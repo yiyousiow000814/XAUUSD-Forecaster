@@ -55,31 +55,6 @@ type StatusPayload = {
   }>;
 };
 
-function localTime(value: string | null): string {
-  return value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "—";
-}
-
-function elapsed(seconds: number | null): string {
-  if (seconds === null) return "尚无记录";
-  const whole = Math.max(0, Math.round(seconds));
-  if (whole < 60) return `距今 ${whole} 秒`;
-  const minutes = Math.floor(whole / 60);
-  if (minutes < 60) return `距今 ${minutes} 分 ${whole % 60} 秒`;
-  const hours = Math.floor(minutes / 60);
-  return `距今 ${hours} 小时 ${minutes % 60} 分`;
-}
-
-const componentLabels: Record<string, string> = {
-  quote_bridge: "XAUUSD 报价桥",
-  decision_collector: "5 分钟决策收集器",
-  outcome_settler: "30 分钟结果结算器",
-  news_collector: "新闻收集器",
-  gemini_annotator: "Gemini 新闻分析器",
-  sites_synchronizer: "网页同步器",
-  sqlite_backup: "SQLite 备份",
-  integrity_check: "数据库完整性检查",
-};
-
 function formatCountdown(target: string | undefined, nowMs: number): string {
   if (!target || !nowMs) return "—";
   const remaining = Math.max(0, new Date(target).getTime() - nowMs);
@@ -162,6 +137,7 @@ export default function StatusPage() {
           <div><strong>Aurum System Status</strong><small>本机进程 · 多模型配额</small></div>
         </button>
         <div className="top-actions">
+          <button className="audit-link" type="button" onClick={() => router.push("/health")}>组件与新闻源</button>
           <button className="audit-link" type="button" onClick={() => router.push("/audit")}>新闻与决策</button>
           <button className="audit-link" type="button" onClick={() => router.replace("/")}>← 返回实时室</button>
         </div>
@@ -175,31 +151,6 @@ export default function StatusPage() {
       </section>
 
       {error ? <div className="error-banner">状态读取失败：{error}</div> : null}
-
-      <section className="component-status" aria-label="数据链路组件状态">
-        <header><div><p className="eyebrow">EVIDENCE PIPELINE</p><h2>系统组件状态</h2></div><p><b>{payload?.system.source_of_truth ?? "Local append-only SQLite"}</b> 是不可修改的证据源；{payload?.system.sites_mirror ?? "Sites D1 read-only materialized display mirror"} 只是展示镜像。</p></header>
-        <div>{Object.entries(payload?.system.components ?? {}).map(([name, item]) => <article key={name}>
-          <span className={item.status === "OK" ? "component-ok" : "component-stale"}>{item.status}</span>
-          <strong>{componentLabels[name] ?? name.replaceAll("_", " ")}</strong>
-          <small>最后成功 {item.last_success ? new Date(item.last_success).toLocaleString("zh-CN", { hour12: false }) : "—"}</small>
-          <small>{elapsed(item.age_seconds)}</small>
-          {item.last_error ? <em>{item.last_error}</em> : null}
-        </article>)}</div>
-      </section>
-
-      <section className="source-health" aria-label="新闻来源状态">
-        <header>
-          <div><p className="eyebrow">NEWS INGEST / SOURCE-BY-SOURCE</p><h2>新闻来源状态</h2></div>
-          <p>发布源和正文解析器分别判断。<b>正文链路降级不会伪装成全部新闻中断</b>；错误会保留最近一次成功时间和具体原因。</p>
-        </header>
-        <div className="source-health-head"><span>来源 / 角色</span><span>状态 / 最近轮询</span><span>证据</span><span>最近错误</span></div>
-        {(payload?.news_source_health ?? []).map((item) => <article key={item.source}>
-          <div><strong>{item.label}</strong><small>{item.role} · {item.source}</small></div>
-          <div><b className={`source-health-badge health-${item.health.toLowerCase()}`}>{item.health}</b><small>{localTime(item.latest_poll_time)}</small><small>最近成功 {localTime(item.last_success)}</small></div>
-          <div><strong>{item.item_count || "—"} 篇</strong><small>{item.revision_count || "—"} revisions · 完整正文 {item.full_text_count || "—"}</small><small>轮询 {item.ok_count}/{item.poll_count} 成功</small></div>
-          <div className="source-health-error"><strong>{item.last_error_type ? `${item.health === "HEALTHY" ? "历史异常 · 已恢复" : "当前异常"} · ${item.last_error_type}` : "无已记录异常"}</strong><small>{item.last_error_time ? localTime(item.last_error_time) : ""} {item.last_error ?? "链路轮询正常"}</small></div>
-        </article>)}
-      </section>
 
       <section className="quota-summary">
         <article><span>已配置 KEY</span><strong>{payload?.annotation_queue.configured_key_count ?? "—"}</strong><small>当前可用 {payload?.annotation_queue.available_key_count ?? "—"} · 只显示匿名编号</small></article>

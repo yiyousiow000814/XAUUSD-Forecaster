@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -57,6 +58,15 @@ def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
     )
     ledger.connection.close()
 
+    sync_success = now.isoformat()
+    (tmp_path / "dashboard-sync-status.json").write_text(
+        json.dumps({"last_success": sync_success, "last_error": None}),
+        encoding="utf-8",
+    )
+
     payload = _dashboard_module()._dashboard_payload(database)
     assert payload["recent_news"][0]["headline"] == "2026年6月个人收入与支出"
     assert len(payload["news_source_health"]) == 11
+    synchronizer = payload["system"]["components"]["sites_synchronizer"]
+    assert synchronizer["last_success"] == sync_success
+    assert synchronizer["status"] == "OK"

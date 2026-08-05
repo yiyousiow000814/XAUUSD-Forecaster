@@ -1,26 +1,13 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
+import { applyFreshness } from "./freshness.js";
 
 export const dynamic = "force-dynamic";
 
 type DashboardPayload = {
   generated_at?: string;
   system?: { online?: boolean; quote_age_seconds?: number | null };
-  latest?: { source_received_time?: string };
 };
-
-function applyFreshness(payload: DashboardPayload): DashboardPayload {
-  const received = Date.parse(payload.latest?.source_received_time ?? "");
-  const age = Number.isFinite(received) ? Math.max(0, (Date.now() - received) / 1000) : null;
-  return {
-    ...payload,
-    system: {
-      ...payload.system,
-      quote_age_seconds: age,
-      online: age !== null && age <= 30,
-    },
-  };
-}
 
 export async function GET() {
   const relay = process.env.STATUS_RELAY_URL;
@@ -31,8 +18,8 @@ export async function GET() {
         headers: { Accept: "application/json" },
         signal: AbortSignal.timeout(4_000),
       });
-      const payload = await response.json();
-      return NextResponse.json(payload, {
+      const payload = (await response.json()) as DashboardPayload;
+      return NextResponse.json(applyFreshness(payload), {
         status: response.status,
         headers: { "Cache-Control": "no-store, max-age=0" },
       });

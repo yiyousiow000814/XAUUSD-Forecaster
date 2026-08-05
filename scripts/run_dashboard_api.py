@@ -531,8 +531,14 @@ def _dashboard_payload(database: Path) -> dict:
                 "status": "OK" if age is not None and age <= stale_after else "STALE",
                 "last_error": last_error}
 
-    sync_file = database.parent / "dashboard-sync.json"
-    sync_time = datetime.fromtimestamp(sync_file.stat().st_mtime, UTC).isoformat() if sync_file.exists() else None
+    sync_status_file = database.parent / "dashboard-sync-status.json"
+    sync_status = {}
+    if sync_status_file.exists():
+        try:
+            sync_status = json.loads(sync_status_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            sync_status = {"last_error": "Invalid synchronizer status file"}
+    sync_time = sync_status.get("last_success")
     backup_files = sorted((database.parent / "backups").glob("*.sqlite3"), key=lambda p: p.stat().st_mtime)
     backup_time = datetime.fromtimestamp(backup_files[-1].stat().st_mtime, UTC).isoformat() if backup_files else None
     component_times["sites_synchronizer"] = sync_time
@@ -618,7 +624,9 @@ def _dashboard_payload(database: Path) -> dict:
                 "outcome_settler": component("outcome_settler", 420),
                 "news_collector": component("news_collector", 300),
                 "gemini_annotator": component("gemini_annotator", 900),
-                "sites_synchronizer": component("sites_synchronizer", 120),
+                "sites_synchronizer": component(
+                    "sites_synchronizer", 120, sync_status.get("last_error")
+                ),
                 "sqlite_backup": component("sqlite_backup", 172800),
                 "integrity_check": {"last_success": now.isoformat(), "age_seconds": 0,
                                     "status": "OK" if integrity == "ok" else "ERROR",

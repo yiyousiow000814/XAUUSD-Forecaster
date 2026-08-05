@@ -10,11 +10,52 @@ import os
 import time
 import urllib.error
 import urllib.request
+from datetime import UTC, datetime
 from pathlib import Path
 
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = MODULE_ROOT / ".local" / "forward" / "dashboard-sync.json"
+DEFAULT_STATUS = MODULE_ROOT / ".local" / "forward" / "dashboard-sync-status.json"
+
+
+def write_sync_status(
+    path: Path,
+    *,
+    success: bool,
+    attempts_used: int | None = None,
+    error: Exception | None = None,
+) -> None:
+    """Atomically publish the synchronizer's actual operational heartbeat."""
+    existing: dict = {}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+    now = datetime.now(UTC).isoformat()
+    if success:
+        existing.update(
+            {
+                "last_success": now,
+                "last_attempt": now,
+                "last_error": None,
+                "last_error_type": None,
+                "attempts_used": attempts_used,
+            }
+        )
+    else:
+        existing.update(
+            {
+                "last_attempt": now,
+                "last_error": str(error)[:500] if error else "Unknown sync error",
+                "last_error_type": type(error).__name__ if error else "UnknownError",
+            }
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(existing, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(path)
 
 
 def sync_once(config: dict) -> None:
@@ -72,6 +113,7 @@ def sync_with_retry(config: dict, *, attempts: int = 3) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--status-file", type=Path, default=DEFAULT_STATUS)
     parser.add_argument("--interval-seconds", type=float, default=30.0)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
@@ -79,6 +121,9 @@ def main() -> int:
     while True:
         try:
             attempts_used = sync_with_retry(config)
+            write_sync_status(
+                args.status_file, success=True, attempts_used=attempts_used
+            )
             print(
                 json.dumps(
                     {"event": "DASHBOARD_SYNC_OK", "attempts_used": attempts_used}
@@ -86,6 +131,7 @@ def main() -> int:
                 flush=True,
             )
         except Exception as error:
+            write_sync_status(args.status_file, success=False, error=error)
             print(
                 json.dumps(
                     {

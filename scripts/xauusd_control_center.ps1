@@ -76,16 +76,26 @@ function Get-ServiceState {
     }
 
     if ($Service.Key -eq "sync") {
-        $latestLog = Get-ChildItem -LiteralPath $logRoot -Filter "control-sync-*.stdout.log" `
-            -File -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime -Descending |
-            Select-Object -First 1
-        $lastLine = if ($null -ne $latestLog) {
-            Get-Content -LiteralPath $latestLog.FullName -Tail 1 -ErrorAction SilentlyContinue
+        $statusFile = Join-Path $moduleRoot ".local\forward\dashboard-sync-status.json"
+        if (-not (Test-Path -LiteralPath $statusFile)) { return "STARTING" }
+        try {
+            $syncStatus = Get-Content -LiteralPath $statusFile -Raw | ConvertFrom-Json
+            $lastSuccess = if ($syncStatus.last_success) {
+                [DateTimeOffset]::Parse($syncStatus.last_success)
+            } else { $null }
+            $lastAttempt = if ($syncStatus.last_attempt) {
+                [DateTimeOffset]::Parse($syncStatus.last_attempt)
+            } else { $null }
+            if ($syncStatus.last_error -and $lastAttempt -and (
+                -not $lastSuccess -or $lastAttempt -gt $lastSuccess
+            )) { return "SYNC ERROR" }
+            if ($lastSuccess -and (
+                [DateTimeOffset]::UtcNow - $lastSuccess
+            ).TotalSeconds -le 120) { return "SYNC OK" }
+            return "SYNC STALE"
+        } catch {
+            return "SYNC ERROR"
         }
-        if ($lastLine -match 'DASHBOARD_SYNC_OK') { return "SYNC OK" }
-        if ($lastLine -match 'DASHBOARD_SYNC_ERROR') { return "SYNC ERROR" }
-        return "STARTING"
     }
 
     return "RUNNING"
