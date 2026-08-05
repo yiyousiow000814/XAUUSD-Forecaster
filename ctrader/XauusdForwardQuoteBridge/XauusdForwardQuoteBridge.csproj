@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <WarningsAsErrors>CS*</WarningsAsErrors>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <EnableDefaultAlgoSetItems>false</EnableDefaultAlgoSetItems>
+    <NoWarn>SA0001;SA1600;SA1633;SA1636;SA1649</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="XauusdForwardQuoteBridge.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="cTrader.Automate" Version="*" />
+    <PackageReference Include="StyleCop.Analyzers" Version="1.2.0-beta.507">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <Target Name="SetAlgoFileName" BeforeTargets="_ExtractMetadata;_BundleAlgo">
+    <PropertyGroup>
+      <_AlgoFileName>XauusdForwardQuoteBridge.algo</_AlgoFileName>
+      <_AlgoFilePath>$(OutDir)$(_AlgoFileName)</_AlgoFilePath>
+      <_AlgoMetadataFileName>$(_AlgoFileName).metadata</_AlgoMetadataFileName>
+      <_AlgoMetadataFilePath>$(OutDir)$(_AlgoMetadataFileName)</_AlgoMetadataFilePath>
+    </PropertyGroup>
+  </Target>
+</Project>

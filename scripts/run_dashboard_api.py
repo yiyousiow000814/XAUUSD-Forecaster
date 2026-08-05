@@ -1,0 +1,460 @@
+#!/usr/bin/env python
+"""Read-only localhost API for the XAUUSD Forward dashboard."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sqlite3
+import sys
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+
+MODULE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(MODULE_ROOT))
+DEFAULT_DATABASE = MODULE_ROOT / ".local" / "forward" / "forward-evidence.sqlite3"
+UTC = timezone.utc
+
+from xauusd_forecaster.factors import factor_coverage  # noqa: E402
+from xauusd_forecaster.annotation import (  # noqa: E402
+    DEFAULT_GEMINI_MODEL,
+    DEFAULT_GEMMA_MODEL,
+    GEMMA_REQUESTS_PER_DAY_PER_KEY,
+    GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
+    GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
+    configured_gemini_api_keys,
+)
+from xauusd_forecaster.gemini_quota import GeminiQuotaLedger  # noqa: E402
+from xauusd_forecaster.training import MARKET_FEATURES  # noqa: E402
+
+
+def _news_category(item: dict) -> str:
+    source = str(item.get("source") or "")
+    searchable = " ".join(
+        str(item.get(key) or "")
+        for key in ("headline", "event_type", "summary_zh")
+    ).lower()
+    if source in {"gdelt_gold_geopolitics", "google_news_gold_geopolitics"}:
+        return "战争/地缘"
+    if source == "world_gold_council_central_banks":
+        return "央行购金"
+    if source in {"eia_today_in_energy", "eia_press_releases"}:
+        return "油价/能源"
+    if source == "ecb_press_releases":
+        return "利率/Fed"
+    if any(
+        term in searchable
+        for term in (
+            "war", "conflict", "sanction", "iran", "russia", "ukraine",
+            "middle east", "hormuz", "战争", "制裁", "伊朗", "俄罗斯", "乌克兰",
+        )
+    ):
+        return "战争/地缘"
+    if any(term in searchable for term in ("oil", "opec", "crude", "原油", "油价")):
+        return "油价/能源"
+    if any(
+        term in searchable
+        for term in (
+            "inflation", "cpi", "pce", "payroll", "employment", "unemployment",
+            "jobs", "wage", "通胀", "就业", "失业", "薪资",
+        )
+    ):
+        return "通胀/就业"
+    if any(term in searchable for term in ("dollar", "liquidity", "balance sheet", "美元", "流动性")):
+        return "美元/流动性"
+    if any(term in searchable for term in ("gdp", "gross domestic product", "personal income", "growth", "经济增长")):
+        return "增长/经济"
+    if source in {"federal_reserve_monetary", "federal_reserve_speeches_testimony"}:
+        return "利率/Fed"
+    if source == "federal_reserve_press_all":
+        return "Fed监管/其他"
+    return "其他"
+
+
+def _dashboard_payload(database: Path) -> dict:
+    now = datetime.now(UTC)
+    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=5)
+    connection.row_factory = sqlite3.Row
+    try:
+        latest = connection.execute(
+            """SELECT d.decision_time, d.effective_action, d.data_health,
+                      d.reason_codes_json, s.source_event_time,
+                      s.source_received_time, s.bid, s.ask, s.spread,
+                      s.features_json, s.u5, s.u5_status
+               FROM decision_events d
+               JOIN market_snapshots s USING(snapshot_id)
+               ORDER BY d.decision_time DESC LIMIT 1"""
+        ).fetchone()
+        recent = connection.execute(
+            """SELECT d.decision_id, d.decision_time, d.effective_action, d.data_health,
+                      s.bid, s.ask, s.spread, s.features_json,
+                      o.outcome_status, o.long_return, o.short_return,
+                      o.long_mfe, o.long_mae, o.short_mfe, o.short_mae,
+                      o.maximum_spread
+               FROM decision_events d
+               JOIN market_snapshots s USING(snapshot_id)
+               LEFT JOIN outcomes o USING(decision_id)
+               ORDER BY d.decision_time DESC LIMIT 30"""
+        ).fetchall()
+        counts = {
+            name: connection.execute(f"SELECT count(*) FROM {name}").fetchone()[0]
+            for name in (
+                "decision_events",
+                "outcomes",
+                "news_revisions",
+                "news_annotations",
+                "news_title_translations",
+                "macro_observations",
+                "training_eligibility",
+                "model_updates",
+            )
+        }
+        decision_ids = [row["decision_id"] for row in recent]
+        predictions_by_decision: dict[str, list[dict]] = {key: [] for key in decision_ids}
+        if decision_ids:
+            placeholders = ",".join("?" for _ in decision_ids)
+            prediction_rows = connection.execute(
+                f"""SELECT decision_id, model_identity, model_version,
+                            predicted_direction_u5, predicted_news_residual_u5,
+                            ev_long_u5, ev_short_u5, uncertainty_u5,
+                            recommended_action, effective_action, prediction_status
+                     FROM predictions WHERE decision_id IN ({placeholders})
+                     ORDER BY decision_id, model_identity""",
+                decision_ids,
+            ).fetchall()
+            for prediction in prediction_rows:
+                item = dict(prediction)
+                predictions_by_decision[item.pop("decision_id")].append(item)
+        news_rows = connection.execute(
+            """SELECT n.source, n.source_item_id, n.revision_number,
+                      n.source_published_time, n.collector_first_seen_time,
+                      n.headline AS original_headline,
+                      COALESCE(t.headline_zh, n.headline) AS headline,
+                      length(COALESCE(n.body, '')) AS content_characters,
+                      CASE WHEN n.body LIKE '[FULL_TEXT%' THEN 'FULL_TEXT'
+                           WHEN length(trim(COALESCE(n.body, ''))) >= 240 THEN 'SOURCE_CONTENT'
+                           ELSE 'HEADLINE_ONLY' END AS content_status,
+                      n.link, n.content_hash,
+                      json_extract(a.annotation_json, '$.summary_zh') AS summary_zh,
+                      COALESCE(a.event_type, legacy.event_type, legacy_v3.event_type) AS event_type,
+                      COALESCE(a.entities_json, legacy.entities_json, legacy_v3.entities_json) AS entities_json,
+                      COALESCE(a.hawkishness, legacy.hawkishness, legacy_v3.hawkishness) AS hawkishness,
+                      COALESCE(a.inflation_impulse, legacy.inflation_impulse, legacy_v3.inflation_impulse) AS inflation_impulse,
+                      COALESCE(a.growth_impulse, legacy.growth_impulse, legacy_v3.growth_impulse) AS growth_impulse,
+                      COALESCE(a.geopolitical_risk, legacy.geopolitical_risk, legacy_v3.geopolitical_risk) AS geopolitical_risk,
+                      COALESCE(a.usd_impulse, legacy.usd_impulse, legacy_v3.usd_impulse) AS usd_impulse,
+                      COALESCE(a.novelty, legacy.novelty, legacy_v3.novelty) AS novelty,
+                      COALESCE(a.confidence, legacy.confidence, legacy_v3.confidence) AS confidence,
+                      COALESCE(a.llm_model_version, legacy.llm_model_version, legacy_v3.llm_model_version) AS llm_model_version,
+                      COALESCE(a.prompt_version, legacy.prompt_version, legacy_v3.prompt_version) AS prompt_version,
+                      COALESCE(a.parsed_at, legacy.parsed_at, legacy_v3.parsed_at) AS parsed_at,
+                      CASE WHEN a.annotation_id IS NOT NULL THEN 'READY'
+                           WHEN length(trim(COALESCE(n.body, ''))) >= 240 THEN 'QUEUED'
+                           ELSE 'WAITING_CONTENT' END AS annotation_status
+               FROM news_revisions n
+               LEFT JOIN news_title_translations t
+                 ON t.translation_id=(
+                   SELECT latest_t.translation_id
+                   FROM news_title_translations latest_t
+                   WHERE latest_t.source=n.source
+                     AND latest_t.source_item_id=n.source_item_id
+                     AND latest_t.revision_number=n.revision_number
+                   ORDER BY latest_t.parsed_at DESC, latest_t.translation_id DESC
+                   LIMIT 1)
+               LEFT JOIN news_annotations a
+                 ON a.source=n.source AND a.source_item_id=n.source_item_id
+                AND a.revision_number=n.revision_number
+                AND a.llm_model_version='gemini-3.5-flash-lite'
+                AND a.prompt_version='news-json-v8-strict-zh-source-number-lexemes'
+               LEFT JOIN news_annotations legacy
+                 ON legacy.source=n.source
+                AND legacy.source_item_id=n.source_item_id
+                AND legacy.revision_number=n.revision_number
+                AND legacy.llm_model_version='gemini-3.5-flash-lite'
+                AND legacy.prompt_version='news-json-v7-strict-headline-and-summary-zh-verbatim-numbers'
+               LEFT JOIN news_annotations legacy_v3
+                 ON legacy_v3.source=n.source
+                AND legacy_v3.source_item_id=n.source_item_id
+                AND legacy_v3.revision_number=n.revision_number
+                AND legacy_v3.llm_model_version='gemini-3.5-flash-lite'
+                AND legacy_v3.prompt_version='news-json-v6-headline-and-summary-zh-verbatim-numbers'
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM news_revisions newer
+                 WHERE newer.source=n.source
+                   AND newer.source_item_id=n.source_item_id
+                   AND newer.revision_number>n.revision_number)
+                 AND NOT EXISTS (
+                   SELECT 1 FROM news_revisions peer
+                   WHERE peer.cluster_id=n.cluster_id
+                     AND NOT EXISTS (
+                       SELECT 1 FROM news_revisions peer_newer
+                       WHERE peer_newer.source=peer.source
+                         AND peer_newer.source_item_id=peer.source_item_id
+                         AND peer_newer.revision_number>peer.revision_number)
+                     AND (length(COALESCE(peer.body, '')) > length(COALESCE(n.body, ''))
+                          OR (length(COALESCE(peer.body, '')) = length(COALESCE(n.body, ''))
+                              AND peer.source_item_id < n.source_item_id)))
+               ORDER BY COALESCE(n.source_published_time,
+                                 n.collector_first_seen_time) DESC,
+                        n.source, n.source_item_id
+               LIMIT 200"""
+        ).fetchall()
+        annotation_queue = connection.execute(
+            """SELECT
+                 sum(CASE WHEN length(trim(COALESCE(n.body, ''))) >= 240
+                           AND a.annotation_id IS NOT NULL THEN 1 ELSE 0 END) AS ready,
+                 sum(CASE WHEN length(trim(COALESCE(n.body, ''))) >= 240
+                           AND a.annotation_id IS NULL THEN 1 ELSE 0 END) AS queued,
+                 sum(CASE WHEN length(trim(COALESCE(n.body, ''))) < 240
+                          THEN 1 ELSE 0 END) AS waiting_content
+               FROM news_revisions n
+               LEFT JOIN news_annotations a
+                 ON a.source=n.source AND a.source_item_id=n.source_item_id
+                AND a.revision_number=n.revision_number
+                AND a.llm_model_version='gemini-3.5-flash-lite'
+                AND a.prompt_version='news-json-v8-strict-zh-source-number-lexemes'
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM news_revisions newer
+                 WHERE newer.source=n.source
+                   AND newer.source_item_id=n.source_item_id
+                   AND newer.revision_number>n.revision_number)
+                 AND NOT EXISTS (
+                   SELECT 1 FROM news_revisions peer
+                   WHERE peer.cluster_id=n.cluster_id
+                     AND NOT EXISTS (
+                       SELECT 1 FROM news_revisions peer_newer
+                       WHERE peer_newer.source=peer.source
+                         AND peer_newer.source_item_id=peer.source_item_id
+                         AND peer_newer.revision_number>peer.revision_number)
+                     AND (length(COALESCE(peer.body, '')) > length(COALESCE(n.body, ''))
+                          OR (length(COALESCE(peer.body, '')) = length(COALESCE(n.body, ''))
+                              AND peer.source_item_id < n.source_item_id)))"""
+        ).fetchone()
+        model_rows = connection.execute(
+            """SELECT model_identity, model_version, created_at,
+                      training_cutoff, hyperparameters_json, artifact_hash
+               FROM model_updates ORDER BY training_cutoff DESC,
+                                           model_identity"""
+        ).fetchall()
+        valid = connection.execute(
+            """SELECT count(*) AS samples,
+                      avg(long_return) AS avg_long,
+                      avg(short_return) AS avg_short,
+                      avg(quote_coverage) AS avg_coverage
+               FROM outcomes WHERE outcome_status='VALID'"""
+        ).fetchone()
+        epoch = connection.execute(
+            "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
+        ).fetchone()[0]
+        macro_rows = connection.execute(
+            """SELECT m.series_id, m.observation_period, m.value, m.unit
+               FROM macro_observations m
+               WHERE m.revision_number=(
+                 SELECT max(r.revision_number) FROM macro_observations r
+                 WHERE r.source=m.source AND r.series_id=m.series_id
+                   AND r.observation_period=m.observation_period)
+                 AND m.observation_period=(
+                   SELECT max(p.observation_period) FROM macro_observations p
+                   WHERE p.series_id=m.series_id)
+               ORDER BY m.series_id"""
+        ).fetchall()
+        latest_macro = {row["series_id"]: dict(row) for row in macro_rows}
+        collected_news_sources = {
+            row[0] for row in connection.execute("SELECT DISTINCT source FROM news_revisions")
+        }
+        complete_candidates = connection.execute(
+            """SELECT s.features_json, s.u5
+               FROM training_eligibility e
+               JOIN decision_events d USING(decision_id)
+               JOIN market_snapshots s USING(snapshot_id)
+               WHERE e.eligible_at <= ? AND d.decision_time >= ?""",
+            (now.isoformat(), epoch),
+        ).fetchall()
+        complete_rows = 0
+        for candidate in complete_candidates:
+            features = json.loads(candidate["features_json"])
+            values = [features.get(name) for name in MARKET_FEATURES]
+            if candidate["u5"] is None or any(value is None for value in values):
+                continue
+            numeric = [float(value) for value in values]
+            if all(math.isfinite(value) for value in numeric) and math.isfinite(
+                float(candidate["u5"])
+            ):
+                complete_rows += 1
+    finally:
+        connection.close()
+
+    latest_data = dict(latest) if latest else None
+    age_seconds = None
+    if latest_data and latest_data["source_received_time"]:
+        age_seconds = max(
+            0.0,
+            (now - datetime.fromisoformat(latest_data["source_received_time"])).total_seconds(),
+        )
+    online = bool(latest_data and age_seconds is not None and age_seconds <= 600)
+
+    def serialize_row(row: sqlite3.Row) -> dict:
+        item = dict(row)
+        item["features"] = json.loads(item.pop("features_json"))
+        item["predictions"] = predictions_by_decision.get(item["decision_id"], [])
+        return item
+
+    news = []
+    seen_news_links = set()
+    for row in news_rows:
+        item = dict(row)
+        dedupe_key = item.get("link") or (
+            item["source"],
+            item["source_item_id"],
+        )
+        if dedupe_key in seen_news_links:
+            continue
+        seen_news_links.add(dedupe_key)
+        item["entities"] = json.loads(item.pop("entities_json")) if item.get("entities_json") else []
+        item["category"] = _news_category(item)
+        news.append(item)
+    counts["latest_news_items"] = len(news)
+    models = []
+    for row in model_rows:
+        item = dict(row)
+        item["hyperparameters"] = json.loads(item.pop("hyperparameters_json"))
+        models.append(item)
+    latest_market = next(
+        (item for item in models if item["model_identity"] == "CHALLENGER_A"),
+        None,
+    )
+    trained_rows = (
+        int(latest_market["hyperparameters"].get("complete_rows", 0))
+        if latest_market else 0
+    )
+    next_training_at = 200 if trained_rows == 0 else trained_rows + 50
+
+    if latest_data:
+        latest_data["features"] = json.loads(latest_data.pop("features_json"))
+        latest_data["reason_codes"] = json.loads(latest_data.pop("reason_codes_json"))
+    gemini_keys = configured_gemini_api_keys()
+    gemini_quota = GeminiQuotaLedger(database.parent / "gemini-quota.json").snapshot(
+        gemini_keys
+    )
+    gemma_quota = GeminiQuotaLedger(
+        database.parent / "gemma-quota.json",
+        daily_limit=GEMMA_REQUESTS_PER_DAY_PER_KEY,
+    ).snapshot(gemini_keys)
+    available_gemini_keys = sum(
+        item["status"] == "AVAILABLE" for item in gemini_quota["keys"]
+    )
+    return {
+        "generated_at": now.isoformat(),
+        "forward_epoch": epoch,
+        "system": {
+            "online": online,
+            "quote_age_seconds": age_seconds,
+            "mode": "SHADOW",
+            "trading_enabled": False,
+            "symbol": "XAUUSD",
+        },
+        "latest": latest_data,
+        "counts": counts,
+        "outcome_summary": dict(valid),
+        "recent_decisions": [serialize_row(row) for row in recent],
+        "recent_news": news,
+        "annotation_queue": {
+            "ready": int(annotation_queue["ready"] or 0),
+            "queued": int(annotation_queue["queued"] or 0),
+            "waiting_content": int(annotation_queue["waiting_content"] or 0),
+            "configured_key_count": len(gemini_keys),
+            "available_key_count": available_gemini_keys,
+            "requests_per_minute_per_key": GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
+            "requests_per_minute": (
+                available_gemini_keys
+                * GEMINI_REQUESTS_PER_MINUTE_PER_KEY
+            ),
+        },
+        "gemini_quota": gemini_quota,
+        "gemma_quota": gemma_quota,
+        "llm_routing": {
+            "action_bearing": {
+                "model": DEFAULT_GEMINI_MODEL,
+                "role": "完整正文、结构化事件与训练特征",
+            },
+            "display_only": {
+                "model": DEFAULT_GEMMA_MODEL,
+                "role": "标题中文翻译，不进入模型训练",
+                "requests_per_minute": GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
+            },
+            "antigravity": {
+                "enabled": False,
+                "reason": "每日额度仅 100，不用于批量新闻流水线",
+            },
+        },
+        "training": {
+            "automatic": True,
+            "minimum_rows": 200,
+            "retrain_interval": 50,
+            "eligible_rows": counts["training_eligibility"],
+            "complete_rows": complete_rows,
+            "next_training_at": next_training_at,
+            "champion_auto_promotion": False,
+            "models": models,
+        },
+        "factor_coverage": factor_coverage(latest_macro, collected_news_sources),
+        "sources": {
+            "market": "cTrader CLI / Bid-Ask",
+            "fed": "ONLINE",
+            "bls": "ONLINE" if counts["macro_observations"] else "WARMING_UP",
+            "llm": "ENABLED" if counts["news_annotations"] else "ANNOTATION_WARMUP",
+        },
+    }
+
+
+class Handler(BaseHTTPRequestHandler):
+    database: Path
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path.rstrip("/") != "/api/status":
+            self.send_error(404)
+            return
+        try:
+            body = json.dumps(_dashboard_payload(self.database), allow_nan=False).encode()
+            self.send_response(200)
+        except Exception as error:
+            body = json.dumps({"error": str(error)[:500]}).encode()
+            self.send_response(500)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8765)
+    args = parser.parse_args()
+    Handler.database = args.database.resolve()
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    print(
+        json.dumps(
+            {
+                "event": "DASHBOARD_API_STARTED",
+                "url": f"http://{args.host}:{args.port}/api/status",
+                "database": str(Handler.database),
+                "read_only": True,
+            }
+        ),
+        flush=True,
+    )
+    server.serve_forever()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

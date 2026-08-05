@@ -1,0 +1,32 @@
+{
+  "collector": {
+    "decision_clock": "UTC_5_MINUTES",
+    "news_poll_seconds": 60,
+    "shadow_only": true,
+    "automatic_challenger_training": true,
+    "minimum_training_rows": 200,
+    "retrain_interval_rows": 50,
+    "automatic_champion_promotion": false
+  },
+  "market": {
+    "provider": "CTRADER_CLI_JSONL_FAIL_CLOSED",
+    "symbol": "XAUUSD",
+    "jsonl_contract": {
+      "event_time": "UTC ISO-8601",
+      "received_time": "UTC ISO-8601",
+      "bid": "positive number",
+      "ask": "number greater than or equal to bid"
+    }
+  },
+  "news": {
+    "official_rss_only": true,
+    "historical_backfill": false
+  },
+  "annotation": {
+    "provider": "Google Gemini API",
+    "model": "gemini-3.5-flash-lite",
+    "api_key_environment_variables": ["GEMINI_API_KEYS", "GEMINI_API_KEY"],
+    "local_ollama_optional_fallback": true,
+    "trading_authority": false
+  }
+}
