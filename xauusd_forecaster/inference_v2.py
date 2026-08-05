@@ -6,6 +6,7 @@ import json
 import math
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 
@@ -30,6 +31,10 @@ def _active_updates(updates) -> list:
         identity = update["model_identity"]
         if identity not in MODEL_IDENTITIES or counts[identity] >= ACTIVE_VERSIONS_PER_IDENTITY:
             continue
+        if "artifact_path" in update.keys():
+            artifact_path = Path(update["artifact_path"])
+            if not artifact_path.is_absolute() or not artifact_path.exists():
+                continue
         counts[identity] += 1
         active.append(update)
     return active

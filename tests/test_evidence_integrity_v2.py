@@ -11,6 +11,7 @@ from xauusd_forecaster.evidence_v2 import install_v2_schema
 from xauusd_forecaster.executable_label import build_executable_label_v2
 from xauusd_forecaster.forward_ledger import ForwardLedger, canonical_hash
 from xauusd_forecaster.learning_curves import _stage, learning_curve_payload
+from xauusd_forecaster.live_v2 import append_live_outcome_v2
 from xauusd_forecaster.market import MarketObservation
 from xauusd_forecaster.news_evidence import event_evidence_rows
 from xauusd_forecaster.news_features_v2 import aggregate_news_features_v2
@@ -200,6 +201,37 @@ def test_v2_tables_are_append_only_and_legacy_hash_is_unchanged(tmp_path) -> Non
         ledger.connection.execute(
             "UPDATE source_eligibility_versions SET description='changed' WHERE eligibility_version='v'"
         )
+    ledger.close()
+
+
+def test_live_settler_is_idempotent_after_repair_created_outcome(tmp_path) -> None:
+    decision = datetime(2026, 8, 5, 10, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=decision)
+    ledger.connection.execute(
+        "INSERT INTO evaluation_epochs VALUES (?,?,?,?,?,?,?)",
+        ("epoch", decision.isoformat(), decision.isoformat(), decision.isoformat(),
+         decision.isoformat(), "commit", "contract"),
+    )
+    ledger.connection.execute(
+        """INSERT INTO derived_outcomes (
+        derived_outcome_id,source_decision_id,decision_time,evidence_lane,
+        recomputed_at,label_version,outcome_status,reason_codes_json,
+        ambiguity_state,commission_status,slippage_status,source_evidence_hash,
+        output_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        ("outcome", "decision", decision.isoformat(), "REPAIRED_SEED",
+         decision.isoformat(), "received-time-executable-30m-v2", "UNREPAIRABLE",
+         "[]", "NONE", "UNCONFIGURED", "UNAVAILABLE_SHADOW", "source", "output"),
+    )
+    ledger.connection.commit()
+    appended = append_live_outcome_v2(
+        ledger, decision_id="decision", decision_time=decision,
+        appended_at=decision + timedelta(minutes=31), label=SimpleNamespace(),
+        source_evidence_hash="later-source",
+    )
+    assert appended is False
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM derived_outcomes WHERE source_decision_id='decision'"
+    ).fetchone()[0] == 1
     ledger.close()
 
 

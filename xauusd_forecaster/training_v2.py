@@ -207,9 +207,19 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
         (stage, latest["created_at"]),
     ).fetchall() if latest is not None else []
     paired_identities = {row["model_identity"] for row in paired_models}
+    latest_artifact_path = Path(latest["artifact_path"]) if latest is not None else None
+    latest_artifact_invalid = bool(
+        latest_artifact_path is not None
+        and latest_artifact_path.suffix == ".json"
+        and (
+            not latest_artifact_path.is_absolute()
+            or not latest_artifact_path.exists()
+        )
+    )
     bootstrap_news_pair = latest is not None and (
         (official_ready and "FULL" not in paired_identities)
         or (broad_ready and "BROAD_FULL" not in paired_identities)
+        or latest_artifact_invalid
     )
     if (latest is not None
             and count < int(latest["training_rows"]) + RETRAIN_INTERVAL
@@ -218,7 +228,7 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
                  "next_threshold": int(latest["training_rows"]) + RETRAIN_INTERVAL}]
 
     now = datetime.now(UTC)
-    root = Path(artifact_root)
+    root = Path(artifact_root).resolve()
     version, artifact, path, dataset_hash = _write_market_artifact(training_rows, root, cutoff, stage)
     seed_rows = sum(row["lane"] == "REPAIRED_SEED" for row in training_rows)
     live_rows = sum(row["lane"] == "LIVE_OOS" for row in training_rows)

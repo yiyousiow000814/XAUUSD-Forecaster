@@ -97,6 +97,13 @@ def append_live_outcome_v2(ledger, *, decision_id: str, decision_time: datetime,
     epoch = evaluation_epoch(ledger.connection)
     if epoch is None or decision_time < epoch:
         return False
+    existing = ledger.connection.execute(
+        """SELECT 1 FROM derived_outcomes
+        WHERE source_decision_id=? AND label_version=?""",
+        (decision_id, LABEL_VERSION),
+    ).fetchone()
+    if existing is not None:
+        return False
     values = label.payload()
     hashable_values = {
         key: (value.isoformat() if isinstance(value, datetime) else value)
