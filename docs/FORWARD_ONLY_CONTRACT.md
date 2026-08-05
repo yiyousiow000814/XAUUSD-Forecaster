@@ -163,10 +163,27 @@ evidence use separate roles and cannot share training queries.
 
 ## Active free source boundary
 
-Version 1 records broad free-source coverage but freezes model eligibility in
-`news-source-eligibility-v1`. Only source-qualified official full bodies may
-enter News-residual features. No FedWatch scraping, historical news backfill,
-or consensus backfill is permitted.
+The official News-residual path accepts source-qualified official full bodies.
+The separate Broad News-residual path manages evidence at event level under
+`news-event-evidence-v1`:
+
+- `PRIMARY`: a complete annotated body from a configured first-party source;
+- `CORROBORATED`: complete annotated bodies about the same event from at least
+  two independent publishers on the reliable-domain list;
+- `SINGLE_RELIABLE`: one reliable publisher, display-only;
+- `DISCOVERY_ONLY`: unconfirmed discovery or aggregation source, display-only.
+
+An event also needs at least one declared XAUUSD topic before it can enter Broad
+features. Topics cover rates/Fed, inflation, employment, growth, USD/liquidity,
+oil/energy, war/geopolitics, central-bank gold, and risk sentiment. Source
+identity never grants media content model permission by itself. Event grouping,
+evidence grade, permission, members, first-seen cutoff, and source hash are
+deterministic and visible on the evidence dashboard.
+
+Broad News-residual and Broad Full are independent Shadow identities. Their
+learning curves are compared with the official Full identity; they never
+replace it or gain order authority automatically. No FedWatch scraping,
+historical news backfill, or consensus backfill is permitted.
 
 ## Explicit exclusions
 

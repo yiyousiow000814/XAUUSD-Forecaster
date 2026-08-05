@@ -65,6 +65,22 @@ type News = {
   eligibility_version: string;
 };
 
+type NewsEvidence = {
+  event_key: string;
+  canonical_headline: string;
+  canonical_source: string;
+  collector_first_seen_time: string;
+  topics: string[];
+  evidence_grade: "PRIMARY" | "CORROBORATED" | "SINGLE_RELIABLE" | "DISCOVERY_ONLY";
+  broad_model_eligible: boolean;
+  model_permission: "BROAD_MODEL" | "DISPLAY_ONLY";
+  member_count: number;
+  independent_publishers: number;
+  source_names: string[];
+  publisher_domains: string[];
+  reason_codes: string[];
+};
+
 type LearningModel = {
   model_version: string;
   model_identity: string;
@@ -118,6 +134,14 @@ type Payload = {
     requests_per_minute: number;
   };
   recent_news: News[];
+  news_evidence: NewsEvidence[];
+  news_evidence_summary: {
+    policy_version: string;
+    total_events: number;
+    broad_model_eligible: number;
+    grades: Record<string, number>;
+    topics: Record<string, number>;
+  };
   recent_decisions: Decision[];
   training: {
     automatic: boolean;
@@ -197,13 +221,25 @@ const MODEL_LABELS: Record<string, string> = {
   MARKET_ONLY: "黄金自身 Ridge",
   NEWS_RESIDUAL: "新闻残差 Ridge",
   FULL: "黄金＋新闻 Ridge",
+  BROAD_NEWS_RESIDUAL: "大视野新闻残差 Ridge",
+  BROAD_FULL: "黄金＋大视野新闻 Ridge",
+};
+const TOPIC_LABELS: Record<string, string> = {
+  rates_fed: "利率 / Fed", inflation: "通胀", employment: "就业",
+  growth_economy: "增长 / 经济", usd_liquidity: "美元 / 流动性",
+  oil_energy: "油价 / 能源", war_geopolitics: "战争 / 地缘",
+  central_bank_gold: "央行购金", risk_sentiment: "风险偏好",
+};
+const EVIDENCE_LABELS: Record<string, string> = {
+  PRIMARY: "一手官方证据", CORROBORATED: "多源确认",
+  SINGLE_RELIABLE: "单一可靠来源", DISCOVERY_ONLY: "线索来源",
 };
 
 export default function AuditPage() {
   const router = useRouter();
   const [payload, setPayload] = useState<Payload | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<"news" | "decisions" | "league" | "coverage">("news");
+  const [view, setView] = useState<"news" | "evidence" | "decisions" | "league" | "coverage">("news");
   const [newsCategory, setNewsCategory] = useState("全部");
   const [newsPage, setNewsPage] = useState(1);
 
@@ -222,7 +258,7 @@ export default function AuditPage() {
   useEffect(() => {
     const initial = window.setTimeout(() => {
       const requested = new URLSearchParams(window.location.search).get("view");
-      if (requested === "news" || requested === "decisions" || requested === "league" || requested === "coverage") {
+      if (requested === "news" || requested === "evidence" || requested === "decisions" || requested === "league" || requested === "coverage") {
         setView(requested);
       }
       refresh();
@@ -231,7 +267,7 @@ export default function AuditPage() {
     return () => { window.clearTimeout(initial); window.clearInterval(interval); };
   }, [refresh]);
 
-  const selectView = (next: "news" | "decisions" | "league" | "coverage") => {
+  const selectView = (next: "news" | "evidence" | "decisions" | "league" | "coverage") => {
     setView(next);
     window.history.replaceState(null, "", `/audit?view=${next}`);
   };
@@ -306,6 +342,7 @@ export default function AuditPage() {
 
       <nav className="audit-tabs" aria-label="审计视图">
         <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻与 Gemini <b>{payload?.counts.latest_news_items ?? 0}</b></a>
+        <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>新闻证据管理 <b>{payload?.news_evidence_summary.broad_model_eligible ?? 0}</b></a>
         <a href="/audit?view=decisions" className={view === "decisions" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("decisions"); }}>决策与30分钟结果 <b>{payload?.counts.decision_events ?? 0}</b></a>
         <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b>{activeLearningModels.length}</b></a>
         <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b>{payload?.factor_coverage.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</b></a>
@@ -364,9 +401,32 @@ export default function AuditPage() {
         </nav>}
       </>}
 
+      {view === "evidence" && <section className="evidence-desk">
+        <header className="evidence-intro">
+          <div><p className="eyebrow">EVENT-LEVEL NEWS EVIDENCE</p><h2>来源不是权限，<br />证据强度才是。</h2></div>
+          <p>同一事件先按主题、实体和首次可见时间聚合。一手官方正文可直接进入大视野实验模型；媒体报道必须由至少两个独立可靠 publisher 相互确认。单一来源和聚合标题继续显示，但没有训练权限。</p>
+        </header>
+        <div className="evidence-summary">
+          <article><span>事件总数</span><strong>{payload?.news_evidence_summary.total_events ?? 0}</strong></article>
+          <article><span>允许进入 Broad</span><strong>{payload?.news_evidence_summary.broad_model_eligible ?? 0}</strong></article>
+          <article><span>一手官方</span><strong>{payload?.news_evidence_summary.grades.PRIMARY ?? 0}</strong></article>
+          <article><span>多源确认</span><strong>{payload?.news_evidence_summary.grades.CORROBORATED ?? 0}</strong></article>
+        </div>
+        <div className="evidence-table-wrap"><table className="evidence-table">
+          <thead><tr><th>证据等级 / 权限</th><th>事件与主题</th><th>独立来源</th><th>首次可见</th></tr></thead>
+          <tbody>{(payload?.news_evidence ?? []).map(row => <tr key={row.event_key}>
+            <td><span className={`evidence-grade grade-${row.evidence_grade.toLowerCase().replaceAll("_", "-")}`}>{EVIDENCE_LABELS[row.evidence_grade] ?? row.evidence_grade}</span><small>{row.broad_model_eligible ? "可进入 Broad 实验模型" : "仅显示，不进入训练"}</small></td>
+            <td><strong>{row.canonical_headline}</strong><div className="evidence-topics">{row.topics.map(topic => <span key={topic}>{TOPIC_LABELS[topic] ?? topic}</span>)}</div></td>
+            <td><strong>{row.independent_publishers}</strong><small>{[...row.source_names, ...row.publisher_domains].join(" · ") || "未识别 publisher"}<br />{row.member_count} 篇成员新闻</small></td>
+            <td><time>{time(row.collector_first_seen_time)}</time><small>{row.reason_codes.join(" · ")}</small></td>
+          </tr>)}</tbody>
+        </table></div>
+      </section>}
+
       {view === "decisions" && <section className="decision-audit">
         {(payload?.recent_decisions ?? []).map((row) => {
-          const full = row.predictions.find(item => item.model_identity === "CHALLENGER_FULL");
+          const full = row.predictions.find(item => item.model_identity === "BROAD_FULL")
+            ?? row.predictions.find(item => item.model_identity === "FULL");
           return <details className="decision-row" key={row.decision_id}>
             <summary>
               <time>{time(row.decision_time)}</time><b>{row.effective_action}</b>

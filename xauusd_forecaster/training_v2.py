@@ -8,9 +8,14 @@ from pathlib import Path
 
 import numpy as np
 
-from .evidence_v2 import ELIGIBILITY_VERSION, FEATURE_VERSION, NEWS_FEATURE_VERSION
+from .evidence_v2 import (
+    ELIGIBILITY_VERSION, FEATURE_VERSION, LABEL_VERSION, NEWS_FEATURE_VERSION,
+)
 from .factors import NEWS_FEATURES
 from .forward_ledger import canonical_hash
+from .news_evidence import (
+    BROAD_NEWS_FEATURES, EVIDENCE_POLICY_VERSION, event_evidence_rows,
+)
 from .news_features_v2 import SOURCE_RULES
 from .ridge import RidgeArtifact, train_ridge
 from .training import MARKET_FEATURES
@@ -25,6 +30,7 @@ NEWS_MIN_CLUSTERS = 10
 NEWS_EXPERIMENTAL_MIN_EVENT_DAYS = 1
 NEWS_MIN_EVENT_DAYS = 3
 CROSSFIT_VERSION = "expanding-market-purge30m-v1"
+BROAD_MODEL_FEATURES = (*NEWS_FEATURES, *BROAD_NEWS_FEATURES)
 
 
 def news_evidence_status(event_days: int) -> str:
@@ -54,8 +60,11 @@ def _rows(ledger, cutoff: datetime):
         JOIN derived_outcomes o
           ON o.source_decision_id=e.source_decision_id
         WHERE e.eligible_at <= ? AND o.outcome_status='VALID'
+          AND m.feature_version=? AND n.feature_version=?
+          AND n.eligibility_version=? AND o.label_version=?
         ORDER BY m.decision_time, e.source_decision_id""",
-        (cutoff.isoformat(),),
+        (cutoff.isoformat(), FEATURE_VERSION, NEWS_FEATURE_VERSION,
+         ELIGIBILITY_VERSION, LABEL_VERSION),
     ).fetchall()
 
 
@@ -74,7 +83,14 @@ def complete_training_rows(ledger, cutoff: datetime) -> list[dict]:
             "decision_id": row["source_decision_id"], "lane": row["evidence_lane"],
             "decision_time": row["decision_time"], "market": values,
             "news": [float(json.loads(row["news_json"])[name]) for name in NEWS_FEATURES],
+            "broad_news": [
+                float(json.loads(row["news_json"]).get(name, 0.0))
+                for name in BROAD_MODEL_FEATURES
+            ],
             "target": target, "news_exposed": bool(row["news_exposed"]),
+            "broad_news_exposed": bool(
+                json.loads(row["news_json"]).get("broad_news_event_count", 0.0)
+            ),
             "distinct_news_clusters": int(row["distinct_news_clusters"]),
             "receipt": (row["source_decision_id"], row["market_hash"], row["news_hash"], row["outcome_hash"]),
         })
@@ -144,28 +160,7 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
         return [{"status": "ENGINEERING" if count < 30 else "EARLY_LEARNING",
                  "complete_rows": count, "next_threshold": PREVIEW_ROWS}]
     stage = "SHADOW" if count >= SHADOW_ROWS else "PREVIEW_ONLY"
-    latest = ledger.connection.execute(
-        """SELECT * FROM model_updates_v2 WHERE model_identity='MARKET_ONLY'
-        AND model_stage=? ORDER BY training_rows DESC LIMIT 1""", (stage,)
-    ).fetchone()
-    paired_full = ledger.connection.execute(
-        """SELECT 1 FROM model_updates_v2 WHERE model_identity='FULL'
-        AND model_stage=? AND created_at>=? LIMIT 1""",
-        (stage, latest["created_at"]),
-    ).fetchone() if latest is not None else None
-    bootstrap_news_pair = latest is not None and paired_full is None
-    if (latest is not None
-            and count < int(latest["training_rows"]) + RETRAIN_INTERVAL
-            and not bootstrap_news_pair):
-        return [{"status": "NOT_DUE", "complete_rows": count,
-                 "next_threshold": int(latest["training_rows"]) + RETRAIN_INTERVAL}]
-
     training_rows = rows if stage == "PREVIEW_ONLY" else rows[: count - (count % RETRAIN_INTERVAL)]
-    now = datetime.now(UTC)
-    root = Path(artifact_root)
-    version, artifact, path, dataset_hash = _write_market_artifact(training_rows, root, cutoff, stage)
-    seed_rows = sum(row["lane"] == "REPAIRED_SEED" for row in training_rows)
-    live_rows = sum(row["lane"] == "LIVE_OOS" for row in training_rows)
     news_exposed = [row for row in training_rows if row["news_exposed"]]
     eligible_sources = [source for source, rule in SOURCE_RULES.items() if rule[0] == "MODEL_ELIGIBLE"]
     placeholders = ",".join("?" for _ in eligible_sources)
@@ -180,6 +175,53 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
     ).fetchone()
     clusters = int(coverage["clusters"] or 0)
     event_days = int(coverage["event_days"] or 0)
+    official_ready = (
+        len(news_exposed) >= NEWS_MIN_EXPOSED_ROWS
+        and clusters >= NEWS_MIN_CLUSTERS
+        and event_days >= NEWS_EXPERIMENTAL_MIN_EVENT_DAYS
+    )
+    broad_exposed = [
+        row for row in training_rows if row.get("broad_news_exposed", False)
+    ]
+    broad_events = [
+        row for row in event_evidence_rows(ledger, cutoff)
+        if row["broad_model_eligible"]
+    ]
+    broad_clusters = len(broad_events)
+    broad_event_days = len({
+        row["collector_first_seen_time"][:10] for row in broad_events
+    })
+    broad_ready = (
+        len(broad_exposed) >= NEWS_MIN_EXPOSED_ROWS
+        and broad_clusters >= NEWS_MIN_CLUSTERS
+        and broad_event_days >= NEWS_EXPERIMENTAL_MIN_EVENT_DAYS
+    )
+    latest = ledger.connection.execute(
+        """SELECT * FROM model_updates_v2 WHERE model_identity='MARKET_ONLY'
+        AND model_stage=? ORDER BY training_rows DESC LIMIT 1""", (stage,)
+    ).fetchone()
+    paired_models = ledger.connection.execute(
+        """SELECT DISTINCT model_identity FROM model_updates_v2
+        WHERE model_identity IN ('FULL','BROAD_FULL')
+          AND model_stage=? AND created_at>=?""",
+        (stage, latest["created_at"]),
+    ).fetchall() if latest is not None else []
+    paired_identities = {row["model_identity"] for row in paired_models}
+    bootstrap_news_pair = latest is not None and (
+        (official_ready and "FULL" not in paired_identities)
+        or (broad_ready and "BROAD_FULL" not in paired_identities)
+    )
+    if (latest is not None
+            and count < int(latest["training_rows"]) + RETRAIN_INTERVAL
+            and not bootstrap_news_pair):
+        return [{"status": "NOT_DUE", "complete_rows": count,
+                 "next_threshold": int(latest["training_rows"]) + RETRAIN_INTERVAL}]
+
+    now = datetime.now(UTC)
+    root = Path(artifact_root)
+    version, artifact, path, dataset_hash = _write_market_artifact(training_rows, root, cutoff, stage)
+    seed_rows = sum(row["lane"] == "REPAIRED_SEED" for row in training_rows)
+    live_rows = sum(row["lane"] == "LIVE_OOS" for row in training_rows)
     evidence_status = news_evidence_status(event_days)
     with ledger.connection:
         ledger.connection.execute(
@@ -273,4 +315,122 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
                  "distinct_event_days": event_days},
             ])
             ledger.connection.commit()
+
+    broad_evidence_status = news_evidence_status(broad_event_days)
+    if (len(broad_exposed) < NEWS_MIN_EXPOSED_ROWS
+            or broad_clusters < NEWS_MIN_CLUSTERS
+            or broad_event_days < NEWS_EXPERIMENTAL_MIN_EVENT_DAYS):
+        statuses.append({
+            "status": "BROAD_NEWS_EVIDENCE_INSUFFICIENT",
+            "news_exposed_rows": len(broad_exposed),
+            "distinct_news_clusters": broad_clusters,
+            "distinct_event_days": broad_event_days,
+            "news_evidence_status": broad_evidence_status,
+        })
+    else:
+        crossfit_by_id = {row["decision_id"]: row for row in crossfit}
+        residual_rows = [
+            row for row in broad_exposed if row["decision_id"] in crossfit_by_id
+        ]
+        if len(residual_rows) < NEWS_MIN_EXPOSED_ROWS:
+            statuses.append({
+                "status": "BROAD_NEWS_CROSSFIT_INSUFFICIENT",
+                "covered_exposed_rows": len(residual_rows),
+                "news_exposed_rows": len(broad_exposed),
+            })
+        else:
+            residual_receipts = [
+                (
+                    row["decision_id"], row["receipt"],
+                    crossfit_by_id[row["decision_id"]]["artifact_hash"],
+                    crossfit_by_id[row["decision_id"]]["residual"],
+                    EVIDENCE_POLICY_VERSION,
+                )
+                for row in residual_rows
+            ]
+            residual_hash = canonical_hash(residual_receipts)
+            evidence_slug = broad_evidence_status.lower().replace("_", "-")
+            broad_version = (
+                f"broad-news-residual-{evidence_slug}-{stage.lower()}-"
+                f"{cutoff.astimezone(UTC).strftime('%Y%m%dT%H%M%SZ')}-"
+                f"{residual_hash[:12]}"
+            )
+            broad_artifact = train_ridge(
+                np.asarray([row["broad_news"] for row in residual_rows]),
+                np.asarray([
+                    crossfit_by_id[row["decision_id"]]["residual"]
+                    for row in residual_rows
+                ]),
+                BROAD_MODEL_FEATURES, 100.0, residual_hash,
+            )
+            broad_path = root / broad_version / "model.json"
+            if not broad_path.exists():
+                broad_artifact.write(broad_path)
+            broad_eligibility = f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}"
+            ledger.connection.execute(
+                """INSERT INTO model_updates_v2 VALUES
+                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    broad_version, "BROAD_NEWS_RESIDUAL", stage, now.isoformat(),
+                    cutoff.isoformat(), len(residual_rows),
+                    sum(row["lane"] == "REPAIRED_SEED" for row in residual_rows),
+                    sum(row["lane"] == "LIVE_OOS" for row in residual_rows),
+                    len(residual_rows), broad_clusters, broad_event_days,
+                    residual_hash, NEWS_FEATURE_VERSION, broad_eligibility,
+                    str(broad_path), broad_artifact.artifact_hash, "CHALLENGER",
+                ),
+            )
+            manifest = {
+                "schema": "xauusd.phase2f.broad-full-model.v1",
+                "market_model_version": version,
+                "market_artifact_path": str(path),
+                "market_artifact_hash": artifact.artifact_hash,
+                "news_model_version": broad_version,
+                "news_artifact_path": str(broad_path),
+                "news_artifact_hash": broad_artifact.artifact_hash,
+                "training_dataset_hash": dataset_hash,
+                "news_training_hash": residual_hash,
+                "evidence_policy_version": EVIDENCE_POLICY_VERSION,
+            }
+            full_hash = canonical_hash(manifest)
+            broad_full_version = (
+                f"broad-full-{evidence_slug}-{stage.lower()}-"
+                f"{cutoff.astimezone(UTC).strftime('%Y%m%dT%H%M%SZ')}-"
+                f"{full_hash[:12]}"
+            )
+            broad_full_path = root / broad_full_version / "manifest.json"
+            if not broad_full_path.exists():
+                broad_full_path.parent.mkdir(parents=True, exist_ok=False)
+                broad_full_path.write_text(
+                    json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
+                )
+            ledger.connection.execute(
+                """INSERT INTO model_updates_v2 VALUES
+                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    broad_full_version, "BROAD_FULL", stage, now.isoformat(),
+                    cutoff.isoformat(), len(training_rows), seed_rows, live_rows,
+                    len(residual_rows), broad_clusters, broad_event_days, dataset_hash,
+                    f"{FEATURE_VERSION}+{NEWS_FEATURE_VERSION}+{EVIDENCE_POLICY_VERSION}",
+                    broad_eligibility, str(broad_full_path), full_hash, "CHALLENGER",
+                ),
+            )
+            ledger.connection.commit()
+            statuses.extend([
+                {
+                    "status": "TRAINED", "model_identity": "BROAD_NEWS_RESIDUAL",
+                    "model_stage": stage, "model_version": broad_version,
+                    "training_rows": len(residual_rows),
+                    "crossfit_method": CROSSFIT_VERSION,
+                    "news_evidence_status": broad_evidence_status,
+                    "distinct_event_days": broad_event_days,
+                },
+                {
+                    "status": "TRAINED", "model_identity": "BROAD_FULL",
+                    "model_stage": stage, "model_version": broad_full_version,
+                    "training_rows": len(training_rows),
+                    "news_evidence_status": broad_evidence_status,
+                    "distinct_event_days": broad_event_days,
+                },
+            ])
     return statuses

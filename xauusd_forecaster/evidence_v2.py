@@ -9,9 +9,9 @@ from datetime import datetime, timezone
 UTC = timezone.utc
 EVIDENCE_CONTRACT_VERSION = "phase2f-evidence-integrity-v2"
 FEATURE_VERSION = "repaired-market-v2"
-NEWS_FEATURE_VERSION = "eligible-news-first-seen-v2"
+NEWS_FEATURE_VERSION = "eligible-news-event-evidence-v3"
 LABEL_VERSION = "received-time-executable-30m-v2"
-ELIGIBILITY_VERSION = "news-source-eligibility-v1"
+ELIGIBILITY_VERSION = "news-source-eligibility-v2-event-evidence"
 
 V2_IMMUTABLE_TABLES = (
     "repair_batches",

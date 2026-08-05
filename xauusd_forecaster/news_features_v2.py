@@ -8,6 +8,7 @@ from datetime import datetime
 from .evidence_v2 import ELIGIBILITY_VERSION
 from .factors import MACRO_FEATURE_MAP, NEWS_FEATURES
 from .forward_ledger import canonical_hash
+from .news_evidence import BROAD_NEWS_FEATURES, event_evidence_rows
 
 
 SOURCE_RULES = {
@@ -118,6 +119,46 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
                 if len(values) > 1 else 0.0
             )
             evidence.append((series_id, values[-1]["content_hash"]))
+
+    broad_totals = {name: 0.0 for name in BROAD_NEWS_FEATURES}
+    broad_events = [
+        row for row in event_evidence_rows(ledger, decision_time)
+        if row["broad_model_eligible"]
+    ]
+    broad_weight_sum = 0.0
+    broad_evidence = []
+    for row in broad_events:
+        first_seen = datetime.fromisoformat(row["collector_first_seen_time"])
+        age_minutes = max(0.0, (decision_time - first_seen).total_seconds() / 60.0)
+        freshness = math.exp(-math.log(2.0) * age_minutes / 360.0)
+        weight = freshness * row["confidence"] * max(0.05, row["novelty"])
+        broad_weight_sum += weight
+        broad_totals["broad_news_hawkishness"] += weight * row["hawkishness"]
+        broad_totals["broad_news_inflation_impulse"] += weight * row["inflation_impulse"]
+        broad_totals["broad_news_growth_impulse"] += weight * row["growth_impulse"]
+        broad_totals["broad_news_geopolitical_risk"] += weight * row["geopolitical_risk"]
+        broad_totals["broad_news_usd_impulse"] += weight * row["usd_impulse"]
+        broad_totals["broad_news_novelty"] += weight * row["novelty"]
+        broad_totals["broad_news_confidence"] += weight * row["confidence"]
+        broad_totals["broad_news_event_count"] += freshness
+        broad_totals[
+            "broad_primary_event_count" if row["evidence_grade"] == "PRIMARY"
+            else "broad_corroborated_event_count"
+        ] += freshness
+        for topic in row["topics"]:
+            name = f"broad_topic_{topic}"
+            if name in broad_totals:
+                broad_totals[name] += freshness
+        broad_evidence.append((row["event_cluster_id"], row["source_hash"], age_minutes))
+    if broad_weight_sum:
+        for name in (
+            "broad_news_hawkishness", "broad_news_inflation_impulse",
+            "broad_news_growth_impulse", "broad_news_geopolitical_risk",
+            "broad_news_usd_impulse", "broad_news_novelty",
+            "broad_news_confidence",
+        ):
+            broad_totals[name] /= broad_weight_sum
+    totals.update(broad_totals)
     return {
         "features": totals,
         "eligibility_version": ELIGIBILITY_VERSION,
@@ -125,5 +166,9 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
         "news_exposed": int(bool(canonical)),
         "distinct_news_clusters": len(canonical),
         "distinct_event_types": len(event_types),
-        "source_evidence_hash": canonical_hash(evidence),
+        "broad_model_visible_items": len(broad_events),
+        "broad_news_exposed": int(bool(broad_events)),
+        "distinct_broad_clusters": len(broad_events),
+        "broad_source_evidence_hash": canonical_hash(broad_evidence),
+        "source_evidence_hash": canonical_hash((evidence, broad_evidence)),
     }

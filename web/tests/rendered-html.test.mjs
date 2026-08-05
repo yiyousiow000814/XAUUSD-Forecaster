@@ -57,6 +57,10 @@ test("renders the news and decision audit route", async () => {
   const html = await response.text();
   assert.match(html, /Aurum Evidence Desk/);
   assert.match(html, /新闻与 Gemini/);
+  assert.match(html, /新闻证据管理/);
+  const source = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
+  assert.match(source, /来源不是权限/);
+  assert.match(source, /多源确认/);
   assert.match(html, /news-row-placeholder/);
   assert.match(html, /决策与30分钟结果/);
   assert.match(html, /Live OOS 学习曲线/);

@@ -16,7 +16,10 @@ from .training import MARKET_FEATURES
 
 MIN_CALIBRATION_BLOCKS = 20
 ACTIVE_VERSIONS_PER_IDENTITY = 2
-MODEL_IDENTITIES = frozenset({"MARKET_ONLY", "NEWS_RESIDUAL", "FULL"})
+MODEL_IDENTITIES = frozenset({
+    "MARKET_ONLY", "NEWS_RESIDUAL", "FULL",
+    "BROAD_NEWS_RESIDUAL", "BROAD_FULL",
+})
 
 
 def _active_updates(updates) -> list:
@@ -133,13 +136,13 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
         if identity == "MARKET_ONLY":
             artifact = RidgeArtifact.read(update["artifact_path"])
             predicted = float(artifact.predict(np.asarray([[float(v) for v in values]]))[0])
-        elif identity == "NEWS_RESIDUAL":
+        elif identity in {"NEWS_RESIDUAL", "BROAD_NEWS_RESIDUAL"}:
             artifact = RidgeArtifact.read(update["artifact_path"])
             news_residual = float(artifact.predict(np.asarray([
                 [float(news_features[name]) for name in artifact.feature_names]
             ]))[0])
             predicted = news_residual
-        elif identity == "FULL":
+        elif identity in {"FULL", "BROAD_FULL"}:
             manifest = json.loads(open(update["artifact_path"], encoding="utf-8").read())
             market_artifact = RidgeArtifact.read(manifest["market_artifact_path"])
             news_artifact = RidgeArtifact.read(manifest["news_artifact_path"])

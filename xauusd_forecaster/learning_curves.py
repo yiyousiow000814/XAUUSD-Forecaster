@@ -131,7 +131,10 @@ def learning_curve_payload(connection) -> dict:
         })
 
     rolling_processes = []
-    for identity in ("MARKET_ONLY", "NEWS_RESIDUAL", "FULL"):
+    for identity in (
+        "MARKET_ONLY", "NEWS_RESIDUAL", "FULL",
+        "BROAD_NEWS_RESIDUAL", "BROAD_FULL",
+    ):
         rows = connection.execute(
             """WITH ranked AS (
                 SELECT p.source_decision_id,p.decision_time,p.recommended_action,
@@ -171,7 +174,10 @@ def learning_curve_payload(connection) -> dict:
         })
 
     identity_curves = []
-    for identity in ("CHAMPION_0", "MARKET_ONLY", "NEWS_RESIDUAL", "FULL"):
+    for identity in (
+        "CHAMPION_0", "MARKET_ONLY", "NEWS_RESIDUAL", "FULL",
+        "BROAD_NEWS_RESIDUAL", "BROAD_FULL",
+    ):
         if identity == "CHAMPION_0":
             rows = connection.execute(
                 """SELECT p.decision_time,s.value_quote_return FROM predictions_v2 p
@@ -212,7 +218,7 @@ def learning_curve_payload(connection) -> dict:
             FROM predictions_v2 p
             JOIN prediction_scores_v2 s USING(source_decision_id,model_version)
             JOIN model_updates_v2 u USING(model_version)
-            WHERE p.model_identity IN ('FULL','MARKET_ONLY')
+            WHERE p.model_identity IN ('FULL','BROAD_FULL','MARKET_ONLY')
               AND p.decision_time>u.created_at
         ), latest AS (
             SELECT * FROM ranked WHERE version_rank=1
@@ -228,6 +234,33 @@ def learning_curve_payload(connection) -> dict:
         cumulative += float(row["delta"])
         incremental.append({"decision_time": row["decision_time"], "paired_delta": row["delta"],
                             "cumulative_delta": cumulative})
+
+    broad_paired = connection.execute(
+        """WITH ranked AS (
+            SELECT p.source_decision_id,p.decision_time,p.model_identity,s.value_quote_return,
+                   row_number() OVER (
+                       PARTITION BY p.source_decision_id,p.model_identity
+                       ORDER BY u.created_at DESC,u.model_version DESC
+                   ) AS version_rank
+            FROM predictions_v2 p
+            JOIN prediction_scores_v2 s USING(source_decision_id,model_version)
+            JOIN model_updates_v2 u USING(model_version)
+            WHERE p.model_identity IN ('BROAD_FULL','FULL')
+              AND p.decision_time>u.created_at
+        ), latest AS (SELECT * FROM ranked WHERE version_rank=1)
+        SELECT b.decision_time,b.value_quote_return-o.value_quote_return AS delta
+        FROM latest b JOIN latest o USING(source_decision_id)
+        WHERE b.model_identity='BROAD_FULL' AND o.model_identity='FULL'
+        ORDER BY b.decision_time"""
+    ).fetchall()
+    broad_cumulative = 0.0
+    broad_incremental = []
+    for row in broad_paired:
+        broad_cumulative += float(row["delta"])
+        broad_incremental.append({
+            "decision_time": row["decision_time"], "paired_delta": row["delta"],
+            "cumulative_delta": broad_cumulative,
+        })
 
     latest_models = {row["model_stage"]: row["model_version"] for row in connection.execute(
         "SELECT * FROM model_updates_v2 WHERE model_identity='MARKET_ONLY' ORDER BY created_at"
@@ -253,5 +286,6 @@ def learning_curve_payload(connection) -> dict:
             "cumulative_quote_return": 0.0, "trained": False, "uses_ai": False,
         },
         "identity_curves": identity_curves, "full_minus_market": incremental,
+        "broad_full_minus_official_full": broad_incremental,
         "disclaimer": "早期曲线用于观察学习过程，不代表已证明盈利。",
     }

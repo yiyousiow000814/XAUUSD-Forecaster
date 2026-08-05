@@ -8,6 +8,7 @@ import json
 import math
 import sqlite3
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -33,6 +34,9 @@ from xauusd_forecaster.annotation import (  # noqa: E402
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger  # noqa: E402
 from xauusd_forecaster.training import MARKET_FEATURES  # noqa: E402
 from xauusd_forecaster.learning_curves import learning_curve_payload  # noqa: E402
+from xauusd_forecaster.news_evidence import (  # noqa: E402
+    EVIDENCE_POLICY_VERSION, event_evidence_rows_from_connection,
+)
 
 
 NEWS_SOURCE_DEFINITIONS = {
@@ -510,6 +514,13 @@ def _dashboard_payload(database: Path) -> dict:
         }
         integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
         news_source_health = _news_source_health(connection, now)
+        news_evidence = list(reversed(
+            event_evidence_rows_from_connection(connection, now)
+        ))
+        evidence_grades = Counter(row["evidence_grade"] for row in news_evidence)
+        evidence_topics = Counter(
+            topic for row in news_evidence for topic in row["topics"]
+        )
     finally:
         connection.close()
 
@@ -640,6 +651,16 @@ def _dashboard_payload(database: Path) -> dict:
         "outcome_summary": dict(valid),
         "recent_decisions": [serialize_row(row) for row in recent],
         "recent_news": news,
+        "news_evidence": news_evidence,
+        "news_evidence_summary": {
+            "policy_version": EVIDENCE_POLICY_VERSION,
+            "total_events": len(news_evidence),
+            "broad_model_eligible": sum(
+                int(row["broad_model_eligible"]) for row in news_evidence
+            ),
+            "grades": dict(evidence_grades),
+            "topics": dict(evidence_topics),
+        },
         "news_source_health": news_source_health,
         "annotation_queue": {
             "ready": int(annotation_queue["ready"] or 0),

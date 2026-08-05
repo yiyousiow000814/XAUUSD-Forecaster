@@ -12,6 +12,7 @@ from xauusd_forecaster.executable_label import build_executable_label_v2
 from xauusd_forecaster.forward_ledger import ForwardLedger, canonical_hash
 from xauusd_forecaster.learning_curves import _stage, learning_curve_payload
 from xauusd_forecaster.market import MarketObservation
+from xauusd_forecaster.news_evidence import event_evidence_rows
 from xauusd_forecaster.news_features_v2 import aggregate_news_features_v2
 from xauusd_forecaster.repair_v2 import immutable_table_hash
 from xauusd_forecaster import inference_v2, training_v2
@@ -65,24 +66,29 @@ def test_u5_requires_a_new_contiguous_31_minute_path_after_gap() -> None:
 
 
 def _append_news(ledger: ForwardLedger, *, source: str, item: str,
-                 first_seen: datetime, parsed_at: datetime, impulse: float) -> None:
+                 first_seen: datetime, parsed_at: datetime, impulse: float,
+                 link: str | None = None,
+                 entities: list[str] | None = None,
+                 event_type: str = "monetary_policy") -> None:
+    entities = entities or []
     body = ("publisher full body " * 30) + item
     digest = hashlib.sha256(body.encode()).hexdigest()
     ledger.append_news_revision({
         "source": source, "source_item_id": item,
         "collector_first_seen_time": first_seen, "fetched_time": first_seen,
         "headline": item, "body": body, "content_hash": digest, "cluster_id": item,
+        "link": link,
     })
     ledger.append_annotation({
         "annotation_id": item, "source": source, "source_item_id": item,
-        "revision_number": 1, "raw_content_hash": digest, "event_type": "monetary_policy",
-        "entities": [], "hawkishness": impulse, "inflation_impulse": 0.0,
+        "revision_number": 1, "raw_content_hash": digest, "event_type": event_type,
+        "entities": entities, "hawkishness": impulse, "inflation_impulse": 0.0,
         "growth_impulse": 0.0, "geopolitical_risk": 0.0, "usd_impulse": 0.0,
         "novelty": 1.0, "confidence": 1.0, "llm_model_version": "gemini-3.5-flash-lite",
         "prompt_version": "news-json-v9-local-display-recovery",
         "parse_started_at": parsed_at, "parsed_at": parsed_at,
         "annotation": {
-            "event_type": "monetary_policy", "entities": [], "hawkishness": impulse,
+            "event_type": event_type, "entities": entities, "hawkishness": impulse,
             "inflation_impulse": 0.0, "growth_impulse": 0.0,
             "geopolitical_risk": 0.0, "usd_impulse": 0.0,
             "novelty": 1.0, "confidence": 1.0,
@@ -111,6 +117,72 @@ def test_collect_only_news_cannot_change_model_feature_hash(tmp_path) -> None:
     after = aggregate_news_features_v2(ledger, decision)
     assert canonical_hash(before["features"]) == canonical_hash(after["features"])
     assert after["model_visible_items"] == 0
+    ledger.close()
+
+
+def test_single_reliable_publisher_remains_display_only(tmp_path) -> None:
+    cutoff = datetime(2026, 8, 5, 10, 30, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=cutoff - timedelta(hours=1))
+    _append_news(
+        ledger, source="gdelt_gold_geopolitics", item="War disrupts oil routes",
+        first_seen=cutoff - timedelta(minutes=10), parsed_at=cutoff - timedelta(minutes=5),
+        impulse=0.0, link="https://www.reuters.com/world/example",
+        entities=["Iran", "Strait of Hormuz"], event_type="geopolitical_conflict",
+    )
+    event = event_evidence_rows(ledger, cutoff)[0]
+    assert event["evidence_grade"] == "SINGLE_RELIABLE"
+    assert event["broad_model_eligible"] is False
+    assert event["model_permission"] == "DISPLAY_ONLY"
+    ledger.close()
+
+
+def test_two_independent_publishers_corroborate_same_event(tmp_path) -> None:
+    cutoff = datetime(2026, 8, 5, 10, 30, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=cutoff - timedelta(hours=1))
+    common = {
+        "first_seen": cutoff - timedelta(minutes=10),
+        "parsed_at": cutoff - timedelta(minutes=5), "impulse": 0.0,
+        "entities": ["Iran", "Strait of Hormuz"],
+        "event_type": "geopolitical_conflict",
+    }
+    _append_news(
+        ledger, source="gdelt_gold_geopolitics", item="War disrupts oil routes",
+        link="https://www.reuters.com/world/example", **common,
+    )
+    _append_news(
+        ledger, source="google_news_gold_context", item="Conflict threatens crude supply",
+        link="https://www.bbc.com/news/example", **common,
+    )
+    events = event_evidence_rows(ledger, cutoff)
+    assert len(events) == 1
+    assert events[0]["evidence_grade"] == "CORROBORATED"
+    assert events[0]["independent_publishers"] == 2
+    assert events[0]["broad_model_eligible"] is True
+    ledger.close()
+
+
+def test_confirmation_is_not_visible_before_second_publisher_is_parsed(tmp_path) -> None:
+    first = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=first - timedelta(minutes=5))
+    common = {
+        "first_seen": first, "impulse": 0.0,
+        "entities": ["Iran", "Strait of Hormuz"],
+        "event_type": "geopolitical_conflict",
+    }
+    _append_news(
+        ledger, source="gdelt_gold_geopolitics", item="War disrupts oil routes",
+        parsed_at=first + timedelta(minutes=1),
+        link="https://www.reuters.com/world/example", **common,
+    )
+    _append_news(
+        ledger, source="google_news_gold_context", item="Conflict threatens crude supply",
+        parsed_at=first + timedelta(minutes=8),
+        link="https://www.bbc.com/news/example", **common,
+    )
+    early = event_evidence_rows(ledger, first + timedelta(minutes=5))[0]
+    later = event_evidence_rows(ledger, first + timedelta(minutes=10))[0]
+    assert early["evidence_grade"] == "SINGLE_RELIABLE"
+    assert later["evidence_grade"] == "CORROBORATED"
     ledger.close()
 
 
@@ -253,7 +325,9 @@ def _training_rows(count: int) -> list[dict]:
         "decision_time": (start + timedelta(minutes=5 * index)).isoformat(),
         "market": [float(index + offset) for offset in range(len(training_v2.MARKET_FEATURES))],
         "news": [0.0] * len(training_v2.NEWS_FEATURES), "target": float(index) / 100,
-        "news_exposed": False, "distinct_news_clusters": 0,
+        "broad_news": [0.0] * len(training_v2.BROAD_MODEL_FEATURES),
+        "news_exposed": False, "broad_news_exposed": False,
+        "distinct_news_clusters": 0,
         "receipt": (f"d-{index}", f"m-{index}", f"n-{index}", f"o-{index}"),
     } for index in range(count)]
 
@@ -290,6 +364,9 @@ def test_retraining_occurs_after_fifty_additional_rows(tmp_path, monkeypatch) ->
     initial_cutoff = datetime(2026, 8, 1, 12, tzinfo=UTC)
     _insert_model_update(ledger.connection, "market-existing", "MARKET_ONLY", initial_cutoff)
     _insert_model_update(ledger.connection, "full-existing", "FULL", initial_cutoff)
+    _insert_model_update(
+        ledger.connection, "broad-full-existing", "BROAD_FULL", initial_cutoff
+    )
     monkeypatch.setattr(training_v2, "complete_training_rows", lambda *_: _training_rows(145))
     result = training_v2.train_due_v2(
         ledger, datetime(2026, 8, 6, 20, tzinfo=UTC), tmp_path / "models"
@@ -325,6 +402,8 @@ def test_news_models_train_early_with_explicit_experimental_status(
     for row in rows:
         row["news_exposed"] = True
         row["news"] = [0.1] * len(training_v2.NEWS_FEATURES)
+        row["broad_news_exposed"] = True
+        row["broad_news"] = [0.1] * len(training_v2.BROAD_MODEL_FEATURES)
     first_seen = datetime(2026, 8, 1, 10, tzinfo=UTC)
     for index in range(10):
         seen = first_seen + timedelta(days=index % event_days)
@@ -365,6 +444,8 @@ def test_news_models_train_early_with_explicit_experimental_status(
     trained = {row.get("model_identity"): row for row in result if row["status"] == "TRAINED"}
     assert trained["NEWS_RESIDUAL"]["news_evidence_status"] == expected_status
     assert trained["FULL"]["news_evidence_status"] == expected_status
+    assert trained["BROAD_NEWS_RESIDUAL"]["news_evidence_status"] == expected_status
+    assert trained["BROAD_FULL"]["news_evidence_status"] == expected_status
     updates = {
         row["model_identity"]: row
         for row in ledger.connection.execute("SELECT * FROM model_updates_v2")
