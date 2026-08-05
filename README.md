@@ -86,6 +86,11 @@ before transmission. The file stores anonymous key fingerprints only, stops a
 key at 500 attempts for the Pacific quota day, and starts a fresh counter at
 Pacific midnight. Google applies Gemini rate limits per project rather than per
 API key, so keys belonging to one project may still share the upstream quota.
+The final 150 Flash requests are reserved for monetary-policy, CPI, and payroll
+events. Failed validation is written to the append-only failure ledger and
+backed off; a repeated permanent error is isolated instead of being retried
+every minute. The status page separates ready, queued, backing-off, and
+isolated items.
 Gemini produces a Simplified Chinese display headline and full-content summary.
 Mixed-language output and source-inconsistent numeric lexemes are rejected or
 repaired before append. Headline-only translations remain presentation-only and

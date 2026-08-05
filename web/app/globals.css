@@ -120,6 +120,8 @@ footer { font-size:13px; font-weight:600; letter-spacing:.06em; }
 .training-card p { font-size:14px; color:var(--muted); }
 .annotation-queue span { font-size:14px; }
 .annotation-queue small { font-size:13px; font-weight:600; }
+.annotation-queue { grid-template-columns:1.4fr repeat(5,.55fr); }
+@media (max-width:850px){.annotation-queue{grid-template-columns:1fr 1fr}}
 .news-browser>div span { font-size:13px; font-weight:600; }
 .news-browser button,.news-pagination button { font-size:13px; }
 .news-pagination span { font-size:13px; font-weight:600; }

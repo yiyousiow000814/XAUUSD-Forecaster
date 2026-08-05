@@ -24,6 +24,7 @@ from xauusd_forecaster.annotation import (  # noqa: E402
     DEFAULT_GEMMA_MODEL,
     GEMMA_REQUESTS_PER_DAY_PER_KEY,
     GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
+    GEMINI_DAILY_PRIORITY_RESERVE,
     GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
     configured_gemini_api_keys,
 )
@@ -152,6 +153,9 @@ def _dashboard_payload(database: Path) -> dict:
                       COALESCE(a.prompt_version, legacy.prompt_version, legacy_v3.prompt_version) AS prompt_version,
                       COALESCE(a.parsed_at, legacy.parsed_at, legacy_v3.parsed_at) AS parsed_at,
                       CASE WHEN a.annotation_id IS NOT NULL THEN 'READY'
+                           WHEN length(trim(COALESCE(n.body, ''))) < 240 THEN 'WAITING_CONTENT'
+                           WHEN f.is_terminal=1 THEN 'DEAD_LETTER'
+                           WHEN f.next_retry_at > ? THEN 'BACKING_OFF'
                            WHEN length(trim(COALESCE(n.body, ''))) >= 240 THEN 'QUEUED'
                            ELSE 'WAITING_CONTENT' END AS annotation_status
                FROM news_revisions n
@@ -181,6 +185,17 @@ def _dashboard_payload(database: Path) -> dict:
                 AND legacy_v3.revision_number=n.revision_number
                 AND legacy_v3.llm_model_version='gemini-3.5-flash-lite'
                 AND legacy_v3.prompt_version='news-json-v6-headline-and-summary-zh-verbatim-numbers'
+               LEFT JOIN news_llm_failures f
+                 ON f.failure_id=(
+                   SELECT latest_f.failure_id
+                   FROM news_llm_failures latest_f
+                   WHERE latest_f.task_type='ANNOTATION'
+                     AND latest_f.source=n.source
+                     AND latest_f.source_item_id=n.source_item_id
+                     AND latest_f.revision_number=n.revision_number
+                     AND latest_f.llm_model_version='gemini-3.5-flash-lite'
+                     AND latest_f.prompt_version='news-json-v8-strict-zh-source-number-lexemes'
+                   ORDER BY latest_f.attempt_number DESC LIMIT 1)
                WHERE NOT EXISTS (
                  SELECT 1 FROM news_revisions newer
                  WHERE newer.source=n.source
@@ -200,14 +215,23 @@ def _dashboard_payload(database: Path) -> dict:
                ORDER BY COALESCE(n.source_published_time,
                                  n.collector_first_seen_time) DESC,
                         n.source, n.source_item_id
-               LIMIT 200"""
+               LIMIT 200""",
+            (now.isoformat(timespec="microseconds"),),
         ).fetchall()
         annotation_queue = connection.execute(
             """SELECT
                  sum(CASE WHEN length(trim(COALESCE(n.body, ''))) >= 240
                            AND a.annotation_id IS NOT NULL THEN 1 ELSE 0 END) AS ready,
                  sum(CASE WHEN length(trim(COALESCE(n.body, ''))) >= 240
-                           AND a.annotation_id IS NULL THEN 1 ELSE 0 END) AS queued,
+                           AND a.annotation_id IS NULL
+                           AND (f.failure_id IS NULL OR
+                                (f.is_terminal=0 AND f.next_retry_at <= ?))
+                          THEN 1 ELSE 0 END) AS queued,
+                 sum(CASE WHEN a.annotation_id IS NULL
+                           AND f.is_terminal=0 AND f.next_retry_at > ?
+                          THEN 1 ELSE 0 END) AS backing_off,
+                 sum(CASE WHEN a.annotation_id IS NULL
+                           AND f.is_terminal=1 THEN 1 ELSE 0 END) AS dead_letter,
                  sum(CASE WHEN length(trim(COALESCE(n.body, ''))) < 240
                           THEN 1 ELSE 0 END) AS waiting_content
                FROM news_revisions n
@@ -216,6 +240,17 @@ def _dashboard_payload(database: Path) -> dict:
                 AND a.revision_number=n.revision_number
                 AND a.llm_model_version='gemini-3.5-flash-lite'
                 AND a.prompt_version='news-json-v8-strict-zh-source-number-lexemes'
+               LEFT JOIN news_llm_failures f
+                 ON f.failure_id=(
+                   SELECT latest_f.failure_id
+                   FROM news_llm_failures latest_f
+                   WHERE latest_f.task_type='ANNOTATION'
+                     AND latest_f.source=n.source
+                     AND latest_f.source_item_id=n.source_item_id
+                     AND latest_f.revision_number=n.revision_number
+                     AND latest_f.llm_model_version='gemini-3.5-flash-lite'
+                     AND latest_f.prompt_version='news-json-v8-strict-zh-source-number-lexemes'
+                   ORDER BY latest_f.attempt_number DESC LIMIT 1)
                WHERE NOT EXISTS (
                  SELECT 1 FROM news_revisions newer
                  WHERE newer.source=n.source
@@ -231,7 +266,11 @@ def _dashboard_payload(database: Path) -> dict:
                          AND peer_newer.revision_number>peer.revision_number)
                      AND (length(COALESCE(peer.body, '')) > length(COALESCE(n.body, ''))
                           OR (length(COALESCE(peer.body, '')) = length(COALESCE(n.body, ''))
-                              AND peer.source_item_id < n.source_item_id)))"""
+                              AND peer.source_item_id < n.source_item_id)))""",
+            (
+                now.isoformat(timespec="microseconds"),
+                now.isoformat(timespec="microseconds"),
+            ),
         ).fetchone()
         model_rows = connection.execute(
             """SELECT model_identity, model_version, created_at,
@@ -346,6 +385,12 @@ def _dashboard_payload(database: Path) -> dict:
     available_gemini_keys = sum(
         item["status"] == "AVAILABLE" for item in gemini_quota["keys"]
     )
+    flash_routine_remaining = max(
+        0, int(gemini_quota["total_remaining"]) - GEMINI_DAILY_PRIORITY_RESERVE
+    )
+    flash_priority_reserve = min(
+        GEMINI_DAILY_PRIORITY_RESERVE, int(gemini_quota["total_remaining"])
+    )
     return {
         "generated_at": now.isoformat(),
         "forward_epoch": epoch,
@@ -364,6 +409,8 @@ def _dashboard_payload(database: Path) -> dict:
         "annotation_queue": {
             "ready": int(annotation_queue["ready"] or 0),
             "queued": int(annotation_queue["queued"] or 0),
+            "backing_off": int(annotation_queue["backing_off"] or 0),
+            "dead_letter": int(annotation_queue["dead_letter"] or 0),
             "waiting_content": int(annotation_queue["waiting_content"] or 0),
             "configured_key_count": len(gemini_keys),
             "available_key_count": available_gemini_keys,
@@ -372,6 +419,8 @@ def _dashboard_payload(database: Path) -> dict:
                 available_gemini_keys
                 * GEMINI_REQUESTS_PER_MINUTE_PER_KEY
             ),
+            "priority_reserve": flash_priority_reserve,
+            "routine_remaining": flash_routine_remaining,
         },
         "gemini_quota": gemini_quota,
         "gemma_quota": gemma_quota,

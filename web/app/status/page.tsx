@@ -28,6 +28,10 @@ type StatusPayload = {
     available_key_count: number;
     requests_per_minute_per_key: number;
     requests_per_minute: number;
+    backing_off: number;
+    dead_letter: number;
+    priority_reserve: number;
+    routine_remaining: number;
   };
   gemini_quota: QuotaState;
   gemma_quota: QuotaState;
@@ -137,6 +141,10 @@ export default function StatusPage() {
         <article><span>已配置 KEY</span><strong>{payload?.annotation_queue.configured_key_count ?? "—"}</strong><small>当前可用 {payload?.annotation_queue.available_key_count ?? "—"} · 只显示匿名编号</small></article>
         <article><span>Flash 今日已发送</span><strong>{quota?.total_sent ?? "—"}</strong><small>重要正文与训练特征</small></article>
         <article><span>Flash 今日剩余</span><strong className="good">{quota?.total_remaining ?? "—"}</strong><small>本机账本上限</small></article>
+        <article><span>普通新闻可用</span><strong>{payload?.annotation_queue.routine_remaining ?? "—"}</strong><small>不会动用重要新闻保留额</small></article>
+        <article><span>重要新闻保留</span><strong className="good">{payload?.annotation_queue.priority_reserve ?? "—"}</strong><small>FOMC、CPI、Payroll 专用</small></article>
+        <article><span>错误退避中</span><strong>{payload?.annotation_queue.backing_off ?? "—"}</strong><small>到期前不会重复请求</small></article>
+        <article><span>已隔离</span><strong>{payload?.annotation_queue.dead_letter ?? "—"}</strong><small>相同永久错误不再消耗配额</small></article>
         <article><span>安全吞吐</span><strong>{payload?.annotation_queue.requests_per_minute ?? "—"}</strong><small>RPM · 每 key {payload?.annotation_queue.requests_per_minute_per_key ?? "—"}</small></article>
       </section>
 
@@ -151,7 +159,7 @@ export default function StatusPage() {
 
       <aside className="quota-note">
         <b>计数规则</b>
-        <p>每次请求在发往模型前永久计入各自账本，包括被 Google 拒绝的请求。Flash 每 key 本机上限 500；Gemma 每 key 本机上限 15,000。两个账本都在 Pacific midnight 自动切换。</p>
+        <p>每次请求在发往模型前永久计入各自账本，包括被 Google 拒绝的请求。Flash 每 key 本机上限 500，并保留一部分给 FOMC、CPI 与 Payroll；验证失败会持久退避，相同永久错误再次出现后会隔离，不会每分钟重试。Gemma 每 key 本机上限 15,000。两个账本都在 Pacific midnight 自动切换。</p>
         <p>Google 实际额度按 project 而不是 API key 计算。如果多个 key 属于同一个 project，它们仍会共享 Google 的额度；本页显示的是本机逐模型、逐 key 的安全账本，不代表 Google 端保证额度。</p>
       </aside>
 

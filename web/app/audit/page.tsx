@@ -43,7 +43,7 @@ type News = {
   content_characters: number;
   content_status: "FULL_TEXT" | "SOURCE_CONTENT" | "HEADLINE_ONLY";
   summary_zh: string | null;
-  annotation_status: "READY" | "QUEUED" | "WAITING_CONTENT";
+  annotation_status: "READY" | "QUEUED" | "BACKING_OFF" | "DEAD_LETTER" | "WAITING_CONTENT";
   link: string;
   event_type: string | null;
   entities: string[];
@@ -66,6 +66,8 @@ type Payload = {
   annotation_queue: {
     ready: number;
     queued: number;
+    backing_off: number;
+    dead_letter: number;
     waiting_content: number;
     configured_key_count: number;
     requests_per_minute_per_key: number;
@@ -214,8 +216,10 @@ export default function AuditPage() {
         <strong>Gemini 完整正文摘要</strong>
         <span><b>{payload?.annotation_queue.ready ?? 0}</b> 已完成</span>
         <span><b>{payload?.annotation_queue.queued ?? 0}</b> 排队中</span>
+        <span><b>{payload?.annotation_queue.backing_off ?? 0}</b> 退避中</span>
+        <span><b>{payload?.annotation_queue.dead_letter ?? 0}</b> 已隔离</span>
         <span><b>{payload?.annotation_queue.waiting_content ?? 0}</b> 等待正文</span>
-        <small>完整正文由 Gemini 3.5 Flash-Lite 处理：本机已启用 {payload?.annotation_queue.configured_key_count ?? 0} 个 key，每个安全使用 {payload?.annotation_queue.requests_per_minute_per_key ?? 12} RPM，合计每分钟最多 {payload?.annotation_queue.requests_per_minute ?? 0} 篇；标题中文翻译由 Gemma 4 31B 分流，且不进入训练。</small>
+        <small>完整正文由 Gemini 3.5 Flash-Lite 处理：本机已启用 {payload?.annotation_queue.configured_key_count ?? 0} 个 key，每个安全使用 {payload?.annotation_queue.requests_per_minute_per_key ?? 12} RPM；失败项目持久退避，相同永久错误会隔离。标题中文翻译由 Gemma 4 31B 分流，且不进入训练。</small>
       </section>
 
       <nav className="audit-tabs" aria-label="审计视图">
@@ -241,7 +245,7 @@ export default function AuditPage() {
               <div className="news-row-title"><strong>{row.headline}</strong><small>{SOURCE_LABELS[row.source] ?? row.source.replaceAll("_", " ")}{row.headline !== row.original_headline ? " · Gemini 中文标题" : " · 等待标题翻译"}</small></div>
               <div className={`news-row-state state-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
                 <b>{row.content_status === "FULL_TEXT" ? `${row.content_characters.toLocaleString()} 字符` : row.source === "google_news_gold_geopolitics" ? "聚合标题" : "等待正文"}</b>
-                <small>{row.annotation_status === "READY" ? "Gemini 已完成" : row.annotation_status === "QUEUED" ? "Gemini 排队中" : "禁止判断"}</small>
+                <small>{row.annotation_status === "READY" ? "Gemini 已完成" : row.annotation_status === "QUEUED" ? "Gemini 排队中" : row.annotation_status === "BACKING_OFF" ? "失败退避中" : row.annotation_status === "DEAD_LETTER" ? "已隔离待审" : "禁止判断"}</small>
               </div>
             </summary>
             <div className="news-row-detail">
@@ -256,6 +260,10 @@ export default function AuditPage() {
                 <span>GEMINI 中文摘要 · 完整读取 {row.content_characters.toLocaleString()} 字符</span><p>{row.summary_zh}</p>
               </section> : row.annotation_status === "QUEUED" ? <section className="gemini-summary summary-queued">
                 <span>FLASH-LITE 摘要排队中</span><p>正文已经完整入库，不会截断。系统正通过 {payload?.annotation_queue.configured_key_count ?? 0} 个 key 轮换，每分钟最多生成 {payload?.annotation_queue.requests_per_minute ?? 0} 篇中文摘要；标题翻译会独立交给 Gemma。</p>
+              </section> : row.annotation_status === "BACKING_OFF" ? <section className="gemini-summary summary-queued">
+                <span>暂时退避</span><p>本次模型响应未通过验证；系统已停止每分钟重试，将在退避到期后有限重试。</p>
+              </section> : row.annotation_status === "DEAD_LETTER" ? <section className="gemini-summary summary-waiting">
+                <span>已隔离</span><p>相同永久错误重复出现，系统不会再自动消耗 Flash 配额；该新闻保留在 Ledger 中等待规则修复或人工复核。</p>
               </section> : <section className="gemini-summary summary-waiting">
                 <span>等待来源正文</span><p>当前只有标题或短描述，不会进入模型，也不会假装已经理解内容。</p>
               </section>}

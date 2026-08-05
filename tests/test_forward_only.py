@@ -875,6 +875,134 @@ def test_gemini_accepts_source_numbers_with_aggregator_spacing() -> None:
     assert "12-15" in result["summary_zh"]
 
 
+def test_gemini_named_month_translation_does_not_invent_numeric_month() -> None:
+    result = {
+        "headline_zh": "黄金价格于8月5日上涨",
+        "summary_zh": "市场正在关注8月的黄金走势。",
+    }
+    source = "Altın fiyatı 5 Ağustos tarihinde yükseldi"
+    annotation_module._normalize_translated_named_months(result, source)
+    annotation_module._restore_source_number_lexemes(result, source, "")
+    assert result["headline_zh"] == "黄金价格于八月5日上涨"
+    assert result["summary_zh"] == "市场正在关注八月的黄金走势。"
+
+
+def test_llm_failure_is_persisted_and_blocks_immediate_retry(
+    tmp_path, monkeypatch
+) -> None:
+    now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "Complete source text with enough content for annotation. " * 10
+    ledger.append_news_revision(
+        {
+            "source": "failure-test", "source_item_id": "one",
+            "collector_first_seen_time": now, "fetched_time": now,
+            "headline": "Gold report", "body": body,
+            "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+            "cluster_id": "failure-cluster",
+        }
+    )
+    calls = 0
+
+    def fail_once(*_args):
+        nonlocal calls
+        calls += 1
+        raise ValueError("Gemini summary_zh contains a number absent from source")
+
+    monkeypatch.setattr(annotation_module, "_call_gemini", fail_once)
+    first = annotate_pending_news(
+        ledger, provider="gemini", api_key="test-key", limit=1
+    )
+    second = annotate_pending_news(
+        ledger, provider="gemini", api_key="test-key", limit=1
+    )
+    assert first[0]["retry_state"] == "BACKING_OFF"
+    assert second == []
+    assert calls == 1
+    assert ledger.count("news_llm_failures") == 1
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        ledger.connection.execute("DELETE FROM news_llm_failures")
+
+
+def test_repeated_same_validation_failure_enters_dead_letter(tmp_path) -> None:
+    now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "Complete source text with enough content for annotation. " * 10
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    row = {
+        "source": "failure-test", "source_item_id": "two",
+        "collector_first_seen_time": now, "fetched_time": now,
+        "headline": "Gold report", "body": body,
+        "content_hash": digest, "cluster_id": "failure-cluster-two",
+    }
+    ledger.append_news_revision(row)
+    parsed = {
+        "row": {**row, "revision_number": 1},
+        "error_type": "ValueError",
+        "error": "Gemini summary_zh contains a number absent from source",
+        "error_code": None,
+        "model_version": annotation_module.DEFAULT_GEMINI_MODEL,
+    }
+    first = annotation_module._append_llm_failure(
+        ledger, parsed, "ANNOTATION", annotation_module.PROMPT_VERSION
+    )
+    second = annotation_module._append_llm_failure(
+        ledger, parsed, "ANNOTATION", annotation_module.PROMPT_VERSION
+    )
+    assert first["retry_state"] == "BACKING_OFF"
+    assert second["retry_state"] == "DEAD_LETTER"
+    latest = ledger.connection.execute(
+        "SELECT * FROM news_llm_failures ORDER BY attempt_number DESC LIMIT 1"
+    ).fetchone()
+    assert latest["is_terminal"] == 1
+    assert latest["next_retry_at"] is None
+
+
+def test_flash_reserve_is_unavailable_to_routine_news_but_kept_for_priority(
+    tmp_path, monkeypatch
+) -> None:
+    now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    for source, item, headline in (
+        ("routine", "one", "Ordinary market story"),
+        ("federal_reserve_monetary", "two", "FOMC statement"),
+    ):
+        body = f"Complete audited source {item}. " * 20
+        ledger.append_news_revision(
+            {
+                "source": source, "source_item_id": item,
+                "collector_first_seen_time": now, "fetched_time": now,
+                "headline": headline, "body": body,
+                "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+                "cluster_id": f"cluster-{item}",
+            }
+        )
+    key = "test-key"
+    GeminiQuotaLedger(tmp_path / "gemini-quota.json").seed(
+        key, 500 - annotation_module.GEMINI_DAILY_PRIORITY_RESERVE
+    )
+    calls: list[str] = []
+    vector = {
+        "headline_zh": "联邦公开市场委员会声明",
+        "summary_zh": "这是一份重要政策声明的完整中文摘要，用于验证优先配额保留。",
+        "event_type": "monetary_policy", "entities": ["Federal Reserve"],
+        "hawkishness": 0.0, "inflation_impulse": 0.0,
+        "growth_impulse": 0.0, "geopolitical_risk": 0.0,
+        "usd_impulse": 0.0, "novelty": 0.5, "confidence": 0.8,
+    }
+
+    def fake_call(_key, _model, headline, _body):
+        calls.append(headline)
+        return dict(vector), annotation_module.DEFAULT_GEMINI_MODEL
+
+    monkeypatch.setattr(annotation_module, "_call_gemini", fake_call)
+    statuses = annotate_pending_news(
+        ledger, provider="gemini", api_key=key, limit=10
+    )
+    assert len(statuses) == 1
+    assert calls == ["FOMC statement"]
+
+
 def test_headline_only_translation_is_display_only(tmp_path, monkeypatch) -> None:
     now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)

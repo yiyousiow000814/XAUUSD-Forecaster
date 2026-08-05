@@ -56,6 +56,15 @@ application-level character slice and appends a concise Simplified-Chinese
 summary together with the structured impulse fields. A new prompt version is a
 new immutable annotation; it never rewrites an earlier interpretation.
 
+Every rejected or unavailable LLM result appends a `news_llm_failures` row
+before it may be retried. Validation failures wait six hours; the same
+validation error on the next attempt becomes terminal for that exact news
+revision, model, and prompt. HTTP 429 and transient 5xx failures use bounded
+progressive backoff and become terminal after five attempts. Terminal rows
+remain auditable and are not automatically requeued. The daily Flash budget
+keeps 150 requests reserved for monetary-policy, CPI, and payroll events;
+routine news cannot consume that reserve.
+
 ## Prequential learning order
 
 For event time `t`, the immutable order is:

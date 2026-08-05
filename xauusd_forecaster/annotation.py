@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import threading
 import urllib.error
 import urllib.request
 import uuid
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .forward_ledger import ForwardLedger
@@ -23,10 +24,12 @@ DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_GEMMA_MODEL = "gemma-4-31b-it"
 GEMINI_REQUESTS_PER_MINUTE_PER_KEY = 12
 GEMINI_MAX_PARALLEL_REQUESTS = 3
+GEMINI_DAILY_PRIORITY_RESERVE = 150
 GEMMA_REQUESTS_PER_DAY_PER_KEY = 15_000
 GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL = 20
 PROMPT_VERSION = "news-json-v8-strict-zh-source-number-lexemes"
 TITLE_PROMPT_VERSION = "headline-zh-v1"
+HIGH_PRIORITY_NEWS_SOURCES = frozenset({"federal_reserve_monetary"})
 
 
 def _schema() -> dict:
@@ -76,10 +79,15 @@ def annotate_pending_news(
     if selected_provider == "gemini":
         quota = GeminiQuotaLedger(ledger.path.parent / "gemini-quota.json")
         request_pool = _GeminiRequestPool(keys, quota)
-        capacity = request_pool.available_batch_capacity()
-        if capacity <= 0:
+        total_capacity = request_pool.available_batch_capacity()
+        if total_capacity <= 0:
             return [{"status": "DISABLED", "reason": "GEMINI_DAILY_QUOTA_EXHAUSTED"}]
-        effective_limit = capacity if limit is None else min(max(1, limit), capacity)
+        routine_capacity = request_pool.available_batch_capacity(
+            reserve_total=GEMINI_DAILY_PRIORITY_RESERVE
+        )
+        effective_limit = (
+            total_capacity if limit is None else min(max(1, limit), total_capacity)
+        )
     else:
         effective_limit = max(1, limit or 1)
     pending = ledger.connection.execute(
@@ -106,13 +114,36 @@ def annotate_pending_news(
               AND (length(COALESCE(peer.body, '')) > length(COALESCE(n.body, ''))
                    OR (length(COALESCE(peer.body, '')) = length(COALESCE(n.body, ''))
                        AND peer.source_item_id < n.source_item_id)))
-        ORDER BY CASE WHEN n.source='federal_reserve_monetary' THEN 0 ELSE 1 END,
+          AND NOT EXISTS (
+            SELECT 1 FROM news_llm_failures f
+            WHERE f.task_type='ANNOTATION'
+              AND f.source=n.source AND f.source_item_id=n.source_item_id
+              AND f.revision_number=n.revision_number
+              AND f.llm_model_version=? AND f.prompt_version=?
+              AND f.attempt_number=(
+                SELECT max(f2.attempt_number) FROM news_llm_failures f2
+                WHERE f2.task_type=f.task_type AND f2.source=f.source
+                  AND f2.source_item_id=f.source_item_id
+                  AND f2.revision_number=f.revision_number
+                  AND f2.llm_model_version=f.llm_model_version
+                  AND f2.prompt_version=f.prompt_version)
+              AND (f.is_terminal=1 OR f.next_retry_at > ?))
+        ORDER BY CASE WHEN n.source='federal_reserve_monetary'
+                           OR lower(n.headline) LIKE '%fomc%'
+                           OR lower(n.headline) LIKE '%consumer price%'
+                           OR lower(n.headline) LIKE '%payroll%'
+                      THEN 0 ELSE 1 END,
                  CASE WHEN n.body LIKE '[FULL_TEXT%' THEN 0 ELSE 1 END,
                  COALESCE(n.source_published_time,
                           n.collector_first_seen_time) DESC,
                  n.collector_first_seen_time, n.source, n.source_item_id
         LIMIT ?""",
-        (expected_model_identity, PROMPT_VERSION, effective_limit),
+        (
+            expected_model_identity, PROMPT_VERSION,
+            expected_model_identity, PROMPT_VERSION,
+            datetime.now(UTC).isoformat(timespec="microseconds"),
+            effective_limit,
+        ),
     ).fetchall()
     def parse(item: tuple[int, dict]) -> dict[str, object]:
         index, row = item
@@ -140,9 +171,21 @@ def annotate_pending_news(
                 "row": row,
                 "error_type": type(error).__name__,
                 "error": str(error)[:500],
+                "error_code": getattr(error, "code", None),
+                "model_version": expected_model_identity,
             }
 
     pending_records = [dict(row) for row in pending]
+    if selected_provider == "gemini":
+        routine_used = 0
+        selected_records = []
+        for row in pending_records:
+            if _is_priority_news(row):
+                selected_records.append(row)
+            elif routine_used < routine_capacity:
+                selected_records.append(row)
+                routine_used += 1
+        pending_records = selected_records
     indexed_records = list(enumerate(pending_records))
     statuses: list[dict[str, object]] = []
     if selected_provider == "gemini" and pending_records:
@@ -163,12 +206,16 @@ def _persist_parsed_annotation(
 ) -> dict[str, object]:
     row = parsed_record["row"]
     if parsed_record["status"] != "PARSED":
+        failure = _append_llm_failure(
+            ledger, parsed_record, "ANNOTATION", PROMPT_VERSION
+        )
         return {
             "status": "ERROR", "source": row["source"],
             "source_item_id": row["source_item_id"],
             "revision_number": row["revision_number"],
             "error_type": parsed_record["error_type"],
             "error": parsed_record["error"],
+            **failure,
         }
     result = parsed_record["result"]
     exact_model = str(parsed_record["exact_model"])
@@ -250,11 +297,28 @@ def translate_pending_headlines(
                   AND peer_newer.revision_number>peer.revision_number)
               AND (length(COALESCE(peer.body, '')) > length(COALESCE(n.body, ''))
                    OR (length(COALESCE(peer.body, '')) = length(COALESCE(n.body, ''))
-                       AND peer.source_item_id < n.source_item_id)))
+                   AND peer.source_item_id < n.source_item_id)))
+          AND NOT EXISTS (
+            SELECT 1 FROM news_llm_failures f
+            WHERE f.task_type='TITLE_TRANSLATION'
+              AND f.source=n.source AND f.source_item_id=n.source_item_id
+              AND f.revision_number=n.revision_number
+              AND f.llm_model_version=? AND f.prompt_version=?
+              AND f.attempt_number=(
+                SELECT max(f2.attempt_number) FROM news_llm_failures f2
+                WHERE f2.task_type=f.task_type AND f2.source=f.source
+                  AND f2.source_item_id=f.source_item_id
+                  AND f2.revision_number=f.revision_number
+                  AND f2.llm_model_version=f.llm_model_version
+                  AND f2.prompt_version=f.prompt_version)
+              AND (f.is_terminal=1 OR f.next_retry_at > ?))
         ORDER BY COALESCE(n.source_published_time,
                           n.collector_first_seen_time) DESC
         LIMIT ?""",
-        (capacity,),
+        (
+            selected_model, TITLE_PROMPT_VERSION,
+            datetime.now(UTC).isoformat(timespec="microseconds"), capacity,
+        ),
     ).fetchall()
     statuses: list[dict[str, object]] = []
     for index, raw_row in enumerate(pending):
@@ -293,6 +357,18 @@ def translate_pending_headlines(
             )
             statuses.append({"status": "OK", "translation_id": translation_id})
         except Exception as error:
+            failure = _append_llm_failure(
+                ledger,
+                {
+                    "row": row,
+                    "error_type": type(error).__name__,
+                    "error": str(error)[:500],
+                    "error_code": getattr(error, "code", None),
+                    "model_version": selected_model,
+                },
+                "TITLE_TRANSLATION",
+                TITLE_PROMPT_VERSION,
+            )
             statuses.append(
                 {
                     "status": "ERROR",
@@ -300,6 +376,7 @@ def translate_pending_headlines(
                     "source_item_id": row["source_item_id"],
                     "error_type": type(error).__name__,
                     "error": str(error)[:500],
+                    **failure,
                 }
             )
     return statuses
@@ -351,11 +428,15 @@ class _GeminiRequestPool:
         self._batch_counts = {key: 0 for key in api_keys}
         self._lock = threading.Lock()
 
-    def available_batch_capacity(self) -> int:
+    def available_batch_capacity(self, *, reserve_total: int = 0) -> int:
         snapshot = self.quota.snapshot(self.api_keys)
         capacity = sum(
             min(item["remaining"], self.requests_per_key)
             for item in snapshot["keys"]
+        )
+        capacity = min(
+            capacity,
+            max(0, int(snapshot["total_remaining"]) - max(0, reserve_total)),
         )
         return min(capacity, self.batch_limit) if self.batch_limit else capacity
 
@@ -378,6 +459,7 @@ class _GeminiRequestPool:
                 continue
             try:
                 result, exact_model = _call_gemini(key, model, headline, body)
+                _normalize_translated_named_months(result, f"{headline}\n{body}")
                 _restore_source_number_lexemes(result, headline, body)
                 try:
                     _validate_chinese_result(result)
@@ -554,6 +636,7 @@ def _call_gemini_title(api_key: str, model: str, headline: str) -> tuple[str, st
     result = json.loads(envelope["candidates"][0]["content"]["parts"][0]["text"])
     headline_zh = str(result.get("headline_zh") or "").strip()
     translated = {"headline_zh": headline_zh}
+    _normalize_translated_named_months(translated, headline)
     _restore_source_number_lexemes(translated, headline, "")
     headline_zh = translated["headline_zh"]
     _require_simplified_chinese(headline_zh, "headline_zh", 2, 1.0, 20)
@@ -590,6 +673,123 @@ def _restore_source_number_lexemes(
             raise ValueError(f"Gemini {field} contains a number absent from source")
 
         result[field] = token_pattern.sub(restore, text)
+
+
+def _normalize_translated_named_months(result: dict, source: str) -> None:
+    aliases = {
+        1: ("january", "jan", "ocak"), 2: ("february", "feb", "şubat"),
+        3: ("march", "mar", "mart"), 4: ("april", "apr", "nisan"),
+        5: ("may", "mayıs"), 6: ("june", "jun", "haziran"),
+        7: ("july", "jul", "temmuz"), 8: ("august", "aug", "ağustos"),
+        9: ("september", "sep", "eylül"), 10: ("october", "oct", "ekim"),
+        11: ("november", "nov", "kasım"), 12: ("december", "dec", "aralık"),
+    }
+    chinese = {
+        1: "一", 2: "二", 3: "三", 4: "四", 5: "五", 6: "六",
+        7: "七", 8: "八", 9: "九", 10: "十", 11: "十一", 12: "十二",
+    }
+    source_lower = source.casefold()
+    named_months = {
+        number for number, names in aliases.items()
+        if any(re.search(rf"(?<!\w){re.escape(name)}(?!\w)", source_lower) for name in names)
+    }
+    if not named_months:
+        return
+    for field in ("headline_zh", "summary_zh"):
+        if field not in result:
+            continue
+        text = str(result[field])
+        for number in named_months:
+            text = re.sub(
+                rf"(?<!\d){number}(?=月)", chinese[number], text
+            )
+        result[field] = text
+
+
+def _is_priority_news(row: dict) -> bool:
+    if row["source"] in HIGH_PRIORITY_NEWS_SOURCES:
+        return True
+    headline = str(row.get("headline") or "").casefold()
+    return bool(re.search(r"\bcpi\b", headline)) or any(
+        term in headline
+        for term in (
+            "fomc", "consumer price", "payroll",
+            "employment situation", "interest rate decision",
+            "monetary policy decision",
+        )
+    )
+
+
+def _append_llm_failure(
+    ledger: ForwardLedger,
+    parsed_record: dict[str, object],
+    task_type: str,
+    prompt_version: str,
+) -> dict[str, object]:
+    row = parsed_record["row"]
+    model_version = str(parsed_record["model_version"])
+    error_type = str(parsed_record["error_type"])
+    error = str(parsed_record["error"])
+    normalized_error = re.sub(r"\s+", " ", error).strip()
+    signature = hashlib.sha256(
+        f"{error_type}|{normalized_error}".encode("utf-8")
+    ).hexdigest()
+    prior = ledger.connection.execute(
+        """SELECT attempt_number, error_signature FROM news_llm_failures
+        WHERE task_type=? AND source=? AND source_item_id=?
+          AND revision_number=? AND llm_model_version=? AND prompt_version=?
+        ORDER BY attempt_number DESC LIMIT 1""",
+        (
+            task_type, row["source"], row["source_item_id"],
+            row["revision_number"], model_version, prompt_version,
+        ),
+    ).fetchone()
+    attempt = 1 if prior is None else int(prior["attempt_number"]) + 1
+    same_error = prior is not None and prior["error_signature"] == signature
+    error_code = parsed_record.get("error_code")
+    transient = error_code in {429, 500, 502, 503, 504} or (
+        error_type == "RuntimeError"
+        and "unavailable" in normalized_error.casefold()
+    )
+    if transient:
+        terminal = attempt >= 5
+        delay = timedelta(minutes=(15, 60, 360, 720)[min(attempt - 1, 3)])
+    else:
+        terminal = (same_error and attempt >= 2) or attempt >= 3
+        delay = timedelta(hours=6)
+    failed_at = datetime.now(UTC)
+    next_retry = None if terminal else failed_at + delay
+    identity = "|".join(
+        [
+            task_type, str(row["source"]), str(row["source_item_id"]),
+            str(row["revision_number"]), model_version, prompt_version,
+            str(attempt), signature,
+        ]
+    )
+    ledger.append_llm_failure(
+        {
+            "failure_id": str(uuid.uuid5(uuid.NAMESPACE_URL, identity)),
+            "task_type": task_type,
+            "source": row["source"],
+            "source_item_id": row["source_item_id"],
+            "revision_number": row["revision_number"],
+            "raw_content_hash": row["content_hash"],
+            "llm_model_version": model_version,
+            "prompt_version": prompt_version,
+            "attempt_number": attempt,
+            "error_type": error_type,
+            "error_signature": signature,
+            "error": normalized_error,
+            "failed_at": failed_at,
+            "next_retry_at": next_retry,
+            "is_terminal": terminal,
+        }
+    )
+    return {
+        "retry_state": "DEAD_LETTER" if terminal else "BACKING_OFF",
+        "attempt_number": attempt,
+        "next_retry_at": next_retry.isoformat() if next_retry else None,
+    }
 
 
 def _require_simplified_chinese(
