@@ -9,9 +9,8 @@
 | 96–199 | `PREVIEW` | regularized Market Preview; no effective action |
 | 200+ | `INITIAL_SHADOW` | frozen Shadow Challengers; no promotion |
 
-Each additional 50 complete rows may create a new frozen model version only
-after those rows span at least five new UTC trading days since that stage's
-latest training cutoff.
+Each additional 50 complete rows creates a new frozen model version. The row
+clock is independent of the version's longer OOS evaluation lifetime.
 Twenty distinct trading days may be labelled `RESEARCH_CANDIDATE`; 60 days is
 `HIGHER_CONFIDENCE`. Neither day count blocks early display or model fitting.
 

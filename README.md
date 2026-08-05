@@ -106,9 +106,9 @@ the strongest available body instead of repeated mirror rows.
 At 96 complete V2 rows, the collector creates a Market-only Preview whose
 effective action remains `WAIT`. At 200 rows it creates frozen Shadow
 Challengers, then creates a new version after each additional 50 eligible rows.
-The additional rows must span at least five new UTC trading days. Each frozen
-version remains under parallel Shadow evaluation for up to 60 distinct valid
-OOS days; unhealthy predictions do not shorten that evaluation window.
+Each frozen version remains under parallel Shadow evaluation for up to 60
+distinct valid OOS days; unhealthy predictions do not shorten that evaluation
+window.
 News-residual and Full versions require their own minimum news exposure,
 cluster, and event-day evidence; they are not fabricated when those gates fail.
 Every version is scored only on decisions created after that version. Sixty

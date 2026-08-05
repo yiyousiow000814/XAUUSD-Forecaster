@@ -272,34 +272,18 @@ def test_preview_and_shadow_thresholds_create_challengers_only(
     ledger.close()
 
 
-def test_retraining_requires_five_new_distinct_days(tmp_path, monkeypatch) -> None:
+def test_retraining_occurs_after_fifty_additional_rows(tmp_path, monkeypatch) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     initial_cutoff = datetime(2026, 8, 1, 12, tzinfo=UTC)
     _insert_model_update(ledger.connection, "market-existing", "MARKET_ONLY", initial_cutoff)
-    base = _training_rows(96)
-
-    def rows_with_new_days(days: int) -> list[dict]:
-        rows = list(base)
-        for index in range(50):
-            day = index % days + 1
-            row = dict(base[index])
-            row["decision_id"] = f"new-{days}-{index}"
-            row["decision_time"] = (
-                initial_cutoff + timedelta(days=day, minutes=index)
-            ).isoformat()
-            row["receipt"] = (row["decision_id"], f"m-{index}", f"n-{index}", f"o-{index}")
-            rows.append(row)
-        return rows
-
-    monkeypatch.setattr(training_v2, "complete_training_rows", lambda *_: rows_with_new_days(4))
+    monkeypatch.setattr(training_v2, "complete_training_rows", lambda *_: _training_rows(145))
     result = training_v2.train_due_v2(
         ledger, datetime(2026, 8, 6, 20, tzinfo=UTC), tmp_path / "models"
     )
     assert result[0]["status"] == "NOT_DUE"
-    assert result[0]["new_distinct_days"] == 4
-    assert result[0]["minimum_new_distinct_days"] == 5
+    assert result[0]["next_threshold"] == 146
 
-    monkeypatch.setattr(training_v2, "complete_training_rows", lambda *_: rows_with_new_days(5))
+    monkeypatch.setattr(training_v2, "complete_training_rows", lambda *_: _training_rows(146))
     monkeypatch.setattr(
         training_v2, "_write_market_artifact",
         lambda _rows, root, cutoff, stage: (
