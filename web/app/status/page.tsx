@@ -22,7 +22,11 @@ type QuotaState = {
 
 type StatusPayload = {
   generated_at: string;
-  system: { online: boolean; mode: string; trading_enabled: boolean };
+  system: {
+    online: boolean; mode: string; trading_enabled: boolean;
+    source_of_truth: string; sites_mirror: string;
+    components: Record<string, { last_success: string | null; age_seconds: number | null; status: string; last_error: string | null }>;
+  };
   annotation_queue: {
     configured_key_count: number;
     available_key_count: number;
@@ -139,6 +143,17 @@ export default function StatusPage() {
       </section>
 
       {error ? <div className="error-banner">状态读取失败：{error}</div> : null}
+
+      <section className="component-status" aria-label="数据链路组件状态">
+        <header><div><p className="eyebrow">EVIDENCE PIPELINE</p><h2>每个组件分别报告</h2></div><p><b>{payload?.system.source_of_truth ?? "Local append-only SQLite"}</b> 是不可修改的证据源；{payload?.system.sites_mirror ?? "Sites D1 read-only materialized display mirror"} 只是展示镜像。</p></header>
+        <div>{Object.entries(payload?.system.components ?? {}).map(([name, item]) => <article key={name}>
+          <span className={item.status === "OK" ? "component-ok" : "component-stale"}>{item.status}</span>
+          <strong>{name.replaceAll("_", " ")}</strong>
+          <small>最后成功 {item.last_success ? new Date(item.last_success).toLocaleString("zh-CN", { hour12: false }) : "—"}</small>
+          <small>年龄 {item.age_seconds === null ? "—" : `${Math.round(item.age_seconds)} 秒`}</small>
+          {item.last_error ? <em>{item.last_error}</em> : null}
+        </article>)}</div>
+      </section>
 
       <section className="quota-summary">
         <article><span>已配置 KEY</span><strong>{payload?.annotation_queue.configured_key_count ?? "—"}</strong><small>当前可用 {payload?.annotation_queue.available_key_count ?? "—"} · 只显示匿名编号</small></article>

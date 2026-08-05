@@ -3,11 +3,14 @@
 ## Authority and epoch
 
 This contract replaces historical Replay as the active development route.
-The runtime creates `FORWARD_EPOCH` exactly once, using the UTC time at which
+The runtime creates `COLLECTION_EPOCH` exactly once, using the UTC time at which
 the real collector first initializes its append-only database. The value is
 stored in immutable runtime metadata and a local epoch receipt. It is never
 backdated. Evidence earlier than that value is ineligible for training and
-performance reporting.
+performance reporting. Phase 2F also freezes `EVALUATION_EPOCH_V2`; predictions
+at or after that epoch are the only source of `LIVE_OOS` scores. Existing
+records remain `LEGACY_ENGINEERING`; deterministic append-only repair products
+are `REPAIRED_SEED` and may train a model but never count as that model's OOS.
 
 Historical XAUUSD observations may be read only to initialize frozen U5 state.
 They must carry `data_role=WARMUP_ONLY`; they cannot create decisions,
@@ -19,8 +22,9 @@ outcomes, training rows, performance rows, or news matches.
 - One decision event is appended for every clock boundary, including outages.
 - Every model identity predicts from the same immutable snapshot.
 - Champion-0 is `always-wait-v1` and its effective action is always `WAIT`.
-- The primary outcome uses the first valid quote strictly after the decision,
-  then the first valid quote at or after 30 minutes from that actual entry.
+- The primary outcome uses the first valid quote received strictly after the
+  decision and within 20 seconds, then the first valid quote received at or
+  after 30 minutes from that actual received entry.
 - Long enters at Ask and exits at Bid. Short enters at Bid and exits at Ask.
 - An outcome is appended; it never updates its decision or prediction.
 
@@ -99,16 +103,40 @@ are immutable model-update fields.
 - Full estimate equals Market estimate plus News residual estimate.
 - U5 is a scale and reporting unit only; it cannot vote on direction.
 - A new Challenger is trained only after a fixed new-sample threshold.
-- The collector automatically trains the first Shadow Challenger set at 200
-  matured complete Forward rows, then trains a new version after each 50 new
-  eligible rows. A failed training attempt is logged and cannot alter a prior
-  artifact.
+- The collector trains a non-actionable Market Preview at 96 V2-eligible rows,
+  the first Shadow Challenger set at 200 rows, then a new version after each 50
+  new eligible rows. Sixty trading days is a confidence milestone, not a
+  training blocker. A failed training attempt is logged and cannot alter a
+  prior artifact.
 - Training never changes the active Champion.
 - Only the owner may append a manual promotion approval after forward gates.
 - Unknown, missing, stale, or unhealthy data always produces effective
   `WAIT`; it never invents a replacement direction.
-- Automatic training creates Market-only, News-residual, and Full composite
-  artifacts from one immutable cutoff. All remain Shadow Challengers.
+- Automatic training always evaluates Market-only eligibility. News-residual
+  and Full artifacts additionally require 30 news-exposed rows, 10 distinct
+  clusters, and three distinct event days. All remain Shadow Challengers.
+
+## Versioned prequential Shadow evaluation
+
+- Every frozen model version predicts only future decisions created after its
+  own `created_at`. Repaired Seed and training rows are excluded from its
+  learning curve. Old predictions and scorecards are never rewritten.
+- A simulated Long or Short is admitted at decision time, before its outcome is
+  visible. Each model version owns an independent Shadow portfolio with at most
+  one position, a 20-second entry expiry, and a fixed 30-minute holding period.
+- Predictions blocked by an existing simulated position remain append-only
+  `OVERLAP_BLOCK` evidence. Waits and unhealthy predictions are recorded but do
+  not create a simulated position.
+- Executable Bid/Ask labels include spread. Commission is `UNCONFIGURED` and
+  Shadow slippage is `UNAVAILABLE_SHADOW`; neither is silently treated as zero,
+  and the dashboard must call results quote-cost-adjusted rather than net.
+- U5 controls only the reporting scale: one U5 of simulated PnL maps to one
+  percent of virtual equity. It does not change direction or admission.
+- PF, MaxDD, Sharpe, action frequency, calibration, and cumulative value are
+  reported per immutable version from subsequent `LIVE_OOS` rows only. Full
+  minus Market uses paired same-clock rows. Early values are descriptive and
+  remain exposed to market-regime differences. These metrics never authorize a
+  real order or automatic Champion promotion.
 
 ## Storage and separation
 
@@ -120,10 +148,10 @@ evidence use separate roles and cannot share training queries.
 
 ## Active free source boundary
 
-Version 1 enables only official RSS adapters for Federal Reserve press
-releases, monetary-policy releases, speeches/testimony, and BLS Employment
-Situation, CPI, and JOLTS releases. No FedWatch scraping, historical news
-backfill, consensus backfill, or broad web-news crawling is permitted.
+Version 1 records broad free-source coverage but freezes model eligibility in
+`news-source-eligibility-v1`. Only source-qualified official full bodies may
+enter News-residual features. No FedWatch scraping, historical news backfill,
+or consensus backfill is permitted.
 
 ## Explicit exclusions
 

@@ -24,10 +24,26 @@ IMMUTABLE_TABLES = (
     "predictions",
     "outcomes",
     "prediction_scores",
+    "shadow_trade_intents",
+    "shadow_trade_results",
     "training_eligibility",
     "model_updates",
     "promotion_approvals",
     "collector_runs",
+    "repair_batches",
+    "evaluation_epochs",
+    "evidence_lane_assignments",
+    "source_eligibility_versions",
+    "source_eligibility_rules",
+    "derived_market_snapshots",
+    "derived_news_feature_snapshots",
+    "derived_outcomes",
+    "training_eligibility_v2",
+    "market_crossfit_predictions",
+    "model_updates_v2",
+    "predictions_v2",
+    "prediction_scores_v2",
+    "calibration_snapshots_v2",
 )
 
 SCHEMA = """
@@ -230,6 +246,44 @@ CREATE TABLE IF NOT EXISTS prediction_scores (
     FOREIGN KEY(decision_id) REFERENCES outcomes(decision_id)
 );
 
+CREATE TABLE IF NOT EXISTS shadow_trade_intents (
+    decision_id TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    model_identity TEXT NOT NULL,
+    decision_time TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    recommended_action TEXT NOT NULL CHECK(recommended_action IN ('LONG', 'SHORT', 'WAIT')),
+    simulated_action TEXT NOT NULL CHECK(simulated_action IN ('LONG', 'SHORT', 'WAIT')),
+    admission_status TEXT NOT NULL CHECK(admission_status IN (
+        'ADMITTED', 'MODEL_WAIT', 'PREDICTION_NOT_READY',
+        'OVERLAP_BLOCK', 'NOT_ACTION_MODEL')),
+    planned_exit_time TEXT,
+    simulation_version TEXT NOT NULL,
+    PRIMARY KEY(decision_id, model_version),
+    FOREIGN KEY(decision_id, model_version)
+        REFERENCES predictions(decision_id, model_version)
+);
+
+CREATE TABLE IF NOT EXISTS shadow_trade_results (
+    decision_id TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    settled_at TEXT NOT NULL,
+    result_status TEXT NOT NULL CHECK(result_status IN ('VALID', 'INVALID', 'NOT_TRADED')),
+    simulated_action TEXT NOT NULL CHECK(simulated_action IN ('LONG', 'SHORT', 'WAIT')),
+    pnl_log_return REAL,
+    pnl_u5 REAL,
+    equity_log_return REAL,
+    mfe_u5 REAL,
+    mae_u5 REAL,
+    cost_model TEXT NOT NULL,
+    outcome_source_hash TEXT NOT NULL,
+    simulation_version TEXT NOT NULL,
+    PRIMARY KEY(decision_id, model_version),
+    FOREIGN KEY(decision_id, model_version)
+        REFERENCES shadow_trade_intents(decision_id, model_version),
+    FOREIGN KEY(decision_id) REFERENCES outcomes(decision_id)
+);
+
 CREATE TABLE IF NOT EXISTS training_eligibility (
     decision_id TEXT PRIMARY KEY REFERENCES outcomes(decision_id),
     eligible_at TEXT NOT NULL,
@@ -298,6 +352,9 @@ class ForwardLedger:
         self.connection = sqlite3.connect(self.path)
         self.connection.row_factory = sqlite3.Row
         self.connection.executescript(SCHEMA)
+        from .evidence_v2 import install_v2_schema
+
+        install_v2_schema(self.connection)
         self._install_append_only_triggers()
         created = now or datetime.now(UTC)
         with self.connection:
@@ -640,10 +697,21 @@ class ForwardLedger:
                         prediction["prediction_status"], _iso(record["created_at"]),
                     ),
                 )
+            from .shadow_simulation import append_shadow_intents
+
+            append_shadow_intents(
+                self.connection,
+                record["decision_id"],
+                decision_time,
+                record["created_at"],
+                record["predictions"],
+            )
 
     def append_outcome(self, record: dict[str, Any]) -> None:
         decision = self.connection.execute(
-            "SELECT decision_time FROM decision_events WHERE decision_id=?",
+            """SELECT d.decision_time, s.u5
+            FROM decision_events d JOIN market_snapshots s USING(snapshot_id)
+            WHERE d.decision_id=?""",
             (record["decision_id"],),
         ).fetchone()
         if decision is None:
@@ -673,6 +741,13 @@ class ForwardLedger:
                     record.get("quote_coverage"),
                     record["source_hash"],
                 ),
+            )
+            from .shadow_simulation import append_shadow_results
+
+            append_shadow_results(
+                self.connection,
+                record,
+                decision["u5"],
             )
 
     def append_score(self, record: dict[str, Any]) -> None:

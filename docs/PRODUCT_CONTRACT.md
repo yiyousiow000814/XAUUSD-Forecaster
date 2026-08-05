@@ -23,7 +23,7 @@ SHORT, or WAIT?
 | Deployment mode | Shadow only; no order submission |
 | Model lifecycle | Frozen Champion; no in-place or online update |
 | Promotion owner | Repository owner, manually approved |
-| Primary objective | Executable after-cost direction value, not accuracy |
+| Primary objective | Executable quote-cost-adjusted direction value, not accuracy |
 
 Every 5-minute event is still predicted and labelled for paired research. When
 a user-facing `LONG` or `SHORT` shadow signal is active, later forecasts remain
@@ -44,13 +44,15 @@ The first Full-model campaign may add only source-qualified versions of:
 - a high-impact macro release observation;
 - XAUUSD confirmation of the external move.
 
-Oil, war/news text, central-bank purchases, reinforcement learning, dynamic
-exits, multiple horizons, LLM direction decisions, and unrestricted feature
-search are excluded.
+Official full-body news may enter only the frozen News-residual eligibility
+lane. Display-only or collect-only oil, geopolitical, and central-bank-purchase
+coverage cannot enter a model. Reinforcement learning, dynamic exits, multiple
+horizons, LLM direction decisions, and unrestricted feature search are
+excluded.
 
 ## Direction and uncertainty gate
 
-The direction with the larger predicted after-cost EV is the proposed
+The direction with the larger predicted quote-cost-adjusted EV is the proposed
 direction. It is admitted only when its precomputed 95% lower confidence bound
 is strictly positive. Equal directional EVs, unhealthy data, or a non-positive
 best-direction lower bound produce `WAIT`.
@@ -68,9 +70,12 @@ forecast.
 3. **Trading-quality evidence:** `PF >= 1.5`, `MaxDD <= 20%`, `Sharpe >= 1.0`,
    and about 10 to 50 non-overlapping directional signals per month.
 
-Candidate-valid evidence requires at least 60 trading days and 100
-non-overlapping signals. Version-1 success requires at least 6 months of frozen
-Shadow evidence and 200 non-overlapping signals, including different
+The learning pipeline creates a non-actionable Preview at 96 eligible rows, an
+initial Shadow version at 200 rows, and a new immutable version after every 50
+additional rows. Sixty trading days is a confidence milestone, not a training
+blocker. Candidate-valid evidence still requires at least 60 trading days and
+100 non-overlapping signals. Version-1 success requires at least 6 months of
+frozen Shadow evidence and 200 non-overlapping signals, including different
 volatility and macro-event conditions.
 
 Uncertainty must be clustered by day or week. Five-minute observations and

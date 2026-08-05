@@ -18,21 +18,23 @@ be silently replaced by an LLM opinion.
 
 ## Active boundary
 
-XAUUSD Bid/Ask is the only action-bearing live market source. Federal Reserve
-RSS, BLS observations, and Gemini annotations are collected evidence. News may
-enter a News-residual Challenger only after the annotation was visible at the
-decision time and after the fixed training threshold. It never receives order
-authority.
+XAUUSD Bid/Ask is the only action-bearing live market source. News uses
+`news-source-eligibility-v1`: official Federal Reserve monetary, press, and
+speech/testimony bodies, BEA releases, and U.S. Treasury releases may be
+`MODEL_ELIGIBLE`; every item must still pass full-body, first-seen, parsed-at,
+and content-hash checks. Other sources are `CANDIDATE_ONLY`, `DISPLAY_ONLY`, or
+`COLLECT_ONLY`. BLS observations remain collected macro evidence until a
+versioned release-body rule is added. News never receives order authority.
 
 Rates, real yields, direct USD market observations, oil, broad geopolitical
 news, central-bank purchases, liquidity, and risk-asset proxies remain explicit
 coverage gaps until a free point-in-time source passes provenance, cadence,
-freshness, and outage tests.
+freshness, outage, and explicit eligibility tests.
 
 ## Incremental-value rule
 
 New domains enter as separate versioned modules. They must be compared against
 the same-clock XAU-only baseline. A domain is retained only when untouched
-Forward evidence shows positive incremental after-cost value with uncertainty
+Forward evidence shows positive incremental quote-cost-adjusted value with uncertainty
 reported. Disagreement, stale inputs, missing sources, or unexplained shocks
 increase uncertainty and route the effective action to `WAIT`.

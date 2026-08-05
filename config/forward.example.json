@@ -3,7 +3,9 @@
     "decision_clock": "UTC_5_MINUTES",
     "news_poll_seconds": 60,
     "shadow_only": true,
-    "automatic_challenger_training": true,
+    "automatic_challenger_training_v2": true,
+    "legacy_training_eligibility": "PAUSED_EVIDENCE_INTEGRITY_REPAIR",
+    "preview_training_rows": 96,
     "minimum_training_rows": 200,
     "retrain_interval_rows": 50,
     "automatic_champion_promotion": false

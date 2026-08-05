@@ -2,8 +2,9 @@
 
 ## Objective
 
-At each frozen decision event, estimate the executable, after-cost value and
-uncertainty of `LONG`, `SHORT`, and `WAIT`. The first implementation should use
+At each frozen decision event, estimate the executable Bid/Ask
+quote-cost-adjusted value and uncertainty of `LONG`, `SHORT`, and `WAIT`. The
+first implementation should use
 one primary clock and one primary horizon. It must not attempt to explain or
 predict every possible gold narrative.
 
@@ -81,12 +82,16 @@ Execution reports remain separate because actual fills and slippage exist only
 for submitted orders. Counterfactual labels must use the same executable quote
 rules for both directions and must expose missing-quote ambiguity.
 
-For `executable-fixed-30m-v2`, entry is the first valid Bid/Ask quote strictly
-after the decision event and no later than signal expiry. The terminal quote is
-the first valid quote at or after 30 minutes from the actual entry. Long enters
+For `received-time-executable-30m-v2`, entry is the first valid Bid/Ask quote
+whose collector `received_time` is strictly after the decision event and no
+later than signal expiry. The terminal quote is the first valid quote whose
+`received_time` is at or after 30 minutes from the actual received entry. Both
+event and receipt times and delays remain in the outcome. Long enters
 at Ask and exits at Bid; Short enters at Bid and exits at Ask. One explicitly
-configured round-trip commission is subtracted from both directions. Without
-real orders, actual slippage is unavailable and must not be fabricated.
+configured round-trip commission may be subtracted only after a versioned
+account contract exists. Current evidence reports
+`commission_status=UNCONFIGURED` and
+`slippage_status=UNAVAILABLE_SHADOW`; it is not net PnL.
 
 Every 5-minute event has two action fields:
 
@@ -158,7 +163,7 @@ action-bearing data produces `WAIT` and a machine-readable reason.
   and same-clock matched controls.
 - Evaluate every eligible decision event, not only executed trades or events a
   model liked.
-- Report absolute after-cost EV separately from directional accuracy and from
+- Report absolute quote-cost-adjusted EV separately from directional accuracy and from
   incremental value over controls.
 - Report calibration, uncertainty coverage, complete-period stability, tail
   loss, drawdown, cost stress, source outages, and winner concentration.

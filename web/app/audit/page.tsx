@@ -57,11 +57,38 @@ type News = {
   llm_model_version: string | null;
   prompt_version: string | null;
   parsed_at: string | null;
+  fetched_time: string;
+  collection_delay_seconds: number | null;
+  processing_delay_seconds: number | null;
+  source_eligibility: string;
+  model_visibility: string;
+  eligibility_version: string;
+};
+
+type LearningModel = {
+  model_version: string;
+  model_identity: string;
+  model_stage: string;
+  training_rows: number;
+  training_cutoff: string;
+  subsequent_oos_rows: number;
+  effective_blocks: number;
+  distinct_days: number;
+  cumulative_quote_return: number;
+  average_quote_return: number | null;
+  profit_factor_quote_adjusted: number | null;
+  max_drawdown_quote_return: number;
+  sharpe_quote_adjusted: number | null;
+  interval_width: number | null;
+  calibration_status: string;
+  wait_rate: number | null;
+  long_frequency: number;
+  short_frequency: number;
 };
 
 type Payload = {
   generated_at: string;
-  system: { online: boolean };
+  system: { online: boolean; source_of_truth: string; sites_mirror: string };
   counts: Record<string, number>;
   annotation_queue: {
     ready: number;
@@ -84,6 +111,26 @@ type Payload = {
     next_training_at: number;
     champion_auto_promotion: boolean;
     models: Array<{ model_identity: string; model_version: string; training_cutoff: string }>;
+  };
+  learning_curves: {
+    collection_epoch: string | null;
+    evaluation_epoch_v2: string | null;
+    legacy_engineering_rows: number;
+    repaired_seed_rows: number;
+    live_oos_rows: number;
+    raw_matured_rows: number;
+    effective_30m_blocks: number;
+    distinct_trading_days: number;
+    news_exposed_rows: number;
+    distinct_news_clusters: number;
+    learning_stage: string;
+    current_preview_version: string | null;
+    current_shadow_version: string | null;
+    next_training_threshold: number;
+    commission_status: string;
+    slippage_status: string;
+    models: LearningModel[];
+    disclaimer: string;
   };
   factor_coverage: Array<{
     domain: string;
@@ -125,7 +172,7 @@ export default function AuditPage() {
   const router = useRouter();
   const [payload, setPayload] = useState<Payload | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<"news" | "decisions" | "coverage">("news");
+  const [view, setView] = useState<"news" | "decisions" | "league" | "coverage">("news");
   const [newsCategory, setNewsCategory] = useState("全部");
   const [newsPage, setNewsPage] = useState(1);
 
@@ -144,7 +191,7 @@ export default function AuditPage() {
   useEffect(() => {
     const initial = window.setTimeout(() => {
       const requested = new URLSearchParams(window.location.search).get("view");
-      if (requested === "news" || requested === "decisions" || requested === "coverage") {
+      if (requested === "news" || requested === "decisions" || requested === "league" || requested === "coverage") {
         setView(requested);
       }
       refresh();
@@ -153,7 +200,7 @@ export default function AuditPage() {
     return () => { window.clearTimeout(initial); window.clearInterval(interval); };
   }, [refresh]);
 
-  const selectView = (next: "news" | "decisions" | "coverage") => {
+  const selectView = (next: "news" | "decisions" | "league" | "coverage") => {
     setView(next);
     window.history.replaceState(null, "", `/audit?view=${next}`);
   };
@@ -203,10 +250,10 @@ export default function AuditPage() {
       <section className="audit-intro">
         <div><p className="eyebrow">IMMUTABLE FORWARD EVIDENCE</p><h1>新闻先被看见，<br />决定才被允许产生。</h1></div>
         <div className="training-card">
-          <span>AUTO TRAINING</span>
+          <span>LEARNING PROGRESS</span>
           <strong>{payload?.training.complete_rows ?? 0}<small> / {payload?.training.next_training_at ?? 200}</small></strong>
           <div className="progress-track"><i style={{ width: `${progress}%` }} /></div>
-          <p>达到门槛自动生成 Challenger；Champion 仍由你批准。</p>
+          <p>96 行生成 Preview，200 行生成 Shadow；Champion 永远由你批准。</p>
         </div>
       </section>
 
@@ -225,6 +272,7 @@ export default function AuditPage() {
       <nav className="audit-tabs" aria-label="审计视图">
         <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻与 Gemini <b>{payload?.counts.latest_news_items ?? 0}</b></a>
         <a href="/audit?view=decisions" className={view === "decisions" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("decisions"); }}>决策与30分钟结果 <b>{payload?.counts.decision_events ?? 0}</b></a>
+        <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b>{payload?.learning_curves.models.length ?? 0}</b></a>
         <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b>{payload?.factor_coverage.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</b></a>
       </nav>
 
@@ -241,7 +289,7 @@ export default function AuditPage() {
           <header className="news-table-head"><span>分类 / 时间</span><span>新闻与来源</span><span>正文 / Gemini</span></header>
           {visibleNews.map((row) => <details className="news-row" key={`${row.source}-${row.source_item_id}-${row.revision_number}`}>
             <summary>
-              <div className="news-row-stamp"><b>{row.category}</b><time>{time(row.source_published_time)}</time></div>
+              <div className="news-row-stamp"><b>{row.category}</b><time>{time(row.source_published_time)}</time><small className={`eligibility-badge eligibility-${row.model_visibility.toLowerCase().replaceAll("_", "-")}`}>{row.model_visibility.replaceAll("_", " ")}</small></div>
               <div className="news-row-title"><strong>{row.headline}</strong><small>{SOURCE_LABELS[row.source] ?? row.source.replaceAll("_", " ")}{row.headline !== row.original_headline ? " · Gemini 中文标题" : " · 等待标题翻译"}</small></div>
               <div className={`news-row-state state-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
                 <b>{row.content_status === "FULL_TEXT" ? `${row.content_characters.toLocaleString()} 字符` : row.source === "google_news_gold_geopolitics" ? "聚合标题" : "等待正文"}</b>
@@ -268,6 +316,7 @@ export default function AuditPage() {
                 <span>等待来源正文</span><p>当前只有标题或短描述，不会进入模型，也不会假装已经理解内容。</p>
               </section>}
               {row.event_type && <div className="news-classification"><b>{row.event_type}</b><span>鹰派 {impulse(row.hawkishness)}</span><span>通胀 {impulse(row.inflation_impulse)}</span><span>增长 {impulse(row.growth_impulse)}</span><span>地缘 {impulse(row.geopolitical_risk)}</span><span>美元 {impulse(row.usd_impulse)}</span><span>新颖 {number(row.novelty)}</span><span>置信 {number(row.confidence)}</span></div>}
+              <dl className="news-timeline"><div><dt>Publisher time</dt><dd>{time(row.source_published_time)}</dd></div><div><dt>First seen</dt><dd>{time(row.collector_first_seen_time)}</dd></div><div><dt>Parsed at</dt><dd>{time(row.parsed_at)}</dd></div><div><dt>Collection delay</dt><dd>{row.collection_delay_seconds === null ? "—" : `${number(row.collection_delay_seconds, 1)}s`}</dd></div><div><dt>Processing delay</dt><dd>{row.processing_delay_seconds === null ? "—" : `${number(row.processing_delay_seconds, 1)}s`}</dd></div><div><dt>Eligibility</dt><dd>{row.source_eligibility} · {row.model_visibility}</dd></div></dl>
               <footer className="card-footer"><span>{row.entities.join(" · ") || "无实体"}</span><span>{row.llm_model_version ?? "未标注"} · 收到 {time(row.collector_first_seen_time)} · 标注 {time(row.parsed_at)}</span></footer>
             </div>
           </details>)}
@@ -300,6 +349,42 @@ export default function AuditPage() {
             </div>
           </details>;
         })}
+      </section>}
+
+      {view === "league" && <section className="shadow-league">
+        <header className="league-intro">
+          <div><p className="eyebrow">LIVE OOS LEARNING CURVES</p><h2>每次训练是一组，<br />只看它之后没见过的数据。</h2></div>
+          <dl>
+            <div><dt>Collection started</dt><dd>{time(payload?.learning_curves.collection_epoch)}</dd></div>
+            <div><dt>Evaluation V2 started</dt><dd>{time(payload?.learning_curves.evaluation_epoch_v2)}</dd></div>
+            <div><dt>当前证据等级</dt><dd>{payload?.learning_curves.learning_stage ?? "ENGINEERING"}</dd></div>
+          </dl>
+        </header>
+        <div className="evidence-lane-grid">
+          <article><span>Legacy Engineering</span><strong>{payload?.learning_curves.legacy_engineering_rows ?? 0}</strong><small>只用于修复审计</small></article>
+          <article><span>Repaired Seed</span><strong>{payload?.learning_curves.repaired_seed_rows ?? 0}</strong><small>可训练，不计 Live OOS</small></article>
+          <article><span>Live OOS</span><strong>{payload?.learning_curves.live_oos_rows ?? 0}</strong><small>模型上线后的真实前向结果</small></article>
+          <article><span>30m Blocks / Days</span><strong>{payload?.learning_curves.effective_30m_blocks ?? 0} / {payload?.learning_curves.distinct_trading_days ?? 0}</strong><small>置信区间的独立证据</small></article>
+          <article><span>News exposure</span><strong>{payload?.learning_curves.news_exposed_rows ?? 0}</strong><small>{payload?.learning_curves.distinct_news_clusters ?? 0} 个可见 cluster</small></article>
+          <article><span>Next fit</span><strong>{payload?.learning_curves.next_training_threshold ?? 96}</strong><small>Preview 96 · Shadow 200 · 后续每50</small></article>
+        </div>
+        <div className="league-cost-note"><b>诚实成本口径</b><span>显示的是 Bid/Ask quote-cost-adjusted return；commission {payload?.learning_curves.commission_status ?? "UNCONFIGURED"}，slippage {payload?.learning_curves.slippage_status ?? "UNAVAILABLE_SHADOW"}，因此不是 net PnL。</span></div>
+        {(payload?.learning_curves.models.length ?? 0) === 0 ? <div className="league-empty">
+          <strong>正在建立第一版 Preview</strong><p>达到 96 条修复或 Forward 完整样本即可训练 Market Preview，不需要等待60天。曲线只从模型创建后的新 Decision 开始，绝不回填假历史成绩。</p>
+        </div> : <div className="league-table-wrap"><table className="league-table learning-table">
+          <thead><tr><th>版本 / 阶段</th><th>训练资料</th><th>之后 OOS</th><th>累计 / 平均</th><th>PF</th><th>MaxDD</th><th>Sharpe</th><th>区间状态</th></tr></thead>
+          <tbody>{payload?.learning_curves.models.map(row => <tr key={row.model_version}>
+            <td><b>{row.model_identity}</b><small>{row.model_stage} · {row.model_version}</small></td>
+            <td><strong>{row.training_rows}</strong><small>cutoff {time(row.training_cutoff)}</small></td>
+            <td><strong>{row.subsequent_oos_rows}</strong><small>{row.effective_blocks} blocks · {row.distinct_days} days</small></td>
+            <td><strong>{percent(row.cumulative_quote_return)}</strong><small>平均 {percent(row.average_quote_return)}</small></td>
+            <td><strong>{number(row.profit_factor_quote_adjusted, 2)}</strong><small>quote-adjusted</small></td>
+            <td><strong>{percent(row.max_drawdown_quote_return)}</strong><small>累计回撤</small></td>
+            <td><strong>{number(row.sharpe_quote_adjusted, 2)}</strong><small>至少5个 OOS 日后显示</small></td>
+            <td><span className="league-stage">{row.calibration_status}</span><small>宽度 {number(row.interval_width, 3)} · WAIT {row.wait_rate === null ? "—" : percent(row.wait_rate)}</small></td>
+          </tr>)}</tbody>
+        </table></div>}
+        <footer className="league-footer">{payload?.learning_curves.disclaimer ?? "早期曲线用于观察学习过程，不代表已证明盈利。"} Champion 始终是 Always Wait，Preview 与 Shadow 都没有下单权限，也不会自动晋升。</footer>
       </section>}
 
       {view === "coverage" && <section className="coverage-grid">

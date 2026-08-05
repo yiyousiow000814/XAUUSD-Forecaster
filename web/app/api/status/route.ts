@@ -17,7 +17,7 @@ function applyFreshness(payload: DashboardPayload): DashboardPayload {
     system: {
       ...payload.system,
       quote_age_seconds: age,
-      online: age !== null && age <= 600,
+      online: age !== null && age <= 30,
     },
   };
 }

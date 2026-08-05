@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 import math
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
+
+
+U5_VERSION = "finite-memory-u5-v5-contiguous-m1"
 
 
 class U5State:
@@ -17,6 +20,7 @@ class U5State:
         self.excursions: deque[float] = deque(maxlen=10_000)
         self.last_minute: datetime | None = None
         self.last_u5: float | None = None
+        self.continuity_resets = 0
 
     @property
     def status(self) -> str:
@@ -30,6 +34,12 @@ class U5State:
     ) -> float | None:
         if self.last_minute is not None and minute <= self.last_minute:
             return self.last_u5
+        if self.last_minute is not None and minute - self.last_minute != timedelta(minutes=1):
+            # An A30 observation is defined by 31 consecutive completed M1
+            # closes.  Preserve the finite 10,000-observation authority window,
+            # but rebuild the current path after any missing minute.
+            self.midpoints.clear()
+            self.continuity_resets += 1
         midpoint = (bid_close + ask_close) / 2.0
         if midpoint <= 0 or ask_close < bid_close:
             raise ValueError("U5 update requires positive non-crossed close")
@@ -51,12 +61,14 @@ class U5State:
     def as_dict(self) -> dict:
         return {
             "schema": "xauusd.forward.u5-state.v1",
+            "u5_version": U5_VERSION,
             "data_role": "WARMUP_ONLY_AND_FORWARD_STATE",
             "midpoints": list(self.midpoints),
             "excursions": list(self.excursions),
             "last_minute": self.last_minute.isoformat() if self.last_minute else None,
             "last_u5": self.last_u5,
             "status": self.status,
+            "continuity_resets": self.continuity_resets,
             "training_allowed": False,
             "performance_evaluation_allowed": False,
         }
@@ -77,4 +89,5 @@ class U5State:
             if payload.get("last_minute") else None
         )
         state.last_u5 = payload.get("last_u5")
+        state.continuity_resets = int(payload.get("continuity_resets", 0))
         return state

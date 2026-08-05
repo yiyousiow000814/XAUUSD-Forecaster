@@ -1,0 +1,170 @@
+"""Read-only Live OOS learning curves; repaired seed never enters scores."""
+
+from __future__ import annotations
+
+import math
+import statistics
+from collections import defaultdict
+from datetime import datetime
+
+
+def _stage(complete: int, live_rows: int, days: int) -> str:
+    if complete < 30:
+        return "ENGINEERING"
+    if complete < 96:
+        return "EARLY_LEARNING"
+    if complete < 200:
+        return "PREVIEW"
+    if days < 20:
+        return "INITIAL_SHADOW"
+    if days < 60:
+        return "RESEARCH_CANDIDATE"
+    return "HIGHER_CONFIDENCE"
+
+
+def _metrics(values: list[float], days: dict[str, float]) -> dict:
+    gains = sum(value for value in values if value > 0)
+    losses = sum(value for value in values if value < 0)
+    pf = gains / abs(losses) if losses < 0 else None
+    equity = peak = 0.0
+    max_drawdown = 0.0
+    for value in values:
+        equity += value
+        peak = max(peak, equity)
+        max_drawdown = max(max_drawdown, peak - equity)
+    sharpe = None
+    daily = [value for _, value in sorted(days.items())]
+    if len(daily) >= 5 and statistics.stdev(daily) > 0:
+        sharpe = statistics.mean(daily) / statistics.stdev(daily) * math.sqrt(252.0)
+    return {"cumulative_quote_return": sum(values), "average_quote_return": statistics.mean(values) if values else None,
+            "profit_factor_quote_adjusted": pf, "max_drawdown_quote_return": max_drawdown,
+            "sharpe_quote_adjusted": sharpe}
+
+
+def learning_curve_payload(connection) -> dict:
+    epoch = connection.execute(
+        "SELECT * FROM evaluation_epochs ORDER BY created_at DESC LIMIT 1"
+    ).fetchone()
+    counts = {row["evidence_lane"]: row["n"] for row in connection.execute(
+        "SELECT evidence_lane,count(*) n FROM training_eligibility_v2 GROUP BY evidence_lane"
+    )}
+    complete = sum(counts.values())
+    live_rows = counts.get("LIVE_OOS", 0)
+    seed_rows = counts.get("REPAIRED_SEED", 0)
+    distinct_days = connection.execute(
+        "SELECT count(DISTINCT substr(decision_time,1,10)) FROM derived_outcomes WHERE outcome_status='VALID'"
+    ).fetchone()[0]
+    news = connection.execute(
+        """SELECT coalesce(sum(news_exposed),0), coalesce(max(distinct_news_clusters),0)
+        FROM derived_news_feature_snapshots"""
+    ).fetchone()
+    models = []
+    for update in connection.execute(
+        "SELECT * FROM model_updates_v2 ORDER BY created_at,model_identity"
+    ):
+        rows = connection.execute(
+            """SELECT p.decision_time,p.recommended_action,p.interval_width,
+                      p.calibration_status,p.calibration_rows,p.calibration_effective_blocks,
+                      p.calibration_distinct_days,s.value_quote_return,s.squared_error,
+                      s.direction_correct,s.high_confidence_error
+            FROM predictions_v2 p LEFT JOIN prediction_scores_v2 s
+              USING(source_decision_id,model_version)
+            WHERE p.model_version=? AND p.decision_time>?
+            ORDER BY p.decision_time""", (update["model_version"], update["created_at"])
+        ).fetchall()
+        scored = [row for row in rows if row["value_quote_return"] is not None]
+        values = [float(row["value_quote_return"]) for row in scored]
+        daily = defaultdict(float)
+        for row in scored:
+            daily[row["decision_time"][:10]] += float(row["value_quote_return"])
+        metrics = _metrics(values, daily)
+        latest = rows[-1] if rows else None
+        models.append({
+            "model_version": update["model_version"], "model_identity": update["model_identity"],
+            "model_stage": update["model_stage"], "training_rows": update["training_rows"],
+            "training_cutoff": update["training_cutoff"], "created_at": update["created_at"],
+            "subsequent_oos_rows": len(scored), "effective_blocks": len(daily),
+            "distinct_days": len(daily), "wait_rate": (
+                sum(row["recommended_action"] == "WAIT" for row in rows) / len(rows) if rows else None
+            ),
+            "long_frequency": sum(row["recommended_action"] == "LONG" for row in rows),
+            "short_frequency": sum(row["recommended_action"] == "SHORT" for row in rows),
+            "mean_squared_error": (
+                statistics.mean(float(row["squared_error"]) for row in scored if row["squared_error"] is not None)
+                if any(row["squared_error"] is not None for row in scored) else None
+            ),
+            "direction_accuracy": (
+                statistics.mean(int(row["direction_correct"]) for row in scored if row["direction_correct"] is not None)
+                if any(row["direction_correct"] is not None for row in scored) else None
+            ),
+            "high_confidence_errors": sum(int(row["high_confidence_error"] or 0) for row in scored),
+            "interval_width": latest["interval_width"] if latest else None,
+            "calibration_status": latest["calibration_status"] if latest else "NO_LIVE_OOS",
+            "calibration_rows": latest["calibration_rows"] if latest else 0,
+            "calibration_effective_blocks": latest["calibration_effective_blocks"] if latest else 0,
+            "calibration_distinct_days": latest["calibration_distinct_days"] if latest else 0,
+            **metrics,
+        })
+
+    identity_curves = []
+    for identity in ("CHAMPION_0", "MARKET_ONLY", "NEWS_RESIDUAL", "FULL"):
+        if identity == "CHAMPION_0":
+            rows = connection.execute(
+                """SELECT p.decision_time,s.value_quote_return FROM predictions_v2 p
+                JOIN prediction_scores_v2 s USING(source_decision_id,model_version)
+                WHERE p.model_identity=? ORDER BY p.decision_time""", (identity,)
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                """SELECT p.decision_time,s.value_quote_return FROM predictions_v2 p
+                JOIN prediction_scores_v2 s USING(source_decision_id,model_version)
+                JOIN model_updates_v2 u USING(model_version)
+                WHERE p.model_identity=? AND p.decision_time>u.created_at
+                ORDER BY p.decision_time""", (identity,)
+            ).fetchall()
+        cumulative = 0.0
+        points = []
+        for row in rows:
+            cumulative += float(row["value_quote_return"])
+            points.append({"decision_time": row["decision_time"], "cumulative_quote_return": cumulative})
+        identity_curves.append({"model_identity": identity, "points": points})
+
+    paired = connection.execute(
+        """SELECT f.decision_time,fs.value_quote_return-ms.value_quote_return AS delta
+        FROM predictions_v2 f JOIN prediction_scores_v2 fs
+          ON fs.source_decision_id=f.source_decision_id AND fs.model_version=f.model_version
+        JOIN model_updates_v2 fu ON fu.model_version=f.model_version
+        JOIN predictions_v2 m ON m.source_decision_id=f.source_decision_id AND m.model_identity='MARKET_ONLY'
+        JOIN prediction_scores_v2 ms ON ms.source_decision_id=m.source_decision_id AND ms.model_version=m.model_version
+        JOIN model_updates_v2 mu ON mu.model_version=m.model_version
+        WHERE f.model_identity='FULL' AND f.decision_time>fu.created_at
+          AND m.decision_time>mu.created_at ORDER BY f.decision_time"""
+    ).fetchall()
+    cumulative = 0.0
+    incremental = []
+    for row in paired:
+        cumulative += float(row["delta"])
+        incremental.append({"decision_time": row["decision_time"], "paired_delta": row["delta"],
+                            "cumulative_delta": cumulative})
+
+    latest_models = {row["model_stage"]: row["model_version"] for row in connection.execute(
+        "SELECT * FROM model_updates_v2 WHERE model_identity='MARKET_ONLY' ORDER BY created_at"
+    )}
+    return {
+        "collection_epoch": epoch["collection_epoch"] if epoch else None,
+        "evaluation_epoch_v2": epoch["evaluation_epoch"] if epoch else None,
+        "legacy_engineering_rows": connection.execute("SELECT count(*) FROM training_eligibility").fetchone()[0],
+        "repaired_seed_rows": seed_rows, "live_oos_rows": live_rows,
+        "raw_matured_rows": connection.execute("SELECT count(*) FROM outcomes").fetchone()[0],
+        "effective_30m_blocks": connection.execute(
+            "SELECT count(DISTINCT substr(decision_time,1,13)||printf('%02d',(cast(substr(decision_time,15,2) as int)/30)*30)) FROM derived_outcomes WHERE outcome_status='VALID'"
+        ).fetchone()[0],
+        "distinct_trading_days": distinct_days, "news_exposed_rows": int(news[0]),
+        "distinct_news_clusters": int(news[1]), "learning_stage": _stage(complete, live_rows, distinct_days),
+        "current_preview_version": latest_models.get("PREVIEW_ONLY"),
+        "current_shadow_version": latest_models.get("SHADOW"),
+        "next_training_threshold": 96 if complete < 96 else 200 if complete < 200 else ((complete // 50) + 1) * 50,
+        "commission_status": "UNCONFIGURED", "slippage_status": "UNAVAILABLE_SHADOW",
+        "models": models, "identity_curves": identity_curves, "full_minus_market": incremental,
+        "disclaimer": "早期曲线用于观察学习过程，不代表已证明盈利。",
+    }

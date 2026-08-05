@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-import math
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from .forward_ledger import ForwardLedger
+from .executable_label import build_executable_label_v2
+from .forward_ledger import ForwardLedger, canonical_hash
 from .inference import build_shadow_predictions
 from .market import MarketProvider, build_forward_snapshot
 from .news import collect_official_news
@@ -87,6 +87,12 @@ class ForwardEngine:
                 "predictions": predictions,
             }
         )
+        from .live_v2 import append_live_decision_v2
+
+        append_live_decision_v2(
+            self.ledger, decision_id=decision_id, decision_time=decision_time,
+            created_at=collected_at, snapshot=snapshot,
+        )
         run_id = str(uuid.uuid4())
         with self.ledger.connection:
             self.ledger.connection.execute(
@@ -125,79 +131,56 @@ class ForwardEngine:
         for row in due:
             decision_time = datetime.fromisoformat(row["decision_time"])
             visible = [item for item in observations if item.received_time <= now]
-            entries = [
-                item
-                for item in visible
-                if decision_time < item.event_time <= decision_time + timedelta(seconds=20)
-            ]
-            entry = entries[0] if entries else None
-            exit_quote = None
-            path = []
-            if entry is not None:
-                target = entry.event_time + timedelta(minutes=30)
-                exits = [item for item in visible if item.event_time >= target]
-                exit_quote = exits[0] if exits else None
-                if exit_quote is not None:
-                    path = [
-                        item
-                        for item in visible
-                        if entry.event_time <= item.event_time <= exit_quote.event_time
-                    ]
+            label = build_executable_label_v2(decision_time=decision_time, quotes=visible)
             grace_end = decision_time + timedelta(minutes=31, seconds=20)
-            if exit_quote is None and now < grace_end:
+            if "NO_EXIT_RECEIVED_AFTER_HORIZON" in label.reason_codes and now < grace_end:
                 continue
-            reasons: list[str] = []
+            reasons = list(label.reason_codes)
             if provider_error is not None:
                 reasons.append("MARKET_PROVIDER_ERROR")
-            if entry is None:
-                reasons.append("NO_ENTRY_WITHIN_20S")
-            elif exit_quote is None:
-                reasons.append("NO_EXIT_QUOTE")
-            elif (exit_quote.event_time - target).total_seconds() > 60:
-                reasons.append("EXIT_DELAY_GT_60S")
-            if len(path) > 1:
-                maximum_gap = max(
-                    (right.event_time - left.event_time).total_seconds()
-                    for left, right in zip(path, path[1:])
-                )
-                if maximum_gap > 60:
-                    reasons.append("PATH_GAP_GT_60S")
-            if reasons:
+            source_hash = canonical_hash([
+                (item.event_time.isoformat(), item.received_time.isoformat(), item.bid, item.ask)
+                for item in visible
+                if decision_time < item.received_time <= min(now, grace_end)
+            ])
+            if label.outcome_status != "VALID" or provider_error is not None:
                 outcome = {
                     "decision_id": row["decision_id"],
                     "appended_at": now,
-                    "label_version": "forward-executable-30m-v1",
+                    "label_version": "received-time-executable-30m-v2",
                     "outcome_status": "INVALID",
                     "reason_codes": reasons,
-                    "source_hash": "NO_VALID_EXECUTABLE_PATH",
+                    "source_hash": source_hash,
                 }
             else:
-                long_path = [math.log(item.bid / entry.ask) for item in path]
-                short_path = [math.log(entry.bid / item.ask) for item in path]
-                long_return = long_path[-1]
-                short_return = short_path[-1]
                 outcome = {
                     "decision_id": row["decision_id"],
-                    "entry_time": entry.event_time,
-                    "exit_time": exit_quote.event_time,
+                    "entry_time": label.entry_received_time,
+                    "exit_time": label.exit_received_time,
                     "horizon": timedelta(minutes=30),
                     "appended_at": now,
-                    "label_version": "forward-executable-30m-v1",
+                    "label_version": "received-time-executable-30m-v2",
                     "outcome_status": "VALID",
                     "reason_codes": (),
-                    "long_return": long_return,
-                    "short_return": short_return,
-                    "direction_move": (long_return - short_return) / 2.0,
-                    "spread_quote_cost": -(long_return + short_return) / 2.0,
-                    "long_mfe": max(long_path),
-                    "long_mae": min(long_path),
-                    "short_mfe": max(short_path),
-                    "short_mae": min(short_path),
-                    "maximum_spread": max(item.ask - item.bid for item in path),
-                    "quote_coverage": 1.0,
-                    "source_hash": str(uuid.uuid5(uuid.NAMESPACE_URL, repr(path))),
+                    "long_return": label.long_quote_return,
+                    "short_return": label.short_quote_return,
+                    "direction_move": label.gross_midpoint_direction_move,
+                    "spread_quote_cost": label.spread_quote_cost,
+                    "long_mfe": label.long_mfe,
+                    "long_mae": label.long_mae,
+                    "short_mfe": label.short_mfe,
+                    "short_mae": label.short_mae,
+                    "maximum_spread": label.maximum_spread,
+                    "quote_coverage": label.quote_coverage,
+                    "source_hash": source_hash,
                 }
             self.ledger.append_outcome(outcome)
+            from .live_v2 import append_live_outcome_v2
+
+            append_live_outcome_v2(
+                self.ledger, decision_id=row["decision_id"], decision_time=decision_time,
+                appended_at=now, label=label, source_evidence_hash=source_hash,
+            )
             predictions = self.ledger.connection.execute(
                 "SELECT * FROM predictions WHERE decision_id=? ORDER BY model_version",
                 (row["decision_id"],),
@@ -219,11 +202,8 @@ class ForwardEngine:
                         "score": score,
                     }
                 )
-            if (
-                outcome["outcome_status"] == "VALID"
-                and row["u5"] is not None
-                and row["data_health"] == "OK"
-            ):
-                self.ledger.mark_training_eligible(row["decision_id"], now)
+            # Phase 2F v1 eligibility is frozen as LEGACY_ENGINEERING.  The
+            # repaired pipeline appends its own evidence-lane assignments and
+            # never extends the legacy training_eligibility table.
             completed.append(row["decision_id"])
         return completed

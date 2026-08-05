@@ -2,8 +2,9 @@
 
 This module is the home of a decision-support system for XAUUSD. Its first
 target is deliberately narrow: at a fixed decision clock, estimate the
-after-cost value and uncertainty of `LONG`, `SHORT`, and `WAIT` over a declared
-horizon.
+executable Bid/Ask quote-return value and uncertainty of `LONG`, `SHORT`, and
+`WAIT` over a declared horizon. Commission is explicitly unconfigured and
+Shadow slippage is unavailable, so current results are not net PnL.
 
 The system is not an autonomous self-modifying trading robot. Production
 artifacts stay frozen. Research produces versioned challengers, and a
@@ -15,7 +16,9 @@ stability, and operational gates pass.
 Phase 2F: Forward-only Evidence and Learning Engine. The production Champion
 is Always Wait; Challengers are Shadow-only and this module does not place
 orders. Historical observations may initialize U5 only and cannot enter
-training or performance evaluation.
+training or performance evaluation. Append-only repair rows are isolated as
+`REPAIRED_SEED`; only predictions created after `EVALUATION_EPOCH_V2` can
+produce `LIVE_OOS` learning-curve evidence.
 
 The accepted owner decisions are recorded in
 [`docs/PRODUCT_CONTRACT.md`](docs/PRODUCT_CONTRACT.md). The system and
@@ -100,8 +103,11 @@ neutralized before append. Headline-only translations remain presentation-only a
 never create model features. Syndicated duplicate clusters are represented by
 the strongest available body instead of repeated mirror rows.
 
-After 200 matured complete Forward rows, the collector automatically trains a
-versioned Market-only, News-residual, and Full Shadow Challenger set. A new set
-is trained after each additional 50 eligible rows. Training never promotes a
-Champion and never changes the effective `WAIT` action without an owner
-approval recorded against frozen evidence.
+At 96 complete V2 rows, the collector creates a Market-only Preview whose
+effective action remains `WAIT`. At 200 rows it creates frozen Shadow
+Challengers, then creates a new version after each additional 50 eligible rows.
+News-residual and Full versions require their own minimum news exposure,
+cluster, and event-day evidence; they are not fabricated when those gates fail.
+Every version is scored only on decisions created after that version. Sixty
+trading days is a confidence milestone, not a reason to delay Preview or
+Shadow learning. Training never promotes a Champion and never enables orders.

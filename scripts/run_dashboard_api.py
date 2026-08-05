@@ -31,6 +31,24 @@ from xauusd_forecaster.annotation import (  # noqa: E402
 )
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger  # noqa: E402
 from xauusd_forecaster.training import MARKET_FEATURES  # noqa: E402
+from xauusd_forecaster.learning_curves import learning_curve_payload  # noqa: E402
+
+
+def _latest_quote_received(database: Path) -> str | None:
+    sources = sorted((database.parent / "quotes").glob("*.jsonl"))
+    if not sources:
+        return None
+    with sources[-1].open("rb") as handle:
+        handle.seek(0, 2)
+        size = handle.tell()
+        handle.seek(max(0, size - 65_536))
+        lines = handle.read().splitlines()
+    for line in reversed(lines):
+        try:
+            return str(json.loads(line)["received_time"]).replace("Z", "+00:00")
+        except (KeyError, ValueError, json.JSONDecodeError):
+            continue
+    return None
 
 
 def _news_category(item: dict) -> str:
@@ -112,6 +130,16 @@ def _dashboard_payload(database: Path) -> dict:
                 "macro_observations",
                 "training_eligibility",
                 "model_updates",
+                "shadow_trade_intents",
+                "shadow_trade_results",
+                "repair_batches",
+                "derived_market_snapshots",
+                "derived_news_feature_snapshots",
+                "derived_outcomes",
+                "training_eligibility_v2",
+                "model_updates_v2",
+                "predictions_v2",
+                "prediction_scores_v2",
             )
         }
         decision_ids = [row["decision_id"] for row in recent]
@@ -132,7 +160,8 @@ def _dashboard_payload(database: Path) -> dict:
                 predictions_by_decision[item.pop("decision_id")].append(item)
         news_rows = connection.execute(
             """SELECT n.source, n.source_item_id, n.revision_number,
-                      n.source_published_time, n.collector_first_seen_time,
+                       n.source_published_time, n.collector_first_seen_time,
+                       n.fetched_time,
                       n.headline AS original_headline,
                       COALESCE(t.headline_zh, n.headline) AS headline,
                       length(COALESCE(n.body, '')) AS content_characters,
@@ -152,7 +181,23 @@ def _dashboard_payload(database: Path) -> dict:
                       COALESCE(a.confidence, legacy.confidence, legacy_v3.confidence) AS confidence,
                       COALESCE(a.llm_model_version, legacy.llm_model_version, legacy_v3.llm_model_version) AS llm_model_version,
                       COALESCE(a.prompt_version, legacy.prompt_version, legacy_v3.prompt_version) AS prompt_version,
-                      COALESCE(a.parsed_at, legacy.parsed_at, legacy_v3.parsed_at) AS parsed_at,
+                       COALESCE(a.parsed_at, legacy.parsed_at, legacy_v3.parsed_at) AS parsed_at,
+                       CASE WHEN n.source_published_time IS NOT NULL THEN
+                         (julianday(n.collector_first_seen_time)-julianday(n.source_published_time))*86400
+                       END AS collection_delay_seconds,
+                       CASE WHEN COALESCE(a.parsed_at, legacy.parsed_at, legacy_v3.parsed_at) IS NOT NULL THEN
+                         (julianday(COALESCE(a.parsed_at, legacy.parsed_at, legacy_v3.parsed_at))-
+                          julianday(n.collector_first_seen_time))*86400
+                       END AS processing_delay_seconds,
+                       COALESCE(r.maximum_tier, 'COLLECT_ONLY') AS source_eligibility,
+                       CASE WHEN r.maximum_tier='MODEL_ELIGIBLE'
+                                  AND length(trim(COALESCE(n.body,'')))>=r.minimum_body_characters
+                                  AND a.parsed_at IS NOT NULL THEN 'MODEL_VISIBLE'
+                            WHEN r.maximum_tier='MODEL_ELIGIBLE'
+                                 AND length(trim(COALESCE(n.body,'')))>=r.minimum_body_characters
+                                 AND a.parsed_at IS NULL THEN 'NOT_YET_PARSED'
+                            WHEN r.maximum_tier='MODEL_ELIGIBLE' THEN 'MODEL_INELIGIBLE'
+                            ELSE COALESCE(r.maximum_tier, 'COLLECT_ONLY') END AS model_visibility,
                       CASE WHEN a.annotation_id IS NOT NULL THEN 'READY'
                            WHEN length(trim(COALESCE(n.body, ''))) < 240 THEN 'WAITING_CONTENT'
                            WHEN f.is_terminal=1 THEN 'DEAD_LETTER'
@@ -211,7 +256,10 @@ def _dashboard_payload(database: Path) -> dict:
                      AND latest_f.prompt_version='news-json-v9-local-display-recovery'
                      AND NOT (latest_f.error_type='RuntimeError'
                               AND latest_f.error='All configured Gemini keys unavailable for this batch')
-                   ORDER BY latest_f.failed_at DESC LIMIT 1)
+                    ORDER BY latest_f.failed_at DESC LIMIT 1)
+               LEFT JOIN source_eligibility_rules r
+                 ON r.eligibility_version='news-source-eligibility-v1'
+                AND r.source=n.source
                WHERE NOT EXISTS (
                  SELECT 1 FROM news_revisions newer
                  WHERE newer.source=n.source
@@ -354,17 +402,44 @@ def _dashboard_payload(database: Path) -> dict:
                 float(candidate["u5"])
             ):
                 complete_rows += 1
+        learning = learning_curve_payload(connection)
+        component_times = {
+            "quote_bridge": _latest_quote_received(database),
+            "decision_collector": connection.execute("SELECT max(created_at) FROM decision_events").fetchone()[0],
+            "outcome_settler": connection.execute("SELECT max(appended_at) FROM outcomes").fetchone()[0],
+            "news_collector": connection.execute("SELECT max(fetched_time) FROM source_polls").fetchone()[0],
+            "gemini_annotator": connection.execute("SELECT max(parsed_at) FROM news_annotations").fetchone()[0],
+        }
+        integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
     finally:
         connection.close()
 
     latest_data = dict(latest) if latest else None
     age_seconds = None
-    if latest_data and latest_data["source_received_time"]:
+    if component_times["quote_bridge"]:
         age_seconds = max(
             0.0,
-            (now - datetime.fromisoformat(latest_data["source_received_time"])).total_seconds(),
+            (now - datetime.fromisoformat(component_times["quote_bridge"])).total_seconds(),
         )
-    online = bool(latest_data and age_seconds is not None and age_seconds <= 600)
+    decision_success = component_times.get("decision_collector")
+    decision_age = ((now - datetime.fromisoformat(decision_success)).total_seconds()
+                    if decision_success else None)
+    online = bool(age_seconds is not None and age_seconds <= 30
+                  and decision_age is not None and decision_age <= 420)
+
+    def component(name: str, stale_after: int, last_error: str | None = None) -> dict:
+        value = component_times.get(name)
+        age = max(0.0, (now - datetime.fromisoformat(value)).total_seconds()) if value else None
+        return {"last_success": value, "age_seconds": age,
+                "status": "OK" if age is not None and age <= stale_after else "STALE",
+                "last_error": last_error}
+
+    sync_file = database.parent / "dashboard-sync.json"
+    sync_time = datetime.fromtimestamp(sync_file.stat().st_mtime, UTC).isoformat() if sync_file.exists() else None
+    backup_files = sorted((database.parent / "backups").glob("*.sqlite3"), key=lambda p: p.stat().st_mtime)
+    backup_time = datetime.fromtimestamp(backup_files[-1].stat().st_mtime, UTC).isoformat() if backup_files else None
+    component_times["sites_synchronizer"] = sync_time
+    component_times["sqlite_backup"] = backup_time
 
     def serialize_row(row: sqlite3.Row) -> dict:
         item = dict(row)
@@ -385,6 +460,7 @@ def _dashboard_payload(database: Path) -> dict:
         seen_news_links.add(dedupe_key)
         item["entities"] = json.loads(item.pop("entities_json")) if item.get("entities_json") else []
         item["category"] = _news_category(item)
+        item["eligibility_version"] = "news-source-eligibility-v1"
         news.append(item)
     counts["latest_news_items"] = len(news)
     models = []
@@ -437,6 +513,20 @@ def _dashboard_payload(database: Path) -> dict:
             "mode": "SHADOW",
             "trading_enabled": False,
             "symbol": "XAUUSD",
+            "source_of_truth": "Local append-only SQLite",
+            "sites_mirror": "read-only materialized display mirror",
+            "components": {
+                "quote_bridge": component("quote_bridge", 30),
+                "decision_collector": component("decision_collector", 420),
+                "outcome_settler": component("outcome_settler", 420),
+                "news_collector": component("news_collector", 300),
+                "gemini_annotator": component("gemini_annotator", 900),
+                "sites_synchronizer": component("sites_synchronizer", 120),
+                "sqlite_backup": component("sqlite_backup", 172800),
+                "integrity_check": {"last_success": now.isoformat(), "age_seconds": 0,
+                                    "status": "OK" if integrity == "ok" else "ERROR",
+                                    "last_error": None if integrity == "ok" else integrity},
+            },
         },
         "latest": latest_data,
         "counts": counts,
@@ -481,14 +571,18 @@ def _dashboard_payload(database: Path) -> dict:
         },
         "training": {
             "automatic": True,
+            "label": "LEARNING PROGRESS",
+            "preview_rows": 96,
             "minimum_rows": 200,
             "retrain_interval": 50,
-            "eligible_rows": counts["training_eligibility"],
-            "complete_rows": complete_rows,
-            "next_training_at": next_training_at,
+            "legacy_eligible_rows": counts["training_eligibility"],
+            "eligible_rows": counts["training_eligibility_v2"],
+            "complete_rows": counts["training_eligibility_v2"],
+            "next_training_at": learning["next_training_threshold"],
             "champion_auto_promotion": False,
-            "models": models,
+            "models": learning["models"],
         },
+        "learning_curves": learning,
         "factor_coverage": factor_coverage(latest_macro, collected_news_sources),
         "sources": {
             "market": "cTrader CLI / Bid-Ask",

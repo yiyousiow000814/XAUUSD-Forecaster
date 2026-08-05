@@ -22,7 +22,7 @@ from xauusd_forecaster.maintenance import (  # noqa: E402
     archive_completed_quote_days,
     backup_forward_ledger,
 )
-from xauusd_forecaster.training import auto_train_due  # noqa: E402
+from xauusd_forecaster.training_v2 import train_due_v2  # noqa: E402
 
 
 UTC = timezone.utc
@@ -150,20 +150,9 @@ def main() -> int:
                     flush=True,
                 )
             if completed_outcomes:
-                try:
-                    training_status = auto_train_due(
-                        ledger,
-                        now,
-                        local_root / "models",
-                        minimum_rows=args.minimum_training_rows,
-                        retrain_interval=args.retrain_interval,
-                    )
-                except Exception as error:
-                    training_status = [{
-                        "status": "ERROR",
-                        "error_type": type(error).__name__,
-                        "error": str(error)[:500],
-                    }]
+                # The V1 engine remains permanently quarantined.  Only the V2
+                # repaired/Live-OOS lane may create new model versions.
+                training_status = train_due_v2(ledger, now, local_root / "models-v2")
                 print(
                     json.dumps(
                         {"event": "AUTO_TRAIN_CHECK", "results": training_status},

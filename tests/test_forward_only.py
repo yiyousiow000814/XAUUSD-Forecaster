@@ -42,6 +42,7 @@ from xauusd_forecaster.news import (
     parse_rss,
 )
 from xauusd_forecaster.ridge import train_ridge
+from xauusd_forecaster.shadow_simulation import shadow_league
 from xauusd_forecaster.u5_state import U5State
 from xauusd_forecaster.training import (
     MARKET_FEATURES,
@@ -712,6 +713,102 @@ def test_auto_training_builds_all_shadow_challengers_once_due(tmp_path) -> None:
     assert len(predictions) == 4
     assert predictions[-1]["model_identity"] == "CHALLENGER_FULL"
     assert predictions[-1]["prediction_status"] == "READY"
+    league = shadow_league(ledger.connection)
+    assert [row["model_identity"] for row in league["models"]] == [
+        "CHALLENGER_A",
+        "CHALLENGER_FULL",
+    ]
+
+    decision = datetime(2026, 8, 5, 11, 5, tzinfo=UTC)
+    decision_id = _decision(ledger, decision, _snapshot(ledger, decision))
+    _valid_outcome(ledger, decision_id, decision)
+    ledger.append_score(
+        {
+            "decision_id": decision_id,
+            "model_version": "always-wait-v1",
+            "scored_at": decision + timedelta(minutes=31),
+            "score": {"squared_error": 0.1},
+        }
+    )
+    ledger.mark_training_eligible(decision_id, decision + timedelta(minutes=31))
+    second_cutoff = datetime(2026, 8, 5, 12, 0, tzinfo=UTC)
+    retrained = auto_train_due(
+        ledger,
+        second_cutoff,
+        tmp_path / "models",
+        minimum_rows=2,
+        retrain_interval=1,
+    )
+    assert [row["model_identity"] for row in retrained] == [
+        "CHALLENGER_A",
+        "CHALLENGER_B",
+        "CHALLENGER_FULL",
+    ]
+    parallel = build_shadow_predictions(ledger, snapshot, second_cutoff)
+    assert len(parallel) == 7
+    assert sum(row["model_identity"] == "CHALLENGER_A" for row in parallel) == 2
+    assert sum(row["model_identity"] == "CHALLENGER_FULL" for row in parallel) == 2
+
+
+def test_shadow_simulation_freezes_admission_and_settles_executable_return(
+    tmp_path,
+) -> None:
+    epoch = datetime(2026, 8, 5, 9, 59, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
+
+    def append_action(decision: datetime, action: str) -> str:
+        decision_id = f"shadow-{decision.timestamp()}"
+        ledger.append_decision(
+            {
+                "decision_id": decision_id,
+                "decision_time": decision,
+                "snapshot_id": _snapshot(ledger, decision),
+                "created_at": decision,
+                "data_health": "OK",
+                "reason_codes": (),
+                "predictions": [
+                    {
+                        "model_version": "market-v1",
+                        "model_identity": "CHALLENGER_A",
+                        "predicted_direction_u5": 0.2,
+                        "predicted_news_residual_u5": None,
+                        "ev_long_u5": 0.1,
+                        "ev_short_u5": -0.3,
+                        "uncertainty_u5": 0.01,
+                        "recommended_action": action,
+                        "prediction_status": "READY",
+                    }
+                ],
+            }
+        )
+        return decision_id
+
+    first = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    first_id = append_action(first, "LONG")
+    second = first + timedelta(minutes=5)
+    append_action(second, "LONG")
+    intents = ledger.connection.execute(
+        "SELECT admission_status, simulated_action FROM shadow_trade_intents ORDER BY decision_time"
+    ).fetchall()
+    assert [row["admission_status"] for row in intents] == [
+        "ADMITTED",
+        "OVERLAP_BLOCK",
+    ]
+    assert [row["simulated_action"] for row in intents] == ["LONG", "WAIT"]
+
+    _valid_outcome(ledger, first_id, first)
+    result = ledger.connection.execute(
+        "SELECT * FROM shadow_trade_results WHERE decision_id=?",
+        (first_id,),
+    ).fetchone()
+    assert result["result_status"] == "VALID"
+    assert result["pnl_log_return"] > 0
+    assert result["pnl_u5"] == pytest.approx(result["pnl_log_return"] / 0.01)
+    assert result["cost_model"] == "EXECUTABLE_BID_ASK;COMMISSION_0;SLIPPAGE_0"
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        ledger.connection.execute(
+            "UPDATE shadow_trade_intents SET simulated_action='SHORT'"
+        )
 
 
 def test_jsonl_provider_reads_directory_incrementally_and_ignores_partial_line(
