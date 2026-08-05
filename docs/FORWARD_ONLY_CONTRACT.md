@@ -121,8 +121,10 @@ are immutable model-update fields.
 - Unknown, missing, stale, or unhealthy data always produces effective
   `WAIT`; it never invents a replacement direction.
 - Automatic training always evaluates Market-only eligibility. News-residual
-  and Full artifacts additionally require 30 news-exposed rows, 10 distinct
-  clusters, and three distinct event days. All remain Shadow Challengers.
+  and Full artifacts require 30 news-exposed rows and 10 distinct clusters.
+  Artifacts trained from one or two distinct event days are explicitly labelled
+  `EXPERIMENTAL_SINGLE_DAY` or `EXPERIMENTAL_TWO_DAY`; three distinct event days
+  establish the standard news evidence state. All remain Shadow Challengers.
 
 ## Versioned prequential Shadow evaluation
 

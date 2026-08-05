@@ -86,6 +86,8 @@ type LearningModel = {
   short_frequency: number;
   active_rank: number | null;
   lifecycle_status: "LATEST" | "PREVIOUS" | "ARCHIVED";
+  news_event_days: number;
+  news_evidence_status: string;
 };
 
 type RollingProcess = {
@@ -421,7 +423,7 @@ export default function AuditPage() {
         </div> : <div className="league-table-wrap"><table className="league-table learning-table">
           <thead><tr><th>版本 / 阶段</th><th>训练资料</th><th>之后 OOS</th><th>累计 / 平均</th><th>PF</th><th>MaxDD</th><th>Sharpe</th><th>区间状态</th></tr></thead>
           <tbody>{activeLearningModels.map(row => <tr key={row.model_version}>
-            <td><b>{MODEL_LABELS[row.model_identity] ?? row.model_identity}</b><span className={`version-role role-${row.lifecycle_status.toLowerCase()}`}>{row.lifecycle_status === "LATEST" ? "最新版" : "前一版"}</span><small>{row.model_stage} · {row.model_version}</small></td>
+            <td><b>{MODEL_LABELS[row.model_identity] ?? row.model_identity}</b><span className={`version-role role-${row.lifecycle_status.toLowerCase()}`}>{row.lifecycle_status === "LATEST" ? "最新版" : "前一版"}</span><small>{row.model_stage} · {row.model_version}</small>{row.news_evidence_status === "EXPERIMENTAL_SINGLE_DAY" && <small>EXPERIMENTAL · 单日新闻证据</small>}{row.news_evidence_status === "EXPERIMENTAL_TWO_DAY" && <small>EXPERIMENTAL · 双日新闻证据</small>}{row.news_evidence_status === "STANDARD" && row.model_identity !== "MARKET_ONLY" && <small>标准新闻证据 · {row.news_event_days} 日</small>}</td>
             <td><strong>{row.training_rows}</strong><small>cutoff {time(row.training_cutoff)}</small></td>
             <td><strong>{row.subsequent_oos_rows}</strong><small>{row.effective_blocks} blocks · {row.distinct_days} days</small></td>
             <td><strong>{percent(row.cumulative_quote_return)}</strong><small>平均 {percent(row.average_quote_return)}</small></td>
@@ -431,7 +433,7 @@ export default function AuditPage() {
             <td><span className="league-stage">{row.calibration_status}</span><small>滚动校准 · 宽度 {number(row.interval_width, 3)} · WAIT {row.wait_rate === null ? "—" : percent(row.wait_rate)}</small></td>
           </tr>)}</tbody>
         </table></div>}
-        <footer className="league-footer">{payload?.learning_curves.disclaimer ?? "早期曲线用于观察学习过程，不代表已证明盈利。"} 当前只运行每个 Ridge 身份的最新版和前一版；{archivedModelCount} 个旧版本的 artifact、预测和成绩已永久归档。零收益安全基准不训练、不占模型名额。Preview 与 Shadow 都没有下单权限，也不会自动晋升。</footer>
+        <footer className="league-footer">{payload?.learning_curves.disclaimer ?? "早期曲线用于观察学习过程，不代表已证明盈利。"} 单日和双日新闻模型明确标记 EXPERIMENTAL；达到3个新闻日期后自动进入标准证据状态。当前只运行每个 Ridge 身份的最新版和前一版；{archivedModelCount} 个旧版本的 artifact、预测和成绩已永久归档。零收益安全基准不训练、不占模型名额。Preview 与 Shadow 都没有下单权限，也不会自动晋升。</footer>
       </section>}
 
       {view === "coverage" && <section className="coverage-grid">

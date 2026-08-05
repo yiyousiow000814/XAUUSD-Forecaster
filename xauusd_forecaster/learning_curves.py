@@ -115,6 +115,14 @@ def learning_curve_payload(connection) -> dict:
             "calibration_rows": latest["calibration_rows"] if latest else 0,
             "calibration_effective_blocks": latest["calibration_effective_blocks"] if latest else 0,
             "calibration_distinct_days": latest["calibration_distinct_days"] if latest else 0,
+            "news_event_days": int(update["distinct_event_days"] or 0),
+            "news_evidence_status": (
+                "NOT_APPLICABLE" if update["model_identity"] == "MARKET_ONLY"
+                else "EXPERIMENTAL_SINGLE_DAY" if int(update["distinct_event_days"] or 0) == 1
+                else "EXPERIMENTAL_TWO_DAY" if int(update["distinct_event_days"] or 0) == 2
+                else "STANDARD" if int(update["distinct_event_days"] or 0) >= 3
+                else "INSUFFICIENT"
+            ),
             "active_rank": active_rank,
             "lifecycle_status": (
                 "LATEST" if active_rank == 1 else "PREVIOUS" if active_rank == 2 else "ARCHIVED"

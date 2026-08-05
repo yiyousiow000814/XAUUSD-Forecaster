@@ -289,6 +289,7 @@ def test_retraining_occurs_after_fifty_additional_rows(tmp_path, monkeypatch) ->
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     initial_cutoff = datetime(2026, 8, 1, 12, tzinfo=UTC)
     _insert_model_update(ledger.connection, "market-existing", "MARKET_ONLY", initial_cutoff)
+    _insert_model_update(ledger.connection, "full-existing", "FULL", initial_cutoff)
     monkeypatch.setattr(training_v2, "complete_training_rows", lambda *_: _training_rows(145))
     result = training_v2.train_due_v2(
         ledger, datetime(2026, 8, 6, 20, tzinfo=UTC), tmp_path / "models"
@@ -309,6 +310,67 @@ def test_retraining_occurs_after_fifty_additional_rows(tmp_path, monkeypatch) ->
         ledger, datetime(2026, 8, 7, 20, tzinfo=UTC), tmp_path / "models"
     )
     assert result[0]["status"] == "TRAINED"
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    "event_days,expected_status",
+    [(1, "EXPERIMENTAL_SINGLE_DAY"), (2, "EXPERIMENTAL_TWO_DAY")],
+)
+def test_news_models_train_early_with_explicit_experimental_status(
+    tmp_path, monkeypatch, event_days: int, expected_status: str
+) -> None:
+    ledger = ForwardLedger(tmp_path / f"forward-news-{event_days}.sqlite3")
+    rows = _training_rows(120)
+    for row in rows:
+        row["news_exposed"] = True
+        row["news"] = [0.1] * len(training_v2.NEWS_FEATURES)
+    first_seen = datetime(2026, 8, 1, 10, tzinfo=UTC)
+    for index in range(10):
+        seen = first_seen + timedelta(days=index % event_days)
+        _append_news(
+            ledger, source="federal_reserve_monetary", item=f"official-{index}",
+            first_seen=seen, parsed_at=seen, impulse=0.1,
+        )
+
+    class Artifact:
+        artifact_hash = "news-artifact-hash"
+
+        def write(self, path):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(training_v2, "complete_training_rows", lambda *_: rows)
+    monkeypatch.setattr(
+        training_v2, "_write_market_artifact",
+        lambda _rows, root, cutoff, stage: (
+            "market-preview-test", Artifact(), tmp_path / "market.json", "dataset-hash",
+        ),
+    )
+    monkeypatch.setattr(
+        training_v2, "chronological_crossfit_market",
+        lambda _ledger, crossfit_rows, *_: [
+            {
+                "decision_id": row["decision_id"], "artifact_hash": "crossfit-hash",
+                "residual": row["target"] - 0.01,
+            }
+            for row in crossfit_rows[48:]
+        ],
+    )
+    monkeypatch.setattr(training_v2, "train_ridge", lambda *_: Artifact())
+
+    result = training_v2.train_due_v2(
+        ledger, datetime(2026, 8, 3, 12, tzinfo=UTC), tmp_path / "models"
+    )
+    trained = {row.get("model_identity"): row for row in result if row["status"] == "TRAINED"}
+    assert trained["NEWS_RESIDUAL"]["news_evidence_status"] == expected_status
+    assert trained["FULL"]["news_evidence_status"] == expected_status
+    updates = {
+        row["model_identity"]: row
+        for row in ledger.connection.execute("SELECT * FROM model_updates_v2")
+    }
+    assert expected_status.lower().replace("_", "-") in updates["NEWS_RESIDUAL"]["model_version"]
+    assert updates["NEWS_RESIDUAL"]["distinct_event_days"] == event_days
     ledger.close()
 
 

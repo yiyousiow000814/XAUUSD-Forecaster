@@ -22,8 +22,20 @@ SHADOW_ROWS = 200
 RETRAIN_INTERVAL = 50
 NEWS_MIN_EXPOSED_ROWS = 30
 NEWS_MIN_CLUSTERS = 10
+NEWS_EXPERIMENTAL_MIN_EVENT_DAYS = 1
 NEWS_MIN_EVENT_DAYS = 3
 CROSSFIT_VERSION = "expanding-market-purge30m-v1"
+
+
+def news_evidence_status(event_days: int) -> str:
+    """Label early news models without blocking observable Shadow learning."""
+    if event_days < NEWS_EXPERIMENTAL_MIN_EVENT_DAYS:
+        return "INSUFFICIENT"
+    if event_days >= NEWS_MIN_EVENT_DAYS:
+        return "STANDARD"
+    if event_days == 1:
+        return "EXPERIMENTAL_SINGLE_DAY"
+    return "EXPERIMENTAL_TWO_DAY"
 
 
 def _rows(ledger, cutoff: datetime):
@@ -136,7 +148,15 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
         """SELECT * FROM model_updates_v2 WHERE model_identity='MARKET_ONLY'
         AND model_stage=? ORDER BY training_rows DESC LIMIT 1""", (stage,)
     ).fetchone()
-    if latest is not None and count < int(latest["training_rows"]) + RETRAIN_INTERVAL:
+    paired_full = ledger.connection.execute(
+        """SELECT 1 FROM model_updates_v2 WHERE model_identity='FULL'
+        AND model_stage=? AND created_at>=? LIMIT 1""",
+        (stage, latest["created_at"]),
+    ).fetchone() if latest is not None else None
+    bootstrap_news_pair = latest is not None and paired_full is None
+    if (latest is not None
+            and count < int(latest["training_rows"]) + RETRAIN_INTERVAL
+            and not bootstrap_news_pair):
         return [{"status": "NOT_DUE", "complete_rows": count,
                  "next_threshold": int(latest["training_rows"]) + RETRAIN_INTERVAL}]
 
@@ -160,6 +180,7 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
     ).fetchone()
     clusters = int(coverage["clusters"] or 0)
     event_days = int(coverage["event_days"] or 0)
+    evidence_status = news_evidence_status(event_days)
     with ledger.connection:
         ledger.connection.execute(
             """INSERT INTO model_updates_v2 VALUES
@@ -174,10 +195,11 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
                  "model_stage": stage, "model_version": version,
                  "training_rows": len(training_rows), "crossfit_rows": len(crossfit)}]
     if (len(news_exposed) < NEWS_MIN_EXPOSED_ROWS or clusters < NEWS_MIN_CLUSTERS
-            or event_days < NEWS_MIN_EVENT_DAYS):
+            or event_days < NEWS_EXPERIMENTAL_MIN_EVENT_DAYS):
         statuses.append({"status": "NEWS_EVIDENCE_INSUFFICIENT",
                          "news_exposed_rows": len(news_exposed),
-                         "distinct_news_clusters": clusters, "distinct_event_days": event_days})
+                         "distinct_news_clusters": clusters, "distinct_event_days": event_days,
+                         "news_evidence_status": evidence_status})
     else:
         crossfit_by_id = {row["decision_id"]: row for row in crossfit}
         residual_rows = [row for row in news_exposed if row["decision_id"] in crossfit_by_id]
@@ -193,7 +215,8 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
             ]
             residual_hash = canonical_hash(residual_receipts)
             news_version = (
-                f"news-residual-{stage.lower()}-{cutoff.astimezone(UTC).strftime('%Y%m%dT%H%M%SZ')}-"
+                f"news-residual-{evidence_status.lower().replace('_', '-')}-"
+                f"{stage.lower()}-{cutoff.astimezone(UTC).strftime('%Y%m%dT%H%M%SZ')}-"
                 f"{residual_hash[:12]}"
             )
             news_artifact = train_ridge(
@@ -222,7 +245,8 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
             }
             full_hash = canonical_hash(manifest)
             full_version = (
-                f"full-{stage.lower()}-{cutoff.astimezone(UTC).strftime('%Y%m%dT%H%M%SZ')}-"
+                f"full-{evidence_status.lower().replace('_', '-')}-"
+                f"{stage.lower()}-{cutoff.astimezone(UTC).strftime('%Y%m%dT%H%M%SZ')}-"
                 f"{full_hash[:12]}"
             )
             full_path = root / full_version / "manifest.json"
@@ -240,9 +264,13 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
             statuses.extend([
                 {"status": "TRAINED", "model_identity": "NEWS_RESIDUAL",
                  "model_stage": stage, "model_version": news_version,
-                 "training_rows": len(residual_rows), "crossfit_method": CROSSFIT_VERSION},
+                 "training_rows": len(residual_rows), "crossfit_method": CROSSFIT_VERSION,
+                 "news_evidence_status": evidence_status,
+                 "distinct_event_days": event_days},
                 {"status": "TRAINED", "model_identity": "FULL", "model_stage": stage,
-                 "model_version": full_version, "training_rows": len(training_rows)},
+                 "model_version": full_version, "training_rows": len(training_rows),
+                 "news_evidence_status": evidence_status,
+                 "distinct_event_days": event_days},
             ])
             ledger.connection.commit()
     return statuses
