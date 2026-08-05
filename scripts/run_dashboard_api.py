@@ -514,13 +514,24 @@ def _dashboard_payload(database: Path) -> dict:
         }
         integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
         news_source_health = _news_source_health(connection, now)
-        news_evidence = list(reversed(
-            event_evidence_rows_from_connection(connection, now)
-        ))
-        evidence_grades = Counter(row["evidence_grade"] for row in news_evidence)
-        evidence_topics = Counter(
-            topic for row in news_evidence for topic in row["topics"]
+        all_news_evidence = event_evidence_rows_from_connection(connection, now)
+        evidence_grades = Counter(
+            row["evidence_grade"] for row in all_news_evidence
         )
+        evidence_topics = Counter(
+            topic for row in all_news_evidence for topic in row["topics"]
+        )
+        evidence_display_fields = (
+            "event_key", "canonical_headline", "canonical_source",
+            "collector_first_seen_time", "topics", "evidence_grade",
+            "broad_model_eligible", "model_permission", "member_count",
+            "independent_publishers", "source_names", "publisher_domains",
+            "reason_codes",
+        )
+        news_evidence = [
+            {name: row[name] for name in evidence_display_fields}
+            for row in reversed(all_news_evidence[-100:])
+        ]
     finally:
         connection.close()
 
@@ -654,9 +665,10 @@ def _dashboard_payload(database: Path) -> dict:
         "news_evidence": news_evidence,
         "news_evidence_summary": {
             "policy_version": EVIDENCE_POLICY_VERSION,
-            "total_events": len(news_evidence),
+            "total_events": len(all_news_evidence),
+            "displayed_events": len(news_evidence),
             "broad_model_eligible": sum(
-                int(row["broad_model_eligible"]) for row in news_evidence
+                int(row["broad_model_eligible"]) for row in all_news_evidence
             ),
             "grades": dict(evidence_grades),
             "topics": dict(evidence_topics),

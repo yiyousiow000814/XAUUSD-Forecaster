@@ -138,6 +138,7 @@ type Payload = {
   news_evidence_summary: {
     policy_version: string;
     total_events: number;
+    displayed_events: number;
     broad_model_eligible: number;
     grades: Record<string, number>;
     topics: Record<string, number>;
@@ -407,7 +408,7 @@ export default function AuditPage() {
           <p>同一事件先按主题、实体和首次可见时间聚合。一手官方正文可直接进入大视野实验模型；媒体报道必须由至少两个独立可靠 publisher 相互确认。单一来源和聚合标题继续显示，但没有训练权限。</p>
         </header>
         <div className="evidence-summary">
-          <article><span>事件总数</span><strong>{payload?.news_evidence_summary.total_events ?? 0}</strong></article>
+          <article><span>事件总数</span><strong>{payload?.news_evidence_summary.total_events ?? 0}</strong><small>显示最近 {payload?.news_evidence_summary.displayed_events ?? 0} 个</small></article>
           <article><span>允许进入 Broad</span><strong>{payload?.news_evidence_summary.broad_model_eligible ?? 0}</strong></article>
           <article><span>一手官方</span><strong>{payload?.news_evidence_summary.grades.PRIMARY ?? 0}</strong></article>
           <article><span>多源确认</span><strong>{payload?.news_evidence_summary.grades.CORROBORATED ?? 0}</strong></article>
