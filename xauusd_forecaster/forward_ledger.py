@@ -18,6 +18,7 @@ IMMUTABLE_TABLES = (
     "news_annotations",
     "news_title_translations",
     "news_llm_failures",
+    "news_content_failures",
     "macro_observations",
     "source_polls",
     "decision_events",
@@ -159,6 +160,27 @@ CREATE TABLE IF NOT EXISTS news_llm_failures (
 CREATE INDEX IF NOT EXISTS news_llm_failures_lookup
 ON news_llm_failures(task_type, source, source_item_id, revision_number,
                      llm_model_version, prompt_version, attempt_number);
+
+CREATE TABLE IF NOT EXISTS news_content_failures (
+    failure_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    source_item_id TEXT NOT NULL,
+    revision_number INTEGER NOT NULL,
+    raw_content_hash TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL CHECK(attempt_number >= 1),
+    error_type TEXT NOT NULL,
+    error_signature TEXT NOT NULL,
+    error TEXT NOT NULL,
+    failed_at TEXT NOT NULL,
+    next_retry_at TEXT,
+    is_terminal INTEGER NOT NULL CHECK(is_terminal IN (0, 1)),
+    FOREIGN KEY(source, source_item_id, revision_number)
+        REFERENCES news_revisions(source, source_item_id, revision_number),
+    UNIQUE(source, source_item_id, revision_number, attempt_number)
+);
+
+CREATE INDEX IF NOT EXISTS news_content_failures_lookup
+ON news_content_failures(source, source_item_id, revision_number, attempt_number);
 
 CREATE TABLE IF NOT EXISTS macro_observations (
     source TEXT NOT NULL,
@@ -628,6 +650,36 @@ class ForwardLedger:
                     record["failure_id"], record["task_type"], *source_key,
                     record["raw_content_hash"], record["llm_model_version"],
                     record["prompt_version"], record["attempt_number"],
+                    record["error_type"], record["error_signature"],
+                    record["error"], _iso(record["failed_at"]),
+                    _iso(next_retry) if next_retry else None,
+                    int(bool(record.get("is_terminal"))),
+                ),
+            )
+
+    def append_content_failure(self, record: dict[str, Any]) -> None:
+        source_key = (
+            record["source"], record["source_item_id"], record["revision_number"]
+        )
+        news = self.connection.execute(
+            """SELECT content_hash FROM news_revisions
+            WHERE source=? AND source_item_id=? AND revision_number=?""",
+            source_key,
+        ).fetchone()
+        if news is None or news["content_hash"] != record["raw_content_hash"]:
+            raise ValueError("content failure does not match an immutable news revision")
+        next_retry = record.get("next_retry_at")
+        if next_retry is not None and next_retry < record["failed_at"]:
+            raise ValueError("content retry time precedes failure time")
+        if record.get("is_terminal") and next_retry is not None:
+            raise ValueError("terminal content failure cannot have a retry time")
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO news_content_failures VALUES
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    record["failure_id"], *source_key,
+                    record["raw_content_hash"], record["attempt_number"],
                     record["error_type"], record["error_signature"],
                     record["error"], _iso(record["failed_at"]),
                     _iso(next_retry) if next_retry else None,

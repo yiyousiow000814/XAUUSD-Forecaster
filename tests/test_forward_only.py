@@ -3,6 +3,7 @@ import json
 import math
 import os
 import sqlite3
+import urllib.error
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -415,6 +416,65 @@ def test_non_fed_article_hydration_appends_auditable_revision(tmp_path) -> None:
     ).fetchone()
     assert latest["revision_number"] == 2
     assert latest["body"].startswith("[FULL_TEXT")
+
+
+@pytest.mark.parametrize(
+    "denial",
+    [
+        urllib.error.HTTPError(
+            "https://publisher.example/protected", 403, "Forbidden", {}, None
+        ),
+        urllib.error.HTTPError(
+            "https://publisher.example/protected", 302, "Redirect loop", {}, None
+        ),
+        urllib.error.URLError(
+            "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"
+        ),
+    ],
+)
+def test_non_fed_permanent_denial_is_quarantined_without_component_failure(
+    tmp_path, denial,
+) -> None:
+    fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+    article_url = "https://publisher.example/protected"
+    ledger.append_news_revision(
+        {
+            "source": "google_news_gold_context",
+            "source_item_id": "protected-article",
+            "collector_first_seen_time": fetched,
+            "fetched_time": fetched,
+            "headline": "Protected article",
+            "body": "Headline-only discovery record",
+            "link": article_url,
+            "content_hash": hashlib.sha256(b"protected").hexdigest(),
+            "cluster_id": "protected-cluster",
+        }
+    )
+    calls = 0
+
+    def denied(url):
+        nonlocal calls
+        calls += 1
+        raise denial
+
+    first = hydrate_pending_non_fed_content(
+        ledger, fetched + timedelta(minutes=5), extractor=denied
+    )
+    second = hydrate_pending_non_fed_content(
+        ledger, fetched + timedelta(minutes=10), extractor=denied
+    )
+
+    assert first["status"] == "OK"
+    assert first["unavailable"] == 1
+    assert second["status"] == "OK"
+    assert second["attempted"] == 0
+    assert calls == 1
+    failure = ledger.connection.execute(
+        "SELECT * FROM news_content_failures"
+    ).fetchone()
+    assert failure["is_terminal"] == 1
+    assert failure["next_retry_at"] is None
 
 
 def test_bls_api_values_are_versioned_and_rate_limited(tmp_path, monkeypatch) -> None:

@@ -62,7 +62,9 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
     for source, (label, role, stale_minutes, revision_sources) in NEWS_SOURCE_DEFINITIONS.items():
         polls = connection.execute(
             """SELECT count(*) total,
-                      sum(status='OK') ok_count,
+                      sum(status='OK' OR
+                          (source='non_fed_full_text'
+                           AND error_type='HydrationErrors')) ok_count,
                       sum(status='PARTIAL') partial_count,
                       sum(status='ERROR') error_count,
                       max(CASE WHEN status='OK' THEN fetched_time END) last_success

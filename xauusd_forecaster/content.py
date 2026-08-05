@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import io
+import re
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Callable
 
 from bs4 import BeautifulSoup
@@ -156,6 +158,18 @@ def hydrate_pending_non_fed_content(
                   AND newer.revision_number>n.revision_number)
               AND n.link LIKE 'https://%'
               AND n.link NOT LIKE 'https://news.google.com/%'
+              AND NOT EXISTS (
+                SELECT 1 FROM news_content_failures f
+                WHERE f.source=n.source
+                  AND f.source_item_id=n.source_item_id
+                  AND f.revision_number=n.revision_number
+                  AND f.attempt_number=(
+                    SELECT max(f2.attempt_number) FROM news_content_failures f2
+                    WHERE f2.source=f.source
+                      AND f2.source_item_id=f.source_item_id
+                      AND f2.revision_number=f.revision_number)
+                  AND (f.is_terminal=1 OR f.next_retry_at>? )
+              )
               AND (
                 n.body NOT LIKE '[FULL_TEXT%'
                 OR (n.source='us_treasury_press_releases'
@@ -174,17 +188,26 @@ def hydrate_pending_non_fed_content(
                      COALESCE(n.source_published_time,
                               n.collector_first_seen_time) DESC
             LIMIT ?""",
-        (*NON_FED_FULL_TEXT_SOURCES, limit),
+        (
+            *NON_FED_FULL_TEXT_SOURCES,
+            fetched_at.astimezone(UTC).isoformat(timespec="microseconds"),
+            limit,
+        ),
     ).fetchall()
     inserted = 0
     errors: list[str] = []
+    operational_errors: list[str] = []
     with ThreadPoolExecutor(max_workers=min(4, len(rows) or 1)) as pool:
         extracted = list(pool.map(lambda row: _extract_safely(extractor, row["link"]), rows))
     for row, result in zip(rows, extracted):
         if isinstance(result, Exception):
-            errors.append(
+            failure = _append_content_failure(ledger, row, result, fetched_at)
+            description = (
                 f"{row['source_item_id']}:{type(result).__name__}:{str(result)[:160]}"
             )
+            errors.append(description)
+            if not failure["is_terminal"]:
+                operational_errors.append(description)
             continue
         try:
             text, source_url = result
@@ -214,15 +237,30 @@ def hydrate_pending_non_fed_content(
             errors.append(
                 f"{row['source_item_id']}:{type(error).__name__}:{str(error)[:160]}"
             )
-    status = "OK" if not errors else ("PARTIAL" if inserted else "ERROR")
+    status = (
+        "OK" if not operational_errors
+        else ("PARTIAL" if inserted else "ERROR")
+    )
+    summary = {
+        "attempted": len(rows),
+        "inserted": inserted,
+        "unavailable": len(errors) - len(operational_errors),
+        "retrying": len(operational_errors),
+    }
     ledger.append_source_poll(
         {
             "poll_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{poll_source}|{fetched_at.isoformat()}")),
             "source": poll_source,
             "fetched_time": fetched_at,
             "status": status,
-            "error_type": "HydrationErrors" if errors else None,
-            "error": " | ".join(errors)[:500] if errors else None,
+            "payload_hash": hashlib.sha256(
+                repr(sorted(summary.items())).encode("utf-8")
+            ).hexdigest(),
+            "error_type": "HydrationErrors" if operational_errors else None,
+            "error": (
+                " | ".join(operational_errors)[:500]
+                if operational_errors else None
+            ),
         }
     )
     return {
@@ -230,7 +268,79 @@ def hydrate_pending_non_fed_content(
         "status": status,
         "inserted_revisions": inserted,
         "errors": errors,
+        **summary,
     }
+
+
+def _append_content_failure(
+    ledger: ForwardLedger,
+    row,
+    error: Exception,
+    failed_at: datetime,
+) -> dict[str, object]:
+    normalized = re.sub(r"\s+", " ", str(error)).strip()
+    error_type = type(error).__name__
+    signature = hashlib.sha256(
+        f"{error_type}|{normalized}".encode("utf-8")
+    ).hexdigest()
+    prior = ledger.connection.execute(
+        """SELECT attempt_number, error_signature FROM news_content_failures
+        WHERE source=? AND source_item_id=? AND revision_number=?
+        ORDER BY attempt_number DESC LIMIT 1""",
+        (row["source"], row["source_item_id"], row["revision_number"]),
+    ).fetchone()
+    attempt = 1 if prior is None else int(prior["attempt_number"]) + 1
+    http_code = error.code if isinstance(error, urllib.error.HTTPError) else None
+    deterministic_extraction = isinstance(error, ValueError) and (
+        "content container" in normalized or "produced only" in normalized
+    )
+    permanent = (
+        http_code in {301, 302, 303, 307, 308, 401, 403, 404, 410, 451}
+        or deterministic_extraction
+        or (
+            isinstance(error, urllib.error.URLError)
+            and "certificate verify failed" in normalized.casefold()
+        )
+    )
+    transient = (
+        http_code == 429
+        or (http_code is not None and http_code >= 500)
+        or isinstance(error, (TimeoutError, ConnectionError))
+        or (isinstance(error, urllib.error.URLError) and http_code is None)
+    )
+    terminal = permanent or (transient and attempt >= 5) or (
+        not transient and attempt >= 2
+    )
+    if terminal:
+        next_retry = None
+    elif transient:
+        delay_minutes = (15, 60, 360, 720)[min(attempt - 1, 3)]
+        next_retry = failed_at + timedelta(minutes=delay_minutes)
+    else:
+        next_retry = failed_at + timedelta(hours=6)
+    identity = "|".join(
+        [
+            str(row["source"]), str(row["source_item_id"]),
+            str(row["revision_number"]), str(attempt), signature,
+        ]
+    )
+    ledger.append_content_failure(
+        {
+            "failure_id": str(uuid.uuid5(uuid.NAMESPACE_URL, identity)),
+            "source": row["source"],
+            "source_item_id": row["source_item_id"],
+            "revision_number": row["revision_number"],
+            "raw_content_hash": row["content_hash"],
+            "attempt_number": attempt,
+            "error_type": error_type,
+            "error_signature": signature,
+            "error": normalized,
+            "failed_at": failed_at,
+            "next_retry_at": next_retry,
+            "is_terminal": terminal,
+        }
+    )
+    return {"is_terminal": terminal, "next_retry_at": next_retry}
 
 
 def _extract_safely(

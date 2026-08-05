@@ -99,7 +99,7 @@ export default function HealthPage() {
       {(payload?.news_source_health ?? []).map((item) => <article key={item.source}>
         <div><strong>{item.label}</strong><small>{item.role} · {item.source}</small></div>
         <div><b className={`source-health-badge health-${item.health.toLowerCase()}`}>{item.health}</b><small>{localTime(item.latest_poll_time)}</small><small>最近成功 {localTime(item.last_success)}</small></div>
-        <div><strong>{item.item_count || "—"} 篇</strong><small>{item.revision_count || "—"} revisions · 完整正文 {item.full_text_count || "—"}</small><small>轮询 {item.ok_count}/{item.poll_count} 成功</small></div>
+        <div><strong>{item.item_count || "—"} 篇</strong><small>{item.revision_count || "—"} revisions · 完整正文 {item.full_text_count || "—"}</small><small>轮询 {item.ok_count}/{item.poll_count} 完成</small></div>
         <div className="source-health-error"><strong>{item.last_error_type ? `${item.health === "HEALTHY" ? "历史异常 · 已恢复" : "当前异常"} · ${item.last_error_type}` : "无已记录异常"}</strong><small>{item.last_error_time ? localTime(item.last_error_time) : ""} {item.last_error ?? "链路轮询正常"}</small></div>
       </article>)}
     </section>
