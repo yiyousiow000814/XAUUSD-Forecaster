@@ -159,7 +159,7 @@ export default function StatusPage() {
 
       <aside className="quota-note">
         <b>计数规则</b>
-        <p>每次请求在发往模型前永久计入各自账本，包括被 Google 拒绝的请求。Flash 每 key 本机上限 500，并保留一部分给 FOMC、CPI 与 Payroll；验证失败会持久退避，相同永久错误再次出现后会隔离，不会每分钟重试。Gemma 每 key 本机上限 15,000。两个账本都在 Pacific midnight 自动切换。</p>
+        <p>每次请求在发往模型前永久计入各自账本，包括被 Google 拒绝的请求。Flash 每 key 本机上限 500，并保留一部分给 FOMC、CPI 与 Payroll；数字格式和中文显示问题会在本地恢复，同一分钟的 RPM 槽位用完只会延后到下一批，不算失败。只有 Google 服务或响应故障才进入持久退避。Gemma 每 key 本机上限 15,000。两个账本都在 Pacific midnight 自动切换。</p>
         <p>Google 实际额度按 project 而不是 API key 计算。如果多个 key 属于同一个 project，它们仍会共享 Google 的额度；本页显示的是本机逐模型、逐 key 的安全账本，不代表 Google 端保证额度。</p>
       </aside>
 

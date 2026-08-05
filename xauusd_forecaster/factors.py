@@ -31,6 +31,11 @@ NEWS_FEATURES = (
     "vix_change",
 )
 
+NEWS_PROMPT_VERSIONS = (
+    "news-json-v9-local-display-recovery",
+    "news-json-v8-strict-zh-source-number-lexemes",
+)
+
 MACRO_FEATURE_MAP = {
     "DGS2": ("rate_2y_level", "rate_2y_change"),
     "DFII10": ("real_yield_10y_level", "real_yield_10y_change"),
@@ -46,7 +51,7 @@ def aggregate_news_features(
     decision_time: datetime,
     *,
     model_version: str = "gemini-3.5-flash-lite",
-    prompt_version: str = "news-json-v8-strict-zh-source-number-lexemes",
+    prompt_versions: tuple[str, ...] = NEWS_PROMPT_VERSIONS,
     half_life_minutes: float = 360.0,
 ) -> dict[str, float]:
     """Aggregate only annotations that were actually visible at decision time."""
@@ -68,13 +73,22 @@ def aggregate_news_features(
         (row["source"], row["source_item_id"]): int(row["revision_number"])
         for row in canonical_news.values()
     }
-    selected = [
-        row for row in ledger.visible_annotations(decision_time)
-        if row["llm_model_version"] == model_version
-        and row["prompt_version"] == prompt_version
-        and latest_news.get((row["source"], row["source_item_id"]))
-        == int(row["revision_number"])
-    ]
+    prompt_priority = {version: index for index, version in enumerate(prompt_versions)}
+    selected_by_item = {}
+    for row in ledger.visible_annotations(decision_time):
+        key = (row["source"], row["source_item_id"])
+        if (
+            row["llm_model_version"] != model_version
+            or row["prompt_version"] not in prompt_priority
+            or latest_news.get(key) != int(row["revision_number"])
+        ):
+            continue
+        current = selected_by_item.get(key)
+        if current is None or prompt_priority[row["prompt_version"]] < prompt_priority[
+            current["prompt_version"]
+        ]:
+            selected_by_item[key] = row
+    selected = list(selected_by_item.values())
     totals = {name: 0.0 for name in NEWS_FEATURES}
     weight_sum = 0.0
     for row in selected:

@@ -887,6 +887,81 @@ def test_gemini_named_month_translation_does_not_invent_numeric_month() -> None:
     assert result["summary_zh"] == "市场正在关注八月的黄金走势。"
 
 
+def test_gemini_locally_recovers_unverifiable_display_numbers() -> None:
+    result = {
+        "headline_zh": "黄金预计上涨2.0%",
+        "summary_zh": "来源称黄金上涨2.0%，但原文没有给出该数值。",
+        "confidence": 0.9,
+    }
+    annotation_module._recover_display_fields(
+        result, "Altın yüzde 1,3 arttı", "Fiyat hareketi devam etti."
+    )
+    assert "2.0" not in result["headline_zh"]
+    assert "相关数值" in result["headline_zh"]
+    assert "相关数值" in result["summary_zh"]
+    assert result["confidence"] == 0.5
+
+
+def test_invalid_language_fallback_is_neutral_and_auditable() -> None:
+    result = {
+        "headline_zh": "Gold market update",
+        "summary_zh": "This response was not translated into Chinese.",
+        "hawkishness": 0.8, "inflation_impulse": 0.7,
+        "growth_impulse": -0.4, "geopolitical_risk": 0.9,
+        "usd_impulse": 0.6, "novelty": 0.8, "confidence": 0.9,
+    }
+    annotation_module._neutralize_unvalidated_language(result)
+    annotation_module._validate_chinese_result(result)
+    assert result["confidence"] == 0.0
+    assert result["geopolitical_risk"] == 0.0
+    assert "用于审计" in result["summary_zh"]
+
+
+def test_annotation_appends_neutral_record_when_translation_repair_is_unavailable(
+    tmp_path, monkeypatch
+) -> None:
+    now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "Complete source text without numeric claims. " * 20
+    ledger.append_news_revision(
+        {
+            "source": "language-test", "source_item_id": "one",
+            "collector_first_seen_time": now, "fetched_time": now,
+            "headline": "Gold market update", "body": body,
+            "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+            "cluster_id": "language-cluster",
+        }
+    )
+    vector = {
+        "headline_zh": "Gold market update 99",
+        "summary_zh": "This response remained in English and invented 99.",
+        "event_type": "other", "entities": [], "hawkishness": 0.7,
+        "inflation_impulse": 0.6, "growth_impulse": -0.4,
+        "geopolitical_risk": 0.8, "usd_impulse": 0.5,
+        "novelty": 0.9, "confidence": 0.9,
+    }
+    monkeypatch.setattr(
+        annotation_module,
+        "_call_gemini",
+        lambda *_: (dict(vector), annotation_module.DEFAULT_GEMINI_MODEL),
+    )
+    monkeypatch.setattr(
+        annotation_module,
+        "_call_gemini_chinese_repair",
+        lambda *_: (_ for _ in ()).throw(RuntimeError("repair unavailable")),
+    )
+    statuses = annotate_pending_news(
+        ledger, provider="gemini", api_key="test-key", limit=1
+    )
+    assert statuses[0]["status"] == "OK"
+    saved = ledger.connection.execute(
+        "SELECT * FROM news_annotations WHERE source='language-test'"
+    ).fetchone()
+    assert saved["confidence"] == 0.0
+    assert saved["geopolitical_risk"] == 0.0
+    assert ledger.count("news_llm_failures") == 0
+
+
 def test_llm_failure_is_persisted_and_blocks_immediate_retry(
     tmp_path, monkeypatch
 ) -> None:
@@ -956,6 +1031,39 @@ def test_repeated_same_validation_failure_enters_dead_letter(tmp_path) -> None:
     ).fetchone()
     assert latest["is_terminal"] == 1
     assert latest["next_retry_at"] is None
+
+
+def test_batch_rpm_exhaustion_is_deferred_without_failure_row(
+    tmp_path, monkeypatch
+) -> None:
+    now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "Complete source text for a deferred annotation. " * 10
+    ledger.append_news_revision(
+        {
+            "source": "capacity-test", "source_item_id": "one",
+            "collector_first_seen_time": now, "fetched_time": now,
+            "headline": "Gold report", "body": body,
+            "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+            "cluster_id": "capacity-test-one",
+        }
+    )
+    monkeypatch.setattr(
+        annotation_module._GeminiRequestPool,
+        "call",
+        lambda *_: (_ for _ in ()).throw(
+            annotation_module.GeminiBatchCapacityExhausted(
+                "Gemini RPM slots used; retained for the next batch"
+            )
+        ),
+    )
+
+    statuses = annotate_pending_news(
+        ledger, provider="gemini", api_key="test-key", limit=1
+    )
+
+    assert statuses[0]["status"] == "DEFERRED"
+    assert ledger.count("news_llm_failures") == 0
 
 
 def test_flash_reserve_is_unavailable_to_routine_news_but_kept_for_priority(
@@ -1123,6 +1231,47 @@ def test_gemini_annotation_does_not_treat_other_model_as_complete(
     )
     assert statuses[0]["status"] == "OK"
     assert ledger.count("news_annotations") == 2
+
+
+def test_v8_success_is_compatible_and_not_reprocessed(tmp_path, monkeypatch) -> None:
+    now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "Complete audited source content. " * 20
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    ledger.append_news_revision(
+        {
+            "source": "compatible-test", "source_item_id": "one",
+            "collector_first_seen_time": now, "fetched_time": now,
+            "headline": "Policy update", "body": body,
+            "content_hash": digest, "cluster_id": "compatible-cluster",
+        }
+    )
+    vector = {
+        "headline_zh": "政策更新",
+        "summary_zh": "这是一份已经通过旧版严格规则的完整中文摘要，不应再次消耗模型配额。",
+        "event_type": "monetary_policy", "entities": [],
+        "hawkishness": 0.0, "inflation_impulse": 0.0,
+        "growth_impulse": 0.0, "geopolitical_risk": 0.0,
+        "usd_impulse": 0.0, "novelty": 0.2, "confidence": 0.8,
+    }
+    ledger.append_annotation(
+        {
+            "annotation_id": "v8-success", "source": "compatible-test",
+            "source_item_id": "one", "revision_number": 1,
+            "raw_content_hash": digest, "annotation": vector,
+            "llm_model_version": annotation_module.DEFAULT_GEMINI_MODEL,
+            "prompt_version": "news-json-v8-strict-zh-source-number-lexemes",
+            "parse_started_at": now, "parsed_at": now,
+        }
+    )
+    monkeypatch.setattr(
+        annotation_module,
+        "_call_gemini",
+        lambda *_: pytest.fail("compatible v8 annotation was reprocessed"),
+    )
+    assert annotate_pending_news(
+        ledger, provider="gemini", api_key="test-key", limit=1
+    ) == []
 
 
 def test_gemini_batch_is_capped_below_provider_rpm_limit(tmp_path, monkeypatch) -> None:

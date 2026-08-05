@@ -56,14 +56,18 @@ application-level character slice and appends a concise Simplified-Chinese
 summary together with the structured impulse fields. A new prompt version is a
 new immutable annotation; it never rewrites an earlier interpretation.
 
-Every rejected or unavailable LLM result appends a `news_llm_failures` row
-before it may be retried. Validation failures wait six hours; the same
-validation error on the next attempt becomes terminal for that exact news
-revision, model, and prompt. HTTP 429 and transient 5xx failures use bounded
-progressive backoff and become terminal after five attempts. Terminal rows
-remain auditable and are not automatically requeued. The daily Flash budget
-keeps 150 requests reserved for monetary-policy, CPI, and payroll events;
-routine news cannot consume that reserve.
+Display-number formatting is repaired deterministically against source
+lexemes. Unsupported numbers are replaced by a nonnumeric disclosure and lower
+display confidence instead of rejecting the structured receipt. If a Chinese
+repair cannot pass validation, the display text becomes an explicit audit notice and
+all directional impulses, novelty, and confidence become zero. Provider,
+transport, or malformed-JSON failures append a `news_llm_failures` row before
+retry. HTTP 429 and transient 5xx failures use bounded progressive backoff and
+become terminal after five attempts. Terminal rows remain auditable and are
+not automatically requeued. The daily Flash budget keeps 150 requests reserved
+for monetary-policy, CPI, and payroll events; routine news cannot consume that
+reserve. Exhausting the current minute's local request slots leaves the item
+pending for the next batch and does not create a failure record.
 
 ## Prequential learning order
 

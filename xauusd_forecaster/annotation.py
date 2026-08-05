@@ -27,9 +27,17 @@ GEMINI_MAX_PARALLEL_REQUESTS = 3
 GEMINI_DAILY_PRIORITY_RESERVE = 150
 GEMMA_REQUESTS_PER_DAY_PER_KEY = 15_000
 GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL = 20
-PROMPT_VERSION = "news-json-v8-strict-zh-source-number-lexemes"
-TITLE_PROMPT_VERSION = "headline-zh-v1"
+PROMPT_VERSION = "news-json-v9-local-display-recovery"
+COMPATIBLE_PROMPT_VERSIONS = (
+    PROMPT_VERSION,
+    "news-json-v8-strict-zh-source-number-lexemes",
+)
+TITLE_PROMPT_VERSION = "headline-zh-v2-local-display-recovery"
 HIGH_PRIORITY_NEWS_SOURCES = frozenset({"federal_reserve_monetary"})
+
+
+class GeminiBatchCapacityExhausted(RuntimeError):
+    """The current batch used its local RPM slots; the item remains pending."""
 
 
 def _schema() -> dict:
@@ -95,7 +103,7 @@ def annotate_pending_news(
         LEFT JOIN news_annotations a
          ON a.source=n.source AND a.source_item_id=n.source_item_id
          AND a.revision_number=n.revision_number
-         AND a.llm_model_version=? AND a.prompt_version=?
+         AND a.llm_model_version=? AND a.prompt_version IN (?, ?)
         WHERE a.annotation_id IS NULL
           AND length(trim(COALESCE(n.body, ''))) >= 240
           AND NOT EXISTS (
@@ -120,6 +128,8 @@ def annotate_pending_news(
               AND f.source=n.source AND f.source_item_id=n.source_item_id
               AND f.revision_number=n.revision_number
               AND f.llm_model_version=? AND f.prompt_version=?
+              AND NOT (f.error_type='RuntimeError'
+                       AND f.error='All configured Gemini keys unavailable for this batch')
               AND f.attempt_number=(
                 SELECT max(f2.attempt_number) FROM news_llm_failures f2
                 WHERE f2.task_type=f.task_type AND f2.source=f.source
@@ -139,7 +149,7 @@ def annotate_pending_news(
                  n.collector_first_seen_time, n.source, n.source_item_id
         LIMIT ?""",
         (
-            expected_model_identity, PROMPT_VERSION,
+            expected_model_identity, *COMPATIBLE_PROMPT_VERSIONS,
             expected_model_identity, PROMPT_VERSION,
             datetime.now(UTC).isoformat(timespec="microseconds"),
             effective_limit,
@@ -164,6 +174,12 @@ def annotate_pending_news(
                 "exact_model": exact_model,
                 "started": started,
                 "parsed": datetime.now(UTC),
+            }
+        except GeminiBatchCapacityExhausted as error:
+            return {
+                "status": "DEFERRED",
+                "row": row,
+                "reason": str(error),
             }
         except Exception as error:
             return {
@@ -205,6 +221,14 @@ def _persist_parsed_annotation(
     ledger: ForwardLedger, parsed_record: dict[str, object]
 ) -> dict[str, object]:
     row = parsed_record["row"]
+    if parsed_record["status"] == "DEFERRED":
+        return {
+            "status": "DEFERRED",
+            "source": row["source"],
+            "source_item_id": row["source_item_id"],
+            "revision_number": row["revision_number"],
+            "reason": parsed_record["reason"],
+        }
     if parsed_record["status"] != "PARSED":
         failure = _append_llm_failure(
             ledger, parsed_record, "ANNOTATION", PROMPT_VERSION
@@ -356,6 +380,15 @@ def translate_pending_headlines(
                 }
             )
             statuses.append({"status": "OK", "translation_id": translation_id})
+        except GeminiBatchCapacityExhausted as error:
+            statuses.append(
+                {
+                    "status": "DEFERRED",
+                    "source": row["source"],
+                    "source_item_id": row["source_item_id"],
+                    "reason": str(error),
+                }
+            )
         except Exception as error:
             failure = _append_llm_failure(
                 ledger,
@@ -459,26 +492,31 @@ class _GeminiRequestPool:
                 continue
             try:
                 result, exact_model = _call_gemini(key, model, headline, body)
-                _normalize_translated_named_months(result, f"{headline}\n{body}")
-                _restore_source_number_lexemes(result, headline, body)
+                _recover_display_fields(result, headline, body)
                 try:
                     _validate_chinese_result(result)
                     return result, exact_model
                 except ValueError:
-                    repaired = self._repair_chinese(
-                        start_index + offset + 1, model, result
-                    )
-                    _validate_chinese_result(repaired)
-                    result["headline_zh"] = repaired["headline_zh"]
-                    result["summary_zh"] = repaired["summary_zh"]
-                    _restore_source_number_lexemes(result, headline, body)
-                    _validate_chinese_result(result)
+                    try:
+                        repaired = self._repair_chinese(
+                            start_index + offset + 1, model, result
+                        )
+                        result["headline_zh"] = repaired["headline_zh"]
+                        result["summary_zh"] = repaired["summary_zh"]
+                        _recover_display_fields(result, headline, body)
+                        _validate_chinese_result(result)
+                    except Exception:
+                        _neutralize_unvalidated_language(result)
                     return result, exact_model
             except urllib.error.HTTPError as error:
                 last_error = error
                 if error.code not in {401, 403, 429}:
                     raise
-        raise RuntimeError("All configured Gemini keys unavailable for this batch") from last_error
+        if last_error is None:
+            raise GeminiBatchCapacityExhausted(
+                "Gemini RPM slots used; retained for the next batch"
+            )
+        raise RuntimeError("All configured Gemini keys rejected for this batch") from last_error
 
     def _repair_chinese(
         self, start_index: int, model: str, result: dict
@@ -512,7 +550,11 @@ class _GeminiRequestPool:
                 last_error = error
                 if error.code not in {401, 403, 429}:
                     raise
-        raise RuntimeError("All configured Gemini keys unavailable for this batch") from last_error
+        if last_error is None:
+            raise GeminiBatchCapacityExhausted(
+                "Gemini RPM slots used; retained for the next batch"
+            )
+        raise RuntimeError("All configured Gemini keys rejected for this batch") from last_error
 
 
 def _call_gemini(
@@ -636,10 +678,12 @@ def _call_gemini_title(api_key: str, model: str, headline: str) -> tuple[str, st
     result = json.loads(envelope["candidates"][0]["content"]["parts"][0]["text"])
     headline_zh = str(result.get("headline_zh") or "").strip()
     translated = {"headline_zh": headline_zh}
-    _normalize_translated_named_months(translated, headline)
-    _restore_source_number_lexemes(translated, headline, "")
+    _recover_display_fields(translated, headline, "")
     headline_zh = translated["headline_zh"]
-    _require_simplified_chinese(headline_zh, "headline_zh", 2, 1.0, 20)
+    try:
+        _require_simplified_chinese(headline_zh, "headline_zh", 2, 1.0, 20)
+    except ValueError:
+        headline_zh = "来源新闻（中文标题待校验）"
     return headline_zh, str(envelope.get("modelVersion") or model)
 
 
@@ -673,6 +717,53 @@ def _restore_source_number_lexemes(
             raise ValueError(f"Gemini {field} contains a number absent from source")
 
         result[field] = token_pattern.sub(restore, text)
+
+
+def _recover_display_fields(result: dict, headline: str, body: str) -> None:
+    """Make display text auditable without rejecting structured measurements."""
+    source = f"{headline}\n{body}"
+    _normalize_translated_named_months(result, source)
+    token_pattern = re.compile(r"\d+(?:(?:\s*[.,/-]\s*)\d+)*")
+    source_tokens = {
+        re.sub(r"\s+", "", token) for token in token_pattern.findall(source)
+    }
+    by_digits: dict[str, set[str]] = {}
+    for token in source_tokens:
+        by_digits.setdefault(re.sub(r"\D", "", token), set()).add(token)
+    unsupported = False
+    for field in ("headline_zh", "summary_zh"):
+        if field not in result:
+            continue
+
+        def recover(match: re.Match[str]) -> str:
+            nonlocal unsupported
+            token = re.sub(r"\s+", "", match.group(0))
+            if token in source_tokens:
+                return token
+            candidates = by_digits.get(re.sub(r"\D", "", token), set())
+            if len(candidates) == 1:
+                return next(iter(candidates))
+            unsupported = True
+            return "相关数值"
+
+        result[field] = token_pattern.sub(recover, str(result.get(field) or ""))
+    if unsupported and "confidence" in result:
+        result["confidence"] = min(0.5, float(result.get("confidence") or 0.0))
+    _restore_source_number_lexemes(result, headline, body)
+
+
+def _neutralize_unvalidated_language(result: dict) -> None:
+    """Keep the receipt while preventing an unreliable translation from voting."""
+    result["headline_zh"] = "来源新闻（中文标题待校验）"
+    result["summary_zh"] = (
+        "来源正文已完整保存，但自动中文摘要未通过语言一致性检查。"
+        "本条记录保留用于审计，结构化方向影响已设为中性。"
+    )
+    for field in (
+        "hawkishness", "inflation_impulse", "growth_impulse",
+        "geopolitical_risk", "usd_impulse", "novelty", "confidence",
+    ):
+        result[field] = 0.0
 
 
 def _normalize_translated_named_months(result: dict, source: str) -> None:

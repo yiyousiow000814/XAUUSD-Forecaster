@@ -169,10 +169,19 @@ def _dashboard_payload(database: Path) -> dict:
                    ORDER BY latest_t.parsed_at DESC, latest_t.translation_id DESC
                    LIMIT 1)
                LEFT JOIN news_annotations a
-                 ON a.source=n.source AND a.source_item_id=n.source_item_id
-                AND a.revision_number=n.revision_number
-                AND a.llm_model_version='gemini-3.5-flash-lite'
-                AND a.prompt_version='news-json-v8-strict-zh-source-number-lexemes'
+                 ON a.annotation_id=(
+                   SELECT preferred_a.annotation_id
+                   FROM news_annotations preferred_a
+                   WHERE preferred_a.source=n.source
+                     AND preferred_a.source_item_id=n.source_item_id
+                     AND preferred_a.revision_number=n.revision_number
+                     AND preferred_a.llm_model_version='gemini-3.5-flash-lite'
+                     AND preferred_a.prompt_version IN (
+                       'news-json-v9-local-display-recovery',
+                       'news-json-v8-strict-zh-source-number-lexemes')
+                   ORDER BY CASE preferred_a.prompt_version
+                     WHEN 'news-json-v9-local-display-recovery' THEN 0 ELSE 1 END,
+                     preferred_a.parsed_at DESC LIMIT 1)
                LEFT JOIN news_annotations legacy
                  ON legacy.source=n.source
                 AND legacy.source_item_id=n.source_item_id
@@ -194,7 +203,9 @@ def _dashboard_payload(database: Path) -> dict:
                      AND latest_f.source_item_id=n.source_item_id
                      AND latest_f.revision_number=n.revision_number
                      AND latest_f.llm_model_version='gemini-3.5-flash-lite'
-                     AND latest_f.prompt_version='news-json-v8-strict-zh-source-number-lexemes'
+                     AND latest_f.prompt_version='news-json-v9-local-display-recovery'
+                     AND NOT (latest_f.error_type='RuntimeError'
+                              AND latest_f.error='All configured Gemini keys unavailable for this batch')
                    ORDER BY latest_f.attempt_number DESC LIMIT 1)
                WHERE NOT EXISTS (
                  SELECT 1 FROM news_revisions newer
@@ -236,10 +247,19 @@ def _dashboard_payload(database: Path) -> dict:
                           THEN 1 ELSE 0 END) AS waiting_content
                FROM news_revisions n
                LEFT JOIN news_annotations a
-                 ON a.source=n.source AND a.source_item_id=n.source_item_id
-                AND a.revision_number=n.revision_number
-                AND a.llm_model_version='gemini-3.5-flash-lite'
-                AND a.prompt_version='news-json-v8-strict-zh-source-number-lexemes'
+                 ON a.annotation_id=(
+                   SELECT preferred_a.annotation_id
+                   FROM news_annotations preferred_a
+                   WHERE preferred_a.source=n.source
+                     AND preferred_a.source_item_id=n.source_item_id
+                     AND preferred_a.revision_number=n.revision_number
+                     AND preferred_a.llm_model_version='gemini-3.5-flash-lite'
+                     AND preferred_a.prompt_version IN (
+                       'news-json-v9-local-display-recovery',
+                       'news-json-v8-strict-zh-source-number-lexemes')
+                   ORDER BY CASE preferred_a.prompt_version
+                     WHEN 'news-json-v9-local-display-recovery' THEN 0 ELSE 1 END,
+                     preferred_a.parsed_at DESC LIMIT 1)
                LEFT JOIN news_llm_failures f
                  ON f.failure_id=(
                    SELECT latest_f.failure_id
@@ -249,7 +269,9 @@ def _dashboard_payload(database: Path) -> dict:
                      AND latest_f.source_item_id=n.source_item_id
                      AND latest_f.revision_number=n.revision_number
                      AND latest_f.llm_model_version='gemini-3.5-flash-lite'
-                     AND latest_f.prompt_version='news-json-v8-strict-zh-source-number-lexemes'
+                     AND latest_f.prompt_version='news-json-v9-local-display-recovery'
+                     AND NOT (latest_f.error_type='RuntimeError'
+                              AND latest_f.error='All configured Gemini keys unavailable for this batch')
                    ORDER BY latest_f.attempt_number DESC LIMIT 1)
                WHERE NOT EXISTS (
                  SELECT 1 FROM news_revisions newer
