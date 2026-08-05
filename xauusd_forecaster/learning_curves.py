@@ -116,11 +116,19 @@ def learning_curve_payload(connection) -> dict:
             ).fetchall()
         else:
             rows = connection.execute(
-                """SELECT p.decision_time,s.value_quote_return FROM predictions_v2 p
-                JOIN prediction_scores_v2 s USING(source_decision_id,model_version)
-                JOIN model_updates_v2 u USING(model_version)
-                WHERE p.model_identity=? AND p.decision_time>u.created_at
-                ORDER BY p.decision_time""", (identity,)
+                """WITH ranked AS (
+                    SELECT p.source_decision_id,p.decision_time,s.value_quote_return,
+                           row_number() OVER (
+                               PARTITION BY p.source_decision_id,p.model_identity
+                               ORDER BY u.created_at DESC,u.model_version DESC
+                           ) AS version_rank
+                    FROM predictions_v2 p
+                    JOIN prediction_scores_v2 s USING(source_decision_id,model_version)
+                    JOIN model_updates_v2 u USING(model_version)
+                    WHERE p.model_identity=? AND p.decision_time>u.created_at
+                )
+                SELECT decision_time,value_quote_return FROM ranked
+                WHERE version_rank=1 ORDER BY decision_time""", (identity,)
             ).fetchall()
         cumulative = 0.0
         points = []
@@ -130,15 +138,25 @@ def learning_curve_payload(connection) -> dict:
         identity_curves.append({"model_identity": identity, "points": points})
 
     paired = connection.execute(
-        """SELECT f.decision_time,fs.value_quote_return-ms.value_quote_return AS delta
-        FROM predictions_v2 f JOIN prediction_scores_v2 fs
-          ON fs.source_decision_id=f.source_decision_id AND fs.model_version=f.model_version
-        JOIN model_updates_v2 fu ON fu.model_version=f.model_version
-        JOIN predictions_v2 m ON m.source_decision_id=f.source_decision_id AND m.model_identity='MARKET_ONLY'
-        JOIN prediction_scores_v2 ms ON ms.source_decision_id=m.source_decision_id AND ms.model_version=m.model_version
-        JOIN model_updates_v2 mu ON mu.model_version=m.model_version
-        WHERE f.model_identity='FULL' AND f.decision_time>fu.created_at
-          AND m.decision_time>mu.created_at ORDER BY f.decision_time"""
+        """WITH ranked AS (
+            SELECT p.source_decision_id,p.decision_time,p.model_identity,
+                   s.value_quote_return,
+                   row_number() OVER (
+                       PARTITION BY p.source_decision_id,p.model_identity
+                       ORDER BY u.created_at DESC,u.model_version DESC
+                   ) AS version_rank
+            FROM predictions_v2 p
+            JOIN prediction_scores_v2 s USING(source_decision_id,model_version)
+            JOIN model_updates_v2 u USING(model_version)
+            WHERE p.model_identity IN ('FULL','MARKET_ONLY')
+              AND p.decision_time>u.created_at
+        ), latest AS (
+            SELECT * FROM ranked WHERE version_rank=1
+        )
+        SELECT f.decision_time,f.value_quote_return-m.value_quote_return AS delta
+        FROM latest f JOIN latest m USING(source_decision_id)
+        WHERE f.model_identity='FULL' AND m.model_identity='MARKET_ONLY'
+        ORDER BY f.decision_time"""
     ).fetchall()
     cumulative = 0.0
     incremental = []

@@ -153,10 +153,13 @@ def test_learning_stages_do_not_wait_for_sixty_days() -> None:
     assert _stage(200, 0, 60) == "HIGHER_CONFIDENCE"
 
 
-def _insert_prediction(connection, decision_id: str, decision_time: datetime) -> None:
+def _insert_prediction(connection, decision_id: str, decision_time: datetime, *,
+                       model_version: str = "market-test",
+                       model_identity: str = "MARKET_ONLY",
+                       value_quote_return: float = 2.0) -> None:
     connection.execute(
         "INSERT INTO predictions_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (decision_id, "market-test", "MARKET_ONLY", decision_time.isoformat(),
+        (decision_id, model_version, model_identity, decision_time.isoformat(),
          decision_time.isoformat(), "LIVE_OOS", "feature-hash", 0.1, None,
          0.1, -0.1, None, None, "UTC_DAY_BLOCK_OOS_ABS_RESIDUAL_Q95",
          "calibration-test", 0, 0, 0, None, "UNCALIBRATED", "LONG", "WAIT",
@@ -164,8 +167,19 @@ def _insert_prediction(connection, decision_id: str, decision_time: datetime) ->
     )
     connection.execute(
         "INSERT INTO prediction_scores_v2 VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (decision_id, "market-test", decision_time.isoformat(), 2.0, 0.2, 0.1,
+        (decision_id, model_version, decision_time.isoformat(), value_quote_return, 0.2, 0.1,
          0.01, 1, 0, f"score-{decision_id}"),
+    )
+
+
+def _insert_model_update(connection, model_version: str, model_identity: str,
+                         created_at: datetime, training_rows: int = 96) -> None:
+    connection.execute(
+        "INSERT INTO model_updates_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (model_version, model_identity, "PREVIEW_ONLY", created_at.isoformat(),
+         created_at.isoformat(), training_rows, training_rows, 0, 0, 0, 0,
+         f"dataset-{model_version}", "features", None, "artifact",
+         f"artifact-{model_version}", "CHALLENGER"),
     )
 
 
@@ -191,6 +205,31 @@ def test_learning_curve_excludes_predictions_not_after_model_creation(tmp_path) 
     assert [point["decision_time"] for point in market_curve["points"]] == [
         (created_at + timedelta(minutes=5)).isoformat()
     ]
+    ledger.close()
+
+
+def test_identity_curve_uses_only_latest_parallel_version_per_decision(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    created = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    decision = created + timedelta(hours=1)
+    _insert_model_update(ledger.connection, "market-old", "MARKET_ONLY", created)
+    _insert_model_update(
+        ledger.connection, "market-new", "MARKET_ONLY", created + timedelta(minutes=30)
+    )
+    _insert_prediction(
+        ledger.connection, "same-decision", decision, model_version="market-old",
+        value_quote_return=1.0,
+    )
+    _insert_prediction(
+        ledger.connection, "same-decision", decision, model_version="market-new",
+        value_quote_return=2.0,
+    )
+    payload = learning_curve_payload(ledger.connection)
+    curve = next(
+        row for row in payload["identity_curves"] if row["model_identity"] == "MARKET_ONLY"
+    )
+    assert len(curve["points"]) == 1
+    assert curve["points"][0]["cumulative_quote_return"] == pytest.approx(2.0)
     ledger.close()
 
 
@@ -230,6 +269,49 @@ def test_preview_and_shadow_thresholds_create_challengers_only(
     assert update["repaired_seed_rows"] == count
     assert ledger.connection.execute("SELECT count(*) FROM predictions_v2").fetchone()[0] == 0
     assert learning_curve_payload(ledger.connection)["models"][0]["subsequent_oos_rows"] == 0
+    ledger.close()
+
+
+def test_retraining_requires_five_new_distinct_days(tmp_path, monkeypatch) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    initial_cutoff = datetime(2026, 8, 1, 12, tzinfo=UTC)
+    _insert_model_update(ledger.connection, "market-existing", "MARKET_ONLY", initial_cutoff)
+    base = _training_rows(96)
+
+    def rows_with_new_days(days: int) -> list[dict]:
+        rows = list(base)
+        for index in range(50):
+            day = index % days + 1
+            row = dict(base[index])
+            row["decision_id"] = f"new-{days}-{index}"
+            row["decision_time"] = (
+                initial_cutoff + timedelta(days=day, minutes=index)
+            ).isoformat()
+            row["receipt"] = (row["decision_id"], f"m-{index}", f"n-{index}", f"o-{index}")
+            rows.append(row)
+        return rows
+
+    monkeypatch.setattr(training_v2, "complete_training_rows", lambda *_: rows_with_new_days(4))
+    result = training_v2.train_due_v2(
+        ledger, datetime(2026, 8, 6, 20, tzinfo=UTC), tmp_path / "models"
+    )
+    assert result[0]["status"] == "NOT_DUE"
+    assert result[0]["new_distinct_days"] == 4
+    assert result[0]["minimum_new_distinct_days"] == 5
+
+    monkeypatch.setattr(training_v2, "complete_training_rows", lambda *_: rows_with_new_days(5))
+    monkeypatch.setattr(
+        training_v2, "_write_market_artifact",
+        lambda _rows, root, cutoff, stage: (
+            "market-preview-only-new", SimpleNamespace(artifact_hash="artifact-hash"),
+            tmp_path / "model.json", "dataset-hash-new",
+        ),
+    )
+    monkeypatch.setattr(training_v2, "chronological_crossfit_market", lambda *_: [])
+    result = training_v2.train_due_v2(
+        ledger, datetime(2026, 8, 7, 20, tzinfo=UTC), tmp_path / "models"
+    )
+    assert result[0]["status"] == "TRAINED"
     ledger.close()
 
 
@@ -281,6 +363,38 @@ def test_uncertainty_uses_only_same_version_prior_oos_residuals(tmp_path) -> Non
     )
     assert calibration["rows"] == 1
     assert calibration["half_width"] == pytest.approx(0.25)
+    ledger.close()
+
+
+def test_evaluation_lifetime_uses_valid_days_not_prediction_count(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    empty = {"version": "none", "rows": 0, "blocks": 0, "days": 0,
+             "half_width": None, "status": "UNCALIBRATED"}
+    for index in range(75):
+        when = base + timedelta(minutes=5 * index)
+        inference_v2._insert_prediction(
+            ledger, decision_id=f"unhealthy-{index}", decision_time=when, created_at=when,
+            model_version="long-lived", model_identity="MARKET_ONLY", feature_hash="features",
+            predicted=None, news_residual=None, ev_long=None, ev_short=None,
+            calibration=empty, recommended="WAIT", status="DATA_UNHEALTHY",
+        )
+    assert inference_v2._evaluation_window_open(
+        ledger, "long-lived", base + timedelta(days=1)
+    )
+
+    for day in range(60):
+        when = base + timedelta(days=day, hours=12)
+        _insert_prediction(
+            ledger.connection, f"valid-{day}", when,
+            model_version="long-lived", value_quote_return=0.1,
+        )
+    assert inference_v2._evaluation_window_open(
+        ledger, "long-lived", base + timedelta(days=59, hours=13)
+    )
+    assert not inference_v2._evaluation_window_open(
+        ledger, "long-lived", base + timedelta(days=60)
+    )
     ledger.close()
 
 

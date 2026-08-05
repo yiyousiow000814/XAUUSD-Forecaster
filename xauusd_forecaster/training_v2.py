@@ -20,6 +20,7 @@ UTC = timezone.utc
 PREVIEW_ROWS = 96
 SHADOW_ROWS = 200
 RETRAIN_INTERVAL = 50
+MIN_RETRAIN_DISTINCT_DAYS = 5
 NEWS_MIN_EXPOSED_ROWS = 30
 NEWS_MIN_CLUSTERS = 10
 NEWS_MIN_EVENT_DAYS = 3
@@ -136,9 +137,19 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
         """SELECT * FROM model_updates_v2 WHERE model_identity='MARKET_ONLY'
         AND model_stage=? ORDER BY training_rows DESC LIMIT 1""", (stage,)
     ).fetchone()
-    if latest is not None and count < int(latest["training_rows"]) + RETRAIN_INTERVAL:
-        return [{"status": "NOT_DUE", "complete_rows": count,
-                 "next_threshold": int(latest["training_rows"]) + RETRAIN_INTERVAL}]
+    if latest is not None:
+        next_threshold = int(latest["training_rows"]) + RETRAIN_INTERVAL
+        latest_cutoff = datetime.fromisoformat(latest["training_cutoff"])
+        new_days = {
+            row["decision_time"][:10]
+            for row in rows
+            if datetime.fromisoformat(row["decision_time"]) > latest_cutoff
+        }
+        if count < next_threshold or len(new_days) < MIN_RETRAIN_DISTINCT_DAYS:
+            return [{"status": "NOT_DUE", "complete_rows": count,
+                     "next_threshold": next_threshold,
+                     "new_distinct_days": len(new_days),
+                     "minimum_new_distinct_days": MIN_RETRAIN_DISTINCT_DAYS}]
 
     training_rows = rows if stage == "PREVIEW_ONLY" else rows[: count - (count % RETRAIN_INTERVAL)]
     now = datetime.now(UTC)

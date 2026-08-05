@@ -102,12 +102,17 @@ are immutable model-update fields.
 - Challenger-B: News residual Ridge.
 - Full estimate equals Market estimate plus News residual estimate.
 - U5 is a scale and reporting unit only; it cannot vote on direction.
-- A new Challenger is trained only after a fixed new-sample threshold.
+- A new Challenger is trained only after 50 additional eligible rows and at
+  least five new UTC trading days for the same model stage.
 - The collector trains a non-actionable Market Preview at 96 V2-eligible rows,
   the first Shadow Challenger set at 200 rows, then a new version after each 50
   new eligible rows. Sixty trading days is a confidence milestone, not a
   training blocker. A failed training attempt is logged and cannot alter a
   prior artifact.
+- Every frozen version remains in parallel Shadow evaluation until it has 60
+  distinct UTC days with valid OOS scores. Unhealthy predictions and invalid
+  outcomes do not consume that lifetime. Twenty valid UTC-day blocks are
+  required for `CALIBRATED` uncertainty.
 - Training never changes the active Champion.
 - Only the owner may append a manual promotion approval after forward gates.
 - Unknown, missing, stale, or unhealthy data always produces effective
@@ -137,6 +142,9 @@ are immutable model-update fields.
   minus Market uses paired same-clock rows. Early values are descriptive and
   remain exposed to market-regime differences. These metrics never authorize a
   real order or automatic Champion promotion.
+- Identity-level and paired aggregate curves select only the newest eligible
+  version at each Decision, so parallel version evaluation cannot duplicate
+  returns.
 
 ## Storage and separation
 

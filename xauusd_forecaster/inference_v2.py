@@ -13,8 +13,22 @@ from .ridge import RidgeArtifact
 from .training import MARKET_FEATURES
 
 
-NEXT_BATCH_DECISIONS = 50
 MIN_CALIBRATION_BLOCKS = 20
+MAX_EVALUATION_DAYS = 60
+
+
+def _evaluation_window_open(ledger, model_version: str, decision_time: datetime) -> bool:
+    """Keep a frozen model alive for 60 distinct days with valid OOS scores."""
+    rows = ledger.connection.execute(
+        """SELECT DISTINCT substr(p.decision_time,1,10) AS evaluation_day
+        FROM predictions_v2 p JOIN prediction_scores_v2 s
+          USING(source_decision_id, model_version)
+        WHERE p.model_version=? AND s.residual_u5 IS NOT NULL""",
+        (model_version,),
+    ).fetchall()
+    evaluated_days = {row["evaluation_day"] for row in rows}
+    current_day = decision_time.isoformat()[:10]
+    return current_day in evaluated_days or len(evaluated_days) < MAX_EVALUATION_DAYS
 
 
 def _calibration(ledger, model_version: str, model_identity: str, decision_time: datetime) -> dict:
@@ -87,22 +101,17 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
         """SELECT * FROM model_updates_v2
         WHERE created_at < ? ORDER BY created_at DESC""", (decision_time.isoformat(),)
     ).fetchall()
-    seen = set()
     features = json.loads(market_snapshot["features_json"])
     news_features = json.loads(news_snapshot["features_json"])
     values = [features.get(name) for name in MARKET_FEATURES]
     for update in updates:
         identity = update["model_identity"]
-        if identity in seen:
+        # Training cadence and evaluation lifetime are independent.  Every
+        # frozen version keeps producing Shadow predictions until it has 60
+        # distinct UTC days with valid OOS scores.  Unhealthy/invalid rows do
+        # not consume this lifetime.
+        if not _evaluation_window_open(ledger, update["model_version"], decision_time):
             continue
-        # Retain each frozen version for its next 50 true forward decisions.
-        count = ledger.connection.execute(
-            "SELECT count(*) FROM predictions_v2 WHERE model_version=?",
-            (update["model_version"],),
-        ).fetchone()[0]
-        if count >= NEXT_BATCH_DECISIONS:
-            continue
-        seen.add(identity)
         calibration = _calibration(ledger, update["model_version"], identity, decision_time)
         if market_snapshot["data_health"] != "OK" or market_snapshot["u5"] is None \
                 or any(value is None for value in values):

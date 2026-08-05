@@ -9,7 +9,9 @@
 | 96–199 | `PREVIEW` | regularized Market Preview; no effective action |
 | 200+ | `INITIAL_SHADOW` | frozen Shadow Challengers; no promotion |
 
-Each additional 50 complete rows may create a new frozen model version.
+Each additional 50 complete rows may create a new frozen model version only
+after those rows span at least five new UTC trading days since that stage's
+latest training cutoff.
 Twenty distinct trading days may be labelled `RESEARCH_CANDIDATE`; 60 days is
 `HIGHER_CONFIDENCE`. Neither day count blocks early display or model fitting.
 
@@ -17,11 +19,18 @@ Twenty distinct trading days may be labelled `RESEARCH_CANDIDATE`; 60 days is
 
 A model version is scored only on Decisions after its `created_at` and
 `training_cutoff`. Seed rows train the model but never appear on its Live OOS
-curve. Each version retains its next-batch clock, training rows, subsequent
-OOS rows, effective UTC-day blocks, distinct days, average quote-adjusted
-value, interval state, and error diagnostics.
+curve. Every frozen version continues parallel Shadow evaluation through 60
+distinct UTC days containing valid OOS scores. Unhealthy predictions and
+invalid outcomes remain auditable but do not consume this evaluation lifetime.
+Each version retains its training rows, subsequent OOS rows, effective UTC-day
+blocks, distinct days, average quote-adjusted value, interval state, and error
+diagnostics.
 
-The dashboard includes cumulative identity value, version next-batch value,
+Identity-level curves select the newest version that existed at each Decision.
+They never sum parallel versions from the same model identity. Paired
+Full-minus-Market value applies the same latest-version rule to both sides.
+
+The dashboard includes cumulative identity value, per-version OOS value,
 paired Full-minus-Market value, interval width and calibration growth, error
 and recommendation frequencies, and sample growth. Early curves explicitly
 state that they do not prove profitability.
