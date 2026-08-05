@@ -1236,6 +1236,46 @@ def test_headline_only_translation_is_display_only(tmp_path, monkeypatch) -> Non
     assert (tmp_path / "gemma-quota.json").exists()
 
 
+def test_placeholder_title_is_retried_append_only(tmp_path, monkeypatch) -> None:
+    now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "full source text " * 30
+    content_hash = hashlib.sha256(body.encode()).hexdigest()
+    ledger.append_news_revision(
+        {
+            "source": "title-test", "source_item_id": "retry",
+            "collector_first_seen_time": now, "fetched_time": now,
+            "headline": "Federal Reserve requests comment", "body": body,
+            "content_hash": content_hash, "cluster_id": "title-retry",
+        }
+    )
+    ledger.append_title_translation(
+        {
+            "translation_id": "old-placeholder", "source": "title-test",
+            "source_item_id": "retry", "revision_number": 1,
+            "raw_content_hash": content_hash,
+            "headline_zh": annotation_module.INVALID_CHINESE_TITLE,
+            "llm_model_version": "gemma-4-31b-it",
+            "prompt_version": "headline-zh-v2-local-display-recovery",
+            "parse_started_at": now, "parsed_at": now,
+        }
+    )
+    monkeypatch.setattr(
+        annotation_module, "_call_gemini_title",
+        lambda *_: ("美联储就提案征求意见", "gemma-4-31b-it"),
+    )
+    statuses = translate_pending_headlines(ledger, api_key="test-key")
+    assert statuses[0]["status"] == "OK"
+    assert ledger.count("news_title_translations") == 2
+    assert translate_pending_headlines(ledger, api_key="test-key") == []
+
+
+def test_json_object_decoder_accepts_fence_and_trailing_text() -> None:
+    assert annotation_module._decode_json_object(
+        '```json\n{"headline_zh":"黄金上涨"}\n``` extra'
+    ) == {"headline_zh": "黄金上涨"}
+
+
 def test_duplicate_cluster_prefers_full_content_for_annotation(
     tmp_path, monkeypatch
 ) -> None:

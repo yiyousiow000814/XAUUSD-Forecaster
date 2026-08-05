@@ -209,6 +209,21 @@ footer { font-size:13px; font-weight:600; letter-spacing:.06em; }
 .component-status article em { display:block; margin-top:8px; color:var(--red); font-size:10px; overflow-wrap:anywhere; }
 .component-ok,.component-stale { display:inline-block; padding:4px 7px; border:1px solid var(--ink); font-size:10px; font-weight:900; }
 .component-ok { background:var(--green); color:var(--paper); }.component-stale { background:#ecc2b8; color:var(--red); }
+.source-health { margin-top:24px; border:1px solid var(--ink); background:var(--paper); }
+.source-health>header { display:grid; grid-template-columns:1fr 1fr; gap:24px; align-items:end; padding:22px; border-bottom:1px solid var(--ink); }
+.source-health h2 { margin:5px 0 0; font-family:var(--font-display); font-size:38px; }
+.source-health header p { margin:0; font-size:14px; line-height:1.6; }
+.source-health-head,.source-health article { display:grid; grid-template-columns:1.15fr .95fr .8fr 1.25fr; gap:18px; }
+.source-health-head { padding:11px 18px; background:var(--ink); color:var(--paper); font-size:13px; font-weight:800; }
+.source-health article { align-items:start; min-height:98px; padding:16px 18px; border-bottom:1px solid rgba(17,17,15,.3); }
+.source-health article:last-child { border-bottom:0; }
+.source-health article div { min-width:0; }
+.source-health article strong,.source-health article small { display:block; }
+.source-health article strong { font-size:14px; }
+.source-health article small { margin-top:6px; color:var(--muted); font-size:12px; font-weight:650; line-height:1.45; overflow-wrap:anywhere; }
+.source-health-badge { display:inline-block; width:max-content; padding:5px 8px; border:1px solid var(--ink); font-size:11px; }
+.health-healthy { background:#d9e4c7; color:var(--green); }.health-degraded,.health-stale { background:#ead8a9; color:#765414; }.health-error { background:#f0c3ba; color:var(--red); }
+.source-health-error strong { color:var(--red); }.source-health-error small { max-height:4.35em; overflow:hidden; }
 .quota-summary { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1px; margin-top:24px; border:1px solid var(--ink); background:var(--ink); }
 .quota-summary article { background:var(--paper); padding:22px; }
 .quota-summary span,.quota-summary small { display:block; color:var(--muted); font-size:13px; font-weight:700; }
@@ -242,6 +257,9 @@ footer { font-size:13px; font-weight:600; letter-spacing:.06em; }
 @media (max-width:850px){
   .status-hero { align-items:flex-start; flex-direction:column; }
   .component-status>header { grid-template-columns:1fr; }
+  .source-health>header { grid-template-columns:1fr; }
+  .source-health-head { display:none; }
+  .source-health article { grid-template-columns:1fr 1fr; }
   .component-status>div { grid-template-columns:1fr 1fr; }
   .quota-summary { grid-template-columns:1fr 1fr; }
   .quota-summary article:last-child:nth-child(odd) { grid-column:1/-1; }
@@ -255,5 +273,6 @@ footer { font-size:13px; font-weight:600; letter-spacing:.06em; }
 @media (max-width:520px){
   .component-status>div { grid-template-columns:1fr; }
   .quota-summary { grid-template-columns:1fr; }
+  .source-health article { grid-template-columns:1fr; }
   .quota-summary article:last-child:nth-child(odd) { grid-column:auto; }
 }

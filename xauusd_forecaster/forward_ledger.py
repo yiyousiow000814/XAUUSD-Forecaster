@@ -185,6 +185,8 @@ CREATE TABLE IF NOT EXISTS source_polls (
     error_type TEXT,
     error TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_source_polls_source_time
+ON source_polls(source, fetched_time DESC);
 
 CREATE TABLE IF NOT EXISTS decision_events (
     decision_id TEXT PRIMARY KEY,

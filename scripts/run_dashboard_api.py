@@ -27,11 +27,106 @@ from xauusd_forecaster.annotation import (  # noqa: E402
     GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
     GEMINI_DAILY_PRIORITY_RESERVE,
     GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
+    INVALID_CHINESE_TITLE,
     configured_gemini_api_keys,
 )
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger  # noqa: E402
 from xauusd_forecaster.training import MARKET_FEATURES  # noqa: E402
 from xauusd_forecaster.learning_curves import learning_curve_payload  # noqa: E402
+
+
+NEWS_SOURCE_DEFINITIONS = {
+    "federal_reserve_full_text": ("Federal Reserve", "发布源", 15, ("federal_reserve_monetary", "federal_reserve_press_all", "federal_reserve_speeches_testimony")),
+    "us_treasury_press_releases": ("U.S. Treasury", "发布源", 45, ("us_treasury_press_releases",)),
+    "bea_economic_releases": ("U.S. BEA", "发布源", 45, ("bea_economic_releases",)),
+    "ecb_press_releases": ("European Central Bank", "发布源", 45, ("ecb_press_releases",)),
+    "eia_press_releases": ("U.S. EIA Press", "发布源", 45, ("eia_press_releases",)),
+    "eia_today_in_energy": ("U.S. EIA Energy", "发布源", 45, ("eia_today_in_energy",)),
+    "gdelt_gold_geopolitics": ("GDELT", "发布源", 75, ("gdelt_gold_geopolitics",)),
+    "google_news_gold_context": ("Google News Context", "发布源", 45, ("google_news_gold_context",)),
+    "google_news_gold_geopolitics": ("Google News Geopolitics", "备用发布源", 420, ("google_news_gold_geopolitics",)),
+    "world_gold_council_central_banks": ("World Gold Council", "发布源", 420, ("world_gold_council_central_banks",)),
+    "non_fed_full_text": ("非 Fed 正文解析器", "正文链路", 45, ()),
+}
+
+
+def _parse_utc(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[dict]:
+    rows = []
+    for source, (label, role, stale_minutes, revision_sources) in NEWS_SOURCE_DEFINITIONS.items():
+        polls = connection.execute(
+            """SELECT count(*) total,
+                      sum(status='OK') ok_count,
+                      sum(status='PARTIAL') partial_count,
+                      sum(status='ERROR') error_count,
+                      max(CASE WHEN status='OK' THEN fetched_time END) last_success
+               FROM source_polls WHERE source=?""",
+            (source,),
+        ).fetchone()
+        latest = connection.execute(
+            """SELECT fetched_time, status, error_type, error
+               FROM source_polls WHERE source=?
+               ORDER BY fetched_time DESC, poll_id DESC LIMIT 1""",
+            (source,),
+        ).fetchone()
+        latest_error = connection.execute(
+            """SELECT fetched_time, error_type, error
+               FROM source_polls WHERE source=? AND status<>'OK'
+               ORDER BY fetched_time DESC, poll_id DESC LIMIT 1""",
+            (source,),
+        ).fetchone()
+        item_count = revision_count = full_text_count = 0
+        latest_item_time = None
+        if revision_sources:
+            placeholders = ",".join("?" for _ in revision_sources)
+            evidence = connection.execute(
+                f"""SELECT count(DISTINCT source || ':' || source_item_id) item_count,
+                            count(*) revision_count,
+                            count(DISTINCT CASE WHEN body LIKE '[FULL_TEXT%'
+                              THEN source || ':' || source_item_id END) full_text_count,
+                            max(collector_first_seen_time) latest_item_time
+                     FROM news_revisions WHERE source IN ({placeholders})""",
+                revision_sources,
+            ).fetchone()
+            item_count = int(evidence["item_count"] or 0)
+            revision_count = int(evidence["revision_count"] or 0)
+            full_text_count = int(evidence["full_text_count"] or 0)
+            latest_item_time = evidence["latest_item_time"]
+        latest_time = _parse_utc(latest["fetched_time"] if latest else None)
+        age_seconds = max(0.0, (now - latest_time).total_seconds()) if latest_time else None
+        latest_status = latest["status"] if latest else "NO_DATA"
+        if latest_status == "ERROR":
+            health = "DEGRADED" if role == "正文链路" else "ERROR"
+        elif latest_status == "PARTIAL":
+            health = "DEGRADED"
+        elif age_seconds is None or age_seconds > stale_minutes * 60:
+            health = "STALE"
+        else:
+            health = "HEALTHY"
+        rows.append({
+            "source": source, "label": label, "role": role, "health": health,
+            "latest_status": latest_status,
+            "latest_poll_time": latest["fetched_time"] if latest else None,
+            "last_success": polls["last_success"] or (
+                latest["fetched_time"] if role == "正文链路" and latest_status == "PARTIAL" else None
+            ), "age_seconds": age_seconds,
+            "last_error_time": latest_error["fetched_time"] if latest_error else None,
+            "last_error_type": latest_error["error_type"] if latest_error else None,
+            "last_error": latest_error["error"] if latest_error else None,
+            "poll_count": int(polls["total"] or 0),
+            "ok_count": int(polls["ok_count"] or 0),
+            "partial_count": int(polls["partial_count"] or 0),
+            "error_count": int(polls["error_count"] or 0),
+            "item_count": item_count, "revision_count": revision_count,
+            "full_text_count": full_text_count, "latest_item_time": latest_item_time,
+        })
+    return rows
 
 
 def _latest_quote_received(database: Path) -> str | None:
@@ -212,7 +307,8 @@ def _dashboard_payload(database: Path) -> dict:
                    WHERE latest_t.source=n.source
                      AND latest_t.source_item_id=n.source_item_id
                      AND latest_t.revision_number=n.revision_number
-                   ORDER BY latest_t.parsed_at DESC, latest_t.translation_id DESC
+                   ORDER BY (latest_t.headline_zh=?) ASC,
+                            latest_t.parsed_at DESC, latest_t.translation_id DESC
                    LIMIT 1)
                LEFT JOIN news_annotations a
                  ON a.annotation_id=(
@@ -280,7 +376,7 @@ def _dashboard_payload(database: Path) -> dict:
                                  n.collector_first_seen_time) DESC,
                         n.source, n.source_item_id
                LIMIT 200""",
-            (now.isoformat(timespec="microseconds"),),
+            (now.isoformat(timespec="microseconds"), INVALID_CHINESE_TITLE),
         ).fetchall()
         annotation_queue = connection.execute(
             """SELECT
@@ -411,6 +507,7 @@ def _dashboard_payload(database: Path) -> dict:
             "gemini_annotator": connection.execute("SELECT max(parsed_at) FROM news_annotations").fetchone()[0],
         }
         integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+        news_source_health = _news_source_health(connection, now)
     finally:
         connection.close()
 
@@ -533,6 +630,7 @@ def _dashboard_payload(database: Path) -> dict:
         "outcome_summary": dict(valid),
         "recent_decisions": [serialize_row(row) for row in recent],
         "recent_news": news,
+        "news_source_health": news_source_health,
         "annotation_queue": {
             "ready": int(annotation_queue["ready"] or 0),
             "queued": int(annotation_queue["queued"] or 0),

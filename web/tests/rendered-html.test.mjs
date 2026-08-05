@@ -35,7 +35,9 @@ test("renders the Gemini quota status route", async () => {
   assert.match(html, /reset-countdown/);
   assert.match(html, /逐 Key 配额/);
   assert.match(html, /Pacific midnight/);
-  assert.match(html, /每个组件分别报告/);
+  assert.match(html, /系统组件状态/);
+  assert.match(html, /新闻来源状态/);
+  assert.match(html, /正在读取状态/);
 });
 
 test("renders the news and decision audit route", async () => {

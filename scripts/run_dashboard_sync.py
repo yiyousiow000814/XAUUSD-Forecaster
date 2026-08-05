@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -36,6 +38,37 @@ def sync_once(config: dict) -> None:
             raise RuntimeError(f"dashboard sync returned HTTP {response.status}")
 
 
+def sync_with_retry(config: dict, *, attempts: int = 3) -> int:
+    """Retry transient transport failures without waiting for the next sync cycle."""
+    for attempt in range(1, attempts + 1):
+        try:
+            sync_once(config)
+            return attempt
+        except Exception as error:
+            transient = isinstance(
+                error,
+                (ConnectionError, TimeoutError, http.client.RemoteDisconnected),
+            ) or (
+                isinstance(error, urllib.error.HTTPError)
+                and (error.code == 429 or error.code >= 500)
+            )
+            if not transient or attempt >= attempts:
+                raise
+            print(
+                json.dumps(
+                    {
+                        "event": "DASHBOARD_SYNC_RETRY",
+                        "attempt": attempt,
+                        "error_type": type(error).__name__,
+                        "error": str(error)[:500],
+                    }
+                ),
+                flush=True,
+            )
+            time.sleep(float(attempt * 2))
+    raise RuntimeError("dashboard sync retry loop exhausted")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -45,8 +78,13 @@ def main() -> int:
     config = json.loads(args.config.read_text(encoding="utf-8"))
     while True:
         try:
-            sync_once(config)
-            print(json.dumps({"event": "DASHBOARD_SYNC_OK"}), flush=True)
+            attempts_used = sync_with_retry(config)
+            print(
+                json.dumps(
+                    {"event": "DASHBOARD_SYNC_OK", "attempts_used": attempts_used}
+                ),
+                flush=True,
+            )
         except Exception as error:
             print(
                 json.dumps(

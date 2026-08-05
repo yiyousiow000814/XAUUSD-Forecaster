@@ -34,7 +34,8 @@ COMPATIBLE_PROMPT_VERSIONS = (
     PROMPT_VERSION,
     "news-json-v8-strict-zh-source-number-lexemes",
 )
-TITLE_PROMPT_VERSION = "headline-zh-v2-local-display-recovery"
+TITLE_PROMPT_VERSION = "headline-zh-v3-strict-retry"
+INVALID_CHINESE_TITLE = "来源新闻（中文标题待校验）"
 HIGH_PRIORITY_NEWS_SOURCES = frozenset({"federal_reserve_monetary"})
 
 
@@ -316,7 +317,9 @@ def translate_pending_headlines(
         WHERE NOT EXISTS (
             SELECT 1 FROM news_title_translations t
             WHERE t.source=n.source AND t.source_item_id=n.source_item_id
-              AND t.revision_number=n.revision_number)
+              AND t.revision_number=n.revision_number
+              AND trim(t.headline_zh)<>?
+              AND t.headline_zh GLOB '*[一-龥]*')
           AND NOT EXISTS (
             SELECT 1 FROM news_revisions newer
             WHERE newer.source=n.source
@@ -347,12 +350,19 @@ def translate_pending_headlines(
                   AND f2.llm_model_version=f.llm_model_version
                   AND f2.prompt_version=f.prompt_version)
               AND (f.is_terminal=1 OR f.next_retry_at > ?))
-        ORDER BY COALESCE(n.source_published_time,
+        ORDER BY EXISTS (
+            SELECT 1 FROM news_title_translations retry_t
+            WHERE retry_t.source=n.source
+              AND retry_t.source_item_id=n.source_item_id
+              AND retry_t.revision_number=n.revision_number
+              AND trim(retry_t.headline_zh)=?) DESC,
+                 COALESCE(n.source_published_time,
                           n.collector_first_seen_time) DESC
         LIMIT ?""",
         (
-            selected_model, TITLE_PROMPT_VERSION,
-            datetime.now(UTC).isoformat(timespec="microseconds"), capacity,
+            INVALID_CHINESE_TITLE, selected_model, TITLE_PROMPT_VERSION,
+            datetime.now(UTC).isoformat(timespec="microseconds"),
+            INVALID_CHINESE_TITLE, capacity,
         ),
     ).fetchall()
     statuses: list[dict[str, object]] = []
@@ -673,7 +683,21 @@ def _call_gemini_chinese_repair(
     )
     with urllib.request.urlopen(request, timeout=120.0) as response:
         envelope = json.loads(response.read())
-    return json.loads(envelope["candidates"][0]["content"]["parts"][0]["text"])
+    return _decode_json_object(
+        envelope["candidates"][0]["content"]["parts"][0]["text"]
+    )
+
+
+def _decode_json_object(raw: object) -> dict:
+    """Read the first JSON object while tolerating fences or trailing model prose."""
+    text = str(raw or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, count=1, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```\s*$", "", text, count=1)
+    result, _ = json.JSONDecoder().raw_decode(text)
+    if not isinstance(result, dict):
+        raise ValueError("LLM response must be a JSON object")
+    return result
 
 
 def _call_gemini_title(api_key: str, model: str, headline: str) -> tuple[str, str]:
@@ -704,15 +728,14 @@ def _call_gemini_title(api_key: str, model: str, headline: str) -> tuple[str, st
     )
     with urllib.request.urlopen(request, timeout=120.0) as response:
         envelope = json.loads(response.read())
-    result = json.loads(envelope["candidates"][0]["content"]["parts"][0]["text"])
+    result = _decode_json_object(
+        envelope["candidates"][0]["content"]["parts"][0]["text"]
+    )
     headline_zh = str(result.get("headline_zh") or "").strip()
     translated = {"headline_zh": headline_zh}
     _recover_display_fields(translated, headline, "")
     headline_zh = translated["headline_zh"]
-    try:
-        _require_simplified_chinese(headline_zh, "headline_zh", 2, 1.0, 20)
-    except ValueError:
-        headline_zh = "来源新闻（中文标题待校验）"
+    _require_simplified_chinese(headline_zh, "headline_zh", 2, 1.0, 20)
     return headline_zh, str(envelope.get("modelVersion") or model)
 
 
