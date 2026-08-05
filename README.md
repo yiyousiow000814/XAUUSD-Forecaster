@@ -75,17 +75,19 @@ fields are frozen in `config/forward.example.json`.
 Generated databases, epoch receipts, U5 state, logs, and model artifacts stay
 under the ignored `.local/forward/` tree. Completed quote days are compressed
 with checksum receipts, and a verified SQLite online backup is kept locally.
-Run `scripts/run_news_annotator.py` to use the Gemini 3.5 Flash-Lite
-fixed-schema news annotator. `GEMINI_API_KEYS` accepts a semicolon-separated
+Run `scripts/run_news_annotator.py` to use the fixed-schema news annotator.
+Gemini 3.5 Flash-Lite is primary; Gemini 3.1 Flash-Lite takes routine full-text
+work only after the primary routine budget reaches its protected reserve.
+`GEMINI_API_KEYS` accepts a semicolon-separated
 rotation pool, while `GEMINI_API_KEY` remains the single-key fallback. Both are
 read from the local environment and never committed. Neither the collector nor the annotator contains an
 order-submission surface.
 
-Every outbound Gemini attempt is reserved in `.local/forward/gemini-quota.json`
-before transmission. The file stores anonymous key fingerprints only, stops a
-key at 500 attempts for the Pacific quota day, and starts a fresh counter at
-Pacific midnight. Google applies Gemini rate limits per project rather than per
-API key, so keys belonging to one project may still share the upstream quota.
+Every outbound Gemini attempt is reserved before transmission. Gemini 3.5 and
+3.1 use independent local quota ledgers; both store anonymous key fingerprints
+only, stop a key at 500 attempts for the Pacific quota day, and start fresh at
+Pacific midnight. Google applies Gemini rate limits per project and model, so
+the local ledgers remain conservative safety limits rather than provider truth.
 The final 150 Flash requests are reserved for monetary-policy, CPI, and payroll
 events. Display-number and language validation problems are recovered locally;
 an untrusted translation is retained as a zero-confidence neutral audit record.

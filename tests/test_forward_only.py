@@ -19,6 +19,7 @@ from xauusd_forecaster.content import (
 )
 from xauusd_forecaster.inference import build_shadow_predictions
 from xauusd_forecaster.annotation import annotate_pending_news, translate_pending_headlines
+from xauusd_forecaster.factors import aggregate_news_features
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
 from xauusd_forecaster.maintenance import (
     archive_completed_quote_days,
@@ -1394,6 +1395,75 @@ def test_gemini_daily_quota_counts_attempts_and_resets_at_pacific_midnight(
     assert key not in path.read_text(encoding="utf-8")
     assert quota.snapshot((key,), after_reset)["keys"][0]["sent"] == 0
     assert quota.reserve(key, after_reset)
+
+
+def test_gemini_31_has_an_independent_fallback_quota(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    key = "test-key"
+    assert annotation_module.gemini_routine_remaining(
+        ledger, annotation_module.DEFAULT_GEMINI_MODEL, key
+    ) == 350
+    assert annotation_module.gemini_routine_remaining(
+        ledger, annotation_module.FALLBACK_GEMINI_MODEL, key
+    ) == 500
+    primary = GeminiQuotaLedger(tmp_path / "gemini-quota.json")
+    primary.seed(key, 500)
+    assert annotation_module.gemini_routine_remaining(
+        ledger, annotation_module.DEFAULT_GEMINI_MODEL, key
+    ) == 0
+    assert annotation_module.gemini_routine_remaining(
+        ledger, annotation_module.FALLBACK_GEMINI_MODEL, key
+    ) == 500
+
+
+def test_gemini_31_annotation_is_training_visible_and_not_reprocessed(
+    tmp_path, monkeypatch
+) -> None:
+    now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "Gold geopolitical source text without numeric claims. " * 20
+    ledger.append_news_revision(
+        {
+            "source": "fallback-test", "source_item_id": "one",
+            "collector_first_seen_time": now, "fetched_time": now,
+            "headline": "Gold geopolitical update", "body": body,
+            "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+            "cluster_id": "fallback-test-cluster",
+        }
+    )
+    vector = {
+        "headline_zh": "黄金地缘局势更新",
+        "summary_zh": "来源报道黄金相关地缘局势出现更新，内容已经完整保存。",
+        "event_type": "geopolitical", "entities": [],
+        "hawkishness": 0.0, "inflation_impulse": 0.0,
+        "growth_impulse": 0.0, "geopolitical_risk": 0.8,
+        "usd_impulse": 0.0, "novelty": 0.7, "confidence": 0.9,
+    }
+
+    def fallback_call(_key, model, *_args):
+        assert model == annotation_module.FALLBACK_GEMINI_MODEL
+        return dict(vector), model
+
+    monkeypatch.setattr(annotation_module, "_call_gemini", fallback_call)
+    statuses = annotate_pending_news(
+        ledger,
+        provider="gemini",
+        api_key="test-key",
+        model=annotation_module.FALLBACK_GEMINI_MODEL,
+        limit=1,
+    )
+    assert statuses[0]["status"] == "OK"
+    features = aggregate_news_features(
+        ledger, datetime.now(UTC) + timedelta(minutes=1)
+    )
+    assert features["news_geopolitical_risk"] == pytest.approx(0.8)
+    assert annotate_pending_news(
+        ledger,
+        provider="gemini",
+        api_key="test-key",
+        model=annotation_module.DEFAULT_GEMINI_MODEL,
+        limit=1,
+    ) == []
 
 
 def test_completed_quotes_are_archived_and_ledger_backup_is_valid(tmp_path) -> None:

@@ -35,6 +35,10 @@ NEWS_PROMPT_VERSIONS = (
     "news-json-v9-local-display-recovery",
     "news-json-v8-strict-zh-source-number-lexemes",
 )
+NEWS_MODEL_VERSIONS = (
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+)
 
 MACRO_FEATURE_MAP = {
     "DGS2": ("rate_2y_level", "rate_2y_change"),
@@ -50,7 +54,7 @@ def aggregate_news_features(
     ledger: ForwardLedger,
     decision_time: datetime,
     *,
-    model_version: str = "gemini-3.5-flash-lite",
+    model_versions: tuple[str, ...] = NEWS_MODEL_VERSIONS,
     prompt_versions: tuple[str, ...] = NEWS_PROMPT_VERSIONS,
     half_life_minutes: float = 360.0,
 ) -> dict[str, float]:
@@ -74,19 +78,26 @@ def aggregate_news_features(
         for row in canonical_news.values()
     }
     prompt_priority = {version: index for index, version in enumerate(prompt_versions)}
+    model_priority = {version: index for index, version in enumerate(model_versions)}
     selected_by_item = {}
     for row in ledger.visible_annotations(decision_time):
         key = (row["source"], row["source_item_id"])
         if (
-            row["llm_model_version"] != model_version
+            row["llm_model_version"] not in model_priority
             or row["prompt_version"] not in prompt_priority
             or latest_news.get(key) != int(row["revision_number"])
         ):
             continue
         current = selected_by_item.get(key)
-        if current is None or prompt_priority[row["prompt_version"]] < prompt_priority[
-            current["prompt_version"]
-        ]:
+        candidate_priority = (
+            prompt_priority[row["prompt_version"]],
+            model_priority[row["llm_model_version"]],
+        )
+        current_priority = (
+            prompt_priority[current["prompt_version"]],
+            model_priority[current["llm_model_version"]],
+        ) if current is not None else None
+        if current_priority is None or candidate_priority < current_priority:
             selected_by_item[key] = row
     selected = list(selected_by_item.values())
     totals = {name: 0.0 for name in NEWS_FEATURES}

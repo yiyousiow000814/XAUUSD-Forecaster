@@ -55,6 +55,11 @@ The active Gemini prompt receives the complete stored source body without an
 application-level character slice and appends a concise Simplified-Chinese
 summary together with the structured impulse fields. A new prompt version is a
 new immutable annotation; it never rewrites an earlier interpretation.
+Gemini 3.5 Flash-Lite is the primary annotator. Its last 150 daily local
+requests remain reserved for monetary-policy, CPI, and payroll events. Gemini
+3.1 Flash-Lite may annotate routine full-text items only after the 3.5 routine
+budget reaches that reserve. Both model identities and quota ledgers remain
+separate and are accepted by the same point-in-time training contract.
 
 Display-number formatting is repaired deterministically against source
 lexemes. Unsupported numbers are replaced by a nonnumeric disclosure and lower
@@ -64,7 +69,7 @@ all directional impulses, novelty, and confidence become zero. Provider,
 transport, or malformed-JSON failures append a `news_llm_failures` row before
 retry. HTTP 429 and transient 5xx failures use bounded progressive backoff and
 become terminal after five attempts. Terminal rows remain auditable and are
-not automatically requeued. The daily Flash budget keeps 150 requests reserved
+not automatically requeued. The primary Flash budget keeps 150 requests reserved
 for monetary-policy, CPI, and payroll events; routine news cannot consume that
 reserve. Exhausting the current minute's local request slots leaves the item
 pending for the next batch and does not create a failure record.

@@ -26,6 +26,7 @@ type StatusPayload = {
   annotation_queue: {
     configured_key_count: number;
     available_key_count: number;
+    fallback_available_key_count: number;
     requests_per_minute_per_key: number;
     requests_per_minute: number;
     backing_off: number;
@@ -34,9 +35,10 @@ type StatusPayload = {
     routine_remaining: number;
   };
   gemini_quota: QuotaState;
+  gemini_31_quota: QuotaState;
   gemma_quota: QuotaState;
   llm_routing: {
-    action_bearing: { model: string; role: string };
+    action_bearing: { model: string; fallback_model: string; role: string };
     display_only: { model: string; role: string; requests_per_minute: number };
     antigravity: { enabled: boolean; reason: string };
   };
@@ -112,6 +114,7 @@ export default function StatusPage() {
   }, []);
 
   const quota = payload?.gemini_quota;
+  const fallbackQuota = payload?.gemini_31_quota;
   const gemmaQuota = payload?.gemma_quota;
 
   return (
@@ -141,6 +144,7 @@ export default function StatusPage() {
         <article><span>已配置 KEY</span><strong>{payload?.annotation_queue.configured_key_count ?? "—"}</strong><small>当前可用 {payload?.annotation_queue.available_key_count ?? "—"} · 只显示匿名编号</small></article>
         <article><span>Flash 今日已发送</span><strong>{quota?.total_sent ?? "—"}</strong><small>重要正文与训练特征</small></article>
         <article><span>Flash 今日剩余</span><strong className="good">{quota?.total_remaining ?? "—"}</strong><small>本机账本上限</small></article>
+        <article><span>3.1 今日剩余</span><strong className="good">{fallbackQuota?.total_remaining ?? "—"}</strong><small>3.5 普通额度用尽后接管</small></article>
         <article><span>普通新闻可用</span><strong>{payload?.annotation_queue.routine_remaining ?? "—"}</strong><small>不会动用重要新闻保留额</small></article>
         <article><span>重要新闻保留</span><strong className="good">{payload?.annotation_queue.priority_reserve ?? "—"}</strong><small>FOMC、CPI、Payroll 专用</small></article>
         <article><span>错误退避中</span><strong>{payload?.annotation_queue.backing_off ?? "—"}</strong><small>到期前不会重复请求</small></article>
@@ -149,17 +153,18 @@ export default function StatusPage() {
       </section>
 
       <section className="routing-grid">
-        <article><span>重要 / 会进入训练</span><strong>{payload?.llm_routing.action_bearing.model ?? "Gemini 3.5 Flash-Lite"}</strong><p>{payload?.llm_routing.action_bearing.role ?? "完整正文、结构化事件与训练特征"}</p></article>
+        <article><span>重要 / 会进入训练</span><strong>{payload?.llm_routing.action_bearing.model ?? "Gemini 3.5 Flash-Lite"} → {payload?.llm_routing.action_bearing.fallback_model ?? "Gemini 3.1 Flash-Lite"}</strong><p>{payload?.llm_routing.action_bearing.role ?? "3.5 优先，普通额度用尽后由 3.1 接管"}</p></article>
         <article><span>低重要性 / 仅展示</span><strong>{payload?.llm_routing.display_only.model ?? "Gemma 4 31B"}</strong><p>{payload?.llm_routing.display_only.role ?? "标题中文翻译，不进入模型训练"}</p></article>
         <article><span>暂不启用</span><strong>Antigravity</strong><p>{payload?.llm_routing.antigravity.reason ?? "每日额度不适合批量新闻"}</p></article>
       </section>
 
       <QuotaPanel title="Gemini 3.5 Flash-Lite · 逐 Key 配额" eyebrow="ACTION-BEARING / FULL CONTENT" quota={quota} nowMs={nowMs} />
+      <QuotaPanel title="Gemini 3.1 Flash-Lite · 逐 Key 配额" eyebrow="ACTION-BEARING FALLBACK / FULL CONTENT" quota={fallbackQuota} nowMs={nowMs} />
       <QuotaPanel title="Gemma 4 31B · 逐 Key 配额" eyebrow="DISPLAY-ONLY / TITLE TRANSLATION" quota={gemmaQuota} nowMs={nowMs} />
 
       <aside className="quota-note">
         <b>计数规则</b>
-        <p>每次请求在发往模型前永久计入各自账本，包括被 Google 拒绝的请求。Flash 每 key 本机上限 500，并保留一部分给 FOMC、CPI 与 Payroll；数字格式和中文显示问题会在本地恢复，同一分钟的 RPM 槽位用完只会延后到下一批，不算失败。只有 Google 服务或响应故障才进入持久退避。Gemma 每 key 本机上限 15,000。两个账本都在 Pacific midnight 自动切换。</p>
+        <p>每次请求在发往模型前永久计入各自账本，包括被 Google 拒绝的请求。3.5 每 key 本机上限 500，并保留一部分给 FOMC、CPI 与 Payroll；普通额度用尽后才由 3.1 接管。数字格式和中文显示问题会在本地恢复，同一分钟的 RPM 槽位用完只会延后到下一批，不算失败。只有 Google 服务或响应故障才进入持久退避。Gemma 每 key 本机上限 15,000。三个账本都在 Pacific midnight 自动切换。</p>
         <p>Google 实际额度按 project 而不是 API key 计算。如果多个 key 属于同一个 project，它们仍会共享 Google 的额度；本页显示的是本机逐模型、逐 key 的安全账本，不代表 Google 端保证额度。</p>
       </aside>
 

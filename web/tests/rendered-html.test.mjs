@@ -30,6 +30,7 @@ test("renders the Gemini quota status route", async () => {
   const html = await response.text();
   assert.match(html, /AI 模型使用状态/);
   assert.match(html, /Gemini 3.5 Flash-Lite/);
+  assert.match(html, /Gemini 3.1 Flash-Lite/);
   assert.match(html, /Gemma 4 31B/);
   assert.match(html, /reset-countdown/);
   assert.match(html, /逐 Key 配额/);

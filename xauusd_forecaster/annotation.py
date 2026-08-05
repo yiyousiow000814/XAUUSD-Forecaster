@@ -21,6 +21,8 @@ from .gemini_quota import GeminiQuotaLedger
 UTC = timezone.utc
 DEFAULT_OLLAMA_MODEL = "qwen3.5:9b"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
+FALLBACK_GEMINI_MODEL = "gemini-3.1-flash-lite"
+SUPPORTED_GEMINI_MODELS = (DEFAULT_GEMINI_MODEL, FALLBACK_GEMINI_MODEL)
 DEFAULT_GEMMA_MODEL = "gemma-4-31b-it"
 GEMINI_REQUESTS_PER_MINUTE_PER_KEY = 12
 GEMINI_MAX_PARALLEL_REQUESTS = 3
@@ -85,25 +87,34 @@ def annotate_pending_news(
     )
     request_pool = None
     if selected_provider == "gemini":
-        quota = GeminiQuotaLedger(ledger.path.parent / "gemini-quota.json")
+        quota = GeminiQuotaLedger(_gemini_quota_path(ledger, selected_model))
         request_pool = _GeminiRequestPool(keys, quota)
         total_capacity = request_pool.available_batch_capacity()
         if total_capacity <= 0:
             return [{"status": "DISABLED", "reason": "GEMINI_DAILY_QUOTA_EXHAUSTED"}]
+        reserve_total = (
+            GEMINI_DAILY_PRIORITY_RESERVE
+            if selected_model == DEFAULT_GEMINI_MODEL else 0
+        )
         routine_capacity = request_pool.available_batch_capacity(
-            reserve_total=GEMINI_DAILY_PRIORITY_RESERVE
+            reserve_total=reserve_total
         )
         effective_limit = (
             total_capacity if limit is None else min(max(1, limit), total_capacity)
         )
     else:
         effective_limit = max(1, limit or 1)
+    compatible_models = (
+        SUPPORTED_GEMINI_MODELS
+        if selected_provider == "gemini"
+        else (expected_model_identity, expected_model_identity)
+    )
     pending = ledger.connection.execute(
         """SELECT n.* FROM news_revisions n
         LEFT JOIN news_annotations a
          ON a.source=n.source AND a.source_item_id=n.source_item_id
          AND a.revision_number=n.revision_number
-         AND a.llm_model_version=? AND a.prompt_version IN (?, ?)
+         AND a.llm_model_version IN (?, ?) AND a.prompt_version IN (?, ?)
         WHERE a.annotation_id IS NULL
           AND length(trim(COALESCE(n.body, ''))) >= 240
           AND NOT EXISTS (
@@ -149,7 +160,7 @@ def annotate_pending_news(
                  n.collector_first_seen_time, n.source, n.source_item_id
         LIMIT ?""",
         (
-            expected_model_identity, *COMPATIBLE_PROMPT_VERSIONS,
+            *compatible_models, *COMPATIBLE_PROMPT_VERSIONS,
             expected_model_identity, PROMPT_VERSION,
             datetime.now(UTC).isoformat(timespec="microseconds"),
             effective_limit,
@@ -424,6 +435,24 @@ def configured_gemini_api_keys(api_key: str | None = None) -> tuple[str, ...]:
         candidates.extend(os.environ.get("GEMINI_API_KEYS", "").split(";"))
         candidates.append(os.environ.get("GEMINI_API_KEY", ""))
     return tuple(dict.fromkeys(key.strip() for key in candidates if key.strip()))
+
+
+def _gemini_quota_path(ledger: ForwardLedger, model: str) -> Path:
+    if model == DEFAULT_GEMINI_MODEL:
+        return ledger.path.parent / "gemini-quota.json"
+    safe_model = re.sub(r"[^a-z0-9.-]+", "-", model.lower())
+    return ledger.path.parent / f"{safe_model}-quota.json"
+
+
+def gemini_routine_remaining(
+    ledger: ForwardLedger,
+    model: str,
+    api_key: str | None = None,
+) -> int:
+    keys = configured_gemini_api_keys(api_key)
+    quota = GeminiQuotaLedger(_gemini_quota_path(ledger, model)).snapshot(keys)
+    reserve = GEMINI_DAILY_PRIORITY_RESERVE if model == DEFAULT_GEMINI_MODEL else 0
+    return max(0, int(quota["total_remaining"]) - reserve)
 
 
 def _call_gemini_with_fallback(

@@ -174,7 +174,7 @@ def train_news_residual_challenger(
         "training_cutoff": cutoff,
         "training_dataset_hash": evidence_hash,
         "feature_version": "forward-news-v1",
-        "news_prompt_version": "news-json-v9-local-display-recovery+v8-compatible",
+        "news_prompt_version": "gemini-3.5+3.1/news-v9+v8-compatible",
         "hyperparameters": {
             "alpha": alpha,
             "minimum_rows": minimum_rows,
@@ -228,7 +228,7 @@ def create_full_challenger(
         "training_cutoff": cutoff,
         "training_dataset_hash": evidence_hash,
         "feature_version": "forward-full-v1",
-        "news_prompt_version": "news-json-v9-local-display-recovery+v8-compatible",
+        "news_prompt_version": "gemini-3.5+3.1/news-v9+v8-compatible",
         "hyperparameters": {
             "minimum_rows": minimum_rows,
             "eligible_rows": eligible_count,

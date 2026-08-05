@@ -22,6 +22,7 @@ from xauusd_forecaster.factors import factor_coverage  # noqa: E402
 from xauusd_forecaster.annotation import (  # noqa: E402
     DEFAULT_GEMINI_MODEL,
     DEFAULT_GEMMA_MODEL,
+    FALLBACK_GEMINI_MODEL,
     GEMMA_REQUESTS_PER_DAY_PER_KEY,
     GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
     GEMINI_DAILY_PRIORITY_RESERVE,
@@ -175,12 +176,15 @@ def _dashboard_payload(database: Path) -> dict:
                    WHERE preferred_a.source=n.source
                      AND preferred_a.source_item_id=n.source_item_id
                      AND preferred_a.revision_number=n.revision_number
-                     AND preferred_a.llm_model_version='gemini-3.5-flash-lite'
+                     AND preferred_a.llm_model_version IN (
+                       'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
                      AND preferred_a.prompt_version IN (
                        'news-json-v9-local-display-recovery',
                        'news-json-v8-strict-zh-source-number-lexemes')
                    ORDER BY CASE preferred_a.prompt_version
                      WHEN 'news-json-v9-local-display-recovery' THEN 0 ELSE 1 END,
+                     CASE preferred_a.llm_model_version
+                       WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                      preferred_a.parsed_at DESC LIMIT 1)
                LEFT JOIN news_annotations legacy
                  ON legacy.source=n.source
@@ -202,11 +206,12 @@ def _dashboard_payload(database: Path) -> dict:
                      AND latest_f.source=n.source
                      AND latest_f.source_item_id=n.source_item_id
                      AND latest_f.revision_number=n.revision_number
-                     AND latest_f.llm_model_version='gemini-3.5-flash-lite'
+                     AND latest_f.llm_model_version IN (
+                       'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
                      AND latest_f.prompt_version='news-json-v9-local-display-recovery'
                      AND NOT (latest_f.error_type='RuntimeError'
                               AND latest_f.error='All configured Gemini keys unavailable for this batch')
-                   ORDER BY latest_f.attempt_number DESC LIMIT 1)
+                   ORDER BY latest_f.failed_at DESC LIMIT 1)
                WHERE NOT EXISTS (
                  SELECT 1 FROM news_revisions newer
                  WHERE newer.source=n.source
@@ -253,12 +258,15 @@ def _dashboard_payload(database: Path) -> dict:
                    WHERE preferred_a.source=n.source
                      AND preferred_a.source_item_id=n.source_item_id
                      AND preferred_a.revision_number=n.revision_number
-                     AND preferred_a.llm_model_version='gemini-3.5-flash-lite'
+                     AND preferred_a.llm_model_version IN (
+                       'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
                      AND preferred_a.prompt_version IN (
                        'news-json-v9-local-display-recovery',
                        'news-json-v8-strict-zh-source-number-lexemes')
                    ORDER BY CASE preferred_a.prompt_version
                      WHEN 'news-json-v9-local-display-recovery' THEN 0 ELSE 1 END,
+                     CASE preferred_a.llm_model_version
+                       WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                      preferred_a.parsed_at DESC LIMIT 1)
                LEFT JOIN news_llm_failures f
                  ON f.failure_id=(
@@ -268,11 +276,12 @@ def _dashboard_payload(database: Path) -> dict:
                      AND latest_f.source=n.source
                      AND latest_f.source_item_id=n.source_item_id
                      AND latest_f.revision_number=n.revision_number
-                     AND latest_f.llm_model_version='gemini-3.5-flash-lite'
+                     AND latest_f.llm_model_version IN (
+                       'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
                      AND latest_f.prompt_version='news-json-v9-local-display-recovery'
                      AND NOT (latest_f.error_type='RuntimeError'
                               AND latest_f.error='All configured Gemini keys unavailable for this batch')
-                   ORDER BY latest_f.attempt_number DESC LIMIT 1)
+                   ORDER BY latest_f.failed_at DESC LIMIT 1)
                WHERE NOT EXISTS (
                  SELECT 1 FROM news_revisions newer
                  WHERE newer.source=n.source
@@ -400,12 +409,18 @@ def _dashboard_payload(database: Path) -> dict:
     gemini_quota = GeminiQuotaLedger(database.parent / "gemini-quota.json").snapshot(
         gemini_keys
     )
+    gemini_31_quota = GeminiQuotaLedger(
+        database.parent / "gemini-3.1-flash-lite-quota.json"
+    ).snapshot(gemini_keys)
     gemma_quota = GeminiQuotaLedger(
         database.parent / "gemma-quota.json",
         daily_limit=GEMMA_REQUESTS_PER_DAY_PER_KEY,
     ).snapshot(gemini_keys)
     available_gemini_keys = sum(
         item["status"] == "AVAILABLE" for item in gemini_quota["keys"]
+    )
+    available_fallback_keys = sum(
+        item["status"] == "AVAILABLE" for item in gemini_31_quota["keys"]
     )
     flash_routine_remaining = max(
         0, int(gemini_quota["total_remaining"]) - GEMINI_DAILY_PRIORITY_RESERVE
@@ -436,6 +451,7 @@ def _dashboard_payload(database: Path) -> dict:
             "waiting_content": int(annotation_queue["waiting_content"] or 0),
             "configured_key_count": len(gemini_keys),
             "available_key_count": available_gemini_keys,
+            "fallback_available_key_count": available_fallback_keys,
             "requests_per_minute_per_key": GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
             "requests_per_minute": (
                 available_gemini_keys
@@ -445,11 +461,13 @@ def _dashboard_payload(database: Path) -> dict:
             "routine_remaining": flash_routine_remaining,
         },
         "gemini_quota": gemini_quota,
+        "gemini_31_quota": gemini_31_quota,
         "gemma_quota": gemma_quota,
         "llm_routing": {
             "action_bearing": {
                 "model": DEFAULT_GEMINI_MODEL,
-                "role": "完整正文、结构化事件与训练特征",
+                "fallback_model": FALLBACK_GEMINI_MODEL,
+                "role": "3.5 优先；普通额度用尽后 3.1 接管完整正文与训练特征",
             },
             "display_only": {
                 "model": DEFAULT_GEMMA_MODEL,
