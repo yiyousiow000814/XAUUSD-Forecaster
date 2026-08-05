@@ -156,7 +156,8 @@ def test_learning_stages_do_not_wait_for_sixty_days() -> None:
 def _insert_prediction(connection, decision_id: str, decision_time: datetime, *,
                        model_version: str = "market-test",
                        model_identity: str = "MARKET_ONLY",
-                       value_quote_return: float = 2.0) -> None:
+                       value_quote_return: float = 2.0,
+                       residual_u5: float = 0.1) -> None:
     connection.execute(
         "INSERT INTO predictions_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (decision_id, model_version, model_identity, decision_time.isoformat(),
@@ -167,8 +168,8 @@ def _insert_prediction(connection, decision_id: str, decision_time: datetime, *,
     )
     connection.execute(
         "INSERT INTO prediction_scores_v2 VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (decision_id, model_version, decision_time.isoformat(), value_quote_return, 0.2, 0.1,
-         0.01, 1, 0, f"score-{decision_id}"),
+        (decision_id, model_version, decision_time.isoformat(), value_quote_return, 0.2,
+         residual_u5, residual_u5 ** 2, 1, 0, f"score-{decision_id}-{model_version}"),
     )
 
 
@@ -212,6 +213,9 @@ def test_identity_curve_uses_only_latest_parallel_version_per_decision(tmp_path)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     created = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     decision = created + timedelta(hours=1)
+    _insert_model_update(
+        ledger.connection, "market-archived", "MARKET_ONLY", created - timedelta(hours=1)
+    )
     _insert_model_update(ledger.connection, "market-old", "MARKET_ONLY", created)
     _insert_model_update(
         ledger.connection, "market-new", "MARKET_ONLY", created + timedelta(minutes=30)
@@ -230,6 +234,15 @@ def test_identity_curve_uses_only_latest_parallel_version_per_decision(tmp_path)
     )
     assert len(curve["points"]) == 1
     assert curve["points"][0]["cumulative_quote_return"] == pytest.approx(2.0)
+    models = {row["model_version"]: row for row in payload["models"]}
+    assert models["market-new"]["lifecycle_status"] == "LATEST"
+    assert models["market-old"]["lifecycle_status"] == "PREVIOUS"
+    assert models["market-archived"]["lifecycle_status"] == "ARCHIVED"
+    rolling = next(
+        row for row in payload["rolling_processes"] if row["model_identity"] == "MARKET_ONLY"
+    )
+    assert rolling["oos_rows"] == 1
+    assert rolling["cumulative_quote_return"] == pytest.approx(2.0)
     ledger.close()
 
 
@@ -327,58 +340,65 @@ def test_market_crossfit_uses_purged_chronological_training_only(tmp_path, monke
     ledger.close()
 
 
-def test_uncertainty_uses_only_same_version_prior_oos_residuals(tmp_path) -> None:
+def test_rolling_uncertainty_uses_latest_version_per_prior_decision(tmp_path) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     base = datetime(2026, 8, 1, tzinfo=UTC)
-    for model, residual in (("market", 9.0), ("full", 0.25)):
-        ledger.connection.execute(
-            "INSERT INTO predictions_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (f"{model}-d", model, model.upper(), base.isoformat(), base.isoformat(),
-             "LIVE_OOS", "features", 0.0, None, 0.0, 0.0, None, None, "method",
-             "cal", 0, 0, 0, None, "EARLY", "WAIT", "WAIT", "PROVISIONAL"),
-        )
-        ledger.connection.execute(
-            "INSERT INTO prediction_scores_v2 VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (f"{model}-d", model, base.isoformat(), 0.0, 0.0, residual, residual ** 2,
-             0, 0, f"score-{model}"),
-        )
-    calibration = inference_v2._calibration(
-        ledger, "full", "FULL", base + timedelta(days=1)
+    _insert_model_update(
+        ledger.connection, "market-old", "MARKET_ONLY", base - timedelta(hours=2)
     )
+    _insert_model_update(
+        ledger.connection, "market-new", "MARKET_ONLY", base - timedelta(hours=1)
+    )
+    _insert_prediction(
+        ledger.connection, "same-decision", base, model_version="market-old",
+        residual_u5=9.0,
+    )
+    _insert_prediction(
+        ledger.connection, "same-decision", base, model_version="market-new",
+        residual_u5=0.25,
+    )
+    calibration = inference_v2._calibration(ledger, "MARKET_ONLY", base + timedelta(days=1))
     assert calibration["rows"] == 1
     assert calibration["half_width"] == pytest.approx(0.25)
     ledger.close()
 
 
-def test_evaluation_lifetime_uses_valid_days_not_prediction_count(tmp_path) -> None:
+def test_only_latest_and_previous_versions_are_active() -> None:
+    updates = [
+        {"model_identity": "MARKET_ONLY", "model_version": "market-3"},
+        {"model_identity": "FULL", "model_version": "full-3"},
+        {"model_identity": "MARKET_ONLY", "model_version": "market-2"},
+        {"model_identity": "FULL", "model_version": "full-2"},
+        {"model_identity": "MARKET_ONLY", "model_version": "market-1"},
+        {"model_identity": "FULL", "model_version": "full-1"},
+    ]
+    active = inference_v2._active_updates(updates)
+    assert [row["model_version"] for row in active] == [
+        "market-3", "full-3", "market-2", "full-2",
+    ]
+
+
+def test_unhealthy_predictions_do_not_enter_rolling_calibration(tmp_path) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     base = datetime(2026, 1, 1, tzinfo=UTC)
+    _insert_model_update(
+        ledger.connection, "market-live", "MARKET_ONLY", base - timedelta(hours=1)
+    )
     empty = {"version": "none", "rows": 0, "blocks": 0, "days": 0,
              "half_width": None, "status": "UNCALIBRATED"}
     for index in range(75):
         when = base + timedelta(minutes=5 * index)
         inference_v2._insert_prediction(
             ledger, decision_id=f"unhealthy-{index}", decision_time=when, created_at=when,
-            model_version="long-lived", model_identity="MARKET_ONLY", feature_hash="features",
+            model_version="market-live", model_identity="MARKET_ONLY", feature_hash="features",
             predicted=None, news_residual=None, ev_long=None, ev_short=None,
             calibration=empty, recommended="WAIT", status="DATA_UNHEALTHY",
         )
-    assert inference_v2._evaluation_window_open(
-        ledger, "long-lived", base + timedelta(days=1)
+    calibration = inference_v2._calibration(
+        ledger, "MARKET_ONLY", base + timedelta(days=1)
     )
-
-    for day in range(60):
-        when = base + timedelta(days=day, hours=12)
-        _insert_prediction(
-            ledger.connection, f"valid-{day}", when,
-            model_version="long-lived", value_quote_return=0.1,
-        )
-    assert inference_v2._evaluation_window_open(
-        ledger, "long-lived", base + timedelta(days=59, hours=13)
-    )
-    assert not inference_v2._evaluation_window_open(
-        ledger, "long-lived", base + timedelta(days=60)
-    )
+    assert calibration["rows"] == 0
+    assert calibration["status"] == "UNCALIBRATED"
     ledger.close()
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections import defaultdict
 from datetime import datetime
 
 import numpy as np
@@ -14,30 +15,41 @@ from .training import MARKET_FEATURES
 
 
 MIN_CALIBRATION_BLOCKS = 20
-MAX_EVALUATION_DAYS = 60
+ACTIVE_VERSIONS_PER_IDENTITY = 2
+MODEL_IDENTITIES = frozenset({"MARKET_ONLY", "NEWS_RESIDUAL", "FULL"})
 
 
-def _evaluation_window_open(ledger, model_version: str, decision_time: datetime) -> bool:
-    """Keep a frozen model alive for 60 distinct days with valid OOS scores."""
+def _active_updates(updates) -> list:
+    """Select only the newest and preceding frozen version per identity."""
+    counts: dict[str, int] = defaultdict(int)
+    active = []
+    for update in updates:
+        identity = update["model_identity"]
+        if identity not in MODEL_IDENTITIES or counts[identity] >= ACTIVE_VERSIONS_PER_IDENTITY:
+            continue
+        counts[identity] += 1
+        active.append(update)
+    return active
+
+
+def _calibration(ledger, model_identity: str, decision_time: datetime) -> dict:
+    """Calibrate the rolling lineage using the newest model at each prior decision."""
     rows = ledger.connection.execute(
-        """SELECT DISTINCT substr(p.decision_time,1,10) AS evaluation_day
-        FROM predictions_v2 p JOIN prediction_scores_v2 s
-          USING(source_decision_id, model_version)
-        WHERE p.model_version=? AND s.residual_u5 IS NOT NULL""",
-        (model_version,),
-    ).fetchall()
-    evaluated_days = {row["evaluation_day"] for row in rows}
-    current_day = decision_time.isoformat()[:10]
-    return current_day in evaluated_days or len(evaluated_days) < MAX_EVALUATION_DAYS
-
-
-def _calibration(ledger, model_version: str, model_identity: str, decision_time: datetime) -> dict:
-    rows = ledger.connection.execute(
-        """SELECT s.residual_u5, p.decision_time
-        FROM prediction_scores_v2 s JOIN predictions_v2 p
-          USING(source_decision_id, model_version)
-        WHERE s.model_version=? AND p.decision_time < ?
-        ORDER BY p.decision_time""", (model_version, decision_time.isoformat())
+        """WITH ranked AS (
+            SELECT s.residual_u5,p.decision_time,
+                   row_number() OVER (
+                       PARTITION BY p.source_decision_id,p.model_identity
+                       ORDER BY u.created_at DESC,u.model_version DESC
+                   ) AS version_rank
+            FROM prediction_scores_v2 s
+            JOIN predictions_v2 p USING(source_decision_id,model_version)
+            JOIN model_updates_v2 u USING(model_version)
+            WHERE p.model_identity=? AND p.decision_time>u.created_at
+              AND p.decision_time<?
+        )
+        SELECT residual_u5,decision_time FROM ranked
+        WHERE version_rank=1 ORDER BY decision_time""",
+        (model_identity, decision_time.isoformat()),
     ).fetchall()
     days = {}
     for row in rows:
@@ -49,7 +61,7 @@ def _calibration(ledger, model_version: str, model_identity: str, decision_time:
         "EARLY" if blocks else "UNCALIBRATED"
     )
     source_hash = canonical_hash([(row["decision_time"], row["residual_u5"]) for row in rows])
-    version = f"block-day-oos-{model_version}-{source_hash[:12]}"
+    version = f"rolling-lineage-day-oos-{model_identity.lower()}-{source_hash[:12]}"
     ledger.connection.execute(
         """INSERT OR IGNORE INTO calibration_snapshots_v2 VALUES
         (?,?,?,?,?,?,?,?,?,?,?)""",
@@ -104,15 +116,9 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
     features = json.loads(market_snapshot["features_json"])
     news_features = json.loads(news_snapshot["features_json"])
     values = [features.get(name) for name in MARKET_FEATURES]
-    for update in updates:
+    for update in _active_updates(updates):
         identity = update["model_identity"]
-        # Training cadence and evaluation lifetime are independent.  Every
-        # frozen version keeps producing Shadow predictions until it has 60
-        # distinct UTC days with valid OOS scores.  Unhealthy/invalid rows do
-        # not consume this lifetime.
-        if not _evaluation_window_open(ledger, update["model_version"], decision_time):
-            continue
-        calibration = _calibration(ledger, update["model_version"], identity, decision_time)
+        calibration = _calibration(ledger, identity, decision_time)
         if market_snapshot["data_health"] != "OK" or market_snapshot["u5"] is None \
                 or any(value is None for value in values):
             _insert_prediction(

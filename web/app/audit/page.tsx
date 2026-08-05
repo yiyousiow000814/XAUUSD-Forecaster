@@ -84,6 +84,21 @@ type LearningModel = {
   wait_rate: number | null;
   long_frequency: number;
   short_frequency: number;
+  active_rank: number | null;
+  lifecycle_status: "LATEST" | "PREVIOUS" | "ARCHIVED";
+};
+
+type RollingProcess = {
+  model_identity: string;
+  active_model_versions: string[];
+  oos_rows: number;
+  distinct_days: number;
+  cumulative_quote_return: number;
+  average_quote_return: number | null;
+  profit_factor_quote_adjusted: number | null;
+  max_drawdown_quote_return: number;
+  sharpe_quote_adjusted: number | null;
+  calibration_status: string;
 };
 
 type Payload = {
@@ -130,6 +145,14 @@ type Payload = {
     commission_status: string;
     slippage_status: string;
     models: LearningModel[];
+    rolling_processes: RollingProcess[];
+    zero_return_baseline: {
+      label: string;
+      model_identity: string;
+      cumulative_quote_return: number;
+      trained: boolean;
+      uses_ai: boolean;
+    };
     disclaimer: string;
   };
   factor_coverage: Array<{
@@ -166,6 +189,12 @@ const SOURCE_LABELS: Record<string, string> = {
   ecb_press_releases: "European Central Bank · 官方发布",
   us_treasury_press_releases: "U.S. Treasury · 官方发布",
   bea_economic_releases: "U.S. BEA · 经济数据发布",
+};
+const MODEL_LABELS: Record<string, string> = {
+  CHAMPION_0: "零收益安全基准",
+  MARKET_ONLY: "黄金自身 Ridge",
+  NEWS_RESIDUAL: "新闻残差 Ridge",
+  FULL: "黄金＋新闻 Ridge",
 };
 
 export default function AuditPage() {
@@ -229,6 +258,10 @@ export default function AuditPage() {
   const currentNewsPage = Math.min(newsPage, newsPageCount);
   const visibleNews = filteredNews.slice((currentNewsPage - 1) * NEWS_PER_PAGE, currentNewsPage * NEWS_PER_PAGE);
   const emptyNewsRows = Math.max(0, NEWS_PER_PAGE - visibleNews.length);
+  const activeLearningModels = (payload?.learning_curves.models ?? []).filter(
+    row => row.active_rank !== null,
+  );
+  const archivedModelCount = (payload?.learning_curves.models.length ?? 0) - activeLearningModels.length;
 
   return (
     <main className="audit-main">
@@ -272,7 +305,7 @@ export default function AuditPage() {
       <nav className="audit-tabs" aria-label="审计视图">
         <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻与 Gemini <b>{payload?.counts.latest_news_items ?? 0}</b></a>
         <a href="/audit?view=decisions" className={view === "decisions" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("decisions"); }}>决策与30分钟结果 <b>{payload?.counts.decision_events ?? 0}</b></a>
-        <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b>{payload?.learning_curves.models.length ?? 0}</b></a>
+        <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b>{activeLearningModels.length}</b></a>
         <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b>{payload?.factor_coverage.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</b></a>
       </nav>
 
@@ -341,7 +374,7 @@ export default function AuditPage() {
             </summary>
             <div className="prediction-grid">
               {row.predictions.map(model => <article key={model.model_version}>
-                <span>{model.model_identity}</span><h3>{model.recommended_action}</h3>
+                <span>{MODEL_LABELS[model.model_identity] ?? model.model_identity}</span><h3>{model.recommended_action}</h3>
                 <p>{model.prediction_status}</p>
                 <dl><div><dt>方向 U5</dt><dd>{number(model.predicted_direction_u5, 3)}</dd></div><div><dt>News residual</dt><dd>{number(model.predicted_news_residual_u5, 3)}</dd></div><div><dt>Long EV</dt><dd>{number(model.ev_long_u5, 3)}</dd></div><div><dt>Short EV</dt><dd>{number(model.ev_short_u5, 3)}</dd></div><div><dt>不确定性</dt><dd>{number(model.uncertainty_u5, 3)}</dd></div></dl>
                 <small>{model.model_version}</small>
@@ -369,22 +402,36 @@ export default function AuditPage() {
           <article><span>Next fit</span><strong>{payload?.learning_curves.next_training_threshold ?? 96}</strong><small>Preview 96 · Shadow 200 · 后续每50</small></article>
         </div>
         <div className="league-cost-note"><b>诚实成本口径</b><span>显示的是 Bid/Ask quote-cost-adjusted return；commission {payload?.learning_curves.commission_status ?? "UNCONFIGURED"}，slippage {payload?.learning_curves.slippage_status ?? "UNAVAILABLE_SHADOW"}，因此不是 net PnL。</span></div>
+        <section className="rolling-process-grid" aria-label="滚动训练流程长期成绩">
+          <article className="baseline-card">
+            <span>SAFETY BASELINE</span>
+            <h3>{payload?.learning_curves.zero_return_baseline.label ?? "零收益安全基准"}</h3>
+            <strong>{percent(payload?.learning_curves.zero_return_baseline.cumulative_quote_return ?? 0)}</strong>
+            <p>不训练、不使用 AI、不占 Ridge 版本名额，只代表什么都不做。</p>
+          </article>
+          {(payload?.learning_curves.rolling_processes ?? []).filter(row => row.active_model_versions.length > 0).map(row => <article key={row.model_identity}>
+            <span>ROLLING OOS · {row.calibration_status}</span>
+            <h3>{MODEL_LABELS[row.model_identity] ?? row.model_identity}</h3>
+            <strong>{percent(row.cumulative_quote_return)}</strong>
+            <p>{row.oos_rows} 条 · {row.distinct_days} 日 · PF {number(row.profit_factor_quote_adjusted, 2)}</p>
+          </article>)}
+        </section>
         {(payload?.learning_curves.models.length ?? 0) === 0 ? <div className="league-empty">
           <strong>正在建立第一版 Preview</strong><p>达到 96 条修复或 Forward 完整样本即可训练 Market Preview，不需要等待60天。曲线只从模型创建后的新 Decision 开始，绝不回填假历史成绩。</p>
         </div> : <div className="league-table-wrap"><table className="league-table learning-table">
           <thead><tr><th>版本 / 阶段</th><th>训练资料</th><th>之后 OOS</th><th>累计 / 平均</th><th>PF</th><th>MaxDD</th><th>Sharpe</th><th>区间状态</th></tr></thead>
-          <tbody>{payload?.learning_curves.models.map(row => <tr key={row.model_version}>
-            <td><b>{row.model_identity}</b><small>{row.model_stage} · {row.model_version}</small></td>
+          <tbody>{activeLearningModels.map(row => <tr key={row.model_version}>
+            <td><b>{MODEL_LABELS[row.model_identity] ?? row.model_identity}</b><span className={`version-role role-${row.lifecycle_status.toLowerCase()}`}>{row.lifecycle_status === "LATEST" ? "最新版" : "前一版"}</span><small>{row.model_stage} · {row.model_version}</small></td>
             <td><strong>{row.training_rows}</strong><small>cutoff {time(row.training_cutoff)}</small></td>
             <td><strong>{row.subsequent_oos_rows}</strong><small>{row.effective_blocks} blocks · {row.distinct_days} days</small></td>
             <td><strong>{percent(row.cumulative_quote_return)}</strong><small>平均 {percent(row.average_quote_return)}</small></td>
             <td><strong>{number(row.profit_factor_quote_adjusted, 2)}</strong><small>quote-adjusted</small></td>
             <td><strong>{percent(row.max_drawdown_quote_return)}</strong><small>累计回撤</small></td>
             <td><strong>{number(row.sharpe_quote_adjusted, 2)}</strong><small>至少5个 OOS 日后显示</small></td>
-            <td><span className="league-stage">{row.calibration_status}</span><small>宽度 {number(row.interval_width, 3)} · WAIT {row.wait_rate === null ? "—" : percent(row.wait_rate)}</small></td>
+            <td><span className="league-stage">{row.calibration_status}</span><small>滚动校准 · 宽度 {number(row.interval_width, 3)} · WAIT {row.wait_rate === null ? "—" : percent(row.wait_rate)}</small></td>
           </tr>)}</tbody>
         </table></div>}
-        <footer className="league-footer">{payload?.learning_curves.disclaimer ?? "早期曲线用于观察学习过程，不代表已证明盈利。"} Champion 始终是 Always Wait，Preview 与 Shadow 都没有下单权限，也不会自动晋升。</footer>
+        <footer className="league-footer">{payload?.learning_curves.disclaimer ?? "早期曲线用于观察学习过程，不代表已证明盈利。"} 当前只运行每个 Ridge 身份的最新版和前一版；{archivedModelCount} 个旧版本的 artifact、预测和成绩已永久归档。零收益安全基准不训练、不占模型名额。Preview 与 Shadow 都没有下单权限，也不会自动晋升。</footer>
       </section>}
 
       {view === "coverage" && <section className="coverage-grid">

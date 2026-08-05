@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -61,6 +62,14 @@ test("renders the news and decision audit route", async () => {
   assert.match(html, /Live OOS 学习曲线/);
   assert.match(html, /大视野覆盖/);
   assert.match(html, /LEARNING PROGRESS/);
+});
+
+test("labels the rolling lifecycle without presenting the safety baseline as AI", () => {
+  const source = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
+  assert.match(source, /零收益安全基准/);
+  assert.match(source, /最新版和前一版/);
+  assert.match(source, /不训练、不使用 AI、不占 Ridge 版本名额/);
+  assert.doesNotMatch(source, /Champion 始终是 Always Wait/);
 });
 
 test("keeps live quotes online between five-minute decisions", async () => {

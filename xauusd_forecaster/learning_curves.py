@@ -58,10 +58,17 @@ def learning_curve_payload(connection) -> dict:
         """SELECT coalesce(sum(news_exposed),0), coalesce(max(distinct_news_clusters),0)
         FROM derived_news_feature_snapshots"""
     ).fetchone()
-    models = []
-    for update in connection.execute(
+    updates = connection.execute(
         "SELECT * FROM model_updates_v2 ORDER BY created_at,model_identity"
-    ):
+    ).fetchall()
+    active_versions: dict[str, list[str]] = defaultdict(list)
+    for update in reversed(updates):
+        identity = update["model_identity"]
+        if len(active_versions[identity]) < 2:
+            active_versions[identity].append(update["model_version"])
+
+    models = []
+    for update in updates:
         rows = connection.execute(
             """SELECT p.decision_time,p.recommended_action,p.interval_width,
                       p.calibration_status,p.calibration_rows,p.calibration_effective_blocks,
@@ -79,6 +86,11 @@ def learning_curve_payload(connection) -> dict:
             daily[row["decision_time"][:10]] += float(row["value_quote_return"])
         metrics = _metrics(values, daily)
         latest = rows[-1] if rows else None
+        active_rank = (
+            active_versions[update["model_identity"]].index(update["model_version"]) + 1
+            if update["model_version"] in active_versions[update["model_identity"]]
+            else None
+        )
         models.append({
             "model_version": update["model_version"], "model_identity": update["model_identity"],
             "model_stage": update["model_stage"], "training_rows": update["training_rows"],
@@ -103,7 +115,51 @@ def learning_curve_payload(connection) -> dict:
             "calibration_rows": latest["calibration_rows"] if latest else 0,
             "calibration_effective_blocks": latest["calibration_effective_blocks"] if latest else 0,
             "calibration_distinct_days": latest["calibration_distinct_days"] if latest else 0,
+            "active_rank": active_rank,
+            "lifecycle_status": (
+                "LATEST" if active_rank == 1 else "PREVIOUS" if active_rank == 2 else "ARCHIVED"
+            ),
             **metrics,
+        })
+
+    rolling_processes = []
+    for identity in ("MARKET_ONLY", "NEWS_RESIDUAL", "FULL"):
+        rows = connection.execute(
+            """WITH ranked AS (
+                SELECT p.source_decision_id,p.decision_time,p.recommended_action,
+                       p.interval_width,p.calibration_status,
+                       p.calibration_rows,p.calibration_effective_blocks,
+                       p.calibration_distinct_days,s.value_quote_return,s.squared_error,
+                       s.direction_correct,s.high_confidence_error,
+                       row_number() OVER (
+                           PARTITION BY p.source_decision_id,p.model_identity
+                           ORDER BY u.created_at DESC,u.model_version DESC
+                       ) AS version_rank
+                FROM predictions_v2 p
+                JOIN prediction_scores_v2 s USING(source_decision_id,model_version)
+                JOIN model_updates_v2 u USING(model_version)
+                WHERE p.model_identity=? AND p.decision_time>u.created_at
+            )
+            SELECT * FROM ranked WHERE version_rank=1 ORDER BY decision_time""",
+            (identity,),
+        ).fetchall()
+        values = [float(row["value_quote_return"]) for row in rows]
+        daily = defaultdict(float)
+        for row in rows:
+            daily[row["decision_time"][:10]] += float(row["value_quote_return"])
+        latest = rows[-1] if rows else None
+        rolling_processes.append({
+            "model_identity": identity,
+            "active_model_versions": active_versions.get(identity, []),
+            "oos_rows": len(rows),
+            "distinct_days": len(daily),
+            "calibration_status": latest["calibration_status"] if latest else "NO_LIVE_OOS",
+            "calibration_rows": latest["calibration_rows"] if latest else 0,
+            "calibration_effective_blocks": (
+                latest["calibration_effective_blocks"] if latest else 0
+            ),
+            "calibration_distinct_days": latest["calibration_distinct_days"] if latest else 0,
+            **_metrics(values, daily),
         })
 
     identity_curves = []
@@ -183,6 +239,11 @@ def learning_curve_payload(connection) -> dict:
         "current_shadow_version": latest_models.get("SHADOW"),
         "next_training_threshold": 96 if complete < 96 else 200 if complete < 200 else ((complete // 50) + 1) * 50,
         "commission_status": "UNCONFIGURED", "slippage_status": "UNAVAILABLE_SHADOW",
-        "models": models, "identity_curves": identity_curves, "full_minus_market": incremental,
+        "models": models, "rolling_processes": rolling_processes,
+        "zero_return_baseline": {
+            "label": "零收益安全基准", "model_identity": "CHAMPION_0",
+            "cumulative_quote_return": 0.0, "trained": False, "uses_ai": False,
+        },
+        "identity_curves": identity_curves, "full_minus_market": incremental,
         "disclaimer": "早期曲线用于观察学习过程，不代表已证明盈利。",
     }

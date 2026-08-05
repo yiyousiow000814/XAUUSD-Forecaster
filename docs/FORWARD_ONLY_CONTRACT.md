@@ -109,10 +109,13 @@ are immutable model-update fields.
   new eligible rows. Sixty trading days is a confidence milestone, not a
   training blocker. A failed training attempt is logged and cannot alter a
   prior artifact.
-- Every frozen version remains in parallel Shadow evaluation until it has 60
-  distinct UTC days with valid OOS scores. Unhealthy predictions and invalid
-  outcomes do not consume that lifetime. Twenty valid UTC-day blocks are
-  required for `CALIBRATED` uncertainty.
+- Only the newest and immediately preceding version of each Ridge identity
+  continue producing Shadow predictions. Older versions are archived without
+  deleting their artifacts, predictions, scores, or receipts.
+- Calibration follows the rolling model identity and selects the newest version
+  that existed at each prior Decision. Unhealthy predictions and invalid
+  outcomes cannot enter it. Twenty valid UTC-day blocks are required for
+  `CALIBRATED` uncertainty.
 - Training never changes the active Champion.
 - Only the owner may append a manual promotion approval after forward gates.
 - Unknown, missing, stale, or unhealthy data always produces effective
@@ -145,6 +148,8 @@ are immutable model-update fields.
 - Identity-level and paired aggregate curves select only the newest eligible
   version at each Decision, so parallel version evaluation cannot duplicate
   returns.
+- Champion-0 is reported separately as a zero-return safety baseline. It is not
+  a trained model and does not occupy a Ridge version slot.
 
 ## Storage and separation
 
