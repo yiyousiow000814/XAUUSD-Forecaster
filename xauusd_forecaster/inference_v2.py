@@ -41,8 +41,13 @@ def _recommended_action(
     return "WAIT"
 
 
-def _active_updates(updates) -> list:
+def _active_updates(updates, available_news_eligibilities: set[str] | None = None) -> list:
     """Select only the newest and preceding frozen version per identity."""
+    if available_news_eligibilities is None:
+        available_news_eligibilities = {
+            ELIGIBILITY_VERSION,
+            f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}",
+        }
     counts: dict[str, int] = defaultdict(int)
     active = []
     for update in updates:
@@ -53,11 +58,9 @@ def _active_updates(updates) -> list:
             update["eligibility_version"]
             if "eligibility_version" in update.keys() else None
         )
-        if identity in {"NEWS_RESIDUAL", "FULL"} and eligibility != ELIGIBILITY_VERSION:
+        if identity in {"NEWS_RESIDUAL", "FULL"} and eligibility not in available_news_eligibilities:
             continue
-        if identity in {"BROAD_NEWS_RESIDUAL", "BROAD_FULL"} and eligibility != (
-            f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}"
-        ):
+        if identity in {"BROAD_NEWS_RESIDUAL", "BROAD_FULL"} and eligibility not in available_news_eligibilities:
             continue
         if "artifact_path" in update.keys():
             artifact_path = Path(update["artifact_path"])
@@ -138,7 +141,8 @@ def _insert_prediction(ledger, *, decision_id: str, decision_time: datetime,
 
 def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datetime,
                                created_at: datetime, market_snapshot: dict,
-                               news_snapshot: dict) -> list[dict]:
+                               news_snapshot: dict,
+                               news_snapshots: dict[str, dict] | None = None) -> list[dict]:
     """Append only models that existed before this decision; never backfill."""
     created = []
     empty_cal = {"version": "always-wait-no-calibration", "rows": 0, "blocks": 0,
@@ -156,10 +160,15 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
         WHERE created_at < ? ORDER BY created_at DESC""", (decision_time.isoformat(),)
     ).fetchall()
     features = json.loads(market_snapshot["features_json"])
-    news_features = json.loads(news_snapshot["features_json"])
+    snapshots = dict(news_snapshots or {})
+    snapshots.setdefault(ELIGIBILITY_VERSION, news_snapshot)
+    snapshots.setdefault(f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}", news_snapshot)
     values = [features.get(name) for name in MARKET_FEATURES]
-    for update in _active_updates(updates):
+    for update in _active_updates(updates, set(snapshots)):
         identity = update["model_identity"]
+        update_eligibility = update["eligibility_version"]
+        selected_news_snapshot = snapshots.get(update_eligibility, news_snapshot)
+        news_features = json.loads(selected_news_snapshot["features_json"])
         calibration = _calibration(ledger, identity, decision_time)
         if market_snapshot["data_health"] != "OK" or market_snapshot["u5"] is None \
                 or any(value is None for value in values):
@@ -206,7 +215,10 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
         _insert_prediction(
             ledger, decision_id=decision_id, decision_time=decision_time, created_at=created_at,
             model_version=update["model_version"], model_identity=identity,
-            feature_hash=canonical_hash((market_snapshot["output_hash"], news_snapshot["output_hash"])),
+            feature_hash=canonical_hash((
+                market_snapshot["output_hash"], selected_news_snapshot["output_hash"],
+                update_eligibility,
+            )),
             predicted=predicted, news_residual=news_residual,
             ev_long=ev_long, ev_short=ev_short, calibration=calibration,
             recommended=recommended, status=(

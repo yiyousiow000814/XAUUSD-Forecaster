@@ -952,6 +952,22 @@ def test_active_updates_reject_old_news_eligibility_but_keep_market() -> None:
     assert [row["model_version"] for row in active] == ["market-current"]
 
 
+def test_active_updates_keep_frozen_legacy_news_when_matching_snapshot_exists() -> None:
+    legacy = "news-source-eligibility-v2-event-evidence"
+    legacy_broad = f"{legacy}+news-event-evidence-v1"
+    updates = [
+        {"model_identity": "FULL", "model_version": "old-full",
+         "eligibility_version": legacy},
+        {"model_identity": "BROAD_FULL", "model_version": "old-broad",
+         "eligibility_version": legacy_broad},
+        {"model_identity": "MARKET_ONLY", "model_version": "market-current"},
+    ]
+    active = inference_v2._active_updates(updates, {legacy, legacy_broad})
+    assert [row["model_version"] for row in active] == [
+        "old-full", "old-broad", "market-current",
+    ]
+
+
 def test_unhealthy_predictions_do_not_enter_rolling_calibration(tmp_path) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     base = datetime(2026, 1, 1, tzinfo=UTC)

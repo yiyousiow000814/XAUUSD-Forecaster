@@ -13,6 +13,12 @@ from .evidence_v2 import (
 from .forward_ledger import canonical_hash
 from .inference_v2 import append_live_predictions_v2
 from .news_features_v2 import aggregate_news_features_v2
+from .legacy_news_features_v2 import (
+    LEGACY_BROAD_ELIGIBILITY_VERSION,
+    LEGACY_ELIGIBILITY_VERSION,
+    LEGACY_NEWS_FEATURE_VERSION,
+    aggregate_legacy_news_features_v2,
+)
 from .repair_v2 import LANE_RULE_VERSION, TRAINING_ELIGIBILITY_VERSION
 from .training import MARKET_FEATURES
 from .u5_state import U5_VERSION
@@ -60,6 +66,19 @@ def append_live_decision_v2(ledger, *, decision_id: str, decision_time: datetime
                     "eligibility_version": ELIGIBILITY_VERSION, **news}
     news_hash = canonical_hash(news_payload)
     news_id = _uuid("derived-news", f"{decision_id}:{NEWS_FEATURE_VERSION}:{ELIGIBILITY_VERSION}")
+    legacy_news = aggregate_legacy_news_features_v2(ledger, decision_time)
+    legacy_payload = {
+        "decision_id": decision_id,
+        "decision_time": decision_time.isoformat(),
+        "feature_version": LEGACY_NEWS_FEATURE_VERSION,
+        "eligibility_version": LEGACY_ELIGIBILITY_VERSION,
+        **legacy_news,
+    }
+    legacy_hash = canonical_hash(legacy_payload)
+    legacy_id = _uuid(
+        "derived-news",
+        f"{decision_id}:{LEGACY_NEWS_FEATURE_VERSION}:{LEGACY_ELIGIBILITY_VERSION}",
+    )
     with ledger.connection:
         ledger.connection.execute(
             """INSERT INTO derived_market_snapshots VALUES
@@ -78,17 +97,36 @@ def append_live_decision_v2(ledger, *, decision_id: str, decision_time: datetime
              news["model_visible_items"], news["news_exposed"], news["distinct_news_clusters"],
              news["distinct_event_types"], news["source_evidence_hash"], news_hash),
         )
+        ledger.connection.execute(
+            """INSERT INTO derived_news_feature_snapshots VALUES
+            (?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?)""",
+            (legacy_id, decision_id, decision_time.isoformat(), "LIVE_OOS", created_at.isoformat(),
+             LEGACY_NEWS_FEATURE_VERSION, LEGACY_ELIGIBILITY_VERSION,
+             json.dumps(legacy_news["features"], sort_keys=True, separators=(",", ":")),
+             legacy_news["model_visible_items"], legacy_news["news_exposed"],
+             legacy_news["distinct_news_clusters"], legacy_news["distinct_event_types"],
+             legacy_news["source_evidence_hash"], legacy_hash),
+        )
         _lane(ledger.connection, "DECISION", decision_id, "LIVE_OOS", created_at, market_hash)
         _lane(ledger.connection, "LEGACY_PREDICTIONS", decision_id, "LEGACY_ENGINEERING",
               created_at, snapshot["snapshot_hash"])
         _lane(ledger.connection, "DERIVED_MARKET", market_id, "LIVE_OOS", created_at, market_hash)
         _lane(ledger.connection, "DERIVED_NEWS", news_id, "LIVE_OOS", created_at, news_hash)
+        _lane(ledger.connection, "DERIVED_NEWS", legacy_id, "LIVE_OOS", created_at, legacy_hash)
+        legacy_snapshot = {
+            "features_json": json.dumps(legacy_news["features"]),
+            "output_hash": legacy_hash,
+        }
         predictions = append_live_predictions_v2(
             ledger, decision_id=decision_id, decision_time=decision_time,
             created_at=created_at,
             market_snapshot={"features_json": json.dumps(features), "u5": snapshot["u5"],
                              "data_health": snapshot["data_health"], "output_hash": market_hash},
             news_snapshot={"features_json": json.dumps(news["features"]), "output_hash": news_hash},
+            news_snapshots={
+                LEGACY_ELIGIBILITY_VERSION: legacy_snapshot,
+                LEGACY_BROAD_ELIGIBILITY_VERSION: legacy_snapshot,
+            },
         )
         append_lot_predictions(
             ledger, decision_id=decision_id, decision_time=decision_time,
