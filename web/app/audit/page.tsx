@@ -218,7 +218,7 @@ type Payload = {
     models: LearningModel[];
     version_groups: VersionGroup[];
     rolling_processes: RollingProcess[];
-    identity_curves: Array<{ model_identity: string; points: Array<{ decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number }> }>;
+    identity_curves: Array<{ model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: Array<{ decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number }> }>;
     zero_return_baseline: {
       label: string;
       model_identity: string;

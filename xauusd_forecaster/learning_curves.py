@@ -9,6 +9,42 @@ from collections import defaultdict
 from datetime import datetime
 
 
+MAX_CURVE_POINTS = 1200
+
+
+def _bounded_curve(points: list[dict], max_points: int = MAX_CURVE_POINTS) -> list[dict]:
+    """Bound dashboard transfer size without changing the append-only ledger.
+
+    The first/last point, every model-generation boundary, and local extrema are
+    retained.  This is a display envelope only; cumulative scores remain based
+    on every matured OOS row.
+    """
+    if len(points) <= max_points:
+        return points
+    mandatory = {0, len(points) - 1}
+    mandatory.update(
+        index for index, point in enumerate(points)
+        if point.get("model_version")
+    )
+    if len(mandatory) >= max_points:
+        ordered = sorted(mandatory)
+        stride = (len(ordered) - 1) / max(1, max_points - 1)
+        return [points[ordered[round(index * stride)]] for index in range(max_points)]
+
+    candidates = [index for index in range(1, len(points) - 1) if index not in mandatory]
+    bucket_count = max(1, (max_points - len(mandatory)) // 2)
+    selected = set(mandatory)
+    for bucket in range(bucket_count):
+        start = bucket * len(candidates) // bucket_count
+        end = (bucket + 1) * len(candidates) // bucket_count
+        indexes = candidates[start:end]
+        if not indexes:
+            continue
+        selected.add(min(indexes, key=lambda index: points[index]["cumulative_quote_return"]))
+        selected.add(max(indexes, key=lambda index: points[index]["cumulative_quote_return"]))
+    return [points[index] for index in sorted(selected)]
+
+
 def _stage(complete: int, live_rows: int, days: int) -> str:
     if complete < 30:
         return "ENGINEERING"
@@ -343,7 +379,14 @@ def learning_curve_payload(connection) -> dict:
                 )
                 previous_generation = generation
             points.append(point)
-        identity_curves.append({"model_identity": identity, "points": points})
+        bounded_points = _bounded_curve(points)
+        identity_curves.append({
+            "model_identity": identity,
+            "source_point_count": len(points),
+            "chart_point_count": len(bounded_points),
+            "chart_downsampled": len(bounded_points) < len(points),
+            "points": bounded_points,
+        })
 
     paired = connection.execute(
         """WITH ranked AS (

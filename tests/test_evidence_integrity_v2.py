@@ -12,7 +12,7 @@ import pytest
 from xauusd_forecaster.evidence_v2 import V2_SCHEMA, install_v2_schema
 from xauusd_forecaster.executable_label import build_executable_label_v2
 from xauusd_forecaster.forward_ledger import ForwardLedger, canonical_hash
-from xauusd_forecaster.learning_curves import _stage, learning_curve_payload
+from xauusd_forecaster.learning_curves import _bounded_curve, _stage, learning_curve_payload
 from xauusd_forecaster.live_v2 import append_live_outcome_v2
 from xauusd_forecaster.market import MarketObservation
 from xauusd_forecaster.news_evidence import event_evidence_rows
@@ -618,6 +618,27 @@ def test_identity_curve_uses_only_latest_parallel_version_per_decision(tmp_path)
     assert rolling["oos_rows"] == 2
     assert rolling["cumulative_quote_return"] == pytest.approx(3.5)
     ledger.close()
+
+
+def test_learning_curve_dashboard_envelope_is_bounded_and_keeps_history_landmarks() -> None:
+    points = []
+    for index in range(5000):
+        point = {
+            "decision_time": (datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=5 * index)).isoformat(),
+            "cumulative_quote_return": float((index % 101) - 50),
+        }
+        if index % 250 == 0:
+            point["model_version"] = f"version-{index}"
+        points.append(point)
+    bounded = _bounded_curve(points, max_points=120)
+    assert len(bounded) <= 120
+    assert bounded[0] == points[0]
+    assert bounded[-1] == points[-1]
+    assert min(row["cumulative_quote_return"] for row in bounded) == -50.0
+    assert max(row["cumulative_quote_return"] for row in bounded) == 50.0
+    assert {row.get("model_version") for row in bounded if row.get("model_version")} == {
+        f"version-{index}" for index in range(0, 5000, 250)
+    }
 
 
 def _training_rows(count: int) -> list[dict]:

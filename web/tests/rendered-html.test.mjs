@@ -131,6 +131,14 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /较高的一边只要大于0就记录为 Shadow 方向/);
   assert.match(modal, /每根K线5分钟 · 每个箭头预测未来30分钟/);
   assert.match(modal, /历史＋实时成熟 OOS（只追加，不重写）/);
+  assert.match(modal, /24小时/);
+  assert.match(modal, /7天/);
+  assert.match(modal, /30天/);
+  assert.match(modal, /全部总览/);
+  assert.match(modal, /较早一段/);
+  assert.match(modal, /较晚一段/);
+  assert.match(modal, /回到最新/);
+  assert.match(modal, /全部历史只画压缩轮廓/);
   assert.match(modal, /成本后EV较高方向/);
   assert.match(modal, /模型版本/);
   assert.match(modal, /历史规则不一致/);
@@ -151,7 +159,8 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(css, /graph-modal\.graph-modal-curve \{ height:auto; max-height:calc\(100dvh - 16px\); grid-template-rows:auto auto auto auto/);
   assert.match(css, /graph-modal\.graph-modal-curve>\.graph-modal-body \{ overflow:visible/);
   assert.match(css, /scrollbar-gutter:stable/);
-  assert.match(css, /long-curve-block>\.learning-svg \{ height:clamp\(420px,55dvh,600px\)/);
+  assert.match(css, /long-curve-block>\.learning-svg \{ height:clamp\(390px,48dvh,520px\)/);
+  assert.match(css, /\.curve-navigation/);
   assert.match(css, /long-curve-block>\.chart-legend \{ margin-top:16px; padding-bottom:10px/);
   assert.match(modal, /预测 \/ 方向/);
   assert.match(modal, /row\.decision_time \?\? row\.time/);

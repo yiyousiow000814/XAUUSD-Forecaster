@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 
 type CurvePoint = { decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number };
-type Curve = { model_identity: string; points: CurvePoint[] };
+type Curve = { model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: CurvePoint[] };
 type Candle = { time: string; open: number; high: number; low: number; close: number; ticks: number };
 type Decision = {
   source_decision_id: string; decision_time: string; exit_time?: string;
@@ -119,19 +119,42 @@ function VersionLedger({ groups }: { groups: VersionGroup[] }) {
 }
 
 function LongCurve({ curves }: { curves: Curve[] }) {
+  const [range, setRange] = useState<"24h" | "7d" | "30d" | "all">("24h");
+  const [pageOffset, setPageOffset] = useState(0);
   const usable = curves.filter(row => row.model_identity !== "CHAMPION_0" && row.points.length > 0);
-  const all = usable.flatMap(row => row.points);
-  if (!all.length) return <Empty text="还没有已成熟的 Live OOS 点；第一个预测走完30分钟后才会出现。" />;
-  const uniqueDecisionTimes = new Set(all.map(point => point.decision_time)).size;
-  const start = Math.min(...all.map(point => Date.parse(point.decision_time)));
-  const end = Math.max(...all.map(point => Date.parse(point.decision_time)));
-  const values = all.map(point => point.cumulative_quote_return).concat(0);
+  const overviewPoints = usable.flatMap(row => row.points);
+  if (!overviewPoints.length) return <Empty text="还没有已成熟的 Live OOS 点；第一个预测走完30分钟后才会出现。" />;
+  const fullStart = Math.min(...overviewPoints.map(point => Date.parse(point.decision_time)));
+  const fullEnd = Math.max(...overviewPoints.map(point => Date.parse(point.decision_time)));
+  const rangeMs = range === "24h" ? 24 * 3_600_000 : range === "7d" ? 7 * 86_400_000 : range === "30d" ? 30 * 86_400_000 : Math.max(1, fullEnd-fullStart);
+  const requestedEnd = range === "all" ? fullEnd : fullEnd - pageOffset * rangeMs;
+  const requestedStart = range === "all" ? fullStart : requestedEnd - rangeMs;
+  const start = Math.max(fullStart, requestedStart);
+  const end = Math.min(fullEnd, requestedEnd);
+  const visibleCurves = usable.map(row => {
+    if (range === "all") return row;
+    const before = row.points.filter(point => Date.parse(point.decision_time) <= start).at(-1);
+    const within = row.points.filter(point => {
+      const time = Date.parse(point.decision_time);
+      return time >= start && time <= end;
+    });
+    const points = [...within];
+    if (before && (!points.length || Date.parse(points[0].decision_time) > start)) {
+      points.unshift({ decision_time: new Date(start).toISOString(), cumulative_quote_return: before.cumulative_quote_return });
+    }
+    if (points.length && Date.parse(points.at(-1)!.decision_time) < end) {
+      points.push({ decision_time: new Date(end).toISOString(), cumulative_quote_return: points.at(-1)!.cumulative_quote_return });
+    }
+    return { ...row, points };
+  }).filter(row => row.points.length > 0);
+  const visiblePoints = visibleCurves.flatMap(row => row.points);
+  const values = visiblePoints.map(point => point.cumulative_quote_return).concat(0);
   const low = Math.min(...values); const high = Math.max(...values);
   const x = (time: string) => 58 + (Date.parse(time) - start) / Math.max(1, end - start) * 862;
   const y = (value: number) => 28 + (high - value) / Math.max(.000001, high - low) * 310;
   const tickTimes = Array.from(new Set([0, .25, .5, .75, 1].map(part => new Date(start + (end - start) * part).toISOString())));
   const axisLabel = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-  const versionBoundaries = usable.flatMap(row => row.points.flatMap((point, index) => {
+  const versionBoundaries = visibleCurves.flatMap(row => row.points.flatMap((point, index) => {
     if (index === 0 || !point.model_version) return [];
     return [{
       decision_time: point.decision_time,
@@ -144,20 +167,37 @@ function LongCurve({ curves }: { curves: Curve[] }) {
     decision_time: decisionTime,
     changes: versionBoundaries.filter(row => row.decision_time === decisionTime),
   }));
+  const markerLimit = 14;
+  const displayedBoundaries = groupedBoundaries.length <= markerLimit ? groupedBoundaries : Array.from(
+    new Set(Array.from({ length: markerLimit }, (_, index) => Math.round(index * (groupedBoundaries.length - 1) / (markerLimit - 1))))
+  ).map(index => groupedBoundaries[index]);
+  const sourcePointCount = usable.reduce((total, row) => total + (row.source_point_count ?? row.points.length), 0);
+  const sourceTimeCount = Math.max(...usable.map(row => row.source_point_count ?? row.points.length));
+  const chartDownsampled = usable.some(row => row.chart_downsampled);
+  const canGoEarlier = range !== "all" && requestedStart > fullStart;
+  const canGoLater = range !== "all" && pageOffset > 0;
+  const windowLabel = `${axisLabel(new Date(start).toISOString())} — ${axisLabel(new Date(end).toISOString())}`;
   return <div className="chart-block long-curve-block">
-    <div className="chart-caption"><div><b>历史＋实时成熟 OOS（只追加，不重写）</b><span>每个30分钟结果成熟后追加到右端；模型换版本不会清零，已存在的历史点不会重新计算。</span></div><strong>{uniqueDecisionTimes} 个时点<small> · {all.length} 条模型评分</small></strong></div>
+    <div className="chart-caption"><div><b>历史＋实时成熟 OOS（只追加，不重写）</b><span>数据库永久保留每个成熟结果；图表固定宽度，按时间窗口查看，全部历史只画压缩轮廓。</span></div><strong>{sourceTimeCount} 个时点<small> · {sourcePointCount} 条模型评分</small></strong></div>
+    <div className="curve-navigation" aria-label="长期 OOS 时间范围">
+      <label>时间窗口<select value={range} onChange={event => { setRange(event.target.value as typeof range); setPageOffset(0); }}><option value="24h">24小时</option><option value="7d">7天</option><option value="30d">30天</option><option value="all">全部总览</option></select></label>
+      <button type="button" disabled={!canGoEarlier} onClick={() => setPageOffset(value => value + 1)}>← 较早一段</button>
+      <button type="button" disabled={!canGoLater} onClick={() => setPageOffset(value => Math.max(0, value - 1))}>较晚一段 →</button>
+      <button type="button" disabled={pageOffset === 0} onClick={() => setPageOffset(0)}>回到最新</button>
+      <span>{windowLabel}{chartDownsampled ? ` · 全历史 ${sourcePointCount} 条已压缩为 ${overviewPoints.length} 个绘图点` : ` · 当前 ${visiblePoints.length} 个绘图点`}</span>
+    </div>
     <svg className="learning-svg" viewBox="0 0 960 400" role="img" aria-label="各模型历史与实时成熟 OOS 曲线">
       <line x1="58" x2="920" y1={y(0)} y2={y(0)} className="zero-line" />
       <text x="8" y={y(high) + 5}>{pct(high)}</text><text x="8" y={y(low) + 5}>{pct(low)}</text>
-      {groupedBoundaries.map((boundary, index) => <g key={boundary.decision_time} className="version-boundary">
+      {displayedBoundaries.map((boundary, index) => <g key={boundary.decision_time} className="version-boundary">
         <title>{boundary.changes.map(change => `${LABELS[change.model_identity] ?? change.model_identity} · 新训练数据代 · ${change.model_version}`).join("\n")}</title>
         <line x1={x(boundary.decision_time)} x2={x(boundary.decision_time)} y1="18" y2="350" />
         <text x={x(boundary.decision_time) + 4} y={24 + index % 2 * 14}>{boundary.changes[0]?.training_rows ?? ""}条新训练</text>
       </g>)}
-      {usable.map(row => <polyline key={row.model_identity} fill="none" stroke={COLORS[row.model_identity]} strokeWidth="3" points={row.points.map(point => `${x(point.decision_time)},${y(point.cumulative_quote_return)}`).join(" ")} />)}
+      {visibleCurves.map(row => <polyline key={row.model_identity} fill="none" stroke={COLORS[row.model_identity]} strokeWidth="3" points={row.points.map(point => `${x(point.decision_time)},${y(point.cumulative_quote_return)}`).join(" ")} />)}
       {tickTimes.map(value => <g key={value} className="time-axis"><line x1={x(value)} x2={x(value)} y1="350" y2="356" /><text x={x(value)} y="374" textAnchor="middle">{axisLabel(value)}</text></g>)}
     </svg>
-    <div className="chart-legend">{usable.map(row => <span key={row.model_identity}><i style={{ background: COLORS[row.model_identity] }} />{LABELS[row.model_identity]} <b>{pct(row.points.at(-1)?.cumulative_quote_return ?? 0)}</b></span>)}{groupedBoundaries.length > 0 && <span><i className="train-dot" />模型换版本</span>}</div>
+    <div className="chart-legend">{visibleCurves.map(row => <span key={row.model_identity}><i style={{ background: COLORS[row.model_identity] }} />{LABELS[row.model_identity]} <b>{pct(row.points.at(-1)?.cumulative_quote_return ?? 0)}</b></span>)}{groupedBoundaries.length > 0 && <span><i className="train-dot" />模型换版本{groupedBoundaries.length > displayedBoundaries.length ? `（显示 ${displayedBoundaries.length}/${groupedBoundaries.length}）` : ""}</span>}</div>
   </div>;
 }
 
