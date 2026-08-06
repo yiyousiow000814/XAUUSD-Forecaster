@@ -306,15 +306,29 @@ def _recent_market_chart(
            ORDER BY decision_time,model_identity""",
         (first_time,),
     ).fetchall()
-    decisions = [{
-        **{key: value for key, value in dict(row).items()
-           if key != "outcome_reason_codes_json"},
-        "outcome_reason_codes": json.loads(row["outcome_reason_codes_json"] or "[]"),
-        "exit_time": (
-            datetime.fromisoformat(row["decision_time"]) + timedelta(minutes=30)
-        ).isoformat(),
-        "outcome_status": row["outcome_status"] or "PENDING",
-    } for row in decision_rows]
+    decisions = []
+    for row in decision_rows:
+        recorded = row["recommended_action"]
+        lcb_long = row["lcb_long_u5"]
+        lcb_short = row["lcb_short_u5"]
+        expected = "WAIT"
+        if lcb_long is not None and lcb_short is not None:
+            if lcb_long > lcb_short and lcb_long > 0:
+                expected = "LONG"
+            elif lcb_short > lcb_long and lcb_short > 0:
+                expected = "SHORT"
+        decisions.append({
+            **{key: value for key, value in dict(row).items()
+               if key != "outcome_reason_codes_json"},
+            "outcome_reason_codes": json.loads(row["outcome_reason_codes_json"] or "[]"),
+            "exit_time": (
+                datetime.fromisoformat(row["decision_time"]) + timedelta(minutes=30)
+            ).isoformat(),
+            "outcome_status": row["outcome_status"] or "PENDING",
+            "policy_expected_action": expected,
+            "policy_consistent": recorded == expected,
+            "frozen_record": True,
+        })
     marker_rows = connection.execute(
         """WITH grouped AS (
              SELECT model_identity,training_dataset_hash,min(created_at) created_at,
@@ -732,6 +746,14 @@ def _dashboard_payload(database: Path) -> dict:
     if research_forecast is not None:
         research_forecast["signal_expiry_seconds"] = 20
         research_forecast["forecast_horizon_seconds"] = 30 * 60
+        ev_long = research_forecast.get("ev_long_u5")
+        ev_short = research_forecast.get("ev_short_u5")
+        research_forecast["directional_bias"] = (
+            "LONG" if ev_long is not None and ev_short is not None and ev_long > ev_short
+            else "SHORT" if ev_long is not None and ev_short is not None and ev_short > ev_long
+            else "NEUTRAL"
+        )
+        research_forecast["frozen_record"] = True
     u5_values = sorted(float(row["u5"]) for row in u5_rows)
     current_u5 = float(latest["u5"]) if latest and latest["u5"] is not None else None
     u5_percentile = None

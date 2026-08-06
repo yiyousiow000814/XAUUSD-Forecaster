@@ -114,25 +114,6 @@ def learning_curve_payload(connection) -> dict:
         identity = update["model_identity"]
         if len(active_versions[identity]) < 2:
             active_versions[identity].append(update["model_version"])
-    # The compact "continuous history" and long curve are frozen at the
-    # beginning of the currently evaluating training generation.  Outcomes
-    # earned by that generation belong only to its independent score until a
-    # newer generation exists; otherwise the historical number would move as
-    # the current examination matures.
-    latest_dataset_by_identity: dict[str, str] = {}
-    for update in updates:
-        latest_dataset_by_identity[update["model_identity"]] = update[
-            "training_dataset_hash"
-        ]
-    history_cutoff_by_identity: dict[str, str] = {}
-    for identity, dataset_hash in latest_dataset_by_identity.items():
-        history_cutoff_by_identity[identity] = min(
-            update["created_at"]
-            for update in updates
-            if update["model_identity"] == identity
-            and update["training_dataset_hash"] == dataset_hash
-        )
-
     models = []
     for update in updates:
         rows = connection.execute(
@@ -288,9 +269,6 @@ def learning_curve_payload(connection) -> dict:
             SELECT * FROM ranked WHERE version_rank=1 ORDER BY decision_time""",
             (identity,),
         ).fetchall()
-        history_cutoff = history_cutoff_by_identity.get(identity)
-        if history_cutoff:
-            rows = [row for row in rows if row["decision_time"] < history_cutoff]
         values = [float(row["value_quote_return"]) for row in rows]
         daily = defaultdict(float)
         for row in rows:
@@ -298,7 +276,7 @@ def learning_curve_payload(connection) -> dict:
         latest = rows[-1] if rows else None
         rolling_processes.append({
             "model_identity": identity,
-            "history_cutoff": history_cutoff,
+            "history_cutoff": None,
             "active_model_versions": active_versions.get(identity, []),
             "oos_rows": len(rows),
             "distinct_days": len(daily),
@@ -341,9 +319,6 @@ def learning_curve_payload(connection) -> dict:
                        value_quote_return FROM ranked
                 WHERE version_rank=1 ORDER BY decision_time""", (identity,)
             ).fetchall()
-            history_cutoff = history_cutoff_by_identity.get(identity)
-            if history_cutoff:
-                rows = [row for row in rows if row["decision_time"] < history_cutoff]
         cumulative = 0.0
         points = []
         previous_generation = None

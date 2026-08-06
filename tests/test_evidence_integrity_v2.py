@@ -436,9 +436,8 @@ def test_learning_curve_excludes_predictions_not_after_model_creation(tmp_path) 
     market_curve = next(
         row for row in payload["identity_curves"] if row["model_identity"] == "MARKET_ONLY"
     )
-    # The only generation is still the current examination.  Its result is
-    # visible in the version ledger but cannot mutate frozen history.
-    assert market_curve["points"] == []
+    assert len(market_curve["points"]) == 1
+    assert market_curve["points"][0]["cumulative_quote_return"] == pytest.approx(2.0)
     ledger.close()
 
 
@@ -469,9 +468,11 @@ def test_identity_curve_uses_only_latest_parallel_version_per_decision(tmp_path)
     curve = next(
         row for row in payload["identity_curves"] if row["model_identity"] == "MARKET_ONLY"
     )
-    assert len(curve["points"]) == 1
+    assert len(curve["points"]) == 2
     assert curve["points"][0]["cumulative_quote_return"] == pytest.approx(1.5)
     assert curve["points"][0]["model_version"] == "market-old"
+    assert curve["points"][1]["cumulative_quote_return"] == pytest.approx(3.5)
+    assert curve["points"][1]["model_version"] == "market-new"
     models = {row["model_version"]: row for row in payload["models"]}
     assert models["market-new"]["lifecycle_status"] == "LATEST"
     assert models["market-old"]["lifecycle_status"] == "PREVIOUS"
@@ -479,8 +480,8 @@ def test_identity_curve_uses_only_latest_parallel_version_per_decision(tmp_path)
     rolling = next(
         row for row in payload["rolling_processes"] if row["model_identity"] == "MARKET_ONLY"
     )
-    assert rolling["oos_rows"] == 1
-    assert rolling["cumulative_quote_return"] == pytest.approx(1.5)
+    assert rolling["oos_rows"] == 2
+    assert rolling["cumulative_quote_return"] == pytest.approx(3.5)
     ledger.close()
 
 
@@ -720,13 +721,29 @@ def test_uncalibrated_prediction_has_no_lcb(tmp_path) -> None:
         ledger, decision_id="d", decision_time=now, created_at=now,
         model_version="market", model_identity="MARKET_ONLY", feature_hash="features",
         predicted=1.0, news_residual=None, ev_long=0.8, ev_short=-1.2,
-        calibration=calibration, recommended="LONG", status="PROVISIONAL",
+        calibration=calibration, recommended="WAIT", status="PROVISIONAL",
     )
     row = ledger.connection.execute("SELECT * FROM predictions_v2").fetchone()
     assert row["lcb_long_u5"] is None
     assert row["lcb_short_u5"] is None
     assert row["effective_action"] == "WAIT"
     assert row["calibration_status"] == "UNCALIBRATED"
+    ledger.close()
+
+
+def test_prediction_insert_rejects_action_that_violates_frozen_lcb_policy(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    calibration = {"version": "cal", "rows": 20, "blocks": 2, "days": 2,
+                   "half_width": 0.35, "status": "EARLY"}
+    with pytest.raises(ValueError, match="violates frozen LCB policy"):
+        inference_v2._insert_prediction(
+            ledger, decision_id="bad-action", decision_time=now, created_at=now,
+            model_version="market", model_identity="MARKET_ONLY", feature_hash="features",
+            predicted=0.3, news_residual=None, ev_long=0.3, ev_short=-0.4,
+            calibration=calibration, recommended="LONG", status="PROVISIONAL",
+        )
+    assert ledger.connection.execute("SELECT count(*) FROM predictions_v2").fetchone()[0] == 0
     ledger.close()
 
 

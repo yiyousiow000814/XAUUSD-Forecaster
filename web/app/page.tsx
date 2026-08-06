@@ -47,6 +47,8 @@ type Payload = {
     decision_time: string;
     signal_expiry_seconds: number;
     forecast_horizon_seconds: number;
+    directional_bias: "LONG" | "SHORT" | "NEUTRAL";
+    frozen_record: boolean;
   } | null;
   u5_context: { percentile: number | null; samples: number; label: string };
   counts: Record<string, number>;
@@ -146,7 +148,7 @@ export default function Home() {
     : signalRemaining > 0
       ? `新信号 · 参考窗口剩 ${signalRemaining} 秒`
       : horizonRemaining > 0
-        ? "入场参考窗口已过 · 仅观察结果"
+        ? "本轮预测已冻结 · 30分钟观察中"
         : "30分钟评估期已结束";
 
   return (
@@ -191,6 +193,7 @@ export default function Home() {
             {forecastAction}
           </div>
           <p>{forecast?.model_identity === "BROAD_FULL" ? "黄金＋大视野新闻" : forecast?.model_identity ?? "等待模型"} · {forecast?.prediction_status ?? "WAITING"}</p>
+          {forecastAction === "WAIT" && forecast?.directional_bias && forecast.directional_bias !== "NEUTRAL" && <p className="forecast-bias">当前倾向 {forecast.directional_bias}，但95%保守下界未过零，所以动作保持 WAIT</p>}
           <div className={`forecast-freshness ${signalRemaining > 0 && online ? "is-current" : "is-observe"}`}>
             <strong>{freshness}</strong>
             <small>产生于 {localTime(forecast?.decision_time)} · 已过去 {forecastAge === null ? "—" : `${Math.floor(forecastAge / 60)}分${forecastAge % 60}秒`}</small>

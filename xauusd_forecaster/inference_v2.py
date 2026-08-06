@@ -107,6 +107,12 @@ def _insert_prediction(ledger, *, decision_id: str, decision_time: datetime,
     width = calibration["half_width"]
     lcb_long = ev_long - width if width is not None and ev_long is not None else None
     lcb_short = ev_short - width if width is not None and ev_short is not None else None
+    expected_action = _recommended_action(ev_long, ev_short, width)
+    if recommended != expected_action:
+        raise ValueError(
+            f"prediction action violates frozen LCB policy: "
+            f"recorded={recommended}, expected={expected_action}"
+        )
     ledger.connection.execute(
         """INSERT INTO predictions_v2 VALUES
         (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",

@@ -7,7 +7,8 @@ type Curve = { model_identity: string; points: CurvePoint[] };
 type Candle = { time: string; open: number; high: number; low: number; close: number; ticks: number };
 type Decision = {
   source_decision_id: string; decision_time: string; exit_time: string;
-  model_identity: string; recommended_action: string; prediction_status: string;
+  model_identity: string; model_version: string; recommended_action: string; prediction_status: string;
+  policy_consistent?: boolean; policy_expected_action?: string; frozen_record?: boolean;
   outcome_status: string; value_quote_return: number | null;
   outcome_reason_codes?: string[];
   long_quote_return: number | null; short_quote_return: number | null;
@@ -113,8 +114,8 @@ function LongCurve({ curves }: { curves: Curve[] }) {
     changes: versionBoundaries.filter(row => row.decision_time === decisionTime),
   }));
   return <div className="chart-block">
-    <div className="chart-caption"><div><b>已归档历史 OOS（当前组不改写）</b><span>曲线冻结在当前训练组开始前；当前组只显示在页面的“当前组暂计”，等下一组创建后才归入这里。</span></div><strong>{uniqueDecisionTimes} 个时点<small> · {all.length} 条模型评分</small></strong></div>
-    <svg className="learning-svg" viewBox="0 0 960 400" role="img" aria-label="各模型已归档历史 OOS 曲线">
+    <div className="chart-caption"><div><b>历史＋实时成熟 OOS（只追加，不重写）</b><span>每个30分钟结果成熟后追加到右端；换版不会清零，已存在的历史点不会重新计算。</span></div><strong>{uniqueDecisionTimes} 个时点<small> · {all.length} 条模型评分</small></strong></div>
+    <svg className="learning-svg" viewBox="0 0 960 400" role="img" aria-label="各模型历史与实时成熟 OOS 曲线">
       <line x1="58" x2="920" y1={y(0)} y2={y(0)} className="zero-line" />
       <text x="8" y={y(high) + 5}>{pct(high)}</text><text x="8" y={y(low) + 5}>{pct(low)}</text>
       {groupedBoundaries.map((boundary, index) => <g key={boundary.decision_time} className="version-boundary">
@@ -151,13 +152,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: { candles: Ca
   ), [scopedDecisions, showLong, showShort, showWait]);
   const decisions = useMemo(() => {
     if (dense) return candidateDecisions;
-    let previousIncluded = Number.POSITIVE_INFINITY;
-    return [...candidateDecisions].reverse().filter(row => {
-      const time = Date.parse(row.decision_time);
-      if (time > previousIncluded - 1_800_000) return false;
-      previousIncluded = time;
-      return true;
-    }).reverse();
+    return candidateDecisions.filter(row => new Date(row.decision_time).getUTCMinutes() % 30 === 0);
   }, [candidateDecisions, dense]);
   if (!candles.length) return <Empty text="最近24小时还没有可绘制的本机 Bid/Ask 报价。" />;
   const low = Math.min(...candles.map(row => row.low)); const high = Math.max(...candles.map(row => row.high));
@@ -169,9 +164,10 @@ function MarketChart({ market, identity, setIdentity }: { market?: { candles: Ca
   const xTime = (time: string) => Date.parse(time) > end ? 925 : xAtIndex(indexByTime(time));
   const byTime = (time: string) => candles[indexByTime(time)];
   const hiddenCount = candidateDecisions.length - decisions.length;
-  const counts = scopedDecisions.reduce((total, row) => ({ ...total, [row.recommended_action]: total[row.recommended_action] + 1 }), { LONG: 0, SHORT: 0, WAIT: 0 } as Record<string, number>);
-  const unhealthyWaits = scopedDecisions.filter(row => row.recommended_action === "WAIT" && row.prediction_status === "DATA_UNHEALTHY").length;
-  const activeSelected = selected && decisions.some(row => row.source_decision_id === selected.source_decision_id && row.model_identity === selected.model_identity) ? selected : decisions.at(-1) ?? null;
+  const counts = decisions.reduce((total, row) => ({ ...total, [row.recommended_action]: total[row.recommended_action] + 1 }), { LONG: 0, SHORT: 0, WAIT: 0 } as Record<string, number>);
+  const unhealthyWaits = decisions.filter(row => row.recommended_action === "WAIT" && row.prediction_status === "DATA_UNHEALTHY").length;
+  const policyMismatchCount = decisions.filter(row => row.policy_consistent === false).length;
+  const activeSelected = selected && decisions.some(row => row.source_decision_id === selected.source_decision_id && row.model_identity === selected.model_identity && row.model_version === selected.model_version) ? selected : decisions.at(-1) ?? null;
   const selectedX = activeSelected ? xTime(activeSelected.decision_time) : null;
   const selectedExitX = activeSelected ? Math.min(925, xTime(activeSelected.exit_time)) : null;
   const timeLabel = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
@@ -182,25 +178,25 @@ function MarketChart({ market, identity, setIdentity }: { market?: { candles: Ca
     <div className="chart-caption"><div><b>每根K线5分钟 · 每个箭头预测未来30分钟</b><span>绿色向上、红色向下、灰色双向代表 WAIT。新闻残差只表示新闻对黄金基线的修正量；完整方向请看“黄金＋新闻”。</span></div><select value={identity} onChange={event => { setIdentity(event.target.value); setSelected(null); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key, label]) => <option key={key} value={key}>{label}{key.includes("RESIDUAL") ? "（修正量）" : ""}</option>)}</select></div>
     <div className="market-controls" aria-label="K线图显示控制">
       <label>窗口<select value={hours} onChange={event => setHours(Number(event.target.value))}><option value="3">最近3小时</option><option value="6">最近6小时</option><option value="12">最近12小时</option><option value="24">最近24小时</option></select></label>
-      <label>密度<select value={dense ? "all" : "clear"} onChange={event => setDense(event.target.value === "all")}><option value="clear">清晰：每30分钟1次</option><option value="all">全部：每5分钟预测</option></select></label>
+      <label>密度<select value={dense ? "all" : "clear"} onChange={event => setDense(event.target.value === "all")}><option value="clear">固定网格：每小时 :00 / :30</option><option value="all">全部：每5分钟预测</option></select></label>
       <button className={showLong ? "active" : ""} type="button" onClick={() => setShowLong(value => !value)}>看多 LONG</button>
       <button className={showShort ? "active" : ""} type="button" onClick={() => setShowShort(value => !value)}>看空 SHORT</button>
       <button className={showWait ? "active" : ""} type="button" onClick={() => setShowWait(value => !value)}>等待 WAIT</button>
       <button className={showTraining ? "active" : ""} type="button" onClick={() => setShowTraining(value => !value)}>模型换版位置</button>
-      <span>显示 {decisions.length} 次{hiddenCount > 0 ? ` · 收起 ${hiddenCount} 次重复预测` : ""}</span>
+      <span>显示 {decisions.length} 次{hiddenCount > 0 ? ` · 隐藏 ${hiddenCount} 次5分钟预测` : ""}</span>
     </div>
-    <div className="prediction-counts"><b>本窗口全部原始预测</b><span>看多 {counts.LONG}</span><span>看空 {counts.SHORT}</span><span>等待 {counts.WAIT}{unhealthyWaits ? `（数据异常 ${unhealthyWaits}）` : ""}</span></div>
+    <div className="prediction-counts"><b>当前图中显示</b><span>看多 {counts.LONG}</span><span>看空 {counts.SHORT}</span><span>等待 {counts.WAIT}{unhealthyWaits ? `（数据异常 ${unhealthyWaits}）` : ""}</span>{policyMismatchCount > 0 && <span className="negative">历史规则不一致 {policyMismatchCount}（原记录保留）</span>}</div>
     <svg className="learning-svg" viewBox="0 0 960 400" role="img" aria-label="XAUUSD K线与模型决策">
       {candles.map((row, index) => { const cx = xAtIndex(index); const width = Math.max(1.5, 650 / candles.length); const up = row.close >= row.open; return <g key={row.time}><line x1={cx} x2={cx} y1={y(row.high)} y2={y(row.low)} stroke={up ? "#476b19" : "#c9362b"} /><rect x={cx - width / 2} width={width} y={Math.min(y(row.open), y(row.close))} height={Math.max(1, Math.abs(y(row.open) - y(row.close)))} fill={up ? "#476b19" : "#c9362b"} /></g>; })}
       {selectedX != null && selectedExitX != null && <g className="selected-window"><rect x={selectedX} width={Math.max(2, selectedExitX-selectedX)} y="52" height="280" /><line x1={selectedX} x2={selectedX} y1="52" y2="332" /><line x1={selectedExitX} x2={selectedExitX} y1="52" y2="332" /><text x={selectedX+4} y="49">预测</text><text x={Math.max(selectedX+36, selectedExitX-58)} y="49">30分钟后</text></g>}
-      {decisions.map(row => { const candle = byTime(row.decision_time); const cx = xTime(row.decision_time); const action = row.recommended_action; const cy = action === "WAIT" ? 30 : action === "LONG" ? y(candle.low) + 12 : y(candle.high) - 12; const color = action === "LONG" ? "#476b19" : action === "SHORT" ? "#c9362b" : "#555149"; const isSelected = activeSelected?.source_decision_id === row.source_decision_id && activeSelected?.model_identity === row.model_identity; return <g key={`${row.source_decision_id}-${row.model_identity}`} role="button" tabIndex={0} className={`decision-marker${isSelected ? " selected" : ""}`} onClick={() => setSelected(row)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") setSelected(row); }}><title>{`${timeLabel(row.decision_time)} · ${action} · 点击查看30分钟结果`}</title>{action === "WAIT" && <circle cx={cx} cy={cy} r="10" fill="#eee9da" stroke={color} strokeWidth="1.5" />}{isSelected && <circle cx={cx} cy={cy} r="14" fill="none" stroke={color} strokeWidth="2" />}{action === "WAIT" ? <path d={`M ${cx-7} ${cy} h 14 M ${cx-7} ${cy} l 4 -4 M ${cx-7} ${cy} l 4 4 M ${cx+7} ${cy} l -4 -4 M ${cx+7} ${cy} l -4 4`} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" /> : <path d={action === "LONG" ? `M ${cx} ${cy-7} l -6 11 h 12 z` : `M ${cx} ${cy+7} l -6 -11 h 12 z`} fill={color} />}</g>; })}
+      {decisions.map(row => { const candle = byTime(row.decision_time); const cx = xTime(row.decision_time); const action = row.recommended_action; const cy = action === "WAIT" ? y(candle.close) : action === "LONG" ? y(candle.low) + 12 : y(candle.high) - 12; const color = action === "LONG" ? "#476b19" : action === "SHORT" ? "#c9362b" : "#555149"; const isSelected = activeSelected?.source_decision_id === row.source_decision_id && activeSelected?.model_identity === row.model_identity && activeSelected?.model_version === row.model_version; return <g key={`${row.source_decision_id}-${row.model_identity}-${row.model_version}`} role="button" tabIndex={0} className={`decision-marker${isSelected ? " selected" : ""}${row.policy_consistent === false ? " policy-mismatch" : ""}`} onClick={() => setSelected(row)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") setSelected(row); }}><title>{`${timeLabel(row.decision_time)} · ${action} · 冻结版本 ${row.model_version} · 点击查看30分钟结果`}</title>{action === "WAIT" && <circle cx={cx} cy={cy} r="10" fill="#eee9da" stroke={color} strokeWidth="1.5" />}{isSelected && <circle cx={cx} cy={cy} r="14" fill="none" stroke={color} strokeWidth="2" />}{action === "WAIT" ? <path d={`M ${cx-7} ${cy} h 14 M ${cx-7} ${cy} l 4 -4 M ${cx-7} ${cy} l 4 4 M ${cx+7} ${cy} l -4 -4 M ${cx+7} ${cy} l -4 4`} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" /> : <path d={action === "LONG" ? `M ${cx} ${cy-7} l -6 11 h 12 z` : `M ${cx} ${cy+7} l -6 -11 h 12 z`} fill={color} />}</g>; })}
       {showTraining && (market?.training_markers ?? []).filter(row => row.model_identity === identity && Date.parse(row.created_at) >= cutoff).map(row => <g key={`${row.model_identity}-${row.training_dataset_hash}`}><title>{`${timeLabel(row.created_at)} · 第一次使用 ${row.training_rows} 条训练数据${row.artifact_count > 1 ? ` · 后续恢复重建 ${row.artifact_count-1} 次` : ""}`}</title><line x1={xTime(row.created_at)} x2={xTime(row.created_at)} y1="52" y2="332" className="training-line" /><text x={xTime(row.created_at)+4} y="328" className="training-label">{row.training_rows}条新训练</text></g>)}
       <text x="5" y="64">{high.toFixed(2)}</text><text x="5" y="335">{low.toFixed(2)}</text>
       {timeTickIndices.map(index => <g key={candles[index].time} className="time-axis"><line x1={xAtIndex(index)} x2={xAtIndex(index)} y1="338" y2="344" /><text x={xAtIndex(index)} y="366" textAnchor="middle">{axisTimeLabel(candles[index].time)}</text></g>)}
     </svg>
     <div className="chart-legend"><span><i className="long-dot" />看多预测</span><span><i className="short-dot" />看空预测</span>{showWait && <span><i className="wait-dot" />↔ 等待，不持仓</span>}{showTraining && <span><i className="train-dot" />新训练数据代</span>}</div>
     <div className="decision-reader" aria-live="polite">{activeSelected ? <>
-      <div><small>一次完整观察</small><strong>{timeLabel(activeSelected.decision_time)} 预测 {activeSelected.recommended_action}</strong><span>→ {timeLabel(activeSelected.exit_time)} 固定观察结果</span></div>
+      <div><small>一次完整观察 · 冻结记录</small><strong>{timeLabel(activeSelected.decision_time)} 预测 {activeSelected.recommended_action}</strong><span>版本 {activeSelected.model_version} · → {timeLabel(activeSelected.exit_time)} 固定观察结果{activeSelected.policy_consistent === false ? ` · 历史规则不一致（按当时原记录保留；现行规则应为 ${activeSelected.policy_expected_action}）` : ""}</span></div>
       <DecisionPayoff selected={activeSelected} resultLabel={resultLabel} />
     </> : <><div><small>怎样阅读</small><strong>点击图中的三角形</strong><span>这里只显示一次预测；选中后才标出它对应的30分钟观察窗口。</span></div></>}</div>
     <p className="wait-explainer"><b>WAIT 怎样产生：</b> Ridge 学习的是未来30分钟连续收益，不是硬猜三分类。Long、Wait=0、Short 三种结果都会被评分；只有最佳方向扣除 Bid/Ask 成本与95%不确定性后仍为正，才显示方向，否则 WAIT。系统同时记录 WAIT 错过的事后机会，但不会用惩罚强迫开仓。</p>

@@ -93,12 +93,16 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /版本独立盈亏清单/);
   assert.match(modal, /K线与决策/);
   assert.match(modal, /系统同时记录 WAIT 错过的事后机会/);
-  assert.match(modal, /清晰：每30分钟1次/);
+  assert.match(modal, /固定网格：每小时 :00 \/ :30/);
   assert.match(modal, /点击图中的三角形/);
   assert.match(modal, /Ridge 学习的是未来30分钟连续收益/);
   assert.match(modal, /Long、Wait=0、Short 三种结果都会被评分/);
   assert.match(modal, /每根K线5分钟 · 每个箭头预测未来30分钟/);
-  assert.match(modal, /previousIncluded = Number.POSITIVE_INFINITY/);
+  assert.match(modal, /历史＋实时成熟 OOS（只追加，不重写）/);
+  assert.match(modal, /当前图中显示/);
+  assert.match(modal, /冻结版本/);
+  assert.match(modal, /历史规则不一致/);
+  assert.match(modal, /getUTCMinutes\(\) % 30 === 0/);
   assert.match(modal, /const xAtIndex/);
   assert.match(modal, /条模型评分/);
   assert.match(modal, /versionBoundaries/);
