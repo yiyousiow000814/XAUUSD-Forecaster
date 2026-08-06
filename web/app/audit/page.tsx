@@ -310,7 +310,7 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
   };
   return <details className="news-row" onToggle={loadDetail}>
     <summary>
-      <div className="news-row-stamp"><b>{row.category}</b><time>{time(row.source_published_time)}</time><small className={`eligibility-badge eligibility-${row.model_visibility.toLowerCase().replaceAll("_", "-")}`}>{row.model_visibility.replaceAll("_", " ")}</small></div>
+      <div className="news-row-stamp"><b>{row.category}</b><time title="系统第一次收到这条新闻的时间">收到 {time(row.collector_first_seen_time)}</time><small className={`eligibility-badge eligibility-${row.model_visibility.toLowerCase().replaceAll("_", "-")}`}>{row.model_visibility.replaceAll("_", " ")}</small></div>
       <div className="news-row-title"><strong>{row.headline}</strong><small>{SOURCE_LABELS[row.source] ?? row.source.replaceAll("_", " ")}{translated ? " · Gemini 中文标题" : ""}{row.emerging_topic_zh ? ` · ${row.emerging_topic_zh}` : ""}</small></div>
       <div className={`news-row-state state-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
         <b>{row.content_status === "FULL_TEXT" ? `${row.content_characters.toLocaleString()} 字符` : row.source === "google_news_gold_geopolitics" ? "聚合标题" : "等待正文"}</b>
@@ -340,7 +340,7 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
           <span>等待来源正文</span><p>当前只有标题或短描述，不会进入模型，也不会假装已经理解内容。</p>
         </section>}
         {current.event_type && <div className="news-classification"><b>{current.event_type}</b><span>鹰派 {impulse(current.hawkishness)}</span><span>通胀 {impulse(current.inflation_impulse)}</span><span>增长 {impulse(current.growth_impulse)}</span><span>地缘 {impulse(current.geopolitical_risk)}</span><span>美元 {impulse(current.usd_impulse)}</span><span>新颖 {number(current.novelty)}</span><span>置信 {number(current.confidence)}</span></div>}
-        <dl className="news-timeline"><div><dt>Publisher time</dt><dd>{time(row.source_published_time)}</dd></div><div><dt>First seen</dt><dd>{time(row.collector_first_seen_time)}</dd></div><div><dt>Parsed at</dt><dd>{time(current.parsed_at)}</dd></div><div><dt>Collection delay</dt><dd>{current.collection_delay_seconds == null ? "—" : `${number(current.collection_delay_seconds, 1)}s`}</dd></div><div><dt>Processing delay</dt><dd>{current.processing_delay_seconds == null ? "—" : `${number(current.processing_delay_seconds, 1)}s`}</dd></div><div><dt>Eligibility</dt><dd>{current.source_eligibility ?? "—"} · {row.model_visibility}</dd></div></dl>
+        <dl className="news-timeline"><div><dt>媒体发布时间</dt><dd>{time(row.source_published_time)}</dd></div><div><dt>系统首次收到</dt><dd>{time(row.collector_first_seen_time)}</dd></div><div><dt>Gemini 完成时间</dt><dd>{time(current.parsed_at)}</dd></div><div><dt>采集延迟</dt><dd>{current.collection_delay_seconds == null ? "—" : `${number(current.collection_delay_seconds, 1)} 秒`}</dd></div><div><dt>处理延迟</dt><dd>{current.processing_delay_seconds == null ? "—" : `${number(current.processing_delay_seconds, 1)} 秒`}</dd></div><div><dt>模型权限</dt><dd>{current.source_eligibility ?? "—"} · {row.model_visibility}</dd></div></dl>
         <footer className="card-footer"><span>{current.entities?.join(" · ") || "无实体"}</span><span>{current.llm_model_version ?? "未标注"} · 收到 {time(row.collector_first_seen_time)} · 标注 {time(current.parsed_at)}</span></footer>
       </>}
     </div>
@@ -466,7 +466,7 @@ export default function AuditPage() {
 
       {view === "news" && <>
         <section className="news-browser" aria-label="新闻自动分类">
-          <div><strong>自动分类</strong><span>最新版本共 {payload?.counts.latest_news_items ?? 0} 条 · 每页 {NEWS_PER_PAGE} 条</span></div>
+          <div><strong>自动分类</strong><span>按系统首次收到排序 · 最新版本共 {payload?.counts.latest_news_items ?? 0} 条 · 每页 {NEWS_PER_PAGE} 条</span></div>
           <nav>
             {categories.map(category => <button key={category.name} type="button" className={newsCategory === category.name ? "active" : ""} onClick={() => { setNewsCategory(category.name); setNewsPage(1); }}>
               {category.name}<b>{category.count}</b>
@@ -474,7 +474,7 @@ export default function AuditPage() {
           </nav>
         </section>
         <section className="news-table">
-          <header className="news-table-head"><span>分类 / 时间</span><span>新闻与来源</span><span>正文 / Gemini</span></header>
+          <header className="news-table-head"><span>分类 / 首次收到</span><span>新闻与来源</span><span>正文 / Gemini</span></header>
           {visibleNews.map(row => <NewsRow
             key={`${row.source}-${row.source_item_id}-${row.revision_number}`}
             row={row}

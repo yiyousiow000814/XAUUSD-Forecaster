@@ -549,7 +549,11 @@ def _dashboard_payload(database: Path) -> dict:
                      AND (length(COALESCE(peer.body, '')) > length(COALESCE(n.body, ''))
                           OR (length(COALESCE(peer.body, '')) = length(COALESCE(n.body, ''))
                               AND peer.source_item_id < n.source_item_id)))
-               ORDER BY COALESCE(n.source_published_time,
+               -- The forward ledger is an arrival-time view.  A newly discovered
+               -- article can have an old publisher timestamp, so ordering by the
+               -- publisher clock makes an active collector look frozen.
+               ORDER BY n.collector_first_seen_time DESC,
+                        COALESCE(n.source_published_time,
                                  n.collector_first_seen_time) DESC,
                         n.source, n.source_item_id
                LIMIT 200""",

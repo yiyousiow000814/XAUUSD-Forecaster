@@ -72,6 +72,39 @@ def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
     assert synchronizer["status"] == "OK"
 
 
+def test_dashboard_orders_news_by_first_seen_not_publisher_time(tmp_path) -> None:
+    now = datetime(2026, 8, 6, 6, 0, tzinfo=UTC)
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=now)
+
+    for item_id, published_at, first_seen in (
+        ("visible-first", now - timedelta(minutes=5), now - timedelta(minutes=20)),
+        ("arrived-first", now - timedelta(days=2), now - timedelta(minutes=1)),
+    ):
+        body = f"full evidence for {item_id} " * 30
+        ledger.append_news_revision(
+            {
+                "source": "bea_economic_releases",
+                "source_item_id": item_id,
+                "source_published_time": published_at,
+                "collector_first_seen_time": first_seen,
+                "fetched_time": first_seen,
+                "headline": item_id,
+                "body": body,
+                "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+                "cluster_id": item_id,
+            }
+        )
+    ledger.connection.close()
+
+    payload = _dashboard_module()._dashboard_payload(database)
+
+    assert [row["source_item_id"] for row in payload["recent_news"][:2]] == [
+        "arrived-first",
+        "visible-first",
+    ]
+
+
 def test_dashboard_uses_gemini_controlled_category_before_source_guess() -> None:
     module = _dashboard_module()
     assert module._news_category({
