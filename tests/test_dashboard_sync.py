@@ -110,6 +110,8 @@ def test_remote_snapshot_is_bounded_and_keeps_retained_content() -> None:
         {"lifecycle_status": "LATEST", "model_version": "latest"}
     ]
     assert mirrored["learning_curves"]["archived_model_count"] == 1
+    assert mirrored["learning_curves"]["identity_curves"] == [body]
+    assert "full_minus_market" not in mirrored["learning_curves"]
     assert "models" not in mirrored["training"]
 
 

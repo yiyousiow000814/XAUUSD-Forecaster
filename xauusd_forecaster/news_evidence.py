@@ -90,6 +90,22 @@ def _topics(row: dict) -> tuple[str, ...]:
         str(annotation.get("summary_zh") or ""),
     )).casefold().replace("_", " ")
     found = [topic for topic, terms in _TOPIC_TERMS if any(term in text for term in terms)]
+    category_topics = {
+        "rates_fed": ("rates_fed",),
+        "inflation_employment": ("inflation", "employment"),
+        "growth_economy": ("growth_economy",),
+        "usd_liquidity": ("usd_liquidity",),
+        "oil_energy": ("oil_energy",),
+        "war_geopolitics": ("war_geopolitics",),
+        "central_bank_gold": ("central_bank_gold",),
+        "risk_sentiment": ("risk_sentiment",),
+    }
+    if not found:
+        for category in (
+            annotation.get("primary_category"),
+            *(annotation.get("secondary_categories") or []),
+        ):
+            found.extend(category_topics.get(str(category), ()))
     if not found:
         if abs(float(row.get("geopolitical_risk") or 0.0)) >= 0.2:
             found.append("war_geopolitics")
@@ -134,7 +150,8 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
            WHERE n.collector_first_seen_time<=? AND a.parsed_at<=?
              AND length(trim(coalesce(n.body,'')))>=240
              AND a.llm_model_version IN ('gemini-3.5-flash-lite','gemini-3.1-flash-lite')
-             AND a.prompt_version IN ('news-json-v9-local-display-recovery',
+             AND a.prompt_version IN ('news-json-v10-controlled-category-zh',
+                                      'news-json-v9-local-display-recovery',
                                       'news-json-v8-strict-zh-source-number-lexemes')
              AND NOT EXISTS (
                SELECT 1 FROM news_revisions newer
@@ -192,6 +209,10 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
         reasons = [f"EVIDENCE_{grade}"]
         if not eligible:
             reasons.append("NO_ACTION_TOPIC" if not (ACTION_TOPICS & set(topics)) else "NEEDS_CONFIRMATION")
+        annotation = json.loads(canonical.get("annotation_json") or "{}")
+        canonical_headline = str(
+            annotation.get("headline_zh") or canonical["headline"]
+        )
         events.append({
             "event_cluster_id": event_id,
             "event_key": event_id,
@@ -206,8 +227,8 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             "canonical_source": canonical["source"],
             "canonical_source_item_id": canonical["source_item_id"],
             "publisher_domain": canonical["publisher_domain"],
-            "headline": canonical["headline"],
-            "canonical_headline": canonical["headline"],
+            "headline": canonical_headline,
+            "canonical_headline": canonical_headline,
             "model_permission": "BROAD_MODEL" if eligible else "DISPLAY_ONLY",
             "collector_first_seen_time": min(row["collector_first_seen_time"] for row in members),
             "parsed_at": canonical["parsed_at"],

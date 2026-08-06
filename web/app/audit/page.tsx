@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import LearningGraphModal from "./LearningGraphModal";
 
 type Prediction = {
   model_identity: string;
@@ -63,6 +64,9 @@ type News = {
   source_eligibility: string;
   model_visibility: string;
   eligibility_version: string;
+  primary_category: string | null;
+  secondary_categories: string[];
+  emerging_topic_zh: string | null;
 };
 
 type NewsEvidence = {
@@ -173,6 +177,7 @@ type Payload = {
     slippage_status: string;
     models: LearningModel[];
     rolling_processes: RollingProcess[];
+    identity_curves: Array<{ model_identity: string; points: Array<{ decision_time: string; cumulative_quote_return: number }> }>;
     zero_return_baseline: {
       label: string;
       model_identity: string;
@@ -192,6 +197,11 @@ type Payload = {
     observed_at?: string | null;
     unit?: string | null;
   }>;
+  market_chart: {
+    candles: Array<{ time: string; open: number; high: number; low: number; close: number; ticks: number }>;
+    decisions: Array<{ source_decision_id: string; decision_time: string; exit_time: string; model_identity: string; recommended_action: string; outcome_status: string }>;
+    training_markers: Array<{ model_identity: string; model_version: string; created_at: string; training_rows: number }>;
+  };
 };
 
 const time = (value?: string | null) => value ? new Intl.DateTimeFormat("zh-CN", {
@@ -202,7 +212,7 @@ const number = (value?: number | null, digits = 2) => value === null || value ==
 const percent = (value?: number | null) => value === null || value === undefined ? "—" : `${value >= 0 ? "+" : "−"}${Math.abs(value * 100).toFixed(3)}%`;
 const impulse = (value?: number | null) => value === null || value === undefined ? "—" : `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
 const NEWS_PER_PAGE = 12;
-const CATEGORY_ORDER = ["战争/地缘", "利率/Fed", "央行购金", "通胀/就业", "增长/经济", "油价/能源", "美元/流动性", "Fed监管/其他", "其他"];
+const CATEGORY_ORDER = ["战争/地缘", "利率/Fed", "央行购金", "通胀/就业", "增长/经济", "油价/能源", "美元/流动性", "风险偏好", "监管/其他", "其他"];
 const SOURCE_LABELS: Record<string, string> = {
   federal_reserve_monetary: "Federal Reserve · 货币政策",
   federal_reserve_speeches_testimony: "Federal Reserve · 演讲证词",
@@ -226,10 +236,10 @@ const MODEL_LABELS: Record<string, string> = {
   BROAD_FULL: "黄金＋大视野新闻 Ridge",
 };
 const TOPIC_LABELS: Record<string, string> = {
-  rates_fed: "利率 / Fed", inflation: "通胀", employment: "就业",
+  rates_fed: "利率 / Fed", inflation: "通胀", employment: "就业", inflation_employment: "通胀 / 就业",
   growth_economy: "增长 / 经济", usd_liquidity: "美元 / 流动性",
   oil_energy: "油价 / 能源", war_geopolitics: "战争 / 地缘",
-  central_bank_gold: "央行购金", risk_sentiment: "风险偏好",
+  central_bank_gold: "央行购金", risk_sentiment: "风险偏好", regulation_other: "监管 / 其他",
 };
 const EVIDENCE_LABELS: Record<string, string> = {
   PRIMARY: "一手官方证据", CORROBORATED: "多源确认",
@@ -243,6 +253,7 @@ export default function AuditPage() {
   const [view, setView] = useState<"news" | "evidence" | "decisions" | "league" | "coverage">("news");
   const [newsCategory, setNewsCategory] = useState("全部");
   const [newsPage, setNewsPage] = useState(1);
+  const [graphOpen, setGraphOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -363,7 +374,7 @@ export default function AuditPage() {
           {visibleNews.map((row) => <details className="news-row" key={`${row.source}-${row.source_item_id}-${row.revision_number}`}>
             <summary>
               <div className="news-row-stamp"><b>{row.category}</b><time>{time(row.source_published_time)}</time><small className={`eligibility-badge eligibility-${row.model_visibility.toLowerCase().replaceAll("_", "-")}`}>{row.model_visibility.replaceAll("_", " ")}</small></div>
-              <div className="news-row-title"><strong>{row.headline}</strong><small>{SOURCE_LABELS[row.source] ?? row.source.replaceAll("_", " ")}{row.headline !== row.original_headline ? " · Gemini 中文标题" : " · 等待标题翻译"}</small></div>
+              <div className="news-row-title"><strong>{row.headline}</strong><small>{SOURCE_LABELS[row.source] ?? row.source.replaceAll("_", " ")}{row.headline !== row.original_headline ? " · Gemini 中文标题" : " · 等待标题翻译"}{row.emerging_topic_zh ? ` · ${row.emerging_topic_zh}` : ""}</small></div>
               <div className={`news-row-state state-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
                 <b>{row.content_status === "FULL_TEXT" ? `${row.content_characters.toLocaleString()} 字符` : row.source === "google_news_gold_geopolitics" ? "聚合标题" : "等待正文"}</b>
                 <small>{row.annotation_status === "READY" ? "Gemini 已完成" : row.annotation_status === "QUEUED" ? "Gemini 排队中" : row.annotation_status === "BACKING_OFF" ? "失败退避中" : row.annotation_status === "DEAD_LETTER" ? "已隔离待审" : "禁止判断"}</small>
@@ -465,36 +476,25 @@ export default function AuditPage() {
           <article><span>Next fit</span><strong>{payload?.learning_curves.next_training_threshold ?? 96}</strong><small>Preview 96 · Shadow 200 · 后续每50</small></article>
         </div>
         <div className="league-cost-note"><b>诚实成本口径</b><span>显示的是 Bid/Ask quote-cost-adjusted return；commission {payload?.learning_curves.commission_status ?? "UNCONFIGURED"}，slippage {payload?.learning_curves.slippage_status ?? "UNAVAILABLE_SHADOW"}，因此不是 net PnL。</span></div>
-        <section className="rolling-process-grid" aria-label="滚动训练流程长期成绩">
-          <article className="baseline-card">
-            <span>SAFETY BASELINE</span>
-            <h3>{payload?.learning_curves.zero_return_baseline.label ?? "零收益安全基准"}</h3>
-            <strong>{percent(payload?.learning_curves.zero_return_baseline.cumulative_quote_return ?? 0)}</strong>
-            <p>不训练、不使用 AI、不占 Ridge 版本名额，只代表什么都不做。</p>
-          </article>
-          {(payload?.learning_curves.rolling_processes ?? []).filter(row => row.active_model_versions.length > 0).map(row => <article key={row.model_identity}>
-            <span>ROLLING OOS · {row.calibration_status}</span>
-            <h3>{MODEL_LABELS[row.model_identity] ?? row.model_identity}</h3>
-            <strong>{percent(row.cumulative_quote_return)}</strong>
-            <p>{row.oos_rows} 条 · {row.distinct_days} 日 · PF {number(row.profit_factor_quote_adjusted, 2)}</p>
-          </article>)}
+        <section className="graph-launch">
+          <div><span>ONE TIMELINE · THREE VIEWS</span><h3>不要再对着两套数字猜。</h3><p>长期累计、最新版/前一版，以及 XAUUSD K线上的 Long / Wait / Short 与固定30分钟退出，都在同一个弹窗里按时间对齐。</p></div>
+          <button type="button" onClick={() => setGraphOpen(true)}>打开交互图表 ↗</button>
+        </section>
+        <section className="model-scope-note">
+          <article><b>新闻残差</b><span>只使用 Fed、BEA、U.S. Treasury 等冻结的核心官方正文，范围窄、来源确定。</span></article>
+          <article><b>大视野新闻残差</b><span>加入 EIA、ECB、World Gold Council 及经过一手或多源确认的可靠事件；单一线索和聚合标题仍禁止训练。</span></article>
         </section>
         {(payload?.learning_curves.models.length ?? 0) === 0 ? <div className="league-empty">
           <strong>正在建立第一版 Preview</strong><p>达到 96 条修复或 Forward 完整样本即可训练 Market Preview，不需要等待60天。曲线只从模型创建后的新 Decision 开始，绝不回填假历史成绩。</p>
-        </div> : <div className="league-table-wrap"><table className="league-table learning-table">
-          <thead><tr><th>版本 / 阶段</th><th>训练资料</th><th>之后 OOS</th><th>累计 / 平均</th><th>PF</th><th>MaxDD</th><th>Sharpe</th><th>区间状态</th></tr></thead>
-          <tbody>{activeLearningModels.map(row => <tr key={row.model_version}>
-            <td><b>{MODEL_LABELS[row.model_identity] ?? row.model_identity}</b><span className={`version-role role-${row.lifecycle_status.toLowerCase()}`}>{row.lifecycle_status === "LATEST" ? "最新版" : "前一版"}</span><small>{row.model_stage} · {row.model_version}</small>{row.news_evidence_status === "EXPERIMENTAL_SINGLE_DAY" && <small>EXPERIMENTAL · 单日新闻证据</small>}{row.news_evidence_status === "EXPERIMENTAL_TWO_DAY" && <small>EXPERIMENTAL · 双日新闻证据</small>}{row.news_evidence_status === "STANDARD" && row.model_identity !== "MARKET_ONLY" && <small>标准新闻证据 · {row.news_event_days} 日</small>}</td>
-            <td><strong>{row.training_rows}</strong><small>cutoff {time(row.training_cutoff)}</small></td>
-            <td><strong>{row.subsequent_oos_rows}</strong><small>{row.effective_blocks} blocks · {row.distinct_days} days</small></td>
-            <td><strong>{percent(row.cumulative_quote_return)}</strong><small>平均 {percent(row.average_quote_return)}</small></td>
-            <td><strong>{number(row.profit_factor_quote_adjusted, 2)}</strong><small>quote-adjusted</small></td>
-            <td><strong>{percent(row.max_drawdown_quote_return)}</strong><small>累计回撤</small></td>
-            <td><strong>{number(row.sharpe_quote_adjusted, 2)}</strong><small>至少5个 OOS 日后显示</small></td>
-            <td><span className="league-stage">{row.calibration_status}</span><small>滚动校准 · 宽度 {number(row.interval_width, 3)} · WAIT {row.wait_rate === null ? "—" : percent(row.wait_rate)}</small></td>
-          </tr>)}</tbody>
-        </table></div>}
-        <footer className="league-footer">{payload?.learning_curves.disclaimer ?? "早期曲线用于观察学习过程，不代表已证明盈利。"} 单日和双日新闻模型明确标记 EXPERIMENTAL；达到3个新闻日期后自动进入标准证据状态。当前只运行每个 Ridge 身份的最新版和前一版；{archivedModelCount} 个旧版本的 artifact、预测和成绩已永久归档。零收益安全基准不训练、不占模型名额。Preview 与 Shadow 都没有下单权限，也不会自动晋升。</footer>
+        </div> : <div className="compact-model-summary">{Object.keys(MODEL_LABELS).filter(identity => identity !== "CHAMPION_0").map(identity => {
+          const latest = activeLearningModels.find(row => row.model_identity === identity && row.lifecycle_status === "LATEST");
+          const previous = activeLearningModels.find(row => row.model_identity === identity && row.lifecycle_status === "PREVIOUS");
+          if (!latest && !previous) return null;
+          const score = (row?: LearningModel) => !row ? "—" : row.subsequent_oos_rows ? percent(row.cumulative_quote_return) : "等待结果";
+          return <article key={identity}><b>{MODEL_LABELS[identity]}</b><span>前一版 <strong>{score(previous)}</strong></span><i aria-hidden="true">→</i><span>最新版 <strong>{score(latest)}</strong></span></article>;
+        })}</div>}
+        <footer className="league-footer">{payload?.learning_curves.disclaimer ?? "早期曲线用于观察学习过程，不代表已证明盈利。"} 单日和双日新闻模型明确标记 EXPERIMENTAL；达到3个新闻日期后自动进入标准证据状态。当前只运行每个 Ridge 身份的最新版和前一版；{archivedModelCount} 个旧版本的 artifact、预测和成绩已永久归档。零收益安全基准不训练、不使用 AI、不占 Ridge 版本名额。Preview 与 Shadow 都没有下单权限，也不会自动晋升。</footer>
+        <LearningGraphModal open={graphOpen} onClose={() => setGraphOpen(false)} curves={payload?.learning_curves.identity_curves ?? []} models={activeLearningModels} market={payload?.market_chart} />
       </section>}
 
       {view === "coverage" && <section className="coverage-grid">

@@ -32,8 +32,8 @@ NEWS_FEATURES = (
 )
 
 NEWS_PROMPT_VERSIONS = (
+    "news-json-v10-controlled-category-zh",
     "news-json-v9-local-display-recovery",
-    "news-json-v8-strict-zh-source-number-lexemes",
 )
 NEWS_MODEL_VERSIONS = (
     "gemini-3.5-flash-lite",

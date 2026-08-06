@@ -566,12 +566,34 @@ class ForwardLedger:
         }
         summary_fields = legacy_fields | {"summary_zh"}
         translated_fields = summary_fields | {"headline_zh"}
-        if set(vector) not in (legacy_fields, summary_fields, translated_fields):
+        classified_fields = translated_fields | {
+            "primary_category", "secondary_categories", "emerging_topic_zh"
+        }
+        if set(vector) not in (
+            legacy_fields, summary_fields, translated_fields, classified_fields
+        ):
             raise ValueError("annotation does not match frozen JSON schema fields")
         if "summary_zh" in vector and not str(vector["summary_zh"]).strip():
             raise ValueError("annotation summary_zh is empty")
         if "headline_zh" in vector and not str(vector["headline_zh"]).strip():
             raise ValueError("annotation headline_zh is empty")
+        if set(vector) == classified_fields:
+            allowed_categories = {
+                "rates_fed", "inflation_employment", "growth_economy",
+                "usd_liquidity", "oil_energy", "war_geopolitics",
+                "central_bank_gold", "risk_sentiment", "regulation_other",
+            }
+            if vector["primary_category"] not in allowed_categories:
+                raise ValueError("annotation primary_category is not controlled")
+            secondary = list(vector["secondary_categories"])
+            if len(secondary) > 2 or len(set(secondary)) != len(secondary):
+                raise ValueError("annotation secondary_categories exceeds limit")
+            if any(value not in allowed_categories for value in secondary):
+                raise ValueError("annotation secondary category is not controlled")
+            if vector["primary_category"] in secondary:
+                raise ValueError("annotation category cannot be both primary and secondary")
+            if len(str(vector["emerging_topic_zh"])) > 16:
+                raise ValueError("annotation emerging_topic_zh is too long")
         for name in (
             "hawkishness", "inflation_impulse", "growth_impulse",
             "geopolitical_risk", "usd_impulse",

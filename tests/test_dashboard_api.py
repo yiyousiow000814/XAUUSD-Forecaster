@@ -70,3 +70,21 @@ def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
     synchronizer = payload["system"]["components"]["sites_synchronizer"]
     assert synchronizer["last_success"] == sync_success
     assert synchronizer["status"] == "OK"
+
+
+def test_dashboard_uses_gemini_controlled_category_before_source_guess() -> None:
+    module = _dashboard_module()
+    assert module._news_category({
+        "primary_category": "central_bank_gold",
+        "source": "gdelt_gold_geopolitics",
+        "headline": "Central bank increases gold reserves",
+        "summary_zh": "央行增加黄金储备。",
+        "event_type": "central_bank_purchase",
+    }) == "央行购金"
+    assert module._news_category({
+        "primary_category": None,
+        "source": "federal_reserve_press_all",
+        "headline": "Application approval",
+        "summary_zh": "监管审批。",
+        "event_type": "regulatory_approval",
+    }) == "监管/其他"

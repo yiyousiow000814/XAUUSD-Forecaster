@@ -1431,7 +1431,7 @@ def test_gemini_annotation_does_not_treat_other_model_as_complete(
     assert ledger.count("news_annotations") == 2
 
 
-def test_v8_success_is_compatible_and_not_reprocessed(tmp_path, monkeypatch) -> None:
+def test_v8_success_is_readable_but_receives_one_v10_category_backfill(tmp_path, monkeypatch) -> None:
     now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
     body = "Complete audited source content. " * 20
@@ -1451,6 +1451,8 @@ def test_v8_success_is_compatible_and_not_reprocessed(tmp_path, monkeypatch) -> 
         "hawkishness": 0.0, "inflation_impulse": 0.0,
         "growth_impulse": 0.0, "geopolitical_risk": 0.0,
         "usd_impulse": 0.0, "novelty": 0.2, "confidence": 0.8,
+        "primary_category": "rates_fed", "secondary_categories": [],
+        "emerging_topic_zh": "政策更新",
     }
     ledger.append_annotation(
         {
@@ -1463,10 +1465,18 @@ def test_v8_success_is_compatible_and_not_reprocessed(tmp_path, monkeypatch) -> 
         }
     )
     monkeypatch.setattr(
-        annotation_module,
-        "_call_gemini",
-        lambda *_: pytest.fail("compatible v8 annotation was reprocessed"),
+        annotation_module, "_call_gemini",
+        lambda *_: (vector, annotation_module.DEFAULT_GEMINI_MODEL),
     )
+    statuses = annotate_pending_news(
+        ledger, provider="gemini", api_key="test-key", limit=1
+    )
+    assert len(statuses) == 1
+    assert statuses[0]["status"] == "OK"
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_annotations WHERE prompt_version=?",
+        (annotation_module.PROMPT_VERSION,),
+    ).fetchone()[0] == 1
     assert annotate_pending_news(
         ledger, provider="gemini", api_key="test-key", limit=1
     ) == []

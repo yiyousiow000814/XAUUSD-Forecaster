@@ -33,9 +33,8 @@ def remote_snapshot(payload: dict) -> bytes:
 
     learning = snapshot.get("learning_curves")
     if isinstance(learning, dict):
-        # These analytical series are retained in local SQLite/API and are not
-        # rendered by the Sites UI.
-        learning.pop("identity_curves", None)
+        # Keep identity_curves for the graph modal. Pairwise diagnostics are
+        # local-only because the Sites UI does not render them.
         learning.pop("full_minus_market", None)
         learning.pop("broad_full_minus_official_full", None)
         models = learning.get("models")

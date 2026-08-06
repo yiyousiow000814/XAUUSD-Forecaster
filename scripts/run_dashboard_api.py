@@ -9,7 +9,7 @@ import math
 import sqlite3
 import sys
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -151,14 +151,28 @@ def _latest_quote_received(database: Path) -> str | None:
     return None
 
 
+CATEGORY_LABELS = {
+    "rates_fed": "利率/Fed",
+    "inflation_employment": "通胀/就业",
+    "growth_economy": "增长/经济",
+    "usd_liquidity": "美元/流动性",
+    "oil_energy": "油价/能源",
+    "war_geopolitics": "战争/地缘",
+    "central_bank_gold": "央行购金",
+    "risk_sentiment": "风险偏好",
+    "regulation_other": "监管/其他",
+}
+
+
 def _news_category(item: dict) -> str:
+    controlled = CATEGORY_LABELS.get(str(item.get("primary_category") or ""))
+    if controlled:
+        return controlled
     source = str(item.get("source") or "")
     searchable = " ".join(
         str(item.get(key) or "")
         for key in ("headline", "event_type", "summary_zh")
     ).lower()
-    if source in {"gdelt_gold_geopolitics", "google_news_gold_geopolitics"}:
-        return "战争/地缘"
     if source == "world_gold_council_central_banks":
         return "央行购金"
     if source in {"eia_today_in_energy", "eia_press_releases"}:
@@ -190,8 +204,93 @@ def _news_category(item: dict) -> str:
     if source in {"federal_reserve_monetary", "federal_reserve_speeches_testimony"}:
         return "利率/Fed"
     if source == "federal_reserve_press_all":
-        return "Fed监管/其他"
+        return "监管/其他"
     return "其他"
+
+
+def _recent_market_chart(
+    database: Path, connection: sqlite3.Connection, now: datetime
+) -> dict:
+    """Aggregate the latest 24 hours of append-only quotes into true 5m candles."""
+    cutoff = now - timedelta(hours=24)
+    buckets: dict[datetime, dict] = {}
+    quote_files = sorted((database.parent / "quotes").glob("*.jsonl"))[-2:]
+    for path in quote_files:
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        quote = json.loads(line)
+                        observed = datetime.fromisoformat(
+                            str(quote["received_time"]).replace("Z", "+00:00")
+                        )
+                        if observed < cutoff:
+                            continue
+                        bid = float(quote["bid"])
+                        ask = float(quote["ask"])
+                        midpoint = (bid + ask) / 2.0
+                        minute = observed.replace(second=0, microsecond=0)
+                        bucket = minute - timedelta(minutes=minute.minute % 5)
+                    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                    candle = buckets.get(bucket)
+                    if candle is None:
+                        buckets[bucket] = {
+                            "time": bucket.isoformat(), "open": midpoint,
+                            "high": midpoint, "low": midpoint, "close": midpoint,
+                            "ticks": 1,
+                        }
+                    else:
+                        candle["high"] = max(candle["high"], midpoint)
+                        candle["low"] = min(candle["low"], midpoint)
+                        candle["close"] = midpoint
+                        candle["ticks"] += 1
+        except OSError:
+            continue
+    candles = [buckets[key] for key in sorted(buckets)][-288:]
+    first_time = candles[0]["time"] if candles else cutoff.isoformat()
+    decision_rows = connection.execute(
+        """WITH ranked AS (
+             SELECT p.source_decision_id,p.decision_time,p.model_identity,
+                    p.model_version,p.recommended_action,p.effective_action,
+                    p.prediction_status,s.value_quote_return,
+                    row_number() OVER (
+                      PARTITION BY p.source_decision_id,p.model_identity
+                      ORDER BY u.created_at DESC,u.model_version DESC
+                    ) AS version_rank
+             FROM predictions_v2 p
+             JOIN model_updates_v2 u USING(model_version)
+             LEFT JOIN prediction_scores_v2 s
+               USING(source_decision_id,model_version)
+             WHERE p.decision_time>=? AND p.decision_time>u.created_at
+           )
+           SELECT * FROM ranked WHERE version_rank=1
+           ORDER BY decision_time,model_identity""",
+        (first_time,),
+    ).fetchall()
+    decisions = [{
+        **dict(row),
+        "exit_time": (
+            datetime.fromisoformat(row["decision_time"]) + timedelta(minutes=30)
+        ).isoformat(),
+        "outcome_status": (
+            "VALID" if row["value_quote_return"] is not None else "PENDING"
+        ),
+    } for row in decision_rows]
+    marker_rows = connection.execute(
+        """SELECT model_identity,model_version,model_stage,training_rows,
+                  training_cutoff,created_at
+           FROM model_updates_v2 WHERE created_at>=?
+           ORDER BY created_at,model_identity""",
+        (first_time,),
+    ).fetchall()
+    return {
+        "window_hours": 24,
+        "candle_minutes": 5,
+        "candles": candles,
+        "decisions": [dict(row) for row in decisions],
+        "training_markers": [dict(row) for row in marker_rows],
+    }
 
 
 def _dashboard_payload(database: Path) -> dict:
@@ -200,7 +299,7 @@ def _dashboard_payload(database: Path) -> dict:
     connection.row_factory = sqlite3.Row
     try:
         latest = connection.execute(
-            """SELECT d.decision_time, d.effective_action, d.data_health,
+            """SELECT d.decision_id, d.decision_time, d.effective_action, d.data_health,
                       d.reason_codes_json, s.source_event_time,
                       s.source_received_time, s.bid, s.ask, s.spread,
                       s.features_json, s.u5, s.u5_status
@@ -208,12 +307,43 @@ def _dashboard_payload(database: Path) -> dict:
                JOIN market_snapshots s USING(snapshot_id)
                ORDER BY d.decision_time DESC LIMIT 1"""
         ).fetchone()
+        latest_prediction = None
+        if latest:
+            latest_prediction = connection.execute(
+                """SELECT p.model_identity,p.model_version,p.recommended_action,
+                          p.prediction_status,p.ev_long_u5,p.ev_short_u5,
+                          p.interval_width
+                   FROM predictions_v2 p
+                   JOIN model_updates_v2 u USING(model_version)
+                   WHERE p.source_decision_id=?
+                     AND p.model_identity IN ('BROAD_FULL','FULL','MARKET_ONLY')
+                   ORDER BY CASE p.model_identity
+                              WHEN 'BROAD_FULL' THEN 0 WHEN 'FULL' THEN 1 ELSE 2 END,
+                            u.created_at DESC
+                   LIMIT 1""",
+                (latest["decision_id"],),
+            ).fetchone()
+        u5_rows = connection.execute(
+            """SELECT u5 FROM market_snapshots
+               WHERE u5_status='READY' AND u5 IS NOT NULL
+               ORDER BY decision_time"""
+        ).fetchall()
         recent = connection.execute(
             """SELECT d.decision_id, d.decision_time, d.effective_action, d.data_health,
                       s.bid, s.ask, s.spread, s.features_json,
                       o.outcome_status, o.long_return, o.short_return,
                       o.long_mfe, o.long_mae, o.short_mfe, o.short_mae,
-                      o.maximum_spread
+                      o.maximum_spread,
+                      (SELECT p.recommended_action FROM predictions_v2 p
+                       JOIN model_updates_v2 u USING(model_version)
+                       WHERE p.source_decision_id=d.decision_id
+                         AND p.model_identity='BROAD_FULL'
+                       ORDER BY u.created_at DESC LIMIT 1) AS research_action,
+                      (SELECT p.prediction_status FROM predictions_v2 p
+                       JOIN model_updates_v2 u USING(model_version)
+                       WHERE p.source_decision_id=d.decision_id
+                         AND p.model_identity='BROAD_FULL'
+                       ORDER BY u.created_at DESC LIMIT 1) AS research_status
                FROM decision_events d
                JOIN market_snapshots s USING(snapshot_id)
                LEFT JOIN outcomes o USING(decision_id)
@@ -270,6 +400,9 @@ def _dashboard_payload(database: Path) -> dict:
                            ELSE 'HEADLINE_ONLY' END AS content_status,
                       n.link, n.content_hash,
                       json_extract(a.annotation_json, '$.summary_zh') AS summary_zh,
+                      json_extract(a.annotation_json, '$.primary_category') AS primary_category,
+                      json_extract(a.annotation_json, '$.secondary_categories') AS secondary_categories_json,
+                      json_extract(a.annotation_json, '$.emerging_topic_zh') AS emerging_topic_zh,
                       COALESCE(a.event_type, legacy.event_type, legacy_v3.event_type) AS event_type,
                       COALESCE(a.entities_json, legacy.entities_json, legacy_v3.entities_json) AS entities_json,
                       COALESCE(a.hawkishness, legacy.hawkishness, legacy_v3.hawkishness) AS hawkishness,
@@ -325,10 +458,12 @@ def _dashboard_payload(database: Path) -> dict:
                      AND preferred_a.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
                      AND preferred_a.prompt_version IN (
+                       'news-json-v10-controlled-category-zh',
                        'news-json-v9-local-display-recovery',
                        'news-json-v8-strict-zh-source-number-lexemes')
                    ORDER BY CASE preferred_a.prompt_version
-                     WHEN 'news-json-v9-local-display-recovery' THEN 0 ELSE 1 END,
+                     WHEN 'news-json-v10-controlled-category-zh' THEN 0
+                     WHEN 'news-json-v9-local-display-recovery' THEN 1 ELSE 2 END,
                      CASE preferred_a.llm_model_version
                        WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                      preferred_a.parsed_at DESC LIMIT 1)
@@ -354,7 +489,7 @@ def _dashboard_payload(database: Path) -> dict:
                      AND latest_f.revision_number=n.revision_number
                      AND latest_f.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
-                     AND latest_f.prompt_version='news-json-v9-local-display-recovery'
+                     AND latest_f.prompt_version='news-json-v10-controlled-category-zh'
                      AND NOT (latest_f.error_type='RuntimeError'
                               AND latest_f.error='All configured Gemini keys unavailable for this batch')
                     ORDER BY latest_f.failed_at DESC LIMIT 1)
@@ -410,10 +545,12 @@ def _dashboard_payload(database: Path) -> dict:
                      AND preferred_a.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
                      AND preferred_a.prompt_version IN (
+                       'news-json-v10-controlled-category-zh',
                        'news-json-v9-local-display-recovery',
                        'news-json-v8-strict-zh-source-number-lexemes')
                    ORDER BY CASE preferred_a.prompt_version
-                     WHEN 'news-json-v9-local-display-recovery' THEN 0 ELSE 1 END,
+                     WHEN 'news-json-v10-controlled-category-zh' THEN 0
+                     WHEN 'news-json-v9-local-display-recovery' THEN 1 ELSE 2 END,
                      CASE preferred_a.llm_model_version
                        WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                      preferred_a.parsed_at DESC LIMIT 1)
@@ -427,7 +564,7 @@ def _dashboard_payload(database: Path) -> dict:
                      AND latest_f.revision_number=n.revision_number
                      AND latest_f.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
-                     AND latest_f.prompt_version='news-json-v9-local-display-recovery'
+                     AND latest_f.prompt_version='news-json-v10-controlled-category-zh'
                      AND NOT (latest_f.error_type='RuntimeError'
                               AND latest_f.error='All configured Gemini keys unavailable for this batch')
                    ORDER BY latest_f.failed_at DESC LIMIT 1)
@@ -504,6 +641,7 @@ def _dashboard_payload(database: Path) -> dict:
             ):
                 complete_rows += 1
         learning = learning_curve_payload(connection)
+        market_chart = _recent_market_chart(database, connection, now)
         component_times = {
             "quote_bridge": _latest_quote_received(database),
             "decision_collector": connection.execute("SELECT max(created_at) FROM decision_events").fetchone()[0],
@@ -535,6 +673,26 @@ def _dashboard_payload(database: Path) -> dict:
         connection.close()
 
     latest_data = dict(latest) if latest else None
+    if latest_data:
+        latest_data.pop("decision_id", None)
+    research_forecast = dict(latest_prediction) if latest_prediction else None
+    u5_values = sorted(float(row["u5"]) for row in u5_rows)
+    current_u5 = float(latest["u5"]) if latest and latest["u5"] is not None else None
+    u5_percentile = None
+    if current_u5 is not None and u5_values:
+        u5_percentile = round(
+            100.0 * sum(value <= current_u5 for value in u5_values) / len(u5_values), 1
+        )
+    u5_context = {
+        "percentile": u5_percentile,
+        "samples": len(u5_values),
+        "label": (
+            "高波动" if u5_percentile is not None and u5_percentile >= 85 else
+            "偏高" if u5_percentile is not None and u5_percentile >= 60 else
+            "一般" if u5_percentile is not None and u5_percentile >= 25 else
+            "低波动" if u5_percentile is not None else "等待样本"
+        ),
+    }
     age_seconds = None
     if component_times["quote_bridge"]:
         age_seconds = max(
@@ -596,6 +754,11 @@ def _dashboard_payload(database: Path) -> dict:
             continue
         seen_news_links.add(dedupe_key)
         item["entities"] = json.loads(item.pop("entities_json")) if item.get("entities_json") else []
+        secondary_categories_json = item.pop("secondary_categories_json", None)
+        item["secondary_categories"] = (
+            json.loads(secondary_categories_json)
+            if secondary_categories_json else []
+        )
         item["category"] = _news_category(item)
         item["eligibility_version"] = "news-source-eligibility-v1"
         news.append(item)
@@ -668,6 +831,8 @@ def _dashboard_payload(database: Path) -> dict:
             },
         },
         "latest": latest_data,
+        "research_forecast": research_forecast,
+        "u5_context": u5_context,
         "counts": counts,
         "outcome_summary": dict(valid),
         "recent_decisions": [serialize_row(row) for row in recent],
@@ -734,6 +899,7 @@ def _dashboard_payload(database: Path) -> dict:
             "models": learning["models"],
         },
         "learning_curves": learning,
+        "market_chart": market_chart,
         "factor_coverage": factor_coverage(latest_macro, collected_news_sources),
         "sources": {
             "market": "cTrader CLI / Bid-Ask",

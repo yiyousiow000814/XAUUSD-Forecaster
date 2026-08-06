@@ -6,6 +6,9 @@
   "required": [
     "headline_zh",
     "summary_zh",
+    "primary_category",
+    "secondary_categories",
+    "emerging_topic_zh",
     "event_type",
     "entities",
     "hawkishness",
@@ -28,6 +31,46 @@
       "minLength": 20,
       "maxLength": 1600,
       "description": "Simplified Chinese summary of the complete source content"
+    },
+    "primary_category": {
+      "type": "string",
+      "enum": [
+        "rates_fed",
+        "inflation_employment",
+        "growth_economy",
+        "usd_liquidity",
+        "oil_energy",
+        "war_geopolitics",
+        "central_bank_gold",
+        "risk_sentiment",
+        "regulation_other"
+      ],
+      "description": "Best matching controlled XAUUSD news domain"
+    },
+    "secondary_categories": {
+      "type": "array",
+      "maxItems": 2,
+      "items": {
+        "type": "string",
+        "enum": [
+          "rates_fed",
+          "inflation_employment",
+          "growth_economy",
+          "usd_liquidity",
+          "oil_energy",
+          "war_geopolitics",
+          "central_bank_gold",
+          "risk_sentiment",
+          "regulation_other"
+        ]
+      },
+      "uniqueItems": true,
+      "description": "At most two additional controlled domains"
+    },
+    "emerging_topic_zh": {
+      "type": "string",
+      "maxLength": 16,
+      "description": "One concise Simplified Chinese subtopic; never creates a new top-level domain"
     },
     "event_type": {"type": "string", "minLength": 1},
     "entities": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},

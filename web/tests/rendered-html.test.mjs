@@ -76,6 +76,27 @@ test("labels the rolling lifecycle without presenting the safety baseline as AI"
   assert.doesNotMatch(source, /Champion 始终是 Always Wait/);
 });
 
+test("uses one modal timeline for model generations and market decisions", () => {
+  const page = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
+  const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
+  assert.match(page, /打开交互图表/);
+  assert.match(page, /新闻残差/);
+  assert.match(page, /大视野新闻残差/);
+  assert.match(modal, /长期 OOS 曲线/);
+  assert.match(modal, /最新版 \/ 前一版/);
+  assert.match(modal, /K线与决策/);
+  assert.match(modal, /WAIT 仍记录反事实/);
+});
+
+test("explains U5 as a risk scale rather than a probability", () => {
+  const source = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(source, /30分钟波动风险/);
+  assert.match(source, /risk-scale/);
+  assert.match(source, /它不是亏损概率，也不代表方向/);
+  assert.match(source, /research_forecast/);
+  assert.match(source, /安全基准仍是 WAIT/);
+});
+
 test("keeps live quotes online between five-minute decisions", async () => {
   const now = Date.now();
   const payload = applyFreshness({

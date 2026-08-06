@@ -6,6 +6,8 @@ import { useRouter } from "next/navigation";
 type Decision = {
   decision_time: string;
   effective_action: string;
+  research_action?: string | null;
+  research_status?: string | null;
   data_health: string;
   bid: number | null;
   ask: number | null;
@@ -33,6 +35,16 @@ type Payload = {
     u5_status: string;
     reason_codes: string[];
   };
+  research_forecast: {
+    model_identity: string;
+    model_version: string;
+    recommended_action: "LONG" | "SHORT" | "WAIT";
+    prediction_status: string;
+    ev_long_u5: number | null;
+    ev_short_u5: number | null;
+    interval_width: number | null;
+  } | null;
+  u5_context: { percentile: number | null; samples: number; label: string };
   counts: Record<string, number>;
   outcome_summary: {
     samples: number;
@@ -103,7 +115,12 @@ export default function Home() {
   const latest = payload?.latest;
   const online = Boolean(payload?.system.online && !error);
   const mid = latest?.bid && latest.ask ? (latest.bid + latest.ask) / 2 : null;
+  const u5Percent = latest?.u5 == null ? null : Math.expm1(latest.u5) * 100;
+  const u5Dollars = latest?.u5 == null || mid == null ? null : Math.expm1(latest.u5) * mid;
   const decisions = [...(payload?.recent_decisions ?? [])].reverse();
+  const forecast = payload?.research_forecast;
+  const forecastAction = forecast?.recommended_action ?? "WAIT";
+  const riskPercentile = payload?.u5_context.percentile ?? 0;
 
   return (
     <main>
@@ -142,12 +159,12 @@ export default function Home() {
         </div>
 
         <div className="decision-dial">
-          <span className="dial-label">30 MINUTE VIEW</span>
-          <div className={`action action-${latest?.effective_action?.toLowerCase() ?? "wait"}`}>
-            {latest?.effective_action ?? "WAIT"}
+          <span className="dial-label">30 MINUTE RESEARCH FORECAST</span>
+          <div className={`action action-${forecastAction.toLowerCase()}`}>
+            {forecastAction}
           </div>
-          <p>Champion-0 · Shadow only</p>
-          <small>不会下单 · 每5分钟重新评估</small>
+          <p>{forecast?.model_identity === "BROAD_FULL" ? "黄金＋大视野新闻" : forecast?.model_identity ?? "等待模型"} · {forecast?.prediction_status ?? "WAITING"}</p>
+          <small>安全基准仍是 WAIT · 不会下单 · 每5分钟更新</small>
         </div>
       </section>
 
@@ -181,7 +198,7 @@ export default function Home() {
       <section className="workspace-grid">
         <article className="panel timeline-panel">
           <div className="panel-head">
-            <div><span>DECISION LEDGER</span><h2>最近90分钟</h2></div>
+            <div><span>RESEARCH FORECAST LEDGER · 非下单动作</span><h2>最近90分钟</h2></div>
             <button type="button" onClick={refresh} disabled={refreshing}>
               {refreshing ? "同步中" : "刷新"}
             </button>
@@ -191,7 +208,7 @@ export default function Home() {
               <div className="tick" key={row.decision_time}>
                 <span className={`health-dot ${row.data_health === "OK" ? "ok" : "bad"}`} />
                 <time>{localTime(row.decision_time).slice(-8, -3)}</time>
-                <b>{row.effective_action}</b>
+                <b title={`安全基准动作 ${row.effective_action}`}>{row.research_action ?? row.effective_action}</b>
                 <span>{fmt(row.bid)} / {fmt(row.ask)}</span>
                 <em title={row.outcome_status === "VALID" ? "30分钟结果已计算" : "预测已记录，等待未来30分钟走完后计算结果"}>{row.outcome_status === "VALID" ? "30分钟结果 ✓" : "等待30分钟结果"}</em>
               </div>
@@ -206,7 +223,11 @@ export default function Home() {
           <Factor label="15分钟" value={latest?.features?.return_15m} />
           <Factor label="30分钟" value={latest?.features?.return_30m} />
           <div className="factor-footer">
-            <span>U5</span><b>{fmt(latest?.u5, 5)}</b><small>{latest?.u5_status ?? "—"}</small>
+            <span><b>30分钟波动风险</b><small>相对本系统历史</small></span>
+            <strong>{payload?.u5_context.label ?? "等待样本"}<small>{u5Percent === null ? "—" : `约 ±${u5Percent.toFixed(2)}% · ±$${u5Dollars?.toFixed(1)}`}</small></strong>
+            <em>{riskPercentile.toFixed(0)} / 100</em>
+            <div className="risk-scale" aria-label={`历史波动分位 ${riskPercentile.toFixed(0)} / 100`}><i style={{ left: `${Math.min(100, Math.max(0, riskPercentile))}%` }} /></div>
+            <p>箭头表示它在已收集 {payload?.u5_context.samples ?? 0} 个样本中的波动分位；越靠红色，未来30分钟通常波动越剧烈。它不是亏损概率，也不代表方向。</p>
           </div>
         </article>
 
