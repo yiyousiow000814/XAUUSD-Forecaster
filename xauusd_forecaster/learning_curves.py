@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import statistics
 from collections import defaultdict
@@ -81,6 +82,15 @@ def learning_curve_payload(connection) -> dict:
     distinct_days = connection.execute(
         "SELECT count(DISTINCT substr(decision_time,1,10)) FROM derived_outcomes WHERE outcome_status='VALID'"
     ).fetchone()[0]
+    outcome_quality = {row["outcome_status"]: row["n"] for row in connection.execute(
+        "SELECT outcome_status,count(*) n FROM derived_outcomes GROUP BY outcome_status"
+    )}
+    invalid_reason_counts = defaultdict(int)
+    for row in connection.execute(
+        "SELECT reason_codes_json FROM derived_outcomes WHERE outcome_status!='VALID'"
+    ):
+        for reason in json.loads(row["reason_codes_json"] or "[]"):
+            invalid_reason_counts[reason] += 1
     news = connection.execute(
         """SELECT coalesce(sum(news_exposed),0), coalesce(max(distinct_news_clusters),0)
         FROM derived_news_feature_snapshots"""
@@ -88,6 +98,17 @@ def learning_curve_payload(connection) -> dict:
     updates = connection.execute(
         "SELECT * FROM model_updates_v2 ORDER BY created_at,model_identity"
     ).fetchall()
+    # A model artifact can be rebuilt from the same immutable dataset during
+    # recovery.  That is not a new learning generation and must not create a
+    # fake reset/upgrade in the UI.
+    market_training_hashes = []
+    for update in updates:
+        if update["model_identity"] == "MARKET_ONLY" \
+                and update["training_dataset_hash"] not in market_training_hashes:
+            market_training_hashes.append(update["training_dataset_hash"])
+    training_run_count = sum(
+        update["model_identity"] == "MARKET_ONLY" for update in updates
+    )
     active_versions: dict[str, list[str]] = defaultdict(list)
     for update in reversed(updates):
         identity = update["model_identity"]
@@ -160,6 +181,69 @@ def learning_curve_payload(connection) -> dict:
             **metrics,
         })
 
+    version_groups = []
+    group_keys = []
+    for update in updates:
+        key = (update["model_identity"], update["training_dataset_hash"])
+        if key not in group_keys:
+            group_keys.append(key)
+    identity_group_counts = defaultdict(int)
+    for identity, _ in group_keys:
+        identity_group_counts[identity] += 1
+    identity_group_seen = defaultdict(int)
+    for identity, dataset_hash in group_keys:
+        identity_group_seen[identity] += 1
+        group_updates = [
+            row for row in updates
+            if row["model_identity"] == identity
+            and row["training_dataset_hash"] == dataset_hash
+        ]
+        versions = [row["model_version"] for row in group_updates]
+        placeholders = ",".join("?" for _ in versions)
+        rows = connection.execute(
+            f"""WITH ranked AS (
+                SELECT p.source_decision_id,p.decision_time,p.recommended_action,
+                       s.value_quote_return,o.long_quote_return,o.short_quote_return,
+                       row_number() OVER (
+                           PARTITION BY p.source_decision_id,p.model_identity
+                           ORDER BY u.created_at DESC,u.model_version DESC
+                       ) AS version_rank
+                FROM predictions_v2 p
+                JOIN model_updates_v2 u USING(model_version)
+                LEFT JOIN prediction_scores_v2 s USING(source_decision_id,model_version)
+                LEFT JOIN derived_outcomes o USING(source_decision_id)
+                WHERE p.model_version IN ({placeholders})
+                  AND p.decision_time>?
+            )
+            SELECT * FROM ranked WHERE version_rank=1 ORDER BY decision_time""",
+            (*versions, group_updates[0]["created_at"]),
+        ).fetchall()
+        scored = [row for row in rows if row["value_quote_return"] is not None]
+        values = [float(row["value_quote_return"]) for row in scored]
+        daily = defaultdict(float)
+        for row in scored:
+            daily[row["decision_time"][:10]] += float(row["value_quote_return"])
+        group_number = identity_group_seen[identity]
+        total_groups = identity_group_counts[identity]
+        version_groups.append({
+            "model_identity": identity,
+            "training_dataset_hash": dataset_hash,
+            "generation": group_number,
+            "lifecycle_status": (
+                "LATEST" if group_number == total_groups else
+                "PREVIOUS" if group_number == total_groups - 1 else "ARCHIVED"
+            ),
+            "created_at": group_updates[0]["created_at"],
+            "latest_rebuild_at": group_updates[-1]["created_at"],
+            "training_rows": group_updates[0]["training_rows"],
+            "artifact_rebuilds": max(0, len(group_updates) - 1),
+            "model_versions": versions,
+            "subsequent_oos_rows": len(scored),
+            "distinct_days": len(daily),
+            **_selection_metrics(scored),
+            **_metrics(values, daily),
+        })
+
     rolling_processes = []
     for identity in (
         "MARKET_ONLY", "NEWS_RESIDUAL", "FULL",
@@ -221,7 +305,7 @@ def learning_curve_payload(connection) -> dict:
             rows = connection.execute(
                 """WITH ranked AS (
                     SELECT p.source_decision_id,p.decision_time,p.model_version,
-                           s.value_quote_return,
+                           u.training_dataset_hash,u.training_rows,s.value_quote_return,
                            row_number() OVER (
                                PARTITION BY p.source_decision_id,p.model_identity
                                ORDER BY u.created_at DESC,u.model_version DESC
@@ -231,12 +315,13 @@ def learning_curve_payload(connection) -> dict:
                     JOIN model_updates_v2 u USING(model_version)
                     WHERE p.model_identity=? AND p.decision_time>u.created_at
                 )
-                SELECT decision_time,model_version,value_quote_return FROM ranked
+                SELECT decision_time,model_version,training_dataset_hash,training_rows,
+                       value_quote_return FROM ranked
                 WHERE version_rank=1 ORDER BY decision_time""", (identity,)
             ).fetchall()
         cumulative = 0.0
         points = []
-        previous_version = None
+        previous_generation = None
         for row in rows:
             cumulative += float(row["value_quote_return"])
             model_version = (
@@ -246,9 +331,17 @@ def learning_curve_payload(connection) -> dict:
                 "decision_time": row["decision_time"],
                 "cumulative_quote_return": cumulative,
             }
-            if model_version != previous_version:
+            generation = (
+                row["training_dataset_hash"] if identity != "CHAMPION_0"
+                else "always-wait"
+            )
+            if generation != previous_generation:
                 point["model_version"] = model_version
-                previous_version = model_version
+                point["training_dataset_hash"] = generation
+                point["training_rows"] = (
+                    row["training_rows"] if identity != "CHAMPION_0" else 0
+                )
+                previous_generation = generation
             points.append(point)
         identity_curves.append({"model_identity": identity, "points": points})
 
@@ -320,12 +413,23 @@ def learning_curve_payload(connection) -> dict:
             "SELECT count(DISTINCT substr(decision_time,1,13)||printf('%02d',(cast(substr(decision_time,15,2) as int)/30)*30)) FROM derived_outcomes WHERE outcome_status='VALID'"
         ).fetchone()[0],
         "distinct_trading_days": distinct_days, "news_exposed_rows": int(news[0]),
+        "outcome_quality": {
+            "valid": int(outcome_quality.get("VALID", 0)),
+            "invalid": int(sum(
+                count for status, count in outcome_quality.items() if status != "VALID"
+            )),
+            "reason_counts": dict(invalid_reason_counts),
+        },
         "distinct_news_clusters": int(news[1]), "learning_stage": _stage(complete, live_rows, distinct_days),
         "current_preview_version": latest_models.get("PREVIEW_ONLY"),
         "current_shadow_version": latest_models.get("SHADOW"),
+        "training_generation_count": len(market_training_hashes),
+        "training_run_count": training_run_count,
+        "recovery_rebuild_count": max(0, training_run_count - len(market_training_hashes)),
         "next_training_threshold": 96 if complete < 96 else 200 if complete < 200 else ((complete // 50) + 1) * 50,
         "commission_status": "UNCONFIGURED", "slippage_status": "UNAVAILABLE_SHADOW",
-        "models": models, "rolling_processes": rolling_processes,
+        "models": models, "version_groups": version_groups,
+        "rolling_processes": rolling_processes,
         "zero_return_baseline": {
             "label": "零收益安全基准", "model_identity": "CHAMPION_0",
             "cumulative_quote_return": 0.0, "trained": False, "uses_ai": False,

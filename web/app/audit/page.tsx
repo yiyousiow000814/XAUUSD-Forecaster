@@ -127,6 +127,14 @@ type RollingProcess = {
   sharpe_quote_adjusted: number | null;
   calibration_status: string;
 };
+type VersionGroup = {
+  model_identity: string; training_dataset_hash: string; generation: number;
+  lifecycle_status: "LATEST" | "PREVIOUS" | "ARCHIVED"; created_at: string;
+  latest_rebuild_at: string; training_rows: number; artifact_rebuilds: number;
+  model_versions: string[]; subsequent_oos_rows: number; distinct_days: number;
+  cumulative_quote_return: number; profit_factor_quote_adjusted: number | null;
+  coverage_rate: number | null; average_oracle_regret: number | null;
+};
 
 type Payload = {
   generated_at: string;
@@ -178,17 +186,22 @@ type Payload = {
     raw_matured_rows: number;
     effective_30m_blocks: number;
     distinct_trading_days: number;
+    outcome_quality: { valid: number; invalid: number; reason_counts: Record<string, number> };
     news_exposed_rows: number;
     distinct_news_clusters: number;
     learning_stage: string;
     current_preview_version: string | null;
     current_shadow_version: string | null;
     next_training_threshold: number;
+    training_generation_count: number;
+    training_run_count: number;
+    recovery_rebuild_count: number;
     commission_status: string;
     slippage_status: string;
     models: LearningModel[];
+    version_groups: VersionGroup[];
     rolling_processes: RollingProcess[];
-    identity_curves: Array<{ model_identity: string; points: Array<{ decision_time: string; cumulative_quote_return: number }> }>;
+    identity_curves: Array<{ model_identity: string; points: Array<{ decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number }> }>;
     zero_return_baseline: {
       label: string;
       model_identity: string;
@@ -223,7 +236,7 @@ type Payload = {
       lcb_long_u5: number | null;
       lcb_short_u5: number | null;
     }>;
-    training_markers: Array<{ model_identity: string; model_version: string; created_at: string; training_rows: number }>;
+    training_markers: Array<{ model_identity: string; training_dataset_hash: string; created_at: string; training_rows: number; artifact_count: number }>;
   };
 };
 
@@ -549,8 +562,10 @@ export default function AuditPage() {
           <article><span>Repaired Seed</span><strong>{payload?.learning_curves.repaired_seed_rows ?? 0}</strong><small>可训练，不计 Live OOS</small></article>
           <article><span>Live OOS</span><strong>{payload?.learning_curves.live_oos_rows ?? 0}</strong><small>模型上线后的真实前向结果</small></article>
           <article><span>30m Blocks / Days</span><strong>{payload?.learning_curves.effective_30m_blocks ?? 0} / {payload?.learning_curves.distinct_trading_days ?? 0}</strong><small>置信区间的独立证据</small></article>
+          <article><span>有效 / 隔离样本</span><strong>{payload?.learning_curves.outcome_quality.valid ?? 0} / {payload?.learning_curves.outcome_quality.invalid ?? 0}</strong><small>隔离样本不评分、不训练；点开 K 线可看具体原因</small></article>
           <article><span>News exposure</span><strong>{payload?.learning_curves.news_exposed_rows ?? 0}</strong><small>{payload?.learning_curves.distinct_news_clusters ?? 0} 个可见 cluster</small></article>
-          <article><span>Next fit</span><strong>{payload?.learning_curves.next_training_threshold ?? 96}</strong><small>Preview 96 · Shadow 200 · 后续每50</small></article>
+          <article><span>训练数据代 / 运行</span><strong>{payload?.learning_curves.training_generation_count ?? 0} / {payload?.learning_curves.training_run_count ?? 0}</strong><small>{payload?.learning_curves.recovery_rebuild_count ?? 0} 次只是恢复重建，不算新一组</small></article>
+          <article><span>Next fit</span><strong>{payload?.learning_curves.next_training_threshold ?? 96}</strong><small>再有 {(payload?.learning_curves.next_training_threshold ?? 96) - (payload?.training.complete_rows ?? 0)} 条成熟数据训练下一组</small></article>
         </div>
         <div className="league-cost-note"><b>诚实成本口径</b><span>显示的是 Bid/Ask quote-cost-adjusted return；commission {payload?.learning_curves.commission_status ?? "UNCONFIGURED"}，slippage {payload?.learning_curves.slippage_status ?? "UNAVAILABLE_SHADOW"}，因此不是 net PnL。</span></div>
         <section className="graph-launch">
@@ -564,14 +579,14 @@ export default function AuditPage() {
         {(payload?.learning_curves.models.length ?? 0) === 0 ? <div className="league-empty">
           <strong>正在建立第一版 Preview</strong><p>达到 96 条修复或 Forward 完整样本即可训练 Market Preview，不需要等待60天。曲线只从模型创建后的新 Decision 开始，绝不回填假历史成绩。</p>
         </div> : <div className="compact-model-summary">{Object.keys(MODEL_LABELS).filter(identity => identity !== "CHAMPION_0").map(identity => {
-          const latest = activeLearningModels.find(row => row.model_identity === identity && row.lifecycle_status === "LATEST");
-          const previous = activeLearningModels.find(row => row.model_identity === identity && row.lifecycle_status === "PREVIOUS");
-          if (!latest && !previous) return null;
-          const score = (row?: LearningModel) => !row ? "—" : row.subsequent_oos_rows ? percent(row.cumulative_quote_return) : "等待结果";
-          return <article key={identity}><b>{MODEL_LABELS[identity]}</b><span>前一版 <strong>{score(previous)}</strong></span><i aria-hidden="true">→</i><span>最新版 <strong>{score(latest)}</strong></span></article>;
+          const process = payload?.learning_curves.rolling_processes.find(row => row.model_identity === identity);
+          const latestGroup = payload?.learning_curves.version_groups.find(row => row.model_identity === identity && row.lifecycle_status === "LATEST");
+          if (!process && !latestGroup) return null;
+          const diagnostic = identity === "NEWS_RESIDUAL" || identity === "BROAD_NEWS_RESIDUAL";
+          return <article key={identity}><b>{MODEL_LABELS[identity]}{diagnostic ? <small>诊断组件</small> : null}</b><span>连续累计 <strong>{process?.oos_rows ? percent(process.cumulative_quote_return) : "等待结果"}</strong></span><i aria-hidden="true">+</i><span>本组独立 <strong>{latestGroup?.subsequent_oos_rows ? percent(latestGroup.cumulative_quote_return) : "等待结果"}</strong></span></article>;
         })}</div>}
         <footer className="league-footer">{payload?.learning_curves.disclaimer ?? "早期曲线用于观察学习过程，不代表已证明盈利。"} 单日和双日新闻模型明确标记 EXPERIMENTAL；达到3个新闻日期后自动进入标准证据状态。当前只运行每个 Ridge 身份的最新版和前一版；{archivedModelCount} 个旧版本的 artifact、预测和成绩已永久归档。零收益安全基准不训练、不使用 AI、不占 Ridge 版本名额。Preview 与 Shadow 都没有下单权限，也不会自动晋升。</footer>
-        <LearningGraphModal open={graphOpen} onClose={() => setGraphOpen(false)} curves={payload?.learning_curves.identity_curves ?? []} models={activeLearningModels} market={payload?.market_chart} />
+        <LearningGraphModal open={graphOpen} onClose={() => setGraphOpen(false)} curves={payload?.learning_curves.identity_curves ?? []} models={activeLearningModels} versionGroups={payload?.learning_curves.version_groups ?? []} market={payload?.market_chart} />
       </section>}
 
       {view === "coverage" && <section className="coverage-grid">

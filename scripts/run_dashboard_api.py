@@ -313,9 +313,14 @@ def _recent_market_chart(
         "outcome_status": row["outcome_status"] or "PENDING",
     } for row in decision_rows]
     marker_rows = connection.execute(
-        """SELECT model_identity,model_version,model_stage,training_rows,
-                  training_cutoff,created_at
-           FROM model_updates_v2 WHERE created_at>=?
+        """WITH grouped AS (
+             SELECT model_identity,training_dataset_hash,min(created_at) created_at,
+                    min(training_rows) training_rows,min(training_cutoff) training_cutoff,
+                    count(*) artifact_count
+             FROM model_updates_v2
+             GROUP BY model_identity,training_dataset_hash
+           )
+           SELECT * FROM grouped WHERE created_at>=?
            ORDER BY created_at,model_identity""",
         (first_time,),
     ).fetchall()
