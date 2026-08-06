@@ -29,6 +29,7 @@ REMOTE_EVIDENCE_LIMIT = 60
 NEWS_DETAIL_BATCH_LIMIT_BYTES = 400_000
 NEWS_DETAIL_FULL_REFRESH_SECONDS = 86_400
 REMOTE_CURVE_POINTS_PER_IDENTITY = 480
+REMOTE_MARKET_DECISION_LIMIT = 240
 
 NEWS_INDEX_FIELDS = (
     "category", "source", "source_item_id", "revision_number",
@@ -165,7 +166,10 @@ def remote_snapshot(payload: dict) -> bytes:
             if market_version is False:
                 compact["frozen_record"] = False
             compact_decisions.append(compact)
-        market["decisions"] = compact_decisions
+        compact_decisions.sort(key=lambda row: (
+            row.get("decision_time") or "", row.get("model_identity") or ""
+        ))
+        market["decisions"] = compact_decisions[-REMOTE_MARKET_DECISION_LIMIT:]
 
     for name, limit in (
         ("recent_news", REMOTE_NEWS_LIMIT),

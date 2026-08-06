@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from xauusd_forecaster.evidence_v2 import install_v2_schema
+from xauusd_forecaster.evidence_v2 import V2_SCHEMA, install_v2_schema
 from xauusd_forecaster.executable_label import build_executable_label_v2
 from xauusd_forecaster.forward_ledger import ForwardLedger, canonical_hash
 from xauusd_forecaster.learning_curves import _stage, learning_curve_payload
@@ -25,6 +26,39 @@ from xauusd_forecaster.execution_learning import (
     score_execution_predictions, train_due_execution,
 )
 from xauusd_forecaster.training import MARKET_FEATURES
+
+
+def test_install_repairs_invalid_execution_score_foreign_key() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.executescript(V2_SCHEMA)
+    connection.executescript(
+        """
+        DROP TABLE execution_position_scores_v2;
+        CREATE TABLE execution_position_scores_v2 (
+            source_decision_id TEXT NOT NULL,
+            model_version TEXT NOT NULL,
+            model_identity TEXT NOT NULL,
+            scored_at TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            selected_action TEXT NOT NULL,
+            exit_minutes INTEGER NOT NULL,
+            selected_quote_return REAL NOT NULL,
+            baseline_quote_return REAL NOT NULL,
+            delta_quote_return REAL NOT NULL,
+            score_hash TEXT NOT NULL,
+            PRIMARY KEY(source_decision_id,model_version),
+            FOREIGN KEY(source_decision_id,model_version)
+              REFERENCES execution_predictions_v2(source_decision_id,model_version)
+        );
+        """
+    )
+    install_v2_schema(connection)
+    foreign_keys = connection.execute(
+        "PRAGMA foreign_key_list(execution_position_scores_v2)"
+    ).fetchall()
+    assert len(foreign_keys) == 1
+    assert foreign_keys[0][2] == "execution_model_updates_v2"
+    assert foreign_keys[0][3:5] == ("model_version", "model_version")
 
 
 UTC = timezone.utc

@@ -152,6 +152,28 @@ def test_news_detail_batches_stay_bounded() -> None:
         assert len(encoded) <= module.NEWS_DETAIL_BATCH_LIMIT_BYTES
 
 
+def test_remote_market_chart_keeps_only_latest_bounded_decisions() -> None:
+    module = _sync_module()
+    decisions = [{
+        "source_decision_id": f"d-{index}",
+        "decision_time": f"2026-08-06T{index // 60:02d}:{index % 60:02d}:00+00:00",
+        "model_identity": "BROAD_FULL",
+        "model_version": f"model-{index}",
+        "recommended_action": "SHORT",
+        "prediction_status": "PROVISIONAL",
+        "outcome_status": "VALID",
+        "ev_long_u5": -0.2,
+        "ev_short_u5": 0.1,
+    } for index in range(module.REMOTE_MARKET_DECISION_LIMIT + 20)]
+    mirrored = json.loads(module.remote_snapshot({
+        "market_chart": {"decisions": list(reversed(decisions))},
+    }))
+    retained = mirrored["market_chart"]["decisions"]
+    assert len(retained) == module.REMOTE_MARKET_DECISION_LIMIT
+    assert retained[0]["source_decision_id"] == "d-20"
+    assert retained[-1]["source_decision_id"] == f"d-{len(decisions) - 1}"
+
+
 def test_curve_compaction_preserves_extremes_and_version_boundaries() -> None:
     module = _sync_module()
     points = [{

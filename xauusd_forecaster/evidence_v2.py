@@ -397,8 +397,8 @@ CREATE TABLE IF NOT EXISTS execution_position_scores_v2 (
     delta_quote_return REAL NOT NULL,
     score_hash TEXT NOT NULL,
     PRIMARY KEY(source_decision_id,model_version),
-    FOREIGN KEY(source_decision_id,model_version)
-      REFERENCES execution_predictions_v2(source_decision_id,model_version)
+    FOREIGN KEY(model_version)
+      REFERENCES execution_model_updates_v2(model_version)
 );
 
 CREATE INDEX IF NOT EXISTS derived_market_time_v2
@@ -418,9 +418,52 @@ ON execution_predictions_v2(model_identity, prediction_time);
 """
 
 
+def _repair_execution_score_foreign_key(connection: sqlite3.Connection) -> None:
+    """Replace the invalid two-column FK shipped with the initial V2 table.
+
+    ``execution_predictions_v2`` is unique by decision, model, and checkpoint.
+    A two-column reference to only decision and model is therefore invalid in
+    SQLite and causes outcome settlement to abort as soon as a score is added.
+    Score rows retain the decision identity while their enforceable parent is
+    the immutable model artifact that produced the prediction.
+    """
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' "
+        "AND name='execution_position_scores_v2'"
+    ).fetchone()
+    if row is None or "REFERENCES execution_predictions_v2" not in str(row[0]):
+        return
+    connection.executescript(
+        """
+        ALTER TABLE execution_position_scores_v2
+          RENAME TO execution_position_scores_v2_invalid_fk;
+        CREATE TABLE execution_position_scores_v2 (
+            source_decision_id TEXT NOT NULL,
+            model_version TEXT NOT NULL,
+            model_identity TEXT NOT NULL CHECK(model_identity IN ('LOT_RIDGE','EXIT_RIDGE')),
+            scored_at TEXT NOT NULL,
+            direction TEXT NOT NULL CHECK(direction IN ('LONG','SHORT')),
+            selected_action TEXT NOT NULL,
+            exit_minutes INTEGER NOT NULL,
+            selected_quote_return REAL NOT NULL,
+            baseline_quote_return REAL NOT NULL,
+            delta_quote_return REAL NOT NULL,
+            score_hash TEXT NOT NULL,
+            PRIMARY KEY(source_decision_id,model_version),
+            FOREIGN KEY(model_version)
+              REFERENCES execution_model_updates_v2(model_version)
+        );
+        INSERT INTO execution_position_scores_v2
+          SELECT * FROM execution_position_scores_v2_invalid_fk;
+        DROP TABLE execution_position_scores_v2_invalid_fk;
+        """
+    )
+
+
 def install_v2_schema(connection: sqlite3.Connection) -> None:
     """Create V2 structures and append-only guards; never mutate old rows."""
     connection.executescript(V2_SCHEMA)
+    _repair_execution_score_foreign_key(connection)
     for table in V2_IMMUTABLE_TABLES:
         for operation in ("UPDATE", "DELETE"):
             connection.execute(
