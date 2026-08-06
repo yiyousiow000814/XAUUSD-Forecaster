@@ -112,6 +112,10 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /无效样本 · 已隔离/);
   assert.doesNotMatch(modal, /三种动作同一30分钟结果/);
   assert.doesNotMatch(modal, /30分钟退出线/);
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /height:min\(860px,92dvh\)/);
+  assert.match(css, /grid-template-rows:auto auto minmax\(0,1fr\) auto/);
+  assert.match(css, /scrollbar-gutter:stable/);
 });
 
 test("explains U5 as a risk scale rather than a probability", () => {
