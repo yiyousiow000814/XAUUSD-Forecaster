@@ -86,6 +86,13 @@ type NewsEvidence = {
   publisher_domains: string[];
   reason_codes: string[];
 };
+type Storyline = {
+  storyline_id: string; title: string; state: string; event_count: number;
+  reliable_event_count: number; latest_change: string; last_updated: string;
+  topics: string[]; model_permission: "DISPLAY_ONLY";
+  timeline: Array<{ event_key: string; first_seen: string; headline: string;
+    evidence_grade: string; independent_publishers: number; relation: string; topics: string[] }>;
+};
 
 type LearningModel = {
   model_version: string;
@@ -160,6 +167,8 @@ type Payload = {
     grades: Record<string, number>;
     topics: Record<string, number>;
   };
+  storylines: Storyline[];
+  storyline_summary: { policy_version: string; total: number; display_only: boolean };
   news_feature_policy: {
     maximum_current_age_hours: number;
     freshness_half_life_hours: number;
@@ -364,7 +373,7 @@ export default function AuditPage() {
   const router = useRouter();
   const [payload, setPayload] = useState<Payload | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<"news" | "evidence" | "decisions" | "league" | "coverage">("news");
+  const [view, setView] = useState<"news" | "evidence" | "stories" | "decisions" | "league" | "coverage">("news");
   const [newsCategory, setNewsCategory] = useState("全部");
   const [newsPage, setNewsPage] = useState(1);
   const [graphOpen, setGraphOpen] = useState(false);
@@ -384,7 +393,7 @@ export default function AuditPage() {
   useEffect(() => {
     const initial = window.setTimeout(() => {
       const requested = new URLSearchParams(window.location.search).get("view");
-      if (requested === "news" || requested === "evidence" || requested === "decisions" || requested === "league" || requested === "coverage") {
+      if (requested === "news" || requested === "evidence" || requested === "stories" || requested === "decisions" || requested === "league" || requested === "coverage") {
         setView(requested);
       }
       refresh();
@@ -393,7 +402,7 @@ export default function AuditPage() {
     return () => { window.clearTimeout(initial); window.clearInterval(interval); };
   }, [refresh]);
 
-  const selectView = (next: "news" | "evidence" | "decisions" | "league" | "coverage") => {
+  const selectView = (next: "news" | "evidence" | "stories" | "decisions" | "league" | "coverage") => {
     setView(next);
     window.history.replaceState(null, "", `/audit?view=${next}`);
   };
@@ -472,6 +481,7 @@ export default function AuditPage() {
       <nav className="audit-tabs" aria-label="审计视图">
         <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻与 Gemini <b>{payload?.counts.latest_news_items ?? 0}</b></a>
         <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>新闻证据管理 <b>{payload?.news_evidence_summary.broad_model_eligible ?? 0}</b></a>
+        <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件故事链 <b>{payload?.storyline_summary.total ?? 0}</b></a>
         <a href="/audit?view=decisions" className={view === "decisions" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("decisions"); }}>决策与30分钟结果 <b>{payload?.counts.decision_events ?? 0}</b></a>
         <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b>{activeLearningIdentities}组</b></a>
         <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b>{payload?.factor_coverage.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</b></a>
@@ -525,6 +535,16 @@ export default function AuditPage() {
         </table></div>
       </section>}
 
+      {view === "stories" && <section className="story-desk">
+        <header className="evidence-intro"><div><p className="eyebrow">TEMPORAL EVENT GRAPH · RESEARCH ONLY</p><h2>不再数新闻，<br />而是看故事发生了什么变化。</h2></div><p>系统把同一主题的事件按首次可见时间串联，并区分确认、升级、缓和与随后发生。当前只用于阅读和审计，<b>不进入 Ridge、不影响 Long / Short / Wait</b>；也不会把时间先后写成因果关系。</p></header>
+        <div className="story-grid">{(payload?.storylines ?? []).map(story => <article key={story.storyline_id}>
+          <header><div><span>{story.state}</span><h3>{story.title}</h3></div><strong>{story.event_count}<small> 个事件</small></strong></header>
+          <p className="story-latest"><b>最新变化</b>{story.latest_change}</p>
+          <div className="story-meta"><span>可靠证据 {story.reliable_event_count}</span><span>更新 {time(story.last_updated)}</span><span>仅展示，不训练</span></div>
+          <ol>{story.timeline.slice().reverse().map(item => <li key={item.event_key}><time>{time(item.first_seen)}</time><b>{({ STARTS:"故事开始", FOLLOWED_BY:"随后发生", CONFIRMS:"可靠来源确认", ESCALATES:"风险升级", DEESCALATES:"风险缓和" } as Record<string,string>)[item.relation] ?? item.relation}</b><span>{item.headline}</span><small>{item.evidence_grade} · {item.independent_publishers} 个独立来源</small></li>)}</ol>
+        </article>)}</div>
+      </section>}
+
       {view === "decisions" && <section className="decision-audit">
         {(payload?.recent_decisions ?? []).map((row) => {
           const full = row.predictions.find(item => item.model_identity === "BROAD_FULL")
@@ -569,12 +589,17 @@ export default function AuditPage() {
         </div>
         <div className="league-cost-note"><b>诚实成本口径</b><span>显示的是 Bid/Ask quote-cost-adjusted return；commission {payload?.learning_curves.commission_status ?? "UNCONFIGURED"}，slippage {payload?.learning_curves.slippage_status ?? "UNAVAILABLE_SHADOW"}，因此不是 net PnL。</span></div>
         <section className="graph-launch">
-          <div><span>ONE TIMELINE · THREE VIEWS</span><h3>不要再对着两套数字猜。</h3><p>长期累计、最新版/前一版，以及 XAUUSD K线上的 Long / Wait / Short 与固定30分钟退出，都在同一个弹窗里按时间对齐。</p></div>
+          <div><span>ONE TIMELINE · TWO CHARTS</span><h3>图表只负责时间关系。</h3><p>弹窗只保留长期累计曲线和 XAUUSD K线决策；每一组版本的独立盈亏清单固定显示在本页，不再塞进狭窄弹窗。</p></div>
           <button type="button" onClick={() => setGraphOpen(true)}>打开交互图表 ↗</button>
         </section>
+        <VersionLedger groups={payload?.learning_curves.version_groups ?? []} />
+        <section className="execution-research"><header><span>SEPARATE EXECUTION RESEARCH</span><h3>仓位与退出不会偷偷混进方向模型</h3></header><div>
+          <article><b>仓位倍率 Ridge</b><strong>尚未训练</strong><p>计划研究 0.5x / 1.0x / 2.0x。当前 commission、slippage、账户权益与保证金效用未冻结；现在训练只会机械偏爱最大仓位，因此先禁止产生假成绩。</p><small>缺少：净成本口径 · 风险效用 · 账户尺度</small></article>
+          <article><b>Exit Ridge</b><strong>尚未训练</strong><p>计划每5分钟独立判断 EXIT / HOLD。当前主标签只有固定30分钟可执行结果，还没有每个中间检查点的无泄漏继续持有价值，所以先收集标签合同。</p><small>缺少：5/10/15/20/25分钟可执行 checkpoint outcome</small></article>
+        </div></section>
         <section className="model-scope-note">
-          <article><b>新闻残差</b><span>只使用 Fed、BEA、U.S. Treasury 等冻结的核心官方正文，范围窄、来源确定。</span></article>
-          <article><b>大视野新闻残差</b><span>加入 EIA、ECB、World Gold Council 及经过一手或多源确认的可靠事件；单一线索和聚合标题仍禁止训练。</span></article>
+          <article><b>新闻残差 = 修正量</b><span>它学习“真实30分钟方向 − 黄金自身预测”，不是独立完整方向。当前漂亮曲线只能说明新闻修正量值得继续研究，不能直接证明可以删掉黄金自身。</span></article>
+          <article><b>独立 Broad News-only 对照</b><span>如果要验证“不用黄金自身”，必须另训一个直接预测30分钟完整目标的 News-only Challenger，再与 Market-only、Broad Full 同时做未来 OOS；不能把残差模型改名冒充。</span></article>
         </section>
         {(payload?.learning_curves.models.length ?? 0) === 0 ? <div className="league-empty">
           <strong>正在建立第一版 Preview</strong><p>达到 96 条修复或 Forward 完整样本即可训练 Market Preview，不需要等待60天。曲线只从模型创建后的新 Decision 开始，绝不回填假历史成绩。</p>
@@ -583,10 +608,10 @@ export default function AuditPage() {
           const latestGroup = payload?.learning_curves.version_groups.find(row => row.model_identity === identity && row.lifecycle_status === "LATEST");
           if (!process && !latestGroup) return null;
           const diagnostic = identity === "NEWS_RESIDUAL" || identity === "BROAD_NEWS_RESIDUAL";
-          return <article key={identity}><b>{MODEL_LABELS[identity]}{diagnostic ? <small>诊断组件</small> : null}</b><span>连续累计 <strong>{process?.oos_rows ? percent(process.cumulative_quote_return) : "等待结果"}</strong></span><i aria-hidden="true">+</i><span>本组独立 <strong>{latestGroup?.subsequent_oos_rows ? percent(latestGroup.cumulative_quote_return) : "等待结果"}</strong></span></article>;
+          return <article key={identity}><b>{MODEL_LABELS[identity]}{diagnostic ? <small>新闻修正量</small> : null}</b><span>连续累计 <strong>{process?.oos_rows ? percent(process.cumulative_quote_return) : "等待结果"}</strong></span><i aria-hidden="true">+</i><span>本组独立 <strong>{latestGroup?.subsequent_oos_rows ? percent(latestGroup.cumulative_quote_return) : "等待结果"}</strong></span></article>;
         })}</div>}
         <footer className="league-footer">{payload?.learning_curves.disclaimer ?? "早期曲线用于观察学习过程，不代表已证明盈利。"} 单日和双日新闻模型明确标记 EXPERIMENTAL；达到3个新闻日期后自动进入标准证据状态。当前只运行每个 Ridge 身份的最新版和前一版；{archivedModelCount} 个旧版本的 artifact、预测和成绩已永久归档。零收益安全基准不训练、不使用 AI、不占 Ridge 版本名额。Preview 与 Shadow 都没有下单权限，也不会自动晋升。</footer>
-        <LearningGraphModal open={graphOpen} onClose={() => setGraphOpen(false)} curves={payload?.learning_curves.identity_curves ?? []} models={activeLearningModels} versionGroups={payload?.learning_curves.version_groups ?? []} market={payload?.market_chart} />
+        <LearningGraphModal open={graphOpen} onClose={() => setGraphOpen(false)} curves={payload?.learning_curves.identity_curves ?? []} market={payload?.market_chart} />
       </section>}
 
       {view === "coverage" && <section className="coverage-grid">
@@ -600,4 +625,20 @@ export default function AuditPage() {
       <footer className="audit-footer"><span>最后同步 {time(payload?.generated_at)}</span><span>SHADOW ONLY · APPEND ONLY</span></footer>
     </main>
   );
+}
+
+function VersionLedger({ groups }: { groups: VersionGroup[] }) {
+  const [identity, setIdentity] = useState("BROAD_FULL");
+  const rows = groups.filter(row => row.model_identity === identity).sort((a,b) => b.generation-a.generation);
+  return <section className="version-ledger"><header><div><span>每个训练数据代 · 独立从零评分</span><h3>版本独立盈亏清单</h3></div><select value={identity} onChange={event => setIdentity(event.target.value)}>{Object.entries(MODEL_LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select></header>
+    <div className="version-ledger-head"><span>组别 / 状态</span><span>训练与上线</span><span>创建后 OOS</span><span>本组独立收益</span><span>PF / 出方向</span></div>
+    {rows.map(row => <article key={`${row.model_identity}-${row.training_dataset_hash}`} className={row.lifecycle_status === "LATEST" ? "is-latest" : ""}>
+      <span><b>第 {row.generation} 组</b><small>{row.lifecycle_status === "LATEST" ? "最新版" : row.lifecycle_status === "PREVIOUS" ? "前一版" : "已归档"}</small></span>
+      <span><b>{row.training_rows} 条</b><small>{time(row.created_at)}{row.artifact_rebuilds ? ` · 恢复重建 ${row.artifact_rebuilds} 次` : ""}</small></span>
+      <span><b>{row.subsequent_oos_rows} 条</b><small>{row.distinct_days} 个日期</small></span>
+      <strong>{row.subsequent_oos_rows ? percent(row.cumulative_quote_return) : "等待结果"}</strong>
+      <span><b>{row.profit_factor_quote_adjusted?.toFixed(2) ?? "—"}</b><small>出方向 {((row.coverage_rate ?? 0)*100).toFixed(1)}%</small></span>
+    </article>)}
+    {!rows.length && <p>这个模型还没有真实训练版本。</p>}
+  </section>;
 }

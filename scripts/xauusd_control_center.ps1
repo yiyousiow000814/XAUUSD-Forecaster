@@ -201,6 +201,27 @@ function Disable-AutoStart {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 }
 
+function Repair-WindowsTime {
+    $command = "Set-Service W32Time -StartupType Automatic; Start-Service W32Time; w32tm /resync /force"
+    try {
+        $process = Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ArgumentList @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $command
+        )
+        if ($process.ExitCode -ne 0) {
+            throw "管理员命令退出码 $($process.ExitCode)"
+        }
+        [System.Windows.Forms.MessageBox]::Show(
+            "Windows Time 已启动并请求重新同步。报价时钟偏差通常会在随后几次报价中下降。",
+            "时钟修复已执行"
+        ) | Out-Null
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show(
+            "无法完成时钟修复：$($_.Exception.Message)",
+            "时钟修复失败"
+        ) | Out-Null
+    }
+}
+
 function Install-ControlShortcut {
     $desktop = [Environment]::GetFolderPath("Desktop")
     $shortcutPath = Join-Path $desktop "XAUUSD Forecaster Control Center.lnk"
@@ -221,7 +242,7 @@ function Show-ControlCenter {
 
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "XAUUSD Forecaster Control Center"
-    $form.Size = New-Object System.Drawing.Size(720, 565)
+    $form.Size = New-Object System.Drawing.Size(720, 620)
     $form.StartPosition = "CenterScreen"
     $form.ShowInTaskbar = $true
     $form.BackColor = [System.Drawing.Color]::FromArgb(235, 230, 215)
@@ -343,10 +364,22 @@ function Show-ControlCenter {
     $refreshButton.Location = New-Object System.Drawing.Point(30, 425)
     $form.Controls.Add($refreshButton)
 
+    $clockButton = New-Object System.Windows.Forms.Button
+    $clockButton.Text = "修复本机时钟（管理员）"
+    $clockButton.Size = New-Object System.Drawing.Size(220, 38)
+    $clockButton.Location = New-Object System.Drawing.Point(195, 425)
+    $clockButton.Add_Click({ Repair-WindowsTime })
+    $form.Controls.Add($clockButton)
+
+    $clockLabel = New-Object System.Windows.Forms.Label
+    $clockLabel.AutoSize = $true
+    $clockLabel.Location = New-Object System.Drawing.Point(430, 436)
+    $form.Controls.Add($clockLabel)
+
     $note = New-Object System.Windows.Forms.Label
     $note.Text = "A powered-off PC cannot collect data. This control center never authorizes trading."
     $note.AutoSize = $true
-    $note.Location = New-Object System.Drawing.Point(30, 485)
+    $note.Location = New-Object System.Drawing.Point(30, 535)
     $form.Controls.Add($note)
 
     $refresh = {
@@ -363,6 +396,17 @@ function Show-ControlCenter {
             "Auto-start: enabled at Windows logon"
         } else {
             "Auto-start: disabled"
+        }
+        $timeService = Get-Service W32Time -ErrorAction SilentlyContinue
+        $clockLabel.Text = if ($timeService -and $timeService.Status -eq "Running") {
+            "Windows Time: RUNNING"
+        } else {
+            "Windows Time: STOPPED"
+        }
+        $clockLabel.ForeColor = if ($timeService -and $timeService.Status -eq "Running") {
+            [System.Drawing.Color]::FromArgb(52, 105, 38)
+        } else {
+            [System.Drawing.Color]::FromArgb(190, 45, 36)
         }
     }
     $timer = New-Object System.Windows.Forms.Timer

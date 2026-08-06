@@ -4,21 +4,6 @@ import { useEffect, useMemo, useState } from "react";
 
 type CurvePoint = { decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number };
 type Curve = { model_identity: string; points: CurvePoint[] };
-type Model = {
-  model_identity: string; model_version: string; lifecycle_status: string;
-  subsequent_oos_rows: number; cumulative_quote_return: number;
-  profit_factor_quote_adjusted: number | null; distinct_days: number;
-  coverage_rate: number | null; average_oracle_regret: number | null;
-  wait_opportunity_cost: number;
-};
-type VersionGroup = {
-  model_identity: string; training_dataset_hash: string; generation: number;
-  lifecycle_status: string; created_at: string; latest_rebuild_at: string;
-  training_rows: number; artifact_rebuilds: number; model_versions: string[];
-  subsequent_oos_rows: number; cumulative_quote_return: number;
-  profit_factor_quote_adjusted: number | null; distinct_days: number;
-  coverage_rate: number | null; average_oracle_regret: number | null;
-};
 type Candle = { time: string; open: number; high: number; low: number; close: number; ticks: number };
 type Decision = {
   source_decision_id: string; decision_time: string; exit_time: string;
@@ -42,12 +27,12 @@ const COLORS: Record<string, string> = {
 const pct = (value: number) => `${value >= 0 ? "+" : "−"}${Math.abs(value * 100).toFixed(3)}%`;
 
 export default function LearningGraphModal({
-  open, onClose, curves, models, versionGroups, market,
+  open, onClose, curves, market,
 }: {
-  open: boolean; onClose: () => void; curves: Curve[]; models: Model[]; versionGroups: VersionGroup[];
+  open: boolean; onClose: () => void; curves: Curve[];
   market?: { candles: Candle[]; decisions: Decision[]; training_markers: TrainingMarker[] };
 }) {
-  const [tab, setTab] = useState<"curve" | "versions" | "market">("curve");
+  const [tab, setTab] = useState<"curve" | "market">("curve");
   const [identity, setIdentity] = useState("BROAD_FULL");
   useEffect(() => {
     if (!open) return;
@@ -62,12 +47,10 @@ export default function LearningGraphModal({
       <header><div><span>SHADOW EVIDENCE VISUALIZER</span><h2 id="graph-modal-title">模型与 XAUUSD 时间轴</h2></div><button type="button" onClick={onClose} aria-label="关闭图表">×</button></header>
       <nav aria-label="图表类型">
         <button className={tab === "curve" ? "active" : ""} onClick={() => setTab("curve")}>长期 OOS 曲线</button>
-        <button className={tab === "versions" ? "active" : ""} onClick={() => setTab("versions")}>最新版 / 前一版</button>
         <button className={tab === "market" ? "active" : ""} onClick={() => setTab("market")}>K线与决策</button>
       </nav>
       <div className="graph-modal-body">
         {tab === "curve" && <LongCurve curves={curves} />}
-        {tab === "versions" && <VersionComparison groups={versionGroups} />}
         {tab === "market" && <MarketChart market={market} identity={identity} setIdentity={setIdentity} />}
       </div>
       <footer><b>统一口径：</b> 所有曲线只使用模型创建后真正没见过的 30 分钟结果；WAIT 显示为灰色双向箭头，但收益固定为零，不会被画成一笔虚构交易。</footer>
@@ -112,21 +95,6 @@ function LongCurve({ curves }: { curves: Curve[] }) {
       {usable.map(row => <polyline key={row.model_identity} fill="none" stroke={COLORS[row.model_identity]} strokeWidth="3" points={row.points.map(point => `${x(point.decision_time)},${y(point.cumulative_quote_return)}`).join(" ")} />)}
     </svg>
     <div className="chart-legend">{usable.map(row => <span key={row.model_identity}><i style={{ background: COLORS[row.model_identity] }} />{LABELS[row.model_identity]} <b>{pct(row.points.at(-1)?.cumulative_quote_return ?? 0)}</b></span>)}{groupedBoundaries.length > 0 && <span><i className="train-dot" />模型换版</span>}</div>
-  </div>;
-}
-
-function VersionComparison({ groups }: { groups: VersionGroup[] }) {
-  const identities = [...new Set(groups.map(row => row.model_identity))];
-  return <div className="version-graph">
-    <div className="chart-caption"><div><b>每个训练数据代的独立收益清单</b><span>每组从创建后归零独立评分；“恢复重建”沿用同一训练数据，不算新一组。</span></div></div>
-    {identities.map(name => {
-      const rows = groups.filter(row => row.model_identity === name).sort((a, b) => b.generation - a.generation);
-      const diagnostic = name === "NEWS_RESIDUAL" || name === "BROAD_NEWS_RESIDUAL";
-      return <article key={name}><h3>{LABELS[name] ?? name}<small>{diagnostic ? "诊断组件，不是完整交易策略" : "完整方向策略"}</small></h3><div>{rows.map(row => <section key={`${row.model_identity}-${row.training_dataset_hash}`} className={row.lifecycle_status === "LATEST" ? "is-latest" : ""}>
-        <span>第 {row.generation} 组<br />{row.lifecycle_status === "LATEST" ? "最新版" : row.lifecycle_status === "PREVIOUS" ? "前一版" : "已归档"}</span>
-        {row.subsequent_oos_rows ? <><strong>{pct(row.cumulative_quote_return)}</strong><small>{row.training_rows} 条训练 · {row.subsequent_oos_rows} 条 OOS · {row.distinct_days} 日 · PF {row.profit_factor_quote_adjusted?.toFixed(2) ?? "—"}</small><small>出方向 {(100 * (row.coverage_rate ?? 0)).toFixed(1)}% · 平均机会损失 {pct(row.average_oracle_regret ?? 0)}{row.artifact_rebuilds ? ` · 恢复重建 ${row.artifact_rebuilds} 次` : ""}</small></> : <><strong className="pending-score">等待结果</strong><small>{row.training_rows} 条训练 · 尚无创建后30分钟成熟样本</small></>}
-      </section>)}</div></article>;
-    })}
   </div>;
 }
 
@@ -178,7 +146,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: { candles: Ca
   const timeLabel = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
   const resultLabel = (value: number | null) => value == null ? "等待30分钟结果" : pct(value);
   return <div className="chart-block market-chart-block">
-    <div className="chart-caption"><div><b>每根K线5分钟 · 每个箭头预测未来30分钟</b><span>绿色向上、红色向下、灰色双向代表 WAIT。新闻残差是诊断组件；完整方向请看“黄金＋新闻”。</span></div><select value={identity} onChange={event => { setIdentity(event.target.value); setSelected(null); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key, label]) => <option key={key} value={key}>{label}{key.includes("RESIDUAL") ? "（诊断）" : ""}</option>)}</select></div>
+    <div className="chart-caption"><div><b>每根K线5分钟 · 每个箭头预测未来30分钟</b><span>绿色向上、红色向下、灰色双向代表 WAIT。新闻残差只表示新闻对黄金基线的修正量；完整方向请看“黄金＋新闻”。</span></div><select value={identity} onChange={event => { setIdentity(event.target.value); setSelected(null); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key, label]) => <option key={key} value={key}>{label}{key.includes("RESIDUAL") ? "（修正量）" : ""}</option>)}</select></div>
     <div className="market-controls" aria-label="K线图显示控制">
       <label>窗口<select value={hours} onChange={event => setHours(Number(event.target.value))}><option value="3">最近3小时</option><option value="6">最近6小时</option><option value="12">最近12小时</option><option value="24">最近24小时</option></select></label>
       <label>密度<select value={dense ? "all" : "clear"} onChange={event => setDense(event.target.value === "all")}><option value="clear">清晰：每30分钟1次</option><option value="all">全部：每5分钟预测</option></select></label>
@@ -192,7 +160,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: { candles: Ca
     <svg className="learning-svg" viewBox="0 0 960 380" role="img" aria-label="XAUUSD K线与模型决策">
       {candles.map((row, index) => { const cx = xAtIndex(index); const width = Math.max(1.5, 650 / candles.length); const up = row.close >= row.open; return <g key={row.time}><line x1={cx} x2={cx} y1={y(row.high)} y2={y(row.low)} stroke={up ? "#476b19" : "#c9362b"} /><rect x={cx - width / 2} width={width} y={Math.min(y(row.open), y(row.close))} height={Math.max(1, Math.abs(y(row.open) - y(row.close)))} fill={up ? "#476b19" : "#c9362b"} /></g>; })}
       {selectedX != null && selectedExitX != null && <g className="selected-window"><rect x={selectedX} width={Math.max(2, selectedExitX-selectedX)} y="18" height="332" /><line x1={selectedX} x2={selectedX} y1="18" y2="350" /><line x1={selectedExitX} x2={selectedExitX} y1="18" y2="350" /><text x={selectedX+4} y="32">预测</text><text x={Math.max(selectedX+36, selectedExitX-58)} y="32">30分钟后</text></g>}
-      {decisions.map(row => { const candle = byTime(row.decision_time); const cx = xTime(row.decision_time); const action = row.recommended_action; const cy = action === "LONG" ? y(candle.low) + 12 : action === "SHORT" ? y(candle.high) - 12 : y(candle.close); const color = action === "LONG" ? "#476b19" : action === "SHORT" ? "#c9362b" : "#777267"; const isSelected = activeSelected?.source_decision_id === row.source_decision_id && activeSelected?.model_identity === row.model_identity; return <g key={`${row.source_decision_id}-${row.model_identity}`} role="button" tabIndex={0} className={`decision-marker${isSelected ? " selected" : ""}`} onClick={() => setSelected(row)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") setSelected(row); }}><title>{`${timeLabel(row.decision_time)} · ${action} · 点击查看30分钟结果`}</title>{isSelected && <circle cx={cx} cy={cy} r="11" fill="none" stroke={color} strokeWidth="2" />}{action === "WAIT" ? <path d={`M ${cx-8} ${cy} l 5 -5 v3 h6 v-3 l5 5 -5 5 v-3 h-6 v3 z`} fill={color} /> : <path d={action === "LONG" ? `M ${cx} ${cy-7} l -6 11 h 12 z` : `M ${cx} ${cy+7} l -6 -11 h 12 z`} fill={color} />}</g>; })}
+      {decisions.map(row => { const candle = byTime(row.decision_time); const cx = xTime(row.decision_time); const action = row.recommended_action; const cy = action === "LONG" ? y(candle.low) + 12 : y(candle.high) - (action === "WAIT" ? 22 : 12); const color = action === "LONG" ? "#476b19" : action === "SHORT" ? "#c9362b" : "#555149"; const isSelected = activeSelected?.source_decision_id === row.source_decision_id && activeSelected?.model_identity === row.model_identity; return <g key={`${row.source_decision_id}-${row.model_identity}`} role="button" tabIndex={0} className={`decision-marker${isSelected ? " selected" : ""}`} onClick={() => setSelected(row)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") setSelected(row); }}><title>{`${timeLabel(row.decision_time)} · ${action} · 点击查看30分钟结果`}</title>{action === "WAIT" && <circle cx={cx} cy={cy} r="10" fill="#eee9da" stroke={color} strokeWidth="1.5" />}{isSelected && <circle cx={cx} cy={cy} r="14" fill="none" stroke={color} strokeWidth="2" />}{action === "WAIT" ? <path d={`M ${cx-7} ${cy} h 14 M ${cx-7} ${cy} l 4 -4 M ${cx-7} ${cy} l 4 4 M ${cx+7} ${cy} l -4 -4 M ${cx+7} ${cy} l -4 4`} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" /> : <path d={action === "LONG" ? `M ${cx} ${cy-7} l -6 11 h 12 z` : `M ${cx} ${cy+7} l -6 -11 h 12 z`} fill={color} />}</g>; })}
       {showTraining && (market?.training_markers ?? []).filter(row => row.model_identity === identity && Date.parse(row.created_at) >= cutoff).map(row => <g key={`${row.model_identity}-${row.training_dataset_hash}`}><title>{`${timeLabel(row.created_at)} · 第一次使用 ${row.training_rows} 条训练数据${row.artifact_count > 1 ? ` · 后续恢复重建 ${row.artifact_count-1} 次` : ""}`}</title><line x1={xTime(row.created_at)} x2={xTime(row.created_at)} y1="18" y2="350" className="training-line" /><text x={xTime(row.created_at)+4} y="347" className="training-label">{row.training_rows}条新训练</text></g>)}
       <text x="5" y="30">{high.toFixed(2)}</text><text x="5" y="350">{low.toFixed(2)}</text>
     </svg>

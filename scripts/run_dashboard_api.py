@@ -37,6 +37,7 @@ from xauusd_forecaster.learning_curves import learning_curve_payload  # noqa: E4
 from xauusd_forecaster.news_evidence import (  # noqa: E402
     EVIDENCE_POLICY_VERSION, event_evidence_rows_from_connection,
 )
+from xauusd_forecaster.storylines import STORYLINE_POLICY_VERSION, storyline_rows  # noqa: E402
 
 
 NEWS_SOURCE_DEFINITIONS = {
@@ -698,6 +699,7 @@ def _dashboard_payload(database: Path) -> dict:
         integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
         news_source_health = _news_source_health(connection, now)
         all_news_evidence = event_evidence_rows_from_connection(connection, now)
+        storylines = storyline_rows(all_news_evidence)
         evidence_grades = Counter(
             row["evidence_grade"] for row in all_news_evidence
         )
@@ -885,7 +887,7 @@ def _dashboard_payload(database: Path) -> dict:
                     ),
                     "last_error": (
                         None if clock_skew_seconds is not None and abs(clock_skew_seconds) <= 5
-                        else f"cTrader服务器钟与本机接收钟相差 {abs(clock_skew_seconds):.2f} 秒；Windows Time 服务需要启动"
+                        else f"偏差 {abs(clock_skew_seconds):.2f} 秒；仍在20秒样本隔离上限内，不影响当前评分。请用管理员 PowerShell 启动 Windows Time 并强制同步"
                         if clock_skew_seconds is not None else "尚无报价时钟样本"
                     ),
                 },
@@ -910,6 +912,12 @@ def _dashboard_payload(database: Path) -> dict:
         "recent_decisions": [serialize_row(row) for row in recent],
         "recent_news": news,
         "news_evidence": news_evidence,
+        "storylines": storylines[:20],
+        "storyline_summary": {
+            "policy_version": STORYLINE_POLICY_VERSION,
+            "total": len(storylines),
+            "display_only": True,
+        },
         "news_evidence_summary": {
             "policy_version": EVIDENCE_POLICY_VERSION,
             "total_events": len(all_news_evidence),
