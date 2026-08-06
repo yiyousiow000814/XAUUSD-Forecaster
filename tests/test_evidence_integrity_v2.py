@@ -346,10 +346,9 @@ def test_learning_curve_excludes_predictions_not_after_model_creation(tmp_path) 
     market_curve = next(
         row for row in payload["identity_curves"] if row["model_identity"] == "MARKET_ONLY"
     )
-    assert [point["decision_time"] for point in market_curve["points"]] == [
-        (created_at + timedelta(minutes=5)).isoformat()
-    ]
-    assert market_curve["points"][0]["model_version"] == "market-test"
+    # The only generation is still the current examination.  Its result is
+    # visible in the version ledger but cannot mutate frozen history.
+    assert market_curve["points"] == []
     ledger.close()
 
 
@@ -365,6 +364,10 @@ def test_identity_curve_uses_only_latest_parallel_version_per_decision(tmp_path)
         ledger.connection, "market-new", "MARKET_ONLY", created + timedelta(minutes=30)
     )
     _insert_prediction(
+        ledger.connection, "historical-decision", created + timedelta(minutes=15),
+        model_version="market-old", value_quote_return=1.5,
+    )
+    _insert_prediction(
         ledger.connection, "same-decision", decision, model_version="market-old",
         value_quote_return=1.0,
     )
@@ -377,8 +380,8 @@ def test_identity_curve_uses_only_latest_parallel_version_per_decision(tmp_path)
         row for row in payload["identity_curves"] if row["model_identity"] == "MARKET_ONLY"
     )
     assert len(curve["points"]) == 1
-    assert curve["points"][0]["cumulative_quote_return"] == pytest.approx(2.0)
-    assert curve["points"][0]["model_version"] == "market-new"
+    assert curve["points"][0]["cumulative_quote_return"] == pytest.approx(1.5)
+    assert curve["points"][0]["model_version"] == "market-old"
     models = {row["model_version"]: row for row in payload["models"]}
     assert models["market-new"]["lifecycle_status"] == "LATEST"
     assert models["market-old"]["lifecycle_status"] == "PREVIOUS"
@@ -387,7 +390,7 @@ def test_identity_curve_uses_only_latest_parallel_version_per_decision(tmp_path)
         row for row in payload["rolling_processes"] if row["model_identity"] == "MARKET_ONLY"
     )
     assert rolling["oos_rows"] == 1
-    assert rolling["cumulative_quote_return"] == pytest.approx(2.0)
+    assert rolling["cumulative_quote_return"] == pytest.approx(1.5)
     ledger.close()
 
 

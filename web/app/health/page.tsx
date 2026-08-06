@@ -22,7 +22,7 @@ type StatusPayload = {
 
 const componentLabels: Record<string, string> = {
   quote_bridge: "XAUUSD 报价桥",
-  system_clock: "cTrader / 本机时钟差",
+  system_clock: "cTrader 报价时间 / 本机接收时间",
   decision_collector: "5 分钟决策收集器",
   outcome_settler: "30 分钟结果结算器",
   news_collector: "新闻收集器",

@@ -124,6 +124,7 @@ type LearningModel = {
 
 type RollingProcess = {
   model_identity: string;
+  history_cutoff?: string | null;
   active_model_versions: string[];
   oos_rows: number;
   distinct_days: number;
@@ -608,7 +609,7 @@ export default function AuditPage() {
           const latestGroup = payload?.learning_curves.version_groups.find(row => row.model_identity === identity && row.lifecycle_status === "LATEST");
           if (!process && !latestGroup) return null;
           const diagnostic = identity === "NEWS_RESIDUAL" || identity === "BROAD_NEWS_RESIDUAL";
-          return <article key={identity}><b>{MODEL_LABELS[identity]}{diagnostic ? <small>新闻修正量</small> : null}</b><span>连续累计 <strong>{process?.oos_rows ? percent(process.cumulative_quote_return) : "等待结果"}</strong></span><i aria-hidden="true">+</i><span>本组独立 <strong>{latestGroup?.subsequent_oos_rows ? percent(latestGroup.cumulative_quote_return) : "等待结果"}</strong></span></article>;
+          return <article key={identity}><b>{MODEL_LABELS[identity]}{diagnostic ? <small>新闻修正量</small> : null}</b><span>已归档历史 <strong>{process?.oos_rows ? percent(process.cumulative_quote_return) : "尚无历史组"}</strong></span><i aria-hidden="true">+</i><span>当前组暂计 <strong>{latestGroup?.subsequent_oos_rows ? percent(latestGroup.cumulative_quote_return) : "等待结果"}</strong></span></article>;
         })}</div>}
         <footer className="league-footer">{payload?.learning_curves.disclaimer ?? "早期曲线用于观察学习过程，不代表已证明盈利。"} 单日和双日新闻模型明确标记 EXPERIMENTAL；达到3个新闻日期后自动进入标准证据状态。当前只运行每个 Ridge 身份的最新版和前一版；{archivedModelCount} 个旧版本的 artifact、预测和成绩已永久归档。零收益安全基准不训练、不使用 AI、不占 Ridge 版本名额。Preview 与 Shadow 都没有下单权限，也不会自动晋升。</footer>
         <LearningGraphModal open={graphOpen} onClose={() => setGraphOpen(false)} curves={payload?.learning_curves.identity_curves ?? []} market={payload?.market_chart} />
