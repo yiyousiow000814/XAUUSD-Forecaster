@@ -109,10 +109,11 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /版本独立盈亏清单/);
   assert.match(modal, /K线与决策/);
   assert.match(modal, /仓位与退出/);
-  assert.match(modal, /冻结 Shadow 动作/);
+  assert.doesNotMatch(modal, /冻结 Shadow 动作/);
   assert.match(modal, /每小时 :00 \/ :30/);
   assert.match(modal, /每5分钟/);
-  assert.match(modal, /成本后 EV 较优方向/);
+  assert.doesNotMatch(modal, /成本后 EV 较优方向/);
+  assert.doesNotMatch(modal, /setArrowMode/);
   assert.match(modal, /U5 只是统一波动尺度，不是 WAIT 开关/);
   assert.match(modal, /模型选择 vs 固定 1\.0x/);
   assert.match(modal, /顺序 Exit Ridge vs 固定持有30分钟/);
@@ -124,7 +125,7 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /每根K线5分钟 · 每个箭头预测未来30分钟/);
   assert.match(modal, /历史＋实时成熟 OOS（只追加，不重写）/);
   assert.match(modal, /成本后EV较高方向/);
-  assert.match(modal, /冻结版本/);
+  assert.match(modal, /模型版本/);
   assert.match(modal, /历史规则不一致/);
   assert.match(modal, /getUTCMinutes\(\) % 30 === 0/);
   assert.match(modal, /const xAtIndex/);
