@@ -151,9 +151,12 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
            WHERE n.collector_first_seen_time<=? AND a.parsed_at<=?
              AND length(trim(coalesce(n.body,'')))>=240
              AND a.llm_model_version IN ('gemini-3.5-flash-lite','gemini-3.1-flash-lite')
-             AND a.prompt_version IN ('news-json-v10-controlled-category-zh',
-                                      'news-json-v9-local-display-recovery',
-                                      'news-json-v8-strict-zh-source-number-lexemes')
+             AND a.prompt_version IN ('news-json-v14-material-event-evidence',
+                                      'news-json-v13-event-claims',
+                                      'news-json-v12-gemini-story-identity',
+                                      'news-json-v11-gemini-story-subjects',
+                                      'news-json-v10-controlled-category-zh',
+                                      'news-json-v9-local-display-recovery')
              AND NOT EXISTS (
                SELECT 1 FROM news_revisions newer
                WHERE newer.source=n.source AND newer.source_item_id=n.source_item_id
@@ -271,6 +274,26 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             "event_type": canonical.get("event_type"),
             "entities": entities,
             "primary_category": annotation.get("primary_category"),
+            "record_kind": annotation.get("record_kind"),
+            "actor": annotation.get("actor"),
+            "action": annotation.get("action"),
+            "object": annotation.get("object"),
+            "location": annotation.get("location"),
+            "event_time": annotation.get("event_time"),
+            "claim_status": annotation.get("claim_status"),
+            "materiality": annotation.get("materiality"),
+            "canonical_actor_id": annotation.get("canonical_actor_id"),
+            "action_family": annotation.get("action_family"),
+            "canonical_object_id": annotation.get("canonical_object_id"),
+            "canonical_location_id": annotation.get("canonical_location_id"),
+            "episode_key": annotation.get("episode_key"),
+            "primary_story_title_zh": annotation.get("primary_story_title_zh"),
+            "secondary_contexts_zh": annotation.get("secondary_contexts_zh") or [],
+            "relation_to_prior": annotation.get("relation_to_prior"),
+            "document_kind": annotation.get("document_kind"),
+            "material_event_key": annotation.get("material_event_key"),
+            "source_organization_id": annotation.get("source_organization_id"),
+            "evidence_role": annotation.get("evidence_role"),
             "model_permission": "BROAD_MODEL" if eligible else "DISPLAY_ONLY",
             "source_published_time": (
                 canonical["time_assessment"].event_time.isoformat()

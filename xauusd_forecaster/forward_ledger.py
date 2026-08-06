@@ -569,15 +569,27 @@ class ForwardLedger:
         classified_fields = translated_fields | {
             "primary_category", "secondary_categories", "emerging_topic_zh"
         }
+        storyline_fields = classified_fields | {"story_subjects_zh"}
+        event_claim_fields = classified_fields | {
+            "record_kind", "actor", "action", "object", "location", "event_time",
+            "claim_status", "materiality", "canonical_actor_id", "action_family",
+            "canonical_object_id", "canonical_location_id", "episode_key",
+            "primary_story_title_zh", "secondary_contexts_zh", "relation_to_prior",
+        }
+        material_event_fields = event_claim_fields | {
+            "document_kind", "material_event_key", "source_organization_id",
+            "evidence_role",
+        }
         if set(vector) not in (
-            legacy_fields, summary_fields, translated_fields, classified_fields
+            legacy_fields, summary_fields, translated_fields, classified_fields,
+            storyline_fields, event_claim_fields, material_event_fields,
         ):
             raise ValueError("annotation does not match frozen JSON schema fields")
         if "summary_zh" in vector and not str(vector["summary_zh"]).strip():
             raise ValueError("annotation summary_zh is empty")
         if "headline_zh" in vector and not str(vector["headline_zh"]).strip():
             raise ValueError("annotation headline_zh is empty")
-        if set(vector) == classified_fields:
+        if classified_fields <= set(vector):
             allowed_categories = {
                 "rates_fed", "inflation_employment", "growth_economy",
                 "usd_liquidity", "oil_energy", "war_geopolitics",
@@ -594,6 +606,33 @@ class ForwardLedger:
                 raise ValueError("annotation category cannot be both primary and secondary")
             if len(str(vector["emerging_topic_zh"])) > 16:
                 raise ValueError("annotation emerging_topic_zh is too long")
+        if set(vector) == event_claim_fields:
+            if vector["record_kind"] not in {
+                "FACT_EVENT", "OFFICIAL_CLAIM", "MARKET_REACTION",
+                "COMMENTARY_FORECAST", "BACKGROUND",
+            }:
+                raise ValueError("annotation record_kind is not controlled")
+            if not 0.0 <= float(vector["materiality"]) <= 1.0:
+                raise ValueError("annotation materiality is outside [0, 1]")
+            contexts = list(vector["secondary_contexts_zh"])
+            if len(contexts) > 2 or len(set(contexts)) != len(contexts):
+                raise ValueError("annotation secondary contexts exceeds limit")
+            core = vector["record_kind"] in {"FACT_EVENT", "OFFICIAL_CLAIM"}
+            if vector["episode_key"] and (
+                not core and vector["record_kind"] not in {
+                    "MARKET_REACTION", "COMMENTARY_FORECAST", "BACKGROUND"
+                }
+            ):
+                raise ValueError("annotation episode membership is invalid")
+            if core and vector["episode_key"] and not (
+                str(vector["canonical_actor_id"]).strip()
+                and str(vector["action_family"]).strip()
+                and (
+                    str(vector["canonical_object_id"]).strip()
+                    or str(vector["canonical_location_id"]).strip()
+                )
+            ):
+                raise ValueError("core episode lacks actor/action/object-location identity")
         for name in (
             "hawkishness", "inflation_impulse", "growth_impulse",
             "geopolitical_risk", "usd_impulse",

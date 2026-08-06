@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from .evidence_v2 import ELIGIBILITY_VERSION
+from .execution_costs import ROUND_TRIP_COMMISSION_LOG_COST
 from .forward_ledger import canonical_hash
 from .news_evidence import EVIDENCE_POLICY_VERSION
 from .ridge import RidgeArtifact
@@ -206,7 +207,9 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
         bid = float(features["decision_bid"])
         ask = float(features["decision_ask"])
         u5 = float(market_snapshot["u5"])
-        quote_cost_estimate_u5 = math.log(ask / bid) * 2.0 / u5
+        quote_cost_estimate_u5 = (
+            math.log(ask / bid) * 2.0 + ROUND_TRIP_COMMISSION_LOG_COST
+        ) / u5
         ev_long = predicted - quote_cost_estimate_u5
         ev_short = -predicted - quote_cost_estimate_u5
         recommended = _recommended_action(

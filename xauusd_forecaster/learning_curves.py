@@ -8,6 +8,8 @@ import statistics
 from collections import defaultdict
 from datetime import datetime
 
+from .execution_costs import COMMISSION_STATUS, SLIPPAGE_STATUS, net_shadow_log_return
+
 
 MAX_CURVE_POINTS = 1200
 
@@ -89,10 +91,10 @@ def _selection_metrics(rows) -> dict:
     wait_opportunity_cost = 0.0
     directional = 0
     for row in rows:
-        long_value = float(row["long_quote_return"] or 0.0)
-        short_value = float(row["short_quote_return"] or 0.0)
+        long_value = net_shadow_log_return(row["long_quote_return"] or 0.0)
+        short_value = net_shadow_log_return(row["short_quote_return"] or 0.0)
         oracle = max(0.0, long_value, short_value)
-        policy = float(row["value_quote_return"] or 0.0)
+        policy = _net_row_value(row)
         regrets.append(oracle - policy)
         if row["recommended_action"] == "WAIT":
             wait_opportunity_cost += oracle
@@ -103,6 +105,17 @@ def _selection_metrics(rows) -> dict:
         "average_oracle_regret": statistics.mean(regrets),
         "wait_opportunity_cost": wait_opportunity_cost,
     }
+
+
+def _net_row_value(row) -> float:
+    value = float(row["value_quote_return"] or 0.0)
+    return 0.0 if row["recommended_action"] == "WAIT" else net_shadow_log_return(value)
+
+
+def _net_direction_correct(row) -> int | None:
+    if row["recommended_action"] == "WAIT" or row["value_quote_return"] is None:
+        return None
+    return int(_net_row_value(row) > 0.0)
 
 
 def _is_fixed_30m_grid(value: str) -> bool:
@@ -121,10 +134,10 @@ def _cadence_metrics(rows) -> dict:
         ("EVERY_5M", list(rows)),
         ("FIXED_30M", [row for row in rows if _is_fixed_30m_grid(row["decision_time"])]),
     ):
-        values = [float(row["value_quote_return"]) for row in cadence_rows]
+        values = [_net_row_value(row) for row in cadence_rows]
         daily = defaultdict(float)
         for row in cadence_rows:
-            daily[row["decision_time"][:10]] += float(row["value_quote_return"])
+            daily[row["decision_time"][:10]] += _net_row_value(row)
         result[name] = {
             "oos_rows": len(cadence_rows),
             "distinct_days": len(daily),
@@ -195,10 +208,10 @@ def learning_curve_payload(connection) -> dict:
         ).fetchall()
         scored = [row for row in rows if row["value_quote_return"] is not None]
         cadence_metrics = _cadence_metrics(scored)
-        values = [float(row["value_quote_return"]) for row in scored]
+        values = [_net_row_value(row) for row in scored]
         daily = defaultdict(float)
         for row in scored:
-            daily[row["decision_time"][:10]] += float(row["value_quote_return"])
+            daily[row["decision_time"][:10]] += _net_row_value(row)
         metrics = _metrics(values, daily)
         latest = rows[-1] if rows else None
         active_rank = (
@@ -222,10 +235,19 @@ def learning_curve_payload(connection) -> dict:
                 if any(row["squared_error"] is not None for row in scored) else None
             ),
             "direction_accuracy": (
-                statistics.mean(int(row["direction_correct"]) for row in scored if row["direction_correct"] is not None)
-                if any(row["direction_correct"] is not None for row in scored) else None
+                statistics.mean(
+                    result for row in scored
+                    if (result := _net_direction_correct(row)) is not None
+                )
+                if any(_net_direction_correct(row) is not None for row in scored) else None
             ),
-            "high_confidence_errors": sum(int(row["high_confidence_error"] or 0) for row in scored),
+            "high_confidence_errors": sum(
+                int(
+                    row["calibration_status"] == "CALIBRATED"
+                    and _net_direction_correct(row) == 0
+                )
+                for row in scored
+            ),
             "interval_width": latest["interval_width"] if latest else None,
             "calibration_status": latest["calibration_status"] if latest else "NO_LIVE_OOS",
             "calibration_rows": latest["calibration_rows"] if latest else 0,
@@ -285,10 +307,10 @@ def learning_curve_payload(connection) -> dict:
             (*versions, group_updates[0]["created_at"]),
         ).fetchall()
         scored = [row for row in rows if row["value_quote_return"] is not None]
-        values = [float(row["value_quote_return"]) for row in scored]
+        values = [_net_row_value(row) for row in scored]
         daily = defaultdict(float)
         for row in scored:
-            daily[row["decision_time"][:10]] += float(row["value_quote_return"])
+            daily[row["decision_time"][:10]] += _net_row_value(row)
         cadence_metrics = _cadence_metrics(scored)
         primary_metrics = cadence_metrics["EVERY_5M"]
         group_number = identity_group_seen[identity]
@@ -310,8 +332,8 @@ def learning_curve_payload(connection) -> dict:
             "distinct_days": primary_metrics["distinct_days"],
             "cadence_metrics": cadence_metrics,
             **_selection_metrics(scored),
-            **_metrics([float(row["value_quote_return"]) for row in scored], {
-                day: sum(float(row["value_quote_return"]) for row in scored if row["decision_time"][:10] == day)
+            **_metrics([_net_row_value(row) for row in scored], {
+                day: sum(_net_row_value(row) for row in scored if row["decision_time"][:10] == day)
                 for day in {row["decision_time"][:10] for row in scored}
             }),
         })
@@ -360,8 +382,8 @@ def learning_curve_payload(connection) -> dict:
             "calibration_distinct_days": latest["calibration_distinct_days"] if latest else 0,
             **_selection_metrics(rows),
             **_metrics(
-                [float(row["value_quote_return"]) for row in rows],
-                {day: sum(float(row["value_quote_return"]) for row in rows if row["decision_time"][:10] == day)
+                [_net_row_value(row) for row in rows],
+                {day: sum(_net_row_value(row) for row in rows if row["decision_time"][:10] == day)
                  for day in {row["decision_time"][:10] for row in rows}},
             ),
         })
@@ -373,7 +395,8 @@ def learning_curve_payload(connection) -> dict:
     ):
         if identity == "CHAMPION_0":
             rows = connection.execute(
-                """SELECT p.decision_time,s.value_quote_return FROM predictions_v2 p
+                """SELECT p.decision_time,p.recommended_action,s.value_quote_return
+                FROM predictions_v2 p
                 JOIN prediction_scores_v2 s USING(source_decision_id,model_version)
                 WHERE p.model_identity=? ORDER BY p.decision_time""", (identity,)
             ).fetchall()
@@ -381,6 +404,7 @@ def learning_curve_payload(connection) -> dict:
             rows = connection.execute(
                 """WITH ranked AS (
                     SELECT p.source_decision_id,p.decision_time,p.model_version,
+                           p.recommended_action,
                            u.training_dataset_hash,u.training_rows,s.value_quote_return,
                            row_number() OVER (
                                PARTITION BY p.source_decision_id,p.model_identity
@@ -391,7 +415,8 @@ def learning_curve_payload(connection) -> dict:
                     JOIN model_updates_v2 u USING(model_version)
                     WHERE p.model_identity=? AND p.decision_time>u.created_at
                 )
-                SELECT decision_time,model_version,training_dataset_hash,training_rows,
+                SELECT decision_time,model_version,recommended_action,
+                       training_dataset_hash,training_rows,
                        value_quote_return FROM ranked
                 WHERE version_rank=1 ORDER BY decision_time""", (identity,)
             ).fetchall()
@@ -400,7 +425,7 @@ def learning_curve_payload(connection) -> dict:
             result = []
             previous_generation = None
             for row in source_rows:
-                cumulative += float(row["value_quote_return"])
+                cumulative += _net_row_value(row)
                 model_version = row["model_version"] if identity != "CHAMPION_0" else "always-wait-v1"
                 point = {"decision_time": row["decision_time"], "cumulative_quote_return": cumulative}
                 generation = row["training_dataset_hash"] if identity != "CHAMPION_0" else "always-wait"
@@ -431,7 +456,7 @@ def learning_curve_payload(connection) -> dict:
     paired = connection.execute(
         """WITH ranked AS (
             SELECT p.source_decision_id,p.decision_time,p.model_identity,
-                   s.value_quote_return,
+                   p.recommended_action,s.value_quote_return,
                    row_number() OVER (
                        PARTITION BY p.source_decision_id,p.model_identity
                        ORDER BY u.created_at DESC,u.model_version DESC
@@ -444,7 +469,10 @@ def learning_curve_payload(connection) -> dict:
         ), latest AS (
             SELECT * FROM ranked WHERE version_rank=1
         )
-        SELECT f.decision_time,f.value_quote_return-m.value_quote_return AS delta
+        SELECT f.decision_time,f.value_quote_return AS full_value,
+               f.recommended_action AS full_action,
+               m.value_quote_return AS market_value,
+               m.recommended_action AS market_action
         FROM latest f JOIN latest m USING(source_decision_id)
         WHERE f.model_identity='FULL' AND m.model_identity='MARKET_ONLY'
         ORDER BY f.decision_time"""
@@ -452,13 +480,18 @@ def learning_curve_payload(connection) -> dict:
     cumulative = 0.0
     incremental = []
     for row in paired:
-        cumulative += float(row["delta"])
-        incremental.append({"decision_time": row["decision_time"], "paired_delta": row["delta"],
+        delta = (
+            (0.0 if row["full_action"] == "WAIT" else net_shadow_log_return(row["full_value"]))
+            - (0.0 if row["market_action"] == "WAIT" else net_shadow_log_return(row["market_value"]))
+        )
+        cumulative += delta
+        incremental.append({"decision_time": row["decision_time"], "paired_delta": delta,
                             "cumulative_delta": cumulative})
 
     broad_paired = connection.execute(
         """WITH ranked AS (
-            SELECT p.source_decision_id,p.decision_time,p.model_identity,s.value_quote_return,
+            SELECT p.source_decision_id,p.decision_time,p.model_identity,
+                   p.recommended_action,s.value_quote_return,
                    row_number() OVER (
                        PARTITION BY p.source_decision_id,p.model_identity
                        ORDER BY u.created_at DESC,u.model_version DESC
@@ -469,7 +502,10 @@ def learning_curve_payload(connection) -> dict:
             WHERE p.model_identity IN ('BROAD_FULL','FULL')
               AND p.decision_time>u.created_at
         ), latest AS (SELECT * FROM ranked WHERE version_rank=1)
-        SELECT b.decision_time,b.value_quote_return-o.value_quote_return AS delta
+        SELECT b.decision_time,b.value_quote_return AS broad_value,
+               b.recommended_action AS broad_action,
+               o.value_quote_return AS official_value,
+               o.recommended_action AS official_action
         FROM latest b JOIN latest o USING(source_decision_id)
         WHERE b.model_identity='BROAD_FULL' AND o.model_identity='FULL'
         ORDER BY b.decision_time"""
@@ -477,9 +513,13 @@ def learning_curve_payload(connection) -> dict:
     broad_cumulative = 0.0
     broad_incremental = []
     for row in broad_paired:
-        broad_cumulative += float(row["delta"])
+        delta = (
+            (0.0 if row["broad_action"] == "WAIT" else net_shadow_log_return(row["broad_value"]))
+            - (0.0 if row["official_action"] == "WAIT" else net_shadow_log_return(row["official_value"]))
+        )
+        broad_cumulative += delta
         broad_incremental.append({
-            "decision_time": row["decision_time"], "paired_delta": row["delta"],
+            "decision_time": row["decision_time"], "paired_delta": delta,
             "cumulative_delta": broad_cumulative,
         })
 
@@ -510,7 +550,7 @@ def learning_curve_payload(connection) -> dict:
         "training_run_count": training_run_count,
         "recovery_rebuild_count": max(0, training_run_count - len(market_training_hashes)),
         "next_training_threshold": 96 if complete < 96 else 200 if complete < 200 else ((complete // 50) + 1) * 50,
-        "commission_status": "UNCONFIGURED", "slippage_status": "UNAVAILABLE_SHADOW",
+        "commission_status": COMMISSION_STATUS, "slippage_status": SLIPPAGE_STATUS,
         "models": models, "version_groups": version_groups,
         "rolling_processes": rolling_processes,
         "zero_return_baseline": {

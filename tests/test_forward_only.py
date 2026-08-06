@@ -1008,10 +1008,12 @@ def test_gemini_repairs_mixed_language_summary_with_counted_request(
     mixed = {
         "headline_zh": "黄金上涨",
         "summary_zh": "黄金上涨。Bu metin Türkçe olarak devam ediyor ve çevrilmedi.",
+        "primary_story_title_zh": "",
     }
     repaired = {
         "headline_zh": "黄金上涨",
         "summary_zh": "黄金价格上涨，美元走弱，市场正在关注后续经济数据。",
+        "primary_story_title_zh": "",
     }
     monkeypatch.setattr(
         annotation_module,
@@ -1027,6 +1029,35 @@ def test_gemini_repairs_mixed_language_summary_with_counted_request(
     pool = annotation_module._GeminiRequestPool(("key-a", "key-b"), quota)
     result, _ = pool.call(0, "model", "headline", "body")
     assert result["summary_zh"] == repaired["summary_zh"]
+    assert quota.snapshot(("key-a", "key-b"))["total_sent"] == 2
+
+
+def test_gemini_repairs_mixed_script_story_identity_with_counted_request(
+    tmp_path, monkeypatch
+) -> None:
+    mixed = {
+        "headline_zh": "霍尔木兹海峡重新开放",
+        "summary_zh": "报道讨论霍尔木兹海峡重新开放。",
+        "primary_story_title_zh": "霍尔omuz海峡重新开放事件",
+    }
+    repaired = {
+        **mixed,
+        "primary_story_title_zh": "霍尔木兹海峡重新开放事件",
+    }
+    monkeypatch.setattr(
+        annotation_module,
+        "_call_gemini",
+        lambda *_: (dict(mixed), "gemini-3.5-flash-lite"),
+    )
+    monkeypatch.setattr(
+        annotation_module,
+        "_call_gemini_chinese_repair",
+        lambda *_: dict(repaired),
+    )
+    quota = GeminiQuotaLedger(tmp_path / "quota.json")
+    pool = annotation_module._GeminiRequestPool(("key-a", "key-b"), quota)
+    result, _ = pool.call(0, "model", "headline", "body")
+    assert result["primary_story_title_zh"] == "霍尔木兹海峡重新开放事件"
     assert quota.snapshot(("key-a", "key-b"))["total_sent"] == 2
 
 

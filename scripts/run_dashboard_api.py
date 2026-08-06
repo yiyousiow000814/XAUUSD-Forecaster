@@ -7,6 +7,7 @@ import argparse
 import json
 import math
 import sqlite3
+import subprocess
 import sys
 from types import SimpleNamespace
 from collections import Counter
@@ -19,6 +20,7 @@ MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
 DEFAULT_DATABASE = MODULE_ROOT / ".local" / "forward" / "forward-evidence.sqlite3"
 UTC = timezone.utc
+PAYLOAD_SCHEMA_VERSION = "xauusd-dashboard-v4-event-episode"
 
 from xauusd_forecaster.factors import factor_coverage  # noqa: E402
 from xauusd_forecaster.annotation import (  # noqa: E402
@@ -35,11 +37,44 @@ from xauusd_forecaster.annotation import (  # noqa: E402
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger  # noqa: E402
 from xauusd_forecaster.training import MARKET_FEATURES  # noqa: E402
 from xauusd_forecaster.learning_curves import learning_curve_payload  # noqa: E402
+from xauusd_forecaster.execution_costs import net_shadow_log_return  # noqa: E402
 from xauusd_forecaster.news_evidence import (  # noqa: E402
     EVIDENCE_POLICY_VERSION, event_evidence_rows_from_connection,
 )
-from xauusd_forecaster.storylines import STORYLINE_POLICY_VERSION, storyline_rows  # noqa: E402
+from xauusd_forecaster.storylines import STORYLINE_POLICY_VERSION, temporal_event_graph  # noqa: E402
 from xauusd_forecaster.execution_learning import execution_learning_status  # noqa: E402
+
+
+def _deployment_provenance(generated_at: datetime, database_epoch: str | None) -> dict:
+    """Expose code/data identity so a stale Sites mirror cannot look current."""
+    repo = MODULE_ROOT.parents[1]
+    def git(*args: str) -> str | None:
+        try:
+            result = subprocess.run(
+                ("git", *args), cwd=repo, capture_output=True, text=True,
+                timeout=5, check=True,
+            )
+            return result.stdout.strip() or None
+        except (OSError, subprocess.SubprocessError):
+            return None
+    runtime_sha = git("rev-parse", "HEAD")
+    upstream = git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+    expected_sha = git("rev-parse", upstream) if upstream else None
+    module_dirty = bool(git("status", "--porcelain", "--", "src/XAUUSD-Forecaster"))
+    drift = module_dirty or not runtime_sha or not expected_sha or runtime_sha != expected_sha
+    return {
+        "runtime_git_sha": runtime_sha,
+        "expected_git_sha": expected_sha,
+        "runtime_dirty": module_dirty,
+        "status": "DEPLOYMENT_DRIFT" if drift else "MATCHED",
+        "storyline_policy_version": STORYLINE_POLICY_VERSION,
+        "payload_schema_version": PAYLOAD_SCHEMA_VERSION,
+        "payload_generated_at": generated_at.isoformat(),
+        "source_database_epoch": database_epoch,
+    }
+
+
+DEPLOYMENT_PROVENANCE = _deployment_provenance(datetime.now(UTC), None)
 
 
 NEWS_SOURCE_DEFINITIONS = {
@@ -309,6 +344,21 @@ def _recent_market_chart(
     decisions = []
     for row in decision_rows:
         recorded = row["recommended_action"]
+        row_payload = {
+            key: value for key, value in dict(row).items()
+            if key != "outcome_reason_codes_json"
+        }
+        for key in ("long_quote_return", "short_quote_return"):
+            gross = row_payload.get(key)
+            row_payload[f"gross_{key}"] = gross
+            if gross is not None:
+                row_payload[key] = net_shadow_log_return(gross)
+        gross_score = row_payload.get("value_quote_return")
+        row_payload["gross_value_quote_return"] = gross_score
+        if gross_score is not None:
+            row_payload["value_quote_return"] = (
+                0.0 if recorded == "WAIT" else net_shadow_log_return(gross_score)
+            )
         ev_long = row["ev_long_u5"]
         ev_short = row["ev_short_u5"]
         lcb_long = row["lcb_long_u5"]
@@ -326,8 +376,7 @@ def _recent_market_chart(
             elif ev_short > ev_long and ev_short > 0:
                 expected = "SHORT"
         decisions.append({
-            **{key: value for key, value in dict(row).items()
-               if key != "outcome_reason_codes_json"},
+            **row_payload,
             "outcome_reason_codes": json.loads(row["outcome_reason_codes_json"] or "[]"),
             "exit_time": (
                 datetime.fromisoformat(row["decision_time"]) + timedelta(minutes=30)
@@ -515,7 +564,7 @@ def _dashboard_payload(database: Path) -> dict:
                             WHEN r.maximum_tier='MODEL_ELIGIBLE'
                                  AND length(trim(COALESCE(n.body,'')))>=r.minimum_body_characters
                                  AND a.parsed_at IS NULL THEN 'NOT_YET_PARSED'
-                            WHEN r.maximum_tier='MODEL_ELIGIBLE' THEN 'MODEL_INELIGIBLE'
+                            WHEN r.maximum_tier='MODEL_ELIGIBLE' THEN 'WAITING_CONTENT'
                             ELSE COALESCE(r.maximum_tier, 'COLLECT_ONLY') END AS model_visibility,
                       CASE WHEN a.annotation_id IS NOT NULL THEN 'READY'
                            WHEN length(trim(COALESCE(n.body, ''))) < 240 THEN 'WAITING_CONTENT'
@@ -749,7 +798,8 @@ def _dashboard_payload(database: Path) -> dict:
         integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
         news_source_health = _news_source_health(connection, now)
         all_news_evidence = event_evidence_rows_from_connection(connection, now)
-        storylines = storyline_rows(all_news_evidence)
+        event_graph = temporal_event_graph(all_news_evidence)
+        storylines = event_graph["stories"]
         evidence_grades = Counter(
             row["evidence_grade"] for row in all_news_evidence
         )
@@ -929,6 +979,11 @@ def _dashboard_payload(database: Path) -> dict:
         "forward_epoch": epoch,
         "system": {
             "online": online,
+            "deployment": {
+                **DEPLOYMENT_PROVENANCE,
+                "payload_generated_at": now.isoformat(),
+                "source_database_epoch": epoch,
+            },
             "quote_age_seconds": age_seconds,
             "mode": "SHADOW",
             "trading_enabled": False,
@@ -973,9 +1028,23 @@ def _dashboard_payload(database: Path) -> dict:
         "recent_news": news,
         "news_evidence": news_evidence,
         "storylines": storylines[:20],
+        "market_narrative_candidates": event_graph["market_narrative_candidates"][:20],
+        "archived_storylines": event_graph["archived_storylines"][:20],
+        "archived_story_event_candidates": event_graph["archived_event_candidates"][:50],
+        "story_event_candidates": event_graph["event_candidates"][:50],
+        "market_reaction_streams": event_graph["market_reaction_streams"],
+        "theme_streams": event_graph["theme_streams"],
+        "unassigned_story_events": event_graph["unassigned_events"][:50],
         "storyline_summary": {
             "policy_version": STORYLINE_POLICY_VERSION,
+            "legacy_policy_status": event_graph["legacy_policy_status"],
             "total": len(storylines),
+            "market_narrative_total": len(event_graph["market_narrative_candidates"]),
+            "archived_total": len(event_graph["archived_storylines"]) + len(event_graph["archived_event_candidates"]),
+            "candidate_total": len(event_graph["event_candidates"]),
+            "market_stream_total": len(event_graph["market_reaction_streams"]),
+            "theme_total": len(event_graph["theme_streams"]),
+            "unassigned_total": len(event_graph["unassigned_events"]),
             "display_only": True,
         },
         "news_evidence_summary": {

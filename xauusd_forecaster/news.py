@@ -575,7 +575,25 @@ def collect_direct_full_text_html_news(
                     break
             inserted = 0
             unchanged = 0
+            preserved_full_text = 0
             for record in records:
+                latest = ledger.connection.execute(
+                    """SELECT headline, body, link FROM news_revisions
+                    WHERE source=? AND source_item_id=?
+                    ORDER BY revision_number DESC LIMIT 1""",
+                    (record["source"], record["source_item_id"]),
+                ).fetchone()
+                if (
+                    latest is not None
+                    and str(latest["body"] or "").startswith("[FULL_TEXT")
+                    and str(latest["headline"] or "") == record["headline"]
+                    and str(latest["link"] or "") == record["link"]
+                ):
+                    # A listing page proves that the article still exists; it
+                    # does not supersede an already captured article body.
+                    unchanged += 1
+                    preserved_full_text += 1
+                    continue
                 _, created = ledger.append_news_revision(record)
                 inserted += int(created)
                 unchanged += int(not created)
@@ -596,6 +614,7 @@ def collect_direct_full_text_html_news(
                     "status": "OK",
                     "inserted_revisions": inserted,
                     "unchanged_items": unchanged,
+                    "preserved_full_text": preserved_full_text,
                 }
             )
         except Exception as error:

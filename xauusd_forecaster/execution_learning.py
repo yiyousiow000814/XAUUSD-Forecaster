@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from .forward_ledger import canonical_hash
+from .execution_costs import net_shadow_log_return
 from .market import MarketObservation
 from .ridge import RidgeArtifact, train_ridge
 from .training import MARKET_FEATURES
@@ -217,7 +218,7 @@ def train_due_execution(ledger, cutoff: datetime, artifact_root: str | Path,
             matrix = np.asarray([json.loads(row["feature_json"]) for row in selected])
             for size in LOT_CANDIDATES:
                 target = np.asarray([
-                    size * (float(row["final_quote_return"]) / float(row["u5"]))
+                    size * (net_shadow_log_return(row["final_quote_return"]) / float(row["u5"]))
                     - 0.5 * (size * abs(float(row["adverse_u5"]))) ** 2
                     for row in selected
                 ])
@@ -233,14 +234,19 @@ def train_due_execution(ledger, cutoff: datetime, artifact_root: str | Path,
             matrix_rows, targets = [], []
             for row in selected:
                 base = json.loads(row["feature_json"])
-                final_u5 = float(row["final_quote_return"]) / float(row["u5"])
+                final_u5 = net_shadow_log_return(row["final_quote_return"]) / float(row["u5"])
                 for checkpoint in json.loads(row["checkpoint_path_json"]):
+                    cost_u5 = (
+                        float(checkpoint["current_return_u5"])
+                        - net_shadow_log_return(checkpoint["current_quote_return"]) / float(row["u5"])
+                    )
+                    current_u5 = float(checkpoint["current_return_u5"]) - cost_u5
                     matrix_rows.append([
                         *base, checkpoint["minutes"] / 30.0,
-                        checkpoint["current_return_u5"], checkpoint["mfe_u5"],
-                        checkpoint["mae_u5"],
+                        current_u5, checkpoint["mfe_u5"] - cost_u5,
+                        checkpoint["mae_u5"] - cost_u5,
                     ])
-                    targets.append(final_u5 - checkpoint["current_return_u5"])
+                    targets.append(final_u5 - current_u5)
             artifact = train_ridge(np.asarray(matrix_rows), np.asarray(targets),
                                    EXIT_FEATURES, 100.0, dataset_hash)
             path = root / version / "exit" / "model.json"
@@ -327,8 +333,11 @@ def _checkpoint_features(ledger, decision_id: str, direction: str, minutes: int,
         returns = [math.log(entry.bid / row.ask) for row in path]
         sign = -1.0
     u5 = float(market["u5"])
-    values = [*base, sign, minutes / 30.0, returns[-1] / u5,
-              max(returns) / u5, min(returns) / u5]
+    values = [
+        *base, sign, minutes / 30.0, net_shadow_log_return(returns[-1]) / u5,
+        net_shadow_log_return(max(returns)) / u5,
+        net_shadow_log_return(min(returns)) / u5,
+    ]
     return values, returns[-1], checkpoint.received_time, canonical_hash((
         market["output_hash"], direction, minutes, values,
     ))
@@ -400,7 +409,7 @@ def score_execution_predictions(ledger, *, decision_id: str, scored_at: datetime
     ).fetchone()
     if lot is not None:
         size = float(lot["recommended_action"].removesuffix("X"))
-        baseline = float(example["final_quote_return"])
+        baseline = net_shadow_log_return(example["final_quote_return"])
         selected = size * baseline
         inserted += _append_score(ledger, lot, scored_at, lot["recommended_action"], 30,
                                   selected, baseline)
@@ -420,18 +429,18 @@ def score_execution_predictions(ledger, *, decision_id: str, scored_at: datetime
         if terminal is None and completed_checkpoints != set(EXIT_CHECKPOINTS):
             return inserted
         if terminal is not None:
-            selected = float(terminal["current_quote_return"])
+            selected = net_shadow_log_return(terminal["current_quote_return"])
             minutes = int(terminal["checkpoint_minutes"])
             action = f"EXIT_{minutes}M"
             scoring_row = terminal
         else:
-            selected = float(example["final_quote_return"])
+            selected = net_shadow_log_return(example["final_quote_return"])
             minutes = 30
             action = "HOLD_TO_30M"
             scoring_row = exit_rows[-1]
         inserted += _append_score(
             ledger, scoring_row, scored_at, action, minutes, selected,
-            float(example["final_quote_return"]),
+            net_shadow_log_return(example["final_quote_return"]),
         )
     return inserted
 
@@ -486,8 +495,16 @@ def execution_learning_status(ledger) -> dict:
         selected_total = baseline_total = 0.0
         points, result_rows = [], []
         for row in scores:
-            selected_total += float(row["selected_quote_return"])
-            baseline_total += float(row["baseline_quote_return"])
+            baseline = net_shadow_log_return(row["baseline_quote_return"])
+            if identity == LOT_IDENTITY:
+                size = float(str(row["selected_action"]).removesuffix("X"))
+                selected = float(row["selected_quote_return"]) - (
+                    size * (float(row["baseline_quote_return"]) - baseline)
+                )
+            else:
+                selected = net_shadow_log_return(row["selected_quote_return"])
+            selected_total += selected
+            baseline_total += baseline
             point = {
                 "time": row["scored_at"], "model_version": row["model_version"],
                 "selected_cumulative_return": selected_total,
@@ -504,9 +521,9 @@ def execution_learning_status(ledger) -> dict:
                 "model_version": row["model_version"],
                 "direction": row["direction"], "selected_action": row["selected_action"],
                 "exit_minutes": row["exit_minutes"],
-                "selected_quote_return": row["selected_quote_return"],
-                "baseline_quote_return": row["baseline_quote_return"],
-                "delta_quote_return": row["delta_quote_return"],
+                "selected_quote_return": selected,
+                "baseline_quote_return": baseline,
+                "delta_quote_return": selected - baseline,
             })
         training_decisions = int(latest["training_decisions"]) if latest else 0
         chart_points = _bounded_execution_curve(points)

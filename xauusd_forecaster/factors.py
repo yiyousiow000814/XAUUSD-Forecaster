@@ -32,8 +32,11 @@ NEWS_FEATURES = (
 )
 
 NEWS_PROMPT_VERSIONS = (
+    "news-json-v14-material-event-evidence",
+    "news-json-v13-event-claims",
+    "news-json-v12-gemini-story-identity",
+    "news-json-v11-gemini-story-subjects",
     "news-json-v10-controlled-category-zh",
-    "news-json-v9-local-display-recovery",
 )
 NEWS_MODEL_VERSIONS = (
     "gemini-3.5-flash-lite",

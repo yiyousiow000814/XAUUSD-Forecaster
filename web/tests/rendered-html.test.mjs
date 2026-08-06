@@ -64,7 +64,7 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /api\/news-content\?key=/);
   assert.match(source, /列表与正文详情分开保存/);
   assert.match(source, /最多回看/);
-  assert.match(source, /更旧新闻仍保留为当时历史样本/);
+  assert.match(source, /迟到发现只保留展示，不进入训练/);
   assert.match(source, /无效样本/);
   assert.match(source, /activeLearningIdentities/);
   assert.match(html, /news-row-placeholder/);
@@ -77,10 +77,13 @@ test("renders the news and decision audit route", async () => {
 test("renders generic story coverage without black empty grid placeholders", () => {
   const page = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(page, /事件家族、实体和首次可见时间/);
-  assert.match(page, /来源角色/);
-  assert.match(page, /候选来源与缺口/);
-  assert.match(page, /不会自动授权来源/);
+  assert.match(page, /主题流/);
+  assert.match(page, /个事件/);
+  assert.match(page, /市场反应流/);
+  assert.match(page, /新事件候选/);
+  assert.match(page, /DEPLOYMENT DRIFT/);
+  assert.match(page, /未归属事件/);
+  assert.match(page, /不进入 Ridge/);
   assert.match(css, /\.story-grid[^}]+background:#aaa59a/);
   assert.match(css, /html \{ background:var\(--paper\)/);
   assert.doesNotMatch(css, /\.story-grid[^}]+background:var\(--ink\)/);

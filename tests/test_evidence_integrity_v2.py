@@ -11,6 +11,7 @@ import pytest
 
 from xauusd_forecaster.evidence_v2 import V2_SCHEMA, install_v2_schema
 from xauusd_forecaster.executable_label import build_executable_label_v2
+from xauusd_forecaster.execution_costs import net_shadow_log_return
 from xauusd_forecaster.forward_ledger import ForwardLedger, canonical_hash
 from xauusd_forecaster.learning_curves import _bounded_curve, _stage, learning_curve_payload
 from xauusd_forecaster.live_v2 import append_live_outcome_v2
@@ -621,12 +622,14 @@ def test_learning_curve_excludes_predictions_not_after_model_creation(tmp_path) 
     payload = learning_curve_payload(ledger.connection)
     model = payload["models"][0]
     assert model["subsequent_oos_rows"] == 1
-    assert model["cumulative_quote_return"] == pytest.approx(2.0)
+    assert model["cumulative_quote_return"] == pytest.approx(net_shadow_log_return(2.0))
     market_curve = next(
         row for row in payload["identity_curves"] if row["model_identity"] == "MARKET_ONLY"
     )
     assert len(market_curve["points"]) == 1
-    assert market_curve["points"][0]["cumulative_quote_return"] == pytest.approx(2.0)
+    assert market_curve["points"][0]["cumulative_quote_return"] == pytest.approx(
+        net_shadow_log_return(2.0)
+    )
     ledger.close()
 
 
@@ -658,9 +661,13 @@ def test_identity_curve_uses_only_latest_parallel_version_per_decision(tmp_path)
         row for row in payload["identity_curves"] if row["model_identity"] == "MARKET_ONLY"
     )
     assert len(curve["points"]) == 2
-    assert curve["points"][0]["cumulative_quote_return"] == pytest.approx(1.5)
+    assert curve["points"][0]["cumulative_quote_return"] == pytest.approx(
+        net_shadow_log_return(1.5)
+    )
     assert curve["points"][0]["model_version"] == "market-old"
-    assert curve["points"][1]["cumulative_quote_return"] == pytest.approx(3.5)
+    assert curve["points"][1]["cumulative_quote_return"] == pytest.approx(
+        net_shadow_log_return(1.5) + net_shadow_log_return(2.0)
+    )
     assert curve["points"][1]["model_version"] == "market-new"
     models = {row["model_version"]: row for row in payload["models"]}
     assert models["market-new"]["lifecycle_status"] == "LATEST"
@@ -670,7 +677,9 @@ def test_identity_curve_uses_only_latest_parallel_version_per_decision(tmp_path)
         row for row in payload["rolling_processes"] if row["model_identity"] == "MARKET_ONLY"
     )
     assert rolling["oos_rows"] == 2
-    assert rolling["cumulative_quote_return"] == pytest.approx(3.5)
+    assert rolling["cumulative_quote_return"] == pytest.approx(
+        net_shadow_log_return(1.5) + net_shadow_log_return(2.0)
+    )
     ledger.close()
 
 
@@ -697,9 +706,13 @@ def test_learning_curves_expose_true_fixed_30m_non_overlapping_evaluation(tmp_pa
         if row["model_identity"] == "MARKET_ONLY"
     )
     assert group["cadence_metrics"]["EVERY_5M"]["oos_rows"] == 3
-    assert group["cadence_metrics"]["EVERY_5M"]["cumulative_quote_return"] == pytest.approx(2.5)
+    assert group["cadence_metrics"]["EVERY_5M"]["cumulative_quote_return"] == pytest.approx(
+        sum(net_shadow_log_return(value) for value in (1.0, 2.0, -0.5))
+    )
     assert group["cadence_metrics"]["FIXED_30M"]["oos_rows"] == 1
-    assert group["cadence_metrics"]["FIXED_30M"]["cumulative_quote_return"] == pytest.approx(2.0)
+    assert group["cadence_metrics"]["FIXED_30M"]["cumulative_quote_return"] == pytest.approx(
+        net_shadow_log_return(2.0)
+    )
 
     curve = next(
         row for row in payload["identity_curves"] if row["model_identity"] == "MARKET_ONLY"
@@ -707,7 +720,9 @@ def test_learning_curves_expose_true_fixed_30m_non_overlapping_evaluation(tmp_pa
     assert len(curve["points"]) == 3
     assert len(curve["points_30m"]) == 1
     assert curve["points_30m"][0]["decision_time"] == (created + timedelta(minutes=30)).isoformat()
-    assert curve["points_30m"][0]["cumulative_quote_return"] == pytest.approx(2.0)
+    assert curve["points_30m"][0]["cumulative_quote_return"] == pytest.approx(
+        net_shadow_log_return(2.0)
+    )
     ledger.close()
 
 

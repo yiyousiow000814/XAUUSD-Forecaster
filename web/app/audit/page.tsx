@@ -91,18 +91,30 @@ type NewsEvidence = {
   publisher_domains: string[];
   reason_codes: string[];
 };
+type StoryEvent = { event_key: string; first_seen: string; headline: string;
+  event_time: string; actor: string; action: string; object: string; location: string;
+  claim_status: string; materiality: number; evidence_grade: string;
+  independent_publishers: number; independent_organizations: number; evidence_documents: number;
+  document_kinds: string[]; source_published_time: string | null;
+  collector_first_seen_time: string; archival: boolean; relation: string };
 type Storyline = {
-  storyline_id: string; title: string; family: string; family_label: string; state: string; event_count: number;
-  reliable_event_count: number; latest_change: string; last_updated: string;
-  topics: string[]; model_permission: "DISPLAY_ONLY";
+  storyline_id: string; episode_key: string; title: string; state: string; event_count: number;
+  evidence_document_count: number; reliable_event_count: number; latest_change: string; last_updated: string;
+  model_permission: "DISPLAY_ONLY"; independent_confirmation: boolean;
+  story_type: "MATERIAL_EPISODE" | "MARKET_NARRATIVE_CANDIDATE"; archival: boolean;
+  coverage_template: string; coverage_count: number; coverage_total: number;
+  independent_organization_count: number; source_organizations: string[];
   covered_roles: Array<{ key: string; label: string }>;
   missing_roles: Array<{ key: string; label: string }>;
-  coverage_count: number; coverage_total: number;
-  candidate_sources: Array<{ candidate: string; suggested_role: string; reason: string; status: string; adapter: string }>;
-  state_deltas: Record<string, number>;
-  timeline: Array<{ event_key: string; first_seen: string; headline: string;
-    evidence_grade: string; independent_publishers: number; relation: string; topics: string[] }>;
+  timeline: StoryEvent[];
+  market_reactions: StoryEvent[];
+  commentary: StoryEvent[];
+  background: StoryEvent[];
 };
+type ThemeStream = { theme_id: string; title: string; item_count: number; last_updated: string; latest_headline: string; model_permission: "DISPLAY_ONLY" };
+type EventCandidate = { candidate_id: string; episode_key: string; headline: string; first_seen: string; event_time: string; evidence_documents: number; independent_publishers: number; archival: boolean; reason: string; model_permission: "DISPLAY_ONLY" };
+type MarketReactionStream = { stream_id: string; title: string; item_count: number; last_updated: string; latest_headline: string; model_permission: "DISPLAY_ONLY" };
+type UnassignedStoryEvent = { event_key: string; headline: string; first_seen: string; record_kind: string; reason: string };
 
 type LearningModel = {
   model_version: string;
@@ -160,7 +172,7 @@ type CadenceMetric = { oos_rows: number; distinct_days: number; cumulative_quote
 
 type Payload = {
   generated_at: string;
-  system: { online: boolean; source_of_truth: string; sites_mirror: string };
+  system: { online: boolean; source_of_truth: string; sites_mirror: string; deployment?: { runtime_git_sha: string | null; expected_git_sha: string | null; runtime_dirty: boolean; status: string; storyline_policy_version: string; payload_schema_version: string; payload_generated_at: string; source_database_epoch: string | null } };
   counts: Record<string, number>;
   annotation_queue: {
     ready: number;
@@ -183,7 +195,14 @@ type Payload = {
     topics: Record<string, number>;
   };
   storylines: Storyline[];
-  storyline_summary: { policy_version: string; total: number; display_only: boolean };
+  market_narrative_candidates: Storyline[];
+  archived_storylines: Storyline[];
+  archived_story_event_candidates: EventCandidate[];
+  story_event_candidates: EventCandidate[];
+  market_reaction_streams: MarketReactionStream[];
+  theme_streams: ThemeStream[];
+  unassigned_story_events: UnassignedStoryEvent[];
+  storyline_summary: { policy_version: string; legacy_policy_status: string; total: number; market_narrative_total: number; archived_total: number; candidate_total: number; market_stream_total: number; theme_total: number; unassigned_total: number; display_only: boolean };
   news_feature_policy: {
     maximum_current_age_hours: number;
     freshness_half_life_hours: number;
@@ -348,6 +367,14 @@ const EVIDENCE_REASON_LABELS: Record<string, string> = {
   EVIDENCE_SINGLE_RELIABLE: "单一可靠来源",
   EVIDENCE_DISCOVERY_ONLY: "线索来源",
 };
+const VISIBILITY_LABELS: Record<string, string> = {
+  MODEL_VISIBLE: "可用于模型",
+  NOT_YET_PARSED: "等待 Gemini",
+  WAITING_CONTENT: "等待正文",
+  DISPLAY_ONLY: "仅供查看",
+  COLLECT_ONLY: "仅收集",
+  MODEL_INELIGIBLE: "不可用于模型",
+};
 
 function NewsRow({ row, keyCount, requestsPerMinute }: {
   row: News; keyCount: number; requestsPerMinute: number;
@@ -383,7 +410,7 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
   };
   return <details className="news-row" onToggle={loadDetail}>
     <summary>
-      <div className="news-row-stamp"><b>{row.category}</b><time title="系统第一次收到这条新闻的时间">收到 {time(row.collector_first_seen_time)}</time><small className={`eligibility-badge eligibility-${row.model_visibility.toLowerCase().replaceAll("_", "-")}`}>{row.model_visibility.replaceAll("_", " ")}</small></div>
+      <div className="news-row-stamp"><b>{row.category}</b><time title="系统第一次收到这条新闻的时间">收到 {time(row.collector_first_seen_time)}</time><small className={`eligibility-badge eligibility-${row.model_visibility.toLowerCase().replaceAll("_", "-")}`}>{VISIBILITY_LABELS[row.model_visibility] ?? row.model_visibility.replaceAll("_", " ")}</small></div>
       <div className="news-row-title"><strong>{row.headline}</strong><small>{SOURCE_LABELS[row.source] ?? row.source.replaceAll("_", " ")}{translated ? " · Gemini 中文标题" : ""}{row.emerging_topic_zh ? ` · ${row.emerging_topic_zh}` : ""}</small></div>
       <div className={`news-row-state state-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
         <b>{row.content_status === "FULL_TEXT" ? `${row.content_characters.toLocaleString()} 字符` : row.source === "google_news_gold_geopolitics" ? "聚合标题" : "等待正文"}</b>
@@ -589,15 +616,26 @@ export default function AuditPage() {
       </section>}
 
       {view === "stories" && <section className="story-desk">
-        <header className="evidence-intro"><div><p className="eyebrow">TEMPORAL EVENT GRAPH · RESEARCH ONLY</p><h2>不再数新闻，<br />而是看故事发生了什么变化。</h2></div><p>系统按<b>事件家族、实体和首次可见时间</b>组装故事，再按来源角色模板检查官方确认、现场影响、独立确认与市场反应。缺少角色时只进入候选来源队列，<b>不会自动授权来源，也不进入 Ridge</b>。</p></header>
+        <header className="evidence-intro"><div><p className="eyebrow">TEMPORAL EVENT GRAPH V5 · RESEARCH ONLY</p><h2>文章、证据文件与现实事件，<br />分别计算。</h2></div><p>同一机构的声明、问答和会议纪要只增加证据文件数，不冒充多个事件或多源确认。事件按现实发生/发布时间排序；系统首次收到时间只用于审计。市场反应、评论和历史回填均与活跃核心故事分开。<b>全部仅供研究展示，不进入 Ridge</b>。</p></header>
+        {payload?.system.deployment && <section className={`deployment-proof ${payload.system.deployment.status === "MATCHED" ? "matched" : "drift"}`}><b>{payload.system.deployment.status === "MATCHED" ? "部署版本一致" : "DEPLOYMENT DRIFT · 当前展示代码未与远端版本完全一致"}</b><span>Runtime {payload.system.deployment.runtime_git_sha?.slice(0, 8) ?? "UNKNOWN"}</span><span>Expected {payload.system.deployment.expected_git_sha?.slice(0, 8) ?? "UNKNOWN"}</span><span>Policy {payload.system.deployment.storyline_policy_version}</span><span>Payload {payload.system.deployment.payload_schema_version}</span><span>生成 {time(payload.system.deployment.payload_generated_at)}</span><span>数据纪元 {time(payload.system.deployment.source_database_epoch)}</span></section>}
+        <section className="theme-streams"><header><h3>主题流</h3><span>不声称构成单一事件</span></header><div>{(payload?.theme_streams ?? []).map(theme => <article key={theme.theme_id}><b>{theme.title}</b><strong>{theme.item_count}</strong><span>{theme.latest_headline}</span><small>{time(theme.last_updated)}</small></article>)}</div></section>
+        <section className="theme-streams market-streams"><header><h3>市场反应流</h3><span>价格反应不冒充核心事实</span></header><div>{(payload?.market_reaction_streams ?? []).map(stream => <article key={stream.stream_id}><b>{stream.title}</b><strong>{stream.item_count}</strong><span>{stream.latest_headline}</span><small>{time(stream.last_updated)}</small></article>)}</div></section>
         <div className="story-grid">{(payload?.storylines ?? []).map(story => <article key={story.storyline_id}>
-          <header><div><span>{story.family_label ? `${story.family_label} · ` : ""}{({ EMERGING:"刚出现", REPORTED:"已有报道", CORROBORATED:"多源确认", OFFICIALLY_CONFIRMED:"官方确认", PHYSICAL_IMPACT_CONFIRMED:"实物影响确认", ESCALATING:"升级中", DEESCALATING:"缓和中", CONTRADICTED:"存在冲突", RESOLVED:"已结束" } as Record<string,string>)[story.state] ?? story.state}</span><h3>{story.title}</h3></div><strong>{story.event_count}<small> 个事件</small></strong></header>
-          <p className="story-latest"><b>最新变化</b>{story.latest_change}</p>
-          <div className="story-meta"><span>可靠证据 {story.reliable_event_count}</span><span>更新 {time(story.last_updated)}</span><span>来源角色 {story.coverage_count ?? 0}/{story.coverage_total ?? 0}</span></div>
-          <section className="story-coverage"><div><b>已覆盖</b>{(story.covered_roles ?? []).length ? story.covered_roles.map(role => <span key={role.key}>{role.label}</span>) : <em>等待 v2 来源角色</em>}</div><div><b>仍缺少</b>{(story.missing_roles ?? []).length ? story.missing_roles.map(role => <span className="missing" key={role.key}>{role.label}</span>) : <em>{story.coverage_total ? "覆盖完整" : "后台同步中"}</em>}</div></section>
-          <ol>{story.timeline.slice().reverse().map(item => <li key={item.event_key}><time>{time(item.first_seen)}</time><b>{({ STARTS:"故事开始", FOLLOWED_BY:"随后发生", CONFIRMS:"可靠来源确认", ESCALATES:"风险升级", DEESCALATES:"风险缓和" } as Record<string,string>)[item.relation] ?? item.relation}</b><span>{item.headline}</span><small>{item.evidence_grade} · {item.independent_publishers} 个独立来源</small></li>)}</ol>
-          {(story.candidate_sources ?? []).length > 0 && <details className="source-candidate-queue"><summary>候选来源与缺口 <b>{story.candidate_sources.length}</b></summary>{story.candidate_sources.map((item, index) => <div key={`${item.candidate}-${index}`}><strong>{item.candidate}</strong><span>{item.reason}</span><small>{item.status} · {item.adapter}</small></div>)}</details>}
+          <header><div><span>{({ EMERGING:"刚出现", REPORTED:"已有报道", CORROBORATED:"独立交叉确认", OFFICIALLY_CONFIRMED:"官方确认", ESCALATING:"升级中", DEESCALATING:"缓和中", CONTRADICTED:"存在冲突" } as Record<string,string>)[story.state] ?? story.state}</span><h3>{story.title}</h3><small>{story.episode_key}</small></div><strong>{story.event_count}<small> 个现实事件</small></strong></header>
+          <p className="story-latest"><b>最新事实变化</b>{story.latest_change}</p>
+          <div className="story-meta"><span>证据文件 {story.evidence_document_count}</span><span>独立组织 {story.independent_organization_count}</span><span>更新 {time(story.last_updated)}</span><span>{story.independent_confirmation ? "跨组织确认" : "尚未跨组织确认"}</span></div>
+          <section className="story-coverage"><div><b>覆盖模板 {story.coverage_template} · {story.coverage_count}/{story.coverage_total}</b>{story.covered_roles.map(role => <span key={role.key}>{role.label}</span>)}{story.missing_roles.map(role => <em className="missing" key={role.key}>仍缺：{role.label}</em>)}</div></section>
+          <ol>{story.timeline.map(item => <li key={item.event_key}><time>{time(item.event_time || item.source_published_time || item.first_seen)}</time><b>{({ STARTS:"故事开始", FOLLOWED_BY:"随后发生", CONFIRMS:"确认", CONTRADICTS:"否认/冲突", RESPONDS_TO:"作出回应", ESCALATES:"实际升级", DEESCALATES:"实际缓和", SUPERSEDES:"修订替代" } as Record<string,string>)[item.relation] ?? item.relation}</b><span>{item.headline}</span><small>{item.actor} · {item.action} · {item.evidence_documents} 份文件 · {item.independent_organizations} 个组织<br />发布 {time(item.source_published_time)} · 系统首次看到 {time(item.collector_first_seen_time)}</small></li>)}</ol>
+          {story.market_reactions.length > 0 && <details className="story-attachments"><summary>市场反应 {story.market_reactions.length}</summary>{story.market_reactions.map(item => <p key={item.event_key}>{item.headline}</p>)}</details>}
+          {story.commentary.length > 0 && <details className="story-attachments"><summary>评论与预测 {story.commentary.length}</summary>{story.commentary.map(item => <p key={item.event_key}>{item.headline}</p>)}</details>}
+          {story.background.length > 0 && <details className="story-attachments"><summary>背景材料 {story.background.length}</summary>{story.background.map(item => <p key={item.event_key}>{item.headline}</p>)}</details>}
         </article>)}</div>
+        {(payload?.storylines.length ?? 0) === 0 && <div className="story-empty"><b>正在建立 V5 事件链</b><span>孤立事实先留在候选区；在形成第二个不同进展前，不会冒充完整故事。</span></div>}
+        <details className="unassigned-story-events" open><summary>市场叙事候选 <b>{payload?.storyline_summary.market_narrative_total ?? 0}</b> <small>只有市场反应或评论，核心现实进展尚未确认</small></summary>{(payload?.market_narrative_candidates ?? []).map(story => <div key={story.storyline_id}><time>{time(story.last_updated)}</time><span><b>{story.title}</b><br />{story.latest_change}</span><small>{story.event_count} 个候选节点 · {story.evidence_document_count} 份文件 · 不进入活跃故事</small></div>)}</details>
+        <details className="unassigned-story-events"><summary>历史档案 <b>{payload?.storyline_summary.archived_total ?? 0}</b> <small>ARCHIVAL_BACKFILL，不显示为当前新事件</small></summary>{(payload?.archived_storylines ?? []).map(story => <div key={story.storyline_id}><time>{time(story.timeline[0]?.event_time)}</time><span><b>{story.title}</b><br />{story.latest_change}</span><small>{story.event_count} 个历史事件 · 系统首次收录 {time(story.last_updated)}</small></div>)}{(payload?.archived_story_event_candidates ?? []).map(item => <div key={item.candidate_id}><time>{time(item.event_time)}</time><span>{item.headline}</span><small>{item.evidence_documents} 份历史证据文件 · 系统首次收录 {time(item.first_seen)}</small></div>)}</details>
+        <details className="unassigned-story-events" open><summary>新事件候选 <b>{payload?.storyline_summary.candidate_total ?? 0}</b> <small>等待第二个不同进展，不会一篇新闻生成一张故事卡</small></summary>{(payload?.story_event_candidates ?? []).map(item => <div key={item.candidate_id}><time>{time(item.first_seen)}</time><span>{item.headline}</span><small>{item.evidence_documents} 篇证据 · {item.independent_publishers} 个独立来源 · {item.episode_key}</small></div>)}</details>
+        <details className="unassigned-story-events"><summary>未归属事件 <b>{payload?.storyline_summary.unassigned_total ?? 0}</b></summary>{(payload?.unassigned_story_events ?? []).map(item => <div key={item.event_key}><time>{time(item.first_seen)}</time><span>{item.headline}</span><small>{item.record_kind} · {item.reason}</small></div>)}</details>
+        {payload?.system.deployment && <footer className="story-policy-footer"><span>Runtime Git SHA <b>{payload.system.deployment.runtime_git_sha ?? "UNKNOWN"}</b></span><span>Story Policy <b>{payload.system.deployment.storyline_policy_version}</b></span></footer>}
       </section>}
 
       {view === "decisions" && <section className="decision-audit">
@@ -642,7 +680,7 @@ export default function AuditPage() {
           <article><span>训练数据代 / 运行</span><strong>{payload?.learning_curves.training_generation_count ?? 0} / {payload?.learning_curves.training_run_count ?? 0}</strong><small>{payload?.learning_curves.recovery_rebuild_count ?? 0} 次只是恢复重建，不算新一组</small></article>
           <article><span>Next fit</span><strong>{payload?.learning_curves.next_training_threshold ?? 96}</strong><small>再有 {(payload?.learning_curves.next_training_threshold ?? 96) - (payload?.training.complete_rows ?? 0)} 条成熟数据训练下一组</small></article>
         </div>
-        <div className="league-cost-note"><b>诚实成本口径</b><span>显示的是 Bid/Ask quote-cost-adjusted return；commission {payload?.learning_curves.commission_status ?? "UNCONFIGURED"}，slippage {payload?.learning_curves.slippage_status ?? "UNAVAILABLE_SHADOW"}，因此不是 net PnL。</span></div>
+        <div className="league-cost-note"><b>成本口径</b><span>收益已使用可执行 Bid/Ask（含 spread），并按入场、退出两边各 $30 / 百万美元成交额扣除 commission；slippage 暂按 0 的 Shadow 假设计算。仍未包含账户实际成交偏差，因此不是实盘 PnL。</span></div>
         <section className="graph-launch">
           <div><span>ONE TIMELINE · THREE VIEWS</span><h3>曲线、每组成绩与 K 线放在同一弹窗。</h3><p>主页面保持紧凑；点开后可切换长期累计、每个训练组的独立成绩，以及 XAUUSD K线决策。</p></div>
           <button type="button" onClick={() => { setGraphStartTab("curve"); setGraphOpen(true); }}>打开交互图表 ↗</button>
