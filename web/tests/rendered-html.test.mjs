@@ -91,6 +91,11 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /Ridge 学习的是未来30分钟连续收益/);
   assert.match(modal, /Long、Wait=0、Short 三种结果都会被评分/);
   assert.match(modal, /不是预测未来5分钟/);
+  assert.match(modal, /previousIncluded = Number.POSITIVE_INFINITY/);
+  assert.match(modal, /const xAtIndex/);
+  assert.match(modal, /条模型评分/);
+  assert.match(modal, /30分钟结果/);
+  assert.doesNotMatch(modal, /三种动作同一30分钟结果/);
   assert.doesNotMatch(modal, /30分钟退出线/);
 });
 
@@ -101,6 +106,7 @@ test("explains U5 as a risk scale rather than a probability", () => {
   assert.match(source, /它不是亏损概率，也不代表方向/);
   assert.match(source, /research_forecast/);
   assert.match(source, /安全基准仍是 WAIT/);
+  assert.match(readFileSync(new URL("../app/globals.css", import.meta.url), "utf8"), /timeline-panel \{ grid-column:1; grid-row:1 \/ span 3; \}/);
 });
 
 test("keeps live quotes online between five-minute decisions", async () => {
