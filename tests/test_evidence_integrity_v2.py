@@ -594,3 +594,11 @@ def test_uncalibrated_prediction_has_no_lcb(tmp_path) -> None:
     assert row["effective_action"] == "WAIT"
     assert row["calibration_status"] == "UNCALIBRATED"
     ledger.close()
+
+
+def test_recommendation_requires_positive_conservative_lower_bound() -> None:
+    assert inference_v2._recommended_action(0.30, -0.40, None) == "WAIT"
+    assert inference_v2._recommended_action(0.30, -0.40, 0.35) == "WAIT"
+    assert inference_v2._recommended_action(0.30, -0.40, 0.20) == "LONG"
+    assert inference_v2._recommended_action(-0.40, 0.30, 0.20) == "SHORT"
+    assert inference_v2._recommended_action(0.30, 0.30, 0.20) == "WAIT"

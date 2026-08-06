@@ -8,6 +8,8 @@ type Model = {
   model_identity: string; model_version: string; lifecycle_status: string;
   subsequent_oos_rows: number; cumulative_quote_return: number;
   profit_factor_quote_adjusted: number | null; distinct_days: number;
+  coverage_rate: number | null; average_oracle_regret: number | null;
+  wait_opportunity_cost: number;
 };
 type Candle = { time: string; open: number; high: number; low: number; close: number; ticks: number };
 type Decision = {
@@ -15,6 +17,8 @@ type Decision = {
   model_identity: string; recommended_action: string; prediction_status: string;
   outcome_status: string; value_quote_return: number | null;
   long_quote_return: number | null; short_quote_return: number | null;
+  predicted_direction_u5: number | null; ev_long_u5: number | null;
+  ev_short_u5: number | null; lcb_long_u5: number | null; lcb_short_u5: number | null;
 };
 type TrainingMarker = { model_identity: string; model_version: string; created_at: string; training_rows: number };
 
@@ -91,7 +95,7 @@ function VersionComparison({ models }: { models: Model[] }) {
       const rows = models.filter(row => row.model_identity === name).sort((a, b) => a.lifecycle_status === "LATEST" ? 1 : b.lifecycle_status === "LATEST" ? -1 : 0);
       return <article key={name}><h3>{LABELS[name] ?? name}</h3><div>{rows.map(row => <section key={row.model_version} className={row.lifecycle_status === "LATEST" ? "is-latest" : ""}>
         <span>{row.lifecycle_status === "LATEST" ? "最新版" : "前一版"}</span>
-        {row.subsequent_oos_rows ? <><strong>{pct(row.cumulative_quote_return)}</strong><small>{row.subsequent_oos_rows} 条 · {row.distinct_days} 日 · PF {row.profit_factor_quote_adjusted?.toFixed(2) ?? "—"}</small></> : <><strong className="pending-score">等待结果</strong><small>尚无创建后30分钟成熟样本</small></>}
+        {row.subsequent_oos_rows ? <><strong>{pct(row.cumulative_quote_return)}</strong><small>{row.subsequent_oos_rows} 条 · {row.distinct_days} 日 · PF {row.profit_factor_quote_adjusted?.toFixed(2) ?? "—"}</small><small>出方向 {(100 * (row.coverage_rate ?? 0)).toFixed(1)}% · 平均机会损失 {pct(row.average_oracle_regret ?? 0)}</small></> : <><strong className="pending-score">等待结果</strong><small>尚无创建后30分钟成熟样本</small></>}
       </section>)}</div></article>;
     })}
   </div>;
@@ -141,7 +145,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: { candles: Ca
   const timeLabel = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
   const resultLabel = (value: number | null) => value == null ? "等待30分钟结果" : pct(value);
   return <div className="chart-block market-chart-block">
-    <div className="chart-caption"><div><b>XAUUSD 5分钟 K线＋30分钟预测结果</b><span>三角形是预测，不代表真实下单。点击一个三角形，查看它在30分钟后的结果。</span></div><select value={identity} onChange={event => { setIdentity(event.target.value); setSelected(null); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></div>
+    <div className="chart-caption"><div><b>每根K线5分钟 · 每个箭头预测未来30分钟</b><span>不是预测未来5分钟。系统每5分钟重新判断一次，箭头的成绩统一在30分钟后结算；不代表真实下单。</span></div><select value={identity} onChange={event => { setIdentity(event.target.value); setSelected(null); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></div>
     <div className="market-controls" aria-label="K线图显示控制">
       <label>窗口<select value={hours} onChange={event => setHours(Number(event.target.value))}><option value="3">最近3小时</option><option value="6">最近6小时</option><option value="12">最近12小时</option><option value="24">最近24小时</option></select></label>
       <label>密度<select value={dense ? "all" : "clear"} onChange={event => setDense(event.target.value === "all")}><option value="clear">清晰：每30分钟1次</option><option value="all">全部：每5分钟预测</option></select></label>
@@ -162,10 +166,21 @@ function MarketChart({ market, identity, setIdentity }: { market?: { candles: Ca
     <div className="chart-legend"><span><i className="long-dot" />看多预测</span><span><i className="short-dot" />看空预测</span>{showWait && <span><i className="wait-dot" />等待，不持仓</span>}{showTraining && <span><i className="train-dot" />模型换版</span>}</div>
     <div className="decision-reader" aria-live="polite">{selected ? <>
       <div><small>一次完整观察</small><strong>{timeLabel(selected.decision_time)} 预测 {selected.recommended_action}</strong><span>→ {timeLabel(selected.exit_time)} 固定观察结果</span></div>
-      {selected.recommended_action === "WAIT" ? <div><small>WAIT 没有模拟持仓</small><strong>反事实：Long {resultLabel(selected.long_quote_return)}</strong><span>Short {resultLabel(selected.short_quote_return)}</span></div> : <div><small>Bid/Ask 报价成本后方向结果</small><strong className={(selected.value_quote_return ?? 0) >= 0 ? "positive" : "negative"}>{resultLabel(selected.value_quote_return)}</strong><span>{selected.outcome_status === "VALID" ? "30分钟结果已完成" : "结果尚未成熟"}</span></div>}
+      <DecisionPayoff selected={selected} resultLabel={resultLabel} />
     </> : <><div><small>怎样阅读</small><strong>点击图中的三角形</strong><span>这里只显示一次预测；选中后才标出它对应的30分钟观察窗口。</span></div></>}</div>
-    <p className="wait-explainer"><b>WAIT 怎样产生：</b> Ridge 并不学习一个叫 WAIT 的类别。它先预测未来30分钟的连续价格变化；系统扣除 Bid/Ask 成本后，Long 和 Short 都没有正优势，或数据不健康时，才记录 WAIT。</p>
+    <p className="wait-explainer"><b>WAIT 怎样产生：</b> Ridge 学习的是未来30分钟连续收益，不是硬猜三分类。Long、Wait=0、Short 三种结果都会被评分；只有最佳方向扣除 Bid/Ask 成本与95%不确定性后仍为正，才显示方向，否则 WAIT。系统同时记录 WAIT 错过的事后机会，但不会用惩罚强迫开仓。</p>
   </div>;
+}
+
+function DecisionPayoff({ selected, resultLabel }: { selected: Decision; resultLabel: (value: number | null) => string }) {
+  if (selected.outcome_status !== "VALID") return <div><small>三种动作同场评分</small><strong>等待30分钟结果</strong><span>成熟后显示 Long / Wait / Short 的成本后百分比。</span></div>;
+  const longValue = selected.long_quote_return ?? 0;
+  const shortValue = selected.short_quote_return ?? 0;
+  const choices = [{ name: "LONG", value: longValue }, { name: "WAIT", value: 0 }, { name: "SHORT", value: shortValue }];
+  const best = choices.reduce((winner, choice) => choice.value > winner.value ? choice : winner);
+  const policy = selected.recommended_action === "LONG" ? longValue : selected.recommended_action === "SHORT" ? shortValue : 0;
+  const regret = best.value - policy;
+  return <div><small>三种动作同一30分钟结果</small><strong>Long {resultLabel(longValue)} · Wait ±0.000% · Short {resultLabel(shortValue)}</strong><span>事后最佳 {best.name} · 本次建议 {selected.recommended_action} · 机会损失 {pct(regret)}</span></div>;
 }
 
 function Empty({ text }: { text: string }) { return <div className="graph-empty"><strong>等待可验证数据</strong><p>{text}</p></div>; }

@@ -102,6 +102,9 @@ type LearningModel = {
   interval_width: number | null;
   calibration_status: string;
   wait_rate: number | null;
+  coverage_rate: number | null;
+  average_oracle_regret: number | null;
+  wait_opportunity_cost: number;
   long_frequency: number;
   short_frequency: number;
   active_rank: number | null;
@@ -199,7 +202,19 @@ type Payload = {
   }>;
   market_chart: {
     candles: Array<{ time: string; open: number; high: number; low: number; close: number; ticks: number }>;
-    decisions: Array<{ source_decision_id: string; decision_time: string; exit_time: string; model_identity: string; recommended_action: string; outcome_status: string }>;
+    decisions: Array<{
+      source_decision_id: string;
+      decision_time: string;
+      exit_time: string;
+      model_identity: string;
+      recommended_action: string;
+      outcome_status: string;
+      predicted_direction_u5: number | null;
+      ev_long_u5: number | null;
+      ev_short_u5: number | null;
+      lcb_long_u5: number | null;
+      lcb_short_u5: number | null;
+    }>;
     training_markers: Array<{ model_identity: string; model_version: string; created_at: string; training_rows: number }>;
   };
 };

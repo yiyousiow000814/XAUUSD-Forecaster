@@ -282,7 +282,9 @@ def _recent_market_chart(
         """WITH ranked AS (
              SELECT p.source_decision_id,p.decision_time,p.model_identity,
                     p.model_version,p.recommended_action,p.effective_action,
-                    p.prediction_status,s.value_quote_return,
+                    p.prediction_status,p.predicted_direction_u5,
+                    p.ev_long_u5,p.ev_short_u5,p.lcb_long_u5,p.lcb_short_u5,
+                    s.value_quote_return,
                     o.long_quote_return,o.short_quote_return,o.outcome_status,
                     row_number() OVER (
                       PARTITION BY p.source_decision_id,p.model_identity

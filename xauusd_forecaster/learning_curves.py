@@ -41,6 +41,33 @@ def _metrics(values: list[float], days: dict[str, float]) -> dict:
             "sharpe_quote_adjusted": sharpe}
 
 
+def _selection_metrics(rows) -> dict:
+    """Score abstention without using hindsight to choose a live action."""
+    if not rows:
+        return {
+            "coverage_rate": None, "average_oracle_regret": None,
+            "wait_opportunity_cost": 0.0,
+        }
+    regrets = []
+    wait_opportunity_cost = 0.0
+    directional = 0
+    for row in rows:
+        long_value = float(row["long_quote_return"] or 0.0)
+        short_value = float(row["short_quote_return"] or 0.0)
+        oracle = max(0.0, long_value, short_value)
+        policy = float(row["value_quote_return"] or 0.0)
+        regrets.append(oracle - policy)
+        if row["recommended_action"] == "WAIT":
+            wait_opportunity_cost += oracle
+        else:
+            directional += 1
+    return {
+        "coverage_rate": directional / len(rows),
+        "average_oracle_regret": statistics.mean(regrets),
+        "wait_opportunity_cost": wait_opportunity_cost,
+    }
+
+
 def learning_curve_payload(connection) -> dict:
     epoch = connection.execute(
         "SELECT * FROM evaluation_epochs ORDER BY created_at DESC LIMIT 1"
@@ -73,9 +100,11 @@ def learning_curve_payload(connection) -> dict:
             """SELECT p.decision_time,p.recommended_action,p.interval_width,
                       p.calibration_status,p.calibration_rows,p.calibration_effective_blocks,
                       p.calibration_distinct_days,s.value_quote_return,s.squared_error,
-                      s.direction_correct,s.high_confidence_error
+                      s.direction_correct,s.high_confidence_error,
+                      o.long_quote_return,o.short_quote_return
             FROM predictions_v2 p LEFT JOIN prediction_scores_v2 s
               USING(source_decision_id,model_version)
+            LEFT JOIN derived_outcomes o USING(source_decision_id)
             WHERE p.model_version=? AND p.decision_time>?
             ORDER BY p.decision_time""", (update["model_version"], update["created_at"])
         ).fetchall()
@@ -127,6 +156,7 @@ def learning_curve_payload(connection) -> dict:
             "lifecycle_status": (
                 "LATEST" if active_rank == 1 else "PREVIOUS" if active_rank == 2 else "ARCHIVED"
             ),
+            **_selection_metrics(scored),
             **metrics,
         })
 
@@ -142,6 +172,7 @@ def learning_curve_payload(connection) -> dict:
                        p.calibration_rows,p.calibration_effective_blocks,
                        p.calibration_distinct_days,s.value_quote_return,s.squared_error,
                        s.direction_correct,s.high_confidence_error,
+                       o.long_quote_return,o.short_quote_return,
                        row_number() OVER (
                            PARTITION BY p.source_decision_id,p.model_identity
                            ORDER BY u.created_at DESC,u.model_version DESC
@@ -149,6 +180,7 @@ def learning_curve_payload(connection) -> dict:
                 FROM predictions_v2 p
                 JOIN prediction_scores_v2 s USING(source_decision_id,model_version)
                 JOIN model_updates_v2 u USING(model_version)
+                LEFT JOIN derived_outcomes o USING(source_decision_id)
                 WHERE p.model_identity=? AND p.decision_time>u.created_at
             )
             SELECT * FROM ranked WHERE version_rank=1 ORDER BY decision_time""",
@@ -170,6 +202,7 @@ def learning_curve_payload(connection) -> dict:
                 latest["calibration_effective_blocks"] if latest else 0
             ),
             "calibration_distinct_days": latest["calibration_distinct_days"] if latest else 0,
+            **_selection_metrics(rows),
             **_metrics(values, daily),
         })
 

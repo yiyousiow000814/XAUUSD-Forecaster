@@ -23,6 +23,23 @@ MODEL_IDENTITIES = frozenset({
 })
 
 
+def _recommended_action(
+    ev_long: float | None, ev_short: float | None, half_width: float | None,
+) -> str:
+    """Apply the frozen conservative-action contract; abstention is not a class."""
+    if ev_long is None or ev_short is None or half_width is None:
+        return "WAIT"
+    lcb_long = ev_long - half_width
+    lcb_short = ev_short - half_width
+    if lcb_long == lcb_short:
+        return "WAIT"
+    if lcb_long > lcb_short and lcb_long > 0:
+        return "LONG"
+    if lcb_short > lcb_long and lcb_short > 0:
+        return "SHORT"
+    return "WAIT"
+
+
 def _active_updates(updates) -> list:
     """Select only the newest and preceding frozen version per identity."""
     counts: dict[str, int] = defaultdict(int)
@@ -166,8 +183,8 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
         quote_cost_estimate_u5 = math.log(ask / bid) * 2.0 / u5
         ev_long = predicted - quote_cost_estimate_u5
         ev_short = -predicted - quote_cost_estimate_u5
-        recommended = "LONG" if ev_long >= ev_short and ev_long > 0 else (
-            "SHORT" if ev_short > 0 else "WAIT"
+        recommended = _recommended_action(
+            ev_long, ev_short, calibration["half_width"],
         )
         _insert_prediction(
             ledger, decision_id=decision_id, decision_time=decision_time, created_at=created_at,
@@ -175,7 +192,10 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
             feature_hash=canonical_hash((market_snapshot["output_hash"], news_snapshot["output_hash"])),
             predicted=predicted, news_residual=news_residual,
             ev_long=ev_long, ev_short=ev_short, calibration=calibration,
-            recommended=recommended, status=("READY" if calibration["status"] == "CALIBRATED" else "PROVISIONAL"),
+            recommended=recommended, status=(
+                "READY" if calibration["status"] == "CALIBRATED"
+                else "PROVISIONAL_LCB_GATED"
+            ),
         )
         created.append({"model_identity": identity, "model_version": update["model_version"],
                         "recommended_action": recommended, "calibration_status": calibration["status"]})

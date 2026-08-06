@@ -88,7 +88,9 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /WAIT 仍记录反事实/);
   assert.match(modal, /清晰：每30分钟1次/);
   assert.match(modal, /点击图中的三角形/);
-  assert.match(modal, /Ridge 并不学习一个叫 WAIT 的类别/);
+  assert.match(modal, /Ridge 学习的是未来30分钟连续收益/);
+  assert.match(modal, /Long、Wait=0、Short 三种结果都会被评分/);
+  assert.match(modal, /不是预测未来5分钟/);
   assert.doesNotMatch(modal, /30分钟退出线/);
 });
 
