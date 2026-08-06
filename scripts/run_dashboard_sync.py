@@ -38,9 +38,8 @@ NEWS_INDEX_FIELDS = (
 )
 MARKET_DECISION_FIELDS = (
     "source_decision_id", "decision_time", "exit_time", "model_identity",
-    "model_version", "recommended_action", "prediction_status", "outcome_status",
-    "ev_long_u5", "ev_short_u5", "policy_expected_action",
-    "policy_consistent", "frozen_record",
+    "recommended_action", "prediction_status", "outcome_status",
+    "ev_long_u5", "ev_short_u5",
     "outcome_reason_codes",
     "long_quote_return", "short_quote_return",
 )
@@ -149,10 +148,24 @@ def remote_snapshot(payload: dict) -> bytes:
 
     market = snapshot.get("market_chart")
     if isinstance(market, dict) and isinstance(market.get("decisions"), list):
-        market["decisions"] = [
-            {key: row.get(key) for key in MARKET_DECISION_FIELDS}
-            for row in market["decisions"]
-        ]
+        compact_decisions = []
+        for row in market["decisions"]:
+            compact = {key: row.get(key) for key in MARKET_DECISION_FIELDS}
+            for key in ("ev_long_u5", "ev_short_u5"):
+                if compact[key] is not None:
+                    compact[key] = round(float(compact[key]), 6)
+            # The chart only needs a compact frozen-version identifier. Keeping
+            # every full artifact name can add more than 100 KiB per day.
+            if row.get("model_version"):
+                compact["model_version"] = str(row["model_version"])[-12:]
+            if row.get("policy_consistent") is False:
+                compact["policy_consistent"] = False
+                compact["policy_expected_action"] = row.get("policy_expected_action")
+            market_version = row.get("frozen_record")
+            if market_version is False:
+                compact["frozen_record"] = False
+            compact_decisions.append(compact)
+        market["decisions"] = compact_decisions
 
     for name, limit in (
         ("recent_news", REMOTE_NEWS_LIMIT),

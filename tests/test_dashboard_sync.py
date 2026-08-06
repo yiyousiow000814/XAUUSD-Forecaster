@@ -119,12 +119,12 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
     assert detail_rows[0]["payload"]["summary_zh"] == body
     assert len(detail_rows[0]["detail_key"]) == 64
     market_decision = mirrored["market_chart"]["decisions"][0]
-    assert market_decision["model_version"] == "large-unused-field"
+    assert market_decision["model_version"] == "unused-field"
     assert market_decision["ev_long_u5"] == -0.2
     assert market_decision["ev_short_u5"] == 0.1
-    assert market_decision["policy_expected_action"] == "SHORT"
-    assert market_decision["policy_consistent"] is True
-    assert market_decision["frozen_record"] is True
+    assert "policy_expected_action" not in market_decision
+    assert "policy_consistent" not in market_decision
+    assert "frozen_record" not in market_decision
     assert len(mirrored["recent_decisions"]) == module.REMOTE_DECISION_LIMIT
     assert len(mirrored["news_evidence"]) == module.REMOTE_EVIDENCE_LIMIT
     assert mirrored["learning_curves"]["models"] == [
