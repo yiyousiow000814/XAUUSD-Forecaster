@@ -21,6 +21,8 @@ type Decision = {
   decision_id: string;
   decision_time: string;
   effective_action: string;
+  research_action?: string | null;
+  research_status?: string | null;
   data_health: string;
   bid: number | null;
   ask: number | null;
@@ -270,6 +272,7 @@ type Payload = {
       lcb_short_u5: number | null;
     }>;
     training_markers: Array<{ model_identity: string; training_dataset_hash: string; created_at: string; training_rows: number; artifact_count: number }>;
+    decision_resource?: string;
   };
 };
 
@@ -578,9 +581,9 @@ export default function AuditPage() {
             ?? row.predictions.find(item => item.model_identity === "FULL");
           return <details className="decision-row" key={row.decision_id}>
             <summary>
-              <time>{time(row.decision_time)}</time><b>{row.effective_action}</b>
+              <time>{time(row.decision_time)}</time><b>{row.research_action ?? full?.recommended_action ?? "WAIT"}</b>
               <span>{number(row.bid)} / {number(row.ask)}</span>
-              <em>Full建议 {full?.recommended_action ?? "WAIT"}</em>
+              <em>大视野研究预测 {full?.recommended_action ?? row.research_action ?? "WAIT"}</em>
               <strong className={row.outcome_status === "VALID" ? "good" : row.outcome_status ? "bad" : "muted"}>{row.outcome_status === "VALID" ? `Long ${percent(row.long_return)} · Short ${percent(row.short_return)}` : row.outcome_status ? `无效样本 · ${outcomeReason(row.outcome_reason_codes)}` : "等待30分钟结果"}</strong>
             </summary>
             <div className="prediction-grid">

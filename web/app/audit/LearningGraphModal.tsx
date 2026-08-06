@@ -7,8 +7,8 @@ type CurvePoint = { decision_time: string; model_version?: string; training_rows
 type Curve = { model_identity: string; points: CurvePoint[] };
 type Candle = { time: string; open: number; high: number; low: number; close: number; ticks: number };
 type Decision = {
-  source_decision_id: string; decision_time: string; exit_time: string;
-  model_identity: string; model_version: string; recommended_action: string; prediction_status: string;
+  source_decision_id: string; decision_time: string; exit_time?: string;
+  model_identity: string; model_version: string; recommended_action: string; prediction_status?: string;
   policy_consistent?: boolean; policy_expected_action?: string; frozen_record?: boolean;
   outcome_status: string; value_quote_return: number | null;
   outcome_reason_codes?: string[];
@@ -53,11 +53,12 @@ export default function LearningGraphModal({
   open, onClose, startTab, curves, market, versionGroups, execution,
 }: {
   open: boolean; onClose: () => void; startTab?: "curve" | "execution"; curves: Curve[];
-  market?: { candles: Candle[]; decisions: Decision[]; training_markers: TrainingMarker[] };
+  market?: { candles: Candle[]; decisions: Decision[]; training_markers: TrainingMarker[]; decision_resource?: string };
   versionGroups: VersionGroup[]; execution?: ExecutionLearning;
 }) {
   const [tab, setTab] = useState<GraphTab>(startTab ?? "curve");
   const [identity, setIdentity] = useState("BROAD_FULL");
+  const [remoteMarket, setRemoteMarket] = useState<typeof market>();
   useEffect(() => {
     if (!open) return;
     const close = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
@@ -65,6 +66,19 @@ export default function LearningGraphModal({
     window.addEventListener("keydown", close);
     return () => { document.body.classList.remove("modal-open"); window.removeEventListener("keydown", close); };
   }, [open, onClose]);
+  useEffect(() => {
+    if (!open || !market?.decision_resource) return;
+    let cancelled = false;
+    fetch(market.decision_resource, { cache: "no-store" })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(body => { if (!cancelled) setRemoteMarket(body); })
+      .catch(() => { /* The status snapshot remains a safe empty fallback. */ });
+    return () => { cancelled = true; };
+  }, [open, market]);
+  const resolvedMarket = market?.decision_resource ? remoteMarket ?? market : market;
   if (!open) return null;
   return <div className="graph-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className={`graph-modal graph-modal-${tab}`} role="dialog" aria-modal="true" aria-labelledby="graph-modal-title">
@@ -78,7 +92,7 @@ export default function LearningGraphModal({
       <div className="graph-modal-body">
         {tab === "curve" && <LongCurve curves={curves} />}
         {tab === "versions" && <VersionLedger groups={versionGroups} />}
-        {tab === "market" && <MarketChart market={market} identity={identity} setIdentity={setIdentity} />}
+        {tab === "market" && <MarketChart market={resolvedMarket} identity={identity} setIdentity={setIdentity} />}
         {tab === "execution" && <ExecutionCharts execution={execution} />}
       </div>
       <footer><b>统一口径：</b> 所有曲线只使用模型创建后真正没见过的 30 分钟结果；WAIT 显示为灰色双向箭头，但收益固定为零，不会被画成一笔虚构交易。</footer>
@@ -184,13 +198,15 @@ function MarketChart({ market, identity, setIdentity }: { market?: { candles: Ca
     Math.abs(Date.parse(row.time) - Date.parse(time)) < Math.abs(Date.parse(candles[best].time) - Date.parse(time)) ? index : best, 0);
   const xTime = (time: string) => Date.parse(time) > end ? 925 : xAtIndex(indexByTime(time));
   const byTime = (time: string) => candles[indexByTime(time)];
-  const hiddenCount = candidateDecisions.length - decisions.length;
+  const hiddenByAction = scopedDecisions.length - candidateDecisions.length;
+  const hiddenByFrequency = candidateDecisions.length - decisions.length;
   const counts = decisions.reduce((total, row) => ({ ...total, [arrowAction(row)]: total[arrowAction(row)] + 1 }), { LONG: 0, SHORT: 0, WAIT: 0 } as Record<string, number>);
   const unhealthyWaits = decisions.filter(row => row.recommended_action === "WAIT" && row.prediction_status === "DATA_UNHEALTHY").length;
   const policyMismatchCount = decisions.filter(row => row.policy_consistent === false).length;
   const activeSelected = selected && decisions.some(row => row.source_decision_id === selected.source_decision_id && row.model_identity === selected.model_identity && row.model_version === selected.model_version) ? selected : decisions.at(-1) ?? null;
   const selectedX = activeSelected ? xTime(activeSelected.decision_time) : null;
-  const selectedExitX = activeSelected ? Math.min(925, xTime(activeSelected.exit_time)) : null;
+  const exitTime = (row: Decision) => row.exit_time ?? new Date(Date.parse(row.decision_time) + 30 * 60_000).toISOString();
+  const selectedExitX = activeSelected ? Math.min(925, xTime(exitTime(activeSelected))) : null;
   const timeLabel = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
   const axisTimeLabel = (value: string) => new Date(value).toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit" });
   const timeTickIndices = Array.from(new Set([0, .25, .5, .75, 1].map(part => Math.round((candles.length - 1) * part))));
@@ -204,7 +220,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: { candles: Ca
       <button className={showShort ? "active" : ""} type="button" onClick={() => setShowShort(value => !value)}>看空 SHORT</button>
       <button className={showWait ? "active" : ""} type="button" onClick={() => setShowWait(value => !value)}>等待 WAIT</button>
       <button className={showTraining ? "active" : ""} type="button" onClick={() => setShowTraining(value => !value)}>模型换版本</button>
-      <span>显示 {decisions.length} 次{hiddenCount > 0 ? ` · 仅视图隐藏 ${hiddenCount} 次5分钟预测` : ""}</span>
+      <span>显示 {decisions.length} 次{hiddenByAction > 0 ? ` · 动作筛选隐藏 ${hiddenByAction} 次` : ""}{hiddenByFrequency > 0 ? ` · 频率收起 ${hiddenByFrequency} 次` : ""}</span>
     </div>
     <div className="prediction-counts"><b>成本后EV较高方向</b><span>看多 {counts.LONG}</span><span>看空 {counts.SHORT}</span><span>等待 {counts.WAIT}{unhealthyWaits ? `（数据异常 ${unhealthyWaits}）` : ""}</span>{policyMismatchCount > 0 && <span className="negative">历史规则不一致 {policyMismatchCount}（原记录保留）</span>}</div>
     <svg className="learning-svg" viewBox="0 0 960 400" role="img" aria-label="XAUUSD K线与模型决策">
@@ -217,7 +233,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: { candles: Ca
     </svg>
     <div className="chart-legend"><span><i className="long-dot" />看多预测</span><span><i className="short-dot" />看空预测</span>{showWait && <span><i className="wait-dot" />↔ 等待，不持仓</span>}{showTraining && <span><i className="train-dot" />新训练数据代</span>}</div>
     <div className="decision-reader" aria-live="polite">{activeSelected ? <>
-      <div><small>一次完整观察</small><strong>{timeLabel(activeSelected.decision_time)} · 成本后EV较高 {arrowAction(activeSelected)}</strong><span>版本 {activeSelected.model_version} · → {timeLabel(activeSelected.exit_time)} 固定观察结果{activeSelected.policy_consistent === false ? ` · 当时规则校验异常（原记录保留；应为 ${activeSelected.policy_expected_action}）` : ""}</span></div>
+      <div><small>一次完整观察</small><strong>{timeLabel(activeSelected.decision_time)} · 成本后EV较高 {arrowAction(activeSelected)}</strong><span>版本 {activeSelected.model_version} · → {timeLabel(exitTime(activeSelected))} 固定观察结果{activeSelected.policy_consistent === false ? ` · 当时规则校验异常（原记录保留；应为 ${activeSelected.policy_expected_action}）` : ""}</span></div>
       <DecisionPayoff selected={activeSelected} resultLabel={resultLabel} />
     </> : <><div><small>怎样阅读</small><strong>点击图中的三角形</strong><span>这里只显示一次预测；选中后才标出它对应的30分钟观察窗口。</span></div></>}</div>
     <p className="wait-explainer"><b>方向怎样产生：</b> Ridge 预测未来30分钟连续收益。系统分别计算 Long 与 Short 的 Bid/Ask 成本后 EV，较高的一边只要大于0就记录为 Shadow 方向；两边都不大于0、数值相同或数据异常才 WAIT。95%下界仍用于观察不确定性和未来晋升，但不再封锁早期 Shadow 方向。U5 只是统一波动尺度，不是 WAIT 开关。</p>
