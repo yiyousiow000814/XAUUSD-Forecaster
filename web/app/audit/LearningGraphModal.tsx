@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 
 type CurvePoint = { decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number };
 type Curve = { model_identity: string; points: CurvePoint[] };
@@ -27,6 +28,7 @@ type VersionGroup = {
 type ExecutionModel = {
   model_identity: string; training_rows: number; training_decisions?: number;
   training_observations?: number; predictions: number; scores: number;
+  action_counts?: Record<string, number>;
   evaluation: {
     score_count: number; selected_cumulative_return?: number;
     baseline_cumulative_return?: number; delta_cumulative_return?: number; unit: string;
@@ -246,34 +248,40 @@ function ExecutionCharts({ execution }: { execution?: ExecutionLearning }) {
   return <section className="execution-charts">
     <header><span>CAUSAL EXECUTION OOS</span><h3>跟随同一个 Live 方向，逐笔看仓位与退出。</h3><p>方向固定来自 {execution?.source_model_label ?? "黄金＋大视野新闻 Ridge"}。WAIT 不创建仓位；历史结果只训练，下面只评分模型上线后真正发生的未来位置。</p></header>
     <div className="execution-scorecards">
-      <article><small>仓位倍率 Ridge</small><strong>{lot?.evaluation.score_count ?? 0} 个未来位置</strong><span>历史训练决策 {lot?.training_decisions ?? 0} 个 · 不是虚构成交数</span></article>
-      <article><small>Exit Ridge</small><strong>{exit?.evaluation.score_count ?? 0} 个未来位置</strong><span>历史训练决策 {exit?.training_decisions ?? 0} 个 · {exit?.training_observations ?? 0} 个路径检查点</span></article>
+      <article><small>仓位倍率 Ridge</small><strong>{lot?.evaluation.score_count ?? 0} 笔已评分</strong><span>每个方向位置只比较 0.5x / 1.0x / 2.0x</span></article>
+      <article><small>Exit Ridge</small><strong>{exit?.evaluation.score_count ?? 0} 笔已评分</strong><span>{exit?.predictions ?? 0} 次途中检查 · 提前退出 {exit?.action_counts?.EXIT ?? 0} 次 · 继续持有 {exit?.action_counts?.HOLD ?? 0} 次</span></article>
     </div>
+    {(exit?.predictions ?? 0) > 0 && (exit?.action_counts?.EXIT ?? 0) === 0 && <p className="execution-callout"><b>目前没有提前退出。</b> Exit Ridge 已正常检查，但每次预测的“从当前继续持有到30分钟”的收益都大于零，因此全部选择继续持有。这是当前模型结果，不是页面遗漏。</p>}
     <ExecutionLineChart title="仓位倍率：模型选择 vs 固定 1.0x" subtitle="每个点是一笔冻结 Live 方向产生的未来位置；0.5x / 1.0x / 2.0x 只改变同一方向的倍率。" points={lot?.evaluation.points ?? []} firstKey="selected_cumulative_return" secondKey="baseline_cumulative_return" firstLabel="Ridge 倍率" secondLabel="固定 1.0x" format={pct} />
     <ExecutionLineChart title="退出：顺序 Exit Ridge vs 固定持有30分钟" subtitle="每个位置从5分钟开始依次检查；一旦 EXIT，后续检查停止。曲线是整段位置收益，不再累加重复检查点。" points={exit?.evaluation.points ?? []} firstKey="selected_cumulative_return" secondKey="baseline_cumulative_return" firstLabel="顺序 Exit Ridge" secondLabel="固定30分钟" format={pct} />
-    <ExecutionResultList lot={lot} exit={exit} />
+    <ExecutionResultLists lot={lot} exit={exit} />
   </section>;
 }
 
-function ExecutionResultList({ lot, exit }: { lot?: ExecutionModel; exit?: ExecutionModel }) {
+function ExecutionResultLists({ lot, exit }: { lot?: ExecutionModel; exit?: ExecutionModel }) {
   const lotRows = lot?.evaluation.results ?? [];
   const exitRows = exit?.evaluation.results ?? [];
-  const byDecision = new Map(exitRows.map(row => [String(row.decision_id), row]));
-  const rows = lotRows.slice().reverse().slice(0, 30);
+  const exitIds = new Set(exitRows.map(row => String(row.decision_id)));
+  const incompleteExitPaths = lotRows.filter(row => !exitIds.has(String(row.decision_id))).length;
   const stamp = (value: string | number) => new Date(String(value)).toLocaleString("zh-CN", { hour12:false, month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" });
-  const shortId = (value: string | number) => String(value).replace(/^XAU-/, "").replace(/Z$/, "");
-  return <section className="execution-result-list"><header><div><b>逐笔未来 OOS 清单</b><span>历史用于训练；这里只列模型上线后冻结、成熟且不会改写的结果。</span></div><strong>{lotRows.length} 笔</strong></header>
-    <div className="execution-result-head"><span>预测 → 结算 / 方向</span><span>仓位选择</span><span>退出选择</span><span>模型结果</span><span>固定 1.0x / 30m</span><span>改善</span></div>
-    {rows.map(row => { const exitRow = byDecision.get(String(row.decision_id)); return <article key={String(row.decision_id)}>
-      <span><b>{stamp(row.decision_time ?? row.time)} → {stamp(row.scored_at ?? row.time)}</b><small>{String(row.direction)} · {shortId(row.decision_id)}</small></span>
-      <b>{String(row.selected_action)}</b>
-      <b>{exitRow ? String(exitRow.selected_action).replace("_", " ") : "等待退出 OOS"}</b>
-      <strong>{pct(Number(exitRow?.selected_quote_return ?? row.selected_quote_return))}</strong>
-      <span>{pct(Number(exitRow?.baseline_quote_return ?? row.baseline_quote_return))}</span>
-      <strong className={Number(exitRow?.delta_quote_return ?? row.delta_quote_return) >= 0 ? "positive" : "negative"}>{pct(Number(exitRow?.delta_quote_return ?? row.delta_quote_return))}</strong>
-    </article>})}
-    {!rows.length && <p>新执行模型上线后的第一笔方向还没有走完30分钟。</p>}
+  const actionLabel = (value: string | number) => String(value) === "HOLD_TO_30M" ? "持有到30分钟" : String(value).replace(/^EXIT_(\d+)M$/, "$1分钟提前退出");
+  return <section className="execution-results"><header><span>两套独立实验</span><h4>仓位倍率与退出动作分别评分。</h4><p>两套模型跟随同一个冻结方向，但不会拼成一笔组合成绩。各显示最近 10 笔；完整历史在上方曲线中。</p></header>
+    <div className="execution-result-grid">
+      <ExecutionResultPanel title="仓位倍率 OOS" count={lotRows.length} columns={["预测 / 方向", "选择", "模型收益", "固定1.0x", "差值"]}>
+        {lotRows.slice().reverse().slice(0, 10).map(row => <article key={String(row.decision_id)}><span><b>{stamp(row.decision_time ?? row.time)} · {String(row.direction)}</b><small>结算 {stamp(row.scored_at ?? row.time)}</small></span><b>{String(row.selected_action)}</b><strong>{pct(Number(row.selected_quote_return))}</strong><span>{pct(Number(row.baseline_quote_return))}</span><strong className={Number(row.delta_quote_return) >= 0 ? "positive" : "negative"}>{pct(Number(row.delta_quote_return))}</strong></article>)}
+        {!lotRows.length && <p>还没有成熟的仓位倍率 OOS。</p>}
+      </ExecutionResultPanel>
+      <ExecutionResultPanel title="提前退出 OOS" count={exitRows.length} columns={["预测 / 方向", "退出动作", "模型收益", "持有30m", "差值"]}>
+        {exitRows.slice().reverse().slice(0, 10).map(row => <article key={String(row.decision_id)}><span><b>{stamp(row.decision_time ?? row.time)} · {String(row.direction)}</b><small>结算 {stamp(row.scored_at ?? row.time)}</small></span><b>{actionLabel(row.selected_action)}</b><strong>{pct(Number(row.selected_quote_return))}</strong><span>{pct(Number(row.baseline_quote_return))}</span><strong className={Number(row.delta_quote_return) >= 0 ? "positive" : "negative"}>{pct(Number(row.delta_quote_return))}</strong></article>)}
+        {!exitRows.length && <p>还没有完整且成熟的退出路径。</p>}
+      </ExecutionResultPanel>
+    </div>
+    {incompleteExitPaths > 0 && <p className="execution-path-note">另有 {incompleteExitPaths} 笔已成熟仓位缺少完整的 5/10/15/20/25 分钟因果检查路径，因此退出实验不评分；它们不会再显示成“等待退出”。</p>}
   </section>;
+}
+
+function ExecutionResultPanel({ title, count, columns, children }: { title: string; count: number; columns: string[]; children: ReactNode }) {
+  return <section className="execution-result-panel"><header><b>{title}</b><strong>{count} 笔</strong></header><div className="execution-result-head">{columns.map(value => <span key={value}>{value}</span>)}</div>{children}</section>;
 }
 
 function ExecutionLineChart({ title, subtitle, points, firstKey, secondKey, firstLabel, secondLabel, format }: {

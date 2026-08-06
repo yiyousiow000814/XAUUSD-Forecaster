@@ -117,7 +117,11 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /U5 只是统一波动尺度，不是 WAIT 开关/);
   assert.match(modal, /模型选择 vs 固定 1\.0x/);
   assert.match(modal, /顺序 Exit Ridge vs 固定持有30分钟/);
-  assert.match(modal, /逐笔未来 OOS 清单/);
+  assert.match(modal, /两套独立实验/);
+  assert.match(modal, /仓位倍率 OOS/);
+  assert.match(modal, /提前退出 OOS/);
+  assert.match(modal, /目前没有提前退出/);
+  assert.doesNotMatch(modal, /等待退出 OOS/);
   assert.match(modal, /WAIT 不创建仓位/);
   assert.match(modal, /点击图中的三角形/);
   assert.match(modal, /Ridge 预测未来30分钟连续收益/);
@@ -146,7 +150,7 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(css, /scrollbar-gutter:stable/);
   assert.match(css, /long-curve-block>\.learning-svg \{ height:clamp\(420px,55dvh,600px\)/);
   assert.match(css, /long-curve-block>\.chart-legend \{ margin-top:16px; padding-bottom:10px/);
-  assert.match(modal, /预测 → 结算 \/ 方向/);
+  assert.match(modal, /预测 \/ 方向/);
   assert.match(modal, /row\.decision_time \?\? row\.time/);
   assert.match(modal, /row\.scored_at \?\? row\.time/);
 });

@@ -227,6 +227,14 @@ def test_execution_ridges_follow_one_frozen_live_direction(tmp_path) -> None:
     assert [(row["direction"], row["checkpoint_minutes"]) for row in rows] == [("LONG", 5)]
     assert all(row["prediction_time"] == live_quotes[-1].received_time.isoformat()
                for row in rows)
+    exit_status = {
+        row["model_identity"]: row for row in execution_learning_status(ledger)["models"]
+    }["EXIT_RIDGE"]
+    assert exit_status["action_counts"] == {
+        ledger.connection.execute(
+            "SELECT recommended_action FROM execution_predictions_v2 WHERE model_identity='EXIT_RIDGE'"
+        ).fetchone()[0]: 1
+    }
 
     # Missing later checkpoints are a data gap, not permission to invent a
     # completed HOLD_TO_30M position score.

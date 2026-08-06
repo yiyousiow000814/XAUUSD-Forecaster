@@ -462,6 +462,15 @@ def execution_learning_status(ledger) -> dict:
         predictions = ledger.connection.execute(
             "SELECT count(*) FROM execution_predictions_v2 WHERE model_identity=?", (identity,),
         ).fetchone()[0]
+        action_counts = {
+            str(row["recommended_action"]): int(row["count"])
+            for row in ledger.connection.execute(
+                """SELECT recommended_action,count(*) AS count
+                FROM execution_predictions_v2 WHERE model_identity=?
+                GROUP BY recommended_action""",
+                (identity,),
+            ).fetchall()
+        }
         scores = ledger.connection.execute(
             "SELECT * FROM execution_position_scores_v2 WHERE model_identity=? ORDER BY scored_at",
             (identity,),
@@ -509,6 +518,7 @@ def execution_learning_status(ledger) -> dict:
             "next_training_threshold": training_decisions + RETRAIN_INTERVAL if latest else MIN_TRAINING_DECISIONS,
             "model_version": latest["model_version"] if latest else None,
             "predictions": int(predictions), "scores": len(scores),
+            "action_counts": action_counts,
             "evaluation": {
                 "score_count": len(scores),
                 "selected_cumulative_return": selected_total,
