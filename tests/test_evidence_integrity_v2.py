@@ -61,6 +61,37 @@ def test_install_repairs_invalid_execution_score_foreign_key() -> None:
     assert foreign_keys[0][3:5] == ("model_version", "model_version")
 
 
+def test_execution_status_distinguishes_prediction_and_settlement_times(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    decision = datetime(2026, 8, 6, 10, 50, tzinfo=timezone.utc)
+    settled = datetime(2026, 8, 6, 11, 28, 17, tzinfo=timezone.utc)
+    ledger.connection.execute(
+        "INSERT INTO execution_model_updates_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("lot-model", "LOT_RIDGE", "SHADOW", decision.isoformat(),
+         decision.isoformat(), 50, 50, "dataset", "features", "labels", "{}",
+         "artifact", "BROAD_FULL", "CHALLENGER"),
+    )
+    ledger.connection.execute(
+        "INSERT INTO execution_predictions_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("XAU-20260806T105000Z", "lot-model", "LOT_RIDGE", "BROAD_FULL",
+         "direction-model", "SHORT", 0, decision.isoformat(), decision.isoformat(),
+         0.1, "2.0X", None, "SHADOW_ONLY", "feature-hash"),
+    )
+    ledger.connection.execute(
+        "INSERT INTO execution_position_scores_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        ("XAU-20260806T105000Z", "lot-model", "LOT_RIDGE", settled.isoformat(),
+         "SHORT", "2.0X", 30, 0.004, 0.002, 0.002, "score-hash"),
+    )
+
+    result = execution_learning_status(ledger)["models"][0]["evaluation"]["results"][0]
+
+    assert result["decision_time"] == decision.isoformat()
+    assert result["scored_at"] == settled.isoformat()
+    assert result["time"] == settled.isoformat()
+    assert result["model_version"] == "lot-model"
+    ledger.close()
+
+
 UTC = timezone.utc
 
 

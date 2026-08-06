@@ -65,7 +65,7 @@ export default function LearningGraphModal({
   }, [open, onClose]);
   if (!open) return null;
   return <div className="graph-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <section className="graph-modal" role="dialog" aria-modal="true" aria-labelledby="graph-modal-title">
+    <section className={`graph-modal graph-modal-${tab}`} role="dialog" aria-modal="true" aria-labelledby="graph-modal-title">
       <header><div><span>SHADOW EVIDENCE VISUALIZER</span><h2 id="graph-modal-title">模型与 XAUUSD 时间轴</h2></div><button type="button" onClick={onClose} aria-label="关闭图表">×</button></header>
       <nav aria-label="图表类型">
         <button className={tab === "curve" ? "active" : ""} onClick={() => setTab("curve")}>长期 OOS 曲线</button>
@@ -261,10 +261,11 @@ function ExecutionResultList({ lot, exit }: { lot?: ExecutionModel; exit?: Execu
   const byDecision = new Map(exitRows.map(row => [String(row.decision_id), row]));
   const rows = lotRows.slice().reverse().slice(0, 30);
   const stamp = (value: string | number) => new Date(String(value)).toLocaleString("zh-CN", { hour12:false, month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" });
+  const shortId = (value: string | number) => String(value).replace(/^XAU-/, "").replace(/Z$/, "");
   return <section className="execution-result-list"><header><div><b>逐笔未来 OOS 清单</b><span>历史用于训练；这里只列模型上线后冻结、成熟且不会改写的结果。</span></div><strong>{lotRows.length} 笔</strong></header>
-    <div className="execution-result-head"><span>结算时间 / 方向</span><span>仓位选择</span><span>退出选择</span><span>模型结果</span><span>固定 1.0x / 30m</span><span>改善</span></div>
+    <div className="execution-result-head"><span>预测 → 结算 / 方向</span><span>仓位选择</span><span>退出选择</span><span>模型结果</span><span>固定 1.0x / 30m</span><span>改善</span></div>
     {rows.map(row => { const exitRow = byDecision.get(String(row.decision_id)); return <article key={String(row.decision_id)}>
-      <span><b>{stamp(row.time)}</b><small>{String(row.direction)}</small></span>
+      <span><b>{stamp(row.decision_time ?? row.time)} → {stamp(row.scored_at ?? row.time)}</b><small>{String(row.direction)} · {shortId(row.decision_id)}</small></span>
       <b>{String(row.selected_action)}</b>
       <b>{exitRow ? String(exitRow.selected_action).replace("_", " ") : "等待退出 OOS"}</b>
       <strong>{pct(Number(exitRow?.selected_quote_return ?? row.selected_quote_return))}</strong>

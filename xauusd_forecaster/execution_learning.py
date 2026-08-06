@@ -466,6 +466,14 @@ def execution_learning_status(ledger) -> dict:
             "SELECT * FROM execution_position_scores_v2 WHERE model_identity=? ORDER BY scored_at",
             (identity,),
         ).fetchall()
+        prediction_times = {
+            (row["source_decision_id"], row["model_version"]): row["prediction_time"]
+            for row in ledger.connection.execute(
+                """SELECT source_decision_id,model_version,prediction_time
+                FROM execution_predictions_v2 WHERE model_identity=?""",
+                (identity,),
+            ).fetchall()
+        }
         selected_total = baseline_total = 0.0
         points, result_rows = [], []
         for row in scores:
@@ -478,7 +486,13 @@ def execution_learning_status(ledger) -> dict:
             }
             points.append(point)
             result_rows.append({
-                "decision_id": row["source_decision_id"], "time": row["scored_at"],
+                "decision_id": row["source_decision_id"],
+                "decision_time": prediction_times.get(
+                    (row["source_decision_id"], row["model_version"]),
+                    row["scored_at"],
+                ),
+                "scored_at": row["scored_at"], "time": row["scored_at"],
+                "model_version": row["model_version"],
                 "direction": row["direction"], "selected_action": row["selected_action"],
                 "exit_minutes": row["exit_minutes"],
                 "selected_quote_return": row["selected_quote_return"],

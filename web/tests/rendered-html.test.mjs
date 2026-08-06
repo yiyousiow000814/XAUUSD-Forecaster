@@ -140,9 +140,15 @@ test("uses one modal timeline for model generations and market decisions", () =>
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(css, /height:calc\(100dvh - 16px\)/);
   assert.match(css, /grid-template-rows:auto auto minmax\(0,1fr\) auto/);
+  assert.match(modal, /graph-modal-\$\{tab\}/);
+  assert.match(css, /graph-modal\.graph-modal-curve \{ height:auto; max-height:calc\(100dvh - 16px\); grid-template-rows:auto auto auto auto/);
+  assert.match(css, /graph-modal\.graph-modal-curve>\.graph-modal-body \{ overflow:visible/);
   assert.match(css, /scrollbar-gutter:stable/);
   assert.match(css, /long-curve-block>\.learning-svg \{ height:clamp\(420px,55dvh,600px\)/);
   assert.match(css, /long-curve-block>\.chart-legend \{ margin-top:16px; padding-bottom:10px/);
+  assert.match(modal, /预测 → 结算 \/ 方向/);
+  assert.match(modal, /row\.decision_time \?\? row\.time/);
+  assert.match(modal, /row\.scored_at \?\? row\.time/);
 });
 
 test("explains U5 as a risk scale rather than a probability", () => {
