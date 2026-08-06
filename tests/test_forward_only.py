@@ -556,6 +556,33 @@ def test_broad_free_sources_are_first_seen_versioned_and_rate_limited(tmp_path) 
     assert ledger.count("news_revisions") == 3
 
 
+def test_gdelt_429_uses_exponential_backoff_without_blocking_fallback(tmp_path) -> None:
+    fetched = datetime(2026, 8, 6, 0, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+
+    def rate_limited(_url: str) -> bytes:
+        raise RuntimeError("HTTP Error 429: Too Many Requests")
+
+    failed = collect_gdelt_news(ledger, fetched, rate_limited)
+    assert failed["status"] == "ERROR"
+    assert failed["fallback_source"] == "google_news_gold_context"
+    assert failed["retry_at"] == (fetched + timedelta(hours=2)).isoformat()
+
+    skipped = collect_gdelt_news(
+        ledger, fetched + timedelta(minutes=61),
+        lambda _url: b'{"articles": []}',
+    )
+    assert skipped["status"] == "SKIPPED_BACKOFF"
+    assert skipped["rate_limit_streak"] == 1
+    assert skipped["retry_at"] == (fetched + timedelta(hours=2)).isoformat()
+
+    recovered = collect_gdelt_news(
+        ledger, fetched + timedelta(hours=2),
+        lambda _url: b'{"articles": []}',
+    )
+    assert recovered["status"] == "OK"
+
+
 def test_direct_official_rss_sources_are_bounded_and_rate_limited(tmp_path) -> None:
     fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)

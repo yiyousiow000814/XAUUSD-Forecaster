@@ -43,6 +43,9 @@ type Payload = {
     ev_long_u5: number | null;
     ev_short_u5: number | null;
     interval_width: number | null;
+    decision_time: string;
+    signal_expiry_seconds: number;
+    forecast_horizon_seconds: number;
   } | null;
   u5_context: { percentile: number | null; samples: number; label: string };
   counts: Record<string, number>;
@@ -87,6 +90,7 @@ export default function Home() {
   const [payload, setPayload] = useState<Payload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
 
   const refresh = useCallback(async () => {
     setRefreshing(true);
@@ -112,6 +116,11 @@ export default function Home() {
     };
   }, [refresh]);
 
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const latest = payload?.latest;
   const online = Boolean(payload?.system.online && !error);
   const mid = latest?.bid && latest.ask ? (latest.bid + latest.ask) / 2 : null;
@@ -121,6 +130,23 @@ export default function Home() {
   const forecast = payload?.research_forecast;
   const forecastAction = forecast?.recommended_action ?? "WAIT";
   const riskPercentile = payload?.u5_context.percentile ?? 0;
+  const forecastAge = forecast?.decision_time
+    ? Math.max(0, Math.floor((now - new Date(forecast.decision_time).getTime()) / 1_000))
+    : null;
+  const signalExpiry = forecast?.signal_expiry_seconds ?? 20;
+  const horizon = forecast?.forecast_horizon_seconds ?? 1_800;
+  const signalRemaining = forecastAge === null ? 0 : Math.max(0, signalExpiry - forecastAge);
+  const horizonRemaining = forecastAge === null ? 0 : Math.max(0, horizon - forecastAge);
+  const horizonProgress = forecastAge === null ? 0 : Math.min(100, forecastAge / horizon * 100);
+  const horizonMinutes = Math.floor(horizonRemaining / 60);
+  const horizonSeconds = horizonRemaining % 60;
+  const freshness = !online || forecastAge === null
+    ? "当前不可参考"
+    : signalRemaining > 0
+      ? `新信号 · 参考窗口剩 ${signalRemaining} 秒`
+      : horizonRemaining > 0
+        ? "入场参考窗口已过 · 仅观察结果"
+        : "30分钟评估期已结束";
 
   return (
     <main>
@@ -164,7 +190,13 @@ export default function Home() {
             {forecastAction}
           </div>
           <p>{forecast?.model_identity === "BROAD_FULL" ? "黄金＋大视野新闻" : forecast?.model_identity ?? "等待模型"} · {forecast?.prediction_status ?? "WAITING"}</p>
-          <small>安全基准仍是 WAIT · 不会下单 · 每5分钟更新</small>
+          <div className={`forecast-freshness ${signalRemaining > 0 && online ? "is-current" : "is-observe"}`}>
+            <strong>{freshness}</strong>
+            <small>产生于 {localTime(forecast?.decision_time)} · 已过去 {forecastAge === null ? "—" : `${Math.floor(forecastAge / 60)}分${forecastAge % 60}秒`}</small>
+            <div className="forecast-progress"><i style={{ width: `${horizonProgress}%` }} /></div>
+            <small>{horizonRemaining > 0 ? `距30分钟结果还剩 ${horizonMinutes}分${horizonSeconds}秒` : "30分钟结果窗口已完成"}</small>
+          </div>
+          <small>安全基准仍是 WAIT · 20秒仅指新预测参考窗口 · 固定观察30分钟 · 不会下单</small>
         </div>
       </section>
 

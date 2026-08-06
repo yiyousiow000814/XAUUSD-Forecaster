@@ -12,10 +12,11 @@ type StatusPayload = {
     components: Record<string, { last_success: string | null; age_seconds: number | null; status: string; last_error: string | null }>;
   };
   news_source_health: Array<{
-    source: string; label: string; role: string; health: "HEALTHY" | "DEGRADED" | "ERROR" | "STALE";
+    source: string; label: string; role: string; health: "HEALTHY" | "DEGRADED" | "ERROR" | "STALE" | "FALLBACK_ACTIVE";
     latest_poll_time: string | null; last_success: string | null;
     age_seconds: number | null; last_error_time: string | null; last_error_type: string | null; last_error: string | null;
     poll_count: number; ok_count: number; item_count: number; revision_count: number; full_text_count: number;
+    recovery_mode: string | null; fallback_label: string | null; fallback_health: string | null; next_retry_time: string | null;
   }>;
 };
 
@@ -98,9 +99,9 @@ export default function HealthPage() {
       <div className="source-health-head"><span>来源 / 角色</span><span>状态 / 最近轮询</span><span>证据</span><span>最近错误</span></div>
       {(payload?.news_source_health ?? []).map((item) => <article key={item.source}>
         <div><strong>{item.label}</strong><small>{item.role} · {item.source}</small></div>
-        <div><b className={`source-health-badge health-${item.health.toLowerCase()}`}>{item.health}</b><small>{localTime(item.latest_poll_time)}</small><small>最近成功 {localTime(item.last_success)}</small></div>
+        <div><b className={`source-health-badge health-${item.health.toLowerCase()}`}>{item.health === "FALLBACK_ACTIVE" ? "后备源接管中" : item.health}</b><small>{localTime(item.latest_poll_time)}</small><small>最近成功 {localTime(item.last_success)}</small>{item.next_retry_time ? <small>自动重试 {localTime(item.next_retry_time)}</small> : null}</div>
         <div><strong>{item.item_count || "—"} 篇</strong><small>{item.revision_count || "—"} revisions · 完整正文 {item.full_text_count || "—"}</small><small>轮询 {item.ok_count}/{item.poll_count} 完成</small></div>
-        <div className="source-health-error"><strong>{item.last_error_type ? `${item.health === "HEALTHY" ? "历史异常 · 已恢复" : "当前异常"} · ${item.last_error_type}` : "无已记录异常"}</strong><small>{item.last_error_time ? localTime(item.last_error_time) : ""} {item.last_error ?? "链路轮询正常"}</small></div>
+        <div className="source-health-error"><strong>{item.recovery_mode === "RATE_LIMIT_BACKOFF" ? `GDELT 限流 · ${item.fallback_label} 自动接管` : item.last_error_type ? `${item.health === "HEALTHY" ? "历史异常 · 已恢复" : "当前异常"} · ${item.last_error_type}` : "无已记录异常"}</strong><small>{item.last_error_time ? localTime(item.last_error_time) : ""} {item.last_error ?? "链路轮询正常"}</small>{item.fallback_label ? <small>后备链路：{item.fallback_label} · {item.fallback_health}</small> : null}</div>
       </article>)}
     </section>
     <footer><span>每 15 秒刷新 · SHADOW ONLY</span><span>最后状态：{payload?.generated_at ? localTime(payload.generated_at) : "—"}</span></footer>

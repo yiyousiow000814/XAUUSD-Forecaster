@@ -357,10 +357,36 @@ def collect_gdelt_news(
     fetched_at: datetime,
     fetcher: Callable[[str], bytes] = fetch_url,
 ) -> dict[str, object]:
-    """Collect a small, rate-limited geopolitical gold news window."""
+    """Collect GDELT with an append-only 429 circuit breaker.
+
+    Google News is collected independently, so a GDELT cooldown never stops the
+    geopolitical-news lane.  A successful probe closes the circuit naturally.
+    """
     last_poll = ledger.latest_source_poll_time(GDELT_SOURCE)
-    if last_poll is not None and fetched_at - last_poll < timedelta(minutes=60):
-        return {"source": GDELT_SOURCE, "status": "SKIPPED_INTERVAL"}
+    recent_polls = ledger.connection.execute(
+        """SELECT fetched_time,status,error FROM source_polls
+           WHERE source=? ORDER BY fetched_time DESC,poll_id DESC LIMIT 8""",
+        (GDELT_SOURCE,),
+    ).fetchall()
+    rate_limit_streak = 0
+    for row in recent_polls:
+        if row["status"] == "ERROR" and "429" in str(row["error"] or ""):
+            rate_limit_streak += 1
+        else:
+            break
+    cooldown_minutes = (
+        min(360, 60 * (2 ** min(rate_limit_streak, 3)))
+        if rate_limit_streak else 60
+    )
+    retry_at = last_poll + timedelta(minutes=cooldown_minutes) if last_poll else None
+    if retry_at is not None and fetched_at < retry_at:
+        return {
+            "source": GDELT_SOURCE,
+            "status": "SKIPPED_BACKOFF" if rate_limit_streak else "SKIPPED_INTERVAL",
+            "fallback_source": GOOGLE_GEO_SOURCE if rate_limit_streak else None,
+            "retry_at": retry_at.isoformat(),
+            "rate_limit_streak": rate_limit_streak,
+        }
     poll_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{GDELT_SOURCE}|{fetched_at.isoformat()}"))
     try:
         raw = fetcher(GDELT_URL)
@@ -399,8 +425,19 @@ def collect_gdelt_news(
         ledger.append_source_poll({"poll_id": poll_id, "source": GDELT_SOURCE, "fetched_time": fetched_at, "status": "OK", "payload_hash": hashlib.sha256(raw).hexdigest()})
         return {"source": GDELT_SOURCE, "status": "OK", "inserted_revisions": inserted, "unchanged_items": unchanged}
     except Exception as error:
-        ledger.append_source_poll({"poll_id": poll_id, "source": GDELT_SOURCE, "fetched_time": fetched_at, "status": "ERROR", "error_type": type(error).__name__, "error": str(error)[:500]})
-        return {"source": GDELT_SOURCE, "status": "ERROR", "error_type": type(error).__name__, "error": str(error)[:500]}
+        message = str(error)[:500]
+        ledger.append_source_poll({"poll_id": poll_id, "source": GDELT_SOURCE, "fetched_time": fetched_at, "status": "ERROR", "error_type": type(error).__name__, "error": message})
+        next_streak = rate_limit_streak + int("429" in message)
+        next_cooldown = min(360, 60 * (2 ** min(next_streak, 3))) if next_streak else 60
+        return {
+            "source": GDELT_SOURCE,
+            "status": "ERROR",
+            "error_type": type(error).__name__,
+            "error": message,
+            "fallback_source": GOOGLE_GEO_SOURCE,
+            "retry_at": (fetched_at + timedelta(minutes=next_cooldown)).isoformat(),
+            "rate_limit_streak": next_streak,
+        }
 
 
 def collect_direct_full_text_rss_news(

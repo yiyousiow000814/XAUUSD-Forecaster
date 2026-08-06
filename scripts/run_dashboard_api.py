@@ -130,7 +130,36 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
             "error_count": int(polls["error_count"] or 0),
             "item_count": item_count, "revision_count": revision_count,
             "full_text_count": full_text_count, "latest_item_time": latest_item_time,
+            "recovery_mode": None, "fallback_label": None,
+            "fallback_health": None, "next_retry_time": None,
         })
+    by_source = {row["source"]: row for row in rows}
+    gdelt = by_source.get("gdelt_gold_geopolitics")
+    fallback = by_source.get("google_news_gold_context")
+    if gdelt and fallback and "429" in str(gdelt.get("last_error") or ""):
+        recent = connection.execute(
+            """SELECT fetched_time,status,error FROM source_polls
+               WHERE source='gdelt_gold_geopolitics'
+               ORDER BY fetched_time DESC,poll_id DESC LIMIT 8"""
+        ).fetchall()
+        streak = 0
+        for poll in recent:
+            if poll["status"] == "ERROR" and "429" in str(poll["error"] or ""):
+                streak += 1
+            else:
+                break
+        latest_poll = _parse_utc(gdelt["latest_poll_time"])
+        cooldown = min(360, 60 * (2 ** min(streak, 3))) if streak else 60
+        gdelt["recovery_mode"] = "RATE_LIMIT_BACKOFF"
+        gdelt["fallback_label"] = fallback["label"]
+        gdelt["fallback_health"] = fallback["health"]
+        gdelt["next_retry_time"] = (
+            (latest_poll + timedelta(minutes=cooldown)).isoformat()
+            if latest_poll else None
+        )
+        if fallback["health"] == "HEALTHY":
+            gdelt["health"] = "FALLBACK_ACTIVE"
+            gdelt["latest_status"] = "RATE_LIMITED"
     return rows
 
 
@@ -313,7 +342,7 @@ def _dashboard_payload(database: Path) -> dict:
             latest_prediction = connection.execute(
                 """SELECT p.model_identity,p.model_version,p.recommended_action,
                           p.prediction_status,p.ev_long_u5,p.ev_short_u5,
-                          p.interval_width
+                          p.interval_width,p.decision_time
                    FROM predictions_v2 p
                    JOIN model_updates_v2 u USING(model_version)
                    WHERE p.source_decision_id=?
@@ -677,6 +706,9 @@ def _dashboard_payload(database: Path) -> dict:
     if latest_data:
         latest_data.pop("decision_id", None)
     research_forecast = dict(latest_prediction) if latest_prediction else None
+    if research_forecast is not None:
+        research_forecast["signal_expiry_seconds"] = 20
+        research_forecast["forecast_horizon_seconds"] = 30 * 60
     u5_values = sorted(float(row["u5"]) for row in u5_rows)
     current_u5 = float(latest["u5"]) if latest and latest["u5"] is not None else None
     u5_percentile = None

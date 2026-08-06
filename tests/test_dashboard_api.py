@@ -88,3 +88,25 @@ def test_dashboard_uses_gemini_controlled_category_before_source_guess() -> None
         "summary_zh": "监管审批。",
         "event_type": "regulatory_approval",
     }) == "监管/其他"
+
+
+def test_dashboard_reports_gdelt_fallback_and_retry_time(tmp_path) -> None:
+    now = datetime(2026, 8, 6, 4, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger.append_source_poll({
+        "poll_id": "gdelt-429", "source": "gdelt_gold_geopolitics",
+        "fetched_time": now - timedelta(minutes=30), "status": "ERROR",
+        "error_type": "HTTPError", "error": "HTTP Error 429: Too Many Requests",
+    })
+    ledger.append_source_poll({
+        "poll_id": "google-ok", "source": "google_news_gold_context",
+        "fetched_time": now - timedelta(minutes=5), "status": "OK",
+    })
+    connection = ledger.connection
+    rows = _dashboard_module()._news_source_health(connection, now)
+    gdelt = next(row for row in rows if row["source"] == "gdelt_gold_geopolitics")
+    assert gdelt["health"] == "FALLBACK_ACTIVE"
+    assert gdelt["latest_status"] == "RATE_LIMITED"
+    assert gdelt["fallback_label"] == "Google News Context"
+    assert gdelt["fallback_health"] == "HEALTHY"
+    assert gdelt["next_retry_time"] == (now + timedelta(minutes=90)).isoformat()

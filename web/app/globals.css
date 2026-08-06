@@ -108,6 +108,14 @@ body { font-weight:500; }
 .dial-label { font-size:13px; font-weight:700; }
 .decision-dial p { font-size:13px; }
 .decision-dial small { font-size:13px; font-weight:600; }
+.forecast-freshness { width:min(310px,90%); margin:8px auto 10px; padding:10px 12px; border:1px solid var(--ink); text-align:left; background:rgba(255,255,255,.18); }
+.forecast-freshness strong,.forecast-freshness small { display:block; }
+.forecast-freshness strong { font-size:13px; margin-bottom:4px; }
+.forecast-freshness.is-current strong { color:var(--green); }
+.forecast-freshness.is-observe strong { color:var(--red); }
+.forecast-progress { height:8px; margin:8px 0 6px; border:1px solid var(--ink); background:transparent; overflow:hidden; }
+.forecast-progress i { display:block; height:100%; background:linear-gradient(90deg,var(--acid),#d39b2f,var(--red)); transition:width .5s linear; }
+.source-health-badge.health-fallback_active { background:#e5c35f; color:var(--ink); }
 .metric-grid span,.metric-grid small { font-size:13px; font-weight:600; }
 .tick em { font-size:13px; }
 .factor { font-size:13px; }
