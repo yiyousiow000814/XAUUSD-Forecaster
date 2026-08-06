@@ -38,7 +38,9 @@ NEWS_INDEX_FIELDS = (
 )
 MARKET_DECISION_FIELDS = (
     "source_decision_id", "decision_time", "exit_time", "model_identity",
-    "recommended_action", "prediction_status", "outcome_status",
+    "model_version", "recommended_action", "prediction_status", "outcome_status",
+    "ev_long_u5", "ev_short_u5", "policy_expected_action",
+    "policy_consistent", "frozen_record",
     "outcome_reason_codes",
     "long_quote_return", "short_quote_return",
 )
