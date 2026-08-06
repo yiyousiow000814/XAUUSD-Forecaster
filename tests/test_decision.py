@@ -32,7 +32,7 @@ def forecast(at: datetime, **overrides: object) -> Forecast:
     return Forecast(**values)
 
 
-def test_selects_best_ev_only_when_its_lcb_is_positive() -> None:
+def test_selects_best_positive_post_cost_ev_without_lcb_gate() -> None:
     at = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     assert select_recommended_action(forecast(at))[0] is Action.LONG
     assert (
@@ -46,10 +46,10 @@ def test_selects_best_ev_only_when_its_lcb_is_positive() -> None:
         )[0]
         is Action.SHORT
     )
-    assert (
-        select_recommended_action(forecast(at, lcb_long_u5=0.0))[0]
-        is Action.WAIT
-    )
+    assert select_recommended_action(forecast(at, lcb_long_u5=-1.0))[0] is Action.LONG
+    assert select_recommended_action(
+        forecast(at, ev_long_u5=-0.1, ev_short_u5=-0.2)
+    )[0] is Action.WAIT
 
 
 def test_unhealthy_data_and_tied_ev_fail_closed() -> None:

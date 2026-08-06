@@ -8,7 +8,7 @@ from .models import Action, DataHealth, Decision, Forecast
 
 
 def select_recommended_action(forecast: Forecast) -> tuple[Action, str]:
-    """Apply the frozen best-EV and positive-LCB rule."""
+    """Choose the positive post-cost EV direction; keep LCB as diagnostics."""
     if forecast.data_health is not DataHealth.OK:
         return Action.WAIT, f"DATA_{forecast.data_health.value}"
 
@@ -16,13 +16,13 @@ def select_recommended_action(forecast: Forecast) -> tuple[Action, str]:
         return Action.WAIT, "TIED_DIRECTIONAL_EV"
 
     if forecast.ev_long_u5 > forecast.ev_short_u5:
-        if forecast.lcb_long_u5 > 0:
-            return Action.LONG, "LONG_BEST_EV_POSITIVE_LCB"
-        return Action.WAIT, "LONG_BEST_EV_NON_POSITIVE_LCB"
+        if forecast.ev_long_u5 > 0:
+            return Action.LONG, "LONG_BEST_POSITIVE_POST_COST_EV"
+        return Action.WAIT, "NO_POSITIVE_POST_COST_EV"
 
-    if forecast.lcb_short_u5 > 0:
-        return Action.SHORT, "SHORT_BEST_EV_POSITIVE_LCB"
-    return Action.WAIT, "SHORT_BEST_EV_NON_POSITIVE_LCB"
+    if forecast.ev_short_u5 > 0:
+        return Action.SHORT, "SHORT_BEST_POSITIVE_POST_COST_EV"
+    return Action.WAIT, "NO_POSITIVE_POST_COST_EV"
 
 
 class ShadowDecisionGate:

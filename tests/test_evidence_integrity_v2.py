@@ -725,7 +725,7 @@ def test_uncalibrated_prediction_has_no_lcb(tmp_path) -> None:
         ledger, decision_id="d", decision_time=now, created_at=now,
         model_version="market", model_identity="MARKET_ONLY", feature_hash="features",
         predicted=1.0, news_residual=None, ev_long=0.8, ev_short=-1.2,
-        calibration=calibration, recommended="WAIT", status="PROVISIONAL",
+        calibration=calibration, recommended="LONG", status="PROVISIONAL",
     )
     row = ledger.connection.execute("SELECT * FROM predictions_v2").fetchone()
     assert row["lcb_long_u5"] is None
@@ -735,25 +735,26 @@ def test_uncalibrated_prediction_has_no_lcb(tmp_path) -> None:
     ledger.close()
 
 
-def test_prediction_insert_rejects_action_that_violates_frozen_lcb_policy(tmp_path) -> None:
+def test_prediction_insert_rejects_action_that_violates_post_cost_ev_policy(tmp_path) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     now = datetime(2026, 8, 5, tzinfo=UTC)
     calibration = {"version": "cal", "rows": 20, "blocks": 2, "days": 2,
                    "half_width": 0.35, "status": "EARLY"}
-    with pytest.raises(ValueError, match="violates frozen LCB policy"):
+    with pytest.raises(ValueError, match="violates frozen post-cost EV policy"):
         inference_v2._insert_prediction(
             ledger, decision_id="bad-action", decision_time=now, created_at=now,
             model_version="market", model_identity="MARKET_ONLY", feature_hash="features",
             predicted=0.3, news_residual=None, ev_long=0.3, ev_short=-0.4,
-            calibration=calibration, recommended="LONG", status="PROVISIONAL",
+            calibration=calibration, recommended="WAIT", status="PROVISIONAL",
         )
     assert ledger.connection.execute("SELECT count(*) FROM predictions_v2").fetchone()[0] == 0
     ledger.close()
 
 
-def test_recommendation_requires_positive_conservative_lower_bound() -> None:
-    assert inference_v2._recommended_action(0.30, -0.40, None) == "WAIT"
-    assert inference_v2._recommended_action(0.30, -0.40, 0.35) == "WAIT"
+def test_recommendation_uses_positive_post_cost_ev_and_retains_wait() -> None:
+    assert inference_v2._recommended_action(0.30, -0.40, None) == "LONG"
+    assert inference_v2._recommended_action(0.30, -0.40, 0.35) == "LONG"
     assert inference_v2._recommended_action(0.30, -0.40, 0.20) == "LONG"
     assert inference_v2._recommended_action(-0.40, 0.30, 0.20) == "SHORT"
     assert inference_v2._recommended_action(0.30, 0.30, 0.20) == "WAIT"
+    assert inference_v2._recommended_action(-0.10, -0.20, 0.20) == "WAIT"

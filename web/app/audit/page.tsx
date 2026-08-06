@@ -303,9 +303,9 @@ const SOURCE_LABELS: Record<string, string> = {
 const MODEL_LABELS: Record<string, string> = {
   CHAMPION_0: "零收益安全基准",
   MARKET_ONLY: "黄金自身 Ridge",
-  NEWS_RESIDUAL: "新闻残差 Ridge",
+  NEWS_RESIDUAL: "新闻修正量 Ridge",
   FULL: "黄金＋新闻 Ridge",
-  BROAD_NEWS_RESIDUAL: "大视野新闻残差 Ridge",
+  BROAD_NEWS_RESIDUAL: "大视野新闻修正量 Ridge",
   BROAD_FULL: "黄金＋大视野新闻 Ridge",
 };
 const TOPIC_LABELS: Record<string, string> = {
@@ -618,8 +618,9 @@ export default function AuditPage() {
         </section>
         <ExecutionResearch status={payload?.execution_learning} onOpenGraph={() => { setGraphStartTab("execution"); setGraphOpen(true); }} />
         <section className="model-scope-note">
-          <article><b>新闻残差是“加减多少”，不是完整答案</b><span>例：黄金自身预测 +0.10 U5，新闻残差 +0.04 U5，组合答案才是 +0.14 U5。残差模型虽然有自己独立的 Ridge 参数，但它的训练答案依赖黄金自身先算出的 +0.10。</span></article>
-          <article><b>News-only 才能回答“完全不看黄金行不行”</b><span>News-only 必须只拿新闻特征，直接学习真实30分钟目标 +0.14 U5；它不是“基线漏了多少”。然后才可与黄金自身、黄金＋新闻三者做同一时点的未来 OOS 对照。</span></article>
+          <article><b>“大视野新闻修正量”不是“大视野新闻自身”</b><span>它先看黄金自身预测错了多少，再学习新闻应该把黄金答案往上或往下修多少。例：黄金自身 +0.10 U5，新闻修正 +0.04 U5，只有“黄金＋大视野新闻”才输出完整方向 +0.14 U5。</span></article>
+          <article><b>当前还没有独立的“大视野 News-only”</b><span>真正的 News-only 会完全不读取黄金特征，只用新闻直接预测完整30分钟目标。现在名为“大视野新闻修正量”的曲线不能当作 News-only，也不能单独拿去做完整方向。</span></article>
+          <article className="live-method"><b>做法可以实时复现；结果尚未达到实盘标准</b><span>行情只读取决策时已经收到的 Bid/Ask，新闻只读取当时已经首次看见且已完成解析的内容；30分钟结果成熟后才进入下一轮训练，所以方法本身不依赖未来数据。当前仍缺真实 commission、slippage 与下单接口验证，因此这里只能证明“计算方法可在线运行”，不能宣称已有可实盘收益。</span></article>
         </section>
         {(payload?.learning_curves.models.length ?? 0) === 0 ? <div className="league-empty">
           <strong>正在建立第一版 Preview</strong><p>达到 96 条修复或 Forward 完整样本即可训练 Market Preview，不需要等待60天。曲线只从模型创建后的新 Decision 开始，绝不回填假历史成绩。</p>

@@ -193,7 +193,7 @@ export default function Home() {
             {forecastAction}
           </div>
           <p>{forecast?.model_identity === "BROAD_FULL" ? "黄金＋大视野新闻" : forecast?.model_identity ?? "等待模型"} · {forecast?.prediction_status ?? "WAITING"}</p>
-          {forecastAction === "WAIT" && forecast?.directional_bias && forecast.directional_bias !== "NEUTRAL" && <p className="forecast-bias">当前倾向 {forecast.directional_bias}，但95%保守下界未过零，所以动作保持 WAIT</p>}
+          {forecastAction === "WAIT" && forecast?.directional_bias && forecast.directional_bias !== "NEUTRAL" && <p className="forecast-bias">成本后 EV 较高方向为 {forecast.directional_bias}；这条历史冻结记录仍是 WAIT</p>}
           <div className={`forecast-freshness ${signalRemaining > 0 && online ? "is-current" : "is-observe"}`}>
             <strong>{freshness}</strong>
             <small>产生于 {localTime(forecast?.decision_time)} · 已过去 {forecastAge === null ? "—" : `${Math.floor(forecastAge / 60)}分${forecastAge % 60}秒`}</small>

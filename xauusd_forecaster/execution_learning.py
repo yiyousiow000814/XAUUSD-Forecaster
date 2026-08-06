@@ -243,7 +243,7 @@ def train_due_execution(ledger, cutoff: datetime, artifact_root: str | Path,
             ledger.connection.execute(
                 """INSERT OR IGNORE INTO execution_model_updates_v1 VALUES
                 (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (version, identity, stage, datetime.now(UTC).isoformat(), cutoff.isoformat(),
+                (version, identity, stage, cutoff.isoformat(), cutoff.isoformat(),
                  training_count, dataset_hash, FEATURE_VERSION, label_version,
                  str(path), artifact.artifact_hash, "CHALLENGER"),
             )

@@ -50,16 +50,17 @@ coverage cannot enter a model. Reinforcement learning, dynamic exits, multiple
 horizons, LLM direction decisions, and unrestricted feature search are
 excluded.
 
-## Direction and uncertainty gate
+## Direction and uncertainty policy
 
 The direction with the larger predicted quote-cost-adjusted EV is the proposed
-direction. It is admitted only when its precomputed 95% lower confidence bound
-is strictly positive. Equal directional EVs, unhealthy data, or a non-positive
-best-direction lower bound produce `WAIT`.
+Shadow direction. It is recorded as `LONG` or `SHORT` when that larger EV is
+strictly positive. Equal directional EVs, unhealthy data, missing EVs, or two
+non-positive directional EVs produce `WAIT`.
 
-The gate consumes uncertainty estimates from a separately validated model or
-calibration process. It does not manufacture a confidence interval from one
-forecast.
+The precomputed 95% lower confidence bound remains an evidence and promotion
+diagnostic. It does not suppress early Shadow directions, authorize an order,
+or manufacture a confidence interval from one forecast. Historical Predictions
+remain frozen under the policy version that created them.
 
 ## Success hierarchy
 

@@ -309,13 +309,21 @@ def _recent_market_chart(
     decisions = []
     for row in decision_rows:
         recorded = row["recommended_action"]
+        ev_long = row["ev_long_u5"]
+        ev_short = row["ev_short_u5"]
         lcb_long = row["lcb_long_u5"]
         lcb_short = row["lcb_short_u5"]
         expected = "WAIT"
-        if lcb_long is not None and lcb_short is not None:
+        legacy_lcb_policy = row["prediction_status"] == "PROVISIONAL_LCB_GATED"
+        if legacy_lcb_policy and lcb_long is not None and lcb_short is not None:
             if lcb_long > lcb_short and lcb_long > 0:
                 expected = "LONG"
             elif lcb_short > lcb_long and lcb_short > 0:
+                expected = "SHORT"
+        elif not legacy_lcb_policy and ev_long is not None and ev_short is not None:
+            if ev_long > ev_short and ev_long > 0:
+                expected = "LONG"
+            elif ev_short > ev_long and ev_short > 0:
                 expected = "SHORT"
         decisions.append({
             **{key: value for key, value in dict(row).items()
@@ -327,6 +335,9 @@ def _recent_market_chart(
             "outcome_status": row["outcome_status"] or "PENDING",
             "policy_expected_action": expected,
             "policy_consistent": recorded == expected,
+            "action_policy": (
+                "POSITIVE_LCB_V1" if legacy_lcb_policy else "POSITIVE_POST_COST_EV_V2"
+            ),
             "frozen_record": True,
         })
     marker_rows = connection.execute(

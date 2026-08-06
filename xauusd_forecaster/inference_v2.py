@@ -26,16 +26,15 @@ MODEL_IDENTITIES = frozenset({
 def _recommended_action(
     ev_long: float | None, ev_short: float | None, half_width: float | None,
 ) -> str:
-    """Apply the frozen conservative-action contract; abstention is not a class."""
-    if ev_long is None or ev_short is None or half_width is None:
+    """Choose the positive post-cost EV direction; uncertainty remains diagnostic."""
+    del half_width
+    if ev_long is None or ev_short is None:
         return "WAIT"
-    lcb_long = ev_long - half_width
-    lcb_short = ev_short - half_width
-    if lcb_long == lcb_short:
+    if ev_long == ev_short:
         return "WAIT"
-    if lcb_long > lcb_short and lcb_long > 0:
+    if ev_long > ev_short and ev_long > 0:
         return "LONG"
-    if lcb_short > lcb_long and lcb_short > 0:
+    if ev_short > ev_long and ev_short > 0:
         return "SHORT"
     return "WAIT"
 
@@ -110,7 +109,7 @@ def _insert_prediction(ledger, *, decision_id: str, decision_time: datetime,
     expected_action = _recommended_action(ev_long, ev_short, width)
     if recommended != expected_action:
         raise ValueError(
-            f"prediction action violates frozen LCB policy: "
+            f"prediction action violates frozen post-cost EV policy: "
             f"recorded={recommended}, expected={expected_action}"
         )
     ledger.connection.execute(
@@ -200,7 +199,7 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
             ev_long=ev_long, ev_short=ev_short, calibration=calibration,
             recommended=recommended, status=(
                 "READY" if calibration["status"] == "CALIBRATED"
-                else "PROVISIONAL_LCB_GATED"
+                else "PROVISIONAL_POST_COST_EV"
             ),
         )
         created.append({"model_identity": identity, "model_version": update["model_version"],
