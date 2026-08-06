@@ -254,6 +254,7 @@ def _recent_market_chart(
              SELECT p.source_decision_id,p.decision_time,p.model_identity,
                     p.model_version,p.recommended_action,p.effective_action,
                     p.prediction_status,s.value_quote_return,
+                    o.long_quote_return,o.short_quote_return,o.outcome_status,
                     row_number() OVER (
                       PARTITION BY p.source_decision_id,p.model_identity
                       ORDER BY u.created_at DESC,u.model_version DESC
@@ -262,6 +263,8 @@ def _recent_market_chart(
              JOIN model_updates_v2 u USING(model_version)
              LEFT JOIN prediction_scores_v2 s
                USING(source_decision_id,model_version)
+             LEFT JOIN derived_outcomes o
+               ON o.source_decision_id=p.source_decision_id
              WHERE p.decision_time>=? AND p.decision_time>u.created_at
            )
            SELECT * FROM ranked WHERE version_rank=1
@@ -273,9 +276,7 @@ def _recent_market_chart(
         "exit_time": (
             datetime.fromisoformat(row["decision_time"]) + timedelta(minutes=30)
         ).isoformat(),
-        "outcome_status": (
-            "VALID" if row["value_quote_return"] is not None else "PENDING"
-        ),
+        "outcome_status": row["outcome_status"] or "PENDING",
     } for row in decision_rows]
     marker_rows = connection.execute(
         """SELECT model_identity,model_version,model_stage,training_rows,

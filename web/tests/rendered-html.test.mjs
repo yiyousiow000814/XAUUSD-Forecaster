@@ -86,6 +86,10 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /最新版 \/ 前一版/);
   assert.match(modal, /K线与决策/);
   assert.match(modal, /WAIT 仍记录反事实/);
+  assert.match(modal, /清晰：每30分钟1次/);
+  assert.match(modal, /点击图中的三角形/);
+  assert.match(modal, /Ridge 并不学习一个叫 WAIT 的类别/);
+  assert.doesNotMatch(modal, /30分钟退出线/);
 });
 
 test("explains U5 as a risk scale rather than a probability", () => {
