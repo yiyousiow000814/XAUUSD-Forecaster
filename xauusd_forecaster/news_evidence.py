@@ -210,6 +210,12 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
         if not eligible:
             reasons.append("NO_ACTION_TOPIC" if not (ACTION_TOPICS & set(topics)) else "NEEDS_CONFIRMATION")
         annotation = json.loads(canonical.get("annotation_json") or "{}")
+        entities = sorted({
+            str(value).strip()
+            for row in members
+            for value in json.loads(row.get("entities_json") or "[]")
+            if str(value).strip()
+        })
         canonical_headline = str(
             annotation.get("headline_zh") or canonical["headline"]
         )
@@ -229,6 +235,9 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             "publisher_domain": canonical["publisher_domain"],
             "headline": canonical_headline,
             "canonical_headline": canonical_headline,
+            "event_type": canonical.get("event_type"),
+            "entities": entities,
+            "primary_category": annotation.get("primary_category"),
             "model_permission": "BROAD_MODEL" if eligible else "DISPLAY_ONLY",
             "collector_first_seen_time": min(row["collector_first_seen_time"] for row in members),
             "parsed_at": canonical["parsed_at"],

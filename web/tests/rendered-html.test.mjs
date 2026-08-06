@@ -74,6 +74,18 @@ test("renders the news and decision audit route", async () => {
   assert.match(html, /LEARNING PROGRESS/);
 });
 
+test("renders generic story coverage without black empty grid placeholders", () => {
+  const page = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(page, /事件家族、实体和首次可见时间/);
+  assert.match(page, /来源角色/);
+  assert.match(page, /候选来源与缺口/);
+  assert.match(page, /不会自动授权来源/);
+  assert.match(css, /\.story-grid[^}]+background:#aaa59a/);
+  assert.match(css, /html \{ background:var\(--paper\)/);
+  assert.doesNotMatch(css, /\.story-grid[^}]+background:var\(--ink\)/);
+});
+
 test("labels the rolling lifecycle without presenting the safety baseline as AI", () => {
   const source = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
   assert.match(source, /零收益安全基准/);

@@ -87,9 +87,14 @@ type NewsEvidence = {
   reason_codes: string[];
 };
 type Storyline = {
-  storyline_id: string; title: string; state: string; event_count: number;
+  storyline_id: string; title: string; family: string; family_label: string; state: string; event_count: number;
   reliable_event_count: number; latest_change: string; last_updated: string;
   topics: string[]; model_permission: "DISPLAY_ONLY";
+  covered_roles: Array<{ key: string; label: string }>;
+  missing_roles: Array<{ key: string; label: string }>;
+  coverage_count: number; coverage_total: number;
+  candidate_sources: Array<{ candidate: string; suggested_role: string; reason: string; status: string; adapter: string }>;
+  state_deltas: Record<string, number>;
   timeline: Array<{ event_key: string; first_seen: string; headline: string;
     evidence_grade: string; independent_publishers: number; relation: string; topics: string[] }>;
 };
@@ -545,12 +550,14 @@ export default function AuditPage() {
       </section>}
 
       {view === "stories" && <section className="story-desk">
-        <header className="evidence-intro"><div><p className="eyebrow">TEMPORAL EVENT GRAPH · RESEARCH ONLY</p><h2>不再数新闻，<br />而是看故事发生了什么变化。</h2></div><p>系统把同一主题的事件按首次可见时间串联，并区分确认、升级、缓和与随后发生。当前只用于阅读和审计，<b>不进入 Ridge、不影响 Long / Short / Wait</b>；也不会把时间先后写成因果关系。</p></header>
+        <header className="evidence-intro"><div><p className="eyebrow">TEMPORAL EVENT GRAPH · RESEARCH ONLY</p><h2>不再数新闻，<br />而是看故事发生了什么变化。</h2></div><p>系统按<b>事件家族、实体和首次可见时间</b>组装故事，再按来源角色模板检查官方确认、现场影响、独立确认与市场反应。缺少角色时只进入候选来源队列，<b>不会自动授权来源，也不进入 Ridge</b>。</p></header>
         <div className="story-grid">{(payload?.storylines ?? []).map(story => <article key={story.storyline_id}>
-          <header><div><span>{story.state}</span><h3>{story.title}</h3></div><strong>{story.event_count}<small> 个事件</small></strong></header>
+          <header><div><span>{story.family_label ? `${story.family_label} · ` : ""}{({ EMERGING:"刚出现", REPORTED:"已有报道", CORROBORATED:"多源确认", OFFICIALLY_CONFIRMED:"官方确认", PHYSICAL_IMPACT_CONFIRMED:"实物影响确认", ESCALATING:"升级中", DEESCALATING:"缓和中", CONTRADICTED:"存在冲突", RESOLVED:"已结束" } as Record<string,string>)[story.state] ?? story.state}</span><h3>{story.title}</h3></div><strong>{story.event_count}<small> 个事件</small></strong></header>
           <p className="story-latest"><b>最新变化</b>{story.latest_change}</p>
-          <div className="story-meta"><span>可靠证据 {story.reliable_event_count}</span><span>更新 {time(story.last_updated)}</span><span>仅展示，不训练</span></div>
+          <div className="story-meta"><span>可靠证据 {story.reliable_event_count}</span><span>更新 {time(story.last_updated)}</span><span>来源角色 {story.coverage_count ?? 0}/{story.coverage_total ?? 0}</span></div>
+          <section className="story-coverage"><div><b>已覆盖</b>{(story.covered_roles ?? []).length ? story.covered_roles.map(role => <span key={role.key}>{role.label}</span>) : <em>等待 v2 来源角色</em>}</div><div><b>仍缺少</b>{(story.missing_roles ?? []).length ? story.missing_roles.map(role => <span className="missing" key={role.key}>{role.label}</span>) : <em>{story.coverage_total ? "覆盖完整" : "后台同步中"}</em>}</div></section>
           <ol>{story.timeline.slice().reverse().map(item => <li key={item.event_key}><time>{time(item.first_seen)}</time><b>{({ STARTS:"故事开始", FOLLOWED_BY:"随后发生", CONFIRMS:"可靠来源确认", ESCALATES:"风险升级", DEESCALATES:"风险缓和" } as Record<string,string>)[item.relation] ?? item.relation}</b><span>{item.headline}</span><small>{item.evidence_grade} · {item.independent_publishers} 个独立来源</small></li>)}</ol>
+          {(story.candidate_sources ?? []).length > 0 && <details className="source-candidate-queue"><summary>候选来源与缺口 <b>{story.candidate_sources.length}</b></summary>{story.candidate_sources.map((item, index) => <div key={`${item.candidate}-${index}`}><strong>{item.candidate}</strong><span>{item.reason}</span><small>{item.status} · {item.adapter}</small></div>)}</details>}
         </article>)}</div>
       </section>}
 
