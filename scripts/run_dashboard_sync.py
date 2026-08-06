@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import http.client
 import json
 import os
@@ -18,10 +19,97 @@ from pathlib import Path
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = MODULE_ROOT / ".local" / "forward" / "dashboard-sync.json"
 DEFAULT_STATUS = MODULE_ROOT / ".local" / "forward" / "dashboard-sync-status.json"
-REMOTE_PAYLOAD_LIMIT_BYTES = 450_000
-REMOTE_NEWS_LIMIT = 80
+DEFAULT_NEWS_STATE = (
+    MODULE_ROOT / ".local" / "forward" / "dashboard-news-sync-state.json"
+)
+REMOTE_PAYLOAD_LIMIT_BYTES = 750_000
+REMOTE_NEWS_LIMIT = 200
 REMOTE_DECISION_LIMIT = 20
 REMOTE_EVIDENCE_LIMIT = 60
+NEWS_DETAIL_BATCH_LIMIT_BYTES = 400_000
+NEWS_DETAIL_FULL_REFRESH_SECONDS = 86_400
+REMOTE_CURVE_POINTS_PER_IDENTITY = 480
+
+NEWS_INDEX_FIELDS = (
+    "category", "source", "source_item_id", "revision_number",
+    "source_published_time", "collector_first_seen_time", "headline",
+    "content_characters", "content_status", "annotation_status",
+    "model_visibility", "emerging_topic_zh",
+)
+MARKET_DECISION_FIELDS = (
+    "source_decision_id", "decision_time", "exit_time", "model_identity",
+    "recommended_action", "prediction_status", "outcome_status",
+    "outcome_reason_codes",
+    "long_quote_return", "short_quote_return",
+)
+
+
+def _stable_news_key(row: dict) -> str:
+    identity = "\0".join((
+        str(row.get("source", "")), str(row.get("source_item_id", "")),
+        str(row.get("revision_number", "")),
+    ))
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def news_mirror_parts(payload: dict) -> tuple[list[dict], list[dict]]:
+    """Split the complete news rows into a compact index and lazy details."""
+    index_rows = []
+    detail_rows = []
+    for row in payload.get("recent_news", [])[:REMOTE_NEWS_LIMIT]:
+        detail_key = _stable_news_key(row)
+        detail_payload = {
+            key: value for key, value in row.items() if key not in NEWS_INDEX_FIELDS
+        }
+        encoded_detail = json.dumps(
+            detail_payload, ensure_ascii=False, allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        detail_hash = hashlib.sha256(encoded_detail).hexdigest()
+        index_rows.append({
+            **{key: row.get(key) for key in NEWS_INDEX_FIELDS},
+            "detail_key": detail_key,
+        })
+        detail_rows.append({
+            "detail_key": detail_key,
+            "detail_hash": detail_hash,
+            "payload": detail_payload,
+        })
+    return index_rows, detail_rows
+
+
+def news_detail_batches(rows: list[dict]) -> list[list[dict]]:
+    batches: list[list[dict]] = []
+    current: list[dict] = []
+    for row in rows:
+        candidate = [*current, row]
+        size = len(json.dumps(
+            {"items": candidate}, ensure_ascii=False, allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8"))
+        if current and size > NEWS_DETAIL_BATCH_LIMIT_BYTES:
+            batches.append(current)
+            current = [row]
+        else:
+            current = candidate
+    if current:
+        batches.append(current)
+    return batches
+
+
+def compact_curve_points(points: list[dict]) -> list[dict]:
+    """Preserve curve shape and version boundaries within a visual-size budget."""
+    if len(points) <= REMOTE_CURVE_POINTS_PER_IDENTITY:
+        return points
+    bucket_count = max(1, REMOTE_CURVE_POINTS_PER_IDENTITY // 2)
+    bucket_size = max(1, (len(points) + bucket_count - 1) // bucket_count)
+    keep = {0, len(points) - 1}
+    keep.update(index for index, point in enumerate(points) if point.get("model_version"))
+    for start in range(0, len(points), bucket_size):
+        indices = range(start, min(len(points), start + bucket_size))
+        keep.add(min(indices, key=lambda index: points[index]["cumulative_quote_return"]))
+        keep.add(max(indices, key=lambda index: points[index]["cumulative_quote_return"]))
+    return [points[index] for index in sorted(keep)]
 
 
 def remote_snapshot(payload: dict) -> bytes:
@@ -48,6 +136,21 @@ def remote_snapshot(payload: dict) -> bytes:
                 for row in models
                 if row.get("lifecycle_status") in {"LATEST", "PREVIOUS"}
             ]
+        curves = learning.get("identity_curves")
+        if isinstance(curves, list):
+            for curve in curves:
+                if isinstance(curve, dict) and isinstance(curve.get("points"), list):
+                    curve["points"] = compact_curve_points(curve["points"])
+
+    news_index, _ = news_mirror_parts(snapshot)
+    snapshot["recent_news"] = news_index
+
+    market = snapshot.get("market_chart")
+    if isinstance(market, dict) and isinstance(market.get("decisions"), list):
+        market["decisions"] = [
+            {key: row.get(key) for key in MARKET_DECISION_FIELDS}
+            for row in market["decisions"]
+        ]
 
     for name, limit in (
         ("recent_news", REMOTE_NEWS_LIMIT),
@@ -67,16 +170,11 @@ def remote_snapshot(payload: dict) -> bytes:
     encoded = json.dumps(
         snapshot, ensure_ascii=False, allow_nan=False, separators=(",", ":")
     ).encode("utf-8")
-    while len(encoded) > REMOTE_PAYLOAD_LIMIT_BYTES and snapshot.get("recent_news"):
-        snapshot["recent_news"].pop()
-        snapshot["mirror_window"]["recent_news"] = len(snapshot["recent_news"])
-        encoded = json.dumps(
-            snapshot, ensure_ascii=False, allow_nan=False, separators=(",", ":")
-        ).encode("utf-8")
     if len(encoded) > REMOTE_PAYLOAD_LIMIT_BYTES:
         raise ValueError(
             f"bounded dashboard payload is still {len(encoded)} bytes "
-            f"(limit {REMOTE_PAYLOAD_LIMIT_BYTES})"
+            f"(limit {REMOTE_PAYLOAD_LIMIT_BYTES}); split another large surface "
+            "instead of dropping news index rows"
         )
     return encoded
 
@@ -120,9 +218,7 @@ def write_sync_status(
     temporary.replace(path)
 
 
-def sync_once(config: dict) -> None:
-    with urllib.request.urlopen(config["local_status_url"], timeout=5) as response:
-        payload = remote_snapshot(json.loads(response.read()))
+def _post_json(url: str, payload: bytes, config: dict) -> None:
     headers = {
         "Authorization": f"Bearer {config['token']}",
         "Content-Type": "application/json",
@@ -130,15 +226,70 @@ def sync_once(config: dict) -> None:
     sites_bypass_token = os.environ.get("SITES_BYPASS_TOKEN", "").strip()
     if sites_bypass_token:
         headers["OAI-Sites-Authorization"] = f"Bearer {sites_bypass_token}"
-    request = urllib.request.Request(
-        config["remote_ingest_url"],
-        data=payload,
-        headers=headers,
-        method="POST",
-    )
+    request = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     with urllib.request.urlopen(request, timeout=10) as response:
         if response.status != 200:
             raise RuntimeError(f"dashboard sync returned HTTP {response.status}")
+
+
+def _read_news_sync_state(path: Path) -> dict:
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+        return state if isinstance(state, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_news_sync_state(path: Path, state: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(path)
+
+
+def sync_once(config: dict) -> None:
+    with urllib.request.urlopen(config["local_status_url"], timeout=5) as response:
+        local_payload = json.loads(response.read())
+    _post_json(config["remote_ingest_url"], remote_snapshot(local_payload), config)
+
+    _, details = news_mirror_parts(local_payload)
+    state_path = Path(config.get("news_state_file", DEFAULT_NEWS_STATE))
+    state = _read_news_sync_state(state_path)
+    synced_hashes = state.get("hashes", {})
+    if not isinstance(synced_hashes, dict):
+        synced_hashes = {}
+    last_full = state.get("last_full_sync")
+    try:
+        full_refresh_due = (
+            not last_full
+            or (datetime.now(UTC) - datetime.fromisoformat(last_full)).total_seconds()
+            >= NEWS_DETAIL_FULL_REFRESH_SECONDS
+        )
+    except (TypeError, ValueError):
+        full_refresh_due = True
+    pending = [
+        row for row in details
+        if full_refresh_due or synced_hashes.get(row["detail_key"]) != row["detail_hash"]
+    ]
+    news_url = config.get("remote_news_ingest_url") or (
+        config["remote_ingest_url"].rsplit("/", 1)[0] + "/news-content"
+    )
+    for batch in news_detail_batches(pending):
+        encoded = json.dumps(
+            {"items": batch}, ensure_ascii=False, allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        _post_json(news_url, encoded, config)
+        for row in batch:
+            synced_hashes[row["detail_key"]] = row["detail_hash"]
+        _write_news_sync_state(state_path, {
+            "hashes": synced_hashes,
+            "last_full_sync": state.get("last_full_sync"),
+        })
+    if full_refresh_due:
+        state["last_full_sync"] = datetime.now(UTC).isoformat()
+    state["hashes"] = synced_hashes
+    _write_news_sync_state(state_path, state)
 
 
 def sync_with_retry(config: dict, *, attempts: int = 3) -> int:

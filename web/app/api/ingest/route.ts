@@ -9,7 +9,7 @@ export async function POST(request: Request) {
   }
   const payload = await request.json();
   const serialized = JSON.stringify(payload);
-  if (serialized.length > 500_000) {
+  if (new TextEncoder().encode(serialized).byteLength > 800_000) {
     return NextResponse.json({ error: "payload too large" }, { status: 413 });
   }
   const binding = env.DB as D1Database | undefined;

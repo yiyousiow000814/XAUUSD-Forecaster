@@ -286,6 +286,7 @@ def _recent_market_chart(
                     p.ev_long_u5,p.ev_short_u5,p.lcb_long_u5,p.lcb_short_u5,
                     s.value_quote_return,
                     o.long_quote_return,o.short_quote_return,o.outcome_status,
+                    o.reason_codes_json AS outcome_reason_codes_json,
                     row_number() OVER (
                       PARTITION BY p.source_decision_id,p.model_identity
                       ORDER BY u.created_at DESC,u.model_version DESC
@@ -303,7 +304,9 @@ def _recent_market_chart(
         (first_time,),
     ).fetchall()
     decisions = [{
-        **dict(row),
+        **{key: value for key, value in dict(row).items()
+           if key != "outcome_reason_codes_json"},
+        "outcome_reason_codes": json.loads(row["outcome_reason_codes_json"] or "[]"),
         "exit_time": (
             datetime.fromisoformat(row["decision_time"]) + timedelta(minutes=30)
         ).isoformat(),
@@ -363,7 +366,9 @@ def _dashboard_payload(database: Path) -> dict:
         recent = connection.execute(
             """SELECT d.decision_id, d.decision_time, d.effective_action, d.data_health,
                       s.bid, s.ask, s.spread, s.features_json,
-                      o.outcome_status, o.long_return, o.short_return,
+                      o.outcome_status,
+                      o.reason_codes_json AS outcome_reason_codes_json,
+                      o.long_return, o.short_return,
                       o.long_mfe, o.long_mae, o.short_mfe, o.short_mae,
                       o.maximum_spread,
                       (SELECT p.recommended_action FROM predictions_v2 p
@@ -739,6 +744,12 @@ def _dashboard_payload(database: Path) -> dict:
                     if decision_success else None)
     online = bool(age_seconds is not None and age_seconds <= 30
                   and decision_age is not None and decision_age <= 420)
+    clock_skew_seconds = None
+    if latest and latest["source_event_time"] and latest["source_received_time"]:
+        clock_skew_seconds = (
+            datetime.fromisoformat(latest["source_event_time"])
+            - datetime.fromisoformat(latest["source_received_time"])
+        ).total_seconds()
 
     def component(name: str, stale_after: int, last_error: str | None = None) -> dict:
         value = component_times.get(name)
@@ -774,6 +785,9 @@ def _dashboard_payload(database: Path) -> dict:
     def serialize_row(row: sqlite3.Row) -> dict:
         item = dict(row)
         item["features"] = json.loads(item.pop("features_json"))
+        item["outcome_reason_codes"] = json.loads(
+            item.pop("outcome_reason_codes_json") or "[]"
+        )
         item["predictions"] = predictions_by_decision.get(item["decision_id"], [])
         return item
 
@@ -852,6 +866,20 @@ def _dashboard_payload(database: Path) -> dict:
             "sites_mirror": "read-only materialized display mirror",
             "components": {
                 "quote_bridge": component("quote_bridge", 30),
+                "system_clock": {
+                    "last_success": latest["source_received_time"] if latest else None,
+                    "age_seconds": abs(clock_skew_seconds) if clock_skew_seconds is not None else None,
+                    "status": (
+                        "OK" if clock_skew_seconds is not None and abs(clock_skew_seconds) <= 5
+                        else "WARN" if clock_skew_seconds is not None and abs(clock_skew_seconds) <= 20
+                        else "ERROR"
+                    ),
+                    "last_error": (
+                        None if clock_skew_seconds is not None and abs(clock_skew_seconds) <= 5
+                        else f"cTrader服务器钟与本机接收钟相差 {abs(clock_skew_seconds):.2f} 秒；Windows Time 服务需要启动"
+                        if clock_skew_seconds is not None else "尚无报价时钟样本"
+                    ),
+                },
                 "decision_collector": component("decision_collector", 420),
                 "outcome_settler": component("outcome_settler", 420),
                 "news_collector": component("news_collector", 300),
@@ -882,6 +910,12 @@ def _dashboard_payload(database: Path) -> dict:
             ),
             "grades": dict(evidence_grades),
             "topics": dict(evidence_topics),
+        },
+        "news_feature_policy": {
+            "maximum_current_age_hours": 72,
+            "freshness_half_life_hours": 6,
+            "historical_training_rows_retained": True,
+            "point_in_time_cutoff": True,
         },
         "news_source_health": news_source_health,
         "annotation_queue": {

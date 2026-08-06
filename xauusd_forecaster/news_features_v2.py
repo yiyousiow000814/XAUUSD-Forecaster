@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .evidence_v2 import ELIGIBILITY_VERSION
 from .factors import MACRO_FEATURE_MAP, NEWS_FEATURES
@@ -25,6 +25,10 @@ SOURCE_RULES = {
     "google_news_gold_context": ("DISPLAY_ONLY", True, 200, "aggregated discovery is display-only"),
     "google_news_gold_geopolitics": ("COLLECT_ONLY", True, 200, "headline-only aggregation"),
 }
+
+# Historical samples remain trainable, but old headlines must not remain a
+# current decision feature indefinitely.
+MAX_NEWS_AGE = timedelta(hours=72)
 
 
 def frozen_rule_rows() -> list[tuple[str, str, int, int, str]]:
@@ -50,6 +54,9 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
         )
         body = str(news["body"] or "")
         if tier != "MODEL_ELIGIBLE" or (requires_body and len(body) < minimum):
+            continue
+        first_seen = datetime.fromisoformat(news["collector_first_seen_time"])
+        if decision_time - first_seen > MAX_NEWS_AGE:
             continue
         selected.append((news, annotation))
 
@@ -124,6 +131,7 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
     broad_events = [
         row for row in event_evidence_rows(ledger, decision_time)
         if row["broad_model_eligible"]
+        and decision_time - datetime.fromisoformat(row["collector_first_seen_time"]) <= MAX_NEWS_AGE
     ]
     broad_weight_sum = 0.0
     broad_evidence = []

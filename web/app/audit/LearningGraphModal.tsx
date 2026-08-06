@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-type CurvePoint = { decision_time: string; cumulative_quote_return: number };
+type CurvePoint = { decision_time: string; model_version?: string; cumulative_quote_return: number };
 type Curve = { model_identity: string; points: CurvePoint[] };
 type Model = {
   model_identity: string; model_version: string; lifecycle_status: string;
@@ -16,6 +16,7 @@ type Decision = {
   source_decision_id: string; decision_time: string; exit_time: string;
   model_identity: string; recommended_action: string; prediction_status: string;
   outcome_status: string; value_quote_return: number | null;
+  outcome_reason_codes?: string[];
   long_quote_return: number | null; short_quote_return: number | null;
   predicted_direction_u5: number | null; ev_long_u5: number | null;
   ev_short_u5: number | null; lcb_long_u5: number | null; lcb_short_u5: number | null;
@@ -77,14 +78,31 @@ function LongCurve({ curves }: { curves: Curve[] }) {
   const low = Math.min(...values); const high = Math.max(...values);
   const x = (time: string) => 58 + (Date.parse(time) - start) / Math.max(1, end - start) * 862;
   const y = (value: number) => 28 + (high - value) / Math.max(.000001, high - low) * 310;
+  const versionBoundaries = usable.flatMap(row => row.points.flatMap((point, index) => {
+    if (index === 0 || !point.model_version) return [];
+    return [{
+      decision_time: point.decision_time,
+      model_identity: row.model_identity,
+      model_version: point.model_version,
+    }];
+  }));
+  const groupedBoundaries = [...new Set(versionBoundaries.map(row => row.decision_time))].map(decisionTime => ({
+    decision_time: decisionTime,
+    changes: versionBoundaries.filter(row => row.decision_time === decisionTime),
+  }));
   return <div className="chart-block">
-    <div className="chart-caption"><div><b>连续累计 OOS（换版本不归零）</b><span>每个身份只取当时最新冻结版本；同一时点会同时评分多个模型，但只算一个独立市场时点。</span></div><strong>{uniqueDecisionTimes} 个时点<small> · {all.length} 条模型评分</small></strong></div>
+    <div className="chart-caption"><div><b>连续累计 OOS（换版本不归零）</b><span>橙色虚线是新版本首次参与评分的位置；同一时点会同时评分多个模型，但只算一个独立市场时点。</span></div><strong>{uniqueDecisionTimes} 个时点<small> · {all.length} 条模型评分</small></strong></div>
     <svg className="learning-svg" viewBox="0 0 960 380" role="img" aria-label="各模型累计 Live OOS 曲线">
       <line x1="58" x2="920" y1={y(0)} y2={y(0)} className="zero-line" />
       <text x="8" y={y(high) + 5}>{pct(high)}</text><text x="8" y={y(low) + 5}>{pct(low)}</text>
+      {groupedBoundaries.map((boundary, index) => <g key={boundary.decision_time} className="version-boundary">
+        <title>{boundary.changes.map(change => `${LABELS[change.model_identity] ?? change.model_identity} → ${change.model_version}`).join("\n")}</title>
+        <line x1={x(boundary.decision_time)} x2={x(boundary.decision_time)} y1="18" y2="350" />
+        <text x={x(boundary.decision_time) + 4} y={24 + index % 2 * 14}>换版</text>
+      </g>)}
       {usable.map(row => <polyline key={row.model_identity} fill="none" stroke={COLORS[row.model_identity]} strokeWidth="3" points={row.points.map(point => `${x(point.decision_time)},${y(point.cumulative_quote_return)}`).join(" ")} />)}
     </svg>
-    <div className="chart-legend">{usable.map(row => <span key={row.model_identity}><i style={{ background: COLORS[row.model_identity] }} />{LABELS[row.model_identity]} <b>{pct(row.points.at(-1)?.cumulative_quote_return ?? 0)}</b></span>)}</div>
+    <div className="chart-legend">{usable.map(row => <span key={row.model_identity}><i style={{ background: COLORS[row.model_identity] }} />{LABELS[row.model_identity]} <b>{pct(row.points.at(-1)?.cumulative_quote_return ?? 0)}</b></span>)}{groupedBoundaries.length > 0 && <span><i className="train-dot" />模型换版</span>}</div>
   </div>;
 }
 
@@ -178,6 +196,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: { candles: Ca
 }
 
 function DecisionPayoff({ selected, resultLabel }: { selected: Decision; resultLabel: (value: number | null) => string }) {
+  if (selected.outcome_status !== "VALID" && selected.outcome_status !== "PENDING") return <div><small>30分钟结果</small><strong className="negative">无效样本 · 已隔离</strong><span>{selected.outcome_reason_codes?.some(code => code.includes("CLOCK_AHEAD")) ? "服务器报价钟与本机接收钟偏差超过当时上限；不评分、不训练。" : "报价证据不完整；不评分、不训练。"}</span></div>;
   if (selected.outcome_status !== "VALID") return <div><small>30分钟结果</small><strong>等待结算</strong><span>这次预测的固定观察期还没有走完。</span></div>;
   const result = selected.recommended_action === "LONG" ? selected.long_quote_return : selected.recommended_action === "SHORT" ? selected.short_quote_return : 0;
   return <div><small>30分钟结果</small><strong className={(result ?? 0) >= 0 ? "positive" : "negative"}>{selected.recommended_action} {resultLabel(result)}</strong><span>{selected.recommended_action === "WAIT" ? "未持仓，结果固定为零" : (result ?? 0) >= 0 ? "方向正确，成本后为正" : "方向错误，成本后为负"}</span></div>;

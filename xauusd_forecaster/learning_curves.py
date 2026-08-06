@@ -220,7 +220,8 @@ def learning_curve_payload(connection) -> dict:
         else:
             rows = connection.execute(
                 """WITH ranked AS (
-                    SELECT p.source_decision_id,p.decision_time,s.value_quote_return,
+                    SELECT p.source_decision_id,p.decision_time,p.model_version,
+                           s.value_quote_return,
                            row_number() OVER (
                                PARTITION BY p.source_decision_id,p.model_identity
                                ORDER BY u.created_at DESC,u.model_version DESC
@@ -230,14 +231,25 @@ def learning_curve_payload(connection) -> dict:
                     JOIN model_updates_v2 u USING(model_version)
                     WHERE p.model_identity=? AND p.decision_time>u.created_at
                 )
-                SELECT decision_time,value_quote_return FROM ranked
+                SELECT decision_time,model_version,value_quote_return FROM ranked
                 WHERE version_rank=1 ORDER BY decision_time""", (identity,)
             ).fetchall()
         cumulative = 0.0
         points = []
+        previous_version = None
         for row in rows:
             cumulative += float(row["value_quote_return"])
-            points.append({"decision_time": row["decision_time"], "cumulative_quote_return": cumulative})
+            model_version = (
+                row["model_version"] if identity != "CHAMPION_0" else "always-wait-v1"
+            )
+            point = {
+                "decision_time": row["decision_time"],
+                "cumulative_quote_return": cumulative,
+            }
+            if model_version != previous_version:
+                point["model_version"] = model_version
+                previous_version = model_version
+            points.append(point)
         identity_curves.append({"model_identity": identity, "points": points})
 
     paired = connection.execute(

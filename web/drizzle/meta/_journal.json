@@ -8,6 +8,13 @@
       "when": 1785912330770,
       "tag": "0000_sad_toad",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1785996242848,
+      "tag": "0001_daily_epoch",
+      "breakpoints": true
     }
   ]
 }

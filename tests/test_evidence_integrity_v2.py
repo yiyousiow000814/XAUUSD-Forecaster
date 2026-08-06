@@ -53,6 +53,29 @@ def test_executable_horizon_starts_from_entry_received_time() -> None:
     assert label.exit_received_time == entry_received + timedelta(minutes=30)
 
 
+def test_stable_ctrader_server_clock_lead_within_freshness_is_valid() -> None:
+    decision = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    rows = [
+        _quote(decision + timedelta(seconds=11), decision + timedelta(seconds=5)),
+        _quote(decision + timedelta(minutes=30, seconds=11),
+               decision + timedelta(minutes=30, seconds=5)),
+    ]
+    label = build_executable_label_v2(decision_time=decision, quotes=rows)
+    assert label.outcome_status == "VALID"
+
+
+def test_server_clock_lead_beyond_quote_freshness_is_invalid() -> None:
+    decision = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    rows = [
+        _quote(decision + timedelta(seconds=26), decision + timedelta(seconds=5)),
+        _quote(decision + timedelta(minutes=30, seconds=26),
+               decision + timedelta(minutes=30, seconds=5)),
+    ]
+    label = build_executable_label_v2(decision_time=decision, quotes=rows)
+    assert label.outcome_status == "UNREPAIRABLE"
+    assert label.reason_codes == ("ENTRY_EVENT_CLOCK_AHEAD",)
+
+
 def test_u5_requires_a_new_contiguous_31_minute_path_after_gap() -> None:
     state = U5State()
     start = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
@@ -106,6 +129,22 @@ def test_news_freshness_ages_from_first_seen_not_parsed_at(tmp_path) -> None:
     features = aggregate_news_features_v2(ledger, decision)
     expected_freshness = 2 ** (-30 / 360)
     assert features["features"]["news_event_count"] == pytest.approx(expected_freshness)
+    ledger.close()
+
+
+def test_news_older_than_72_hours_is_not_a_current_feature(tmp_path) -> None:
+    decision = datetime(2026, 8, 5, 10, 30, tzinfo=UTC)
+    first_seen = decision - timedelta(hours=72, seconds=1)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=first_seen)
+    _append_news(
+        ledger, source="federal_reserve_monetary", item="old-official",
+        first_seen=first_seen, parsed_at=first_seen + timedelta(minutes=1),
+        impulse=1.0,
+    )
+    features = aggregate_news_features_v2(ledger, decision)
+    assert features["model_visible_items"] == 0
+    assert features["news_exposed"] == 0
+    assert features["features"]["news_event_count"] == 0.0
     ledger.close()
 
 
@@ -310,6 +349,7 @@ def test_learning_curve_excludes_predictions_not_after_model_creation(tmp_path) 
     assert [point["decision_time"] for point in market_curve["points"]] == [
         (created_at + timedelta(minutes=5)).isoformat()
     ]
+    assert market_curve["points"][0]["model_version"] == "market-test"
     ledger.close()
 
 
@@ -338,6 +378,7 @@ def test_identity_curve_uses_only_latest_parallel_version_per_decision(tmp_path)
     )
     assert len(curve["points"]) == 1
     assert curve["points"][0]["cumulative_quote_return"] == pytest.approx(2.0)
+    assert curve["points"][0]["model_version"] == "market-new"
     models = {row["model_version"]: row for row in payload["models"]}
     assert models["market-new"]["lifecycle_status"] == "LATEST"
     assert models["market-old"]["lifecycle_status"] == "PREVIOUS"

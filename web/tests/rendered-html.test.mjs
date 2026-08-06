@@ -61,6 +61,12 @@ test("renders the news and decision audit route", async () => {
   const source = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
   assert.match(source, /来源不是权限/);
   assert.match(source, /多源确认/);
+  assert.match(source, /api\/news-content\?key=/);
+  assert.match(source, /列表与正文详情分开保存/);
+  assert.match(source, /最多回看/);
+  assert.match(source, /更旧新闻仍保留为当时历史样本/);
+  assert.match(source, /无效样本/);
+  assert.match(source, /activeLearningIdentities/);
   assert.match(html, /news-row-placeholder/);
   assert.match(html, /决策与30分钟结果/);
   assert.match(html, /Live OOS 学习曲线/);
@@ -94,7 +100,11 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /previousIncluded = Number.POSITIVE_INFINITY/);
   assert.match(modal, /const xAtIndex/);
   assert.match(modal, /条模型评分/);
+  assert.match(modal, /versionBoundaries/);
+  assert.match(modal, /橙色虚线是新版本首次参与评分的位置/);
+  assert.match(modal, /模型换版/);
   assert.match(modal, /30分钟结果/);
+  assert.match(modal, /无效样本 · 已隔离/);
   assert.doesNotMatch(modal, /三种动作同一30分钟结果/);
   assert.doesNotMatch(modal, /30分钟退出线/);
 });

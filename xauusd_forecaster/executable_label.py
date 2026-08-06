@@ -56,14 +56,16 @@ def build_executable_label_v2(
     signal_expiry_seconds: int = 20,
     hold_minutes: int = 30,
     maximum_healthy_gap_seconds: int = 60,
-    maximum_clock_skew_seconds: float = 5.0,
+    maximum_clock_skew_seconds: float = 20.0,
     maximum_quote_freshness_seconds: float = 20.0,
 ) -> ExecutableLabelV2:
     """Build one label using only the order in which quotes were received.
 
     Entry and exit eligibility are both receipt-clock decisions.  Event time is
     retained for clock, freshness, and path diagnostics but never makes a late
-    quote executable retroactively.
+    quote executable retroactively.  The clock tolerance is aligned with quote
+    freshness because cTrader server time can lead the local receipt clock by
+    several seconds without exposing the quote before it was received.
     """
     rows = sorted(quotes, key=lambda q: (q.received_time, q.event_time))
     expiry = decision_time + timedelta(seconds=signal_expiry_seconds)

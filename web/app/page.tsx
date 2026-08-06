@@ -13,6 +13,7 @@ type Decision = {
   ask: number | null;
   spread: number | null;
   outcome_status?: string | null;
+  outcome_reason_codes?: string[];
   long_return?: number | null;
   short_return?: number | null;
   features: Record<string, number | null>;
@@ -242,7 +243,7 @@ export default function Home() {
                 <time>{localTime(row.decision_time).slice(-8, -3)}</time>
                 <b title={`安全基准动作 ${row.effective_action}`}>{row.research_action ?? row.effective_action}</b>
                 <span>{fmt(row.bid)} / {fmt(row.ask)}</span>
-                <em title={row.outcome_status === "VALID" ? "30分钟结果已计算" : "预测已记录，等待未来30分钟走完后计算结果"}>{row.outcome_status === "VALID" ? "30分钟结果 ✓" : "等待30分钟结果"}</em>
+                <em title={row.outcome_status === "VALID" ? "30分钟结果已计算" : row.outcome_status ? `样本已隔离，不进入训练：${row.outcome_reason_codes?.join(" · ") || "报价证据无效"}` : "预测已记录，等待未来30分钟走完后计算结果"}>{row.outcome_status === "VALID" ? "30分钟结果 ✓" : row.outcome_status ? "无效样本 · 已隔离" : "等待30分钟结果"}</em>
               </div>
             ))}
           </div>

@@ -25,6 +25,7 @@ type Decision = {
   bid: number | null;
   ask: number | null;
   outcome_status: string | null;
+  outcome_reason_codes: string[];
   long_return: number | null;
   short_return: number | null;
   long_mfe: number | null;
@@ -33,6 +34,7 @@ type Decision = {
 };
 
 type News = {
+  detail_key: string;
   category: string;
   source: string;
   source_item_id: string;
@@ -40,32 +42,32 @@ type News = {
   source_published_time: string | null;
   collector_first_seen_time: string;
   headline: string;
-  original_headline: string;
+  original_headline?: string;
   content_characters: number;
   content_status: "FULL_TEXT" | "SOURCE_CONTENT" | "HEADLINE_ONLY";
-  summary_zh: string | null;
+  summary_zh?: string | null;
   annotation_status: "READY" | "QUEUED" | "BACKING_OFF" | "DEAD_LETTER" | "WAITING_CONTENT";
-  link: string;
-  event_type: string | null;
-  entities: string[];
-  hawkishness: number | null;
-  inflation_impulse: number | null;
-  growth_impulse: number | null;
-  geopolitical_risk: number | null;
-  usd_impulse: number | null;
-  novelty: number | null;
-  confidence: number | null;
-  llm_model_version: string | null;
-  prompt_version: string | null;
-  parsed_at: string | null;
-  fetched_time: string;
-  collection_delay_seconds: number | null;
-  processing_delay_seconds: number | null;
-  source_eligibility: string;
+  link?: string;
+  event_type?: string | null;
+  entities?: string[];
+  hawkishness?: number | null;
+  inflation_impulse?: number | null;
+  growth_impulse?: number | null;
+  geopolitical_risk?: number | null;
+  usd_impulse?: number | null;
+  novelty?: number | null;
+  confidence?: number | null;
+  llm_model_version?: string | null;
+  prompt_version?: string | null;
+  parsed_at?: string | null;
+  fetched_time?: string;
+  collection_delay_seconds?: number | null;
+  processing_delay_seconds?: number | null;
+  source_eligibility?: string;
   model_visibility: string;
-  eligibility_version: string;
-  primary_category: string | null;
-  secondary_categories: string[];
+  eligibility_version?: string;
+  primary_category?: string | null;
+  secondary_categories?: string[];
   emerging_topic_zh: string | null;
 };
 
@@ -150,6 +152,12 @@ type Payload = {
     grades: Record<string, number>;
     topics: Record<string, number>;
   };
+  news_feature_policy: {
+    maximum_current_age_hours: number;
+    freshness_half_life_hours: number;
+    historical_training_rows_retained: boolean;
+    point_in_time_cutoff: boolean;
+  };
   recent_decisions: Decision[];
   training: {
     automatic: boolean;
@@ -225,6 +233,13 @@ const time = (value?: string | null) => value ? new Intl.DateTimeFormat("zh-CN",
 }).format(new Date(value)) : "—";
 const number = (value?: number | null, digits = 2) => value === null || value === undefined ? "—" : value.toFixed(digits);
 const percent = (value?: number | null) => value === null || value === undefined ? "—" : `${value >= 0 ? "+" : "−"}${Math.abs(value * 100).toFixed(3)}%`;
+const outcomeReason = (codes: string[]) => codes.some(code => code.includes("CLOCK_AHEAD"))
+  ? "服务器报价时钟与本机接收钟偏差过大，样本已隔离"
+  : codes.includes("NO_ENTRY_RECEIVED_WITHIN_EXPIRY")
+    ? "20秒有效期内没有收到可执行报价，样本已隔离"
+    : codes.includes("NO_EXIT_RECEIVED_AFTER_HORIZON")
+      ? "30分钟后没有收到退出报价，样本已隔离"
+      : "报价证据不完整，样本已隔离且不进入训练";
 const impulse = (value?: number | null) => value === null || value === undefined ? "—" : `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
 const NEWS_PER_PAGE = 12;
 const CATEGORY_ORDER = ["战争/地缘", "利率/Fed", "央行购金", "通胀/就业", "增长/经济", "油价/能源", "美元/流动性", "风险偏好", "监管/其他", "其他"];
@@ -260,6 +275,77 @@ const EVIDENCE_LABELS: Record<string, string> = {
   PRIMARY: "一手官方证据", CORROBORATED: "多源确认",
   SINGLE_RELIABLE: "单一可靠来源", DISCOVERY_ONLY: "线索来源",
 };
+
+function NewsRow({ row, keyCount, requestsPerMinute }: {
+  row: News; keyCount: number; requestsPerMinute: number;
+}) {
+  const [detail, setDetail] = useState<Partial<News> | null>(
+    row.summary_zh !== undefined ? row : null,
+  );
+  const [detailState, setDetailState] = useState<"idle" | "loading" | "ready" | "error">(
+    row.summary_zh !== undefined ? "ready" : "idle",
+  );
+  const current = { ...row, ...(detail ?? {}) };
+  const translated = Boolean(
+    current.original_headline && current.headline !== current.original_headline,
+  );
+  const loadDetail = async (event: React.SyntheticEvent<HTMLDetailsElement>) => {
+    if (!event.currentTarget.open || detailState === "loading" || detailState === "ready") return;
+    if (!row.detail_key) {
+      setDetailState("error");
+      return;
+    }
+    setDetailState("loading");
+    try {
+      const response = await fetch(`/api/news-content?key=${encodeURIComponent(row.detail_key)}`, {
+        cache: "no-store",
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
+      setDetail(body.payload);
+      setDetailState("ready");
+    } catch {
+      setDetailState("error");
+    }
+  };
+  return <details className="news-row" onToggle={loadDetail}>
+    <summary>
+      <div className="news-row-stamp"><b>{row.category}</b><time>{time(row.source_published_time)}</time><small className={`eligibility-badge eligibility-${row.model_visibility.toLowerCase().replaceAll("_", "-")}`}>{row.model_visibility.replaceAll("_", " ")}</small></div>
+      <div className="news-row-title"><strong>{row.headline}</strong><small>{SOURCE_LABELS[row.source] ?? row.source.replaceAll("_", " ")}{translated ? " · Gemini 中文标题" : ""}{row.emerging_topic_zh ? ` · ${row.emerging_topic_zh}` : ""}</small></div>
+      <div className={`news-row-state state-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
+        <b>{row.content_status === "FULL_TEXT" ? `${row.content_characters.toLocaleString()} 字符` : row.source === "google_news_gold_geopolitics" ? "聚合标题" : "等待正文"}</b>
+        <small>{row.annotation_status === "READY" ? "Gemini 已完成" : row.annotation_status === "QUEUED" ? "Gemini 排队中" : row.annotation_status === "BACKING_OFF" ? "失败退避中" : row.annotation_status === "DEAD_LETTER" ? "已隔离待审" : "禁止判断"}</small>
+      </div>
+    </summary>
+    <div className="news-row-detail">
+      {detailState === "loading" ? <section className="gemini-summary summary-loading"><span>正在读取新闻详情</span><p>列表与正文详情分开保存，这里只加载你点开的这一条。</p></section>
+      : detailState === "error" ? <section className="gemini-summary summary-waiting"><span>详情同步中</span><p>新闻索引已经到达网页，正文摘要仍在同步；稍后重新点开即可。</p></section>
+      : <>
+        <div className="news-detail-top">
+          <div className={`content-proof content-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
+            {row.content_status === "FULL_TEXT" ? `✓ 已读取正式正文 · ${row.content_characters.toLocaleString()} 字符` : row.content_status === "SOURCE_CONTENT" ? `已读取来源内容 · ${row.content_characters.toLocaleString()} 字符` : row.source === "google_news_gold_geopolitics" ? "Google News RSS 只提供聚合标题 · 未取得 publisher 正文" : "来源正文尚未抓取 · 禁止 Gemini 判断"}
+          </div>
+          {current.link && <a className="source-link" href={current.link} target="_blank" rel="noreferrer">阅读来源 ↗</a>}
+        </div>
+        {translated ? <p className="original-headline"><b>原文标题</b>{current.original_headline}</p> : null}
+        {row.annotation_status === "READY" ? <section className="gemini-summary">
+          <span>GEMINI 中文摘要 · 完整读取 {row.content_characters.toLocaleString()} 字符</span><p>{current.summary_zh}</p>
+        </section> : row.annotation_status === "QUEUED" ? <section className="gemini-summary summary-queued">
+          <span>FLASH-LITE 摘要排队中</span><p>正文已经完整入库，不会截断。系统正通过 {keyCount} 个 key 轮换，每分钟最多生成 {requestsPerMinute} 篇中文摘要；标题翻译会独立交给 Gemma。</p>
+        </section> : row.annotation_status === "BACKING_OFF" ? <section className="gemini-summary summary-queued">
+          <span>暂时退避</span><p>本次模型响应未通过验证；系统已停止每分钟重试，将在退避到期后有限重试。</p>
+        </section> : row.annotation_status === "DEAD_LETTER" ? <section className="gemini-summary summary-waiting">
+          <span>已隔离</span><p>相同永久错误重复出现，系统不会再自动消耗 Flash 配额；该新闻保留在 Ledger 中等待规则修复或人工复核。</p>
+        </section> : <section className="gemini-summary summary-waiting">
+          <span>等待来源正文</span><p>当前只有标题或短描述，不会进入模型，也不会假装已经理解内容。</p>
+        </section>}
+        {current.event_type && <div className="news-classification"><b>{current.event_type}</b><span>鹰派 {impulse(current.hawkishness)}</span><span>通胀 {impulse(current.inflation_impulse)}</span><span>增长 {impulse(current.growth_impulse)}</span><span>地缘 {impulse(current.geopolitical_risk)}</span><span>美元 {impulse(current.usd_impulse)}</span><span>新颖 {number(current.novelty)}</span><span>置信 {number(current.confidence)}</span></div>}
+        <dl className="news-timeline"><div><dt>Publisher time</dt><dd>{time(row.source_published_time)}</dd></div><div><dt>First seen</dt><dd>{time(row.collector_first_seen_time)}</dd></div><div><dt>Parsed at</dt><dd>{time(current.parsed_at)}</dd></div><div><dt>Collection delay</dt><dd>{current.collection_delay_seconds == null ? "—" : `${number(current.collection_delay_seconds, 1)}s`}</dd></div><div><dt>Processing delay</dt><dd>{current.processing_delay_seconds == null ? "—" : `${number(current.processing_delay_seconds, 1)}s`}</dd></div><div><dt>Eligibility</dt><dd>{current.source_eligibility ?? "—"} · {row.model_visibility}</dd></div></dl>
+        <footer className="card-footer"><span>{current.entities?.join(" · ") || "无实体"}</span><span>{current.llm_model_version ?? "未标注"} · 收到 {time(row.collector_first_seen_time)} · 标注 {time(current.parsed_at)}</span></footer>
+      </>}
+    </div>
+  </details>;
+}
 
 export default function AuditPage() {
   const router = useRouter();
@@ -326,6 +412,9 @@ export default function AuditPage() {
   const activeLearningModels = (payload?.learning_curves.models ?? []).filter(
     row => row.active_rank !== null,
   );
+  const activeLearningIdentities = new Set(
+    activeLearningModels.map(row => row.model_identity),
+  ).size;
   const archivedModelCount = (payload?.learning_curves.models.length ?? 0) - activeLearningModels.length;
 
   return (
@@ -371,7 +460,7 @@ export default function AuditPage() {
         <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻与 Gemini <b>{payload?.counts.latest_news_items ?? 0}</b></a>
         <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>新闻证据管理 <b>{payload?.news_evidence_summary.broad_model_eligible ?? 0}</b></a>
         <a href="/audit?view=decisions" className={view === "decisions" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("decisions"); }}>决策与30分钟结果 <b>{payload?.counts.decision_events ?? 0}</b></a>
-        <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b>{activeLearningModels.length}</b></a>
+        <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b>{activeLearningIdentities}组</b></a>
         <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b>{payload?.factor_coverage.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</b></a>
       </nav>
 
@@ -386,39 +475,12 @@ export default function AuditPage() {
         </section>
         <section className="news-table">
           <header className="news-table-head"><span>分类 / 时间</span><span>新闻与来源</span><span>正文 / Gemini</span></header>
-          {visibleNews.map((row) => <details className="news-row" key={`${row.source}-${row.source_item_id}-${row.revision_number}`}>
-            <summary>
-              <div className="news-row-stamp"><b>{row.category}</b><time>{time(row.source_published_time)}</time><small className={`eligibility-badge eligibility-${row.model_visibility.toLowerCase().replaceAll("_", "-")}`}>{row.model_visibility.replaceAll("_", " ")}</small></div>
-              <div className="news-row-title"><strong>{row.headline}</strong><small>{SOURCE_LABELS[row.source] ?? row.source.replaceAll("_", " ")}{row.headline !== row.original_headline ? " · Gemini 中文标题" : " · 等待标题翻译"}{row.emerging_topic_zh ? ` · ${row.emerging_topic_zh}` : ""}</small></div>
-              <div className={`news-row-state state-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
-                <b>{row.content_status === "FULL_TEXT" ? `${row.content_characters.toLocaleString()} 字符` : row.source === "google_news_gold_geopolitics" ? "聚合标题" : "等待正文"}</b>
-                <small>{row.annotation_status === "READY" ? "Gemini 已完成" : row.annotation_status === "QUEUED" ? "Gemini 排队中" : row.annotation_status === "BACKING_OFF" ? "失败退避中" : row.annotation_status === "DEAD_LETTER" ? "已隔离待审" : "禁止判断"}</small>
-              </div>
-            </summary>
-            <div className="news-row-detail">
-              <div className="news-detail-top">
-                <div className={`content-proof content-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
-                  {row.content_status === "FULL_TEXT" ? `✓ 已读取正式正文 · ${row.content_characters.toLocaleString()} 字符` : row.content_status === "SOURCE_CONTENT" ? `已读取来源内容 · ${row.content_characters.toLocaleString()} 字符` : row.source === "google_news_gold_geopolitics" ? "Google News RSS 只提供聚合标题 · 未取得 publisher 正文" : "来源正文尚未抓取 · 禁止 Gemini 判断"}
-                </div>
-                {row.link && <a className="source-link" href={row.link} target="_blank" rel="noreferrer">阅读来源 ↗</a>}
-              </div>
-              {row.headline !== row.original_headline ? <p className="original-headline"><b>原文标题</b>{row.original_headline}</p> : null}
-              {row.annotation_status === "READY" ? <section className="gemini-summary">
-                <span>GEMINI 中文摘要 · 完整读取 {row.content_characters.toLocaleString()} 字符</span><p>{row.summary_zh}</p>
-              </section> : row.annotation_status === "QUEUED" ? <section className="gemini-summary summary-queued">
-                <span>FLASH-LITE 摘要排队中</span><p>正文已经完整入库，不会截断。系统正通过 {payload?.annotation_queue.configured_key_count ?? 0} 个 key 轮换，每分钟最多生成 {payload?.annotation_queue.requests_per_minute ?? 0} 篇中文摘要；标题翻译会独立交给 Gemma。</p>
-              </section> : row.annotation_status === "BACKING_OFF" ? <section className="gemini-summary summary-queued">
-                <span>暂时退避</span><p>本次模型响应未通过验证；系统已停止每分钟重试，将在退避到期后有限重试。</p>
-              </section> : row.annotation_status === "DEAD_LETTER" ? <section className="gemini-summary summary-waiting">
-                <span>已隔离</span><p>相同永久错误重复出现，系统不会再自动消耗 Flash 配额；该新闻保留在 Ledger 中等待规则修复或人工复核。</p>
-              </section> : <section className="gemini-summary summary-waiting">
-                <span>等待来源正文</span><p>当前只有标题或短描述，不会进入模型，也不会假装已经理解内容。</p>
-              </section>}
-              {row.event_type && <div className="news-classification"><b>{row.event_type}</b><span>鹰派 {impulse(row.hawkishness)}</span><span>通胀 {impulse(row.inflation_impulse)}</span><span>增长 {impulse(row.growth_impulse)}</span><span>地缘 {impulse(row.geopolitical_risk)}</span><span>美元 {impulse(row.usd_impulse)}</span><span>新颖 {number(row.novelty)}</span><span>置信 {number(row.confidence)}</span></div>}
-              <dl className="news-timeline"><div><dt>Publisher time</dt><dd>{time(row.source_published_time)}</dd></div><div><dt>First seen</dt><dd>{time(row.collector_first_seen_time)}</dd></div><div><dt>Parsed at</dt><dd>{time(row.parsed_at)}</dd></div><div><dt>Collection delay</dt><dd>{row.collection_delay_seconds === null ? "—" : `${number(row.collection_delay_seconds, 1)}s`}</dd></div><div><dt>Processing delay</dt><dd>{row.processing_delay_seconds === null ? "—" : `${number(row.processing_delay_seconds, 1)}s`}</dd></div><div><dt>Eligibility</dt><dd>{row.source_eligibility} · {row.model_visibility}</dd></div></dl>
-              <footer className="card-footer"><span>{row.entities.join(" · ") || "无实体"}</span><span>{row.llm_model_version ?? "未标注"} · 收到 {time(row.collector_first_seen_time)} · 标注 {time(row.parsed_at)}</span></footer>
-            </div>
-          </details>)}
+          {visibleNews.map(row => <NewsRow
+            key={`${row.source}-${row.source_item_id}-${row.revision_number}`}
+            row={row}
+            keyCount={payload?.annotation_queue.configured_key_count ?? 0}
+            requestsPerMinute={payload?.annotation_queue.requests_per_minute ?? 0}
+          />)}
           {Array.from({ length: emptyNewsRows }, (_, index) => <div className="news-row-placeholder" aria-hidden="true" key={`empty-news-row-${index}`} />)}
         </section>
         {newsPageCount > 1 && <nav className="news-pagination" aria-label="新闻分页">
@@ -431,7 +493,7 @@ export default function AuditPage() {
       {view === "evidence" && <section className="evidence-desk">
         <header className="evidence-intro">
           <div><p className="eyebrow">EVENT-LEVEL NEWS EVIDENCE</p><h2>来源不是权限，<br />证据强度才是。</h2></div>
-          <p>同一事件先按主题、实体和首次可见时间聚合。一手官方正文可直接进入大视野实验模型；媒体报道必须由至少两个独立可靠 publisher 相互确认。单一来源和聚合标题继续显示，但没有训练权限。</p>
+          <p>同一事件先按主题、实体和首次可见时间聚合。一手官方正文可直接进入大视野实验模型；媒体报道必须由至少两个独立可靠 publisher 相互确认。当前决策最多回看 <b>{payload?.news_feature_policy.maximum_current_age_hours ?? 72} 小时</b>，每 {payload?.news_feature_policy.freshness_half_life_hours ?? 6} 小时权重减半；更旧新闻仍保留为当时历史样本，但不会伪装成今天的信号。</p>
         </header>
         <div className="evidence-summary">
           <article><span>事件总数</span><strong>{payload?.news_evidence_summary.total_events ?? 0}</strong><small>显示最近 {payload?.news_evidence_summary.displayed_events ?? 0} 个</small></article>
@@ -459,7 +521,7 @@ export default function AuditPage() {
               <time>{time(row.decision_time)}</time><b>{row.effective_action}</b>
               <span>{number(row.bid)} / {number(row.ask)}</span>
               <em>Full建议 {full?.recommended_action ?? "WAIT"}</em>
-              <strong className={row.outcome_status === "VALID" ? "good" : "muted"}>{row.outcome_status === "VALID" ? `Long ${percent(row.long_return)} · Short ${percent(row.short_return)}` : "等待30分钟结果"}</strong>
+              <strong className={row.outcome_status === "VALID" ? "good" : row.outcome_status ? "bad" : "muted"}>{row.outcome_status === "VALID" ? `Long ${percent(row.long_return)} · Short ${percent(row.short_return)}` : row.outcome_status ? `无效样本 · ${outcomeReason(row.outcome_reason_codes)}` : "等待30分钟结果"}</strong>
             </summary>
             <div className="prediction-grid">
               {row.predictions.map(model => <article key={model.model_version}>
