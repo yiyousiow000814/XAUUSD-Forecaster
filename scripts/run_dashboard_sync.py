@@ -23,6 +23,8 @@ DEFAULT_NEWS_STATE = (
     MODULE_ROOT / ".local" / "forward" / "dashboard-news-sync-state.json"
 )
 REMOTE_PAYLOAD_LIMIT_BYTES = 750_000
+LOCAL_STATUS_TIMEOUT_SECONDS = 20
+REMOTE_POST_TIMEOUT_SECONDS = 30
 REMOTE_NEWS_LIMIT = 200
 REMOTE_DECISION_LIMIT = 20
 REMOTE_EVIDENCE_LIMIT = 60
@@ -267,7 +269,9 @@ def _post_json(url: str, payload: bytes, config: dict) -> None:
     if sites_bypass_token:
         headers["OAI-Sites-Authorization"] = f"Bearer {sites_bypass_token}"
     request = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=10) as response:
+    with urllib.request.urlopen(
+        request, timeout=REMOTE_POST_TIMEOUT_SECONDS
+    ) as response:
         if response.status != 200:
             raise RuntimeError(f"dashboard sync returned HTTP {response.status}")
 
@@ -288,7 +292,9 @@ def _write_news_sync_state(path: Path, state: dict) -> None:
 
 
 def sync_once(config: dict) -> None:
-    with urllib.request.urlopen(config["local_status_url"], timeout=5) as response:
+    with urllib.request.urlopen(
+        config["local_status_url"], timeout=LOCAL_STATUS_TIMEOUT_SECONDS
+    ) as response:
         local_payload = json.loads(response.read())
     _post_json(config["remote_ingest_url"], remote_snapshot(local_payload), config)
     market_url = config.get("remote_market_chart_url") or (

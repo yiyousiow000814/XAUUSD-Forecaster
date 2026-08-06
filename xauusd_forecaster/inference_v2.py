@@ -10,7 +10,9 @@ from pathlib import Path
 
 import numpy as np
 
+from .evidence_v2 import ELIGIBILITY_VERSION
 from .forward_ledger import canonical_hash
+from .news_evidence import EVIDENCE_POLICY_VERSION
 from .ridge import RidgeArtifact
 from .training import MARKET_FEATURES
 
@@ -46,6 +48,16 @@ def _active_updates(updates) -> list:
     for update in updates:
         identity = update["model_identity"]
         if identity not in MODEL_IDENTITIES or counts[identity] >= ACTIVE_VERSIONS_PER_IDENTITY:
+            continue
+        eligibility = (
+            update["eligibility_version"]
+            if "eligibility_version" in update.keys() else None
+        )
+        if identity in {"NEWS_RESIDUAL", "FULL"} and eligibility != ELIGIBILITY_VERSION:
+            continue
+        if identity in {"BROAD_NEWS_RESIDUAL", "BROAD_FULL"} and eligibility != (
+            f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}"
+        ):
             continue
         if "artifact_path" in update.keys():
             artifact_path = Path(update["artifact_path"])

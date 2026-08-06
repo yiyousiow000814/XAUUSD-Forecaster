@@ -10,9 +10,10 @@ from collections import defaultdict
 from datetime import datetime
 
 from .forward_ledger import canonical_hash
+from .news_time import assess_news_time
 
 
-EVIDENCE_POLICY_VERSION = "news-event-evidence-v1"
+EVIDENCE_POLICY_VERSION = "news-event-evidence-v2-economic-time"
 CORE_OFFICIAL_SOURCES = frozenset({
     "federal_reserve_monetary",
     "federal_reserve_press_all",
@@ -121,7 +122,7 @@ def _topics(row: dict) -> tuple[str, ...]:
 
 
 def _event_key(row: dict, topics: tuple[str, ...]) -> str:
-    day = str(row["collector_first_seen_time"])[:10]
+    day = str(row.get("source_published_time") or row["collector_first_seen_time"])[:10]
     entities = sorted({
         re.sub(r"\s+", " ", str(value).casefold()).strip()
         for value in json.loads(row.get("entities_json") or "[]") if str(value).strip()
@@ -168,8 +169,18 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             (row["source"], row["source_item_id"], row["revision_number"]), row
         )
 
+    epoch_row = connection.execute(
+        "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
+    ).fetchone()
+    if epoch_row is None:
+        raise ValueError("FORWARD_EPOCH is missing")
+    forward_epoch = datetime.fromisoformat(str(epoch_row["value"]))
+
     grouped: dict[str, list[dict]] = defaultdict(list)
     for row in latest.values():
+        row["time_assessment"] = assess_news_time(
+            row, decision_time=decision_time, forward_epoch=forward_epoch
+        )
         row["publisher_domain"] = _domain(row.get("link"))
         row["reliable_domain"] = _reliable_domain(row["publisher_domain"])
         row["topics"] = _topics(row)
@@ -178,9 +189,13 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
 
     events = []
     for event_id, members in grouped.items():
-        primary = [row for row in members if row["source"] in BROAD_PRIMARY_SOURCES]
+        timely = [row for row in members if row["time_assessment"].eligible]
+        evidence_members = timely or members
+        primary = [
+            row for row in evidence_members if row["source"] in BROAD_PRIMARY_SOURCES
+        ]
         reliable_domains = {
-            row["reliable_domain"] for row in members if row["reliable_domain"]
+            row["reliable_domain"] for row in evidence_members if row["reliable_domain"]
         }
         if primary:
             grade = "PRIMARY"
@@ -191,14 +206,25 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
         else:
             grade = "DISCOVERY_ONLY"
         candidates = primary or [
-            row for row in members if row["reliable_domain"] in reliable_domains
-        ] or members
+            row for row in evidence_members if row["reliable_domain"] in reliable_domains
+        ] or evidence_members
         canonical = max(
             candidates,
             key=lambda row: (float(row["confidence"]), len(str(row["body"])), row["source_item_id"]),
         )
         topics = tuple(sorted({topic for row in members for topic in row["topics"]}))
-        eligible = grade in {"PRIMARY", "CORROBORATED"} and bool(ACTION_TOPICS & set(topics))
+        annotation = json.loads(canonical.get("annotation_json") or "{}")
+        controlled_category = str(annotation.get("primary_category") or "")
+        relevant = controlled_category in {
+            "rates_fed", "inflation_employment", "growth_economy", "usd_liquidity",
+            "oil_energy", "war_geopolitics", "central_bank_gold", "risk_sentiment",
+        }
+        eligible = (
+            bool(timely)
+            and grade in {"PRIMARY", "CORROBORATED"}
+            and bool(ACTION_TOPICS & set(topics))
+            and relevant
+        )
         source_names = sorted({row["source"] for row in members})
         publisher_domains = sorted({
             row["publisher_domain"] for row in members if row["publisher_domain"]
@@ -207,9 +233,16 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             row["source"] for row in primary
         })
         reasons = [f"EVIDENCE_{grade}"]
-        if not eligible:
-            reasons.append("NO_ACTION_TOPIC" if not (ACTION_TOPICS & set(topics)) else "NEEDS_CONFIRMATION")
-        annotation = json.loads(canonical.get("annotation_json") or "{}")
+        if not timely:
+            reasons.extend(sorted({
+                row["time_assessment"].reason_code for row in members
+            }))
+        if not relevant:
+            reasons.append("CATEGORY_NOT_ACTIONABLE")
+        if not (ACTION_TOPICS & set(topics)):
+            reasons.append("NO_ACTION_TOPIC")
+        elif timely and grade not in {"PRIMARY", "CORROBORATED"}:
+            reasons.append("NEEDS_CONFIRMATION")
         entities = sorted({
             str(value).strip()
             for row in members
@@ -239,6 +272,12 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             "entities": entities,
             "primary_category": annotation.get("primary_category"),
             "model_permission": "BROAD_MODEL" if eligible else "DISPLAY_ONLY",
+            "source_published_time": (
+                canonical["time_assessment"].event_time.isoformat()
+                if canonical["time_assessment"].event_time else None
+            ),
+            "economic_age_minutes": canonical["time_assessment"].age_minutes,
+            "freshness_status": canonical["time_assessment"].reason_code,
             "collector_first_seen_time": min(row["collector_first_seen_time"] for row in members),
             "parsed_at": canonical["parsed_at"],
             "hawkishness": float(canonical["hawkishness"]),

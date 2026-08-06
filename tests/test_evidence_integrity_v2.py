@@ -318,12 +318,18 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
                  first_seen: datetime, parsed_at: datetime, impulse: float,
                  link: str | None = None,
                  entities: list[str] | None = None,
-                 event_type: str = "monetary_policy") -> None:
+                 event_type: str = "monetary_policy",
+                 published_at: datetime | None = None,
+                 primary_category: str = "rates_fed",
+                 include_published_time: bool = True) -> None:
     entities = entities or []
     body = ("publisher full body " * 30) + item
     digest = hashlib.sha256(body.encode()).hexdigest()
     ledger.append_news_revision({
         "source": source, "source_item_id": item,
+        "source_published_time": (
+            (published_at or first_seen) if include_published_time else None
+        ),
         "collector_first_seen_time": first_seen, "fetched_time": first_seen,
         "headline": item, "body": body, "content_hash": digest, "cluster_id": item,
         "link": link,
@@ -334,23 +340,27 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
         "entities": entities, "hawkishness": impulse, "inflation_impulse": 0.0,
         "growth_impulse": 0.0, "geopolitical_risk": 0.0, "usd_impulse": 0.0,
         "novelty": 1.0, "confidence": 1.0, "llm_model_version": "gemini-3.5-flash-lite",
-        "prompt_version": "news-json-v9-local-display-recovery",
+        "prompt_version": "news-json-v10-controlled-category-zh",
         "parse_started_at": parsed_at, "parsed_at": parsed_at,
         "annotation": {
             "event_type": event_type, "entities": entities, "hawkishness": impulse,
             "inflation_impulse": 0.0, "growth_impulse": 0.0,
             "geopolitical_risk": 0.0, "usd_impulse": 0.0,
             "novelty": 1.0, "confidence": 1.0,
+            "headline_zh": item, "summary_zh": body,
+            "primary_category": primary_category,
+            "secondary_categories": [], "emerging_topic_zh": "",
         },
     })
 
 
-def test_news_freshness_ages_from_first_seen_not_parsed_at(tmp_path) -> None:
+def test_news_freshness_ages_from_published_time_not_parsed_at(tmp_path) -> None:
     first_seen = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     decision = first_seen + timedelta(minutes=30)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=first_seen)
     _append_news(ledger, source="federal_reserve_monetary", item="official",
-                 first_seen=first_seen, parsed_at=decision, impulse=1.0)
+                 first_seen=first_seen, parsed_at=decision, impulse=1.0,
+                 published_at=first_seen)
     features = aggregate_news_features_v2(ledger, decision)
     expected_freshness = 2 ** (-30 / 360)
     assert features["features"]["news_event_count"] == pytest.approx(expected_freshness)
@@ -370,6 +380,50 @@ def test_news_older_than_72_hours_is_not_a_current_feature(tmp_path) -> None:
     assert features["model_visible_items"] == 0
     assert features["news_exposed"] == 0
     assert features["features"]["news_event_count"] == 0.0
+    ledger.close()
+
+
+def test_archive_collected_after_epoch_does_not_become_current_news(tmp_path) -> None:
+    epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    decision = epoch + timedelta(minutes=30)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
+    _append_news(
+        ledger, source="federal_reserve_monetary", item="archive",
+        first_seen=epoch + timedelta(minutes=2), parsed_at=epoch + timedelta(minutes=4),
+        published_at=epoch - timedelta(days=30), impulse=1.0,
+    )
+    features = aggregate_news_features_v2(ledger, decision)
+    assert features["model_visible_items"] == 0
+    assert features["features"]["news_event_count"] == 0.0
+    ledger.close()
+
+
+def test_missing_publisher_time_is_display_only_not_a_current_impulse(tmp_path) -> None:
+    epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    decision = epoch + timedelta(minutes=30)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
+    _append_news(
+        ledger, source="federal_reserve_monetary", item="unknown-time",
+        first_seen=epoch + timedelta(minutes=2), parsed_at=epoch + timedelta(minutes=4),
+        impulse=1.0, include_published_time=False,
+    )
+    features = aggregate_news_features_v2(ledger, decision)
+    assert features["model_visible_items"] == 0
+    ledger.close()
+
+
+def test_regulatory_category_cannot_enter_direction_features(tmp_path) -> None:
+    epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    decision = epoch + timedelta(minutes=30)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
+    _append_news(
+        ledger, source="federal_reserve_press_all", item="bank-application",
+        first_seen=epoch + timedelta(minutes=2), parsed_at=epoch + timedelta(minutes=4),
+        impulse=1.0, primary_category="regulation_other",
+    )
+    features = aggregate_news_features_v2(ledger, decision)
+    assert features["model_visible_items"] == 0
+    assert features["features"]["news_hawkishness"] == 0.0
     ledger.close()
 
 
@@ -757,14 +811,16 @@ def test_retraining_occurs_after_fifty_additional_rows(tmp_path, monkeypatch) ->
 def test_news_models_train_early_with_explicit_experimental_status(
     tmp_path, monkeypatch, event_days: int, expected_status: str
 ) -> None:
-    ledger = ForwardLedger(tmp_path / f"forward-news-{event_days}.sqlite3")
+    first_seen = datetime(2026, 8, 1, 10, tzinfo=UTC)
+    ledger = ForwardLedger(
+        tmp_path / f"forward-news-{event_days}.sqlite3", now=first_seen
+    )
     rows = _training_rows(120)
     for row in rows:
         row["news_exposed"] = True
         row["news"] = [0.1] * len(training_v2.NEWS_FEATURES)
         row["broad_news_exposed"] = True
         row["broad_news"] = [0.1] * len(training_v2.BROAD_MODEL_FEATURES)
-    first_seen = datetime(2026, 8, 1, 10, tzinfo=UTC)
     for index in range(10):
         seen = first_seen + timedelta(days=index % event_days)
         _append_news(
@@ -869,16 +925,31 @@ def test_rolling_uncertainty_uses_latest_version_per_prior_decision(tmp_path) ->
 def test_only_latest_and_previous_versions_are_active() -> None:
     updates = [
         {"model_identity": "MARKET_ONLY", "model_version": "market-3"},
-        {"model_identity": "FULL", "model_version": "full-3"},
+        {"model_identity": "FULL", "model_version": "full-3",
+         "eligibility_version": inference_v2.ELIGIBILITY_VERSION},
         {"model_identity": "MARKET_ONLY", "model_version": "market-2"},
-        {"model_identity": "FULL", "model_version": "full-2"},
+        {"model_identity": "FULL", "model_version": "full-2",
+         "eligibility_version": inference_v2.ELIGIBILITY_VERSION},
         {"model_identity": "MARKET_ONLY", "model_version": "market-1"},
-        {"model_identity": "FULL", "model_version": "full-1"},
+        {"model_identity": "FULL", "model_version": "full-1",
+         "eligibility_version": inference_v2.ELIGIBILITY_VERSION},
     ]
     active = inference_v2._active_updates(updates)
     assert [row["model_version"] for row in active] == [
         "market-3", "full-3", "market-2", "full-2",
     ]
+
+
+def test_active_updates_reject_old_news_eligibility_but_keep_market() -> None:
+    updates = [
+        {"model_identity": "FULL", "model_version": "old-full",
+         "eligibility_version": "news-source-eligibility-v2-event-evidence"},
+        {"model_identity": "BROAD_FULL", "model_version": "old-broad",
+         "eligibility_version": "news-source-eligibility-v2-event-evidence+old"},
+        {"model_identity": "MARKET_ONLY", "model_version": "market-current"},
+    ]
+    active = inference_v2._active_updates(updates)
+    assert [row["model_version"] for row in active] == ["market-current"]
 
 
 def test_unhealthy_predictions_do_not_enter_rolling_calibration(tmp_path) -> None:

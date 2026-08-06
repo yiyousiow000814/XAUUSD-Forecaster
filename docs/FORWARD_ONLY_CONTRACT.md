@@ -35,6 +35,15 @@ than the decision. A news revision is visible only when its
 `collector_first_seen_time` is not later than the decision. Publisher time is
 descriptive metadata and never overrides collector visibility.
 
+Visibility and economic freshness are separate clocks. Action-bearing news
+must also have a recorded `source_published_time` at or after `FORWARD_EPOCH`,
+not later than the decision, and no more than 72 hours before both first receipt
+and the decision. Missing publisher timestamps, pre-epoch archive items, late
+discoveries, and stale events remain visible for audit but cannot create a
+current model impulse. Freshness decay is measured from publisher time, never
+from parser completion or collector startup. Controlled category
+`regulation_other` is display-only even when it comes from an official source.
+
 Revised news is a new row with a larger revision number and a new content
 hash. Existing revisions are never updated. An annotation is usable only when
 all of the following hold:

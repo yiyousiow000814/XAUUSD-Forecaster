@@ -621,19 +621,23 @@ def test_direct_official_html_sources_are_filtered_and_bounded(tmp_path) -> None
 
     def fetcher(url: str) -> bytes:
         if "treasury.gov" in url:
-            return b'''<a href="/news/press-releases/sb1">Treasury sanctions Iran oil network</a>
+            return b'''<div><time datetime="2026-08-05T09:00:00Z">5 August</time>
+            <a href="/news/press-releases/sb1">Treasury sanctions Iran oil network</a></div>
             <a href="/news/press-releases/sb2">Unrelated office update</a>'''
-        return b'''<a href="/news/2026/gdp-release">GDP (Advance Estimate)</a>
+        return b'''<tr><td><a href="/news/2026/gdp-release">GDP (Advance Estimate)</a></td>
+        <td><time datetime="2026-08-05T05:30:00-04:00">5 August</time></td></tr>
         <a href="/news/2026/direct-investment">Direct Investment</a>'''
 
     results = collect_direct_full_text_html_news(ledger, fetched, fetcher)
     assert [item["status"] for item in results] == ["OK", "OK"]
     rows = ledger.connection.execute(
-        "SELECT source, headline, link FROM news_revisions ORDER BY source"
+        "SELECT source, headline, link, source_published_time FROM news_revisions ORDER BY source"
     ).fetchall()
     assert len(rows) == 2
     assert rows[0]["source"] == "bea_economic_releases"
+    assert rows[0]["source_published_time"] == "2026-08-05T09:30:00.000000+00:00"
     assert rows[1]["source"] == "us_treasury_press_releases"
+    assert rows[1]["source_published_time"] == "2026-08-05T09:00:00.000000+00:00"
     assert rows[1]["link"].startswith("https://home.treasury.gov/")
 
 

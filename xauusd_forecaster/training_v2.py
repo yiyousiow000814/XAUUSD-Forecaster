@@ -166,12 +166,21 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
     placeholders = ",".join("?" for _ in eligible_sources)
     coverage = ledger.connection.execute(
         f"""SELECT count(DISTINCT n.cluster_id) AS clusters,
-                   count(DISTINCT substr(n.collector_first_seen_time,1,10)) AS event_days
+                   count(DISTINCT substr(n.source_published_time,1,10)) AS event_days
         FROM news_revisions n
         JOIN news_annotations a USING(source,source_item_id,revision_number)
         WHERE n.source IN ({placeholders}) AND length(coalesce(n.body,''))>=200
-          AND n.collector_first_seen_time<=? AND a.parsed_at<=?""",
-        (*eligible_sources, cutoff.isoformat(), cutoff.isoformat()),
+          AND n.collector_first_seen_time<=? AND a.parsed_at<=?
+          AND n.source_published_time IS NOT NULL
+          AND n.source_published_time>=?
+          AND n.source_published_time<=?
+          AND julianday(n.collector_first_seen_time)-julianday(n.source_published_time)<=3.0
+          AND julianday(?)-julianday(n.source_published_time)<=3.0
+          AND coalesce(json_extract(a.annotation_json,'$.primary_category'),'') IN
+              ('rates_fed','inflation_employment','growth_economy','usd_liquidity',
+               'oil_energy','war_geopolitics','central_bank_gold','risk_sentiment')""",
+        (*eligible_sources, cutoff.isoformat(), cutoff.isoformat(),
+         ledger.forward_epoch.isoformat(), cutoff.isoformat(), cutoff.isoformat()),
     ).fetchone()
     clusters = int(coverage["clusters"] or 0)
     event_days = int(coverage["event_days"] or 0)
@@ -189,7 +198,7 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
     ]
     broad_clusters = len(broad_events)
     broad_event_days = len({
-        row["collector_first_seen_time"][:10] for row in broad_events
+        row["source_published_time"][:10] for row in broad_events
     })
     broad_ready = (
         len(broad_exposed) >= NEWS_MIN_EXPOSED_ROWS
@@ -202,9 +211,16 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
     ).fetchone()
     paired_models = ledger.connection.execute(
         """SELECT DISTINCT model_identity FROM model_updates_v2
-        WHERE model_identity IN ('FULL','BROAD_FULL')
-          AND model_stage=? AND created_at>=?""",
-        (stage, latest["created_at"]),
+        WHERE model_stage=? AND created_at>=?
+          AND (
+            (model_identity='FULL' AND eligibility_version=?)
+            OR
+            (model_identity='BROAD_FULL' AND eligibility_version=?)
+          )""",
+        (
+            stage, latest["created_at"], ELIGIBILITY_VERSION,
+            f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}",
+        ),
     ).fetchall() if latest is not None else []
     paired_identities = {row["model_identity"] for row in paired_models}
     latest_artifact_path = Path(latest["artifact_path"]) if latest is not None else None

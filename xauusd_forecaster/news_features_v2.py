@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import math
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from .evidence_v2 import ELIGIBILITY_VERSION
 from .factors import MACRO_FEATURE_MAP, NEWS_FEATURES
 from .forward_ledger import canonical_hash
 from .news_evidence import BROAD_NEWS_FEATURES, event_evidence_rows
+from .news_time import assess_news_time
 
 
 SOURCE_RULES = {
@@ -26,9 +28,10 @@ SOURCE_RULES = {
     "google_news_gold_geopolitics": ("COLLECT_ONLY", True, 200, "headline-only aggregation"),
 }
 
-# Historical samples remain trainable, but old headlines must not remain a
-# current decision feature indefinitely.
-MAX_NEWS_AGE = timedelta(hours=72)
+ACTIONABLE_CATEGORIES = frozenset({
+    "rates_fed", "inflation_employment", "growth_economy", "usd_liquidity",
+    "oil_energy", "war_geopolitics", "central_bank_gold", "risk_sentiment",
+})
 
 
 def frozen_rule_rows() -> list[tuple[str, str, int, int, str]]:
@@ -55,28 +58,34 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
         body = str(news["body"] or "")
         if tier != "MODEL_ELIGIBLE" or (requires_body and len(body) < minimum):
             continue
-        first_seen = datetime.fromisoformat(news["collector_first_seen_time"])
-        if decision_time - first_seen > MAX_NEWS_AGE:
+        timing = assess_news_time(
+            news, decision_time=decision_time, forward_epoch=ledger.forward_epoch
+        )
+        annotation_payload = json.loads(annotation["annotation_json"] or "{}")
+        if (
+            not timing.eligible
+            or annotation_payload.get("primary_category") not in ACTIONABLE_CATEGORIES
+        ):
             continue
-        selected.append((news, annotation))
+        selected.append((news, annotation, timing))
 
     # One canonical publisher item per duplicate cluster.
     canonical = {}
-    for news, annotation in selected:
+    for news, annotation, timing in selected:
         cluster = str(news["cluster_id"])
         current = canonical.get(cluster)
         candidate = (len(str(news["body"] or "")), str(news["source_item_id"]))
         if current is None or candidate > current[0]:
-            canonical[cluster] = (candidate, news, annotation)
+            canonical[cluster] = (candidate, news, annotation, timing)
 
     totals = {name: 0.0 for name in NEWS_FEATURES}
     weight_sum = 0.0
     event_types = set()
     evidence = []
-    for _, news, row in canonical.values():
+    for _, news, row, timing in canonical.values():
         first_seen = datetime.fromisoformat(news["collector_first_seen_time"])
         parsed_at = datetime.fromisoformat(row["parsed_at"])
-        age_minutes = max(0.0, (decision_time - first_seen).total_seconds() / 60.0)
+        age_minutes = float(timing.age_minutes or 0.0)
         processing_delay = (parsed_at - first_seen).total_seconds()
         freshness = math.exp(-math.log(2.0) * age_minutes / 360.0)
         confidence = float(row["confidence"])
@@ -92,7 +101,11 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
         totals["news_confidence"] += weight * confidence
         totals["news_event_count"] += freshness
         event_types.add(str(row["event_type"]))
-        evidence.append((news["content_hash"], row["annotation_id"], age_minutes, processing_delay))
+        evidence.append((
+            news["content_hash"], row["annotation_id"],
+            timing.event_time.isoformat() if timing.event_time else None,
+            age_minutes, processing_delay,
+        ))
     if weight_sum:
         for name in (
             "news_hawkishness", "news_inflation_impulse", "news_growth_impulse",
@@ -131,13 +144,11 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
     broad_events = [
         row for row in event_evidence_rows(ledger, decision_time)
         if row["broad_model_eligible"]
-        and decision_time - datetime.fromisoformat(row["collector_first_seen_time"]) <= MAX_NEWS_AGE
     ]
     broad_weight_sum = 0.0
     broad_evidence = []
     for row in broad_events:
-        first_seen = datetime.fromisoformat(row["collector_first_seen_time"])
-        age_minutes = max(0.0, (decision_time - first_seen).total_seconds() / 60.0)
+        age_minutes = float(row["economic_age_minutes"])
         freshness = math.exp(-math.log(2.0) * age_minutes / 360.0)
         weight = freshness * row["confidence"] * max(0.05, row["novelty"])
         broad_weight_sum += weight

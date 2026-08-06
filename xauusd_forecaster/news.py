@@ -183,6 +183,21 @@ def _clean(value: str) -> str:
     return " ".join(plain.split())
 
 
+def _published_near_anchor(anchor) -> datetime | None:
+    """Read an official listing timestamp without guessing from the headline."""
+    node = anchor
+    for _ in range(5):
+        node = getattr(node, "parent", None)
+        if node is None:
+            break
+        stamped = node.select_one("time[datetime]")
+        if stamped is not None:
+            parsed = _published(str(stamped.get("datetime") or ""))
+            if parsed is not None:
+                return parsed
+    return None
+
+
 def parse_rss(payload: bytes, source: RssSource, fetched_at: datetime) -> list[dict]:
     root = ET.fromstring(payload)
     items = [node for node in root.iter() if node.tag.rsplit("}", 1)[-1].lower() in {"item", "entry"}]
@@ -540,20 +555,22 @@ def collect_direct_full_text_html_news(
                     {
                         "source": source.name,
                         "source_item_id": link,
-                        "source_published_time": None,
+                        "source_published_time": _published_near_anchor(anchor),
                         "collector_first_seen_time": fetched_at,
                         "fetched_time": fetched_at,
                         "headline": headline,
                         "body": body,
                         "link": link,
-                        "content_hash": hashlib.sha256(
-                            f"{headline}\n{body}\n{link}".encode()
-                        ).hexdigest(),
+                        "content_hash": "",
                         "cluster_id": hashlib.sha256(
                             re.sub(r"[^a-z0-9]+", " ", headline.lower()).strip().encode()
                         ).hexdigest(),
                     }
                 )
+                published = records[-1]["source_published_time"]
+                records[-1]["content_hash"] = hashlib.sha256(
+                    f"{headline}\n{body}\n{link}\n{published}".encode()
+                ).hexdigest()
                 if len(records) >= 5:
                     break
             inserted = 0

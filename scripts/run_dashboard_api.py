@@ -758,7 +758,9 @@ def _dashboard_payload(database: Path) -> dict:
         )
         evidence_display_fields = (
             "event_key", "canonical_headline", "canonical_source",
-            "collector_first_seen_time", "topics", "evidence_grade",
+            "source_published_time", "collector_first_seen_time",
+            "economic_age_minutes", "freshness_status",
+            "topics", "evidence_grade",
             "broad_model_eligible", "model_permission", "member_count",
             "independent_publishers", "source_names", "publisher_domains",
             "reason_codes",

@@ -77,7 +77,10 @@ type NewsEvidence = {
   event_key: string;
   canonical_headline: string;
   canonical_source: string;
+  source_published_time: string | null;
   collector_first_seen_time: string;
+  economic_age_minutes: number | null;
+  freshness_status: string;
   topics: string[];
   evidence_grade: "PRIMARY" | "CORROBORATED" | "SINGLE_RELIABLE" | "DISCOVERY_ONLY";
   broad_model_eligible: boolean;
@@ -329,6 +332,22 @@ const EVIDENCE_LABELS: Record<string, string> = {
   PRIMARY: "一手官方证据", CORROBORATED: "多源确认",
   SINGLE_RELIABLE: "单一可靠来源", DISCOVERY_ONLY: "线索来源",
 };
+const EVIDENCE_REASON_LABELS: Record<string, string> = {
+  CURRENT_EVENT: "当前事件",
+  NOT_YET_VISIBLE: "决策时尚未收到",
+  PUBLISHED_TIME_MISSING: "缺少可靠发布时间",
+  PRE_FORWARD_PUBLICATION: "系统启动前的旧档案",
+  PUBLISHED_AFTER_DECISION: "决策时尚未发布",
+  LATE_DISCOVERY: "迟到发现，不算当前冲击",
+  STALE_EVENT: "发布时间已超过72小时",
+  CATEGORY_NOT_ACTIONABLE: "非黄金方向类别",
+  NEEDS_CONFIRMATION: "尚未达到模型证据门槛",
+  NO_ACTION_TOPIC: "与方向主题无关",
+  EVIDENCE_PRIMARY: "一手来源",
+  EVIDENCE_CORROBORATED: "多源确认",
+  EVIDENCE_SINGLE_RELIABLE: "单一可靠来源",
+  EVIDENCE_DISCOVERY_ONLY: "线索来源",
+};
 
 function NewsRow({ row, keyCount, requestsPerMinute }: {
   row: News; keyCount: number; requestsPerMinute: number;
@@ -550,7 +569,7 @@ export default function AuditPage() {
       {view === "evidence" && <section className="evidence-desk">
         <header className="evidence-intro">
           <div><p className="eyebrow">EVENT-LEVEL NEWS EVIDENCE</p><h2>来源不是权限，<br />证据强度才是。</h2></div>
-          <p>同一事件先按主题、实体和首次可见时间聚合。一手官方正文可直接进入大视野实验模型；媒体报道必须由至少两个独立可靠 publisher 相互确认。当前决策最多回看 <b>{payload?.news_feature_policy.maximum_current_age_hours ?? 72} 小时</b>，每 {payload?.news_feature_policy.freshness_half_life_hours ?? 6} 小时权重减半；更旧新闻仍保留为当时历史样本，但不会伪装成今天的信号。</p>
+          <p>系统首次收到时间只决定“当时能不能看见”；媒体发布时间才决定“是不是当前事件”。一手官方正文可直接进入大视野实验模型，媒体报道必须由至少两个独立可靠 publisher 相互确认。当前决策最多回看 <b>{payload?.news_feature_policy.maximum_current_age_hours ?? 72} 小时</b>，每 {payload?.news_feature_policy.freshness_half_life_hours ?? 6} 小时权重减半；缺少可靠发布时间、启动前旧档案及迟到发现只保留展示，不进入训练。</p>
         </header>
         <div className="evidence-summary">
           <article><span>事件总数</span><strong>{payload?.news_evidence_summary.total_events ?? 0}</strong><small>显示最近 {payload?.news_evidence_summary.displayed_events ?? 0} 个</small></article>
@@ -559,12 +578,12 @@ export default function AuditPage() {
           <article><span>多源确认</span><strong>{payload?.news_evidence_summary.grades.CORROBORATED ?? 0}</strong></article>
         </div>
         <div className="evidence-table-wrap"><table className="evidence-table">
-          <thead><tr><th>证据等级 / 权限</th><th>事件与主题</th><th>独立来源</th><th>首次可见</th></tr></thead>
+          <thead><tr><th>证据等级 / 权限</th><th>事件与主题</th><th>独立来源</th><th>发布时间 / 首次收到</th></tr></thead>
           <tbody>{(payload?.news_evidence ?? []).map(row => <tr key={row.event_key}>
             <td><span className={`evidence-grade grade-${row.evidence_grade.toLowerCase().replaceAll("_", "-")}`}>{EVIDENCE_LABELS[row.evidence_grade] ?? row.evidence_grade}</span><small>{row.broad_model_eligible ? "可进入 Broad 实验模型" : "仅显示，不进入训练"}</small></td>
             <td><strong>{row.canonical_headline}</strong><div className="evidence-topics">{row.topics.map(topic => <span key={topic}>{TOPIC_LABELS[topic] ?? topic}</span>)}</div></td>
             <td><strong>{row.independent_publishers}</strong><small>{[...row.source_names, ...row.publisher_domains].join(" · ") || "未识别 publisher"}<br />{row.member_count} 篇成员新闻</small></td>
-            <td><time>{time(row.collector_first_seen_time)}</time><small>{row.reason_codes.join(" · ")}</small></td>
+            <td><time>{row.source_published_time ? time(row.source_published_time) : "发布时间未知"}</time><small>首次收到 {time(row.collector_first_seen_time)}<br />{row.reason_codes.map(code => EVIDENCE_REASON_LABELS[code] ?? code).join(" · ")}</small></td>
           </tr>)}</tbody>
         </table></div>
       </section>}
