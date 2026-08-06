@@ -7,6 +7,7 @@ import argparse
 import json
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -23,6 +24,18 @@ from xauusd_forecaster.annotation import (  # noqa: E402
 from xauusd_forecaster.forward_ledger import ForwardLedger  # noqa: E402
 
 
+def write_heartbeat(path: Path, *, work_items: int) -> None:
+    now = datetime.now(UTC).isoformat()
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(
+            {"last_success": now, "last_error": None, "work_items": work_items}
+        ),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -36,6 +49,11 @@ def main() -> int:
         help="0 uses the safe per-key Gemini capacity automatically",
     )
     parser.add_argument("--once", action="store_true")
+    parser.add_argument(
+        "--status-file",
+        type=Path,
+        default=MODULE_ROOT / ".local" / "forward" / "news-annotator-status.json",
+    )
     args = parser.parse_args()
     ledger = ForwardLedger(args.database)
     try:
@@ -78,6 +96,12 @@ def main() -> int:
                 ),
                 flush=True,
             )
+            work_items = sum(
+                len(batch)
+                for batch in (statuses, fallback_statuses, translations)
+                if isinstance(batch, list)
+            )
+            write_heartbeat(args.status_file, work_items=work_items)
             if args.once:
                 break
             time.sleep(max(5.0, args.interval_seconds))

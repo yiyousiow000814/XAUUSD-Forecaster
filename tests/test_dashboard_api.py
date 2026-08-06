@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from xauusd_forecaster.annotation import INVALID_CHINESE_TITLE
@@ -23,7 +23,7 @@ def _dashboard_module():
 
 
 def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
-    now = datetime(2026, 8, 6, 1, 0, tzinfo=UTC)
+    now = datetime.now(UTC).replace(microsecond=0)
     database = tmp_path / "forward.sqlite3"
     ledger = ForwardLedger(database, now=now)
     body = "full evidence body " * 30
@@ -53,7 +53,7 @@ def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
             **common, "translation_id": "placeholder",
             "headline_zh": INVALID_CHINESE_TITLE,
             "prompt_version": "news-json-v9-local-display-recovery",
-            "parsed_at": now.replace(second=1),
+            "parsed_at": now + timedelta(seconds=1),
         }
     )
     ledger.connection.close()
@@ -66,7 +66,7 @@ def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
 
     payload = _dashboard_module()._dashboard_payload(database)
     assert payload["recent_news"][0]["headline"] == "2026年6月个人收入与支出"
-    assert len(payload["news_source_health"]) == 11
+    assert len(payload["news_source_health"]) == 10
     synchronizer = payload["system"]["components"]["sites_synchronizer"]
     assert synchronizer["last_success"] == sync_success
     assert synchronizer["status"] == "OK"

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import http.client
 import json
 import os
@@ -17,6 +18,68 @@ from pathlib import Path
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = MODULE_ROOT / ".local" / "forward" / "dashboard-sync.json"
 DEFAULT_STATUS = MODULE_ROOT / ".local" / "forward" / "dashboard-sync-status.json"
+REMOTE_PAYLOAD_LIMIT_BYTES = 450_000
+REMOTE_NEWS_LIMIT = 80
+REMOTE_DECISION_LIMIT = 20
+REMOTE_EVIDENCE_LIMIT = 60
+
+
+def remote_snapshot(payload: dict) -> bytes:
+    """Build a bounded Sites mirror without truncating retained news content."""
+    snapshot = copy.deepcopy(payload)
+    training = snapshot.get("training")
+    if isinstance(training, dict):
+        training.pop("models", None)  # Duplicated by learning_curves.models.
+
+    learning = snapshot.get("learning_curves")
+    if isinstance(learning, dict):
+        # These analytical series are retained in local SQLite/API and are not
+        # rendered by the Sites UI.
+        learning.pop("identity_curves", None)
+        learning.pop("full_minus_market", None)
+        learning.pop("broad_full_minus_official_full", None)
+        models = learning.get("models")
+        if isinstance(models, list):
+            learning["archived_model_count"] = sum(
+                row.get("lifecycle_status") not in {"LATEST", "PREVIOUS"}
+                for row in models
+            )
+            learning["models"] = [
+                row
+                for row in models
+                if row.get("lifecycle_status") in {"LATEST", "PREVIOUS"}
+            ]
+
+    for name, limit in (
+        ("recent_news", REMOTE_NEWS_LIMIT),
+        ("recent_decisions", REMOTE_DECISION_LIMIT),
+        ("news_evidence", REMOTE_EVIDENCE_LIMIT),
+    ):
+        rows = snapshot.get(name)
+        if isinstance(rows, list):
+            snapshot[name] = rows[:limit]
+
+    snapshot["mirror_window"] = {
+        "bounded": True,
+        "recent_news": len(snapshot.get("recent_news", [])),
+        "recent_decisions": len(snapshot.get("recent_decisions", [])),
+        "news_evidence": len(snapshot.get("news_evidence", [])),
+    }
+    encoded = json.dumps(
+        snapshot, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+    ).encode("utf-8")
+    while len(encoded) > REMOTE_PAYLOAD_LIMIT_BYTES and snapshot.get("recent_news"):
+        snapshot["recent_news"].pop()
+        snapshot["mirror_window"]["recent_news"] = len(snapshot["recent_news"])
+        encoded = json.dumps(
+            snapshot, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+        ).encode("utf-8")
+    if len(encoded) > REMOTE_PAYLOAD_LIMIT_BYTES:
+        raise ValueError(
+            f"bounded dashboard payload is still {len(encoded)} bytes "
+            f"(limit {REMOTE_PAYLOAD_LIMIT_BYTES})"
+        )
+    return encoded
 
 
 def write_sync_status(
@@ -60,7 +123,7 @@ def write_sync_status(
 
 def sync_once(config: dict) -> None:
     with urllib.request.urlopen(config["local_status_url"], timeout=5) as response:
-        payload = response.read()
+        payload = remote_snapshot(json.loads(response.read()))
     headers = {
         "Authorization": f"Bearer {config['token']}",
         "Content-Type": "application/json",

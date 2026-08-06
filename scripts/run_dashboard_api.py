@@ -48,7 +48,6 @@ NEWS_SOURCE_DEFINITIONS = {
     "eia_today_in_energy": ("U.S. EIA Energy", "发布源", 45, ("eia_today_in_energy",)),
     "gdelt_gold_geopolitics": ("GDELT", "发布源", 75, ("gdelt_gold_geopolitics",)),
     "google_news_gold_context": ("Google News Context", "发布源", 45, ("google_news_gold_context",)),
-    "google_news_gold_geopolitics": ("Google News Geopolitics", "备用发布源", 420, ("google_news_gold_geopolitics",)),
     "world_gold_council_central_banks": ("World Gold Council", "发布源", 420, ("world_gold_council_central_banks",)),
     "non_fed_full_text": ("非 Fed 正文解析器", "正文链路", 45, ()),
 }
@@ -563,6 +562,17 @@ def _dashboard_payload(database: Path) -> dict:
         except (OSError, json.JSONDecodeError):
             sync_status = {"last_error": "Invalid synchronizer status file"}
     sync_time = sync_status.get("last_success")
+    annotator_status_file = database.parent / "news-annotator-status.json"
+    if annotator_status_file.exists():
+        try:
+            annotator_status = json.loads(
+                annotator_status_file.read_text(encoding="utf-8")
+            )
+            component_times["gemini_annotator"] = annotator_status.get(
+                "last_success"
+            ) or component_times["gemini_annotator"]
+        except (OSError, json.JSONDecodeError):
+            pass
     backup_files = sorted((database.parent / "backups").glob("*.sqlite3"), key=lambda p: p.stat().st_mtime)
     backup_time = datetime.fromtimestamp(backup_files[-1].stat().st_mtime, UTC).isoformat() if backup_files else None
     component_times["sites_synchronizer"] = sync_time
