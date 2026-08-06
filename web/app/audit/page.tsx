@@ -232,7 +232,14 @@ type Payload = {
     exit_checkpoints_minutes: number[];
     models: Array<{ model_identity: string; status: string; training_rows: number;
       available_examples: number; next_training_threshold: number;
-      model_version: string | null; predictions: number; scores: number }>;
+      model_version: string | null; predictions: number; scores: number;
+      evaluation: {
+        score_count: number; exact_choice_rate?: number | null; action_accuracy?: number | null;
+        mean_squared_error: number | null; selected_cumulative_return?: number;
+        baseline_cumulative_return?: number; selected_cumulative_utility_u5?: number;
+        always_hold_cumulative_utility_u5?: number; unit: string;
+        points: Array<Record<string, string | number>>;
+      } }>;
   };
   factor_coverage: Array<{
     domain: string;
@@ -391,6 +398,7 @@ export default function AuditPage() {
   const [newsCategory, setNewsCategory] = useState("全部");
   const [newsPage, setNewsPage] = useState(1);
   const [graphOpen, setGraphOpen] = useState(false);
+  const [graphStartTab, setGraphStartTab] = useState<"curve" | "execution">("curve");
 
   const refresh = useCallback(async () => {
     try {
@@ -606,9 +614,9 @@ export default function AuditPage() {
         <div className="league-cost-note"><b>诚实成本口径</b><span>显示的是 Bid/Ask quote-cost-adjusted return；commission {payload?.learning_curves.commission_status ?? "UNCONFIGURED"}，slippage {payload?.learning_curves.slippage_status ?? "UNAVAILABLE_SHADOW"}，因此不是 net PnL。</span></div>
         <section className="graph-launch">
           <div><span>ONE TIMELINE · THREE VIEWS</span><h3>曲线、每组成绩与 K 线放在同一弹窗。</h3><p>主页面保持紧凑；点开后可切换长期累计、每个训练组的独立成绩，以及 XAUUSD K线决策。</p></div>
-          <button type="button" onClick={() => setGraphOpen(true)}>打开交互图表 ↗</button>
+          <button type="button" onClick={() => { setGraphStartTab("curve"); setGraphOpen(true); }}>打开交互图表 ↗</button>
         </section>
-        <ExecutionResearch status={payload?.execution_learning} />
+        <ExecutionResearch status={payload?.execution_learning} onOpenGraph={() => { setGraphStartTab("execution"); setGraphOpen(true); }} />
         <section className="model-scope-note">
           <article><b>新闻残差是“加减多少”，不是完整答案</b><span>例：黄金自身预测 +0.10 U5，新闻残差 +0.04 U5，组合答案才是 +0.14 U5。残差模型虽然有自己独立的 Ridge 参数，但它的训练答案依赖黄金自身先算出的 +0.10。</span></article>
           <article><b>News-only 才能回答“完全不看黄金行不行”</b><span>News-only 必须只拿新闻特征，直接学习真实30分钟目标 +0.14 U5；它不是“基线漏了多少”。然后才可与黄金自身、黄金＋新闻三者做同一时点的未来 OOS 对照。</span></article>
@@ -623,7 +631,7 @@ export default function AuditPage() {
           return <article key={identity}><b>{MODEL_LABELS[identity]}{diagnostic ? <small>新闻修正量</small> : null}</b><span>历史＋实时连续累计 <strong>{process?.oos_rows ? percent(process.cumulative_quote_return) : "等待成熟结果"}</strong></span><i aria-hidden="true">·</i><span>本组独立 <strong>{latestGroup?.subsequent_oos_rows ? percent(latestGroup.cumulative_quote_return) : "等待结果"}</strong></span></article>;
         })}</div>}
         <footer className="league-footer">{payload?.learning_curves.disclaimer ?? "早期曲线用于观察学习过程，不代表已证明盈利。"} 单日和双日新闻模型明确标记 EXPERIMENTAL；达到3个新闻日期后自动进入标准证据状态。当前只运行每个 Ridge 身份的最新版和前一版；{archivedModelCount} 个旧版本的 artifact、预测和成绩已永久归档。零收益安全基准不训练、不使用 AI、不占 Ridge 版本名额。Preview 与 Shadow 都没有下单权限，也不会自动晋升。</footer>
-        <LearningGraphModal open={graphOpen} onClose={() => setGraphOpen(false)} curves={payload?.learning_curves.identity_curves ?? []} market={payload?.market_chart} versionGroups={payload?.learning_curves.version_groups ?? []} />
+        <LearningGraphModal key={graphStartTab} open={graphOpen} onClose={() => setGraphOpen(false)} startTab={graphStartTab} curves={payload?.learning_curves.identity_curves ?? []} market={payload?.market_chart} versionGroups={payload?.learning_curves.version_groups ?? []} execution={payload?.execution_learning} />
       </section>}
 
       {view === "coverage" && <section className="coverage-grid">
@@ -639,7 +647,7 @@ export default function AuditPage() {
   );
 }
 
-function ExecutionResearch({ status }: { status?: Payload["execution_learning"] }) {
+function ExecutionResearch({ status, onOpenGraph }: { status?: Payload["execution_learning"]; onOpenGraph: () => void }) {
   const lot = status?.models.find(row => row.model_identity === "LOT_RIDGE");
   const exit = status?.models.find(row => row.model_identity === "EXIT_RIDGE");
   const card = (title: string, model: typeof lot, detail: string, contract: string) => <article>
@@ -647,7 +655,7 @@ function ExecutionResearch({ status }: { status?: Payload["execution_learning"] 
     <strong>{model?.training_rows ? `已训练 ${model.training_rows} 条` : `${model?.available_examples ?? 0} / ${model?.next_training_threshold ?? 0}`}</strong>
     <p>{detail}</p><dl><div><dt>可用样本</dt><dd>{model?.available_examples ?? 0}</dd></div><div><dt>前向预测 / 已评分</dt><dd>{model?.predictions ?? 0} / {model?.scores ?? 0}</dd></div><div><dt>下一次训练</dt><dd>{model?.next_training_threshold ?? "—"} 条</dd></div></dl><small>{contract}</small>
   </article>;
-  return <section className="execution-research"><header><span>SEPARATE EXECUTION SHADOW LEARNING</span><h3>方向、仓位倍率、退出各自训练。</h3><p>这两套 Ridge 没有下单权限，也不会改写30分钟方向模型；它们只在独立账本中学习和评分。</p></header><div>
+  return <section className="execution-research"><header><div><span>SEPARATE EXECUTION SHADOW LEARNING</span><h3>方向、仓位倍率、退出各自训练。</h3><p>这两套 Ridge 没有下单权限，也不会改写30分钟方向模型；它们只在独立账本中学习和评分。</p></div><button type="button" onClick={onOpenGraph}>查看仓位与退出结果图 ↗</button></header><div>
     {card("仓位倍率 Ridge", lot, "方向确定后，在 0.5x / 1.0x / 2.0x 中选择风险倍率。奖励方向收益，同时用 U5 标准化的途中不利波动作平方惩罚，避免永远偏爱 2.0x。", "Shadow multiplier · 非账户 lot · commission/slippage 仍未配置")}
     {card("Exit Ridge", exit, "在进场后的 5 / 10 / 15 / 20 / 25 分钟，预测继续持有到30分钟还能增加多少收益；大于零为 HOLD，否则为 EXIT。", "received-time checkpoint · 只用检查点当时已经收到的报价")}
   </div></section>;

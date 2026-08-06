@@ -417,6 +417,96 @@ def score_execution_predictions(ledger, *, decision_id: str, scored_at: datetime
 
 
 def execution_learning_status(ledger) -> dict:
+    def lot_evaluation() -> dict:
+        rows = ledger.connection.execute(
+            """SELECT p.prediction_time,p.model_version,p.direction,
+                      p.recommended_action,s.target_value,s.squared_error,
+                      CASE p.direction WHEN 'LONG' THEN o.long_quote_return
+                           ELSE o.short_quote_return END AS quote_return
+               FROM execution_predictions_v1 p
+               JOIN execution_prediction_scores_v1 s
+                 USING(source_decision_id,model_version,direction,checkpoint_minutes)
+               JOIN derived_outcomes o USING(source_decision_id)
+               WHERE p.model_identity=? AND o.outcome_status='VALID'
+               ORDER BY p.prediction_time,p.direction""",
+            (LOT_IDENTITY,),
+        ).fetchall()
+        selected_total = 0.0
+        baseline_total = 0.0
+        exact = 0
+        points = []
+        for row in rows:
+            selected = float(str(row["recommended_action"]).removesuffix("X"))
+            target = float(row["target_value"])
+            quote_return = float(row["quote_return"])
+            selected_total += selected * quote_return
+            baseline_total += quote_return
+            exact += int(math.isclose(selected, target))
+            points.append({
+                "time": row["prediction_time"],
+                "model_version": row["model_version"],
+                "selected_cumulative_return": selected_total,
+                "baseline_cumulative_return": baseline_total,
+            })
+        return {
+            "score_count": len(rows),
+            "exact_choice_rate": exact / len(rows) if rows else None,
+            "mean_squared_error": (
+                sum(float(row["squared_error"]) for row in rows) / len(rows)
+                if rows else None
+            ),
+            "selected_cumulative_return": selected_total,
+            "baseline_cumulative_return": baseline_total,
+            "points": points,
+            "unit": "QUOTE_RETURN",
+        }
+
+    def exit_evaluation() -> dict:
+        rows = ledger.connection.execute(
+            """SELECT p.prediction_time,p.model_version,p.direction,
+                      p.checkpoint_minutes,p.recommended_action,
+                      s.target_value,s.selected_utility,s.squared_error,
+                      e.target_action
+               FROM execution_predictions_v1 p
+               JOIN execution_prediction_scores_v1 s
+                 USING(source_decision_id,model_version,direction,checkpoint_minutes)
+               JOIN execution_training_examples_v1 e
+                 USING(source_decision_id,direction,checkpoint_minutes)
+               WHERE p.model_identity=?
+               ORDER BY p.prediction_time,p.direction,p.checkpoint_minutes""",
+            (EXIT_IDENTITY,),
+        ).fetchall()
+        selected_total = 0.0
+        hold_total = 0.0
+        correct = 0
+        points = []
+        for row in rows:
+            selected_total += float(row["selected_utility"])
+            hold_total += float(row["target_value"])
+            correct += int(row["recommended_action"] == row["target_action"])
+            points.append({
+                "time": row["prediction_time"],
+                "model_version": row["model_version"],
+                "selected_cumulative_utility_u5": selected_total,
+                "always_hold_cumulative_utility_u5": hold_total,
+            })
+        return {
+            "score_count": len(rows),
+            "action_accuracy": correct / len(rows) if rows else None,
+            "mean_squared_error": (
+                sum(float(row["squared_error"]) for row in rows) / len(rows)
+                if rows else None
+            ),
+            "selected_cumulative_utility_u5": selected_total,
+            "always_hold_cumulative_utility_u5": hold_total,
+            "points": points,
+            "unit": "CONTINUATION_U5",
+        }
+
+    evaluations = {
+        LOT_IDENTITY: lot_evaluation(),
+        EXIT_IDENTITY: exit_evaluation(),
+    }
     models = []
     for identity, minimum in ((LOT_IDENTITY, MIN_LOT_ROWS), (EXIT_IDENTITY, MIN_EXIT_ROWS)):
         rows = _training_rows(ledger, identity, datetime.max.replace(tzinfo=UTC))
@@ -442,6 +532,7 @@ def execution_learning_status(ledger) -> dict:
             ),
             "model_version": latest["model_version"] if latest else None,
             "predictions": int(predictions), "scores": int(scores),
+            "evaluation": evaluations[identity],
         })
     return {"models": models, "shadow_only": True,
             "lot_candidates": list(LOT_CANDIDATES),

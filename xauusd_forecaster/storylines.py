@@ -65,6 +65,10 @@ _TITLE_ALIASES = {
     "strait of hormuz": "霍尔木兹海峡", "hormuz": "霍尔木兹海峡", "霍尔木兹": "霍尔木兹海峡",
     "iran": "伊朗", "伊朗": "伊朗", "ukraine": "乌克兰", "乌克兰": "乌克兰",
     "russia": "俄罗斯", "俄罗斯": "俄罗斯", "fomc": "FOMC",
+    "energy information administration": "U.S. EIA",
+    "u.s. department of energy": "U.S. EIA",
+    "department of energy": "U.S. EIA",
+    "eia": "U.S. EIA",
 }
 _BROAD_STORY_ANCHORS = {"伊朗", "乌克兰", "俄罗斯"}
 
@@ -104,6 +108,8 @@ def _story_entities(event: dict) -> tuple[str, ...]:
 
 
 def _display_entity(value: str) -> str:
+    if value in _TITLE_ALIASES.values():
+        return value
     return _TITLE_ALIASES.get(value, value.title() if value.isascii() else value)
 
 
@@ -211,6 +217,8 @@ def storyline_rows(events: list[dict]) -> list[dict]:
         required_roles = list(COVERAGE_TEMPLATES[family_key])
         missing_roles = [role for role in required_roles if role not in covered_roles]
         title = "—".join(dict.fromkeys(_display_entity(value) for value in entities))
+        if title == "U.S. EIA" and anchor != "U.S. EIA":
+            title = anchor
         headline_blob = " ".join(_normal(member.get("canonical_headline")) for member in members)
         if ("iran" in headline_blob or "伊朗" in headline_blob) and ("hormuz" in headline_blob or "霍尔木兹" in headline_blob):
             title = "伊朗—霍尔木兹海峡"

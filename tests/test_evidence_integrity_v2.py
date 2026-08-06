@@ -21,7 +21,7 @@ from xauusd_forecaster import inference_v2, training_v2
 from xauusd_forecaster.u5_state import U5State, U5_VERSION
 from xauusd_forecaster.execution_learning import (
     LOT_FEATURES, EXIT_FEATURES, append_due_exit_predictions,
-    append_execution_examples, train_due_execution,
+    append_execution_examples, execution_learning_status, train_due_execution,
 )
 from xauusd_forecaster.training import MARKET_FEATURES
 
@@ -108,6 +108,10 @@ def test_execution_ridges_train_from_matured_counterfactual_paths(tmp_path) -> N
     ).fetchone()
     assert tuple(json.loads(Path(lot["artifact_path"]).read_text())["feature_names"]) == LOT_FEATURES
     assert tuple(json.loads(Path(exit_model["artifact_path"]).read_text())["feature_names"]) == EXIT_FEATURES
+    status = execution_learning_status(ledger)
+    by_identity = {row["model_identity"]: row for row in status["models"]}
+    assert by_identity["LOT_RIDGE"]["evaluation"]["unit"] == "QUOTE_RETURN"
+    assert by_identity["EXIT_RIDGE"]["evaluation"]["unit"] == "CONTINUATION_U5"
 
     live_decision = start + timedelta(days=1, minutes=5)
     live_id = "execution-live-checkpoint"
