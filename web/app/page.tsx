@@ -192,7 +192,7 @@ export default function Home() {
           <div className={`action action-${forecastAction.toLowerCase()}`}>
             {forecastAction}
           </div>
-          <p>{forecast?.model_identity === "BROAD_FULL" ? "黄金＋大视野新闻" : forecast?.model_identity ?? "等待模型"} · {forecast?.prediction_status ?? "WAITING"}</p>
+          <p>{forecast?.model_identity === "BROAD_FULL" ? "黄金＋大视野新闻 Ridge" : forecast?.model_identity ?? "等待模型"} · SHADOW</p>
           {forecastAction === "WAIT" && forecast?.directional_bias && forecast.directional_bias !== "NEUTRAL" && <p className="forecast-bias">成本后 EV 较高方向为 {forecast.directional_bias}；这条历史冻结记录仍是 WAIT</p>}
           <div className={`forecast-freshness ${signalRemaining > 0 && online ? "is-current" : "is-observe"}`}>
             <strong>{freshness}</strong>
@@ -200,7 +200,7 @@ export default function Home() {
             <div className="forecast-progress"><i style={{ width: `${horizonProgress}%` }} /></div>
             <small>{horizonRemaining > 0 ? `距30分钟结果还剩 ${horizonMinutes}分${horizonSeconds}秒` : "30分钟结果窗口已完成"}</small>
           </div>
-          <small>安全基准仍是 WAIT · 20秒仅指新预测参考窗口 · 固定观察30分钟 · 不会下单</small>
+          <small>固定观察30分钟 · 不下单</small>
         </div>
       </section>
 

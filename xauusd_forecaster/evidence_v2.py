@@ -32,6 +32,10 @@ V2_IMMUTABLE_TABLES = (
     "execution_model_updates_v1",
     "execution_predictions_v1",
     "execution_prediction_scores_v1",
+    "execution_training_examples_v2",
+    "execution_model_updates_v2",
+    "execution_predictions_v2",
+    "execution_position_scores_v2",
 )
 
 V2_SCHEMA = """
@@ -330,6 +334,73 @@ CREATE TABLE IF NOT EXISTS execution_prediction_scores_v1 (
       REFERENCES execution_predictions_v1(source_decision_id,model_version,direction,checkpoint_minutes)
 );
 
+CREATE TABLE IF NOT EXISTS execution_training_examples_v2 (
+    source_decision_id TEXT PRIMARY KEY,
+    source_model_identity TEXT NOT NULL CHECK(source_model_identity='BROAD_FULL'),
+    source_model_version TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK(direction IN ('LONG','SHORT')),
+    observed_at TEXT NOT NULL,
+    evidence_lane TEXT NOT NULL CHECK(evidence_lane IN ('REPAIRED_SEED','LIVE_OOS')),
+    feature_json TEXT NOT NULL,
+    u5 REAL NOT NULL,
+    final_quote_return REAL NOT NULL,
+    adverse_u5 REAL NOT NULL,
+    checkpoint_path_json TEXT NOT NULL,
+    source_hash TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS execution_model_updates_v2 (
+    model_version TEXT PRIMARY KEY,
+    model_identity TEXT NOT NULL CHECK(model_identity IN ('LOT_RIDGE','EXIT_RIDGE')),
+    model_stage TEXT NOT NULL CHECK(model_stage IN ('PREVIEW_ONLY','SHADOW')),
+    created_at TEXT NOT NULL,
+    training_cutoff TEXT NOT NULL,
+    training_decisions INTEGER NOT NULL,
+    training_observations INTEGER NOT NULL,
+    training_dataset_hash TEXT NOT NULL,
+    feature_version TEXT NOT NULL,
+    label_version TEXT NOT NULL,
+    artifact_paths_json TEXT NOT NULL,
+    artifact_hash TEXT NOT NULL,
+    source_model_identity TEXT NOT NULL CHECK(source_model_identity='BROAD_FULL'),
+    status TEXT NOT NULL CHECK(status='CHALLENGER')
+);
+
+CREATE TABLE IF NOT EXISTS execution_predictions_v2 (
+    source_decision_id TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    model_identity TEXT NOT NULL CHECK(model_identity IN ('LOT_RIDGE','EXIT_RIDGE')),
+    source_model_identity TEXT NOT NULL CHECK(source_model_identity='BROAD_FULL'),
+    source_model_version TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK(direction IN ('LONG','SHORT')),
+    checkpoint_minutes INTEGER NOT NULL CHECK(checkpoint_minutes IN (0,5,10,15,20,25)),
+    prediction_time TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    predicted_value REAL NOT NULL,
+    recommended_action TEXT NOT NULL,
+    current_quote_return REAL,
+    prediction_status TEXT NOT NULL CHECK(prediction_status='SHADOW_ONLY'),
+    feature_hash TEXT NOT NULL,
+    PRIMARY KEY(source_decision_id,model_version,checkpoint_minutes)
+);
+
+CREATE TABLE IF NOT EXISTS execution_position_scores_v2 (
+    source_decision_id TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    model_identity TEXT NOT NULL CHECK(model_identity IN ('LOT_RIDGE','EXIT_RIDGE')),
+    scored_at TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK(direction IN ('LONG','SHORT')),
+    selected_action TEXT NOT NULL,
+    exit_minutes INTEGER NOT NULL,
+    selected_quote_return REAL NOT NULL,
+    baseline_quote_return REAL NOT NULL,
+    delta_quote_return REAL NOT NULL,
+    score_hash TEXT NOT NULL,
+    PRIMARY KEY(source_decision_id,model_version),
+    FOREIGN KEY(source_decision_id,model_version)
+      REFERENCES execution_predictions_v2(source_decision_id,model_version)
+);
+
 CREATE INDEX IF NOT EXISTS derived_market_time_v2
 ON derived_market_snapshots(decision_time, evidence_lane);
 CREATE INDEX IF NOT EXISTS derived_outcome_time_v2
@@ -340,6 +411,10 @@ CREATE INDEX IF NOT EXISTS execution_examples_time_v1
 ON execution_training_examples_v1(checkpoint_minutes, observed_at);
 CREATE INDEX IF NOT EXISTS execution_predictions_time_v1
 ON execution_predictions_v1(model_identity, prediction_time);
+CREATE INDEX IF NOT EXISTS execution_examples_time_v2
+ON execution_training_examples_v2(observed_at);
+CREATE INDEX IF NOT EXISTS execution_predictions_time_v2
+ON execution_predictions_v2(model_identity, prediction_time);
 """
 
 

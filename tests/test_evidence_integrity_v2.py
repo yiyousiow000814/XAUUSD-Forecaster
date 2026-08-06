@@ -21,7 +21,8 @@ from xauusd_forecaster import inference_v2, training_v2
 from xauusd_forecaster.u5_state import U5State, U5_VERSION
 from xauusd_forecaster.execution_learning import (
     LOT_FEATURES, EXIT_FEATURES, append_due_exit_predictions,
-    append_execution_examples, execution_learning_status, train_due_execution,
+    append_execution_examples, append_lot_predictions, execution_learning_status,
+    score_execution_predictions, train_due_execution,
 )
 from xauusd_forecaster.training import MARKET_FEATURES
 
@@ -59,7 +60,7 @@ def test_executable_horizon_starts_from_entry_received_time() -> None:
     assert label.exit_received_time == entry_received + timedelta(minutes=30)
 
 
-def test_execution_ridges_train_from_matured_counterfactual_paths(tmp_path) -> None:
+def test_execution_ridges_follow_one_frozen_live_direction(tmp_path) -> None:
     start = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=start)
     quotes = [
@@ -86,11 +87,15 @@ def test_execution_ridges_train_from_matured_counterfactual_paths(tmp_path) -> N
              "finite-memory-u5-v5-contiguous-m1", 0.01,
              json.dumps(features), "OK", "[]", market_hash, market_hash),
         )
+        _insert_prediction(
+            ledger.connection, decision_id, decision,
+            model_version="broad-full-frozen", model_identity="BROAD_FULL",
+        )
         assert append_execution_examples(
             ledger, decision_id=decision_id,
             appended_at=decision + timedelta(minutes=31), label=label,
             source_hash=canonical_hash((decision_id, "quotes")),
-        ) == 12
+        ) == 1
     statuses = train_due_execution(
         ledger, start + timedelta(days=1), tmp_path / "execution-models"
     )
@@ -98,20 +103,23 @@ def test_execution_ridges_train_from_matured_counterfactual_paths(tmp_path) -> N
         "LOT_RIDGE", "EXIT_RIDGE",
     }
     assert ledger.connection.execute(
-        "SELECT count(*) FROM execution_model_updates_v1"
+        "SELECT count(*) FROM execution_model_updates_v2"
     ).fetchone()[0] == 2
     lot = ledger.connection.execute(
-        "SELECT artifact_path FROM execution_model_updates_v1 WHERE model_identity='LOT_RIDGE'"
+        "SELECT artifact_paths_json FROM execution_model_updates_v2 WHERE model_identity='LOT_RIDGE'"
     ).fetchone()
     exit_model = ledger.connection.execute(
-        "SELECT artifact_path FROM execution_model_updates_v1 WHERE model_identity='EXIT_RIDGE'"
+        "SELECT model_version,artifact_paths_json FROM execution_model_updates_v2 WHERE model_identity='EXIT_RIDGE'"
     ).fetchone()
-    assert tuple(json.loads(Path(lot["artifact_path"]).read_text())["feature_names"]) == LOT_FEATURES
-    assert tuple(json.loads(Path(exit_model["artifact_path"]).read_text())["feature_names"]) == EXIT_FEATURES
+    lot_paths = json.loads(lot["artifact_paths_json"])
+    assert set(lot_paths) == {"0.5X", "1.0X", "2.0X"}
+    assert tuple(json.loads(Path(lot_paths["1.0X"]).read_text())["feature_names"]) == LOT_FEATURES
+    exit_path = json.loads(exit_model["artifact_paths_json"])["CONTINUATION"]
+    assert tuple(json.loads(Path(exit_path).read_text())["feature_names"]) == EXIT_FEATURES
     status = execution_learning_status(ledger)
     by_identity = {row["model_identity"]: row for row in status["models"]}
     assert by_identity["LOT_RIDGE"]["evaluation"]["unit"] == "QUOTE_RETURN"
-    assert by_identity["EXIT_RIDGE"]["evaluation"]["unit"] == "CONTINUATION_U5"
+    assert by_identity["EXIT_RIDGE"]["evaluation"]["unit"] == "QUOTE_RETURN"
 
     live_decision = start + timedelta(days=1, minutes=5)
     live_id = "execution-live-checkpoint"
@@ -124,6 +132,17 @@ def test_execution_ridges_train_from_matured_counterfactual_paths(tmp_path) -> N
          "finite-memory-u5-v5-contiguous-m1", 0.01,
          json.dumps(features), "OK", "[]", live_hash, live_hash),
     )
+    _insert_prediction(
+        ledger.connection, live_id, live_decision,
+        model_version="broad-full-live", model_identity="BROAD_FULL",
+    )
+    assert append_lot_predictions(
+        ledger, decision_id=live_id, decision_time=live_decision,
+        created_at=live_decision, market_snapshot={
+            "features_json": json.dumps(features), "data_health": "OK",
+            "output_hash": live_hash,
+        },
+    ) == 1
     live_quotes = [
         _quote(live_decision + timedelta(seconds=1),
                live_decision + timedelta(seconds=1), 4000.0),
@@ -134,17 +153,31 @@ def test_execution_ridges_train_from_matured_counterfactual_paths(tmp_path) -> N
     assert append_due_exit_predictions(
         ledger, checkpoint_time=observed_at, created_at=observed_at,
         quotes=live_quotes,
-    ) == 2
+    ) == 1
     rows = ledger.connection.execute(
         """SELECT direction,checkpoint_minutes,prediction_time
-        FROM execution_predictions_v1 WHERE model_identity='EXIT_RIDGE'
+        FROM execution_predictions_v2 WHERE model_identity='EXIT_RIDGE'
         ORDER BY direction"""
     ).fetchall()
-    assert [(row["direction"], row["checkpoint_minutes"]) for row in rows] == [
-        ("LONG", 5), ("SHORT", 5),
-    ]
+    assert [(row["direction"], row["checkpoint_minutes"]) for row in rows] == [("LONG", 5)]
     assert all(row["prediction_time"] == live_quotes[-1].received_time.isoformat()
                for row in rows)
+
+    # Missing later checkpoints are a data gap, not permission to invent a
+    # completed HOLD_TO_30M position score.
+    ledger.connection.execute(
+        "INSERT INTO execution_predictions_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("execution-0", exit_model["model_version"], "EXIT_RIDGE", "BROAD_FULL",
+         "broad-full-frozen", "LONG", 5, observed_at.isoformat(),
+         observed_at.isoformat(), 0.1, "HOLD", 0.01, "SHADOW_ONLY",
+         canonical_hash(("execution-0", "incomplete-exit-path"))),
+    )
+    assert score_execution_predictions(
+        ledger, decision_id="execution-0", scored_at=observed_at + timedelta(minutes=30)
+    ) == 0
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM execution_position_scores_v2 WHERE model_identity='EXIT_RIDGE'"
+    ).fetchone()[0] == 0
 
 
 def test_stable_ctrader_server_clock_lead_within_freshness_is_valid() -> None:

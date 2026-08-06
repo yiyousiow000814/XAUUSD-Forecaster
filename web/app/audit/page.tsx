@@ -227,18 +227,21 @@ type Payload = {
     disclaimer: string;
   };
   execution_learning: {
-    shadow_only: boolean;
+      shadow_only: boolean;
+      source_model_identity: string;
+      source_model_label: string;
+      training_contract: string;
     lot_candidates: number[];
     exit_checkpoints_minutes: number[];
-    models: Array<{ model_identity: string; status: string; training_rows: number;
+      models: Array<{ model_identity: string; status: string; training_rows: number;
+        training_decisions?: number; training_observations?: number;
       available_examples: number; next_training_threshold: number;
       model_version: string | null; predictions: number; scores: number;
       evaluation: {
-        score_count: number; exact_choice_rate?: number | null; action_accuracy?: number | null;
-        mean_squared_error: number | null; selected_cumulative_return?: number;
-        baseline_cumulative_return?: number; selected_cumulative_utility_u5?: number;
-        always_hold_cumulative_utility_u5?: number; unit: string;
-        points: Array<Record<string, string | number>>;
+          score_count: number; selected_cumulative_return?: number;
+          baseline_cumulative_return?: number; delta_cumulative_return?: number; unit: string;
+          points: Array<Record<string, string | number>>;
+          results?: Array<Record<string, string | number>>;
       } }>;
   };
   factor_coverage: Array<{
@@ -651,13 +654,13 @@ export default function AuditPage() {
 function ExecutionResearch({ status, onOpenGraph }: { status?: Payload["execution_learning"]; onOpenGraph: () => void }) {
   const lot = status?.models.find(row => row.model_identity === "LOT_RIDGE");
   const exit = status?.models.find(row => row.model_identity === "EXIT_RIDGE");
-  const card = (title: string, model: typeof lot, detail: string, contract: string) => <article>
+    const card = (title: string, model: typeof lot, detail: string, contract: string) => <article>
     <div className="execution-title"><b>{title}</b><em className={model?.status === "RUNNING" ? "is-running" : ""}>{model?.status === "RUNNING" ? "学习中" : "收集中"}</em></div>
-    <strong>{model?.training_rows ? `已训练 ${model.training_rows} 条` : `${model?.available_examples ?? 0} / ${model?.next_training_threshold ?? 0}`}</strong>
-    <p>{detail}</p><dl><div><dt>可用样本</dt><dd>{model?.available_examples ?? 0}</dd></div><div><dt>前向预测 / 已评分</dt><dd>{model?.predictions ?? 0} / {model?.scores ?? 0}</dd></div><div><dt>下一次训练</dt><dd>{model?.next_training_threshold ?? "—"} 条</dd></div></dl><small>{contract}</small>
+      <strong>{model?.training_decisions ? `已学习 ${model.training_decisions} 个历史方向` : `${model?.available_examples ?? 0} / ${model?.next_training_threshold ?? 0}`}</strong>
+      <p>{detail}</p><dl><div><dt>可用方向决策</dt><dd>{model?.available_examples ?? 0}</dd></div><div><dt>未来位置 / 已结算</dt><dd>{model?.predictions ?? 0} / {model?.scores ?? 0}</dd></div><div><dt>下一次训练</dt><dd>{model?.next_training_threshold ?? "—"} 个方向</dd></div></dl><small>{contract}</small>
   </article>;
-  return <section className="execution-research"><header><div><span>SEPARATE EXECUTION SHADOW LEARNING</span><h3>方向、仓位倍率、退出各自训练。</h3><p>这两套 Ridge 没有下单权限，也不会改写30分钟方向模型；它们只在独立账本中学习和评分。</p></div><button type="button" onClick={onOpenGraph}>查看仓位与退出结果图 ↗</button></header><div>
-    {card("仓位倍率 Ridge", lot, "方向确定后，在 0.5x / 1.0x / 2.0x 中选择风险倍率。奖励方向收益，同时用 U5 标准化的途中不利波动作平方惩罚，避免永远偏爱 2.0x。", "Shadow multiplier · 非账户 lot · commission/slippage 仍未配置")}
-    {card("Exit Ridge", exit, "在进场后的 5 / 10 / 15 / 20 / 25 分钟，预测继续持有到30分钟还能增加多少收益；大于零为 HOLD，否则为 EXIT。", "received-time checkpoint · 只用检查点当时已经收到的报价")}
+    return <section className="execution-research"><header><div><span>EXECUTION FOLLOWS LIVE DIRECTION</span><h3>仓位与退出跟随同一套方向。</h3><p>方向固定来自“{status?.source_model_label ?? "黄金＋大视野新闻 Ridge"}”。它当时 LONG 就只研究这笔 LONG；SHORT 同理；WAIT 不创建仓位。</p></div><button type="button" onClick={onOpenGraph}>查看逐笔未来结果 ↗</button></header><div>
+      {card("仓位倍率 Ridge", lot, "每个冻结方向只产生一个位置，在 0.5x / 1.0x / 2.0x 中选择倍率。三种倍率分别学习未来效用，不再同时虚构 Long 和 Short。", "Shadow multiplier · 一个方向=一个位置 · 非账户 lot")}
+      {card("Exit Ridge", exit, "同一位置按 5 / 10 / 15 / 20 / 25 分钟顺序检查。模型一旦选择 EXIT，这笔位置结束，不会继续制造后续 HOLD / EXIT 评分。", `历史路径检查点 ${exit?.training_observations ?? 0} 个 · 未来评分按位置计数`) }
   </div></section>;
 }

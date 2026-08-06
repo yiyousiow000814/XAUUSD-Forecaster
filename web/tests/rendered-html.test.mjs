@@ -105,13 +105,15 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /版本独立盈亏清单/);
   assert.match(modal, /K线与决策/);
   assert.match(modal, /仓位与退出/);
-  assert.match(modal, /Shadow方向：成本后EV大于0/);
-  assert.match(modal, /稀疏视图：每小时 :00 \/ :30/);
-  assert.match(modal, /完整视图：每5分钟原始预测/);
-  assert.match(modal, /原始倾向：成本后EV较高方向/);
+  assert.match(modal, /冻结 Shadow 动作/);
+  assert.match(modal, /每小时 :00 \/ :30/);
+  assert.match(modal, /每5分钟/);
+  assert.match(modal, /成本后 EV 较优方向/);
   assert.match(modal, /U5 只是统一波动尺度，不是 WAIT 开关/);
   assert.match(modal, /模型选择 vs 固定 1\.0x/);
-  assert.match(modal, /模型选择 vs 始终持有到30分钟/);
+  assert.match(modal, /顺序 Exit Ridge vs 固定持有30分钟/);
+  assert.match(modal, /逐笔未来 OOS 清单/);
+  assert.match(modal, /WAIT 不创建仓位/);
   assert.match(modal, /点击图中的三角形/);
   assert.match(modal, /Ridge 预测未来30分钟连续收益/);
   assert.match(modal, /较高的一边只要大于0就记录为 Shadow 方向/);
@@ -142,7 +144,8 @@ test("explains U5 as a risk scale rather than a probability", () => {
   assert.match(source, /risk-scale/);
   assert.match(source, /它不是亏损概率，也不代表方向/);
   assert.match(source, /research_forecast/);
-  assert.match(source, /安全基准仍是 WAIT/);
+  assert.match(source, /黄金＋大视野新闻 Ridge/);
+  assert.match(source, /固定观察30分钟 · 不下单/);
   assert.match(readFileSync(new URL("../app/globals.css", import.meta.url), "utf8"), /timeline-panel \{ grid-column:1; grid-row:1 \/ span 3; \}/);
 });
 

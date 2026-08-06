@@ -25,16 +25,16 @@ type VersionGroup = {
   coverage_rate: number | null; average_oracle_regret: number | null;
 };
 type ExecutionModel = {
-  model_identity: string; training_rows: number; predictions: number; scores: number;
+  model_identity: string; training_rows: number; training_decisions?: number;
+  training_observations?: number; predictions: number; scores: number;
   evaluation: {
-    score_count: number; exact_choice_rate?: number | null; action_accuracy?: number | null;
-    mean_squared_error: number | null; selected_cumulative_return?: number;
-    baseline_cumulative_return?: number; selected_cumulative_utility_u5?: number;
-    always_hold_cumulative_utility_u5?: number; unit: string;
+    score_count: number; selected_cumulative_return?: number;
+    baseline_cumulative_return?: number; delta_cumulative_return?: number; unit: string;
     points: Array<Record<string, string | number>>;
+    results?: Array<Record<string, string | number>>;
   };
 };
-type ExecutionLearning = { models: ExecutionModel[]; shadow_only: boolean };
+type ExecutionLearning = { models: ExecutionModel[]; shadow_only: boolean; source_model_label?: string; training_contract?: string };
 type GraphTab = "curve" | "versions" | "market" | "execution";
 
 const LABELS: Record<string, string> = {
@@ -198,12 +198,12 @@ function MarketChart({ market, identity, setIdentity }: { market?: { candles: Ca
     <div className="chart-caption"><div><b>每根K线5分钟 · 每个箭头预测未来30分钟</b><span>绿色向上、红色向下、灰色双向代表 WAIT。新闻残差只表示新闻对黄金基线的修正量；完整方向请看“黄金＋新闻”。</span></div><select value={identity} onChange={event => { setIdentity(event.target.value); setSelected(null); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key, label]) => <option key={key} value={key}>{label}{key.includes("RESIDUAL") ? "（修正量）" : ""}</option>)}</select></div>
     <div className="market-controls" aria-label="K线图显示控制">
       <label>窗口<select value={hours} onChange={event => setHours(Number(event.target.value))}><option value="3">最近3小时</option><option value="6">最近6小时</option><option value="12">最近12小时</option><option value="24">最近24小时</option></select></label>
-      <label>显示频率<select value={dense ? "all" : "clear"} onChange={event => setDense(event.target.value === "all")}><option value="clear">稀疏视图：每小时 :00 / :30</option><option value="all">完整视图：每5分钟原始预测</option></select></label>
-      <label>箭头含义<select value={arrowMode} onChange={event => setArrowMode(event.target.value as "bias" | "action")}><option value="bias">原始倾向：成本后EV较高方向</option><option value="action">Shadow方向：成本后EV大于0</option></select></label>
+      <label>频率<select value={dense ? "all" : "clear"} onChange={event => setDense(event.target.value === "all")}><option value="clear">每小时 :00 / :30</option><option value="all">每5分钟</option></select></label>
+      <label>箭头<select value={arrowMode} onChange={event => setArrowMode(event.target.value as "bias" | "action")}><option value="bias">成本后 EV 较优方向</option><option value="action">冻结 Shadow 动作</option></select></label>
       <button className={showLong ? "active" : ""} type="button" onClick={() => setShowLong(value => !value)}>看多 LONG</button>
       <button className={showShort ? "active" : ""} type="button" onClick={() => setShowShort(value => !value)}>看空 SHORT</button>
       <button className={showWait ? "active" : ""} type="button" onClick={() => setShowWait(value => !value)}>等待 WAIT</button>
-      <button className={showTraining ? "active" : ""} type="button" onClick={() => setShowTraining(value => !value)}>模型换版本位置</button>
+      <button className={showTraining ? "active" : ""} type="button" onClick={() => setShowTraining(value => !value)}>模型换版本</button>
       <span>显示 {decisions.length} 次{hiddenCount > 0 ? ` · 仅视图隐藏 ${hiddenCount} 次5分钟预测` : ""}</span>
     </div>
     <div className="prediction-counts"><b>{arrowMode === "bias" ? "成本后EV较高方向" : "新产生的 Shadow 方向"}</b><span>看多 {counts.LONG}</span><span>看空 {counts.SHORT}</span><span>等待 {counts.WAIT}{unhealthyWaits ? `（数据异常 ${unhealthyWaits}）` : ""}</span>{policyMismatchCount > 0 && <span className="negative">历史规则不一致 {policyMismatchCount}（原记录保留）</span>}</div>
@@ -246,13 +246,34 @@ function ExecutionCharts({ execution }: { execution?: ExecutionLearning }) {
   const exit = execution?.models.find(row => row.model_identity === "EXIT_RIDGE");
   if (!lot && !exit) return <Empty text="仓位与退出模型还没有生成可评分的前向预测。" />;
   return <section className="execution-charts">
-    <header><span>SEPARATE EXECUTION OOS</span><h3>仓位与退出的结果，不再只看训练条数。</h3><p>两张图只使用模型上线后才发生并已成熟的前向样本；方向模型、仓位模型和退出模型仍保持三本独立账。</p></header>
+    <header><span>CAUSAL EXECUTION OOS</span><h3>跟随同一个 Live 方向，逐笔看仓位与退出。</h3><p>方向固定来自 {execution?.source_model_label ?? "黄金＋大视野新闻 Ridge"}。WAIT 不创建仓位；历史结果只训练，下面只评分模型上线后真正发生的未来位置。</p></header>
     <div className="execution-scorecards">
-      <article><small>仓位倍率 Ridge</small><strong>{lot?.evaluation.score_count ?? 0} 条已评分</strong><span>选中正确倍率 {lot?.evaluation.exact_choice_rate == null ? "—" : `${(lot.evaluation.exact_choice_rate * 100).toFixed(1)}%`} · MSE {lot?.evaluation.mean_squared_error?.toFixed(3) ?? "—"}</span></article>
-      <article><small>Exit Ridge</small><strong>{exit?.evaluation.score_count ?? 0} 条已评分</strong><span>EXIT / HOLD 判断正确 {exit?.evaluation.action_accuracy == null ? "—" : `${(exit.evaluation.action_accuracy * 100).toFixed(1)}%`} · MSE {exit?.evaluation.mean_squared_error?.toFixed(3) ?? "—"}</span></article>
+      <article><small>仓位倍率 Ridge</small><strong>{lot?.evaluation.score_count ?? 0} 个未来位置</strong><span>历史训练决策 {lot?.training_decisions ?? 0} 个 · 不是虚构成交数</span></article>
+      <article><small>Exit Ridge</small><strong>{exit?.evaluation.score_count ?? 0} 个未来位置</strong><span>历史训练决策 {exit?.training_decisions ?? 0} 个 · {exit?.training_observations ?? 0} 个路径检查点</span></article>
     </div>
-    <ExecutionLineChart title="仓位倍率：模型选择 vs 固定 1.0x" subtitle="每个方向都作为反事实样本评分；这是倍率研究曲线，不是假装已经成交的账户 PnL。" points={lot?.evaluation.points ?? []} firstKey="selected_cumulative_return" secondKey="baseline_cumulative_return" firstLabel="Ridge 选择倍率" secondLabel="固定 1.0x" format={pct} />
-    <ExecutionLineChart title="退出：模型选择 vs 始终持有到30分钟" subtitle="纵轴是检查点之后的累计增量收益（U5单位）；它衡量 EXIT/HOLD 是否改善后半段，不是整笔交易 PnL。" points={exit?.evaluation.points ?? []} firstKey="selected_cumulative_utility_u5" secondKey="always_hold_cumulative_utility_u5" firstLabel="Exit Ridge" secondLabel="始终 HOLD" format={(value) => `${value >= 0 ? "+" : "−"}${Math.abs(value).toFixed(3)} U5`} />
+    <ExecutionLineChart title="仓位倍率：模型选择 vs 固定 1.0x" subtitle="每个点是一笔冻结 Live 方向产生的未来位置；0.5x / 1.0x / 2.0x 只改变同一方向的倍率。" points={lot?.evaluation.points ?? []} firstKey="selected_cumulative_return" secondKey="baseline_cumulative_return" firstLabel="Ridge 倍率" secondLabel="固定 1.0x" format={pct} />
+    <ExecutionLineChart title="退出：顺序 Exit Ridge vs 固定持有30分钟" subtitle="每个位置从5分钟开始依次检查；一旦 EXIT，后续检查停止。曲线是整段位置收益，不再累加重复检查点。" points={exit?.evaluation.points ?? []} firstKey="selected_cumulative_return" secondKey="baseline_cumulative_return" firstLabel="顺序 Exit Ridge" secondLabel="固定30分钟" format={pct} />
+    <ExecutionResultList lot={lot} exit={exit} />
+  </section>;
+}
+
+function ExecutionResultList({ lot, exit }: { lot?: ExecutionModel; exit?: ExecutionModel }) {
+  const lotRows = lot?.evaluation.results ?? [];
+  const exitRows = exit?.evaluation.results ?? [];
+  const byDecision = new Map(exitRows.map(row => [String(row.decision_id), row]));
+  const rows = lotRows.slice().reverse().slice(0, 30);
+  const stamp = (value: string | number) => new Date(String(value)).toLocaleString("zh-CN", { hour12:false, month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" });
+  return <section className="execution-result-list"><header><div><b>逐笔未来 OOS 清单</b><span>历史用于训练；这里只列模型上线后冻结、成熟且不会改写的结果。</span></div><strong>{lotRows.length} 笔</strong></header>
+    <div className="execution-result-head"><span>结算时间 / 方向</span><span>仓位选择</span><span>退出选择</span><span>模型结果</span><span>固定 1.0x / 30m</span><span>改善</span></div>
+    {rows.map(row => { const exitRow = byDecision.get(String(row.decision_id)); return <article key={String(row.decision_id)}>
+      <span><b>{stamp(row.time)}</b><small>{String(row.direction)}</small></span>
+      <b>{String(row.selected_action)}</b>
+      <b>{exitRow ? String(exitRow.selected_action).replace("_", " ") : "等待退出 OOS"}</b>
+      <strong>{pct(Number(exitRow?.selected_quote_return ?? row.selected_quote_return))}</strong>
+      <span>{pct(Number(exitRow?.baseline_quote_return ?? row.baseline_quote_return))}</span>
+      <strong className={Number(exitRow?.delta_quote_return ?? row.delta_quote_return) >= 0 ? "positive" : "negative"}>{pct(Number(exitRow?.delta_quote_return ?? row.delta_quote_return))}</strong>
+    </article>})}
+    {!rows.length && <p>新执行模型上线后的第一笔方向还没有走完30分钟。</p>}
   </section>;
 }
 
