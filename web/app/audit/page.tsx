@@ -629,12 +629,15 @@ export default function AuditPage() {
           <button type="button" onClick={() => { setGraphStartTab("curve"); setGraphOpen(true); }}>打开交互图表 ↗</button>
         </section>
         <ExecutionResearch status={payload?.execution_learning} onOpenGraph={() => { setGraphStartTab("execution"); setGraphOpen(true); }} />
-        <section className="model-scope-note">
-          <article><b>“大视野新闻修正量”不是“大视野新闻自身”</b><span>它先看黄金自身预测错了多少，再学习新闻应该把黄金答案往上或往下修多少。例：黄金自身 +0.10 U5，新闻修正 +0.04 U5，只有“黄金＋大视野新闻”才输出完整方向 +0.14 U5。</span></article>
-          <article><b>当前还没有独立的“大视野 News-only”</b><span>真正的 News-only 会完全不读取黄金特征，只用新闻直接预测完整30分钟目标。现在名为“大视野新闻修正量”的曲线不能当作 News-only，也不能单独拿去做完整方向。</span></article>
-          <article className="live-method"><b>做法可以实时复现；结果尚未达到实盘标准</b><span>行情只读取决策时已经收到的 Bid/Ask，新闻只读取当时已经首次看见且已完成解析的内容；30分钟结果成熟后才进入下一轮训练，所以方法本身不依赖未来数据。当前仍缺真实 commission、slippage 与下单接口验证，因此这里只能证明“计算方法可在线运行”，不能宣称已有可实盘收益。</span></article>
-        </section>
-        <div className="summary-cadence"><span>摘要统计频率</span><button type="button" className={summaryCadence === "EVERY_5M" ? "active" : ""} onClick={() => setSummaryCadence("EVERY_5M")}>每5分钟（重叠）</button><button type="button" className={summaryCadence === "FIXED_30M" ? "active" : ""} onClick={() => setSummaryCadence("FIXED_30M")}>每30分钟（:00 / :30）</button><small>预测期限始终是30分钟；这里改变的是入场评估频率。</small></div>
+        <details className="model-method-note">
+          <summary><span>方法与实盘边界</span><small>新闻修正量、News-only 与成本口径说明</small></summary>
+          <div>
+            <article><b>“大视野新闻修正量”不是“大视野新闻自身”</b><span>它先看黄金自身预测错了多少，再学习新闻应该把黄金答案往上或往下修多少。例：黄金自身 +0.10 U5，新闻修正 +0.04 U5，只有“黄金＋大视野新闻”才输出完整方向 +0.14 U5。</span></article>
+            <article><b>当前还没有独立的“大视野 News-only”</b><span>真正的 News-only 会完全不读取黄金特征，只用新闻直接预测完整30分钟目标。现在名为“大视野新闻修正量”的曲线不能当作 News-only，也不能单独拿去做完整方向。</span></article>
+            <article className="live-method"><b>做法可以实时复现；结果尚未达到实盘标准</b><span>行情只读取决策时已经收到的 Bid/Ask，新闻只读取当时已经首次看见且已完成解析的内容；30分钟结果成熟后才进入下一轮训练。当前仍缺真实 commission、slippage 与下单接口验证，因此只能证明计算方法可在线运行。</span></article>
+          </div>
+        </details>
+        <section className="model-score-summary"><header><div><span>LIVE OOS SCOREBOARD</span><h3>五套模型，现在表现怎样？</h3></div><small>左边是本组开始前，箭头后是连续累计，圆点后是本组独立贡献。</small></header><div className="summary-cadence"><span>统计频率</span><button type="button" className={summaryCadence === "EVERY_5M" ? "active" : ""} onClick={() => setSummaryCadence("EVERY_5M")}>每5分钟（重叠）</button><button type="button" className={summaryCadence === "FIXED_30M" ? "active" : ""} onClick={() => setSummaryCadence("FIXED_30M")}>每30分钟（:00 / :30）</button><small>预测期限始终是30分钟。</small></div>
         {(payload?.learning_curves.models.length ?? 0) === 0 ? <div className="league-empty">
           <strong>正在建立第一版 Preview</strong><p>达到 96 条修复或 Forward 完整样本即可训练 Market Preview，不需要等待60天。曲线只从模型创建后的新 Decision 开始，绝不回填假历史成绩。</p>
         </div> : <div className="compact-model-summary">{Object.keys(MODEL_LABELS).filter(identity => identity !== "CHAMPION_0").map(identity => {
@@ -651,7 +654,7 @@ export default function AuditPage() {
           const history = total === null ? null : total - (group ?? 0);
           const tone = group === null ? "is-pending" : group >= 0 ? "is-positive" : "is-negative";
           return <article key={identity}><b>{MODEL_LABELS[identity]}{diagnostic ? <small>新闻修正量</small> : null}</b><div className="return-flow" aria-label={`本组开始前 ${percent(history)}，加入本组后 ${percent(total)}，本组贡献 ${percent(group)}`}><span title="本组开始前的历史累计">{history === null ? "—" : percent(history)}</span><i className={tone} aria-hidden="true">→</i><strong title="加入本组后的连续累计">{total === null ? "等待结果" : percent(total)}</strong><i className="return-separator" aria-hidden="true">·</i><strong className={`group-return ${tone}`} title="本组独立贡献">{group === null ? "等待" : percent(group)}</strong></div></article>;
-        })}</div>}
+        })}</div>}</section>
         <footer className="league-footer">{payload?.learning_curves.disclaimer ?? "早期曲线用于观察学习过程，不代表已证明盈利。"} 单日和双日新闻模型明确标记 EXPERIMENTAL；达到3个新闻日期后自动进入标准证据状态。当前只运行每个 Ridge 身份的最新版和前一版；{archivedModelCount} 个旧版本的 artifact、预测和成绩已永久归档。零收益安全基准不训练、不使用 AI、不占 Ridge 版本名额。Preview 与 Shadow 都没有下单权限，也不会自动晋升。</footer>
         <LearningGraphModal key={graphStartTab} open={graphOpen} onClose={() => setGraphOpen(false)} startTab={graphStartTab} curves={payload?.learning_curves.identity_curves ?? []} market={payload?.market_chart} versionGroups={payload?.learning_curves.version_groups ?? []} execution={payload?.execution_learning} />
       </section>}

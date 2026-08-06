@@ -107,9 +107,10 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /长期 OOS 曲线/);
   assert.match(modal, /每组独立成绩/);
   assert.match(modal, /所有模型的训练组成绩/);
-  assert.match(modal, /每30分钟（:00 \/ :30）/);
+  assert.match(modal, /每30分钟（固定 :00 \/ :30）/);
   assert.match(modal, /把鼠标移到圆点上/);
-  assert.match(page, /摘要统计频率/);
+  assert.match(page, /五套模型，现在表现怎样/);
+  assert.match(page, /方法与实盘边界/);
   assert.match(modal, /K线与决策/);
   assert.match(modal, /仓位与退出/);
   assert.doesNotMatch(modal, /冻结 Shadow 动作/);
