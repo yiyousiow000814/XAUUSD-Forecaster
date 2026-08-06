@@ -15,6 +15,14 @@ type Decision = {
   ev_short_u5: number | null; lcb_long_u5: number | null; lcb_short_u5: number | null;
 };
 type TrainingMarker = { model_identity: string; training_dataset_hash: string; created_at: string; training_rows: number; artifact_count: number };
+type VersionGroup = {
+  model_identity: string; training_dataset_hash: string; generation: number;
+  lifecycle_status: "LATEST" | "PREVIOUS" | "ARCHIVED"; created_at: string;
+  latest_rebuild_at: string; training_rows: number; artifact_rebuilds: number;
+  model_versions: string[]; subsequent_oos_rows: number; distinct_days: number;
+  cumulative_quote_return: number; profit_factor_quote_adjusted: number | null;
+  coverage_rate: number | null; average_oracle_regret: number | null;
+};
 
 const LABELS: Record<string, string> = {
   CHAMPION_0: "零收益基准", MARKET_ONLY: "黄金自身", NEWS_RESIDUAL: "官方新闻残差",
@@ -27,12 +35,13 @@ const COLORS: Record<string, string> = {
 const pct = (value: number) => `${value >= 0 ? "+" : "−"}${Math.abs(value * 100).toFixed(3)}%`;
 
 export default function LearningGraphModal({
-  open, onClose, curves, market,
+  open, onClose, curves, market, versionGroups,
 }: {
   open: boolean; onClose: () => void; curves: Curve[];
   market?: { candles: Candle[]; decisions: Decision[]; training_markers: TrainingMarker[] };
+  versionGroups: VersionGroup[];
 }) {
-  const [tab, setTab] = useState<"curve" | "market">("curve");
+  const [tab, setTab] = useState<"curve" | "versions" | "market">("curve");
   const [identity, setIdentity] = useState("BROAD_FULL");
   useEffect(() => {
     if (!open) return;
@@ -47,15 +56,34 @@ export default function LearningGraphModal({
       <header><div><span>SHADOW EVIDENCE VISUALIZER</span><h2 id="graph-modal-title">模型与 XAUUSD 时间轴</h2></div><button type="button" onClick={onClose} aria-label="关闭图表">×</button></header>
       <nav aria-label="图表类型">
         <button className={tab === "curve" ? "active" : ""} onClick={() => setTab("curve")}>长期 OOS 曲线</button>
+        <button className={tab === "versions" ? "active" : ""} onClick={() => setTab("versions")}>每组独立成绩</button>
         <button className={tab === "market" ? "active" : ""} onClick={() => setTab("market")}>K线与决策</button>
       </nav>
       <div className="graph-modal-body">
         {tab === "curve" && <LongCurve curves={curves} />}
+        {tab === "versions" && <VersionLedger groups={versionGroups} />}
         {tab === "market" && <MarketChart market={market} identity={identity} setIdentity={setIdentity} />}
       </div>
       <footer><b>统一口径：</b> 所有曲线只使用模型创建后真正没见过的 30 分钟结果；WAIT 显示为灰色双向箭头，但收益固定为零，不会被画成一笔虚构交易。</footer>
     </section>
   </div>;
+}
+
+function VersionLedger({ groups }: { groups: VersionGroup[] }) {
+  const [identity, setIdentity] = useState("BROAD_FULL");
+  const rows = groups.filter(row => row.model_identity === identity).sort((a,b) => b.generation-a.generation);
+  const stamp = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12:false, month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" });
+  return <section className="version-ledger modal-version-ledger"><header><div><span>每个训练数据代 · 独立从零评分</span><h3>版本独立盈亏清单</h3></div><select value={identity} onChange={event => setIdentity(event.target.value)}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select></header>
+    <div className="version-ledger-head"><span>组别 / 状态</span><span>训练与上线</span><span>创建后 OOS</span><span>本组独立收益</span><span>PF / 出方向</span></div>
+    {rows.map(row => <article key={`${row.model_identity}-${row.training_dataset_hash}`} className={row.lifecycle_status === "LATEST" ? "is-latest" : ""}>
+      <span><b>第 {row.generation} 组</b><small>{row.lifecycle_status === "LATEST" ? "最新版" : row.lifecycle_status === "PREVIOUS" ? "前一版" : "已归档"}</small></span>
+      <span><b>{row.training_rows} 条</b><small>{stamp(row.created_at)}{row.artifact_rebuilds ? ` · 恢复重建 ${row.artifact_rebuilds} 次` : ""}</small></span>
+      <span><b>{row.subsequent_oos_rows} 条</b><small>{row.distinct_days} 个日期</small></span>
+      <strong>{row.subsequent_oos_rows ? pct(row.cumulative_quote_return) : "等待结果"}</strong>
+      <span><b>{row.profit_factor_quote_adjusted?.toFixed(2) ?? "—"}</b><small>出方向 {((row.coverage_rate ?? 0)*100).toFixed(1)}%</small></span>
+    </article>)}
+    {!rows.length && <p>这个模型还没有真实训练版本。</p>}
+  </section>;
 }
 
 function LongCurve({ curves }: { curves: Curve[] }) {

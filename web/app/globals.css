@@ -268,7 +268,7 @@ body.modal-open { overflow:hidden; }
 .role-latest { background:var(--green); color:var(--paper); }
 .role-previous { background:#d9d2c1; }
 .league-footer { padding:18px 22px; border-top:1px solid var(--ink); color:var(--muted); font-size:12px; line-height:1.6; }
-.evidence-lane-grid { display:grid; grid-template-columns:repeat(3,1fr); border-bottom:1px solid var(--ink); background:var(--ink); gap:1px; }
+.evidence-lane-grid { display:grid; grid-template-columns:repeat(3,1fr); border-bottom:1px solid var(--ink); background:#b9b3a5; gap:1px; }
 .evidence-lane-grid article { min-height:126px; padding:18px 20px; background:var(--paper); }
 .evidence-lane-grid span,.evidence-lane-grid small { display:block; color:var(--muted); font-size:12px; font-weight:700; }
 .evidence-lane-grid strong { display:block; margin:9px 0 5px; font-family:var(--font-display); font-size:34px; }
@@ -306,8 +306,11 @@ body.modal-open { overflow:hidden; }
 .component-status article strong { margin:9px 0; font-size:14px; text-transform:uppercase; }
 .component-status article small { color:var(--muted); font-size:11px; line-height:1.6; }
 .component-status article em { display:block; margin-top:8px; color:var(--red); font-size:10px; overflow-wrap:anywhere; }
-.audit-tabs { grid-template-columns:repeat(3,1fr); }
-.graph-modal>nav { grid-template-columns:repeat(2,1fr); }
+.audit-tabs { grid-template-columns:repeat(3,1fr); gap:1px; padding:1px; background:#b9b3a5; }
+.audit-tabs a { border:0; background:var(--paper); }
+.audit-tabs a.active { background:#d9d2c1; color:var(--ink); box-shadow:inset 0 5px var(--acid); }
+.audit-tabs a:hover,.audit-tabs a:focus-visible { background:#ded9ca; }
+.graph-modal>nav { grid-template-columns:repeat(3,1fr); }
 .story-desk { border:1px solid var(--ink); border-top:0; }
 .story-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1px; background:var(--ink); border-top:1px solid var(--ink); }
 .story-grid>article { background:var(--paper); padding:24px; }
@@ -333,15 +336,24 @@ body.modal-open { overflow:hidden; }
 .version-ledger>article small { color:var(--muted); font-size:10px; }
 .version-ledger>article>strong { font-family:var(--font-display); font-size:25px; }
 .version-ledger>p { padding:24px; }
+.modal-version-ledger { margin:0; border:0; }
+.modal-version-ledger>header { position:sticky; top:0; z-index:1; background:var(--paper); }
 .execution-research { margin-top:1px; border:1px solid var(--ink); }
-.execution-research>header { padding:20px; }
+.execution-research>header { padding:22px; }
 .execution-research h3 { margin:6px 0 0; font-family:var(--font-display); font-size:30px; }
+.execution-research>header p { max-width:760px; margin:10px 0 0; color:var(--muted); font-size:13px; line-height:1.6; }
 .execution-research>div { display:grid; grid-template-columns:1fr 1fr; gap:1px; background:var(--ink); border-top:1px solid var(--ink); }
 .execution-research article { background:var(--paper); padding:22px; }
 .execution-research article b,.execution-research article strong { display:block; }
 .execution-research article strong { margin:12px 0; color:var(--gold); font-family:var(--font-display); font-size:28px; }
 .execution-research article p { line-height:1.65; }
 .execution-research article small { color:var(--muted); }
+.execution-title { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+.execution-title em { border:1px solid var(--gold); padding:5px 8px; color:#765414; font-size:11px; font-style:normal; font-weight:900; }
+.execution-title em.is-running { border-color:var(--green); background:#d9e4c7; color:var(--green); }
+.execution-research dl { margin:16px 0; border-top:1px solid rgba(17,17,15,.25); }
+.execution-research dl div { display:flex; justify-content:space-between; gap:20px; padding:8px 0; border-bottom:1px solid rgba(17,17,15,.2); font-size:12px; }
+.execution-research dd { margin:0; font-weight:800; }
 .component-ok,.component-stale { display:inline-block; padding:4px 7px; border:1px solid var(--ink); font-size:10px; font-weight:900; }
 .component-ok { background:var(--green); color:var(--paper); }.component-stale { background:#ecc2b8; color:var(--red); }
 .source-health { margin-top:24px; border:1px solid var(--ink); background:var(--paper); }

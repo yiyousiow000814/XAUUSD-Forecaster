@@ -16,6 +16,7 @@ from .news_features_v2 import aggregate_news_features_v2
 from .repair_v2 import LANE_RULE_VERSION, TRAINING_ELIGIBILITY_VERSION
 from .training import MARKET_FEATURES
 from .u5_state import U5_VERSION
+from .execution_learning import append_execution_examples, append_lot_predictions
 
 
 def _uuid(namespace: str, value: str) -> str:
@@ -88,6 +89,13 @@ def append_live_decision_v2(ledger, *, decision_id: str, decision_time: datetime
             market_snapshot={"features_json": json.dumps(features), "u5": snapshot["u5"],
                              "data_health": snapshot["data_health"], "output_hash": market_hash},
             news_snapshot={"features_json": json.dumps(news["features"]), "output_hash": news_hash},
+        )
+        append_lot_predictions(
+            ledger, decision_id=decision_id, decision_time=decision_time,
+            created_at=created_at,
+            market_snapshot={"features_json": json.dumps(features),
+                             "data_health": snapshot["data_health"],
+                             "output_hash": market_hash},
         )
     return predictions
 
@@ -179,4 +187,8 @@ def append_live_outcome_v2(ledger, *, decision_id: str, decision_time: datetime,
                      appended_at.isoformat(), TRAINING_ELIGIBILITY_VERSION, market["output_hash"],
                      output_hash, news["output_hash"] if news else None),
                 )
+            append_execution_examples(
+                ledger, decision_id=decision_id, appended_at=appended_at,
+                label=label, source_hash=source_evidence_hash,
+            )
     return True

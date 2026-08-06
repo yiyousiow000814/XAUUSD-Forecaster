@@ -28,6 +28,10 @@ V2_IMMUTABLE_TABLES = (
     "predictions_v2",
     "prediction_scores_v2",
     "calibration_snapshots_v2",
+    "execution_training_examples_v1",
+    "execution_model_updates_v1",
+    "execution_predictions_v1",
+    "execution_prediction_scores_v1",
 )
 
 V2_SCHEMA = """
@@ -267,12 +271,75 @@ CREATE TABLE IF NOT EXISTS calibration_snapshots_v2 (
     source_hash TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS execution_training_examples_v1 (
+    example_id TEXT PRIMARY KEY,
+    source_decision_id TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK(direction IN ('LONG','SHORT')),
+    checkpoint_minutes INTEGER NOT NULL CHECK(checkpoint_minutes IN (0,5,10,15,20,25)),
+    observed_at TEXT NOT NULL,
+    evidence_lane TEXT NOT NULL CHECK(evidence_lane IN ('REPAIRED_SEED','LIVE_OOS')),
+    feature_json TEXT NOT NULL,
+    target_value REAL NOT NULL,
+    target_action TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    UNIQUE(source_decision_id,direction,checkpoint_minutes)
+);
+
+CREATE TABLE IF NOT EXISTS execution_model_updates_v1 (
+    model_version TEXT PRIMARY KEY,
+    model_identity TEXT NOT NULL CHECK(model_identity IN ('LOT_RIDGE','EXIT_RIDGE')),
+    model_stage TEXT NOT NULL CHECK(model_stage IN ('PREVIEW_ONLY','SHADOW')),
+    created_at TEXT NOT NULL,
+    training_cutoff TEXT NOT NULL,
+    training_rows INTEGER NOT NULL,
+    training_dataset_hash TEXT NOT NULL,
+    feature_version TEXT NOT NULL,
+    label_version TEXT NOT NULL,
+    artifact_path TEXT NOT NULL,
+    artifact_hash TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status='CHALLENGER')
+);
+
+CREATE TABLE IF NOT EXISTS execution_predictions_v1 (
+    source_decision_id TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    model_identity TEXT NOT NULL CHECK(model_identity IN ('LOT_RIDGE','EXIT_RIDGE')),
+    direction TEXT NOT NULL CHECK(direction IN ('LONG','SHORT')),
+    checkpoint_minutes INTEGER NOT NULL,
+    prediction_time TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    predicted_value REAL NOT NULL,
+    recommended_action TEXT NOT NULL,
+    prediction_status TEXT NOT NULL,
+    feature_hash TEXT NOT NULL,
+    PRIMARY KEY(source_decision_id,model_version,direction,checkpoint_minutes)
+);
+
+CREATE TABLE IF NOT EXISTS execution_prediction_scores_v1 (
+    source_decision_id TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    checkpoint_minutes INTEGER NOT NULL,
+    scored_at TEXT NOT NULL,
+    target_value REAL NOT NULL,
+    selected_utility REAL NOT NULL,
+    squared_error REAL NOT NULL,
+    score_hash TEXT NOT NULL,
+    PRIMARY KEY(source_decision_id,model_version,direction,checkpoint_minutes),
+    FOREIGN KEY(source_decision_id,model_version,direction,checkpoint_minutes)
+      REFERENCES execution_predictions_v1(source_decision_id,model_version,direction,checkpoint_minutes)
+);
+
 CREATE INDEX IF NOT EXISTS derived_market_time_v2
 ON derived_market_snapshots(decision_time, evidence_lane);
 CREATE INDEX IF NOT EXISTS derived_outcome_time_v2
 ON derived_outcomes(decision_time, evidence_lane, outcome_status);
 CREATE INDEX IF NOT EXISTS prediction_v2_time
 ON predictions_v2(model_identity, decision_time);
+CREATE INDEX IF NOT EXISTS execution_examples_time_v1
+ON execution_training_examples_v1(checkpoint_minutes, observed_at);
+CREATE INDEX IF NOT EXISTS execution_predictions_time_v1
+ON execution_predictions_v1(model_identity, prediction_time);
 """
 
 

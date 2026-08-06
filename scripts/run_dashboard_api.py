@@ -8,6 +8,7 @@ import json
 import math
 import sqlite3
 import sys
+from types import SimpleNamespace
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,6 +39,7 @@ from xauusd_forecaster.news_evidence import (  # noqa: E402
     EVIDENCE_POLICY_VERSION, event_evidence_rows_from_connection,
 )
 from xauusd_forecaster.storylines import STORYLINE_POLICY_VERSION, storyline_rows  # noqa: E402
+from xauusd_forecaster.execution_learning import execution_learning_status  # noqa: E402
 
 
 NEWS_SOURCE_DEFINITIONS = {
@@ -688,6 +690,9 @@ def _dashboard_payload(database: Path) -> dict:
             ):
                 complete_rows += 1
         learning = learning_curve_payload(connection)
+        execution_learning = execution_learning_status(
+            SimpleNamespace(connection=connection)
+        )
         market_chart = _recent_market_chart(database, connection, now)
         component_times = {
             "quote_bridge": _latest_quote_received(database),
@@ -985,6 +990,7 @@ def _dashboard_payload(database: Path) -> dict:
             "models": learning["models"],
         },
         "learning_curves": learning,
+        "execution_learning": execution_learning,
         "market_chart": market_chart,
         "factor_coverage": factor_coverage(latest_macro, collected_news_sources),
         "sources": {

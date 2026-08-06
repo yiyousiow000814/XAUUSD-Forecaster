@@ -221,6 +221,14 @@ type Payload = {
     };
     disclaimer: string;
   };
+  execution_learning: {
+    shadow_only: boolean;
+    lot_candidates: number[];
+    exit_checkpoints_minutes: number[];
+    models: Array<{ model_identity: string; status: string; training_rows: number;
+      available_examples: number; next_training_threshold: number;
+      model_version: string | null; predictions: number; scores: number }>;
+  };
   factor_coverage: Array<{
     domain: string;
     status: string;
@@ -590,17 +598,13 @@ export default function AuditPage() {
         </div>
         <div className="league-cost-note"><b>诚实成本口径</b><span>显示的是 Bid/Ask quote-cost-adjusted return；commission {payload?.learning_curves.commission_status ?? "UNCONFIGURED"}，slippage {payload?.learning_curves.slippage_status ?? "UNAVAILABLE_SHADOW"}，因此不是 net PnL。</span></div>
         <section className="graph-launch">
-          <div><span>ONE TIMELINE · TWO CHARTS</span><h3>图表只负责时间关系。</h3><p>弹窗只保留长期累计曲线和 XAUUSD K线决策；每一组版本的独立盈亏清单固定显示在本页，不再塞进狭窄弹窗。</p></div>
+          <div><span>ONE TIMELINE · THREE VIEWS</span><h3>曲线、每组成绩与 K 线放在同一弹窗。</h3><p>主页面保持紧凑；点开后可切换长期累计、每个训练组的独立成绩，以及 XAUUSD K线决策。</p></div>
           <button type="button" onClick={() => setGraphOpen(true)}>打开交互图表 ↗</button>
         </section>
-        <VersionLedger groups={payload?.learning_curves.version_groups ?? []} />
-        <section className="execution-research"><header><span>SEPARATE EXECUTION RESEARCH</span><h3>仓位与退出不会偷偷混进方向模型</h3></header><div>
-          <article><b>仓位倍率 Ridge</b><strong>尚未训练</strong><p>计划研究 0.5x / 1.0x / 2.0x。当前 commission、slippage、账户权益与保证金效用未冻结；现在训练只会机械偏爱最大仓位，因此先禁止产生假成绩。</p><small>缺少：净成本口径 · 风险效用 · 账户尺度</small></article>
-          <article><b>Exit Ridge</b><strong>尚未训练</strong><p>计划每5分钟独立判断 EXIT / HOLD。当前主标签只有固定30分钟可执行结果，还没有每个中间检查点的无泄漏继续持有价值，所以先收集标签合同。</p><small>缺少：5/10/15/20/25分钟可执行 checkpoint outcome</small></article>
-        </div></section>
+        <ExecutionResearch status={payload?.execution_learning} />
         <section className="model-scope-note">
-          <article><b>新闻残差 = 修正量</b><span>它学习“真实30分钟方向 − 黄金自身预测”，不是独立完整方向。当前漂亮曲线只能说明新闻修正量值得继续研究，不能直接证明可以删掉黄金自身。</span></article>
-          <article><b>独立 Broad News-only 对照</b><span>如果要验证“不用黄金自身”，必须另训一个直接预测30分钟完整目标的 News-only Challenger，再与 Market-only、Broad Full 同时做未来 OOS；不能把残差模型改名冒充。</span></article>
+          <article><b>新闻残差是“加减多少”，不是完整答案</b><span>例：黄金自身预测 +0.10 U5，新闻残差 +0.04 U5，组合答案才是 +0.14 U5。残差模型虽然有自己独立的 Ridge 参数，但它的训练答案依赖黄金自身先算出的 +0.10。</span></article>
+          <article><b>News-only 才能回答“完全不看黄金行不行”</b><span>News-only 必须只拿新闻特征，直接学习真实30分钟目标 +0.14 U5；它不是“基线漏了多少”。然后才可与黄金自身、黄金＋新闻三者做同一时点的未来 OOS 对照。</span></article>
         </section>
         {(payload?.learning_curves.models.length ?? 0) === 0 ? <div className="league-empty">
           <strong>正在建立第一版 Preview</strong><p>达到 96 条修复或 Forward 完整样本即可训练 Market Preview，不需要等待60天。曲线只从模型创建后的新 Decision 开始，绝不回填假历史成绩。</p>
@@ -612,7 +616,7 @@ export default function AuditPage() {
           return <article key={identity}><b>{MODEL_LABELS[identity]}{diagnostic ? <small>新闻修正量</small> : null}</b><span>已归档历史 <strong>{process?.oos_rows ? percent(process.cumulative_quote_return) : "尚无历史组"}</strong></span><i aria-hidden="true">+</i><span>当前组暂计 <strong>{latestGroup?.subsequent_oos_rows ? percent(latestGroup.cumulative_quote_return) : "等待结果"}</strong></span></article>;
         })}</div>}
         <footer className="league-footer">{payload?.learning_curves.disclaimer ?? "早期曲线用于观察学习过程，不代表已证明盈利。"} 单日和双日新闻模型明确标记 EXPERIMENTAL；达到3个新闻日期后自动进入标准证据状态。当前只运行每个 Ridge 身份的最新版和前一版；{archivedModelCount} 个旧版本的 artifact、预测和成绩已永久归档。零收益安全基准不训练、不使用 AI、不占 Ridge 版本名额。Preview 与 Shadow 都没有下单权限，也不会自动晋升。</footer>
-        <LearningGraphModal open={graphOpen} onClose={() => setGraphOpen(false)} curves={payload?.learning_curves.identity_curves ?? []} market={payload?.market_chart} />
+        <LearningGraphModal open={graphOpen} onClose={() => setGraphOpen(false)} curves={payload?.learning_curves.identity_curves ?? []} market={payload?.market_chart} versionGroups={payload?.learning_curves.version_groups ?? []} />
       </section>}
 
       {view === "coverage" && <section className="coverage-grid">
@@ -628,18 +632,16 @@ export default function AuditPage() {
   );
 }
 
-function VersionLedger({ groups }: { groups: VersionGroup[] }) {
-  const [identity, setIdentity] = useState("BROAD_FULL");
-  const rows = groups.filter(row => row.model_identity === identity).sort((a,b) => b.generation-a.generation);
-  return <section className="version-ledger"><header><div><span>每个训练数据代 · 独立从零评分</span><h3>版本独立盈亏清单</h3></div><select value={identity} onChange={event => setIdentity(event.target.value)}>{Object.entries(MODEL_LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select></header>
-    <div className="version-ledger-head"><span>组别 / 状态</span><span>训练与上线</span><span>创建后 OOS</span><span>本组独立收益</span><span>PF / 出方向</span></div>
-    {rows.map(row => <article key={`${row.model_identity}-${row.training_dataset_hash}`} className={row.lifecycle_status === "LATEST" ? "is-latest" : ""}>
-      <span><b>第 {row.generation} 组</b><small>{row.lifecycle_status === "LATEST" ? "最新版" : row.lifecycle_status === "PREVIOUS" ? "前一版" : "已归档"}</small></span>
-      <span><b>{row.training_rows} 条</b><small>{time(row.created_at)}{row.artifact_rebuilds ? ` · 恢复重建 ${row.artifact_rebuilds} 次` : ""}</small></span>
-      <span><b>{row.subsequent_oos_rows} 条</b><small>{row.distinct_days} 个日期</small></span>
-      <strong>{row.subsequent_oos_rows ? percent(row.cumulative_quote_return) : "等待结果"}</strong>
-      <span><b>{row.profit_factor_quote_adjusted?.toFixed(2) ?? "—"}</b><small>出方向 {((row.coverage_rate ?? 0)*100).toFixed(1)}%</small></span>
-    </article>)}
-    {!rows.length && <p>这个模型还没有真实训练版本。</p>}
-  </section>;
+function ExecutionResearch({ status }: { status?: Payload["execution_learning"] }) {
+  const lot = status?.models.find(row => row.model_identity === "LOT_RIDGE");
+  const exit = status?.models.find(row => row.model_identity === "EXIT_RIDGE");
+  const card = (title: string, model: typeof lot, detail: string, contract: string) => <article>
+    <div className="execution-title"><b>{title}</b><em className={model?.status === "RUNNING" ? "is-running" : ""}>{model?.status === "RUNNING" ? "学习中" : "收集中"}</em></div>
+    <strong>{model?.training_rows ? `已训练 ${model.training_rows} 条` : `${model?.available_examples ?? 0} / ${model?.next_training_threshold ?? 0}`}</strong>
+    <p>{detail}</p><dl><div><dt>可用样本</dt><dd>{model?.available_examples ?? 0}</dd></div><div><dt>前向预测 / 已评分</dt><dd>{model?.predictions ?? 0} / {model?.scores ?? 0}</dd></div><div><dt>下一次训练</dt><dd>{model?.next_training_threshold ?? "—"} 条</dd></div></dl><small>{contract}</small>
+  </article>;
+  return <section className="execution-research"><header><span>SEPARATE EXECUTION SHADOW LEARNING</span><h3>方向、仓位倍率、退出各自训练。</h3><p>这两套 Ridge 没有下单权限，也不会改写30分钟方向模型；它们只在独立账本中学习和评分。</p></header><div>
+    {card("仓位倍率 Ridge", lot, "方向确定后，在 0.5x / 1.0x / 2.0x 中选择风险倍率。奖励方向收益，同时用 U5 标准化的途中不利波动作平方惩罚，避免永远偏爱 2.0x。", "Shadow multiplier · 非账户 lot · commission/slippage 仍未配置")}
+    {card("Exit Ridge", exit, "在进场后的 5 / 10 / 15 / 20 / 25 分钟，预测继续持有到30分钟还能增加多少收益；大于零为 HOLD，否则为 EXIT。", "received-time checkpoint · 只用检查点当时已经收到的报价")}
+  </div></section>;
 }

@@ -23,6 +23,10 @@ from xauusd_forecaster.maintenance import (  # noqa: E402
     backup_forward_ledger,
 )
 from xauusd_forecaster.training_v2 import train_due_v2  # noqa: E402
+from xauusd_forecaster.execution_learning import (  # noqa: E402
+    append_due_exit_predictions,
+    train_due_execution,
+)
 
 
 UTC = timezone.utc
@@ -140,6 +144,21 @@ def main() -> int:
                     u5_state.save(u5_path)
                 last_decision = candidate
                 candidate += timedelta(minutes=5)
+            if quote_root:
+                checkpoint_quotes = provider.observations(now)
+                checkpoint_count = append_due_exit_predictions(
+                    ledger, checkpoint_time=now, created_at=now,
+                    quotes=checkpoint_quotes,
+                )
+                if checkpoint_count:
+                    print(
+                        json.dumps(
+                            {"event": "EXIT_CHECKPOINT_PREDICTIONS_APPENDED",
+                             "count": checkpoint_count},
+                            sort_keys=True,
+                        ),
+                        flush=True,
+                    )
             completed_outcomes = engine.settle_due_outcomes(now)
             for decision_id in completed_outcomes:
                 print(
@@ -153,9 +172,13 @@ def main() -> int:
                 # The V1 engine remains permanently quarantined.  Only the V2
                 # repaired/Live-OOS lane may create new model versions.
                 training_status = train_due_v2(ledger, now, local_root / "models-v2")
+                execution_status = train_due_execution(
+                    ledger, now, local_root / "execution-models-v1", quote_root
+                )
                 print(
                     json.dumps(
-                        {"event": "AUTO_TRAIN_CHECK", "results": training_status},
+                        {"event": "AUTO_TRAIN_CHECK", "results": training_status,
+                         "execution_results": execution_status},
                         sort_keys=True,
                     ),
                     flush=True,

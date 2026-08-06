@@ -6,11 +6,27 @@ Direction, exposure, and exit are separate research questions. No execution mode
 
 ## Exposure Ridge
 
-The candidate actions are `0.5x`, `1.0x`, and `2.0x` relative exposure, not broker-specific lot sizes. Training is prohibited until account equity, contract value, margin, commission, slippage, and a frozen risk utility are configured. Without those fields, return scales mechanically with size and a model would learn to choose the largest multiplier whenever expected return is positive.
+The candidate actions are `0.5x`, `1.0x`, and `2.0x` relative Shadow exposure, not broker-specific lot sizes. Each matured decision supplies separate LONG and SHORT counterfactual examples. The frozen target maximizes:
+
+```text
+size * executable_return_u5 - 0.5 * (size * absolute_adverse_excursion_u5)^2
+```
+
+The quadratic adverse-path term prevents positive-return rows from mechanically selecting the largest multiplier. Commission, slippage, account equity, contract value, and margin remain unconfigured, so this model must be described as a relative exposure experiment and never as a live lot recommendation.
 
 ## Exit Ridge
 
-The candidate actions are `EXIT` and `HOLD`. Training is prohibited until point-in-time executable outcomes exist at fixed 5-minute checkpoints inside the 30-minute horizon. The label must include the value of continuing from each checkpoint and must not use a later path value at the checkpoint decision.
+The candidate actions are `EXIT` and `HOLD` at 5, 10, 15, 20, and 25 minutes after the executable entry receipt. Features contain only the original decision snapshot and the quote path received by that checkpoint. The continuous target is:
+
+```text
+30-minute executable return - checkpoint executable return
+```
+
+Positive predicted continuation value maps to `HOLD`; zero or negative value maps to `EXIT`. Retained forward quotes may reconstruct training labels after the complete 30-minute path matures, but they may not backfill a prediction or an OOS score.
+
+## Lifecycle
+
+Both models begin after their minimum complete training sets exist. A new frozen version is created for every additional 50 examples. Predictions are appended before their respective outcome is known, and only those forward predictions may receive an OOS score.
 
 ## Required gates
 

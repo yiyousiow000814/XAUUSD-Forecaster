@@ -37,6 +37,7 @@ class ExecutableLabelV2:
     break_even_commission_short: float | None = None
     commission_status: str = "UNCONFIGURED"
     slippage_status: str = "UNAVAILABLE_SHADOW"
+    checkpoint_path: tuple[dict, ...] = ()
 
     def payload(self) -> dict:
         return asdict(self)
@@ -124,6 +125,31 @@ def build_executable_label_v2(
     long_return = long_path[-1]
     short_return = short_path[-1]
     quote_cost = -(long_return + short_return) / 2.0
+    checkpoints = []
+    for minutes in (5, 10, 15, 20, 25):
+        checkpoint_target = entry.received_time + timedelta(minutes=minutes)
+        checkpoint_quotes = [
+            quote for quote in path if quote.received_time >= checkpoint_target
+        ]
+        if not checkpoint_quotes:
+            continue
+        checkpoint = checkpoint_quotes[0]
+        visible_path = [
+            quote for quote in path
+            if entry.received_time <= quote.received_time <= checkpoint.received_time
+        ]
+        long_visible = [math.log(quote.bid / entry.ask) for quote in visible_path]
+        short_visible = [math.log(entry.bid / quote.ask) for quote in visible_path]
+        checkpoints.append({
+            "minutes": minutes,
+            "received_time": checkpoint.received_time.isoformat(),
+            "long_return": long_visible[-1],
+            "short_return": short_visible[-1],
+            "long_mfe": max(long_visible),
+            "long_mae": min(long_visible),
+            "short_mfe": max(short_visible),
+            "short_mae": min(short_visible),
+        })
     return ExecutableLabelV2(
         outcome_status="VALID",
         reason_codes=(),
@@ -148,4 +174,5 @@ def build_executable_label_v2(
         maximum_spread=max(quote.ask - quote.bid for quote in path),
         break_even_commission_long=max(0.0, long_return),
         break_even_commission_short=max(0.0, short_return),
+        checkpoint_path=tuple(checkpoints),
     )

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -18,6 +19,11 @@ from xauusd_forecaster.news_features_v2 import aggregate_news_features_v2
 from xauusd_forecaster.repair_v2 import immutable_table_hash
 from xauusd_forecaster import inference_v2, training_v2
 from xauusd_forecaster.u5_state import U5State, U5_VERSION
+from xauusd_forecaster.execution_learning import (
+    LOT_FEATURES, EXIT_FEATURES, append_due_exit_predictions,
+    append_execution_examples, train_due_execution,
+)
+from xauusd_forecaster.training import MARKET_FEATURES
 
 
 UTC = timezone.utc
@@ -51,6 +57,90 @@ def test_executable_horizon_starts_from_entry_received_time() -> None:
     label = build_executable_label_v2(decision_time=decision, quotes=rows)
     assert label.outcome_status == "VALID"
     assert label.exit_received_time == entry_received + timedelta(minutes=30)
+
+
+def test_execution_ridges_train_from_matured_counterfactual_paths(tmp_path) -> None:
+    start = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=start)
+    quotes = [
+        _quote(start + timedelta(seconds=1), start + timedelta(seconds=1), 4000.0),
+        *[
+            _quote(start + timedelta(minutes=minute, seconds=1),
+                   start + timedelta(minutes=minute, seconds=1),
+                   4000.0 + minute)
+            for minute in range(1, 31)
+        ],
+    ]
+    label = build_executable_label_v2(decision_time=start, quotes=quotes)
+    assert [row["minutes"] for row in label.checkpoint_path] == [5, 10, 15, 20, 25]
+    features = {name: 0.001 * (index + 1) for index, name in enumerate(MARKET_FEATURES)}
+    for index in range(48):
+        decision_id = f"execution-{index}"
+        decision = start + timedelta(minutes=5 * index)
+        market_hash = canonical_hash((decision_id, features))
+        ledger.connection.execute(
+            """INSERT INTO derived_market_snapshots VALUES
+            (?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?)""",
+            (f"market-{index}", decision_id, decision.isoformat(), market_hash,
+             "LIVE_OOS", decision.isoformat(), "repaired-market-v2",
+             "finite-memory-u5-v5-contiguous-m1", 0.01,
+             json.dumps(features), "OK", "[]", market_hash, market_hash),
+        )
+        assert append_execution_examples(
+            ledger, decision_id=decision_id,
+            appended_at=decision + timedelta(minutes=31), label=label,
+            source_hash=canonical_hash((decision_id, "quotes")),
+        ) == 12
+    statuses = train_due_execution(
+        ledger, start + timedelta(days=1), tmp_path / "execution-models"
+    )
+    assert {row["model_identity"] for row in statuses if row["status"] == "TRAINED"} == {
+        "LOT_RIDGE", "EXIT_RIDGE",
+    }
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM execution_model_updates_v1"
+    ).fetchone()[0] == 2
+    lot = ledger.connection.execute(
+        "SELECT artifact_path FROM execution_model_updates_v1 WHERE model_identity='LOT_RIDGE'"
+    ).fetchone()
+    exit_model = ledger.connection.execute(
+        "SELECT artifact_path FROM execution_model_updates_v1 WHERE model_identity='EXIT_RIDGE'"
+    ).fetchone()
+    assert tuple(json.loads(Path(lot["artifact_path"]).read_text())["feature_names"]) == LOT_FEATURES
+    assert tuple(json.loads(Path(exit_model["artifact_path"]).read_text())["feature_names"]) == EXIT_FEATURES
+
+    live_decision = start + timedelta(days=1, minutes=5)
+    live_id = "execution-live-checkpoint"
+    live_hash = canonical_hash((live_id, features))
+    ledger.connection.execute(
+        """INSERT INTO derived_market_snapshots VALUES
+        (?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?)""",
+        ("market-live", live_id, live_decision.isoformat(), live_hash,
+         "LIVE_OOS", live_decision.isoformat(), "repaired-market-v2",
+         "finite-memory-u5-v5-contiguous-m1", 0.01,
+         json.dumps(features), "OK", "[]", live_hash, live_hash),
+    )
+    live_quotes = [
+        _quote(live_decision + timedelta(seconds=1),
+               live_decision + timedelta(seconds=1), 4000.0),
+        _quote(live_decision + timedelta(minutes=5, seconds=1),
+               live_decision + timedelta(minutes=5, seconds=1), 4001.0),
+    ]
+    observed_at = live_decision + timedelta(minutes=5, seconds=2)
+    assert append_due_exit_predictions(
+        ledger, checkpoint_time=observed_at, created_at=observed_at,
+        quotes=live_quotes,
+    ) == 2
+    rows = ledger.connection.execute(
+        """SELECT direction,checkpoint_minutes,prediction_time
+        FROM execution_predictions_v1 WHERE model_identity='EXIT_RIDGE'
+        ORDER BY direction"""
+    ).fetchall()
+    assert [(row["direction"], row["checkpoint_minutes"]) for row in rows] == [
+        ("LONG", 5), ("SHORT", 5),
+    ]
+    assert all(row["prediction_time"] == live_quotes[-1].received_time.isoformat()
+               for row in rows)
 
 
 def test_stable_ctrader_server_clock_lead_within_freshness_is_valid() -> None:
