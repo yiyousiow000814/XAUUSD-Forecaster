@@ -118,13 +118,10 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
     assert "summary_zh" not in mirrored["recent_news"][0]
     assert detail_rows[0]["payload"]["summary_zh"] == body
     assert len(detail_rows[0]["detail_key"]) == 64
-    market_decision = mirrored["market_chart"]["decisions"][0]
+    assert mirrored["market_chart"]["decisions"] == []
+    market_decision = json.loads(module.market_chart_snapshot(payload))["decisions"][0]
+    assert market_decision["source_decision_id"] == "d1"
     assert market_decision["model_version"] == "unused-field"
-    assert market_decision["ev_long_u5"] == -0.2
-    assert market_decision["ev_short_u5"] == 0.1
-    assert "policy_expected_action" not in market_decision
-    assert "policy_consistent" not in market_decision
-    assert "frozen_record" not in market_decision
     assert len(mirrored["recent_decisions"]) == module.REMOTE_DECISION_LIMIT
     assert len(mirrored["news_evidence"]) == module.REMOTE_EVIDENCE_LIMIT
     assert mirrored["learning_curves"]["models"] == [
@@ -152,7 +149,7 @@ def test_news_detail_batches_stay_bounded() -> None:
         assert len(encoded) <= module.NEWS_DETAIL_BATCH_LIMIT_BYTES
 
 
-def test_remote_market_chart_keeps_only_latest_bounded_decisions() -> None:
+def test_remote_market_chart_is_split_from_status_and_keeps_complete_window() -> None:
     module = _sync_module()
     decisions = [{
         "source_decision_id": f"d-{index}",
@@ -165,13 +162,19 @@ def test_remote_market_chart_keeps_only_latest_bounded_decisions() -> None:
         "ev_long_u5": -0.2,
         "ev_short_u5": 0.1,
     } for index in range(module.REMOTE_MARKET_DECISION_LIMIT + 20)]
-    mirrored = json.loads(module.remote_snapshot({
+    payload = {
         "market_chart": {"decisions": list(reversed(decisions))},
-    }))
-    retained = mirrored["market_chart"]["decisions"]
+    }
+    mirrored = json.loads(module.remote_snapshot(payload))
+    assert mirrored["market_chart"]["decisions"] == []
+    assert mirrored["market_chart"]["decision_resource"] == "/api/market-chart"
+
+    retained = json.loads(module.market_chart_snapshot(payload))["decisions"]
     assert len(retained) == module.REMOTE_MARKET_DECISION_LIMIT
     assert retained[0]["source_decision_id"] == "d-20"
     assert retained[-1]["source_decision_id"] == f"d-{len(decisions) - 1}"
+    assert "exit_time" not in retained[0]
+    assert retained[0]["model_version"] == "model-20"
 
 
 def test_curve_compaction_preserves_extremes_and_version_boundaries() -> None:

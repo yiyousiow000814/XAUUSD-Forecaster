@@ -447,12 +447,28 @@ def _dashboard_payload(database: Path) -> dict:
         if decision_ids:
             placeholders = ",".join("?" for _ in decision_ids)
             prediction_rows = connection.execute(
-                f"""SELECT decision_id, model_identity, model_version,
-                            predicted_direction_u5, predicted_news_residual_u5,
-                            ev_long_u5, ev_short_u5, uncertainty_u5,
-                            recommended_action, effective_action, prediction_status
-                     FROM predictions WHERE decision_id IN ({placeholders})
-                     ORDER BY decision_id, model_identity""",
+                f"""WITH ranked AS (
+                       SELECT p.source_decision_id AS decision_id,
+                              p.model_identity,p.model_version,
+                              p.predicted_direction_u5,p.predicted_news_residual_u5,
+                              p.ev_long_u5,p.ev_short_u5,
+                              p.interval_width AS uncertainty_u5,
+                              p.recommended_action,p.effective_action,p.prediction_status,
+                              row_number() OVER (
+                                PARTITION BY p.source_decision_id,p.model_identity
+                                ORDER BY u.created_at DESC,u.model_version DESC
+                              ) AS version_rank
+                       FROM predictions_v2 p
+                       JOIN model_updates_v2 u USING(model_version)
+                       WHERE p.source_decision_id IN ({placeholders})
+                         AND p.decision_time>u.created_at
+                     )
+                     SELECT decision_id,model_identity,model_version,
+                            predicted_direction_u5,predicted_news_residual_u5,
+                            ev_long_u5,ev_short_u5,uncertainty_u5,
+                            recommended_action,effective_action,prediction_status
+                     FROM ranked WHERE version_rank=1
+                     ORDER BY decision_id,model_identity""",
                 decision_ids,
             ).fetchall()
             for prediction in prediction_rows:
@@ -528,12 +544,14 @@ def _dashboard_payload(database: Path) -> dict:
                      AND preferred_a.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
                      AND preferred_a.prompt_version IN (
+                       'news-json-v12-gemini-story-identity',
+                       'news-json-v11-gemini-story-subjects',
                        'news-json-v10-controlled-category-zh',
-                       'news-json-v9-local-display-recovery',
-                       'news-json-v8-strict-zh-source-number-lexemes')
+                       'news-json-v9-local-display-recovery')
                    ORDER BY CASE preferred_a.prompt_version
-                     WHEN 'news-json-v10-controlled-category-zh' THEN 0
-                     WHEN 'news-json-v9-local-display-recovery' THEN 1 ELSE 2 END,
+                     WHEN 'news-json-v12-gemini-story-identity' THEN 0
+                     WHEN 'news-json-v11-gemini-story-subjects' THEN 1
+                     WHEN 'news-json-v10-controlled-category-zh' THEN 2 ELSE 3 END,
                      CASE preferred_a.llm_model_version
                        WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                      preferred_a.parsed_at DESC LIMIT 1)
@@ -559,7 +577,7 @@ def _dashboard_payload(database: Path) -> dict:
                      AND latest_f.revision_number=n.revision_number
                      AND latest_f.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
-                     AND latest_f.prompt_version='news-json-v10-controlled-category-zh'
+                     AND latest_f.prompt_version='news-json-v12-gemini-story-identity'
                      AND NOT (latest_f.error_type='RuntimeError'
                               AND latest_f.error='All configured Gemini keys unavailable for this batch')
                     ORDER BY latest_f.failed_at DESC LIMIT 1)
@@ -619,12 +637,14 @@ def _dashboard_payload(database: Path) -> dict:
                      AND preferred_a.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
                      AND preferred_a.prompt_version IN (
+                       'news-json-v12-gemini-story-identity',
+                       'news-json-v11-gemini-story-subjects',
                        'news-json-v10-controlled-category-zh',
-                       'news-json-v9-local-display-recovery',
-                       'news-json-v8-strict-zh-source-number-lexemes')
+                       'news-json-v9-local-display-recovery')
                    ORDER BY CASE preferred_a.prompt_version
-                     WHEN 'news-json-v10-controlled-category-zh' THEN 0
-                     WHEN 'news-json-v9-local-display-recovery' THEN 1 ELSE 2 END,
+                     WHEN 'news-json-v12-gemini-story-identity' THEN 0
+                     WHEN 'news-json-v11-gemini-story-subjects' THEN 1
+                     WHEN 'news-json-v10-controlled-category-zh' THEN 2 ELSE 3 END,
                      CASE preferred_a.llm_model_version
                        WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                      preferred_a.parsed_at DESC LIMIT 1)
@@ -638,7 +658,7 @@ def _dashboard_payload(database: Path) -> dict:
                      AND latest_f.revision_number=n.revision_number
                      AND latest_f.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
-                     AND latest_f.prompt_version='news-json-v10-controlled-category-zh'
+                     AND latest_f.prompt_version='news-json-v12-gemini-story-identity'
                      AND NOT (latest_f.error_type='RuntimeError'
                               AND latest_f.error='All configured Gemini keys unavailable for this batch')
                    ORDER BY latest_f.failed_at DESC LIMIT 1)

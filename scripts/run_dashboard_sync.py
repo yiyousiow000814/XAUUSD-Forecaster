@@ -29,7 +29,7 @@ REMOTE_EVIDENCE_LIMIT = 60
 NEWS_DETAIL_BATCH_LIMIT_BYTES = 400_000
 NEWS_DETAIL_FULL_REFRESH_SECONDS = 86_400
 REMOTE_CURVE_POINTS_PER_IDENTITY = 480
-REMOTE_MARKET_DECISION_LIMIT = 240
+REMOTE_MARKET_DECISION_LIMIT = 288 * 5
 
 NEWS_INDEX_FIELDS = (
     "category", "source", "source_item_id", "revision_number",
@@ -38,10 +38,8 @@ NEWS_INDEX_FIELDS = (
     "model_visibility", "emerging_topic_zh",
 )
 MARKET_DECISION_FIELDS = (
-    "source_decision_id", "decision_time", "exit_time", "model_identity",
-    "recommended_action", "prediction_status", "outcome_status",
-    "ev_long_u5", "ev_short_u5",
-    "outcome_reason_codes",
+    "source_decision_id", "decision_time", "model_identity",
+    "recommended_action", "outcome_status", "ev_long_u5", "ev_short_u5",
     "long_quote_return", "short_quote_return",
 )
 
@@ -114,6 +112,46 @@ def compact_curve_points(points: list[dict]) -> list[dict]:
     return [points[index] for index in sorted(keep)]
 
 
+def compact_market_chart(payload: dict) -> dict:
+    """Keep one complete 24-hour decision window in its own mirror payload."""
+    market = copy.deepcopy(payload.get("market_chart") or {})
+    compact_decisions = []
+    for row in market.get("decisions", []):
+        compact = {
+            key: row.get(key)
+            for key in MARKET_DECISION_FIELDS
+            if row.get(key) is not None
+        }
+        for key in ("ev_long_u5", "ev_short_u5"):
+            if key in compact:
+                compact[key] = round(float(compact[key]), 6)
+        if row.get("model_version"):
+            compact["model_version"] = str(row["model_version"])[-12:]
+        if row.get("prediction_status") != "PROVISIONAL_POST_COST_EV":
+            compact["prediction_status"] = row.get("prediction_status")
+        if row.get("outcome_reason_codes"):
+            compact["outcome_reason_codes"] = row["outcome_reason_codes"]
+        compact_decisions.append(compact)
+    compact_decisions.sort(key=lambda row: (
+        row.get("decision_time") or "", row.get("model_identity") or ""
+    ))
+    market["decisions"] = compact_decisions[-REMOTE_MARKET_DECISION_LIMIT:]
+    return market
+
+
+def market_chart_snapshot(payload: dict) -> bytes:
+    encoded = json.dumps(
+        compact_market_chart(payload), ensure_ascii=False, allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(encoded) > REMOTE_PAYLOAD_LIMIT_BYTES:
+        raise ValueError(
+            f"market chart payload is {len(encoded)} bytes "
+            f"(limit {REMOTE_PAYLOAD_LIMIT_BYTES})"
+        )
+    return encoded
+
+
 def remote_snapshot(payload: dict) -> bytes:
     """Build a bounded Sites mirror without truncating retained news content."""
     snapshot = copy.deepcopy(payload)
@@ -148,28 +186,11 @@ def remote_snapshot(payload: dict) -> bytes:
     snapshot["recent_news"] = news_index
 
     market = snapshot.get("market_chart")
-    if isinstance(market, dict) and isinstance(market.get("decisions"), list):
-        compact_decisions = []
-        for row in market["decisions"]:
-            compact = {key: row.get(key) for key in MARKET_DECISION_FIELDS}
-            for key in ("ev_long_u5", "ev_short_u5"):
-                if compact[key] is not None:
-                    compact[key] = round(float(compact[key]), 6)
-            # The chart only needs a compact frozen-version identifier. Keeping
-            # every full artifact name can add more than 100 KiB per day.
-            if row.get("model_version"):
-                compact["model_version"] = str(row["model_version"])[-12:]
-            if row.get("policy_consistent") is False:
-                compact["policy_consistent"] = False
-                compact["policy_expected_action"] = row.get("policy_expected_action")
-            market_version = row.get("frozen_record")
-            if market_version is False:
-                compact["frozen_record"] = False
-            compact_decisions.append(compact)
-        compact_decisions.sort(key=lambda row: (
-            row.get("decision_time") or "", row.get("model_identity") or ""
-        ))
-        market["decisions"] = compact_decisions[-REMOTE_MARKET_DECISION_LIMIT:]
+    if isinstance(market, dict):
+        # The full chart is synchronized separately.  Keeping it in the status
+        # snapshot made five model families compete for one global row limit.
+        market["decisions"] = []
+        market["decision_resource"] = "/api/market-chart"
 
     for name, limit in (
         ("recent_news", REMOTE_NEWS_LIMIT),
@@ -270,6 +291,10 @@ def sync_once(config: dict) -> None:
     with urllib.request.urlopen(config["local_status_url"], timeout=5) as response:
         local_payload = json.loads(response.read())
     _post_json(config["remote_ingest_url"], remote_snapshot(local_payload), config)
+    market_url = config.get("remote_market_chart_url") or (
+        config["remote_ingest_url"].rsplit("/", 1)[0] + "/market-chart"
+    )
+    _post_json(market_url, market_chart_snapshot(local_payload), config)
 
     _, details = news_mirror_parts(local_payload)
     state_path = Path(config.get("news_state_file", DEFAULT_NEWS_STATE))
