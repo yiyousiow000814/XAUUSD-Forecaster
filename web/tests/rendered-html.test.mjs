@@ -141,6 +141,8 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(css, /height:calc\(100dvh - 16px\)/);
   assert.match(css, /grid-template-rows:auto auto minmax\(0,1fr\) auto/);
   assert.match(css, /scrollbar-gutter:stable/);
+  assert.match(css, /long-curve-block>\.learning-svg \{ height:clamp\(420px,55dvh,600px\)/);
+  assert.match(css, /long-curve-block>\.chart-legend \{ margin-top:16px; padding-bottom:10px/);
 });
 
 test("explains U5 as a risk scale rather than a probability", () => {
