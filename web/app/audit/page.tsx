@@ -632,7 +632,13 @@ export default function AuditPage() {
           const latestGroup = payload?.learning_curves.version_groups.find(row => row.model_identity === identity && row.lifecycle_status === "LATEST");
           if (!process && !latestGroup) return null;
           const diagnostic = identity === "NEWS_RESIDUAL" || identity === "BROAD_NEWS_RESIDUAL";
-          return <article key={identity}><b>{MODEL_LABELS[identity]}{diagnostic ? <small>新闻修正量</small> : null}</b><span>历史＋实时连续累计 <strong>{process?.oos_rows ? percent(process.cumulative_quote_return) : "等待成熟结果"}</strong></span><i aria-hidden="true">·</i><span>本组独立 <strong>{latestGroup?.subsequent_oos_rows ? percent(latestGroup.cumulative_quote_return) : "等待结果"}</strong></span></article>;
+          const hasTotal = (process?.oos_rows ?? 0) > 0;
+          const hasGroup = (latestGroup?.subsequent_oos_rows ?? 0) > 0;
+          const total = hasTotal ? process!.cumulative_quote_return : null;
+          const group = hasGroup ? latestGroup!.cumulative_quote_return : null;
+          const history = total === null ? null : total - (group ?? 0);
+          const tone = group === null ? "is-pending" : group >= 0 ? "is-positive" : "is-negative";
+          return <article key={identity}><b>{MODEL_LABELS[identity]}{diagnostic ? <small>新闻修正量</small> : null}</b><div className="return-flow" aria-label={`本组开始前 ${percent(history)}，加入本组后 ${percent(total)}，本组贡献 ${percent(group)}`}><span title="本组开始前的历史累计">{history === null ? "—" : percent(history)}</span><i className={tone} aria-hidden="true">→</i><strong title="加入本组后的连续累计">{total === null ? "等待结果" : percent(total)}</strong><i className="return-separator" aria-hidden="true">·</i><strong className={`group-return ${tone}`} title="本组独立贡献">{group === null ? "等待" : percent(group)}</strong></div></article>;
         })}</div>}
         <footer className="league-footer">{payload?.learning_curves.disclaimer ?? "早期曲线用于观察学习过程，不代表已证明盈利。"} 单日和双日新闻模型明确标记 EXPERIMENTAL；达到3个新闻日期后自动进入标准证据状态。当前只运行每个 Ridge 身份的最新版和前一版；{archivedModelCount} 个旧版本的 artifact、预测和成绩已永久归档。零收益安全基准不训练、不使用 AI、不占 Ridge 版本名额。Preview 与 Shadow 都没有下单权限，也不会自动晋升。</footer>
         <LearningGraphModal key={graphStartTab} open={graphOpen} onClose={() => setGraphOpen(false)} startTab={graphStartTab} curves={payload?.learning_curves.identity_curves ?? []} market={payload?.market_chart} versionGroups={payload?.learning_curves.version_groups ?? []} execution={payload?.execution_learning} />

@@ -100,6 +100,10 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(page, /打开交互图表/);
   assert.match(page, /新闻修正量/);
   assert.match(page, /大视野新闻修正量/);
+  assert.match(page, /return-flow/);
+  assert.match(page, /本组开始前的历史累计/);
+  assert.match(page, /加入本组后的连续累计/);
+  assert.match(page, /本组独立贡献/);
   assert.match(modal, /长期 OOS 曲线/);
   assert.match(modal, /每组独立成绩/);
   assert.match(modal, /版本独立盈亏清单/);

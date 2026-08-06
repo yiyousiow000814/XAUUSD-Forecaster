@@ -220,8 +220,10 @@ footer { font-size:13px; font-weight:600; letter-spacing:.06em; }
 .model-scope-note .live-method { grid-column:1/-1; border-top:1px solid var(--ink); }
 .model-scope-note b { font-size:15px; }.model-scope-note span { font-size:13px; line-height:1.55; color:var(--muted); }
 .compact-model-summary { display:grid; grid-template-columns:repeat(2,1fr); gap:1px; background:#b9b3a5; border-bottom:1px solid var(--ink); }
-.compact-model-summary article { display:grid; grid-template-columns:minmax(140px,1fr) auto 20px auto; align-items:center; gap:12px; min-height:78px; padding:14px 18px; background:var(--paper); }
-.compact-model-summary article>b { font-size:15px; }.compact-model-summary span { display:grid; gap:3px; color:var(--muted); font-size:10px; }.compact-model-summary strong { color:var(--ink); font-family:var(--font-display); font-size:19px; }.compact-model-summary i { font-style:normal; color:var(--muted); }
+.compact-model-summary article { display:grid; grid-template-columns:minmax(150px,1fr) auto; align-items:center; gap:18px; min-height:78px; padding:14px 18px; background:var(--paper); }
+.compact-model-summary article>b { font-size:15px; }.compact-model-summary strong { color:var(--ink); font-family:var(--font-display); font-size:19px; }
+.return-flow { display:grid; grid-template-columns:auto 24px auto 12px auto; align-items:center; gap:8px; white-space:nowrap; font-family:var(--font-display); font-size:19px; font-weight:700; }
+.return-flow>span { color:var(--muted); }.return-flow i { font-family:var(--font-mono); font-style:normal; text-align:center; }.return-flow .is-positive { color:var(--green); }.return-flow .is-negative { color:var(--red); }.return-flow .is-pending,.return-flow .return-separator { color:var(--muted); }.return-flow .group-return { min-width:78px; }
 .compact-model-summary article>b small,.version-graph h3 small { display:block; margin-top:5px; color:var(--muted); font-family:var(--font-mono); font-size:10px; font-weight:700; }
 body.modal-open { overflow:hidden; }
 .graph-modal-backdrop { position:fixed; inset:0; z-index:100; display:grid; place-items:center; padding:8px; background:rgba(17,17,15,.72); backdrop-filter:blur(3px); }
