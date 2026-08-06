@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 
 type CurvePoint = { decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number };
-type Curve = { model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: CurvePoint[] };
+type Curve = { model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: CurvePoint[]; source_point_count_30m?: number; chart_point_count_30m?: number; chart_downsampled_30m?: boolean; points_30m?: CurvePoint[] };
 type Candle = { time: string; open: number; high: number; low: number; close: number; ticks: number };
 type Decision = {
   source_decision_id: string; decision_time: string; exit_time?: string;
@@ -24,7 +24,10 @@ type VersionGroup = {
   model_versions: string[]; subsequent_oos_rows: number; distinct_days: number;
   cumulative_quote_return: number; profit_factor_quote_adjusted: number | null;
   coverage_rate: number | null; average_oracle_regret: number | null;
+  cadence_metrics?: Record<EvaluationCadence, CadenceMetric>;
 };
+type EvaluationCadence = "EVERY_5M" | "FIXED_30M";
+type CadenceMetric = { oos_rows: number; distinct_days: number; cumulative_quote_return: number; profit_factor_quote_adjusted: number | null; coverage_rate: number | null };
 type ExecutionModel = {
   model_identity: string; training_rows: number; training_decisions?: number;
   training_observations?: number; predictions: number; scores: number;
@@ -103,25 +106,49 @@ export default function LearningGraphModal({
 
 function VersionLedger({ groups }: { groups: VersionGroup[] }) {
   const [identity, setIdentity] = useState("BROAD_FULL");
+  const [cadence, setCadence] = useState<EvaluationCadence>("EVERY_5M");
+  const [hovered, setHovered] = useState<VersionGroup | null>(null);
   const rows = groups.filter(row => row.model_identity === identity).sort((a,b) => b.generation-a.generation);
   const stamp = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12:false, month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" });
-  return <section className="version-ledger modal-version-ledger"><header><div><span>每个训练数据代 · 独立从零评分</span><h3>版本独立盈亏清单</h3></div><select value={identity} onChange={event => setIdentity(event.target.value)}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select></header>
+  const metric = (row: VersionGroup) => row.cadence_metrics?.[cadence] ?? { oos_rows: row.subsequent_oos_rows, distinct_days: row.distinct_days, cumulative_quote_return: row.cumulative_quote_return, profit_factor_quote_adjusted: row.profit_factor_quote_adjusted, coverage_rate: row.coverage_rate };
+  const graphRows = groups.filter(row => metric(row).oos_rows > 0);
+  const times = graphRows.map(row => Date.parse(row.created_at));
+  const values = graphRows.map(row => metric(row).cumulative_quote_return).concat(0);
+  const minTime = times.length ? Math.min(...times) : 0; const maxTime = times.length ? Math.max(...times) : 1;
+  const low = Math.min(...values); const high = Math.max(...values);
+  const gx = (value: string) => 70 + (Date.parse(value)-minTime)/Math.max(1,maxTime-minTime)*820;
+  const gy = (value: number) => 32 + (high-value)/Math.max(.000001,high-low)*230;
+  const hoveredMetric = hovered ? metric(hovered) : null;
+  return <section className="version-ledger modal-version-ledger"><header><div><span>同一冻结模型 · 两种真实评估频率</span><h3>所有模型的训练组成绩</h3></div><div className="version-ledger-controls"><label>统计频率<select value={cadence} onChange={event => setCadence(event.target.value as EvaluationCadence)}><option value="EVERY_5M">每5分钟（重叠）</option><option value="FIXED_30M">每30分钟（:00 / :30）</option></select></label><label>下方清单<select value={identity} onChange={event => setIdentity(event.target.value)}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select></label></div></header>
+    <section className="version-hover-chart" aria-label="所有模型训练组独立收益图">
+      <div className="version-hover-readout">{hovered && hoveredMetric ? <><b>{LABELS[hovered.model_identity]} · 第 {hovered.generation} 组</b><span>{stamp(hovered.created_at)} · 训练 {hovered.training_rows} 条 · OOS {hoveredMetric.oos_rows} 条 · 收益 {pct(hoveredMetric.cumulative_quote_return)} · PF {hoveredMetric.profit_factor_quote_adjusted?.toFixed(2) ?? "—"} · 出方向 {((hoveredMetric.coverage_rate ?? 0)*100).toFixed(1)}%</span></> : <><b>把鼠标移到圆点上</b><span>可查看模型、训练组、上线时间、OOS 数量、收益、PF 与出方向比例。</span></>}</div>
+      {graphRows.length ? <svg viewBox="0 0 960 310" role="img">
+        <line x1="70" x2="890" y1={gy(0)} y2={gy(0)} className="zero-line" />
+        <text x="12" y={gy(high)+4}>{pct(high)}</text><text x="12" y={gy(low)+4}>{pct(low)}</text>
+        {Object.keys(LABELS).filter(key => key !== "CHAMPION_0").map(key => {
+          const modelRows = graphRows.filter(row => row.model_identity === key).sort((a,b) => Date.parse(a.created_at)-Date.parse(b.created_at));
+          return <g key={key}>{modelRows.length > 1 && <polyline fill="none" stroke={COLORS[key]} strokeWidth="2.5" points={modelRows.map(row => `${gx(row.created_at)},${gy(metric(row).cumulative_quote_return)}`).join(" ")} />}{modelRows.map(row => <circle key={row.training_dataset_hash} cx={gx(row.created_at)} cy={gy(metric(row).cumulative_quote_return)} r="5" fill={COLORS[key]} stroke="#eee9dc" strokeWidth="2" tabIndex={0} onMouseEnter={() => setHovered(row)} onMouseLeave={() => setHovered(null)} onFocus={() => setHovered(row)} onBlur={() => setHovered(null)} />)}</g>;
+        })}
+      </svg> : <Empty text="这个频率还没有成熟的训练组结果。" />}
+      <div className="chart-legend">{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <span key={key}><i style={{ background:COLORS[key] }} />{label}</span>)}</div>
+    </section>
     <div className="version-ledger-head"><span>组别 / 状态</span><span>训练与上线</span><span>创建后 OOS</span><span>本组独立收益</span><span>PF / 出方向</span></div>
-    {rows.map(row => <article key={`${row.model_identity}-${row.training_dataset_hash}`} className={row.lifecycle_status === "LATEST" ? "is-latest" : ""}>
+    {rows.map(row => { const selected = metric(row); return <article key={`${row.model_identity}-${row.training_dataset_hash}`} className={row.lifecycle_status === "LATEST" ? "is-latest" : ""}>
       <span><b>第 {row.generation} 组</b><small>{row.lifecycle_status === "LATEST" ? "最新版" : row.lifecycle_status === "PREVIOUS" ? "前一版" : "已归档"}</small></span>
       <span><b>{row.training_rows} 条</b><small>{stamp(row.created_at)}{row.artifact_rebuilds ? ` · 恢复重建 ${row.artifact_rebuilds} 次` : ""}</small></span>
-      <span><b>{row.subsequent_oos_rows} 条</b><small>{row.distinct_days} 个日期</small></span>
-      <strong>{row.subsequent_oos_rows ? pct(row.cumulative_quote_return) : "等待结果"}</strong>
-      <span><b>{row.profit_factor_quote_adjusted?.toFixed(2) ?? "—"}</b><small>出方向 {((row.coverage_rate ?? 0)*100).toFixed(1)}%</small></span>
-    </article>)}
+      <span><b>{selected.oos_rows} 条</b><small>{selected.distinct_days} 个日期</small></span>
+      <strong>{selected.oos_rows ? pct(selected.cumulative_quote_return) : "等待结果"}</strong>
+      <span><b>{selected.profit_factor_quote_adjusted?.toFixed(2) ?? "—"}</b><small>出方向 {((selected.coverage_rate ?? 0)*100).toFixed(1)}%</small></span>
+    </article>})}
     {!rows.length && <p>这个模型还没有真实训练版本。</p>}
   </section>;
 }
 
 function LongCurve({ curves }: { curves: Curve[] }) {
   const [range, setRange] = useState<"24h" | "7d" | "30d" | "all">("24h");
+  const [cadence, setCadence] = useState<EvaluationCadence>("EVERY_5M");
   const [pageOffset, setPageOffset] = useState(0);
-  const usable = curves.filter(row => row.model_identity !== "CHAMPION_0" && row.points.length > 0);
+  const usable = curves.map(row => cadence === "FIXED_30M" ? { ...row, points: row.points_30m ?? [], source_point_count: row.source_point_count_30m, chart_point_count: row.chart_point_count_30m, chart_downsampled: row.chart_downsampled_30m } : row).filter(row => row.model_identity !== "CHAMPION_0" && row.points.length > 0);
   const overviewPoints = usable.flatMap(row => row.points);
   if (!overviewPoints.length) return <Empty text="还没有已成熟的 Live OOS 点；第一个预测走完30分钟后才会出现。" />;
   const fullStart = Math.min(...overviewPoints.map(point => Date.parse(point.decision_time)));
@@ -180,6 +207,7 @@ function LongCurve({ curves }: { curves: Curve[] }) {
   return <div className="chart-block long-curve-block">
     <div className="chart-caption"><div><b>历史＋实时成熟 OOS（只追加，不重写）</b><span>数据库永久保留每个成熟结果；图表固定宽度，按时间窗口查看，全部历史只画压缩轮廓。</span></div><strong>{sourceTimeCount} 个时点<small> · {sourcePointCount} 条模型评分</small></strong></div>
     <div className="curve-navigation" aria-label="长期 OOS 时间范围">
+      <label>统计频率<select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPageOffset(0); }}><option value="EVERY_5M">每5分钟（重叠）</option><option value="FIXED_30M">每30分钟（非重叠）</option></select></label>
       <label>时间窗口<select value={range} onChange={event => { setRange(event.target.value as typeof range); setPageOffset(0); }}><option value="24h">24小时</option><option value="7d">7天</option><option value="30d">30天</option><option value="all">全部总览</option></select></label>
       <button type="button" disabled={!canGoEarlier} onClick={() => setPageOffset(value => value + 1)}>← 较早一段</button>
       <button type="button" disabled={!canGoLater} onClick={() => setPageOffset(value => Math.max(0, value - 1))}>较晚一段 →</button>

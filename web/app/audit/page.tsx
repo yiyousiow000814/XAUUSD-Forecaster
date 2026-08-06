@@ -141,6 +141,7 @@ type RollingProcess = {
   max_drawdown_quote_return: number;
   sharpe_quote_adjusted: number | null;
   calibration_status: string;
+  cadence_metrics?: Record<EvaluationCadence, CadenceMetric>;
 };
 type VersionGroup = {
   model_identity: string; training_dataset_hash: string; generation: number;
@@ -149,7 +150,10 @@ type VersionGroup = {
   model_versions: string[]; subsequent_oos_rows: number; distinct_days: number;
   cumulative_quote_return: number; profit_factor_quote_adjusted: number | null;
   coverage_rate: number | null; average_oracle_regret: number | null;
+  cadence_metrics?: Record<EvaluationCadence, CadenceMetric>;
 };
+type EvaluationCadence = "EVERY_5M" | "FIXED_30M";
+type CadenceMetric = { oos_rows: number; distinct_days: number; cumulative_quote_return: number; profit_factor_quote_adjusted: number | null; coverage_rate: number | null };
 
 type Payload = {
   generated_at: string;
@@ -218,7 +222,7 @@ type Payload = {
     models: LearningModel[];
     version_groups: VersionGroup[];
     rolling_processes: RollingProcess[];
-    identity_curves: Array<{ model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: Array<{ decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number }> }>;
+    identity_curves: Array<{ model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: Array<{ decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number }>; source_point_count_30m?: number; chart_point_count_30m?: number; chart_downsampled_30m?: boolean; points_30m?: Array<{ decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number }> }>;
     zero_return_baseline: {
       label: string;
       model_identity: string;
@@ -406,6 +410,7 @@ export default function AuditPage() {
   const [newsPage, setNewsPage] = useState(1);
   const [graphOpen, setGraphOpen] = useState(false);
   const [graphStartTab, setGraphStartTab] = useState<"curve" | "execution">("curve");
+  const [summaryCadence, setSummaryCadence] = useState<EvaluationCadence>("EVERY_5M");
 
   const refresh = useCallback(async () => {
     try {
@@ -629,6 +634,7 @@ export default function AuditPage() {
           <article><b>当前还没有独立的“大视野 News-only”</b><span>真正的 News-only 会完全不读取黄金特征，只用新闻直接预测完整30分钟目标。现在名为“大视野新闻修正量”的曲线不能当作 News-only，也不能单独拿去做完整方向。</span></article>
           <article className="live-method"><b>做法可以实时复现；结果尚未达到实盘标准</b><span>行情只读取决策时已经收到的 Bid/Ask，新闻只读取当时已经首次看见且已完成解析的内容；30分钟结果成熟后才进入下一轮训练，所以方法本身不依赖未来数据。当前仍缺真实 commission、slippage 与下单接口验证，因此这里只能证明“计算方法可在线运行”，不能宣称已有可实盘收益。</span></article>
         </section>
+        <div className="summary-cadence"><span>摘要统计频率</span><button type="button" className={summaryCadence === "EVERY_5M" ? "active" : ""} onClick={() => setSummaryCadence("EVERY_5M")}>每5分钟（重叠）</button><button type="button" className={summaryCadence === "FIXED_30M" ? "active" : ""} onClick={() => setSummaryCadence("FIXED_30M")}>每30分钟（:00 / :30）</button><small>预测期限始终是30分钟；这里改变的是入场评估频率。</small></div>
         {(payload?.learning_curves.models.length ?? 0) === 0 ? <div className="league-empty">
           <strong>正在建立第一版 Preview</strong><p>达到 96 条修复或 Forward 完整样本即可训练 Market Preview，不需要等待60天。曲线只从模型创建后的新 Decision 开始，绝不回填假历史成绩。</p>
         </div> : <div className="compact-model-summary">{Object.keys(MODEL_LABELS).filter(identity => identity !== "CHAMPION_0").map(identity => {
@@ -636,10 +642,12 @@ export default function AuditPage() {
           const latestGroup = payload?.learning_curves.version_groups.find(row => row.model_identity === identity && row.lifecycle_status === "LATEST");
           if (!process && !latestGroup) return null;
           const diagnostic = identity === "NEWS_RESIDUAL" || identity === "BROAD_NEWS_RESIDUAL";
-          const hasTotal = (process?.oos_rows ?? 0) > 0;
-          const hasGroup = (latestGroup?.subsequent_oos_rows ?? 0) > 0;
-          const total = hasTotal ? process!.cumulative_quote_return : null;
-          const group = hasGroup ? latestGroup!.cumulative_quote_return : null;
+          const processMetric = process?.cadence_metrics?.[summaryCadence] ?? process;
+          const groupMetric = latestGroup?.cadence_metrics?.[summaryCadence] ?? latestGroup;
+          const hasTotal = (processMetric?.oos_rows ?? 0) > 0;
+          const hasGroup = (groupMetric?.oos_rows ?? 0) > 0;
+          const total = hasTotal ? processMetric!.cumulative_quote_return : null;
+          const group = hasGroup ? groupMetric!.cumulative_quote_return : null;
           const history = total === null ? null : total - (group ?? 0);
           const tone = group === null ? "is-pending" : group >= 0 ? "is-positive" : "is-negative";
           return <article key={identity}><b>{MODEL_LABELS[identity]}{diagnostic ? <small>新闻修正量</small> : null}</b><div className="return-flow" aria-label={`本组开始前 ${percent(history)}，加入本组后 ${percent(total)}，本组贡献 ${percent(group)}`}><span title="本组开始前的历史累计">{history === null ? "—" : percent(history)}</span><i className={tone} aria-hidden="true">→</i><strong title="加入本组后的连续累计">{total === null ? "等待结果" : percent(total)}</strong><i className="return-separator" aria-hidden="true">·</i><strong className={`group-return ${tone}`} title="本组独立贡献">{group === null ? "等待" : percent(group)}</strong></div></article>;

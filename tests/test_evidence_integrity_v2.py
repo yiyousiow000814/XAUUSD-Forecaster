@@ -620,6 +620,43 @@ def test_identity_curve_uses_only_latest_parallel_version_per_decision(tmp_path)
     ledger.close()
 
 
+def test_learning_curves_expose_true_fixed_30m_non_overlapping_evaluation(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    created = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    _insert_model_update(ledger.connection, "market-cadence", "MARKET_ONLY", created)
+    _insert_prediction(
+        ledger.connection, "five-minute-only-a", created + timedelta(minutes=5),
+        model_version="market-cadence", value_quote_return=1.0,
+    )
+    _insert_prediction(
+        ledger.connection, "fixed-grid", created + timedelta(minutes=30),
+        model_version="market-cadence", value_quote_return=2.0,
+    )
+    _insert_prediction(
+        ledger.connection, "five-minute-only-b", created + timedelta(minutes=35),
+        model_version="market-cadence", value_quote_return=-0.5,
+    )
+    payload = learning_curve_payload(ledger.connection)
+
+    group = next(
+        row for row in payload["version_groups"]
+        if row["model_identity"] == "MARKET_ONLY"
+    )
+    assert group["cadence_metrics"]["EVERY_5M"]["oos_rows"] == 3
+    assert group["cadence_metrics"]["EVERY_5M"]["cumulative_quote_return"] == pytest.approx(2.5)
+    assert group["cadence_metrics"]["FIXED_30M"]["oos_rows"] == 1
+    assert group["cadence_metrics"]["FIXED_30M"]["cumulative_quote_return"] == pytest.approx(2.0)
+
+    curve = next(
+        row for row in payload["identity_curves"] if row["model_identity"] == "MARKET_ONLY"
+    )
+    assert len(curve["points"]) == 3
+    assert len(curve["points_30m"]) == 1
+    assert curve["points_30m"][0]["decision_time"] == (created + timedelta(minutes=30)).isoformat()
+    assert curve["points_30m"][0]["cumulative_quote_return"] == pytest.approx(2.0)
+    ledger.close()
+
+
 def test_learning_curve_dashboard_envelope_is_bounded_and_keeps_history_landmarks() -> None:
     points = []
     for index in range(5000):

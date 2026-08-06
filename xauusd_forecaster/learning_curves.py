@@ -105,6 +105,35 @@ def _selection_metrics(rows) -> dict:
     }
 
 
+def _is_fixed_30m_grid(value: str) -> bool:
+    """Return True for the predeclared non-overlapping :00/:30 evaluation grid."""
+    try:
+        instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    return instant.minute in (0, 30) and instant.second == 0
+
+
+def _cadence_metrics(rows) -> dict:
+    """Expose overlapping 5m and fixed non-overlapping 30m evaluations side by side."""
+    result = {}
+    for name, cadence_rows in (
+        ("EVERY_5M", list(rows)),
+        ("FIXED_30M", [row for row in rows if _is_fixed_30m_grid(row["decision_time"])]),
+    ):
+        values = [float(row["value_quote_return"]) for row in cadence_rows]
+        daily = defaultdict(float)
+        for row in cadence_rows:
+            daily[row["decision_time"][:10]] += float(row["value_quote_return"])
+        result[name] = {
+            "oos_rows": len(cadence_rows),
+            "distinct_days": len(daily),
+            **_selection_metrics(cadence_rows),
+            **_metrics(values, daily),
+        }
+    return result
+
+
 def learning_curve_payload(connection) -> dict:
     epoch = connection.execute(
         "SELECT * FROM evaluation_epochs ORDER BY created_at DESC LIMIT 1"
@@ -165,6 +194,7 @@ def learning_curve_payload(connection) -> dict:
             ORDER BY p.decision_time""", (update["model_version"], update["created_at"])
         ).fetchall()
         scored = [row for row in rows if row["value_quote_return"] is not None]
+        cadence_metrics = _cadence_metrics(scored)
         values = [float(row["value_quote_return"]) for row in scored]
         daily = defaultdict(float)
         for row in scored:
@@ -180,6 +210,7 @@ def learning_curve_payload(connection) -> dict:
             "model_version": update["model_version"], "model_identity": update["model_identity"],
             "model_stage": update["model_stage"], "training_rows": update["training_rows"],
             "training_cutoff": update["training_cutoff"], "created_at": update["created_at"],
+            "cadence_metrics": cadence_metrics,
             "subsequent_oos_rows": len(scored), "effective_blocks": len(daily),
             "distinct_days": len(daily), "wait_rate": (
                 sum(row["recommended_action"] == "WAIT" for row in rows) / len(rows) if rows else None
@@ -258,6 +289,8 @@ def learning_curve_payload(connection) -> dict:
         daily = defaultdict(float)
         for row in scored:
             daily[row["decision_time"][:10]] += float(row["value_quote_return"])
+        cadence_metrics = _cadence_metrics(scored)
+        primary_metrics = cadence_metrics["EVERY_5M"]
         group_number = identity_group_seen[identity]
         total_groups = identity_group_counts[identity]
         version_groups.append({
@@ -273,10 +306,14 @@ def learning_curve_payload(connection) -> dict:
             "training_rows": group_updates[0]["training_rows"],
             "artifact_rebuilds": max(0, len(group_updates) - 1),
             "model_versions": versions,
-            "subsequent_oos_rows": len(scored),
-            "distinct_days": len(daily),
+            "subsequent_oos_rows": primary_metrics["oos_rows"],
+            "distinct_days": primary_metrics["distinct_days"],
+            "cadence_metrics": cadence_metrics,
             **_selection_metrics(scored),
-            **_metrics(values, daily),
+            **_metrics([float(row["value_quote_return"]) for row in scored], {
+                day: sum(float(row["value_quote_return"]) for row in scored if row["decision_time"][:10] == day)
+                for day in {row["decision_time"][:10] for row in scored}
+            }),
         })
 
     rolling_processes = []
@@ -305,17 +342,16 @@ def learning_curve_payload(connection) -> dict:
             SELECT * FROM ranked WHERE version_rank=1 ORDER BY decision_time""",
             (identity,),
         ).fetchall()
-        values = [float(row["value_quote_return"]) for row in rows]
-        daily = defaultdict(float)
-        for row in rows:
-            daily[row["decision_time"][:10]] += float(row["value_quote_return"])
+        cadence_metrics = _cadence_metrics(rows)
+        primary_metrics = cadence_metrics["EVERY_5M"]
         latest = rows[-1] if rows else None
         rolling_processes.append({
             "model_identity": identity,
             "history_cutoff": None,
             "active_model_versions": active_versions.get(identity, []),
-            "oos_rows": len(rows),
-            "distinct_days": len(daily),
+            "oos_rows": primary_metrics["oos_rows"],
+            "distinct_days": primary_metrics["distinct_days"],
+            "cadence_metrics": cadence_metrics,
             "calibration_status": latest["calibration_status"] if latest else "NO_LIVE_OOS",
             "calibration_rows": latest["calibration_rows"] if latest else 0,
             "calibration_effective_blocks": (
@@ -323,7 +359,11 @@ def learning_curve_payload(connection) -> dict:
             ),
             "calibration_distinct_days": latest["calibration_distinct_days"] if latest else 0,
             **_selection_metrics(rows),
-            **_metrics(values, daily),
+            **_metrics(
+                [float(row["value_quote_return"]) for row in rows],
+                {day: sum(float(row["value_quote_return"]) for row in rows if row["decision_time"][:10] == day)
+                 for day in {row["decision_time"][:10] for row in rows}},
+            ),
         })
 
     identity_curves = []
@@ -355,37 +395,37 @@ def learning_curve_payload(connection) -> dict:
                        value_quote_return FROM ranked
                 WHERE version_rank=1 ORDER BY decision_time""", (identity,)
             ).fetchall()
-        cumulative = 0.0
-        points = []
-        previous_generation = None
-        for row in rows:
-            cumulative += float(row["value_quote_return"])
-            model_version = (
-                row["model_version"] if identity != "CHAMPION_0" else "always-wait-v1"
-            )
-            point = {
-                "decision_time": row["decision_time"],
-                "cumulative_quote_return": cumulative,
-            }
-            generation = (
-                row["training_dataset_hash"] if identity != "CHAMPION_0"
-                else "always-wait"
-            )
-            if generation != previous_generation:
-                point["model_version"] = model_version
-                point["training_dataset_hash"] = generation
-                point["training_rows"] = (
-                    row["training_rows"] if identity != "CHAMPION_0" else 0
-                )
-                previous_generation = generation
-            points.append(point)
+        def build_points(source_rows):
+            cumulative = 0.0
+            result = []
+            previous_generation = None
+            for row in source_rows:
+                cumulative += float(row["value_quote_return"])
+                model_version = row["model_version"] if identity != "CHAMPION_0" else "always-wait-v1"
+                point = {"decision_time": row["decision_time"], "cumulative_quote_return": cumulative}
+                generation = row["training_dataset_hash"] if identity != "CHAMPION_0" else "always-wait"
+                if generation != previous_generation:
+                    point["model_version"] = model_version
+                    point["training_dataset_hash"] = generation
+                    point["training_rows"] = row["training_rows"] if identity != "CHAMPION_0" else 0
+                    previous_generation = generation
+                result.append(point)
+            return result
+
+        points = build_points(rows)
+        points_30m = build_points([row for row in rows if _is_fixed_30m_grid(row["decision_time"])])
         bounded_points = _bounded_curve(points)
+        bounded_points_30m = _bounded_curve(points_30m)
         identity_curves.append({
             "model_identity": identity,
             "source_point_count": len(points),
             "chart_point_count": len(bounded_points),
             "chart_downsampled": len(bounded_points) < len(points),
             "points": bounded_points,
+            "source_point_count_30m": len(points_30m),
+            "chart_point_count_30m": len(bounded_points_30m),
+            "chart_downsampled_30m": len(bounded_points_30m) < len(points_30m),
+            "points_30m": bounded_points_30m,
         })
 
     paired = connection.execute(
