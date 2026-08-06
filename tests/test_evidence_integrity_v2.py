@@ -21,7 +21,8 @@ from xauusd_forecaster.repair_v2 import immutable_table_hash
 from xauusd_forecaster import inference_v2, training_v2
 from xauusd_forecaster.u5_state import U5State, U5_VERSION
 from xauusd_forecaster.execution_learning import (
-    LOT_FEATURES, EXIT_FEATURES, append_due_exit_predictions,
+    EXECUTION_CHART_MAX_POINTS, LOT_FEATURES, EXIT_FEATURES,
+    _bounded_execution_curve, append_due_exit_predictions,
     append_execution_examples, append_lot_predictions, execution_learning_status,
     score_execution_predictions, train_due_execution,
 )
@@ -90,6 +91,30 @@ def test_execution_status_distinguishes_prediction_and_settlement_times(tmp_path
     assert result["time"] == settled.isoformat()
     assert result["model_version"] == "lot-model"
     ledger.close()
+
+
+def test_execution_curve_is_bounded_and_preserves_endpoints_and_extrema() -> None:
+    points = []
+    selected = baseline = 0.0
+    for index in range(10_000):
+        selected += 0.001 if index % 9 else -0.004
+        baseline += 0.0002 if index % 7 else -0.0005
+        if index == 4_321:
+            selected += 2.0
+        if index == 4_322:
+            selected -= 2.0
+        points.append({
+            "time": f"point-{index}",
+            "selected_cumulative_return": selected,
+            "baseline_cumulative_return": baseline,
+        })
+
+    bounded = _bounded_execution_curve(points)
+
+    assert len(bounded) <= EXECUTION_CHART_MAX_POINTS
+    assert bounded[0] == points[0]
+    assert bounded[-1] == points[-1]
+    assert points[4_321] in bounded
 
 
 UTC = timezone.utc

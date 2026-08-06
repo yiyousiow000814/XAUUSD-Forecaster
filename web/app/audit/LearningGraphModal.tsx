@@ -32,6 +32,7 @@ type ExecutionModel = {
   evaluation: {
     score_count: number; selected_cumulative_return?: number;
     baseline_cumulative_return?: number; delta_cumulative_return?: number; unit: string;
+    chart_source_count?: number; chart_point_count?: number; chart_downsampled?: boolean;
     points: Array<Record<string, string | number>>;
     results?: Array<Record<string, string | number>>;
   };
@@ -268,8 +269,8 @@ function ExecutionCharts({ execution }: { execution?: ExecutionLearning }) {
       <article><small>Exit Ridge</small><strong>{exit?.evaluation.score_count ?? 0} 笔已评分</strong><span>{exit?.predictions ?? 0} 次途中检查 · 提前退出 {exit?.action_counts?.EXIT ?? 0} 次 · 继续持有 {exit?.action_counts?.HOLD ?? 0} 次</span></article>
     </div>
     {(exit?.predictions ?? 0) > 0 && (exit?.action_counts?.EXIT ?? 0) === 0 && <p className="execution-callout"><b>目前没有提前退出。</b> Exit Ridge 已正常检查，但每次预测的“从当前继续持有到30分钟”的收益都大于零，因此全部选择继续持有。这是当前模型结果，不是页面遗漏。</p>}
-    <ExecutionLineChart title="仓位倍率：模型选择 vs 固定 1.0x" subtitle="每个点是一笔冻结 Live 方向产生的未来位置；0.5x / 1.0x / 2.0x 只改变同一方向的倍率。" points={lot?.evaluation.points ?? []} firstKey="selected_cumulative_return" secondKey="baseline_cumulative_return" firstLabel="Ridge 倍率" secondLabel="固定 1.0x" format={pct} />
-    <ExecutionLineChart title="退出：顺序 Exit Ridge vs 固定持有30分钟" subtitle="每个位置从5分钟开始依次检查；一旦 EXIT，后续检查停止。曲线是整段位置收益，不再累加重复检查点。" points={exit?.evaluation.points ?? []} firstKey="selected_cumulative_return" secondKey="baseline_cumulative_return" firstLabel="顺序 Exit Ridge" secondLabel="固定30分钟" format={pct} />
+      <ExecutionLineChart title="仓位倍率：模型选择 vs 固定 1.0x" subtitle="每个点是一笔冻结 Live 方向产生的未来位置；0.5x / 1.0x / 2.0x 只改变同一方向的倍率。" points={lot?.evaluation.points ?? []} sourceCount={lot?.evaluation.chart_source_count} downsampled={lot?.evaluation.chart_downsampled} firstKey="selected_cumulative_return" secondKey="baseline_cumulative_return" firstLabel="Ridge 倍率" secondLabel="固定 1.0x" format={pct} />
+    <ExecutionLineChart title="退出：顺序 Exit Ridge vs 固定持有30分钟" subtitle="每个位置从5分钟开始依次检查；一旦 EXIT，后续检查停止。曲线是整段位置收益，不再累加重复检查点。" points={exit?.evaluation.points ?? []} sourceCount={exit?.evaluation.chart_source_count} downsampled={exit?.evaluation.chart_downsampled} firstKey="selected_cumulative_return" secondKey="baseline_cumulative_return" firstLabel="顺序 Exit Ridge" secondLabel="固定30分钟" format={pct} />
     <ExecutionResultLists lot={lot} exit={exit} />
   </section>;
 }
@@ -283,11 +284,11 @@ function ExecutionResultLists({ lot, exit }: { lot?: ExecutionModel; exit?: Exec
   const actionLabel = (value: string | number) => String(value) === "HOLD_TO_30M" ? "持有到30分钟" : String(value).replace(/^EXIT_(\d+)M$/, "$1分钟提前退出");
   return <section className="execution-results"><header><span>两套独立实验</span><h4>仓位倍率与退出动作分别评分。</h4><p>两套模型跟随同一个冻结方向，但不会拼成一笔组合成绩。各显示最近 10 笔；完整历史在上方曲线中。</p></header>
     <div className="execution-result-grid">
-      <ExecutionResultPanel title="仓位倍率 OOS" count={lotRows.length} columns={["预测 / 方向", "选择", "模型收益", "固定1.0x", "差值"]}>
+      <ExecutionResultPanel title="仓位倍率 OOS" count={lot?.evaluation.score_count ?? 0} visibleCount={Math.min(10, lotRows.length)} columns={["预测 / 方向", "选择", "模型收益", "固定1.0x", "差值"]}>
         {lotRows.slice().reverse().slice(0, 10).map(row => <article key={String(row.decision_id)}><span><b>{stamp(row.decision_time ?? row.time)} · {String(row.direction)}</b><small>结算 {stamp(row.scored_at ?? row.time)}</small></span><b>{String(row.selected_action)}</b><strong>{pct(Number(row.selected_quote_return))}</strong><span>{pct(Number(row.baseline_quote_return))}</span><strong className={Number(row.delta_quote_return) >= 0 ? "positive" : "negative"}>{pct(Number(row.delta_quote_return))}</strong></article>)}
         {!lotRows.length && <p>还没有成熟的仓位倍率 OOS。</p>}
       </ExecutionResultPanel>
-      <ExecutionResultPanel title="提前退出 OOS" count={exitRows.length} columns={["预测 / 方向", "退出动作", "模型收益", "持有30m", "差值"]}>
+      <ExecutionResultPanel title="提前退出 OOS" count={exit?.evaluation.score_count ?? 0} visibleCount={Math.min(10, exitRows.length)} columns={["预测 / 方向", "退出动作", "模型收益", "持有30m", "差值"]}>
         {exitRows.slice().reverse().slice(0, 10).map(row => <article key={String(row.decision_id)}><span><b>{stamp(row.decision_time ?? row.time)} · {String(row.direction)}</b><small>结算 {stamp(row.scored_at ?? row.time)}</small></span><b>{actionLabel(row.selected_action)}</b><strong>{pct(Number(row.selected_quote_return))}</strong><span>{pct(Number(row.baseline_quote_return))}</span><strong className={Number(row.delta_quote_return) >= 0 ? "positive" : "negative"}>{pct(Number(row.delta_quote_return))}</strong></article>)}
         {!exitRows.length && <p>还没有完整且成熟的退出路径。</p>}
       </ExecutionResultPanel>
@@ -296,12 +297,13 @@ function ExecutionResultLists({ lot, exit }: { lot?: ExecutionModel; exit?: Exec
   </section>;
 }
 
-function ExecutionResultPanel({ title, count, columns, children }: { title: string; count: number; columns: string[]; children: ReactNode }) {
-  return <section className="execution-result-panel"><header><b>{title}</b><strong>{count} 笔</strong></header><div className="execution-result-head">{columns.map(value => <span key={value}>{value}</span>)}</div>{children}</section>;
+function ExecutionResultPanel({ title, count, visibleCount, columns, children }: { title: string; count: number; visibleCount: number; columns: string[]; children: ReactNode }) {
+  return <section className="execution-result-panel"><header><b>{title}</b><span><strong>总计 {count} 笔</strong><small>当前显示最新 {visibleCount} 笔</small></span></header><div className="execution-result-head">{columns.map(value => <span key={value}>{value}</span>)}</div>{children}</section>;
 }
 
-function ExecutionLineChart({ title, subtitle, points, firstKey, secondKey, firstLabel, secondLabel, format }: {
+function ExecutionLineChart({ title, subtitle, points, sourceCount, downsampled, firstKey, secondKey, firstLabel, secondLabel, format }: {
   title: string; subtitle: string; points: Array<Record<string, string | number>>;
+  sourceCount?: number; downsampled?: boolean;
   firstKey: string; secondKey: string; firstLabel: string; secondLabel: string;
   format: (value: number) => string;
 }) {
@@ -314,7 +316,7 @@ function ExecutionLineChart({ title, subtitle, points, firstKey, secondKey, firs
   const y = (value: number) => 34 + (high - value) / Math.max(.000001, high - low) * 230;
   const line = (rows: number[]) => rows.map((value, index) => `${x(index)},${y(value)}`).join(" ");
   const stamp = (value: string | number) => new Date(String(value)).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-  return <article className="execution-chart"><div className="chart-caption"><div><b>{title}</b><span>{subtitle}</span></div><strong>{format(first.at(-1) ?? 0)}<small> · {points.length} 条</small></strong></div>
+  return <article className="execution-chart"><div className="chart-caption"><div><b>{title}</b><span>{subtitle}</span></div><strong>{format(first.at(-1) ?? 0)}<small> · 累计 {sourceCount ?? points.length} 笔{downsampled ? ` · 图中压缩为 ${points.length} 点` : ""}</small></strong></div>
     <svg viewBox="0 0 960 320" role="img" aria-label={title}>
       <line x1="64" x2="914" y1={y(0)} y2={y(0)} className="zero-line" />
       <text x="8" y={y(high)+4}>{format(high)}</text><text x="8" y={y(low)+4}>{format(low)}</text>

@@ -120,6 +120,9 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /两套独立实验/);
   assert.match(modal, /仓位倍率 OOS/);
   assert.match(modal, /提前退出 OOS/);
+  assert.match(modal, /总计 \{count\} 笔/);
+  assert.match(modal, /当前显示最新 \{visibleCount\} 笔/);
+  assert.match(modal, /图中压缩为/);
   assert.match(modal, /目前没有提前退出/);
   assert.doesNotMatch(modal, /等待退出 OOS/);
   assert.match(modal, /WAIT 不创建仓位/);

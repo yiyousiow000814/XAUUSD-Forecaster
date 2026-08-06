@@ -509,6 +509,7 @@ def execution_learning_status(ledger) -> dict:
                 "delta_quote_return": row["delta_quote_return"],
             })
         training_decisions = int(latest["training_decisions"]) if latest else 0
+        chart_points = _bounded_execution_curve(points)
         models.append({
             "model_identity": identity, "status": "RUNNING" if latest else "COLLECTING",
             "training_rows": training_decisions,
@@ -524,7 +525,11 @@ def execution_learning_status(ledger) -> dict:
                 "selected_cumulative_return": selected_total,
                 "baseline_cumulative_return": baseline_total,
                 "delta_cumulative_return": selected_total - baseline_total,
-                "points": points, "results": result_rows[-100:], "unit": "QUOTE_RETURN",
+                "points": chart_points,
+                "chart_source_count": len(points),
+                "chart_point_count": len(chart_points),
+                "chart_downsampled": len(points) > EXECUTION_CHART_MAX_POINTS,
+                "results": result_rows[-100:], "unit": "QUOTE_RETURN",
             },
         })
     return {
@@ -535,3 +540,31 @@ def execution_learning_status(ledger) -> dict:
         "lot_candidates": list(LOT_CANDIDATES),
         "exit_checkpoints_minutes": list(EXIT_CHECKPOINTS),
     }
+
+
+EXECUTION_CHART_MAX_POINTS = 600
+
+
+def _bounded_execution_curve(points: list[dict]) -> list[dict]:
+    """Keep long-running cumulative curves bounded without hiding reversals.
+
+    SQLite remains the append-only authority.  The dashboard receives the first
+    and last point plus the high/low turning points of both cumulative series in
+    deterministic chronological buckets.  This prevents a 10,000-position
+    history from becoming a 10,000-node SVG or a multi-megabyte sync payload.
+    """
+    if len(points) <= EXECUTION_CHART_MAX_POINTS:
+        return points
+    interior = points[1:-1]
+    bucket_count = max(1, (EXECUTION_CHART_MAX_POINTS - 2) // 4)
+    bucket_width = max(1, math.ceil(len(interior) / bucket_count))
+    selected_indices = {0, len(points) - 1}
+    keys = ("selected_cumulative_return", "baseline_cumulative_return")
+    for offset in range(0, len(interior), bucket_width):
+        start = offset + 1
+        stop = min(len(points) - 1, start + bucket_width)
+        indices = range(start, stop)
+        for key in keys:
+            selected_indices.add(min(indices, key=lambda index: float(points[index][key])))
+            selected_indices.add(max(indices, key=lambda index: float(points[index][key])))
+    return [points[index] for index in sorted(selected_indices)]

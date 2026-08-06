@@ -242,6 +242,7 @@ type Payload = {
       evaluation: {
           score_count: number; selected_cumulative_return?: number;
           baseline_cumulative_return?: number; delta_cumulative_return?: number; unit: string;
+          chart_source_count?: number; chart_point_count?: number; chart_downsampled?: boolean;
           points: Array<Record<string, string | number>>;
           results?: Array<Record<string, string | number>>;
       } }>;
