@@ -27,21 +27,25 @@ SHADOW_ROWS = 200
 RETRAIN_INTERVAL = 50
 NEWS_MIN_EXPOSED_ROWS = 30
 NEWS_MIN_CLUSTERS = 10
+NEWS_EXPERIMENTAL_MIN_CLUSTERS = 1
 NEWS_EXPERIMENTAL_MIN_EVENT_DAYS = 1
 NEWS_MIN_EVENT_DAYS = 3
 CROSSFIT_VERSION = "expanding-market-purge30m-v1"
 BROAD_MODEL_FEATURES = (*NEWS_FEATURES, *BROAD_NEWS_FEATURES)
 
 
-def news_evidence_status(event_days: int) -> str:
+def news_evidence_status(event_days: int, clusters: int = NEWS_MIN_CLUSTERS) -> str:
     """Label early news models without blocking observable Shadow learning."""
-    if event_days < NEWS_EXPERIMENTAL_MIN_EVENT_DAYS:
+    if (event_days < NEWS_EXPERIMENTAL_MIN_EVENT_DAYS
+            or clusters < NEWS_EXPERIMENTAL_MIN_CLUSTERS):
         return "INSUFFICIENT"
-    if event_days >= NEWS_MIN_EVENT_DAYS:
+    if event_days >= NEWS_MIN_EVENT_DAYS and clusters >= NEWS_MIN_CLUSTERS:
         return "STANDARD"
     if event_days == 1:
         return "EXPERIMENTAL_SINGLE_DAY"
-    return "EXPERIMENTAL_TWO_DAY"
+    if event_days == 2:
+        return "EXPERIMENTAL_TWO_DAY"
+    return "EXPERIMENTAL_SPARSE_CLUSTERS"
 
 
 def _rows(ledger, cutoff: datetime):
@@ -186,7 +190,7 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
     event_days = int(coverage["event_days"] or 0)
     official_ready = (
         len(news_exposed) >= NEWS_MIN_EXPOSED_ROWS
-        and clusters >= NEWS_MIN_CLUSTERS
+        and clusters >= NEWS_EXPERIMENTAL_MIN_CLUSTERS
         and event_days >= NEWS_EXPERIMENTAL_MIN_EVENT_DAYS
     )
     broad_exposed = [
@@ -202,7 +206,7 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
     })
     broad_ready = (
         len(broad_exposed) >= NEWS_MIN_EXPOSED_ROWS
-        and broad_clusters >= NEWS_MIN_CLUSTERS
+        and broad_clusters >= NEWS_EXPERIMENTAL_MIN_CLUSTERS
         and broad_event_days >= NEWS_EXPERIMENTAL_MIN_EVENT_DAYS
     )
     latest = ledger.connection.execute(
@@ -245,24 +249,46 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
 
     now = datetime.now(UTC)
     root = Path(artifact_root).resolve()
-    version, artifact, path, dataset_hash = _write_market_artifact(training_rows, root, cutoff, stage)
     seed_rows = sum(row["lane"] == "REPAIRED_SEED" for row in training_rows)
     live_rows = sum(row["lane"] == "LIVE_OOS" for row in training_rows)
-    evidence_status = news_evidence_status(event_days)
-    with ledger.connection:
-        ledger.connection.execute(
-            """INSERT INTO model_updates_v2 VALUES
-            (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (version, "MARKET_ONLY", stage, now.isoformat(), cutoff.isoformat(),
-             len(training_rows), seed_rows, live_rows, len(news_exposed), clusters, event_days,
-             dataset_hash, FEATURE_VERSION, None, str(path), artifact.artifact_hash, "CHALLENGER"),
+    market_due = (
+        latest is None
+        or count >= int(latest["training_rows"]) + RETRAIN_INTERVAL
+        or latest_artifact_invalid
+    )
+    if market_due:
+        version, artifact, path, dataset_hash = _write_market_artifact(
+            training_rows, root, cutoff, stage
         )
+        artifact_hash = artifact.artifact_hash
+        with ledger.connection:
+            ledger.connection.execute(
+                """INSERT INTO model_updates_v2 VALUES
+                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (version, "MARKET_ONLY", stage, now.isoformat(), cutoff.isoformat(),
+                 len(training_rows), seed_rows, live_rows, len(news_exposed), clusters, event_days,
+                 dataset_hash, FEATURE_VERSION, None, str(path), artifact_hash, "CHALLENGER"),
+            )
+            crossfit = chronological_crossfit_market(ledger, training_rows, root, now)
+        statuses = [{"status": "TRAINED", "model_identity": "MARKET_ONLY",
+                     "model_stage": stage, "model_version": version,
+                     "training_rows": len(training_rows), "crossfit_rows": len(crossfit)}]
+    else:
+        # Evidence can become eligible between the 50-row market retraining
+        # boundaries. Pair the news models with the already-frozen market
+        # artifact instead of inventing an extra off-grid market generation.
+        version = latest["model_version"]
+        path = Path(latest["artifact_path"])
+        dataset_hash = latest["training_dataset_hash"]
+        artifact_hash = latest["artifact_hash"]
         crossfit = chronological_crossfit_market(ledger, training_rows, root, now)
+        statuses = [{"status": "REUSED", "model_identity": "MARKET_ONLY",
+                     "model_stage": stage, "model_version": version,
+                     "training_rows": len(training_rows), "crossfit_rows": len(crossfit)}]
 
-    statuses = [{"status": "TRAINED", "model_identity": "MARKET_ONLY",
-                 "model_stage": stage, "model_version": version,
-                 "training_rows": len(training_rows), "crossfit_rows": len(crossfit)}]
-    if (len(news_exposed) < NEWS_MIN_EXPOSED_ROWS or clusters < NEWS_MIN_CLUSTERS
+    evidence_status = news_evidence_status(event_days, clusters)
+    if (len(news_exposed) < NEWS_MIN_EXPOSED_ROWS
+            or clusters < NEWS_EXPERIMENTAL_MIN_CLUSTERS
             or event_days < NEWS_EXPERIMENTAL_MIN_EVENT_DAYS):
         statuses.append({"status": "NEWS_EVIDENCE_INSUFFICIENT",
                          "news_exposed_rows": len(news_exposed),
@@ -306,7 +332,7 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
             )
             manifest = {
                 "schema": "xauusd.phase2f.full-model.v2", "market_model_version": version,
-                "market_artifact_path": str(path), "market_artifact_hash": artifact.artifact_hash,
+                "market_artifact_path": str(path), "market_artifact_hash": artifact_hash,
                 "news_model_version": news_version, "news_artifact_path": str(news_path),
                 "news_artifact_hash": news_artifact.artifact_hash,
                 "training_dataset_hash": dataset_hash, "news_training_hash": residual_hash,
@@ -342,9 +368,9 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
             ])
             ledger.connection.commit()
 
-    broad_evidence_status = news_evidence_status(broad_event_days)
+    broad_evidence_status = news_evidence_status(broad_event_days, broad_clusters)
     if (len(broad_exposed) < NEWS_MIN_EXPOSED_ROWS
-            or broad_clusters < NEWS_MIN_CLUSTERS
+            or broad_clusters < NEWS_EXPERIMENTAL_MIN_CLUSTERS
             or broad_event_days < NEWS_EXPERIMENTAL_MIN_EVENT_DAYS):
         statuses.append({
             "status": "BROAD_NEWS_EVIDENCE_INSUFFICIENT",
@@ -410,7 +436,7 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
                 "schema": "xauusd.phase2f.broad-full-model.v1",
                 "market_model_version": version,
                 "market_artifact_path": str(path),
-                "market_artifact_hash": artifact.artifact_hash,
+                "market_artifact_hash": artifact_hash,
                 "news_model_version": broad_version,
                 "news_artifact_path": str(broad_path),
                 "news_artifact_hash": broad_artifact.artifact_hash,

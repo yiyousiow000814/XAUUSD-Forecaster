@@ -836,7 +836,7 @@ def test_news_models_train_early_with_explicit_experimental_status(
         row["news"] = [0.1] * len(training_v2.NEWS_FEATURES)
         row["broad_news_exposed"] = True
         row["broad_news"] = [0.1] * len(training_v2.BROAD_MODEL_FEATURES)
-    for index in range(10):
+    for index in range(3):
         seen = first_seen + timedelta(days=index % event_days)
         _append_news(
             ledger, source="federal_reserve_monetary", item=f"official-{index}",
@@ -883,6 +883,71 @@ def test_news_models_train_early_with_explicit_experimental_status(
     }
     assert expected_status.lower().replace("_", "-") in updates["NEWS_RESIDUAL"]["model_version"]
     assert updates["NEWS_RESIDUAL"]["distinct_event_days"] == event_days
+    ledger.close()
+
+
+def test_newly_eligible_news_reuses_latest_frozen_market_generation(
+    tmp_path, monkeypatch
+) -> None:
+    first_seen = datetime(2026, 8, 1, 10, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward-news-bootstrap.sqlite3", now=first_seen)
+    rows = _training_rows(320)
+    market_path = tmp_path / "market.json"
+    market_path.write_text("{}", encoding="utf-8")
+
+    class Artifact:
+        artifact_hash = "artifact-hash"
+
+        def write(self, path):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(training_v2, "complete_training_rows", lambda *_: rows)
+    monkeypatch.setattr(
+        training_v2, "_write_market_artifact",
+        lambda _rows, root, cutoff, stage: (
+            "market-shadow-bootstrap-test", Artifact(), market_path, "dataset-hash",
+        ),
+    )
+    monkeypatch.setattr(
+        training_v2, "chronological_crossfit_market",
+        lambda _ledger, crossfit_rows, *_: [
+            {
+                "decision_id": row["decision_id"], "artifact_hash": "crossfit-hash",
+                "residual": row["target"] - 0.01,
+            }
+            for row in crossfit_rows[48:]
+        ],
+    )
+    monkeypatch.setattr(training_v2, "train_ridge", lambda *_: Artifact())
+
+    first_result = training_v2.train_due_v2(
+        ledger, datetime(2026, 8, 2, 12, tzinfo=UTC), tmp_path / "models"
+    )
+    assert first_result[0]["status"] == "TRAINED"
+
+    for row in rows:
+        row["news_exposed"] = True
+        row["news"] = [0.1] * len(training_v2.NEWS_FEATURES)
+        row["broad_news_exposed"] = True
+        row["broad_news"] = [0.1] * len(training_v2.BROAD_MODEL_FEATURES)
+    for index in range(3):
+        _append_news(
+            ledger, source="federal_reserve_monetary", item=f"bootstrap-{index}",
+            first_seen=first_seen, parsed_at=first_seen, impulse=0.1,
+        )
+
+    second_result = training_v2.train_due_v2(
+        ledger, datetime(2026, 8, 2, 13, tzinfo=UTC), tmp_path / "models"
+    )
+    assert second_result[0]["status"] == "REUSED"
+    assert {
+        row.get("model_identity") for row in second_result if row["status"] == "TRAINED"
+    } == {"NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL"}
+    market_generations = ledger.connection.execute(
+        "SELECT count(*) FROM model_updates_v2 WHERE model_identity='MARKET_ONLY'"
+    ).fetchone()[0]
+    assert market_generations == 1
     ledger.close()
 
 
