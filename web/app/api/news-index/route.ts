@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
+import { isIngestAuthorized } from "../_shared/ingest-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -7,6 +8,7 @@ type NewsIndexItem = {
   detail_key?: unknown;
   category?: unknown;
   collector_first_seen_time?: unknown;
+  source_published_time?: unknown;
   [key: string]: unknown;
 };
 
@@ -19,6 +21,49 @@ const pageRequest = (request: Request) => {
 
 export async function GET(request: Request) {
   const { page, pageSize, category } = pageRequest(request);
+  try {
+    const binding = env.DB as D1Database | undefined;
+    if (binding) {
+      const readableEvidence = `
+        json_extract(payload, '$.content_status') IN ('FULL_TEXT', 'SOURCE_CONTENT')
+        AND COALESCE(json_extract(payload, '$.model_visibility'), 'COLLECT_ONLY') <> 'COLLECT_ONLY'
+        AND COALESCE(json_extract(payload, '$.parsed_at'), '') <> ''`;
+      const where = category
+        ? `WHERE ${readableEvidence} AND category = ?`
+        : `WHERE ${readableEvidence}`;
+      const bindValues = category ? [category] : [];
+      const offset = (page - 1) * pageSize;
+      const [rows, totalRow, allTotalRow, categoryRows] = await Promise.all([
+        binding.prepare(
+          `SELECT payload FROM news_index ${where}
+           ORDER BY COALESCE(json_extract(payload, '$.source_published_time'),
+                             collector_first_seen_time) DESC,
+                    collector_first_seen_time DESC, detail_key DESC LIMIT ? OFFSET ?`,
+        ).bind(...bindValues, pageSize, offset).all<{ payload: string }>(),
+        binding.prepare(`SELECT count(*) AS count FROM news_index ${where}`)
+          .bind(...bindValues).first<{ count: number }>(),
+        binding.prepare(`SELECT count(*) AS count FROM news_index WHERE ${readableEvidence}`)
+          .first<{ count: number }>(),
+        binding.prepare(
+          `SELECT category, count(*) AS count FROM news_index
+           WHERE ${readableEvidence} GROUP BY category`,
+        ).all<{ category: string; count: number }>(),
+      ]);
+      return NextResponse.json({
+        items: rows.results.map(row => JSON.parse(row.payload)),
+        total: totalRow?.count ?? 0,
+        all_total: allTotalRow?.count ?? 0,
+        category_counts: Object.fromEntries(
+          categoryRows.results.map(row => [row.category, row.count]),
+        ),
+        page,
+        page_size: pageSize,
+      }, { headers: { "Cache-Control": "no-store, max-age=0" } });
+    }
+  } catch {
+    // Fall through to the relay when D1 is temporarily unavailable.
+  }
+
   const relay = process.env.STATUS_RELAY_URL;
   if (relay) {
     try {
@@ -28,7 +73,11 @@ export async function GET(request: Request) {
         signal: AbortSignal.timeout(4_000),
       });
       const payload = await response.json() as { recent_news?: NewsIndexItem[] };
-      const all = payload.recent_news ?? [];
+      const all = [...(payload.recent_news ?? [])].sort((left, right) => {
+        const leftTime = String(left.source_published_time ?? left.collector_first_seen_time ?? "");
+        const rightTime = String(right.source_published_time ?? right.collector_first_seen_time ?? "");
+        return rightTime.localeCompare(leftTime);
+      });
       const categoryCounts = Object.fromEntries(
         [...new Set(all.map(row => String(row.category ?? "其他")))].map(name => [
           name, all.filter(row => String(row.category ?? "其他") === name).length,
@@ -43,58 +92,34 @@ export async function GET(request: Request) {
         category_counts: categoryCounts,
         page,
         page_size: pageSize,
-      }, { status: response.status });
+      }, { status: response.status, headers: { "Cache-Control": "no-store, max-age=0" } });
     } catch {
-      return NextResponse.json({ error: "本机新闻索引服务未运行" }, { status: 503 });
+      // Return a single public-facing error below.
     }
   }
 
-  const binding = env.DB as D1Database | undefined;
-  if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
-  const where = category ? "WHERE category = ?" : "";
-  const bindValues = category ? [category] : [];
-  const offset = (page - 1) * pageSize;
-  const [rows, totalRow, allTotalRow, categoryRows] = await Promise.all([
-    binding.prepare(
-      `SELECT payload FROM news_index ${where}
-       ORDER BY collector_first_seen_time DESC, detail_key DESC LIMIT ? OFFSET ?`,
-    ).bind(...bindValues, pageSize, offset).all<{ payload: string }>(),
-    binding.prepare(`SELECT count(*) AS count FROM news_index ${where}`)
-      .bind(...bindValues).first<{ count: number }>(),
-    binding.prepare("SELECT count(*) AS count FROM news_index").first<{ count: number }>(),
-    binding.prepare(
-      "SELECT category, count(*) AS count FROM news_index GROUP BY category",
-    ).all<{ category: string; count: number }>(),
-  ]);
-  return NextResponse.json({
-    items: rows.results.map(row => JSON.parse(row.payload)),
-    total: totalRow?.count ?? 0,
-    all_total: allTotalRow?.count ?? 0,
-    category_counts: Object.fromEntries(
-      categoryRows.results.map(row => [row.category, row.count]),
-    ),
-    page,
-    page_size: pageSize,
-  }, { headers: { "Cache-Control": "private, max-age=15" } });
+  return NextResponse.json({ error: "等待公开新闻索引" }, { status: 503 });
 }
 
 export async function POST(request: Request) {
-  const expected = process.env.INGEST_TOKEN;
-  const provided = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
-  if (!expected || !provided || provided !== expected) {
+  if (!await isIngestAuthorized(request)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
   const serialized = await request.text();
   if (new TextEncoder().encode(serialized).byteLength > 450_000) {
     return NextResponse.json({ error: "payload too large" }, { status: 413 });
   }
-  const body = JSON.parse(serialized) as { items?: NewsIndexItem[] };
-  if (!Array.isArray(body.items) || body.items.length > 200) {
-    return NextResponse.json({ error: "invalid news index batch" }, { status: 400 });
-  }
   const binding = env.DB as D1Database | undefined;
   if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
   try {
+    const body = JSON.parse(serialized) as { items?: NewsIndexItem[]; reset?: unknown };
+    if (body.reset === true) {
+      await binding.prepare("DELETE FROM news_index").run();
+      return NextResponse.json({ status: "OK", reset: true });
+    }
+    if (!Array.isArray(body.items) || body.items.length > 200) {
+      return NextResponse.json({ error: "invalid news index batch" }, { status: 400 });
+    }
     const now = new Date().toISOString();
     const statements = body.items.map(item => {
       if (

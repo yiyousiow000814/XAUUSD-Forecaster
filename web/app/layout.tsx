@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import DeploymentRefresh from "./_components/DeploymentRefresh";
 
 export const metadata: Metadata = {
   title: "Aurum Signal Room",
@@ -8,5 +9,5 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="zh-CN"><body>{children}</body></html>;
+  return <html lang="zh-CN"><body><DeploymentRefresh />{children}</body></html>;
 }

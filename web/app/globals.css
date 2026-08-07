@@ -175,6 +175,10 @@ footer { font-size:13px; font-weight:600; letter-spacing:.06em; }
 .evidence-summary span,.evidence-summary strong { display:block; }
 .evidence-summary span { font-size:13px; font-weight:700; }
 .evidence-summary strong { margin-top:8px; font-family:var(--font-display); font-size:40px; }
+.evidence-filters { display:flex; flex-wrap:wrap; gap:10px; padding:14px 18px; border-bottom:1px solid var(--ink); background:#ded9ca; }
+.evidence-filters button { border:1px solid var(--ink); padding:9px 12px; background:var(--paper); color:var(--ink); font-size:13px; font-weight:800; cursor:pointer; }
+.evidence-filters button b { margin-left:7px; }
+.evidence-filters button.active { background:var(--ink); color:var(--paper); box-shadow:inset 0 -4px var(--acid); }
 .evidence-table-wrap { overflow:auto; }
 .evidence-table { width:100%; border-collapse:collapse; }
 .evidence-table th { padding:12px 16px; background:var(--ink); color:var(--paper); text-align:left; font-size:13px; }
@@ -186,6 +190,9 @@ footer { font-size:13px; font-weight:600; letter-spacing:.06em; }
 .evidence-table td>strong { font-size:17px; line-height:1.4; }
 .evidence-table td>small { margin-top:8px; color:var(--muted); line-height:1.5; font-weight:600; }
 .evidence-grade { display:inline-block; border:1px solid var(--ink); padding:6px 8px; font-weight:800; }
+.model-seen-badge { display:inline-block; border:1px solid var(--ink); padding:7px 9px; font-weight:900; }
+.model-seen-badge.is-seen { background:var(--green); color:var(--paper); }
+.model-seen-badge.is-unseen { background:#d7d1c1; color:var(--ink); }
 .grade-primary,.grade-corroborated { background:var(--green); color:var(--paper); }
 .grade-single-reliable { background:var(--gold); }
 .grade-discovery-only { background:#d7d1c1; }
@@ -209,6 +216,13 @@ footer { font-size:13px; font-weight:600; letter-spacing:.06em; }
 .league-intro dd { margin:0; font-size:13px; font-weight:700; text-align:right; }
 .league-cost-note { display:flex; gap:18px; padding:14px 20px; border-bottom:1px solid var(--ink); background:#e0bb65; font-size:13px; line-height:1.5; }
 .league-cost-note b { flex:0 0 auto; }
+.news-model-activation { display:grid; grid-template-columns:minmax(220px,.8fr) minmax(360px,1.4fr); gap:12px 28px; padding:16px 20px; border-bottom:1px solid var(--ink); background:#dce7c8; }
+.news-model-activation.is-inactive { background:#efc6b8; }
+.news-model-activation span,.news-model-activation small { color:var(--muted); font-size:12px; font-weight:700; }
+.news-model-activation h3 { margin:4px 0 0; font-family:var(--font-display); font-size:25px; font-weight:500; }
+.news-model-activation-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:5px 16px; }
+.news-model-activation-list p { display:flex; justify-content:space-between; gap:12px; margin:0; padding:4px 0; border-bottom:1px dotted rgba(20,20,18,.3); font-size:12px; }
+.news-model-activation > small { grid-column:1/-1; }
 .graph-launch { display:flex; align-items:center; justify-content:space-between; gap:28px; padding:28px; border-bottom:1px solid var(--ink); background:linear-gradient(110deg,#d9d2c1 0 72%,var(--paper) 72%); }
 .graph-launch span { color:var(--muted); font-size:11px; font-weight:900; letter-spacing:.12em; }
 .graph-launch h3 { margin:7px 0; font-family:var(--font-display); font-size:34px; }
@@ -306,6 +320,9 @@ body.modal-open { overflow:hidden; }
   .league-intro { grid-template-columns:1fr; background:var(--paper); padding:24px; }
   .league-intro dd { text-align:left; }
   .league-cost-note { flex-direction:column; gap:5px; }
+  .news-model-activation { grid-template-columns:1fr; }
+  .news-model-activation-list { grid-template-columns:1fr; }
+  .news-model-activation > small { grid-column:auto; }
   .evidence-lane-grid,.news-timeline { grid-template-columns:1fr; }
   .rolling-process-grid { grid-template-columns:1fr 1fr; }
   .graph-launch { align-items:flex-start; flex-direction:column; background:#d9d2c1; }.model-method-note>div,.compact-model-summary { grid-template-columns:1fr; }
@@ -337,6 +354,7 @@ body.modal-open { overflow:hidden; }
 .deployment-proof { display:flex; flex-wrap:wrap; gap:8px 18px; align-items:center; padding:12px 22px; border-top:1px solid var(--ink); border-bottom:1px solid var(--ink); font-size:12px; }
 .deployment-proof b { margin-right:auto; }
 .deployment-proof.matched { background:#dce6cf; }
+.deployment-proof.local-changes,.deployment-proof.unknown { background:#f0dfae; color:#5f4800; }
 .deployment-proof.drift { background:#f4c8bd; color:#8b1f13; }
 .market-streams { background:#d7ddd6; }
 .theme-streams>header { display:flex; justify-content:space-between; align-items:end; margin-bottom:12px; }

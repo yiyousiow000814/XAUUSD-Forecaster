@@ -1,9 +1,26 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
+import { isIngestAuthorized } from "../_shared/ingest-auth";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  const binding = env.DB as D1Database | undefined;
+  if (binding) {
+    const row = await binding
+      .prepare("SELECT payload FROM dashboard_snapshots WHERE id = ?")
+      .bind(3)
+      .first<{ payload: string }>();
+    if (row) {
+      return NextResponse.json(JSON.parse(row.payload), {
+        headers: { "Cache-Control": "private, max-age=15" },
+      });
+    }
+  }
+
+  // The relay carries the small live-status heartbeat.  It deliberately keeps
+  // only active model versions, so it is a fallback—not the authority for the
+  // append-only learning history stored in D1.
   const relay = process.env.STATUS_RELAY_URL;
   if (relay) {
     try {
@@ -19,26 +36,15 @@ export async function GET() {
         execution_learning: payload.execution_learning ?? {},
       }, { status: response.status });
     } catch {
-      return NextResponse.json({ error: "本机学习数据服务未运行" }, { status: 503 });
+      return NextResponse.json({ error: "学习历史与本机后备服务均不可用" }, { status: 503 });
     }
   }
 
-  const binding = env.DB as D1Database | undefined;
-  if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
-  const row = await binding
-    .prepare("SELECT payload FROM dashboard_snapshots WHERE id = ?")
-    .bind(3)
-    .first<{ payload: string }>();
-  if (!row) return NextResponse.json({ error: "等待学习数据首次同步" }, { status: 503 });
-  return NextResponse.json(JSON.parse(row.payload), {
-    headers: { "Cache-Control": "private, max-age=15" },
-  });
+  return NextResponse.json({ error: "等待学习数据首次同步" }, { status: 503 });
 }
 
 export async function POST(request: Request) {
-  const expected = process.env.INGEST_TOKEN;
-  const provided = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
-  if (!expected || !provided || provided !== expected) {
+  if (!await isIngestAuthorized(request)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
   const serialized = await request.text();

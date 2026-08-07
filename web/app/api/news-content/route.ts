@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
+import { isIngestAuthorized } from "../_shared/ingest-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -32,24 +33,26 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const expected = process.env.INGEST_TOKEN;
-  const provided = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
-  if (!expected || !provided || provided !== expected) {
+  if (!await isIngestAuthorized(request)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
   const serialized = await request.text();
   if (new TextEncoder().encode(serialized).byteLength > 450_000) {
     return NextResponse.json({ error: "payload too large" }, { status: 413 });
   }
-  const body = JSON.parse(serialized) as { items?: NewsDetailItem[] };
-  if (!Array.isArray(body.items) || body.items.length > 200) {
-    return NextResponse.json({ error: "invalid news detail batch" }, { status: 400 });
-  }
   const binding = env.DB as D1Database | undefined;
   if (!binding) {
     return NextResponse.json({ error: "database unavailable" }, { status: 503 });
   }
   try {
+    const body = JSON.parse(serialized) as { items?: NewsDetailItem[]; reset?: unknown };
+    if (body.reset === true) {
+      await binding.prepare("DELETE FROM news_details").run();
+      return NextResponse.json({ status: "OK", reset: true });
+    }
+    if (!Array.isArray(body.items) || body.items.length > 200) {
+      return NextResponse.json({ error: "invalid news detail batch" }, { status: 400 });
+    }
     const now = new Date().toISOString();
     const statements = body.items.map((item) => {
       if (

@@ -12,7 +12,9 @@
     "start": "vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "cf:types": "wrangler types worker-configuration.d.ts",
+    "cf:deploy": "npm run test && wrangler deploy"
   },
   "dependencies": {
     "drizzle-orm": "0.45.2",

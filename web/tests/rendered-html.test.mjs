@@ -56,7 +56,7 @@ test("renders the news and decision audit route", async () => {
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /Aurum Evidence Desk/);
-  assert.match(html, /新闻与 Gemini/);
+  assert.match(html, />新闻 <b>/);
   assert.match(html, /新闻证据管理/);
   const source = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
   assert.match(source, /来源不是权限/);
@@ -64,6 +64,11 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /api\/news-content\?key=/);
   assert.match(source, /api\/news-index\?/);
   assert.match(source, /api\/learning/);
+  assert.match(source, /Promise\.allSettled/);
+  assert.match(source, /读取中…/);
+  assert.match(source, /学习数据暂不可用|暂不可用/);
+  assert.match(source, /页面会保留上一份成功数据并自动重试/);
+  assert.doesNotMatch(source, /payload\?\.system\.online && !error/);
   assert.match(source, /列表与正文详情分开保存/);
   assert.match(source, /最多回看/);
   assert.match(source, /迟到发现只保留展示，不进入训练/);
@@ -74,6 +79,25 @@ test("renders the news and decision audit route", async () => {
   assert.match(html, /Live OOS 学习曲线/);
   assert.match(html, /大视野覆盖/);
   assert.match(html, /LEARNING PROGRESS/);
+});
+
+test("reloads an already-open dashboard after a deployment changes its client bundle", () => {
+  const layout = readFileSync(new URL("../app/layout.tsx", import.meta.url), "utf8");
+  const refresh = readFileSync(new URL("../app/_components/DeploymentRefresh.tsx", import.meta.url), "utf8");
+  assert.match(layout, /<DeploymentRefresh\s*\/>/);
+  assert.match(refresh, /\/_next\/static\//);
+  assert.match(refresh, /cache:\s*"no-store"/);
+  assert.match(refresh, /window\.location\.reload\(\)/);
+  assert.match(refresh, /document\.visibilityState !== "visible"/);
+});
+
+test("reads the append-only D1 learning history before the compact live relay", () => {
+  const source = readFileSync(new URL("../app/api/learning/route.ts", import.meta.url), "utf8");
+  const d1Read = source.indexOf("dashboard_snapshots WHERE id = ?");
+  const relayRead = source.indexOf("process.env.STATUS_RELAY_URL");
+  assert.ok(d1Read >= 0, "learning route must read the dedicated D1 snapshot");
+  assert.ok(relayRead > d1Read, "the compact relay must remain a fallback");
+  assert.match(source, /append-only learning history stored in D1/);
 });
 
 test("renders generic story coverage without black empty grid placeholders", () => {
@@ -112,9 +136,24 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /长期 OOS 曲线/);
   assert.match(modal, /每组独立成绩/);
   assert.match(modal, /所有模型的训练组成绩/);
+  assert.match(modal, /共同训练截止量对齐/);
+  assert.match(modal, /查看模型明细/);
+  assert.match(modal, /最近20个训练截止点/);
+  assert.match(modal, /空缺代表该模型当轮没有合法新版本/);
+  assert.match(modal, /crossesMissingCutoff/);
+  assert.match(modal, /strokeDasharray=\{crossesMissingCutoff/);
+  assert.match(modal, /这里只叠加显示，不会把收益相加/);
+  assert.match(modal, /gx\(comparisonCutoff\(row\)\)/);
+  assert.doesNotMatch(modal, /gx\(row\.generation\)/);
   assert.match(modal, /每30分钟（固定 :00 \/ :30）/);
-  assert.match(modal, /把鼠标移到圆点上/);
+  assert.match(modal, /同一坐标叠加比较/);
   assert.match(page, /五套模型，现在表现怎样/);
+  assert.match(page, /方向收集/);
+  assert.match(page, /当前模型的新闻子集/);
+  assert.match(page, /方向再收集/);
+  assert.match(page, /有合格新闻/);
+  assert.match(page, /同轮更新/);
+  assert.doesNotMatch(page, /learning-data-flow/);
   assert.match(page, /方法与实盘边界/);
   assert.match(modal, /K线与决策/);
   assert.match(modal, /仓位与退出/);
@@ -138,6 +177,7 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /点击图中的三角形/);
   assert.match(modal, /Ridge 预测未来30分钟连续收益/);
   assert.match(modal, /较高的一边只要大于0就记录为 Shadow 方向/);
+  assert.match(modal, /return bestEv > 0 \? bestAction : "WAIT"/);
   assert.match(modal, /每根K线5分钟 · 每个箭头预测未来30分钟/);
   assert.match(modal, /历史＋实时成熟 OOS（只追加，不重写）/);
   assert.match(modal, /24小时/);
@@ -156,6 +196,19 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /条模型评分/);
   assert.match(modal, /versionBoundaries/);
   assert.match(modal, /新训练数据代/);
+  assert.match(modal, /pools\.direction !== null && pools\.direction !== state\.lastDirectionRows/);
+  assert.match(modal, /pools\.news !== null && pools\.news !== state\.lastNewsRows/);
+  assert.match(modal, /sort\(\(a, b\) => Date\.parse\(a\) - Date\.parse\(b\)\)/);
+  assert.match(modal, /方向 \$\{boundary\.direction\}/);
+  assert.match(modal, /新闻 \$\{boundary\.news\}/);
+  assert.match(modal, /version-boundary-badge/);
+  assert.match(modal, /const laneEnds: number\[\] = \[\]/);
+  assert.match(modal, /boundaryLayouts/);
+  assert.match(modal, /version-boundary-leader/);
+  assert.match(modal, /boundaryDividerY/);
+  assert.doesNotMatch(modal, /标签分别显示方向池与新闻池/);
+  assert.match(modal, /version-label-divider/);
+  assert.doesNotMatch(modal, /changes\[0\]\?\.training_rows/);
   assert.match(modal, /模型换版本/);
   assert.match(modal, /30分钟结果/);
   assert.match(modal, /无效样本 · 已隔离/);
@@ -170,6 +223,8 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(css, /scrollbar-gutter:stable/);
   assert.match(css, /long-curve-block>\.learning-svg \{ height:clamp\(390px,48dvh,520px\)/);
   assert.match(css, /\.curve-navigation/);
+  assert.match(css, /version-ledger-controls \{ display:grid; grid-template-columns:minmax\(210px,1\.16fr\) minmax\(190px,1fr\) minmax\(180px,\.9fr\)/);
+  assert.match(css, /@media \(max-width:1100px\)\{[\s\S]*?\.version-ledger>header \{ grid-template-columns:1fr/);
   assert.match(css, /long-curve-block>\.chart-legend \{ margin-top:16px; padding-bottom:10px/);
   assert.match(modal, /预测 \/ 方向/);
   assert.match(modal, /row\.decision_time \?\? row\.time/);

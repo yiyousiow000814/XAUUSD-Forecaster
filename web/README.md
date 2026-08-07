@@ -1,8 +1,9 @@
-# vinext-starter
+# Aurum Signal Room
 
-A clean full-stack starter running on
-[vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
-Drizzle support.
+The XAUUSD Forecaster public research dashboard. The same application can run
+on ChatGPT Sites and on an independent Cloudflare Worker. Cloudflare stores the
+latest public snapshots in D1, so public visitors never connect to the owner's
+PC directly.
 
 ## Prerequisites
 
@@ -16,16 +17,14 @@ npm run dev
 npm run build
 ```
 
-This starter does not use `wrangler.jsonc`.
+## Cloudflare Shape
 
-## Included Shape
-
-- edit site code under `app/`
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
+- vinext and the Cloudflare Vite plugin build the UI and API as one Worker.
+- `worker/index.ts` is the Worker entry point.
+- `wrangler.jsonc` declares D1 and runtime bindings.
+- `drizzle/` contains the append-only dashboard migrations.
+- the local synchronizer writes Sites and Cloudflare independently.
+- `INGEST_TOKEN` is a Worker secret; it must never be committed.
 
 ## Workspace Auth Headers
 
@@ -91,10 +90,37 @@ actions tied to the current ChatGPT user. Leave public content anonymous.
 
 - `npm run dev`: start local development
 - `npm run build`: verify the vinext build output
-- `npm test`: build the starter and verify its rendered loading skeleton
+- `npm test`: build the application and run rendered API/UI regressions
+- `npm run lint`: lint source code while excluding generated hosting artifacts
 - `npm run db:generate`: generate Drizzle migrations after schema changes
+- `npm run cf:types`: refresh Cloudflare binding types
+- `npm run cf:deploy`: test and deploy the Worker
+
+## One-time Cloudflare Setup
+
+```powershell
+npx wrangler login
+npx wrangler d1 migrations apply aurum-signal-room --remote
+npx wrangler secret put INGEST_TOKEN
+npm run cf:deploy
+```
+
+The local Control Center reads these user-level environment variables when it
+starts `Dashboard Mirrors`:
+
+- `CLOUDFLARE_INGEST_URL`
+- `CLOUDFLARE_INGEST_TOKEN`
+- `XAUUSD_DASHBOARD_URL`
+
+For automatic deployment after a GitHub push, connect the GitHub repository in
+Cloudflare Workers Builds, set the root directory to
+`src/XAUUSD-Forecaster/web`, use `npm ci && npm test` as the build command and
+`npx wrangler deploy` as the deploy command. Keep D1 identifiers in
+`wrangler.jsonc`; keep `INGEST_TOKEN` in Cloudflare secrets.
 
 ## Learn More
 
 - [vinext Documentation](https://github.com/cloudflare/vinext)
 - [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+- [Cloudflare Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/)
+- [Cloudflare D1](https://developers.cloudflare.com/d1/)

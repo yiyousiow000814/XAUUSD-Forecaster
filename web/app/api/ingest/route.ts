@@ -1,10 +1,9 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
+import { isIngestAuthorized } from "../_shared/ingest-auth";
 
 export async function POST(request: Request) {
-  const expected = process.env.INGEST_TOKEN;
-  const provided = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
-  if (!expected || !provided || provided !== expected) {
+  if (!await isIngestAuthorized(request)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
   const payload = await request.json();

@@ -1,9 +1,27 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
+import { isIngestAuthorized } from "../_shared/ingest-auth";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  try {
+    const binding = env.DB as D1Database | undefined;
+    if (binding) {
+      const row = await binding
+        .prepare("SELECT payload FROM dashboard_snapshots WHERE id = ?")
+        .bind(2)
+        .first<{ payload: string }>();
+      if (row) {
+        return NextResponse.json(JSON.parse(row.payload), {
+          headers: { "Cache-Control": "no-store, max-age=0" },
+        });
+      }
+    }
+  } catch {
+    // Fall through to the relay when D1 is temporarily unavailable.
+  }
+
   const relay = process.env.STATUS_RELAY_URL;
   if (relay) {
     try {
@@ -18,26 +36,15 @@ export async function GET() {
         headers: { "Cache-Control": "no-store, max-age=0" },
       });
     } catch {
-      return NextResponse.json({ error: "本机图表数据服务未运行" }, { status: 503 });
+      // Return a single public-facing error below.
     }
   }
 
-  const binding = env.DB as D1Database | undefined;
-  if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
-  const row = await binding
-    .prepare("SELECT payload FROM dashboard_snapshots WHERE id = ?")
-    .bind(2)
-    .first<{ payload: string }>();
-  if (!row) return NextResponse.json({ error: "等待图表首次同步" }, { status: 503 });
-  return NextResponse.json(JSON.parse(row.payload), {
-    headers: { "Cache-Control": "private, max-age=15" },
-  });
+  return NextResponse.json({ error: "等待公开图表快照" }, { status: 503 });
 }
 
 export async function POST(request: Request) {
-  const expected = process.env.INGEST_TOKEN;
-  const provided = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
-  if (!expected || !provided || provided !== expected) {
+  if (!await isIngestAuthorized(request)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
   const serialized = await request.text();

@@ -10,6 +10,27 @@ type DashboardPayload = {
 };
 
 export async function GET() {
+  // Public viewers must not depend on a direct connection to the owner's PC.
+  // The synchronizer writes the authoritative public snapshot to D1; the
+  // local relay is only a last-resort fallback before the first sync.
+  try {
+    const binding = env.DB as D1Database | undefined;
+    if (binding) {
+      const row = await binding
+        .prepare("SELECT payload FROM dashboard_snapshots WHERE id = ?")
+        .bind(1)
+        .first<{ payload: string }>();
+      if (row) {
+        return NextResponse.json(applyFreshness(JSON.parse(row.payload)), {
+          headers: { "Cache-Control": "no-store, max-age=0" },
+        });
+      }
+    }
+  } catch {
+    // Fall through to the relay. A temporary D1 read problem should not stop
+    // the public page when the live relay is still reachable.
+  }
+
   const relay = process.env.STATUS_RELAY_URL;
   if (relay) {
     try {
@@ -24,27 +45,10 @@ export async function GET() {
         headers: { "Cache-Control": "no-store, max-age=0" },
       });
     } catch {
-      return NextResponse.json({ error: "本机数据服务未运行" }, { status: 503 });
+      // The final error is intentionally generic: viewers do not need to know
+      // the owner's local network layout.
     }
   }
 
-  try {
-    const binding = env.DB as D1Database | undefined;
-    if (!binding) throw new Error("Dashboard database is unavailable");
-    const row = await binding
-      .prepare("SELECT payload FROM dashboard_snapshots WHERE id = ?")
-      .bind(1)
-      .first<{ payload: string }>();
-    if (!row) {
-      return NextResponse.json({ error: "等待本机首次同步" }, { status: 503 });
-    }
-    return NextResponse.json(applyFreshness(JSON.parse(row.payload)), {
-      headers: { "Cache-Control": "no-store, max-age=0" },
-    });
-  } catch (reason) {
-    return NextResponse.json(
-      { error: reason instanceof Error ? reason.message : "无法读取状态" },
-      { status: 503 },
-    );
-  }
+  return NextResponse.json({ error: "等待公开状态快照" }, { status: 503 });
 }

@@ -24,6 +24,7 @@ type Payload = {
   forward_epoch: string;
   system: {
     online: boolean;
+    market_session?: "OPEN" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE";
     quote_age_seconds: number | null;
     mode: string;
     trading_enabled: boolean;
@@ -125,7 +126,9 @@ export default function Home() {
   }, []);
 
   const latest = payload?.latest;
+  const loading = payload === null && error === null;
   const online = Boolean(payload?.system.online && !error);
+  const marketClosed = Boolean(payload?.system.market_session === "WEEKLY_CLOSED" && !error);
   const mid = latest?.bid && latest.ask ? (latest.bid + latest.ask) / 2 : null;
   const u5Percent = latest?.u5 == null ? null : Math.expm1(latest.u5) * 100;
   const u5Dollars = latest?.u5 == null || mid == null ? null : Math.expm1(latest.u5) * mid;
@@ -165,8 +168,8 @@ export default function Home() {
         <div className="top-actions">
           <button className="audit-link" type="button" onClick={() => router.push("/status")}>系统状态</button>
           <button className="audit-link" type="button" onClick={() => router.push("/audit?view=decisions")}>新闻与决策 / 结果 <span aria-hidden="true">→</span></button>
-          <div className={`live-pill ${online ? "is-live" : "is-down"}`}>
-            <span />{online ? "LIVE" : "OFFLINE"}
+          <div className={`live-pill ${loading ? "is-pending" : online || marketClosed ? "is-live" : "is-down"}`}>
+            <span />{loading ? "CONNECTING" : online ? "LIVE" : marketClosed ? "MARKET CLOSED" : "OFFLINE"}
           </div>
         </div>
       </header>
@@ -277,7 +280,7 @@ export default function Home() {
 
         <article className="panel source-panel">
           <div className="panel-head"><div><span>SOURCE HEALTH</span><h2>数据链路</h2></div></div>
-          <Source name="cTrader XAUUSD · 本机 Algo" state={online ? "本机在线" : "本机中断"} good={online} />
+          <Source name="cTrader XAUUSD · 本机 Algo" state={online ? "本机在线" : marketClosed ? "市场休市 · 新闻继续" : "本机中断"} good={online || marketClosed} />
           <Source name="Federal Reserve · 官方源" state="采集中" good />
           <Source name="BLS Public API · 官方源" state={payload?.sources.bls === "ONLINE" ? "采集中" : "准备中"} good={payload?.sources.bls === "ONLINE"} />
           <Source name="Gemini 3.5 Flash-Lite · API" state={payload?.sources.llm === "ENABLED" ? "标注中" : "等待标注"} good={payload?.sources.llm === "ENABLED"} />

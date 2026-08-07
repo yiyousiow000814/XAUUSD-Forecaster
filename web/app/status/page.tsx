@@ -23,7 +23,7 @@ type QuotaState = {
 type StatusPayload = {
   generated_at: string;
   system: {
-    online: boolean; mode: string; trading_enabled: boolean;
+    online: boolean; mode: string; trading_enabled: boolean; market_session?: "OPEN" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE";
     source_of_truth: string; sites_mirror: string;
     components: Record<string, { last_success: string | null; age_seconds: number | null; status: string; last_error: string | null }>;
   };
@@ -127,6 +127,7 @@ export default function StatusPage() {
   const quota = payload?.gemini_quota;
   const fallbackQuota = payload?.gemini_31_quota;
   const gemmaQuota = payload?.gemma_quota;
+  const marketClosed = payload?.system.market_session === "WEEKLY_CLOSED";
 
   return (
     <main className="status-main">
@@ -145,8 +146,8 @@ export default function StatusPage() {
 
       <section className="status-hero">
         <div><p className="eyebrow">LOCAL QUOTA LEDGER / PACIFIC DAY</p><h1>AI 模型使用状态</h1></div>
-        <div className={`live-pill ${payload === null && !error ? "is-pending" : payload?.system.online && !error ? "is-live" : "is-down"}`}>
-          <span />{payload === null && !error ? "正在读取状态" : payload?.system.online && !error ? "系统在线" : "状态离线"}
+        <div className={`live-pill ${payload === null && !error ? "is-pending" : (payload?.system.online || marketClosed) && !error ? "is-live" : "is-down"}`}>
+          <span />{payload === null && !error ? "正在读取状态" : marketClosed && !error ? "市场休市 · 新闻运行中" : payload?.system.online && !error ? "系统在线" : "状态离线"}
         </div>
       </section>
 

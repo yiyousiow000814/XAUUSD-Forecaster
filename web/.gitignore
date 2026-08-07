@@ -12,6 +12,8 @@
 
 # testing
 /coverage
+/test-results/
+/.playwright-cli/
 
 # next.js
 /.next/
@@ -39,3 +41,5 @@ yarn-error.log*
 /outputs/
 /work/
 /.local/
+/.openai/site-stage-*/
+/.openai/site-package-*.tar.gz
