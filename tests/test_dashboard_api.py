@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -143,3 +144,33 @@ def test_dashboard_reports_gdelt_fallback_and_retry_time(tmp_path) -> None:
     assert gdelt["fallback_label"] == "Google News Context"
     assert gdelt["fallback_health"] == "HEALTHY"
     assert gdelt["next_retry_time"] == (now + timedelta(minutes=90)).isoformat()
+
+
+def test_learning_surfaces_rebuild_only_when_source_counts_change(monkeypatch) -> None:
+    module = _dashboard_module()
+    connection = sqlite3.connect(":memory:")
+    for table in module._LEARNING_REVISION_TABLES:
+        connection.execute(f"CREATE TABLE {table} (id INTEGER)")
+    calls = {"learning": 0, "execution": 0}
+
+    def learning(_connection):
+        calls["learning"] += 1
+        return {"generation": calls["learning"]}
+
+    def execution(_ledger):
+        calls["execution"] += 1
+        return {"generation": calls["execution"]}
+
+    monkeypatch.setattr(module, "learning_curve_payload", learning)
+    monkeypatch.setattr(module, "execution_learning_status", execution)
+
+    first = module._learning_surfaces(connection)
+    second = module._learning_surfaces(connection)
+    assert first == second
+    assert calls == {"learning": 1, "execution": 1}
+
+    connection.execute("INSERT INTO derived_outcomes VALUES (1)")
+    third = module._learning_surfaces(connection)
+    assert third != second
+    assert calls == {"learning": 2, "execution": 2}
+    connection.close()

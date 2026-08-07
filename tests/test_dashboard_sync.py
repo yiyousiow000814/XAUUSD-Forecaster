@@ -111,11 +111,12 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
     encoded = module.remote_snapshot(payload)
     mirrored = json.loads(encoded)
     index_rows, detail_rows = module.news_mirror_parts(payload)
+    learning = json.loads(module.learning_snapshot(payload))
 
     assert len(encoded) <= module.REMOTE_PAYLOAD_LIMIT_BYTES
-    assert len(mirrored["recent_news"]) == 100
-    assert mirrored["recent_news"] == index_rows
-    assert "summary_zh" not in mirrored["recent_news"][0]
+    assert mirrored["recent_news"] == []
+    assert mirrored["news_index_resource"] == "/api/news-index"
+    assert mirrored["learning_resource"] == "/api/learning"
     assert detail_rows[0]["payload"]["summary_zh"] == body
     assert len(detail_rows[0]["detail_key"]) == 64
     assert mirrored["market_chart"]["decisions"] == []
@@ -124,13 +125,15 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
     assert market_decision["model_version"] == "unused-field"
     assert len(mirrored["recent_decisions"]) == module.REMOTE_DECISION_LIMIT
     assert len(mirrored["news_evidence"]) == module.REMOTE_EVIDENCE_LIMIT
-    assert mirrored["learning_curves"]["models"] == [
+    assert learning["learning_curves"]["models"] == [
         {"lifecycle_status": "LATEST", "model_version": "latest"}
     ]
-    assert mirrored["learning_curves"]["archived_model_count"] == 1
-    assert mirrored["learning_curves"]["identity_curves"] == [body]
-    assert "full_minus_market" not in mirrored["learning_curves"]
+    assert learning["learning_curves"]["archived_model_count"] == 1
+    assert learning["learning_curves"]["identity_curves"] == [body]
+    assert "full_minus_market" not in learning["learning_curves"]
+    assert "learning_curves" not in mirrored
     assert "models" not in mirrored["training"]
+    assert len(index_rows) == 100
 
 
 def test_news_detail_batches_stay_bounded() -> None:
@@ -147,6 +150,81 @@ def test_news_detail_batches_stay_bounded() -> None:
             {"items": batch}, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")
         assert len(encoded) <= module.NEWS_DETAIL_BATCH_LIMIT_BYTES
+
+
+def test_news_index_batches_stay_bounded() -> None:
+    module = _sync_module()
+    rows = [{
+        "detail_key": f"{index:064x}", "category": "战争/地缘",
+        "collector_first_seen_time": f"2026-08-07T00:{index:02d}:00+00:00",
+        "headline": "标题" * 5_000,
+    } for index in range(20)]
+    batches = module.news_index_batches(rows)
+    assert sum(len(batch) for batch in batches) == len(rows)
+    for batch in batches:
+        encoded = json.dumps(
+            {"items": batch}, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        assert len(encoded) <= module.NEWS_INDEX_BATCH_LIMIT_BYTES
+
+
+def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> None:
+    module = _sync_module()
+    payload = {
+        "generated_at": "2026-08-07T00:00:00+00:00",
+        "learning_curves": {"learning_stage": "EARLY"},
+        "execution_learning": {"models": []},
+        "recent_news": [{
+            "source": "example", "source_item_id": "1", "revision_number": 1,
+            "category": "其他", "collector_first_seen_time": "2026-08-07T00:00:00+00:00",
+            "headline": "第一条", "summary_zh": "摘要",
+        }],
+        "market_chart": {"decisions": []},
+    }
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    posted: list[str] = []
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(module, "_post_json", lambda url, _body, _config: posted.append(url))
+    config = {
+        "local_status_url": "http://local/status",
+        "remote_ingest_url": "https://remote/api/ingest",
+        "token": "test",
+        "news_state_file": str(tmp_path / "news-state.json"),
+        "learning_state_file": str(tmp_path / "learning-state.json"),
+    }
+
+    module.sync_once(config)
+    assert posted.count("https://remote/api/learning") == 1
+    assert posted.count("https://remote/api/news-index") == 1
+
+    posted.clear()
+    payload["generated_at"] = "2026-08-07T00:00:30+00:00"
+    module.sync_once(config)
+    assert "https://remote/api/learning" not in posted
+    assert "https://remote/api/news-index" not in posted
+
+    posted.clear()
+    payload["learning_curves"]["learning_stage"] = "READY"
+    payload["recent_news"][0]["headline"] = "第一条（更新）"
+    module.sync_once(config)
+    assert posted.count("https://remote/api/learning") == 1
+    assert posted.count("https://remote/api/news-index") == 1
+
+    news_state = json.loads((tmp_path / "news-state.json").read_text(encoding="utf-8"))
+    assert len(news_state["hashes"]) == 1
+    assert len(news_state["index_hashes"]) == 1
 
 
 def test_remote_market_chart_is_split_from_status_and_keeps_complete_window() -> None:

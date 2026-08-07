@@ -184,7 +184,7 @@ type Payload = {
     requests_per_minute_per_key: number;
     requests_per_minute: number;
   };
-  recent_news: News[];
+  recent_news?: News[];
   news_evidence: NewsEvidence[];
   news_evidence_summary: {
     policy_version: string;
@@ -301,6 +301,15 @@ type Payload = {
     training_markers: Array<{ model_identity: string; training_dataset_hash: string; created_at: string; training_rows: number; artifact_count: number }>;
     decision_resource?: string;
   };
+};
+
+type NewsIndexResponse = {
+  items: News[];
+  total: number;
+  all_total: number;
+  category_counts: Record<string, number>;
+  page: number;
+  page_size: number;
 };
 
 const time = (value?: string | null) => value ? new Intl.DateTimeFormat("zh-CN", {
@@ -450,6 +459,9 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
 export default function AuditPage() {
   const router = useRouter();
   const [payload, setPayload] = useState<Payload | null>(null);
+  const [newsIndex, setNewsIndex] = useState<NewsIndexResponse>({
+    items: [], total: 0, all_total: 0, category_counts: {}, page: 1, page_size: NEWS_PER_PAGE,
+  });
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<"news" | "evidence" | "stories" | "decisions" | "league" | "coverage">("news");
   const [newsCategory, setNewsCategory] = useState("全部");
@@ -460,15 +472,32 @@ export default function AuditPage() {
 
   const refresh = useCallback(async () => {
     try {
-      const response = await fetch("/api/status", { cache: "no-store" });
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
-      setPayload(body);
+      const [statusResponse, learningResponse] = await Promise.all([
+        fetch("/api/status", { cache: "no-store" }),
+        fetch("/api/learning", { cache: "no-store" }),
+      ]);
+      const [body, learning] = await Promise.all([
+        statusResponse.json(), learningResponse.json(),
+      ]);
+      if (!statusResponse.ok) throw new Error(body.error ?? `HTTP ${statusResponse.status}`);
+      if (!learningResponse.ok) throw new Error(learning.error ?? `HTTP ${learningResponse.status}`);
+      setPayload({ ...body, ...learning });
       setError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "无法读取审计数据");
     }
   }, []);
+
+  const refreshNews = useCallback(async () => {
+    const query = new URLSearchParams({
+      page: String(newsPage), limit: String(NEWS_PER_PAGE),
+    });
+    if (newsCategory !== "全部") query.set("category", newsCategory);
+    const response = await fetch(`/api/news-index?${query}`, { cache: "no-store" });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
+    setNewsIndex(body);
+  }, [newsCategory, newsPage]);
 
   useEffect(() => {
     const initial = window.setTimeout(() => {
@@ -477,10 +506,18 @@ export default function AuditPage() {
         setView(requested);
       }
       refresh();
+      refreshNews().catch(reason => setError(
+        reason instanceof Error ? reason.message : "无法读取新闻索引",
+      ));
     }, 0);
-    const interval = window.setInterval(refresh, 15_000);
+    const interval = window.setInterval(() => {
+      refresh();
+      refreshNews().catch(reason => setError(
+        reason instanceof Error ? reason.message : "无法读取新闻索引",
+      ));
+    }, 15_000);
     return () => { window.clearTimeout(initial); window.clearInterval(interval); };
-  }, [refresh]);
+  }, [refresh, refreshNews]);
 
   const selectView = (next: "news" | "evidence" | "stories" | "decisions" | "league" | "coverage") => {
     setView(next);
@@ -493,23 +530,13 @@ export default function AuditPage() {
     return Math.min(100, training.complete_rows / training.next_training_at * 100);
   }, [payload]);
 
-  const categoryCounts = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const row of payload?.recent_news ?? []) {
-      counts.set(row.category, (counts.get(row.category) ?? 0) + 1);
-    }
-    return counts;
-  }, [payload]);
   const categories = useMemo(() => [
-    { name: "全部", count: payload?.recent_news.length ?? 0 },
-    ...CATEGORY_ORDER.filter(name => categoryCounts.has(name)).map(name => ({ name, count: categoryCounts.get(name) ?? 0 })),
-  ], [categoryCounts, payload]);
-  const filteredNews = useMemo(() => newsCategory === "全部"
-    ? payload?.recent_news ?? []
-    : (payload?.recent_news ?? []).filter(row => row.category === newsCategory), [newsCategory, payload]);
-  const newsPageCount = Math.max(1, Math.ceil(filteredNews.length / NEWS_PER_PAGE));
+    { name: "全部", count: newsIndex.all_total },
+    ...CATEGORY_ORDER.filter(name => newsIndex.category_counts[name]).map(name => ({ name, count: newsIndex.category_counts[name] ?? 0 })),
+  ], [newsIndex]);
+  const newsPageCount = Math.max(1, Math.ceil(newsIndex.total / NEWS_PER_PAGE));
   const currentNewsPage = Math.min(newsPage, newsPageCount);
-  const visibleNews = filteredNews.slice((currentNewsPage - 1) * NEWS_PER_PAGE, currentNewsPage * NEWS_PER_PAGE);
+  const visibleNews = newsIndex.items;
   const emptyNewsRows = Math.max(0, NEWS_PER_PAGE - visibleNews.length);
   const activeLearningModels = (payload?.learning_curves.models ?? []).filter(
     row => row.active_rank !== null,
@@ -559,7 +586,7 @@ export default function AuditPage() {
       </section>
 
       <nav className="audit-tabs" aria-label="审计视图">
-        <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻与 Gemini <b>{payload?.counts.latest_news_items ?? 0}</b></a>
+        <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻与 Gemini <b>{newsIndex.all_total}</b></a>
         <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>新闻证据管理 <b>{payload?.news_evidence_summary.broad_model_eligible ?? 0}</b></a>
         <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件故事链 <b>{payload?.storyline_summary.total ?? 0}</b></a>
         <a href="/audit?view=decisions" className={view === "decisions" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("decisions"); }}>决策与30分钟结果 <b>{payload?.counts.decision_events ?? 0}</b></a>
@@ -569,7 +596,7 @@ export default function AuditPage() {
 
       {view === "news" && <>
         <section className="news-browser" aria-label="新闻自动分类">
-          <div><strong>自动分类</strong><span>按系统首次收到排序 · 最新版本共 {payload?.counts.latest_news_items ?? 0} 条 · 每页 {NEWS_PER_PAGE} 条</span></div>
+          <div><strong>自动分类</strong><span>按系统首次收到排序 · 已归档 {newsIndex.all_total} 条 · 每页 {NEWS_PER_PAGE} 条</span></div>
           <nav>
             {categories.map(category => <button key={category.name} type="button" className={newsCategory === category.name ? "active" : ""} onClick={() => { setNewsCategory(category.name); setNewsPage(1); }}>
               {category.name}<b>{category.count}</b>
@@ -588,7 +615,7 @@ export default function AuditPage() {
         </section>
         {newsPageCount > 1 && <nav className="news-pagination" aria-label="新闻分页">
           <button type="button" disabled={currentNewsPage === 1} onClick={() => setNewsPage(page => Math.max(1, page - 1))}>← 上一页</button>
-          <span>第 <b>{currentNewsPage}</b> / {newsPageCount} 页 · 当前分类 {filteredNews.length} 条</span>
+          <span>第 <b>{currentNewsPage}</b> / {newsPageCount} 页 · 当前分类 {newsIndex.total} 条</span>
           <button type="button" disabled={currentNewsPage === newsPageCount} onClick={() => setNewsPage(page => Math.min(newsPageCount, page + 1))}>下一页 →</button>
         </nav>}
       </>}

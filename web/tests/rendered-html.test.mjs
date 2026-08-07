@@ -62,6 +62,8 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /来源不是权限/);
   assert.match(source, /多源确认/);
   assert.match(source, /api\/news-content\?key=/);
+  assert.match(source, /api\/news-index\?/);
+  assert.match(source, /api\/learning/);
   assert.match(source, /列表与正文详情分开保存/);
   assert.match(source, /最多回看/);
   assert.match(source, /迟到发现只保留展示，不进入训练/);

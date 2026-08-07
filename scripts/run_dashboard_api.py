@@ -9,6 +9,7 @@ import math
 import sqlite3
 import subprocess
 import sys
+import threading
 from types import SimpleNamespace
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -75,6 +76,44 @@ def _deployment_provenance(generated_at: datetime, database_epoch: str | None) -
 
 
 DEPLOYMENT_PROVENANCE = _deployment_provenance(datetime.now(UTC), None)
+
+_LEARNING_REVISION_TABLES = (
+    "derived_outcomes",
+    "model_updates_v2",
+    "predictions_v2",
+    "prediction_scores_v2",
+    "execution_training_examples_v2",
+    "execution_model_updates_v2",
+    "execution_predictions_v2",
+    "execution_position_scores_v2",
+)
+_LEARNING_CACHE_LOCK = threading.Lock()
+_LEARNING_CACHE: dict[str, object] = {}
+
+
+def _learning_revision(connection: sqlite3.Connection) -> tuple[object, ...]:
+    database_row = connection.execute("PRAGMA database_list").fetchone()
+    database_identity = database_row[2] if database_row and database_row[2] else id(connection)
+    counts = tuple(
+        int(connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
+        for table in _LEARNING_REVISION_TABLES
+    )
+    return (database_identity, *counts)
+
+
+def _learning_surfaces(connection: sqlite3.Connection) -> tuple[dict, dict]:
+    """Rebuild learning surfaces only when append-only source counts change."""
+    revision = _learning_revision(connection)
+    with _LEARNING_CACHE_LOCK:
+        if _LEARNING_CACHE.get("revision") != revision:
+            _LEARNING_CACHE.update({
+                "revision": revision,
+                "learning": learning_curve_payload(connection),
+                "execution": execution_learning_status(
+                    SimpleNamespace(connection=connection)
+                ),
+            })
+        return _LEARNING_CACHE["learning"], _LEARNING_CACHE["execution"]
 
 
 NEWS_SOURCE_DEFINITIONS = {
@@ -783,10 +822,7 @@ def _dashboard_payload(database: Path) -> dict:
                 float(candidate["u5"])
             ):
                 complete_rows += 1
-        learning = learning_curve_payload(connection)
-        execution_learning = execution_learning_status(
-            SimpleNamespace(connection=connection)
-        )
+        learning, execution_learning = _learning_surfaces(connection)
         market_chart = _recent_market_chart(database, connection, now)
         component_times = {
             "quote_bridge": _latest_quote_received(database),

@@ -1,4 +1,4 @@
-import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const dashboardSnapshots = sqliteTable("dashboard_snapshots", {
   id: integer("id").primaryKey(),
@@ -12,3 +12,20 @@ export const newsDetails = sqliteTable("news_details", {
   payload: text("payload").notNull(),
   receivedAt: text("received_at").notNull(),
 });
+
+export const newsIndex = sqliteTable(
+  "news_index",
+  {
+    detailKey: text("detail_key").primaryKey(),
+    category: text("category").notNull(),
+    collectorFirstSeenTime: text("collector_first_seen_time").notNull(),
+    payload: text("payload").notNull(),
+    receivedAt: text("received_at").notNull(),
+  },
+  table => [
+    index("news_index_seen_idx").on(table.collectorFirstSeenTime),
+    index("news_index_category_seen_idx").on(
+      table.category, table.collectorFirstSeenTime,
+    ),
+  ],
+);

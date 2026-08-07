@@ -15,6 +15,20 @@
       "when": 1785996242848,
       "tag": "0001_daily_epoch",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1786079534440,
+      "tag": "0002_hard_bishop",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1786080472624,
+      "tag": "0003_news_index_lookup",
+      "breakpoints": true
     }
   ]
 }

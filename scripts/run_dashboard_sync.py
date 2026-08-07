@@ -22,6 +22,9 @@ DEFAULT_STATUS = MODULE_ROOT / ".local" / "forward" / "dashboard-sync-status.jso
 DEFAULT_NEWS_STATE = (
     MODULE_ROOT / ".local" / "forward" / "dashboard-news-sync-state.json"
 )
+DEFAULT_LEARNING_STATE = (
+    MODULE_ROOT / ".local" / "forward" / "dashboard-learning-sync-state.json"
+)
 REMOTE_PAYLOAD_LIMIT_BYTES = 750_000
 LOCAL_STATUS_TIMEOUT_SECONDS = 20
 REMOTE_POST_TIMEOUT_SECONDS = 30
@@ -29,6 +32,7 @@ REMOTE_NEWS_LIMIT = 200
 REMOTE_DECISION_LIMIT = 20
 REMOTE_EVIDENCE_LIMIT = 60
 NEWS_DETAIL_BATCH_LIMIT_BYTES = 400_000
+NEWS_INDEX_BATCH_LIMIT_BYTES = 400_000
 NEWS_DETAIL_FULL_REFRESH_SECONDS = 86_400
 REMOTE_CURVE_POINTS_PER_IDENTITY = 480
 REMOTE_MARKET_DECISION_LIMIT = 288 * 5
@@ -52,6 +56,14 @@ def _stable_news_key(row: dict) -> str:
         str(row.get("revision_number", "")),
     ))
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _json_hash(value: object) -> str:
+    encoded = json.dumps(
+        value, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def news_mirror_parts(payload: dict) -> tuple[list[dict], list[dict]]:
@@ -81,6 +93,14 @@ def news_mirror_parts(payload: dict) -> tuple[list[dict], list[dict]]:
 
 
 def news_detail_batches(rows: list[dict]) -> list[list[dict]]:
+    return _bounded_item_batches(rows, NEWS_DETAIL_BATCH_LIMIT_BYTES)
+
+
+def news_index_batches(rows: list[dict]) -> list[list[dict]]:
+    return _bounded_item_batches(rows, NEWS_INDEX_BATCH_LIMIT_BYTES)
+
+
+def _bounded_item_batches(rows: list[dict], limit_bytes: int) -> list[list[dict]]:
     batches: list[list[dict]] = []
     current: list[dict] = []
     for row in rows:
@@ -89,7 +109,7 @@ def news_detail_batches(rows: list[dict]) -> list[list[dict]]:
             {"items": candidate}, ensure_ascii=False, allow_nan=False,
             separators=(",", ":"),
         ).encode("utf-8"))
-        if current and size > NEWS_DETAIL_BATCH_LIMIT_BYTES:
+        if current and size > limit_bytes:
             batches.append(current)
             current = [row]
         else:
@@ -154,6 +174,47 @@ def market_chart_snapshot(payload: dict) -> bytes:
     return encoded
 
 
+def learning_snapshot(payload: dict) -> bytes:
+    """Keep growing learning surfaces outside the live status heartbeat."""
+    learning = copy.deepcopy(payload.get("learning_curves") or {})
+    learning.pop("full_minus_market", None)
+    learning.pop("broad_full_minus_official_full", None)
+    models = learning.get("models")
+    if isinstance(models, list):
+        learning["archived_model_count"] = sum(
+            row.get("lifecycle_status") not in {"LATEST", "PREVIOUS"}
+            for row in models
+        )
+        learning["models"] = [
+            row for row in models
+            if row.get("lifecycle_status") in {"LATEST", "PREVIOUS"}
+        ]
+    version_groups = learning.get("version_groups")
+    if isinstance(version_groups, list):
+        learning["version_groups"] = [
+            row for row in version_groups
+            if row.get("lifecycle_status") in {"LATEST", "PREVIOUS"}
+        ]
+    curves = learning.get("identity_curves")
+    if isinstance(curves, list):
+        for curve in curves:
+            if isinstance(curve, dict) and isinstance(curve.get("points"), list):
+                curve["points"] = compact_curve_points(curve["points"])
+    encoded = json.dumps(
+        {
+            "learning_curves": learning,
+            "execution_learning": payload.get("execution_learning") or {},
+        },
+        ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+    ).encode("utf-8")
+    if len(encoded) > REMOTE_PAYLOAD_LIMIT_BYTES:
+        raise ValueError(
+            f"learning payload is {len(encoded)} bytes "
+            f"(limit {REMOTE_PAYLOAD_LIMIT_BYTES})"
+        )
+    return encoded
+
+
 def remote_snapshot(payload: dict) -> bytes:
     """Build a bounded Sites mirror without truncating retained news content."""
     snapshot = copy.deepcopy(payload)
@@ -161,31 +222,12 @@ def remote_snapshot(payload: dict) -> bytes:
     if isinstance(training, dict):
         training.pop("models", None)  # Duplicated by learning_curves.models.
 
-    learning = snapshot.get("learning_curves")
-    if isinstance(learning, dict):
-        # Keep identity_curves for the graph modal. Pairwise diagnostics are
-        # local-only because the Sites UI does not render them.
-        learning.pop("full_minus_market", None)
-        learning.pop("broad_full_minus_official_full", None)
-        models = learning.get("models")
-        if isinstance(models, list):
-            learning["archived_model_count"] = sum(
-                row.get("lifecycle_status") not in {"LATEST", "PREVIOUS"}
-                for row in models
-            )
-            learning["models"] = [
-                row
-                for row in models
-                if row.get("lifecycle_status") in {"LATEST", "PREVIOUS"}
-            ]
-        curves = learning.get("identity_curves")
-        if isinstance(curves, list):
-            for curve in curves:
-                if isinstance(curve, dict) and isinstance(curve.get("points"), list):
-                    curve["points"] = compact_curve_points(curve["points"])
+    snapshot.pop("learning_curves", None)
+    snapshot.pop("execution_learning", None)
+    snapshot["learning_resource"] = "/api/learning"
 
-    news_index, _ = news_mirror_parts(snapshot)
-    snapshot["recent_news"] = news_index
+    snapshot["recent_news"] = []
+    snapshot["news_index_resource"] = "/api/news-index"
 
     market = snapshot.get("market_chart")
     if isinstance(market, dict):
@@ -297,14 +339,57 @@ def sync_once(config: dict) -> None:
     ) as response:
         local_payload = json.loads(response.read())
     _post_json(config["remote_ingest_url"], remote_snapshot(local_payload), config)
+    learning_url = config.get("remote_learning_url") or (
+        config["remote_ingest_url"].rsplit("/", 1)[0] + "/learning"
+    )
+    learning_state_path = Path(
+        config.get("learning_state_file", DEFAULT_LEARNING_STATE)
+    )
+    learning_state = _read_news_sync_state(learning_state_path)
+    learning_payload = learning_snapshot(local_payload)
+    learning_hash = hashlib.sha256(learning_payload).hexdigest()
+    if learning_state.get("payload_hash") != learning_hash:
+        _post_json(learning_url, learning_payload, config)
+        _write_news_sync_state(learning_state_path, {
+            "payload_hash": learning_hash,
+            "last_success": datetime.now(UTC).isoformat(),
+        })
     market_url = config.get("remote_market_chart_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/market-chart"
     )
     _post_json(market_url, market_chart_snapshot(local_payload), config)
 
-    _, details = news_mirror_parts(local_payload)
+    news_index, details = news_mirror_parts(local_payload)
     state_path = Path(config.get("news_state_file", DEFAULT_NEWS_STATE))
     state = _read_news_sync_state(state_path)
+    synced_index_hashes = state.get("index_hashes", {})
+    if not isinstance(synced_index_hashes, dict):
+        synced_index_hashes = {}
+    current_index_hashes = {
+        row["detail_key"]: _json_hash(row) for row in news_index
+    }
+    pending_index = [
+        row for row in news_index
+        if synced_index_hashes.get(row["detail_key"])
+        != current_index_hashes[row["detail_key"]]
+    ]
+    news_index_url = config.get("remote_news_index_url") or (
+        config["remote_ingest_url"].rsplit("/", 1)[0] + "/news-index"
+    )
+    for batch in news_index_batches(pending_index):
+        encoded = json.dumps(
+            {"items": batch}, ensure_ascii=False, allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        _post_json(news_index_url, encoded, config)
+        for row in batch:
+            synced_index_hashes[row["detail_key"]] = current_index_hashes[
+                row["detail_key"]
+            ]
+        _write_news_sync_state(state_path, {
+            **state,
+            "index_hashes": synced_index_hashes,
+        })
     synced_hashes = state.get("hashes", {})
     if not isinstance(synced_hashes, dict):
         synced_hashes = {}
@@ -338,7 +423,13 @@ def sync_once(config: dict) -> None:
         })
     if full_refresh_due:
         state["last_full_sync"] = datetime.now(UTC).isoformat()
-    state["hashes"] = synced_hashes
+    current_keys = {row["detail_key"] for row in details}
+    state["hashes"] = {
+        key: value for key, value in synced_hashes.items() if key in current_keys
+    }
+    state["index_hashes"] = {
+        key: current_index_hashes[key] for key in current_index_hashes
+    }
     _write_news_sync_state(state_path, state)
 
 
