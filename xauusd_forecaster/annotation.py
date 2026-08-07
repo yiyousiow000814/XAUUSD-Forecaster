@@ -13,6 +13,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from sqlite3 import Connection
 
 from .forward_ledger import ForwardLedger
 from .gemini_quota import GeminiQuotaLedger
@@ -46,6 +47,172 @@ HIGH_PRIORITY_NEWS_SOURCES = frozenset({"federal_reserve_monetary"})
 
 class GeminiBatchCapacityExhausted(RuntimeError):
     """The current batch used its local RPM slots; the item remains pending."""
+
+
+def pending_annotation_records(
+    connection: Connection,
+    *,
+    expected_model_identity: str = DEFAULT_GEMINI_MODEL,
+    compatible_models: tuple[str, str] = SUPPORTED_GEMINI_MODELS,
+    observed_at: datetime | None = None,
+    limit: int = 500,
+) -> list[dict[str, object]]:
+    """Return exactly the rows that the current annotator may claim.
+
+    Dashboard queue counts must use this function too.  Keeping a second SQL
+    approximation made display-only, archival, duplicate and stale-prompt rows
+    look permanently queued even though the worker could never select them.
+    """
+    now = observed_at or datetime.now(UTC)
+    rows = connection.execute(
+        """SELECT n.* FROM news_revisions n
+        LEFT JOIN news_annotations a
+         ON a.source=n.source AND a.source_item_id=n.source_item_id
+         AND a.revision_number=n.revision_number
+         AND a.llm_model_version IN (?, ?) AND a.prompt_version IN (?, ?)
+        WHERE a.annotation_id IS NULL
+          AND length(trim(COALESCE(n.body, ''))) >= 240
+          AND (
+            n.source_published_time IS NULL
+            OR (
+              n.source_published_time >= (
+                SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH')
+              AND (julianday(n.collector_first_seen_time)
+                   - julianday(n.source_published_time)) <= ?
+            )
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM news_revisions newer
+            WHERE newer.source=n.source
+              AND newer.source_item_id=n.source_item_id
+              AND newer.revision_number>n.revision_number)
+          AND NOT EXISTS (
+            SELECT 1 FROM news_revisions peer
+            WHERE peer.cluster_id=n.cluster_id
+              AND NOT EXISTS (
+                SELECT 1 FROM news_revisions peer_newer
+                WHERE peer_newer.source=peer.source
+                  AND peer_newer.source_item_id=peer.source_item_id
+                  AND peer_newer.revision_number>peer.revision_number)
+              AND (length(COALESCE(peer.body, '')) > length(COALESCE(n.body, ''))
+                   OR (length(COALESCE(peer.body, '')) = length(COALESCE(n.body, ''))
+                       AND peer.source_item_id < n.source_item_id)))
+          AND NOT EXISTS (
+            SELECT 1 FROM news_llm_failures f
+            WHERE f.task_type='ANNOTATION'
+              AND f.source=n.source AND f.source_item_id=n.source_item_id
+              AND f.revision_number=n.revision_number
+              AND f.llm_model_version=? AND f.prompt_version=?
+              AND NOT (f.error_type='RuntimeError'
+                       AND f.error='All configured Gemini keys unavailable for this batch')
+              AND f.attempt_number=(
+                SELECT max(f2.attempt_number) FROM news_llm_failures f2
+                WHERE f2.task_type=f.task_type AND f2.source=f.source
+                  AND f2.source_item_id=f.source_item_id
+                  AND f2.revision_number=f.revision_number
+                  AND f2.llm_model_version=f.llm_model_version
+                  AND f2.prompt_version=f.prompt_version)
+              AND (f.is_terminal=1 OR f.next_retry_at > ?))
+        ORDER BY CASE WHEN n.source='federal_reserve_monetary'
+                           OR lower(n.headline) LIKE '%fomc%'
+                           OR lower(n.headline) LIKE '%consumer price%'
+                           OR lower(n.headline) LIKE '%payroll%'
+                      THEN 0 ELSE 1 END,
+                 CASE WHEN n.body LIKE '[FULL_TEXT%' THEN 0 ELSE 1 END,
+                 COALESCE(n.source_published_time,
+                          n.collector_first_seen_time) DESC,
+                 n.collector_first_seen_time, n.source, n.source_item_id
+        LIMIT ?""",
+        (
+            *compatible_models, PROMPT_VERSION, PROMPT_VERSION,
+            MAX_ACTIONABLE_DISCOVERY_DELAY.total_seconds() / 86400.0,
+            expected_model_identity, PROMPT_VERSION,
+            now.isoformat(timespec="microseconds"), max(1, limit),
+        ),
+    ).fetchall()
+    records: list[dict[str, object]] = []
+    for raw_row in rows:
+        row = dict(raw_row)
+        published_at = (
+            datetime.fromisoformat(str(row["source_published_time"]))
+            if row.get("source_published_time") else None
+        )
+        allowed, _ = google_news_item_is_relevant(
+            str(row["source"]), str(row.get("headline") or ""),
+            published_at, now,
+        )
+        if allowed:
+            records.append(row)
+    return records
+
+
+def completed_annotation_records(
+    connection: Connection,
+    *,
+    compatible_models: tuple[str, str] = SUPPORTED_GEMINI_MODELS,
+    observed_at: datetime | None = None,
+    limit: int = 100_000,
+) -> list[dict[str, object]]:
+    """Return current-policy rows already completed by the annotator."""
+    now = observed_at or datetime.now(UTC)
+    rows = connection.execute(
+        """SELECT n.* FROM news_revisions n
+        WHERE length(trim(COALESCE(n.body, ''))) >= 240
+          AND EXISTS (
+            SELECT 1 FROM news_annotations a
+            WHERE a.source=n.source AND a.source_item_id=n.source_item_id
+              AND a.revision_number=n.revision_number
+              AND a.llm_model_version IN (?, ?)
+              AND a.prompt_version=?)
+          AND (
+            n.source_published_time IS NULL
+            OR (
+              n.source_published_time >= (
+                SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH')
+              AND (julianday(n.collector_first_seen_time)
+                   - julianday(n.source_published_time)) <= ?
+            )
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM news_revisions newer
+            WHERE newer.source=n.source
+              AND newer.source_item_id=n.source_item_id
+              AND newer.revision_number>n.revision_number)
+          AND NOT EXISTS (
+            SELECT 1 FROM news_revisions peer
+            WHERE peer.cluster_id=n.cluster_id
+              AND NOT EXISTS (
+                SELECT 1 FROM news_revisions peer_newer
+                WHERE peer_newer.source=peer.source
+                  AND peer_newer.source_item_id=peer.source_item_id
+                  AND peer_newer.revision_number>peer.revision_number)
+              AND (length(COALESCE(peer.body, '')) > length(COALESCE(n.body, ''))
+                   OR (length(COALESCE(peer.body, '')) = length(COALESCE(n.body, ''))
+                       AND peer.source_item_id < n.source_item_id)))
+        ORDER BY COALESCE(n.source_published_time,
+                          n.collector_first_seen_time) DESC,
+                 n.collector_first_seen_time, n.source, n.source_item_id
+        LIMIT ?""",
+        (
+            *compatible_models, PROMPT_VERSION,
+            MAX_ACTIONABLE_DISCOVERY_DELAY.total_seconds() / 86400.0,
+            max(1, limit),
+        ),
+    ).fetchall()
+    records: list[dict[str, object]] = []
+    for raw_row in rows:
+        row = dict(raw_row)
+        published_at = (
+            datetime.fromisoformat(str(row["source_published_time"]))
+            if row.get("source_published_time") else None
+        )
+        allowed, _ = google_news_item_is_relevant(
+            str(row["source"]), str(row.get("headline") or ""),
+            published_at, now,
+        )
+        if allowed:
+            records.append(row)
+    return records
 
 
 def _schema() -> dict:
@@ -115,76 +282,12 @@ def annotate_pending_news(
         if selected_provider == "gemini"
         else (expected_model_identity, expected_model_identity)
     )
-    pending = ledger.connection.execute(
-        """SELECT n.* FROM news_revisions n
-        LEFT JOIN news_annotations a
-         ON a.source=n.source AND a.source_item_id=n.source_item_id
-         AND a.revision_number=n.revision_number
-         AND a.llm_model_version IN (?, ?) AND a.prompt_version IN (?, ?)
-        WHERE a.annotation_id IS NULL
-          AND length(trim(COALESCE(n.body, ''))) >= 240
-          AND (
-            n.source_published_time IS NULL
-            OR (
-              n.source_published_time >= (
-                SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH')
-              AND (julianday(n.collector_first_seen_time)
-                   - julianday(n.source_published_time)) <= ?
-            )
-          )
-          AND NOT EXISTS (
-            SELECT 1 FROM news_revisions newer
-            WHERE newer.source=n.source
-              AND newer.source_item_id=n.source_item_id
-              AND newer.revision_number>n.revision_number)
-          AND NOT EXISTS (
-            SELECT 1 FROM news_revisions peer
-            WHERE peer.cluster_id=n.cluster_id
-              AND NOT EXISTS (
-                SELECT 1 FROM news_revisions peer_newer
-                WHERE peer_newer.source=peer.source
-                  AND peer_newer.source_item_id=peer.source_item_id
-                  AND peer_newer.revision_number>peer.revision_number)
-              AND (length(COALESCE(peer.body, '')) > length(COALESCE(n.body, ''))
-                   OR (length(COALESCE(peer.body, '')) = length(COALESCE(n.body, ''))
-                       AND peer.source_item_id < n.source_item_id)))
-          AND NOT EXISTS (
-            SELECT 1 FROM news_llm_failures f
-            WHERE f.task_type='ANNOTATION'
-              AND f.source=n.source AND f.source_item_id=n.source_item_id
-              AND f.revision_number=n.revision_number
-              AND f.llm_model_version=? AND f.prompt_version=?
-              AND NOT (f.error_type='RuntimeError'
-                       AND f.error='All configured Gemini keys unavailable for this batch')
-              AND f.attempt_number=(
-                SELECT max(f2.attempt_number) FROM news_llm_failures f2
-                WHERE f2.task_type=f.task_type AND f2.source=f.source
-                  AND f2.source_item_id=f.source_item_id
-                  AND f2.revision_number=f.revision_number
-                  AND f2.llm_model_version=f.llm_model_version
-                  AND f2.prompt_version=f.prompt_version)
-              AND (f.is_terminal=1 OR f.next_retry_at > ?))
-        ORDER BY CASE WHEN n.source='federal_reserve_monetary'
-                           OR lower(n.headline) LIKE '%fomc%'
-                           OR lower(n.headline) LIKE '%consumer price%'
-                           OR lower(n.headline) LIKE '%payroll%'
-                      THEN 0 ELSE 1 END,
-                 CASE WHEN n.body LIKE '[FULL_TEXT%' THEN 0 ELSE 1 END,
-                 COALESCE(n.source_published_time,
-                          n.collector_first_seen_time) DESC,
-                 n.collector_first_seen_time, n.source, n.source_item_id
-        LIMIT ?""",
-        (
-            # A new prompt schema is a new append-only annotation. Older
-            # compatible prompts remain readable by the model pipeline, but
-            # cannot suppress the v10 category and Chinese-headline backfill.
-            *compatible_models, PROMPT_VERSION, PROMPT_VERSION,
-            MAX_ACTIONABLE_DISCOVERY_DELAY.total_seconds() / 86400.0,
-            expected_model_identity, PROMPT_VERSION,
-            datetime.now(UTC).isoformat(timespec="microseconds"),
-            max(effective_limit * 25, 500),
-        ),
-    ).fetchall()
+    pending_records = pending_annotation_records(
+        ledger.connection,
+        expected_model_identity=expected_model_identity,
+        compatible_models=compatible_models,
+        limit=max(effective_limit * 25, 500),
+    )
     def parse(item: tuple[int, dict]) -> dict[str, object]:
         index, row = item
         started = datetime.now(UTC)
@@ -221,21 +324,7 @@ def annotate_pending_news(
                 "model_version": expected_model_identity,
             }
 
-    pending_records = [dict(row) for row in pending]
-    relevant_records = []
-    observed_at = datetime.now(UTC)
-    for row in pending_records:
-        published_at = (
-            datetime.fromisoformat(str(row["source_published_time"]))
-            if row.get("source_published_time") else None
-        )
-        allowed, _ = google_news_item_is_relevant(
-            str(row["source"]), str(row.get("headline") or ""),
-            published_at, observed_at,
-        )
-        if allowed:
-            relevant_records.append(row)
-    pending_records = relevant_records[:effective_limit]
+    pending_records = pending_records[:effective_limit]
     if selected_provider == "gemini":
         routine_used = 0
         selected_records = []

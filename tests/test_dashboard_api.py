@@ -9,7 +9,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from xauusd_forecaster.annotation import INVALID_CHINESE_TITLE
+from xauusd_forecaster.annotation import INVALID_CHINESE_TITLE, PROMPT_VERSION
 from xauusd_forecaster.forward_ledger import ForwardLedger
 
 
@@ -41,6 +41,7 @@ def _append_basic_annotation(
     item_id: str,
     digest: str,
     parsed_at: datetime,
+    prompt_version: str = "news-json-v9-local-display-recovery",
 ) -> None:
     ledger.append_annotation(
         {
@@ -63,11 +64,48 @@ def _append_basic_annotation(
                 "headline_zh": "测试经济数据发布",
             },
             "llm_model_version": "gemini-3.5-flash-lite",
-            "prompt_version": "news-json-v9-local-display-recovery",
+            "prompt_version": prompt_version,
             "parse_started_at": parsed_at - timedelta(seconds=1),
             "parsed_at": parsed_at,
         }
     )
+
+
+def test_dashboard_annotation_counts_match_current_worker_policy(tmp_path) -> None:
+    now = datetime(2026, 8, 8, 1, 0, tzinfo=UTC)
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=now)
+    for item_id in ("completed", "pending"):
+        body = (f"Official Treasury release {item_id}. " * 30).strip()
+        digest = hashlib.sha256(body.encode()).hexdigest()
+        ledger.append_news_revision(
+            {
+                "source": "us_treasury_press_releases",
+                "source_item_id": item_id,
+                "source_published_time": now,
+                "collector_first_seen_time": now,
+                "fetched_time": now,
+                "headline": f"Treasury publishes {item_id} economic release",
+                "body": body,
+                "content_hash": digest,
+                "cluster_id": item_id,
+            }
+        )
+        if item_id == "completed":
+            _append_basic_annotation(
+                ledger,
+                source="us_treasury_press_releases",
+                item_id=item_id,
+                digest=digest,
+                parsed_at=now + timedelta(seconds=1),
+                prompt_version=PROMPT_VERSION,
+            )
+    ledger.connection.close()
+
+    payload = _dashboard_module()._dashboard_payload(database)
+
+    assert payload["annotation_queue"]["ready"] == 1
+    assert payload["annotation_queue"]["queued"] == 1
 
 
 def test_health_endpoint_does_not_build_dashboard(monkeypatch, tmp_path) -> None:

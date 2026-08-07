@@ -33,7 +33,9 @@ from xauusd_forecaster.annotation import (  # noqa: E402
     GEMINI_DAILY_PRIORITY_RESERVE,
     GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
     INVALID_CHINESE_TITLE,
+    completed_annotation_records,
     configured_gemini_api_keys,
+    pending_annotation_records,
 )
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger  # noqa: E402
 from xauusd_forecaster.training import MARKET_FEATURES  # noqa: E402
@@ -879,6 +881,14 @@ def _dashboard_payload(database: Path) -> dict:
                 now.isoformat(timespec="microseconds"),
             ),
         ).fetchone()
+        # The displayed queue is the worker's real claimable queue, not a
+        # second approximation tied to an older prompt version.
+        claimable_annotation_count = len(
+            pending_annotation_records(connection, limit=100_000)
+        )
+        completed_annotation_count = len(
+            completed_annotation_records(connection, limit=100_000)
+        )
         model_rows = connection.execute(
             """SELECT model_identity, model_version, created_at,
                       training_cutoff, hyperparameters_json, artifact_hash
@@ -1393,8 +1403,8 @@ def _dashboard_payload(database: Path) -> dict:
         },
         "news_source_health": news_source_health,
         "annotation_queue": {
-            "ready": int(annotation_queue["ready"] or 0),
-            "queued": int(annotation_queue["queued"] or 0),
+            "ready": completed_annotation_count,
+            "queued": claimable_annotation_count,
             "backing_off": int(annotation_queue["backing_off"] or 0),
             "dead_letter": int(annotation_queue["dead_letter"] or 0),
             "waiting_content": int(annotation_queue["waiting_content"] or 0),
