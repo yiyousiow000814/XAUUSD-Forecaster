@@ -1,6 +1,9 @@
 param(
-    [ValidateSet("Gui", "Status", "Start", "Stop", "Restart", "Watchdog", "EnableAutoStart", "DisableAutoStart", "InstallShortcut")]
-    [string]$Action = "Gui"
+    [ValidateSet("Gui", "Status", "StatusJson", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "EnableAutoStart", "DisableAutoStart", "InstallShortcut")]
+    [string]$Action = "Gui",
+    [ValidateSet("", "quote", "collector", "annotator", "api", "sync")]
+    [string]$ServiceKey = "",
+    [string]$StatusPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -107,7 +110,7 @@ function Get-ServiceState {
     if ($Service.Key -eq "api") {
         try {
             $response = Invoke-WebRequest -UseBasicParsing `
-                -Uri "http://127.0.0.1:8765/api/status" -TimeoutSec 10
+                -Uri "http://127.0.0.1:8765/api/health" -TimeoutSec 2
             if ($response.StatusCode -eq 200) { return "API OK" }
             return "API ERROR"
         } catch {
@@ -332,16 +335,16 @@ function Repair-WindowsTime {
             "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $command
         )
         if ($process.ExitCode -ne 0) {
-            throw "管理员命令退出码 $($process.ExitCode)"
+            throw "Administrator command exited with code $($process.ExitCode)"
         }
         [System.Windows.Forms.MessageBox]::Show(
-            "Windows Time 已启动并请求重新同步。报价时钟偏差通常会在随后几次报价中下降。",
-            "时钟修复已执行"
+            "Windows Time has been started and a resync was requested. Quote clock drift should decrease over the next few updates.",
+            "Clock Repair Requested"
         ) | Out-Null
     } catch {
         [System.Windows.Forms.MessageBox]::Show(
-            "无法完成时钟修复：$($_.Exception.Message)",
-            "时钟修复失败"
+            "Clock repair could not be completed: $($_.Exception.Message)",
+            "Clock Repair Failed"
         ) | Out-Null
     }
 }
@@ -364,11 +367,25 @@ function Show-ControlCenter {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
 
+    $createdNew = $false
+    $activationEvent = [System.Threading.EventWaitHandle]::new(
+        $false,
+        [System.Threading.EventResetMode]::AutoReset,
+        "Local\XAUUSD-Forecaster-Control-Center",
+        [ref]$createdNew
+    )
+    if (-not $createdNew) {
+        [void]$activationEvent.Set()
+        $activationEvent.Dispose()
+        return
+    }
+
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "XAUUSD Forecaster Control Center"
     $form.Size = New-Object System.Drawing.Size(720, 680)
     $form.StartPosition = "CenterScreen"
     $form.ShowInTaskbar = $true
+    $form.MinimumSize = New-Object System.Drawing.Size(720, 680)
     $form.BackColor = [System.Drawing.Color]::FromArgb(235, 230, 215)
     $form.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 10)
 
@@ -386,6 +403,7 @@ function Show-ControlCenter {
     $form.Controls.Add($subtitle)
 
     $statusLabels = @{}
+    $actionButtons = New-Object System.Collections.ArrayList
     $rowY = 105
     foreach ($service in $services) {
         $name = New-Object System.Windows.Forms.Label
@@ -409,10 +427,10 @@ function Show-ControlCenter {
         $startButton.Location = New-Object System.Drawing.Point(455, ($rowY - 6))
         $startButton.Add_Click({
             param($sender)
-            $target = $services | Where-Object Key -eq $sender.Tag
-            Start-ForecasterService $target
+            Invoke-GuiOperation -Operation "ServiceStart" -TargetKey $sender.Tag
         })
         $form.Controls.Add($startButton)
+        [void]$actionButtons.Add($startButton)
 
         $stopButton = New-Object System.Windows.Forms.Button
         $stopButton.Text = "Stop"
@@ -421,10 +439,10 @@ function Show-ControlCenter {
         $stopButton.Location = New-Object System.Drawing.Point(545, ($rowY - 6))
         $stopButton.Add_Click({
             param($sender)
-            $target = $services | Where-Object Key -eq $sender.Tag
-            Stop-ForecasterService $target
+            Invoke-GuiOperation -Operation "ServiceStop" -TargetKey $sender.Tag
         })
         $form.Controls.Add($stopButton)
+        [void]$actionButtons.Add($stopButton)
         $rowY += 48
     }
 
@@ -432,22 +450,25 @@ function Show-ControlCenter {
     $startAll.Text = "Start All"
     $startAll.Size = New-Object System.Drawing.Size(120, 38)
     $startAll.Location = New-Object System.Drawing.Point(28, 355)
-    $startAll.Add_Click({ Start-All })
+    $startAll.Add_Click({ Invoke-GuiOperation -Operation "Start" })
     $form.Controls.Add($startAll)
+    [void]$actionButtons.Add($startAll)
 
     $restartAll = New-Object System.Windows.Forms.Button
     $restartAll.Text = "Restart All"
     $restartAll.Size = New-Object System.Drawing.Size(120, 38)
     $restartAll.Location = New-Object System.Drawing.Point(158, 355)
-    $restartAll.Add_Click({ Restart-All })
+    $restartAll.Add_Click({ Invoke-GuiOperation -Operation "Restart" })
     $form.Controls.Add($restartAll)
+    [void]$actionButtons.Add($restartAll)
 
     $stopAll = New-Object System.Windows.Forms.Button
     $stopAll.Text = "Stop All"
     $stopAll.Size = New-Object System.Drawing.Size(120, 38)
     $stopAll.Location = New-Object System.Drawing.Point(288, 355)
-    $stopAll.Add_Click({ Stop-All })
+    $stopAll.Add_Click({ Invoke-GuiOperation -Operation "Stop" })
     $form.Controls.Add($stopAll)
+    [void]$actionButtons.Add($stopAll)
 
     $openSite = New-Object System.Windows.Forms.Button
     $openSite.Text = "Open Dashboard"
@@ -489,7 +510,7 @@ function Show-ControlCenter {
     $form.Controls.Add($refreshButton)
 
     $clockButton = New-Object System.Windows.Forms.Button
-    $clockButton.Text = "修复本机时钟（管理员）"
+    $clockButton.Text = "Repair Windows Time (Admin)"
     $clockButton.Size = New-Object System.Drawing.Size(220, 38)
     $clockButton.Location = New-Object System.Drawing.Point(195, 470)
     $clockButton.Add_Click({ Repair-WindowsTime })
@@ -500,14 +521,49 @@ function Show-ControlCenter {
     $clockLabel.Location = New-Object System.Drawing.Point(430, 481)
     $form.Controls.Add($clockLabel)
 
+    $operationLabel = New-Object System.Windows.Forms.Label
+    $operationLabel.Text = "Ready"
+    $operationLabel.AutoSize = $true
+    $operationLabel.Location = New-Object System.Drawing.Point(30, 545)
+    $operationLabel.ForeColor = [System.Drawing.Color]::FromArgb(82, 78, 68)
+    $form.Controls.Add($operationLabel)
+
     $note = New-Object System.Windows.Forms.Label
     $note.Text = "A powered-off PC cannot collect data. This control center never authorizes trading."
     $note.AutoSize = $true
     $note.Location = New-Object System.Drawing.Point(30, 590)
     $form.Controls.Add($note)
 
-    $refresh = {
-        foreach ($row in (Get-ForecasterStatus)) {
+    $script:guiOperation = $null
+    $script:guiOperationName = ""
+    function Set-GuiBusy {
+        param([bool]$Busy, [string]$Message)
+        foreach ($button in $actionButtons) { $button.Enabled = -not $Busy }
+        $refreshButton.Enabled = -not $Busy
+        $operationLabel.Text = $Message
+        $form.UseWaitCursor = $Busy
+    }
+    function Invoke-GuiOperation {
+        param([string]$Operation, [string]$TargetKey = "")
+        if ($script:guiOperation -and -not $script:guiOperation.HasExited) { return }
+        $arguments = @(
+            "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
+            "-File", ('"{0}"' -f $PSCommandPath), "-Action", $Operation
+        )
+        if ($TargetKey) { $arguments += @("-ServiceKey", $TargetKey) }
+        $script:guiOperationName = $Operation
+        $script:guiOperation = Start-Process -FilePath "powershell.exe" `
+            -ArgumentList $arguments -WorkingDirectory $moduleRoot `
+            -WindowStyle Hidden -PassThru
+        Set-GuiBusy -Busy $true -Message "Working in background: $Operation"
+    }
+
+    $statusSnapshotPath = Join-Path $env:TEMP ("xauusd-control-status-{0}.json" -f $PID)
+    $script:statusRefreshProcess = $null
+    $script:lastStatusRequest = [DateTime]::MinValue
+    function Apply-GuiStatus {
+        param([pscustomobject]$Snapshot)
+        foreach ($row in @($Snapshot.services)) {
             $label = $statusLabels[$row.Key]
             $label.Text = $row.State
             $label.ForeColor = if ($row.State -in @("RUNNING", "LIVE", "API OK", "SYNC OK")) {
@@ -516,42 +572,121 @@ function Show-ControlCenter {
                 [System.Drawing.Color]::FromArgb(190, 45, 36)
             }
         }
-        $autoLabel.Text = if (Test-AutoStart) {
+        $autoLabel.Text = if ($Snapshot.auto_start) {
             "Auto-start: enabled at Windows logon"
         } else {
             "Auto-start: disabled"
         }
-        $timeService = Get-Service W32Time -ErrorAction SilentlyContinue
-        $clockLabel.Text = if ($timeService -and $timeService.Status -eq "Running") {
+        $clockLabel.Text = if ($Snapshot.windows_time_running) {
             "Windows Time: RUNNING"
         } else {
             "Windows Time: STOPPED"
         }
-        $clockLabel.ForeColor = if ($timeService -and $timeService.Status -eq "Running") {
+        $clockLabel.ForeColor = if ($Snapshot.windows_time_running) {
             [System.Drawing.Color]::FromArgb(52, 105, 38)
         } else {
             [System.Drawing.Color]::FromArgb(190, 45, 36)
         }
     }
-    $timer = New-Object System.Windows.Forms.Timer
-    $timer.Interval = 10000
-    $timer.Add_Tick($refresh)
-    $refreshButton.Add_Click($refresh)
-    $timer.Start()
-    & $refresh
+    function Request-GuiStatus {
+        if ($script:statusRefreshProcess -and -not $script:statusRefreshProcess.HasExited) { return }
+        $arguments = @(
+            "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
+            "-File", ('"{0}"' -f $PSCommandPath), "-Action", "StatusJson",
+            "-StatusPath", ('"{0}"' -f $statusSnapshotPath)
+        )
+        $script:lastStatusRequest = Get-Date
+        $script:statusRefreshProcess = Start-Process -FilePath "powershell.exe" `
+            -ArgumentList $arguments -WorkingDirectory $moduleRoot `
+            -WindowStyle Hidden -PassThru
+    }
+    $refreshButton.Add_Click({ Request-GuiStatus })
+
+    $statusTimer = New-Object System.Windows.Forms.Timer
+    $statusTimer.Interval = 500
+    $statusTimer.Add_Tick({
+        if ($script:statusRefreshProcess -and $script:statusRefreshProcess.HasExited) {
+            $script:statusRefreshProcess.Dispose()
+            $script:statusRefreshProcess = $null
+            if (Test-Path -LiteralPath $statusSnapshotPath) {
+                try { Apply-GuiStatus (Get-Content -LiteralPath $statusSnapshotPath -Raw | ConvertFrom-Json) } catch {}
+            }
+        }
+        if (-not $script:statusRefreshProcess -and ((Get-Date) - $script:lastStatusRequest).TotalSeconds -ge 10) {
+            Request-GuiStatus
+        }
+    })
+    $statusTimer.Start()
+    Request-GuiStatus
+
+    $operationTimer = New-Object System.Windows.Forms.Timer
+    $operationTimer.Interval = 400
+    $operationTimer.Add_Tick({
+        if (-not $script:guiOperation -or -not $script:guiOperation.HasExited) { return }
+        $exitCode = $script:guiOperation.ExitCode
+        $finished = $script:guiOperationName
+        $script:guiOperation.Dispose()
+        $script:guiOperation = $null
+        Set-GuiBusy -Busy $false -Message $(if ($exitCode -eq 0) { "Completed: $finished" } else { "Failed: $finished (exit $exitCode)" })
+        Request-GuiStatus
+    })
+    $operationTimer.Start()
+
+    $activationTimer = New-Object System.Windows.Forms.Timer
+    $activationTimer.Interval = 250
+    $activationTimer.Add_Tick({
+        if (-not $activationEvent.WaitOne(0)) { return }
+        if (-not $form.Visible) { $form.Show() }
+        if ($form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) {
+            $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+        }
+        $form.ShowInTaskbar = $true
+        $form.Activate()
+        $form.BringToFront()
+        $form.TopMost = $true
+        $form.TopMost = $false
+    })
+    $activationTimer.Start()
     $form.Add_Shown({
         $form.Activate()
         $form.TopMost = $true
         $form.TopMost = $false
+    })
+    $form.Add_FormClosed({
+        $statusTimer.Stop()
+        $operationTimer.Stop()
+        $activationTimer.Stop()
+        $activationEvent.Dispose()
+        Remove-Item -LiteralPath $statusSnapshotPath -Force -ErrorAction SilentlyContinue
     })
     [void]$form.ShowDialog()
 }
 
 switch ($Action) {
     "Status" { Get-ForecasterStatus | Format-Table -AutoSize }
+    "StatusJson" {
+        if (-not $StatusPath) { throw "StatusPath is required for StatusJson." }
+        $timeService = Get-Service W32Time -ErrorAction SilentlyContinue
+        [pscustomobject]@{
+            captured_at = [DateTimeOffset]::UtcNow.ToString("o")
+            services = @(Get-ForecasterStatus)
+            auto_start = [bool](Test-AutoStart)
+            windows_time_running = [bool]($timeService -and $timeService.Status -eq "Running")
+        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $StatusPath -Encoding UTF8
+    }
     "Start" { Start-All; Start-Sleep -Seconds 2; Get-ForecasterStatus | Format-Table -AutoSize }
     "Stop" { Stop-All; Start-Sleep -Seconds 1; Get-ForecasterStatus | Format-Table -AutoSize }
     "Restart" { Restart-All; Start-Sleep -Seconds 2; Get-ForecasterStatus | Format-Table -AutoSize }
+    "ServiceStart" {
+        $target = $services | Where-Object Key -eq $ServiceKey
+        if (-not $target) { throw "Unknown service key: $ServiceKey" }
+        Start-ForecasterService $target
+    }
+    "ServiceStop" {
+        $target = $services | Where-Object Key -eq $ServiceKey
+        if (-not $target) { throw "Unknown service key: $ServiceKey" }
+        Stop-ForecasterService $target
+    }
     "Watchdog" { Start-All; Invoke-ForecasterWatchdog }
     "EnableAutoStart" { Enable-AutoStart; Write-Output "Auto-start enabled." }
     "DisableAutoStart" { Disable-AutoStart; Write-Output "Auto-start disabled." }
