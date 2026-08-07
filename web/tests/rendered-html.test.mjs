@@ -70,6 +70,8 @@ test("renders the news and decision audit route", async () => {
   assert.doesNotMatch(source, /row\.topics\.map/);
   assert.doesNotMatch(source, /row\.model_identities\.map/);
   assert.doesNotMatch(source, /row\.model_unseen_reason_codes\.map/);
+  assert.doesNotMatch(source, /IDENTITY_LABELS/);
+  assert.match(source, /MODEL_LABELS\[identity\] \?\? identity/);
   assert.match(source, /读取中…/);
   assert.match(source, /学习数据暂不可用|暂不可用/);
   assert.match(source, /页面会保留上一份成功数据并自动重试/);
