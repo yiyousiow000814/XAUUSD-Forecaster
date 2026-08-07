@@ -17,6 +17,8 @@ from bs4 import BeautifulSoup
 from pypdf import PdfReader
 
 from .forward_ledger import ForwardLedger
+from .news_time import MAX_ACTIONABLE_DISCOVERY_DELAY
+from .news_relevance import google_news_item_is_relevant
 
 
 USER_AGENT = "XAUUSD-Forward-Evidence/0.1 (+local research collector)"
@@ -38,6 +40,14 @@ NON_FED_FULL_TEXT_SOURCES = (
     "us_treasury_press_releases",
     "bea_economic_releases",
     "google_news_gold_context",
+    "google_news_gold_geopolitics",
+    "google_news_bls_official_releases",
+    "google_news_us_employment",
+    "google_news_us_inflation",
+    "google_news_fed_rates",
+    "bls_employment_situation",
+    "bls_consumer_price_index",
+    "bls_job_openings",
 )
 
 
@@ -165,6 +175,15 @@ def hydrate_pending_non_fed_content(
     rows = ledger.connection.execute(
         f"""SELECT n.* FROM news_revisions n
             WHERE n.source IN ({placeholders})
+              AND (
+                n.source_published_time IS NULL
+                OR (
+                  n.source_published_time >= (
+                    SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH')
+                  AND (julianday(n.collector_first_seen_time)
+                       - julianday(n.source_published_time)) <= ?
+                )
+              )
               AND NOT EXISTS (
                 SELECT 1 FROM news_revisions newer
                 WHERE newer.source=n.source
@@ -191,13 +210,20 @@ def hydrate_pending_non_fed_content(
                     AND n.body LIKE '%About Treasury%General Information%')
               )
             ORDER BY CASE
-                       WHEN n.source IN ('world_gold_council_central_banks',
+                       WHEN n.source IN ('bls_employment_situation',
+                                         'bls_consumer_price_index',
+                                         'bls_job_openings',
+                                         'world_gold_council_central_banks',
                                          'eia_today_in_energy',
                                          'eia_press_releases',
                                          'ecb_press_releases',
                                          'us_treasury_press_releases',
                                          'bea_economic_releases') THEN 0
-                       WHEN n.source='google_news_gold_context' THEN 1
+                       WHEN n.source IN ('google_news_gold_context',
+                                         'google_news_bls_official_releases',
+                                         'google_news_us_employment',
+                                         'google_news_us_inflation',
+                                         'google_news_fed_rates') THEN 1
                        ELSE 2
                      END,
                      COALESCE(n.source_published_time,
@@ -205,10 +231,27 @@ def hydrate_pending_non_fed_content(
             LIMIT ?""",
         (
             *NON_FED_FULL_TEXT_SOURCES,
+            MAX_ACTIONABLE_DISCOVERY_DELAY.total_seconds() / 86400.0,
             fetched_at.astimezone(UTC).isoformat(timespec="microseconds"),
-            limit,
+            max(limit * 25, 250),
         ),
     ).fetchall()
+    admitted_rows = []
+    rejected_irrelevant = 0
+    for row in rows:
+        published_at = (
+            datetime.fromisoformat(row["source_published_time"])
+            if row["source_published_time"] else None
+        )
+        allowed, _ = google_news_item_is_relevant(
+            str(row["source"]), str(row["headline"] or ""),
+            published_at, fetched_at,
+        )
+        if allowed:
+            admitted_rows.append(row)
+        else:
+            rejected_irrelevant += 1
+    rows = admitted_rows[:limit]
     inserted = 0
     errors: list[str] = []
     operational_errors: list[str] = []
@@ -258,6 +301,7 @@ def hydrate_pending_non_fed_content(
     )
     summary = {
         "attempted": len(rows),
+        "rejected_irrelevant": rejected_irrelevant,
         "inserted": inserted,
         "unavailable": len(errors) - len(operational_errors),
         "retrying": len(operational_errors),

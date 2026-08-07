@@ -10,7 +10,11 @@ $ErrorActionPreference = "Stop"
 $moduleRoot = Split-Path -Parent $PSScriptRoot
 $logRoot = Join-Path $moduleRoot ".local\forward\logs"
 $taskName = "XAUUSD-Forecaster-Autostart"
-$dashboardUrl = "https://aurum-signal-room.yiyousiow1234.chatgpt.site"
+$dashboardUrl = if ([Environment]::GetEnvironmentVariable("XAUUSD_DASHBOARD_URL", "User")) {
+    [Environment]::GetEnvironmentVariable("XAUUSD_DASHBOARD_URL", "User")
+} else {
+    "https://aurum-signal-room.yiyousiow1234.chatgpt.site"
+}
 $watchdogLog = Join-Path $logRoot "control-watchdog.jsonl"
 
 $services = @(
@@ -54,7 +58,7 @@ $services = @(
     },
     [pscustomobject]@{
         Key = "sync"
-        Label = "Sites Sync"
+        Label = "Dashboard Mirrors"
         Match = "run_dashboard_sync.py"
         Kind = "Python"
         Script = "scripts\run_dashboard_sync.py"
@@ -132,6 +136,9 @@ function Get-ServiceState {
             if ($syncStatus.last_error -and $lastAttempt -and (
                 -not $lastSuccess -or $lastAttempt -gt $lastSuccess
             )) { return "SYNC ERROR" }
+            if ($lastSuccess -and $syncStatus.status -eq "DEGRADED" -and (
+                [DateTimeOffset]::UtcNow - $lastSuccess
+            ).TotalSeconds -le 120) { return "SYNC DEGRADED" }
             if ($lastSuccess -and (
                 [DateTimeOffset]::UtcNow - $lastSuccess
             ).TotalSeconds -le 120) { return "SYNC OK" }
@@ -175,6 +182,12 @@ function Start-ForecasterService {
     if ($Service.Key -eq "sync") {
         $env:SITES_BYPASS_TOKEN = [Environment]::GetEnvironmentVariable(
             "SITES_BYPASS_TOKEN", "User"
+        )
+        $env:CLOUDFLARE_INGEST_URL = [Environment]::GetEnvironmentVariable(
+            "CLOUDFLARE_INGEST_URL", "User"
+        )
+        $env:CLOUDFLARE_INGEST_TOKEN = [Environment]::GetEnvironmentVariable(
+            "CLOUDFLARE_INGEST_TOKEN", "User"
         )
     }
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -397,7 +410,7 @@ function Show-ControlCenter {
     $form.Controls.Add($title)
 
     $subtitle = New-Object System.Windows.Forms.Label
-    $subtitle.Text = "Single local control surface for processes, logs, and auto-start. Sites is view-only."
+    $subtitle.Text = "Local process control. Dashboard mirrors are view-only and never place orders."
     $subtitle.AutoSize = $true
     $subtitle.Location = New-Object System.Drawing.Point(26, 58)
     $form.Controls.Add($subtitle)
@@ -568,6 +581,8 @@ function Show-ControlCenter {
             $label.Text = $row.State
             $label.ForeColor = if ($row.State -in @("RUNNING", "LIVE", "API OK", "SYNC OK")) {
                 [System.Drawing.Color]::FromArgb(52, 105, 38)
+            } elseif ($row.State -eq "SYNC DEGRADED") {
+                [System.Drawing.Color]::FromArgb(170, 105, 0)
             } else {
                 [System.Drawing.Color]::FromArgb(190, 45, 36)
             }

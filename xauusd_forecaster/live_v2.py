@@ -13,11 +13,18 @@ from .evidence_v2 import (
 from .forward_ledger import canonical_hash
 from .inference_v2 import append_live_predictions_v2
 from .news_features_v2 import aggregate_news_features_v2
+from .news_evidence import EVIDENCE_POLICY_VERSION
 from .legacy_news_features_v2 import (
     LEGACY_BROAD_ELIGIBILITY_VERSION,
     LEGACY_ELIGIBILITY_VERSION,
     LEGACY_NEWS_FEATURE_VERSION,
     aggregate_legacy_news_features_v2,
+)
+from .legacy_news_features_v3 import (
+    LEGACY_V3_BROAD_ELIGIBILITY_VERSION,
+    LEGACY_V3_ELIGIBILITY_VERSION,
+    LEGACY_V3_NEWS_FEATURE_VERSION,
+    aggregate_legacy_news_features_v3,
 )
 from .repair_v2 import LANE_RULE_VERSION, TRAINING_ELIGIBILITY_VERSION
 from .training import MARKET_FEATURES
@@ -36,6 +43,65 @@ def _lane(connection, kind: str, evidence_id: str, lane: str,
         (_uuid("lane", f"{kind}:{evidence_id}:{LANE_RULE_VERSION}"), kind, evidence_id,
          lane, at.isoformat(), LANE_RULE_VERSION, source_hash),
     )
+
+
+def _append_news_visibility_receipts(
+    connection, *, decision_id: str, decision_time: datetime,
+    recorded_at: datetime, predictions: list[dict],
+    news_by_eligibility: dict[str, dict],
+    origin: str = "LIVE",
+) -> int:
+    """Freeze which point-in-time news events each created model could consume."""
+    lane_by_identity = {
+        "NEWS_RESIDUAL": ("OFFICIAL", "official_visible_events"),
+        "FULL": ("OFFICIAL", "official_visible_events"),
+        "BROAD_NEWS_RESIDUAL": ("BROAD", "broad_visible_events"),
+        "BROAD_FULL": ("BROAD", "broad_visible_events"),
+    }
+    inserted = 0
+    for prediction in predictions:
+        config = lane_by_identity.get(str(prediction.get("model_identity")))
+        if config is None:
+            continue
+        lane, event_field = config
+        eligibility = str(prediction.get("eligibility_version") or "")
+        news = news_by_eligibility.get(eligibility)
+        if news is None:
+            continue
+        for event in news.get(event_field, []):
+            connection.execute(
+                """INSERT OR IGNORE INTO news_model_visibility_events_v1
+                VALUES (?,?,?,?,?,?,?,?,?)""",
+                (
+                    event["source_hash"], event["event_key"],
+                    str(event.get("canonical_headline") or event["event_key"]),
+                    str(event.get("canonical_source") or "UNKNOWN"),
+                    event.get("source_published_time"),
+                    str(event.get("collector_first_seen_time") or decision_time.isoformat()),
+                    json.dumps(event.get("topics") or [], ensure_ascii=False, sort_keys=True),
+                    str(event.get("evidence_grade") or "FROZEN_MODEL_INPUT"),
+                    recorded_at.isoformat(),
+                ),
+            )
+            receipt_id = _uuid(
+                "news-visibility",
+                f"{decision_id}:{prediction['model_version']}:{lane}:{event['event_key']}",
+            )
+            cursor = connection.execute(
+                """INSERT OR IGNORE INTO news_model_visibility_receipts_v1
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    receipt_id, decision_id, decision_time.isoformat(),
+                    prediction["model_identity"], prediction["model_version"],
+                    eligibility,
+                    str(news.get("evidence_policy_version") or EVIDENCE_POLICY_VERSION),
+                    lane,
+                    event["event_key"], event["source_hash"], recorded_at.isoformat(),
+                    origin,
+                ),
+            )
+            inserted += int(cursor.rowcount > 0)
+    return inserted
 
 
 def append_live_decision_v2(ledger, *, decision_id: str, decision_time: datetime,
@@ -61,23 +127,48 @@ def append_live_decision_v2(ledger, *, decision_id: str, decision_time: datetime
     market_hash = canonical_hash(payload)
     market_id = _uuid("derived-market", f"{decision_id}:{FEATURE_VERSION}")
     news = aggregate_news_features_v2(ledger, decision_time)
+    news_snapshot_values = {
+        key: value for key, value in news.items()
+        if key not in {"official_visible_events", "broad_visible_events"}
+    }
     news_payload = {"decision_id": decision_id, "decision_time": decision_time.isoformat(),
                     "feature_version": NEWS_FEATURE_VERSION,
-                    "eligibility_version": ELIGIBILITY_VERSION, **news}
+                    "eligibility_version": ELIGIBILITY_VERSION, **news_snapshot_values}
     news_hash = canonical_hash(news_payload)
     news_id = _uuid("derived-news", f"{decision_id}:{NEWS_FEATURE_VERSION}:{ELIGIBILITY_VERSION}")
     legacy_news = aggregate_legacy_news_features_v2(ledger, decision_time)
+    legacy_v3_news = aggregate_legacy_news_features_v3(ledger, decision_time)
+    legacy_news_snapshot_values = {
+        key: value for key, value in legacy_news.items()
+        if key not in {"official_visible_events", "broad_visible_events"}
+    }
     legacy_payload = {
         "decision_id": decision_id,
         "decision_time": decision_time.isoformat(),
         "feature_version": LEGACY_NEWS_FEATURE_VERSION,
         "eligibility_version": LEGACY_ELIGIBILITY_VERSION,
-        **legacy_news,
+        **legacy_news_snapshot_values,
     }
     legacy_hash = canonical_hash(legacy_payload)
     legacy_id = _uuid(
         "derived-news",
         f"{decision_id}:{LEGACY_NEWS_FEATURE_VERSION}:{LEGACY_ELIGIBILITY_VERSION}",
+    )
+    legacy_v3_snapshot_values = {
+        key: value for key, value in legacy_v3_news.items()
+        if key not in {"official_visible_events", "broad_visible_events"}
+    }
+    legacy_v3_payload = {
+        "decision_id": decision_id,
+        "decision_time": decision_time.isoformat(),
+        "feature_version": LEGACY_V3_NEWS_FEATURE_VERSION,
+        "eligibility_version": LEGACY_V3_ELIGIBILITY_VERSION,
+        **legacy_v3_snapshot_values,
+    }
+    legacy_v3_hash = canonical_hash(legacy_v3_payload)
+    legacy_v3_id = _uuid(
+        "derived-news",
+        f"{decision_id}:{LEGACY_V3_NEWS_FEATURE_VERSION}:{LEGACY_V3_ELIGIBILITY_VERSION}",
     )
     with ledger.connection:
         ledger.connection.execute(
@@ -100,6 +191,18 @@ def append_live_decision_v2(ledger, *, decision_id: str, decision_time: datetime
         ledger.connection.execute(
             """INSERT INTO derived_news_feature_snapshots VALUES
             (?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?)""",
+            (legacy_v3_id, decision_id, decision_time.isoformat(), "LIVE_OOS",
+             created_at.isoformat(), LEGACY_V3_NEWS_FEATURE_VERSION,
+             LEGACY_V3_ELIGIBILITY_VERSION,
+             json.dumps(legacy_v3_news["features"], sort_keys=True, separators=(",", ":")),
+             legacy_v3_news["model_visible_items"], legacy_v3_news["news_exposed"],
+             legacy_v3_news["distinct_news_clusters"],
+             legacy_v3_news["distinct_event_types"],
+             legacy_v3_news["source_evidence_hash"], legacy_v3_hash),
+        )
+        ledger.connection.execute(
+            """INSERT INTO derived_news_feature_snapshots VALUES
+            (?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?)""",
             (legacy_id, decision_id, decision_time.isoformat(), "LIVE_OOS", created_at.isoformat(),
              LEGACY_NEWS_FEATURE_VERSION, LEGACY_ELIGIBILITY_VERSION,
              json.dumps(legacy_news["features"], sort_keys=True, separators=(",", ":")),
@@ -113,9 +216,15 @@ def append_live_decision_v2(ledger, *, decision_id: str, decision_time: datetime
         _lane(ledger.connection, "DERIVED_MARKET", market_id, "LIVE_OOS", created_at, market_hash)
         _lane(ledger.connection, "DERIVED_NEWS", news_id, "LIVE_OOS", created_at, news_hash)
         _lane(ledger.connection, "DERIVED_NEWS", legacy_id, "LIVE_OOS", created_at, legacy_hash)
+        _lane(ledger.connection, "DERIVED_NEWS", legacy_v3_id, "LIVE_OOS",
+              created_at, legacy_v3_hash)
         legacy_snapshot = {
             "features_json": json.dumps(legacy_news["features"]),
             "output_hash": legacy_hash,
+        }
+        legacy_v3_snapshot = {
+            "features_json": json.dumps(legacy_v3_news["features"]),
+            "output_hash": legacy_v3_hash,
         }
         predictions = append_live_predictions_v2(
             ledger, decision_id=decision_id, decision_time=decision_time,
@@ -126,6 +235,20 @@ def append_live_decision_v2(ledger, *, decision_id: str, decision_time: datetime
             news_snapshots={
                 LEGACY_ELIGIBILITY_VERSION: legacy_snapshot,
                 LEGACY_BROAD_ELIGIBILITY_VERSION: legacy_snapshot,
+                LEGACY_V3_ELIGIBILITY_VERSION: legacy_v3_snapshot,
+                LEGACY_V3_BROAD_ELIGIBILITY_VERSION: legacy_v3_snapshot,
+            },
+        )
+        _append_news_visibility_receipts(
+            ledger.connection, decision_id=decision_id, decision_time=decision_time,
+            recorded_at=created_at, predictions=predictions,
+            news_by_eligibility={
+                ELIGIBILITY_VERSION: news,
+                f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}": news,
+                LEGACY_ELIGIBILITY_VERSION: legacy_news,
+                LEGACY_BROAD_ELIGIBILITY_VERSION: legacy_news,
+                LEGACY_V3_ELIGIBILITY_VERSION: legacy_v3_news,
+                LEGACY_V3_BROAD_ELIGIBILITY_VERSION: legacy_v3_news,
             },
         )
         append_lot_predictions(

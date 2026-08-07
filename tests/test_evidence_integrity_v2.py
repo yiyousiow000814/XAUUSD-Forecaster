@@ -9,17 +9,25 @@ from types import SimpleNamespace
 
 import pytest
 
-from xauusd_forecaster.evidence_v2 import V2_SCHEMA, install_v2_schema
+from xauusd_forecaster.evidence_v2 import (
+    ELIGIBILITY_VERSION,
+    V2_SCHEMA,
+    install_v2_schema,
+)
 from xauusd_forecaster.executable_label import build_executable_label_v2
 from xauusd_forecaster.execution_costs import net_shadow_log_return
 from xauusd_forecaster.forward_ledger import ForwardLedger, canonical_hash
 from xauusd_forecaster.learning_curves import _bounded_curve, _stage, learning_curve_payload
-from xauusd_forecaster.live_v2 import append_live_outcome_v2
+from xauusd_forecaster.live_v2 import (
+    _append_news_visibility_receipts,
+    append_live_outcome_v2,
+)
 from xauusd_forecaster.market import MarketObservation
-from xauusd_forecaster.news_evidence import event_evidence_rows
+from xauusd_forecaster.news_evidence import EVIDENCE_POLICY_VERSION, event_evidence_rows
 from xauusd_forecaster.news_features_v2 import aggregate_news_features_v2
+from xauusd_forecaster.news_time import assess_news_time, category_time_rule
 from xauusd_forecaster.repair_v2 import immutable_table_hash
-from xauusd_forecaster import inference_v2, training_v2
+from xauusd_forecaster import inference_v2, news_contract_migration, training_v2
 from xauusd_forecaster.u5_state import U5State, U5_VERSION
 from xauusd_forecaster.execution_learning import (
     EXECUTION_CHART_MAX_POINTS, LOT_FEATURES, EXIT_FEATURES,
@@ -322,7 +330,11 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
                  event_type: str = "monetary_policy",
                  published_at: datetime | None = None,
                  primary_category: str = "rates_fed",
-                 include_published_time: bool = True) -> None:
+                 include_published_time: bool = True,
+                 record_kind: str = "FACT_EVENT",
+                 evidence_role: str = "CORE_CLAIM",
+                 materiality: float = 0.8,
+                 material_event_key: str = "") -> None:
     entities = entities or []
     body = ("publisher full body " * 30) + item
     digest = hashlib.sha256(body.encode()).hexdigest()
@@ -341,7 +353,7 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
         "entities": entities, "hawkishness": impulse, "inflation_impulse": 0.0,
         "growth_impulse": 0.0, "geopolitical_risk": 0.0, "usd_impulse": 0.0,
         "novelty": 1.0, "confidence": 1.0, "llm_model_version": "gemini-3.5-flash-lite",
-        "prompt_version": "news-json-v10-controlled-category-zh",
+        "prompt_version": "news-json-v14-material-event-evidence",
         "parse_started_at": parsed_at, "parsed_at": parsed_at,
         "annotation": {
             "event_type": event_type, "entities": entities, "hawkishness": impulse,
@@ -351,6 +363,26 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
             "headline_zh": item, "summary_zh": body,
             "primary_category": primary_category,
             "secondary_categories": [], "emerging_topic_zh": "",
+            "record_kind": record_kind,
+            "actor": entities[0] if entities else "official source",
+            "action": "reported",
+            "object": entities[1] if len(entities) > 1 else item,
+            "location": "",
+            "event_time": (published_at or first_seen).isoformat(),
+            "claim_status": "CONFIRMED",
+            "materiality": materiality,
+            "canonical_actor_id": "official_source",
+            "action_family": "OTHER_FACT",
+            "canonical_object_id": "reported_event",
+            "canonical_location_id": "",
+            "episode_key": "",
+            "primary_story_title_zh": item,
+            "secondary_contexts_zh": [],
+            "relation_to_prior": "NONE",
+            "document_kind": "NEWS_REPORT",
+            "material_event_key": material_event_key,
+            "source_organization_id": source,
+            "evidence_role": evidence_role,
         },
     })
 
@@ -366,6 +398,30 @@ def test_news_freshness_ages_from_published_time_not_parsed_at(tmp_path) -> None
     expected_freshness = 2 ** (-30 / 360)
     assert features["features"]["news_event_count"] == pytest.approx(expected_freshness)
     ledger.close()
+
+
+def test_release_categories_expire_faster_than_central_bank_gold() -> None:
+    epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    decision = epoch + timedelta(hours=30)
+    row = {
+        "source_published_time": epoch,
+        "collector_first_seen_time": epoch + timedelta(minutes=1),
+    }
+    release_age, release_half_life = category_time_rule("inflation_employment")
+    gold_age, gold_half_life = category_time_rule("central_bank_gold")
+
+    release = assess_news_time(
+        row, decision_time=decision, forward_epoch=epoch,
+        max_actionable_age=release_age,
+    )
+    gold = assess_news_time(
+        row, decision_time=decision, forward_epoch=epoch,
+        max_actionable_age=gold_age,
+    )
+
+    assert release.reason_code == "STALE_EVENT"
+    assert gold.eligible is True
+    assert release_half_life < gold_half_life
 
 
 def test_news_older_than_72_hours_is_not_a_current_feature(tmp_path) -> None:
@@ -523,6 +579,76 @@ def test_v2_tables_are_append_only_and_legacy_hash_is_unchanged(tmp_path) -> Non
     ledger.close()
 
 
+def test_news_contract_migration_is_point_in_time_and_idempotent(
+    tmp_path, monkeypatch
+) -> None:
+    decision = datetime(2026, 8, 5, 10, tzinfo=UTC)
+    cutoff = decision + timedelta(hours=1)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=decision)
+    ledger.connection.execute(
+        "INSERT INTO derived_market_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "market", "decision", decision.isoformat(), "source", None,
+            "LIVE_OOS", decision.isoformat(), news_contract_migration.FEATURE_VERSION,
+            "u5", 1.0, "[]", "HEALTHY", "[]", "source", "market-output",
+        ),
+    )
+    ledger.connection.execute(
+        """INSERT INTO derived_outcomes (
+        derived_outcome_id,source_decision_id,decision_time,evidence_lane,
+        recomputed_at,label_version,outcome_status,reason_codes_json,
+        ambiguity_state,commission_status,slippage_status,source_evidence_hash,
+        output_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            "outcome", "decision", decision.isoformat(), "LIVE_OOS",
+            cutoff.isoformat(), news_contract_migration.LABEL_VERSION, "VALID", "[]",
+            "NONE", "UNCONFIGURED", "UNAVAILABLE_SHADOW", "source", "outcome-output",
+        ),
+    )
+    ledger.connection.execute(
+        "INSERT INTO training_eligibility_v2 VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "eligibility", "decision", "LIVE_OOS", cutoff.isoformat(),
+            "test", "market-output", "outcome-output", None,
+        ),
+    )
+    ledger.connection.commit()
+
+    observed_cutoffs = []
+
+    def fake_aggregate(_ledger, visible_at):
+        observed_cutoffs.append(visible_at)
+        return {
+            "features": [0.25], "model_visible_items": 1, "news_exposed": True,
+            "distinct_news_clusters": 1, "distinct_event_types": 1,
+            "source_evidence_hash": "news-source",
+            "official_visible_events": [], "broad_visible_events": [],
+        }
+
+    monkeypatch.setattr(
+        news_contract_migration, "aggregate_news_features_v2", fake_aggregate
+    )
+    first = news_contract_migration.append_missing_current_news_snapshots(
+        ledger, cutoff, recomputed_at=cutoff
+    )
+    second = news_contract_migration.append_missing_current_news_snapshots(
+        ledger, cutoff, recomputed_at=cutoff
+    )
+
+    assert first["appended"] == 1
+    assert second["appended"] == 0
+    assert observed_cutoffs == [decision]
+    snapshot = ledger.connection.execute(
+        "SELECT * FROM derived_news_feature_snapshots"
+    ).fetchone()
+    assert snapshot["decision_time"] == decision.isoformat()
+    assert snapshot["feature_version"] == news_contract_migration.NEWS_FEATURE_VERSION
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM evidence_lane_assignments WHERE evidence_type='DERIVED_NEWS'"
+    ).fetchone()[0] == 1
+    ledger.close()
+
+
 def test_live_settler_is_idempotent_after_repair_created_outcome(tmp_path) -> None:
     decision = datetime(2026, 8, 5, 10, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=decision)
@@ -594,6 +720,71 @@ def _insert_prediction(connection, decision_id: str, decision_time: datetime, *,
         (decision_id, model_version, decision_time.isoformat(), value_quote_return, 0.2,
          residual_u5, residual_u5 ** 2, 1, 0, f"score-{decision_id}-{model_version}"),
     )
+
+
+def test_model_news_visibility_receipt_is_exact_and_append_only(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    decision = datetime(2026, 8, 8, 1, 0, tzinfo=UTC)
+    _insert_prediction(
+        ledger.connection,
+        "news-receipt-decision",
+        decision,
+        model_version="broad-full-receipt-test",
+        model_identity="BROAD_FULL",
+    )
+    prediction = {
+        "model_identity": "BROAD_FULL",
+        "model_version": "broad-full-receipt-test",
+        "eligibility_version": f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}",
+    }
+    news = {
+        "official_visible_events": [],
+        "broad_visible_events": [
+            {"event_key": "event-a", "source_hash": "hash-a"},
+            {"event_key": "event-b", "source_hash": "hash-b"},
+        ],
+    }
+
+    inserted = _append_news_visibility_receipts(
+        ledger.connection,
+        decision_id="news-receipt-decision",
+        decision_time=decision,
+        recorded_at=decision,
+        predictions=[prediction],
+        news_by_eligibility={prediction["eligibility_version"]: news},
+    )
+    assert inserted == 2
+    assert _append_news_visibility_receipts(
+        ledger.connection,
+        decision_id="news-receipt-decision",
+        decision_time=decision,
+        recorded_at=decision,
+        predictions=[prediction],
+        news_by_eligibility={prediction["eligibility_version"]: news},
+    ) == 0
+    rows = ledger.connection.execute(
+        """SELECT event_key,event_source_hash,receipt_origin
+        FROM news_model_visibility_receipts_v1 ORDER BY event_key"""
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("event-a", "hash-a", "LIVE"),
+        ("event-b", "hash-b", "LIVE"),
+    ]
+    catalog = ledger.connection.execute(
+        """SELECT event_key,event_source_hash,canonical_headline
+        FROM news_model_visibility_events_v1 ORDER BY event_key"""
+    ).fetchall()
+    assert [tuple(row) for row in catalog] == [
+        ("event-a", "hash-a", "event-a"),
+        ("event-b", "hash-b", "event-b"),
+    ]
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        ledger.connection.execute(
+            "UPDATE news_model_visibility_receipts_v1 SET event_key='changed'"
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        ledger.connection.execute("DELETE FROM news_model_visibility_events_v1")
+    ledger.close()
 
 
 def _insert_model_update(connection, model_version: str, model_identity: str,
@@ -1006,12 +1197,15 @@ def test_only_latest_and_previous_versions_are_active() -> None:
     updates = [
         {"model_identity": "MARKET_ONLY", "model_version": "market-3"},
         {"model_identity": "FULL", "model_version": "full-3",
+         "feature_version": f"{inference_v2.FEATURE_VERSION}+{inference_v2.NEWS_FEATURE_VERSION}",
          "eligibility_version": inference_v2.ELIGIBILITY_VERSION},
         {"model_identity": "MARKET_ONLY", "model_version": "market-2"},
         {"model_identity": "FULL", "model_version": "full-2",
+         "feature_version": f"{inference_v2.FEATURE_VERSION}+{inference_v2.NEWS_FEATURE_VERSION}",
          "eligibility_version": inference_v2.ELIGIBILITY_VERSION},
         {"model_identity": "MARKET_ONLY", "model_version": "market-1"},
         {"model_identity": "FULL", "model_version": "full-1",
+         "feature_version": f"{inference_v2.FEATURE_VERSION}+{inference_v2.NEWS_FEATURE_VERSION}",
          "eligibility_version": inference_v2.ELIGIBILITY_VERSION},
     ]
     active = inference_v2._active_updates(updates)
@@ -1032,7 +1226,7 @@ def test_active_updates_reject_old_news_eligibility_but_keep_market() -> None:
     assert [row["model_version"] for row in active] == ["market-current"]
 
 
-def test_active_updates_keep_frozen_legacy_news_when_matching_snapshot_exists() -> None:
+def test_active_updates_do_not_revive_frozen_legacy_news() -> None:
     legacy = "news-source-eligibility-v2-event-evidence"
     legacy_broad = f"{legacy}+news-event-evidence-v1"
     updates = [
@@ -1043,9 +1237,31 @@ def test_active_updates_keep_frozen_legacy_news_when_matching_snapshot_exists() 
         {"model_identity": "MARKET_ONLY", "model_version": "market-current"},
     ]
     active = inference_v2._active_updates(updates, {legacy, legacy_broad})
-    assert [row["model_version"] for row in active] == [
-        "old-full", "old-broad", "market-current",
+    assert [row["model_version"] for row in active] == ["market-current"]
+
+
+def test_newest_news_policy_mismatch_blocks_older_current_model() -> None:
+    current_feature = f"{inference_v2.FEATURE_VERSION}+{inference_v2.NEWS_FEATURE_VERSION}"
+    updates = [
+        {"model_identity": "FULL", "model_version": "new-but-incompatible",
+         "feature_version": "obsolete-feature", "eligibility_version": "obsolete-policy"},
+        {"model_identity": "FULL", "model_version": "old-current",
+         "feature_version": current_feature,
+         "eligibility_version": inference_v2.ELIGIBILITY_VERSION},
+        {"model_identity": "MARKET_ONLY", "model_version": "market-current"},
     ]
+    active = inference_v2._active_updates(updates)
+    assert [row["model_version"] for row in active] == ["market-current"]
+
+
+def test_news_activation_reports_policy_mismatch() -> None:
+    statuses = inference_v2.news_model_activation_status([
+        {"model_identity": "FULL", "model_version": "old-full",
+         "feature_version": "old-feature", "eligibility_version": "old-policy"},
+    ])
+    full = next(row for row in statuses if row["model_identity"] == "FULL")
+    assert full["status"] == "POLICY_MISMATCH"
+    assert full["reason"] == "最新版不符合当前新闻规则"
 
 
 def test_unhealthy_predictions_do_not_enter_rolling_calibration(tmp_path) -> None:
@@ -1114,3 +1330,60 @@ def test_recommendation_uses_positive_post_cost_ev_and_retains_wait() -> None:
     assert inference_v2._recommended_action(-0.40, 0.30, 0.20) == "SHORT"
     assert inference_v2._recommended_action(0.30, 0.30, 0.20) == "WAIT"
     assert inference_v2._recommended_action(-0.10, -0.20, 0.20) == "WAIT"
+
+
+def test_news_discovered_more_than_one_hour_late_is_display_only(tmp_path) -> None:
+    epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    first_seen = epoch + timedelta(hours=2)
+    decision = first_seen + timedelta(minutes=5)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
+    _append_news(
+        ledger, source="federal_reserve_monetary", item="late-official",
+        first_seen=first_seen, parsed_at=first_seen, published_at=epoch,
+        impulse=1.0,
+    )
+    event = event_evidence_rows(ledger, decision)[0]
+    assert event["broad_model_eligible"] is False
+    assert event["freshness_status"] == "LATE_DISCOVERY"
+    assert "LATE_DISCOVERY" in event["reason_codes"]
+    ledger.close()
+
+
+def test_commentary_and_low_materiality_are_not_training_evidence(tmp_path) -> None:
+    epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    decision = epoch + timedelta(minutes=10)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
+    _append_news(
+        ledger, source="federal_reserve_monetary", item="policy-commentary",
+        first_seen=epoch + timedelta(minutes=1), parsed_at=epoch + timedelta(minutes=2),
+        impulse=0.2, record_kind="COMMENTARY_FORECAST",
+        evidence_role="COMMENTARY", materiality=0.2,
+    )
+    event = event_evidence_rows(ledger, decision)[0]
+    assert event["evidence_grade"] == "PRIMARY"
+    assert event["broad_model_eligible"] is False
+    assert "RECORD_KIND_NOT_ACTIONABLE" in event["reason_codes"]
+    assert "EVIDENCE_ROLE_NOT_ACTIONABLE" in event["reason_codes"]
+    assert "LOW_MATERIALITY" in event["reason_codes"]
+    ledger.close()
+
+
+def test_material_event_key_deduplicates_different_headlines(tmp_path) -> None:
+    epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    decision = epoch + timedelta(minutes=10)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
+    for source, item in (
+        ("gdelt_gold_geopolitics", "Oil jumps after shipping disruption"),
+        ("google_news_gold_context", "Vessel incident lifts crude and gold"),
+    ):
+        _append_news(
+            ledger, source=source, item=item,
+            first_seen=epoch + timedelta(minutes=1),
+            parsed_at=epoch + timedelta(minutes=2), impulse=0.0,
+            primary_category="oil_energy",
+            material_event_key="hormuz_shipping_incident_20260805",
+        )
+    events = event_evidence_rows(ledger, decision)
+    assert len(events) == 1
+    assert events[0]["member_count"] == 2
+    ledger.close()

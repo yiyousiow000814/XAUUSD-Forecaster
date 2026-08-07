@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Mirror the read-only dashboard snapshot to the private Sites dashboard."""
+"""Mirror the read-only dashboard snapshot to independent remote dashboards."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import json
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,14 +35,20 @@ REMOTE_EVIDENCE_LIMIT = 60
 NEWS_DETAIL_BATCH_LIMIT_BYTES = 400_000
 NEWS_INDEX_BATCH_LIMIT_BYTES = 400_000
 NEWS_DETAIL_FULL_REFRESH_SECONDS = 86_400
+NEWS_INDEX_FULL_REFRESH_SECONDS = 86_400
+NEWS_MIRROR_CONTRACT_VERSION = "news-readable-authoritative-v1"
 REMOTE_CURVE_POINTS_PER_IDENTITY = 480
+REMOTE_CURVE_POINT_LIMITS = (480, 360, 240, 160, 120, 80, 40, 20)
+REMOTE_DETAIL_LIMITS = (240, 160, 120, 80, 40, 20)
+REMOTE_EXECUTION_RESULT_LIMIT = 100
 REMOTE_MARKET_DECISION_LIMIT = 288 * 5
 
 NEWS_INDEX_FIELDS = (
     "category", "source", "source_item_id", "revision_number",
     "source_published_time", "collector_first_seen_time", "headline",
-    "content_characters", "content_status", "annotation_status",
-    "model_visibility", "emerging_topic_zh",
+    "content_characters", "content_status", "content_fetch_status",
+    "content_error_type", "annotation_status",
+    "model_visibility", "parsed_at", "emerging_topic_zh",
 )
 MARKET_DECISION_FIELDS = (
     "source_decision_id", "decision_time", "model_identity",
@@ -119,19 +126,108 @@ def _bounded_item_batches(rows: list[dict], limit_bytes: int) -> list[list[dict]
     return batches
 
 
-def compact_curve_points(points: list[dict]) -> list[dict]:
+def compact_curve_points(
+    points: list[dict],
+    *,
+    limit: int = REMOTE_CURVE_POINTS_PER_IDENTITY,
+    value_keys: tuple[str, ...] = ("cumulative_quote_return",),
+) -> list[dict]:
     """Preserve curve shape and version boundaries within a visual-size budget."""
-    if len(points) <= REMOTE_CURVE_POINTS_PER_IDENTITY:
+    if len(points) <= limit:
         return points
-    bucket_count = max(1, REMOTE_CURVE_POINTS_PER_IDENTITY // 2)
+    bucket_count = max(1, limit // max(2, 2 * len(value_keys)))
     bucket_size = max(1, (len(points) + bucket_count - 1) // bucket_count)
     keep = {0, len(points) - 1}
-    keep.update(index for index, point in enumerate(points) if point.get("model_version"))
+    # Every point carries model_version.  Preserve only actual transition
+    # boundaries; preserving every non-empty value defeats compaction.
+    for index in range(1, len(points)):
+        if points[index].get("model_version") != points[index - 1].get("model_version"):
+            keep.update((index - 1, index))
     for start in range(0, len(points), bucket_size):
-        indices = range(start, min(len(points), start + bucket_size))
-        keep.add(min(indices, key=lambda index: points[index]["cumulative_quote_return"]))
-        keep.add(max(indices, key=lambda index: points[index]["cumulative_quote_return"]))
-    return [points[index] for index in sorted(keep)]
+        indices = list(range(start, min(len(points), start + bucket_size)))
+        for key in value_keys:
+            candidates = [index for index in indices if points[index].get(key) is not None]
+            if candidates:
+                keep.add(min(candidates, key=lambda index: float(points[index][key])))
+                keep.add(max(candidates, key=lambda index: float(points[index][key])))
+    ordered = sorted(keep)
+    if len(ordered) > limit:
+        mandatory = {0, len(points) - 1}
+        for key in value_keys:
+            candidates = [
+                index for index, point in enumerate(points)
+                if point.get(key) is not None
+            ]
+            if candidates:
+                mandatory.add(min(candidates, key=lambda index: float(points[index][key])))
+                mandatory.add(max(candidates, key=lambda index: float(points[index][key])))
+        remaining = [index for index in ordered if index not in mandatory]
+        available = max(0, limit - len(mandatory))
+        if available and remaining:
+            sampled = {
+                remaining[round(position * (len(remaining) - 1) / max(1, available - 1))]
+                for position in range(available)
+            }
+        else:
+            sampled = set()
+        ordered = sorted(mandatory | sampled)[:limit]
+    return [points[index] for index in ordered]
+
+
+def _compact_learning_payload(
+    payload: dict, point_limit: int, detail_limit: int
+) -> dict:
+    learning = copy.deepcopy(payload.get("learning_curves") or {})
+    models = learning.get("models")
+    if isinstance(models, list):
+        learning["archived_model_count"] = sum(
+            row.get("lifecycle_status") not in {"LATEST", "PREVIOUS"}
+            for row in models
+        )
+        learning["model_detail_total"] = len(models)
+        learning["models"] = models[-detail_limit:]
+    version_groups = learning.get("version_groups")
+    if isinstance(version_groups, list):
+        learning["version_group_total"] = len(version_groups)
+        learning["version_groups"] = version_groups[-detail_limit:]
+    curves = learning.get("identity_curves")
+    if isinstance(curves, list):
+        for curve in curves:
+            if not isinstance(curve, dict):
+                continue
+            for field in ("points", "points_30m"):
+                if isinstance(curve.get(field), list):
+                    curve[field] = compact_curve_points(
+                        curve[field], limit=point_limit
+                    )
+    for field in ("full_minus_market", "broad_full_minus_official_full"):
+        if isinstance(learning.get(field), list):
+            learning[field] = compact_curve_points(
+                learning[field], limit=point_limit,
+                value_keys=("cumulative_delta",),
+            )
+
+    execution = copy.deepcopy(payload.get("execution_learning") or {})
+    for model in execution.get("models", []) if isinstance(execution, dict) else []:
+        evaluation = model.get("evaluation") if isinstance(model, dict) else None
+        if isinstance(evaluation, dict) and isinstance(evaluation.get("points"), list):
+            evaluation["points"] = compact_curve_points(
+                evaluation["points"], limit=point_limit,
+                value_keys=("selected_cumulative_return", "baseline_cumulative_return"),
+            )
+        if isinstance(evaluation, dict) and isinstance(evaluation.get("results"), list):
+            evaluation["result_total"] = len(evaluation["results"])
+            evaluation["results"] = evaluation["results"][-REMOTE_EXECUTION_RESULT_LIMIT:]
+    return {
+        "learning_curves": learning,
+        "execution_learning": execution,
+        "mirror_compaction": {
+            "display_only": True,
+            "sqlite_history_complete": True,
+            "curve_point_limit": point_limit,
+            "detail_row_limit": detail_limit,
+        },
+    }
 
 
 def compact_market_chart(payload: dict) -> dict:
@@ -176,43 +272,20 @@ def market_chart_snapshot(payload: dict) -> bytes:
 
 def learning_snapshot(payload: dict) -> bytes:
     """Keep growing learning surfaces outside the live status heartbeat."""
-    learning = copy.deepcopy(payload.get("learning_curves") or {})
-    learning.pop("full_minus_market", None)
-    learning.pop("broad_full_minus_official_full", None)
-    models = learning.get("models")
-    if isinstance(models, list):
-        learning["archived_model_count"] = sum(
-            row.get("lifecycle_status") not in {"LATEST", "PREVIOUS"}
-            for row in models
-        )
-        learning["models"] = [
-            row for row in models
-            if row.get("lifecycle_status") in {"LATEST", "PREVIOUS"}
-        ]
-    version_groups = learning.get("version_groups")
-    if isinstance(version_groups, list):
-        learning["version_groups"] = [
-            row for row in version_groups
-            if row.get("lifecycle_status") in {"LATEST", "PREVIOUS"}
-        ]
-    curves = learning.get("identity_curves")
-    if isinstance(curves, list):
-        for curve in curves:
-            if isinstance(curve, dict) and isinstance(curve.get("points"), list):
-                curve["points"] = compact_curve_points(curve["points"])
-    encoded = json.dumps(
-        {
-            "learning_curves": learning,
-            "execution_learning": payload.get("execution_learning") or {},
-        },
-        ensure_ascii=False, allow_nan=False, separators=(",", ":"),
-    ).encode("utf-8")
-    if len(encoded) > REMOTE_PAYLOAD_LIMIT_BYTES:
-        raise ValueError(
-            f"learning payload is {len(encoded)} bytes "
-            f"(limit {REMOTE_PAYLOAD_LIMIT_BYTES})"
-        )
-    return encoded
+    last_size = 0
+    for detail_limit in REMOTE_DETAIL_LIMITS:
+        for point_limit in REMOTE_CURVE_POINT_LIMITS:
+            encoded = json.dumps(
+                _compact_learning_payload(payload, point_limit, detail_limit),
+                ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+            ).encode("utf-8")
+            last_size = len(encoded)
+            if last_size <= REMOTE_PAYLOAD_LIMIT_BYTES:
+                return encoded
+    raise ValueError(
+        f"learning payload is {last_size} bytes after adaptive compaction "
+        f"(limit {REMOTE_PAYLOAD_LIMIT_BYTES})"
+    )
 
 
 def remote_snapshot(payload: dict) -> bytes:
@@ -269,6 +342,7 @@ def write_sync_status(
     success: bool,
     attempts_used: int | None = None,
     error: Exception | None = None,
+    degraded_resources: list[dict] | None = None,
 ) -> None:
     """Atomically publish the synchronizer's actual operational heartbeat."""
     existing: dict = {}
@@ -279,6 +353,7 @@ def write_sync_status(
             existing = {}
     now = datetime.now(UTC).isoformat()
     if success:
+        degraded_resources = degraded_resources or []
         existing.update(
             {
                 "last_success": now,
@@ -286,6 +361,8 @@ def write_sync_status(
                 "last_error": None,
                 "last_error_type": None,
                 "attempts_used": attempts_used,
+                "status": "DEGRADED" if degraded_resources else "OK",
+                "degraded_resources": degraded_resources,
             }
         )
     else:
@@ -294,6 +371,7 @@ def write_sync_status(
                 "last_attempt": now,
                 "last_error": str(error)[:500] if error else "Unknown sync error",
                 "last_error_type": type(error).__name__ if error else "UnknownError",
+                "status": "ERROR",
             }
         )
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -306,9 +384,11 @@ def _post_json(url: str, payload: bytes, config: dict) -> None:
     headers = {
         "Authorization": f"Bearer {config['token']}",
         "Content-Type": "application/json",
+        "User-Agent": "AurumSignalRoomMirror/1.0",
     }
     sites_bypass_token = os.environ.get("SITES_BYPASS_TOKEN", "").strip()
-    if sites_bypass_token:
+    remote_host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    if sites_bypass_token and remote_host.endswith(".chatgpt.site"):
         headers["OAI-Sites-Authorization"] = f"Bearer {sites_bypass_token}"
     request = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     with urllib.request.urlopen(
@@ -316,6 +396,73 @@ def _post_json(url: str, payload: bytes, config: dict) -> None:
     ) as response:
         if response.status != 200:
             raise RuntimeError(f"dashboard sync returned HTTP {response.status}")
+
+
+def _target_state_path(path: Path, target_name: str, *, legacy: bool) -> Path:
+    if legacy or target_name == "sites":
+        return path
+    safe_name = "".join(
+        character if character.isalnum() or character in "-_" else "-"
+        for character in target_name.lower()
+    ).strip("-") or "mirror"
+    return path.with_name(f"{path.stem}-{safe_name}{path.suffix}")
+
+
+def configured_targets(config: dict) -> list[dict]:
+    """Resolve legacy or multi-target mirror configuration without sharing state."""
+    declared = config.get("targets")
+    if not isinstance(declared, list):
+        declared = [{**config, "name": config.get("name", "sites"), "legacy": True}]
+        cloudflare_url = os.environ.get("CLOUDFLARE_INGEST_URL", "").strip()
+        cloudflare_token = os.environ.get("CLOUDFLARE_INGEST_TOKEN", "").strip()
+        if cloudflare_url or cloudflare_token:
+            declared.append({
+                "name": "cloudflare",
+                "remote_ingest_url": cloudflare_url,
+                "token": cloudflare_token,
+                "legacy": False,
+            })
+
+    targets = []
+    for index, target in enumerate(declared):
+        if not isinstance(target, dict):
+            raise ValueError(f"dashboard target {index + 1} must be an object")
+        name = str(target.get("name") or f"mirror-{index + 1}").strip()
+        remote_url = str(target.get("remote_ingest_url") or "").strip()
+        token_env = str(target.get("token_env") or "").strip()
+        token = str(
+            target.get("token") or (os.environ.get(token_env) if token_env else "") or ""
+        ).strip()
+        if not remote_url.startswith("https://") or not token:
+            raise ValueError(f"dashboard target {name!r} needs https URL and token")
+        scoped = {
+            **config,
+            **target,
+            "name": name,
+            "token": token,
+            "legacy": bool(target.get("legacy", False)),
+        }
+        scoped.pop("targets", None)
+        scoped["learning_state_file"] = str(_target_state_path(
+            Path(target.get(
+                "learning_state_file",
+                config.get("learning_state_file", DEFAULT_LEARNING_STATE),
+            )),
+            name,
+            legacy=scoped["legacy"],
+        ))
+        scoped["news_state_file"] = str(_target_state_path(
+            Path(target.get(
+                "news_state_file",
+                config.get("news_state_file", DEFAULT_NEWS_STATE),
+            )),
+            name,
+            legacy=scoped["legacy"],
+        ))
+        targets.append(scoped)
+    if not targets:
+        raise ValueError("dashboard sync has no configured targets")
+    return targets
 
 
 def _read_news_sync_state(path: Path) -> dict:
@@ -333,12 +480,7 @@ def _write_news_sync_state(path: Path, state: dict) -> None:
     temporary.replace(path)
 
 
-def sync_once(config: dict) -> None:
-    with urllib.request.urlopen(
-        config["local_status_url"], timeout=LOCAL_STATUS_TIMEOUT_SECONDS
-    ) as response:
-        local_payload = json.loads(response.read())
-    _post_json(config["remote_ingest_url"], remote_snapshot(local_payload), config)
+def _sync_learning(local_payload: dict, config: dict) -> None:
     learning_url = config.get("remote_learning_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/learning"
     )
@@ -354,11 +496,16 @@ def sync_once(config: dict) -> None:
             "payload_hash": learning_hash,
             "last_success": datetime.now(UTC).isoformat(),
         })
+
+
+def _sync_market(local_payload: dict, config: dict) -> None:
     market_url = config.get("remote_market_chart_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/market-chart"
     )
     _post_json(market_url, market_chart_snapshot(local_payload), config)
 
+
+def _sync_news(local_payload: dict, config: dict) -> None:
     news_index, details = news_mirror_parts(local_payload)
     state_path = Path(config.get("news_state_file", DEFAULT_NEWS_STATE))
     state = _read_news_sync_state(state_path)
@@ -368,14 +515,41 @@ def sync_once(config: dict) -> None:
     current_index_hashes = {
         row["detail_key"]: _json_hash(row) for row in news_index
     }
-    pending_index = [
-        row for row in news_index
-        if synced_index_hashes.get(row["detail_key"])
-        != current_index_hashes[row["detail_key"]]
-    ]
     news_index_url = config.get("remote_news_index_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/news-index"
     )
+    news_url = config.get("remote_news_ingest_url") or (
+        config["remote_ingest_url"].rsplit("/", 1)[0] + "/news-content"
+    )
+    removed_keys = set(synced_index_hashes) - set(current_index_hashes)
+    reset_required = (
+        state.get("mirror_contract_version") != NEWS_MIRROR_CONTRACT_VERSION
+        or bool(removed_keys)
+    )
+    if reset_required:
+        reset_payload = json.dumps(
+            {"reset": True}, separators=(",", ":"),
+        ).encode("utf-8")
+        _post_json(news_index_url, reset_payload, config)
+        _post_json(news_url, reset_payload, config)
+        synced_index_hashes = {}
+        state = {"mirror_contract_version": NEWS_MIRROR_CONTRACT_VERSION}
+    last_index_full = state.get("last_index_full_sync")
+    try:
+        index_full_refresh_due = (
+            not last_index_full
+            or (
+                datetime.now(UTC) - datetime.fromisoformat(last_index_full)
+            ).total_seconds() >= NEWS_INDEX_FULL_REFRESH_SECONDS
+        )
+    except (TypeError, ValueError):
+        index_full_refresh_due = True
+    pending_index = [
+        row for row in news_index
+        if index_full_refresh_due
+        or synced_index_hashes.get(row["detail_key"])
+        != current_index_hashes[row["detail_key"]]
+    ]
     for batch in news_index_batches(pending_index):
         encoded = json.dumps(
             {"items": batch}, ensure_ascii=False, allow_nan=False,
@@ -390,6 +564,8 @@ def sync_once(config: dict) -> None:
             **state,
             "index_hashes": synced_index_hashes,
         })
+    if index_full_refresh_due:
+        state["last_index_full_sync"] = datetime.now(UTC).isoformat()
     synced_hashes = state.get("hashes", {})
     if not isinstance(synced_hashes, dict):
         synced_hashes = {}
@@ -406,9 +582,6 @@ def sync_once(config: dict) -> None:
         row for row in details
         if full_refresh_due or synced_hashes.get(row["detail_key"]) != row["detail_hash"]
     ]
-    news_url = config.get("remote_news_ingest_url") or (
-        config["remote_ingest_url"].rsplit("/", 1)[0] + "/news-content"
-    )
     for batch in news_detail_batches(pending):
         encoded = json.dumps(
             {"items": batch}, ensure_ascii=False, allow_nan=False,
@@ -430,15 +603,59 @@ def sync_once(config: dict) -> None:
     state["index_hashes"] = {
         key: current_index_hashes[key] for key in current_index_hashes
     }
+    state["mirror_contract_version"] = NEWS_MIRROR_CONTRACT_VERSION
     _write_news_sync_state(state_path, state)
 
 
-def sync_with_retry(config: dict, *, attempts: int = 3) -> int:
+def sync_once(config: dict) -> list[dict]:
+    with urllib.request.urlopen(
+        config["local_status_url"], timeout=LOCAL_STATUS_TIMEOUT_SECONDS
+    ) as response:
+        local_payload = json.loads(response.read())
+
+    degraded = []
+    healthy_targets = 0
+    live_payload = remote_snapshot(local_payload)
+    for target in configured_targets(config):
+        target_name = target["name"]
+        try:
+            # The live heartbeat is the critical path. Optional, growing
+            # resources must not make a healthy target appear offline.
+            _post_json(target["remote_ingest_url"], live_payload, target)
+            healthy_targets += 1
+        except Exception as error:
+            degraded.append({
+                "target": target_name,
+                "resource": "heartbeat",
+                "error_type": type(error).__name__,
+                "error": str(error)[:500],
+            })
+            continue
+        for resource, operation in (
+            ("learning", _sync_learning),
+            ("market_chart", _sync_market),
+            ("news", _sync_news),
+        ):
+            try:
+                operation(local_payload, target)
+            except Exception as error:
+                degraded.append({
+                    "target": target_name,
+                    "resource": resource,
+                    "error_type": type(error).__name__,
+                    "error": str(error)[:500],
+                })
+    if healthy_targets == 0:
+        raise RuntimeError("all dashboard mirror targets rejected the heartbeat")
+    return degraded
+
+
+def sync_with_retry(config: dict, *, attempts: int = 3) -> tuple[int, list[dict]]:
     """Retry transient transport failures without waiting for the next sync cycle."""
     for attempt in range(1, attempts + 1):
         try:
-            sync_once(config)
-            return attempt
+            degraded = sync_once(config) or []
+            return attempt, degraded
         except Exception as error:
             transient = isinstance(
                 error,
@@ -474,13 +691,23 @@ def main() -> int:
     config = json.loads(args.config.read_text(encoding="utf-8"))
     while True:
         try:
-            attempts_used = sync_with_retry(config)
+            attempts_used, degraded_resources = sync_with_retry(config)
             write_sync_status(
-                args.status_file, success=True, attempts_used=attempts_used
+                args.status_file,
+                success=True,
+                attempts_used=attempts_used,
+                degraded_resources=degraded_resources,
             )
             print(
                 json.dumps(
-                    {"event": "DASHBOARD_SYNC_OK", "attempts_used": attempts_used}
+                    {
+                        "event": (
+                            "DASHBOARD_SYNC_DEGRADED"
+                            if degraded_resources else "DASHBOARD_SYNC_OK"
+                        ),
+                        "attempts_used": attempts_used,
+                        "degraded_resources": degraded_resources,
+                    }
                 ),
                 flush=True,
             )

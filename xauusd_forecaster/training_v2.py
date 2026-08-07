@@ -217,12 +217,14 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
         """SELECT DISTINCT model_identity FROM model_updates_v2
         WHERE model_stage=? AND created_at>=?
           AND (
-            (model_identity='FULL' AND eligibility_version=?)
+            (model_identity='FULL' AND feature_version=? AND eligibility_version=?)
             OR
-            (model_identity='BROAD_FULL' AND eligibility_version=?)
+            (model_identity='BROAD_FULL' AND feature_version=? AND eligibility_version=?)
           )""",
         (
-            stage, latest["created_at"], ELIGIBILITY_VERSION,
+            stage, latest["created_at"],
+            f"{FEATURE_VERSION}+{NEWS_FEATURE_VERSION}", ELIGIBILITY_VERSION,
+            f"{FEATURE_VERSION}+{NEWS_FEATURE_VERSION}+{EVIDENCE_POLICY_VERSION}",
             f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}",
         ),
     ).fetchall() if latest is not None else []

@@ -24,7 +24,9 @@ reachable even though the BLS RSS pages return HTTP 403. Payrolls, earnings,
 unemployment, headline/core CPI, and JOLTS values are stored with first-seen
 time and later revisions. Without a free BLS registration key the collector
 polls within the public 25-query daily limit; a free key permits five-minute
-polling around the clock.
+polling around the clock. A `bls.gov`-restricted Google News lane supplies a
+conservative release-page discovery fallback. Its later Google/local receipt
+time is retained; it never backdates visibility to the publisher timestamp.
 
 ## 4. Optional synchronized symbols
 

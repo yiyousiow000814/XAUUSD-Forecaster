@@ -31,6 +31,7 @@ def test_listing_poll_does_not_supersede_existing_full_text(tmp_path) -> None:
         lambda url: page
         if "treasury.gov" in url
         else b'<a href="/news/2026/gdp-release">GDP release</a>',
+        lambda url: ("official release evidence " * 30, url),
     )
 
     latest = ledger.connection.execute(

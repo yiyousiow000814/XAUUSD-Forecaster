@@ -9,9 +9,9 @@ from datetime import datetime, timezone
 UTC = timezone.utc
 EVIDENCE_CONTRACT_VERSION = "phase2f-evidence-integrity-v2"
 FEATURE_VERSION = "repaired-market-v2"
-NEWS_FEATURE_VERSION = "eligible-news-event-evidence-v4-economic-time"
+NEWS_FEATURE_VERSION = "eligible-news-event-evidence-v5-live-delay-materiality"
 LABEL_VERSION = "received-time-executable-30m-v2"
-ELIGIBILITY_VERSION = "news-source-eligibility-v3-economic-time"
+ELIGIBILITY_VERSION = "news-source-eligibility-v4-live-delay-materiality"
 
 V2_IMMUTABLE_TABLES = (
     "repair_batches",
@@ -26,6 +26,8 @@ V2_IMMUTABLE_TABLES = (
     "market_crossfit_predictions",
     "model_updates_v2",
     "predictions_v2",
+    "news_model_visibility_events_v1",
+    "news_model_visibility_receipts_v1",
     "prediction_scores_v2",
     "calibration_snapshots_v2",
     "execution_training_examples_v1",
@@ -245,6 +247,37 @@ CREATE TABLE IF NOT EXISTS predictions_v2 (
     PRIMARY KEY(source_decision_id, model_version)
 );
 
+CREATE TABLE IF NOT EXISTS news_model_visibility_receipts_v1 (
+    receipt_id TEXT PRIMARY KEY,
+    source_decision_id TEXT NOT NULL,
+    decision_time TEXT NOT NULL,
+    model_identity TEXT NOT NULL CHECK(model_identity IN (
+        'NEWS_RESIDUAL','FULL','BROAD_NEWS_RESIDUAL','BROAD_FULL')),
+    model_version TEXT NOT NULL,
+    eligibility_version TEXT NOT NULL,
+    evidence_policy_version TEXT NOT NULL,
+    evidence_lane TEXT NOT NULL CHECK(evidence_lane IN ('OFFICIAL','BROAD')),
+    event_key TEXT NOT NULL,
+    event_source_hash TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    receipt_origin TEXT NOT NULL CHECK(receipt_origin IN ('LIVE','POINT_IN_TIME_REPLAY')),
+    UNIQUE(source_decision_id, model_version, evidence_lane, event_key),
+    FOREIGN KEY(source_decision_id, model_version)
+      REFERENCES predictions_v2(source_decision_id, model_version)
+);
+
+CREATE TABLE IF NOT EXISTS news_model_visibility_events_v1 (
+    event_source_hash TEXT PRIMARY KEY,
+    event_key TEXT NOT NULL,
+    canonical_headline TEXT NOT NULL,
+    canonical_source TEXT NOT NULL,
+    source_published_time TEXT,
+    collector_first_seen_time TEXT NOT NULL,
+    topics_json TEXT NOT NULL,
+    evidence_grade TEXT NOT NULL,
+    first_recorded_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS prediction_scores_v2 (
     source_decision_id TEXT NOT NULL,
     model_version TEXT NOT NULL,
@@ -407,6 +440,12 @@ CREATE INDEX IF NOT EXISTS derived_outcome_time_v2
 ON derived_outcomes(decision_time, evidence_lane, outcome_status);
 CREATE INDEX IF NOT EXISTS prediction_v2_time
 ON predictions_v2(model_identity, decision_time);
+CREATE INDEX IF NOT EXISTS news_visibility_event_v1
+ON news_model_visibility_receipts_v1(event_key, decision_time);
+CREATE INDEX IF NOT EXISTS news_visibility_decision_v1
+ON news_model_visibility_receipts_v1(source_decision_id, model_identity);
+CREATE INDEX IF NOT EXISTS news_visibility_catalog_event_v1
+ON news_model_visibility_events_v1(event_key, collector_first_seen_time);
 CREATE INDEX IF NOT EXISTS execution_examples_time_v1
 ON execution_training_examples_v1(checkpoint_minutes, observed_at);
 CREATE INDEX IF NOT EXISTS execution_predictions_time_v1

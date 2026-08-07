@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .evidence_v2 import ELIGIBILITY_VERSION
+from .evidence_v2 import ELIGIBILITY_VERSION, FEATURE_VERSION, NEWS_FEATURE_VERSION
 from .execution_costs import ROUND_TRIP_COMMISSION_LOG_COST
 from .forward_ledger import canonical_hash
 from .news_evidence import EVIDENCE_POLICY_VERSION
@@ -24,6 +24,73 @@ MODEL_IDENTITIES = frozenset({
     "MARKET_ONLY", "NEWS_RESIDUAL", "FULL",
     "BROAD_NEWS_RESIDUAL", "BROAD_FULL",
 })
+NEWS_MODEL_IDENTITIES = frozenset({
+    "NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL",
+})
+
+
+def _row_value(row, key: str, default=None):
+    return row[key] if key in row.keys() else default
+
+
+def _expected_news_contract(identity: str) -> tuple[str, str] | None:
+    if identity == "NEWS_RESIDUAL":
+        return NEWS_FEATURE_VERSION, ELIGIBILITY_VERSION
+    if identity == "FULL":
+        return f"{FEATURE_VERSION}+{NEWS_FEATURE_VERSION}", ELIGIBILITY_VERSION
+    broad_eligibility = f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}"
+    if identity == "BROAD_NEWS_RESIDUAL":
+        return NEWS_FEATURE_VERSION, broad_eligibility
+    if identity == "BROAD_FULL":
+        return (
+            f"{FEATURE_VERSION}+{NEWS_FEATURE_VERSION}+{EVIDENCE_POLICY_VERSION}",
+            broad_eligibility,
+        )
+    return None
+
+
+def _news_contract_matches(update) -> bool:
+    expected = _expected_news_contract(update["model_identity"])
+    if expected is None:
+        return True
+    return (
+        _row_value(update, "feature_version") == expected[0]
+        and _row_value(update, "eligibility_version") == expected[1]
+    )
+
+
+def news_model_activation_status(updates) -> list[dict]:
+    """Explain whether each news identity has a current-policy runnable artifact."""
+    newest = {}
+    for update in updates:
+        newest.setdefault(update["model_identity"], update)
+    result = []
+    for identity in ("NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL"):
+        expected_feature, expected_eligibility = _expected_news_contract(identity)
+        update = newest.get(identity)
+        if update is None:
+            status, reason = "NOT_TRAINED", "尚未训练当前新闻模型"
+        elif not _news_contract_matches(update):
+            status, reason = "POLICY_MISMATCH", "最新版不符合当前新闻规则"
+        else:
+            artifact = _row_value(update, "artifact_path")
+            artifact_valid = True
+            if artifact:
+                path = Path(artifact)
+                artifact_valid = path.is_absolute() and path.exists()
+            status = "ACTIVE" if artifact_valid else "ARTIFACT_UNAVAILABLE"
+            reason = "当前规则版本已激活" if artifact_valid else "当前模型文件不可用"
+        result.append({
+            "model_identity": identity,
+            "status": status,
+            "reason": reason,
+            "model_version": _row_value(update, "model_version") if update else None,
+            "actual_feature_version": _row_value(update, "feature_version") if update else None,
+            "actual_eligibility_version": _row_value(update, "eligibility_version") if update else None,
+            "expected_feature_version": expected_feature,
+            "expected_eligibility_version": expected_eligibility,
+        })
+    return result
 
 
 def _recommended_action(
@@ -43,29 +110,43 @@ def _recommended_action(
 
 
 def _active_updates(updates, available_news_eligibilities: set[str] | None = None) -> list:
-    """Select only the newest and preceding frozen version per identity."""
+    """Select current-policy newest/previous models without reviving legacy news."""
     if available_news_eligibilities is None:
         available_news_eligibilities = {
             ELIGIBILITY_VERSION,
             f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}",
         }
     counts: dict[str, int] = defaultdict(int)
+    newest_seen: set[str] = set()
+    blocked_news: set[str] = set()
     active = []
     for update in updates:
         identity = update["model_identity"]
         if identity not in MODEL_IDENTITIES or counts[identity] >= ACTIVE_VERSIONS_PER_IDENTITY:
             continue
-        eligibility = (
-            update["eligibility_version"]
-            if "eligibility_version" in update.keys() else None
-        )
-        if identity in {"NEWS_RESIDUAL", "FULL"} and eligibility not in available_news_eligibilities:
+        if identity in blocked_news:
             continue
-        if identity in {"BROAD_NEWS_RESIDUAL", "BROAD_FULL"} and eligibility not in available_news_eligibilities:
-            continue
+        if identity in NEWS_MODEL_IDENTITIES:
+            eligibility = _row_value(update, "eligibility_version")
+            compatible = (
+                _news_contract_matches(update)
+                and eligibility in available_news_eligibilities
+            )
+            if identity not in newest_seen and not compatible:
+                # The newest artifact defines the identity's lifecycle.  Never
+                # fall through to an older rule version just because its
+                # historical snapshot still exists.
+                blocked_news.add(identity)
+                newest_seen.add(identity)
+                continue
+            if not compatible:
+                continue
+        newest_seen.add(identity)
         if "artifact_path" in update.keys():
             artifact_path = Path(update["artifact_path"])
             if not artifact_path.is_absolute() or not artifact_path.exists():
+                if identity in NEWS_MODEL_IDENTITIES:
+                    blocked_news.add(identity)
                 continue
         counts[identity] += 1
         active.append(update)
@@ -230,5 +311,6 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
             ),
         )
         created.append({"model_identity": identity, "model_version": update["model_version"],
+                        "eligibility_version": update_eligibility,
                         "recommended_action": recommended, "calibration_status": calibration["status"]})
     return created

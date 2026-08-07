@@ -33,6 +33,16 @@ There is no historical news or consensus backfill.
   feeds are active.
 - BLS Employment Situation, CPI, and JOLTS RSS adapters are configured but the
   current machine receives HTTP 403; each failure is recorded independently.
+  A separate Google News query restricted to `bls.gov` discovers official
+  Employment Situation, CPI, and JOLTS release pages. It uses the later local
+  receipt time and may enter the model only when the resolved publisher is
+  `bls.gov`, a complete body was actually received, and Gemini finished before
+  the decision. The BLS Public Data API remains the authoritative free path for
+  actual payroll, earnings, unemployment, CPI, and JOLTS values and revisions.
+- Separate employment, inflation, and Fed/rates Google News lanes process the
+  complete returned feed before applying a bounded unseen-first work limit.
+  These general media lanes are discovery/display evidence and do not become
+  model votes merely because their headlines were collected.
 - `collector_first_seen_time`, not publisher time, controls visibility.
 - Revisions append new rows and never replace old content.
 

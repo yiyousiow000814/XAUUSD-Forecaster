@@ -26,14 +26,17 @@ export async function GET(request: Request) {
     if (binding) {
       const readableEvidence = `
         json_extract(payload, '$.content_status') IN ('FULL_TEXT', 'SOURCE_CONTENT')
-        AND COALESCE(json_extract(payload, '$.model_visibility'), 'COLLECT_ONLY') <> 'COLLECT_ONLY'
+        AND COALESCE(json_extract(payload, '$.model_visibility'), 'COLLECT_ONLY') <> 'COLLECT_ONLY'`;
+      const parsedEvidence = `${readableEvidence}
         AND COALESCE(json_extract(payload, '$.parsed_at'), '') <> ''`;
+      const modelCandidateEvidence = `${parsedEvidence}
+        AND json_extract(payload, '$.model_visibility') = 'MODEL_VISIBLE'`;
       const where = category
         ? `WHERE ${readableEvidence} AND category = ?`
         : `WHERE ${readableEvidence}`;
       const bindValues = category ? [category] : [];
       const offset = (page - 1) * pageSize;
-      const [rows, totalRow, allTotalRow, categoryRows] = await Promise.all([
+      const [rows, totalRow, allTotalRow, parsedTotalRow, modelCandidateTotalRow, categoryRows] = await Promise.all([
         binding.prepare(
           `SELECT payload FROM news_index ${where}
            ORDER BY COALESCE(json_extract(payload, '$.source_published_time'),
@@ -44,6 +47,10 @@ export async function GET(request: Request) {
           .bind(...bindValues).first<{ count: number }>(),
         binding.prepare(`SELECT count(*) AS count FROM news_index WHERE ${readableEvidence}`)
           .first<{ count: number }>(),
+        binding.prepare(`SELECT count(*) AS count FROM news_index WHERE ${parsedEvidence}`)
+          .first<{ count: number }>(),
+        binding.prepare(`SELECT count(*) AS count FROM news_index WHERE ${modelCandidateEvidence}`)
+          .first<{ count: number }>(),
         binding.prepare(
           `SELECT category, count(*) AS count FROM news_index
            WHERE ${readableEvidence} GROUP BY category`,
@@ -53,6 +60,9 @@ export async function GET(request: Request) {
         items: rows.results.map(row => JSON.parse(row.payload)),
         total: totalRow?.count ?? 0,
         all_total: allTotalRow?.count ?? 0,
+        readable_total: allTotalRow?.count ?? 0,
+        parsed_total: parsedTotalRow?.count ?? 0,
+        model_candidate_total: modelCandidateTotalRow?.count ?? 0,
         category_counts: Object.fromEntries(
           categoryRows.results.map(row => [row.category, row.count]),
         ),
@@ -84,11 +94,16 @@ export async function GET(request: Request) {
         ]),
       );
       const filtered = category ? all.filter(row => row.category === category) : all;
+      const parsedTotal = all.filter(row => typeof row.parsed_at === "string" && row.parsed_at.length > 0).length;
+      const modelCandidateTotal = all.filter(row => row.model_visibility === "MODEL_VISIBLE").length;
       const offset = (page - 1) * pageSize;
       return NextResponse.json({
         items: filtered.slice(offset, offset + pageSize),
         total: filtered.length,
         all_total: all.length,
+        readable_total: all.length,
+        parsed_total: parsedTotal,
+        model_candidate_total: modelCandidateTotal,
         category_counts: categoryCounts,
         page,
         page_size: pageSize,

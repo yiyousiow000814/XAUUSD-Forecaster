@@ -65,6 +65,11 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /api\/news-index\?/);
   assert.match(source, /api\/learning/);
   assert.match(source, /Promise\.allSettled/);
+  assert.match(source, /Publish one coherent snapshot/);
+  assert.equal((source.match(/setPayload\(/g) ?? []).length, 1);
+  assert.doesNotMatch(source, /row\.topics\.map/);
+  assert.doesNotMatch(source, /row\.model_identities\.map/);
+  assert.doesNotMatch(source, /row\.model_unseen_reason_codes\.map/);
   assert.match(source, /读取中…/);
   assert.match(source, /学习数据暂不可用|暂不可用/);
   assert.match(source, /页面会保留上一份成功数据并自动重试/);
@@ -149,10 +154,11 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /同一坐标叠加比较/);
   assert.match(page, /五套模型，现在表现怎样/);
   assert.match(page, /方向收集/);
-  assert.match(page, /当前模型的新闻子集/);
+  assert.match(page, /含新闻的决策时点/);
   assert.match(page, /方向再收集/);
-  assert.match(page, /有合格新闻/);
-  assert.match(page, /同轮更新/);
+  assert.match(page, /重复决策样本，不是文章数/);
+  assert.match(page, /已冻结可审计证据/);
+  assert.match(page, /新闻特征随下一轮方向模型一起更新/);
   assert.doesNotMatch(page, /learning-data-flow/);
   assert.match(page, /方法与实盘边界/);
   assert.match(modal, /K线与决策/);

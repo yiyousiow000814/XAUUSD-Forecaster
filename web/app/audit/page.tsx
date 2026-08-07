@@ -83,7 +83,7 @@ type NewsEvidence = {
   collector_first_seen_time: string;
   economic_age_minutes: number | null;
   freshness_status: string;
-  topics: string[];
+  topics?: string[] | null;
   evidence_grade: "PRIMARY" | "CORROBORATED" | "SINGLE_RELIABLE" | "DISCOVERY_ONLY";
   broad_model_eligible: boolean;
   model_permission: "BROAD_MODEL" | "DISPLAY_ONLY";
@@ -97,9 +97,9 @@ type NewsEvidence = {
   frozen_decisions: number;
   first_model_decision_time: string | null;
   last_model_decision_time: string | null;
-  model_identities: string[];
+  model_identities?: string[] | null;
   model_versions: string[];
-  model_unseen_reason_codes: string[];
+  model_unseen_reason_codes?: string[] | null;
 };
 type StoryEvent = { event_key: string; first_seen: string; headline: string;
   event_time: string; actor: string; action: string; object: string; location: string;
@@ -332,6 +332,9 @@ type NewsIndexResponse = {
   items: News[];
   total: number;
   all_total: number;
+  readable_total?: number;
+  parsed_total?: number;
+  model_candidate_total?: number;
   category_counts: Record<string, number>;
   page: number;
   page_size: number;
@@ -528,7 +531,6 @@ export default function AuditPage() {
     ]);
 
     if (statusResult.status === "fulfilled") {
-      setPayload(previous => ({ ...previous, ...statusResult.value }) as Payload);
       setStatusState("ready");
       setStatusError(null);
     } else {
@@ -537,12 +539,21 @@ export default function AuditPage() {
     }
 
     if (learningResult.status === "fulfilled") {
-      setPayload(previous => ({ ...previous, ...learningResult.value }) as Payload);
       setLearningState("ready");
       setLearningError(null);
     } else {
       setLearningState("error");
       setLearningError(learningResult.reason instanceof Error ? learningResult.reason.message : "无法读取学习进度");
+    }
+
+    const nextPayload = {
+      ...(statusResult.status === "fulfilled" ? statusResult.value : {}),
+      ...(learningResult.status === "fulfilled" ? learningResult.value : {}),
+    };
+    if (Object.keys(nextPayload).length > 0) {
+      // Publish one coherent snapshot. Rendering either response independently can
+      // expose a learning-only or status-only payload and crash another audit tab.
+      setPayload(previous => ({ ...previous, ...nextPayload }) as Payload);
     }
   }, []);
 
@@ -590,24 +601,24 @@ export default function AuditPage() {
   }, [payload]);
 
   const categories = useMemo(() => [
-    { name: "全部", count: newsIndex.all_total },
+    { name: "全部", count: newsIndex.readable_total ?? newsIndex.all_total },
     ...CATEGORY_ORDER.filter(name => newsIndex.category_counts[name]).map(name => ({ name, count: newsIndex.category_counts[name] ?? 0 })),
   ], [newsIndex]);
   const newsPageCount = Math.max(1, Math.ceil(newsIndex.total / NEWS_PER_PAGE));
   const currentNewsPage = Math.min(newsPage, newsPageCount);
   const visibleNews = newsIndex.items;
   const emptyNewsRows = Math.max(0, NEWS_PER_PAGE - visibleNews.length);
-  const activeLearningModels = (payload?.learning_curves.models ?? []).filter(
+  const activeLearningModels = (payload?.learning_curves?.models ?? []).filter(
     row => row.active_rank !== null,
   );
   const activeLearningIdentities = new Set(
     activeLearningModels.map(row => row.model_identity),
   ).size;
-  const archivedModelCount = (payload?.learning_curves.models.length ?? 0) - activeLearningModels.length;
-  const inactiveNewsModels = (payload?.learning_curves.news_model_activation ?? []).filter(
+  const archivedModelCount = (payload?.learning_curves?.models?.length ?? 0) - activeLearningModels.length;
+  const inactiveNewsModels = (payload?.learning_curves?.news_model_activation ?? []).filter(
     row => row.status !== "ACTIVE",
   );
-  const latestVersionGroups = (payload?.learning_curves.version_groups ?? []).filter(
+  const latestVersionGroups = (payload?.learning_curves?.version_groups ?? []).filter(
     row => row.lifecycle_status === "LATEST",
   );
   const directionPoolRows = Math.max(0, ...latestVersionGroups
@@ -617,11 +628,15 @@ export default function AuditPage() {
     .filter(row => row.model_identity.endsWith("NEWS_RESIDUAL"))
     .map(row => row.training_rows));
   const newsPoolCoverage = directionPoolRows > 0 ? newsPoolRows / directionPoolRows : 0;
+  const readableNewsTotal = newsIndex.readable_total ?? newsIndex.all_total;
+  const parsedNewsTotal = newsIndex.parsed_total ?? newsIndex.items.filter(row => Boolean(row.parsed_at)).length;
+  const modelCandidateNewsTotal = newsIndex.model_candidate_total ?? newsIndex.items.filter(row => row.model_visibility === "MODEL_VISIBLE").length;
+  const modelSeenNewsEvents = payload?.news_evidence_summary?.model_seen_events ?? 0;
   const rowsUntilTraining = learningState === "ready" && payload?.training
     ? Math.max(0, payload.training.next_training_at - payload.training.complete_rows)
     : null;
-  const systemIsLive = statusState === "ready" && payload?.system.online === true;
-  const marketClosed = statusState === "ready" && payload?.system.market_session === "WEEKLY_CLOSED";
+  const systemIsLive = statusState === "ready" && payload?.system?.online === true;
+  const marketClosed = statusState === "ready" && payload?.system?.market_session === "WEEKLY_CLOSED";
   const systemLabel = statusState === "loading" ? "连接中" : statusState === "error" ? "状态未知" : systemIsLive ? "LIVE" : marketClosed ? "市场休市" : "OFFLINE";
   const combinedErrors = [
     statusError && `系统状态：${statusError}`,
@@ -632,7 +647,7 @@ export default function AuditPage() {
     evidenceMode === "all" || (evidenceMode === "seen" ? row.model_seen : !row.model_seen)
   ));
   const deploymentPresentation = DEPLOYMENT_PRESENTATION[
-    payload?.system.deployment?.status ?? "PROVENANCE_UNKNOWN"
+    payload?.system?.deployment?.status ?? "PROVENANCE_UNKNOWN"
   ] ?? DEPLOYMENT_PRESENTATION.PROVENANCE_UNKNOWN;
 
   return (
@@ -657,7 +672,7 @@ export default function AuditPage() {
         <div
           className="training-card"
           aria-label={learningState === "ready"
-            ? `学习进度：方向已收集 ${payload?.training.complete_rows ?? 0} 条，下一轮 ${payload?.training.next_training_at ?? 0} 条；当前模型使用方向样本 ${directionPoolRows} 条，其中 ${newsPoolRows} 条具有合格新闻证据`
+            ? `学习进度：方向已收集 ${payload?.training?.complete_rows ?? 0} 条，下一轮 ${payload?.training?.next_training_at ?? 0} 条；当前模型使用 ${newsPoolRows} 个带新闻特征的决策时点，已有 ${modelSeenNewsEvents} 个冻结事件可逐条审计`
             : "学习进度暂不可用"}
         >
           <div className="training-card-head">
@@ -676,9 +691,9 @@ export default function AuditPage() {
             </div>
             <div className="training-progress-row">
               <div className="training-progress-label">
-                <span>当前模型的新闻子集</span>
+                <span>含新闻的决策时点</span>
                 <strong>{learningState === "ready"
-                  ? <>{newsPoolRows}<small> 条</small></>
+                  ? <>{newsPoolRows}<small> 个</small></>
                   : <small>{learningState === "loading" ? "读取中…" : "暂不可用"}</small>}
                 </strong>
               </div>
@@ -688,8 +703,8 @@ export default function AuditPage() {
           <p className="training-card-summary">
             <b>{rowsUntilTraining === null ? "等待数据" : rowsUntilTraining === 0 ? "下一轮已就绪" : `方向再收集 ${rowsUntilTraining} 条`}</b>
             <span>{learningState === "ready"
-              ? `当前 ${directionPoolRows} 条训练批次中，${Math.round(newsPoolCoverage * 100)}% 有合格新闻；下一轮同轮更新`
-              : "新闻子集随下一轮方向模型一起更新"}</span>
+              ? `这是重复决策样本，不是文章数；可读 ${readableNewsTotal} 篇，已解析 ${parsedNewsTotal} 篇，已冻结可审计证据 ${modelSeenNewsEvents} 个事件`
+              : "新闻特征随下一轮方向模型一起更新"}</span>
           </p>
         </div>
       </section>
@@ -698,27 +713,27 @@ export default function AuditPage() {
 
       <section className="annotation-queue" aria-label="Gemini 摘要队列">
         <strong>新闻处理状态</strong>
-        <span><b>{payload?.annotation_queue.ready ?? 0}</b> 已完成</span>
-        <span><b>{payload?.annotation_queue.queued ?? 0}</b> 排队中</span>
-        <span><b>{payload?.annotation_queue.backing_off ?? 0}</b> 退避中</span>
-        <span><b>{payload?.annotation_queue.dead_letter ?? 0}</b> 已隔离</span>
-        <span><b>{payload?.annotation_queue.waiting_content ?? 0}</b> 等待正文</span>
-        <span><b>{payload?.annotation_queue.unavailable_content ?? 0}</b> 正文不可用</span>
-        <small>完整正文由 Gemini 3.5 Flash-Lite 处理：本机已启用 {payload?.annotation_queue.configured_key_count ?? 0} 个 key，每个安全使用 {payload?.annotation_queue.requests_per_minute_per_key ?? 12} RPM；临时失败自动退避重试，确定不可读取的文章保留标题但不阻塞后续新闻。标题中文翻译由 Gemma 4 31B 分流，且不进入训练。</small>
+        <span><b>{payload?.annotation_queue?.ready ?? 0}</b> 已完成</span>
+        <span><b>{payload?.annotation_queue?.queued ?? 0}</b> 排队中</span>
+        <span><b>{payload?.annotation_queue?.backing_off ?? 0}</b> 退避中</span>
+        <span><b>{payload?.annotation_queue?.dead_letter ?? 0}</b> 已隔离</span>
+        <span><b>{payload?.annotation_queue?.waiting_content ?? 0}</b> 等待正文</span>
+        <span><b>{payload?.annotation_queue?.unavailable_content ?? 0}</b> 正文不可用</span>
+        <small>完整正文由 Gemini 3.5 Flash-Lite 处理：本机已启用 {payload?.annotation_queue?.configured_key_count ?? 0} 个 key，每个安全使用 {payload?.annotation_queue?.requests_per_minute_per_key ?? 12} RPM；临时失败自动退避重试，确定不可读取的文章保留标题但不阻塞后续新闻。标题中文翻译由 Gemma 4 31B 分流，且不进入训练。</small>
       </section>
 
       <nav className="audit-tabs" aria-label="审计视图">
-        <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻 <b>{newsIndex.all_total}</b></a>
-        <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>新闻证据管理 <b>{payload?.news_evidence_summary.model_seen_events ?? 0}</b></a>
-        <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件故事链 <b>{payload?.storyline_summary.total ?? 0}</b></a>
-        <a href="/audit?view=decisions" className={view === "decisions" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("decisions"); }}>决策与30分钟结果 <b>{payload?.counts.decision_events ?? 0}</b></a>
+        <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻 <b>{readableNewsTotal}</b></a>
+        <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>新闻证据管理 <b>{payload?.news_evidence_summary?.model_seen_events ?? 0}</b></a>
+        <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件故事链 <b>{payload?.storyline_summary?.total ?? 0}</b></a>
+        <a href="/audit?view=decisions" className={view === "decisions" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("decisions"); }}>决策与30分钟结果 <b>{payload?.counts?.decision_events ?? 0}</b></a>
         <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b>{learningState === "ready" ? `${activeLearningIdentities}组` : learningState === "loading" ? "读取中" : "—"}</b></a>
-        <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b>{payload?.factor_coverage.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</b></a>
+        <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b>{payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</b></a>
       </nav>
 
       {view === "news" && <>
         <section className="news-browser" aria-label="新闻自动分类">
-          <div><strong>自动分类</strong><span>按媒体发布时间排序 · 首次收到时间单独保留审计 · 已归档 {newsIndex.all_total} 条 · 每页 {NEWS_PER_PAGE} 条</span></div>
+          <div><strong>自动分类</strong><span>按媒体发布时间排序 · 可读 {readableNewsTotal} 篇 · 已解析 {parsedNewsTotal} 篇 · 模型候选 {modelCandidateNewsTotal} 篇 · 每页 {NEWS_PER_PAGE} 篇</span></div>
           <nav>
             {categories.map(category => <button key={category.name} type="button" className={newsCategory === category.name ? "active" : ""} onClick={() => { setNewsCategory(category.name); setNewsPage(1); }}>
               {category.name}<b>{category.count}</b>
@@ -730,8 +745,8 @@ export default function AuditPage() {
           {visibleNews.map(row => <NewsRow
             key={`${row.source}-${row.source_item_id}-${row.revision_number}`}
             row={row}
-            keyCount={payload?.annotation_queue.configured_key_count ?? 0}
-            requestsPerMinute={payload?.annotation_queue.requests_per_minute ?? 0}
+            keyCount={payload?.annotation_queue?.configured_key_count ?? 0}
+            requestsPerMinute={payload?.annotation_queue?.requests_per_minute ?? 0}
           />)}
           {Array.from({ length: emptyNewsRows }, (_, index) => <div className="news-row-placeholder" aria-hidden="true" key={`empty-news-row-${index}`} />)}
         </section>
@@ -748,22 +763,22 @@ export default function AuditPage() {
           <p>“模型已看”表示某次冻结预测确实读取过这项事件，不是按今天的规则事后猜测。每份回执同时保存决策时间、模型版本、证据通道与事件哈希；模型最多回看当时规则允许的 72 小时，迟到发现只保留展示，不进入训练。“未进入模型”会明确显示缺正文、太旧、尚未确认或仍在等待下一次预测等原因。</p>
         </header>
         <div className="evidence-summary">
-          <article><span>模型已看事件</span><strong>{payload?.news_evidence_summary.model_seen_events ?? 0}</strong><small>至少有一份冻结回执</small></article>
-          <article><span>冻结使用记录</span><strong>{payload?.news_evidence_summary.frozen_model_uses ?? 0}</strong><small>不同预测与模型分别记账</small></article>
-          <article><span>未进入模型</span><strong>{payload?.news_evidence_summary.model_unseen_events ?? 0}</strong><small>可逐条查看原因</small></article>
-          <article><span>当前达到 Broad 门槛</span><strong>{payload?.news_evidence_summary.broad_model_eligible ?? 0}</strong><small>不等于过去已经被模型读取</small></article>
+          <article><span>模型已看事件</span><strong>{payload?.news_evidence_summary?.model_seen_events ?? 0}</strong><small>至少有一份冻结回执</small></article>
+          <article><span>冻结使用记录</span><strong>{payload?.news_evidence_summary?.frozen_model_uses ?? 0}</strong><small>不同预测与模型分别记账</small></article>
+          <article><span>未进入模型</span><strong>{payload?.news_evidence_summary?.model_unseen_events ?? 0}</strong><small>可逐条查看原因</small></article>
+          <article><span>当前达到 Broad 门槛</span><strong>{payload?.news_evidence_summary?.broad_model_eligible ?? 0}</strong><small>不等于过去已经被模型读取</small></article>
         </div>
         <nav className="evidence-filters" aria-label="模型新闻可见性筛选">
-          <button type="button" className={evidenceMode === "seen" ? "active" : ""} onClick={() => setEvidenceMode("seen")}>模型已看 <b>{payload?.news_evidence_summary.model_seen_events ?? 0}</b></button>
-          <button type="button" className={evidenceMode === "unseen" ? "active" : ""} onClick={() => setEvidenceMode("unseen")}>未进入模型 <b>{payload?.news_evidence_summary.model_unseen_events ?? 0}</b></button>
-          <button type="button" className={evidenceMode === "all" ? "active" : ""} onClick={() => setEvidenceMode("all")}>全部审计 <b>{payload?.news_evidence_summary.displayed_events ?? 0}</b></button>
+          <button type="button" className={evidenceMode === "seen" ? "active" : ""} onClick={() => setEvidenceMode("seen")}>模型已看 <b>{payload?.news_evidence_summary?.model_seen_events ?? 0}</b></button>
+          <button type="button" className={evidenceMode === "unseen" ? "active" : ""} onClick={() => setEvidenceMode("unseen")}>未进入模型 <b>{payload?.news_evidence_summary?.model_unseen_events ?? 0}</b></button>
+          <button type="button" className={evidenceMode === "all" ? "active" : ""} onClick={() => setEvidenceMode("all")}>全部审计 <b>{payload?.news_evidence_summary?.displayed_events ?? 0}</b></button>
         </nav>
         <div className="evidence-table-wrap"><table className="evidence-table">
           <thead><tr><th>模型回执</th><th>事件与主题</th><th>冻结使用 / 未看原因</th><th>发布时间 / 首次收到</th></tr></thead>
           <tbody>{visibleEvidence.map(row => <tr key={row.event_key}>
             <td><span className={`model-seen-badge ${row.model_seen ? "is-seen" : "is-unseen"}`}>{row.model_seen ? "模型已看" : "模型未看"}</span><small>{EVIDENCE_LABELS[row.evidence_grade] ?? row.evidence_grade}<br />{row.model_seen ? "当时已进入冻结模型输入" : row.broad_model_eligible ? "当前达到 Broad 门槛" : "当前不符合模型门槛"}</small></td>
-            <td><strong>{row.canonical_headline}</strong><div className="evidence-topics">{row.topics.map(topic => <span key={topic}>{TOPIC_LABELS[topic] ?? topic}</span>)}</div></td>
-            <td>{row.model_seen ? <><strong>{row.frozen_decisions} 次决策 · {row.frozen_model_uses} 份模型回执</strong><small>{row.model_identities.map(identity => IDENTITY_LABELS[identity] ?? identity).join(" · ")}<br />首次用于 {time(row.first_model_decision_time)} · 最近用于 {time(row.last_model_decision_time)}</small></> : <><strong>没有冻结回执</strong><small>{row.model_unseen_reason_codes.map(code => EVIDENCE_REASON_LABELS[code] ?? code).join(" · ") || "未达到当时的可见性与证据门槛"}</small></>}</td>
+            <td><strong>{row.canonical_headline}</strong><div className="evidence-topics">{(row.topics ?? []).map(topic => <span key={topic}>{TOPIC_LABELS[topic] ?? topic}</span>)}</div></td>
+            <td>{row.model_seen ? <><strong>{row.frozen_decisions} 次决策 · {row.frozen_model_uses} 份模型回执</strong><small>{(row.model_identities ?? []).map(identity => IDENTITY_LABELS[identity] ?? identity).join(" · ") || "冻结模型身份未记录"}<br />首次用于 {time(row.first_model_decision_time)} · 最近用于 {time(row.last_model_decision_time)}</small></> : <><strong>没有冻结回执</strong><small>{(row.model_unseen_reason_codes ?? []).map(code => EVIDENCE_REASON_LABELS[code] ?? code).join(" · ") || "未达到当时的可见性与证据门槛"}</small></>}</td>
             <td><time>{row.source_published_time ? time(row.source_published_time) : "发布时间未知"}</time><small>首次收到 {time(row.collector_first_seen_time)}<br />{row.independent_publishers} 个独立来源 · {row.member_count} 篇成员新闻</small></td>
           </tr>)}</tbody>
         </table></div>
@@ -784,11 +799,11 @@ export default function AuditPage() {
           {story.commentary.length > 0 && <details className="story-attachments"><summary>评论与预测 {story.commentary.length}</summary>{story.commentary.map(item => <p key={item.event_key}>{item.headline}</p>)}</details>}
           {story.background.length > 0 && <details className="story-attachments"><summary>背景材料 {story.background.length}</summary>{story.background.map(item => <p key={item.event_key}>{item.headline}</p>)}</details>}
         </article>)}</div>
-        {(payload?.storylines.length ?? 0) === 0 && <div className="story-empty"><b>正在建立 V5 事件链</b><span>孤立事实先留在候选区；在形成第二个不同进展前，不会冒充完整故事。</span></div>}
-        <details className="unassigned-story-events" open><summary>市场叙事候选 <b>{payload?.storyline_summary.market_narrative_total ?? 0}</b> <small>只有市场反应或评论，核心现实进展尚未确认</small></summary>{(payload?.market_narrative_candidates ?? []).map(story => <div key={story.storyline_id}><time>{time(story.last_updated)}</time><span><b>{story.title}</b><br />{story.latest_change}</span><small>{story.event_count} 个候选节点 · {story.evidence_document_count} 份文件 · 不进入活跃故事</small></div>)}</details>
-        <details className="unassigned-story-events"><summary>历史档案 <b>{payload?.storyline_summary.archived_total ?? 0}</b> <small>ARCHIVAL_BACKFILL，不显示为当前新事件</small></summary>{(payload?.archived_storylines ?? []).map(story => <div key={story.storyline_id}><time>{time(story.timeline[0]?.event_time)}</time><span><b>{story.title}</b><br />{story.latest_change}</span><small>{story.event_count} 个历史事件 · 系统首次收录 {time(story.last_updated)}</small></div>)}{(payload?.archived_story_event_candidates ?? []).map(item => <div key={item.candidate_id}><time>{time(item.event_time)}</time><span>{item.headline}</span><small>{item.evidence_documents} 份历史证据文件 · 系统首次收录 {time(item.first_seen)}</small></div>)}</details>
-        <details className="unassigned-story-events" open><summary>新事件候选 <b>{payload?.storyline_summary.candidate_total ?? 0}</b> <small>等待第二个不同进展，不会一篇新闻生成一张故事卡</small></summary>{(payload?.story_event_candidates ?? []).map(item => <div key={item.candidate_id}><time>{time(item.first_seen)}</time><span>{item.headline}</span><small>{item.evidence_documents} 篇证据 · {item.independent_publishers} 个独立来源 · {item.episode_key}</small></div>)}</details>
-        <details className="unassigned-story-events"><summary>未归属事件 <b>{payload?.storyline_summary.unassigned_total ?? 0}</b></summary>{(payload?.unassigned_story_events ?? []).map(item => <div key={item.event_key}><time>{time(item.first_seen)}</time><span>{item.headline}</span><small>{item.record_kind} · {item.reason}</small></div>)}</details>
+        {(payload?.storylines?.length ?? 0) === 0 && <div className="story-empty"><b>正在建立 V5 事件链</b><span>孤立事实先留在候选区；在形成第二个不同进展前，不会冒充完整故事。</span></div>}
+        <details className="unassigned-story-events" open><summary>市场叙事候选 <b>{payload?.storyline_summary?.market_narrative_total ?? 0}</b> <small>只有市场反应或评论，核心现实进展尚未确认</small></summary>{(payload?.market_narrative_candidates ?? []).map(story => <div key={story.storyline_id}><time>{time(story.last_updated)}</time><span><b>{story.title}</b><br />{story.latest_change}</span><small>{story.event_count} 个候选节点 · {story.evidence_document_count} 份文件 · 不进入活跃故事</small></div>)}</details>
+        <details className="unassigned-story-events"><summary>历史档案 <b>{payload?.storyline_summary?.archived_total ?? 0}</b> <small>ARCHIVAL_BACKFILL，不显示为当前新事件</small></summary>{(payload?.archived_storylines ?? []).map(story => <div key={story.storyline_id}><time>{time(story.timeline[0]?.event_time)}</time><span><b>{story.title}</b><br />{story.latest_change}</span><small>{story.event_count} 个历史事件 · 系统首次收录 {time(story.last_updated)}</small></div>)}{(payload?.archived_story_event_candidates ?? []).map(item => <div key={item.candidate_id}><time>{time(item.event_time)}</time><span>{item.headline}</span><small>{item.evidence_documents} 份历史证据文件 · 系统首次收录 {time(item.first_seen)}</small></div>)}</details>
+        <details className="unassigned-story-events" open><summary>新事件候选 <b>{payload?.storyline_summary?.candidate_total ?? 0}</b> <small>等待第二个不同进展，不会一篇新闻生成一张故事卡</small></summary>{(payload?.story_event_candidates ?? []).map(item => <div key={item.candidate_id}><time>{time(item.first_seen)}</time><span>{item.headline}</span><small>{item.evidence_documents} 篇证据 · {item.independent_publishers} 个独立来源 · {item.episode_key}</small></div>)}</details>
+        <details className="unassigned-story-events"><summary>未归属事件 <b>{payload?.storyline_summary?.unassigned_total ?? 0}</b></summary>{(payload?.unassigned_story_events ?? []).map(item => <div key={item.event_key}><time>{time(item.first_seen)}</time><span>{item.headline}</span><small>{item.record_kind} · {item.reason}</small></div>)}</details>
         {payload?.system.deployment && <footer className="story-policy-footer"><span>Runtime Git SHA <b>{payload.system.deployment.runtime_git_sha ?? "UNKNOWN"}</b></span><span>Story Policy <b>{payload.system.deployment.storyline_policy_version}</b></span></footer>}
       </section>}
 
@@ -819,24 +834,24 @@ export default function AuditPage() {
         <header className="league-intro">
           <div><p className="eyebrow">LIVE OOS LEARNING CURVES</p><h2>每次训练是一组，<br />只看它之后没见过的数据。</h2></div>
           <dl>
-            <div><dt>Collection started</dt><dd>{time(payload?.learning_curves.collection_epoch)}</dd></div>
-            <div><dt>Evaluation V2 started</dt><dd>{time(payload?.learning_curves.evaluation_epoch_v2)}</dd></div>
-            <div><dt>当前证据等级</dt><dd>{payload?.learning_curves.learning_stage ?? "ENGINEERING"}</dd></div>
+            <div><dt>Collection started</dt><dd>{time(payload?.learning_curves?.collection_epoch)}</dd></div>
+            <div><dt>Evaluation V2 started</dt><dd>{time(payload?.learning_curves?.evaluation_epoch_v2)}</dd></div>
+            <div><dt>当前证据等级</dt><dd>{payload?.learning_curves?.learning_stage ?? "ENGINEERING"}</dd></div>
           </dl>
         </header>
         <div className="evidence-lane-grid">
-          <article><span>Legacy Engineering</span><strong>{learningState === "ready" ? payload?.learning_curves.legacy_engineering_rows ?? 0 : "—"}</strong><small>只用于修复审计</small></article>
-          <article><span>Repaired Seed</span><strong>{learningState === "ready" ? payload?.learning_curves.repaired_seed_rows ?? 0 : "—"}</strong><small>可训练，不计 Live OOS</small></article>
-          <article><span>Live OOS</span><strong>{learningState === "ready" ? payload?.learning_curves.live_oos_rows ?? 0 : "—"}</strong><small>{learningState === "loading" ? "正在读取公开学习快照" : "模型上线后的真实前向结果"}</small></article>
-          <article><span>30m Blocks / Days</span><strong>{learningState === "ready" ? `${payload?.learning_curves.effective_30m_blocks ?? 0} / ${payload?.learning_curves.distinct_trading_days ?? 0}` : "—"}</strong><small>置信区间的独立证据</small></article>
-          <article><span>有效 / 隔离样本</span><strong>{learningState === "ready" ? `${payload?.learning_curves.outcome_quality.valid ?? 0} / ${payload?.learning_curves.outcome_quality.invalid ?? 0}` : "—"}</strong><small>隔离样本不评分、不训练；点开 K 线可看具体原因</small></article>
-          <article><span>News exposure</span><strong>{learningState === "ready" ? payload?.learning_curves.news_exposed_rows ?? 0 : "—"}</strong><small>{learningState === "ready" ? `${payload?.learning_curves.distinct_news_clusters ?? 0} 个可见 cluster` : "正在读取"}</small></article>
-          <article><span>训练数据代 / 运行</span><strong>{learningState === "ready" ? `${payload?.learning_curves.training_generation_count ?? 0} / ${payload?.learning_curves.training_run_count ?? 0}` : "—"}</strong><small>{learningState === "ready" ? `${payload?.learning_curves.recovery_rebuild_count ?? 0} 次只是恢复重建，不算新一组` : "正在读取"}</small></article>
-          <article><span>Next fit</span><strong>{learningState === "ready" ? payload?.learning_curves.next_training_threshold ?? 96 : "—"}</strong><small>{learningState === "ready" ? `再有 ${Math.max(0, (payload?.learning_curves.next_training_threshold ?? 96) - (payload?.training.complete_rows ?? 0))} 条成熟数据训练下一组` : "正在读取"}</small></article>
+          <article><span>Legacy Engineering</span><strong>{learningState === "ready" ? payload?.learning_curves?.legacy_engineering_rows ?? 0 : "—"}</strong><small>只用于修复审计</small></article>
+          <article><span>Repaired Seed</span><strong>{learningState === "ready" ? payload?.learning_curves?.repaired_seed_rows ?? 0 : "—"}</strong><small>可训练，不计 Live OOS</small></article>
+          <article><span>Live OOS</span><strong>{learningState === "ready" ? payload?.learning_curves?.live_oos_rows ?? 0 : "—"}</strong><small>{learningState === "loading" ? "正在读取公开学习快照" : "模型上线后的真实前向结果"}</small></article>
+          <article><span>30m Blocks / Days</span><strong>{learningState === "ready" ? `${payload?.learning_curves?.effective_30m_blocks ?? 0} / ${payload?.learning_curves?.distinct_trading_days ?? 0}` : "—"}</strong><small>置信区间的独立证据</small></article>
+          <article><span>有效 / 隔离样本</span><strong>{learningState === "ready" ? `${payload?.learning_curves?.outcome_quality?.valid ?? 0} / ${payload?.learning_curves?.outcome_quality?.invalid ?? 0}` : "—"}</strong><small>隔离样本不评分、不训练；点开 K 线可看具体原因</small></article>
+          <article><span>News exposure</span><strong>{learningState === "ready" ? payload?.learning_curves?.news_exposed_rows ?? 0 : "—"}</strong><small>{learningState === "ready" ? `${payload?.learning_curves?.distinct_news_clusters ?? 0} 个可见 cluster` : "正在读取"}</small></article>
+          <article><span>训练数据代 / 运行</span><strong>{learningState === "ready" ? `${payload?.learning_curves?.training_generation_count ?? 0} / ${payload?.learning_curves?.training_run_count ?? 0}` : "—"}</strong><small>{learningState === "ready" ? `${payload?.learning_curves?.recovery_rebuild_count ?? 0} 次只是恢复重建，不算新一组` : "正在读取"}</small></article>
+          <article><span>Next fit</span><strong>{learningState === "ready" ? payload?.learning_curves?.next_training_threshold ?? 96 : "—"}</strong><small>{learningState === "ready" ? `再有 ${Math.max(0, (payload?.learning_curves?.next_training_threshold ?? 96) - (payload?.training?.complete_rows ?? 0))} 条成熟数据训练下一组` : "正在读取"}</small></article>
         </div>
-        {(payload?.learning_curves.news_model_activation?.length ?? 0) > 0 && <section className={`news-model-activation ${inactiveNewsModels.length > 0 ? "is-inactive" : "is-active"}`}>
+        {(payload?.learning_curves?.news_model_activation?.length ?? 0) > 0 && <section className={`news-model-activation ${inactiveNewsModels.length > 0 ? "is-inactive" : "is-active"}`}>
           <div><span>NEWS MODEL CONTRACT</span><h3>{inactiveNewsModels.length > 0 ? "新闻模型尚未激活" : "新闻模型使用当前规则"}</h3></div>
-          <div className="news-model-activation-list">{(payload?.learning_curves.news_model_activation ?? []).map(row => <p key={row.model_identity}><b>{MODEL_LABELS[row.model_identity] ?? row.model_identity}</b><span>{row.status === "ACTIVE" ? "已激活" : row.reason}</span></p>)}</div>
+          <div className="news-model-activation-list">{(payload?.learning_curves?.news_model_activation ?? []).map(row => <p key={row.model_identity}><b>{MODEL_LABELS[row.model_identity] ?? row.model_identity}</b><span>{row.status === "ACTIVE" ? "已激活" : row.reason}</span></p>)}</div>
           <small>{inactiveNewsModels.length > 0 ? "旧规则模型不会被静默复活；当前只保留黄金自身模型继续 Shadow。证据足够后会立即训练兼容的新新闻版本。" : "特征版本、来源资格版本和模型文件均与当前新闻规则一致。"}</small>
         </section>}
         <div className="league-cost-note"><b>成本口径</b><span>收益已使用可执行 Bid/Ask（含 spread），并按入场、退出两边各 $30 / 百万美元成交额扣除 commission；slippage 暂按 0 的 Shadow 假设计算。仍未包含账户实际成交偏差，因此不是实盘 PnL。</span></div>
@@ -854,11 +869,11 @@ export default function AuditPage() {
           </div>
         </details>
         <section className="model-score-summary"><header><div><span>LIVE OOS SCOREBOARD</span><h3>五套模型，现在表现怎样？</h3></div><small>左边是本组开始前，箭头后是连续累计，圆点后是本组独立贡献。</small></header><div className="summary-cadence"><span>统计频率</span><button type="button" className={summaryCadence === "EVERY_5M" ? "active" : ""} onClick={() => setSummaryCadence("EVERY_5M")}>每5分钟（重叠）</button><button type="button" className={summaryCadence === "FIXED_30M" ? "active" : ""} onClick={() => setSummaryCadence("FIXED_30M")}>每30分钟（:00 / :30）</button><small>预测期限始终是30分钟。</small></div>
-        {(payload?.learning_curves.models.length ?? 0) === 0 ? <div className="league-empty">
+        {(payload?.learning_curves?.models?.length ?? 0) === 0 ? <div className="league-empty">
           <strong>正在建立第一版 Preview</strong><p>达到 96 条修复或 Forward 完整样本即可训练 Market Preview，不需要等待60天。曲线只从模型创建后的新 Decision 开始，绝不回填假历史成绩。</p>
         </div> : <div className="compact-model-summary">{Object.keys(MODEL_LABELS).filter(identity => identity !== "CHAMPION_0").map(identity => {
-          const process = payload?.learning_curves.rolling_processes.find(row => row.model_identity === identity);
-          const latestGroup = payload?.learning_curves.version_groups.find(row => row.model_identity === identity && row.lifecycle_status === "LATEST");
+          const process = payload?.learning_curves?.rolling_processes?.find(row => row.model_identity === identity);
+          const latestGroup = payload?.learning_curves?.version_groups?.find(row => row.model_identity === identity && row.lifecycle_status === "LATEST");
           if (!process && !latestGroup) return null;
           const diagnostic = identity === "NEWS_RESIDUAL" || identity === "BROAD_NEWS_RESIDUAL";
           const processMetric = process?.cadence_metrics?.[summaryCadence] ?? process;
@@ -871,8 +886,8 @@ export default function AuditPage() {
           const tone = group === null ? "is-pending" : group >= 0 ? "is-positive" : "is-negative";
           return <article key={identity}><b>{MODEL_LABELS[identity]}{diagnostic ? <small>新闻修正量</small> : null}</b><div className="return-flow" aria-label={`本组开始前 ${percent(history)}，加入本组后 ${percent(total)}，本组贡献 ${percent(group)}`}><span title="本组开始前的历史累计">{history === null ? "—" : percent(history)}</span><i className={tone} aria-hidden="true">→</i><strong title="加入本组后的连续累计">{total === null ? "等待结果" : percent(total)}</strong><i className="return-separator" aria-hidden="true">·</i><strong className={`group-return ${tone}`} title="本组独立贡献">{group === null ? "等待" : percent(group)}</strong></div></article>;
         })}</div>}</section>
-        <footer className="league-footer">{payload?.learning_curves.disclaimer ?? "早期曲线用于观察学习过程，不代表已证明盈利。"} 单日和双日新闻模型明确标记 EXPERIMENTAL；达到3个新闻日期后自动进入标准证据状态。当前只运行每个 Ridge 身份的最新版和前一版；{archivedModelCount} 个旧版本的 artifact、预测和成绩已永久归档。零收益安全基准不训练、不使用 AI、不占 Ridge 版本名额。Preview 与 Shadow 都没有下单权限，也不会自动晋升。</footer>
-        <LearningGraphModal key={graphStartTab} open={graphOpen} onClose={() => setGraphOpen(false)} startTab={graphStartTab} curves={payload?.learning_curves.identity_curves ?? []} market={payload?.market_chart} versionGroups={payload?.learning_curves.version_groups ?? []} execution={payload?.execution_learning} />
+        <footer className="league-footer">{payload?.learning_curves?.disclaimer ?? "早期曲线用于观察学习过程，不代表已证明盈利。"} 单日和双日新闻模型明确标记 EXPERIMENTAL；达到3个新闻日期后自动进入标准证据状态。当前只运行每个 Ridge 身份的最新版和前一版；{archivedModelCount} 个旧版本的 artifact、预测和成绩已永久归档。零收益安全基准不训练、不使用 AI、不占 Ridge 版本名额。Preview 与 Shadow 都没有下单权限，也不会自动晋升。</footer>
+        <LearningGraphModal key={graphStartTab} open={graphOpen} onClose={() => setGraphOpen(false)} startTab={graphStartTab} curves={payload?.learning_curves?.identity_curves ?? []} market={payload?.market_chart} versionGroups={payload?.learning_curves?.version_groups ?? []} execution={payload?.execution_learning} />
       </section>}
 
       {view === "coverage" && <section className="coverage-grid">
@@ -891,13 +906,25 @@ export default function AuditPage() {
 function ExecutionResearch({ status, onOpenGraph }: { status?: Payload["execution_learning"]; onOpenGraph: () => void }) {
   const lot = status?.models.find(row => row.model_identity === "LOT_RIDGE");
   const exit = status?.models.find(row => row.model_identity === "EXIT_RIDGE");
-    const card = (title: string, model: typeof lot, detail: string, contract: string) => <article>
-    <div className="execution-title"><b>{title}</b><em className={model?.status === "RUNNING" ? "is-running" : ""}>{model?.status === "RUNNING" ? "学习中" : "收集中"}</em></div>
-      <strong>{model?.training_decisions ? `已学习 ${model.training_decisions} 个历史方向` : `${model?.available_examples ?? 0} / ${model?.next_training_threshold ?? 0}`}</strong>
-      <p>{detail}</p><dl><div><dt>可用方向决策</dt><dd>{model?.available_examples ?? 0}</dd></div><div><dt>未来位置 / 已结算</dt><dd>{model?.predictions ?? 0} / {model?.scores ?? 0}</dd></div><div><dt>下一次训练</dt><dd>{model?.next_training_threshold ?? "—"} 个方向</dd></div></dl><small>{contract}</small>
+  const card = (title: string, model: typeof lot, hint: string) => <article>
+    <div className="execution-title">
+      <div><b>{title}</b><small>{hint}</small></div>
+      <em className={model?.status === "RUNNING" ? "is-running" : ""}>{model?.status === "RUNNING" ? "学习中" : "收集中"}</em>
+    </div>
+    <dl>
+      <div><dt>已学习</dt><dd>{model?.training_decisions ?? 0}</dd></div>
+      <div><dt>已结算</dt><dd>{model?.scores ?? 0}</dd></div>
+      <div><dt>下次训练</dt><dd>{model?.next_training_threshold ?? "—"}</dd></div>
+    </dl>
   </article>;
-    return <section className="execution-research"><header><div><span>EXECUTION FOLLOWS LIVE DIRECTION</span><h3>仓位与退出跟随同一套方向。</h3><p>方向固定来自“{status?.source_model_label ?? "黄金＋大视野新闻 Ridge"}”。它当时 LONG 就只研究这笔 LONG；SHORT 同理；WAIT 不创建仓位。</p></div><button type="button" onClick={onOpenGraph}>查看逐笔未来结果 ↗</button></header><div>
-      {card("仓位倍率 Ridge", lot, "每个冻结方向只产生一个位置，在 0.5x / 1.0x / 2.0x 中选择倍率。三种倍率分别学习未来效用，不再同时虚构 Long 和 Short。", "Shadow multiplier · 一个方向=一个位置 · 非账户 lot")}
-      {card("Exit Ridge", exit, "同一位置按 5 / 10 / 15 / 20 / 25 分钟顺序检查。模型一旦选择 EXIT，这笔位置结束，不会继续制造后续 HOLD / EXIT 评分。", `历史路径检查点 ${exit?.training_observations ?? 0} 个 · 未来评分按位置计数`) }
-  </div></section>;
+  return <section className="execution-research compact-execution-research">
+    <header>
+      <div><span>EXECUTION RESEARCH</span><h3>仓位与退出</h3><p>跟随“{status?.source_model_label ?? "黄金＋大视野新闻 Ridge"}”的 Live 方向；WAIT 不建立位置。</p></div>
+      <button type="button" onClick={onOpenGraph}>详细结果 ↗</button>
+    </header>
+    <div>
+      {card("仓位倍率 Ridge", lot, "0.5x / 1.0x / 2.0x")}
+      {card("Exit Ridge", exit, "5 / 10 / 15 / 20 / 25 分钟")}
+    </div>
+  </section>;
 }

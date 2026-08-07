@@ -49,6 +49,35 @@ _LEGACY_PROMPTS = (
 )
 
 
+def _visibility_event_ref(event: dict | None, news, annotation) -> dict:
+    news_row = dict(news)
+    annotation_row = dict(annotation)
+    annotation_payload = json.loads(annotation_row.get("annotation_json") or "{}")
+    if event is not None:
+        return {
+            "event_key": event["event_cluster_id"],
+            "source_hash": event["source_hash"],
+            "canonical_headline": event["canonical_headline"],
+            "canonical_source": event["canonical_source"],
+            "source_published_time": event.get("source_published_time"),
+            "collector_first_seen_time": event["collector_first_seen_time"],
+            "topics": list(event.get("topics") or []),
+            "evidence_grade": event.get("evidence_grade") or "FROZEN_MODEL_INPUT",
+        }
+    return {
+        "event_key": str(news_row["cluster_id"]),
+        "source_hash": canonical_hash((news_row["content_hash"], annotation_row["annotation_id"])),
+        "canonical_headline": str(
+            annotation_payload.get("headline_zh") or news_row["headline"]
+        ),
+        "canonical_source": str(news_row["source"]),
+        "source_published_time": news_row.get("source_published_time"),
+        "collector_first_seen_time": news_row["collector_first_seen_time"],
+        "topics": list(_topics(annotation_row)),
+        "evidence_grade": "PRIMARY",
+    }
+
+
 def _legacy_event_key(row: dict, topics: tuple[str, ...]) -> str:
     day = str(row["collector_first_seen_time"])[:10]
     entities = sorted({
@@ -119,10 +148,17 @@ def _legacy_event_evidence_rows(connection, decision_time: datetime) -> list[dic
             candidates,
             key=lambda row: (float(row["confidence"]), len(str(row["body"])), row["source_item_id"]),
         )
+        canonical_annotation = json.loads(canonical.get("annotation_json") or "{}")
         topics = tuple(sorted({topic for row in members for topic in row["topics"]}))
         eligible = grade in {"PRIMARY", "CORROBORATED"} and bool(ACTION_TOPICS & set(topics))
         events.append({
             "event_cluster_id": event_id,
+            "canonical_source": canonical["source"],
+            "canonical_source_item_id": canonical["source_item_id"],
+            "canonical_headline": str(
+                canonical_annotation.get("headline_zh") or canonical["headline"]
+            ),
+            "source_published_time": canonical.get("source_published_time"),
             "topics": topics,
             "evidence_grade": grade,
             "broad_model_eligible": eligible,
@@ -228,8 +264,9 @@ def aggregate_legacy_news_features_v2(ledger, decision_time: datetime) -> dict:
             evidence.append((series_id, values[-1]["content_hash"]))
 
     broad_totals = {name: 0.0 for name in BROAD_NEWS_FEATURES}
+    all_events = _legacy_event_evidence_rows(ledger.connection, decision_time)
     broad_events = [
-        row for row in _legacy_event_evidence_rows(ledger.connection, decision_time)
+        row for row in all_events
         if row["broad_model_eligible"]
         and decision_time - datetime.fromisoformat(row["collector_first_seen_time"]) <= MAX_NEWS_AGE
     ]
@@ -270,6 +307,18 @@ def aggregate_legacy_news_features_v2(ledger, decision_time: datetime) -> dict:
         ):
             broad_totals[name] /= broad_weight_sum
     totals.update(broad_totals)
+    event_by_item = {
+        (row["canonical_source"], row["canonical_source_item_id"]): row
+        for row in all_events
+    }
+    official_visible_events = []
+    for _, news, row in canonical.values():
+        event = event_by_item.get((news["source"], news["source_item_id"]))
+        official_visible_events.append(_visibility_event_ref(event, news, row))
+    broad_visible_events = [
+        _visibility_event_ref(row, row, row)
+        for row in broad_events
+    ]
     return {
         "features": totals,
         "eligibility_version": LEGACY_ELIGIBILITY_VERSION,
@@ -278,4 +327,7 @@ def aggregate_legacy_news_features_v2(ledger, decision_time: datetime) -> dict:
         "distinct_news_clusters": len(canonical),
         "distinct_event_types": len(event_types),
         "source_evidence_hash": canonical_hash((evidence, broad_evidence)),
+        "evidence_policy_version": LEGACY_EVIDENCE_POLICY_VERSION,
+        "official_visible_events": official_visible_events,
+        "broad_visible_events": broad_visible_events,
     }

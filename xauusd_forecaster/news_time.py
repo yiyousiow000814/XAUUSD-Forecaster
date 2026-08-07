@@ -8,6 +8,23 @@ from typing import Mapping
 
 
 MAX_ACTIONABLE_NEWS_AGE = timedelta(hours=72)
+MAX_ACTIONABLE_DISCOVERY_DELAY = timedelta(hours=1)
+
+_CATEGORY_TIME_RULES = {
+    "inflation_employment": (timedelta(hours=24), 180.0),
+    "rates_fed": (timedelta(hours=72), 360.0),
+    "growth_economy": (timedelta(hours=48), 360.0),
+    "usd_liquidity": (timedelta(hours=48), 360.0),
+    "oil_energy": (timedelta(hours=48), 360.0),
+    "war_geopolitics": (timedelta(hours=36), 360.0),
+    "central_bank_gold": (timedelta(days=7), 1440.0),
+    "risk_sentiment": (timedelta(hours=24), 180.0),
+}
+
+
+def category_time_rule(category: str | None) -> tuple[timedelta, float]:
+    """Return the frozen actionable window and freshness half-life."""
+    return _CATEGORY_TIME_RULES.get(str(category or ""), (MAX_ACTIONABLE_NEWS_AGE, 360.0))
 
 
 @dataclass(frozen=True)
@@ -40,6 +57,8 @@ def assess_news_time(
     *,
     decision_time: datetime,
     forward_epoch: datetime,
+    max_actionable_age: timedelta = MAX_ACTIONABLE_NEWS_AGE,
+    max_discovery_delay: timedelta = MAX_ACTIONABLE_DISCOVERY_DELAY,
 ) -> NewsTimeAssessment:
     """Keep receipt visibility separate from economic freshness.
 
@@ -69,8 +88,8 @@ def assess_news_time(
         return NewsTimeAssessment(
             False, published, age_minutes, delay, "PUBLISHED_AFTER_DECISION"
         )
-    if first_seen - published > MAX_ACTIONABLE_NEWS_AGE:
+    if first_seen - published > max_discovery_delay:
         return NewsTimeAssessment(False, published, age_minutes, delay, "LATE_DISCOVERY")
-    if decision - published > MAX_ACTIONABLE_NEWS_AGE:
+    if decision - published > max_actionable_age:
         return NewsTimeAssessment(False, published, age_minutes, delay, "STALE_EVENT")
     return NewsTimeAssessment(True, published, max(0.0, age_minutes), delay, "CURRENT_EVENT")

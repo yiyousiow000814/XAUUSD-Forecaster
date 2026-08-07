@@ -33,13 +33,16 @@ from xauusd_forecaster.market import (
     build_forward_snapshot,
 )
 from xauusd_forecaster.news import (
+    GoogleNewsLane,
     RssSource,
     collect_bls_macro,
     collect_direct_full_text_rss_news,
     collect_direct_full_text_html_news,
     collect_fred_macro,
+    collect_federal_reserve_news,
     collect_gdelt_news,
     collect_google_geopolitical_news,
+    collect_google_news_lane,
     collect_world_gold_council_news,
     parse_rss,
 )
@@ -319,6 +322,43 @@ def test_official_rss_parser_stamps_real_fetch_time() -> None:
     assert row["source_published_time"] < row["collector_first_seen_time"]
 
 
+def test_federal_reserve_intake_requires_current_full_text(tmp_path) -> None:
+    fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
+    ledger = ForwardLedger(
+        tmp_path / "forward.sqlite3", now=fetched - timedelta(hours=1)
+    )
+
+    def feed(source: RssSource) -> bytes:
+        return f"""<rss><channel><item><guid>{source.name}</guid>
+        <title>Current Federal Reserve release</title>
+        <description>Headline placeholder</description>
+        <pubDate>Wed, 05 Aug 2026 10:00:00 GMT</pubDate>
+        <link>https://example.test/{source.name}</link></item></channel></rss>""".encode()
+
+    unavailable = collect_federal_reserve_news(
+        ledger, fetched, feed,
+        lambda _url: (_ for _ in ()).throw(ValueError("blocked")),
+    )
+    assert ledger.count("news_revisions") == 0
+    assert all(
+        item["rejected_reasons"] == {"FULL_TEXT_UNAVAILABLE": 1}
+        for item in unavailable
+    )
+
+    accepted = collect_federal_reserve_news(
+        ledger,
+        fetched + timedelta(seconds=1),
+        feed,
+        lambda url: ("auditable policy evidence " * 30, url),
+    )
+    assert ledger.count("news_revisions") == 3
+    assert all(item["inserted_revisions"] == 1 for item in accepted)
+    assert all(
+        str(row["body"]).startswith("[FULL_TEXT")
+        for row in ledger.connection.execute("SELECT body FROM news_revisions")
+    )
+
+
 def test_fed_release_hydration_follows_accessible_full_text_and_appends_revision(
     tmp_path,
 ) -> None:
@@ -468,11 +508,12 @@ def test_non_fed_permanent_denial_is_quarantined_without_component_failure(
     article_url = "https://publisher.example/protected"
     ledger.append_news_revision(
         {
-            "source": "google_news_gold_context",
-            "source_item_id": "protected-article",
+                "source": "google_news_gold_context",
+                "source_item_id": "protected-article",
+                "source_published_time": fetched,
             "collector_first_seen_time": fetched,
             "fetched_time": fetched,
-            "headline": "Protected article",
+                "headline": "Gold and Federal Reserve rates protected article",
             "body": "Headline-only discovery record",
             "link": article_url,
             "content_hash": hashlib.sha256(b"protected").hexdigest(),
@@ -547,7 +588,9 @@ def test_bls_api_values_are_versioned_and_rate_limited(tmp_path, monkeypatch) ->
 
 def test_broad_free_sources_are_first_seen_versioned_and_rate_limited(tmp_path) -> None:
     fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+    ledger = ForwardLedger(
+        tmp_path / "forward.sqlite3", now=fetched - timedelta(hours=1)
+    )
 
     def fred_fetcher(url: str) -> bytes:
         series = url.split("id=")[1].split("&")[0]
@@ -567,21 +610,26 @@ def test_broad_free_sources_are_first_seen_versioned_and_rate_limited(tmp_path) 
         "sourcecountry": "US",
         "language": "English",
     }]}).encode()
-    assert collect_gdelt_news(ledger, fetched, lambda _: gdelt)["status"] == "OK"
+    assert collect_gdelt_news(
+        ledger, fetched, lambda _: gdelt,
+        content_extractor=lambda url: ("geopolitical evidence " * 30, url),
+    )["status"] == "OK"
 
     geo_rss = b"""<rss><channel><item><guid>geo-2</guid><title>Gold conflict update</title>
     <description>Geopolitical monitor</description><pubDate>Wed, 05 Aug 2026 10:00:00 GMT</pubDate>
     <link>https://example.test/geo-2</link></item></channel></rss>"""
     assert collect_google_geopolitical_news(
-        ledger, fetched, lambda _: geo_rss
+        ledger, fetched, lambda _: geo_rss,
+        content_extractor=lambda url: ("geopolitical gold evidence " * 30, url),
     )["status"] == "OK"
 
     wgc = b'''<a href="/goldhub/gold-focus/2026/08/central-bank-gold">Central bank gold buying</a>'''
     assert collect_world_gold_council_news(
-        ledger, fetched, lambda _: wgc
+        ledger, fetched, lambda _: wgc,
+        content_extractor=lambda url: ("central bank gold evidence " * 30, url),
     )["status"] == "OK"
     assert ledger.count("macro_observations") == 12
-    assert ledger.count("news_revisions") == 3
+    assert ledger.count("news_revisions") == 2
 
 
 def test_gdelt_429_uses_exponential_backoff_without_blocking_fallback(tmp_path) -> None:
@@ -613,10 +661,19 @@ def test_gdelt_429_uses_exponential_backoff_without_blocking_fallback(tmp_path) 
 
 def test_direct_official_rss_sources_are_bounded_and_rate_limited(tmp_path) -> None:
     fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+    ledger = ForwardLedger(
+        tmp_path / "forward.sqlite3", now=fetched - timedelta(hours=1)
+    )
 
     def fetcher(source: RssSource) -> bytes:
-        topic = "oil production" if source.name.startswith("eia_") else "monetary policy"
+        if source.name == "bls_employment_situation":
+            topic = "employment situation nonfarm payroll update"
+        elif source.name == "bls_consumer_price_index":
+            topic = "consumer price index inflation update"
+        elif source.name == "bls_job_openings":
+            topic = "JOLTS job openings update"
+        else:
+            topic = "oil production" if source.name.startswith("eia_") else "monetary policy"
         link = (
             "/pressroom/releases/example.php"
             if source.name == "eia_press_releases"
@@ -628,15 +685,19 @@ def test_direct_official_rss_sources_are_bounded_and_rate_limited(tmp_path) -> N
         <pubDate>Wed, 05 Aug 2026 10:00:00 GMT</pubDate>
         <link>{link}</link></item></channel></rss>""".encode()
 
-    first = collect_direct_full_text_rss_news(ledger, fetched, fetcher)
-    second = collect_direct_full_text_rss_news(
-        ledger, fetched + timedelta(minutes=5), fetcher
+    extractor = lambda url: ("official source evidence " * 30, url)
+    first = collect_direct_full_text_rss_news(
+        ledger, fetched, fetcher, extractor
     )
-    assert [item["status"] for item in first] == ["OK", "OK", "OK"]
+    second = collect_direct_full_text_rss_news(
+        ledger, fetched + timedelta(minutes=5), fetcher, extractor
+    )
+    assert [item["status"] for item in first] == ["OK"] * 6
     assert [item["status"] for item in second] == [
-        "SKIPPED_INTERVAL", "SKIPPED_INTERVAL", "SKIPPED_INTERVAL"
+        "OK", "OK", "OK",
+        "SKIPPED_INTERVAL", "SKIPPED_INTERVAL", "SKIPPED_INTERVAL",
     ]
-    assert ledger.count("news_revisions") == 3
+    assert ledger.count("news_revisions") == 6
     stored = ledger.connection.execute(
         "SELECT link FROM news_revisions WHERE source='eia_press_releases'"
     ).fetchone()
@@ -645,7 +706,9 @@ def test_direct_official_rss_sources_are_bounded_and_rate_limited(tmp_path) -> N
 
 def test_direct_official_html_sources_are_filtered_and_bounded(tmp_path) -> None:
     fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+    ledger = ForwardLedger(
+        tmp_path / "forward.sqlite3", now=fetched - timedelta(hours=2)
+    )
 
     def fetcher(url: str) -> bytes:
         if "treasury.gov" in url:
@@ -656,7 +719,12 @@ def test_direct_official_html_sources_are_filtered_and_bounded(tmp_path) -> None
         <td><time datetime="2026-08-05T05:30:00-04:00">5 August</time></td></tr>
         <a href="/news/2026/direct-investment">Direct Investment</a>'''
 
-    results = collect_direct_full_text_html_news(ledger, fetched, fetcher)
+    results = collect_direct_full_text_html_news(
+        ledger,
+        fetched,
+        fetcher,
+        lambda url: ("official release evidence " * 30, url),
+    )
     assert [item["status"] for item in results] == ["OK", "OK"]
     rows = ledger.connection.execute(
         "SELECT source, headline, link, source_published_time FROM news_revisions ORDER BY source"
@@ -681,12 +749,75 @@ def test_google_news_revision_uses_resolved_publisher_url(tmp_path) -> None:
         fetched,
         lambda _: rss,
         lambda _: "https://publisher.example/gold-rates",
+        content_extractor=lambda url: ("gold rates evidence " * 40, url),
     )
     assert result["status"] == "OK"
     row = ledger.connection.execute(
         "SELECT link FROM news_revisions WHERE source='google_news_gold_context'"
     ).fetchone()
     assert row["link"] == "https://publisher.example/gold-rates"
+
+
+def test_google_news_lane_caps_one_event_family_across_repeated_polls(tmp_path) -> None:
+    fetched = datetime(2026, 8, 5, 10, 40, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+    lane = GoogleNewsLane("google_news_us_employment", "nonfarm payrolls")
+    items = "".join(
+        f"""<item><guid>jobs-{index}</guid><title>Payroll release {index}</title>
+        <description>Employment situation result</description>
+        <pubDate>Wed, 05 Aug 2026 10:{index:02d}:00 GMT</pubDate>
+        <link>https://publisher.example/jobs-{index}</link></item>"""
+        for index in range(30)
+    )
+    rss = f"<rss><channel>{items}</channel></rss>".encode()
+
+    first = collect_google_news_lane(
+        ledger, fetched, lane, fetcher=lambda _: rss, decoder=lambda url: url,
+        content_extractor=lambda url: ("payroll evidence " * 40, url), limit=10
+    )
+    second = collect_google_news_lane(
+        ledger, fetched + timedelta(minutes=20), lane,
+        fetcher=lambda _: rss, decoder=lambda url: url,
+        content_extractor=lambda url: ("payroll evidence " * 40, url), limit=25,
+    )
+
+    assert first["inserted_revisions"] == 3
+    assert first["processed_items"] == 3
+    assert first["rejected_reasons"]["EVENT_FAMILY_CAP"] == 27
+    assert second["feed_items"] == 30
+    assert second["deduped_items"] == 30
+    assert second["processed_items"] == 0
+    assert second["inserted_revisions"] == 0
+    assert second["rejected_reasons"]["EVENT_FAMILY_CAP"] == 30
+    assert ledger.count("news_revisions") == 3
+
+
+def test_google_news_lane_rejects_old_and_off_topic_results_before_ledger(tmp_path) -> None:
+    fetched = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+    lane = GoogleNewsLane("google_news_us_inflation", "US CPI")
+    rss = b"""<rss><channel>
+      <item><guid>old</guid><title>US makes most aggressive interest rate hike</title>
+        <pubDate>Wed, 22 Jun 2022 15:00:00 GMT</pubDate>
+        <link>https://example.test/old</link></item>
+      <item><guid>wrong</guid><title>European football transfer update</title>
+        <pubDate>Sat, 08 Aug 2026 09:40:00 GMT</pubDate>
+        <link>https://example.test/wrong</link></item>
+      <item><guid>fresh</guid><title>US CPI inflation report surprises markets</title>
+        <pubDate>Sat, 08 Aug 2026 09:45:00 GMT</pubDate>
+        <link>https://example.test/fresh</link></item>
+    </channel></rss>"""
+
+    result = collect_google_news_lane(
+        ledger, fetched, lane, fetcher=lambda _: rss, decoder=lambda url: url,
+        content_extractor=lambda url: ("inflation evidence " * 40, url),
+    )
+
+    assert result["inserted_revisions"] == 1
+    assert result["rejected_items"] == 2
+    assert ledger.connection.execute(
+        "SELECT source_item_id FROM news_revisions"
+    ).fetchone()["source_item_id"] == "fresh"
 
 
 def test_generic_article_extractor_reads_pdf(monkeypatch) -> None:
@@ -1781,6 +1912,7 @@ def test_completed_quotes_are_archived_and_ledger_backup_is_valid(tmp_path) -> N
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
     backup = backup_forward_ledger(ledger, tmp_path / "backups", now)
+    assert list((tmp_path / "backups").glob("*.tmp")) == []
     connection = sqlite3.connect(backup)
     try:
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
@@ -1803,3 +1935,61 @@ class _FixedProvider:
 
     def observations(self, decision_time):
         return [row for row in self.rows if row.received_time <= decision_time]
+
+
+def test_old_or_late_news_does_not_enter_full_text_queue(tmp_path) -> None:
+    epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
+    for item, published, seen in (
+        ("archive", epoch - timedelta(days=10), epoch + timedelta(minutes=1)),
+        ("late", epoch + timedelta(minutes=1), epoch + timedelta(hours=2)),
+    ):
+        ledger.append_news_revision({
+            "source": "google_news_gold_context", "source_item_id": item,
+            "source_published_time": published,
+            "collector_first_seen_time": seen, "fetched_time": seen,
+            "headline": item, "body": "Headline-only discovery record",
+            "link": f"https://publisher.example/{item}",
+            "content_hash": hashlib.sha256(item.encode()).hexdigest(),
+            "cluster_id": item,
+        })
+    calls = []
+    result = hydrate_pending_non_fed_content(
+        ledger, epoch + timedelta(hours=3),
+        extractor=lambda url: calls.append(url) or ("x" * 600, url),
+    )
+    assert result["inserted_revisions"] == 0
+    assert calls == []
+    ledger.close()
+
+
+def test_old_or_late_news_does_not_enter_annotation_queue(
+    tmp_path, monkeypatch
+) -> None:
+    epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
+    for item, published, seen in (
+        ("archive", epoch - timedelta(days=10), epoch + timedelta(minutes=1)),
+        ("late", epoch + timedelta(minutes=1), epoch + timedelta(hours=2)),
+    ):
+        body = (f"Complete source text for {item}. " * 30).strip()
+        ledger.append_news_revision({
+            "source": "google_news_gold_context", "source_item_id": item,
+            "source_published_time": published,
+            "collector_first_seen_time": seen, "fetched_time": seen,
+            "headline": item, "body": body,
+            "link": f"https://publisher.example/{item}",
+            "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+            "cluster_id": item,
+        })
+    calls = []
+    monkeypatch.setattr(
+        annotation_module, "_call_ollama",
+        lambda *args: calls.append(args) or ({}, "ollama:test"),
+    )
+    result = annotate_pending_news(
+        ledger, provider="ollama", model="test", limit=10
+    )
+    assert result == []
+    assert calls == []
+    ledger.close()

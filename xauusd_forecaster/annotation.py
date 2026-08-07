@@ -16,6 +16,8 @@ from pathlib import Path
 
 from .forward_ledger import ForwardLedger
 from .gemini_quota import GeminiQuotaLedger
+from .news_time import MAX_ACTIONABLE_DISCOVERY_DELAY
+from .news_relevance import google_news_item_is_relevant
 
 
 UTC = timezone.utc
@@ -121,6 +123,15 @@ def annotate_pending_news(
          AND a.llm_model_version IN (?, ?) AND a.prompt_version IN (?, ?)
         WHERE a.annotation_id IS NULL
           AND length(trim(COALESCE(n.body, ''))) >= 240
+          AND (
+            n.source_published_time IS NULL
+            OR (
+              n.source_published_time >= (
+                SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH')
+              AND (julianday(n.collector_first_seen_time)
+                   - julianday(n.source_published_time)) <= ?
+            )
+          )
           AND NOT EXISTS (
             SELECT 1 FROM news_revisions newer
             WHERE newer.source=n.source
@@ -168,9 +179,10 @@ def annotate_pending_news(
             # compatible prompts remain readable by the model pipeline, but
             # cannot suppress the v10 category and Chinese-headline backfill.
             *compatible_models, PROMPT_VERSION, PROMPT_VERSION,
+            MAX_ACTIONABLE_DISCOVERY_DELAY.total_seconds() / 86400.0,
             expected_model_identity, PROMPT_VERSION,
             datetime.now(UTC).isoformat(timespec="microseconds"),
-            effective_limit,
+            max(effective_limit * 25, 500),
         ),
     ).fetchall()
     def parse(item: tuple[int, dict]) -> dict[str, object]:
@@ -210,6 +222,20 @@ def annotate_pending_news(
             }
 
     pending_records = [dict(row) for row in pending]
+    relevant_records = []
+    observed_at = datetime.now(UTC)
+    for row in pending_records:
+        published_at = (
+            datetime.fromisoformat(str(row["source_published_time"]))
+            if row.get("source_published_time") else None
+        )
+        allowed, _ = google_news_item_is_relevant(
+            str(row["source"]), str(row.get("headline") or ""),
+            published_at, observed_at,
+        )
+        if allowed:
+            relevant_records.append(row)
+    pending_records = relevant_records[:effective_limit]
     if selected_provider == "gemini":
         routine_used = 0
         selected_records = []

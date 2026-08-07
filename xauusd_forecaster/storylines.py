@@ -8,7 +8,8 @@ from collections import defaultdict
 from datetime import UTC, datetime
 
 
-STORYLINE_POLICY_VERSION = "temporal-event-graph-v5-material-event"
+STORYLINE_POLICY_VERSION = "temporal-event-graph-v7-canonical-material-events"
+CURRENT_EVENT_PROMPT_VERSION = "news-json-v14-material-event-evidence"
 LEGACY_POLICY_STATUS = "temporal-event-graph-v2:EXPERIMENTAL_MEMBERSHIP_INVALID"
 MODEL_PERMISSION = "DISPLAY_ONLY"
 
@@ -121,10 +122,16 @@ def _event_datetime(event: dict) -> datetime:
     raw_event_time = str(event.get("event_time") or "").strip()
     parsed_event = _parse_time(raw_event_time)
     parsed_published = _parse_time(event.get("source_published_time"))
+    visibility_ceiling = _parse_time(event.get("parsed_at")) or _parse_time(
+        event.get("collector_first_seen_time")
+    )
     # A date-only LLM extraction has day precision, not midnight precision.
     # Within that day, the source timestamp is the more honest ordering key.
     has_clock = bool(re.search(r"(?:T|\s)\d{1,2}:\d{2}", raw_event_time))
-    if parsed_event is not None and has_clock:
+    if (
+        parsed_event is not None and has_clock
+        and (visibility_ceiling is None or parsed_event <= visibility_ceiling)
+    ):
         return parsed_event
     if parsed_published is not None:
         return parsed_published
@@ -198,6 +205,71 @@ def _episode_identity(event: dict) -> str | None:
     location = _canonical_id(event.get("canonical_location_id") or event.get("location"))
     if not episode or not actor or not action or not (object_id or location):
         return None
+    # One economic release is one episode even when publishers and separate
+    # Gemini calls use different names such as jobs_report, NFP or payrolls.
+    # The normalization is deliberately anchored to a US labour authority or
+    # an explicitly US employment object, so Canadian jobs and NFIB surveys do
+    # not get folded into the BLS Employment Situation release.
+    structured = "_".join((episode, actor, object_id))
+    us_labor_actor = actor in {
+        "bls", "bureau_of_labor_statistics", "labor_department",
+        "us_bureau_of_labor_statistics", "us_labor_department",
+    }
+    us_employment_object = (
+        any(token in structured for token in (
+            "us_employment", "us_jobs", "us_nonfarm", "us_nfp",
+            "united_states_employment", "united_states_jobs",
+        ))
+        and any(token in structured for token in (
+            "employment", "jobs", "nonfarm", "payroll", "nfp",
+        ))
+    )
+    if action == "economic_release" and (us_labor_actor or us_employment_object):
+        month_aliases = {
+            "january": "01", "february": "02", "march": "03", "april": "04",
+            "may": "05", "june": "06", "july": "07", "august": "08",
+            "september": "09", "october": "10", "november": "11", "december": "12",
+        }
+        def report_period(value: str) -> tuple[str, str] | None:
+            # Prefer the economic period stated by the object.  A July jobs
+            # report is normally published in August, so the episode/release
+            # timestamp is not a safe proxy for the reporting month.
+            for month_name, month_number in month_aliases.items():
+                named = re.search(
+                    rf"{month_name}[_-]?(20\d{{2}})|(20\d{{2}})[_-]?{month_name}",
+                    value,
+                )
+                if named:
+                    year = named.group(1) or named.group(2)
+                    return year, month_number
+            numeric = re.search(r"(20\d{2})[_-](0[1-9]|1[0-2])", value)
+            return numeric.groups() if numeric else None
+
+        # Object is the report's subject and therefore has priority. Episode
+        # is only a fallback because some annotators name it by release month.
+        object_period = report_period(object_id)
+        episode_period = report_period(episode)
+        period = object_period or episode_period
+        # BLS publishes the monthly Employment Situation near the beginning of
+        # the following month.  Some annotation calls named the episode by its
+        # release month (for example 2026_08) while leaving the object generic.
+        # Only apply this correction to an official US labour actor, an early-
+        # month publication, and an episode period equal to that publication
+        # month. Explicit report periods in the object always win above.
+        published = _parse_time(event.get("source_published_time"))
+        if (
+            object_period is None
+            and episode_period is not None
+            and us_labor_actor
+            and published is not None
+            and published.day <= 10
+            and episode_period == (f"{published.year:04d}", f"{published.month:02d}")
+        ):
+            previous_year = published.year if published.month > 1 else published.year - 1
+            previous_month = published.month - 1 if published.month > 1 else 12
+            period = (f"{previous_year:04d}", f"{previous_month:02d}")
+        if period:
+            return f"us_employment_report_{period[0]}_{period[1]}"
     # Gemini may spell the same named episode differently across independent
     # calls. Normalize known canonical anchors only when the structured object
     # or location supports the match; a headline/key mention alone is not
@@ -241,13 +313,50 @@ def _record_kind(event: dict) -> str:
     )
     if declared == "FACT_EVENT" and (market_actor or price_object):
         return "MARKET_REACTION"
+    # Gemini occasionally describes a market-response article as a fact about
+    # the underlying release. Keep it visible, but outside the core event
+    # timeline. Both an instrument and a movement verb are required.
+    normalized_headline = _normal(headline)
+    market_instrument = any(token in normalized_headline for token in (
+        "gold", "bullion", "silver", "dollar", "yield", "treasury", "stock", "shares",
+        "futures", "oil", "黄金", "金价", "美元", "收益率", "美债", "股市",
+        "股指", "期货", "油价", "原油", "白银",
+    ))
+    market_move = any(token in normalized_headline for token in (
+        "rise", "rises", "rose", "fall", "falls", "fell", "drop", "drops",
+        "gain", "gains", "climb", "climbs", "steady", "surge", "slip",
+        "上涨", "下跌", "走高", "走低", "攀升", "回落", "持稳", "大涨", "大跌",
+    ))
+    if declared == "FACT_EVENT" and market_instrument and market_move:
+        return "MARKET_REACTION"
+    market_expectation = any(token in normalized_headline for token in (
+        "market bets", "markets bet", "traders bet", "rate-cut bets",
+        "rate hike bets", "市场押注", "交易员押注", "降息预期", "加息预期",
+    ))
+    monetary_channel = any(token in normalized_headline for token in (
+        "fed", "rate", "yield", "dollar", "美联储", "利率", "收益率", "美元",
+    ))
+    if declared == "FACT_EVENT" and market_expectation and monetary_channel:
+        return "MARKET_REACTION"
+    # Pre-release/watch pieces and generic market narratives are context, not
+    # the material event itself. They remain auditable but cannot start or
+    # update an event story.
+    market_waiting = any(token in normalized_headline for token in (
+        "await", "awaits", "watch", "watches", "in focus", "ahead of",
+        "备受关注", "等待", "关注焦点", "公布前",
+    ))
+    if declared == "FACT_EVENT" and market_waiting:
+        return "BACKGROUND"
     return declared
 
 
 def _is_core(event: dict) -> bool:
     return (
-        _record_kind(event) in CORE_KINDS
+        event.get("prompt_version") == CURRENT_EVENT_PROMPT_VERSION
+        and event.get("evidence_grade") in {"PRIMARY", "CORROBORATED", "SINGLE_RELIABLE"}
+        and _record_kind(event) in CORE_KINDS
         and float(event.get("materiality") or 0.0) >= 0.50
+        and _document_kind(event) not in {"MARKET_REPORT", "ANALYSIS", "BACKGROUND"}
         and _episode_identity(event) is not None
     )
 
@@ -261,11 +370,18 @@ def _relation(event: dict, *, first: bool) -> str:
 
 def _event_identity(event: dict) -> str:
     """Identify the fact being reported, independently from its article/cluster."""
+    episode = _episode_identity(event) or ""
+    action_family = _canonical_id(event.get("action_family") or event.get("action"))
+    # The initial Employment Situation release is a single material event.
+    # Publisher-specific material_event_key values must not split it into many
+    # nodes. Explicit revisions remain distinct because they supersede it.
+    if episode.startswith("us_employment_report_") and action_family == "economic_release":
+        relation = str(event.get("relation_to_prior") or "").upper()
+        parts = (episode, "revision", _event_time(event)) if relation == "SUPERSEDES" else (episode, "initial_release")
+        return hashlib.sha256("|".join(parts).encode()).hexdigest()[:20]
     declared = _canonical_id(event.get("material_event_key"))
     if declared:
         return hashlib.sha256(declared.encode()).hexdigest()[:20]
-    episode = _episode_identity(event) or ""
-    action_family = _canonical_id(event.get("action_family") or event.get("action"))
     if action_family == "policy_decision":
         parts = (episode, action_family)
         return hashlib.sha256("|".join(parts).encode()).hexdigest()[:20]

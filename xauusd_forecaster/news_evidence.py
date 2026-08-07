@@ -10,18 +10,44 @@ from collections import defaultdict
 from datetime import datetime
 
 from .forward_ledger import canonical_hash
-from .news_time import assess_news_time
+from .news_time import assess_news_time, category_time_rule
 
 
-EVIDENCE_POLICY_VERSION = "news-event-evidence-v2-economic-time"
+EVIDENCE_POLICY_VERSION = "news-event-evidence-v3-live-delay-materiality"
+LEGACY_V3_EVIDENCE_POLICY_VERSION = "news-event-evidence-v2-economic-time"
+CURRENT_EVENT_PROMPT_VERSION = "news-json-v14-material-event-evidence"
+ACTIONABLE_RECORD_KINDS = frozenset({
+    "FACT_EVENT", "OFFICIAL_CLAIM", "MARKET_REACTION",
+})
+ACTIONABLE_EVIDENCE_ROLES = frozenset({
+    "CORE_CLAIM", "EVIDENCE_DOCUMENT", "MARKET_REACTION",
+})
+MIN_ACTIONABLE_MATERIALITY = 0.50
 CORE_OFFICIAL_SOURCES = frozenset({
     "federal_reserve_monetary",
     "federal_reserve_press_all",
     "federal_reserve_speeches_testimony",
     "bea_economic_releases",
     "us_treasury_press_releases",
+    "bls_employment_situation",
+    "bls_consumer_price_index",
+    "bls_job_openings",
+    "google_news_bls_official_releases",
 })
 BROAD_PRIMARY_SOURCES = CORE_OFFICIAL_SOURCES | frozenset({
+    "eia_press_releases",
+    "eia_today_in_energy",
+    "ecb_press_releases",
+    "world_gold_council_central_banks",
+})
+LEGACY_V3_CORE_OFFICIAL_SOURCES = frozenset({
+    "federal_reserve_monetary",
+    "federal_reserve_press_all",
+    "federal_reserve_speeches_testimony",
+    "bea_economic_releases",
+    "us_treasury_press_releases",
+})
+LEGACY_V3_BROAD_PRIMARY_SOURCES = LEGACY_V3_CORE_OFFICIAL_SOURCES | frozenset({
     "eia_press_releases",
     "eia_today_in_energy",
     "ecb_press_releases",
@@ -121,8 +147,15 @@ def _topics(row: dict) -> tuple[str, ...]:
     return tuple(dict.fromkeys(found or ["other"]))
 
 
-def _event_key(row: dict, topics: tuple[str, ...]) -> str:
+def _event_key(
+    row: dict, topics: tuple[str, ...], *, use_material_event_key: bool = True,
+) -> str:
     day = str(row.get("source_published_time") or row["collector_first_seen_time"])[:10]
+    annotation = json.loads(row.get("annotation_json") or "{}")
+    material_event_key = str(annotation.get("material_event_key") or "").strip().casefold()
+    if use_material_event_key and material_event_key:
+        identity = (day, topics[0], material_event_key)
+        return hashlib.sha256(repr(identity).encode("utf-8")).hexdigest()
     entities = sorted({
         re.sub(r"\s+", " ", str(value).casefold()).strip()
         for value in json.loads(row.get("entities_json") or "[]") if str(value).strip()
@@ -138,13 +171,16 @@ def _event_key(row: dict, topics: tuple[str, ...]) -> str:
     return hashlib.sha256(repr(identity).encode("utf-8")).hexdigest()
 
 
-def event_evidence_rows_from_connection(connection, decision_time: datetime) -> list[dict]:
+def event_evidence_rows_from_connection(
+    connection, decision_time: datetime, *, legacy_v3: bool = False,
+) -> list[dict]:
     """Return one point-in-time canonical row per event cluster."""
     cutoff = decision_time.isoformat()
     raw_rows = connection.execute(
         """SELECT n.*,a.annotation_id,a.event_type,a.entities_json,a.hawkishness,
                   a.inflation_impulse,a.growth_impulse,a.geopolitical_risk,
-                  a.usd_impulse,a.novelty,a.confidence,a.annotation_json,a.parsed_at
+                  a.usd_impulse,a.novelty,a.confidence,a.annotation_json,a.parsed_at,
+                  a.prompt_version,a.llm_model_version
            FROM news_revisions n JOIN news_annotations a
              ON a.source=n.source AND a.source_item_id=n.source_item_id
             AND a.revision_number=n.revision_number AND a.raw_content_hash=n.content_hash
@@ -181,22 +217,41 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
 
     grouped: dict[str, list[dict]] = defaultdict(list)
     for row in latest.values():
-        row["time_assessment"] = assess_news_time(
-            row, decision_time=decision_time, forward_epoch=forward_epoch
-        )
+        annotation = json.loads(row.get("annotation_json") or "{}")
+        if legacy_v3:
+            row["time_assessment"] = assess_news_time(
+                row, decision_time=decision_time, forward_epoch=forward_epoch,
+            )
+        else:
+            max_age, _ = category_time_rule(annotation.get("primary_category"))
+            row["time_assessment"] = assess_news_time(
+                row, decision_time=decision_time, forward_epoch=forward_epoch,
+                max_actionable_age=max_age,
+            )
         row["publisher_domain"] = _domain(row.get("link"))
+        if (
+            not legacy_v3
+            and
+            row["source"] == "google_news_bls_official_releases"
+            and row["publisher_domain"] != "bls.gov"
+            and not row["publisher_domain"].endswith(".bls.gov")
+        ):
+            continue
         row["reliable_domain"] = _reliable_domain(row["publisher_domain"])
         row["topics"] = _topics(row)
-        row["event_cluster_id"] = _event_key(row, row["topics"])
+        row["event_cluster_id"] = _event_key(
+            row, row["topics"], use_material_event_key=not legacy_v3,
+        )
         grouped[row["event_cluster_id"]].append(row)
 
     events = []
     for event_id, members in grouped.items():
         timely = [row for row in members if row["time_assessment"].eligible]
         evidence_members = timely or members
-        primary = [
-            row for row in evidence_members if row["source"] in BROAD_PRIMARY_SOURCES
-        ]
+        primary_sources = (
+            LEGACY_V3_BROAD_PRIMARY_SOURCES if legacy_v3 else BROAD_PRIMARY_SOURCES
+        )
+        primary = [row for row in evidence_members if row["source"] in primary_sources]
         reliable_domains = {
             row["reliable_domain"] for row in evidence_members if row["reliable_domain"]
         }
@@ -218,6 +273,16 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
         topics = tuple(sorted({topic for row in members for topic in row["topics"]}))
         annotation = json.loads(canonical.get("annotation_json") or "{}")
         controlled_category = str(annotation.get("primary_category") or "")
+        record_kind = str(annotation.get("record_kind") or "")
+        evidence_role = str(annotation.get("evidence_role") or "")
+        materiality = float(annotation.get("materiality") or 0.0)
+        current_semantic_schema = canonical.get("prompt_version") == CURRENT_EVENT_PROMPT_VERSION
+        semantic_eligible = legacy_v3 or (
+            current_semantic_schema
+            and record_kind in ACTIONABLE_RECORD_KINDS
+            and evidence_role in ACTIONABLE_EVIDENCE_ROLES
+            and materiality >= MIN_ACTIONABLE_MATERIALITY
+        )
         relevant = controlled_category in {
             "rates_fed", "inflation_employment", "growth_economy", "usd_liquidity",
             "oil_energy", "war_geopolitics", "central_bank_gold", "risk_sentiment",
@@ -227,14 +292,27 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             and grade in {"PRIMARY", "CORROBORATED"}
             and bool(ACTION_TOPICS & set(topics))
             and relevant
+            and semantic_eligible
         )
         source_names = sorted({row["source"] for row in members})
         publisher_domains = sorted({
             row["publisher_domain"] for row in members if row["publisher_domain"]
         })
-        independent_publishers = len(reliable_domains) if not primary else len({
-            row["source"] for row in primary
-        })
+        if legacy_v3:
+            independent_publishers = (
+                len(reliable_domains) if not primary
+                else len({row["source"] for row in primary})
+            )
+        else:
+            primary_organizations = {
+                str(json.loads(row.get("annotation_json") or "{}").get(
+                    "source_organization_id"
+                ) or row["source"]).strip().casefold()
+                for row in primary
+            }
+            independent_publishers = (
+                len(reliable_domains) if not primary else len(primary_organizations)
+            )
         reasons = [f"EVIDENCE_{grade}"]
         if not timely:
             reasons.extend(sorted({
@@ -246,6 +324,15 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             reasons.append("NO_ACTION_TOPIC")
         elif timely and grade not in {"PRIMARY", "CORROBORATED"}:
             reasons.append("NEEDS_CONFIRMATION")
+        if not legacy_v3:
+            if not current_semantic_schema:
+                reasons.append("LEGACY_ANNOTATION_SCHEMA")
+            if record_kind not in ACTIONABLE_RECORD_KINDS:
+                reasons.append("RECORD_KIND_NOT_ACTIONABLE")
+            if evidence_role not in ACTIONABLE_EVIDENCE_ROLES:
+                reasons.append("EVIDENCE_ROLE_NOT_ACTIONABLE")
+            if materiality < MIN_ACTIONABLE_MATERIALITY:
+                reasons.append("LOW_MATERIALITY")
         entities = sorted({
             str(value).strip()
             for row in members
@@ -258,7 +345,11 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
         events.append({
             "event_cluster_id": event_id,
             "event_key": event_id,
-            "policy_version": EVIDENCE_POLICY_VERSION,
+            "policy_version": (
+                LEGACY_V3_EVIDENCE_POLICY_VERSION if legacy_v3
+                else EVIDENCE_POLICY_VERSION
+            ),
+            "prompt_version": canonical.get("prompt_version"),
             "topics": topics,
             "evidence_grade": grade,
             "broad_model_eligible": eligible,

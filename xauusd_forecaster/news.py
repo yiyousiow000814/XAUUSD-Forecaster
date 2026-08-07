@@ -21,20 +21,71 @@ from typing import Callable
 from bs4 import BeautifulSoup
 
 from .content import (
-    hydrate_pending_federal_reserve_content,
-    hydrate_pending_non_fed_content,
+    extract_article_full_text,
+    extract_federal_reserve_full_text,
 )
 from .forward_ledger import ForwardLedger
+from .news_relevance import (
+    GOOGLE_NEWS_MAX_ITEMS_PER_EVENT_FAMILY,
+    google_news_candidate_family,
+    google_news_item_is_relevant,
+)
 
 
 UTC = timezone.utc
 USER_AGENT = "XAUUSD-Forward-Evidence/0.1 (+local research collector)"
+NEWS_INTAKE_MAX_AGE = timedelta(hours=72)
 
 
 @dataclass(frozen=True)
 class RssSource:
     name: str
     url: str
+
+
+def _current_forward_news(record: dict[str, object], ledger: ForwardLedger,
+                          fetched_at: datetime) -> tuple[bool, str]:
+    """Reject archive/search results before any durable news row is created."""
+    published = record.get("source_published_time")
+    if not isinstance(published, datetime):
+        return False, "PUBLISHED_TIME_MISSING"
+    if published < ledger.forward_epoch:
+        return False, "PRE_FORWARD_PUBLICATION"
+    if published > fetched_at + timedelta(minutes=5):
+        return False, "FUTURE_PUBLICATION_TIME"
+    if fetched_at - published > NEWS_INTAKE_MAX_AGE:
+        return False, "STALE_PUBLICATION"
+    return True, "ELIGIBLE"
+
+
+def _append_after_full_text(
+    ledger: ForwardLedger,
+    record: dict[str, object],
+    extractor: Callable[[str], tuple[str, str]],
+) -> tuple[bool, str]:
+    """Append exactly once, and only after auditable publisher text exists."""
+    latest = ledger.connection.execute(
+        """SELECT body FROM news_revisions
+           WHERE source=? AND source_item_id=?
+           ORDER BY revision_number DESC LIMIT 1""",
+        (record["source"], record["source_item_id"]),
+    ).fetchone()
+    if latest is not None and str(latest["body"] or "").startswith("[FULL_TEXT"):
+        return False, "UNCHANGED_FULL_TEXT"
+    link = str(record.get("link") or "").strip()
+    if not link:
+        return False, "SOURCE_URL_MISSING"
+    try:
+        text, source_url = extractor(link)
+    except Exception:
+        return False, "FULL_TEXT_UNAVAILABLE"
+    record["link"] = source_url
+    record["body"] = f"[FULL_TEXT source={source_url} chars={len(text)}]\n{text}"
+    record["content_hash"] = hashlib.sha256(
+        f"{record['headline']}\n{record['body']}\n{source_url}".encode()
+    ).hexdigest()
+    _, created = ledger.append_news_revision(record)
+    return created, "INSERTED" if created else "UNCHANGED_FULL_TEXT"
 
 
 OFFICIAL_RSS_SOURCES = (
@@ -47,6 +98,9 @@ OFFICIAL_RSS_SOURCES = (
 )
 
 DIRECT_FULL_TEXT_RSS_SOURCES = (
+    RssSource("bls_employment_situation", "https://www.bls.gov/feed/empsit.rss"),
+    RssSource("bls_consumer_price_index", "https://www.bls.gov/feed/cpi.rss"),
+    RssSource("bls_job_openings", "https://www.bls.gov/feed/jolts.rss"),
     RssSource("eia_today_in_energy", "https://www.eia.gov/rss/todayinenergy.xml"),
     RssSource("eia_press_releases", "https://www.eia.gov/rss/press_rss.xml"),
     RssSource("ecb_press_releases", "https://www.ecb.europa.eu/rss/press.html"),
@@ -83,6 +137,16 @@ DIRECT_FULL_TEXT_HTML_SOURCES = (
     ),
 )
 DIRECT_RSS_RELEVANCE_TERMS = {
+    "bls_employment_situation": (
+        "employment situation", "nonfarm payroll", "payroll employment",
+        "unemployment rate", "average hourly earnings",
+    ),
+    "bls_consumer_price_index": (
+        "consumer price index", "cpi", "inflation",
+    ),
+    "bls_job_openings": (
+        "job openings", "jolts", "labor turnover",
+    ),
     "eia_today_in_energy": (
         "oil", "crude", "petroleum", "gasoline", "diesel", "opec",
         "hormuz", "strait", "production", "global demand", "supply disruption",
@@ -135,21 +199,47 @@ GDELT_URL = (
     + "&mode=artlist&maxrecords=25&timespan=2h&format=json"
 )
 GOOGLE_GEO_SOURCE = "google_news_gold_context"
-GOOGLE_GEO_URL = (
-    "https://news.google.com/rss/search?"
-    + urllib.parse.urlencode(
-        {
-            "q": (
-                "gold (Fed OR rates OR yield OR dollar OR inflation OR payrolls "
-                "OR jobs OR oil OR war OR conflict OR sanctions OR geopolitical "
-                "OR central bank)"
-            ),
-            "hl": "en-US",
-            "gl": "US",
-            "ceid": "US:en",
-        }
-    )
+
+
+@dataclass(frozen=True)
+class GoogleNewsLane:
+    name: str
+    query: str
+
+    @property
+    def url(self) -> str:
+        return "https://news.google.com/rss/search?" + urllib.parse.urlencode(
+            {"q": self.query, "hl": "en-US", "gl": "US", "ceid": "US:en"}
+        )
+
+
+GOOGLE_NEWS_LANES = (
+    GoogleNewsLane(
+        GOOGLE_GEO_SOURCE,
+        "gold (Fed OR rates OR yield OR dollar OR inflation OR payrolls OR jobs "
+        "OR oil OR war OR conflict OR sanctions OR geopolitical OR central bank) when:3d",
+    ),
+    GoogleNewsLane(
+        "google_news_bls_official_releases",
+        'site:bls.gov ("Employment Situation" OR "Consumer Price Index" '
+        'OR "Job Openings and Labor Turnover") when:3d',
+    ),
+    GoogleNewsLane(
+        "google_news_us_employment",
+        '("nonfarm payrolls" OR NFP OR "jobs report" OR "employment situation" '
+        'OR "unemployment rate" OR "average hourly earnings" OR JOLTS) when:3d',
+    ),
+    GoogleNewsLane(
+        "google_news_us_inflation",
+        '((CPI OR inflation OR "consumer price index" OR PCE) '
+        '(BLS OR BEA OR "Federal Reserve")) when:3d',
+    ),
+    GoogleNewsLane(
+        "google_news_fed_rates",
+        '(FOMC OR "Federal Reserve" OR "interest rates" OR "Treasury yields") when:3d',
+    ),
 )
+GOOGLE_GEO_URL = GOOGLE_NEWS_LANES[0].url
 WGC_SOURCE = "world_gold_council_central_banks"
 WGC_URL = "https://www.gold.org/blog-categories/central-banks"
 
@@ -371,6 +461,7 @@ def collect_gdelt_news(
     ledger: ForwardLedger,
     fetched_at: datetime,
     fetcher: Callable[[str], bytes] = fetch_url,
+    content_extractor: Callable[[str], tuple[str, str]] = extract_article_full_text,
 ) -> dict[str, object]:
     """Collect GDELT with an append-only 429 circuit breaker.
 
@@ -407,38 +498,37 @@ def collect_gdelt_news(
         raw = fetcher(GDELT_URL)
         inserted = 0
         unchanged = 0
+        rejected: dict[str, int] = {}
         for article in json.loads(raw).get("articles", [])[:25]:
             link = str(article.get("url") or "").strip()
             headline = _clean(str(article.get("title") or ""))
             if not link or not headline:
                 continue
             published = _published(str(article.get("seendate") or ""))
-            body = " · ".join(
-                value for value in (
-                    str(article.get("domain") or "").strip(),
-                    str(article.get("sourcecountry") or "").strip(),
-                    str(article.get("language") or "").strip(),
-                ) if value
-            )
-            digest = hashlib.sha256(f"{headline}\n{body}\n{link}".encode()).hexdigest()
-            _, created = ledger.append_news_revision(
-                {
-                    "source": GDELT_SOURCE,
-                    "source_item_id": link,
-                    "source_published_time": published,
-                    "collector_first_seen_time": fetched_at,
-                    "fetched_time": fetched_at,
-                    "headline": headline,
-                    "body": body,
-                    "link": link,
-                    "content_hash": digest,
-                    "cluster_id": hashlib.sha256(headline.lower().encode()).hexdigest(),
-                }
-            )
+            record = {
+                "source": GDELT_SOURCE,
+                "source_item_id": link,
+                "source_published_time": published,
+                "collector_first_seen_time": fetched_at,
+                "fetched_time": fetched_at,
+                "headline": headline,
+                "body": "",
+                "link": link,
+                "content_hash": "",
+                "cluster_id": hashlib.sha256(headline.lower().encode()).hexdigest(),
+            }
+            eligible, reason = _current_forward_news(record, ledger, fetched_at)
+            if not eligible:
+                rejected[reason] = rejected.get(reason, 0) + 1
+                continue
+            created, reason = _append_after_full_text(ledger, record, content_extractor)
             inserted += int(created)
-            unchanged += int(not created)
+            unchanged += int(reason == "UNCHANGED_FULL_TEXT")
+            if reason not in {"INSERTED", "UNCHANGED_FULL_TEXT"}:
+                rejected[reason] = rejected.get(reason, 0) + 1
         ledger.append_source_poll({"poll_id": poll_id, "source": GDELT_SOURCE, "fetched_time": fetched_at, "status": "OK", "payload_hash": hashlib.sha256(raw).hexdigest()})
-        return {"source": GDELT_SOURCE, "status": "OK", "inserted_revisions": inserted, "unchanged_items": unchanged}
+        return {"source": GDELT_SOURCE, "status": "OK", "inserted_revisions": inserted,
+                "unchanged_items": unchanged, "rejected_reasons": rejected}
     except Exception as error:
         message = str(error)[:500]
         ledger.append_source_poll({"poll_id": poll_id, "source": GDELT_SOURCE, "fetched_time": fetched_at, "status": "ERROR", "error_type": type(error).__name__, "error": message})
@@ -459,12 +549,14 @@ def collect_direct_full_text_rss_news(
     ledger: ForwardLedger,
     fetched_at: datetime,
     fetcher: Callable[[RssSource], bytes] = fetch_rss,
+    content_extractor: Callable[[str], tuple[str, str]] = extract_article_full_text,
 ) -> list[dict[str, object]]:
-    """Collect bounded official feeds whose publisher pages can be hydrated."""
+    """Collect bounded official feeds only after publisher text is available."""
     statuses: list[dict[str, object]] = []
     for source in DIRECT_FULL_TEXT_RSS_SOURCES:
         last_poll = ledger.latest_source_poll_time(source.name)
-        if last_poll is not None and fetched_at - last_poll < timedelta(minutes=10):
+        interval = timedelta(minutes=5 if source.name.startswith("bls_") else 10)
+        if last_poll is not None and fetched_at - last_poll < interval:
             statuses.append({"source": source.name, "status": "SKIPPED_INTERVAL"})
             continue
         poll_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source.name}|{fetched_at.isoformat()}"))
@@ -472,16 +564,26 @@ def collect_direct_full_text_rss_news(
             raw = fetcher(source)
             inserted = 0
             unchanged = 0
+            rejected: dict[str, int] = {}
             relevant = []
             terms = DIRECT_RSS_RELEVANCE_TERMS[source.name]
             for record in parse_rss(raw, source, fetched_at):
                 searchable = f"{record['headline']} {record['body']}".lower()
                 if any(term in searchable for term in terms):
                     relevant.append(record)
-            for record in relevant[:5]:
-                _, created = ledger.append_news_revision(record)
+            limit = 12 if source.name.startswith("bls_") else 5
+            for record in relevant[:limit]:
+                eligible, reason = _current_forward_news(record, ledger, fetched_at)
+                if not eligible:
+                    rejected[reason] = rejected.get(reason, 0) + 1
+                    continue
+                created, reason = _append_after_full_text(
+                    ledger, record, content_extractor
+                )
                 inserted += int(created)
-                unchanged += int(not created)
+                unchanged += int(reason == "UNCHANGED_FULL_TEXT")
+                if reason not in {"INSERTED", "UNCHANGED_FULL_TEXT"}:
+                    rejected[reason] = rejected.get(reason, 0) + 1
             ledger.append_source_poll(
                 {
                     "poll_id": poll_id,
@@ -497,6 +599,7 @@ def collect_direct_full_text_rss_news(
                     "status": "OK",
                     "inserted_revisions": inserted,
                     "unchanged_items": unchanged,
+                    "rejected_reasons": rejected,
                 }
             )
         except Exception as error:
@@ -525,6 +628,7 @@ def collect_direct_full_text_html_news(
     ledger: ForwardLedger,
     fetched_at: datetime,
     fetcher: Callable[[str], bytes] = fetch_url,
+    content_extractor: Callable[[str], tuple[str, str]] = extract_article_full_text,
 ) -> list[dict[str, object]]:
     """Monitor bounded official listing pages with stable direct article links."""
     statuses: list[dict[str, object]] = []
@@ -576,6 +680,7 @@ def collect_direct_full_text_html_news(
             inserted = 0
             unchanged = 0
             preserved_full_text = 0
+            rejected: dict[str, int] = {}
             for record in records:
                 latest = ledger.connection.execute(
                     """SELECT headline, body, link FROM news_revisions
@@ -594,9 +699,17 @@ def collect_direct_full_text_html_news(
                     unchanged += 1
                     preserved_full_text += 1
                     continue
-                _, created = ledger.append_news_revision(record)
+                eligible, reason = _current_forward_news(record, ledger, fetched_at)
+                if not eligible:
+                    rejected[reason] = rejected.get(reason, 0) + 1
+                    continue
+                created, reason = _append_after_full_text(
+                    ledger, record, content_extractor
+                )
                 inserted += int(created)
-                unchanged += int(not created)
+                unchanged += int(reason == "UNCHANGED_FULL_TEXT")
+                if reason not in {"INSERTED", "UNCHANGED_FULL_TEXT"}:
+                    rejected[reason] = rejected.get(reason, 0) + 1
             if not records:
                 raise ValueError(f"{source.name} returned no relevant direct links")
             ledger.append_source_poll(
@@ -615,6 +728,7 @@ def collect_direct_full_text_html_news(
                     "inserted_revisions": inserted,
                     "unchanged_items": unchanged,
                     "preserved_full_text": preserved_full_text,
+                    "rejected_reasons": rejected,
                 }
             )
         except Exception as error:
@@ -643,6 +757,7 @@ def collect_world_gold_council_news(
     ledger: ForwardLedger,
     fetched_at: datetime,
     fetcher: Callable[[str], bytes] = fetch_url,
+    content_extractor: Callable[[str], tuple[str, str]] = extract_article_full_text,
 ) -> dict[str, object]:
     """Collect World Gold Council central-bank research headlines."""
     last_poll = ledger.latest_source_poll_time(WGC_SOURCE)
@@ -659,6 +774,7 @@ def collect_world_gold_council_news(
         )
         inserted = 0
         unchanged = 0
+        rejected: dict[str, int] = {}
         seen: set[str] = set()
         for path, raw_title in matches:
             if path in seen or len(seen) >= 8:
@@ -668,26 +784,32 @@ def collect_world_gold_council_news(
             if not headline or headline.lower().startswith("read more"):
                 continue
             link = urllib.parse.urljoin(WGC_URL, path)
-            digest = hashlib.sha256(f"{headline}\n{link}".encode()).hexdigest()
-            _, created = ledger.append_news_revision(
-                {
-                    "source": WGC_SOURCE,
-                    "source_item_id": link,
-                    "collector_first_seen_time": fetched_at,
-                    "fetched_time": fetched_at,
-                    "headline": headline,
-                    "body": "World Gold Council central-bank research monitor",
-                    "link": link,
-                    "content_hash": digest,
-                    "cluster_id": hashlib.sha256(headline.lower().encode()).hexdigest(),
-                }
-            )
+            record = {
+                "source": WGC_SOURCE,
+                "source_item_id": link,
+                "source_published_time": None,
+                "collector_first_seen_time": fetched_at,
+                "fetched_time": fetched_at,
+                "headline": headline,
+                "body": "",
+                "link": link,
+                "content_hash": "",
+                "cluster_id": hashlib.sha256(headline.lower().encode()).hexdigest(),
+            }
+            eligible, reason = _current_forward_news(record, ledger, fetched_at)
+            if not eligible:
+                rejected[reason] = rejected.get(reason, 0) + 1
+                continue
+            created, reason = _append_after_full_text(ledger, record, content_extractor)
             inserted += int(created)
-            unchanged += int(not created)
+            unchanged += int(reason == "UNCHANGED_FULL_TEXT")
+            if reason not in {"INSERTED", "UNCHANGED_FULL_TEXT"}:
+                rejected[reason] = rejected.get(reason, 0) + 1
         if not seen:
             raise ValueError("World Gold Council page returned no central-bank links")
         ledger.append_source_poll({"poll_id": poll_id, "source": WGC_SOURCE, "fetched_time": fetched_at, "status": "OK", "payload_hash": hashlib.sha256(raw).hexdigest()})
-        return {"source": WGC_SOURCE, "status": "OK", "inserted_revisions": inserted, "unchanged_items": unchanged}
+        return {"source": WGC_SOURCE, "status": "OK", "inserted_revisions": inserted,
+                "unchanged_items": unchanged, "rejected_reasons": rejected}
     except Exception as error:
         ledger.append_source_poll({"poll_id": poll_id, "source": WGC_SOURCE, "fetched_time": fetched_at, "status": "ERROR", "error_type": type(error).__name__, "error": str(error)[:500]})
         return {"source": WGC_SOURCE, "status": "ERROR", "error_type": type(error).__name__, "error": str(error)[:500]}
@@ -698,53 +820,181 @@ def collect_google_geopolitical_news(
     fetched_at: datetime,
     fetcher: Callable[[RssSource], bytes] = fetch_rss,
     decoder: Callable[[str], str] = decode_google_news_publisher_url,
+    content_extractor: Callable[[str], tuple[str, str]] = extract_article_full_text,
 ) -> dict[str, object]:
-    """Independent free fallback when GDELT rate-limits its DOC endpoint."""
-    last_poll = ledger.latest_source_poll_time(GOOGLE_GEO_SOURCE)
+    """Compatibility wrapper for the original broad gold-context lane."""
+    return collect_google_news_lane(
+        ledger, fetched_at, GOOGLE_NEWS_LANES[0], fetcher=fetcher, decoder=decoder,
+        content_extractor=content_extractor,
+    )
+
+
+def collect_google_news_lane(
+    ledger: ForwardLedger,
+    fetched_at: datetime,
+    lane: GoogleNewsLane,
+    *,
+    fetcher: Callable[[RssSource], bytes] = fetch_rss,
+    decoder: Callable[[str], str] = decode_google_news_publisher_url,
+    content_extractor: Callable[[str], tuple[str, str]] = extract_article_full_text,
+    limit: int = 10,
+) -> dict[str, object]:
+    """Collect a bounded lane only after publisher full text is available.
+
+    Google often returns old popular articles first.  Capping before dedupe made
+    a stable top ten permanently hide fresh releases farther down the feed.
+    Headline-only search candidates are not durable evidence and are therefore
+    never appended to the immutable news ledger.
+    """
+    last_poll = ledger.latest_source_poll_time(lane.name)
     if last_poll is not None and fetched_at - last_poll < timedelta(minutes=20):
-        return {"source": GOOGLE_GEO_SOURCE, "status": "SKIPPED_INTERVAL"}
-    source = RssSource(GOOGLE_GEO_SOURCE, GOOGLE_GEO_URL)
-    poll_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{GOOGLE_GEO_SOURCE}|{fetched_at.isoformat()}"))
+        return {"source": lane.name, "status": "SKIPPED_INTERVAL"}
+    source = RssSource(lane.name, lane.url)
+    poll_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{lane.name}|{fetched_at.isoformat()}"))
     try:
         raw = fetcher(source)
         inserted = 0
         unchanged = 0
-        for record in parse_rss(raw, source, fetched_at)[:10]:
+        records = parse_rss(raw, source, fetched_at)
+        rejected = {}
+        admitted = []
+        for record in records:
+            allowed, reason = google_news_item_is_relevant(
+                lane.name,
+                str(record.get("headline") or ""),
+                record.get("source_published_time"),
+                fetched_at,
+            )
+            if allowed:
+                admitted.append(record)
+            else:
+                rejected[reason] = rejected.get(reason, 0) + 1
+        records = admitted
+        deduped: dict[str, dict] = {}
+        for record in records:
+            identity = str(record.get("cluster_id") or record["source_item_id"])
+            deduped.setdefault(identity, record)
+        ranked = sorted(
+            deduped.values(),
+            key=lambda record: (
+                ledger.connection.execute(
+                    "SELECT 1 FROM news_revisions WHERE source=? AND source_item_id=? LIMIT 1",
+                    (record["source"], record["source_item_id"]),
+                ).fetchone() is not None,
+                -(record["source_published_time"].timestamp()
+                  if record.get("source_published_time") else 0.0),
+                str(record["source_item_id"]),
+            ),
+        )
+        selected = []
+        family_counts: dict[str, int] = {}
+        # Count already-admitted Google items in the same freshness window so
+        # repeated polls cannot slowly ingest the other 97 rewrites of one
+        # report. Recognized family keys are intentionally shared across lanes.
+        existing_family_rows = ledger.connection.execute(
+            """SELECT existing.source, existing.headline,
+                      existing.source_published_time
+               FROM news_revisions existing
+               WHERE existing.source LIKE 'google_news_%'
+                 AND existing.revision_number=(
+                   SELECT max(newer.revision_number) FROM news_revisions newer
+                   WHERE newer.source=existing.source
+                     AND newer.source_item_id=existing.source_item_id)
+                 AND existing.source_published_time>=?""",
+            ((fetched_at - timedelta(hours=72)).isoformat(),),
+        ).fetchall()
+        for existing_row in existing_family_rows:
+            existing_published = (
+                datetime.fromisoformat(str(existing_row["source_published_time"]))
+                if existing_row["source_published_time"] else None
+            )
+            family = google_news_candidate_family(
+                str(existing_row["source"]),
+                str(existing_row["headline"] or ""),
+                existing_published,
+            )
+            family_counts[family] = family_counts.get(family, 0) + 1
+        for record in ranked:
+            family = google_news_candidate_family(
+                lane.name,
+                str(record.get("headline") or ""),
+                record.get("source_published_time"),
+            )
+            if family_counts.get(family, 0) >= GOOGLE_NEWS_MAX_ITEMS_PER_EVENT_FAMILY:
+                rejected["EVENT_FAMILY_CAP"] = rejected.get("EVENT_FAMILY_CAP", 0) + 1
+                continue
+            family_counts[family] = family_counts.get(family, 0) + 1
+            selected.append(record)
+            if len(selected) >= limit:
+                break
+        full_text_records = []
+        for record in selected:
             existing = ledger.connection.execute(
-                """SELECT link FROM news_revisions
+                """SELECT link, body FROM news_revisions
                 WHERE source=? AND source_item_id=?
                 ORDER BY revision_number DESC LIMIT 1""",
                 (record["source"], record["source_item_id"]),
             ).fetchone()
             existing_link = str(existing["link"] or "") if existing else ""
+            existing_body = str(existing["body"] or "") if existing else ""
+            if existing_body.startswith("[FULL_TEXT"):
+                unchanged += 1
+                full_text_records.append(record)
+                continue
             if existing_link and urllib.parse.urlparse(existing_link).hostname != "news.google.com":
                 resolved = existing_link
             else:
                 resolved = decoder(record["link"])
-            if resolved != record["link"]:
-                record["link"] = resolved
-                record["content_hash"] = hashlib.sha256(
-                    f"{record['headline']}\n{record['body']}\n{resolved}".encode()
-                ).hexdigest()
+            if urllib.parse.urlparse(resolved).hostname == "news.google.com":
+                rejected["PUBLISHER_URL_UNRESOLVED"] = rejected.get(
+                    "PUBLISHER_URL_UNRESOLVED", 0
+                ) + 1
+                continue
+            try:
+                text, source_url = content_extractor(resolved)
+            except Exception:
+                rejected["FULL_TEXT_UNAVAILABLE"] = rejected.get(
+                    "FULL_TEXT_UNAVAILABLE", 0
+                ) + 1
+                continue
+            record["link"] = source_url
+            record["body"] = f"[FULL_TEXT source={source_url} chars={len(text)}]\n{text}"
+            record["content_hash"] = hashlib.sha256(
+                f"{record['headline']}\n{record['body']}\n{source_url}".encode()
+            ).hexdigest()
             _, created = ledger.append_news_revision(record)
             inserted += int(created)
             unchanged += int(not created)
-        ledger.append_source_poll({"poll_id": poll_id, "source": GOOGLE_GEO_SOURCE, "fetched_time": fetched_at, "status": "OK", "payload_hash": hashlib.sha256(raw).hexdigest()})
-        return {"source": GOOGLE_GEO_SOURCE, "status": "OK", "inserted_revisions": inserted, "unchanged_items": unchanged}
+            full_text_records.append(record)
+        ledger.append_source_poll({"poll_id": poll_id, "source": lane.name, "fetched_time": fetched_at, "status": "OK", "payload_hash": hashlib.sha256(raw).hexdigest()})
+        return {
+            "source": lane.name,
+            "status": "OK",
+            "feed_items": len(records),
+            "deduped_items": len(deduped),
+            "attempted_items": len(selected),
+            "processed_items": len(full_text_records),
+            "rejected_items": sum(rejected.values()),
+            "rejected_reasons": rejected,
+            "inserted_revisions": inserted,
+            "unchanged_items": unchanged,
+        }
     except Exception as error:
-        ledger.append_source_poll({"poll_id": poll_id, "source": GOOGLE_GEO_SOURCE, "fetched_time": fetched_at, "status": "ERROR", "error_type": type(error).__name__, "error": str(error)[:500]})
-        return {"source": GOOGLE_GEO_SOURCE, "status": "ERROR", "error_type": type(error).__name__, "error": str(error)[:500]}
+        ledger.append_source_poll({"poll_id": poll_id, "source": lane.name, "fetched_time": fetched_at, "status": "ERROR", "error_type": type(error).__name__, "error": str(error)[:500]})
+        return {"source": lane.name, "status": "ERROR", "error_type": type(error).__name__, "error": str(error)[:500]}
 
 
 def collect_bls_macro(
     ledger: ForwardLedger,
     fetched_at: datetime,
     fetcher: Callable[[datetime], bytes] = fetch_bls_api,
+    *,
+    force: bool = False,
 ) -> dict[str, object]:
     key_configured = bool(os.environ.get("BLS_API_KEY", "").strip())
     interval = timedelta(minutes=5 if key_configured else 65)
     last_poll = ledger.latest_source_poll_time(BLS_SOURCE)
-    if last_poll is not None and fetched_at - last_poll < interval:
+    if not force and last_poll is not None and fetched_at - last_poll < interval:
         return {
             "source": BLS_SOURCE,
             "status": "SKIPPED_INTERVAL",
@@ -769,37 +1019,52 @@ def collect_bls_macro(
             ]
             if series_id not in BLS_SERIES or not points:
                 continue
-            point = points[0]
-            period = f"{point['year']}-{point['period']}"
             title, unit = BLS_SERIES[series_id]
-            stored_payload = {
-                "series_id": series_id,
-                "title": title,
-                "year": point["year"],
-                "period": point["period"],
-                "period_name": point.get("periodName"),
-                "value": point["value"],
-                "footnotes": point.get("footnotes", []),
-            }
-            content_hash = hashlib.sha256(
-                json.dumps(stored_payload, sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest()
-            _, created = ledger.append_macro_observation(
-                {
-                    "source": BLS_SOURCE,
+            for index, point in enumerate(points[:3]):
+                period = f"{point['year']}-{point['period']}"
+                previous = points[index + 1] if index + 1 < len(points) else None
+                prior_revision = ledger.connection.execute(
+                    """SELECT value FROM macro_observations
+                       WHERE source=? AND series_id=? AND observation_period=?
+                       ORDER BY revision_number DESC LIMIT 1""",
+                    (BLS_SOURCE, series_id, period),
+                ).fetchone()
+                stored_payload = {
                     "series_id": series_id,
-                    "observation_period": period,
-                    "collector_first_seen_time": fetched_at,
-                    "fetched_time": fetched_at,
-                    "value": float(point["value"]),
-                    "unit": unit,
+                    "title": title,
+                    "year": point["year"],
+                    "period": point["period"],
+                    "period_name": point.get("periodName"),
+                    "value": point["value"],
+                    "previous_period_value": previous.get("value") if previous else None,
+                    "revision_from_last_seen": (
+                        float(point["value"]) - float(prior_revision["value"])
+                        if prior_revision is not None else None
+                    ),
+                    "consensus": None,
+                    "surprise": None,
+                    "consensus_status": "UNAVAILABLE_FREE_POINT_IN_TIME",
                     "footnotes": point.get("footnotes", []),
-                    "payload": stored_payload,
-                    "content_hash": content_hash,
                 }
-            )
-            inserted += int(created)
-            unchanged += int(not created)
+                content_hash = hashlib.sha256(
+                    json.dumps(stored_payload, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest()
+                _, created = ledger.append_macro_observation(
+                    {
+                        "source": BLS_SOURCE,
+                        "series_id": series_id,
+                        "observation_period": period,
+                        "collector_first_seen_time": fetched_at,
+                        "fetched_time": fetched_at,
+                        "value": float(point["value"]),
+                        "unit": unit,
+                        "footnotes": point.get("footnotes", []),
+                        "payload": stored_payload,
+                        "content_hash": content_hash,
+                    }
+                )
+                inserted += int(created)
+                unchanged += int(not created)
         ledger.append_source_poll(
             {
                 "poll_id": poll_id,
@@ -836,26 +1101,37 @@ def collect_bls_macro(
         }
 
 
-def collect_official_news(
+def collect_federal_reserve_news(
     ledger: ForwardLedger,
     fetched_at: datetime,
     fetcher: Callable[[RssSource], bytes] = fetch_rss,
+    fed_content_extractor: Callable[[str], tuple[str, str]] = extract_federal_reserve_full_text,
 ) -> list[dict[str, object]]:
     statuses: list[dict[str, object]] = []
     for source in OFFICIAL_RSS_SOURCES:
         inserted = 0
         unchanged = 0
+        rejected: dict[str, int] = {}
         try:
             for record in parse_rss(fetcher(source), source, fetched_at):
-                _, created = ledger.append_news_revision(record)
+                eligible, reason = _current_forward_news(record, ledger, fetched_at)
+                if not eligible:
+                    rejected[reason] = rejected.get(reason, 0) + 1
+                    continue
+                created, reason = _append_after_full_text(
+                    ledger, record, fed_content_extractor
+                )
                 inserted += int(created)
-                unchanged += int(not created)
+                unchanged += int(reason == "UNCHANGED_FULL_TEXT")
+                if reason not in {"INSERTED", "UNCHANGED_FULL_TEXT"}:
+                    rejected[reason] = rejected.get(reason, 0) + 1
             statuses.append(
                 {
                     "source": source.name,
                     "status": "OK",
                     "inserted_revisions": inserted,
                     "unchanged_items": unchanged,
+                    "rejected_reasons": rejected,
                 }
             )
         except Exception as error:  # source failure must not hide other feeds
@@ -867,13 +1143,30 @@ def collect_official_news(
                     "error": str(error)[:500],
                 }
             )
-    statuses.append(hydrate_pending_federal_reserve_content(ledger, fetched_at))
-    statuses.append(collect_bls_macro(ledger, fetched_at))
+    return statuses
+
+
+def collect_official_news(
+    ledger: ForwardLedger,
+    fetched_at: datetime,
+    fetcher: Callable[[RssSource], bytes] = fetch_rss,
+    fed_content_extractor: Callable[[str], tuple[str, str]] = extract_federal_reserve_full_text,
+) -> list[dict[str, object]]:
+    statuses = collect_federal_reserve_news(
+        ledger, fetched_at, fetcher, fed_content_extractor
+    )
+    direct_rss = collect_direct_full_text_rss_news(ledger, fetched_at, fetcher)
+    statuses.extend(direct_rss)
+    force_bls = any(
+        str(item.get("source", "")).startswith("bls_")
+        and int(item.get("inserted_revisions", 0)) > 0
+        for item in direct_rss
+    )
+    statuses.append(collect_bls_macro(ledger, fetched_at, force=force_bls))
     statuses.append(collect_fred_macro(ledger, fetched_at))
-    statuses.extend(collect_direct_full_text_rss_news(ledger, fetched_at, fetcher))
     statuses.extend(collect_direct_full_text_html_news(ledger, fetched_at))
     statuses.append(collect_gdelt_news(ledger, fetched_at))
-    statuses.append(collect_google_geopolitical_news(ledger, fetched_at))
+    for lane in GOOGLE_NEWS_LANES:
+        statuses.append(collect_google_news_lane(ledger, fetched_at, lane))
     statuses.append(collect_world_gold_council_news(ledger, fetched_at))
-    statuses.append(hydrate_pending_non_fed_content(ledger, fetched_at))
     return statuses

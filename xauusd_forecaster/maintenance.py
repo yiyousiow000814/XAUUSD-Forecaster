@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -68,9 +69,9 @@ def backup_forward_ledger(
     backup_root.mkdir(parents=True, exist_ok=True)
     day = now.astimezone(UTC).strftime("%Y%m%d")
     target = backup_root / f"forward-evidence-{day}.sqlite3"
-    temporary = target.with_suffix(".sqlite3.tmp")
-    if temporary.exists():
-        temporary.unlink()
+    temporary = backup_root / (
+        f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
     destination = sqlite3.connect(temporary)
     try:
         ledger.connection.backup(destination)
@@ -79,5 +80,8 @@ def backup_forward_ledger(
             raise RuntimeError(f"backup integrity check failed: {result}")
     finally:
         destination.close()
-    os.replace(temporary, target)
+    try:
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
     return target

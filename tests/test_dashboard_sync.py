@@ -37,7 +37,7 @@ def test_sync_retries_transient_disconnect(monkeypatch) -> None:
 
     monkeypatch.setattr(module, "sync_once", flaky)
     monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
-    assert module.sync_with_retry({"unused": True}) == 3
+    assert module.sync_with_retry({"unused": True}) == (3, [])
     assert len(calls) == 3
 
 
@@ -68,6 +68,7 @@ def test_sync_status_records_real_success_and_preserves_it_on_error(tmp_path) ->
     assert datetime.fromisoformat(succeeded["last_success"])
     assert succeeded["attempts_used"] == 2
     assert succeeded["last_error"] is None
+    assert succeeded["status"] == "OK"
 
     module.write_sync_status(
         status_file, success=False, error=ConnectionResetError("remote closed")
@@ -76,6 +77,77 @@ def test_sync_status_records_real_success_and_preserves_it_on_error(tmp_path) ->
     assert failed["last_success"] == succeeded["last_success"]
     assert failed["last_error_type"] == "ConnectionResetError"
     assert failed["last_error"] == "remote closed"
+    assert failed["status"] == "ERROR"
+
+
+def test_sync_status_reports_optional_resource_degradation(tmp_path) -> None:
+    module = _sync_module()
+    status_file = tmp_path / "dashboard-sync-status.json"
+    degraded = [{"resource": "learning", "error": "too large"}]
+    module.write_sync_status(
+        status_file, success=True, attempts_used=1,
+        degraded_resources=degraded,
+    )
+    status = json.loads(status_file.read_text(encoding="utf-8"))
+    assert status["status"] == "DEGRADED"
+    assert status["last_error"] is None
+    assert status["degraded_resources"] == degraded
+
+
+def test_configured_targets_adds_independent_cloudflare_mirror(
+    monkeypatch, tmp_path
+) -> None:
+    module = _sync_module()
+    monkeypatch.setenv(
+        "CLOUDFLARE_INGEST_URL", "https://example.workers.dev/api/ingest"
+    )
+    monkeypatch.setenv("CLOUDFLARE_INGEST_TOKEN", "cloudflare-token")
+    config = {
+        "remote_ingest_url": "https://example.chatgpt.site/api/ingest",
+        "token": "sites-token",
+        "learning_state_file": str(tmp_path / "learning.json"),
+        "news_state_file": str(tmp_path / "news.json"),
+    }
+
+    sites, cloudflare = module.configured_targets(config)
+
+    assert sites["name"] == "sites"
+    assert sites["learning_state_file"].endswith("learning.json")
+    assert cloudflare["name"] == "cloudflare"
+    assert cloudflare["remote_ingest_url"].endswith("workers.dev/api/ingest")
+    assert cloudflare["learning_state_file"].endswith("learning-cloudflare.json")
+    assert cloudflare["news_state_file"].endswith("news-cloudflare.json")
+
+
+def test_sites_bypass_header_is_not_sent_to_cloudflare(monkeypatch) -> None:
+    module = _sync_module()
+    monkeypatch.setenv("SITES_BYPASS_TOKEN", "sites-bypass")
+    captured = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_urlopen(request, **_kwargs):
+        captured.append(dict(request.header_items()))
+        return Response()
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", fake_urlopen)
+    config = {"token": "ingest-token"}
+
+    module._post_json(
+        "https://example.chatgpt.site/api/ingest", b"{}", config
+    )
+    module._post_json("https://example.workers.dev/api/ingest", b"{}", config)
+
+    assert "Oai-sites-authorization" in captured[0]
+    assert "Oai-sites-authorization" not in captured[1]
+    assert captured[1]["User-agent"] == "AurumSignalRoomMirror/1.0"
 
 
 def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
@@ -96,6 +168,8 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
             "source": "example", "source_item_id": str(index),
             "revision_number": 1, "headline": f"新闻 {index}",
             "summary_zh": body, "category": "其他",
+            "content_fetch_status": "UNAVAILABLE",
+            "content_error_type": "HTTPError",
         } for index in range(100)],
         "recent_decisions": [{"id": index} for index in range(30)],
         "news_evidence": [{"id": index} for index in range(100)],
@@ -118,6 +192,9 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
     assert mirrored["news_index_resource"] == "/api/news-index"
     assert mirrored["learning_resource"] == "/api/learning"
     assert detail_rows[0]["payload"]["summary_zh"] == body
+    assert index_rows[0]["content_fetch_status"] == "UNAVAILABLE"
+    assert index_rows[0]["content_error_type"] == "HTTPError"
+    assert "content_fetch_status" not in detail_rows[0]["payload"]
     assert len(detail_rows[0]["detail_key"]) == 64
     assert mirrored["market_chart"]["decisions"] == []
     market_decision = json.loads(module.market_chart_snapshot(payload))["decisions"][0]
@@ -126,11 +203,13 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
     assert len(mirrored["recent_decisions"]) == module.REMOTE_DECISION_LIMIT
     assert len(mirrored["news_evidence"]) == module.REMOTE_EVIDENCE_LIMIT
     assert learning["learning_curves"]["models"] == [
-        {"lifecycle_status": "LATEST", "model_version": "latest"}
+        {"lifecycle_status": "LATEST", "model_version": "latest"},
+        {"lifecycle_status": "ARCHIVED", "model_version": "old"},
     ]
     assert learning["learning_curves"]["archived_model_count"] == 1
     assert learning["learning_curves"]["identity_curves"] == [body]
-    assert "full_minus_market" not in learning["learning_curves"]
+    assert learning["learning_curves"]["full_minus_market"] == [body]
+    assert learning["learning_curves"]["broad_full_minus_official_full"] == [body]
     assert "learning_curves" not in mirrored
     assert "models" not in mirrored["training"]
     assert len(index_rows) == 100
@@ -207,13 +286,17 @@ def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> 
 
     module.sync_once(config)
     assert posted.count("https://remote/api/learning") == 1
-    assert posted.count("https://remote/api/news-index") == 1
+    # An unknown mirror contract is reset once before the authoritative rows
+    # are repopulated, so stale remote-only news cannot survive forever.
+    assert posted.count("https://remote/api/news-index") == 2
+    assert posted[0] == "https://remote/api/ingest"
 
     posted.clear()
     payload["generated_at"] = "2026-08-07T00:00:30+00:00"
     module.sync_once(config)
     assert "https://remote/api/learning" not in posted
     assert "https://remote/api/news-index" not in posted
+    assert posted[0] == "https://remote/api/ingest"
 
     posted.clear()
     payload["learning_curves"]["learning_stage"] = "READY"
@@ -221,10 +304,74 @@ def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> 
     module.sync_once(config)
     assert posted.count("https://remote/api/learning") == 1
     assert posted.count("https://remote/api/news-index") == 1
+    assert posted[0] == "https://remote/api/ingest"
 
     news_state = json.loads((tmp_path / "news-state.json").read_text(encoding="utf-8"))
     assert len(news_state["hashes"]) == 1
     assert len(news_state["index_hashes"]) == 1
+    assert news_state["last_index_full_sync"]
+    assert news_state["mirror_contract_version"] == module.NEWS_MIRROR_CONTRACT_VERSION
+
+
+def test_sync_repopulates_news_index_without_full_refresh_marker(
+    monkeypatch, tmp_path
+) -> None:
+    module = _sync_module()
+    payload = {
+        "generated_at": "2026-08-07T00:00:00+00:00",
+        "learning_curves": {},
+        "execution_learning": {"models": []},
+        "recent_news": [{
+            "source": "Federal Reserve",
+            "source_item_id": "press-1",
+            "revision_number": 1,
+            "category": "利率/Fed",
+            "collector_first_seen_time": "2026-08-07T00:00:00+00:00",
+            "headline": "第一条",
+        }],
+        "market_chart": {"decisions": []},
+    }
+    index_rows, _ = module.news_mirror_parts(payload)
+    state_file = tmp_path / "news-state.json"
+    state_file.write_text(json.dumps({
+        "index_hashes": {
+            index_rows[0]["detail_key"]: module._json_hash(index_rows[0]),
+        },
+        "hashes": {},
+        "last_full_sync": "2026-08-07T00:00:00+00:00",
+    }), encoding="utf-8")
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    posted: list[str] = []
+    monkeypatch.setattr(
+        module.urllib.request, "urlopen", lambda *_args, **_kwargs: Response()
+    )
+    monkeypatch.setattr(
+        module, "_post_json", lambda url, _body, _config: posted.append(url)
+    )
+    config = {
+        "local_status_url": "http://local/status",
+        "remote_ingest_url": "https://remote/api/ingest",
+        "token": "test",
+        "news_state_file": str(state_file),
+        "learning_state_file": str(tmp_path / "learning-state.json"),
+    }
+
+    module.sync_once(config)
+
+    assert posted.count("https://remote/api/news-index") == 2
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    assert state["last_index_full_sync"]
+    assert state["mirror_contract_version"] == module.NEWS_MIRROR_CONTRACT_VERSION
 
 
 def test_remote_market_chart_is_split_from_status_and_keeps_complete_window() -> None:

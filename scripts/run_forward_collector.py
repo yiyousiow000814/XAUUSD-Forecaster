@@ -17,12 +17,16 @@ sys.path.insert(0, str(MODULE_ROOT))
 from xauusd_forecaster.forward_engine import ForwardEngine, floor_five_minutes  # noqa: E402
 from xauusd_forecaster.forward_ledger import ForwardLedger  # noqa: E402
 from xauusd_forecaster.market import JsonlMarketProvider, NullMarketProvider  # noqa: E402
+from xauusd_forecaster.market_session import skipped_grid_reason  # noqa: E402
 from xauusd_forecaster.u5_state import U5State  # noqa: E402
 from xauusd_forecaster.maintenance import (  # noqa: E402
     archive_completed_quote_days,
     backup_forward_ledger,
 )
 from xauusd_forecaster.training_v2 import train_due_v2  # noqa: E402
+from xauusd_forecaster.news_contract_migration import (  # noqa: E402
+    append_missing_current_news_snapshots,
+)
 from xauusd_forecaster.execution_learning import (  # noqa: E402
     append_due_exit_predictions,
     train_due_execution,
@@ -101,6 +105,30 @@ def main() -> int:
         ledger.close()
         return 0
 
+    # A frozen news contract can change after direction samples have matured.
+    # Append the new point-in-time feature version before checking training so
+    # compatible news challengers do not disappear until 96 new rows arrive.
+    startup_news_migration = append_missing_current_news_snapshots(
+        ledger, datetime.now(UTC)
+    )
+    print(
+        json.dumps(
+            {"event": "NEWS_CONTRACT_MIGRATION", **startup_news_migration},
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    startup_training_status = train_due_v2(
+        ledger, datetime.now(UTC), local_root / "models-v2"
+    )
+    print(
+        json.dumps(
+            {"event": "STARTUP_TRAIN_CHECK", "results": startup_training_status},
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+
     last_news_poll = datetime.now(UTC)
     last_maintenance_day = initialized_at.date()
     row = ledger.connection.execute(
@@ -124,26 +152,45 @@ def main() -> int:
                 last_news_poll = now
             boundary = floor_five_minutes(now)
             candidate = last_decision + timedelta(minutes=5)
+            try:
+                visible_observations = provider.observations(boundary)
+            except (OSError, ValueError, json.JSONDecodeError):
+                visible_observations = []
+            skipped_grids: dict[str, int] = {}
             while candidate <= boundary:
                 if candidate >= ledger.forward_epoch:
-                    snapshot_id, decision_id = engine.append_clock_event(
-                        candidate, now, news_status
+                    skip_reason = skipped_grid_reason(
+                        candidate, boundary, visible_observations
                     )
-                    print(
-                        json.dumps(
-                            {
-                                "event": "DECISION_APPENDED",
-                                "decision_time": candidate.isoformat(),
-                                "snapshot_id": snapshot_id,
-                                "decision_id": decision_id,
-                            },
-                            sort_keys=True,
-                        ),
-                        flush=True,
-                    )
-                    u5_state.save(u5_path)
+                    if skip_reason:
+                        skipped_grids[skip_reason] = skipped_grids.get(skip_reason, 0) + 1
+                    else:
+                        snapshot_id, decision_id = engine.append_clock_event(
+                            candidate, now, news_status
+                        )
+                        print(
+                            json.dumps(
+                                {
+                                    "event": "DECISION_APPENDED",
+                                    "decision_time": candidate.isoformat(),
+                                    "snapshot_id": snapshot_id,
+                                    "decision_id": decision_id,
+                                },
+                                sort_keys=True,
+                            ),
+                            flush=True,
+                        )
+                        u5_state.save(u5_path)
                 last_decision = candidate
                 candidate += timedelta(minutes=5)
+            if skipped_grids:
+                print(
+                    json.dumps(
+                        {"event": "NON_LIVE_GRIDS_SKIPPED", "counts": skipped_grids},
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
             if quote_root:
                 checkpoint_quotes = provider.observations(now)
                 checkpoint_count = append_due_exit_predictions(

@@ -12,6 +12,8 @@ def event(key, time, headline, **overrides):
         "source_published_time": time,
         "canonical_headline": headline,
         "evidence_grade": "SINGLE_RELIABLE",
+        "prompt_version": "news-json-v14-material-event-evidence",
+        "parsed_at": time,
         "independent_publishers": 1,
         "publisher_domains": ("reuters.com",),
         "source_names": ("gdelt_gold_geopolitics",),
@@ -32,6 +34,7 @@ def event(key, time, headline, **overrides):
         "primary_story_title_zh": "2026年8月伊朗—霍尔木兹航运紧张局势",
         "secondary_contexts_zh": [],
         "relation_to_prior": "NONE",
+        "document_kind": "NEWS_ARTICLE",
     }
     row.update(overrides)
     return row
@@ -98,7 +101,7 @@ def test_reported_confirmed_claim_does_not_impersonate_official_source():
     )
     graph = temporal_event_graph([row])
     assert graph["stories"] == []
-    assert graph["event_candidates"][0]["independent_publishers"] == 1
+    assert graph["event_candidates"] == []
 
 
 def test_two_publishers_can_cross_confirm_same_core_claim():
@@ -123,7 +126,7 @@ def test_multiple_discovery_publishers_are_not_cross_confirmation():
     )
     graph = temporal_event_graph([first, second])
     assert graph["stories"] == []
-    assert graph["event_candidates"][0]["independent_publishers"] == 2
+    assert graph["event_candidates"] == []
 
 
 def test_hormuz_episode_aliases_merge_when_structured_anchor_matches():
@@ -158,6 +161,115 @@ def test_mislabeled_gold_price_fact_cannot_update_core_timeline():
     story = storyline_rows([core, follow_up, reaction])[0]
     assert story["event_count"] == 2
     assert [row["headline"] for row in story["market_reactions"]] == [reaction["canonical_headline"]]
+
+
+def test_us_july_jobs_aliases_are_one_material_event_not_many_stories():
+    released = event(
+        "jobs-a", "2026-08-07T12:30:00+00:00", "美国7月非农就业人口意外减少",
+        primary_category="inflation_employment", actor="美国劳工统计局",
+        canonical_actor_id="bureau_of_labor_statistics", action="发布",
+        action_family="ECONOMIC_RELEASE", object="美国7月非农就业报告",
+        canonical_object_id="us_nonfarm_payrolls_july_2026", location="美国",
+        canonical_location_id="united_states", episode_key="us_nfp_july_2026",
+        material_event_key="bls_release_2026_08_07", primary_story_title_zh="美国2026年7月就业报告",
+    )
+    same_release = event(
+        "jobs-b", "2026-08-07T12:35:00+00:00", "美国7月就业报告显示岗位减少",
+        primary_category="inflation_employment", actor="美国劳工部",
+        canonical_actor_id="us_labor_department", action="公布",
+        action_family="ECONOMIC_RELEASE", object="美国就业报告",
+        canonical_object_id="us_jobs_report_2026_07", location="美国",
+        canonical_location_id="united_states", episode_key="us_jobs_report_2026_07",
+        material_event_key="jobs_report_july_2026", relation_to_prior="CONFIRMS",
+        publisher_domains=("apnews.com",), primary_story_title_zh="美国7月就业报告疲软",
+    )
+    graph = temporal_event_graph([released, same_release])
+    assert graph["stories"] == []
+    assert len(graph["event_candidates"]) == 1
+    assert graph["event_candidates"][0]["episode_key"] == "us_employment_report_2026_07"
+    assert graph["event_candidates"][0]["evidence_documents"] == 2
+
+
+def test_market_response_to_jobs_report_cannot_become_core_fact():
+    reaction = event(
+        "jobs-reaction", "2026-08-07T12:40:00+00:00",
+        "美债收益率因美国就业报告疲软而下跌",
+        primary_category="inflation_employment", actor="美国劳工统计局",
+        canonical_actor_id="bureau_of_labor_statistics", action="发布",
+        action_family="ECONOMIC_RELEASE", object="美国7月就业报告",
+        canonical_object_id="us_jobs_report_2026_07", location="美国",
+        canonical_location_id="united_states", episode_key="us_jobs_report_july_2026",
+        material_event_key="market_article_yields_jobs",
+    )
+    graph = temporal_event_graph([reaction])
+    assert graph["stories"] == []
+    assert graph["event_candidates"] == []
+    assert graph["market_reaction_streams"][0]["stream_id"] == "treasury_yields"
+
+
+def test_jobs_reporting_month_beats_release_month_episode_alias():
+    released = event(
+        "jobs-release-month", "2026-08-07T12:30:00+00:00",
+        "美国7月就业报告显示就业岗位减少",
+        primary_category="inflation_employment", actor="美国劳工统计局",
+        canonical_actor_id="bureau_of_labor_statistics", action="发布",
+        action_family="ECONOMIC_RELEASE", object="美国2026年7月就业报告",
+        canonical_object_id="us_jobs_report_july_2026", location="美国",
+        canonical_location_id="united_states", episode_key="us_jobs_report_2026_08",
+        material_event_key="release_month_alias",
+    )
+    graph = temporal_event_graph([released])
+    assert graph["event_candidates"][0]["episode_key"] == "us_employment_report_2026_07"
+
+
+def test_bls_release_month_alias_is_shifted_to_previous_reporting_month():
+    released = event(
+        "jobs-generic-object", "2026-08-07T13:00:00+00:00",
+        "美国就业报告意外疲软，市场讨论美联储政策",
+        source_published_time="2026-08-07T12:30:00+00:00",
+        primary_category="inflation_employment", actor="美国劳工统计局",
+        canonical_actor_id="bureau_of_labor_statistics", action="发布",
+        action_family="ECONOMIC_RELEASE", object="美国就业数据",
+        canonical_object_id="us_employment_data", location="美国",
+        canonical_location_id="united_states", episode_key="us_jobs_report_2026_08",
+        material_event_key="release_month_generic_object",
+    )
+    graph = temporal_event_graph([released])
+    assert graph["event_candidates"][0]["episode_key"] == "us_employment_report_2026_07"
+
+
+def test_silver_response_to_jobs_report_cannot_become_core_fact():
+    reaction = event(
+        "jobs-silver-reaction", "2026-08-07T13:10:00+00:00",
+        "白银价格因美国就业报告令人失望而上涨",
+        primary_category="inflation_employment", actor="美国劳工统计局",
+        canonical_actor_id="bureau_of_labor_statistics", action="发布",
+        action_family="ECONOMIC_RELEASE", object="美国就业报告",
+        canonical_object_id="us_jobs_report", location="美国",
+        canonical_location_id="united_states", episode_key="us_jobs_report_2026_08_07",
+        material_event_key="silver_market_response",
+    )
+    graph = temporal_event_graph([reaction])
+    assert graph["stories"] == []
+    assert graph["event_candidates"] == []
+    assert graph["market_reaction_streams"]
+
+
+def test_market_bets_after_jobs_report_cannot_become_core_fact():
+    reaction = event(
+        "jobs-fed-bets", "2026-08-07T13:15:00+00:00",
+        "美国就业报告疲软，市场押注美联储九月不会加息",
+        primary_category="inflation_employment", actor="美国劳工统计局",
+        canonical_actor_id="bureau_of_labor_statistics", action="发布",
+        action_family="ECONOMIC_RELEASE", object="美国就业数据",
+        canonical_object_id="us_employment_data", location="美国",
+        canonical_location_id="united_states", episode_key="us_jobs_report_2026_08",
+        material_event_key="fed_bets_market_response",
+    )
+    graph = temporal_event_graph([reaction])
+    assert graph["stories"] == []
+    assert graph["event_candidates"] == []
+    assert graph["market_reaction_streams"]
 
 
 def test_relation_never_comes_from_geopolitical_score_delta():
@@ -262,6 +374,25 @@ def test_timeline_uses_event_time_not_collector_arrival_order():
     assert story["timeline"][0]["collector_first_seen_time"] > story["timeline"][1]["collector_first_seen_time"]
 
 
+def test_future_llm_event_time_cannot_become_story_start():
+    first = event(
+        "a", "2026-08-08T10:00:00+00:00", "官方发布就业报告",
+        event_time="2026-08-08T15:00:00+00:00",
+        source_published_time="2026-08-08T09:55:00+00:00",
+        parsed_at="2026-08-08T10:00:00+00:00",
+    )
+    second = event(
+        "b", "2026-08-08T10:05:00+00:00", "官方随后说明报告",
+        event_time="2026-08-08T10:04:00+00:00",
+        relation_to_prior="RESPONDS_TO",
+    )
+
+    story = storyline_rows([first, second])[0]
+
+    assert story["timeline"][0]["headline"] == "官方发布就业报告"
+    assert story["timeline"][0]["event_time"] == "2026-08-08T09:55:00+00:00"
+
+
 def test_date_only_event_time_uses_source_publication_clock_for_ordering():
     date_only = event(
         "late", "2026-08-06T14:00:00+00:00", "当天稍晚发布",
@@ -316,5 +447,4 @@ def test_market_reports_are_quarantined_as_narrative_candidate():
     ]
     graph = temporal_event_graph(rows)
     assert graph["stories"] == []
-    assert graph["market_narrative_candidates"][0]["story_type"] == "MARKET_NARRATIVE_CANDIDATE"
-    assert graph["market_narrative_candidates"][0]["coverage_total"] > 0
+    assert graph["market_narrative_candidates"] == []

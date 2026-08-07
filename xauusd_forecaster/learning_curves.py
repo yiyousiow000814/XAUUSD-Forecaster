@@ -148,6 +148,7 @@ def _cadence_metrics(rows) -> dict:
 
 
 def learning_curve_payload(connection) -> dict:
+    from .inference_v2 import news_model_activation_status
     epoch = connection.execute(
         "SELECT * FROM evaluation_epochs ORDER BY created_at DESC LIMIT 1"
     ).fetchone()
@@ -176,6 +177,7 @@ def learning_curve_payload(connection) -> dict:
     updates = connection.execute(
         "SELECT * FROM model_updates_v2 ORDER BY created_at,model_identity"
     ).fetchall()
+    news_activation = news_model_activation_status(reversed(updates))
     # A model artifact can be rebuilt from the same immutable dataset during
     # recovery.  That is not a new learning generation and must not create a
     # fake reset/upgrade in the UI.
@@ -553,6 +555,7 @@ def learning_curve_payload(connection) -> dict:
         "commission_status": COMMISSION_STATUS, "slippage_status": SLIPPAGE_STATUS,
         "models": models, "version_groups": version_groups,
         "rolling_processes": rolling_processes,
+        "news_model_activation": news_activation,
         "zero_return_baseline": {
             "label": "零收益安全基准", "model_identity": "CHAMPION_0",
             "cumulative_quote_return": 0.0, "trained": False, "uses_ai": False,

@@ -1,41 +1,37 @@
-"""Frozen, first-seen-aged news features for Phase 2F V2."""
+"""Frozen economic-time news features for already-trained V3 artifacts.
+
+The active feature contract may evolve, but deployed Shadow artifacts must keep
+receiving the exact point-in-time feature surface they were trained against.
+"""
 
 from __future__ import annotations
 
 import json
 import math
-import urllib.parse
 from datetime import datetime
 
-from .evidence_v2 import ELIGIBILITY_VERSION
 from .factors import MACRO_FEATURE_MAP, NEWS_FEATURES
 from .forward_ledger import canonical_hash
-from .news_evidence import BROAD_NEWS_FEATURES, event_evidence_rows
-from .news_time import assess_news_time, category_time_rule
+from .news_evidence import (
+    BROAD_NEWS_FEATURES,
+    LEGACY_V3_EVIDENCE_POLICY_VERSION,
+    event_evidence_rows_from_connection,
+)
+from .news_time import assess_news_time
 
 
-SOURCE_RULES = {
-    "federal_reserve_monetary": ("MODEL_ELIGIBLE", True, 200, "official monetary policy publisher"),
-    "federal_reserve_press_all": ("MODEL_ELIGIBLE", True, 200, "official central-bank publisher"),
-    "federal_reserve_speeches_testimony": ("MODEL_ELIGIBLE", True, 200, "official central-bank publisher"),
-    "bea_economic_releases": ("MODEL_ELIGIBLE", True, 200, "official economic-statistics publisher"),
-    "us_treasury_press_releases": ("MODEL_ELIGIBLE", True, 200, "official fiscal publisher"),
-    "bls_employment_situation": ("MODEL_ELIGIBLE", True, 200, "official labor-market release publisher"),
-    "bls_consumer_price_index": ("MODEL_ELIGIBLE", True, 200, "official inflation release publisher"),
-    "bls_job_openings": ("MODEL_ELIGIBLE", True, 200, "official labor-market release publisher"),
-    "eia_press_releases": ("RESEARCH_CANDIDATE", True, 200, "official energy publisher pending feature audit"),
-    "eia_today_in_energy": ("RESEARCH_CANDIDATE", True, 200, "official energy publisher pending feature audit"),
-    "ecb_press_releases": ("RESEARCH_CANDIDATE", True, 200, "official publisher pending XAUUSD relevance audit"),
-    "world_gold_council_central_banks": ("RESEARCH_CANDIDATE", True, 200, "publisher body retained; source qualification pending"),
-    "gdelt_gold_geopolitics": ("DISPLAY_ONLY", True, 200, "aggregator metadata is not action-bearing"),
-    "google_news_gold_context": ("DISPLAY_ONLY", True, 200, "aggregated discovery is display-only"),
-    "google_news_gold_geopolitics": ("COLLECT_ONLY", True, 200, "headline-only aggregation"),
-    "google_news_bls_official_releases": ("MODEL_ELIGIBLE", True, 200, "official bls.gov body discovered through a delayed Google index"),
-    "google_news_us_employment": ("DISPLAY_ONLY", True, 200, "release discovery lane; publisher qualification required"),
-    "google_news_us_inflation": ("DISPLAY_ONLY", True, 200, "release discovery lane; publisher qualification required"),
-    "google_news_fed_rates": ("DISPLAY_ONLY", True, 200, "policy discovery lane; publisher qualification required"),
+LEGACY_V3_NEWS_FEATURE_VERSION = "eligible-news-event-evidence-v4-economic-time"
+LEGACY_V3_ELIGIBILITY_VERSION = "news-source-eligibility-v3-economic-time"
+LEGACY_V3_BROAD_ELIGIBILITY_VERSION = (
+    f"{LEGACY_V3_ELIGIBILITY_VERSION}+{LEGACY_V3_EVIDENCE_POLICY_VERSION}"
+)
+LEGACY_V3_SOURCE_RULES = {
+    "federal_reserve_monetary": ("MODEL_ELIGIBLE", True, 200),
+    "federal_reserve_press_all": ("MODEL_ELIGIBLE", True, 200),
+    "federal_reserve_speeches_testimony": ("MODEL_ELIGIBLE", True, 200),
+    "bea_economic_releases": ("MODEL_ELIGIBLE", True, 200),
+    "us_treasury_press_releases": ("MODEL_ELIGIBLE", True, 200),
 }
-
 ACTIONABLE_CATEGORIES = frozenset({
     "rates_fed", "inflation_employment", "growth_economy", "usd_liquidity",
     "oil_energy", "war_geopolitics", "central_bank_gold", "risk_sentiment",
@@ -71,15 +67,8 @@ def _visibility_event_ref(event: dict | None, news, annotation) -> dict:
     }
 
 
-def frozen_rule_rows() -> list[tuple[str, str, int, int, str]]:
-    return [
-        (source, tier, int(requires_body), minimum, rationale)
-        for source, (tier, requires_body, minimum, rationale) in sorted(SOURCE_RULES.items())
-    ]
-
-
-def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
-    """Aggregate only frozen MODEL_ELIGIBLE publisher bodies visible then."""
+def aggregate_legacy_news_features_v3(ledger, decision_time: datetime) -> dict:
+    """Reproduce the committed V3 eligibility and economic-time contract."""
     selected = []
     for annotation in ledger.visible_annotations(decision_time):
         news = ledger.connection.execute(
@@ -89,37 +78,28 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
         ).fetchone()
         if news is None:
             continue
-        tier, requires_body, minimum, _ = SOURCE_RULES.get(
-            str(news["source"]), ("COLLECT_ONLY", True, 200, "unlisted source")
+        tier, requires_body, minimum = LEGACY_V3_SOURCE_RULES.get(
+            str(news["source"]), ("COLLECT_ONLY", True, 200)
         )
         body = str(news["body"] or "")
-        if str(news["source"]) == "google_news_bls_official_releases":
-            host = (urllib.parse.urlparse(str(news["link"] or "")).hostname or "").casefold()
-            if host != "bls.gov" and not host.endswith(".bls.gov"):
-                continue
         if tier != "MODEL_ELIGIBLE" or (requires_body and len(body) < minimum):
             continue
-        annotation_payload = json.loads(annotation["annotation_json"] or "{}")
-        category = str(annotation_payload.get("primary_category") or "")
-        max_age, _ = category_time_rule(category)
         timing = assess_news_time(
-            news, decision_time=decision_time, forward_epoch=ledger.forward_epoch,
-            max_actionable_age=max_age,
+            news, decision_time=decision_time, forward_epoch=ledger.forward_epoch
         )
+        annotation_payload = json.loads(annotation["annotation_json"] or "{}")
         if (
             not timing.eligible
-            or category not in ACTIONABLE_CATEGORIES
+            or annotation_payload.get("primary_category") not in ACTIONABLE_CATEGORIES
         ):
             continue
         selected.append((news, annotation, timing))
 
-    # One canonical publisher item per duplicate cluster.
     canonical = {}
     for news, annotation, timing in selected:
         cluster = str(news["cluster_id"])
-        current = canonical.get(cluster)
         candidate = (len(str(news["body"] or "")), str(news["source_item_id"]))
-        if current is None or candidate > current[0]:
+        if cluster not in canonical or candidate > canonical[cluster][0]:
             canonical[cluster] = (candidate, news, annotation, timing)
 
     totals = {name: 0.0 for name in NEWS_FEATURES}
@@ -130,19 +110,19 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
         first_seen = datetime.fromisoformat(news["collector_first_seen_time"])
         parsed_at = datetime.fromisoformat(row["parsed_at"])
         age_minutes = float(timing.age_minutes or 0.0)
-        processing_delay = (parsed_at - first_seen).total_seconds()
-        category = json.loads(row["annotation_json"] or "{}").get("primary_category")
-        _, half_life_minutes = category_time_rule(str(category or ""))
-        freshness = math.exp(-math.log(2.0) * age_minutes / half_life_minutes)
+        freshness = math.exp(-math.log(2.0) * age_minutes / 360.0)
         confidence = float(row["confidence"])
         novelty = float(row["novelty"])
         weight = freshness * confidence * max(0.05, novelty)
         weight_sum += weight
-        totals["news_hawkishness"] += weight * float(row["hawkishness"])
-        totals["news_inflation_impulse"] += weight * float(row["inflation_impulse"])
-        totals["news_growth_impulse"] += weight * float(row["growth_impulse"])
-        totals["news_geopolitical_risk"] += weight * float(row["geopolitical_risk"])
-        totals["news_usd_impulse"] += weight * float(row["usd_impulse"])
+        for name, column in (
+            ("news_hawkishness", "hawkishness"),
+            ("news_inflation_impulse", "inflation_impulse"),
+            ("news_growth_impulse", "growth_impulse"),
+            ("news_geopolitical_risk", "geopolitical_risk"),
+            ("news_usd_impulse", "usd_impulse"),
+        ):
+            totals[name] += weight * float(row[column])
         totals["news_novelty"] += weight * novelty
         totals["news_confidence"] += weight * confidence
         totals["news_event_count"] += freshness
@@ -150,7 +130,7 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
         evidence.append((
             news["content_hash"], row["annotation_id"],
             timing.event_time.isoformat() if timing.event_time else None,
-            age_minutes, processing_delay,
+            age_minutes, (parsed_at - first_seen).total_seconds(),
         ))
     if weight_sum:
         for name in (
@@ -161,16 +141,15 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
             totals[name] /= weight_sum
 
     macro_rows = ledger.connection.execute(
-        """SELECT m.series_id, m.observation_period, m.value, m.content_hash
-        FROM macro_observations m
-        WHERE m.collector_first_seen_time <= ?
+        """SELECT m.series_id,m.observation_period,m.value,m.content_hash
+        FROM macro_observations m WHERE m.collector_first_seen_time<=?
           AND NOT EXISTS (
             SELECT 1 FROM macro_observations newer
             WHERE newer.source=m.source AND newer.series_id=m.series_id
               AND newer.observation_period=m.observation_period
               AND newer.revision_number>m.revision_number
-              AND newer.collector_first_seen_time <= ?)
-        ORDER BY m.series_id, m.observation_period""",
+              AND newer.collector_first_seen_time<=?)
+        ORDER BY m.series_id,m.observation_period""",
         (decision_time.isoformat(), decision_time.isoformat()),
     ).fetchall()
     grouped = {}
@@ -186,9 +165,11 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
             )
             evidence.append((series_id, values[-1]["content_hash"]))
 
+    all_events = event_evidence_rows_from_connection(
+        ledger.connection, decision_time, legacy_v3=True,
+    )
+    broad_events = [row for row in all_events if row["broad_model_eligible"]]
     broad_totals = {name: 0.0 for name in BROAD_NEWS_FEATURES}
-    all_evidence_events = event_evidence_rows(ledger, decision_time)
-    broad_events = [row for row in all_evidence_events if row["broad_model_eligible"]]
     broad_weight_sum = 0.0
     broad_evidence = []
     for row in broad_events:
@@ -196,18 +177,22 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
         freshness = math.exp(-math.log(2.0) * age_minutes / 360.0)
         weight = freshness * row["confidence"] * max(0.05, row["novelty"])
         broad_weight_sum += weight
-        broad_totals["broad_news_hawkishness"] += weight * row["hawkishness"]
-        broad_totals["broad_news_inflation_impulse"] += weight * row["inflation_impulse"]
-        broad_totals["broad_news_growth_impulse"] += weight * row["growth_impulse"]
-        broad_totals["broad_news_geopolitical_risk"] += weight * row["geopolitical_risk"]
-        broad_totals["broad_news_usd_impulse"] += weight * row["usd_impulse"]
+        for name, column in (
+            ("broad_news_hawkishness", "hawkishness"),
+            ("broad_news_inflation_impulse", "inflation_impulse"),
+            ("broad_news_growth_impulse", "growth_impulse"),
+            ("broad_news_geopolitical_risk", "geopolitical_risk"),
+            ("broad_news_usd_impulse", "usd_impulse"),
+        ):
+            broad_totals[name] += weight * row[column]
         broad_totals["broad_news_novelty"] += weight * row["novelty"]
         broad_totals["broad_news_confidence"] += weight * row["confidence"]
         broad_totals["broad_news_event_count"] += freshness
-        broad_totals[
+        count_name = (
             "broad_primary_event_count" if row["evidence_grade"] == "PRIMARY"
             else "broad_corroborated_event_count"
-        ] += freshness
+        )
+        broad_totals[count_name] += freshness
         for topic in row["topics"]:
             name = f"broad_topic_{topic}"
             if name in broad_totals:
@@ -217,14 +202,14 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
         for name in (
             "broad_news_hawkishness", "broad_news_inflation_impulse",
             "broad_news_growth_impulse", "broad_news_geopolitical_risk",
-            "broad_news_usd_impulse", "broad_news_novelty",
-            "broad_news_confidence",
+            "broad_news_usd_impulse", "broad_news_novelty", "broad_news_confidence",
         ):
             broad_totals[name] /= broad_weight_sum
     totals.update(broad_totals)
+
     event_by_item = {
         (row["canonical_source"], row["canonical_source_item_id"]): row
-        for row in all_evidence_events
+        for row in all_events
     }
     official_visible_events = []
     for _, news, row, _ in canonical.values():
@@ -236,18 +221,13 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
     ]
     return {
         "features": totals,
-        "eligibility_version": ELIGIBILITY_VERSION,
+        "eligibility_version": LEGACY_V3_ELIGIBILITY_VERSION,
+        "evidence_policy_version": LEGACY_V3_EVIDENCE_POLICY_VERSION,
         "model_visible_items": len(canonical),
         "news_exposed": int(bool(canonical)),
         "distinct_news_clusters": len(canonical),
         "distinct_event_types": len(event_types),
-        "broad_model_visible_items": len(broad_events),
-        "broad_news_exposed": int(bool(broad_events)),
-        "distinct_broad_clusters": len(broad_events),
-        "broad_source_evidence_hash": canonical_hash(broad_evidence),
         "source_evidence_hash": canonical_hash((evidence, broad_evidence)),
-        # These references are written to a separate append-only visibility ledger.
-        # They are intentionally excluded from the aggregate feature snapshot hash.
         "official_visible_events": official_visible_events,
         "broad_visible_events": broad_visible_events,
     }

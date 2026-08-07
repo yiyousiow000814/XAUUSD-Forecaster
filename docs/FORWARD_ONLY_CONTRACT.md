@@ -19,7 +19,10 @@ outcomes, training rows, performance rows, or news matches.
 ## Clock and outcome
 
 - Decision times are UTC boundaries divisible by five minutes.
-- One decision event is appended for every clock boundary, including outages.
+- One decision event is appended for every live clock boundary, including an
+  unexpected current outage. Expected weekly-closure grids and historical
+  grids missed while the process was stopped are not reconstructed as if they
+  had been live predictions.
 - Every model identity predicts from the same immutable snapshot.
 - Champion-0 is `always-wait-v1` and its effective action is always `WAIT`.
 - The primary outcome uses the first valid quote received strictly after the
@@ -28,6 +31,23 @@ outcomes, training rows, performance rows, or news matches.
 - Long enters at Ask and exits at Bid. Short enters at Bid and exits at Ask.
 - An outcome is appended; it never updates its decision or prediction.
 
+## Weekly market closure
+
+- News collection and annotation continue during the expected weekly XAUUSD
+  closure. Their immutable first-seen clocks continue advancing normally.
+- A scheduled closed grid without a fresh point-in-time Bid/Ask does not create
+  a market snapshot, prediction, outcome, or training row.
+- A genuinely received fresh quote takes precedence over the closure clock.
+- The operational closure clock follows Friday 17:00 through Sunday 18:00 in
+  `America/New_York`, so daylight-saving transitions do not require a fixed UTC
+  offset. Broker quotes remain authoritative when they are actually present.
+- After restart, missed grids without their own point-in-time quote are skipped;
+  the runtime never manufactures retrospective predictions to fill a gap.
+- Collection resumes on the first live grid with a fresh quote. Weekend news is
+  eligible only under the ordinary publication-time, first-seen, parsing,
+  collection-latency, and category-specific freshness rules. There is no Monday
+  batch training of empty weekend market grids.
+
 ## Point-in-time visibility
 
 A market observation is visible only when its `received_time` is not later
@@ -35,14 +55,21 @@ than the decision. A news revision is visible only when its
 `collector_first_seen_time` is not later than the decision. Publisher time is
 descriptive metadata and never overrides collector visibility.
 
-Visibility and economic freshness are separate clocks. Action-bearing news
-must also have a recorded `source_published_time` at or after `FORWARD_EPOCH`,
-not later than the decision, and no more than 72 hours before both first receipt
-and the decision. Missing publisher timestamps, pre-epoch archive items, late
-discoveries, and stale events remain visible for audit but cannot create a
-current model impulse. Freshness decay is measured from publisher time, never
-from parser completion or collector startup. Controlled category
-`regulation_other` is display-only even when it comes from an official source.
+Visibility, collection latency, and economic freshness are separate clocks.
+Action-bearing news must also have a recorded `source_published_time` at or
+after `FORWARD_EPOCH`, not later than the decision, and must first be collected
+within 60 minutes of publication. The maximum economic age is frozen by
+controlled category: 24 hours for inflation/employment and risk sentiment,
+36 hours for war/geopolitics, 48 hours for growth, USD/liquidity and oil/energy,
+72 hours for rates/Fed, and seven days for central-bank gold. Missing publisher
+timestamps, pre-epoch archive items, discoveries delayed by more than 60
+minutes, and stale events remain visible for audit but cannot create a current
+model impulse. Known pre-epoch and late-discovery archive rows are not sent to
+the full-text or Gemini queues. A row with a missing publisher timestamp may be
+summarized for display, but it remains ineligible for training. Freshness decay
+is measured from publisher time, never from parser completion or collector
+startup. Controlled category `regulation_other` is display-only even when it
+comes from an official source.
 
 Revised news is a new row with a larger revision number and a new content
 hash. Existing revisions are never updated. An annotation is usable only when
@@ -73,6 +100,15 @@ requests remain reserved for monetary-policy, CPI, and payroll events. Gemini
 3.1 Flash-Lite may annotate routine full-text items only after the 3.5 routine
 budget reaches that reserve. Both model identities and quota ledgers remain
 separate and are accepted by the same point-in-time training contract.
+
+Broad training accepts only the current material-event schema. The canonical
+event must be a `FACT_EVENT`, `OFFICIAL_CLAIM`, or `MARKET_REACTION`; its
+evidence role must be `CORE_CLAIM`, `EVIDENCE_DOCUMENT`, or `MARKET_REACTION`;
+and materiality must be at least 0.50. Commentary, forecasts, low-materiality
+items, legacy annotation schemas, and unsupported source domains remain
+display-only. Syndicated headlines sharing one `material_event_key` form one
+event and never create multiple votes. A primary-source grade is based on the
+source organization, not the number of feeds or documents carrying it.
 
 Display-number formatting is repaired deterministically against source
 lexemes. Unsupported numbers are replaced by a nonnumeric disclosure and lower
