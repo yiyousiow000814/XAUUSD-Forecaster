@@ -572,6 +572,11 @@ def _dashboard_payload(database: Path) -> dict:
                       CASE WHEN n.body LIKE '[FULL_TEXT%' THEN 'FULL_TEXT'
                            WHEN length(trim(COALESCE(n.body, ''))) >= 240 THEN 'SOURCE_CONTENT'
                            ELSE 'HEADLINE_ONLY' END AS content_status,
+                      CASE WHEN length(trim(COALESCE(n.body, ''))) >= 240 THEN 'AVAILABLE'
+                           WHEN cf.is_terminal=1 THEN 'UNAVAILABLE'
+                           WHEN cf.next_retry_at IS NOT NULL THEN 'RETRYING'
+                           ELSE 'PENDING' END AS content_fetch_status,
+                      cf.error_type AS content_error_type,
                       n.link, n.content_hash,
                       json_extract(a.annotation_json, '$.summary_zh') AS summary_zh,
                       json_extract(a.annotation_json, '$.primary_category') AS primary_category,
@@ -603,9 +608,12 @@ def _dashboard_payload(database: Path) -> dict:
                             WHEN r.maximum_tier='MODEL_ELIGIBLE'
                                  AND length(trim(COALESCE(n.body,'')))>=r.minimum_body_characters
                                  AND a.parsed_at IS NULL THEN 'NOT_YET_PARSED'
+                            WHEN r.maximum_tier='MODEL_ELIGIBLE' AND cf.is_terminal=1
+                                 THEN 'CONTENT_UNAVAILABLE'
                             WHEN r.maximum_tier='MODEL_ELIGIBLE' THEN 'WAITING_CONTENT'
                             ELSE COALESCE(r.maximum_tier, 'COLLECT_ONLY') END AS model_visibility,
                       CASE WHEN a.annotation_id IS NOT NULL THEN 'READY'
+                           WHEN cf.is_terminal=1 THEN 'CONTENT_UNAVAILABLE'
                            WHEN length(trim(COALESCE(n.body, ''))) < 240 THEN 'WAITING_CONTENT'
                            WHEN f.is_terminal=1 THEN 'DEAD_LETTER'
                            WHEN f.next_retry_at > ? THEN 'BACKING_OFF'
@@ -669,6 +677,14 @@ def _dashboard_payload(database: Path) -> dict:
                      AND NOT (latest_f.error_type='RuntimeError'
                               AND latest_f.error='All configured Gemini keys unavailable for this batch')
                     ORDER BY latest_f.failed_at DESC LIMIT 1)
+               LEFT JOIN news_content_failures cf
+                 ON cf.failure_id=(
+                   SELECT latest_cf.failure_id
+                   FROM news_content_failures latest_cf
+                   WHERE latest_cf.source=n.source
+                     AND latest_cf.source_item_id=n.source_item_id
+                     AND latest_cf.revision_number=n.revision_number
+                   ORDER BY latest_cf.attempt_number DESC LIMIT 1)
                LEFT JOIN source_eligibility_rules r
                  ON r.eligibility_version='news-source-eligibility-v1'
                 AND r.source=n.source
@@ -713,7 +729,11 @@ def _dashboard_payload(database: Path) -> dict:
                  sum(CASE WHEN a.annotation_id IS NULL
                            AND f.is_terminal=1 THEN 1 ELSE 0 END) AS dead_letter,
                  sum(CASE WHEN length(trim(COALESCE(n.body, ''))) < 240
-                          THEN 1 ELSE 0 END) AS waiting_content
+                           AND (cf.failure_id IS NULL OR cf.is_terminal=0)
+                          THEN 1 ELSE 0 END) AS waiting_content,
+                 sum(CASE WHEN length(trim(COALESCE(n.body, ''))) < 240
+                           AND cf.is_terminal=1
+                          THEN 1 ELSE 0 END) AS unavailable_content
                FROM news_revisions n
                LEFT JOIN news_annotations a
                  ON a.annotation_id=(
@@ -750,6 +770,14 @@ def _dashboard_payload(database: Path) -> dict:
                      AND NOT (latest_f.error_type='RuntimeError'
                               AND latest_f.error='All configured Gemini keys unavailable for this batch')
                    ORDER BY latest_f.failed_at DESC LIMIT 1)
+               LEFT JOIN news_content_failures cf
+                 ON cf.failure_id=(
+                   SELECT latest_cf.failure_id
+                   FROM news_content_failures latest_cf
+                   WHERE latest_cf.source=n.source
+                     AND latest_cf.source_item_id=n.source_item_id
+                     AND latest_cf.revision_number=n.revision_number
+                   ORDER BY latest_cf.attempt_number DESC LIMIT 1)
                WHERE NOT EXISTS (
                  SELECT 1 FROM news_revisions newer
                  WHERE newer.source=n.source
@@ -1106,6 +1134,7 @@ def _dashboard_payload(database: Path) -> dict:
             "backing_off": int(annotation_queue["backing_off"] or 0),
             "dead_letter": int(annotation_queue["dead_letter"] or 0),
             "waiting_content": int(annotation_queue["waiting_content"] or 0),
+            "unavailable_content": int(annotation_queue["unavailable_content"] or 0),
             "configured_key_count": len(gemini_keys),
             "available_key_count": available_gemini_keys,
             "fallback_available_key_count": available_fallback_keys,

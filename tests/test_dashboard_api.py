@@ -106,6 +106,51 @@ def test_dashboard_orders_news_by_first_seen_not_publisher_time(tmp_path) -> Non
     ]
 
 
+def test_dashboard_distinguishes_unavailable_content_from_pending(tmp_path) -> None:
+    now = datetime(2026, 8, 7, 9, 0, tzinfo=UTC)
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=now)
+    digest = hashlib.sha256(b"headline-only").hexdigest()
+    ledger.append_news_revision(
+        {
+            "source": "google_news_gold_context",
+            "source_item_id": "blocked",
+            "collector_first_seen_time": now,
+            "fetched_time": now,
+            "headline": "Publisher blocks automated article access",
+            "body": "headline-only",
+            "link": "https://publisher.example/blocked",
+            "content_hash": digest,
+            "cluster_id": "blocked",
+        }
+    )
+    ledger.append_content_failure(
+        {
+            "failure_id": "blocked-403",
+            "source": "google_news_gold_context",
+            "source_item_id": "blocked",
+            "revision_number": 1,
+            "raw_content_hash": digest,
+            "attempt_number": 1,
+            "error_type": "HTTPError",
+            "error_signature": hashlib.sha256(b"403").hexdigest(),
+            "error": "HTTP Error 403: Forbidden",
+            "failed_at": now,
+            "is_terminal": True,
+        }
+    )
+    ledger.connection.close()
+
+    payload = _dashboard_module()._dashboard_payload(database)
+    row = payload["recent_news"][0]
+    assert row["content_status"] == "HEADLINE_ONLY"
+    assert row["content_fetch_status"] == "UNAVAILABLE"
+    assert row["content_error_type"] == "HTTPError"
+    assert row["annotation_status"] == "CONTENT_UNAVAILABLE"
+    assert payload["annotation_queue"]["waiting_content"] == 0
+    assert payload["annotation_queue"]["unavailable_content"] == 1
+
+
 def test_dashboard_uses_gemini_controlled_category_before_source_guess() -> None:
     module = _dashboard_module()
     assert module._news_category({

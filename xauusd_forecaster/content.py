@@ -20,6 +20,10 @@ from .forward_ledger import ForwardLedger
 
 
 USER_AGENT = "XAUUSD-Forward-Evidence/0.1 (+local research collector)"
+ARTICLE_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0 Safari/537.36"
+)
 FED_SOURCES = (
     "federal_reserve_press_all",
     "federal_reserve_monetary",
@@ -38,7 +42,17 @@ NON_FED_FULL_TEXT_SOURCES = (
 
 
 def fetch_content(url: str, timeout_seconds: float = 12.0) -> bytes:
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    # Publisher pages commonly reject unknown crawler agents even when the same
+    # public article is readable in an ordinary browser.  Use a normal document
+    # request profile; this does not bypass authentication or paywalls.
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": ARTICLE_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+    )
     with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
         return response.read()
 
@@ -168,7 +182,8 @@ def hydrate_pending_non_fed_content(
                     WHERE f2.source=f.source
                       AND f2.source_item_id=f.source_item_id
                       AND f2.revision_number=f.revision_number)
-                  AND (f.is_terminal=1 OR f.next_retry_at>? )
+                  AND (f.is_terminal=1 OR
+                       (f.next_retry_at>? AND f.error NOT LIKE 'HTTP Error 405:%'))
               )
               AND (
                 n.body NOT LIKE '[FULL_TEXT%'

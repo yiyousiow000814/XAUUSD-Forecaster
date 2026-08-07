@@ -15,6 +15,7 @@ from xauusd_forecaster.forward_ledger import ForwardLedger
 from xauusd_forecaster.content import (
     extract_article_full_text,
     extract_federal_reserve_full_text,
+    fetch_content,
     hydrate_pending_federal_reserve_content,
     hydrate_pending_non_fed_content,
 )
@@ -416,6 +417,33 @@ def test_non_fed_article_hydration_appends_auditable_revision(tmp_path) -> None:
     ).fetchone()
     assert latest["revision_number"] == 2
     assert latest["body"].startswith("[FULL_TEXT")
+
+
+def test_article_fetch_uses_browser_document_headers(monkeypatch) -> None:
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b"publisher article"
+
+    def open_request(request, timeout):
+        captured["headers"] = dict(request.header_items())
+        captured["timeout"] = timeout
+        return Response()
+
+    import xauusd_forecaster.content as content_module
+
+    monkeypatch.setattr(content_module.urllib.request, "urlopen", open_request)
+    assert fetch_content("https://publisher.example/article") == b"publisher article"
+    assert captured["headers"]["User-agent"].startswith("Mozilla/5.0")
+    assert "text/html" in captured["headers"]["Accept"]
+    assert captured["timeout"] == 12.0
 
 
 @pytest.mark.parametrize(
