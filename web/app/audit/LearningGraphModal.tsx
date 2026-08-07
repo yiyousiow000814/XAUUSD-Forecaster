@@ -17,6 +17,11 @@ type Decision = {
   ev_short_u5: number | null; lcb_long_u5: number | null; lcb_short_u5: number | null;
 };
 type TrainingMarker = { model_identity: string; training_dataset_hash: string; created_at: string; training_rows: number; artifact_count: number };
+type BoundaryReadout = {
+  decision_time: string; direction: number | null; news: number | null;
+  changes: Array<{ model_identity: string; model_version: string; training_rows?: number }>;
+  event_count?: number;
+};
 type VersionGroup = {
   model_identity: string; training_dataset_hash: string; generation: number;
   lifecycle_status: "LATEST" | "PREVIOUS" | "ARCHIVED"; created_at: string;
@@ -107,27 +112,41 @@ export default function LearningGraphModal({
 function VersionLedger({ groups }: { groups: VersionGroup[] }) {
   const [identity, setIdentity] = useState("BROAD_FULL");
   const [cadence, setCadence] = useState<EvaluationCadence>("EVERY_5M");
+  const [cutoffWindow, setCutoffWindow] = useState<"20" | "all">("20");
   const [hovered, setHovered] = useState<VersionGroup | null>(null);
   const rows = groups.filter(row => row.model_identity === identity).sort((a,b) => b.generation-a.generation);
   const stamp = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12:false, month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" });
   const metric = (row: VersionGroup) => row.cadence_metrics?.[cadence] ?? { oos_rows: row.subsequent_oos_rows, distinct_days: row.distinct_days, cumulative_quote_return: row.cumulative_quote_return, profit_factor_quote_adjusted: row.profit_factor_quote_adjusted, coverage_rate: row.coverage_rate };
-  const graphRows = groups.filter(row => metric(row).oos_rows > 0);
-  const times = graphRows.map(row => Date.parse(row.created_at));
+  const matureRows = groups.filter(row => metric(row).oos_rows > 0);
+  const fullCutoffByCreatedAt = new Map(groups.filter(row => row.model_identity === "FULL" || row.model_identity === "BROAD_FULL").map(row => [row.created_at, row.training_rows]));
+  const comparisonCutoff = (row: VersionGroup) => row.model_identity.endsWith("NEWS_RESIDUAL") ? fullCutoffByCreatedAt.get(row.created_at) ?? row.training_rows : row.training_rows;
+  const allCutoffs = [...new Set(matureRows.map(comparisonCutoff))].sort((a, b) => a - b);
+  const cutoffs = cutoffWindow === "all" ? allCutoffs : allCutoffs.slice(-20);
+  const graphRows = matureRows.filter(row => cutoffs.includes(comparisonCutoff(row)));
   const values = graphRows.map(row => metric(row).cumulative_quote_return).concat(0);
-  const minTime = times.length ? Math.min(...times) : 0; const maxTime = times.length ? Math.max(...times) : 1;
   const low = Math.min(...values); const high = Math.max(...values);
-  const gx = (value: string) => 70 + (Date.parse(value)-minTime)/Math.max(1,maxTime-minTime)*820;
-  const gy = (value: number) => 32 + (high-value)/Math.max(.000001,high-low)*230;
+  const gx = (trainingRows: number) => cutoffs.length === 1
+    ? 480
+    : 90 + cutoffs.indexOf(trainingRows) / Math.max(1, cutoffs.length - 1) * 780;
+  const gy = (value: number) => 28 + (high-value)/Math.max(.000001,high-low)*218;
   const hoveredMetric = hovered ? metric(hovered) : null;
-  return <section className="version-ledger modal-version-ledger"><header><div><span>同一冻结模型 · 两种真实评估频率</span><h3>所有模型的训练组成绩</h3></div><div className="version-ledger-controls"><label><span>统计频率</span><select value={cadence} onChange={event => setCadence(event.target.value as EvaluationCadence)}><option value="EVERY_5M">每5分钟（重叠样本）</option><option value="FIXED_30M">每30分钟（固定 :00 / :30）</option></select></label><label><span>查看模型明细</span><select value={identity} onChange={event => setIdentity(event.target.value)}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select></label></div></header>
+  return <section className="version-ledger modal-version-ledger"><header><div className="version-ledger-title"><span>共同训练截止量对齐 · 同一坐标叠加比较</span><h3>所有模型的训练组成绩</h3></div><div className="version-ledger-controls"><label className="version-ledger-model"><span>查看模型明细</span><select value={identity} onChange={event => setIdentity(event.target.value)}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select></label><label><span>统计频率</span><select value={cadence} onChange={event => setCadence(event.target.value as EvaluationCadence)}><option value="EVERY_5M">每5分钟（重叠样本）</option><option value="FIXED_30M">每30分钟（固定 :00 / :30）</option></select></label><label><span>横轴范围</span><select value={cutoffWindow} onChange={event => setCutoffWindow(event.target.value as "20" | "all")}><option value="20">最近20个训练截止点</option><option value="all">全部训练截止点</option></select></label></div></header>
     <section className="version-hover-chart" aria-label="所有模型训练组独立收益图">
-      <div className="version-hover-readout">{hovered && hoveredMetric ? <><b>{LABELS[hovered.model_identity]} · 第 {hovered.generation} 组</b><span>{stamp(hovered.created_at)} · 训练 {hovered.training_rows} 条 · OOS {hoveredMetric.oos_rows} 条 · 收益 {pct(hoveredMetric.cumulative_quote_return)} · PF {hoveredMetric.profit_factor_quote_adjusted?.toFixed(2) ?? "—"} · 出方向 {((hoveredMetric.coverage_rate ?? 0)*100).toFixed(1)}%</span></> : <><b>把鼠标移到圆点上</b><span>可查看模型、训练组、上线时间、OOS 数量、收益、PF 与出方向比例。</span></>}</div>
-      {graphRows.length ? <svg viewBox="0 0 960 310" role="img">
+      <div className="version-hover-readout">{hovered && hoveredMetric ? <><b>{LABELS[hovered.model_identity]} · 第 {hovered.generation} 组</b><span>{stamp(hovered.created_at)} · 共同截止 {comparisonCutoff(hovered)} 条 · 自身训练 {hovered.training_rows} 条 · OOS {hoveredMetric.oos_rows} 条 · 收益 {pct(hoveredMetric.cumulative_quote_return)} · PF {hoveredMetric.profit_factor_quote_adjusted?.toFixed(2) ?? "—"} · 出方向 {((hoveredMetric.coverage_rate ?? 0)*100).toFixed(1)}%</span></> : <><b>五种模型叠加在同一坐标</b><span>实线连接相邻训练截止点；虚线跨过没有合法新版本的空档。空缺代表该模型当轮没有合法新版本；这里只叠加显示，不会把收益相加。</span></>}</div>
+      {graphRows.length ? <svg viewBox="0 0 960 300" role="img">
         <line x1="70" x2="890" y1={gy(0)} y2={gy(0)} className="zero-line" />
         <text x="12" y={gy(high)+4}>{pct(high)}</text><text x="12" y={gy(low)+4}>{pct(low)}</text>
+        {cutoffs.map(trainingRows => <g key={trainingRows} className="generation-axis"><line x1={gx(trainingRows)} x2={gx(trainingRows)} y1="252" y2="258" /><text x={gx(trainingRows)} y="279" textAnchor="middle">{trainingRows} 条</text></g>)}
         {Object.keys(LABELS).filter(key => key !== "CHAMPION_0").map(key => {
-          const modelRows = graphRows.filter(row => row.model_identity === key).sort((a,b) => Date.parse(a.created_at)-Date.parse(b.created_at));
-          return <g key={key}>{modelRows.length > 1 && <polyline fill="none" stroke={COLORS[key]} strokeWidth="2.5" points={modelRows.map(row => `${gx(row.created_at)},${gy(metric(row).cumulative_quote_return)}`).join(" ")} />}{modelRows.map(row => <circle key={row.training_dataset_hash} cx={gx(row.created_at)} cy={gy(metric(row).cumulative_quote_return)} r="5" fill={COLORS[key]} stroke="#eee9dc" strokeWidth="2" tabIndex={0} onMouseEnter={() => setHovered(row)} onMouseLeave={() => setHovered(null)} onFocus={() => setHovered(row)} onBlur={() => setHovered(null)} />)}</g>;
+          const modelRows = graphRows.filter(row => row.model_identity === key).sort((a,b) => comparisonCutoff(a)-comparisonCutoff(b));
+          const selected = key === identity;
+          return <g key={key} opacity={selected ? 1 : .48}>{modelRows.slice(1).map((row, index) => {
+            const previous = modelRows[index];
+            const previousIndex = cutoffs.indexOf(comparisonCutoff(previous));
+            const currentIndex = cutoffs.indexOf(comparisonCutoff(row));
+            const crossesMissingCutoff = currentIndex !== previousIndex + 1;
+            return <line key={`${previous.training_dataset_hash}-${row.training_dataset_hash}`} x1={gx(comparisonCutoff(previous))} y1={gy(metric(previous).cumulative_quote_return)} x2={gx(comparisonCutoff(row))} y2={gy(metric(row).cumulative_quote_return)} stroke={COLORS[key]} strokeWidth={selected ? "3.5" : "2.25"} strokeDasharray={crossesMissingCutoff ? "7 6" : undefined} />;
+          })}{modelRows.map(row => <circle key={row.training_dataset_hash} cx={gx(comparisonCutoff(row))} cy={gy(metric(row).cumulative_quote_return)} r={selected ? "6" : "5"} fill={COLORS[key]} stroke="#eee9dc" strokeWidth="2" tabIndex={0} onMouseEnter={() => setHovered(row)} onMouseLeave={() => setHovered(null)} onFocus={() => setHovered(row)} onBlur={() => setHovered(null)}><title>{`${LABELS[key]} · 共同截止 ${comparisonCutoff(row)} 条 · 自身训练 ${row.training_rows} 条 · 自身第 ${row.generation} 组 · ${pct(metric(row).cumulative_quote_return)}`}</title></circle>)}</g>;
         })}
       </svg> : <Empty text="这个频率还没有成熟的训练组结果。" />}
       <div className="chart-legend">{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <span key={key}><i style={{ background:COLORS[key] }} />{label}</span>)}</div>
@@ -148,6 +167,7 @@ function LongCurve({ curves }: { curves: Curve[] }) {
   const [range, setRange] = useState<"24h" | "7d" | "30d" | "all">("24h");
   const [cadence, setCadence] = useState<EvaluationCadence>("EVERY_5M");
   const [pageOffset, setPageOffset] = useState(0);
+  const [hoveredBoundary, setHoveredBoundary] = useState<BoundaryReadout | null>(null);
   const usable = curves.map(row => cadence === "FIXED_30M" ? { ...row, points: row.points_30m ?? [], source_point_count: row.source_point_count_30m, chart_point_count: row.chart_point_count_30m, chart_downsampled: row.chart_downsampled_30m } : row).filter(row => row.model_identity !== "CHAMPION_0" && row.points.length > 0);
   const overviewPoints = usable.flatMap(row => row.points);
   if (!overviewPoints.length) return <Empty text="还没有已成熟的 Live OOS 点；第一个预测走完30分钟后才会出现。" />;
@@ -178,7 +198,6 @@ function LongCurve({ curves }: { curves: Curve[] }) {
   const values = visiblePoints.map(point => point.cumulative_quote_return).concat(0);
   const low = Math.min(...values); const high = Math.max(...values);
   const x = (time: string) => 58 + (Date.parse(time) - start) / Math.max(1, end - start) * 862;
-  const y = (value: number) => 28 + (high - value) / Math.max(.000001, high - low) * 310;
   const tickTimes = Array.from(new Set([0, .25, .5, .75, 1].map(part => new Date(start + (end - start) * part).toISOString())));
   const axisLabel = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
   const versionBoundaries = visibleCurves.flatMap(row => row.points.flatMap((point, index) => {
@@ -190,14 +209,82 @@ function LongCurve({ curves }: { curves: Curve[] }) {
       training_rows: point.training_rows,
     }];
   }));
-  const groupedBoundaries = [...new Set(versionBoundaries.map(row => row.decision_time))].map(decisionTime => ({
+  const rawGroupedBoundaries = [...new Set(versionBoundaries.map(row => row.decision_time))]
+    .sort((a, b) => Date.parse(a) - Date.parse(b))
+    .map(decisionTime => ({
     decision_time: decisionTime,
     changes: versionBoundaries.filter(row => row.decision_time === decisionTime),
-  }));
-  const markerLimit = 14;
+    }));
+  const boundaryPools = (changes: typeof versionBoundaries) => {
+    const directionRows = changes
+      .filter(change => !change.model_identity.endsWith("NEWS_RESIDUAL"))
+      .map(change => change.training_rows ?? 0);
+    const newsRows = changes
+      .filter(change => change.model_identity.endsWith("NEWS_RESIDUAL"))
+      .map(change => change.training_rows ?? 0);
+    return {
+      direction: directionRows.length ? Math.max(...directionRows) : null,
+      news: newsRows.length ? Math.max(...newsRows) : null,
+    };
+  };
+  const boundaryState = rawGroupedBoundaries.reduce<{
+    lastDirectionRows: number | null;
+    lastNewsRows: number | null;
+    boundaries: Array<typeof rawGroupedBoundaries[number] & { direction: number | null; news: number | null }>;
+  }>((state, boundary) => {
+    const pools = boundaryPools(boundary.changes);
+    const direction = pools.direction !== null && pools.direction !== state.lastDirectionRows ? pools.direction : null;
+    const news = pools.news !== null && pools.news !== state.lastNewsRows ? pools.news : null;
+    return {
+      lastDirectionRows: pools.direction ?? state.lastDirectionRows,
+      lastNewsRows: pools.news ?? state.lastNewsRows,
+      boundaries: direction === null && news === null
+        ? state.boundaries
+        : [...state.boundaries, { ...boundary, direction, news }],
+    };
+  }, { lastDirectionRows: null, lastNewsRows: null, boundaries: [] });
+  const groupedBoundaries = boundaryState.boundaries;
+  const boundaryLabel = (boundary: typeof groupedBoundaries[number]) => [
+    boundary.direction !== null ? `方向 ${boundary.direction}` : null,
+    boundary.news !== null ? `新闻 ${boundary.news}` : null,
+  ].filter(Boolean).join(" / ");
+  const compactBoundaryRail = range === "all";
+  const markerLimit = compactBoundaryRail ? 36 : 14;
   const displayedBoundaries = groupedBoundaries.length <= markerLimit ? groupedBoundaries : Array.from(
     new Set(Array.from({ length: markerLimit }, (_, index) => Math.round(index * (groupedBoundaries.length - 1) / (markerLimit - 1))))
   ).map(index => groupedBoundaries[index]);
+  const boundaryGroups = compactBoundaryRail ? displayedBoundaries.reduce<typeof displayedBoundaries[]>((groups, boundary) => {
+    const previous = groups.at(-1);
+    const previousBoundary = previous?.at(-1);
+    if (previous && previousBoundary && Math.abs(x(boundary.decision_time) - x(previousBoundary.decision_time)) < 15) previous.push(boundary);
+    else groups.push([boundary]);
+    return groups;
+  }, []) : displayedBoundaries.map(boundary => [boundary]);
+  const laneEnds: number[] = [];
+  const boundaryLayouts = boundaryGroups.map(group => {
+    const latest = group.at(-1)!;
+    const boundary: BoundaryReadout = {
+      decision_time: latest.decision_time,
+      direction: [...group].reverse().find(item => item.direction !== null)?.direction ?? null,
+      news: [...group].reverse().find(item => item.news !== null)?.news ?? null,
+      changes: group.flatMap(item => item.changes),
+      event_count: group.length,
+    };
+    const markerX = group.reduce((total, item) => total + x(item.decision_time), 0) / group.length;
+    const label = boundaryLabel(boundary);
+    const labelWidth = Math.max(62, Math.min(132, 22 + label.length * 7));
+    const idealLabelX = Math.max(58 + labelWidth / 2, Math.min(920 - labelWidth / 2, markerX));
+    const idealLeft = idealLabelX - labelWidth / 2;
+    let lane = laneEnds.findIndex(endX => idealLeft >= endX + 8);
+    if (lane < 0) lane = laneEnds.length;
+    laneEnds[lane] = idealLabelX + labelWidth / 2;
+    return { boundary, markerX, label, labelWidth, labelX: idealLabelX, lane };
+  });
+  const boundaryLaneCount = compactBoundaryRail || !boundaryLayouts.length ? 0 : Math.max(...boundaryLayouts.map(layout => layout.lane)) + 1;
+  const boundaryDividerY = compactBoundaryRail ? 18 : boundaryLaneCount ? 14 + boundaryLaneCount * 25 : 56;
+  const plotTop = compactBoundaryRail ? 46 : boundaryLaneCount ? boundaryDividerY + 14 : 70;
+  const plotHeight = Math.max(118, 338 - plotTop);
+  const y = (value: number) => plotTop + (high - value) / Math.max(.000001, high - low) * plotHeight;
   const sourcePointCount = usable.reduce((total, row) => total + (row.source_point_count ?? row.points.length), 0);
   const sourceTimeCount = Math.max(...usable.map(row => row.source_point_count ?? row.points.length));
   const chartDownsampled = usable.some(row => row.chart_downsampled);
@@ -214,18 +301,29 @@ function LongCurve({ curves }: { curves: Curve[] }) {
       <button type="button" disabled={pageOffset === 0} onClick={() => setPageOffset(0)}>回到最新</button>
       <span>{windowLabel}{chartDownsampled ? ` · 全历史 ${sourcePointCount} 条已压缩为 ${overviewPoints.length} 个绘图点` : ` · 当前 ${visiblePoints.length} 个绘图点`}</span>
     </div>
+    {compactBoundaryRail && <div className="curve-event-readout" aria-live="polite">
+      {hoveredBoundary ? <><b>{hoveredBoundary.event_count && hoveredBoundary.event_count > 1 ? `${hoveredBoundary.event_count} 次相近换版 · ` : ""}{axisLabel(hoveredBoundary.decision_time)} · {boundaryLabel(hoveredBoundary)}</b><span>{hoveredBoundary.changes.map(change => `${LABELS[change.model_identity] ?? change.model_identity}（${change.training_rows ?? "—"} 条）`).join(" · ")}</span></> : <><b>模型换版本事件轨道</b><span>相近换版会合并为一个圆点；移到圆点查看准确时间、方向样本、新闻样本与模型明细。</span></>}
+    </div>}
     <svg className="learning-svg" viewBox="0 0 960 400" role="img" aria-label="各模型历史与实时成熟 OOS 曲线">
+      {boundaryLayouts.length > 0 && <line x1="58" x2="920" y1={boundaryDividerY} y2={boundaryDividerY} className={compactBoundaryRail ? "version-event-rail" : "version-label-divider"} />}
       <line x1="58" x2="920" y1={y(0)} y2={y(0)} className="zero-line" />
       <text x="8" y={y(high) + 5}>{pct(high)}</text><text x="8" y={y(low) + 5}>{pct(low)}</text>
-      {displayedBoundaries.map((boundary, index) => <g key={boundary.decision_time} className="version-boundary">
-        <title>{boundary.changes.map(change => `${LABELS[change.model_identity] ?? change.model_identity} · 新训练数据代 · ${change.model_version}`).join("\n")}</title>
-        <line x1={x(boundary.decision_time)} x2={x(boundary.decision_time)} y1="18" y2="350" />
-        <text x={x(boundary.decision_time) + 4} y={24 + index % 2 * 14}>{boundary.changes[0]?.training_rows ?? ""}条新训练</text>
-      </g>)}
+      {boundaryLayouts.map(({ boundary, markerX, label, labelWidth, labelX, lane }) => {
+        const labelY = 8 + lane * 25;
+        return <g key={boundary.decision_time} className="version-boundary">
+          <title>{boundary.event_count && boundary.event_count > 1 ? `${boundary.event_count} 次相近换版\n` : ""}{boundary.changes.map(change => `${LABELS[change.model_identity] ?? change.model_identity} · 训练 ${change.training_rows ?? "—"} 条 · ${change.model_version}`).join("\n")}</title>
+          <line className="version-boundary-marker" x1={markerX} x2={markerX} y1={boundaryDividerY} y2="350" />
+          {compactBoundaryRail ? <circle className="version-event-dot" cx={markerX} cy={boundaryDividerY} r="5" tabIndex={0} onMouseEnter={() => setHoveredBoundary(boundary)} onMouseLeave={() => setHoveredBoundary(null)} onFocus={() => setHoveredBoundary(boundary)} onBlur={() => setHoveredBoundary(null)} /> : <>
+            <path className="version-boundary-leader" d={`M ${labelX} ${labelY + 21} L ${labelX} ${boundaryDividerY - 5} L ${markerX} ${boundaryDividerY}`} />
+            <rect className="version-boundary-badge" x={labelX - labelWidth / 2} y={labelY} width={labelWidth} height="21" rx="3" />
+            <text x={labelX} textAnchor="middle" y={labelY + 14}>{label}</text>
+          </>}
+        </g>;
+      })}
       {visibleCurves.map(row => <polyline key={row.model_identity} fill="none" stroke={COLORS[row.model_identity]} strokeWidth="3" points={row.points.map(point => `${x(point.decision_time)},${y(point.cumulative_quote_return)}`).join(" ")} />)}
       {tickTimes.map(value => <g key={value} className="time-axis"><line x1={x(value)} x2={x(value)} y1="350" y2="356" /><text x={x(value)} y="374" textAnchor="middle">{axisLabel(value)}</text></g>)}
     </svg>
-    <div className="chart-legend">{visibleCurves.map(row => <span key={row.model_identity}><i style={{ background: COLORS[row.model_identity] }} />{LABELS[row.model_identity]} <b>{pct(row.points.at(-1)?.cumulative_quote_return ?? 0)}</b></span>)}{groupedBoundaries.length > 0 && <span><i className="train-dot" />模型换版本{groupedBoundaries.length > displayedBoundaries.length ? `（显示 ${displayedBoundaries.length}/${groupedBoundaries.length}）` : ""}</span>}</div>
+    <div className="chart-legend">{visibleCurves.map(row => <span key={row.model_identity}><i style={{ background: COLORS[row.model_identity] }} />{LABELS[row.model_identity]} <b>{pct(row.points.at(-1)?.cumulative_quote_return ?? 0)}</b></span>)}{groupedBoundaries.length > 0 && <span><i className="train-dot" />模型换版本{compactBoundaryRail ? `（${boundaryLayouts.length} 个事件点 / ${groupedBoundaries.length} 次）` : groupedBoundaries.length > displayedBoundaries.length ? `（显示 ${displayedBoundaries.length}/${groupedBoundaries.length}）` : ""}</span>}</div>
   </div>;
 }
 
@@ -244,11 +342,12 @@ function MarketChart({ market, identity, setIdentity }: { market?: { candles: Ca
   const scopedDecisions = useMemo(() => (market?.decisions ?? []).filter(row =>
     row.model_identity === identity && Date.parse(row.decision_time) >= cutoff
   ), [market, identity, cutoff]);
-  const arrowAction = (row: Decision) => (
-    row.ev_long_u5 != null && row.ev_short_u5 != null && row.ev_long_u5 !== row.ev_short_u5
-      ? row.ev_long_u5 > row.ev_short_u5 ? "LONG" : "SHORT"
-      : "WAIT"
-  );
+  const arrowAction = (row: Decision) => {
+    if (row.ev_long_u5 == null || row.ev_short_u5 == null || row.ev_long_u5 === row.ev_short_u5) return "WAIT";
+    const bestAction = row.ev_long_u5 > row.ev_short_u5 ? "LONG" : "SHORT";
+    const bestEv = bestAction === "LONG" ? row.ev_long_u5 : row.ev_short_u5;
+    return bestEv > 0 ? bestAction : "WAIT";
+  };
   const candidateDecisions = scopedDecisions.filter(row =>
     ((arrowAction(row) === "LONG" && showLong) ||
      (arrowAction(row) === "SHORT" && showShort) ||
