@@ -301,6 +301,7 @@ type Payload = {
   factor_coverage: Array<{
     domain: string;
     status: string;
+    status_reason?: string | null;
     source: string | null;
     action_bearing: boolean;
     cadence: string;
@@ -892,9 +893,9 @@ export default function AuditPage() {
 
       {view === "coverage" && <section className="coverage-grid">
         {(payload?.factor_coverage ?? []).map(row => <article key={row.domain} className={`coverage-card status-${row.status.toLowerCase().replaceAll("_", "-")}`}>
-          <div><span>{row.cadence}</span><b>{row.status}</b></div><h2>{row.domain}</h2><p>{row.source ?? "尚未连接可靠的 point-in-time 数据源"}</p>
+          <div><span>{row.cadence}</span><b>{row.status === "WARMING_UP" ? "等待首次有效资料" : row.status}</b></div><h2>{row.domain}</h2><p>{row.source ?? "尚未连接可靠的 point-in-time 数据源"}</p>
           {row.value !== null && row.value !== undefined && <strong className="coverage-value">{number(row.value, 3)} <small>{row.unit}</small></strong>}
-          <small>{row.observed_at ? `观测期 ${row.observed_at} · ` : ""}{row.action_bearing ? "已进入决策Snapshot" : "Shadow特征，等待训练验证"}</small>
+          <small>{row.status_reason ?? `${row.observed_at ? `观测期 ${row.observed_at} · ` : ""}${row.action_bearing ? "已进入决策Snapshot" : "Shadow特征，等待训练验证"}`}</small>
         </article>)}
       </section>}
 

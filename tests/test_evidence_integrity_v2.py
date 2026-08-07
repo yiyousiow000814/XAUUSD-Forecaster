@@ -1194,24 +1194,66 @@ def test_rolling_uncertainty_uses_latest_version_per_prior_decision(tmp_path) ->
 
 
 def test_only_latest_and_previous_versions_are_active() -> None:
-    updates = [
-        {"model_identity": "MARKET_ONLY", "model_version": "market-3"},
-        {"model_identity": "FULL", "model_version": "full-3",
-         "feature_version": f"{inference_v2.FEATURE_VERSION}+{inference_v2.NEWS_FEATURE_VERSION}",
-         "eligibility_version": inference_v2.ELIGIBILITY_VERSION},
-        {"model_identity": "MARKET_ONLY", "model_version": "market-2"},
-        {"model_identity": "FULL", "model_version": "full-2",
-         "feature_version": f"{inference_v2.FEATURE_VERSION}+{inference_v2.NEWS_FEATURE_VERSION}",
-         "eligibility_version": inference_v2.ELIGIBILITY_VERSION},
-        {"model_identity": "MARKET_ONLY", "model_version": "market-1"},
-        {"model_identity": "FULL", "model_version": "full-1",
-         "feature_version": f"{inference_v2.FEATURE_VERSION}+{inference_v2.NEWS_FEATURE_VERSION}",
-         "eligibility_version": inference_v2.ELIGIBILITY_VERSION},
-    ]
+    def generation(version: int) -> list[dict]:
+        return [
+            {"model_identity": "MARKET_ONLY", "model_version": f"market-{version}"},
+            {"model_identity": "NEWS_RESIDUAL", "model_version": f"news-{version}",
+             "feature_version": inference_v2.NEWS_FEATURE_VERSION,
+             "eligibility_version": inference_v2.ELIGIBILITY_VERSION},
+            {"model_identity": "FULL", "model_version": f"full-{version}",
+             "feature_version": f"{inference_v2.FEATURE_VERSION}+{inference_v2.NEWS_FEATURE_VERSION}",
+             "eligibility_version": inference_v2.ELIGIBILITY_VERSION},
+            {"model_identity": "BROAD_NEWS_RESIDUAL", "model_version": f"broad-news-{version}",
+             "feature_version": inference_v2.NEWS_FEATURE_VERSION,
+             "eligibility_version": (
+                 f"{inference_v2.ELIGIBILITY_VERSION}+{inference_v2.EVIDENCE_POLICY_VERSION}"
+             )},
+            {"model_identity": "BROAD_FULL", "model_version": f"broad-full-{version}",
+             "feature_version": (
+                 f"{inference_v2.FEATURE_VERSION}+{inference_v2.NEWS_FEATURE_VERSION}"
+                 f"+{inference_v2.EVIDENCE_POLICY_VERSION}"
+             ),
+             "eligibility_version": (
+                 f"{inference_v2.ELIGIBILITY_VERSION}+{inference_v2.EVIDENCE_POLICY_VERSION}"
+             )},
+        ]
+
+    updates = generation(3) + generation(2) + generation(1)
     active = inference_v2._active_updates(updates)
     assert [row["model_version"] for row in active] == [
-        "market-3", "full-3", "market-2", "full-2",
+        "market-3", "news-3", "full-3", "broad-news-3", "broad-full-3",
+        "market-2", "news-2", "full-2", "broad-news-2", "broad-full-2",
     ]
+
+
+def test_news_generation_stays_inactive_until_all_four_models_exist() -> None:
+    updates = [
+        {"model_identity": "MARKET_ONLY", "model_version": "market-current"},
+        {"model_identity": "NEWS_RESIDUAL", "model_version": "news-current",
+         "feature_version": inference_v2.NEWS_FEATURE_VERSION,
+         "eligibility_version": inference_v2.ELIGIBILITY_VERSION},
+        {"model_identity": "FULL", "model_version": "full-current",
+         "feature_version": f"{inference_v2.FEATURE_VERSION}+{inference_v2.NEWS_FEATURE_VERSION}",
+         "eligibility_version": inference_v2.ELIGIBILITY_VERSION},
+        {"model_identity": "BROAD_NEWS_RESIDUAL", "model_version": "broad-news-current",
+         "feature_version": inference_v2.NEWS_FEATURE_VERSION,
+         "eligibility_version": (
+             f"{inference_v2.ELIGIBILITY_VERSION}+{inference_v2.EVIDENCE_POLICY_VERSION}"
+         )},
+    ]
+
+    active = inference_v2._active_updates(updates)
+
+    assert [row["model_version"] for row in active] == ["market-current"]
+    status = inference_v2.news_model_activation_status(updates)
+    assert {
+        row["model_identity"]: row["status"] for row in status
+    } == {
+        "NEWS_RESIDUAL": "GENERATION_WAIT",
+        "FULL": "GENERATION_WAIT",
+        "BROAD_NEWS_RESIDUAL": "GENERATION_WAIT",
+        "BROAD_FULL": "NOT_TRAINED",
+    }
 
 
 def test_active_updates_reject_old_news_eligibility_but_keep_market() -> None:

@@ -213,22 +213,29 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
         """SELECT * FROM model_updates_v2 WHERE model_identity='MARKET_ONLY'
         AND model_stage=? ORDER BY training_rows DESC LIMIT 1""", (stage,)
     ).fetchone()
-    paired_models = ledger.connection.execute(
+    generation_models = ledger.connection.execute(
         """SELECT DISTINCT model_identity FROM model_updates_v2
         WHERE model_stage=? AND created_at>=?
           AND (
+            (model_identity='NEWS_RESIDUAL' AND feature_version=? AND eligibility_version=?)
+            OR
             (model_identity='FULL' AND feature_version=? AND eligibility_version=?)
+            OR
+            (model_identity='BROAD_NEWS_RESIDUAL' AND feature_version=? AND eligibility_version=?)
             OR
             (model_identity='BROAD_FULL' AND feature_version=? AND eligibility_version=?)
           )""",
         (
             stage, latest["created_at"],
+            NEWS_FEATURE_VERSION, ELIGIBILITY_VERSION,
             f"{FEATURE_VERSION}+{NEWS_FEATURE_VERSION}", ELIGIBILITY_VERSION,
+            NEWS_FEATURE_VERSION,
+            f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}",
             f"{FEATURE_VERSION}+{NEWS_FEATURE_VERSION}+{EVIDENCE_POLICY_VERSION}",
             f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}",
         ),
     ).fetchall() if latest is not None else []
-    paired_identities = {row["model_identity"] for row in paired_models}
+    generation_identities = {row["model_identity"] for row in generation_models}
     latest_artifact_path = Path(latest["artifact_path"]) if latest is not None else None
     latest_artifact_invalid = bool(
         latest_artifact_path is not None
@@ -238,14 +245,14 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
             or not latest_artifact_path.exists()
         )
     )
-    bootstrap_news_pair = latest is not None and (
-        (official_ready and "FULL" not in paired_identities)
-        or (broad_ready and "BROAD_FULL" not in paired_identities)
+    bootstrap_news_generation = latest is not None and (
+        (official_ready and not {"NEWS_RESIDUAL", "FULL"}.issubset(generation_identities))
+        or (broad_ready and not {"BROAD_NEWS_RESIDUAL", "BROAD_FULL"}.issubset(generation_identities))
         or latest_artifact_invalid
     )
     if (latest is not None
             and count < int(latest["training_rows"]) + RETRAIN_INTERVAL
-            and not bootstrap_news_pair):
+            and not bootstrap_news_generation):
         return [{"status": "NOT_DUE", "complete_rows": count,
                  "next_threshold": int(latest["training_rows"]) + RETRAIN_INTERVAL}]
 

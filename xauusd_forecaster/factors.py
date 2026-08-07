@@ -183,7 +183,7 @@ def factor_coverage(
         {"domain": "就业", "status": "COLLECTING", "source": "BLS Payroll/AHE/Unemployment/JOLTS", "action_bearing": False, "cadence": "月度/事件"},
         macro("油价", "DCOILWTICO", "EIA/FRED WTI spot", "日度"),
         {"domain": "战争/地缘", "status": "COLLECTING" if {"gdelt_gold_geopolitics", "google_news_gold_geopolitics", "google_news_gold_context", "us_treasury_press_releases"} & news_sources else "WARMING_UP", "source": "GDELT + Google News publisher resolution + U.S. Treasury + Gemini", "action_bearing": False, "cadence": "20分钟/事件"},
-        {"domain": "央行购金", "status": "COLLECTING" if "world_gold_council_central_banks" in news_sources else "WARMING_UP", "source": "World Gold Council central-bank monitor", "action_bearing": False, "cadence": "6小时/月度"},
+        {"domain": "央行购金", "status": "COLLECTING" if "world_gold_council_central_banks" in news_sources else "WARMING_UP", "status_reason": "已捕获 World Gold Council 正式央行购金资料" if "world_gold_council_central_banks" in news_sources else "尚未捕获 World Gold Council 正式央行购金资料；黄色只表示等待首次有效资料，不表示看多、看空或模型故障", "source": "World Gold Council central-bank monitor", "action_bearing": False, "cadence": "6小时/月度"},
         macro("流动性", "WALCL", "Fed/FRED total assets", "周度"),
         macro("风险偏好", "VIXCLS", "CBOE/FRED VIX", "日度"),
     ]

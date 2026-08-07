@@ -59,11 +59,35 @@ def _news_contract_matches(update) -> bool:
     )
 
 
+def _news_generation_ready(
+    newest: dict, available_news_eligibilities: set[str] | None = None,
+) -> bool:
+    """Require one complete, runnable generation for every news identity."""
+    return all(
+        identity in newest
+        and _news_contract_matches(newest[identity])
+        and (
+            available_news_eligibilities is None
+            or _row_value(newest[identity], "eligibility_version")
+                in available_news_eligibilities
+        )
+        and (
+            "artifact_path" not in newest[identity].keys()
+            or (
+                Path(newest[identity]["artifact_path"]).is_absolute()
+                and Path(newest[identity]["artifact_path"]).exists()
+            )
+        )
+        for identity in NEWS_MODEL_IDENTITIES
+    )
+
+
 def news_model_activation_status(updates) -> list[dict]:
     """Explain whether each news identity has a current-policy runnable artifact."""
     newest = {}
     for update in updates:
         newest.setdefault(update["model_identity"], update)
+    generation_ready = _news_generation_ready(newest)
     result = []
     for identity in ("NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL"):
         expected_feature, expected_eligibility = _expected_news_contract(identity)
@@ -80,6 +104,9 @@ def news_model_activation_status(updates) -> list[dict]:
                 artifact_valid = path.is_absolute() and path.exists()
             status = "ACTIVE" if artifact_valid else "ARTIFACT_UNAVAILABLE"
             reason = "当前规则版本已激活" if artifact_valid else "当前模型文件不可用"
+            if status == "ACTIVE" and not generation_ready:
+                status = "GENERATION_WAIT"
+                reason = "等待同一规则版本的四套新闻模型全部生成"
         result.append({
             "model_identity": identity,
             "status": status,
@@ -110,12 +137,19 @@ def _recommended_action(
 
 
 def _active_updates(updates, available_news_eligibilities: set[str] | None = None) -> list:
-    """Select current-policy newest/previous models without reviving legacy news."""
+    """Select models, activating news only as one complete policy generation."""
     if available_news_eligibilities is None:
         available_news_eligibilities = {
             ELIGIBILITY_VERSION,
             f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}",
         }
+    newest_by_identity = {}
+    for update in updates:
+        newest_by_identity.setdefault(update["model_identity"], update)
+    news_generation_ready = _news_generation_ready(
+        newest_by_identity, available_news_eligibilities
+    )
+
     counts: dict[str, int] = defaultdict(int)
     newest_seen: set[str] = set()
     blocked_news: set[str] = set()
@@ -123,6 +157,11 @@ def _active_updates(updates, available_news_eligibilities: set[str] | None = Non
     for update in updates:
         identity = update["model_identity"]
         if identity not in MODEL_IDENTITIES or counts[identity] >= ACTIVE_VERSIONS_PER_IDENTITY:
+            continue
+        if identity in NEWS_MODEL_IDENTITIES and not news_generation_ready:
+            # A rule generation is usable only after all four news identities
+            # have compatible artifacts.  This prevents a policy deployment
+            # from exposing a partial or silently mixed model generation.
             continue
         if identity in blocked_news:
             continue

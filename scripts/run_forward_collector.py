@@ -34,6 +34,16 @@ from xauusd_forecaster.execution_learning import (  # noqa: E402
 
 
 UTC = timezone.utc
+NEWS_CONTRACT_RECONCILE_SECONDS = 300
+
+
+def reconcile_news_contract(ledger, cutoff: datetime, artifact_root: Path) -> dict:
+    """Migrate PIT news snapshots and build any missing current generation."""
+    migration = append_missing_current_news_snapshots(ledger, cutoff)
+    training = train_due_v2(ledger, cutoff, artifact_root)
+    return {"migration": migration, "training": training}
+
+
 DEFAULT_LOCAL_ROOT = MODULE_ROOT / ".local" / "forward"
 
 
@@ -101,35 +111,25 @@ def main() -> int:
         ),
         flush=True,
     )
-    if args.once:
-        ledger.close()
-        return 0
-
-    # A frozen news contract can change after direction samples have matured.
-    # Append the new point-in-time feature version before checking training so
-    # compatible news challengers do not disappear until 96 new rows arrive.
-    startup_news_migration = append_missing_current_news_snapshots(
-        ledger, datetime.now(UTC)
-    )
-    print(
-        json.dumps(
-            {"event": "NEWS_CONTRACT_MIGRATION", **startup_news_migration},
-            sort_keys=True,
-        ),
-        flush=True,
-    )
-    startup_training_status = train_due_v2(
+    # Reconcile at startup even in --once mode.  A rule release must build its
+    # compatible news generation from already matured point-in-time evidence;
+    # it must not wait for 96 brand-new direction rows.
+    startup_reconciliation = reconcile_news_contract(
         ledger, datetime.now(UTC), local_root / "models-v2"
     )
     print(
         json.dumps(
-            {"event": "STARTUP_TRAIN_CHECK", "results": startup_training_status},
+            {"event": "NEWS_CONTRACT_RECONCILIATION", **startup_reconciliation},
             sort_keys=True,
         ),
         flush=True,
     )
+    if args.once:
+        ledger.close()
+        return 0
 
     last_news_poll = datetime.now(UTC)
+    last_news_reconciliation = last_news_poll
     last_maintenance_day = initialized_at.date()
     row = ledger.connection.execute(
         "SELECT max(decision_time) AS latest FROM decision_events"
@@ -150,6 +150,19 @@ def main() -> int:
             if (now - last_news_poll).total_seconds() >= args.news_poll_seconds:
                 news_status = engine.collect_news(now)
                 last_news_poll = now
+            if ((now - last_news_reconciliation).total_seconds()
+                    >= NEWS_CONTRACT_RECONCILE_SECONDS):
+                reconciliation = reconcile_news_contract(
+                    ledger, now, local_root / "models-v2"
+                )
+                print(
+                    json.dumps(
+                        {"event": "NEWS_CONTRACT_RECONCILIATION", **reconciliation},
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+                last_news_reconciliation = now
             boundary = floor_five_minutes(now)
             candidate = last_decision + timedelta(minutes=5)
             try:
