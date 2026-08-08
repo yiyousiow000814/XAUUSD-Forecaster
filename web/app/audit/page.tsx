@@ -669,6 +669,12 @@ export default function AuditPage() {
     window.history.replaceState(null, "", `/audit?view=${next}`);
   };
 
+  const scrollAuditTabs = (direction: -1 | 1) => {
+    const nav = auditTabsRef.current;
+    if (!nav) return;
+    nav.scrollBy({ left: direction * Math.max(180, nav.clientWidth * 0.75), behavior: "smooth" });
+  };
+
   useEffect(() => {
     if (!window.matchMedia("(max-width: 850px)").matches) return;
     const nav = auditTabsRef.current;
@@ -700,7 +706,6 @@ export default function AuditPage() {
   const activeLearningIdentities = new Set(
     activeLearningModels.map(row => row.model_identity),
   ).size;
-  const archivedModelCount = (payload?.learning_curves?.models?.length ?? 0) - activeLearningModels.length;
   const latestVersionGroups = (payload?.learning_curves?.version_groups ?? []).filter(
     row => row.lifecycle_status === "LATEST",
   );
@@ -766,6 +771,8 @@ export default function AuditPage() {
 
       {combinedErrors && <div className="error-banner">{combinedErrors}。页面会保留上一份成功数据并自动重试。</div>}
 
+      <div className="audit-tabs-shell">
+      <button type="button" className="audit-tabs-scroll" onClick={() => scrollAuditTabs(-1)} aria-label="向左查看更多审计视图">向左</button>
       <nav ref={auditTabsRef} className="audit-tabs" aria-label="审计视图">
         <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻 <b>{readableNewsTotal}</b></a>
         <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>新闻证据管理 <b>{payload?.news_evidence_summary?.model_seen_events ?? 0}</b></a>
@@ -774,6 +781,8 @@ export default function AuditPage() {
         <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b>{learningState === "ready" ? `${activeLearningIdentities}组` : learningState === "loading" ? "读取中" : "—"}</b></a>
         <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b>{payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</b></a>
       </nav>
+      <button type="button" className="audit-tabs-scroll" onClick={() => scrollAuditTabs(1)} aria-label="向右查看更多审计视图">向右</button>
+      </div>
 
       {view === "news" && <>
         <section className="annotation-queue" aria-label="新闻处理进度">
@@ -931,7 +940,7 @@ export default function AuditPage() {
             <article><b>做法可以实时复现；结果尚未达到实盘标准</b><span>行情和新闻都只读取决策时已经看见的内容；30分钟结果成熟后才进入下一轮训练。当前仍没有下单权限，也不会自动晋升。</span></article>
           </div>
         </details>
-        <footer className="league-footer">{payload?.learning_curves?.disclaimer ?? "早期曲线用于观察学习过程，不代表已证明盈利。"} 单日和双日新闻模型明确标记 EXPERIMENTAL；达到3个新闻日期后自动进入标准证据状态。当前只运行每个 Ridge 身份的最新版和前一版；{archivedModelCount} 个旧版本的 artifact、预测和成绩已永久归档。零收益安全基准不训练、不使用 AI、不占 Ridge 版本名额。Preview 与 Shadow 都没有下单权限，也不会自动晋升。</footer>
+        <footer className="league-footer">仅供研究观察，不代表盈利，也不会自动下单。</footer>
         <LearningGraphModal key={graphStartTab} open={graphOpen} onClose={() => setGraphOpen(false)} startTab={graphStartTab} curves={payload?.learning_curves?.identity_curves ?? []} market={payload?.market_chart} versionGroups={payload?.learning_curves?.version_groups ?? []} execution={payload?.execution_learning} />
       </section>}
 

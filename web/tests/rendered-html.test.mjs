@@ -48,7 +48,7 @@ test("keeps branch previews isolated from the production database", async () => 
 test("does not show a redundant forecast warning while the market is closed", () => {
   const source = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(source, /const forecastStatus = marketClosed\s*\? null/);
-  assert.match(source, /forecastStatus && <strong className=\{`forecast-state/);
+  assert.match(source, /forecastStatus && signalRemaining > 0 && online/);
   assert.match(source, /等待行情恢复/);
   assert.match(source, /等待最新预测/);
   assert.doesNotMatch(source, /当前不可参考/);
@@ -192,11 +192,10 @@ test("renders generic story coverage without black empty grid placeholders", () 
   assert.doesNotMatch(css, /\.story-grid[^}]+background:var\(--ink\)/);
 });
 
-test("labels the rolling lifecycle without presenting the safety baseline as AI", () => {
+test("keeps the learning disclaimer short and explicit", () => {
   const source = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
-  assert.match(source, /零收益安全基准/);
-  assert.match(source, /最新版和前一版/);
-  assert.match(source, /不训练、不使用 AI、不占 Ridge 版本名额/);
+  assert.match(source, /仅供研究观察，不代表盈利，也不会自动下单/);
+  assert.doesNotMatch(source, /早期曲线用于观察学习过程/);
   assert.doesNotMatch(source, /Champion 始终是 Always Wait/);
 });
 
@@ -327,8 +326,12 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(page, /ref=\{auditTabsRef\} className="audit-tabs"/);
   assert.match(page, /active\.offsetLeft - \(nav\.clientWidth - active\.clientWidth\) \/ 2/);
+  assert.match(page, /scrollAuditTabs/);
+  assert.match(page, /aria-label="向左查看更多审计视图"/);
+  assert.match(page, /aria-label="向右查看更多审计视图"/);
   assert.match(css, /\.topbar \{ align-items:stretch; flex-direction:column/);
-  assert.match(css, /\.audit-tabs \{ position:sticky; top:0; display:flex;[\s\S]*?overflow-x:auto/);
+  assert.match(css, /\.audit-tabs-shell \{ position:sticky; top:0;[\s\S]*?grid-template-columns:46px minmax\(0,1fr\) 46px/);
+  assert.match(css, /\.audit-tabs \{ position:static; display:flex;[\s\S]*?overflow-x:auto/);
   assert.match(css, /\.graph-modal>nav \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
   assert.match(css, /\.graph-modal,\.graph-modal\.graph-modal-curve,\.graph-modal\.graph-modal-versions \{ width:100vw; height:100dvh/);
   assert.match(page, /return-value return-history/);
@@ -337,6 +340,8 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.compact-model-summary article \{ grid-template-columns:minmax\(0,1fr\)/);
   assert.match(css, /\.return-flow \{ width:100%; grid-template-columns:minmax\(0,1fr\) 12px minmax\(0,1fr\) 10px minmax\(0,1fr\)/);
   assert.match(css, /\.story-grid>article \{ overflow:hidden/);
+  assert.match(css, /\.unassigned-story-events>div \{ grid-template-columns:minmax\(0,1fr\)/);
+  assert.match(css, /\.return-value>span,\.return-value>strong \{ overflow:visible;[\s\S]*?font-size:clamp\(14px,4\.4vw,17px\)/);
   assert.match(css, /\.summary-cadence \{ display:grid; grid-template-columns:minmax\(0,1fr\) minmax\(0,1fr\)/);
   assert.match(modal, /mobile-chart-scroll/);
   assert.match(modal, /左右滑动查看完整图表/);

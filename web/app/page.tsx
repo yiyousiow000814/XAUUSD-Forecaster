@@ -200,7 +200,7 @@ export default function Home() {
           <div className={`action action-${forecastAction.toLowerCase()}`}>
             {forecastAction}
           </div>
-          {forecastStatus && <strong className={`forecast-state ${signalRemaining > 0 && online ? "is-current" : "is-muted"}`}>{forecastStatus}</strong>}
+          {forecastStatus && signalRemaining > 0 && online && <strong className="forecast-state is-current">{forecastStatus}</strong>}
         </div>
       </section>
 
