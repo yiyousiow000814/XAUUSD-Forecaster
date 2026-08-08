@@ -961,6 +961,9 @@ def _dashboard_payload(database: Path) -> dict:
         }
         integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
         news_source_health = _news_source_health(connection, now)
+        monitored_news_sources = {
+            row["source"] for row in news_source_health if row["health"] == "HEALTHY"
+        }
         all_news_evidence = event_evidence_rows_from_connection(connection, now)
         event_graph = temporal_event_graph(all_news_evidence)
         storylines = event_graph["stories"]
@@ -1491,7 +1494,9 @@ def _dashboard_payload(database: Path) -> dict:
         "learning_curves": learning,
         "execution_learning": execution_learning,
         "market_chart": market_chart,
-        "factor_coverage": factor_coverage(latest_macro, collected_news_sources),
+        "factor_coverage": factor_coverage(
+            latest_macro, collected_news_sources, monitored_news_sources,
+        ),
         "sources": {
             "market": "cTrader CLI / Bid-Ask",
             "fed": "ONLINE",

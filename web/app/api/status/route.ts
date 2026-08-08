@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
 import { applyFreshness } from "./freshness.js";
+import { previewBundle, previewJson } from "../_shared/preview";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +11,7 @@ type DashboardPayload = {
 };
 
 export async function GET() {
+  if (previewBundle) return previewJson(previewBundle.status);
   // Public viewers must not depend on a direct connection to the owner's PC.
   // The synchronizer writes the authoritative public snapshot to D1; the
   // local relay is only a last-resort fallback before the first sync.

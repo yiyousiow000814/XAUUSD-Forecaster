@@ -357,6 +357,27 @@ def fetch_url(url: str, timeout_seconds: float = 30.0) -> bytes:
         return response.read()
 
 
+def extract_world_gold_council_article(
+    url: str,
+    fetcher: Callable[[str], bytes] = fetch_url,
+) -> tuple[datetime | None, str, str]:
+    """Read WGC's visible publication date and article body in one request."""
+    raw = fetcher(url)
+    soup = BeautifulSoup(raw, "html.parser")
+    published = None
+    for paragraph in soup.select("main p, article p, body p"):
+        value = " ".join(paragraph.get_text(" ", strip=True).split())
+        if not re.fullmatch(r"\d{1,2} [A-Za-z]+, \d{4}", value):
+            continue
+        try:
+            published = datetime.strptime(value, "%d %B, %Y").replace(tzinfo=UTC)
+        except ValueError:
+            continue
+        break
+    text, source_url = extract_article_full_text(url, fetcher=lambda _: raw)
+    return published, text, source_url
+
+
 def decode_google_news_publisher_url(url: str) -> str:
     """Best-effort Google wrapper decoding; failure leaves the discovery URL intact."""
     if urllib.parse.urlparse(url).hostname != "news.google.com":
@@ -782,7 +803,9 @@ def collect_world_gold_council_news(
     ledger: ForwardLedger,
     fetched_at: datetime,
     fetcher: Callable[[str], bytes] = fetch_url,
-    content_extractor: Callable[[str], tuple[str, str]] = extract_article_full_text,
+    article_loader: Callable[
+        [str], tuple[datetime | None, str, str]
+    ] = extract_world_gold_council_article,
 ) -> dict[str, object]:
     """Collect World Gold Council central-bank research headlines."""
     last_poll = ledger.latest_source_poll_time(WGC_SOURCE)
@@ -800,6 +823,7 @@ def collect_world_gold_council_news(
         inserted = 0
         unchanged = 0
         rejected: dict[str, int] = {}
+        article_errors: list[str] = []
         seen: set[str] = set()
         for path, raw_title in matches:
             if path in seen or len(seen) >= 8:
@@ -809,10 +833,16 @@ def collect_world_gold_council_news(
             if not headline or headline.lower().startswith("read more"):
                 continue
             link = urllib.parse.urljoin(WGC_URL, path)
+            try:
+                published, article_text, source_url = article_loader(link)
+            except Exception as error:
+                rejected["ARTICLE_LOAD_ERROR"] = rejected.get("ARTICLE_LOAD_ERROR", 0) + 1
+                article_errors.append(f"{link}:{type(error).__name__}:{str(error)[:120]}")
+                continue
             record = {
                 "source": WGC_SOURCE,
                 "source_item_id": link,
-                "source_published_time": None,
+                "source_published_time": published,
                 "collector_first_seen_time": fetched_at,
                 "fetched_time": fetched_at,
                 "headline": headline,
@@ -825,15 +855,42 @@ def collect_world_gold_council_news(
             if not eligible:
                 rejected[reason] = rejected.get(reason, 0) + 1
                 continue
-            created, reason = _append_after_full_text(ledger, record, content_extractor)
+            created, reason = _append_after_full_text(
+                ledger,
+                record,
+                lambda _: (article_text, source_url),
+            )
             inserted += int(created)
             unchanged += int(reason == "UNCHANGED_FULL_TEXT")
             if reason not in {"INSERTED", "UNCHANGED_FULL_TEXT"}:
                 rejected[reason] = rejected.get(reason, 0) + 1
         if not seen:
             raise ValueError("World Gold Council page returned no central-bank links")
-        ledger.append_source_poll({"poll_id": poll_id, "source": WGC_SOURCE, "fetched_time": fetched_at, "status": "OK", "payload_hash": hashlib.sha256(raw).hexdigest()})
-        return {"source": WGC_SOURCE, "status": "OK", "inserted_revisions": inserted,
+        technical_rejections = sum(
+            rejected.get(reason, 0)
+            for reason in (
+                "PUBLISHED_TIME_MISSING", "ARTICLE_LOAD_ERROR",
+                "FULL_TEXT_UNAVAILABLE", "SOURCE_URL_MISSING",
+            )
+        )
+        status = (
+            "PARTIAL" if technical_rejections and inserted + unchanged
+            else "ERROR" if technical_rejections
+            else "OK"
+        )
+        error = " | ".join(article_errors)[:500] if article_errors else (
+            json.dumps(rejected, sort_keys=True)[:500] if technical_rejections else None
+        )
+        ledger.append_source_poll({
+            "poll_id": poll_id,
+            "source": WGC_SOURCE,
+            "fetched_time": fetched_at,
+            "status": status,
+            "payload_hash": hashlib.sha256(raw).hexdigest(),
+            "error_type": "WgcArticleIngestionError" if technical_rejections else None,
+            "error": error,
+        })
+        return {"source": WGC_SOURCE, "status": status, "inserted_revisions": inserted,
                 "unchanged_items": unchanged, "rejected_reasons": rejected}
     except Exception as error:
         ledger.append_source_poll({"poll_id": poll_id, "source": WGC_SOURCE, "fetched_time": fetched_at, "status": "ERROR", "error_type": type(error).__name__, "error": str(error)[:500]})
