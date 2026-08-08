@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import sys
+import types
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -14,8 +16,10 @@ from pathlib import Path
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
-
-from xauusd_forecaster.factors import factor_coverage  # noqa: E402
+package = types.ModuleType("xauusd_forecaster")
+package.__path__ = [str(MODULE_ROOT / "xauusd_forecaster")]
+sys.modules["xauusd_forecaster"] = package
+factor_coverage = importlib.import_module("xauusd_forecaster.factors").factor_coverage
 
 
 DEFAULT_SOURCE = "https://aurum-signal-room.yiyousiow1234.workers.dev"
