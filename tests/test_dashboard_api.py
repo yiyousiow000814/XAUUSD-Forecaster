@@ -34,6 +34,33 @@ def test_deployment_status_does_not_mislabel_local_edits_as_remote_drift() -> No
     assert module._deployment_status(None, "remote", False) == "PROVENANCE_UNKNOWN"
 
 
+def test_deployment_provenance_discovers_git_from_standalone_module_root(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _dashboard_module()
+    calls: list[Path] = []
+
+    def fake_run(args, *, cwd, **_kwargs):
+        calls.append(Path(cwd))
+        command = tuple(args[1:])
+        outputs = {
+            ("rev-parse", "HEAD"): "abc123\n",
+            ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"): "origin/main\n",
+            ("rev-parse", "origin/main"): "abc123\n",
+            ("status", "--porcelain", "--", "."): "",
+        }
+        return type("Result", (), {"stdout": outputs[command]})()
+
+    monkeypatch.setattr(module, "MODULE_ROOT", tmp_path)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    provenance = module._deployment_provenance(datetime.now(UTC), None)
+
+    assert provenance["status"] == "MATCHED"
+    assert provenance["runtime_git_sha"] == "abc123"
+    assert calls and set(calls) == {tmp_path}
+
+
 def _append_basic_annotation(
     ledger: ForwardLedger,
     *,

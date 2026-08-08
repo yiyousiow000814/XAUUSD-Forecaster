@@ -66,7 +66,10 @@ def _deployment_status(
 
 def _deployment_provenance(generated_at: datetime, database_epoch: str | None) -> dict:
     """Expose code/data identity so a stale Sites mirror cannot look current."""
-    repo = MODULE_ROOT.parents[1]
+    # Git discovers the repository from the module directory in both the old
+    # nested checkout and the current standalone checkout. A fixed parent
+    # depth breaks as soon as the project is moved.
+    repo = MODULE_ROOT
     def git(*args: str) -> str | None:
         try:
             result = subprocess.run(
@@ -79,7 +82,7 @@ def _deployment_provenance(generated_at: datetime, database_epoch: str | None) -
     runtime_sha = git("rev-parse", "HEAD")
     upstream = git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
     expected_sha = git("rev-parse", upstream) if upstream else None
-    module_dirty = bool(git("status", "--porcelain", "--", "src/XAUUSD-Forecaster"))
+    module_dirty = bool(git("status", "--porcelain", "--", "."))
     return {
         "runtime_git_sha": runtime_sha,
         "expected_git_sha": expected_sha,

@@ -152,9 +152,12 @@ test("renders generic story coverage without black empty grid placeholders", () 
   assert.match(page, /个事件/);
   assert.match(page, /市场反应流/);
   assert.match(page, /新事件候选/);
-  assert.match(page, /DEPLOYMENT DRIFT/);
+  assert.match(page, /版本需要更新/);
+  assert.match(page, /同一事件的报道，合并显示/);
+  assert.doesNotMatch(page, /TEMPORAL EVENT GRAPH V5/);
+  assert.doesNotMatch(page, /Runtime Git SHA/);
+  assert.doesNotMatch(page, /Story Policy/);
   assert.match(page, /未归属事件/);
-  assert.match(page, /不进入 Ridge/);
   assert.match(css, /\.story-grid[^}]+background:#aaa59a/);
   assert.match(css, /html \{ background:var\(--paper\)/);
   assert.doesNotMatch(css, /\.story-grid[^}]+background:var\(--ink\)/);

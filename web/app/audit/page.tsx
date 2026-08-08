@@ -424,10 +424,10 @@ const EVIDENCE_REASON_LABELS: Record<string, string> = {
   LOW_MATERIALITY: "事件重要性不足",
 };
 const DEPLOYMENT_PRESENTATION: Record<string, { className: string; label: string }> = {
-  MATCHED: { className: "matched", label: "部署版本一致" },
-  LOCAL_CHANGES: { className: "local-changes", label: "本机有未发布改动 · Git 版本一致" },
-  PROVENANCE_UNKNOWN: { className: "unknown", label: "部署版本暂时无法核对" },
-  DEPLOYMENT_DRIFT: { className: "drift", label: "DEPLOYMENT DRIFT · 运行版本与远端版本不同" },
+  MATCHED: { className: "matched", label: "版本正常" },
+  LOCAL_CHANGES: { className: "local-changes", label: "有尚未发布的改动" },
+  PROVENANCE_UNKNOWN: { className: "unknown", label: "版本暂时无法核对" },
+  DEPLOYMENT_DRIFT: { className: "drift", label: "版本需要更新" },
 };
 const VISIBILITY_LABELS: Record<string, string> = {
   MODEL_VISIBLE: "可用于模型",
@@ -779,8 +779,8 @@ export default function AuditPage() {
       </section>}
 
       {view === "stories" && <section className="story-desk">
-        <header className="evidence-intro"><div><p className="eyebrow">TEMPORAL EVENT GRAPH V5 · RESEARCH ONLY</p><h2>文章、证据文件与现实事件，<br />分别计算。</h2></div><p>同一机构的声明、问答和会议纪要只增加证据文件数，不冒充多个事件或多源确认。事件按现实发生/发布时间排序；系统首次收到时间只用于审计。市场反应、评论和历史回填均与活跃核心故事分开。<b>全部仅供研究展示，不进入 Ridge</b>。</p></header>
-        {payload?.system.deployment && <section className={`deployment-proof ${deploymentPresentation.className}`}><b>{deploymentPresentation.label}</b><span>Runtime {payload.system.deployment.runtime_git_sha?.slice(0, 8) ?? "UNKNOWN"}</span><span>Expected {payload.system.deployment.expected_git_sha?.slice(0, 8) ?? "UNKNOWN"}</span><span>Policy {payload.system.deployment.storyline_policy_version}</span><span>Payload {payload.system.deployment.payload_schema_version}</span><span>生成 {time(payload.system.deployment.payload_generated_at)}</span><span>数据纪元 {time(payload.system.deployment.source_database_epoch)}</span></section>}
+        <header className="evidence-intro evidence-intro-compact"><div><p className="eyebrow">事件故事链</p><h2>同一事件的报道，合并显示。</h2></div></header>
+        {payload?.system.deployment && <section className={`deployment-proof ${deploymentPresentation.className}`}><b>{deploymentPresentation.label}</b>{payload.system.deployment.status === "DEPLOYMENT_DRIFT" ? <span>本机 {payload.system.deployment.runtime_git_sha?.slice(0, 8) ?? "未知"} · 远端 {payload.system.deployment.expected_git_sha?.slice(0, 8) ?? "未知"}</span> : payload.system.deployment.runtime_git_sha ? <span>版本 {payload.system.deployment.runtime_git_sha.slice(0, 8)}</span> : null}</section>}
         <section className="theme-streams"><header><h3>主题流</h3><span>不声称构成单一事件</span></header><div>{(payload?.theme_streams ?? []).map(theme => <article key={theme.theme_id}><b>{theme.title}</b><strong>{theme.item_count}</strong><span>{theme.latest_headline}</span><small>{time(theme.last_updated)}</small></article>)}</div></section>
         <section className="theme-streams market-streams"><header><h3>市场反应流</h3><span>价格反应不冒充核心事实</span></header><div>{(payload?.market_reaction_streams ?? []).map(stream => <article key={stream.stream_id}><b>{stream.title}</b><strong>{stream.item_count}</strong><span>{stream.latest_headline}</span><small>{time(stream.last_updated)}</small></article>)}</div></section>
         <div className="story-grid">{(payload?.storylines ?? []).map(story => <article key={story.storyline_id}>
@@ -798,7 +798,6 @@ export default function AuditPage() {
         <details className="unassigned-story-events"><summary>历史档案 <b>{payload?.storyline_summary?.archived_total ?? 0}</b> <small>ARCHIVAL_BACKFILL，不显示为当前新事件</small></summary>{(payload?.archived_storylines ?? []).map(story => <div key={story.storyline_id}><time>{time(story.timeline[0]?.event_time)}</time><span><b>{story.title}</b><br />{story.latest_change}</span><small>{story.event_count} 个历史事件 · 系统首次收录 {time(story.last_updated)}</small></div>)}{(payload?.archived_story_event_candidates ?? []).map(item => <div key={item.candidate_id}><time>{time(item.event_time)}</time><span>{item.headline}</span><small>{item.evidence_documents} 份历史证据文件 · 系统首次收录 {time(item.first_seen)}</small></div>)}</details>
         <details className="unassigned-story-events" open><summary>新事件候选 <b>{payload?.storyline_summary?.candidate_total ?? 0}</b> <small>等待第二个不同进展，不会一篇新闻生成一张故事卡</small></summary>{(payload?.story_event_candidates ?? []).map(item => <div key={item.candidate_id}><time>{time(item.first_seen)}</time><span>{item.headline}</span><small>{item.evidence_documents} 篇证据 · {item.independent_publishers} 个独立来源 · {item.episode_key}</small></div>)}</details>
         <details className="unassigned-story-events"><summary>未归属事件 <b>{payload?.storyline_summary?.unassigned_total ?? 0}</b></summary>{(payload?.unassigned_story_events ?? []).map(item => <div key={item.event_key}><time>{time(item.first_seen)}</time><span>{item.headline}</span><small>{item.record_kind} · {item.reason}</small></div>)}</details>
-        {payload?.system.deployment && <footer className="story-policy-footer"><span>Runtime Git SHA <b>{payload.system.deployment.runtime_git_sha ?? "UNKNOWN"}</b></span><span>Story Policy <b>{payload.system.deployment.storyline_policy_version}</b></span></footer>}
       </section>}
 
       {view === "decisions" && <section className="decision-audit">
