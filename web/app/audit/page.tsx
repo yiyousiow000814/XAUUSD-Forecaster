@@ -878,26 +878,16 @@ export default function AuditPage() {
             <article><span>真正训练代数</span><strong>{learningState === "ready" ? payload?.learning_curves?.training_generation_count ?? 0 : "—"}</strong><small>{learningState === "ready" ? `共运行 ${payload?.learning_curves?.training_run_count ?? 0} 次，其中 ${payload?.learning_curves?.recovery_rebuild_count ?? 0} 次只是恢复重建` : "正在读取"}</small></article>
             <article><span>当前模型版本</span><strong>{learningState === "ready" ? payload?.learning_curves?.active_generation?.generation_id?.slice(0, 8) ?? "待首次激活" : "—"}</strong><small>{payload?.learning_curves?.active_generation ? `5 套模型 · 截止 ${time(payload.learning_curves.active_generation.training_cutoff)}` : "完整生成后一次切换"}</small></article>
           </div>
+          {(payload?.learning_curves?.news_model_activation?.length ?? 0) > 0 && <section className={`news-model-activation ${inactiveNewsModels.length > 0 ? "is-inactive" : "is-active"}`}>
+            <div><span>NEWS MODEL CONTRACT</span><h3>{inactiveNewsModels.length > 0 ? "新闻 generation 尚未完整" : (payload?.learning_curves?.active_generation ? "新闻模型使用当前规则" : "当前 generation 持续学习")}</h3></div>
+            <div className="news-model-activation-list">{(payload?.learning_curves?.news_model_activation ?? []).map(row => <p key={row.model_identity}><b>{MODEL_LABELS[row.model_identity] ?? row.model_identity}</b><span>{row.status === "ACTIVE" ? "已激活" : row.status === "LEGACY_ACTIVE" ? "持续预测" : row.reason}</span></p>)}</div>
+            <small>{inactiveNewsModels.length > 0 ? "完整的五模型 generation 构建成功前不会切换。" : payload?.learning_curves?.active_generation ? "五套模型共享同一 generation、训练截止、事件快照和新闻规则。" : "现有五套模型继续产生预测；完整新 generation 就绪后一次替换，页面不会出现双代输出。"}</small>
+          </section>}
         </details>
-        {(payload?.learning_curves?.news_model_activation?.length ?? 0) > 0 && <section className={`news-model-activation ${inactiveNewsModels.length > 0 ? "is-inactive" : "is-active"}`}>
-          <div><span>NEWS MODEL CONTRACT</span><h3>{inactiveNewsModels.length > 0 ? "新闻 generation 尚未完整" : (payload?.learning_curves?.active_generation ? "新闻模型使用当前规则" : "当前 generation 持续学习")}</h3></div>
-          <div className="news-model-activation-list">{(payload?.learning_curves?.news_model_activation ?? []).map(row => <p key={row.model_identity}><b>{MODEL_LABELS[row.model_identity] ?? row.model_identity}</b><span>{row.status === "ACTIVE" ? "已激活" : row.status === "LEGACY_ACTIVE" ? "持续预测" : row.reason}</span></p>)}</div>
-          <small>{inactiveNewsModels.length > 0 ? "完整的五模型 generation 构建成功前不会切换。" : payload?.learning_curves?.active_generation ? "五套模型共享同一 generation、训练截止、事件快照和新闻规则。" : "现有五套模型继续产生预测；完整新 generation 就绪后一次替换，页面不会出现双代输出。"}</small>
-        </section>}
-        <div className="league-cost-note"><b>成本口径</b><span>收益已使用可执行 Bid/Ask（含 spread），并按入场、退出两边各 $30 / 百万美元成交额扣除 commission；slippage 暂按 0 的 Shadow 假设计算。仍未包含账户实际成交偏差，因此不是实盘 PnL。</span></div>
         <section className="graph-launch">
-          <div><span>ONE TIMELINE · THREE VIEWS</span><h3>曲线、每组成绩与 K 线放在同一弹窗。</h3><p>主页面保持紧凑；点开后可切换长期累计、每个训练组的独立成绩，以及 XAUUSD K线决策。</p></div>
+          <div><h3>查看学习曲线与 K 线</h3><p>长期累计、每组成绩与决策位置</p></div>
           <button type="button" onClick={() => { setGraphStartTab("curve"); setGraphOpen(true); }}>打开交互图表 ↗</button>
         </section>
-        <ExecutionResearch status={payload?.execution_learning} onOpenGraph={() => { setGraphStartTab("execution"); setGraphOpen(true); }} />
-        <details className="model-method-note">
-          <summary><span>方法与实盘边界</span><small>新闻修正量、News-only 与成本口径说明</small></summary>
-          <div>
-            <article><b>“大视野新闻修正量”不是“大视野新闻自身”</b><span>它先看黄金自身预测错了多少，再学习新闻应该把黄金答案往上或往下修多少。例：黄金自身 +0.10 U5，新闻修正 +0.04 U5，只有“黄金＋大视野新闻”才输出完整方向 +0.14 U5。</span></article>
-            <article><b>当前还没有独立的“大视野 News-only”</b><span>真正的 News-only 会完全不读取黄金特征，只用新闻直接预测完整30分钟目标。现在名为“大视野新闻修正量”的曲线不能当作 News-only，也不能单独拿去做完整方向。</span></article>
-            <article className="live-method"><b>做法可以实时复现；结果尚未达到实盘标准</b><span>行情只读取决策时已经收到的 Bid/Ask，新闻只读取当时已经首次看见且已完成解析的内容；30分钟结果成熟后才进入下一轮训练。当前仍缺真实 commission、slippage 与下单接口验证，因此只能证明计算方法可在线运行。</span></article>
-          </div>
-        </details>
         <section className="model-score-summary"><header><div><span>LIVE OOS SCOREBOARD</span><h3>五套模型，现在表现怎样？</h3></div><small>左边是本组开始前，箭头后是连续累计，圆点后是本组独立贡献。</small></header><div className="summary-cadence"><span>统计频率</span><button type="button" className={summaryCadence === "EVERY_5M" ? "active" : ""} onClick={() => setSummaryCadence("EVERY_5M")}>每5分钟（重叠）</button><button type="button" className={summaryCadence === "FIXED_30M" ? "active" : ""} onClick={() => setSummaryCadence("FIXED_30M")}>每30分钟（:00 / :30）</button><small>预测期限始终是30分钟。</small></div>
         {(payload?.learning_curves?.models?.length ?? 0) === 0 ? <div className="league-empty">
           <strong>正在建立第一版 Preview</strong><p>达到 96 条修复或 Forward 完整样本即可训练 Market Preview，不需要等待60天。曲线只从模型创建后的新 Decision 开始，绝不回填假历史成绩。</p>
@@ -916,6 +906,16 @@ export default function AuditPage() {
           const tone = group === null ? "is-pending" : group >= 0 ? "is-positive" : "is-negative";
           return <article key={identity}><b>{MODEL_LABELS[identity]}{diagnostic ? <small>新闻修正量</small> : null}</b><div className="return-flow" aria-label={`本组开始前 ${percent(history)}，加入本组后 ${percent(total)}，本组贡献 ${percent(group)}`}><span title="本组开始前的历史累计">{history === null ? "—" : percent(history)}</span><i className={tone} aria-hidden="true">→</i><strong title="加入本组后的连续累计">{total === null ? "等待结果" : percent(total)}</strong><i className="return-separator" aria-hidden="true">·</i><strong className={`group-return ${tone}`} title="本组独立贡献">{group === null ? "等待" : percent(group)}</strong></div></article>;
         })}</div>}</section>
+        <ExecutionResearch status={payload?.execution_learning} onOpenGraph={() => { setGraphStartTab("execution"); setGraphOpen(true); }} />
+        <details className="model-method-note">
+          <summary><span>方法与实盘边界</span><small>新闻修正量、成本与 Shadow 限制</small></summary>
+          <div>
+            <article><b>“大视野新闻修正量”不是“大视野新闻自身”</b><span>它先看黄金自身预测错了多少，再学习新闻应该把黄金答案往上或往下修多少。例：黄金自身 +0.10 U5，新闻修正 +0.04 U5，只有“黄金＋大视野新闻”才输出完整方向 +0.14 U5。</span></article>
+            <article><b>当前还没有独立的“大视野 News-only”</b><span>真正的 News-only 会完全不读取黄金特征，只用新闻直接预测完整30分钟目标。现在名为“大视野新闻修正量”的曲线不能当作 News-only，也不能单独拿去做完整方向。</span></article>
+            <article><b>成本口径</b><span>收益使用可执行 Bid/Ask，并扣除入场、退出两边各 $30 / 百万美元成交额的 commission；slippage 暂按 0。尚未包含账户真实成交偏差，所以不是实盘 PnL。</span></article>
+            <article><b>做法可以实时复现；结果尚未达到实盘标准</b><span>行情和新闻都只读取决策时已经看见的内容；30分钟结果成熟后才进入下一轮训练。当前仍没有下单权限，也不会自动晋升。</span></article>
+          </div>
+        </details>
         <footer className="league-footer">{payload?.learning_curves?.disclaimer ?? "早期曲线用于观察学习过程，不代表已证明盈利。"} 单日和双日新闻模型明确标记 EXPERIMENTAL；达到3个新闻日期后自动进入标准证据状态。当前只运行每个 Ridge 身份的最新版和前一版；{archivedModelCount} 个旧版本的 artifact、预测和成绩已永久归档。零收益安全基准不训练、不使用 AI、不占 Ridge 版本名额。Preview 与 Shadow 都没有下单权限，也不会自动晋升。</footer>
         <LearningGraphModal key={graphStartTab} open={graphOpen} onClose={() => setGraphOpen(false)} startTab={graphStartTab} curves={payload?.learning_curves?.identity_curves ?? []} market={payload?.market_chart} versionGroups={payload?.learning_curves?.version_groups ?? []} execution={payload?.execution_learning} />
       </section>}
@@ -947,14 +947,12 @@ function ExecutionResearch({ status, onOpenGraph }: { status?: Payload["executio
       <div><dt>下次训练</dt><dd>{model?.next_training_threshold ?? "—"}</dd></div>
     </dl>
   </article>;
-  return <section className="execution-research compact-execution-research">
-    <header>
-      <div><span>EXECUTION RESEARCH</span><h3>仓位与退出</h3><p>跟随“{status?.source_model_label ?? "黄金＋大视野新闻 Ridge"}”的 Live 方向；WAIT 不建立位置。</p></div>
-      <button type="button" onClick={onOpenGraph}>详细结果 ↗</button>
-    </header>
+  return <details className="model-method-note execution-research execution-research-details">
+    <summary><span>仓位与退出研究</span><small>仓位倍率与提前退出</small></summary>
     <div>
       {card("仓位倍率 Ridge", lot, "0.5x / 1.0x / 2.0x")}
       {card("Exit Ridge", exit, "5 / 10 / 15 / 20 / 25 分钟")}
+      <article className="execution-detail-action"><p>跟随“{status?.source_model_label ?? "黄金＋大视野新闻 Ridge"}”的 Live 方向；WAIT 不建立位置。</p><button type="button" onClick={onOpenGraph}>打开详细结果 ↗</button></article>
     </div>
-  </section>;
+  </details>;
 }

@@ -274,6 +274,20 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /row\.scored_at \?\? row\.time/);
 });
 
+test("keeps the learning page focused and folds secondary research below the scoreboard", () => {
+  const page = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
+  const technical = page.indexOf('<details className="learning-audit-details">');
+  const newsContract = page.indexOf("NEWS MODEL CONTRACT");
+  const graph = page.indexOf('<section className="graph-launch">');
+  const scoreboard = page.indexOf('<section className="model-score-summary">');
+  const execution = page.indexOf("<ExecutionResearch", scoreboard);
+  const methods = page.indexOf('<details className="model-method-note">', execution);
+  assert.ok(technical >= 0 && newsContract > technical && graph > newsContract);
+  assert.ok(scoreboard > graph && execution > scoreboard && methods > execution);
+  assert.doesNotMatch(page, /league-cost-note/);
+  assert.match(page, /仓位与退出研究/);
+});
+
 test("explains U5 as a risk scale rather than a probability", () => {
   const source = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(source, /30分钟波动风险/);
