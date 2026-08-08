@@ -447,6 +447,10 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
     row.summary_zh !== undefined ? "ready" : "idle",
   );
   const current = { ...row, ...(detail ?? {}) };
+  const annotationStatus = row.annotation_status === "QUEUED"
+    && row.model_visibility !== "NOT_YET_PARSED"
+    ? "NOT_REQUIRED"
+    : row.annotation_status;
   const translated = Boolean(
     current.original_headline && current.headline !== current.original_headline,
   );
@@ -475,7 +479,7 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
       <div className="news-row-title"><strong>{row.headline}</strong><small>{SOURCE_LABELS[row.source] ?? row.source.replaceAll("_", " ")}{translated ? " · Gemini 中文标题" : ""}{row.emerging_topic_zh ? ` · ${row.emerging_topic_zh}` : ""}</small></div>
       <div className={`news-row-state state-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
         <b>{row.content_status === "FULL_TEXT" ? `${row.content_characters.toLocaleString()} 字符` : row.content_fetch_status === "UNAVAILABLE" ? "正文不可用" : row.content_fetch_status === "RETRYING" ? "自动重试中" : row.source === "google_news_gold_geopolitics" ? "聚合标题" : "等待正文"}</b>
-        <small>{row.annotation_status === "READY" ? "AI 已读懂正文" : row.annotation_status === "NOT_REQUIRED" ? "无需 AI 解析" : row.content_fetch_status === "UNAVAILABLE" ? "保留标题 · 不阻塞" : row.content_fetch_status === "RETRYING" ? "备用抓取中" : row.annotation_status === "QUEUED" ? "AI 等待处理中" : row.annotation_status === "BACKING_OFF" ? "失败后等待重试" : row.annotation_status === "DEAD_LETTER" ? "已隔离待审" : "禁止判断"}</small>
+        <small>{annotationStatus === "READY" ? "AI 已读懂正文" : annotationStatus === "NOT_REQUIRED" ? "无需 AI 解析" : row.content_fetch_status === "UNAVAILABLE" ? "保留标题 · 不阻塞" : row.content_fetch_status === "RETRYING" ? "备用抓取中" : annotationStatus === "QUEUED" ? "AI 等待处理中" : annotationStatus === "BACKING_OFF" ? "失败后等待重试" : annotationStatus === "DEAD_LETTER" ? "已隔离待审" : "禁止判断"}</small>
       </div>
     </summary>
     <div className="news-row-detail">
@@ -489,15 +493,15 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
           {current.link && <a className="source-link" href={current.link} target="_blank" rel="noreferrer">阅读来源 ↗</a>}
         </div>
         {translated ? <p className="original-headline"><b>原文标题</b>{current.original_headline}</p> : null}
-        {row.annotation_status === "READY" ? <section className="gemini-summary">
+        {annotationStatus === "READY" ? <section className="gemini-summary">
           <span>GEMINI 中文摘要 · 完整读取 {row.content_characters.toLocaleString()} 字符</span><p>{current.summary_zh}</p>
-        </section> : row.annotation_status === "QUEUED" ? <section className="gemini-summary summary-queued">
+        </section> : annotationStatus === "QUEUED" ? <section className="gemini-summary summary-queued">
           <span>FLASH-LITE 摘要排队中</span><p>正文已经完整入库，不会截断。系统正通过 {keyCount} 个 key 轮换，每分钟最多生成 {requestsPerMinute} 篇中文摘要；标题翻译会独立交给 Gemma。</p>
-        </section> : row.annotation_status === "BACKING_OFF" ? <section className="gemini-summary summary-queued">
+        </section> : annotationStatus === "BACKING_OFF" ? <section className="gemini-summary summary-queued">
           <span>暂时退避</span><p>本次模型响应未通过验证；系统已停止每分钟重试，将在退避到期后有限重试。</p>
-        </section> : row.annotation_status === "DEAD_LETTER" ? <section className="gemini-summary summary-waiting">
+        </section> : annotationStatus === "DEAD_LETTER" ? <section className="gemini-summary summary-waiting">
           <span>已隔离</span><p>相同永久错误重复出现，系统不会再自动消耗 Flash 配额；该新闻保留在 Ledger 中等待规则修复或人工复核。</p>
-        </section> : row.annotation_status === "NOT_REQUIRED" ? <section className="gemini-summary summary-queued">
+        </section> : annotationStatus === "NOT_REQUIRED" ? <section className="gemini-summary summary-queued">
           <span>这篇新闻只供阅读</span><p>系统已保留正文，但它属于重复内容、搜索线索、历史资料或发现得太晚，因此无需消耗 AI 配额，也不会进入模型。</p>
         </section> : row.content_fetch_status === "UNAVAILABLE" ? <section className="gemini-summary summary-waiting">
           <span>来源正文不可自动读取</span><p>发布网站拒绝访问、要求登录或没有可提取正文；这类候选不会写入新闻库，也不会进入模型。</p>

@@ -89,6 +89,7 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /列表与正文详情分开保存/);
   assert.match(source, /这些新闻处理到哪里了/);
   assert.match(source, /无需 AI 解析/);
+  assert.match(source, /row\.model_visibility !== "NOT_YET_PARSED"/);
   assert.match(source, /当前模型可用/);
   assert.ok(source.indexOf('<nav className="audit-tabs"') < source.indexOf('<section className="annotation-queue"'));
   assert.match(source, /已经积累多少结果/);
