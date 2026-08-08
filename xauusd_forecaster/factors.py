@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
+from typing import TYPE_CHECKING
 
-from .forward_ledger import ForwardLedger
+if TYPE_CHECKING:
+    from .forward_ledger import ForwardLedger
 
 
 NEWS_FEATURES = (
