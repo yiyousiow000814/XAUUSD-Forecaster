@@ -87,6 +87,15 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /页面会保留上一份成功数据并自动重试/);
   assert.doesNotMatch(source, /payload\?\.system\.online && !error/);
   assert.match(source, /列表与正文详情分开保存/);
+  assert.match(source, /这些新闻处理到哪里了/);
+  assert.match(source, /无需 AI 解析/);
+  assert.match(source, /当前模型可用/);
+  assert.ok(source.indexOf('<nav className="audit-tabs"') < source.indexOf('<section className="annotation-queue"'));
+  assert.match(source, /已经积累多少结果/);
+  assert.match(source, /真实上线后结果/);
+  assert.match(source, /距离下次学习/);
+  assert.match(source, /查看技术审计明细/);
+  assert.doesNotMatch(source, /Legacy Engineering|Repaired Seed|Next fit/);
   assert.match(source, /最长 72 小时/);
   assert.match(source, /迟到发现只保留展示，不进入训练/);
   assert.match(source, /无效样本/);

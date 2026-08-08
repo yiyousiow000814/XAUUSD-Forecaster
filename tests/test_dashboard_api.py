@@ -327,9 +327,37 @@ def test_dashboard_shows_readable_unparsed_news_without_model_visibility(tmp_pat
 
     assert len(payload["recent_news"]) == 1
     assert payload["recent_news"][0]["model_visibility"] == "NOT_YET_PARSED"
+    assert payload["recent_news"][0]["annotation_status"] == "QUEUED"
     assert payload["counts"]["readable_news_items"] == 1
     assert payload["counts"]["parsed_news_items"] == 0
     assert payload["counts"]["model_candidate_news_items"] == 0
+
+
+def test_dashboard_marks_readable_late_news_as_not_requiring_annotation(tmp_path) -> None:
+    now = datetime(2026, 8, 8, 1, 0, tzinfo=UTC)
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=now)
+    body = "readable late official evidence body " * 20
+    ledger.append_news_revision(
+        {
+            "source": "us_treasury_press_releases",
+            "source_item_id": "late-readable",
+            "source_published_time": now - timedelta(hours=2),
+            "collector_first_seen_time": now,
+            "fetched_time": now,
+            "headline": "Readable official release discovered too late",
+            "body": body,
+            "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+            "cluster_id": "late-readable",
+        }
+    )
+    ledger.connection.close()
+
+    payload = _dashboard_module()._dashboard_payload(database)
+
+    assert len(payload["recent_news"]) == 1
+    assert payload["recent_news"][0]["annotation_status"] == "NOT_REQUIRED"
+    assert payload["annotation_queue"]["queued"] == 0
 
 
 def test_dashboard_uses_gemini_controlled_category_before_source_guess() -> None:

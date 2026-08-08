@@ -50,7 +50,7 @@ type News = {
   content_fetch_status?: "AVAILABLE" | "PENDING" | "RETRYING" | "UNAVAILABLE";
   content_error_type?: string | null;
   summary_zh?: string | null;
-  annotation_status: "READY" | "QUEUED" | "BACKING_OFF" | "DEAD_LETTER" | "WAITING_CONTENT" | "CONTENT_UNAVAILABLE";
+  annotation_status: "READY" | "QUEUED" | "BACKING_OFF" | "DEAD_LETTER" | "WAITING_CONTENT" | "CONTENT_UNAVAILABLE" | "NOT_REQUIRED";
   link?: string;
   event_type?: string | null;
   entities?: string[];
@@ -475,7 +475,7 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
       <div className="news-row-title"><strong>{row.headline}</strong><small>{SOURCE_LABELS[row.source] ?? row.source.replaceAll("_", " ")}{translated ? " · Gemini 中文标题" : ""}{row.emerging_topic_zh ? ` · ${row.emerging_topic_zh}` : ""}</small></div>
       <div className={`news-row-state state-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
         <b>{row.content_status === "FULL_TEXT" ? `${row.content_characters.toLocaleString()} 字符` : row.content_fetch_status === "UNAVAILABLE" ? "正文不可用" : row.content_fetch_status === "RETRYING" ? "自动重试中" : row.source === "google_news_gold_geopolitics" ? "聚合标题" : "等待正文"}</b>
-        <small>{row.annotation_status === "READY" ? "Gemini 已完成" : row.content_fetch_status === "UNAVAILABLE" ? "保留标题 · 不阻塞" : row.content_fetch_status === "RETRYING" ? "备用抓取中" : row.annotation_status === "QUEUED" ? "Gemini 排队中" : row.annotation_status === "BACKING_OFF" ? "失败退避中" : row.annotation_status === "DEAD_LETTER" ? "已隔离待审" : "禁止判断"}</small>
+        <small>{row.annotation_status === "READY" ? "AI 已读懂正文" : row.annotation_status === "NOT_REQUIRED" ? "无需 AI 解析" : row.content_fetch_status === "UNAVAILABLE" ? "保留标题 · 不阻塞" : row.content_fetch_status === "RETRYING" ? "备用抓取中" : row.annotation_status === "QUEUED" ? "AI 等待处理中" : row.annotation_status === "BACKING_OFF" ? "失败后等待重试" : row.annotation_status === "DEAD_LETTER" ? "已隔离待审" : "禁止判断"}</small>
       </div>
     </summary>
     <div className="news-row-detail">
@@ -497,6 +497,8 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
           <span>暂时退避</span><p>本次模型响应未通过验证；系统已停止每分钟重试，将在退避到期后有限重试。</p>
         </section> : row.annotation_status === "DEAD_LETTER" ? <section className="gemini-summary summary-waiting">
           <span>已隔离</span><p>相同永久错误重复出现，系统不会再自动消耗 Flash 配额；该新闻保留在 Ledger 中等待规则修复或人工复核。</p>
+        </section> : row.annotation_status === "NOT_REQUIRED" ? <section className="gemini-summary summary-queued">
+          <span>这篇新闻只供阅读</span><p>系统已保留正文，但它属于重复内容、搜索线索、历史资料或发现得太晚，因此无需消耗 AI 配额，也不会进入模型。</p>
         </section> : row.content_fetch_status === "UNAVAILABLE" ? <section className="gemini-summary summary-waiting">
           <span>来源正文不可自动读取</span><p>发布网站拒绝访问、要求登录或没有可提取正文；这类候选不会写入新闻库，也不会进入模型。</p>
         </section> : <section className="gemini-summary summary-waiting">
@@ -644,6 +646,10 @@ export default function AuditPage() {
   const readableNewsTotal = newsIndex.readable_total ?? newsIndex.all_total;
   const parsedNewsTotal = newsIndex.parsed_total ?? newsIndex.items.filter(row => Boolean(row.parsed_at)).length;
   const modelCandidateNewsTotal = newsIndex.model_candidate_total ?? newsIndex.items.filter(row => row.model_visibility === "MODEL_VISIBLE").length;
+  const newsWaitingTotal = (payload?.annotation_queue?.queued ?? 0)
+    + (payload?.annotation_queue?.backing_off ?? 0)
+    + (payload?.annotation_queue?.dead_letter ?? 0);
+  const newsNoParsingNeededTotal = Math.max(0, readableNewsTotal - parsedNewsTotal - newsWaitingTotal);
   const modelSeenNewsEvents = payload?.news_evidence_summary?.model_seen_events ?? 0;
   const rowsUntilTraining = learningState === "ready" && payload?.training
     ? Math.max(0, payload.training.next_training_at - payload.training.complete_rows)
@@ -724,17 +730,6 @@ export default function AuditPage() {
 
       {combinedErrors && <div className="error-banner">{combinedErrors}。页面会保留上一份成功数据并自动重试。</div>}
 
-      <section className="annotation-queue" aria-label="Gemini 摘要队列">
-        <strong>新闻处理状态</strong>
-        <span><b>{payload?.annotation_queue?.ready ?? 0}</b> 已完成</span>
-        <span><b>{payload?.annotation_queue?.queued ?? 0}</b> 排队中</span>
-        <span><b>{payload?.annotation_queue?.backing_off ?? 0}</b> 退避中</span>
-        <span><b>{payload?.annotation_queue?.dead_letter ?? 0}</b> 已隔离</span>
-        <span><b>{payload?.annotation_queue?.waiting_content ?? 0}</b> 等待正文</span>
-        <span><b>{payload?.annotation_queue?.unavailable_content ?? 0}</b> 正文不可用</span>
-        <small>完整正文由 Gemini 3.5 Flash-Lite 处理：本机已启用 {payload?.annotation_queue?.configured_key_count ?? 0} 个 key，每个安全使用 {payload?.annotation_queue?.requests_per_minute_per_key ?? 12} RPM；临时失败自动退避重试，确定不可读取的文章保留标题但不阻塞后续新闻。标题中文翻译由 Gemma 4 31B 分流，且不进入训练。</small>
-      </section>
-
       <nav className="audit-tabs" aria-label="审计视图">
         <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻 <b>{readableNewsTotal}</b></a>
         <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>新闻证据管理 <b>{payload?.news_evidence_summary?.model_seen_events ?? 0}</b></a>
@@ -745,6 +740,18 @@ export default function AuditPage() {
       </nav>
 
       {view === "news" && <>
+        <section className="annotation-queue" aria-label="新闻处理进度">
+          <header><strong>这些新闻处理到哪里了？</strong><small>不是每篇新闻都要交给 AI；系统先筛选，再解析可能影响模型的新闻。</small></header>
+          <span><b>{readableNewsTotal}</b> 可阅读新闻</span>
+          <span><b>{parsedNewsTotal}</b> 已读懂正文</span>
+          <span><b>{newsNoParsingNeededTotal}</b> 无需 AI 解析</span>
+          <span><b>{newsWaitingTotal}</b> 等待处理</span>
+          <span className="is-model-ready"><b>{modelCandidateNewsTotal}</b> 当前模型可用</span>
+          <details>
+            <summary>查看处理器技术状态</summary>
+            <p>真正排队 {payload?.annotation_queue?.queued ?? 0} · 失败后等待重试 {payload?.annotation_queue?.backing_off ?? 0} · 已隔离 {payload?.annotation_queue?.dead_letter ?? 0} · 等待正文 {payload?.annotation_queue?.waiting_content ?? 0} · 正文不可用 {payload?.annotation_queue?.unavailable_content ?? 0}</p>
+          </details>
+        </section>
         <section className="news-browser" aria-label="新闻自动分类">
           <div><strong>自动分类</strong><span>按媒体发布时间排序 · 可读 {readableNewsTotal} 篇 · 已解析 {parsedNewsTotal} 篇 · 模型候选 {modelCandidateNewsTotal} 篇 · 每页 {NEWS_PER_PAGE} 篇</span></div>
           <nav>
@@ -854,19 +861,25 @@ export default function AuditPage() {
             <div><dt>当前证据等级</dt><dd>{payload?.learning_curves?.learning_stage ?? "ENGINEERING"}</dd></div>
           </dl>
         </header>
-        <div className="evidence-lane-grid">
-          <article><span>Legacy Engineering</span><strong>{learningState === "ready" ? payload?.learning_curves?.legacy_engineering_rows ?? 0 : "—"}</strong><small>只用于修复审计</small></article>
-          <article><span>Repaired Seed</span><strong>{learningState === "ready" ? payload?.learning_curves?.repaired_seed_rows ?? 0 : "—"}</strong><small>可训练，不计 Live OOS</small></article>
-          <article><span>Live OOS</span><strong>{learningState === "ready" ? payload?.learning_curves?.live_oos_rows ?? 0 : "—"}</strong><small>{learningState === "loading" ? "正在读取公开学习快照" : "模型上线后的真实前向结果"}</small></article>
-          <article><span>30m Blocks / Days</span><strong>{learningState === "ready" ? `${payload?.learning_curves?.effective_30m_blocks ?? 0} / ${payload?.learning_curves?.distinct_trading_days ?? 0}` : "—"}</strong><small>置信区间的独立证据</small></article>
-          <article><span>有效 / 隔离样本</span><strong>{learningState === "ready" ? `${payload?.learning_curves?.outcome_quality?.valid ?? 0} / ${payload?.learning_curves?.outcome_quality?.invalid ?? 0}` : "—"}</strong><small>隔离样本不评分、不训练；点开 K 线可看具体原因</small></article>
-          <article><span>已收集新闻</span><strong>{learningState === "ready" ? payload?.learning_curves?.news_training_evidence?.distinct_articles ?? 0 : "—"}</strong><small>{learningState === "ready" ? `共保存 ${payload?.learning_curves?.news_training_evidence?.raw_article_revisions ?? 0} 个内容版本` : "正在读取"}</small></article>
-          <article><span>合格事件</span><strong>{learningState === "ready" ? payload?.learning_curves?.news_training_evidence?.distinct_eligible_events ?? 0 : "—"}</strong><small>{learningState === "ready" ? `这些事件曾在 ${payload?.learning_curves?.news_training_evidence?.decision_event_exposures ?? 0} 个预测时点可见` : "正在读取"}</small></article>
-          <article><span>本代实际事件数</span><strong>{learningState === "ready" ? payload?.learning_curves?.news_training_evidence?.active_generation_weights?.BROAD?.effective_event_count ?? 0 : "—"}</strong><small>重复出现在多个 5 分钟预测中，也只算同一个事件</small></article>
-          <article><span>训练了多少代</span><strong>{learningState === "ready" ? payload?.learning_curves?.training_generation_count ?? 0 : "—"}</strong><small>{learningState === "ready" ? `共运行 ${payload?.learning_curves?.training_run_count ?? 0} 次；其中 ${payload?.learning_curves?.recovery_rebuild_count ?? 0} 次只是恢复重建` : "正在读取"}</small></article>
-          <article><span>当前原子 Generation</span><strong>{learningState === "ready" ? payload?.learning_curves?.active_generation?.generation_id?.slice(0, 8) ?? "待首次激活" : "—"}</strong><small>{payload?.learning_curves?.active_generation ? `5 套模型 · 截止 ${time(payload.learning_curves.active_generation.training_cutoff)}` : "完整生成后一次切换，不并行输出新旧代"}</small></article>
-          <article><span>Next fit</span><strong>{learningState === "ready" ? payload?.learning_curves?.next_training_threshold ?? 96 : "—"}</strong><small>{learningState === "ready" ? `再有 ${Math.max(0, (payload?.learning_curves?.next_training_threshold ?? 96) - (payload?.training?.complete_rows ?? 0))} 条成熟数据训练下一组` : "正在读取"}</small></article>
+        <div className="learning-summary-grid">
+          <article><span>已经积累多少结果</span><strong>{learningState === "ready" ? payload?.training?.complete_rows ?? 0 : "—"}</strong><small>已经走完 30 分钟、可以用于学习的结果</small></article>
+          <article><span>真实上线后结果</span><strong>{learningState === "ready" ? payload?.learning_curves?.live_oos_rows ?? 0 : "—"}</strong><small>模型上线后才发生，不能回头偷看</small></article>
+          <article><span>当前模型学到哪里</span><strong>{learningState === "ready" ? directionPoolRows : "—"}</strong><small>当前五套模型共同使用的数据截止点</small></article>
+          <article><span>距离下次学习</span><strong>{rowsUntilTraining === null ? "—" : rowsUntilTraining}</strong><small>{rowsUntilTraining === 0 ? "新一轮训练已经可以开始" : "再收到这些成熟结果，就训练下一组"}</small></article>
         </div>
+        <details className="learning-audit-details">
+          <summary><span>查看技术审计明细</span><small>修复数据、隔离样本、事件权重与模型版本</small></summary>
+          <div className="evidence-lane-grid">
+            <article><span>旧工程数据</span><strong>{learningState === "ready" ? payload?.learning_curves?.legacy_engineering_rows ?? 0 : "—"}</strong><small>只用于修复审计</small></article>
+            <article><span>修复后的训练种子</span><strong>{learningState === "ready" ? payload?.learning_curves?.repaired_seed_rows ?? 0 : "—"}</strong><small>可训练，不算真实上线后结果</small></article>
+            <article><span>独立时间块 / 交易日</span><strong>{learningState === "ready" ? `${payload?.learning_curves?.effective_30m_blocks ?? 0} / ${payload?.learning_curves?.distinct_trading_days ?? 0}` : "—"}</strong><small>判断证据是否过度重复</small></article>
+            <article><span>有效 / 隔离结果</span><strong>{learningState === "ready" ? `${payload?.learning_curves?.outcome_quality?.valid ?? 0} / ${payload?.learning_curves?.outcome_quality?.invalid ?? 0}` : "—"}</strong><small>隔离结果不评分、不训练</small></article>
+            <article><span>合格新闻事件</span><strong>{learningState === "ready" ? payload?.learning_curves?.news_training_evidence?.distinct_eligible_events ?? 0 : "—"}</strong><small>{learningState === "ready" ? `曾在 ${payload?.learning_curves?.news_training_evidence?.decision_event_exposures ?? 0} 个预测时点可见` : "正在读取"}</small></article>
+            <article><span>本代实际使用事件</span><strong>{learningState === "ready" ? payload?.learning_curves?.news_training_evidence?.active_generation_weights?.BROAD?.effective_event_count ?? 0 : "—"}</strong><small>同一事件重复出现也只算一次</small></article>
+            <article><span>真正训练代数</span><strong>{learningState === "ready" ? payload?.learning_curves?.training_generation_count ?? 0 : "—"}</strong><small>{learningState === "ready" ? `共运行 ${payload?.learning_curves?.training_run_count ?? 0} 次，其中 ${payload?.learning_curves?.recovery_rebuild_count ?? 0} 次只是恢复重建` : "正在读取"}</small></article>
+            <article><span>当前模型版本</span><strong>{learningState === "ready" ? payload?.learning_curves?.active_generation?.generation_id?.slice(0, 8) ?? "待首次激活" : "—"}</strong><small>{payload?.learning_curves?.active_generation ? `5 套模型 · 截止 ${time(payload.learning_curves.active_generation.training_cutoff)}` : "完整生成后一次切换"}</small></article>
+          </div>
+        </details>
         {(payload?.learning_curves?.news_model_activation?.length ?? 0) > 0 && <section className={`news-model-activation ${inactiveNewsModels.length > 0 ? "is-inactive" : "is-active"}`}>
           <div><span>NEWS MODEL CONTRACT</span><h3>{inactiveNewsModels.length > 0 ? "新闻 generation 尚未完整" : (payload?.learning_curves?.active_generation ? "新闻模型使用当前规则" : "当前 generation 持续学习")}</h3></div>
           <div className="news-model-activation-list">{(payload?.learning_curves?.news_model_activation ?? []).map(row => <p key={row.model_identity}><b>{MODEL_LABELS[row.model_identity] ?? row.model_identity}</b><span>{row.status === "ACTIVE" ? "已激活" : row.status === "LEGACY_ACTIVE" ? "持续预测" : row.reason}</span></p>)}</div>
