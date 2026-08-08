@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 
 const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -24,6 +24,25 @@ test("renders the live room with an audit-page navigation button", async () => {
   assert.match(html, /系统状态/);
   assert.doesNotMatch(html, /next\/link|rel="prefetch"/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
+});
+
+test("keeps branch previews isolated from the production database", async () => {
+  const source = readFileSync(new URL("../app/api/_shared/preview.ts", import.meta.url), "utf8");
+  const layout = readFileSync(new URL("../app/layout.tsx", import.meta.url), "utf8");
+  assert.match(source, /PR Preview 是只读快照/);
+  assert.match(source, /X-Aurum-Preview/);
+  assert.match(layout, /<PreviewBanner \/>/);
+
+  if (!process.env.WORKERS_CI_BRANCH || process.env.WORKERS_CI_BRANCH === "main") return;
+  const builtPreview = readdirSync(new URL("../dist/server/", import.meta.url), {
+    recursive: true,
+    withFileTypes: true,
+  }).filter(entry => entry.isFile() && entry.name.endsWith(".js"))
+    .map(entry => readFileSync(`${entry.parentPath}/${entry.name}`, "utf8"))
+    .join("\n");
+  assert.match(builtPreview, /PREVIEW_SNAPSHOT/);
+  assert.match(builtPreview, /历史文章不会回填/);
+  assert.match(builtPreview, new RegExp(process.env.WORKERS_CI_BRANCH.replaceAll("/", "\\/")));
 });
 
 test("does not show a redundant forecast warning while the market is closed", () => {

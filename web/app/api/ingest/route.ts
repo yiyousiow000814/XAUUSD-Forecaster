@@ -1,8 +1,11 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
+import { rejectPreviewWrite } from "../_shared/preview";
 
 export async function POST(request: Request) {
+  const previewRejection = rejectPreviewWrite();
+  if (previewRejection) return previewRejection;
   if (!await isIngestAuthorized(request)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }

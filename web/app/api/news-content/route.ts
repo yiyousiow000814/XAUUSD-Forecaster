@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
+import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
 
 export const dynamic = "force-dynamic";
 
@@ -14,6 +15,12 @@ export async function GET(request: Request) {
   const detailKey = new URL(request.url).searchParams.get("key");
   if (!detailKey || !/^[a-f0-9]{64}$/.test(detailKey)) {
     return NextResponse.json({ error: "invalid news detail key" }, { status: 400 });
+  }
+  if (previewBundle) {
+    const detail = previewBundle.news_details[detailKey];
+    return detail
+      ? previewJson(detail)
+      : previewJson({ error: "该新闻详情不在本次 Preview 快照中" }, 404);
   }
   const binding = env.DB as D1Database | undefined;
   if (!binding) {
@@ -33,6 +40,8 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const previewRejection = rejectPreviewWrite();
+  if (previewRejection) return previewRejection;
   if (!await isIngestAuthorized(request)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }

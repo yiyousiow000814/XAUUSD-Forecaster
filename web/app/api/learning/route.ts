@@ -1,10 +1,12 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
+import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  if (previewBundle) return previewJson(previewBundle.learning);
   const binding = env.DB as D1Database | undefined;
   if (binding) {
     const row = await binding
@@ -44,6 +46,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const previewRejection = rejectPreviewWrite();
+  if (previewRejection) return previewRejection;
   if (!await isIngestAuthorized(request)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }

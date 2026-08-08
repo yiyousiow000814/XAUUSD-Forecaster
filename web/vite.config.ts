@@ -1,6 +1,8 @@
 import vinext from "vinext";
 import { defineConfig } from "vite";
 import { sites } from "./build/sites-vite-plugin";
+import { execFileSync } from "node:child_process";
+import { resolve } from "node:path";
 
 // macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
@@ -14,6 +16,19 @@ export default defineConfig(async () => {
 
   // Wrangler snapshots its log path while the Cloudflare plugin is imported.
   const { cloudflare } = await import("@cloudflare/vite-plugin");
+  const branch = process.env.WORKERS_CI_BRANCH ?? "";
+  const commit = process.env.WORKERS_CI_COMMIT_SHA ?? "";
+  const isWorkerPreview = Boolean(branch && commit && branch !== "main");
+  let previewBundle: unknown = null;
+  if (isWorkerPreview) {
+    const python = process.platform === "win32" ? "python" : "python3";
+    const output = execFileSync(
+      python,
+      [resolve("../scripts/build_preview_bundle.py"), "--branch", branch, "--commit", commit],
+      { cwd: resolve("."), encoding: "utf8", maxBuffer: 5 * 1024 * 1024 },
+    );
+    previewBundle = JSON.parse(output);
+  }
 
   return {
     server: isCodexSeatbeltSandbox
@@ -27,5 +42,8 @@ export default defineConfig(async () => {
         configPath: "./wrangler.jsonc",
       }),
     ],
+    define: {
+      __AURUM_PREVIEW_BUNDLE__: JSON.stringify(previewBundle),
+    },
   };
 });
