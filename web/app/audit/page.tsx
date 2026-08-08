@@ -745,12 +745,11 @@ export default function AuditPage() {
 
       {view === "news" && <>
         <section className="annotation-queue" aria-label="新闻处理进度">
-          <header><strong>这些新闻处理到哪里了？</strong><small>不是每篇新闻都要交给 AI；系统先筛选，再解析可能影响模型的新闻。</small></header>
-          <span><b>{readableNewsTotal}</b> 可阅读新闻</span>
-          <span><b>{parsedNewsTotal}</b> 已读懂正文</span>
-          <span><b>{newsNoParsingNeededTotal}</b> 无需 AI 解析</span>
+          <span><b>{readableNewsTotal}</b> 新闻总数</span>
+          <span><b>{parsedNewsTotal}</b> 已完整解析</span>
+          <span><b>{newsNoParsingNeededTotal}</b> 无需解析</span>
           <span><b>{newsWaitingTotal}</b> 等待处理</span>
-          <span className="is-model-ready"><b>{modelCandidateNewsTotal}</b> 当前模型可用</span>
+          <span className="is-model-ready"><b>{modelCandidateNewsTotal}</b> 模型可用</span>
           <details>
             <summary>查看处理器技术状态</summary>
             <p>真正排队 {payload?.annotation_queue?.queued ?? 0} · 失败后等待重试 {payload?.annotation_queue?.backing_off ?? 0} · 已隔离 {payload?.annotation_queue?.dead_letter ?? 0} · 等待正文 {payload?.annotation_queue?.waiting_content ?? 0} · 正文不可用 {payload?.annotation_queue?.unavailable_content ?? 0}</p>
