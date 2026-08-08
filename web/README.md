@@ -113,8 +113,8 @@ starts `Dashboard Mirrors`:
 - `XAUUSD_DASHBOARD_URL`
 
 For automatic deployment after a GitHub push, connect the GitHub repository in
-Cloudflare Workers Builds, set the root directory to
-`src/XAUUSD-Forecaster/web`, use `npm ci && npm test` as the build command and
+Cloudflare Workers Builds, set the root directory to `web`, use
+`npm ci && npm test` as the build command and
 `npx wrangler deploy` as the deploy command. Keep D1 identifiers in
 `wrangler.jsonc`; keep `INGEST_TOKEN` in Cloudflare secrets.
 
