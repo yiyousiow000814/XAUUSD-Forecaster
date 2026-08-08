@@ -772,28 +772,28 @@ export default function AuditPage() {
 
       {view === "evidence" && <section className="evidence-desk">
         <header className="evidence-intro">
-          <div><p className="eyebrow">FROZEN MODEL VISIBILITY RECEIPTS</p><h2>模型看过什么，<br />由冻结回执证明。</h2><p>来源不是权限；证据资格决定能否进入模型，冻结回执记录它是否真的被某次决策看过。</p></div>
-          <p>“模型已看”表示某次冻结预测确实读取过这项事件，不是按今天的规则事后猜测。每份回执同时保存决策时间、模型版本、证据通道与事件哈希；模型最多回看当时规则允许的 72 小时，迟到发现只保留展示，不进入训练。“未进入模型”会明确显示缺正文、太旧、尚未确认或仍在等待下一次预测等原因。</p>
+          <div><p className="eyebrow">NEWS USED BY MODEL</p><h2>哪些新闻真的<br />影响过模型？</h2><p>这里按“独立事件”统计，不按转载文章数统计。只有符合时间、正文和来源要求的事件，才可能进入预测。</p></div>
+          <p>“历史上用过”表示它确实参与过至少一次预测；“现在仍合格”表示它可以参加下一次预测，但不代表以前用过。系统会保存每次读取记录，方便核对模型在当时究竟看到了什么。不同新闻的有效期不同，最长 72 小时；迟到发现只保留展示，不进入训练。</p>
         </header>
         <div className="evidence-summary">
-          <article><span>文章 / Revision</span><strong>{`${payload?.news_evidence_summary?.distinct_articles ?? 0} / ${payload?.news_evidence_summary?.raw_article_revisions ?? 0}`}</strong><small>原始层 append-only</small></article>
-          <article><span>模型已看事件</span><strong>{payload?.news_evidence_summary?.model_seen_events ?? 0}</strong><small>至少有一份冻结回执</small></article>
-          <article><span>决策事件暴露</span><strong>{payload?.news_evidence_summary?.decision_event_exposures ?? 0}</strong><small>事件在各决策点的可见快照</small></article>
-          <article><span>冻结使用记录</span><strong>{payload?.news_evidence_summary?.frozen_model_uses ?? 0}</strong><small>不同预测与模型分别记账</small></article>
-          <article><span>未进入模型</span><strong>{payload?.news_evidence_summary?.model_unseen_events ?? 0}</strong><small>可逐条查看原因</small></article>
-          <article><span>当前达到 Broad 门槛</span><strong>{payload?.news_evidence_summary?.broad_model_eligible ?? 0}</strong><small>不等于过去已经被模型读取</small></article>
+          <article><span>收到多少篇新闻</span><strong>{payload?.news_evidence_summary?.distinct_articles ?? 0}</strong><small>共保存 {payload?.news_evidence_summary?.raw_article_revisions ?? 0} 个版本；文章更新不会算成新新闻</small></article>
+          <article><span>历史上用过多少个事件</span><strong>{payload?.news_evidence_summary?.model_seen_events ?? 0}</strong><small>每个都确实参加过至少一次预测</small></article>
+          <article><span>影响过多少次预测</span><strong>{payload?.news_evidence_summary?.decision_event_exposures ?? 0}</strong><small>同一事件可以连续影响多个 5 分钟预测</small></article>
+          <article><span>模型一共读取多少次</span><strong>{payload?.news_evidence_summary?.frozen_model_uses ?? 0}</strong><small>5 套模型分别记账；这不是新闻数量</small></article>
+          <article><span>从未进入预测的事件</span><strong>{payload?.news_evidence_summary?.model_unseen_events ?? 0}</strong><small>可在下方逐条查看没有使用的原因</small></article>
+          <article><span>现在仍可用于预测</span><strong>{payload?.news_evidence_summary?.broad_model_eligible ?? 0}</strong><small>等待下一次预测读取；不代表历史上用过</small></article>
         </div>
         <nav className="evidence-filters" aria-label="模型新闻可见性筛选">
-          <button type="button" className={evidenceMode === "seen" ? "active" : ""} onClick={() => setEvidenceMode("seen")}>模型已看 <b>{payload?.news_evidence_summary?.model_seen_events ?? 0}</b></button>
-          <button type="button" className={evidenceMode === "unseen" ? "active" : ""} onClick={() => setEvidenceMode("unseen")}>未进入模型 <b>{payload?.news_evidence_summary?.model_unseen_events ?? 0}</b></button>
-          <button type="button" className={evidenceMode === "all" ? "active" : ""} onClick={() => setEvidenceMode("all")}>全部审计 <b>{payload?.news_evidence_summary?.displayed_events ?? 0}</b></button>
+          <button type="button" className={evidenceMode === "seen" ? "active" : ""} onClick={() => setEvidenceMode("seen")}>历史上用过 <b>{payload?.news_evidence_summary?.model_seen_events ?? 0}</b></button>
+          <button type="button" className={evidenceMode === "unseen" ? "active" : ""} onClick={() => setEvidenceMode("unseen")}>从未用过 <b>{payload?.news_evidence_summary?.model_unseen_events ?? 0}</b></button>
+          <button type="button" className={evidenceMode === "all" ? "active" : ""} onClick={() => setEvidenceMode("all")}>查看全部 <b>{payload?.news_evidence_summary?.displayed_events ?? 0}</b></button>
         </nav>
         <div className="evidence-table-wrap"><table className="evidence-table">
-          <thead><tr><th>模型回执</th><th>事件与主题</th><th>冻结使用 / 未看原因</th><th>发布时间 / 首次收到</th></tr></thead>
+          <thead><tr><th>是否用于预测</th><th>新闻事件</th><th>用了多少次 / 为什么没用</th><th>发布时间 / 收到时间</th></tr></thead>
           <tbody>{visibleEvidence.map(row => <tr key={row.event_key}>
-            <td><span className={`model-seen-badge ${row.model_seen ? "is-seen" : "is-unseen"}`}>{row.model_seen ? "模型已看" : "模型未看"}</span><small>{EVIDENCE_LABELS[row.evidence_grade] ?? row.evidence_grade}<br />{row.model_seen ? "当时已进入冻结模型输入" : row.broad_model_eligible ? "当前达到 Broad 门槛" : "当前不符合模型门槛"}</small></td>
+            <td><span className={`model-seen-badge ${row.model_seen ? "is-seen" : "is-unseen"}`}>{row.model_seen ? "已用于预测" : "未用于预测"}</span><small>{EVIDENCE_LABELS[row.evidence_grade] ?? row.evidence_grade}<br />{row.model_seen ? "当时确实参与了模型输入" : row.broad_model_eligible ? "现在符合条件，等待下一次预测" : "现在也不符合使用条件"}</small></td>
             <td><strong>{row.canonical_headline}</strong><div className="evidence-topics">{(row.topics ?? []).map(topic => <span key={topic}>{TOPIC_LABELS[topic] ?? topic}</span>)}</div></td>
-            <td>{row.model_seen ? <><strong>{row.frozen_decisions} 次决策 · {row.frozen_model_uses} 份模型回执</strong><small>{(row.model_identities ?? []).map(identity => MODEL_LABELS[identity] ?? identity).join(" · ") || "冻结模型身份未记录"}<br />首次用于 {time(row.first_model_decision_time)} · 最近用于 {time(row.last_model_decision_time)}</small></> : <><strong>没有冻结回执</strong><small>{(row.model_unseen_reason_codes ?? []).map(code => EVIDENCE_REASON_LABELS[code] ?? code).join(" · ") || "未达到当时的可见性与证据门槛"}</small></>}</td>
+            <td>{row.model_seen ? <><strong>参与 {row.frozen_decisions} 次预测 · 被模型读取 {row.frozen_model_uses} 次</strong><small>{(row.model_identities ?? []).map(identity => MODEL_LABELS[identity] ?? identity).join(" · ") || "模型名称未记录"}<br />首次参与 {time(row.first_model_decision_time)} · 最近参与 {time(row.last_model_decision_time)}</small></> : <><strong>从未进入任何预测</strong><small>{(row.model_unseen_reason_codes ?? []).map(code => EVIDENCE_REASON_LABELS[code] ?? code).join(" · ") || "当时未达到时间、正文或来源要求"}</small></>}</td>
             <td><time>{row.source_published_time ? time(row.source_published_time) : "发布时间未知"}</time><small>首次收到 {time(row.collector_first_seen_time)}<br />{row.independent_publishers} 个独立来源 · {row.member_count} 篇成员新闻</small></td>
           </tr>)}</tbody>
         </table></div>
@@ -860,10 +860,10 @@ export default function AuditPage() {
           <article><span>Live OOS</span><strong>{learningState === "ready" ? payload?.learning_curves?.live_oos_rows ?? 0 : "—"}</strong><small>{learningState === "loading" ? "正在读取公开学习快照" : "模型上线后的真实前向结果"}</small></article>
           <article><span>30m Blocks / Days</span><strong>{learningState === "ready" ? `${payload?.learning_curves?.effective_30m_blocks ?? 0} / ${payload?.learning_curves?.distinct_trading_days ?? 0}` : "—"}</strong><small>置信区间的独立证据</small></article>
           <article><span>有效 / 隔离样本</span><strong>{learningState === "ready" ? `${payload?.learning_curves?.outcome_quality?.valid ?? 0} / ${payload?.learning_curves?.outcome_quality?.invalid ?? 0}` : "—"}</strong><small>隔离样本不评分、不训练；点开 K 线可看具体原因</small></article>
-          <article><span>文章 / Revision</span><strong>{learningState === "ready" ? `${payload?.learning_curves?.news_training_evidence?.distinct_articles ?? 0} / ${payload?.learning_curves?.news_training_evidence?.raw_article_revisions ?? 0}` : "—"}</strong><small>原始文章永久保留，Revision 单独计数</small></article>
-          <article><span>独立事件 / 决策暴露</span><strong>{learningState === "ready" ? `${payload?.learning_curves?.news_training_evidence?.distinct_eligible_events ?? 0} / ${payload?.learning_curves?.news_training_evidence?.decision_event_exposures ?? 0}` : "—"}</strong><small>同一事件每 5 分钟可见会形成暴露，但不会增加事件票数</small></article>
-          <article><span>有效事件权重</span><strong>{learningState === "ready" ? `${payload?.learning_curves?.news_training_evidence?.active_generation_weights?.OFFICIAL?.effective_event_count ?? 0} / ${payload?.learning_curves?.news_training_evidence?.active_generation_weights?.BROAD?.effective_event_count ?? 0}` : "—"}</strong><small>Official / Broad；每个事件在一代训练中的总预算相同</small></article>
-          <article><span>训练数据代 / 运行</span><strong>{learningState === "ready" ? `${payload?.learning_curves?.training_generation_count ?? 0} / ${payload?.learning_curves?.training_run_count ?? 0}` : "—"}</strong><small>{learningState === "ready" ? `${payload?.learning_curves?.recovery_rebuild_count ?? 0} 次只是恢复重建，不算新一组` : "正在读取"}</small></article>
+          <article><span>已收集新闻</span><strong>{learningState === "ready" ? payload?.learning_curves?.news_training_evidence?.distinct_articles ?? 0 : "—"}</strong><small>{learningState === "ready" ? `共保存 ${payload?.learning_curves?.news_training_evidence?.raw_article_revisions ?? 0} 个内容版本` : "正在读取"}</small></article>
+          <article><span>合格事件</span><strong>{learningState === "ready" ? payload?.learning_curves?.news_training_evidence?.distinct_eligible_events ?? 0 : "—"}</strong><small>{learningState === "ready" ? `这些事件曾在 ${payload?.learning_curves?.news_training_evidence?.decision_event_exposures ?? 0} 个预测时点可见` : "正在读取"}</small></article>
+          <article><span>本代实际事件数</span><strong>{learningState === "ready" ? payload?.learning_curves?.news_training_evidence?.active_generation_weights?.BROAD?.effective_event_count ?? 0 : "—"}</strong><small>重复出现在多个 5 分钟预测中，也只算同一个事件</small></article>
+          <article><span>训练了多少代</span><strong>{learningState === "ready" ? payload?.learning_curves?.training_generation_count ?? 0 : "—"}</strong><small>{learningState === "ready" ? `共运行 ${payload?.learning_curves?.training_run_count ?? 0} 次；其中 ${payload?.learning_curves?.recovery_rebuild_count ?? 0} 次只是恢复重建` : "正在读取"}</small></article>
           <article><span>当前原子 Generation</span><strong>{learningState === "ready" ? payload?.learning_curves?.active_generation?.generation_id?.slice(0, 8) ?? "待首次激活" : "—"}</strong><small>{payload?.learning_curves?.active_generation ? `5 套模型 · 截止 ${time(payload.learning_curves.active_generation.training_cutoff)}` : "完整生成后一次切换，不并行输出新旧代"}</small></article>
           <article><span>Next fit</span><strong>{learningState === "ready" ? payload?.learning_curves?.next_training_threshold ?? 96 : "—"}</strong><small>{learningState === "ready" ? `再有 ${Math.max(0, (payload?.learning_curves?.next_training_threshold ?? 96) - (payload?.training?.complete_rows ?? 0))} 条成熟数据训练下一组` : "正在读取"}</small></article>
         </div>

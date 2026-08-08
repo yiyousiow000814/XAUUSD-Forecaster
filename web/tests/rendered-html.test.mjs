@@ -59,7 +59,17 @@ test("renders the news and decision audit route", async () => {
   assert.match(html, />新闻 <b>/);
   assert.match(html, /新闻证据管理/);
   const source = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
-  assert.match(source, /来源不是权限/);
+  assert.match(source, /哪些新闻真的/);
+  assert.match(source, /收到多少篇新闻/);
+  assert.match(source, /历史上用过多少个事件/);
+  assert.match(source, /影响过多少次预测/);
+  assert.match(source, /模型一共读取多少次/);
+  assert.match(source, /现在仍可用于预测/);
+  assert.match(source, /这不是新闻数量/);
+  assert.doesNotMatch(source, /文章 \/ Revision/);
+  assert.doesNotMatch(source, /当前达到 Broad 门槛/);
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.evidence-summary \{[^}]*grid-template-columns:repeat\(3,1fr\)/);
   assert.match(source, /多源确认/);
   assert.match(source, /api\/news-content\?key=/);
   assert.match(source, /api\/news-index\?/);
@@ -77,7 +87,7 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /页面会保留上一份成功数据并自动重试/);
   assert.doesNotMatch(source, /payload\?\.system\.online && !error/);
   assert.match(source, /列表与正文详情分开保存/);
-  assert.match(source, /最多回看/);
+  assert.match(source, /最长 72 小时/);
   assert.match(source, /迟到发现只保留展示，不进入训练/);
   assert.match(source, /无效样本/);
   assert.match(source, /activeLearningIdentities/);

@@ -119,6 +119,28 @@ def test_configured_targets_adds_independent_cloudflare_mirror(
     assert cloudflare["news_state_file"].endswith("news-cloudflare.json")
 
 
+def test_configured_targets_can_disable_retired_sites_mirror(
+    monkeypatch, tmp_path
+) -> None:
+    module = _sync_module()
+    monkeypatch.setenv(
+        "CLOUDFLARE_INGEST_URL", "https://example.workers.dev/api/ingest"
+    )
+    monkeypatch.setenv("CLOUDFLARE_INGEST_TOKEN", "cloudflare-token")
+    config = {
+        "enabled": False,
+        "remote_ingest_url": "https://retired.chatgpt.site/api/ingest",
+        "token": "retired-token",
+        "learning_state_file": str(tmp_path / "learning.json"),
+        "news_state_file": str(tmp_path / "news.json"),
+    }
+
+    targets = module.configured_targets(config)
+
+    assert [target["name"] for target in targets] == ["cloudflare"]
+    assert targets[0]["remote_ingest_url"].endswith("workers.dev/api/ingest")
+
+
 def test_sites_bypass_header_is_not_sent_to_cloudflare(monkeypatch) -> None:
     module = _sync_module()
     monkeypatch.setenv("SITES_BYPASS_TOKEN", "sites-bypass")

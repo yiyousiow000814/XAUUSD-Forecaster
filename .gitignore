@@ -1,0 +1,7 @@
+.local/
+output/
+.playwright-cli/
+__pycache__/
+*.py[cod]
+ctrader/**/bin/
+ctrader/**/obj/

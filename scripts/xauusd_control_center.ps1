@@ -92,6 +92,17 @@ function Get-ForecasterProcesses {
         Where-Object { Test-ForecasterServiceProcess -Process $_ -Service $Service })
 }
 
+function Test-ExpectedWeeklyMarketClosure {
+    $eastern = [System.TimeZoneInfo]::FindSystemTimeZoneById("Eastern Standard Time")
+    $newYork = [System.TimeZoneInfo]::ConvertTime([DateTimeOffset]::UtcNow, $eastern)
+    if ($newYork.DayOfWeek -eq [DayOfWeek]::Saturday) { return $true }
+    if ($newYork.DayOfWeek -eq [DayOfWeek]::Friday -and
+        $newYork.TimeOfDay -ge [TimeSpan]::FromHours(17)) { return $true }
+    if ($newYork.DayOfWeek -eq [DayOfWeek]::Sunday -and
+        $newYork.TimeOfDay -lt [TimeSpan]::FromHours(18)) { return $true }
+    return $false
+}
+
 function Get-ServiceState {
     param(
         [pscustomobject]$Service,
@@ -106,6 +117,7 @@ function Get-ServiceState {
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 1
         if ($null -eq $latestQuote -or ((Get-Date) - $latestQuote.LastWriteTime).TotalSeconds -gt 60) {
+            if (Test-ExpectedWeeklyMarketClosure) { return "MARKET CLOSED" }
             return "DATA STALE"
         }
         return "LIVE"
@@ -579,7 +591,7 @@ function Show-ControlCenter {
         foreach ($row in @($Snapshot.services)) {
             $label = $statusLabels[$row.Key]
             $label.Text = $row.State
-            $label.ForeColor = if ($row.State -in @("RUNNING", "LIVE", "API OK", "SYNC OK")) {
+            $label.ForeColor = if ($row.State -in @("RUNNING", "LIVE", "MARKET CLOSED", "API OK", "SYNC OK")) {
                 [System.Drawing.Color]::FromArgb(52, 105, 38)
             } elseif ($row.State -eq "SYNC DEGRADED") {
                 [System.Drawing.Color]::FromArgb(170, 105, 0)
