@@ -818,6 +818,7 @@ class _GeminiRequestPool:
         self, start_index: int, row: dict
     ) -> tuple[dict, str]:
         last_error: Exception | None = None
+        last_http_error: urllib.error.HTTPError | None = None
         for offset in range(len(self.api_keys)):
             key = self.api_keys[(start_index + offset) % len(self.api_keys)]
             if not self._reserve(key):
@@ -828,12 +829,18 @@ class _GeminiRequestPool:
                 last_error = error
             except urllib.error.HTTPError as error:
                 last_error = error
+                last_http_error = error
                 if error.code not in {401, 403, 429, 500, 502, 503, 504}:
                     raise
         if last_error is None:
             raise GeminiBatchCapacityExhausted(
                 "Gemma RPM slots used; retained for the next batch"
             )
+        if last_http_error is not None:
+            # Preserve the status code so the failure ledger applies the
+            # bounded transient 429/5xx retry schedule instead of treating it
+            # as a permanent validation failure.
+            raise last_http_error
         raise RuntimeError("All Gemma impact requests failed validation") from last_error
 
 
@@ -1041,6 +1048,8 @@ def _call_gemini_impact(api_key: str, row: dict) -> tuple[dict, str]:
         "POLICY_SHIFT=最长72小时；ONGOING_EVENT=最长7天；BACKGROUND=不进入模型。"
         "普通转载、同一事实确认或换标题必须选DUPLICATE_REPORT，不能延长事件寿命；"
         "只有正文包含新的决定、数据、行动、升级、降级或正式后续才是MATERIAL_UPDATE。"
+        "PRIOR_SAME_EVENT_RECORDS是按人物、对象和主题找到的较早候选，即使事件key不同也必须比较；"
+        "若当前正文没有比候选新增实质事实，必须选DUPLICATE_REPORT。"
         "reason_zh用一句简体中文说明正文依据。只返回JSON。\n"
         f"PUBLISHED_AT: {row.get('source_published_time') or ''}\n"
         f"FIRST_SEEN_AT: {row.get('collector_first_seen_time') or ''}\n"

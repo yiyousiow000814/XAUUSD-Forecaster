@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 import json
+import re
 
 from .news_relevance import google_news_item_is_relevant
 
 
 IMPACT_MODEL = "gemma-4-31b-it"
-IMPACT_PROMPT_VERSION = "news-impact-v1-fixed-lifetime-classes"
+IMPACT_PROMPT_VERSION = "news-impact-v2-semantic-prior-candidates"
 
 IMPACT_TIME_RULES = {
     "IMMEDIATE": (timedelta(hours=2), 30.0),
@@ -83,6 +84,36 @@ def validate_impact_assessment(result: dict) -> dict:
     }
 
 
+def _identity_tokens(annotation: dict) -> set[str]:
+    values = [
+        annotation.get("material_event_key"), annotation.get("episode_key"),
+        annotation.get("canonical_actor_id"), annotation.get("canonical_object_id"),
+        annotation.get("actor"), annotation.get("object"),
+        *(annotation.get("entities") or []),
+    ]
+    return {
+        token for value in values
+        for token in re.findall(r"[a-z0-9\u4e00-\u9fff]+", str(value or "").casefold())
+        if len(token) >= 3
+    }
+
+
+def _prior_similarity(current: dict, prior: dict) -> float:
+    current_tokens = _identity_tokens(current)
+    prior_tokens = _identity_tokens(prior)
+    if not current_tokens or not prior_tokens:
+        return 0.0
+    overlap = len(current_tokens & prior_tokens) / len(current_tokens | prior_tokens)
+    current_object = str(current.get("canonical_object_id") or "").casefold()
+    prior_object = str(prior.get("canonical_object_id") or "").casefold()
+    object_match = bool(
+        current_object and prior_object
+        and (current_object == prior_object
+             or current_object in prior_object or prior_object in current_object)
+    )
+    return max(overlap, 0.75 if object_match else 0.0)
+
+
 def pending_impact_records(
     connection,
     *,
@@ -149,10 +180,14 @@ def pending_impact_records(
                 row["annotation"].get("material_event_key") or ""
             ).strip()
             row["prior_event_context"] = []
-            if material_event_key:
+            primary_category = str(
+                row["annotation"].get("primary_category") or ""
+            ).strip()
+            if material_event_key or primary_category:
                 prior_rows = connection.execute(
                     """SELECT p.source,p.source_item_id,p.headline,
                               p.collector_first_seen_time,
+                              pa.annotation_json,
                               json_extract(pa.annotation_json,'$.summary_zh') AS summary_zh,
                               pi.impact_class,pi.update_type
                        FROM news_revisions p JOIN news_annotations pa
@@ -164,18 +199,49 @@ def pending_impact_records(
                          ON pi.annotation_id=pa.annotation_id
                         AND pi.llm_model_version=? AND pi.prompt_version=?
                        WHERE pa.prompt_version='news-json-v14-material-event-evidence'
-                         AND json_extract(pa.annotation_json,'$.material_event_key')=?
+                         AND (
+                           json_extract(pa.annotation_json,'$.material_event_key')=?
+                           OR json_extract(pa.annotation_json,'$.primary_category')=?
+                         )
                          AND p.collector_first_seen_time<=?
                          AND NOT (p.source=? AND p.source_item_id=?
                                   AND p.revision_number=?)
-                       ORDER BY p.collector_first_seen_time DESC LIMIT 5""",
+                       ORDER BY p.collector_first_seen_time DESC LIMIT 50""",
                     (
-                        IMPACT_MODEL, IMPACT_PROMPT_VERSION, material_event_key,
+                        IMPACT_MODEL, IMPACT_PROMPT_VERSION,
+                        material_event_key, primary_category,
                         row["collector_first_seen_time"], row["source"],
                         row["source_item_id"], row["revision_number"],
                     ),
                 ).fetchall()
-                row["prior_event_context"] = [dict(prior) for prior in prior_rows]
+                candidates = []
+                for prior in prior_rows:
+                    candidate = dict(prior)
+                    prior_annotation = json.loads(
+                        candidate.pop("annotation_json") or "{}"
+                    )
+                    similarity = _prior_similarity(row["annotation"], prior_annotation)
+                    if similarity < 0.25:
+                        continue
+                    candidate["similarity"] = round(similarity, 3)
+                    candidate["material_event_key"] = prior_annotation.get(
+                        "material_event_key"
+                    )
+                    candidate["canonical_actor_id"] = prior_annotation.get(
+                        "canonical_actor_id"
+                    )
+                    candidate["canonical_object_id"] = prior_annotation.get(
+                        "canonical_object_id"
+                    )
+                    candidates.append(candidate)
+                row["prior_event_context"] = sorted(
+                    candidates,
+                    key=lambda candidate: (
+                        float(candidate["similarity"]),
+                        str(candidate["collector_first_seen_time"]),
+                    ),
+                    reverse=True,
+                )[:5]
             selected.append(row)
         if len(selected) >= limit:
             break

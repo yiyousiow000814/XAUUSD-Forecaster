@@ -401,7 +401,7 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
             "source": source, "source_item_id": item, "revision_number": 1,
             "raw_content_hash": digest, "annotation_id": item,
             "llm_model_version": "gemma-4-31b-it",
-            "prompt_version": "news-impact-v1-fixed-lifetime-classes",
+            "prompt_version": "news-impact-v2-semantic-prior-candidates",
             "parse_started_at": assessed_at, "assessed_at": assessed_at,
             "impact_class": impact_class,
             "event_state": "ACTIVE" if impact_class != "BACKGROUND" else "BACKGROUND",
@@ -1608,6 +1608,38 @@ def test_material_update_creates_new_version_without_new_event_budget(tmp_path) 
     assert event["canonical_source_item_id"] == "update-event"
     assert event["event_occurred_at"] == update_time.isoformat()
     ledger.close()
+
+
+def test_event_budget_preserves_freshness_between_events() -> None:
+    rows = [
+        {"decision_id": "fresh-1", "official_events": [{
+            "event_id": "fresh", "event_version_id": "fresh-v1",
+            "raw_weight": 0.9,
+        }]},
+        {"decision_id": "fresh-2", "official_events": [{
+            "event_id": "fresh", "event_version_id": "fresh-v1",
+            "raw_weight": 0.8,
+        }]},
+        {"decision_id": "late-1", "official_events": [{
+            "event_id": "late", "event_version_id": "late-v1",
+            "raw_weight": 0.1,
+        }]},
+    ]
+
+    weights, receipts, summary = training_v2._event_budget_weights(
+        rows, "official_events"
+    )
+    event_totals = {
+        event_id: sum(
+            receipt["normalized_event_weight"]
+            for receipt in receipts if receipt["event_id"] == event_id
+        )
+        for event_id in ("fresh", "late")
+    }
+
+    assert event_totals["fresh"] / event_totals["late"] == pytest.approx(9.0)
+    assert weights[2] < weights[0]
+    assert summary["maximum_event_weight_share"] == pytest.approx(0.9)
 
 
 def test_commentary_and_low_materiality_are_not_training_evidence(tmp_path) -> None:

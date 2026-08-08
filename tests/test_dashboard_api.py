@@ -69,7 +69,33 @@ def _append_basic_annotation(
     digest: str,
     parsed_at: datetime,
     prompt_version: str = "news-json-v9-local-display-recovery",
+    event_time: datetime | None = None,
 ) -> None:
+    annotation = {
+        "event_type": "economic_release",
+        "entities": [],
+        "hawkishness": 0.0,
+        "inflation_impulse": 0.0,
+        "growth_impulse": 0.0,
+        "geopolitical_risk": 0.0,
+        "usd_impulse": 0.0,
+        "novelty": 0.5,
+        "confidence": 0.8,
+        "summary_zh": "已取得正文并完成测试解析。",
+        "headline_zh": "测试经济数据发布",
+    }
+    if event_time:
+        annotation.update({
+            "primary_category": "growth_economy", "secondary_categories": [],
+            "emerging_topic_zh": "", "record_kind": "FACT_EVENT",
+            "actor": "US Treasury", "action": "published", "object": "official event",
+            "location": "United States", "event_time": event_time.isoformat(),
+            "claim_status": "CONFIRMED", "materiality": 0.8,
+            "canonical_actor_id": "us_treasury", "action_family": "OFFICIAL_RELEASE",
+            "canonical_object_id": "official_event", "canonical_location_id": "us",
+            "episode_key": "official_event", "primary_story_title_zh": "测试事件",
+            "secondary_contexts_zh": [], "relation_to_prior": "NONE",
+        })
     ledger.append_annotation(
         {
             "annotation_id": f"annotation-{source}-{item_id}",
@@ -77,19 +103,7 @@ def _append_basic_annotation(
             "source_item_id": item_id,
             "revision_number": 1,
             "raw_content_hash": digest,
-            "annotation": {
-                "event_type": "economic_release",
-                "entities": [],
-                "hawkishness": 0.0,
-                "inflation_impulse": 0.0,
-                "growth_impulse": 0.0,
-                "geopolitical_risk": 0.0,
-                "usd_impulse": 0.0,
-                "novelty": 0.5,
-                "confidence": 0.8,
-                "summary_zh": "已取得正文并完成测试解析。",
-                "headline_zh": "测试经济数据发布",
-            },
+            "annotation": annotation,
             "llm_model_version": "gemini-3.5-flash-lite",
             "prompt_version": prompt_version,
             "parse_started_at": parsed_at - timedelta(seconds=1),
@@ -425,7 +439,7 @@ def test_dashboard_explains_active_and_expired_on_receipt_impacts(tmp_path) -> N
             "raw_content_hash": digest,
             "annotation_id": f"annotation-us_treasury_press_releases-{item_id}",
             "llm_model_version": "gemma-4-31b-it",
-            "prompt_version": "news-impact-v1-fixed-lifetime-classes",
+            "prompt_version": "news-impact-v2-semantic-prior-candidates",
             "parse_started_at": parsed_at,
             "assessed_at": parsed_at + timedelta(seconds=1),
             "impact_class": impact_class,
@@ -443,6 +457,46 @@ def test_dashboard_explains_active_and_expired_on_receipt_impacts(tmp_path) -> N
     assert rows["active"]["model_visibility"] == "MODEL_VISIBLE"
     assert rows["expired-on-receipt"]["impact_status"] == "EXPIRED_ON_RECEIPT"
     assert rows["expired-on-receipt"]["model_visibility"] == "IMPACT_EXPIRED"
+
+
+def test_dashboard_uses_same_explicit_event_clock_as_model(tmp_path) -> None:
+    now = datetime.now(UTC)
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=now - timedelta(days=2))
+    published = now - timedelta(hours=2)
+    event_time = now - timedelta(hours=13)
+    first_seen = now - timedelta(hours=1)
+    body = "official event happened before the publication timestamp " * 20
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    ledger.append_news_revision({
+        "source": "us_treasury_press_releases", "source_item_id": "old-event",
+        "source_published_time": published, "collector_first_seen_time": first_seen,
+        "fetched_time": first_seen, "headline": "Delayed official event report",
+        "body": body, "content_hash": digest, "cluster_id": "old-event",
+    })
+    parsed_at = first_seen + timedelta(seconds=1)
+    _append_basic_annotation(
+        ledger, source="us_treasury_press_releases", item_id="old-event",
+        digest=digest, parsed_at=parsed_at, event_time=event_time,
+    )
+    ledger.append_news_impact_assessment({
+        "assessment_id": "old-event-impact", "source": "us_treasury_press_releases",
+        "source_item_id": "old-event", "revision_number": 1,
+        "raw_content_hash": digest,
+        "annotation_id": "annotation-us_treasury_press_releases-old-event",
+        "llm_model_version": "gemma-4-31b-it",
+        "prompt_version": "news-impact-v2-semantic-prior-candidates",
+        "parse_started_at": parsed_at, "assessed_at": parsed_at + timedelta(seconds=1),
+        "impact_class": "SAME_DAY", "event_state": "ACTIVE",
+        "update_type": "NEW_EVENT", "confidence": 0.9,
+        "reason_zh": "事件发生时间早于文章发布时间。",
+    })
+    ledger.connection.close()
+
+    row = _dashboard_module()._dashboard_payload(database)["recent_news"][0]
+
+    assert row["impact_status"] == "EXPIRED_ON_RECEIPT"
+    assert datetime.fromisoformat(row["impact_expires_at"]) == event_time + timedelta(hours=12)
 
 
 def test_dashboard_uses_gemini_controlled_category_before_source_guess() -> None:

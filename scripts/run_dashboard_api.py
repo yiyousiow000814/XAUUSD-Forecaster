@@ -43,6 +43,7 @@ from xauusd_forecaster.learning_curves import learning_curve_payload  # noqa: E4
 from xauusd_forecaster.execution_costs import net_shadow_log_return  # noqa: E402
 from xauusd_forecaster.news_evidence import (  # noqa: E402
     EVIDENCE_POLICY_VERSION, event_evidence_rows_from_connection,
+    resolve_event_clock,
 )
 from xauusd_forecaster.news_relevance import google_news_item_is_relevant  # noqa: E402
 from xauusd_forecaster.news_features_v2 import SOURCE_RULES  # noqa: E402
@@ -442,14 +443,15 @@ def _apply_impact_status(item: dict, now: datetime) -> None:
         item["model_visibility"] = "MODEL_INELIGIBLE"
         return
 
-    published_raw = item.get("source_published_time")
-    if not published_raw:
+    event_at, clock_source, _ = resolve_event_clock(item, primary_source=True)
+    if event_at is None:
         item["impact_status"] = "MISSING_PUBLICATION_TIME"
         item["model_visibility"] = "MODEL_INELIGIBLE"
         return
-    published = datetime.fromisoformat(str(published_raw))
     max_age, _ = impact_time_rule(impact_class)
-    expires_at = published + max_age
+    expires_at = event_at + max_age
+    item["impact_event_at"] = event_at.isoformat(timespec="microseconds")
+    item["impact_clock_source"] = clock_source
     item["impact_expires_at"] = expires_at.isoformat(timespec="microseconds")
     first_seen = datetime.fromisoformat(str(item["collector_first_seen_time"]))
     assessed_at = datetime.fromisoformat(str(item["impact_assessed_at"]))
@@ -736,7 +738,8 @@ def _dashboard_payload(database: Path) -> dict:
                       json_extract(a.annotation_json, '$.summary_zh') AS summary_zh,
                       json_extract(a.annotation_json, '$.primary_category') AS primary_category,
                       json_extract(a.annotation_json, '$.secondary_categories') AS secondary_categories_json,
-                      json_extract(a.annotation_json, '$.emerging_topic_zh') AS emerging_topic_zh,
+                       json_extract(a.annotation_json, '$.emerging_topic_zh') AS emerging_topic_zh,
+                       json_extract(a.annotation_json, '$.event_time') AS event_time,
                       COALESCE(a.event_type, legacy.event_type, legacy_v3.event_type) AS event_type,
                       COALESCE(a.entities_json, legacy.entities_json, legacy_v3.entities_json) AS entities_json,
                       COALESCE(a.hawkishness, legacy.hawkishness, legacy_v3.hawkishness) AS hawkishness,

@@ -19,7 +19,7 @@ from .news_impact import (
 from .news_time import NewsTimeAssessment, assess_news_time
 
 
-EVIDENCE_POLICY_VERSION = "news-event-evidence-v5-gemma-impact-lifetime"
+EVIDENCE_POLICY_VERSION = "news-event-evidence-v6-semantic-impact-lifetime"
 LEGACY_V3_EVIDENCE_POLICY_VERSION = "news-event-evidence-v2-economic-time"
 CURRENT_EVENT_PROMPT_VERSION = "news-json-v14-material-event-evidence"
 ACTIONABLE_RECORD_KINDS = frozenset({
@@ -196,7 +196,9 @@ def _parsed_timestamp(value: object) -> datetime | None:
     return parsed
 
 
-def _event_clock(row: dict, *, primary_source: bool) -> tuple[datetime | None, str, str]:
+def resolve_event_clock(
+    row: dict, *, primary_source: bool,
+) -> tuple[datetime | None, str, str]:
     """Return a live-known event clock with explicit provenance.
 
     A precise body clock is preferred.  For an official primary publisher the
@@ -205,7 +207,7 @@ def _event_clock(row: dict, *, primary_source: bool) -> tuple[datetime | None, s
     unknown real-world event clock.
     """
     annotation = json.loads(row.get("annotation_json") or "{}")
-    explicit = _parsed_timestamp(annotation.get("event_time"))
+    explicit = _parsed_timestamp(annotation.get("event_time") or row.get("event_time"))
     if explicit is not None:
         return explicit, "EXPLICIT_BODY_TIME", "TIMESTAMP"
     official_release = _parsed_timestamp(row.get("source_published_time"))
@@ -366,7 +368,7 @@ def event_evidence_rows_from_connection(
         evidence_role = str(annotation.get("evidence_role") or "")
         materiality = float(annotation.get("materiality") or 0.0)
         current_semantic_schema = canonical.get("prompt_version") == CURRENT_EVENT_PROMPT_VERSION
-        event_clock, event_clock_source, event_time_precision = _event_clock(
+        event_clock, event_clock_source, event_time_precision = resolve_event_clock(
             canonical, primary_source=canonical["source"] in primary_sources,
         )
         event_clock_valid = legacy_v3 or bool(

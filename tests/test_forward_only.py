@@ -27,6 +27,7 @@ from xauusd_forecaster.annotation import (
 )
 from xauusd_forecaster.factors import aggregate_news_features, factor_coverage
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
+from xauusd_forecaster.news_impact import pending_impact_records
 from xauusd_forecaster.maintenance import (
     archive_completed_quote_days,
     backup_forward_ledger,
@@ -1954,6 +1955,94 @@ def test_gemma_impact_assessment_is_append_only_and_versioned(
     assert row["impact_class"] == "POLICY_SHIFT"
     assert row["llm_model_version"] == annotation_module.IMPACT_MODEL
     assert assess_pending_news_impacts(ledger, api_key="test-key", limit=1) == []
+
+
+def test_gemma_impact_preserves_transient_http_error(tmp_path, monkeypatch) -> None:
+    pool = annotation_module._GeminiRequestPool(
+        ("test-key",), GeminiQuotaLedger(tmp_path / "quota.json"),
+        requests_per_key=1, batch_limit=1,
+    )
+    transient = urllib.error.HTTPError(
+        "https://example", 429, "Too Many Requests", {}, None
+    )
+    monkeypatch.setattr(
+        annotation_module, "_call_gemini_impact",
+        lambda *_args: (_ for _ in ()).throw(transient),
+    )
+
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        pool.call_impact(0, {})
+
+    assert caught.value.code == 429
+
+
+def test_impact_context_finds_semantically_similar_prior_event(tmp_path) -> None:
+    now = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    common = {
+        "event_type": "fed_independence", "entities": ["Donald Trump", "Lisa Cook"],
+        "hawkishness": 0.0, "inflation_impulse": 0.0,
+        "growth_impulse": 0.0, "geopolitical_risk": 0.2,
+        "usd_impulse": 0.0, "novelty": 0.8, "confidence": 0.9,
+        "primary_category": "rates_fed", "record_kind": "FACT_EVENT",
+        "evidence_role": "CORE_CLAIM", "materiality": 0.8,
+        "canonical_actor_id": "donald_trump", "canonical_object_id": "lisa_cook",
+        "headline_zh": "特朗普再次寻求解除丽莎库克职务",
+        "secondary_categories": [], "emerging_topic_zh": "美联储独立性",
+        "actor": "Donald Trump", "action": "attempts removal",
+        "object": "Lisa Cook", "location": "United States", "event_time": "",
+        "claim_status": "CONFIRMED", "action_family": "REGULATORY_ACTION",
+        "canonical_location_id": "us", "primary_story_title_zh": "丽莎库克罢免争议",
+        "secondary_contexts_zh": [], "relation_to_prior": "NONE",
+        "document_kind": "NEWS_REPORT", "source_organization_id": "test-source",
+    }
+    for index, material_key in enumerate((
+        "trump_removes_lisa_cook", "cook_firing_attempt",
+    )):
+        item_id = f"cook-{index}"
+        seen = now + timedelta(minutes=index * 10)
+        body = f"Trump effort involving Federal Reserve Governor Lisa Cook {index}. " * 20
+        digest = hashlib.sha256(body.encode()).hexdigest()
+        ledger.append_news_revision({
+            "source": "federal_reserve_press_all", "source_item_id": item_id,
+            "source_published_time": seen, "collector_first_seen_time": seen,
+            "fetched_time": seen, "headline": f"Fed Governor Lisa Cook report {index}",
+            "body": body, "content_hash": digest, "cluster_id": item_id,
+        })
+        ledger.append_annotation({
+            "annotation_id": f"annotation-{index}",
+            "source": "federal_reserve_press_all", "source_item_id": item_id,
+            "revision_number": 1, "raw_content_hash": digest,
+            "annotation": {
+                **common, "material_event_key": material_key,
+                "episode_key": material_key,
+                "summary_zh": "特朗普再次寻求解除美联储理事丽莎库克的职务。",
+            },
+            "llm_model_version": annotation_module.DEFAULT_GEMINI_MODEL,
+            "prompt_version": annotation_module.PROMPT_VERSION,
+            "parse_started_at": seen, "parsed_at": seen + timedelta(seconds=1),
+        })
+        if index == 0:
+            ledger.append_news_impact_assessment({
+                "assessment_id": "prior-impact", "source": "federal_reserve_press_all",
+                "source_item_id": item_id, "revision_number": 1,
+                "raw_content_hash": digest, "annotation_id": "annotation-0",
+                "llm_model_version": annotation_module.IMPACT_MODEL,
+                "prompt_version": annotation_module.IMPACT_PROMPT_VERSION,
+                "parse_started_at": seen + timedelta(seconds=1),
+                "assessed_at": seen + timedelta(seconds=2),
+                "impact_class": "ONGOING_EVENT", "event_state": "ACTIVE",
+                "update_type": "NEW_EVENT", "confidence": 0.9,
+                "reason_zh": "此前已经收到同一事件。",
+            })
+
+    pending = pending_impact_records(
+        ledger.connection, observed_at=now + timedelta(hours=1), limit=10,
+    )
+
+    current = next(row for row in pending if row["source_item_id"] == "cook-1")
+    assert current["prior_event_context"]
+    assert current["prior_event_context"][0]["source_item_id"] == "cook-0"
 
 
 def test_json_object_decoder_accepts_fence_and_trailing_text() -> None:
