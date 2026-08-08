@@ -52,6 +52,8 @@ type News = {
   content_error_type?: string | null;
   summary_zh?: string | null;
   annotation_status: "READY" | "QUEUED" | "BACKING_OFF" | "DEAD_LETTER" | "WAITING_CONTENT" | "CONTENT_UNAVAILABLE" | "NOT_REQUIRED";
+  annotation_reason_code?: "DUPLICATE_CONTENT" | "SEARCH_LEAD" | "HISTORICAL_MATERIAL" | "LATE_DISCOVERY";
+  annotation_reason?: string;
   link?: string;
   event_type?: string | null;
   entities?: string[];
@@ -443,6 +445,12 @@ const VISIBILITY_LABELS: Record<string, string> = {
   COLLECT_ONLY: "仅收集",
   MODEL_INELIGIBLE: "不可用于模型",
 };
+const ANNOTATION_REASON_LABELS: Record<string, string> = {
+  DUPLICATE_CONTENT: "重复内容",
+  SEARCH_LEAD: "搜索线索",
+  HISTORICAL_MATERIAL: "历史资料",
+  LATE_DISCOVERY: "发现太晚",
+};
 
 function NewsRow({ row, keyCount, requestsPerMinute }: {
   row: News; keyCount: number; requestsPerMinute: number;
@@ -458,6 +466,9 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
     && row.model_visibility !== "NOT_YET_PARSED"
     ? "NOT_REQUIRED"
     : row.annotation_status;
+  const annotationReasonLabel = ANNOTATION_REASON_LABELS[
+    current.annotation_reason_code ?? ""
+  ] ?? "无需 AI 解析";
   const translated = Boolean(
     current.original_headline && current.headline !== current.original_headline,
   );
@@ -486,7 +497,7 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
       <div className="news-row-title"><strong>{row.headline}</strong><small>{SOURCE_LABELS[row.source] ?? row.source.replaceAll("_", " ")}{translated ? " · Gemini 中文标题" : ""}{row.emerging_topic_zh ? ` · ${row.emerging_topic_zh}` : ""}</small></div>
       <div className={`news-row-state state-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
         <b>{row.content_status === "FULL_TEXT" ? `${row.content_characters.toLocaleString()} 字符` : row.content_fetch_status === "UNAVAILABLE" ? "正文不可用" : row.content_fetch_status === "RETRYING" ? "自动重试中" : row.source === "google_news_gold_geopolitics" ? "聚合标题" : "等待正文"}</b>
-        <small>{annotationStatus === "READY" ? "AI 已读懂正文" : annotationStatus === "NOT_REQUIRED" ? "无需 AI 解析" : row.content_fetch_status === "UNAVAILABLE" ? "保留标题 · 不阻塞" : row.content_fetch_status === "RETRYING" ? "备用抓取中" : annotationStatus === "QUEUED" ? "AI 等待处理中" : annotationStatus === "BACKING_OFF" ? "失败后等待重试" : annotationStatus === "DEAD_LETTER" ? "已隔离待审" : "禁止判断"}</small>
+        <small>{annotationStatus === "READY" ? "AI 已读懂正文" : annotationStatus === "NOT_REQUIRED" ? annotationReasonLabel : row.content_fetch_status === "UNAVAILABLE" ? "保留标题 · 不阻塞" : row.content_fetch_status === "RETRYING" ? "备用抓取中" : annotationStatus === "QUEUED" ? "AI 等待处理中" : annotationStatus === "BACKING_OFF" ? "失败后等待重试" : annotationStatus === "DEAD_LETTER" ? "已隔离待审" : "禁止判断"}</small>
       </div>
     </summary>
     <div className="news-row-detail">
@@ -509,7 +520,7 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
         </section> : annotationStatus === "DEAD_LETTER" ? <section className="gemini-summary summary-waiting">
           <span>已隔离</span><p>相同永久错误重复出现，系统不会再自动消耗 Flash 配额；该新闻保留在 Ledger 中等待规则修复或人工复核。</p>
         </section> : annotationStatus === "NOT_REQUIRED" ? <section className="gemini-summary summary-queued">
-          <span>这篇新闻只供阅读</span><p>系统已保留正文，但它属于重复内容、搜索线索、历史资料或发现得太晚，因此无需消耗 AI 配额，也不会进入模型。</p>
+          <span>{annotationReasonLabel}</span><p>{current.annotation_reason ?? "该新闻不满足当前解析条件，不会消耗 AI 配额或进入模型。"}</p>
         </section> : row.content_fetch_status === "UNAVAILABLE" ? <section className="gemini-summary summary-waiting">
           <span>来源正文不可自动读取</span><p>发布网站拒绝访问、要求登录或没有可提取正文；这类候选不会写入新闻库，也不会进入模型。</p>
         </section> : <section className="gemini-summary summary-waiting">

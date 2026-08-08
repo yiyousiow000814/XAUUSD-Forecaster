@@ -278,15 +278,21 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
                 release
                 and release.get("latest_status") == "ERROR"
                 and release.get("last_error_type") == "HTTPError"
-                and bls_fallback.get("health") == "HEALTHY"
+                and bls_fallback.get("health") in {"HEALTHY", "DEGRADED"}
             ):
-                release["health"] = "FALLBACK_ACTIVE"
+                fallback_healthy = bls_fallback.get("health") == "HEALTHY"
+                release["health"] = "FALLBACK_ACTIVE" if fallback_healthy else "DEGRADED"
                 release["recovery_mode"] = "BLS_DIRECT_BLOCKED"
                 release["fallback_label"] = bls_fallback["label"]
                 release["fallback_health"] = bls_fallback["health"]
-                release["semantic_status"] = "OFFICIAL_DOMAIN_FALLBACK_ACTIVE"
+                release["semantic_status"] = (
+                    "OFFICIAL_DOMAIN_FALLBACK_ACTIVE" if fallback_healthy
+                    else "OFFICIAL_RELEASE_BODY_BLOCKED"
+                )
                 release["semantic_message"] = (
                     "BLS 直接 RSS 被本机网络拒绝；官方域名备用发现源与 BLS 数值 API 正常运行"
+                    if fallback_healthy else
+                    "已发现 BLS 官方发布，但本机仍无法读取正式正文；BLS 数值 API 独立运行"
                 )
     gdelt = by_source.get("gdelt_gold_geopolitics")
     fallback = by_source.get("google_news_gold_context")
@@ -389,6 +395,28 @@ def _news_category(item: dict) -> str:
     if source == "federal_reserve_press_all":
         return "监管/其他"
     return "其他"
+
+
+def _not_required_reason(item: dict, forward_epoch: str) -> tuple[str, str]:
+    """Explain the single reason a readable row will not consume AI quota."""
+    published_raw = item.get("source_published_time")
+    if not published_raw:
+        return "HISTORICAL_MATERIAL", "历史资料：缺少可靠发布时间"
+    published = datetime.fromisoformat(str(published_raw))
+    epoch = datetime.fromisoformat(forward_epoch)
+    if published < epoch:
+        return "HISTORICAL_MATERIAL", "历史资料：发布时间早于系统开始记录"
+    first_seen = datetime.fromisoformat(str(item["collector_first_seen_time"]))
+    delay_seconds = max(0.0, (first_seen - published).total_seconds())
+    if delay_seconds > 3600:
+        hours, remainder = divmod(int(delay_seconds), 3600)
+        minutes = remainder // 60
+        delay = f"{hours}小时{minutes}分" if hours else f"{minutes}分钟"
+        return "LATE_DISCOVERY", f"发现太晚：发布后 {delay} 才被系统收到"
+    source = str(item.get("source") or "")
+    if source.startswith("google_news_") or source.startswith("gdelt_"):
+        return "SEARCH_LEAD", "搜索线索：来自聚合发现源，不是独立官方发布"
+    return "DUPLICATE_CONTENT", "重复内容：同一事件已有正文更完整的版本"
 
 
 def _recent_market_chart(
@@ -1248,11 +1276,17 @@ def _dashboard_payload(database: Path) -> dict:
             # Legacy-compatible annotations are also complete even when the
             # current-version LEFT JOIN did not populate a.annotation_id.
             item["annotation_status"] = "READY"
-        elif annotation_key not in claimable_annotation_keys:
+        elif (
+            item.get("annotation_status") == "QUEUED"
+            and annotation_key not in claimable_annotation_keys
+        ):
             # A readable row can be retained for the reader without being a
             # job the current worker is allowed to claim (duplicate, archival,
             # or discovered too late). Calling it QUEUED is misleading.
             item["annotation_status"] = "NOT_REQUIRED"
+            reason_code, reason = _not_required_reason(item, epoch)
+            item["annotation_reason_code"] = reason_code
+            item["annotation_reason"] = reason
         # The reader page shows every retained article with readable source
         # content. Parsing is a separate state: an unparsed article remains
         # visible for audit, but model_visibility prevents it from entering

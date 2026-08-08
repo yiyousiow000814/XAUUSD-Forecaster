@@ -40,8 +40,11 @@ COMPATIBLE_PROMPT_VERSIONS = (
     "news-json-v11-gemini-story-subjects",
     "news-json-v10-controlled-category-zh",
 )
-TITLE_PROMPT_VERSION = "headline-zh-v3-strict-retry"
+TITLE_PROMPT_VERSION = "headline-zh-v6-exact-number-preservation"
 INVALID_CHINESE_TITLE = "来源新闻（中文标题待校验）"
+TITLE_TRANSLATION_MODELS = (
+    DEFAULT_GEMMA_MODEL, DEFAULT_GEMINI_MODEL, FALLBACK_GEMINI_MODEL,
+)
 HIGH_PRIORITY_NEWS_SOURCES = frozenset({"federal_reserve_monetary"})
 
 
@@ -440,6 +443,7 @@ def translate_pending_headlines(
             WHERE t.source=n.source AND t.source_item_id=n.source_item_id
               AND t.revision_number=n.revision_number
               AND trim(t.headline_zh)<>?
+              AND t.headline_zh NOT LIKE ?
               AND t.headline_zh GLOB '*[一-龥]*')
           AND NOT EXISTS (
             SELECT 1 FROM news_revisions newer
@@ -476,16 +480,38 @@ def translate_pending_headlines(
             WHERE retry_t.source=n.source
               AND retry_t.source_item_id=n.source_item_id
               AND retry_t.revision_number=n.revision_number
-              AND trim(retry_t.headline_zh)=?) DESC,
+              AND (trim(retry_t.headline_zh)=?
+                   OR retry_t.headline_zh LIKE ?)) DESC,
                  COALESCE(n.source_published_time,
                           n.collector_first_seen_time) DESC
         LIMIT ?""",
         (
-            INVALID_CHINESE_TITLE, selected_model, TITLE_PROMPT_VERSION,
+            INVALID_CHINESE_TITLE, "%相关数值%",
+            selected_model, TITLE_PROMPT_VERSION,
             datetime.now(UTC).isoformat(timespec="microseconds"),
-            INVALID_CHINESE_TITLE, capacity,
+            INVALID_CHINESE_TITLE, "%相关数值%", capacity * 4,
         ),
     ).fetchall()
+    relevant_pending = []
+    for raw_row in pending:
+        row = dict(raw_row)
+        observed_at = row.get("collector_first_seen_time") or datetime.now(UTC)
+        if not isinstance(observed_at, datetime):
+            observed_at = datetime.fromisoformat(str(observed_at))
+        published_at = row.get("source_published_time")
+        if published_at is not None and not isinstance(published_at, datetime):
+            published_at = datetime.fromisoformat(str(published_at))
+        allowed, _ = google_news_item_is_relevant(
+            str(row.get("source") or ""),
+            str(row.get("headline") or ""),
+            published_at,
+            observed_at,
+        )
+        if allowed:
+            relevant_pending.append(raw_row)
+        if len(relevant_pending) >= capacity:
+            break
+    pending = relevant_pending
     statuses: list[dict[str, object]] = []
     for index, raw_row in enumerate(pending):
         row = dict(raw_row)
@@ -705,21 +731,28 @@ class _GeminiRequestPool:
         self, start_index: int, model: str, headline: str
     ) -> tuple[str, str]:
         last_error: Exception | None = None
-        for offset in range(len(self.api_keys)):
-            key = self.api_keys[(start_index + offset) % len(self.api_keys)]
-            if not self._reserve(key):
-                continue
-            try:
-                return _call_gemini_title(key, model, headline)
-            except urllib.error.HTTPError as error:
-                last_error = error
-                if error.code not in {401, 403, 429}:
-                    raise
+        models = TITLE_TRANSLATION_MODELS if model == DEFAULT_GEMMA_MODEL else (model,)
+        for candidate_model in models:
+            for offset in range(len(self.api_keys)):
+                key = self.api_keys[(start_index + offset) % len(self.api_keys)]
+                if not self._reserve(key):
+                    continue
+                try:
+                    return _call_gemini_title(key, candidate_model, headline)
+                except (ValueError, KeyError, json.JSONDecodeError) as error:
+                    # A schema-valid response can still echo the English title.
+                    # Try another key/model instead of turning a simple display
+                    # translation into a permanent dead letter.
+                    last_error = error
+                except urllib.error.HTTPError as error:
+                    last_error = error
+                    if error.code not in {401, 403, 429}:
+                        raise
         if last_error is None:
             raise GeminiBatchCapacityExhausted(
                 "Gemini RPM slots used; retained for the next batch"
             )
-        raise RuntimeError("All configured Gemini keys rejected for this batch") from last_error
+        raise RuntimeError("All title translation models failed validation") from last_error
 
 
 def _call_gemini(
@@ -870,11 +903,14 @@ def _decode_json_object(raw: object) -> dict:
 
 def _call_gemini_title(api_key: str, model: str, headline: str) -> tuple[str, str]:
     payload = {
+        "systemInstruction": {"parts": [{"text": (
+            "你是新闻标题翻译器。必须把标题翻译成自然、准确的简体中文，"
+            "不得原样返回英文标题。"
+        )}]},
         "contents": [{"parts": [{"text": (
-            "Translate the delimited news headline faithfully into natural "
-            "Simplified Chinese. Preserve names, dates, percentages, prices, "
-            "and all numbers exactly. Return JSON only. Do not summarize or "
-            "infer facts beyond the headline.\nHEADLINE_START\n"
+            "请把以下新闻标题忠实翻译成自然的简体中文。保留人名、日期、"
+            "百分比、价格和所有数字，不要总结，不要补充标题以外的事实。"
+            "只返回 JSON。\nHEADLINE_START\n"
             f"{headline}\nHEADLINE_END"
         )}]}],
         "generationConfig": {
@@ -882,7 +918,10 @@ def _call_gemini_title(api_key: str, model: str, headline: str) -> tuple[str, st
             "responseSchema": {
                 "type": "object",
                 "required": ["headline_zh"],
-                "properties": {"headline_zh": {"type": "string"}},
+                "properties": {"headline_zh": {
+                    "type": "string",
+                    "description": "忠实翻译后的简体中文新闻标题",
+                }},
             },
             "maxOutputTokens": 300,
             "temperature": 0,
@@ -903,12 +942,31 @@ def _call_gemini_title(api_key: str, model: str, headline: str) -> tuple[str, st
     translated = {"headline_zh": headline_zh}
     _recover_display_fields(translated, headline, "")
     headline_zh = translated["headline_zh"]
-    _require_simplified_chinese(headline_zh, "headline_zh", 2, 1.0, 20)
+    _require_title_numbers_preserved(headline_zh, headline)
+    # Company names, tickers and publisher names legitimately remain in their
+    # source script.  The old 20-letter ceiling rejected valid translations
+    # such as "Public Storage：优先股… (PSA) - Seeking Alpha".
+    _require_simplified_chinese(headline_zh, "headline_zh", 2, 4.0, 60)
     return headline_zh, str(envelope.get("modelVersion") or model)
 
 
+def _require_title_numbers_preserved(translated: str, source: str) -> None:
+    """Reject display translations that change, omit or invent headline numbers."""
+    # Digit runs avoid treating the prose comma in "August 4, 2026" as one
+    # numeric token while still catching conversions such as 120 -> 1.2.
+    source_tokens = set(re.findall(r"\d+", source))
+    translated_tokens = set(re.findall(r"\d+", translated))
+    if "相关数值" in translated:
+        raise ValueError("Translated headline contains an unresolved number")
+    missing = source_tokens - translated_tokens
+    if missing:
+        raise ValueError(
+            "Translated headline omitted source numbers: " + ", ".join(sorted(missing))
+        )
+
+
 def _validate_chinese_result(result: dict) -> None:
-    _require_simplified_chinese(result.get("headline_zh"), "headline_zh", 2, 1.0, 20)
+    _require_simplified_chinese(result.get("headline_zh"), "headline_zh", 2, 4.0, 60)
     _require_simplified_chinese(result.get("summary_zh"), "summary_zh", 10, 0.20, 25)
     story_title = str(result.get("primary_story_title_zh") or "").strip()
     if story_title:
@@ -920,7 +978,9 @@ def _validate_chinese_result(result: dict) -> None:
 def _restore_source_number_lexemes(
     result: dict, headline: str, body: str
 ) -> None:
-    token_pattern = re.compile(r"\d+(?:(?:\s*[.,/-]\s*)\d+)*")
+    token_pattern = re.compile(
+        r"\d+(?:(?:\s*[./-]\s*\d+)|(?:\s*,\s*\d{1,3}(?!\d)))*"
+    )
     source_tokens = {
         re.sub(r"\s+", "", token)
         for token in token_pattern.findall(f"{headline}\n{body}")
@@ -948,7 +1008,9 @@ def _recover_display_fields(result: dict, headline: str, body: str) -> None:
     """Make display text auditable without rejecting structured measurements."""
     source = f"{headline}\n{body}"
     _normalize_translated_named_months(result, source)
-    token_pattern = re.compile(r"\d+(?:(?:\s*[.,/-]\s*)\d+)*")
+    token_pattern = re.compile(
+        r"\d+(?:(?:\s*[./-]\s*\d+)|(?:\s*,\s*\d{1,3}(?!\d)))*"
+    )
     source_tokens = {
         re.sub(r"\s+", "", token) for token in token_pattern.findall(source)
     }
@@ -1030,7 +1092,7 @@ def _normalize_translated_named_months(result: dict, source: str) -> None:
         text = str(result[field])
         for number in named_months:
             text = re.sub(
-                rf"(?<!\d){number}(?=月)", chinese[number], text
+                rf"(?<!\d){number}\s*月", f"{chinese[number]}月", text
             )
         result[field] = text
 

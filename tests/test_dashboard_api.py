@@ -363,7 +363,7 @@ def test_dashboard_shows_readable_unparsed_news_without_model_visibility(tmp_pat
 def test_dashboard_marks_readable_late_news_as_not_requiring_annotation(tmp_path) -> None:
     now = datetime(2026, 8, 8, 1, 0, tzinfo=UTC)
     database = tmp_path / "forward.sqlite3"
-    ledger = ForwardLedger(database, now=now)
+    ledger = ForwardLedger(database, now=now - timedelta(hours=3))
     body = "readable late official evidence body " * 20
     ledger.append_news_revision(
         {
@@ -384,6 +384,10 @@ def test_dashboard_marks_readable_late_news_as_not_requiring_annotation(tmp_path
 
     assert len(payload["recent_news"]) == 1
     assert payload["recent_news"][0]["annotation_status"] == "NOT_REQUIRED"
+    assert payload["recent_news"][0]["annotation_reason_code"] == "LATE_DISCOVERY"
+    assert payload["recent_news"][0]["annotation_reason"] == (
+        "发现太晚：发布后 2小时0分 才被系统收到"
+    )
     assert payload["annotation_queue"]["queued"] == 0
 
 

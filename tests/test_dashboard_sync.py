@@ -192,6 +192,9 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
             "summary_zh": body, "category": "其他",
             "content_fetch_status": "UNAVAILABLE",
             "content_error_type": "HTTPError",
+            "annotation_status": "NOT_REQUIRED",
+            "annotation_reason_code": "LATE_DISCOVERY",
+            "annotation_reason": "发现太晚：发布后 2小时 才被系统收到",
         } for index in range(100)],
         "recent_decisions": [{"id": index} for index in range(30)],
         "news_evidence": [{"id": index} for index in range(100)],
@@ -216,7 +219,10 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
     assert detail_rows[0]["payload"]["summary_zh"] == body
     assert index_rows[0]["content_fetch_status"] == "UNAVAILABLE"
     assert index_rows[0]["content_error_type"] == "HTTPError"
+    assert index_rows[0]["annotation_reason_code"] == "LATE_DISCOVERY"
+    assert index_rows[0]["annotation_reason"].startswith("发现太晚")
     assert "content_fetch_status" not in detail_rows[0]["payload"]
+    assert "annotation_reason" not in detail_rows[0]["payload"]
     assert len(detail_rows[0]["detail_key"]) == 64
     assert mirrored["market_chart"]["decisions"] == []
     market_decision = json.loads(module.market_chart_snapshot(payload))["decisions"][0]

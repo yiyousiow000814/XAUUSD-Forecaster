@@ -29,6 +29,7 @@ from .news_relevance import (
     GOOGLE_NEWS_MAX_ITEMS_PER_EVENT_FAMILY,
     google_news_candidate_family,
     google_news_item_is_relevant,
+    google_news_quality_rank,
 )
 
 
@@ -963,6 +964,7 @@ def collect_google_news_lane(
                     "SELECT 1 FROM news_revisions WHERE source=? AND source_item_id=? LIMIT 1",
                     (record["source"], record["source_item_id"]),
                 ).fetchone() is not None,
+                google_news_quality_rank(str(record.get("headline") or "")),
                 -(record["source_published_time"].timestamp()
                   if record.get("source_published_time") else 0.0),
                 str(record["source_item_id"]),
@@ -1002,10 +1004,15 @@ def collect_google_news_lane(
                 str(record.get("headline") or ""),
                 record.get("source_published_time"),
             )
-            if family_counts.get(family, 0) >= GOOGLE_NEWS_MAX_ITEMS_PER_EVENT_FAMILY:
+            official_bls_fallback = lane.name == "google_news_bls_official_releases"
+            if (
+                not official_bls_fallback
+                and family_counts.get(family, 0) >= GOOGLE_NEWS_MAX_ITEMS_PER_EVENT_FAMILY
+            ):
                 rejected["EVENT_FAMILY_CAP"] = rejected.get("EVENT_FAMILY_CAP", 0) + 1
                 continue
-            family_counts[family] = family_counts.get(family, 0) + 1
+            if not official_bls_fallback:
+                family_counts[family] = family_counts.get(family, 0) + 1
             selected.append(record)
             if len(selected) >= limit:
                 break
@@ -1048,10 +1055,27 @@ def collect_google_news_lane(
             inserted += int(created)
             unchanged += int(not created)
             full_text_records.append(record)
-        ledger.append_source_poll({"poll_id": poll_id, "source": lane.name, "fetched_time": fetched_at, "status": "OK", "payload_hash": hashlib.sha256(raw).hexdigest()})
+        content_blocked = (
+            bool(selected)
+            and not full_text_records
+            and any(rejected.get(reason, 0) for reason in (
+                "PUBLISHER_URL_UNRESOLVED", "FULL_TEXT_UNAVAILABLE",
+            ))
+        )
+        poll_status = "PARTIAL" if content_blocked else "OK"
+        ledger.append_source_poll({
+            "poll_id": poll_id, "source": lane.name, "fetched_time": fetched_at,
+            "status": poll_status,
+            "payload_hash": hashlib.sha256(raw).hexdigest(),
+            "error_type": "PublisherContentUnavailable" if content_blocked else None,
+            "error": (
+                "Relevant search result found, but publisher full text was unavailable"
+                if content_blocked else None
+            ),
+        })
         return {
             "source": lane.name,
-            "status": "OK",
+            "status": poll_status,
             "feed_items": len(records),
             "deduped_items": len(deduped),
             "attempted_items": len(selected),

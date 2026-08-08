@@ -47,7 +47,8 @@ NEWS_INDEX_FIELDS = (
     "category", "source", "source_item_id", "revision_number",
     "source_published_time", "collector_first_seen_time", "headline",
     "content_characters", "content_status", "content_fetch_status",
-    "content_error_type", "annotation_status",
+    "content_error_type", "annotation_status", "annotation_reason_code",
+    "annotation_reason",
     "model_visibility", "parsed_at", "emerging_topic_zh",
 )
 MARKET_DECISION_FIELDS = (
