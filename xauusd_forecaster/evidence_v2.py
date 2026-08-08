@@ -9,9 +9,9 @@ from datetime import datetime, timezone
 UTC = timezone.utc
 EVIDENCE_CONTRACT_VERSION = "phase2f-evidence-integrity-v2"
 FEATURE_VERSION = "repaired-market-v2"
-NEWS_FEATURE_VERSION = "eligible-news-event-evidence-v5-live-delay-materiality"
+NEWS_FEATURE_VERSION = "eligible-news-event-evidence-v6-event-budget"
 LABEL_VERSION = "received-time-executable-30m-v2"
-ELIGIBILITY_VERSION = "news-source-eligibility-v4-live-delay-materiality"
+ELIGIBILITY_VERSION = "news-source-eligibility-v5-unified-event-clock"
 
 V2_IMMUTABLE_TABLES = (
     "repair_batches",
@@ -28,6 +28,13 @@ V2_IMMUTABLE_TABLES = (
     "predictions_v2",
     "news_model_visibility_events_v1",
     "news_model_visibility_receipts_v1",
+    "news_event_catalog_v1",
+    "news_decision_event_snapshots_v1",
+    "news_model_generations_v1",
+    "news_model_generation_members_v1",
+    "news_model_generation_activations_v1",
+    "news_training_weight_receipts_v1",
+    "news_item_classifications_v1",
     "prediction_scores_v2",
     "calibration_snapshots_v2",
     "execution_training_examples_v1",
@@ -278,6 +285,99 @@ CREATE TABLE IF NOT EXISTS news_model_visibility_events_v1 (
     first_recorded_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS news_event_catalog_v1 (
+    event_version_id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    event_occurred_at TEXT NOT NULL,
+    event_clock_source TEXT NOT NULL CHECK(event_clock_source IN (
+        'EXPLICIT_BODY_TIME','OFFICIAL_RELEASE_TIME','SOURCE_STRUCTURED_TIME')),
+    event_time_precision TEXT NOT NULL CHECK(event_time_precision='TIMESTAMP'),
+    canonical_source TEXT NOT NULL,
+    canonical_source_item_id TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    evidence_grade TEXT NOT NULL,
+    model_permissions_json TEXT NOT NULL,
+    reason_codes_json TEXT NOT NULL,
+    first_recorded_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS news_decision_event_snapshots_v1 (
+    source_decision_id TEXT NOT NULL,
+    decision_time TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    event_version_id TEXT NOT NULL REFERENCES news_event_catalog_v1(event_version_id),
+    policy_version TEXT NOT NULL,
+    model_permission TEXT NOT NULL CHECK(model_permission IN (
+        'OFFICIAL_MODEL','BROAD_MODEL','DISPLAY_ONLY')),
+    raw_weight REAL NOT NULL CHECK(raw_weight >= 0),
+    age_minutes REAL NOT NULL CHECK(age_minutes >= 0),
+    snapshot_hash TEXT NOT NULL,
+    PRIMARY KEY(source_decision_id,event_version_id,model_permission)
+);
+
+CREATE TABLE IF NOT EXISTS news_model_generations_v1 (
+    generation_id TEXT PRIMARY KEY,
+    model_stage TEXT NOT NULL CHECK(model_stage IN ('PREVIEW_ONLY','SHADOW')),
+    created_at TEXT NOT NULL,
+    training_cutoff TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    feature_version TEXT NOT NULL,
+    eligibility_version TEXT NOT NULL,
+    event_snapshot_hash TEXT NOT NULL,
+    market_dataset_hash TEXT NOT NULL,
+    official_news_dataset_hash TEXT NOT NULL,
+    broad_news_dataset_hash TEXT NOT NULL,
+    weighting_version TEXT NOT NULL,
+    member_count INTEGER NOT NULL CHECK(member_count=5),
+    status TEXT NOT NULL CHECK(status='READY')
+);
+
+CREATE TABLE IF NOT EXISTS news_model_generation_members_v1 (
+    generation_id TEXT NOT NULL REFERENCES news_model_generations_v1(generation_id),
+    model_identity TEXT NOT NULL CHECK(model_identity IN (
+        'MARKET_ONLY','NEWS_RESIDUAL','FULL','BROAD_NEWS_RESIDUAL','BROAD_FULL')),
+    model_version TEXT NOT NULL REFERENCES model_updates_v2(model_version),
+    PRIMARY KEY(generation_id,model_identity),
+    UNIQUE(model_version)
+);
+
+CREATE TABLE IF NOT EXISTS news_model_generation_activations_v1 (
+    activation_id TEXT PRIMARY KEY,
+    generation_id TEXT NOT NULL REFERENCES news_model_generations_v1(generation_id),
+    previous_generation_id TEXT,
+    activated_at TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    UNIQUE(generation_id)
+);
+
+CREATE TABLE IF NOT EXISTS news_training_weight_receipts_v1 (
+    generation_id TEXT NOT NULL REFERENCES news_model_generations_v1(generation_id),
+    evidence_lane TEXT NOT NULL CHECK(evidence_lane IN ('OFFICIAL','BROAD')),
+    source_decision_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    event_version_id TEXT NOT NULL,
+    raw_weight REAL NOT NULL CHECK(raw_weight >= 0),
+    normalized_event_weight REAL NOT NULL CHECK(normalized_event_weight >= 0),
+    receipt_hash TEXT NOT NULL,
+    PRIMARY KEY(generation_id,evidence_lane,source_decision_id,event_version_id)
+);
+
+CREATE TABLE IF NOT EXISTS news_item_classifications_v1 (
+    classification_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    source_item_id TEXT NOT NULL,
+    revision_number INTEGER,
+    classified_at TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    visibility_status TEXT NOT NULL CHECK(visibility_status IN (
+        'DISPLAY_VISIBLE','MODEL_CANDIDATE','MODEL_ELIGIBLE','ARCHIVAL_ONLY',
+        'CONTENT_UNAVAILABLE','DUPLICATE_DOCUMENT')),
+    reason_code TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    UNIQUE(source,source_item_id,revision_number,policy_version)
+);
+
 CREATE TABLE IF NOT EXISTS prediction_scores_v2 (
     source_decision_id TEXT NOT NULL,
     model_version TEXT NOT NULL,
@@ -446,6 +546,12 @@ CREATE INDEX IF NOT EXISTS news_visibility_decision_v1
 ON news_model_visibility_receipts_v1(source_decision_id, model_identity);
 CREATE INDEX IF NOT EXISTS news_visibility_catalog_event_v1
 ON news_model_visibility_events_v1(event_key, collector_first_seen_time);
+CREATE INDEX IF NOT EXISTS news_event_catalog_identity_v1
+ON news_event_catalog_v1(event_id,event_occurred_at);
+CREATE INDEX IF NOT EXISTS news_decision_event_time_v1
+ON news_decision_event_snapshots_v1(decision_time,event_id);
+CREATE INDEX IF NOT EXISTS news_generation_activation_time_v1
+ON news_model_generation_activations_v1(activated_at,generation_id);
 CREATE INDEX IF NOT EXISTS execution_examples_time_v1
 ON execution_training_examples_v1(checkpoint_minutes, observed_at);
 CREATE INDEX IF NOT EXISTS execution_predictions_time_v1

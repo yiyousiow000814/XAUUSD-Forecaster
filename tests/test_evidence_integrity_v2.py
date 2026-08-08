@@ -334,7 +334,8 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
                  record_kind: str = "FACT_EVENT",
                  evidence_role: str = "CORE_CLAIM",
                  materiality: float = 0.8,
-                 material_event_key: str = "") -> None:
+                 material_event_key: str = "",
+                 event_time: str | None = "__DEFAULT__") -> None:
     entities = entities or []
     body = ("publisher full body " * 30) + item
     digest = hashlib.sha256(body.encode()).hexdigest()
@@ -368,7 +369,10 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
             "action": "reported",
             "object": entities[1] if len(entities) > 1 else item,
             "location": "",
-            "event_time": (published_at or first_seen).isoformat(),
+            "event_time": (
+                (published_at or first_seen).isoformat()
+                if event_time == "__DEFAULT__" else event_time
+            ),
             "claim_status": "CONFIRMED",
             "materiality": materiality,
             "canonical_actor_id": "official_source",
@@ -862,7 +866,7 @@ def test_identity_curve_uses_only_latest_parallel_version_per_decision(tmp_path)
     assert curve["points"][1]["model_version"] == "market-new"
     models = {row["model_version"]: row for row in payload["models"]}
     assert models["market-new"]["lifecycle_status"] == "LATEST"
-    assert models["market-old"]["lifecycle_status"] == "PREVIOUS"
+    assert models["market-old"]["lifecycle_status"] == "ARCHIVED"
     assert models["market-archived"]["lifecycle_status"] == "ARCHIVED"
     rolling = next(
         row for row in payload["rolling_processes"] if row["model_identity"] == "MARKET_ONLY"
@@ -948,38 +952,50 @@ def _training_rows(count: int) -> list[dict]:
         "broad_news": [0.0] * len(training_v2.BROAD_MODEL_FEATURES),
         "news_exposed": False, "broad_news_exposed": False,
         "distinct_news_clusters": 0,
+        "official_events": [], "broad_events": [],
         "receipt": (f"d-{index}", f"m-{index}", f"n-{index}", f"o-{index}"),
     } for index in range(count)]
 
 
-@pytest.mark.parametrize("count,expected_stage", [(96, "PREVIEW_ONLY"), (200, "SHADOW")])
-def test_preview_and_shadow_thresholds_create_challengers_only(
-    tmp_path, monkeypatch, count: int, expected_stage: str
+def _attach_event_exposure(rows: list[dict], *, event_days: int = 1,
+                           event_count: int = 3) -> None:
+    start = datetime(2026, 8, 1, tzinfo=UTC)
+    for index, row in enumerate(rows):
+        event_index = index % event_count
+        event = {
+            "event_id": f"event-{event_index}",
+            "event_version_id": f"event-version-{event_index}",
+            "event_occurred_at": (
+                start + timedelta(days=event_index % event_days)
+            ).isoformat(),
+            "raw_weight": 1.0,
+        }
+        row["news_exposed"] = True
+        row["broad_news_exposed"] = True
+        row["news"] = [0.1] * len(training_v2.NEWS_FEATURES)
+        row["broad_news"] = [0.1] * len(training_v2.BROAD_MODEL_FEATURES)
+        row["official_events"] = [{**event, "model_permission": "OFFICIAL_MODEL"}]
+        row["broad_events"] = [{**event, "model_permission": "BROAD_MODEL"}]
+
+
+@pytest.mark.parametrize("count", [96, 200])
+def test_generation_waits_for_news_evidence_without_partial_market_update(
+    tmp_path, monkeypatch, count: int
 ) -> None:
     ledger = ForwardLedger(tmp_path / f"forward-{count}.sqlite3")
     rows = _training_rows(count)
     monkeypatch.setattr(training_v2, "complete_training_rows", lambda *_: rows)
-    monkeypatch.setattr(
-        training_v2, "_write_market_artifact",
-        lambda _rows, root, cutoff, stage: (
-            f"market-{stage.lower()}-test", SimpleNamespace(artifact_hash="artifact-hash"),
-            tmp_path / "model.json", "dataset-hash"),
-    )
-    monkeypatch.setattr(training_v2, "chronological_crossfit_market", lambda *_: [])
     result = training_v2.train_due_v2(
         ledger, datetime(2026, 8, 5, 12, tzinfo=UTC), tmp_path / "models"
     )
     update = ledger.connection.execute("SELECT * FROM model_updates_v2").fetchone()
-    assert result[0]["status"] == "TRAINED"
-    assert update["model_stage"] == expected_stage
-    assert update["status"] == "CHALLENGER"
-    assert update["repaired_seed_rows"] == count
+    assert result[0]["status"] == "NEWS_GENERATION_EVIDENCE_INSUFFICIENT"
+    assert update is None
     assert ledger.connection.execute("SELECT count(*) FROM predictions_v2").fetchone()[0] == 0
-    assert learning_curve_payload(ledger.connection)["models"][0]["subsequent_oos_rows"] == 0
     ledger.close()
 
 
-def test_retraining_occurs_after_fifty_additional_rows(tmp_path, monkeypatch) -> None:
+def test_policy_generation_does_not_reuse_legacy_retrain_clock(tmp_path, monkeypatch) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     initial_cutoff = datetime(2026, 8, 1, 12, tzinfo=UTC)
     _insert_model_update(ledger.connection, "market-existing", "MARKET_ONLY", initial_cutoff)
@@ -991,8 +1007,7 @@ def test_retraining_occurs_after_fifty_additional_rows(tmp_path, monkeypatch) ->
     result = training_v2.train_due_v2(
         ledger, datetime(2026, 8, 6, 20, tzinfo=UTC), tmp_path / "models"
     )
-    assert result[0]["status"] == "NOT_DUE"
-    assert result[0]["next_threshold"] == 146
+    assert result[0]["status"] == "NEWS_GENERATION_EVIDENCE_INSUFFICIENT"
 
     monkeypatch.setattr(training_v2, "complete_training_rows", lambda *_: _training_rows(146))
     monkeypatch.setattr(
@@ -1006,7 +1021,7 @@ def test_retraining_occurs_after_fifty_additional_rows(tmp_path, monkeypatch) ->
     result = training_v2.train_due_v2(
         ledger, datetime(2026, 8, 7, 20, tzinfo=UTC), tmp_path / "models"
     )
-    assert result[0]["status"] == "TRAINED"
+    assert result[0]["status"] == "NEWS_GENERATION_EVIDENCE_INSUFFICIENT"
     ledger.close()
 
 
@@ -1022,11 +1037,7 @@ def test_news_models_train_early_with_explicit_experimental_status(
         tmp_path / f"forward-news-{event_days}.sqlite3", now=first_seen
     )
     rows = _training_rows(120)
-    for row in rows:
-        row["news_exposed"] = True
-        row["news"] = [0.1] * len(training_v2.NEWS_FEATURES)
-        row["broad_news_exposed"] = True
-        row["broad_news"] = [0.1] * len(training_v2.BROAD_MODEL_FEATURES)
+    _attach_event_exposure(rows, event_days=event_days)
     for index in range(3):
         seen = first_seen + timedelta(days=index % event_days)
         _append_news(
@@ -1042,6 +1053,7 @@ def test_news_models_train_early_with_explicit_experimental_status(
             path.write_text("{}", encoding="utf-8")
 
     monkeypatch.setattr(training_v2, "complete_training_rows", lambda *_: rows)
+    (tmp_path / "market.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(
         training_v2, "_write_market_artifact",
         lambda _rows, root, cutoff, stage: (
@@ -1077,7 +1089,7 @@ def test_news_models_train_early_with_explicit_experimental_status(
     ledger.close()
 
 
-def test_newly_eligible_news_reuses_latest_frozen_market_generation(
+def test_generation_activates_all_five_models_only_after_news_is_eligible(
     tmp_path, monkeypatch
 ) -> None:
     first_seen = datetime(2026, 8, 1, 10, tzinfo=UTC)
@@ -1115,13 +1127,12 @@ def test_newly_eligible_news_reuses_latest_frozen_market_generation(
     first_result = training_v2.train_due_v2(
         ledger, datetime(2026, 8, 2, 12, tzinfo=UTC), tmp_path / "models"
     )
-    assert first_result[0]["status"] == "TRAINED"
+    assert first_result[0]["status"] == "NEWS_GENERATION_EVIDENCE_INSUFFICIENT"
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM model_updates_v2"
+    ).fetchone()[0] == 0
 
-    for row in rows:
-        row["news_exposed"] = True
-        row["news"] = [0.1] * len(training_v2.NEWS_FEATURES)
-        row["broad_news_exposed"] = True
-        row["broad_news"] = [0.1] * len(training_v2.BROAD_MODEL_FEATURES)
+    _attach_event_exposure(rows)
     for index in range(3):
         _append_news(
             ledger, source="federal_reserve_monetary", item=f"bootstrap-{index}",
@@ -1131,10 +1142,10 @@ def test_newly_eligible_news_reuses_latest_frozen_market_generation(
     second_result = training_v2.train_due_v2(
         ledger, datetime(2026, 8, 2, 13, tzinfo=UTC), tmp_path / "models"
     )
-    assert second_result[0]["status"] == "REUSED"
+    assert second_result[0]["status"] == "TRAINED"
     assert {
         row.get("model_identity") for row in second_result if row["status"] == "TRAINED"
-    } == {"NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL"}
+    } == {"MARKET_ONLY", "NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL"}
     market_generations = ledger.connection.execute(
         "SELECT count(*) FROM model_updates_v2 WHERE model_identity='MARKET_ONLY'"
     ).fetchone()[0]
@@ -1205,25 +1216,59 @@ def test_only_latest_and_previous_versions_are_active() -> None:
              "eligibility_version": inference_v2.ELIGIBILITY_VERSION},
             {"model_identity": "BROAD_NEWS_RESIDUAL", "model_version": f"broad-news-{version}",
              "feature_version": inference_v2.NEWS_FEATURE_VERSION,
-             "eligibility_version": (
-                 f"{inference_v2.ELIGIBILITY_VERSION}+{inference_v2.EVIDENCE_POLICY_VERSION}"
-             )},
+             "eligibility_version": inference_v2.ELIGIBILITY_VERSION},
             {"model_identity": "BROAD_FULL", "model_version": f"broad-full-{version}",
              "feature_version": (
                  f"{inference_v2.FEATURE_VERSION}+{inference_v2.NEWS_FEATURE_VERSION}"
                  f"+{inference_v2.EVIDENCE_POLICY_VERSION}"
              ),
-             "eligibility_version": (
-                 f"{inference_v2.ELIGIBILITY_VERSION}+{inference_v2.EVIDENCE_POLICY_VERSION}"
-             )},
+             "eligibility_version": inference_v2.ELIGIBILITY_VERSION},
         ]
 
     updates = generation(3) + generation(2) + generation(1)
     active = inference_v2._active_updates(updates)
     assert [row["model_version"] for row in active] == [
         "market-3", "news-3", "full-3", "broad-news-3", "broad-full-3",
-        "market-2", "news-2", "full-2", "broad-news-2", "broad-full-2",
     ]
+
+
+def test_activated_generation_directly_replaces_previous_generation(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    base = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    identities = (
+        "MARKET_ONLY", "NEWS_RESIDUAL", "FULL",
+        "BROAD_NEWS_RESIDUAL", "BROAD_FULL",
+    )
+    for generation_index in (1, 2):
+        generation_id = f"generation-{generation_index}"
+        for identity in identities:
+            version = f"{identity.lower()}-{generation_index}"
+            _insert_model_update(ledger.connection, version, identity, base)
+        ledger.connection.execute(
+            "INSERT INTO news_model_generations_v1 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (generation_id, "PREVIEW_ONLY", base.isoformat(), base.isoformat(),
+             EVIDENCE_POLICY_VERSION, training_v2.NEWS_FEATURE_VERSION,
+             training_v2.ELIGIBILITY_VERSION, f"events-{generation_index}",
+             f"market-{generation_index}", f"official-{generation_index}",
+             f"broad-{generation_index}", training_v2.EVENT_WEIGHTING_VERSION, 5, "READY"),
+        )
+        for identity in identities:
+            ledger.connection.execute(
+                "INSERT INTO news_model_generation_members_v1 VALUES (?,?,?)",
+                (generation_id, identity, f"{identity.lower()}-{generation_index}"),
+            )
+        ledger.connection.execute(
+            "INSERT INTO news_model_generation_activations_v1 VALUES (?,?,?,?,?)",
+            (f"activation-{generation_index}", generation_id,
+             f"generation-{generation_index - 1}" if generation_index > 1 else None,
+             (base + timedelta(minutes=generation_index)).isoformat(), "TEST"),
+        )
+    updates = inference_v2._activated_generation_updates(
+        ledger, base + timedelta(minutes=3)
+    )
+    assert {row["model_version"] for row in updates} == {
+        f"{identity.lower()}-2" for identity in identities
+    }
 
 
 def test_news_generation_stays_inactive_until_all_four_models_exist() -> None:
@@ -1235,11 +1280,9 @@ def test_news_generation_stays_inactive_until_all_four_models_exist() -> None:
         {"model_identity": "FULL", "model_version": "full-current",
          "feature_version": f"{inference_v2.FEATURE_VERSION}+{inference_v2.NEWS_FEATURE_VERSION}",
          "eligibility_version": inference_v2.ELIGIBILITY_VERSION},
-        {"model_identity": "BROAD_NEWS_RESIDUAL", "model_version": "broad-news-current",
+    {"model_identity": "BROAD_NEWS_RESIDUAL", "model_version": "broad-news-current",
          "feature_version": inference_v2.NEWS_FEATURE_VERSION,
-         "eligibility_version": (
-             f"{inference_v2.ELIGIBILITY_VERSION}+{inference_v2.EVIDENCE_POLICY_VERSION}"
-         )},
+         "eligibility_version": inference_v2.ELIGIBILITY_VERSION},
     ]
 
     active = inference_v2._active_updates(updates)
@@ -1280,6 +1323,28 @@ def test_active_updates_do_not_revive_frozen_legacy_news() -> None:
     ]
     active = inference_v2._active_updates(updates, {legacy, legacy_broad})
     assert [row["model_version"] for row in active] == ["market-current"]
+
+
+def test_complete_legacy_set_keeps_predicting_until_first_atomic_generation() -> None:
+    legacy = "news-source-eligibility-v3-broad-event-evidence"
+    legacy_broad = f"{legacy}+news-event-evidence-v3-material-claims"
+    updates = [
+        {"model_identity": "MARKET_ONLY", "model_version": "market-live"},
+        {"model_identity": "NEWS_RESIDUAL", "model_version": "news-live",
+         "eligibility_version": legacy},
+        {"model_identity": "FULL", "model_version": "full-live",
+         "eligibility_version": legacy},
+        {"model_identity": "BROAD_NEWS_RESIDUAL", "model_version": "broad-news-live",
+         "eligibility_version": legacy_broad},
+        {"model_identity": "BROAD_FULL", "model_version": "broad-full-live",
+         "eligibility_version": legacy_broad},
+    ]
+    active = inference_v2._active_updates(
+        updates, {legacy, legacy_broad}, enforce_current_contract=False,
+    )
+    assert {row["model_version"] for row in active} == {
+        "market-live", "news-live", "full-live", "broad-news-live", "broad-full-live",
+    }
 
 
 def test_newest_news_policy_mismatch_blocks_older_current_model() -> None:
@@ -1411,17 +1476,17 @@ def test_commentary_and_low_materiality_are_not_training_evidence(tmp_path) -> N
 
 
 def test_material_event_key_deduplicates_different_headlines(tmp_path) -> None:
-    epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
-    decision = epoch + timedelta(minutes=10)
+    epoch = datetime(2026, 8, 5, 23, 55, tzinfo=UTC)
+    decision = epoch + timedelta(minutes=20)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
-    for source, item in (
-        ("gdelt_gold_geopolitics", "Oil jumps after shipping disruption"),
-        ("google_news_gold_context", "Vessel incident lifts crude and gold"),
+    for offset, source, item in (
+        (1, "gdelt_gold_geopolitics", "Oil jumps after shipping disruption"),
+        (10, "google_news_gold_context", "Vessel incident lifts crude and gold"),
     ):
         _append_news(
             ledger, source=source, item=item,
-            first_seen=epoch + timedelta(minutes=1),
-            parsed_at=epoch + timedelta(minutes=2), impulse=0.0,
+            first_seen=epoch + timedelta(minutes=offset),
+            parsed_at=epoch + timedelta(minutes=offset + 1), impulse=0.0,
             primary_category="oil_energy",
             material_event_key="hormuz_shipping_incident_20260805",
         )
@@ -1429,3 +1494,35 @@ def test_material_event_key_deduplicates_different_headlines(tmp_path) -> None:
     assert len(events) == 1
     assert events[0]["member_count"] == 2
     ledger.close()
+
+
+def test_nonofficial_event_without_precise_event_clock_fails_closed(tmp_path) -> None:
+    epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
+    for source, item, link in (
+        ("gdelt_gold_geopolitics", "event-a", "https://apnews.com/a"),
+        ("google_news_gold_context", "event-b", "https://reuters.com/b"),
+    ):
+        _append_news(
+            ledger, source=source, item=item, link=link,
+            first_seen=epoch + timedelta(minutes=1),
+            parsed_at=epoch + timedelta(minutes=2), impulse=0.0,
+            primary_category="war_geopolitics", material_event_key="same-event",
+            event_time=None,
+        )
+    event = event_evidence_rows(ledger, epoch + timedelta(minutes=10))[0]
+    assert event["evidence_grade"] == "CORROBORATED"
+    assert event["broad_model_eligible"] is False
+    assert "EVENT_TIME_INVALID" in event["reason_codes"]
+
+
+def test_official_release_timestamp_is_valid_event_clock(tmp_path) -> None:
+    epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
+    _append_news(
+        ledger, source="federal_reserve_monetary", item="official-release",
+        first_seen=epoch, parsed_at=epoch, impulse=0.3, event_time=None,
+    )
+    event = event_evidence_rows(ledger, epoch + timedelta(minutes=1))[0]
+    assert event["official_model_eligible"] is True
+    assert event["event_clock_source"] == "OFFICIAL_RELEASE_TIME"

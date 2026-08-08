@@ -6,8 +6,8 @@
 |---:|---|---|
 | 0–29 | `ENGINEERING` | integrity, labels, receipt times, raw distributions |
 | 30–95 | `EARLY_LEARNING` | simple distributions and feature stability |
-| 96–199 | `PREVIEW` | regularized Market Preview; no effective action |
-| 200+ | `INITIAL_SHADOW` | frozen Shadow Challengers; no promotion |
+| 96–199 | `PREVIEW` | complete five-model Preview when event evidence is sufficient; no effective action |
+| 200+ | `INITIAL_SHADOW` | complete frozen five-model Shadow generation; no promotion |
 
 Each additional 50 complete rows creates a new frozen model version. The row
 clock is independent of the rolling process's longer OOS evaluation lifetime.
@@ -19,9 +19,10 @@ early display or model fitting.
 
 A model version is scored only on Decisions after its `created_at` and
 `training_cutoff`. Seed rows train the model but never appear on its Live OOS
-curve. Only the newest and immediately preceding version of each Ridge identity
-continue producing Shadow predictions. Older artifacts, predictions, and scores
-remain immutable but become `ARCHIVED`.
+curve. One activated generation supplies exactly one version of each Ridge
+identity for future Shadow predictions. A complete new generation atomically
+replaces it. Older artifacts, predictions, and scores remain immutable and
+become `ARCHIVED`.
 
 Long-horizon calibration belongs to the rolling model identity. At each prior
 Decision it uses only the newest version that existed then, grouped into UTC-day
@@ -34,7 +35,7 @@ They never sum parallel versions from the same model identity. Paired
 Full-minus-Market value applies the same latest-version rule to both sides.
 
 `CHAMPION_0` is shown separately as the zero-return safety baseline. It is not a
-trained model and does not occupy either Ridge version slot.
+trained model and does not occupy a generation member slot.
 
 The dashboard includes cumulative identity value, per-version OOS value,
 paired Full-minus-Market value, interval width and calibration growth, error

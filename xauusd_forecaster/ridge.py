@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import Any
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +23,8 @@ class RidgeArtifact:
     training_dataset_hash: str
     residual_std: float
     training_rows: int
+    weighting_version: str | None = None
+    weight_summary: dict[str, Any] | None = None
 
     def predict(self, rows: np.ndarray) -> np.ndarray:
         matrix = np.asarray(rows, dtype=np.float64)
@@ -33,7 +36,7 @@ class RidgeArtifact:
         )
 
     def as_dict(self) -> dict:
-        return {
+        payload = {
             "schema": "xauusd.forward.ridge.v2",
             "feature_names": list(self.feature_names),
             "means": list(self.means),
@@ -45,6 +48,10 @@ class RidgeArtifact:
             "residual_std": self.residual_std,
             "training_rows": self.training_rows,
         }
+        if self.weighting_version is not None:
+            payload["weighting_version"] = self.weighting_version
+            payload["weight_summary"] = dict(self.weight_summary or {})
+        return payload
 
     @property
     def artifact_hash(self) -> str:
@@ -70,6 +77,8 @@ class RidgeArtifact:
             training_dataset_hash=str(payload["training_dataset_hash"]),
             residual_std=float(payload.get("residual_std", 0.0)),
             training_rows=int(payload.get("training_rows", 0)),
+            weighting_version=payload.get("weighting_version"),
+            weight_summary=payload.get("weight_summary"),
         )
 
 
@@ -79,6 +88,9 @@ def train_ridge(
     feature_names: tuple[str, ...],
     alpha: float,
     training_dataset_hash: str,
+    sample_weight: np.ndarray | None = None,
+    weighting_version: str | None = None,
+    weight_summary: dict[str, Any] | None = None,
 ) -> RidgeArtifact:
     matrix = np.asarray(rows, dtype=np.float64)
     values = np.asarray(target, dtype=np.float64)
@@ -90,26 +102,42 @@ def train_ridge(
         raise ValueError("Ridge inputs must be finite")
     if alpha <= 0:
         raise ValueError("Ridge alpha must be positive")
-    means = matrix.mean(axis=0)
-    scales = matrix.std(axis=0)
+    weights = (
+        np.ones(len(values), dtype=np.float64)
+        if sample_weight is None else np.asarray(sample_weight, dtype=np.float64)
+    )
+    if weights.ndim != 1 or len(weights) != len(values):
+        raise ValueError("Ridge sample weights have incompatible shape")
+    if not np.isfinite(weights).all() or np.any(weights < 0) or weights.sum() <= 0:
+        raise ValueError("Ridge sample weights must be finite, non-negative, and non-zero")
+    normalized_weights = weights / weights.sum()
+    means = np.sum(matrix * normalized_weights[:, None], axis=0)
+    scales = np.sqrt(np.sum(
+        np.square(matrix - means) * normalized_weights[:, None], axis=0
+    ))
     scales[scales == 0.0] = 1.0
     standardized = (matrix - means) / scales
-    centered_target = values - values.mean()
-    gram = standardized.T @ standardized
+    target_mean = float(np.sum(values * normalized_weights))
+    centered_target = values - target_mean
+    gram = standardized.T @ (weights[:, None] * standardized)
     coefficients = np.linalg.solve(
         gram + alpha * np.eye(matrix.shape[1]),
-        standardized.T @ centered_target,
+        standardized.T @ (weights * centered_target),
     )
-    fitted = values.mean() + standardized @ coefficients
-    residual_std = float(np.sqrt(np.mean(np.square(values - fitted))))
+    fitted = target_mean + standardized @ coefficients
+    residual_std = float(np.sqrt(np.sum(
+        normalized_weights * np.square(values - fitted)
+    )))
     return RidgeArtifact(
         feature_names=feature_names,
         means=tuple(float(value) for value in means),
         scales=tuple(float(value) for value in scales),
         coefficients=tuple(float(value) for value in coefficients),
-        intercept=float(values.mean()),
+        intercept=target_mean,
         alpha=float(alpha),
         training_dataset_hash=training_dataset_hash,
         residual_std=residual_std,
         training_rows=len(values),
+        weighting_version=weighting_version,
+        weight_summary=weight_summary,
     )

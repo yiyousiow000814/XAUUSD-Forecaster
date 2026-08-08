@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import uuid
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -13,10 +15,8 @@ from .evidence_v2 import (
 )
 from .factors import NEWS_FEATURES
 from .forward_ledger import canonical_hash
-from .news_evidence import (
-    BROAD_NEWS_FEATURES, EVIDENCE_POLICY_VERSION, event_evidence_rows,
-)
-from .news_features_v2 import SOURCE_RULES
+from .news_evidence import BROAD_NEWS_FEATURES, EVIDENCE_POLICY_VERSION
+from .news_features_v2 import aggregate_news_features_v2
 from .ridge import RidgeArtifact, train_ridge
 from .training import MARKET_FEATURES
 
@@ -31,6 +31,7 @@ NEWS_EXPERIMENTAL_MIN_CLUSTERS = 1
 NEWS_EXPERIMENTAL_MIN_EVENT_DAYS = 1
 NEWS_MIN_EVENT_DAYS = 3
 CROSSFIT_VERSION = "expanding-market-purge30m-v1"
+EVENT_WEIGHTING_VERSION = "equal-event-budget-decay-v1"
 BROAD_MODEL_FEATURES = (*NEWS_FEATURES, *BROAD_NEWS_FEATURES)
 
 
@@ -83,8 +84,24 @@ def complete_training_rows(ledger, cutoff: datetime) -> list[dict]:
         values = [float(value) for value in market_values]
         if not np.isfinite(values).all() or not np.isfinite(target):
             continue
+        decision_id = row["source_decision_id"]
+        event_rows = ledger.connection.execute(
+            """SELECT s.event_id,s.event_version_id,s.model_permission,s.raw_weight,
+                      c.event_occurred_at,c.event_clock_source,c.event_time_precision
+            FROM news_decision_event_snapshots_v1 s
+            JOIN news_event_catalog_v1 c USING(event_version_id)
+            WHERE s.source_decision_id=? AND s.policy_version=?
+            ORDER BY s.model_permission,s.event_id,s.event_version_id""",
+            (decision_id, EVIDENCE_POLICY_VERSION),
+        ).fetchall()
+        if event_rows:
+            event_snapshots = [dict(event) for event in event_rows]
+        else:
+            event_snapshots = aggregate_news_features_v2(
+                ledger, datetime.fromisoformat(row["decision_time"])
+            )["event_snapshots"]
         complete.append({
-            "decision_id": row["source_decision_id"], "lane": row["evidence_lane"],
+            "decision_id": decision_id, "lane": row["evidence_lane"],
             "decision_time": row["decision_time"], "market": values,
             "news": [float(json.loads(row["news_json"])[name]) for name in NEWS_FEATURES],
             "broad_news": [
@@ -96,6 +113,14 @@ def complete_training_rows(ledger, cutoff: datetime) -> list[dict]:
                 json.loads(row["news_json"]).get("broad_news_event_count", 0.0)
             ),
             "distinct_news_clusters": int(row["distinct_news_clusters"]),
+            "official_events": [
+                event for event in event_snapshots
+                if event["model_permission"] == "OFFICIAL_MODEL"
+            ],
+            "broad_events": [
+                event for event in event_snapshots
+                if event["model_permission"] == "BROAD_MODEL"
+            ],
             "receipt": (row["source_decision_id"], row["market_hash"], row["news_hash"], row["outcome_hash"]),
         })
     return complete
@@ -156,8 +181,83 @@ def chronological_crossfit_market(ledger, rows: list[dict], artifact_root: Path,
     return predictions
 
 
+def _event_coverage(rows: list[dict], field: str) -> tuple[int, int]:
+    versions: dict[str, dict] = {}
+    for row in rows:
+        for event in row.get(field, []):
+            versions.setdefault(str(event["event_id"]), event)
+    days = {
+        str(event.get("event_occurred_at") or "")[:10]
+        for event in versions.values() if event.get("event_occurred_at")
+    }
+    return len(versions), len(days)
+
+
+def _event_budget_weights(
+    rows: list[dict], field: str,
+) -> tuple[np.ndarray, list[dict], dict]:
+    totals: dict[str, float] = defaultdict(float)
+    for row in rows:
+        for event in row.get(field, []):
+            totals[str(event["event_id"])] += float(event["raw_weight"])
+    if not totals:
+        raise ValueError("news residual rows require at least one eligible event")
+    row_weights = []
+    receipts = []
+    for row in rows:
+        budget = 0.0
+        for event in row.get(field, []):
+            event_id = str(event["event_id"])
+            raw = float(event["raw_weight"])
+            normalized = raw / totals[event_id]
+            budget += normalized
+            receipts.append({
+                "source_decision_id": row["decision_id"],
+                "event_id": event_id,
+                "event_version_id": str(event["event_version_id"]),
+                "raw_weight": raw,
+                "normalized_event_weight": normalized,
+            })
+        row_weights.append(budget)
+    weights = np.asarray(row_weights, dtype=np.float64)
+    weights *= len(weights) / weights.sum()
+    effective_rows = float(weights.sum() ** 2 / np.square(weights).sum())
+    shares = sorted((1.0 / len(totals) for _ in totals), reverse=True)
+    summary = {
+        "raw_training_rows": len(rows),
+        "distinct_event_count": len(totals),
+        "effective_event_count": float(len(totals)),
+        "effective_weighted_rows": effective_rows,
+        "maximum_event_weight_share": shares[0],
+        "top_three_event_weight_share": sum(shares[:3]),
+        "total_sample_weight": float(weights.sum()),
+    }
+    return weights, receipts, summary
+
+
+def _latest_generation(connection, stage: str):
+    return connection.execute(
+        """SELECT g.*,u.training_rows
+        FROM news_model_generation_activations_v1 a
+        JOIN news_model_generations_v1 g USING(generation_id)
+        JOIN news_model_generation_members_v1 m USING(generation_id)
+        JOIN model_updates_v2 u USING(model_version)
+        WHERE g.model_stage=? AND m.model_identity='MARKET_ONLY'
+        ORDER BY a.activated_at DESC LIMIT 1""",
+        (stage,),
+    ).fetchone()
+
+
+def _write_manifest(path: Path, payload: dict) -> str:
+    digest = canonical_hash(payload)
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=False)
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return digest
+
+
 def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[dict]:
-    """Append due V2 models; never changes Champion or effective action."""
+    """Build and atomically activate one complete five-model generation."""
     rows = complete_training_rows(ledger, cutoff)
     count = len(rows)
     if count < PREVIEW_ROWS:
@@ -165,333 +265,207 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
                  "complete_rows": count, "next_threshold": PREVIEW_ROWS}]
     stage = "SHADOW" if count >= SHADOW_ROWS else "PREVIEW_ONLY"
     training_rows = rows if stage == "PREVIEW_ONLY" else rows[: count - (count % RETRAIN_INTERVAL)]
-    news_exposed = [row for row in training_rows if row["news_exposed"]]
-    eligible_sources = [source for source, rule in SOURCE_RULES.items() if rule[0] == "MODEL_ELIGIBLE"]
-    placeholders = ",".join("?" for _ in eligible_sources)
-    coverage = ledger.connection.execute(
-        f"""SELECT count(DISTINCT n.cluster_id) AS clusters,
-                   count(DISTINCT substr(n.source_published_time,1,10)) AS event_days
-        FROM news_revisions n
-        JOIN news_annotations a USING(source,source_item_id,revision_number)
-        WHERE n.source IN ({placeholders}) AND length(coalesce(n.body,''))>=200
-          AND n.collector_first_seen_time<=? AND a.parsed_at<=?
-          AND n.source_published_time IS NOT NULL
-          AND n.source_published_time>=?
-          AND n.source_published_time<=?
-          AND julianday(n.collector_first_seen_time)-julianday(n.source_published_time)<=3.0
-          AND julianday(?)-julianday(n.source_published_time)<=3.0
-          AND coalesce(json_extract(a.annotation_json,'$.primary_category'),'') IN
-              ('rates_fed','inflation_employment','growth_economy','usd_liquidity',
-               'oil_energy','war_geopolitics','central_bank_gold','risk_sentiment')""",
-        (*eligible_sources, cutoff.isoformat(), cutoff.isoformat(),
-         ledger.forward_epoch.isoformat(), cutoff.isoformat(), cutoff.isoformat()),
-    ).fetchone()
-    clusters = int(coverage["clusters"] or 0)
-    event_days = int(coverage["event_days"] or 0)
-    official_ready = (
-        len(news_exposed) >= NEWS_MIN_EXPOSED_ROWS
-        and clusters >= NEWS_EXPERIMENTAL_MIN_CLUSTERS
-        and event_days >= NEWS_EXPERIMENTAL_MIN_EVENT_DAYS
-    )
-    broad_exposed = [
-        row for row in training_rows if row.get("broad_news_exposed", False)
-    ]
-    broad_events = [
-        row for row in event_evidence_rows(ledger, cutoff)
-        if row["broad_model_eligible"]
-    ]
-    broad_clusters = len(broad_events)
-    broad_event_days = len({
-        row["source_published_time"][:10] for row in broad_events
-    })
-    broad_ready = (
-        len(broad_exposed) >= NEWS_MIN_EXPOSED_ROWS
-        and broad_clusters >= NEWS_EXPERIMENTAL_MIN_CLUSTERS
-        and broad_event_days >= NEWS_EXPERIMENTAL_MIN_EVENT_DAYS
-    )
-    latest = ledger.connection.execute(
-        """SELECT * FROM model_updates_v2 WHERE model_identity='MARKET_ONLY'
-        AND model_stage=? ORDER BY training_rows DESC LIMIT 1""", (stage,)
-    ).fetchone()
-    generation_models = ledger.connection.execute(
-        """SELECT DISTINCT model_identity FROM model_updates_v2
-        WHERE model_stage=? AND created_at>=?
-          AND (
-            (model_identity='NEWS_RESIDUAL' AND feature_version=? AND eligibility_version=?)
-            OR
-            (model_identity='FULL' AND feature_version=? AND eligibility_version=?)
-            OR
-            (model_identity='BROAD_NEWS_RESIDUAL' AND feature_version=? AND eligibility_version=?)
-            OR
-            (model_identity='BROAD_FULL' AND feature_version=? AND eligibility_version=?)
-          )""",
-        (
-            stage, latest["created_at"],
-            NEWS_FEATURE_VERSION, ELIGIBILITY_VERSION,
-            f"{FEATURE_VERSION}+{NEWS_FEATURE_VERSION}", ELIGIBILITY_VERSION,
-            NEWS_FEATURE_VERSION,
-            f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}",
-            f"{FEATURE_VERSION}+{NEWS_FEATURE_VERSION}+{EVIDENCE_POLICY_VERSION}",
-            f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}",
-        ),
-    ).fetchall() if latest is not None else []
-    generation_identities = {row["model_identity"] for row in generation_models}
-    latest_artifact_path = Path(latest["artifact_path"]) if latest is not None else None
-    latest_artifact_invalid = bool(
-        latest_artifact_path is not None
-        and latest_artifact_path.suffix == ".json"
-        and (
-            not latest_artifact_path.is_absolute()
-            or not latest_artifact_path.exists()
-        )
-    )
-    bootstrap_news_generation = latest is not None and (
-        (official_ready and not {"NEWS_RESIDUAL", "FULL"}.issubset(generation_identities))
-        or (broad_ready and not {"BROAD_NEWS_RESIDUAL", "BROAD_FULL"}.issubset(generation_identities))
-        or latest_artifact_invalid
-    )
-    if (latest is not None
-            and count < int(latest["training_rows"]) + RETRAIN_INTERVAL
-            and not bootstrap_news_generation):
+    official_rows = [row for row in training_rows if row.get("official_events")]
+    broad_rows = [row for row in training_rows if row.get("broad_events")]
+    official_events, official_days = _event_coverage(official_rows, "official_events")
+    broad_events, broad_days = _event_coverage(broad_rows, "broad_events")
+    evidence_status = news_evidence_status(official_days, official_events)
+    broad_evidence_status = news_evidence_status(broad_days, broad_events)
+    latest = _latest_generation(ledger.connection, stage)
+    if latest is not None and len(training_rows) < int(latest["training_rows"]) + RETRAIN_INTERVAL:
         return [{"status": "NOT_DUE", "complete_rows": count,
+                 "generation_id": latest["generation_id"],
                  "next_threshold": int(latest["training_rows"]) + RETRAIN_INTERVAL}]
-
+    if len(official_rows) < NEWS_MIN_EXPOSED_ROWS or len(broad_rows) < NEWS_MIN_EXPOSED_ROWS \
+            or not official_events or not broad_events:
+        return [{
+            "status": "NEWS_GENERATION_EVIDENCE_INSUFFICIENT",
+            "official_exposed_rows": len(official_rows),
+            "broad_exposed_rows": len(broad_rows),
+            "official_events": official_events,
+            "broad_events": broad_events,
+            "official_evidence_status": evidence_status,
+            "broad_evidence_status": broad_evidence_status,
+        }]
     now = datetime.now(UTC)
     root = Path(artifact_root).resolve()
+    root.mkdir(parents=True, exist_ok=True)
     seed_rows = sum(row["lane"] == "REPAIRED_SEED" for row in training_rows)
     live_rows = sum(row["lane"] == "LIVE_OOS" for row in training_rows)
-    market_due = (
-        latest is None
-        or count >= int(latest["training_rows"]) + RETRAIN_INTERVAL
-        or latest_artifact_invalid
+    market_version, market_artifact, market_path, market_hash = _write_market_artifact(
+        training_rows, root, cutoff, stage
     )
-    if market_due:
-        version, artifact, path, dataset_hash = _write_market_artifact(
-            training_rows, root, cutoff, stage
-        )
-        artifact_hash = artifact.artifact_hash
-        with ledger.connection:
-            ledger.connection.execute(
-                """INSERT INTO model_updates_v2 VALUES
-                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (version, "MARKET_ONLY", stage, now.isoformat(), cutoff.isoformat(),
-                 len(training_rows), seed_rows, live_rows, len(news_exposed), clusters, event_days,
-                 dataset_hash, FEATURE_VERSION, None, str(path), artifact_hash, "CHALLENGER"),
-            )
-            crossfit = chronological_crossfit_market(ledger, training_rows, root, now)
-        statuses = [{"status": "TRAINED", "model_identity": "MARKET_ONLY",
-                     "model_stage": stage, "model_version": version,
-                     "training_rows": len(training_rows), "crossfit_rows": len(crossfit)}]
-    else:
-        # Evidence can become eligible between the 50-row market retraining
-        # boundaries. Pair the news models with the already-frozen market
-        # artifact instead of inventing an extra off-grid market generation.
-        version = latest["model_version"]
-        path = Path(latest["artifact_path"])
-        dataset_hash = latest["training_dataset_hash"]
-        artifact_hash = latest["artifact_hash"]
+    with ledger.connection:
         crossfit = chronological_crossfit_market(ledger, training_rows, root, now)
-        statuses = [{"status": "REUSED", "model_identity": "MARKET_ONLY",
-                     "model_stage": stage, "model_version": version,
-                     "training_rows": len(training_rows), "crossfit_rows": len(crossfit)}]
+    crossfit_by_id = {row["decision_id"]: row for row in crossfit}
+    official_residual = [row for row in official_rows if row["decision_id"] in crossfit_by_id]
+    broad_residual = [row for row in broad_rows if row["decision_id"] in crossfit_by_id]
+    if len(official_residual) < NEWS_MIN_EXPOSED_ROWS or len(broad_residual) < NEWS_MIN_EXPOSED_ROWS:
+        return [{"status": "NEWS_GENERATION_CROSSFIT_INSUFFICIENT",
+                 "official_rows": len(official_residual), "broad_rows": len(broad_residual)}]
 
-    evidence_status = news_evidence_status(event_days, clusters)
-    if (len(news_exposed) < NEWS_MIN_EXPOSED_ROWS
-            or clusters < NEWS_EXPERIMENTAL_MIN_CLUSTERS
-            or event_days < NEWS_EXPERIMENTAL_MIN_EVENT_DAYS):
-        statuses.append({"status": "NEWS_EVIDENCE_INSUFFICIENT",
-                         "news_exposed_rows": len(news_exposed),
-                         "distinct_news_clusters": clusters, "distinct_event_days": event_days,
-                         "news_evidence_status": evidence_status})
-    else:
-        crossfit_by_id = {row["decision_id"]: row for row in crossfit}
-        residual_rows = [row for row in news_exposed if row["decision_id"] in crossfit_by_id]
-        if len(residual_rows) < NEWS_MIN_EXPOSED_ROWS:
-            statuses.append({"status": "NEWS_CROSSFIT_INSUFFICIENT",
-                             "covered_exposed_rows": len(residual_rows),
-                             "news_exposed_rows": len(news_exposed)})
-        else:
-            residual_receipts = [
-                (row["decision_id"], row["receipt"], crossfit_by_id[row["decision_id"]]["artifact_hash"],
-                 crossfit_by_id[row["decision_id"]]["residual"])
-                for row in residual_rows
-            ]
-            residual_hash = canonical_hash(residual_receipts)
-            news_version = (
-                f"news-residual-{evidence_status.lower().replace('_', '-')}-"
-                f"{stage.lower()}-{cutoff.astimezone(UTC).strftime('%Y%m%dT%H%M%SZ')}-"
-                f"{residual_hash[:12]}"
-            )
-            news_artifact = train_ridge(
-                np.asarray([row["news"] for row in residual_rows]),
-                np.asarray([crossfit_by_id[row["decision_id"]]["residual"] for row in residual_rows]),
-                NEWS_FEATURES, 100.0, residual_hash,
-            )
-            news_path = root / news_version / "model.json"
-            if not news_path.exists():
-                news_artifact.write(news_path)
-            ledger.connection.execute(
-                """INSERT INTO model_updates_v2 VALUES
-                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (news_version, "NEWS_RESIDUAL", stage, now.isoformat(), cutoff.isoformat(),
-                 len(residual_rows), sum(row["lane"] == "REPAIRED_SEED" for row in residual_rows),
-                 sum(row["lane"] == "LIVE_OOS" for row in residual_rows), len(residual_rows),
-                 clusters, event_days, residual_hash, NEWS_FEATURE_VERSION, ELIGIBILITY_VERSION,
-                 str(news_path), news_artifact.artifact_hash, "CHALLENGER"),
-            )
-            manifest = {
-                "schema": "xauusd.phase2f.full-model.v2", "market_model_version": version,
-                "market_artifact_path": str(path), "market_artifact_hash": artifact_hash,
-                "news_model_version": news_version, "news_artifact_path": str(news_path),
-                "news_artifact_hash": news_artifact.artifact_hash,
-                "training_dataset_hash": dataset_hash, "news_training_hash": residual_hash,
-            }
-            full_hash = canonical_hash(manifest)
-            full_version = (
-                f"full-{evidence_status.lower().replace('_', '-')}-"
-                f"{stage.lower()}-{cutoff.astimezone(UTC).strftime('%Y%m%dT%H%M%SZ')}-"
-                f"{full_hash[:12]}"
-            )
-            full_path = root / full_version / "manifest.json"
-            if not full_path.exists():
-                full_path.parent.mkdir(parents=True, exist_ok=False)
-                full_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
-            ledger.connection.execute(
-                """INSERT INTO model_updates_v2 VALUES
-                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (full_version, "FULL", stage, now.isoformat(), cutoff.isoformat(), len(training_rows),
-                 seed_rows, live_rows, len(residual_rows), clusters, event_days, dataset_hash,
-                 f"{FEATURE_VERSION}+{NEWS_FEATURE_VERSION}", ELIGIBILITY_VERSION,
-                 str(full_path), full_hash, "CHALLENGER"),
-            )
-            statuses.extend([
-                {"status": "TRAINED", "model_identity": "NEWS_RESIDUAL",
-                 "model_stage": stage, "model_version": news_version,
-                 "training_rows": len(residual_rows), "crossfit_method": CROSSFIT_VERSION,
-                 "news_evidence_status": evidence_status,
-                 "distinct_event_days": event_days},
-                {"status": "TRAINED", "model_identity": "FULL", "model_stage": stage,
-                 "model_version": full_version, "training_rows": len(training_rows),
-                 "news_evidence_status": evidence_status,
-                 "distinct_event_days": event_days},
-            ])
-            ledger.connection.commit()
+    official_weights, official_weight_receipts, official_summary = _event_budget_weights(
+        official_residual, "official_events"
+    )
+    broad_weights, broad_weight_receipts, broad_summary = _event_budget_weights(
+        broad_residual, "broad_events"
+    )
+    official_hash = canonical_hash([
+        (row["decision_id"], row["receipt"], crossfit_by_id[row["decision_id"]]["artifact_hash"],
+         crossfit_by_id[row["decision_id"]]["residual"], receipt)
+        for row, receipt in zip(official_residual, official_weights.tolist())
+    ])
+    broad_hash = canonical_hash([
+        (row["decision_id"], row["receipt"], crossfit_by_id[row["decision_id"]]["artifact_hash"],
+         crossfit_by_id[row["decision_id"]]["residual"], receipt)
+        for row, receipt in zip(broad_residual, broad_weights.tolist())
+    ])
+    event_snapshot_hash = canonical_hash(sorted({
+        (event["event_id"], event["event_version_id"])
+        for row in training_rows for field in ("official_events", "broad_events")
+        for event in row.get(field, [])
+    }))
+    generation_seed = canonical_hash((
+        stage, cutoff.isoformat(), EVIDENCE_POLICY_VERSION, NEWS_FEATURE_VERSION,
+        ELIGIBILITY_VERSION, EVENT_WEIGHTING_VERSION, event_snapshot_hash,
+        market_hash, official_hash, broad_hash,
+    ))
+    generation_id = str(uuid.uuid5(uuid.NAMESPACE_URL, generation_seed))
+    slug = generation_id.split("-")[0]
 
-    broad_evidence_status = news_evidence_status(broad_event_days, broad_clusters)
-    if (len(broad_exposed) < NEWS_MIN_EXPOSED_ROWS
-            or broad_clusters < NEWS_EXPERIMENTAL_MIN_CLUSTERS
-            or broad_event_days < NEWS_EXPERIMENTAL_MIN_EVENT_DAYS):
-        statuses.append({
-            "status": "BROAD_NEWS_EVIDENCE_INSUFFICIENT",
-            "news_exposed_rows": len(broad_exposed),
-            "distinct_news_clusters": broad_clusters,
-            "distinct_event_days": broad_event_days,
-            "news_evidence_status": broad_evidence_status,
-        })
-    else:
-        crossfit_by_id = {row["decision_id"]: row for row in crossfit}
-        residual_rows = [
-            row for row in broad_exposed if row["decision_id"] in crossfit_by_id
-        ]
-        if len(residual_rows) < NEWS_MIN_EXPOSED_ROWS:
-            statuses.append({
-                "status": "BROAD_NEWS_CROSSFIT_INSUFFICIENT",
-                "covered_exposed_rows": len(residual_rows),
-                "news_exposed_rows": len(broad_exposed),
-            })
-        else:
-            residual_receipts = [
-                (
-                    row["decision_id"], row["receipt"],
-                    crossfit_by_id[row["decision_id"]]["artifact_hash"],
-                    crossfit_by_id[row["decision_id"]]["residual"],
-                    EVIDENCE_POLICY_VERSION,
-                )
-                for row in residual_rows
-            ]
-            residual_hash = canonical_hash(residual_receipts)
-            evidence_slug = broad_evidence_status.lower().replace("_", "-")
-            broad_version = (
-                f"broad-news-residual-{evidence_slug}-{stage.lower()}-"
-                f"{cutoff.astimezone(UTC).strftime('%Y%m%dT%H%M%SZ')}-"
-                f"{residual_hash[:12]}"
-            )
-            broad_artifact = train_ridge(
-                np.asarray([row["broad_news"] for row in residual_rows]),
-                np.asarray([
-                    crossfit_by_id[row["decision_id"]]["residual"]
-                    for row in residual_rows
-                ]),
-                BROAD_MODEL_FEATURES, 100.0, residual_hash,
-            )
-            broad_path = root / broad_version / "model.json"
-            if not broad_path.exists():
-                broad_artifact.write(broad_path)
-            broad_eligibility = f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}"
+    official_version = (
+        f"news-residual-{evidence_status.lower().replace('_', '-')}-"
+        f"{stage.lower()}-{slug}-{official_hash[:12]}"
+    )
+    official_artifact = train_ridge(
+        np.asarray([row["news"] for row in official_residual]),
+        np.asarray([crossfit_by_id[row["decision_id"]]["residual"] for row in official_residual]),
+        NEWS_FEATURES, 100.0, official_hash, official_weights,
+        EVENT_WEIGHTING_VERSION, official_summary,
+    )
+    official_path = root / official_version / "model.json"
+    if not official_path.exists():
+        official_artifact.write(official_path)
+
+    broad_version = (
+        f"broad-news-residual-{broad_evidence_status.lower().replace('_', '-')}-"
+        f"{stage.lower()}-{slug}-{broad_hash[:12]}"
+    )
+    broad_artifact = train_ridge(
+        np.asarray([row["broad_news"] for row in broad_residual]),
+        np.asarray([crossfit_by_id[row["decision_id"]]["residual"] for row in broad_residual]),
+        BROAD_MODEL_FEATURES, 100.0, broad_hash, broad_weights,
+        EVENT_WEIGHTING_VERSION, broad_summary,
+    )
+    broad_path = root / broad_version / "model.json"
+    if not broad_path.exists():
+        broad_artifact.write(broad_path)
+
+    full_manifest = {
+        "schema": "xauusd.phase2f.full-model.v3", "generation_id": generation_id,
+        "market_model_version": market_version, "market_artifact_path": str(market_path),
+        "market_artifact_hash": market_artifact.artifact_hash,
+        "news_model_version": official_version, "news_artifact_path": str(official_path),
+        "news_artifact_hash": official_artifact.artifact_hash,
+        "training_dataset_hash": market_hash, "news_training_hash": official_hash,
+        "event_snapshot_hash": event_snapshot_hash,
+        "event_weighting_version": EVENT_WEIGHTING_VERSION,
+    }
+    full_version = f"full-{stage.lower()}-{slug}-{canonical_hash(full_manifest)[:12]}"
+    full_path = root / full_version / "manifest.json"
+    full_artifact_hash = _write_manifest(full_path, full_manifest)
+    broad_manifest = {
+        **full_manifest,
+        "schema": "xauusd.phase2f.broad-full-model.v2",
+        "news_model_version": broad_version,
+        "news_artifact_path": str(broad_path),
+        "news_artifact_hash": broad_artifact.artifact_hash,
+        "news_training_hash": broad_hash,
+        "evidence_policy_version": EVIDENCE_POLICY_VERSION,
+    }
+    broad_full_version = (
+        f"broad-full-{stage.lower()}-{slug}-{canonical_hash(broad_manifest)[:12]}"
+    )
+    broad_full_path = root / broad_full_version / "manifest.json"
+    broad_full_hash = _write_manifest(broad_full_path, broad_manifest)
+    required_paths = (market_path, official_path, full_path, broad_path, broad_full_path)
+    if any(not path.is_absolute() or not path.exists() for path in required_paths):
+        return [{"status": "GENERATION_ARTIFACT_VALIDATION_FAILED",
+                 "generation_id": generation_id}]
+
+    updates = (
+        (market_version, "MARKET_ONLY", len(training_rows), len(official_residual),
+         official_events, official_days, market_hash, FEATURE_VERSION, None,
+         market_path, market_artifact.artifact_hash),
+        (official_version, "NEWS_RESIDUAL", len(official_residual), len(official_residual),
+         official_events, official_days, official_hash, NEWS_FEATURE_VERSION,
+         ELIGIBILITY_VERSION, official_path, official_artifact.artifact_hash),
+        (full_version, "FULL", len(training_rows), len(official_residual),
+         official_events, official_days, market_hash,
+         f"{FEATURE_VERSION}+{NEWS_FEATURE_VERSION}", ELIGIBILITY_VERSION,
+         full_path, full_artifact_hash),
+        (broad_version, "BROAD_NEWS_RESIDUAL", len(broad_residual), len(broad_residual),
+         broad_events, broad_days, broad_hash, NEWS_FEATURE_VERSION,
+         ELIGIBILITY_VERSION, broad_path, broad_artifact.artifact_hash),
+        (broad_full_version, "BROAD_FULL", len(training_rows), len(broad_residual),
+         broad_events, broad_days, market_hash,
+         f"{FEATURE_VERSION}+{NEWS_FEATURE_VERSION}+{EVIDENCE_POLICY_VERSION}",
+         ELIGIBILITY_VERSION, broad_full_path, broad_full_hash),
+    )
+    previous = ledger.connection.execute(
+        """SELECT generation_id FROM news_model_generation_activations_v1
+        ORDER BY activated_at DESC LIMIT 1"""
+    ).fetchone()
+    with ledger.connection:
+        for update in updates:
+            (model_version, identity, model_rows, exposed_rows, events, days,
+             dataset_hash, feature_version, eligibility, artifact_path, artifact_hash) = update
             ledger.connection.execute(
                 """INSERT INTO model_updates_v2 VALUES
                 (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    broad_version, "BROAD_NEWS_RESIDUAL", stage, now.isoformat(),
-                    cutoff.isoformat(), len(residual_rows),
-                    sum(row["lane"] == "REPAIRED_SEED" for row in residual_rows),
-                    sum(row["lane"] == "LIVE_OOS" for row in residual_rows),
-                    len(residual_rows), broad_clusters, broad_event_days,
-                    residual_hash, NEWS_FEATURE_VERSION, broad_eligibility,
-                    str(broad_path), broad_artifact.artifact_hash, "CHALLENGER",
-                ),
+                (model_version, identity, stage, now.isoformat(), cutoff.isoformat(),
+                 model_rows, seed_rows, live_rows, exposed_rows, events, days,
+                 dataset_hash, feature_version, eligibility, str(artifact_path),
+                 artifact_hash, "CHALLENGER"),
             )
-            manifest = {
-                "schema": "xauusd.phase2f.broad-full-model.v1",
-                "market_model_version": version,
-                "market_artifact_path": str(path),
-                "market_artifact_hash": artifact_hash,
-                "news_model_version": broad_version,
-                "news_artifact_path": str(broad_path),
-                "news_artifact_hash": broad_artifact.artifact_hash,
-                "training_dataset_hash": dataset_hash,
-                "news_training_hash": residual_hash,
-                "evidence_policy_version": EVIDENCE_POLICY_VERSION,
-            }
-            full_hash = canonical_hash(manifest)
-            broad_full_version = (
-                f"broad-full-{evidence_slug}-{stage.lower()}-"
-                f"{cutoff.astimezone(UTC).strftime('%Y%m%dT%H%M%SZ')}-"
-                f"{full_hash[:12]}"
-            )
-            broad_full_path = root / broad_full_version / "manifest.json"
-            if not broad_full_path.exists():
-                broad_full_path.parent.mkdir(parents=True, exist_ok=False)
-                broad_full_path.write_text(
-                    json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
-                )
+        ledger.connection.execute(
+            """INSERT INTO news_model_generations_v1 VALUES
+            (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (generation_id, stage, now.isoformat(), cutoff.isoformat(),
+             EVIDENCE_POLICY_VERSION, NEWS_FEATURE_VERSION, ELIGIBILITY_VERSION,
+             event_snapshot_hash, market_hash, official_hash, broad_hash,
+             EVENT_WEIGHTING_VERSION, 5, "READY"),
+        )
+        for update in updates:
             ledger.connection.execute(
-                """INSERT INTO model_updates_v2 VALUES
-                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    broad_full_version, "BROAD_FULL", stage, now.isoformat(),
-                    cutoff.isoformat(), len(training_rows), seed_rows, live_rows,
-                    len(residual_rows), broad_clusters, broad_event_days, dataset_hash,
-                    f"{FEATURE_VERSION}+{NEWS_FEATURE_VERSION}+{EVIDENCE_POLICY_VERSION}",
-                    broad_eligibility, str(broad_full_path), full_hash, "CHALLENGER",
-                ),
+                "INSERT INTO news_model_generation_members_v1 VALUES (?,?,?)",
+                (generation_id, update[1], update[0]),
             )
-            ledger.connection.commit()
-            statuses.extend([
-                {
-                    "status": "TRAINED", "model_identity": "BROAD_NEWS_RESIDUAL",
-                    "model_stage": stage, "model_version": broad_version,
-                    "training_rows": len(residual_rows),
-                    "crossfit_method": CROSSFIT_VERSION,
-                    "news_evidence_status": broad_evidence_status,
-                    "distinct_event_days": broad_event_days,
-                },
-                {
-                    "status": "TRAINED", "model_identity": "BROAD_FULL",
-                    "model_stage": stage, "model_version": broad_full_version,
-                    "training_rows": len(training_rows),
-                    "news_evidence_status": broad_evidence_status,
-                    "distinct_event_days": broad_event_days,
-                },
-            ])
-    return statuses
+        ledger.connection.execute(
+            "INSERT INTO news_model_generation_activations_v1 VALUES (?,?,?,?,?)",
+            (str(uuid.uuid5(uuid.NAMESPACE_URL, f"activate:{generation_id}")), generation_id,
+             previous["generation_id"] if previous else None, now.isoformat(),
+             "COMPLETE_FIVE_MODEL_GENERATION"),
+        )
+        for lane, receipts in (
+            ("OFFICIAL", official_weight_receipts), ("BROAD", broad_weight_receipts),
+        ):
+            for receipt in receipts:
+                receipt_hash = canonical_hash((generation_id, lane, receipt))
+                ledger.connection.execute(
+                    """INSERT INTO news_training_weight_receipts_v1 VALUES
+                    (?,?,?,?,?,?,?,?)""",
+                    (generation_id, lane, receipt["source_decision_id"],
+                     receipt["event_id"], receipt["event_version_id"],
+                     receipt["raw_weight"], receipt["normalized_event_weight"], receipt_hash),
+                )
+    return [{
+        "status": "TRAINED", "model_identity": update[1],
+        "model_stage": stage, "model_version": update[0],
+        "generation_id": generation_id, "training_cutoff": cutoff.isoformat(),
+        "event_snapshot_hash": event_snapshot_hash,
+        "weighting_version": EVENT_WEIGHTING_VERSION,
+        "news_evidence_status": (
+            broad_evidence_status if update[1].startswith("BROAD") else evidence_status
+        ),
+    } for update in updates]

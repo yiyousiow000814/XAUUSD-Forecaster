@@ -13,7 +13,7 @@ from .forward_ledger import canonical_hash
 from .news_time import assess_news_time, category_time_rule
 
 
-EVIDENCE_POLICY_VERSION = "news-event-evidence-v3-live-delay-materiality"
+EVIDENCE_POLICY_VERSION = "news-event-evidence-v4-unified-event-clock"
 LEGACY_V3_EVIDENCE_POLICY_VERSION = "news-event-evidence-v2-economic-time"
 CURRENT_EVENT_PROMPT_VERSION = "news-json-v14-material-event-evidence"
 ACTIONABLE_RECORD_KINDS = frozenset({
@@ -150,32 +150,72 @@ def _topics(row: dict) -> tuple[str, ...]:
 def _event_key(
     row: dict, topics: tuple[str, ...], *, use_material_event_key: bool = True,
 ) -> str:
-    day = str(row.get("source_published_time") or row["collector_first_seen_time"])[:10]
     annotation = json.loads(row.get("annotation_json") or "{}")
     material_event_key = str(annotation.get("material_event_key") or "").strip().casefold()
     if use_material_event_key and material_event_key:
-        identity = (day, topics[0], material_event_key)
+        identity = ("material-event", material_event_key)
+        return hashlib.sha256(repr(identity).encode("utf-8")).hexdigest()
+    actor = str(annotation.get("canonical_actor_id") or annotation.get("actor") or "").strip().casefold()
+    action = str(annotation.get("action_family") or annotation.get("action") or "").strip().casefold()
+    object_id = str(annotation.get("canonical_object_id") or annotation.get("object") or "").strip().casefold()
+    location = str(annotation.get("canonical_location_id") or annotation.get("location") or "").strip().casefold()
+    if actor and action and object_id:
+        identity = ("semantic-event", topics[0], actor, action, object_id, location)
         return hashlib.sha256(repr(identity).encode("utf-8")).hexdigest()
     entities = sorted({
         re.sub(r"\s+", " ", str(value).casefold()).strip()
         for value in json.loads(row.get("entities_json") or "[]") if str(value).strip()
     })
     if len(entities) >= 2:
-        identity = (day, topics[0], tuple(entities))
+        identity = ("entities", topics[0], tuple(entities))
     else:
         tokens = sorted({
             token for token in re.findall(r"[a-z0-9]+", str(row["headline"]).casefold())
             if token not in _TITLE_STOPWORDS
         })[:12]
-        identity = (day, topics[0], tuple(entities), tuple(tokens))
+        identity = ("headline", topics[0], tuple(entities), tuple(tokens))
     return hashlib.sha256(repr(identity).encode("utf-8")).hexdigest()
+
+
+def _parsed_timestamp(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text or not re.search(r"(?:T|\s)\d{1,2}:\d{2}", text):
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed
+
+
+def _event_clock(row: dict, *, primary_source: bool) -> tuple[datetime | None, str, str]:
+    """Return a live-known event clock with explicit provenance.
+
+    A precise body clock is preferred.  For an official primary publisher the
+    publication itself is an admissible event only when the source supplies a
+    precise timestamp.  Media publication time never substitutes for an
+    unknown real-world event clock.
+    """
+    annotation = json.loads(row.get("annotation_json") or "{}")
+    explicit = _parsed_timestamp(annotation.get("event_time"))
+    if explicit is not None:
+        return explicit, "EXPLICIT_BODY_TIME", "TIMESTAMP"
+    official_release = _parsed_timestamp(row.get("source_published_time"))
+    if primary_source and official_release is not None:
+        return official_release, "OFFICIAL_RELEASE_TIME", "TIMESTAMP"
+    return None, "UNKNOWN", "UNKNOWN"
 
 
 def event_evidence_rows_from_connection(
     connection, decision_time: datetime, *, legacy_v3: bool = False,
 ) -> list[dict]:
     """Return one point-in-time canonical row per event cluster."""
-    cutoff = decision_time.isoformat()
+    # Ledger timestamps are canonicalized with microseconds.  Keep the same
+    # representation so an annotation parsed exactly at decision time remains
+    # visible under SQLite's lexicographic timestamp comparison.
+    cutoff = decision_time.isoformat(timespec="microseconds")
     raw_rows = connection.execute(
         """SELECT n.*,a.annotation_id,a.event_type,a.entities_json,a.hawkishness,
                   a.inflation_impulse,a.growth_impulse,a.geopolitical_risk,
@@ -277,6 +317,14 @@ def event_evidence_rows_from_connection(
         evidence_role = str(annotation.get("evidence_role") or "")
         materiality = float(annotation.get("materiality") or 0.0)
         current_semantic_schema = canonical.get("prompt_version") == CURRENT_EVENT_PROMPT_VERSION
+        event_clock, event_clock_source, event_time_precision = _event_clock(
+            canonical, primary_source=canonical["source"] in primary_sources,
+        )
+        event_clock_valid = legacy_v3 or bool(
+            event_clock is not None
+            and event_clock <= decision_time
+            and event_clock >= forward_epoch
+        )
         semantic_eligible = legacy_v3 or (
             current_semantic_schema
             and record_kind in ACTIONABLE_RECORD_KINDS
@@ -293,7 +341,9 @@ def event_evidence_rows_from_connection(
             and bool(ACTION_TOPICS & set(topics))
             and relevant
             and semantic_eligible
+            and event_clock_valid
         )
+        official_eligible = eligible and canonical["source"] in CORE_OFFICIAL_SOURCES
         source_names = sorted({row["source"] for row in members})
         publisher_domains = sorted({
             row["publisher_domain"] for row in members if row["publisher_domain"]
@@ -333,6 +383,8 @@ def event_evidence_rows_from_connection(
                 reasons.append("EVIDENCE_ROLE_NOT_ACTIONABLE")
             if materiality < MIN_ACTIONABLE_MATERIALITY:
                 reasons.append("LOW_MATERIALITY")
+            if not event_clock_valid:
+                reasons.append("EVENT_TIME_INVALID")
         entities = sorted({
             str(value).strip()
             for row in members
@@ -345,6 +397,11 @@ def event_evidence_rows_from_connection(
         events.append({
             "event_cluster_id": event_id,
             "event_key": event_id,
+            "event_id": event_id,
+            "event_version_id": canonical_hash((
+                event_id, canonical["content_hash"], canonical["annotation_id"],
+                EVIDENCE_POLICY_VERSION if not legacy_v3 else LEGACY_V3_EVIDENCE_POLICY_VERSION,
+            )),
             "policy_version": (
                 LEGACY_V3_EVIDENCE_POLICY_VERSION if legacy_v3
                 else EVIDENCE_POLICY_VERSION
@@ -353,6 +410,7 @@ def event_evidence_rows_from_connection(
             "topics": topics,
             "evidence_grade": grade,
             "broad_model_eligible": eligible,
+            "official_model_eligible": official_eligible,
             "independent_publishers": independent_publishers,
             "member_count": len(members),
             "source_names": source_names,
@@ -371,6 +429,9 @@ def event_evidence_rows_from_connection(
             "object": annotation.get("object"),
             "location": annotation.get("location"),
             "event_time": annotation.get("event_time"),
+            "event_occurred_at": event_clock.isoformat() if event_clock else None,
+            "event_clock_source": event_clock_source,
+            "event_time_precision": event_time_precision,
             "claim_status": annotation.get("claim_status"),
             "materiality": annotation.get("materiality"),
             "canonical_actor_id": annotation.get("canonical_actor_id"),

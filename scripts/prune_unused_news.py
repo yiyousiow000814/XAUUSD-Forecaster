@@ -1,4 +1,4 @@
-"""Remove intake-only news rows after creating a verified local backup."""
+"""Classify intake-only news rows while preserving the raw-news ledger."""
 
 from __future__ import annotations
 
@@ -16,12 +16,15 @@ from xauusd_forecaster.news_pruning import prune_unused_news
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("database", type=Path)
-    parser.add_argument("--backup-directory", type=Path, required=True)
-    parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--backup-directory", type=Path)
+    parser.add_argument(
+        "--apply", action="store_true",
+        help="append visibility classifications; raw rows remain unchanged",
+    )
     args = parser.parse_args()
     receipt = prune_unused_news(
         args.database,
-        backup_directory=args.backup_directory,
+        backup_directory=args.backup_directory or args.database.parent / "backups",
         dry_run=not args.apply,
     )
     print(json.dumps(receipt, ensure_ascii=False, indent=2))

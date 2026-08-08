@@ -10,8 +10,15 @@ awareness while keeping the training boundary point-in-time and auditable.
 
 Only complete stored bodies with a matching immutable Gemini annotation are
 considered. Both the revision first-seen time and annotation parsed time must be
-at or before the decision cutoff. The event key uses the UTC first-seen date,
-normalized topic, entities when available, and normalized headline tokens.
+at or before the decision cutoff. The stable `event_id` uses the material event
+key or normalized actor, action, object, location, topic, and entity identity;
+calendar date is not part of that identity. Annotation or canonical-document
+changes create a new immutable `event_version_id` under the same event.
+
+Training requires a precise event timestamp known at the decision cutoff.
+Explicit body time is preferred. Official primary releases may use their
+precise publication timestamp because publication is the event. Missing,
+date-only, future, and media-publication substitute clocks remain display-only.
 
 The current actionable topics are rates/Fed, inflation, employment,
 growth/economy, USD/liquidity, oil/energy, war/geopolitics, central-bank gold,
@@ -25,9 +32,11 @@ and risk sentiment. The topic mapper is deterministic and versioned.
 3. `SINGLE_RELIABLE`: one reliable publisher reports the event.
 4. `DISCOVERY_ONLY`: an aggregation or unconfirmed source provides the item.
 
-Only `PRIMARY` and `CORROBORATED` events with an actionable topic receive
-`BROAD_MODEL` permission. Other events stay visible as `DISPLAY_ONLY` and
-cannot affect Broad training or inference.
+The same eligibility engine grants `OFFICIAL_MODEL`, `BROAD_MODEL`, or
+`DISPLAY_ONLY` permission. `OFFICIAL_MODEL` additionally requires a configured
+official source. `BROAD_MODEL` accepts qualified `PRIMARY` and `CORROBORATED`
+events. Both permissions share the same event identity, time validity,
+materiality, semantic-schema, and point-in-time checks.
 
 ## Model separation
 
@@ -37,3 +46,14 @@ predictions, using official news features plus event-evidence features. Broad
 Full equals the same frozen Market-only prediction plus the Broad news
 residual. All versions are Shadow-only, run only after creation, and require
 manual owner approval for any future promotion.
+
+Every event has one total weight budget per generation. Repeated five-minute
+exposures split that budget using their frozen freshness weights. The news
+residual Ridge consumes these values as `sample_weight`; repeated visibility
+does not create additional event votes.
+
+One complete generation contains Market-only, News residual, Full, Broad News
+residual, and Broad Full. All five share one cutoff, policy version, event
+snapshot hash, and generation identifier. Activation is a single append-only
+record written only after every artifact and member is valid. Future decisions
+read only the latest activated generation.

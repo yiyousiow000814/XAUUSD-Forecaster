@@ -555,6 +555,31 @@ def collect_direct_full_text_rss_news(
     statuses: list[dict[str, object]] = []
     for source in DIRECT_FULL_TEXT_RSS_SOURCES:
         last_poll = ledger.latest_source_poll_time(source.name)
+        recent_polls = ledger.connection.execute(
+            """SELECT fetched_time,status,error FROM source_polls
+            WHERE source=? ORDER BY fetched_time DESC,poll_id DESC LIMIT 3""",
+            (source.name,),
+        ).fetchall()
+        forbidden_streak = 0
+        for row in recent_polls:
+            if row["status"] == "ERROR" and "403" in str(row["error"] or ""):
+                forbidden_streak += 1
+            else:
+                break
+        circuit_retry_at = (
+            last_poll + timedelta(hours=6)
+            if source.name.startswith("bls_") and forbidden_streak >= 3 and last_poll
+            else None
+        )
+        if circuit_retry_at is not None and fetched_at < circuit_retry_at:
+            statuses.append({
+                "source": source.name,
+                "status": "SKIPPED_CIRCUIT_OPEN",
+                "failure_streak": forbidden_streak,
+                "retry_at": circuit_retry_at.isoformat(),
+                "fallback_source": BLS_SOURCE,
+            })
+            continue
         interval = timedelta(minutes=5 if source.name.startswith("bls_") else 10)
         if last_poll is not None and fetched_at - last_poll < interval:
             statuses.append({"source": source.name, "status": "SKIPPED_INTERVAL"})

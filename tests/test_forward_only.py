@@ -312,6 +312,21 @@ def test_ridge_artifact_and_dataset_hash_are_deterministic() -> None:
     np.testing.assert_array_equal(first.predict(rows), second.predict(rows))
 
 
+def test_ridge_sample_weight_limits_repeated_event_dominance() -> None:
+    rows = np.array([[0.0], [1.0], [10.0]])
+    target = np.array([0.0, 1.0, 100.0])
+    equal = train_ridge(rows, target, ("news",), 0.01, "equal")
+    weighted = train_ridge(
+        rows, target, ("news",), 0.01, "weighted",
+        sample_weight=np.array([1.0, 1.0, 0.01]),
+        weighting_version="equal-event-budget-decay-v1",
+        weight_summary={"distinct_event_count": 2},
+    )
+    assert weighted.predict(np.array([[1.0]]))[0] < equal.predict(np.array([[1.0]]))[0]
+    assert weighted.weighting_version == "equal-event-budget-decay-v1"
+    assert weighted.weight_summary == {"distinct_event_count": 2}
+
+
 def test_official_rss_parser_stamps_real_fetch_time() -> None:
     fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
     xml = b"""<rss><channel><item><guid>x1</guid><title>Headline</title>
@@ -702,6 +717,30 @@ def test_direct_official_rss_sources_are_bounded_and_rate_limited(tmp_path) -> N
         "SELECT link FROM news_revisions WHERE source='eia_press_releases'"
     ).fetchone()
     assert stored["link"] == "https://www.eia.gov/pressroom/releases/example.php"
+
+
+def test_bls_rss_403_circuit_uses_public_api_fallback(tmp_path) -> None:
+    fetched = datetime(2026, 8, 5, 10, 30, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched - timedelta(hours=1))
+    source = "bls_employment_situation"
+    for minutes in (15, 10, 5):
+        at = fetched - timedelta(minutes=minutes)
+        ledger.append_source_poll({
+            "poll_id": f"bls-403-{minutes}", "source": source,
+            "fetched_time": at, "status": "ERROR",
+            "error_type": "HTTPError", "error": "HTTP Error 403: Forbidden",
+        })
+    called = []
+
+    def fetcher(item: RssSource) -> bytes:
+        called.append(item.name)
+        return b"<rss><channel /></rss>"
+
+    statuses = collect_direct_full_text_rss_news(ledger, fetched, fetcher)
+    employment = next(row for row in statuses if row["source"] == source)
+    assert employment["status"] == "SKIPPED_CIRCUIT_OPEN"
+    assert employment["fallback_source"] == "bls_public_api"
+    assert source not in called
 
 
 def test_direct_official_html_sources_are_filtered_and_bounded(tmp_path) -> None:

@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import json
 import math
-import urllib.parse
 from datetime import datetime
 
 from .evidence_v2 import ELIGIBILITY_VERSION
 from .factors import MACRO_FEATURE_MAP, NEWS_FEATURES
 from .forward_ledger import canonical_hash
 from .news_evidence import BROAD_NEWS_FEATURES, event_evidence_rows
-from .news_time import assess_news_time, category_time_rule
+from .news_time import category_time_rule
 
 
 SOURCE_RULES = {
@@ -78,65 +77,30 @@ def frozen_rule_rows() -> list[tuple[str, str, int, int, str]]:
     ]
 
 
+def event_raw_weight(row: dict) -> float:
+    """Return the event's live-known contribution before generation budgeting."""
+    age_minutes = max(0.0, float(row.get("economic_age_minutes") or 0.0))
+    _, half_life_minutes = category_time_rule(str(row.get("primary_category") or ""))
+    freshness = math.exp(-math.log(2.0) * age_minutes / half_life_minutes)
+    return freshness * float(row["confidence"]) * max(0.05, float(row["novelty"]))
+
+
 def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
-    """Aggregate only frozen MODEL_ELIGIBLE publisher bodies visible then."""
-    selected = []
-    for annotation in ledger.visible_annotations(decision_time):
-        news = ledger.connection.execute(
-            """SELECT * FROM news_revisions
-            WHERE source=? AND source_item_id=? AND revision_number=?""",
-            (annotation["source"], annotation["source_item_id"], annotation["revision_number"]),
-        ).fetchone()
-        if news is None:
-            continue
-        tier, requires_body, minimum, _ = SOURCE_RULES.get(
-            str(news["source"]), ("COLLECT_ONLY", True, 200, "unlisted source")
-        )
-        body = str(news["body"] or "")
-        if str(news["source"]) == "google_news_bls_official_releases":
-            host = (urllib.parse.urlparse(str(news["link"] or "")).hostname or "").casefold()
-            if host != "bls.gov" and not host.endswith(".bls.gov"):
-                continue
-        if tier != "MODEL_ELIGIBLE" or (requires_body and len(body) < minimum):
-            continue
-        annotation_payload = json.loads(annotation["annotation_json"] or "{}")
-        category = str(annotation_payload.get("primary_category") or "")
-        max_age, _ = category_time_rule(category)
-        timing = assess_news_time(
-            news, decision_time=decision_time, forward_epoch=ledger.forward_epoch,
-            max_actionable_age=max_age,
-        )
-        if (
-            not timing.eligible
-            or category not in ACTIONABLE_CATEGORIES
-        ):
-            continue
-        selected.append((news, annotation, timing))
-
-    # One canonical publisher item per duplicate cluster.
-    canonical = {}
-    for news, annotation, timing in selected:
-        cluster = str(news["cluster_id"])
-        current = canonical.get(cluster)
-        candidate = (len(str(news["body"] or "")), str(news["source_item_id"]))
-        if current is None or candidate > current[0]:
-            canonical[cluster] = (candidate, news, annotation, timing)
-
+    """Aggregate one unified event snapshot into official and Broad features."""
+    all_evidence_events = event_evidence_rows(ledger, decision_time)
+    official_events = [row for row in all_evidence_events if row["official_model_eligible"]]
+    broad_events = [row for row in all_evidence_events if row["broad_model_eligible"]]
     totals = {name: 0.0 for name in NEWS_FEATURES}
     weight_sum = 0.0
     event_types = set()
     evidence = []
-    for _, news, row, timing in canonical.values():
-        first_seen = datetime.fromisoformat(news["collector_first_seen_time"])
-        parsed_at = datetime.fromisoformat(row["parsed_at"])
-        age_minutes = float(timing.age_minutes or 0.0)
-        processing_delay = (parsed_at - first_seen).total_seconds()
-        category = json.loads(row["annotation_json"] or "{}").get("primary_category")
-        _, half_life_minutes = category_time_rule(str(category or ""))
+    for row in official_events:
+        age_minutes = float(row["economic_age_minutes"])
+        _, half_life_minutes = category_time_rule(str(row.get("primary_category") or ""))
         freshness = math.exp(-math.log(2.0) * age_minutes / half_life_minutes)
         confidence = float(row["confidence"])
         novelty = float(row["novelty"])
-        weight = freshness * confidence * max(0.05, novelty)
+        weight = event_raw_weight(row)
         weight_sum += weight
         totals["news_hawkishness"] += weight * float(row["hawkishness"])
         totals["news_inflation_impulse"] += weight * float(row["inflation_impulse"])
@@ -146,11 +110,10 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
         totals["news_novelty"] += weight * novelty
         totals["news_confidence"] += weight * confidence
         totals["news_event_count"] += freshness
-        event_types.add(str(row["event_type"]))
+        event_types.add(str(row.get("event_type") or row.get("record_kind") or ""))
         evidence.append((
-            news["content_hash"], row["annotation_id"],
-            timing.event_time.isoformat() if timing.event_time else None,
-            age_minutes, processing_delay,
+            row["event_id"], row["event_version_id"], row["source_hash"],
+            row["event_occurred_at"], age_minutes,
         ))
     if weight_sum:
         for name in (
@@ -187,14 +150,12 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
             evidence.append((series_id, values[-1]["content_hash"]))
 
     broad_totals = {name: 0.0 for name in BROAD_NEWS_FEATURES}
-    all_evidence_events = event_evidence_rows(ledger, decision_time)
-    broad_events = [row for row in all_evidence_events if row["broad_model_eligible"]]
     broad_weight_sum = 0.0
     broad_evidence = []
     for row in broad_events:
         age_minutes = float(row["economic_age_minutes"])
         freshness = math.exp(-math.log(2.0) * age_minutes / 360.0)
-        weight = freshness * row["confidence"] * max(0.05, row["novelty"])
+        weight = event_raw_weight(row)
         broad_weight_sum += weight
         broad_totals["broad_news_hawkishness"] += weight * row["hawkishness"]
         broad_totals["broad_news_inflation_impulse"] += weight * row["inflation_impulse"]
@@ -212,7 +173,9 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
             name = f"broad_topic_{topic}"
             if name in broad_totals:
                 broad_totals[name] += freshness
-        broad_evidence.append((row["event_cluster_id"], row["source_hash"], age_minutes))
+        broad_evidence.append((
+            row["event_id"], row["event_version_id"], row["source_hash"], age_minutes,
+        ))
     if broad_weight_sum:
         for name in (
             "broad_news_hawkishness", "broad_news_inflation_impulse",
@@ -222,24 +185,42 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
         ):
             broad_totals[name] /= broad_weight_sum
     totals.update(broad_totals)
-    event_by_item = {
-        (row["canonical_source"], row["canonical_source_item_id"]): row
-        for row in all_evidence_events
-    }
-    official_visible_events = []
-    for _, news, row, _ in canonical.values():
-        event = event_by_item.get((news["source"], news["source_item_id"]))
-        official_visible_events.append(_visibility_event_ref(event, news, row))
+    official_visible_events = [_visibility_event_ref(row, row, row) for row in official_events]
     broad_visible_events = [
         _visibility_event_ref(row, row, row)
         for row in broad_events
     ]
+    event_snapshots = []
+    for permission, rows in (
+        ("OFFICIAL_MODEL", official_events), ("BROAD_MODEL", broad_events),
+    ):
+        for row in rows:
+            event_snapshots.append({
+                "event_id": row["event_id"],
+                "event_version_id": row["event_version_id"],
+                "policy_version": row["policy_version"],
+                "event_occurred_at": row["event_occurred_at"],
+                "event_clock_source": row["event_clock_source"],
+                "event_time_precision": row["event_time_precision"],
+                "canonical_source": row["canonical_source"],
+                "canonical_source_item_id": row["canonical_source_item_id"],
+                "source_hash": row["source_hash"],
+                "evidence_grade": row["evidence_grade"],
+                "model_permission": permission,
+                "model_permissions": (
+                    ["OFFICIAL_MODEL", "BROAD_MODEL"]
+                    if row["official_model_eligible"] else ["BROAD_MODEL"]
+                ),
+                "reason_codes": list(row["reason_codes"]),
+                "raw_weight": event_raw_weight(row),
+                "age_minutes": float(row["economic_age_minutes"]),
+            })
     return {
         "features": totals,
         "eligibility_version": ELIGIBILITY_VERSION,
-        "model_visible_items": len(canonical),
-        "news_exposed": int(bool(canonical)),
-        "distinct_news_clusters": len(canonical),
+        "model_visible_items": len(official_events),
+        "news_exposed": int(bool(official_events)),
+        "distinct_news_clusters": len(official_events),
         "distinct_event_types": len(event_types),
         "broad_model_visible_items": len(broad_events),
         "broad_news_exposed": int(bool(broad_events)),
@@ -250,4 +231,5 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
         # They are intentionally excluded from the aggregate feature snapshot hash.
         "official_visible_events": official_visible_events,
         "broad_visible_events": broad_visible_events,
+        "event_snapshots": event_snapshots,
     }

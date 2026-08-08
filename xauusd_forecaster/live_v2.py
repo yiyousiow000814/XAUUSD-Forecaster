@@ -129,7 +129,7 @@ def append_live_decision_v2(ledger, *, decision_id: str, decision_time: datetime
     news = aggregate_news_features_v2(ledger, decision_time)
     news_snapshot_values = {
         key: value for key, value in news.items()
-        if key not in {"official_visible_events", "broad_visible_events"}
+        if key not in {"official_visible_events", "broad_visible_events", "event_snapshots"}
     }
     news_payload = {"decision_id": decision_id, "decision_time": decision_time.isoformat(),
                     "feature_version": NEWS_FEATURE_VERSION,
@@ -140,7 +140,7 @@ def append_live_decision_v2(ledger, *, decision_id: str, decision_time: datetime
     legacy_v3_news = aggregate_legacy_news_features_v3(ledger, decision_time)
     legacy_news_snapshot_values = {
         key: value for key, value in legacy_news.items()
-        if key not in {"official_visible_events", "broad_visible_events"}
+        if key not in {"official_visible_events", "broad_visible_events", "event_snapshots"}
     }
     legacy_payload = {
         "decision_id": decision_id,
@@ -156,7 +156,7 @@ def append_live_decision_v2(ledger, *, decision_id: str, decision_time: datetime
     )
     legacy_v3_snapshot_values = {
         key: value for key, value in legacy_v3_news.items()
-        if key not in {"official_visible_events", "broad_visible_events"}
+        if key not in {"official_visible_events", "broad_visible_events", "event_snapshots"}
     }
     legacy_v3_payload = {
         "decision_id": decision_id,
@@ -188,6 +188,36 @@ def append_live_decision_v2(ledger, *, decision_id: str, decision_time: datetime
              news["model_visible_items"], news["news_exposed"], news["distinct_news_clusters"],
              news["distinct_event_types"], news["source_evidence_hash"], news_hash),
         )
+        for event in news["event_snapshots"]:
+            permissions = event["model_permissions"]
+            ledger.connection.execute(
+                """INSERT OR IGNORE INTO news_event_catalog_v1 VALUES
+                (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    event["event_version_id"], event["event_id"], event["policy_version"],
+                    event["event_occurred_at"], event["event_clock_source"],
+                    event["event_time_precision"], event["canonical_source"],
+                    event["canonical_source_item_id"], event["source_hash"],
+                    event["evidence_grade"], json.dumps(permissions, separators=(",", ":")),
+                    json.dumps(event["reason_codes"], separators=(",", ":")),
+                    created_at.isoformat(),
+                ),
+            )
+            event_snapshot_hash = canonical_hash((
+                decision_id, decision_time.isoformat(), event["event_id"],
+                event["event_version_id"], event["model_permission"],
+                event["raw_weight"], event["age_minutes"],
+            ))
+            ledger.connection.execute(
+                """INSERT OR IGNORE INTO news_decision_event_snapshots_v1 VALUES
+                (?,?,?,?,?,?,?,?,?)""",
+                (
+                    decision_id, decision_time.isoformat(), event["event_id"],
+                    event["event_version_id"], event["policy_version"],
+                    event["model_permission"], event["raw_weight"],
+                    event["age_minutes"], event_snapshot_hash,
+                ),
+            )
         ledger.connection.execute(
             """INSERT INTO derived_news_feature_snapshots VALUES
             (?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?)""",

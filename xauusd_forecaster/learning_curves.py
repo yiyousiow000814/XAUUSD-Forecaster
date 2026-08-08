@@ -177,7 +177,46 @@ def learning_curve_payload(connection) -> dict:
     updates = connection.execute(
         "SELECT * FROM model_updates_v2 ORDER BY created_at,model_identity"
     ).fetchall()
-    news_activation = news_model_activation_status(reversed(updates))
+    active_generation_row = connection.execute(
+        """SELECT g.* FROM news_model_generation_activations_v1 a
+        JOIN news_model_generations_v1 g USING(generation_id)
+        ORDER BY a.activated_at DESC,a.activation_id DESC LIMIT 1"""
+    ).fetchone()
+    active_generation = dict(active_generation_row) if active_generation_row else None
+    news_activation = news_model_activation_status(
+        reversed(updates), allow_legacy_contract=active_generation is None,
+    )
+    generation_by_version = {
+        row["model_version"]: row["generation_id"]
+        for row in connection.execute(
+            "SELECT generation_id,model_version FROM news_model_generation_members_v1"
+        )
+    }
+    active_generation_versions = {
+        row["model_version"] for row in connection.execute(
+            "SELECT model_version FROM news_model_generation_members_v1 WHERE generation_id=?",
+            (active_generation["generation_id"],),
+        )
+    } if active_generation else set()
+    weight_rows = connection.execute(
+        """SELECT evidence_lane,count(*) exposure_count,
+                  count(DISTINCT event_id) event_count,
+                  sum(normalized_event_weight) normalized_weight
+        FROM news_training_weight_receipts_v1
+        WHERE generation_id=? GROUP BY evidence_lane""",
+        (active_generation["generation_id"] if active_generation else "",),
+    ).fetchall()
+    weight_summary = {
+        row["evidence_lane"]: {
+            "decision_event_exposures": int(row["exposure_count"]),
+            "effective_event_count": int(row["event_count"]),
+            "maximum_event_weight_share": (
+                1.0 / int(row["event_count"]) if int(row["event_count"]) else None
+            ),
+            "total_event_budget": float(row["normalized_weight"] or 0.0),
+        }
+        for row in weight_rows
+    }
     # A model artifact can be rebuilt from the same immutable dataset during
     # recovery.  That is not a new learning generation and must not create a
     # fake reset/upgrade in the UI.
@@ -192,7 +231,10 @@ def learning_curve_payload(connection) -> dict:
     active_versions: dict[str, list[str]] = defaultdict(list)
     for update in reversed(updates):
         identity = update["model_identity"]
-        if len(active_versions[identity]) < 2:
+        if active_generation:
+            if update["model_version"] in active_generation_versions:
+                active_versions[identity].append(update["model_version"])
+        elif not active_versions[identity]:
             active_versions[identity].append(update["model_version"])
     models = []
     for update in updates:
@@ -223,6 +265,7 @@ def learning_curve_payload(connection) -> dict:
         )
         models.append({
             "model_version": update["model_version"], "model_identity": update["model_identity"],
+            "generation_id": generation_by_version.get(update["model_version"]),
             "model_stage": update["model_stage"], "training_rows": update["training_rows"],
             "training_cutoff": update["training_cutoff"], "created_at": update["created_at"],
             "cadence_metrics": cadence_metrics,
@@ -265,7 +308,7 @@ def learning_curve_payload(connection) -> dict:
             ),
             "active_rank": active_rank,
             "lifecycle_status": (
-                "LATEST" if active_rank == 1 else "PREVIOUS" if active_rank == 2 else "ARCHIVED"
+                "LATEST" if active_rank == 1 else "ARCHIVED"
             ),
             **_selection_metrics(scored),
             **metrics,
@@ -548,12 +591,33 @@ def learning_curve_payload(connection) -> dict:
         "distinct_news_clusters": int(news[1]), "learning_stage": _stage(complete, live_rows, distinct_days),
         "current_preview_version": latest_models.get("PREVIEW_ONLY"),
         "current_shadow_version": latest_models.get("SHADOW"),
-        "training_generation_count": len(market_training_hashes),
+        "training_generation_count": connection.execute(
+            "SELECT count(*) FROM news_model_generations_v1"
+        ).fetchone()[0] or len(market_training_hashes),
         "training_run_count": training_run_count,
         "recovery_rebuild_count": max(0, training_run_count - len(market_training_hashes)),
         "next_training_threshold": 96 if complete < 96 else 200 if complete < 200 else ((complete // 50) + 1) * 50,
         "commission_status": COMMISSION_STATUS, "slippage_status": SLIPPAGE_STATUS,
         "models": models, "version_groups": version_groups,
+        "active_generation": active_generation,
+        "news_training_evidence": {
+            "raw_article_revisions": connection.execute(
+                "SELECT count(*) FROM news_revisions"
+            ).fetchone()[0],
+            "distinct_articles": connection.execute(
+                "SELECT count(*) FROM (SELECT DISTINCT source,source_item_id FROM news_revisions)"
+            ).fetchone()[0],
+            "eligible_event_versions": connection.execute(
+                "SELECT count(*) FROM news_event_catalog_v1"
+            ).fetchone()[0],
+            "distinct_eligible_events": connection.execute(
+                "SELECT count(DISTINCT event_id) FROM news_event_catalog_v1"
+            ).fetchone()[0],
+            "decision_event_exposures": connection.execute(
+                "SELECT count(*) FROM news_decision_event_snapshots_v1"
+            ).fetchone()[0],
+            "active_generation_weights": weight_summary,
+        },
         "rolling_processes": rolling_processes,
         "news_model_activation": news_activation,
         "zero_return_baseline": {

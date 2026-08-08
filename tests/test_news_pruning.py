@@ -1,6 +1,4 @@
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-
 from xauusd_forecaster.forward_ledger import ForwardLedger
 from xauusd_forecaster.news_pruning import build_news_prune_plan, prune_unused_news
 
@@ -43,7 +41,7 @@ def test_prune_plan_keeps_only_timely_full_text_evidence(tmp_path) -> None:
     }
 
 
-def test_prune_creates_backup_and_restores_append_only_trigger(tmp_path) -> None:
+def test_prune_classifies_unusable_news_without_deleting_raw_rows(tmp_path) -> None:
     epoch = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
     database = tmp_path / "forward.sqlite3"
     ledger = ForwardLedger(database, now=epoch)
@@ -57,17 +55,18 @@ def test_prune_creates_backup_and_restores_append_only_trigger(tmp_path) -> None
     )
 
     assert receipt["delete_items"] == 1
-    assert receipt["remaining_items"] == 0
-    assert Path(receipt["backup"]).exists()
+    assert receipt["destructive"] is False
+    assert receipt["remaining_items"] == 1
+    assert receipt["remaining_revisions"] == 1
     check = ForwardLedger(database, now=epoch)
-    trigger = check.connection.execute(
-        "SELECT name FROM sqlite_master WHERE type='trigger' "
-        "AND name='news_revisions_no_delete'"
+    classification = check.connection.execute(
+        "SELECT visibility_status,reason_code FROM news_item_classifications_v1"
     ).fetchone()
-    assert trigger is not None
+    assert classification["visibility_status"] == "CONTENT_UNAVAILABLE"
+    assert classification["reason_code"] == "NO_FULL_TEXT"
 
 
-def test_prune_removes_unused_placeholder_but_keeps_full_text_revision(tmp_path) -> None:
+def test_prune_classifies_placeholder_and_keeps_both_revisions(tmp_path) -> None:
     epoch = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
     database = tmp_path / "forward.sqlite3"
     ledger = ForwardLedger(database, now=epoch)
@@ -90,9 +89,15 @@ def test_prune_removes_unused_placeholder_but_keeps_full_text_revision(tmp_path)
         database, backup_directory=tmp_path / "backups", dry_run=False
     )
     assert receipt["remaining_items"] == 1
-    assert receipt["remaining_revisions"] == 1
+    assert receipt["remaining_revisions"] == 2
     check = ForwardLedger(database, now=epoch)
     rows = check.connection.execute(
         "SELECT revision_number, body FROM news_revisions"
     ).fetchall()
-    assert [(row["revision_number"], row["body"].startswith("[FULL_TEXT")) for row in rows] == [(2, True)]
+    assert [(row["revision_number"], row["body"].startswith("[FULL_TEXT")) for row in rows] == [
+        (1, False), (2, True)
+    ]
+    classification = check.connection.execute(
+        "SELECT revision_number,visibility_status FROM news_item_classifications_v1"
+    ).fetchone()
+    assert tuple(classification) == (1, "DUPLICATE_DOCUMENT")

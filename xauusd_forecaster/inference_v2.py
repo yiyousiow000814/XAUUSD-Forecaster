@@ -19,7 +19,7 @@ from .training import MARKET_FEATURES
 
 
 MIN_CALIBRATION_BLOCKS = 20
-ACTIVE_VERSIONS_PER_IDENTITY = 2
+ACTIVE_VERSIONS_PER_IDENTITY = 1
 MODEL_IDENTITIES = frozenset({
     "MARKET_ONLY", "NEWS_RESIDUAL", "FULL",
     "BROAD_NEWS_RESIDUAL", "BROAD_FULL",
@@ -38,13 +38,12 @@ def _expected_news_contract(identity: str) -> tuple[str, str] | None:
         return NEWS_FEATURE_VERSION, ELIGIBILITY_VERSION
     if identity == "FULL":
         return f"{FEATURE_VERSION}+{NEWS_FEATURE_VERSION}", ELIGIBILITY_VERSION
-    broad_eligibility = f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}"
     if identity == "BROAD_NEWS_RESIDUAL":
-        return NEWS_FEATURE_VERSION, broad_eligibility
+        return NEWS_FEATURE_VERSION, ELIGIBILITY_VERSION
     if identity == "BROAD_FULL":
         return (
             f"{FEATURE_VERSION}+{NEWS_FEATURE_VERSION}+{EVIDENCE_POLICY_VERSION}",
-            broad_eligibility,
+            ELIGIBILITY_VERSION,
         )
     return None
 
@@ -61,11 +60,12 @@ def _news_contract_matches(update) -> bool:
 
 def _news_generation_ready(
     newest: dict, available_news_eligibilities: set[str] | None = None,
+    *, enforce_current_contract: bool = True,
 ) -> bool:
     """Require one complete, runnable generation for every news identity."""
     return all(
         identity in newest
-        and _news_contract_matches(newest[identity])
+        and (not enforce_current_contract or _news_contract_matches(newest[identity]))
         and (
             available_news_eligibilities is None
             or _row_value(newest[identity], "eligibility_version")
@@ -82,18 +82,24 @@ def _news_generation_ready(
     )
 
 
-def news_model_activation_status(updates) -> list[dict]:
+def news_model_activation_status(updates, *, allow_legacy_contract: bool = False) -> list[dict]:
     """Explain whether each news identity has a current-policy runnable artifact."""
     newest = {}
     for update in updates:
         newest.setdefault(update["model_identity"], update)
     generation_ready = _news_generation_ready(newest)
+    legacy_generation_ready = allow_legacy_contract and _news_generation_ready(
+        newest, enforce_current_contract=False,
+    )
     result = []
     for identity in ("NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL"):
         expected_feature, expected_eligibility = _expected_news_contract(identity)
         update = newest.get(identity)
         if update is None:
             status, reason = "NOT_TRAINED", "尚未训练当前新闻模型"
+        elif not _news_contract_matches(update) and legacy_generation_ready:
+            status = "LEGACY_ACTIVE"
+            reason = "当前 generation 持续预测，等待完整新 generation 原子替换"
         elif not _news_contract_matches(update):
             status, reason = "POLICY_MISMATCH", "最新版不符合当前新闻规则"
         else:
@@ -136,7 +142,10 @@ def _recommended_action(
     return "WAIT"
 
 
-def _active_updates(updates, available_news_eligibilities: set[str] | None = None) -> list:
+def _active_updates(
+    updates, available_news_eligibilities: set[str] | None = None,
+    *, enforce_current_contract: bool = True,
+) -> list:
     """Select models, activating news only as one complete policy generation."""
     if available_news_eligibilities is None:
         available_news_eligibilities = {
@@ -147,7 +156,8 @@ def _active_updates(updates, available_news_eligibilities: set[str] | None = Non
     for update in updates:
         newest_by_identity.setdefault(update["model_identity"], update)
     news_generation_ready = _news_generation_ready(
-        newest_by_identity, available_news_eligibilities
+        newest_by_identity, available_news_eligibilities,
+        enforce_current_contract=enforce_current_contract,
     )
 
     counts: dict[str, int] = defaultdict(int)
@@ -168,7 +178,7 @@ def _active_updates(updates, available_news_eligibilities: set[str] | None = Non
         if identity in NEWS_MODEL_IDENTITIES:
             eligibility = _row_value(update, "eligibility_version")
             compatible = (
-                _news_contract_matches(update)
+                (not enforce_current_contract or _news_contract_matches(update))
                 and eligibility in available_news_eligibilities
             )
             if identity not in newest_seen and not compatible:
@@ -190,6 +200,44 @@ def _active_updates(updates, available_news_eligibilities: set[str] | None = Non
         counts[identity] += 1
         active.append(update)
     return active
+
+
+def _activated_generation_updates(ledger, decision_time: datetime):
+    """Return exactly one complete generation, or legacy rows before migration."""
+    table = ledger.connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='news_model_generation_activations_v1'"
+    ).fetchone()
+    if table is not None:
+        generation = ledger.connection.execute(
+            """SELECT generation_id FROM news_model_generation_activations_v1
+            WHERE activated_at<? ORDER BY activated_at DESC,activation_id DESC LIMIT 1""",
+            (decision_time.isoformat(),),
+        ).fetchone()
+        if generation is not None:
+            return ledger.connection.execute(
+                """SELECT u.* FROM news_model_generation_members_v1 m
+                JOIN model_updates_v2 u USING(model_version)
+                WHERE m.generation_id=?
+                ORDER BY CASE u.model_identity
+                  WHEN 'MARKET_ONLY' THEN 1 WHEN 'NEWS_RESIDUAL' THEN 2
+                  WHEN 'FULL' THEN 3 WHEN 'BROAD_NEWS_RESIDUAL' THEN 4
+                  WHEN 'BROAD_FULL' THEN 5 ELSE 99 END""",
+                (generation["generation_id"],),
+            ).fetchall()
+    return ledger.connection.execute(
+        """SELECT * FROM model_updates_v2
+        WHERE created_at < ? ORDER BY created_at DESC""",
+        (decision_time.isoformat(),),
+    ).fetchall()
+
+
+def _has_activated_generation(ledger, decision_time: datetime) -> bool:
+    return ledger.connection.execute(
+        """SELECT 1 FROM news_model_generation_activations_v1
+        WHERE activated_at<? LIMIT 1""",
+        (decision_time.isoformat(),),
+    ).fetchone() is not None
 
 
 def _calibration(ledger, model_identity: str, decision_time: datetime) -> dict:
@@ -276,16 +324,16 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
     )
     created.append({"model_identity": "CHAMPION_0", "model_version": "always-wait-v1"})
 
-    updates = ledger.connection.execute(
-        """SELECT * FROM model_updates_v2
-        WHERE created_at < ? ORDER BY created_at DESC""", (decision_time.isoformat(),)
-    ).fetchall()
+    explicit_generation = _has_activated_generation(ledger, decision_time)
+    updates = _activated_generation_updates(ledger, decision_time)
     features = json.loads(market_snapshot["features_json"])
     snapshots = dict(news_snapshots or {})
     snapshots.setdefault(ELIGIBILITY_VERSION, news_snapshot)
     snapshots.setdefault(f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}", news_snapshot)
     values = [features.get(name) for name in MARKET_FEATURES]
-    for update in _active_updates(updates, set(snapshots)):
+    for update in _active_updates(
+        updates, set(snapshots), enforce_current_contract=explicit_generation,
+    ):
         identity = update["model_identity"]
         update_eligibility = update["eligibility_version"]
         selected_news_snapshot = snapshots.get(update_eligibility, news_snapshot)

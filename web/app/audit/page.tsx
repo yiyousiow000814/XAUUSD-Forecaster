@@ -155,7 +155,7 @@ type LearningModel = {
 };
 type NewsModelActivation = {
   model_identity: string;
-  status: "ACTIVE" | "NOT_TRAINED" | "POLICY_MISMATCH" | "ARTIFACT_UNAVAILABLE";
+  status: "ACTIVE" | "LEGACY_ACTIVE" | "GENERATION_WAIT" | "NOT_TRAINED" | "POLICY_MISMATCH" | "ARTIFACT_UNAVAILABLE";
   reason: string;
   model_version: string | null;
   actual_feature_version: string | null;
@@ -209,6 +209,9 @@ type Payload = {
   news_evidence: NewsEvidence[];
   news_evidence_summary: {
     policy_version: string;
+    raw_article_revisions: number;
+    distinct_articles: number;
+    decision_event_exposures: number;
     total_events: number;
     displayed_events: number;
     broad_model_eligible: number;
@@ -263,6 +266,15 @@ type Payload = {
     training_generation_count: number;
     training_run_count: number;
     recovery_rebuild_count: number;
+    active_generation: null | { generation_id: string; training_cutoff: string; policy_version: string; weighting_version: string; member_count: number };
+    news_training_evidence: {
+      raw_article_revisions: number;
+      distinct_articles: number;
+      eligible_event_versions: number;
+      distinct_eligible_events: number;
+      decision_event_exposures: number;
+      active_generation_weights: Record<string, { decision_event_exposures: number; effective_event_count: number; maximum_event_weight_share: number | null; total_event_budget: number }>;
+    };
     commission_status: string;
     slippage_status: string;
     models: LearningModel[];
@@ -617,7 +629,7 @@ export default function AuditPage() {
   ).size;
   const archivedModelCount = (payload?.learning_curves?.models?.length ?? 0) - activeLearningModels.length;
   const inactiveNewsModels = (payload?.learning_curves?.news_model_activation ?? []).filter(
-    row => row.status !== "ACTIVE",
+    row => !["ACTIVE", "LEGACY_ACTIVE"].includes(row.status),
   );
   const latestVersionGroups = (payload?.learning_curves?.version_groups ?? []).filter(
     row => row.lifecycle_status === "LATEST",
@@ -764,7 +776,9 @@ export default function AuditPage() {
           <p>“模型已看”表示某次冻结预测确实读取过这项事件，不是按今天的规则事后猜测。每份回执同时保存决策时间、模型版本、证据通道与事件哈希；模型最多回看当时规则允许的 72 小时，迟到发现只保留展示，不进入训练。“未进入模型”会明确显示缺正文、太旧、尚未确认或仍在等待下一次预测等原因。</p>
         </header>
         <div className="evidence-summary">
+          <article><span>文章 / Revision</span><strong>{`${payload?.news_evidence_summary?.distinct_articles ?? 0} / ${payload?.news_evidence_summary?.raw_article_revisions ?? 0}`}</strong><small>原始层 append-only</small></article>
           <article><span>模型已看事件</span><strong>{payload?.news_evidence_summary?.model_seen_events ?? 0}</strong><small>至少有一份冻结回执</small></article>
+          <article><span>决策事件暴露</span><strong>{payload?.news_evidence_summary?.decision_event_exposures ?? 0}</strong><small>事件在各决策点的可见快照</small></article>
           <article><span>冻结使用记录</span><strong>{payload?.news_evidence_summary?.frozen_model_uses ?? 0}</strong><small>不同预测与模型分别记账</small></article>
           <article><span>未进入模型</span><strong>{payload?.news_evidence_summary?.model_unseen_events ?? 0}</strong><small>可逐条查看原因</small></article>
           <article><span>当前达到 Broad 门槛</span><strong>{payload?.news_evidence_summary?.broad_model_eligible ?? 0}</strong><small>不等于过去已经被模型读取</small></article>
@@ -846,14 +860,17 @@ export default function AuditPage() {
           <article><span>Live OOS</span><strong>{learningState === "ready" ? payload?.learning_curves?.live_oos_rows ?? 0 : "—"}</strong><small>{learningState === "loading" ? "正在读取公开学习快照" : "模型上线后的真实前向结果"}</small></article>
           <article><span>30m Blocks / Days</span><strong>{learningState === "ready" ? `${payload?.learning_curves?.effective_30m_blocks ?? 0} / ${payload?.learning_curves?.distinct_trading_days ?? 0}` : "—"}</strong><small>置信区间的独立证据</small></article>
           <article><span>有效 / 隔离样本</span><strong>{learningState === "ready" ? `${payload?.learning_curves?.outcome_quality?.valid ?? 0} / ${payload?.learning_curves?.outcome_quality?.invalid ?? 0}` : "—"}</strong><small>隔离样本不评分、不训练；点开 K 线可看具体原因</small></article>
-          <article><span>News exposure</span><strong>{learningState === "ready" ? payload?.learning_curves?.news_exposed_rows ?? 0 : "—"}</strong><small>{learningState === "ready" ? `${payload?.learning_curves?.distinct_news_clusters ?? 0} 个可见 cluster` : "正在读取"}</small></article>
+          <article><span>文章 / Revision</span><strong>{learningState === "ready" ? `${payload?.learning_curves?.news_training_evidence?.distinct_articles ?? 0} / ${payload?.learning_curves?.news_training_evidence?.raw_article_revisions ?? 0}` : "—"}</strong><small>原始文章永久保留，Revision 单独计数</small></article>
+          <article><span>独立事件 / 决策暴露</span><strong>{learningState === "ready" ? `${payload?.learning_curves?.news_training_evidence?.distinct_eligible_events ?? 0} / ${payload?.learning_curves?.news_training_evidence?.decision_event_exposures ?? 0}` : "—"}</strong><small>同一事件每 5 分钟可见会形成暴露，但不会增加事件票数</small></article>
+          <article><span>有效事件权重</span><strong>{learningState === "ready" ? `${payload?.learning_curves?.news_training_evidence?.active_generation_weights?.OFFICIAL?.effective_event_count ?? 0} / ${payload?.learning_curves?.news_training_evidence?.active_generation_weights?.BROAD?.effective_event_count ?? 0}` : "—"}</strong><small>Official / Broad；每个事件在一代训练中的总预算相同</small></article>
           <article><span>训练数据代 / 运行</span><strong>{learningState === "ready" ? `${payload?.learning_curves?.training_generation_count ?? 0} / ${payload?.learning_curves?.training_run_count ?? 0}` : "—"}</strong><small>{learningState === "ready" ? `${payload?.learning_curves?.recovery_rebuild_count ?? 0} 次只是恢复重建，不算新一组` : "正在读取"}</small></article>
+          <article><span>当前原子 Generation</span><strong>{learningState === "ready" ? payload?.learning_curves?.active_generation?.generation_id?.slice(0, 8) ?? "待首次激活" : "—"}</strong><small>{payload?.learning_curves?.active_generation ? `5 套模型 · 截止 ${time(payload.learning_curves.active_generation.training_cutoff)}` : "完整生成后一次切换，不并行输出新旧代"}</small></article>
           <article><span>Next fit</span><strong>{learningState === "ready" ? payload?.learning_curves?.next_training_threshold ?? 96 : "—"}</strong><small>{learningState === "ready" ? `再有 ${Math.max(0, (payload?.learning_curves?.next_training_threshold ?? 96) - (payload?.training?.complete_rows ?? 0))} 条成熟数据训练下一组` : "正在读取"}</small></article>
         </div>
         {(payload?.learning_curves?.news_model_activation?.length ?? 0) > 0 && <section className={`news-model-activation ${inactiveNewsModels.length > 0 ? "is-inactive" : "is-active"}`}>
-          <div><span>NEWS MODEL CONTRACT</span><h3>{inactiveNewsModels.length > 0 ? "新闻模型尚未激活" : "新闻模型使用当前规则"}</h3></div>
-          <div className="news-model-activation-list">{(payload?.learning_curves?.news_model_activation ?? []).map(row => <p key={row.model_identity}><b>{MODEL_LABELS[row.model_identity] ?? row.model_identity}</b><span>{row.status === "ACTIVE" ? "已激活" : row.reason}</span></p>)}</div>
-          <small>{inactiveNewsModels.length > 0 ? "旧规则模型不会被静默复活；当前只保留黄金自身模型继续 Shadow。证据足够后会立即训练兼容的新新闻版本。" : "特征版本、来源资格版本和模型文件均与当前新闻规则一致。"}</small>
+          <div><span>NEWS MODEL CONTRACT</span><h3>{inactiveNewsModels.length > 0 ? "新闻 generation 尚未完整" : (payload?.learning_curves?.active_generation ? "新闻模型使用当前规则" : "当前 generation 持续学习")}</h3></div>
+          <div className="news-model-activation-list">{(payload?.learning_curves?.news_model_activation ?? []).map(row => <p key={row.model_identity}><b>{MODEL_LABELS[row.model_identity] ?? row.model_identity}</b><span>{row.status === "ACTIVE" ? "已激活" : row.status === "LEGACY_ACTIVE" ? "持续预测" : row.reason}</span></p>)}</div>
+          <small>{inactiveNewsModels.length > 0 ? "完整的五模型 generation 构建成功前不会切换。" : payload?.learning_curves?.active_generation ? "五套模型共享同一 generation、训练截止、事件快照和新闻规则。" : "现有五套模型继续产生预测；完整新 generation 就绪后一次替换，页面不会出现双代输出。"}</small>
         </section>}
         <div className="league-cost-note"><b>成本口径</b><span>收益已使用可执行 Bid/Ask（含 spread），并按入场、退出两边各 $30 / 百万美元成交额扣除 commission；slippage 暂按 0 的 Shadow 假设计算。仍未包含账户实际成交偏差，因此不是实盘 PnL。</span></div>
         <section className="graph-launch">

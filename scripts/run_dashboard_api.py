@@ -1083,6 +1083,15 @@ def _dashboard_payload(database: Path) -> dict:
             reverse=True,
         )
         news_evidence = news_evidence[:100]
+        raw_article_revisions = connection.execute(
+            "SELECT count(*) FROM news_revisions"
+        ).fetchone()[0]
+        distinct_articles = connection.execute(
+            "SELECT count(*) FROM (SELECT DISTINCT source,source_item_id FROM news_revisions)"
+        ).fetchone()[0]
+        decision_event_exposures = connection.execute(
+            "SELECT count(*) FROM news_decision_event_snapshots_v1"
+        ).fetchone()[0]
     finally:
         connection.close()
 
@@ -1384,6 +1393,9 @@ def _dashboard_payload(database: Path) -> dict:
         },
         "news_evidence_summary": {
             "policy_version": EVIDENCE_POLICY_VERSION,
+            "raw_article_revisions": raw_article_revisions,
+            "distinct_articles": distinct_articles,
+            "decision_event_exposures": decision_event_exposures,
             "total_events": len(all_news_evidence),
             "displayed_events": len(news_evidence),
             "broad_model_eligible": sum(

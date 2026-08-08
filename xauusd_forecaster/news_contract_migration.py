@@ -28,7 +28,7 @@ def _uuid(namespace: str, value: str) -> str:
 def _current_news_snapshot(decision_id: str, decision_time: datetime, news: dict) -> dict:
     values = {
         key: value for key, value in news.items()
-        if key not in {"official_visible_events", "broad_visible_events"}
+        if key not in {"official_visible_events", "broad_visible_events", "event_snapshots"}
     }
     payload = {
         "decision_id": decision_id,
@@ -111,6 +111,36 @@ def append_missing_current_news_snapshots(
             if cursor.rowcount <= 0:
                 continue
             appended += 1
+            for event in news.get("event_snapshots", []):
+                ledger.connection.execute(
+                    """INSERT OR IGNORE INTO news_event_catalog_v1 VALUES
+                    (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        event["event_version_id"], event["event_id"],
+                        event["policy_version"], event["event_occurred_at"],
+                        event["event_clock_source"], event["event_time_precision"],
+                        event["canonical_source"], event["canonical_source_item_id"],
+                        event["source_hash"], event["evidence_grade"],
+                        json.dumps(event["model_permissions"], separators=(",", ":")),
+                        json.dumps(event["reason_codes"], separators=(",", ":")),
+                        recomputed_at.isoformat(),
+                    ),
+                )
+                event_snapshot_hash = canonical_hash((
+                    decision_id, decision_time.isoformat(), event["event_id"],
+                    event["event_version_id"], event["model_permission"],
+                    event["raw_weight"], event["age_minutes"],
+                ))
+                ledger.connection.execute(
+                    """INSERT OR IGNORE INTO news_decision_event_snapshots_v1 VALUES
+                    (?,?,?,?,?,?,?,?,?)""",
+                    (
+                        decision_id, decision_time.isoformat(), event["event_id"],
+                        event["event_version_id"], event["policy_version"],
+                        event["model_permission"], event["raw_weight"],
+                        event["age_minutes"], event_snapshot_hash,
+                    ),
+                )
             ledger.connection.execute(
                 """INSERT OR IGNORE INTO evidence_lane_assignments
                 VALUES (?,?,?,?,?,?,?,NULL)""",
