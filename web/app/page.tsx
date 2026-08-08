@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import SystemStatePill from "./_components/SystemStatePill";
 
 type Decision = {
   decision_time: string;
@@ -168,9 +169,7 @@ export default function Home() {
         <div className="top-actions">
           <button className="audit-link" type="button" onClick={() => router.push("/status")}>系统状态</button>
           <button className="audit-link" type="button" onClick={() => router.push("/audit?view=decisions")}>新闻与决策 / 结果 <span aria-hidden="true">→</span></button>
-          <div className={`live-pill ${loading ? "is-pending" : online || marketClosed ? "is-live" : "is-down"}`}>
-            <span />{loading ? "CONNECTING" : online ? "LIVE" : marketClosed ? "MARKET CLOSED" : "OFFLINE"}
-          </div>
+          <SystemStatePill loading={loading} error={Boolean(error)} online={Boolean(payload?.system.online)} marketSession={payload?.system.market_session} />
         </div>
       </header>
 

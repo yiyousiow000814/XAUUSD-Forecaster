@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import SystemStatePill from "../_components/SystemStatePill";
 import LearningGraphModal from "./LearningGraphModal";
 
 type Prediction = {
@@ -658,9 +659,6 @@ export default function AuditPage() {
   const rowsUntilTraining = learningState === "ready" && payload?.training
     ? Math.max(0, payload.training.next_training_at - payload.training.complete_rows)
     : null;
-  const systemIsLive = statusState === "ready" && payload?.system?.online === true;
-  const marketClosed = statusState === "ready" && payload?.system?.market_session === "WEEKLY_CLOSED";
-  const systemLabel = statusState === "loading" ? "连接中" : statusState === "error" ? "状态未知" : systemIsLive ? "LIVE" : marketClosed ? "市场休市" : "OFFLINE";
   const combinedErrors = [
     statusError && `系统状态：${statusError}`,
     learningError && `学习进度：${learningError}`,
@@ -684,9 +682,7 @@ export default function AuditPage() {
         <div className="top-actions">
           <button className="audit-link" type="button" onClick={() => router.push("/status")}>系统状态</button>
           <button className="audit-link" type="button" onClick={() => router.replace("/")}>← 返回实时室</button>
-          <div className={`live-pill ${systemIsLive || marketClosed ? "is-live" : statusState === "loading" ? "is-loading" : "is-down"}`}>
-            <span />{systemLabel}
-          </div>
+          <SystemStatePill loading={statusState === "loading"} error={statusState === "error"} online={Boolean(payload?.system?.online)} marketSession={payload?.system?.market_session} />
         </div>
       </header>
 

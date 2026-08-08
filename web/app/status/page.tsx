@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import SystemStatePill from "../_components/SystemStatePill";
 
 type QuotaKey = {
   slot: number;
@@ -127,8 +128,6 @@ export default function StatusPage() {
   const quota = payload?.gemini_quota;
   const fallbackQuota = payload?.gemini_31_quota;
   const gemmaQuota = payload?.gemma_quota;
-  const marketClosed = payload?.system.market_session === "WEEKLY_CLOSED";
-
   return (
     <main className="status-main">
       <div className="grain" />
@@ -146,9 +145,7 @@ export default function StatusPage() {
 
       <section className="status-hero">
         <div><p className="eyebrow">LOCAL QUOTA LEDGER / PACIFIC DAY</p><h1>AI 模型使用状态</h1></div>
-        <div className={`live-pill ${payload === null && !error ? "is-pending" : (payload?.system.online || marketClosed) && !error ? "is-live" : "is-down"}`}>
-          <span />{payload === null && !error ? "正在读取状态" : marketClosed && !error ? "市场休市 · 新闻运行中" : payload?.system.online && !error ? "系统在线" : "状态离线"}
-        </div>
+        <SystemStatePill loading={payload === null && !error} error={Boolean(error)} online={Boolean(payload?.system.online)} marketSession={payload?.system.market_session} />
       </section>
 
       {error ? <div className="error-banner">状态读取失败：{error}</div> : null}

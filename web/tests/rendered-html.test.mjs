@@ -38,7 +38,7 @@ test("renders the Gemini quota status route", async () => {
   assert.match(html, /逐 Key 配额/);
   assert.match(html, /Pacific midnight/);
   assert.match(html, /组件与新闻源/);
-  assert.match(html, /正在读取状态/);
+  assert.match(html, /连接中/);
 });
 
 test("renders component and news-source health on a separate route", async () => {
@@ -49,6 +49,19 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(html, /系统组件状态/);
   assert.match(html, /新闻来源状态/);
   assert.match(html, /AI 模型用量/);
+});
+
+test("uses one Chinese system-state presentation across every dashboard page", () => {
+  const component = readFileSync(new URL("../app/_components/SystemStatePill.tsx", import.meta.url), "utf8");
+  assert.match(component, /连接中/);
+  assert.match(component, /系统在线/);
+  assert.match(component, /市场休市/);
+  assert.match(component, /状态离线/);
+  for (const path of ["../app/page.tsx", "../app/audit/page.tsx", "../app/status/page.tsx", "../app/health/page.tsx"]) {
+    const source = readFileSync(new URL(path, import.meta.url), "utf8");
+    assert.match(source, /SystemStatePill/);
+    assert.doesNotMatch(source, /MARKET CLOSED|CONNECTING|市场休市 · 新闻运行中/);
+  }
 });
 
 test("renders the news and decision audit route", async () => {
