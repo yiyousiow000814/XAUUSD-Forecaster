@@ -26,6 +26,15 @@ test("renders the live room with an audit-page navigation button", async () => {
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
 });
 
+test("does not show a redundant forecast warning while the market is closed", () => {
+  const source = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(source, /const forecastStatus = marketClosed\s*\? null/);
+  assert.match(source, /forecastStatus && <strong className=\{`forecast-state/);
+  assert.match(source, /等待行情恢复/);
+  assert.match(source, /等待最新预测/);
+  assert.doesNotMatch(source, /当前不可参考/);
+});
+
 test("renders the Gemini quota status route", async () => {
   const response = await render("/status");
   assert.equal(response.status, 200);
@@ -291,6 +300,17 @@ test("keeps the learning page focused and folds secondary research below the sco
   assert.doesNotMatch(page, /learning-audit-details|NEWS MODEL CONTRACT/);
   assert.doesNotMatch(page, /league-cost-note/);
   assert.match(page, /仓位与退出研究/);
+});
+
+test("keeps dashboard navigation and graph controls usable on phones", () => {
+  const page = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(page, /ref=\{auditTabsRef\} className="audit-tabs"/);
+  assert.match(page, /active\.offsetLeft - \(nav\.clientWidth - active\.clientWidth\) \/ 2/);
+  assert.match(css, /\.topbar \{ align-items:stretch; flex-direction:column/);
+  assert.match(css, /\.audit-tabs \{ position:sticky; top:0; display:flex;[\s\S]*?overflow-x:auto/);
+  assert.match(css, /\.graph-modal>nav \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(css, /\.graph-modal,\.graph-modal\.graph-modal-curve,\.graph-modal\.graph-modal-versions \{ width:100vw; height:100dvh/);
 });
 
 test("explains U5 as a risk scale rather than a probability", () => {
