@@ -17,8 +17,14 @@ from sqlite3 import Connection
 
 from .forward_ledger import ForwardLedger
 from .gemini_quota import GeminiQuotaLedger
-from .news_time import MAX_ACTIONABLE_DISCOVERY_DELAY
 from .news_relevance import google_news_item_is_relevant
+from .news_impact import (
+    IMPACT_MODEL,
+    IMPACT_PROMPT_VERSION,
+    IMPACT_RESPONSE_SCHEMA,
+    pending_impact_records,
+    validate_impact_assessment,
+)
 
 
 UTC = timezone.utc
@@ -32,6 +38,8 @@ GEMINI_MAX_PARALLEL_REQUESTS = 3
 GEMINI_DAILY_PRIORITY_RESERVE = 150
 GEMMA_REQUESTS_PER_DAY_PER_KEY = 15_000
 GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL = 20
+GEMMA_TITLE_BATCH_LIMIT = 10
+GEMMA_IMPACT_BATCH_LIMIT = 10
 PROMPT_VERSION = "news-json-v14-material-event-evidence"
 COMPATIBLE_PROMPT_VERSIONS = (
     PROMPT_VERSION,
@@ -75,15 +83,6 @@ def pending_annotation_records(
          AND a.llm_model_version IN (?, ?) AND a.prompt_version IN (?, ?)
         WHERE a.annotation_id IS NULL
           AND length(trim(COALESCE(n.body, ''))) >= 240
-          AND (
-            n.source_published_time IS NULL
-            OR (
-              n.source_published_time >= (
-                SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH')
-              AND (julianday(n.collector_first_seen_time)
-                   - julianday(n.source_published_time)) <= ?
-            )
-          )
           AND NOT EXISTS (
             SELECT 1 FROM news_revisions newer
             WHERE newer.source=n.source
@@ -128,7 +127,6 @@ def pending_annotation_records(
         LIMIT ?""",
         (
             *compatible_models, PROMPT_VERSION, PROMPT_VERSION,
-            MAX_ACTIONABLE_DISCOVERY_DELAY.total_seconds() / 86400.0,
             expected_model_identity, PROMPT_VERSION,
             now.isoformat(timespec="microseconds"), max(1, limit),
         ),
@@ -167,15 +165,6 @@ def completed_annotation_records(
               AND a.revision_number=n.revision_number
               AND a.llm_model_version IN (?, ?)
               AND a.prompt_version=?)
-          AND (
-            n.source_published_time IS NULL
-            OR (
-              n.source_published_time >= (
-                SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH')
-              AND (julianday(n.collector_first_seen_time)
-                   - julianday(n.source_published_time)) <= ?
-            )
-          )
           AND NOT EXISTS (
             SELECT 1 FROM news_revisions newer
             WHERE newer.source=n.source
@@ -198,7 +187,6 @@ def completed_annotation_records(
         LIMIT ?""",
         (
             *compatible_models, PROMPT_VERSION,
-            MAX_ACTIONABLE_DISCOVERY_DELAY.total_seconds() / 86400.0,
             max(1, limit),
         ),
     ).fetchall()
@@ -431,7 +419,7 @@ def translate_pending_headlines(
         keys,
         quota,
         requests_per_key=GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
-        batch_limit=GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
+        batch_limit=GEMMA_TITLE_BATCH_LIMIT,
     )
     capacity = request_pool.available_batch_capacity()
     if capacity <= 0:
@@ -580,6 +568,78 @@ def translate_pending_headlines(
                     **failure,
                 }
             )
+    return statuses
+
+
+def assess_pending_news_impacts(
+    ledger: ForwardLedger,
+    *,
+    api_key: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, object]]:
+    """Classify semantic impact lifetime with frozen Gemma 4 buckets."""
+    keys = configured_gemini_api_keys(api_key)
+    if not keys:
+        return [{"status": "DISABLED", "reason": "GEMINI_API_KEY_MISSING"}]
+    quota = GeminiQuotaLedger(
+        ledger.path.parent / "gemma-quota.json",
+        daily_limit=GEMMA_REQUESTS_PER_DAY_PER_KEY,
+    )
+    request_pool = _GeminiRequestPool(
+        keys, quota,
+        requests_per_key=GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
+        batch_limit=GEMMA_IMPACT_BATCH_LIMIT,
+    )
+    capacity = request_pool.available_batch_capacity()
+    if capacity <= 0:
+        return [{"status": "DISABLED", "reason": "GEMMA_DAILY_QUOTA_EXHAUSTED"}]
+    effective_limit = capacity if limit is None else min(max(1, limit), capacity)
+    pending = pending_impact_records(
+        ledger.connection, limit=max(effective_limit * 4, 100),
+    )[:effective_limit]
+    statuses = []
+    for index, row in enumerate(pending):
+        started = datetime.now(UTC)
+        try:
+            result, exact_model = request_pool.call_impact(index, row)
+            assessed = datetime.now(UTC)
+            identity = "|".join((
+                str(row["annotation_id"]), exact_model, IMPACT_PROMPT_VERSION,
+            ))
+            ledger.append_news_impact_assessment({
+                "assessment_id": str(uuid.uuid5(uuid.NAMESPACE_URL, identity)),
+                "source": row["source"],
+                "source_item_id": row["source_item_id"],
+                "revision_number": row["revision_number"],
+                "raw_content_hash": row["content_hash"],
+                "annotation_id": row["annotation_id"],
+                "llm_model_version": exact_model,
+                "prompt_version": IMPACT_PROMPT_VERSION,
+                "parse_started_at": started,
+                "assessed_at": assessed,
+                **result,
+            })
+            statuses.append({
+                "status": "OK", "source": row["source"],
+                "source_item_id": row["source_item_id"],
+                "assessment_id": str(uuid.uuid5(uuid.NAMESPACE_URL, identity)),
+                "impact_class": result["impact_class"],
+            })
+        except GeminiBatchCapacityExhausted as error:
+            statuses.append({
+                "status": "DEFERRED", "source": row["source"],
+                "source_item_id": row["source_item_id"], "reason": str(error),
+            })
+        except Exception as error:
+            failure = _append_impact_failure(
+                ledger, row, error, model_version=IMPACT_MODEL,
+            )
+            statuses.append({
+                "status": "ERROR", "source": row["source"],
+                "source_item_id": row["source_item_id"],
+                "error_type": type(error).__name__, "error": str(error)[:500],
+                **failure,
+            })
     return statuses
 
 
@@ -753,6 +813,28 @@ class _GeminiRequestPool:
                 "Gemini RPM slots used; retained for the next batch"
             )
         raise RuntimeError("All title translation models failed validation") from last_error
+
+    def call_impact(
+        self, start_index: int, row: dict
+    ) -> tuple[dict, str]:
+        last_error: Exception | None = None
+        for offset in range(len(self.api_keys)):
+            key = self.api_keys[(start_index + offset) % len(self.api_keys)]
+            if not self._reserve(key):
+                continue
+            try:
+                return _call_gemini_impact(key, row)
+            except (ValueError, KeyError, json.JSONDecodeError) as error:
+                last_error = error
+            except urllib.error.HTTPError as error:
+                last_error = error
+                if error.code not in {401, 403, 429, 500, 502, 503, 504}:
+                    raise
+        if last_error is None:
+            raise GeminiBatchCapacityExhausted(
+                "Gemma RPM slots used; retained for the next batch"
+            )
+        raise RuntimeError("All Gemma impact requests failed validation") from last_error
 
 
 def _call_gemini(
@@ -948,6 +1030,53 @@ def _call_gemini_title(api_key: str, model: str, headline: str) -> tuple[str, st
     # such as "Public Storage：优先股… (PSA) - Seeking Alpha".
     _require_simplified_chinese(headline_zh, "headline_zh", 2, 4.0, 60)
     return headline_zh, str(envelope.get("modelVersion") or model)
+
+
+def _call_gemini_impact(api_key: str, row: dict) -> tuple[dict, str]:
+    annotation = dict(row.get("annotation") or {})
+    prompt = (
+        "判断以下新闻事件从事件发生或发布时间起，通常可能影响XAUUSD相关市场信息多久。"
+        "你只能依据此新闻正文和已给出的事件抽取，不得使用后来发生的事实，不得预测交易方向。"
+        "IMMEDIATE=最长2小时；SAME_DAY=最长12小时；DATA_RELEASE=最长24小时；"
+        "POLICY_SHIFT=最长72小时；ONGOING_EVENT=最长7天；BACKGROUND=不进入模型。"
+        "普通转载、同一事实确认或换标题必须选DUPLICATE_REPORT，不能延长事件寿命；"
+        "只有正文包含新的决定、数据、行动、升级、降级或正式后续才是MATERIAL_UPDATE。"
+        "reason_zh用一句简体中文说明正文依据。只返回JSON。\n"
+        f"PUBLISHED_AT: {row.get('source_published_time') or ''}\n"
+        f"FIRST_SEEN_AT: {row.get('collector_first_seen_time') or ''}\n"
+        f"EVENT_EXTRACTION: {json.dumps(annotation, ensure_ascii=False, separators=(',', ':'))}\n"
+        f"PRIOR_SAME_EVENT_RECORDS: {json.dumps(row.get('prior_event_context') or [], ensure_ascii=False, separators=(',', ':'))}\n"
+        "NEWS_START\n"
+        f"Headline: {row.get('headline') or ''}\nFull content: {row.get('body') or ''}\n"
+        "NEWS_END"
+    )
+    payload = {
+        "systemInstruction": {"parts": [{"text": (
+            "你是受严格约束的新闻影响寿命分类器，不是交易顾问。"
+            "必须遵守固定枚举和时间上限。"
+        )}]},
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": IMPACT_RESPONSE_SCHEMA,
+            "maxOutputTokens": 500,
+            "temperature": 0,
+        },
+    }
+    request = urllib.request.Request(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{IMPACT_MODEL}:generateContent",
+        data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=120.0) as response:
+        envelope = json.loads(response.read())
+    result = _decode_json_object(
+        envelope["candidates"][0]["content"]["parts"][0]["text"]
+    )
+    validated = validate_impact_assessment(result)
+    _require_simplified_chinese(validated["reason_zh"], "reason_zh", 4, 0.5, 12)
+    return validated, str(envelope.get("modelVersion") or IMPACT_MODEL)
 
 
 def _require_title_numbers_preserved(translated: str, source: str) -> None:
@@ -1176,6 +1305,61 @@ def _append_llm_failure(
             "is_terminal": terminal,
         }
     )
+    return {
+        "retry_state": "DEAD_LETTER" if terminal else "BACKING_OFF",
+        "attempt_number": attempt,
+        "next_retry_at": next_retry.isoformat() if next_retry else None,
+    }
+
+
+def _append_impact_failure(
+    ledger: ForwardLedger,
+    row: dict,
+    error: Exception,
+    *,
+    model_version: str,
+) -> dict[str, object]:
+    error_type = type(error).__name__
+    normalized = re.sub(r"\s+", " ", str(error)).strip()[:500]
+    signature = hashlib.sha256(
+        f"{error_type}|{normalized}".encode("utf-8")
+    ).hexdigest()
+    prior = ledger.connection.execute(
+        """SELECT attempt_number,error_signature FROM news_impact_failures_v1
+        WHERE annotation_id=? AND llm_model_version=? AND prompt_version=?
+        ORDER BY attempt_number DESC LIMIT 1""",
+        (row["annotation_id"], model_version, IMPACT_PROMPT_VERSION),
+    ).fetchone()
+    attempt = 1 if prior is None else int(prior["attempt_number"]) + 1
+    transient = getattr(error, "code", None) in {429, 500, 502, 503, 504}
+    same_error = prior is not None and prior["error_signature"] == signature
+    terminal = attempt >= 5 if transient else ((same_error and attempt >= 2) or attempt >= 3)
+    failed_at = datetime.now(UTC)
+    if terminal:
+        next_retry = None
+    elif transient:
+        next_retry = failed_at + timedelta(
+            minutes=(15, 60, 360, 720)[min(attempt - 1, 3)]
+        )
+    else:
+        next_retry = failed_at + timedelta(hours=6)
+    identity = "|".join((
+        str(row["annotation_id"]), model_version, IMPACT_PROMPT_VERSION,
+        str(attempt), signature,
+    ))
+    ledger.append_news_impact_failure({
+        "failure_id": str(uuid.uuid5(uuid.NAMESPACE_URL, identity)),
+        "source": row["source"], "source_item_id": row["source_item_id"],
+        "revision_number": row["revision_number"],
+        "raw_content_hash": row["content_hash"],
+        "annotation_id": row["annotation_id"],
+        "llm_model_version": model_version,
+        "prompt_version": IMPACT_PROMPT_VERSION,
+        "attempt_number": attempt, "error_type": error_type,
+        "error_signature": signature, "error": normalized,
+        "failed_at": failed_at, "next_retry_at": next_retry,
+        "is_terminal": terminal,
+    })
     return {
         "retry_state": "DEAD_LETTER" if terminal else "BACKING_OFF",
         "attempt_number": attempt,

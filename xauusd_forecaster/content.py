@@ -17,7 +17,6 @@ from bs4 import BeautifulSoup
 from pypdf import PdfReader
 
 from .forward_ledger import ForwardLedger
-from .news_time import MAX_ACTIONABLE_DISCOVERY_DELAY
 from .news_relevance import google_news_item_is_relevant
 
 
@@ -175,15 +174,6 @@ def hydrate_pending_non_fed_content(
     rows = ledger.connection.execute(
         f"""SELECT n.* FROM news_revisions n
             WHERE n.source IN ({placeholders})
-              AND (
-                n.source_published_time IS NULL
-                OR (
-                  n.source_published_time >= (
-                    SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH')
-                  AND (julianday(n.collector_first_seen_time)
-                       - julianday(n.source_published_time)) <= ?
-                )
-              )
               AND NOT EXISTS (
                 SELECT 1 FROM news_revisions newer
                 WHERE newer.source=n.source
@@ -231,7 +221,6 @@ def hydrate_pending_non_fed_content(
             LIMIT ?""",
         (
             *NON_FED_FULL_TEXT_SOURCES,
-            MAX_ACTIONABLE_DISCOVERY_DELAY.total_seconds() / 86400.0,
             fetched_at.astimezone(UTC).isoformat(timespec="microseconds"),
             max(limit * 25, 250),
         ),

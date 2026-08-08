@@ -50,6 +50,9 @@ NEWS_INDEX_FIELDS = (
     "content_error_type", "annotation_status", "annotation_reason_code",
     "annotation_reason",
     "model_visibility", "parsed_at", "emerging_topic_zh",
+    "impact_status", "impact_class", "impact_event_state",
+    "impact_update_type", "impact_assessed_at", "impact_expires_at",
+    "impact_reason_zh",
 )
 MARKET_DECISION_FIELDS = (
     "source_decision_id", "decision_time", "model_identity",

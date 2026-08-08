@@ -35,7 +35,7 @@ def _preview_module():
     return module
 
 
-def test_preview_backfills_exact_reason_from_older_production_snapshot() -> None:
+def test_preview_does_not_call_late_aggregated_news_expired() -> None:
     module = _preview_module()
     news_index = {"items": [{
         "annotation_status": "NOT_REQUIRED",
@@ -49,8 +49,8 @@ def test_preview_backfills_exact_reason_from_older_production_snapshot() -> None
     )
 
     row = news_index["items"][0]
-    assert row["annotation_reason_code"] == "LATE_DISCOVERY"
-    assert row["annotation_reason"] == "发现太晚：发布后 2小时53分 才被系统收到"
+    assert row["annotation_reason_code"] == "SEARCH_LEAD"
+    assert row["annotation_reason"] == "搜索线索：来自聚合发现源，不是独立官方发布"
 
 
 def test_sync_retries_transient_disconnect(monkeypatch) -> None:
@@ -220,8 +220,8 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
             "content_fetch_status": "UNAVAILABLE",
             "content_error_type": "HTTPError",
             "annotation_status": "NOT_REQUIRED",
-            "annotation_reason_code": "LATE_DISCOVERY",
-            "annotation_reason": "发现太晚：发布后 2小时 才被系统收到",
+            "annotation_reason_code": "SEARCH_LEAD",
+            "annotation_reason": "搜索线索：来自聚合发现源，不是独立官方发布",
         } for index in range(100)],
         "recent_decisions": [{"id": index} for index in range(30)],
         "news_evidence": [{"id": index} for index in range(100)],
@@ -246,8 +246,8 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
     assert detail_rows[0]["payload"]["summary_zh"] == body
     assert index_rows[0]["content_fetch_status"] == "UNAVAILABLE"
     assert index_rows[0]["content_error_type"] == "HTTPError"
-    assert index_rows[0]["annotation_reason_code"] == "LATE_DISCOVERY"
-    assert index_rows[0]["annotation_reason"].startswith("发现太晚")
+    assert index_rows[0]["annotation_reason_code"] == "SEARCH_LEAD"
+    assert index_rows[0]["annotation_reason"].startswith("搜索线索")
     assert "content_fetch_status" not in detail_rows[0]["payload"]
     assert "annotation_reason" not in detail_rows[0]["payload"]
     assert len(detail_rows[0]["detail_key"]) == 64

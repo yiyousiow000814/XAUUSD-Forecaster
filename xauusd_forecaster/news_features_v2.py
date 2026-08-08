@@ -10,7 +10,7 @@ from .evidence_v2 import ELIGIBILITY_VERSION
 from .factors import MACRO_FEATURE_MAP, NEWS_FEATURES
 from .forward_ledger import canonical_hash
 from .news_evidence import BROAD_NEWS_FEATURES, event_evidence_rows
-from .news_time import category_time_rule
+from .news_impact import impact_time_rule
 
 
 SOURCE_RULES = {
@@ -80,7 +80,7 @@ def frozen_rule_rows() -> list[tuple[str, str, int, int, str]]:
 def event_raw_weight(row: dict) -> float:
     """Return the event's live-known contribution before generation budgeting."""
     age_minutes = max(0.0, float(row.get("economic_age_minutes") or 0.0))
-    _, half_life_minutes = category_time_rule(str(row.get("primary_category") or ""))
+    _, half_life_minutes = impact_time_rule(str(row.get("impact_class") or "BACKGROUND"))
     freshness = math.exp(-math.log(2.0) * age_minutes / half_life_minutes)
     return freshness * float(row["confidence"]) * max(0.05, float(row["novelty"]))
 
@@ -96,7 +96,7 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
     evidence = []
     for row in official_events:
         age_minutes = float(row["economic_age_minutes"])
-        _, half_life_minutes = category_time_rule(str(row.get("primary_category") or ""))
+        _, half_life_minutes = impact_time_rule(str(row.get("impact_class") or "BACKGROUND"))
         freshness = math.exp(-math.log(2.0) * age_minutes / half_life_minutes)
         confidence = float(row["confidence"])
         novelty = float(row["novelty"])
@@ -154,7 +154,10 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
     broad_evidence = []
     for row in broad_events:
         age_minutes = float(row["economic_age_minutes"])
-        freshness = math.exp(-math.log(2.0) * age_minutes / 360.0)
+        _, half_life_minutes = impact_time_rule(
+            str(row.get("impact_class") or "BACKGROUND")
+        )
+        freshness = math.exp(-math.log(2.0) * age_minutes / half_life_minutes)
         weight = event_raw_weight(row)
         broad_weight_sum += weight
         broad_totals["broad_news_hawkishness"] += weight * row["hawkishness"]

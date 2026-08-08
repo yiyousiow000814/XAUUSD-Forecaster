@@ -46,6 +46,12 @@ from xauusd_forecaster.news_evidence import (  # noqa: E402
 )
 from xauusd_forecaster.news_relevance import google_news_item_is_relevant  # noqa: E402
 from xauusd_forecaster.news_features_v2 import SOURCE_RULES  # noqa: E402
+from xauusd_forecaster.news_impact import (  # noqa: E402
+    IMPACT_MODEL,
+    IMPACT_PROMPT_VERSION,
+    impact_is_actionable,
+    impact_time_rule,
+)
 from xauusd_forecaster.storylines import STORYLINE_POLICY_VERSION, temporal_event_graph  # noqa: E402
 from xauusd_forecaster.execution_learning import execution_learning_status  # noqa: E402
 from xauusd_forecaster.market_session import expected_weekly_closure  # noqa: E402
@@ -406,17 +412,61 @@ def _not_required_reason(item: dict, forward_epoch: str) -> tuple[str, str]:
     epoch = datetime.fromisoformat(forward_epoch)
     if published < epoch:
         return "HISTORICAL_MATERIAL", "历史资料：发布时间早于系统开始记录"
-    first_seen = datetime.fromisoformat(str(item["collector_first_seen_time"]))
-    delay_seconds = max(0.0, (first_seen - published).total_seconds())
-    if delay_seconds > 3600:
-        hours, remainder = divmod(int(delay_seconds), 3600)
-        minutes = remainder // 60
-        delay = f"{hours}小时{minutes}分" if hours else f"{minutes}分钟"
-        return "LATE_DISCOVERY", f"发现太晚：发布后 {delay} 才被系统收到"
     source = str(item.get("source") or "")
     if source.startswith("google_news_") or source.startswith("gdelt_"):
         return "SEARCH_LEAD", "搜索线索：来自聚合发现源，不是独立官方发布"
     return "DUPLICATE_CONTENT", "重复内容：同一事件已有正文更完整的版本"
+
+
+def _apply_impact_status(item: dict, now: datetime) -> None:
+    """Expose the current Gemma lifetime decision in plain, auditable states."""
+    if not item.get("parsed_at"):
+        item["impact_status"] = "PENDING_ANNOTATION"
+        return
+    if not item.get("impact_assessed_at"):
+        item["impact_status"] = "PENDING_IMPACT"
+        return
+
+    update_type = str(item.get("impact_update_type") or "")
+    impact_class = str(item.get("impact_class") or "BACKGROUND")
+    if not impact_is_actionable({
+        "impact_class": impact_class,
+        "event_state": item.get("impact_event_state"),
+        "update_type": update_type,
+    }):
+        item["impact_status"] = {
+            "DUPLICATE_REPORT": "DUPLICATE_REPORT",
+            "COMMENTARY": "COMMENTARY_ONLY",
+            "HISTORICAL_CONTEXT": "HISTORICAL_CONTEXT",
+        }.get(update_type, "BACKGROUND")
+        item["model_visibility"] = "MODEL_INELIGIBLE"
+        return
+
+    published_raw = item.get("source_published_time")
+    if not published_raw:
+        item["impact_status"] = "MISSING_PUBLICATION_TIME"
+        item["model_visibility"] = "MODEL_INELIGIBLE"
+        return
+    published = datetime.fromisoformat(str(published_raw))
+    max_age, _ = impact_time_rule(impact_class)
+    expires_at = published + max_age
+    item["impact_expires_at"] = expires_at.isoformat(timespec="microseconds")
+    first_seen = datetime.fromisoformat(str(item["collector_first_seen_time"]))
+    assessed_at = datetime.fromisoformat(str(item["impact_assessed_at"]))
+    available_at = max(first_seen, assessed_at)
+    item["impact_available_at"] = available_at.isoformat(timespec="microseconds")
+    if first_seen >= expires_at:
+        item["impact_status"] = "EXPIRED_ON_RECEIPT"
+        item["model_visibility"] = "IMPACT_EXPIRED"
+    elif available_at >= expires_at:
+        item["impact_status"] = "EXPIRED_BEFORE_AVAILABLE"
+        item["model_visibility"] = "IMPACT_EXPIRED"
+    elif now >= expires_at:
+        item["impact_status"] = "EXPIRED"
+        item["model_visibility"] = "IMPACT_EXPIRED"
+    else:
+        item["impact_status"] = "ACTIVE"
+        item["model_visibility"] = "MODEL_VISIBLE"
 
 
 def _recent_market_chart(
@@ -699,6 +749,12 @@ def _dashboard_payload(database: Path) -> dict:
                       COALESCE(a.llm_model_version, legacy.llm_model_version, legacy_v3.llm_model_version) AS llm_model_version,
                       COALESCE(a.prompt_version, legacy.prompt_version, legacy_v3.prompt_version) AS prompt_version,
                        COALESCE(a.parsed_at, legacy.parsed_at, legacy_v3.parsed_at) AS parsed_at,
+                       i.impact_class,
+                       i.event_state AS impact_event_state,
+                       i.update_type AS impact_update_type,
+                       i.confidence AS impact_confidence,
+                       i.reason_zh AS impact_reason_zh,
+                       i.assessed_at AS impact_assessed_at,
                        CASE WHEN n.source_published_time IS NOT NULL THEN
                          (julianday(n.collector_first_seen_time)-julianday(n.source_published_time))*86400
                        END AS collection_delay_seconds,
@@ -771,7 +827,11 @@ def _dashboard_payload(database: Path) -> dict:
                 AND legacy_v3.source_item_id=n.source_item_id
                 AND legacy_v3.revision_number=n.revision_number
                 AND legacy_v3.llm_model_version='gemini-3.5-flash-lite'
-                AND legacy_v3.prompt_version='news-json-v6-headline-and-summary-zh-verbatim-numbers'
+                 AND legacy_v3.prompt_version='news-json-v6-headline-and-summary-zh-verbatim-numbers'
+               LEFT JOIN news_impact_assessments_v1 i
+                 ON i.annotation_id=a.annotation_id
+                AND i.llm_model_version=?
+                AND i.prompt_version=?
                LEFT JOIN news_llm_failures f
                  ON f.failure_id=(
                    SELECT latest_f.failure_id
@@ -825,7 +885,10 @@ def _dashboard_payload(database: Path) -> dict:
                         n.collector_first_seen_time DESC,
                         n.source, n.source_item_id
                LIMIT 1000""",
-            (now.isoformat(timespec="microseconds"), INVALID_CHINESE_TITLE),
+            (
+                now.isoformat(timespec="microseconds"), INVALID_CHINESE_TITLE,
+                IMPACT_MODEL, IMPACT_PROMPT_VERSION,
+            ),
         ).fetchall()
         annotation_queue = connection.execute(
             """SELECT
@@ -1261,7 +1324,7 @@ def _dashboard_payload(database: Path) -> dict:
         if source_tier == "COLLECT_ONLY":
             continue
         item["model_visibility"] = (
-            "MODEL_VISIBLE"
+            "IMPACT_PENDING"
             if source_tier == "MODEL_ELIGIBLE" and item.get("parsed_at")
             else "NOT_YET_PARSED"
             if source_tier == "MODEL_ELIGIBLE"
@@ -1287,6 +1350,8 @@ def _dashboard_payload(database: Path) -> dict:
             reason_code, reason = _not_required_reason(item, epoch)
             item["annotation_reason_code"] = reason_code
             item["annotation_reason"] = reason
+        if source_tier == "MODEL_ELIGIBLE":
+            _apply_impact_status(item, now)
         # The reader page shows every retained article with readable source
         # content. Parsing is a separate state: an unparsed article remains
         # visible for audit, but model_visibility prevents it from entering

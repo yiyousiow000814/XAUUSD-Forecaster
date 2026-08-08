@@ -360,7 +360,7 @@ def test_dashboard_shows_readable_unparsed_news_without_model_visibility(tmp_pat
     assert payload["counts"]["model_candidate_news_items"] == 0
 
 
-def test_dashboard_marks_readable_late_news_as_not_requiring_annotation(tmp_path) -> None:
+def test_dashboard_keeps_readable_late_news_for_semantic_impact_review(tmp_path) -> None:
     now = datetime(2026, 8, 8, 1, 0, tzinfo=UTC)
     database = tmp_path / "forward.sqlite3"
     ledger = ForwardLedger(database, now=now - timedelta(hours=3))
@@ -383,12 +383,66 @@ def test_dashboard_marks_readable_late_news_as_not_requiring_annotation(tmp_path
     payload = _dashboard_module()._dashboard_payload(database)
 
     assert len(payload["recent_news"]) == 1
-    assert payload["recent_news"][0]["annotation_status"] == "NOT_REQUIRED"
-    assert payload["recent_news"][0]["annotation_reason_code"] == "LATE_DISCOVERY"
-    assert payload["recent_news"][0]["annotation_reason"] == (
-        "发现太晚：发布后 2小时0分 才被系统收到"
-    )
-    assert payload["annotation_queue"]["queued"] == 0
+    row = payload["recent_news"][0]
+    assert row["annotation_status"] == "QUEUED"
+    assert row["impact_status"] == "PENDING_ANNOTATION"
+    assert "annotation_reason_code" not in row
+    assert payload["annotation_queue"]["queued"] == 1
+
+
+def test_dashboard_explains_active_and_expired_on_receipt_impacts(tmp_path) -> None:
+    now = datetime.now(UTC)
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=now - timedelta(hours=4))
+    for item_id, published_at, impact_class in (
+        ("active", now - timedelta(hours=2), "SAME_DAY"),
+        ("expired-on-receipt", now - timedelta(hours=3), "IMMEDIATE"),
+    ):
+        first_seen = now - timedelta(minutes=30)
+        body = f"official impact evidence {item_id} " * 30
+        digest = hashlib.sha256(body.encode()).hexdigest()
+        ledger.append_news_revision({
+            "source": "us_treasury_press_releases",
+            "source_item_id": item_id,
+            "source_published_time": published_at,
+            "collector_first_seen_time": first_seen,
+            "fetched_time": first_seen,
+            "headline": item_id,
+            "body": body,
+            "content_hash": digest,
+            "cluster_id": item_id,
+        })
+        parsed_at = first_seen + timedelta(seconds=1)
+        _append_basic_annotation(
+            ledger, source="us_treasury_press_releases", item_id=item_id,
+            digest=digest, parsed_at=parsed_at,
+        )
+        ledger.append_news_impact_assessment({
+            "assessment_id": f"impact-{item_id}",
+            "source": "us_treasury_press_releases",
+            "source_item_id": item_id,
+            "revision_number": 1,
+            "raw_content_hash": digest,
+            "annotation_id": f"annotation-us_treasury_press_releases-{item_id}",
+            "llm_model_version": "gemma-4-31b-it",
+            "prompt_version": "news-impact-v1-fixed-lifetime-classes",
+            "parse_started_at": parsed_at,
+            "assessed_at": parsed_at + timedelta(seconds=1),
+            "impact_class": impact_class,
+            "event_state": "ACTIVE",
+            "update_type": "NEW_EVENT",
+            "confidence": 0.9,
+            "reason_zh": "测试有效期判断。",
+        })
+    ledger.connection.close()
+
+    payload = _dashboard_module()._dashboard_payload(database)
+    rows = {row["source_item_id"]: row for row in payload["recent_news"]}
+
+    assert rows["active"]["impact_status"] == "ACTIVE"
+    assert rows["active"]["model_visibility"] == "MODEL_VISIBLE"
+    assert rows["expired-on-receipt"]["impact_status"] == "EXPIRED_ON_RECEIPT"
+    assert rows["expired-on-receipt"]["model_visibility"] == "IMPACT_EXPIRED"
 
 
 def test_dashboard_uses_gemini_controlled_category_before_source_guess() -> None:

@@ -10,10 +10,16 @@ from collections import defaultdict
 from datetime import datetime
 
 from .forward_ledger import canonical_hash
-from .news_time import assess_news_time, category_time_rule
+from .news_impact import (
+    IMPACT_MODEL,
+    IMPACT_PROMPT_VERSION,
+    impact_is_actionable,
+    impact_time_rule,
+)
+from .news_time import NewsTimeAssessment, assess_news_time
 
 
-EVIDENCE_POLICY_VERSION = "news-event-evidence-v4-unified-event-clock"
+EVIDENCE_POLICY_VERSION = "news-event-evidence-v5-gemma-impact-lifetime"
 LEGACY_V3_EVIDENCE_POLICY_VERSION = "news-event-evidence-v2-economic-time"
 CURRENT_EVENT_PROMPT_VERSION = "news-json-v14-material-event-evidence"
 ACTIONABLE_RECORD_KINDS = frozenset({
@@ -220,10 +226,20 @@ def event_evidence_rows_from_connection(
         """SELECT n.*,a.annotation_id,a.event_type,a.entities_json,a.hawkishness,
                   a.inflation_impulse,a.growth_impulse,a.geopolitical_risk,
                   a.usd_impulse,a.novelty,a.confidence,a.annotation_json,a.parsed_at,
-                  a.prompt_version,a.llm_model_version
+                  a.prompt_version,a.llm_model_version,
+                  i.assessment_id AS impact_assessment_id,
+                  i.assessed_at AS impact_assessed_at,
+                  i.impact_class,i.event_state AS impact_event_state,
+                  i.update_type AS impact_update_type,
+                  i.confidence AS impact_confidence,
+                  i.reason_zh AS impact_reason_zh
            FROM news_revisions n JOIN news_annotations a
              ON a.source=n.source AND a.source_item_id=n.source_item_id
             AND a.revision_number=n.revision_number AND a.raw_content_hash=n.content_hash
+           LEFT JOIN news_impact_assessments_v1 i
+             ON i.annotation_id=a.annotation_id
+            AND i.llm_model_version=? AND i.prompt_version=?
+            AND i.assessed_at<=?
            WHERE n.collector_first_seen_time<=? AND a.parsed_at<=?
              AND length(trim(coalesce(n.body,'')))>=240
              AND a.llm_model_version IN ('gemini-3.5-flash-lite','gemini-3.1-flash-lite')
@@ -239,7 +255,7 @@ def event_evidence_rows_from_connection(
                  AND newer.revision_number>n.revision_number
                  AND newer.collector_first_seen_time<=?)
            ORDER BY a.parsed_at DESC,a.annotation_id DESC""",
-        (cutoff, cutoff, cutoff),
+        (IMPACT_MODEL, IMPACT_PROMPT_VERSION, cutoff, cutoff, cutoff, cutoff),
     ).fetchall()
     latest: dict[tuple[str, str, int], dict] = {}
     for raw in raw_rows:
@@ -263,11 +279,39 @@ def event_evidence_rows_from_connection(
                 row, decision_time=decision_time, forward_epoch=forward_epoch,
             )
         else:
-            max_age, _ = category_time_rule(annotation.get("primary_category"))
-            row["time_assessment"] = assess_news_time(
+            impact = (
+                {
+                    "impact_class": row.get("impact_class"),
+                    "event_state": row.get("impact_event_state"),
+                    "update_type": row.get("impact_update_type"),
+                }
+                if row.get("impact_assessment_id") else None
+            )
+            max_age, _ = impact_time_rule(
+                str(row.get("impact_class") or "BACKGROUND")
+            )
+            timing = assess_news_time(
                 row, decision_time=decision_time, forward_epoch=forward_epoch,
                 max_actionable_age=max_age,
+                max_discovery_delay=None,
+                allow_pre_forward_publication=True,
             )
+            if not impact_is_actionable(impact):
+                if impact is None:
+                    reason = "IMPACT_NOT_ASSESSED"
+                elif impact.get("update_type") == "DUPLICATE_REPORT":
+                    reason = "IMPACT_DUPLICATE_REPORT"
+                elif impact.get("update_type") == "HISTORICAL_CONTEXT":
+                    reason = "IMPACT_HISTORICAL_CONTEXT"
+                elif impact.get("update_type") == "COMMENTARY":
+                    reason = "IMPACT_COMMENTARY"
+                else:
+                    reason = "IMPACT_BACKGROUND"
+                timing = NewsTimeAssessment(
+                    False, timing.event_time, timing.age_minutes,
+                    timing.discovery_delay_seconds, reason,
+                )
+            row["time_assessment"] = timing
         row["publisher_domain"] = _domain(row.get("link"))
         if (
             not legacy_v3
@@ -308,7 +352,12 @@ def event_evidence_rows_from_connection(
         ] or evidence_members
         canonical = max(
             candidates,
-            key=lambda row: (float(row["confidence"]), len(str(row["body"])), row["source_item_id"]),
+            key=lambda row: (
+                int(row.get("impact_update_type") == "MATERIAL_UPDATE"),
+                str(row["collector_first_seen_time"]),
+                float(row["confidence"]), len(str(row["body"])),
+                row["source_item_id"],
+            ),
         )
         topics = tuple(sorted({topic for row in members for topic in row["topics"]}))
         annotation = json.loads(canonical.get("annotation_json") or "{}")
@@ -323,7 +372,6 @@ def event_evidence_rows_from_connection(
         event_clock_valid = legacy_v3 or bool(
             event_clock is not None
             and event_clock <= decision_time
-            and event_clock >= forward_epoch
         )
         semantic_eligible = legacy_v3 or (
             current_semantic_schema
@@ -400,6 +448,7 @@ def event_evidence_rows_from_connection(
             "event_id": event_id,
             "event_version_id": canonical_hash((
                 event_id, canonical["content_hash"], canonical["annotation_id"],
+                canonical.get("impact_assessment_id"),
                 EVIDENCE_POLICY_VERSION if not legacy_v3 else LEGACY_V3_EVIDENCE_POLICY_VERSION,
             )),
             "policy_version": (
@@ -446,6 +495,12 @@ def event_evidence_rows_from_connection(
             "material_event_key": annotation.get("material_event_key"),
             "source_organization_id": annotation.get("source_organization_id"),
             "evidence_role": annotation.get("evidence_role"),
+            "impact_assessment_id": canonical.get("impact_assessment_id"),
+            "impact_assessed_at": canonical.get("impact_assessed_at"),
+            "impact_class": canonical.get("impact_class"),
+            "impact_event_state": canonical.get("impact_event_state"),
+            "impact_update_type": canonical.get("impact_update_type"),
+            "impact_reason_zh": canonical.get("impact_reason_zh"),
             "model_permission": "BROAD_MODEL" if eligible else "DISPLAY_ONLY",
             "source_published_time": (
                 canonical["time_assessment"].event_time.isoformat()
@@ -461,7 +516,10 @@ def event_evidence_rows_from_connection(
             "geopolitical_risk": float(canonical["geopolitical_risk"]),
             "usd_impulse": float(canonical["usd_impulse"]),
             "novelty": float(canonical["novelty"]),
-            "confidence": float(canonical["confidence"]),
+            "confidence": min(
+                float(canonical["confidence"]),
+                float(canonical.get("impact_confidence") or 0.0),
+            ) if not legacy_v3 else float(canonical["confidence"]),
             "reason_codes": reasons,
             "source_hash": canonical_hash(sorted(
                 (row["content_hash"], row["annotation_id"]) for row in members

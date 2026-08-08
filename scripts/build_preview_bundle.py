@@ -92,16 +92,7 @@ def _backfill_annotation_reasons(news_index: dict, status: dict) -> None:
                 first_seen = datetime.fromisoformat(
                     str(item["collector_first_seen_time"])
                 )
-                delay_seconds = max(0.0, (first_seen - published).total_seconds())
-                if delay_seconds > 3600:
-                    hours, remainder = divmod(int(delay_seconds), 3600)
-                    minutes = remainder // 60
-                    delay = f"{hours}小时{minutes}分" if hours else f"{minutes}分钟"
-                    code, reason = (
-                        "LATE_DISCOVERY",
-                        f"发现太晚：发布后 {delay} 才被系统收到",
-                    )
-                elif str(item.get("source") or "").startswith(("google_news_", "gdelt_")):
+                if str(item.get("source") or "").startswith(("google_news_", "gdelt_")):
                     code, reason = (
                         "SEARCH_LEAD", "搜索线索：来自聚合发现源，不是独立官方发布",
                     )

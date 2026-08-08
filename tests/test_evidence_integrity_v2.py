@@ -25,6 +25,7 @@ from xauusd_forecaster.live_v2 import (
 from xauusd_forecaster.market import MarketObservation
 from xauusd_forecaster.news_evidence import EVIDENCE_POLICY_VERSION, event_evidence_rows
 from xauusd_forecaster.news_features_v2 import aggregate_news_features_v2
+from xauusd_forecaster.news_impact import impact_time_rule
 from xauusd_forecaster.news_time import assess_news_time, category_time_rule
 from xauusd_forecaster.repair_v2 import immutable_table_hash
 from xauusd_forecaster import inference_v2, news_contract_migration, training_v2
@@ -335,7 +336,11 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
                  evidence_role: str = "CORE_CLAIM",
                  materiality: float = 0.8,
                  material_event_key: str = "",
-                 event_time: str | None = "__DEFAULT__") -> None:
+                 event_time: str | None = "__DEFAULT__",
+                 impact_class: str = "POLICY_SHIFT",
+                 impact_update_type: str = "NEW_EVENT",
+                 impact_assessed_at: datetime | None = None,
+                 include_impact: bool = True) -> None:
     entities = entities or []
     body = ("publisher full body " * 30) + item
     digest = hashlib.sha256(body.encode()).hexdigest()
@@ -389,6 +394,20 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
             "evidence_role": evidence_role,
         },
     })
+    if include_impact:
+        assessed_at = impact_assessed_at or parsed_at
+        ledger.append_news_impact_assessment({
+            "assessment_id": f"impact:{source}:{item}",
+            "source": source, "source_item_id": item, "revision_number": 1,
+            "raw_content_hash": digest, "annotation_id": item,
+            "llm_model_version": "gemma-4-31b-it",
+            "prompt_version": "news-impact-v1-fixed-lifetime-classes",
+            "parse_started_at": assessed_at, "assessed_at": assessed_at,
+            "impact_class": impact_class,
+            "event_state": "ACTIVE" if impact_class != "BACKGROUND" else "BACKGROUND",
+            "update_type": impact_update_type,
+            "confidence": 1.0, "reason_zh": "测试中的固定影响寿命判断。",
+        })
 
 
 def test_news_freshness_ages_from_published_time_not_parsed_at(tmp_path) -> None:
@@ -397,11 +416,75 @@ def test_news_freshness_ages_from_published_time_not_parsed_at(tmp_path) -> None
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=first_seen)
     _append_news(ledger, source="federal_reserve_monetary", item="official",
                  first_seen=first_seen, parsed_at=decision, impulse=1.0,
-                 published_at=first_seen)
+                 published_at=first_seen, impact_class="DATA_RELEASE")
     features = aggregate_news_features_v2(ledger, decision)
     expected_freshness = 2 ** (-30 / 360)
     assert features["features"]["news_event_count"] == pytest.approx(expected_freshness)
     ledger.close()
+
+
+def test_late_received_news_can_be_used_only_after_receipt_when_still_active() -> None:
+    published = datetime(2026, 8, 8, 20, 40, tzinfo=UTC)
+    first_seen = published + timedelta(hours=2, minutes=53)
+    max_age, _ = impact_time_rule("SAME_DAY")
+
+    before_receipt = assess_news_time(
+        {"source_published_time": published, "collector_first_seen_time": first_seen},
+        decision_time=first_seen - timedelta(seconds=1),
+        forward_epoch=published - timedelta(days=1),
+        max_actionable_age=max_age,
+        max_discovery_delay=None,
+        allow_pre_forward_publication=True,
+    )
+    after_receipt = assess_news_time(
+        {"source_published_time": published, "collector_first_seen_time": first_seen},
+        decision_time=first_seen + timedelta(minutes=1),
+        forward_epoch=published - timedelta(days=1),
+        max_actionable_age=max_age,
+        max_discovery_delay=None,
+        allow_pre_forward_publication=True,
+    )
+
+    assert before_receipt.reason_code == "NOT_YET_VISIBLE"
+    assert after_receipt.eligible is True
+    assert after_receipt.age_minutes == pytest.approx(174.0)
+
+
+def test_news_received_after_impact_window_is_expired_on_arrival() -> None:
+    published = datetime(2026, 8, 8, 20, 40, tzinfo=UTC)
+    first_seen = published + timedelta(hours=2, minutes=53)
+    max_age, _ = impact_time_rule("IMMEDIATE")
+
+    timing = assess_news_time(
+        {"source_published_time": published, "collector_first_seen_time": first_seen},
+        decision_time=first_seen + timedelta(minutes=1),
+        forward_epoch=published - timedelta(days=1),
+        max_actionable_age=max_age,
+        max_discovery_delay=None,
+        allow_pre_forward_publication=True,
+    )
+
+    assert timing.eligible is False
+    assert timing.reason_code == "STALE_EVENT"
+
+
+def test_weekend_news_keeps_wall_clock_age_and_never_resets_at_open() -> None:
+    published = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    first_seen = published + timedelta(minutes=5)
+    monday_open = datetime(2026, 8, 10, 1, 0, tzinfo=UTC)
+    max_age, _ = impact_time_rule("ONGOING_EVENT")
+
+    timing = assess_news_time(
+        {"source_published_time": published, "collector_first_seen_time": first_seen},
+        decision_time=monday_open,
+        forward_epoch=published - timedelta(days=1),
+        max_actionable_age=max_age,
+        max_discovery_delay=None,
+        allow_pre_forward_publication=True,
+    )
+
+    assert timing.eligible is True
+    assert timing.age_minutes == pytest.approx(37 * 60)
 
 
 def test_release_categories_expire_faster_than_central_bank_gold() -> None:
@@ -1439,7 +1522,7 @@ def test_recommendation_uses_positive_post_cost_ev_and_retains_wait() -> None:
     assert inference_v2._recommended_action(-0.10, -0.20, 0.20) == "WAIT"
 
 
-def test_news_discovered_more_than_one_hour_late_is_display_only(tmp_path) -> None:
+def test_news_discovered_more_than_one_hour_late_uses_gemma_lifetime(tmp_path) -> None:
     epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     first_seen = epoch + timedelta(hours=2)
     decision = first_seen + timedelta(minutes=5)
@@ -1450,9 +1533,80 @@ def test_news_discovered_more_than_one_hour_late_is_display_only(tmp_path) -> No
         impulse=1.0,
     )
     event = event_evidence_rows(ledger, decision)[0]
-    assert event["broad_model_eligible"] is False
-    assert event["freshness_status"] == "LATE_DISCOVERY"
-    assert "LATE_DISCOVERY" in event["reason_codes"]
+    assert event["broad_model_eligible"] is True
+    assert event["freshness_status"] == "CURRENT_EVENT"
+    assert event["impact_class"] == "POLICY_SHIFT"
+    assert event["economic_age_minutes"] == pytest.approx(125.0)
+    ledger.close()
+
+
+def test_impact_assessment_cannot_retroactively_enter_earlier_decision(tmp_path) -> None:
+    epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    assessed = epoch + timedelta(minutes=10)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
+    _append_news(
+        ledger, source="federal_reserve_monetary", item="assessed-later",
+        first_seen=epoch, parsed_at=epoch, published_at=epoch, impulse=1.0,
+        impact_assessed_at=assessed,
+    )
+
+    before = event_evidence_rows(ledger, assessed - timedelta(seconds=1))[0]
+    after = event_evidence_rows(ledger, assessed)[0]
+
+    assert before["broad_model_eligible"] is False
+    assert "IMPACT_NOT_ASSESSED" in before["reason_codes"]
+    assert after["broad_model_eligible"] is True
+    ledger.close()
+
+
+def test_duplicate_report_cannot_extend_material_event_lifetime(tmp_path) -> None:
+    epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
+    common = {
+        "source": "federal_reserve_monetary", "impulse": 1.0,
+        "material_event_key": "same-policy-event", "impact_class": "SAME_DAY",
+    }
+    _append_news(
+        ledger, item="initial-policy", first_seen=epoch, parsed_at=epoch,
+        published_at=epoch, **common,
+    )
+    duplicate_time = epoch + timedelta(hours=3)
+    _append_news(
+        ledger, item="duplicate-policy", first_seen=duplicate_time,
+        parsed_at=duplicate_time, published_at=duplicate_time,
+        impact_update_type="DUPLICATE_REPORT", **common,
+    )
+
+    event = event_evidence_rows(ledger, duplicate_time + timedelta(minutes=1))[0]
+
+    assert event["member_count"] == 2
+    assert event["canonical_source_item_id"] == "initial-policy"
+    assert event["event_occurred_at"] == epoch.isoformat()
+    ledger.close()
+
+
+def test_material_update_creates_new_version_without_new_event_budget(tmp_path) -> None:
+    epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
+    common = {
+        "source": "federal_reserve_monetary", "impulse": 1.0,
+        "material_event_key": "ongoing-policy-event", "impact_class": "POLICY_SHIFT",
+    }
+    _append_news(
+        ledger, item="initial-event", first_seen=epoch, parsed_at=epoch,
+        published_at=epoch, **common,
+    )
+    update_time = epoch + timedelta(hours=3)
+    _append_news(
+        ledger, item="update-event", first_seen=update_time, parsed_at=update_time,
+        published_at=update_time, impact_update_type="MATERIAL_UPDATE", **common,
+    )
+
+    event = event_evidence_rows(ledger, update_time + timedelta(minutes=1))[0]
+
+    assert len(event_evidence_rows(ledger, update_time + timedelta(minutes=1))) == 1
+    assert event["canonical_source_item_id"] == "update-event"
+    assert event["event_occurred_at"] == update_time.isoformat()
     ledger.close()
 
 

@@ -20,7 +20,11 @@ from xauusd_forecaster.content import (
     hydrate_pending_non_fed_content,
 )
 from xauusd_forecaster.inference import build_shadow_predictions
-from xauusd_forecaster.annotation import annotate_pending_news, translate_pending_headlines
+from xauusd_forecaster.annotation import (
+    annotate_pending_news,
+    assess_pending_news_impacts,
+    translate_pending_headlines,
+)
 from xauusd_forecaster.factors import aggregate_news_features, factor_coverage
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
 from xauusd_forecaster.maintenance import (
@@ -1899,6 +1903,57 @@ def test_irrelevant_google_rate_title_does_not_consume_translation(
 
     assert translate_pending_headlines(ledger, api_key="test-key") == []
     assert ledger.count("news_title_translations") == 0
+
+
+def test_gemma_impact_assessment_is_append_only_and_versioned(
+    tmp_path, monkeypatch
+) -> None:
+    now = datetime(2026, 8, 8, 20, 40, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "Complete policy report with a material decision. " * 20
+    content_hash = hashlib.sha256(body.encode()).hexdigest()
+    ledger.append_news_revision({
+        "source": "federal_reserve_monetary", "source_item_id": "impact-one",
+        "source_published_time": now,
+        "collector_first_seen_time": now + timedelta(hours=2, minutes=53),
+        "fetched_time": now + timedelta(hours=2, minutes=53),
+        "headline": "Federal Reserve announces policy decision", "body": body,
+        "content_hash": content_hash, "cluster_id": "impact-cluster",
+    })
+    vector = {
+        "event_type": "monetary_policy", "entities": ["Federal Reserve"],
+        "hawkishness": 0.0, "inflation_impulse": 0.0,
+        "growth_impulse": 0.0, "geopolitical_risk": 0.0,
+        "usd_impulse": 0.0, "novelty": 0.8, "confidence": 0.9,
+    }
+    ledger.append_annotation({
+        "annotation_id": "impact-annotation", "source": "federal_reserve_monetary",
+        "source_item_id": "impact-one", "revision_number": 1,
+        "raw_content_hash": content_hash, "annotation": vector,
+        "llm_model_version": annotation_module.DEFAULT_GEMINI_MODEL,
+        "prompt_version": annotation_module.PROMPT_VERSION,
+        "parse_started_at": now + timedelta(hours=2, minutes=53),
+        "parsed_at": now + timedelta(hours=2, minutes=54),
+    })
+    monkeypatch.setattr(
+        annotation_module,
+        "_call_gemini_impact",
+        lambda _key, _row: ({
+            "impact_class": "POLICY_SHIFT", "event_state": "ACTIVE",
+            "update_type": "NEW_EVENT", "confidence": 0.9,
+            "reason_zh": "政策决定可能持续影响利率预期。",
+        }, annotation_module.IMPACT_MODEL),
+    )
+
+    statuses = assess_pending_news_impacts(ledger, api_key="test-key", limit=1)
+
+    assert statuses[0]["status"] == "OK"
+    row = ledger.connection.execute(
+        "SELECT * FROM news_impact_assessments_v1"
+    ).fetchone()
+    assert row["impact_class"] == "POLICY_SHIFT"
+    assert row["llm_model_version"] == annotation_module.IMPACT_MODEL
+    assert assess_pending_news_impacts(ledger, api_key="test-key", limit=1) == []
 
 
 def test_json_object_decoder_accepts_fence_and_trailing_text() -> None:
