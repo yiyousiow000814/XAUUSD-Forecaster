@@ -106,9 +106,10 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /row\.model_visibility !== "NOT_YET_PARSED"/);
   assert.match(source, /模型可用/);
   assert.ok(source.indexOf('<nav className="audit-tabs"') < source.indexOf('<section className="annotation-queue"'));
-  assert.match(source, /已经积累多少结果/);
-  assert.match(source, /真实上线后结果/);
-  assert.match(source, /距离下次学习/);
+  assert.doesNotMatch(source, /已经积累多少结果|真实上线后结果|当前模型学到哪里|距离下次学习/);
+  assert.match(source, /上一次学习/);
+  assert.match(source, /下一次学习/);
+  assert.match(source, /目标 − 目前已有 = 还差多少/);
   assert.match(source, /查看技术审计明细/);
   assert.doesNotMatch(source, /Legacy Engineering|Repaired Seed|Next fit/);
   assert.match(source, /最长 72 小时/);
