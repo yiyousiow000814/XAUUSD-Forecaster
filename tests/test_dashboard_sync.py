@@ -26,6 +26,33 @@ def _annotator_module():
     return module
 
 
+def _preview_module():
+    path = Path(__file__).resolve().parents[1] / "scripts" / "build_preview_bundle.py"
+    spec = importlib.util.spec_from_file_location("build_preview_bundle_test", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_preview_backfills_exact_reason_from_older_production_snapshot() -> None:
+    module = _preview_module()
+    news_index = {"items": [{
+        "annotation_status": "NOT_REQUIRED",
+        "source": "google_news_gold_context",
+        "source_published_time": "2026-08-08T20:40:28+00:00",
+        "collector_first_seen_time": "2026-08-08T23:34:06+00:00",
+    }]}
+
+    module._backfill_annotation_reasons(
+        news_index, {"forward_epoch": "2026-08-05T00:00:00+00:00"}
+    )
+
+    row = news_index["items"][0]
+    assert row["annotation_reason_code"] == "LATE_DISCOVERY"
+    assert row["annotation_reason"] == "发现太晚：发布后 2小时53分 才被系统收到"
+
+
 def test_sync_retries_transient_disconnect(monkeypatch) -> None:
     module = _sync_module()
     calls = []

@@ -11,6 +11,7 @@ import sys
 import types
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 
@@ -67,6 +68,51 @@ def _rebuild_factor_coverage(status: dict) -> list[dict[str, object]]:
     return factor_coverage(latest_macro, collected_sources, monitored_sources)
 
 
+def _backfill_annotation_reasons(news_index: dict, status: dict) -> None:
+    """Make new audit labels visible against an older production snapshot."""
+    epoch_raw = status.get("forward_epoch")
+    if not epoch_raw:
+        return
+    epoch = datetime.fromisoformat(str(epoch_raw))
+    for item in news_index.get("items", []):
+        if item.get("annotation_status") != "NOT_REQUIRED":
+            continue
+        if item.get("annotation_reason_code") and item.get("annotation_reason"):
+            continue
+        published_raw = item.get("source_published_time")
+        if not published_raw:
+            code, reason = "HISTORICAL_MATERIAL", "历史资料：缺少可靠发布时间"
+        else:
+            published = datetime.fromisoformat(str(published_raw))
+            if published < epoch:
+                code, reason = (
+                    "HISTORICAL_MATERIAL", "历史资料：发布时间早于系统开始记录",
+                )
+            else:
+                first_seen = datetime.fromisoformat(
+                    str(item["collector_first_seen_time"])
+                )
+                delay_seconds = max(0.0, (first_seen - published).total_seconds())
+                if delay_seconds > 3600:
+                    hours, remainder = divmod(int(delay_seconds), 3600)
+                    minutes = remainder // 60
+                    delay = f"{hours}小时{minutes}分" if hours else f"{minutes}分钟"
+                    code, reason = (
+                        "LATE_DISCOVERY",
+                        f"发现太晚：发布后 {delay} 才被系统收到",
+                    )
+                elif str(item.get("source") or "").startswith(("google_news_", "gdelt_")):
+                    code, reason = (
+                        "SEARCH_LEAD", "搜索线索：来自聚合发现源，不是独立官方发布",
+                    )
+                else:
+                    code, reason = (
+                        "DUPLICATE_CONTENT", "重复内容：同一事件已有正文更完整的版本",
+                    )
+        item["annotation_reason_code"] = code
+        item["annotation_reason"] = reason
+
+
 def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
     status = _read_json(base_url, "/api/status")
     learning = _read_json(base_url, "/api/learning")
@@ -74,6 +120,7 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
     news_index = _read_json(base_url, "/api/news-index?limit=50")
 
     status["factor_coverage"] = _rebuild_factor_coverage(status)
+    _backfill_annotation_reasons(news_index, status)
     status["preview"] = {
         "is_preview": True,
         "branch": branch,
