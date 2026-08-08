@@ -31,7 +31,7 @@ NEWS_EXPERIMENTAL_MIN_CLUSTERS = 1
 NEWS_EXPERIMENTAL_MIN_EVENT_DAYS = 1
 NEWS_MIN_EVENT_DAYS = 3
 CROSSFIT_VERSION = "expanding-market-purge30m-v1"
-EVENT_WEIGHTING_VERSION = "equal-event-budget-decay-v1"
+EVENT_WEIGHTING_VERSION = "quality-scaled-event-budget-gemma-decay-v3"
 BROAD_MODEL_FEATURES = (*NEWS_FEATURES, *BROAD_NEWS_FEATURES)
 
 
@@ -197,9 +197,17 @@ def _event_budget_weights(
     rows: list[dict], field: str,
 ) -> tuple[np.ndarray, list[dict], dict]:
     totals: dict[str, float] = defaultdict(float)
+    event_budgets: dict[str, float] = defaultdict(float)
     for row in rows:
         for event in row.get(field, []):
-            totals[str(event["event_id"])] += float(event["raw_weight"])
+            event_id = str(event["event_id"])
+            raw = max(0.0, float(event["raw_weight"]))
+            totals[event_id] += raw
+            # Reuse the existing freshness/confidence/novelty weight as the
+            # event's total quality budget.  The previous equal-event
+            # normalization cancelled decay across events and could give one
+            # very late row more weight than several fresh rows.
+            event_budgets[event_id] = max(event_budgets[event_id], raw)
     if not totals:
         raise ValueError("news residual rows require at least one eligible event")
     row_weights = []
@@ -209,7 +217,7 @@ def _event_budget_weights(
         for event in row.get(field, []):
             event_id = str(event["event_id"])
             raw = float(event["raw_weight"])
-            normalized = raw / totals[event_id]
+            normalized = raw / totals[event_id] * event_budgets[event_id]
             budget += normalized
             receipts.append({
                 "source_decision_id": row["decision_id"],
@@ -222,7 +230,11 @@ def _event_budget_weights(
     weights = np.asarray(row_weights, dtype=np.float64)
     weights *= len(weights) / weights.sum()
     effective_rows = float(weights.sum() ** 2 / np.square(weights).sum())
-    shares = sorted((1.0 / len(totals) for _ in totals), reverse=True)
+    total_event_budget = sum(event_budgets.values())
+    shares = sorted(
+        (budget / total_event_budget for budget in event_budgets.values()),
+        reverse=True,
+    )
     summary = {
         "raw_training_rows": len(rows),
         "distinct_event_count": len(totals),

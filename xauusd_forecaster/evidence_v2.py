@@ -9,9 +9,9 @@ from datetime import datetime, timezone
 UTC = timezone.utc
 EVIDENCE_CONTRACT_VERSION = "phase2f-evidence-integrity-v2"
 FEATURE_VERSION = "repaired-market-v2"
-NEWS_FEATURE_VERSION = "eligible-news-event-evidence-v6-event-budget"
+NEWS_FEATURE_VERSION = "eligible-news-event-evidence-v8-quality-scaled-impact"
 LABEL_VERSION = "received-time-executable-30m-v2"
-ELIGIBILITY_VERSION = "news-source-eligibility-v5-unified-event-clock"
+ELIGIBILITY_VERSION = "news-source-eligibility-v7-semantic-impact-after-receipt"
 
 V2_IMMUTABLE_TABLES = (
     "repair_batches",
@@ -35,6 +35,8 @@ V2_IMMUTABLE_TABLES = (
     "news_model_generation_activations_v1",
     "news_training_weight_receipts_v1",
     "news_item_classifications_v1",
+    "news_impact_assessments_v1",
+    "news_impact_failures_v1",
     "prediction_scores_v2",
     "calibration_snapshots_v2",
     "execution_training_examples_v1",
@@ -376,6 +378,63 @@ CREATE TABLE IF NOT EXISTS news_item_classifications_v1 (
     reason_code TEXT NOT NULL,
     source_hash TEXT NOT NULL,
     UNIQUE(source,source_item_id,revision_number,policy_version)
+);
+
+CREATE TABLE IF NOT EXISTS news_impact_assessments_v1 (
+    assessment_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    source_item_id TEXT NOT NULL,
+    revision_number INTEGER NOT NULL,
+    raw_content_hash TEXT NOT NULL,
+    annotation_id TEXT NOT NULL,
+    llm_model_version TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    parse_started_at TEXT NOT NULL,
+    assessed_at TEXT NOT NULL,
+    impact_class TEXT NOT NULL CHECK(impact_class IN (
+        'IMMEDIATE','SAME_DAY','DATA_RELEASE','POLICY_SHIFT',
+        'ONGOING_EVENT','BACKGROUND')),
+    event_state TEXT NOT NULL CHECK(event_state IN (
+        'ACTIVE','COMPLETED','UNCERTAIN','BACKGROUND')),
+    update_type TEXT NOT NULL CHECK(update_type IN (
+        'NEW_EVENT','MATERIAL_UPDATE','DUPLICATE_REPORT','COMMENTARY',
+        'HISTORICAL_CONTEXT')),
+    confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
+    reason_zh TEXT NOT NULL,
+    FOREIGN KEY(annotation_id) REFERENCES news_annotations(annotation_id),
+    FOREIGN KEY(source,source_item_id,revision_number)
+      REFERENCES news_revisions(source,source_item_id,revision_number),
+    UNIQUE(annotation_id,llm_model_version,prompt_version)
+);
+
+CREATE INDEX IF NOT EXISTS news_impact_assessments_lookup_v1
+ON news_impact_assessments_v1(
+    source,source_item_id,revision_number,assessed_at
+);
+
+CREATE TABLE IF NOT EXISTS news_impact_failures_v1 (
+    failure_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    source_item_id TEXT NOT NULL,
+    revision_number INTEGER NOT NULL,
+    raw_content_hash TEXT NOT NULL,
+    annotation_id TEXT NOT NULL,
+    llm_model_version TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL CHECK(attempt_number >= 1),
+    error_type TEXT NOT NULL,
+    error_signature TEXT NOT NULL,
+    error TEXT NOT NULL,
+    failed_at TEXT NOT NULL,
+    next_retry_at TEXT,
+    is_terminal INTEGER NOT NULL CHECK(is_terminal IN (0,1)),
+    FOREIGN KEY(annotation_id) REFERENCES news_annotations(annotation_id),
+    UNIQUE(annotation_id,llm_model_version,prompt_version,attempt_number)
+);
+
+CREATE INDEX IF NOT EXISTS news_impact_failures_lookup_v1
+ON news_impact_failures_v1(
+    annotation_id,llm_model_version,prompt_version,attempt_number
 );
 
 CREATE TABLE IF NOT EXISTS prediction_scores_v2 (

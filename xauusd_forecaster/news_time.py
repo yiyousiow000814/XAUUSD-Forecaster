@@ -58,7 +58,8 @@ def assess_news_time(
     decision_time: datetime,
     forward_epoch: datetime,
     max_actionable_age: timedelta = MAX_ACTIONABLE_NEWS_AGE,
-    max_discovery_delay: timedelta = MAX_ACTIONABLE_DISCOVERY_DELAY,
+    max_discovery_delay: timedelta | None = MAX_ACTIONABLE_DISCOVERY_DELAY,
+    allow_pre_forward_publication: bool = False,
 ) -> NewsTimeAssessment:
     """Keep receipt visibility separate from economic freshness.
 
@@ -80,7 +81,7 @@ def assess_news_time(
         return NewsTimeAssessment(False, None, None, None, "PUBLISHED_TIME_MISSING")
     delay = (first_seen - published).total_seconds()
     age_minutes = (decision - published).total_seconds() / 60.0
-    if published < epoch:
+    if published < epoch and not allow_pre_forward_publication:
         return NewsTimeAssessment(
             False, published, age_minutes, delay, "PRE_FORWARD_PUBLICATION"
         )
@@ -88,7 +89,10 @@ def assess_news_time(
         return NewsTimeAssessment(
             False, published, age_minutes, delay, "PUBLISHED_AFTER_DECISION"
         )
-    if first_seen - published > max_discovery_delay:
+    if (
+        max_discovery_delay is not None
+        and first_seen - published > max_discovery_delay
+    ):
         return NewsTimeAssessment(False, published, age_minutes, delay, "LATE_DISCOVERY")
     if decision - published > max_actionable_age:
         return NewsTimeAssessment(False, published, age_minutes, delay, "STALE_EVENT")

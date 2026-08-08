@@ -17,8 +17,14 @@ from sqlite3 import Connection
 
 from .forward_ledger import ForwardLedger
 from .gemini_quota import GeminiQuotaLedger
-from .news_time import MAX_ACTIONABLE_DISCOVERY_DELAY
 from .news_relevance import google_news_item_is_relevant
+from .news_impact import (
+    IMPACT_MODEL,
+    IMPACT_PROMPT_VERSION,
+    IMPACT_RESPONSE_SCHEMA,
+    pending_impact_records,
+    validate_impact_assessment,
+)
 
 
 UTC = timezone.utc
@@ -32,6 +38,8 @@ GEMINI_MAX_PARALLEL_REQUESTS = 3
 GEMINI_DAILY_PRIORITY_RESERVE = 150
 GEMMA_REQUESTS_PER_DAY_PER_KEY = 15_000
 GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL = 20
+GEMMA_TITLE_BATCH_LIMIT = 10
+GEMMA_IMPACT_BATCH_LIMIT = 10
 PROMPT_VERSION = "news-json-v14-material-event-evidence"
 COMPATIBLE_PROMPT_VERSIONS = (
     PROMPT_VERSION,
@@ -40,8 +48,11 @@ COMPATIBLE_PROMPT_VERSIONS = (
     "news-json-v11-gemini-story-subjects",
     "news-json-v10-controlled-category-zh",
 )
-TITLE_PROMPT_VERSION = "headline-zh-v3-strict-retry"
+TITLE_PROMPT_VERSION = "headline-zh-v6-exact-number-preservation"
 INVALID_CHINESE_TITLE = "来源新闻（中文标题待校验）"
+TITLE_TRANSLATION_MODELS = (
+    DEFAULT_GEMMA_MODEL, DEFAULT_GEMINI_MODEL, FALLBACK_GEMINI_MODEL,
+)
 HIGH_PRIORITY_NEWS_SOURCES = frozenset({"federal_reserve_monetary"})
 
 
@@ -72,15 +83,6 @@ def pending_annotation_records(
          AND a.llm_model_version IN (?, ?) AND a.prompt_version IN (?, ?)
         WHERE a.annotation_id IS NULL
           AND length(trim(COALESCE(n.body, ''))) >= 240
-          AND (
-            n.source_published_time IS NULL
-            OR (
-              n.source_published_time >= (
-                SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH')
-              AND (julianday(n.collector_first_seen_time)
-                   - julianday(n.source_published_time)) <= ?
-            )
-          )
           AND NOT EXISTS (
             SELECT 1 FROM news_revisions newer
             WHERE newer.source=n.source
@@ -125,7 +127,6 @@ def pending_annotation_records(
         LIMIT ?""",
         (
             *compatible_models, PROMPT_VERSION, PROMPT_VERSION,
-            MAX_ACTIONABLE_DISCOVERY_DELAY.total_seconds() / 86400.0,
             expected_model_identity, PROMPT_VERSION,
             now.isoformat(timespec="microseconds"), max(1, limit),
         ),
@@ -164,15 +165,6 @@ def completed_annotation_records(
               AND a.revision_number=n.revision_number
               AND a.llm_model_version IN (?, ?)
               AND a.prompt_version=?)
-          AND (
-            n.source_published_time IS NULL
-            OR (
-              n.source_published_time >= (
-                SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH')
-              AND (julianday(n.collector_first_seen_time)
-                   - julianday(n.source_published_time)) <= ?
-            )
-          )
           AND NOT EXISTS (
             SELECT 1 FROM news_revisions newer
             WHERE newer.source=n.source
@@ -195,7 +187,6 @@ def completed_annotation_records(
         LIMIT ?""",
         (
             *compatible_models, PROMPT_VERSION,
-            MAX_ACTIONABLE_DISCOVERY_DELAY.total_seconds() / 86400.0,
             max(1, limit),
         ),
     ).fetchall()
@@ -428,7 +419,7 @@ def translate_pending_headlines(
         keys,
         quota,
         requests_per_key=GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
-        batch_limit=GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
+        batch_limit=GEMMA_TITLE_BATCH_LIMIT,
     )
     capacity = request_pool.available_batch_capacity()
     if capacity <= 0:
@@ -440,6 +431,7 @@ def translate_pending_headlines(
             WHERE t.source=n.source AND t.source_item_id=n.source_item_id
               AND t.revision_number=n.revision_number
               AND trim(t.headline_zh)<>?
+              AND t.headline_zh NOT LIKE ?
               AND t.headline_zh GLOB '*[一-龥]*')
           AND NOT EXISTS (
             SELECT 1 FROM news_revisions newer
@@ -476,16 +468,38 @@ def translate_pending_headlines(
             WHERE retry_t.source=n.source
               AND retry_t.source_item_id=n.source_item_id
               AND retry_t.revision_number=n.revision_number
-              AND trim(retry_t.headline_zh)=?) DESC,
+              AND (trim(retry_t.headline_zh)=?
+                   OR retry_t.headline_zh LIKE ?)) DESC,
                  COALESCE(n.source_published_time,
                           n.collector_first_seen_time) DESC
         LIMIT ?""",
         (
-            INVALID_CHINESE_TITLE, selected_model, TITLE_PROMPT_VERSION,
+            INVALID_CHINESE_TITLE, "%相关数值%",
+            selected_model, TITLE_PROMPT_VERSION,
             datetime.now(UTC).isoformat(timespec="microseconds"),
-            INVALID_CHINESE_TITLE, capacity,
+            INVALID_CHINESE_TITLE, "%相关数值%", capacity * 4,
         ),
     ).fetchall()
+    relevant_pending = []
+    for raw_row in pending:
+        row = dict(raw_row)
+        observed_at = row.get("collector_first_seen_time") or datetime.now(UTC)
+        if not isinstance(observed_at, datetime):
+            observed_at = datetime.fromisoformat(str(observed_at))
+        published_at = row.get("source_published_time")
+        if published_at is not None and not isinstance(published_at, datetime):
+            published_at = datetime.fromisoformat(str(published_at))
+        allowed, _ = google_news_item_is_relevant(
+            str(row.get("source") or ""),
+            str(row.get("headline") or ""),
+            published_at,
+            observed_at,
+        )
+        if allowed:
+            relevant_pending.append(raw_row)
+        if len(relevant_pending) >= capacity:
+            break
+    pending = relevant_pending
     statuses: list[dict[str, object]] = []
     for index, raw_row in enumerate(pending):
         row = dict(raw_row)
@@ -554,6 +568,78 @@ def translate_pending_headlines(
                     **failure,
                 }
             )
+    return statuses
+
+
+def assess_pending_news_impacts(
+    ledger: ForwardLedger,
+    *,
+    api_key: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, object]]:
+    """Classify semantic impact lifetime with frozen Gemma 4 buckets."""
+    keys = configured_gemini_api_keys(api_key)
+    if not keys:
+        return [{"status": "DISABLED", "reason": "GEMINI_API_KEY_MISSING"}]
+    quota = GeminiQuotaLedger(
+        ledger.path.parent / "gemma-quota.json",
+        daily_limit=GEMMA_REQUESTS_PER_DAY_PER_KEY,
+    )
+    request_pool = _GeminiRequestPool(
+        keys, quota,
+        requests_per_key=GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
+        batch_limit=GEMMA_IMPACT_BATCH_LIMIT,
+    )
+    capacity = request_pool.available_batch_capacity()
+    if capacity <= 0:
+        return [{"status": "DISABLED", "reason": "GEMMA_DAILY_QUOTA_EXHAUSTED"}]
+    effective_limit = capacity if limit is None else min(max(1, limit), capacity)
+    pending = pending_impact_records(
+        ledger.connection, limit=max(effective_limit * 4, 100),
+    )[:effective_limit]
+    statuses = []
+    for index, row in enumerate(pending):
+        started = datetime.now(UTC)
+        try:
+            result, exact_model = request_pool.call_impact(index, row)
+            assessed = datetime.now(UTC)
+            identity = "|".join((
+                str(row["annotation_id"]), exact_model, IMPACT_PROMPT_VERSION,
+            ))
+            ledger.append_news_impact_assessment({
+                "assessment_id": str(uuid.uuid5(uuid.NAMESPACE_URL, identity)),
+                "source": row["source"],
+                "source_item_id": row["source_item_id"],
+                "revision_number": row["revision_number"],
+                "raw_content_hash": row["content_hash"],
+                "annotation_id": row["annotation_id"],
+                "llm_model_version": exact_model,
+                "prompt_version": IMPACT_PROMPT_VERSION,
+                "parse_started_at": started,
+                "assessed_at": assessed,
+                **result,
+            })
+            statuses.append({
+                "status": "OK", "source": row["source"],
+                "source_item_id": row["source_item_id"],
+                "assessment_id": str(uuid.uuid5(uuid.NAMESPACE_URL, identity)),
+                "impact_class": result["impact_class"],
+            })
+        except GeminiBatchCapacityExhausted as error:
+            statuses.append({
+                "status": "DEFERRED", "source": row["source"],
+                "source_item_id": row["source_item_id"], "reason": str(error),
+            })
+        except Exception as error:
+            failure = _append_impact_failure(
+                ledger, row, error, model_version=IMPACT_MODEL,
+            )
+            statuses.append({
+                "status": "ERROR", "source": row["source"],
+                "source_item_id": row["source_item_id"],
+                "error_type": type(error).__name__, "error": str(error)[:500],
+                **failure,
+            })
     return statuses
 
 
@@ -705,21 +791,57 @@ class _GeminiRequestPool:
         self, start_index: int, model: str, headline: str
     ) -> tuple[str, str]:
         last_error: Exception | None = None
+        models = TITLE_TRANSLATION_MODELS if model == DEFAULT_GEMMA_MODEL else (model,)
+        for candidate_model in models:
+            for offset in range(len(self.api_keys)):
+                key = self.api_keys[(start_index + offset) % len(self.api_keys)]
+                if not self._reserve(key):
+                    continue
+                try:
+                    return _call_gemini_title(key, candidate_model, headline)
+                except (ValueError, KeyError, json.JSONDecodeError) as error:
+                    # A schema-valid response can still echo the English title.
+                    # Try another key/model instead of turning a simple display
+                    # translation into a permanent dead letter.
+                    last_error = error
+                except urllib.error.HTTPError as error:
+                    last_error = error
+                    if error.code not in {401, 403, 429}:
+                        raise
+        if last_error is None:
+            raise GeminiBatchCapacityExhausted(
+                "Gemini RPM slots used; retained for the next batch"
+            )
+        raise RuntimeError("All title translation models failed validation") from last_error
+
+    def call_impact(
+        self, start_index: int, row: dict
+    ) -> tuple[dict, str]:
+        last_error: Exception | None = None
+        last_http_error: urllib.error.HTTPError | None = None
         for offset in range(len(self.api_keys)):
             key = self.api_keys[(start_index + offset) % len(self.api_keys)]
             if not self._reserve(key):
                 continue
             try:
-                return _call_gemini_title(key, model, headline)
+                return _call_gemini_impact(key, row)
+            except (ValueError, KeyError, json.JSONDecodeError) as error:
+                last_error = error
             except urllib.error.HTTPError as error:
                 last_error = error
-                if error.code not in {401, 403, 429}:
+                last_http_error = error
+                if error.code not in {401, 403, 429, 500, 502, 503, 504}:
                     raise
         if last_error is None:
             raise GeminiBatchCapacityExhausted(
-                "Gemini RPM slots used; retained for the next batch"
+                "Gemma RPM slots used; retained for the next batch"
             )
-        raise RuntimeError("All configured Gemini keys rejected for this batch") from last_error
+        if last_http_error is not None:
+            # Preserve the status code so the failure ledger applies the
+            # bounded transient 429/5xx retry schedule instead of treating it
+            # as a permanent validation failure.
+            raise last_http_error
+        raise RuntimeError("All Gemma impact requests failed validation") from last_error
 
 
 def _call_gemini(
@@ -870,11 +992,14 @@ def _decode_json_object(raw: object) -> dict:
 
 def _call_gemini_title(api_key: str, model: str, headline: str) -> tuple[str, str]:
     payload = {
+        "systemInstruction": {"parts": [{"text": (
+            "你是新闻标题翻译器。必须把标题翻译成自然、准确的简体中文，"
+            "不得原样返回英文标题。"
+        )}]},
         "contents": [{"parts": [{"text": (
-            "Translate the delimited news headline faithfully into natural "
-            "Simplified Chinese. Preserve names, dates, percentages, prices, "
-            "and all numbers exactly. Return JSON only. Do not summarize or "
-            "infer facts beyond the headline.\nHEADLINE_START\n"
+            "请把以下新闻标题忠实翻译成自然的简体中文。保留人名、日期、"
+            "百分比、价格和所有数字，不要总结，不要补充标题以外的事实。"
+            "只返回 JSON。\nHEADLINE_START\n"
             f"{headline}\nHEADLINE_END"
         )}]}],
         "generationConfig": {
@@ -882,7 +1007,10 @@ def _call_gemini_title(api_key: str, model: str, headline: str) -> tuple[str, st
             "responseSchema": {
                 "type": "object",
                 "required": ["headline_zh"],
-                "properties": {"headline_zh": {"type": "string"}},
+                "properties": {"headline_zh": {
+                    "type": "string",
+                    "description": "忠实翻译后的简体中文新闻标题",
+                }},
             },
             "maxOutputTokens": 300,
             "temperature": 0,
@@ -903,12 +1031,80 @@ def _call_gemini_title(api_key: str, model: str, headline: str) -> tuple[str, st
     translated = {"headline_zh": headline_zh}
     _recover_display_fields(translated, headline, "")
     headline_zh = translated["headline_zh"]
-    _require_simplified_chinese(headline_zh, "headline_zh", 2, 1.0, 20)
+    _require_title_numbers_preserved(headline_zh, headline)
+    # Company names, tickers and publisher names legitimately remain in their
+    # source script.  The old 20-letter ceiling rejected valid translations
+    # such as "Public Storage：优先股… (PSA) - Seeking Alpha".
+    _require_simplified_chinese(headline_zh, "headline_zh", 2, 4.0, 60)
     return headline_zh, str(envelope.get("modelVersion") or model)
 
 
+def _call_gemini_impact(api_key: str, row: dict) -> tuple[dict, str]:
+    annotation = dict(row.get("annotation") or {})
+    prompt = (
+        "判断以下新闻事件从事件发生或发布时间起，通常可能影响XAUUSD相关市场信息多久。"
+        "你只能依据此新闻正文和已给出的事件抽取，不得使用后来发生的事实，不得预测交易方向。"
+        "IMMEDIATE=最长2小时；SAME_DAY=最长12小时；DATA_RELEASE=最长24小时；"
+        "POLICY_SHIFT=最长72小时；ONGOING_EVENT=最长7天；BACKGROUND=不进入模型。"
+        "普通转载、同一事实确认或换标题必须选DUPLICATE_REPORT，不能延长事件寿命；"
+        "只有正文包含新的决定、数据、行动、升级、降级或正式后续才是MATERIAL_UPDATE。"
+        "PRIOR_SAME_EVENT_RECORDS是按人物、对象和主题找到的较早候选，即使事件key不同也必须比较；"
+        "若当前正文没有比候选新增实质事实，必须选DUPLICATE_REPORT。"
+        "reason_zh用一句简体中文说明正文依据。只返回JSON。\n"
+        f"PUBLISHED_AT: {row.get('source_published_time') or ''}\n"
+        f"FIRST_SEEN_AT: {row.get('collector_first_seen_time') or ''}\n"
+        f"EVENT_EXTRACTION: {json.dumps(annotation, ensure_ascii=False, separators=(',', ':'))}\n"
+        f"PRIOR_SAME_EVENT_RECORDS: {json.dumps(row.get('prior_event_context') or [], ensure_ascii=False, separators=(',', ':'))}\n"
+        "NEWS_START\n"
+        f"Headline: {row.get('headline') or ''}\nFull content: {row.get('body') or ''}\n"
+        "NEWS_END"
+    )
+    payload = {
+        "systemInstruction": {"parts": [{"text": (
+            "你是受严格约束的新闻影响寿命分类器，不是交易顾问。"
+            "必须遵守固定枚举和时间上限。"
+        )}]},
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": IMPACT_RESPONSE_SCHEMA,
+            "maxOutputTokens": 500,
+            "temperature": 0,
+        },
+    }
+    request = urllib.request.Request(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{IMPACT_MODEL}:generateContent",
+        data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=120.0) as response:
+        envelope = json.loads(response.read())
+    result = _decode_json_object(
+        envelope["candidates"][0]["content"]["parts"][0]["text"]
+    )
+    validated = validate_impact_assessment(result)
+    _require_simplified_chinese(validated["reason_zh"], "reason_zh", 4, 0.5, 12)
+    return validated, str(envelope.get("modelVersion") or IMPACT_MODEL)
+
+
+def _require_title_numbers_preserved(translated: str, source: str) -> None:
+    """Reject display translations that change, omit or invent headline numbers."""
+    # Digit runs avoid treating the prose comma in "August 4, 2026" as one
+    # numeric token while still catching conversions such as 120 -> 1.2.
+    source_tokens = set(re.findall(r"\d+", source))
+    translated_tokens = set(re.findall(r"\d+", translated))
+    if "相关数值" in translated:
+        raise ValueError("Translated headline contains an unresolved number")
+    missing = source_tokens - translated_tokens
+    if missing:
+        raise ValueError(
+            "Translated headline omitted source numbers: " + ", ".join(sorted(missing))
+        )
+
+
 def _validate_chinese_result(result: dict) -> None:
-    _require_simplified_chinese(result.get("headline_zh"), "headline_zh", 2, 1.0, 20)
+    _require_simplified_chinese(result.get("headline_zh"), "headline_zh", 2, 4.0, 60)
     _require_simplified_chinese(result.get("summary_zh"), "summary_zh", 10, 0.20, 25)
     story_title = str(result.get("primary_story_title_zh") or "").strip()
     if story_title:
@@ -920,7 +1116,9 @@ def _validate_chinese_result(result: dict) -> None:
 def _restore_source_number_lexemes(
     result: dict, headline: str, body: str
 ) -> None:
-    token_pattern = re.compile(r"\d+(?:(?:\s*[.,/-]\s*)\d+)*")
+    token_pattern = re.compile(
+        r"\d+(?:(?:\s*[./-]\s*\d+)|(?:\s*,\s*\d{1,3}(?!\d)))*"
+    )
     source_tokens = {
         re.sub(r"\s+", "", token)
         for token in token_pattern.findall(f"{headline}\n{body}")
@@ -948,7 +1146,9 @@ def _recover_display_fields(result: dict, headline: str, body: str) -> None:
     """Make display text auditable without rejecting structured measurements."""
     source = f"{headline}\n{body}"
     _normalize_translated_named_months(result, source)
-    token_pattern = re.compile(r"\d+(?:(?:\s*[.,/-]\s*)\d+)*")
+    token_pattern = re.compile(
+        r"\d+(?:(?:\s*[./-]\s*\d+)|(?:\s*,\s*\d{1,3}(?!\d)))*"
+    )
     source_tokens = {
         re.sub(r"\s+", "", token) for token in token_pattern.findall(source)
     }
@@ -1030,7 +1230,7 @@ def _normalize_translated_named_months(result: dict, source: str) -> None:
         text = str(result[field])
         for number in named_months:
             text = re.sub(
-                rf"(?<!\d){number}(?=月)", chinese[number], text
+                rf"(?<!\d){number}\s*月", f"{chinese[number]}月", text
             )
         result[field] = text
 
@@ -1114,6 +1314,61 @@ def _append_llm_failure(
             "is_terminal": terminal,
         }
     )
+    return {
+        "retry_state": "DEAD_LETTER" if terminal else "BACKING_OFF",
+        "attempt_number": attempt,
+        "next_retry_at": next_retry.isoformat() if next_retry else None,
+    }
+
+
+def _append_impact_failure(
+    ledger: ForwardLedger,
+    row: dict,
+    error: Exception,
+    *,
+    model_version: str,
+) -> dict[str, object]:
+    error_type = type(error).__name__
+    normalized = re.sub(r"\s+", " ", str(error)).strip()[:500]
+    signature = hashlib.sha256(
+        f"{error_type}|{normalized}".encode("utf-8")
+    ).hexdigest()
+    prior = ledger.connection.execute(
+        """SELECT attempt_number,error_signature FROM news_impact_failures_v1
+        WHERE annotation_id=? AND llm_model_version=? AND prompt_version=?
+        ORDER BY attempt_number DESC LIMIT 1""",
+        (row["annotation_id"], model_version, IMPACT_PROMPT_VERSION),
+    ).fetchone()
+    attempt = 1 if prior is None else int(prior["attempt_number"]) + 1
+    transient = getattr(error, "code", None) in {429, 500, 502, 503, 504}
+    same_error = prior is not None and prior["error_signature"] == signature
+    terminal = attempt >= 5 if transient else ((same_error and attempt >= 2) or attempt >= 3)
+    failed_at = datetime.now(UTC)
+    if terminal:
+        next_retry = None
+    elif transient:
+        next_retry = failed_at + timedelta(
+            minutes=(15, 60, 360, 720)[min(attempt - 1, 3)]
+        )
+    else:
+        next_retry = failed_at + timedelta(hours=6)
+    identity = "|".join((
+        str(row["annotation_id"]), model_version, IMPACT_PROMPT_VERSION,
+        str(attempt), signature,
+    ))
+    ledger.append_news_impact_failure({
+        "failure_id": str(uuid.uuid5(uuid.NAMESPACE_URL, identity)),
+        "source": row["source"], "source_item_id": row["source_item_id"],
+        "revision_number": row["revision_number"],
+        "raw_content_hash": row["content_hash"],
+        "annotation_id": row["annotation_id"],
+        "llm_model_version": model_version,
+        "prompt_version": IMPACT_PROMPT_VERSION,
+        "attempt_number": attempt, "error_type": error_type,
+        "error_signature": signature, "error": normalized,
+        "failed_at": failed_at, "next_retry_at": next_retry,
+        "is_terminal": terminal,
+    })
     return {
         "retry_state": "DEAD_LETTER" if terminal else "BACKING_OFF",
         "attempt_number": attempt,

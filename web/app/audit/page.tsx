@@ -52,6 +52,16 @@ type News = {
   content_error_type?: string | null;
   summary_zh?: string | null;
   annotation_status: "READY" | "QUEUED" | "BACKING_OFF" | "DEAD_LETTER" | "WAITING_CONTENT" | "CONTENT_UNAVAILABLE" | "NOT_REQUIRED";
+  annotation_reason_code?: "DUPLICATE_CONTENT" | "SEARCH_LEAD" | "HISTORICAL_MATERIAL";
+  annotation_reason?: string;
+  impact_status?: "PENDING_ANNOTATION" | "PENDING_IMPACT" | "ACTIVE" | "EXPIRED_ON_RECEIPT" | "EXPIRED_BEFORE_AVAILABLE" | "EXPIRED" | "DUPLICATE_REPORT" | "COMMENTARY_ONLY" | "HISTORICAL_CONTEXT" | "BACKGROUND" | "MISSING_PUBLICATION_TIME";
+  impact_class?: "IMMEDIATE" | "SAME_DAY" | "DATA_RELEASE" | "POLICY_SHIFT" | "ONGOING_EVENT" | "BACKGROUND";
+  impact_event_state?: "ACTIVE" | "COMPLETED" | "UNCERTAIN" | "BACKGROUND";
+  impact_update_type?: "NEW_EVENT" | "MATERIAL_UPDATE" | "DUPLICATE_REPORT" | "COMMENTARY" | "HISTORICAL_CONTEXT";
+  impact_assessed_at?: string | null;
+  impact_available_at?: string | null;
+  impact_expires_at?: string | null;
+  impact_reason_zh?: string | null;
   link?: string;
   event_type?: string | null;
   entities?: string[];
@@ -414,7 +424,9 @@ const EVIDENCE_REASON_LABELS: Record<string, string> = {
   PUBLISHED_TIME_MISSING: "缺少可靠发布时间",
   PRE_FORWARD_PUBLICATION: "系统启动前的旧档案",
   PUBLISHED_AFTER_DECISION: "决策时尚未发布",
-  LATE_DISCOVERY: "迟到发现，不算当前冲击",
+  IMPACT_NOT_ASSESSED: "等待 Gemma 判断有效期",
+  IMPACT_EXPIRED: "新闻影响期已结束",
+  IMPACT_DUPLICATE_REPORT: "重复报道，不延长影响期",
   STALE_EVENT: "发布时间已超过72小时",
   CATEGORY_NOT_ACTIONABLE: "非黄金方向类别",
   NEEDS_CONFIRMATION: "尚未达到模型证据门槛",
@@ -437,11 +449,39 @@ const DEPLOYMENT_PRESENTATION: Record<string, { className: string; label: string
 };
 const VISIBILITY_LABELS: Record<string, string> = {
   MODEL_VISIBLE: "可用于模型",
+  IMPACT_PENDING: "等待 Gemma",
+  IMPACT_EXPIRED: "影响已结束",
   NOT_YET_PARSED: "等待 Gemini",
   WAITING_CONTENT: "等待正文",
   DISPLAY_ONLY: "仅供查看",
   COLLECT_ONLY: "仅收集",
   MODEL_INELIGIBLE: "不可用于模型",
+};
+const ANNOTATION_REASON_LABELS: Record<string, string> = {
+  DUPLICATE_CONTENT: "重复内容",
+  SEARCH_LEAD: "搜索线索",
+  HISTORICAL_MATERIAL: "历史资料",
+};
+const IMPACT_STATUS_LABELS: Record<string, string> = {
+  PENDING_ANNOTATION: "等待 Gemini 阅读",
+  PENDING_IMPACT: "等待 Gemma 判断",
+  ACTIVE: "当前仍有效",
+  EXPIRED_ON_RECEIPT: "收到时已过期",
+  EXPIRED_BEFORE_AVAILABLE: "处理完成前已过期",
+  EXPIRED: "影响期已结束",
+  DUPLICATE_REPORT: "重复报道",
+  COMMENTARY_ONLY: "评论内容",
+  HISTORICAL_CONTEXT: "历史资料",
+  BACKGROUND: "背景资料",
+  MISSING_PUBLICATION_TIME: "缺少发布时间",
+};
+const IMPACT_CLASS_LABELS: Record<string, string> = {
+  IMMEDIATE: "即时影响",
+  SAME_DAY: "当日影响",
+  DATA_RELEASE: "数据发布",
+  POLICY_SHIFT: "政策变化",
+  ONGOING_EVENT: "持续事件",
+  BACKGROUND: "背景资料",
 };
 
 function NewsRow({ row, keyCount, requestsPerMinute }: {
@@ -458,6 +498,10 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
     && row.model_visibility !== "NOT_YET_PARSED"
     ? "NOT_REQUIRED"
     : row.annotation_status;
+  const annotationReasonLabel = ANNOTATION_REASON_LABELS[
+    current.annotation_reason_code ?? ""
+  ] ?? "无需 AI 解析";
+  const impactLabel = IMPACT_STATUS_LABELS[current.impact_status ?? ""];
   const translated = Boolean(
     current.original_headline && current.headline !== current.original_headline,
   );
@@ -486,7 +530,7 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
       <div className="news-row-title"><strong>{row.headline}</strong><small>{SOURCE_LABELS[row.source] ?? row.source.replaceAll("_", " ")}{translated ? " · Gemini 中文标题" : ""}{row.emerging_topic_zh ? ` · ${row.emerging_topic_zh}` : ""}</small></div>
       <div className={`news-row-state state-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
         <b>{row.content_status === "FULL_TEXT" ? `${row.content_characters.toLocaleString()} 字符` : row.content_fetch_status === "UNAVAILABLE" ? "正文不可用" : row.content_fetch_status === "RETRYING" ? "自动重试中" : row.source === "google_news_gold_geopolitics" ? "聚合标题" : "等待正文"}</b>
-        <small>{annotationStatus === "READY" ? "AI 已读懂正文" : annotationStatus === "NOT_REQUIRED" ? "无需 AI 解析" : row.content_fetch_status === "UNAVAILABLE" ? "保留标题 · 不阻塞" : row.content_fetch_status === "RETRYING" ? "备用抓取中" : annotationStatus === "QUEUED" ? "AI 等待处理中" : annotationStatus === "BACKING_OFF" ? "失败后等待重试" : annotationStatus === "DEAD_LETTER" ? "已隔离待审" : "禁止判断"}</small>
+        <small>{annotationStatus === "READY" ? (impactLabel ?? "等待 Gemma 判断") : annotationStatus === "NOT_REQUIRED" ? annotationReasonLabel : row.content_fetch_status === "UNAVAILABLE" ? "保留标题 · 不阻塞" : row.content_fetch_status === "RETRYING" ? "备用抓取中" : annotationStatus === "QUEUED" ? "AI 等待处理中" : annotationStatus === "BACKING_OFF" ? "失败后等待重试" : annotationStatus === "DEAD_LETTER" ? "已隔离待审" : "禁止判断"}</small>
       </div>
     </summary>
     <div className="news-row-detail">
@@ -509,11 +553,15 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
         </section> : annotationStatus === "DEAD_LETTER" ? <section className="gemini-summary summary-waiting">
           <span>已隔离</span><p>相同永久错误重复出现，系统不会再自动消耗 Flash 配额；该新闻保留在 Ledger 中等待规则修复或人工复核。</p>
         </section> : annotationStatus === "NOT_REQUIRED" ? <section className="gemini-summary summary-queued">
-          <span>这篇新闻只供阅读</span><p>系统已保留正文，但它属于重复内容、搜索线索、历史资料或发现得太晚，因此无需消耗 AI 配额，也不会进入模型。</p>
+          <span>{annotationReasonLabel}</span><p>{current.annotation_reason ?? "该新闻不满足当前解析条件，不会消耗 AI 配额或进入模型。"}</p>
         </section> : row.content_fetch_status === "UNAVAILABLE" ? <section className="gemini-summary summary-waiting">
           <span>来源正文不可自动读取</span><p>发布网站拒绝访问、要求登录或没有可提取正文；这类候选不会写入新闻库，也不会进入模型。</p>
         </section> : <section className="gemini-summary summary-waiting">
           <span>{row.content_fetch_status === "RETRYING" ? "正文自动重试中" : "等待来源正文"}</span><p>当前只有标题或短描述，不会进入模型，也不会假装已经理解内容。</p>
+        </section>}
+        {annotationStatus === "READY" && <section className={`gemini-summary ${current.impact_status === "ACTIVE" ? "" : "summary-queued"}`}>
+          <span>{impactLabel ?? "等待 Gemma 判断"}{current.impact_class ? ` · ${IMPACT_CLASS_LABELS[current.impact_class] ?? current.impact_class}` : ""}</span>
+          <p>{current.impact_reason_zh ?? "Gemma 将根据新闻内容判断它现在是否仍会影响市场。晚收到只影响可见时间，不会改写过去。"}</p>
         </section>}
         {current.event_type && <div className="news-classification"><b>{current.event_type}</b><span>鹰派 {impulse(current.hawkishness)}</span><span>通胀 {impulse(current.inflation_impulse)}</span><span>增长 {impulse(current.growth_impulse)}</span><span>地缘 {impulse(current.geopolitical_risk)}</span><span>美元 {impulse(current.usd_impulse)}</span><span>新颖 {number(current.novelty)}</span><span>置信 {number(current.confidence)}</span></div>}
         <dl className="news-timeline"><div><dt>媒体发布时间</dt><dd>{time(row.source_published_time)}</dd></div><div><dt>系统首次收到</dt><dd>{time(row.collector_first_seen_time)}</dd></div><div><dt>Gemini 完成时间</dt><dd>{time(current.parsed_at)}</dd></div><div><dt>采集延迟</dt><dd>{current.collection_delay_seconds == null ? "—" : `${number(current.collection_delay_seconds, 1)} 秒`}</dd></div><div><dt>处理延迟</dt><dd>{current.processing_delay_seconds == null ? "—" : `${number(current.processing_delay_seconds, 1)} 秒`}</dd></div><div><dt>模型权限</dt><dd>{current.source_eligibility ?? "—"} · {row.model_visibility}</dd></div></dl>

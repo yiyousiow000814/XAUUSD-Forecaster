@@ -83,6 +83,8 @@ def build_news_prune_plan(
                 row,
                 decision_time=revision_visible_at,
                 forward_epoch=forward_epoch,
+                max_discovery_delay=None,
+                allow_pre_forward_publication=True,
             )
             if not timing.eligible:
                 item_reason = timing.reason_code

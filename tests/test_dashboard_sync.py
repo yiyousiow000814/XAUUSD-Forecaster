@@ -26,6 +26,33 @@ def _annotator_module():
     return module
 
 
+def _preview_module():
+    path = Path(__file__).resolve().parents[1] / "scripts" / "build_preview_bundle.py"
+    spec = importlib.util.spec_from_file_location("build_preview_bundle_test", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_preview_does_not_call_late_aggregated_news_expired() -> None:
+    module = _preview_module()
+    news_index = {"items": [{
+        "annotation_status": "NOT_REQUIRED",
+        "source": "google_news_gold_context",
+        "source_published_time": "2026-08-08T20:40:28+00:00",
+        "collector_first_seen_time": "2026-08-08T23:34:06+00:00",
+    }]}
+
+    module._backfill_annotation_reasons(
+        news_index, {"forward_epoch": "2026-08-05T00:00:00+00:00"}
+    )
+
+    row = news_index["items"][0]
+    assert row["annotation_reason_code"] == "SEARCH_LEAD"
+    assert row["annotation_reason"] == "搜索线索：来自聚合发现源，不是独立官方发布"
+
+
 def test_sync_retries_transient_disconnect(monkeypatch) -> None:
     module = _sync_module()
     calls = []
@@ -192,6 +219,9 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
             "summary_zh": body, "category": "其他",
             "content_fetch_status": "UNAVAILABLE",
             "content_error_type": "HTTPError",
+            "annotation_status": "NOT_REQUIRED",
+            "annotation_reason_code": "SEARCH_LEAD",
+            "annotation_reason": "搜索线索：来自聚合发现源，不是独立官方发布",
         } for index in range(100)],
         "recent_decisions": [{"id": index} for index in range(30)],
         "news_evidence": [{"id": index} for index in range(100)],
@@ -216,7 +246,10 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
     assert detail_rows[0]["payload"]["summary_zh"] == body
     assert index_rows[0]["content_fetch_status"] == "UNAVAILABLE"
     assert index_rows[0]["content_error_type"] == "HTTPError"
+    assert index_rows[0]["annotation_reason_code"] == "SEARCH_LEAD"
+    assert index_rows[0]["annotation_reason"].startswith("搜索线索")
     assert "content_fetch_status" not in detail_rows[0]["payload"]
+    assert "annotation_reason" not in detail_rows[0]["payload"]
     assert len(detail_rows[0]["detail_key"]) == 64
     assert mirrored["market_chart"]["decisions"] == []
     market_decision = json.loads(module.market_chart_snapshot(payload))["decisions"][0]

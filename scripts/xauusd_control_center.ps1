@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Gui", "Status", "StatusJson", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "EnableAutoStart", "DisableAutoStart", "InstallShortcut")]
+    [ValidateSet("Gui", "Status", "StatusJson", "CodeRevision", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "EnableAutoStart", "DisableAutoStart", "InstallShortcut")]
     [string]$Action = "Gui",
     [ValidateSet("", "quote", "collector", "annotator", "api", "sync")]
     [string]$ServiceKey = "",
@@ -16,6 +16,8 @@ $dashboardUrl = if ([Environment]::GetEnvironmentVariable("XAUUSD_DASHBOARD_URL"
     "https://aurum-signal-room.yiyousiow1234.chatgpt.site"
 }
 $watchdogLog = Join-Path $logRoot "control-watchdog.jsonl"
+$runtimeCodeStatePath = Join-Path $moduleRoot ".local\forward\runtime-code-state.json"
+$reloadableServiceKeys = @("collector", "annotator", "api", "sync")
 
 $services = @(
     [pscustomobject]@{
@@ -90,6 +92,69 @@ function Get-ForecasterProcesses {
     param([pscustomobject]$Service)
     @(Get-ForecasterProcessSnapshot |
         Where-Object { Test-ForecasterServiceProcess -Process $_ -Service $Service })
+}
+
+function Get-CodeRevision {
+    try {
+        $revision = (& git -C $moduleRoot rev-parse HEAD 2>$null).Trim()
+        if ($LASTEXITCODE -eq 0 -and $revision -match '^[0-9a-f]{40}$') {
+            return $revision
+        }
+    } catch {}
+    return $null
+}
+
+function Get-RuntimeCodeState {
+    if (-not (Test-Path -LiteralPath $runtimeCodeStatePath)) { return $null }
+    try {
+        return Get-Content -LiteralPath $runtimeCodeStatePath -Raw | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+}
+
+function Write-RuntimeCodeState {
+    param([string]$Revision)
+    $directory = Split-Path -Parent $runtimeCodeStatePath
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $temporary = "$runtimeCodeStatePath.tmp"
+    $servicePids = @{}
+    foreach ($service in @($services | Where-Object { $_.Key -in $reloadableServiceKeys })) {
+        $servicePids[$service.Key] = @(
+            Get-ForecasterProcesses $service | ForEach-Object { $_.ProcessId }
+        )
+    }
+    [pscustomobject]@{
+        applied_revision = $Revision
+        applied_at = [DateTimeOffset]::UtcNow.ToString("o")
+        service_pids = $servicePids
+    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $temporary -Encoding UTF8
+    Move-Item -LiteralPath $temporary -Destination $runtimeCodeStatePath -Force
+}
+
+function Restart-CodeReloadableServices {
+    param([string]$Revision)
+    $targets = @($services | Where-Object { $_.Key -in $reloadableServiceKeys })
+    Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_STARTED" `
+        -Service "collector,annotator,api,sync" -State $Revision
+    foreach ($service in $targets) { Stop-ForecasterService $service }
+    Start-Sleep -Milliseconds 800
+    foreach ($service in $targets) {
+        Start-ForecasterService $service -SkipExistingCheck
+    }
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(15)
+    do {
+        Start-Sleep -Milliseconds 500
+        $missing = @($targets | Where-Object {
+            @(Get-ForecasterProcesses $_).Count -eq 0
+        })
+    } while ($missing.Count -gt 0 -and [DateTimeOffset]::UtcNow -lt $deadline)
+    if ($missing.Count -gt 0) {
+        throw "Code revision reload failed to start: $($missing.Key -join ',')"
+    }
+    Write-RuntimeCodeState -Revision $Revision
+    Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_APPLIED" `
+        -Service "collector,annotator,api,sync" -State $Revision
 }
 
 function Test-ExpectedWeeklyMarketClosure {
@@ -291,9 +356,25 @@ function Invoke-ForecasterWatchdog {
         $failureCounts[$service.Key] = 0
         $lastRestart[$service.Key] = [DateTimeOffset]::MinValue
     }
+    $lastCodeReload = [DateTimeOffset]::MinValue
     Write-WatchdogEvent -Event "WATCHDOG_STARTED" -Service "all" -State "MONITORING"
     while ($true) {
         try {
+            $currentRevision = Get-CodeRevision
+            $runtimeState = Get-RuntimeCodeState
+            $appliedRevision = if ($runtimeState) {
+                [string]$runtimeState.applied_revision
+            } else { "" }
+            if ($currentRevision -and $currentRevision -ne $appliedRevision -and (
+                [DateTimeOffset]::UtcNow - $lastCodeReload
+            ).TotalSeconds -ge 120) {
+                $lastCodeReload = [DateTimeOffset]::UtcNow
+                Restart-CodeReloadableServices -Revision $currentRevision
+                foreach ($service in $services) {
+                    $lastRestart[$service.Key] = [DateTimeOffset]::UtcNow
+                    $failureCounts[$service.Key] = 0
+                }
+            }
             $status = @(Get-ForecasterStatus)
             foreach ($service in $services) {
                 $row = $status | Where-Object Key -eq $service.Key
@@ -694,13 +775,27 @@ switch ($Action) {
     "StatusJson" {
         if (-not $StatusPath) { throw "StatusPath is required for StatusJson." }
         $timeService = Get-Service W32Time -ErrorAction SilentlyContinue
+        $currentRevision = Get-CodeRevision
+        $runtimeState = Get-RuntimeCodeState
+        $appliedRevision = if ($runtimeState) {
+            [string]$runtimeState.applied_revision
+        } else { $null }
         [pscustomobject]@{
             captured_at = [DateTimeOffset]::UtcNow.ToString("o")
             services = @(Get-ForecasterStatus)
             auto_start = [bool](Test-AutoStart)
             windows_time_running = [bool]($timeService -and $timeService.Status -eq "Running")
+            runtime_code = [pscustomobject]@{
+                current_revision = $currentRevision
+                applied_revision = $appliedRevision
+                status = if ($currentRevision -and $currentRevision -eq $appliedRevision) {
+                    "CURRENT"
+                } else { "RELOAD_REQUIRED" }
+                applied_at = if ($runtimeState) { $runtimeState.applied_at } else { $null }
+            }
         } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $StatusPath -Encoding UTF8
     }
+    "CodeRevision" { Write-Output (Get-CodeRevision) }
     "Start" { Start-All; Start-Sleep -Seconds 2; Get-ForecasterStatus | Format-Table -AutoSize }
     "Stop" { Stop-All; Start-Sleep -Seconds 1; Get-ForecasterStatus | Format-Table -AutoSize }
     "Restart" { Restart-All; Start-Sleep -Seconds 2; Get-ForecasterStatus | Format-Table -AutoSize }

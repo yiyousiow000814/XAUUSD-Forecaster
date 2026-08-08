@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,3 +29,27 @@ def test_control_center_treats_weekly_close_as_healthy() -> None:
     assert 'return "MARKET CLOSED"' in control_center
     assert '"MARKET CLOSED", "API OK"' in control_center
     assert '@("STOPPED", "DATA STALE", "API ERROR")' in control_center
+
+
+def test_control_center_auto_reloads_python_services_on_commit_change() -> None:
+    path = ROOT / "scripts" / "xauusd_control_center.ps1"
+    control_center = path.read_text(encoding="utf-8")
+
+    assert '$reloadableServiceKeys = @("collector", "annotator", "api", "sync")' in control_center
+    assert 'CODE_REVISION_RELOAD_APPLIED' in control_center
+    assert 'Write-RuntimeCodeState -Revision $Revision' in control_center
+    assert 'currentRevision -ne $appliedRevision' in control_center
+    assert '"quote"' not in control_center.split("$reloadableServiceKeys =", 1)[1].splitlines()[0]
+
+    reported = subprocess.run(
+        [
+            "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", str(path), "-Action", "CodeRevision",
+        ],
+        cwd=ROOT, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    expected = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT,
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert reported == expected

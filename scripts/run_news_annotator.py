@@ -18,6 +18,7 @@ from xauusd_forecaster.annotation import (  # noqa: E402
     DEFAULT_GEMINI_MODEL,
     FALLBACK_GEMINI_MODEL,
     annotate_pending_news,
+    assess_pending_news_impacts,
     gemini_routine_remaining,
     translate_pending_headlines,
 )
@@ -96,9 +97,16 @@ def main() -> int:
                 ),
                 flush=True,
             )
+            impacts = assess_pending_news_impacts(ledger, limit=limit)
+            print(
+                json.dumps(
+                    {"event": "NEWS_IMPACT_BATCH", "statuses": impacts}
+                ),
+                flush=True,
+            )
             work_items = sum(
                 len(batch)
-                for batch in (statuses, fallback_statuses, translations)
+                for batch in (statuses, fallback_statuses, translations, impacts)
                 if isinstance(batch, list)
             )
             write_heartbeat(args.status_file, work_items=work_items)

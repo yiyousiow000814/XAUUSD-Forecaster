@@ -14,6 +14,24 @@ GOOGLE_NEWS_MAX_AGE = timedelta(hours=72)
 GOOGLE_NEWS_FUTURE_TOLERANCE = timedelta(minutes=10)
 GOOGLE_NEWS_MAX_ITEMS_PER_EVENT_FAMILY = 3
 
+_RETAIL_RATE_NOISE = (
+    "mortgage", "refinance", "credit card", "savings account", "fixed deposit",
+    "bank deposit", "personal loan", "auto loan", "student loan", "nri", "fcnr",
+)
+_FED_POLICY_ANCHORS = (
+    "fomc", "federal reserve", "fed ", "fed's", "fed’s", "treasury yield",
+    "powell", "warsh", "美联储", "美债收益率",
+)
+_FED_RATE_CONTEXT = (
+    "u.s.", " us ", "treasury", "inflation", "jobs", "payroll", "dollar",
+    "gold", "economy", "通胀", "就业", "美元", "黄金", "美国",
+)
+_HIGH_QUALITY_PUBLISHERS = (
+    "reuters", "bloomberg", "associated press", " ap news", "cnbc",
+    "financial times", "wall street journal", "bureau of labor statistics",
+    "federal reserve", "u.s. department of labor", "world gold council",
+)
+
 _TERMS = {
     "google_news_gold_context": (
         ("gold", "xau", "bullion", "金价", "黄金"),
@@ -68,10 +86,28 @@ def google_news_item_is_relevant(
     if observed - published > GOOGLE_NEWS_MAX_AGE:
         return False, "SEARCH_RESULT_TOO_OLD"
     text = " " + re.sub(r"\s+", " ", (headline or "").casefold()).strip() + " "
+    if source == "google_news_fed_rates":
+        anchored = any(term in text for term in _FED_POLICY_ANCHORS)
+        contextual_rate = (
+            any(term in text for term in ("interest rate", "rate cut", "rate hike", "利率", "降息", "加息"))
+            and any(term in text for term in _FED_RATE_CONTEXT)
+        )
+        if any(term in text for term in _RETAIL_RATE_NOISE) and not anchored:
+            return False, "RETAIL_RATE_NOISE"
+        if not anchored and not contextual_rate:
+            return False, "TITLE_NOT_RELEVANT_TO_LANE"
+        return True, "RELEVANT_RECENT_ITEM"
     for required_group in _TERMS[source]:
         if not any(term in text for term in required_group):
             return False, "TITLE_NOT_RELEVANT_TO_LANE"
     return True, "RELEVANT_RECENT_ITEM"
+
+
+def google_news_quality_rank(headline: str) -> int:
+    """Prefer official and established publishers within the same fresh feed."""
+    text = " " + re.sub(r"\s+", " ", (headline or "").casefold()).strip() + " "
+    publisher = text.rsplit(" - ", 1)[-1]
+    return 0 if any(name in publisher for name in _HIGH_QUALITY_PUBLISHERS) else 1
 
 
 def google_news_candidate_family(

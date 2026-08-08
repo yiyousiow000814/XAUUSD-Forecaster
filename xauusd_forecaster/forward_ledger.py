@@ -373,8 +373,12 @@ class ForwardLedger:
     def __init__(self, path: str | Path, now: datetime | None = None) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(self.path)
+        # Collector and annotator are independent long-running writers.  A
+        # brief WAL writer collision must wait for the current transaction,
+        # not terminate either service during a code reload or normal polling.
+        self.connection = sqlite3.connect(self.path, timeout=60.0)
         self.connection.row_factory = sqlite3.Row
+        self.connection.execute("PRAGMA busy_timeout=60000")
         self.connection.executescript(SCHEMA)
         from .evidence_v2 import install_v2_schema
 
@@ -656,6 +660,71 @@ class ForwardLedger:
                     record["llm_model_version"], record["prompt_version"],
                     _iso(record["parse_started_at"]), _iso(record["parsed_at"]),
                     json.dumps(vector, sort_keys=True, separators=(",", ":")),
+                ),
+            )
+
+    def append_news_impact_assessment(self, record: dict[str, Any]) -> None:
+        from .news_impact import EVENT_STATES, IMPACT_CLASSES, UPDATE_TYPES
+
+        source_key = (
+            record["source"], record["source_item_id"], record["revision_number"]
+        )
+        news = self.connection.execute(
+            """SELECT content_hash FROM news_revisions
+            WHERE source=? AND source_item_id=? AND revision_number=?""",
+            source_key,
+        ).fetchone()
+        if news is None or news["content_hash"] != record["raw_content_hash"]:
+            raise ValueError("impact assessment does not match immutable news")
+        annotation = self.connection.execute(
+            "SELECT annotation_id FROM news_annotations WHERE annotation_id=?",
+            (record["annotation_id"],),
+        ).fetchone()
+        if annotation is None:
+            raise ValueError("impact assessment annotation is missing")
+        if record["assessed_at"] < record["parse_started_at"]:
+            raise ValueError("impact assessment completion precedes start")
+        if record["impact_class"] not in IMPACT_CLASSES:
+            raise ValueError("impact assessment class is not controlled")
+        if record["event_state"] not in EVENT_STATES:
+            raise ValueError("impact event state is not controlled")
+        if record["update_type"] not in UPDATE_TYPES:
+            raise ValueError("impact update type is not controlled")
+        if not 0.0 <= float(record["confidence"]) <= 1.0:
+            raise ValueError("impact confidence is outside [0, 1]")
+        if not str(record["reason_zh"]).strip():
+            raise ValueError("impact reason is empty")
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO news_impact_assessments_v1 VALUES
+                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    record["assessment_id"], *source_key,
+                    record["raw_content_hash"], record["annotation_id"],
+                    record["llm_model_version"], record["prompt_version"],
+                    _iso(record["parse_started_at"]), _iso(record["assessed_at"]),
+                    record["impact_class"], record["event_state"],
+                    record["update_type"], float(record["confidence"]),
+                    str(record["reason_zh"]).strip(),
+                ),
+            )
+
+    def append_news_impact_failure(self, record: dict[str, Any]) -> None:
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO news_impact_failures_v1 VALUES
+                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    record["failure_id"], record["source"],
+                    record["source_item_id"], record["revision_number"],
+                    record["raw_content_hash"], record["annotation_id"],
+                    record["llm_model_version"], record["prompt_version"],
+                    record["attempt_number"], record["error_type"],
+                    record["error_signature"], record["error"],
+                    _iso(record["failed_at"]),
+                    _iso(record["next_retry_at"])
+                    if record.get("next_retry_at") else None,
+                    int(bool(record["is_terminal"])),
                 ),
             )
 

@@ -20,9 +20,14 @@ from xauusd_forecaster.content import (
     hydrate_pending_non_fed_content,
 )
 from xauusd_forecaster.inference import build_shadow_predictions
-from xauusd_forecaster.annotation import annotate_pending_news, translate_pending_headlines
+from xauusd_forecaster.annotation import (
+    annotate_pending_news,
+    assess_pending_news_impacts,
+    translate_pending_headlines,
+)
 from xauusd_forecaster.factors import aggregate_news_features, factor_coverage
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
+from xauusd_forecaster.news_impact import pending_impact_records
 from xauusd_forecaster.maintenance import (
     archive_completed_quote_days,
     backup_forward_ledger,
@@ -47,6 +52,7 @@ from xauusd_forecaster.news import (
     extract_world_gold_council_article,
     parse_rss,
 )
+from xauusd_forecaster.news_relevance import google_news_item_is_relevant
 from xauusd_forecaster.ridge import train_ridge
 from xauusd_forecaster.shadow_simulation import shadow_league
 from xauusd_forecaster.u5_state import U5State
@@ -58,6 +64,15 @@ from xauusd_forecaster.training import (
 
 
 UTC = timezone.utc
+
+
+def test_forward_ledger_waits_for_short_writer_collisions(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    try:
+        timeout_ms = ledger.connection.execute("PRAGMA busy_timeout").fetchone()[0]
+        assert timeout_ms == 60_000
+    finally:
+        ledger.close()
 
 
 def _snapshot(
@@ -894,6 +909,106 @@ def test_google_news_lane_caps_one_event_family_across_repeated_polls(tmp_path) 
     assert ledger.count("news_revisions") == 3
 
 
+def test_bls_official_fallback_is_not_blocked_by_discovery_family_cap(tmp_path) -> None:
+    fetched = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched - timedelta(days=1))
+    for index in range(3):
+        body = "publisher employment report commentary " * 20
+        ledger.append_news_revision({
+            "source": "google_news_us_employment", "source_item_id": f"commentary-{index}",
+            "source_published_time": fetched - timedelta(hours=1),
+            "collector_first_seen_time": fetched - timedelta(minutes=30),
+            "fetched_time": fetched - timedelta(minutes=30),
+            "headline": f"July jobs report commentary {index}", "body": body,
+            "link": f"https://publisher.example/jobs-{index}",
+            "content_hash": hashlib.sha256(f"{body}{index}".encode()).hexdigest(),
+            "cluster_id": f"commentary-{index}",
+        })
+    lane = GoogleNewsLane(
+        "google_news_bls_official_releases", "site:bls.gov Employment Situation",
+    )
+    rss = b"""<rss><channel><item><guid>bls-official</guid>
+      <title>Employment Situation News Release - 2026 M07 Results - Bureau of Labor Statistics (.gov)</title>
+      <pubDate>Sat, 08 Aug 2026 09:30:00 GMT</pubDate>
+      <link>https://news.google.com/rss/articles/bls</link>
+    </item></channel></rss>"""
+    result = collect_google_news_lane(
+        ledger, fetched, lane, fetcher=lambda _: rss,
+        decoder=lambda _: "https://www.bls.gov/news.release/empsit.nr0.htm",
+        content_extractor=lambda url: ("official employment release " * 40, url),
+    )
+    assert result["inserted_revisions"] == 1
+    assert result["rejected_reasons"].get("EVENT_FAMILY_CAP", 0) == 0
+
+
+def test_google_official_fallback_reports_partial_when_body_is_blocked(tmp_path) -> None:
+    fetched = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched - timedelta(days=1))
+    lane = GoogleNewsLane(
+        "google_news_bls_official_releases", "site:bls.gov Employment Situation",
+    )
+    rss = b"""<rss><channel><item><guid>bls-official</guid>
+      <title>Employment Situation News Release - Bureau of Labor Statistics (.gov)</title>
+      <pubDate>Sat, 08 Aug 2026 09:30:00 GMT</pubDate>
+      <link>https://news.google.com/rss/articles/bls</link>
+    </item></channel></rss>"""
+    result = collect_google_news_lane(
+        ledger, fetched, lane, fetcher=lambda _: rss,
+        decoder=lambda _: "https://www.bls.gov/news.release/empsit.nr0.htm",
+        content_extractor=lambda _url: (_ for _ in ()).throw(
+            urllib.error.HTTPError(_url, 403, "Forbidden", {}, None)
+        ),
+    )
+    assert result["status"] == "PARTIAL"
+    assert result["rejected_reasons"] == {"FULL_TEXT_UNAVAILABLE": 1}
+    poll = ledger.connection.execute(
+        "SELECT status,error_type FROM source_polls ORDER BY fetched_time DESC LIMIT 1"
+    ).fetchone()
+    assert poll["status"] == "PARTIAL"
+    assert poll["error_type"] == "PublisherContentUnavailable"
+
+
+def test_fed_rates_lane_rejects_retail_rate_noise() -> None:
+    observed = datetime(2026, 8, 8, 16, 0, tzinfo=UTC)
+    for headline in (
+        "Public Storage preferred shares benefit from lower interest rates",
+        "Highest FCNR deposit interest rates for NRIs",
+        "Mortgage and refinance interest rates today",
+    ):
+        allowed, _ = google_news_item_is_relevant(
+            "google_news_fed_rates", headline, observed - timedelta(minutes=10), observed,
+        )
+        assert not allowed
+    for headline in (
+        "Federal Reserve split deepens over rate hikes",
+        "Treasury yields drop after surprise US jobs loss",
+        "US inflation changes the outlook for interest rates",
+    ):
+        allowed, _ = google_news_item_is_relevant(
+            "google_news_fed_rates", headline, observed - timedelta(minutes=10), observed,
+        )
+        assert allowed
+
+
+def test_google_news_lane_prefers_established_publisher_within_limit(tmp_path) -> None:
+    fetched = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+    lane = GoogleNewsLane("google_news_fed_rates", "Federal Reserve")
+    rss = b"""<rss><channel>
+      <item><guid>blog</guid><title>Federal Reserve rate outlook - Random Market Blog</title>
+        <pubDate>Sat, 08 Aug 2026 09:59:00 GMT</pubDate><link>https://example.test/blog</link></item>
+      <item><guid>reuters</guid><title>Federal Reserve split deepens over rates - Reuters</title>
+        <pubDate>Sat, 08 Aug 2026 09:50:00 GMT</pubDate><link>https://example.test/reuters</link></item>
+    </channel></rss>"""
+    result = collect_google_news_lane(
+        ledger, fetched, lane, fetcher=lambda _: rss, decoder=lambda url: url,
+        content_extractor=lambda url: ("complete rates evidence " * 40, url), limit=1,
+    )
+    assert result["inserted_revisions"] == 1
+    row = ledger.connection.execute("SELECT headline FROM news_revisions").fetchone()
+    assert row["headline"].endswith("Reuters")
+
+
 def test_google_news_lane_rejects_old_and_off_topic_results_before_ledger(tmp_path) -> None:
     fetched = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
@@ -1263,6 +1378,19 @@ def test_gemini_rejects_non_chinese_translation_fields() -> None:
         annotation_module._validate_chinese_result(vector)
 
 
+def test_gemini_accepts_chinese_title_with_preserved_proper_names() -> None:
+    vector = {
+        "headline_zh": "Public Storage：优先股有望从利率下降中获益（PSA）- Seeking Alpha",
+        "summary_zh": "该报道讨论利率下降对优先股估值的影响，并完整保留公司名称和股票缩写。",
+        "event_type": "analyst_report", "entities": ["Public Storage"],
+        "hawkishness": 0.0, "inflation_impulse": 0.0,
+        "growth_impulse": 0.0, "geopolitical_risk": 0.0,
+        "usd_impulse": 0.0, "novelty": 0.0, "confidence": 0.5,
+    }
+
+    annotation_module._validate_chinese_result(vector)
+
+
 def test_gemini_repairs_mixed_language_summary_with_counted_request(
     tmp_path, monkeypatch
 ) -> None:
@@ -1366,6 +1494,47 @@ def test_gemini_named_month_translation_does_not_invent_numeric_month() -> None:
     annotation_module._restore_source_number_lexemes(result, source, "")
     assert result["headline_zh"] == "黄金价格于八月5日上涨"
     assert result["summary_zh"] == "市场正在关注八月的黄金走势。"
+
+
+def test_gemini_named_month_translation_accepts_space_before_month() -> None:
+    result = {
+        "headline_zh": "就业报告：Brian Belski 分析 7 月数据及科技股估值",
+    }
+    source = "Jobs report: Brian Belski breaks down July data, tech valuations"
+
+    annotation_module._recover_display_fields(result, source, "")
+
+    assert result["headline_zh"] == "就业报告：Brian Belski 分析 七月数据及科技股估值"
+    assert "相关数值" not in result["headline_zh"]
+
+
+def test_display_number_recovery_does_not_merge_date_comma_with_year() -> None:
+    result = {"headline_zh": "财政部委员会2026年8月4日会议纪要"}
+    source = "Treasury committee minutes August 4, 2026"
+
+    annotation_module._recover_display_fields(result, source, "")
+
+    assert result["headline_zh"] == "财政部委员会2026年八月4日会议纪要"
+    assert "相关数值" not in result["headline_zh"]
+
+
+def test_title_translation_requires_every_source_number() -> None:
+    annotation_module._require_title_numbers_preserved(
+        "财政部借款咨询委员会2026年八月4日会议纪要",
+        "Treasury Borrowing Advisory Committee August 4, 2026",
+    )
+
+
+def test_title_translation_rejects_missing_or_unresolved_numbers() -> None:
+    source = "Treasury Borrowing Advisory Committee August 4, 2026"
+    with pytest.raises(ValueError, match="omitted source numbers"):
+        annotation_module._require_title_numbers_preserved(
+            "财政部借款咨询委员会八月4日会议纪要", source
+        )
+    with pytest.raises(ValueError, match="unresolved number"):
+        annotation_module._require_title_numbers_preserved(
+            "相关数值年八月4日财政部借款咨询委员会会议纪要", source
+        )
 
 
 def test_gemini_locally_recovers_unverifiable_display_numbers() -> None:
@@ -1619,6 +1788,42 @@ def test_headline_only_translation_is_display_only(tmp_path, monkeypatch) -> Non
     assert (tmp_path / "gemma-quota.json").exists()
 
 
+def test_headline_translation_falls_back_after_non_chinese_response(
+    tmp_path, monkeypatch
+) -> None:
+    now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "complete publisher text " * 20
+    ledger.append_news_revision({
+        "source": "title-test", "source_item_id": "fallback",
+        "source_published_time": now, "collector_first_seen_time": now,
+        "fetched_time": now, "headline": "Federal Reserve requests comment",
+        "body": body, "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+        "cluster_id": "title-fallback",
+    })
+    models = []
+    def fake_title(_key, model, _headline):
+        models.append(model)
+        if model == annotation_module.DEFAULT_GEMMA_MODEL:
+            raise ValueError("Gemini headline_zh is not Simplified Chinese")
+        return "美联储就提案征求意见", model
+    monkeypatch.setattr(annotation_module, "_call_gemini_title", fake_title)
+
+    statuses = translate_pending_headlines(ledger, api_key="test-key")
+
+    assert statuses[0]["status"] == "OK"
+    assert models == [
+        annotation_module.DEFAULT_GEMMA_MODEL,
+        annotation_module.DEFAULT_GEMINI_MODEL,
+    ]
+    row = ledger.connection.execute(
+        "SELECT headline_zh,llm_model_version,prompt_version FROM news_title_translations"
+    ).fetchone()
+    assert row["headline_zh"] == "美联储就提案征求意见"
+    assert row["llm_model_version"] == annotation_module.DEFAULT_GEMINI_MODEL
+    assert row["prompt_version"] == annotation_module.TITLE_PROMPT_VERSION
+
+
 def test_placeholder_title_is_retried_append_only(tmp_path, monkeypatch) -> None:
     now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
@@ -1651,6 +1856,202 @@ def test_placeholder_title_is_retried_append_only(tmp_path, monkeypatch) -> None
     assert statuses[0]["status"] == "OK"
     assert ledger.count("news_title_translations") == 2
     assert translate_pending_headlines(ledger, api_key="test-key") == []
+
+
+def test_suspect_numeric_recovery_title_is_retried_append_only(
+    tmp_path, monkeypatch
+) -> None:
+    now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "full source text " * 30
+    content_hash = hashlib.sha256(body.encode()).hexdigest()
+    ledger.append_news_revision({
+        "source": "title-test", "source_item_id": "month-retry",
+        "collector_first_seen_time": now, "fetched_time": now,
+        "headline": "Jobs report reviews July data", "body": body,
+        "content_hash": content_hash, "cluster_id": "title-month-retry",
+    })
+    ledger.append_title_translation({
+        "translation_id": "old-suspect", "source": "title-test",
+        "source_item_id": "month-retry", "revision_number": 1,
+        "raw_content_hash": content_hash,
+        "headline_zh": "就业报告回顾相关数值月数据",
+        "llm_model_version": "gemma-4-31b-it",
+        "prompt_version": "headline-zh-v4-multimodel-fallback",
+        "parse_started_at": now, "parsed_at": now,
+    })
+    monkeypatch.setattr(
+        annotation_module, "_call_gemini_title",
+        lambda *_: ("就业报告回顾七月数据", "gemma-4-31b-it"),
+    )
+
+    statuses = translate_pending_headlines(ledger, api_key="test-key")
+
+    assert statuses[0]["status"] == "OK"
+    assert ledger.count("news_title_translations") == 2
+    assert translate_pending_headlines(ledger, api_key="test-key") == []
+
+
+def test_irrelevant_google_rate_title_does_not_consume_translation(
+    tmp_path, monkeypatch
+) -> None:
+    now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "full source text " * 30
+    ledger.append_news_revision({
+        "source": "google_news_fed_rates", "source_item_id": "mortgage",
+        "source_published_time": now, "collector_first_seen_time": now,
+        "fetched_time": now,
+        "headline": "Mortgage and refinance rates today",
+        "body": body, "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+        "cluster_id": "irrelevant-mortgage",
+    })
+    monkeypatch.setattr(
+        annotation_module, "_call_gemini_title",
+        lambda *_: pytest.fail("irrelevant title must not call the translator"),
+    )
+
+    assert translate_pending_headlines(ledger, api_key="test-key") == []
+    assert ledger.count("news_title_translations") == 0
+
+
+def test_gemma_impact_assessment_is_append_only_and_versioned(
+    tmp_path, monkeypatch
+) -> None:
+    now = datetime(2026, 8, 8, 20, 40, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "Complete policy report with a material decision. " * 20
+    content_hash = hashlib.sha256(body.encode()).hexdigest()
+    ledger.append_news_revision({
+        "source": "federal_reserve_monetary", "source_item_id": "impact-one",
+        "source_published_time": now,
+        "collector_first_seen_time": now + timedelta(hours=2, minutes=53),
+        "fetched_time": now + timedelta(hours=2, minutes=53),
+        "headline": "Federal Reserve announces policy decision", "body": body,
+        "content_hash": content_hash, "cluster_id": "impact-cluster",
+    })
+    vector = {
+        "event_type": "monetary_policy", "entities": ["Federal Reserve"],
+        "hawkishness": 0.0, "inflation_impulse": 0.0,
+        "growth_impulse": 0.0, "geopolitical_risk": 0.0,
+        "usd_impulse": 0.0, "novelty": 0.8, "confidence": 0.9,
+    }
+    ledger.append_annotation({
+        "annotation_id": "impact-annotation", "source": "federal_reserve_monetary",
+        "source_item_id": "impact-one", "revision_number": 1,
+        "raw_content_hash": content_hash, "annotation": vector,
+        "llm_model_version": annotation_module.DEFAULT_GEMINI_MODEL,
+        "prompt_version": annotation_module.PROMPT_VERSION,
+        "parse_started_at": now + timedelta(hours=2, minutes=53),
+        "parsed_at": now + timedelta(hours=2, minutes=54),
+    })
+    monkeypatch.setattr(
+        annotation_module,
+        "_call_gemini_impact",
+        lambda _key, _row: ({
+            "impact_class": "POLICY_SHIFT", "event_state": "ACTIVE",
+            "update_type": "NEW_EVENT", "confidence": 0.9,
+            "reason_zh": "政策决定可能持续影响利率预期。",
+        }, annotation_module.IMPACT_MODEL),
+    )
+
+    statuses = assess_pending_news_impacts(ledger, api_key="test-key", limit=1)
+
+    assert statuses[0]["status"] == "OK"
+    row = ledger.connection.execute(
+        "SELECT * FROM news_impact_assessments_v1"
+    ).fetchone()
+    assert row["impact_class"] == "POLICY_SHIFT"
+    assert row["llm_model_version"] == annotation_module.IMPACT_MODEL
+    assert assess_pending_news_impacts(ledger, api_key="test-key", limit=1) == []
+
+
+def test_gemma_impact_preserves_transient_http_error(tmp_path, monkeypatch) -> None:
+    pool = annotation_module._GeminiRequestPool(
+        ("test-key",), GeminiQuotaLedger(tmp_path / "quota.json"),
+        requests_per_key=1, batch_limit=1,
+    )
+    transient = urllib.error.HTTPError(
+        "https://example", 429, "Too Many Requests", {}, None
+    )
+    monkeypatch.setattr(
+        annotation_module, "_call_gemini_impact",
+        lambda *_args: (_ for _ in ()).throw(transient),
+    )
+
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        pool.call_impact(0, {})
+
+    assert caught.value.code == 429
+
+
+def test_impact_context_finds_semantically_similar_prior_event(tmp_path) -> None:
+    now = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    common = {
+        "event_type": "fed_independence", "entities": ["Donald Trump", "Lisa Cook"],
+        "hawkishness": 0.0, "inflation_impulse": 0.0,
+        "growth_impulse": 0.0, "geopolitical_risk": 0.2,
+        "usd_impulse": 0.0, "novelty": 0.8, "confidence": 0.9,
+        "primary_category": "rates_fed", "record_kind": "FACT_EVENT",
+        "evidence_role": "CORE_CLAIM", "materiality": 0.8,
+        "canonical_actor_id": "donald_trump", "canonical_object_id": "lisa_cook",
+        "headline_zh": "特朗普再次寻求解除丽莎库克职务",
+        "secondary_categories": [], "emerging_topic_zh": "美联储独立性",
+        "actor": "Donald Trump", "action": "attempts removal",
+        "object": "Lisa Cook", "location": "United States", "event_time": "",
+        "claim_status": "CONFIRMED", "action_family": "REGULATORY_ACTION",
+        "canonical_location_id": "us", "primary_story_title_zh": "丽莎库克罢免争议",
+        "secondary_contexts_zh": [], "relation_to_prior": "NONE",
+        "document_kind": "NEWS_REPORT", "source_organization_id": "test-source",
+    }
+    for index, material_key in enumerate((
+        "trump_removes_lisa_cook", "cook_firing_attempt",
+    )):
+        item_id = f"cook-{index}"
+        seen = now + timedelta(minutes=index * 10)
+        body = f"Trump effort involving Federal Reserve Governor Lisa Cook {index}. " * 20
+        digest = hashlib.sha256(body.encode()).hexdigest()
+        ledger.append_news_revision({
+            "source": "federal_reserve_press_all", "source_item_id": item_id,
+            "source_published_time": seen, "collector_first_seen_time": seen,
+            "fetched_time": seen, "headline": f"Fed Governor Lisa Cook report {index}",
+            "body": body, "content_hash": digest, "cluster_id": item_id,
+        })
+        ledger.append_annotation({
+            "annotation_id": f"annotation-{index}",
+            "source": "federal_reserve_press_all", "source_item_id": item_id,
+            "revision_number": 1, "raw_content_hash": digest,
+            "annotation": {
+                **common, "material_event_key": material_key,
+                "episode_key": material_key,
+                "summary_zh": "特朗普再次寻求解除美联储理事丽莎库克的职务。",
+            },
+            "llm_model_version": annotation_module.DEFAULT_GEMINI_MODEL,
+            "prompt_version": annotation_module.PROMPT_VERSION,
+            "parse_started_at": seen, "parsed_at": seen + timedelta(seconds=1),
+        })
+        if index == 0:
+            ledger.append_news_impact_assessment({
+                "assessment_id": "prior-impact", "source": "federal_reserve_press_all",
+                "source_item_id": item_id, "revision_number": 1,
+                "raw_content_hash": digest, "annotation_id": "annotation-0",
+                "llm_model_version": annotation_module.IMPACT_MODEL,
+                "prompt_version": annotation_module.IMPACT_PROMPT_VERSION,
+                "parse_started_at": seen + timedelta(seconds=1),
+                "assessed_at": seen + timedelta(seconds=2),
+                "impact_class": "ONGOING_EVENT", "event_state": "ACTIVE",
+                "update_type": "NEW_EVENT", "confidence": 0.9,
+                "reason_zh": "此前已经收到同一事件。",
+            })
+
+    pending = pending_impact_records(
+        ledger.connection, observed_at=now + timedelta(hours=1), limit=10,
+    )
+
+    current = next(row for row in pending if row["source_item_id"] == "cook-1")
+    assert current["prior_event_context"]
+    assert current["prior_event_context"][0]["source_item_id"] == "cook-0"
 
 
 def test_json_object_decoder_accepts_fence_and_trailing_text() -> None:
