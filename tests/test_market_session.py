@@ -4,6 +4,7 @@ from xauusd_forecaster.market import MarketObservation
 from xauusd_forecaster.market_session import (
     expected_weekly_closure,
     has_fresh_quote,
+    horizon_crosses_weekly_closure,
     skipped_grid_reason,
 )
 
@@ -20,12 +21,29 @@ def test_expected_weekly_closure_window() -> None:
 
 
 def test_fresh_received_quote_overrides_weekly_clock() -> None:
-    decision = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+    decision = datetime(2026, 8, 7, 20, 0, tzinfo=UTC)
     quote = MarketObservation(
         decision - timedelta(seconds=2), decision - timedelta(seconds=1), 4300, 4300.1
     )
     assert has_fresh_quote([quote], decision)
     assert skipped_grid_reason(decision, decision, [quote]) is None
+
+
+def test_fixed_horizon_must_finish_before_weekly_close() -> None:
+    last_eligible = datetime(2026, 8, 7, 20, 29, tzinfo=UTC)
+    first_blocked = datetime(2026, 8, 7, 20, 30, tzinfo=UTC)
+    quote = MarketObservation(
+        first_blocked - timedelta(seconds=2),
+        first_blocked - timedelta(seconds=1),
+        4300,
+        4300.1,
+    )
+
+    assert not horizon_crosses_weekly_closure(last_eligible)
+    assert horizon_crosses_weekly_closure(first_blocked)
+    assert skipped_grid_reason(first_blocked, first_blocked, [quote]) == (
+        "FIXED_HORIZON_CROSSES_WEEKLY_CLOSE"
+    )
 
 
 def test_weekend_and_retroactive_missing_grids_are_not_reconstructed() -> None:

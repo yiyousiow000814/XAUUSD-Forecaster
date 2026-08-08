@@ -35,6 +35,10 @@ outcomes, training rows, performance rows, or news matches.
 
 - News collection and annotation continue during the expected weekly XAUUSD
   closure. Their immutable first-seen clocks continue advancing normally.
+- A decision grid is eligible only when its complete fixed 30-minute horizon
+  ends before the expected Friday close. Grids from Friday 16:30 New York time
+  onward are skipped even when the entry quote is fresh, because an executable
+  30-minute exit cannot be guaranteed.
 - A scheduled closed grid without a fresh point-in-time Bid/Ask does not create
   a market snapshot, prediction, outcome, or training row.
 - A genuinely received fresh quote takes precedence over the closure clock.
@@ -109,6 +113,11 @@ items, legacy annotation schemas, and unsupported source domains remain
 display-only. Syndicated headlines sharing one `material_event_key` form one
 event and never create multiple votes. A primary-source grade is based on the
 source organization, not the number of feeds or documents carrying it.
+Every model-eligible event also requires a precise, live-known event clock.
+An explicit timestamp extracted from the body is preferred. A precise
+publisher timestamp may serve as `OFFICIAL_RELEASE_TIME` only when the official
+publication is itself the event. Date-only, missing, future, and media-derived
+substitute clocks fail closed for training.
 
 Display-number formatting is repaired deterministically against source
 lexemes. Unsupported numbers are replaced by a nonnumeric disclosure and lower
@@ -154,9 +163,11 @@ are immutable model-update fields.
   new eligible rows. Sixty trading days is a confidence milestone, not a
   training blocker. A failed training attempt is logged and cannot alter a
   prior artifact.
-- Only the newest and immediately preceding version of each Ridge identity
-  continue producing Shadow predictions. Older versions are archived without
-  deleting their artifacts, predictions, scores, or receipts.
+- Five Ridge identities form one immutable generation with one training cutoff,
+  policy version, event-snapshot hash, and `generation_id`. Training writes all
+  five artifacts before one activation record atomically replaces the active
+  generation. Only the active generation produces future Shadow predictions.
+  Archived generations retain artifacts, predictions, scores, and receipts.
 - Calibration follows the rolling model identity and selects the newest version
   that existed at each prior Decision. Unhealthy predictions and invalid
   outcomes cannot enter it. Twenty valid UTC-day blocks are required for
@@ -165,8 +176,10 @@ are immutable model-update fields.
 - Only the owner may append a manual promotion approval after forward gates.
 - Unknown, missing, stale, or unhealthy data always produces effective
   `WAIT`; it never invents a replacement direction.
-- Automatic training always evaluates Market-only eligibility. News-residual
-  and Full artifacts require 30 news-exposed rows and 10 distinct clusters.
+- Automatic generation training requires 30 event-exposed rows for both the
+  Official and Broad lanes. One event and one event day permit an explicitly
+  experimental Shadow generation; 10 events and three event days establish the
+  standard evidence state.
   Artifacts trained from one or two distinct event days are explicitly labelled
   `EXPERIMENTAL_SINGLE_DAY` or `EXPERIMENTAL_TWO_DAY`; three distinct event days
   establish the standard news evidence state. All remain Shadow Challengers.
@@ -205,12 +218,15 @@ annotations, decision events, per-model predictions, outcomes, scores, and
 model-update records. Raw high-frequency quotes belong in compressed daily
 files outside the Prediction Ledger. Historical warm-up state and forward
 evidence use separate roles and cannot share training queries.
+Raw news revisions are append-only. Maintenance appends visibility
+classifications such as `CONTENT_UNAVAILABLE`, `DUPLICATE_DOCUMENT`, and
+`ARCHIVAL_ONLY`; it does not delete or rewrite raw evidence.
 
 ## Active free source boundary
 
 The official News-residual path accepts source-qualified official full bodies.
-The separate Broad News-residual path manages evidence at event level under
-`news-event-evidence-v1`:
+Official and Broad news paths share one event snapshot and event-clock policy.
+The Broad permission uses these evidence grades:
 
 - `PRIMARY`: a complete annotated body from a configured first-party source;
 - `CORROBORATED`: complete annotated bodies about the same event from at least
@@ -224,6 +240,14 @@ oil/energy, war/geopolitics, central-bank gold, and risk sentiment. Source
 identity never grants media content model permission by itself. Event grouping,
 evidence grade, permission, members, first-seen cutoff, and source hash are
 deterministic and visible on the evidence dashboard.
+
+Each event receives one total training budget within a generation. Its
+five-minute decision exposures divide that budget according to the frozen
+freshness and evidence weight. Ridge fits use the resulting `sample_weight`, so
+repeated visibility preserves continuous estimation without turning one event
+into many independent votes. Official 30-minute evaluation uses fixed,
+non-overlapping `:00` and `:30` decisions; five-minute results remain a clearly
+labelled overlapping diagnostic.
 
 Broad News-residual and Broad Full are independent Shadow identities. Their
 learning curves are compared with the official Full identity; they never

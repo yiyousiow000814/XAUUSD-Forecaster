@@ -28,6 +28,19 @@ def expected_weekly_closure(at: datetime) -> bool:
     )
 
 
+def horizon_crosses_weekly_closure(
+    decision_time: datetime,
+    horizon: timedelta = timedelta(minutes=30),
+) -> bool:
+    """Return whether a new fixed-horizon observation would cross Friday close."""
+
+    if horizon <= timedelta(0):
+        raise ValueError("horizon must be positive")
+    if expected_weekly_closure(decision_time):
+        return True
+    return expected_weekly_closure(decision_time + horizon)
+
+
 def has_fresh_quote(
     observations: list[MarketObservation],
     decision_time: datetime,
@@ -52,6 +65,11 @@ def skipped_grid_reason(
 ) -> str | None:
     """Classify grids that must not be reconstructed as live predictions."""
 
+    if (
+        not expected_weekly_closure(decision_time)
+        and horizon_crosses_weekly_closure(decision_time)
+    ):
+        return "FIXED_HORIZON_CROSSES_WEEKLY_CLOSE"
     if has_fresh_quote(observations, decision_time):
         return None
     if expected_weekly_closure(decision_time):
