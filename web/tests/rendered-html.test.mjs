@@ -123,7 +123,7 @@ test("renders the news and decision audit route", async () => {
   assert.match(html, /决策与30分钟结果/);
   assert.match(html, /Live OOS 学习曲线/);
   assert.match(html, /大视野覆盖/);
-  assert.match(html, /LEARNING PROGRESS/);
+  assert.match(html, /学习进度/);
 });
 
 test("reloads an already-open dashboard after a deployment changes its client bundle", () => {
@@ -193,12 +193,10 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /每30分钟（固定 :00 \/ :30）/);
   assert.match(modal, /同一坐标叠加比较/);
   assert.match(page, /五套模型，现在表现怎样/);
-  assert.match(page, /方向收集/);
-  assert.match(page, /含新闻的决策时点/);
-  assert.match(page, /方向再收集/);
-  assert.match(page, /重复决策样本，不是文章数/);
-  assert.match(page, /已冻结可审计证据/);
-  assert.match(page, /新闻特征随下一轮方向模型一起更新/);
+  assert.match(page, /training-card-total/);
+  assert.match(page, /还差/);
+  assert.doesNotMatch(page, /含新闻的决策时点/);
+  assert.doesNotMatch(page, /重复决策样本，不是文章数/);
   assert.doesNotMatch(page, /learning-data-flow/);
   assert.match(page, /方法与实盘边界/);
   assert.match(modal, /K线与决策/);

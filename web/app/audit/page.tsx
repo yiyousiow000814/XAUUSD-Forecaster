@@ -644,10 +644,6 @@ export default function AuditPage() {
   const directionPoolRows = Math.max(0, ...latestVersionGroups
     .filter(row => !row.model_identity.endsWith("NEWS_RESIDUAL"))
     .map(row => row.training_rows));
-  const newsPoolRows = Math.max(0, ...latestVersionGroups
-    .filter(row => row.model_identity.endsWith("NEWS_RESIDUAL"))
-    .map(row => row.training_rows));
-  const newsPoolCoverage = directionPoolRows > 0 ? newsPoolRows / directionPoolRows : 0;
   const readableNewsTotal = newsIndex.readable_total ?? newsIndex.all_total;
   const parsedNewsTotal = newsIndex.parsed_total ?? newsIndex.items.filter(row => Boolean(row.parsed_at)).length;
   const modelCandidateNewsTotal = newsIndex.model_candidate_total ?? newsIndex.items.filter(row => row.model_visibility === "MODEL_VISIBLE").length;
@@ -655,7 +651,6 @@ export default function AuditPage() {
     + (payload?.annotation_queue?.backing_off ?? 0)
     + (payload?.annotation_queue?.dead_letter ?? 0);
   const newsNoParsingNeededTotal = Math.max(0, readableNewsTotal - parsedNewsTotal - newsWaitingTotal);
-  const modelSeenNewsEvents = payload?.news_evidence_summary?.model_seen_events ?? 0;
   const rowsUntilTraining = learningState === "ready" && payload?.training
     ? Math.max(0, payload.training.next_training_at - payload.training.complete_rows)
     : null;
@@ -691,40 +686,18 @@ export default function AuditPage() {
         <div
           className="training-card"
           aria-label={learningState === "ready"
-            ? `学习进度：方向已收集 ${payload?.training?.complete_rows ?? 0} 条，下一轮 ${payload?.training?.next_training_at ?? 0} 条；当前模型使用 ${newsPoolRows} 个带新闻特征的决策时点，已有 ${modelSeenNewsEvents} 个冻结事件可逐条审计`
+            ? `学习进度：已收集 ${payload?.training?.complete_rows ?? 0} 条，目标 ${payload?.training?.next_training_at ?? 0} 条，还差 ${rowsUntilTraining ?? 0} 条`
             : "学习进度暂不可用"}
         >
-          <div className="training-card-head">
-            <span>LEARNING PROGRESS</span>
+          <div className="training-card-head"><span>学习进度</span></div>
+          <div className="training-card-total">
+            <strong>{learningState === "ready" && payload?.training
+              ? <>{payload.training.complete_rows}<small> / {payload.training.next_training_at}</small></>
+              : <small>{learningState === "loading" ? "读取中…" : "暂不可用"}</small>}
+            </strong>
+            <span>{rowsUntilTraining === null ? "等待数据" : rowsUntilTraining === 0 ? "可以开始下一轮" : `还差 ${rowsUntilTraining} 条`}</span>
           </div>
-          <div className="training-progress-list">
-            <div className="training-progress-row">
-              <div className="training-progress-label">
-                <span>方向收集</span>
-                <strong>{learningState === "ready" && payload?.training
-                  ? <>{payload.training.complete_rows}<small> / {payload.training.next_training_at}</small></>
-                  : <small>{learningState === "loading" ? "读取中…" : "暂不可用"}</small>}
-                </strong>
-              </div>
-              <div className="progress-track"><i style={{ width: `${progress}%` }} /></div>
-            </div>
-            <div className="training-progress-row">
-              <div className="training-progress-label">
-                <span>含新闻的决策时点</span>
-                <strong>{learningState === "ready"
-                  ? <>{newsPoolRows}<small> 个</small></>
-                  : <small>{learningState === "loading" ? "读取中…" : "暂不可用"}</small>}
-                </strong>
-              </div>
-              <div className="progress-track progress-track-news"><i style={{ width: `${Math.min(100, newsPoolCoverage * 100)}%` }} /></div>
-            </div>
-          </div>
-          <p className="training-card-summary">
-            <b>{rowsUntilTraining === null ? "等待数据" : rowsUntilTraining === 0 ? "下一轮已就绪" : `方向再收集 ${rowsUntilTraining} 条`}</b>
-            <span>{learningState === "ready"
-              ? `这是重复决策样本，不是文章数；可读 ${readableNewsTotal} 篇，已解析 ${parsedNewsTotal} 篇，已冻结可审计证据 ${modelSeenNewsEvents} 个事件`
-              : "新闻特征随下一轮方向模型一起更新"}</span>
-          </p>
+          <div className="progress-track"><i style={{ width: `${progress}%` }} /></div>
         </div>
       </section>
 
