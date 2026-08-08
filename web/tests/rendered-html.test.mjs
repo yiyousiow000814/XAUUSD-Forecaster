@@ -26,6 +26,15 @@ test("renders the live room with an audit-page navigation button", async () => {
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
 });
 
+test("does not show a redundant forecast warning while the market is closed", () => {
+  const source = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(source, /const forecastStatus = marketClosed\s*\? null/);
+  assert.match(source, /forecastStatus && <strong className=\{`forecast-state/);
+  assert.match(source, /等待行情恢复/);
+  assert.match(source, /等待最新预测/);
+  assert.doesNotMatch(source, /当前不可参考/);
+});
+
 test("renders the Gemini quota status route", async () => {
   const response = await render("/status");
   assert.equal(response.status, 200);

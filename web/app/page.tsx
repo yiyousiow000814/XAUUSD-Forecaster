@@ -145,13 +145,21 @@ export default function Home() {
   const signalRemaining = forecastAge === null ? 0 : Math.max(0, signalExpiry - forecastAge);
   const horizonRemaining = forecastAge === null ? 0 : Math.max(0, horizon - forecastAge);
   const horizonMinutes = Math.floor(horizonRemaining / 60);
-  const forecastStatus = !online || forecastAge === null
-    ? "当前不可参考"
-    : signalRemaining > 0
-      ? `可参考 · ${signalRemaining}秒`
-      : horizonRemaining > 0
-        ? `观察中 · 剩${horizonMinutes}分钟`
-        : "本轮已结束";
+  const forecastStatus = marketClosed
+    ? null
+    : loading
+      ? "读取中…"
+      : error
+        ? "数据服务暂不可用"
+        : !online
+          ? "等待行情恢复"
+          : forecastAge === null
+            ? "等待最新预测"
+            : signalRemaining > 0
+              ? `可参考 · ${signalRemaining}秒`
+              : horizonRemaining > 0
+                ? `观察中 · 剩${horizonMinutes}分钟`
+                : "本轮已结束";
 
   return (
     <main>
@@ -192,7 +200,7 @@ export default function Home() {
           <div className={`action action-${forecastAction.toLowerCase()}`}>
             {forecastAction}
           </div>
-          <strong className={`forecast-state ${signalRemaining > 0 && online ? "is-current" : "is-muted"}`}>{forecastStatus}</strong>
+          {forecastStatus && <strong className={`forecast-state ${signalRemaining > 0 && online ? "is-current" : "is-muted"}`}>{forecastStatus}</strong>}
         </div>
       </section>
 
