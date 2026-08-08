@@ -323,6 +323,7 @@ test("keeps the learning page focused and folds secondary research below the sco
 
 test("keeps dashboard navigation and graph controls usable on phones", () => {
   const page = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
+  const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(page, /ref=\{auditTabsRef\} className="audit-tabs"/);
   assert.match(page, /active\.offsetLeft - \(nav\.clientWidth - active\.clientWidth\) \/ 2/);
@@ -330,6 +331,17 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.audit-tabs \{ position:sticky; top:0; display:flex;[\s\S]*?overflow-x:auto/);
   assert.match(css, /\.graph-modal>nav \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
   assert.match(css, /\.graph-modal,\.graph-modal\.graph-modal-curve,\.graph-modal\.graph-modal-versions \{ width:100vw; height:100dvh/);
+  assert.match(page, /return-value return-history/);
+  assert.match(page, /return-value return-total/);
+  assert.match(page, /return-value return-group/);
+  assert.match(css, /\.compact-model-summary article \{ grid-template-columns:minmax\(0,1fr\)/);
+  assert.match(css, /\.return-flow \{ width:100%; grid-template-columns:minmax\(0,1fr\) 12px minmax\(0,1fr\) 10px minmax\(0,1fr\)/);
+  assert.match(css, /\.story-grid>article \{ overflow:hidden/);
+  assert.match(css, /\.summary-cadence \{ display:grid; grid-template-columns:minmax\(0,1fr\) minmax\(0,1fr\)/);
+  assert.match(modal, /mobile-chart-scroll/);
+  assert.match(modal, /左右滑动查看完整图表/);
+  assert.match(css, /\.mobile-chart-scroll \{ width:100%; overflow-x:auto/);
+  assert.match(css, /\.chart-block \{ overflow:visible/);
 });
 
 test("explains U5 as a risk scale rather than a probability", () => {
