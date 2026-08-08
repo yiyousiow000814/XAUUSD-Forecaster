@@ -373,8 +373,12 @@ class ForwardLedger:
     def __init__(self, path: str | Path, now: datetime | None = None) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(self.path)
+        # Collector and annotator are independent long-running writers.  A
+        # brief WAL writer collision must wait for the current transaction,
+        # not terminate either service during a code reload or normal polling.
+        self.connection = sqlite3.connect(self.path, timeout=60.0)
         self.connection.row_factory = sqlite3.Row
+        self.connection.execute("PRAGMA busy_timeout=60000")
         self.connection.executescript(SCHEMA)
         from .evidence_v2 import install_v2_schema
 

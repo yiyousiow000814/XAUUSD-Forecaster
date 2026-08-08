@@ -66,6 +66,15 @@ from xauusd_forecaster.training import (
 UTC = timezone.utc
 
 
+def test_forward_ledger_waits_for_short_writer_collisions(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    try:
+        timeout_ms = ledger.connection.execute("PRAGMA busy_timeout").fetchone()[0]
+        assert timeout_ms == 60_000
+    finally:
+        ledger.close()
+
+
 def _snapshot(
     ledger: ForwardLedger,
     decision: datetime,
