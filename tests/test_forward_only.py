@@ -21,7 +21,7 @@ from xauusd_forecaster.content import (
 )
 from xauusd_forecaster.inference import build_shadow_predictions
 from xauusd_forecaster.annotation import annotate_pending_news, translate_pending_headlines
-from xauusd_forecaster.factors import aggregate_news_features
+from xauusd_forecaster.factors import aggregate_news_features, factor_coverage
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
 from xauusd_forecaster.maintenance import (
     archive_completed_quote_days,
@@ -44,6 +44,7 @@ from xauusd_forecaster.news import (
     collect_google_geopolitical_news,
     collect_google_news_lane,
     collect_world_gold_council_news,
+    extract_world_gold_council_article,
     parse_rss,
 )
 from xauusd_forecaster.ridge import train_ridge
@@ -641,10 +642,65 @@ def test_broad_free_sources_are_first_seen_versioned_and_rate_limited(tmp_path) 
     wgc = b'''<a href="/goldhub/gold-focus/2026/08/central-bank-gold">Central bank gold buying</a>'''
     assert collect_world_gold_council_news(
         ledger, fetched, lambda _: wgc,
-        content_extractor=lambda url: ("central bank gold evidence " * 30, url),
+        article_loader=lambda url: (
+            fetched - timedelta(minutes=10),
+            "central bank gold evidence " * 30,
+            url,
+        ),
     )["status"] == "OK"
     assert ledger.count("macro_observations") == 12
-    assert ledger.count("news_revisions") == 2
+    assert ledger.count("news_revisions") == 3
+
+
+def test_world_gold_council_article_date_is_required_and_auditable(tmp_path) -> None:
+    fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched - timedelta(days=1))
+    listing = b'''<a href="/goldhub/gold-focus/2026/08/central-bank-gold">Central bank gold buying</a>'''
+    article = (
+        b"<html><body><main><h1>Central bank gold buying</h1>"
+        b"<p>5 August, 2026</p><article><p>" + b"central bank evidence " * 40
+        + b"</p></article></main></body></html>"
+    )
+    published, text, source_url = extract_world_gold_council_article(
+        "https://www.gold.org/goldhub/gold-focus/2026/08/central-bank-gold",
+        fetcher=lambda _: article,
+    )
+    assert published == datetime(2026, 8, 5, tzinfo=UTC)
+    assert len(text) >= 500
+    assert source_url.endswith("central-bank-gold")
+
+    inserted = collect_world_gold_council_news(
+        ledger,
+        fetched,
+        fetcher=lambda _: listing,
+        article_loader=lambda _: (published, text, source_url),
+    )
+    assert inserted["status"] == "OK"
+    assert inserted["inserted_revisions"] == 1
+
+    missing = collect_world_gold_council_news(
+        ledger,
+        fetched + timedelta(hours=6),
+        fetcher=lambda _: listing,
+        article_loader=lambda _: (None, text, source_url),
+    )
+    assert missing["status"] == "ERROR"
+    assert missing["rejected_reasons"] == {"PUBLISHED_TIME_MISSING": 1}
+    latest_poll = ledger.connection.execute(
+        "SELECT status,error_type,error FROM source_polls WHERE source=? ORDER BY fetched_time DESC LIMIT 1",
+        ("world_gold_council_central_banks",),
+    ).fetchone()
+    assert latest_poll["status"] == "ERROR"
+    assert latest_poll["error_type"] == "WgcArticleIngestionError"
+    assert "PUBLISHED_TIME_MISSING" in latest_poll["error"]
+
+
+def test_central_bank_gold_coverage_explains_the_forward_only_wait() -> None:
+    coverage = factor_coverage([], set())
+    central_bank_gold = next(row for row in coverage if row["domain"] == "央行购金")
+    assert central_bank_gold["status"] == "WARMING_UP"
+    assert "历史文章不会回填" in central_bank_gold["status_reason"]
+    assert "等待下一份正式发布" in central_bank_gold["status_reason"]
 
 
 def test_gdelt_429_uses_exponential_backoff_without_blocking_fallback(tmp_path) -> None:
