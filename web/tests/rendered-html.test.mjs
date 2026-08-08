@@ -38,7 +38,7 @@ test("renders the Gemini quota status route", async () => {
   assert.match(html, /逐 Key 配额/);
   assert.match(html, /Pacific midnight/);
   assert.match(html, /组件与新闻源/);
-  assert.match(html, /正在读取状态/);
+  assert.match(html, /连接中/);
 });
 
 test("renders component and news-source health on a separate route", async () => {
@@ -51,6 +51,19 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(html, /AI 模型用量/);
 });
 
+test("uses one Chinese system-state presentation across every dashboard page", () => {
+  const component = readFileSync(new URL("../app/_components/SystemStatePill.tsx", import.meta.url), "utf8");
+  assert.match(component, /连接中/);
+  assert.match(component, /系统在线/);
+  assert.match(component, /市场休市/);
+  assert.match(component, /状态离线/);
+  for (const path of ["../app/page.tsx", "../app/audit/page.tsx", "../app/status/page.tsx", "../app/health/page.tsx"]) {
+    const source = readFileSync(new URL(path, import.meta.url), "utf8");
+    assert.match(source, /SystemStatePill/);
+    assert.doesNotMatch(source, /MARKET CLOSED|CONNECTING|市场休市 · 新闻运行中/);
+  }
+});
+
 test("renders the news and decision audit route", async () => {
   const response = await render("/audit");
   assert.equal(response.status, 200);
@@ -59,7 +72,20 @@ test("renders the news and decision audit route", async () => {
   assert.match(html, />新闻 <b>/);
   assert.match(html, /新闻证据管理/);
   const source = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
-  assert.match(source, /来源不是权限/);
+  assert.match(source, /模型真正用过哪些新闻/);
+  assert.match(source, /只显示实际进入过预测的独立新闻事件/);
+  assert.match(source, /evidence-intro evidence-intro-compact/);
+  assert.match(source, /查看统计规则/);
+  assert.match(source, /收到多少篇新闻/);
+  assert.match(source, /历史上用过多少个事件/);
+  assert.match(source, /影响过多少次预测/);
+  assert.match(source, /模型一共读取多少次/);
+  assert.match(source, /现在仍可用于预测/);
+  assert.match(source, /这不是新闻数量/);
+  assert.doesNotMatch(source, /文章 \/ Revision/);
+  assert.doesNotMatch(source, /当前达到 Broad 门槛/);
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.evidence-summary \{[^}]*grid-template-columns:repeat\(3,1fr\)/);
   assert.match(source, /多源确认/);
   assert.match(source, /api\/news-content\?key=/);
   assert.match(source, /api\/news-index\?/);
@@ -77,7 +103,20 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /页面会保留上一份成功数据并自动重试/);
   assert.doesNotMatch(source, /payload\?\.system\.online && !error/);
   assert.match(source, /列表与正文详情分开保存/);
-  assert.match(source, /最多回看/);
+  assert.doesNotMatch(source, /这些新闻处理到哪里了/);
+  assert.match(source, /新闻总数/);
+  assert.match(source, /无需解析/);
+  assert.match(source, /row\.model_visibility !== "NOT_YET_PARSED"/);
+  assert.match(source, /模型可用/);
+  assert.ok(source.indexOf('<nav className="audit-tabs"') < source.indexOf('<section className="annotation-queue"'));
+  assert.doesNotMatch(source, /已经积累多少结果|真实上线后结果|当前模型学到哪里|距离下次学习/);
+  assert.match(source, /上一次学习/);
+  assert.match(source, /下一次学习/);
+  assert.match(source, /目标 − 目前已有 = 还差多少/);
+  assert.doesNotMatch(source, /查看技术审计明细/);
+  assert.doesNotMatch(source, /旧工程数据|修复后的训练种子|上线后前向结果/);
+  assert.doesNotMatch(source, /Legacy Engineering|Repaired Seed|Next fit/);
+  assert.match(source, /最长 72 小时/);
   assert.match(source, /迟到发现只保留展示，不进入训练/);
   assert.match(source, /无效样本/);
   assert.match(source, /activeLearningIdentities/);
@@ -85,7 +124,7 @@ test("renders the news and decision audit route", async () => {
   assert.match(html, /决策与30分钟结果/);
   assert.match(html, /Live OOS 学习曲线/);
   assert.match(html, /大视野覆盖/);
-  assert.match(html, /LEARNING PROGRESS/);
+  assert.match(html, /学习进度/);
 });
 
 test("reloads an already-open dashboard after a deployment changes its client bundle", () => {
@@ -114,9 +153,12 @@ test("renders generic story coverage without black empty grid placeholders", () 
   assert.match(page, /个事件/);
   assert.match(page, /市场反应流/);
   assert.match(page, /新事件候选/);
-  assert.match(page, /DEPLOYMENT DRIFT/);
+  assert.match(page, /版本需要更新/);
+  assert.match(page, /同一事件的报道，合并显示/);
+  assert.doesNotMatch(page, /TEMPORAL EVENT GRAPH V5/);
+  assert.doesNotMatch(page, /Runtime Git SHA/);
+  assert.doesNotMatch(page, /Story Policy/);
   assert.match(page, /未归属事件/);
-  assert.match(page, /不进入 Ridge/);
   assert.match(css, /\.story-grid[^}]+background:#aaa59a/);
   assert.match(css, /html \{ background:var\(--paper\)/);
   assert.doesNotMatch(css, /\.story-grid[^}]+background:var\(--ink\)/);
@@ -155,12 +197,10 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /每30分钟（固定 :00 \/ :30）/);
   assert.match(modal, /同一坐标叠加比较/);
   assert.match(page, /五套模型，现在表现怎样/);
-  assert.match(page, /方向收集/);
-  assert.match(page, /含新闻的决策时点/);
-  assert.match(page, /方向再收集/);
-  assert.match(page, /重复决策样本，不是文章数/);
-  assert.match(page, /已冻结可审计证据/);
-  assert.match(page, /新闻特征随下一轮方向模型一起更新/);
+  assert.match(page, /training-card-total/);
+  assert.match(page, /还差/);
+  assert.doesNotMatch(page, /含新闻的决策时点/);
+  assert.doesNotMatch(page, /重复决策样本，不是文章数/);
   assert.doesNotMatch(page, /learning-data-flow/);
   assert.match(page, /方法与实盘边界/);
   assert.match(modal, /K线与决策/);
@@ -239,14 +279,31 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /row\.scored_at \?\? row\.time/);
 });
 
+test("keeps the learning page focused and folds secondary research below the scoreboard", () => {
+  const page = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
+  const summary = page.indexOf('<div className="learning-summary-grid">');
+  const graph = page.indexOf('<section className="graph-launch">');
+  const scoreboard = page.indexOf('<section className="model-score-summary">');
+  const execution = page.indexOf("<ExecutionResearch", scoreboard);
+  const methods = page.indexOf('<details className="model-method-note">', execution);
+  assert.ok(summary >= 0 && graph > summary);
+  assert.ok(scoreboard > graph && execution > scoreboard && methods > execution);
+  assert.doesNotMatch(page, /learning-audit-details|NEWS MODEL CONTRACT/);
+  assert.doesNotMatch(page, /league-cost-note/);
+  assert.match(page, /仓位与退出研究/);
+});
+
 test("explains U5 as a risk scale rather than a probability", () => {
   const source = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(source, /30分钟波动风险/);
   assert.match(source, /risk-scale/);
   assert.match(source, /它不是亏损概率，也不代表方向/);
   assert.match(source, /research_forecast/);
-  assert.match(source, /黄金＋大视野新闻 Ridge/);
-  assert.match(source, /固定观察30分钟 · 不下单/);
+  assert.match(source, /30分钟预测/);
+  assert.match(source, /forecast-state/);
+  assert.doesNotMatch(source, /成本后 EV 较高方向/);
+  assert.doesNotMatch(source, /固定观察30分钟 · 不下单/);
+  assert.doesNotMatch(source, /30分钟结果窗口已完成/);
   assert.match(readFileSync(new URL("../app/globals.css", import.meta.url), "utf8"), /timeline-panel \{ grid-column:1; grid-row:1 \/ span 3; \}/);
 });
 

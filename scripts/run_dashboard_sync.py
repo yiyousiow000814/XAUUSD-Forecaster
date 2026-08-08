@@ -427,6 +427,8 @@ def configured_targets(config: dict) -> list[dict]:
     for index, target in enumerate(declared):
         if not isinstance(target, dict):
             raise ValueError(f"dashboard target {index + 1} must be an object")
+        if target.get("enabled") is False:
+            continue
         name = str(target.get("name") or f"mirror-{index + 1}").strip()
         remote_url = str(target.get("remote_ingest_url") or "").strip()
         token_env = str(target.get("token_env") or "").strip()

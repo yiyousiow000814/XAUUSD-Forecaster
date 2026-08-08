@@ -22,3 +22,15 @@ dotnet build XauusdForwardQuoteBridge.csproj -c Release -p:AlgoPublish=false
 The live CLI launcher is intentionally separate from build and tests. It must
 be started by the owner because repository automation policy does not permit an
 agent to open a live CLI account session.
+
+For the standalone repository, configure the two local paths once at user
+scope. They contain paths only; account credentials remain in the external
+secret directory:
+
+```powershell
+[Environment]::SetEnvironmentVariable('CTRADER_CLI_PATH', 'C:\path\to\ctrader-cli.exe', 'User')
+[Environment]::SetEnvironmentVariable('CTRADER_SECRET_ROOT', 'C:\path\to\secret-directory', 'User')
+```
+
+The launcher also accepts `-CliPath` and `-SecretRoot`, or reads pointer files
+from `.local\config`. None of these local values belong in Git.

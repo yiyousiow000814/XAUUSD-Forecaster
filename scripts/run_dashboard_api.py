@@ -66,7 +66,10 @@ def _deployment_status(
 
 def _deployment_provenance(generated_at: datetime, database_epoch: str | None) -> dict:
     """Expose code/data identity so a stale Sites mirror cannot look current."""
-    repo = MODULE_ROOT.parents[1]
+    # Git discovers the repository from the module directory in both the old
+    # nested checkout and the current standalone checkout. A fixed parent
+    # depth breaks as soon as the project is moved.
+    repo = MODULE_ROOT
     def git(*args: str) -> str | None:
         try:
             result = subprocess.run(
@@ -79,7 +82,7 @@ def _deployment_provenance(generated_at: datetime, database_epoch: str | None) -
     runtime_sha = git("rev-parse", "HEAD")
     upstream = git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
     expected_sha = git("rev-parse", upstream) if upstream else None
-    module_dirty = bool(git("status", "--porcelain", "--", "src/XAUUSD-Forecaster"))
+    module_dirty = bool(git("status", "--porcelain", "--", "."))
     return {
         "runtime_git_sha": runtime_sha,
         "expected_git_sha": expected_sha,
@@ -883,9 +886,16 @@ def _dashboard_payload(database: Path) -> dict:
         ).fetchone()
         # The displayed queue is the worker's real claimable queue, not a
         # second approximation tied to an older prompt version.
-        claimable_annotation_count = len(
-            pending_annotation_records(connection, limit=100_000)
-        )
+        claimable_annotations = pending_annotation_records(connection, limit=100_000)
+        claimable_annotation_count = len(claimable_annotations)
+        claimable_annotation_keys = {
+            (
+                str(row["source"]),
+                str(row["source_item_id"]),
+                int(row["revision_number"]),
+            )
+            for row in claimable_annotations
+        }
         completed_annotation_count = len(
             completed_annotation_records(connection, limit=100_000)
         )
@@ -1226,6 +1236,20 @@ def _dashboard_payload(database: Path) -> dict:
             if source_tier == "MODEL_ELIGIBLE"
             else source_tier
         )
+        annotation_key = (
+            str(item.get("source") or ""),
+            str(item.get("source_item_id") or ""),
+            int(item.get("revision_number") or 0),
+        )
+        if item.get("parsed_at"):
+            # Legacy-compatible annotations are also complete even when the
+            # current-version LEFT JOIN did not populate a.annotation_id.
+            item["annotation_status"] = "READY"
+        elif annotation_key not in claimable_annotation_keys:
+            # A readable row can be retained for the reader without being a
+            # job the current worker is allowed to claim (duplicate, archival,
+            # or discovered too late). Calling it QUEUED is misleading.
+            item["annotation_status"] = "NOT_REQUIRED"
         # The reader page shows every retained article with readable source
         # content. Parsing is a separate state: an unparsed article remains
         # visible for audit, but model_visibility prevents it from entering

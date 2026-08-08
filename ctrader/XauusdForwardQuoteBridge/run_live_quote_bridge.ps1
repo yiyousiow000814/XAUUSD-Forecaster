@@ -1,13 +1,14 @@
 param(
     [string]$Symbol = 'XAUUSD',
     [string]$OutputDirectory = '',
+    [string]$CliPath = '',
+    [string]$SecretRoot = '',
     [switch]$BuildOnly
 )
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = $PSScriptRoot
 $moduleRoot = Split-Path (Split-Path $projectRoot -Parent) -Parent
-$repositoryRoot = Split-Path (Split-Path $moduleRoot -Parent) -Parent
 $project = Join-Path $projectRoot 'XauusdForwardQuoteBridge.csproj'
 
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
@@ -38,23 +39,45 @@ if ($BuildOnly) {
     exit 0
 }
 
-$cliPathFile = Join-Path $repositoryRoot 'src\ctrader\windows_cli_path.txt'
-$secretPathFile = Join-Path $repositoryRoot 'src\ctrader\windows_secret_path.txt'
-$cli = (Get-Content -LiteralPath $cliPathFile -Raw).Trim()
-$secretRoot = (Get-Content -LiteralPath $secretPathFile -Raw).Trim()
-foreach ($required in @($cli, (Join-Path $secretRoot 'ctid.txt'), (Join-Path $secretRoot 'account.txt'), (Join-Path $secretRoot 'ctrader-cli.pwd'))) {
+if ([string]::IsNullOrWhiteSpace($CliPath)) {
+    $CliPath = [Environment]::GetEnvironmentVariable('CTRADER_CLI_PATH', 'User')
+}
+if ([string]::IsNullOrWhiteSpace($SecretRoot)) {
+    $SecretRoot = [Environment]::GetEnvironmentVariable('CTRADER_SECRET_ROOT', 'User')
+}
+
+$localConfigRoot = Join-Path $moduleRoot '.local\config'
+if ([string]::IsNullOrWhiteSpace($CliPath)) {
+    $cliPathFile = Join-Path $localConfigRoot 'windows_cli_path.txt'
+    if (Test-Path -LiteralPath $cliPathFile) {
+        $CliPath = (Get-Content -LiteralPath $cliPathFile -Raw).Trim()
+    }
+}
+if ([string]::IsNullOrWhiteSpace($SecretRoot)) {
+    $secretPathFile = Join-Path $localConfigRoot 'windows_secret_path.txt'
+    if (Test-Path -LiteralPath $secretPathFile) {
+        $SecretRoot = (Get-Content -LiteralPath $secretPathFile -Raw).Trim()
+    }
+}
+if ([string]::IsNullOrWhiteSpace($CliPath) -or [string]::IsNullOrWhiteSpace($SecretRoot)) {
+    throw 'Set user-level CTRADER_CLI_PATH and CTRADER_SECRET_ROOT, or provide the matching parameters.'
+}
+
+$CliPath = [System.IO.Path]::GetFullPath($CliPath)
+$SecretRoot = [System.IO.Path]::GetFullPath($SecretRoot)
+foreach ($required in @($CliPath, (Join-Path $SecretRoot 'ctid.txt'), (Join-Path $SecretRoot 'account.txt'), (Join-Path $SecretRoot 'ctrader-cli.pwd'))) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "Required local cTrader file not found: $required"
     }
 }
 
-$ctid = (Get-Content -LiteralPath (Join-Path $secretRoot 'ctid.txt') -Raw).Trim()
-$account = (Get-Content -LiteralPath (Join-Path $secretRoot 'account.txt') -Raw).Trim()
+$ctid = (Get-Content -LiteralPath (Join-Path $SecretRoot 'ctid.txt') -Raw).Trim()
+$account = (Get-Content -LiteralPath (Join-Path $SecretRoot 'account.txt') -Raw).Trim()
 $arguments = @(
     'run',
     $artifact,
     '--ctid', $ctid,
-    '--pwd-file', (Join-Path $secretRoot 'ctrader-cli.pwd'),
+    '--pwd-file', (Join-Path $SecretRoot 'ctrader-cli.pwd'),
     '--account', $account,
     '--symbol', $Symbol,
     '--period', 'm1',
@@ -67,7 +90,7 @@ $arguments = @(
 
 Write-Host "Starting read-only XAUUSD quote bridge. No order API exists in the Algo."
 Write-Host "Output directory: $OutputDirectory"
-& $cli @arguments
+& $CliPath @arguments
 if ($LASTEXITCODE -ne 0) {
     throw "cTrader CLI quote bridge exited with code $LASTEXITCODE"
 }

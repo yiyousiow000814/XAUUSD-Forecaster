@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import SystemStatePill from "../_components/SystemStatePill";
 
 type StatusPayload = {
   generated_at: string;
@@ -69,8 +70,6 @@ export default function HealthPage() {
     return () => { window.clearTimeout(initial); window.clearInterval(timer); };
   }, [refresh]);
 
-  const marketClosed = payload?.system.market_session === "WEEKLY_CLOSED";
-
   return <main className="status-main">
     <div className="grain" />
     <header className="topbar">
@@ -85,9 +84,7 @@ export default function HealthPage() {
     </header>
     <section className="status-hero">
       <div><p className="eyebrow">OPERATIONAL HEARTBEATS / SOURCE HEALTH</p><h1>系统健康状态</h1></div>
-      <div className={`live-pill ${payload === null && !error ? "is-pending" : (payload?.system.online || marketClosed) && !error ? "is-live" : "is-down"}`}>
-        <span />{payload === null && !error ? "正在读取状态" : marketClosed && !error ? "市场休市 · 新闻运行中" : payload?.system.online && !error ? "系统在线" : "状态离线"}
-      </div>
+      <SystemStatePill loading={payload === null && !error} error={Boolean(error)} online={Boolean(payload?.system.online)} marketSession={payload?.system.market_session} />
     </section>
     {error ? <div className="error-banner">状态读取失败：{error}</div> : null}
     <section className="component-status" aria-label="数据链路组件状态">
