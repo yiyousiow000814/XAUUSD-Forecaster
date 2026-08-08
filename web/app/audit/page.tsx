@@ -777,9 +777,8 @@ export default function AuditPage() {
       </>}
 
       {view === "evidence" && <section className="evidence-desk">
-        <header className="evidence-intro">
-          <div><p className="eyebrow">NEWS USED BY MODEL</p><h2>哪些新闻真的<br />影响过模型？</h2><p>这里按“独立事件”统计，不按转载文章数统计。只有符合时间、正文和来源要求的事件，才可能进入预测。</p></div>
-          <p>“历史上用过”表示它确实参与过至少一次预测；“现在仍合格”表示它可以参加下一次预测，但不代表以前用过。系统会保存每次读取记录，方便核对模型在当时究竟看到了什么。不同新闻的有效期不同，最长 72 小时；迟到发现只保留展示，不进入训练。</p>
+        <header className="evidence-intro evidence-intro-compact">
+          <div><p className="eyebrow">NEWS USED BY MODEL</p><h2>模型真正用过哪些新闻？</h2><p>只显示实际进入过预测的独立新闻事件。</p></div>
         </header>
         <div className="evidence-summary">
           <article><span>收到多少篇新闻</span><strong>{payload?.news_evidence_summary?.distinct_articles ?? 0}</strong><small>共保存 {payload?.news_evidence_summary?.raw_article_revisions ?? 0} 个版本；文章更新不会算成新新闻</small></article>
@@ -794,6 +793,7 @@ export default function AuditPage() {
           <button type="button" className={evidenceMode === "unseen" ? "active" : ""} onClick={() => setEvidenceMode("unseen")}>从未用过 <b>{payload?.news_evidence_summary?.model_unseen_events ?? 0}</b></button>
           <button type="button" className={evidenceMode === "all" ? "active" : ""} onClick={() => setEvidenceMode("all")}>查看全部 <b>{payload?.news_evidence_summary?.displayed_events ?? 0}</b></button>
         </nav>
+        <details className="evidence-rule-note"><summary>查看统计规则</summary><p>按独立事件统计，不重复计算转载。新闻最长 72 小时有效；迟到发现只保留展示，不进入训练。</p></details>
         <div className="evidence-table-wrap"><table className="evidence-table">
           <thead><tr><th>是否用于预测</th><th>新闻事件</th><th>用了多少次 / 为什么没用</th><th>发布时间 / 收到时间</th></tr></thead>
           <tbody>{visibleEvidence.map(row => <tr key={row.event_key}>

@@ -72,7 +72,10 @@ test("renders the news and decision audit route", async () => {
   assert.match(html, />新闻 <b>/);
   assert.match(html, /新闻证据管理/);
   const source = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
-  assert.match(source, /哪些新闻真的/);
+  assert.match(source, /模型真正用过哪些新闻/);
+  assert.match(source, /只显示实际进入过预测的独立新闻事件/);
+  assert.match(source, /evidence-intro evidence-intro-compact/);
+  assert.match(source, /查看统计规则/);
   assert.match(source, /收到多少篇新闻/);
   assert.match(source, /历史上用过多少个事件/);
   assert.match(source, /影响过多少次预测/);
