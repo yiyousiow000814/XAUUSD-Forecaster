@@ -113,7 +113,8 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /上一次学习/);
   assert.match(source, /下一次学习/);
   assert.match(source, /目标 − 目前已有 = 还差多少/);
-  assert.match(source, /查看技术审计明细/);
+  assert.doesNotMatch(source, /查看技术审计明细/);
+  assert.doesNotMatch(source, /旧工程数据|修复后的训练种子|上线后前向结果/);
   assert.doesNotMatch(source, /Legacy Engineering|Repaired Seed|Next fit/);
   assert.match(source, /最长 72 小时/);
   assert.match(source, /迟到发现只保留展示，不进入训练/);
@@ -280,14 +281,14 @@ test("uses one modal timeline for model generations and market decisions", () =>
 
 test("keeps the learning page focused and folds secondary research below the scoreboard", () => {
   const page = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
-  const technical = page.indexOf('<details className="learning-audit-details">');
-  const newsContract = page.indexOf("NEWS MODEL CONTRACT");
+  const summary = page.indexOf('<div className="learning-summary-grid">');
   const graph = page.indexOf('<section className="graph-launch">');
   const scoreboard = page.indexOf('<section className="model-score-summary">');
   const execution = page.indexOf("<ExecutionResearch", scoreboard);
   const methods = page.indexOf('<details className="model-method-note">', execution);
-  assert.ok(technical >= 0 && newsContract > technical && graph > newsContract);
+  assert.ok(summary >= 0 && graph > summary);
   assert.ok(scoreboard > graph && execution > scoreboard && methods > execution);
+  assert.doesNotMatch(page, /learning-audit-details|NEWS MODEL CONTRACT/);
   assert.doesNotMatch(page, /league-cost-note/);
   assert.match(page, /仓位与退出研究/);
 });

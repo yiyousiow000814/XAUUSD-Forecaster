@@ -635,9 +635,6 @@ export default function AuditPage() {
     activeLearningModels.map(row => row.model_identity),
   ).size;
   const archivedModelCount = (payload?.learning_curves?.models?.length ?? 0) - activeLearningModels.length;
-  const inactiveNewsModels = (payload?.learning_curves?.news_model_activation ?? []).filter(
-    row => !["ACTIVE", "LEGACY_ACTIVE"].includes(row.status),
-  );
   const latestVersionGroups = (payload?.learning_curves?.version_groups ?? []).filter(
     row => row.lifecycle_status === "LATEST",
   );
@@ -836,26 +833,6 @@ export default function AuditPage() {
           <article><span>上一次学习</span><strong>{learningState === "ready" ? directionPoolRows : "—"}</strong><small>当前模型已经学到这里</small></article>
           <article><span>下一次学习</span><strong>{learningState === "ready" && payload?.training && rowsUntilTraining !== null ? `${payload.training.next_training_at} − ${payload.training.complete_rows} = ${rowsUntilTraining}` : "—"}</strong><small>{rowsUntilTraining === 0 ? "已经达到目标，可以开始新一轮" : "目标 − 目前已有 = 还差多少"}</small></article>
         </div>
-        <details className="learning-audit-details">
-          <summary><span>查看技术审计明细</span><small>修复数据、隔离样本、事件权重与模型版本</small></summary>
-          <div className="evidence-lane-grid">
-            <article><span>全部成熟结果</span><strong>{learningState === "ready" ? payload?.training?.complete_rows ?? 0 : "—"}</strong><small>已经走完 30 分钟的有效结果</small></article>
-            <article><span>旧工程数据</span><strong>{learningState === "ready" ? payload?.learning_curves?.legacy_engineering_rows ?? 0 : "—"}</strong><small>只用于修复审计</small></article>
-            <article><span>修复后的训练种子</span><strong>{learningState === "ready" ? payload?.learning_curves?.repaired_seed_rows ?? 0 : "—"}</strong><small>只作训练种子，不算前向结果</small></article>
-            <article><span>上线后前向结果</span><strong>{learningState === "ready" ? payload?.learning_curves?.live_oos_rows ?? 0 : "—"}</strong><small>仅供技术审计与前向评分</small></article>
-            <article><span>独立时间块 / 交易日</span><strong>{learningState === "ready" ? `${payload?.learning_curves?.effective_30m_blocks ?? 0} / ${payload?.learning_curves?.distinct_trading_days ?? 0}` : "—"}</strong><small>判断证据是否过度重复</small></article>
-            <article><span>有效 / 隔离结果</span><strong>{learningState === "ready" ? `${payload?.learning_curves?.outcome_quality?.valid ?? 0} / ${payload?.learning_curves?.outcome_quality?.invalid ?? 0}` : "—"}</strong><small>隔离结果不评分、不训练</small></article>
-            <article><span>合格新闻事件</span><strong>{learningState === "ready" ? payload?.learning_curves?.news_training_evidence?.distinct_eligible_events ?? 0 : "—"}</strong><small>{learningState === "ready" ? `曾在 ${payload?.learning_curves?.news_training_evidence?.decision_event_exposures ?? 0} 个预测时点可见` : "正在读取"}</small></article>
-            <article><span>本代实际使用事件</span><strong>{learningState === "ready" ? payload?.learning_curves?.news_training_evidence?.active_generation_weights?.BROAD?.effective_event_count ?? 0 : "—"}</strong><small>同一事件重复出现也只算一次</small></article>
-            <article><span>真正训练代数</span><strong>{learningState === "ready" ? payload?.learning_curves?.training_generation_count ?? 0 : "—"}</strong><small>{learningState === "ready" ? `共运行 ${payload?.learning_curves?.training_run_count ?? 0} 次，其中 ${payload?.learning_curves?.recovery_rebuild_count ?? 0} 次只是恢复重建` : "正在读取"}</small></article>
-            <article><span>当前模型版本</span><strong>{learningState === "ready" ? payload?.learning_curves?.active_generation?.generation_id?.slice(0, 8) ?? "待首次激活" : "—"}</strong><small>{payload?.learning_curves?.active_generation ? `5 套模型 · 截止 ${time(payload.learning_curves.active_generation.training_cutoff)}` : "完整生成后一次切换"}</small></article>
-          </div>
-          {(payload?.learning_curves?.news_model_activation?.length ?? 0) > 0 && <section className={`news-model-activation ${inactiveNewsModels.length > 0 ? "is-inactive" : "is-active"}`}>
-            <div><span>NEWS MODEL CONTRACT</span><h3>{inactiveNewsModels.length > 0 ? "新闻 generation 尚未完整" : (payload?.learning_curves?.active_generation ? "新闻模型使用当前规则" : "当前 generation 持续学习")}</h3></div>
-            <div className="news-model-activation-list">{(payload?.learning_curves?.news_model_activation ?? []).map(row => <p key={row.model_identity}><b>{MODEL_LABELS[row.model_identity] ?? row.model_identity}</b><span>{row.status === "ACTIVE" ? "已激活" : row.status === "LEGACY_ACTIVE" ? "持续预测" : row.reason}</span></p>)}</div>
-            <small>{inactiveNewsModels.length > 0 ? "完整的五模型 generation 构建成功前不会切换。" : payload?.learning_curves?.active_generation ? "五套模型共享同一 generation、训练截止、事件快照和新闻规则。" : "现有五套模型继续产生预测；完整新 generation 就绪后一次替换，页面不会出现双代输出。"}</small>
-          </section>}
-        </details>
         <section className="graph-launch">
           <div><h3>查看学习曲线与 K 线</h3><p>长期累计、每组成绩与决策位置</p></div>
           <button type="button" onClick={() => { setGraphStartTab("curve"); setGraphOpen(true); }}>打开交互图表 ↗</button>
