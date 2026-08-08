@@ -144,16 +144,14 @@ export default function Home() {
   const horizon = forecast?.forecast_horizon_seconds ?? 1_800;
   const signalRemaining = forecastAge === null ? 0 : Math.max(0, signalExpiry - forecastAge);
   const horizonRemaining = forecastAge === null ? 0 : Math.max(0, horizon - forecastAge);
-  const horizonProgress = forecastAge === null ? 0 : Math.min(100, forecastAge / horizon * 100);
   const horizonMinutes = Math.floor(horizonRemaining / 60);
-  const horizonSeconds = horizonRemaining % 60;
-  const freshness = !online || forecastAge === null
+  const forecastStatus = !online || forecastAge === null
     ? "当前不可参考"
     : signalRemaining > 0
-      ? `新信号 · 参考窗口剩 ${signalRemaining} 秒`
+      ? `可参考 · ${signalRemaining}秒`
       : horizonRemaining > 0
-        ? "本轮预测已冻结 · 30分钟观察中"
-        : "30分钟评估期已结束";
+        ? `观察中 · 剩${horizonMinutes}分钟`
+        : "本轮已结束";
 
   return (
     <main>
@@ -190,19 +188,11 @@ export default function Home() {
         </div>
 
         <div className="decision-dial">
-          <span className="dial-label">30 MINUTE RESEARCH FORECAST</span>
+          <span className="dial-label">30分钟预测</span>
           <div className={`action action-${forecastAction.toLowerCase()}`}>
             {forecastAction}
           </div>
-          <p>{forecast?.model_identity === "BROAD_FULL" ? "黄金＋大视野新闻 Ridge" : forecast?.model_identity ?? "等待模型"} · SHADOW</p>
-          {forecastAction === "WAIT" && forecast?.directional_bias && forecast.directional_bias !== "NEUTRAL" && <p className="forecast-bias">成本后 EV 较高方向为 {forecast.directional_bias}；这条历史冻结记录仍是 WAIT</p>}
-          <div className={`forecast-freshness ${signalRemaining > 0 && online ? "is-current" : "is-observe"}`}>
-            <strong>{freshness}</strong>
-            <small>产生于 {localTime(forecast?.decision_time)} · 已过去 {forecastAge === null ? "—" : `${Math.floor(forecastAge / 60)}分${forecastAge % 60}秒`}</small>
-            <div className="forecast-progress"><i style={{ width: `${horizonProgress}%` }} /></div>
-            <small>{horizonRemaining > 0 ? `距30分钟结果还剩 ${horizonMinutes}分${horizonSeconds}秒` : "30分钟结果窗口已完成"}</small>
-          </div>
-          <small>固定观察30分钟 · 不下单</small>
+          <strong className={`forecast-state ${signalRemaining > 0 && online ? "is-current" : "is-muted"}`}>{forecastStatus}</strong>
         </div>
       </section>
 

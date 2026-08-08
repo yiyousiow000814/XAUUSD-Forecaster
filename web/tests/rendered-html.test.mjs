@@ -297,8 +297,11 @@ test("explains U5 as a risk scale rather than a probability", () => {
   assert.match(source, /risk-scale/);
   assert.match(source, /它不是亏损概率，也不代表方向/);
   assert.match(source, /research_forecast/);
-  assert.match(source, /黄金＋大视野新闻 Ridge/);
-  assert.match(source, /固定观察30分钟 · 不下单/);
+  assert.match(source, /30分钟预测/);
+  assert.match(source, /forecast-state/);
+  assert.doesNotMatch(source, /成本后 EV 较高方向/);
+  assert.doesNotMatch(source, /固定观察30分钟 · 不下单/);
+  assert.doesNotMatch(source, /30分钟结果窗口已完成/);
   assert.match(readFileSync(new URL("../app/globals.css", import.meta.url), "utf8"), /timeline-panel \{ grid-column:1; grid-row:1 \/ span 3; \}/);
 });
 
