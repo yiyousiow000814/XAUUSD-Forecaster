@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import SystemStatePill from "../_components/SystemStatePill";
 import LearningGraphModal from "./LearningGraphModal";
@@ -535,6 +535,7 @@ export default function AuditPage() {
   const [graphStartTab, setGraphStartTab] = useState<"curve" | "execution">("curve");
   const [summaryCadence, setSummaryCadence] = useState<EvaluationCadence>("EVERY_5M");
   const [evidenceMode, setEvidenceMode] = useState<"seen" | "unseen" | "all">("seen");
+  const auditTabsRef = useRef<HTMLElement>(null);
 
   const refresh = useCallback(async () => {
     const [statusResult, learningResult] = await Promise.allSettled([
@@ -613,6 +614,17 @@ export default function AuditPage() {
     setView(next);
     window.history.replaceState(null, "", `/audit?view=${next}`);
   };
+
+  useEffect(() => {
+    if (!window.matchMedia("(max-width: 850px)").matches) return;
+    const nav = auditTabsRef.current;
+    const active = nav?.querySelector<HTMLElement>("a.active");
+    if (!nav || !active) return;
+    nav.scrollTo({
+      left: Math.max(0, active.offsetLeft - (nav.clientWidth - active.clientWidth) / 2),
+      behavior: "smooth",
+    });
+  }, [view]);
 
   const progress = useMemo(() => {
     const training = payload?.training;
@@ -700,7 +712,7 @@ export default function AuditPage() {
 
       {combinedErrors && <div className="error-banner">{combinedErrors}。页面会保留上一份成功数据并自动重试。</div>}
 
-      <nav className="audit-tabs" aria-label="审计视图">
+      <nav ref={auditTabsRef} className="audit-tabs" aria-label="审计视图">
         <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻 <b>{readableNewsTotal}</b></a>
         <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>新闻证据管理 <b>{payload?.news_evidence_summary?.model_seen_events ?? 0}</b></a>
         <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件故事链 <b>{payload?.storyline_summary?.total ?? 0}</b></a>

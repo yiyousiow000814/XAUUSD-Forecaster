@@ -557,3 +557,82 @@ body.modal-open { overflow:hidden; }
   .source-candidate-queue>div { grid-template-columns:1fr; }
   .source-candidate-queue>div small { grid-column:1; }
 }
+
+/* Mobile usability: preserve the desktop information architecture while making
+   navigation, touch targets, and dense research views usable on a phone. */
+@media (max-width:850px){
+  main { padding:14px; }
+  .topbar { align-items:stretch; flex-direction:column; gap:14px; padding-bottom:14px; }
+  .brand { width:max-content; max-width:100%; }
+  .top-actions { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; width:100%; }
+  .top-actions .audit-link,.top-actions .live-pill { min-width:0; min-height:46px; justify-content:center; padding:8px 7px; text-align:center; white-space:normal; line-height:1.3; }
+  .top-actions .audit-link { font-size:12px; }
+  .top-actions .live-pill { gap:6px; border-radius:0; font-size:10px; letter-spacing:.05em; }
+  .top-actions .live-pill span { flex:0 0 auto; }
+
+  .audit-intro { gap:22px; padding:26px 0 22px; }
+  .audit-intro h1 { font-size:clamp(42px,12vw,58px); line-height:.92; }
+  .training-card { padding:15px; box-shadow:5px 5px 0 var(--ink); }
+
+  .audit-tabs { position:sticky; top:0; display:flex; gap:1px; overflow-x:auto; padding:1px; scroll-padding-inline:14px; scroll-snap-type:x proximity; scrollbar-width:none; overscroll-behavior-inline:contain; }
+  .audit-tabs::-webkit-scrollbar { display:none; }
+  .audit-tabs a { flex:0 0 auto; min-width:max-content; min-height:52px; gap:12px; padding:10px 14px; border:0; white-space:nowrap; scroll-snap-align:center; }
+  .audit-tabs b { font-size:21px; }
+
+  .evidence-intro,.evidence-intro-compact { gap:14px; padding:24px 18px; }
+  .evidence-intro h2,.evidence-intro-compact h2 { font-size:clamp(34px,10vw,44px); line-height:1; }
+  .league-intro { gap:20px; padding:24px 18px; }
+  .league-intro h2 { font-size:clamp(38px,11vw,50px); line-height:.96; }
+  .league-intro dl div { grid-template-columns:90px 1fr; }
+  .league-intro dd { text-align:right; }
+  .status-hero { gap:18px; padding:32px 0 24px; }
+  .status-hero h1 { font-size:clamp(42px,12vw,58px); line-height:.94; }
+
+  .graph-modal-backdrop { padding:0; }
+  .graph-modal,.graph-modal.graph-modal-curve,.graph-modal.graph-modal-versions { width:100vw; height:100dvh; max-height:100dvh; border:0; box-shadow:none; grid-template-rows:auto auto minmax(0,1fr) auto; }
+  .graph-modal.graph-modal-curve>.graph-modal-body,.graph-modal.graph-modal-versions>.graph-modal-body { min-height:0; max-height:none; overflow:auto; }
+  .graph-modal>header { padding:12px 14px; }
+  .graph-modal>header span { display:none; }
+  .graph-modal>header h2 { margin:0; font-size:28px; line-height:1; }
+  .graph-modal>header button { width:46px; height:46px; flex:0 0 auto; }
+  .graph-modal>nav { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .graph-modal>nav button { min-height:46px; padding:8px 5px; border-right:1px solid var(--ink); border-bottom:1px solid var(--ink); font-size:11px; line-height:1.25; }
+  .graph-modal>nav button:nth-child(2n) { border-right:0; }
+  .graph-modal>nav button:nth-last-child(-n+2) { border-bottom:0; }
+  .graph-modal>footer { padding:10px 14px; font-size:10px; }
+  .chart-block,.version-graph { padding:14px; }
+  .chart-caption { align-items:flex-start; flex-direction:column; gap:10px; }
+  .chart-caption>strong { text-align:left; }
+  .curve-navigation { align-items:stretch; }
+  .curve-navigation label { width:100%; justify-content:space-between; }
+  .curve-navigation select { min-width:0; max-width:65%; }
+  .curve-navigation button { flex:1 1 90px; min-height:44px; }
+  .curve-navigation>span { width:100%; margin-left:0; }
+  .long-curve-block>.learning-svg { min-width:680px; min-height:340px; height:42dvh; }
+  .learning-summary-grid article { min-height:120px; padding:18px; }
+  .learning-summary-grid strong { font-size:36px; }
+
+  button,a,summary,select { touch-action:manipulation; }
+  .news-row>summary,.decision-row summary,.unassigned-story-events summary,.source-candidate-queue summary { min-height:44px; }
+}
+
+@media (max-width:430px){
+  main { padding:12px; }
+  .brand-mark { width:42px; height:42px; }
+  .brand strong { font-size:12px; }
+  .top-actions .audit-link { font-size:11px; }
+  .audit-intro h1 { font-size:40px; }
+  .training-card-total { align-items:flex-end; gap:10px; }
+  .training-card-total strong { font-size:31px; }
+  .training-card-total>span { max-width:110px; text-align:right; }
+  .annotation-queue>* { padding:12px; }
+  .annotation-queue span b { font-size:24px; }
+  .news-card { min-height:0; }
+  .story-grid>article { padding:18px; }
+  .story-grid article>header { gap:12px; }
+  .story-grid h3 { font-size:27px; }
+  .story-grid li { grid-template-columns:82px 1fr; }
+  .story-grid li small { grid-column:2; }
+  .league-intro dl div { grid-template-columns:1fr; gap:5px; }
+  .league-intro dd { text-align:left; }
+}

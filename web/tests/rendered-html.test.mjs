@@ -293,6 +293,17 @@ test("keeps the learning page focused and folds secondary research below the sco
   assert.match(page, /仓位与退出研究/);
 });
 
+test("keeps dashboard navigation and graph controls usable on phones", () => {
+  const page = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(page, /ref=\{auditTabsRef\} className="audit-tabs"/);
+  assert.match(page, /active\.offsetLeft - \(nav\.clientWidth - active\.clientWidth\) \/ 2/);
+  assert.match(css, /\.topbar \{ align-items:stretch; flex-direction:column/);
+  assert.match(css, /\.audit-tabs \{ position:sticky; top:0; display:flex;[\s\S]*?overflow-x:auto/);
+  assert.match(css, /\.graph-modal>nav \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(css, /\.graph-modal,\.graph-modal\.graph-modal-curve,\.graph-modal\.graph-modal-versions \{ width:100vw; height:100dvh/);
+});
+
 test("explains U5 as a risk scale rather than a probability", () => {
   const source = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(source, /30分钟波动风险/);
