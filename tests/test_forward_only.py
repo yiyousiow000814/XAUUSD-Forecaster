@@ -695,12 +695,19 @@ def test_world_gold_council_article_date_is_required_and_auditable(tmp_path) -> 
     assert "PUBLISHED_TIME_MISSING" in latest_poll["error"]
 
 
-def test_central_bank_gold_coverage_explains_the_forward_only_wait() -> None:
+def test_central_bank_gold_coverage_waits_when_monitor_is_not_running() -> None:
     coverage = factor_coverage([], set())
     central_bank_gold = next(row for row in coverage if row["domain"] == "央行购金")
     assert central_bank_gold["status"] == "WARMING_UP"
-    assert "历史文章不会回填" in central_bank_gold["status_reason"]
-    assert "等待下一份正式发布" in central_bank_gold["status_reason"]
+    assert central_bank_gold["status_reason"] == "监测尚未启动"
+
+
+def test_central_bank_gold_coverage_is_collecting_when_monitor_is_healthy() -> None:
+    source = "world_gold_council_central_banks"
+    coverage = factor_coverage([], set(), {source})
+    central_bank_gold = next(row for row in coverage if row["domain"] == "央行购金")
+    assert central_bank_gold["status"] == "COLLECTING"
+    assert central_bank_gold["status_reason"] == "监测正常，暂无新的正式月度资料"
 
 
 def test_gdelt_429_uses_exponential_backoff_without_blocking_fallback(tmp_path) -> None:

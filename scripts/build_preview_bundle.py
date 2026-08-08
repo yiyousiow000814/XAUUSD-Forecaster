@@ -59,7 +59,12 @@ def _rebuild_factor_coverage(status: dict) -> list[dict[str, object]]:
         for row in status.get("news_source_health", [])
         if row.get("source") and int(row.get("item_count") or 0) > 0
     }
-    return factor_coverage(latest_macro, collected_sources)
+    monitored_sources = {
+        str(row["source"])
+        for row in status.get("news_source_health", [])
+        if row.get("source") and row.get("health") == "HEALTHY"
+    }
+    return factor_coverage(latest_macro, collected_sources, monitored_sources)
 
 
 def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:

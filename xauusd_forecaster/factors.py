@@ -158,10 +158,16 @@ def aggregate_news_features(
 def factor_coverage(
     latest_macro: dict[str, dict[str, object]] | None = None,
     news_sources: set[str] | None = None,
+    monitored_news_sources: set[str] | None = None,
 ) -> list[dict[str, object]]:
     """Expose missing domains instead of silently pretending they are covered."""
     latest_macro = latest_macro or {}
     news_sources = news_sources or set()
+    monitored_news_sources = monitored_news_sources or set()
+
+    wgc_source = "world_gold_council_central_banks"
+    wgc_has_release = wgc_source in news_sources
+    wgc_is_monitored = wgc_source in monitored_news_sources
 
     def macro(domain: str, series_id: str, source: str, cadence: str) -> dict[str, object]:
         observation = latest_macro.get(series_id)
@@ -185,7 +191,7 @@ def factor_coverage(
         {"domain": "就业", "status": "COLLECTING", "source": "BLS Payroll/AHE/Unemployment/JOLTS", "action_bearing": False, "cadence": "月度/事件"},
         macro("油价", "DCOILWTICO", "EIA/FRED WTI spot", "日度"),
         {"domain": "战争/地缘", "status": "COLLECTING" if {"gdelt_gold_geopolitics", "google_news_gold_geopolitics", "google_news_gold_context", "us_treasury_press_releases"} & news_sources else "WARMING_UP", "source": "GDELT + Google News publisher resolution + U.S. Treasury + Gemini", "action_bearing": False, "cadence": "20分钟/事件"},
-        {"domain": "央行购金", "status": "COLLECTING" if "world_gold_council_central_banks" in news_sources else "WARMING_UP", "status_reason": "已捕获 World Gold Council 正式央行购金资料" if "world_gold_council_central_banks" in news_sources else "尚无系统启动后的 World Gold Council 月度资料；历史文章不会回填，等待下一份正式发布", "source": "World Gold Council central-bank monitor", "action_bearing": False, "cadence": "6小时/月度"},
+        {"domain": "央行购金", "status": "COLLECTING" if wgc_has_release or wgc_is_monitored else "WARMING_UP", "status_reason": "已收到 World Gold Council 正式央行购金资料" if wgc_has_release else "监测正常，暂无新的正式月度资料" if wgc_is_monitored else "监测尚未启动", "source": "World Gold Council central-bank monitor", "action_bearing": False, "cadence": "6小时/月度"},
         macro("流动性", "WALCL", "Fed/FRED total assets", "周度"),
         macro("风险偏好", "VIXCLS", "CBOE/FRED VIX", "日度"),
     ]

@@ -384,6 +384,12 @@ const SOURCE_LABELS: Record<string, string> = {
   us_treasury_press_releases: "U.S. Treasury · 官方发布",
   bea_economic_releases: "U.S. BEA · 经济数据发布",
 };
+
+const COVERAGE_STATUS_LABELS: Record<string, string> = {
+  LIVE: "实时",
+  COLLECTING: "监测中",
+  WARMING_UP: "等待数据",
+};
 const MODEL_LABELS: Record<string, string> = {
   CHAMPION_0: "零收益安全基准",
   MARKET_ONLY: "黄金自身 Ridge",
@@ -883,7 +889,7 @@ export default function AuditPage() {
 
       {view === "coverage" && <section className="coverage-grid">
         {(payload?.factor_coverage ?? []).map(row => <article key={row.domain} className={`coverage-card status-${row.status.toLowerCase().replaceAll("_", "-")}`}>
-          <div><span>{row.cadence}</span><b>{row.status === "WARMING_UP" ? "等待首次有效资料" : row.status}</b></div><h2>{row.domain}</h2><p>{row.source ?? "尚未连接可靠的 point-in-time 数据源"}</p>
+          <div><span>{row.cadence}</span><b>{COVERAGE_STATUS_LABELS[row.status] ?? row.status}</b></div><h2>{row.domain}</h2><p>{row.source ?? "尚未连接可靠的 point-in-time 数据源"}</p>
           {row.value !== null && row.value !== undefined && <strong className="coverage-value">{number(row.value, 3)} <small>{row.unit}</small></strong>}
           <small>{row.status_reason ?? `${row.observed_at ? `观测期 ${row.observed_at} · ` : ""}${row.action_bearing ? "已进入决策Snapshot" : "Shadow特征，等待训练验证"}`}</small>
         </article>)}
