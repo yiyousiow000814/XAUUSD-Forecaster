@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 type CurvePoint = { decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number };
@@ -68,13 +68,44 @@ export default function LearningGraphModal({
   const [tab, setTab] = useState<GraphTab>(startTab ?? "curve");
   const [identity, setIdentity] = useState("BROAD_FULL");
   const [remoteMarket, setRemoteMarket] = useState<typeof market>();
+  const dialogRef = useRef<HTMLElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const openerRef = useRef<HTMLElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
   useEffect(() => {
     if (!open) return;
-    const close = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusFrame = window.requestAnimationFrame(() => closeButtonRef.current?.focus());
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const focusable = [...dialogRef.current.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), select:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+      )].filter(element => !element.hasAttribute("disabled"));
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
     document.body.classList.add("modal-open");
     window.addEventListener("keydown", close);
-    return () => { document.body.classList.remove("modal-open"); window.removeEventListener("keydown", close); };
-  }, [open, onClose]);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.body.classList.remove("modal-open");
+      window.removeEventListener("keydown", close);
+      openerRef.current?.focus();
+    };
+  }, [open]);
   useEffect(() => {
     if (!open || !market?.decision_resource) return;
     let cancelled = false;
@@ -90,8 +121,8 @@ export default function LearningGraphModal({
   const resolvedMarket = market?.decision_resource ? remoteMarket ?? market : market;
   if (!open) return null;
   return <div className="graph-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <section className={`graph-modal graph-modal-${tab}`} role="dialog" aria-modal="true" aria-labelledby="graph-modal-title">
-      <header><div><span>SHADOW EVIDENCE VISUALIZER</span><h2 id="graph-modal-title">模型与 XAUUSD 时间轴</h2></div><button type="button" onClick={onClose} aria-label="关闭图表">×</button></header>
+    <section ref={dialogRef} className={`graph-modal graph-modal-${tab}`} role="dialog" aria-modal="true" aria-labelledby="graph-modal-title">
+      <header><div><span>SHADOW EVIDENCE VISUALIZER</span><h2 id="graph-modal-title">模型与 XAUUSD 时间轴</h2></div><button ref={closeButtonRef} type="button" onClick={onClose} aria-label="关闭图表">×</button></header>
       <nav aria-label="图表类型">
         <button className={tab === "curve" ? "active" : ""} onClick={() => setTab("curve")}>长期 OOS 曲线</button>
         <button className={tab === "versions" ? "active" : ""} onClick={() => setTab("versions")}>每组独立成绩</button>
@@ -304,6 +335,10 @@ function LongCurve({ curves }: { curves: Curve[] }) {
     {compactBoundaryRail && <div className="curve-event-readout" aria-live="polite">
       {hoveredBoundary ? <><b>{hoveredBoundary.event_count && hoveredBoundary.event_count > 1 ? `${hoveredBoundary.event_count} 次相近换版 · ` : ""}{axisLabel(hoveredBoundary.decision_time)} · {boundaryLabel(hoveredBoundary)}</b><span>{hoveredBoundary.changes.map(change => `${LABELS[change.model_identity] ?? change.model_identity}（${change.training_rows ?? "—"} 条）`).join(" · ")}</span></> : <><b>模型换版本事件轨道</b><span>相近换版会合并为一个圆点；移到圆点查看准确时间、方向样本、新闻样本与模型明细。</span></>}
     </div>}
+    <span className="mobile-scroll-hint" role="note">左右滑动查看完整图表</span>
+    {/* Keyboard users need focus here so arrow keys can pan the wide chart. */}
+    {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
+    <div className="mobile-chart-scroll" tabIndex={0} aria-label="可左右滑动的长期 OOS 图表">
     <svg className="learning-svg" viewBox="0 0 960 400" role="img" aria-label="各模型历史与实时成熟 OOS 曲线">
       {boundaryLayouts.length > 0 && <line x1="58" x2="920" y1={boundaryDividerY} y2={boundaryDividerY} className={compactBoundaryRail ? "version-event-rail" : "version-label-divider"} />}
       <line x1="58" x2="920" y1={y(0)} y2={y(0)} className="zero-line" />
@@ -323,6 +358,7 @@ function LongCurve({ curves }: { curves: Curve[] }) {
       {visibleCurves.map(row => <polyline key={row.model_identity} fill="none" stroke={COLORS[row.model_identity]} strokeWidth="3" points={row.points.map(point => `${x(point.decision_time)},${y(point.cumulative_quote_return)}`).join(" ")} />)}
       {tickTimes.map(value => <g key={value} className="time-axis"><line x1={x(value)} x2={x(value)} y1="350" y2="356" /><text x={x(value)} y="374" textAnchor="middle">{axisLabel(value)}</text></g>)}
     </svg>
+    </div>
     <div className="chart-legend">{visibleCurves.map(row => <span key={row.model_identity}><i style={{ background: COLORS[row.model_identity] }} />{LABELS[row.model_identity]} <b>{pct(row.points.at(-1)?.cumulative_quote_return ?? 0)}</b></span>)}{groupedBoundaries.length > 0 && <span><i className="train-dot" />模型换版本{compactBoundaryRail ? `（${boundaryLayouts.length} 个事件点 / ${groupedBoundaries.length} 次）` : groupedBoundaries.length > displayedBoundaries.length ? `（显示 ${displayedBoundaries.length}/${groupedBoundaries.length}）` : ""}</span>}</div>
   </div>;
 }
@@ -391,6 +427,10 @@ function MarketChart({ market, identity, setIdentity }: { market?: { candles: Ca
       <span>显示 {decisions.length} 次{hiddenByAction > 0 ? ` · 动作筛选隐藏 ${hiddenByAction} 次` : ""}{hiddenByFrequency > 0 ? ` · 频率收起 ${hiddenByFrequency} 次` : ""}</span>
     </div>
     <div className="prediction-counts"><b>成本后EV较高方向</b><span>看多 {counts.LONG}</span><span>看空 {counts.SHORT}</span><span>等待 {counts.WAIT}{unhealthyWaits ? `（数据异常 ${unhealthyWaits}）` : ""}</span>{policyMismatchCount > 0 && <span className="negative">历史规则不一致 {policyMismatchCount}（原记录保留）</span>}</div>
+    <span className="mobile-scroll-hint" role="note">左右滑动查看完整图表</span>
+    {/* Keyboard users need focus here so arrow keys can pan the wide chart. */}
+    {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
+    <div className="mobile-chart-scroll" tabIndex={0} aria-label="可左右滑动的 XAUUSD K线图">
     <svg className="learning-svg" viewBox="0 0 960 400" role="img" aria-label="XAUUSD K线与模型决策">
       {candles.map((row, index) => { const cx = xAtIndex(index); const width = Math.max(1.5, 650 / candles.length); const up = row.close >= row.open; return <g key={row.time}><line x1={cx} x2={cx} y1={y(row.high)} y2={y(row.low)} stroke={up ? "#476b19" : "#c9362b"} /><rect x={cx - width / 2} width={width} y={Math.min(y(row.open), y(row.close))} height={Math.max(1, Math.abs(y(row.open) - y(row.close)))} fill={up ? "#476b19" : "#c9362b"} /></g>; })}
       {selectedX != null && selectedExitX != null && <g className="selected-window"><rect x={selectedX} width={Math.max(2, selectedExitX-selectedX)} y="52" height="280" /><line x1={selectedX} x2={selectedX} y1="52" y2="332" /><line x1={selectedExitX} x2={selectedExitX} y1="52" y2="332" /><text x={selectedX+4} y="49">预测</text><text x={Math.max(selectedX+36, selectedExitX-58)} y="49">30分钟后</text></g>}
@@ -399,6 +439,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: { candles: Ca
       <text x="5" y="64">{high.toFixed(2)}</text><text x="5" y="335">{low.toFixed(2)}</text>
       {timeTickIndices.map(index => <g key={candles[index].time} className="time-axis"><line x1={xAtIndex(index)} x2={xAtIndex(index)} y1="338" y2="344" /><text x={xAtIndex(index)} y="366" textAnchor="middle">{axisTimeLabel(candles[index].time)}</text></g>)}
     </svg>
+    </div>
     <div className="chart-legend"><span><i className="long-dot" />看多预测</span><span><i className="short-dot" />看空预测</span>{showWait && <span><i className="wait-dot" />↔ 等待，不持仓</span>}{showTraining && <span><i className="train-dot" />新训练数据代</span>}</div>
     <div className="decision-reader" aria-live="polite">{activeSelected ? <>
       <div><small>一次完整观察</small><strong>{timeLabel(activeSelected.decision_time)} · 成本后EV较高 {arrowAction(activeSelected)}</strong><span>版本 {activeSelected.model_version} · → {timeLabel(exitTime(activeSelected))} 固定观察结果{activeSelected.policy_consistent === false ? ` · 当时规则校验异常（原记录保留；应为 ${activeSelected.policy_expected_action}）` : ""}</span></div>
