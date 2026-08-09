@@ -189,7 +189,7 @@ async function overviewDecisions(
   const stride = Math.max(1, Math.ceil(count / OVERVIEW_DECISIONS));
   const result = await binding.prepare(
     `WITH ordered AS (
-       SELECT payload,row_number() OVER (ORDER BY decision_epoch) sequence
+       SELECT payload,row_number() OVER (ORDER BY decision_epoch,decision_key) sequence
        FROM market_decisions WHERE model_identity=? ${frequencyClause}
      )
      SELECT payload FROM ordered WHERE (sequence-1) % ? = 0
@@ -244,7 +244,7 @@ export async function GET(request: Request) {
     const decisionSql = `SELECT payload FROM market_decisions
       WHERE model_identity=? AND decision_epoch>=? AND decision_epoch<?
       ${frequency === "30m" ? "AND decision_epoch % 1800 = 0" : ""}
-      ORDER BY decision_epoch`;
+      ORDER BY decision_epoch,decision_key`;
     const decisionsResult = await binding.prepare(decisionSql)
       .bind(identity, start, end).all<{ payload: string }>();
     const candles = candlesResult.results.map(compactCandle);
