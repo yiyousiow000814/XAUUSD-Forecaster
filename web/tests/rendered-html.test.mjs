@@ -46,7 +46,7 @@ test("keeps branch previews isolated from the production database", async () => 
 });
 
 test("does not show a redundant forecast warning while the market is closed", () => {
-  const source = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
   assert.match(source, /const forecastStatus = marketClosed\s*\? null/);
   assert.match(source, /forecastStatus && signalRemaining > 0 && online/);
   assert.match(source, /等待行情恢复/);
@@ -55,7 +55,7 @@ test("does not show a redundant forecast warning while the market is closed", ()
 });
 
 test("renders the Gemini quota status route", async () => {
-  const response = await render("/status");
+  const response = await render("/?room=status");
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /AI 模型使用状态/);
@@ -70,7 +70,7 @@ test("renders the Gemini quota status route", async () => {
 });
 
 test("renders component and news-source health on a separate route", async () => {
-  const response = await render("/health");
+  const response = await render("/?room=health");
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /系统健康状态/);
@@ -85,7 +85,7 @@ test("uses one Chinese system-state presentation across every dashboard page", (
   assert.match(component, /系统在线/);
   assert.match(component, /市场休市/);
   assert.match(component, /状态离线/);
-  for (const path of ["../app/page.tsx", "../app/audit/page.tsx", "../app/status/page.tsx", "../app/health/page.tsx"]) {
+  for (const path of ["../app/_views/LiveRoomView.tsx", "../app/_views/AuditView.tsx", "../app/_views/StatusView.tsx", "../app/_views/HealthView.tsx"]) {
     const source = readFileSync(new URL(path, import.meta.url), "utf8");
     assert.match(source, /SystemStatePill/);
     assert.doesNotMatch(source, /MARKET CLOSED|CONNECTING|市场休市 · 新闻运行中/);
@@ -93,13 +93,13 @@ test("uses one Chinese system-state presentation across every dashboard page", (
 });
 
 test("renders the news and decision audit route", async () => {
-  const response = await render("/audit");
+  const response = await render("/?room=audit&view=news");
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /Aurum Evidence Desk/);
   assert.match(html, />新闻 <b>/);
   assert.match(html, /新闻证据管理/);
-  const source = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   assert.match(source, /模型真正用过哪些新闻/);
   assert.match(source, /只显示实际进入过预测的独立新闻事件/);
   assert.match(source, /evidence-intro evidence-intro-compact/);
@@ -156,28 +156,44 @@ test("renders the news and decision audit route", async () => {
   assert.match(html, /学习进度/);
 });
 
-test("prefetches dashboard routes and reuses client data between pages", () => {
+test("switches dashboard rooms locally and reuses client data between views", () => {
   const cache = readFileSync(new URL("../app/_lib/dashboard-resource.ts", import.meta.url), "utf8");
   const link = readFileSync(new URL("../app/_components/DashboardLink.tsx", import.meta.url), "utf8");
+  const app = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-  for (const path of ["../app/page.tsx", "../app/audit/page.tsx", "../app/status/page.tsx", "../app/health/page.tsx"]) {
+  for (const path of ["../app/_views/LiveRoomView.tsx", "../app/_views/AuditView.tsx", "../app/_views/StatusView.tsx", "../app/_views/HealthView.tsx"]) {
     const source = readFileSync(new URL(path, import.meta.url), "utf8");
     assert.match(source, /DashboardLink/);
     assert.match(source, /readDashboardResource/);
     assert.match(source, /loadDashboardResource/);
     assert.doesNotMatch(source, /useRouter/);
   }
-  assert.match(link, /router\.prefetch\(href\)/);
-  assert.match(link, /router\.push\(href\)/);
-  assert.match(link, /router\.replace\(href\)/);
+  assert.match(link, /navigation\?\.preload\(href\)/);
+  assert.match(link, /navigation\.navigate\(href, replace\)/);
   assert.match(link, /href=\{href\}/);
   assert.match(link, /setAttribute\("aria-busy", "true"\)/);
+  assert.match(app, /window\.history\.pushState/);
+  assert.match(app, /window\.history\.replaceState/);
+  assert.match(app, /window\.addEventListener\("popstate"/);
+  assert.match(app, /lazy\(loadAuditView\)/);
   assert.match(css, /\.audit-link\.is-navigating::after/);
   assert.match(css, /prefers-reduced-motion:reduce/);
   assert.match(cache, /const resources = new Map/);
   assert.match(cache, /if \(!options\.force && isFresh\)/);
   assert.match(cache, /if \(entry\.pending\)/);
   assert.match(cache, /cache: "no-store"/);
+});
+
+test("redirects legacy dashboard URLs to the single app shell", async () => {
+  for (const [path, location] of [
+    ["/status", "/?room=status"],
+    ["/health", "/?room=health"],
+    ["/audit?view=league", "/?room=audit&view=league"],
+  ]) {
+    const response = await render(path);
+    assert.equal(response.status, 307);
+    assert.equal(response.headers.get("location"), location);
+  }
 });
 
 test("reloads an already-open dashboard after a deployment changes its client bundle", () => {
@@ -200,7 +216,7 @@ test("reads the append-only D1 learning history before the compact live relay", 
 });
 
 test("renders generic story coverage without black empty grid placeholders", () => {
-  const page = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
+  const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(page, /主题流/);
   assert.match(page, /个事件/);
@@ -218,14 +234,14 @@ test("renders generic story coverage without black empty grid placeholders", () 
 });
 
 test("keeps the learning disclaimer short and explicit", () => {
-  const source = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   assert.match(source, /仅供研究观察，不代表盈利，也不会自动下单/);
   assert.doesNotMatch(source, /早期曲线用于观察学习过程/);
   assert.doesNotMatch(source, /Champion 始终是 Always Wait/);
 });
 
 test("uses one modal timeline for model generations and market decisions", () => {
-  const page = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
+  const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
   assert.match(page, /打开交互图表/);
   assert.match(page, /新闻修正量/);
@@ -341,7 +357,7 @@ test("uses one modal timeline for model generations and market decisions", () =>
 });
 
 test("keeps the learning page focused and folds secondary research below the scoreboard", () => {
-  const page = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
+  const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const summary = page.indexOf('<div className="learning-summary-grid">');
   const graph = page.indexOf('<section className="graph-launch">');
   const scoreboard = page.indexOf('<section className="model-score-summary">');
@@ -355,7 +371,7 @@ test("keeps the learning page focused and folds secondary research below the sco
 });
 
 test("keeps dashboard navigation and graph controls usable on phones", () => {
-  const page = readFileSync(new URL("../app/audit/page.tsx", import.meta.url), "utf8");
+  const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(page, /ref=\{auditTabsRef\} className="audit-tabs"/);
@@ -398,7 +414,7 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
 });
 
 test("explains U5 as a risk scale rather than a probability", () => {
-  const source = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
   assert.match(source, /30分钟波动风险/);
   assert.match(source, /risk-scale/);
   assert.match(source, /它不是亏损概率，也不代表方向/);
