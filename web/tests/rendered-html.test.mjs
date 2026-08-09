@@ -364,6 +364,8 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(modal, /openerRef\.current\?\.focus\(\)/);
   assert.match(modal, /event\.key !== "Tab"/);
   assert.match(css, /\.mobile-chart-scroll \{ width:100%; overflow-x:auto/);
+  assert.match(css, /\.market-history-nav \{[^}]*margin:10px 0 0;[^}]*border:1px solid/);
+  assert.match(css, /\.prediction-counts \{[^}]*border-top:0/);
   assert.match(css, /\.chart-block \{ overflow:visible/);
   assert.match(css, /\.graph-modal-backdrop \{ position:fixed; inset:0; z-index:1100/);
   assert.match(css, /\.audit-intro>div:first-child \.eyebrow \{ display:none/);
@@ -427,4 +429,8 @@ test("loads market history by bounded range instead of one growing snapshot", ()
   assert.match(route, /WHERE time_epoch>=\? AND time_epoch<\?/);
   assert.match(route, /ON CONFLICT\(decision_key\) DO UPDATE/);
   assert.match(route, /MAX_INGEST_BYTES = 400_000/);
+  assert.match(route, /ORDER BY decision_epoch,decision_key/);
+  assert.match(modal, /cancelled = true; controller\.abort\(\)/);
+  assert.match(modal, /!detailCandles\.length && !canGoLater/);
+  assert.match(modal, /onClick=\{goLater\}>→ 返回较新行情/);
 });

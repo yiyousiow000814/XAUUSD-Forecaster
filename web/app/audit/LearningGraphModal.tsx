@@ -392,19 +392,22 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
     });
     if (before && range !== "all") query.set("before", before);
     const controller = new AbortController();
+    let cancelled = false;
     fetch(`${market.history_resource}?${query}`, { cache: "no-store", signal: controller.signal })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
       })
-      .then(body => setHistoryMarket({
-        ...body,
-        training_markers: market.training_markers ?? [],
-        prediction_history_start: market.prediction_history_start,
-        history_resource: market.history_resource,
-      }))
+      .then(body => {
+        if (!cancelled) setHistoryMarket({
+          ...body,
+          training_markers: market.training_markers ?? [],
+          prediction_history_start: market.prediction_history_start,
+          history_resource: market.history_resource,
+        });
+      })
       .catch(() => { /* Keep the last successful page or bundled fallback visible. */ })
-    return () => controller.abort();
+    return () => { cancelled = true; controller.abort(); };
   }, [market, range, identity, dense, before]);
   const activeMarket = historyMarket ?? market;
   const remoteHistory = Boolean(market?.history_resource);
@@ -418,6 +421,25 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
   const cutoff = candles.length ? Date.parse(candles[0].time) : 0;
   const canGoEarlier = range !== "all" && (remoteHistory ? Boolean(activeMarket?.page?.has_earlier) : pageStartIndex > 0);
   const canGoLater = range !== "all" && (remoteHistory ? laterPages.length > 0 : page > 0);
+  const goEarlier = () => {
+    if (remoteHistory) {
+      if (!candles.length) return;
+      setLaterPages(value => [...value, before]);
+      setBefore(candles[0].time);
+    } else {
+      setPage(value => value + 1);
+    }
+  };
+  const goLater = () => {
+    if (remoteHistory) {
+      const previous = laterPages.at(-1) ?? null;
+      setLaterPages(value => value.slice(0, -1));
+      setBefore(previous);
+    } else {
+      setPage(value => Math.max(0, value - 1));
+    }
+  };
+  const goLatest = () => { setPage(0); setBefore(null); setLaterPages([]); };
   const scopedDecisions = useMemo(() => (activeMarket?.decisions ?? []).filter(row =>
     row.model_identity === identity && Date.parse(row.decision_time) >= cutoff && Date.parse(row.decision_time) < pageEnd
   ), [activeMarket, identity, cutoff, pageEnd]);
@@ -436,8 +458,8 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
     if (dense) return candidateDecisions;
     return candidateDecisions.filter(row => new Date(row.decision_time).getUTCMinutes() % 30 === 0);
   })();
-  if (!detailCandles.length) return <Empty text="还没有保存过可绘制的 Bid/Ask 行情。" />;
-  if (!candles.length) return <div className="chart-block"><div className="market-history-nav"><button type="button" disabled={!canGoLater} onClick={() => setPage(value => Math.max(0, value - 1))}>← 返回较新行情</button></div><Empty text="这一段没有行情，可能是周末或休市时段。" /></div>;
+  if (!detailCandles.length && !canGoLater) return <Empty text="还没有保存过可绘制的 Bid/Ask 行情。" />;
+  if (!candles.length) return <div className="chart-block"><div className="market-history-nav"><button type="button" disabled={!canGoLater} onClick={goLater}>→ 返回较新行情</button></div><Empty text="这一段没有行情，可能是周末或休市时段。" /></div>;
   const low = Math.min(...candles.map(row => row.low)); const high = Math.max(...candles.map(row => row.high));
   const start = Date.parse(candles[0].time);
   const end = Date.parse(candles.at(-1)!.time) + 300_000;
@@ -486,10 +508,10 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
       <span>显示 {decisions.length}{activeMarket?.decision_downsampled ? ` / 共 ${activeMarket.source_decision_count ?? decisions.length}` : ""} 次{hiddenByAction > 0 ? ` · 动作筛选隐藏 ${hiddenByAction} 次` : ""}{hiddenByFrequency > 0 ? ` · 频率收起 ${hiddenByFrequency} 次` : ""}</span>
     </div>
     <div className="market-history-nav" aria-label="历史行情翻页">
-      <button type="button" disabled={!canGoEarlier} onClick={() => { if (remoteHistory) { setLaterPages(value => [...value, before]); setBefore(candles[0].time); } else setPage(value => value + 1); }} aria-label="查看更早行情">←</button>
+      <button type="button" disabled={!canGoEarlier} onClick={goEarlier} aria-label="查看更早行情">←</button>
       <span>{timeLabel(candles[0].time)} — {timeLabel(candles.at(-1)!.time)}{range === "all" && activeMarket?.overview_downsampled ? ` · 全部 ${activeMarket.source_candle_count ?? ""} 根概览` : ""}</span>
-      <button type="button" disabled={!canGoLater} onClick={() => { if (remoteHistory) { const previous = laterPages.at(-1) ?? null; setLaterPages(value => value.slice(0, -1)); setBefore(previous); } else setPage(value => Math.max(0, value - 1)); }} aria-label="查看较新行情">→</button>
-      {(page > 0 || laterPages.length > 0) && <button type="button" onClick={() => { setPage(0); setBefore(null); setLaterPages([]); }}>最新</button>}
+      <button type="button" disabled={!canGoLater} onClick={goLater} aria-label="查看较新行情">→</button>
+      {(page > 0 || laterPages.length > 0) && <button type="button" onClick={goLatest}>最新</button>}
     </div>
     <div className="prediction-counts"><b>{scopedDecisions.length ? "成本后EV较高方向" : predictionAvailability}</b>{scopedDecisions.length > 0 && <><span>看多 {counts.LONG}</span><span>看空 {counts.SHORT}</span><span>等待 {counts.WAIT}{unhealthyWaits ? `（数据异常 ${unhealthyWaits}）` : ""}</span>{policyMismatchCount > 0 && <span className="negative">历史规则不一致 {policyMismatchCount}（原记录保留）</span>}</>}</div>
     <span className="mobile-scroll-hint" role="note">左右滑动查看完整图表</span>
