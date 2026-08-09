@@ -27,6 +27,9 @@ DEFAULT_NEWS_STATE = (
 DEFAULT_LEARNING_STATE = (
     MODULE_ROOT / ".local" / "forward" / "dashboard-learning-sync-state.json"
 )
+DEFAULT_MARKET_HISTORY_STATE = (
+    MODULE_ROOT / ".local" / "forward" / "dashboard-market-history-sync-state.json"
+)
 REMOTE_PAYLOAD_LIMIT_BYTES = 750_000
 LOCAL_STATUS_TIMEOUT_SECONDS = 20
 REMOTE_POST_TIMEOUT_SECONDS = 30
@@ -38,6 +41,9 @@ NEWS_INDEX_BATCH_LIMIT_BYTES = 400_000
 NEWS_DETAIL_FULL_REFRESH_SECONDS = 86_400
 NEWS_INDEX_FULL_REFRESH_SECONDS = 86_400
 NEWS_MIRROR_CONTRACT_VERSION = "news-readable-authoritative-v1"
+MARKET_HISTORY_CONTRACT_VERSION = "market-history-d1-v1"
+MARKET_HISTORY_BATCH_LIMIT_BYTES = 350_000
+MARKET_HISTORY_OVERLAP_SECONDS = 2 * 3_600
 REMOTE_CURVE_POINTS_PER_IDENTITY = 480
 REMOTE_CURVE_POINT_LIMITS = (480, 360, 240, 160, 120, 80, 40, 20)
 REMOTE_DETAIL_LIMITS = (240, 160, 120, 80, 40, 20)
@@ -379,6 +385,7 @@ def remote_snapshot(payload: dict) -> bytes:
         # snapshot made five model families compete for one global row limit.
         market["decisions"] = []
         market["decision_resource"] = "/api/market-chart"
+        market["history_resource"] = "/api/market-history"
 
     for name, limit in (
         ("recent_news", REMOTE_NEWS_LIMIT),
@@ -532,6 +539,14 @@ def configured_targets(config: dict) -> list[dict]:
             name,
             legacy=scoped["legacy"],
         ))
+        scoped["market_history_state_file"] = str(_target_state_path(
+            Path(target.get(
+                "market_history_state_file",
+                config.get("market_history_state_file", DEFAULT_MARKET_HISTORY_STATE),
+            )),
+            name,
+            legacy=scoped["legacy"],
+        ))
         targets.append(scoped)
     if not targets:
         raise ValueError("dashboard sync has no configured targets")
@@ -576,6 +591,107 @@ def _sync_market(local_payload: dict, config: dict) -> None:
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/market-chart"
     )
     _post_json(market_url, market_chart_snapshot(local_payload), config)
+
+
+def _market_history_payloads(candles: list[dict], decisions: list[dict]) -> list[bytes]:
+    """Keep D1 ingest requests bounded while preserving every row."""
+    compacted = compact_market_chart({
+        "market_chart": {
+            "candles": candles, "overview_candles": [], "decisions": decisions,
+        },
+    }, dense_limit=max(1, len(decisions)), overview_limit=1)
+    candles = compacted["candles"]
+    decisions = compacted["decisions"]
+    payloads = []
+    for key, rows in (("candles", candles), ("decisions", decisions)):
+        current: list[dict] = []
+        for row in rows:
+            candidate = [*current, row]
+            encoded = json.dumps(
+                {key: candidate}, ensure_ascii=False, allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            if current and len(encoded) > MARKET_HISTORY_BATCH_LIMIT_BYTES:
+                payloads.append(json.dumps(
+                    {key: current}, ensure_ascii=False, allow_nan=False,
+                    separators=(",", ":"),
+                ).encode("utf-8"))
+                current = [row]
+            else:
+                current = candidate
+        if current:
+            payloads.append(json.dumps(
+                {key: current}, ensure_ascii=False, allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8"))
+    return payloads
+
+
+def _local_market_history_url(config: dict, after: str | None) -> str:
+    status_url = urllib.parse.urlsplit(config["local_status_url"])
+    query = {"limit": "500"}
+    if after:
+        query["after"] = after
+    return urllib.parse.urlunsplit((
+        status_url.scheme, status_url.netloc, "/api/market-history",
+        urllib.parse.urlencode(query), "",
+    ))
+
+
+def _overlap_cursor(cursor: str | None) -> str | None:
+    if not cursor:
+        return None
+    try:
+        value = datetime.fromisoformat(cursor.replace("Z", "+00:00"))
+        return datetime.fromtimestamp(
+            value.timestamp() - MARKET_HISTORY_OVERLAP_SECONDS, UTC,
+        ).isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
+def _sync_market_history(config: dict) -> None:
+    remote_host = urllib.parse.urlsplit(config["remote_ingest_url"]).hostname or ""
+    if remote_host.lower().endswith(".chatgpt.site"):
+        return  # Sites remains on the bounded compatibility snapshot; D1 is Cloudflare-only.
+    remote_url = config.get("remote_market_history_url") or (
+        config["remote_ingest_url"].rsplit("/", 1)[0] + "/market-history"
+    )
+    state_path = Path(config.get(
+        "market_history_state_file", DEFAULT_MARKET_HISTORY_STATE,
+    ))
+    state = _read_news_sync_state(state_path)
+    cursor = (
+        state.get("cursor")
+        if state.get("contract_version") == MARKET_HISTORY_CONTRACT_VERSION
+        else None
+    )
+    after = _overlap_cursor(cursor)
+    pages = 0
+    while True:
+        with urllib.request.urlopen(
+            _local_market_history_url(config, after),
+            timeout=LOCAL_STATUS_TIMEOUT_SECONDS,
+        ) as response:
+            page = json.loads(response.read())
+        candles = page.get("candles") if isinstance(page.get("candles"), list) else []
+        decisions = page.get("decisions") if isinstance(page.get("decisions"), list) else []
+        for payload in _market_history_payloads(candles, decisions):
+            _post_json(remote_url, payload, config)
+        next_cursor = page.get("next_cursor")
+        if next_cursor:
+            cursor = str(next_cursor)
+            _write_news_sync_state(state_path, {
+                "contract_version": MARKET_HISTORY_CONTRACT_VERSION,
+                "cursor": cursor,
+                "last_success": datetime.now(UTC).isoformat(),
+            })
+        pages += 1
+        if not page.get("has_more") or not next_cursor or next_cursor == after:
+            break
+        if pages >= 1_000:
+            raise RuntimeError("market history backfill exceeded 1000 pages")
+        after = str(next_cursor)
 
 
 def _sync_news(local_payload: dict, config: dict) -> None:
@@ -707,6 +823,7 @@ def sync_once(config: dict) -> list[dict]:
         for resource, operation in (
             ("learning", _sync_learning),
             ("market_chart", _sync_market),
+            ("market_history", lambda _payload, scoped: _sync_market_history(scoped)),
             ("news", _sync_news),
         ):
             try:
