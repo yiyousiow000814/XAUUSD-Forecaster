@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
 import SystemStatePill from "../_components/SystemStatePill";
+import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 
 type StatusPayload = {
   generated_at: string;
@@ -50,14 +51,11 @@ function elapsed(seconds: number | null): string {
 }
 
 export default function HealthPage() {
-  const router = useRouter();
-  const [payload, setPayload] = useState<StatusPayload | null>(null);
+  const [payload, setPayload] = useState<StatusPayload | null>(() => readDashboardResource<StatusPayload>("/api/status"));
   const [error, setError] = useState<string | null>(null);
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (force = false) => {
     try {
-      const response = await fetch("/api/status", { cache: "no-store" });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      setPayload(await response.json());
+      setPayload(await loadDashboardResource<StatusPayload>("/api/status", { force }));
       setError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "状态读取失败");
@@ -66,20 +64,20 @@ export default function HealthPage() {
 
   useEffect(() => {
     const initial = window.setTimeout(() => void refresh(), 0);
-    const timer = window.setInterval(() => void refresh(), 15_000);
+    const timer = window.setInterval(() => void refresh(true), 15_000);
     return () => { window.clearTimeout(initial); window.clearInterval(timer); };
   }, [refresh]);
 
   return <main className="status-main">
     <div className="grain" />
     <header className="topbar">
-      <button className="brand audit-brand brand-button" type="button" onClick={() => router.replace("/")}>
+      <Link className="brand audit-brand brand-button" href="/" replace prefetch>
         <span className="brand-mark">AU</span><div><strong>Aurum System Health</strong><small>组件心跳 · 新闻来源</small></div>
-      </button>
+      </Link>
       <div className="top-actions">
-        <button className="audit-link" type="button" onClick={() => router.push("/status")}>AI 模型用量</button>
-        <button className="audit-link" type="button" onClick={() => router.push("/audit")}>新闻与决策</button>
-        <button className="audit-link" type="button" onClick={() => router.replace("/")}>← 返回实时室</button>
+        <Link className="audit-link" href="/status" prefetch>AI 模型用量</Link>
+        <Link className="audit-link" href="/audit?view=news" prefetch>新闻与决策</Link>
+        <Link className="audit-link" href="/" replace prefetch>← 返回实时室</Link>
       </div>
     </header>
     <section className="status-hero">

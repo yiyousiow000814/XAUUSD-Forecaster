@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
 import SystemStatePill from "./_components/SystemStatePill";
+import { loadDashboardResource, readDashboardResource } from "./_lib/dashboard-resource";
 
 type Decision = {
   decision_time: string;
@@ -91,19 +92,15 @@ const localTime = (value?: string) =>
     : "—";
 
 export default function Home() {
-  const router = useRouter();
-  const [payload, setPayload] = useState<Payload | null>(null);
+  const [payload, setPayload] = useState<Payload | null>(() => readDashboardResource<Payload>("/api/status"));
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (force = false) => {
     setRefreshing(true);
     try {
-      const response = await fetch("/api/status", { cache: "no-store" });
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
-      setPayload(body);
+      setPayload(await loadDashboardResource<Payload>("/api/status", { force, maxAgeMs: 5_000 }));
       setError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "无法读取实时状态");
@@ -113,8 +110,8 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    const initial = window.setTimeout(refresh, 0);
-    const interval = window.setInterval(refresh, 5_000);
+    const initial = window.setTimeout(() => void refresh(), 0);
+    const interval = window.setInterval(() => void refresh(true), 5_000);
     return () => {
       window.clearTimeout(initial);
       window.clearInterval(interval);
@@ -173,8 +170,8 @@ export default function Home() {
           </div>
         </div>
         <div className="top-actions">
-          <button className="audit-link" type="button" onClick={() => router.push("/status")}>系统状态</button>
-          <button className="audit-link" type="button" onClick={() => router.push("/audit?view=decisions")}>新闻与决策 / 结果 <span aria-hidden="true">→</span></button>
+          <Link className="audit-link" href="/status" prefetch>系统状态</Link>
+          <Link className="audit-link" href="/audit?view=decisions" prefetch>新闻与决策 / 结果 <span aria-hidden="true">→</span></Link>
           <SystemStatePill loading={loading} error={Boolean(error)} online={Boolean(payload?.system.online)} marketSession={payload?.system.market_session} />
         </div>
       </header>

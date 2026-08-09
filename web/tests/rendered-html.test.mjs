@@ -118,9 +118,10 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /api\/news-content\?key=/);
   assert.match(source, /api\/news-index\?/);
   assert.match(source, /api\/learning/);
-  assert.match(source, /Promise\.allSettled/);
-  assert.match(source, /Publish one coherent snapshot/);
-  assert.equal((source.match(/setPayload\(/g) ?? []).length, 1);
+  assert.match(source, /view !== "news"/);
+  assert.match(source, /view !== "league"/);
+  assert.match(source, /loadDashboardResource<Payload>\("\/api\/status"/);
+  assert.doesNotMatch(source, /Promise\.allSettled/);
   assert.doesNotMatch(source, /row\.topics\.map/);
   assert.doesNotMatch(source, /row\.model_identities\.map/);
   assert.doesNotMatch(source, /row\.model_unseen_reason_codes\.map/);
@@ -153,6 +154,21 @@ test("renders the news and decision audit route", async () => {
   assert.match(html, /Live OOS 学习曲线/);
   assert.match(html, /大视野覆盖/);
   assert.match(html, /学习进度/);
+});
+
+test("prefetches dashboard routes and reuses client data between pages", () => {
+  const cache = readFileSync(new URL("../app/_lib/dashboard-resource.ts", import.meta.url), "utf8");
+  for (const path of ["../app/page.tsx", "../app/audit/page.tsx", "../app/status/page.tsx", "../app/health/page.tsx"]) {
+    const source = readFileSync(new URL(path, import.meta.url), "utf8");
+    assert.match(source, /from "next\/link"/);
+    assert.match(source, /readDashboardResource/);
+    assert.match(source, /loadDashboardResource/);
+    assert.doesNotMatch(source, /useRouter/);
+  }
+  assert.match(cache, /const resources = new Map/);
+  assert.match(cache, /if \(!options\.force && isFresh\)/);
+  assert.match(cache, /if \(entry\.pending\)/);
+  assert.match(cache, /cache: "no-store"/);
 });
 
 test("reloads an already-open dashboard after a deployment changes its client bundle", () => {

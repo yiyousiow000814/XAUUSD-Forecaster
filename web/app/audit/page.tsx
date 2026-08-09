@@ -1,8 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import SystemStatePill from "../_components/SystemStatePill";
+import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import LearningGraphModal from "./LearningGraphModal";
 
 type Prediction = {
@@ -582,17 +584,27 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
 }
 
 export default function AuditPage() {
-  const router = useRouter();
-  const [payload, setPayload] = useState<Payload | null>(null);
-  const [newsIndex, setNewsIndex] = useState<NewsIndexResponse>({
-    items: [], total: 0, all_total: 0, category_counts: {}, page: 1, page_size: NEWS_PER_PAGE,
-  });
-  const [statusState, setStatusState] = useState<"loading" | "ready" | "error">("loading");
-  const [learningState, setLearningState] = useState<"loading" | "ready" | "error">("loading");
+  const searchParams = useSearchParams();
+  const requestedView = searchParams.get("view");
+  const initialView = requestedView === "news" || requestedView === "evidence" || requestedView === "stories" || requestedView === "decisions" || requestedView === "league" || requestedView === "coverage"
+    ? requestedView
+    : "news";
+  const cachedStatus = readDashboardResource<Payload>("/api/status");
+  const cachedLearning = readDashboardResource<Partial<Payload>>("/api/learning");
+  const [payload, setPayload] = useState<Payload | null>(() => cachedStatus
+    ? ({ ...cachedStatus, ...cachedLearning } as Payload)
+    : null);
+  const [newsIndex, setNewsIndex] = useState<NewsIndexResponse>(() => (
+    readDashboardResource<NewsIndexResponse>(`/api/news-index?page=1&limit=${NEWS_PER_PAGE}`) ?? {
+      items: [], total: 0, all_total: 0, category_counts: {}, page: 1, page_size: NEWS_PER_PAGE,
+    }
+  ));
+  const [statusState, setStatusState] = useState<"loading" | "ready" | "error">(cachedStatus ? "ready" : "loading");
+  const [learningState, setLearningState] = useState<"idle" | "loading" | "ready" | "error">(cachedLearning ? "ready" : "idle");
   const [statusError, setStatusError] = useState<string | null>(null);
   const [learningError, setLearningError] = useState<string | null>(null);
   const [newsError, setNewsError] = useState<string | null>(null);
-  const [view, setView] = useState<"news" | "evidence" | "stories" | "decisions" | "league" | "coverage">("news");
+  const [view, setView] = useState<"news" | "evidence" | "stories" | "decisions" | "league" | "coverage">(initialView);
   const [newsCategory, setNewsCategory] = useState("全部");
   const [newsPage, setNewsPage] = useState(1);
   const [graphOpen, setGraphOpen] = useState(false);
@@ -601,78 +613,68 @@ export default function AuditPage() {
   const [evidenceMode, setEvidenceMode] = useState<"seen" | "unseen" | "all">("seen");
   const auditTabsRef = useRef<HTMLElement>(null);
 
-  const refresh = useCallback(async () => {
-    const [statusResult, learningResult] = await Promise.allSettled([
-      fetch("/api/status", { cache: "no-store" }).then(async response => {
-        const body = await response.json();
-        if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
-        return body;
-      }),
-      fetch("/api/learning", { cache: "no-store" }).then(async response => {
-        const body = await response.json();
-        if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
-        return body;
-      }),
-    ]);
-
-    if (statusResult.status === "fulfilled") {
+  const refreshStatus = useCallback(async (force = false) => {
+    try {
+      const body = await loadDashboardResource<Payload>("/api/status", { force });
+      setPayload(previous => ({ ...previous, ...body }) as Payload);
       setStatusState("ready");
       setStatusError(null);
-    } else {
+    } catch (reason) {
       setStatusState("error");
-      setStatusError(statusResult.reason instanceof Error ? statusResult.reason.message : "无法读取系统状态");
-    }
-
-    if (learningResult.status === "fulfilled") {
-      setLearningState("ready");
-      setLearningError(null);
-    } else {
-      setLearningState("error");
-      setLearningError(learningResult.reason instanceof Error ? learningResult.reason.message : "无法读取学习进度");
-    }
-
-    const nextPayload = {
-      ...(statusResult.status === "fulfilled" ? statusResult.value : {}),
-      ...(learningResult.status === "fulfilled" ? learningResult.value : {}),
-    };
-    if (Object.keys(nextPayload).length > 0) {
-      // Publish one coherent snapshot. Rendering either response independently can
-      // expose a learning-only or status-only payload and crash another audit tab.
-      setPayload(previous => ({ ...previous, ...nextPayload }) as Payload);
+      setStatusError(reason instanceof Error ? reason.message : "无法读取系统状态");
     }
   }, []);
 
-  const refreshNews = useCallback(async () => {
+  const refreshLearning = useCallback(async (force = false) => {
+    setLearningState(previous => previous === "ready" ? previous : "loading");
+    try {
+      const body = await loadDashboardResource<Partial<Payload>>("/api/learning", { force });
+      setPayload(previous => ({ ...previous, ...body }) as Payload);
+      setLearningState("ready");
+      setLearningError(null);
+    } catch (reason) {
+      setLearningState("error");
+      setLearningError(reason instanceof Error ? reason.message : "无法读取学习进度");
+    }
+  }, []);
+
+  const refreshNews = useCallback(async (force = false) => {
     const query = new URLSearchParams({
       page: String(newsPage), limit: String(NEWS_PER_PAGE),
     });
     if (newsCategory !== "全部") query.set("category", newsCategory);
-    const response = await fetch(`/api/news-index?${query}`, { cache: "no-store" });
-    const body = await response.json();
-    if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
+    const body = await loadDashboardResource<NewsIndexResponse>(`/api/news-index?${query}`, { force });
     setNewsIndex(body);
     setNewsError(null);
   }, [newsCategory, newsPage]);
 
   useEffect(() => {
-    const initial = window.setTimeout(() => {
-      const requested = new URLSearchParams(window.location.search).get("view");
-      if (requested === "news" || requested === "evidence" || requested === "stories" || requested === "decisions" || requested === "league" || requested === "coverage") {
-        setView(requested);
-      }
-      refresh();
-      refreshNews().catch(reason => setNewsError(
-        reason instanceof Error ? reason.message : "无法读取新闻索引",
-      ));
-    }, 0);
+    const initial = window.setTimeout(() => void refreshStatus(), 0);
     const interval = window.setInterval(() => {
-      refresh();
-      refreshNews().catch(reason => setNewsError(
+      void refreshStatus(true);
+    }, 15_000);
+    return () => { window.clearTimeout(initial); window.clearInterval(interval); };
+  }, [refreshStatus]);
+
+  useEffect(() => {
+    if (view !== "news") return;
+    const initial = window.setTimeout(() => void refreshNews().catch(reason => setNewsError(
+      reason instanceof Error ? reason.message : "无法读取新闻索引",
+    )), 0);
+    const interval = window.setInterval(() => {
+      refreshNews(true).catch(reason => setNewsError(
         reason instanceof Error ? reason.message : "无法读取新闻索引",
       ));
     }, 15_000);
     return () => { window.clearTimeout(initial); window.clearInterval(interval); };
-  }, [refresh, refreshNews]);
+  }, [refreshNews, view]);
+
+  useEffect(() => {
+    if (view !== "league") return;
+    const initial = window.setTimeout(() => void refreshLearning(), 0);
+    const interval = window.setInterval(() => void refreshLearning(true), 15_000);
+    return () => { window.clearTimeout(initial); window.clearInterval(interval); };
+  }, [refreshLearning, view]);
 
   const selectView = (next: "news" | "evidence" | "stories" | "decisions" | "league" | "coverage") => {
     setView(next);
@@ -722,20 +724,20 @@ export default function AuditPage() {
   const directionPoolRows = Math.max(0, ...latestVersionGroups
     .filter(row => !row.model_identity.endsWith("NEWS_RESIDUAL"))
     .map(row => row.training_rows));
-  const readableNewsTotal = newsIndex.readable_total ?? newsIndex.all_total;
-  const parsedNewsTotal = newsIndex.parsed_total ?? newsIndex.items.filter(row => Boolean(row.parsed_at)).length;
-  const modelCandidateNewsTotal = newsIndex.model_candidate_total ?? newsIndex.items.filter(row => row.model_visibility === "MODEL_VISIBLE").length;
+  const readableNewsTotal = (newsIndex.readable_total ?? newsIndex.all_total) || payload?.counts?.readable_news_items || 0;
+  const parsedNewsTotal = newsIndex.parsed_total ?? payload?.counts?.parsed_news_items ?? newsIndex.items.filter(row => Boolean(row.parsed_at)).length;
+  const modelCandidateNewsTotal = newsIndex.model_candidate_total ?? payload?.counts?.model_candidate_news_items ?? newsIndex.items.filter(row => row.model_visibility === "MODEL_VISIBLE").length;
   const newsWaitingTotal = (payload?.annotation_queue?.queued ?? 0)
     + (payload?.annotation_queue?.backing_off ?? 0)
     + (payload?.annotation_queue?.dead_letter ?? 0);
   const newsNoParsingNeededTotal = Math.max(0, readableNewsTotal - parsedNewsTotal - newsWaitingTotal);
-  const rowsUntilTraining = learningState === "ready" && payload?.training
+  const rowsUntilTraining = statusState === "ready" && payload?.training
     ? Math.max(0, payload.training.next_training_at - payload.training.complete_rows)
     : null;
   const combinedErrors = [
     statusError && `系统状态：${statusError}`,
-    learningError && `学习进度：${learningError}`,
-    newsError && `新闻索引：${newsError}`,
+    view === "league" && learningError && `学习进度：${learningError}`,
+    view === "news" && newsError && `新闻索引：${newsError}`,
   ].filter(Boolean).join(" · ");
   const visibleEvidence = (payload?.news_evidence ?? []).filter(row => (
     evidenceMode === "all" || (evidenceMode === "seen" ? row.model_seen : !row.model_seen)
@@ -748,13 +750,13 @@ export default function AuditPage() {
     <main className="audit-main">
       <div className="grain" />
       <header className="topbar audit-topbar">
-        <button className="brand audit-brand brand-button" type="button" onClick={() => router.replace("/")}>
+        <Link className="brand audit-brand brand-button" href="/" replace prefetch>
           <span className="brand-mark">AU</span>
           <div><strong>Aurum Evidence Desk</strong><small>新闻 · 决策 · 因子覆盖</small></div>
-        </button>
+        </Link>
         <div className="top-actions">
-          <button className="audit-link" type="button" onClick={() => router.push("/status")}>系统状态</button>
-          <button className="audit-link" type="button" onClick={() => router.replace("/")}>← 返回实时室</button>
+          <Link className="audit-link" href="/status" prefetch>系统状态</Link>
+          <Link className="audit-link" href="/" replace prefetch>← 返回实时室</Link>
           <SystemStatePill loading={statusState === "loading"} error={statusState === "error"} online={Boolean(payload?.system?.online)} marketSession={payload?.system?.market_session} />
         </div>
       </header>
@@ -763,15 +765,15 @@ export default function AuditPage() {
         <div><p className="eyebrow">IMMUTABLE FORWARD EVIDENCE</p><h1>新闻先被看见，<br />决定才被允许产生。</h1></div>
         <div
           className="training-card"
-          aria-label={learningState === "ready"
+          aria-label={statusState === "ready"
             ? `学习进度：已收集 ${payload?.training?.complete_rows ?? 0} 条，目标 ${payload?.training?.next_training_at ?? 0} 条，还差 ${rowsUntilTraining ?? 0} 条`
             : "学习进度暂不可用"}
         >
           <div className="training-card-head"><span>学习进度</span></div>
           <div className="training-card-total">
-            <strong>{learningState === "ready" && payload?.training
+            <strong>{statusState === "ready" && payload?.training
               ? <>{payload.training.complete_rows}<small> / {payload.training.next_training_at}</small></>
-              : <small>{learningState === "loading" ? "读取中…" : "暂不可用"}</small>}
+              : <small>{statusState === "loading" ? "读取中…" : "暂不可用"}</small>}
             </strong>
             <span>{rowsUntilTraining === null ? "等待数据" : rowsUntilTraining === 0 ? "可以开始下一轮" : `还差 ${rowsUntilTraining} 条`}</span>
           </div>
