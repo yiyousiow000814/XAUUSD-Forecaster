@@ -329,6 +329,8 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(page, /scrollAuditTabs/);
   assert.match(page, /aria-label="向左查看更多审计视图"/);
   assert.match(page, /aria-label="向右查看更多审计视图"/);
+  assert.match(page, /aria-hidden="true">‹<\/span>/);
+  assert.match(page, /aria-hidden="true">›<\/span>/);
   assert.match(css, /\.topbar \{ align-items:stretch; flex-direction:column/);
   assert.match(css, /\.audit-tabs-shell \{ position:sticky; top:0;[\s\S]*?grid-template-columns:38px minmax\(0,1fr\) 38px/);
   assert.match(css, /\.audit-tabs \{ position:static; display:flex;[\s\S]*?overflow-x:auto/);

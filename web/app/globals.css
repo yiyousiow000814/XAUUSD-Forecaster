@@ -655,7 +655,8 @@ body.modal-open { overflow:hidden; }
   .training-card-total strong { font-size:31px; }
 
   .audit-tabs-shell { position:sticky; top:0; z-index:10; display:grid; grid-template-columns:38px minmax(0,1fr) 38px; gap:1px; border:1px solid var(--ink); background:var(--ink); }
-  .audit-tabs-scroll { display:block; min-width:0; min-height:52px; border:0; background:#d9d2c1; color:var(--ink); font-size:11px; font-weight:900; cursor:pointer; }
+  .audit-tabs-scroll { display:grid; place-items:center; min-width:0; min-height:52px; border:0; background:#d9d2c1; color:var(--ink); cursor:pointer; }
+  .audit-tabs-scroll span { display:block; transform:translateY(-1px); font-family:var(--font-display); font-size:30px; font-weight:700; line-height:1; }
   .audit-tabs-scroll:active,.audit-tabs-scroll:focus-visible { background:var(--acid); outline:2px solid var(--ink); outline-offset:-3px; }
   .audit-tabs { position:static; display:flex; gap:1px; min-width:0; overflow-x:auto; padding:1px; border:0; scroll-padding-inline:14px; scroll-snap-type:x proximity; scrollbar-width:none; overscroll-behavior-inline:contain; touch-action:pan-x; }
   .audit-tabs::-webkit-scrollbar { display:none; }
