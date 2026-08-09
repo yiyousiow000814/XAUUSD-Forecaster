@@ -194,11 +194,11 @@ function VersionLedger({ groups }: { groups: VersionGroup[] }) {
     </section>
     <div className="version-ledger-head"><span>组别 / 状态</span><span>训练与上线</span><span>创建后 OOS</span><span>本组独立收益</span><span>PF / 出方向</span></div>
     {rows.map(row => { const selected = metric(row); return <article key={`${row.model_identity}-${row.training_dataset_hash}`} className={row.lifecycle_status === "LATEST" ? "is-latest" : ""}>
-      <span><b>第 {row.generation} 组</b><small>{row.lifecycle_status === "LATEST" ? "最新版" : row.lifecycle_status === "PREVIOUS" ? "前一版" : "已归档"}</small></span>
-      <span><b>{row.training_rows} 条</b><small>{stamp(row.created_at)}{row.artifact_rebuilds ? ` · 恢复重建 ${row.artifact_rebuilds} 次` : ""}</small></span>
-      <span><b>{selected.oos_rows} 条</b><small>{selected.distinct_days} 个日期</small></span>
-      <strong>{selected.oos_rows ? pct(selected.cumulative_quote_return) : "等待结果"}</strong>
-      <span><b>{selected.profit_factor_quote_adjusted?.toFixed(2) ?? "—"}</b><small>出方向 {((selected.coverage_rate ?? 0)*100).toFixed(1)}%</small></span>
+      <span className="version-group"><b>第 {row.generation} 组</b><small>{row.lifecycle_status === "LATEST" ? "最新版" : row.lifecycle_status === "PREVIOUS" ? "前一版" : "已归档"}</small></span>
+      <span data-label="训练"><b>{row.training_rows} 条</b><small>{stamp(row.created_at)}{row.artifact_rebuilds ? ` · 恢复重建 ${row.artifact_rebuilds} 次` : ""}</small></span>
+      <span data-label="上线后"><b>{selected.oos_rows} 条</b><small>{selected.distinct_days} 个日期</small></span>
+      <strong data-label="本组收益">{selected.oos_rows ? pct(selected.cumulative_quote_return) : "等待结果"}</strong>
+      <span data-label="PF / 出方向"><b>{selected.profit_factor_quote_adjusted?.toFixed(2) ?? "—"}</b><small>出方向 {((selected.coverage_rate ?? 0)*100).toFixed(1)}%</small></span>
     </article>})}
     {!rows.length && <p>这个模型还没有真实训练版本。</p>}
   </section>;
