@@ -171,7 +171,7 @@ test("prefetches dashboard routes and reuses client data between pages", () => {
   assert.match(link, /router\.push\(href\)/);
   assert.match(link, /router\.replace\(href\)/);
   assert.match(link, /href=\{href\}/);
-  assert.match(link, /aria-busy=\{navigating/);
+  assert.match(link, /setAttribute\("aria-busy", "true"\)/);
   assert.match(css, /\.audit-link\.is-navigating::after/);
   assert.match(css, /prefers-reduced-motion:reduce/);
   assert.match(cache, /const resources = new Map/);
