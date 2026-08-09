@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import math
 import sqlite3
@@ -22,6 +23,9 @@ sys.path.insert(0, str(MODULE_ROOT))
 DEFAULT_DATABASE = MODULE_ROOT / ".local" / "forward" / "forward-evidence.sqlite3"
 UTC = timezone.utc
 PAYLOAD_SCHEMA_VERSION = "xauusd-dashboard-v4-event-episode"
+MARKET_DETAIL_CANDLE_LIMIT = 7 * 288
+MARKET_OVERVIEW_CANDLE_LIMIT = 480
+_QUOTE_CANDLE_CACHE: dict[tuple[str, int, int], list[dict]] = {}
 
 from xauusd_forecaster.factors import factor_coverage  # noqa: E402
 from xauusd_forecaster.annotation import (  # noqa: E402
@@ -471,47 +475,117 @@ def _apply_impact_status(item: dict, now: datetime) -> None:
         item["model_visibility"] = "MODEL_VISIBLE"
 
 
+def _quote_history_files(directory: Path) -> list[Path]:
+    """Choose one authoritative file for each append-only quote date."""
+    by_day: dict[str, Path] = {}
+    for path in sorted(directory.glob("xauusd-quotes-*.jsonl*")):
+        if path.name.endswith(".receipt.json"):
+            continue
+        day = path.name.split(".jsonl", 1)[0]
+        current = by_day.get(day)
+        replace_empty = (
+            current is not None
+            and current.stat().st_size == 0
+            and path.stat().st_size > 0
+        )
+        prefer_live = (
+            path.suffix == ".jsonl"
+            and current is not None
+            and current.suffix == ".gz"
+            and path.stat().st_size > 0
+        )
+        if current is None or replace_empty or prefer_live:
+            by_day[day] = path
+    return [by_day[day] for day in sorted(by_day)]
+
+
+def _quote_file_candles(path: Path) -> list[dict]:
+    """Aggregate one daily quote file and cache immutable archive results."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return []
+    key = (str(path), stat.st_size, stat.st_mtime_ns)
+    cached = _QUOTE_CANDLE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    for stale in [candidate for candidate in _QUOTE_CANDLE_CACHE if candidate[0] == str(path)]:
+        del _QUOTE_CANDLE_CACHE[stale]
+    buckets: dict[datetime, dict] = {}
+    opener = gzip.open if path.suffix == ".gz" else open
+    try:
+        with opener(path, "rt", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    quote = json.loads(line)
+                    observed = datetime.fromisoformat(
+                        str(quote["received_time"]).replace("Z", "+00:00")
+                    )
+                    observed = (
+                        observed.replace(tzinfo=UTC)
+                        if observed.tzinfo is None else observed.astimezone(UTC)
+                    )
+                    bid = float(quote["bid"])
+                    ask = float(quote["ask"])
+                    midpoint = (bid + ask) / 2.0
+                    minute = observed.replace(second=0, microsecond=0)
+                    bucket = minute - timedelta(minutes=minute.minute % 5)
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                candle = buckets.get(bucket)
+                if candle is None:
+                    buckets[bucket] = {
+                        "time": bucket.isoformat(), "open": midpoint,
+                        "high": midpoint, "low": midpoint, "close": midpoint,
+                        "ticks": 1,
+                    }
+                else:
+                    candle["high"] = max(candle["high"], midpoint)
+                    candle["low"] = min(candle["low"], midpoint)
+                    candle["close"] = midpoint
+                    candle["ticks"] += 1
+    except OSError:
+        return []
+    candles = [buckets[bucket] for bucket in sorted(buckets)]
+    _QUOTE_CANDLE_CACHE[key] = candles
+    return candles
+
+
+def _downsample_candles(candles: list[dict], limit: int) -> list[dict]:
+    """Preserve OHLC extremes while bounding the all-history overview."""
+    if len(candles) <= limit:
+        return candles
+    chunk_size = math.ceil(len(candles) / limit)
+    compacted = []
+    for start in range(0, len(candles), chunk_size):
+        rows = candles[start:start + chunk_size]
+        compacted.append({
+            "time": rows[0]["time"],
+            "open": rows[0]["open"],
+            "high": max(row["high"] for row in rows),
+            "low": min(row["low"] for row in rows),
+            "close": rows[-1]["close"],
+            "ticks": sum(int(row.get("ticks") or 0) for row in rows),
+            "source_candles": len(rows),
+        })
+    return compacted
+
+
 def _recent_market_chart(
     database: Path, connection: sqlite3.Connection, now: datetime
 ) -> dict:
-    """Aggregate the latest 24 hours of append-only quotes into true 5m candles."""
-    cutoff = now - timedelta(hours=24)
-    buckets: dict[datetime, dict] = {}
-    quote_files = sorted((database.parent / "quotes").glob("*.jsonl"))[-2:]
-    for path in quote_files:
-        try:
-            with path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    try:
-                        quote = json.loads(line)
-                        observed = datetime.fromisoformat(
-                            str(quote["received_time"]).replace("Z", "+00:00")
-                        )
-                        if observed < cutoff:
-                            continue
-                        bid = float(quote["bid"])
-                        ask = float(quote["ask"])
-                        midpoint = (bid + ask) / 2.0
-                        minute = observed.replace(second=0, microsecond=0)
-                        bucket = minute - timedelta(minutes=minute.minute % 5)
-                    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-                        continue
-                    candle = buckets.get(bucket)
-                    if candle is None:
-                        buckets[bucket] = {
-                            "time": bucket.isoformat(), "open": midpoint,
-                            "high": midpoint, "low": midpoint, "close": midpoint,
-                            "ticks": 1,
-                        }
-                    else:
-                        candle["high"] = max(candle["high"], midpoint)
-                        candle["low"] = min(candle["low"], midpoint)
-                        candle["close"] = midpoint
-                        candle["ticks"] += 1
-        except OSError:
-            continue
-    candles = [buckets[key] for key in sorted(buckets)][-288:]
-    first_time = candles[0]["time"] if candles else cutoff.isoformat()
+    """Build recorded quote history; weekends must not erase the last session."""
+    history_by_time: dict[str, dict] = {}
+    for path in _quote_history_files(database.parent / "quotes"):
+        for candle in _quote_file_candles(path):
+            history_by_time[candle["time"]] = candle
+    history = [history_by_time[key] for key in sorted(history_by_time)]
+    candles = history[-MARKET_DETAIL_CANDLE_LIMIT:]
+    overview_candles = (
+        _downsample_candles(history, MARKET_OVERVIEW_CANDLE_LIMIT)
+        if len(history) > len(candles) else []
+    )
+    first_time = candles[0]["time"] if candles else now.isoformat()
     decision_rows = connection.execute(
         """WITH ranked AS (
              SELECT p.source_decision_id,p.decision_time,p.model_identity,
@@ -598,9 +672,15 @@ def _recent_market_chart(
         (first_time,),
     ).fetchall()
     return {
-        "window_hours": 24,
+        "window_hours": None,
         "candle_minutes": 5,
         "candles": candles,
+        "overview_candles": overview_candles,
+        "history_start": history[0]["time"] if history else None,
+        "history_end": history[-1]["time"] if history else None,
+        "detail_start": candles[0]["time"] if candles else None,
+        "source_candle_count": len(history),
+        "overview_downsampled": bool(overview_candles),
         "decisions": [dict(row) for row in decisions],
         "training_markers": [dict(row) for row in marker_rows],
     }

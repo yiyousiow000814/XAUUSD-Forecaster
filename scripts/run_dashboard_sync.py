@@ -235,7 +235,7 @@ def _compact_learning_payload(
 
 
 def compact_market_chart(payload: dict) -> dict:
-    """Keep one complete 24-hour decision window in its own mirror payload."""
+    """Keep recorded candles plus a bounded recent decision window."""
     market = copy.deepcopy(payload.get("market_chart") or {})
     compact_decisions = []
     for row in market.get("decisions", []):

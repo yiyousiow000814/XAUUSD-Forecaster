@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import gzip
 import importlib.util
 import json
 import sqlite3
@@ -537,6 +538,51 @@ def test_dashboard_reports_gdelt_fallback_and_retry_time(tmp_path) -> None:
     assert gdelt["fallback_label"] == "Google News Context"
     assert gdelt["fallback_health"] == "HEALTHY"
     assert gdelt["next_retry_time"] == (now + timedelta(minutes=90)).isoformat()
+
+
+def test_market_chart_keeps_last_session_on_weekend_and_reads_gzip(tmp_path) -> None:
+    module = _dashboard_module()
+    now = datetime(2026, 8, 9, 4, 0, tzinfo=UTC)
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=now)
+    quote_dir = tmp_path / "quotes"
+    quote_dir.mkdir()
+    friday = datetime(2026, 8, 7, 20, 55, tzinfo=UTC)
+    rows = [
+        {"received_time": (friday + timedelta(minutes=index)).isoformat(), "bid": 3400 + index, "ask": 3400.2 + index}
+        for index in range(2)
+    ]
+    with gzip.open(quote_dir / "xauusd-quotes-20260807.jsonl.gz", "wt", encoding="utf-8") as handle:
+        handle.write("\n".join(json.dumps(row) for row in rows) + "\n")
+    (quote_dir / "xauusd-quotes-20260807.jsonl").write_text("", encoding="utf-8")
+    (quote_dir / "xauusd-quotes-20260809.jsonl").write_text("", encoding="utf-8")
+
+    payload = module._recent_market_chart(database, ledger.connection, now)
+
+    assert len(payload["candles"]) == 1
+    assert payload["candles"][0]["time"] == "2026-08-07T20:55:00+00:00"
+    assert payload["history_end"] == "2026-08-07T20:55:00+00:00"
+    assert payload["source_candle_count"] == 1
+    assert payload["overview_downsampled"] is False
+
+
+def test_market_chart_overview_preserves_ohlc_extremes() -> None:
+    module = _dashboard_module()
+    candles = [{
+        "time": f"2026-08-07T00:{index:02d}:00+00:00",
+        "open": float(index), "high": float(index + 1), "low": float(index - 1),
+        "close": float(index + 0.5), "ticks": 2,
+    } for index in range(6)]
+
+    compact = module._downsample_candles(candles, 2)
+
+    assert len(compact) == 2
+    assert compact[0] == {
+        "time": candles[0]["time"], "open": 0.0, "high": 3.0, "low": -1.0,
+        "close": 2.5, "ticks": 6, "source_candles": 3,
+    }
+    assert compact[1]["open"] == 3.0
+    assert compact[1]["close"] == 5.5
 
 
 def test_learning_surfaces_rebuild_only_when_source_counts_change(monkeypatch) -> None:

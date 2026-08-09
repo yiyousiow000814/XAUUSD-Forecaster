@@ -443,18 +443,28 @@ def test_remote_market_chart_is_split_from_status_and_keeps_complete_window() ->
         "ev_short_u5": 0.1,
     } for index in range(module.REMOTE_MARKET_DECISION_LIMIT + 20)]
     payload = {
-        "market_chart": {"decisions": list(reversed(decisions))},
+        "market_chart": {
+            "decisions": list(reversed(decisions)),
+            "candles": [{"time": "2026-08-05T00:00:00+00:00", "open": 1, "high": 2, "low": 0, "close": 1.5, "ticks": 8}],
+            "history_start": "2026-08-05T00:00:00+00:00",
+            "history_end": "2026-08-07T20:55:00+00:00",
+            "source_candle_count": 736,
+        },
     }
     mirrored = json.loads(module.remote_snapshot(payload))
     assert mirrored["market_chart"]["decisions"] == []
     assert mirrored["market_chart"]["decision_resource"] == "/api/market-chart"
 
-    retained = json.loads(module.market_chart_snapshot(payload))["decisions"]
+    market = json.loads(module.market_chart_snapshot(payload))
+    retained = market["decisions"]
     assert len(retained) == module.REMOTE_MARKET_DECISION_LIMIT
     assert retained[0]["source_decision_id"] == "d-20"
     assert retained[-1]["source_decision_id"] == f"d-{len(decisions) - 1}"
     assert "exit_time" not in retained[0]
     assert retained[0]["model_version"] == "model-20"
+    assert len(market["candles"]) == 1
+    assert market["history_end"] == "2026-08-07T20:55:00+00:00"
+    assert market["source_candle_count"] == 736
 
 
 def test_curve_compaction_preserves_extremes_and_version_boundaries() -> None:
