@@ -13,6 +13,7 @@ type MarketData = {
   source_candle_count?: number; overview_downsampled?: boolean;
   prediction_history_start?: Record<string, string>;
   mode?: "detail" | "overview"; preview_limited?: boolean;
+  source_decision_count?: number; decision_downsampled?: boolean;
   page?: { start?: string; end?: string; has_earlier: boolean; has_later: boolean };
 };
 type Decision = {
@@ -442,11 +443,15 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
   const end = Date.parse(candles.at(-1)!.time) + 300_000;
   const xValue = (value: number) => 55 + (value - start) / Math.max(300_000, end - start) * 870;
   const xAtIndex = (index: number) => xValue(Date.parse(candles[index].time));
+  const candleSteps = candles.slice(1).map((row, index) =>
+    Date.parse(row.time) - Date.parse(candles[index].time)
+  ).filter(step => step > 0).sort((a, b) => a - b);
+  const typicalCandleStep = candleSteps.length ? candleSteps[Math.floor(candleSteps.length / 2)] : 300_000;
   const marketGaps = candles.slice(1).map((row, index) => {
-    const previousEnd = Date.parse(candles[index].time) + 300_000;
+    const previousEnd = Date.parse(candles[index].time) + typicalCandleStep;
     const nextStart = Date.parse(row.time);
     return { start: previousEnd, end: nextStart, duration: nextStart - previousEnd };
-  }).filter(gap => gap.duration >= 600_000);
+  }).filter(gap => gap.duration >= 300_000);
   const y = (value: number) => 58 + (high - value) / Math.max(.00001, high - low) * 274;
   const indexByTime = (time: string) => candles.reduce((best, row, index) =>
     Math.abs(Date.parse(row.time) - Date.parse(time)) < Math.abs(Date.parse(candles[best].time) - Date.parse(time)) ? index : best, 0);
@@ -472,13 +477,13 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
   return <div className="chart-block market-chart-block">
     <div className="chart-caption"><div><b>每根K线5分钟 · 每个箭头预测未来30分钟</b><span>绿色向上、红色向下、灰色双向代表 WAIT。新闻残差只表示新闻对黄金基线的修正量；完整方向请看“黄金＋新闻”。</span></div><select value={identity} onChange={event => { setIdentity(event.target.value); setSelected(null); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key, label]) => <option key={key} value={key}>{label}{key.includes("RESIDUAL") ? "（修正量）" : ""}</option>)}</select></div>
     <div className="market-controls" aria-label="K线图显示控制">
-      <label>时间<select value={range} onChange={event => { setRange(event.target.value); setPage(0); setBefore(null); setLaterPages([]); setSelected(null); if (event.target.value === "168" || event.target.value === "all") setDense(false); }}><option value="3">3小时</option><option value="6">6小时</option><option value="12">12小时</option><option value="24">24小时</option><option value="168">7天</option><option value="all">全部历史</option></select></label>
-      <label>频率<select value={dense ? "all" : "clear"} disabled={range === "168" || range === "all"} onChange={event => setDense(event.target.value === "all")}><option value="clear">每小时 :00 / :30</option><option value="all">每5分钟</option></select></label>
+      <label>时间<select value={range} onChange={event => { setRange(event.target.value); setPage(0); setBefore(null); setLaterPages([]); setSelected(null); if (event.target.value === "168") setDense(false); }}><option value="3">3小时</option><option value="6">6小时</option><option value="12">12小时</option><option value="24">24小时</option><option value="168">7天</option><option value="all">全部历史</option></select></label>
+      <label>频率<select value={dense ? "all" : "clear"} disabled={range === "168"} onChange={event => setDense(event.target.value === "all")}><option value="clear">每小时 :00 / :30</option><option value="all">每5分钟</option></select></label>
       <button className={showLong ? "active" : ""} type="button" onClick={() => setShowLong(value => !value)}>看多 LONG</button>
       <button className={showShort ? "active" : ""} type="button" onClick={() => setShowShort(value => !value)}>看空 SHORT</button>
       <button className={showWait ? "active" : ""} type="button" onClick={() => setShowWait(value => !value)}>等待 WAIT</button>
       <button className={showTraining ? "active" : ""} type="button" onClick={() => setShowTraining(value => !value)}>模型换版本</button>
-      <span>显示 {decisions.length} 次{hiddenByAction > 0 ? ` · 动作筛选隐藏 ${hiddenByAction} 次` : ""}{hiddenByFrequency > 0 ? ` · 频率收起 ${hiddenByFrequency} 次` : ""}</span>
+      <span>显示 {decisions.length}{activeMarket?.decision_downsampled ? ` / 共 ${activeMarket.source_decision_count ?? decisions.length}` : ""} 次{hiddenByAction > 0 ? ` · 动作筛选隐藏 ${hiddenByAction} 次` : ""}{hiddenByFrequency > 0 ? ` · 频率收起 ${hiddenByFrequency} 次` : ""}</span>
     </div>
     <div className="market-history-nav" aria-label="历史行情翻页">
       <button type="button" disabled={!canGoEarlier} onClick={() => { if (remoteHistory) { setLaterPages(value => [...value, before]); setBefore(candles[0].time); } else setPage(value => value + 1); }} aria-label="查看更早行情">←</button>
@@ -492,7 +497,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
     {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
     <div className="mobile-chart-scroll" tabIndex={0} aria-label="可左右滑动的 XAUUSD K线图">
     <svg className="learning-svg" viewBox="0 0 960 400" role="img" aria-label="XAUUSD K线与模型决策">
-      {marketGaps.map(gap => <g key={`${gap.start}-${gap.end}`} className="market-gap"><rect x={xValue(gap.start)} y="52" width={Math.max(1, xValue(gap.end)-xValue(gap.start))} height="280" /><text x={(xValue(gap.start)+xValue(gap.end))/2} y="190" textAnchor="middle">休市 {gap.duration >= 3_600_000 ? `${Math.round(gap.duration/3_600_000)}小时` : `${Math.round(gap.duration/60_000)}分钟`}</text></g>)}
+      {marketGaps.map(gap => <g key={`${gap.start}-${gap.end}`} className="market-gap"><rect x={xValue(gap.start)} y="52" width={Math.max(1, xValue(gap.end)-xValue(gap.start))} height="280" /><text x={(xValue(gap.start)+xValue(gap.end))/2} y="190" textAnchor="middle">{gap.duration >= 45 * 60_000 ? `休市 ${Math.max(1, Math.round(gap.duration/3_600_000))}小时` : "数据缺口"}</text></g>)}
       {candles.map((row, index) => { const cx = xAtIndex(index); const width = Math.max(1.5, 650 / candles.length); const up = row.close >= row.open; return <g key={row.time}><line x1={cx} x2={cx} y1={y(row.high)} y2={y(row.low)} stroke={up ? "#476b19" : "#c9362b"} /><rect x={cx - width / 2} width={width} y={Math.min(y(row.open), y(row.close))} height={Math.max(1, Math.abs(y(row.open) - y(row.close)))} fill={up ? "#476b19" : "#c9362b"} /></g>; })}
       {selectedX != null && selectedExitX != null && <g className="selected-window"><rect x={selectedX} width={Math.max(2, selectedExitX-selectedX)} y="52" height="280" /><line x1={selectedX} x2={selectedX} y1="52" y2="332" /><line x1={selectedExitX} x2={selectedExitX} y1="52" y2="332" /><text x={selectedX+4} y="49">预测</text><text x={Math.max(selectedX+36, selectedExitX-58)} y="49">30分钟后</text></g>}
       {decisions.map(row => { const candle = byTime(row.decision_time); const cx = xTime(row.decision_time); const action = arrowAction(row); const cy = action === "WAIT" ? 34 : action === "LONG" ? y(candle.low) + 12 : y(candle.high) - 12; const color = action === "LONG" ? "#476b19" : action === "SHORT" ? "#c9362b" : "#555149"; const isSelected = activeSelected?.source_decision_id === row.source_decision_id && activeSelected?.model_identity === row.model_identity && activeSelected?.model_version === row.model_version; return <g key={`${row.source_decision_id}-${row.model_identity}-${row.model_version}`} role="button" tabIndex={0} className={`decision-marker${isSelected ? " selected" : ""}${row.policy_consistent === false ? " policy-mismatch" : ""}`} onClick={() => setSelected(row)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") setSelected(row); }}><title>{`${timeLabel(row.decision_time)} · 成本后EV较高方向 ${action} · 模型版本 ${row.model_version} · 点击查看30分钟结果`}</title>{action === "WAIT" && <circle cx={cx} cy={cy} r="10" fill="#eee9da" stroke={color} strokeWidth="1.5" />}{isSelected && <circle cx={cx} cy={cy} r="14" fill="none" stroke={color} strokeWidth="2" />}{action === "WAIT" ? <path d={`M ${cx-7} ${cy} h 14 M ${cx-7} ${cy} l 4 -4 M ${cx-7} ${cy} l 4 4 M ${cx+7} ${cy} l -4 -4 M ${cx+7} ${cy} l -4 4`} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" /> : <path d={action === "LONG" ? `M ${cx} ${cy-7} l -6 11 h 12 z` : `M ${cx} ${cy+7} l -6 -11 h 12 z`} fill={color} />}</g>; })}
