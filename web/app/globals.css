@@ -531,12 +531,14 @@ body.modal-open { overflow:hidden; }
   .version-ledger>header { grid-template-columns:1fr; align-items:start; }
   .version-ledger-controls { grid-template-columns:1fr; width:100%; }
   .version-hover-readout { grid-template-columns:1fr; gap:6px; }
-  .version-ledger>article { grid-template-columns:1fr 1fr; gap:0; min-height:0; padding:0; }
-  .version-ledger>article>.version-group { grid-column:1/-1; display:flex; align-items:center; justify-content:space-between; padding:12px 14px; background:#ded9ca; }
-  .version-ledger>article>[data-label] { min-width:0; padding:12px 14px; border-top:1px solid rgba(17,17,15,.18); }
-  .version-ledger>article>[data-label]:nth-child(even) { border-right:1px solid rgba(17,17,15,.18); }
-  .version-ledger>article>[data-label]::before { content:attr(data-label); display:block; margin-bottom:7px; color:var(--muted); font-size:9px; font-weight:900; letter-spacing:.08em; }
-  .version-ledger>article>strong[data-label] { display:block; font-size:22px; }
+  .version-ledger>article { grid-template-columns:repeat(6,minmax(0,1fr)); gap:0; min-height:0; padding:0; }
+  .version-ledger>article>.version-group { grid-column:span 3; display:flex; align-items:center; justify-content:space-between; padding:10px 12px; border-right:1px solid rgba(17,17,15,.18); background:#ded9ca; }
+  .version-ledger>article>[data-label] { min-width:0; padding:9px 10px; }
+  .version-ledger>article>[data-label]:nth-child(2) { grid-column:span 3; background:#ded9ca; }
+  .version-ledger>article>[data-label]:nth-child(n+3) { grid-column:span 2; border-top:1px solid rgba(17,17,15,.18); }
+  .version-ledger>article>[data-label]:nth-child(3),.version-ledger>article>[data-label]:nth-child(4) { border-right:1px solid rgba(17,17,15,.18); }
+  .version-ledger>article>[data-label]::before { content:attr(data-label); display:block; margin-bottom:4px; color:var(--muted); font-size:8px; font-weight:900; letter-spacing:.08em; }
+  .version-ledger>article>strong[data-label] { display:block; font-size:20px; }
   .quota-summary { grid-template-columns:1fr 1fr; }
   .quota-summary article:last-child:nth-child(odd) { grid-column:1/-1; }
   .routing-grid { grid-template-columns:1fr; }
