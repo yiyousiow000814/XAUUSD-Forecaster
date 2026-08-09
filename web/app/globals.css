@@ -413,7 +413,7 @@ body.modal-open { overflow:hidden; }
 .version-ledger>article>strong { font-family:var(--font-display); font-size:25px; }
 .version-ledger>p { padding:24px; }
 .modal-version-ledger { margin:0; border:0; }
-.modal-version-ledger>header { position:sticky; top:0; z-index:1; background:var(--paper); }
+.modal-version-ledger>header { background:var(--paper); }
 .version-ledger-title { align-self:center; min-width:0; }
 .version-ledger-controls { display:grid; grid-template-columns:minmax(210px,1.16fr) minmax(190px,1fr) minmax(180px,.9fr); align-items:end; gap:12px; min-width:0; }.version-ledger-controls label { display:grid; gap:7px; min-width:0; color:var(--muted); font-size:13px; font-weight:900; }.version-ledger-controls select { width:100%; min-width:0; min-height:48px; padding:10px 12px; font-size:15px; }
 .version-hover-chart { margin:0 20px 22px; border:1px solid rgba(17,17,15,.38); background:#eee9dc; }.version-hover-chart svg { display:block; width:100%; height:280px; }.version-hover-chart svg text { fill:var(--muted); font:11px var(--font-mono); }.version-hover-chart .zero-line { stroke:var(--ink); stroke-dasharray:5 5; opacity:.45; }.version-hover-chart .generation-axis line { stroke:rgba(17,17,15,.45); }.version-hover-chart .generation-axis text { font-weight:800; }.version-hover-chart circle { cursor:crosshair; transition:r .12s ease,stroke-width .12s ease,opacity .12s ease; }.version-hover-chart circle:hover,.version-hover-chart circle:focus { r:8; stroke-width:4; outline:none; }

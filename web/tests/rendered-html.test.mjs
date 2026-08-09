@@ -349,6 +349,7 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(css, /long-curve-block>\.learning-svg \{ height:clamp\(390px,48dvh,520px\)/);
   assert.match(css, /\.curve-navigation/);
   assert.match(css, /version-ledger-controls \{ display:grid; grid-template-columns:minmax\(210px,1\.16fr\) minmax\(190px,1fr\) minmax\(180px,\.9fr\)/);
+  assert.doesNotMatch(css, /\.modal-version-ledger>header \{[^}]*position:sticky/);
   assert.match(css, /@media \(max-width:1100px\)\{[\s\S]*?\.version-ledger>header \{ grid-template-columns:1fr/);
   assert.match(css, /long-curve-block>\.chart-legend \{ margin-top:16px; padding-bottom:10px/);
   assert.match(modal, /预测 \/ 方向/);
