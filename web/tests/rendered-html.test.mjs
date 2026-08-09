@@ -330,7 +330,7 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(page, /aria-label="向左查看更多审计视图"/);
   assert.match(page, /aria-label="向右查看更多审计视图"/);
   assert.match(css, /\.topbar \{ align-items:stretch; flex-direction:column/);
-  assert.match(css, /\.audit-tabs-shell \{ position:sticky; top:0;[\s\S]*?grid-template-columns:46px minmax\(0,1fr\) 46px/);
+  assert.match(css, /\.audit-tabs-shell \{ position:sticky; top:0;[\s\S]*?grid-template-columns:38px minmax\(0,1fr\) 38px/);
   assert.match(css, /\.audit-tabs \{ position:static; display:flex;[\s\S]*?overflow-x:auto/);
   assert.match(css, /\.graph-modal>nav \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
   assert.match(css, /\.graph-modal,\.graph-modal\.graph-modal-curve,\.graph-modal\.graph-modal-versions \{ width:100vw; height:100dvh/);
@@ -345,8 +345,14 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.summary-cadence \{ display:grid; grid-template-columns:minmax\(0,1fr\) minmax\(0,1fr\)/);
   assert.match(modal, /mobile-chart-scroll/);
   assert.match(modal, /左右滑动查看完整图表/);
+  assert.match(modal, /closeButtonRef\.current\?\.focus\(\)/);
+  assert.match(modal, /openerRef\.current\?\.focus\(\)/);
+  assert.match(modal, /event\.key !== "Tab"/);
   assert.match(css, /\.mobile-chart-scroll \{ width:100%; overflow-x:auto/);
   assert.match(css, /\.chart-block \{ overflow:visible/);
+  assert.match(css, /\.graph-modal-backdrop \{ position:fixed; inset:0; z-index:1100/);
+  assert.match(css, /\.audit-intro>div:first-child \.eyebrow \{ display:none/);
+  assert.match(css, /\.audit-intro h1 \{ font-size:clamp\(32px,9vw,38px\)/);
 });
 
 test("explains U5 as a risk scale rather than a probability", () => {
