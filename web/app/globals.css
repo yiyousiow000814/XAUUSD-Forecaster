@@ -724,6 +724,72 @@ body.modal-open { overflow:hidden; }
   .league-intro dd { text-align:left; }
   .learning-summary-grid strong { font-size:clamp(28px,9vw,34px); }
 }
+
+/* Mobile density pass: keep the audit readable without carrying desktop-sized
+   cards and repeated introductions into a narrow viewport. */
+@media (max-width:850px){
+  .audit-main .audit-intro { display:block; padding:10px 0 12px; border-bottom:0; }
+  .audit-main .audit-intro>div:first-child { display:none; }
+  .audit-main .training-card { padding:10px 12px; box-shadow:4px 4px 0 var(--ink); }
+  .audit-main .training-card-head { margin-bottom:6px; }
+  .audit-main .training-card-total { margin-bottom:7px; }
+  .audit-main .training-card-total strong { font-size:28px; }
+
+  .annotation-queue { grid-template-columns:repeat(6,minmax(0,1fr)); margin-top:12px; }
+  .annotation-queue>span { grid-column:span 2; min-height:68px; padding:9px 10px; }
+  .annotation-queue>span:nth-of-type(4),.annotation-queue>span:nth-of-type(5) { grid-column:span 3; }
+  .annotation-queue span { font-size:10px; }
+  .annotation-queue span b { font-size:23px; }
+  .annotation-queue>details { grid-column:1/-1; padding:10px 12px; }
+
+  .evidence-intro,.evidence-intro-compact { padding:15px 16px; }
+  .evidence-intro h2,.evidence-intro-compact h2 { font-size:30px; line-height:1.02; }
+  .evidence-intro-compact div>p:last-child { margin-top:6px; font-size:11px; }
+  .evidence-summary { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .evidence-summary article { min-height:82px; padding:11px 10px; }
+  .evidence-summary span { font-size:10px; line-height:1.35; }
+  .evidence-summary strong { margin-top:6px; font-size:27px; }
+  .evidence-summary small { display:none; }
+
+  .theme-streams { padding:14px; }
+  .theme-streams>header { align-items:center; margin-bottom:9px; }
+  .theme-streams h3 { font-size:23px; }
+  .theme-streams>header span { font-size:10px; }
+  .theme-streams>div { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+  .theme-streams article { padding:10px; }
+  .theme-streams article strong { font-size:21px; }
+  .theme-streams article span { display:none; }
+  .theme-streams article small { font-size:10px; }
+  .unassigned-story-events>div { padding:9px 11px; }
+  .unassigned-story-events>div small { font-size:10px; }
+
+  .league-intro { gap:12px; padding:15px 16px; }
+  .league-intro h2 { font-size:28px; line-height:1.02; }
+  .league-intro dl div { grid-template-columns:110px minmax(0,1fr); gap:10px; padding:8px 10px; }
+  .league-intro dt,.league-intro dd { font-size:10px; }
+  .learning-summary-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .learning-summary-grid article { min-height:100px; padding:14px; }
+  .learning-summary-grid span,.learning-summary-grid small { font-size:10px; }
+  .learning-summary-grid strong { margin:8px 0 5px; overflow-wrap:anywhere; white-space:normal; font-size:clamp(20px,6.2vw,27px); line-height:1.05; }
+
+  .coverage-card { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:0 12px; min-height:0; padding:13px 15px 13px 19px; }
+  .coverage-card>div { grid-column:1/-1; }
+  .coverage-card h2 { grid-column:1; grid-row:2; align-self:end; margin:9px 0 0; font-size:28px; line-height:1; }
+  .coverage-card p { grid-column:1/-1; grid-row:3; min-height:0; margin:6px 0 0; font-size:11px; line-height:1.4; }
+  .coverage-value { grid-column:2; grid-row:2; align-self:end; margin:9px 0 0; font-size:22px; white-space:nowrap; }
+  .coverage-card>small { grid-column:1/-1; grid-row:4; margin-top:6px; font-size:10px; line-height:1.35; }
+
+  .quota-summary { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .quota-summary article { grid-column:auto; min-height:88px; padding:11px 12px; }
+  .quota-summary article:last-child:nth-child(odd) { grid-column:1/-1; }
+  .quota-summary strong { margin:5px 0 3px; font-size:25px; }
+  .quota-summary span,.quota-summary small { font-size:10px; line-height:1.35; }
+}
+
+@media (max-width:430px){
+  .league-intro dl div { grid-template-columns:110px minmax(0,1fr); gap:8px; }
+  .league-intro dd { text-align:right; overflow-wrap:anywhere; }
+}
 /* Branch previews use an immutable build-time snapshot and must never look live. */
 .preview-banner{position:sticky;top:0;z-index:1000;display:flex;align-items:center;justify-content:center;gap:14px;padding:8px 16px;background:var(--acid);border-bottom:1px solid var(--ink);color:var(--ink);font-size:12px;letter-spacing:.03em}
 .preview-banner strong{font-size:13px}.preview-banner code{font-size:11px}
