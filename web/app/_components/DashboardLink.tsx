@@ -22,9 +22,9 @@ export default function DashboardLink({ children, className, href, replace = fal
   const navigate = (event: MouseEvent<HTMLAnchorElement>) => {
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
-    setNavigating(true);
     if (replace) router.replace(href);
     else router.push(href);
+    setNavigating(true);
   };
 
   return <a
