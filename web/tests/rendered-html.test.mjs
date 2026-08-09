@@ -261,7 +261,8 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /模型当时尚未开始预测/);
   assert.match(modal, /这段时间没有预测/);
   assert.match(modal, /marketGaps/);
-  assert.match(modal, /休市 \{gap\.duration/);
+  assert.match(modal, /"数据缺口"/);
+  assert.match(modal, /gap\.duration >= 45 \* 60_000/);
   assert.match(modal, /历史＋实时成熟 OOS（只追加，不重写）/);
   assert.match(modal, /24小时/);
   assert.match(modal, /7天/);
@@ -420,6 +421,9 @@ test("loads market history by bounded range instead of one growing snapshot", ()
   assert.match(modal, /query\.set\("before", before\)/);
   assert.match(modal, /setBefore\(candles\[0\]\.time\)/);
   assert.match(route, /OVERVIEW_POINTS = 480/);
+  assert.match(route, /OVERVIEW_DECISIONS = 480/);
+  assert.match(route, /source_decision_count/);
+  assert.match(route, /decision_downsampled/);
   assert.match(route, /WHERE time_epoch>=\? AND time_epoch<\?/);
   assert.match(route, /ON CONFLICT\(decision_key\) DO UPDATE/);
   assert.match(route, /MAX_INGEST_BYTES = 400_000/);

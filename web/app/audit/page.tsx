@@ -357,6 +357,8 @@ type Payload = {
     source_candle_count?: number;
     overview_downsampled?: boolean;
     prediction_history_start?: Record<string, string>;
+    source_decision_count?: number;
+    decision_downsampled?: boolean;
   };
 };
 

@@ -24,6 +24,7 @@ type HistoryMeta = { count: number; start_epoch: number; end_epoch: number };
 const MAX_INGEST_BYTES = 400_000;
 const MAX_BATCH_STATEMENTS = 50;
 const OVERVIEW_POINTS = 480;
+const OVERVIEW_DECISIONS = 480;
 const RANGE_SECONDS: Record<string, number> = {
   "3": 3 * 3_600, "6": 6 * 3_600, "12": 12 * 3_600,
   "24": 24 * 3_600, "168": 7 * 86_400,
@@ -66,6 +67,12 @@ function downsample(rows: Candle[], limit = OVERVIEW_POINTS): Candle[] {
   return result;
 }
 
+function sampleDecisions(rows: Decision[], limit = OVERVIEW_DECISIONS): Decision[] {
+  if (rows.length <= limit) return rows;
+  const stride = Math.ceil(rows.length / limit);
+  return rows.filter((_, index) => index % stride === 0).slice(0, limit);
+}
+
 function previewHistory(request: Request) {
   const source = previewBundle!.market_chart as MarketSnapshot;
   const url = new URL(request.url);
@@ -76,8 +83,17 @@ function previewHistory(request: Request) {
   if (range === "all") {
     const candles = source.overview_candles?.length
       ? source.overview_candles : downsample(detail);
+    const allDecisions = (source.decisions ?? []).filter(row => {
+      const minute = new Date(row.decision_time).getUTCMinutes();
+      return row.model_identity === identity
+        && (frequency === "5m" || minute % 30 === 0);
+    });
     return previewJson({
-      ...source, candles, overview_candles: [], decisions: [], mode: "overview",
+      ...source, candles, overview_candles: [],
+      decisions: sampleDecisions(allDecisions),
+      source_decision_count: allDecisions.length,
+      decision_downsampled: allDecisions.length > OVERVIEW_DECISIONS,
+      mode: "overview",
       page: { has_earlier: false, has_later: false }, preview_limited: true,
     });
   }
@@ -161,6 +177,30 @@ async function overview(binding: D1Database, meta: HistoryMeta) {
   return rows.results.map(compactCandle);
 }
 
+async function overviewDecisions(
+  binding: D1Database, identity: string, frequency: "5m" | "30m",
+) {
+  const frequencyClause = frequency === "30m" ? "AND decision_epoch % 1800 = 0" : "";
+  const countRow = await binding.prepare(
+    `SELECT count(*) count FROM market_decisions
+     WHERE model_identity=? ${frequencyClause}`,
+  ).bind(identity).first<{ count: number }>();
+  const count = Number(countRow?.count ?? 0);
+  const stride = Math.max(1, Math.ceil(count / OVERVIEW_DECISIONS));
+  const result = await binding.prepare(
+    `WITH ordered AS (
+       SELECT payload,row_number() OVER (ORDER BY decision_epoch) sequence
+       FROM market_decisions WHERE model_identity=? ${frequencyClause}
+     )
+     SELECT payload FROM ordered WHERE (sequence-1) % ? = 0
+     ORDER BY sequence LIMIT ?`,
+  ).bind(identity, stride, OVERVIEW_DECISIONS).all<{ payload: string }>();
+  return {
+    decisions: result.results.map(row => JSON.parse(row.payload)),
+    sourceDecisionCount: count,
+  };
+}
+
 export async function GET(request: Request) {
   if (previewBundle) return previewHistory(request);
   const binding = env.DB as D1Database | undefined;
@@ -178,8 +218,13 @@ export async function GET(request: Request) {
     const historyStart = new Date(meta.start_epoch * 1_000).toISOString();
     const historyEnd = new Date(meta.end_epoch * 1_000).toISOString();
     if (range === "all") {
+      const decisionOverview = await overviewDecisions(binding, identity, frequency);
       return NextResponse.json({
-        candles: await overview(binding, meta), decisions: [], training_markers: [],
+        candles: await overview(binding, meta),
+        decisions: decisionOverview.decisions,
+        source_decision_count: decisionOverview.sourceDecisionCount,
+        decision_downsampled: decisionOverview.sourceDecisionCount > OVERVIEW_DECISIONS,
+        training_markers: [],
         mode: "overview", history_start: historyStart, history_end: historyEnd,
         source_candle_count: meta.count, overview_downsampled: meta.count > OVERVIEW_POINTS,
         page: { has_earlier: false, has_later: false },
