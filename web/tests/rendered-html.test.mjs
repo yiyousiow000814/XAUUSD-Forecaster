@@ -254,6 +254,14 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /较高的一边只要大于0就记录为 Shadow 方向/);
   assert.match(modal, /return bestEv > 0 \? bestAction : "WAIT"/);
   assert.match(modal, /每根K线5分钟 · 每个箭头预测未来30分钟/);
+  assert.match(modal, /全部历史/);
+  assert.match(modal, /查看更早行情/);
+  assert.match(modal, /查看较新行情/);
+  assert.match(modal, /还没有保存过可绘制的 Bid\/Ask 行情/);
+  assert.match(modal, /模型当时尚未开始预测/);
+  assert.match(modal, /这段时间没有预测/);
+  assert.match(modal, /marketGaps/);
+  assert.match(modal, /休市 \{gap\.duration/);
   assert.match(modal, /历史＋实时成熟 OOS（只追加，不重写）/);
   assert.match(modal, /24小时/);
   assert.match(modal, /7天/);

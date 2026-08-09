@@ -8,6 +8,7 @@ import copy
 import hashlib
 import http.client
 import json
+import math
 import os
 import time
 import urllib.error
@@ -42,6 +43,8 @@ REMOTE_CURVE_POINT_LIMITS = (480, 360, 240, 160, 120, 80, 40, 20)
 REMOTE_DETAIL_LIMITS = (240, 160, 120, 80, 40, 20)
 REMOTE_EXECUTION_RESULT_LIMIT = 100
 REMOTE_MARKET_DECISION_LIMIT = 288 * 5
+REMOTE_MARKET_DENSE_LIMITS = (1440, 1152, 864, 576, 288, 0)
+REMOTE_MARKET_OVERVIEW_LIMITS = (480, 240, 120, 80, 40)
 
 NEWS_INDEX_FIELDS = (
     "category", "source", "source_item_id", "revision_number",
@@ -234,9 +237,60 @@ def _compact_learning_payload(
     }
 
 
-def compact_market_chart(payload: dict) -> dict:
-    """Keep one complete 24-hour decision window in its own mirror payload."""
+def _is_half_hour_decision(row: dict) -> bool:
+    try:
+        clock = str(row.get("decision_time") or "").split("T", 1)[1]
+        return int(clock.split(":", 2)[1]) in (0, 30)
+    except (IndexError, TypeError, ValueError):
+        return False
+
+
+def _decision_key(row: dict) -> tuple[str, str, str]:
+    return (
+        str(row.get("source_decision_id") or ""),
+        str(row.get("model_identity") or ""),
+        str(row.get("model_version") or ""),
+    )
+
+
+def _downsample_market_overview(rows: list[dict], limit: int) -> list[dict]:
+    if len(rows) <= limit:
+        return rows
+    chunk_size = math.ceil(len(rows) / limit)
+    compacted = []
+    for start in range(0, len(rows), chunk_size):
+        chunk = rows[start:start + chunk_size]
+        compacted.append({
+            "time": chunk[0]["time"], "open": chunk[0]["open"],
+            "high": max(row["high"] for row in chunk),
+            "low": min(row["low"] for row in chunk),
+            "close": chunk[-1]["close"],
+            "source_candles": sum(int(row.get("source_candles") or 1) for row in chunk),
+        })
+    return compacted
+
+
+def compact_market_chart(
+    payload: dict,
+    dense_limit: int = REMOTE_MARKET_DECISION_LIMIT,
+    overview_limit: int = REMOTE_MARKET_OVERVIEW_LIMITS[0],
+) -> dict:
+    """Keep all half-hour evidence plus a bounded recent five-minute window."""
     market = copy.deepcopy(payload.get("market_chart") or {})
+    for candle_key in ("candles", "overview_candles"):
+        compact_candles = []
+        source_rows = market.get(candle_key, [])
+        if candle_key == "overview_candles":
+            source_rows = _downsample_market_overview(source_rows, overview_limit)
+        for row in source_rows:
+            compact = {key: value for key, value in row.items() if key != "ticks"}
+            if str(compact.get("time") or "").endswith("+00:00"):
+                compact["time"] = str(compact["time"])[:-6] + "Z"
+            for key in ("open", "high", "low", "close"):
+                if compact.get(key) is not None:
+                    compact[key] = round(float(compact[key]), 3)
+            compact_candles.append(compact)
+        market[candle_key] = compact_candles
     compact_decisions = []
     for row in market.get("decisions", []):
         compact = {
@@ -249,6 +303,8 @@ def compact_market_chart(payload: dict) -> dict:
                 compact[key] = round(float(compact[key]), 6)
         if row.get("model_version"):
             compact["model_version"] = str(row["model_version"])[-12:]
+        if str(compact.get("decision_time") or "").endswith("+00:00"):
+            compact["decision_time"] = str(compact["decision_time"])[:-6] + "Z"
         if row.get("prediction_status") != "PROVISIONAL_POST_COST_EV":
             compact["prediction_status"] = row.get("prediction_status")
         if row.get("outcome_reason_codes"):
@@ -257,21 +313,32 @@ def compact_market_chart(payload: dict) -> dict:
     compact_decisions.sort(key=lambda row: (
         row.get("decision_time") or "", row.get("model_identity") or ""
     ))
-    market["decisions"] = compact_decisions[-REMOTE_MARKET_DECISION_LIMIT:]
+    half_hour = [row for row in compact_decisions if _is_half_hour_decision(row)]
+    retained = {_decision_key(row): row for row in half_hour}
+    if dense_limit:
+        for row in compact_decisions[-dense_limit:]:
+            retained[_decision_key(row)] = row
+    market["decisions"] = sorted(retained.values(), key=lambda row: (
+        row.get("decision_time") or "", row.get("model_identity") or ""
+    ))
     return market
 
 
 def market_chart_snapshot(payload: dict) -> bytes:
-    encoded = json.dumps(
-        compact_market_chart(payload), ensure_ascii=False, allow_nan=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    if len(encoded) > REMOTE_PAYLOAD_LIMIT_BYTES:
-        raise ValueError(
-            f"market chart payload is {len(encoded)} bytes "
-            f"(limit {REMOTE_PAYLOAD_LIMIT_BYTES})"
-        )
-    return encoded
+    last_size = 0
+    for dense_limit in REMOTE_MARKET_DENSE_LIMITS:
+        for overview_limit in REMOTE_MARKET_OVERVIEW_LIMITS:
+            encoded = json.dumps(
+                compact_market_chart(payload, dense_limit, overview_limit),
+                ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+            ).encode("utf-8")
+            last_size = len(encoded)
+            if last_size <= REMOTE_PAYLOAD_LIMIT_BYTES:
+                return encoded
+    raise ValueError(
+        f"half-hour market chart payload is {last_size} bytes "
+        f"(limit {REMOTE_PAYLOAD_LIMIT_BYTES})"
+    )
 
 
 def learning_snapshot(payload: dict) -> bytes:

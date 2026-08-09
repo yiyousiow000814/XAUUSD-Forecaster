@@ -4,7 +4,7 @@ import importlib.util
 import io
 import json
 import urllib.error
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -443,18 +443,93 @@ def test_remote_market_chart_is_split_from_status_and_keeps_complete_window() ->
         "ev_short_u5": 0.1,
     } for index in range(module.REMOTE_MARKET_DECISION_LIMIT + 20)]
     payload = {
-        "market_chart": {"decisions": list(reversed(decisions))},
+        "market_chart": {
+            "decisions": list(reversed(decisions)),
+            "candles": [{"time": "2026-08-05T00:00:00+00:00", "open": 1.1234567, "high": 2, "low": 0, "close": 1.5, "ticks": 8}],
+            "history_start": "2026-08-05T00:00:00+00:00",
+            "history_end": "2026-08-07T20:55:00+00:00",
+            "source_candle_count": 736,
+        },
     }
     mirrored = json.loads(module.remote_snapshot(payload))
     assert mirrored["market_chart"]["decisions"] == []
     assert mirrored["market_chart"]["decision_resource"] == "/api/market-chart"
 
-    retained = json.loads(module.market_chart_snapshot(payload))["decisions"]
-    assert len(retained) == module.REMOTE_MARKET_DECISION_LIMIT
-    assert retained[0]["source_decision_id"] == "d-20"
+    market = json.loads(module.market_chart_snapshot(payload))
+    retained = market["decisions"]
+    assert len(retained) == module.REMOTE_MARKET_DECISION_LIMIT + 1
+    assert retained[0]["source_decision_id"] == "d-0"
+    assert all(row["source_decision_id"] != "d-1" for row in retained)
     assert retained[-1]["source_decision_id"] == f"d-{len(decisions) - 1}"
-    assert "exit_time" not in retained[0]
-    assert retained[0]["model_version"] == "model-20"
+    assert "exit_time" not in retained[1]
+    assert retained[1]["model_version"] == "model-20"
+    assert len(market["candles"]) == 1
+    assert market["candles"][0]["open"] == 1.123
+    assert market["candles"][0]["time"] == "2026-08-05T00:00:00Z"
+    assert "ticks" not in market["candles"][0]
+    assert market["history_end"] == "2026-08-07T20:55:00+00:00"
+    assert market["source_candle_count"] == 736
+
+
+def test_seven_day_market_snapshot_keeps_every_half_hour_under_limit() -> None:
+    module = _sync_module()
+    start = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    identities = ("MARKET_ONLY", "NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL")
+    candles = []
+    decisions = []
+    for index in range(7 * 288):
+        decision_time = (start + timedelta(minutes=5 * index)).isoformat()
+        candles.append({
+            "time": decision_time, "open": 4300.123456, "high": 4301.123456,
+            "low": 4299.123456, "close": 4300.623456, "ticks": 100,
+        })
+        decisions.extend({
+            "source_decision_id": f"d-{index}", "decision_time": decision_time,
+            "model_identity": identity, "model_version": "model-version-long",
+            "recommended_action": "LONG", "outcome_status": "VALID",
+            "ev_long_u5": 0.123456789, "ev_short_u5": -0.123456789,
+            "long_quote_return": 0.00123456789,
+            "short_quote_return": -0.00123456789,
+        } for identity in identities)
+
+    encoded = module.market_chart_snapshot({
+        "market_chart": {
+            "candles": candles, "overview_candles": candles[::4][:480],
+            "decisions": decisions,
+            "prediction_history_start": {
+                identity: start.isoformat() for identity in identities
+            },
+        },
+    })
+    market = json.loads(encoded)
+
+    assert len(encoded) <= module.REMOTE_PAYLOAD_LIMIT_BYTES
+    assert len(market["candles"]) == 7 * 288
+    assert 0 < len(market["overview_candles"]) < 480
+    retained_half_hours = {
+        row["decision_time"] for row in market["decisions"]
+        if row["model_identity"] == "MARKET_ONLY" and row["decision_time"][14:16] in ("00", "30")
+    }
+    assert len(retained_half_hours) == 7 * 48
+    assert min(retained_half_hours) == "2026-08-01T00:00:00Z"
+    assert max(retained_half_hours) == "2026-08-07T23:30:00Z"
+
+
+def test_market_overview_downsampling_preserves_ohlc_extremes() -> None:
+    module = _sync_module()
+    rows = [{
+        "time": f"t-{index}", "open": float(index), "high": float(index + 2),
+        "low": float(index - 2), "close": float(index + 0.5),
+        "source_candles": 2,
+    } for index in range(6)]
+
+    compact = module._downsample_market_overview(rows, 2)
+
+    assert len(compact) == 2
+    assert compact[0] == {
+        "time": "t-0", "open": 0.0, "high": 4.0, "low": -2.0,
+        "close": 2.5, "source_candles": 6,
+    }
 
 
 def test_curve_compaction_preserves_extremes_and_version_boundaries() -> None:
