@@ -261,7 +261,8 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /模型当时尚未开始预测/);
   assert.match(modal, /这段时间没有预测/);
   assert.match(modal, /marketGaps/);
-  assert.match(modal, /休市 \{gap\.duration/);
+  assert.match(modal, /"数据缺口"/);
+  assert.match(modal, /gap\.duration >= 45 \* 60_000/);
   assert.match(modal, /历史＋实时成熟 OOS（只追加，不重写）/);
   assert.match(modal, /24小时/);
   assert.match(modal, /7天/);
@@ -363,6 +364,8 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(modal, /openerRef\.current\?\.focus\(\)/);
   assert.match(modal, /event\.key !== "Tab"/);
   assert.match(css, /\.mobile-chart-scroll \{ width:100%; overflow-x:auto/);
+  assert.match(css, /\.market-history-nav \{[^}]*margin:10px 0 0;[^}]*border:1px solid/);
+  assert.match(css, /\.prediction-counts \{[^}]*border-top:0/);
   assert.match(css, /\.chart-block \{ overflow:visible/);
   assert.match(css, /\.graph-modal-backdrop \{ position:fixed; inset:0; z-index:1100/);
   assert.match(css, /\.audit-intro>div:first-child \.eyebrow \{ display:none/);
@@ -411,4 +414,23 @@ test("does not turn a locally offline collector back online", () => {
     system: { online: false, quote_age_seconds: 1 },
   });
   assert.equal(payload.system.online, false);
+});
+
+test("loads market history by bounded range instead of one growing snapshot", () => {
+  const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
+  const route = readFileSync(new URL("../app/api/market-history/route.ts", import.meta.url), "utf8");
+  assert.match(modal, /history_resource/);
+  assert.match(modal, /query\.set\("before", before\)/);
+  assert.match(modal, /setBefore\(candles\[0\]\.time\)/);
+  assert.match(route, /OVERVIEW_POINTS = 480/);
+  assert.match(route, /OVERVIEW_DECISIONS = 480/);
+  assert.match(route, /source_decision_count/);
+  assert.match(route, /decision_downsampled/);
+  assert.match(route, /WHERE time_epoch>=\? AND time_epoch<\?/);
+  assert.match(route, /ON CONFLICT\(decision_key\) DO UPDATE/);
+  assert.match(route, /MAX_INGEST_BYTES = 400_000/);
+  assert.match(route, /ORDER BY decision_epoch,decision_key/);
+  assert.match(modal, /cancelled = true; controller\.abort\(\)/);
+  assert.match(modal, /!detailCandles\.length && !canGoLater/);
+  assert.match(modal, /onClick=\{goLater\}>→ 返回较新行情/);
 });
