@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, type MouseEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type MouseEvent, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 
 type DashboardLinkProps = {
@@ -12,6 +12,7 @@ type DashboardLinkProps = {
 
 export default function DashboardLink({ children, className, href, replace = false }: DashboardLinkProps) {
   const router = useRouter();
+  const [navigating, setNavigating] = useState(false);
   const prefetch = useCallback(() => router.prefetch(href), [href, router]);
 
   useEffect(() => {
@@ -21,11 +22,19 @@ export default function DashboardLink({ children, className, href, replace = fal
   const navigate = (event: MouseEvent<HTMLAnchorElement>) => {
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
+    setNavigating(true);
     if (replace) router.replace(href);
     else router.push(href);
   };
 
-  return <a className={className} href={href} onClick={navigate} onFocus={prefetch} onPointerEnter={prefetch}>
+  return <a
+    aria-busy={navigating || undefined}
+    className={[className, navigating ? "is-navigating" : ""].filter(Boolean).join(" ")}
+    href={href}
+    onClick={navigate}
+    onFocus={prefetch}
+    onPointerEnter={prefetch}
+  >
     {children}
   </a>;
 }

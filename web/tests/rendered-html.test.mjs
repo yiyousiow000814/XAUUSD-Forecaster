@@ -159,6 +159,7 @@ test("renders the news and decision audit route", async () => {
 test("prefetches dashboard routes and reuses client data between pages", () => {
   const cache = readFileSync(new URL("../app/_lib/dashboard-resource.ts", import.meta.url), "utf8");
   const link = readFileSync(new URL("../app/_components/DashboardLink.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   for (const path of ["../app/page.tsx", "../app/audit/page.tsx", "../app/status/page.tsx", "../app/health/page.tsx"]) {
     const source = readFileSync(new URL(path, import.meta.url), "utf8");
     assert.match(source, /DashboardLink/);
@@ -170,6 +171,9 @@ test("prefetches dashboard routes and reuses client data between pages", () => {
   assert.match(link, /router\.push\(href\)/);
   assert.match(link, /router\.replace\(href\)/);
   assert.match(link, /href=\{href\}/);
+  assert.match(link, /aria-busy=\{navigating/);
+  assert.match(css, /\.audit-link\.is-navigating::after/);
+  assert.match(css, /prefers-reduced-motion:reduce/);
   assert.match(cache, /const resources = new Map/);
   assert.match(cache, /if \(!options\.force && isFresh\)/);
   assert.match(cache, /if \(entry\.pending\)/);

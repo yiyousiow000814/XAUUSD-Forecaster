@@ -11,7 +11,10 @@ main { min-height:100vh; position:relative; overflow:hidden; padding:24px 3vw 18
 .topbar { display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--ink); padding-bottom:18px; position:relative; z-index:1; }
 .top-actions { display:flex; align-items:center; gap:12px; }.audit-link { display:inline-flex; align-items:center; gap:14px; min-height:44px; border:2px solid var(--ink); padding:10px 15px; background:var(--paper); font-size:14px; font-weight:700; letter-spacing:.04em; text-decoration:none; position:relative; z-index:5; cursor:pointer; }.audit-link:hover,.audit-link:focus-visible { background:var(--ink); color:var(--paper); outline:3px solid var(--acid); outline-offset:2px; }
 .brand { display:flex; align-items:center; gap:12px; }
-.brand-button { border:0; background:transparent; padding:0; text-align:left; cursor:pointer; }
+.brand-button { border:0; background:transparent; padding:0; text-align:left; cursor:pointer; position:relative; }
+.audit-link.is-navigating::after,.brand-button.is-navigating::after { content:""; position:absolute; left:0; bottom:-5px; width:42%; height:3px; background:var(--acid); animation:nav-progress .7s ease-in-out infinite alternate; pointer-events:none; }
+@keyframes nav-progress { from { transform:translateX(0); } to { transform:translateX(138%); } }
+@media (prefers-reduced-motion:reduce) { .audit-link.is-navigating::after,.brand-button.is-navigating::after { width:100%; animation:none; } }
 .brand-mark { width:46px; height:46px; display:grid; place-items:center; border-radius:50%; background:var(--ink); color:var(--paper); font-family:var(--font-display); font-size:23px; }
 .brand strong,.brand small { display:block; }.brand strong { text-transform:uppercase; letter-spacing:.08em; font-size:13px; }.brand small { color:var(--muted); font-size:10px; margin-top:4px; }
 .live-pill { display:flex; gap:9px; align-items:center; border:1px solid var(--ink); border-radius:999px; padding:8px 13px; font-size:11px; letter-spacing:.12em; }
