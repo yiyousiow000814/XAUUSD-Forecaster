@@ -333,8 +333,8 @@ type Payload = {
     unit?: string | null;
   }>;
   market_chart: {
-    candles: Array<{ time: string; open: number; high: number; low: number; close: number; ticks: number }>;
-    overview_candles?: Array<{ time: string; open: number; high: number; low: number; close: number; ticks: number }>;
+    candles: Array<{ time: string; open: number; high: number; low: number; close: number; ticks?: number }>;
+    overview_candles?: Array<{ time: string; open: number; high: number; low: number; close: number; ticks?: number }>;
     decisions: Array<{
       source_decision_id: string;
       decision_time: string;
@@ -355,6 +355,7 @@ type Payload = {
     detail_start?: string | null;
     source_candle_count?: number;
     overview_downsampled?: boolean;
+    prediction_history_start?: Record<string, string>;
   };
 };
 

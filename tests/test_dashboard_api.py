@@ -564,6 +564,7 @@ def test_market_chart_keeps_last_session_on_weekend_and_reads_gzip(tmp_path) -> 
     assert payload["history_end"] == "2026-08-07T20:55:00+00:00"
     assert payload["source_candle_count"] == 1
     assert payload["overview_downsampled"] is False
+    assert payload["prediction_history_start"] == {}
 
 
 def test_market_chart_overview_preserves_ohlc_extremes() -> None:

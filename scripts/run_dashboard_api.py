@@ -671,6 +671,15 @@ def _recent_market_chart(
            ORDER BY created_at,model_identity""",
         (first_time,),
     ).fetchall()
+    prediction_history_start: dict[str, str] = {}
+    for row in decisions:
+        identity = str(row.get("model_identity") or "")
+        decision_time = str(row.get("decision_time") or "")
+        if identity and decision_time and (
+            identity not in prediction_history_start
+            or decision_time < prediction_history_start[identity]
+        ):
+            prediction_history_start[identity] = decision_time
     return {
         "window_hours": None,
         "candle_minutes": 5,
@@ -681,6 +690,7 @@ def _recent_market_chart(
         "detail_start": candles[0]["time"] if candles else None,
         "source_candle_count": len(history),
         "overview_downsampled": bool(overview_candles),
+        "prediction_history_start": prediction_history_start,
         "decisions": [dict(row) for row in decisions],
         "training_markers": [dict(row) for row in marker_rows],
     }
