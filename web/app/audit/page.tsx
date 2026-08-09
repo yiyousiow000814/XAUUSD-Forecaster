@@ -350,6 +350,7 @@ type Payload = {
     }>;
     training_markers: Array<{ model_identity: string; training_dataset_hash: string; created_at: string; training_rows: number; artifact_count: number }>;
     decision_resource?: string;
+    history_resource?: string;
     history_start?: string | null;
     history_end?: string | null;
     detail_start?: string | null;

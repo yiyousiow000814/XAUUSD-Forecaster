@@ -8,10 +8,12 @@ type Curve = { model_identity: string; source_point_count?: number; chart_point_
 type Candle = { time: string; open: number; high: number; low: number; close: number; ticks?: number };
 type MarketData = {
   candles: Candle[]; overview_candles?: Candle[]; decisions: Decision[];
-  training_markers: TrainingMarker[]; decision_resource?: string;
+  training_markers: TrainingMarker[]; decision_resource?: string; history_resource?: string;
   history_start?: string | null; history_end?: string | null; detail_start?: string | null;
   source_candle_count?: number; overview_downsampled?: boolean;
   prediction_history_start?: Record<string, string>;
+  mode?: "detail" | "overview"; preview_limited?: boolean;
+  page?: { start?: string; end?: string; has_earlier: boolean; has_later: boolean };
 };
 type Decision = {
   source_decision_id: string; decision_time: string; exit_time?: string;
@@ -114,7 +116,7 @@ export default function LearningGraphModal({
     };
   }, [open]);
   useEffect(() => {
-    if (!open || !market?.decision_resource) return;
+    if (!open || !market?.decision_resource || market.history_resource) return;
     let cancelled = false;
     fetch(market.decision_resource, { cache: "no-store" })
       .then(response => {
@@ -373,25 +375,51 @@ function LongCurve({ curves }: { curves: Curve[] }) {
 function MarketChart({ market, identity, setIdentity }: { market?: MarketData; identity: string; setIdentity: (value: string) => void }) {
   const [range, setRange] = useState("24");
   const [page, setPage] = useState(0);
+  const [before, setBefore] = useState<string | null>(null);
+  const [laterPages, setLaterPages] = useState<Array<string | null>>([]);
+  const [historyMarket, setHistoryMarket] = useState<MarketData>();
   const [showLong, setShowLong] = useState(true);
   const [showShort, setShowShort] = useState(true);
   const [showWait, setShowWait] = useState(true);
   const [dense, setDense] = useState(false);
   const [showTraining, setShowTraining] = useState(false);
   const [selected, setSelected] = useState<Decision | null>(null);
-  const detailCandles = market?.candles ?? [];
-  const allCandles = range === "all" && market?.overview_candles?.length ? market.overview_candles : detailCandles;
+  useEffect(() => {
+    if (!market?.history_resource) return;
+    const query = new URLSearchParams({
+      range, identity, frequency: dense ? "5m" : "30m",
+    });
+    if (before && range !== "all") query.set("before", before);
+    const controller = new AbortController();
+    fetch(`${market.history_resource}?${query}`, { cache: "no-store", signal: controller.signal })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(body => setHistoryMarket({
+        ...body,
+        training_markers: market.training_markers ?? [],
+        prediction_history_start: market.prediction_history_start,
+        history_resource: market.history_resource,
+      }))
+      .catch(() => { /* Keep the last successful page or bundled fallback visible. */ })
+    return () => controller.abort();
+  }, [market, range, identity, dense, before]);
+  const activeMarket = historyMarket ?? market;
+  const remoteHistory = Boolean(market?.history_resource);
+  const detailCandles = activeMarket?.candles ?? [];
+  const allCandles = range === "all" && activeMarket?.overview_candles?.length ? activeMarket.overview_candles : detailCandles;
   const candleCount = range === "all" ? allCandles.length : Number(range) * 12;
   const pageEndIndex = range === "all" ? allCandles.length : Math.max(0, detailCandles.length - page * candleCount);
   const pageStartIndex = range === "all" ? 0 : Math.max(0, pageEndIndex - candleCount);
   const candles = range === "all" ? allCandles : detailCandles.slice(pageStartIndex, pageEndIndex);
   const pageEnd = candles.length ? Date.parse(candles.at(-1)!.time) + 300_000 : 0;
   const cutoff = candles.length ? Date.parse(candles[0].time) : 0;
-  const canGoEarlier = range !== "all" && pageStartIndex > 0;
-  const canGoLater = range !== "all" && page > 0;
-  const scopedDecisions = useMemo(() => (market?.decisions ?? []).filter(row =>
+  const canGoEarlier = range !== "all" && (remoteHistory ? Boolean(activeMarket?.page?.has_earlier) : pageStartIndex > 0);
+  const canGoLater = range !== "all" && (remoteHistory ? laterPages.length > 0 : page > 0);
+  const scopedDecisions = useMemo(() => (activeMarket?.decisions ?? []).filter(row =>
     row.model_identity === identity && Date.parse(row.decision_time) >= cutoff && Date.parse(row.decision_time) < pageEnd
-  ), [market, identity, cutoff, pageEnd]);
+  ), [activeMarket, identity, cutoff, pageEnd]);
   const arrowAction = (row: Decision) => {
     if (row.ev_long_u5 == null || row.ev_short_u5 == null || row.ev_long_u5 === row.ev_short_u5) return "WAIT";
     const bestAction = row.ev_long_u5 > row.ev_short_u5 ? "LONG" : "SHORT";
@@ -427,7 +455,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
   const hiddenByAction = scopedDecisions.length - candidateDecisions.length;
   const hiddenByFrequency = candidateDecisions.length - decisions.length;
   const counts = decisions.reduce((total, row) => ({ ...total, [arrowAction(row)]: total[arrowAction(row)] + 1 }), { LONG: 0, SHORT: 0, WAIT: 0 } as Record<string, number>);
-  const predictionStart = market?.prediction_history_start?.[identity];
+  const predictionStart = activeMarket?.prediction_history_start?.[identity];
   const predictionAvailability = predictionStart && pageEnd <= Date.parse(predictionStart)
     ? "模型当时尚未开始预测"
     : "这段时间没有预测";
@@ -444,8 +472,8 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
   return <div className="chart-block market-chart-block">
     <div className="chart-caption"><div><b>每根K线5分钟 · 每个箭头预测未来30分钟</b><span>绿色向上、红色向下、灰色双向代表 WAIT。新闻残差只表示新闻对黄金基线的修正量；完整方向请看“黄金＋新闻”。</span></div><select value={identity} onChange={event => { setIdentity(event.target.value); setSelected(null); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key, label]) => <option key={key} value={key}>{label}{key.includes("RESIDUAL") ? "（修正量）" : ""}</option>)}</select></div>
     <div className="market-controls" aria-label="K线图显示控制">
-      <label>时间<select value={range} onChange={event => { setRange(event.target.value); setPage(0); }}><option value="3">3小时</option><option value="6">6小时</option><option value="12">12小时</option><option value="24">24小时</option><option value="168">7天</option><option value="all">全部历史</option></select></label>
-      <label>频率<select value={dense ? "all" : "clear"} onChange={event => setDense(event.target.value === "all")}><option value="clear">每小时 :00 / :30</option><option value="all">每5分钟</option></select></label>
+      <label>时间<select value={range} onChange={event => { setRange(event.target.value); setPage(0); setBefore(null); setLaterPages([]); setSelected(null); if (event.target.value === "168" || event.target.value === "all") setDense(false); }}><option value="3">3小时</option><option value="6">6小时</option><option value="12">12小时</option><option value="24">24小时</option><option value="168">7天</option><option value="all">全部历史</option></select></label>
+      <label>频率<select value={dense ? "all" : "clear"} disabled={range === "168" || range === "all"} onChange={event => setDense(event.target.value === "all")}><option value="clear">每小时 :00 / :30</option><option value="all">每5分钟</option></select></label>
       <button className={showLong ? "active" : ""} type="button" onClick={() => setShowLong(value => !value)}>看多 LONG</button>
       <button className={showShort ? "active" : ""} type="button" onClick={() => setShowShort(value => !value)}>看空 SHORT</button>
       <button className={showWait ? "active" : ""} type="button" onClick={() => setShowWait(value => !value)}>等待 WAIT</button>
@@ -453,10 +481,10 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
       <span>显示 {decisions.length} 次{hiddenByAction > 0 ? ` · 动作筛选隐藏 ${hiddenByAction} 次` : ""}{hiddenByFrequency > 0 ? ` · 频率收起 ${hiddenByFrequency} 次` : ""}</span>
     </div>
     <div className="market-history-nav" aria-label="历史行情翻页">
-      <button type="button" disabled={!canGoEarlier} onClick={() => setPage(value => value + 1)} aria-label="查看更早行情">←</button>
-      <span>{timeLabel(candles[0].time)} — {timeLabel(candles.at(-1)!.time)}{range === "all" && market?.overview_downsampled ? ` · 全部 ${market.source_candle_count ?? ""} 根概览` : ""}</span>
-      <button type="button" disabled={!canGoLater} onClick={() => setPage(value => Math.max(0, value - 1))} aria-label="查看较新行情">→</button>
-      {page > 0 && <button type="button" onClick={() => setPage(0)}>最新</button>}
+      <button type="button" disabled={!canGoEarlier} onClick={() => { if (remoteHistory) { setLaterPages(value => [...value, before]); setBefore(candles[0].time); } else setPage(value => value + 1); }} aria-label="查看更早行情">←</button>
+      <span>{timeLabel(candles[0].time)} — {timeLabel(candles.at(-1)!.time)}{range === "all" && activeMarket?.overview_downsampled ? ` · 全部 ${activeMarket.source_candle_count ?? ""} 根概览` : ""}</span>
+      <button type="button" disabled={!canGoLater} onClick={() => { if (remoteHistory) { const previous = laterPages.at(-1) ?? null; setLaterPages(value => value.slice(0, -1)); setBefore(previous); } else setPage(value => Math.max(0, value - 1)); }} aria-label="查看较新行情">→</button>
+      {(page > 0 || laterPages.length > 0) && <button type="button" onClick={() => { setPage(0); setBefore(null); setLaterPages([]); }}>最新</button>}
     </div>
     <div className="prediction-counts"><b>{scopedDecisions.length ? "成本后EV较高方向" : predictionAvailability}</b>{scopedDecisions.length > 0 && <><span>看多 {counts.LONG}</span><span>看空 {counts.SHORT}</span><span>等待 {counts.WAIT}{unhealthyWaits ? `（数据异常 ${unhealthyWaits}）` : ""}</span>{policyMismatchCount > 0 && <span className="negative">历史规则不一致 {policyMismatchCount}（原记录保留）</span>}</>}</div>
     <span className="mobile-scroll-hint" role="note">左右滑动查看完整图表</span>
@@ -468,7 +496,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
       {candles.map((row, index) => { const cx = xAtIndex(index); const width = Math.max(1.5, 650 / candles.length); const up = row.close >= row.open; return <g key={row.time}><line x1={cx} x2={cx} y1={y(row.high)} y2={y(row.low)} stroke={up ? "#476b19" : "#c9362b"} /><rect x={cx - width / 2} width={width} y={Math.min(y(row.open), y(row.close))} height={Math.max(1, Math.abs(y(row.open) - y(row.close)))} fill={up ? "#476b19" : "#c9362b"} /></g>; })}
       {selectedX != null && selectedExitX != null && <g className="selected-window"><rect x={selectedX} width={Math.max(2, selectedExitX-selectedX)} y="52" height="280" /><line x1={selectedX} x2={selectedX} y1="52" y2="332" /><line x1={selectedExitX} x2={selectedExitX} y1="52" y2="332" /><text x={selectedX+4} y="49">预测</text><text x={Math.max(selectedX+36, selectedExitX-58)} y="49">30分钟后</text></g>}
       {decisions.map(row => { const candle = byTime(row.decision_time); const cx = xTime(row.decision_time); const action = arrowAction(row); const cy = action === "WAIT" ? 34 : action === "LONG" ? y(candle.low) + 12 : y(candle.high) - 12; const color = action === "LONG" ? "#476b19" : action === "SHORT" ? "#c9362b" : "#555149"; const isSelected = activeSelected?.source_decision_id === row.source_decision_id && activeSelected?.model_identity === row.model_identity && activeSelected?.model_version === row.model_version; return <g key={`${row.source_decision_id}-${row.model_identity}-${row.model_version}`} role="button" tabIndex={0} className={`decision-marker${isSelected ? " selected" : ""}${row.policy_consistent === false ? " policy-mismatch" : ""}`} onClick={() => setSelected(row)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") setSelected(row); }}><title>{`${timeLabel(row.decision_time)} · 成本后EV较高方向 ${action} · 模型版本 ${row.model_version} · 点击查看30分钟结果`}</title>{action === "WAIT" && <circle cx={cx} cy={cy} r="10" fill="#eee9da" stroke={color} strokeWidth="1.5" />}{isSelected && <circle cx={cx} cy={cy} r="14" fill="none" stroke={color} strokeWidth="2" />}{action === "WAIT" ? <path d={`M ${cx-7} ${cy} h 14 M ${cx-7} ${cy} l 4 -4 M ${cx-7} ${cy} l 4 4 M ${cx+7} ${cy} l -4 -4 M ${cx+7} ${cy} l -4 4`} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" /> : <path d={action === "LONG" ? `M ${cx} ${cy-7} l -6 11 h 12 z` : `M ${cx} ${cy+7} l -6 -11 h 12 z`} fill={color} />}</g>; })}
-      {showTraining && (market?.training_markers ?? []).filter(row => row.model_identity === identity && Date.parse(row.created_at) >= cutoff && Date.parse(row.created_at) < pageEnd).map(row => <g key={`${row.model_identity}-${row.training_dataset_hash}`}><title>{`${timeLabel(row.created_at)} · 第一次使用 ${row.training_rows} 条训练数据${row.artifact_count > 1 ? ` · 后续恢复重建 ${row.artifact_count-1} 次` : ""}`}</title><line x1={xTime(row.created_at)} x2={xTime(row.created_at)} y1="52" y2="332" className="training-line" /><text x={xTime(row.created_at)+4} y="328" className="training-label">{row.training_rows}条新训练</text></g>)}
+      {showTraining && (activeMarket?.training_markers ?? []).filter(row => row.model_identity === identity && Date.parse(row.created_at) >= cutoff && Date.parse(row.created_at) < pageEnd).map(row => <g key={`${row.model_identity}-${row.training_dataset_hash}`}><title>{`${timeLabel(row.created_at)} · 第一次使用 ${row.training_rows} 条训练数据${row.artifact_count > 1 ? ` · 后续恢复重建 ${row.artifact_count-1} 次` : ""}`}</title><line x1={xTime(row.created_at)} x2={xTime(row.created_at)} y1="52" y2="332" className="training-line" /><text x={xTime(row.created_at)+4} y="328" className="training-label">{row.training_rows}条新训练</text></g>)}
       <text x="5" y="64">{high.toFixed(2)}</text><text x="5" y="335">{low.toFixed(2)}</text>
       {timeTickIndices.map(index => <g key={candles[index].time} className="time-axis"><line x1={xAtIndex(index)} x2={xAtIndex(index)} y1="338" y2="344" /><text x={xAtIndex(index)} y="366" textAnchor="middle">{axisTimeLabel(candles[index].time)}</text></g>)}
     </svg>

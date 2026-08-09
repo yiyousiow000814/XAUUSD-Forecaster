@@ -586,6 +586,37 @@ def test_market_chart_overview_preserves_ohlc_extremes() -> None:
     assert compact[1]["close"] == 5.5
 
 
+def test_market_history_pages_are_complete_and_cursor_safe(tmp_path) -> None:
+    module = _dashboard_module()
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=datetime(2026, 8, 7, tzinfo=UTC))
+    quote_dir = tmp_path / "quotes"
+    quote_dir.mkdir()
+    start = datetime(2026, 8, 7, 0, 0, tzinfo=UTC)
+    rows = [{
+        "received_time": (start + timedelta(minutes=5 * index)).isoformat(),
+        "bid": 3400 + index, "ask": 3400.2 + index,
+    } for index in range(5)]
+    (quote_dir / "xauusd-quotes-20260807.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8",
+    )
+
+    first = module._market_history_page(database, ledger.connection, None, 2)
+    second = module._market_history_page(
+        database, ledger.connection, first["next_cursor"], 2,
+    )
+    third = module._market_history_page(
+        database, ledger.connection, second["next_cursor"], 2,
+    )
+
+    times = [row["time"] for page in (first, second, third) for row in page["candles"]]
+    assert len(times) == len(set(times)) == 5
+    assert first["has_more"] is True
+    assert second["has_more"] is True
+    assert third["has_more"] is False
+    assert third["next_cursor"] == times[-1]
+
+
 def test_learning_surfaces_rebuild_only_when_source_counts_change(monkeypatch) -> None:
     module = _dashboard_module()
     connection = sqlite3.connect(":memory:")

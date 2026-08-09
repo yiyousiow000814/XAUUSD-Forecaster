@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import urllib.parse
 from types import SimpleNamespace
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -25,6 +26,7 @@ UTC = timezone.utc
 PAYLOAD_SCHEMA_VERSION = "xauusd-dashboard-v4-event-episode"
 MARKET_DETAIL_CANDLE_LIMIT = 7 * 288
 MARKET_OVERVIEW_CANDLE_LIMIT = 480
+MARKET_HISTORY_PAGE_LIMIT = 500
 _QUOTE_CANDLE_CACHE: dict[tuple[str, int, int], list[dict]] = {}
 
 from xauusd_forecaster.factors import factor_coverage  # noqa: E402
@@ -571,23 +573,23 @@ def _downsample_candles(candles: list[dict], limit: int) -> list[dict]:
     return compacted
 
 
-def _recent_market_chart(
-    database: Path, connection: sqlite3.Connection, now: datetime
-) -> dict:
-    """Build recorded quote history; weekends must not erase the last session."""
+def _all_market_candles(database: Path) -> list[dict]:
     history_by_time: dict[str, dict] = {}
     for path in _quote_history_files(database.parent / "quotes"):
         for candle in _quote_file_candles(path):
             history_by_time[candle["time"]] = candle
-    history = [history_by_time[key] for key in sorted(history_by_time)]
-    candles = history[-MARKET_DETAIL_CANDLE_LIMIT:]
-    overview_candles = (
-        _downsample_candles(history, MARKET_OVERVIEW_CANDLE_LIMIT)
-        if len(history) > len(candles) else []
+    return [history_by_time[key] for key in sorted(history_by_time)]
+
+
+def _market_decisions(
+    connection: sqlite3.Connection, start_time: str, end_time: str | None = None,
+) -> list[dict]:
+    end_clause = " AND p.decision_time<?" if end_time else ""
+    parameters: tuple[str, ...] = (
+        (start_time, end_time) if end_time else (start_time,)
     )
-    first_time = candles[0]["time"] if candles else now.isoformat()
     decision_rows = connection.execute(
-        """WITH ranked AS (
+        f"""WITH ranked AS (
              SELECT p.source_decision_id,p.decision_time,p.model_identity,
                     p.model_version,p.recommended_action,p.effective_action,
                     p.prediction_status,p.predicted_direction_u5,
@@ -605,11 +607,11 @@ def _recent_market_chart(
                USING(source_decision_id,model_version)
              LEFT JOIN derived_outcomes o
                ON o.source_decision_id=p.source_decision_id
-             WHERE p.decision_time>=? AND p.decision_time>u.created_at
+             WHERE p.decision_time>=?{end_clause} AND p.decision_time>u.created_at
            )
            SELECT * FROM ranked WHERE version_rank=1
            ORDER BY decision_time,model_identity""",
-        (first_time,),
+        parameters,
     ).fetchall()
     decisions = []
     for row in decision_rows:
@@ -659,6 +661,47 @@ def _recent_market_chart(
             ),
             "frozen_record": True,
         })
+    return decisions
+
+
+def _market_history_page(
+    database: Path, connection: sqlite3.Connection, after: str | None, limit: int,
+) -> dict:
+    """Return an ordered, replay-safe page for incremental remote ingestion."""
+    history = _all_market_candles(database)
+    start_index = 0
+    if after:
+        while start_index < len(history) and history[start_index]["time"] <= after:
+            start_index += 1
+    candles = history[start_index:start_index + limit]
+    if not candles:
+        return {"candles": [], "decisions": [], "next_cursor": after, "has_more": False}
+    end_index = start_index + len(candles)
+    end_time = history[end_index]["time"] if end_index < len(history) else None
+    return {
+        "candles": candles,
+        "decisions": _market_decisions(
+            connection, candles[0]["time"], end_time,
+        ),
+        "next_cursor": candles[-1]["time"],
+        "has_more": end_index < len(history),
+        "history_start": history[0]["time"],
+        "history_end": history[-1]["time"],
+    }
+
+
+def _recent_market_chart(
+    database: Path, connection: sqlite3.Connection, now: datetime
+) -> dict:
+    """Build recorded quote history; weekends must not erase the last session."""
+    history = _all_market_candles(database)
+    candles = history[-MARKET_DETAIL_CANDLE_LIMIT:]
+    overview_candles = (
+        _downsample_candles(history, MARKET_OVERVIEW_CANDLE_LIMIT)
+        if len(history) > len(candles) else []
+    )
+    first_time = candles[0]["time"] if candles else now.isoformat()
+    decisions = _market_decisions(connection, first_time)
     marker_rows = connection.execute(
         """WITH grouped AS (
              SELECT model_identity,training_dataset_hash,min(created_at) created_at,
@@ -691,6 +734,7 @@ def _recent_market_chart(
         "source_candle_count": len(history),
         "overview_downsampled": bool(overview_candles),
         "prediction_history_start": prediction_history_start,
+        "history_resource": "/api/market-history",
         "decisions": [dict(row) for row in decisions],
         "training_markers": [dict(row) for row in marker_rows],
     }
@@ -1702,10 +1746,40 @@ class Handler(BaseHTTPRequestHandler):
     database: Path
 
     def do_GET(self) -> None:  # noqa: N802
-        path = self.path.rstrip("/")
+        parsed = urllib.parse.urlsplit(self.path)
+        path = parsed.path.rstrip("/")
         if path == "/api/health":
             body = b'{"status":"OK"}'
             self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path == "/api/market-history":
+            query = urllib.parse.parse_qs(parsed.query)
+            after = (query.get("after") or [None])[0]
+            try:
+                limit = min(
+                    MARKET_HISTORY_PAGE_LIMIT,
+                    max(1, int((query.get("limit") or [MARKET_HISTORY_PAGE_LIMIT])[0])),
+                )
+                connection = sqlite3.connect(
+                    f"file:{self.database}?mode=ro", uri=True, timeout=5,
+                )
+                connection.row_factory = sqlite3.Row
+                try:
+                    payload = _market_history_page(
+                        self.database, connection, after, limit,
+                    )
+                finally:
+                    connection.close()
+                body = json.dumps(payload, allow_nan=False).encode()
+                self.send_response(200)
+            except (OSError, sqlite3.Error, TypeError, ValueError) as error:
+                body = json.dumps({"error": str(error)[:500]}).encode()
+                self.send_response(400)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))

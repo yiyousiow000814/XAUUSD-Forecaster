@@ -412,3 +412,15 @@ test("does not turn a locally offline collector back online", () => {
   });
   assert.equal(payload.system.online, false);
 });
+
+test("loads market history by bounded range instead of one growing snapshot", () => {
+  const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
+  const route = readFileSync(new URL("../app/api/market-history/route.ts", import.meta.url), "utf8");
+  assert.match(modal, /history_resource/);
+  assert.match(modal, /query\.set\("before", before\)/);
+  assert.match(modal, /setBefore\(candles\[0\]\.time\)/);
+  assert.match(route, /OVERVIEW_POINTS = 480/);
+  assert.match(route, /WHERE time_epoch>=\? AND time_epoch<\?/);
+  assert.match(route, /ON CONFLICT\(decision_key\) DO UPDATE/);
+  assert.match(route, /MAX_INGEST_BYTES = 400_000/);
+});

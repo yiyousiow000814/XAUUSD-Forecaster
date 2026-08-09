@@ -29,3 +29,32 @@ export const newsIndex = sqliteTable(
     ),
   ],
 );
+
+export const marketCandles = sqliteTable("market_candles", {
+  timeEpoch: integer("time_epoch").primaryKey(),
+  time: text("time").notNull(),
+  open: integer("open_milli").notNull(),
+  high: integer("high_milli").notNull(),
+  low: integer("low_milli").notNull(),
+  close: integer("close_milli").notNull(),
+  ticks: integer("ticks").notNull(),
+  receivedAt: text("received_at").notNull(),
+});
+
+export const marketDecisions = sqliteTable(
+  "market_decisions",
+  {
+    decisionKey: text("decision_key").primaryKey(),
+    decisionEpoch: integer("decision_epoch").notNull(),
+    decisionTime: text("decision_time").notNull(),
+    modelIdentity: text("model_identity").notNull(),
+    payload: text("payload").notNull(),
+    receivedAt: text("received_at").notNull(),
+  },
+  table => [
+    index("market_decisions_time_idx").on(table.decisionEpoch),
+    index("market_decisions_model_time_idx").on(
+      table.modelIdentity, table.decisionEpoch,
+    ),
+  ],
+);

@@ -108,6 +108,7 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
     status = _read_json(base_url, "/api/status")
     learning = _read_json(base_url, "/api/learning")
     market_chart = _read_json(base_url, "/api/market-chart")
+    market_chart["history_resource"] = "/api/market-history"
     news_index = _read_json(base_url, "/api/news-index?limit=50")
 
     status["factor_coverage"] = _rebuild_factor_coverage(status)
