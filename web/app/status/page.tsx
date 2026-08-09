@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
+import DashboardLink from "../_components/DashboardLink";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 
@@ -130,14 +130,14 @@ export default function StatusPage() {
     <main className="status-main">
       <div className="grain" />
       <header className="topbar">
-        <Link className="brand audit-brand brand-button" href="/" replace prefetch>
+        <DashboardLink className="brand audit-brand brand-button" href="/" replace>
           <span className="brand-mark">AU</span>
           <div><strong>Aurum System Status</strong><small>本机进程 · 多模型配额</small></div>
-        </Link>
+        </DashboardLink>
         <div className="top-actions">
-          <Link className="audit-link" href="/health" prefetch>组件与新闻源</Link>
-          <Link className="audit-link" href="/audit?view=news" prefetch>新闻与决策</Link>
-          <Link className="audit-link" href="/" replace prefetch>← 返回实时室</Link>
+          <DashboardLink className="audit-link" href="/health">组件与新闻源</DashboardLink>
+          <DashboardLink className="audit-link" href="/audit?view=news">新闻与决策</DashboardLink>
+          <DashboardLink className="audit-link" href="/" replace>← 返回实时室</DashboardLink>
         </div>
       </header>
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
+import DashboardLink from "./_components/DashboardLink";
 import SystemStatePill from "./_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "./_lib/dashboard-resource";
 
@@ -170,8 +170,8 @@ export default function Home() {
           </div>
         </div>
         <div className="top-actions">
-          <Link className="audit-link" href="/status" prefetch>系统状态</Link>
-          <Link className="audit-link" href="/audit?view=decisions" prefetch>新闻与决策 / 结果 <span aria-hidden="true">→</span></Link>
+          <DashboardLink className="audit-link" href="/status">系统状态</DashboardLink>
+          <DashboardLink className="audit-link" href="/audit?view=decisions">新闻与决策 / 结果 <span aria-hidden="true">→</span></DashboardLink>
           <SystemStatePill loading={loading} error={Boolean(error)} online={Boolean(payload?.system.online)} marketSession={payload?.system.market_session} />
         </div>
       </header>

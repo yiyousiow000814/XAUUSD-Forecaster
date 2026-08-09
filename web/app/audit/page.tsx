@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
 import { useSearchParams } from "next/navigation";
+import DashboardLink from "../_components/DashboardLink";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import LearningGraphModal from "./LearningGraphModal";
@@ -750,13 +750,13 @@ export default function AuditPage() {
     <main className="audit-main">
       <div className="grain" />
       <header className="topbar audit-topbar">
-        <Link className="brand audit-brand brand-button" href="/" replace prefetch>
+        <DashboardLink className="brand audit-brand brand-button" href="/" replace>
           <span className="brand-mark">AU</span>
           <div><strong>Aurum Evidence Desk</strong><small>新闻 · 决策 · 因子覆盖</small></div>
-        </Link>
+        </DashboardLink>
         <div className="top-actions">
-          <Link className="audit-link" href="/status" prefetch>系统状态</Link>
-          <Link className="audit-link" href="/" replace prefetch>← 返回实时室</Link>
+          <DashboardLink className="audit-link" href="/status">系统状态</DashboardLink>
+          <DashboardLink className="audit-link" href="/" replace>← 返回实时室</DashboardLink>
           <SystemStatePill loading={statusState === "loading"} error={statusState === "error"} online={Boolean(payload?.system?.online)} marketSession={payload?.system?.market_session} />
         </div>
       </header>

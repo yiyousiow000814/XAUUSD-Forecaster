@@ -158,13 +158,18 @@ test("renders the news and decision audit route", async () => {
 
 test("prefetches dashboard routes and reuses client data between pages", () => {
   const cache = readFileSync(new URL("../app/_lib/dashboard-resource.ts", import.meta.url), "utf8");
+  const link = readFileSync(new URL("../app/_components/DashboardLink.tsx", import.meta.url), "utf8");
   for (const path of ["../app/page.tsx", "../app/audit/page.tsx", "../app/status/page.tsx", "../app/health/page.tsx"]) {
     const source = readFileSync(new URL(path, import.meta.url), "utf8");
-    assert.match(source, /from "next\/link"/);
+    assert.match(source, /DashboardLink/);
     assert.match(source, /readDashboardResource/);
     assert.match(source, /loadDashboardResource/);
     assert.doesNotMatch(source, /useRouter/);
   }
+  assert.match(link, /router\.prefetch\(href\)/);
+  assert.match(link, /router\.push\(href\)/);
+  assert.match(link, /router\.replace\(href\)/);
+  assert.match(link, /href=\{href\}/);
   assert.match(cache, /const resources = new Map/);
   assert.match(cache, /if \(!options\.force && isFresh\)/);
   assert.match(cache, /if \(entry\.pending\)/);
