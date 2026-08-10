@@ -4,7 +4,6 @@ import { useCallback, useEffect, useState } from "react";
 import DashboardLink from "../_components/DashboardLink";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
-import { isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 
 type StatusPayload = {
   generated_at: string;
@@ -38,7 +37,7 @@ const componentLabels: Record<string, string> = {
 };
 
 function localTime(value: string | null): string {
-  return value ? new Date(value).toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Kuala_Lumpur" }) : "—";
+  return value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "—";
 }
 
 function elapsed(seconds: number | null): string {
@@ -54,7 +53,6 @@ function elapsed(seconds: number | null): string {
 export default function HealthView() {
   const [payload, setPayload] = useState<StatusPayload | null>(() => readDashboardResource<StatusPayload>("/api/status"));
   const [error, setError] = useState<string | null>(null);
-  const immutablePreview = isImmutablePreview(payload);
   const refresh = useCallback(async (force = false) => {
     try {
       setPayload(await loadDashboardResource<StatusPayload>("/api/status", { force }));
@@ -65,13 +63,10 @@ export default function HealthView() {
   }, []);
 
   useEffect(() => {
-    return scheduleDashboardRefresh(
-      () => void refresh(),
-      () => void refresh(true),
-      15_000,
-      immutablePreview,
-    );
-  }, [refresh, immutablePreview]);
+    const initial = window.setTimeout(() => void refresh(), 0);
+    const timer = window.setInterval(() => void refresh(true), 15_000);
+    return () => { window.clearTimeout(initial); window.clearInterval(timer); };
+  }, [refresh]);
 
   return <main className="status-main">
     <div className="grain" />

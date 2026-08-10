@@ -7,7 +7,6 @@ import json
 import re
 
 from .news_relevance import google_news_item_is_relevant
-from .news_semantics import CURRENT_NEWS_PROMPT_VERSION
 
 
 IMPACT_MODEL = "gemma-4-31b-it"
@@ -130,7 +129,7 @@ def pending_impact_records(
          AND a.revision_number=n.revision_number
          AND a.raw_content_hash=n.content_hash
         WHERE length(trim(COALESCE(n.body,'')))>=240
-          AND a.prompt_version=?
+          AND a.prompt_version='news-json-v14-material-event-evidence'
           AND a.llm_model_version IN (
             'gemini-3.5-flash-lite','gemini-3.1-flash-lite')
           AND NOT EXISTS (
@@ -161,7 +160,6 @@ def pending_impact_records(
                  COALESCE(n.source_published_time,n.collector_first_seen_time) DESC
         LIMIT ?""",
         (
-            CURRENT_NEWS_PROMPT_VERSION,
             IMPACT_MODEL, IMPACT_PROMPT_VERSION,
             IMPACT_MODEL, IMPACT_PROMPT_VERSION,
             now.isoformat(timespec="microseconds"), max(1, limit * 4),
@@ -203,7 +201,7 @@ def pending_impact_records(
                        LEFT JOIN news_impact_assessments_v1 pi
                          ON pi.annotation_id=pa.annotation_id
                         AND pi.llm_model_version=? AND pi.prompt_version=?
-                       WHERE pa.prompt_version=?
+                       WHERE pa.prompt_version='news-json-v14-material-event-evidence'
                          AND (
                            json_extract(pa.annotation_json,'$.material_event_key')=?
                            OR json_extract(pa.annotation_json,'$.primary_category')=?
@@ -214,7 +212,6 @@ def pending_impact_records(
                        ORDER BY p.collector_first_seen_time DESC LIMIT 50""",
                     (
                         IMPACT_MODEL, IMPACT_PROMPT_VERSION,
-                        CURRENT_NEWS_PROMPT_VERSION,
                         material_event_key, primary_category,
                         row["collector_first_seen_time"], row["source"],
                         row["source_item_id"], row["revision_number"],

@@ -2,9 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { compressedTimeline } from "./compressedTimeline";
 
-type CurvePoint = { decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number; w?: 1 };
+type CurvePoint = { decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number };
 type Curve = { model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: CurvePoint[]; source_point_count_30m?: number; chart_point_count_30m?: number; chart_downsampled_30m?: boolean; points_30m?: CurvePoint[] };
 type Candle = { time: string; open: number; high: number; low: number; close: number; ticks?: number };
 type MarketData = {
@@ -13,7 +12,7 @@ type MarketData = {
   history_start?: string | null; history_end?: string | null; detail_start?: string | null;
   source_candle_count?: number; overview_downsampled?: boolean;
   prediction_history_start?: Record<string, string>;
-  mode?: "detail" | "overview";
+  mode?: "detail" | "overview"; preview_limited?: boolean;
   source_decision_count?: number; decision_downsampled?: boolean;
   page?: { start?: string; end?: string; has_earlier: boolean; has_later: boolean };
 };
@@ -70,22 +69,6 @@ const COLORS: Record<string, string> = {
   NEWS_ONLY: "#d08a00",
 };
 const pct = (value: number) => `${value >= 0 ? "+" : "−"}${Math.abs(value * 100).toFixed(3)}%`;
-
-function curveRuns(points: CurvePoint[]) {
-  if (points.length < 2) return [];
-  const runs: Array<{ wait: boolean; points: CurvePoint[] }> = [];
-  let current = { wait: points[1].w === 1, points: [points[0], points[1]] };
-  for (let index = 2; index < points.length; index += 1) {
-    const wait = points[index].w === 1;
-    if (wait === current.wait) current.points.push(points[index]);
-    else {
-      runs.push(current);
-      current = { wait, points: [points[index - 1], points[index]] };
-    }
-  }
-  runs.push(current);
-  return runs;
-}
 
 export default function LearningGraphModal({
   open, onClose, startTab, curves, market, versionGroups, execution,
@@ -192,7 +175,7 @@ function VersionLedger({ groups }: { groups: VersionGroup[] }) {
   const hoveredMetric = hovered ? metric(hovered) : null;
   return <section className="version-ledger modal-version-ledger"><header><div className="version-ledger-title"><span>共同训练截止量对齐 · 同一坐标叠加比较</span><h3>所有模型的训练组成绩</h3></div><div className="version-ledger-controls"><label className="version-ledger-model"><span>查看模型明细</span><select value={identity} onChange={event => setIdentity(event.target.value)}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select></label><label><span>统计频率</span><select value={cadence} onChange={event => setCadence(event.target.value as EvaluationCadence)}><option value="EVERY_5M">每5分钟（重叠样本）</option><option value="FIXED_30M">每30分钟（固定 :00 / :30）</option></select></label><label><span>横轴范围</span><select value={cutoffWindow} onChange={event => setCutoffWindow(event.target.value as "20" | "all")}><option value="20">最近20个训练截止点</option><option value="all">全部训练截止点</option></select></label></div></header>
     <section className="version-hover-chart" aria-label="所有模型训练组独立收益图">
-      <div className="version-hover-readout">{hovered && hoveredMetric ? <><b>{LABELS[hovered.model_identity]} · 第 {hovered.generation} 组</b><span>{stamp(hovered.created_at)} · 共同截止 {comparisonCutoff(hovered)} 条 · 自身训练 {hovered.training_rows} 条 · OOS {hoveredMetric.oos_rows} 条 · 收益 {pct(hoveredMetric.cumulative_quote_return)} · PF {hoveredMetric.profit_factor_quote_adjusted?.toFixed(2) ?? "—"} · 出方向 {((hoveredMetric.coverage_rate ?? 0)*100).toFixed(1)}%</span></> : <><b>模型成绩对比</b><span>按同一训练截止点比较。</span></>}</div>
+      <div className="version-hover-readout">{hovered && hoveredMetric ? <><b>{LABELS[hovered.model_identity]} · 第 {hovered.generation} 组</b><span>{stamp(hovered.created_at)} · 共同截止 {comparisonCutoff(hovered)} 条 · 自身训练 {hovered.training_rows} 条 · OOS {hoveredMetric.oos_rows} 条 · 收益 {pct(hoveredMetric.cumulative_quote_return)} · PF {hoveredMetric.profit_factor_quote_adjusted?.toFixed(2) ?? "—"} · 出方向 {((hoveredMetric.coverage_rate ?? 0)*100).toFixed(1)}%</span></> : <><b>五种模型叠加在同一坐标</b><span>实线连接相邻训练截止点；虚线跨过没有合法新版本的空档。空缺代表该模型当轮没有合法新版本；这里只叠加显示，不会把收益相加。</span></>}</div>
       {graphRows.length ? <svg viewBox="0 0 960 300" role="img">
         <line x1="70" x2="890" y1={gy(0)} y2={gy(0)} className="zero-line" />
         <text x="12" y={gy(high)+4}>{pct(high)}</text><text x="12" y={gy(low)+4}>{pct(low)}</text>
@@ -257,21 +240,40 @@ function LongCurve({ curves }: { curves: Curve[] }) {
   const activePage = Math.min(pageOffset, resultWindows.length - 1);
   const { start, end } = resultWindows[activePage];
   const visibleCurves = usable.map(row => {
+    const previousPoint = row.points.filter(point => Date.parse(point.decision_time) < start).at(-1);
     const points = row.points.filter(point => {
       const time = Date.parse(point.decision_time);
       return time >= start && time <= end;
     });
-    return { ...row, points };
+    return { ...row, points, previousPoint };
   }).filter(row => row.points.length > 0);
   const visiblePoints = visibleCurves.flatMap(row => row.points);
   const values = visiblePoints.map(point => point.cumulative_quote_return).concat(0);
   const low = Math.min(...values); const high = Math.max(...values);
   const visibleResultTimes = [...new Set(visiblePoints.map(point => Date.parse(point.decision_time)))].sort((a, b) => a - b);
   const expectedStep = cadence === "FIXED_30M" ? 30 * 60_000 : 5 * 60_000;
-  const resultTimeline = compressedTimeline(visibleResultTimes, expectedStep, 58, 920);
-  const x = (time: string) => resultTimeline.positionAt(time);
+  const gapThreshold = Math.max(45 * 60_000, expectedStep * 3);
+  // Plot result time, not wall-clock time. Long closures receive one compact
+  // break and never consume the width of the OOS chart.
+  const resultPlotUnits = visibleResultTimes.map((time, index) => index === 0 ? 0 : Math.min(
+    4,
+    Math.max(1, (time - visibleResultTimes[index - 1]) / expectedStep),
+  )).reduce<number[]>((units, step, index) => [
+    ...units,
+    index === 0 ? 0 : units[index - 1] + step,
+  ], []);
+  const totalResultPlotUnits = Math.max(1, resultPlotUnits.at(-1) ?? 1);
+  const resultX = new Map(visibleResultTimes.map((time, index) => [time, 58 + resultPlotUnits[index] / totalResultPlotUnits * 862]));
+  const x = (time: string) => resultX.get(Date.parse(time)) ?? 58;
   const tickIndices = Array.from(new Set([0, .25, .5, .75, 1].map(part => Math.round((visibleResultTimes.length - 1) * part))));
   const tickTimes = tickIndices.map(index => new Date(visibleResultTimes[index]).toISOString());
+  const curveRuns = (points: CurvePoint[]) => points.reduce<CurvePoint[][]>((runs, point) => {
+    const current = runs.at(-1);
+    const previous = current?.at(-1);
+    if (!current || (previous && Date.parse(point.decision_time) - Date.parse(previous.decision_time) >= gapThreshold)) runs.push([point]);
+    else current.push(point);
+    return runs;
+  }, []);
   const axisLabel = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
   const versionBoundaries = visibleCurves.flatMap(row => row.points.flatMap((point, index) => {
     if (index === 0 || !point.model_version) return [];
@@ -397,20 +399,29 @@ function LongCurve({ curves }: { curves: Curve[] }) {
           </>}
         </g>;
       })}
-      {visibleCurves.flatMap(row => row.points.length === 1
-        ? [<circle key={row.model_identity} cx={x(row.points[0].decision_time)} cy={y(row.points[0].cumulative_quote_return)} r="4" fill={COLORS[row.model_identity]} />]
-        : curveRuns(row.points).map((run, index) => <polyline
-            key={`${row.model_identity}-${index}`}
-            fill="none"
-            stroke={COLORS[row.model_identity]}
-            strokeWidth="3"
-            strokeDasharray={run.wait ? "7 6" : undefined}
-            points={run.points.map(point => `${x(point.decision_time)},${y(point.cumulative_quote_return)}`).join(" ")}
-          ><title>{run.wait ? "WAIT：当时没有方向判断" : "当时已有 LONG / SHORT 判断"}</title></polyline>))}
+      {visibleCurves.flatMap(row => {
+        const runs = curveRuns(row.points);
+        const first = runs[0]?.[0];
+        const carryIn = row.previousPoint && first
+          && Date.parse(first.decision_time) - Date.parse(row.previousPoint.decision_time) >= gapThreshold
+          && x(first.decision_time) > 59
+          ? <line key={`${row.model_identity}-carry-in`} className="curve-gap-bridge curve-gap-carry-in" stroke={COLORS[row.model_identity]} x1="58" y1={y(row.previousPoint.cumulative_quote_return)} x2={x(first.decision_time)} y2={y(first.cumulative_quote_return)}><title>窗口开始前有真实结果；中间没有成熟结果</title></line>
+          : null;
+        return [carryIn, ...runs.flatMap((run, index) => {
+          const previous = runs[index - 1]?.at(-1);
+          const bridge = previous && run[0]
+            ? <line key={`${row.model_identity}-bridge-${index}`} className="curve-gap-bridge" stroke={COLORS[row.model_identity]} x1={x(previous.decision_time)} y1={y(previous.cumulative_quote_return)} x2={x(run[0].decision_time)} y2={y(run[0].cumulative_quote_return)}><title>休市期间没有成熟结果</title></line>
+            : null;
+          const curve = run.length === 1
+            ? <circle key={`${row.model_identity}-run-${index}`} cx={x(run[0].decision_time)} cy={y(run[0].cumulative_quote_return)} r="4" fill={COLORS[row.model_identity]} />
+            : <polyline key={`${row.model_identity}-run-${index}`} fill="none" stroke={COLORS[row.model_identity]} strokeWidth="3" points={run.map(point => `${x(point.decision_time)},${y(point.cumulative_quote_return)}`).join(" ")} />;
+          return [bridge, curve];
+        })];
+      })}
       {tickTimes.map(value => <g key={value} className="time-axis"><line x1={x(value)} x2={x(value)} y1="350" y2="356" /><text x={x(value)} y="374" textAnchor="middle">{axisLabel(value)}</text></g>)}
     </svg>
     </div>
-    <div className="chart-legend">{visibleCurves.map(row => <span key={row.model_identity}><i style={{ background: COLORS[row.model_identity] }} />{LABELS[row.model_identity]} <b>{pct(row.points.at(-1)?.cumulative_quote_return ?? 0)}</b></span>)}<span><i className="wait-line" />虚线：WAIT</span>{groupedBoundaries.length > 0 && <span><i className="train-dot" />模型换版本{compactBoundaryRail ? `（${boundaryLayouts.length} 个事件点 / ${groupedBoundaries.length} 次）` : groupedBoundaries.length > displayedBoundaries.length ? `（显示 ${displayedBoundaries.length}/${groupedBoundaries.length}）` : ""}</span>}</div>
+    <div className="chart-legend">{visibleCurves.map(row => <span key={row.model_identity}><i style={{ background: COLORS[row.model_identity] }} />{LABELS[row.model_identity]} <b>{pct(row.points.at(-1)?.cumulative_quote_return ?? 0)}</b></span>)}{groupedBoundaries.length > 0 && <span><i className="train-dot" />模型换版本{compactBoundaryRail ? `（${boundaryLayouts.length} 个事件点 / ${groupedBoundaries.length} 次）` : groupedBoundaries.length > displayedBoundaries.length ? `（显示 ${displayedBoundaries.length}/${groupedBoundaries.length}）` : ""}</span>}</div>
   </div>;
 }
 
@@ -508,8 +519,15 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
   const typicalCandleStep = candleSteps.length ? candleSteps[Math.floor(candleSteps.length / 2)] : 300_000;
   // Plot trading time, not wall-clock time. Long closures get one compact
   // visual break instead of consuming most of the chart width.
-  const marketTimeline = compressedTimeline(candles.map(row => row.time), typicalCandleStep, 55, 925);
-  const xAtIndex = (index: number) => marketTimeline.positions[index];
+  const plotUnits = candles.map((row, index) => index === 0 ? 0 : Math.min(
+    4,
+    Math.max(1, (Date.parse(row.time) - Date.parse(candles[index - 1].time)) / typicalCandleStep),
+  )).reduce<number[]>((values, step, index) => [
+    ...values,
+    index === 0 ? 0 : values[index - 1] + step,
+  ], []);
+  const totalPlotUnits = Math.max(1, plotUnits.at(-1) ?? 1);
+  const xAtIndex = (index: number) => 55 + plotUnits[index] / totalPlotUnits * 870;
   const marketGaps = candles.slice(1).map((row, index) => {
     const duration = Date.parse(row.time) - Date.parse(candles[index].time) - typicalCandleStep;
     const left = xAtIndex(index);
@@ -539,7 +557,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
   const timeTickIndices = Array.from(new Set([0, .25, .5, .75, 1].map(part => Math.round((candles.length - 1) * part))));
   const resultLabel = (value: number | null) => value == null ? "等待30分钟结果" : pct(value);
   return <div className="chart-block market-chart-block">
-    <div className="chart-caption"><div><b>每根K线5分钟 · 每个箭头预测未来30分钟</b><span>绿色向上、红色向下、灰色双向代表 WAIT。新闻修正量也显示自己的方向：LONG 表示向上修正，SHORT 表示向下修正；完整方向请看“黄金＋新闻”。</span></div><select value={identity} onChange={event => { setIdentity(event.target.value); setSelected(null); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key, label]) => <option key={key} value={key}>{label}{key.includes("RESIDUAL") ? "（修正量）" : ""}</option>)}</select></div>
+    <div className="chart-caption"><div><b>每根K线5分钟 · 每个箭头预测未来30分钟</b><span>绿色向上、红色向下、灰色双向代表 WAIT。新闻残差只表示新闻对黄金基线的修正量；完整方向请看“黄金＋新闻”。</span></div><select value={identity} onChange={event => { setIdentity(event.target.value); setSelected(null); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key, label]) => <option key={key} value={key}>{label}{key.includes("RESIDUAL") ? "（修正量）" : ""}</option>)}</select></div>
     <div className="market-controls" aria-label="K线图显示控制">
       <label>时间<select value={range} onChange={event => { setRange(event.target.value); setPage(0); setBefore(null); setLaterPages([]); setSelected(null); if (event.target.value === "168") setDense(false); }}><option value="3">3小时</option><option value="6">6小时</option><option value="12">12小时</option><option value="24">24小时</option><option value="168">7天</option><option value="all">全部历史</option></select></label>
       <label>频率<select value={dense ? "all" : "clear"} disabled={range === "168"} onChange={event => setDense(event.target.value === "all")}><option value="clear">每小时 :00 / :30</option><option value="all">每5分钟</option></select></label>

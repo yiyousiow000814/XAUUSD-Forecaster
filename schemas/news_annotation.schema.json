@@ -4,50 +4,92 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "headline_zh", "summary_zh", "primary_category", "secondary_categories",
-    "emerging_topic_zh", "record_kind", "actor", "action", "object",
-    "location", "event_time", "claim_status", "materiality",
-    "canonical_actor_id", "action_family", "canonical_object_id",
-    "canonical_location_id", "episode_key", "primary_story_title_zh",
-    "secondary_contexts_zh", "relation_to_prior", "document_kind",
-    "material_event_key", "source_organization_id", "evidence_role",
-    "event_type", "entities", "hawkishness", "inflation_impulse",
-    "growth_impulse", "geopolitical_risk", "usd_impulse", "novelty",
+    "headline_zh",
+    "summary_zh",
+    "primary_category",
+    "secondary_categories",
+    "emerging_topic_zh",
+    "record_kind",
+    "actor",
+    "action",
+    "object",
+    "location",
+    "event_time",
+    "claim_status",
+    "materiality",
+    "canonical_actor_id",
+    "action_family",
+    "canonical_object_id",
+    "canonical_location_id",
+    "episode_key",
+    "primary_story_title_zh",
+    "secondary_contexts_zh",
+    "relation_to_prior",
+    "document_kind",
+    "material_event_key",
+    "source_organization_id",
+    "evidence_role",
+    "event_type",
+    "entities",
+    "hawkishness",
+    "inflation_impulse",
+    "growth_impulse",
+    "geopolitical_risk",
+    "usd_impulse",
+    "novelty",
     "confidence"
   ],
   "properties": {
     "headline_zh": {
-      "type": "string", "minLength": 2, "maxLength": 300,
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 300,
       "description": "Faithful Simplified Chinese translation of the source headline"
     },
     "summary_zh": {
-      "type": "string", "minLength": 20, "maxLength": 1600,
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 1600,
       "description": "Simplified Chinese summary of the complete source content"
     },
     "primary_category": {
       "type": "string",
       "enum": [
-        "rates_fed", "inflation_employment", "growth_economy",
-        "usd_liquidity", "oil_energy", "war_geopolitics",
-        "central_bank_gold", "risk_sentiment", "regulation_other"
+        "rates_fed",
+        "inflation_employment",
+        "growth_economy",
+        "usd_liquidity",
+        "oil_energy",
+        "war_geopolitics",
+        "central_bank_gold",
+        "risk_sentiment",
+        "regulation_other"
       ],
       "description": "Best matching controlled XAUUSD news domain"
     },
     "secondary_categories": {
-      "type": "array", "maxItems": 2,
+      "type": "array",
+      "maxItems": 2,
       "items": {
         "type": "string",
         "enum": [
-          "rates_fed", "inflation_employment", "growth_economy",
-          "usd_liquidity", "oil_energy", "war_geopolitics",
-          "central_bank_gold", "risk_sentiment", "regulation_other"
+          "rates_fed",
+          "inflation_employment",
+          "growth_economy",
+          "usd_liquidity",
+          "oil_energy",
+          "war_geopolitics",
+          "central_bank_gold",
+          "risk_sentiment",
+          "regulation_other"
         ]
       },
       "uniqueItems": true,
       "description": "At most two additional controlled domains"
     },
     "emerging_topic_zh": {
-      "type": "string", "maxLength": 16,
+      "type": "string",
+      "maxLength": 16,
       "description": "One concise Simplified Chinese subtopic; never creates a new top-level domain"
     },
     "record_kind": {"type": "string", "enum": ["FACT_EVENT", "OFFICIAL_CLAIM", "MARKET_REACTION", "COMMENTARY_FORECAST", "BACKGROUND"]},

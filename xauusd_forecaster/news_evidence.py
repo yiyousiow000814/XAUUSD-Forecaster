@@ -23,17 +23,14 @@ from .news_identity import (
     canonical_source_organization,
 )
 from .news_time import NewsTimeAssessment, assess_news_time
-from .news_semantics import (
-    ACTIONABLE_CATEGORIES,
-    ACTIONABLE_RECORD_KINDS,
-    CURRENT_NEWS_PROMPT_VERSION,
-    annotation_topics,
-    effective_record_kind,
-)
 
 
 EVIDENCE_POLICY_VERSION = CURRENT_NEWS_CONTRACT.policy_version
-CURRENT_EVENT_PROMPT_VERSION = CURRENT_NEWS_PROMPT_VERSION
+LEGACY_V3_EVIDENCE_POLICY_VERSION = "news-event-evidence-v2-economic-time"
+CURRENT_EVENT_PROMPT_VERSION = "news-json-v14-material-event-evidence"
+ACTIONABLE_RECORD_KINDS = frozenset({
+    "FACT_EVENT", "OFFICIAL_CLAIM",
+})
 ACTIONABLE_EVIDENCE_ROLES = frozenset({
     "CORE_CLAIM", "EVIDENCE_DOCUMENT", "MARKET_REACTION",
 })
@@ -50,6 +47,19 @@ CORE_OFFICIAL_SOURCES = frozenset({
     "google_news_bls_official_releases",
 })
 BROAD_PRIMARY_SOURCES = CORE_OFFICIAL_SOURCES | frozenset({
+    "eia_press_releases",
+    "eia_today_in_energy",
+    "ecb_press_releases",
+    "world_gold_council_central_banks",
+})
+LEGACY_V3_CORE_OFFICIAL_SOURCES = frozenset({
+    "federal_reserve_monetary",
+    "federal_reserve_press_all",
+    "federal_reserve_speeches_testimony",
+    "bea_economic_releases",
+    "us_treasury_press_releases",
+})
+LEGACY_V3_BROAD_PRIMARY_SOURCES = LEGACY_V3_CORE_OFFICIAL_SOURCES | frozenset({
     "eia_press_releases",
     "eia_today_in_energy",
     "ecb_press_releases",
@@ -83,6 +93,40 @@ BROAD_NEWS_FEATURES = (
 )
 
 
+def _deterministic_record_kind(annotation: dict, headline: str) -> str:
+    """Keep market-price narration out of fact-event learning.
+
+    The LLM may still label a mixed market wrap as FACT_EVENT.  Requiring both
+    an instrument and a movement term makes the deterministic override narrow
+    and leaves the immutable original annotation auditable.
+    """
+    declared = str(annotation.get("record_kind") or "").upper()
+    if declared not in {"FACT_EVENT", "OFFICIAL_CLAIM"}:
+        return declared
+    normalized = re.sub(r"\s+", " ", str(headline or "").casefold())
+    instrument = any(token in normalized for token in (
+        "gold", "bullion", "dollar", "yield", "treasury", "stock", "shares",
+        "futures", "oil", "黄金", "金价", "美元", "收益率", "美债", "股市",
+        "股指", "期货", "油价", "原油",
+    ))
+    movement = any(token in normalized for token in (
+        "rise", "rises", "rose", "higher", "fall", "falls", "fell", "drop",
+        "gain", "gains", "climb", "steady", "surge", "slip", "breakout",
+        "上涨", "下跌", "走高", "走低", "攀升", "回落", "持稳", "突破",
+    ))
+    return "MARKET_REACTION" if instrument and movement else declared
+
+_TOPIC_TERMS = (
+    ("central_bank_gold", ("central bank gold", "gold reserve", "gold purchase", "gold buying")),
+    ("war_geopolitics", ("war", "conflict", "sanction", "military", "geopolit", "iran", "russia", "ukraine", "hormuz", "terror")),
+    ("oil_energy", ("oil", "crude", "petroleum", "opec", "energy", "gasoline", "supply disruption", "inventory")),
+    ("employment", ("payroll", "employment", "unemployment", "job openings", "wage", "earnings")),
+    ("inflation", ("inflation", "consumer price", "cpi", "pce", "price index")),
+    ("rates_fed", ("fomc", "interest rate", "monetary policy", "rate decision", "yield", "hawkish", "dovish")),
+    ("usd_liquidity", ("dollar", "foreign exchange", "currency", "liquidity", "balance sheet", "treasury market")),
+    ("growth_economy", ("gdp", "growth", "recession", "personal income", "trade data", "economic outlook")),
+    ("risk_sentiment", ("risk sentiment", "market stress", "financial stability", "equity selloff", "safe haven")),
+)
 _TITLE_STOPWORDS = frozenset({
     "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with",
     "as", "at", "by", "from", "after", "before", "says", "said", "update",
@@ -118,7 +162,39 @@ def _source_organization(row: dict) -> str | None:
 
 def _topics(row: dict) -> tuple[str, ...]:
     annotation = json.loads(row.get("annotation_json") or "{}")
-    return annotation_topics(annotation)
+    text = " ".join((
+        str(row.get("headline") or ""), str(row.get("event_type") or ""),
+        str(annotation.get("summary_zh") or ""),
+    )).casefold().replace("_", " ")
+    found = [topic for topic, terms in _TOPIC_TERMS if any(term in text for term in terms)]
+    category_topics = {
+        "rates_fed": ("rates_fed",),
+        "inflation_employment": ("inflation", "employment"),
+        "growth_economy": ("growth_economy",),
+        "usd_liquidity": ("usd_liquidity",),
+        "oil_energy": ("oil_energy",),
+        "war_geopolitics": ("war_geopolitics",),
+        "central_bank_gold": ("central_bank_gold",),
+        "risk_sentiment": ("risk_sentiment",),
+    }
+    if not found:
+        for category in (
+            annotation.get("primary_category"),
+            *(annotation.get("secondary_categories") or []),
+        ):
+            found.extend(category_topics.get(str(category), ()))
+    if not found:
+        if abs(float(row.get("geopolitical_risk") or 0.0)) >= 0.2:
+            found.append("war_geopolitics")
+        elif abs(float(row.get("inflation_impulse") or 0.0)) >= 0.2:
+            found.append("inflation")
+        elif abs(float(row.get("hawkishness") or 0.0)) >= 0.2:
+            found.append("rates_fed")
+        elif abs(float(row.get("growth_impulse") or 0.0)) >= 0.2:
+            found.append("growth_economy")
+        elif abs(float(row.get("usd_impulse") or 0.0)) >= 0.2:
+            found.append("usd_liquidity")
+    return tuple(dict.fromkeys(found or ["other"]))
 
 
 def _event_key(
@@ -203,7 +279,9 @@ def resolve_event_clock(
     return None, "UNKNOWN", "UNKNOWN"
 
 
-def event_evidence_rows_from_connection(connection, decision_time: datetime) -> list[dict]:
+def event_evidence_rows_from_connection(
+    connection, decision_time: datetime, *, legacy_v3: bool = False,
+) -> list[dict]:
     """Return one point-in-time canonical row per event cluster."""
     # Ledger timestamps are canonicalized with microseconds.  Keep the same
     # representation so an annotation parsed exactly at decision time remains
@@ -230,17 +308,19 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
            WHERE n.collector_first_seen_time<=? AND a.parsed_at<=?
              AND length(trim(coalesce(n.body,'')))>=240
              AND a.llm_model_version IN ('gemini-3.5-flash-lite','gemini-3.1-flash-lite')
-             AND a.prompt_version=?
+             AND a.prompt_version IN ('news-json-v14-material-event-evidence',
+                                      'news-json-v13-event-claims',
+                                      'news-json-v12-gemini-story-identity',
+                                      'news-json-v11-gemini-story-subjects',
+                                      'news-json-v10-controlled-category-zh',
+                                      'news-json-v9-local-display-recovery')
              AND NOT EXISTS (
                SELECT 1 FROM news_revisions newer
                WHERE newer.source=n.source AND newer.source_item_id=n.source_item_id
                  AND newer.revision_number>n.revision_number
                  AND newer.collector_first_seen_time<=?)
            ORDER BY a.parsed_at DESC,a.annotation_id DESC""",
-        (
-            IMPACT_MODEL, IMPACT_PROMPT_VERSION, cutoff,
-            cutoff, cutoff, CURRENT_EVENT_PROMPT_VERSION, cutoff,
-        ),
+        (IMPACT_MODEL, IMPACT_PROMPT_VERSION, cutoff, cutoff, cutoff, cutoff),
     ).fetchall()
     latest: dict[tuple[str, str, int], dict] = {}
     for raw in raw_rows:
@@ -259,40 +339,49 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
     grouped: dict[str, list[dict]] = defaultdict(list)
     for row in latest.values():
         annotation = json.loads(row.get("annotation_json") or "{}")
-        impact = (
-            {
-                "impact_class": row.get("impact_class"),
-                "event_state": row.get("impact_event_state"),
-                "update_type": row.get("impact_update_type"),
-            }
-            if row.get("impact_assessment_id") else None
-        )
-        max_age, _ = impact_time_rule(str(row.get("impact_class") or "BACKGROUND"))
-        timing = assess_news_time(
-            row, decision_time=decision_time, forward_epoch=forward_epoch,
-            max_actionable_age=max_age,
-            max_discovery_delay=None,
-            allow_pre_forward_publication=True,
-            exclude_weekly_closure=True,
-        )
-        if not impact_is_actionable(impact):
-            if impact is None:
-                reason = "IMPACT_NOT_ASSESSED"
-            elif impact.get("update_type") == "DUPLICATE_REPORT":
-                reason = "IMPACT_DUPLICATE_REPORT"
-            elif impact.get("update_type") == "HISTORICAL_CONTEXT":
-                reason = "IMPACT_HISTORICAL_CONTEXT"
-            elif impact.get("update_type") == "COMMENTARY":
-                reason = "IMPACT_COMMENTARY"
-            else:
-                reason = "IMPACT_BACKGROUND"
-            timing = NewsTimeAssessment(
-                False, timing.event_time, timing.age_minutes,
-                timing.discovery_delay_seconds, reason,
+        if legacy_v3:
+            row["time_assessment"] = assess_news_time(
+                row, decision_time=decision_time, forward_epoch=forward_epoch,
             )
-        row["time_assessment"] = timing
+        else:
+            impact = (
+                {
+                    "impact_class": row.get("impact_class"),
+                    "event_state": row.get("impact_event_state"),
+                    "update_type": row.get("impact_update_type"),
+                }
+                if row.get("impact_assessment_id") else None
+            )
+            max_age, _ = impact_time_rule(
+                str(row.get("impact_class") or "BACKGROUND")
+            )
+            timing = assess_news_time(
+                row, decision_time=decision_time, forward_epoch=forward_epoch,
+                max_actionable_age=max_age,
+                max_discovery_delay=None,
+                allow_pre_forward_publication=True,
+                exclude_weekly_closure=True,
+            )
+            if not impact_is_actionable(impact):
+                if impact is None:
+                    reason = "IMPACT_NOT_ASSESSED"
+                elif impact.get("update_type") == "DUPLICATE_REPORT":
+                    reason = "IMPACT_DUPLICATE_REPORT"
+                elif impact.get("update_type") == "HISTORICAL_CONTEXT":
+                    reason = "IMPACT_HISTORICAL_CONTEXT"
+                elif impact.get("update_type") == "COMMENTARY":
+                    reason = "IMPACT_COMMENTARY"
+                else:
+                    reason = "IMPACT_BACKGROUND"
+                timing = NewsTimeAssessment(
+                    False, timing.event_time, timing.age_minutes,
+                    timing.discovery_delay_seconds, reason,
+                )
+            row["time_assessment"] = timing
         row["publisher_domain"] = _domain(row.get("link"))
         if (
+            not legacy_v3
+            and
             row["source"] == "google_news_bls_official_releases"
             and row["publisher_domain"] != "bls.gov"
             and not row["publisher_domain"].endswith(".bls.gov")
@@ -305,7 +394,7 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
         )
         row["topics"] = _topics(row)
         row["event_cluster_id"] = _event_key(
-            row, row["topics"],
+            row, row["topics"], use_material_event_key=not legacy_v3,
         )
         grouped[row["event_cluster_id"]].append(row)
 
@@ -313,7 +402,9 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
     for event_id, members in grouped.items():
         timely = [row for row in members if row["time_assessment"].eligible]
         evidence_members = timely or members
-        primary_sources = BROAD_PRIMARY_SOURCES
+        primary_sources = (
+            LEGACY_V3_BROAD_PRIMARY_SOURCES if legacy_v3 else BROAD_PRIMARY_SOURCES
+        )
         primary = [row for row in evidence_members if row["source"] in primary_sources]
         reliable_domains = {
             row["reliable_domain"] for row in evidence_members if row["reliable_domain"]
@@ -322,7 +413,9 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             row["source_organization"]
             for row in evidence_members if row["source_organization"]
         }
-        reliable_sources = reliable_organizations
+        reliable_sources = (
+            reliable_domains if legacy_v3 else reliable_organizations
+        )
         if primary:
             grade = "PRIMARY"
         elif len(reliable_sources) >= 2:
@@ -334,7 +427,8 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
         candidates = primary or [
             row for row in evidence_members
             if (
-                row["source_organization"] in reliable_sources
+                row["reliable_domain"] in reliable_sources if legacy_v3
+                else row["source_organization"] in reliable_sources
             )
         ] or evidence_members
         canonical = max(
@@ -349,27 +443,31 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
         topics = tuple(sorted({topic for row in members for topic in row["topics"]}))
         annotation = json.loads(canonical.get("annotation_json") or "{}")
         controlled_category = str(annotation.get("primary_category") or "")
-        record_kind = effective_record_kind(
-            annotation,
-            str(annotation.get("headline_zh") or canonical.get("headline") or ""),
+        record_kind = _deterministic_record_kind(
+            annotation, str(annotation.get("headline_zh") or canonical.get("headline") or ""),
         )
         evidence_role = str(annotation.get("evidence_role") or "")
         materiality = float(annotation.get("materiality") or 0.0)
+        current_semantic_schema = canonical.get("prompt_version") == CURRENT_EVENT_PROMPT_VERSION
         event_clock, event_clock_source, event_time_precision = resolve_event_clock(
             canonical,
             primary_source=canonical["source"] in primary_sources,
             reliable_publisher=bool(canonical["reliable_domain"]),
         )
-        event_clock_valid = bool(
+        event_clock_valid = legacy_v3 or bool(
             event_clock is not None
             and event_clock <= decision_time
         )
-        semantic_eligible = (
-            record_kind in ACTIONABLE_RECORD_KINDS
+        semantic_eligible = legacy_v3 or (
+            current_semantic_schema
+            and record_kind in ACTIONABLE_RECORD_KINDS
             and evidence_role in ACTIONABLE_EVIDENCE_ROLES
             and materiality >= MIN_ACTIONABLE_MATERIALITY
         )
-        relevant = controlled_category in ACTIONABLE_CATEGORIES
+        relevant = controlled_category in {
+            "rates_fed", "inflation_employment", "growth_economy", "usd_liquidity",
+            "oil_energy", "war_geopolitics", "central_bank_gold", "risk_sentiment",
+        }
         headline_actionable = news_headline_is_actionable(
             str(canonical.get("headline") or "")
         )
@@ -387,15 +485,21 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
         publisher_domains = sorted({
             row["publisher_domain"] for row in members if row["publisher_domain"]
         })
-        primary_organizations = {
-            str(json.loads(row.get("annotation_json") or "{}").get(
-                "source_organization_id"
-            ) or row["source"]).strip().casefold()
-            for row in primary
-        }
-        independent_publishers = (
-            len(reliable_organizations) if not primary else len(primary_organizations)
-        )
+        if legacy_v3:
+            independent_publishers = (
+                len(reliable_sources) if not primary
+                else len({row["source"] for row in primary})
+            )
+        else:
+            primary_organizations = {
+                str(json.loads(row.get("annotation_json") or "{}").get(
+                    "source_organization_id"
+                ) or row["source"]).strip().casefold()
+                for row in primary
+            }
+            independent_publishers = (
+                len(reliable_organizations) if not primary else len(primary_organizations)
+            )
         reasons = [f"EVIDENCE_{grade}"]
         if event_clock_source == "SOURCE_STRUCTURED_TIME":
             reasons.append("RELIABLE_PUBLISHER_TIME_PROXY")
@@ -411,16 +515,19 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             reasons.append("RELIABLE_SINGLE_SOURCE_PROVISIONAL")
         elif timely and grade not in {"PRIMARY", "CORROBORATED"}:
             reasons.append("NEEDS_CONFIRMATION")
-        if record_kind not in ACTIONABLE_RECORD_KINDS:
-            reasons.append("RECORD_KIND_NOT_ACTIONABLE")
-        if evidence_role not in ACTIONABLE_EVIDENCE_ROLES:
-            reasons.append("EVIDENCE_ROLE_NOT_ACTIONABLE")
-        if materiality < MIN_ACTIONABLE_MATERIALITY:
-            reasons.append("LOW_MATERIALITY")
-        if not event_clock_valid:
-            reasons.append("EVENT_TIME_INVALID")
-        if not headline_actionable:
-            reasons.append("EDITORIAL_OR_INVESTMENT_GUIDE")
+        if not legacy_v3:
+            if not current_semantic_schema:
+                reasons.append("LEGACY_ANNOTATION_SCHEMA")
+            if record_kind not in ACTIONABLE_RECORD_KINDS:
+                reasons.append("RECORD_KIND_NOT_ACTIONABLE")
+            if evidence_role not in ACTIONABLE_EVIDENCE_ROLES:
+                reasons.append("EVIDENCE_ROLE_NOT_ACTIONABLE")
+            if materiality < MIN_ACTIONABLE_MATERIALITY:
+                reasons.append("LOW_MATERIALITY")
+            if not event_clock_valid:
+                reasons.append("EVENT_TIME_INVALID")
+            if not headline_actionable:
+                reasons.append("EDITORIAL_OR_INVESTMENT_GUIDE")
         entities = sorted({
             str(value).strip()
             for row in members
@@ -430,26 +537,39 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
         canonical_headline = str(
             annotation.get("headline_zh") or canonical["headline"]
         )
-        source_hash = canonical_hash(sorted(
-            (
-                row["content_hash"], row["annotation_id"],
-                row.get("impact_assessment_id"), row.get("source_organization"),
-            )
-            for row in members
-        ))
-        event_version_id = canonical_hash((
-            event_id, source_hash, canonical["content_hash"],
-            canonical["annotation_id"], canonical.get("impact_assessment_id"),
-            grade, eligible, official_eligible,
-            event_clock.isoformat() if event_clock else None,
-            EVIDENCE_POLICY_VERSION,
-        ))
+        if legacy_v3:
+            source_hash = canonical_hash(sorted(
+                (row["content_hash"], row["annotation_id"]) for row in members
+            ))
+            event_version_id = canonical_hash((
+                event_id, canonical["content_hash"], canonical["annotation_id"],
+                canonical.get("impact_assessment_id"),
+                LEGACY_V3_EVIDENCE_POLICY_VERSION,
+            ))
+        else:
+            source_hash = canonical_hash(sorted(
+                (
+                    row["content_hash"], row["annotation_id"],
+                    row.get("impact_assessment_id"), row.get("source_organization"),
+                )
+                for row in members
+            ))
+            event_version_id = canonical_hash((
+                event_id, source_hash, canonical["content_hash"],
+                canonical["annotation_id"], canonical.get("impact_assessment_id"),
+                grade, eligible, official_eligible,
+                event_clock.isoformat() if event_clock else None,
+                EVIDENCE_POLICY_VERSION,
+            ))
         events.append({
             "event_cluster_id": event_id,
             "event_key": event_id,
             "event_id": event_id,
             "event_version_id": event_version_id,
-            "policy_version": EVIDENCE_POLICY_VERSION,
+            "policy_version": (
+                LEGACY_V3_EVIDENCE_POLICY_VERSION if legacy_v3
+                else EVIDENCE_POLICY_VERSION
+            ),
             "prompt_version": canonical.get("prompt_version"),
             "topics": topics,
             "evidence_grade": grade,
@@ -519,7 +639,7 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             "confidence": min(
                 float(canonical["confidence"]),
                 float(canonical.get("impact_confidence") or 0.0),
-            ),
+            ) if not legacy_v3 else float(canonical["confidence"]),
             "reason_codes": reasons,
             "source_hash": source_hash,
         })

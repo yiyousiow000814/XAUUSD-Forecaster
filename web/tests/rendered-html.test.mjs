@@ -15,17 +15,6 @@ async function render(path) {
   );
 }
 
-async function renderSettled(path, marker) {
-  let response = await render(path);
-  let html = await response.text();
-  if (!marker.test(html) && html.includes("app-view-loading")) {
-    await new Promise(resolve => setTimeout(resolve, 25));
-    response = await render(path);
-    html = await response.text();
-  }
-  return { response, html };
-}
-
 test("renders the live room with an audit-page navigation button", async () => {
   const response = await render("/");
   assert.equal(response.status, 200);
@@ -38,7 +27,7 @@ test("renders the live room with an audit-page navigation button", async () => {
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
 });
 
-test("keeps branch preview writes isolated from the production database", async () => {
+test("keeps branch previews isolated from the production database", async () => {
   const source = readFileSync(new URL("../app/api/_shared/preview.ts", import.meta.url), "utf8");
   const layout = readFileSync(new URL("../app/layout.tsx", import.meta.url), "utf8");
   assert.match(source, /PR Preview 是只读快照/);
@@ -55,103 +44,6 @@ test("keeps branch preview writes isolated from the production database", async 
   assert.match(builtPreview, /PREVIEW_SNAPSHOT/);
   assert.match(builtPreview, /监测正常，暂无新的正式月度资料/);
   assert.match(builtPreview, new RegExp(process.env.WORKERS_CI_BRANCH.replaceAll("/", "\\/")));
-});
-
-test("hydrates preview pages from compact status plus read-only D1 resources", () => {
-  const page = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
-  const app = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
-  const resources = readFileSync(new URL("../app/_lib/dashboard-resource.ts", import.meta.url), "utf8");
-  assert.match(page, /function previewResources/);
-  assert.match(page, /previewBundle\.status/);
-  assert.match(page, /previewBundle\.learning_summary/);
-  const vite = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
-  const learning = readFileSync(new URL("../build/preview-learning.ts", import.meta.url), "utf8");
-  const contract = readFileSync(new URL("../preview-contract.json", import.meta.url), "utf8");
-  assert.match(vite, /compactPreviewLearning/);
-  assert.match(vite, /compactPreviewStatus/);
-  assert.match(vite, /compactPreviewNewsIndex/);
-  assert.match(vite, /delete bundle\.learning/);
-  assert.doesNotMatch(learning, /"recent_decisions"/);
-  assert.doesNotMatch(learning, /"news_evidence"/);
-  assert.match(learning, /items\.slice\(0, PREVIEW_NEWS_PAGE_SIZE\)/);
-  assert.match(learning, /history_resource: market\.history_resource \?\? PREVIEW_RESOURCES\.marketHistory/);
-  assert.match(learning, /training_markers: market\.training_markers \?\? \[\]/);
-  for (const key of ["news_evidence", "story_event_candidates", "recent_decisions"]) {
-    assert.match(contract, new RegExp(`"${key}"`), key);
-  }
-  assert.match(contract, /"marketHistory": "\/api\/market-history"/);
-  assert.doesNotMatch(page, /function previewRoomResources/);
-  assert.match(learning, /models\.filter/);
-  assert.match(learning, /lifecycle_status === "LATEST"/);
-  assert.match(learning, /identity_curves: \[\]/);
-  assert.doesNotMatch(page, /auditView === "league"/);
-  assert.match(page, /\[PREVIEW_RESOURCES\.status\]: previewBundle\.status/);
-  assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);
-  assert.match(resources, /DEFAULT_TIMEOUT_MS = 10_000/);
-  assert.match(resources, /数据读取超时，页面会自动重试/);
-});
-
-test("keeps every audit collection in compact Preview status", () => {
-  const contract = readFileSync(new URL("../preview-contract.json", import.meta.url), "utf8");
-  for (const key of [
-    "news_evidence", "storylines", "story_event_candidates", "theme_streams",
-    "market_reaction_streams", "recent_decisions",
-  ]) {
-    assert.match(contract, new RegExp(`"${key}"`), key);
-  }
-  assert.match(contract, /"preview"/);
-  assert.match(contract, /"marketHistory": "\/api\/market-history"/);
-});
-
-test("falls through to read-only D1 for later Preview news and details", () => {
-  const index = readFileSync(new URL("../app/api/news-index/route.ts", import.meta.url), "utf8");
-  const detail = readFileSync(new URL("../app/api/news-content/route.ts", import.meta.url), "utf8");
-  assert.match(index, /previewBundle && page === 1 && !category && pageSize <= inlinePreviewItems\.length/);
-  assert.match(index, /Number\(previewBundle\.news_index\.total \?\? inlinePreviewItems\.length\)/);
-  assert.match(index, /if \(previewBundle\) \{\s*return previewJson\(\{ error: "新闻档案暂时不可用，请稍后重试" \}, 503\)/);
-  assert.match(detail, /if \(detail\) return previewJson\(detail\)/);
-  assert.doesNotMatch(detail, /该新闻详情不在本次 Preview 快照中/);
-});
-
-test("does not poll immutable Preview snapshots", () => {
-  const helper = readFileSync(new URL("../app/_lib/dashboard-refresh.ts", import.meta.url), "utf8");
-  assert.match(helper, /immutablePreview\s*\?\s*null\s*:\s*window\.setInterval\(pollRefresh/);
-  assert.match(helper, /is_preview[^=]*=== true/s);
-  for (const path of [
-    "../app/_views/LiveRoomView.tsx",
-    "../app/_views/StatusView.tsx",
-    "../app/_views/HealthView.tsx",
-    "../app/_views/AuditView.tsx",
-  ]) {
-    const source = readFileSync(new URL(path, import.meta.url), "utf8");
-    assert.match(source, /scheduleDashboardRefresh/);
-    assert.match(source, /immutablePreview/);
-  }
-});
-
-test("renders every preview room from the build snapshot", async () => {
-  if (!process.env.WORKERS_CI_BRANCH || process.env.WORKERS_CI_BRANCH === "main") return;
-  for (const [path, marker] of [
-    ["/", /Aurum Signal Room/],
-    ["/?room=status", /AI 模型使用状态/],
-    ["/?room=health", /系统健康状态/],
-  ]) {
-    const { response, html } = await renderSettled(path, marker);
-    assert.equal(response.status, 200, path);
-    assert.match(html, marker, path);
-  }
-  for (const view of ["news", "evidence", "stories", "decisions", "league", "coverage"]) {
-    const response = await render(`/?room=audit&view=${view}`);
-    assert.equal(response.status, 200, view);
-    const html = await response.text();
-    assert.doesNotMatch(html, /读取中/, view);
-  }
-});
-
-test("formats server-rendered preview times in one deterministic timezone", () => {
-  for (const path of ["../app/_views/AuditView.tsx", "../app/_views/LiveRoomView.tsx", "../app/_views/StatusView.tsx", "../app/_views/HealthView.tsx"]) {
-    assert.match(readFileSync(new URL(path, import.meta.url), "utf8"), /timeZone:\s*"Asia\/Kuala_Lumpur"/, path);
-  }
 });
 
 test("returns a verified main revision through the existing ingest heartbeat", () => {
@@ -174,8 +66,9 @@ test("does not show a redundant forecast warning while the market is closed", ()
 });
 
 test("renders the Gemini quota status route", async () => {
-  const { response, html } = await renderSettled("/?room=status", /AI 模型使用状态/);
+  const response = await render("/?room=status");
   assert.equal(response.status, 200);
+  const html = await response.text();
   assert.match(html, /AI 模型使用状态/);
   assert.match(html, /Gemini 3.5 Flash-Lite/);
   assert.match(html, /Gemini 3.1 Flash-Lite/);
@@ -184,7 +77,7 @@ test("renders the Gemini quota status route", async () => {
   assert.match(html, /逐 Key 配额/);
   assert.match(html, /Pacific midnight/);
   assert.match(html, /组件与新闻源/);
-  assert.match(html, /连接中|状态离线/);
+  assert.match(html, /连接中/);
 });
 
 test("renders component and news-source health on a separate route", async () => {
@@ -267,9 +160,7 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /按事件类型和有效交易时间逐步衰减/);
   assert.match(source, /无效样本/);
   assert.match(source, /activeLearningIdentities/);
-  // The live snapshot may fill all 12 rows or leave placeholders.  Rendering
-  // must not depend on today's article count.
-  assert.match(html, /news-row/);
+  assert.match(html, /news-row-placeholder/);
   assert.match(html, /决策与30分钟结果/);
   assert.match(html, /Live OOS 学习曲线/);
   assert.match(html, /大视野覆盖/);
@@ -392,10 +283,10 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /共同训练截止量对齐/);
   assert.match(modal, /查看模型明细/);
   assert.match(modal, /最近20个训练截止点/);
-  assert.match(modal, /按同一训练截止点比较/);
-  assert.doesNotMatch(modal, /空缺代表该模型当轮没有合法新版本/);
+  assert.match(modal, /空缺代表该模型当轮没有合法新版本/);
   assert.match(modal, /crossesMissingCutoff/);
   assert.match(modal, /strokeDasharray=\{crossesMissingCutoff/);
+  assert.match(modal, /这里只叠加显示，不会把收益相加/);
   assert.match(modal, /gx\(comparisonCutoff\(row\)\)/);
   assert.doesNotMatch(modal, /gx\(row\.generation\)/);
   assert.match(modal, /每30分钟（固定 :00 \/ :30）/);
@@ -451,12 +342,11 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /回到最新/);
   assert.match(modal, /全部历史只画压缩轮廓/);
   assert.match(modal, /Page through windows that contain real matured results/);
-  assert.match(modal, /compressedTimeline/);
-  const timeline = readFileSync(new URL("../app/audit/compressedTimeline.ts", import.meta.url), "utf8");
-  assert.match(timeline, /One plotting-time contract for every market chart/);
-  assert.equal(modal.match(/compressedTimeline\(/g)?.length, 2);
-  assert.doesNotMatch(modal, /curve-gap-bridge/);
-  assert.doesNotMatch(modal, /休市期间没有成熟结果/);
+  assert.match(modal, /Plot result time, not wall-clock time/);
+  assert.match(modal, /curve-gap-bridge/);
+  assert.match(modal, /休市期间没有成熟结果/);
+  assert.match(modal, /curve-gap-carry-in/);
+  assert.match(modal, /窗口开始前有真实结果；中间没有成熟结果/);
   assert.doesNotMatch(modal, /points\.unshift\(\{ decision_time: new Date\(start\)/);
   assert.doesNotMatch(modal, /points\.push\(\{ decision_time: new Date\(end\)/);
   assert.match(modal, /成本后EV较高方向/);
@@ -473,9 +363,6 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /方向 \$\{boundary\.direction\}/);
   assert.match(modal, /新闻 \$\{boundary\.news\}/);
   assert.match(modal, /version-boundary-badge/);
-  assert.match(modal, /function curveRuns/);
-  assert.match(modal, /strokeDasharray=\{run\.wait \? "7 6" : undefined\}/);
-  assert.match(modal, /虚线：WAIT/);
   assert.match(modal, /const laneEnds: number\[\] = \[\]/);
   assert.match(modal, /boundaryLayouts/);
   assert.match(modal, /version-boundary-leader/);
@@ -643,28 +530,11 @@ test("explains training rows separately from independent news events", () => {
   assert.match(source, /不是训练还缺的数量/);
 });
 
-test("shows residual and news-only research directions without implying execution", () => {
+test("labels residual and news-only research without hiding composite direction", () => {
   const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
-  assert.match(source, /修正量自己的30分钟方向研究/);
-  assert.match(source, /正修正显示 LONG，负修正显示 SHORT/);
+  assert.match(source, /仅显示修正值，不单独判断方向/);
   assert.match(source, /只看新闻的30分钟方向研究/);
-  assert.match(source, /model\.research_action \?\? model\.recommended_action/);
-  assert.match(source, /按当时冻结 EV 重算方向 · 原始记录为 WAIT/);
   assert.doesNotMatch(source, /暂不参考方向/);
-  assert.doesNotMatch(source, /仅显示修正值，不单独判断方向/);
-});
-
-test("prefetches the complete learning ledger before interactive charts need it", () => {
-  const audit = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
-  const compact = readFileSync(new URL("../build/preview-learning.ts", import.meta.url), "utf8");
-  assert.match(compact, /learning_preview_summary: true/);
-  assert.match(compact, /preview_status_summary: true/);
-  assert.match(compact, /identity_curves: \[\]/);
-  assert.match(audit, /refreshStatus\(!fullStatusReadyRef\.current\)/);
-  assert.match(audit, /refreshLearning\(!fullLearningReadyRef\.current\)/);
-  assert.match(audit, /if \(!fullLearningReadyRef\.current\) void refreshLearning\(true\)/);
-  assert.match(audit, /learningDataAvailableRef\.current \? "ready" : "error"/);
-  assert.match(audit, /learningFailureCountRef\.current >= 2/);
 });
 
 test("reflows news evidence into readable mobile cards", () => {

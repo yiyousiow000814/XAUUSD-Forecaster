@@ -2,7 +2,6 @@
 
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import LiveRoomView from "../_views/LiveRoomView";
-import { primeDashboardResources } from "../_lib/dashboard-resource";
 import {
   DashboardNavigationProvider,
   type AuditViewName,
@@ -48,13 +47,7 @@ function preloadRoom(room: DashboardRoom): Promise<unknown> {
   return Promise.resolve();
 }
 
-export default function DashboardApp({
-  initialLocation, initialResources = {},
-}: {
-  initialLocation: DashboardLocation;
-  initialResources?: Record<string, unknown>;
-}) {
-  primeDashboardResources(initialResources);
+export default function DashboardApp({ initialLocation }: { initialLocation: DashboardLocation }) {
   const [location, setLocation] = useState(initialLocation);
   const navigationSequence = useRef(0);
 

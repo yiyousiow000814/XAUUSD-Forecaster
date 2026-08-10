@@ -39,7 +39,6 @@ from xauusd_forecaster.annotation import (  # noqa: E402
     GEMINI_DAILY_PRIORITY_RESERVE,
     GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
     INVALID_CHINESE_TITLE,
-    PROMPT_VERSION,
     completed_annotation_records,
     configured_gemini_api_keys,
     pending_annotation_records,
@@ -48,7 +47,6 @@ from xauusd_forecaster.gemini_quota import GeminiQuotaLedger  # noqa: E402
 from xauusd_forecaster.training import MARKET_FEATURES  # noqa: E402
 from xauusd_forecaster.learning_curves import learning_curve_payload  # noqa: E402
 from xauusd_forecaster.execution_costs import net_shadow_log_return  # noqa: E402
-from xauusd_forecaster.decision import prediction_research_action  # noqa: E402
 from xauusd_forecaster.news_evidence import (  # noqa: E402
     EVIDENCE_POLICY_VERSION, event_evidence_rows_from_connection,
     resolve_event_clock,
@@ -854,7 +852,7 @@ def _news_evidence_display_rows(
         event_key = row["event_key"]
         if event_key in displayed_events:
             continue
-        if row.get("prompt_version") != PROMPT_VERSION:
+        if row.get("prompt_version") != "news-json-v14-material-event-evidence":
             continue
         if row.get("evidence_grade") not in {
             "PRIMARY", "CORROBORATED", "SINGLE_RELIABLE",
@@ -1000,15 +998,6 @@ def _dashboard_payload(database: Path) -> dict:
             ).fetchall()
             for prediction in prediction_rows:
                 item = dict(prediction)
-                research_action, research_action_source = prediction_research_action(
-                    model_identity=item["model_identity"],
-                    prediction_status=item["prediction_status"],
-                    recommended_action=item["recommended_action"],
-                    ev_long_u5=item["ev_long_u5"],
-                    ev_short_u5=item["ev_short_u5"],
-                )
-                item["research_action"] = research_action
-                item["research_action_source"] = research_action_source
                 predictions_by_decision[item.pop("decision_id")].append(item)
         news_rows = connection.execute(
             """SELECT n.source, n.source_item_id, n.revision_number,
@@ -1031,11 +1020,18 @@ def _dashboard_payload(database: Path) -> dict:
                       json_extract(a.annotation_json, '$.secondary_categories') AS secondary_categories_json,
                        json_extract(a.annotation_json, '$.emerging_topic_zh') AS emerging_topic_zh,
                        json_extract(a.annotation_json, '$.event_time') AS event_time,
-                      a.event_type, a.entities_json, a.hawkishness,
-                      a.inflation_impulse, a.growth_impulse,
-                      a.geopolitical_risk, a.usd_impulse, a.novelty,
-                      a.confidence, a.llm_model_version, a.prompt_version,
-                      a.parsed_at,
+                      COALESCE(a.event_type, legacy.event_type, legacy_v3.event_type) AS event_type,
+                      COALESCE(a.entities_json, legacy.entities_json, legacy_v3.entities_json) AS entities_json,
+                      COALESCE(a.hawkishness, legacy.hawkishness, legacy_v3.hawkishness) AS hawkishness,
+                      COALESCE(a.inflation_impulse, legacy.inflation_impulse, legacy_v3.inflation_impulse) AS inflation_impulse,
+                      COALESCE(a.growth_impulse, legacy.growth_impulse, legacy_v3.growth_impulse) AS growth_impulse,
+                      COALESCE(a.geopolitical_risk, legacy.geopolitical_risk, legacy_v3.geopolitical_risk) AS geopolitical_risk,
+                      COALESCE(a.usd_impulse, legacy.usd_impulse, legacy_v3.usd_impulse) AS usd_impulse,
+                      COALESCE(a.novelty, legacy.novelty, legacy_v3.novelty) AS novelty,
+                      COALESCE(a.confidence, legacy.confidence, legacy_v3.confidence) AS confidence,
+                      COALESCE(a.llm_model_version, legacy.llm_model_version, legacy_v3.llm_model_version) AS llm_model_version,
+                      COALESCE(a.prompt_version, legacy.prompt_version, legacy_v3.prompt_version) AS prompt_version,
+                       COALESCE(a.parsed_at, legacy.parsed_at, legacy_v3.parsed_at) AS parsed_at,
                        i.impact_class,
                        i.event_state AS impact_event_state,
                        i.update_type AS impact_update_type,
@@ -1045,8 +1041,8 @@ def _dashboard_payload(database: Path) -> dict:
                        CASE WHEN n.source_published_time IS NOT NULL THEN
                          (julianday(n.collector_first_seen_time)-julianday(n.source_published_time))*86400
                        END AS collection_delay_seconds,
-                       CASE WHEN a.parsed_at IS NOT NULL THEN
-                         (julianday(a.parsed_at)-
+                       CASE WHEN COALESCE(a.parsed_at, legacy.parsed_at, legacy_v3.parsed_at) IS NOT NULL THEN
+                         (julianday(COALESCE(a.parsed_at, legacy.parsed_at, legacy_v3.parsed_at))-
                           julianday(n.collector_first_seen_time))*86400
                        END AS processing_delay_seconds,
                        COALESCE(r.maximum_tier, 'COLLECT_ONLY') AS source_eligibility,
@@ -1087,10 +1083,34 @@ def _dashboard_payload(database: Path) -> dict:
                      AND preferred_a.revision_number=n.revision_number
                      AND preferred_a.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
-                     AND preferred_a.prompt_version=?
-                   ORDER BY CASE preferred_a.llm_model_version
+                     AND preferred_a.prompt_version IN (
+                       'news-json-v14-material-event-evidence',
+                       'news-json-v13-event-claims',
+                       'news-json-v12-gemini-story-identity',
+                       'news-json-v11-gemini-story-subjects',
+                       'news-json-v10-controlled-category-zh',
+                       'news-json-v9-local-display-recovery')
+                   ORDER BY CASE preferred_a.prompt_version
+                     WHEN 'news-json-v14-material-event-evidence' THEN 0
+                     WHEN 'news-json-v13-event-claims' THEN 1
+                     WHEN 'news-json-v12-gemini-story-identity' THEN 2
+                     WHEN 'news-json-v11-gemini-story-subjects' THEN 3
+                     WHEN 'news-json-v10-controlled-category-zh' THEN 4 ELSE 5 END,
+                     CASE preferred_a.llm_model_version
                        WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                      preferred_a.parsed_at DESC LIMIT 1)
+               LEFT JOIN news_annotations legacy
+                 ON legacy.source=n.source
+                AND legacy.source_item_id=n.source_item_id
+                AND legacy.revision_number=n.revision_number
+                AND legacy.llm_model_version='gemini-3.5-flash-lite'
+                AND legacy.prompt_version='news-json-v7-strict-headline-and-summary-zh-verbatim-numbers'
+               LEFT JOIN news_annotations legacy_v3
+                 ON legacy_v3.source=n.source
+                AND legacy_v3.source_item_id=n.source_item_id
+                AND legacy_v3.revision_number=n.revision_number
+                AND legacy_v3.llm_model_version='gemini-3.5-flash-lite'
+                 AND legacy_v3.prompt_version='news-json-v6-headline-and-summary-zh-verbatim-numbers'
                LEFT JOIN news_impact_assessments_v1 i
                  ON i.annotation_id=a.annotation_id
                 AND i.llm_model_version=?
@@ -1105,7 +1125,7 @@ def _dashboard_payload(database: Path) -> dict:
                      AND latest_f.revision_number=n.revision_number
                      AND latest_f.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
-                     AND latest_f.prompt_version=?
+                     AND latest_f.prompt_version='news-json-v14-material-event-evidence'
                      AND NOT (latest_f.error_type='RuntimeError'
                               AND latest_f.error='All configured Gemini keys unavailable for this batch')
                     ORDER BY latest_f.failed_at DESC LIMIT 1)
@@ -1150,9 +1170,7 @@ def _dashboard_payload(database: Path) -> dict:
                LIMIT 1000""",
             (
                 now.isoformat(timespec="microseconds"), INVALID_CHINESE_TITLE,
-                PROMPT_VERSION,
                 IMPACT_MODEL, IMPACT_PROMPT_VERSION,
-                PROMPT_VERSION,
             ),
         ).fetchall()
         annotation_queue = connection.execute(
@@ -1185,8 +1203,16 @@ def _dashboard_payload(database: Path) -> dict:
                      AND preferred_a.revision_number=n.revision_number
                      AND preferred_a.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
-                     AND preferred_a.prompt_version=?
-                   ORDER BY CASE preferred_a.llm_model_version
+                     AND preferred_a.prompt_version IN (
+                       'news-json-v12-gemini-story-identity',
+                       'news-json-v11-gemini-story-subjects',
+                       'news-json-v10-controlled-category-zh',
+                       'news-json-v9-local-display-recovery')
+                   ORDER BY CASE preferred_a.prompt_version
+                     WHEN 'news-json-v12-gemini-story-identity' THEN 0
+                     WHEN 'news-json-v11-gemini-story-subjects' THEN 1
+                     WHEN 'news-json-v10-controlled-category-zh' THEN 2 ELSE 3 END,
+                     CASE preferred_a.llm_model_version
                        WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                      preferred_a.parsed_at DESC LIMIT 1)
                LEFT JOIN news_llm_failures f
@@ -1199,7 +1225,7 @@ def _dashboard_payload(database: Path) -> dict:
                      AND latest_f.revision_number=n.revision_number
                      AND latest_f.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
-                     AND latest_f.prompt_version=?
+                     AND latest_f.prompt_version='news-json-v12-gemini-story-identity'
                      AND NOT (latest_f.error_type='RuntimeError'
                               AND latest_f.error='All configured Gemini keys unavailable for this batch')
                    ORDER BY latest_f.failed_at DESC LIMIT 1)
@@ -1230,8 +1256,6 @@ def _dashboard_payload(database: Path) -> dict:
             (
                 now.isoformat(timespec="microseconds"),
                 now.isoformat(timespec="microseconds"),
-                PROMPT_VERSION,
-                PROMPT_VERSION,
             ),
         ).fetchone()
         # The displayed queue is the worker's real claimable queue, not a

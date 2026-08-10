@@ -7,24 +7,9 @@ from xauusd_forecaster import (
     ShadowDecisionGate,
     select_recommended_action,
 )
-from xauusd_forecaster.decision import (
-    prediction_research_action,
-    select_post_cost_ev_action,
-)
 
 
 UTC = timezone.utc
-
-
-def test_legacy_residual_research_action_uses_only_frozen_ev() -> None:
-    assert select_post_cost_ev_action(0.109, -0.129) is Action.LONG
-    assert prediction_research_action(
-        model_identity="BROAD_NEWS_RESIDUAL",
-        prediction_status="DIAGNOSTIC_RESIDUAL_ONLY",
-        recommended_action="WAIT",
-        ev_long_u5=0.109,
-        ev_short_u5=-0.129,
-    ) == ("LONG", "REPLAYED_FROM_FROZEN_POST_COST_EV")
 
 
 def forecast(at: datetime, **overrides: object) -> Forecast:
