@@ -35,6 +35,56 @@ def test_deployment_status_does_not_mislabel_local_edits_as_remote_drift() -> No
     assert module._deployment_status(None, "remote", False) == "PROVENANCE_UNKNOWN"
 
 
+def test_news_evidence_display_collapses_frozen_versions_to_one_event() -> None:
+    module = _dashboard_module()
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.executescript(
+        """
+        CREATE TABLE news_model_visibility_receipts_v1 (
+          source_decision_id TEXT, decision_time TEXT, model_identity TEXT,
+          model_version TEXT, event_key TEXT, event_source_hash TEXT
+        );
+        CREATE TABLE news_model_visibility_events_v1 (
+          event_source_hash TEXT, event_key TEXT, canonical_headline TEXT,
+          canonical_source TEXT, source_published_time TEXT,
+          collector_first_seen_time TEXT, topics_json TEXT,
+          evidence_grade TEXT
+        );
+        """
+    )
+    for version in ("hash-v1", "hash-v2"):
+        connection.execute(
+            "INSERT INTO news_model_visibility_events_v1 VALUES (?,?,?,?,?,?,?,?)",
+            (version, "same-event", "同一个事件", "source", "2026-08-10T01:00:00+00:00",
+             "2026-08-10T01:01:00+00:00", "[]", "SINGLE_RELIABLE"),
+        )
+        connection.execute(
+            "INSERT INTO news_model_visibility_receipts_v1 VALUES (?,?,?,?,?,?)",
+            (f"decision-{version}", "2026-08-10T02:00:00+00:00", "FULL",
+             f"model-{version}", "same-event", version),
+        )
+    current = [{
+        "event_key": "same-event", "source_hash": "hash-v2",
+        "canonical_headline": "同一个事件", "canonical_source": "source",
+        "source_published_time": "2026-08-10T01:00:00+00:00",
+        "collector_first_seen_time": "2026-08-10T01:01:00+00:00",
+        "economic_age_minutes": 60, "freshness_status": "ACTIVE", "topics": [],
+        "evidence_grade": "SINGLE_RELIABLE", "broad_model_eligible": True,
+        "model_permission": "BROAD_MODEL", "member_count": 2,
+        "independent_publishers": 1, "source_names": ["source"],
+        "publisher_domains": ["example.com"], "source_identity_organizations": ["source"],
+        "reason_codes": [], "prompt_version": "news-json-v14-material-event-evidence",
+    }]
+
+    rows = module._news_evidence_display_rows(connection, current)
+
+    assert len(rows) == 1
+    assert rows[0]["event_key"] == "same-event"
+    assert rows[0]["frozen_versions"] == 2
+    assert rows[0]["frozen_decisions"] == 2
+
+
 def test_deployment_provenance_discovers_git_from_standalone_module_root(
     monkeypatch,
     tmp_path: Path,
