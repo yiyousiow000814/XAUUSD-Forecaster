@@ -6,6 +6,14 @@ type CacheEntry = {
 
 const resources = new Map<string, CacheEntry>();
 const DEFAULT_MAX_AGE_MS = 15_000;
+const DEFAULT_TIMEOUT_MS = 10_000;
+
+export function primeDashboardResources(initial: Record<string, unknown>): void {
+  const updatedAt = Date.now();
+  for (const [url, data] of Object.entries(initial)) {
+    resources.set(url, { data, updatedAt });
+  }
+}
 
 export function readDashboardResource<T>(url: string): T | null {
   return (resources.get(url)?.data as T | undefined) ?? null;
@@ -13,7 +21,7 @@ export function readDashboardResource<T>(url: string): T | null {
 
 export async function loadDashboardResource<T>(
   url: string,
-  options: { force?: boolean; maxAgeMs?: number } = {},
+  options: { force?: boolean; maxAgeMs?: number; timeoutMs?: number } = {},
 ): Promise<T> {
   const entry = resources.get(url) ?? { updatedAt: 0 };
   const maxAgeMs = options.maxAgeMs ?? DEFAULT_MAX_AGE_MS;
@@ -22,7 +30,11 @@ export async function loadDashboardResource<T>(
   if (!options.force && isFresh) return entry.data as T;
   if (entry.pending) return entry.pending as Promise<T>;
 
-  const pending = fetch(url, { cache: "no-store" }).then(async response => {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(
+    () => controller.abort(), options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+  );
+  const pending = fetch(url, { cache: "no-store", signal: controller.signal }).then(async response => {
     const serialized = await response.text();
     let body: unknown;
     try {
@@ -42,7 +54,12 @@ export async function loadDashboardResource<T>(
     return body as T;
   }).catch(reason => {
     resources.set(url, { ...entry, pending: undefined });
+    if (reason instanceof DOMException && reason.name === "AbortError") {
+      throw new Error("数据读取超时，页面会自动重试");
+    }
     throw reason;
+  }).finally(() => {
+    window.clearTimeout(timeout);
   });
 
   resources.set(url, { ...entry, pending });

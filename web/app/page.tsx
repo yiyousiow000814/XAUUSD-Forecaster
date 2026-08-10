@@ -1,5 +1,6 @@
 import DashboardApp from "./_components/DashboardApp";
 import type { AuditViewName, DashboardLocation } from "./_components/DashboardNavigation";
+import { previewBundle } from "./api/_shared/preview";
 
 type PageProps = {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
@@ -14,5 +15,11 @@ export default async function HomePage({ searchParams }: PageProps) {
   const auditView = viewValue && AUDIT_VIEWS.has(viewValue as AuditViewName) ? viewValue as AuditViewName : "news";
   const room = roomValue === "status" || roomValue === "health" || roomValue === "audit" ? roomValue : "live";
   const initialLocation: DashboardLocation = { room, auditView };
-  return <DashboardApp initialLocation={initialLocation} />;
+  const initialResources: Record<string, unknown> = previewBundle
+    ? { "/api/status": previewBundle.status }
+    : {};
+  if (previewBundle && room === "audit" && auditView === "league") {
+    initialResources["/api/learning"] = previewBundle.learning;
+  }
+  return <DashboardApp initialLocation={initialLocation} initialResources={initialResources} />;
 }

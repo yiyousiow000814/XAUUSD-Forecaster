@@ -46,6 +46,17 @@ test("keeps branch previews isolated from the production database", async () => 
   assert.match(builtPreview, new RegExp(process.env.WORKERS_CI_BRANCH.replaceAll("/", "\\/")));
 });
 
+test("hydrates preview pages from their immutable build snapshot", () => {
+  const page = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const app = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
+  const resources = readFileSync(new URL("../app/_lib/dashboard-resource.ts", import.meta.url), "utf8");
+  assert.match(page, /"\/api\/status": previewBundle\.status/);
+  assert.match(page, /initialResources\["\/api\/learning"\] = previewBundle\.learning/);
+  assert.match(app, /primeDashboardResources\(initialResources\)/);
+  assert.match(resources, /DEFAULT_TIMEOUT_MS = 10_000/);
+  assert.match(resources, /数据读取超时，页面会自动重试/);
+});
+
 test("returns a verified main revision through the existing ingest heartbeat", () => {
   const ingest = readFileSync(new URL("../app/api/ingest/route.ts", import.meta.url), "utf8");
   const vite = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
