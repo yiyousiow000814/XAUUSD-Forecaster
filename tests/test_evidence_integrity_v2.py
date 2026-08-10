@@ -24,7 +24,15 @@ from xauusd_forecaster.live_v2 import (
 )
 from xauusd_forecaster.market import MarketObservation
 from xauusd_forecaster.news_evidence import EVIDENCE_POLICY_VERSION, event_evidence_rows
-from xauusd_forecaster.news_features_v2 import aggregate_news_features_v2
+from xauusd_forecaster.news_contracts import (
+    CURRENT_NEWS_CONTRACT,
+    SUPPORTED_NEWS_CONTRACTS,
+    UNIFIED_EVENT_CLOCK_V4,
+)
+from xauusd_forecaster.news_features_v2 import (
+    aggregate_legacy_v4_news_features,
+    aggregate_news_features_v2,
+)
 from xauusd_forecaster.news_impact import impact_time_rule
 from xauusd_forecaster.news_time import assess_news_time, category_time_rule
 from xauusd_forecaster.repair_v2 import immutable_table_hash
@@ -420,6 +428,36 @@ def test_news_freshness_ages_from_published_time_not_parsed_at(tmp_path) -> None
     features = aggregate_news_features_v2(ledger, decision)
     expected_freshness = 2 ** (-30 / 360)
     assert features["features"]["news_event_count"] == pytest.approx(expected_freshness)
+    ledger.close()
+
+
+def test_contract_history_keeps_previous_generation_runnable() -> None:
+    assert SUPPORTED_NEWS_CONTRACTS[-1] == CURRENT_NEWS_CONTRACT
+    assert UNIFIED_EVENT_CLOCK_V4 in SUPPORTED_NEWS_CONTRACTS
+    assert len({contract.eligibility_version for contract in SUPPORTED_NEWS_CONTRACTS}) == len(
+        SUPPORTED_NEWS_CONTRACTS
+    )
+
+
+def test_legacy_v4_features_are_reproduced_without_new_impact_assessment(tmp_path) -> None:
+    first_seen = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    decision = first_seen + timedelta(minutes=10)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=first_seen)
+    _append_news(
+        ledger, source="federal_reserve_monetary", item="legacy-active",
+        first_seen=first_seen, parsed_at=first_seen, impulse=1.0,
+        include_impact=False,
+    )
+
+    current = aggregate_news_features_v2(ledger, decision)
+    legacy = aggregate_legacy_v4_news_features(ledger, decision)
+
+    assert current["news_exposed"] == 0
+    assert legacy["news_exposed"] == 1
+    assert legacy["eligibility_version"] == UNIFIED_EVENT_CLOCK_V4.eligibility_version
+    assert {
+        event["policy_version"] for event in legacy["event_snapshots"]
+    } == {UNIFIED_EVENT_CLOCK_V4.policy_version}
     ledger.close()
 
 
@@ -1354,6 +1392,103 @@ def test_activated_generation_directly_replaces_previous_generation(tmp_path) ->
     }
 
 
+def test_second_contract_upgrade_keeps_supported_active_generation(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    base = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    identities = (
+        "MARKET_ONLY", "NEWS_RESIDUAL", "FULL",
+        "BROAD_NEWS_RESIDUAL", "BROAD_FULL",
+    )
+    for identity in identities:
+        _insert_model_update(
+            ledger.connection, f"legacy-{identity.lower()}", identity, base,
+        )
+    ledger.connection.execute(
+        "INSERT INTO news_model_generations_v1 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "legacy-generation", "PREVIEW_ONLY", base.isoformat(), base.isoformat(),
+            UNIFIED_EVENT_CLOCK_V4.policy_version,
+            UNIFIED_EVENT_CLOCK_V4.feature_version,
+            UNIFIED_EVENT_CLOCK_V4.eligibility_version,
+            "events", "market", "official", "broad", "weighting", 5, "READY",
+        ),
+    )
+    for identity in identities:
+        ledger.connection.execute(
+            "INSERT INTO news_model_generation_members_v1 VALUES (?,?,?)",
+            ("legacy-generation", identity, f"legacy-{identity.lower()}"),
+        )
+    ledger.connection.execute(
+        "INSERT INTO news_model_generation_activations_v1 VALUES (?,?,?,?,?)",
+        (
+            "legacy-activation", "legacy-generation", None,
+            (base + timedelta(minutes=1)).isoformat(), "TEST",
+        ),
+    )
+
+    assert inference_v2._has_activated_generation(
+        ledger, base + timedelta(minutes=2),
+    ) is True
+    assert inference_v2._allow_activated_legacy_contract(
+        ledger, base + timedelta(minutes=2),
+    ) is True
+    transition = learning_curve_payload(ledger.connection)["news_contract_transition"]
+    assert transition["state"] == "BUILDING_REPLACEMENT"
+    assert transition["active_contract"]["name"] == UNIFIED_EVENT_CLOCK_V4.name
+    assert transition["target_contract"]["name"] == CURRENT_NEWS_CONTRACT.name
+    ledger.close()
+
+
+def test_contract_upgrade_bypasses_old_generation_retrain_clock(
+    tmp_path, monkeypatch,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward-contract-upgrade.sqlite3")
+    base = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    identities = (
+        "MARKET_ONLY", "NEWS_RESIDUAL", "FULL",
+        "BROAD_NEWS_RESIDUAL", "BROAD_FULL",
+    )
+    for identity in identities:
+        _insert_model_update(
+            ledger.connection, f"old-{identity.lower()}", identity, base,
+            training_rows=96,
+        )
+    ledger.connection.execute(
+        "INSERT INTO news_model_generations_v1 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "old-generation", "PREVIEW_ONLY", base.isoformat(), base.isoformat(),
+            UNIFIED_EVENT_CLOCK_V4.policy_version,
+            UNIFIED_EVENT_CLOCK_V4.feature_version,
+            UNIFIED_EVENT_CLOCK_V4.eligibility_version,
+            "events", "market", "official", "broad", "weighting", 5, "READY",
+        ),
+    )
+    for identity in identities:
+        ledger.connection.execute(
+            "INSERT INTO news_model_generation_members_v1 VALUES (?,?,?)",
+            ("old-generation", identity, f"old-{identity.lower()}"),
+        )
+    ledger.connection.execute(
+        "INSERT INTO news_model_generation_activations_v1 VALUES (?,?,?,?,?)",
+        (
+            "old-activation", "old-generation", None,
+            (base + timedelta(minutes=1)).isoformat(), "TEST",
+        ),
+    )
+    monkeypatch.setattr(
+        training_v2, "complete_training_rows", lambda *_: _training_rows(120),
+    )
+
+    result = training_v2.train_due_v2(
+        ledger, base + timedelta(days=1), tmp_path / "models",
+    )
+
+    assert result[0]["status"] == "NEWS_GENERATION_EVIDENCE_INSUFFICIENT"
+    assert result[0]["active_contract_current"] is False
+    assert result[0]["minimum_exposed_rows"] == training_v2.NEWS_MIN_EXPOSED_ROWS
+    ledger.close()
+
+
 def test_news_generation_stays_inactive_until_all_four_models_exist() -> None:
     updates = [
         {"model_identity": "MARKET_ONLY", "model_version": "market-current"},
@@ -1428,6 +1563,54 @@ def test_complete_legacy_set_keeps_predicting_until_first_atomic_generation() ->
     assert {row["model_version"] for row in active} == {
         "market-live", "news-live", "full-live", "broad-news-live", "broad-full-live",
     }
+
+
+def test_registered_previous_contract_requires_exact_four_model_match() -> None:
+    contract = UNIFIED_EVENT_CLOCK_V4
+    updates = [
+        {"model_identity": "MARKET_ONLY", "model_version": "market-live"},
+        {"model_identity": "NEWS_RESIDUAL", "model_version": "news-live",
+         "feature_version": contract.feature_version,
+         "eligibility_version": contract.eligibility_version},
+        {"model_identity": "FULL", "model_version": "full-live",
+         "feature_version": f"{inference_v2.FEATURE_VERSION}+{contract.feature_version}",
+         "eligibility_version": contract.eligibility_version},
+        {"model_identity": "BROAD_NEWS_RESIDUAL", "model_version": "broad-news-live",
+         "feature_version": contract.feature_version,
+         "eligibility_version": contract.eligibility_version},
+        {"model_identity": "BROAD_FULL", "model_version": "broad-full-live",
+         "feature_version": (
+             f"{inference_v2.FEATURE_VERSION}+{contract.feature_version}"
+             f"+{contract.policy_version}"
+         ),
+         "eligibility_version": contract.eligibility_version},
+    ]
+
+    active = inference_v2._active_updates(
+        updates, {contract.eligibility_version},
+        enforce_current_contract=False, news_contract=contract,
+    )
+    assert {row["model_version"] for row in active} == {
+        "market-live", "news-live", "full-live", "broad-news-live", "broad-full-live",
+    }
+
+    updates[-1]["feature_version"] = "corrupt-contract"
+    blocked = inference_v2._active_updates(
+        updates, {contract.eligibility_version},
+        enforce_current_contract=False, news_contract=contract,
+    )
+    assert [row["model_version"] for row in blocked] == ["market-live"]
+
+
+def test_news_exposure_flag_prevents_residual_without_visible_event() -> None:
+    features = {"news_event_count": 1.0, "broad_news_event_count": 1.0}
+    assert inference_v2._news_snapshot_exposed(
+        "NEWS_RESIDUAL", {"news_exposed": 0}, features,
+    ) is False
+    assert inference_v2._news_snapshot_exposed(
+        "BROAD_FULL", {"broad_news_exposed": 0}, features,
+    ) is False
+    assert inference_v2._news_snapshot_exposed("FULL", {}, features) is True
 
 
 def test_newest_news_policy_mismatch_blocks_older_current_model() -> None:

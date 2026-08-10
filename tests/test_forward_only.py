@@ -53,7 +53,7 @@ from xauusd_forecaster.news import (
     parse_rss,
 )
 from xauusd_forecaster.news_relevance import google_news_item_is_relevant
-from xauusd_forecaster.ridge import train_ridge
+from xauusd_forecaster.ridge import RidgeArtifact, train_ridge
 from xauusd_forecaster.shadow_simulation import shadow_league
 from xauusd_forecaster.u5_state import U5State
 from xauusd_forecaster.training import (
@@ -326,6 +326,18 @@ def test_ridge_artifact_and_dataset_hash_are_deterministic() -> None:
     assert first.as_dict() == second.as_dict()
     assert first.artifact_hash == second.artifact_hash
     np.testing.assert_array_equal(first.predict(rows), second.predict(rows))
+
+
+def test_ridge_treats_near_zero_scale_as_constant_feature() -> None:
+    artifact = RidgeArtifact(
+        feature_names=("constant",), means=(0.95,), scales=(7e-17,),
+        coefficients=(0.04,), intercept=0.01, alpha=100.0,
+        training_dataset_hash="constant", residual_std=0.0, training_rows=30,
+    )
+
+    prediction = artifact.predict(np.asarray([[0.0]]))[0]
+
+    assert prediction == pytest.approx(-0.028)
 
 
 def test_ridge_sample_weight_limits_repeated_event_dominance() -> None:

@@ -16,10 +16,12 @@ from .news_impact import (
     impact_is_actionable,
     impact_time_rule,
 )
-from .news_time import NewsTimeAssessment, assess_news_time
+from .news_contracts import CURRENT_NEWS_CONTRACT, UNIFIED_EVENT_CLOCK_V4
+from .news_time import NewsTimeAssessment, assess_news_time, category_time_rule
 
 
-EVIDENCE_POLICY_VERSION = "news-event-evidence-v6-semantic-impact-lifetime"
+EVIDENCE_POLICY_VERSION = CURRENT_NEWS_CONTRACT.policy_version
+LEGACY_V4_EVIDENCE_POLICY_VERSION = UNIFIED_EVENT_CLOCK_V4.policy_version
 LEGACY_V3_EVIDENCE_POLICY_VERSION = "news-event-evidence-v2-economic-time"
 CURRENT_EVENT_PROMPT_VERSION = "news-json-v14-material-event-evidence"
 ACTIONABLE_RECORD_KINDS = frozenset({
@@ -218,8 +220,11 @@ def resolve_event_clock(
 
 def event_evidence_rows_from_connection(
     connection, decision_time: datetime, *, legacy_v3: bool = False,
+    legacy_v4: bool = False,
 ) -> list[dict]:
     """Return one point-in-time canonical row per event cluster."""
+    if legacy_v3 and legacy_v4:
+        raise ValueError("only one legacy news contract can be selected")
     # Ledger timestamps are canonicalized with microseconds.  Keep the same
     # representation so an annotation parsed exactly at decision time remains
     # visible under SQLite's lexicographic timestamp comparison.
@@ -279,6 +284,12 @@ def event_evidence_rows_from_connection(
         if legacy_v3:
             row["time_assessment"] = assess_news_time(
                 row, decision_time=decision_time, forward_epoch=forward_epoch,
+            )
+        elif legacy_v4:
+            max_age, _ = category_time_rule(annotation.get("primary_category"))
+            row["time_assessment"] = assess_news_time(
+                row, decision_time=decision_time, forward_epoch=forward_epoch,
+                max_actionable_age=max_age,
             )
         else:
             impact = (
@@ -352,15 +363,24 @@ def event_evidence_rows_from_connection(
         candidates = primary or [
             row for row in evidence_members if row["reliable_domain"] in reliable_domains
         ] or evidence_members
-        canonical = max(
-            candidates,
-            key=lambda row: (
-                int(row.get("impact_update_type") == "MATERIAL_UPDATE"),
-                str(row["collector_first_seen_time"]),
-                float(row["confidence"]), len(str(row["body"])),
-                row["source_item_id"],
-            ),
-        )
+        if legacy_v4:
+            canonical = max(
+                candidates,
+                key=lambda row: (
+                    float(row["confidence"]), len(str(row["body"])),
+                    row["source_item_id"],
+                ),
+            )
+        else:
+            canonical = max(
+                candidates,
+                key=lambda row: (
+                    int(row.get("impact_update_type") == "MATERIAL_UPDATE"),
+                    str(row["collector_first_seen_time"]),
+                    float(row["confidence"]), len(str(row["body"])),
+                    row["source_item_id"],
+                ),
+            )
         topics = tuple(sorted({topic for row in members for topic in row["topics"]}))
         annotation = json.loads(canonical.get("annotation_json") or "{}")
         controlled_category = str(annotation.get("primary_category") or "")
@@ -374,6 +394,7 @@ def event_evidence_rows_from_connection(
         event_clock_valid = legacy_v3 or bool(
             event_clock is not None
             and event_clock <= decision_time
+            and (not legacy_v4 or event_clock >= forward_epoch)
         )
         semantic_eligible = legacy_v3 or (
             current_semantic_schema
@@ -450,11 +471,16 @@ def event_evidence_rows_from_connection(
             "event_id": event_id,
             "event_version_id": canonical_hash((
                 event_id, canonical["content_hash"], canonical["annotation_id"],
-                canonical.get("impact_assessment_id"),
-                EVIDENCE_POLICY_VERSION if not legacy_v3 else LEGACY_V3_EVIDENCE_POLICY_VERSION,
+                *(() if legacy_v4 else (canonical.get("impact_assessment_id"),)),
+                (
+                    LEGACY_V3_EVIDENCE_POLICY_VERSION if legacy_v3
+                    else LEGACY_V4_EVIDENCE_POLICY_VERSION if legacy_v4
+                    else EVIDENCE_POLICY_VERSION
+                ),
             )),
             "policy_version": (
                 LEGACY_V3_EVIDENCE_POLICY_VERSION if legacy_v3
+                else LEGACY_V4_EVIDENCE_POLICY_VERSION if legacy_v4
                 else EVIDENCE_POLICY_VERSION
             ),
             "prompt_version": canonical.get("prompt_version"),
@@ -518,10 +544,14 @@ def event_evidence_rows_from_connection(
             "geopolitical_risk": float(canonical["geopolitical_risk"]),
             "usd_impulse": float(canonical["usd_impulse"]),
             "novelty": float(canonical["novelty"]),
-            "confidence": min(
-                float(canonical["confidence"]),
-                float(canonical.get("impact_confidence") or 0.0),
-            ) if not legacy_v3 else float(canonical["confidence"]),
+            "confidence": (
+                min(
+                    float(canonical["confidence"]),
+                    float(canonical.get("impact_confidence") or 0.0),
+                )
+                if not legacy_v3 and not legacy_v4
+                else float(canonical["confidence"])
+            ),
             "reason_codes": reasons,
             "source_hash": canonical_hash(sorted(
                 (row["content_hash"], row["annotation_id"]) for row in members
@@ -532,3 +562,10 @@ def event_evidence_rows_from_connection(
 
 def event_evidence_rows(ledger, decision_time: datetime) -> list[dict]:
     return event_evidence_rows_from_connection(ledger.connection, decision_time)
+
+
+def legacy_v4_event_evidence_rows(ledger, decision_time: datetime) -> list[dict]:
+    """Reproduce the frozen unified-event-clock contract for its active generation."""
+    return event_evidence_rows_from_connection(
+        ledger.connection, decision_time, legacy_v4=True,
+    )

@@ -12,6 +12,9 @@ import numpy as np
 from .forward_ledger import canonical_hash
 
 
+MIN_FEATURE_SCALE = 1e-12
+
+
 @dataclass(frozen=True)
 class RidgeArtifact:
     feature_names: tuple[str, ...]
@@ -28,9 +31,11 @@ class RidgeArtifact:
 
     def predict(self, rows: np.ndarray) -> np.ndarray:
         matrix = np.asarray(rows, dtype=np.float64)
+        scales = np.asarray(self.scales, dtype=np.float64)
+        safe_scales = np.where(np.abs(scales) < MIN_FEATURE_SCALE, 1.0, scales)
         standardized = (
             matrix - np.asarray(self.means, dtype=np.float64)
-        ) / np.asarray(self.scales, dtype=np.float64)
+        ) / safe_scales
         return self.intercept + standardized @ np.asarray(
             self.coefficients, dtype=np.float64
         )
@@ -115,7 +120,7 @@ def train_ridge(
     scales = np.sqrt(np.sum(
         np.square(matrix - means) * normalized_weights[:, None], axis=0
     ))
-    scales[scales == 0.0] = 1.0
+    scales[np.abs(scales) < MIN_FEATURE_SCALE] = 1.0
     standardized = (matrix - means) / scales
     target_mean = float(np.sum(values * normalized_weights))
     centered_target = values - target_mean

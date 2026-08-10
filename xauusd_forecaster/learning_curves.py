@@ -9,6 +9,11 @@ from collections import defaultdict
 from datetime import datetime
 
 from .execution_costs import COMMISSION_STATUS, SLIPPAGE_STATUS, net_shadow_log_return
+from .news_contracts import (
+    CURRENT_NEWS_CONTRACT,
+    generation_matches_contract,
+    supported_generation_contract,
+)
 
 
 MAX_CURVE_POINTS = 1200
@@ -149,6 +154,7 @@ def _cadence_metrics(rows) -> dict:
 
 def learning_curve_payload(connection) -> dict:
     from .inference_v2 import news_model_activation_status
+    from .training_v2 import NEWS_MIN_EXPOSED_ROWS
     epoch = connection.execute(
         "SELECT * FROM evaluation_epochs ORDER BY created_at DESC LIMIT 1"
     ).fetchone()
@@ -183,9 +189,77 @@ def learning_curve_payload(connection) -> dict:
         ORDER BY a.activated_at DESC,a.activation_id DESC LIMIT 1"""
     ).fetchone()
     active_generation = dict(active_generation_row) if active_generation_row else None
-    news_activation = news_model_activation_status(
-        reversed(updates), allow_legacy_contract=active_generation is None,
+    active_contract = supported_generation_contract(active_generation)
+    active_is_current = generation_matches_contract(
+        active_generation, CURRENT_NEWS_CONTRACT,
     )
+    active_updates = (
+        connection.execute(
+            """SELECT u.* FROM news_model_generation_members_v1 m
+            JOIN model_updates_v2 u USING(model_version)
+            WHERE m.generation_id=? ORDER BY u.model_identity""",
+            (active_generation["generation_id"],),
+        ).fetchall()
+        if active_generation else list(reversed(updates))
+    )
+    news_activation = news_model_activation_status(
+        active_updates,
+        allow_legacy_contract=(active_generation is None or (
+            active_contract is not None and not active_is_current
+        )),
+        legacy_contract=(
+            active_contract if active_contract is not None and not active_is_current
+            else None
+        ),
+    )
+    current_exposed_rows = connection.execute(
+        """SELECT count(DISTINCT n.source_decision_id)
+        FROM derived_news_feature_snapshots n
+        JOIN training_eligibility_v2 e USING(source_decision_id)
+        JOIN derived_outcomes o USING(source_decision_id)
+        WHERE n.feature_version=? AND n.eligibility_version=?
+          AND n.news_exposed=1 AND o.outcome_status='VALID'""",
+        (
+            CURRENT_NEWS_CONTRACT.feature_version,
+            CURRENT_NEWS_CONTRACT.eligibility_version,
+        ),
+    ).fetchone()[0]
+    current_event_count = connection.execute(
+        """SELECT count(DISTINCT event_id)
+        FROM news_decision_event_snapshots_v1 WHERE policy_version=?""",
+        (CURRENT_NEWS_CONTRACT.policy_version,),
+    ).fetchone()[0]
+    transition_state = (
+        "NO_ACTIVE_GENERATION" if active_generation is None
+        else "CURRENT" if active_is_current
+        else "BUILDING_REPLACEMENT" if active_contract is not None
+        else "BLOCKED_UNSUPPORTED_ACTIVE_CONTRACT"
+    )
+    news_contract_transition = {
+        "state": transition_state,
+        "active_contract": ({
+            "name": active_contract.name,
+            "feature_version": active_contract.feature_version,
+            "eligibility_version": active_contract.eligibility_version,
+            "policy_version": active_contract.policy_version,
+        } if active_contract else ({
+            "feature_version": active_generation["feature_version"],
+            "eligibility_version": active_generation["eligibility_version"],
+            "policy_version": active_generation["policy_version"],
+        } if active_generation else None)),
+        "target_contract": {
+            "name": CURRENT_NEWS_CONTRACT.name,
+            "feature_version": CURRENT_NEWS_CONTRACT.feature_version,
+            "eligibility_version": CURRENT_NEWS_CONTRACT.eligibility_version,
+            "policy_version": CURRENT_NEWS_CONTRACT.policy_version,
+        },
+        "current_contract_exposed_rows": int(current_exposed_rows),
+        "minimum_exposed_rows": NEWS_MIN_EXPOSED_ROWS,
+        "missing_exposed_rows": max(
+            0, NEWS_MIN_EXPOSED_ROWS - int(current_exposed_rows)
+        ),
+        "current_contract_distinct_events": int(current_event_count),
+    }
     generation_by_version = {
         row["model_version"]: row["generation_id"]
         for row in connection.execute(
@@ -600,6 +674,7 @@ def learning_curve_payload(connection) -> dict:
         "commission_status": COMMISSION_STATUS, "slippage_status": SLIPPAGE_STATUS,
         "models": models, "version_groups": version_groups,
         "active_generation": active_generation,
+        "news_contract_transition": news_contract_transition,
         "news_training_evidence": {
             "raw_article_revisions": connection.execute(
                 "SELECT count(*) FROM news_revisions"

@@ -9,8 +9,14 @@ from datetime import datetime
 from .evidence_v2 import ELIGIBILITY_VERSION
 from .factors import MACRO_FEATURE_MAP, NEWS_FEATURES
 from .forward_ledger import canonical_hash
-from .news_evidence import BROAD_NEWS_FEATURES, event_evidence_rows
+from .news_contracts import UNIFIED_EVENT_CLOCK_V4
+from .news_evidence import (
+    BROAD_NEWS_FEATURES,
+    event_evidence_rows,
+    legacy_v4_event_evidence_rows,
+)
 from .news_impact import impact_time_rule
+from .news_time import category_time_rule
 
 
 SOURCE_RULES = {
@@ -85,9 +91,25 @@ def event_raw_weight(row: dict) -> float:
     return freshness * float(row["confidence"]) * max(0.05, float(row["novelty"]))
 
 
-def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
+def _legacy_v4_event_raw_weight(row: dict) -> float:
+    age_minutes = max(0.0, float(row.get("economic_age_minutes") or 0.0))
+    _, half_life_minutes = category_time_rule(str(row.get("primary_category") or ""))
+    freshness = math.exp(-math.log(2.0) * age_minutes / half_life_minutes)
+    return freshness * float(row["confidence"]) * max(0.05, float(row["novelty"]))
+
+
+def aggregate_news_features_v2(
+    ledger, decision_time: datetime, *, legacy_v4: bool = False,
+) -> dict:
     """Aggregate one unified event snapshot into official and Broad features."""
-    all_evidence_events = event_evidence_rows(ledger, decision_time)
+    all_evidence_events = (
+        legacy_v4_event_evidence_rows(ledger, decision_time)
+        if legacy_v4 else event_evidence_rows(ledger, decision_time)
+    )
+    raw_weight = _legacy_v4_event_raw_weight if legacy_v4 else event_raw_weight
+    eligibility_version = (
+        UNIFIED_EVENT_CLOCK_V4.eligibility_version if legacy_v4 else ELIGIBILITY_VERSION
+    )
     official_events = [row for row in all_evidence_events if row["official_model_eligible"]]
     broad_events = [row for row in all_evidence_events if row["broad_model_eligible"]]
     totals = {name: 0.0 for name in NEWS_FEATURES}
@@ -96,11 +118,14 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
     evidence = []
     for row in official_events:
         age_minutes = float(row["economic_age_minutes"])
-        _, half_life_minutes = impact_time_rule(str(row.get("impact_class") or "BACKGROUND"))
+        _, half_life_minutes = (
+            category_time_rule(str(row.get("primary_category") or ""))
+            if legacy_v4 else impact_time_rule(str(row.get("impact_class") or "BACKGROUND"))
+        )
         freshness = math.exp(-math.log(2.0) * age_minutes / half_life_minutes)
         confidence = float(row["confidence"])
         novelty = float(row["novelty"])
-        weight = event_raw_weight(row)
+        weight = raw_weight(row)
         weight_sum += weight
         totals["news_hawkishness"] += weight * float(row["hawkishness"])
         totals["news_inflation_impulse"] += weight * float(row["inflation_impulse"])
@@ -154,11 +179,14 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
     broad_evidence = []
     for row in broad_events:
         age_minutes = float(row["economic_age_minutes"])
-        _, half_life_minutes = impact_time_rule(
-            str(row.get("impact_class") or "BACKGROUND")
-        )
+        if legacy_v4:
+            half_life_minutes = 360.0
+        else:
+            _, half_life_minutes = impact_time_rule(
+                str(row.get("impact_class") or "BACKGROUND")
+            )
         freshness = math.exp(-math.log(2.0) * age_minutes / half_life_minutes)
-        weight = event_raw_weight(row)
+        weight = raw_weight(row)
         broad_weight_sum += weight
         broad_totals["broad_news_hawkishness"] += weight * row["hawkishness"]
         broad_totals["broad_news_inflation_impulse"] += weight * row["inflation_impulse"]
@@ -215,12 +243,12 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
                     if row["official_model_eligible"] else ["BROAD_MODEL"]
                 ),
                 "reason_codes": list(row["reason_codes"]),
-                "raw_weight": event_raw_weight(row),
+                "raw_weight": raw_weight(row),
                 "age_minutes": float(row["economic_age_minutes"]),
             })
     return {
         "features": totals,
-        "eligibility_version": ELIGIBILITY_VERSION,
+        "eligibility_version": eligibility_version,
         "model_visible_items": len(official_events),
         "news_exposed": int(bool(official_events)),
         "distinct_news_clusters": len(official_events),
@@ -236,3 +264,8 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
         "broad_visible_events": broad_visible_events,
         "event_snapshots": event_snapshots,
     }
+
+
+def aggregate_legacy_v4_news_features(ledger, decision_time: datetime) -> dict:
+    """Build live features for the still-activated unified-event-clock generation."""
+    return aggregate_news_features_v2(ledger, decision_time, legacy_v4=True)
