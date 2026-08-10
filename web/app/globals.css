@@ -390,6 +390,10 @@ body.modal-open { overflow:hidden; }
 .audit-tabs a:hover,.audit-tabs a:focus-visible { background:#ded9ca; }
 .graph-modal>nav { grid-template-columns:repeat(4,1fr); }
 .story-desk { border:1px solid var(--ink); border-top:0; }
+.event-thread-summary { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); border-top:1px solid var(--ink); border-bottom:1px solid var(--ink); background:#ded9ca; }
+.event-thread-summary span { display:flex; align-items:baseline; gap:8px; padding:13px 18px; border-right:1px solid rgba(17,17,15,.28); font-size:12px; }
+.event-thread-summary span:last-child { border-right:0; }
+.event-thread-summary b { font-family:var(--font-display); font-size:25px; }
 .theme-streams { padding:22px; border-top:1px solid var(--ink); background:#e1dccf; }
 .deployment-proof { display:flex; justify-content:space-between; gap:18px; align-items:center; padding:12px 22px; border-top:1px solid var(--ink); border-bottom:1px solid var(--ink); font-size:12px; }
 .deployment-proof b { margin-right:auto; }
@@ -405,6 +409,8 @@ body.modal-open { overflow:hidden; }
 .theme-streams article span,.theme-streams article small { grid-column:1/-1; color:var(--muted); }
 .story-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1px; background:#aaa59a; border-top:1px solid var(--ink); }
 .story-grid>article { background:var(--paper); padding:24px; }
+.story-grid>article.single-event-card { border-top:4px solid #8c5b16; }
+.single-event-card .story-latest { min-height:0; }
 .story-grid article>header { display:flex; justify-content:space-between; gap:24px; align-items:start; }
 .story-grid h3 { margin:6px 0 0; font-family:var(--font-display); font-size:32px; }
 .story-grid header span,.story-grid header small { color:var(--muted); font-size:11px; }
@@ -562,6 +568,9 @@ body.modal-open { overflow:hidden; }
   .source-health article { grid-template-columns:1fr 1fr; }
   .component-status>div { grid-template-columns:1fr 1fr; }
   .story-grid { grid-template-columns:1fr; }
+  .event-thread-summary { grid-template-columns:1fr; }
+  .event-thread-summary span { justify-content:space-between; border-right:0; border-bottom:1px solid rgba(17,17,15,.22); }
+  .event-thread-summary span:last-child { border-bottom:0; }
   .theme-streams>div { grid-template-columns:1fr; }
   .execution-research>div { grid-template-columns:1fr; }
   .version-ledger-head { display:none; }

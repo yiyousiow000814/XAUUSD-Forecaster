@@ -226,15 +226,18 @@ test("reads the append-only D1 learning history before the compact live relay", 
   assert.match(source, /append-only learning history stored in D1/);
 });
 
-test("renders generic story coverage without black empty grid placeholders", () => {
+test("shows single events immediately and keeps later changes in one thread", () => {
   const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(page, /主题流/);
   assert.match(page, /个事件/);
   assert.match(page, /市场反应流/);
-  assert.match(page, /新事件候选/);
+  assert.match(page, /单一事件/);
+  assert.match(page, /暂无后续进展/);
+  assert.match(page, /第一次进展立即显示，后续变化接在一起/);
   assert.match(page, /版本需要更新/);
-  assert.match(page, /同一事件的报道，合并显示/);
+  assert.doesNotMatch(page, /还没有形成故事链/);
+  assert.doesNotMatch(page, /故事开始/);
   assert.doesNotMatch(page, /TEMPORAL EVENT GRAPH V5/);
   assert.doesNotMatch(page, /Runtime Git SHA/);
   assert.doesNotMatch(page, /Story Policy/);

@@ -758,6 +758,9 @@ export default function AuditView() {
   const deploymentPresentation = DEPLOYMENT_PRESENTATION[
     payload?.system?.deployment?.status ?? "PROVENANCE_UNKNOWN"
   ] ?? DEPLOYMENT_PRESENTATION.PROVENANCE_UNKNOWN;
+  const continuedEventTotal = payload?.storyline_summary?.total ?? 0;
+  const singleEventTotal = payload?.storyline_summary?.candidate_total ?? 0;
+  const activeEventTotal = continuedEventTotal + singleEventTotal;
 
   return (
     <main className="audit-main">
@@ -801,7 +804,7 @@ export default function AuditView() {
       <nav ref={auditTabsRef} className="audit-tabs" aria-label="审计视图">
         <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻 <b>{readableNewsTotal}</b></a>
         <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>新闻证据管理 <b>{payload?.news_evidence_summary?.model_seen_events ?? 0}</b></a>
-        <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件故事链 <b>{payload?.storyline_summary?.total ?? 0}</b></a>
+        <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件脉络 <b>{activeEventTotal}</b></a>
         <a href="/audit?view=decisions" className={view === "decisions" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("decisions"); }}>决策与30分钟结果 <b>{payload?.counts?.decision_events ?? 0}</b></a>
         <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b>{learningState === "ready" ? `${activeLearningIdentities}组` : learningState === "loading" ? "读取中" : "—"}</b></a>
         <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b>{payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</b></a>
@@ -877,24 +880,28 @@ export default function AuditView() {
       </section>}
 
       {view === "stories" && <section className="story-desk">
-        <header className="evidence-intro evidence-intro-compact"><div><p className="eyebrow">事件故事链</p><h2>同一事件的报道，合并显示。</h2></div></header>
+        <header className="evidence-intro evidence-intro-compact"><div><p className="eyebrow">事件脉络</p><h2>第一次进展立即显示，后续变化接在一起。</h2></div></header>
         {payload?.system.deployment && <section className={`deployment-proof ${deploymentPresentation.className}`}><b>{deploymentPresentation.label}</b>{payload.system.deployment.status === "DEPLOYMENT_DRIFT" ? <span>本机 {payload.system.deployment.runtime_git_sha?.slice(0, 8) ?? "未知"} · 远端 {payload.system.deployment.expected_git_sha?.slice(0, 8) ?? "未知"}</span> : payload.system.deployment.runtime_git_sha ? <span>版本 {payload.system.deployment.runtime_git_sha.slice(0, 8)}</span> : null}</section>}
+        <div className="event-thread-summary" aria-label="事件脉络统计"><span><b>{activeEventTotal}</b> 个独立事件</span><span><b>{continuedEventTotal}</b> 个已有后续</span><span><b>{singleEventTotal}</b> 个暂无后续</span></div>
         <section className="theme-streams"><header><h3>主题流</h3><span>不声称构成单一事件</span></header><div>{(payload?.theme_streams ?? []).map(theme => <article key={theme.theme_id}><b>{theme.title}</b><strong>{theme.item_count}</strong><span>{theme.latest_headline}</span><small>{time(theme.last_updated)}</small></article>)}</div></section>
         <section className="theme-streams market-streams"><header><h3>市场反应流</h3><span>价格反应不冒充核心事实</span></header><div>{(payload?.market_reaction_streams ?? []).map(stream => <article key={stream.stream_id}><b>{stream.title}</b><strong>{stream.item_count}</strong><span>{stream.latest_headline}</span><small>{time(stream.last_updated)}</small></article>)}</div></section>
-        <div className="story-grid">{(payload?.storylines ?? []).map(story => <article key={story.storyline_id}>
-          <header><div><span>{({ EMERGING:"刚出现", REPORTED:"已有报道", CORROBORATED:"独立交叉确认", OFFICIALLY_CONFIRMED:"官方确认", ESCALATING:"升级中", DEESCALATING:"缓和中", CONTRADICTED:"存在冲突" } as Record<string,string>)[story.state] ?? story.state}</span><h3>{story.title}</h3><small>{story.episode_key}</small></div><strong>{story.event_count}<small> 个现实事件</small></strong></header>
+        <div className="story-grid">{(payload?.story_event_candidates ?? []).map(item => <article className="single-event-card" key={item.candidate_id}>
+          <header><div><span>单一事件</span><h3>{item.headline}</h3></div><strong>1<small> 个进展</small></strong></header>
+          <p className="story-latest"><b>当前状态</b>暂无后续进展</p>
+          <div className="story-meta"><span>证据 {item.evidence_documents} 篇</span><span>独立来源 {item.independent_publishers} 个</span><span>系统收到 {time(item.first_seen)}</span></div>
+        </article>)}{(payload?.storylines ?? []).map(story => <article key={story.storyline_id}>
+          <header><div><span>{({ EMERGING:"刚出现", REPORTED:"已有报道", CORROBORATED:"独立交叉确认", OFFICIALLY_CONFIRMED:"官方确认", ESCALATING:"升级中", DEESCALATING:"缓和中", CONTRADICTED:"存在冲突" } as Record<string,string>)[story.state] ?? story.state}</span><h3>{story.title}</h3></div><strong>{story.event_count}<small> 个进展</small></strong></header>
           <p className="story-latest"><b>最新事实变化</b>{story.latest_change}</p>
           <div className="story-meta"><span>证据文件 {story.evidence_document_count}</span><span>独立组织 {story.independent_organization_count}</span><span>更新 {time(story.last_updated)}</span><span>{story.independent_confirmation ? "跨组织确认" : "尚未跨组织确认"}</span></div>
-          <section className="story-coverage"><div><b>覆盖模板 {story.coverage_template} · {story.coverage_count}/{story.coverage_total}</b>{story.covered_roles.map(role => <span key={role.key}>{role.label}</span>)}{story.missing_roles.map(role => <em className="missing" key={role.key}>仍缺：{role.label}</em>)}</div></section>
-          <ol>{story.timeline.map(item => <li key={item.event_key}><time>{time(item.event_time || item.source_published_time || item.first_seen)}</time><b>{({ STARTS:"故事开始", FOLLOWED_BY:"随后发生", CONFIRMS:"确认", CONTRADICTS:"否认/冲突", RESPONDS_TO:"作出回应", ESCALATES:"实际升级", DEESCALATES:"实际缓和", SUPERSEDES:"修订替代" } as Record<string,string>)[item.relation] ?? item.relation}</b><span>{item.headline}</span><small>{item.actor} · {item.action} · {item.evidence_documents} 份文件 · {item.independent_organizations} 个组织<br />发布 {time(item.source_published_time)} · 系统首次看到 {time(item.collector_first_seen_time)}</small></li>)}</ol>
+          <section className="story-coverage"><div><b>证据覆盖 {story.coverage_count}/{story.coverage_total}</b>{story.covered_roles.map(role => <span key={role.key}>{role.label}</span>)}{story.missing_roles.map(role => <em className="missing" key={role.key}>仍缺：{role.label}</em>)}</div></section>
+          <ol>{story.timeline.map(item => <li key={item.event_key}><time>{time(item.event_time || item.source_published_time || item.first_seen)}</time><b>{({ STARTS:"首次进展", FOLLOWED_BY:"随后发生", CONFIRMS:"确认", CONTRADICTS:"否认/冲突", RESPONDS_TO:"作出回应", ESCALATES:"实际升级", DEESCALATES:"实际缓和", SUPERSEDES:"修订替代" } as Record<string,string>)[item.relation] ?? item.relation}</b><span>{item.headline}</span><small>{item.actor} · {item.action} · {item.evidence_documents} 份文件 · {item.independent_organizations} 个组织<br />发布 {time(item.source_published_time)} · 系统首次看到 {time(item.collector_first_seen_time)}</small></li>)}</ol>
           {story.market_reactions.length > 0 && <details className="story-attachments"><summary>市场反应 {story.market_reactions.length}</summary>{story.market_reactions.map(item => <p key={item.event_key}>{item.headline}</p>)}</details>}
           {story.commentary.length > 0 && <details className="story-attachments"><summary>评论与预测 {story.commentary.length}</summary>{story.commentary.map(item => <p key={item.event_key}>{item.headline}</p>)}</details>}
           {story.background.length > 0 && <details className="story-attachments"><summary>背景材料 {story.background.length}</summary>{story.background.map(item => <p key={item.event_key}>{item.headline}</p>)}</details>}
         </article>)}</div>
-        {(payload?.storylines?.length ?? 0) === 0 && <div className="story-empty"><b>还没有形成故事链</b><span>孤立事实先留在候选区；出现第二个真实进展后才会成为故事。</span></div>}
+        {activeEventTotal === 0 && <div className="story-empty"><b>还没有收到可确认的独立事件</b><span>新事件出现后会直接显示在这里。</span></div>}
         <details className="unassigned-story-events" open><summary>市场叙事候选 <b>{payload?.storyline_summary?.market_narrative_total ?? 0}</b> <small>只有市场反应或评论，核心现实进展尚未确认</small></summary>{(payload?.market_narrative_candidates ?? []).map(story => <div key={story.storyline_id}><time>{time(story.last_updated)}</time><span><b>{story.title}</b><br />{story.latest_change}</span><small>{story.event_count} 个候选节点 · {story.evidence_document_count} 份文件 · 不进入活跃故事</small></div>)}</details>
         <details className="unassigned-story-events"><summary>历史档案 <b>{payload?.storyline_summary?.archived_total ?? 0}</b> <small>ARCHIVAL_BACKFILL，不显示为当前新事件</small></summary>{(payload?.archived_storylines ?? []).map(story => <div key={story.storyline_id}><time>{time(story.timeline[0]?.event_time)}</time><span><b>{story.title}</b><br />{story.latest_change}</span><small>{story.event_count} 个历史事件 · 系统首次收录 {time(story.last_updated)}</small></div>)}{(payload?.archived_story_event_candidates ?? []).map(item => <div key={item.candidate_id}><time>{time(item.event_time)}</time><span>{item.headline}</span><small>{item.evidence_documents} 份历史证据文件 · 系统首次收录 {time(item.first_seen)}</small></div>)}</details>
-        <details className="unassigned-story-events" open><summary>新事件候选 <b>{payload?.storyline_summary?.candidate_total ?? 0}</b> <small>等待第二个不同进展，不会一篇新闻生成一张故事卡</small></summary>{(payload?.story_event_candidates ?? []).map(item => <div key={item.candidate_id}><time>{time(item.first_seen)}</time><span>{item.headline}</span><small>{item.evidence_documents} 篇证据 · {item.independent_publishers} 个独立来源 · {item.episode_key}</small></div>)}</details>
         <details className="unassigned-story-events"><summary>未归属事件 <b>{payload?.storyline_summary?.unassigned_total ?? 0}</b></summary>{(payload?.unassigned_story_events ?? []).map(item => <div key={item.event_key}><time>{time(item.first_seen)}</time><span>{item.headline}</span><small>{item.record_kind} · {item.reason}</small></div>)}</details>
       </section>}
 
