@@ -24,19 +24,15 @@ function previewStatusResource(): Record<string, unknown> | null {
   return compact;
 }
 
-function previewAuditResources(auditView: AuditViewName): Record<string, unknown> {
+function previewResources(): Record<string, unknown> {
   const compactStatus = previewStatusResource();
   if (!previewBundle || !compactStatus) return {};
   const resources: Record<string, unknown> = { "/api/status": compactStatus };
-
-  if (auditView === "news") {
-    const index = previewBundle.news_index;
-    const items = Array.isArray(index.items) ? index.items : [];
-    resources["/api/news-index?page=1&limit=12"] = {
-      ...index, items: items.slice(0, 12), page: 1, page_size: 12,
-    };
-  }
-  if (auditView !== "league") return resources;
+  const index = previewBundle.news_index;
+  const items = Array.isArray(index.items) ? index.items : [];
+  resources["/api/news-index?page=1&limit=12"] = {
+    ...index, items: items.slice(0, 12), page: 1, page_size: 12,
+  };
 
   const learning = previewBundle.learning;
   const curves = (learning.learning_curves ?? {}) as Record<string, unknown>;
@@ -63,13 +59,6 @@ function previewAuditResources(auditView: AuditViewName): Record<string, unknown
   return resources;
 }
 
-function previewRoomResources(room: DashboardLocation["room"], auditView: AuditViewName): Record<string, unknown> {
-  if (room === "audit") return previewAuditResources(auditView);
-  const compactStatus = previewStatusResource();
-  if (!compactStatus) return {};
-  return { "/api/status": compactStatus };
-}
-
 export default async function HomePage({ searchParams }: PageProps) {
   const query = await searchParams;
   const roomValue = Array.isArray(query.room) ? query.room[0] : query.room;
@@ -77,6 +66,6 @@ export default async function HomePage({ searchParams }: PageProps) {
   const auditView = viewValue && AUDIT_VIEWS.has(viewValue as AuditViewName) ? viewValue as AuditViewName : "news";
   const room = roomValue === "status" || roomValue === "health" || roomValue === "audit" ? roomValue : "live";
   const initialLocation: DashboardLocation = { room, auditView };
-  const initialResources = previewRoomResources(room, auditView);
+  const initialResources = previewResources();
   return <DashboardApp initialLocation={initialLocation} initialResources={initialResources} />;
 }
