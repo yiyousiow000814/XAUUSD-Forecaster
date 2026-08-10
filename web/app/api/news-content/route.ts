@@ -18,9 +18,9 @@ export async function GET(request: Request) {
   }
   if (previewBundle) {
     const detail = previewBundle.news_details[detailKey];
-    return detail
-      ? previewJson(detail)
-      : previewJson({ error: "该新闻详情不在本次 Preview 快照中" }, 404);
+    if (detail) return previewJson(detail);
+    // Only the visible first page is compiled into the Worker. Older details
+    // remain readable from D1; Preview writes are still rejected below.
   }
   const binding = env.DB as D1Database | undefined;
   if (!binding) {

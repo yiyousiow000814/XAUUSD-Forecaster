@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 
-type PreviewBundle = {
+export type PreviewBundle = {
   status: Record<string, unknown>;
-  learning: Record<string, unknown>;
+  learning_summary?: Record<string, unknown>;
   market_chart: Record<string, unknown>;
   news_index: {
     items?: Array<Record<string, unknown>>;
@@ -13,7 +13,7 @@ type PreviewBundle = {
 
 declare const __AURUM_PREVIEW_BUNDLE__: PreviewBundle | null;
 
-export const previewBundle = __AURUM_PREVIEW_BUNDLE__;
+export const previewBundle: PreviewBundle | null = __AURUM_PREVIEW_BUNDLE__;
 export const isPreviewDeployment = previewBundle !== null;
 
 export function previewJson(payload: unknown, status = 200) {

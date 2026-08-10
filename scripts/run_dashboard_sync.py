@@ -767,28 +767,6 @@ def _sync_news(local_payload: dict, config: dict) -> None:
         )
     except (TypeError, ValueError):
         index_full_refresh_due = True
-    pending_index = [
-        row for row in news_index
-        if index_full_refresh_due
-        or synced_index_hashes.get(row["detail_key"])
-        != current_index_hashes[row["detail_key"]]
-    ]
-    for batch in news_index_batches(pending_index):
-        encoded = json.dumps(
-            {"items": batch}, ensure_ascii=False, allow_nan=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        _post_json(news_index_url, encoded, config)
-        for row in batch:
-            synced_index_hashes[row["detail_key"]] = current_index_hashes[
-                row["detail_key"]
-            ]
-        _write_news_sync_state(state_path, {
-            **state,
-            "index_hashes": synced_index_hashes,
-        })
-    if index_full_refresh_due:
-        state["last_index_full_sync"] = datetime.now(UTC).isoformat()
     synced_hashes = state.get("hashes", {})
     if not isinstance(synced_hashes, dict):
         synced_hashes = {}
@@ -814,11 +792,39 @@ def _sync_news(local_payload: dict, config: dict) -> None:
         for row in batch:
             synced_hashes[row["detail_key"]] = row["detail_hash"]
         _write_news_sync_state(state_path, {
+            **state,
             "hashes": synced_hashes,
-            "last_full_sync": state.get("last_full_sync"),
+            "index_hashes": synced_index_hashes,
         })
     if full_refresh_due:
         state["last_full_sync"] = datetime.now(UTC).isoformat()
+
+    # Publish discoverability only after every referenced detail is durable.
+    # A timeout may leave the old index visible, but can never expose a new
+    # dangling detail_key.
+    pending_index = [
+        row for row in news_index
+        if index_full_refresh_due
+        or synced_index_hashes.get(row["detail_key"])
+        != current_index_hashes[row["detail_key"]]
+    ]
+    for batch in news_index_batches(pending_index):
+        encoded = json.dumps(
+            {"items": batch}, ensure_ascii=False, allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        _post_json(news_index_url, encoded, config)
+        for row in batch:
+            synced_index_hashes[row["detail_key"]] = current_index_hashes[
+                row["detail_key"]
+            ]
+        _write_news_sync_state(state_path, {
+            **state,
+            "hashes": synced_hashes,
+            "index_hashes": synced_index_hashes,
+        })
+    if index_full_refresh_due:
+        state["last_index_full_sync"] = datetime.now(UTC).isoformat()
     current_keys = {row["detail_key"] for row in details}
     state["hashes"] = {
         key: value for key, value in synced_hashes.items() if key in current_keys
