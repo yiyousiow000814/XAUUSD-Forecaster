@@ -36,6 +36,10 @@ SERIES_BY_DOMAIN = {
     "流动性": "WALCL",
     "风险偏好": "VIXCLS",
 }
+PREVIEW_CONTRACT = json.loads(
+    (MODULE_ROOT / "web" / "preview-contract.json").read_text(encoding="utf-8")
+)
+PREVIEW_NEWS_PAGE_SIZE = int(PREVIEW_CONTRACT["newsPageSize"])
 
 
 def _read_json(base_url: str, path: str) -> dict:
@@ -221,7 +225,7 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
     })
 
     details: dict[str, dict] = {}
-    for item in news_index.get("items", [])[:12]:
+    for item in news_index.get("items", [])[:PREVIEW_NEWS_PAGE_SIZE]:
         detail_key = item.get("detail_key")
         if not isinstance(detail_key, str):
             continue

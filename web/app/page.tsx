@@ -1,6 +1,7 @@
 import DashboardApp from "./_components/DashboardApp";
 import type { AuditViewName, DashboardLocation } from "./_components/DashboardNavigation";
 import { previewBundle } from "./api/_shared/preview";
+import { PREVIEW_NEWS_PAGE_SIZE, PREVIEW_RESOURCES } from "./_lib/preview-contract";
 
 type PageProps = {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
@@ -10,12 +11,12 @@ const AUDIT_VIEWS = new Set<AuditViewName>(["news", "evidence", "stories", "deci
 
 function previewResources(): Record<string, unknown> {
   if (!previewBundle) return {};
-  const resources: Record<string, unknown> = { "/api/status": previewBundle.status };
-  resources["/api/news-index?page=1&limit=12"] = previewBundle.news_index;
+  const resources: Record<string, unknown> = { [PREVIEW_RESOURCES.status]: previewBundle.status };
+  resources[`${PREVIEW_RESOURCES.newsIndex}?page=1&limit=${PREVIEW_NEWS_PAGE_SIZE}`] = previewBundle.news_index;
 
   const learning = previewBundle.learning_summary;
   if (!learning) return resources;
-  resources["/api/learning"] = learning;
+  resources[PREVIEW_RESOURCES.learning] = learning;
   return resources;
 }
 

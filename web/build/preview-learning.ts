@@ -1,16 +1,15 @@
-type JsonObject = Record<string, unknown>;
+import {
+  PREVIEW_NEWS_PAGE_SIZE,
+  PREVIEW_RESOURCES,
+  PREVIEW_STATUS_INLINE_KEYS,
+} from "../app/_lib/preview-contract";
 
-const STATUS_SUMMARY_KEYS = [
-  "generated_at", "system", "training", "counts", "news_evidence_summary",
-  "storyline_summary", "factor_coverage", "annotation_queue", "news_source_health",
-  "llm_routing", "gemini_quota", "gemini_31_quota", "gemma_quota", "latest",
-  "research_forecast", "u5_context", "outcome_summary", "sources", "forward_epoch",
-] as const;
+type JsonObject = Record<string, unknown>;
 
 /** Keep Worker startup memory independent of the growing audit snapshot. */
 export function compactPreviewStatus(status: JsonObject): JsonObject {
   const result: JsonObject = { preview_status_summary: true };
-  for (const key of STATUS_SUMMARY_KEYS) result[key] = status[key];
+  for (const key of PREVIEW_STATUS_INLINE_KEYS) result[key] = status[key];
   const market = status.market_chart && typeof status.market_chart === "object"
     ? status.market_chart as JsonObject
     : {};
@@ -18,7 +17,7 @@ export function compactPreviewStatus(status: JsonObject): JsonObject {
   // that loads them.  Dropping both data and its resource pointer leaves the
   // K-line tab permanently empty in branch previews.
   result.market_chart = {
-    history_resource: market.history_resource ?? "/api/market-history",
+    history_resource: market.history_resource ?? PREVIEW_RESOURCES.marketHistory,
     candles: [],
     decisions: [],
     training_markers: market.training_markers ?? [],
@@ -30,7 +29,12 @@ export function compactPreviewStatus(status: JsonObject): JsonObject {
 /** Keep only the first visible page; later pages already come from D1. */
 export function compactPreviewNewsIndex(index: JsonObject): JsonObject {
   const items = Array.isArray(index.items) ? index.items : [];
-  return { ...index, items: items.slice(0, 12), page: 1, page_size: 12 };
+  return {
+    ...index,
+    items: items.slice(0, PREVIEW_NEWS_PAGE_SIZE),
+    page: 1,
+    page_size: PREVIEW_NEWS_PAGE_SIZE,
+  };
 }
 
 /** Keep first paint useful without compiling the complete learning ledger. */

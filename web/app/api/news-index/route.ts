@@ -22,14 +22,15 @@ const pageRequest = (request: Request) => {
 
 export async function GET(request: Request) {
   const { page, pageSize, category } = pageRequest(request);
-  if (previewBundle) {
-    const all = previewBundle.news_index.items ?? [];
-    const filtered = category ? all.filter(row => row.category === category) : all;
-    const offset = (page - 1) * pageSize;
+  // The first unfiltered page is the branch-aware immutable snapshot. Other
+  // pages and filters are read-only D1 queries; returning an empty sliced
+  // bundle here made Preview look as if the rest of the archive did not exist.
+  const inlinePreviewItems = previewBundle?.news_index.items ?? [];
+  if (previewBundle && page === 1 && !category && pageSize <= inlinePreviewItems.length) {
     return previewJson({
       ...previewBundle.news_index,
-      items: filtered.slice(offset, offset + pageSize),
-      total: filtered.length,
+      items: inlinePreviewItems.slice(0, pageSize),
+      total: Number(previewBundle.news_index.total ?? inlinePreviewItems.length),
       page,
       page_size: pageSize,
     });

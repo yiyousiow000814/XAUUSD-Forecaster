@@ -5,6 +5,8 @@ import { useSearchParams } from "next/navigation";
 import DashboardLink from "../_components/DashboardLink";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
+import { isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
+import { PREVIEW_NEWS_PAGE_SIZE } from "../_lib/preview-contract";
 import LearningGraphModal from "../audit/LearningGraphModal";
 
 type Prediction = {
@@ -405,7 +407,7 @@ const outcomeReason = (codes: string[]) => codes.some(code => code.includes("CLO
       ? "30分钟后没有收到退出报价，样本已隔离"
       : "报价证据不完整，样本已隔离且不进入训练";
 const impulse = (value?: number | null) => value === null || value === undefined ? "—" : `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
-const NEWS_PER_PAGE = 12;
+const NEWS_PER_PAGE = PREVIEW_NEWS_PAGE_SIZE;
 const LEARNING_REFRESH_INTERVAL_MS = 60_000;
 const CATEGORY_ORDER = ["战争/地缘", "利率/Fed", "央行购金", "通胀/就业", "增长/经济", "油价/能源", "美元/流动性", "风险偏好", "监管/其他", "其他"];
 const SOURCE_LABELS: Record<string, string> = {
@@ -721,6 +723,7 @@ export default function AuditView() {
   const [summaryCadence, setSummaryCadence] = useState<EvaluationCadence>("EVERY_5M");
   const [evidenceMode, setEvidenceMode] = useState<"seen" | "unseen" | "all">("seen");
   const auditTabsRef = useRef<HTMLElement>(null);
+  const immutablePreview = isImmutablePreview(payload);
 
   const refreshStatus = useCallback(async (force = false) => {
     try {
@@ -769,41 +772,40 @@ export default function AuditView() {
   }, [newsCategory, newsPage]);
 
   useEffect(() => {
-    const initial = window.setTimeout(
+    return scheduleDashboardRefresh(
       () => void refreshStatus(!fullStatusReadyRef.current),
-      0,
+      () => void refreshStatus(true),
+      15_000,
+      immutablePreview,
     );
-    const interval = window.setInterval(() => {
-      void refreshStatus(true);
-    }, 15_000);
-    return () => { window.clearTimeout(initial); window.clearInterval(interval); };
-  }, [refreshStatus]);
+  }, [refreshStatus, immutablePreview]);
 
   useEffect(() => {
     if (view !== "news") return;
-    const initial = window.setTimeout(() => void refreshNews().catch(reason => setNewsError(
-      reason instanceof Error ? reason.message : "无法读取新闻索引",
-    )), 0);
-    const interval = window.setInterval(() => {
-      refreshNews(true).catch(reason => setNewsError(
+    return scheduleDashboardRefresh(
+      () => void refreshNews().catch(reason => setNewsError(
         reason instanceof Error ? reason.message : "无法读取新闻索引",
-      ));
-    }, 15_000);
-    return () => { window.clearTimeout(initial); window.clearInterval(interval); };
-  }, [refreshNews, view]);
+      )),
+      () => void refreshNews(true).catch(reason => setNewsError(
+        reason instanceof Error ? reason.message : "无法读取新闻索引",
+      )),
+      15_000,
+      immutablePreview,
+    );
+  }, [refreshNews, view, immutablePreview]);
 
   useEffect(() => {
     if (view !== "league") return;
     // The embedded Preview summary keeps first paint small.  Fetch the complete
     // D1 ledger as soon as the league is visible so the modal never waits for
     // the next polling interval.
-    const initial = window.setTimeout(
+    return scheduleDashboardRefresh(
       () => void refreshLearning(!fullLearningReadyRef.current),
-      0,
+      () => void refreshLearning(true),
+      LEARNING_REFRESH_INTERVAL_MS,
+      immutablePreview,
     );
-    const interval = window.setInterval(() => void refreshLearning(true), LEARNING_REFRESH_INTERVAL_MS);
-    return () => { window.clearTimeout(initial); window.clearInterval(interval); };
-  }, [refreshLearning, view]);
+  }, [refreshLearning, view, immutablePreview]);
 
   const openLearningGraph = (tab: "curve" | "execution") => {
     setGraphStartTab(tab);

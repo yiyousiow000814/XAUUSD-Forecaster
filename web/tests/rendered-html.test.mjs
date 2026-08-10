@@ -66,24 +66,66 @@ test("hydrates preview pages from compact status plus read-only D1 resources", (
   assert.match(page, /previewBundle\.learning_summary/);
   const vite = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
   const learning = readFileSync(new URL("../build/preview-learning.ts", import.meta.url), "utf8");
+  const contract = readFileSync(new URL("../preview-contract.json", import.meta.url), "utf8");
   assert.match(vite, /compactPreviewLearning/);
   assert.match(vite, /compactPreviewStatus/);
   assert.match(vite, /compactPreviewNewsIndex/);
   assert.match(vite, /delete bundle\.learning/);
   assert.doesNotMatch(learning, /"recent_decisions"/);
   assert.doesNotMatch(learning, /"news_evidence"/);
-  assert.match(learning, /items\.slice\(0, 12\)/);
-  assert.match(learning, /history_resource: market\.history_resource \?\? "\/api\/market-history"/);
+  assert.match(learning, /items\.slice\(0, PREVIEW_NEWS_PAGE_SIZE\)/);
+  assert.match(learning, /history_resource: market\.history_resource \?\? PREVIEW_RESOURCES\.marketHistory/);
   assert.match(learning, /training_markers: market\.training_markers \?\? \[\]/);
+  for (const key of ["news_evidence", "story_event_candidates", "recent_decisions"]) {
+    assert.match(contract, new RegExp(`"${key}"`), key);
+  }
+  assert.match(contract, /"marketHistory": "\/api\/market-history"/);
   assert.doesNotMatch(page, /function previewRoomResources/);
   assert.match(learning, /models\.filter/);
   assert.match(learning, /lifecycle_status === "LATEST"/);
   assert.match(learning, /identity_curves: \[\]/);
   assert.doesNotMatch(page, /auditView === "league"/);
-  assert.match(page, /"\/api\/status": previewBundle\.status/);
+  assert.match(page, /\[PREVIEW_RESOURCES\.status\]: previewBundle\.status/);
   assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);
   assert.match(resources, /DEFAULT_TIMEOUT_MS = 10_000/);
   assert.match(resources, /数据读取超时，页面会自动重试/);
+});
+
+test("keeps every audit collection in compact Preview status", () => {
+  const contract = readFileSync(new URL("../preview-contract.json", import.meta.url), "utf8");
+  for (const key of [
+    "news_evidence", "storylines", "story_event_candidates", "theme_streams",
+    "market_reaction_streams", "recent_decisions",
+  ]) {
+    assert.match(contract, new RegExp(`"${key}"`), key);
+  }
+  assert.match(contract, /"preview"/);
+  assert.match(contract, /"marketHistory": "\/api\/market-history"/);
+});
+
+test("falls through to read-only D1 for later Preview news and details", () => {
+  const index = readFileSync(new URL("../app/api/news-index/route.ts", import.meta.url), "utf8");
+  const detail = readFileSync(new URL("../app/api/news-content/route.ts", import.meta.url), "utf8");
+  assert.match(index, /previewBundle && page === 1 && !category && pageSize <= inlinePreviewItems\.length/);
+  assert.match(index, /Number\(previewBundle\.news_index\.total \?\? inlinePreviewItems\.length\)/);
+  assert.match(detail, /if \(detail\) return previewJson\(detail\)/);
+  assert.doesNotMatch(detail, /该新闻详情不在本次 Preview 快照中/);
+});
+
+test("does not poll immutable Preview snapshots", () => {
+  const helper = readFileSync(new URL("../app/_lib/dashboard-refresh.ts", import.meta.url), "utf8");
+  assert.match(helper, /immutablePreview\s*\?\s*null\s*:\s*window\.setInterval\(pollRefresh/);
+  assert.match(helper, /is_preview[^=]*=== true/s);
+  for (const path of [
+    "../app/_views/LiveRoomView.tsx",
+    "../app/_views/StatusView.tsx",
+    "../app/_views/HealthView.tsx",
+    "../app/_views/AuditView.tsx",
+  ]) {
+    const source = readFileSync(new URL(path, import.meta.url), "utf8");
+    assert.match(source, /scheduleDashboardRefresh/);
+    assert.match(source, /immutablePreview/);
+  }
 });
 
 test("renders every preview room from the build snapshot", async () => {

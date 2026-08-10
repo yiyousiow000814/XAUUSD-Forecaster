@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import DashboardLink from "../_components/DashboardLink";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
+import { isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 
 type QuotaKey = {
   slot: number;
@@ -95,6 +96,7 @@ export default function StatusView() {
   const [payload, setPayload] = useState<StatusPayload | null>(() => readDashboardResource<StatusPayload>("/api/status"));
   const [error, setError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(0);
+  const immutablePreview = isImmutablePreview(payload);
 
   const refresh = useCallback(async (force = false) => {
     try {
@@ -106,13 +108,13 @@ export default function StatusView() {
   }, []);
 
   useEffect(() => {
-    const initial = window.setTimeout(() => void refresh(), 0);
-    const timer = window.setInterval(() => void refresh(true), 15_000);
-    return () => {
-      window.clearTimeout(initial);
-      window.clearInterval(timer);
-    };
-  }, [refresh]);
+    return scheduleDashboardRefresh(
+      () => void refresh(),
+      () => void refresh(true),
+      15_000,
+      immutablePreview,
+    );
+  }, [refresh, immutablePreview]);
 
   useEffect(() => {
     const initial = window.setTimeout(() => setNowMs(Date.now()), 0);
