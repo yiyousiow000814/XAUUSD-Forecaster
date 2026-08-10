@@ -436,7 +436,7 @@ const TOPIC_LABELS: Record<string, string> = {
 };
 const EVIDENCE_LABELS: Record<string, string> = {
   PRIMARY: "一手官方证据", CORROBORATED: "多源确认",
-  SINGLE_RELIABLE: "单一可靠来源", DISCOVERY_ONLY: "线索来源",
+  SINGLE_RELIABLE: "单一可靠来源 · 35%权重", DISCOVERY_ONLY: "线索来源",
 };
 const EVIDENCE_REASON_LABELS: Record<string, string> = {
   CURRENT_EVENT: "当前事件",
@@ -447,7 +447,7 @@ const EVIDENCE_REASON_LABELS: Record<string, string> = {
   IMPACT_NOT_ASSESSED: "等待 Gemma 判断有效期",
   IMPACT_EXPIRED: "新闻影响期已结束",
   IMPACT_DUPLICATE_REPORT: "重复报道，不延长影响期",
-  STALE_EVENT: "发布时间已超过72小时",
+  STALE_EVENT: "按有效交易时间计算，影响期已结束",
   CATEGORY_NOT_ACTIONABLE: "非黄金方向类别",
   NEEDS_CONFIRMATION: "尚未达到模型证据门槛",
   NO_ACTION_TOPIC: "与方向主题无关",
@@ -455,6 +455,9 @@ const EVIDENCE_REASON_LABELS: Record<string, string> = {
   EVIDENCE_CORROBORATED: "多源确认",
   EVIDENCE_SINGLE_RELIABLE: "单一可靠来源",
   EVIDENCE_DISCOVERY_ONLY: "线索来源",
+  RELIABLE_SINGLE_SOURCE_PROVISIONAL: "可靠单一来源，已降低权重",
+  RELIABLE_PUBLISHER_TIME_PROXY: "以媒体发布时间作为公开时间",
+  EDITORIAL_OR_INVESTMENT_GUIDE: "投资建议或评论，不进入模型",
   ELIGIBLE_AWAITING_FROZEN_PREDICTION: "已达模型门槛，等待下一次冻结预测",
   LEGACY_ANNOTATION_SCHEMA: "旧版标注，不进入当前模型",
   RECORD_KIND_NOT_ACTIONABLE: "不是可交易的现实事件",
@@ -843,7 +846,7 @@ export default function AuditView() {
 
       {view === "evidence" && <section className="evidence-desk">
         <header className="evidence-intro evidence-intro-compact">
-          <div><p className="eyebrow">NEWS USED BY MODEL</p><h2>模型真正用过哪些新闻？</h2><p>只显示实际进入过预测的独立新闻事件。</p></div>
+          <div><p className="eyebrow">NEWS USED BY MODEL</p><h2>模型真正用过哪些新闻？</h2><p>按独立事件说明模型用过什么、没用什么。</p></div>
         </header>
         <div className="evidence-summary">
           <article><span>收到多少篇新闻</span><strong>{payload?.news_evidence_summary?.distinct_articles ?? 0}</strong><small>共保存 {payload?.news_evidence_summary?.raw_article_revisions ?? 0} 个版本；文章更新不会算成新新闻</small></article>
@@ -859,7 +862,7 @@ export default function AuditView() {
           <button type="button" className={evidenceMode === "unseen" ? "active" : ""} onClick={() => setEvidenceMode("unseen")}>从未用过 <b>{payload?.news_evidence_summary?.model_unseen_events ?? 0}</b></button>
           <button type="button" className={evidenceMode === "all" ? "active" : ""} onClick={() => setEvidenceMode("all")}>查看全部 <b>{payload?.news_evidence_summary?.displayed_events ?? 0}</b></button>
         </nav>
-        <details className="evidence-rule-note"><summary>查看统计规则</summary><p>按独立事件统计，不重复计算转载。新闻最长 72 小时有效；迟到发现只保留展示，不进入训练。</p></details>
+        <details className="evidence-rule-note"><summary>查看统计规则</summary><p>官方或多源确认使用正常权重；单一可靠来源使用 35% 权重。新闻只从首次收到后生效，按事件类型和有效交易时间逐步衰减。</p></details>
         <div className="evidence-table-wrap"><table className="evidence-table">
           <thead><tr><th>是否用于预测</th><th>新闻事件</th><th>用了多少次 / 为什么没用</th><th>发布时间 / 收到时间</th></tr></thead>
           <tbody>{visibleEvidence.map(row => <tr key={row.event_key}>

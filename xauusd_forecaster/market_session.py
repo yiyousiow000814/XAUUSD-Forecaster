@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from .market import MarketObservation
@@ -26,6 +26,37 @@ def expected_weekly_closure(at: datetime) -> bool:
         or weekday == 5
         or (weekday == 6 and value.hour < 18)
     )
+
+
+def market_open_elapsed(start: datetime, end: datetime) -> timedelta:
+    """Return elapsed time excluding the normal XAUUSD weekend closure.
+
+    News remains causally invisible until it is received.  Once visible, this
+    clock prevents Friday and weekend publications from expiring while the
+    market cannot react to them.
+    """
+
+    if end < start:
+        raise ValueError("end must not be before start")
+    start_utc = start.astimezone(UTC)
+    end_utc = end.astimezone(UTC)
+    closed = timedelta(0)
+    cursor_date = start_utc.astimezone(NEW_YORK).date() - timedelta(days=7)
+    final_date = end_utc.astimezone(NEW_YORK).date()
+    while cursor_date <= final_date:
+        if cursor_date.weekday() == 4:
+            close = datetime.combine(
+                cursor_date, time(17, 0), tzinfo=NEW_YORK
+            ).astimezone(UTC)
+            reopen = datetime.combine(
+                cursor_date + timedelta(days=2), time(18, 0), tzinfo=NEW_YORK
+            ).astimezone(UTC)
+            overlap_start = max(start_utc, close)
+            overlap_end = min(end_utc, reopen)
+            if overlap_end > overlap_start:
+                closed += overlap_end - overlap_start
+        cursor_date += timedelta(days=1)
+    return end_utc - start_utc - closed
 
 
 def horizon_crosses_weekly_closure(

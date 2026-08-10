@@ -45,6 +45,12 @@ _GDELT_RETAIL_PRICE_PATTERNS = (
     "giá vàng ngày", "giá vàng chiều",
     "cek harga emas", "precio del oro hoy",
 )
+_EDITORIAL_OR_INVESTMENT_GUIDE_PATTERNS = (
+    "way to invest", "ways to invest", "how to invest", "should you buy",
+    "best gold stocks",
+    "investment guide", "price prediction", "投资黄金的", "如何投资黄金",
+    "是否应该买入", "黄金股推荐",
+)
 
 _TERMS = {
     "google_news_gold_context": (
@@ -108,6 +114,10 @@ def google_news_item_is_relevant(
         return False, "FUTURE_PUBLISHED_TIME"
     if observed - published > GOOGLE_NEWS_MAX_AGE:
         return False, "SEARCH_RESULT_TOO_OLD"
+    if source == "google_news_gold_context" and not news_headline_is_actionable(
+        headline
+    ):
+        return False, "EDITORIAL_OR_INVESTMENT_GUIDE"
     if source == "google_news_fed_rates":
         anchored = any(term in text for term in _FED_POLICY_ANCHORS)
         contextual_rate = (
@@ -123,6 +133,12 @@ def google_news_item_is_relevant(
         if not any(term in text for term in required_group):
             return False, "TITLE_NOT_RELEVANT_TO_LANE"
     return True, "RELEVANT_RECENT_ITEM"
+
+
+def news_headline_is_actionable(headline: str) -> bool:
+    """Exclude deterministic advice/editorial formats from model admission."""
+    text = " " + re.sub(r"\s+", " ", (headline or "").casefold()).strip() + " "
+    return not any(pattern in text for pattern in _EDITORIAL_OR_INVESTMENT_GUIDE_PATTERNS)
 
 
 def google_news_quality_rank(headline: str) -> int:

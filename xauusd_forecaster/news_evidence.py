@@ -16,6 +16,7 @@ from .news_impact import (
     impact_is_actionable,
     impact_time_rule,
 )
+from .news_relevance import news_headline_is_actionable
 from .news_contracts import CURRENT_NEWS_CONTRACT
 from .news_time import NewsTimeAssessment, assess_news_time
 
@@ -198,22 +199,24 @@ def _parsed_timestamp(value: object) -> datetime | None:
 
 
 def resolve_event_clock(
-    row: dict, *, primary_source: bool,
+    row: dict, *, primary_source: bool, reliable_publisher: bool = False,
 ) -> tuple[datetime | None, str, str]:
     """Return a live-known event clock with explicit provenance.
 
-    A precise body clock is preferred.  For an official primary publisher the
-    publication itself is an admissible event only when the source supplies a
-    precise timestamp.  Media publication time never substitutes for an
-    unknown real-world event clock.
+    A precise body clock is preferred.  Official publication time is the event
+    clock for primary releases.  A reliable publisher timestamp is a bounded
+    public-information proxy when the real-world occurrence time is absent;
+    receipt time still controls when the model may first observe it.
     """
     annotation = json.loads(row.get("annotation_json") or "{}")
     explicit = _parsed_timestamp(annotation.get("event_time") or row.get("event_time"))
     if explicit is not None:
         return explicit, "EXPLICIT_BODY_TIME", "TIMESTAMP"
-    official_release = _parsed_timestamp(row.get("source_published_time"))
-    if primary_source and official_release is not None:
-        return official_release, "OFFICIAL_RELEASE_TIME", "TIMESTAMP"
+    published = _parsed_timestamp(row.get("source_published_time"))
+    if primary_source and published is not None:
+        return published, "OFFICIAL_RELEASE_TIME", "TIMESTAMP"
+    if reliable_publisher and published is not None:
+        return published, "SOURCE_STRUCTURED_TIME", "TIMESTAMP"
     return None, "UNKNOWN", "UNKNOWN"
 
 
@@ -298,6 +301,7 @@ def event_evidence_rows_from_connection(
                 max_actionable_age=max_age,
                 max_discovery_delay=None,
                 allow_pre_forward_publication=True,
+                exclude_weekly_closure=True,
             )
             if not impact_is_actionable(impact):
                 if impact is None:
@@ -370,7 +374,9 @@ def event_evidence_rows_from_connection(
         materiality = float(annotation.get("materiality") or 0.0)
         current_semantic_schema = canonical.get("prompt_version") == CURRENT_EVENT_PROMPT_VERSION
         event_clock, event_clock_source, event_time_precision = resolve_event_clock(
-            canonical, primary_source=canonical["source"] in primary_sources,
+            canonical,
+            primary_source=canonical["source"] in primary_sources,
+            reliable_publisher=bool(canonical["reliable_domain"]),
         )
         event_clock_valid = legacy_v3 or bool(
             event_clock is not None
@@ -386,13 +392,17 @@ def event_evidence_rows_from_connection(
             "rates_fed", "inflation_employment", "growth_economy", "usd_liquidity",
             "oil_energy", "war_geopolitics", "central_bank_gold", "risk_sentiment",
         }
+        headline_actionable = news_headline_is_actionable(
+            str(canonical.get("headline") or "")
+        )
         eligible = (
             bool(timely)
-            and grade in {"PRIMARY", "CORROBORATED"}
+            and grade in {"PRIMARY", "CORROBORATED", "SINGLE_RELIABLE"}
             and bool(ACTION_TOPICS & set(topics))
             and relevant
             and semantic_eligible
             and event_clock_valid
+            and headline_actionable
         )
         official_eligible = eligible and canonical["source"] in CORE_OFFICIAL_SOURCES
         source_names = sorted({row["source"] for row in members})
@@ -415,6 +425,8 @@ def event_evidence_rows_from_connection(
                 len(reliable_domains) if not primary else len(primary_organizations)
             )
         reasons = [f"EVIDENCE_{grade}"]
+        if event_clock_source == "SOURCE_STRUCTURED_TIME":
+            reasons.append("RELIABLE_PUBLISHER_TIME_PROXY")
         if not timely:
             reasons.extend(sorted({
                 row["time_assessment"].reason_code for row in members
@@ -423,6 +435,8 @@ def event_evidence_rows_from_connection(
             reasons.append("CATEGORY_NOT_ACTIONABLE")
         if not (ACTION_TOPICS & set(topics)):
             reasons.append("NO_ACTION_TOPIC")
+        elif grade == "SINGLE_RELIABLE":
+            reasons.append("RELIABLE_SINGLE_SOURCE_PROVISIONAL")
         elif timely and grade not in {"PRIMARY", "CORROBORATED"}:
             reasons.append("NEEDS_CONFIRMATION")
         if not legacy_v3:
@@ -436,6 +450,8 @@ def event_evidence_rows_from_connection(
                 reasons.append("LOW_MATERIALITY")
             if not event_clock_valid:
                 reasons.append("EVENT_TIME_INVALID")
+            if not headline_actionable:
+                reasons.append("EDITORIAL_OR_INVESTMENT_GUIDE")
         entities = sorted({
             str(value).strip()
             for row in members

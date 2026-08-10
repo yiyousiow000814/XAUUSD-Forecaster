@@ -32,7 +32,7 @@ NEWS_EXPERIMENTAL_MIN_CLUSTERS = 1
 NEWS_EXPERIMENTAL_MIN_EVENT_DAYS = 1
 NEWS_MIN_EVENT_DAYS = 3
 CROSSFIT_VERSION = "expanding-market-purge30m-v1"
-EVENT_WEIGHTING_VERSION = "quality-scaled-event-budget-gemma-decay-v3"
+EVENT_WEIGHTING_VERSION = "quality-scaled-event-budget-gemma-decay-v4-reliable-tier"
 BROAD_MODEL_FEATURES = (*NEWS_FEATURES, *BROAD_NEWS_FEATURES)
 
 

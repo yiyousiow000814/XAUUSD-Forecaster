@@ -40,6 +40,12 @@ ACTIONABLE_CATEGORIES = frozenset({
     "oil_energy", "war_geopolitics", "central_bank_gold", "risk_sentiment",
 })
 
+EVIDENCE_GRADE_WEIGHT = {
+    "PRIMARY": 1.0,
+    "CORROBORATED": 1.0,
+    "SINGLE_RELIABLE": 0.35,
+}
+
 
 def _visibility_event_ref(event: dict | None, news, annotation) -> dict:
     news_row = dict(news)
@@ -82,7 +88,13 @@ def event_raw_weight(row: dict) -> float:
     age_minutes = max(0.0, float(row.get("economic_age_minutes") or 0.0))
     _, half_life_minutes = impact_time_rule(str(row.get("impact_class") or "BACKGROUND"))
     freshness = math.exp(-math.log(2.0) * age_minutes / half_life_minutes)
-    return freshness * float(row["confidence"]) * max(0.05, float(row["novelty"]))
+    evidence_weight = EVIDENCE_GRADE_WEIGHT.get(
+        str(row.get("evidence_grade") or ""), 0.0
+    )
+    return (
+        evidence_weight * freshness * float(row["confidence"])
+        * max(0.05, float(row["novelty"]))
+    )
 
 
 def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
@@ -157,7 +169,11 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
         _, half_life_minutes = impact_time_rule(
             str(row.get("impact_class") or "BACKGROUND")
         )
-        freshness = math.exp(-math.log(2.0) * age_minutes / half_life_minutes)
+        evidence_weight = EVIDENCE_GRADE_WEIGHT[row["evidence_grade"]]
+        freshness = (
+            evidence_weight
+            * math.exp(-math.log(2.0) * age_minutes / half_life_minutes)
+        )
         weight = event_raw_weight(row)
         broad_weight_sum += weight
         broad_totals["broad_news_hawkishness"] += weight * row["hawkishness"]
@@ -168,10 +184,10 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
         broad_totals["broad_news_novelty"] += weight * row["novelty"]
         broad_totals["broad_news_confidence"] += weight * row["confidence"]
         broad_totals["broad_news_event_count"] += freshness
-        broad_totals[
-            "broad_primary_event_count" if row["evidence_grade"] == "PRIMARY"
-            else "broad_corroborated_event_count"
-        ] += freshness
+        if row["evidence_grade"] == "PRIMARY":
+            broad_totals["broad_primary_event_count"] += freshness
+        elif row["evidence_grade"] == "CORROBORATED":
+            broad_totals["broad_corroborated_event_count"] += freshness
         for topic in row["topics"]:
             name = f"broad_topic_{topic}"
             if name in broad_totals:

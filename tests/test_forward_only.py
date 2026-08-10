@@ -2391,6 +2391,17 @@ def test_gemini_key_pool_falls_back_on_quota_error(monkeypatch) -> None:
     assert model == "gemini-3.5-flash-lite"
 
 
+def test_gold_investment_guide_is_not_an_actionable_news_item() -> None:
+    observed = datetime(2026, 8, 10, 6, 0, tzinfo=UTC)
+    allowed, reason = google_news_item_is_relevant(
+        "google_news_gold_context",
+        "Smart ways to invest in gold as the dollar falls - MarketWatch",
+        observed - timedelta(hours=1), observed,
+    )
+    assert allowed is False
+    assert reason == "EDITORIAL_OR_INVESTMENT_GUIDE"
+
+
 def test_gemini_daily_quota_counts_attempts_and_resets_at_pacific_midnight(
     tmp_path,
 ) -> None:
