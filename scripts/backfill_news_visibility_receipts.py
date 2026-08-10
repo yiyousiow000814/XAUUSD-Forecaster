@@ -43,7 +43,8 @@ def backfill(database: Path) -> tuple[int, int]:
                FROM predictions_v2 p
                JOIN model_updates_v2 u ON u.model_version=p.model_version
                WHERE p.model_identity IN (
-                   'NEWS_RESIDUAL','FULL','BROAD_NEWS_RESIDUAL','BROAD_FULL')
+                   'NEWS_RESIDUAL','FULL','BROAD_NEWS_RESIDUAL','BROAD_FULL',
+                   'NEWS_ONLY')
                  AND p.prediction_status!='DATA_UNHEALTHY'
                ORDER BY p.decision_time,p.model_identity"""
         ).fetchall()

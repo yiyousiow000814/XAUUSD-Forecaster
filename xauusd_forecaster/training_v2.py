@@ -281,7 +281,7 @@ def _write_manifest(path: Path, payload: dict) -> str:
 
 
 def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[dict]:
-    """Build and atomically activate one complete five-model generation."""
+    """Build and atomically activate one complete six-model generation."""
     rows = complete_training_rows(ledger, cutoff)
     count = len(rows)
     if count < PREVIEW_ROWS:
@@ -357,6 +357,10 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
          crossfit_by_id[row["decision_id"]]["residual"], receipt)
         for row, receipt in zip(broad_residual, broad_weights.tolist())
     ])
+    news_only_hash = canonical_hash([
+        (row["decision_id"], row["receipt"], row["target"], receipt)
+        for row, receipt in zip(broad_residual, broad_weights.tolist())
+    ])
     event_snapshot_hash = canonical_hash(sorted({
         (event["event_id"], event["event_version_id"])
         for row in training_rows for field in ("official_events", "broad_events")
@@ -365,7 +369,7 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
     generation_seed = canonical_hash((
         stage, cutoff.isoformat(), EVIDENCE_POLICY_VERSION, NEWS_FEATURE_VERSION,
         ELIGIBILITY_VERSION, EVENT_WEIGHTING_VERSION, event_snapshot_hash,
-        market_hash, official_hash, broad_hash,
+        market_hash, official_hash, broad_hash, news_only_hash,
     ))
     generation_id = str(uuid.uuid5(uuid.NAMESPACE_URL, generation_seed))
     slug = generation_id.split("-")[0]
@@ -398,6 +402,20 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
     if not broad_path.exists():
         broad_artifact.write(broad_path)
 
+    news_only_version = (
+        f"news-only-{broad_evidence_status.lower().replace('_', '-')}-"
+        f"{stage.lower()}-{slug}-{news_only_hash[:12]}"
+    )
+    news_only_artifact = train_ridge(
+        np.asarray([row["broad_news"] for row in broad_residual]),
+        np.asarray([row["target"] for row in broad_residual]),
+        BROAD_MODEL_FEATURES, 100.0, news_only_hash, broad_weights,
+        EVENT_WEIGHTING_VERSION, broad_summary,
+    )
+    news_only_path = root / news_only_version / "model.json"
+    if not news_only_path.exists():
+        news_only_artifact.write(news_only_path)
+
     full_manifest = {
         "schema": "xauusd.phase2f.full-model.v3", "generation_id": generation_id,
         "market_model_version": market_version, "market_artifact_path": str(market_path),
@@ -425,7 +443,10 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
     )
     broad_full_path = root / broad_full_version / "manifest.json"
     broad_full_hash = _write_manifest(broad_full_path, broad_manifest)
-    required_paths = (market_path, official_path, full_path, broad_path, broad_full_path)
+    required_paths = (
+        market_path, official_path, full_path, broad_path, broad_full_path,
+        news_only_path,
+    )
     if any(not path.is_absolute() or not path.exists() for path in required_paths):
         return [{"status": "GENERATION_ARTIFACT_VALIDATION_FAILED",
                  "generation_id": generation_id}]
@@ -448,6 +469,10 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
          broad_events, broad_days, market_hash,
          f"{FEATURE_VERSION}+{NEWS_FEATURE_VERSION}+{EVIDENCE_POLICY_VERSION}",
          ELIGIBILITY_VERSION, broad_full_path, broad_full_hash),
+        (news_only_version, "NEWS_ONLY", len(broad_residual), len(broad_residual),
+         broad_events, broad_days, news_only_hash,
+         f"{NEWS_FEATURE_VERSION}+{EVIDENCE_POLICY_VERSION}",
+         ELIGIBILITY_VERSION, news_only_path, news_only_artifact.artifact_hash),
     )
     previous = ledger.connection.execute(
         """SELECT generation_id FROM news_model_generation_activations_v1
@@ -474,15 +499,20 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
              EVENT_WEIGHTING_VERSION, 5, "READY"),
         )
         for update in updates:
+            member_table = (
+                "news_model_generation_aux_members_v1"
+                if update[1] == "NEWS_ONLY"
+                else "news_model_generation_members_v1"
+            )
             ledger.connection.execute(
-                "INSERT INTO news_model_generation_members_v1 VALUES (?,?,?)",
+                f"INSERT INTO {member_table} VALUES (?,?,?)",
                 (generation_id, update[1], update[0]),
             )
         ledger.connection.execute(
             "INSERT INTO news_model_generation_activations_v1 VALUES (?,?,?,?,?)",
             (str(uuid.uuid5(uuid.NAMESPACE_URL, f"activate:{generation_id}")), generation_id,
              previous["generation_id"] if previous else None, now.isoformat(),
-             "COMPLETE_FIVE_MODEL_GENERATION"),
+             "COMPLETE_SIX_MODEL_GENERATION"),
         )
         for lane, receipts in (
             ("OFFICIAL", official_weight_receipts), ("BROAD", broad_weight_receipts),

@@ -29,7 +29,7 @@ EVIDENCE_POLICY_VERSION = CURRENT_NEWS_CONTRACT.policy_version
 LEGACY_V3_EVIDENCE_POLICY_VERSION = "news-event-evidence-v2-economic-time"
 CURRENT_EVENT_PROMPT_VERSION = "news-json-v14-material-event-evidence"
 ACTIONABLE_RECORD_KINDS = frozenset({
-    "FACT_EVENT", "OFFICIAL_CLAIM", "MARKET_REACTION",
+    "FACT_EVENT", "OFFICIAL_CLAIM",
 })
 ACTIONABLE_EVIDENCE_ROLES = frozenset({
     "CORE_CLAIM", "EVIDENCE_DOCUMENT", "MARKET_REACTION",
@@ -91,6 +91,30 @@ BROAD_NEWS_FEATURES = (
     "broad_corroborated_event_count",
     *TOPIC_FEATURES,
 )
+
+
+def _deterministic_record_kind(annotation: dict, headline: str) -> str:
+    """Keep market-price narration out of fact-event learning.
+
+    The LLM may still label a mixed market wrap as FACT_EVENT.  Requiring both
+    an instrument and a movement term makes the deterministic override narrow
+    and leaves the immutable original annotation auditable.
+    """
+    declared = str(annotation.get("record_kind") or "").upper()
+    if declared not in {"FACT_EVENT", "OFFICIAL_CLAIM"}:
+        return declared
+    normalized = re.sub(r"\s+", " ", str(headline or "").casefold())
+    instrument = any(token in normalized for token in (
+        "gold", "bullion", "dollar", "yield", "treasury", "stock", "shares",
+        "futures", "oil", "黄金", "金价", "美元", "收益率", "美债", "股市",
+        "股指", "期货", "油价", "原油",
+    ))
+    movement = any(token in normalized for token in (
+        "rise", "rises", "rose", "higher", "fall", "falls", "fell", "drop",
+        "gain", "gains", "climb", "steady", "surge", "slip", "breakout",
+        "上涨", "下跌", "走高", "走低", "攀升", "回落", "持稳", "突破",
+    ))
+    return "MARKET_REACTION" if instrument and movement else declared
 
 _TOPIC_TERMS = (
     ("central_bank_gold", ("central bank gold", "gold reserve", "gold purchase", "gold buying")),
@@ -419,7 +443,9 @@ def event_evidence_rows_from_connection(
         topics = tuple(sorted({topic for row in members for topic in row["topics"]}))
         annotation = json.loads(canonical.get("annotation_json") or "{}")
         controlled_category = str(annotation.get("primary_category") or "")
-        record_kind = str(annotation.get("record_kind") or "")
+        record_kind = _deterministic_record_kind(
+            annotation, str(annotation.get("headline_zh") or canonical.get("headline") or ""),
+        )
         evidence_role = str(annotation.get("evidence_role") or "")
         materiality = float(annotation.get("materiality") or 0.0)
         current_semantic_schema = canonical.get("prompt_version") == CURRENT_EVENT_PROMPT_VERSION
@@ -566,7 +592,7 @@ def event_evidence_rows_from_connection(
             "event_type": canonical.get("event_type"),
             "entities": entities,
             "primary_category": annotation.get("primary_category"),
-            "record_kind": annotation.get("record_kind"),
+            "record_kind": record_kind,
             "actor": annotation.get("actor"),
             "action": annotation.get("action"),
             "object": annotation.get("object"),

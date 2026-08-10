@@ -34,8 +34,10 @@ V2_IMMUTABLE_TABLES = (
     "news_decision_event_snapshots_v1",
     "news_model_generations_v1",
     "news_model_generation_members_v1",
+    "news_model_generation_aux_members_v1",
     "news_model_generation_activations_v1",
     "news_training_weight_receipts_v1",
+    "news_only_visibility_receipts_v1",
     "news_item_classifications_v1",
     "news_impact_assessments_v1",
     "news_impact_failures_v1",
@@ -346,6 +348,14 @@ CREATE TABLE IF NOT EXISTS news_model_generation_members_v1 (
     UNIQUE(model_version)
 );
 
+CREATE TABLE IF NOT EXISTS news_model_generation_aux_members_v1 (
+    generation_id TEXT NOT NULL REFERENCES news_model_generations_v1(generation_id),
+    model_identity TEXT NOT NULL CHECK(model_identity='NEWS_ONLY'),
+    model_version TEXT NOT NULL REFERENCES model_updates_v2(model_version),
+    PRIMARY KEY(generation_id,model_identity),
+    UNIQUE(model_version)
+);
+
 CREATE TABLE IF NOT EXISTS news_model_generation_activations_v1 (
     activation_id TEXT PRIMARY KEY,
     generation_id TEXT NOT NULL REFERENCES news_model_generations_v1(generation_id),
@@ -365,6 +375,24 @@ CREATE TABLE IF NOT EXISTS news_training_weight_receipts_v1 (
     normalized_event_weight REAL NOT NULL CHECK(normalized_event_weight >= 0),
     receipt_hash TEXT NOT NULL,
     PRIMARY KEY(generation_id,evidence_lane,source_decision_id,event_version_id)
+);
+
+CREATE TABLE IF NOT EXISTS news_only_visibility_receipts_v1 (
+    receipt_id TEXT PRIMARY KEY,
+    source_decision_id TEXT NOT NULL,
+    decision_time TEXT NOT NULL,
+    model_identity TEXT NOT NULL CHECK(model_identity='NEWS_ONLY'),
+    model_version TEXT NOT NULL,
+    eligibility_version TEXT NOT NULL,
+    evidence_policy_version TEXT NOT NULL,
+    evidence_lane TEXT NOT NULL CHECK(evidence_lane='BROAD'),
+    event_key TEXT NOT NULL,
+    event_source_hash TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    receipt_origin TEXT NOT NULL CHECK(receipt_origin IN ('LIVE','POINT_IN_TIME_REPLAY')),
+    UNIQUE(source_decision_id, model_version, evidence_lane, event_key),
+    FOREIGN KEY(source_decision_id, model_version)
+      REFERENCES predictions_v2(source_decision_id, model_version)
 );
 
 CREATE TABLE IF NOT EXISTS news_item_classifications_v1 (
@@ -613,6 +641,8 @@ CREATE INDEX IF NOT EXISTS news_decision_event_time_v1
 ON news_decision_event_snapshots_v1(decision_time,event_id);
 CREATE INDEX IF NOT EXISTS news_generation_activation_time_v1
 ON news_model_generation_activations_v1(activated_at,generation_id);
+CREATE INDEX IF NOT EXISTS news_only_visibility_event_v1
+ON news_only_visibility_receipts_v1(event_key, decision_time);
 CREATE INDEX IF NOT EXISTS execution_examples_time_v1
 ON execution_training_examples_v1(checkpoint_minutes, observed_at);
 CREATE INDEX IF NOT EXISTS execution_predictions_time_v1

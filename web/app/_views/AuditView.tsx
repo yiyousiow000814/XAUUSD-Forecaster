@@ -431,7 +431,14 @@ const MODEL_LABELS: Record<string, string> = {
   FULL: "黄金＋新闻 Ridge",
   BROAD_NEWS_RESIDUAL: "大视野新闻修正量 Ridge",
   BROAD_FULL: "黄金＋大视野新闻 Ridge",
+  NEWS_ONLY: "纯新闻方向 Ridge",
 };
+function predictionStatusLabel(status: string): string {
+  if (status === "DIAGNOSTIC_RESIDUAL_ONLY") return "仅显示修正值，不单独判断方向";
+  if (status === "RESEARCH_NEWS_ONLY") return "只看新闻的30分钟方向研究";
+  if (status === "NO_ELIGIBLE_NEWS") return "当前没有合格新闻";
+  return status;
+}
 const TOPIC_LABELS: Record<string, string> = {
   rates_fed: "利率 / Fed", inflation: "通胀", employment: "就业", inflation_employment: "通胀 / 就业",
   growth_economy: "增长 / 经济", usd_liquidity: "美元 / 流动性",
@@ -1016,7 +1023,7 @@ export default function AuditView() {
             <div className="prediction-grid">
               {row.predictions.map(model => <article key={model.model_version}>
                 <span>{MODEL_LABELS[model.model_identity] ?? model.model_identity}</span><h3>{model.recommended_action}</h3>
-                <p>{model.prediction_status}</p>
+                <p>{predictionStatusLabel(model.prediction_status)}</p>
                 <dl><div><dt>方向 U5</dt><dd>{number(model.predicted_direction_u5, 3)}</dd></div><div><dt>News residual</dt><dd>{number(model.predicted_news_residual_u5, 3)}</dd></div><div><dt>Long EV</dt><dd>{number(model.ev_long_u5, 3)}</dd></div><div><dt>Short EV</dt><dd>{number(model.ev_short_u5, 3)}</dd></div><div><dt>不确定性</dt><dd>{number(model.uncertainty_u5, 3)}</dd></div></dl>
                 <small>{model.model_version}</small>
               </article>)}
@@ -1042,14 +1049,15 @@ export default function AuditView() {
           <div><h3>查看学习曲线与 K 线</h3><p>长期累计、每组成绩与决策位置</p></div>
           <button type="button" onClick={() => { setGraphStartTab("curve"); setGraphOpen(true); }}>打开交互图表 ↗</button>
         </section>
-        <section className="model-score-summary"><header><div><span>LIVE OOS SCOREBOARD</span><h3>五套模型，现在表现怎样？</h3></div><small>左边是本组开始前，箭头后是连续累计，圆点后是本组独立贡献。</small></header><div className="summary-cadence"><span>统计频率</span><button type="button" className={summaryCadence === "EVERY_5M" ? "active" : ""} onClick={() => setSummaryCadence("EVERY_5M")}>每5分钟（重叠）</button><button type="button" className={summaryCadence === "FIXED_30M" ? "active" : ""} onClick={() => setSummaryCadence("FIXED_30M")}>每30分钟（:00 / :30）</button><small>预测期限始终是30分钟。</small></div>
+        <section className="model-score-summary"><header><div><span>LIVE OOS SCOREBOARD</span><h3>六套模型，现在表现怎样？</h3></div><small>左边是本组开始前，箭头后是连续累计，圆点后是本组独立贡献。</small></header><div className="summary-cadence"><span>统计频率</span><button type="button" className={summaryCadence === "EVERY_5M" ? "active" : ""} onClick={() => setSummaryCadence("EVERY_5M")}>每5分钟（重叠）</button><button type="button" className={summaryCadence === "FIXED_30M" ? "active" : ""} onClick={() => setSummaryCadence("FIXED_30M")}>每30分钟（:00 / :30）</button><small>预测期限始终是30分钟。</small></div>
         {(payload?.learning_curves?.models?.length ?? 0) === 0 ? <div className="league-empty">
           <strong>正在建立第一版 Preview</strong><p>达到 96 条修复或 Forward 完整样本即可训练 Market Preview，不需要等待60天。曲线只从模型创建后的新 Decision 开始，绝不回填假历史成绩。</p>
         </div> : <div className="compact-model-summary">{Object.keys(MODEL_LABELS).filter(identity => identity !== "CHAMPION_0").map(identity => {
           const process = payload?.learning_curves?.rolling_processes?.find(row => row.model_identity === identity);
           const latestGroup = payload?.learning_curves?.version_groups?.find(row => row.model_identity === identity && row.lifecycle_status === "LATEST");
-          if (!process && !latestGroup) return null;
+          if (!process && !latestGroup && identity !== "NEWS_ONLY") return null;
           const diagnostic = identity === "NEWS_RESIDUAL" || identity === "BROAD_NEWS_RESIDUAL";
+          const newsOnlyPending = identity === "NEWS_ONLY" && !process && !latestGroup;
           const processMetric = process?.cadence_metrics?.[summaryCadence] ?? process;
           const groupMetric = latestGroup?.cadence_metrics?.[summaryCadence] ?? latestGroup;
           const hasTotal = (processMetric?.oos_rows ?? 0) > 0;
@@ -1058,14 +1066,14 @@ export default function AuditView() {
           const group = hasGroup ? groupMetric!.cumulative_quote_return : null;
           const history = total === null ? null : total - (group ?? 0);
           const tone = group === null ? "is-pending" : group >= 0 ? "is-positive" : "is-negative";
-          return <article key={identity}><b>{MODEL_LABELS[identity]}{diagnostic ? <small>新闻修正量</small> : null}</b><div className="return-flow" aria-label={`本组开始前 ${percent(history)}，加入本组后 ${percent(total)}，本组贡献 ${percent(group)}`}><span className="return-value return-history" title="本组开始前的历史累计"><small>开始前</small><span>{history === null ? "—" : percent(history)}</span></span><i className={tone} aria-hidden="true">→</i><span className="return-value return-total" title="加入本组后的连续累计"><small>当前累计</small><strong>{total === null ? "等待" : percent(total)}</strong></span><i className="return-separator" aria-hidden="true">·</i><span className={`return-value return-group ${tone}`} title="本组独立贡献"><small>本组贡献</small><strong>{group === null ? "等待" : percent(group)}</strong></span></div></article>;
+          return <article key={identity}><b>{MODEL_LABELS[identity]}{diagnostic ? <small>新闻修正量</small> : newsOnlyPending ? <small>等待新版生成</small> : null}</b><div className="return-flow" aria-label={`本组开始前 ${percent(history)}，加入本组后 ${percent(total)}，本组贡献 ${percent(group)}`}><span className="return-value return-history" title="本组开始前的历史累计"><small>开始前</small><span>{history === null ? "—" : percent(history)}</span></span><i className={tone} aria-hidden="true">→</i><span className="return-value return-total" title="加入本组后的连续累计"><small>当前累计</small><strong>{total === null ? "等待" : percent(total)}</strong></span><i className="return-separator" aria-hidden="true">·</i><span className={`return-value return-group ${tone}`} title="本组独立贡献"><small>本组贡献</small><strong>{group === null ? "等待" : percent(group)}</strong></span></div></article>;
         })}</div>}</section>
         <ExecutionResearch status={payload?.execution_learning} onOpenGraph={() => { setGraphStartTab("execution"); setGraphOpen(true); }} />
         <details className="model-method-note">
           <summary><span>方法与实盘边界</span><small>新闻修正量、成本与 Shadow 限制</small></summary>
           <div>
             <article><b>“大视野新闻修正量”不是“大视野新闻自身”</b><span>它先看黄金自身预测错了多少，再学习新闻应该把黄金答案往上或往下修多少。例：黄金自身 +0.10 U5，新闻修正 +0.04 U5，只有“黄金＋大视野新闻”才输出完整方向 +0.14 U5。</span></article>
-            <article><b>当前还没有独立的“大视野 News-only”</b><span>真正的 News-only 会完全不读取黄金特征，只用新闻直接预测完整30分钟目标。现在名为“大视野新闻修正量”的曲线不能当作 News-only，也不能单独拿去做完整方向。</span></article>
+            <article><b>“纯新闻方向”单独回答新闻看涨还是看跌</b><span>它完全不读取黄金行情特征，只用决策时已经看见的合格新闻，直接预测未来30分钟黄金方向；没有合格新闻时显示 WAIT。它与新闻修正量分开评分。</span></article>
             <article><b>成本口径</b><span>收益使用可执行 Bid/Ask，并扣除入场、退出两边各 $30 / 百万美元成交额的 commission；slippage 暂按 0。尚未包含账户真实成交偏差，所以不是实盘 PnL。</span></article>
             <article><b>做法可以实时复现；结果尚未达到实盘标准</b><span>行情和新闻都只读取决策时已经看见的内容；30分钟结果成熟后才进入下一轮训练。当前仍没有下单权限，也不会自动晋升。</span></article>
           </div>

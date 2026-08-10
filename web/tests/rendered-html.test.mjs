@@ -291,7 +291,8 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.doesNotMatch(modal, /gx\(row\.generation\)/);
   assert.match(modal, /每30分钟（固定 :00 \/ :30）/);
   assert.match(modal, /同一坐标叠加比较/);
-  assert.match(page, /五套模型，现在表现怎样/);
+  assert.match(page, /六套模型，现在表现怎样/);
+  assert.match(page, /等待新版生成/);
   assert.match(page, /training-card-total/);
   assert.match(page, /还差/);
   assert.doesNotMatch(page, /含新闻的决策时点/);
@@ -527,6 +528,13 @@ test("explains training rows separately from independent news events", () => {
   assert.match(source, /news_evidence_summary\?\.current_contract_exposed_rows/);
   assert.match(source, /news_evidence_summary\?\.current_contract_distinct_events/);
   assert.match(source, /不是训练还缺的数量/);
+});
+
+test("labels residual and news-only research without hiding composite direction", () => {
+  const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  assert.match(source, /仅显示修正值，不单独判断方向/);
+  assert.match(source, /只看新闻的30分钟方向研究/);
+  assert.doesNotMatch(source, /暂不参考方向/);
 });
 
 test("reflows news evidence into readable mobile cards", () => {

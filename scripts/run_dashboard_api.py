@@ -751,8 +751,18 @@ def _news_evidence_display_rows(
     between "used" and "never used".
     """
     try:
+        aux_receipts = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='news_only_visibility_receipts_v1'"
+        ).fetchone()
+        receipt_source = (
+            "(SELECT * FROM news_model_visibility_receipts_v1 UNION ALL "
+            "SELECT * FROM news_only_visibility_receipts_v1)"
+            if aux_receipts is not None
+            else "news_model_visibility_receipts_v1"
+        )
         visibility_rows = connection.execute(
-            """SELECT event_key,
+            f"""SELECT event_key,
                       count(*) AS frozen_model_uses,
                       count(DISTINCT source_decision_id) AS frozen_decisions,
                       count(DISTINCT event_source_hash) AS frozen_versions,
@@ -760,7 +770,7 @@ def _news_evidence_display_rows(
                       max(decision_time) AS last_model_decision_time,
                       group_concat(DISTINCT model_identity) AS model_identities,
                       group_concat(DISTINCT model_version) AS model_versions
-               FROM news_model_visibility_receipts_v1
+               FROM {receipt_source}
                GROUP BY event_key"""
         ).fetchall()
         catalog_rows = connection.execute(
