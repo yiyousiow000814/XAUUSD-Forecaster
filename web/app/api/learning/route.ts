@@ -1,12 +1,11 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
-import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
+import { rejectPreviewWrite } from "../_shared/preview";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  if (previewBundle) return previewJson(previewBundle.learning);
   const binding = env.DB as D1Database | undefined;
   if (binding) {
     const row = await binding

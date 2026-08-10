@@ -38,7 +38,7 @@ test("renders the live room with an audit-page navigation button", async () => {
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
 });
 
-test("keeps branch previews isolated from the production database", async () => {
+test("keeps branch preview writes isolated from the production database", async () => {
   const source = readFileSync(new URL("../app/api/_shared/preview.ts", import.meta.url), "utf8");
   const layout = readFileSync(new URL("../app/layout.tsx", import.meta.url), "utf8");
   assert.match(source, /PR Preview 是只读快照/);
@@ -57,19 +57,24 @@ test("keeps branch previews isolated from the production database", async () => 
   assert.match(builtPreview, new RegExp(process.env.WORKERS_CI_BRANCH.replaceAll("/", "\\/")));
 });
 
-test("hydrates preview pages from their immutable build snapshot", () => {
+test("hydrates preview pages from compact status plus read-only D1 resources", () => {
   const page = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
   const app = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
   const resources = readFileSync(new URL("../app/_lib/dashboard-resource.ts", import.meta.url), "utf8");
   assert.match(page, /function previewResources/);
   assert.match(page, /function previewStatusResource/);
+  assert.match(page, /previewBundle\.learning_summary/);
+  const vite = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
+  const learning = readFileSync(new URL("../build/preview-learning.ts", import.meta.url), "utf8");
+  assert.match(vite, /compactPreviewLearning/);
+  assert.match(vite, /delete bundle\.learning/);
   assert.match(page, /"recent_decisions"/);
   assert.match(page, /"news_evidence"/);
   assert.match(page, /items: items\.slice\(0, 12\)/);
   assert.doesNotMatch(page, /function previewRoomResources/);
-  assert.match(page, /models\.filter/);
-  assert.match(page, /lifecycle_status === "LATEST"/);
-  assert.match(page, /identity_curves: curves\.identity_curves/);
+  assert.match(learning, /models\.filter/);
+  assert.match(learning, /lifecycle_status === "LATEST"/);
+  assert.match(learning, /identity_curves: curves\.identity_curves/);
   assert.doesNotMatch(page, /auditView === "league"/);
   assert.doesNotMatch(page, /"\/api\/status": previewBundle\.status/);
   assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);
@@ -401,11 +406,12 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /回到最新/);
   assert.match(modal, /全部历史只画压缩轮廓/);
   assert.match(modal, /Page through windows that contain real matured results/);
-  assert.match(modal, /Plot result time, not wall-clock time/);
-  assert.match(modal, /curve-gap-bridge/);
-  assert.match(modal, /休市期间没有成熟结果/);
-  assert.match(modal, /curve-gap-carry-in/);
-  assert.match(modal, /窗口开始前有真实结果；中间没有成熟结果/);
+  assert.match(modal, /compressedTimeline/);
+  const timeline = readFileSync(new URL("../app/audit/compressedTimeline.ts", import.meta.url), "utf8");
+  assert.match(timeline, /One plotting-time contract for every market chart/);
+  assert.equal(modal.match(/compressedTimeline\(/g)?.length, 2);
+  assert.doesNotMatch(modal, /curve-gap-bridge/);
+  assert.doesNotMatch(modal, /休市期间没有成熟结果/);
   assert.doesNotMatch(modal, /points\.unshift\(\{ decision_time: new Date\(start\)/);
   assert.doesNotMatch(modal, /points\.push\(\{ decision_time: new Date\(end\)/);
   assert.match(modal, /成本后EV较高方向/);

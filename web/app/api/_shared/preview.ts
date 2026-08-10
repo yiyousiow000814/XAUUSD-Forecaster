@@ -2,8 +2,8 @@ import { NextResponse } from "next/server";
 
 export type PreviewBundle = {
   status: Record<string, unknown>;
-  learning: Record<string, unknown>;
-  market_chart: Record<string, unknown>;
+  // The complete structured ledger stays in D1; this is first-paint only.
+  learning_summary?: Record<string, unknown>;
   news_index: {
     items?: Array<Record<string, unknown>>;
     [key: string]: unknown;

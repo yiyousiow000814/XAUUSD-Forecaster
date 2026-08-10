@@ -190,9 +190,9 @@ def _backfill_prediction_research_actions(status: dict) -> None:
 
 def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
     status = _read_json(base_url, "/api/status")
+    # Vite keeps only the bounded first-paint summary in the Worker constant.
+    # The complete learning ledger remains authoritative in D1.
     learning = _read_json(base_url, "/api/learning")
-    market_chart = _read_json(base_url, "/api/market-chart")
-    market_chart["history_resource"] = "/api/market-history"
     news_index = _read_json(base_url, "/api/news-index?limit=50")
 
     status["factor_coverage"] = _rebuild_factor_coverage(status)
@@ -211,7 +211,7 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
     system["online"] = False
     system["market_session"] = "DATA_UNAVAILABLE"
     system["source_of_truth"] = "PR 构建时公开快照"
-    system["sites_mirror"] = "分支内置只读快照"
+    system["sites_mirror"] = "分支状态快照＋D1结构化资料"
     deployment = system.setdefault("deployment", {})
     deployment.update({
         "runtime_git_sha": commit_sha,
@@ -235,7 +235,6 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
     return {
         "status": status,
         "learning": learning,
-        "market_chart": market_chart,
         "news_index": news_index,
         "news_details": details,
     }

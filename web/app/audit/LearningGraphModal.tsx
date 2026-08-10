@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { compressedTimeline } from "./compressedTimeline";
 
 type CurvePoint = { decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number };
 type Curve = { model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: CurvePoint[]; source_point_count_30m?: number; chart_point_count_30m?: number; chart_downsampled_30m?: boolean; points_30m?: CurvePoint[] };
@@ -12,7 +13,7 @@ type MarketData = {
   history_start?: string | null; history_end?: string | null; detail_start?: string | null;
   source_candle_count?: number; overview_downsampled?: boolean;
   prediction_history_start?: Record<string, string>;
-  mode?: "detail" | "overview"; preview_limited?: boolean;
+  mode?: "detail" | "overview";
   source_decision_count?: number; decision_downsampled?: boolean;
   page?: { start?: string; end?: string; has_earlier: boolean; has_later: boolean };
 };
@@ -240,40 +241,21 @@ function LongCurve({ curves }: { curves: Curve[] }) {
   const activePage = Math.min(pageOffset, resultWindows.length - 1);
   const { start, end } = resultWindows[activePage];
   const visibleCurves = usable.map(row => {
-    const previousPoint = row.points.filter(point => Date.parse(point.decision_time) < start).at(-1);
     const points = row.points.filter(point => {
       const time = Date.parse(point.decision_time);
       return time >= start && time <= end;
     });
-    return { ...row, points, previousPoint };
+    return { ...row, points };
   }).filter(row => row.points.length > 0);
   const visiblePoints = visibleCurves.flatMap(row => row.points);
   const values = visiblePoints.map(point => point.cumulative_quote_return).concat(0);
   const low = Math.min(...values); const high = Math.max(...values);
   const visibleResultTimes = [...new Set(visiblePoints.map(point => Date.parse(point.decision_time)))].sort((a, b) => a - b);
   const expectedStep = cadence === "FIXED_30M" ? 30 * 60_000 : 5 * 60_000;
-  const gapThreshold = Math.max(45 * 60_000, expectedStep * 3);
-  // Plot result time, not wall-clock time. Long closures receive one compact
-  // break and never consume the width of the OOS chart.
-  const resultPlotUnits = visibleResultTimes.map((time, index) => index === 0 ? 0 : Math.min(
-    4,
-    Math.max(1, (time - visibleResultTimes[index - 1]) / expectedStep),
-  )).reduce<number[]>((units, step, index) => [
-    ...units,
-    index === 0 ? 0 : units[index - 1] + step,
-  ], []);
-  const totalResultPlotUnits = Math.max(1, resultPlotUnits.at(-1) ?? 1);
-  const resultX = new Map(visibleResultTimes.map((time, index) => [time, 58 + resultPlotUnits[index] / totalResultPlotUnits * 862]));
-  const x = (time: string) => resultX.get(Date.parse(time)) ?? 58;
+  const resultTimeline = compressedTimeline(visibleResultTimes, expectedStep, 58, 920);
+  const x = (time: string) => resultTimeline.positionAt(time);
   const tickIndices = Array.from(new Set([0, .25, .5, .75, 1].map(part => Math.round((visibleResultTimes.length - 1) * part))));
   const tickTimes = tickIndices.map(index => new Date(visibleResultTimes[index]).toISOString());
-  const curveRuns = (points: CurvePoint[]) => points.reduce<CurvePoint[][]>((runs, point) => {
-    const current = runs.at(-1);
-    const previous = current?.at(-1);
-    if (!current || (previous && Date.parse(point.decision_time) - Date.parse(previous.decision_time) >= gapThreshold)) runs.push([point]);
-    else current.push(point);
-    return runs;
-  }, []);
   const axisLabel = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
   const versionBoundaries = visibleCurves.flatMap(row => row.points.flatMap((point, index) => {
     if (index === 0 || !point.model_version) return [];
@@ -399,25 +381,9 @@ function LongCurve({ curves }: { curves: Curve[] }) {
           </>}
         </g>;
       })}
-      {visibleCurves.flatMap(row => {
-        const runs = curveRuns(row.points);
-        const first = runs[0]?.[0];
-        const carryIn = row.previousPoint && first
-          && Date.parse(first.decision_time) - Date.parse(row.previousPoint.decision_time) >= gapThreshold
-          && x(first.decision_time) > 59
-          ? <line key={`${row.model_identity}-carry-in`} className="curve-gap-bridge curve-gap-carry-in" stroke={COLORS[row.model_identity]} x1="58" y1={y(row.previousPoint.cumulative_quote_return)} x2={x(first.decision_time)} y2={y(first.cumulative_quote_return)}><title>窗口开始前有真实结果；中间没有成熟结果</title></line>
-          : null;
-        return [carryIn, ...runs.flatMap((run, index) => {
-          const previous = runs[index - 1]?.at(-1);
-          const bridge = previous && run[0]
-            ? <line key={`${row.model_identity}-bridge-${index}`} className="curve-gap-bridge" stroke={COLORS[row.model_identity]} x1={x(previous.decision_time)} y1={y(previous.cumulative_quote_return)} x2={x(run[0].decision_time)} y2={y(run[0].cumulative_quote_return)}><title>休市期间没有成熟结果</title></line>
-            : null;
-          const curve = run.length === 1
-            ? <circle key={`${row.model_identity}-run-${index}`} cx={x(run[0].decision_time)} cy={y(run[0].cumulative_quote_return)} r="4" fill={COLORS[row.model_identity]} />
-            : <polyline key={`${row.model_identity}-run-${index}`} fill="none" stroke={COLORS[row.model_identity]} strokeWidth="3" points={run.map(point => `${x(point.decision_time)},${y(point.cumulative_quote_return)}`).join(" ")} />;
-          return [bridge, curve];
-        })];
-      })}
+      {visibleCurves.map(row => row.points.length === 1
+        ? <circle key={row.model_identity} cx={x(row.points[0].decision_time)} cy={y(row.points[0].cumulative_quote_return)} r="4" fill={COLORS[row.model_identity]} />
+        : <polyline key={row.model_identity} fill="none" stroke={COLORS[row.model_identity]} strokeWidth="3" points={row.points.map(point => `${x(point.decision_time)},${y(point.cumulative_quote_return)}`).join(" ")} />)}
       {tickTimes.map(value => <g key={value} className="time-axis"><line x1={x(value)} x2={x(value)} y1="350" y2="356" /><text x={x(value)} y="374" textAnchor="middle">{axisLabel(value)}</text></g>)}
     </svg>
     </div>
@@ -519,15 +485,8 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
   const typicalCandleStep = candleSteps.length ? candleSteps[Math.floor(candleSteps.length / 2)] : 300_000;
   // Plot trading time, not wall-clock time. Long closures get one compact
   // visual break instead of consuming most of the chart width.
-  const plotUnits = candles.map((row, index) => index === 0 ? 0 : Math.min(
-    4,
-    Math.max(1, (Date.parse(row.time) - Date.parse(candles[index - 1].time)) / typicalCandleStep),
-  )).reduce<number[]>((values, step, index) => [
-    ...values,
-    index === 0 ? 0 : values[index - 1] + step,
-  ], []);
-  const totalPlotUnits = Math.max(1, plotUnits.at(-1) ?? 1);
-  const xAtIndex = (index: number) => 55 + plotUnits[index] / totalPlotUnits * 870;
+  const marketTimeline = compressedTimeline(candles.map(row => row.time), typicalCandleStep, 55, 925);
+  const xAtIndex = (index: number) => marketTimeline.positions[index];
   const marketGaps = candles.slice(1).map((row, index) => {
     const duration = Date.parse(row.time) - Date.parse(candles[index].time) - typicalCandleStep;
     const left = xAtIndex(index);

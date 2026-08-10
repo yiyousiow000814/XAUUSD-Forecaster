@@ -73,6 +73,34 @@ def test_preview_replays_legacy_residual_direction_without_outcomes() -> None:
     assert row["recommended_action"] == "WAIT"
 
 
+def test_preview_bundle_keeps_heavy_structured_data_out_of_worker(monkeypatch) -> None:
+    module = _preview_module()
+    requested: list[str] = []
+
+    def read_json(_base_url: str, path: str) -> dict:
+        requested.append(path)
+        if path == "/api/status":
+            return {
+                "generated_at": "2026-08-11T00:00:00+00:00",
+                "factor_coverage": [], "news_source_health": [],
+                "storylines": [], "recent_decisions": [],
+            }
+        if path == "/api/learning":
+            return {"learning_curves": {"models": [], "identity_curves": []}}
+        if path == "/api/news-index?limit=50":
+            return {"items": []}
+        raise AssertionError(f"heavy Preview resource was embedded: {path}")
+
+    monkeypatch.setattr(module, "_read_json", read_json)
+    bundle = module.build_bundle("https://example.invalid", "fix/test", "abc123")
+
+    assert requested == [
+        "/api/status", "/api/learning", "/api/news-index?limit=50",
+    ]
+    assert "learning" in bundle  # Vite compacts and removes this build-time input.
+    assert "market_chart" not in bundle
+
+
 def test_preview_replays_old_story_aliases_through_branch_policy() -> None:
     module = _preview_module()
     status = {

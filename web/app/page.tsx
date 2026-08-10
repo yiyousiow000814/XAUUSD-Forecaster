@@ -34,28 +34,9 @@ function previewResources(): Record<string, unknown> {
     ...index, items: items.slice(0, 12), page: 1, page_size: 12,
   };
 
-  const learning = previewBundle.learning;
-  const curves = (learning.learning_curves ?? {}) as Record<string, unknown>;
-  const models = Array.isArray(curves.models) ? curves.models : [];
-  const versionGroups = Array.isArray(curves.version_groups) ? curves.version_groups : [];
-  const compactCurves = {
-    collection_epoch: curves.collection_epoch,
-    evaluation_epoch_v2: curves.evaluation_epoch_v2,
-    learning_stage: curves.learning_stage,
-    models: models.filter(row => (
-      row && typeof row === "object" && (row as Record<string, unknown>).active_rank !== null
-    )),
-    version_groups: versionGroups.filter(row => (
-      row && typeof row === "object"
-      && (row as Record<string, unknown>).lifecycle_status === "LATEST"
-    )),
-    rolling_processes: curves.rolling_processes,
-    identity_curves: curves.identity_curves,
-  };
-  resources["/api/learning"] = {
-    generated_at: learning.generated_at,
-    learning_curves: compactCurves,
-  };
+  const learning = previewBundle.learning_summary;
+  if (!learning) return resources;
+  resources["/api/learning"] = learning;
   return resources;
 }
 
