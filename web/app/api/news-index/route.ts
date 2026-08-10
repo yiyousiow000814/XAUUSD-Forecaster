@@ -88,6 +88,13 @@ export async function GET(request: Request) {
     // Fall through to the relay when D1 is temporarily unavailable.
   }
 
+  // A Preview is allowed to read the shared archive, but it must never replace
+  // a failed archive page with the relay's tiny recent-news window. That would
+  // turn a transient D1 error into a convincing but false empty result.
+  if (previewBundle) {
+    return previewJson({ error: "新闻档案暂时不可用，请稍后重试" }, 503);
+  }
+
   const relay = process.env.STATUS_RELAY_URL;
   if (relay) {
     try {
