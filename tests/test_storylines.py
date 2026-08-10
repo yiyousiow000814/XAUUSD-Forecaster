@@ -439,6 +439,83 @@ def test_lisa_cook_court_decision_is_a_distinct_story_development():
     assert story["event_count"] == 2
 
 
+def test_lisa_cook_rate_reports_collapse_to_one_development():
+    rows = [
+        event(
+            "cook-a", "2026-08-05T20:13:00+00:00",
+            "丽莎·库克称通胀高企时准备加息",
+            canonical_actor_id="lisa_cook", actor="Lisa Cook",
+            action_family="OFFICIAL_STATEMENT", action="prepared to raise rates",
+            canonical_object_id="interest_rates", object="interest rates",
+            episode_key="lisa_cook_interest_rates_2026_08",
+            material_event_key="cook_rate_policy_a", record_kind="OFFICIAL_CLAIM",
+        ),
+        event(
+            "cook-b", "2026-08-05T20:36:00+00:00",
+            "库克表示若通胀持续将采取加息行动",
+            canonical_actor_id="lisa_cook", actor="Lisa Cook",
+            action_family="OFFICIAL_STATEMENT", action="prepared to act on rate hike",
+            canonical_object_id="interest_rates", object="interest rates",
+            episode_key="lisa_cook_rate_hike_warning_2026_08",
+            material_event_key="cook_rate_policy_b", record_kind="OFFICIAL_CLAIM",
+            publisher_domains=("cnbc.com",),
+        ),
+    ]
+
+    graph = temporal_event_graph(rows)
+
+    assert graph["stories"] == []
+    assert len(graph["event_candidates"]) == 1
+    assert graph["event_candidates"][0]["evidence_documents"] == 2
+
+
+def test_tbac_report_and_minutes_are_one_meeting_development():
+    rows = [
+        event(
+            "tbac-report", "2026-08-05T12:30:00+00:00", "借款咨询委员会提交季度报告",
+            canonical_actor_id="treasury_borrowing_advisory_committee",
+            actor="Treasury Borrowing Advisory Committee",
+            action_family="OFFICIAL_STATEMENT", action="submitted report",
+            canonical_object_id="secretary_of_the_treasury", object="Treasury Secretary",
+            canonical_location_id="washington_dc", location="Washington",
+            episode_key="tbac_report_2026_08", material_event_key="tbac_report",
+            record_kind="OFFICIAL_CLAIM",
+        ),
+        event(
+            "tbac-minutes", "2026-08-05T12:30:00+00:00", "借款咨询委员会发布会议纪要",
+            canonical_actor_id="treasury_borrowing_advisory_committee",
+            actor="Treasury Borrowing Advisory Committee",
+            action_family="POLICY_DECISION", action="recommended auction sizes",
+            canonical_object_id="treasury_auction_sizes", object="auction sizes",
+            canonical_location_id="washington_dc", location="Washington",
+            episode_key="tbac_meeting_aug_2026", material_event_key="tbac_minutes",
+            record_kind="FACT_EVENT",
+        ),
+    ]
+
+    graph = temporal_event_graph(rows)
+
+    assert graph["stories"] == []
+    assert len(graph["event_candidates"]) == 1
+    assert graph["event_candidates"][0]["evidence_documents"] == 2
+
+
+def test_gold_breakout_article_is_market_reaction_not_jobs_release():
+    row = event(
+        "gold-reaction", "2026-08-07T21:05:00+00:00",
+        "黄金在疲软就业数据公布后实现突破",
+        canonical_actor_id="bureau_of_labor_statistics", actor="BLS",
+        action_family="ECONOMIC_RELEASE", action="reported",
+        canonical_object_id="us_employment_data", object="July jobs",
+        episode_key="us_jobs_report_jul_2026", material_event_key="jobs-gold-reaction",
+    )
+
+    graph = temporal_event_graph([row])
+
+    assert graph["event_candidates"] == []
+    assert graph["market_reaction_streams"][0]["latest_headline"] == row["canonical_headline"]
+
+
 def test_timeline_uses_event_time_not_collector_arrival_order():
     later_receipt = event(
         "start", "2026-08-06T03:00:00+00:00", "谈判开始",

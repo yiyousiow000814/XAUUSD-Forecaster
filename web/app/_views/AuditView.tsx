@@ -110,6 +110,7 @@ type NewsEvidence = {
   model_seen: boolean;
   frozen_model_uses: number;
   frozen_decisions: number;
+  frozen_versions?: number;
   first_model_decision_time: string | null;
   last_model_decision_time: string | null;
   model_identities?: string[] | null;
@@ -463,10 +464,22 @@ const EVIDENCE_REASON_LABELS: Record<string, string> = {
   EDITORIAL_OR_INVESTMENT_GUIDE: "投资建议或评论，不进入模型",
   ELIGIBLE_AWAITING_FROZEN_PREDICTION: "已达模型门槛，等待下一次冻结预测",
   LEGACY_ANNOTATION_SCHEMA: "旧版标注，不进入当前模型",
-  RECORD_KIND_NOT_ACTIONABLE: "不是可交易的现实事件",
+  RECORD_KIND_NOT_ACTIONABLE: "行情报道，不是新的事实事件",
   EVIDENCE_ROLE_NOT_ACTIONABLE: "证据角色不参与方向学习",
   LOW_MATERIALITY: "事件重要性不足",
 };
+const EVIDENCE_REASON_PRIORITY = [
+  "RECORD_KIND_NOT_ACTIONABLE", "EDITORIAL_OR_INVESTMENT_GUIDE",
+  "IMPACT_DUPLICATE_REPORT", "LOW_MATERIALITY", "IMPACT_EXPIRED",
+  "STALE_EVENT", "IMPACT_NOT_ASSESSED", "NEEDS_CONFIRMATION",
+  "NO_ACTION_TOPIC", "CATEGORY_NOT_ACTIONABLE",
+];
+function evidenceReason(row: NewsEvidence): string {
+  const codes = row.model_unseen_reason_codes ?? [];
+  const code = EVIDENCE_REASON_PRIORITY.find(candidate => codes.includes(candidate))
+    ?? codes.find(candidate => EVIDENCE_REASON_LABELS[candidate]);
+  return code ? (EVIDENCE_REASON_LABELS[code] ?? code) : "当时未达到使用条件";
+}
 const DEPLOYMENT_PRESENTATION: Record<string, { className: string; label: string }> = {
   MATCHED: { className: "matched", label: "版本正常" },
   LOCAL_CHANGES: { className: "local-changes", label: "有尚未发布的改动" },
@@ -871,10 +884,10 @@ export default function AuditView() {
         <details className="evidence-rule-note"><summary>查看统计规则</summary><p>官方或多源确认使用正常权重；单一可靠来源使用 35% 权重。新闻只从首次收到后生效，按事件类型和有效交易时间逐步衰减。来源身份由固定代码规则统一，不由 Gemini 或 Gemma 自由决定；每个事件下方可直接核对统一身份与原始发布域名。</p></details>
         <div className="evidence-table-wrap"><table className="evidence-table">
           <thead><tr><th>是否用于预测</th><th>新闻事件</th><th>用了多少次 / 为什么没用</th><th>发布时间 / 收到时间</th></tr></thead>
-          <tbody>{visibleEvidence.map(row => <tr key={row.event_key}>
+          <tbody>{visibleEvidence.map(row => <tr key={`${evidenceMode}:${row.event_key}`}>
             <td className="evidence-status-cell"><span className={`model-seen-badge ${row.model_seen ? "is-seen" : "is-unseen"}`}>{row.model_seen ? "已用于预测" : "未用于预测"}</span><small><span className="evidence-grade-label">{EVIDENCE_LABELS[row.evidence_grade] ?? row.evidence_grade}</span><span className="evidence-status-copy">{row.model_seen ? "当时确实参与了模型输入" : row.broad_model_eligible ? "现在符合条件，等待下一次预测" : "现在也不符合使用条件"}</span></small></td>
             <td className="evidence-event-cell"><strong>{row.canonical_headline}</strong><div className="evidence-topics">{(row.topics ?? []).map(topic => <span key={topic}>{TOPIC_LABELS[topic] ?? topic}</span>)}</div><small className="evidence-source-identity"><span>统一来源身份：{(row.source_identity_organizations ?? []).join(" · ") || "未确认"}</span><span>原始发布域名：{row.publisher_domains.join(" · ") || "未记录"}</span></small></td>
-            <td className="evidence-usage-cell">{row.model_seen ? <><strong>参与 {row.frozen_decisions} 次预测 · 模型读取 {row.frozen_model_uses} 次</strong><small><span className="evidence-model-list">{(row.model_identities ?? []).map(identity => MODEL_LABELS[identity] ?? identity).join(" · ") || "模型名称未记录"}</span><span className="evidence-use-window">首次 {time(row.first_model_decision_time)} · 最近 {time(row.last_model_decision_time)}</span></small></> : <><strong>从未进入任何预测</strong><small>{(row.model_unseen_reason_codes ?? []).map(code => EVIDENCE_REASON_LABELS[code] ?? code).join(" · ") || "当时未达到时间、正文或来源要求"}</small></>}</td>
+            <td className="evidence-usage-cell">{row.model_seen ? <><strong>参与 {row.frozen_decisions} 次预测 · 模型读取 {row.frozen_model_uses} 次</strong><small><span className="evidence-model-list">{(row.model_identities ?? []).map(identity => MODEL_LABELS[identity] ?? identity).join(" · ") || "模型名称未记录"}</span><span className="evidence-use-window">首次 {time(row.first_model_decision_time)} · 最近 {time(row.last_model_decision_time)}</span></small></> : <><strong>从未进入任何预测</strong><small>{evidenceReason(row)}</small></>}</td>
             <td className="evidence-time-cell"><time><span>发布</span>{row.source_published_time ? time(row.source_published_time) : "时间未知"}</time><small><span>收到 {time(row.collector_first_seen_time)}</span><span>{row.independent_publishers} 个独立来源 · {row.member_count} 篇新闻</span></small></td>
           </tr>)}</tbody>
         </table></div>
@@ -884,11 +897,7 @@ export default function AuditView() {
         <header className="evidence-intro evidence-intro-compact"><div><p className="eyebrow">事件脉络</p><h2>第一次进展立即显示，后续变化接在一起。</h2></div></header>
         {payload?.system.deployment && <section className={`deployment-proof ${deploymentPresentation.className}`}><b>{deploymentPresentation.label}</b>{payload.system.deployment.status === "DEPLOYMENT_DRIFT" ? <span>本机 {payload.system.deployment.runtime_git_sha?.slice(0, 8) ?? "未知"} · 远端 {payload.system.deployment.expected_git_sha?.slice(0, 8) ?? "未知"}</span> : payload.system.deployment.runtime_git_sha ? <span>版本 {payload.system.deployment.runtime_git_sha.slice(0, 8)}</span> : null}</section>}
         <div className="event-thread-summary" aria-label="事件脉络统计"><span><b>{activeEventTotal}</b> 个独立事件</span><span><b>{continuedEventTotal}</b> 个已有后续</span><span><b>{singleEventTotal}</b> 个暂无后续</span></div>
-        <div className="story-grid">{(payload?.story_event_candidates ?? []).map(item => <article className="single-event-card" key={item.candidate_id}>
-          <header><div><span>单一事件</span><h3>{item.headline}</h3></div><strong>1<small> 个进展</small></strong></header>
-          <p className="story-latest"><b>当前状态</b>暂无后续进展</p>
-          <div className="story-meta"><span>证据 {item.evidence_documents} 篇</span><span>独立来源 {item.independent_publishers} 个</span><span>系统收到 {time(item.first_seen)}</span></div>
-        </article>)}{(payload?.storylines ?? []).map(story => <article key={story.storyline_id}>
+        {(payload?.storylines ?? []).length > 0 && <div className="story-grid">{(payload?.storylines ?? []).map(story => <article key={story.storyline_id}>
           <header><div><span>{({ EMERGING:"刚出现", REPORTED:"已有报道", CORROBORATED:"独立交叉确认", OFFICIALLY_CONFIRMED:"官方确认", ESCALATING:"升级中", DEESCALATING:"缓和中", CONTRADICTED:"存在冲突" } as Record<string,string>)[story.state] ?? story.state}</span><h3>{story.title}</h3></div><strong>{story.event_count}<small> 个进展</small></strong></header>
           <p className="story-latest"><b>最新事实变化</b>{story.latest_change}</p>
           <div className="story-meta"><span>证据文件 {story.evidence_document_count}</span><span>独立组织 {story.independent_organization_count}</span><span>更新 {time(story.last_updated)}</span><span>{story.independent_confirmation ? "跨组织确认" : "尚未跨组织确认"}</span></div>
@@ -897,7 +906,16 @@ export default function AuditView() {
           {story.market_reactions.length > 0 && <details className="story-attachments"><summary>市场反应 {story.market_reactions.length}</summary>{story.market_reactions.map(item => <p key={item.event_key}>{item.headline}</p>)}</details>}
           {story.commentary.length > 0 && <details className="story-attachments"><summary>评论与预测 {story.commentary.length}</summary>{story.commentary.map(item => <p key={item.event_key}>{item.headline}</p>)}</details>}
           {story.background.length > 0 && <details className="story-attachments"><summary>背景材料 {story.background.length}</summary>{story.background.map(item => <p key={item.event_key}>{item.headline}</p>)}</details>}
-        </article>)}</div>
+        </article>)}</div>}
+        {(payload?.story_event_candidates ?? []).length > 0 && <section className="single-event-index">
+          <header><div><h3>新发生</h3><span>有后续时会自动接成一条脉络</span></div><strong>{singleEventTotal}</strong></header>
+          <div>{(payload?.story_event_candidates ?? []).map(item => <article key={item.candidate_id}>
+            <time>{time(item.event_time || item.first_seen)}</time>
+            <h3>{item.headline}</h3>
+            <span>1 个进展</span>
+            <small>{item.evidence_documents} 篇证据 · {item.independent_publishers} 个独立来源</small>
+          </article>)}</div>
+        </section>}
         {activeEventTotal === 0 && <div className="story-empty"><b>还没有收到可确认的独立事件</b><span>新事件出现后会直接显示在这里。</span></div>}
         <section className="theme-streams"><header><h3>主题流</h3><span>不声称构成单一事件</span></header><div>{(payload?.theme_streams ?? []).map(theme => <article key={theme.theme_id}><b>{theme.title}</b><strong>{theme.item_count}</strong><span>{theme.latest_headline}</span><small>{time(theme.last_updated)}</small></article>)}</div></section>
         <section className="theme-streams market-streams"><header><h3>市场反应流</h3><span>价格反应不冒充核心事实</span></header><div>{(payload?.market_reaction_streams ?? []).map(stream => <article key={stream.stream_id}><b>{stream.title}</b><strong>{stream.item_count}</strong><span>{stream.latest_headline}</span><small>{time(stream.last_updated)}</small></article>)}</div></section>
