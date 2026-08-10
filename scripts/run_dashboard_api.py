@@ -798,6 +798,8 @@ def _dashboard_payload(database: Path) -> dict:
                LEFT JOIN outcomes o USING(decision_id)
                ORDER BY d.decision_time DESC LIMIT 30"""
         ).fetchall()
+        from xauusd_forecaster.daily_brief import recent_daily_briefs
+        daily_news_briefs = recent_daily_briefs(connection)
         counts = {
             name: connection.execute(f"SELECT count(*) FROM {name}").fetchone()[0]
             for name in (
@@ -1633,6 +1635,7 @@ def _dashboard_payload(database: Path) -> dict:
         "outcome_summary": dict(valid),
         "recent_decisions": [serialize_row(row) for row in recent],
         "recent_news": news,
+        "daily_news_briefs": daily_news_briefs,
         "news_evidence": news_evidence,
         "storylines": storylines[:20],
         "market_narrative_candidates": event_graph["market_narrative_candidates"][:20],

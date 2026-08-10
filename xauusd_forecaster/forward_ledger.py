@@ -19,6 +19,7 @@ IMMUTABLE_TABLES = (
     "news_title_translations",
     "news_llm_failures",
     "news_content_failures",
+    "daily_news_briefs",
     "macro_observations",
     "source_polls",
     "decision_events",
@@ -133,6 +134,19 @@ CREATE TABLE IF NOT EXISTS news_title_translations (
     parsed_at TEXT NOT NULL,
     FOREIGN KEY(source, source_item_id, revision_number)
         REFERENCES news_revisions(source, source_item_id, revision_number)
+);
+
+CREATE TABLE IF NOT EXISTS daily_news_briefs (
+    brief_date TEXT NOT NULL,
+    revision_number INTEGER NOT NULL,
+    source_hash TEXT NOT NULL,
+    cutoff_at TEXT NOT NULL,
+    generated_at TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    brief_json TEXT NOT NULL,
+    PRIMARY KEY(brief_date, revision_number),
+    UNIQUE(brief_date, source_hash)
 );
 
 CREATE TABLE IF NOT EXISTS news_llm_failures (

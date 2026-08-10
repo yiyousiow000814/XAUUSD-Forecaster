@@ -23,6 +23,7 @@ from xauusd_forecaster.annotation import (  # noqa: E402
     translate_pending_headlines,
 )
 from xauusd_forecaster.forward_ledger import ForwardLedger  # noqa: E402
+from xauusd_forecaster.daily_brief import update_daily_brief  # noqa: E402
 
 
 def write_heartbeat(path: Path, *, work_items: int) -> None:
@@ -104,6 +105,8 @@ def main() -> int:
                 ),
                 flush=True,
             )
+            daily_brief = update_daily_brief(ledger)
+            print(json.dumps({"event": "DAILY_NEWS_BRIEF", **daily_brief}), flush=True)
             work_items = sum(
                 len(batch)
                 for batch in (statuses, fallback_statuses, translations, impacts)
