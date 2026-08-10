@@ -8,31 +8,10 @@ type PageProps = {
 
 const AUDIT_VIEWS = new Set<AuditViewName>(["news", "evidence", "stories", "decisions", "league", "coverage"]);
 
-function previewStatusResource(): Record<string, unknown> | null {
-  if (!previewBundle) return null;
-  const status = previewBundle.status;
-  const compact: Record<string, unknown> = {};
-  for (const key of [
-    "generated_at", "system", "training", "counts", "news_evidence_summary",
-    "storyline_summary", "factor_coverage", "annotation_queue", "news_evidence",
-    "recent_decisions", "storylines", "market_narrative_candidates", "archived_storylines",
-    "archived_story_event_candidates", "story_event_candidates", "market_reaction_streams",
-    "theme_streams", "unassigned_story_events", "news_source_health", "llm_routing",
-    "gemini_quota", "gemini_31_quota", "gemma_quota", "latest", "research_forecast",
-    "u5_context", "outcome_summary", "sources", "forward_epoch",
-  ]) compact[key] = status[key];
-  return compact;
-}
-
 function previewResources(): Record<string, unknown> {
-  const compactStatus = previewStatusResource();
-  if (!previewBundle || !compactStatus) return {};
-  const resources: Record<string, unknown> = { "/api/status": compactStatus };
-  const index = previewBundle.news_index;
-  const items = Array.isArray(index.items) ? index.items : [];
-  resources["/api/news-index?page=1&limit=12"] = {
-    ...index, items: items.slice(0, 12), page: 1, page_size: 12,
-  };
+  if (!previewBundle) return {};
+  const resources: Record<string, unknown> = { "/api/status": previewBundle.status };
+  resources["/api/news-index?page=1&limit=12"] = previewBundle.news_index;
 
   const learning = previewBundle.learning_summary;
   if (!learning) return resources;

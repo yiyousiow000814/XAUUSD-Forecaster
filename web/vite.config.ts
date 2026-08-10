@@ -3,7 +3,11 @@ import { defineConfig } from "vite";
 import { sites } from "./build/sites-vite-plugin";
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
-import { compactPreviewLearning } from "./build/preview-learning";
+import {
+  compactPreviewLearning,
+  compactPreviewNewsIndex,
+  compactPreviewStatus,
+} from "./build/preview-learning";
 
 // macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
@@ -34,6 +38,12 @@ export default defineConfig(async () => {
       if (bundle.learning && typeof bundle.learning === "object") {
         bundle.learning_summary = compactPreviewLearning(bundle.learning as Record<string, unknown>);
         delete bundle.learning;
+      }
+      if (bundle.status && typeof bundle.status === "object") {
+        bundle.status = compactPreviewStatus(bundle.status as Record<string, unknown>);
+      }
+      if (bundle.news_index && typeof bundle.news_index === "object") {
+        bundle.news_index = compactPreviewNewsIndex(bundle.news_index as Record<string, unknown>);
       }
     }
   }

@@ -209,6 +209,7 @@ type EvaluationCadence = "EVERY_5M" | "FIXED_30M";
 type CadenceMetric = { oos_rows: number; distinct_days: number; cumulative_quote_return: number; profit_factor_quote_adjusted: number | null; coverage_rate: number | null };
 
 type Payload = {
+  preview_status_summary?: boolean;
   learning_preview_summary?: boolean;
   generated_at: string;
   system: { online: boolean; market_session?: "OPEN" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE"; source_of_truth: string; sites_mirror: string; deployment?: { runtime_git_sha: string | null; expected_git_sha: string | null; runtime_dirty: boolean; status: string; storyline_policy_version: string; payload_schema_version: string; payload_generated_at: string; source_database_epoch: string | null } };
@@ -713,6 +714,7 @@ export default function AuditView() {
   const [newsPage, setNewsPage] = useState(1);
   const [graphOpen, setGraphOpen] = useState(false);
   const [graphStartTab, setGraphStartTab] = useState<"curve" | "execution">("curve");
+  const fullStatusReadyRef = useRef(Boolean(cachedStatus && !cachedStatus.preview_status_summary));
   const fullLearningReadyRef = useRef(Boolean(cachedLearning && !cachedLearning.learning_preview_summary));
   const [summaryCadence, setSummaryCadence] = useState<EvaluationCadence>("EVERY_5M");
   const [evidenceMode, setEvidenceMode] = useState<"seen" | "unseen" | "all">("seen");
@@ -722,6 +724,7 @@ export default function AuditView() {
     try {
       const body = await loadDashboardResource<Payload>("/api/status", { force });
       setPayload(previous => ({ ...previous, ...body }) as Payload);
+      if (!body.preview_status_summary) fullStatusReadyRef.current = true;
       setStatusState("ready");
       setStatusError(null);
     } catch (reason) {
@@ -755,7 +758,10 @@ export default function AuditView() {
   }, [newsCategory, newsPage]);
 
   useEffect(() => {
-    const initial = window.setTimeout(() => void refreshStatus(), 0);
+    const initial = window.setTimeout(
+      () => void refreshStatus(!fullStatusReadyRef.current),
+      0,
+    );
     const interval = window.setInterval(() => {
       void refreshStatus(true);
     }, 15_000);
