@@ -509,6 +509,9 @@ test("reflows news evidence into readable mobile cards", () => {
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(view, /className="evidence-event-cell"/);
   assert.match(view, /className="evidence-status-cell"/);
+  assert.match(view, /统一来源身份：/);
+  assert.match(view, /原始发布域名：/);
+  assert.match(view, /不由 Gemini 或 Gemma 自由决定/);
   assert.match(css, /@media \(max-width:640px\)[\s\S]*\.evidence-table thead \{ position:absolute/);
   assert.match(css, /grid-template-areas:"event event" "status time" "usage usage"/);
   assert.match(css, /\.evidence-event-cell \{ grid-area:event/);

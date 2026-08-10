@@ -211,6 +211,7 @@ footer { font-size:13px; font-weight:600; letter-spacing:.06em; }
 .grade-discovery-only { background:#d7d1c1; }
 .evidence-topics { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
 .evidence-topics span { border:1px solid rgba(17,17,15,.35); padding:4px 7px; font-size:12px; font-weight:700; }
+.evidence-source-identity { display:grid!important; gap:3px; margin-top:10px!important; color:var(--muted); font-size:10px; overflow-wrap:anywhere; }
 
 @media (max-width:850px){
   .evidence-intro { grid-template-columns:1fr; }
@@ -245,6 +246,7 @@ footer { font-size:13px; font-weight:600; letter-spacing:.06em; }
   .evidence-table td>small { margin-top:4px; }
   .evidence-topics { gap:5px; margin-top:8px; }
   .evidence-topics span { padding:3px 6px; font-size:10px; }
+  .evidence-source-identity { font-size:9px; }
 }
 
 .shadow-league { border:1px solid var(--ink); border-top:0; background:var(--paper); }

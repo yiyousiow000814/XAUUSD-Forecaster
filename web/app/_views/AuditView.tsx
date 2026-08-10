@@ -103,6 +103,7 @@ type NewsEvidence = {
   member_count: number;
   independent_publishers: number;
   source_names: string[];
+  source_organizations?: string[];
   publisher_domains: string[];
   reason_codes: string[];
   model_seen: boolean;
@@ -862,12 +863,12 @@ export default function AuditView() {
           <button type="button" className={evidenceMode === "unseen" ? "active" : ""} onClick={() => setEvidenceMode("unseen")}>从未用过 <b>{payload?.news_evidence_summary?.model_unseen_events ?? 0}</b></button>
           <button type="button" className={evidenceMode === "all" ? "active" : ""} onClick={() => setEvidenceMode("all")}>查看全部 <b>{payload?.news_evidence_summary?.displayed_events ?? 0}</b></button>
         </nav>
-        <details className="evidence-rule-note"><summary>查看统计规则</summary><p>官方或多源确认使用正常权重；单一可靠来源使用 35% 权重。新闻只从首次收到后生效，按事件类型和有效交易时间逐步衰减。</p></details>
+        <details className="evidence-rule-note"><summary>查看统计规则</summary><p>官方或多源确认使用正常权重；单一可靠来源使用 35% 权重。新闻只从首次收到后生效，按事件类型和有效交易时间逐步衰减。来源身份由固定代码规则统一，不由 Gemini 或 Gemma 自由决定；每个事件下方可直接核对统一身份与原始发布域名。</p></details>
         <div className="evidence-table-wrap"><table className="evidence-table">
           <thead><tr><th>是否用于预测</th><th>新闻事件</th><th>用了多少次 / 为什么没用</th><th>发布时间 / 收到时间</th></tr></thead>
           <tbody>{visibleEvidence.map(row => <tr key={row.event_key}>
             <td className="evidence-status-cell"><span className={`model-seen-badge ${row.model_seen ? "is-seen" : "is-unseen"}`}>{row.model_seen ? "已用于预测" : "未用于预测"}</span><small><span className="evidence-grade-label">{EVIDENCE_LABELS[row.evidence_grade] ?? row.evidence_grade}</span><span className="evidence-status-copy">{row.model_seen ? "当时确实参与了模型输入" : row.broad_model_eligible ? "现在符合条件，等待下一次预测" : "现在也不符合使用条件"}</span></small></td>
-            <td className="evidence-event-cell"><strong>{row.canonical_headline}</strong><div className="evidence-topics">{(row.topics ?? []).map(topic => <span key={topic}>{TOPIC_LABELS[topic] ?? topic}</span>)}</div></td>
+            <td className="evidence-event-cell"><strong>{row.canonical_headline}</strong><div className="evidence-topics">{(row.topics ?? []).map(topic => <span key={topic}>{TOPIC_LABELS[topic] ?? topic}</span>)}</div><small className="evidence-source-identity"><span>统一来源身份：{(row.source_organizations ?? []).join(" · ") || "未确认"}</span><span>原始发布域名：{row.publisher_domains.join(" · ") || "未记录"}</span></small></td>
             <td className="evidence-usage-cell">{row.model_seen ? <><strong>参与 {row.frozen_decisions} 次预测 · 模型读取 {row.frozen_model_uses} 次</strong><small><span className="evidence-model-list">{(row.model_identities ?? []).map(identity => MODEL_LABELS[identity] ?? identity).join(" · ") || "模型名称未记录"}</span><span className="evidence-use-window">首次 {time(row.first_model_decision_time)} · 最近 {time(row.last_model_decision_time)}</span></small></> : <><strong>从未进入任何预测</strong><small>{(row.model_unseen_reason_codes ?? []).map(code => EVIDENCE_REASON_LABELS[code] ?? code).join(" · ") || "当时未达到时间、正文或来源要求"}</small></>}</td>
             <td className="evidence-time-cell"><time><span>发布</span>{row.source_published_time ? time(row.source_published_time) : "时间未知"}</time><small><span>收到 {time(row.collector_first_seen_time)}</span><span>{row.independent_publishers} 个独立来源 · {row.member_count} 篇新闻</span></small></td>
           </tr>)}</tbody>
