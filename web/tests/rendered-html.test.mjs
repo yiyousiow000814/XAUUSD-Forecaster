@@ -547,8 +547,8 @@ test("reflows news evidence into readable mobile cards", () => {
 });
 
 test("keeps news search server bounded and phone readable", () => {
-  const view = readFileSync(join(projectRoot, "app", "_views", "AuditView.tsx"), "utf8");
-  const route = readFileSync(join(projectRoot, "app", "api", "news-search", "route.ts"), "utf8");
+  const view = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  const route = readFileSync(new URL("../app/api/news-search/route.ts", import.meta.url), "utf8");
   assert.match(view, /view === "search"/);
   assert.match(view, /placeholder="标题、来源或主题"/);
   assert.match(route, /slice\(0, 80\)/);
