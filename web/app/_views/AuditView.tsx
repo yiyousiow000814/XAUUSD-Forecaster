@@ -401,6 +401,7 @@ const outcomeReason = (codes: string[]) => codes.some(code => code.includes("CLO
       : "报价证据不完整，样本已隔离且不进入训练";
 const impulse = (value?: number | null) => value === null || value === undefined ? "—" : `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
 const NEWS_PER_PAGE = 12;
+const LEARNING_REFRESH_INTERVAL_MS = 60_000;
 const CATEGORY_ORDER = ["战争/地缘", "利率/Fed", "央行购金", "通胀/就业", "增长/经济", "油价/能源", "美元/流动性", "风险偏好", "监管/其他", "其他"];
 const SOURCE_LABELS: Record<string, string> = {
   federal_reserve_monetary: "Federal Reserve · 货币政策",
@@ -685,7 +686,7 @@ export default function AuditView() {
   useEffect(() => {
     if (view !== "league") return;
     const initial = window.setTimeout(() => void refreshLearning(), 0);
-    const interval = window.setInterval(() => void refreshLearning(true), 15_000);
+    const interval = window.setInterval(() => void refreshLearning(true), LEARNING_REFRESH_INTERVAL_MS);
     return () => { window.clearTimeout(initial); window.clearInterval(interval); };
   }, [refreshLearning, view]);
 
