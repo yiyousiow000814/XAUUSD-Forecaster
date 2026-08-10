@@ -347,10 +347,10 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /共同训练截止量对齐/);
   assert.match(modal, /查看模型明细/);
   assert.match(modal, /最近20个训练截止点/);
-  assert.match(modal, /空缺代表该模型当轮没有合法新版本/);
+  assert.match(modal, /按同一训练截止点比较/);
+  assert.doesNotMatch(modal, /空缺代表该模型当轮没有合法新版本/);
   assert.match(modal, /crossesMissingCutoff/);
   assert.match(modal, /strokeDasharray=\{crossesMissingCutoff/);
-  assert.match(modal, /这里只叠加显示，不会把收益相加/);
   assert.match(modal, /gx\(comparisonCutoff\(row\)\)/);
   assert.doesNotMatch(modal, /gx\(row\.generation\)/);
   assert.match(modal, /每30分钟（固定 :00 \/ :30）/);
