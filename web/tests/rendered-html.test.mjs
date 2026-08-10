@@ -555,3 +555,13 @@ test("keeps news search server bounded and phone readable", () => {
   assert.match(route, /Math\.min\(20/);
   assert.match(route, /LIMIT \? OFFSET \?/);
 });
+
+test("keeps Gemma questions asynchronous and evidence bounded", () => {
+  const view = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  const route = readFileSync(new URL("../app/api/news-questions/route.ts", import.meta.url), "utf8");
+  assert.match(view, /Gemma 正在根据新闻证据回答/);
+  assert.match(view, /setInterval\(\(\) => void check\(\), 10_000\)/);
+  assert.match(route, /pending\?\.count \?\? 0\) >= 10/);
+  assert.match(route, /evidence_ids\) \? body\.evidence_ids\.slice\(0, 12\)/);
+  assert.match(route, /rejectPreviewWrite/);
+});

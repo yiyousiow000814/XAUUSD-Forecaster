@@ -11,6 +11,7 @@ import json
 import math
 import os
 import re
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -20,6 +21,8 @@ from pathlib import Path
 
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(MODULE_ROOT))
+from xauusd_forecaster.news_qa import answer_news_question  # noqa: E402
 DEFAULT_CONFIG = MODULE_ROOT / ".local" / "forward" / "dashboard-sync.json"
 DEFAULT_STATUS = MODULE_ROOT / ".local" / "forward" / "dashboard-sync-status.json"
 DEFAULT_RUNTIME_SIGNAL = (
@@ -510,6 +513,28 @@ def _post_json(url: str, payload: bytes, config: dict) -> dict:
     return result if isinstance(result, dict) else {}
 
 
+def _get_json(url: str, config: dict) -> dict:
+    request = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {config['token']}",
+        "Accept": "application/json", "User-Agent": "AurumSignalRoomMirror/1.0",
+    })
+    with urllib.request.urlopen(request, timeout=REMOTE_POST_TIMEOUT_SECONDS) as response:
+        return json.loads(response.read())
+
+
+def _sync_news_questions(local_payload: dict, config: dict) -> None:
+    url = config.get("remote_news_questions_url") or (
+        config["remote_ingest_url"].rsplit("/", 1)[0] + "/news-questions"
+    )
+    pending = _get_json(url + "?status=pending&limit=3", config).get("items", [])
+    for item in pending[:3]:
+        result = answer_news_question(
+            str(item.get("question") or ""), list(local_payload.get("recent_news") or []),
+            Path(config.get("gemma_qa_quota_path", MODULE_ROOT / ".local" / "forward" / "gemma-4-31b-it-quota.json")),
+        )
+        _post_json(url, json.dumps({"id": item.get("id"), **result}, ensure_ascii=False).encode(), config)
+
+
 def _target_state_path(path: Path, target_name: str, *, legacy: bool) -> Path:
     if legacy or target_name == "sites":
         return path
@@ -859,6 +884,7 @@ def sync_once(config: dict) -> list[dict]:
             ("market_chart", _sync_market),
             ("market_history", lambda _payload, scoped: _sync_market_history(scoped)),
             ("news", _sync_news),
+            ("news_questions", _sync_news_questions),
         ):
             try:
                 operation(local_payload, target)

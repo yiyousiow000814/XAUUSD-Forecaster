@@ -416,6 +416,18 @@ body.modal-open { overflow:hidden; }
 .search-results p { grid-column:2; margin:0; color:var(--muted); }
 .search-results small { grid-column:3; grid-row:1/3; align-self:center; }
 .search-pages { display:flex; justify-content:center; align-items:center; gap:12px; padding:14px; }
+.news-qa-desk { border:1px solid var(--ink); border-top:0; background:var(--paper); }
+.news-qa-desk>header { padding:24px; border-bottom:1px solid var(--ink); }
+.news-qa-desk h2 { margin:5px 0 0; font-family:var(--font-display); font-size:38px; }
+.news-qa-desk form { display:grid; grid-template-columns:1fr auto; padding:24px; }
+.news-qa-desk textarea { min-height:92px; resize:vertical; border:1px solid var(--ink); padding:14px; font:inherit; }
+.news-qa-desk form button { border:1px solid var(--ink); background:var(--ink); color:var(--paper); padding:0 24px; font-weight:800; }
+.news-qa-desk article { padding:24px; border-top:1px solid var(--ink); }
+.news-qa-desk article h3 { margin:8px 0; font-family:var(--font-display); font-size:25px; }
+.news-qa-desk article p { line-height:1.7; }
+.news-qa-desk article small,.news-qa-desk>footer { color:var(--muted); font-size:11px; }
+.news-qa-desk>footer,.qa-error { display:block; margin:0; padding:14px 24px; border-top:1px solid rgba(17,17,15,.25); }
+.qa-error { color:var(--red); }
 @media (max-width:640px){
   .daily-brief-desk>header { align-items:flex-start; flex-direction:column; gap:14px; padding:18px; }
   .daily-brief-desk h2 { font-size:30px; }
@@ -427,6 +439,9 @@ body.modal-open { overflow:hidden; }
   .news-search-desk form { padding:18px; }
   .search-results article { grid-template-columns:1fr; gap:5px; padding:16px 18px; }
   .search-results time,.search-results p,.search-results small { grid-column:1; grid-row:auto; }
+  .news-qa-desk>header,.news-qa-desk form,.news-qa-desk article { padding:18px; }
+  .news-qa-desk form { grid-template-columns:1fr; }
+  .news-qa-desk form button { min-height:46px; }
 }
 .event-thread-summary { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); border-top:1px solid var(--ink); border-bottom:1px solid var(--ink); background:#ded9ca; }
 .event-thread-summary span { display:flex; align-items:baseline; gap:8px; padding:13px 18px; border-right:1px solid rgba(17,17,15,.28); font-size:12px; }

@@ -58,3 +58,15 @@ export const marketDecisions = sqliteTable(
     ),
   ],
 );
+
+export const newsQuestions = sqliteTable(
+  "news_questions",
+  {
+    id: text("id").primaryKey(), questionHash: text("question_hash").notNull().unique(),
+    question: text("question").notNull(), status: text("status").notNull(),
+    askedAt: text("asked_at").notNull(), answer: text("answer"),
+    evidenceJson: text("evidence_json"), answeredAt: text("answered_at"),
+    modelVersion: text("model_version"),
+  },
+  table => [index("news_questions_status_time_idx").on(table.status, table.askedAt)],
+);

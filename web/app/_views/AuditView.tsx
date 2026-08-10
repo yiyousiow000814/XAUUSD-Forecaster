@@ -206,6 +206,7 @@ type EvaluationCadence = "EVERY_5M" | "FIXED_30M";
 type CadenceMetric = { oos_rows: number; distinct_days: number; cumulative_quote_return: number; profit_factor_quote_adjusted: number | null; coverage_rate: number | null };
 type DailyNewsBrief = { brief_date: string; revision_number: number; cutoff_at: string; generated_at: string; model_version: string; prompt_version: string; brief: { title: string; items: Array<{ headline: string; summary: string; evidence_ids: string[] }> } };
 type NewsSearchResponse = { items: News[]; total: number; page: number; page_size: number; query: string };
+type NewsQuestion = { id: string; question: string; status: "PENDING" | "ANSWERED"; asked_at: string; answer?: string; evidence_ids?: string[]; answered_at?: string; model_version?: string };
 
 type Payload = {
   generated_at: string;
@@ -603,7 +604,7 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
 export default function AuditView() {
   const searchParams = useSearchParams();
   const requestedView = searchParams.get("view");
-  const initialView = requestedView === "briefs" || requestedView === "search" || requestedView === "news" || requestedView === "evidence" || requestedView === "stories" || requestedView === "decisions" || requestedView === "league" || requestedView === "coverage"
+  const initialView = requestedView === "briefs" || requestedView === "search" || requestedView === "qa" || requestedView === "news" || requestedView === "evidence" || requestedView === "stories" || requestedView === "decisions" || requestedView === "league" || requestedView === "coverage"
     ? requestedView
     : "news";
   const cachedStatus = readDashboardResource<Payload>("/api/status");
@@ -621,11 +622,14 @@ export default function AuditView() {
   const [statusError, setStatusError] = useState<string | null>(null);
   const [learningError, setLearningError] = useState<string | null>(null);
   const [newsError, setNewsError] = useState<string | null>(null);
-  const [view, setView] = useState<"briefs" | "search" | "news" | "evidence" | "stories" | "decisions" | "league" | "coverage">(initialView);
+  const [view, setView] = useState<"briefs" | "search" | "qa" | "news" | "evidence" | "stories" | "decisions" | "league" | "coverage">(initialView);
   const [briefDate, setBriefDate] = useState<string | null>(null);
   const [searchInput, setSearchInput] = useState("");
   const [searchResults, setSearchResults] = useState<NewsSearchResponse>({ items: [], total: 0, page: 1, page_size: 10, query: "" });
   const [searchBusy, setSearchBusy] = useState(false);
+  const [questionInput, setQuestionInput] = useState("");
+  const [question, setQuestion] = useState<NewsQuestion | null>(null);
+  const [questionError, setQuestionError] = useState<string | null>(null);
   const [newsCategory, setNewsCategory] = useState("全部");
   const [newsPage, setNewsPage] = useState(1);
   const [graphOpen, setGraphOpen] = useState(false);
@@ -697,7 +701,7 @@ export default function AuditView() {
     return () => { window.clearTimeout(initial); window.clearInterval(interval); };
   }, [refreshLearning, view]);
 
-  const selectView = (next: "briefs" | "search" | "news" | "evidence" | "stories" | "decisions" | "league" | "coverage") => {
+  const selectView = (next: "briefs" | "search" | "qa" | "news" | "evidence" | "stories" | "decisions" | "league" | "coverage") => {
     setView(next);
     window.history.replaceState(null, "", `/?room=audit&view=${next}`);
   };
@@ -710,6 +714,30 @@ export default function AuditView() {
       setSearchResults(await loadDashboardResource<NewsSearchResponse>(`/api/news-search?q=${encodeURIComponent(query)}&page=${page}&limit=10`, { force: true }));
     } finally { setSearchBusy(false); }
   };
+
+  const askNewsQuestion = async () => {
+    const value = questionInput.trim();
+    if (value.length < 4) { setQuestionError("请把问题写完整一点"); return; }
+    setQuestionError(null);
+    try {
+      const response = await fetch("/api/news-questions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: value }) });
+      const body = await response.json() as NewsQuestion & { error?: string };
+      if (!response.ok) throw new Error(body.error || "暂时无法提交问题");
+      setQuestion(body);
+    } catch (reason) { setQuestionError(reason instanceof Error ? reason.message : "暂时无法提交问题"); }
+  };
+
+  useEffect(() => {
+    if (!question?.id || question.status !== "PENDING") return;
+    const check = async () => {
+      try {
+        const response = await fetch(`/api/news-questions?id=${encodeURIComponent(question.id)}`, { cache: "no-store" });
+        if (response.ok) setQuestion(await response.json() as NewsQuestion);
+      } catch { /* keep the queued question visible */ }
+    };
+    const interval = window.setInterval(() => void check(), 10_000);
+    return () => window.clearInterval(interval);
+  }, [question?.id, question?.status]);
 
   const scrollAuditTabs = (direction: -1 | 1) => {
     const nav = auditTabsRef.current;
@@ -821,6 +849,7 @@ export default function AuditView() {
       <nav ref={auditTabsRef} className="audit-tabs" aria-label="审计视图">
         <a href="/audit?view=briefs" className={view === "briefs" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("briefs"); }}>每日简报 <b>{payload?.daily_news_briefs?.length ?? 0}</b></a>
         <a href="/audit?view=search" className={view === "search" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("search"); }}>搜索 <b>⌕</b></a>
+        <a href="/audit?view=qa" className={view === "qa" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("qa"); }}>问新闻 <b>?</b></a>
         <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻 <b>{readableNewsTotal}</b></a>
         <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>新闻证据管理 <b>{payload?.news_evidence_summary?.model_seen_events ?? 0}</b></a>
         <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件脉络 <b>{activeEventTotal}</b></a>
@@ -847,6 +876,14 @@ export default function AuditView() {
         {searchResults.query && <p className="search-count">“{searchResults.query}” 找到 {searchResults.total} 条</p>}
         <div className="search-results">{searchResults.items.map(row => <article key={`${row.source}-${row.source_item_id}-${row.revision_number}`}><time>{time(row.source_published_time ?? row.collector_first_seen_time)}</time><h3>{row.headline}</h3><p>{row.emerging_topic_zh || row.impact_reason_zh || row.source}</p><small>{row.source} · {row.category}</small></article>)}</div>
         {searchResults.total > searchResults.page_size && <nav className="search-pages"><button disabled={searchResults.page <= 1 || searchBusy} onClick={() => void runNewsSearch(searchResults.page - 1)}>←</button><span>{searchResults.page} / {Math.ceil(searchResults.total / searchResults.page_size)}</span><button disabled={searchResults.page >= Math.ceil(searchResults.total / searchResults.page_size) || searchBusy} onClick={() => void runNewsSearch(searchResults.page + 1)}>→</button></nav>}
+      </section>}
+
+      {view === "qa" && <section className="news-qa-desk">
+        <header><p className="eyebrow">GEMMA NEWS Q&amp;A</p><h2>问这批新闻</h2></header>
+        <form onSubmit={event => { event.preventDefault(); void askNewsQuestion(); }}><textarea maxLength={200} value={questionInput} onChange={event => setQuestionInput(event.target.value)} placeholder="例如：今天哪些消息可能继续影响黄金？" /><button type="submit">提问</button></form>
+        {questionError && <p className="qa-error">{questionError}</p>}
+        {question && <article><small>{question.status === "PENDING" ? "Gemma 正在根据新闻证据回答" : `${question.evidence_ids?.length ?? 0} 份新闻证据`}</small><h3>{question.question}</h3>{question.answer && <p>{question.answer}</p>}</article>}
+        <footer>只依据已收录新闻回答 · 不提供交易建议</footer>
       </section>}
 
       {view === "news" && <>
