@@ -2067,11 +2067,35 @@ def test_controlled_news_semantics_do_not_reclassify_by_substring() -> None:
     }
 
     assert effective_record_kind(annotation) == "FACT_EVENT"
+    assert effective_record_kind(
+        annotation, "forward guidance argues against a cut"
+    ) == "FACT_EVENT"
+    assert effective_record_kind(
+        annotation, "Gold gains as Treasury yields fall"
+    ) == "MARKET_REACTION"
     assert annotation_topics(annotation) == ("rates_fed", "growth_economy")
     # These used to trigger substring bugs: war in forward and gain in against.
     assert annotation_topics({
         **annotation, "headline_zh": "forward guidance argues against a cut",
     }) == ("rates_fed", "growth_economy")
+
+
+def test_market_wrap_is_display_only_even_when_llm_calls_it_fact(tmp_path) -> None:
+    epoch = datetime(2026, 8, 10, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward-market-wrap.sqlite3", now=epoch)
+    _append_news(
+        ledger, source="google_news_fed_rates", item="Gold gains as Treasury yields fall",
+        first_seen=epoch, parsed_at=epoch + timedelta(seconds=30), impulse=0.2,
+        link="https://finance.yahoo.com/example", primary_category="rates_fed",
+        record_kind="FACT_EVENT", materiality=0.8,
+    )
+
+    row = event_evidence_rows(ledger, epoch + timedelta(minutes=5))[0]
+
+    assert row["record_kind"] == "MARKET_REACTION"
+    assert row["broad_model_eligible"] is False
+    assert "RECORD_KIND_NOT_ACTIONABLE" in row["reason_codes"]
+    ledger.close()
 
 
 def test_current_material_annotation_rejects_unknown_record_kind(tmp_path) -> None:
@@ -2082,6 +2106,24 @@ def test_current_material_annotation_rejects_unknown_record_kind(tmp_path) -> No
             ledger, source="google_news_fed_rates", item="official release",
             first_seen=epoch, parsed_at=epoch + timedelta(seconds=30), impulse=0.2,
             record_kind="RESPONSE",
+        )
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("document_kind", "NOT_A_KIND"), ("evidence_role", "NOT_A_ROLE")),
+)
+def test_current_material_annotation_rejects_unknown_schema_enum(
+    tmp_path, field: str, value: str,
+) -> None:
+    epoch = datetime(2026, 8, 10, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / f"invalid-{field}.sqlite3", now=epoch)
+    with pytest.raises(ValueError, match=rf"{field} is not controlled"):
+        _append_news(
+            ledger, source="google_news_fed_rates", item=f"invalid {field}",
+            first_seen=epoch, parsed_at=epoch + timedelta(seconds=30), impulse=0.2,
+            annotation_overrides={field: value},
         )
     ledger.close()
 
@@ -2172,7 +2214,7 @@ def test_reliable_media_publication_time_is_safe_event_clock_proxy(tmp_path) -> 
             first_seen=epoch + timedelta(minutes=1),
             parsed_at=epoch + timedelta(minutes=2), impulse=0.0,
             primary_category="war_geopolitics", material_event_key="same-event",
-            event_time=None,
+            event_time="",
         )
     event = event_evidence_rows(ledger, epoch + timedelta(minutes=10))[0]
     assert event["evidence_grade"] == "CORROBORATED"
@@ -2222,7 +2264,7 @@ def test_official_release_timestamp_is_valid_event_clock(tmp_path) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
     _append_news(
         ledger, source="federal_reserve_monetary", item="official-release",
-        first_seen=epoch, parsed_at=epoch, impulse=0.3, event_time=None,
+        first_seen=epoch, parsed_at=epoch, impulse=0.3, event_time="",
     )
     event = event_evidence_rows(ledger, epoch + timedelta(minutes=1))[0]
     assert event["official_model_eligible"] is True

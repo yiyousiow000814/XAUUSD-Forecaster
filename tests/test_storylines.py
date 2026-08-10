@@ -153,7 +153,7 @@ def test_gold_price_reaction_cannot_update_core_timeline():
     )
     reaction = event(
         "b", "2026-08-06T02:00:00+00:00", "霍尔木兹消息推动现货黄金上涨",
-        record_kind="MARKET_REACTION", actor="现货黄金", canonical_actor_id="spot_gold",
+        record_kind="FACT_EVENT", actor="现货黄金", canonical_actor_id="spot_gold",
         action="上涨", action_family="OTHER_FACT", object="金价",
         canonical_object_id="gold_price", relation_to_prior="MARKET_REACTS_TO",
     )

@@ -853,7 +853,7 @@ def _news_evidence_display_rows(
         event_key = row["event_key"]
         if event_key in displayed_events:
             continue
-        if row.get("prompt_version") != "news-json-v14-material-event-evidence":
+        if row.get("prompt_version") != PROMPT_VERSION:
             continue
         if row.get("evidence_grade") not in {
             "PRIMARY", "CORROBORATED", "SINGLE_RELIABLE",
@@ -1095,7 +1095,7 @@ def _dashboard_payload(database: Path) -> dict:
                      AND latest_f.revision_number=n.revision_number
                      AND latest_f.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
-                     AND latest_f.prompt_version='news-json-v14-material-event-evidence'
+                     AND latest_f.prompt_version=?
                      AND NOT (latest_f.error_type='RuntimeError'
                               AND latest_f.error='All configured Gemini keys unavailable for this batch')
                     ORDER BY latest_f.failed_at DESC LIMIT 1)
@@ -1142,6 +1142,7 @@ def _dashboard_payload(database: Path) -> dict:
                 now.isoformat(timespec="microseconds"), INVALID_CHINESE_TITLE,
                 PROMPT_VERSION,
                 IMPACT_MODEL, IMPACT_PROMPT_VERSION,
+                PROMPT_VERSION,
             ),
         ).fetchall()
         annotation_queue = connection.execute(

@@ -6,6 +6,8 @@ import math
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from .news_semantics import V1_NEWS_PROMPT_VERSIONS
+
 if TYPE_CHECKING:
     from .forward_ledger import ForwardLedger
 
@@ -33,9 +35,7 @@ NEWS_FEATURES = (
     "vix_change",
 )
 
-NEWS_PROMPT_VERSIONS = (
-    "news-json-v14-material-event-evidence",
-)
+NEWS_PROMPT_VERSIONS = V1_NEWS_PROMPT_VERSIONS
 NEWS_MODEL_VERSIONS = (
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",

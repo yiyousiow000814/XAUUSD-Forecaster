@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .news_semantics import NEWS_CATEGORIES, RECORD_KINDS
+from .news_semantics import NEWS_CATEGORIES, RECORD_KINDS, validate_news_annotation
 
 
 UTC = timezone.utc
@@ -591,6 +591,8 @@ class ForwardLedger:
             storyline_fields, event_claim_fields, material_event_fields,
         ):
             raise ValueError("annotation does not match frozen JSON schema fields")
+        if set(vector) == material_event_fields:
+            validate_news_annotation(vector)
         if "summary_zh" in vector and not str(vector["summary_zh"]).strip():
             raise ValueError("annotation summary_zh is empty")
         if "headline_zh" in vector and not str(vector["headline_zh"]).strip():

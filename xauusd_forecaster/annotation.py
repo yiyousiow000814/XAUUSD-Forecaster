@@ -25,6 +25,7 @@ from .news_impact import (
     pending_impact_records,
     validate_impact_assessment,
 )
+from .news_semantics import CURRENT_NEWS_PROMPT_VERSION, news_annotation_schema
 
 
 UTC = timezone.utc
@@ -40,7 +41,7 @@ GEMMA_REQUESTS_PER_DAY_PER_KEY = 15_000
 GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL = 20
 GEMMA_TITLE_BATCH_LIMIT = 10
 GEMMA_IMPACT_BATCH_LIMIT = 10
-PROMPT_VERSION = "news-json-v14-material-event-evidence"
+PROMPT_VERSION = CURRENT_NEWS_PROMPT_VERSION
 TITLE_PROMPT_VERSION = "headline-zh-v7-multilingual-month-preservation"
 INVALID_CHINESE_TITLE = "来源新闻（中文标题待校验）"
 TITLE_TRANSLATION_MODELS = (
@@ -200,8 +201,7 @@ def completed_annotation_records(
 
 
 def _schema() -> dict:
-    path = Path(__file__).resolve().parents[1] / "schemas" / "news_annotation.schema.json"
-    schema = json.loads(path.read_text(encoding="utf-8"))
+    schema = json.loads(json.dumps(news_annotation_schema()))
     schema.pop("$schema", None)
     schema.pop("$id", None)
     _strip_gemini_unsupported_schema_fields(schema)

@@ -26,13 +26,14 @@ from .news_time import NewsTimeAssessment, assess_news_time
 from .news_semantics import (
     ACTIONABLE_CATEGORIES,
     ACTIONABLE_RECORD_KINDS,
+    CURRENT_NEWS_PROMPT_VERSION,
     annotation_topics,
     effective_record_kind,
 )
 
 
 EVIDENCE_POLICY_VERSION = CURRENT_NEWS_CONTRACT.policy_version
-CURRENT_EVENT_PROMPT_VERSION = "news-json-v14-material-event-evidence"
+CURRENT_EVENT_PROMPT_VERSION = CURRENT_NEWS_PROMPT_VERSION
 ACTIONABLE_EVIDENCE_ROLES = frozenset({
     "CORE_CLAIM", "EVIDENCE_DOCUMENT", "MARKET_REACTION",
 })
@@ -348,7 +349,10 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
         topics = tuple(sorted({topic for row in members for topic in row["topics"]}))
         annotation = json.loads(canonical.get("annotation_json") or "{}")
         controlled_category = str(annotation.get("primary_category") or "")
-        record_kind = effective_record_kind(annotation)
+        record_kind = effective_record_kind(
+            annotation,
+            str(annotation.get("headline_zh") or canonical.get("headline") or ""),
+        )
         evidence_role = str(annotation.get("evidence_role") or "")
         materiality = float(annotation.get("materiality") or 0.0)
         event_clock, event_clock_source, event_time_precision = resolve_event_clock(

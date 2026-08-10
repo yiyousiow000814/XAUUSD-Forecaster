@@ -12,11 +12,15 @@ from .news_identity import (
     canonical_source_organization,
     canonical_story_episode,
 )
-from .news_semantics import ACTIONABLE_RECORD_KINDS, effective_record_kind
+from .news_semantics import (
+    ACTIONABLE_RECORD_KINDS,
+    CURRENT_NEWS_PROMPT_VERSION,
+    effective_record_kind,
+)
 
 
 STORYLINE_POLICY_VERSION = "temporal-event-graph-v8-canonical-occurrence-chains"
-CURRENT_EVENT_PROMPT_VERSION = "news-json-v14-material-event-evidence"
+CURRENT_EVENT_PROMPT_VERSION = CURRENT_NEWS_PROMPT_VERSION
 LEGACY_POLICY_STATUS = "temporal-event-graph-v2:EXPERIMENTAL_MEMBERSHIP_INVALID"
 MODEL_PERMISSION = "DISPLAY_ONLY"
 
@@ -324,7 +328,9 @@ def _episode_identity(event: dict) -> str | None:
 
 
 def _record_kind(event: dict) -> str:
-    return effective_record_kind(event)
+    return effective_record_kind(
+        event, str(event.get("headline_zh") or event.get("headline") or "")
+    )
 
 
 def _is_core(event: dict) -> bool:

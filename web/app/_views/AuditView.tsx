@@ -586,7 +586,7 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
     row.summary_zh !== undefined ? "ready" : "idle",
   );
   const detailElement = useRef<HTMLDetailsElement>(null);
-  const detailRetryCount = useRef(0);
+  const [detailRetryCount, setDetailRetryCount] = useState(0);
   const current = { ...row, ...(detail ?? {}) };
   const annotationStatus = row.annotation_status === "QUEUED"
     && row.model_visibility !== "NOT_YET_PARSED"
@@ -613,7 +613,7 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
       if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
       setDetail(body.payload);
       setDetailState("ready");
-      detailRetryCount.current = 0;
+      setDetailRetryCount(0);
     } catch {
       setDetailState("error");
     }
@@ -622,15 +622,19 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
     if (!event.currentTarget.open || detailState === "loading" || detailState === "ready") return;
     void fetchDetail();
   };
+  const retryDetail = () => {
+    setDetailRetryCount(0);
+    void fetchDetail();
+  };
   useEffect(() => {
-    if (detailState !== "error" || detailRetryCount.current >= 3) return;
+    if (detailState !== "error" || detailRetryCount >= 3) return;
     const timer = window.setTimeout(() => {
       if (!detailElement.current?.open) return;
-      detailRetryCount.current += 1;
+      setDetailRetryCount(count => count + 1);
       void fetchDetail();
     }, 3000);
     return () => window.clearTimeout(timer);
-  }, [detailState, fetchDetail]);
+  }, [detailRetryCount, detailState, fetchDetail]);
   return <details ref={detailElement} className="news-row" onToggle={loadDetail}>
     <summary>
       <div className="news-row-stamp"><b>{row.category}</b><time title="媒体发布时间；列表按此时间排序">发布 {row.source_published_time ? time(row.source_published_time) : "未知"}</time><small title="系统第一次收到；决定模型当时能否看见">收到 {time(row.collector_first_seen_time)}</small><small className={`eligibility-badge eligibility-${row.model_visibility.toLowerCase().replaceAll("_", "-")}`}>{VISIBILITY_LABELS[row.model_visibility] ?? row.model_visibility.replaceAll("_", " ")}</small></div>
@@ -642,7 +646,7 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
     </summary>
     <div className="news-row-detail">
       {detailState === "loading" ? <section className="gemini-summary summary-loading"><span>正在读取新闻详情</span><p>列表与正文详情分开保存，这里只加载你点开的这一条。</p></section>
-      : detailState === "error" ? <section className="gemini-summary summary-waiting"><span>详情暂未到达</span><p>系统正在自动重试。<button type="button" onClick={() => void fetchDetail()}>立即重试</button></p></section>
+      : detailState === "error" ? <section className="gemini-summary summary-waiting"><span>详情暂未到达</span><p>{detailRetryCount >= 3 ? "自动重试已停止。" : "系统正在自动重试。"}<button type="button" onClick={retryDetail}>立即重试</button></p></section>
       : <>
         <div className="news-detail-top">
           <div className={`content-proof content-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
