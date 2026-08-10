@@ -95,6 +95,12 @@ test("renders every preview room from the build snapshot", async () => {
   }
 });
 
+test("formats server-rendered preview times in one deterministic timezone", () => {
+  for (const path of ["../app/_views/AuditView.tsx", "../app/_views/LiveRoomView.tsx", "../app/_views/StatusView.tsx", "../app/_views/HealthView.tsx"]) {
+    assert.match(readFileSync(new URL(path, import.meta.url), "utf8"), /timeZone:\s*"Asia\/Kuala_Lumpur"/, path);
+  }
+});
+
 test("returns a verified main revision through the existing ingest heartbeat", () => {
   const ingest = readFileSync(new URL("../app/api/ingest/route.ts", import.meta.url), "utf8");
   const vite = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");

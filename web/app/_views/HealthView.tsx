@@ -37,7 +37,7 @@ const componentLabels: Record<string, string> = {
 };
 
 function localTime(value: string | null): string {
-  return value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "—";
+  return value ? new Date(value).toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Kuala_Lumpur" }) : "—";
 }
 
 function elapsed(seconds: number | null): string {

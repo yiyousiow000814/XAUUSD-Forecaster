@@ -69,7 +69,7 @@ function formatCountdown(target: string | undefined, nowMs: number): string {
 
 function QuotaPanel({ title, eyebrow, quota, nowMs }: { title: string; eyebrow: string; quota?: QuotaState; nowMs: number }) {
   const resetAt = quota?.next_reset_at
-    ? new Date(quota.next_reset_at).toLocaleString("zh-CN", { hour12: false })
+    ? new Date(quota.next_reset_at).toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Kuala_Lumpur" })
     : "—";
   return <section className="quota-panel">
     <div className="quota-panel-head">
@@ -176,7 +176,7 @@ export default function StatusView() {
         <p>Google 实际额度按 project 而不是 API key 计算。如果多个 key 属于同一个 project，它们仍会共享 Google 的额度；本页显示的是本机逐模型、逐 key 的安全账本，不代表 Google 端保证额度。</p>
       </aside>
 
-      <footer><span>每 15 秒刷新 · SHADOW ONLY</span><span>最后状态：{payload?.generated_at ? new Date(payload.generated_at).toLocaleString("zh-CN", { hour12: false }) : "—"}</span></footer>
+      <footer><span>每 15 秒刷新 · SHADOW ONLY</span><span>最后状态：{payload?.generated_at ? new Date(payload.generated_at).toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Kuala_Lumpur" }) : "—"}</span></footer>
     </main>
   );
 }

@@ -88,6 +88,7 @@ const localTime = (value?: string) =>
         minute: "2-digit",
         second: "2-digit",
         hour12: false,
+        timeZone: "Asia/Kuala_Lumpur",
       }).format(new Date(value))
     : "—";
 

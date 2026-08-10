@@ -391,7 +391,7 @@ type NewsIndexResponse = {
 
 const time = (value?: string | null) => value ? new Intl.DateTimeFormat("zh-CN", {
   day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit",
-  second: "2-digit", hour12: false,
+  second: "2-digit", hour12: false, timeZone: "Asia/Kuala_Lumpur",
 }).format(new Date(value)) : "—";
 const number = (value?: number | null, digits = 2) => value === null || value === undefined ? "—" : value.toFixed(digits);
 const percent = (value?: number | null) => value === null || value === undefined ? "—" : `${value >= 0 ? "+" : "−"}${Math.abs(value * 100).toFixed(3)}%`;
@@ -644,7 +644,7 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
       <div className="news-row-stamp"><b>{row.category}</b><time title="媒体发布时间；列表按此时间排序">发布 {row.source_published_time ? time(row.source_published_time) : "未知"}</time><small title="系统第一次收到；决定模型当时能否看见">收到 {time(row.collector_first_seen_time)}</small><small className={`eligibility-badge eligibility-${row.model_visibility.toLowerCase().replaceAll("_", "-")}`}>{VISIBILITY_LABELS[row.model_visibility] ?? row.model_visibility.replaceAll("_", " ")}</small></div>
       <div className="news-row-title"><strong>{row.headline}</strong><small>{SOURCE_LABELS[row.source] ?? row.source.replaceAll("_", " ")}{translated ? " · Gemini 中文标题" : ""}{row.emerging_topic_zh ? ` · ${row.emerging_topic_zh}` : ""}</small></div>
       <div className={`news-row-state state-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
-        <b>{row.content_status === "FULL_TEXT" ? `${row.content_characters.toLocaleString()} 字符` : row.content_fetch_status === "UNAVAILABLE" ? "正文不可用" : row.content_fetch_status === "RETRYING" ? "自动重试中" : row.source === "google_news_gold_geopolitics" ? "聚合标题" : "等待正文"}</b>
+        <b>{row.content_status === "FULL_TEXT" ? `${row.content_characters.toLocaleString("zh-CN")} 字符` : row.content_fetch_status === "UNAVAILABLE" ? "正文不可用" : row.content_fetch_status === "RETRYING" ? "自动重试中" : row.source === "google_news_gold_geopolitics" ? "聚合标题" : "等待正文"}</b>
         <small>{annotationStatus === "READY" ? (impactLabel ?? "等待 Gemma 判断") : annotationStatus === "NOT_REQUIRED" ? annotationReasonLabel : row.content_fetch_status === "UNAVAILABLE" ? "保留标题 · 不阻塞" : row.content_fetch_status === "RETRYING" ? "备用抓取中" : annotationStatus === "QUEUED" ? "AI 等待处理中" : annotationStatus === "BACKING_OFF" ? "失败后等待重试" : annotationStatus === "DEAD_LETTER" ? "已隔离待审" : "禁止判断"}</small>
       </div>
     </summary>
@@ -654,13 +654,13 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
       : <>
         <div className="news-detail-top">
           <div className={`content-proof content-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
-            {row.content_status === "FULL_TEXT" ? `✓ 已读取正式正文 · ${row.content_characters.toLocaleString()} 字符` : row.content_status === "SOURCE_CONTENT" ? `已读取来源内容 · ${row.content_characters.toLocaleString()} 字符` : row.content_fetch_status === "UNAVAILABLE" ? "发布网站拒绝自动读取或需要登录 · 仅保留标题，不进入模型" : row.content_fetch_status === "RETRYING" ? "首次抓取失败 · 系统将在退避结束后自动重试" : row.source === "google_news_gold_geopolitics" ? "Google News RSS 只提供聚合标题 · 未取得 publisher 正文" : "来源正文尚未抓取 · 禁止 Gemini 判断"}
+            {row.content_status === "FULL_TEXT" ? `✓ 已读取正式正文 · ${row.content_characters.toLocaleString("zh-CN")} 字符` : row.content_status === "SOURCE_CONTENT" ? `已读取来源内容 · ${row.content_characters.toLocaleString("zh-CN")} 字符` : row.content_fetch_status === "UNAVAILABLE" ? "发布网站拒绝自动读取或需要登录 · 仅保留标题，不进入模型" : row.content_fetch_status === "RETRYING" ? "首次抓取失败 · 系统将在退避结束后自动重试" : row.source === "google_news_gold_geopolitics" ? "Google News RSS 只提供聚合标题 · 未取得 publisher 正文" : "来源正文尚未抓取 · 禁止 Gemini 判断"}
           </div>
           {current.link && <a className="source-link" href={current.link} target="_blank" rel="noreferrer">阅读来源 ↗</a>}
         </div>
         {translated ? <p className="original-headline"><b>原文标题</b>{current.original_headline}</p> : null}
         {annotationStatus === "READY" ? <section className="gemini-summary">
-          <span>GEMINI 中文摘要 · 完整读取 {row.content_characters.toLocaleString()} 字符</span><p>{current.summary_zh}</p>
+          <span>GEMINI 中文摘要 · 完整读取 {row.content_characters.toLocaleString("zh-CN")} 字符</span><p>{current.summary_zh}</p>
         </section> : annotationStatus === "QUEUED" ? <section className="gemini-summary summary-queued">
           <span>FLASH-LITE 摘要排队中</span><p>正文已经完整入库，不会截断。系统正通过 {keyCount} 个 key 轮换，每分钟最多生成 {requestsPerMinute} 篇中文摘要；标题翻译会独立交给 Gemma。</p>
         </section> : annotationStatus === "BACKING_OFF" ? <section className="gemini-summary summary-queued">
