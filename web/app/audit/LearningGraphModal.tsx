@@ -264,17 +264,12 @@ function LongCurve({ curves }: { curves: Curve[] }) {
   const x = (time: string) => resultX.get(Date.parse(time)) ?? 58;
   const tickIndices = Array.from(new Set([0, .25, .5, .75, 1].map(part => Math.round((visibleResultTimes.length - 1) * part))));
   const tickTimes = tickIndices.map(index => new Date(visibleResultTimes[index]).toISOString());
-  const curveGapBreaks = visibleResultTimes.slice(1).flatMap((time, index) => {
-    const previous = visibleResultTimes[index];
-    if (time - previous < gapThreshold) return [];
-    return [{ time, previous, x: ((resultX.get(previous) ?? 58) + (resultX.get(time) ?? 58)) / 2 }];
-  });
-  const curveSegments = (points: CurvePoint[]) => points.reduce<CurvePoint[][]>((segments, point) => {
-    const current = segments.at(-1);
+  const curveRuns = (points: CurvePoint[]) => points.reduce<CurvePoint[][]>((runs, point) => {
+    const current = runs.at(-1);
     const previous = current?.at(-1);
-    if (!current || (previous && Date.parse(point.decision_time) - Date.parse(previous.decision_time) >= gapThreshold)) segments.push([point]);
+    if (!current || (previous && Date.parse(point.decision_time) - Date.parse(previous.decision_time) >= gapThreshold)) runs.push([point]);
     else current.push(point);
-    return segments;
+    return runs;
   }, []);
   const axisLabel = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
   const versionBoundaries = visibleCurves.flatMap(row => row.points.flatMap((point, index) => {
@@ -388,7 +383,6 @@ function LongCurve({ curves }: { curves: Curve[] }) {
     <svg className="learning-svg" viewBox="0 0 960 400" role="img" aria-label="各模型历史与实时成熟 OOS 曲线">
       {boundaryLayouts.length > 0 && <line x1="58" x2="920" y1={boundaryDividerY} y2={boundaryDividerY} className={compactBoundaryRail ? "version-event-rail" : "version-label-divider"} />}
       <line x1="58" x2="920" y1={y(0)} y2={y(0)} className="zero-line" />
-      {curveGapBreaks.map(gap => <g key={`${gap.previous}-${gap.time}`} className="curve-gap-break"><title>已跳过没有成熟结果的时段</title><path d={`M ${gap.x-6} 344 l 4 7 l 4 -7 l 4 7`} /></g>)}
       <text x="8" y={y(high) + 5}>{pct(high)}</text><text x="8" y={y(low) + 5}>{pct(low)}</text>
       {boundaryLayouts.map(({ boundary, markerX, label, labelWidth, labelX, lane }) => {
         const labelY = 8 + lane * 25;
@@ -402,9 +396,19 @@ function LongCurve({ curves }: { curves: Curve[] }) {
           </>}
         </g>;
       })}
-      {visibleCurves.flatMap(row => curveSegments(row.points).map((segment, index) => segment.length === 1
-        ? <circle key={`${row.model_identity}-${index}`} cx={x(segment[0].decision_time)} cy={y(segment[0].cumulative_quote_return)} r="4" fill={COLORS[row.model_identity]} />
-        : <polyline key={`${row.model_identity}-${index}`} fill="none" stroke={COLORS[row.model_identity]} strokeWidth="3" points={segment.map(point => `${x(point.decision_time)},${y(point.cumulative_quote_return)}`).join(" ")} />))}
+      {visibleCurves.flatMap(row => {
+        const runs = curveRuns(row.points);
+        return runs.flatMap((run, index) => {
+          const previous = runs[index - 1]?.at(-1);
+          const bridge = previous && run[0]
+            ? <line key={`${row.model_identity}-bridge-${index}`} className="curve-gap-bridge" stroke={COLORS[row.model_identity]} x1={x(previous.decision_time)} y1={y(previous.cumulative_quote_return)} x2={x(run[0].decision_time)} y2={y(run[0].cumulative_quote_return)}><title>休市期间没有成熟结果</title></line>
+            : null;
+          const curve = run.length === 1
+            ? <circle key={`${row.model_identity}-run-${index}`} cx={x(run[0].decision_time)} cy={y(run[0].cumulative_quote_return)} r="4" fill={COLORS[row.model_identity]} />
+            : <polyline key={`${row.model_identity}-run-${index}`} fill="none" stroke={COLORS[row.model_identity]} strokeWidth="3" points={run.map(point => `${x(point.decision_time)},${y(point.cumulative_quote_return)}`).join(" ")} />;
+          return [bridge, curve];
+        });
+      })}
       {tickTimes.map(value => <g key={value} className="time-axis"><line x1={x(value)} x2={x(value)} y1="350" y2="356" /><text x={x(value)} y="374" textAnchor="middle">{axisLabel(value)}</text></g>)}
     </svg>
     </div>
