@@ -17,7 +17,7 @@ from .factors import NEWS_FEATURES
 from .forward_ledger import canonical_hash
 from .news_contracts import CURRENT_NEWS_CONTRACT, generation_matches_contract
 from .news_evidence import BROAD_NEWS_FEATURES, EVIDENCE_POLICY_VERSION
-from .news_features_v2 import aggregate_news_features_v2
+from .news_features_v2 import EVIDENCE_GRADE_WEIGHT, aggregate_news_features_v2
 from .ridge import RidgeArtifact, train_ridge
 from .training import MARKET_FEATURES
 
@@ -32,7 +32,7 @@ NEWS_EXPERIMENTAL_MIN_CLUSTERS = 1
 NEWS_EXPERIMENTAL_MIN_EVENT_DAYS = 1
 NEWS_MIN_EVENT_DAYS = 3
 CROSSFIT_VERSION = "expanding-market-purge30m-v1"
-EVENT_WEIGHTING_VERSION = "quality-scaled-event-budget-gemma-decay-v4-reliable-tier"
+EVENT_WEIGHTING_VERSION = "absolute-trust-event-budget-v5-independent-origin"
 BROAD_MODEL_FEATURES = (*NEWS_FEATURES, *BROAD_NEWS_FEATURES)
 
 
@@ -88,7 +88,8 @@ def complete_training_rows(ledger, cutoff: datetime) -> list[dict]:
         decision_id = row["source_decision_id"]
         event_rows = ledger.connection.execute(
             """SELECT s.event_id,s.event_version_id,s.model_permission,s.raw_weight,
-                      c.event_occurred_at,c.event_clock_source,c.event_time_precision
+                       c.event_occurred_at,c.event_clock_source,c.event_time_precision,
+                       c.evidence_grade
             FROM news_decision_event_snapshots_v1 s
             JOIN news_event_catalog_v1 c USING(event_version_id)
             WHERE s.source_decision_id=? AND s.policy_version=?
@@ -199,16 +200,23 @@ def _event_budget_weights(
 ) -> tuple[np.ndarray, list[dict], dict]:
     totals: dict[str, float] = defaultdict(float)
     event_budgets: dict[str, float] = defaultdict(float)
+    reference_budgets: dict[str, float] = defaultdict(float)
     for row in rows:
         for event in row.get(field, []):
             event_id = str(event["event_id"])
             raw = max(0.0, float(event["raw_weight"]))
+            grade = str(event.get("evidence_grade") or "PRIMARY")
+            trust = EVIDENCE_GRADE_WEIGHT.get(grade, 1.0)
             totals[event_id] += raw
             # Reuse the existing freshness/confidence/novelty weight as the
             # event's total quality budget.  The previous equal-event
             # normalization cancelled decay across events and could give one
             # very late row more weight than several fresh rows.
             event_budgets[event_id] = max(event_budgets[event_id], raw)
+            if trust > 0:
+                reference_budgets[event_id] = max(
+                    reference_budgets[event_id], raw / trust,
+                )
     if not totals:
         raise ValueError("news residual rows require at least one eligible event")
     row_weights = []
@@ -229,7 +237,10 @@ def _event_budget_weights(
             })
         row_weights.append(budget)
     weights = np.asarray(row_weights, dtype=np.float64)
-    weights *= len(weights) / weights.sum()
+    reference_total = sum(reference_budgets.values())
+    if reference_total <= 0:
+        raise ValueError("news residual rows require trusted event evidence")
+    weights *= len(weights) / reference_total
     effective_rows = float(weights.sum() ** 2 / np.square(weights).sum())
     total_event_budget = sum(event_budgets.values())
     shares = sorted(

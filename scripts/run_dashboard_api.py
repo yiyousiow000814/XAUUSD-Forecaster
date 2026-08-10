@@ -94,7 +94,7 @@ def _deployment_provenance(generated_at: datetime, database_epoch: str | None) -
             return None
     runtime_sha = git("rev-parse", "HEAD")
     upstream = git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
-    expected_sha = git("rev-parse", upstream) if upstream else None
+    expected_sha = git("rev-parse", upstream or "origin/main")
     module_dirty = bool(git("status", "--porcelain", "--", "."))
     return {
         "runtime_git_sha": runtime_sha,

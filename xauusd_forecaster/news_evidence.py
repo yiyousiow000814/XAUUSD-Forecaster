@@ -118,6 +118,25 @@ def _reliable_domain(host: str) -> str | None:
     ), None)
 
 
+def _source_organization(row: dict) -> str | None:
+    """Return the original reporting organization for independence checks."""
+    annotation = json.loads(row.get("annotation_json") or "{}")
+    value = re.sub(
+        r"[^a-z0-9]+", "_",
+        str(annotation.get("source_organization_id") or "").strip().casefold(),
+    ).strip("_")
+    aliases = {
+        "thomson_reuters": "reuters",
+        "reuters_news": "reuters",
+        "associated_press": "ap",
+        "ap_news": "ap",
+    }
+    value = aliases.get(value, value)
+    if value.startswith("yahoo_finance"):
+        value = "yahoo_finance"
+    return value or row.get("reliable_domain")
+
+
 def _topics(row: dict) -> tuple[str, ...]:
     annotation = json.loads(row.get("annotation_json") or "{}")
     text = " ".join((
@@ -329,6 +348,9 @@ def event_evidence_rows_from_connection(
         ):
             continue
         row["reliable_domain"] = _reliable_domain(row["publisher_domain"])
+        row["source_organization"] = (
+            _source_organization(row) if row["reliable_domain"] else None
+        )
         row["topics"] = _topics(row)
         row["event_cluster_id"] = _event_key(
             row, row["topics"], use_material_event_key=not legacy_v3,
@@ -346,16 +368,27 @@ def event_evidence_rows_from_connection(
         reliable_domains = {
             row["reliable_domain"] for row in evidence_members if row["reliable_domain"]
         }
+        reliable_organizations = {
+            row["source_organization"]
+            for row in evidence_members if row["source_organization"]
+        }
+        reliable_sources = (
+            reliable_domains if legacy_v3 else reliable_organizations
+        )
         if primary:
             grade = "PRIMARY"
-        elif len(reliable_domains) >= 2:
+        elif len(reliable_sources) >= 2:
             grade = "CORROBORATED"
-        elif reliable_domains:
+        elif reliable_sources:
             grade = "SINGLE_RELIABLE"
         else:
             grade = "DISCOVERY_ONLY"
         candidates = primary or [
-            row for row in evidence_members if row["reliable_domain"] in reliable_domains
+            row for row in evidence_members
+            if (
+                row["reliable_domain"] in reliable_sources if legacy_v3
+                else row["source_organization"] in reliable_sources
+            )
         ] or evidence_members
         canonical = max(
             candidates,
@@ -411,7 +444,7 @@ def event_evidence_rows_from_connection(
         })
         if legacy_v3:
             independent_publishers = (
-                len(reliable_domains) if not primary
+                len(reliable_sources) if not primary
                 else len({row["source"] for row in primary})
             )
         else:
@@ -422,7 +455,7 @@ def event_evidence_rows_from_connection(
                 for row in primary
             }
             independent_publishers = (
-                len(reliable_domains) if not primary else len(primary_organizations)
+                len(reliable_organizations) if not primary else len(primary_organizations)
             )
         reasons = [f"EVIDENCE_{grade}"]
         if event_clock_source == "SOURCE_STRUCTURED_TIME":
@@ -461,15 +494,35 @@ def event_evidence_rows_from_connection(
         canonical_headline = str(
             annotation.get("headline_zh") or canonical["headline"]
         )
+        if legacy_v3:
+            source_hash = canonical_hash(sorted(
+                (row["content_hash"], row["annotation_id"]) for row in members
+            ))
+            event_version_id = canonical_hash((
+                event_id, canonical["content_hash"], canonical["annotation_id"],
+                canonical.get("impact_assessment_id"),
+                LEGACY_V3_EVIDENCE_POLICY_VERSION,
+            ))
+        else:
+            source_hash = canonical_hash(sorted(
+                (
+                    row["content_hash"], row["annotation_id"],
+                    row.get("impact_assessment_id"), row.get("source_organization"),
+                )
+                for row in members
+            ))
+            event_version_id = canonical_hash((
+                event_id, source_hash, canonical["content_hash"],
+                canonical["annotation_id"], canonical.get("impact_assessment_id"),
+                grade, eligible, official_eligible,
+                event_clock.isoformat() if event_clock else None,
+                EVIDENCE_POLICY_VERSION,
+            ))
         events.append({
             "event_cluster_id": event_id,
             "event_key": event_id,
             "event_id": event_id,
-            "event_version_id": canonical_hash((
-                event_id, canonical["content_hash"], canonical["annotation_id"],
-                canonical.get("impact_assessment_id"),
-                EVIDENCE_POLICY_VERSION if not legacy_v3 else LEGACY_V3_EVIDENCE_POLICY_VERSION,
-            )),
+            "event_version_id": event_version_id,
             "policy_version": (
                 LEGACY_V3_EVIDENCE_POLICY_VERSION if legacy_v3
                 else EVIDENCE_POLICY_VERSION
@@ -483,6 +536,7 @@ def event_evidence_rows_from_connection(
             "member_count": len(members),
             "source_names": source_names,
             "publisher_domains": publisher_domains,
+            "source_organizations": sorted(reliable_organizations),
             "canonical_source": canonical["source"],
             "canonical_source_item_id": canonical["source_item_id"],
             "publisher_domain": canonical["publisher_domain"],
@@ -540,9 +594,7 @@ def event_evidence_rows_from_connection(
                 float(canonical.get("impact_confidence") or 0.0),
             ) if not legacy_v3 else float(canonical["confidence"]),
             "reason_codes": reasons,
-            "source_hash": canonical_hash(sorted(
-                (row["content_hash"], row["annotation_id"]) for row in members
-            )),
+            "source_hash": source_hash,
         })
     return sorted(events, key=lambda row: (row["collector_first_seen_time"], row["event_cluster_id"]))
 

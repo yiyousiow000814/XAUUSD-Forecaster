@@ -10,6 +10,7 @@ import http.client
 import json
 import math
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -21,6 +22,9 @@ from pathlib import Path
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = MODULE_ROOT / ".local" / "forward" / "dashboard-sync.json"
 DEFAULT_STATUS = MODULE_ROOT / ".local" / "forward" / "dashboard-sync-status.json"
+DEFAULT_RUNTIME_SIGNAL = (
+    MODULE_ROOT / ".local" / "forward" / "remote-main-signal.json"
+)
 DEFAULT_NEWS_STATE = (
     MODULE_ROOT / ".local" / "forward" / "dashboard-news-sync-state.json"
 )
@@ -458,7 +462,30 @@ def write_sync_status(
     temporary.replace(path)
 
 
-def _post_json(url: str, payload: bytes, config: dict) -> None:
+def _write_runtime_signal(payload: object) -> None:
+    if not isinstance(payload, dict):
+        return
+    revision = str(payload.get("main_revision") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        return
+    target = DEFAULT_RUNTIME_SIGNAL
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(
+            {
+                "main_revision": revision,
+                "observed_at": datetime.now(UTC).isoformat(),
+                "source": "CLOUDFLARE_MAIN_DEPLOYMENT",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    temporary.replace(target)
+
+
+def _post_json(url: str, payload: bytes, config: dict) -> dict:
     headers = {
         "Authorization": f"Bearer {config['token']}",
         "Content-Type": "application/json",
@@ -474,6 +501,13 @@ def _post_json(url: str, payload: bytes, config: dict) -> None:
     ) as response:
         if response.status != 200:
             raise RuntimeError(f"dashboard sync returned HTTP {response.status}")
+        body = response.read()
+    try:
+        result = json.loads(body) if body else {}
+    except (TypeError, ValueError):
+        result = {}
+    _write_runtime_signal(result)
+    return result if isinstance(result, dict) else {}
 
 
 def _target_state_path(path: Path, target_name: str, *, legacy: bool) -> Path:

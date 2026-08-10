@@ -346,9 +346,10 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
                  material_event_key: str = "",
                  event_time: str | None = "__DEFAULT__",
                  impact_class: str = "POLICY_SHIFT",
-                 impact_update_type: str = "NEW_EVENT",
-                 impact_assessed_at: datetime | None = None,
-                 include_impact: bool = True) -> None:
+                  impact_update_type: str = "NEW_EVENT",
+                  impact_assessed_at: datetime | None = None,
+                  source_organization_id: str | None = None,
+                  include_impact: bool = True) -> None:
     entities = entities or []
     body = ("publisher full body " * 30) + item
     digest = hashlib.sha256(body.encode()).hexdigest()
@@ -398,7 +399,7 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
             "relation_to_prior": "NONE",
             "document_kind": "NEWS_REPORT",
             "material_event_key": material_event_key,
-            "source_organization_id": source,
+            "source_organization_id": source_organization_id or source,
             "evidence_role": evidence_role,
         },
     })
@@ -598,7 +599,7 @@ def test_single_reliable_publisher_is_provisional_and_downweighted(tmp_path) -> 
     _append_news(
         ledger, source="gdelt_gold_geopolitics", item="War disrupts oil routes",
         first_seen=cutoff - timedelta(minutes=10), parsed_at=cutoff - timedelta(minutes=5),
-        impulse=0.0, link="https://www.reuters.com/world/example",
+        impulse=1.0, link="https://www.reuters.com/world/example",
         entities=["Iran", "Strait of Hormuz"], event_type="geopolitical_conflict",
     )
     event = event_evidence_rows(ledger, cutoff)[0]
@@ -607,6 +608,13 @@ def test_single_reliable_publisher_is_provisional_and_downweighted(tmp_path) -> 
     assert event["model_permission"] == "BROAD_MODEL"
     assert "RELIABLE_SINGLE_SOURCE_PROVISIONAL" in event["reason_codes"]
     assert event_raw_weight(event) == pytest.approx(
+        0.35 * 2 ** (-10 / 1440)
+    )
+    features = aggregate_news_features_v2(ledger, cutoff)["features"]
+    assert features["broad_news_hawkishness"] == pytest.approx(
+        0.35 * 2 ** (-10 / 1440)
+    )
+    assert features["broad_news_event_count"] == pytest.approx(
         0.35 * 2 ** (-10 / 1440)
     )
     ledger.close()
@@ -659,6 +667,64 @@ def test_confirmation_is_not_visible_before_second_publisher_is_parsed(tmp_path)
     later = event_evidence_rows(ledger, first + timedelta(minutes=10))[0]
     assert early["evidence_grade"] == "SINGLE_RELIABLE"
     assert later["evidence_grade"] == "CORROBORATED"
+    assert early["event_version_id"] != later["event_version_id"]
+    assert early["source_hash"] != later["source_hash"]
+    ledger.close()
+
+
+def test_evidence_upgrade_versions_membership_when_canonical_item_is_unchanged(
+    tmp_path,
+) -> None:
+    first = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=first)
+    common = {
+        "first_seen": first, "impulse": 0.5,
+        "entities": ["Federal Reserve", "rates"],
+        "material_event_key": "same-event",
+    }
+    _append_news(
+        ledger, source="google_news_fed_rates", item="zzzz",
+        parsed_at=first + timedelta(minutes=1),
+        link="https://reuters.com/z", source_organization_id="reuters", **common,
+    )
+    early = event_evidence_rows(ledger, first + timedelta(minutes=2))[0]
+    _append_news(
+        ledger, source="google_news_gold_context", item="aaaa",
+        parsed_at=first + timedelta(minutes=3),
+        link="https://bbc.com/a", source_organization_id="bbc", **common,
+    )
+    later = event_evidence_rows(ledger, first + timedelta(minutes=4))[0]
+
+    assert early["canonical_source_item_id"] == "zzzz"
+    assert later["canonical_source_item_id"] == "zzzz"
+    assert early["event_version_id"] != later["event_version_id"]
+    ledger.close()
+
+
+def test_syndicated_copy_does_not_create_independent_confirmation(tmp_path) -> None:
+    cutoff = datetime(2026, 8, 5, 10, 30, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=cutoff - timedelta(hours=1))
+    common = {
+        "first_seen": cutoff - timedelta(minutes=10),
+        "parsed_at": cutoff - timedelta(minutes=5), "impulse": 0.5,
+        "entities": ["Federal Reserve", "interest rates"],
+        "event_type": "monetary_policy", "material_event_key": "fed-guidance",
+        "source_organization_id": "reuters",
+    }
+    _append_news(
+        ledger, source="google_news_fed_rates", item="Reuters original",
+        link="https://www.reuters.com/world/example", **common,
+    )
+    _append_news(
+        ledger, source="google_news_gold_context", item="Reuters syndicated copy",
+        link="https://www.kitco.com/news/example", **common,
+    )
+
+    event = event_evidence_rows(ledger, cutoff)[0]
+
+    assert event["evidence_grade"] == "SINGLE_RELIABLE"
+    assert event["independent_publishers"] == 1
+    assert event["source_organizations"] == ["reuters"]
     ledger.close()
 
 
@@ -1871,6 +1937,20 @@ def test_event_budget_preserves_freshness_between_events() -> None:
     assert event_totals["fresh"] / event_totals["late"] == pytest.approx(9.0)
     assert weights[2] < weights[0]
     assert summary["maximum_event_weight_share"] == pytest.approx(0.9)
+
+
+def test_single_reliable_training_rows_keep_absolute_35_percent_trust() -> None:
+    rows = [
+        {"decision_id": f"row-{index}", "broad_events": [{
+            "event_id": "reliable", "event_version_id": "reliable-v1",
+            "raw_weight": 0.35, "evidence_grade": "SINGLE_RELIABLE",
+        }]}
+        for index in range(3)
+    ]
+
+    weights, _, _ = training_v2._event_budget_weights(rows, "broad_events")
+
+    assert weights.mean() == pytest.approx(0.35)
 
 
 def test_commentary_and_low_materiality_are_not_training_evidence(tmp_path) -> None:

@@ -31,7 +31,7 @@ def test_control_center_treats_weekly_close_as_healthy() -> None:
     assert '@("STOPPED", "DATA STALE", "API ERROR")' in control_center
 
 
-def test_control_center_auto_reloads_python_services_on_commit_change() -> None:
+def test_control_center_updates_only_the_isolated_main_runtime() -> None:
     path = ROOT / "scripts" / "xauusd_control_center.ps1"
     control_center = path.read_text(encoding="utf-8")
 
@@ -39,6 +39,12 @@ def test_control_center_auto_reloads_python_services_on_commit_change() -> None:
     assert 'CODE_REVISION_RELOAD_APPLIED' in control_center
     assert 'Write-RuntimeCodeState -Revision $Revision' in control_center
     assert 'currentRevision -ne $appliedRevision' in control_center
+    assert "Get-SignaledMainRevision" in control_center
+    assert "Get-VerifiedOriginMain" in control_center
+    assert "Test-RevisionDescendsFrom" in control_center
+    assert "Install-ProductionRuntime" in control_center
+    assert 'RuntimeRoot must be separate from the development checkout' in control_center
+    assert 'worktree add --detach --quiet' in control_center
     assert '"quote"' not in control_center.split("$reloadableServiceKeys =", 1)[1].splitlines()[0]
 
     reported = subprocess.run(

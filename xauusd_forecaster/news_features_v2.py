@@ -47,6 +47,17 @@ EVIDENCE_GRADE_WEIGHT = {
 }
 
 
+def _finalize_weighted_signals(
+    totals: dict[str, float], names: tuple[str, ...], weight_sum: float,
+) -> None:
+    """Keep sparse evidence trust after averaging directional measurements."""
+    if weight_sum <= 0:
+        return
+    signal_strength = min(1.0, weight_sum)
+    for name in names:
+        totals[name] = totals[name] / weight_sum * signal_strength
+
+
 def _visibility_event_ref(event: dict | None, news, annotation) -> dict:
     news_row = dict(news)
     annotation_row = dict(annotation)
@@ -127,13 +138,15 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
             row["event_id"], row["event_version_id"], row["source_hash"],
             row["event_occurred_at"], age_minutes,
         ))
-    if weight_sum:
-        for name in (
+    _finalize_weighted_signals(
+        totals,
+        (
             "news_hawkishness", "news_inflation_impulse", "news_growth_impulse",
             "news_geopolitical_risk", "news_usd_impulse", "news_novelty",
             "news_confidence",
-        ):
-            totals[name] /= weight_sum
+        ),
+        weight_sum,
+    )
 
     macro_rows = ledger.connection.execute(
         """SELECT m.series_id, m.observation_period, m.value, m.content_hash
@@ -195,14 +208,16 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
         broad_evidence.append((
             row["event_id"], row["event_version_id"], row["source_hash"], age_minutes,
         ))
-    if broad_weight_sum:
-        for name in (
+    _finalize_weighted_signals(
+        broad_totals,
+        (
             "broad_news_hawkishness", "broad_news_inflation_impulse",
             "broad_news_growth_impulse", "broad_news_geopolitical_risk",
             "broad_news_usd_impulse", "broad_news_novelty",
             "broad_news_confidence",
-        ):
-            broad_totals[name] /= broad_weight_sum
+        ),
+        broad_weight_sum,
+    )
     totals.update(broad_totals)
     official_visible_events = [_visibility_event_ref(row, row, row) for row in official_events]
     broad_visible_events = [

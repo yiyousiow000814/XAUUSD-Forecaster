@@ -45,6 +45,16 @@ test("keeps branch previews isolated from the production database", async () => 
   assert.match(builtPreview, new RegExp(process.env.WORKERS_CI_BRANCH.replaceAll("/", "\\/")));
 });
 
+test("returns a verified main revision through the existing ingest heartbeat", () => {
+  const ingest = readFileSync(new URL("../app/api/ingest/route.ts", import.meta.url), "utf8");
+  const vite = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
+  assert.match(vite, /__AURUM_DEPLOYMENT__/);
+  assert.match(vite, /WORKERS_CI_COMMIT_SHA/);
+  assert.match(ingest, /deployment\.branch === "main"/);
+  assert.match(ingest, /\^\[0-9a-f\]\{40\}\$/);
+  assert.match(ingest, /main_revision/);
+});
+
 test("does not show a redundant forecast warning while the market is closed", () => {
   const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
   assert.match(source, /const forecastStatus = marketClosed\s*\? null/);

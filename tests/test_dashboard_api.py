@@ -62,6 +62,28 @@ def test_deployment_provenance_discovers_git_from_standalone_module_root(
     assert calls and set(calls) == {tmp_path}
 
 
+def test_detached_runtime_compares_against_origin_main(tmp_path, monkeypatch) -> None:
+    module = _dashboard_module()
+
+    def fake_run(args, *, cwd, **_kwargs):
+        command = tuple(args[1:])
+        outputs = {
+            ("rev-parse", "HEAD"): "abc123\n",
+            ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"): "",
+            ("rev-parse", "origin/main"): "abc123\n",
+            ("status", "--porcelain", "--", "."): "",
+        }
+        return type("Result", (), {"stdout": outputs[command]})()
+
+    monkeypatch.setattr(module, "MODULE_ROOT", tmp_path)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    provenance = module._deployment_provenance(datetime.now(UTC), None)
+
+    assert provenance["expected_git_sha"] == "abc123"
+    assert provenance["status"] == "MATCHED"
+
+
 def _append_basic_annotation(
     ledger: ForwardLedger,
     *,

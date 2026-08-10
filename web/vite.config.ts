@@ -44,6 +44,7 @@ export default defineConfig(async () => {
     ],
     define: {
       __AURUM_PREVIEW_BUNDLE__: JSON.stringify(previewBundle),
+      __AURUM_DEPLOYMENT__: JSON.stringify({ branch, commit_sha: commit }),
     },
   };
 });

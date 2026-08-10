@@ -1,13 +1,21 @@
 param(
-    [ValidateSet("Gui", "Status", "StatusJson", "CodeRevision", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "EnableAutoStart", "DisableAutoStart", "InstallShortcut")]
+    [ValidateSet("Gui", "Status", "StatusJson", "CodeRevision", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime")]
     [string]$Action = "Gui",
     [ValidateSet("", "quote", "collector", "annotator", "api", "sync")]
     [string]$ServiceKey = "",
-    [string]$StatusPath = ""
+    [string]$StatusPath = "",
+    [string]$RuntimeRoot = "",
+    [string]$RepositoryRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
-$moduleRoot = Split-Path -Parent $PSScriptRoot
+$scriptRepositoryRoot = Split-Path -Parent $PSScriptRoot
+$repositoryRoot = if ($RepositoryRoot) {
+    [System.IO.Path]::GetFullPath($RepositoryRoot)
+} else { $scriptRepositoryRoot }
+$moduleRoot = if ($RuntimeRoot) {
+    [System.IO.Path]::GetFullPath($RuntimeRoot)
+} else { $scriptRepositoryRoot }
 $logRoot = Join-Path $moduleRoot ".local\forward\logs"
 $taskName = "XAUUSD-Forecaster-Autostart"
 $dashboardUrl = if ([Environment]::GetEnvironmentVariable("XAUUSD_DASHBOARD_URL", "User")) {
@@ -17,6 +25,8 @@ $dashboardUrl = if ([Environment]::GetEnvironmentVariable("XAUUSD_DASHBOARD_URL"
 }
 $watchdogLog = Join-Path $logRoot "control-watchdog.jsonl"
 $runtimeCodeStatePath = Join-Path $moduleRoot ".local\forward\runtime-code-state.json"
+$runtimeUpdateStatePath = Join-Path $moduleRoot ".local\forward\runtime-update-state.json"
+$remoteMainSignalPath = Join-Path $moduleRoot ".local\forward\remote-main-signal.json"
 $reloadableServiceKeys = @("collector", "annotator", "api", "sync")
 
 $services = @(
@@ -102,6 +112,112 @@ function Get-CodeRevision {
         }
     } catch {}
     return $null
+}
+
+function Get-RuntimeUpdateState {
+    if (-not (Test-Path -LiteralPath $runtimeUpdateStatePath)) { return $null }
+    try {
+        Get-Content -LiteralPath $runtimeUpdateStatePath -Raw | ConvertFrom-Json
+    } catch { $null }
+}
+
+function Write-RuntimeUpdateState {
+    param([hashtable]$Values)
+    $current = @{}
+    $prior = Get-RuntimeUpdateState
+    if ($prior) {
+        foreach ($property in $prior.PSObject.Properties) {
+            $current[$property.Name] = $property.Value
+        }
+    }
+    foreach ($key in $Values.Keys) { $current[$key] = $Values[$key] }
+    $directory = Split-Path -Parent $runtimeUpdateStatePath
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $temporary = "$runtimeUpdateStatePath.tmp"
+    $current | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $temporary -Encoding UTF8
+    Move-Item -LiteralPath $temporary -Destination $runtimeUpdateStatePath -Force
+}
+
+function Get-SignaledMainRevision {
+    if (-not (Test-Path -LiteralPath $remoteMainSignalPath)) { return $null }
+    try {
+        $signal = Get-Content -LiteralPath $remoteMainSignalPath -Raw | ConvertFrom-Json
+        $revision = [string]$signal.main_revision
+        if ($revision -match '^[0-9a-f]{40}$') { return $revision }
+    } catch {}
+    return $null
+}
+
+function Get-VerifiedOriginMain {
+    try {
+        & git -C $repositoryRoot fetch origin main --quiet 2>$null
+        if ($LASTEXITCODE -ne 0) { return $null }
+        $revision = (& git -C $repositoryRoot rev-parse origin/main 2>$null).Trim()
+        if ($LASTEXITCODE -eq 0 -and $revision -match '^[0-9a-f]{40}$') {
+            Write-RuntimeUpdateState @{
+                last_remote_check = [DateTimeOffset]::UtcNow.ToString("o")
+                last_remote_revision = $revision
+            }
+            return $revision
+        }
+    } catch {}
+    return $null
+}
+
+function Test-RevisionDescendsFrom {
+    param([string]$Ancestor, [string]$Candidate)
+    if (-not $Ancestor -or -not $Candidate) { return $false }
+    & git -C $repositoryRoot merge-base --is-ancestor $Ancestor $Candidate 2>$null
+    return $LASTEXITCODE -eq 0
+}
+
+function Get-DesiredMainRevision {
+    param([string]$CurrentRevision)
+    $signal = Get-SignaledMainRevision
+    if ($signal -and $signal -eq $CurrentRevision) {
+        Write-RuntimeUpdateState @{ signal_capable = $true }
+        return $null
+    }
+    if ($signal -and $signal -ne $CurrentRevision) {
+        $verified = Get-VerifiedOriginMain
+        if ($verified -eq $signal -and (Test-RevisionDescendsFrom $CurrentRevision $verified)) {
+            Write-RuntimeUpdateState @{ signal_capable = $true }
+            return $verified
+        }
+    }
+
+    $state = Get-RuntimeUpdateState
+    $signalCapable = $state -and [bool]$state.signal_capable
+    $intervalHours = if ($signalCapable) { 24.0 } else { 0.083333 }
+    $lastCheck = [DateTimeOffset]::MinValue
+    if ($state -and $state.last_remote_check) {
+        [DateTimeOffset]::TryParse([string]$state.last_remote_check, [ref]$lastCheck) | Out-Null
+    }
+    if (([DateTimeOffset]::UtcNow - $lastCheck).TotalHours -lt $intervalHours) {
+        return $null
+    }
+    $verified = Get-VerifiedOriginMain
+    if ($verified -and $verified -ne $CurrentRevision -and
+        (Test-RevisionDescendsFrom $CurrentRevision $verified)) {
+        return $verified
+    }
+    return $null
+}
+
+function Update-RuntimeCheckout {
+    param([string]$Revision)
+    if (-not $RuntimeRoot) { return $false }
+    if (-not (Test-RevisionDescendsFrom (Get-CodeRevision) $Revision)) { return $false }
+    & git -C $moduleRoot checkout --detach --force --quiet $Revision 2>$null
+    if ($LASTEXITCODE -ne 0) { return $false }
+    $stableScript = Join-Path $repositoryRoot ".local\runtime-control\xauusd_control_center.ps1"
+    Copy-Item -LiteralPath (Join-Path $moduleRoot "scripts\xauusd_control_center.ps1") `
+        -Destination $stableScript -Force
+    Write-RuntimeUpdateState @{
+        staged_revision = $Revision
+        staged_at = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+    return $true
 }
 
 function Get-RuntimeCodeState {
@@ -361,6 +477,12 @@ function Invoke-ForecasterWatchdog {
     while ($true) {
         try {
             $currentRevision = Get-CodeRevision
+            $desiredRevision = Get-DesiredMainRevision -CurrentRevision $currentRevision
+            if ($desiredRevision -and (Update-RuntimeCheckout -Revision $desiredRevision)) {
+                Write-WatchdogEvent -Event "MAIN_RUNTIME_UPDATED" `
+                    -Service "all" -State $desiredRevision
+                $currentRevision = $desiredRevision
+            }
             $runtimeState = Get-RuntimeCodeState
             $appliedRevision = if ($runtimeState) {
                 [string]$runtimeState.applied_revision
@@ -415,8 +537,12 @@ function Test-AutoStart {
 
 function Enable-AutoStart {
     $quotedScript = '"{0}"' -f $PSCommandPath
+    $runtimeArguments = if ($RuntimeRoot) {
+        ' -RuntimeRoot "{0}" -RepositoryRoot "{1}"' -f $moduleRoot, $repositoryRoot
+    } else { "" }
     $taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument (
-        "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File {0} -Action Watchdog" -f $quotedScript
+        "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File {0} -Action Watchdog{1}" -f `
+            $quotedScript, $runtimeArguments
     )
     $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
     $principal = New-ScheduledTaskPrincipal `
@@ -428,6 +554,70 @@ function Enable-AutoStart {
     Register-ScheduledTask -TaskName $taskName -Action $taskAction `
         -Trigger $taskTrigger -Principal $principal -Settings $settings -Force | Out-Null
     Start-ScheduledTask -TaskName $taskName
+}
+
+function Install-ProductionRuntime {
+    $source = [System.IO.Path]::GetFullPath($repositoryRoot)
+    $runtime = if ($RuntimeRoot) {
+        [System.IO.Path]::GetFullPath($RuntimeRoot)
+    } else {
+        Join-Path (Split-Path -Parent $source) "XAUUSD-Forecaster-runtime"
+    }
+    $sameCheckout = $runtime.Equals($source, [System.StringComparison]::OrdinalIgnoreCase)
+    $insideCheckout = $runtime.StartsWith(
+        $source + [System.IO.Path]::DirectorySeparatorChar,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )
+    if ($sameCheckout -or $insideCheckout) {
+        throw "RuntimeRoot must be separate from the development checkout."
+    }
+    $revision = (& git -C $source rev-parse HEAD 2>$null).Trim()
+    if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
+        throw "Cannot resolve the verified development revision."
+    }
+    if (Test-Path -LiteralPath $runtime) {
+        $inside = (& git -C $runtime rev-parse --is-inside-work-tree 2>$null).Trim()
+        if ($LASTEXITCODE -ne 0 -or $inside -ne "true") {
+            throw "Existing RuntimeRoot is not a Git worktree: $runtime"
+        }
+        & git -C $runtime checkout --detach --force --quiet $revision 2>$null
+        if ($LASTEXITCODE -ne 0) { throw "Cannot update runtime worktree." }
+    } else {
+        & git -C $source worktree add --detach --quiet $runtime $revision 2>$null
+        if ($LASTEXITCODE -ne 0) { throw "Cannot create runtime worktree." }
+    }
+    $runtimeLocal = Join-Path $runtime ".local"
+    $sourceLocal = Join-Path $source ".local"
+    New-Item -ItemType Directory -Path $sourceLocal -Force | Out-Null
+    if (-not (Test-Path -LiteralPath $runtimeLocal)) {
+        New-Item -ItemType Junction -Path $runtimeLocal -Target $sourceLocal | Out-Null
+    }
+    $controlRoot = Join-Path $sourceLocal "runtime-control"
+    New-Item -ItemType Directory -Path $controlRoot -Force | Out-Null
+    $stableScript = Join-Path $controlRoot "xauusd_control_center.ps1"
+    Copy-Item -LiteralPath $PSCommandPath -Destination $stableScript -Force
+
+    Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    Stop-All
+    $stableArgs = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Action Watchdog -RuntimeRoot "{1}" -RepositoryRoot "{2}"' -f `
+        $stableScript, $runtime, $source
+    $taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $stableArgs
+    $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+    $principal = New-ScheduledTaskPrincipal `
+        -UserId ("{0}\{1}" -f $env:USERDOMAIN, $env:USERNAME) `
+        -LogonType Interactive -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew `
+        -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
+        -ExecutionTimeLimit (New-TimeSpan -Days 3650)
+    Register-ScheduledTask -TaskName $taskName -Action $taskAction `
+        -Trigger $taskTrigger -Principal $principal -Settings $settings -Force | Out-Null
+    Start-ScheduledTask -TaskName $taskName
+    [pscustomobject]@{
+        runtime_root = $runtime
+        state_root = $sourceLocal
+        installed_revision = $revision
+        control_script = $stableScript
+    }
 }
 
 function Disable-AutoStart {
@@ -812,6 +1002,7 @@ switch ($Action) {
     "Watchdog" { Start-All; Invoke-ForecasterWatchdog }
     "EnableAutoStart" { Enable-AutoStart; Write-Output "Auto-start enabled." }
     "DisableAutoStart" { Disable-AutoStart; Write-Output "Auto-start disabled." }
+    "InstallRuntime" { Install-ProductionRuntime | Format-List }
     "InstallShortcut" { Write-Output (Install-ControlShortcut) }
     default { Show-ControlCenter }
 }
