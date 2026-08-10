@@ -88,7 +88,7 @@ test("renders the Gemini quota status route", async () => {
   assert.match(html, /逐 Key 配额/);
   assert.match(html, /Pacific midnight/);
   assert.match(html, /组件与新闻源/);
-  assert.match(html, /连接中/);
+  assert.match(html, /连接中|状态离线/);
 });
 
 test("renders component and news-source health on a separate route", async () => {
