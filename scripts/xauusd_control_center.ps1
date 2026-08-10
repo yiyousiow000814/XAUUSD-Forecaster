@@ -171,6 +171,25 @@ function Test-RevisionDescendsFrom {
     return $LASTEXITCODE -eq 0
 }
 
+function Test-MainCandidate {
+    param([string]$CurrentRevision, [string]$CandidateRevision)
+    if (-not $CandidateRevision -or $CandidateRevision -eq $CurrentRevision) {
+        return $false
+    }
+    $state = Get-RuntimeUpdateState
+    $acceptedMain = if ($state) { [string]$state.accepted_main_revision } else { "" }
+    if ($acceptedMain) {
+        # A PR runtime may be bootstrapped before a squash merge.  In that case
+        # the new main commit is not a descendant of the PR commit, but it must
+        # still advance the last independently verified main checkpoint.
+        return (
+            $CandidateRevision -ne $acceptedMain -and
+            (Test-RevisionDescendsFrom $acceptedMain $CandidateRevision)
+        )
+    }
+    return Test-RevisionDescendsFrom $CurrentRevision $CandidateRevision
+}
+
 function Get-DesiredMainRevision {
     param([string]$CurrentRevision)
     $signal = Get-SignaledMainRevision
@@ -180,7 +199,7 @@ function Get-DesiredMainRevision {
     }
     if ($signal -and $signal -ne $CurrentRevision) {
         $verified = Get-VerifiedOriginMain
-        if ($verified -eq $signal -and (Test-RevisionDescendsFrom $CurrentRevision $verified)) {
+        if ($verified -eq $signal -and (Test-MainCandidate $CurrentRevision $verified)) {
             Write-RuntimeUpdateState @{ signal_capable = $true }
             return $verified
         }
@@ -197,8 +216,7 @@ function Get-DesiredMainRevision {
         return $null
     }
     $verified = Get-VerifiedOriginMain
-    if ($verified -and $verified -ne $CurrentRevision -and
-        (Test-RevisionDescendsFrom $CurrentRevision $verified)) {
+    if ($verified -and (Test-MainCandidate $CurrentRevision $verified)) {
         return $verified
     }
     return $null
@@ -207,13 +225,14 @@ function Get-DesiredMainRevision {
 function Update-RuntimeCheckout {
     param([string]$Revision)
     if (-not $RuntimeRoot) { return $false }
-    if (-not (Test-RevisionDescendsFrom (Get-CodeRevision) $Revision)) { return $false }
+    if (-not (Test-MainCandidate (Get-CodeRevision) $Revision)) { return $false }
     & git -C $moduleRoot checkout --detach --force --quiet $Revision 2>$null
     if ($LASTEXITCODE -ne 0) { return $false }
     $stableScript = Join-Path $repositoryRoot ".local\runtime-control\xauusd_control_center.ps1"
     Copy-Item -LiteralPath (Join-Path $moduleRoot "scripts\xauusd_control_center.ps1") `
         -Destination $stableScript -Force
     Write-RuntimeUpdateState @{
+        accepted_main_revision = $Revision
         staged_revision = $Revision
         staged_at = [DateTimeOffset]::UtcNow.ToString("o")
     }
@@ -575,6 +594,12 @@ function Install-ProductionRuntime {
     if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
         throw "Cannot resolve the verified development revision."
     }
+    & git -C $source fetch origin main --quiet 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "Cannot verify the initial origin/main checkpoint." }
+    $baseMainRevision = (& git -C $source rev-parse origin/main 2>$null).Trim()
+    if ($LASTEXITCODE -ne 0 -or $baseMainRevision -notmatch '^[0-9a-f]{40}$') {
+        throw "Cannot resolve the initial origin/main checkpoint."
+    }
     if (Test-Path -LiteralPath $runtime) {
         $inside = (& git -C $runtime rev-parse --is-inside-work-tree 2>$null).Trim()
         if ($LASTEXITCODE -ne 0 -or $inside -ne "true") {
@@ -591,6 +616,11 @@ function Install-ProductionRuntime {
     New-Item -ItemType Directory -Path $sourceLocal -Force | Out-Null
     if (-not (Test-Path -LiteralPath $runtimeLocal)) {
         New-Item -ItemType Junction -Path $runtimeLocal -Target $sourceLocal | Out-Null
+    }
+    Write-RuntimeUpdateState @{
+        accepted_main_revision = $baseMainRevision
+        bootstrap_revision = $revision
+        installed_at = [DateTimeOffset]::UtcNow.ToString("o")
     }
     $controlRoot = Join-Path $sourceLocal "runtime-control"
     New-Item -ItemType Directory -Path $controlRoot -Force | Out-Null
