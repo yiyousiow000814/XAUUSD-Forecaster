@@ -123,12 +123,17 @@ def _reliable_domain(host: str) -> str | None:
 
 
 def _source_organization(row: dict) -> str | None:
-    """Return the original reporting organization for independence checks."""
+    """Return the reporting identity without granting it reliability."""
     annotation = json.loads(row.get("annotation_json") or "{}")
     declared = canonical_source_organization(
         annotation.get("source_organization_id")
     )
-    return declared or canonical_source_organization(row.get("reliable_domain"))
+    publisher = canonical_source_organization(row.get("publisher_domain"))
+    direct_official = (
+        canonical_source_organization(row.get("source"))
+        if row.get("source") in BROAD_PRIMARY_SOURCES else None
+    )
+    return declared or publisher or direct_official
 
 
 def _topics(row: dict) -> tuple[str, ...]:
@@ -359,8 +364,9 @@ def event_evidence_rows_from_connection(
         ):
             continue
         row["reliable_domain"] = _reliable_domain(row["publisher_domain"])
+        row["source_identity_organization"] = _source_organization(row)
         row["source_organization"] = (
-            _source_organization(row) if row["reliable_domain"] else None
+            row["source_identity_organization"] if row["reliable_domain"] else None
         )
         row["topics"] = _topics(row)
         row["event_cluster_id"] = _event_key(
@@ -548,6 +554,10 @@ def event_evidence_rows_from_connection(
             "source_names": source_names,
             "publisher_domains": publisher_domains,
             "source_organizations": sorted(reliable_organizations),
+            "source_identity_organizations": sorted({
+                row["source_identity_organization"] for row in members
+                if row["source_identity_organization"]
+            }),
             "canonical_source": canonical["source"],
             "canonical_source_item_id": canonical["source_item_id"],
             "publisher_domain": canonical["publisher_domain"],

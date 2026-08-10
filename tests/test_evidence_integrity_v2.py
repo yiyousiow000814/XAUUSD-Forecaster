@@ -2033,6 +2033,22 @@ def test_canonical_occurrence_deduplicates_alias_keys_for_model(tmp_path) -> Non
     ledger.close()
 
 
+def test_source_identity_is_visible_without_granting_reliability(tmp_path) -> None:
+    epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
+    _append_news(
+        ledger, source="gdelt_gold_geopolitics", item="publisher identity",
+        link="https://news.example.test/item", first_seen=epoch,
+        parsed_at=epoch + timedelta(minutes=1), impulse=0.0,
+        primary_category="rates_fed", source_organization_id="Example Media",
+    )
+    event = event_evidence_rows(ledger, epoch + timedelta(minutes=10))[0]
+    assert event["source_identity_organizations"] == ["example_media"]
+    assert event["source_organizations"] == []
+    assert event["independent_publishers"] == 0
+    ledger.close()
+
+
 def test_reliable_media_publication_time_is_safe_event_clock_proxy(tmp_path) -> None:
     epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
