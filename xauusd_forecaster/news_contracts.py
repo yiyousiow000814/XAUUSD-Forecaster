@@ -20,8 +20,16 @@ SEMANTIC_IMPACT_V9 = NewsContract(
     policy_version="news-event-evidence-v9-canonical-occurrence",
 )
 
+SEMANTIC_IMPACT_V10 = NewsContract(
+    name="semantic-impact-v10",
+    feature_version="eligible-news-event-evidence-v12-fact-only",
+    eligibility_version="news-source-eligibility-v10-fact-only",
+    policy_version="news-event-evidence-v10-fact-only",
+)
+
 SUPPORTED_NEWS_CONTRACTS = (
     SEMANTIC_IMPACT_V9,
+    SEMANTIC_IMPACT_V10,
 )
 CURRENT_NEWS_CONTRACT = SUPPORTED_NEWS_CONTRACTS[-1]
 NEWS_CONTRACT_BY_ELIGIBILITY = {

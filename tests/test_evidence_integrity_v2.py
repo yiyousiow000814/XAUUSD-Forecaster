@@ -1235,7 +1235,13 @@ def test_news_models_train_early_with_explicit_experimental_status(
             for row in crossfit_rows[48:]
         ],
     )
-    monkeypatch.setattr(training_v2, "train_ridge", lambda *_: Artifact())
+    trained_targets: list[tuple[tuple[str, ...], list[float]]] = []
+
+    def capture_train(_matrix, targets, feature_names, *_args):
+        trained_targets.append((tuple(feature_names), list(targets)))
+        return Artifact()
+
+    monkeypatch.setattr(training_v2, "train_ridge", capture_train)
 
     result = training_v2.train_due_v2(
         ledger, datetime(2026, 8, 3, 12, tzinfo=UTC), tmp_path / "models"
@@ -1245,16 +1251,24 @@ def test_news_models_train_early_with_explicit_experimental_status(
     assert trained["FULL"]["news_evidence_status"] == expected_status
     assert trained["BROAD_NEWS_RESIDUAL"]["news_evidence_status"] == expected_status
     assert trained["BROAD_FULL"]["news_evidence_status"] == expected_status
+    assert trained["NEWS_ONLY"]["news_evidence_status"] == expected_status
     updates = {
         row["model_identity"]: row
         for row in ledger.connection.execute("SELECT * FROM model_updates_v2")
     }
     assert expected_status.lower().replace("_", "-") in updates["NEWS_RESIDUAL"]["model_version"]
     assert updates["NEWS_RESIDUAL"]["distinct_event_days"] == event_days
+    broad_targets = [
+        targets for features, targets in trained_targets
+        if features == tuple(training_v2.BROAD_MODEL_FEATURES)
+    ]
+    assert len(broad_targets) == 2
+    assert broad_targets[0][0] == pytest.approx(rows[48]["target"] - 0.01)
+    assert broad_targets[1][0] == pytest.approx(rows[48]["target"])
     ledger.close()
 
 
-def test_generation_activates_all_five_models_only_after_news_is_eligible(
+def test_generation_activates_all_six_models_only_after_news_is_eligible(
     tmp_path, monkeypatch
 ) -> None:
     first_seen = datetime(2026, 8, 1, 10, tzinfo=UTC)
@@ -1310,7 +1324,10 @@ def test_generation_activates_all_five_models_only_after_news_is_eligible(
     assert second_result[0]["status"] == "TRAINED"
     assert {
         row.get("model_identity") for row in second_result if row["status"] == "TRAINED"
-    } == {"MARKET_ONLY", "NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL"}
+    } == {
+        "MARKET_ONLY", "NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL",
+        "BROAD_FULL", "NEWS_ONLY",
+    }
     market_generations = ledger.connection.execute(
         "SELECT count(*) FROM model_updates_v2 WHERE model_identity='MARKET_ONLY'"
     ).fetchone()[0]
@@ -1388,12 +1405,19 @@ def test_only_latest_and_previous_versions_are_active() -> None:
                  f"+{inference_v2.EVIDENCE_POLICY_VERSION}"
              ),
              "eligibility_version": inference_v2.ELIGIBILITY_VERSION},
+            {"model_identity": "NEWS_ONLY", "model_version": f"news-only-{version}",
+             "feature_version": (
+                 f"{inference_v2.NEWS_FEATURE_VERSION}"
+                 f"+{inference_v2.EVIDENCE_POLICY_VERSION}"
+             ),
+             "eligibility_version": inference_v2.ELIGIBILITY_VERSION},
         ]
 
     updates = generation(3) + generation(2) + generation(1)
     active = inference_v2._active_updates(updates)
     assert [row["model_version"] for row in active] == [
         "market-3", "news-3", "full-3", "broad-news-3", "broad-full-3",
+        "news-only-3",
     ]
 
 
@@ -1579,7 +1603,7 @@ def test_contract_upgrade_bypasses_old_generation_retrain_clock(
     ledger.close()
 
 
-def test_news_generation_stays_inactive_until_all_four_models_exist() -> None:
+def test_news_generation_stays_inactive_until_all_five_news_models_exist() -> None:
     updates = [
         {"model_identity": "MARKET_ONLY", "model_version": "market-current"},
         {"model_identity": "NEWS_RESIDUAL", "model_version": "news-current",
@@ -1604,6 +1628,7 @@ def test_news_generation_stays_inactive_until_all_four_models_exist() -> None:
         "FULL": "GENERATION_WAIT",
         "BROAD_NEWS_RESIDUAL": "GENERATION_WAIT",
         "BROAD_FULL": "NOT_TRAINED",
+        "NEWS_ONLY": "NOT_TRAINED",
     }
 
 
@@ -1672,7 +1697,7 @@ def test_transition_set_requires_an_explicit_exact_contract() -> None:
     }
 
 
-def test_transition_contract_requires_exact_four_model_match() -> None:
+def test_transition_contract_keeps_exact_old_four_model_set_during_handover() -> None:
     contract = NewsContract(
         name="transition-test-contract",
         policy_version="transition-policy",
@@ -1708,8 +1733,16 @@ def test_transition_contract_requires_exact_four_model_match() -> None:
     statuses = inference_v2.news_model_activation_status(
         updates, allow_transition_contract=True, transition_contract=contract,
     )
-    assert {row["status"] for row in statuses} == {"TRANSITION_ACTIVE"}
-    assert all("整组切换" in row["reason"] for row in statuses)
+    by_identity = {row["model_identity"]: row for row in statuses}
+    assert {
+        row["status"] for identity, row in by_identity.items()
+        if identity != "NEWS_ONLY"
+    } == {"TRANSITION_ACTIVE"}
+    assert by_identity["NEWS_ONLY"]["status"] == "NOT_TRAINED"
+    assert all(
+        "整组切换" in row["reason"]
+        for identity, row in by_identity.items() if identity != "NEWS_ONLY"
+    )
 
     updates[-1]["feature_version"] = "corrupt-contract"
     blocked = inference_v2._active_updates(
@@ -1726,6 +1759,9 @@ def test_news_exposure_flag_prevents_residual_without_visible_event() -> None:
     ) is False
     assert inference_v2._news_snapshot_exposed(
         "BROAD_FULL", {"broad_news_exposed": 0}, features,
+    ) is False
+    assert inference_v2._news_snapshot_exposed(
+        "NEWS_ONLY", {"broad_news_exposed": 0}, features,
     ) is False
     assert inference_v2._news_snapshot_exposed("FULL", {}, features) is True
 
@@ -1972,6 +2008,72 @@ def test_commentary_and_low_materiality_are_not_training_evidence(tmp_path) -> N
     assert "RECORD_KIND_NOT_ACTIONABLE" in event["reason_codes"]
     assert "EVIDENCE_ROLE_NOT_ACTIONABLE" in event["reason_codes"]
     assert "LOW_MATERIALITY" in event["reason_codes"]
+    ledger.close()
+
+
+def test_diagnostic_residual_wait_keeps_ev_for_audit(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "guarded-wait.sqlite3")
+    now = datetime(2026, 8, 10, tzinfo=UTC)
+    calibration = {"version": "early", "rows": 30, "blocks": 1, "days": 1,
+                   "half_width": 0.2, "status": "EARLY"}
+    inference_v2._insert_prediction(
+        ledger, decision_id="guarded", decision_time=now, created_at=now,
+        model_version="full", model_identity="FULL", feature_hash="features",
+        predicted=0.3, news_residual=0.2, ev_long=0.25, ev_short=-0.35,
+        calibration=calibration, recommended="WAIT",
+        status="DIAGNOSTIC_RESIDUAL_ONLY", guarded_wait=True,
+    )
+
+    row = ledger.connection.execute(
+        "SELECT recommended_action,ev_long_u5,ev_short_u5,prediction_status "
+        "FROM predictions_v2"
+    ).fetchone()
+    assert row["recommended_action"] == "WAIT"
+    assert row["ev_long_u5"] == pytest.approx(0.25)
+    assert row["prediction_status"] == "DIAGNOSTIC_RESIDUAL_ONLY"
+    ledger.close()
+
+
+def test_shadow_composite_keeps_research_direction_visible(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "visible-direction.sqlite3")
+    now = datetime(2026, 8, 10, tzinfo=UTC)
+    calibration = {"version": "early", "rows": 30, "blocks": 1, "days": 1,
+                   "half_width": 0.2, "status": "EARLY"}
+    inference_v2._insert_prediction(
+        ledger, decision_id="visible", decision_time=now, created_at=now,
+        model_version="full", model_identity="FULL", feature_hash="features",
+        predicted=0.3, news_residual=0.2, ev_long=0.25, ev_short=-0.35,
+        calibration=calibration, recommended="LONG",
+        status="PROVISIONAL_POST_COST_EV",
+    )
+
+    row = ledger.connection.execute(
+        "SELECT recommended_action,effective_action,prediction_status "
+        "FROM predictions_v2"
+    ).fetchone()
+    assert row["recommended_action"] == "LONG"
+    assert row["effective_action"] == "WAIT"
+    assert row["prediction_status"] == "PROVISIONAL_POST_COST_EV"
+    assert not hasattr(inference_v2, "_news_reference_gate")
+    ledger.close()
+
+
+def test_market_wrap_is_display_only_even_when_llm_calls_it_fact(tmp_path) -> None:
+    epoch = datetime(2026, 8, 10, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward-market-wrap.sqlite3", now=epoch)
+    _append_news(
+        ledger, source="google_news_fed_rates",
+        item="Oil rises, Treasury yields open higher and US equity futures gain",
+        first_seen=epoch, parsed_at=epoch + timedelta(seconds=30), impulse=0.2,
+        link="https://finance.yahoo.com/example", primary_category="oil_energy",
+        record_kind="FACT_EVENT", materiality=0.8,
+    )
+
+    row = event_evidence_rows(ledger, epoch + timedelta(minutes=5))[0]
+
+    assert row["record_kind"] == "MARKET_REACTION"
+    assert row["broad_model_eligible"] is False
+    assert "RECORD_KIND_NOT_ACTIONABLE" in row["reason_codes"]
     ledger.close()
 
 

@@ -61,10 +61,12 @@ type GraphTab = "curve" | "versions" | "market" | "execution";
 const LABELS: Record<string, string> = {
   CHAMPION_0: "零收益基准", MARKET_ONLY: "黄金自身", NEWS_RESIDUAL: "官方新闻修正量",
   FULL: "黄金＋官方新闻", BROAD_NEWS_RESIDUAL: "大视野新闻修正量", BROAD_FULL: "黄金＋大视野新闻",
+  NEWS_ONLY: "纯新闻方向",
 };
 const COLORS: Record<string, string> = {
   MARKET_ONLY: "#8c5b16", NEWS_RESIDUAL: "#4169a1", FULL: "#476b19",
   BROAD_NEWS_RESIDUAL: "#7651a8", BROAD_FULL: "#c9362b", CHAMPION_0: "#777267",
+  NEWS_ONLY: "#d08a00",
 };
 const pct = (value: number) => `${value >= 0 ? "+" : "−"}${Math.abs(value * 100).toFixed(3)}%`;
 

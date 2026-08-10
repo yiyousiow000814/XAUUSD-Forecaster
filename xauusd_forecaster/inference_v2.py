@@ -28,9 +28,12 @@ MIN_CALIBRATION_BLOCKS = 20
 ACTIVE_VERSIONS_PER_IDENTITY = 1
 MODEL_IDENTITIES = frozenset({
     "MARKET_ONLY", "NEWS_RESIDUAL", "FULL",
-    "BROAD_NEWS_RESIDUAL", "BROAD_FULL",
+    "BROAD_NEWS_RESIDUAL", "BROAD_FULL", "NEWS_ONLY",
 })
 NEWS_MODEL_IDENTITIES = frozenset({
+    "NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL", "NEWS_ONLY",
+})
+TRANSITION_NEWS_MODEL_IDENTITIES = frozenset({
     "NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL",
 })
 
@@ -51,6 +54,11 @@ def _expected_news_contract(
     if identity == "BROAD_FULL":
         return (
             f"{FEATURE_VERSION}+{contract.feature_version}+{contract.policy_version}",
+            contract.eligibility_version,
+        )
+    if identity == "NEWS_ONLY":
+        return (
+            f"{contract.feature_version}+{contract.policy_version}",
             contract.eligibility_version,
         )
     return None
@@ -81,6 +89,11 @@ def _news_generation_ready(
     )
     if required_contract is None:
         return False
+    required_identities = (
+        NEWS_MODEL_IDENTITIES
+        if required_contract == CURRENT_NEWS_CONTRACT
+        else TRANSITION_NEWS_MODEL_IDENTITIES
+    )
     return all(
         identity in newest
         and (
@@ -99,7 +112,7 @@ def _news_generation_ready(
                 and Path(newest[identity]["artifact_path"]).exists()
             )
         )
-        for identity in NEWS_MODEL_IDENTITIES
+        for identity in required_identities
     )
 
 
@@ -116,7 +129,9 @@ def news_model_activation_status(
         newest, enforce_current_contract=False, news_contract=transition_contract,
     )
     result = []
-    for identity in ("NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL"):
+    for identity in (
+        "NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL", "NEWS_ONLY",
+    ):
         expected_feature, expected_eligibility = _expected_news_contract(identity)
         update = newest.get(identity)
         if update is None:
@@ -136,7 +151,7 @@ def news_model_activation_status(
             reason = "当前规则版本已激活" if artifact_valid else "当前模型文件不可用"
             if status == "ACTIVE" and not generation_ready:
                 status = "GENERATION_WAIT"
-                reason = "等待同一规则版本的四套新闻模型全部生成"
+                reason = "等待同一规则版本的五套新闻模型全部生成"
         result.append({
             "model_identity": identity,
             "status": status,
@@ -168,7 +183,7 @@ def _recommended_action(
 
 def _news_snapshot_exposed(identity: str, snapshot: dict, features: dict) -> bool:
     """Return whether the selected contract exposed live news to this model lane."""
-    broad = identity in {"BROAD_NEWS_RESIDUAL", "BROAD_FULL"}
+    broad = identity in {"BROAD_NEWS_RESIDUAL", "BROAD_FULL", "NEWS_ONLY"}
     key = "broad_news_exposed" if broad else "news_exposed"
     if key in snapshot:
         return bool(snapshot[key])
@@ -210,7 +225,7 @@ def _active_updates(
         if identity not in MODEL_IDENTITIES or counts[identity] >= ACTIVE_VERSIONS_PER_IDENTITY:
             continue
         if identity in NEWS_MODEL_IDENTITIES and not news_generation_ready:
-            # A rule generation is usable only after all four news identities
+            # A rule generation is usable only after all current news identities
             # have compatible artifacts.  This prevents a policy deployment
             # from exposing a partial or silently mixed model generation.
             continue
@@ -260,13 +275,18 @@ def _activated_generation_updates(ledger, decision_time: datetime):
         ).fetchone()
         if generation is not None:
             return ledger.connection.execute(
-                """SELECT u.* FROM news_model_generation_members_v1 m
-                JOIN model_updates_v2 u USING(model_version)
+                """SELECT u.* FROM (
+                    SELECT generation_id,model_version
+                    FROM news_model_generation_members_v1
+                    UNION ALL
+                    SELECT generation_id,model_version
+                    FROM news_model_generation_aux_members_v1
+                ) m JOIN model_updates_v2 u USING(model_version)
                 WHERE m.generation_id=?
                 ORDER BY CASE u.model_identity
                   WHEN 'MARKET_ONLY' THEN 1 WHEN 'NEWS_RESIDUAL' THEN 2
                   WHEN 'FULL' THEN 3 WHEN 'BROAD_NEWS_RESIDUAL' THEN 4
-                  WHEN 'BROAD_FULL' THEN 5 ELSE 99 END""",
+                  WHEN 'BROAD_FULL' THEN 5 WHEN 'NEWS_ONLY' THEN 6 ELSE 99 END""",
                 (generation["generation_id"],),
             ).fetchall()
     return []
@@ -349,12 +369,15 @@ def _insert_prediction(ledger, *, decision_id: str, decision_time: datetime,
                        feature_hash: str, predicted: float | None,
                        news_residual: float | None, ev_long: float | None,
                        ev_short: float | None, calibration: dict,
-                       recommended: str, status: str) -> None:
+                       recommended: str, status: str,
+                       guarded_wait: bool = False) -> None:
     width = calibration["half_width"]
     lcb_long = ev_long - width if width is not None and ev_long is not None else None
     lcb_short = ev_short - width if width is not None and ev_short is not None else None
     expected_action = _recommended_action(ev_long, ev_short, width)
-    if recommended != expected_action:
+    if recommended != expected_action and not (
+        guarded_wait and recommended == "WAIT"
+    ):
         raise ValueError(
             f"prediction action violates frozen post-cost EV policy: "
             f"recorded={recommended}, expected={expected_action}"
@@ -433,6 +456,14 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
             else:
                 news_residual = 0.0
             predicted = news_residual
+        elif identity == "NEWS_ONLY":
+            if news_exposed:
+                artifact = RidgeArtifact.read(update["artifact_path"])
+                predicted = float(artifact.predict(np.asarray([[
+                    float(news_features[name]) for name in artifact.feature_names
+                ]]))[0])
+            else:
+                predicted = None
         elif identity in {"FULL", "BROAD_FULL"}:
             manifest = json.loads(open(update["artifact_path"], encoding="utf-8").read())
             market_artifact = RidgeArtifact.read(manifest["market_artifact_path"])
@@ -455,11 +486,31 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
         quote_cost_estimate_u5 = (
             math.log(ask / bid) * 2.0 + ROUND_TRIP_COMMISSION_LOG_COST
         ) / u5
-        ev_long = predicted - quote_cost_estimate_u5
-        ev_short = -predicted - quote_cost_estimate_u5
-        recommended = _recommended_action(
+        ev_long = (
+            predicted - quote_cost_estimate_u5 if predicted is not None else None
+        )
+        ev_short = (
+            -predicted - quote_cost_estimate_u5 if predicted is not None else None
+        )
+        raw_recommended = _recommended_action(
             ev_long, ev_short, calibration["half_width"],
         )
+        recommended = raw_recommended
+        guarded_wait = False
+        prediction_status = (
+            "READY" if calibration["status"] == "CALIBRATED"
+            else "PROVISIONAL_POST_COST_EV"
+        )
+        if identity in {"NEWS_RESIDUAL", "BROAD_NEWS_RESIDUAL"}:
+            # A residual is a correction term, not a standalone price forecast.
+            recommended = "WAIT"
+            guarded_wait = True
+            prediction_status = "DIAGNOSTIC_RESIDUAL_ONLY"
+        elif identity == "NEWS_ONLY":
+            prediction_status = (
+                "RESEARCH_NEWS_ONLY" if news_exposed
+                else "NO_ELIGIBLE_NEWS"
+            )
         _insert_prediction(
             ledger, decision_id=decision_id, decision_time=decision_time, created_at=created_at,
             model_version=update["model_version"], model_identity=identity,
@@ -469,12 +520,12 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
             )),
             predicted=predicted, news_residual=news_residual,
             ev_long=ev_long, ev_short=ev_short, calibration=calibration,
-            recommended=recommended, status=(
-                "READY" if calibration["status"] == "CALIBRATED"
-                else "PROVISIONAL_POST_COST_EV"
-            ),
+            recommended=recommended, status=prediction_status,
+            guarded_wait=guarded_wait,
         )
         created.append({"model_identity": identity, "model_version": update["model_version"],
                         "eligibility_version": update_eligibility,
-                        "recommended_action": recommended, "calibration_status": calibration["status"]})
+                        "recommended_action": recommended,
+                        "raw_recommended_action": raw_recommended,
+                        "calibration_status": calibration["status"]})
     return created

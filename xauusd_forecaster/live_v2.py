@@ -46,6 +46,7 @@ def _append_news_visibility_receipts(
         "FULL": ("OFFICIAL", "official_visible_events"),
         "BROAD_NEWS_RESIDUAL": ("BROAD", "broad_visible_events"),
         "BROAD_FULL": ("BROAD", "broad_visible_events"),
+        "NEWS_ONLY": ("BROAD", "broad_visible_events"),
     }
     inserted = 0
     for prediction in predictions:
@@ -80,8 +81,13 @@ def _append_news_visibility_receipts(
                 "news-visibility",
                 f"{decision_id}:{prediction['model_version']}:{lane}:{event['event_key']}",
             )
+            receipt_table = (
+                "news_only_visibility_receipts_v1"
+                if prediction["model_identity"] == "NEWS_ONLY"
+                else "news_model_visibility_receipts_v1"
+            )
             cursor = connection.execute(
-                """INSERT OR IGNORE INTO news_model_visibility_receipts_v1
+                f"""INSERT OR IGNORE INTO {receipt_table}
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     receipt_id, decision_id, decision_time.isoformat(),

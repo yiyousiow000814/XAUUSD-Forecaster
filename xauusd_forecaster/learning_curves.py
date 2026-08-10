@@ -189,13 +189,26 @@ def learning_curve_payload(connection) -> dict:
         ORDER BY a.activated_at DESC,a.activation_id DESC LIMIT 1"""
     ).fetchone()
     active_generation = dict(active_generation_row) if active_generation_row else None
+    if active_generation is not None:
+        auxiliary_members = connection.execute(
+            "SELECT count(*) FROM news_model_generation_aux_members_v1 "
+            "WHERE generation_id=?",
+            (active_generation["generation_id"],),
+        ).fetchone()[0]
+        active_generation["member_count"] = (
+            int(active_generation["member_count"]) + int(auxiliary_members)
+        )
     active_contract = supported_generation_contract(active_generation)
     active_is_current = generation_matches_contract(
         active_generation, CURRENT_NEWS_CONTRACT,
     )
     active_updates = (
         connection.execute(
-            """SELECT u.* FROM news_model_generation_members_v1 m
+            """SELECT u.* FROM (
+                SELECT generation_id,model_version FROM news_model_generation_members_v1
+                UNION ALL
+                SELECT generation_id,model_version FROM news_model_generation_aux_members_v1
+            ) m
             JOIN model_updates_v2 u USING(model_version)
             WHERE m.generation_id=? ORDER BY u.model_identity""",
             (active_generation["generation_id"],),
@@ -263,13 +276,17 @@ def learning_curve_payload(connection) -> dict:
     generation_by_version = {
         row["model_version"]: row["generation_id"]
         for row in connection.execute(
-            "SELECT generation_id,model_version FROM news_model_generation_members_v1"
+            """SELECT generation_id,model_version FROM news_model_generation_members_v1
+            UNION ALL SELECT generation_id,model_version
+            FROM news_model_generation_aux_members_v1"""
         )
     }
     active_generation_versions = {
         row["model_version"] for row in connection.execute(
-            "SELECT model_version FROM news_model_generation_members_v1 WHERE generation_id=?",
-            (active_generation["generation_id"],),
+            """SELECT model_version FROM news_model_generation_members_v1
+            WHERE generation_id=? UNION ALL SELECT model_version
+            FROM news_model_generation_aux_members_v1 WHERE generation_id=?""",
+            (active_generation["generation_id"], active_generation["generation_id"]),
         )
     } if active_generation else set()
     weight_rows = connection.execute(
@@ -460,7 +477,7 @@ def learning_curve_payload(connection) -> dict:
     rolling_processes = []
     for identity in (
         "MARKET_ONLY", "NEWS_RESIDUAL", "FULL",
-        "BROAD_NEWS_RESIDUAL", "BROAD_FULL",
+        "BROAD_NEWS_RESIDUAL", "BROAD_FULL", "NEWS_ONLY",
     ):
         rows = connection.execute(
             """WITH ranked AS (
@@ -510,7 +527,7 @@ def learning_curve_payload(connection) -> dict:
     identity_curves = []
     for identity in (
         "CHAMPION_0", "MARKET_ONLY", "NEWS_RESIDUAL", "FULL",
-        "BROAD_NEWS_RESIDUAL", "BROAD_FULL",
+        "BROAD_NEWS_RESIDUAL", "BROAD_FULL", "NEWS_ONLY",
     ):
         if identity == "CHAMPION_0":
             rows = connection.execute(
