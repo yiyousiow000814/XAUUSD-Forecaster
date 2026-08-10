@@ -16,10 +16,11 @@ from .news_impact import (
     impact_is_actionable,
     impact_time_rule,
 )
+from .news_contracts import CURRENT_NEWS_CONTRACT
 from .news_time import NewsTimeAssessment, assess_news_time
 
 
-EVIDENCE_POLICY_VERSION = "news-event-evidence-v6-semantic-impact-lifetime"
+EVIDENCE_POLICY_VERSION = CURRENT_NEWS_CONTRACT.policy_version
 LEGACY_V3_EVIDENCE_POLICY_VERSION = "news-event-evidence-v2-economic-time"
 CURRENT_EVENT_PROMPT_VERSION = "news-json-v14-material-event-evidence"
 ACTIONABLE_RECORD_KINDS = frozenset({

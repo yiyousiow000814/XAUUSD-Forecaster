@@ -5,13 +5,15 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
+from .news_contracts import CURRENT_NEWS_CONTRACT
+
 
 UTC = timezone.utc
 EVIDENCE_CONTRACT_VERSION = "phase2f-evidence-integrity-v2"
 FEATURE_VERSION = "repaired-market-v2"
-NEWS_FEATURE_VERSION = "eligible-news-event-evidence-v8-quality-scaled-impact"
+NEWS_FEATURE_VERSION = CURRENT_NEWS_CONTRACT.feature_version
 LABEL_VERSION = "received-time-executable-30m-v2"
-ELIGIBILITY_VERSION = "news-source-eligibility-v7-semantic-impact-after-receipt"
+ELIGIBILITY_VERSION = CURRENT_NEWS_CONTRACT.eligibility_version
 
 V2_IMMUTABLE_TABLES = (
     "repair_batches",

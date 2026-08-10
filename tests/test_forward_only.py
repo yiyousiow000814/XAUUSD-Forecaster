@@ -53,7 +53,7 @@ from xauusd_forecaster.news import (
     parse_rss,
 )
 from xauusd_forecaster.news_relevance import google_news_item_is_relevant
-from xauusd_forecaster.ridge import train_ridge
+from xauusd_forecaster.ridge import RidgeArtifact, train_ridge
 from xauusd_forecaster.shadow_simulation import shadow_league
 from xauusd_forecaster.u5_state import U5State
 from xauusd_forecaster.training import (
@@ -326,6 +326,18 @@ def test_ridge_artifact_and_dataset_hash_are_deterministic() -> None:
     assert first.as_dict() == second.as_dict()
     assert first.artifact_hash == second.artifact_hash
     np.testing.assert_array_equal(first.predict(rows), second.predict(rows))
+
+
+def test_ridge_treats_near_zero_scale_as_constant_feature() -> None:
+    artifact = RidgeArtifact(
+        feature_names=("constant",), means=(0.95,), scales=(7e-17,),
+        coefficients=(0.04,), intercept=0.01, alpha=100.0,
+        training_dataset_hash="constant", residual_std=0.0, training_rows=30,
+    )
+
+    prediction = artifact.predict(np.asarray([[0.0]]))[0]
+
+    assert prediction == pytest.approx(-0.028)
 
 
 def test_ridge_sample_weight_limits_repeated_event_dominance() -> None:
@@ -752,6 +764,25 @@ def test_gdelt_429_uses_exponential_backoff_without_blocking_fallback(tmp_path) 
     assert recovered["status"] == "OK"
 
 
+def test_gdelt_rejects_noise_before_fetching_publisher_body(tmp_path) -> None:
+    fetched = datetime(2026, 8, 10, 6, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched - timedelta(days=1))
+    payload = json.dumps({"articles": [{
+        "url": "https://example.test/love-story",
+        "title": "A tragic love story remembered after many years",
+        "seendate": "20260810T054000Z",
+    }]}).encode()
+
+    result = collect_gdelt_news(
+        ledger, fetched, lambda _: payload,
+        content_extractor=lambda _: pytest.fail("noise must not fetch publisher body"),
+    )
+
+    assert result["status"] == "OK"
+    assert result["inserted_revisions"] == 0
+    assert result["rejected_reasons"] == {"TITLE_NOT_RELEVANT_TO_LANE": 1}
+
+
 def test_direct_official_rss_sources_are_bounded_and_rate_limited(tmp_path) -> None:
     fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
     ledger = ForwardLedger(
@@ -988,6 +1019,27 @@ def test_fed_rates_lane_rejects_retail_rate_noise() -> None:
             "google_news_fed_rates", headline, observed - timedelta(minutes=10), observed,
         )
         assert allowed
+
+
+def test_gdelt_lane_rejects_unrelated_and_local_retail_gold_noise() -> None:
+    observed = datetime(2026, 8, 10, 6, 0, tzinfo=UTC)
+    for headline in (
+        "A tragic love story remembered after many years",
+        "Cek Harga Emas Hari Ini Senin 10 Agustus 2026",
+        "Giá vàng chiều 5/8: Vàng SJC tiếp tục đi lên",
+    ):
+        allowed, _ = google_news_item_is_relevant(
+            "gdelt_gold_geopolitics", headline,
+            observed - timedelta(minutes=20), observed,
+        )
+        assert not allowed
+    allowed, reason = google_news_item_is_relevant(
+        "gdelt_gold_geopolitics",
+        "Gold rises as Treasury yields fall after US jobs report",
+        observed - timedelta(minutes=20), observed,
+    )
+    assert allowed
+    assert reason == "RELEVANT_DISCOVERY_ITEM"
 
 
 def test_google_news_lane_prefers_established_publisher_within_limit(tmp_path) -> None:
@@ -1508,6 +1560,22 @@ def test_gemini_named_month_translation_accepts_space_before_month() -> None:
     assert "相关数值" not in result["headline_zh"]
 
 
+def test_gemini_indonesian_named_month_does_not_become_unresolved_number() -> None:
+    result = {
+        "headline_zh": "查看今天2026年8月10日星期一的金价：Antam、Galeri 24和UBS",
+    }
+    source = (
+        "Cek Harga Emas Hari Ini Senin 10 Agustus 2026, "
+        "Antam, Galeri 24 dan UBS"
+    )
+
+    annotation_module._recover_display_fields(result, source, "")
+    annotation_module._require_title_numbers_preserved(result["headline_zh"], source)
+
+    assert "2026年八月10日" in result["headline_zh"]
+    assert "相关数值" not in result["headline_zh"]
+
+
 def test_display_number_recovery_does_not_merge_date_comma_with_year() -> None:
     result = {"headline_zh": "财政部委员会2026年8月4日会议纪要"}
     source = "Treasury committee minutes August 4, 2026"
@@ -1565,6 +1633,21 @@ def test_invalid_language_fallback_is_neutral_and_auditable() -> None:
     assert result["confidence"] == 0.0
     assert result["geopolitical_risk"] == 0.0
     assert "用于审计" in result["summary_zh"]
+
+
+def test_invalid_summary_does_not_erase_a_valid_chinese_headline() -> None:
+    result = {
+        "headline_zh": "美联储就利率政策发布更新",
+        "summary_zh": "This summary was not translated.",
+        "hawkishness": 0.8, "inflation_impulse": 0.7,
+        "growth_impulse": 0.0, "geopolitical_risk": 0.0,
+        "usd_impulse": 0.4, "novelty": 0.8, "confidence": 0.9,
+    }
+
+    annotation_module._neutralize_unvalidated_language(result)
+
+    assert result["headline_zh"] == "美联储就利率政策发布更新"
+    assert result["confidence"] == 0.0
 
 
 def test_annotation_appends_neutral_record_when_translation_repair_is_unavailable(

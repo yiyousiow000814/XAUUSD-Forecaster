@@ -99,7 +99,14 @@ function previewHistory(request: Request) {
   }
   const seconds = RANGE_SECONDS[range] ?? RANGE_SECONDS["24"];
   const suppliedEnd = asEpoch(url.searchParams.get("before"));
-  const end = suppliedEnd ?? (detail.length ? Math.floor(Date.parse(detail.at(-1)!.time) / 1_000) + 300 : 0);
+  let end = suppliedEnd ?? (detail.length ? Math.floor(Date.parse(detail.at(-1)!.time) / 1_000) + 300 : 0);
+  if (suppliedEnd && !detail.some(row => {
+    const epoch = Date.parse(row.time) / 1_000;
+    return epoch >= suppliedEnd - seconds && epoch < suppliedEnd;
+  })) {
+    const previous = detail.findLast(row => Date.parse(row.time) / 1_000 < suppliedEnd);
+    if (previous) end = Math.floor(Date.parse(previous.time) / 1_000) + 300;
+  }
   const start = end - seconds;
   const candles = detail.filter(row => {
     const epoch = Date.parse(row.time) / 1_000;
@@ -128,6 +135,14 @@ async function historyMeta(binding: D1Database): Promise<HistoryMeta | null> {
     `SELECT count(*) count, min(time_epoch) start_epoch, max(time_epoch) end_epoch
      FROM market_candles`,
   ).first<HistoryMeta>();
+}
+
+async function previousCandleEnd(binding: D1Database, before: number) {
+  const previous = await binding.prepare(
+    `SELECT time_epoch FROM market_candles
+     WHERE time_epoch<? ORDER BY time_epoch DESC LIMIT 1`,
+  ).bind(before).first<{ time_epoch: number }>();
+  return previous ? Number(previous.time_epoch) + 300 : before;
 }
 
 async function ensureMarketSchema(binding: D1Database) {
@@ -232,15 +247,28 @@ export async function GET(request: Request) {
     }
     const seconds = RANGE_SECONDS[range];
     const requestedEnd = asEpoch(url.searchParams.get("before"));
-    const end = Math.min(requestedEnd ?? meta.end_epoch + 300, meta.end_epoch + 300);
-    const start = end - seconds;
-    const candlesResult = await binding.prepare(
+    let end = Math.min(requestedEnd ?? meta.end_epoch + 300, meta.end_epoch + 300);
+    let start = end - seconds;
+    let candlesResult = await binding.prepare(
       `SELECT time,open_milli,high_milli,low_milli,close_milli,ticks
        FROM market_candles WHERE time_epoch>=? AND time_epoch<? ORDER BY time_epoch`,
     ).bind(start, end).all<{
       time: string; open_milli: number; high_milli: number; low_milli: number;
       close_milli: number; ticks: number;
     }>();
+    // A fixed wall-clock step can land wholly inside a weekend closure. Skip
+    // that empty interval and return the nearest earlier trading window.
+    if (requestedEnd && candlesResult.results.length === 0) {
+      end = await previousCandleEnd(binding, requestedEnd);
+      start = end - seconds;
+      candlesResult = await binding.prepare(
+        `SELECT time,open_milli,high_milli,low_milli,close_milli,ticks
+         FROM market_candles WHERE time_epoch>=? AND time_epoch<? ORDER BY time_epoch`,
+      ).bind(start, end).all<{
+        time: string; open_milli: number; high_milli: number; low_milli: number;
+        close_milli: number; ticks: number;
+      }>();
+    }
     const decisionSql = `SELECT payload FROM market_decisions
       WHERE model_identity=? AND decision_epoch>=? AND decision_epoch<?
       ${frequency === "30m" ? "AND decision_epoch % 1800 = 0" : ""}

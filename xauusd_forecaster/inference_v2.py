@@ -13,6 +13,12 @@ import numpy as np
 from .evidence_v2 import ELIGIBILITY_VERSION, FEATURE_VERSION, NEWS_FEATURE_VERSION
 from .execution_costs import ROUND_TRIP_COMMISSION_LOG_COST
 from .forward_ledger import canonical_hash
+from .news_contracts import (
+    CURRENT_NEWS_CONTRACT,
+    NewsContract,
+    generation_matches_contract,
+    supported_generation_contract,
+)
 from .news_evidence import EVIDENCE_POLICY_VERSION
 from .ridge import RidgeArtifact
 from .training import MARKET_FEATURES
@@ -33,23 +39,27 @@ def _row_value(row, key: str, default=None):
     return row[key] if key in row.keys() else default
 
 
-def _expected_news_contract(identity: str) -> tuple[str, str] | None:
+def _expected_news_contract(
+    identity: str, contract: NewsContract = CURRENT_NEWS_CONTRACT,
+) -> tuple[str, str] | None:
     if identity == "NEWS_RESIDUAL":
-        return NEWS_FEATURE_VERSION, ELIGIBILITY_VERSION
+        return contract.feature_version, contract.eligibility_version
     if identity == "FULL":
-        return f"{FEATURE_VERSION}+{NEWS_FEATURE_VERSION}", ELIGIBILITY_VERSION
+        return f"{FEATURE_VERSION}+{contract.feature_version}", contract.eligibility_version
     if identity == "BROAD_NEWS_RESIDUAL":
-        return NEWS_FEATURE_VERSION, ELIGIBILITY_VERSION
+        return contract.feature_version, contract.eligibility_version
     if identity == "BROAD_FULL":
         return (
-            f"{FEATURE_VERSION}+{NEWS_FEATURE_VERSION}+{EVIDENCE_POLICY_VERSION}",
-            ELIGIBILITY_VERSION,
+            f"{FEATURE_VERSION}+{contract.feature_version}+{contract.policy_version}",
+            contract.eligibility_version,
         )
     return None
 
 
-def _news_contract_matches(update) -> bool:
-    expected = _expected_news_contract(update["model_identity"])
+def _news_contract_matches(
+    update, contract: NewsContract = CURRENT_NEWS_CONTRACT,
+) -> bool:
+    expected = _expected_news_contract(update["model_identity"], contract)
     if expected is None:
         return True
     return (
@@ -61,11 +71,22 @@ def _news_contract_matches(update) -> bool:
 def _news_generation_ready(
     newest: dict, available_news_eligibilities: set[str] | None = None,
     *, enforce_current_contract: bool = True,
+    news_contract: NewsContract | None = None,
 ) -> bool:
     """Require one complete, runnable generation for every news identity."""
+    required_contract = (
+        news_contract if news_contract is not None
+        else CURRENT_NEWS_CONTRACT if enforce_current_contract
+        else None
+    )
+    if required_contract is None:
+        return False
     return all(
         identity in newest
-        and (not enforce_current_contract or _news_contract_matches(newest[identity]))
+        and (
+            required_contract is None
+            or _news_contract_matches(newest[identity], required_contract)
+        )
         and (
             available_news_eligibilities is None
             or _row_value(newest[identity], "eligibility_version")
@@ -82,14 +103,17 @@ def _news_generation_ready(
     )
 
 
-def news_model_activation_status(updates, *, allow_legacy_contract: bool = False) -> list[dict]:
+def news_model_activation_status(
+    updates, *, allow_transition_contract: bool = False,
+    transition_contract: NewsContract | None = None,
+) -> list[dict]:
     """Explain whether each news identity has a current-policy runnable artifact."""
     newest = {}
     for update in updates:
         newest.setdefault(update["model_identity"], update)
     generation_ready = _news_generation_ready(newest)
-    legacy_generation_ready = allow_legacy_contract and _news_generation_ready(
-        newest, enforce_current_contract=False,
+    transition_generation_ready = allow_transition_contract and _news_generation_ready(
+        newest, enforce_current_contract=False, news_contract=transition_contract,
     )
     result = []
     for identity in ("NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL"):
@@ -97,9 +121,9 @@ def news_model_activation_status(updates, *, allow_legacy_contract: bool = False
         update = newest.get(identity)
         if update is None:
             status, reason = "NOT_TRAINED", "尚未训练当前新闻模型"
-        elif not _news_contract_matches(update) and legacy_generation_ready:
-            status = "LEGACY_ACTIVE"
-            reason = "当前 generation 持续预测，等待完整新 generation 原子替换"
+        elif not _news_contract_matches(update) and transition_generation_ready:
+            status = "TRANSITION_ACTIVE"
+            reason = "当前整组模型继续预测，等待新版全部准备好后整组切换"
         elif not _news_contract_matches(update):
             status, reason = "POLICY_MISMATCH", "最新版不符合当前新闻规则"
         else:
@@ -142,9 +166,20 @@ def _recommended_action(
     return "WAIT"
 
 
+def _news_snapshot_exposed(identity: str, snapshot: dict, features: dict) -> bool:
+    """Return whether the selected contract exposed live news to this model lane."""
+    broad = identity in {"BROAD_NEWS_RESIDUAL", "BROAD_FULL"}
+    key = "broad_news_exposed" if broad else "news_exposed"
+    if key in snapshot:
+        return bool(snapshot[key])
+    count_key = "broad_news_event_count" if broad else "news_event_count"
+    return float(features.get(count_key) or 0.0) > 0.0
+
+
 def _active_updates(
     updates, available_news_eligibilities: set[str] | None = None,
     *, enforce_current_contract: bool = True,
+    news_contract: NewsContract | None = None,
 ) -> list:
     """Select models, activating news only as one complete policy generation."""
     if available_news_eligibilities is None:
@@ -158,6 +193,12 @@ def _active_updates(
     news_generation_ready = _news_generation_ready(
         newest_by_identity, available_news_eligibilities,
         enforce_current_contract=enforce_current_contract,
+        news_contract=news_contract,
+    )
+    required_contract = (
+        news_contract if news_contract is not None
+        else CURRENT_NEWS_CONTRACT if enforce_current_contract
+        else None
     )
 
     counts: dict[str, int] = defaultdict(int)
@@ -178,7 +219,10 @@ def _active_updates(
         if identity in NEWS_MODEL_IDENTITIES:
             eligibility = _row_value(update, "eligibility_version")
             compatible = (
-                (not enforce_current_contract or _news_contract_matches(update))
+                (
+                    required_contract is None
+                    or _news_contract_matches(update, required_contract)
+                )
                 and eligibility in available_news_eligibilities
             )
             if identity not in newest_seen and not compatible:
@@ -203,7 +247,7 @@ def _active_updates(
 
 
 def _activated_generation_updates(ledger, decision_time: datetime):
-    """Return exactly one complete generation, or legacy rows before migration."""
+    """Return exactly one explicitly activated complete generation."""
     table = ledger.connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' "
         "AND name='news_model_generation_activations_v1'"
@@ -225,11 +269,7 @@ def _activated_generation_updates(ledger, decision_time: datetime):
                   WHEN 'BROAD_FULL' THEN 5 ELSE 99 END""",
                 (generation["generation_id"],),
             ).fetchall()
-    return ledger.connection.execute(
-        """SELECT * FROM model_updates_v2
-        WHERE created_at < ? ORDER BY created_at DESC""",
-        (decision_time.isoformat(),),
-    ).fetchall()
+    return []
 
 
 def _has_activated_generation(ledger, decision_time: datetime) -> bool:
@@ -238,6 +278,29 @@ def _has_activated_generation(ledger, decision_time: datetime) -> bool:
         WHERE activated_at<? LIMIT 1""",
         (decision_time.isoformat(),),
     ).fetchone() is not None
+
+
+def _activated_generation(ledger, decision_time: datetime):
+    """Return the generation contract that governed this decision time."""
+    return ledger.connection.execute(
+        """SELECT g.* FROM news_model_generation_activations_v1 a
+        JOIN news_model_generations_v1 g USING(generation_id)
+        WHERE a.activated_at<?
+        ORDER BY a.activated_at DESC,a.activation_id DESC LIMIT 1""",
+        (decision_time.isoformat(),),
+    ).fetchone()
+
+
+def _allow_activated_transition_contract(ledger, decision_time: datetime) -> bool:
+    """Keep a supported active generation alive until its atomic replacement."""
+    generation = _activated_generation(ledger, decision_time)
+    if generation is None:
+        return False
+    contract = supported_generation_contract(generation)
+    return (
+        contract is not None
+        and not generation_matches_contract(generation, CURRENT_NEWS_CONTRACT)
+    )
 
 
 def _calibration(ledger, model_identity: str, decision_time: datetime) -> dict:
@@ -324,7 +387,11 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
     )
     created.append({"model_identity": "CHAMPION_0", "model_version": "always-wait-v1"})
 
-    explicit_generation = _has_activated_generation(ledger, decision_time)
+    active_generation = _activated_generation(ledger, decision_time)
+    active_contract = supported_generation_contract(active_generation)
+    allow_transition_contract = _allow_activated_transition_contract(
+        ledger, decision_time,
+    )
     updates = _activated_generation_updates(ledger, decision_time)
     features = json.loads(market_snapshot["features_json"])
     snapshots = dict(news_snapshots or {})
@@ -332,12 +399,16 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
     snapshots.setdefault(f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}", news_snapshot)
     values = [features.get(name) for name in MARKET_FEATURES]
     for update in _active_updates(
-        updates, set(snapshots), enforce_current_contract=explicit_generation,
+        updates, set(snapshots), enforce_current_contract=not allow_transition_contract,
+        news_contract=active_contract if allow_transition_contract else None,
     ):
         identity = update["model_identity"]
         update_eligibility = update["eligibility_version"]
         selected_news_snapshot = snapshots.get(update_eligibility, news_snapshot)
         news_features = json.loads(selected_news_snapshot["features_json"])
+        news_exposed = _news_snapshot_exposed(
+            identity, selected_news_snapshot, news_features,
+        )
         calibration = _calibration(ledger, identity, decision_time)
         if market_snapshot["data_health"] != "OK" or market_snapshot["u5"] is None \
                 or any(value is None for value in values):
@@ -354,21 +425,27 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
             artifact = RidgeArtifact.read(update["artifact_path"])
             predicted = float(artifact.predict(np.asarray([[float(v) for v in values]]))[0])
         elif identity in {"NEWS_RESIDUAL", "BROAD_NEWS_RESIDUAL"}:
-            artifact = RidgeArtifact.read(update["artifact_path"])
-            news_residual = float(artifact.predict(np.asarray([
-                [float(news_features[name]) for name in artifact.feature_names]
-            ]))[0])
+            if news_exposed:
+                artifact = RidgeArtifact.read(update["artifact_path"])
+                news_residual = float(artifact.predict(np.asarray([
+                    [float(news_features[name]) for name in artifact.feature_names]
+                ]))[0])
+            else:
+                news_residual = 0.0
             predicted = news_residual
         elif identity in {"FULL", "BROAD_FULL"}:
             manifest = json.loads(open(update["artifact_path"], encoding="utf-8").read())
             market_artifact = RidgeArtifact.read(manifest["market_artifact_path"])
-            news_artifact = RidgeArtifact.read(manifest["news_artifact_path"])
             market_prediction = float(market_artifact.predict(
                 np.asarray([[float(v) for v in values]])
             )[0])
-            news_residual = float(news_artifact.predict(np.asarray([
-                [float(news_features[name]) for name in news_artifact.feature_names]
-            ]))[0])
+            if news_exposed:
+                news_artifact = RidgeArtifact.read(manifest["news_artifact_path"])
+                news_residual = float(news_artifact.predict(np.asarray([
+                    [float(news_features[name]) for name in news_artifact.feature_names]
+                ]))[0])
+            else:
+                news_residual = 0.0
             predicted = market_prediction + news_residual
         else:
             continue

@@ -31,6 +31,20 @@ _HIGH_QUALITY_PUBLISHERS = (
     "financial times", "wall street journal", "bureau of labor statistics",
     "federal reserve", "u.s. department of labor", "world gold council",
 )
+_GDELT_GOLD_TERMS = (
+    "gold", "bullion", "xau", "emas", "altın", "oro", "vàng", "黄金", "金价",
+)
+_GDELT_STRONG_CONTEXT = (
+    "fed", "fomc", "treasury", "yield", "inflation", "payroll", "jobs",
+    "dollar", "central bank", "reserve", "war", "conflict", "sanction",
+    "iran", "ukraine", "hormuz", "oil", "美联储", "收益率", "通胀",
+    "就业", "美元", "央行", "战争", "制裁", "油价",
+)
+_GDELT_RETAIL_PRICE_PATTERNS = (
+    "gold price today", "harga emas hari ini", "giá vàng hôm nay",
+    "giá vàng ngày", "giá vàng chiều",
+    "cek harga emas", "precio del oro hoy",
+)
 
 _TERMS = {
     "google_news_gold_context": (
@@ -75,6 +89,15 @@ def google_news_item_is_relevant(
     observed_at: datetime,
 ) -> tuple[bool, str]:
     """Return whether a Google search item may enter expensive processing."""
+    text = " " + re.sub(r"\s+", " ", (headline or "").casefold()).strip() + " "
+    if source == "gdelt_gold_geopolitics":
+        has_gold = any(term in text for term in _GDELT_GOLD_TERMS)
+        has_context = any(term in text for term in _GDELT_STRONG_CONTEXT)
+        if any(term in text for term in _GDELT_RETAIL_PRICE_PATTERNS) and not has_context:
+            return False, "LOCAL_RETAIL_GOLD_QUOTE"
+        if not has_gold and not has_context:
+            return False, "TITLE_NOT_RELEVANT_TO_LANE"
+        return True, "RELEVANT_DISCOVERY_ITEM"
     if source not in _TERMS:
         return True, "NOT_GOOGLE_LANE"
     if published_at is None:
@@ -85,7 +108,6 @@ def google_news_item_is_relevant(
         return False, "FUTURE_PUBLISHED_TIME"
     if observed - published > GOOGLE_NEWS_MAX_AGE:
         return False, "SEARCH_RESULT_TOO_OLD"
-    text = " " + re.sub(r"\s+", " ", (headline or "").casefold()).strip() + " "
     if source == "google_news_fed_rates":
         anchored = any(term in text for term in _FED_POLICY_ANCHORS)
         contextual_rate = (

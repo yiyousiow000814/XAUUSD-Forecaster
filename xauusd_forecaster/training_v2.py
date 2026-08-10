@@ -15,6 +15,7 @@ from .evidence_v2 import (
 )
 from .factors import NEWS_FEATURES
 from .forward_ledger import canonical_hash
+from .news_contracts import CURRENT_NEWS_CONTRACT, generation_matches_contract
 from .news_evidence import BROAD_NEWS_FEATURES, EVIDENCE_POLICY_VERSION
 from .news_features_v2 import aggregate_news_features_v2
 from .ridge import RidgeArtifact, train_ridge
@@ -284,7 +285,14 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
     evidence_status = news_evidence_status(official_days, official_events)
     broad_evidence_status = news_evidence_status(broad_days, broad_events)
     latest = _latest_generation(ledger.connection, stage)
-    if latest is not None and len(training_rows) < int(latest["training_rows"]) + RETRAIN_INTERVAL:
+    latest_uses_current_contract = generation_matches_contract(
+        latest, CURRENT_NEWS_CONTRACT,
+    )
+    if (
+        latest is not None
+        and latest_uses_current_contract
+        and len(training_rows) < int(latest["training_rows"]) + RETRAIN_INTERVAL
+    ):
         return [{"status": "NOT_DUE", "complete_rows": count,
                  "generation_id": latest["generation_id"],
                  "next_threshold": int(latest["training_rows"]) + RETRAIN_INTERVAL}]
@@ -298,6 +306,12 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
             "broad_events": broad_events,
             "official_evidence_status": evidence_status,
             "broad_evidence_status": broad_evidence_status,
+            "active_generation_id": latest["generation_id"] if latest else None,
+            "active_contract_current": latest_uses_current_contract,
+            "target_feature_version": NEWS_FEATURE_VERSION,
+            "target_eligibility_version": ELIGIBILITY_VERSION,
+            "target_policy_version": EVIDENCE_POLICY_VERSION,
+            "minimum_exposed_rows": NEWS_MIN_EXPOSED_ROWS,
         }]
     now = datetime.now(UTC)
     root = Path(artifact_root).resolve()

@@ -48,7 +48,7 @@ COMPATIBLE_PROMPT_VERSIONS = (
     "news-json-v11-gemini-story-subjects",
     "news-json-v10-controlled-category-zh",
 )
-TITLE_PROMPT_VERSION = "headline-zh-v6-exact-number-preservation"
+TITLE_PROMPT_VERSION = "headline-zh-v7-multilingual-month-preservation"
 INVALID_CHINESE_TITLE = "来源新闻（中文标题待校验）"
 TITLE_TRANSLATION_MODELS = (
     DEFAULT_GEMMA_MODEL, DEFAULT_GEMINI_MODEL, FALLBACK_GEMINI_MODEL,
@@ -1179,7 +1179,15 @@ def _recover_display_fields(result: dict, headline: str, body: str) -> None:
 
 def _neutralize_unvalidated_language(result: dict) -> None:
     """Keep the receipt while preventing an unreliable translation from voting."""
-    result["headline_zh"] = "来源新闻（中文标题待校验）"
+    # Validation is field-specific. A bad summary must not erase a headline
+    # that is already valid Simplified Chinese; the display translator can
+    # repair only the fields that actually failed.
+    try:
+        _require_simplified_chinese(
+            result.get("headline_zh"), "headline_zh", 2, 4.0, 60
+        )
+    except ValueError:
+        result["headline_zh"] = INVALID_CHINESE_TITLE
     result["summary_zh"] = (
         "来源正文已完整保存，但自动中文摘要未通过语言一致性检查。"
         "本条记录保留用于审计，结构化方向影响已设为中性。"
@@ -1206,12 +1214,18 @@ def _neutralize_unvalidated_language(result: dict) -> None:
 
 def _normalize_translated_named_months(result: dict, source: str) -> None:
     aliases = {
-        1: ("january", "jan", "ocak"), 2: ("february", "feb", "şubat"),
-        3: ("march", "mar", "mart"), 4: ("april", "apr", "nisan"),
-        5: ("may", "mayıs"), 6: ("june", "jun", "haziran"),
-        7: ("july", "jul", "temmuz"), 8: ("august", "aug", "ağustos"),
-        9: ("september", "sep", "eylül"), 10: ("october", "oct", "ekim"),
-        11: ("november", "nov", "kasım"), 12: ("december", "dec", "aralık"),
+        1: ("january", "jan", "ocak", "januari", "enero", "janvier"),
+        2: ("february", "feb", "şubat", "februari", "febrero", "février"),
+        3: ("march", "mar", "mart", "maret", "marzo", "mars"),
+        4: ("april", "apr", "nisan", "abril", "avril"),
+        5: ("may", "mayıs", "mei", "mayo", "mai"),
+        6: ("june", "jun", "haziran", "juni", "junio", "juin"),
+        7: ("july", "jul", "temmuz", "juli", "julio", "juillet"),
+        8: ("august", "aug", "ağustos", "agustus", "agosto", "août"),
+        9: ("september", "sep", "eylül", "septiembre", "septembre"),
+        10: ("october", "oct", "ekim", "oktober", "octubre", "octobre"),
+        11: ("november", "nov", "kasım", "noviembre", "novembre"),
+        12: ("december", "dec", "aralık", "desember", "diciembre", "décembre"),
     }
     chinese = {
         1: "一", 2: "二", 3: "三", 4: "四", 5: "五", 6: "六",

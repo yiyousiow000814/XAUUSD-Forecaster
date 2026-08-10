@@ -482,4 +482,14 @@ test("loads market history by bounded range instead of one growing snapshot", ()
   assert.match(modal, /cancelled = true; controller\.abort\(\)/);
   assert.match(modal, /!detailCandles\.length && !canGoLater/);
   assert.match(modal, /onClick=\{goLater\}>→ 返回较新行情/);
+  assert.match(route, /previousCandleEnd/);
+  assert.match(modal, /Plot trading time, not wall-clock time/);
+  assert.doesNotMatch(modal, /休市 \$\{Math\.max/);
+});
+
+test("explains training rows separately from independent news events", () => {
+  const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  assert.match(source, /news_evidence_summary\?\.current_contract_exposed_rows/);
+  assert.match(source, /news_evidence_summary\?\.current_contract_distinct_events/);
+  assert.match(source, /不是训练还缺的数量/);
 });

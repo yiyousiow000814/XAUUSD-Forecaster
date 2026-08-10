@@ -543,6 +543,12 @@ def collect_gdelt_news(
             if not eligible:
                 rejected[reason] = rejected.get(reason, 0) + 1
                 continue
+            relevant, reason = google_news_item_is_relevant(
+                GDELT_SOURCE, headline, published, fetched_at,
+            )
+            if not relevant:
+                rejected[reason] = rejected.get(reason, 0) + 1
+                continue
             created, reason = _append_after_full_text(ledger, record, content_extractor)
             inserted += int(created)
             unchanged += int(reason == "UNCHANGED_FULL_TEXT")
