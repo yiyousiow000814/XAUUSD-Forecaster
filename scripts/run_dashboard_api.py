@@ -1667,6 +1667,19 @@ def _dashboard_payload(database: Path) -> dict:
             "model_seen_events": sum(int(row["model_seen"]) for row in news_evidence),
             "model_unseen_events": sum(int(not row["model_seen"]) for row in news_evidence),
             "frozen_model_uses": sum(int(row["frozen_model_uses"]) for row in news_evidence),
+            # Reuse the learning contract's sole row/event calculation. These
+            # compact fields survive the PR preview bundle even when the heavy
+            # learning-curve payload is intentionally removed.
+            "current_contract_exposed_rows": int(
+                learning.get("news_contract_transition", {}).get(
+                    "current_contract_exposed_rows", 0
+                )
+            ),
+            "current_contract_distinct_events": int(
+                learning.get("news_contract_transition", {}).get(
+                    "current_contract_distinct_events", 0
+                )
+            ),
             "grades": dict(evidence_grades),
             "topics": dict(evidence_topics),
         },

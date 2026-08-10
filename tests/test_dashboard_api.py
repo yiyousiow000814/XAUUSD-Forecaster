@@ -148,6 +148,9 @@ def test_dashboard_annotation_counts_match_current_worker_policy(tmp_path) -> No
 
     assert payload["annotation_queue"]["ready"] == 1
     assert payload["annotation_queue"]["queued"] == 1
+    transition = payload["learning_curves"]["news_contract_transition"]
+    assert payload["news_evidence_summary"]["current_contract_exposed_rows"] == transition["current_contract_exposed_rows"]
+    assert payload["news_evidence_summary"]["current_contract_distinct_events"] == transition["current_contract_distinct_events"]
 
 
 def test_health_endpoint_does_not_build_dashboard(monkeypatch, tmp_path) -> None:

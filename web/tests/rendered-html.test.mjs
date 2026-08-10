@@ -489,7 +489,7 @@ test("loads market history by bounded range instead of one growing snapshot", ()
 
 test("explains training rows separately from independent news events", () => {
   const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
-  assert.match(source, /news_contract_transition\?\.current_contract_exposed_rows/);
-  assert.match(source, /news_contract_transition\?\.current_contract_distinct_events/);
+  assert.match(source, /news_evidence_summary\?\.current_contract_exposed_rows/);
+  assert.match(source, /news_evidence_summary\?\.current_contract_distinct_events/);
   assert.match(source, /不是训练还缺的数量/);
 });

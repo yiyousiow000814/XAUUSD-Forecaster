@@ -230,6 +230,8 @@ type Payload = {
     broad_model_eligible: number;
     model_seen_events: number;
     model_unseen_events: number;
+    current_contract_exposed_rows: number;
+    current_contract_distinct_events: number;
     frozen_model_uses: number;
     grades: Record<string, number>;
     topics: Record<string, number>;
@@ -851,7 +853,7 @@ export default function AuditView() {
           <article><span>从未进入预测的事件</span><strong>{payload?.news_evidence_summary?.model_unseen_events ?? 0}</strong><small>可在下方逐条查看没有使用的原因</small></article>
           <article><span>现在仍可用于预测</span><strong>{payload?.news_evidence_summary?.broad_model_eligible ?? 0}</strong><small>等待下一次预测读取；不代表历史上用过</small></article>
         </div>
-        <p className="evidence-count-note"><b>{payload?.learning_curves?.news_contract_transition?.current_contract_exposed_rows ?? 0} 条训练记录</b> 来自 <b>{payload?.learning_curves?.news_contract_transition?.current_contract_distinct_events ?? 0} 个当前合格事件</b>；下方的“未用过”是其他独立事件，不是训练还缺的数量。</p>
+        <p className="evidence-count-note"><b>{payload?.news_evidence_summary?.current_contract_exposed_rows ?? 0} 条训练记录</b> 来自 <b>{payload?.news_evidence_summary?.current_contract_distinct_events ?? 0} 个当前合格事件</b>；下方的“未用过”是其他独立事件，不是训练还缺的数量。</p>
         <nav className="evidence-filters" aria-label="模型新闻可见性筛选">
           <button type="button" className={evidenceMode === "seen" ? "active" : ""} onClick={() => setEvidenceMode("seen")}>历史上用过 <b>{payload?.news_evidence_summary?.model_seen_events ?? 0}</b></button>
           <button type="button" className={evidenceMode === "unseen" ? "active" : ""} onClick={() => setEvidenceMode("unseen")}>从未用过 <b>{payload?.news_evidence_summary?.model_unseen_events ?? 0}</b></button>
