@@ -15,6 +15,17 @@ async function render(path) {
   );
 }
 
+async function renderSettled(path, marker) {
+  let response = await render(path);
+  let html = await response.text();
+  if (!marker.test(html) && html.includes("app-view-loading")) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+    response = await render(path);
+    html = await response.text();
+  }
+  return { response, html };
+}
+
 test("renders the live room with an audit-page navigation button", async () => {
   const response = await render("/");
   assert.equal(response.status, 200);
@@ -50,7 +61,12 @@ test("hydrates preview pages from their immutable build snapshot", () => {
   const page = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
   const app = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
   const resources = readFileSync(new URL("../app/_lib/dashboard-resource.ts", import.meta.url), "utf8");
-  assert.match(page, /function previewLeagueResources/);
+  assert.match(page, /function previewAuditResources/);
+  assert.match(page, /function previewStatusResource/);
+  assert.match(page, /"recent_decisions"/);
+  assert.match(page, /"news_evidence"/);
+  assert.match(page, /items: items\.slice\(0, 12\)/);
+  assert.match(page, /function previewRoomResources/);
   assert.match(page, /models\.filter/);
   assert.match(page, /lifecycle_status === "LATEST"/);
   assert.match(page, /identity_curves: curves\.identity_curves/);
@@ -58,6 +74,25 @@ test("hydrates preview pages from their immutable build snapshot", () => {
   assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);
   assert.match(resources, /DEFAULT_TIMEOUT_MS = 10_000/);
   assert.match(resources, /数据读取超时，页面会自动重试/);
+});
+
+test("renders every preview room from the build snapshot", async () => {
+  if (!process.env.WORKERS_CI_BRANCH || process.env.WORKERS_CI_BRANCH === "main") return;
+  for (const [path, marker] of [
+    ["/", /Aurum Signal Room/],
+    ["/?room=status", /AI 模型使用状态/],
+    ["/?room=health", /系统健康状态/],
+  ]) {
+    const { response, html } = await renderSettled(path, marker);
+    assert.equal(response.status, 200, path);
+    assert.match(html, marker, path);
+  }
+  for (const view of ["news", "evidence", "stories", "decisions", "league", "coverage"]) {
+    const response = await render(`/?room=audit&view=${view}`);
+    assert.equal(response.status, 200, view);
+    const html = await response.text();
+    assert.doesNotMatch(html, /读取中/, view);
+  }
 });
 
 test("returns a verified main revision through the existing ingest heartbeat", () => {
@@ -80,9 +115,8 @@ test("does not show a redundant forecast warning while the market is closed", ()
 });
 
 test("renders the Gemini quota status route", async () => {
-  const response = await render("/?room=status");
+  const { response, html } = await renderSettled("/?room=status", /AI 模型使用状态/);
   assert.equal(response.status, 200);
-  const html = await response.text();
   assert.match(html, /AI 模型使用状态/);
   assert.match(html, /Gemini 3.5 Flash-Lite/);
   assert.match(html, /Gemini 3.1 Flash-Lite/);
@@ -174,7 +208,11 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /按事件类型和有效交易时间逐步衰减/);
   assert.match(source, /无效样本/);
   assert.match(source, /activeLearningIdentities/);
-  assert.match(html, /news-row-placeholder/);
+  if (process.env.WORKERS_CI_BRANCH && process.env.WORKERS_CI_BRANCH !== "main") {
+    assert.doesNotMatch(html, /news-row-placeholder/);
+  } else {
+    assert.match(html, /news-row-placeholder/);
+  }
   assert.match(html, /决策与30分钟结果/);
   assert.match(html, /Live OOS 学习曲线/);
   assert.match(html, /大视野覆盖/);
