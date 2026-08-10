@@ -503,3 +503,18 @@ test("explains training rows separately from independent news events", () => {
   assert.match(source, /news_evidence_summary\?\.current_contract_distinct_events/);
   assert.match(source, /不是训练还缺的数量/);
 });
+
+test("reflows news evidence into readable mobile cards", () => {
+  const view = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(view, /className="evidence-event-cell"/);
+  assert.match(view, /className="evidence-status-cell"/);
+  assert.match(css, /@media \(max-width:640px\)[\s\S]*\.evidence-table thead \{ position:absolute/);
+  assert.match(css, /grid-template-areas:"event event" "status time" "usage usage"/);
+  assert.match(css, /\.evidence-event-cell \{ grid-area:event/);
+  assert.match(css, /\.evidence-status-cell \{ grid-area:status/);
+  assert.match(css, /\.evidence-usage-cell \{ grid-area:usage/);
+  assert.match(css, /\.evidence-time-cell \{ grid-area:time/);
+  assert.match(css, /\.evidence-status-copy \{ display:none!important/);
+  assert.match(css, /\.evidence-model-list \{ display:none!important/);
+});
