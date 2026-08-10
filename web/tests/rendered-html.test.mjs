@@ -327,6 +327,8 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /Plot result time, not wall-clock time/);
   assert.match(modal, /curve-gap-bridge/);
   assert.match(modal, /休市期间没有成熟结果/);
+  assert.match(modal, /curve-gap-carry-in/);
+  assert.match(modal, /窗口开始前有真实结果；中间没有成熟结果/);
   assert.doesNotMatch(modal, /points\.unshift\(\{ decision_time: new Date\(start\)/);
   assert.doesNotMatch(modal, /points\.push\(\{ decision_time: new Date\(end\)/);
   assert.match(modal, /成本后EV较高方向/);
