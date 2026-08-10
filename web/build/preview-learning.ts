@@ -11,6 +11,19 @@ const STATUS_SUMMARY_KEYS = [
 export function compactPreviewStatus(status: JsonObject): JsonObject {
   const result: JsonObject = { preview_status_summary: true };
   for (const key of STATUS_SUMMARY_KEYS) result[key] = status[key];
+  const market = status.market_chart && typeof status.market_chart === "object"
+    ? status.market_chart as JsonObject
+    : {};
+  // The candles stay in D1, but the compact first paint must retain the route
+  // that loads them.  Dropping both data and its resource pointer leaves the
+  // K-line tab permanently empty in branch previews.
+  result.market_chart = {
+    history_resource: market.history_resource ?? "/api/market-history",
+    candles: [],
+    decisions: [],
+    training_markers: market.training_markers ?? [],
+    prediction_history_start: market.prediction_history_start ?? {},
+  };
   return result;
 }
 

@@ -73,6 +73,8 @@ test("hydrates preview pages from compact status plus read-only D1 resources", (
   assert.doesNotMatch(learning, /"recent_decisions"/);
   assert.doesNotMatch(learning, /"news_evidence"/);
   assert.match(learning, /items\.slice\(0, 12\)/);
+  assert.match(learning, /history_resource: market\.history_resource \?\? "\/api\/market-history"/);
+  assert.match(learning, /training_markers: market\.training_markers \?\? \[\]/);
   assert.doesNotMatch(page, /function previewRoomResources/);
   assert.match(learning, /models\.filter/);
   assert.match(learning, /lifecycle_status === "LATEST"/);
