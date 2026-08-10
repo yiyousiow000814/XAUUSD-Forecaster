@@ -2012,26 +2012,27 @@ def test_commentary_and_low_materiality_are_not_training_evidence(tmp_path) -> N
     ledger.close()
 
 
-def test_diagnostic_residual_wait_keeps_ev_for_audit(tmp_path) -> None:
-    ledger = ForwardLedger(tmp_path / "guarded-wait.sqlite3")
+def test_residual_model_keeps_research_direction_visible(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "visible-residual.sqlite3")
     now = datetime(2026, 8, 10, tzinfo=UTC)
     calibration = {"version": "early", "rows": 30, "blocks": 1, "days": 1,
                    "half_width": 0.2, "status": "EARLY"}
     inference_v2._insert_prediction(
-        ledger, decision_id="guarded", decision_time=now, created_at=now,
-        model_version="full", model_identity="FULL", feature_hash="features",
+        ledger, decision_id="residual", decision_time=now, created_at=now,
+        model_version="broad-news", model_identity="BROAD_NEWS_RESIDUAL",
+        feature_hash="features",
         predicted=0.3, news_residual=0.2, ev_long=0.25, ev_short=-0.35,
-        calibration=calibration, recommended="WAIT",
-        status="DIAGNOSTIC_RESIDUAL_ONLY", guarded_wait=True,
+        calibration=calibration, recommended="LONG",
+        status="RESEARCH_RESIDUAL_DIRECTION",
     )
 
     row = ledger.connection.execute(
         "SELECT recommended_action,ev_long_u5,ev_short_u5,prediction_status "
         "FROM predictions_v2"
     ).fetchone()
-    assert row["recommended_action"] == "WAIT"
+    assert row["recommended_action"] == "LONG"
     assert row["ev_long_u5"] == pytest.approx(0.25)
-    assert row["prediction_status"] == "DIAGNOSTIC_RESIDUAL_ONLY"
+    assert row["prediction_status"] == "RESEARCH_RESIDUAL_DIRECTION"
     ledger.close()
 
 

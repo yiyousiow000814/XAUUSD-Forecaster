@@ -530,11 +530,13 @@ test("explains training rows separately from independent news events", () => {
   assert.match(source, /不是训练还缺的数量/);
 });
 
-test("labels residual and news-only research without hiding composite direction", () => {
+test("shows residual and news-only research directions without implying execution", () => {
   const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
-  assert.match(source, /仅显示修正值，不单独判断方向/);
+  assert.match(source, /修正量自己的30分钟方向研究/);
+  assert.match(source, /正修正显示 LONG，负修正显示 SHORT/);
   assert.match(source, /只看新闻的30分钟方向研究/);
   assert.doesNotMatch(source, /暂不参考方向/);
+  assert.doesNotMatch(source, /仅显示修正值，不单独判断方向/);
 });
 
 test("reflows news evidence into readable mobile cards", () => {

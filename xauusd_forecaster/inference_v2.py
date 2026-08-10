@@ -369,15 +369,12 @@ def _insert_prediction(ledger, *, decision_id: str, decision_time: datetime,
                        feature_hash: str, predicted: float | None,
                        news_residual: float | None, ev_long: float | None,
                        ev_short: float | None, calibration: dict,
-                       recommended: str, status: str,
-                       guarded_wait: bool = False) -> None:
+                       recommended: str, status: str) -> None:
     width = calibration["half_width"]
     lcb_long = ev_long - width if width is not None and ev_long is not None else None
     lcb_short = ev_short - width if width is not None and ev_short is not None else None
     expected_action = _recommended_action(ev_long, ev_short, width)
-    if recommended != expected_action and not (
-        guarded_wait and recommended == "WAIT"
-    ):
+    if recommended != expected_action:
         raise ValueError(
             f"prediction action violates frozen post-cost EV policy: "
             f"recorded={recommended}, expected={expected_action}"
@@ -496,16 +493,12 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
             ev_long, ev_short, calibration["half_width"],
         )
         recommended = raw_recommended
-        guarded_wait = False
         prediction_status = (
             "READY" if calibration["status"] == "CALIBRATED"
             else "PROVISIONAL_POST_COST_EV"
         )
         if identity in {"NEWS_RESIDUAL", "BROAD_NEWS_RESIDUAL"}:
-            # A residual is a correction term, not a standalone price forecast.
-            recommended = "WAIT"
-            guarded_wait = True
-            prediction_status = "DIAGNOSTIC_RESIDUAL_ONLY"
+            prediction_status = "RESEARCH_RESIDUAL_DIRECTION"
         elif identity == "NEWS_ONLY":
             prediction_status = (
                 "RESEARCH_NEWS_ONLY" if news_exposed
@@ -521,7 +514,6 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
             predicted=predicted, news_residual=news_residual,
             ev_long=ev_long, ev_short=ev_short, calibration=calibration,
             recommended=recommended, status=prediction_status,
-            guarded_wait=guarded_wait,
         )
         created.append({"model_identity": identity, "model_version": update["model_version"],
                         "eligibility_version": update_eligibility,

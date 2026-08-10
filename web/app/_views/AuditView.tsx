@@ -434,7 +434,8 @@ const MODEL_LABELS: Record<string, string> = {
   NEWS_ONLY: "纯新闻方向 Ridge",
 };
 function predictionStatusLabel(status: string): string {
-  if (status === "DIAGNOSTIC_RESIDUAL_ONLY") return "仅显示修正值，不单独判断方向";
+  if (status === "RESEARCH_RESIDUAL_DIRECTION") return "修正量自己的30分钟方向研究";
+  if (status === "DIAGNOSTIC_RESIDUAL_ONLY") return "历史版本仅保存修正值";
   if (status === "RESEARCH_NEWS_ONLY") return "只看新闻的30分钟方向研究";
   if (status === "NO_ELIGIBLE_NEWS") return "当前没有合格新闻";
   return status;
@@ -1091,7 +1092,7 @@ export default function AuditView() {
         <details className="model-method-note">
           <summary><span>方法与实盘边界</span><small>新闻修正量、成本与 Shadow 限制</small></summary>
           <div>
-            <article><b>“大视野新闻修正量”不是“大视野新闻自身”</b><span>它先看黄金自身预测错了多少，再学习新闻应该把黄金答案往上或往下修多少。例：黄金自身 +0.10 U5，新闻修正 +0.04 U5，只有“黄金＋大视野新闻”才输出完整方向 +0.14 U5。</span></article>
+            <article><b>新闻修正量也显示自己的方向</b><span>正修正显示 LONG，负修正显示 SHORT；它表示新闻把黄金基线往上或往下推，不等于“黄金＋新闻”的完整方向。例：黄金自身 +0.10 U5，新闻修正 +0.04 U5，修正量是 LONG，完整模型为 +0.14 U5。</span></article>
             <article><b>“纯新闻方向”单独回答新闻看涨还是看跌</b><span>它完全不读取黄金行情特征，只用决策时已经看见的合格新闻，直接预测未来30分钟黄金方向；没有合格新闻时显示 WAIT。它与新闻修正量分开评分。</span></article>
             <article><b>成本口径</b><span>收益使用可执行 Bid/Ask，并扣除入场、退出两边各 $30 / 百万美元成交额的 commission；slippage 暂按 0。尚未包含账户真实成交偏差，所以不是实盘 PnL。</span></article>
             <article><b>做法可以实时复现；结果尚未达到实盘标准</b><span>行情和新闻都只读取决策时已经看见的内容；30分钟结果成熟后才进入下一轮训练。当前仍没有下单权限，也不会自动晋升。</span></article>
