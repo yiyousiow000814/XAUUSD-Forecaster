@@ -774,6 +774,24 @@ def test_curve_compaction_preserves_extremes_and_version_boundaries() -> None:
     assert compact[-1] == points[-1]
 
 
+def test_curve_compaction_preserves_wait_boundaries() -> None:
+    module = _sync_module()
+    points = [
+        {
+            "decision_time": f"2026-08-11T00:{index:02d}:00+00:00",
+            "cumulative_quote_return": float(index),
+            **({"w": 1} if 20 <= index < 30 else {}),
+        }
+        for index in range(60)
+    ]
+    compact = module.compact_curve_points(points, limit=20)
+    retained = {row["decision_time"]: row for row in compact}
+    assert "2026-08-11T00:19:00+00:00" in retained
+    assert retained["2026-08-11T00:20:00+00:00"]["w"] == 1
+    assert retained["2026-08-11T00:29:00+00:00"]["w"] == 1
+    assert "w" not in retained["2026-08-11T00:30:00+00:00"]
+
+
 def test_annotator_heartbeat_reports_idle_loop_as_healthy(tmp_path) -> None:
     module = _annotator_module()
     status_file = tmp_path / "news-annotator-status.json"

@@ -8,20 +8,25 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   const binding = env.DB as D1Database | undefined;
   if (binding) {
-    const row = await binding
-      .prepare("SELECT payload FROM dashboard_snapshots WHERE id = ?")
-      .bind(3)
-      .first<{ payload: string }>();
-    if (row) {
-      // POST validates the snapshot before storing it. Returning the validated
-      // JSON bytes directly avoids parsing and serializing a growing history on
-      // every poll, which can exceed the Worker CPU limit.
-      return new Response(row.payload, {
-        headers: {
-          "Content-Type": "application/json; charset=utf-8",
-          "Cache-Control": "private, max-age=15",
-        },
-      });
+    try {
+      const row = await binding
+        .prepare("SELECT payload FROM dashboard_snapshots WHERE id = ?")
+        .bind(3)
+        .first<{ payload: string }>();
+      if (row) {
+        // POST validates the snapshot before storing it. Returning the validated
+        // JSON bytes directly avoids parsing and serializing a growing history on
+        // every poll, which can exceed the Worker CPU limit.
+        return new Response(row.payload, {
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+            "Cache-Control": "private, max-age=15",
+          },
+        });
+      }
+    } catch {
+      // A transient D1 read failure may still be served by the bounded relay
+      // fallback below.  Do not turn it into an unhandled Worker 500.
     }
   }
 

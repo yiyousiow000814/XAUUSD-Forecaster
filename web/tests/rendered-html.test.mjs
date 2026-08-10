@@ -222,11 +222,9 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /按事件类型和有效交易时间逐步衰减/);
   assert.match(source, /无效样本/);
   assert.match(source, /activeLearningIdentities/);
-  if (process.env.WORKERS_CI_BRANCH && process.env.WORKERS_CI_BRANCH !== "main") {
-    assert.doesNotMatch(html, /news-row-placeholder/);
-  } else {
-    assert.match(html, /news-row-placeholder/);
-  }
+  // The live snapshot may fill all 12 rows or leave placeholders.  Rendering
+  // must not depend on today's article count.
+  assert.match(html, /news-row/);
   assert.match(html, /决策与30分钟结果/);
   assert.match(html, /Live OOS 学习曲线/);
   assert.match(html, /大视野覆盖/);
@@ -430,6 +428,9 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /方向 \$\{boundary\.direction\}/);
   assert.match(modal, /新闻 \$\{boundary\.news\}/);
   assert.match(modal, /version-boundary-badge/);
+  assert.match(modal, /function curveRuns/);
+  assert.match(modal, /strokeDasharray=\{run\.wait \? "7 6" : undefined\}/);
+  assert.match(modal, /虚线：WAIT/);
   assert.match(modal, /const laneEnds: number\[\] = \[\]/);
   assert.match(modal, /boundaryLayouts/);
   assert.match(modal, /version-boundary-leader/);
@@ -617,6 +618,8 @@ test("prefetches the complete learning ledger before interactive charts need it"
   assert.match(audit, /refreshStatus\(!fullStatusReadyRef\.current\)/);
   assert.match(audit, /refreshLearning\(!fullLearningReadyRef\.current\)/);
   assert.match(audit, /if \(!fullLearningReadyRef\.current\) void refreshLearning\(true\)/);
+  assert.match(audit, /learningDataAvailableRef\.current \? "ready" : "error"/);
+  assert.match(audit, /learningFailureCountRef\.current >= 2/);
 });
 
 test("reflows news evidence into readable mobile cards", () => {

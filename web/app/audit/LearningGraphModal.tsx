@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { compressedTimeline } from "./compressedTimeline";
 
-type CurvePoint = { decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number };
+type CurvePoint = { decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number; w?: 1 };
 type Curve = { model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: CurvePoint[]; source_point_count_30m?: number; chart_point_count_30m?: number; chart_downsampled_30m?: boolean; points_30m?: CurvePoint[] };
 type Candle = { time: string; open: number; high: number; low: number; close: number; ticks?: number };
 type MarketData = {
@@ -70,6 +70,22 @@ const COLORS: Record<string, string> = {
   NEWS_ONLY: "#d08a00",
 };
 const pct = (value: number) => `${value >= 0 ? "+" : "−"}${Math.abs(value * 100).toFixed(3)}%`;
+
+function curveRuns(points: CurvePoint[]) {
+  if (points.length < 2) return [];
+  const runs: Array<{ wait: boolean; points: CurvePoint[] }> = [];
+  let current = { wait: points[1].w === 1, points: [points[0], points[1]] };
+  for (let index = 2; index < points.length; index += 1) {
+    const wait = points[index].w === 1;
+    if (wait === current.wait) current.points.push(points[index]);
+    else {
+      runs.push(current);
+      current = { wait, points: [points[index - 1], points[index]] };
+    }
+  }
+  runs.push(current);
+  return runs;
+}
 
 export default function LearningGraphModal({
   open, onClose, startTab, curves, market, versionGroups, execution,
@@ -381,13 +397,20 @@ function LongCurve({ curves }: { curves: Curve[] }) {
           </>}
         </g>;
       })}
-      {visibleCurves.map(row => row.points.length === 1
-        ? <circle key={row.model_identity} cx={x(row.points[0].decision_time)} cy={y(row.points[0].cumulative_quote_return)} r="4" fill={COLORS[row.model_identity]} />
-        : <polyline key={row.model_identity} fill="none" stroke={COLORS[row.model_identity]} strokeWidth="3" points={row.points.map(point => `${x(point.decision_time)},${y(point.cumulative_quote_return)}`).join(" ")} />)}
+      {visibleCurves.flatMap(row => row.points.length === 1
+        ? [<circle key={row.model_identity} cx={x(row.points[0].decision_time)} cy={y(row.points[0].cumulative_quote_return)} r="4" fill={COLORS[row.model_identity]} />]
+        : curveRuns(row.points).map((run, index) => <polyline
+            key={`${row.model_identity}-${index}`}
+            fill="none"
+            stroke={COLORS[row.model_identity]}
+            strokeWidth="3"
+            strokeDasharray={run.wait ? "7 6" : undefined}
+            points={run.points.map(point => `${x(point.decision_time)},${y(point.cumulative_quote_return)}`).join(" ")}
+          ><title>{run.wait ? "WAIT：当时没有方向判断" : "当时已有 LONG / SHORT 判断"}</title></polyline>))}
       {tickTimes.map(value => <g key={value} className="time-axis"><line x1={x(value)} x2={x(value)} y1="350" y2="356" /><text x={x(value)} y="374" textAnchor="middle">{axisLabel(value)}</text></g>)}
     </svg>
     </div>
-    <div className="chart-legend">{visibleCurves.map(row => <span key={row.model_identity}><i style={{ background: COLORS[row.model_identity] }} />{LABELS[row.model_identity]} <b>{pct(row.points.at(-1)?.cumulative_quote_return ?? 0)}</b></span>)}{groupedBoundaries.length > 0 && <span><i className="train-dot" />模型换版本{compactBoundaryRail ? `（${boundaryLayouts.length} 个事件点 / ${groupedBoundaries.length} 次）` : groupedBoundaries.length > displayedBoundaries.length ? `（显示 ${displayedBoundaries.length}/${groupedBoundaries.length}）` : ""}</span>}</div>
+    <div className="chart-legend">{visibleCurves.map(row => <span key={row.model_identity}><i style={{ background: COLORS[row.model_identity] }} />{LABELS[row.model_identity]} <b>{pct(row.points.at(-1)?.cumulative_quote_return ?? 0)}</b></span>)}<span><i className="wait-line" />虚线：WAIT</span>{groupedBoundaries.length > 0 && <span><i className="train-dot" />模型换版本{compactBoundaryRail ? `（${boundaryLayouts.length} 个事件点 / ${groupedBoundaries.length} 次）` : groupedBoundaries.length > displayedBoundaries.length ? `（显示 ${displayedBoundaries.length}/${groupedBoundaries.length}）` : ""}</span>}</div>
   </div>;
 }
 

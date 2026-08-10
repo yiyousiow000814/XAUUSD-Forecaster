@@ -56,6 +56,11 @@ def _bounded_curve(points: list[dict], max_points: int = MAX_CURVE_POINTS) -> li
         index for index, point in enumerate(points)
         if point.get("model_version")
     )
+    for index in range(1, len(points)):
+        if bool(points[index].get("w")) != bool(points[index - 1].get("w")):
+            # Retain both sides so downsampling cannot turn a WAIT interval
+            # into a directional solid line (or the reverse).
+            mandatory.update((index - 1, index))
     if len(mandatory) >= max_points:
         ordered = sorted(mandatory)
         stride = (len(ordered) - 1) / max(1, max_points - 1)
@@ -597,6 +602,11 @@ def learning_curve_payload(connection) -> dict:
                 cumulative += _net_row_value(row)
                 model_version = row["model_version"] if identity != "CHAMPION_0" else "always-wait-v1"
                 point = {"decision_time": row["decision_time"], "cumulative_quote_return": cumulative}
+                # The chart needs to distinguish a frozen WAIT (no position)
+                # from a directional result.  Keep the wire format compact:
+                # directional points need no marker, while WAIT is explicit.
+                if identity != "CHAMPION_0" and row["recommended_action"] == "WAIT":
+                    point["w"] = 1
                 generation = row["training_dataset_hash"] if identity != "CHAMPION_0" else "always-wait"
                 if generation != previous_generation:
                     point["model_version"] = model_version

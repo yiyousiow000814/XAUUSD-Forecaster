@@ -309,7 +309,7 @@ type Payload = {
     version_groups: VersionGroup[];
     rolling_processes: RollingProcess[];
     news_model_activation: NewsModelActivation[];
-    identity_curves: Array<{ model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: Array<{ decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number }>; source_point_count_30m?: number; chart_point_count_30m?: number; chart_downsampled_30m?: boolean; points_30m?: Array<{ decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number }> }>;
+    identity_curves: Array<{ model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: Array<{ decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number; w?: 1 }>; source_point_count_30m?: number; chart_point_count_30m?: number; chart_downsampled_30m?: boolean; points_30m?: Array<{ decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number; w?: 1 }> }>;
     zero_return_baseline: {
       label: string;
       model_identity: string;
@@ -716,6 +716,8 @@ export default function AuditView() {
   const [graphStartTab, setGraphStartTab] = useState<"curve" | "execution">("curve");
   const fullStatusReadyRef = useRef(Boolean(cachedStatus && !cachedStatus.preview_status_summary));
   const fullLearningReadyRef = useRef(Boolean(cachedLearning && !cachedLearning.learning_preview_summary));
+  const learningDataAvailableRef = useRef(Boolean(cachedLearning));
+  const learningFailureCountRef = useRef(0);
   const [summaryCadence, setSummaryCadence] = useState<EvaluationCadence>("EVERY_5M");
   const [evidenceMode, setEvidenceMode] = useState<"seen" | "unseen" | "all">("seen");
   const auditTabsRef = useRef<HTMLElement>(null);
@@ -738,12 +740,21 @@ export default function AuditView() {
     try {
       const body = await loadDashboardResource<Partial<Payload>>("/api/learning", { force });
       setPayload(previous => ({ ...previous, ...body }) as Payload);
+      learningDataAvailableRef.current = true;
+      learningFailureCountRef.current = 0;
       if (!body.learning_preview_summary) fullLearningReadyRef.current = true;
       setLearningState("ready");
       setLearningError(null);
     } catch (reason) {
-      setLearningState("error");
-      setLearningError(reason instanceof Error ? reason.message : "无法读取学习进度");
+      learningFailureCountRef.current += 1;
+      setLearningState(learningDataAvailableRef.current ? "ready" : "error");
+      // One transient failure must not replace a valid snapshot with a red
+      // outage banner.  Persistent failures stay visible on the second poll.
+      setLearningError(
+        !learningDataAvailableRef.current || learningFailureCountRef.current >= 2
+          ? (reason instanceof Error ? reason.message : "无法读取学习进度")
+          : null,
+      );
     }
   }, []);
 

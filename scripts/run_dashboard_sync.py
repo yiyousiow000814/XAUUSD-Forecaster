@@ -160,6 +160,8 @@ def compact_curve_points(
     for index in range(1, len(points)):
         if points[index].get("model_version") != points[index - 1].get("model_version"):
             keep.update((index - 1, index))
+        if bool(points[index].get("w")) != bool(points[index - 1].get("w")):
+            keep.update((index - 1, index))
     for start in range(0, len(points), bucket_size):
         indices = list(range(start, min(len(points), start + bucket_size)))
         for key in value_keys:
@@ -170,6 +172,9 @@ def compact_curve_points(
     ordered = sorted(keep)
     if len(ordered) > limit:
         mandatory = {0, len(points) - 1}
+        for index in range(1, len(points)):
+            if bool(points[index].get("w")) != bool(points[index - 1].get("w")):
+                mandatory.update((index - 1, index))
         for key in value_keys:
             candidates = [
                 index for index, point in enumerate(points)

@@ -1037,6 +1037,34 @@ def test_residual_learning_scores_replay_only_frozen_ev_direction(tmp_path) -> N
     assert rolling["cumulative_quote_return"] == pytest.approx(expected)
     assert group["cumulative_quote_return"] == pytest.approx(expected)
     assert curve["points"][0]["cumulative_quote_return"] == pytest.approx(expected)
+    assert "w" not in curve["points"][0]
+    ledger.close()
+
+
+def test_identity_curve_marks_frozen_wait_without_scoring_a_trade(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    created_at = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    _insert_model_update(ledger.connection, "market-wait", "MARKET_ONLY", created_at)
+    _insert_prediction(
+        ledger.connection, "wait-oos", created_at + timedelta(minutes=5),
+        model_version="market-wait", value_quote_return=2.0,
+        recommended_action="WAIT",
+    )
+    ledger.connection.commit()
+
+    payload = learning_curve_payload(ledger.connection)
+    curve = next(
+        row for row in payload["identity_curves"]
+        if row["model_identity"] == "MARKET_ONLY"
+    )
+    assert curve["points"] == [{
+        "decision_time": (created_at + timedelta(minutes=5)).isoformat(),
+        "cumulative_quote_return": 0.0,
+        "w": 1,
+        "model_version": "market-wait",
+        "training_dataset_hash": "dataset-market-wait",
+        "training_rows": 96,
+    }]
     ledger.close()
 
 
