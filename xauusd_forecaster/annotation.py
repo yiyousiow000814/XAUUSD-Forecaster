@@ -41,13 +41,6 @@ GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL = 20
 GEMMA_TITLE_BATCH_LIMIT = 10
 GEMMA_IMPACT_BATCH_LIMIT = 10
 PROMPT_VERSION = "news-json-v14-material-event-evidence"
-COMPATIBLE_PROMPT_VERSIONS = (
-    PROMPT_VERSION,
-    "news-json-v13-event-claims",
-    "news-json-v12-gemini-story-identity",
-    "news-json-v11-gemini-story-subjects",
-    "news-json-v10-controlled-category-zh",
-)
 TITLE_PROMPT_VERSION = "headline-zh-v7-multilingual-month-preservation"
 INVALID_CHINESE_TITLE = "来源新闻（中文标题待校验）"
 TITLE_TRANSLATION_MODELS = (

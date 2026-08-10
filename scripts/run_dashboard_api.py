@@ -39,6 +39,7 @@ from xauusd_forecaster.annotation import (  # noqa: E402
     GEMINI_DAILY_PRIORITY_RESERVE,
     GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
     INVALID_CHINESE_TITLE,
+    PROMPT_VERSION,
     completed_annotation_records,
     configured_gemini_api_keys,
     pending_annotation_records,
@@ -1020,18 +1021,11 @@ def _dashboard_payload(database: Path) -> dict:
                       json_extract(a.annotation_json, '$.secondary_categories') AS secondary_categories_json,
                        json_extract(a.annotation_json, '$.emerging_topic_zh') AS emerging_topic_zh,
                        json_extract(a.annotation_json, '$.event_time') AS event_time,
-                      COALESCE(a.event_type, legacy.event_type, legacy_v3.event_type) AS event_type,
-                      COALESCE(a.entities_json, legacy.entities_json, legacy_v3.entities_json) AS entities_json,
-                      COALESCE(a.hawkishness, legacy.hawkishness, legacy_v3.hawkishness) AS hawkishness,
-                      COALESCE(a.inflation_impulse, legacy.inflation_impulse, legacy_v3.inflation_impulse) AS inflation_impulse,
-                      COALESCE(a.growth_impulse, legacy.growth_impulse, legacy_v3.growth_impulse) AS growth_impulse,
-                      COALESCE(a.geopolitical_risk, legacy.geopolitical_risk, legacy_v3.geopolitical_risk) AS geopolitical_risk,
-                      COALESCE(a.usd_impulse, legacy.usd_impulse, legacy_v3.usd_impulse) AS usd_impulse,
-                      COALESCE(a.novelty, legacy.novelty, legacy_v3.novelty) AS novelty,
-                      COALESCE(a.confidence, legacy.confidence, legacy_v3.confidence) AS confidence,
-                      COALESCE(a.llm_model_version, legacy.llm_model_version, legacy_v3.llm_model_version) AS llm_model_version,
-                      COALESCE(a.prompt_version, legacy.prompt_version, legacy_v3.prompt_version) AS prompt_version,
-                       COALESCE(a.parsed_at, legacy.parsed_at, legacy_v3.parsed_at) AS parsed_at,
+                      a.event_type, a.entities_json, a.hawkishness,
+                      a.inflation_impulse, a.growth_impulse,
+                      a.geopolitical_risk, a.usd_impulse, a.novelty,
+                      a.confidence, a.llm_model_version, a.prompt_version,
+                      a.parsed_at,
                        i.impact_class,
                        i.event_state AS impact_event_state,
                        i.update_type AS impact_update_type,
@@ -1041,8 +1035,8 @@ def _dashboard_payload(database: Path) -> dict:
                        CASE WHEN n.source_published_time IS NOT NULL THEN
                          (julianday(n.collector_first_seen_time)-julianday(n.source_published_time))*86400
                        END AS collection_delay_seconds,
-                       CASE WHEN COALESCE(a.parsed_at, legacy.parsed_at, legacy_v3.parsed_at) IS NOT NULL THEN
-                         (julianday(COALESCE(a.parsed_at, legacy.parsed_at, legacy_v3.parsed_at))-
+                       CASE WHEN a.parsed_at IS NOT NULL THEN
+                         (julianday(a.parsed_at)-
                           julianday(n.collector_first_seen_time))*86400
                        END AS processing_delay_seconds,
                        COALESCE(r.maximum_tier, 'COLLECT_ONLY') AS source_eligibility,
@@ -1083,34 +1077,10 @@ def _dashboard_payload(database: Path) -> dict:
                      AND preferred_a.revision_number=n.revision_number
                      AND preferred_a.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
-                     AND preferred_a.prompt_version IN (
-                       'news-json-v14-material-event-evidence',
-                       'news-json-v13-event-claims',
-                       'news-json-v12-gemini-story-identity',
-                       'news-json-v11-gemini-story-subjects',
-                       'news-json-v10-controlled-category-zh',
-                       'news-json-v9-local-display-recovery')
-                   ORDER BY CASE preferred_a.prompt_version
-                     WHEN 'news-json-v14-material-event-evidence' THEN 0
-                     WHEN 'news-json-v13-event-claims' THEN 1
-                     WHEN 'news-json-v12-gemini-story-identity' THEN 2
-                     WHEN 'news-json-v11-gemini-story-subjects' THEN 3
-                     WHEN 'news-json-v10-controlled-category-zh' THEN 4 ELSE 5 END,
-                     CASE preferred_a.llm_model_version
+                     AND preferred_a.prompt_version=?
+                   ORDER BY CASE preferred_a.llm_model_version
                        WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                      preferred_a.parsed_at DESC LIMIT 1)
-               LEFT JOIN news_annotations legacy
-                 ON legacy.source=n.source
-                AND legacy.source_item_id=n.source_item_id
-                AND legacy.revision_number=n.revision_number
-                AND legacy.llm_model_version='gemini-3.5-flash-lite'
-                AND legacy.prompt_version='news-json-v7-strict-headline-and-summary-zh-verbatim-numbers'
-               LEFT JOIN news_annotations legacy_v3
-                 ON legacy_v3.source=n.source
-                AND legacy_v3.source_item_id=n.source_item_id
-                AND legacy_v3.revision_number=n.revision_number
-                AND legacy_v3.llm_model_version='gemini-3.5-flash-lite'
-                 AND legacy_v3.prompt_version='news-json-v6-headline-and-summary-zh-verbatim-numbers'
                LEFT JOIN news_impact_assessments_v1 i
                  ON i.annotation_id=a.annotation_id
                 AND i.llm_model_version=?
@@ -1170,6 +1140,7 @@ def _dashboard_payload(database: Path) -> dict:
                LIMIT 1000""",
             (
                 now.isoformat(timespec="microseconds"), INVALID_CHINESE_TITLE,
+                PROMPT_VERSION,
                 IMPACT_MODEL, IMPACT_PROMPT_VERSION,
             ),
         ).fetchall()
@@ -1203,16 +1174,8 @@ def _dashboard_payload(database: Path) -> dict:
                      AND preferred_a.revision_number=n.revision_number
                      AND preferred_a.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
-                     AND preferred_a.prompt_version IN (
-                       'news-json-v12-gemini-story-identity',
-                       'news-json-v11-gemini-story-subjects',
-                       'news-json-v10-controlled-category-zh',
-                       'news-json-v9-local-display-recovery')
-                   ORDER BY CASE preferred_a.prompt_version
-                     WHEN 'news-json-v12-gemini-story-identity' THEN 0
-                     WHEN 'news-json-v11-gemini-story-subjects' THEN 1
-                     WHEN 'news-json-v10-controlled-category-zh' THEN 2 ELSE 3 END,
-                     CASE preferred_a.llm_model_version
+                     AND preferred_a.prompt_version=?
+                   ORDER BY CASE preferred_a.llm_model_version
                        WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                      preferred_a.parsed_at DESC LIMIT 1)
                LEFT JOIN news_llm_failures f
@@ -1225,7 +1188,7 @@ def _dashboard_payload(database: Path) -> dict:
                      AND latest_f.revision_number=n.revision_number
                      AND latest_f.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
-                     AND latest_f.prompt_version='news-json-v12-gemini-story-identity'
+                     AND latest_f.prompt_version=?
                      AND NOT (latest_f.error_type='RuntimeError'
                               AND latest_f.error='All configured Gemini keys unavailable for this batch')
                    ORDER BY latest_f.failed_at DESC LIMIT 1)
@@ -1256,6 +1219,8 @@ def _dashboard_payload(database: Path) -> dict:
             (
                 now.isoformat(timespec="microseconds"),
                 now.isoformat(timespec="microseconds"),
+                PROMPT_VERSION,
+                PROMPT_VERSION,
             ),
         ).fetchone()
         # The displayed queue is the worker's real claimable queue, not a

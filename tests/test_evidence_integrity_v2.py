@@ -34,6 +34,7 @@ from xauusd_forecaster.news_features_v2 import (
     event_raw_weight,
 )
 from xauusd_forecaster.news_impact import impact_time_rule, pending_impact_records
+from xauusd_forecaster.news_semantics import annotation_topics, effective_record_kind
 from xauusd_forecaster.news_time import assess_news_time, category_time_rule
 from xauusd_forecaster.repair_v2 import immutable_table_hash
 from xauusd_forecaster import inference_v2, news_contract_migration, training_v2
@@ -2058,22 +2059,30 @@ def test_shadow_composite_keeps_research_direction_visible(tmp_path) -> None:
     ledger.close()
 
 
-def test_market_wrap_is_display_only_even_when_llm_calls_it_fact(tmp_path) -> None:
+def test_controlled_news_semantics_do_not_reclassify_by_substring() -> None:
+    annotation = {
+        "record_kind": "FACT_EVENT",
+        "primary_category": "rates_fed",
+        "secondary_categories": ["growth_economy"],
+    }
+
+    assert effective_record_kind(annotation) == "FACT_EVENT"
+    assert annotation_topics(annotation) == ("rates_fed", "growth_economy")
+    # These used to trigger substring bugs: war in forward and gain in against.
+    assert annotation_topics({
+        **annotation, "headline_zh": "forward guidance argues against a cut",
+    }) == ("rates_fed", "growth_economy")
+
+
+def test_current_material_annotation_rejects_unknown_record_kind(tmp_path) -> None:
     epoch = datetime(2026, 8, 10, 10, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward-market-wrap.sqlite3", now=epoch)
-    _append_news(
-        ledger, source="google_news_fed_rates",
-        item="Oil rises, Treasury yields open higher and US equity futures gain",
-        first_seen=epoch, parsed_at=epoch + timedelta(seconds=30), impulse=0.2,
-        link="https://finance.yahoo.com/example", primary_category="oil_energy",
-        record_kind="FACT_EVENT", materiality=0.8,
-    )
-
-    row = event_evidence_rows(ledger, epoch + timedelta(minutes=5))[0]
-
-    assert row["record_kind"] == "MARKET_REACTION"
-    assert row["broad_model_eligible"] is False
-    assert "RECORD_KIND_NOT_ACTIONABLE" in row["reason_codes"]
+    ledger = ForwardLedger(tmp_path / "invalid-record-kind.sqlite3", now=epoch)
+    with pytest.raises(ValueError, match="record_kind is not controlled"):
+        _append_news(
+            ledger, source="google_news_fed_rates", item="official release",
+            first_seen=epoch, parsed_at=epoch + timedelta(seconds=30), impulse=0.2,
+            record_kind="RESPONSE",
+        )
     ledger.close()
 
 
