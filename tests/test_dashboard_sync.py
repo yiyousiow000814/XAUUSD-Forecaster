@@ -53,6 +53,59 @@ def test_preview_does_not_call_late_aggregated_news_expired() -> None:
     assert row["annotation_reason"] == "搜索线索：来自聚合发现源，不是独立官方发布"
 
 
+def test_preview_replays_old_story_aliases_through_branch_policy() -> None:
+    module = _preview_module()
+    status = {
+        "storylines": [
+            {
+                "episode_key": episode,
+                "title": headline,
+                "source_organizations": [source],
+                "timeline": [{
+                    "event_key": f"event-{index}",
+                    "first_seen": f"2026-08-08T0{index}:00:00+00:00",
+                    "event_time": f"2026-08-07T2{index}:00:00+00:00",
+                    "source_published_time": f"2026-08-07T2{index}:00:00+00:00",
+                    "collector_first_seen_time": f"2026-08-08T0{index}:00:00+00:00",
+                    "headline": headline,
+                    "actor": "Donald Trump",
+                    "action": action,
+                    "object": "Lisa Cook",
+                    "location": "Washington, DC",
+                    "claim_status": "REPORTED",
+                    "materiality": 0.75,
+                    "evidence_grade": "SINGLE_RELIABLE",
+                    "independent_publishers": 1,
+                    "evidence_documents": 1,
+                    "document_kinds": ["NEWS_REPORT"],
+                    "archival": False,
+                    "relation": "STARTS",
+                }],
+                "market_reactions": [], "commentary": [], "background": [],
+            }
+            for index, (episode, headline, action, source) in enumerate((
+                ("trump_fires_lisa_cook_2026_08", "特朗普重启解雇丽莎库克", "considering", "cnbc"),
+                ("trump_fire_cook_aug_2026", "特朗普再次企图解雇丽莎库克", "renews bid to fire", "the_guardian"),
+                ("trump_fires_lisa_cook_aug_2026", "特朗普再度推动解雇丽莎库克", "threatens to fire", "npr"),
+            ), start=1)
+        ],
+        "story_event_candidates": [],
+        "storyline_summary": {},
+    }
+
+    module._rebuild_story_snapshot(status)
+
+    assert status["storylines"] == []
+    candidates = status["story_event_candidates"]
+    assert len(candidates) == 1
+    assert candidates[0]["episode_key"] == "lisa_cook_removal_2026_08"
+    assert candidates[0]["evidence_documents"] == 3
+    assert candidates[0]["independent_publishers"] == 3
+    assert status["storyline_summary"]["policy_version"].endswith(
+        "canonical-occurrence-chains"
+    )
+
+
 def test_sync_retries_transient_disconnect(monkeypatch) -> None:
     module = _sync_module()
     calls = []
