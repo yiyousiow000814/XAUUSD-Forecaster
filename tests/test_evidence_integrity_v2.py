@@ -1628,6 +1628,11 @@ def test_transition_contract_requires_exact_four_model_match() -> None:
     assert {row["model_version"] for row in active} == {
         "market-live", "news-live", "full-live", "broad-news-live", "broad-full-live",
     }
+    statuses = inference_v2.news_model_activation_status(
+        updates, allow_transition_contract=True, transition_contract=contract,
+    )
+    assert {row["status"] for row in statuses} == {"TRANSITION_ACTIVE"}
+    assert all("整组切换" in row["reason"] for row in statuses)
 
     updates[-1]["feature_version"] = "corrupt-contract"
     blocked = inference_v2._active_updates(

@@ -123,7 +123,7 @@ def news_model_activation_status(
             status, reason = "NOT_TRAINED", "尚未训练当前新闻模型"
         elif not _news_contract_matches(update) and transition_generation_ready:
             status = "TRANSITION_ACTIVE"
-            reason = "当前 generation 持续预测，等待完整新 generation 原子替换"
+            reason = "当前整组模型继续预测，等待新版全部准备好后整组切换"
         elif not _news_contract_matches(update):
             status, reason = "POLICY_MISMATCH", "最新版不符合当前新闻规则"
         else:
