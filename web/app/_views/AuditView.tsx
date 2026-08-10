@@ -483,6 +483,52 @@ function evidenceReason(row: NewsEvidence): string {
     ?? codes.find(candidate => EVIDENCE_REASON_LABELS[candidate]);
   return code ? (EVIDENCE_REASON_LABELS[code] ?? code) : "当时未达到使用条件";
 }
+function mergeUnique(values: Array<string[] | null | undefined>): string[] {
+  return Array.from(new Set(values.flatMap(value => value ?? []).filter(Boolean))).sort();
+}
+function mergeNewsEvidenceByEvent(rows: NewsEvidence[]): NewsEvidence[] {
+  const merged = new Map<string, NewsEvidence>();
+  for (const row of rows) {
+    const previous = merged.get(row.event_key);
+    if (!previous) {
+      merged.set(row.event_key, row);
+      continue;
+    }
+    const latest = row.collector_first_seen_time >= previous.collector_first_seen_time ? row : previous;
+    merged.set(row.event_key, {
+      ...latest,
+      event_key: row.event_key,
+      broad_model_eligible: previous.broad_model_eligible || row.broad_model_eligible,
+      model_permission: previous.model_permission === "BROAD_MODEL" || row.model_permission === "BROAD_MODEL"
+        ? "BROAD_MODEL"
+        : "DISPLAY_ONLY",
+      member_count: Math.max(previous.member_count, row.member_count),
+      independent_publishers: Math.max(previous.independent_publishers, row.independent_publishers),
+      source_names: mergeUnique([previous.source_names, row.source_names]),
+      source_organizations: mergeUnique([previous.source_organizations, row.source_organizations]),
+      source_identity_organizations: mergeUnique([
+        previous.source_identity_organizations, row.source_identity_organizations,
+      ]),
+      publisher_domains: mergeUnique([previous.publisher_domains, row.publisher_domains]),
+      topics: mergeUnique([previous.topics, row.topics]),
+      reason_codes: mergeUnique([previous.reason_codes, row.reason_codes]),
+      model_seen: previous.model_seen || row.model_seen,
+      frozen_model_uses: previous.frozen_model_uses + row.frozen_model_uses,
+      frozen_decisions: previous.frozen_decisions + row.frozen_decisions,
+      frozen_versions: (previous.frozen_versions ?? 1) + (row.frozen_versions ?? 1),
+      first_model_decision_time: [previous.first_model_decision_time, row.first_model_decision_time]
+        .filter((value): value is string => Boolean(value)).sort()[0] ?? null,
+      last_model_decision_time: [previous.last_model_decision_time, row.last_model_decision_time]
+        .filter((value): value is string => Boolean(value)).sort().at(-1) ?? null,
+      model_identities: mergeUnique([previous.model_identities, row.model_identities]),
+      model_versions: mergeUnique([previous.model_versions, row.model_versions]),
+      model_unseen_reason_codes: mergeUnique([
+        previous.model_unseen_reason_codes, row.model_unseen_reason_codes,
+      ]),
+    });
+  }
+  return Array.from(merged.values());
+}
 const DEPLOYMENT_PRESENTATION: Record<string, { className: string; label: string }> = {
   MATCHED: { className: "matched", label: "版本正常" },
   LOCAL_CHANGES: { className: "local-changes", label: "有尚未发布的改动" },
@@ -782,7 +828,39 @@ export default function AuditView() {
     view === "league" && learningError && `学习进度：${learningError}`,
     view === "news" && newsError && `新闻索引：${newsError}`,
   ].filter(Boolean).join(" · ");
-  const visibleEvidence = (payload?.news_evidence ?? []).filter(row => (
+  const canonicalEvidence = useMemo(
+    () => mergeNewsEvidenceByEvent(payload?.news_evidence ?? []),
+    [payload?.news_evidence],
+  );
+  const evidencePayloadHasDuplicates = canonicalEvidence.length !== (payload?.news_evidence ?? []).length;
+  const seenEvidenceCount = canonicalEvidence.filter(row => row.model_seen).length;
+  const unseenEvidenceCount = canonicalEvidence.length - seenEvidenceCount;
+  const eligibleEvidenceCount = canonicalEvidence.filter(row => row.broad_model_eligible).length;
+  const evidenceDecisionExposures = canonicalEvidence.reduce(
+    (total, row) => total + row.frozen_decisions, 0,
+  );
+  const evidenceModelUses = canonicalEvidence.reduce(
+    (total, row) => total + row.frozen_model_uses, 0,
+  );
+  const evidenceSummarySeenCount = evidencePayloadHasDuplicates
+    ? seenEvidenceCount
+    : payload?.news_evidence_summary?.model_seen_events ?? seenEvidenceCount;
+  const evidenceSummaryUnseenCount = evidencePayloadHasDuplicates
+    ? unseenEvidenceCount
+    : payload?.news_evidence_summary?.model_unseen_events ?? unseenEvidenceCount;
+  const evidenceSummaryDisplayedCount = evidencePayloadHasDuplicates
+    ? canonicalEvidence.length
+    : payload?.news_evidence_summary?.displayed_events ?? canonicalEvidence.length;
+  const evidenceSummaryEligibleCount = evidencePayloadHasDuplicates
+    ? eligibleEvidenceCount
+    : payload?.news_evidence_summary?.broad_model_eligible ?? eligibleEvidenceCount;
+  const evidenceSummaryDecisionExposures = evidencePayloadHasDuplicates
+    ? evidenceDecisionExposures
+    : payload?.news_evidence_summary?.decision_event_exposures ?? evidenceDecisionExposures;
+  const evidenceSummaryModelUses = evidencePayloadHasDuplicates
+    ? evidenceModelUses
+    : payload?.news_evidence_summary?.frozen_model_uses ?? evidenceModelUses;
+  const visibleEvidence = canonicalEvidence.filter(row => (
     evidenceMode === "all" || (evidenceMode === "seen" ? row.model_seen : !row.model_seen)
   ));
   const deploymentPresentation = DEPLOYMENT_PRESENTATION[
@@ -835,7 +913,7 @@ export default function AuditView() {
         <a href="/audit?view=briefs" className={view === "briefs" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("briefs"); }}>每日简报 <b>{payload?.daily_news_briefs?.length ?? 0}</b></a>
         <a href="/audit?view=search" className={view === "search" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("search"); }}>搜索 <b>⌕</b></a>
         <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻 <b>{readableNewsTotal}</b></a>
-        <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>新闻证据管理 <b>{payload?.news_evidence_summary?.model_seen_events ?? 0}</b></a>
+        <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>新闻证据管理 <b>{evidenceSummarySeenCount}</b></a>
         <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件脉络 <b>{activeEventTotal}</b></a>
         <a href="/audit?view=decisions" className={view === "decisions" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("decisions"); }}>决策与30分钟结果 <b>{payload?.counts?.decision_events ?? 0}</b></a>
         <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b>{learningState === "ready" ? `${activeLearningIdentities}组` : learningState === "loading" ? "读取中" : "—"}</b></a>
@@ -905,22 +983,22 @@ export default function AuditView() {
         </header>
         <div className="evidence-summary">
           <article><span>收到多少篇新闻</span><strong>{payload?.news_evidence_summary?.distinct_articles ?? 0}</strong><small>共保存 {payload?.news_evidence_summary?.raw_article_revisions ?? 0} 个版本；文章更新不会算成新新闻</small></article>
-          <article><span>历史上用过多少个事件</span><strong>{payload?.news_evidence_summary?.model_seen_events ?? 0}</strong><small>每个都确实参加过至少一次预测</small></article>
-          <article><span>影响过多少次预测</span><strong>{payload?.news_evidence_summary?.decision_event_exposures ?? 0}</strong><small>同一事件可以连续影响多个 5 分钟预测</small></article>
-          <article><span>模型一共读取多少次</span><strong>{payload?.news_evidence_summary?.frozen_model_uses ?? 0}</strong><small>5 套模型分别记账；这不是新闻数量</small></article>
-          <article><span>从未进入预测的事件</span><strong>{payload?.news_evidence_summary?.model_unseen_events ?? 0}</strong><small>可在下方逐条查看没有使用的原因</small></article>
-          <article><span>现在仍可用于预测</span><strong>{payload?.news_evidence_summary?.broad_model_eligible ?? 0}</strong><small>等待下一次预测读取；不代表历史上用过</small></article>
+          <article><span>历史上用过多少个事件</span><strong>{evidenceSummarySeenCount}</strong><small>每个都确实参加过至少一次预测</small></article>
+          <article><span>影响过多少次预测</span><strong>{evidenceSummaryDecisionExposures}</strong><small>同一事件可以连续影响多个 5 分钟预测</small></article>
+          <article><span>模型一共读取多少次</span><strong>{evidenceSummaryModelUses}</strong><small>5 套模型分别记账；这不是新闻数量</small></article>
+          <article><span>从未进入预测的事件</span><strong>{evidenceSummaryUnseenCount}</strong><small>可在下方逐条查看没有使用的原因</small></article>
+          <article><span>现在仍可用于预测</span><strong>{evidenceSummaryEligibleCount}</strong><small>等待下一次预测读取；不代表历史上用过</small></article>
         </div>
         <p className="evidence-count-note"><b>{payload?.news_evidence_summary?.current_contract_exposed_rows ?? 0} 条训练记录</b> 来自 <b>{payload?.news_evidence_summary?.current_contract_distinct_events ?? 0} 个当前合格事件</b>；下方的“未用过”是其他独立事件，不是训练还缺的数量。</p>
         <nav className="evidence-filters" aria-label="模型新闻可见性筛选">
-          <button type="button" className={evidenceMode === "seen" ? "active" : ""} onClick={() => setEvidenceMode("seen")}>历史上用过 <b>{payload?.news_evidence_summary?.model_seen_events ?? 0}</b></button>
-          <button type="button" className={evidenceMode === "unseen" ? "active" : ""} onClick={() => setEvidenceMode("unseen")}>从未用过 <b>{payload?.news_evidence_summary?.model_unseen_events ?? 0}</b></button>
-          <button type="button" className={evidenceMode === "all" ? "active" : ""} onClick={() => setEvidenceMode("all")}>查看全部 <b>{payload?.news_evidence_summary?.displayed_events ?? 0}</b></button>
+          <button type="button" className={evidenceMode === "seen" ? "active" : ""} onClick={() => setEvidenceMode("seen")}>历史上用过 <b>{evidenceSummarySeenCount}</b></button>
+          <button type="button" className={evidenceMode === "unseen" ? "active" : ""} onClick={() => setEvidenceMode("unseen")}>从未用过 <b>{evidenceSummaryUnseenCount}</b></button>
+          <button type="button" className={evidenceMode === "all" ? "active" : ""} onClick={() => setEvidenceMode("all")}>查看全部 <b>{evidenceSummaryDisplayedCount}</b></button>
         </nav>
         <details className="evidence-rule-note"><summary>查看统计规则</summary><p>官方或多源确认使用正常权重；单一可靠来源使用 35% 权重。新闻只从首次收到后生效，按事件类型和有效交易时间逐步衰减。来源身份由固定代码规则统一，不由 Gemini 或 Gemma 自由决定；每个事件下方可直接核对统一身份与原始发布域名。</p></details>
         <div className="evidence-table-wrap"><table className="evidence-table">
           <thead><tr><th>是否用于预测</th><th>新闻事件</th><th>用了多少次 / 为什么没用</th><th>发布时间 / 收到时间</th></tr></thead>
-          <tbody>{visibleEvidence.map((row, index) => <tr key={`${evidenceMode}:${row.event_key}:${index}`}>
+          <tbody>{visibleEvidence.map(row => <tr key={`${evidenceMode}:${row.event_key}`}>
             <td className="evidence-status-cell"><span className={`model-seen-badge ${row.model_seen ? "is-seen" : "is-unseen"}`}>{row.model_seen ? "已用于预测" : "未用于预测"}</span><small><span className="evidence-grade-label">{EVIDENCE_LABELS[row.evidence_grade] ?? row.evidence_grade}</span><span className="evidence-status-copy">{row.model_seen ? "当时确实参与了模型输入" : row.broad_model_eligible ? "现在符合条件，等待下一次预测" : "现在也不符合使用条件"}</span></small></td>
             <td className="evidence-event-cell"><strong>{row.canonical_headline}</strong><div className="evidence-topics">{(row.topics ?? []).map(topic => <span key={topic}>{TOPIC_LABELS[topic] ?? topic}</span>)}</div><small className="evidence-source-identity"><span>统一来源身份：{(row.source_identity_organizations ?? []).join(" · ") || "未确认"}</span><span>原始发布域名：{row.publisher_domains.join(" · ") || "未记录"}</span></small></td>
             <td className="evidence-usage-cell">{row.model_seen ? <><strong>参与 {row.frozen_decisions} 次预测 · 模型读取 {row.frozen_model_uses} 次</strong><small><span className="evidence-model-list">{(row.model_identities ?? []).map(identity => MODEL_LABELS[identity] ?? identity).join(" · ") || "模型名称未记录"}</span><span className="evidence-use-window">首次 {time(row.first_model_decision_time)} · 最近 {time(row.last_model_decision_time)}</span></small></> : <><strong>从未进入任何预测</strong><small>{evidenceReason(row)}</small></>}</td>
