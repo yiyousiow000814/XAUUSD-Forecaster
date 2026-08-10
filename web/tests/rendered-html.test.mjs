@@ -235,6 +235,7 @@ test("shows single events immediately and keeps later changes in one thread", ()
   assert.match(page, /单一事件/);
   assert.match(page, /暂无后续进展/);
   assert.match(page, /第一次进展立即显示，后续变化接在一起/);
+  assert.ok(page.indexOf('className="story-grid"') < page.indexOf('className="theme-streams"'), "events must appear before secondary topic streams");
   assert.match(page, /版本需要更新/);
   assert.doesNotMatch(page, /还没有形成故事链/);
   assert.doesNotMatch(page, /故事开始/);

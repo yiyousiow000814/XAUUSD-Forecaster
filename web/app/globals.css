@@ -568,9 +568,9 @@ body.modal-open { overflow:hidden; }
   .source-health article { grid-template-columns:1fr 1fr; }
   .component-status>div { grid-template-columns:1fr 1fr; }
   .story-grid { grid-template-columns:1fr; }
-  .event-thread-summary { grid-template-columns:1fr; }
-  .event-thread-summary span { justify-content:space-between; border-right:0; border-bottom:1px solid rgba(17,17,15,.22); }
-  .event-thread-summary span:last-child { border-bottom:0; }
+  .event-thread-summary { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .event-thread-summary span { display:grid; justify-content:normal; justify-items:center; gap:3px; padding:10px 4px; border-right:1px solid rgba(17,17,15,.22); border-bottom:0; text-align:center; font-size:10px; }
+  .event-thread-summary span:last-child { border-right:0; }
   .theme-streams>div { grid-template-columns:1fr; }
   .execution-research>div { grid-template-columns:1fr; }
   .version-ledger-head { display:none; }
