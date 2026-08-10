@@ -71,7 +71,8 @@ def canonical_story_episode(event: dict) -> str | None:
     )
     text = "_".join(canonical_id(event.get(name)) for name in (
         "episode_key", "material_event_key", "canonical_object_id", "object",
-        "canonical_headline", "headline", "headline_zh", "action",
+        "canonical_actor_id", "actor", "canonical_headline", "headline",
+        "headline_zh", "action",
     ))
     cook_subject = "lisa_cook" in text or (
         "cook" in text and any(token in text for token in (
@@ -87,6 +88,20 @@ def canonical_story_episode(event: dict) -> str | None:
         "lisa_cook" in object_id or "cook" in object_id or "lisa_cook" in text
     ):
         return f"lisa_cook_removal_{_period(event)}"
+    if ("lisa_cook" in text or "lisa_d_cook" in text) and any(
+        token in text for token in (
+            "rate_hike", "interest_rate", "inflation", "monetary_policy",
+            "加息", "利率", "通胀", "货币政策",
+        )
+    ):
+        return f"lisa_cook_rate_policy_{_period(event)}"
+    if any(token in text for token in (
+        "treasury_borrowing_advisory_committee", "tbac_",
+    )) and any(token in text for token in (
+        "meeting", "minutes", "report", "quarterly_refunding", "auction_sizes",
+        "会议", "纪要",
+    )):
+        return f"tbac_meeting_{_period(event)}"
     return episode or None
 
 

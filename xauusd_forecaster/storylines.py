@@ -231,7 +231,8 @@ def _episode_identity(event: dict) -> str | None:
     structured = "_".join((episode, actor, object_id))
     us_labor_actor = actor in {
         "bls", "bureau_of_labor_statistics", "labor_department",
-        "us_bureau_of_labor_statistics", "us_labor_department",
+        "us_bureau_of_labor_statistics", "u_s_bureau_of_labor_statistics",
+        "us_labor_department",
     }
     us_employment_object = (
         any(token in structured for token in (
@@ -275,6 +276,13 @@ def _episode_identity(event: dict) -> str | None:
         # month publication, and an episode period equal to that publication
         # month. Explicit report periods in the object always win above.
         published = _parse_time(event.get("source_published_time"))
+        if (
+            period is None and us_labor_actor and published is not None
+            and published.day <= 10
+        ):
+            previous_year = published.year if published.month > 1 else published.year - 1
+            previous_month = published.month - 1 if published.month > 1 else 12
+            period = (f"{previous_year:04d}", f"{previous_month:02d}")
         if (
             object_period is None
             and episode_period is not None
@@ -344,6 +352,7 @@ def _record_kind(event: dict) -> str:
         "rise", "rises", "rose", "fall", "falls", "fell", "drop", "drops",
         "gain", "gains", "climb", "climbs", "steady", "surge", "slip",
         "上涨", "下跌", "走高", "走低", "攀升", "回落", "持稳", "大涨", "大跌",
+        "突破",
     ))
     if declared == "FACT_EVENT" and market_instrument and market_move:
         return "MARKET_REACTION"
@@ -390,6 +399,8 @@ def _event_identity(event: dict) -> str:
     """Identify the fact being reported, independently from its article/cluster."""
     episode = _episode_identity(event) or ""
     action_family = _canonical_id(event.get("action_family") or event.get("action"))
+    if episode.startswith(("lisa_cook_rate_policy_", "tbac_meeting_")):
+        return hashlib.sha256(f"{episode}|single-development".encode()).hexdigest()[:20]
     # The initial Employment Situation release is a single material event.
     # Publisher-specific material_event_key values must not split it into many
     # nodes. Explicit revisions remain distinct because they supersede it.
