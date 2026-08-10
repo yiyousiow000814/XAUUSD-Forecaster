@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from .evidence_v2 import ELIGIBILITY_VERSION, FEATURE_VERSION, NEWS_FEATURE_VERSION
+from .decision import select_post_cost_ev_action
 from .execution_costs import ROUND_TRIP_COMMISSION_LOG_COST
 from .forward_ledger import canonical_hash
 from .news_contracts import (
@@ -170,15 +171,7 @@ def _recommended_action(
 ) -> str:
     """Choose the positive post-cost EV direction; uncertainty remains diagnostic."""
     del half_width
-    if ev_long is None or ev_short is None:
-        return "WAIT"
-    if ev_long == ev_short:
-        return "WAIT"
-    if ev_long > ev_short and ev_long > 0:
-        return "LONG"
-    if ev_short > ev_long and ev_short > 0:
-        return "SHORT"
-    return "WAIT"
+    return select_post_cost_ev_action(ev_long, ev_short).value
 
 
 def _news_snapshot_exposed(identity: str, snapshot: dict, features: dict) -> bool:
@@ -369,15 +362,12 @@ def _insert_prediction(ledger, *, decision_id: str, decision_time: datetime,
                        feature_hash: str, predicted: float | None,
                        news_residual: float | None, ev_long: float | None,
                        ev_short: float | None, calibration: dict,
-                       recommended: str, status: str,
-                       guarded_wait: bool = False) -> None:
+                       recommended: str, status: str) -> None:
     width = calibration["half_width"]
     lcb_long = ev_long - width if width is not None and ev_long is not None else None
     lcb_short = ev_short - width if width is not None and ev_short is not None else None
     expected_action = _recommended_action(ev_long, ev_short, width)
-    if recommended != expected_action and not (
-        guarded_wait and recommended == "WAIT"
-    ):
+    if recommended != expected_action:
         raise ValueError(
             f"prediction action violates frozen post-cost EV policy: "
             f"recorded={recommended}, expected={expected_action}"
@@ -496,16 +486,12 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
             ev_long, ev_short, calibration["half_width"],
         )
         recommended = raw_recommended
-        guarded_wait = False
         prediction_status = (
             "READY" if calibration["status"] == "CALIBRATED"
             else "PROVISIONAL_POST_COST_EV"
         )
         if identity in {"NEWS_RESIDUAL", "BROAD_NEWS_RESIDUAL"}:
-            # A residual is a correction term, not a standalone price forecast.
-            recommended = "WAIT"
-            guarded_wait = True
-            prediction_status = "DIAGNOSTIC_RESIDUAL_ONLY"
+            prediction_status = "RESEARCH_RESIDUAL_DIRECTION"
         elif identity == "NEWS_ONLY":
             prediction_status = (
                 "RESEARCH_NEWS_ONLY" if news_exposed
@@ -521,7 +507,6 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
             predicted=predicted, news_residual=news_residual,
             ev_long=ev_long, ev_short=ev_short, calibration=calibration,
             recommended=recommended, status=prediction_status,
-            guarded_wait=guarded_wait,
         )
         created.append({"model_identity": identity, "model_version": update["model_version"],
                         "eligibility_version": update_eligibility,

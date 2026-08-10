@@ -145,7 +145,7 @@ def test_hormuz_episode_aliases_merge_when_structured_anchor_matches():
     assert stories[0]["event_count"] == 2
 
 
-def test_mislabeled_gold_price_fact_cannot_update_core_timeline():
+def test_gold_price_reaction_cannot_update_core_timeline():
     core = event("a", "2026-08-06T01:00:00+00:00", "霍尔木兹谈判开始")
     follow_up = event(
         "a2", "2026-08-06T01:30:00+00:00", "伊朗回应谈判安排",
@@ -193,7 +193,8 @@ def test_market_response_to_jobs_report_cannot_become_core_fact():
     reaction = event(
         "jobs-reaction", "2026-08-07T12:40:00+00:00",
         "美债收益率因美国就业报告疲软而下跌",
-        primary_category="inflation_employment", actor="美国劳工统计局",
+        primary_category="inflation_employment", record_kind="MARKET_REACTION",
+        actor="美国劳工统计局",
         canonical_actor_id="bureau_of_labor_statistics", action="发布",
         action_family="ECONOMIC_RELEASE", object="美国7月就业报告",
         canonical_object_id="us_jobs_report_2026_07", location="美国",
@@ -241,7 +242,8 @@ def test_silver_response_to_jobs_report_cannot_become_core_fact():
     reaction = event(
         "jobs-silver-reaction", "2026-08-07T13:10:00+00:00",
         "白银价格因美国就业报告令人失望而上涨",
-        primary_category="inflation_employment", actor="美国劳工统计局",
+        primary_category="inflation_employment", record_kind="MARKET_REACTION",
+        actor="美国劳工统计局",
         canonical_actor_id="bureau_of_labor_statistics", action="发布",
         action_family="ECONOMIC_RELEASE", object="美国就业报告",
         canonical_object_id="us_jobs_report", location="美国",
@@ -258,7 +260,8 @@ def test_market_bets_after_jobs_report_cannot_become_core_fact():
     reaction = event(
         "jobs-fed-bets", "2026-08-07T13:15:00+00:00",
         "美国就业报告疲软，市场押注美联储九月不会加息",
-        primary_category="inflation_employment", actor="美国劳工统计局",
+        primary_category="inflation_employment", record_kind="MARKET_REACTION",
+        actor="美国劳工统计局",
         canonical_actor_id="bureau_of_labor_statistics", action="发布",
         action_family="ECONOMIC_RELEASE", object="美国就业数据",
         canonical_object_id="us_employment_data", location="美国",
@@ -504,6 +507,7 @@ def test_gold_breakout_article_is_market_reaction_not_jobs_release():
     row = event(
         "gold-reaction", "2026-08-07T21:05:00+00:00",
         "黄金在疲软就业数据公布后实现突破",
+        record_kind="MARKET_REACTION",
         canonical_actor_id="bureau_of_labor_statistics", actor="BLS",
         action_family="ECONOMIC_RELEASE", action="reported",
         canonical_object_id="us_employment_data", object="July jobs",
@@ -586,7 +590,7 @@ def test_commentary_question_cannot_replace_latest_core_change():
     )
     commentary = event(
         "comment", "2026-08-06T02:00:00+00:00", "黄金牛市迎来新支撑？",
-        record_kind="FACT_EVENT", relation_to_prior="FOLLOWED_BY",
+        record_kind="COMMENTARY_FORECAST", relation_to_prior="FOLLOWED_BY",
     )
     story = storyline_rows([core, update, commentary])[0]
     assert story["latest_change"] == update["canonical_headline"]

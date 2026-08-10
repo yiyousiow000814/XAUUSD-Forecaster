@@ -5,6 +5,8 @@ import { useSearchParams } from "next/navigation";
 import DashboardLink from "../_components/DashboardLink";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
+import { isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
+import { PREVIEW_NEWS_PAGE_SIZE } from "../_lib/preview-contract";
 import LearningGraphModal from "../audit/LearningGraphModal";
 
 type Prediction = {
@@ -16,6 +18,8 @@ type Prediction = {
   ev_short_u5: number | null;
   uncertainty_u5: number | null;
   recommended_action: string;
+  research_action?: string;
+  research_action_source?: string;
   effective_action: string;
   prediction_status: string;
 };
@@ -207,6 +211,8 @@ type EvaluationCadence = "EVERY_5M" | "FIXED_30M";
 type CadenceMetric = { oos_rows: number; distinct_days: number; cumulative_quote_return: number; profit_factor_quote_adjusted: number | null; coverage_rate: number | null };
 
 type Payload = {
+  preview_status_summary?: boolean;
+  learning_preview_summary?: boolean;
   generated_at: string;
   system: { online: boolean; market_session?: "OPEN" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE"; source_of_truth: string; sites_mirror: string; deployment?: { runtime_git_sha: string | null; expected_git_sha: string | null; runtime_dirty: boolean; status: string; storyline_policy_version: string; payload_schema_version: string; payload_generated_at: string; source_database_epoch: string | null } };
   counts: Record<string, number>;
@@ -305,7 +311,7 @@ type Payload = {
     version_groups: VersionGroup[];
     rolling_processes: RollingProcess[];
     news_model_activation: NewsModelActivation[];
-    identity_curves: Array<{ model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: Array<{ decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number }>; source_point_count_30m?: number; chart_point_count_30m?: number; chart_downsampled_30m?: boolean; points_30m?: Array<{ decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number }> }>;
+    identity_curves: Array<{ model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: Array<{ decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number; w?: 1 }>; source_point_count_30m?: number; chart_point_count_30m?: number; chart_downsampled_30m?: boolean; points_30m?: Array<{ decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number; w?: 1 }> }>;
     zero_return_baseline: {
       label: string;
       model_identity: string;
@@ -389,7 +395,7 @@ type NewsIndexResponse = {
 
 const time = (value?: string | null) => value ? new Intl.DateTimeFormat("zh-CN", {
   day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit",
-  second: "2-digit", hour12: false,
+  second: "2-digit", hour12: false, timeZone: "Asia/Kuala_Lumpur",
 }).format(new Date(value)) : "—";
 const number = (value?: number | null, digits = 2) => value === null || value === undefined ? "—" : value.toFixed(digits);
 const percent = (value?: number | null) => value === null || value === undefined ? "—" : `${value >= 0 ? "+" : "−"}${Math.abs(value * 100).toFixed(3)}%`;
@@ -401,7 +407,7 @@ const outcomeReason = (codes: string[]) => codes.some(code => code.includes("CLO
       ? "30分钟后没有收到退出报价，样本已隔离"
       : "报价证据不完整，样本已隔离且不进入训练";
 const impulse = (value?: number | null) => value === null || value === undefined ? "—" : `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
-const NEWS_PER_PAGE = 12;
+const NEWS_PER_PAGE = PREVIEW_NEWS_PAGE_SIZE;
 const LEARNING_REFRESH_INTERVAL_MS = 60_000;
 const CATEGORY_ORDER = ["战争/地缘", "利率/Fed", "央行购金", "通胀/就业", "增长/经济", "油价/能源", "美元/流动性", "风险偏好", "监管/其他", "其他"];
 const SOURCE_LABELS: Record<string, string> = {
@@ -433,8 +439,10 @@ const MODEL_LABELS: Record<string, string> = {
   BROAD_FULL: "黄金＋大视野新闻 Ridge",
   NEWS_ONLY: "纯新闻方向 Ridge",
 };
-function predictionStatusLabel(status: string): string {
-  if (status === "DIAGNOSTIC_RESIDUAL_ONLY") return "仅显示修正值，不单独判断方向";
+function predictionStatusLabel(status: string, actionSource?: string): string {
+  if (actionSource === "REPLAYED_FROM_FROZEN_POST_COST_EV") return "按当时冻结 EV 重算方向 · 原始记录为 WAIT";
+  if (status === "RESEARCH_RESIDUAL_DIRECTION") return "修正量自己的30分钟方向研究";
+  if (status === "DIAGNOSTIC_RESIDUAL_ONLY") return "历史版本仅保存修正值";
   if (status === "RESEARCH_NEWS_ONLY") return "只看新闻的30分钟方向研究";
   if (status === "NO_ELIGIBLE_NEWS") return "当前没有合格新闻";
   return status;
@@ -585,6 +593,8 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
   const [detailState, setDetailState] = useState<"idle" | "loading" | "ready" | "error">(
     row.summary_zh !== undefined ? "ready" : "idle",
   );
+  const detailElement = useRef<HTMLDetailsElement>(null);
+  const [detailRetryCount, setDetailRetryCount] = useState(0);
   const current = { ...row, ...(detail ?? {}) };
   const annotationStatus = row.annotation_status === "QUEUED"
     && row.model_visibility !== "NOT_YET_PARSED"
@@ -597,8 +607,7 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
   const translated = Boolean(
     current.original_headline && current.headline !== current.original_headline,
   );
-  const loadDetail = async (event: React.SyntheticEvent<HTMLDetailsElement>) => {
-    if (!event.currentTarget.open || detailState === "loading" || detailState === "ready") return;
+  const fetchDetail = useCallback(async () => {
     if (!row.detail_key) {
       setDetailState("error");
       return;
@@ -612,32 +621,50 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
       if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
       setDetail(body.payload);
       setDetailState("ready");
+      setDetailRetryCount(0);
     } catch {
       setDetailState("error");
     }
+  }, [row.detail_key]);
+  const loadDetail = (event: React.SyntheticEvent<HTMLDetailsElement>) => {
+    if (!event.currentTarget.open || detailState === "loading" || detailState === "ready") return;
+    void fetchDetail();
   };
-  return <details className="news-row" onToggle={loadDetail}>
+  const retryDetail = () => {
+    setDetailRetryCount(0);
+    void fetchDetail();
+  };
+  useEffect(() => {
+    if (detailState !== "error" || detailRetryCount >= 3) return;
+    const timer = window.setTimeout(() => {
+      if (!detailElement.current?.open) return;
+      setDetailRetryCount(count => count + 1);
+      void fetchDetail();
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [detailRetryCount, detailState, fetchDetail]);
+  return <details ref={detailElement} className="news-row" onToggle={loadDetail}>
     <summary>
       <div className="news-row-stamp"><b>{row.category}</b><time title="媒体发布时间；列表按此时间排序">发布 {row.source_published_time ? time(row.source_published_time) : "未知"}</time><small title="系统第一次收到；决定模型当时能否看见">收到 {time(row.collector_first_seen_time)}</small><small className={`eligibility-badge eligibility-${row.model_visibility.toLowerCase().replaceAll("_", "-")}`}>{VISIBILITY_LABELS[row.model_visibility] ?? row.model_visibility.replaceAll("_", " ")}</small></div>
       <div className="news-row-title"><strong>{row.headline}</strong><small>{SOURCE_LABELS[row.source] ?? row.source.replaceAll("_", " ")}{translated ? " · Gemini 中文标题" : ""}{row.emerging_topic_zh ? ` · ${row.emerging_topic_zh}` : ""}</small></div>
       <div className={`news-row-state state-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
-        <b>{row.content_status === "FULL_TEXT" ? `${row.content_characters.toLocaleString()} 字符` : row.content_fetch_status === "UNAVAILABLE" ? "正文不可用" : row.content_fetch_status === "RETRYING" ? "自动重试中" : row.source === "google_news_gold_geopolitics" ? "聚合标题" : "等待正文"}</b>
+        <b>{row.content_status === "FULL_TEXT" ? `${row.content_characters.toLocaleString("zh-CN")} 字符` : row.content_fetch_status === "UNAVAILABLE" ? "正文不可用" : row.content_fetch_status === "RETRYING" ? "自动重试中" : row.source === "google_news_gold_geopolitics" ? "聚合标题" : "等待正文"}</b>
         <small>{annotationStatus === "READY" ? (impactLabel ?? "等待 Gemma 判断") : annotationStatus === "NOT_REQUIRED" ? annotationReasonLabel : row.content_fetch_status === "UNAVAILABLE" ? "保留标题 · 不阻塞" : row.content_fetch_status === "RETRYING" ? "备用抓取中" : annotationStatus === "QUEUED" ? "AI 等待处理中" : annotationStatus === "BACKING_OFF" ? "失败后等待重试" : annotationStatus === "DEAD_LETTER" ? "已隔离待审" : "禁止判断"}</small>
       </div>
     </summary>
     <div className="news-row-detail">
       {detailState === "loading" ? <section className="gemini-summary summary-loading"><span>正在读取新闻详情</span><p>列表与正文详情分开保存，这里只加载你点开的这一条。</p></section>
-      : detailState === "error" ? <section className="gemini-summary summary-waiting"><span>详情同步中</span><p>新闻索引已经到达网页，正文摘要仍在同步；稍后重新点开即可。</p></section>
+      : detailState === "error" ? <section className="gemini-summary summary-waiting"><span>详情暂未到达</span><p>{detailRetryCount >= 3 ? "自动重试已停止。" : "系统正在自动重试。"}<button type="button" onClick={retryDetail}>立即重试</button></p></section>
       : <>
         <div className="news-detail-top">
           <div className={`content-proof content-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
-            {row.content_status === "FULL_TEXT" ? `✓ 已读取正式正文 · ${row.content_characters.toLocaleString()} 字符` : row.content_status === "SOURCE_CONTENT" ? `已读取来源内容 · ${row.content_characters.toLocaleString()} 字符` : row.content_fetch_status === "UNAVAILABLE" ? "发布网站拒绝自动读取或需要登录 · 仅保留标题，不进入模型" : row.content_fetch_status === "RETRYING" ? "首次抓取失败 · 系统将在退避结束后自动重试" : row.source === "google_news_gold_geopolitics" ? "Google News RSS 只提供聚合标题 · 未取得 publisher 正文" : "来源正文尚未抓取 · 禁止 Gemini 判断"}
+            {row.content_status === "FULL_TEXT" ? `✓ 已读取正式正文 · ${row.content_characters.toLocaleString("zh-CN")} 字符` : row.content_status === "SOURCE_CONTENT" ? `已读取来源内容 · ${row.content_characters.toLocaleString("zh-CN")} 字符` : row.content_fetch_status === "UNAVAILABLE" ? "发布网站拒绝自动读取或需要登录 · 仅保留标题，不进入模型" : row.content_fetch_status === "RETRYING" ? "首次抓取失败 · 系统将在退避结束后自动重试" : row.source === "google_news_gold_geopolitics" ? "Google News RSS 只提供聚合标题 · 未取得 publisher 正文" : "来源正文尚未抓取 · 禁止 Gemini 判断"}
           </div>
           {current.link && <a className="source-link" href={current.link} target="_blank" rel="noreferrer">阅读来源 ↗</a>}
         </div>
         {translated ? <p className="original-headline"><b>原文标题</b>{current.original_headline}</p> : null}
         {annotationStatus === "READY" ? <section className="gemini-summary">
-          <span>GEMINI 中文摘要 · 完整读取 {row.content_characters.toLocaleString()} 字符</span><p>{current.summary_zh}</p>
+          <span>GEMINI 中文摘要 · 完整读取 {row.content_characters.toLocaleString("zh-CN")} 字符</span><p>{current.summary_zh}</p>
         </section> : annotationStatus === "QUEUED" ? <section className="gemini-summary summary-queued">
           <span>FLASH-LITE 摘要排队中</span><p>正文已经完整入库，不会截断。系统正通过 {keyCount} 个 key 轮换，每分钟最多生成 {requestsPerMinute} 篇中文摘要；标题翻译会独立交给 Gemma。</p>
         </section> : annotationStatus === "BACKING_OFF" ? <section className="gemini-summary summary-queued">
@@ -689,14 +716,20 @@ export default function AuditView() {
   const [newsPage, setNewsPage] = useState(1);
   const [graphOpen, setGraphOpen] = useState(false);
   const [graphStartTab, setGraphStartTab] = useState<"curve" | "execution">("curve");
+  const fullStatusReadyRef = useRef(Boolean(cachedStatus && !cachedStatus.preview_status_summary));
+  const fullLearningReadyRef = useRef(Boolean(cachedLearning && !cachedLearning.learning_preview_summary));
+  const learningDataAvailableRef = useRef(Boolean(cachedLearning));
+  const learningFailureCountRef = useRef(0);
   const [summaryCadence, setSummaryCadence] = useState<EvaluationCadence>("EVERY_5M");
   const [evidenceMode, setEvidenceMode] = useState<"seen" | "unseen" | "all">("seen");
   const auditTabsRef = useRef<HTMLElement>(null);
+  const immutablePreview = isImmutablePreview(payload);
 
   const refreshStatus = useCallback(async (force = false) => {
     try {
       const body = await loadDashboardResource<Payload>("/api/status", { force });
       setPayload(previous => ({ ...previous, ...body }) as Payload);
+      if (!body.preview_status_summary) fullStatusReadyRef.current = true;
       setStatusState("ready");
       setStatusError(null);
     } catch (reason) {
@@ -710,11 +743,21 @@ export default function AuditView() {
     try {
       const body = await loadDashboardResource<Partial<Payload>>("/api/learning", { force });
       setPayload(previous => ({ ...previous, ...body }) as Payload);
+      learningDataAvailableRef.current = true;
+      learningFailureCountRef.current = 0;
+      if (!body.learning_preview_summary) fullLearningReadyRef.current = true;
       setLearningState("ready");
       setLearningError(null);
     } catch (reason) {
-      setLearningState("error");
-      setLearningError(reason instanceof Error ? reason.message : "无法读取学习进度");
+      learningFailureCountRef.current += 1;
+      setLearningState(learningDataAvailableRef.current ? "ready" : "error");
+      // One transient failure must not replace a valid snapshot with a red
+      // outage banner.  Persistent failures stay visible on the second poll.
+      setLearningError(
+        !learningDataAvailableRef.current || learningFailureCountRef.current >= 2
+          ? (reason instanceof Error ? reason.message : "无法读取学习进度")
+          : null,
+      );
     }
   }, []);
 
@@ -729,32 +772,48 @@ export default function AuditView() {
   }, [newsCategory, newsPage]);
 
   useEffect(() => {
-    const initial = window.setTimeout(() => void refreshStatus(), 0);
-    const interval = window.setInterval(() => {
-      void refreshStatus(true);
-    }, 15_000);
-    return () => { window.clearTimeout(initial); window.clearInterval(interval); };
-  }, [refreshStatus]);
+    return scheduleDashboardRefresh(
+      () => void refreshStatus(!fullStatusReadyRef.current),
+      () => void refreshStatus(true),
+      15_000,
+      immutablePreview,
+    );
+  }, [refreshStatus, immutablePreview]);
 
   useEffect(() => {
     if (view !== "news") return;
-    const initial = window.setTimeout(() => void refreshNews().catch(reason => setNewsError(
-      reason instanceof Error ? reason.message : "无法读取新闻索引",
-    )), 0);
-    const interval = window.setInterval(() => {
-      refreshNews(true).catch(reason => setNewsError(
+    return scheduleDashboardRefresh(
+      () => void refreshNews().catch(reason => setNewsError(
         reason instanceof Error ? reason.message : "无法读取新闻索引",
-      ));
-    }, 15_000);
-    return () => { window.clearTimeout(initial); window.clearInterval(interval); };
-  }, [refreshNews, view]);
+      )),
+      () => void refreshNews(true).catch(reason => setNewsError(
+        reason instanceof Error ? reason.message : "无法读取新闻索引",
+      )),
+      15_000,
+      immutablePreview,
+    );
+  }, [refreshNews, view, immutablePreview]);
 
   useEffect(() => {
     if (view !== "league") return;
-    const initial = window.setTimeout(() => void refreshLearning(), 0);
-    const interval = window.setInterval(() => void refreshLearning(true), LEARNING_REFRESH_INTERVAL_MS);
-    return () => { window.clearTimeout(initial); window.clearInterval(interval); };
-  }, [refreshLearning, view]);
+    // The embedded Preview summary keeps first paint small.  Fetch the complete
+    // D1 ledger as soon as the league is visible so the modal never waits for
+    // the next polling interval.
+    return scheduleDashboardRefresh(
+      () => void refreshLearning(!fullLearningReadyRef.current),
+      () => void refreshLearning(true),
+      LEARNING_REFRESH_INTERVAL_MS,
+      immutablePreview,
+    );
+  }, [refreshLearning, view, immutablePreview]);
+
+  const openLearningGraph = (tab: "curve" | "execution") => {
+    setGraphStartTab(tab);
+    setGraphOpen(true);
+    // Reuse the resource cache's in-flight promise when the idle prefetch is
+    // still running.  This is one D1 request, not a second modal-only fetch.
+    if (!fullLearningReadyRef.current) void refreshLearning(true);
+  };
 
   const selectView = (next: "news" | "evidence" | "stories" | "decisions" | "league" | "coverage") => {
     setView(next);
@@ -1022,8 +1081,8 @@ export default function AuditView() {
             </summary>
             <div className="prediction-grid">
               {row.predictions.map(model => <article key={model.model_version}>
-                <span>{MODEL_LABELS[model.model_identity] ?? model.model_identity}</span><h3>{model.recommended_action}</h3>
-                <p>{predictionStatusLabel(model.prediction_status)}</p>
+                <span>{MODEL_LABELS[model.model_identity] ?? model.model_identity}</span><h3>{model.research_action ?? model.recommended_action}</h3>
+                <p>{predictionStatusLabel(model.prediction_status, model.research_action_source)}</p>
                 <dl><div><dt>方向 U5</dt><dd>{number(model.predicted_direction_u5, 3)}</dd></div><div><dt>News residual</dt><dd>{number(model.predicted_news_residual_u5, 3)}</dd></div><div><dt>Long EV</dt><dd>{number(model.ev_long_u5, 3)}</dd></div><div><dt>Short EV</dt><dd>{number(model.ev_short_u5, 3)}</dd></div><div><dt>不确定性</dt><dd>{number(model.uncertainty_u5, 3)}</dd></div></dl>
                 <small>{model.model_version}</small>
               </article>)}
@@ -1047,7 +1106,7 @@ export default function AuditView() {
         </div>
         <section className="graph-launch">
           <div><h3>查看学习曲线与 K 线</h3><p>长期累计、每组成绩与决策位置</p></div>
-          <button type="button" onClick={() => { setGraphStartTab("curve"); setGraphOpen(true); }}>打开交互图表 ↗</button>
+          <button type="button" onClick={() => openLearningGraph("curve")}>打开交互图表 ↗</button>
         </section>
         <section className="model-score-summary"><header><div><span>LIVE OOS SCOREBOARD</span><h3>六套模型，现在表现怎样？</h3></div><small>左边是本组开始前，箭头后是连续累计，圆点后是本组独立贡献。</small></header><div className="summary-cadence"><span>统计频率</span><button type="button" className={summaryCadence === "EVERY_5M" ? "active" : ""} onClick={() => setSummaryCadence("EVERY_5M")}>每5分钟（重叠）</button><button type="button" className={summaryCadence === "FIXED_30M" ? "active" : ""} onClick={() => setSummaryCadence("FIXED_30M")}>每30分钟（:00 / :30）</button><small>预测期限始终是30分钟。</small></div>
         {(payload?.learning_curves?.models?.length ?? 0) === 0 ? <div className="league-empty">
@@ -1068,11 +1127,11 @@ export default function AuditView() {
           const tone = group === null ? "is-pending" : group >= 0 ? "is-positive" : "is-negative";
           return <article key={identity}><b>{MODEL_LABELS[identity]}{diagnostic ? <small>新闻修正量</small> : newsOnlyPending ? <small>等待新版生成</small> : null}</b><div className="return-flow" aria-label={`本组开始前 ${percent(history)}，加入本组后 ${percent(total)}，本组贡献 ${percent(group)}`}><span className="return-value return-history" title="本组开始前的历史累计"><small>开始前</small><span>{history === null ? "—" : percent(history)}</span></span><i className={tone} aria-hidden="true">→</i><span className="return-value return-total" title="加入本组后的连续累计"><small>当前累计</small><strong>{total === null ? "等待" : percent(total)}</strong></span><i className="return-separator" aria-hidden="true">·</i><span className={`return-value return-group ${tone}`} title="本组独立贡献"><small>本组贡献</small><strong>{group === null ? "等待" : percent(group)}</strong></span></div></article>;
         })}</div>}</section>
-        <ExecutionResearch status={payload?.execution_learning} onOpenGraph={() => { setGraphStartTab("execution"); setGraphOpen(true); }} />
+        <ExecutionResearch status={payload?.execution_learning} onOpenGraph={() => openLearningGraph("execution")} />
         <details className="model-method-note">
           <summary><span>方法与实盘边界</span><small>新闻修正量、成本与 Shadow 限制</small></summary>
           <div>
-            <article><b>“大视野新闻修正量”不是“大视野新闻自身”</b><span>它先看黄金自身预测错了多少，再学习新闻应该把黄金答案往上或往下修多少。例：黄金自身 +0.10 U5，新闻修正 +0.04 U5，只有“黄金＋大视野新闻”才输出完整方向 +0.14 U5。</span></article>
+            <article><b>新闻修正量也显示自己的方向</b><span>正修正显示 LONG，负修正显示 SHORT；它表示新闻把黄金基线往上或往下推，不等于“黄金＋新闻”的完整方向。例：黄金自身 +0.10 U5，新闻修正 +0.04 U5，修正量是 LONG，完整模型为 +0.14 U5。</span></article>
             <article><b>“纯新闻方向”单独回答新闻看涨还是看跌</b><span>它完全不读取黄金行情特征，只用决策时已经看见的合格新闻，直接预测未来30分钟黄金方向；没有合格新闻时显示 WAIT。它与新闻修正量分开评分。</span></article>
             <article><b>成本口径</b><span>收益使用可执行 Bid/Ask，并扣除入场、退出两边各 $30 / 百万美元成交额的 commission；slippage 暂按 0。尚未包含账户真实成交偏差，所以不是实盘 PnL。</span></article>
             <article><b>做法可以实时复现；结果尚未达到实盘标准</b><span>行情和新闻都只读取决策时已经看见的内容；30分钟结果成熟后才进入下一轮训练。当前仍没有下单权限，也不会自动晋升。</span></article>

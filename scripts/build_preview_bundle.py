@@ -22,6 +22,9 @@ package.__path__ = [str(MODULE_ROOT / "xauusd_forecaster")]
 sys.modules["xauusd_forecaster"] = package
 factor_coverage = importlib.import_module("xauusd_forecaster.factors").factor_coverage
 storylines = importlib.import_module("xauusd_forecaster.storylines")
+prediction_research_action = importlib.import_module(
+    "xauusd_forecaster.decision"
+).prediction_research_action
 
 
 DEFAULT_SOURCE = "https://aurum-signal-room.yiyousiow1234.workers.dev"
@@ -33,6 +36,10 @@ SERIES_BY_DOMAIN = {
     "流动性": "WALCL",
     "风险偏好": "VIXCLS",
 }
+PREVIEW_CONTRACT = json.loads(
+    (MODULE_ROOT / "web" / "preview-contract.json").read_text(encoding="utf-8")
+)
+PREVIEW_NEWS_PAGE_SIZE = int(PREVIEW_CONTRACT["newsPageSize"])
 
 
 def _read_json(base_url: str, path: str) -> dict:
@@ -168,16 +175,34 @@ def _rebuild_story_snapshot(status: dict) -> None:
     })
 
 
+def _backfill_prediction_research_actions(status: dict) -> None:
+    """Apply branch display semantics to immutable production predictions."""
+    for decision in status.get("recent_decisions", []):
+        for prediction in decision.get("predictions", []):
+            action, source = prediction_research_action(
+                model_identity=str(prediction.get("model_identity") or ""),
+                prediction_status=str(prediction.get("prediction_status") or ""),
+                recommended_action=str(
+                    prediction.get("recommended_action") or "WAIT"
+                ),
+                ev_long_u5=prediction.get("ev_long_u5"),
+                ev_short_u5=prediction.get("ev_short_u5"),
+            )
+            prediction["research_action"] = action
+            prediction["research_action_source"] = source
+
+
 def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
     status = _read_json(base_url, "/api/status")
+    # Vite keeps only the bounded first-paint summary in the Worker constant.
+    # The complete learning ledger remains authoritative in D1.
     learning = _read_json(base_url, "/api/learning")
-    market_chart = _read_json(base_url, "/api/market-chart")
-    market_chart["history_resource"] = "/api/market-history"
     news_index = _read_json(base_url, "/api/news-index?limit=50")
 
     status["factor_coverage"] = _rebuild_factor_coverage(status)
     _backfill_annotation_reasons(news_index, status)
     _rebuild_story_snapshot(status)
+    _backfill_prediction_research_actions(status)
     status["preview"] = {
         "is_preview": True,
         "branch": branch,
@@ -190,7 +215,7 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
     system["online"] = False
     system["market_session"] = "DATA_UNAVAILABLE"
     system["source_of_truth"] = "PR 构建时公开快照"
-    system["sites_mirror"] = "分支内置只读快照"
+    system["sites_mirror"] = "分支状态快照＋D1结构化资料"
     deployment = system.setdefault("deployment", {})
     deployment.update({
         "runtime_git_sha": commit_sha,
@@ -200,7 +225,7 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
     })
 
     details: dict[str, dict] = {}
-    for item in news_index.get("items", [])[:12]:
+    for item in news_index.get("items", [])[:PREVIEW_NEWS_PAGE_SIZE]:
         detail_key = item.get("detail_key")
         if not isinstance(detail_key, str):
             continue
@@ -214,7 +239,6 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
     return {
         "status": status,
         "learning": learning,
-        "market_chart": market_chart,
         "news_index": news_index,
         "news_details": details,
     }

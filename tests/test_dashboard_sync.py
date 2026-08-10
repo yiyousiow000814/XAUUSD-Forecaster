@@ -7,6 +7,8 @@ import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 
 def _sync_module():
     path = Path(__file__).resolve().parents[1] / "scripts" / "run_dashboard_sync.py"
@@ -51,6 +53,52 @@ def test_preview_does_not_call_late_aggregated_news_expired() -> None:
     row = news_index["items"][0]
     assert row["annotation_reason_code"] == "SEARCH_LEAD"
     assert row["annotation_reason"] == "搜索线索：来自聚合发现源，不是独立官方发布"
+
+
+def test_preview_replays_legacy_residual_direction_without_outcomes() -> None:
+    module = _preview_module()
+    status = {"recent_decisions": [{"predictions": [{
+        "model_identity": "BROAD_NEWS_RESIDUAL",
+        "prediction_status": "DIAGNOSTIC_RESIDUAL_ONLY",
+        "recommended_action": "WAIT",
+        "ev_long_u5": 0.109,
+        "ev_short_u5": -0.129,
+    }]}]}
+
+    module._backfill_prediction_research_actions(status)
+
+    row = status["recent_decisions"][0]["predictions"][0]
+    assert row["research_action"] == "LONG"
+    assert row["research_action_source"] == "REPLAYED_FROM_FROZEN_POST_COST_EV"
+    assert row["recommended_action"] == "WAIT"
+
+
+def test_preview_bundle_keeps_heavy_structured_data_out_of_worker(monkeypatch) -> None:
+    module = _preview_module()
+    requested: list[str] = []
+
+    def read_json(_base_url: str, path: str) -> dict:
+        requested.append(path)
+        if path == "/api/status":
+            return {
+                "generated_at": "2026-08-11T00:00:00+00:00",
+                "factor_coverage": [], "news_source_health": [],
+                "storylines": [], "recent_decisions": [],
+            }
+        if path == "/api/learning":
+            return {"learning_curves": {"models": [], "identity_curves": []}}
+        if path == "/api/news-index?limit=50":
+            return {"items": []}
+        raise AssertionError(f"heavy Preview resource was embedded: {path}")
+
+    monkeypatch.setattr(module, "_read_json", read_json)
+    bundle = module.build_bundle("https://example.invalid", "fix/test", "abc123")
+
+    assert requested == [
+        "/api/status", "/api/learning", "/api/news-index?limit=50",
+    ]
+    assert "learning" in bundle  # Vite compacts and removes this build-time input.
+    assert "market_chart" not in bundle
 
 
 def test_preview_replays_old_story_aliases_through_branch_policy() -> None:
@@ -388,6 +436,71 @@ def test_news_index_batches_stay_bounded() -> None:
         assert len(encoded) <= module.NEWS_INDEX_BATCH_LIMIT_BYTES
 
 
+def test_news_details_are_durable_before_index_is_published(monkeypatch, tmp_path) -> None:
+    module = _sync_module()
+    payload = {
+        "recent_news": [{
+            "source": "example", "source_item_id": "1", "revision_number": 1,
+            "category": "其他",
+            "collector_first_seen_time": "2026-08-10T00:00:00+00:00",
+            "headline": "新闻", "summary_zh": "完整摘要",
+        }],
+    }
+    state_file = tmp_path / "news-state.json"
+    state_file.write_text(json.dumps({
+        "mirror_contract_version": module.NEWS_MIRROR_CONTRACT_VERSION,
+        "hashes": {}, "index_hashes": {},
+    }), encoding="utf-8")
+    posted: list[str] = []
+    monkeypatch.setattr(
+        module, "_post_json", lambda url, _body, _config: posted.append(url)
+    )
+    config = {
+        "remote_ingest_url": "https://remote/api/ingest",
+        "news_state_file": str(state_file), "token": "test",
+    }
+
+    module._sync_news(payload, config)
+
+    assert posted == [
+        "https://remote/api/news-content",
+        "https://remote/api/news-index",
+    ]
+
+
+def test_news_detail_failure_never_publishes_dangling_index(monkeypatch, tmp_path) -> None:
+    module = _sync_module()
+    payload = {
+        "recent_news": [{
+            "source": "example", "source_item_id": "1", "revision_number": 1,
+            "category": "其他",
+            "collector_first_seen_time": "2026-08-10T00:00:00+00:00",
+            "headline": "新闻", "summary_zh": "完整摘要",
+        }],
+    }
+    state_file = tmp_path / "news-state.json"
+    state_file.write_text(json.dumps({
+        "mirror_contract_version": module.NEWS_MIRROR_CONTRACT_VERSION,
+        "hashes": {}, "index_hashes": {},
+    }), encoding="utf-8")
+    posted: list[str] = []
+
+    def fail_detail(url, _body, _config):
+        posted.append(url)
+        raise TimeoutError("detail upload timed out")
+
+    monkeypatch.setattr(module, "_post_json", fail_detail)
+    config = {
+        "remote_ingest_url": "https://remote/api/ingest",
+        "news_state_file": str(state_file), "token": "test",
+    }
+
+    with pytest.raises(TimeoutError, match="detail upload timed out"):
+        module._sync_news(payload, config)
+
+    assert posted == ["https://remote/api/news-content"]
+
+
 def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> None:
     module = _sync_module()
     payload = {
@@ -659,6 +772,24 @@ def test_curve_compaction_preserves_extremes_and_version_boundaries() -> None:
     assert any(point.get("model_version") == "new-version" for point in compact)
     assert compact[0] == points[0]
     assert compact[-1] == points[-1]
+
+
+def test_curve_compaction_preserves_wait_boundaries() -> None:
+    module = _sync_module()
+    points = [
+        {
+            "decision_time": f"2026-08-11T00:{index:02d}:00+00:00",
+            "cumulative_quote_return": float(index),
+            **({"w": 1} if 20 <= index < 30 else {}),
+        }
+        for index in range(60)
+    ]
+    compact = module.compact_curve_points(points, limit=20)
+    retained = {row["decision_time"]: row for row in compact}
+    assert "2026-08-11T00:19:00+00:00" in retained
+    assert retained["2026-08-11T00:20:00+00:00"]["w"] == 1
+    assert retained["2026-08-11T00:29:00+00:00"]["w"] == 1
+    assert "w" not in retained["2026-08-11T00:30:00+00:00"]
 
 
 def test_annotator_heartbeat_reports_idle_loop_as_healthy(tmp_path) -> None:

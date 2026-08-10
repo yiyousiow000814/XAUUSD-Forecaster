@@ -3,5 +3,7 @@ output/
 .playwright-cli/
 __pycache__/
 *.py[cod]
+build/
+*.egg-info/
 ctrader/**/bin/
 ctrader/**/obj/

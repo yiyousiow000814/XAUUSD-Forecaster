@@ -22,14 +22,15 @@ const pageRequest = (request: Request) => {
 
 export async function GET(request: Request) {
   const { page, pageSize, category } = pageRequest(request);
-  if (previewBundle) {
-    const all = previewBundle.news_index.items ?? [];
-    const filtered = category ? all.filter(row => row.category === category) : all;
-    const offset = (page - 1) * pageSize;
+  // The first unfiltered page is the branch-aware immutable snapshot. Other
+  // pages and filters are read-only D1 queries; returning an empty sliced
+  // bundle here made Preview look as if the rest of the archive did not exist.
+  const inlinePreviewItems = previewBundle?.news_index.items ?? [];
+  if (previewBundle && page === 1 && !category && pageSize <= inlinePreviewItems.length) {
     return previewJson({
       ...previewBundle.news_index,
-      items: filtered.slice(offset, offset + pageSize),
-      total: filtered.length,
+      items: inlinePreviewItems.slice(0, pageSize),
+      total: Number(previewBundle.news_index.total ?? inlinePreviewItems.length),
       page,
       page_size: pageSize,
     });
@@ -85,6 +86,13 @@ export async function GET(request: Request) {
     }
   } catch {
     // Fall through to the relay when D1 is temporarily unavailable.
+  }
+
+  // A Preview is allowed to read the shared archive, but it must never replace
+  // a failed archive page with the relay's tiny recent-news window. That would
+  // turn a transient D1 error into a convincing but false empty result.
+  if (previewBundle) {
+    return previewJson({ error: "新闻档案暂时不可用，请稍后重试" }, 503);
   }
 
   const relay = process.env.STATUS_RELAY_URL;
