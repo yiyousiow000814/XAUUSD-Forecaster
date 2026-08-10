@@ -20,7 +20,8 @@ test("renders the live room with an audit-page navigation button", async () => {
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /Aurum Signal Room/);
-  assert.match(html, /新闻与决策/);
+  assert.match(html, /新闻、决策与结果/);
+  assert.match(html, /新闻 \/ 结果/);
   assert.match(html, /系统状态/);
   assert.doesNotMatch(html, /next\/link|rel="prefetch"/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
@@ -323,6 +324,14 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /较晚一段/);
   assert.match(modal, /回到最新/);
   assert.match(modal, /全部历史只画压缩轮廓/);
+  assert.match(modal, /Page through windows that contain real matured results/);
+  assert.match(modal, /Plot result time, not wall-clock time/);
+  assert.match(modal, /curve-gap-bridge/);
+  assert.match(modal, /休市期间没有成熟结果/);
+  assert.match(modal, /curve-gap-carry-in/);
+  assert.match(modal, /窗口开始前有真实结果；中间没有成熟结果/);
+  assert.doesNotMatch(modal, /points\.unshift\(\{ decision_time: new Date\(start\)/);
+  assert.doesNotMatch(modal, /points\.push\(\{ decision_time: new Date\(end\)/);
   assert.match(modal, /成本后EV较高方向/);
   assert.match(modal, /模型版本/);
   assert.match(modal, /历史规则不一致/);
