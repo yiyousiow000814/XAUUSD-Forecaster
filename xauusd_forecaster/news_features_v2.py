@@ -11,6 +11,7 @@ from .factors import MACRO_FEATURE_MAP, NEWS_FEATURES
 from .forward_ledger import canonical_hash
 from .news_evidence import BROAD_NEWS_FEATURES, event_evidence_rows
 from .news_impact import impact_time_rule
+from .news_semantics import ACTIONABLE_CATEGORIES
 
 
 SOURCE_RULES = {
@@ -34,11 +35,6 @@ SOURCE_RULES = {
     "google_news_us_inflation": ("DISPLAY_ONLY", True, 200, "release discovery lane; publisher qualification required"),
     "google_news_fed_rates": ("DISPLAY_ONLY", True, 200, "policy discovery lane; publisher qualification required"),
 }
-
-ACTIONABLE_CATEGORIES = frozenset({
-    "rates_fed", "inflation_employment", "growth_economy", "usd_liquidity",
-    "oil_energy", "war_geopolitics", "central_bank_gold", "risk_sentiment",
-})
 
 EVIDENCE_GRADE_WEIGHT = {
     "PRIMARY": 1.0,

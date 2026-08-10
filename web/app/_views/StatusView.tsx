@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import DashboardLink from "../_components/DashboardLink";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
+import { isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 
 type QuotaKey = {
   slot: number;
@@ -69,7 +70,7 @@ function formatCountdown(target: string | undefined, nowMs: number): string {
 
 function QuotaPanel({ title, eyebrow, quota, nowMs }: { title: string; eyebrow: string; quota?: QuotaState; nowMs: number }) {
   const resetAt = quota?.next_reset_at
-    ? new Date(quota.next_reset_at).toLocaleString("zh-CN", { hour12: false })
+    ? new Date(quota.next_reset_at).toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Kuala_Lumpur" })
     : "—";
   return <section className="quota-panel">
     <div className="quota-panel-head">
@@ -95,6 +96,7 @@ export default function StatusView() {
   const [payload, setPayload] = useState<StatusPayload | null>(() => readDashboardResource<StatusPayload>("/api/status"));
   const [error, setError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(0);
+  const immutablePreview = isImmutablePreview(payload);
 
   const refresh = useCallback(async (force = false) => {
     try {
@@ -106,13 +108,13 @@ export default function StatusView() {
   }, []);
 
   useEffect(() => {
-    const initial = window.setTimeout(() => void refresh(), 0);
-    const timer = window.setInterval(() => void refresh(true), 15_000);
-    return () => {
-      window.clearTimeout(initial);
-      window.clearInterval(timer);
-    };
-  }, [refresh]);
+    return scheduleDashboardRefresh(
+      () => void refresh(),
+      () => void refresh(true),
+      15_000,
+      immutablePreview,
+    );
+  }, [refresh, immutablePreview]);
 
   useEffect(() => {
     const initial = window.setTimeout(() => setNowMs(Date.now()), 0);
@@ -176,7 +178,7 @@ export default function StatusView() {
         <p>Google 实际额度按 project 而不是 API key 计算。如果多个 key 属于同一个 project，它们仍会共享 Google 的额度；本页显示的是本机逐模型、逐 key 的安全账本，不代表 Google 端保证额度。</p>
       </aside>
 
-      <footer><span>每 15 秒刷新 · SHADOW ONLY</span><span>最后状态：{payload?.generated_at ? new Date(payload.generated_at).toLocaleString("zh-CN", { hour12: false }) : "—"}</span></footer>
+      <footer><span>每 15 秒刷新 · SHADOW ONLY</span><span>最后状态：{payload?.generated_at ? new Date(payload.generated_at).toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Kuala_Lumpur" }) : "—"}</span></footer>
     </main>
   );
 }

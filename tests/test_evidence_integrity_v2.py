@@ -34,6 +34,7 @@ from xauusd_forecaster.news_features_v2 import (
     event_raw_weight,
 )
 from xauusd_forecaster.news_impact import impact_time_rule, pending_impact_records
+from xauusd_forecaster.news_semantics import annotation_topics, effective_record_kind
 from xauusd_forecaster.news_time import assess_news_time, category_time_rule
 from xauusd_forecaster.repair_v2 import immutable_table_hash
 from xauusd_forecaster import inference_v2, news_contract_migration, training_v2
@@ -2011,26 +2012,27 @@ def test_commentary_and_low_materiality_are_not_training_evidence(tmp_path) -> N
     ledger.close()
 
 
-def test_diagnostic_residual_wait_keeps_ev_for_audit(tmp_path) -> None:
-    ledger = ForwardLedger(tmp_path / "guarded-wait.sqlite3")
+def test_residual_model_keeps_research_direction_visible(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "visible-residual.sqlite3")
     now = datetime(2026, 8, 10, tzinfo=UTC)
     calibration = {"version": "early", "rows": 30, "blocks": 1, "days": 1,
                    "half_width": 0.2, "status": "EARLY"}
     inference_v2._insert_prediction(
-        ledger, decision_id="guarded", decision_time=now, created_at=now,
-        model_version="full", model_identity="FULL", feature_hash="features",
+        ledger, decision_id="residual", decision_time=now, created_at=now,
+        model_version="broad-news", model_identity="BROAD_NEWS_RESIDUAL",
+        feature_hash="features",
         predicted=0.3, news_residual=0.2, ev_long=0.25, ev_short=-0.35,
-        calibration=calibration, recommended="WAIT",
-        status="DIAGNOSTIC_RESIDUAL_ONLY", guarded_wait=True,
+        calibration=calibration, recommended="LONG",
+        status="RESEARCH_RESIDUAL_DIRECTION",
     )
 
     row = ledger.connection.execute(
         "SELECT recommended_action,ev_long_u5,ev_short_u5,prediction_status "
         "FROM predictions_v2"
     ).fetchone()
-    assert row["recommended_action"] == "WAIT"
+    assert row["recommended_action"] == "LONG"
     assert row["ev_long_u5"] == pytest.approx(0.25)
-    assert row["prediction_status"] == "DIAGNOSTIC_RESIDUAL_ONLY"
+    assert row["prediction_status"] == "RESEARCH_RESIDUAL_DIRECTION"
     ledger.close()
 
 
@@ -2058,14 +2060,34 @@ def test_shadow_composite_keeps_research_direction_visible(tmp_path) -> None:
     ledger.close()
 
 
+def test_controlled_news_semantics_do_not_reclassify_by_substring() -> None:
+    annotation = {
+        "record_kind": "FACT_EVENT",
+        "primary_category": "rates_fed",
+        "secondary_categories": ["growth_economy"],
+    }
+
+    assert effective_record_kind(annotation) == "FACT_EVENT"
+    assert effective_record_kind(
+        annotation, "forward guidance argues against a cut"
+    ) == "FACT_EVENT"
+    assert effective_record_kind(
+        annotation, "Gold gains as Treasury yields fall"
+    ) == "MARKET_REACTION"
+    assert annotation_topics(annotation) == ("rates_fed", "growth_economy")
+    # These used to trigger substring bugs: war in forward and gain in against.
+    assert annotation_topics({
+        **annotation, "headline_zh": "forward guidance argues against a cut",
+    }) == ("rates_fed", "growth_economy")
+
+
 def test_market_wrap_is_display_only_even_when_llm_calls_it_fact(tmp_path) -> None:
     epoch = datetime(2026, 8, 10, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward-market-wrap.sqlite3", now=epoch)
     _append_news(
-        ledger, source="google_news_fed_rates",
-        item="Oil rises, Treasury yields open higher and US equity futures gain",
+        ledger, source="google_news_fed_rates", item="Gold gains as Treasury yields fall",
         first_seen=epoch, parsed_at=epoch + timedelta(seconds=30), impulse=0.2,
-        link="https://finance.yahoo.com/example", primary_category="oil_energy",
+        link="https://finance.yahoo.com/example", primary_category="rates_fed",
         record_kind="FACT_EVENT", materiality=0.8,
     )
 
@@ -2074,6 +2096,36 @@ def test_market_wrap_is_display_only_even_when_llm_calls_it_fact(tmp_path) -> No
     assert row["record_kind"] == "MARKET_REACTION"
     assert row["broad_model_eligible"] is False
     assert "RECORD_KIND_NOT_ACTIONABLE" in row["reason_codes"]
+    ledger.close()
+
+
+def test_current_material_annotation_rejects_unknown_record_kind(tmp_path) -> None:
+    epoch = datetime(2026, 8, 10, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "invalid-record-kind.sqlite3", now=epoch)
+    with pytest.raises(ValueError, match="record_kind is not controlled"):
+        _append_news(
+            ledger, source="google_news_fed_rates", item="official release",
+            first_seen=epoch, parsed_at=epoch + timedelta(seconds=30), impulse=0.2,
+            record_kind="RESPONSE",
+        )
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("document_kind", "NOT_A_KIND"), ("evidence_role", "NOT_A_ROLE")),
+)
+def test_current_material_annotation_rejects_unknown_schema_enum(
+    tmp_path, field: str, value: str,
+) -> None:
+    epoch = datetime(2026, 8, 10, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / f"invalid-{field}.sqlite3", now=epoch)
+    with pytest.raises(ValueError, match=rf"{field} is not controlled"):
+        _append_news(
+            ledger, source="google_news_fed_rates", item=f"invalid {field}",
+            first_seen=epoch, parsed_at=epoch + timedelta(seconds=30), impulse=0.2,
+            annotation_overrides={field: value},
+        )
     ledger.close()
 
 
@@ -2163,7 +2215,7 @@ def test_reliable_media_publication_time_is_safe_event_clock_proxy(tmp_path) -> 
             first_seen=epoch + timedelta(minutes=1),
             parsed_at=epoch + timedelta(minutes=2), impulse=0.0,
             primary_category="war_geopolitics", material_event_key="same-event",
-            event_time=None,
+            event_time="",
         )
     event = event_evidence_rows(ledger, epoch + timedelta(minutes=10))[0]
     assert event["evidence_grade"] == "CORROBORATED"
@@ -2213,7 +2265,7 @@ def test_official_release_timestamp_is_valid_event_clock(tmp_path) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
     _append_news(
         ledger, source="federal_reserve_monetary", item="official-release",
-        first_seen=epoch, parsed_at=epoch, impulse=0.3, event_time=None,
+        first_seen=epoch, parsed_at=epoch, impulse=0.3, event_time="",
     )
     event = event_evidence_rows(ledger, epoch + timedelta(minutes=1))[0]
     assert event["official_model_eligible"] is True

@@ -7,6 +7,8 @@ import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 
 def _sync_module():
     path = Path(__file__).resolve().parents[1] / "scripts" / "run_dashboard_sync.py"
@@ -386,6 +388,71 @@ def test_news_index_batches_stay_bounded() -> None:
             {"items": batch}, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")
         assert len(encoded) <= module.NEWS_INDEX_BATCH_LIMIT_BYTES
+
+
+def test_news_details_are_durable_before_index_is_published(monkeypatch, tmp_path) -> None:
+    module = _sync_module()
+    payload = {
+        "recent_news": [{
+            "source": "example", "source_item_id": "1", "revision_number": 1,
+            "category": "其他",
+            "collector_first_seen_time": "2026-08-10T00:00:00+00:00",
+            "headline": "新闻", "summary_zh": "完整摘要",
+        }],
+    }
+    state_file = tmp_path / "news-state.json"
+    state_file.write_text(json.dumps({
+        "mirror_contract_version": module.NEWS_MIRROR_CONTRACT_VERSION,
+        "hashes": {}, "index_hashes": {},
+    }), encoding="utf-8")
+    posted: list[str] = []
+    monkeypatch.setattr(
+        module, "_post_json", lambda url, _body, _config: posted.append(url)
+    )
+    config = {
+        "remote_ingest_url": "https://remote/api/ingest",
+        "news_state_file": str(state_file), "token": "test",
+    }
+
+    module._sync_news(payload, config)
+
+    assert posted == [
+        "https://remote/api/news-content",
+        "https://remote/api/news-index",
+    ]
+
+
+def test_news_detail_failure_never_publishes_dangling_index(monkeypatch, tmp_path) -> None:
+    module = _sync_module()
+    payload = {
+        "recent_news": [{
+            "source": "example", "source_item_id": "1", "revision_number": 1,
+            "category": "其他",
+            "collector_first_seen_time": "2026-08-10T00:00:00+00:00",
+            "headline": "新闻", "summary_zh": "完整摘要",
+        }],
+    }
+    state_file = tmp_path / "news-state.json"
+    state_file.write_text(json.dumps({
+        "mirror_contract_version": module.NEWS_MIRROR_CONTRACT_VERSION,
+        "hashes": {}, "index_hashes": {},
+    }), encoding="utf-8")
+    posted: list[str] = []
+
+    def fail_detail(url, _body, _config):
+        posted.append(url)
+        raise TimeoutError("detail upload timed out")
+
+    monkeypatch.setattr(module, "_post_json", fail_detail)
+    config = {
+        "remote_ingest_url": "https://remote/api/ingest",
+        "news_state_file": str(state_file), "token": "test",
+    }
+
+    with pytest.raises(TimeoutError, match="detail upload timed out"):
+        module._sync_news(payload, config)
+
+    assert posted == ["https://remote/api/news-content"]
 
 
 def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> None:

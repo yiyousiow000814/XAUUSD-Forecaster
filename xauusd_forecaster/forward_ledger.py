@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .news_semantics import NEWS_CATEGORIES, RECORD_KINDS, validate_news_annotation
+
 
 UTC = timezone.utc
 IMMUTABLE_TABLES = (
@@ -589,16 +591,14 @@ class ForwardLedger:
             storyline_fields, event_claim_fields, material_event_fields,
         ):
             raise ValueError("annotation does not match frozen JSON schema fields")
+        if set(vector) == material_event_fields:
+            validate_news_annotation(vector)
         if "summary_zh" in vector and not str(vector["summary_zh"]).strip():
             raise ValueError("annotation summary_zh is empty")
         if "headline_zh" in vector and not str(vector["headline_zh"]).strip():
             raise ValueError("annotation headline_zh is empty")
         if classified_fields <= set(vector):
-            allowed_categories = {
-                "rates_fed", "inflation_employment", "growth_economy",
-                "usd_liquidity", "oil_energy", "war_geopolitics",
-                "central_bank_gold", "risk_sentiment", "regulation_other",
-            }
+            allowed_categories = NEWS_CATEGORIES
             if vector["primary_category"] not in allowed_categories:
                 raise ValueError("annotation primary_category is not controlled")
             secondary = list(vector["secondary_categories"])
@@ -610,11 +610,8 @@ class ForwardLedger:
                 raise ValueError("annotation category cannot be both primary and secondary")
             if len(str(vector["emerging_topic_zh"])) > 16:
                 raise ValueError("annotation emerging_topic_zh is too long")
-        if set(vector) == event_claim_fields:
-            if vector["record_kind"] not in {
-                "FACT_EVENT", "OFFICIAL_CLAIM", "MARKET_REACTION",
-                "COMMENTARY_FORECAST", "BACKGROUND",
-            }:
+        if event_claim_fields <= set(vector):
+            if vector["record_kind"] not in RECORD_KINDS:
                 raise ValueError("annotation record_kind is not controlled")
             if not 0.0 <= float(vector["materiality"]) <= 1.0:
                 raise ValueError("annotation materiality is outside [0, 1]")

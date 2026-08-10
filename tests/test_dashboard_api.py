@@ -141,7 +141,7 @@ def _append_basic_annotation(
     item_id: str,
     digest: str,
     parsed_at: datetime,
-    prompt_version: str = "news-json-v9-local-display-recovery",
+    prompt_version: str = "news-json-v14-material-event-evidence",
     event_time: datetime | None = None,
 ) -> None:
     annotation = {
@@ -278,7 +278,7 @@ def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
         {
             **common, "translation_id": "placeholder",
             "headline_zh": INVALID_CHINESE_TITLE,
-            "prompt_version": "news-json-v9-local-display-recovery",
+            "prompt_version": "headline-zh-placeholder-test",
             "parsed_at": now + timedelta(seconds=1),
         }
     )
