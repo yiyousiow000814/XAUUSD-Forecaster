@@ -53,11 +53,10 @@ def test_core_fact_and_market_reaction_are_separated():
         actor="黄金", action="上涨", object="", canonical_actor_id="gold",
         action_family="OTHER_FACT", canonical_object_id="risk_premium",
     )
-    story = storyline_rows([core, confirmation, reaction])[0]
-    assert story["event_count"] == 1
-    assert story["evidence_document_count"] == 2
-    assert story["latest_change"] == core["canonical_headline"]
-    assert [row["headline"] for row in story["market_reactions"]] == [reaction["canonical_headline"]]
+    graph = temporal_event_graph([core, confirmation, reaction])
+    assert graph["stories"] == []
+    assert graph["event_candidates"][0]["evidence_documents"] == 2
+    assert graph["market_reaction_streams"][0]["latest_headline"] == reaction["canonical_headline"]
 
 
 def test_spacex_amd_and_generic_commentary_cannot_create_hormuz_story():
@@ -357,6 +356,87 @@ def test_same_central_bank_documents_are_one_event_and_one_organization():
     candidate = graph["event_candidates"][0]
     assert candidate["evidence_documents"] == 2
     assert candidate["independent_publishers"] == 1
+
+
+def test_declared_publisher_and_its_domain_count_as_one_organization():
+    row = event(
+        "cnbc", "2026-08-07T18:00:00+00:00", "同一家媒体的一篇报道",
+        source_organizations=("cnbc",), source_organization_id="cnbc",
+        publisher_domains=("cnbc.com",),
+    )
+    candidate = temporal_event_graph([row])["event_candidates"][0]
+    assert candidate["independent_publishers"] == 1
+
+
+def test_lisa_cook_aliases_are_one_event_candidate_not_three_stories():
+    rows = [
+        event(
+            "cnbc", "2026-08-07T17:45:00+00:00",
+            "特朗普重启解雇美联储理事丽莎·库克的努力",
+            canonical_actor_id="donald_trump", actor="Donald Trump",
+            action="renews bid to fire", action_family="OFFICIAL_STATEMENT",
+            object="Lisa Cook", canonical_object_id="lisa_cook",
+            location="Washington", canonical_location_id="washington_dc",
+            episode_key="trump_fires_lisa_cook_2026_08",
+            material_event_key="trump_lisa_cook_dismissal_effort_2026",
+            relation_to_prior="ESCALATES", source_organizations=("cnbc",),
+            publisher_domains=("cnbc.com",),
+        ),
+        event(
+            "guardian", "2026-08-07T18:47:00+00:00",
+            "特朗普不顾法院裁决，再次企图解雇丽莎·库克",
+            canonical_actor_id="donald_trump", actor="Donald Trump",
+            action="renews bid to fire", action_family="POLICY_DECISION",
+            object="Lisa Cook", canonical_object_id="lisa_cook",
+            location="Washington", canonical_location_id="washington_dc",
+            episode_key="trump_fire_cook_aug_2026",
+            material_event_key="trump_lisa_cook_firing_2026_08",
+            relation_to_prior="ESCALATES", source_organizations=("the_guardian",),
+            publisher_domains=("theguardian.com",),
+        ),
+        event(
+            "npr", "2026-08-07T19:35:00+00:00",
+            "特朗普再度推进罢免美联储理事丽莎·库克",
+            canonical_actor_id="white_house", actor="White House",
+            action="threatens to fire", action_family="REGULATORY_ACTION",
+            object="Lisa Cook", canonical_object_id="lisa_cook",
+            location="Washington", canonical_location_id="washington_dc",
+            episode_key="trump_fires_lisa_cook_aug_2026",
+            material_event_key="trump_lisa_cook_dismissal_push_2026_08",
+            relation_to_prior="ESCALATES", source_organizations=("npr",),
+            publisher_domains=("npr.org",),
+        ),
+    ]
+    graph = temporal_event_graph(rows)
+    assert graph["stories"] == []
+    assert len(graph["event_candidates"]) == 1
+    candidate = graph["event_candidates"][0]
+    assert candidate["episode_key"] == "lisa_cook_removal_2026_08"
+    assert candidate["evidence_documents"] == 3
+    assert candidate["independent_publishers"] == 3
+
+
+def test_lisa_cook_court_decision_is_a_distinct_story_development():
+    attempt = event(
+        "attempt", "2026-08-07T18:00:00+00:00",
+        "特朗普重启罢免丽莎·库克的行动",
+        canonical_actor_id="donald_trump", action_family="REGULATORY_ACTION",
+        canonical_object_id="lisa_cook", object="Lisa Cook",
+        episode_key="trump_fires_lisa_cook_2026_08",
+        material_event_key="removal_attempt", relation_to_prior="ESCALATES",
+    )
+    ruling = event(
+        "ruling", "2026-08-08T15:00:00+00:00",
+        "法院裁决驳回罢免丽莎·库克的申请",
+        canonical_actor_id="supreme_court", actor="法院",
+        action="作出法院裁决", action_family="COURT_DECISION",
+        canonical_object_id="lisa_cook_removal", object="丽莎·库克罢免案",
+        episode_key="lisa_cook_firing_case_2026_08",
+        material_event_key="cook_court_ruling", relation_to_prior="DEESCALATES",
+    )
+    story = storyline_rows([attempt, ruling])[0]
+    assert story["episode_key"] == "lisa_cook_removal_2026_08"
+    assert story["event_count"] == 2
 
 
 def test_timeline_uses_event_time_not_collector_arrival_order():
