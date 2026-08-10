@@ -8,6 +8,21 @@
 4. Identify obsolete code.
 5. Add or update tests.
 
+## Web And Mobile Experience
+
+- Treat desktop and mobile as separate acceptance surfaces. A desktop pass does
+  not prove the phone experience works.
+- Verify every user-facing web change on the deployed branch Preview, not only
+  with a local build or source inspection.
+- At minimum, check desktop plus 390x844 and 360x800 phone viewports. Confirm
+  there is no unintended horizontal overflow, clipped content, blocked result,
+  or unreachable control.
+- Exercise the complete affected flow on a phone: open, navigate, scroll,
+  select, paginate or expand, return, and close as applicable. Interactive
+  targets should be at least 44x44 CSS pixels.
+- Add or update automated coverage, and record the Preview URL and responsive
+  checks in the pull request before calling the change complete.
+
 ## Version Handover
 
 - A model-rule handover may keep the active and target implementations together

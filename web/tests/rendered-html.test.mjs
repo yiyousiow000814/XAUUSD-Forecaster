@@ -399,6 +399,7 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /aria-label="上一页训练组"/);
   assert.match(modal, /aria-label="下一页训练组"/);
   assert.match(modal, /position="bottom"/);
+  assert.match(modal, /className="version-list-anchor"/);
   assert.match(modal, /共同训练截止量对齐/);
   assert.match(modal, /查看模型明细/);
   assert.match(modal, /最近20个训练截止点/);
@@ -496,6 +497,8 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.doesNotMatch(modal, /30分钟退出线/);
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(css, /\.version-pagination/);
+  assert.match(css, /\.version-pagination button \{ width:46px; height:46px/);
+  assert.match(css, /font-size:clamp\(24px,7vw,28px\)/);
   assert.match(css, /height:calc\(100dvh - 16px\)/);
   assert.match(css, /grid-template-rows:auto auto minmax\(0,1fr\) auto/);
   assert.match(modal, /graph-modal-\$\{tab\}/);

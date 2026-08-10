@@ -204,8 +204,9 @@ function VersionLedger({ groups }: { groups: VersionGroup[] }) {
       </svg> : <Empty text="这个频率还没有成熟的训练组结果。" />}
       <div className="chart-legend">{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <span key={key}><i style={{ background:COLORS[key] }} />{label}</span>)}</div>
     </section>
+    <div ref={resultListRef} className="version-list-anchor" aria-hidden="true" />
     {pageCount > 1 && <VersionPagination page={safePage} pageCount={pageCount} total={rows.length} onPage={goToPage} />}
-    <div ref={resultListRef} className="version-ledger-head"><span>组别 / 状态</span><span>训练与上线</span><span>创建后 OOS</span><span>本组独立收益</span><span>PF / 出方向</span></div>
+    <div className="version-ledger-head"><span>组别 / 状态</span><span>训练与上线</span><span>创建后 OOS</span><span>本组独立收益</span><span>PF / 出方向</span></div>
     {visibleRows.map(row => { const selected = metric(row); return <article key={`${row.model_identity}-${row.training_dataset_hash}`} className={row.lifecycle_status === "LATEST" ? "is-latest" : ""}>
       <div className="version-result-head">
         <span className="version-group"><b>第 {row.generation} 组</b><small>{row.lifecycle_status === "LATEST" ? "最新版" : row.lifecycle_status === "PREVIOUS" ? "前一版" : "已归档"}</small></span>
