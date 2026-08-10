@@ -324,6 +324,14 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /较晚一段/);
   assert.match(modal, /回到最新/);
   assert.match(modal, /全部历史只画压缩轮廓/);
+  assert.match(modal, /Page through windows that contain real matured results/);
+  assert.match(modal, /Plot result time, not wall-clock time/);
+  assert.match(modal, /curve-gap-bridge/);
+  assert.match(modal, /休市期间没有成熟结果/);
+  assert.match(modal, /curve-gap-carry-in/);
+  assert.match(modal, /窗口开始前有真实结果；中间没有成熟结果/);
+  assert.doesNotMatch(modal, /points\.unshift\(\{ decision_time: new Date\(start\)/);
+  assert.doesNotMatch(modal, /points\.push\(\{ decision_time: new Date\(end\)/);
   assert.match(modal, /成本后EV较高方向/);
   assert.match(modal, /模型版本/);
   assert.match(modal, /历史规则不一致/);

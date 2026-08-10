@@ -216,34 +216,62 @@ function LongCurve({ curves }: { curves: Curve[] }) {
   const usable = curves.map(row => cadence === "FIXED_30M" ? { ...row, points: row.points_30m ?? [], source_point_count: row.source_point_count_30m, chart_point_count: row.chart_point_count_30m, chart_downsampled: row.chart_downsampled_30m } : row).filter(row => row.model_identity !== "CHAMPION_0" && row.points.length > 0);
   const overviewPoints = usable.flatMap(row => row.points);
   if (!overviewPoints.length) return <Empty text="还没有已成熟的 Live OOS 点；第一个预测走完30分钟后才会出现。" />;
-  const fullStart = Math.min(...overviewPoints.map(point => Date.parse(point.decision_time)));
-  const fullEnd = Math.max(...overviewPoints.map(point => Date.parse(point.decision_time)));
+  const availableResultTimes = [...new Set(overviewPoints.map(point => Date.parse(point.decision_time)))].sort((a, b) => a - b);
+  const fullStart = availableResultTimes[0];
+  const fullEnd = availableResultTimes.at(-1)!;
   const rangeMs = range === "24h" ? 24 * 3_600_000 : range === "7d" ? 7 * 86_400_000 : range === "30d" ? 30 * 86_400_000 : Math.max(1, fullEnd-fullStart);
-  const requestedEnd = range === "all" ? fullEnd : fullEnd - pageOffset * rangeMs;
-  const requestedStart = range === "all" ? fullStart : requestedEnd - rangeMs;
-  const start = Math.max(fullStart, requestedStart);
-  const end = Math.min(fullEnd, requestedEnd);
+  // Page through windows that contain real matured results. A market closure
+  // is not a page of flat scores, so jump directly to the previous result.
+  const resultWindows = range === "all" ? [{ start: fullStart, end: fullEnd }] : (() => {
+    const windows: Array<{ start: number; end: number }> = [];
+    let endIndex = availableResultTimes.length - 1;
+    while (endIndex >= 0) {
+      const windowEnd = availableResultTimes[endIndex];
+      const cutoff = windowEnd - rangeMs;
+      let startIndex = endIndex;
+      while (startIndex > 0 && availableResultTimes[startIndex - 1] >= cutoff) startIndex -= 1;
+      windows.push({ start: availableResultTimes[startIndex], end: windowEnd });
+      endIndex = startIndex - 1;
+    }
+    return windows;
+  })();
+  const activePage = Math.min(pageOffset, resultWindows.length - 1);
+  const { start, end } = resultWindows[activePage];
   const visibleCurves = usable.map(row => {
-    if (range === "all") return row;
-    const before = row.points.filter(point => Date.parse(point.decision_time) <= start).at(-1);
-    const within = row.points.filter(point => {
+    const previousPoint = row.points.filter(point => Date.parse(point.decision_time) < start).at(-1);
+    const points = row.points.filter(point => {
       const time = Date.parse(point.decision_time);
       return time >= start && time <= end;
     });
-    const points = [...within];
-    if (before && (!points.length || Date.parse(points[0].decision_time) > start)) {
-      points.unshift({ decision_time: new Date(start).toISOString(), cumulative_quote_return: before.cumulative_quote_return });
-    }
-    if (points.length && Date.parse(points.at(-1)!.decision_time) < end) {
-      points.push({ decision_time: new Date(end).toISOString(), cumulative_quote_return: points.at(-1)!.cumulative_quote_return });
-    }
-    return { ...row, points };
+    return { ...row, points, previousPoint };
   }).filter(row => row.points.length > 0);
   const visiblePoints = visibleCurves.flatMap(row => row.points);
   const values = visiblePoints.map(point => point.cumulative_quote_return).concat(0);
   const low = Math.min(...values); const high = Math.max(...values);
-  const x = (time: string) => 58 + (Date.parse(time) - start) / Math.max(1, end - start) * 862;
-  const tickTimes = Array.from(new Set([0, .25, .5, .75, 1].map(part => new Date(start + (end - start) * part).toISOString())));
+  const visibleResultTimes = [...new Set(visiblePoints.map(point => Date.parse(point.decision_time)))].sort((a, b) => a - b);
+  const expectedStep = cadence === "FIXED_30M" ? 30 * 60_000 : 5 * 60_000;
+  const gapThreshold = Math.max(45 * 60_000, expectedStep * 3);
+  // Plot result time, not wall-clock time. Long closures receive one compact
+  // break and never consume the width of the OOS chart.
+  const resultPlotUnits = visibleResultTimes.map((time, index) => index === 0 ? 0 : Math.min(
+    4,
+    Math.max(1, (time - visibleResultTimes[index - 1]) / expectedStep),
+  )).reduce<number[]>((units, step, index) => [
+    ...units,
+    index === 0 ? 0 : units[index - 1] + step,
+  ], []);
+  const totalResultPlotUnits = Math.max(1, resultPlotUnits.at(-1) ?? 1);
+  const resultX = new Map(visibleResultTimes.map((time, index) => [time, 58 + resultPlotUnits[index] / totalResultPlotUnits * 862]));
+  const x = (time: string) => resultX.get(Date.parse(time)) ?? 58;
+  const tickIndices = Array.from(new Set([0, .25, .5, .75, 1].map(part => Math.round((visibleResultTimes.length - 1) * part))));
+  const tickTimes = tickIndices.map(index => new Date(visibleResultTimes[index]).toISOString());
+  const curveRuns = (points: CurvePoint[]) => points.reduce<CurvePoint[][]>((runs, point) => {
+    const current = runs.at(-1);
+    const previous = current?.at(-1);
+    if (!current || (previous && Date.parse(point.decision_time) - Date.parse(previous.decision_time) >= gapThreshold)) runs.push([point]);
+    else current.push(point);
+    return runs;
+  }, []);
   const axisLabel = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
   const versionBoundaries = visibleCurves.flatMap(row => row.points.flatMap((point, index) => {
     if (index === 0 || !point.model_version) return [];
@@ -333,16 +361,16 @@ function LongCurve({ curves }: { curves: Curve[] }) {
   const sourcePointCount = usable.reduce((total, row) => total + (row.source_point_count ?? row.points.length), 0);
   const sourceTimeCount = Math.max(...usable.map(row => row.source_point_count ?? row.points.length));
   const chartDownsampled = usable.some(row => row.chart_downsampled);
-  const canGoEarlier = range !== "all" && requestedStart > fullStart;
-  const canGoLater = range !== "all" && pageOffset > 0;
+  const canGoEarlier = range !== "all" && activePage < resultWindows.length - 1;
+  const canGoLater = range !== "all" && activePage > 0;
   const windowLabel = `${axisLabel(new Date(start).toISOString())} — ${axisLabel(new Date(end).toISOString())}`;
   return <div className="chart-block long-curve-block">
     <div className="chart-caption"><div><b>历史＋实时成熟 OOS（只追加，不重写）</b><span>数据库永久保留每个成熟结果；图表固定宽度，按时间窗口查看，全部历史只画压缩轮廓。</span></div><strong>{sourceTimeCount} 个时点<small> · {sourcePointCount} 条模型评分</small></strong></div>
     <div className="curve-navigation" aria-label="长期 OOS 时间范围">
       <label>统计频率<select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPageOffset(0); }}><option value="EVERY_5M">每5分钟（重叠）</option><option value="FIXED_30M">每30分钟（非重叠）</option></select></label>
       <label>时间窗口<select value={range} onChange={event => { setRange(event.target.value as typeof range); setPageOffset(0); }}><option value="24h">24小时</option><option value="7d">7天</option><option value="30d">30天</option><option value="all">全部总览</option></select></label>
-      <button type="button" disabled={!canGoEarlier} onClick={() => setPageOffset(value => value + 1)}>← 较早一段</button>
-      <button type="button" disabled={!canGoLater} onClick={() => setPageOffset(value => Math.max(0, value - 1))}>较晚一段 →</button>
+      <button type="button" disabled={!canGoEarlier} onClick={() => setPageOffset(activePage + 1)}>← 较早一段</button>
+      <button type="button" disabled={!canGoLater} onClick={() => setPageOffset(Math.max(0, activePage - 1))}>较晚一段 →</button>
       <button type="button" disabled={pageOffset === 0} onClick={() => setPageOffset(0)}>回到最新</button>
       <span>{windowLabel}{chartDownsampled ? ` · 全历史 ${sourcePointCount} 条已压缩为 ${overviewPoints.length} 个绘图点` : ` · 当前 ${visiblePoints.length} 个绘图点`}</span>
     </div>
@@ -369,7 +397,25 @@ function LongCurve({ curves }: { curves: Curve[] }) {
           </>}
         </g>;
       })}
-      {visibleCurves.map(row => <polyline key={row.model_identity} fill="none" stroke={COLORS[row.model_identity]} strokeWidth="3" points={row.points.map(point => `${x(point.decision_time)},${y(point.cumulative_quote_return)}`).join(" ")} />)}
+      {visibleCurves.flatMap(row => {
+        const runs = curveRuns(row.points);
+        const first = runs[0]?.[0];
+        const carryIn = row.previousPoint && first
+          && Date.parse(first.decision_time) - Date.parse(row.previousPoint.decision_time) >= gapThreshold
+          && x(first.decision_time) > 59
+          ? <line key={`${row.model_identity}-carry-in`} className="curve-gap-bridge curve-gap-carry-in" stroke={COLORS[row.model_identity]} x1="58" y1={y(row.previousPoint.cumulative_quote_return)} x2={x(first.decision_time)} y2={y(first.cumulative_quote_return)}><title>窗口开始前有真实结果；中间没有成熟结果</title></line>
+          : null;
+        return [carryIn, ...runs.flatMap((run, index) => {
+          const previous = runs[index - 1]?.at(-1);
+          const bridge = previous && run[0]
+            ? <line key={`${row.model_identity}-bridge-${index}`} className="curve-gap-bridge" stroke={COLORS[row.model_identity]} x1={x(previous.decision_time)} y1={y(previous.cumulative_quote_return)} x2={x(run[0].decision_time)} y2={y(run[0].cumulative_quote_return)}><title>休市期间没有成熟结果</title></line>
+            : null;
+          const curve = run.length === 1
+            ? <circle key={`${row.model_identity}-run-${index}`} cx={x(run[0].decision_time)} cy={y(run[0].cumulative_quote_return)} r="4" fill={COLORS[row.model_identity]} />
+            : <polyline key={`${row.model_identity}-run-${index}`} fill="none" stroke={COLORS[row.model_identity]} strokeWidth="3" points={run.map(point => `${x(point.decision_time)},${y(point.cumulative_quote_return)}`).join(" ")} />;
+          return [bridge, curve];
+        })];
+      })}
       {tickTimes.map(value => <g key={value} className="time-axis"><line x1={x(value)} x2={x(value)} y1="350" y2="356" /><text x={x(value)} y="374" textAnchor="middle">{axisLabel(value)}</text></g>)}
     </svg>
     </div>
