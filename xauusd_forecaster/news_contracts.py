@@ -13,15 +13,15 @@ class NewsContract:
     policy_version: str
 
 
-SEMANTIC_IMPACT_V6 = NewsContract(
-    name="semantic-impact-v6",
-    feature_version="eligible-news-event-evidence-v8-quality-scaled-impact",
-    eligibility_version="news-source-eligibility-v7-semantic-impact-after-receipt",
-    policy_version="news-event-evidence-v6-semantic-impact-lifetime",
+SEMANTIC_IMPACT_V8 = NewsContract(
+    name="semantic-impact-v8",
+    feature_version="eligible-news-event-evidence-v10-absolute-trust-weight",
+    eligibility_version="news-source-eligibility-v9-independent-origin",
+    policy_version="news-event-evidence-v8-versioned-membership",
 )
 
 SUPPORTED_NEWS_CONTRACTS = (
-    SEMANTIC_IMPACT_V6,
+    SEMANTIC_IMPACT_V8,
 )
 CURRENT_NEWS_CONTRACT = SUPPORTED_NEWS_CONTRACTS[-1]
 NEWS_CONTRACT_BY_ELIGIBILITY = {

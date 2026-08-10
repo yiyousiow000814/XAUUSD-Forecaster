@@ -176,6 +176,9 @@ def test_sites_bypass_header_is_not_sent_to_cloudflare(monkeypatch) -> None:
     class Response:
         status = 200
 
+        def read(self):
+            return b'{}'
+
         def __enter__(self):
             return self
 
@@ -197,6 +200,36 @@ def test_sites_bypass_header_is_not_sent_to_cloudflare(monkeypatch) -> None:
     assert "Oai-sites-authorization" in captured[0]
     assert "Oai-sites-authorization" not in captured[1]
     assert captured[1]["User-agent"] == "AurumSignalRoomMirror/1.0"
+
+
+def test_ingest_response_records_valid_main_revision(tmp_path, monkeypatch) -> None:
+    module = _sync_module()
+    revision = "a" * 40
+    signal = tmp_path / "remote-main-signal.json"
+    monkeypatch.setattr(module, "DEFAULT_RUNTIME_SIGNAL", signal)
+
+    class Response:
+        status = 200
+
+        def read(self):
+            return json.dumps({"status": "OK", "main_revision": revision}).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        module.urllib.request, "urlopen", lambda *_args, **_kwargs: Response()
+    )
+
+    result = module._post_json(
+        "https://example.workers.dev/api/ingest", b"{}", {"token": "token"}
+    )
+
+    assert result["main_revision"] == revision
+    assert json.loads(signal.read_text(encoding="utf-8"))["main_revision"] == revision
 
 
 def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:

@@ -29,8 +29,11 @@ from xauusd_forecaster.news_contracts import (
     CURRENT_NEWS_CONTRACT,
     NewsContract,
 )
-from xauusd_forecaster.news_features_v2 import aggregate_news_features_v2
-from xauusd_forecaster.news_impact import impact_time_rule
+from xauusd_forecaster.news_features_v2 import (
+    aggregate_news_features_v2,
+    event_raw_weight,
+)
+from xauusd_forecaster.news_impact import impact_time_rule, pending_impact_records
 from xauusd_forecaster.news_time import assess_news_time, category_time_rule
 from xauusd_forecaster.repair_v2 import immutable_table_hash
 from xauusd_forecaster import inference_v2, news_contract_migration, training_v2
@@ -343,9 +346,10 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
                  material_event_key: str = "",
                  event_time: str | None = "__DEFAULT__",
                  impact_class: str = "POLICY_SHIFT",
-                 impact_update_type: str = "NEW_EVENT",
-                 impact_assessed_at: datetime | None = None,
-                 include_impact: bool = True) -> None:
+                  impact_update_type: str = "NEW_EVENT",
+                  impact_assessed_at: datetime | None = None,
+                  source_organization_id: str | None = None,
+                  include_impact: bool = True) -> None:
     entities = entities or []
     body = ("publisher full body " * 30) + item
     digest = hashlib.sha256(body.encode()).hexdigest()
@@ -395,7 +399,7 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
             "relation_to_prior": "NONE",
             "document_kind": "NEWS_REPORT",
             "material_event_key": material_event_key,
-            "source_organization_id": source,
+            "source_organization_id": source_organization_id or source,
             "evidence_role": evidence_role,
         },
     })
@@ -473,7 +477,7 @@ def test_news_received_after_impact_window_is_expired_on_arrival() -> None:
     assert timing.reason_code == "STALE_EVENT"
 
 
-def test_weekend_news_keeps_wall_clock_age_and_never_resets_at_open() -> None:
+def test_weekend_closure_does_not_consume_actionable_lifetime() -> None:
     published = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
     first_seen = published + timedelta(minutes=5)
     monday_open = datetime(2026, 8, 10, 1, 0, tzinfo=UTC)
@@ -486,10 +490,11 @@ def test_weekend_news_keeps_wall_clock_age_and_never_resets_at_open() -> None:
         max_actionable_age=max_age,
         max_discovery_delay=None,
         allow_pre_forward_publication=True,
+        exclude_weekly_closure=True,
     )
 
     assert timing.eligible is True
-    assert timing.age_minutes == pytest.approx(37 * 60)
+    assert timing.age_minutes == pytest.approx(3 * 60)
 
 
 def test_release_categories_expire_faster_than_central_bank_gold() -> None:
@@ -518,7 +523,7 @@ def test_release_categories_expire_faster_than_central_bank_gold() -> None:
 
 def test_news_older_than_72_hours_is_not_a_current_feature(tmp_path) -> None:
     decision = datetime(2026, 8, 5, 10, 30, tzinfo=UTC)
-    first_seen = decision - timedelta(hours=72, seconds=1)
+    first_seen = decision - timedelta(days=5, hours=2, seconds=1)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=first_seen)
     _append_news(
         ledger, source="federal_reserve_monetary", item="old-official",
@@ -588,19 +593,30 @@ def test_collect_only_news_cannot_change_model_feature_hash(tmp_path) -> None:
     ledger.close()
 
 
-def test_single_reliable_publisher_remains_display_only(tmp_path) -> None:
+def test_single_reliable_publisher_is_provisional_and_downweighted(tmp_path) -> None:
     cutoff = datetime(2026, 8, 5, 10, 30, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=cutoff - timedelta(hours=1))
     _append_news(
         ledger, source="gdelt_gold_geopolitics", item="War disrupts oil routes",
         first_seen=cutoff - timedelta(minutes=10), parsed_at=cutoff - timedelta(minutes=5),
-        impulse=0.0, link="https://www.reuters.com/world/example",
+        impulse=1.0, link="https://www.reuters.com/world/example",
         entities=["Iran", "Strait of Hormuz"], event_type="geopolitical_conflict",
     )
     event = event_evidence_rows(ledger, cutoff)[0]
     assert event["evidence_grade"] == "SINGLE_RELIABLE"
-    assert event["broad_model_eligible"] is False
-    assert event["model_permission"] == "DISPLAY_ONLY"
+    assert event["broad_model_eligible"] is True
+    assert event["model_permission"] == "BROAD_MODEL"
+    assert "RELIABLE_SINGLE_SOURCE_PROVISIONAL" in event["reason_codes"]
+    assert event_raw_weight(event) == pytest.approx(
+        0.35 * 2 ** (-10 / 1440)
+    )
+    features = aggregate_news_features_v2(ledger, cutoff)["features"]
+    assert features["broad_news_hawkishness"] == pytest.approx(
+        0.35 * 2 ** (-10 / 1440)
+    )
+    assert features["broad_news_event_count"] == pytest.approx(
+        0.35 * 2 ** (-10 / 1440)
+    )
     ledger.close()
 
 
@@ -651,6 +667,64 @@ def test_confirmation_is_not_visible_before_second_publisher_is_parsed(tmp_path)
     later = event_evidence_rows(ledger, first + timedelta(minutes=10))[0]
     assert early["evidence_grade"] == "SINGLE_RELIABLE"
     assert later["evidence_grade"] == "CORROBORATED"
+    assert early["event_version_id"] != later["event_version_id"]
+    assert early["source_hash"] != later["source_hash"]
+    ledger.close()
+
+
+def test_evidence_upgrade_versions_membership_when_canonical_item_is_unchanged(
+    tmp_path,
+) -> None:
+    first = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=first)
+    common = {
+        "first_seen": first, "impulse": 0.5,
+        "entities": ["Federal Reserve", "rates"],
+        "material_event_key": "same-event",
+    }
+    _append_news(
+        ledger, source="google_news_fed_rates", item="zzzz",
+        parsed_at=first + timedelta(minutes=1),
+        link="https://reuters.com/z", source_organization_id="reuters", **common,
+    )
+    early = event_evidence_rows(ledger, first + timedelta(minutes=2))[0]
+    _append_news(
+        ledger, source="google_news_gold_context", item="aaaa",
+        parsed_at=first + timedelta(minutes=3),
+        link="https://bbc.com/a", source_organization_id="bbc", **common,
+    )
+    later = event_evidence_rows(ledger, first + timedelta(minutes=4))[0]
+
+    assert early["canonical_source_item_id"] == "zzzz"
+    assert later["canonical_source_item_id"] == "zzzz"
+    assert early["event_version_id"] != later["event_version_id"]
+    ledger.close()
+
+
+def test_syndicated_copy_does_not_create_independent_confirmation(tmp_path) -> None:
+    cutoff = datetime(2026, 8, 5, 10, 30, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=cutoff - timedelta(hours=1))
+    common = {
+        "first_seen": cutoff - timedelta(minutes=10),
+        "parsed_at": cutoff - timedelta(minutes=5), "impulse": 0.5,
+        "entities": ["Federal Reserve", "interest rates"],
+        "event_type": "monetary_policy", "material_event_key": "fed-guidance",
+        "source_organization_id": "reuters",
+    }
+    _append_news(
+        ledger, source="google_news_fed_rates", item="Reuters original",
+        link="https://www.reuters.com/world/example", **common,
+    )
+    _append_news(
+        ledger, source="google_news_gold_context", item="Reuters syndicated copy",
+        link="https://www.kitco.com/news/example", **common,
+    )
+
+    event = event_evidence_rows(ledger, cutoff)[0]
+
+    assert event["evidence_grade"] == "SINGLE_RELIABLE"
+    assert event["independent_publishers"] == 1
+    assert event["source_organizations"] == ["reuters"]
     ledger.close()
 
 
@@ -1865,6 +1939,20 @@ def test_event_budget_preserves_freshness_between_events() -> None:
     assert summary["maximum_event_weight_share"] == pytest.approx(0.9)
 
 
+def test_single_reliable_training_rows_keep_absolute_35_percent_trust() -> None:
+    rows = [
+        {"decision_id": f"row-{index}", "broad_events": [{
+            "event_id": "reliable", "event_version_id": "reliable-v1",
+            "raw_weight": 0.35, "evidence_grade": "SINGLE_RELIABLE",
+        }]}
+        for index in range(3)
+    ]
+
+    weights, _, _ = training_v2._event_budget_weights(rows, "broad_events")
+
+    assert weights.mean() == pytest.approx(0.35)
+
+
 def test_commentary_and_low_materiality_are_not_training_evidence(tmp_path) -> None:
     epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     decision = epoch + timedelta(minutes=10)
@@ -1905,7 +1993,7 @@ def test_material_event_key_deduplicates_different_headlines(tmp_path) -> None:
     ledger.close()
 
 
-def test_nonofficial_event_without_precise_event_clock_fails_closed(tmp_path) -> None:
+def test_reliable_media_publication_time_is_safe_event_clock_proxy(tmp_path) -> None:
     epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
     for source, item, link in (
@@ -1921,8 +2009,45 @@ def test_nonofficial_event_without_precise_event_clock_fails_closed(tmp_path) ->
         )
     event = event_evidence_rows(ledger, epoch + timedelta(minutes=10))[0]
     assert event["evidence_grade"] == "CORROBORATED"
-    assert event["broad_model_eligible"] is False
-    assert "EVENT_TIME_INVALID" in event["reason_codes"]
+    assert event["broad_model_eligible"] is True
+    assert event["event_clock_source"] == "SOURCE_STRUCTURED_TIME"
+    assert event["event_time_precision"] == "TIMESTAMP"
+    assert "RELIABLE_PUBLISHER_TIME_PROXY" in event["reason_codes"]
+    assert "EVENT_TIME_INVALID" not in event["reason_codes"]
+
+
+def test_terminal_429_impact_failure_reenters_pending_queue(tmp_path) -> None:
+    epoch = datetime(2026, 8, 7, 12, 30, tzinfo=UTC)
+    item = "The Employment Situation - July 2026"
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
+    _append_news(
+        ledger, source="google_news_bls_official_releases", item=item,
+        link="https://www.bls.gov/news.release/empsit.nr0.htm",
+        first_seen=epoch + timedelta(days=1),
+        parsed_at=epoch + timedelta(days=1, minutes=1),
+        published_at=epoch, impulse=0.8,
+        primary_category="inflation_employment", include_impact=False,
+    )
+    ledger.append_news_impact_failure({
+        "failure_id": "terminal-429", "source": "google_news_bls_official_releases",
+        "source_item_id": item, "revision_number": 1,
+        "raw_content_hash": ledger.connection.execute(
+            "SELECT content_hash FROM news_revisions"
+        ).fetchone()[0],
+        "annotation_id": item, "llm_model_version": "gemma-4-31b-it",
+        "prompt_version": "news-impact-v2-semantic-prior-candidates",
+        "attempt_number": 5, "error_type": "HTTPError",
+        "error_signature": "quota", "error": "HTTP Error 429: Too Many Requests",
+        "failed_at": epoch + timedelta(days=1, minutes=2),
+        "next_retry_at": None, "is_terminal": True,
+    })
+
+    pending = pending_impact_records(
+        ledger.connection, observed_at=epoch + timedelta(days=2), limit=10,
+    )
+
+    assert [row["source_item_id"] for row in pending] == [item]
+    ledger.close()
 
 
 def test_official_release_timestamp_is_valid_event_clock(tmp_path) -> None:

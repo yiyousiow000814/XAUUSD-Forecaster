@@ -149,7 +149,10 @@ def pending_impact_records(
                 WHERE f2.annotation_id=f.annotation_id
                   AND f2.llm_model_version=f.llm_model_version
                   AND f2.prompt_version=f.prompt_version)
-              AND (f.is_terminal=1 OR f.next_retry_at>?))
+              AND (
+                (f.is_terminal=1 AND f.attempt_number>=5
+                 AND NOT (f.error_type='HTTPError' AND f.error LIKE '%429%'))
+                OR (f.next_retry_at IS NOT NULL AND f.next_retry_at>?)))
         ORDER BY CASE WHEN n.source IN (
                    'federal_reserve_monetary','bls_employment_situation',
                    'bls_consumer_price_index','bls_job_openings',

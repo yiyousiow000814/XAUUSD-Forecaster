@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import subprocess
 
 
@@ -31,7 +32,7 @@ def test_control_center_treats_weekly_close_as_healthy() -> None:
     assert '@("STOPPED", "DATA STALE", "API ERROR")' in control_center
 
 
-def test_control_center_auto_reloads_python_services_on_commit_change() -> None:
+def test_control_center_updates_only_the_isolated_main_runtime() -> None:
     path = ROOT / "scripts" / "xauusd_control_center.ps1"
     control_center = path.read_text(encoding="utf-8")
 
@@ -39,6 +40,14 @@ def test_control_center_auto_reloads_python_services_on_commit_change() -> None:
     assert 'CODE_REVISION_RELOAD_APPLIED' in control_center
     assert 'Write-RuntimeCodeState -Revision $Revision' in control_center
     assert 'currentRevision -ne $appliedRevision' in control_center
+    assert "Get-SignaledMainRevision" in control_center
+    assert "Get-VerifiedOriginMain" in control_center
+    assert "Test-RevisionDescendsFrom" in control_center
+    assert "Test-MainCandidate" in control_center
+    assert "accepted_main_revision" in control_center
+    assert "Install-ProductionRuntime" in control_center
+    assert 'RuntimeRoot must be separate from the development checkout' in control_center
+    assert 'worktree add --detach --quiet' in control_center
     assert '"quote"' not in control_center.split("$reloadableServiceKeys =", 1)[1].splitlines()[0]
 
     reported = subprocess.run(
@@ -53,3 +62,57 @@ def test_control_center_auto_reloads_python_services_on_commit_change() -> None:
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     assert reported == expected
+
+
+def test_main_checkpoint_accepts_squash_merge_without_accepting_stale_main(
+    tmp_path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for command in (
+        ["git", "init", "-q"],
+        ["git", "config", "user.email", "test@example.com"],
+        ["git", "config", "user.name", "Test"],
+    ):
+        subprocess.run(command, cwd=repo, check=True)
+    (repo / "value.txt").write_text("base", encoding="utf-8")
+    subprocess.run(["git", "add", "value.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
+        text=True, check=True,
+    ).stdout.strip()
+    (repo / "value.txt").write_text("feature", encoding="utf-8")
+    subprocess.run(["git", "commit", "-qam", "feature"], cwd=repo, check=True)
+    feature = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
+        text=True, check=True,
+    ).stdout.strip()
+    tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=repo, capture_output=True,
+        text=True, check=True,
+    ).stdout.strip()
+    squash = subprocess.run(
+        ["git", "commit-tree", tree, "-p", base, "-m", "squash"], cwd=repo,
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    state = repo / ".local" / "forward" / "runtime-update-state.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(
+        json.dumps({"accepted_main_revision": base}), encoding="utf-8",
+    )
+    script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    command = (
+        f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{repo}' "
+        f"-RepositoryRoot '{repo}'; "
+        f"$advance = Test-MainCandidate -CurrentRevision '{feature}' "
+        f"-CandidateRevision '{squash}'; "
+        f"$stale = Test-MainCandidate -CurrentRevision '{feature}' "
+        f"-CandidateRevision '{base}'; Write-Output \"$advance,$stale\""
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    assert result == "True,False"

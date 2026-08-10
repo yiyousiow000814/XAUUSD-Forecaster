@@ -45,6 +45,16 @@ test("keeps branch previews isolated from the production database", async () => 
   assert.match(builtPreview, new RegExp(process.env.WORKERS_CI_BRANCH.replaceAll("/", "\\/")));
 });
 
+test("returns a verified main revision through the existing ingest heartbeat", () => {
+  const ingest = readFileSync(new URL("../app/api/ingest/route.ts", import.meta.url), "utf8");
+  const vite = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
+  assert.match(vite, /__AURUM_DEPLOYMENT__/);
+  assert.match(vite, /WORKERS_CI_COMMIT_SHA/);
+  assert.match(ingest, /deployment\.branch === "main"/);
+  assert.match(ingest, /\^\[0-9a-f\]\{40\}\$/);
+  assert.match(ingest, /main_revision/);
+});
+
 test("does not show a redundant forecast warning while the market is closed", () => {
   const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
   assert.match(source, /const forecastStatus = marketClosed\s*\? null/);
@@ -101,7 +111,7 @@ test("renders the news and decision audit route", async () => {
   assert.match(html, /新闻证据管理/);
   const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   assert.match(source, /模型真正用过哪些新闻/);
-  assert.match(source, /只显示实际进入过预测的独立新闻事件/);
+  assert.match(source, /按独立事件说明模型用过什么、没用什么/);
   assert.match(source, /evidence-intro evidence-intro-compact/);
   assert.match(source, /查看统计规则/);
   assert.match(source, /收到多少篇新闻/);
@@ -145,8 +155,8 @@ test("renders the news and decision audit route", async () => {
   assert.doesNotMatch(source, /查看技术审计明细/);
   assert.doesNotMatch(source, /旧工程数据|修复后的训练种子|上线后前向结果/);
   assert.doesNotMatch(source, /Legacy Engineering|Repaired Seed|Next fit/);
-  assert.match(source, /最长 72 小时/);
-  assert.match(source, /迟到发现只保留展示，不进入训练/);
+  assert.match(source, /单一可靠来源使用 35% 权重/);
+  assert.match(source, /按事件类型和有效交易时间逐步衰减/);
   assert.match(source, /无效样本/);
   assert.match(source, /activeLearningIdentities/);
   assert.match(html, /news-row-placeholder/);

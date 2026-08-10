@@ -16,6 +16,7 @@ from .news_impact import (
     impact_is_actionable,
     impact_time_rule,
 )
+from .news_relevance import news_headline_is_actionable
 from .news_contracts import CURRENT_NEWS_CONTRACT
 from .news_time import NewsTimeAssessment, assess_news_time
 
@@ -117,6 +118,25 @@ def _reliable_domain(host: str) -> str | None:
     ), None)
 
 
+def _source_organization(row: dict) -> str | None:
+    """Return the original reporting organization for independence checks."""
+    annotation = json.loads(row.get("annotation_json") or "{}")
+    value = re.sub(
+        r"[^a-z0-9]+", "_",
+        str(annotation.get("source_organization_id") or "").strip().casefold(),
+    ).strip("_")
+    aliases = {
+        "thomson_reuters": "reuters",
+        "reuters_news": "reuters",
+        "associated_press": "ap",
+        "ap_news": "ap",
+    }
+    value = aliases.get(value, value)
+    if value.startswith("yahoo_finance"):
+        value = "yahoo_finance"
+    return value or row.get("reliable_domain")
+
+
 def _topics(row: dict) -> tuple[str, ...]:
     annotation = json.loads(row.get("annotation_json") or "{}")
     text = " ".join((
@@ -198,22 +218,24 @@ def _parsed_timestamp(value: object) -> datetime | None:
 
 
 def resolve_event_clock(
-    row: dict, *, primary_source: bool,
+    row: dict, *, primary_source: bool, reliable_publisher: bool = False,
 ) -> tuple[datetime | None, str, str]:
     """Return a live-known event clock with explicit provenance.
 
-    A precise body clock is preferred.  For an official primary publisher the
-    publication itself is an admissible event only when the source supplies a
-    precise timestamp.  Media publication time never substitutes for an
-    unknown real-world event clock.
+    A precise body clock is preferred.  Official publication time is the event
+    clock for primary releases.  A reliable publisher timestamp is a bounded
+    public-information proxy when the real-world occurrence time is absent;
+    receipt time still controls when the model may first observe it.
     """
     annotation = json.loads(row.get("annotation_json") or "{}")
     explicit = _parsed_timestamp(annotation.get("event_time") or row.get("event_time"))
     if explicit is not None:
         return explicit, "EXPLICIT_BODY_TIME", "TIMESTAMP"
-    official_release = _parsed_timestamp(row.get("source_published_time"))
-    if primary_source and official_release is not None:
-        return official_release, "OFFICIAL_RELEASE_TIME", "TIMESTAMP"
+    published = _parsed_timestamp(row.get("source_published_time"))
+    if primary_source and published is not None:
+        return published, "OFFICIAL_RELEASE_TIME", "TIMESTAMP"
+    if reliable_publisher and published is not None:
+        return published, "SOURCE_STRUCTURED_TIME", "TIMESTAMP"
     return None, "UNKNOWN", "UNKNOWN"
 
 
@@ -298,6 +320,7 @@ def event_evidence_rows_from_connection(
                 max_actionable_age=max_age,
                 max_discovery_delay=None,
                 allow_pre_forward_publication=True,
+                exclude_weekly_closure=True,
             )
             if not impact_is_actionable(impact):
                 if impact is None:
@@ -325,6 +348,9 @@ def event_evidence_rows_from_connection(
         ):
             continue
         row["reliable_domain"] = _reliable_domain(row["publisher_domain"])
+        row["source_organization"] = (
+            _source_organization(row) if row["reliable_domain"] else None
+        )
         row["topics"] = _topics(row)
         row["event_cluster_id"] = _event_key(
             row, row["topics"], use_material_event_key=not legacy_v3,
@@ -342,16 +368,27 @@ def event_evidence_rows_from_connection(
         reliable_domains = {
             row["reliable_domain"] for row in evidence_members if row["reliable_domain"]
         }
+        reliable_organizations = {
+            row["source_organization"]
+            for row in evidence_members if row["source_organization"]
+        }
+        reliable_sources = (
+            reliable_domains if legacy_v3 else reliable_organizations
+        )
         if primary:
             grade = "PRIMARY"
-        elif len(reliable_domains) >= 2:
+        elif len(reliable_sources) >= 2:
             grade = "CORROBORATED"
-        elif reliable_domains:
+        elif reliable_sources:
             grade = "SINGLE_RELIABLE"
         else:
             grade = "DISCOVERY_ONLY"
         candidates = primary or [
-            row for row in evidence_members if row["reliable_domain"] in reliable_domains
+            row for row in evidence_members
+            if (
+                row["reliable_domain"] in reliable_sources if legacy_v3
+                else row["source_organization"] in reliable_sources
+            )
         ] or evidence_members
         canonical = max(
             candidates,
@@ -370,7 +407,9 @@ def event_evidence_rows_from_connection(
         materiality = float(annotation.get("materiality") or 0.0)
         current_semantic_schema = canonical.get("prompt_version") == CURRENT_EVENT_PROMPT_VERSION
         event_clock, event_clock_source, event_time_precision = resolve_event_clock(
-            canonical, primary_source=canonical["source"] in primary_sources,
+            canonical,
+            primary_source=canonical["source"] in primary_sources,
+            reliable_publisher=bool(canonical["reliable_domain"]),
         )
         event_clock_valid = legacy_v3 or bool(
             event_clock is not None
@@ -386,13 +425,17 @@ def event_evidence_rows_from_connection(
             "rates_fed", "inflation_employment", "growth_economy", "usd_liquidity",
             "oil_energy", "war_geopolitics", "central_bank_gold", "risk_sentiment",
         }
+        headline_actionable = news_headline_is_actionable(
+            str(canonical.get("headline") or "")
+        )
         eligible = (
             bool(timely)
-            and grade in {"PRIMARY", "CORROBORATED"}
+            and grade in {"PRIMARY", "CORROBORATED", "SINGLE_RELIABLE"}
             and bool(ACTION_TOPICS & set(topics))
             and relevant
             and semantic_eligible
             and event_clock_valid
+            and headline_actionable
         )
         official_eligible = eligible and canonical["source"] in CORE_OFFICIAL_SOURCES
         source_names = sorted({row["source"] for row in members})
@@ -401,7 +444,7 @@ def event_evidence_rows_from_connection(
         })
         if legacy_v3:
             independent_publishers = (
-                len(reliable_domains) if not primary
+                len(reliable_sources) if not primary
                 else len({row["source"] for row in primary})
             )
         else:
@@ -412,9 +455,11 @@ def event_evidence_rows_from_connection(
                 for row in primary
             }
             independent_publishers = (
-                len(reliable_domains) if not primary else len(primary_organizations)
+                len(reliable_organizations) if not primary else len(primary_organizations)
             )
         reasons = [f"EVIDENCE_{grade}"]
+        if event_clock_source == "SOURCE_STRUCTURED_TIME":
+            reasons.append("RELIABLE_PUBLISHER_TIME_PROXY")
         if not timely:
             reasons.extend(sorted({
                 row["time_assessment"].reason_code for row in members
@@ -423,6 +468,8 @@ def event_evidence_rows_from_connection(
             reasons.append("CATEGORY_NOT_ACTIONABLE")
         if not (ACTION_TOPICS & set(topics)):
             reasons.append("NO_ACTION_TOPIC")
+        elif grade == "SINGLE_RELIABLE":
+            reasons.append("RELIABLE_SINGLE_SOURCE_PROVISIONAL")
         elif timely and grade not in {"PRIMARY", "CORROBORATED"}:
             reasons.append("NEEDS_CONFIRMATION")
         if not legacy_v3:
@@ -436,6 +483,8 @@ def event_evidence_rows_from_connection(
                 reasons.append("LOW_MATERIALITY")
             if not event_clock_valid:
                 reasons.append("EVENT_TIME_INVALID")
+            if not headline_actionable:
+                reasons.append("EDITORIAL_OR_INVESTMENT_GUIDE")
         entities = sorted({
             str(value).strip()
             for row in members
@@ -445,15 +494,35 @@ def event_evidence_rows_from_connection(
         canonical_headline = str(
             annotation.get("headline_zh") or canonical["headline"]
         )
+        if legacy_v3:
+            source_hash = canonical_hash(sorted(
+                (row["content_hash"], row["annotation_id"]) for row in members
+            ))
+            event_version_id = canonical_hash((
+                event_id, canonical["content_hash"], canonical["annotation_id"],
+                canonical.get("impact_assessment_id"),
+                LEGACY_V3_EVIDENCE_POLICY_VERSION,
+            ))
+        else:
+            source_hash = canonical_hash(sorted(
+                (
+                    row["content_hash"], row["annotation_id"],
+                    row.get("impact_assessment_id"), row.get("source_organization"),
+                )
+                for row in members
+            ))
+            event_version_id = canonical_hash((
+                event_id, source_hash, canonical["content_hash"],
+                canonical["annotation_id"], canonical.get("impact_assessment_id"),
+                grade, eligible, official_eligible,
+                event_clock.isoformat() if event_clock else None,
+                EVIDENCE_POLICY_VERSION,
+            ))
         events.append({
             "event_cluster_id": event_id,
             "event_key": event_id,
             "event_id": event_id,
-            "event_version_id": canonical_hash((
-                event_id, canonical["content_hash"], canonical["annotation_id"],
-                canonical.get("impact_assessment_id"),
-                EVIDENCE_POLICY_VERSION if not legacy_v3 else LEGACY_V3_EVIDENCE_POLICY_VERSION,
-            )),
+            "event_version_id": event_version_id,
             "policy_version": (
                 LEGACY_V3_EVIDENCE_POLICY_VERSION if legacy_v3
                 else EVIDENCE_POLICY_VERSION
@@ -467,6 +536,7 @@ def event_evidence_rows_from_connection(
             "member_count": len(members),
             "source_names": source_names,
             "publisher_domains": publisher_domains,
+            "source_organizations": sorted(reliable_organizations),
             "canonical_source": canonical["source"],
             "canonical_source_item_id": canonical["source_item_id"],
             "publisher_domain": canonical["publisher_domain"],
@@ -524,9 +594,7 @@ def event_evidence_rows_from_connection(
                 float(canonical.get("impact_confidence") or 0.0),
             ) if not legacy_v3 else float(canonical["confidence"]),
             "reason_codes": reasons,
-            "source_hash": canonical_hash(sorted(
-                (row["content_hash"], row["annotation_id"]) for row in members
-            )),
+            "source_hash": source_hash,
         })
     return sorted(events, key=lambda row: (row["collector_first_seen_time"], row["event_cluster_id"]))
 

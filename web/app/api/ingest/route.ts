@@ -3,6 +3,11 @@ import { NextResponse } from "next/server";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
 import { rejectPreviewWrite } from "../_shared/preview";
 
+declare const __AURUM_DEPLOYMENT__: {
+  branch: string;
+  commit_sha: string;
+};
+
 export async function POST(request: Request) {
   const previewRejection = rejectPreviewWrite();
   if (previewRejection) return previewRejection;
@@ -27,5 +32,12 @@ export async function POST(request: Request) {
     )
     .bind(1, serialized, new Date().toISOString())
     .run();
-  return NextResponse.json({ status: "OK" });
+  const deployment = __AURUM_DEPLOYMENT__;
+  return NextResponse.json({
+    status: "OK",
+    main_revision:
+      deployment.branch === "main" && /^[0-9a-f]{40}$/.test(deployment.commit_sha)
+        ? deployment.commit_sha
+        : null,
+  });
 }

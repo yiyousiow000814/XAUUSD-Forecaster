@@ -1355,8 +1355,7 @@ def _append_impact_failure(
     ).fetchone()
     attempt = 1 if prior is None else int(prior["attempt_number"]) + 1
     transient = getattr(error, "code", None) in {429, 500, 502, 503, 504}
-    same_error = prior is not None and prior["error_signature"] == signature
-    terminal = attempt >= 5 if transient else ((same_error and attempt >= 2) or attempt >= 3)
+    terminal = False if transient else attempt >= 5
     failed_at = datetime.now(UTC)
     if terminal:
         next_retry = None
