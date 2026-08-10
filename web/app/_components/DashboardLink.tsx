@@ -4,13 +4,14 @@ import { useCallback, useEffect, type MouseEvent, type ReactNode } from "react";
 import { useDashboardNavigation } from "./DashboardNavigation";
 
 type DashboardLinkProps = {
+  ariaLabel?: string;
   children: ReactNode;
   className?: string;
   href: string;
   replace?: boolean;
 };
 
-export default function DashboardLink({ children, className, href, replace = false }: DashboardLinkProps) {
+export default function DashboardLink({ ariaLabel, children, className, href, replace = false }: DashboardLinkProps) {
   const navigation = useDashboardNavigation();
   const prefetch = useCallback(() => navigation?.preload(href), [href, navigation]);
 
@@ -27,6 +28,7 @@ export default function DashboardLink({ children, className, href, replace = fal
   };
 
   return <a
+    aria-label={ariaLabel}
     className={className}
     href={href}
     onClick={navigate}
