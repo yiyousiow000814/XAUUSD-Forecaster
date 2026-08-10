@@ -54,10 +54,8 @@ export default function DashboardApp({
   initialLocation: DashboardLocation;
   initialResources?: Record<string, unknown>;
 }) {
-  const [location, setLocation] = useState(() => {
-    primeDashboardResources(initialResources);
-    return initialLocation;
-  });
+  primeDashboardResources(initialResources);
+  const [location, setLocation] = useState(initialLocation);
   const navigationSequence = useRef(0);
 
   const preload = useCallback((href: string) => {

@@ -11,7 +11,7 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 export function primeDashboardResources(initial: Record<string, unknown>): void {
   const updatedAt = Date.now();
   for (const [url, data] of Object.entries(initial)) {
-    resources.set(url, { data, updatedAt });
+    if (!resources.has(url)) resources.set(url, { data, updatedAt });
   }
 }
 

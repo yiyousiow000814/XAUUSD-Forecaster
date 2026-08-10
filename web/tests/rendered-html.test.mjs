@@ -52,7 +52,7 @@ test("hydrates preview pages from their immutable build snapshot", () => {
   const resources = readFileSync(new URL("../app/_lib/dashboard-resource.ts", import.meta.url), "utf8");
   assert.match(page, /"\/api\/status": previewBundle\.status/);
   assert.match(page, /initialResources\["\/api\/learning"\] = previewBundle\.learning/);
-  assert.match(app, /primeDashboardResources\(initialResources\)/);
+  assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);
   assert.match(resources, /DEFAULT_TIMEOUT_MS = 10_000/);
   assert.match(resources, /数据读取超时，页面会自动重试/);
 });
