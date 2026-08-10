@@ -13,16 +13,6 @@ class NewsContract:
     policy_version: str
 
 
-# Keep every contract that an activated generation may still need for live
-# inference.  A new contract is appended here; the previous entry remains
-# runnable until a complete generation for the new entry is activated.
-UNIFIED_EVENT_CLOCK_V4 = NewsContract(
-    name="unified-event-clock-v4",
-    feature_version="eligible-news-event-evidence-v6-event-budget",
-    eligibility_version="news-source-eligibility-v5-unified-event-clock",
-    policy_version="news-event-evidence-v4-unified-event-clock",
-)
-
 SEMANTIC_IMPACT_V6 = NewsContract(
     name="semantic-impact-v6",
     feature_version="eligible-news-event-evidence-v8-quality-scaled-impact",
@@ -31,7 +21,6 @@ SEMANTIC_IMPACT_V6 = NewsContract(
 )
 
 SUPPORTED_NEWS_CONTRACTS = (
-    UNIFIED_EVENT_CLOCK_V4,
     SEMANTIC_IMPACT_V6,
 )
 CURRENT_NEWS_CONTRACT = SUPPORTED_NEWS_CONTRACTS[-1]

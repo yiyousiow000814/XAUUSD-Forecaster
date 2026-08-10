@@ -204,10 +204,10 @@ def learning_curve_payload(connection) -> dict:
     )
     news_activation = news_model_activation_status(
         active_updates,
-        allow_legacy_contract=(active_generation is None or (
+        allow_transition_contract=(
             active_contract is not None and not active_is_current
-        )),
-        legacy_contract=(
+        ),
+        transition_contract=(
             active_contract if active_contract is not None and not active_is_current
             else None
         ),

@@ -12,28 +12,9 @@ from .evidence_v2 import (
 )
 from .forward_ledger import canonical_hash
 from .inference_v2 import append_live_predictions_v2
-from .news_contracts import (
-    NEWS_CONTRACT_BY_ELIGIBILITY,
-    UNIFIED_EVENT_CLOCK_V4,
-    supported_generation_contract,
-)
-from .news_features_v2 import (
-    aggregate_legacy_v4_news_features,
-    aggregate_news_features_v2,
-)
+from .news_contracts import NEWS_CONTRACT_BY_ELIGIBILITY
+from .news_features_v2 import aggregate_news_features_v2
 from .news_evidence import EVIDENCE_POLICY_VERSION
-from .legacy_news_features_v2 import (
-    LEGACY_BROAD_ELIGIBILITY_VERSION,
-    LEGACY_ELIGIBILITY_VERSION,
-    LEGACY_NEWS_FEATURE_VERSION,
-    aggregate_legacy_news_features_v2,
-)
-from .legacy_news_features_v3 import (
-    LEGACY_V3_BROAD_ELIGIBILITY_VERSION,
-    LEGACY_V3_ELIGIBILITY_VERSION,
-    LEGACY_V3_NEWS_FEATURE_VERSION,
-    aggregate_legacy_news_features_v3,
-)
 from .repair_v2 import LANE_RULE_VERSION, TRAINING_ELIGIBILITY_VERSION
 from .training import MARKET_FEATURES
 from .u5_state import U5_VERSION
@@ -148,74 +129,6 @@ def append_live_decision_v2(ledger, *, decision_id: str, decision_time: datetime
                     "eligibility_version": ELIGIBILITY_VERSION, **news_snapshot_values}
     news_hash = canonical_hash(news_payload)
     news_id = _uuid("derived-news", f"{decision_id}:{NEWS_FEATURE_VERSION}:{ELIGIBILITY_VERSION}")
-    active_generation = ledger.connection.execute(
-        """SELECT g.* FROM news_model_generation_activations_v1 a
-        JOIN news_model_generations_v1 g USING(generation_id)
-        WHERE a.activated_at<?
-        ORDER BY a.activated_at DESC,a.activation_id DESC LIMIT 1""",
-        (decision_time.isoformat(),),
-    ).fetchone()
-    active_contract = supported_generation_contract(active_generation)
-    legacy_v4_news = (
-        aggregate_legacy_v4_news_features(ledger, decision_time)
-        if active_contract == UNIFIED_EVENT_CLOCK_V4 else None
-    )
-    legacy_v4_hash = None
-    legacy_v4_id = None
-    if legacy_v4_news is not None:
-        legacy_v4_snapshot_values = {
-            key: value for key, value in legacy_v4_news.items()
-            if key not in {
-                "official_visible_events", "broad_visible_events", "event_snapshots"
-            }
-        }
-        legacy_v4_payload = {
-            "decision_id": decision_id,
-            "decision_time": decision_time.isoformat(),
-            "feature_version": UNIFIED_EVENT_CLOCK_V4.feature_version,
-            "eligibility_version": UNIFIED_EVENT_CLOCK_V4.eligibility_version,
-            **legacy_v4_snapshot_values,
-        }
-        legacy_v4_hash = canonical_hash(legacy_v4_payload)
-        legacy_v4_id = _uuid(
-            "derived-news",
-            f"{decision_id}:{UNIFIED_EVENT_CLOCK_V4.feature_version}:"
-            f"{UNIFIED_EVENT_CLOCK_V4.eligibility_version}",
-        )
-    legacy_news = aggregate_legacy_news_features_v2(ledger, decision_time)
-    legacy_v3_news = aggregate_legacy_news_features_v3(ledger, decision_time)
-    legacy_news_snapshot_values = {
-        key: value for key, value in legacy_news.items()
-        if key not in {"official_visible_events", "broad_visible_events", "event_snapshots"}
-    }
-    legacy_payload = {
-        "decision_id": decision_id,
-        "decision_time": decision_time.isoformat(),
-        "feature_version": LEGACY_NEWS_FEATURE_VERSION,
-        "eligibility_version": LEGACY_ELIGIBILITY_VERSION,
-        **legacy_news_snapshot_values,
-    }
-    legacy_hash = canonical_hash(legacy_payload)
-    legacy_id = _uuid(
-        "derived-news",
-        f"{decision_id}:{LEGACY_NEWS_FEATURE_VERSION}:{LEGACY_ELIGIBILITY_VERSION}",
-    )
-    legacy_v3_snapshot_values = {
-        key: value for key, value in legacy_v3_news.items()
-        if key not in {"official_visible_events", "broad_visible_events", "event_snapshots"}
-    }
-    legacy_v3_payload = {
-        "decision_id": decision_id,
-        "decision_time": decision_time.isoformat(),
-        "feature_version": LEGACY_V3_NEWS_FEATURE_VERSION,
-        "eligibility_version": LEGACY_V3_ELIGIBILITY_VERSION,
-        **legacy_v3_snapshot_values,
-    }
-    legacy_v3_hash = canonical_hash(legacy_v3_payload)
-    legacy_v3_id = _uuid(
-        "derived-news",
-        f"{decision_id}:{LEGACY_V3_NEWS_FEATURE_VERSION}:{LEGACY_V3_ELIGIBILITY_VERSION}",
-    )
     with ledger.connection:
         ledger.connection.execute(
             """INSERT INTO derived_market_snapshots VALUES
@@ -234,25 +147,6 @@ def append_live_decision_v2(ledger, *, decision_id: str, decision_time: datetime
              news["model_visible_items"], news["news_exposed"], news["distinct_news_clusters"],
              news["distinct_event_types"], news["source_evidence_hash"], news_hash),
         )
-        if legacy_v4_news is not None:
-            ledger.connection.execute(
-                """INSERT INTO derived_news_feature_snapshots VALUES
-                (?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    legacy_v4_id, decision_id, decision_time.isoformat(), "LIVE_OOS",
-                    created_at.isoformat(), UNIFIED_EVENT_CLOCK_V4.feature_version,
-                    UNIFIED_EVENT_CLOCK_V4.eligibility_version,
-                    json.dumps(
-                        legacy_v4_news["features"], sort_keys=True,
-                        separators=(",", ":"),
-                    ),
-                    legacy_v4_news["model_visible_items"],
-                    legacy_v4_news["news_exposed"],
-                    legacy_v4_news["distinct_news_clusters"],
-                    legacy_v4_news["distinct_event_types"],
-                    legacy_v4_news["source_evidence_hash"], legacy_v4_hash,
-                ),
-            )
         for event in news["event_snapshots"]:
             permissions = event["model_permissions"]
             ledger.connection.execute(
@@ -283,61 +177,9 @@ def append_live_decision_v2(ledger, *, decision_id: str, decision_time: datetime
                     event["age_minutes"], event_snapshot_hash,
                 ),
             )
-        ledger.connection.execute(
-            """INSERT INTO derived_news_feature_snapshots VALUES
-            (?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?)""",
-            (legacy_v3_id, decision_id, decision_time.isoformat(), "LIVE_OOS",
-             created_at.isoformat(), LEGACY_V3_NEWS_FEATURE_VERSION,
-             LEGACY_V3_ELIGIBILITY_VERSION,
-             json.dumps(legacy_v3_news["features"], sort_keys=True, separators=(",", ":")),
-             legacy_v3_news["model_visible_items"], legacy_v3_news["news_exposed"],
-             legacy_v3_news["distinct_news_clusters"],
-             legacy_v3_news["distinct_event_types"],
-             legacy_v3_news["source_evidence_hash"], legacy_v3_hash),
-        )
-        ledger.connection.execute(
-            """INSERT INTO derived_news_feature_snapshots VALUES
-            (?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,?)""",
-            (legacy_id, decision_id, decision_time.isoformat(), "LIVE_OOS", created_at.isoformat(),
-             LEGACY_NEWS_FEATURE_VERSION, LEGACY_ELIGIBILITY_VERSION,
-             json.dumps(legacy_news["features"], sort_keys=True, separators=(",", ":")),
-             legacy_news["model_visible_items"], legacy_news["news_exposed"],
-             legacy_news["distinct_news_clusters"], legacy_news["distinct_event_types"],
-             legacy_news["source_evidence_hash"], legacy_hash),
-        )
         _lane(ledger.connection, "DECISION", decision_id, "LIVE_OOS", created_at, market_hash)
-        _lane(ledger.connection, "LEGACY_PREDICTIONS", decision_id, "LEGACY_ENGINEERING",
-              created_at, snapshot["snapshot_hash"])
         _lane(ledger.connection, "DERIVED_MARKET", market_id, "LIVE_OOS", created_at, market_hash)
         _lane(ledger.connection, "DERIVED_NEWS", news_id, "LIVE_OOS", created_at, news_hash)
-        if legacy_v4_news is not None:
-            _lane(
-                ledger.connection, "DERIVED_NEWS", legacy_v4_id, "LIVE_OOS",
-                created_at, legacy_v4_hash,
-            )
-        _lane(ledger.connection, "DERIVED_NEWS", legacy_id, "LIVE_OOS", created_at, legacy_hash)
-        _lane(ledger.connection, "DERIVED_NEWS", legacy_v3_id, "LIVE_OOS",
-              created_at, legacy_v3_hash)
-        legacy_snapshot = {
-            "features_json": json.dumps(legacy_news["features"]),
-            "output_hash": legacy_hash,
-            "news_exposed": legacy_news["news_exposed"],
-            "broad_news_exposed": legacy_news.get("broad_news_exposed", 0),
-        }
-        legacy_v3_snapshot = {
-            "features_json": json.dumps(legacy_v3_news["features"]),
-            "output_hash": legacy_v3_hash,
-            "news_exposed": legacy_v3_news["news_exposed"],
-            "broad_news_exposed": legacy_v3_news.get("broad_news_exposed", 0),
-        }
-        legacy_v4_snapshots = ({
-            UNIFIED_EVENT_CLOCK_V4.eligibility_version: {
-                "features_json": json.dumps(legacy_v4_news["features"]),
-                "output_hash": legacy_v4_hash,
-                "news_exposed": legacy_v4_news["news_exposed"],
-                "broad_news_exposed": legacy_v4_news.get("broad_news_exposed", 0),
-            },
-        } if legacy_v4_news is not None else {})
         predictions = append_live_predictions_v2(
             ledger, decision_id=decision_id, decision_time=decision_time,
             created_at=created_at,
@@ -349,13 +191,6 @@ def append_live_decision_v2(ledger, *, decision_id: str, decision_time: datetime
                 "news_exposed": news["news_exposed"],
                 "broad_news_exposed": news.get("broad_news_exposed", 0),
             },
-            news_snapshots={
-                **legacy_v4_snapshots,
-                LEGACY_ELIGIBILITY_VERSION: legacy_snapshot,
-                LEGACY_BROAD_ELIGIBILITY_VERSION: legacy_snapshot,
-                LEGACY_V3_ELIGIBILITY_VERSION: legacy_v3_snapshot,
-                LEGACY_V3_BROAD_ELIGIBILITY_VERSION: legacy_v3_snapshot,
-            },
         )
         _append_news_visibility_receipts(
             ledger.connection, decision_id=decision_id, decision_time=decision_time,
@@ -363,13 +198,6 @@ def append_live_decision_v2(ledger, *, decision_id: str, decision_time: datetime
             news_by_eligibility={
                 ELIGIBILITY_VERSION: news,
                 f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}": news,
-                **({
-                    UNIFIED_EVENT_CLOCK_V4.eligibility_version: legacy_v4_news,
-                } if legacy_v4_news is not None else {}),
-                LEGACY_ELIGIBILITY_VERSION: legacy_news,
-                LEGACY_BROAD_ELIGIBILITY_VERSION: legacy_news,
-                LEGACY_V3_ELIGIBILITY_VERSION: legacy_v3_news,
-                LEGACY_V3_BROAD_ELIGIBILITY_VERSION: legacy_v3_news,
             },
         )
         append_lot_predictions(

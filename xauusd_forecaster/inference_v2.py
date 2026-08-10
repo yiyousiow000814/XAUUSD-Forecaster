@@ -79,6 +79,8 @@ def _news_generation_ready(
         else CURRENT_NEWS_CONTRACT if enforce_current_contract
         else None
     )
+    if required_contract is None:
+        return False
     return all(
         identity in newest
         and (
@@ -102,16 +104,16 @@ def _news_generation_ready(
 
 
 def news_model_activation_status(
-    updates, *, allow_legacy_contract: bool = False,
-    legacy_contract: NewsContract | None = None,
+    updates, *, allow_transition_contract: bool = False,
+    transition_contract: NewsContract | None = None,
 ) -> list[dict]:
     """Explain whether each news identity has a current-policy runnable artifact."""
     newest = {}
     for update in updates:
         newest.setdefault(update["model_identity"], update)
     generation_ready = _news_generation_ready(newest)
-    legacy_generation_ready = allow_legacy_contract and _news_generation_ready(
-        newest, enforce_current_contract=False, news_contract=legacy_contract,
+    transition_generation_ready = allow_transition_contract and _news_generation_ready(
+        newest, enforce_current_contract=False, news_contract=transition_contract,
     )
     result = []
     for identity in ("NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL"):
@@ -119,8 +121,8 @@ def news_model_activation_status(
         update = newest.get(identity)
         if update is None:
             status, reason = "NOT_TRAINED", "尚未训练当前新闻模型"
-        elif not _news_contract_matches(update) and legacy_generation_ready:
-            status = "LEGACY_ACTIVE"
+        elif not _news_contract_matches(update) and transition_generation_ready:
+            status = "TRANSITION_ACTIVE"
             reason = "当前 generation 持续预测，等待完整新 generation 原子替换"
         elif not _news_contract_matches(update):
             status, reason = "POLICY_MISMATCH", "最新版不符合当前新闻规则"
@@ -245,7 +247,7 @@ def _active_updates(
 
 
 def _activated_generation_updates(ledger, decision_time: datetime):
-    """Return exactly one complete generation, or legacy rows before migration."""
+    """Return exactly one explicitly activated complete generation."""
     table = ledger.connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' "
         "AND name='news_model_generation_activations_v1'"
@@ -267,11 +269,7 @@ def _activated_generation_updates(ledger, decision_time: datetime):
                   WHEN 'BROAD_FULL' THEN 5 ELSE 99 END""",
                 (generation["generation_id"],),
             ).fetchall()
-    return ledger.connection.execute(
-        """SELECT * FROM model_updates_v2
-        WHERE created_at < ? ORDER BY created_at DESC""",
-        (decision_time.isoformat(),),
-    ).fetchall()
+    return []
 
 
 def _has_activated_generation(ledger, decision_time: datetime) -> bool:
@@ -293,11 +291,11 @@ def _activated_generation(ledger, decision_time: datetime):
     ).fetchone()
 
 
-def _allow_activated_legacy_contract(ledger, decision_time: datetime) -> bool:
+def _allow_activated_transition_contract(ledger, decision_time: datetime) -> bool:
     """Keep a supported active generation alive until its atomic replacement."""
     generation = _activated_generation(ledger, decision_time)
     if generation is None:
-        return True
+        return False
     contract = supported_generation_contract(generation)
     return (
         contract is not None
@@ -391,7 +389,9 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
 
     active_generation = _activated_generation(ledger, decision_time)
     active_contract = supported_generation_contract(active_generation)
-    allow_legacy_contract = _allow_activated_legacy_contract(ledger, decision_time)
+    allow_transition_contract = _allow_activated_transition_contract(
+        ledger, decision_time,
+    )
     updates = _activated_generation_updates(ledger, decision_time)
     features = json.loads(market_snapshot["features_json"])
     snapshots = dict(news_snapshots or {})
@@ -399,8 +399,8 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
     snapshots.setdefault(f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}", news_snapshot)
     values = [features.get(name) for name in MARKET_FEATURES]
     for update in _active_updates(
-        updates, set(snapshots), enforce_current_contract=not allow_legacy_contract,
-        news_contract=active_contract if allow_legacy_contract else None,
+        updates, set(snapshots), enforce_current_contract=not allow_transition_contract,
+        news_contract=active_contract if allow_transition_contract else None,
     ):
         identity = update["model_identity"]
         update_eligibility = update["eligibility_version"]
