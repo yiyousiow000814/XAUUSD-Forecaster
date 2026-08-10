@@ -237,15 +237,20 @@ test("handles a non-JSON service failure without exposing a parser error", () =>
   assert.match(audit, /LEARNING_REFRESH_INTERVAL_MS = 60_000/);
 });
 
-test("renders generic story coverage without black empty grid placeholders", () => {
+test("shows single events immediately and keeps later changes in one thread", () => {
   const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(page, /主题流/);
   assert.match(page, /个事件/);
   assert.match(page, /市场反应流/);
-  assert.match(page, /新事件候选/);
+  assert.match(page, /新发生/);
+  assert.match(page, /有后续时会自动接成一条脉络/);
+  assert.doesNotMatch(page, /暂无后续进展/);
+  assert.match(page, /第一次进展立即显示，后续变化接在一起/);
+  assert.ok(page.indexOf('className="story-grid"') < page.indexOf('className="theme-streams"'), "events must appear before secondary topic streams");
   assert.match(page, /版本需要更新/);
-  assert.match(page, /同一事件的报道，合并显示/);
+  assert.doesNotMatch(page, /还没有形成故事链/);
+  assert.doesNotMatch(page, /故事开始/);
   assert.doesNotMatch(page, /TEMPORAL EVENT GRAPH V5/);
   assert.doesNotMatch(page, /Runtime Git SHA/);
   assert.doesNotMatch(page, /Story Policy/);
@@ -529,6 +534,13 @@ test("reflows news evidence into readable mobile cards", () => {
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(view, /className="evidence-event-cell"/);
   assert.match(view, /className="evidence-status-cell"/);
+  assert.match(view, /统一来源身份：/);
+  assert.match(view, /原始发布域名：/);
+  assert.match(view, /不由 Gemini 或 Gemma 自由决定/);
+  assert.match(view, /mergeNewsEvidenceByEvent/);
+  assert.match(view, /new Map<string, NewsEvidence>/);
+  assert.match(view, /evidenceMode}:\$\{row\.event_key}/);
+  assert.doesNotMatch(view, /evidenceMode}:\$\{row\.event_key}:\$\{index}/);
   assert.match(css, /@media \(max-width:640px\)[\s\S]*\.evidence-table thead \{ position:absolute/);
   assert.match(css, /grid-template-areas:"event event" "status time" "usage usage"/);
   assert.match(css, /\.evidence-event-cell \{ grid-area:event/);

@@ -18,6 +18,10 @@ from .news_impact import (
 )
 from .news_relevance import news_headline_is_actionable
 from .news_contracts import CURRENT_NEWS_CONTRACT
+from .news_identity import (
+    canonical_material_event_anchor,
+    canonical_source_organization,
+)
 from .news_time import NewsTimeAssessment, assess_news_time
 
 
@@ -119,22 +123,17 @@ def _reliable_domain(host: str) -> str | None:
 
 
 def _source_organization(row: dict) -> str | None:
-    """Return the original reporting organization for independence checks."""
+    """Return the reporting identity without granting it reliability."""
     annotation = json.loads(row.get("annotation_json") or "{}")
-    value = re.sub(
-        r"[^a-z0-9]+", "_",
-        str(annotation.get("source_organization_id") or "").strip().casefold(),
-    ).strip("_")
-    aliases = {
-        "thomson_reuters": "reuters",
-        "reuters_news": "reuters",
-        "associated_press": "ap",
-        "ap_news": "ap",
-    }
-    value = aliases.get(value, value)
-    if value.startswith("yahoo_finance"):
-        value = "yahoo_finance"
-    return value or row.get("reliable_domain")
+    declared = canonical_source_organization(
+        annotation.get("source_organization_id")
+    )
+    publisher = canonical_source_organization(row.get("publisher_domain"))
+    direct_official = (
+        canonical_source_organization(row.get("source"))
+        if row.get("source") in BROAD_PRIMARY_SOURCES else None
+    )
+    return declared or publisher or direct_official
 
 
 def _topics(row: dict) -> tuple[str, ...]:
@@ -178,10 +177,27 @@ def _event_key(
     row: dict, topics: tuple[str, ...], *, use_material_event_key: bool = True,
 ) -> str:
     annotation = json.loads(row.get("annotation_json") or "{}")
+    structured = {
+        **annotation,
+        "headline": row.get("headline"),
+        "source_published_time": row.get("source_published_time"),
+        "collector_first_seen_time": row.get("collector_first_seen_time"),
+    }
+    anchor = canonical_material_event_anchor(structured)
+    # A system-level canonical development may repair divergent LLM keys. For
+    # ordinary events, an explicit shared material key remains the strongest
+    # identity and must win over a broader structured fallback.
+    if (
+        use_material_event_key and anchor is not None
+        and anchor[0] == "canonical-development"
+    ):
+        return hashlib.sha256(repr(anchor).encode("utf-8")).hexdigest()
     material_event_key = str(annotation.get("material_event_key") or "").strip().casefold()
     if use_material_event_key and material_event_key:
         identity = ("material-event", material_event_key)
         return hashlib.sha256(repr(identity).encode("utf-8")).hexdigest()
+    if use_material_event_key and anchor is not None:
+        return hashlib.sha256(repr(anchor).encode("utf-8")).hexdigest()
     actor = str(annotation.get("canonical_actor_id") or annotation.get("actor") or "").strip().casefold()
     action = str(annotation.get("action_family") or annotation.get("action") or "").strip().casefold()
     object_id = str(annotation.get("canonical_object_id") or annotation.get("object") or "").strip().casefold()
@@ -348,8 +364,9 @@ def event_evidence_rows_from_connection(
         ):
             continue
         row["reliable_domain"] = _reliable_domain(row["publisher_domain"])
+        row["source_identity_organization"] = _source_organization(row)
         row["source_organization"] = (
-            _source_organization(row) if row["reliable_domain"] else None
+            row["source_identity_organization"] if row["reliable_domain"] else None
         )
         row["topics"] = _topics(row)
         row["event_cluster_id"] = _event_key(
@@ -537,6 +554,10 @@ def event_evidence_rows_from_connection(
             "source_names": source_names,
             "publisher_domains": publisher_domains,
             "source_organizations": sorted(reliable_organizations),
+            "source_identity_organizations": sorted({
+                row["source_identity_organization"] for row in members
+                if row["source_identity_organization"]
+            }),
             "canonical_source": canonical["source"],
             "canonical_source_item_id": canonical["source_item_id"],
             "publisher_domain": canonical["publisher_domain"],

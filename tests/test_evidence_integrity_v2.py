@@ -349,7 +349,8 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
                   impact_update_type: str = "NEW_EVENT",
                   impact_assessed_at: datetime | None = None,
                   source_organization_id: str | None = None,
-                  include_impact: bool = True) -> None:
+                  include_impact: bool = True,
+                  annotation_overrides: dict | None = None) -> None:
     entities = entities or []
     body = ("publisher full body " * 30) + item
     digest = hashlib.sha256(body.encode()).hexdigest()
@@ -362,6 +363,39 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
         "headline": item, "body": body, "content_hash": digest, "cluster_id": item,
         "link": link,
     })
+    annotation = {
+        "event_type": event_type, "entities": entities, "hawkishness": impulse,
+        "inflation_impulse": 0.0, "growth_impulse": 0.0,
+        "geopolitical_risk": 0.0, "usd_impulse": 0.0,
+        "novelty": 1.0, "confidence": 1.0,
+        "headline_zh": item, "summary_zh": body,
+        "primary_category": primary_category,
+        "secondary_categories": [], "emerging_topic_zh": "",
+        "record_kind": record_kind,
+        "actor": entities[0] if entities else "official source",
+        "action": "reported",
+        "object": entities[1] if len(entities) > 1 else item,
+        "location": "",
+        "event_time": (
+            (published_at or first_seen).isoformat()
+            if event_time == "__DEFAULT__" else event_time
+        ),
+        "claim_status": "CONFIRMED",
+        "materiality": materiality,
+        "canonical_actor_id": "official_source",
+        "action_family": "OTHER_FACT",
+        "canonical_object_id": "reported_event",
+        "canonical_location_id": "",
+        "episode_key": "",
+        "primary_story_title_zh": item,
+        "secondary_contexts_zh": [],
+        "relation_to_prior": "NONE",
+        "document_kind": "NEWS_REPORT",
+        "material_event_key": material_event_key,
+        "source_organization_id": source_organization_id or source,
+        "evidence_role": evidence_role,
+    }
+    annotation.update(annotation_overrides or {})
     ledger.append_annotation({
         "annotation_id": item, "source": source, "source_item_id": item,
         "revision_number": 1, "raw_content_hash": digest, "event_type": event_type,
@@ -370,38 +404,7 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
         "novelty": 1.0, "confidence": 1.0, "llm_model_version": "gemini-3.5-flash-lite",
         "prompt_version": "news-json-v14-material-event-evidence",
         "parse_started_at": parsed_at, "parsed_at": parsed_at,
-        "annotation": {
-            "event_type": event_type, "entities": entities, "hawkishness": impulse,
-            "inflation_impulse": 0.0, "growth_impulse": 0.0,
-            "geopolitical_risk": 0.0, "usd_impulse": 0.0,
-            "novelty": 1.0, "confidence": 1.0,
-            "headline_zh": item, "summary_zh": body,
-            "primary_category": primary_category,
-            "secondary_categories": [], "emerging_topic_zh": "",
-            "record_kind": record_kind,
-            "actor": entities[0] if entities else "official source",
-            "action": "reported",
-            "object": entities[1] if len(entities) > 1 else item,
-            "location": "",
-            "event_time": (
-                (published_at or first_seen).isoformat()
-                if event_time == "__DEFAULT__" else event_time
-            ),
-            "claim_status": "CONFIRMED",
-            "materiality": materiality,
-            "canonical_actor_id": "official_source",
-            "action_family": "OTHER_FACT",
-            "canonical_object_id": "reported_event",
-            "canonical_location_id": "",
-            "episode_key": "",
-            "primary_story_title_zh": item,
-            "secondary_contexts_zh": [],
-            "relation_to_prior": "NONE",
-            "document_kind": "NEWS_REPORT",
-            "material_event_key": material_event_key,
-            "source_organization_id": source_organization_id or source,
-            "evidence_role": evidence_role,
-        },
+        "annotation": annotation,
     })
     if include_impact:
         assessed_at = impact_assessed_at or parsed_at
@@ -1990,6 +1993,59 @@ def test_material_event_key_deduplicates_different_headlines(tmp_path) -> None:
     events = event_evidence_rows(ledger, decision)
     assert len(events) == 1
     assert events[0]["member_count"] == 2
+    ledger.close()
+
+
+def test_canonical_occurrence_deduplicates_alias_keys_for_model(tmp_path) -> None:
+    epoch = datetime(2026, 8, 7, 17, 30, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
+    rows = (
+        ("gdelt_gold_geopolitics", "Trump renews bid to fire Lisa Cook",
+         "https://cnbc.com/a", "cnbc", "donald_trump", "OFFICIAL_STATEMENT",
+         "trump_fires_lisa_cook_2026_08", "cook-dismissal-effort"),
+        ("google_news_gold_context", "Trump again attempts to remove Lisa Cook",
+         "https://theguardian.com/b", "the_guardian", "donald_trump", "POLICY_DECISION",
+         "trump_fire_cook_aug_2026", "cook-firing-push"),
+        ("gdelt_gold_context", "White House pushes Lisa Cook removal",
+         "https://npr.org/c", "npr", "white_house", "REGULATORY_ACTION",
+         "trump_fires_lisa_cook_aug_2026", "cook-removal-attempt"),
+    )
+    for offset, row in enumerate(rows, start=1):
+        source, item, link, organization, actor, action, episode, material = row
+        _append_news(
+            ledger, source=source, item=item, link=link,
+            first_seen=epoch + timedelta(minutes=offset),
+            parsed_at=epoch + timedelta(minutes=offset + 1), impulse=0.0,
+            primary_category="regulation_other",
+            source_organization_id=organization,
+            material_event_key=material,
+            annotation_overrides={
+                "actor": actor, "canonical_actor_id": actor,
+                "action": "renews removal attempt", "action_family": action,
+                "object": "Lisa Cook", "canonical_object_id": "lisa_cook",
+                "episode_key": episode, "relation_to_prior": "ESCALATES",
+            },
+        )
+    events = event_evidence_rows(ledger, epoch + timedelta(minutes=20))
+    assert len(events) == 1
+    assert events[0]["member_count"] == 3
+    assert events[0]["independent_publishers"] == 3
+    ledger.close()
+
+
+def test_source_identity_is_visible_without_granting_reliability(tmp_path) -> None:
+    epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
+    _append_news(
+        ledger, source="gdelt_gold_geopolitics", item="publisher identity",
+        link="https://news.example.test/item", first_seen=epoch,
+        parsed_at=epoch + timedelta(minutes=1), impulse=0.0,
+        primary_category="rates_fed", source_organization_id="Example Media",
+    )
+    event = event_evidence_rows(ledger, epoch + timedelta(minutes=10))[0]
+    assert event["source_identity_organizations"] == ["example_media"]
+    assert event["source_organizations"] == []
+    assert event["independent_publishers"] == 0
     ledger.close()
 
 

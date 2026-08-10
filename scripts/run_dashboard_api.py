@@ -740,6 +740,142 @@ def _recent_market_chart(
     }
 
 
+def _news_evidence_display_rows(
+    connection: sqlite3.Connection, all_news_evidence: list[dict],
+) -> list[dict]:
+    """Return one audit row per independent event, not per frozen revision.
+
+    Model visibility is immutable at the event-version level.  The dashboard,
+    however, is an event audit.  Rendering every frozen version duplicated the
+    same headline and also produced duplicate React keys when users switched
+    between "used" and "never used".
+    """
+    try:
+        visibility_rows = connection.execute(
+            """SELECT event_key,
+                      count(*) AS frozen_model_uses,
+                      count(DISTINCT source_decision_id) AS frozen_decisions,
+                      count(DISTINCT event_source_hash) AS frozen_versions,
+                      min(decision_time) AS first_model_decision_time,
+                      max(decision_time) AS last_model_decision_time,
+                      group_concat(DISTINCT model_identity) AS model_identities,
+                      group_concat(DISTINCT model_version) AS model_versions
+               FROM news_model_visibility_receipts_v1
+               GROUP BY event_key"""
+        ).fetchall()
+        catalog_rows = connection.execute(
+            """SELECT * FROM news_model_visibility_events_v1
+               ORDER BY collector_first_seen_time DESC,event_key"""
+        ).fetchall()
+    except sqlite3.OperationalError:
+        visibility_rows = []
+        catalog_rows = []
+
+    receipts = {row["event_key"]: dict(row) for row in visibility_rows}
+    catalog_by_event: dict[str, dict] = {}
+    for raw in catalog_rows:
+        row = dict(raw)
+        catalog_by_event.setdefault(row["event_key"], row)
+
+    current_by_event: dict[str, dict] = {}
+    for row in all_news_evidence:
+        current_by_event[row["event_key"]] = row
+
+    display_fields = (
+        "event_key", "source_hash", "canonical_headline", "canonical_source",
+        "source_published_time", "collector_first_seen_time",
+        "economic_age_minutes", "freshness_status", "topics",
+        "evidence_grade", "broad_model_eligible", "model_permission",
+        "member_count", "independent_publishers", "source_names",
+        "publisher_domains", "source_identity_organizations", "reason_codes",
+    )
+    rows: list[dict] = []
+    displayed_events: set[str] = set()
+
+    for event_key, receipt in receipts.items():
+        current = current_by_event.get(event_key)
+        catalog = catalog_by_event.get(event_key)
+        if current is None and catalog is None:
+            continue
+        if current is not None:
+            display = {name: current.get(name) for name in display_fields}
+        else:
+            display = {
+                "event_key": event_key,
+                "source_hash": catalog["event_source_hash"],
+                "canonical_headline": catalog["canonical_headline"],
+                "canonical_source": catalog["canonical_source"],
+                "source_published_time": catalog["source_published_time"],
+                "collector_first_seen_time": catalog["collector_first_seen_time"],
+                "economic_age_minutes": None,
+                "freshness_status": "FROZEN_AT_DECISION",
+                "topics": json.loads(catalog["topics_json"] or "[]"),
+                "evidence_grade": catalog["evidence_grade"],
+                "broad_model_eligible": False,
+                "model_permission": "MODEL_USED",
+                "member_count": 1,
+                "independent_publishers": 1,
+                "source_names": [catalog["canonical_source"]],
+                "publisher_domains": [],
+                "source_identity_organizations": [],
+                "reason_codes": ["FROZEN_MODEL_VISIBILITY_RECEIPT"],
+            }
+        display.update({
+            "model_seen": True,
+            "frozen_model_uses": int(receipt["frozen_model_uses"]),
+            "frozen_decisions": int(receipt["frozen_decisions"]),
+            "frozen_versions": int(receipt["frozen_versions"]),
+            "first_model_decision_time": receipt["first_model_decision_time"],
+            "last_model_decision_time": receipt["last_model_decision_time"],
+            "model_identities": sorted(filter(
+                None, str(receipt["model_identities"] or "").split(","),
+            )),
+            "model_versions": sorted(filter(
+                None, str(receipt["model_versions"] or "").split(","),
+            )),
+            "model_unseen_reason_codes": [],
+        })
+        rows.append(display)
+        displayed_events.add(event_key)
+
+    for row in reversed(all_news_evidence):
+        event_key = row["event_key"]
+        if event_key in displayed_events:
+            continue
+        if row.get("prompt_version") != "news-json-v14-material-event-evidence":
+            continue
+        if row.get("evidence_grade") not in {
+            "PRIMARY", "CORROBORATED", "SINGLE_RELIABLE",
+        }:
+            continue
+        display = {name: row.get(name) for name in display_fields}
+        display.update({
+            "model_seen": False,
+            "frozen_model_uses": 0,
+            "frozen_decisions": 0,
+            "frozen_versions": 0,
+            "first_model_decision_time": None,
+            "last_model_decision_time": None,
+            "model_identities": [],
+            "model_versions": [],
+            "model_unseen_reason_codes": (
+                ["ELIGIBLE_AWAITING_FROZEN_PREDICTION"]
+                if row["broad_model_eligible"] else list(row["reason_codes"])
+            ),
+        })
+        rows.append(display)
+        displayed_events.add(event_key)
+
+    rows.sort(
+        key=lambda row: (
+            int(row["model_seen"]), row["collector_first_seen_time"],
+            row["event_key"],
+        ),
+        reverse=True,
+    )
+    return rows[:100]
+
+
 def _dashboard_payload(database: Path) -> dict:
     now = datetime.now(UTC)
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=5)
@@ -1201,129 +1337,7 @@ def _dashboard_payload(database: Path) -> dict:
         evidence_topics = Counter(
             topic for row in all_news_evidence for topic in row["topics"]
         )
-        try:
-            visibility_rows = connection.execute(
-                """SELECT event_key,event_source_hash,
-                          count(*) AS frozen_model_uses,
-                          count(DISTINCT source_decision_id) AS frozen_decisions,
-                          min(decision_time) AS first_model_decision_time,
-                          max(decision_time) AS last_model_decision_time,
-                          group_concat(DISTINCT model_identity) AS model_identities,
-                          group_concat(DISTINCT model_version) AS model_versions
-                   FROM news_model_visibility_receipts_v1
-                   GROUP BY event_key,event_source_hash"""
-            ).fetchall()
-            visibility_catalog_rows = connection.execute(
-                """SELECT * FROM news_model_visibility_events_v1
-                   ORDER BY collector_first_seen_time DESC,event_key"""
-            ).fetchall()
-        except sqlite3.OperationalError:
-            visibility_rows = []
-            visibility_catalog_rows = []
-        visibility_by_event = {}
-        visibility_by_source_hash = {}
-        for visibility_row in visibility_rows:
-            receipt = dict(visibility_row)
-            visibility_by_event.setdefault(receipt["event_key"], receipt)
-            visibility_by_source_hash.setdefault(receipt["event_source_hash"], receipt)
-        evidence_display_fields = (
-            "event_key", "source_hash", "canonical_headline", "canonical_source",
-            "source_published_time", "collector_first_seen_time",
-            "economic_age_minutes", "freshness_status",
-            "topics", "evidence_grade",
-            "broad_model_eligible", "model_permission", "member_count",
-            "independent_publishers", "source_names", "publisher_domains",
-            "reason_codes",
-        )
-        news_evidence = []
-        current_by_event = {row["event_key"]: row for row in all_news_evidence}
-        current_by_source_hash = {row["source_hash"]: row for row in all_news_evidence}
-        displayed_source_hashes = set()
-        for catalog_row_raw in visibility_catalog_rows:
-            catalog_row = dict(catalog_row_raw)
-            receipt = visibility_by_source_hash.get(catalog_row["event_source_hash"])
-            if receipt is None:
-                continue
-            current = (
-                current_by_source_hash.get(catalog_row["event_source_hash"])
-                or current_by_event.get(catalog_row["event_key"])
-            )
-            news_evidence.append({
-                "event_key": catalog_row["event_key"],
-                "source_hash": catalog_row["event_source_hash"],
-                "canonical_headline": catalog_row["canonical_headline"],
-                "canonical_source": catalog_row["canonical_source"],
-                "source_published_time": catalog_row["source_published_time"],
-                "collector_first_seen_time": catalog_row["collector_first_seen_time"],
-                "economic_age_minutes": current.get("economic_age_minutes") if current else None,
-                "freshness_status": current.get("freshness_status") if current else "FROZEN_AT_DECISION",
-                "topics": json.loads(catalog_row["topics_json"] or "[]"),
-                "evidence_grade": catalog_row["evidence_grade"],
-                "broad_model_eligible": True,
-                "model_permission": "MODEL_USED",
-                "member_count": current.get("member_count", 1) if current else 1,
-                "independent_publishers": current.get("independent_publishers", 1) if current else 1,
-                "source_names": current.get("source_names", [catalog_row["canonical_source"]]) if current else [catalog_row["canonical_source"]],
-                "publisher_domains": current.get("publisher_domains", []) if current else [],
-                "reason_codes": ["FROZEN_MODEL_VISIBILITY_RECEIPT"],
-                "model_seen": True,
-                "frozen_model_uses": int(receipt["frozen_model_uses"]),
-                "frozen_decisions": int(receipt["frozen_decisions"]),
-                "first_model_decision_time": receipt["first_model_decision_time"],
-                "last_model_decision_time": receipt["last_model_decision_time"],
-                "model_identities": sorted(filter(None, str(receipt["model_identities"] or "").split(","))),
-                "model_versions": sorted(filter(None, str(receipt["model_versions"] or "").split(","))),
-                "model_unseen_reason_codes": [],
-            })
-            displayed_source_hashes.add(catalog_row["event_source_hash"])
-        for row in reversed(all_news_evidence):
-            if row.get("prompt_version") != "news-json-v14-material-event-evidence":
-                continue
-            if row.get("evidence_grade") not in {
-                "PRIMARY", "CORROBORATED", "SINGLE_RELIABLE"
-            }:
-                continue
-            if row["source_hash"] in displayed_source_hashes:
-                continue
-            display = {name: row[name] for name in evidence_display_fields}
-            receipt = (
-                visibility_by_event.get(row["event_key"])
-                or visibility_by_source_hash.get(row["source_hash"])
-            )
-            display.update({
-                "model_seen": receipt is not None,
-                "frozen_model_uses": int(receipt["frozen_model_uses"]) if receipt else 0,
-                "frozen_decisions": int(receipt["frozen_decisions"]) if receipt else 0,
-                "first_model_decision_time": (
-                    receipt["first_model_decision_time"] if receipt else None
-                ),
-                "last_model_decision_time": (
-                    receipt["last_model_decision_time"] if receipt else None
-                ),
-                "model_identities": (
-                    sorted(filter(None, str(receipt["model_identities"] or "").split(",")))
-                    if receipt else []
-                ),
-                "model_versions": (
-                    sorted(filter(None, str(receipt["model_versions"] or "").split(",")))
-                    if receipt else []
-                ),
-                "model_unseen_reason_codes": (
-                    [] if receipt else (
-                        ["ELIGIBLE_AWAITING_FROZEN_PREDICTION"]
-                        if row["broad_model_eligible"] else list(row["reason_codes"])
-                    )
-                ),
-            })
-            news_evidence.append(display)
-            displayed_source_hashes.add(row["source_hash"])
-        news_evidence.sort(
-            key=lambda row: (
-                int(row["model_seen"]), row["collector_first_seen_time"], row["event_key"]
-            ),
-            reverse=True,
-        )
-        news_evidence = news_evidence[:100]
+        news_evidence = _news_evidence_display_rows(connection, all_news_evidence)
         raw_article_revisions = connection.execute(
             "SELECT count(*) FROM news_revisions"
         ).fetchone()[0]

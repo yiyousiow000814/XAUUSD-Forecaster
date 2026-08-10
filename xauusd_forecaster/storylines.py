@@ -7,8 +7,14 @@ import re
 from collections import defaultdict
 from datetime import UTC, datetime
 
+from .news_identity import (
+    canonical_material_event_anchor,
+    canonical_source_organization,
+    canonical_story_episode,
+)
 
-STORYLINE_POLICY_VERSION = "temporal-event-graph-v7-canonical-material-events"
+
+STORYLINE_POLICY_VERSION = "temporal-event-graph-v8-canonical-occurrence-chains"
 CURRENT_EVENT_PROMPT_VERSION = "news-json-v14-material-event-evidence"
 LEGACY_POLICY_STATUS = "temporal-event-graph-v2:EXPERIMENTAL_MEMBERSHIP_INVALID"
 MODEL_PERMISSION = "DISPLAY_ONLY"
@@ -184,16 +190,25 @@ def _source_organizations(event: dict) -> set[str]:
         for source in event.get("source_names") or ()
         if source in OFFICIAL_ORGANIZATIONS
     }
-    organizations = set(official_organizations)
-    if not official_organizations:
-        for domain in event.get("publisher_domains") or ():
-            canonical = _canonical_id(domain.removeprefix("www."))
-            if canonical:
-                organizations.add(canonical)
-    declared = _canonical_id(event.get("source_organization_id"))
+    if official_organizations:
+        return official_organizations
+    declared = {
+        canonical_source_organization(value)
+        for value in event.get("source_organizations") or ()
+        if canonical_source_organization(value)
+    }
+    single_declared = canonical_source_organization(
+        event.get("source_organization_id")
+    )
+    if single_declared:
+        declared.add(single_declared)
     if declared:
-        organizations.add(declared)
-    return organizations
+        return declared
+    return {
+        canonical_source_organization(domain.removeprefix("www."))
+        for domain in event.get("publisher_domains") or ()
+        if canonical_source_organization(domain.removeprefix("www."))
+    }
 
 
 def _episode_identity(event: dict) -> str | None:
@@ -205,6 +220,9 @@ def _episode_identity(event: dict) -> str | None:
     location = _canonical_id(event.get("canonical_location_id") or event.get("location"))
     if not episode or not actor or not action or not (object_id or location):
         return None
+    canonical_episode = canonical_story_episode(event)
+    if canonical_episode != episode:
+        return canonical_episode
     # One economic release is one episode even when publishers and separate
     # Gemini calls use different names such as jobs_report, NFP or payrolls.
     # The normalization is deliberately anchored to a US labour authority or
@@ -213,7 +231,8 @@ def _episode_identity(event: dict) -> str | None:
     structured = "_".join((episode, actor, object_id))
     us_labor_actor = actor in {
         "bls", "bureau_of_labor_statistics", "labor_department",
-        "us_bureau_of_labor_statistics", "us_labor_department",
+        "us_bureau_of_labor_statistics", "u_s_bureau_of_labor_statistics",
+        "us_labor_department",
     }
     us_employment_object = (
         any(token in structured for token in (
@@ -257,6 +276,13 @@ def _episode_identity(event: dict) -> str | None:
         # month publication, and an episode period equal to that publication
         # month. Explicit report periods in the object always win above.
         published = _parse_time(event.get("source_published_time"))
+        if (
+            period is None and us_labor_actor and published is not None
+            and published.day <= 10
+        ):
+            previous_year = published.year if published.month > 1 else published.year - 1
+            previous_month = published.month - 1 if published.month > 1 else 12
+            period = (f"{previous_year:04d}", f"{previous_month:02d}")
         if (
             object_period is None
             and episode_period is not None
@@ -326,6 +352,7 @@ def _record_kind(event: dict) -> str:
         "rise", "rises", "rose", "fall", "falls", "fell", "drop", "drops",
         "gain", "gains", "climb", "climbs", "steady", "surge", "slip",
         "上涨", "下跌", "走高", "走低", "攀升", "回落", "持稳", "大涨", "大跌",
+        "突破",
     ))
     if declared == "FACT_EVENT" and market_instrument and market_move:
         return "MARKET_REACTION"
@@ -372,6 +399,8 @@ def _event_identity(event: dict) -> str:
     """Identify the fact being reported, independently from its article/cluster."""
     episode = _episode_identity(event) or ""
     action_family = _canonical_id(event.get("action_family") or event.get("action"))
+    if episode.startswith(("lisa_cook_rate_policy_", "tbac_meeting_")):
+        return hashlib.sha256(f"{episode}|single-development".encode()).hexdigest()[:20]
     # The initial Employment Situation release is a single material event.
     # Publisher-specific material_event_key values must not split it into many
     # nodes. Explicit revisions remain distinct because they supersede it.
@@ -379,9 +408,17 @@ def _event_identity(event: dict) -> str:
         relation = str(event.get("relation_to_prior") or "").upper()
         parts = (episode, "revision", _event_time(event)) if relation == "SUPERSEDES" else (episode, "initial_release")
         return hashlib.sha256("|".join(parts).encode()).hexdigest()[:20]
+    anchor = canonical_material_event_anchor({
+        **event,
+        "episode_key": episode,
+    })
+    if anchor is not None and anchor[0] == "canonical-development":
+        return hashlib.sha256("|".join(anchor).encode()).hexdigest()[:20]
     declared = _canonical_id(event.get("material_event_key"))
     if declared:
         return hashlib.sha256(declared.encode()).hexdigest()[:20]
+    if anchor is not None:
+        return hashlib.sha256("|".join(anchor).encode()).hexdigest()[:20]
     if action_family == "policy_decision":
         parts = (episode, action_family)
         return hashlib.sha256("|".join(parts).encode()).hexdigest()[:20]
@@ -528,18 +565,9 @@ def _timeline_row(event: dict, *, first: bool) -> dict:
 
 
 def _is_active_story(core: list[dict], attached: list[dict]) -> bool:
-    if len(core) >= 2:
-        return True
-    meaningful = {"CONFIRMS", "CONTRADICTS", "RESPONDS_TO", "ESCALATES", "DEESCALATES", "SUPERSEDES"}
-    if any(_relation(row, first=False) in meaningful for row in core):
-        return True
-    # One important fact may become a story only after independent confirmation
-    # and a subsequent reaction. Article count alone never passes this gate.
-    return bool(
-        core
-        and int(core[0].get("independent_publishers") or 0) >= 2
-        and attached
-    )
+    # Confirmations and reactions strengthen one fact; they do not create a
+    # temporal chain. A story requires two distinct real-world developments.
+    return len(core) >= 2
 
 
 def _coverage_template(core: list[dict]) -> tuple[str, tuple[str, ...]]:
