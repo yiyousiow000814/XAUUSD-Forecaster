@@ -8,6 +8,7 @@ import statistics
 from collections import defaultdict
 from datetime import datetime
 
+from .decision import prediction_research_action
 from .execution_costs import COMMISSION_STATUS, SLIPPAGE_STATUS, net_shadow_log_return
 from .news_contracts import (
     CURRENT_NEWS_CONTRACT,
@@ -17,6 +18,28 @@ from .news_contracts import (
 
 
 MAX_CURVE_POINTS = 1200
+
+
+def _research_scoring_rows(rows, model_identity: str) -> list[dict]:
+    """Use the one causal action contract for display and learning scores.
+
+    Early residual predictions were immutably stored as WAIT even though their
+    frozen post-cost EV pair contained a direction.  Reconstruct that research
+    direction without rewriting the prediction ledger or consulting outcomes.
+    """
+    result = []
+    for source in rows:
+        row = dict(source)
+        action, _ = prediction_research_action(
+            model_identity=model_identity,
+            prediction_status=str(row.get("prediction_status") or ""),
+            recommended_action=str(row.get("recommended_action") or "WAIT"),
+            ev_long_u5=row.get("ev_long_u5"),
+            ev_short_u5=row.get("ev_short_u5"),
+        )
+        row["recommended_action"] = action
+        result.append(row)
+    return result
 
 
 def _bounded_curve(points: list[dict], max_points: int = MAX_CURVE_POINTS) -> list[dict]:
@@ -330,7 +353,8 @@ def learning_curve_payload(connection) -> dict:
     models = []
     for update in updates:
         rows = connection.execute(
-            """SELECT p.decision_time,p.recommended_action,p.interval_width,
+            """SELECT p.decision_time,p.recommended_action,p.prediction_status,
+                      p.ev_long_u5,p.ev_short_u5,p.interval_width,
                       p.calibration_status,p.calibration_rows,p.calibration_effective_blocks,
                       p.calibration_distinct_days,s.value_quote_return,s.squared_error,
                       s.direction_correct,s.high_confidence_error,
@@ -341,6 +365,7 @@ def learning_curve_payload(connection) -> dict:
             WHERE p.model_version=? AND p.decision_time>?
             ORDER BY p.decision_time""", (update["model_version"], update["created_at"])
         ).fetchall()
+        rows = _research_scoring_rows(rows, update["model_identity"])
         scored = [row for row in rows if row["value_quote_return"] is not None]
         cadence_metrics = _cadence_metrics(scored)
         values = [_net_row_value(row) for row in scored]
@@ -427,6 +452,7 @@ def learning_curve_payload(connection) -> dict:
         rows = connection.execute(
             f"""WITH ranked AS (
                 SELECT p.source_decision_id,p.decision_time,p.recommended_action,
+                       p.prediction_status,p.ev_long_u5,p.ev_short_u5,
                        s.value_quote_return,o.long_quote_return,o.short_quote_return,
                        row_number() OVER (
                            PARTITION BY p.source_decision_id,p.model_identity
@@ -442,6 +468,7 @@ def learning_curve_payload(connection) -> dict:
             SELECT * FROM ranked WHERE version_rank=1 ORDER BY decision_time""",
             (*versions, group_updates[0]["created_at"]),
         ).fetchall()
+        rows = _research_scoring_rows(rows, identity)
         scored = [row for row in rows if row["value_quote_return"] is not None]
         values = [_net_row_value(row) for row in scored]
         daily = defaultdict(float)
@@ -482,6 +509,7 @@ def learning_curve_payload(connection) -> dict:
         rows = connection.execute(
             """WITH ranked AS (
                 SELECT p.source_decision_id,p.decision_time,p.recommended_action,
+                       p.prediction_status,p.ev_long_u5,p.ev_short_u5,
                        p.interval_width,p.calibration_status,
                        p.calibration_rows,p.calibration_effective_blocks,
                        p.calibration_distinct_days,s.value_quote_return,s.squared_error,
@@ -500,6 +528,7 @@ def learning_curve_payload(connection) -> dict:
             SELECT * FROM ranked WHERE version_rank=1 ORDER BY decision_time""",
             (identity,),
         ).fetchall()
+        rows = _research_scoring_rows(rows, identity)
         cadence_metrics = _cadence_metrics(rows)
         primary_metrics = cadence_metrics["EVERY_5M"]
         latest = rows[-1] if rows else None
@@ -540,7 +569,8 @@ def learning_curve_payload(connection) -> dict:
             rows = connection.execute(
                 """WITH ranked AS (
                     SELECT p.source_decision_id,p.decision_time,p.model_version,
-                           p.recommended_action,
+                           p.recommended_action,p.prediction_status,
+                           p.ev_long_u5,p.ev_short_u5,
                            u.training_dataset_hash,u.training_rows,s.value_quote_return,
                            row_number() OVER (
                                PARTITION BY p.source_decision_id,p.model_identity
@@ -552,10 +582,13 @@ def learning_curve_payload(connection) -> dict:
                     WHERE p.model_identity=? AND p.decision_time>u.created_at
                 )
                 SELECT decision_time,model_version,recommended_action,
+                       prediction_status,ev_long_u5,ev_short_u5,
                        training_dataset_hash,training_rows,
                        value_quote_return FROM ranked
                 WHERE version_rank=1 ORDER BY decision_time""", (identity,)
             ).fetchall()
+        rows = _research_scoring_rows(rows, identity)
+
         def build_points(source_rows):
             cumulative = 0.0
             result = []

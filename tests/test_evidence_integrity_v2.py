@@ -876,14 +876,18 @@ def _insert_prediction(connection, decision_id: str, decision_time: datetime, *,
                        model_version: str = "market-test",
                        model_identity: str = "MARKET_ONLY",
                        value_quote_return: float = 2.0,
-                       residual_u5: float = 0.1) -> None:
+                       residual_u5: float = 0.1,
+                       recommended_action: str = "LONG",
+                       prediction_status: str = "PROVISIONAL",
+                       ev_long_u5: float = 0.1,
+                       ev_short_u5: float = -0.1) -> None:
     connection.execute(
         "INSERT INTO predictions_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (decision_id, model_version, model_identity, decision_time.isoformat(),
          decision_time.isoformat(), "LIVE_OOS", "feature-hash", 0.1, None,
-         0.1, -0.1, None, None, "UTC_DAY_BLOCK_OOS_ABS_RESIDUAL_Q95",
-         "calibration-test", 0, 0, 0, None, "UNCALIBRATED", "LONG", "WAIT",
-         "PROVISIONAL"),
+         ev_long_u5, ev_short_u5, None, None, "UTC_DAY_BLOCK_OOS_ABS_RESIDUAL_Q95",
+         "calibration-test", 0, 0, 0, None, "UNCALIBRATED", recommended_action, "WAIT",
+         prediction_status),
     )
     connection.execute(
         "INSERT INTO prediction_scores_v2 VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -991,6 +995,48 @@ def test_learning_curve_excludes_predictions_not_after_model_creation(tmp_path) 
     assert market_curve["points"][0]["cumulative_quote_return"] == pytest.approx(
         net_shadow_log_return(2.0)
     )
+    ledger.close()
+
+
+def test_residual_learning_scores_replay_only_frozen_ev_direction(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    created_at = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    _insert_model_update(
+        ledger.connection, "news-residual-test", "NEWS_RESIDUAL", created_at,
+    )
+    _insert_prediction(
+        ledger.connection, "residual-oos", created_at + timedelta(minutes=5),
+        model_version="news-residual-test", model_identity="NEWS_RESIDUAL",
+        value_quote_return=2.0, recommended_action="WAIT",
+        prediction_status="DIAGNOSTIC_RESIDUAL_ONLY",
+        ev_long_u5=0.2, ev_short_u5=-0.3,
+    )
+    ledger.connection.commit()
+
+    payload = learning_curve_payload(ledger.connection)
+    expected = net_shadow_log_return(2.0)
+    model = next(
+        row for row in payload["models"]
+        if row["model_identity"] == "NEWS_RESIDUAL"
+    )
+    rolling = next(
+        row for row in payload["rolling_processes"]
+        if row["model_identity"] == "NEWS_RESIDUAL"
+    )
+    group = next(
+        row for row in payload["version_groups"]
+        if row["model_identity"] == "NEWS_RESIDUAL"
+    )
+    curve = next(
+        row for row in payload["identity_curves"]
+        if row["model_identity"] == "NEWS_RESIDUAL"
+    )
+    assert model["cumulative_quote_return"] == pytest.approx(expected)
+    assert model["long_frequency"] == 1
+    assert model["wait_rate"] == 0.0
+    assert rolling["cumulative_quote_return"] == pytest.approx(expected)
+    assert group["cumulative_quote_return"] == pytest.approx(expected)
+    assert curve["points"][0]["cumulative_quote_return"] == pytest.approx(expected)
     ledger.close()
 
 

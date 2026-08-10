@@ -209,6 +209,7 @@ type EvaluationCadence = "EVERY_5M" | "FIXED_30M";
 type CadenceMetric = { oos_rows: number; distinct_days: number; cumulative_quote_return: number; profit_factor_quote_adjusted: number | null; coverage_rate: number | null };
 
 type Payload = {
+  learning_preview_summary?: boolean;
   generated_at: string;
   system: { online: boolean; market_session?: "OPEN" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE"; source_of_truth: string; sites_mirror: string; deployment?: { runtime_git_sha: string | null; expected_git_sha: string | null; runtime_dirty: boolean; status: string; storyline_policy_version: string; payload_schema_version: string; payload_generated_at: string; source_database_epoch: string | null } };
   counts: Record<string, number>;
@@ -712,6 +713,7 @@ export default function AuditView() {
   const [newsPage, setNewsPage] = useState(1);
   const [graphOpen, setGraphOpen] = useState(false);
   const [graphStartTab, setGraphStartTab] = useState<"curve" | "execution">("curve");
+  const fullLearningReadyRef = useRef(Boolean(cachedLearning && !cachedLearning.learning_preview_summary));
   const [summaryCadence, setSummaryCadence] = useState<EvaluationCadence>("EVERY_5M");
   const [evidenceMode, setEvidenceMode] = useState<"seen" | "unseen" | "all">("seen");
   const auditTabsRef = useRef<HTMLElement>(null);
@@ -733,6 +735,7 @@ export default function AuditView() {
     try {
       const body = await loadDashboardResource<Partial<Payload>>("/api/learning", { force });
       setPayload(previous => ({ ...previous, ...body }) as Payload);
+      if (!body.learning_preview_summary) fullLearningReadyRef.current = true;
       setLearningState("ready");
       setLearningError(null);
     } catch (reason) {
@@ -774,10 +777,24 @@ export default function AuditView() {
 
   useEffect(() => {
     if (view !== "league") return;
-    const initial = window.setTimeout(() => void refreshLearning(), 0);
+    // The embedded Preview summary keeps first paint small.  Fetch the complete
+    // D1 ledger as soon as the league is visible so the modal never waits for
+    // the next polling interval.
+    const initial = window.setTimeout(
+      () => void refreshLearning(!fullLearningReadyRef.current),
+      0,
+    );
     const interval = window.setInterval(() => void refreshLearning(true), LEARNING_REFRESH_INTERVAL_MS);
     return () => { window.clearTimeout(initial); window.clearInterval(interval); };
   }, [refreshLearning, view]);
+
+  const openLearningGraph = (tab: "curve" | "execution") => {
+    setGraphStartTab(tab);
+    setGraphOpen(true);
+    // Reuse the resource cache's in-flight promise when the idle prefetch is
+    // still running.  This is one D1 request, not a second modal-only fetch.
+    if (!fullLearningReadyRef.current) void refreshLearning(true);
+  };
 
   const selectView = (next: "news" | "evidence" | "stories" | "decisions" | "league" | "coverage") => {
     setView(next);
@@ -1070,7 +1087,7 @@ export default function AuditView() {
         </div>
         <section className="graph-launch">
           <div><h3>查看学习曲线与 K 线</h3><p>长期累计、每组成绩与决策位置</p></div>
-          <button type="button" onClick={() => { setGraphStartTab("curve"); setGraphOpen(true); }}>打开交互图表 ↗</button>
+          <button type="button" onClick={() => openLearningGraph("curve")}>打开交互图表 ↗</button>
         </section>
         <section className="model-score-summary"><header><div><span>LIVE OOS SCOREBOARD</span><h3>六套模型，现在表现怎样？</h3></div><small>左边是本组开始前，箭头后是连续累计，圆点后是本组独立贡献。</small></header><div className="summary-cadence"><span>统计频率</span><button type="button" className={summaryCadence === "EVERY_5M" ? "active" : ""} onClick={() => setSummaryCadence("EVERY_5M")}>每5分钟（重叠）</button><button type="button" className={summaryCadence === "FIXED_30M" ? "active" : ""} onClick={() => setSummaryCadence("FIXED_30M")}>每30分钟（:00 / :30）</button><small>预测期限始终是30分钟。</small></div>
         {(payload?.learning_curves?.models?.length ?? 0) === 0 ? <div className="league-empty">
@@ -1091,7 +1108,7 @@ export default function AuditView() {
           const tone = group === null ? "is-pending" : group >= 0 ? "is-positive" : "is-negative";
           return <article key={identity}><b>{MODEL_LABELS[identity]}{diagnostic ? <small>新闻修正量</small> : newsOnlyPending ? <small>等待新版生成</small> : null}</b><div className="return-flow" aria-label={`本组开始前 ${percent(history)}，加入本组后 ${percent(total)}，本组贡献 ${percent(group)}`}><span className="return-value return-history" title="本组开始前的历史累计"><small>开始前</small><span>{history === null ? "—" : percent(history)}</span></span><i className={tone} aria-hidden="true">→</i><span className="return-value return-total" title="加入本组后的连续累计"><small>当前累计</small><strong>{total === null ? "等待" : percent(total)}</strong></span><i className="return-separator" aria-hidden="true">·</i><span className={`return-value return-group ${tone}`} title="本组独立贡献"><small>本组贡献</small><strong>{group === null ? "等待" : percent(group)}</strong></span></div></article>;
         })}</div>}</section>
-        <ExecutionResearch status={payload?.execution_learning} onOpenGraph={() => { setGraphStartTab("execution"); setGraphOpen(true); }} />
+        <ExecutionResearch status={payload?.execution_learning} onOpenGraph={() => openLearningGraph("execution")} />
         <details className="model-method-note">
           <summary><span>方法与实盘边界</span><small>新闻修正量、成本与 Shadow 限制</small></summary>
           <div>

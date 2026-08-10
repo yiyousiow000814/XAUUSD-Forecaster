@@ -606,6 +606,14 @@ test("shows residual and news-only research directions without implying executio
   assert.doesNotMatch(source, /仅显示修正值，不单独判断方向/);
 });
 
+test("prefetches the complete learning ledger before interactive charts need it", () => {
+  const audit = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  const compact = readFileSync(new URL("../build/preview-learning.ts", import.meta.url), "utf8");
+  assert.match(compact, /learning_preview_summary: true/);
+  assert.match(audit, /refreshLearning\(!fullLearningReadyRef\.current\)/);
+  assert.match(audit, /if \(!fullLearningReadyRef\.current\) void refreshLearning\(true\)/);
+});
+
 test("reflows news evidence into readable mobile cards", () => {
   const view = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");

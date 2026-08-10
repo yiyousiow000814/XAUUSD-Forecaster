@@ -6,6 +6,7 @@ export function compactPreviewLearning(learning: JsonObject): JsonObject {
   const models = Array.isArray(curves.models) ? curves.models : [];
   const versionGroups = Array.isArray(curves.version_groups) ? curves.version_groups : [];
   return {
+    learning_preview_summary: true,
     generated_at: learning.generated_at,
     learning_curves: {
       collection_epoch: curves.collection_epoch,
