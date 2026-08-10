@@ -7,21 +7,54 @@ from datetime import datetime, timedelta
 from .models import Action, DataHealth, Decision, Forecast
 
 
+RESIDUAL_MODEL_IDENTITIES = frozenset({"NEWS_RESIDUAL", "BROAD_NEWS_RESIDUAL"})
+
+
+def select_post_cost_ev_action(
+    ev_long_u5: float | None, ev_short_u5: float | None,
+) -> Action:
+    """Choose a research direction using only the frozen post-cost EV pair."""
+    if ev_long_u5 is None or ev_short_u5 is None or ev_long_u5 == ev_short_u5:
+        return Action.WAIT
+    if ev_long_u5 > ev_short_u5 and ev_long_u5 > 0:
+        return Action.LONG
+    if ev_short_u5 > ev_long_u5 and ev_short_u5 > 0:
+        return Action.SHORT
+    return Action.WAIT
+
+
+def prediction_research_action(
+    *, model_identity: str, prediction_status: str,
+    recommended_action: str, ev_long_u5: float | None,
+    ev_short_u5: float | None,
+) -> tuple[str, str]:
+    """Expose legacy residual direction without rewriting immutable history."""
+    if (
+        model_identity in RESIDUAL_MODEL_IDENTITIES
+        and prediction_status == "DIAGNOSTIC_RESIDUAL_ONLY"
+        and recommended_action == Action.WAIT.value
+    ):
+        return (
+            select_post_cost_ev_action(ev_long_u5, ev_short_u5).value,
+            "REPLAYED_FROM_FROZEN_POST_COST_EV",
+        )
+    return recommended_action, "RECORDED"
+
+
 def select_recommended_action(forecast: Forecast) -> tuple[Action, str]:
     """Choose the positive post-cost EV direction; keep LCB as diagnostics."""
     if forecast.data_health is not DataHealth.OK:
         return Action.WAIT, f"DATA_{forecast.data_health.value}"
 
+    action = select_post_cost_ev_action(
+        forecast.ev_long_u5, forecast.ev_short_u5,
+    )
     if forecast.ev_long_u5 == forecast.ev_short_u5:
         return Action.WAIT, "TIED_DIRECTIONAL_EV"
-
-    if forecast.ev_long_u5 > forecast.ev_short_u5:
-        if forecast.ev_long_u5 > 0:
-            return Action.LONG, "LONG_BEST_POSITIVE_POST_COST_EV"
-        return Action.WAIT, "NO_POSITIVE_POST_COST_EV"
-
-    if forecast.ev_short_u5 > 0:
-        return Action.SHORT, "SHORT_BEST_POSITIVE_POST_COST_EV"
+    if action is Action.LONG:
+        return action, "LONG_BEST_POSITIVE_POST_COST_EV"
+    if action is Action.SHORT:
+        return action, "SHORT_BEST_POSITIVE_POST_COST_EV"
     return Action.WAIT, "NO_POSITIVE_POST_COST_EV"
 
 

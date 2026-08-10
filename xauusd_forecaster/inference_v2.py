@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from .evidence_v2 import ELIGIBILITY_VERSION, FEATURE_VERSION, NEWS_FEATURE_VERSION
+from .decision import select_post_cost_ev_action
 from .execution_costs import ROUND_TRIP_COMMISSION_LOG_COST
 from .forward_ledger import canonical_hash
 from .news_contracts import (
@@ -170,15 +171,7 @@ def _recommended_action(
 ) -> str:
     """Choose the positive post-cost EV direction; uncertainty remains diagnostic."""
     del half_width
-    if ev_long is None or ev_short is None:
-        return "WAIT"
-    if ev_long == ev_short:
-        return "WAIT"
-    if ev_long > ev_short and ev_long > 0:
-        return "LONG"
-    if ev_short > ev_long and ev_short > 0:
-        return "SHORT"
-    return "WAIT"
+    return select_post_cost_ev_action(ev_long, ev_short).value
 
 
 def _news_snapshot_exposed(identity: str, snapshot: dict, features: dict) -> bool:

@@ -48,6 +48,7 @@ from xauusd_forecaster.gemini_quota import GeminiQuotaLedger  # noqa: E402
 from xauusd_forecaster.training import MARKET_FEATURES  # noqa: E402
 from xauusd_forecaster.learning_curves import learning_curve_payload  # noqa: E402
 from xauusd_forecaster.execution_costs import net_shadow_log_return  # noqa: E402
+from xauusd_forecaster.decision import prediction_research_action  # noqa: E402
 from xauusd_forecaster.news_evidence import (  # noqa: E402
     EVIDENCE_POLICY_VERSION, event_evidence_rows_from_connection,
     resolve_event_clock,
@@ -999,6 +1000,15 @@ def _dashboard_payload(database: Path) -> dict:
             ).fetchall()
             for prediction in prediction_rows:
                 item = dict(prediction)
+                research_action, research_action_source = prediction_research_action(
+                    model_identity=item["model_identity"],
+                    prediction_status=item["prediction_status"],
+                    recommended_action=item["recommended_action"],
+                    ev_long_u5=item["ev_long_u5"],
+                    ev_short_u5=item["ev_short_u5"],
+                )
+                item["research_action"] = research_action
+                item["research_action_source"] = research_action_source
                 predictions_by_decision[item.pop("decision_id")].append(item)
         news_rows = connection.execute(
             """SELECT n.source, n.source_item_id, n.revision_number,

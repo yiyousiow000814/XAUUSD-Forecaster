@@ -535,6 +535,8 @@ test("shows residual and news-only research directions without implying executio
   assert.match(source, /修正量自己的30分钟方向研究/);
   assert.match(source, /正修正显示 LONG，负修正显示 SHORT/);
   assert.match(source, /只看新闻的30分钟方向研究/);
+  assert.match(source, /model\.research_action \?\? model\.recommended_action/);
+  assert.match(source, /按当时冻结 EV 重算方向 · 原始记录为 WAIT/);
   assert.doesNotMatch(source, /暂不参考方向/);
   assert.doesNotMatch(source, /仅显示修正值，不单独判断方向/);
 });

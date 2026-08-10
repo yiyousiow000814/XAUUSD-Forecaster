@@ -16,6 +16,8 @@ type Prediction = {
   ev_short_u5: number | null;
   uncertainty_u5: number | null;
   recommended_action: string;
+  research_action?: string;
+  research_action_source?: string;
   effective_action: string;
   prediction_status: string;
 };
@@ -433,7 +435,8 @@ const MODEL_LABELS: Record<string, string> = {
   BROAD_FULL: "黄金＋大视野新闻 Ridge",
   NEWS_ONLY: "纯新闻方向 Ridge",
 };
-function predictionStatusLabel(status: string): string {
+function predictionStatusLabel(status: string, actionSource?: string): string {
+  if (actionSource === "REPLAYED_FROM_FROZEN_POST_COST_EV") return "按当时冻结 EV 重算方向 · 原始记录为 WAIT";
   if (status === "RESEARCH_RESIDUAL_DIRECTION") return "修正量自己的30分钟方向研究";
   if (status === "DIAGNOSTIC_RESIDUAL_ONLY") return "历史版本仅保存修正值";
   if (status === "RESEARCH_NEWS_ONLY") return "只看新闻的30分钟方向研究";
@@ -1042,8 +1045,8 @@ export default function AuditView() {
             </summary>
             <div className="prediction-grid">
               {row.predictions.map(model => <article key={model.model_version}>
-                <span>{MODEL_LABELS[model.model_identity] ?? model.model_identity}</span><h3>{model.recommended_action}</h3>
-                <p>{predictionStatusLabel(model.prediction_status)}</p>
+                <span>{MODEL_LABELS[model.model_identity] ?? model.model_identity}</span><h3>{model.research_action ?? model.recommended_action}</h3>
+                <p>{predictionStatusLabel(model.prediction_status, model.research_action_source)}</p>
                 <dl><div><dt>方向 U5</dt><dd>{number(model.predicted_direction_u5, 3)}</dd></div><div><dt>News residual</dt><dd>{number(model.predicted_news_residual_u5, 3)}</dd></div><div><dt>Long EV</dt><dd>{number(model.ev_long_u5, 3)}</dd></div><div><dt>Short EV</dt><dd>{number(model.ev_short_u5, 3)}</dd></div><div><dt>不确定性</dt><dd>{number(model.uncertainty_u5, 3)}</dd></div></dl>
                 <small>{model.model_version}</small>
               </article>)}

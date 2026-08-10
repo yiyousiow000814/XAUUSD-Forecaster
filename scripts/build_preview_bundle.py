@@ -22,6 +22,9 @@ package.__path__ = [str(MODULE_ROOT / "xauusd_forecaster")]
 sys.modules["xauusd_forecaster"] = package
 factor_coverage = importlib.import_module("xauusd_forecaster.factors").factor_coverage
 storylines = importlib.import_module("xauusd_forecaster.storylines")
+prediction_research_action = importlib.import_module(
+    "xauusd_forecaster.decision"
+).prediction_research_action
 
 
 DEFAULT_SOURCE = "https://aurum-signal-room.yiyousiow1234.workers.dev"
@@ -168,6 +171,23 @@ def _rebuild_story_snapshot(status: dict) -> None:
     })
 
 
+def _backfill_prediction_research_actions(status: dict) -> None:
+    """Apply branch display semantics to immutable production predictions."""
+    for decision in status.get("recent_decisions", []):
+        for prediction in decision.get("predictions", []):
+            action, source = prediction_research_action(
+                model_identity=str(prediction.get("model_identity") or ""),
+                prediction_status=str(prediction.get("prediction_status") or ""),
+                recommended_action=str(
+                    prediction.get("recommended_action") or "WAIT"
+                ),
+                ev_long_u5=prediction.get("ev_long_u5"),
+                ev_short_u5=prediction.get("ev_short_u5"),
+            )
+            prediction["research_action"] = action
+            prediction["research_action_source"] = source
+
+
 def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
     status = _read_json(base_url, "/api/status")
     learning = _read_json(base_url, "/api/learning")
@@ -178,6 +198,7 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
     status["factor_coverage"] = _rebuild_factor_coverage(status)
     _backfill_annotation_reasons(news_index, status)
     _rebuild_story_snapshot(status)
+    _backfill_prediction_research_actions(status)
     status["preview"] = {
         "is_preview": True,
         "branch": branch,

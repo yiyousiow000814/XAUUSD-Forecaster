@@ -55,6 +55,24 @@ def test_preview_does_not_call_late_aggregated_news_expired() -> None:
     assert row["annotation_reason"] == "搜索线索：来自聚合发现源，不是独立官方发布"
 
 
+def test_preview_replays_legacy_residual_direction_without_outcomes() -> None:
+    module = _preview_module()
+    status = {"recent_decisions": [{"predictions": [{
+        "model_identity": "BROAD_NEWS_RESIDUAL",
+        "prediction_status": "DIAGNOSTIC_RESIDUAL_ONLY",
+        "recommended_action": "WAIT",
+        "ev_long_u5": 0.109,
+        "ev_short_u5": -0.129,
+    }]}]}
+
+    module._backfill_prediction_research_actions(status)
+
+    row = status["recent_decisions"][0]["predictions"][0]
+    assert row["research_action"] == "LONG"
+    assert row["research_action_source"] == "REPLAYED_FROM_FROZEN_POST_COST_EV"
+    assert row["recommended_action"] == "WAIT"
+
+
 def test_preview_replays_old_story_aliases_through_branch_policy() -> None:
     module = _preview_module()
     status = {
