@@ -224,6 +224,17 @@ test("reads the append-only D1 learning history before the compact live relay", 
   assert.ok(d1Read >= 0, "learning route must read the dedicated D1 snapshot");
   assert.ok(relayRead > d1Read, "the compact relay must remain a fallback");
   assert.match(source, /append-only learning history stored in D1/);
+  assert.match(source, /return new Response\(row\.payload/);
+  assert.doesNotMatch(source, /NextResponse\.json\(JSON\.parse\(row\.payload\)/);
+});
+
+test("handles a non-JSON service failure without exposing a parser error", () => {
+  const resource = readFileSync(new URL("../app/_lib/dashboard-resource.ts", import.meta.url), "utf8");
+  const audit = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  assert.match(resource, /数据服务暂时不可用/);
+  assert.match(resource, /await response\.text\(\)/);
+  assert.doesNotMatch(resource, /await response\.json\(\)/);
+  assert.match(audit, /LEARNING_REFRESH_INTERVAL_MS = 60_000/);
 });
 
 test("renders generic story coverage without black empty grid placeholders", () => {
