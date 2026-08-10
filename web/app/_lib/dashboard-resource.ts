@@ -23,7 +23,15 @@ export async function loadDashboardResource<T>(
   if (entry.pending) return entry.pending as Promise<T>;
 
   const pending = fetch(url, { cache: "no-store" }).then(async response => {
-    const body = await response.json();
+    const serialized = await response.text();
+    let body: unknown;
+    try {
+      body = serialized ? JSON.parse(serialized) : null;
+    } catch {
+      throw new Error(response.ok
+        ? "数据服务正在更新，页面会自动重试"
+        : `数据服务暂时不可用（HTTP ${response.status}），页面会自动重试`);
+    }
     if (!response.ok) {
       const message = body && typeof body === "object" && "error" in body
         ? String(body.error)

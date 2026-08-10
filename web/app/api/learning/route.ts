@@ -14,8 +14,14 @@ export async function GET() {
       .bind(3)
       .first<{ payload: string }>();
     if (row) {
-      return NextResponse.json(JSON.parse(row.payload), {
-        headers: { "Cache-Control": "private, max-age=15" },
+      // POST validates the snapshot before storing it. Returning the validated
+      // JSON bytes directly avoids parsing and serializing a growing history on
+      // every poll, which can exceed the Worker CPU limit.
+      return new Response(row.payload, {
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "private, max-age=15",
+        },
       });
     }
   }
