@@ -4,7 +4,6 @@ import { useCallback, useEffect, useState } from "react";
 import DashboardLink from "../_components/DashboardLink";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
-import { isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 
 type Decision = {
   decision_time: string;
@@ -89,7 +88,6 @@ const localTime = (value?: string) =>
         minute: "2-digit",
         second: "2-digit",
         hour12: false,
-        timeZone: "Asia/Kuala_Lumpur",
       }).format(new Date(value))
     : "—";
 
@@ -98,7 +96,6 @@ export default function LiveRoomView() {
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [now, setNow] = useState(() => Date.now());
-  const immutablePreview = isImmutablePreview(payload);
 
   const refresh = useCallback(async (force = false) => {
     setRefreshing(true);
@@ -113,13 +110,13 @@ export default function LiveRoomView() {
   }, []);
 
   useEffect(() => {
-    return scheduleDashboardRefresh(
-      () => void refresh(),
-      () => void refresh(true),
-      5_000,
-      immutablePreview,
-    );
-  }, [refresh, immutablePreview]);
+    const initial = window.setTimeout(() => void refresh(), 0);
+    const interval = window.setInterval(() => void refresh(true), 5_000);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(interval);
+    };
+  }, [refresh]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);

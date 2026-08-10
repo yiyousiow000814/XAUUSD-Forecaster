@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
-import { rejectPreviewWrite } from "../_shared/preview";
+import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +12,12 @@ type Candle = {
 type Decision = {
   source_decision_id: string; decision_time: string; model_identity: string;
   [key: string]: unknown;
+};
+type MarketSnapshot = {
+  candles?: Candle[]; overview_candles?: Candle[]; decisions?: Decision[];
+  training_markers?: Array<Record<string, unknown>>;
+  history_start?: string | null; history_end?: string | null;
+  source_candle_count?: number; prediction_history_start?: Record<string, string>;
 };
 type HistoryMeta = { count: number; start_epoch: number; end_epoch: number };
 
@@ -42,6 +48,87 @@ const compactCandle = (row: {
   ticks: row.ticks,
   ...(row.source_candles ? { source_candles: row.source_candles } : {}),
 });
+
+function downsample(rows: Candle[], limit = OVERVIEW_POINTS): Candle[] {
+  if (rows.length <= limit) return rows;
+  const size = Math.ceil(rows.length / limit);
+  const result: Candle[] = [];
+  for (let start = 0; start < rows.length; start += size) {
+    const group = rows.slice(start, start + size);
+    result.push({
+      time: group[0].time, open: group[0].open,
+      high: Math.max(...group.map(row => row.high)),
+      low: Math.min(...group.map(row => row.low)),
+      close: group.at(-1)!.close,
+      ticks: group.reduce((total, row) => total + (row.ticks ?? 0), 0),
+      source_candles: group.length,
+    });
+  }
+  return result;
+}
+
+function sampleDecisions(rows: Decision[], limit = OVERVIEW_DECISIONS): Decision[] {
+  if (rows.length <= limit) return rows;
+  const stride = Math.ceil(rows.length / limit);
+  return rows.filter((_, index) => index % stride === 0).slice(0, limit);
+}
+
+function previewHistory(request: Request) {
+  const source = previewBundle!.market_chart as MarketSnapshot;
+  const url = new URL(request.url);
+  const range = url.searchParams.get("range") ?? "24";
+  const identity = url.searchParams.get("identity") ?? "BROAD_FULL";
+  const frequency = url.searchParams.get("frequency") === "5m" ? "5m" : "30m";
+  const detail = source.candles ?? [];
+  if (range === "all") {
+    const candles = source.overview_candles?.length
+      ? source.overview_candles : downsample(detail);
+    const allDecisions = (source.decisions ?? []).filter(row => {
+      const minute = new Date(row.decision_time).getUTCMinutes();
+      return row.model_identity === identity
+        && (frequency === "5m" || minute % 30 === 0);
+    });
+    return previewJson({
+      ...source, candles, overview_candles: [],
+      decisions: sampleDecisions(allDecisions),
+      source_decision_count: allDecisions.length,
+      decision_downsampled: allDecisions.length > OVERVIEW_DECISIONS,
+      mode: "overview",
+      page: { has_earlier: false, has_later: false }, preview_limited: true,
+    });
+  }
+  const seconds = RANGE_SECONDS[range] ?? RANGE_SECONDS["24"];
+  const suppliedEnd = asEpoch(url.searchParams.get("before"));
+  let end = suppliedEnd ?? (detail.length ? Math.floor(Date.parse(detail.at(-1)!.time) / 1_000) + 300 : 0);
+  if (suppliedEnd && !detail.some(row => {
+    const epoch = Date.parse(row.time) / 1_000;
+    return epoch >= suppliedEnd - seconds && epoch < suppliedEnd;
+  })) {
+    const previous = detail.findLast(row => Date.parse(row.time) / 1_000 < suppliedEnd);
+    if (previous) end = Math.floor(Date.parse(previous.time) / 1_000) + 300;
+  }
+  const start = end - seconds;
+  const candles = detail.filter(row => {
+    const epoch = Date.parse(row.time) / 1_000;
+    return epoch >= start && epoch < end;
+  });
+  const decisions = (source.decisions ?? []).filter(row => {
+    const epoch = Date.parse(row.decision_time) / 1_000;
+    const minute = new Date(row.decision_time).getUTCMinutes();
+    return row.model_identity === identity && epoch >= start && epoch < end
+      && (frequency === "5m" || minute % 30 === 0);
+  });
+  return previewJson({
+    ...source, candles, overview_candles: [], decisions, mode: "detail",
+    page: {
+      start: candles[0]?.time ?? new Date(start * 1_000).toISOString(),
+      end: candles.at(-1)?.time ?? new Date(end * 1_000).toISOString(),
+      has_earlier: Boolean(detail.length && start > Date.parse(detail[0].time) / 1_000),
+      has_later: Boolean(detail.length && end <= Date.parse(detail.at(-1)!.time) / 1_000),
+    },
+    preview_limited: true,
+  });
+}
 
 async function historyMeta(binding: D1Database): Promise<HistoryMeta | null> {
   return binding.prepare(
@@ -130,6 +217,7 @@ async function overviewDecisions(
 }
 
 export async function GET(request: Request) {
+  if (previewBundle) return previewHistory(request);
   const binding = env.DB as D1Database | undefined;
   if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
   const url = new URL(request.url);

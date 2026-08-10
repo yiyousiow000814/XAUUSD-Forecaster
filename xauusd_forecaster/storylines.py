@@ -12,19 +12,14 @@ from .news_identity import (
     canonical_source_organization,
     canonical_story_episode,
 )
-from .news_semantics import (
-    ACTIONABLE_RECORD_KINDS,
-    CURRENT_NEWS_PROMPT_VERSION,
-    effective_record_kind,
-)
 
 
 STORYLINE_POLICY_VERSION = "temporal-event-graph-v8-canonical-occurrence-chains"
-CURRENT_EVENT_PROMPT_VERSION = CURRENT_NEWS_PROMPT_VERSION
+CURRENT_EVENT_PROMPT_VERSION = "news-json-v14-material-event-evidence"
 LEGACY_POLICY_STATUS = "temporal-event-graph-v2:EXPERIMENTAL_MEMBERSHIP_INVALID"
 MODEL_PERMISSION = "DISPLAY_ONLY"
 
-CORE_KINDS = set(ACTIONABLE_RECORD_KINDS)
+CORE_KINDS = {"FACT_EVENT", "OFFICIAL_CLAIM", "RESPONSE"}
 ATTACHMENT_KINDS = {"MARKET_REACTION", "COMMENTARY_FORECAST", "BACKGROUND"}
 RELATIONS = {
     "CONFIRMS", "CONTRADICTS", "RESPONDS_TO", "ESCALATES",
@@ -328,9 +323,58 @@ def _episode_identity(event: dict) -> str | None:
 
 
 def _record_kind(event: dict) -> str:
-    return effective_record_kind(
-        event, str(event.get("headline_zh") or event.get("headline") or "")
+    declared = str(event.get("record_kind") or "").upper()
+    headline = str(event.get("canonical_headline") or "").strip()
+    if declared in CORE_KINDS and headline.endswith(("?", "？")):
+        return "COMMENTARY_FORECAST"
+    actor = _canonical_id(event.get("canonical_actor_id") or event.get("actor"))
+    action = _canonical_id(event.get("action_family") or event.get("action"))
+    object_id = _canonical_id(event.get("canonical_object_id") or event.get("object"))
+    # A price move is a market reaction even when the LLM called it a fact.
+    # This guard changes only story membership; the immutable annotation stays
+    # visible and auditable in the ledger.
+    market_actor = actor in {"gold", "spot_gold", "international_gold_market", "gold_market"}
+    price_object = object_id == "gold" or any(
+        token in object_id for token in ("gold_price", "market_price", "price_", "_price")
     )
+    if declared == "FACT_EVENT" and (market_actor or price_object):
+        return "MARKET_REACTION"
+    # Gemini occasionally describes a market-response article as a fact about
+    # the underlying release. Keep it visible, but outside the core event
+    # timeline. Both an instrument and a movement verb are required.
+    normalized_headline = _normal(headline)
+    market_instrument = any(token in normalized_headline for token in (
+        "gold", "bullion", "silver", "dollar", "yield", "treasury", "stock", "shares",
+        "futures", "oil", "黄金", "金价", "美元", "收益率", "美债", "股市",
+        "股指", "期货", "油价", "原油", "白银",
+    ))
+    market_move = any(token in normalized_headline for token in (
+        "rise", "rises", "rose", "fall", "falls", "fell", "drop", "drops",
+        "gain", "gains", "climb", "climbs", "steady", "surge", "slip",
+        "上涨", "下跌", "走高", "走低", "攀升", "回落", "持稳", "大涨", "大跌",
+        "突破",
+    ))
+    if declared == "FACT_EVENT" and market_instrument and market_move:
+        return "MARKET_REACTION"
+    market_expectation = any(token in normalized_headline for token in (
+        "market bets", "markets bet", "traders bet", "rate-cut bets",
+        "rate hike bets", "市场押注", "交易员押注", "降息预期", "加息预期",
+    ))
+    monetary_channel = any(token in normalized_headline for token in (
+        "fed", "rate", "yield", "dollar", "美联储", "利率", "收益率", "美元",
+    ))
+    if declared == "FACT_EVENT" and market_expectation and monetary_channel:
+        return "MARKET_REACTION"
+    # Pre-release/watch pieces and generic market narratives are context, not
+    # the material event itself. They remain auditable but cannot start or
+    # update an event story.
+    market_waiting = any(token in normalized_headline for token in (
+        "await", "awaits", "watch", "watches", "in focus", "ahead of",
+        "备受关注", "等待", "关注焦点", "公布前",
+    ))
+    if declared == "FACT_EVENT" and market_waiting:
+        return "BACKGROUND"
+    return declared
 
 
 def _is_core(event: dict) -> bool:

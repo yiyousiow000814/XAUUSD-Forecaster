@@ -34,7 +34,6 @@ from xauusd_forecaster.news_features_v2 import (
     event_raw_weight,
 )
 from xauusd_forecaster.news_impact import impact_time_rule, pending_impact_records
-from xauusd_forecaster.news_semantics import annotation_topics, effective_record_kind
 from xauusd_forecaster.news_time import assess_news_time, category_time_rule
 from xauusd_forecaster.repair_v2 import immutable_table_hash
 from xauusd_forecaster import inference_v2, news_contract_migration, training_v2
@@ -876,18 +875,14 @@ def _insert_prediction(connection, decision_id: str, decision_time: datetime, *,
                        model_version: str = "market-test",
                        model_identity: str = "MARKET_ONLY",
                        value_quote_return: float = 2.0,
-                       residual_u5: float = 0.1,
-                       recommended_action: str = "LONG",
-                       prediction_status: str = "PROVISIONAL",
-                       ev_long_u5: float = 0.1,
-                       ev_short_u5: float = -0.1) -> None:
+                       residual_u5: float = 0.1) -> None:
     connection.execute(
         "INSERT INTO predictions_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (decision_id, model_version, model_identity, decision_time.isoformat(),
          decision_time.isoformat(), "LIVE_OOS", "feature-hash", 0.1, None,
-         ev_long_u5, ev_short_u5, None, None, "UTC_DAY_BLOCK_OOS_ABS_RESIDUAL_Q95",
-         "calibration-test", 0, 0, 0, None, "UNCALIBRATED", recommended_action, "WAIT",
-         prediction_status),
+         0.1, -0.1, None, None, "UTC_DAY_BLOCK_OOS_ABS_RESIDUAL_Q95",
+         "calibration-test", 0, 0, 0, None, "UNCALIBRATED", "LONG", "WAIT",
+         "PROVISIONAL"),
     )
     connection.execute(
         "INSERT INTO prediction_scores_v2 VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -995,76 +990,6 @@ def test_learning_curve_excludes_predictions_not_after_model_creation(tmp_path) 
     assert market_curve["points"][0]["cumulative_quote_return"] == pytest.approx(
         net_shadow_log_return(2.0)
     )
-    ledger.close()
-
-
-def test_residual_learning_scores_replay_only_frozen_ev_direction(tmp_path) -> None:
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
-    created_at = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
-    _insert_model_update(
-        ledger.connection, "news-residual-test", "NEWS_RESIDUAL", created_at,
-    )
-    _insert_prediction(
-        ledger.connection, "residual-oos", created_at + timedelta(minutes=5),
-        model_version="news-residual-test", model_identity="NEWS_RESIDUAL",
-        value_quote_return=2.0, recommended_action="WAIT",
-        prediction_status="DIAGNOSTIC_RESIDUAL_ONLY",
-        ev_long_u5=0.2, ev_short_u5=-0.3,
-    )
-    ledger.connection.commit()
-
-    payload = learning_curve_payload(ledger.connection)
-    expected = net_shadow_log_return(2.0)
-    model = next(
-        row for row in payload["models"]
-        if row["model_identity"] == "NEWS_RESIDUAL"
-    )
-    rolling = next(
-        row for row in payload["rolling_processes"]
-        if row["model_identity"] == "NEWS_RESIDUAL"
-    )
-    group = next(
-        row for row in payload["version_groups"]
-        if row["model_identity"] == "NEWS_RESIDUAL"
-    )
-    curve = next(
-        row for row in payload["identity_curves"]
-        if row["model_identity"] == "NEWS_RESIDUAL"
-    )
-    assert model["cumulative_quote_return"] == pytest.approx(expected)
-    assert model["long_frequency"] == 1
-    assert model["wait_rate"] == 0.0
-    assert rolling["cumulative_quote_return"] == pytest.approx(expected)
-    assert group["cumulative_quote_return"] == pytest.approx(expected)
-    assert curve["points"][0]["cumulative_quote_return"] == pytest.approx(expected)
-    assert "w" not in curve["points"][0]
-    ledger.close()
-
-
-def test_identity_curve_marks_frozen_wait_without_scoring_a_trade(tmp_path) -> None:
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
-    created_at = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
-    _insert_model_update(ledger.connection, "market-wait", "MARKET_ONLY", created_at)
-    _insert_prediction(
-        ledger.connection, "wait-oos", created_at + timedelta(minutes=5),
-        model_version="market-wait", value_quote_return=2.0,
-        recommended_action="WAIT",
-    )
-    ledger.connection.commit()
-
-    payload = learning_curve_payload(ledger.connection)
-    curve = next(
-        row for row in payload["identity_curves"]
-        if row["model_identity"] == "MARKET_ONLY"
-    )
-    assert curve["points"] == [{
-        "decision_time": (created_at + timedelta(minutes=5)).isoformat(),
-        "cumulative_quote_return": 0.0,
-        "w": 1,
-        "model_version": "market-wait",
-        "training_dataset_hash": "dataset-market-wait",
-        "training_rows": 96,
-    }]
     ledger.close()
 
 
@@ -2086,27 +2011,26 @@ def test_commentary_and_low_materiality_are_not_training_evidence(tmp_path) -> N
     ledger.close()
 
 
-def test_residual_model_keeps_research_direction_visible(tmp_path) -> None:
-    ledger = ForwardLedger(tmp_path / "visible-residual.sqlite3")
+def test_diagnostic_residual_wait_keeps_ev_for_audit(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "guarded-wait.sqlite3")
     now = datetime(2026, 8, 10, tzinfo=UTC)
     calibration = {"version": "early", "rows": 30, "blocks": 1, "days": 1,
                    "half_width": 0.2, "status": "EARLY"}
     inference_v2._insert_prediction(
-        ledger, decision_id="residual", decision_time=now, created_at=now,
-        model_version="broad-news", model_identity="BROAD_NEWS_RESIDUAL",
-        feature_hash="features",
+        ledger, decision_id="guarded", decision_time=now, created_at=now,
+        model_version="full", model_identity="FULL", feature_hash="features",
         predicted=0.3, news_residual=0.2, ev_long=0.25, ev_short=-0.35,
-        calibration=calibration, recommended="LONG",
-        status="RESEARCH_RESIDUAL_DIRECTION",
+        calibration=calibration, recommended="WAIT",
+        status="DIAGNOSTIC_RESIDUAL_ONLY", guarded_wait=True,
     )
 
     row = ledger.connection.execute(
         "SELECT recommended_action,ev_long_u5,ev_short_u5,prediction_status "
         "FROM predictions_v2"
     ).fetchone()
-    assert row["recommended_action"] == "LONG"
+    assert row["recommended_action"] == "WAIT"
     assert row["ev_long_u5"] == pytest.approx(0.25)
-    assert row["prediction_status"] == "RESEARCH_RESIDUAL_DIRECTION"
+    assert row["prediction_status"] == "DIAGNOSTIC_RESIDUAL_ONLY"
     ledger.close()
 
 
@@ -2134,34 +2058,14 @@ def test_shadow_composite_keeps_research_direction_visible(tmp_path) -> None:
     ledger.close()
 
 
-def test_controlled_news_semantics_do_not_reclassify_by_substring() -> None:
-    annotation = {
-        "record_kind": "FACT_EVENT",
-        "primary_category": "rates_fed",
-        "secondary_categories": ["growth_economy"],
-    }
-
-    assert effective_record_kind(annotation) == "FACT_EVENT"
-    assert effective_record_kind(
-        annotation, "forward guidance argues against a cut"
-    ) == "FACT_EVENT"
-    assert effective_record_kind(
-        annotation, "Gold gains as Treasury yields fall"
-    ) == "MARKET_REACTION"
-    assert annotation_topics(annotation) == ("rates_fed", "growth_economy")
-    # These used to trigger substring bugs: war in forward and gain in against.
-    assert annotation_topics({
-        **annotation, "headline_zh": "forward guidance argues against a cut",
-    }) == ("rates_fed", "growth_economy")
-
-
 def test_market_wrap_is_display_only_even_when_llm_calls_it_fact(tmp_path) -> None:
     epoch = datetime(2026, 8, 10, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward-market-wrap.sqlite3", now=epoch)
     _append_news(
-        ledger, source="google_news_fed_rates", item="Gold gains as Treasury yields fall",
+        ledger, source="google_news_fed_rates",
+        item="Oil rises, Treasury yields open higher and US equity futures gain",
         first_seen=epoch, parsed_at=epoch + timedelta(seconds=30), impulse=0.2,
-        link="https://finance.yahoo.com/example", primary_category="rates_fed",
+        link="https://finance.yahoo.com/example", primary_category="oil_energy",
         record_kind="FACT_EVENT", materiality=0.8,
     )
 
@@ -2170,36 +2074,6 @@ def test_market_wrap_is_display_only_even_when_llm_calls_it_fact(tmp_path) -> No
     assert row["record_kind"] == "MARKET_REACTION"
     assert row["broad_model_eligible"] is False
     assert "RECORD_KIND_NOT_ACTIONABLE" in row["reason_codes"]
-    ledger.close()
-
-
-def test_current_material_annotation_rejects_unknown_record_kind(tmp_path) -> None:
-    epoch = datetime(2026, 8, 10, 10, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "invalid-record-kind.sqlite3", now=epoch)
-    with pytest.raises(ValueError, match="record_kind is not controlled"):
-        _append_news(
-            ledger, source="google_news_fed_rates", item="official release",
-            first_seen=epoch, parsed_at=epoch + timedelta(seconds=30), impulse=0.2,
-            record_kind="RESPONSE",
-        )
-    ledger.close()
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    (("document_kind", "NOT_A_KIND"), ("evidence_role", "NOT_A_ROLE")),
-)
-def test_current_material_annotation_rejects_unknown_schema_enum(
-    tmp_path, field: str, value: str,
-) -> None:
-    epoch = datetime(2026, 8, 10, 10, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / f"invalid-{field}.sqlite3", now=epoch)
-    with pytest.raises(ValueError, match=rf"{field} is not controlled"):
-        _append_news(
-            ledger, source="google_news_fed_rates", item=f"invalid {field}",
-            first_seen=epoch, parsed_at=epoch + timedelta(seconds=30), impulse=0.2,
-            annotation_overrides={field: value},
-        )
     ledger.close()
 
 
@@ -2289,7 +2163,7 @@ def test_reliable_media_publication_time_is_safe_event_clock_proxy(tmp_path) -> 
             first_seen=epoch + timedelta(minutes=1),
             parsed_at=epoch + timedelta(minutes=2), impulse=0.0,
             primary_category="war_geopolitics", material_event_key="same-event",
-            event_time="",
+            event_time=None,
         )
     event = event_evidence_rows(ledger, epoch + timedelta(minutes=10))[0]
     assert event["evidence_grade"] == "CORROBORATED"
@@ -2339,7 +2213,7 @@ def test_official_release_timestamp_is_valid_event_clock(tmp_path) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
     _append_news(
         ledger, source="federal_reserve_monetary", item="official-release",
-        first_seen=epoch, parsed_at=epoch, impulse=0.3, event_time="",
+        first_seen=epoch, parsed_at=epoch, impulse=0.3, event_time=None,
     )
     event = event_evidence_rows(ledger, epoch + timedelta(minutes=1))[0]
     assert event["official_model_eligible"] is True
