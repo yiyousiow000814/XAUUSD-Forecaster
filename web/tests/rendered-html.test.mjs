@@ -545,3 +545,13 @@ test("reflows news evidence into readable mobile cards", () => {
   assert.match(css, /\.evidence-status-copy \{ display:none!important/);
   assert.match(css, /\.evidence-model-list \{ display:none!important/);
 });
+
+test("keeps news search server bounded and phone readable", () => {
+  const view = readFileSync(join(projectRoot, "app", "_views", "AuditView.tsx"), "utf8");
+  const route = readFileSync(join(projectRoot, "app", "api", "news-search", "route.ts"), "utf8");
+  assert.match(view, /view === "search"/);
+  assert.match(view, /placeholder="标题、来源或主题"/);
+  assert.match(route, /slice\(0, 80\)/);
+  assert.match(route, /Math\.min\(20/);
+  assert.match(route, /LIMIT \? OFFSET \?/);
+});
