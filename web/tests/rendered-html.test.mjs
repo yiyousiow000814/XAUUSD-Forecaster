@@ -537,7 +537,10 @@ test("reflows news evidence into readable mobile cards", () => {
   assert.match(view, /统一来源身份：/);
   assert.match(view, /原始发布域名：/);
   assert.match(view, /不由 Gemini 或 Gemma 自由决定/);
-  assert.match(view, /evidenceMode}:\$\{row\.event_key}:\$\{index}/);
+  assert.match(view, /mergeNewsEvidenceByEvent/);
+  assert.match(view, /new Map<string, NewsEvidence>/);
+  assert.match(view, /evidenceMode}:\$\{row\.event_key}/);
+  assert.doesNotMatch(view, /evidenceMode}:\$\{row\.event_key}:\$\{index}/);
   assert.match(css, /@media \(max-width:640px\)[\s\S]*\.evidence-table thead \{ position:absolute/);
   assert.match(css, /grid-template-areas:"event event" "status time" "usage usage"/);
   assert.match(css, /\.evidence-event-cell \{ grid-area:event/);
