@@ -20,7 +20,8 @@ test("renders the live room with an audit-page navigation button", async () => {
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /Aurum Signal Room/);
-  assert.match(html, /新闻与决策/);
+  assert.match(html, /新闻、决策与结果/);
+  assert.match(html, /新闻 \/ 结果/);
   assert.match(html, /系统状态/);
   assert.doesNotMatch(html, /next\/link|rel="prefetch"/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
