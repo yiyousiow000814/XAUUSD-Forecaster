@@ -505,6 +505,25 @@ def test_curve_overview_marks_only_real_source_gaps() -> None:
     assert not any(row["source_gap_before"] for row in compressed_source)
 
 
+def test_curve_overview_preserves_wait_boundaries_separately_from_source_gaps() -> None:
+    module = _sync_module()
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    points = [{
+        "decision_time": (start + timedelta(minutes=5 * index)).isoformat(),
+        "cumulative_quote_return": index / 1000,
+        **({"w": 1} if 20 <= index < 30 else {}),
+    } for index in range(100)]
+
+    overview = module._visual_curve_overview(points, 24)
+    retained = {row["decision_time"]: row for row in overview}
+
+    assert points[19]["decision_time"] in retained
+    assert retained[points[20]["decision_time"]]["w"] == 1
+    assert retained[points[29]["decision_time"]]["w"] == 1
+    assert "w" not in retained[points[30]["decision_time"]]
+    assert not any(row["source_gap_before"] for row in overview)
+
+
 def test_decision_overviews_are_incremental_bounded_and_frequency_scoped() -> None:
     module = _sync_module()
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)

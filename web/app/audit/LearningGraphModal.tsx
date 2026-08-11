@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { loadDashboardResource, readDashboardResource, waitForMinimumLoading } from "../_lib/dashboard-resource";
 
-type CurvePoint = { decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number; source_gap_before?: boolean };
+type CurvePoint = { decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number; source_gap_before?: boolean; w?: 1 };
 type Curve = { model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: CurvePoint[]; source_point_count_30m?: number; chart_point_count_30m?: number; chart_downsampled_30m?: boolean; points_30m?: CurvePoint[] };
 type Candle = { time: string; open: number; high: number; low: number; close: number; ticks?: number };
 type MarketData = {
@@ -89,6 +89,7 @@ function curveResponseItems(
         training_dataset_hash: point.training_dataset_hash,
         cumulative_quote_return: point.cumulative_quote_return,
         source_gap_before: point.source_gap_before,
+        w: point.w,
       }))
       .sort((a, b) => Date.parse(a.decision_time) - Date.parse(b.decision_time));
     return cadence === "FIXED_30M"
@@ -481,6 +482,21 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
     else current.push(point);
     return runs;
   }, []);
+  const actionRuns = (points: CurvePoint[]) => {
+    if (points.length < 2) return [];
+    const runs: Array<{ wait: boolean; points: CurvePoint[] }> = [];
+    let current = { wait: points[1].w === 1, points: [points[0], points[1]] };
+    for (let index = 2; index < points.length; index += 1) {
+      const wait = points[index].w === 1;
+      if (wait === current.wait) current.points.push(points[index]);
+      else {
+        runs.push(current);
+        current = { wait, points: [points[index - 1], points[index]] };
+      }
+    }
+    runs.push(current);
+    return runs;
+  };
   const axisLabel = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
   const versionBoundaries = visibleCurves.flatMap(row => row.points.flatMap((point, index) => {
     if (index === 0 || !point.model_version) return [];
@@ -626,14 +642,22 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
             : null;
           const curve = run.length === 1
             ? <circle key={`${row.model_identity}-run-${index}`} cx={x(run[0].decision_time)} cy={y(run[0].cumulative_quote_return)} r="4" fill={COLORS[row.model_identity]} />
-            : <polyline key={`${row.model_identity}-run-${index}`} fill="none" stroke={COLORS[row.model_identity]} strokeWidth="3" points={run.map(point => `${x(point.decision_time)},${y(point.cumulative_quote_return)}`).join(" ")} />;
+            : actionRuns(run).map((actionRun, actionIndex) => <polyline
+                key={`${row.model_identity}-run-${index}-action-${actionIndex}`}
+                className={actionRun.wait ? "curve-wait-run" : "curve-direction-run"}
+                fill="none"
+                stroke={COLORS[row.model_identity]}
+                strokeWidth="3"
+                strokeDasharray={actionRun.wait ? "7 6" : undefined}
+                points={actionRun.points.map(point => `${x(point.decision_time)},${y(point.cumulative_quote_return)}`).join(" ")}
+              ><title>{actionRun.wait ? "WAIT：当时没有方向判断" : "当时已有 LONG / SHORT 判断"}</title></polyline>);
           return [bridge, curve];
         })];
       })}
       {tickTimes.map(value => <g key={value} className="time-axis"><line x1={x(value)} x2={x(value)} y1="350" y2="356" /><text x={x(value)} y="374" textAnchor="middle">{axisLabel(value)}</text></g>)}
     </svg>
     </div>
-    <div className="chart-legend">{visibleCurves.map(row => <span key={row.model_identity}><i style={{ background: COLORS[row.model_identity] }} />{LABELS[row.model_identity]} <b>{pct(row.points.at(-1)?.cumulative_quote_return ?? 0)}</b></span>)}{groupedBoundaries.length > 0 && <span><i className="train-dot" />模型换版本{compactBoundaryRail ? `（${boundaryLayouts.length} 个事件点 / ${groupedBoundaries.length} 次）` : groupedBoundaries.length > displayedBoundaries.length ? `（显示 ${displayedBoundaries.length}/${groupedBoundaries.length}）` : ""}</span>}</div>
+    <div className="chart-legend">{visibleCurves.map(row => <span key={row.model_identity}><i style={{ background: COLORS[row.model_identity] }} />{LABELS[row.model_identity]} <b>{pct(row.points.at(-1)?.cumulative_quote_return ?? 0)}</b></span>)}<span><i className="wait-line" />虚线：WAIT</span><span><i className="gap-line" />点线：无成熟结果</span>{groupedBoundaries.length > 0 && <span><i className="train-dot" />模型换版本{compactBoundaryRail ? `（${boundaryLayouts.length} 个事件点 / ${groupedBoundaries.length} 次）` : groupedBoundaries.length > displayedBoundaries.length ? `（显示 ${displayedBoundaries.length}/${groupedBoundaries.length}）` : ""}</span>}</div>
   </div>;
 }
 
