@@ -432,6 +432,7 @@ def test_learning_history_records_have_stable_keys_and_bounded_batches() -> None
     assert first == second
     assert {row["resource"] for row in first} == {
         "model", "version-group", "curve-5m", "curve-30m",
+        "curve-overview", "version-overview",
     }
     assert all(len(row["payload_hash"]) == 64 for row in first)
     batches = module.learning_history_batches(first * 2_000)
@@ -441,6 +442,72 @@ def test_learning_history_records_have_stable_keys_and_bounded_batches() -> None
             {"records": batch}, ensure_ascii=False, separators=(",", ":"),
         ).encode("utf-8")
         assert len(encoded) <= module.LEARNING_HISTORY_BATCH_LIMIT_BYTES
+
+
+def test_visual_overviews_stay_bounded_and_preserve_the_full_span() -> None:
+    module = _sync_module()
+    points = [{
+        "decision_time": (
+            datetime(2026, 1, 1, tzinfo=timezone.utc)
+            + timedelta(minutes=5 * index)
+        ).isoformat(),
+        "cumulative_quote_return": (-1 if index == 50_000 else index / 100_000),
+    } for index in range(100_000)]
+
+    overview = module._visual_curve_overview(points, 240)
+
+    assert len(overview) <= 240
+    assert overview[0] == points[0]
+    assert overview[-1] == points[-1]
+    assert points[50_000] in overview
+
+    groups = [{
+        "created_at": point["decision_time"],
+        "generation": index,
+        "cumulative_quote_return": point["cumulative_quote_return"],
+        "cadence_metrics": {
+            "FIXED_30M": {
+                "cumulative_quote_return": 2 if index == 75_000 else -index / 100_000,
+            },
+        },
+    } for index, point in enumerate(points)]
+    group_overview = module._visual_version_overview(groups, 60)
+
+    assert len(group_overview) <= 60
+    assert group_overview[0] == groups[0]
+    assert group_overview[-1] == groups[-1]
+    assert groups[50_000] in group_overview
+    assert groups[75_000] in group_overview
+
+
+def test_decision_overviews_are_incremental_bounded_and_frequency_scoped() -> None:
+    module = _sync_module()
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    decisions = [{
+        "source_decision_id": f"decision-{index}",
+        "decision_time": (start + timedelta(minutes=5 * index)).isoformat(),
+        "model_identity": "FULL",
+        "recommended_action": ("SHORT" if index % 7 == 0 else "LONG"),
+    } for index in range(2_000)]
+
+    summaries = module._update_decision_overviews({}, decisions, None)
+    five = summaries["FULL\0" "5m"]
+    half_hour = summaries["FULL\0" "30m"]
+
+    assert five["source_decision_count"] == 2_000
+    assert len(five["decisions"]) <= module.MARKET_OVERVIEW_DECISIONS_PER_SERIES
+    assert five["decisions"][0]["source_decision_id"] == "decision-0"
+    assert five["decisions"][-1]["source_decision_id"] == "decision-1999"
+    assert half_hour["source_decision_count"] == 334
+    assert all(
+        datetime.fromisoformat(row["decision_time"]).minute % 30 == 0
+        for row in half_hour["decisions"]
+    )
+
+    unchanged = module._update_decision_overviews(
+        summaries, decisions[-24:], decisions[-1]["decision_time"],
+    )
+    assert unchanged == summaries
 
 
 def test_learning_summary_size_is_fixed_as_history_grows() -> None:

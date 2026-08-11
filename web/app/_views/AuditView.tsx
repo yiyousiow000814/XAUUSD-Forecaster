@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import DashboardLink from "../_components/DashboardLink";
 import SystemStatePill from "../_components/SystemStatePill";
-import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
+import { loadDashboardResource, readDashboardResource, waitForMinimumLoading } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { PREVIEW_NEWS_PAGE_SIZE } from "../_lib/preview-contract";
 import LearningGraphModal from "../audit/LearningGraphModal";
@@ -614,16 +614,19 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
       return;
     }
     setDetailState("loading");
+    const startedAt = Date.now();
     try {
       const response = await fetch(`/api/news-content?key=${encodeURIComponent(row.detail_key)}`, {
         cache: "no-store",
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
+      await waitForMinimumLoading(startedAt);
       setDetail(body.payload);
       setDetailState("ready");
       setDetailRetryCount(0);
     } catch {
+      await waitForMinimumLoading(startedAt);
       setDetailState("error");
     }
   }, [row.detail_key]);

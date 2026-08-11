@@ -48,15 +48,18 @@ NEWS_INDEX_BATCH_LIMIT_BYTES = 400_000
 NEWS_DETAIL_FULL_REFRESH_SECONDS = 86_400
 NEWS_INDEX_FULL_REFRESH_SECONDS = 86_400
 NEWS_MIRROR_CONTRACT_VERSION = "news-readable-authoritative-v1"
-MARKET_HISTORY_CONTRACT_VERSION = "market-history-d1-v1"
+MARKET_HISTORY_CONTRACT_VERSION = "market-history-d1-v2"
 MARKET_HISTORY_BATCH_LIMIT_BYTES = 350_000
 MARKET_HISTORY_OVERLAP_SECONDS = 2 * 3_600
-LEARNING_HISTORY_CONTRACT_VERSION = "learning-history-d1-v1"
+LEARNING_HISTORY_CONTRACT_VERSION = "learning-history-d1-v2"
 LEARNING_HISTORY_BATCH_LIMIT_BYTES = 300_000
 LEARNING_HISTORY_FULL_REFRESH_SECONDS = 86_400
 LEARNING_SUMMARY_CURVE_POINTS = 48
 LEARNING_SUMMARY_GROUPS_PER_IDENTITY = 6
 LEARNING_SUMMARY_EXECUTION_RESULTS = 20
+LEARNING_OVERVIEW_CURVE_POINTS = 240
+LEARNING_OVERVIEW_GROUPS_PER_IDENTITY = 60
+MARKET_OVERVIEW_DECISIONS_PER_SERIES = 480
 REMOTE_MARKET_DECISION_LIMIT = 288 * 5
 REMOTE_MARKET_CANDLE_LIMIT = 576
 REMOTE_MARKET_DENSE_LIMITS = (1440, 1152, 864, 576, 288, 0)
@@ -172,6 +175,207 @@ def _learning_record(
     }
 
 
+def _visual_curve_overview(points: list[dict], limit: int) -> list[dict]:
+    """Keep first/low/high/last shape points without growing the response."""
+    if len(points) <= limit:
+        return list(points)
+    bucket_count = max(1, limit // 4)
+    bucket_size = math.ceil(len(points) / bucket_count)
+    overview: list[dict] = []
+    for start in range(0, len(points), bucket_size):
+        bucket = points[start:start + bucket_size]
+        indexed = list(enumerate(bucket))
+        selected = {
+            0,
+            len(bucket) - 1,
+            min(indexed, key=lambda item: float(
+                item[1].get("cumulative_quote_return") or 0.0
+            ))[0],
+            max(indexed, key=lambda item: float(
+                item[1].get("cumulative_quote_return") or 0.0
+            ))[0],
+        }
+        overview.extend(bucket[index] for index in sorted(selected))
+    return overview[:limit]
+
+
+def _visual_decision_overview(rows: list[dict], limit: int) -> list[dict]:
+    """Retain the time span and action changes in a bounded marker summary."""
+    ordered = sorted(rows, key=lambda row: (
+        row.get("decision_time") or "", row.get("source_decision_id") or "",
+    ))
+    deduplicated = {
+        str(row.get("source_decision_id") or ""): row
+        for row in ordered if row.get("source_decision_id")
+    }
+    ordered = sorted(deduplicated.values(), key=lambda row: (
+        row.get("decision_time") or "", row.get("source_decision_id") or "",
+    ))
+    if len(ordered) <= limit:
+        return ordered
+    bucket_count = max(1, limit // 4)
+    bucket_size = math.ceil(len(ordered) / bucket_count)
+    overview: list[dict] = []
+    for start in range(0, len(ordered), bucket_size):
+        bucket = ordered[start:start + bucket_size]
+        selected = {0, len(bucket) - 1}
+        for action in ("LONG", "SHORT"):
+            match = next((
+                index for index, row in enumerate(bucket)
+                if row.get("recommended_action") == action
+            ), None)
+            if match is not None:
+                selected.add(match)
+        overview.extend(bucket[index] for index in sorted(selected))
+    return overview[:limit]
+
+
+def _version_metric(row: dict, cadence: str) -> float:
+    metrics = row.get("cadence_metrics") or {}
+    selected = metrics.get(cadence) if isinstance(metrics, dict) else None
+    if isinstance(selected, dict):
+        return float(selected.get("cumulative_quote_return") or 0.0)
+    return float(row.get("cumulative_quote_return") or 0.0)
+
+
+def _visual_version_overview(rows: list[dict], limit: int) -> list[dict]:
+    """Preserve the full generation span and extrema for both chart cadences."""
+    ordered = sorted(rows, key=lambda row: (
+        row.get("created_at") or "", row.get("generation") or 0,
+    ))
+    if len(ordered) <= limit:
+        return ordered
+    bucket_count = max(1, limit // 6)
+    bucket_size = math.ceil(len(ordered) / bucket_count)
+    overview: list[dict] = []
+    for start in range(0, len(ordered), bucket_size):
+        bucket = ordered[start:start + bucket_size]
+        indexed = list(enumerate(bucket))
+        selected = {0, len(bucket) - 1}
+        for cadence in ("EVERY_5M", "FIXED_30M"):
+            selected.add(min(
+                indexed, key=lambda item: _version_metric(item[1], cadence),
+            )[0])
+            selected.add(max(
+                indexed, key=lambda item: _version_metric(item[1], cadence),
+            )[0])
+        overview.extend(bucket[index] for index in sorted(selected))
+    return overview[:limit]
+
+
+def _update_decision_overviews(
+    summaries: dict, decisions: list[dict], after: str | None,
+) -> dict:
+    """Increment fixed-size decision summaries without rereading remote history."""
+    updated = copy.deepcopy(summaries) if isinstance(summaries, dict) else {}
+    for identity in sorted({
+        str(row.get("model_identity") or "") for row in decisions
+        if isinstance(row, dict) and row.get("model_identity")
+    }):
+        identity_rows = [
+            row for row in decisions
+            if isinstance(row, dict) and row.get("model_identity") == identity
+            and (not after or _epoch(row.get("decision_time")) >= _epoch(after))
+        ]
+        for frequency in ("5m", "30m"):
+            incoming = identity_rows if frequency == "5m" else [
+                row for row in identity_rows
+                if _epoch(row.get("decision_time")) % 1_800 == 0
+            ]
+            key = f"{identity}\0{frequency}"
+            previous = updated.get(key) if isinstance(updated.get(key), dict) else {}
+            previous_keys = {
+                str(row.get("source_decision_id") or "")
+                for row in previous.get("decisions", [])
+                if isinstance(row, dict) and row.get("source_decision_id")
+            }
+            incoming = [
+                row for row in incoming
+                if str(row.get("source_decision_id") or "") not in previous_keys
+            ]
+            if not incoming:
+                continue
+            merged = [*(previous.get("decisions") or []), *incoming]
+            overview = _visual_decision_overview(
+                merged, MARKET_OVERVIEW_DECISIONS_PER_SERIES,
+            )
+            updated[key] = {
+                "model_identity": identity,
+                "frequency": frequency,
+                "source_decision_count": int(
+                    previous.get("source_decision_count") or 0
+                ) + len(incoming),
+                "decision_count": len(overview),
+                "decision_downsampled": (
+                    int(previous.get("source_decision_count") or 0)
+                    + len(incoming) > len(overview)
+                ),
+                "decisions": overview,
+            }
+    return updated
+
+
+def _learning_overview_records(payload: dict) -> list[dict]:
+    """Materialize fixed-size graph summaries before data reaches the Worker."""
+    learning = payload.get("learning_curves") or {}
+    records: list[dict] = []
+    for curve in learning.get("identity_curves", []):
+        if not isinstance(curve, dict):
+            continue
+        identity = str(curve.get("model_identity") or "")
+        if not identity:
+            continue
+        for field, cadence in (("points", "5m"), ("points_30m", "30m")):
+            points = [
+                point for point in (curve.get(field, []) or [])
+                if isinstance(point, dict) and point.get("decision_time")
+            ]
+            if not points:
+                continue
+            overview = _visual_curve_overview(
+                points, LEARNING_OVERVIEW_CURVE_POINTS,
+            )
+            summary = {
+                "model_identity": identity,
+                "cadence": cadence,
+                "source_point_count": len(points),
+                "chart_point_count": len(overview),
+                "chart_downsampled": len(overview) < len(points),
+                "points": overview,
+            }
+            records.append(_learning_record(
+                "curve-overview", f"{cadence}\0{identity}",
+                _epoch(points[-1]["decision_time"]), summary,
+            ))
+    groups = learning.get("version_groups", [])
+    identities = sorted({
+        str(row.get("model_identity") or "") for row in groups
+        if isinstance(row, dict) and row.get("model_identity")
+    })
+    for identity in identities:
+        rows = sorted(
+            (row for row in groups if isinstance(row, dict)
+             and row.get("model_identity") == identity),
+            key=lambda row: (row.get("created_at") or "", row.get("generation") or 0),
+        )
+        if not rows:
+            continue
+        overview = _visual_version_overview(
+            rows, LEARNING_OVERVIEW_GROUPS_PER_IDENTITY,
+        )
+        summary = {
+            "model_identity": identity,
+            "source_group_count": len(rows),
+            "chart_group_count": len(overview),
+            "chart_downsampled": len(overview) < len(rows),
+            "groups": overview,
+        }
+        records.append(_learning_record(
+            "version-overview", identity, _epoch(rows[-1].get("created_at")), summary,
+        ))
+    return records
+
+
 def learning_history_records(payload: dict) -> list[dict]:
     """Normalize append-only learning evidence into idempotent D1 records."""
     learning = payload.get("learning_curves") or {}
@@ -233,6 +437,7 @@ def learning_history_records(payload: dict) -> list[dict]:
                 "execution-result", f"{identity}\0{result_id}\0{result_time}",
                 _epoch(result_time), record_payload,
             ))
+    records.extend(_learning_overview_records(payload))
     return records
 
 
@@ -733,7 +938,29 @@ def _sync_market(local_payload: dict, config: dict) -> None:
     market_url = config.get("remote_market_chart_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/market-chart"
     )
-    _post_json(market_url, market_chart_snapshot(local_payload), config)
+    snapshot = market_chart_snapshot(local_payload)
+    _post_json(market_url, snapshot, config)
+    if (urllib.parse.urlsplit(config["remote_ingest_url"]).hostname or "").lower().endswith(
+        ".chatgpt.site"
+    ):
+        return
+    market = json.loads(snapshot)
+    overview_candles = market.get("overview_candles") or _downsample_market_overview(
+        market.get("candles", []), REMOTE_MARKET_OVERVIEW_LIMITS[0],
+    )
+    history_url = config.get("remote_market_history_url") or (
+        config["remote_ingest_url"].rsplit("/", 1)[0] + "/market-history"
+    )
+    overview = {
+        "candles": overview_candles,
+        "source_candle_count": int(market.get("source_candle_count") or len(overview_candles)),
+        "history_start": market.get("history_start"),
+        "history_end": market.get("history_end"),
+    }
+    _post_json(history_url, json.dumps(
+        {"overview": overview}, ensure_ascii=False, allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8"), config)
 
 
 def _market_history_payloads(candles: list[dict], decisions: list[dict]) -> list[bytes]:
@@ -809,6 +1036,12 @@ def _sync_market_history(config: dict) -> None:
         if state.get("contract_version") == MARKET_HISTORY_CONTRACT_VERSION
         else None
     )
+    decision_overviews = (
+        state.get("decision_overviews", {})
+        if state.get("contract_version") == MARKET_HISTORY_CONTRACT_VERSION
+        else {}
+    )
+    new_after = cursor
     after = _overlap_cursor(cursor)
     pages = 0
     while True:
@@ -819,6 +1052,9 @@ def _sync_market_history(config: dict) -> None:
             page = json.loads(response.read())
         candles = page.get("candles") if isinstance(page.get("candles"), list) else []
         decisions = page.get("decisions") if isinstance(page.get("decisions"), list) else []
+        decision_overviews = _update_decision_overviews(
+            decision_overviews, decisions, new_after,
+        )
         for payload in _market_history_payloads(candles, decisions):
             _post_json(remote_url, payload, config)
         next_cursor = page.get("next_cursor")
@@ -827,6 +1063,7 @@ def _sync_market_history(config: dict) -> None:
             _write_news_sync_state(state_path, {
                 "contract_version": MARKET_HISTORY_CONTRACT_VERSION,
                 "cursor": cursor,
+                "decision_overviews": decision_overviews,
                 "last_success": datetime.now(UTC).isoformat(),
             })
         pages += 1
@@ -835,6 +1072,11 @@ def _sync_market_history(config: dict) -> None:
         if pages >= 1_000:
             raise RuntimeError("market history backfill exceeded 1000 pages")
         after = str(next_cursor)
+    for summary in decision_overviews.values():
+        _post_json(remote_url, json.dumps(
+            {"decision_overviews": [summary]}, ensure_ascii=False,
+            allow_nan=False, separators=(",", ":"),
+        ).encode("utf-8"), config)
 
 
 def _sync_news(local_payload: dict, config: dict) -> None:

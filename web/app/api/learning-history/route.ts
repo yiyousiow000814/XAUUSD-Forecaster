@@ -18,11 +18,9 @@ const MAX_INGEST_BYTES = 350_000;
 const MAX_INGEST_ROWS = 1_000;
 const MAX_PAGE_ROWS = 500;
 const MAX_RESPONSE_BYTES = 400_000;
-const CURVE_OVERVIEW_POINTS = 240;
-const VERSION_OVERVIEW_GROUPS = 60;
 const ALLOWED_RESOURCES = new Set([
   "model", "version-group", "curve-5m", "curve-30m",
-  "execution-point", "execution-result",
+  "execution-point", "execution-result", "curve-overview", "version-overview",
 ]);
 
 function encodeCursor(sortEpoch: number, recordKey: string) {
@@ -153,88 +151,35 @@ async function pagedRecords(binding: D1Database, url: URL) {
 
 async function curveOverview(binding: D1Database, url: URL) {
   const cadence = url.searchParams.get("cadence") === "30m" ? "30m" : "5m";
-  const resource = `curve-${cadence}`;
   const result = await binding.prepare(
-    `WITH ranked AS (
-       SELECT payload,sort_epoch,record_key,
-              row_number() OVER (
-                PARTITION BY json_extract(payload,'$.model_identity')
-                ORDER BY sort_epoch,record_key
-              ) sequence,
-              count(*) OVER (
-                PARTITION BY json_extract(payload,'$.model_identity')
-              ) total
-       FROM learning_records WHERE resource=?
-     ), sampled AS (
-       SELECT sort_epoch,record_key,payload FROM ranked
-       WHERE total<=? OR (sequence-1) % MAX(1,(total+?-1)/?)=0
-     ), measured AS (
-       SELECT sort_epoch,record_key,payload,
-              row_number() OVER (ORDER BY sort_epoch,record_key) sequence,
-              sum(length(CAST(payload AS BLOB))+1) OVER (
-                ORDER BY sort_epoch,record_key
-              ) running_bytes
-       FROM sampled
-     ), visible AS (
-       SELECT sort_epoch,record_key,payload FROM measured
-       WHERE running_bytes<=? OR sequence=1
-     )
-     SELECT COALESCE((SELECT json_group_array(json(payload)) FROM (
-              SELECT payload FROM visible ORDER BY sort_epoch,record_key
-            )),'[]') items_json,
-            (SELECT count(*) FROM sampled) sampled_count,
-            (SELECT count(*) FROM visible) visible_count`,
-  ).bind(resource, CURVE_OVERVIEW_POINTS, CURVE_OVERVIEW_POINTS,
-    CURVE_OVERVIEW_POINTS, MAX_RESPONSE_BYTES).first<{
-      items_json: string; sampled_count: number; visible_count: number;
+    `SELECT COALESCE(json_group_array(json(payload)),'[]') items_json,
+            count(*) visible_count
+     FROM learning_records
+     WHERE resource='curve-overview'
+       AND json_extract(payload,'$.cadence')=?`,
+  ).bind(cadence).first<{
+      items_json: string; visible_count: number;
     }>();
   if (!result) throw new Error("missing curve overview");
   return rawItemsResponse(result.items_json, {
-    mode: "overview", point_limit_per_identity: CURVE_OVERVIEW_POINTS,
-    byte_limit: MAX_RESPONSE_BYTES,
-    truncated: Number(result.visible_count) < Number(result.sampled_count),
+    mode: "materialized-overview", byte_limit: MAX_RESPONSE_BYTES,
+    summary_count: Number(result.visible_count),
   });
 }
 
 async function versionOverview(binding: D1Database) {
   const result = await binding.prepare(
-    `WITH ranked AS (
-       SELECT payload,sort_epoch,record_key,
-              row_number() OVER (
-                PARTITION BY json_extract(payload,'$.model_identity')
-                ORDER BY sort_epoch,record_key
-              ) sequence,
-              count(*) OVER (
-                PARTITION BY json_extract(payload,'$.model_identity')
-              ) total
-       FROM learning_records WHERE resource='version-group'
-     ), sampled AS (
-       SELECT sort_epoch,record_key,payload FROM ranked
-       WHERE total<=? OR (sequence-1) % MAX(1,(total+?-1)/?)=0
-     ), measured AS (
-       SELECT sort_epoch,record_key,payload,
-              row_number() OVER (ORDER BY sort_epoch,record_key) sequence,
-              sum(length(CAST(payload AS BLOB))+1) OVER (
-                ORDER BY sort_epoch,record_key
-              ) running_bytes
-       FROM sampled
-     ), visible AS (
-       SELECT sort_epoch,record_key,payload FROM measured
-       WHERE running_bytes<=? OR sequence=1
-     )
-     SELECT COALESCE((SELECT json_group_array(json(payload)) FROM (
-              SELECT payload FROM visible ORDER BY sort_epoch,record_key
-            )),'[]') items_json,
-            (SELECT count(*) FROM sampled) sampled_count,
-            (SELECT count(*) FROM visible) visible_count`,
-  ).bind(VERSION_OVERVIEW_GROUPS, VERSION_OVERVIEW_GROUPS,
-    VERSION_OVERVIEW_GROUPS, MAX_RESPONSE_BYTES).first<{
-      items_json: string; sampled_count: number; visible_count: number;
+    `SELECT COALESCE(json_group_array(json(value)),'[]') items_json,
+            count(*) visible_count
+     FROM learning_records,json_each(learning_records.payload,'$.groups')
+     WHERE resource='version-overview'`,
+  ).first<{
+      items_json: string; visible_count: number;
     }>();
   if (!result) throw new Error("missing version overview");
   return rawItemsResponse(result.items_json, {
-    mode: "overview", byte_limit: MAX_RESPONSE_BYTES,
-    truncated: Number(result.visible_count) < Number(result.sampled_count),
+    mode: "materialized-overview", byte_limit: MAX_RESPONSE_BYTES,
+    summary_count: Number(result.visible_count),
   });
 }
 
@@ -243,13 +188,18 @@ export async function GET(request: Request) {
   const resource = url.searchParams.get("resource") ?? "";
   if (resource === "version-overview") {
     if (previewBundle) {
+      const summaries = previewRecords().filter(row => row.resource === "version-overview");
+      if (summaries.length) return previewJson({
+        items: summaries.flatMap(row => Array.isArray(row.payload.groups) ? row.payload.groups : []),
+        mode: "materialized-overview", preview_limited: true,
+      });
       const source = previewRecords().filter(row => row.resource === "version-group");
       const identities = [...new Set(source.map(row => String(row.payload.model_identity ?? "")))];
       return previewJson({
         items: identities.flatMap(identity => source
           .filter(row => row.payload.model_identity === identity)
           .sort((a, b) => a.sort_epoch - b.sort_epoch)
-          .slice(-VERSION_OVERVIEW_GROUPS)
+          .slice(-60)
           .map(row => row.payload)),
         mode: "overview", preview_limited: true,
       });
@@ -264,15 +214,22 @@ export async function GET(request: Request) {
   }
   if (resource === "curve-overview") {
     if (previewBundle) {
-      const cadence = url.searchParams.get("cadence") === "30m" ? "curve-30m" : "curve-5m";
+      const cadenceName = url.searchParams.get("cadence") === "30m" ? "30m" : "5m";
+      const summaries = previewRecords().filter(row => row.resource === "curve-overview"
+        && row.payload.cadence === cadenceName);
+      if (summaries.length) return previewJson({
+        items: summaries.map(row => row.payload),
+        mode: "materialized-overview", preview_limited: true,
+      });
+      const cadence = cadenceName === "30m" ? "curve-30m" : "curve-5m";
       const source = previewRecords().filter(row => row.resource === cadence);
       const identities = [...new Set(source.map(row => String(row.payload.model_identity ?? "")))];
       const sampled = identities.flatMap(identity => {
         const rows = source.filter(row => row.payload.model_identity === identity)
           .sort((a, b) => a.sort_epoch - b.sort_epoch);
-        if (rows.length <= CURVE_OVERVIEW_POINTS) return rows;
-        const stride = Math.ceil(rows.length / CURVE_OVERVIEW_POINTS);
-        return rows.filter((_, index) => index % stride === 0).slice(0, CURVE_OVERVIEW_POINTS);
+        if (rows.length <= 240) return rows;
+        const stride = Math.ceil(rows.length / 240);
+        return rows.filter((_, index) => index % stride === 0).slice(0, 240);
       });
       return previewJson({
         items: sampled.map(row => row.payload),
@@ -330,7 +287,8 @@ export async function POST(request: Request) {
                   json_type(row)='object'
                   AND json_extract(row,'$.resource') IN
                     ('model','version-group','curve-5m','curve-30m',
-                     'execution-point','execution-result')
+                     'execution-point','execution-result','curve-overview',
+                     'version-overview')
                   AND length(json_extract(row,'$.record_key'))>0
                   AND json_type(row,'$.sort_epoch')='integer'
                   AND json_extract(row,'$.sort_epoch')>=0

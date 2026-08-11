@@ -59,6 +59,23 @@ export const marketDecisions = sqliteTable(
   ],
 );
 
+export const marketHistoryOverview = sqliteTable("market_history_overview", {
+  overviewKey: text("overview_key").primaryKey(),
+  payload: text("payload").notNull(),
+  receivedAt: text("received_at").notNull(),
+});
+
+export const marketDecisionOverviews = sqliteTable(
+  "market_decision_overviews",
+  {
+    overviewKey: text("overview_key").primaryKey(),
+    modelIdentity: text("model_identity").notNull(),
+    frequency: text("frequency").notNull(),
+    payload: text("payload").notNull(),
+    receivedAt: text("received_at").notNull(),
+  },
+);
+
 export const learningRecords = sqliteTable(
   "learning_records",
   {

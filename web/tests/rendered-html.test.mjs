@@ -382,7 +382,10 @@ test("stores growing learning history as bounded idempotent D1 records", () => {
   assert.match(route, /running_bytes<=\?/);
   assert.doesNotMatch(route, /results\.map\(row => JSON\.parse\(row\.payload\)\)/);
   assert.match(route, /next_cursor/);
-  assert.match(sync, /LEARNING_HISTORY_CONTRACT_VERSION = "learning-history-d1-v1"/);
+  assert.match(sync, /LEARNING_HISTORY_CONTRACT_VERSION = "learning-history-d1-v2"/);
+  assert.match(route, /resource='curve-overview'/);
+  assert.match(route, /resource='version-overview'/);
+  assert.doesNotMatch(route, /row_number\(\) OVER \(PARTITION BY model_identity/);
   assert.match(sync, /learning_history_records/);
   assert.match(sync, /LEARNING_SUMMARY_GROUPS_PER_IDENTITY = 6/);
   assert.match(sync, /LEARNING_SUMMARY_CURVE_POINTS = 48/);
@@ -826,13 +829,30 @@ test("loads bounded learning history only when interactive charts need it", () =
 
 test("distinguishes market history loading, empty, and failed states", () => {
   const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
+  const resource = readFileSync(new URL("../app/_lib/dashboard-resource.ts", import.meta.url), "utf8");
+  const history = readFileSync(new URL("../app/api/market-history/route.ts", import.meta.url), "utf8");
+  const schema = readFileSync(new URL("../db/schema.ts", import.meta.url), "utf8");
+  const migration = readFileSync(new URL("../drizzle/0006_materialized_history_overviews.sql", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(modal, /historyState === "loading"/);
   assert.match(modal, /historyState === "error"/);
   assert.match(modal, /正在读取行情/);
+  assert.match(modal, /正在读取长期曲线/);
+  assert.match(modal, /正在读取训练记录/);
   assert.match(modal, /title="暂无行情数据"/);
   assert.match(modal, /重新读取/);
   assert.doesNotMatch(modal, /还没有保存过可绘制的 Bid\/Ask 行情/);
+  assert.doesNotMatch(modal, /等待可验证数据/);
+  assert.match(resource, /MIN_VISIBLE_LOADING_MS = 1_000/);
+  assert.match(modal, /waitForMinimumLoading\(startedAt\)/);
+  assert.match(history, /market_history_overview/);
+  assert.match(history, /market_decision_overviews/);
+  assert.match(schema, /marketHistoryOverview/);
+  assert.match(schema, /marketDecisionOverviews/);
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS `market_history_overview`/);
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS `market_decision_overviews`/);
+  assert.doesNotMatch(history, /SELECT count\(\*\) count, min\(time_epoch\)/);
+  assert.doesNotMatch(history, /row_number\(\) OVER/);
   assert.match(css, /graph-data-pulse/);
   assert.match(css, /prefers-reduced-motion:reduce/);
 });

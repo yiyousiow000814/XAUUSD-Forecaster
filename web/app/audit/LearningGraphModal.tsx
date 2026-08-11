@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { waitForMinimumLoading } from "../_lib/dashboard-resource";
 
 type CurvePoint = { decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number };
 type Curve = { model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: CurvePoint[]; source_point_count_30m?: number; chart_point_count_30m?: number; chart_downsampled_30m?: boolean; points_30m?: CurvePoint[] };
@@ -69,7 +70,6 @@ const COLORS: Record<string, string> = {
   NEWS_ONLY: "#d08a00",
 };
 const pct = (value: number) => `${value >= 0 ? "+" : "−"}${Math.abs(value * 100).toFixed(3)}%`;
-
 export default function LearningGraphModal({
   open, onClose, startTab, curves, market, versionGroups, execution, historyResource,
 }: {
@@ -164,21 +164,35 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
   const [remoteTotal, setRemoteTotal] = useState<number | null>(null);
   const [pageError, setPageError] = useState<string | null>(null);
   const [overviewGroups, setOverviewGroups] = useState<VersionGroup[] | null>(null);
+  const [overviewState, setOverviewState] = useState<"loading" | "ready" | "error">(
+    historyResource ? "loading" : "ready",
+  );
+  const [overviewRetry, setOverviewRetry] = useState(0);
+  const [pageRetry, setPageRetry] = useState(0);
   const resultListRef = useRef<HTMLDivElement>(null);
   const rows = groups.filter(row => row.model_identity === identity).sort((a,b) => b.generation-a.generation);
   useEffect(() => {
     if (!historyResource || overviewGroups) return;
     const controller = new AbortController();
+    const startedAt = Date.now();
     fetch(`${historyResource}?resource=version-overview`, {
       cache: "no-store", signal: controller.signal,
     }).then(response => {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return response.json() as Promise<{ items: VersionGroup[] }>;
-    }).then(body => setOverviewGroups(body.items)).catch(() => {
-      /* The bounded first-page graph remains usable. */
+    }).then(async body => {
+      await waitForMinimumLoading(startedAt);
+      if (!controller.signal.aborted) {
+        setOverviewGroups(body.items);
+        setOverviewState("ready");
+      }
+    }).catch(async error => {
+      if (error.name === "AbortError") return;
+      await waitForMinimumLoading(startedAt);
+      if (!controller.signal.aborted) setOverviewState("error");
     });
     return () => controller.abort();
-  }, [historyResource, overviewGroups]);
+  }, [historyResource, overviewGroups, overviewRetry]);
   useEffect(() => {
     if (!historyResource || remotePages[page] || pageCursors[page] === undefined) return;
     const query = new URLSearchParams({
@@ -187,19 +201,26 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
     const cursor = pageCursors[page];
     if (cursor) query.set("cursor", cursor);
     const controller = new AbortController();
+    const startedAt = Date.now();
     fetch(`${historyResource}?${query}`, { cache: "no-store", signal: controller.signal })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json() as Promise<{ items: VersionGroup[]; total: number; next_cursor: string | null }>;
       })
-      .then(body => {
+      .then(async body => {
+        await waitForMinimumLoading(startedAt);
+        if (controller.signal.aborted) return;
         setRemotePages(previous => ({ ...previous, [page]: body.items }));
         setRemoteTotal(body.total);
         setPageCursors(previous => ({ ...previous, [page + 1]: body.next_cursor }));
       })
-      .catch(error => { if (error.name !== "AbortError") setPageError("这一页暂时无法读取"); });
+      .catch(async error => {
+        if (error.name === "AbortError") return;
+        await waitForMinimumLoading(startedAt);
+        if (!controller.signal.aborted) setPageError("训练记录读取失败");
+      });
     return () => controller.abort();
-  }, [historyResource, identity, page, pageCursors, remotePages]);
+  }, [historyResource, identity, page, pageCursors, remotePages, pageRetry]);
   const totalRows = remoteTotal ?? rows.length;
   const pageCount = Math.max(1, Math.ceil(totalRows / pageSize));
   const safePage = Math.min(page, pageCount - 1);
@@ -226,6 +247,21 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
     : 90 + cutoffs.indexOf(trainingRows) / Math.max(1, cutoffs.length - 1) * 780;
   const gy = (value: number) => 28 + (high-value)/Math.max(.000001,high-low)*218;
   const hoveredMetric = hovered ? metric(hovered) : null;
+  if (pageLoading || overviewState === "loading") {
+    return <GraphLoading label="正在读取训练记录" />;
+  }
+  if (overviewState === "error") {
+    return <GraphLoadError label="训练总览读取失败" onRetry={() => {
+      setOverviewState("loading");
+      setOverviewRetry(value => value + 1);
+    }} />;
+  }
+  if (pageError) {
+    return <GraphLoadError label={pageError} onRetry={() => {
+      setPageError(null);
+      setPageRetry(value => value + 1);
+    }} />;
+  }
   return <section className="version-ledger modal-version-ledger"><header><div className="version-ledger-title"><span>共同训练截止量对齐 · 同一坐标叠加比较</span><h3>所有模型的训练组成绩</h3></div><div className="version-ledger-controls"><label className="version-ledger-model"><span>查看模型明细</span><select value={identity} onChange={event => { setIdentity(event.target.value); setPage(0); setRemotePages({}); setPageCursors({ 0: null }); setRemoteTotal(null); setPageError(null); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select></label><label><span>统计频率</span><select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPage(0); }}><option value="EVERY_5M">每5分钟（重叠样本）</option><option value="FIXED_30M">每30分钟（固定 :00 / :30）</option></select></label><label><span>横轴范围</span><select value={cutoffWindow} onChange={event => setCutoffWindow(event.target.value as "20" | "all")}><option value="20">最近20个训练截止点</option><option value="all">全部训练截止点</option></select></label></div></header>
     <section className="version-hover-chart" aria-label="所有模型训练组独立收益图">
       <div className="version-hover-readout">{hovered && hoveredMetric ? <><b>{LABELS[hovered.model_identity]} · 第 {hovered.generation} 组</b><span>{stamp(hovered.created_at)} · 共同截止 {comparisonCutoff(hovered)} 条 · 自身训练 {hovered.training_rows} 条 · OOS {hoveredMetric.oos_rows} 条 · 收益 {pct(hoveredMetric.cumulative_quote_return)} · PF {hoveredMetric.profit_factor_quote_adjusted?.toFixed(2) ?? "—"} · 出方向 {((hoveredMetric.coverage_rate ?? 0)*100).toFixed(1)}%</span></> : <><b>五种模型叠加在同一坐标</b><span>实线连接相邻训练截止点；虚线跨过没有合法新版本的空档。空缺代表该模型当轮没有合法新版本；这里只叠加显示，不会把收益相加。</span></>}</div>
@@ -244,13 +280,11 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
             return <line key={`${previous.training_dataset_hash}-${row.training_dataset_hash}`} x1={gx(comparisonCutoff(previous))} y1={gy(metric(previous).cumulative_quote_return)} x2={gx(comparisonCutoff(row))} y2={gy(metric(row).cumulative_quote_return)} stroke={COLORS[key]} strokeWidth={selected ? "3.5" : "2.25"} strokeDasharray={crossesMissingCutoff ? "7 6" : undefined} />;
           })}{modelRows.map(row => <circle key={row.training_dataset_hash} cx={gx(comparisonCutoff(row))} cy={gy(metric(row).cumulative_quote_return)} r={selected ? "6" : "5"} fill={COLORS[key]} stroke="#eee9dc" strokeWidth="2" tabIndex={0} onMouseEnter={() => setHovered(row)} onMouseLeave={() => setHovered(null)} onFocus={() => setHovered(row)} onBlur={() => setHovered(null)}><title>{`${LABELS[key]} · 共同截止 ${comparisonCutoff(row)} 条 · 自身训练 ${row.training_rows} 条 · 自身第 ${row.generation} 组 · ${pct(metric(row).cumulative_quote_return)}`}</title></circle>)}</g>;
         })}
-      </svg> : <Empty text="这个频率还没有成熟的训练组结果。" />}
+      </svg> : <Empty title="暂无训练组结果" text="这个频率还没有成熟的训练组结果。" />}
       <div className="chart-legend">{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <span key={key}><i style={{ background:COLORS[key] }} />{label}</span>)}</div>
     </section>
     <div ref={resultListRef} className="version-list-anchor" aria-hidden="true" />
     {pageCount > 1 && <VersionPagination page={safePage} pageCount={pageCount} total={totalRows} onPage={goToPage} />}
-    {pageLoading && <p role="status">正在读取这一页…</p>}
-    {pageError && <p role="alert">{pageError}</p>}
     <div className="version-ledger-head"><span>组别 / 状态</span><span>训练与上线</span><span>创建后 OOS</span><span>本组独立收益</span><span>PF / 出方向</span></div>
     {visibleRows.map(row => { const selected = metric(row); return <article key={`${row.model_identity}-${row.training_dataset_hash}`} className={row.lifecycle_status === "LATEST" ? "is-latest" : ""}>
       <div className="version-result-head">
@@ -285,34 +319,56 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
   const [pageOffset, setPageOffset] = useState(0);
   const [hoveredBoundary, setHoveredBoundary] = useState<BoundaryReadout | null>(null);
   const [historyCurves, setHistoryCurves] = useState<Partial<Record<EvaluationCadence, Curve[]>>>({});
+  const [historyErrors, setHistoryErrors] = useState<Partial<Record<EvaluationCadence, boolean>>>({});
+  const [historyRetries, setHistoryRetries] = useState<Partial<Record<EvaluationCadence, number>>>({});
   useEffect(() => {
-    if (!historyResource || historyCurves[cadence]) return;
+    if (!historyResource || historyCurves[cadence] || historyErrors[cadence]) return;
     const controller = new AbortController();
+    const startedAt = Date.now();
     const cadenceQuery = cadence === "FIXED_30M" ? "30m" : "5m";
     fetch(`${historyResource}?resource=curve-overview&cadence=${cadenceQuery}`, {
       cache: "no-store", signal: controller.signal,
     }).then(response => {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return response.json() as Promise<{ items: Array<CurvePoint & { model_identity: string }> }>;
-    }).then(body => {
-      const identities = [...new Set(body.items.map(point => point.model_identity))];
-      const grouped = identities.map(modelIdentity => {
-        const points = body.items
-          .filter(point => point.model_identity === modelIdentity)
+      return response.json() as Promise<{ items: Array<(CurvePoint & { model_identity: string }) | (Curve & { cadence?: string })> }>;
+    }).then(async body => {
+      const summaries = body.items.filter(item => Array.isArray((item as Curve).points)) as Array<Curve & { cadence?: string }>;
+      const flatPoints = body.items.filter(item => !Array.isArray((item as Curve).points)) as Array<CurvePoint & { model_identity: string }>;
+      const identities = [...new Set(flatPoints.map(point => point.model_identity))];
+      const grouped = summaries.length ? summaries.map(summary => cadence === "FIXED_30M"
+        ? {
+            ...summary, points: [], points_30m: summary.points,
+            source_point_count_30m: summary.source_point_count,
+            chart_point_count_30m: summary.chart_point_count,
+            chart_downsampled_30m: summary.chart_downsampled,
+          }
+        : summary) : identities.map(modelIdentity => {
+        const points = flatPoints.filter(point => point.model_identity === modelIdentity)
           .map(({ decision_time, model_version, training_rows, training_dataset_hash, cumulative_quote_return }) => ({ decision_time, model_version, training_rows, training_dataset_hash, cumulative_quote_return }))
           .sort((a, b) => Date.parse(a.decision_time) - Date.parse(b.decision_time));
         return cadence === "FIXED_30M"
           ? { model_identity: modelIdentity, points: [], points_30m: points }
           : { model_identity: modelIdentity, points };
       });
-      setHistoryCurves(previous => ({ ...previous, [cadence]: grouped }));
-    }).catch(() => { /* The bounded first page remains usable. */ });
+      await waitForMinimumLoading(startedAt);
+      if (!controller.signal.aborted) setHistoryCurves(previous => ({ ...previous, [cadence]: grouped }));
+    }).catch(async error => {
+      if (error.name === "AbortError") return;
+      await waitForMinimumLoading(startedAt);
+      if (!controller.signal.aborted) setHistoryErrors(previous => ({ ...previous, [cadence]: true }));
+    });
     return () => controller.abort();
-  }, [historyResource, cadence, historyCurves]);
+  }, [historyResource, cadence, historyCurves, historyErrors, historyRetries]);
+  const historyLoading = Boolean(historyResource && !historyCurves[cadence] && !historyErrors[cadence]);
+  if (historyLoading) return <GraphLoading label="正在读取长期曲线" />;
+  if (historyErrors[cadence]) return <GraphLoadError label="长期曲线读取失败" onRetry={() => {
+    setHistoryErrors(previous => ({ ...previous, [cadence]: false }));
+    setHistoryRetries(previous => ({ ...previous, [cadence]: (previous[cadence] ?? 0) + 1 }));
+  }} />;
   const resolvedCurves = historyCurves[cadence] ?? curves;
   const usable = resolvedCurves.map(row => cadence === "FIXED_30M" ? { ...row, points: row.points_30m ?? [], source_point_count: row.source_point_count_30m, chart_point_count: row.chart_point_count_30m, chart_downsampled: row.chart_downsampled_30m } : row).filter(row => row.model_identity !== "CHAMPION_0" && row.points.length > 0);
   const overviewPoints = usable.flatMap(row => row.points);
-  if (!overviewPoints.length) return <Empty text="还没有已成熟的 Live OOS 点；第一个预测走完30分钟后才会出现。" />;
+  if (!overviewPoints.length) return <Empty title="暂无长期曲线" text="还没有已成熟的 Live OOS 点；第一个预测走完30分钟后才会出现。" />;
   const availableResultTimes = [...new Set(overviewPoints.map(point => Date.parse(point.decision_time)))].sort((a, b) => a - b);
   const fullStart = availableResultTimes[0];
   const fullEnd = availableResultTimes.at(-1)!;
@@ -546,12 +602,14 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
     if (!market?.history_resource) return;
     const controller = new AbortController();
     let cancelled = false;
+    const startedAt = Date.now();
     fetch(`${market.history_resource}?${historyQueryString}`, { cache: "no-store", signal: controller.signal })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
       })
-      .then(body => {
+      .then(async body => {
+        await waitForMinimumLoading(startedAt);
         if (!cancelled) {
           setHistoryResult({
             key: historyRequestKey,
@@ -565,8 +623,10 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
           });
         }
       })
-      .catch(error => {
+      .catch(async error => {
         if (!cancelled && error.name !== "AbortError") {
+          await waitForMinimumLoading(startedAt);
+          if (cancelled) return;
           setHistoryResult({ key: historyRequestKey, state: "error" });
         }
       });
@@ -624,9 +684,9 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
     if (dense) return candidateDecisions;
     return candidateDecisions.filter(row => new Date(row.decision_time).getUTCMinutes() % 30 === 0);
   })();
-  if (remoteHistory && historyState === "loading") return <GraphLoading />;
+  if (remoteHistory && historyState === "loading") return <GraphLoading label="正在读取行情" />;
   if (remoteHistory && historyState === "error") {
-    return <GraphLoadError onRetry={() => setHistoryRetry(value => value + 1)} />;
+    return <GraphLoadError label="行情读取失败" onRetry={() => setHistoryRetry(value => value + 1)} />;
   }
   if (!detailCandles.length && !canGoLater) {
     return <Empty title="暂无行情数据" text="当前范围没有 Bid/Ask 行情。" />;
@@ -737,7 +797,7 @@ function DecisionPayoff({ selected, resultLabel }: { selected: Decision; resultL
 function ExecutionCharts({ execution }: { execution?: ExecutionLearning }) {
   const lot = execution?.models.find(row => row.model_identity === "LOT_RIDGE");
   const exit = execution?.models.find(row => row.model_identity === "EXIT_RIDGE");
-  if (!lot && !exit) return <Empty text="仓位与退出模型还没有生成可评分的前向预测。" />;
+  if (!lot && !exit) return <Empty title="暂无仓位与退出结果" text="仓位与退出模型还没有生成可评分的前向预测。" />;
   return <section className="execution-charts">
     <header><span>CAUSAL EXECUTION OOS</span><h3>跟随同一个 Live 方向，逐笔看仓位与退出。</h3><p>方向固定来自 {execution?.source_model_label ?? "黄金＋大视野新闻 Ridge"}。WAIT 不创建仓位；历史结果只训练，下面只评分模型上线后真正发生的未来位置。</p></header>
     <div className="execution-scorecards">
@@ -804,20 +864,20 @@ function ExecutionLineChart({ title, subtitle, points, sourceCount, downsampled,
   </article>;
 }
 
-function GraphLoading() {
+function GraphLoading({ label = "正在读取数据" }: { label?: string }) {
   return <div className="graph-loading" role="status" aria-live="polite">
     <span className="graph-loading-bars" aria-hidden="true"><i /><i /><i /></span>
-    <strong>正在读取行情</strong>
+    <strong>{label}</strong>
   </div>;
 }
 
-function GraphLoadError({ onRetry }: { onRetry: () => void }) {
+function GraphLoadError({ onRetry, label = "数据读取失败" }: { onRetry: () => void; label?: string }) {
   return <div className="graph-empty graph-load-error" role="alert">
-    <strong>行情读取失败</strong>
+    <strong>{label}</strong>
     <button type="button" onClick={onRetry}>重新读取</button>
   </div>;
 }
 
-function Empty({ text, title = "等待可验证数据" }: { text: string; title?: string }) {
+function Empty({ text, title }: { text: string; title: string }) {
   return <div className="graph-empty"><strong>{title}</strong><p>{text}</p></div>;
 }
