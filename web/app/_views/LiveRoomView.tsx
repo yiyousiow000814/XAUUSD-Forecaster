@@ -27,7 +27,8 @@ type Payload = {
   forward_epoch: string;
   system: {
     online: boolean;
-    market_session?: "OPEN" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE";
+    market_session?: "OPEN" | "CLOSED" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE";
+    market_reopens_at?: string | null;
     quote_age_seconds: number | null;
     mode: string;
     trading_enabled: boolean;
@@ -93,6 +94,16 @@ const localTime = (value?: string) =>
       }).format(new Date(value))
     : "—";
 
+const countdown = (seconds: number) => {
+  const safe = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const remainingSeconds = safe % 60;
+  return [hours, minutes, remainingSeconds]
+    .map((value) => value.toString().padStart(2, "0"))
+    .join(":");
+};
+
 export default function LiveRoomView() {
   const [payload, setPayload] = useState<Payload | null>(() => readDashboardResource<Payload>("/api/status"));
   const [error, setError] = useState<string | null>(null);
@@ -130,7 +141,10 @@ export default function LiveRoomView() {
   const latest = payload?.latest;
   const loading = payload === null && error === null;
   const online = Boolean(payload?.system.online && !error);
-  const marketClosed = Boolean(payload?.system.market_session === "WEEKLY_CLOSED" && !error);
+  const marketClosed = Boolean(
+    (payload?.system.market_session === "CLOSED" ||
+      payload?.system.market_session === "WEEKLY_CLOSED") && !error
+  );
   const mid = latest?.bid && latest.ask ? (latest.bid + latest.ask) / 2 : null;
   const u5Percent = latest?.u5 == null ? null : Math.expm1(latest.u5) * 100;
   const u5Dollars = latest?.u5 == null || mid == null ? null : Math.expm1(latest.u5) * mid;
@@ -146,8 +160,13 @@ export default function LiveRoomView() {
   const signalRemaining = forecastAge === null ? 0 : Math.max(0, signalExpiry - forecastAge);
   const horizonRemaining = forecastAge === null ? 0 : Math.max(0, horizon - forecastAge);
   const horizonMinutes = Math.floor(horizonRemaining / 60);
+  const reopenSeconds = payload?.system.market_reopens_at
+    ? Math.max(0, (new Date(payload.system.market_reopens_at).getTime() - now) / 1_000)
+    : null;
   const forecastStatus = marketClosed
-    ? null
+    ? reopenSeconds === null
+      ? "等待 cTrader 提供重开时间"
+      : `距离重开 ${countdown(reopenSeconds)}`
     : loading
       ? "读取中…"
       : error
@@ -198,22 +217,23 @@ export default function LiveRoomView() {
 
         <div className="decision-dial">
           <span className="dial-label">30分钟预测</span>
-          <div className={`action action-${forecastAction.toLowerCase()}`}>
-            {forecastAction}
+          <div className={`action action-${marketClosed ? "closed" : forecastAction.toLowerCase()}`}>
+            {marketClosed ? "休市" : forecastAction}
           </div>
-          {forecastStatus && signalRemaining > 0 && online && <strong className="forecast-state is-current">{forecastStatus}</strong>}
+          {forecastStatus && (marketClosed || (signalRemaining > 0 && online)) && <strong className="forecast-state is-current">{forecastStatus}</strong>}
         </div>
       </section>
 
       {error && <div className="error-banner">{error}。行情采集可能仍在运行，但网页数据服务已停止。</div>}
+      {marketClosed && <div className="market-closed-banner">cTrader 已确认 XAUUSD 休市。系统暂停新增预测与 30 分钟样本，新闻采集继续运行。</div>}
 
       <section className="metric-grid">
         <article>
           <span>DATA HEALTH</span>
-          <strong className={latest?.data_health === "OK" ? "good" : "warn"}>
-            {latest?.data_health ?? "—"}
+          <strong className={marketClosed || latest?.data_health === "OK" ? "good" : "warn"}>
+            {marketClosed ? "休市" : latest?.data_health ?? "—"}
           </strong>
-          <small>最新决策 {localTime(latest?.decision_time)}</small>
+          <small>{marketClosed ? "最后预测" : "最新决策"} {localTime(latest?.decision_time)}</small>
         </article>
         <article>
           <span>DECISIONS</span>

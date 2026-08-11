@@ -35,10 +35,34 @@ class MarketObservation:
                 raise ValueError("market observation times must be timezone-aware")
 
 
+@dataclass(frozen=True)
+class BrokerMarketSession:
+    observed_at: datetime
+    server_time: datetime
+    is_open: bool
+    time_till_open: timedelta
+    time_till_close: timedelta
+    next_open_time: datetime | None
+    next_close_time: datetime | None
+
+    def __post_init__(self) -> None:
+        for value in (self.observed_at, self.server_time):
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError("market-session times must be timezone-aware")
+        if self.time_till_open < timedelta(0) or self.time_till_close < timedelta(0):
+            raise ValueError("market-session durations must not be negative")
+
+    def is_fresh(self, at: datetime, max_age: timedelta = timedelta(seconds=20)) -> bool:
+        age = at - self.observed_at
+        return -timedelta(seconds=5) <= age <= max_age
+
+
 class MarketProvider(Protocol):
     name: str
 
     def observations(self, decision_time: datetime) -> list[MarketObservation]: ...
+
+    def market_session(self, observed_at: datetime) -> BrokerMarketSession | None: ...
 
 
 class NullMarketProvider:
@@ -46,6 +70,9 @@ class NullMarketProvider:
 
     def observations(self, decision_time: datetime) -> list[MarketObservation]:
         return []
+
+    def market_session(self, observed_at: datetime) -> BrokerMarketSession | None:
+        return None
 
 
 class JsonlMarketProvider:
@@ -80,6 +107,41 @@ class JsonlMarketProvider:
                 and row.received_time <= decision_time
             ],
             key=lambda row: (row.event_time, row.received_time),
+        )
+
+    def market_session(self, observed_at: datetime) -> BrokerMarketSession | None:
+        session_path = (
+            self.path / "market-session.json"
+            if self.path.is_dir()
+            else self.path.parent / "market-session.json"
+        )
+        if not session_path.exists():
+            return None
+        item = json.loads(session_path.read_text(encoding="utf-8"))
+        if item.get("schema") != "xauusd.forward.market-session.v1":
+            raise ValueError(f"unexpected market-session schema in {session_path}")
+        symbol = str(item.get("symbol", ""))
+        if symbol.casefold() != self.expected_symbol.casefold():
+            raise ValueError(
+                f"unexpected market-session symbol {symbol!r}; "
+                f"expected {self.expected_symbol!r}"
+            )
+
+        def timestamp(name: str) -> datetime:
+            return datetime.fromisoformat(str(item[name]).replace("Z", "+00:00"))
+
+        def optional_timestamp(name: str) -> datetime | None:
+            value = item.get(name)
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")) if value else None
+
+        return BrokerMarketSession(
+            observed_at=timestamp("observed_at"),
+            server_time=timestamp("server_time"),
+            is_open=bool(item["is_open"]),
+            time_till_open=timedelta(seconds=max(0.0, float(item["time_till_open_seconds"]))),
+            time_till_close=timedelta(seconds=max(0.0, float(item["time_till_close_seconds"]))),
+            next_open_time=optional_timestamp("next_open_time"),
+            next_close_time=optional_timestamp("next_close_time"),
         )
 
     def _source_files(self) -> list[Path]:

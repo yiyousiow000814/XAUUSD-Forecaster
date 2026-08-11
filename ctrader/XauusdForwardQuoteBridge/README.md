@@ -13,6 +13,12 @@ schema, source, symbol, event_time, received_time, bid, ask, sequence
 the Algo callback handled the Tick. The Forecaster applies the receipt-time
 cutoff and reads only observations visible at the decision boundary.
 
+The Algo also atomically refreshes `market-session.json` on every timer tick.
+That heartbeat contains broker-native `MarketHours.IsOpened()`,
+`TimeTillOpen()`, and `TimeTillClose()` observations. The Forecaster requires a
+fresh heartbeat and never emits a decision while the market is closed or the
+fixed 30-minute horizon would cross the next broker close.
+
 Build inside the repository with external publishing explicitly disabled:
 
 ```text
