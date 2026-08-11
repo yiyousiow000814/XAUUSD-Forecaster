@@ -15,8 +15,14 @@ export async function GET() {
         .bind(2)
         .first<{ payload: string }>();
       if (row) {
-        return NextResponse.json(JSON.parse(row.payload), {
-          headers: { "Cache-Control": "no-store, max-age=0" },
+        // POST validates the snapshot before storing it. Returning those bytes
+        // directly avoids parsing and serializing a payload that can approach
+        // the Worker request-size budget.
+        return new Response(row.payload, {
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+            "Cache-Control": "private, max-age=15",
+          },
         });
       }
     }

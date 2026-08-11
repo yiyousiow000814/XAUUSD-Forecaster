@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-
-const CHECK_INTERVAL_MS = 60_000;
+import { DASHBOARD_REFRESH_INTERVALS } from "../_lib/dashboard-refresh";
 
 function scriptFingerprint(documentRoot: Document): string {
   return Array.from(documentRoot.scripts)
@@ -15,6 +14,7 @@ function scriptFingerprint(documentRoot: Document): string {
 
 export default function DeploymentRefresh() {
   useEffect(() => {
+    if (navigator.webdriver) return;
     const loadedFingerprint = scriptFingerprint(document);
     if (!loadedFingerprint) return;
 
@@ -38,7 +38,7 @@ export default function DeploymentRefresh() {
       }
     };
 
-    const timer = window.setInterval(checkDeployment, CHECK_INTERVAL_MS);
+    const timer = window.setInterval(checkDeployment, DASHBOARD_REFRESH_INTERVALS.deployment);
     window.addEventListener("focus", checkDeployment);
     return () => {
       window.clearInterval(timer);

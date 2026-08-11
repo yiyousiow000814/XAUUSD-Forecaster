@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import DashboardLink from "../_components/DashboardLink";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
-import { isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
+import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 
 type QuotaKey = {
   slot: number;
@@ -111,8 +111,9 @@ export default function StatusView() {
     return scheduleDashboardRefresh(
       () => void refresh(),
       () => void refresh(true),
-      15_000,
+      DASHBOARD_REFRESH_INTERVALS.status,
       immutablePreview,
+      "status",
     );
   }, [refresh, immutablePreview]);
 
@@ -178,7 +179,7 @@ export default function StatusView() {
         <p>Google 实际额度按 project 而不是 API key 计算。如果多个 key 属于同一个 project，它们仍会共享 Google 的额度；本页显示的是本机逐模型、逐 key 的安全账本，不代表 Google 端保证额度。</p>
       </aside>
 
-      <footer><span>每 15 秒刷新 · SHADOW ONLY</span><span>最后状态：{payload?.generated_at ? new Date(payload.generated_at).toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Kuala_Lumpur" }) : "—"}</span></footer>
+      <footer><span>每 {DASHBOARD_REFRESH_INTERVALS.status / 1000} 秒刷新 · SHADOW ONLY</span><span>最后状态：{payload?.generated_at ? new Date(payload.generated_at).toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Kuala_Lumpur" }) : "—"}</span></footer>
     </main>
   );
 }

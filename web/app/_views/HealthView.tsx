@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import DashboardLink from "../_components/DashboardLink";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
-import { isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
+import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 
 type StatusPayload = {
   generated_at: string;
@@ -68,8 +68,9 @@ export default function HealthView() {
     return scheduleDashboardRefresh(
       () => void refresh(),
       () => void refresh(true),
-      15_000,
+      DASHBOARD_REFRESH_INTERVALS.status,
       immutablePreview,
+      "status",
     );
   }, [refresh, immutablePreview]);
 
@@ -109,6 +110,6 @@ export default function HealthView() {
         <div className="source-health-error"><strong>{item.recovery_mode === "RATE_LIMIT_BACKOFF" ? `GDELT 限流 · ${item.fallback_label} 自动接管` : item.recovery_mode === "BLS_DIRECT_BLOCKED" ? `BLS 直接 RSS 被拒绝 · ${item.fallback_label} 接管` : item.last_error_type ? `${item.health === "HEALTHY" ? "历史异常 · 已恢复" : "当前异常"} · ${item.last_error_type}` : "无已记录异常"}</strong><small>{item.last_error_time ? localTime(item.last_error_time) : ""} {item.last_error ?? "链路轮询正常"}</small>{item.fallback_label ? <small>后备链路：{item.fallback_label} · {item.fallback_health}</small> : null}</div>
       </article>)}
     </section>
-    <footer><span>每 15 秒刷新 · SHADOW ONLY</span><span>最后状态：{payload?.generated_at ? localTime(payload.generated_at) : "—"}</span></footer>
+    <footer><span>每 {DASHBOARD_REFRESH_INTERVALS.status / 1000} 秒刷新 · SHADOW ONLY</span><span>最后状态：{payload?.generated_at ? localTime(payload.generated_at) : "—"}</span></footer>
   </main>;
 }

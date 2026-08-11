@@ -1,19 +1,53 @@
 export type DashboardRefreshCleanup = () => void;
 
+export const DASHBOARD_REFRESH_INTERVALS = {
+  live: 15_000,
+  status: 60_000,
+  news: 60_000,
+  learning: 300_000,
+  deployment: 600_000,
+} as const;
+
+const POLL_LEASE_PREFIX = "aurum-dashboard-poll";
+
+function mayPoll(coordinationKey: string, intervalMs: number): boolean {
+  if (document.visibilityState !== "visible" || navigator.webdriver) return false;
+  try {
+    const key = `${POLL_LEASE_PREFIX}:${coordinationKey}`;
+    const now = Date.now();
+    const lastPoll = Number(window.localStorage.getItem(key) ?? 0);
+    if (Number.isFinite(lastPoll) && now - lastPoll < intervalMs * 0.8) return false;
+    window.localStorage.setItem(key, String(now));
+  } catch {
+    // Storage can be unavailable in privacy modes. Visibility gating still
+    // protects the request budget in that case.
+  }
+  return true;
+}
+
 /** Run once immediately, then poll only when the payload is live. */
 export function scheduleDashboardRefresh(
   initialRefresh: () => void,
   pollRefresh: () => void,
   intervalMs: number,
   immutablePreview: boolean,
+  coordinationKey = "status",
 ): DashboardRefreshCleanup {
   const initial = window.setTimeout(initialRefresh, 0);
+  const pollWhenEligible = () => {
+    if (mayPoll(coordinationKey, intervalMs)) pollRefresh();
+  };
   const interval = immutablePreview
     ? null
-    : window.setInterval(pollRefresh, intervalMs);
+    : window.setInterval(pollWhenEligible, intervalMs);
+  const resume = () => {
+    if (document.visibilityState === "visible") pollWhenEligible();
+  };
+  if (!immutablePreview) document.addEventListener("visibilitychange", resume);
   return () => {
     window.clearTimeout(initial);
     if (interval !== null) window.clearInterval(interval);
+    document.removeEventListener("visibilitychange", resume);
   };
 }
 

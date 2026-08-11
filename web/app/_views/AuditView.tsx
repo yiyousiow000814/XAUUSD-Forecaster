@@ -5,7 +5,7 @@ import { useSearchParams } from "next/navigation";
 import DashboardLink from "../_components/DashboardLink";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
-import { isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
+import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { PREVIEW_NEWS_PAGE_SIZE } from "../_lib/preview-contract";
 import LearningGraphModal from "../audit/LearningGraphModal";
 
@@ -406,7 +406,6 @@ const outcomeReason = (codes: string[]) => codes.some(code => code.includes("CLO
       : "报价证据不完整，样本已隔离且不进入训练";
 const impulse = (value?: number | null) => value === null || value === undefined ? "—" : `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
 const NEWS_PER_PAGE = PREVIEW_NEWS_PAGE_SIZE;
-const LEARNING_REFRESH_INTERVAL_MS = 60_000;
 const CATEGORY_ORDER = ["战争/地缘", "利率/Fed", "央行购金", "通胀/就业", "增长/经济", "油价/能源", "美元/流动性", "风险偏好", "监管/其他", "其他"];
 const SOURCE_LABELS: Record<string, string> = {
   federal_reserve_monetary: "Federal Reserve · 货币政策",
@@ -770,8 +769,9 @@ export default function AuditView() {
     return scheduleDashboardRefresh(
       () => void refreshStatus(!fullStatusReadyRef.current),
       () => void refreshStatus(true),
-      15_000,
+      DASHBOARD_REFRESH_INTERVALS.status,
       immutablePreview,
+      "status",
     );
   }, [refreshStatus, immutablePreview]);
 
@@ -784,10 +784,11 @@ export default function AuditView() {
       () => void refreshNews(true).catch(reason => setNewsError(
         reason instanceof Error ? reason.message : "无法读取新闻索引",
       )),
-      15_000,
+      DASHBOARD_REFRESH_INTERVALS.news,
       immutablePreview,
+      `news-index:${newsCategory}:${newsPage}`,
     );
-  }, [refreshNews, view, immutablePreview]);
+  }, [refreshNews, view, immutablePreview, newsCategory, newsPage]);
 
   useEffect(() => {
     if (view !== "league") return;
@@ -797,8 +798,9 @@ export default function AuditView() {
     return scheduleDashboardRefresh(
       () => void refreshLearning(!fullLearningReadyRef.current),
       () => void refreshLearning(true),
-      LEARNING_REFRESH_INTERVAL_MS,
+      DASHBOARD_REFRESH_INTERVALS.learning,
       immutablePreview,
+      "learning",
     );
   }, [refreshLearning, view, immutablePreview]);
 
