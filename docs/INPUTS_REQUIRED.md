@@ -31,13 +31,20 @@ collector process without writing it to source control or logs. A
 conservative release-page discovery fallback. Its later Google/local receipt
 time is retained; it never backdates visibility to the publisher timestamp.
 
-The Control Center also recognizes `BEA_API_KEY`. Both official-data keys may
+The Control Center also recognizes `BEA_API_KEY`, `FRED_API_KEY`, and
+`EIA_API_KEY`. Official-data keys may
 be backed up in the ignored local file
 `.local/secrets/collector-keys.json`; user-level environment variables take
 precedence. Secret values are never returned by the dashboard or written to
 collector logs. The BEA Data API is separate from BEA news-release pages and
 must pass an authenticated API probe before a numeric Forward adapter is
 enabled.
+
+With a registered FRED key, the hourly background collector uses the official
+JSON observations API for its six configured series instead of the public graph
+CSV transport. The EIA adapter makes at most one request per hour and stores the
+latest two official daily WTI observations as evidence-only macro revisions;
+it does not silently replace the active feature source or model generation.
 
 ## 4. Optional synchronized symbols
 

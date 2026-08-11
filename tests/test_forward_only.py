@@ -43,6 +43,7 @@ from xauusd_forecaster.news import (
     collect_bls_macro,
     collect_direct_full_text_rss_news,
     collect_direct_full_text_html_news,
+    collect_eia_macro,
     collect_fred_macro,
     collect_federal_reserve_news,
     collect_gdelt_news,
@@ -639,7 +640,10 @@ def test_bls_api_values_are_versioned_and_rate_limited(tmp_path, monkeypatch) ->
     assert ledger.count("source_polls") == 1
 
 
-def test_broad_free_sources_are_first_seen_versioned_and_rate_limited(tmp_path) -> None:
+def test_broad_free_sources_are_first_seen_versioned_and_rate_limited(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.delenv("FRED_API_KEY", raising=False)
     fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
     ledger = ForwardLedger(
         tmp_path / "forward.sqlite3", now=fetched - timedelta(hours=1)
@@ -687,6 +691,95 @@ def test_broad_free_sources_are_first_seen_versioned_and_rate_limited(tmp_path) 
     )["status"] == "OK"
     assert ledger.count("macro_observations") == 12
     assert ledger.count("news_revisions") == 3
+
+
+def test_registered_fred_api_is_bounded_and_never_persists_key(
+    tmp_path, monkeypatch,
+) -> None:
+    api_key = "a" * 32
+    monkeypatch.setenv("FRED_API_KEY", api_key)
+    fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+    calls = []
+
+    def fetcher(url: str) -> bytes:
+        calls.append(url)
+        assert f"api_key={api_key}" in url
+        return json.dumps({
+            "observations": [
+                {"date": "2026-08-04", "value": "11.0"},
+                {"date": "2026-08-03", "value": "10.0"},
+            ]
+        }).encode()
+
+    result = collect_fred_macro(ledger, fetched, fetcher)
+
+    assert result["status"] == "OK"
+    assert result["registered"] is True
+    assert result["inserted_revisions"] == 12
+    assert len(calls) == 6
+    persisted = "\n".join(ledger.connection.iterdump())
+    assert api_key not in persisted
+    assert "FRED_JSON_API" in persisted
+
+
+def test_eia_api_is_hourly_evidence_only_and_never_persists_key(
+    tmp_path, monkeypatch,
+) -> None:
+    api_key = "b" * 40
+    monkeypatch.setenv("EIA_API_KEY", api_key)
+    fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+    calls = 0
+
+    def fetcher(url: str) -> bytes:
+        nonlocal calls
+        calls += 1
+        assert f"api_key={api_key}" in url
+        return json.dumps({"response": {"data": [
+            {"period": "2026-08-04", "value": "65.25"},
+            {"period": "2026-08-03", "value": "64.75"},
+        ]}}).encode()
+
+    first = collect_eia_macro(ledger, fetched, fetcher)
+    second = collect_eia_macro(ledger, fetched + timedelta(minutes=5), fetcher)
+
+    assert first == {
+        "source": "eia_open_data_api",
+        "status": "OK",
+        "inserted_revisions": 2,
+        "unchanged_items": 0,
+        "registered": True,
+        "model_role": "EVIDENCE_ONLY",
+    }
+    assert second["status"] == "SKIPPED_INTERVAL"
+    assert calls == 1
+    persisted = "\n".join(ledger.connection.iterdump())
+    assert api_key not in persisted
+    assert "EIA_JSON_API_V2" in persisted
+
+
+def test_registered_macro_errors_redact_keys(tmp_path, monkeypatch) -> None:
+    fred_key = "c" * 32
+    eia_key = "d" * 40
+    monkeypatch.setenv("FRED_API_KEY", fred_key)
+    monkeypatch.setenv("EIA_API_KEY", eia_key)
+    fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+
+    def fail_with_url(url: str) -> bytes:
+        raise ValueError(f"request failed: {url}")
+
+    fred = collect_fred_macro(ledger, fetched, fail_with_url)
+    eia = collect_eia_macro(ledger, fetched, fail_with_url)
+
+    assert fred["status"] == "ERROR"
+    assert eia["status"] == "ERROR"
+    persisted = "\n".join(ledger.connection.iterdump())
+    rendered = json.dumps([fred, eia])
+    assert fred_key not in persisted + rendered
+    assert eia_key not in persisted + rendered
+    assert "[REDACTED]" in persisted
 
 
 def test_world_gold_council_article_date_is_required_and_auditable(tmp_path) -> None:

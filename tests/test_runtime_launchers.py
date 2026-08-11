@@ -42,6 +42,8 @@ def test_control_center_loads_collector_keys_without_exposing_them() -> None:
     assert '.local\\secrets\\collector-keys.json' in control_center
     assert 'Get-CollectorSecret -Name "BLS_API_KEY"' in control_center
     assert 'Get-CollectorSecret -Name "BEA_API_KEY"' in control_center
+    assert 'Get-CollectorSecret -Name "FRED_API_KEY"' in control_center
+    assert 'Get-CollectorSecret -Name "EIA_API_KEY"' in control_center
     assert 'ConvertFrom-Json' in control_center
 
 

@@ -98,6 +98,14 @@ def _has_stored_full_text(
     )
 
 
+def _redacted_error(error: Exception, *secrets: str, limit: int = 500) -> str:
+    text = str(error)
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "[REDACTED]")
+    return text[:limit]
+
+
 OFFICIAL_RSS_SOURCES = (
     RssSource("federal_reserve_press_all", "https://www.federalreserve.gov/feeds/press_all.xml"),
     RssSource("federal_reserve_monetary", "https://www.federalreserve.gov/feeds/press_monetary.xml"),
@@ -157,6 +165,7 @@ class FredSeries:
 
 
 FRED_SOURCE = "fred_graph_csv"
+FRED_API_URL = "https://api.stlouisfed.org/fred/series/observations"
 FRED_SERIES = (
     FredSeries("DGS2", "2-Year Treasury Constant Maturity Rate", "percent"),
     FredSeries("DFII10", "10-Year Treasury Inflation-Indexed Security", "percent"),
@@ -165,6 +174,9 @@ FRED_SERIES = (
     FredSeries("WALCL", "Federal Reserve Total Assets", "USD millions"),
     FredSeries("VIXCLS", "CBOE Volatility Index", "index"),
 )
+EIA_API_SOURCE = "eia_open_data_api"
+EIA_API_URL = "https://api.eia.gov/v2/petroleum/pri/spt/data/"
+EIA_WTI_SERIES_ID = "EIA_RWTC"
 GDELT_SOURCE = "gdelt_gold_geopolitics"
 GDELT_URL = (
     "https://api.gdeltproject.org/api/v2/doc/doc?"
@@ -376,7 +388,7 @@ def collect_fred_macro(
     fetched_at: datetime,
     fetcher: Callable[[str], bytes] = fetch_url,
 ) -> dict[str, object]:
-    """Collect free public FRED graph CSV snapshots with first-seen revisions."""
+    """Collect bounded official FRED snapshots with first-seen revisions."""
     interval = timedelta(minutes=60)
     poll_source = f"{FRED_SOURCE}:bundle"
     last_poll = ledger.latest_source_poll_time(poll_source)
@@ -387,20 +399,41 @@ def collect_fred_macro(
     errors: list[str] = []
     hashes: list[str] = []
     start = (fetched_at - timedelta(days=45)).date().isoformat()
+    api_key = os.environ.get("FRED_API_KEY", "").strip()
     for series in FRED_SERIES:
         try:
-            url = (
-                "https://fred.stlouisfed.org/graph/fredgraph.csv?"
-                + urllib.parse.urlencode({"id": series.series_id, "cosd": start})
-            )
+            if api_key:
+                url = FRED_API_URL + "?" + urllib.parse.urlencode({
+                    "series_id": series.series_id,
+                    "api_key": api_key,
+                    "file_type": "json",
+                    "observation_start": start,
+                    "sort_order": "desc",
+                    "limit": 2,
+                })
+                provenance_url = FRED_API_URL
+            else:
+                url = (
+                    "https://fred.stlouisfed.org/graph/fredgraph.csv?"
+                    + urllib.parse.urlencode({"id": series.series_id, "cosd": start})
+                )
+                provenance_url = url
             raw = fetcher(url)
             hashes.append(hashlib.sha256(raw).hexdigest())
-            rows = []
-            for row in csv.DictReader(io.StringIO(raw.decode("utf-8-sig"))):
-                raw_value = (row.get(series.series_id) or "").strip()
-                if not raw_value or raw_value == ".":
-                    continue
-                rows.append((row["observation_date"], float(raw_value)))
+            if api_key:
+                envelope = json.loads(raw)
+                rows = [
+                    (str(row["date"]), float(row["value"]))
+                    for row in reversed(envelope.get("observations", []))
+                    if str(row.get("value") or "").strip() not in {"", "."}
+                ]
+            else:
+                rows = []
+                for row in csv.DictReader(io.StringIO(raw.decode("utf-8-sig"))):
+                    raw_value = (row.get(series.series_id) or "").strip()
+                    if not raw_value or raw_value == ".":
+                        continue
+                    rows.append((row["observation_date"], float(raw_value)))
             if not rows:
                 raise ValueError(f"{series.series_id} returned no finite observations")
             # Two values initialize a current forward state. Their first-seen time is
@@ -411,7 +444,8 @@ def collect_fred_macro(
                     "title": series.title,
                     "observation_period": period,
                     "value": value,
-                    "retrieved_from": url,
+                    "retrieved_from": provenance_url,
+                    "transport": "FRED_JSON_API" if api_key else "FRED_GRAPH_CSV",
                 }
                 digest = hashlib.sha256(
                     json.dumps(stored, sort_keys=True, separators=(",", ":")).encode()
@@ -432,7 +466,10 @@ def collect_fred_macro(
                 inserted += int(created)
                 unchanged += int(not created)
         except Exception as error:
-            errors.append(f"{series.series_id}:{type(error).__name__}:{str(error)[:120]}")
+            errors.append(
+                f"{series.series_id}:{type(error).__name__}:"
+                f"{_redacted_error(error, api_key, limit=120)}"
+            )
     status = "OK" if not errors else ("PARTIAL" if inserted or unchanged else "ERROR")
     ledger.append_source_poll(
         {
@@ -451,7 +488,109 @@ def collect_fred_macro(
         "inserted_revisions": inserted,
         "unchanged_items": unchanged,
         "errors": errors,
+        "registered": bool(api_key),
     }
+
+
+def collect_eia_macro(
+    ledger: ForwardLedger,
+    fetched_at: datetime,
+    fetcher: Callable[[str], bytes] = fetch_url,
+) -> dict[str, object]:
+    """Collect a bounded official EIA WTI snapshot without model activation."""
+    api_key = os.environ.get("EIA_API_KEY", "").strip()
+    if not api_key:
+        return {"source": EIA_API_SOURCE, "status": "DISABLED_KEY_MISSING"}
+    last_poll = ledger.latest_source_poll_time(EIA_API_SOURCE)
+    if last_poll is not None and fetched_at - last_poll < timedelta(hours=1):
+        return {"source": EIA_API_SOURCE, "status": "SKIPPED_INTERVAL"}
+    poll_id = str(uuid.uuid5(
+        uuid.NAMESPACE_URL, f"{EIA_API_SOURCE}|{fetched_at.isoformat()}"
+    ))
+    try:
+        url = EIA_API_URL + "?" + urllib.parse.urlencode({
+            "api_key": api_key,
+            "frequency": "daily",
+            "data[0]": "value",
+            "facets[series][]": "RWTC",
+            "sort[0][column]": "period",
+            "sort[0][direction]": "desc",
+            "offset": 0,
+            "length": 2,
+        })
+        raw = fetcher(url)
+        envelope = json.loads(raw)
+        rows = list(reversed(envelope.get("response", {}).get("data", [])))
+        if not rows:
+            raise ValueError("EIA RWTC returned no observations")
+        inserted = 0
+        unchanged = 0
+        for row in rows:
+            period = str(row.get("period") or "").strip()
+            value = str(row.get("value") or "").strip()
+            if not period or not value or value == ".":
+                continue
+            stored = {
+                "series_id": EIA_WTI_SERIES_ID,
+                "eia_series": "RWTC",
+                "title": "Cushing, OK WTI Spot Price FOB",
+                "observation_period": period,
+                "value": float(value),
+                "retrieved_from": EIA_API_URL,
+                "transport": "EIA_JSON_API_V2",
+                "model_role": "EVIDENCE_ONLY",
+            }
+            digest = hashlib.sha256(
+                json.dumps(stored, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            _, created = ledger.append_macro_observation({
+                "source": EIA_API_SOURCE,
+                "series_id": EIA_WTI_SERIES_ID,
+                "observation_period": period,
+                "collector_first_seen_time": fetched_at,
+                "fetched_time": fetched_at,
+                "value": float(value),
+                "unit": "USD/barrel",
+                "payload": stored,
+                "content_hash": digest,
+            })
+            inserted += int(created)
+            unchanged += int(not created)
+        if not inserted and not unchanged:
+            raise ValueError("EIA RWTC returned no finite observations")
+        ledger.append_source_poll({
+            "poll_id": poll_id,
+            "source": EIA_API_SOURCE,
+            "fetched_time": fetched_at,
+            "status": "OK",
+            "payload_hash": hashlib.sha256(raw).hexdigest(),
+        })
+        return {
+            "source": EIA_API_SOURCE,
+            "status": "OK",
+            "inserted_revisions": inserted,
+            "unchanged_items": unchanged,
+            "registered": True,
+            "model_role": "EVIDENCE_ONLY",
+        }
+    except Exception as error:
+        rate_limited = getattr(error, "code", None) == 429
+        safe_error = _redacted_error(error, api_key)
+        ledger.append_source_poll({
+            "poll_id": poll_id,
+            "source": EIA_API_SOURCE,
+            "fetched_time": fetched_at,
+            "status": "ERROR",
+            "error_type": "RateLimited" if rate_limited else type(error).__name__,
+            "error": safe_error,
+        })
+        return {
+            "source": EIA_API_SOURCE,
+            "status": "ERROR",
+            "error_type": "RateLimited" if rate_limited else type(error).__name__,
+            "error": safe_error,
+            "registered": True,
+        }
 
 
 def collect_gdelt_news(
@@ -1256,6 +1395,7 @@ def collect_official_news(
     )
     statuses.append(collect_bls_macro(ledger, fetched_at, force=force_bls))
     statuses.append(collect_fred_macro(ledger, fetched_at))
+    statuses.append(collect_eia_macro(ledger, fetched_at))
     statuses.extend(collect_direct_full_text_html_news(ledger, fetched_at))
     statuses.append(collect_gdelt_news(ledger, fetched_at))
     for lane in GOOGLE_NEWS_LANES:

@@ -413,6 +413,8 @@ function Start-ForecasterService {
     if ($Service.Key -eq "collector") {
         $env:BLS_API_KEY = Get-CollectorSecret -Name "BLS_API_KEY"
         $env:BEA_API_KEY = Get-CollectorSecret -Name "BEA_API_KEY"
+        $env:FRED_API_KEY = Get-CollectorSecret -Name "FRED_API_KEY"
+        $env:EIA_API_KEY = Get-CollectorSecret -Name "EIA_API_KEY"
     }
     if ($Service.Key -eq "sync") {
         $env:SITES_BYPASS_TOKEN = [Environment]::GetEnvironmentVariable(
