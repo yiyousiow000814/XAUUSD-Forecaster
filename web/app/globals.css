@@ -820,9 +820,9 @@ body.modal-open { overflow:hidden; }
   .execution-chart .chart-caption { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:start; gap:8px; }
   .execution-chart .chart-caption>strong { font-size:19px; text-align:right; }
   .execution-chart .chart-caption>strong small { font-size:9px; }
-  .execution-history-nav { grid-template-columns:repeat(3,minmax(0,1fr)); }
-  .execution-history-nav>span { grid-column:1/-1; grid-row:1; }
-  .execution-history-nav button { min-width:0; min-height:44px; }
+  .execution-history-nav { display:flex; flex-wrap:wrap; justify-content:center; }
+  .execution-history-nav>span { order:-1; flex:0 0 100%; }
+  .execution-history-nav button { flex:0 1 100px; min-width:0; min-height:44px; }
   .execution-chart svg { min-width:560px; min-height:180px; }
   .execution-chart .chart-legend { gap:8px 12px; }
   .learning-summary-grid article { min-height:120px; padding:18px; }

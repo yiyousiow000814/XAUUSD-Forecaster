@@ -739,6 +739,8 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(modal, /openerRef\.current\?\.focus\(\)/);
   assert.match(modal, /event\.key !== "Tab"/);
   assert.match(css, /\.mobile-chart-scroll \{ width:100%; overflow-x:auto/);
+  assert.match(css, /\.execution-history-nav \{ display:flex; flex-wrap:wrap; justify-content:center; \}/);
+  assert.match(css, /\.execution-history-nav button \{ flex:0 1 100px; min-width:0; min-height:44px; \}/);
   assert.match(css, /\.market-history-nav \{[^}]*margin:10px 0 0;[^}]*border:1px solid/);
   assert.match(css, /\.prediction-counts \{[^}]*border-top:0/);
   assert.match(css, /\.chart-block \{ overflow:visible/);
