@@ -14,7 +14,6 @@ from xauusd_forecaster.news_semantics import (
     news_annotation_schema,
     validate_news_annotation,
 )
-from xauusd_forecaster.news_relevance import google_news_candidate_family
 from xauusd_forecaster.news_evidence import event_evidence_rows
 from xauusd_forecaster.news_impact import (
     TARGET_IMPACT_PROMPT_VERSION,
@@ -106,19 +105,6 @@ def test_v15_prompt_uses_context_not_keyword_or_casing() -> None:
     assert "lowercase 'bls jolts report'" in prompt
     assert "'earthquake jolts city' is not JOLTS" in prompt
     assert "investment guide remains commentary" in prompt
-
-
-def test_intake_family_does_not_guess_event_identity_from_topic_words() -> None:
-    published = datetime(2026, 8, 11, 10, 0, tzinfo=UTC)
-
-    first = google_news_candidate_family(
-        "google_news_us_employment", "Payroll growth slows", published
-    )
-    second = google_news_candidate_family(
-        "google_news_us_employment", "Unemployment rate falls", published
-    )
-
-    assert first != second
 
 
 def test_v14_and_v15_annotations_coexist_without_activating_v15(tmp_path) -> None:

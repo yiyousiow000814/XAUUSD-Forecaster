@@ -14,7 +14,6 @@ import re
 
 GOOGLE_NEWS_MAX_AGE = timedelta(hours=72)
 GOOGLE_NEWS_FUTURE_TOLERANCE = timedelta(minutes=10)
-GOOGLE_NEWS_MAX_ITEMS_PER_EVENT_FAMILY = 3
 
 _HIGH_QUALITY_PUBLISHERS = (
     "reuters", "bloomberg", "associated press", " ap news", "cnbc",
@@ -66,31 +65,3 @@ def google_news_quality_rank(headline: str) -> int:
     text = " " + re.sub(r"\s+", " ", (headline or "").casefold()).strip() + " "
     publisher = text.rsplit(" - ", 1)[-1]
     return 0 if any(name in publisher for name in _HIGH_QUALITY_PUBLISHERS) else 1
-
-
-def google_news_candidate_family(
-    source: str,
-    headline: str,
-    published_at: datetime | None,
-) -> str:
-    """Return a conservative family key used only to limit duplicate intake.
-
-    This is not an event judgment and never enters model features.  It prevents
-    ten publisher rewrites of one release from consuming all ten intake slots;
-    up to three independent articles remain available for corroboration.
-    """
-    text = " " + re.sub(r"\s+", " ", (headline or "").casefold()).strip() + " "
-    publication_day = "unknown"
-    if published_at is not None:
-        published = published_at.replace(
-            tzinfo=published_at.tzinfo or UTC
-        ).astimezone(UTC)
-        publication_day = published.date().isoformat()
-
-    # Collapse only near-identical titles from the same publication day.
-    # Event meaning belongs to the AI contract; this mechanical intake key
-    # must not guess that two differently worded reports are the same event.
-    tokens = re.findall(r"[a-z0-9\u4e00-\u9fff]+", text)
-    stop = {"the", "a", "an", "and", "or", "to", "of", "in", "on", "for"}
-    canonical = "-".join(token for token in tokens if token not in stop)[:120]
-    return f"{source}:{publication_day}:{canonical or 'untitled'}"

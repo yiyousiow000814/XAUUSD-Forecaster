@@ -26,8 +26,6 @@ from .content import (
 )
 from .forward_ledger import ForwardLedger
 from .news_relevance import (
-    GOOGLE_NEWS_MAX_ITEMS_PER_EVENT_FAMILY,
-    google_news_candidate_family,
     google_news_item_is_relevant,
     google_news_quality_rank,
 )
@@ -976,52 +974,9 @@ def collect_google_news_lane(
                 str(record["source_item_id"]),
             ),
         )
-        selected = []
-        family_counts: dict[str, int] = {}
-        # Count already-admitted Google items in the same freshness window so
-        # repeated polls cannot slowly ingest the other 97 rewrites of one
-        # report. Recognized family keys are intentionally shared across lanes.
-        existing_family_rows = ledger.connection.execute(
-            """SELECT existing.source, existing.headline,
-                      existing.source_published_time
-               FROM news_revisions existing
-               WHERE existing.source LIKE 'google_news_%'
-                 AND existing.revision_number=(
-                   SELECT max(newer.revision_number) FROM news_revisions newer
-                   WHERE newer.source=existing.source
-                     AND newer.source_item_id=existing.source_item_id)
-                 AND existing.source_published_time>=?""",
-            ((fetched_at - timedelta(hours=72)).isoformat(),),
-        ).fetchall()
-        for existing_row in existing_family_rows:
-            existing_published = (
-                datetime.fromisoformat(str(existing_row["source_published_time"]))
-                if existing_row["source_published_time"] else None
-            )
-            family = google_news_candidate_family(
-                str(existing_row["source"]),
-                str(existing_row["headline"] or ""),
-                existing_published,
-            )
-            family_counts[family] = family_counts.get(family, 0) + 1
-        for record in ranked:
-            family = google_news_candidate_family(
-                lane.name,
-                str(record.get("headline") or ""),
-                record.get("source_published_time"),
-            )
-            official_bls_fallback = lane.name == "google_news_bls_official_releases"
-            if (
-                not official_bls_fallback
-                and family_counts.get(family, 0) >= GOOGLE_NEWS_MAX_ITEMS_PER_EVENT_FAMILY
-            ):
-                rejected["EVENT_FAMILY_CAP"] = rejected.get("EVENT_FAMILY_CAP", 0) + 1
-                continue
-            if not official_bls_fallback:
-                family_counts[family] = family_counts.get(family, 0) + 1
-            selected.append(record)
-            if len(selected) >= limit:
-                break
+        # ``cluster_id``/``source_item_id`` above are the single mechanical
+        # deduplication boundary. Event meaning belongs to the AI annotator.
+        selected = ranked[:limit]
         full_text_records = []
         for record in selected:
             existing = ledger.connection.execute(

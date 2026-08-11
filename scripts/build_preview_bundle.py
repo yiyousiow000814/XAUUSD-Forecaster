@@ -22,6 +22,7 @@ package.__path__ = [str(MODULE_ROOT / "xauusd_forecaster")]
 sys.modules["xauusd_forecaster"] = package
 factor_coverage = importlib.import_module("xauusd_forecaster.factors").factor_coverage
 storylines = importlib.import_module("xauusd_forecaster.storylines")
+dashboard_sync = importlib.import_module("scripts.run_dashboard_sync")
 
 
 DEFAULT_SOURCE = "https://aurum-signal-room.yiyousiow1234.workers.dev"
@@ -48,6 +49,61 @@ def _read_json(base_url: str, path: str) -> dict:
         if response.status != 200:
             raise RuntimeError(f"preview source returned HTTP {response.status} for {path}")
         return json.load(response)
+
+
+def _execution_history_records(base_url: str) -> list[dict]:
+    """Copy bounded public execution pages into the immutable Preview bundle."""
+    records: dict[tuple[str, str], dict] = {}
+    for identity in ("LOT_RIDGE", "EXIT_RIDGE"):
+        cursor: str | None = None
+        while True:
+            query = (
+                "/api/learning-history?resource=execution-point"
+                f"&identity={urllib.parse.quote(identity)}&limit=500"
+            )
+            if cursor:
+                query += f"&cursor={urllib.parse.quote(cursor)}"
+            page = _read_json(base_url, query)
+            for point in page.get("items", []):
+                if not isinstance(point, dict) or not point.get("time"):
+                    continue
+                payload = {"model_identity": identity, **point}
+                record = dashboard_sync._learning_record(
+                    "execution-point", f"{identity}\0{point['time']}",
+                    dashboard_sync._epoch(point["time"]), payload,
+                )
+                records[(record["resource"], record["record_key"])] = record
+            cursor = page.get("next_cursor")
+            if not page.get("has_more") or not isinstance(cursor, str) or not cursor:
+                break
+    return list(records.values())
+
+
+def _curve_overview_records(base_url: str) -> list[dict]:
+    """Freeze production's materialized curve overviews into Preview."""
+    records: dict[tuple[str, str], dict] = {}
+    for cadence in ("5m", "30m"):
+        response = _read_json(
+            base_url,
+            f"/api/learning-history?resource=curve-overview&cadence={cadence}",
+        )
+        for item in response.get("items", []):
+            if not isinstance(item, dict):
+                continue
+            identity = str(item.get("model_identity") or "")
+            points = item.get("points") or []
+            if not identity or not isinstance(points, list) or not points:
+                continue
+            last_time = points[-1].get("decision_time")
+            if not last_time:
+                continue
+            payload = {**item, "cadence": cadence}
+            record = dashboard_sync._learning_record(
+                "curve-overview", f"{cadence}\0{identity}",
+                dashboard_sync._epoch(last_time), payload,
+            )
+            records[(record["resource"], record["record_key"])] = record
+    return list(records.values())
 
 
 def _rebuild_factor_coverage(status: dict) -> list[dict[str, object]]:
@@ -215,9 +271,29 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
         except (OSError, RuntimeError, json.JSONDecodeError):
             continue
 
+    learning_history = dashboard_sync.learning_history_records(
+        learning, infer_source_gaps=False,
+    )
+    try:
+        execution_history = _execution_history_records(base_url)
+    except (OSError, RuntimeError, json.JSONDecodeError):
+        execution_history = []
+    try:
+        curve_overviews = _curve_overview_records(base_url)
+    except (OSError, RuntimeError, json.JSONDecodeError):
+        curve_overviews = []
+    indexed_history = {
+        (row["resource"], row["record_key"]): row
+        for row in [*learning_history, *execution_history, *curve_overviews]
+    }
+
     return {
         "status": status,
         "learning": learning,
+        # Production's public learning payload is already compressed. Wider
+        # spacing there is not proof of a source-data gap, so Preview must not
+        # infer dashed segments from it.
+        "learning_history": list(indexed_history.values()),
         "market_chart": market_chart,
         "news_index": news_index,
         "news_details": details,

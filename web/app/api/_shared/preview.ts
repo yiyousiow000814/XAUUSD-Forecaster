@@ -3,6 +3,10 @@ import { NextResponse } from "next/server";
 export type PreviewBundle = {
   status: Record<string, unknown>;
   learning_summary?: Record<string, unknown>;
+  learning_history?: Array<{
+    resource: string; record_key: string; sort_epoch: number;
+    payload_hash: string; payload: Record<string, unknown>;
+  }>;
   market_chart: Record<string, unknown>;
   news_index: {
     items?: Array<Record<string, unknown>>;

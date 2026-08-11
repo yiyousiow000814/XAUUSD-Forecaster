@@ -940,7 +940,36 @@ def test_google_news_lane_deduplicates_identical_titles_across_polls(tmp_path) -
     assert ledger.count("news_revisions") == 1
 
 
-def test_bls_official_fallback_is_not_blocked_by_discovery_family_cap(tmp_path) -> None:
+def test_google_news_lane_does_not_merge_distinct_events_before_ai(tmp_path) -> None:
+    fetched = datetime(2026, 8, 5, 10, 40, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+    lane = GoogleNewsLane("google_news_us_employment", "nonfarm payrolls")
+    headlines = (
+        "Nonfarm payrolls decline in July",
+        "US unemployment rate rises to 4.3 percent",
+        "Weekly jobless claims fall unexpectedly",
+        "Federal Reserve discusses labour market cooling",
+    )
+    items = "".join(
+        f"""<item><guid>jobs-{index}</guid><title>{headline}</title>
+        <description>Employment evidence</description>
+        <pubDate>Wed, 05 Aug 2026 10:{index:02d}:00 GMT</pubDate>
+        <link>https://publisher.example/jobs-{index}</link></item>"""
+        for index, headline in enumerate(headlines)
+    )
+    rss = f"<rss><channel>{items}</channel></rss>".encode()
+
+    result = collect_google_news_lane(
+        ledger, fetched, lane, fetcher=lambda _: rss, decoder=lambda url: url,
+        content_extractor=lambda url: ("payroll evidence " * 40, url), limit=10
+    )
+
+    assert result["inserted_revisions"] == len(headlines)
+    assert result["processed_items"] == len(headlines)
+    assert result["rejected_reasons"] == {}
+
+
+def test_bls_official_fallback_is_collected_after_related_discovery_items(tmp_path) -> None:
     fetched = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched - timedelta(days=1))
     for index in range(3):
@@ -969,7 +998,7 @@ def test_bls_official_fallback_is_not_blocked_by_discovery_family_cap(tmp_path) 
         content_extractor=lambda url: ("official employment release " * 40, url),
     )
     assert result["inserted_revisions"] == 1
-    assert result["rejected_reasons"].get("EVENT_FAMILY_CAP", 0) == 0
+    assert result["rejected_reasons"] == {}
 
 
 def test_google_official_fallback_reports_partial_when_body_is_blocked(tmp_path) -> None:
