@@ -79,6 +79,33 @@ def _execution_history_records(base_url: str) -> list[dict]:
     return list(records.values())
 
 
+def _curve_overview_records(base_url: str) -> list[dict]:
+    """Freeze production's materialized curve overviews into Preview."""
+    records: dict[tuple[str, str], dict] = {}
+    for cadence in ("5m", "30m"):
+        response = _read_json(
+            base_url,
+            f"/api/learning-history?resource=curve-overview&cadence={cadence}",
+        )
+        for item in response.get("items", []):
+            if not isinstance(item, dict):
+                continue
+            identity = str(item.get("model_identity") or "")
+            points = item.get("points") or []
+            if not identity or not isinstance(points, list) or not points:
+                continue
+            last_time = points[-1].get("decision_time")
+            if not last_time:
+                continue
+            payload = {**item, "cadence": cadence}
+            record = dashboard_sync._learning_record(
+                "curve-overview", f"{cadence}\0{identity}",
+                dashboard_sync._epoch(last_time), payload,
+            )
+            records[(record["resource"], record["record_key"])] = record
+    return list(records.values())
+
+
 def _rebuild_factor_coverage(status: dict) -> list[dict[str, object]]:
     latest_macro: dict[str, dict[str, object]] = {}
     for row in status.get("factor_coverage", []):
@@ -251,9 +278,13 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
         execution_history = _execution_history_records(base_url)
     except (OSError, RuntimeError, json.JSONDecodeError):
         execution_history = []
+    try:
+        curve_overviews = _curve_overview_records(base_url)
+    except (OSError, RuntimeError, json.JSONDecodeError):
+        curve_overviews = []
     indexed_history = {
         (row["resource"], row["record_key"]): row
-        for row in [*learning_history, *execution_history]
+        for row in [*learning_history, *execution_history, *curve_overviews]
     }
 
     return {

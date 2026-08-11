@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { loadDashboardResource, readDashboardResource, waitForMinimumLoading } from "../_lib/dashboard-resource";
+import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 
 type CurvePoint = { decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number; source_gap_before?: boolean };
 type Curve = { model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: CurvePoint[]; source_point_count_30m?: number; chart_point_count_30m?: number; chart_downsampled_30m?: boolean; points_30m?: CurvePoint[] };
@@ -232,19 +232,16 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
     const url = `${historyResource}?resource=version-overview`;
     const cached = readDashboardResource<HistoryResponse<VersionGroup>>(url);
     let cancelled = false;
-    const startedAt = Date.now();
     loadDashboardResource<HistoryResponse<VersionGroup>>(url, {
       force: overviewRetry > 0,
       maxAgeMs: historyCacheAge(cached),
-    }).then(async body => {
-      if (!cached) await waitForMinimumLoading(startedAt);
+    }).then(body => {
       if (!cancelled) {
         setOverviewGroups(body.items);
         setOverviewState("ready");
       }
-    }).catch(async () => {
+    }).catch(() => {
       if (cancelled) return;
-      if (!cached) await waitForMinimumLoading(startedAt);
       if (!cancelled && !cached) setOverviewState("error");
     });
     return () => { cancelled = true; };
@@ -258,21 +255,18 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
     const url = `${historyResource}?${query}`;
     const cached = readDashboardResource<{ items: VersionGroup[]; total: number; next_cursor: string | null; preview_limited?: boolean }>(url);
     let cancelled = false;
-    const startedAt = Date.now();
     loadDashboardResource<{ items: VersionGroup[]; total: number; next_cursor: string | null; preview_limited?: boolean }>(url, {
       force: pageRetry > 0,
       maxAgeMs: historyCacheAge(cached),
     })
-      .then(async body => {
-        if (!cached) await waitForMinimumLoading(startedAt);
+      .then(body => {
         if (cancelled) return;
         setRemotePages(previous => ({ ...previous, [page]: body.items }));
         setRemoteTotal(body.total);
         setPageCursors(previous => ({ ...previous, [page + 1]: body.next_cursor }));
       })
-      .catch(async () => {
+      .catch(() => {
         if (cancelled) return;
-        if (!cached) await waitForMinimumLoading(startedAt);
         if (!cancelled && !cached) setPageError("训练记录读取失败");
       });
     return () => { cancelled = true; };
@@ -395,7 +389,6 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
   const [historyRetries, setHistoryRetries] = useState<Partial<Record<EvaluationCadence, number>>>({});
   useEffect(() => {
     if (!historyResource || historyErrors[cadence]) return;
-    const startedAt = Date.now();
     const cadenceQuery = cadence === "FIXED_30M" ? "30m" : "5m";
     const url = `${historyResource}?resource=curve-overview&cadence=${cadenceQuery}`;
     const cached = readDashboardResource<HistoryResponse<(CurvePoint & { model_identity: string }) | (Curve & { cadence?: string })>>(url);
@@ -403,18 +396,20 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
     loadDashboardResource<HistoryResponse<(CurvePoint & { model_identity: string }) | (Curve & { cadence?: string })>>(url, {
       force: (historyRetries[cadence] ?? 0) > 0,
       maxAgeMs: historyCacheAge(cached),
-    }).then(async body => {
-      if (!cached) await waitForMinimumLoading(startedAt);
+    }).then(body => {
       if (!cancelled) setHistoryCurves(previous => ({ ...previous, [cadence]: curveResponseItems(body, cadence) }));
-    }).catch(async () => {
+    }).catch(() => {
       if (cancelled) return;
-      if (!cached) await waitForMinimumLoading(startedAt);
       if (!cancelled && !cached) setHistoryErrors(previous => ({ ...previous, [cadence]: true }));
     });
     return () => { cancelled = true; };
   }, [historyResource, cadence, historyErrors, historyRetries]);
   const historyLoading = Boolean(historyResource && !historyCurves[cadence] && !historyErrors[cadence]);
-  const resolvedCurves = historyCurves[cadence] ?? curves;
+  // The compact learning snapshot and the canonical history overview have
+  // different point counts. Never paint the compact fallback while the
+  // canonical resource is loading, otherwise the chart visibly redraws with
+  // different axes and curves a moment after opening.
+  const resolvedCurves = historyResource ? historyCurves[cadence] ?? [] : curves;
   const usable = resolvedCurves.map(row => cadence === "FIXED_30M" ? { ...row, points: row.points_30m ?? [], source_point_count: row.source_point_count_30m, chart_point_count: row.chart_point_count_30m, chart_downsampled: row.chart_downsampled_30m } : row).filter(row => row.model_identity !== "CHAMPION_0" && row.points.length > 0);
   const overviewPoints = usable.flatMap(row => row.points);
   if (!overviewPoints.length) return <div className="chart-block long-curve-block graph-state-shell">
@@ -681,15 +676,13 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
   useEffect(() => {
     if (!market?.history_resource) return;
     let cancelled = false;
-    const startedAt = Date.now();
     const url = `${market.history_resource}?${historyQueryString}`;
     const cached = readDashboardResource<MarketData>(url);
     loadDashboardResource<MarketData>(url, {
       force: historyRetry > 0,
       maxAgeMs: historyCacheAge(cached),
     })
-      .then(async body => {
-        if (!cached) await waitForMinimumLoading(startedAt);
+      .then(body => {
         if (!cancelled) {
           setHistoryResult({
             key: historyRequestKey,
@@ -703,9 +696,8 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
           });
         }
       })
-      .catch(async () => {
+      .catch(() => {
         if (!cancelled) {
-          if (!cached) await waitForMinimumLoading(startedAt);
           if (cancelled) return;
           if (!cached) setHistoryResult({ key: historyRequestKey, state: "error" });
         }

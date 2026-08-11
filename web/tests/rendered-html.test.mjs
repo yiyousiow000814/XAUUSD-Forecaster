@@ -89,7 +89,9 @@ test("hydrates preview pages from their immutable build snapshot", () => {
   assert.match(learning, /results: results\.slice\(-20\)/);
   assert.match(previewBuilder, /resource=execution-point/);
   assert.match(previewBuilder, /for identity in \("LOT_RIDGE", "EXIT_RIDGE"\)/);
-  assert.match(previewBuilder, /\[\*learning_history, \*execution_history\]/);
+  assert.match(previewBuilder, /resource=curve-overview&cadence=\{cadence\}/);
+  assert.match(previewBuilder, /for cadence in \("5m", "30m"\)/);
+  assert.match(previewBuilder, /\[\*learning_history, \*execution_history, \*curve_overviews\]/);
   assert.doesNotMatch(page, /auditView === "league"/);
   assert.match(page, /\[PREVIEW_RESOURCES\.status\]: previewBundle\.status/);
   assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);
@@ -847,6 +849,8 @@ test("loads bounded learning history only when interactive charts need it", () =
   assert.match(audit, /historyResource=\{payload\?\.learning_history_resource\}/);
   assert.match(modal, /resource: "version-group"/);
   assert.match(modal, /resource=curve-overview/);
+  assert.match(modal, /const resolvedCurves = historyResource \? historyCurves\[cadence\] \?\? \[\] : curves/);
+  assert.doesNotMatch(modal, /const resolvedCurves = historyCurves\[cadence\] \?\? curves/);
   assert.match(modal, /next_cursor/);
   assert.match(modal, /const pageCursor = pageCursors\[page\]/);
   assert.doesNotMatch(modal, /loadedPageKeys/);
@@ -875,13 +879,13 @@ test("distinguishes market history loading, empty, and failed states", () => {
   assert.match(modal, /重新读取/);
   assert.doesNotMatch(modal, /还没有保存过可绘制的 Bid\/Ask 行情/);
   assert.doesNotMatch(modal, /等待可验证数据/);
-  assert.match(resource, /MIN_VISIBLE_LOADING_MS = 500/);
+  assert.doesNotMatch(resource, /MIN_VISIBLE_LOADING_MS|waitForMinimumLoading/);
   assert.match(modal, /loadDashboardResource/);
   assert.match(modal, /readDashboardResource/);
   assert.match(modal, /HISTORY_CACHE_MAX_AGE_MS = 60_000/);
   assert.match(modal, /Number\.POSITIVE_INFINITY/);
   assert.match(modal, /initialHistoryResult/);
-  assert.match(modal, /waitForMinimumLoading\(startedAt\)/);
+  assert.doesNotMatch(modal, /waitForMinimumLoading|startedAt/);
   assert.match(modal, /point\.source_gap_before/);
   assert.match(modal, /first\.source_gap_before/);
   assert.match(modal, /overviewStep/);
