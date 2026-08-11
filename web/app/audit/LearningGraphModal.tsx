@@ -186,7 +186,7 @@ export default function LearningGraphModal({
         {tab === "market" && <MarketChart market={resolvedMarket} identity={identity} setIdentity={setIdentity} />}
         {tab === "execution" && <ExecutionCharts execution={execution} />}
       </div>
-      <footer><b>统一口径：</b> 所有曲线只使用模型创建后真正没见过的 30 分钟结果；WAIT 显示为灰色双向箭头，但收益固定为零，不会被画成一笔虚构交易。</footer>
+      <footer><b>研究口径：</b> 只统计模型创建后才发生的 30 分钟结果；WAIT 收益记为零。</footer>
     </section>
   </div>;
 }
@@ -415,9 +415,11 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
   const overviewPoints = usable.flatMap(row => row.points);
   if (!overviewPoints.length) return <div className="chart-block long-curve-block graph-state-shell">
     <div className="chart-caption"><div><b>历史＋实时成熟 OOS（只追加，不重写）</b><span>切换统计频率时，页面结构会保留。</span></div></div>
-    <div className="curve-navigation" aria-label="长期 OOS 时间范围">
-      <label>统计频率<select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPageOffset(0); }}><option value="EVERY_5M">每5分钟（重叠）</option><option value="FIXED_30M">每30分钟（非重叠）</option></select></label>
-      <label>时间窗口<select value={range} onChange={event => { setRange(event.target.value as typeof range); setPageOffset(0); }}><option value="24h">24小时</option><option value="7d">7天</option><option value="30d">30天</option><option value="all">全部总览</option></select></label>
+    <div className="curve-navigation curve-navigation-filters-only" aria-label="长期 OOS 时间范围">
+      <div className="curve-filters">
+        <label>统计频率<select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPageOffset(0); }}><option value="EVERY_5M">每5分钟（重叠）</option><option value="FIXED_30M">每30分钟（非重叠）</option></select></label>
+        <label>时间窗口<select value={range} onChange={event => { setRange(event.target.value as typeof range); setPageOffset(0); }}><option value="24h">24小时</option><option value="7d">7天</option><option value="30d">30天</option><option value="all">全部总览</option></select></label>
+      </div>
     </div>
     {historyLoading ? <GraphLoading label="正在读取长期曲线" compact /> : historyErrors[cadence] ? <GraphLoadError compact label="长期曲线读取失败" onRetry={() => {
       setHistoryErrors(previous => ({ ...previous, [cadence]: false }));
@@ -579,12 +581,16 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
   return <div className="chart-block long-curve-block">
     <div className="chart-caption"><div><b>历史＋实时成熟 OOS（只追加，不重写）</b><span>数据库永久保留每个成熟结果；图表固定宽度，按时间窗口查看，全部历史只画压缩轮廓。</span></div><strong>{sourceTimeCount} 个时点<small> · {sourcePointCount} 条模型评分</small></strong></div>
     <div className="curve-navigation" aria-label="长期 OOS 时间范围">
-      <label>统计频率<select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPageOffset(0); }}><option value="EVERY_5M">每5分钟（重叠）</option><option value="FIXED_30M">每30分钟（非重叠）</option></select></label>
-      <label>时间窗口<select value={range} onChange={event => { setRange(event.target.value as typeof range); setPageOffset(0); }}><option value="24h">24小时</option><option value="7d">7天</option><option value="30d">30天</option><option value="all">全部总览</option></select></label>
-      <button type="button" disabled={!canGoEarlier} onClick={() => setPageOffset(activePage + 1)}>← 较早一段</button>
-      <button type="button" disabled={!canGoLater} onClick={() => setPageOffset(Math.max(0, activePage - 1))}>较晚一段 →</button>
-      <button type="button" disabled={pageOffset === 0} onClick={() => setPageOffset(0)}>回到最新</button>
-      <span>{windowLabel}{chartDownsampled ? ` · 全历史 ${sourcePointCount} 条已压缩为 ${overviewPoints.length} 个绘图点` : ` · 当前 ${visiblePoints.length} 个绘图点`}</span>
+      <div className="curve-filters">
+        <label>统计频率<select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPageOffset(0); }}><option value="EVERY_5M">每5分钟（重叠）</option><option value="FIXED_30M">每30分钟（非重叠）</option></select></label>
+        <label>时间窗口<select value={range} onChange={event => { setRange(event.target.value as typeof range); setPageOffset(0); }}><option value="24h">24小时</option><option value="7d">7天</option><option value="30d">30天</option><option value="all">全部总览</option></select></label>
+      </div>
+      <div className="curve-pager">
+        <button type="button" disabled={!canGoEarlier} onClick={() => setPageOffset(activePage + 1)}>← 较早一段</button>
+        <button type="button" disabled={!canGoLater} onClick={() => setPageOffset(Math.max(0, activePage - 1))}>较晚一段 →</button>
+        <button type="button" disabled={pageOffset === 0} onClick={() => setPageOffset(0)}>回到最新</button>
+        <span>{windowLabel}{chartDownsampled ? ` · 全历史 ${sourcePointCount} 条已压缩为 ${overviewPoints.length} 个绘图点` : ` · 当前 ${visiblePoints.length} 个绘图点`}</span>
+      </div>
     </div>
     {historyLoading && <GraphLoading label="正在更新长期曲线" compact />}
     {historyErrors[cadence] && <GraphLoadError compact label="长期曲线更新失败" onRetry={() => {

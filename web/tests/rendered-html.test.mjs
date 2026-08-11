@@ -725,10 +725,17 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.summary-cadence \{ display:grid; grid-template-columns:minmax\(0,1fr\) minmax\(0,1fr\)/);
   assert.match(modal, /mobile-chart-scroll/);
   assert.match(modal, /左右滑动查看完整图表/);
+  assert.match(modal, /className="curve-filters"/);
+  assert.match(modal, /className="curve-pager"/);
   assert.match(modal, /closeButtonRef\.current\?\.focus\(\)/);
   assert.match(modal, /openerRef\.current\?\.focus\(\)/);
   assert.match(modal, /event\.key !== "Tab"/);
   assert.match(css, /\.mobile-chart-scroll \{ width:100%; overflow-x:auto/);
+  assert.match(css, /\.long-curve-block>\.curve-navigation \{ display:contents; \}/);
+  assert.match(css, /\.long-curve-block \.curve-filters \{ order:2; display:grid; grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(css, /\.long-curve-block>\.mobile-chart-scroll \{ order:5; \}/);
+  assert.match(css, /\.long-curve-block>\.chart-legend \{ order:6; display:grid; grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(css, /\.long-curve-block>\.curve-navigation \.curve-pager \{ order:7; display:grid; grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
   assert.match(css, /\.market-history-nav \{[^}]*margin:10px 0 0;[^}]*border:1px solid/);
   assert.match(css, /\.prediction-counts \{[^}]*border-top:0/);
   assert.match(css, /\.chart-block \{ overflow:visible/);
