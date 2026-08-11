@@ -395,6 +395,49 @@ test("rejects oversized snapshots before preparing a D1 statement", async () => 
   assert.equal(prepared, false);
 });
 
+test("rejects an oversized snapshot when content-length understates the body", async () => {
+  const { MAX_DASHBOARD_SNAPSHOT_BYTES, writeDashboardSnapshot } = await import(
+    "../app/api/_shared/dashboard-snapshot.ts"
+  );
+  let prepared = false;
+  const binding = { prepare() { prepared = true; } };
+  const body = JSON.stringify({ data: "x".repeat(MAX_DASHBOARD_SNAPSHOT_BYTES) });
+  const request = new Request("https://example.test/api/learning", {
+    method: "POST",
+    headers: { "content-length": "2" },
+    body,
+  });
+  assert.equal(await writeDashboardSnapshot(request, binding, 3), "too_large");
+  assert.equal(prepared, false);
+});
+
+test("bounds a streamed snapshot without content-length", async () => {
+  const { MAX_DASHBOARD_SNAPSHOT_BYTES, writeDashboardSnapshot } = await import(
+    "../app/api/_shared/dashboard-snapshot.ts"
+  );
+  let prepared = false;
+  let cancelled = false;
+  let pulls = 0;
+  const binding = { prepare() { prepared = true; } };
+  const stream = new ReadableStream({
+    pull(controller) {
+      pulls += 1;
+      controller.enqueue(new Uint8Array(
+        pulls === 1 ? MAX_DASHBOARD_SNAPSHOT_BYTES : 1,
+      ));
+    },
+    cancel() { cancelled = true; },
+  });
+  const request = new Request("https://example.test/api/market-chart", {
+    method: "POST",
+    body: stream,
+    duplex: "half",
+  });
+  assert.equal(await writeDashboardSnapshot(request, binding, 2), "too_large");
+  assert.equal(prepared, false);
+  assert.equal(cancelled, true);
+});
+
 test("lets D1 validate raw snapshot JSON in the same write", async () => {
   const { writeDashboardSnapshot } = await import("../app/api/_shared/dashboard-snapshot.ts");
   const calls = [];

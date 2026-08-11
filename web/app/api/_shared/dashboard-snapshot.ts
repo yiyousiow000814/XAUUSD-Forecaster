@@ -2,11 +2,44 @@ export const MAX_DASHBOARD_SNAPSHOT_BYTES = 800_000;
 
 export type SnapshotWriteResult = "stored" | "invalid" | "too_large";
 
+type BoundedBodyResult =
+  | { status: "ok"; serialized: string }
+  | { status: "too_large" };
+
 function declaredBodyBytes(request: Request): number | null {
   const raw = request.headers.get("content-length");
   if (raw === null) return null;
   const parsed = Number(raw);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+async function readBoundedBody(request: Request): Promise<BoundedBodyResult> {
+  const declaredBytes = declaredBodyBytes(request);
+  if (declaredBytes !== null && declaredBytes > MAX_DASHBOARD_SNAPSHOT_BYTES) {
+    return { status: "too_large" };
+  }
+  if (!request.body) return { status: "ok", serialized: "" };
+
+  const reader = request.body.getReader();
+  const decoder = new TextDecoder();
+  const decoded: string[] = [];
+  let receivedBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      receivedBytes += value.byteLength;
+      if (receivedBytes > MAX_DASHBOARD_SNAPSHOT_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        return { status: "too_large" };
+      }
+      decoded.push(decoder.decode(value, { stream: true }));
+    }
+    decoded.push(decoder.decode());
+    return { status: "ok", serialized: decoded.join("") };
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 /**
@@ -21,18 +54,8 @@ export async function writeDashboardSnapshot(
   binding: D1Database,
   snapshotId: number,
 ): Promise<SnapshotWriteResult> {
-  const declaredBytes = declaredBodyBytes(request);
-  if (declaredBytes !== null && declaredBytes > MAX_DASHBOARD_SNAPSHOT_BYTES) {
-    return "too_large";
-  }
-
-  const serialized = await request.text();
-  if (
-    declaredBytes === null
-    && new TextEncoder().encode(serialized).byteLength > MAX_DASHBOARD_SNAPSHOT_BYTES
-  ) {
-    return "too_large";
-  }
+  const body = await readBoundedBody(request);
+  if (body.status === "too_large") return "too_large";
 
   const result = await binding.prepare(
     `WITH incoming(payload) AS (SELECT ?)
@@ -40,7 +63,7 @@ export async function writeDashboardSnapshot(
      SELECT ?, payload, ? FROM incoming WHERE json_valid(payload)
      ON CONFLICT(id) DO UPDATE SET
        payload=excluded.payload, received_at=excluded.received_at`,
-  ).bind(serialized, snapshotId, new Date().toISOString()).run();
+  ).bind(body.serialized, snapshotId, new Date().toISOString()).run();
 
   return Number(result.meta.changes ?? 0) > 0 ? "stored" : "invalid";
 }
