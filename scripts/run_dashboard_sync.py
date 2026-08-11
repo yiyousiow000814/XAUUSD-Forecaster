@@ -185,46 +185,23 @@ def _visual_curve_overview(
     if len(ordered) <= limit:
         selected_indices = list(range(len(ordered)))
     else:
-        mandatory = {0, len(ordered) - 1}
-        for index in range(1, len(ordered)):
-            if bool(ordered[index].get("w")) != bool(ordered[index - 1].get("w")):
-                mandatory.update((index - 1, index))
         bucket_count = max(1, limit // 4)
         bucket_size = math.ceil(len(ordered) / bucket_count)
-        selected = set(mandatory)
         for start in range(0, len(ordered), bucket_size):
             bucket = ordered[start:start + bucket_size]
             indexed = list(enumerate(bucket))
-            selected.update({
-                start,
-                start + len(bucket) - 1,
-                start + min(indexed, key=lambda item: float(
+            selected = {
+                0,
+                len(bucket) - 1,
+                min(indexed, key=lambda item: float(
                     item[1].get("cumulative_quote_return") or 0.0
                 ))[0],
-                start + max(indexed, key=lambda item: float(
+                max(indexed, key=lambda item: float(
                     item[1].get("cumulative_quote_return") or 0.0
                 ))[0],
-            })
-        if len(selected) > limit:
-            # Semantic boundaries outrank shape samples. The normal dashboard
-            # budget retains every WAIT transition; only pathological input
-            # with more transitions than the entire limit needs sampling.
-            if len(mandatory) >= limit:
-                candidates = sorted(mandatory)
-                stride = (len(candidates) - 1) / max(1, limit - 1)
-                selected_indices = sorted({
-                    candidates[round(index * stride)] for index in range(limit)
-                })
-            else:
-                candidates = sorted(selected - mandatory)
-                slots = limit - len(mandatory)
-                stride = (len(candidates) - 1) / max(1, slots - 1)
-                sampled = {
-                    candidates[round(index * stride)] for index in range(slots)
-                }
-                selected_indices = sorted(mandatory | sampled)
-        else:
-            selected_indices = sorted(selected)
+            }
+            selected_indices.extend(start + index for index in sorted(selected))
+    selected_indices = selected_indices[:limit]
     gap_threshold = max(45 * 60, expected_step_seconds * 3)
     overview: list[dict] = []
     previous_index: int | None = None

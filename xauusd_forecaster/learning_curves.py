@@ -33,11 +33,6 @@ def _bounded_curve(points: list[dict], max_points: int = MAX_CURVE_POINTS) -> li
         index for index, point in enumerate(points)
         if point.get("model_version")
     )
-    for index in range(1, len(points)):
-        if bool(points[index].get("w")) != bool(points[index - 1].get("w")):
-            # A display envelope must not turn a frozen WAIT interval into a
-            # directional trade (or hide the return to LONG / SHORT).
-            mandatory.update((index - 1, index))
     if len(mandatory) >= max_points:
         ordered = sorted(mandatory)
         stride = (len(ordered) - 1) / max(1, max_points - 1)
@@ -569,11 +564,6 @@ def learning_curve_payload(connection) -> dict:
                 cumulative += _net_row_value(row)
                 model_version = row["model_version"] if identity != "CHAMPION_0" else "always-wait-v1"
                 point = {"decision_time": row["decision_time"], "cumulative_quote_return": cumulative}
-                # The point closes the interval that ended at decision_time.
-                # Directional points stay compact; frozen WAIT is explicit so
-                # every dashboard renderer can use the same line semantics.
-                if identity != "CHAMPION_0" and row["recommended_action"] == "WAIT":
-                    point["w"] = 1
                 generation = row["training_dataset_hash"] if identity != "CHAMPION_0" else "always-wait"
                 if generation != previous_generation:
                     point["model_version"] = model_version
