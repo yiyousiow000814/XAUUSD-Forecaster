@@ -499,6 +499,11 @@ def test_curve_overview_marks_only_real_source_gaps() -> None:
         False, False, False, True, False,
     ]
 
+    compressed_source = module._visual_curve_overview(
+        points, 240, infer_source_gaps=False,
+    )
+    assert not any(row["source_gap_before"] for row in compressed_source)
+
 
 def test_decision_overviews_are_incremental_bounded_and_frequency_scoped() -> None:
     module = _sync_module()

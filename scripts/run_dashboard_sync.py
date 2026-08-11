@@ -177,6 +177,7 @@ def _learning_record(
 
 def _visual_curve_overview(
     points: list[dict], limit: int, expected_step_seconds: int = 300,
+    infer_source_gaps: bool = True,
 ) -> list[dict]:
     """Keep curve shape plus real source gaps in a fixed-size overview."""
     ordered = sorted(points, key=lambda row: row.get("decision_time") or "")
@@ -206,7 +207,7 @@ def _visual_curve_overview(
     previous_index: int | None = None
     for index in selected_indices:
         source_gap_before = False
-        if previous_index is not None:
+        if infer_source_gaps and previous_index is not None:
             source_gap_before = any(
                 _epoch(ordered[current].get("decision_time"))
                 - _epoch(ordered[current - 1].get("decision_time"))
@@ -336,7 +337,9 @@ def _update_decision_overviews(
     return updated
 
 
-def _learning_overview_records(payload: dict) -> list[dict]:
+def _learning_overview_records(
+    payload: dict, *, infer_source_gaps: bool = True,
+) -> list[dict]:
     """Materialize fixed-size graph summaries before data reaches the Worker."""
     learning = payload.get("learning_curves") or {}
     records: list[dict] = []
@@ -356,6 +359,7 @@ def _learning_overview_records(payload: dict) -> list[dict]:
             overview = _visual_curve_overview(
                 points, LEARNING_OVERVIEW_CURVE_POINTS,
                 expected_step_seconds=1_800 if cadence == "30m" else 300,
+                infer_source_gaps=infer_source_gaps,
             )
             summary = {
                 "model_identity": identity,
@@ -398,7 +402,9 @@ def _learning_overview_records(payload: dict) -> list[dict]:
     return records
 
 
-def learning_history_records(payload: dict) -> list[dict]:
+def learning_history_records(
+    payload: dict, *, infer_source_gaps: bool = True,
+) -> list[dict]:
     """Normalize append-only learning evidence into idempotent D1 records."""
     learning = payload.get("learning_curves") or {}
     records: list[dict] = []
@@ -459,7 +465,9 @@ def learning_history_records(payload: dict) -> list[dict]:
                 "execution-result", f"{identity}\0{result_id}\0{result_time}",
                 _epoch(result_time), record_payload,
             ))
-    records.extend(_learning_overview_records(payload))
+    records.extend(_learning_overview_records(
+        payload, infer_source_gaps=infer_source_gaps,
+    ))
     return records
 
 

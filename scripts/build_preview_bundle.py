@@ -219,7 +219,12 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
     return {
         "status": status,
         "learning": learning,
-        "learning_history": dashboard_sync.learning_history_records(learning),
+        # Production's public learning payload is already compressed. Wider
+        # spacing there is not proof of a source-data gap, so Preview must not
+        # infer dashed segments from it.
+        "learning_history": dashboard_sync.learning_history_records(
+            learning, infer_source_gaps=False,
+        ),
         "market_chart": market_chart,
         "news_index": news_index,
         "news_details": details,
