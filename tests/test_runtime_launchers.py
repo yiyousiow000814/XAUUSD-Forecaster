@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 import subprocess
+import textwrap
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +63,48 @@ def test_control_center_updates_only_the_isolated_main_runtime() -> None:
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     assert reported == expected
+
+
+def test_watchdog_autostart_uses_one_windowless_registration_path(tmp_path) -> None:
+    control_center = (
+        ROOT / "scripts" / "xauusd_control_center.ps1"
+    ).read_text(encoding="utf-8")
+    launcher = ROOT / "scripts" / "xauusd_watchdog_launcher.vbs"
+    launcher_text = launcher.read_text(encoding="utf-8")
+
+    assert "function Register-AutoStartTask" in control_center
+    assert control_center.count("Register-ScheduledTask -TaskName $taskName") == 1
+    assert '"System32\\wscript.exe"' in control_center
+    assert 'Join-Path $moduleRoot "scripts\\xauusd_watchdog_launcher.vbs"' in control_center
+    assert "shell.Run(command, 0, True)" in launcher_text
+    assert "-WindowStyle Hidden -ExecutionPolicy Bypass -File" not in control_center
+
+    marker = tmp_path / "watchdog-marker.txt"
+    probe = tmp_path / "watchdog-probe.ps1"
+    probe.write_text(
+        textwrap.dedent(
+            f'''\
+            param(
+                [string]$Action,
+                [string]$RuntimeRoot,
+                [string]$RepositoryRoot
+            )
+            "$Action|$RuntimeRoot|$RepositoryRoot" | Set-Content -LiteralPath '{marker}'
+            '''
+        ),
+        encoding="utf-8",
+    )
+    subprocess.run(
+        [
+            "cscript.exe", "//NoLogo", str(launcher), str(probe),
+            str(tmp_path / "runtime"), str(tmp_path / "repository"),
+        ],
+        check=True,
+    )
+
+    assert marker.read_text(encoding="utf-8-sig").strip() == (
+        f"Watchdog|{tmp_path / 'runtime'}|{tmp_path / 'repository'}"
+    )
 
 
 def test_main_checkpoint_accepts_squash_merge_without_accepting_stale_main(
