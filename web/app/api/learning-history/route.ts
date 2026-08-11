@@ -17,6 +17,7 @@ type LearningRecord = {
 const MAX_INGEST_BYTES = 350_000;
 const MAX_INGEST_ROWS = 1_000;
 const MAX_PAGE_ROWS = 500;
+const MAX_RESPONSE_BYTES = 400_000;
 const CURVE_OVERVIEW_POINTS = 240;
 const VERSION_OVERVIEW_GROUPS = 60;
 const ALLOWED_RESOURCES = new Set([
@@ -74,6 +75,19 @@ function responseFromRows(
   };
 }
 
+function rawItemsResponse(
+  itemsJson: string | null | undefined,
+  metadata: Record<string, unknown>,
+) {
+  const suffix = JSON.stringify(metadata).slice(1);
+  return new Response(`{"items":${itemsJson || "[]"},${suffix}`, {
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "private, max-age=60",
+    },
+  });
+}
+
 function previewPage(url: URL) {
   const resource = url.searchParams.get("resource") ?? "";
   const identity = url.searchParams.get("identity");
@@ -99,17 +113,42 @@ async function pagedRecords(binding: D1Database, url: URL) {
   const values: unknown[] = [resource];
   if (identity) values.push(identity);
   if (cursor) values.push(cursor[0], cursor[0], cursor[1]);
-  const rows = await binding.prepare(
-    `SELECT sort_epoch,record_key,payload FROM learning_records
-     WHERE resource=? ${identityClause} ${cursorClause}
-     ORDER BY sort_epoch DESC,record_key DESC LIMIT ?`,
-  ).bind(...values, limit + 1).all<{ sort_epoch: number; record_key: string; payload: string }>();
-  const countValues: unknown[] = [resource];
-  if (identity) countValues.push(identity);
-  const count = await binding.prepare(
-    `SELECT count(*) count FROM learning_records WHERE resource=? ${identityClause}`,
-  ).bind(...countValues).first<{ count: number }>();
-  return responseFromRows(rows.results, Number(count?.count ?? 0), limit);
+  const result = await binding.prepare(
+    `WITH base AS (
+       SELECT sort_epoch,record_key,payload FROM learning_records
+       WHERE resource=? ${identityClause}
+     ), candidates AS (
+       SELECT sort_epoch,record_key,payload,
+              row_number() OVER (ORDER BY sort_epoch DESC,record_key DESC) sequence,
+              sum(length(CAST(payload AS BLOB))+1) OVER (
+                ORDER BY sort_epoch DESC,record_key DESC
+              ) running_bytes
+       FROM base WHERE 1=1 ${cursorClause}
+     ), visible AS (
+       SELECT sort_epoch,record_key,payload FROM candidates
+       WHERE sequence<=? AND (running_bytes<=? OR sequence=1)
+     )
+     SELECT
+       COALESCE((SELECT json_group_array(json(payload)) FROM (
+         SELECT payload FROM visible ORDER BY sort_epoch DESC,record_key DESC
+       )),'[]') items_json,
+       (SELECT count(*) FROM base) total,
+       (SELECT count(*) FROM candidates) remaining,
+       (SELECT count(*) FROM visible) visible_count,
+       (SELECT sort_epoch FROM visible ORDER BY sort_epoch,record_key LIMIT 1) last_epoch,
+       (SELECT record_key FROM visible ORDER BY sort_epoch,record_key LIMIT 1) last_key`,
+  ).bind(...values, limit, MAX_RESPONSE_BYTES).first<{
+    items_json: string; total: number; remaining: number; visible_count: number;
+    last_epoch: number | null; last_key: string | null;
+  }>();
+  if (!result) throw new Error("missing page result");
+  const hasMore = Number(result.remaining) > Number(result.visible_count);
+  const nextCursor = hasMore && result.last_epoch !== null && result.last_key
+    ? encodeCursor(Number(result.last_epoch), result.last_key) : null;
+  return rawItemsResponse(result.items_json, {
+    total: Number(result.total), next_cursor: nextCursor, has_more: hasMore,
+    byte_limit: MAX_RESPONSE_BYTES,
+  });
 }
 
 async function curveOverview(binding: D1Database, url: URL) {
@@ -126,17 +165,35 @@ async function curveOverview(binding: D1Database, url: URL) {
                 PARTITION BY json_extract(payload,'$.model_identity')
               ) total
        FROM learning_records WHERE resource=?
+     ), sampled AS (
+       SELECT sort_epoch,record_key,payload FROM ranked
+       WHERE total<=? OR (sequence-1) % MAX(1,(total+?-1)/?)=0
+     ), measured AS (
+       SELECT sort_epoch,record_key,payload,
+              row_number() OVER (ORDER BY sort_epoch,record_key) sequence,
+              sum(length(CAST(payload AS BLOB))+1) OVER (
+                ORDER BY sort_epoch,record_key
+              ) running_bytes
+       FROM sampled
+     ), visible AS (
+       SELECT sort_epoch,record_key,payload FROM measured
+       WHERE running_bytes<=? OR sequence=1
      )
-     SELECT sort_epoch,record_key,payload FROM ranked
-     WHERE total<=? OR (sequence-1) % MAX(1,(total+?-1)/?)=0
-     ORDER BY sort_epoch,record_key`,
-  ).bind(resource, CURVE_OVERVIEW_POINTS, CURVE_OVERVIEW_POINTS, CURVE_OVERVIEW_POINTS)
-    .all<{ sort_epoch: number; record_key: string; payload: string }>();
-  return {
-    items: result.results.map(row => JSON.parse(row.payload)),
-    mode: "overview",
-    point_limit_per_identity: CURVE_OVERVIEW_POINTS,
-  };
+     SELECT COALESCE((SELECT json_group_array(json(payload)) FROM (
+              SELECT payload FROM visible ORDER BY sort_epoch,record_key
+            )),'[]') items_json,
+            (SELECT count(*) FROM sampled) sampled_count,
+            (SELECT count(*) FROM visible) visible_count`,
+  ).bind(resource, CURVE_OVERVIEW_POINTS, CURVE_OVERVIEW_POINTS,
+    CURVE_OVERVIEW_POINTS, MAX_RESPONSE_BYTES).first<{
+      items_json: string; sampled_count: number; visible_count: number;
+    }>();
+  if (!result) throw new Error("missing curve overview");
+  return rawItemsResponse(result.items_json, {
+    mode: "overview", point_limit_per_identity: CURVE_OVERVIEW_POINTS,
+    byte_limit: MAX_RESPONSE_BYTES,
+    truncated: Number(result.visible_count) < Number(result.sampled_count),
+  });
 }
 
 async function versionOverview(binding: D1Database) {
@@ -151,13 +208,34 @@ async function versionOverview(binding: D1Database) {
                 PARTITION BY json_extract(payload,'$.model_identity')
               ) total
        FROM learning_records WHERE resource='version-group'
+     ), sampled AS (
+       SELECT sort_epoch,record_key,payload FROM ranked
+       WHERE total<=? OR (sequence-1) % MAX(1,(total+?-1)/?)=0
+     ), measured AS (
+       SELECT sort_epoch,record_key,payload,
+              row_number() OVER (ORDER BY sort_epoch,record_key) sequence,
+              sum(length(CAST(payload AS BLOB))+1) OVER (
+                ORDER BY sort_epoch,record_key
+              ) running_bytes
+       FROM sampled
+     ), visible AS (
+       SELECT sort_epoch,record_key,payload FROM measured
+       WHERE running_bytes<=? OR sequence=1
      )
-     SELECT payload FROM ranked
-     WHERE total<=? OR (sequence-1) % MAX(1,(total+?-1)/?)=0
-     ORDER BY sort_epoch,record_key`,
-  ).bind(VERSION_OVERVIEW_GROUPS, VERSION_OVERVIEW_GROUPS, VERSION_OVERVIEW_GROUPS)
-    .all<{ payload: string }>();
-  return { items: result.results.map(row => JSON.parse(row.payload)), mode: "overview" };
+     SELECT COALESCE((SELECT json_group_array(json(payload)) FROM (
+              SELECT payload FROM visible ORDER BY sort_epoch,record_key
+            )),'[]') items_json,
+            (SELECT count(*) FROM sampled) sampled_count,
+            (SELECT count(*) FROM visible) visible_count`,
+  ).bind(VERSION_OVERVIEW_GROUPS, VERSION_OVERVIEW_GROUPS,
+    VERSION_OVERVIEW_GROUPS, MAX_RESPONSE_BYTES).first<{
+      items_json: string; sampled_count: number; visible_count: number;
+    }>();
+  if (!result) throw new Error("missing version overview");
+  return rawItemsResponse(result.items_json, {
+    mode: "overview", byte_limit: MAX_RESPONSE_BYTES,
+    truncated: Number(result.visible_count) < Number(result.sampled_count),
+  });
 }
 
 export async function GET(request: Request) {
@@ -179,9 +257,7 @@ export async function GET(request: Request) {
     const binding = env.DB as D1Database | undefined;
     if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
     try {
-      return NextResponse.json(await versionOverview(binding), {
-        headers: { "Cache-Control": "private, max-age=60" },
-      });
+      return await versionOverview(binding);
     } catch {
       return NextResponse.json({ error: "训练组总览读取失败" }, { status: 500 });
     }
@@ -206,9 +282,7 @@ export async function GET(request: Request) {
     const binding = env.DB as D1Database | undefined;
     if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
     try {
-      return NextResponse.json(await curveOverview(binding, url), {
-        headers: { "Cache-Control": "private, max-age=60" },
-      });
+      return await curveOverview(binding, url);
     } catch {
       return NextResponse.json({ error: "学习曲线历史读取失败" }, { status: 500 });
     }
@@ -216,13 +290,14 @@ export async function GET(request: Request) {
   if (!ALLOWED_RESOURCES.has(resource)) {
     return NextResponse.json({ error: "invalid resource" }, { status: 400 });
   }
+  if (url.searchParams.has("cursor") && !decodeCursor(url.searchParams.get("cursor"))) {
+    return NextResponse.json({ error: "invalid cursor" }, { status: 400 });
+  }
   if (previewBundle) return previewPage(url);
   const binding = env.DB as D1Database | undefined;
   if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
   try {
-    return NextResponse.json(await pagedRecords(binding, url), {
-      headers: { "Cache-Control": "private, max-age=60" },
-    });
+    return await pagedRecords(binding, url);
   } catch {
     return NextResponse.json({ error: "学习历史读取失败" }, { status: 500 });
   }

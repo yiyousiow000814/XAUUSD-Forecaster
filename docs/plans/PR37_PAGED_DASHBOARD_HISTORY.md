@@ -31,15 +31,19 @@ The Worker 800 KB check must remain an emergency guard, not the storage model.
 2. `/api/learning-history` accepts requests up to 350 KB and uses D1 JSON1 for
    validation and set-based idempotent upserts without parsing the body in the
    Worker.
-3. History reads use bounded limits and opaque cursors. Chart overview reads
-   are sampled per model with fixed limits.
-4. `/api/learning` is a fixed first page: six generations per model, 48 curve
+3. History reads use opaque cursors, at most 500 rows, and a 400 KB SQL byte
+   budget. D1 emits the response JSON directly, so the Worker does not parse
+   and re-serialize growing pages. If either limit is reached, the next cursor
+   continues from the last returned record.
+4. Chart overview reads are sampled per model and use the same 400 KB byte
+   budget. They report when the byte budget truncates the requested sample.
+5. `/api/learning` is a fixed first page: six generations per model, 48 curve
    points per cadence, and 20 execution results per model.
-5. The existing market-history D1 ledger remains the only complete remote
+6. The existing market-history D1 ledger remains the only complete remote
    market authority. The market-chart snapshot now keeps 576 recent candles
    and a bounded recent decision window instead of retaining all half-hour
    decisions forever.
-6. The UI requests older training pages and curve overviews only after the
+7. The UI requests older training pages and curve overviews only after the
    interactive graph opens. Branch Previews use the same API contract over an
    immutable build snapshot.
 

@@ -376,6 +376,11 @@ test("stores growing learning history as bounded idempotent D1 records", () => {
   assert.match(route, /json_each\(json_extract\(doc,'\$\.records'\)\)/);
   assert.match(route, /ON CONFLICT\(resource,record_key\) DO UPDATE/);
   assert.doesNotMatch(route, /JSON\.parse\(body\.serialized\)/);
+  assert.match(route, /MAX_RESPONSE_BYTES = 400_000/);
+  assert.match(route, /json_group_array\(json\(payload\)\)/);
+  assert.match(route, /length\(CAST\(payload AS BLOB\)\)/);
+  assert.match(route, /running_bytes<=\?/);
+  assert.doesNotMatch(route, /results\.map\(row => JSON\.parse\(row\.payload\)\)/);
   assert.match(route, /next_cursor/);
   assert.match(sync, /LEARNING_HISTORY_CONTRACT_VERSION = "learning-history-d1-v1"/);
   assert.match(sync, /learning_history_records/);
