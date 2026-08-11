@@ -844,7 +844,11 @@ test("distinguishes market history loading, empty, and failed states", () => {
   assert.match(modal, /historyState === "error"/);
   assert.match(modal, /正在读取行情/);
   assert.match(modal, /正在读取长期曲线/);
-  assert.match(modal, /正在读取训练记录/);
+  assert.match(modal, /正在读取这组成绩/);
+  assert.match(modal, /graph-state-compact/);
+  assert.doesNotMatch(modal, /if \(pageLoading \|\| overviewState === "loading"\)/);
+  assert.doesNotMatch(modal, /if \(historyLoading\) return <GraphLoading/);
+  assert.doesNotMatch(modal, /historyState === "loading"\) return <GraphLoading/);
   assert.match(modal, /title="暂无行情数据"/);
   assert.match(modal, /重新读取/);
   assert.doesNotMatch(modal, /还没有保存过可绘制的 Bid\/Ask 行情/);

@@ -298,25 +298,13 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
     : 90 + cutoffs.indexOf(trainingRows) / Math.max(1, cutoffs.length - 1) * 780;
   const gy = (value: number) => 28 + (high-value)/Math.max(.000001,high-low)*218;
   const hoveredMetric = hovered ? metric(hovered) : null;
-  if (pageLoading || overviewState === "loading") {
-    return <GraphLoading label="正在读取训练记录" />;
-  }
-  if (overviewState === "error") {
-    return <GraphLoadError label="训练总览读取失败" onRetry={() => {
-      setOverviewState("loading");
-      setOverviewRetry(value => value + 1);
-    }} />;
-  }
-  if (pageError) {
-    return <GraphLoadError label={pageError} onRetry={() => {
-      setPageError(null);
-      setPageRetry(value => value + 1);
-    }} />;
-  }
   return <section className="version-ledger modal-version-ledger"><header><div className="version-ledger-title"><span>共同训练截止量对齐 · 同一坐标叠加比较</span><h3>所有模型的训练组成绩</h3></div><div className="version-ledger-controls"><label className="version-ledger-model"><span>查看模型明细</span><select value={identity} onChange={event => { setIdentity(event.target.value); setPage(0); setRemotePages({}); setPageCursors({ 0: null }); setRemoteTotal(null); setPageError(null); setPageRetry(0); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select></label><label><span>统计频率</span><select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPage(0); }}><option value="EVERY_5M">每5分钟（重叠样本）</option><option value="FIXED_30M">每30分钟（固定 :00 / :30）</option></select></label><label><span>横轴范围</span><select value={cutoffWindow} onChange={event => setCutoffWindow(event.target.value as "20" | "all")}><option value="20">最近20个训练截止点</option><option value="all">全部训练截止点</option></select></label></div></header>
     <section className="version-hover-chart" aria-label="所有模型训练组独立收益图">
       <div className="version-hover-readout">{hovered && hoveredMetric ? <><b>{LABELS[hovered.model_identity]} · 第 {hovered.generation} 组</b><span>{stamp(hovered.created_at)} · 共同截止 {comparisonCutoff(hovered)} 条 · 自身训练 {hovered.training_rows} 条 · OOS {hoveredMetric.oos_rows} 条 · 收益 {pct(hoveredMetric.cumulative_quote_return)} · PF {hoveredMetric.profit_factor_quote_adjusted?.toFixed(2) ?? "—"} · 出方向 {((hoveredMetric.coverage_rate ?? 0)*100).toFixed(1)}%</span></> : <><b>五种模型叠加在同一坐标</b><span>实线连接相邻训练截止点；虚线跨过没有合法新版本的空档。空缺代表该模型当轮没有合法新版本；这里只叠加显示，不会把收益相加。</span></>}</div>
-      {graphRows.length ? <svg viewBox="0 0 960 300" role="img">
+      {overviewState === "loading" ? <GraphLoading label="正在更新训练总览" compact /> : overviewState === "error" ? <GraphLoadError compact label="训练总览读取失败" onRetry={() => {
+        setOverviewState("loading");
+        setOverviewRetry(value => value + 1);
+      }} /> : graphRows.length ? <svg viewBox="0 0 960 300" role="img">
         <line x1="70" x2="890" y1={gy(0)} y2={gy(0)} className="zero-line" />
         <text x="12" y={gy(high)+4}>{pct(high)}</text><text x="12" y={gy(low)+4}>{pct(low)}</text>
         {cutoffs.map(trainingRows => <g key={trainingRows} className="generation-axis"><line x1={gx(trainingRows)} x2={gx(trainingRows)} y1="252" y2="258" /><text x={gx(trainingRows)} y="279" textAnchor="middle">{trainingRows} 条</text></g>)}
@@ -335,6 +323,10 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
       <div className="chart-legend">{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <span key={key}><i style={{ background:COLORS[key] }} />{label}</span>)}</div>
     </section>
     <div ref={resultListRef} className="version-list-anchor" aria-hidden="true" />
+    {pageLoading ? <GraphLoading label="正在读取这组成绩" compact /> : pageError ? <GraphLoadError compact label={pageError} onRetry={() => {
+      setPageError(null);
+      setPageRetry(value => value + 1);
+    }} /> : <>
     {pageCount > 1 && <VersionPagination page={safePage} pageCount={pageCount} total={totalRows} onPage={goToPage} />}
     <div className="version-ledger-head"><span>组别 / 状态</span><span>训练与上线</span><span>创建后 OOS</span><span>本组独立收益</span><span>PF / 出方向</span></div>
     {visibleRows.map(row => { const selected = metric(row); return <article key={`${row.model_identity}-${row.training_dataset_hash}`} className={row.lifecycle_status === "LATEST" ? "is-latest" : ""}>
@@ -350,6 +342,7 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
     </article>})}
     {pageCount > 1 && <VersionPagination page={safePage} pageCount={pageCount} total={totalRows} onPage={goToPage} position="bottom" />}
     {!totalRows && <p>这个模型还没有真实训练版本。</p>}
+    </>}
   </section>;
 }
 
@@ -399,15 +392,20 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
     return () => { cancelled = true; };
   }, [historyResource, cadence, historyErrors, historyRetries]);
   const historyLoading = Boolean(historyResource && !historyCurves[cadence] && !historyErrors[cadence]);
-  if (historyLoading) return <GraphLoading label="正在读取长期曲线" />;
-  if (historyErrors[cadence]) return <GraphLoadError label="长期曲线读取失败" onRetry={() => {
-    setHistoryErrors(previous => ({ ...previous, [cadence]: false }));
-    setHistoryRetries(previous => ({ ...previous, [cadence]: (previous[cadence] ?? 0) + 1 }));
-  }} />;
   const resolvedCurves = historyCurves[cadence] ?? curves;
   const usable = resolvedCurves.map(row => cadence === "FIXED_30M" ? { ...row, points: row.points_30m ?? [], source_point_count: row.source_point_count_30m, chart_point_count: row.chart_point_count_30m, chart_downsampled: row.chart_downsampled_30m } : row).filter(row => row.model_identity !== "CHAMPION_0" && row.points.length > 0);
   const overviewPoints = usable.flatMap(row => row.points);
-  if (!overviewPoints.length) return <Empty title="暂无长期曲线" text="还没有已成熟的 Live OOS 点；第一个预测走完30分钟后才会出现。" />;
+  if (!overviewPoints.length) return <div className="chart-block long-curve-block graph-state-shell">
+    <div className="chart-caption"><div><b>历史＋实时成熟 OOS（只追加，不重写）</b><span>切换统计频率时，页面结构会保留。</span></div></div>
+    <div className="curve-navigation" aria-label="长期 OOS 时间范围">
+      <label>统计频率<select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPageOffset(0); }}><option value="EVERY_5M">每5分钟（重叠）</option><option value="FIXED_30M">每30分钟（非重叠）</option></select></label>
+      <label>时间窗口<select value={range} onChange={event => { setRange(event.target.value as typeof range); setPageOffset(0); }}><option value="24h">24小时</option><option value="7d">7天</option><option value="30d">30天</option><option value="all">全部总览</option></select></label>
+    </div>
+    {historyLoading ? <GraphLoading label="正在读取长期曲线" compact /> : historyErrors[cadence] ? <GraphLoadError compact label="长期曲线读取失败" onRetry={() => {
+      setHistoryErrors(previous => ({ ...previous, [cadence]: false }));
+      setHistoryRetries(previous => ({ ...previous, [cadence]: (previous[cadence] ?? 0) + 1 }));
+    }} /> : <Empty compact title="暂无长期曲线" text="第一个预测走完30分钟后才会出现。" />}
+  </div>;
   const availableResultTimes = [...new Set(overviewPoints.map(point => Date.parse(point.decision_time)))].sort((a, b) => a - b);
   const fullStart = availableResultTimes[0];
   const fullEnd = availableResultTimes.at(-1)!;
@@ -567,6 +565,11 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
       <button type="button" disabled={pageOffset === 0} onClick={() => setPageOffset(0)}>回到最新</button>
       <span>{windowLabel}{chartDownsampled ? ` · 全历史 ${sourcePointCount} 条已压缩为 ${overviewPoints.length} 个绘图点` : ` · 当前 ${visiblePoints.length} 个绘图点`}</span>
     </div>
+    {historyLoading && <GraphLoading label="正在更新长期曲线" compact />}
+    {historyErrors[cadence] && <GraphLoadError compact label="长期曲线更新失败" onRetry={() => {
+      setHistoryErrors(previous => ({ ...previous, [cadence]: false }));
+      setHistoryRetries(previous => ({ ...previous, [cadence]: (previous[cadence] ?? 0) + 1 }));
+    }} />}
     {compactBoundaryRail && <div className="curve-event-readout" aria-live="polite">
       {hoveredBoundary ? <><b>{hoveredBoundary.event_count && hoveredBoundary.event_count > 1 ? `${hoveredBoundary.event_count} 次相近换版 · ` : ""}{axisLabel(hoveredBoundary.decision_time)} · {boundaryLabel(hoveredBoundary)}</b><span>{hoveredBoundary.changes.map(change => `${LABELS[change.model_identity] ?? change.model_identity}（${change.training_rows ?? "—"} 条）`).join(" · ")}</span></> : <><b>模型换版本事件轨道</b><span>相近换版会合并为一个圆点；移到圆点查看准确时间、方向样本、新闻样本与模型明细。</span></>}
     </div>}
@@ -735,12 +738,12 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
     if (dense) return candidateDecisions;
     return candidateDecisions.filter(row => new Date(row.decision_time).getUTCMinutes() % 30 === 0);
   })();
-  if (remoteHistory && historyState === "loading") return <GraphLoading label="正在读取行情" />;
-  if (remoteHistory && historyState === "error") {
-    return <GraphLoadError label="行情读取失败" onRetry={() => setHistoryRetry(value => value + 1)} />;
-  }
   if (!detailCandles.length && !canGoLater) {
-    return <Empty title="暂无行情数据" text="当前范围没有 Bid/Ask 行情。" />;
+    return <div className="chart-block market-chart-block graph-state-shell">
+      <div className="chart-caption"><div><b>每根K线5分钟 · 每个箭头预测未来30分钟</b><span>切换模型或时间时，页面结构会保留。</span></div><select value={identity} onChange={event => { setIdentity(event.target.value); setSelected(null); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key, label]) => <option key={key} value={key}>{label}{key.includes("RESIDUAL") ? "（修正量）" : ""}</option>)}</select></div>
+      <div className="market-controls" aria-label="K线图显示控制"><label>时间<select value={range} onChange={event => { setRange(event.target.value); setPage(0); setBefore(null); setLaterPages([]); setSelected(null); }}><option value="3">3小时</option><option value="6">6小时</option><option value="12">12小时</option><option value="24">24小时</option><option value="168">7天</option><option value="all">全部历史</option></select></label></div>
+      {historyState === "loading" ? <GraphLoading label="正在读取行情" compact /> : historyState === "error" ? <GraphLoadError compact label="行情读取失败" onRetry={() => setHistoryRetry(value => value + 1)} /> : <Empty compact title="暂无行情数据" text="当前范围没有 Bid/Ask 行情。" />}
+    </div>;
   }
   if (!candles.length) return <div className="chart-block compact-market-empty"><button type="button" disabled={!canGoLater} onClick={goLater}>→ 返回较新行情</button><span>休市时段</span></div>;
   const low = Math.min(...candles.map(row => row.low)); const high = Math.max(...candles.map(row => row.high));
@@ -798,6 +801,8 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
       <button className={showTraining ? "active" : ""} type="button" onClick={() => setShowTraining(value => !value)}>模型换版本</button>
       <span>显示 {decisions.length}{activeMarket?.decision_downsampled ? ` / 共 ${activeMarket.source_decision_count ?? decisions.length}` : ""} 次{hiddenByAction > 0 ? ` · 动作筛选隐藏 ${hiddenByAction} 次` : ""}{hiddenByFrequency > 0 ? ` · 频率收起 ${hiddenByFrequency} 次` : ""}</span>
     </div>
+    {historyState === "loading" && <GraphLoading label="正在更新行情" compact />}
+    {historyState === "error" && <GraphLoadError compact label="行情更新失败" onRetry={() => setHistoryRetry(value => value + 1)} />}
     <div className="market-history-nav" aria-label="历史行情翻页">
       <button type="button" disabled={!canGoEarlier} onClick={goEarlier} aria-label="查看更早行情">←</button>
       <span>{timeLabel(candles[0].time)} — {timeLabel(candles.at(-1)!.time)}{range === "all" && activeMarket?.overview_downsampled ? ` · 全部 ${activeMarket.source_candle_count ?? ""} 根概览` : ""}</span>
@@ -915,20 +920,20 @@ function ExecutionLineChart({ title, subtitle, points, sourceCount, downsampled,
   </article>;
 }
 
-function GraphLoading({ label = "正在读取数据" }: { label?: string }) {
-  return <div className="graph-loading" role="status" aria-live="polite">
+function GraphLoading({ label = "正在读取数据", compact = false }: { label?: string; compact?: boolean }) {
+  return <div className={`graph-loading${compact ? " graph-state-compact" : ""}`} role="status" aria-live="polite">
     <span className="graph-loading-bars" aria-hidden="true"><i /><i /><i /></span>
     <strong>{label}</strong>
   </div>;
 }
 
-function GraphLoadError({ onRetry, label = "数据读取失败" }: { onRetry: () => void; label?: string }) {
-  return <div className="graph-empty graph-load-error" role="alert">
+function GraphLoadError({ onRetry, label = "数据读取失败", compact = false }: { onRetry: () => void; label?: string; compact?: boolean }) {
+  return <div className={`graph-empty graph-load-error${compact ? " graph-state-compact" : ""}`} role="alert">
     <strong>{label}</strong>
     <button type="button" onClick={onRetry}>重新读取</button>
   </div>;
 }
 
-function Empty({ text, title }: { text: string; title: string }) {
-  return <div className="graph-empty"><strong>{title}</strong><p>{text}</p></div>;
+function Empty({ text, title, compact = false }: { text: string; title: string; compact?: boolean }) {
+  return <div className={`graph-empty${compact ? " graph-state-compact" : ""}`}><strong>{title}</strong><p>{text}</p></div>;
 }
