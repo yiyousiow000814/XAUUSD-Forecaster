@@ -3,6 +3,7 @@
   "resources": {
     "status": "/api/status",
     "learning": "/api/learning",
+    "learningHistory": "/api/learning-history",
     "newsIndex": "/api/news-index",
     "newsContent": "/api/news-content",
     "marketHistory": "/api/market-history"

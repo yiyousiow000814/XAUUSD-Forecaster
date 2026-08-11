@@ -16,7 +16,6 @@ from .news_impact import (
     impact_is_actionable,
     impact_time_rule,
 )
-from .news_relevance import news_headline_is_actionable
 from .news_contracts import CURRENT_NEWS_CONTRACT
 from .news_identity import (
     canonical_material_event_anchor,
@@ -370,9 +369,6 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             and materiality >= MIN_ACTIONABLE_MATERIALITY
         )
         relevant = controlled_category in ACTIONABLE_CATEGORIES
-        headline_actionable = news_headline_is_actionable(
-            str(canonical.get("headline") or "")
-        )
         eligible = (
             bool(timely)
             and grade in {"PRIMARY", "CORROBORATED", "SINGLE_RELIABLE"}
@@ -380,7 +376,6 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             and relevant
             and semantic_eligible
             and event_clock_valid
-            and headline_actionable
         )
         official_eligible = eligible and canonical["source"] in CORE_OFFICIAL_SOURCES
         source_names = sorted({row["source"] for row in members})
@@ -419,8 +414,6 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             reasons.append("LOW_MATERIALITY")
         if not event_clock_valid:
             reasons.append("EVENT_TIME_INVALID")
-        if not headline_actionable:
-            reasons.append("EDITORIAL_OR_INVESTMENT_GUIDE")
         entities = sorted({
             str(value).strip()
             for row in members

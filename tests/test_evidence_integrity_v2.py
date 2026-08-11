@@ -2060,7 +2060,7 @@ def test_shadow_composite_keeps_research_direction_visible(tmp_path) -> None:
     ledger.close()
 
 
-def test_controlled_news_semantics_do_not_reclassify_by_substring() -> None:
+def test_controlled_news_semantics_do_not_reclassify_by_headline() -> None:
     annotation = {
         "record_kind": "FACT_EVENT",
         "primary_category": "rates_fed",
@@ -2073,7 +2073,7 @@ def test_controlled_news_semantics_do_not_reclassify_by_substring() -> None:
     ) == "FACT_EVENT"
     assert effective_record_kind(
         annotation, "Gold gains as Treasury yields fall"
-    ) == "MARKET_REACTION"
+    ) == "FACT_EVENT"
     assert annotation_topics(annotation) == ("rates_fed", "growth_economy")
     # These used to trigger substring bugs: war in forward and gain in against.
     assert annotation_topics({
@@ -2081,14 +2081,14 @@ def test_controlled_news_semantics_do_not_reclassify_by_substring() -> None:
     }) == ("rates_fed", "growth_economy")
 
 
-def test_market_wrap_is_display_only_even_when_llm_calls_it_fact(tmp_path) -> None:
+def test_market_wrap_is_display_only_when_ai_calls_it_market_reaction(tmp_path) -> None:
     epoch = datetime(2026, 8, 10, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward-market-wrap.sqlite3", now=epoch)
     _append_news(
         ledger, source="google_news_fed_rates", item="Gold gains as Treasury yields fall",
         first_seen=epoch, parsed_at=epoch + timedelta(seconds=30), impulse=0.2,
         link="https://finance.yahoo.com/example", primary_category="rates_fed",
-        record_kind="FACT_EVENT", materiality=0.8,
+        record_kind="MARKET_REACTION", materiality=0.8,
     )
 
     row = event_evidence_rows(ledger, epoch + timedelta(minutes=5))[0]
