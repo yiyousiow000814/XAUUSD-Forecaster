@@ -1,4 +1,4 @@
-import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const dashboardSnapshots = sqliteTable("dashboard_snapshots", {
   id: integer("id").primaryKey(),
@@ -55,6 +55,41 @@ export const marketDecisions = sqliteTable(
     index("market_decisions_time_idx").on(table.decisionEpoch),
     index("market_decisions_model_time_idx").on(
       table.modelIdentity, table.decisionEpoch,
+    ),
+  ],
+);
+
+export const marketHistoryOverview = sqliteTable("market_history_overview", {
+  overviewKey: text("overview_key").primaryKey(),
+  payload: text("payload").notNull(),
+  receivedAt: text("received_at").notNull(),
+});
+
+export const marketDecisionOverviews = sqliteTable(
+  "market_decision_overviews",
+  {
+    overviewKey: text("overview_key").primaryKey(),
+    modelIdentity: text("model_identity").notNull(),
+    frequency: text("frequency").notNull(),
+    payload: text("payload").notNull(),
+    receivedAt: text("received_at").notNull(),
+  },
+);
+
+export const learningRecords = sqliteTable(
+  "learning_records",
+  {
+    resource: text("resource").notNull(),
+    recordKey: text("record_key").notNull(),
+    sortEpoch: integer("sort_epoch").notNull(),
+    payloadHash: text("payload_hash").notNull(),
+    payload: text("payload").notNull(),
+    receivedAt: text("received_at").notNull(),
+  },
+  table => [
+    primaryKey({ columns: [table.resource, table.recordKey] }),
+    index("learning_records_resource_time_idx").on(
+      table.resource, table.sortEpoch, table.recordKey,
     ),
   ],
 );

@@ -99,6 +99,17 @@ The active Gemini prompt receives the complete stored source body without an
 application-level character slice and appends a concise Simplified-Chinese
 summary together with the structured impulse fields. A new prompt version is a
 new immutable annotation; it never rewrites an earlier interpretation.
+
+The active annotation contract remains
+`news-json-v14-material-event-evidence` while
+`news-json-v15-ai-semantic-review` is built beside it. V15 adds explicit
+semantic relevance, review priority, material-change, time-sensitivity,
+reason, and source-evidence fields. Its evidence excerpts must occur in the
+stored headline or body. Casing, spelling, one keyword, or publisher identity
+cannot determine meaning. V15 annotations and their Gemma reviews are stored
+for comparison but are excluded from active features, storylines, training,
+and inference until a complete generation handover is verified.
+
 Gemini 3.5 Flash-Lite is the primary annotator. Its last 150 daily local
 requests remain reserved for monetary-policy, CPI, and payroll events. Gemini
 3.1 Flash-Lite may annotate routine full-text items only after the 3.5 routine
