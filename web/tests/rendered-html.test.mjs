@@ -532,6 +532,7 @@ test("keeps the learning disclaimer short and explicit", () => {
 test("uses one modal timeline for model generations and market decisions", () => {
   const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(page, /打开交互图表/);
   assert.match(page, /新闻修正量/);
   assert.match(page, /大视野新闻修正量/);
@@ -548,6 +549,13 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /训练组分页（/);
   assert.match(modal, /aria-label="上一页训练组"/);
   assert.match(modal, /aria-label="下一页训练组"/);
+  assert.match(modal, /pendingPageScrollRef/);
+  assert.match(modal, /if \(!pendingPageScrollRef\.current \|\| pageLoading \|\| pageError\) return/);
+  assert.match(modal, /scroller\.scrollTo/);
+  assert.doesNotMatch(modal, /setPage\([\s\S]{0,160}scrollIntoView/);
+  assert.match(modal, /className="version-page-stage" aria-busy=\{pageLoading\}/);
+  assert.match(css, /version-page-stage \{ min-height:560px; display:flex; flex-direction:column/);
+  assert.match(css, /version-pagination-bottom \{ margin-top:auto/);
   assert.match(modal, /position="bottom"/);
   assert.match(modal, /className="version-list-anchor"/);
   assert.match(modal, /共同训练截止量对齐/);
@@ -645,7 +653,6 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /无效样本 · 已隔离/);
   assert.doesNotMatch(modal, /三种动作同一30分钟结果/);
   assert.doesNotMatch(modal, /30分钟退出线/);
-  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(css, /\.version-pagination/);
   assert.match(css, /\.version-pagination button \{ width:46px; height:46px/);
   assert.match(css, /font-size:clamp\(24px,7vw,28px\)/);

@@ -220,6 +220,7 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
   const [overviewRetry, setOverviewRetry] = useState(0);
   const [pageRetry, setPageRetry] = useState(0);
   const resultListRef = useRef<HTMLDivElement>(null);
+  const pendingPageScrollRef = useRef(false);
   const rows = groups.filter(row => row.model_identity === identity).sort((a,b) => b.generation-a.generation);
   const pageCursor = pageCursors[page];
   useEffect(() => {
@@ -279,9 +280,24 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
     ?? rows.slice(safePage * pageSize, (safePage + 1) * pageSize);
   const pageLoading = Boolean(historyResource && !remotePages[safePage] && !pageError);
   const goToPage = (nextPage: number) => {
+    pendingPageScrollRef.current = true;
     setPage(Math.max(0, Math.min(pageCount - 1, nextPage)));
-    window.requestAnimationFrame(() => resultListRef.current?.scrollIntoView({ behavior:"smooth", block:"start" }));
   };
+  useEffect(() => {
+    if (!pendingPageScrollRef.current || pageLoading || pageError) return;
+    pendingPageScrollRef.current = false;
+    const frame = window.requestAnimationFrame(() => {
+      const anchor = resultListRef.current;
+      const scroller = anchor?.closest<HTMLElement>(".graph-modal-body");
+      if (!anchor || !scroller) return;
+      const top = scroller.scrollTop + anchor.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+      scroller.scrollTo({
+        top,
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [pageLoading, pageError, safePage]);
   const stamp = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12:false, month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" });
   const metric = (row: VersionGroup) => row.cadence_metrics?.[cadence] ?? { oos_rows: row.subsequent_oos_rows, distinct_days: row.distinct_days, cumulative_quote_return: row.cumulative_quote_return, profit_factor_quote_adjusted: row.profit_factor_quote_adjusted, coverage_rate: row.coverage_rate };
   const graphGroups = overviewGroups ?? groups;
@@ -323,6 +339,7 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
       <div className="chart-legend">{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <span key={key}><i style={{ background:COLORS[key] }} />{label}</span>)}</div>
     </section>
     <div ref={resultListRef} className="version-list-anchor" aria-hidden="true" />
+    <div className="version-page-stage" aria-busy={pageLoading}>
     {pageLoading ? <GraphLoading label="正在读取这组成绩" compact /> : pageError ? <GraphLoadError compact label={pageError} onRetry={() => {
       setPageError(null);
       setPageRetry(value => value + 1);
@@ -343,6 +360,7 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
     {pageCount > 1 && <VersionPagination page={safePage} pageCount={pageCount} total={totalRows} onPage={goToPage} position="bottom" />}
     {!totalRows && <p>这个模型还没有真实训练版本。</p>}
     </>}
+    </div>
   </section>;
 }
 
