@@ -169,12 +169,18 @@ test("formats server-rendered preview times in one deterministic timezone", () =
 
 test("returns a verified main revision through the existing ingest heartbeat", () => {
   const ingest = readFileSync(new URL("../app/api/ingest/route.ts", import.meta.url), "utf8");
+  const snapshot = readFileSync(new URL("../app/api/_shared/dashboard-snapshot.ts", import.meta.url), "utf8");
   const vite = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
   assert.match(vite, /__AURUM_DEPLOYMENT__/);
   assert.match(vite, /WORKERS_CI_COMMIT_SHA/);
   assert.match(ingest, /deployment\.branch === "main"/);
   assert.match(ingest, /\^\[0-9a-f\]\{40\}\$/);
   assert.match(ingest, /main_revision/);
+  assert.match(ingest, /writeDashboardSnapshot\(request, binding, 1\)/);
+  assert.doesNotMatch(ingest, /request\.json\(\)|JSON\.stringify\(|TextEncoder/);
+  assert.match(snapshot, /json_valid\(payload\)/);
+  assert.match(snapshot, /content-length/);
+  assert.match(snapshot, /MAX_DASHBOARD_SNAPSHOT_BYTES/);
 });
 
 test("does not show a redundant forecast warning while the market is closed", () => {
@@ -359,6 +365,61 @@ test("reads the append-only D1 learning history before the compact live relay", 
   assert.match(source, /return new Response\(row\.payload/);
   assert.doesNotMatch(source, /NextResponse\.json\(JSON\.parse\(row\.payload\)/);
   assert.doesNotMatch(source, /previewBundle\.learning/);
+  assert.match(source, /writeDashboardSnapshot\(request, binding, 3\)/);
+  assert.doesNotMatch(source, /JSON\.parse\(serialized\)|TextEncoder/);
+});
+
+test("uses one D1-validated writer for every large dashboard snapshot", () => {
+  for (const [path, id] of [
+    ["../app/api/ingest/route.ts", 1],
+    ["../app/api/market-chart/route.ts", 2],
+    ["../app/api/learning/route.ts", 3],
+  ]) {
+    const source = readFileSync(new URL(path, import.meta.url), "utf8");
+    assert.match(source, new RegExp(`writeDashboardSnapshot\\(request, binding, ${id}\\)`), path);
+    assert.doesNotMatch(source, /INSERT INTO dashboard_snapshots/, path);
+  }
+});
+
+test("rejects oversized snapshots before preparing a D1 statement", async () => {
+  const { MAX_DASHBOARD_SNAPSHOT_BYTES, writeDashboardSnapshot } = await import(
+    "../app/api/_shared/dashboard-snapshot.ts"
+  );
+  let prepared = false;
+  const binding = { prepare() { prepared = true; } };
+  const request = new Request("https://example.test/api/learning", {
+    method: "POST",
+    headers: { "content-length": String(MAX_DASHBOARD_SNAPSHOT_BYTES + 1) },
+    body: "{}",
+  });
+  assert.equal(await writeDashboardSnapshot(request, binding, 3), "too_large");
+  assert.equal(prepared, false);
+});
+
+test("lets D1 validate raw snapshot JSON in the same write", async () => {
+  const { writeDashboardSnapshot } = await import("../app/api/_shared/dashboard-snapshot.ts");
+  const calls = [];
+  const binding = {
+    prepare(sql) {
+      return {
+        bind(...values) {
+          calls.push({ sql, values });
+          return { run: async () => ({ meta: { changes: 1 } }) };
+        },
+      };
+    },
+  };
+  const body = JSON.stringify({ generated_at: "2026-08-11T12:00:00Z" });
+  const request = new Request("https://example.test/api/ingest", {
+    method: "POST",
+    headers: { "content-length": String(Buffer.byteLength(body)) },
+    body,
+  });
+  assert.equal(await writeDashboardSnapshot(request, binding, 1), "stored");
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].sql, /WHERE json_valid\(payload\)/);
+  assert.equal(calls[0].values[0], body);
+  assert.equal(calls[0].values[1], 1);
 });
 
 test("handles a non-JSON service failure without exposing a parser error", () => {
