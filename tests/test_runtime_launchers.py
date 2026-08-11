@@ -33,6 +33,18 @@ def test_control_center_treats_weekly_close_as_healthy() -> None:
     assert '@("STOPPED", "DATA STALE", "API ERROR")' in control_center
 
 
+def test_control_center_loads_collector_keys_without_exposing_them() -> None:
+    control_center = (
+        ROOT / "scripts" / "xauusd_control_center.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert 'function Get-CollectorSecret' in control_center
+    assert '.local\\secrets\\collector-keys.json' in control_center
+    assert 'Get-CollectorSecret -Name "BLS_API_KEY"' in control_center
+    assert 'Get-CollectorSecret -Name "BEA_API_KEY"' in control_center
+    assert 'ConvertFrom-Json' in control_center
+
+
 def test_control_center_updates_only_the_isolated_main_runtime() -> None:
     path = ROOT / "scripts" / "xauusd_control_center.ps1"
     control_center = path.read_text(encoding="utf-8")

@@ -31,6 +31,14 @@ collector process without writing it to source control or logs. A
 conservative release-page discovery fallback. Its later Google/local receipt
 time is retained; it never backdates visibility to the publisher timestamp.
 
+The Control Center also recognizes `BEA_API_KEY`. Both official-data keys may
+be backed up in the ignored local file
+`.local/secrets/collector-keys.json`; user-level environment variables take
+precedence. Secret values are never returned by the dashboard or written to
+collector logs. The BEA Data API is separate from BEA news-release pages and
+must pass an authenticated API probe before a numeric Forward adapter is
+enabled.
+
 ## 4. Optional synchronized symbols
 
 Confirmed: collect XAUUSD only. The market-provider and symbol-validation
