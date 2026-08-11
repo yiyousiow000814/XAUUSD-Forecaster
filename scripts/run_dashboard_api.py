@@ -241,7 +241,7 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
             health = "DEGRADED"
         elif age_seconds is None or age_seconds > stale_minutes * 60:
             health = "STALE"
-        elif item_count == 0 and source.startswith("bls_"):
+        elif revision_sources and item_count == 0:
             health = "WARMING_UP"
         else:
             health = "HEALTHY"

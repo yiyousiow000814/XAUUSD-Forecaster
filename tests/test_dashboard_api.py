@@ -336,6 +336,21 @@ def test_bls_direct_403_reports_healthy_official_domain_fallback(tmp_path) -> No
     assert direct["semantic_status"] == "OFFICIAL_DOMAIN_FALLBACK_ACTIVE"
 
 
+def test_polled_release_source_without_items_is_not_reported_healthy(tmp_path) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger.append_source_poll({
+        "poll_id": "bea-empty-ok", "source": "bea_economic_releases",
+        "fetched_time": now, "status": "OK",
+    })
+
+    rows = _dashboard_module()._news_source_health(ledger.connection, now)
+    bea = next(row for row in rows if row["source"] == "bea_economic_releases")
+    assert bea["health"] == "WARMING_UP"
+    assert bea["semantic_status"] == "NO_RELEASE_CAPTURED"
+    assert bea["item_count"] == 0
+
+
 def test_dashboard_orders_news_by_publisher_time_not_discovery_time(tmp_path) -> None:
     now = datetime(2026, 8, 6, 6, 0, tzinfo=UTC)
     database = tmp_path / "forward.sqlite3"
@@ -604,6 +619,17 @@ def test_dashboard_reports_gdelt_fallback_and_retry_time(tmp_path) -> None:
     ledger.append_source_poll({
         "poll_id": "google-ok", "source": "google_news_gold_context",
         "fetched_time": now - timedelta(minutes=5), "status": "OK",
+    })
+    body = "complete Google News fallback evidence " * 12
+    ledger.append_news_revision({
+        "source": "google_news_gold_context", "source_item_id": "fallback-item",
+        "source_published_time": now - timedelta(minutes=10),
+        "collector_first_seen_time": now - timedelta(minutes=5),
+        "fetched_time": now - timedelta(minutes=5),
+        "headline": "Gold rises as Treasury yields fall",
+        "body": body, "link": "https://example.test/fallback",
+        "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+        "cluster_id": "fallback-item",
     })
     connection = ledger.connection
     rows = _dashboard_module()._news_source_health(connection, now)

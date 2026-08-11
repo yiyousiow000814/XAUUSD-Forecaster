@@ -764,7 +764,7 @@ def test_gdelt_429_uses_exponential_backoff_without_blocking_fallback(tmp_path) 
     assert recovered["status"] == "OK"
 
 
-def test_gdelt_rejects_noise_before_fetching_publisher_body(tmp_path) -> None:
+def test_gdelt_fetches_fresh_candidate_body_before_ai_semantic_review(tmp_path) -> None:
     fetched = datetime(2026, 8, 10, 6, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched - timedelta(days=1))
     payload = json.dumps({"articles": [{
@@ -775,12 +775,12 @@ def test_gdelt_rejects_noise_before_fetching_publisher_body(tmp_path) -> None:
 
     result = collect_gdelt_news(
         ledger, fetched, lambda _: payload,
-        content_extractor=lambda _: pytest.fail("noise must not fetch publisher body"),
+        content_extractor=lambda url: ("complete candidate evidence " * 30, url),
     )
 
     assert result["status"] == "OK"
-    assert result["inserted_revisions"] == 0
-    assert result["rejected_reasons"] == {"TITLE_NOT_RELEVANT_TO_LANE": 1}
+    assert result["inserted_revisions"] == 1
+    assert result["rejected_reasons"] == {}
 
 
 def test_direct_official_rss_sources_are_bounded_and_rate_limited(tmp_path) -> None:
@@ -999,47 +999,66 @@ def test_google_official_fallback_reports_partial_when_body_is_blocked(tmp_path)
     assert poll["error_type"] == "PublisherContentUnavailable"
 
 
-def test_fed_rates_lane_rejects_retail_rate_noise() -> None:
+def test_fresh_discovery_candidates_reach_ai_despite_headline_semantics() -> None:
     observed = datetime(2026, 8, 8, 16, 0, tzinfo=UTC)
-    for headline in (
+    candidates = (
         "Public Storage preferred shares benefit from lower interest rates",
         "Highest FCNR deposit interest rates for NRIs",
         "Mortgage and refinance interest rates today",
-    ):
-        allowed, _ = google_news_item_is_relevant(
-            "google_news_fed_rates", headline, observed - timedelta(minutes=10), observed,
-        )
-        assert not allowed
-    for headline in (
         "Federal Reserve split deepens over rate hikes",
         "Treasury yields drop after surprise US jobs loss",
         "US inflation changes the outlook for interest rates",
-    ):
-        allowed, _ = google_news_item_is_relevant(
+    )
+    for headline in candidates:
+        allowed, reason = google_news_item_is_relevant(
             "google_news_fed_rates", headline, observed - timedelta(minutes=10), observed,
         )
         assert allowed
+        assert reason == "AI_SEMANTIC_REVIEW_REQUIRED"
 
 
-def test_gdelt_lane_rejects_unrelated_and_local_retail_gold_noise() -> None:
+def test_us_employment_lane_does_not_guess_meaning_from_case_or_keywords() -> None:
+    observed = datetime(2026, 8, 11, 10, 0, tzinfo=UTC)
+    for headline in (
+        "Major earthquake jolts western Colombia",
+        "US earthquake jolts Alaska without major damage",
+        "Musk jolts Zelensky with surprise announcement",
+        "Egypt unemployment rate falls to 5.8%",
+        "US unemployment rate falls after July jobs report",
+        "BLS JOLTS report shows fewer job openings",
+        "bls jolts report shows fewer job openings",
+        "Nonfarm payrolls decline in July",
+    ):
+        allowed, reason = google_news_item_is_relevant(
+            "google_news_us_employment",
+            headline,
+            observed - timedelta(minutes=10),
+            observed,
+        )
+        assert allowed is True
+        assert reason == "AI_SEMANTIC_REVIEW_REQUIRED"
+
+
+def test_gdelt_candidates_also_reach_ai_instead_of_keyword_filtering() -> None:
     observed = datetime(2026, 8, 10, 6, 0, tzinfo=UTC)
     for headline in (
         "A tragic love story remembered after many years",
         "Cek Harga Emas Hari Ini Senin 10 Agustus 2026",
         "Giá vàng chiều 5/8: Vàng SJC tiếp tục đi lên",
     ):
-        allowed, _ = google_news_item_is_relevant(
+        allowed, reason = google_news_item_is_relevant(
             "gdelt_gold_geopolitics", headline,
             observed - timedelta(minutes=20), observed,
         )
-        assert not allowed
+        assert allowed
+        assert reason == "AI_SEMANTIC_REVIEW_REQUIRED"
     allowed, reason = google_news_item_is_relevant(
         "gdelt_gold_geopolitics",
         "Gold rises as Treasury yields fall after US jobs report",
         observed - timedelta(minutes=20), observed,
     )
     assert allowed
-    assert reason == "RELEVANT_DISCOVERY_ITEM"
+    assert reason == "AI_SEMANTIC_REVIEW_REQUIRED"
 
 
 def test_google_news_lane_prefers_established_publisher_within_limit(tmp_path) -> None:
@@ -1061,7 +1080,7 @@ def test_google_news_lane_prefers_established_publisher_within_limit(tmp_path) -
     assert row["headline"].endswith("Reuters")
 
 
-def test_google_news_lane_rejects_old_and_off_topic_results_before_ledger(tmp_path) -> None:
+def test_google_news_lane_rejects_old_but_sends_fresh_results_to_ai(tmp_path) -> None:
     fetched = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
     lane = GoogleNewsLane("google_news_us_inflation", "US CPI")
@@ -1082,11 +1101,14 @@ def test_google_news_lane_rejects_old_and_off_topic_results_before_ledger(tmp_pa
         content_extractor=lambda url: ("inflation evidence " * 40, url),
     )
 
-    assert result["inserted_revisions"] == 1
-    assert result["rejected_items"] == 2
-    assert ledger.connection.execute(
-        "SELECT source_item_id FROM news_revisions"
-    ).fetchone()["source_item_id"] == "fresh"
+    assert result["inserted_revisions"] == 2
+    assert result["rejected_items"] == 1
+    assert {
+        row["source_item_id"]
+        for row in ledger.connection.execute(
+            "SELECT source_item_id FROM news_revisions"
+        ).fetchall()
+    } == {"wrong", "fresh"}
 
 
 def test_generic_article_extractor_reads_pdf(monkeypatch) -> None:
@@ -1975,7 +1997,7 @@ def test_suspect_numeric_recovery_title_is_retried_append_only(
     assert translate_pending_headlines(ledger, api_key="test-key") == []
 
 
-def test_irrelevant_google_rate_title_does_not_consume_translation(
+def test_ambiguous_google_rate_title_reaches_ai_translation(
     tmp_path, monkeypatch
 ) -> None:
     now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
@@ -1991,11 +2013,13 @@ def test_irrelevant_google_rate_title_does_not_consume_translation(
     })
     monkeypatch.setattr(
         annotation_module, "_call_gemini_title",
-        lambda *_: pytest.fail("irrelevant title must not call the translator"),
+        lambda *_: ("今日抵押贷款与再融资利率", "gemma-4-31b-it"),
     )
 
-    assert translate_pending_headlines(ledger, api_key="test-key") == []
-    assert ledger.count("news_title_translations") == 0
+    statuses = translate_pending_headlines(ledger, api_key="test-key")
+    assert len(statuses) == 1
+    assert statuses[0]["status"] == "OK"
+    assert ledger.count("news_title_translations") == 1
 
 
 def test_gemma_impact_assessment_is_append_only_and_versioned(
@@ -2391,15 +2415,15 @@ def test_gemini_key_pool_falls_back_on_quota_error(monkeypatch) -> None:
     assert model == "gemini-3.5-flash-lite"
 
 
-def test_gold_investment_guide_is_not_an_actionable_news_item() -> None:
+def test_gold_investment_guide_reaches_ai_instead_of_keyword_rejection() -> None:
     observed = datetime(2026, 8, 10, 6, 0, tzinfo=UTC)
     allowed, reason = google_news_item_is_relevant(
         "google_news_gold_context",
         "Smart ways to invest in gold as the dollar falls - MarketWatch",
         observed - timedelta(hours=1), observed,
     )
-    assert allowed is False
-    assert reason == "EDITORIAL_OR_INVESTMENT_GUIDE"
+    assert allowed is True
+    assert reason == "AI_SEMANTIC_REVIEW_REQUIRED"
 
 
 def test_gemini_daily_quota_counts_attempts_and_resets_at_pacific_midnight(
@@ -2534,7 +2558,7 @@ class _FixedProvider:
         return [row for row in self.rows if row.received_time <= decision_time]
 
 
-def test_old_or_late_news_does_not_enter_full_text_queue(tmp_path) -> None:
+def test_archive_is_rejected_but_late_seen_news_reaches_full_text_queue(tmp_path) -> None:
     epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
     for item, published, seen in (
@@ -2555,13 +2579,13 @@ def test_old_or_late_news_does_not_enter_full_text_queue(tmp_path) -> None:
         ledger, epoch + timedelta(hours=3),
         extractor=lambda url: calls.append(url) or ("x" * 600, url),
     )
-    assert result["inserted_revisions"] == 0
-    assert calls == []
+    assert result["inserted_revisions"] == 1
+    assert calls == ["https://publisher.example/late"]
     ledger.close()
 
 
-def test_old_or_late_news_does_not_enter_annotation_queue(
-    tmp_path, monkeypatch
+def test_archive_is_rejected_but_late_seen_news_reaches_annotation_queue(
+    tmp_path,
 ) -> None:
     epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
@@ -2579,14 +2603,12 @@ def test_old_or_late_news_does_not_enter_annotation_queue(
             "content_hash": hashlib.sha256(body.encode()).hexdigest(),
             "cluster_id": item,
         })
-    calls = []
-    monkeypatch.setattr(
-        annotation_module, "_call_ollama",
-        lambda *args: calls.append(args) or ({}, "ollama:test"),
+    rows = annotation_module.pending_annotation_records(
+        ledger.connection,
+        expected_model_identity="ollama:test",
+        compatible_models=("ollama:test", "ollama:test"),
+        observed_at=epoch + timedelta(hours=3),
+        limit=10,
     )
-    result = annotate_pending_news(
-        ledger, provider="ollama", model="test", limit=10
-    )
-    assert result == []
-    assert calls == []
+    assert [row["source_item_id"] for row in rows] == ["late"]
     ledger.close()
