@@ -906,12 +906,12 @@ def test_google_news_revision_uses_resolved_publisher_url(tmp_path) -> None:
     assert row["link"] == "https://publisher.example/gold-rates"
 
 
-def test_google_news_lane_caps_one_event_family_across_repeated_polls(tmp_path) -> None:
+def test_google_news_lane_deduplicates_identical_titles_across_polls(tmp_path) -> None:
     fetched = datetime(2026, 8, 5, 10, 40, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
     lane = GoogleNewsLane("google_news_us_employment", "nonfarm payrolls")
     items = "".join(
-        f"""<item><guid>jobs-{index}</guid><title>Payroll release {index}</title>
+        f"""<item><guid>jobs-{index}</guid><title>Payroll release</title>
         <description>Employment situation result</description>
         <pubDate>Wed, 05 Aug 2026 10:{index:02d}:00 GMT</pubDate>
         <link>https://publisher.example/jobs-{index}</link></item>"""
@@ -929,15 +929,15 @@ def test_google_news_lane_caps_one_event_family_across_repeated_polls(tmp_path) 
         content_extractor=lambda url: ("payroll evidence " * 40, url), limit=25,
     )
 
-    assert first["inserted_revisions"] == 3
-    assert first["processed_items"] == 3
-    assert first["rejected_reasons"]["EVENT_FAMILY_CAP"] == 27
+    assert first["deduped_items"] == 1
+    assert first["inserted_revisions"] == 1
+    assert first["processed_items"] == 1
     assert second["feed_items"] == 30
-    assert second["deduped_items"] == 30
-    assert second["processed_items"] == 0
+    assert second["deduped_items"] == 1
+    assert second["processed_items"] == 1
     assert second["inserted_revisions"] == 0
-    assert second["rejected_reasons"]["EVENT_FAMILY_CAP"] == 30
-    assert ledger.count("news_revisions") == 3
+    assert second["unchanged_items"] == 1
+    assert ledger.count("news_revisions") == 1
 
 
 def test_bls_official_fallback_is_not_blocked_by_discovery_family_cap(tmp_path) -> None:
