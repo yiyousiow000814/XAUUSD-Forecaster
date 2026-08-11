@@ -625,6 +625,14 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /休市期间没有成熟结果/);
   assert.match(modal, /curve-gap-carry-in/);
   assert.match(modal, /窗口开始前有真实结果；中间没有成熟结果/);
+  assert.match(modal, /const actionRuns/);
+  assert.match(modal, /className=\{actionRun\.wait \? "curve-wait-run" : "curve-direction-run"\}/);
+  assert.match(modal, /strokeDasharray=\{actionRun\.wait \? "7 6" : undefined\}/);
+  assert.match(modal, /虚线：WAIT/);
+  assert.match(modal, /点线：无成熟结果/);
+  assert.match(css, /curve-gap-bridge \{[^}]*stroke-dasharray:1 7/);
+  assert.match(css, /chart-legend \.wait-line/);
+  assert.match(css, /chart-legend \.gap-line/);
   assert.doesNotMatch(modal, /points\.unshift\(\{ decision_time: new Date\(start\)/);
   assert.doesNotMatch(modal, /points\.push\(\{ decision_time: new Date\(end\)/);
   assert.match(modal, /成本后EV较高方向/);
