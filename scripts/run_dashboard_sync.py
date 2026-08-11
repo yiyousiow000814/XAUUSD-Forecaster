@@ -288,7 +288,7 @@ def _visual_version_overview(rows: list[dict], limit: int) -> list[dict]:
 def _update_decision_overviews(
     summaries: dict, decisions: list[dict], after: str | None,
 ) -> dict:
-    """Increment fixed-size decision summaries without rereading remote history."""
+    """Refresh sampled decisions and append only genuinely new observations."""
     updated = copy.deepcopy(summaries) if isinstance(summaries, dict) else {}
     for identity in sorted({
         str(row.get("model_identity") or "") for row in decisions
@@ -297,7 +297,6 @@ def _update_decision_overviews(
         identity_rows = [
             row for row in decisions
             if isinstance(row, dict) and row.get("model_identity") == identity
-            and (not after or _epoch(row.get("decision_time")) >= _epoch(after))
         ]
         for frequency in ("5m", "30m"):
             incoming = identity_rows if frequency == "5m" else [
@@ -306,18 +305,30 @@ def _update_decision_overviews(
             ]
             key = f"{identity}\0{frequency}"
             previous = updated.get(key) if isinstance(updated.get(key), dict) else {}
-            previous_keys = {
-                str(row.get("source_decision_id") or "")
-                for row in previous.get("decisions", [])
+            previous_rows = [
+                row for row in previous.get("decisions", [])
                 if isinstance(row, dict) and row.get("source_decision_id")
-            }
-            incoming = [
-                row for row in incoming
-                if str(row.get("source_decision_id") or "") not in previous_keys
             ]
-            if not incoming:
+            previous_by_key = {
+                str(row["source_decision_id"]): row for row in previous_rows
+            }
+            incoming_by_key = {
+                str(row["source_decision_id"]): row for row in incoming
+                if row.get("source_decision_id")
+            }
+            new_rows = [
+                row for row in incoming
+                if row.get("source_decision_id")
+                and str(row["source_decision_id"]) not in previous_by_key
+                and (not after or _epoch(row.get("decision_time")) >= _epoch(after))
+            ]
+            refreshed_rows = [
+                incoming_by_key.get(str(row["source_decision_id"]), row)
+                for row in previous_rows
+            ]
+            if not new_rows and refreshed_rows == previous_rows:
                 continue
-            merged = [*(previous.get("decisions") or []), *incoming]
+            merged = [*refreshed_rows, *new_rows]
             overview = _visual_decision_overview(
                 merged, MARKET_OVERVIEW_DECISIONS_PER_SERIES,
             )
@@ -326,11 +337,11 @@ def _update_decision_overviews(
                 "frequency": frequency,
                 "source_decision_count": int(
                     previous.get("source_decision_count") or 0
-                ) + len(incoming),
+                ) + len(new_rows),
                 "decision_count": len(overview),
                 "decision_downsampled": (
                     int(previous.get("source_decision_count") or 0)
-                    + len(incoming) > len(overview)
+                    + len(new_rows) > len(overview)
                 ),
                 "decisions": overview,
             }

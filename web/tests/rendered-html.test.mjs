@@ -829,6 +829,8 @@ test("loads bounded learning history only when interactive charts need it", () =
   assert.match(modal, /resource: "version-group"/);
   assert.match(modal, /resource=curve-overview/);
   assert.match(modal, /next_cursor/);
+  assert.match(modal, /const pageCursor = pageCursors\[page\]/);
+  assert.doesNotMatch(modal, /loadedPageKeys/);
 });
 
 test("distinguishes market history loading, empty, and failed states", () => {

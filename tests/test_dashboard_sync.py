@@ -534,6 +534,23 @@ def test_decision_overviews_are_incremental_bounded_and_frequency_scoped() -> No
     )
     assert unchanged == summaries
 
+    settled = {
+        **five["decisions"][0],
+        "outcome_status": "MATURE",
+        "value_quote_return": 0.001,
+    }
+    refreshed = module._update_decision_overviews(
+        summaries, [settled], decisions[-1]["decision_time"],
+    )
+    refreshed_five = refreshed["FULL\0" "5m"]
+    assert refreshed_five["source_decision_count"] == 2_000
+    refreshed_row = next(
+        row for row in refreshed_five["decisions"]
+        if row["source_decision_id"] == settled["source_decision_id"]
+    )
+    assert refreshed_row["outcome_status"] == "MATURE"
+    assert refreshed_row["value_quote_return"] == 0.001
+
 
 def test_learning_summary_size_is_fixed_as_history_grows() -> None:
     module = _sync_module()

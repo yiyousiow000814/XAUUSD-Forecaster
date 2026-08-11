@@ -219,9 +219,9 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
   );
   const [overviewRetry, setOverviewRetry] = useState(0);
   const [pageRetry, setPageRetry] = useState(0);
-  const loadedPageKeys = useRef(new Set<string>());
   const resultListRef = useRef<HTMLDivElement>(null);
   const rows = groups.filter(row => row.model_identity === identity).sort((a,b) => b.generation-a.generation);
+  const pageCursor = pageCursors[page];
   useEffect(() => {
     if (!historyResource) return;
     const url = `${historyResource}?resource=version-overview`;
@@ -245,17 +245,13 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
     return () => { cancelled = true; };
   }, [historyResource, overviewRetry]);
   useEffect(() => {
-    if (!historyResource || pageCursors[page] === undefined) return;
+    if (!historyResource || pageCursor === undefined) return;
     const query = new URLSearchParams({
       resource: "version-group", identity, limit: String(pageSize),
     });
-    const cursor = pageCursors[page];
-    if (cursor) query.set("cursor", cursor);
+    if (pageCursor) query.set("cursor", pageCursor);
     const url = `${historyResource}?${query}`;
     const cached = readDashboardResource<{ items: VersionGroup[]; total: number; next_cursor: string | null; preview_limited?: boolean }>(url);
-    const loadKey = `${url}:${pageRetry}`;
-    if (loadedPageKeys.current.has(loadKey)) return;
-    loadedPageKeys.current.add(loadKey);
     let cancelled = false;
     const startedAt = Date.now();
     loadDashboardResource<{ items: VersionGroup[]; total: number; next_cursor: string | null; preview_limited?: boolean }>(url, {
@@ -275,7 +271,7 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
         if (!cancelled && !cached) setPageError("训练记录读取失败");
       });
     return () => { cancelled = true; };
-  }, [historyResource, identity, page, pageCursors, remotePages, pageRetry]);
+  }, [historyResource, identity, page, pageCursor, pageRetry]);
   const totalRows = remoteTotal ?? rows.length;
   const pageCount = Math.max(1, Math.ceil(totalRows / pageSize));
   const safePage = Math.min(page, pageCount - 1);
@@ -317,7 +313,7 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
       setPageRetry(value => value + 1);
     }} />;
   }
-  return <section className="version-ledger modal-version-ledger"><header><div className="version-ledger-title"><span>共同训练截止量对齐 · 同一坐标叠加比较</span><h3>所有模型的训练组成绩</h3></div><div className="version-ledger-controls"><label className="version-ledger-model"><span>查看模型明细</span><select value={identity} onChange={event => { setIdentity(event.target.value); setPage(0); setRemotePages({}); setPageCursors({ 0: null }); setRemoteTotal(null); setPageError(null); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select></label><label><span>统计频率</span><select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPage(0); }}><option value="EVERY_5M">每5分钟（重叠样本）</option><option value="FIXED_30M">每30分钟（固定 :00 / :30）</option></select></label><label><span>横轴范围</span><select value={cutoffWindow} onChange={event => setCutoffWindow(event.target.value as "20" | "all")}><option value="20">最近20个训练截止点</option><option value="all">全部训练截止点</option></select></label></div></header>
+  return <section className="version-ledger modal-version-ledger"><header><div className="version-ledger-title"><span>共同训练截止量对齐 · 同一坐标叠加比较</span><h3>所有模型的训练组成绩</h3></div><div className="version-ledger-controls"><label className="version-ledger-model"><span>查看模型明细</span><select value={identity} onChange={event => { setIdentity(event.target.value); setPage(0); setRemotePages({}); setPageCursors({ 0: null }); setRemoteTotal(null); setPageError(null); setPageRetry(0); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select></label><label><span>统计频率</span><select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPage(0); }}><option value="EVERY_5M">每5分钟（重叠样本）</option><option value="FIXED_30M">每30分钟（固定 :00 / :30）</option></select></label><label><span>横轴范围</span><select value={cutoffWindow} onChange={event => setCutoffWindow(event.target.value as "20" | "all")}><option value="20">最近20个训练截止点</option><option value="all">全部训练截止点</option></select></label></div></header>
     <section className="version-hover-chart" aria-label="所有模型训练组独立收益图">
       <div className="version-hover-readout">{hovered && hoveredMetric ? <><b>{LABELS[hovered.model_identity]} · 第 {hovered.generation} 组</b><span>{stamp(hovered.created_at)} · 共同截止 {comparisonCutoff(hovered)} 条 · 自身训练 {hovered.training_rows} 条 · OOS {hoveredMetric.oos_rows} 条 · 收益 {pct(hoveredMetric.cumulative_quote_return)} · PF {hoveredMetric.profit_factor_quote_adjusted?.toFixed(2) ?? "—"} · 出方向 {((hoveredMetric.coverage_rate ?? 0)*100).toFixed(1)}%</span></> : <><b>五种模型叠加在同一坐标</b><span>实线连接相邻训练截止点；虚线跨过没有合法新版本的空档。空缺代表该模型当轮没有合法新版本；这里只叠加显示，不会把收益相加。</span></>}</div>
       {graphRows.length ? <svg viewBox="0 0 960 300" role="img">
