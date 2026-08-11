@@ -115,8 +115,21 @@ test("falls through to read-only D1 for later Preview news and details", () => {
 
 test("does not poll immutable Preview snapshots", () => {
   const helper = readFileSync(new URL("../app/_lib/dashboard-refresh.ts", import.meta.url), "utf8");
-  assert.match(helper, /immutablePreview\s*\?\s*null\s*:\s*window\.setInterval\(pollRefresh/);
+  assert.match(helper, /live:\s*15_000/);
+  assert.match(helper, /status:\s*60_000/);
+  assert.match(helper, /news:\s*30_000/);
+  assert.match(helper, /learning:\s*300_000/);
+  assert.match(helper, /deployment:\s*120_000/);
+  assert.match(helper, /immutablePreview\s*\?\s*null\s*:\s*window\.setInterval\(pollWhenEligible/);
   assert.match(helper, /is_preview[^=]*=== true/s);
+  assert.match(helper, /document\.visibilityState !== "visible"/);
+  assert.match(helper, /navigator\.webdriver/);
+  assert.match(helper, /localStorage\.getItem/);
+  assert.match(helper, /visibilitychange/);
+  const statusView = readFileSync(new URL("../app/_views/StatusView.tsx", import.meta.url), "utf8");
+  const healthView = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
+  assert.match(statusView, /DASHBOARD_REFRESH_INTERVALS\.status \/ 1000/);
+  assert.match(healthView, /DASHBOARD_REFRESH_INTERVALS\.status \/ 1000/);
   for (const path of [
     "../app/_views/LiveRoomView.tsx",
     "../app/_views/StatusView.tsx",
@@ -326,6 +339,14 @@ test("reloads an already-open dashboard after a deployment changes its client bu
   assert.match(refresh, /cache:\s*"no-store"/);
   assert.match(refresh, /window\.location\.reload\(\)/);
   assert.match(refresh, /document\.visibilityState !== "visible"/);
+  assert.match(refresh, /navigator\.webdriver/);
+  assert.match(refresh, /DASHBOARD_REFRESH_INTERVALS\.deployment/);
+});
+
+test("keeps large chart snapshots off the Worker JSON serialization path", () => {
+  const route = readFileSync(new URL("../app/api/market-chart/route.ts", import.meta.url), "utf8");
+  assert.match(route, /return new Response\(row\.payload/);
+  assert.doesNotMatch(route, /NextResponse\.json\(JSON\.parse\(row\.payload\)/);
 });
 
 test("reads the append-only D1 learning history before the compact live relay", () => {
@@ -346,7 +367,7 @@ test("handles a non-JSON service failure without exposing a parser error", () =>
   assert.match(resource, /数据服务暂时不可用/);
   assert.match(resource, /await response\.text\(\)/);
   assert.doesNotMatch(resource, /await response\.json\(\)/);
-  assert.match(audit, /LEARNING_REFRESH_INTERVAL_MS = 60_000/);
+  assert.match(audit, /DASHBOARD_REFRESH_INTERVALS\.learning/);
 });
 
 test("shows single events immediately and keeps later changes in one thread", () => {

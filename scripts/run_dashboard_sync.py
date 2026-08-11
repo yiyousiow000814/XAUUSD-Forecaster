@@ -386,8 +386,11 @@ def remote_snapshot(payload: dict) -> bytes:
     market = snapshot.get("market_chart")
     if isinstance(market, dict):
         # The full chart is synchronized separately.  Keeping it in the status
-        # snapshot made five model families compete for one global row limit.
+        # snapshot wastes Worker CPU and request bytes on every status poll.
+        market["candles"] = []
+        market["overview_candles"] = []
         market["decisions"] = []
+        market["training_markers"] = []
         market["decision_resource"] = "/api/market-chart"
         market["history_resource"] = "/api/market-history"
 

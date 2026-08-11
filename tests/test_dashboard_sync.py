@@ -313,7 +313,13 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
         } for index in range(100)],
         "recent_decisions": [{"id": index} for index in range(30)],
         "news_evidence": [{"id": index} for index in range(100)],
-        "market_chart": {"decisions": [{
+        "market_chart": {
+            "candles": [{"time": "2026-08-06T00:00:00Z", "open": 1,
+                         "high": 2, "low": 0.5, "close": 1.5}],
+            "overview_candles": [{"time": "2026-08-05T00:00:00Z", "open": 1,
+                                  "high": 2, "low": 0.5, "close": 1.5}],
+            "training_markers": [{"time": "2026-08-06T00:00:00Z"}],
+            "decisions": [{
             "source_decision_id": "d1", "decision_time": "2026-08-06T00:00:00+00:00",
             "model_identity": "MARKET_ONLY", "model_version": "large-unused-field",
             "recommended_action": "SHORT", "ev_long_u5": -0.2,
@@ -340,6 +346,9 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
     assert "annotation_reason" not in detail_rows[0]["payload"]
     assert len(detail_rows[0]["detail_key"]) == 64
     assert mirrored["market_chart"]["decisions"] == []
+    assert mirrored["market_chart"]["candles"] == []
+    assert mirrored["market_chart"]["overview_candles"] == []
+    assert mirrored["market_chart"]["training_markers"] == []
     market_decision = json.loads(module.market_chart_snapshot(payload))["decisions"][0]
     assert market_decision["source_decision_id"] == "d1"
     assert market_decision["model_version"] == "unused-field"

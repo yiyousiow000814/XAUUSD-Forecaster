@@ -23,6 +23,25 @@
 - Add or update automated coverage, and record the Preview URL and responsive
   checks in the pull request before calling the change complete.
 
+## Browser Automation Lifecycle
+
+- Treat every Playwright or browser-control session as a resource that must be
+  explicitly closed. Persistent browser sessions must never be left running
+  after inspection because they can keep polling deployed pages and consume
+  production request quotas.
+- Before browser automation, audit existing Playwright browser processes and
+  record the baseline. Reuse one named session for the complete verification
+  flow; do not open a new browser for each viewport, route, or assertion.
+- Close the named session on every completion path, including failed commands,
+  timeouts, interrupted checks, and task switches. A failed verification does
+  not waive cleanup.
+- After closing, audit Playwright browser processes again. Browser verification
+  is incomplete until no process created by the task remains. Report the final
+  process count in the pull request when Preview verification was performed.
+- Prefer immutable branch Previews for UI checks. Do not leave a production page
+  open in an automated browser, and never rely on background throttling to limit
+  its requests.
+
 ## Version Handover
 
 - A model-rule handover may keep the active and target implementations together

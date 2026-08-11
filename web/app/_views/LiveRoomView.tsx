@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import DashboardLink from "../_components/DashboardLink";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
-import { isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
+import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 
 type Decision = {
   decision_time: string;
@@ -116,8 +116,9 @@ export default function LiveRoomView() {
     return scheduleDashboardRefresh(
       () => void refresh(),
       () => void refresh(true),
-      5_000,
+      DASHBOARD_REFRESH_INTERVALS.live,
       immutablePreview,
+      "live-status",
     );
   }, [refresh, immutablePreview]);
 
