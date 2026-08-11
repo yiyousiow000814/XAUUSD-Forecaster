@@ -857,6 +857,9 @@ export default function AuditView() {
   const activeLearningIdentities = new Set(
     activeLearningModels.map(row => row.model_identity),
   ).size;
+  const liveOosModelGroups = learningState === "ready"
+    ? activeLearningIdentities
+    : payload?.counts?.live_oos_model_groups;
   const latestVersionGroups = (payload?.learning_curves?.version_groups ?? []).filter(
     row => row.lifecycle_status === "LATEST",
   );
@@ -964,7 +967,7 @@ export default function AuditView() {
         <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>新闻证据管理 <b>{evidenceSummarySeenCount}</b></a>
         <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件脉络 <b>{activeEventTotal}</b></a>
         <a href="/audit?view=decisions" className={view === "decisions" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("decisions"); }}>决策与30分钟结果 <b>{payload?.counts?.decision_events ?? 0}</b></a>
-        <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b>{learningState === "ready" ? `${activeLearningIdentities}组` : learningState === "loading" ? "读取中" : "—"}</b></a>
+        <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b>{liveOosModelGroups !== undefined ? `${liveOosModelGroups}组` : learningState === "loading" ? "读取中" : "—"}</b></a>
         <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b>{payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</b></a>
       </nav>
       <button type="button" className="audit-tabs-scroll" onClick={() => scrollAuditTabs(1)} aria-label="向右查看更多审计视图"><span aria-hidden="true">›</span></button>

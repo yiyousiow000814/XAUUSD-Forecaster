@@ -294,6 +294,7 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /按事件类型和有效交易时间逐步衰减/);
   assert.match(source, /无效样本/);
   assert.match(source, /activeLearningIdentities/);
+  assert.match(source, /counts\?\.live_oos_model_groups/);
   if (process.env.WORKERS_CI_BRANCH && process.env.WORKERS_CI_BRANCH !== "main") {
     assert.doesNotMatch(html, /news-row-placeholder/);
   } else {

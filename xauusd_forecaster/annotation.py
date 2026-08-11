@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from sqlite3 import Connection
+from typing import Callable
 
 from .forward_ledger import ForwardLedger
 from .gemini_quota import GeminiQuotaLedger
@@ -239,6 +240,8 @@ def annotate_pending_news(
     limit: int | None = None,
     prompt_version: str = PROMPT_VERSION,
     allow_priority_reserve: bool = True,
+    records: list[dict[str, object]] | None = None,
+    request_reserver: Callable[[str], bool] | None = None,
 ) -> list[dict[str, object]]:
     if prompt_version not in GENERATED_NEWS_PROMPT_VERSIONS:
         raise ValueError(f"unsupported news prompt version: {prompt_version}")
@@ -264,7 +267,9 @@ def annotate_pending_news(
     request_pool = None
     if selected_provider == "gemini":
         quota = GeminiQuotaLedger(_gemini_quota_path(ledger, selected_model))
-        request_pool = _GeminiRequestPool(keys, quota)
+        request_pool = _GeminiRequestPool(
+            keys, quota, request_reserver=request_reserver,
+        )
         total_capacity = request_pool.available_batch_capacity()
         if total_capacity <= 0:
             return [{"status": "DISABLED", "reason": "GEMINI_DAILY_QUOTA_EXHAUSTED"}]
@@ -285,7 +290,7 @@ def annotate_pending_news(
         if selected_provider == "gemini"
         else (expected_model_identity, expected_model_identity)
     )
-    pending_records = pending_annotation_records(
+    pending_records = records if records is not None else pending_annotation_records(
         ledger.connection,
         expected_model_identity=expected_model_identity,
         compatible_models=compatible_models,
@@ -350,7 +355,11 @@ def annotate_pending_news(
         pending_records = selected_records
     indexed_records = list(enumerate(pending_records))
     statuses: list[dict[str, object]] = []
-    if selected_provider == "gemini" and pending_records:
+    if (
+        selected_provider == "gemini"
+        and pending_records
+        and request_reserver is None
+    ):
         with ThreadPoolExecutor(
             max_workers=min(GEMINI_MAX_PARALLEL_REQUESTS, len(pending_records))
         ) as pool:
@@ -423,31 +432,16 @@ def _persist_parsed_annotation(
     }
 
 
-def translate_pending_headlines(
-    ledger: ForwardLedger,
+def pending_title_translation_records(
+    connection: Connection,
     *,
-    api_key: str | None = None,
-    model: str | None = None,
+    model: str = DEFAULT_GEMMA_MODEL,
+    observed_at: datetime | None = None,
+    limit: int = 500,
 ) -> list[dict[str, object]]:
-    """Translate display titles without creating action-bearing news features."""
-    keys = configured_gemini_api_keys(api_key)
-    if not keys:
-        return [{"status": "DISABLED", "reason": "GEMINI_API_KEY_MISSING"}]
-    selected_model = model or DEFAULT_GEMMA_MODEL
-    quota = GeminiQuotaLedger(
-        ledger.path.parent / "gemma-quota.json",
-        daily_limit=GEMMA_REQUESTS_PER_DAY_PER_KEY,
-    )
-    request_pool = _GeminiRequestPool(
-        keys,
-        quota,
-        requests_per_key=GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
-        batch_limit=GEMMA_TITLE_BATCH_LIMIT,
-    )
-    capacity = request_pool.available_batch_capacity()
-    if capacity <= 0:
-        return [{"status": "DISABLED", "reason": "GEMMA_DAILY_QUOTA_EXHAUSTED"}]
-    pending = ledger.connection.execute(
+    """Return display-title work without performing an LLM request."""
+    now = observed_at or datetime.now(UTC)
+    pending = connection.execute(
         """SELECT n.* FROM news_revisions n
         WHERE NOT EXISTS (
             SELECT 1 FROM news_title_translations t
@@ -497,32 +491,64 @@ def translate_pending_headlines(
                           n.collector_first_seen_time) DESC
         LIMIT ?""",
         (
-            INVALID_CHINESE_TITLE, "%相关数值%",
-            selected_model, TITLE_PROMPT_VERSION,
-            datetime.now(UTC).isoformat(timespec="microseconds"),
-            INVALID_CHINESE_TITLE, "%相关数值%", capacity * 4,
+            INVALID_CHINESE_TITLE, "%相关数值%", model, TITLE_PROMPT_VERSION,
+            now.isoformat(timespec="microseconds"),
+            INVALID_CHINESE_TITLE, "%相关数值%", max(1, limit * 4),
         ),
     ).fetchall()
-    relevant_pending = []
+    selected: list[dict[str, object]] = []
     for raw_row in pending:
         row = dict(raw_row)
-        observed_at = row.get("collector_first_seen_time") or datetime.now(UTC)
-        if not isinstance(observed_at, datetime):
-            observed_at = datetime.fromisoformat(str(observed_at))
+        first_seen = row.get("collector_first_seen_time") or now
+        if not isinstance(first_seen, datetime):
+            first_seen = datetime.fromisoformat(str(first_seen))
         published_at = row.get("source_published_time")
         if published_at is not None and not isinstance(published_at, datetime):
             published_at = datetime.fromisoformat(str(published_at))
         allowed, _ = google_news_item_is_relevant(
-            str(row.get("source") or ""),
-            str(row.get("headline") or ""),
-            published_at,
-            observed_at,
+            str(row.get("source") or ""), str(row.get("headline") or ""),
+            published_at, first_seen,
         )
         if allowed:
-            relevant_pending.append(raw_row)
-        if len(relevant_pending) >= capacity:
+            selected.append(row)
+        if len(selected) >= limit:
             break
-    pending = relevant_pending
+    return selected
+
+
+def translate_pending_headlines(
+    ledger: ForwardLedger,
+    *,
+    api_key: str | None = None,
+    model: str | None = None,
+    records: list[dict[str, object]] | None = None,
+    request_reserver: Callable[[str], bool] | None = None,
+) -> list[dict[str, object]]:
+    """Translate display titles without creating action-bearing news features."""
+    keys = configured_gemini_api_keys(api_key)
+    if not keys:
+        return [{"status": "DISABLED", "reason": "GEMINI_API_KEY_MISSING"}]
+    selected_model = model or DEFAULT_GEMMA_MODEL
+    quota = GeminiQuotaLedger(
+        ledger.path.parent / "gemma-quota.json",
+        daily_limit=GEMMA_REQUESTS_PER_DAY_PER_KEY,
+    )
+    request_pool = _GeminiRequestPool(
+        keys,
+        quota,
+        requests_per_key=GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
+        batch_limit=GEMMA_TITLE_BATCH_LIMIT,
+        request_reserver=request_reserver,
+    )
+    capacity = request_pool.available_batch_capacity()
+    if capacity <= 0:
+        return [{"status": "DISABLED", "reason": "GEMMA_DAILY_QUOTA_EXHAUSTED"}]
+    pending = (
+        records[:capacity] if records is not None
+        else pending_title_translation_records(
+            ledger.connection, model=selected_model, limit=capacity,
+        )
+    )
     statuses: list[dict[str, object]] = []
     for index, raw_row in enumerate(pending):
         row = dict(raw_row)
@@ -601,6 +627,8 @@ def assess_pending_news_impacts(
     limit: int | None = None,
     annotation_prompt_version: str = PROMPT_VERSION,
     impact_prompt_version: str = IMPACT_PROMPT_VERSION,
+    records: list[dict[str, object]] | None = None,
+    request_reserver: Callable[[str], bool] | None = None,
 ) -> list[dict[str, object]]:
     """Classify semantic impact lifetime with frozen Gemma 4 buckets."""
     keys = configured_gemini_api_keys(api_key)
@@ -614,12 +642,13 @@ def assess_pending_news_impacts(
         keys, quota,
         requests_per_key=GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
         batch_limit=GEMMA_IMPACT_BATCH_LIMIT,
+        request_reserver=request_reserver,
     )
     capacity = request_pool.available_batch_capacity()
     if capacity <= 0:
         return [{"status": "DISABLED", "reason": "GEMMA_DAILY_QUOTA_EXHAUSTED"}]
     effective_limit = capacity if limit is None else min(max(1, limit), capacity)
-    pending = pending_impact_records(
+    pending = records[:effective_limit] if records is not None else pending_impact_records(
         ledger.connection, limit=max(effective_limit * 4, 100),
         annotation_prompt_version=annotation_prompt_version,
         impact_prompt_version=impact_prompt_version,
@@ -732,15 +761,20 @@ class _GeminiRequestPool:
         *,
         requests_per_key: int = GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
         batch_limit: int | None = None,
+        request_reserver: Callable[[str], bool] | None = None,
     ):
         self.api_keys = api_keys
         self.quota = quota
         self.requests_per_key = requests_per_key
         self.batch_limit = batch_limit
+        self.request_reserver = request_reserver
         self._batch_counts = {key: 0 for key in api_keys}
         self._lock = threading.Lock()
 
     def available_batch_capacity(self, *, reserve_total: int = 0) -> int:
+        if self.request_reserver is not None:
+            capacity = len(self.api_keys) * self.requests_per_key
+            return min(capacity, self.batch_limit) if self.batch_limit else capacity
         snapshot = self.quota.snapshot(self.api_keys)
         capacity = sum(
             min(item["remaining"], self.requests_per_key)
@@ -756,7 +790,11 @@ class _GeminiRequestPool:
         with self._lock:
             if self._batch_counts[api_key] >= self.requests_per_key:
                 return False
-            if not self.quota.reserve(api_key):
+            if self.request_reserver is not None:
+                reserved = self.request_reserver(api_key)
+            else:
+                reserved = self.quota.reserve(api_key)
+            if not reserved:
                 return False
             self._batch_counts[api_key] += 1
             return True

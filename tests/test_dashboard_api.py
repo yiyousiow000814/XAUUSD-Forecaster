@@ -220,6 +220,12 @@ def test_dashboard_annotation_counts_match_current_worker_policy(tmp_path) -> No
 
     assert payload["annotation_queue"]["ready"] == 1
     assert payload["annotation_queue"]["queued"] == 1
+    active_identities = {
+        row["model_identity"]
+        for row in payload["learning_curves"]["models"]
+        if row["active_rank"] is not None
+    }
+    assert payload["counts"]["live_oos_model_groups"] == len(active_identities)
     transition = payload["learning_curves"]["news_contract_transition"]
     assert payload["news_evidence_summary"]["current_contract_exposed_rows"] == transition["current_contract_exposed_rows"]
     assert payload["news_evidence_summary"]["current_contract_distinct_events"] == transition["current_contract_distinct_events"]

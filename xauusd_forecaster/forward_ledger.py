@@ -389,8 +389,10 @@ class ForwardLedger:
         self.connection.execute("PRAGMA busy_timeout=60000")
         self.connection.executescript(SCHEMA)
         from .evidence_v2 import install_v2_schema
+        from .news_scheduler import install_scheduler_schema
 
         install_v2_schema(self.connection)
+        install_scheduler_schema(self.connection)
         self._install_append_only_triggers()
         created = now or datetime.now(UTC)
         with self.connection:
