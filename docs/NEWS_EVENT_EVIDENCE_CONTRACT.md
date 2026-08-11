@@ -6,6 +6,22 @@ The evidence layer converts a wide news feed into reproducible event-level
 inputs without granting every headline model authority. It preserves broad
 awareness while keeping the training boundary point-in-time and auditable.
 
+## Source intake
+
+Direct official feeds and listing pages apply only objective pre-AI controls:
+the Forward epoch, a 72-hour publication window, immutable item deduplication,
+complete publisher text, and a fixed per-source fetch limit. They do not use
+headline or body keywords to decide XAUUSD meaning. Complete bounded documents
+proceed to semantic review, which may classify them as irrelevant or background
+without granting model authority.
+
+Collector lanes are not independent publishers. Google News and GDELT are
+discovery mechanisms; source trust uses the first-party collector identity or
+the normalized reporting organization. A successful transport poll with no
+recent complete document is reported separately from a healthy
+evidence-producing source. A current candidate whose publisher body cannot be
+fetched is degraded, not successful.
+
 ## Event construction
 
 Only complete stored bodies with a matching immutable Gemini annotation are

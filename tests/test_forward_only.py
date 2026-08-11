@@ -387,6 +387,11 @@ def test_federal_reserve_intake_requires_current_full_text(tmp_path) -> None:
         item["rejected_reasons"] == {"FULL_TEXT_UNAVAILABLE": 1}
         for item in unavailable
     )
+    first_health = ledger.connection.execute(
+        "SELECT status,error_type FROM source_polls "
+        "WHERE source='federal_reserve_full_text' ORDER BY fetched_time DESC LIMIT 1"
+    ).fetchone()
+    assert tuple(first_health) == ("ERROR", "FeedErrors")
 
     accepted = collect_federal_reserve_news(
         ledger,
@@ -396,6 +401,11 @@ def test_federal_reserve_intake_requires_current_full_text(tmp_path) -> None:
     )
     assert ledger.count("news_revisions") == 3
     assert all(item["inserted_revisions"] == 1 for item in accepted)
+    latest_health = ledger.connection.execute(
+        "SELECT status,error_type FROM source_polls "
+        "WHERE source='federal_reserve_full_text' ORDER BY fetched_time DESC LIMIT 1"
+    ).fetchone()
+    assert tuple(latest_health) == ("OK", None)
     assert all(
         str(row["body"]).startswith("[FULL_TEXT")
         for row in ledger.connection.execute("SELECT body FROM news_revisions")
@@ -796,8 +806,10 @@ def test_direct_official_rss_sources_are_bounded_and_rate_limited(tmp_path) -> N
             topic = "consumer price index inflation update"
         elif source.name == "bls_job_openings":
             topic = "JOLTS job openings update"
+        elif source.name.startswith("eia_"):
+            topic = "oil production"
         else:
-            topic = "oil production" if source.name.startswith("eia_") else "monetary policy"
+            topic = "generic supervisory calendar notice"
         link = (
             "/pressroom/releases/example.php"
             if source.name == "eia_press_releases"
@@ -822,10 +834,79 @@ def test_direct_official_rss_sources_are_bounded_and_rate_limited(tmp_path) -> N
         "SKIPPED_INTERVAL", "SKIPPED_INTERVAL", "SKIPPED_INTERVAL",
     ]
     assert ledger.count("news_revisions") == 6
+    ecb = next(item for item in first if item["source"] == "ecb_press_releases")
+    assert ecb["candidate_items"] == 1
+    assert ecb["eligible_items"] == 1
     stored = ledger.connection.execute(
         "SELECT link FROM news_revisions WHERE source='eia_press_releases'"
     ).fetchone()
     assert stored["link"] == "https://www.eia.gov/pressroom/releases/example.php"
+
+
+def test_direct_official_sources_report_partial_when_current_body_is_blocked(
+    tmp_path,
+) -> None:
+    fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched - timedelta(hours=1))
+
+    def rss(source: RssSource) -> bytes:
+        return f"""<rss><channel><item><guid>{source.name}</guid>
+        <title>Current official notice</title>
+        <pubDate>Wed, 05 Aug 2026 10:00:00 GMT</pubDate>
+        <link>https://example.test/{source.name}</link></item></channel></rss>""".encode()
+
+    blocked = lambda _url: (_ for _ in ()).throw(ValueError("blocked"))
+    rss_results = collect_direct_full_text_rss_news(
+        ledger, fetched, rss, blocked,
+    )
+    assert [row["status"] for row in rss_results] == ["PARTIAL"] * 6
+
+    def html(url: str) -> bytes:
+        if "treasury.gov" in url:
+            return b'''<div><time datetime="2026-08-05T10:00:00Z"></time>
+            <a href="/news/press-releases/current">Current notice</a></div>'''
+        return b'''<div><time datetime="2026-08-05T10:00:00Z"></time>
+        <a href="/news/2026/current">Current release</a></div>'''
+
+    html_results = collect_direct_full_text_html_news(
+        ledger, fetched, html, blocked,
+    )
+    assert [row["status"] for row in html_results] == ["PARTIAL"] * 2
+    latest = ledger.connection.execute(
+        "SELECT status,error_type FROM source_polls "
+        "WHERE source='bea_economic_releases' ORDER BY fetched_time DESC LIMIT 1"
+    ).fetchone()
+    assert tuple(latest) == ("PARTIAL", "PublisherContentUnavailable")
+
+
+def test_saved_official_bodies_do_not_starve_later_feed_items(tmp_path) -> None:
+    fetched = datetime(2026, 8, 5, 10, 30, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched - timedelta(hours=1))
+
+    def feed(source: RssSource) -> bytes:
+        count = 6 if source.name == "eia_press_releases" else 1
+        items = "".join(
+            f"""<item><guid>{source.name}-{index}</guid><title>Official item {index}</title>
+            <pubDate>Wed, 05 Aug 2026 10:{index:02d}:00 GMT</pubDate>
+            <link>https://example.test/{source.name}/{index}</link></item>"""
+            for index in range(count)
+        )
+        return f"<rss><channel>{items}</channel></rss>".encode()
+
+    extractor = lambda url: ("complete official body " * 30, url)
+    first = collect_direct_full_text_rss_news(ledger, fetched, feed, extractor)
+    second = collect_direct_full_text_rss_news(
+        ledger, fetched + timedelta(minutes=11), feed, extractor,
+    )
+    first_eia = next(row for row in first if row["source"] == "eia_press_releases")
+    second_eia = next(row for row in second if row["source"] == "eia_press_releases")
+    assert first_eia["inserted_revisions"] == 5
+    assert first_eia["full_text_attempts"] == 5
+    assert second_eia["inserted_revisions"] == 1
+    assert second_eia["full_text_attempts"] == 1
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_revisions WHERE source='eia_press_releases'"
+    ).fetchone()[0] == 6
 
 
 def test_bls_rss_403_circuit_uses_public_api_fallback(tmp_path) -> None:
@@ -852,7 +933,7 @@ def test_bls_rss_403_circuit_uses_public_api_fallback(tmp_path) -> None:
     assert source not in called
 
 
-def test_direct_official_html_sources_are_filtered_and_bounded(tmp_path) -> None:
+def test_direct_official_html_sources_reach_ai_without_semantic_filtering(tmp_path) -> None:
     fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
     ledger = ForwardLedger(
         tmp_path / "forward.sqlite3", now=fetched - timedelta(hours=2)
@@ -877,12 +958,16 @@ def test_direct_official_html_sources_are_filtered_and_bounded(tmp_path) -> None
     rows = ledger.connection.execute(
         "SELECT source, headline, link, source_published_time FROM news_revisions ORDER BY source"
     ).fetchall()
-    assert len(rows) == 2
+    assert len(rows) == 4
     assert rows[0]["source"] == "bea_economic_releases"
     assert rows[0]["source_published_time"] == "2026-08-05T09:30:00.000000+00:00"
-    assert rows[1]["source"] == "us_treasury_press_releases"
-    assert rows[1]["source_published_time"] == "2026-08-05T09:00:00.000000+00:00"
-    assert rows[1]["link"].startswith("https://home.treasury.gov/")
+    assert {row["headline"] for row in rows} == {
+        "GDP (Advance Estimate)", "Direct Investment",
+        "Treasury sanctions Iran oil network", "Unrelated office update",
+    }
+    treasury = next(row for row in rows if row["headline"] == "Unrelated office update")
+    assert treasury["source_published_time"] == "2026-08-05T09:00:00.000000+00:00"
+    assert treasury["link"].startswith("https://home.treasury.gov/")
 
 
 def test_google_news_revision_uses_resolved_publisher_url(tmp_path) -> None:
