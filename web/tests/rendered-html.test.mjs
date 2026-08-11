@@ -877,13 +877,13 @@ test("distinguishes market history loading, empty, and failed states", () => {
   assert.match(modal, /重新读取/);
   assert.doesNotMatch(modal, /还没有保存过可绘制的 Bid\/Ask 行情/);
   assert.doesNotMatch(modal, /等待可验证数据/);
-  assert.match(resource, /MIN_VISIBLE_LOADING_MS = 500/);
+  assert.doesNotMatch(resource, /MIN_VISIBLE_LOADING_MS|waitForMinimumLoading/);
   assert.match(modal, /loadDashboardResource/);
   assert.match(modal, /readDashboardResource/);
   assert.match(modal, /HISTORY_CACHE_MAX_AGE_MS = 60_000/);
   assert.match(modal, /Number\.POSITIVE_INFINITY/);
   assert.match(modal, /initialHistoryResult/);
-  assert.match(modal, /waitForMinimumLoading\(startedAt\)/);
+  assert.doesNotMatch(modal, /waitForMinimumLoading|startedAt/);
   assert.match(modal, /point\.source_gap_before/);
   assert.match(modal, /first\.source_gap_before/);
   assert.match(modal, /overviewStep/);
