@@ -66,6 +66,7 @@ test("hydrates preview pages from their immutable build snapshot", () => {
   const vite = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
   const learning = readFileSync(new URL("../build/preview-learning.ts", import.meta.url), "utf8");
   const contract = readFileSync(new URL("../preview-contract.json", import.meta.url), "utf8");
+  const previewBuilder = readFileSync(new URL("../../scripts/build_preview_bundle.py", import.meta.url), "utf8");
   assert.match(vite, /compactPreviewLearning/);
   assert.match(vite, /compactPreviewStatus/);
   assert.match(vite, /compactPreviewNewsIndex/);
@@ -86,6 +87,9 @@ test("hydrates preview pages from their immutable build snapshot", () => {
   assert.match(learning, /execution_learning:/);
   assert.match(learning, /points: points\.slice\(-48\)/);
   assert.match(learning, /results: results\.slice\(-20\)/);
+  assert.match(previewBuilder, /resource=execution-point/);
+  assert.match(previewBuilder, /for identity in \("LOT_RIDGE", "EXIT_RIDGE"\)/);
+  assert.match(previewBuilder, /\[\*learning_history, \*execution_history\]/);
   assert.doesNotMatch(page, /auditView === "league"/);
   assert.match(page, /\[PREVIEW_RESOURCES\.status\]: previewBundle\.status/);
   assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);
