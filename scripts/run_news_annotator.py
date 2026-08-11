@@ -81,6 +81,7 @@ def main() -> int:
                     model=DEFAULT_GEMINI_MODEL,
                     limit=limit,
                     prompt_version=TARGET_PROMPT_VERSION,
+                    allow_priority_reserve=False,
                 )
                 if not statuses
                 else [{

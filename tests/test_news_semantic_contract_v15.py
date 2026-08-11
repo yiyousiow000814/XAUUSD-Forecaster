@@ -6,8 +6,12 @@ from datetime import UTC, datetime
 import pytest
 
 from xauusd_forecaster import annotation as annotation_module
-from xauusd_forecaster.annotation import pending_annotation_records
+from xauusd_forecaster.annotation import (
+    annotate_pending_news,
+    pending_annotation_records,
+)
 from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
 from xauusd_forecaster.news_semantics import (
     CURRENT_NEWS_PROMPT_VERSION,
     TARGET_NEWS_PROMPT_VERSION,
@@ -105,6 +109,120 @@ def test_v15_prompt_uses_context_not_keyword_or_casing() -> None:
     assert "lowercase 'bls jolts report'" in prompt
     assert "'earthquake jolts city' is not JOLTS" in prompt
     assert "investment guide remains commentary" in prompt
+
+
+def test_target_backfill_cannot_consume_active_priority_reserve(
+    tmp_path, monkeypatch
+) -> None:
+    now = datetime(2026, 8, 11, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "Complete Federal Reserve policy statement. " * 20
+    ledger.append_news_revision({
+        "source": "federal_reserve_monetary",
+        "source_item_id": "priority-target",
+        "source_published_time": now,
+        "collector_first_seen_time": now,
+        "fetched_time": now,
+        "headline": "FOMC statement",
+        "body": body,
+        "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+        "cluster_id": "priority-target",
+    })
+    key = "test-key"
+    quota = GeminiQuotaLedger(tmp_path / "gemini-quota.json")
+    quota.seed(
+        key,
+        500 - annotation_module.GEMINI_DAILY_PRIORITY_RESERVE,
+    )
+    monkeypatch.setattr(
+        annotation_module,
+        "_call_gemini",
+        lambda *_args, **_kwargs: pytest.fail("target backfill used reserved quota"),
+    )
+
+    statuses = annotate_pending_news(
+        ledger,
+        provider="gemini",
+        api_key=key,
+        limit=1,
+        prompt_version=TARGET_NEWS_PROMPT_VERSION,
+        allow_priority_reserve=False,
+    )
+
+    assert statuses == []
+    assert quota.snapshot((key,))["total_sent"] == (
+        500 - annotation_module.GEMINI_DAILY_PRIORITY_RESERVE
+    )
+    ledger.close()
+
+
+def test_target_contract_fails_closed_for_non_gemini_provider(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+
+    statuses = annotate_pending_news(
+        ledger,
+        provider="ollama",
+        prompt_version=TARGET_NEWS_PROMPT_VERSION,
+    )
+
+    assert statuses == [{
+        "status": "DISABLED",
+        "reason": "TARGET_CONTRACT_REQUIRES_GEMINI",
+    }]
+    ledger.close()
+
+
+def test_target_annotation_pipeline_persists_versioned_receipt(
+    tmp_path, monkeypatch
+) -> None:
+    now = datetime(2026, 8, 11, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = (
+        "The Bureau of Labor Statistics reported job openings fell in June. "
+        * 12
+    )
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    ledger.append_news_revision({
+        "source": "semantic-contract-test",
+        "source_item_id": "target-pipeline",
+        "source_published_time": now,
+        "collector_first_seen_time": now,
+        "fetched_time": now,
+        "headline": "bls jolts report",
+        "body": body,
+        "content_hash": digest,
+        "cluster_id": "target-pipeline",
+    })
+    seen_versions: list[str] = []
+
+    def fake_call(
+        _key, _model, _headline, _body, *, prompt_version=CURRENT_NEWS_PROMPT_VERSION
+    ):
+        seen_versions.append(prompt_version)
+        return (
+            _target_annotation("job openings fell in June"),
+            annotation_module.DEFAULT_GEMINI_MODEL,
+        )
+
+    monkeypatch.setattr(annotation_module, "_call_gemini", fake_call)
+
+    statuses = annotate_pending_news(
+        ledger,
+        provider="gemini",
+        api_key="test-key",
+        limit=1,
+        prompt_version=TARGET_NEWS_PROMPT_VERSION,
+        allow_priority_reserve=False,
+    )
+
+    assert [status["status"] for status in statuses] == ["OK"]
+    assert seen_versions == [TARGET_NEWS_PROMPT_VERSION]
+    row = ledger.connection.execute(
+        "SELECT prompt_version FROM news_annotations WHERE annotation_id=?",
+        (statuses[0]["annotation_id"],),
+    ).fetchone()
+    assert row["prompt_version"] == TARGET_NEWS_PROMPT_VERSION
+    ledger.close()
 
 
 def test_v14_and_v15_annotations_coexist_without_activating_v15(tmp_path) -> None:

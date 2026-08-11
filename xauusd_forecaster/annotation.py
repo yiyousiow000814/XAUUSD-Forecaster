@@ -238,10 +238,16 @@ def annotate_pending_news(
     model: str | None = None,
     limit: int | None = None,
     prompt_version: str = PROMPT_VERSION,
+    allow_priority_reserve: bool = True,
 ) -> list[dict[str, object]]:
     if prompt_version not in GENERATED_NEWS_PROMPT_VERSIONS:
         raise ValueError(f"unsupported news prompt version: {prompt_version}")
     selected_provider = (provider or os.environ.get("NEWS_LLM_PROVIDER", "gemini")).lower()
+    if prompt_version == TARGET_PROMPT_VERSION and selected_provider != "gemini":
+        return [{
+            "status": "DISABLED",
+            "reason": "TARGET_CONTRACT_REQUIRES_GEMINI",
+        }]
     keys = configured_gemini_api_keys(api_key)
     if selected_provider == "gemini" and not keys:
         return [{"status": "DISABLED", "reason": "GEMINI_API_KEY_MISSING"}]
@@ -336,7 +342,7 @@ def annotate_pending_news(
         routine_used = 0
         selected_records = []
         for row in pending_records:
-            if _is_priority_news(row):
+            if allow_priority_reserve and _is_priority_news(row):
                 selected_records.append(row)
             elif routine_used < routine_capacity:
                 selected_records.append(row)
