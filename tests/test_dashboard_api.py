@@ -641,6 +641,43 @@ def test_dashboard_reports_gdelt_fallback_and_retry_time(tmp_path) -> None:
     assert gdelt["next_retry_time"] == (now + timedelta(minutes=90)).isoformat()
 
 
+def test_dashboard_does_not_activate_fallback_from_stale_historical_evidence(
+    tmp_path,
+) -> None:
+    now = datetime(2026, 8, 11, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now - timedelta(days=10))
+    ledger.append_source_poll({
+        "poll_id": "gdelt-429", "source": "gdelt_gold_geopolitics",
+        "fetched_time": now - timedelta(minutes=5), "status": "ERROR",
+        "error_type": "HTTPError", "error": "HTTP Error 429: Too Many Requests",
+    })
+    ledger.append_source_poll({
+        "poll_id": "google-empty-now", "source": "google_news_gold_context",
+        "fetched_time": now - timedelta(minutes=5), "status": "OK",
+    })
+    body = "historical Google News evidence " * 20
+    ledger.append_news_revision({
+        "source": "google_news_gold_context", "source_item_id": "old-item",
+        "source_published_time": now - timedelta(days=10),
+        "collector_first_seen_time": now - timedelta(days=10),
+        "fetched_time": now - timedelta(days=10),
+        "headline": "Old gold report", "body": body,
+        "link": "https://example.test/old",
+        "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+        "cluster_id": "old-item",
+    })
+
+    rows = _dashboard_module()._news_source_health(ledger.connection, now)
+    google = next(row for row in rows if row["source"] == "google_news_gold_context")
+    gdelt = next(row for row in rows if row["source"] == "gdelt_gold_geopolitics")
+
+    assert google["health"] == "HEALTHY"
+    assert google["semantic_status"] == "NO_RECENT_EVIDENCE"
+    assert google["recent_evidence"] is False
+    assert gdelt["health"] == "ERROR"
+    assert gdelt["fallback_health"] == "NO_RECENT_EVIDENCE"
+
+
 def test_market_chart_keeps_last_session_on_weekend_and_reads_gzip(tmp_path) -> None:
     module = _dashboard_module()
     now = datetime(2026, 8, 9, 4, 0, tzinfo=UTC)
