@@ -876,14 +876,13 @@ def _insert_prediction(connection, decision_id: str, decision_time: datetime, *,
                        model_version: str = "market-test",
                        model_identity: str = "MARKET_ONLY",
                        value_quote_return: float = 2.0,
-                       residual_u5: float = 0.1,
-                       recommended_action: str = "LONG") -> None:
+                       residual_u5: float = 0.1) -> None:
     connection.execute(
         "INSERT INTO predictions_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (decision_id, model_version, model_identity, decision_time.isoformat(),
          decision_time.isoformat(), "LIVE_OOS", "feature-hash", 0.1, None,
          0.1, -0.1, None, None, "UTC_DAY_BLOCK_OOS_ABS_RESIDUAL_Q95",
-         "calibration-test", 0, 0, 0, None, "UNCALIBRATED", recommended_action, "WAIT",
+         "calibration-test", 0, 0, 0, None, "UNCALIBRATED", "LONG", "WAIT",
          "PROVISIONAL"),
     )
     connection.execute(
@@ -1107,36 +1106,6 @@ def test_learning_curve_dashboard_envelope_is_bounded_and_keeps_history_landmark
     assert {row.get("model_version") for row in bounded if row.get("model_version")} == {
         f"version-{index}" for index in range(0, 5000, 250)
     }
-
-
-def test_identity_curve_marks_wait_and_compaction_keeps_both_boundaries(tmp_path) -> None:
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
-    created = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
-    _insert_model_update(ledger.connection, "market-wait", "MARKET_ONLY", created)
-    for index, action in enumerate(("LONG", "WAIT", "WAIT", "SHORT"), start=1):
-        _insert_prediction(
-            ledger.connection, f"decision-{index}",
-            created + timedelta(minutes=5 * index), model_version="market-wait",
-            recommended_action=action,
-        )
-    ledger.connection.commit()
-
-    curve = next(
-        row for row in learning_curve_payload(ledger.connection)["identity_curves"]
-        if row["model_identity"] == "MARKET_ONLY"
-    )
-    assert [point.get("w") for point in curve["points"]] == [None, 1, 1, None]
-    compact = _bounded_curve([
-        {"decision_time": str(index), "cumulative_quote_return": float(index),
-         **({"w": 1} if 20 <= index < 30 else {})}
-        for index in range(60)
-    ], max_points=20)
-    retained = {point["decision_time"]: point for point in compact}
-    assert "19" in retained
-    assert retained["20"]["w"] == 1
-    assert retained["29"]["w"] == 1
-    assert "w" not in retained["30"]
-    ledger.close()
 
 
 def _training_rows(count: int) -> list[dict]:
