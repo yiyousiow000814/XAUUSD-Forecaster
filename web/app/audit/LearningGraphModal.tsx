@@ -458,6 +458,7 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
   const low = Math.min(...values); const high = Math.max(...values);
   const visibleResultTimes = [...new Set(visiblePoints.map(point => Date.parse(point.decision_time)))].sort((a, b) => a - b);
   const expectedStep = cadence === "FIXED_30M" ? 30 * 60_000 : 5 * 60_000;
+  const overviewStep = Math.max(45 * 60_000, expectedStep * 3);
   // Plot result time, not wall-clock time. Long closures receive one compact
   // break and never consume the width of the OOS chart.
   const resultPlotUnits = visibleResultTimes.map((time, index) => index === 0 ? 0 : Math.min(
@@ -474,10 +475,12 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
   const tickTimes = tickIndices.map(index => new Date(visibleResultTimes[index]).toISOString());
   const curveRuns = (points: CurvePoint[]) => points.reduce<CurvePoint[][]>((runs, point) => {
     const current = runs.at(-1);
-    // Overview spacing reflects downsampling, not missing observations. Only
-    // the synchronizer sees the raw sequence and may declare a real gap.
-    const beginsSourceGap = point.source_gap_before === true;
-    if (!current || beginsSourceGap) runs.push([point]);
+    const previous = current?.at(-1);
+    // Sparse overview points form a dashed sampled envelope. Dense recent
+    // results remain solid, matching the original long-OOS presentation.
+    const beginsOverviewBridge = point.source_gap_before === true
+      || Boolean(previous && Date.parse(point.decision_time) - Date.parse(previous.decision_time) >= overviewStep);
+    if (!current || beginsOverviewBridge) runs.push([point]);
     else current.push(point);
     return runs;
   }, []);
@@ -615,14 +618,15 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
         const runs = curveRuns(row.points);
         const first = runs[0]?.[0];
         const carryIn = row.previousPoint && first
-          && first.source_gap_before === true
+          && (first.source_gap_before === true
+            || Date.parse(first.decision_time) - Date.parse(row.previousPoint.decision_time) >= overviewStep)
           && x(first.decision_time) > 59
-          ? <line key={`${row.model_identity}-carry-in`} className="curve-gap-bridge curve-gap-carry-in" stroke={COLORS[row.model_identity]} x1="58" y1={y(row.previousPoint.cumulative_quote_return)} x2={x(first.decision_time)} y2={y(first.cumulative_quote_return)}><title>窗口开始前有真实结果；中间没有成熟结果</title></line>
+          ? <line key={`${row.model_identity}-carry-in`} className="curve-gap-bridge curve-gap-carry-in" stroke={COLORS[row.model_identity]} x1="58" y1={y(row.previousPoint.cumulative_quote_return)} x2={x(first.decision_time)} y2={y(first.cumulative_quote_return)}><title>窗口开始前的压缩历史轮廓</title></line>
           : null;
         return [carryIn, ...runs.flatMap((run, index) => {
           const previous = runs[index - 1]?.at(-1);
           const bridge = previous && run[0]
-            ? <line key={`${row.model_identity}-bridge-${index}`} className="curve-gap-bridge" stroke={COLORS[row.model_identity]} x1={x(previous.decision_time)} y1={y(previous.cumulative_quote_return)} x2={x(run[0].decision_time)} y2={y(run[0].cumulative_quote_return)}><title>休市期间没有成熟结果</title></line>
+            ? <line key={`${row.model_identity}-bridge-${index}`} className="curve-gap-bridge" stroke={COLORS[row.model_identity]} x1={x(previous.decision_time)} y1={y(previous.cumulative_quote_return)} x2={x(run[0].decision_time)} y2={y(run[0].cumulative_quote_return)}><title>压缩历史轮廓</title></line>
             : null;
           const curve = run.length === 1
             ? <circle key={`${row.model_identity}-run-${index}`} cx={x(run[0].decision_time)} cy={y(run[0].cumulative_quote_return)} r="4" fill={COLORS[row.model_identity]} />

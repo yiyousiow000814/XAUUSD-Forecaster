@@ -622,9 +622,9 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /Page through windows that contain real matured results/);
   assert.match(modal, /Plot result time, not wall-clock time/);
   assert.match(modal, /curve-gap-bridge/);
-  assert.match(modal, /休市期间没有成熟结果/);
+  assert.match(modal, /压缩历史轮廓/);
   assert.match(modal, /curve-gap-carry-in/);
-  assert.match(modal, /窗口开始前有真实结果；中间没有成熟结果/);
+  assert.match(modal, /窗口开始前的压缩历史轮廓/);
   assert.doesNotMatch(modal, /points\.unshift\(\{ decision_time: new Date\(start\)/);
   assert.doesNotMatch(modal, /points\.push\(\{ decision_time: new Date\(end\)/);
   assert.match(modal, /成本后EV较高方向/);
@@ -872,6 +872,8 @@ test("distinguishes market history loading, empty, and failed states", () => {
   assert.match(modal, /waitForMinimumLoading\(startedAt\)/);
   assert.match(modal, /point\.source_gap_before/);
   assert.match(modal, /first\.source_gap_before/);
+  assert.match(modal, /overviewStep/);
+  assert.match(modal, /Date\.parse\(point\.decision_time\) - Date\.parse\(previous\.decision_time\) >= overviewStep/);
   assert.doesNotMatch(modal, /source_gap_before \?\?/);
   assert.match(history, /market_history_overview/);
   assert.match(history, /market_decision_overviews/);
