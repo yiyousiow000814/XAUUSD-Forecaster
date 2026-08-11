@@ -1,9 +1,11 @@
 import hashlib
+import io
 import json
 import math
 import os
 import sqlite3
 import urllib.error
+import zipfile
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -66,6 +68,42 @@ from xauusd_forecaster.training import (
 
 
 UTC = timezone.utc
+
+
+def _gdelt_gkg_feed(
+    *,
+    title: str = "Gold reacts to sanctions",
+    url: str = "https://example.test/geopolitics",
+    timestamp: str = "20260805100000",
+    themes: str = "ECON_GOLD",
+) -> tuple[bytes, bytes]:
+    fields = [""] * 27
+    fields[0] = f"{timestamp}-1"
+    fields[1] = timestamp
+    fields[3] = "example.test"
+    fields[4] = url
+    fields[7] = themes
+    fields[26] = (
+        f"<PAGE_PRECISEPUBTIMESTAMP>{timestamp}</PAGE_PRECISEPUBTIMESTAMP>"
+        f"<PAGE_TITLE>{title}</PAGE_TITLE>"
+    )
+    payload = ("\t".join(fields) + "\n").encode()
+    archive_buffer = io.BytesIO()
+    with zipfile.ZipFile(archive_buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(f"{timestamp}.gkg.csv", payload)
+    zipped = archive_buffer.getvalue()
+    manifest = (
+        f"{len(zipped)} {hashlib.md5(zipped).hexdigest()} "
+        f"http://data.gdeltproject.org/gdeltv2/{timestamp}.gkg.csv.zip\n"
+    ).encode()
+    return manifest, zipped
+
+
+def _gdelt_fetcher(manifest: bytes, archive: bytes):
+    def fetch(url: str) -> bytes:
+        return manifest if url.endswith("lastupdate.txt") else archive
+
+    return fetch
 
 
 def test_forward_ledger_waits_for_short_writer_collisions(tmp_path) -> None:
@@ -660,16 +698,9 @@ def test_broad_free_sources_are_first_seen_versioned_and_rate_limited(
     assert first["inserted_revisions"] == 12
     assert second["status"] == "SKIPPED_INTERVAL"
 
-    gdelt = json.dumps({"articles": [{
-        "url": "https://example.test/geopolitics",
-        "title": "Gold reacts to sanctions",
-        "seendate": "20260805T100000Z",
-        "domain": "example.test",
-        "sourcecountry": "US",
-        "language": "English",
-    }]}).encode()
+    gdelt_manifest, gdelt_archive = _gdelt_gkg_feed()
     assert collect_gdelt_news(
-        ledger, fetched, lambda _: gdelt,
+        ledger, fetched, _gdelt_fetcher(gdelt_manifest, gdelt_archive),
         content_extractor=lambda url: ("geopolitical evidence " * 30, url),
     )["status"] == "OK"
 
@@ -884,44 +915,49 @@ def test_central_bank_gold_coverage_is_collecting_when_monitor_is_healthy() -> N
     assert central_bank_gold["status_reason"] == "监测正常，暂无新的正式月度资料"
 
 
-def test_gdelt_429_uses_exponential_backoff_without_blocking_fallback(tmp_path) -> None:
+def test_gdelt_gkg_feed_validates_manifest_and_uses_official_gcs_url(tmp_path) -> None:
     fetched = datetime(2026, 8, 6, 0, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+    ledger = ForwardLedger(
+        tmp_path / "forward.sqlite3", now=fetched - timedelta(days=1)
+    )
+    manifest, archive = _gdelt_gkg_feed(timestamp="20260805234000")
+    urls: list[str] = []
 
-    def rate_limited(_url: str) -> bytes:
-        raise RuntimeError("HTTP Error 429: Too Many Requests")
+    def fetch(url: str) -> bytes:
+        urls.append(url)
+        return manifest if url.endswith("lastupdate.txt") else archive
 
-    failed = collect_gdelt_news(ledger, fetched, rate_limited)
+    result = collect_gdelt_news(
+        ledger, fetched, fetch,
+        content_extractor=lambda url: ("complete gold evidence " * 30, url),
+    )
+    assert result["status"] == "OK"
+    assert result["inserted_revisions"] == 1
+    assert urls[1].startswith("https://storage.googleapis.com/")
+    assert urls[1].endswith(".gkg.csv.zip")
+
+    bad_ledger = ForwardLedger(tmp_path / "bad.sqlite3", now=fetched)
+    bad_manifest = manifest.replace(hashlib.md5(archive).hexdigest().encode(), b"0" * 32)
+    failed = collect_gdelt_news(
+        bad_ledger, fetched, _gdelt_fetcher(bad_manifest, archive),
+    )
     assert failed["status"] == "ERROR"
-    assert failed["fallback_source"] == "google_news_gold_context"
-    assert failed["retry_at"] == (fetched + timedelta(hours=2)).isoformat()
-
-    skipped = collect_gdelt_news(
-        ledger, fetched + timedelta(minutes=61),
-        lambda _url: b'{"articles": []}',
-    )
-    assert skipped["status"] == "SKIPPED_BACKOFF"
-    assert skipped["rate_limit_streak"] == 1
-    assert skipped["retry_at"] == (fetched + timedelta(hours=2)).isoformat()
-
-    recovered = collect_gdelt_news(
-        ledger, fetched + timedelta(hours=2),
-        lambda _url: b'{"articles": []}',
-    )
-    assert recovered["status"] == "OK"
+    assert "MD5" in failed["error"]
+    assert bad_ledger.count("news_revisions") == 0
 
 
 def test_gdelt_fetches_fresh_candidate_body_before_ai_semantic_review(tmp_path) -> None:
     fetched = datetime(2026, 8, 10, 6, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched - timedelta(days=1))
-    payload = json.dumps({"articles": [{
-        "url": "https://example.test/love-story",
-        "title": "A tragic love story remembered after many years",
-        "seendate": "20260810T054000Z",
-    }]}).encode()
+    manifest, archive = _gdelt_gkg_feed(
+        title="A tragic love story remembered after many years",
+        url="https://example.test/love-story",
+        timestamp="20260810054000",
+        themes="ECON_GOLD",
+    )
 
     result = collect_gdelt_news(
-        ledger, fetched, lambda _: payload,
+        ledger, fetched, _gdelt_fetcher(manifest, archive),
         content_extractor=lambda url: ("complete candidate evidence " * 30, url),
     )
 

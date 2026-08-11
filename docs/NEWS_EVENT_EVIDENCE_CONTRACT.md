@@ -22,6 +22,14 @@ recent complete document is reported separately from a healthy
 evidence-producing source. A current candidate whose publisher body cannot be
 fetched is degraded, not successful.
 
+GDELT discovery reads the official 15-minute GKG update archive rather than the
+rate-limited DOC API. The collector verifies the manifest size and MD5 digest,
+bounds compressed and expanded payloads, and selects at most 25 gold-related
+GKG candidates before retrieving publisher text. Gold metadata only scopes the
+discovery lane; it does not decide semantic relevance or model permission. A
+`PAGE_PRECISEPUBTIMESTAMP` is retained when available. Otherwise the GKG batch
+timestamp is a conservative visibility clock, not an inferred event time.
+
 ## Event construction
 
 Only complete stored bodies with a matching immutable Gemini annotation are

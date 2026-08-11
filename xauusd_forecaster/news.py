@@ -13,6 +13,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import xml.etree.ElementTree as ET
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -205,14 +206,13 @@ BEA_SERIES = (
     ),
 )
 GDELT_SOURCE = "gdelt_gold_geopolitics"
-GDELT_URL = (
-    "https://api.gdeltproject.org/api/v2/doc/doc?"
-    "query=" + urllib.parse.quote(
-        "gold (war OR conflict OR sanctions OR geopolitical OR Fed OR rates "
-        "OR yield OR dollar OR inflation OR payrolls OR jobs OR oil OR central bank)"
-    )
-    + "&mode=artlist&maxrecords=25&timespan=2h&format=json"
+GDELT_LAST_UPDATE_URL = (
+    "https://storage.googleapis.com/data.gdeltproject.org/gdeltv2/lastupdate.txt"
 )
+GDELT_GCS_PREFIX = "https://storage.googleapis.com/data.gdeltproject.org/gdeltv2/"
+GDELT_MAX_COMPRESSED_BYTES = 16 * 1024 * 1024
+GDELT_MAX_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
+GDELT_MAX_CANDIDATES = 25
 GOOGLE_GEO_SOURCE = "google_news_gold_context"
 
 
@@ -745,48 +745,76 @@ def collect_gdelt_news(
     fetcher: Callable[[str], bytes] = fetch_url,
     content_extractor: Callable[[str], tuple[str, str]] = extract_article_full_text,
 ) -> dict[str, object]:
-    """Collect GDELT with an append-only 429 circuit breaker.
-
-    Google News is collected independently, so a GDELT cooldown never stops the
-    geopolitical-news lane.  A successful probe closes the circuit naturally.
-    """
+    """Collect bounded gold candidates from GDELT's official 15-minute GKG feed."""
     last_poll = ledger.latest_source_poll_time(GDELT_SOURCE)
-    recent_polls = ledger.connection.execute(
-        """SELECT fetched_time,status,error FROM source_polls
-           WHERE source=? ORDER BY fetched_time DESC,poll_id DESC LIMIT 8""",
-        (GDELT_SOURCE,),
-    ).fetchall()
-    rate_limit_streak = 0
-    for row in recent_polls:
-        if row["status"] == "ERROR" and "429" in str(row["error"] or ""):
-            rate_limit_streak += 1
-        else:
-            break
-    cooldown_minutes = (
-        min(360, 60 * (2 ** min(rate_limit_streak, 3)))
-        if rate_limit_streak else 60
-    )
-    retry_at = last_poll + timedelta(minutes=cooldown_minutes) if last_poll else None
-    if retry_at is not None and fetched_at < retry_at:
+    if last_poll is not None and fetched_at < last_poll + timedelta(hours=1):
         return {
             "source": GDELT_SOURCE,
-            "status": "SKIPPED_BACKOFF" if rate_limit_streak else "SKIPPED_INTERVAL",
-            "fallback_source": GOOGLE_GEO_SOURCE if rate_limit_streak else None,
-            "retry_at": retry_at.isoformat(),
-            "rate_limit_streak": rate_limit_streak,
+            "status": "SKIPPED_INTERVAL",
         }
     poll_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{GDELT_SOURCE}|{fetched_at.isoformat()}"))
     try:
-        raw = fetcher(GDELT_URL)
+        manifest = fetcher(GDELT_LAST_UPDATE_URL).decode("ascii")
+        manifest_rows = [line.split(maxsplit=2) for line in manifest.splitlines()]
+        gkg = next(
+            parts
+            for parts in manifest_rows
+            if len(parts) == 3 and parts[2].endswith(".gkg.csv.zip")
+        )
+        expected_size = int(gkg[0])
+        expected_md5 = gkg[1].lower()
+        archive_name = urllib.parse.urlparse(gkg[2]).path.rsplit("/", 1)[-1]
+        if not archive_name or expected_size > GDELT_MAX_COMPRESSED_BYTES:
+            raise ValueError("GDELT compressed archive exceeds the safety limit")
+        archive_url = GDELT_GCS_PREFIX + urllib.parse.quote(archive_name)
+        raw = fetcher(archive_url)
+        if len(raw) != expected_size:
+            raise ValueError("GDELT archive size does not match the manifest")
+        if hashlib.md5(raw, usedforsecurity=False).hexdigest().lower() != expected_md5:
+            raise ValueError("GDELT archive MD5 does not match the manifest")
+
+        with zipfile.ZipFile(io.BytesIO(raw)) as zipped:
+            members = [item for item in zipped.infolist() if not item.is_dir()]
+            if len(members) != 1 or members[0].file_size > GDELT_MAX_UNCOMPRESSED_BYTES:
+                raise ValueError("GDELT archive has an unsafe ZIP layout")
+            payload = zipped.read(members[0])
+
         inserted = 0
         unchanged = 0
         rejected: dict[str, int] = {}
-        for article in json.loads(raw).get("articles", [])[:25]:
-            link = str(article.get("url") or "").strip()
-            headline = _clean(str(article.get("title") or ""))
+        discovered = 0
+        rows = csv.reader(
+            io.StringIO(payload.decode("utf-8", errors="replace")), delimiter="\t"
+        )
+        for fields in rows:
+            if len(fields) < 27:
+                rejected["MALFORMED_GKG_ROW"] = (
+                    rejected.get("MALFORMED_GKG_ROW", 0) + 1
+                )
+                continue
+            link = fields[4].strip()
+            extras = fields[26]
+            title_match = re.search(r"<PAGE_TITLE>(.*?)</PAGE_TITLE>", extras, re.DOTALL)
+            headline = _clean(title_match.group(1) if title_match else "")
             if not link or not headline:
                 continue
-            published = _published(str(article.get("seendate") or ""))
+            discovery_text = " ".join((headline, fields[7], fields[8])).lower()
+            if not re.search(
+                r"(?:^|[^a-z])(gold|bullion|xauusd)(?:$|[^a-z])", discovery_text
+            ):
+                continue
+            if discovered >= GDELT_MAX_CANDIDATES:
+                break
+            discovered += 1
+            precise_match = re.search(
+                r"<PAGE_PRECISEPUBTIMESTAMP>(\d{14})</PAGE_PRECISEPUBTIMESTAMP>",
+                extras,
+            )
+            timestamp = precise_match.group(1) if precise_match else fields[1]
+            try:
+                published = datetime.strptime(timestamp, "%Y%m%d%H%M%S").replace(tzinfo=UTC)
+            except ValueError:
+                published = None
             record = {
                 "source": GDELT_SOURCE,
                 "source_item_id": link,
@@ -803,12 +831,6 @@ def collect_gdelt_news(
             if not eligible:
                 rejected[reason] = rejected.get(reason, 0) + 1
                 continue
-            relevant, reason = google_news_item_is_relevant(
-                GDELT_SOURCE, headline, published, fetched_at,
-            )
-            if not relevant:
-                rejected[reason] = rejected.get(reason, 0) + 1
-                continue
             created, reason = _append_after_full_text(ledger, record, content_extractor)
             inserted += int(created)
             unchanged += int(reason == "UNCHANGED_FULL_TEXT")
@@ -816,20 +838,17 @@ def collect_gdelt_news(
                 rejected[reason] = rejected.get(reason, 0) + 1
         ledger.append_source_poll({"poll_id": poll_id, "source": GDELT_SOURCE, "fetched_time": fetched_at, "status": "OK", "payload_hash": hashlib.sha256(raw).hexdigest()})
         return {"source": GDELT_SOURCE, "status": "OK", "inserted_revisions": inserted,
-                "unchanged_items": unchanged, "rejected_reasons": rejected}
+                "unchanged_items": unchanged, "discovered_candidates": discovered,
+                "archive": archive_name, "rejected_reasons": rejected}
     except Exception as error:
         message = str(error)[:500]
         ledger.append_source_poll({"poll_id": poll_id, "source": GDELT_SOURCE, "fetched_time": fetched_at, "status": "ERROR", "error_type": type(error).__name__, "error": message})
-        next_streak = rate_limit_streak + int("429" in message)
-        next_cooldown = min(360, 60 * (2 ** min(next_streak, 3))) if next_streak else 60
         return {
             "source": GDELT_SOURCE,
             "status": "ERROR",
             "error_type": type(error).__name__,
             "error": message,
             "fallback_source": GOOGLE_GEO_SOURCE,
-            "retry_at": (fetched_at + timedelta(minutes=next_cooldown)).isoformat(),
-            "rate_limit_streak": next_streak,
         }
 
 
