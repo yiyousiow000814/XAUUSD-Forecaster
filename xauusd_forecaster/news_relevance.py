@@ -20,12 +20,6 @@ _HIGH_QUALITY_PUBLISHERS = (
     "financial times", "wall street journal", "bureau of labor statistics",
     "federal reserve", "u.s. department of labor", "world gold council",
 )
-_EDITORIAL_OR_INVESTMENT_GUIDE_PATTERNS = (
-    "way to invest", "ways to invest", "how to invest", "should you buy",
-    "best gold stocks",
-    "investment guide", "price prediction", "投资黄金的", "如何投资黄金",
-    "是否应该买入", "黄金股推荐",
-)
 
 _GOOGLE_NEWS_SOURCES = frozenset({
     "google_news_gold_context",
@@ -64,12 +58,6 @@ def google_news_item_is_relevant(
     if observed - published > GOOGLE_NEWS_MAX_AGE:
         return False, "SEARCH_RESULT_TOO_OLD"
     return True, "AI_SEMANTIC_REVIEW_REQUIRED"
-
-
-def news_headline_is_actionable(headline: str) -> bool:
-    """Exclude deterministic advice/editorial formats from model admission."""
-    text = " " + re.sub(r"\s+", " ", (headline or "").casefold()).strip() + " "
-    return not any(pattern in text for pattern in _EDITORIAL_OR_INVESTMENT_GUIDE_PATTERNS)
 
 
 def google_news_quality_rank(headline: str) -> int:

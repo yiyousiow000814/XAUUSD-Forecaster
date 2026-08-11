@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 import math
-import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 
 CURRENT_NEWS_PROMPT_VERSION = "news-json-v14-material-event-evidence"
+TARGET_NEWS_PROMPT_VERSION = "news-json-v15-ai-semantic-review"
 V1_NEWS_PROMPT_VERSIONS = (
     CURRENT_NEWS_PROMPT_VERSION,
     "news-json-v13-event-claims",
@@ -18,13 +18,67 @@ V1_NEWS_PROMPT_VERSIONS = (
     "news-json-v11-gemini-story-subjects",
     "news-json-v10-controlled-category-zh",
 )
+GENERATED_NEWS_PROMPT_VERSIONS = frozenset({
+    CURRENT_NEWS_PROMPT_VERSION,
+    TARGET_NEWS_PROMPT_VERSION,
+})
+SUPPORTED_NEWS_PROMPT_VERSIONS = frozenset({
+    *V1_NEWS_PROMPT_VERSIONS,
+    TARGET_NEWS_PROMPT_VERSION,
+})
 
 _SCHEMA_PATH = Path(__file__).with_name("news_annotation.schema.json")
 
 
-@lru_cache(maxsize=1)
-def news_annotation_schema() -> dict:
-    return json.loads(_SCHEMA_PATH.read_text(encoding="utf-8"))
+TARGET_SEMANTIC_FIELDS = {
+    "xauusd_relevance": {
+        "type": "string",
+        "enum": ["DIRECT", "MACRO_DRIVER", "CONTEXT_ONLY", "IRRELEVANT"],
+        "description": "Semantic relationship to XAUUSD, based on the complete source",
+    },
+    "review_priority": {
+        "type": "string",
+        "enum": ["IMMEDIATE", "FAST", "NORMAL", "BACKGROUND"],
+        "description": "How quickly an independent semantic review is needed",
+    },
+    "material_change": {
+        "type": "string",
+        "enum": [
+            "NEW_EVENT", "MATERIAL_UPDATE", "DUPLICATE_REPORT",
+            "COMMENTARY", "HISTORICAL_CONTEXT",
+        ],
+        "description": "Whether the source adds a new real-world fact",
+    },
+    "time_sensitivity": {
+        "type": "string",
+        "enum": ["IMMEDIATE", "SAME_DAY", "MULTI_DAY", "ONGOING", "BACKGROUND"],
+        "description": "Semantic urgency without using facts published later",
+    },
+    "semantic_reason_zh": {
+        "type": "string", "minLength": 4, "maxLength": 240,
+        "description": "Concise Simplified Chinese reason grounded in the source",
+    },
+    "supporting_evidence": {
+        "type": "array", "minItems": 1, "maxItems": 3,
+        "items": {"type": "string", "minLength": 4, "maxLength": 240},
+        "uniqueItems": True,
+        "description": "Exact short excerpts copied from the source",
+    },
+}
+
+
+@lru_cache(maxsize=2)
+def news_annotation_schema(
+    prompt_version: str = CURRENT_NEWS_PROMPT_VERSION,
+) -> dict:
+    schema = json.loads(_SCHEMA_PATH.read_text(encoding="utf-8"))
+    if prompt_version == TARGET_NEWS_PROMPT_VERSION:
+        schema["$id"] = "xauusd.forward.news-annotation.v15"
+        schema["required"].extend(TARGET_SEMANTIC_FIELDS)
+        schema["properties"].update(TARGET_SEMANTIC_FIELDS)
+    elif prompt_version not in V1_NEWS_PROMPT_VERSIONS:
+        raise ValueError(f"unsupported news prompt version: {prompt_version}")
+    return schema
 
 
 def _enum(property_name: str) -> frozenset[str]:
@@ -39,17 +93,6 @@ EVIDENCE_ROLES = _enum("evidence_role")
 ACTIONABLE_CATEGORIES = NEWS_CATEGORIES - {"regulation_other"}
 ACTIONABLE_RECORD_KINDS = frozenset({"FACT_EVENT", "OFFICIAL_CLAIM"})
 
-_MARKET_INSTRUMENT_TERMS = frozenset({
-    "gold", "bullion", "dollar", "yield", "treasury", "stock", "shares",
-    "futures", "oil", "黄金", "金价", "美元", "收益率", "美债", "股市",
-    "股指", "期货", "油价", "原油",
-})
-_MARKET_MOVEMENT_TERMS = frozenset({
-    "rise", "rises", "rose", "higher", "fall", "falls", "fell", "drop",
-    "gain", "gains", "climb", "steady", "surge", "slip", "breakout",
-    "上涨", "下跌", "走高", "走低", "攀升", "回落", "持稳", "突破",
-})
-
 CATEGORY_TOPICS: dict[str, tuple[str, ...]] = {
     "rates_fed": ("rates_fed",),
     "inflation_employment": ("inflation", "employment"),
@@ -63,56 +106,28 @@ CATEGORY_TOPICS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _contains_term(text: str, terms: frozenset[str]) -> bool:
-    """Match English words and explicit CJK phrases without substring leaks."""
-    return any(
-        term in text if any("\u3400" <= char <= "\u9fff" for char in term)
-        else re.search(rf"(?<![a-z]){re.escape(term)}(?![a-z])", text) is not None
-        for term in terms
-    )
-
-
 def effective_record_kind(annotation: dict, headline: str = "") -> str:
-    """Return the model kind after narrow, fail-closed consistency checks.
+    """Return Gemini's controlled classification without a keyword override.
 
-    Gemini remains the classifier and its immutable annotation is preserved.
-    This admission view only prevents an internally contradictory annotation,
-    or an explicit market-price narration, from becoming a core fact event.
+    ``headline`` remains temporarily accepted for callers created before v15,
+    but it never changes the semantic result.  Contract validation, not a
+    second hidden classifier, rejects malformed target annotations.
     """
+    del headline
     declared = str(annotation.get("record_kind") or "").upper()
     if declared not in RECORD_KINDS:
         return "BACKGROUND"
-    if declared not in ACTIONABLE_RECORD_KINDS:
-        return declared
-    evidence_role = str(annotation.get("evidence_role") or "").upper()
-    if evidence_role == "MARKET_REACTION":
-        return "MARKET_REACTION"
-    if evidence_role == "COMMENTARY":
-        return "COMMENTARY_FORECAST"
-    if evidence_role == "BACKGROUND":
-        return "BACKGROUND"
-    if str(annotation.get("relation_to_prior") or "").upper() == "MARKET_REACTS_TO":
-        return "MARKET_REACTION"
-    document_kind = str(annotation.get("document_kind") or "").upper()
-    if document_kind == "ANALYSIS":
-        return "COMMENTARY_FORECAST"
-    if document_kind == "BACKGROUND":
-        return "BACKGROUND"
-    normalized = re.sub(
-        r"\s+", " ",
-        str(headline or annotation.get("headline_zh") or "").casefold(),
-    )
-    if (
-        _contains_term(normalized, _MARKET_INSTRUMENT_TERMS)
-        and _contains_term(normalized, _MARKET_MOVEMENT_TERMS)
-    ):
-        return "MARKET_REACTION"
     return declared
 
 
-def validate_news_annotation(annotation: dict[str, Any]) -> None:
+def validate_news_annotation(
+    annotation: dict[str, Any],
+    *,
+    prompt_version: str = CURRENT_NEWS_PROMPT_VERSION,
+    source_text: str | None = None,
+) -> None:
     """Validate the complete current annotation against the packaged schema."""
-    schema = news_annotation_schema()
+    schema = news_annotation_schema(prompt_version)
     properties = schema["properties"]
     required = set(schema["required"])
     keys = set(annotation)
@@ -148,6 +163,8 @@ def validate_news_annotation(annotation: dict[str, Any]) -> None:
         elif expected == "array":
             if not isinstance(value, list):
                 raise ValueError(f"annotation {name} is not an array")
+            if len(value) < int(rule.get("minItems", 0)):
+                raise ValueError(f"annotation {name} has too few items")
             if len(value) > int(rule.get("maxItems", len(value))):
                 raise ValueError(f"annotation {name} exceeds its item limit")
             item_rule = rule.get("items", {})
@@ -165,6 +182,13 @@ def validate_news_annotation(annotation: dict[str, Any]) -> None:
     secondary = annotation["secondary_categories"]
     if annotation["primary_category"] in secondary:
         raise ValueError("annotation category cannot be both primary and secondary")
+    if prompt_version == TARGET_NEWS_PROMPT_VERSION:
+        if source_text is None:
+            raise ValueError("v15 annotation validation requires source text")
+        normalized_source = " ".join(source_text.split()).casefold()
+        for excerpt in annotation["supporting_evidence"]:
+            if " ".join(excerpt.split()).casefold() not in normalized_source:
+                raise ValueError("annotation supporting evidence is absent from source")
 
 
 def annotation_topics(annotation: dict) -> tuple[str, ...]:

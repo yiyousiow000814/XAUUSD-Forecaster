@@ -17,6 +17,8 @@ sys.path.insert(0, str(MODULE_ROOT))
 from xauusd_forecaster.annotation import (  # noqa: E402
     DEFAULT_GEMINI_MODEL,
     FALLBACK_GEMINI_MODEL,
+    TARGET_IMPACT_PROMPT_VERSION,
+    TARGET_PROMPT_VERSION,
     annotate_pending_news,
     assess_pending_news_impacts,
     gemini_routine_remaining,
@@ -73,6 +75,31 @@ def main() -> int:
                 ),
                 flush=True,
             )
+            target_statuses = (
+                annotate_pending_news(
+                    ledger,
+                    model=DEFAULT_GEMINI_MODEL,
+                    limit=limit,
+                    prompt_version=TARGET_PROMPT_VERSION,
+                    allow_priority_reserve=False,
+                )
+                if not statuses
+                else [{
+                    "status": "STANDBY",
+                    "reason": "ACTIVE_CONTRACT_QUEUE_HAS_PRIORITY",
+                }]
+            )
+            print(
+                json.dumps(
+                    {
+                        "event": "TARGET_ANNOTATION_BATCH",
+                        "model": DEFAULT_GEMINI_MODEL,
+                        "prompt_version": TARGET_PROMPT_VERSION,
+                        "statuses": target_statuses,
+                    }
+                ),
+                flush=True,
+            )
             fallback_statuses = (
                 annotate_pending_news(
                     ledger, model=FALLBACK_GEMINI_MODEL, limit=limit
@@ -104,9 +131,35 @@ def main() -> int:
                 ),
                 flush=True,
             )
+            target_impacts = (
+                assess_pending_news_impacts(
+                    ledger,
+                    limit=limit,
+                    annotation_prompt_version=TARGET_PROMPT_VERSION,
+                    impact_prompt_version=TARGET_IMPACT_PROMPT_VERSION,
+                )
+                if not impacts
+                else [{
+                    "status": "STANDBY",
+                    "reason": "ACTIVE_CONTRACT_QUEUE_HAS_PRIORITY",
+                }]
+            )
+            print(
+                json.dumps(
+                    {
+                        "event": "TARGET_NEWS_IMPACT_BATCH",
+                        "prompt_version": TARGET_IMPACT_PROMPT_VERSION,
+                        "statuses": target_impacts,
+                    }
+                ),
+                flush=True,
+            )
             work_items = sum(
                 len(batch)
-                for batch in (statuses, fallback_statuses, translations, impacts)
+                for batch in (
+                    statuses, fallback_statuses, target_statuses,
+                    translations, impacts, target_impacts,
+                )
                 if isinstance(batch, list)
             )
             write_heartbeat(args.status_file, work_items=work_items)

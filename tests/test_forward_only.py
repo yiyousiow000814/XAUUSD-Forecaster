@@ -906,6 +906,40 @@ def test_google_news_revision_uses_resolved_publisher_url(tmp_path) -> None:
     assert row["link"] == "https://publisher.example/gold-rates"
 
 
+def test_google_news_lane_deduplicates_identical_titles_across_polls(tmp_path) -> None:
+    fetched = datetime(2026, 8, 5, 10, 40, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+    lane = GoogleNewsLane("google_news_us_employment", "nonfarm payrolls")
+    items = "".join(
+        f"""<item><guid>jobs-{index}</guid><title>Payroll release</title>
+        <description>Employment situation result</description>
+        <pubDate>Wed, 05 Aug 2026 10:{index:02d}:00 GMT</pubDate>
+        <link>https://publisher.example/jobs-{index}</link></item>"""
+        for index in range(30)
+    )
+    rss = f"<rss><channel>{items}</channel></rss>".encode()
+
+    first = collect_google_news_lane(
+        ledger, fetched, lane, fetcher=lambda _: rss, decoder=lambda url: url,
+        content_extractor=lambda url: ("payroll evidence " * 40, url), limit=10
+    )
+    second = collect_google_news_lane(
+        ledger, fetched + timedelta(minutes=20), lane,
+        fetcher=lambda _: rss, decoder=lambda url: url,
+        content_extractor=lambda url: ("payroll evidence " * 40, url), limit=25,
+    )
+
+    assert first["deduped_items"] == 1
+    assert first["inserted_revisions"] == 1
+    assert first["processed_items"] == 1
+    assert second["feed_items"] == 30
+    assert second["deduped_items"] == 1
+    assert second["processed_items"] == 1
+    assert second["inserted_revisions"] == 0
+    assert second["unchanged_items"] == 1
+    assert ledger.count("news_revisions") == 1
+
+
 def test_google_news_lane_does_not_merge_distinct_events_before_ai(tmp_path) -> None:
     fetched = datetime(2026, 8, 5, 10, 40, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
