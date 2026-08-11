@@ -911,6 +911,39 @@ def test_gdelt_429_uses_exponential_backoff_without_blocking_fallback(tmp_path) 
     assert recovered["status"] == "OK"
 
 
+def test_gdelt_opens_24_hour_circuit_after_three_consecutive_429s(tmp_path) -> None:
+    first_attempt = datetime(2026, 8, 6, 0, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=first_attempt)
+
+    def rate_limited(_url: str) -> bytes:
+        raise RuntimeError("HTTP Error 429: Too Many Requests")
+
+    first = collect_gdelt_news(ledger, first_attempt, rate_limited)
+    second_attempt = first_attempt + timedelta(hours=2)
+    second = collect_gdelt_news(ledger, second_attempt, rate_limited)
+    third_attempt = second_attempt + timedelta(hours=4)
+    third = collect_gdelt_news(ledger, third_attempt, rate_limited)
+
+    assert first["rate_limit_streak"] == 1
+    assert second["rate_limit_streak"] == 2
+    assert third["rate_limit_streak"] == 3
+    assert third["circuit_state"] == "OPEN"
+    assert third["retry_at"] == (third_attempt + timedelta(hours=24)).isoformat()
+
+    skipped = collect_gdelt_news(
+        ledger, third_attempt + timedelta(hours=23, minutes=59),
+        lambda _url: b'{"articles": []}',
+    )
+    assert skipped["status"] == "SKIPPED_CIRCUIT_OPEN"
+    assert skipped["fallback_source"] == "google_news_gold_context"
+
+    recovered = collect_gdelt_news(
+        ledger, third_attempt + timedelta(hours=24),
+        lambda _url: b'{"articles": []}',
+    )
+    assert recovered["status"] == "OK"
+
+
 def test_gdelt_fetches_fresh_candidate_body_before_ai_semantic_review(tmp_path) -> None:
     fetched = datetime(2026, 8, 10, 6, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched - timedelta(days=1))

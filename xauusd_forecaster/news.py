@@ -34,6 +34,17 @@ from .news_relevance import (
 UTC = timezone.utc
 USER_AGENT = "XAUUSD-Forward-Evidence/0.1 (+local research collector)"
 NEWS_INTAKE_MAX_AGE = timedelta(hours=72)
+GDELT_POLL_INTERVAL = timedelta(hours=1)
+GDELT_429_CIRCUIT_THRESHOLD = 3
+GDELT_429_CIRCUIT_OPEN = timedelta(hours=24)
+
+
+def _gdelt_retry_delay(rate_limit_streak: int) -> timedelta:
+    if rate_limit_streak >= GDELT_429_CIRCUIT_THRESHOLD:
+        return GDELT_429_CIRCUIT_OPEN
+    if rate_limit_streak:
+        return timedelta(hours=2 ** rate_limit_streak)
+    return GDELT_POLL_INTERVAL
 
 
 @dataclass(frozen=True)
@@ -762,18 +773,20 @@ def collect_gdelt_news(
             rate_limit_streak += 1
         else:
             break
-    cooldown_minutes = (
-        min(360, 60 * (2 ** min(rate_limit_streak, 3)))
-        if rate_limit_streak else 60
-    )
-    retry_at = last_poll + timedelta(minutes=cooldown_minutes) if last_poll else None
+    circuit_open = rate_limit_streak >= GDELT_429_CIRCUIT_THRESHOLD
+    retry_at = last_poll + _gdelt_retry_delay(rate_limit_streak) if last_poll else None
     if retry_at is not None and fetched_at < retry_at:
         return {
             "source": GDELT_SOURCE,
-            "status": "SKIPPED_BACKOFF" if rate_limit_streak else "SKIPPED_INTERVAL",
+            "status": (
+                "SKIPPED_CIRCUIT_OPEN" if circuit_open
+                else "SKIPPED_BACKOFF" if rate_limit_streak
+                else "SKIPPED_INTERVAL"
+            ),
             "fallback_source": GOOGLE_GEO_SOURCE if rate_limit_streak else None,
             "retry_at": retry_at.isoformat(),
             "rate_limit_streak": rate_limit_streak,
+            "circuit_state": "OPEN" if circuit_open else "CLOSED",
         }
     poll_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{GDELT_SOURCE}|{fetched_at.isoformat()}"))
     try:
@@ -821,15 +834,18 @@ def collect_gdelt_news(
         message = str(error)[:500]
         ledger.append_source_poll({"poll_id": poll_id, "source": GDELT_SOURCE, "fetched_time": fetched_at, "status": "ERROR", "error_type": type(error).__name__, "error": message})
         next_streak = rate_limit_streak + int("429" in message)
-        next_cooldown = min(360, 60 * (2 ** min(next_streak, 3))) if next_streak else 60
+        next_delay = _gdelt_retry_delay(next_streak)
         return {
             "source": GDELT_SOURCE,
             "status": "ERROR",
             "error_type": type(error).__name__,
             "error": message,
             "fallback_source": GOOGLE_GEO_SOURCE,
-            "retry_at": (fetched_at + timedelta(minutes=next_cooldown)).isoformat(),
+            "retry_at": (fetched_at + next_delay).isoformat(),
             "rate_limit_streak": next_streak,
+            "circuit_state": (
+                "OPEN" if next_streak >= GDELT_429_CIRCUIT_THRESHOLD else "CLOSED"
+            ),
         }
 
 
