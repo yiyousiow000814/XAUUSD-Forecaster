@@ -652,8 +652,8 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(css, /height:calc\(100dvh - 16px\)/);
   assert.match(css, /grid-template-rows:auto auto minmax\(0,1fr\) auto/);
   assert.match(modal, /graph-modal-\$\{tab\}/);
-  assert.match(css, /graph-modal\.graph-modal-curve \{ height:auto; max-height:calc\(100dvh - 16px\); grid-template-rows:auto auto auto auto/);
-  assert.match(css, /graph-modal\.graph-modal-curve>\.graph-modal-body \{ overflow:visible/);
+  assert.match(css, /graph-modal\.graph-modal-curve,\.graph-modal\.graph-modal-versions \{ height:calc\(100dvh - 16px\); max-height:none; grid-template-rows:auto auto minmax\(0,1fr\) auto/);
+  assert.match(css, /graph-modal\.graph-modal-curve>\.graph-modal-body,\.graph-modal\.graph-modal-versions>\.graph-modal-body \{ min-height:0; max-height:none; overflow:auto/);
   assert.match(css, /scrollbar-gutter:stable/);
   assert.match(css, /long-curve-block>\.learning-svg \{ height:clamp\(390px,48dvh,520px\)/);
   assert.match(css, /\.curve-navigation/);
@@ -790,7 +790,7 @@ test("loads market history by bounded range instead of one growing snapshot", ()
   assert.match(route, /ORDER BY decision_epoch,decision_key/);
   assert.match(modal, /loadDashboardResource<MarketData>/);
   assert.match(modal, /return \(\) => \{ cancelled = true; \}/);
-  assert.match(modal, /!detailCandles\.length && !canGoLater/);
+  assert.match(modal, /!candles\.length \? <div className="graph-visual-stage market-empty-stage">/);
   assert.match(modal, /onClick=\{goLater\}>→ 返回较新行情/);
   assert.match(route, /previousCandleEnd/);
   assert.match(modal, /Plot trading time, not wall-clock time/);
@@ -849,6 +849,9 @@ test("distinguishes market history loading, empty, and failed states", () => {
   assert.doesNotMatch(modal, /if \(pageLoading \|\| overviewState === "loading"\)/);
   assert.doesNotMatch(modal, /if \(historyLoading\) return <GraphLoading/);
   assert.doesNotMatch(modal, /historyState === "loading"\) return <GraphLoading/);
+  assert.match(modal, /graph-visual-stage market-empty-stage/);
+  assert.doesNotMatch(modal, /compact-market-empty/);
+  assert.match(css, /graph-visual-stage \{ min-height:clamp\(420px,58dvh,620px\)/);
   assert.match(modal, /title="暂无行情数据"/);
   assert.match(modal, /重新读取/);
   assert.doesNotMatch(modal, /还没有保存过可绘制的 Bid\/Ask 行情/);

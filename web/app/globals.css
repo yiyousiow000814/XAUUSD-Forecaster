@@ -282,10 +282,8 @@ footer { font-size:13px; font-weight:600; letter-spacing:.06em; }
 body.modal-open { overflow:hidden; }
 .graph-modal-backdrop { position:fixed; inset:0; z-index:1100; display:grid; place-items:center; padding:8px; background:rgba(17,17,15,.72); backdrop-filter:blur(3px); }
 .graph-modal { width:min(1280px,calc(100vw - 16px)); height:calc(100dvh - 16px); max-height:none; overflow:hidden; display:grid; grid-template-rows:auto auto minmax(0,1fr) auto; border:2px solid var(--ink); background:var(--paper); box-shadow:8px 8px 0 rgba(215,255,79,.8); }
-.graph-modal.graph-modal-curve { height:auto; max-height:calc(100dvh - 16px); grid-template-rows:auto auto auto auto; }
-.graph-modal.graph-modal-curve>.graph-modal-body { overflow:visible; }
-.graph-modal.graph-modal-versions { height:auto; max-height:calc(100dvh - 16px); grid-template-rows:auto auto minmax(0,auto) auto; }
-.graph-modal.graph-modal-versions>.graph-modal-body { max-height:calc(100dvh - 190px); overflow:auto; }
+.graph-modal.graph-modal-curve,.graph-modal.graph-modal-versions { height:calc(100dvh - 16px); max-height:none; grid-template-rows:auto auto minmax(0,1fr) auto; }
+.graph-modal.graph-modal-curve>.graph-modal-body,.graph-modal.graph-modal-versions>.graph-modal-body { min-height:0; max-height:none; overflow:auto; }
 .graph-modal>header { position:sticky; top:0; z-index:2; display:flex; justify-content:space-between; align-items:center; padding:18px 22px; border-bottom:1px solid var(--ink); background:var(--paper); }
 .graph-modal>header span { color:var(--muted); font-size:10px; letter-spacing:.14em; }.graph-modal>header h2 { margin:4px 0 0; font-family:var(--font-display); font-size:34px; }
 .graph-modal>header button { width:46px; height:46px; border:1px solid var(--ink); background:var(--ink); color:var(--paper); font-size:30px; cursor:pointer; }
@@ -319,13 +317,19 @@ body.modal-open { overflow:hidden; }
 .graph-state-compact { min-height:112px; padding:18px; }
 .graph-state-compact strong { font-size:20px; }
 .graph-state-shell { min-height:0; }
+.graph-state-shell>.graph-state-compact { min-height:clamp(340px,52dvh,560px); }
+.graph-visual-stage { min-height:clamp(420px,58dvh,620px); display:grid; place-items:center; border:1px solid rgba(17,17,15,.3); background:rgba(238,233,218,.32); }
+.graph-visual-stage>.graph-loading,.graph-visual-stage>.graph-empty { width:100%; min-height:100%; }
+.market-window-empty { display:grid; justify-items:center; gap:10px; padding:24px; text-align:center; }
+.market-window-empty strong { font-family:var(--font-display); font-size:28px; font-weight:500; }
+.market-window-empty span { max-width:420px; color:var(--muted); font-size:13px; }
+.market-window-empty button { min-height:44px; padding:9px 14px; border:1px solid var(--ink); background:var(--paper); font-weight:900; cursor:pointer; }
 .graph-loading-bars { display:flex; align-items:end; gap:5px; height:28px; }
 .graph-loading-bars i { display:block; width:5px; height:12px; background:var(--green); animation:graph-data-pulse .8s ease-in-out infinite alternate; }
 .graph-loading-bars i:nth-child(2) { height:24px; animation-delay:.14s; }.graph-loading-bars i:nth-child(3) { height:17px; animation-delay:.28s; }
 .graph-load-error { gap:18px; }.graph-load-error button { min-width:112px; min-height:44px; border:1px solid var(--ink); background:var(--acid); font-weight:900; cursor:pointer; }
 @keyframes graph-data-pulse { from { transform:scaleY(.45); opacity:.38; } to { transform:scaleY(1); opacity:1; } }
 @media (prefers-reduced-motion:reduce) { .graph-loading-bars i { animation:none; opacity:.75; } }
-.compact-market-empty { min-height:96px; display:flex; align-items:center; justify-content:center; gap:14px; border:1px solid rgba(17,17,15,.3); }.compact-market-empty button { min-height:40px; border:1px solid var(--ink); background:var(--paper); font-weight:900; }.compact-market-empty span { color:var(--muted); font-weight:800; }
 .evidence-count-note { margin:0; padding:12px 16px; border:1px solid var(--ink); border-top:0; background:#e8dfc8; font-size:13px; }
 .rolling-process-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:1px; border-bottom:1px solid var(--ink); background:#aaa59a; }
 .rolling-process-grid article { min-height:178px; padding:20px; background:var(--paper); }

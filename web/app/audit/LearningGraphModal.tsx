@@ -738,15 +738,8 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
     if (dense) return candidateDecisions;
     return candidateDecisions.filter(row => new Date(row.decision_time).getUTCMinutes() % 30 === 0);
   })();
-  if (!detailCandles.length && !canGoLater) {
-    return <div className="chart-block market-chart-block graph-state-shell">
-      <div className="chart-caption"><div><b>每根K线5分钟 · 每个箭头预测未来30分钟</b><span>切换模型或时间时，页面结构会保留。</span></div><select value={identity} onChange={event => { setIdentity(event.target.value); setSelected(null); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key, label]) => <option key={key} value={key}>{label}{key.includes("RESIDUAL") ? "（修正量）" : ""}</option>)}</select></div>
-      <div className="market-controls" aria-label="K线图显示控制"><label>时间<select value={range} onChange={event => { setRange(event.target.value); setPage(0); setBefore(null); setLaterPages([]); setSelected(null); }}><option value="3">3小时</option><option value="6">6小时</option><option value="12">12小时</option><option value="24">24小时</option><option value="168">7天</option><option value="all">全部历史</option></select></label></div>
-      {historyState === "loading" ? <GraphLoading label="正在读取行情" compact /> : historyState === "error" ? <GraphLoadError compact label="行情读取失败" onRetry={() => setHistoryRetry(value => value + 1)} /> : <Empty compact title="暂无行情数据" text="当前范围没有 Bid/Ask 行情。" />}
-    </div>;
-  }
-  if (!candles.length) return <div className="chart-block compact-market-empty"><button type="button" disabled={!canGoLater} onClick={goLater}>→ 返回较新行情</button><span>休市时段</span></div>;
-  const low = Math.min(...candles.map(row => row.low)); const high = Math.max(...candles.map(row => row.high));
+  const low = candles.length ? Math.min(...candles.map(row => row.low)) : 0;
+  const high = candles.length ? Math.max(...candles.map(row => row.high)) : 1;
   const candleSteps = candles.slice(1).map((row, index) =>
     Date.parse(row.time) - Date.parse(candles[index].time)
   ).filter(step => step > 0).sort((a, b) => a - b);
@@ -801,8 +794,11 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
       <button className={showTraining ? "active" : ""} type="button" onClick={() => setShowTraining(value => !value)}>模型换版本</button>
       <span>显示 {decisions.length}{activeMarket?.decision_downsampled ? ` / 共 ${activeMarket.source_decision_count ?? decisions.length}` : ""} 次{hiddenByAction > 0 ? ` · 动作筛选隐藏 ${hiddenByAction} 次` : ""}{hiddenByFrequency > 0 ? ` · 频率收起 ${hiddenByFrequency} 次` : ""}</span>
     </div>
-    {historyState === "loading" && <GraphLoading label="正在更新行情" compact />}
-    {historyState === "error" && <GraphLoadError compact label="行情更新失败" onRetry={() => setHistoryRetry(value => value + 1)} />}
+    {historyState === "loading" && candles.length > 0 && <GraphLoading label="正在更新行情" compact />}
+    {historyState === "error" && candles.length > 0 && <GraphLoadError compact label="行情更新失败" onRetry={() => setHistoryRetry(value => value + 1)} />}
+    {!candles.length ? <div className="graph-visual-stage market-empty-stage">
+      {historyState === "loading" ? <GraphLoading label="正在读取行情" /> : historyState === "error" ? <GraphLoadError label="行情读取失败" onRetry={() => setHistoryRetry(value => value + 1)} /> : canGoLater ? <div className="market-window-empty"><strong>这段时间没有行情</strong><span>已跳过休市或数据空档，可返回较新的交易时段。</span><button type="button" onClick={goLater}>→ 返回较新行情</button></div> : <Empty title="暂无行情数据" text="当前范围没有 Bid/Ask 行情。" />}
+    </div> : <>
     <div className="market-history-nav" aria-label="历史行情翻页">
       <button type="button" disabled={!canGoEarlier} onClick={goEarlier} aria-label="查看更早行情">←</button>
       <span>{timeLabel(candles[0].time)} — {timeLabel(candles.at(-1)!.time)}{range === "all" && activeMarket?.overview_downsampled ? ` · 全部 ${activeMarket.source_candle_count ?? ""} 根概览` : ""}</span>
@@ -829,6 +825,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
       <div><small>一次完整观察</small><strong>{timeLabel(activeSelected.decision_time)} · 成本后EV较高 {arrowAction(activeSelected)}</strong><span>版本 {activeSelected.model_version} · → {timeLabel(exitTime(activeSelected))} 固定观察结果{activeSelected.policy_consistent === false ? ` · 当时规则校验异常（原记录保留；应为 ${activeSelected.policy_expected_action}）` : ""}</span></div>
       <DecisionPayoff selected={activeSelected} resultLabel={resultLabel} />
     </> : <><div><small>怎样阅读</small><strong>点击图中的三角形</strong><span>这里只显示一次预测；选中后才标出它对应的30分钟观察窗口。</span></div></>}</div>
+    </>}
     <p className="wait-explainer"><b>方向怎样产生：</b> Ridge 预测未来30分钟连续收益。系统分别计算 Long 与 Short 的 Bid/Ask 成本后 EV，较高的一边只要大于0就记录为 Shadow 方向；两边都不大于0、数值相同或数据异常才 WAIT。95%下界仍用于观察不确定性和未来晋升，但不再封锁早期 Shadow 方向。U5 只是统一波动尺度，不是 WAIT 开关。</p>
   </div>;
 }
