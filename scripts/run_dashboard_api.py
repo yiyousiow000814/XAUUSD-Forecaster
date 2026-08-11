@@ -52,7 +52,10 @@ from xauusd_forecaster.news_evidence import (  # noqa: E402
     EVIDENCE_POLICY_VERSION, event_evidence_rows_from_connection,
     resolve_event_clock,
 )
-from xauusd_forecaster.news_relevance import google_news_item_is_relevant  # noqa: E402
+from xauusd_forecaster.news_relevance import (  # noqa: E402
+    GOOGLE_NEWS_MAX_AGE,
+    google_news_item_is_relevant,
+)
 from xauusd_forecaster.news_features_v2 import SOURCE_RULES  # noqa: E402
 from xauusd_forecaster.news_impact import (  # noqa: E402
     IMPACT_MODEL,
@@ -179,6 +182,14 @@ def _parse_utc(value: str | None) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
+def _has_recent_evidence(latest_item_time: str | None, now: datetime) -> bool:
+    latest_item = _parse_utc(latest_item_time)
+    if latest_item is None:
+        return False
+    age = now - latest_item
+    return timedelta(0) <= age <= GOOGLE_NEWS_MAX_AGE
+
+
 def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[dict]:
     rows = []
     for source, (label, role, stale_minutes, revision_sources) in NEWS_SOURCE_DEFINITIONS.items():
@@ -241,10 +252,20 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
             health = "DEGRADED"
         elif age_seconds is None or age_seconds > stale_minutes * 60:
             health = "STALE"
-        elif item_count == 0 and source.startswith("bls_"):
+        elif revision_sources and item_count == 0:
             health = "WARMING_UP"
         else:
             health = "HEALTHY"
+        recent_evidence = _has_recent_evidence(latest_item_time, now)
+        if health == "WARMING_UP":
+            semantic_status = "NO_RELEASE_CAPTURED"
+            semantic_message = "轮询正常，但本机尚未捕获该发布系列的正式条目"
+        elif revision_sources and not recent_evidence:
+            semantic_status = "NO_RECENT_EVIDENCE"
+            semantic_message = "来源轮询正常，但最近 72 小时没有捕获可用资料"
+        else:
+            semantic_status = "OK"
+            semantic_message = None
         rows.append({
             "source": source, "label": label, "role": role, "health": health,
             "latest_status": latest_status,
@@ -261,13 +282,11 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
             "error_count": int(polls["error_count"] or 0),
             "item_count": item_count, "revision_count": revision_count,
             "full_text_count": full_text_count, "latest_item_time": latest_item_time,
+            "recent_evidence": recent_evidence,
             "recovery_mode": None, "fallback_label": None,
             "fallback_health": None, "next_retry_time": None,
-            "semantic_status": "NO_RELEASE_CAPTURED" if health == "WARMING_UP" else "OK",
-            "semantic_message": (
-                "轮询正常，但本机尚未捕获该发布系列的正式条目"
-                if health == "WARMING_UP" else None
-            ),
+            "semantic_status": semantic_status,
+            "semantic_message": semantic_message,
         })
     by_source = {row["source"]: row for row in rows}
     bls_numeric = by_source.get("bls_public_api")
@@ -293,6 +312,7 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
                 and release.get("latest_status") == "ERROR"
                 and release.get("last_error_type") == "HTTPError"
                 and bls_fallback.get("health") in {"HEALTHY", "DEGRADED"}
+                and bls_fallback.get("recent_evidence")
             ):
                 fallback_healthy = bls_fallback.get("health") == "HEALTHY"
                 release["health"] = "FALLBACK_ACTIVE" if fallback_healthy else "DEGRADED"
@@ -326,12 +346,18 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
         cooldown = min(360, 60 * (2 ** min(streak, 3))) if streak else 60
         gdelt["recovery_mode"] = "RATE_LIMIT_BACKOFF"
         gdelt["fallback_label"] = fallback["label"]
-        gdelt["fallback_health"] = fallback["health"]
+        fallback_ready = bool(
+            fallback["health"] == "HEALTHY" and fallback.get("recent_evidence")
+        )
+        gdelt["fallback_health"] = (
+            fallback["health"]
+            if fallback.get("recent_evidence") else "NO_RECENT_EVIDENCE"
+        )
         gdelt["next_retry_time"] = (
             (latest_poll + timedelta(minutes=cooldown)).isoformat()
             if latest_poll else None
         )
-        if fallback["health"] == "HEALTHY":
+        if fallback_ready:
             gdelt["health"] = "FALLBACK_ACTIVE"
             gdelt["latest_status"] = "RATE_LIMITED"
     return rows
