@@ -1,117 +1,65 @@
 # XAUUSD Forecaster
 
-This module is the home of a decision-support system for XAUUSD. Its first
-target is deliberately narrow: at a fixed decision clock, estimate the
-executable Bid/Ask quote-return value and uncertainty of `LONG`, `SHORT`, and
-`WAIT` over a declared horizon. Commission is explicitly unconfigured and
-Shadow slippage is unavailable, so current results are not net PnL.
+一个研究 **XAUUSD（黄金）未来 30 分钟方向**的预估系统。
 
-The system is not an autonomous self-modifying trading robot. Production
-artifacts stay frozen. Research produces versioned challengers, and a
-challenger may become the new champion only after chronological, shadow, cost,
-stability, and operational gates pass.
+系统每 5 分钟产生一次 `LONG`、`SHORT` 或 `WAIT`，30 分钟后记录真实
+Bid/Ask 结果，再用已经成熟的结果训练下一组模型。
 
-## Current status
+**它不会自动下单，也不会连接账户执行交易。**
 
-Phase 2F: Forward-only Evidence and Learning Engine. The production Champion
-is Always Wait; Challengers are Shadow-only and this module does not place
-orders. Historical observations may initialize U5 only and cannot enter
-training or performance evaluation. Append-only repair rows are isolated as
-`REPAIRED_SEED`; only predictions created after `EVALUATION_EPOCH_V2` can
-produce `LIVE_OOS` learning-curve evidence.
+[查看实时研究面板](https://aurum-signal-room.yiyousiow1234.workers.dev/)
 
-The accepted owner decisions are recorded in
-[`docs/PRODUCT_CONTRACT.md`](docs/PRODUCT_CONTRACT.md). The system and
-validation boundaries are recorded in
-[`docs/SYSTEM_CONTRACT.md`](docs/SYSTEM_CONTRACT.md), and the free-source
-feasibility review is in [`docs/FREE_DATA_PLAN.md`](docs/FREE_DATA_PLAN.md).
-The active behavior is frozen in
-[`docs/FORWARD_ONLY_CONTRACT.md`](docs/FORWARD_ONLY_CONTRACT.md). The older
-Replay contract is inactive and retained only as design history.
+## 可以看到什么
 
-## Intended delivery order
+- 当前 30 分钟方向预估；
+- 每次预估对应的真实 30 分钟结果；
+- 只看黄金与加入新闻后的模型成绩；
+- 模型在决策前实际看过的新闻证据；
+- 数据来源、组件和同步状态。
 
-1. Freeze the product, data, label, validation, and deployment contracts.
-2. Build the append-only prediction ledger and point-in-time source inventory.
-3. Start the Forward collector and record every five-minute event, including
-   explicit outages.
-4. Establish simple frozen baselines and a calibrated `WAIT` decision.
-5. Train versioned Challengers only from matured Forward outcomes.
-6. Add a separately approved execution adapter only after the research and
-   runtime behavior match.
-
-## Placement
-
-Source code, tests, and reviewable design documents belong in this directory.
-Raw market data, feature snapshots, databases, model binaries, logs, replay
-outputs, and other generated evidence must stay in an ignored local artifact
-tree defined before ingestion; they must not be committed beside the source.
-
-## Local development
+## 如何工作
 
 ```text
+cTrader Bid/Ask + 有时间记录的新闻
+                 ↓
+       Collector / Annotator
+                 ↓
+       固定版本的 Shadow 模型
+                 ↓
+     30 分钟后记录结果并继续学习
+```
+
+所有预测都会先冻结再等待结果。迟到的新闻不能修改过去的预测，旧模型也不会
+因为新数据被重新改写。
+
+## 研究边界
+
+- 只研究 XAUUSD；
+- 固定每 5 分钟预测、观察未来 30 分钟；
+- 使用真实 Bid/Ask 与可追溯的新闻时间；
+- 所有模型目前都是 Shadow 研究，不具备下单权限；
+- 模型版本只能由项目负责人手动批准切换。
+
+## 本机运行
+
+Windows 用户通过统一控制中心启动 Collector、Annotator、Dashboard API 和同步：
+
+```powershell
+powershell -File scripts/xauusd_control_center.ps1
+```
+
+运行测试：
+
+```powershell
 python -m pytest -q tests
 ```
 
-Initialize the bounded U5 state once. Build and start the read-only cTrader
-quote bridge, then point the Forward collector at its output directory:
+数据库、日志、行情、模型文件和其他运行产物保存在忽略提交的
+`.local/forward/`，不会上传到 GitHub。
 
-```text
-python scripts/initialize_u5_warmup.py
-powershell -File ctrader/XauusdForwardQuoteBridge/run_live_quote_bridge.ps1
-python scripts/run_forward_collector.py --market-jsonl .local/forward/quotes
-```
+## 详细文档
 
-## Local control center
-
-Use `scripts/xauusd_control_center.ps1` as the single Windows control surface
-for the collector, Gemini annotator, dashboard API, and Sites synchronizer. It
-supports a visible GUI, component-level start/stop controls, logs, and an
-explicit opt-in Windows logon task. Auto-start is disabled until the owner
-enables it in the control center.
-
-Without `--market-jsonl`, the market adapter is intentionally unconfigured and
-every five-minute event records `WAIT / MARKET_DATA_MISSING`. A read-only live
-quote bridge can be supplied with `--market-jsonl <path>`. The required JSONL
-fields are frozen in `config/forward.example.json`.
-
-Generated databases, epoch receipts, U5 state, logs, and model artifacts stay
-under the ignored `.local/forward/` tree. Completed quote days are compressed
-with checksum receipts, and a verified SQLite online backup is kept locally.
-Run `scripts/run_news_annotator.py` to use the fixed-schema news annotator.
-Gemini 3.5 Flash-Lite is primary; Gemini 3.1 Flash-Lite takes routine full-text
-work only after the primary routine budget reaches its protected reserve.
-`GEMINI_API_KEYS` accepts a semicolon-separated
-rotation pool, while `GEMINI_API_KEY` remains the single-key fallback. Both are
-read from the local environment and never committed. Neither the collector nor the annotator contains an
-order-submission surface.
-
-Every outbound Gemini attempt is reserved before transmission. Gemini 3.5 and
-3.1 use independent local quota ledgers; both store anonymous key fingerprints
-only, stop a key at 500 attempts for the Pacific quota day, and start fresh at
-Pacific midnight. Google applies Gemini rate limits per project and model, so
-the local ledgers remain conservative safety limits rather than provider truth.
-The final 150 Flash requests are reserved for monetary-policy, CPI, and payroll
-events. Display-number and language validation problems are recovered locally;
-an untrusted translation is retained as a zero-confidence neutral audit record.
-Provider and malformed-response failures use the append-only failure ledger and
-bounded backoff instead of being retried every minute. The status page separates
-ready, queued, backing-off, and isolated items.
-Gemini produces a Simplified Chinese display headline and full-content summary.
-Mixed-language output and source-inconsistent numeric lexemes are repaired or
-neutralized before append. Headline-only translations remain presentation-only and
-never create model features. Syndicated duplicate clusters are represented by
-the strongest available body instead of repeated mirror rows.
-
-At 96 complete V2 rows, the collector creates a Market-only Preview whose
-effective action remains `WAIT`. At 200 rows it creates frozen Shadow
-Challengers, then creates a new version after each additional 50 eligible rows.
-Only the newest and immediately preceding Ridge version continue producing
-Shadow predictions. Older versions remain immutable archives. Long-horizon
-calibration evaluates the rolling identity by selecting the newest version at
-each prior Decision; unhealthy predictions cannot enter that evidence.
-News-residual and Full versions require their own minimum news exposure,
-cluster, and event-day evidence; they are not fabricated when those gates fail.
-Every version is scored only on decisions created after that version. Sixty
-trading days is a confidence milestone, not a reason to delay Preview or
-Shadow learning. Training never promotes a Champion and never enables orders.
+- [产品规则](docs/PRODUCT_CONTRACT.md)
+- [系统与数据边界](docs/SYSTEM_CONTRACT.md)
+- [Forward-only 学习规则](docs/FORWARD_ONLY_CONTRACT.md)
+- [Cloudflare 部署说明](docs/CLOUDFLARE_HOSTING.md)
