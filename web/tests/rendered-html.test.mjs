@@ -590,7 +590,7 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /全部历史/);
   assert.match(modal, /查看更早行情/);
   assert.match(modal, /查看较新行情/);
-  assert.match(modal, /还没有保存过可绘制的 Bid\/Ask 行情/);
+  assert.match(modal, /title="暂无行情数据"/);
   assert.match(modal, /模型当时尚未开始预测/);
   assert.match(modal, /这段时间没有预测/);
   assert.match(modal, /marketGaps/);
@@ -772,7 +772,7 @@ test("loads market history by bounded range instead of one growing snapshot", ()
   const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
   const route = readFileSync(new URL("../app/api/market-history/route.ts", import.meta.url), "utf8");
   assert.match(modal, /history_resource/);
-  assert.match(modal, /query\.set\("before", before\)/);
+  assert.match(modal, /historyQuery\.set\("before", before\)/);
   assert.match(modal, /setBefore\(candles\[0\]\.time\)/);
   assert.match(route, /OVERVIEW_POINTS = 480/);
   assert.match(route, /OVERVIEW_DECISIONS = 480/);
@@ -822,6 +822,19 @@ test("loads bounded learning history only when interactive charts need it", () =
   assert.match(modal, /resource: "version-group"/);
   assert.match(modal, /resource=curve-overview/);
   assert.match(modal, /next_cursor/);
+});
+
+test("distinguishes market history loading, empty, and failed states", () => {
+  const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(modal, /historyState === "loading"/);
+  assert.match(modal, /historyState === "error"/);
+  assert.match(modal, /正在读取行情/);
+  assert.match(modal, /title="暂无行情数据"/);
+  assert.match(modal, /重新读取/);
+  assert.doesNotMatch(modal, /还没有保存过可绘制的 Bid\/Ask 行情/);
+  assert.match(css, /graph-data-pulse/);
+  assert.match(css, /prefers-reduced-motion:reduce/);
 });
 
 test("reflows news evidence into readable mobile cards", () => {

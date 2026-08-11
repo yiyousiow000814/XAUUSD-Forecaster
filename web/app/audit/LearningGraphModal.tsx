@@ -525,39 +525,58 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
   const [page, setPage] = useState(0);
   const [before, setBefore] = useState<string | null>(null);
   const [laterPages, setLaterPages] = useState<Array<string | null>>([]);
-  const [historyMarket, setHistoryMarket] = useState<MarketData>();
+  const [historyResult, setHistoryResult] = useState<{
+    key: string; state: "ready" | "error"; data?: MarketData;
+  }>();
+  const [historyRetry, setHistoryRetry] = useState(0);
   const [showLong, setShowLong] = useState(true);
   const [showShort, setShowShort] = useState(true);
   const [showWait, setShowWait] = useState(true);
   const [dense, setDense] = useState(false);
   const [showTraining, setShowTraining] = useState(false);
   const [selected, setSelected] = useState<Decision | null>(null);
+  const historyQuery = new URLSearchParams({
+      range, identity, frequency: dense ? "5m" : "30m",
+  });
+  if (before && range !== "all") historyQuery.set("before", before);
+  const historyQueryString = historyQuery.toString();
+  const historyRequestKey = market?.history_resource
+    ? `${market.history_resource}?${historyQueryString}&retry=${historyRetry}` : "";
   useEffect(() => {
     if (!market?.history_resource) return;
-    const query = new URLSearchParams({
-      range, identity, frequency: dense ? "5m" : "30m",
-    });
-    if (before && range !== "all") query.set("before", before);
     const controller = new AbortController();
     let cancelled = false;
-    fetch(`${market.history_resource}?${query}`, { cache: "no-store", signal: controller.signal })
+    fetch(`${market.history_resource}?${historyQueryString}`, { cache: "no-store", signal: controller.signal })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
       })
       .then(body => {
-        if (!cancelled) setHistoryMarket({
-          ...body,
-          training_markers: market.training_markers ?? [],
-          prediction_history_start: market.prediction_history_start,
-          history_resource: market.history_resource,
-        });
+        if (!cancelled) {
+          setHistoryResult({
+            key: historyRequestKey,
+            state: "ready",
+            data: {
+              ...body,
+              training_markers: market.training_markers ?? [],
+              prediction_history_start: market.prediction_history_start,
+              history_resource: market.history_resource,
+            },
+          });
+        }
       })
-      .catch(() => { /* Keep the last successful page or bundled fallback visible. */ })
+      .catch(error => {
+        if (!cancelled && error.name !== "AbortError") {
+          setHistoryResult({ key: historyRequestKey, state: "error" });
+        }
+      });
     return () => { cancelled = true; controller.abort(); };
-  }, [market, range, identity, dense, before]);
-  const activeMarket = historyMarket ?? market;
+  }, [market, historyQueryString, historyRequestKey]);
   const remoteHistory = Boolean(market?.history_resource);
+  const historyState = !remoteHistory ? "ready"
+    : historyResult?.key !== historyRequestKey ? "loading" : historyResult.state;
+  const activeMarket = remoteHistory && historyResult?.key === historyRequestKey
+    ? historyResult.data : market;
   const detailCandles = activeMarket?.candles ?? [];
   const allCandles = range === "all" && activeMarket?.overview_candles?.length ? activeMarket.overview_candles : detailCandles;
   const candleCount = range === "all" ? allCandles.length : Number(range) * 12;
@@ -605,7 +624,13 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
     if (dense) return candidateDecisions;
     return candidateDecisions.filter(row => new Date(row.decision_time).getUTCMinutes() % 30 === 0);
   })();
-  if (!detailCandles.length && !canGoLater) return <Empty text="还没有保存过可绘制的 Bid/Ask 行情。" />;
+  if (remoteHistory && historyState === "loading") return <GraphLoading />;
+  if (remoteHistory && historyState === "error") {
+    return <GraphLoadError onRetry={() => setHistoryRetry(value => value + 1)} />;
+  }
+  if (!detailCandles.length && !canGoLater) {
+    return <Empty title="暂无行情数据" text="当前范围没有 Bid/Ask 行情。" />;
+  }
   if (!candles.length) return <div className="chart-block compact-market-empty"><button type="button" disabled={!canGoLater} onClick={goLater}>→ 返回较新行情</button><span>休市时段</span></div>;
   const low = Math.min(...candles.map(row => row.low)); const high = Math.max(...candles.map(row => row.high));
   const candleSteps = candles.slice(1).map((row, index) =>
@@ -779,4 +804,20 @@ function ExecutionLineChart({ title, subtitle, points, sourceCount, downsampled,
   </article>;
 }
 
-function Empty({ text }: { text: string }) { return <div className="graph-empty"><strong>等待可验证数据</strong><p>{text}</p></div>; }
+function GraphLoading() {
+  return <div className="graph-loading" role="status" aria-live="polite">
+    <span className="graph-loading-bars" aria-hidden="true"><i /><i /><i /></span>
+    <strong>正在读取行情</strong>
+  </div>;
+}
+
+function GraphLoadError({ onRetry }: { onRetry: () => void }) {
+  return <div className="graph-empty graph-load-error" role="alert">
+    <strong>行情读取失败</strong>
+    <button type="button" onClick={onRetry}>重新读取</button>
+  </div>;
+}
+
+function Empty({ text, title = "等待可验证数据" }: { text: string; title?: string }) {
+  return <div className="graph-empty"><strong>{title}</strong><p>{text}</p></div>;
+}
