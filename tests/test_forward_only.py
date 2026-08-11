@@ -40,6 +40,7 @@ from xauusd_forecaster.market import (
 from xauusd_forecaster.news import (
     GoogleNewsLane,
     RssSource,
+    collect_bea_macro,
     collect_bls_macro,
     collect_direct_full_text_rss_news,
     collect_direct_full_text_html_news,
@@ -780,6 +781,49 @@ def test_registered_macro_errors_redact_keys(tmp_path, monkeypatch) -> None:
     assert fred_key not in persisted + rendered
     assert eia_key not in persisted + rendered
     assert "[REDACTED]" in persisted
+
+
+def test_bea_api_is_hourly_evidence_only_and_never_persists_key(
+    tmp_path, monkeypatch,
+) -> None:
+    api_key = "00000000-0000-0000-0000-000000000000"
+    monkeypatch.setenv("BEA_API_KEY", api_key)
+    fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+    calls = []
+
+    def fetcher(url: str) -> bytes:
+        calls.append(url)
+        assert f"UserID={api_key}" in url
+        if "TableName=T10101" in url:
+            rows = [
+                {"LineNumber": "1", "TimePeriod": "2026Q1", "DataValue": "1.0"},
+                {"LineNumber": "1", "TimePeriod": "2026Q2", "DataValue": "2.1"},
+            ]
+        else:
+            rows = [
+                {"LineNumber": "1", "TimePeriod": "2026Q1", "DataValue": "131.1"},
+                {"LineNumber": "1", "TimePeriod": "2026Q2", "DataValue": "132.2"},
+                {"LineNumber": "2", "TimePeriod": "2026Q1", "DataValue": "129.1"},
+                {"LineNumber": "2", "TimePeriod": "2026Q2", "DataValue": "130.2"},
+            ]
+        return json.dumps({"BEAAPI": {"Results": {"Data": rows}}}).encode()
+
+    first = collect_bea_macro(ledger, fetched, fetcher)
+    second = collect_bea_macro(ledger, fetched + timedelta(minutes=5), fetcher)
+
+    assert first["status"] == "OK"
+    assert first["inserted_revisions"] == 6
+    assert first["registered"] is True
+    assert first["model_role"] == "EVIDENCE_ONLY"
+    assert second["status"] == "SKIPPED_INTERVAL"
+    assert len(calls) == 2
+    persisted = "\n".join(ledger.connection.iterdump())
+    assert api_key not in persisted
+    assert "BEA_JSON_API" in persisted
+    assert "BEA_REAL_GDP_GROWTH_QOQ_ANNUALIZED" in persisted
+    assert "BEA_GDP_PRICE_INDEX_Q" in persisted
+    assert "BEA_PCE_PRICE_INDEX_Q" in persisted
 
 
 def test_world_gold_council_article_date_is_required_and_auditable(tmp_path) -> None:

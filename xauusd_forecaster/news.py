@@ -177,6 +177,33 @@ FRED_SERIES = (
 EIA_API_SOURCE = "eia_open_data_api"
 EIA_API_URL = "https://api.eia.gov/v2/petroleum/pri/spt/data/"
 EIA_WTI_SERIES_ID = "EIA_RWTC"
+BEA_API_SOURCE = "bea_public_api"
+BEA_API_URL = "https://apps.bea.gov/api/data"
+
+
+@dataclass(frozen=True)
+class BeaSeries:
+    series_id: str
+    table_name: str
+    line_number: str
+    title: str
+    unit: str
+
+
+BEA_SERIES = (
+    BeaSeries(
+        "BEA_REAL_GDP_GROWTH_QOQ_ANNUALIZED", "T10101", "1",
+        "Real gross domestic product growth", "percent annual rate",
+    ),
+    BeaSeries(
+        "BEA_GDP_PRICE_INDEX_Q", "T10104", "1",
+        "Gross domestic product price index", "index",
+    ),
+    BeaSeries(
+        "BEA_PCE_PRICE_INDEX_Q", "T10104", "2",
+        "Personal consumption expenditures price index", "index",
+    ),
+)
 GDELT_SOURCE = "gdelt_gold_geopolitics"
 GDELT_URL = (
     "https://api.gdeltproject.org/api/v2/doc/doc?"
@@ -591,6 +618,125 @@ def collect_eia_macro(
             "error": safe_error,
             "registered": True,
         }
+
+
+def collect_bea_macro(
+    ledger: ForwardLedger,
+    fetched_at: datetime,
+    fetcher: Callable[[str], bytes] = fetch_url,
+) -> dict[str, object]:
+    """Collect bounded official BEA NIPA snapshots as evidence only."""
+    api_key = os.environ.get("BEA_API_KEY", "").strip()
+    if not api_key:
+        return {"source": BEA_API_SOURCE, "status": "DISABLED_KEY_MISSING"}
+    last_poll = ledger.latest_source_poll_time(BEA_API_SOURCE)
+    if last_poll is not None and fetched_at - last_poll < timedelta(hours=1):
+        return {"source": BEA_API_SOURCE, "status": "SKIPPED_INTERVAL"}
+    poll_id = str(uuid.uuid5(
+        uuid.NAMESPACE_URL, f"{BEA_API_SOURCE}|{fetched_at.isoformat()}"
+    ))
+    inserted = 0
+    unchanged = 0
+    hashes: list[str] = []
+    errors: list[str] = []
+    years = f"{fetched_at.year - 1},{fetched_at.year}"
+    by_table: dict[str, list[BeaSeries]] = {}
+    for series in BEA_SERIES:
+        by_table.setdefault(series.table_name, []).append(series)
+    for table_name, configured_series in by_table.items():
+        try:
+            url = BEA_API_URL + "?" + urllib.parse.urlencode({
+                "UserID": api_key,
+                "method": "GetData",
+                "DatasetName": "NIPA",
+                "TableName": table_name,
+                "Frequency": "Q",
+                "Year": years,
+                "ResultFormat": "JSON",
+            })
+            raw = fetcher(url)
+            hashes.append(hashlib.sha256(raw).hexdigest())
+            envelope = json.loads(raw)
+            results = envelope.get("BEAAPI", {}).get("Results", {})
+            error = results.get("Error") or {}
+            if str(error.get("APIErrorCode") or "").strip():
+                raise ValueError(
+                    f"BEA {error.get('APIErrorCode')}: "
+                    f"{error.get('APIErrorDescription')}"
+                )
+            rows = results.get("Data") or []
+            for series in configured_series:
+                selected = sorted(
+                    (
+                        row for row in rows
+                        if str(row.get("LineNumber") or "") == series.line_number
+                    ),
+                    key=lambda row: str(row.get("TimePeriod") or ""),
+                )[-2:]
+                if not selected:
+                    raise ValueError(
+                        f"{table_name} line {series.line_number} returned no observations"
+                    )
+                for row in selected:
+                    period = str(row.get("TimePeriod") or "").strip()
+                    raw_value = str(row.get("DataValue") or "").replace(",", "").strip()
+                    if not period or not raw_value or raw_value == "---":
+                        continue
+                    stored = {
+                        "series_id": series.series_id,
+                        "bea_dataset": "NIPA",
+                        "bea_table": table_name,
+                        "bea_line": series.line_number,
+                        "title": series.title,
+                        "observation_period": period,
+                        "value": float(raw_value),
+                        "retrieved_from": BEA_API_URL,
+                        "transport": "BEA_JSON_API",
+                        "model_role": "EVIDENCE_ONLY",
+                    }
+                    digest = hashlib.sha256(
+                        json.dumps(
+                            stored, sort_keys=True, separators=(",", ":")
+                        ).encode()
+                    ).hexdigest()
+                    _, created = ledger.append_macro_observation({
+                        "source": BEA_API_SOURCE,
+                        "series_id": series.series_id,
+                        "observation_period": period,
+                        "collector_first_seen_time": fetched_at,
+                        "fetched_time": fetched_at,
+                        "value": float(raw_value),
+                        "unit": series.unit,
+                        "payload": stored,
+                        "content_hash": digest,
+                    })
+                    inserted += int(created)
+                    unchanged += int(not created)
+        except Exception as error:
+            errors.append(
+                f"{table_name}:{type(error).__name__}:"
+                f"{_redacted_error(error, api_key, limit=180)}"
+            )
+    status = "OK" if not errors else ("PARTIAL" if inserted or unchanged else "ERROR")
+    ledger.append_source_poll({
+        "poll_id": poll_id,
+        "source": BEA_API_SOURCE,
+        "fetched_time": fetched_at,
+        "status": status,
+        "payload_hash": hashlib.sha256("".join(hashes).encode()).hexdigest()
+        if hashes else None,
+        "error_type": "TableErrors" if errors else None,
+        "error": " | ".join(errors)[:500] if errors else None,
+    })
+    return {
+        "source": BEA_API_SOURCE,
+        "status": status,
+        "inserted_revisions": inserted,
+        "unchanged_items": unchanged,
+        "errors": errors,
+        "registered": True,
+        "model_role": "EVIDENCE_ONLY",
+    }
 
 
 def collect_gdelt_news(
@@ -1396,6 +1542,7 @@ def collect_official_news(
     statuses.append(collect_bls_macro(ledger, fetched_at, force=force_bls))
     statuses.append(collect_fred_macro(ledger, fetched_at))
     statuses.append(collect_eia_macro(ledger, fetched_at))
+    statuses.append(collect_bea_macro(ledger, fetched_at))
     statuses.extend(collect_direct_full_text_html_news(ledger, fetched_at))
     statuses.append(collect_gdelt_news(ledger, fetched_at))
     for lane in GOOGLE_NEWS_LANES:

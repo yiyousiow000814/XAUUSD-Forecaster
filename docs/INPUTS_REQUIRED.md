@@ -37,8 +37,9 @@ be backed up in the ignored local file
 `.local/secrets/collector-keys.json`; user-level environment variables take
 precedence. Secret values are never returned by the dashboard or written to
 collector logs. The BEA Data API is separate from BEA news-release pages and
-must pass an authenticated API probe before a numeric Forward adapter is
-enabled.
+uses two hourly NIPA requests for quarterly real-GDP growth, the GDP price
+index, and the PCE price index. These revisions remain evidence-only until a
+future model contract explicitly adopts them.
 
 With a registered FRED key, the hourly background collector uses the official
 JSON observations API for its six configured series instead of the public graph
