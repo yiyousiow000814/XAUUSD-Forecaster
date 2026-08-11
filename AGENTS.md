@@ -8,6 +8,16 @@
 4. Identify obsolete code.
 5. Add or update tests.
 
+## Documentation Language
+
+- Write repository documentation in English. This includes the root README,
+  Markdown files under `docs/`, developer guides, and pull-request descriptions.
+- Keep developer-facing explanations concise and understandable without private
+  project context. Move implementation detail into the relevant contract or
+  reference document instead of expanding the README.
+- Chinese remains appropriate for the product UI, user-provided content, and
+  immutable audit evidence; those surfaces are not repository documentation.
+
 ## Web And Mobile Experience
 
 - Treat desktop and mobile as separate acceptance surfaces. A desktop pass does
