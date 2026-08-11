@@ -593,6 +593,12 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /总计 \{count\} 笔/);
   assert.match(modal, /当前显示最新 \{visibleCount\} 笔/);
   assert.match(modal, /图中压缩为/);
+  assert.match(modal, /resource=execution-point/);
+  assert.match(modal, /第 \{page \+ 1\} 段 · 共 \{total\} 个历史绘图点/);
+  assert.match(modal, /← 较早/);
+  assert.match(modal, /较晚 →/);
+  assert.match(css, /\.execution-chart-grid \{ display:grid; grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(css, /\.execution-history-nav/);
   assert.match(modal, /目前没有提前退出/);
   assert.doesNotMatch(modal, /等待退出 OOS/);
   assert.match(modal, /WAIT 不创建仓位/);
