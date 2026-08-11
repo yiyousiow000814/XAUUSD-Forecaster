@@ -414,7 +414,11 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
     return () => { cancelled = true; };
   }, [historyResource, cadence, historyErrors, historyRetries]);
   const historyLoading = Boolean(historyResource && !historyCurves[cadence] && !historyErrors[cadence]);
-  const resolvedCurves = historyCurves[cadence] ?? curves;
+  // The compact learning snapshot and the canonical history overview have
+  // different point counts. Never paint the compact fallback while the
+  // canonical resource is loading, otherwise the chart visibly redraws with
+  // different axes and curves a moment after opening.
+  const resolvedCurves = historyResource ? historyCurves[cadence] ?? [] : curves;
   const usable = resolvedCurves.map(row => cadence === "FIXED_30M" ? { ...row, points: row.points_30m ?? [], source_point_count: row.source_point_count_30m, chart_point_count: row.chart_point_count_30m, chart_downsampled: row.chart_downsampled_30m } : row).filter(row => row.model_identity !== "CHAMPION_0" && row.points.length > 0);
   const overviewPoints = usable.flatMap(row => row.points);
   if (!overviewPoints.length) return <div className="chart-block long-curve-block graph-state-shell">

@@ -847,6 +847,8 @@ test("loads bounded learning history only when interactive charts need it", () =
   assert.match(audit, /historyResource=\{payload\?\.learning_history_resource\}/);
   assert.match(modal, /resource: "version-group"/);
   assert.match(modal, /resource=curve-overview/);
+  assert.match(modal, /const resolvedCurves = historyResource \? historyCurves\[cadence\] \?\? \[\] : curves/);
+  assert.doesNotMatch(modal, /const resolvedCurves = historyCurves\[cadence\] \?\? curves/);
   assert.match(modal, /next_cursor/);
   assert.match(modal, /const pageCursor = pageCursors\[page\]/);
   assert.doesNotMatch(modal, /loadedPageKeys/);
