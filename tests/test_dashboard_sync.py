@@ -55,6 +55,39 @@ def test_preview_does_not_call_late_aggregated_news_expired() -> None:
     assert row["annotation_reason"] == "搜索线索：来自聚合发现源，不是独立官方发布"
 
 
+def test_preview_freezes_both_materialized_curve_overviews(monkeypatch) -> None:
+    module = _preview_module()
+    requested: list[str] = []
+
+    def fake_read_json(_base_url: str, path: str) -> dict:
+        requested.append(path)
+        cadence = path.rsplit("=", 1)[-1]
+        return {"items": [{
+            "model_identity": "MARKET_ONLY",
+            "cadence": cadence,
+            "source_point_count": 1059 if cadence == "5m" else 174,
+            "chart_point_count": 1,
+            "chart_downsampled": True,
+            "points": [{
+                "decision_time": "2026-08-12T01:00:00+00:00",
+                "cumulative_quote_return": 0.1,
+            }],
+        }]}
+
+    monkeypatch.setattr(module, "_read_json", fake_read_json)
+    records = module._curve_overview_records("https://example.test")
+
+    assert requested == [
+        "/api/learning-history?resource=curve-overview&cadence=5m",
+        "/api/learning-history?resource=curve-overview&cadence=30m",
+    ]
+    assert {(row["record_key"], row["payload"]["source_point_count"])
+            for row in records} == {
+        ("5m\0MARKET_ONLY", 1059),
+        ("30m\0MARKET_ONLY", 174),
+    }
+
+
 def test_preview_replays_old_story_aliases_through_branch_policy() -> None:
     module = _preview_module()
     status = {

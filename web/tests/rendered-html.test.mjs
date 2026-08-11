@@ -89,7 +89,9 @@ test("hydrates preview pages from their immutable build snapshot", () => {
   assert.match(learning, /results: results\.slice\(-20\)/);
   assert.match(previewBuilder, /resource=execution-point/);
   assert.match(previewBuilder, /for identity in \("LOT_RIDGE", "EXIT_RIDGE"\)/);
-  assert.match(previewBuilder, /\[\*learning_history, \*execution_history\]/);
+  assert.match(previewBuilder, /resource=curve-overview&cadence=\{cadence\}/);
+  assert.match(previewBuilder, /for cadence in \("5m", "30m"\)/);
+  assert.match(previewBuilder, /\[\*learning_history, \*execution_history, \*curve_overviews\]/);
   assert.doesNotMatch(page, /auditView === "league"/);
   assert.match(page, /\[PREVIEW_RESOURCES\.status\]: previewBundle\.status/);
   assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);
