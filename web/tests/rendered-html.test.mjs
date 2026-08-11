@@ -115,6 +115,11 @@ test("falls through to read-only D1 for later Preview news and details", () => {
 
 test("does not poll immutable Preview snapshots", () => {
   const helper = readFileSync(new URL("../app/_lib/dashboard-refresh.ts", import.meta.url), "utf8");
+  assert.match(helper, /live:\s*15_000/);
+  assert.match(helper, /status:\s*60_000/);
+  assert.match(helper, /news:\s*30_000/);
+  assert.match(helper, /learning:\s*300_000/);
+  assert.match(helper, /deployment:\s*120_000/);
   assert.match(helper, /immutablePreview\s*\?\s*null\s*:\s*window\.setInterval\(pollWhenEligible/);
   assert.match(helper, /is_preview[^=]*=== true/s);
   assert.match(helper, /document\.visibilityState !== "visible"/);

@@ -3,9 +3,9 @@ export type DashboardRefreshCleanup = () => void;
 export const DASHBOARD_REFRESH_INTERVALS = {
   live: 15_000,
   status: 60_000,
-  news: 60_000,
+  news: 30_000,
   learning: 300_000,
-  deployment: 600_000,
+  deployment: 120_000,
 } as const;
 
 const POLL_LEASE_PREFIX = "aurum-dashboard-poll";
