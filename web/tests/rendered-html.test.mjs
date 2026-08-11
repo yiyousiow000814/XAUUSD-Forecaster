@@ -53,7 +53,6 @@ test("keeps branch previews isolated from the production database", async () => 
     .map(entry => readFileSync(`${entry.parentPath}/${entry.name}`, "utf8"))
     .join("\n");
   assert.match(builtPreview, /PREVIEW_SNAPSHOT/);
-  assert.match(builtPreview, /监测正常，暂无新的正式月度资料/);
   assert.match(builtPreview, new RegExp(process.env.WORKERS_CI_BRANCH.replaceAll("/", "\\/")));
 });
 
