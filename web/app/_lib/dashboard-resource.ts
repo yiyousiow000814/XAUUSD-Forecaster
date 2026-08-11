@@ -7,7 +7,7 @@ type CacheEntry = {
 const resources = new Map<string, CacheEntry>();
 const DEFAULT_MAX_AGE_MS = 15_000;
 const DEFAULT_TIMEOUT_MS = 10_000;
-export const MIN_VISIBLE_LOADING_MS = 1_000;
+export const MIN_VISIBLE_LOADING_MS = 500;
 
 /** Keep an actually rendered loading state visible long enough to be understood. */
 export async function waitForMinimumLoading(

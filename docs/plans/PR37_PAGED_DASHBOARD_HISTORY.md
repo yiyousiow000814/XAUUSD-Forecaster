@@ -50,8 +50,8 @@ The Worker 800 KB check must remain an emergency guard, not the storage model.
    interactive graph opens. Branch Previews use the same API contract over an
    immutable build snapshot.
 8. Every asynchronous graph surface distinguishes loading, confirmed empty,
-   and failed states. A visible loading animation remains for at least one
-   second, and failures provide an explicit retry.
+   and failed states. A visible loading animation remains for at least 500 ms,
+   and failures provide an explicit retry.
 
 ## Measured Current Data
 
