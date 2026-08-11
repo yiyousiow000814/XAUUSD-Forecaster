@@ -231,6 +231,9 @@ function Update-RuntimeCheckout {
     $stableScript = Join-Path $repositoryRoot ".local\runtime-control\xauusd_control_center.ps1"
     Copy-Item -LiteralPath (Join-Path $moduleRoot "scripts\xauusd_control_center.ps1") `
         -Destination $stableScript -Force
+    Copy-Item -LiteralPath (Join-Path $moduleRoot "scripts\xauusd_watchdog_launcher.vbs") `
+        -Destination (Join-Path (Split-Path -Parent $stableScript) "xauusd_watchdog_launcher.vbs") `
+        -Force
     Write-RuntimeUpdateState @{
         accepted_main_revision = $Revision
         staged_revision = $Revision
@@ -554,15 +557,25 @@ function Test-AutoStart {
     $null -ne (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)
 }
 
-function Enable-AutoStart {
-    $quotedScript = '"{0}"' -f $PSCommandPath
-    $runtimeArguments = if ($RuntimeRoot) {
-        ' -RuntimeRoot "{0}" -RepositoryRoot "{1}"' -f $moduleRoot, $repositoryRoot
-    } else { "" }
-    $taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument (
-        "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File {0} -Action Watchdog{1}" -f `
-            $quotedScript, $runtimeArguments
+function Register-AutoStartTask {
+    param(
+        [string]$ControlScript,
+        [string]$RuntimePath,
+        [string]$SourceRepository
     )
+    $launcherSource = Join-Path $moduleRoot "scripts\xauusd_watchdog_launcher.vbs"
+    if (-not (Test-Path -LiteralPath $launcherSource)) {
+        throw "Missing windowless watchdog launcher: $launcherSource"
+    }
+    $controlRoot = Split-Path -Parent $ControlScript
+    $launcherPath = Join-Path $controlRoot "xauusd_watchdog_launcher.vbs"
+    if (-not $launcherSource.Equals($launcherPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Copy-Item -LiteralPath $launcherSource -Destination $launcherPath -Force
+    }
+    $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
+    $taskArguments = '"{0}" "{1}" "{2}" "{3}"' -f `
+        $launcherPath, $ControlScript, $RuntimePath, $SourceRepository
+    $taskAction = New-ScheduledTaskAction -Execute $wscript -Argument $taskArguments
     $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
     $principal = New-ScheduledTaskPrincipal `
         -UserId ("{0}\{1}" -f $env:USERDOMAIN, $env:USERNAME) `
@@ -573,6 +586,11 @@ function Enable-AutoStart {
     Register-ScheduledTask -TaskName $taskName -Action $taskAction `
         -Trigger $taskTrigger -Principal $principal -Settings $settings -Force | Out-Null
     Start-ScheduledTask -TaskName $taskName
+}
+
+function Enable-AutoStart {
+    Register-AutoStartTask -ControlScript $PSCommandPath `
+        -RuntimePath $moduleRoot -SourceRepository $repositoryRoot
 }
 
 function Install-ProductionRuntime {
@@ -629,19 +647,8 @@ function Install-ProductionRuntime {
 
     Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     Stop-All
-    $stableArgs = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Action Watchdog -RuntimeRoot "{1}" -RepositoryRoot "{2}"' -f `
-        $stableScript, $runtime, $source
-    $taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $stableArgs
-    $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-    $principal = New-ScheduledTaskPrincipal `
-        -UserId ("{0}\{1}" -f $env:USERDOMAIN, $env:USERNAME) `
-        -LogonType Interactive -RunLevel Limited
-    $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew `
-        -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
-        -ExecutionTimeLimit (New-TimeSpan -Days 3650)
-    Register-ScheduledTask -TaskName $taskName -Action $taskAction `
-        -Trigger $taskTrigger -Principal $principal -Settings $settings -Force | Out-Null
-    Start-ScheduledTask -TaskName $taskName
+    Register-AutoStartTask -ControlScript $stableScript `
+        -RuntimePath $runtime -SourceRepository $source
     [pscustomobject]@{
         runtime_root = $runtime
         state_root = $sourceLocal
