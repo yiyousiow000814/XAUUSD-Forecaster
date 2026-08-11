@@ -175,28 +175,49 @@ def _learning_record(
     }
 
 
-def _visual_curve_overview(points: list[dict], limit: int) -> list[dict]:
-    """Keep first/low/high/last shape points without growing the response."""
-    if len(points) <= limit:
-        return list(points)
-    bucket_count = max(1, limit // 4)
-    bucket_size = math.ceil(len(points) / bucket_count)
+def _visual_curve_overview(
+    points: list[dict], limit: int, expected_step_seconds: int = 300,
+) -> list[dict]:
+    """Keep curve shape plus real source gaps in a fixed-size overview."""
+    ordered = sorted(points, key=lambda row: row.get("decision_time") or "")
+    selected_indices: list[int] = []
+    if len(ordered) <= limit:
+        selected_indices = list(range(len(ordered)))
+    else:
+        bucket_count = max(1, limit // 4)
+        bucket_size = math.ceil(len(ordered) / bucket_count)
+        for start in range(0, len(ordered), bucket_size):
+            bucket = ordered[start:start + bucket_size]
+            indexed = list(enumerate(bucket))
+            selected = {
+                0,
+                len(bucket) - 1,
+                min(indexed, key=lambda item: float(
+                    item[1].get("cumulative_quote_return") or 0.0
+                ))[0],
+                max(indexed, key=lambda item: float(
+                    item[1].get("cumulative_quote_return") or 0.0
+                ))[0],
+            }
+            selected_indices.extend(start + index for index in sorted(selected))
+    selected_indices = selected_indices[:limit]
+    gap_threshold = max(45 * 60, expected_step_seconds * 3)
     overview: list[dict] = []
-    for start in range(0, len(points), bucket_size):
-        bucket = points[start:start + bucket_size]
-        indexed = list(enumerate(bucket))
-        selected = {
-            0,
-            len(bucket) - 1,
-            min(indexed, key=lambda item: float(
-                item[1].get("cumulative_quote_return") or 0.0
-            ))[0],
-            max(indexed, key=lambda item: float(
-                item[1].get("cumulative_quote_return") or 0.0
-            ))[0],
-        }
-        overview.extend(bucket[index] for index in sorted(selected))
-    return overview[:limit]
+    previous_index: int | None = None
+    for index in selected_indices:
+        source_gap_before = False
+        if previous_index is not None:
+            source_gap_before = any(
+                _epoch(ordered[current].get("decision_time"))
+                - _epoch(ordered[current - 1].get("decision_time"))
+                >= gap_threshold
+                for current in range(previous_index + 1, index + 1)
+            )
+        overview.append({
+            **ordered[index], "source_gap_before": source_gap_before,
+        })
+        previous_index = index
+    return overview
 
 
 def _visual_decision_overview(rows: list[dict], limit: int) -> list[dict]:
@@ -334,6 +355,7 @@ def _learning_overview_records(payload: dict) -> list[dict]:
                 continue
             overview = _visual_curve_overview(
                 points, LEARNING_OVERVIEW_CURVE_POINTS,
+                expected_step_seconds=1_800 if cadence == "30m" else 300,
             )
             summary = {
                 "model_identity": identity,

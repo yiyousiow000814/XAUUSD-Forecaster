@@ -457,9 +457,13 @@ def test_visual_overviews_stay_bounded_and_preserve_the_full_span() -> None:
     overview = module._visual_curve_overview(points, 240)
 
     assert len(overview) <= 240
-    assert overview[0] == points[0]
-    assert overview[-1] == points[-1]
-    assert points[50_000] in overview
+    assert overview[0]["decision_time"] == points[0]["decision_time"]
+    assert overview[-1]["decision_time"] == points[-1]["decision_time"]
+    assert any(
+        row["decision_time"] == points[50_000]["decision_time"]
+        for row in overview
+    )
+    assert not any(row["source_gap_before"] for row in overview)
 
     groups = [{
         "created_at": point["decision_time"],
@@ -478,6 +482,22 @@ def test_visual_overviews_stay_bounded_and_preserve_the_full_span() -> None:
     assert group_overview[-1] == groups[-1]
     assert groups[50_000] in group_overview
     assert groups[75_000] in group_overview
+
+
+def test_curve_overview_marks_only_real_source_gaps() -> None:
+    module = _sync_module()
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    offsets = [0, 5, 10, 120, 125]
+    points = [{
+        "decision_time": (start + timedelta(minutes=offset)).isoformat(),
+        "cumulative_quote_return": index / 100,
+    } for index, offset in enumerate(offsets)]
+
+    overview = module._visual_curve_overview(points, 240)
+
+    assert [row["source_gap_before"] for row in overview] == [
+        False, False, False, True, False,
+    ]
 
 
 def test_decision_overviews_are_incremental_bounded_and_frequency_scoped() -> None:

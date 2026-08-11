@@ -2,9 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { waitForMinimumLoading } from "../_lib/dashboard-resource";
+import { loadDashboardResource, readDashboardResource, waitForMinimumLoading } from "../_lib/dashboard-resource";
 
-type CurvePoint = { decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number };
+type CurvePoint = { decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number; source_gap_before?: boolean };
 type Curve = { model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: CurvePoint[]; source_point_count_30m?: number; chart_point_count_30m?: number; chart_downsampled_30m?: boolean; points_30m?: CurvePoint[] };
 type Candle = { time: string; open: number; high: number; low: number; close: number; ticks?: number };
 type MarketData = {
@@ -58,6 +58,44 @@ type ExecutionModel = {
 };
 type ExecutionLearning = { models: ExecutionModel[]; shadow_only: boolean; source_model_label?: string; training_contract?: string };
 type GraphTab = "curve" | "versions" | "market" | "execution";
+type HistoryResponse<T> = { items: T[]; preview_limited?: boolean };
+
+const HISTORY_CACHE_MAX_AGE_MS = 60_000;
+const historyCacheAge = (payload: unknown) => payload && typeof payload === "object"
+  && (payload as { preview_limited?: unknown }).preview_limited === true
+  ? Number.POSITIVE_INFINITY
+  : HISTORY_CACHE_MAX_AGE_MS;
+
+function curveResponseItems(
+  body: HistoryResponse<Array<(CurvePoint & { model_identity: string }) | (Curve & { cadence?: string })>[number]>,
+  cadence: EvaluationCadence,
+): Curve[] {
+  const summaries = body.items.filter(item => Array.isArray((item as Curve).points)) as Array<Curve & { cadence?: string }>;
+  const flatPoints = body.items.filter(item => !Array.isArray((item as Curve).points)) as Array<CurvePoint & { model_identity: string }>;
+  const identities = [...new Set(flatPoints.map(point => point.model_identity))];
+  return summaries.length ? summaries.map(summary => cadence === "FIXED_30M"
+    ? {
+        ...summary, points: [], points_30m: summary.points,
+        source_point_count_30m: summary.source_point_count,
+        chart_point_count_30m: summary.chart_point_count,
+        chart_downsampled_30m: summary.chart_downsampled,
+      }
+    : summary) : identities.map(modelIdentity => {
+    const points = flatPoints.filter(point => point.model_identity === modelIdentity)
+      .map(point => ({
+        decision_time: point.decision_time,
+        model_version: point.model_version,
+        training_rows: point.training_rows,
+        training_dataset_hash: point.training_dataset_hash,
+        cumulative_quote_return: point.cumulative_quote_return,
+        source_gap_before: point.source_gap_before,
+      }))
+      .sort((a, b) => Date.parse(a.decision_time) - Date.parse(b.decision_time));
+    return cadence === "FIXED_30M"
+      ? { model_identity: modelIdentity, points: [], points_30m: points }
+      : { model_identity: modelIdentity, points };
+  });
+}
 
 const LABELS: Record<string, string> = {
   CHAMPION_0: "零收益基准", MARKET_ONLY: "黄金自身", NEWS_RESIDUAL: "官方新闻修正量",
@@ -79,7 +117,9 @@ export default function LearningGraphModal({
 }) {
   const [tab, setTab] = useState<GraphTab>(startTab ?? "curve");
   const [identity, setIdentity] = useState("BROAD_FULL");
-  const [remoteMarket, setRemoteMarket] = useState<typeof market>();
+  const [remoteMarket, setRemoteMarket] = useState<typeof market>(() => market?.decision_resource
+    ? readDashboardResource<typeof market>(market.decision_resource) ?? undefined
+    : undefined);
   const dialogRef = useRef<HTMLElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
@@ -121,11 +161,10 @@ export default function LearningGraphModal({
   useEffect(() => {
     if (!open || !market?.decision_resource || market.history_resource) return;
     let cancelled = false;
-    fetch(market.decision_resource, { cache: "no-store" })
-      .then(response => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.json();
-      })
+    const cached = readDashboardResource<typeof market>(market.decision_resource);
+    loadDashboardResource<typeof market>(market.decision_resource, {
+      maxAgeMs: historyCacheAge(cached),
+    })
       .then(body => { if (!cancelled) setRemoteMarket(body); })
       .catch(() => { /* The status snapshot remains a safe empty fallback. */ });
     return () => { cancelled = true; };
@@ -159,67 +198,83 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
   const [cutoffWindow, setCutoffWindow] = useState<"20" | "all">("20");
   const [hovered, setHovered] = useState<VersionGroup | null>(null);
   const [page, setPage] = useState(0);
-  const [remotePages, setRemotePages] = useState<Record<number, VersionGroup[]>>({});
-  const [pageCursors, setPageCursors] = useState<Record<number, string | null>>({ 0: null });
-  const [remoteTotal, setRemoteTotal] = useState<number | null>(null);
+  const overviewUrl = historyResource ? `${historyResource}?resource=version-overview` : "";
+  const cachedOverview = overviewUrl
+    ? readDashboardResource<HistoryResponse<VersionGroup>>(overviewUrl) : null;
+  const initialPageUrl = historyResource
+    ? `${historyResource}?resource=version-group&identity=BROAD_FULL&limit=${pageSize}` : "";
+  const cachedInitialPage = initialPageUrl
+    ? readDashboardResource<{ items: VersionGroup[]; total: number; next_cursor: string | null; preview_limited?: boolean }>(initialPageUrl) : null;
+  const [remotePages, setRemotePages] = useState<Record<number, VersionGroup[]>>(
+    cachedInitialPage ? { 0: cachedInitialPage.items } : {},
+  );
+  const [pageCursors, setPageCursors] = useState<Record<number, string | null>>(
+    cachedInitialPage ? { 0: null, 1: cachedInitialPage.next_cursor } : { 0: null },
+  );
+  const [remoteTotal, setRemoteTotal] = useState<number | null>(cachedInitialPage?.total ?? null);
   const [pageError, setPageError] = useState<string | null>(null);
-  const [overviewGroups, setOverviewGroups] = useState<VersionGroup[] | null>(null);
+  const [overviewGroups, setOverviewGroups] = useState<VersionGroup[] | null>(cachedOverview?.items ?? null);
   const [overviewState, setOverviewState] = useState<"loading" | "ready" | "error">(
-    historyResource ? "loading" : "ready",
+    historyResource && !cachedOverview ? "loading" : "ready",
   );
   const [overviewRetry, setOverviewRetry] = useState(0);
   const [pageRetry, setPageRetry] = useState(0);
+  const loadedPageKeys = useRef(new Set<string>());
   const resultListRef = useRef<HTMLDivElement>(null);
   const rows = groups.filter(row => row.model_identity === identity).sort((a,b) => b.generation-a.generation);
   useEffect(() => {
-    if (!historyResource || overviewGroups) return;
-    const controller = new AbortController();
+    if (!historyResource) return;
+    const url = `${historyResource}?resource=version-overview`;
+    const cached = readDashboardResource<HistoryResponse<VersionGroup>>(url);
+    let cancelled = false;
     const startedAt = Date.now();
-    fetch(`${historyResource}?resource=version-overview`, {
-      cache: "no-store", signal: controller.signal,
-    }).then(response => {
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return response.json() as Promise<{ items: VersionGroup[] }>;
+    loadDashboardResource<HistoryResponse<VersionGroup>>(url, {
+      force: overviewRetry > 0,
+      maxAgeMs: historyCacheAge(cached),
     }).then(async body => {
-      await waitForMinimumLoading(startedAt);
-      if (!controller.signal.aborted) {
+      if (!cached) await waitForMinimumLoading(startedAt);
+      if (!cancelled) {
         setOverviewGroups(body.items);
         setOverviewState("ready");
       }
-    }).catch(async error => {
-      if (error.name === "AbortError") return;
-      await waitForMinimumLoading(startedAt);
-      if (!controller.signal.aborted) setOverviewState("error");
+    }).catch(async () => {
+      if (cancelled) return;
+      if (!cached) await waitForMinimumLoading(startedAt);
+      if (!cancelled && !cached) setOverviewState("error");
     });
-    return () => controller.abort();
-  }, [historyResource, overviewGroups, overviewRetry]);
+    return () => { cancelled = true; };
+  }, [historyResource, overviewRetry]);
   useEffect(() => {
-    if (!historyResource || remotePages[page] || pageCursors[page] === undefined) return;
+    if (!historyResource || pageCursors[page] === undefined) return;
     const query = new URLSearchParams({
       resource: "version-group", identity, limit: String(pageSize),
     });
     const cursor = pageCursors[page];
     if (cursor) query.set("cursor", cursor);
-    const controller = new AbortController();
+    const url = `${historyResource}?${query}`;
+    const cached = readDashboardResource<{ items: VersionGroup[]; total: number; next_cursor: string | null; preview_limited?: boolean }>(url);
+    const loadKey = `${url}:${pageRetry}`;
+    if (loadedPageKeys.current.has(loadKey)) return;
+    loadedPageKeys.current.add(loadKey);
+    let cancelled = false;
     const startedAt = Date.now();
-    fetch(`${historyResource}?${query}`, { cache: "no-store", signal: controller.signal })
-      .then(response => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.json() as Promise<{ items: VersionGroup[]; total: number; next_cursor: string | null }>;
-      })
+    loadDashboardResource<{ items: VersionGroup[]; total: number; next_cursor: string | null; preview_limited?: boolean }>(url, {
+      force: pageRetry > 0,
+      maxAgeMs: historyCacheAge(cached),
+    })
       .then(async body => {
-        await waitForMinimumLoading(startedAt);
-        if (controller.signal.aborted) return;
+        if (!cached) await waitForMinimumLoading(startedAt);
+        if (cancelled) return;
         setRemotePages(previous => ({ ...previous, [page]: body.items }));
         setRemoteTotal(body.total);
         setPageCursors(previous => ({ ...previous, [page + 1]: body.next_cursor }));
       })
-      .catch(async error => {
-        if (error.name === "AbortError") return;
-        await waitForMinimumLoading(startedAt);
-        if (!controller.signal.aborted) setPageError("训练记录读取失败");
+      .catch(async () => {
+        if (cancelled) return;
+        if (!cached) await waitForMinimumLoading(startedAt);
+        if (!cancelled && !cached) setPageError("训练记录读取失败");
       });
-    return () => controller.abort();
+    return () => { cancelled = true; };
   }, [historyResource, identity, page, pageCursors, remotePages, pageRetry]);
   const totalRows = remoteTotal ?? rows.length;
   const pageCount = Math.max(1, Math.ceil(totalRows / pageSize));
@@ -318,47 +373,35 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
   const [cadence, setCadence] = useState<EvaluationCadence>("EVERY_5M");
   const [pageOffset, setPageOffset] = useState(0);
   const [hoveredBoundary, setHoveredBoundary] = useState<BoundaryReadout | null>(null);
-  const [historyCurves, setHistoryCurves] = useState<Partial<Record<EvaluationCadence, Curve[]>>>({});
+  const initialHistoryUrl = historyResource
+    ? `${historyResource}?resource=curve-overview&cadence=5m` : "";
+  const initialHistory = initialHistoryUrl
+    ? readDashboardResource<HistoryResponse<(CurvePoint & { model_identity: string }) | (Curve & { cadence?: string })>>(initialHistoryUrl) : null;
+  const [historyCurves, setHistoryCurves] = useState<Partial<Record<EvaluationCadence, Curve[]>>>(
+    initialHistory ? { EVERY_5M: curveResponseItems(initialHistory, "EVERY_5M") } : {},
+  );
   const [historyErrors, setHistoryErrors] = useState<Partial<Record<EvaluationCadence, boolean>>>({});
   const [historyRetries, setHistoryRetries] = useState<Partial<Record<EvaluationCadence, number>>>({});
   useEffect(() => {
-    if (!historyResource || historyCurves[cadence] || historyErrors[cadence]) return;
-    const controller = new AbortController();
+    if (!historyResource || historyErrors[cadence]) return;
     const startedAt = Date.now();
     const cadenceQuery = cadence === "FIXED_30M" ? "30m" : "5m";
-    fetch(`${historyResource}?resource=curve-overview&cadence=${cadenceQuery}`, {
-      cache: "no-store", signal: controller.signal,
-    }).then(response => {
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return response.json() as Promise<{ items: Array<(CurvePoint & { model_identity: string }) | (Curve & { cadence?: string })> }>;
+    const url = `${historyResource}?resource=curve-overview&cadence=${cadenceQuery}`;
+    const cached = readDashboardResource<HistoryResponse<(CurvePoint & { model_identity: string }) | (Curve & { cadence?: string })>>(url);
+    let cancelled = false;
+    loadDashboardResource<HistoryResponse<(CurvePoint & { model_identity: string }) | (Curve & { cadence?: string })>>(url, {
+      force: (historyRetries[cadence] ?? 0) > 0,
+      maxAgeMs: historyCacheAge(cached),
     }).then(async body => {
-      const summaries = body.items.filter(item => Array.isArray((item as Curve).points)) as Array<Curve & { cadence?: string }>;
-      const flatPoints = body.items.filter(item => !Array.isArray((item as Curve).points)) as Array<CurvePoint & { model_identity: string }>;
-      const identities = [...new Set(flatPoints.map(point => point.model_identity))];
-      const grouped = summaries.length ? summaries.map(summary => cadence === "FIXED_30M"
-        ? {
-            ...summary, points: [], points_30m: summary.points,
-            source_point_count_30m: summary.source_point_count,
-            chart_point_count_30m: summary.chart_point_count,
-            chart_downsampled_30m: summary.chart_downsampled,
-          }
-        : summary) : identities.map(modelIdentity => {
-        const points = flatPoints.filter(point => point.model_identity === modelIdentity)
-          .map(({ decision_time, model_version, training_rows, training_dataset_hash, cumulative_quote_return }) => ({ decision_time, model_version, training_rows, training_dataset_hash, cumulative_quote_return }))
-          .sort((a, b) => Date.parse(a.decision_time) - Date.parse(b.decision_time));
-        return cadence === "FIXED_30M"
-          ? { model_identity: modelIdentity, points: [], points_30m: points }
-          : { model_identity: modelIdentity, points };
-      });
-      await waitForMinimumLoading(startedAt);
-      if (!controller.signal.aborted) setHistoryCurves(previous => ({ ...previous, [cadence]: grouped }));
-    }).catch(async error => {
-      if (error.name === "AbortError") return;
-      await waitForMinimumLoading(startedAt);
-      if (!controller.signal.aborted) setHistoryErrors(previous => ({ ...previous, [cadence]: true }));
+      if (!cached) await waitForMinimumLoading(startedAt);
+      if (!cancelled) setHistoryCurves(previous => ({ ...previous, [cadence]: curveResponseItems(body, cadence) }));
+    }).catch(async () => {
+      if (cancelled) return;
+      if (!cached) await waitForMinimumLoading(startedAt);
+      if (!cancelled && !cached) setHistoryErrors(previous => ({ ...previous, [cadence]: true }));
     });
-    return () => controller.abort();
-  }, [historyResource, cadence, historyCurves, historyErrors, historyRetries]);
+    return () => { cancelled = true; };
+  }, [historyResource, cadence, historyErrors, historyRetries]);
   const historyLoading = Boolean(historyResource && !historyCurves[cadence] && !historyErrors[cadence]);
   if (historyLoading) return <GraphLoading label="正在读取长期曲线" />;
   if (historyErrors[cadence]) return <GraphLoadError label="长期曲线读取失败" onRetry={() => {
@@ -403,7 +446,6 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
   const low = Math.min(...values); const high = Math.max(...values);
   const visibleResultTimes = [...new Set(visiblePoints.map(point => Date.parse(point.decision_time)))].sort((a, b) => a - b);
   const expectedStep = cadence === "FIXED_30M" ? 30 * 60_000 : 5 * 60_000;
-  const gapThreshold = Math.max(45 * 60_000, expectedStep * 3);
   // Plot result time, not wall-clock time. Long closures receive one compact
   // break and never consume the width of the OOS chart.
   const resultPlotUnits = visibleResultTimes.map((time, index) => index === 0 ? 0 : Math.min(
@@ -420,8 +462,10 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
   const tickTimes = tickIndices.map(index => new Date(visibleResultTimes[index]).toISOString());
   const curveRuns = (points: CurvePoint[]) => points.reduce<CurvePoint[][]>((runs, point) => {
     const current = runs.at(-1);
-    const previous = current?.at(-1);
-    if (!current || (previous && Date.parse(point.decision_time) - Date.parse(previous.decision_time) >= gapThreshold)) runs.push([point]);
+    // Overview spacing reflects downsampling, not missing observations. Only
+    // the synchronizer sees the raw sequence and may declare a real gap.
+    const beginsSourceGap = point.source_gap_before === true;
+    if (!current || beginsSourceGap) runs.push([point]);
     else current.push(point);
     return runs;
   }, []);
@@ -554,7 +598,7 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
         const runs = curveRuns(row.points);
         const first = runs[0]?.[0];
         const carryIn = row.previousPoint && first
-          && Date.parse(first.decision_time) - Date.parse(row.previousPoint.decision_time) >= gapThreshold
+          && first.source_gap_before === true
           && x(first.decision_time) > 59
           ? <line key={`${row.model_identity}-carry-in`} className="curve-gap-bridge curve-gap-carry-in" stroke={COLORS[row.model_identity]} x1="58" y1={y(row.previousPoint.cumulative_quote_return)} x2={x(first.decision_time)} y2={y(first.cumulative_quote_return)}><title>窗口开始前有真实结果；中间没有成熟结果</title></line>
           : null;
@@ -581,9 +625,6 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
   const [page, setPage] = useState(0);
   const [before, setBefore] = useState<string | null>(null);
   const [laterPages, setLaterPages] = useState<Array<string | null>>([]);
-  const [historyResult, setHistoryResult] = useState<{
-    key: string; state: "ready" | "error"; data?: MarketData;
-  }>();
   const [historyRetry, setHistoryRetry] = useState(0);
   const [showLong, setShowLong] = useState(true);
   const [showShort, setShowShort] = useState(true);
@@ -597,19 +638,33 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
   if (before && range !== "all") historyQuery.set("before", before);
   const historyQueryString = historyQuery.toString();
   const historyRequestKey = market?.history_resource
-    ? `${market.history_resource}?${historyQueryString}&retry=${historyRetry}` : "";
+    ? `${market.history_resource}?${historyQueryString}` : "";
+  const initialHistoryResult = historyRequestKey
+    ? readDashboardResource<MarketData>(historyRequestKey) : null;
+  const [historyResult, setHistoryResult] = useState<{
+    key: string; state: "ready" | "error"; data?: MarketData;
+  } | undefined>(() => initialHistoryResult ? {
+    key: historyRequestKey,
+    state: "ready",
+    data: {
+      ...initialHistoryResult,
+      training_markers: market?.training_markers ?? [],
+      prediction_history_start: market?.prediction_history_start,
+      history_resource: market?.history_resource,
+    },
+  } : undefined);
   useEffect(() => {
     if (!market?.history_resource) return;
-    const controller = new AbortController();
     let cancelled = false;
     const startedAt = Date.now();
-    fetch(`${market.history_resource}?${historyQueryString}`, { cache: "no-store", signal: controller.signal })
-      .then(response => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.json();
-      })
+    const url = `${market.history_resource}?${historyQueryString}`;
+    const cached = readDashboardResource<MarketData>(url);
+    loadDashboardResource<MarketData>(url, {
+      force: historyRetry > 0,
+      maxAgeMs: historyCacheAge(cached),
+    })
       .then(async body => {
-        await waitForMinimumLoading(startedAt);
+        if (!cached) await waitForMinimumLoading(startedAt);
         if (!cancelled) {
           setHistoryResult({
             key: historyRequestKey,
@@ -623,15 +678,15 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
           });
         }
       })
-      .catch(async error => {
-        if (!cancelled && error.name !== "AbortError") {
-          await waitForMinimumLoading(startedAt);
+      .catch(async () => {
+        if (!cancelled) {
+          if (!cached) await waitForMinimumLoading(startedAt);
           if (cancelled) return;
-          setHistoryResult({ key: historyRequestKey, state: "error" });
+          if (!cached) setHistoryResult({ key: historyRequestKey, state: "error" });
         }
       });
-    return () => { cancelled = true; controller.abort(); };
-  }, [market, historyQueryString, historyRequestKey]);
+    return () => { cancelled = true; };
+  }, [market, historyQueryString, historyRequestKey, historyRetry]);
   const remoteHistory = Boolean(market?.history_resource);
   const historyState = !remoteHistory ? "ready"
     : historyResult?.key !== historyRequestKey ? "loading" : historyResult.state;

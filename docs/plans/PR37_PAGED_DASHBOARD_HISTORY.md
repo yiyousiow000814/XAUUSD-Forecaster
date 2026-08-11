@@ -37,9 +37,10 @@ The Worker 800 KB check must remain an emergency guard, not the storage model.
    continues from the last returned record.
 4. The local synchronizer materializes fixed-size visual summaries before
    upload. Learning curves preserve each bucket's first, low, high, and last
-   points; market candles preserve OHLC; decision summaries preserve the time
-   span and Long/Short changes. Visitor requests read these summaries directly
-   and never scan or rank the growing raw D1 tables.
+   points plus real source gaps; market candles preserve OHLC; decision
+   summaries preserve the time span and Long/Short changes. Visitor requests
+   read these summaries directly and never scan or rank the growing raw D1
+   tables.
 5. `/api/learning` is a fixed first page: six generations per model, 48 curve
    points per cadence, and 20 execution results per model.
 6. The existing market-history D1 ledger remains the only complete remote
@@ -52,6 +53,13 @@ The Worker 800 KB check must remain an emergency guard, not the storage model.
 8. Every asynchronous graph surface distinguishes loading, confirmed empty,
    and failed states. A visible loading animation remains for at least 500 ms,
    and failures provide an explicit retry.
+9. Dashed OOS segments come only from a source-gap flag computed before
+   downsampling. Missing metadata fails to a solid line instead of guessing a
+   gap from the wider spacing between compressed points.
+10. Graph history uses the shared browser resource cache. Reopening a graph
+    shows its last successful result immediately; live data refreshes in the
+    background after 60 seconds, while immutable Preview data is reused for the
+    page lifetime.
 
 ## Measured Current Data
 

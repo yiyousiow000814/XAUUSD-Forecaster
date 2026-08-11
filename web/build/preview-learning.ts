@@ -42,6 +42,8 @@ export function compactPreviewLearning(learning: JsonObject): JsonObject {
   const curves = (learning.learning_curves ?? {}) as JsonObject;
   const models = Array.isArray(curves.models) ? curves.models : [];
   const versionGroups = Array.isArray(curves.version_groups) ? curves.version_groups : [];
+  const execution = (learning.execution_learning ?? {}) as JsonObject;
+  const executionModels = Array.isArray(execution.models) ? execution.models : [];
   return {
     learning_preview_summary: true,
     learning_history_resource: PREVIEW_RESOURCES.learningHistory,
@@ -57,9 +59,31 @@ export function compactPreviewLearning(learning: JsonObject): JsonObject {
         row && typeof row === "object" && (row as JsonObject).lifecycle_status === "LATEST"
       )),
       rolling_processes: curves.rolling_processes,
-      // Curves and execution histories are loaded from D1 when the league is
-      // visible.  Keeping them in the Worker module caused 1102 isolate OOMs.
+      // Complete curves are loaded from D1 when the league is visible. Keeping
+      // them in the Worker module caused 1102 isolate OOMs.
       identity_curves: [],
+    },
+    // The execution tab has no separate first-paint endpoint. Retain only its
+    // bounded scorecard and recent chart/list data; complete execution rows
+    // remain in the paged learning ledger.
+    execution_learning: {
+      ...execution,
+      models: executionModels.map(value => {
+        const model = value && typeof value === "object" ? value as JsonObject : {};
+        const evaluation = model.evaluation && typeof model.evaluation === "object"
+          ? model.evaluation as JsonObject : {};
+        const points = Array.isArray(evaluation.points) ? evaluation.points : [];
+        const results = Array.isArray(evaluation.results) ? evaluation.results : [];
+        return {
+          ...model,
+          evaluation: {
+            ...evaluation,
+            points: points.slice(-48),
+            results: results.slice(-20),
+            result_total: evaluation.result_total ?? results.length,
+          },
+        };
+      }),
     },
   };
 }

@@ -83,6 +83,9 @@ test("hydrates preview pages from their immutable build snapshot", () => {
   assert.match(learning, /models\.filter/);
   assert.match(learning, /lifecycle_status === "LATEST"/);
   assert.match(learning, /identity_curves: \[\]/);
+  assert.match(learning, /execution_learning:/);
+  assert.match(learning, /points: points\.slice\(-48\)/);
+  assert.match(learning, /results: results\.slice\(-20\)/);
   assert.doesNotMatch(page, /auditView === "league"/);
   assert.match(page, /\[PREVIEW_RESOURCES\.status\]: previewBundle\.status/);
   assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);
@@ -785,7 +788,8 @@ test("loads market history by bounded range instead of one growing snapshot", ()
   assert.match(route, /ON CONFLICT\(decision_key\) DO UPDATE/);
   assert.match(route, /MAX_INGEST_BYTES = 400_000/);
   assert.match(route, /ORDER BY decision_epoch,decision_key/);
-  assert.match(modal, /cancelled = true; controller\.abort\(\)/);
+  assert.match(modal, /loadDashboardResource<MarketData>/);
+  assert.match(modal, /return \(\) => \{ cancelled = true; \}/);
   assert.match(modal, /!detailCandles\.length && !canGoLater/);
   assert.match(modal, /onClick=\{goLater\}>→ 返回较新行情/);
   assert.match(route, /previousCandleEnd/);
@@ -844,7 +848,15 @@ test("distinguishes market history loading, empty, and failed states", () => {
   assert.doesNotMatch(modal, /还没有保存过可绘制的 Bid\/Ask 行情/);
   assert.doesNotMatch(modal, /等待可验证数据/);
   assert.match(resource, /MIN_VISIBLE_LOADING_MS = 500/);
+  assert.match(modal, /loadDashboardResource/);
+  assert.match(modal, /readDashboardResource/);
+  assert.match(modal, /HISTORY_CACHE_MAX_AGE_MS = 60_000/);
+  assert.match(modal, /Number\.POSITIVE_INFINITY/);
+  assert.match(modal, /initialHistoryResult/);
   assert.match(modal, /waitForMinimumLoading\(startedAt\)/);
+  assert.match(modal, /point\.source_gap_before/);
+  assert.match(modal, /first\.source_gap_before/);
+  assert.doesNotMatch(modal, /source_gap_before \?\?/);
   assert.match(history, /market_history_overview/);
   assert.match(history, /market_decision_overviews/);
   assert.match(schema, /marketHistoryOverview/);
