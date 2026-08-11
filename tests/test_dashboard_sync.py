@@ -356,9 +356,9 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
     assert len(mirrored["news_evidence"]) == module.REMOTE_EVIDENCE_LIMIT
     assert learning["learning_curves"]["models"] == [
         {"lifecycle_status": "LATEST", "model_version": "latest"},
-        {"lifecycle_status": "ARCHIVED", "model_version": "old"},
     ]
     assert learning["learning_curves"]["archived_model_count"] == 1
+    assert learning["learning_history_resource"] == "/api/learning-history"
     assert learning["learning_curves"]["identity_curves"] == [body]
     assert learning["learning_curves"]["full_minus_market"] == [body]
     assert learning["learning_curves"]["broad_full_minus_official_full"] == [body]
@@ -397,6 +397,224 @@ def test_news_index_batches_stay_bounded() -> None:
             {"items": batch}, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")
         assert len(encoded) <= module.NEWS_INDEX_BATCH_LIMIT_BYTES
+
+
+def test_learning_history_records_have_stable_keys_and_bounded_batches() -> None:
+    module = _sync_module()
+    payload = {
+        "learning_curves": {
+            "models": [{
+                "model_identity": "FULL", "model_version": "model-v1",
+                "created_at": "2026-08-10T01:00:00+00:00",
+            }],
+            "version_groups": [{
+                "model_identity": "FULL", "training_dataset_hash": "hash-1",
+                "created_at": "2026-08-10T01:00:00+00:00", "generation": 3,
+            }],
+            "identity_curves": [{
+                "model_identity": "FULL",
+                "points": [{
+                    "decision_time": "2026-08-10T01:05:00+00:00",
+                    "cumulative_quote_return": 0.01,
+                }],
+                "points_30m": [{
+                    "decision_time": "2026-08-10T01:30:00+00:00",
+                    "cumulative_quote_return": 0.02,
+                }],
+            }],
+        },
+        "execution_learning": {"models": []},
+    }
+
+    first = module.learning_history_records(payload)
+    second = module.learning_history_records(payload)
+
+    assert first == second
+    assert {row["resource"] for row in first} == {
+        "model", "version-group", "curve-5m", "curve-30m",
+        "curve-overview", "version-overview",
+    }
+    assert all(len(row["payload_hash"]) == 64 for row in first)
+    batches = module.learning_history_batches(first * 2_000)
+    assert len(batches) > 1
+    for batch in batches:
+        encoded = json.dumps(
+            {"records": batch}, ensure_ascii=False, separators=(",", ":"),
+        ).encode("utf-8")
+        assert len(encoded) <= module.LEARNING_HISTORY_BATCH_LIMIT_BYTES
+
+
+def test_visual_overviews_stay_bounded_and_preserve_the_full_span() -> None:
+    module = _sync_module()
+    points = [{
+        "decision_time": (
+            datetime(2026, 1, 1, tzinfo=timezone.utc)
+            + timedelta(minutes=5 * index)
+        ).isoformat(),
+        "cumulative_quote_return": (-1 if index == 50_000 else index / 100_000),
+    } for index in range(100_000)]
+
+    overview = module._visual_curve_overview(points, 240)
+
+    assert len(overview) <= 240
+    assert overview[0]["decision_time"] == points[0]["decision_time"]
+    assert overview[-1]["decision_time"] == points[-1]["decision_time"]
+    assert any(
+        row["decision_time"] == points[50_000]["decision_time"]
+        for row in overview
+    )
+    assert not any(row["source_gap_before"] for row in overview)
+
+    groups = [{
+        "created_at": point["decision_time"],
+        "generation": index,
+        "cumulative_quote_return": point["cumulative_quote_return"],
+        "cadence_metrics": {
+            "FIXED_30M": {
+                "cumulative_quote_return": 2 if index == 75_000 else -index / 100_000,
+            },
+        },
+    } for index, point in enumerate(points)]
+    group_overview = module._visual_version_overview(groups, 60)
+
+    assert len(group_overview) <= 60
+    assert group_overview[0] == groups[0]
+    assert group_overview[-1] == groups[-1]
+    assert groups[50_000] in group_overview
+    assert groups[75_000] in group_overview
+
+
+def test_curve_overview_marks_only_real_source_gaps() -> None:
+    module = _sync_module()
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    offsets = [0, 5, 10, 120, 125]
+    points = [{
+        "decision_time": (start + timedelta(minutes=offset)).isoformat(),
+        "cumulative_quote_return": index / 100,
+    } for index, offset in enumerate(offsets)]
+
+    overview = module._visual_curve_overview(points, 240)
+
+    assert [row["source_gap_before"] for row in overview] == [
+        False, False, False, True, False,
+    ]
+
+    compressed_source = module._visual_curve_overview(
+        points, 240, infer_source_gaps=False,
+    )
+    assert not any(row["source_gap_before"] for row in compressed_source)
+
+
+def test_decision_overviews_are_incremental_bounded_and_frequency_scoped() -> None:
+    module = _sync_module()
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    decisions = [{
+        "source_decision_id": f"decision-{index}",
+        "decision_time": (start + timedelta(minutes=5 * index)).isoformat(),
+        "model_identity": "FULL",
+        "recommended_action": ("SHORT" if index % 7 == 0 else "LONG"),
+    } for index in range(2_000)]
+
+    summaries = module._update_decision_overviews({}, decisions, None)
+    five = summaries["FULL\0" "5m"]
+    half_hour = summaries["FULL\0" "30m"]
+
+    assert five["source_decision_count"] == 2_000
+    assert len(five["decisions"]) <= module.MARKET_OVERVIEW_DECISIONS_PER_SERIES
+    assert five["decisions"][0]["source_decision_id"] == "decision-0"
+    assert five["decisions"][-1]["source_decision_id"] == "decision-1999"
+    assert half_hour["source_decision_count"] == 334
+    assert all(
+        datetime.fromisoformat(row["decision_time"]).minute % 30 == 0
+        for row in half_hour["decisions"]
+    )
+
+    unchanged = module._update_decision_overviews(
+        summaries, decisions[-24:], decisions[-1]["decision_time"],
+    )
+    assert unchanged == summaries
+
+    settled = {
+        **five["decisions"][0],
+        "outcome_status": "MATURE",
+        "value_quote_return": 0.001,
+    }
+    refreshed = module._update_decision_overviews(
+        summaries, [settled], decisions[-1]["decision_time"],
+    )
+    refreshed_five = refreshed["FULL\0" "5m"]
+    assert refreshed_five["source_decision_count"] == 2_000
+    refreshed_row = next(
+        row for row in refreshed_five["decisions"]
+        if row["source_decision_id"] == settled["source_decision_id"]
+    )
+    assert refreshed_row["outcome_status"] == "MATURE"
+    assert refreshed_row["value_quote_return"] == 0.001
+
+
+def test_learning_summary_size_is_fixed_as_history_grows() -> None:
+    module = _sync_module()
+    groups = []
+    points = []
+    for index in range(1_000):
+        stamp = (datetime(2026, 8, 1, tzinfo=timezone.utc)
+                 + timedelta(minutes=5 * index)).isoformat()
+        groups.append({
+            "model_identity": "FULL", "training_dataset_hash": f"hash-{index}",
+            "created_at": stamp, "generation": index, "lifecycle_status": "ARCHIVED",
+        })
+        points.append({"decision_time": stamp, "cumulative_quote_return": index / 1000})
+    payload = {
+        "learning_curves": {
+            "models": [], "version_groups": groups,
+            "identity_curves": [{"model_identity": "FULL", "points": points}],
+        },
+        "execution_learning": {"models": []},
+    }
+
+    summary = json.loads(module.learning_snapshot(payload))
+
+    assert len(summary["learning_curves"]["version_groups"]) == 6
+    assert len(summary["learning_curves"]["identity_curves"][0]["points"]) == 48
+    assert summary["learning_history_manifest"]["version_group_total"] == 1_000
+    assert len(module.learning_snapshot(payload)) < 100_000
+
+
+def test_learning_history_is_durable_before_summary_and_retries_idempotently(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _sync_module()
+    payload = {
+        "learning_curves": {
+            "models": [],
+            "version_groups": [{
+                "model_identity": "FULL", "training_dataset_hash": "hash-1",
+                "created_at": "2026-08-10T01:00:00+00:00", "generation": 1,
+            }],
+            "identity_curves": [],
+        },
+        "execution_learning": {"models": []},
+    }
+    posted: list[str] = []
+    monkeypatch.setattr(
+        module, "_post_json", lambda url, _body, _config: posted.append(url)
+    )
+    config = {
+        "remote_ingest_url": "https://worker.example/api/ingest",
+        "token": "test",
+        "learning_state_file": str(tmp_path / "summary.json"),
+        "learning_history_state_file": str(tmp_path / "history.json"),
+    }
+
+    module._sync_learning(payload, config)
+
+    assert posted == [
+        "https://worker.example/api/learning-history",
+        "https://worker.example/api/learning",
+    ]
+    posted.clear()
+    module._sync_learning(payload, config)
+    assert posted == []
 
 
 def test_news_details_are_durable_before_index_is_published(monkeypatch, tmp_path) -> None:
@@ -591,7 +809,7 @@ def test_sync_repopulates_news_index_without_full_refresh_marker(
     assert state["mirror_contract_version"] == module.NEWS_MIRROR_CONTRACT_VERSION
 
 
-def test_remote_market_chart_is_split_from_status_and_keeps_complete_window() -> None:
+def test_remote_market_chart_is_split_from_status_and_keeps_recent_window() -> None:
     module = _sync_module()
     decisions = [{
         "source_decision_id": f"d-{index}",
@@ -619,12 +837,12 @@ def test_remote_market_chart_is_split_from_status_and_keeps_complete_window() ->
 
     market = json.loads(module.market_chart_snapshot(payload))
     retained = market["decisions"]
-    assert len(retained) == module.REMOTE_MARKET_DECISION_LIMIT + 1
-    assert retained[0]["source_decision_id"] == "d-0"
-    assert all(row["source_decision_id"] != "d-1" for row in retained)
+    assert len(retained) == module.REMOTE_MARKET_DECISION_LIMIT
+    assert retained[0]["source_decision_id"] == "d-20"
+    assert all(row["source_decision_id"] != "d-0" for row in retained)
     assert retained[-1]["source_decision_id"] == f"d-{len(decisions) - 1}"
     assert "exit_time" not in retained[1]
-    assert retained[1]["model_version"] == "model-20"
+    assert retained[1]["model_version"] == "model-21"
     assert len(market["candles"]) == 1
     assert market["candles"][0]["open"] == 1.123
     assert market["candles"][0]["time"] == "2026-08-05T00:00:00Z"
@@ -633,7 +851,7 @@ def test_remote_market_chart_is_split_from_status_and_keeps_complete_window() ->
     assert market["source_candle_count"] == 736
 
 
-def test_seven_day_market_snapshot_keeps_every_half_hour_under_limit() -> None:
+def test_seven_day_market_snapshot_is_recent_only_under_limit() -> None:
     module = _sync_module()
     start = datetime(2026, 8, 1, tzinfo=timezone.utc)
     identities = ("MARKET_ONLY", "NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL")
@@ -666,15 +884,10 @@ def test_seven_day_market_snapshot_keeps_every_half_hour_under_limit() -> None:
     market = json.loads(encoded)
 
     assert len(encoded) <= module.REMOTE_PAYLOAD_LIMIT_BYTES
-    assert len(market["candles"]) == 7 * 288
-    assert 0 < len(market["overview_candles"]) < 480
-    retained_half_hours = {
-        row["decision_time"] for row in market["decisions"]
-        if row["model_identity"] == "MARKET_ONLY" and row["decision_time"][14:16] in ("00", "30")
-    }
-    assert len(retained_half_hours) == 7 * 48
-    assert min(retained_half_hours) == "2026-08-01T00:00:00Z"
-    assert max(retained_half_hours) == "2026-08-07T23:30:00Z"
+    assert len(market["candles"]) == module.REMOTE_MARKET_CANDLE_LIMIT
+    assert 0 < len(market["overview_candles"]) <= 480
+    assert len(market["decisions"]) <= module.REMOTE_MARKET_DECISION_LIMIT
+    assert min(row["decision_time"] for row in market["decisions"]) > "2026-08-01T00:00:00Z"
 
 
 def test_market_overview_downsampling_preserves_ohlc_extremes() -> None:
@@ -717,24 +930,6 @@ def test_market_history_ingest_batches_are_bounded_and_complete() -> None:
     assert sum(len(row.get("candles", [])) for row in decoded) == len(candles)
     assert sum(len(row.get("decisions", [])) for row in decoded) == len(decisions)
     assert module._overlap_cursor("2026-08-07T04:00:00Z") == "2026-08-07T02:00:00+00:00"
-
-
-def test_curve_compaction_preserves_extremes_and_version_boundaries() -> None:
-    module = _sync_module()
-    points = [{
-        "decision_time": f"point-{index}",
-        "cumulative_quote_return": float(index),
-        **({"model_version": "new-version"} if index == 501 else {}),
-    } for index in range(960)]
-    points[410]["cumulative_quote_return"] = -999.0
-    points[720]["cumulative_quote_return"] = 999.0
-    compact = module.compact_curve_points(points)
-    retained = {point["cumulative_quote_return"] for point in compact}
-    assert -999.0 in retained
-    assert 999.0 in retained
-    assert any(point.get("model_version") == "new-version" for point in compact)
-    assert compact[0] == points[0]
-    assert compact[-1] == points[-1]
 
 
 def test_annotator_heartbeat_reports_idle_loop_as_healthy(tmp_path) -> None:

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import DashboardLink from "../_components/DashboardLink";
 import SystemStatePill from "../_components/SystemStatePill";
-import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
+import { loadDashboardResource, readDashboardResource, waitForMinimumLoading } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { PREVIEW_NEWS_PAGE_SIZE } from "../_lib/preview-contract";
 import LearningGraphModal from "../audit/LearningGraphModal";
@@ -211,6 +211,11 @@ type CadenceMetric = { oos_rows: number; distinct_days: number; cumulative_quote
 type Payload = {
   preview_status_summary?: boolean;
   learning_preview_summary?: boolean;
+  learning_history_resource?: string;
+  learning_history_manifest?: {
+    contract_version: string; model_total: number;
+    version_group_total: number; record_total: number;
+  };
   generated_at: string;
   system: { online: boolean; market_session?: "OPEN" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE"; source_of_truth: string; sites_mirror: string; deployment?: { runtime_git_sha: string | null; expected_git_sha: string | null; runtime_dirty: boolean; status: string; storyline_policy_version: string; payload_schema_version: string; payload_generated_at: string; source_database_epoch: string | null } };
   counts: Record<string, number>;
@@ -609,16 +614,19 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
       return;
     }
     setDetailState("loading");
+    const startedAt = Date.now();
     try {
       const response = await fetch(`/api/news-content?key=${encodeURIComponent(row.detail_key)}`, {
         cache: "no-store",
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
+      await waitForMinimumLoading(startedAt);
       setDetail(body.payload);
       setDetailState("ready");
       setDetailRetryCount(0);
     } catch {
+      await waitForMinimumLoading(startedAt);
       setDetailState("error");
     }
   }, [row.detail_key]);
@@ -1133,7 +1141,7 @@ export default function AuditView() {
           </div>
         </details>
         <footer className="league-footer">仅供研究观察，不代表盈利，也不会自动下单。</footer>
-        <LearningGraphModal key={graphStartTab} open={graphOpen} onClose={() => setGraphOpen(false)} startTab={graphStartTab} curves={payload?.learning_curves?.identity_curves ?? []} market={payload?.market_chart} versionGroups={payload?.learning_curves?.version_groups ?? []} execution={payload?.execution_learning} />
+        <LearningGraphModal key={graphStartTab} open={graphOpen} onClose={() => setGraphOpen(false)} startTab={graphStartTab} curves={payload?.learning_curves?.identity_curves ?? []} market={payload?.market_chart} versionGroups={payload?.learning_curves?.version_groups ?? []} execution={payload?.execution_learning} historyResource={payload?.learning_history_resource} />
       </section>}
 
       {view === "coverage" && <section className="coverage-grid">

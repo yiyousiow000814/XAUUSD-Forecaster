@@ -22,6 +22,7 @@ package.__path__ = [str(MODULE_ROOT / "xauusd_forecaster")]
 sys.modules["xauusd_forecaster"] = package
 factor_coverage = importlib.import_module("xauusd_forecaster.factors").factor_coverage
 storylines = importlib.import_module("xauusd_forecaster.storylines")
+dashboard_sync = importlib.import_module("scripts.run_dashboard_sync")
 
 
 DEFAULT_SOURCE = "https://aurum-signal-room.yiyousiow1234.workers.dev"
@@ -218,6 +219,12 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
     return {
         "status": status,
         "learning": learning,
+        # Production's public learning payload is already compressed. Wider
+        # spacing there is not proof of a source-data gap, so Preview must not
+        # infer dashed segments from it.
+        "learning_history": dashboard_sync.learning_history_records(
+            learning, infer_source_gaps=False,
+        ),
         "market_chart": market_chart,
         "news_index": news_index,
         "news_details": details,
