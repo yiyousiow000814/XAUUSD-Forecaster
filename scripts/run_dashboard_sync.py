@@ -31,6 +31,9 @@ DEFAULT_NEWS_STATE = (
 DEFAULT_LEARNING_STATE = (
     MODULE_ROOT / ".local" / "forward" / "dashboard-learning-sync-state.json"
 )
+DEFAULT_LEARNING_HISTORY_STATE = (
+    MODULE_ROOT / ".local" / "forward" / "dashboard-learning-history-sync-state.json"
+)
 DEFAULT_MARKET_HISTORY_STATE = (
     MODULE_ROOT / ".local" / "forward" / "dashboard-market-history-sync-state.json"
 )
@@ -48,11 +51,14 @@ NEWS_MIRROR_CONTRACT_VERSION = "news-readable-authoritative-v1"
 MARKET_HISTORY_CONTRACT_VERSION = "market-history-d1-v1"
 MARKET_HISTORY_BATCH_LIMIT_BYTES = 350_000
 MARKET_HISTORY_OVERLAP_SECONDS = 2 * 3_600
-REMOTE_CURVE_POINTS_PER_IDENTITY = 480
-REMOTE_CURVE_POINT_LIMITS = (480, 360, 240, 160, 120, 80, 40, 20)
-REMOTE_DETAIL_LIMITS = (240, 160, 120, 80, 40, 20)
-REMOTE_EXECUTION_RESULT_LIMIT = 100
+LEARNING_HISTORY_CONTRACT_VERSION = "learning-history-d1-v1"
+LEARNING_HISTORY_BATCH_LIMIT_BYTES = 300_000
+LEARNING_HISTORY_FULL_REFRESH_SECONDS = 86_400
+LEARNING_SUMMARY_CURVE_POINTS = 48
+LEARNING_SUMMARY_GROUPS_PER_IDENTITY = 6
+LEARNING_SUMMARY_EXECUTION_RESULTS = 20
 REMOTE_MARKET_DECISION_LIMIT = 288 * 5
+REMOTE_MARKET_CANDLE_LIMIT = 576
 REMOTE_MARKET_DENSE_LIMITS = (1440, 1152, 864, 576, 288, 0)
 REMOTE_MARKET_OVERVIEW_LIMITS = (480, 240, 120, 80, 40)
 
@@ -124,13 +130,15 @@ def news_index_batches(rows: list[dict]) -> list[list[dict]]:
     return _bounded_item_batches(rows, NEWS_INDEX_BATCH_LIMIT_BYTES)
 
 
-def _bounded_item_batches(rows: list[dict], limit_bytes: int) -> list[list[dict]]:
+def _bounded_item_batches(
+    rows: list[dict], limit_bytes: int, *, envelope: str = "items"
+) -> list[list[dict]]:
     batches: list[list[dict]] = []
     current: list[dict] = []
     for row in rows:
         candidate = [*current, row]
         size = len(json.dumps(
-            {"items": candidate}, ensure_ascii=False, allow_nan=False,
+            {envelope: candidate}, ensure_ascii=False, allow_nan=False,
             separators=(",", ":"),
         ).encode("utf-8"))
         if current and size > limit_bytes:
@@ -143,57 +151,99 @@ def _bounded_item_batches(rows: list[dict], limit_bytes: int) -> list[list[dict]
     return batches
 
 
-def compact_curve_points(
-    points: list[dict],
-    *,
-    limit: int = REMOTE_CURVE_POINTS_PER_IDENTITY,
-    value_keys: tuple[str, ...] = ("cumulative_quote_return",),
-) -> list[dict]:
-    """Preserve curve shape and version boundaries within a visual-size budget."""
-    if len(points) <= limit:
-        return points
-    bucket_count = max(1, limit // max(2, 2 * len(value_keys)))
-    bucket_size = max(1, (len(points) + bucket_count - 1) // bucket_count)
-    keep = {0, len(points) - 1}
-    # Every point carries model_version.  Preserve only actual transition
-    # boundaries; preserving every non-empty value defeats compaction.
-    for index in range(1, len(points)):
-        if points[index].get("model_version") != points[index - 1].get("model_version"):
-            keep.update((index - 1, index))
-    for start in range(0, len(points), bucket_size):
-        indices = list(range(start, min(len(points), start + bucket_size)))
-        for key in value_keys:
-            candidates = [index for index in indices if points[index].get(key) is not None]
-            if candidates:
-                keep.add(min(candidates, key=lambda index: float(points[index][key])))
-                keep.add(max(candidates, key=lambda index: float(points[index][key])))
-    ordered = sorted(keep)
-    if len(ordered) > limit:
-        mandatory = {0, len(points) - 1}
-        for key in value_keys:
-            candidates = [
-                index for index, point in enumerate(points)
-                if point.get(key) is not None
-            ]
-            if candidates:
-                mandatory.add(min(candidates, key=lambda index: float(points[index][key])))
-                mandatory.add(max(candidates, key=lambda index: float(points[index][key])))
-        remaining = [index for index in ordered if index not in mandatory]
-        available = max(0, limit - len(mandatory))
-        if available and remaining:
-            sampled = {
-                remaining[round(position * (len(remaining) - 1) / max(1, available - 1))]
-                for position in range(available)
-            }
-        else:
-            sampled = set()
-        ordered = sorted(mandatory | sampled)[:limit]
-    return [points[index] for index in ordered]
+def _epoch(value: object) -> int:
+    try:
+        return int(datetime.fromisoformat(
+            str(value).replace("Z", "+00:00")
+        ).timestamp())
+    except (TypeError, ValueError):
+        return 0
 
 
-def _compact_learning_payload(
-    payload: dict, point_limit: int, detail_limit: int
+def _learning_record(
+    resource: str, record_key: str, sort_epoch: int, payload: dict
 ) -> dict:
+    return {
+        "resource": resource,
+        "record_key": record_key,
+        "sort_epoch": sort_epoch,
+        "payload_hash": _json_hash(payload),
+        "payload": payload,
+    }
+
+
+def learning_history_records(payload: dict) -> list[dict]:
+    """Normalize append-only learning evidence into idempotent D1 records."""
+    learning = payload.get("learning_curves") or {}
+    records: list[dict] = []
+    for row in learning.get("models", []):
+        if not isinstance(row, dict):
+            continue
+        identity = str(row.get("model_identity") or "")
+        version = str(row.get("model_version") or "")
+        if identity and version:
+            records.append(_learning_record(
+                "model", f"{identity}\0{version}", _epoch(row.get("created_at")), row,
+            ))
+    for row in learning.get("version_groups", []):
+        if not isinstance(row, dict):
+            continue
+        identity = str(row.get("model_identity") or "")
+        dataset_hash = str(row.get("training_dataset_hash") or "")
+        if identity and dataset_hash:
+            records.append(_learning_record(
+                "version-group", f"{identity}\0{dataset_hash}",
+                _epoch(row.get("created_at")), row,
+            ))
+    for curve in learning.get("identity_curves", []):
+        if not isinstance(curve, dict):
+            continue
+        identity = str(curve.get("model_identity") or "")
+        if not identity:
+            continue
+        for field, resource in (("points", "curve-5m"), ("points_30m", "curve-30m")):
+            for point in curve.get(field, []) or []:
+                if not isinstance(point, dict) or not point.get("decision_time"):
+                    continue
+                record_payload = {"model_identity": identity, **point}
+                records.append(_learning_record(
+                    resource, f"{identity}\0{point['decision_time']}",
+                    _epoch(point["decision_time"]), record_payload,
+                ))
+    for model in (payload.get("execution_learning") or {}).get("models", []):
+        if not isinstance(model, dict):
+            continue
+        identity = str(model.get("model_identity") or "")
+        evaluation = model.get("evaluation") or {}
+        for point in evaluation.get("points", []) or []:
+            if not isinstance(point, dict) or not point.get("time"):
+                continue
+            record_payload = {"model_identity": identity, **point}
+            records.append(_learning_record(
+                "execution-point", f"{identity}\0{point['time']}",
+                _epoch(point["time"]), record_payload,
+            ))
+        for index, result in enumerate(evaluation.get("results", []) or []):
+            if not isinstance(result, dict):
+                continue
+            result_time = result.get("scored_at") or result.get("decision_time") or ""
+            result_id = result.get("decision_id") or result.get("source_decision_id") or index
+            record_payload = {"model_identity": identity, **result}
+            records.append(_learning_record(
+                "execution-result", f"{identity}\0{result_id}\0{result_time}",
+                _epoch(result_time), record_payload,
+            ))
+    return records
+
+
+def learning_history_batches(rows: list[dict]) -> list[list[dict]]:
+    return _bounded_item_batches(
+        rows, LEARNING_HISTORY_BATCH_LIMIT_BYTES, envelope="records"
+    )
+
+
+def _learning_summary(payload: dict) -> dict:
+    """Return a fixed-size first page; D1 owns every older learning record."""
     learning = copy.deepcopy(payload.get("learning_curves") or {})
     models = learning.get("models")
     if isinstance(models, list):
@@ -202,11 +252,27 @@ def _compact_learning_payload(
             for row in models
         )
         learning["model_detail_total"] = len(models)
-        learning["models"] = models[-detail_limit:]
+        learning["models"] = [
+            row for row in models
+            if row.get("active_rank") is not None
+            or row.get("lifecycle_status") in {"LATEST", "PREVIOUS"}
+        ]
     version_groups = learning.get("version_groups")
     if isinstance(version_groups, list):
         learning["version_group_total"] = len(version_groups)
-        learning["version_groups"] = version_groups[-detail_limit:]
+        retained_groups = []
+        identities = sorted({
+            str(row.get("model_identity") or "") for row in version_groups
+            if isinstance(row, dict)
+        })
+        for identity in identities:
+            rows = sorted(
+                (row for row in version_groups if row.get("model_identity") == identity),
+                key=lambda row: (row.get("generation") or 0, row.get("created_at") or ""),
+                reverse=True,
+            )
+            retained_groups.extend(rows[:LEARNING_SUMMARY_GROUPS_PER_IDENTITY])
+        learning["version_groups"] = retained_groups
     curves = learning.get("identity_curves")
     if isinstance(curves, list):
         for curve in curves:
@@ -214,45 +280,30 @@ def _compact_learning_payload(
                 continue
             for field in ("points", "points_30m"):
                 if isinstance(curve.get(field), list):
-                    curve[field] = compact_curve_points(
-                        curve[field], limit=point_limit
-                    )
+                    curve[field] = curve[field][-LEARNING_SUMMARY_CURVE_POINTS:]
     for field in ("full_minus_market", "broad_full_minus_official_full"):
         if isinstance(learning.get(field), list):
-            learning[field] = compact_curve_points(
-                learning[field], limit=point_limit,
-                value_keys=("cumulative_delta",),
-            )
+            learning[field] = learning[field][-LEARNING_SUMMARY_CURVE_POINTS:]
 
     execution = copy.deepcopy(payload.get("execution_learning") or {})
     for model in execution.get("models", []) if isinstance(execution, dict) else []:
         evaluation = model.get("evaluation") if isinstance(model, dict) else None
         if isinstance(evaluation, dict) and isinstance(evaluation.get("points"), list):
-            evaluation["points"] = compact_curve_points(
-                evaluation["points"], limit=point_limit,
-                value_keys=("selected_cumulative_return", "baseline_cumulative_return"),
-            )
+            evaluation["points"] = evaluation["points"][-LEARNING_SUMMARY_CURVE_POINTS:]
         if isinstance(evaluation, dict) and isinstance(evaluation.get("results"), list):
             evaluation["result_total"] = len(evaluation["results"])
-            evaluation["results"] = evaluation["results"][-REMOTE_EXECUTION_RESULT_LIMIT:]
+            evaluation["results"] = evaluation["results"][-LEARNING_SUMMARY_EXECUTION_RESULTS:]
     return {
         "learning_curves": learning,
         "execution_learning": execution,
-        "mirror_compaction": {
-            "display_only": True,
-            "sqlite_history_complete": True,
-            "curve_point_limit": point_limit,
-            "detail_row_limit": detail_limit,
+        "learning_history_resource": "/api/learning-history",
+        "learning_history_manifest": {
+            "contract_version": LEARNING_HISTORY_CONTRACT_VERSION,
+            "model_total": len(payload.get("learning_curves", {}).get("models", [])),
+            "version_group_total": len(payload.get("learning_curves", {}).get("version_groups", [])),
+            "record_total": len(learning_history_records(payload)),
         },
     }
-
-
-def _is_half_hour_decision(row: dict) -> bool:
-    try:
-        clock = str(row.get("decision_time") or "").split("T", 1)[1]
-        return int(clock.split(":", 2)[1]) in (0, 30)
-    except (IndexError, TypeError, ValueError):
-        return False
 
 
 def _decision_key(row: dict) -> tuple[str, str, str]:
@@ -285,13 +336,15 @@ def compact_market_chart(
     dense_limit: int = REMOTE_MARKET_DECISION_LIMIT,
     overview_limit: int = REMOTE_MARKET_OVERVIEW_LIMITS[0],
 ) -> dict:
-    """Keep all half-hour evidence plus a bounded recent five-minute window."""
+    """Keep a bounded recent chart; D1 owns the complete market history."""
     market = copy.deepcopy(payload.get("market_chart") or {})
     for candle_key in ("candles", "overview_candles"):
         compact_candles = []
         source_rows = market.get(candle_key, [])
         if candle_key == "overview_candles":
             source_rows = _downsample_market_overview(source_rows, overview_limit)
+        else:
+            source_rows = source_rows[-REMOTE_MARKET_CANDLE_LIMIT:]
         for row in source_rows:
             compact = {key: value for key, value in row.items() if key != "ticks"}
             if str(compact.get("time") or "").endswith("+00:00"):
@@ -323,8 +376,7 @@ def compact_market_chart(
     compact_decisions.sort(key=lambda row: (
         row.get("decision_time") or "", row.get("model_identity") or ""
     ))
-    half_hour = [row for row in compact_decisions if _is_half_hour_decision(row)]
-    retained = {_decision_key(row): row for row in half_hour}
+    retained = {}
     if dense_limit:
         for row in compact_decisions[-dense_limit:]:
             retained[_decision_key(row)] = row
@@ -352,21 +404,17 @@ def market_chart_snapshot(payload: dict) -> bytes:
 
 
 def learning_snapshot(payload: dict) -> bytes:
-    """Keep growing learning surfaces outside the live status heartbeat."""
-    last_size = 0
-    for detail_limit in REMOTE_DETAIL_LIMITS:
-        for point_limit in REMOTE_CURVE_POINT_LIMITS:
-            encoded = json.dumps(
-                _compact_learning_payload(payload, point_limit, detail_limit),
-                ensure_ascii=False, allow_nan=False, separators=(",", ":"),
-            ).encode("utf-8")
-            last_size = len(encoded)
-            if last_size <= REMOTE_PAYLOAD_LIMIT_BYTES:
-                return encoded
-    raise ValueError(
-        f"learning payload is {last_size} bytes after adaptive compaction "
-        f"(limit {REMOTE_PAYLOAD_LIMIT_BYTES})"
-    )
+    """Build the bounded first page after history has been stored in D1."""
+    encoded = json.dumps(
+        _learning_summary(payload), ensure_ascii=False, allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(encoded) > REMOTE_PAYLOAD_LIMIT_BYTES:
+        raise ValueError(
+            f"bounded learning summary is {len(encoded)} bytes "
+            f"(limit {REMOTE_PAYLOAD_LIMIT_BYTES})"
+        )
+    return encoded
 
 
 def remote_snapshot(payload: dict) -> bytes:
@@ -584,6 +632,14 @@ def configured_targets(config: dict) -> list[dict]:
             name,
             legacy=scoped["legacy"],
         ))
+        scoped["learning_history_state_file"] = str(_target_state_path(
+            Path(target.get(
+                "learning_history_state_file",
+                config.get("learning_history_state_file", DEFAULT_LEARNING_HISTORY_STATE),
+            )),
+            name,
+            legacy=scoped["legacy"],
+        ))
         targets.append(scoped)
     if not targets:
         raise ValueError("dashboard sync has no configured targets")
@@ -612,6 +668,56 @@ def _sync_learning(local_payload: dict, config: dict) -> None:
     learning_state_path = Path(
         config.get("learning_state_file", DEFAULT_LEARNING_STATE)
     )
+    remote_host = urllib.parse.urlsplit(config["remote_ingest_url"]).hostname or ""
+    if not remote_host.lower().endswith(".chatgpt.site"):
+        history_url = config.get("remote_learning_history_url") or (
+            config["remote_ingest_url"].rsplit("/", 1)[0] + "/learning-history"
+        )
+        history_state_path = Path(config.get(
+            "learning_history_state_file", DEFAULT_LEARNING_HISTORY_STATE,
+        ))
+        history_state = _read_news_sync_state(history_state_path)
+        hashes = history_state.get("hashes", {})
+        if not isinstance(hashes, dict):
+            hashes = {}
+        last_full = history_state.get("last_full_sync")
+        try:
+            full_refresh_due = (
+                history_state.get("contract_version") != LEARNING_HISTORY_CONTRACT_VERSION
+                or not last_full
+                or (datetime.now(UTC) - datetime.fromisoformat(last_full)).total_seconds()
+                >= LEARNING_HISTORY_FULL_REFRESH_SECONDS
+            )
+        except (TypeError, ValueError):
+            full_refresh_due = True
+        records = learning_history_records(local_payload)
+        pending = [
+            row for row in records
+            if full_refresh_due
+            or hashes.get(f"{row['resource']}\0{row['record_key']}")
+            != row["payload_hash"]
+        ]
+        for batch in learning_history_batches(pending):
+            encoded = json.dumps(
+                {"records": batch}, ensure_ascii=False, allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            _post_json(history_url, encoded, config)
+            for row in batch:
+                hashes[f"{row['resource']}\0{row['record_key']}"] = row["payload_hash"]
+            _write_news_sync_state(history_state_path, {
+                "contract_version": LEARNING_HISTORY_CONTRACT_VERSION,
+                "hashes": hashes,
+                "last_full_sync": last_full,
+            })
+        if full_refresh_due:
+            last_full = datetime.now(UTC).isoformat()
+        _write_news_sync_state(history_state_path, {
+            "contract_version": LEARNING_HISTORY_CONTRACT_VERSION,
+            "hashes": hashes,
+            "last_full_sync": last_full,
+            "last_success": datetime.now(UTC).isoformat(),
+        })
     learning_state = _read_news_sync_state(learning_state_path)
     learning_payload = learning_snapshot(local_payload)
     learning_hash = hashlib.sha256(learning_payload).hexdigest()

@@ -71,11 +71,11 @@ const COLORS: Record<string, string> = {
 const pct = (value: number) => `${value >= 0 ? "+" : "−"}${Math.abs(value * 100).toFixed(3)}%`;
 
 export default function LearningGraphModal({
-  open, onClose, startTab, curves, market, versionGroups, execution,
+  open, onClose, startTab, curves, market, versionGroups, execution, historyResource,
 }: {
   open: boolean; onClose: () => void; startTab?: "curve" | "execution"; curves: Curve[];
   market?: MarketData;
-  versionGroups: VersionGroup[]; execution?: ExecutionLearning;
+  versionGroups: VersionGroup[]; execution?: ExecutionLearning; historyResource?: string;
 }) {
   const [tab, setTab] = useState<GraphTab>(startTab ?? "curve");
   const [identity, setIdentity] = useState("BROAD_FULL");
@@ -142,8 +142,8 @@ export default function LearningGraphModal({
         <button className={tab === "execution" ? "active" : ""} onClick={() => setTab("execution")}>仓位与退出</button>
       </nav>
       <div className="graph-modal-body">
-        {tab === "curve" && <LongCurve curves={curves} />}
-        {tab === "versions" && <VersionLedger groups={versionGroups} />}
+        {tab === "curve" && <LongCurve curves={curves} historyResource={historyResource} />}
+        {tab === "versions" && <VersionLedger groups={versionGroups} historyResource={historyResource} />}
         {tab === "market" && <MarketChart market={resolvedMarket} identity={identity} setIdentity={setIdentity} />}
         {tab === "execution" && <ExecutionCharts execution={execution} />}
       </div>
@@ -152,26 +152,69 @@ export default function LearningGraphModal({
   </div>;
 }
 
-function VersionLedger({ groups }: { groups: VersionGroup[] }) {
+function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; historyResource?: string }) {
   const pageSize = 6;
   const [identity, setIdentity] = useState("BROAD_FULL");
   const [cadence, setCadence] = useState<EvaluationCadence>("EVERY_5M");
   const [cutoffWindow, setCutoffWindow] = useState<"20" | "all">("20");
   const [hovered, setHovered] = useState<VersionGroup | null>(null);
   const [page, setPage] = useState(0);
+  const [remotePages, setRemotePages] = useState<Record<number, VersionGroup[]>>({});
+  const [pageCursors, setPageCursors] = useState<Record<number, string | null>>({ 0: null });
+  const [remoteTotal, setRemoteTotal] = useState<number | null>(null);
+  const [pageError, setPageError] = useState<string | null>(null);
+  const [overviewGroups, setOverviewGroups] = useState<VersionGroup[] | null>(null);
   const resultListRef = useRef<HTMLDivElement>(null);
   const rows = groups.filter(row => row.model_identity === identity).sort((a,b) => b.generation-a.generation);
-  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+  useEffect(() => {
+    if (!historyResource || overviewGroups) return;
+    const controller = new AbortController();
+    fetch(`${historyResource}?resource=version-overview`, {
+      cache: "no-store", signal: controller.signal,
+    }).then(response => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json() as Promise<{ items: VersionGroup[] }>;
+    }).then(body => setOverviewGroups(body.items)).catch(() => {
+      /* The bounded first-page graph remains usable. */
+    });
+    return () => controller.abort();
+  }, [historyResource, overviewGroups]);
+  useEffect(() => {
+    if (!historyResource || remotePages[page] || pageCursors[page] === undefined) return;
+    const query = new URLSearchParams({
+      resource: "version-group", identity, limit: String(pageSize),
+    });
+    const cursor = pageCursors[page];
+    if (cursor) query.set("cursor", cursor);
+    const controller = new AbortController();
+    fetch(`${historyResource}?${query}`, { cache: "no-store", signal: controller.signal })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json() as Promise<{ items: VersionGroup[]; total: number; next_cursor: string | null }>;
+      })
+      .then(body => {
+        setRemotePages(previous => ({ ...previous, [page]: body.items }));
+        setRemoteTotal(body.total);
+        setPageCursors(previous => ({ ...previous, [page + 1]: body.next_cursor }));
+      })
+      .catch(error => { if (error.name !== "AbortError") setPageError("这一页暂时无法读取"); });
+    return () => controller.abort();
+  }, [historyResource, identity, page, pageCursors, remotePages]);
+  const totalRows = remoteTotal ?? rows.length;
+  const pageCount = Math.max(1, Math.ceil(totalRows / pageSize));
   const safePage = Math.min(page, pageCount - 1);
-  const visibleRows = rows.slice(safePage * pageSize, (safePage + 1) * pageSize);
+  const visibleRows = remotePages[safePage]
+    ?? rows.slice(safePage * pageSize, (safePage + 1) * pageSize);
+  const pageLoading = Boolean(historyResource && !remotePages[safePage] && !pageError);
   const goToPage = (nextPage: number) => {
     setPage(Math.max(0, Math.min(pageCount - 1, nextPage)));
     window.requestAnimationFrame(() => resultListRef.current?.scrollIntoView({ behavior:"smooth", block:"start" }));
   };
   const stamp = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12:false, month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" });
   const metric = (row: VersionGroup) => row.cadence_metrics?.[cadence] ?? { oos_rows: row.subsequent_oos_rows, distinct_days: row.distinct_days, cumulative_quote_return: row.cumulative_quote_return, profit_factor_quote_adjusted: row.profit_factor_quote_adjusted, coverage_rate: row.coverage_rate };
-  const matureRows = groups.filter(row => metric(row).oos_rows > 0);
-  const fullCutoffByCreatedAt = new Map(groups.filter(row => row.model_identity === "FULL" || row.model_identity === "BROAD_FULL").map(row => [row.created_at, row.training_rows]));
+  const graphGroups = overviewGroups ?? groups;
+  const matureRows = graphGroups.filter(row => metric(row).oos_rows > 0);
+  const fullCutoffByCreatedAt = new Map(graphGroups.filter(row => row.model_identity === "FULL" || row.model_identity === "BROAD_FULL").map(row => [row.created_at, row.training_rows]));
   const comparisonCutoff = (row: VersionGroup) => row.model_identity.endsWith("NEWS_RESIDUAL") ? fullCutoffByCreatedAt.get(row.created_at) ?? row.training_rows : row.training_rows;
   const allCutoffs = [...new Set(matureRows.map(comparisonCutoff))].sort((a, b) => a - b);
   const cutoffs = cutoffWindow === "all" ? allCutoffs : allCutoffs.slice(-20);
@@ -183,7 +226,7 @@ function VersionLedger({ groups }: { groups: VersionGroup[] }) {
     : 90 + cutoffs.indexOf(trainingRows) / Math.max(1, cutoffs.length - 1) * 780;
   const gy = (value: number) => 28 + (high-value)/Math.max(.000001,high-low)*218;
   const hoveredMetric = hovered ? metric(hovered) : null;
-  return <section className="version-ledger modal-version-ledger"><header><div className="version-ledger-title"><span>共同训练截止量对齐 · 同一坐标叠加比较</span><h3>所有模型的训练组成绩</h3></div><div className="version-ledger-controls"><label className="version-ledger-model"><span>查看模型明细</span><select value={identity} onChange={event => { setIdentity(event.target.value); setPage(0); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select></label><label><span>统计频率</span><select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPage(0); }}><option value="EVERY_5M">每5分钟（重叠样本）</option><option value="FIXED_30M">每30分钟（固定 :00 / :30）</option></select></label><label><span>横轴范围</span><select value={cutoffWindow} onChange={event => setCutoffWindow(event.target.value as "20" | "all")}><option value="20">最近20个训练截止点</option><option value="all">全部训练截止点</option></select></label></div></header>
+  return <section className="version-ledger modal-version-ledger"><header><div className="version-ledger-title"><span>共同训练截止量对齐 · 同一坐标叠加比较</span><h3>所有模型的训练组成绩</h3></div><div className="version-ledger-controls"><label className="version-ledger-model"><span>查看模型明细</span><select value={identity} onChange={event => { setIdentity(event.target.value); setPage(0); setRemotePages({}); setPageCursors({ 0: null }); setRemoteTotal(null); setPageError(null); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select></label><label><span>统计频率</span><select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPage(0); }}><option value="EVERY_5M">每5分钟（重叠样本）</option><option value="FIXED_30M">每30分钟（固定 :00 / :30）</option></select></label><label><span>横轴范围</span><select value={cutoffWindow} onChange={event => setCutoffWindow(event.target.value as "20" | "all")}><option value="20">最近20个训练截止点</option><option value="all">全部训练截止点</option></select></label></div></header>
     <section className="version-hover-chart" aria-label="所有模型训练组独立收益图">
       <div className="version-hover-readout">{hovered && hoveredMetric ? <><b>{LABELS[hovered.model_identity]} · 第 {hovered.generation} 组</b><span>{stamp(hovered.created_at)} · 共同截止 {comparisonCutoff(hovered)} 条 · 自身训练 {hovered.training_rows} 条 · OOS {hoveredMetric.oos_rows} 条 · 收益 {pct(hoveredMetric.cumulative_quote_return)} · PF {hoveredMetric.profit_factor_quote_adjusted?.toFixed(2) ?? "—"} · 出方向 {((hoveredMetric.coverage_rate ?? 0)*100).toFixed(1)}%</span></> : <><b>五种模型叠加在同一坐标</b><span>实线连接相邻训练截止点；虚线跨过没有合法新版本的空档。空缺代表该模型当轮没有合法新版本；这里只叠加显示，不会把收益相加。</span></>}</div>
       {graphRows.length ? <svg viewBox="0 0 960 300" role="img">
@@ -205,7 +248,9 @@ function VersionLedger({ groups }: { groups: VersionGroup[] }) {
       <div className="chart-legend">{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <span key={key}><i style={{ background:COLORS[key] }} />{label}</span>)}</div>
     </section>
     <div ref={resultListRef} className="version-list-anchor" aria-hidden="true" />
-    {pageCount > 1 && <VersionPagination page={safePage} pageCount={pageCount} total={rows.length} onPage={goToPage} />}
+    {pageCount > 1 && <VersionPagination page={safePage} pageCount={pageCount} total={totalRows} onPage={goToPage} />}
+    {pageLoading && <p role="status">正在读取这一页…</p>}
+    {pageError && <p role="alert">{pageError}</p>}
     <div className="version-ledger-head"><span>组别 / 状态</span><span>训练与上线</span><span>创建后 OOS</span><span>本组独立收益</span><span>PF / 出方向</span></div>
     {visibleRows.map(row => { const selected = metric(row); return <article key={`${row.model_identity}-${row.training_dataset_hash}`} className={row.lifecycle_status === "LATEST" ? "is-latest" : ""}>
       <div className="version-result-head">
@@ -218,8 +263,8 @@ function VersionLedger({ groups }: { groups: VersionGroup[] }) {
         <span data-label="PF / 出方向"><b>{selected.profit_factor_quote_adjusted?.toFixed(2) ?? "—"}</b><small>出方向 {((selected.coverage_rate ?? 0)*100).toFixed(1)}%</small></span>
       </div>
     </article>})}
-    {pageCount > 1 && <VersionPagination page={safePage} pageCount={pageCount} total={rows.length} onPage={goToPage} position="bottom" />}
-    {!rows.length && <p>这个模型还没有真实训练版本。</p>}
+    {pageCount > 1 && <VersionPagination page={safePage} pageCount={pageCount} total={totalRows} onPage={goToPage} position="bottom" />}
+    {!totalRows && <p>这个模型还没有真实训练版本。</p>}
   </section>;
 }
 
@@ -234,12 +279,38 @@ function VersionPagination({ page, pageCount, total, onPage, position = "top" }:
   </nav>;
 }
 
-function LongCurve({ curves }: { curves: Curve[] }) {
+function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResource?: string }) {
   const [range, setRange] = useState<"24h" | "7d" | "30d" | "all">("24h");
   const [cadence, setCadence] = useState<EvaluationCadence>("EVERY_5M");
   const [pageOffset, setPageOffset] = useState(0);
   const [hoveredBoundary, setHoveredBoundary] = useState<BoundaryReadout | null>(null);
-  const usable = curves.map(row => cadence === "FIXED_30M" ? { ...row, points: row.points_30m ?? [], source_point_count: row.source_point_count_30m, chart_point_count: row.chart_point_count_30m, chart_downsampled: row.chart_downsampled_30m } : row).filter(row => row.model_identity !== "CHAMPION_0" && row.points.length > 0);
+  const [historyCurves, setHistoryCurves] = useState<Partial<Record<EvaluationCadence, Curve[]>>>({});
+  useEffect(() => {
+    if (!historyResource || historyCurves[cadence]) return;
+    const controller = new AbortController();
+    const cadenceQuery = cadence === "FIXED_30M" ? "30m" : "5m";
+    fetch(`${historyResource}?resource=curve-overview&cadence=${cadenceQuery}`, {
+      cache: "no-store", signal: controller.signal,
+    }).then(response => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json() as Promise<{ items: Array<CurvePoint & { model_identity: string }> }>;
+    }).then(body => {
+      const identities = [...new Set(body.items.map(point => point.model_identity))];
+      const grouped = identities.map(modelIdentity => {
+        const points = body.items
+          .filter(point => point.model_identity === modelIdentity)
+          .map(({ decision_time, model_version, training_rows, training_dataset_hash, cumulative_quote_return }) => ({ decision_time, model_version, training_rows, training_dataset_hash, cumulative_quote_return }))
+          .sort((a, b) => Date.parse(a.decision_time) - Date.parse(b.decision_time));
+        return cadence === "FIXED_30M"
+          ? { model_identity: modelIdentity, points: [], points_30m: points }
+          : { model_identity: modelIdentity, points };
+      });
+      setHistoryCurves(previous => ({ ...previous, [cadence]: grouped }));
+    }).catch(() => { /* The bounded first page remains usable. */ });
+    return () => controller.abort();
+  }, [historyResource, cadence, historyCurves]);
+  const resolvedCurves = historyCurves[cadence] ?? curves;
+  const usable = resolvedCurves.map(row => cadence === "FIXED_30M" ? { ...row, points: row.points_30m ?? [], source_point_count: row.source_point_count_30m, chart_point_count: row.chart_point_count_30m, chart_downsampled: row.chart_downsampled_30m } : row).filter(row => row.model_identity !== "CHAMPION_0" && row.points.length > 0);
   const overviewPoints = usable.flatMap(row => row.points);
   if (!overviewPoints.length) return <Empty text="还没有已成熟的 Live OOS 点；第一个预测走完30分钟后才会出现。" />;
   const availableResultTimes = [...new Set(overviewPoints.map(point => Date.parse(point.decision_time)))].sort((a, b) => a - b);

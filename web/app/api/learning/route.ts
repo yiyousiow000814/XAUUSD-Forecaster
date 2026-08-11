@@ -1,15 +1,17 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
-import { rejectPreviewWrite } from "../_shared/preview";
+import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
 import { writeDashboardSnapshot } from "../_shared/dashboard-snapshot";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  // Preview's first paint is hydrated from a compact build snapshot.  The API
-  // must still read the complete D1 ledger when a user opens the interactive
-  // charts; returning the compact snapshot here leaves most models invisible.
+  if (previewBundle?.learning_summary) {
+    return previewJson(previewBundle.learning_summary);
+  }
+  // The fixed-size first page lives in the snapshot table. Older generations
+  // and curve points are fetched from /api/learning-history only on demand.
   const binding = env.DB as D1Database | undefined;
   if (binding) {
     const row = await binding
@@ -31,7 +33,7 @@ export async function GET() {
 
   // The relay carries the small live-status heartbeat.  It deliberately keeps
   // only active model versions, so it is a fallback—not the authority for the
-  // append-only learning history stored in D1.
+  // append-only learning records stored in D1.
   const relay = process.env.STATUS_RELAY_URL;
   if (relay) {
     try {

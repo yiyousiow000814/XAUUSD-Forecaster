@@ -2,7 +2,7 @@ export const MAX_DASHBOARD_SNAPSHOT_BYTES = 800_000;
 
 export type SnapshotWriteResult = "stored" | "invalid" | "too_large";
 
-type BoundedBodyResult =
+export type BoundedBodyResult =
   | { status: "ok"; serialized: string }
   | { status: "too_large" };
 
@@ -13,9 +13,12 @@ function declaredBodyBytes(request: Request): number | null {
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
-async function readBoundedBody(request: Request): Promise<BoundedBodyResult> {
+export async function readBoundedBody(
+  request: Request,
+  maxBytes = MAX_DASHBOARD_SNAPSHOT_BYTES,
+): Promise<BoundedBodyResult> {
   const declaredBytes = declaredBodyBytes(request);
-  if (declaredBytes !== null && declaredBytes > MAX_DASHBOARD_SNAPSHOT_BYTES) {
+  if (declaredBytes !== null && declaredBytes > maxBytes) {
     return { status: "too_large" };
   }
   if (!request.body) return { status: "ok", serialized: "" };
@@ -29,7 +32,7 @@ async function readBoundedBody(request: Request): Promise<BoundedBodyResult> {
       const { done, value } = await reader.read();
       if (done) break;
       receivedBytes += value.byteLength;
-      if (receivedBytes > MAX_DASHBOARD_SNAPSHOT_BYTES) {
+      if (receivedBytes > maxBytes) {
         await reader.cancel().catch(() => undefined);
         return { status: "too_large" };
       }

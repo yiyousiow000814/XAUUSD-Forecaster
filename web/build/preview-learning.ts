@@ -44,6 +44,7 @@ export function compactPreviewLearning(learning: JsonObject): JsonObject {
   const versionGroups = Array.isArray(curves.version_groups) ? curves.version_groups : [];
   return {
     learning_preview_summary: true,
+    learning_history_resource: PREVIEW_RESOURCES.learningHistory,
     generated_at: learning.generated_at,
     learning_curves: {
       collection_epoch: curves.collection_epoch,

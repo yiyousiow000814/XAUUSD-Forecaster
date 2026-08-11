@@ -354,18 +354,33 @@ test("keeps large chart snapshots off the Worker JSON serialization path", () =>
   assert.doesNotMatch(route, /NextResponse\.json\(JSON\.parse\(row\.payload\)/);
 });
 
-test("reads the append-only D1 learning history before the compact live relay", () => {
+test("reads the bounded learning first page before the compact live relay", () => {
   const source = readFileSync(new URL("../app/api/learning/route.ts", import.meta.url), "utf8");
   const d1Read = source.indexOf("dashboard_snapshots WHERE id = ?");
   const relayRead = source.indexOf("process.env.STATUS_RELAY_URL");
   assert.ok(d1Read >= 0, "learning route must read the dedicated D1 snapshot");
   assert.ok(relayRead > d1Read, "the compact relay must remain a fallback");
-  assert.match(source, /append-only learning history stored in D1/);
+  assert.match(source, /append-only learning records stored in D1/);
   assert.match(source, /return new Response\(row\.payload/);
   assert.doesNotMatch(source, /NextResponse\.json\(JSON\.parse\(row\.payload\)/);
-  assert.doesNotMatch(source, /previewBundle\.learning/);
+  assert.match(source, /previewBundle\?\.learning_summary/);
   assert.match(source, /writeDashboardSnapshot\(request, binding, 3\)/);
   assert.doesNotMatch(source, /JSON\.parse\(serialized\)|TextEncoder/);
+});
+
+test("stores growing learning history as bounded idempotent D1 records", () => {
+  const route = readFileSync(new URL("../app/api/learning-history/route.ts", import.meta.url), "utf8");
+  const sync = readFileSync(new URL("../../scripts/run_dashboard_sync.py", import.meta.url), "utf8");
+  assert.match(route, /MAX_INGEST_BYTES = 350_000/);
+  assert.match(route, /readBoundedBody\(request, MAX_INGEST_BYTES\)/);
+  assert.match(route, /json_each\(json_extract\(doc,'\$\.records'\)\)/);
+  assert.match(route, /ON CONFLICT\(resource,record_key\) DO UPDATE/);
+  assert.doesNotMatch(route, /JSON\.parse\(body\.serialized\)/);
+  assert.match(route, /next_cursor/);
+  assert.match(sync, /LEARNING_HISTORY_CONTRACT_VERSION = "learning-history-d1-v1"/);
+  assert.match(sync, /learning_history_records/);
+  assert.match(sync, /LEARNING_SUMMARY_GROUPS_PER_IDENTITY = 6/);
+  assert.match(sync, /LEARNING_SUMMARY_CURVE_POINTS = 48/);
 });
 
 test("uses one D1-validated writer for every large dashboard snapshot", () => {
@@ -788,8 +803,9 @@ test("shows residual and news-only research directions without implying executio
   assert.doesNotMatch(source, /仅显示修正值，不单独判断方向/);
 });
 
-test("prefetches the complete learning ledger before interactive charts need it", () => {
+test("loads bounded learning history only when interactive charts need it", () => {
   const audit = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
   const compact = readFileSync(new URL("../build/preview-learning.ts", import.meta.url), "utf8");
   assert.match(compact, /learning_preview_summary: true/);
   assert.match(compact, /preview_status_summary: true/);
@@ -797,6 +813,10 @@ test("prefetches the complete learning ledger before interactive charts need it"
   assert.match(audit, /refreshStatus\(!fullStatusReadyRef\.current\)/);
   assert.match(audit, /refreshLearning\(!fullLearningReadyRef\.current\)/);
   assert.match(audit, /if \(!fullLearningReadyRef\.current\) void refreshLearning\(true\)/);
+  assert.match(audit, /historyResource=\{payload\?\.learning_history_resource\}/);
+  assert.match(modal, /resource: "version-group"/);
+  assert.match(modal, /resource=curve-overview/);
+  assert.match(modal, /next_cursor/);
 });
 
 test("reflows news evidence into readable mobile cards", () => {

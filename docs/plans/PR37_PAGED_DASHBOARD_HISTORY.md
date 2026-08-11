@@ -24,18 +24,38 @@ The Worker 800 KB check must remain an emergency guard, not the storage model.
 - Add one paged D1 representation for remote learning history; do not keep a
   second growing learning blob after the handover is verified.
 
-## Planned Change
+## Implemented Design
 
-1. Define stable row identities and cursors for learning generations, model
-   curves, and evaluation results.
-2. Store growing learning records as idempotent D1 rows or bounded pages.
-3. Keep `/api/learning` as a small summary and expose bounded cursor-based
-   history reads.
-4. Make the market-chart snapshot recent-only and retrieve older candles and
-   decisions from the existing market-history API.
-5. Load older pages only when the user requests a longer range or older group.
-6. Backfill existing retained history, verify row counts and hashes, switch the
-   complete generation together, then remove the superseded growing-blob path.
+1. `learning_records` stores model versions, training generations, OOS curve
+   points, and execution evaluation rows under stable composite keys.
+2. `/api/learning-history` accepts requests up to 350 KB and uses D1 JSON1 for
+   validation and set-based idempotent upserts without parsing the body in the
+   Worker.
+3. History reads use bounded limits and opaque cursors. Chart overview reads
+   are sampled per model with fixed limits.
+4. `/api/learning` is a fixed first page: six generations per model, 48 curve
+   points per cadence, and 20 execution results per model.
+5. The existing market-history D1 ledger remains the only complete remote
+   market authority. The market-chart snapshot now keeps 576 recent candles
+   and a bounded recent decision window instead of retaining all half-hour
+   decisions forever.
+6. The UI requests older training pages and curve overviews only after the
+   interactive graph opens. Branch Previews use the same API contract over an
+   immutable build snapshot.
+
+## Measured Current Data
+
+The real local status on 2026-08-11 produced:
+
+- 7,955 normalized learning records
+- 11 initial history batches
+- 293 KB maximum history request
+- 192 KB learning first page, down from about 730 KB
+- 576 KB recent market snapshot, with complete history still in D1
+
+After the initial backfill, the synchronizer uploads only new or changed record
+hashes. A daily idempotent refresh repairs missing remote rows without creating
+duplicates.
 
 ## Acceptance Criteria
 
