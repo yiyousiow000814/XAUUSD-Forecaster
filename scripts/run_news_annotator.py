@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import socket
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 
@@ -17,14 +19,35 @@ sys.path.insert(0, str(MODULE_ROOT))
 from xauusd_forecaster.annotation import (  # noqa: E402
     DEFAULT_GEMINI_MODEL,
     FALLBACK_GEMINI_MODEL,
+    GEMINI_DAILY_PRIORITY_RESERVE,
+    GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
+    GEMMA_REQUESTS_PER_DAY_PER_KEY,
+    GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
+    IMPACT_PROMPT_VERSION,
+    PROMPT_VERSION,
     TARGET_IMPACT_PROMPT_VERSION,
     TARGET_PROMPT_VERSION,
+    TITLE_PROMPT_VERSION,
     annotate_pending_news,
     assess_pending_news_impacts,
-    gemini_routine_remaining,
     translate_pending_headlines,
 )
 from xauusd_forecaster.forward_ledger import ForwardLedger  # noqa: E402
+from xauusd_forecaster.gemini_quota import (  # noqa: E402
+    GEMINI_REQUESTS_PER_DAY_PER_KEY,
+)
+from xauusd_forecaster.news_scheduler import (  # noqa: E402
+    ApiCredential,
+    backoff_job,
+    claim_job,
+    complete_job,
+    configured_api_credentials,
+    pending_record_for_job,
+    release_job,
+    reserve_account_request,
+    scheduler_counts,
+    sync_pending_jobs,
+)
 
 
 def write_heartbeat(path: Path, *, work_items: int) -> None:
@@ -37,6 +60,185 @@ def write_heartbeat(path: Path, *, work_items: int) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
+
+
+def _next_retry(status: dict[str, object], now: datetime) -> datetime:
+    raw = status.get("next_retry_at")
+    if raw:
+        try:
+            return datetime.fromisoformat(str(raw))
+        except ValueError:
+            pass
+    return now + timedelta(minutes=1)
+
+
+def _execute_job(
+    ledger: ForwardLedger,
+    credential: ApiCredential,
+    job,
+    *,
+    now: datetime,
+) -> dict[str, object]:
+    record = pending_record_for_job(ledger.connection, job, now=now)
+    if record is None:
+        return {"status": "NOT_CURRENT"}
+    is_annotation = job.task_type in {"ACTIVE_ANNOTATION", "TARGET_ANNOTATION"}
+    urgent = job.priority in {"IMMEDIATE", "FAST"}
+
+    def reserver_for(model_family: str, *, reserve_total: int = 0):
+        def reserve(_api_key: str) -> bool:
+            return reserve_account_request(
+                ledger.connection,
+                account_id=credential.account_id,
+                model_family=model_family,
+                daily_limit=(
+                    GEMINI_REQUESTS_PER_DAY_PER_KEY
+                    if is_annotation else GEMMA_REQUESTS_PER_DAY_PER_KEY
+                ),
+                requests_per_minute=(
+                    GEMINI_REQUESTS_PER_MINUTE_PER_KEY
+                    if is_annotation else GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL
+                ),
+                reserve_total=reserve_total,
+                urgent=urgent,
+            )
+        return reserve
+
+    if job.task_type in {"ACTIVE_ANNOTATION", "TARGET_ANNOTATION"}:
+        common = {
+            "ledger": ledger,
+            "api_key": credential.api_key,
+            "limit": 1,
+            "prompt_version": (
+                PROMPT_VERSION
+                if job.task_type == "ACTIVE_ANNOTATION" else TARGET_PROMPT_VERSION
+            ),
+            "allow_priority_reserve": False,
+            "records": [record],
+        }
+        status = annotate_pending_news(
+            **common,
+            model=DEFAULT_GEMINI_MODEL,
+            request_reserver=reserver_for(
+                DEFAULT_GEMINI_MODEL,
+                reserve_total=GEMINI_DAILY_PRIORITY_RESERVE,
+            ),
+        )[0]
+        if status.get("status") == "DEFERRED":
+            status = annotate_pending_news(
+                **common,
+                model=FALLBACK_GEMINI_MODEL,
+                request_reserver=reserver_for(FALLBACK_GEMINI_MODEL),
+            )[0]
+        return status
+    if job.task_type in {"ACTIVE_IMPACT", "TARGET_IMPACT"}:
+        target = job.task_type == "TARGET_IMPACT"
+        return assess_pending_news_impacts(
+            ledger,
+            api_key=credential.api_key,
+            limit=1,
+            annotation_prompt_version=TARGET_PROMPT_VERSION if target else PROMPT_VERSION,
+            impact_prompt_version=(
+                TARGET_IMPACT_PROMPT_VERSION if target else IMPACT_PROMPT_VERSION
+            ),
+            records=[record],
+            request_reserver=reserver_for("gemma-impact"),
+        )[0]
+    return translate_pending_headlines(
+        ledger,
+        api_key=credential.api_key,
+        records=[record],
+        request_reserver=reserver_for("gemma-title"),
+    )[0]
+
+
+def run_scheduled_batch(
+    ledger: ForwardLedger,
+    *,
+    batch_size: int | None,
+) -> list[dict[str, object]]:
+    now = datetime.now(UTC)
+    sync_pending_jobs(ledger.connection, now=now)
+    credentials = tuple(sorted(
+        configured_api_credentials(),
+        key=lambda item: (item.pool != "PREEMPTIBLE", item.account_id, item.credential_id),
+    ))
+    if not credentials:
+        return [{"status": "DISABLED", "reason": "GEMINI_API_KEY_MISSING"}]
+    maximum = batch_size or max(1, len(credentials) * 10)
+    statuses: list[dict[str, object]] = []
+    worker_prefix = f"{socket.gethostname()}-{os.getpid()}"
+    empty_credentials: set[str] = set()
+    while len(statuses) < maximum and len(empty_credentials) < len(credentials):
+        for credential in credentials:
+            if len(statuses) >= maximum:
+                break
+            worker_id = f"{worker_prefix}-{credential.credential_id}"
+            job = claim_job(
+                ledger.connection,
+                worker_id=worker_id,
+                pool=credential.pool,
+                now=datetime.now(UTC),
+            )
+            if job is None:
+                empty_credentials.add(credential.credential_id)
+                continue
+            empty_credentials.discard(credential.credential_id)
+            executed_at = datetime.now(UTC)
+            try:
+                status = _execute_job(
+                    ledger, credential, job, now=executed_at,
+                )
+            except Exception as error:
+                status = {
+                    "status": "ERROR",
+                    "error_type": type(error).__name__,
+                    "error": str(error)[:500],
+                }
+            outcome = str(status.get("status") or "ERROR")
+            if outcome == "OK":
+                complete_job(ledger.connection, job.job_id, worker_id)
+            elif outcome == "NOT_CURRENT":
+                if job.attempt_count >= 2:
+                    backoff_job(
+                        ledger.connection, job.job_id, worker_id,
+                        available_at=executed_at,
+                        error="CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE", terminal=True,
+                    )
+                else:
+                    release_job(
+                        ledger.connection, job.job_id, worker_id,
+                        available_at=executed_at + timedelta(minutes=1),
+                        error="CURRENT_EVIDENCE_NOT_AVAILABLE",
+                    )
+            elif outcome in {"DEFERRED", "DISABLED"}:
+                empty_credentials.add(credential.credential_id)
+                release_job(
+                    ledger.connection, job.job_id, worker_id,
+                    available_at=(
+                        executed_at
+                        if credential.pool == "PREEMPTIBLE"
+                        else executed_at + timedelta(minutes=1)
+                    ),
+                    error=str(status.get("reason") or outcome),
+                )
+            else:
+                retry_at = _next_retry(status, executed_at)
+                backoff_job(
+                    ledger.connection, job.job_id, worker_id,
+                    available_at=retry_at,
+                    error=str(status.get("error") or outcome),
+                    terminal=bool(status.get("is_terminal")),
+                )
+            statuses.append({
+                "job_id": job.job_id,
+                "task_type": job.task_type,
+                "priority": job.priority,
+                "pool": credential.pool,
+                "account_id": credential.account_id,
+                **status,
+            })
+    return statuses
 
 
 def main() -> int:
@@ -62,106 +264,18 @@ def main() -> int:
     try:
         while True:
             limit = None if args.batch_size <= 0 else args.batch_size
-            statuses = annotate_pending_news(
-                ledger, model=DEFAULT_GEMINI_MODEL, limit=limit
-            )
+            statuses = run_scheduled_batch(ledger, batch_size=limit)
             print(
                 json.dumps(
                     {
-                        "event": "ANNOTATION_BATCH",
-                        "model": DEFAULT_GEMINI_MODEL,
+                        "event": "NEWS_AI_SCHEDULER_BATCH",
                         "statuses": statuses,
+                        "queue": scheduler_counts(ledger.connection),
                     }
                 ),
                 flush=True,
             )
-            target_statuses = (
-                annotate_pending_news(
-                    ledger,
-                    model=DEFAULT_GEMINI_MODEL,
-                    limit=limit,
-                    prompt_version=TARGET_PROMPT_VERSION,
-                    allow_priority_reserve=False,
-                )
-                if not statuses
-                else [{
-                    "status": "STANDBY",
-                    "reason": "ACTIVE_CONTRACT_QUEUE_HAS_PRIORITY",
-                }]
-            )
-            print(
-                json.dumps(
-                    {
-                        "event": "TARGET_ANNOTATION_BATCH",
-                        "model": DEFAULT_GEMINI_MODEL,
-                        "prompt_version": TARGET_PROMPT_VERSION,
-                        "statuses": target_statuses,
-                    }
-                ),
-                flush=True,
-            )
-            fallback_statuses = (
-                annotate_pending_news(
-                    ledger, model=FALLBACK_GEMINI_MODEL, limit=limit
-                )
-                if gemini_routine_remaining(ledger, DEFAULT_GEMINI_MODEL) == 0
-                else [{"status": "STANDBY", "reason": "PRIMARY_ROUTINE_QUOTA_AVAILABLE"}]
-            )
-            print(
-                json.dumps(
-                    {
-                        "event": "ANNOTATION_FALLBACK_BATCH",
-                        "model": FALLBACK_GEMINI_MODEL,
-                        "statuses": fallback_statuses,
-                    }
-                ),
-                flush=True,
-            )
-            translations = translate_pending_headlines(ledger)
-            print(
-                json.dumps(
-                    {"event": "HEADLINE_TRANSLATION_BATCH", "statuses": translations}
-                ),
-                flush=True,
-            )
-            impacts = assess_pending_news_impacts(ledger, limit=limit)
-            print(
-                json.dumps(
-                    {"event": "NEWS_IMPACT_BATCH", "statuses": impacts}
-                ),
-                flush=True,
-            )
-            target_impacts = (
-                assess_pending_news_impacts(
-                    ledger,
-                    limit=limit,
-                    annotation_prompt_version=TARGET_PROMPT_VERSION,
-                    impact_prompt_version=TARGET_IMPACT_PROMPT_VERSION,
-                )
-                if not impacts
-                else [{
-                    "status": "STANDBY",
-                    "reason": "ACTIVE_CONTRACT_QUEUE_HAS_PRIORITY",
-                }]
-            )
-            print(
-                json.dumps(
-                    {
-                        "event": "TARGET_NEWS_IMPACT_BATCH",
-                        "prompt_version": TARGET_IMPACT_PROMPT_VERSION,
-                        "statuses": target_impacts,
-                    }
-                ),
-                flush=True,
-            )
-            work_items = sum(
-                len(batch)
-                for batch in (
-                    statuses, fallback_statuses, target_statuses,
-                    translations, impacts, target_impacts,
-                )
-                if isinstance(batch, list)
-            )
+            work_items = len(statuses)
             write_heartbeat(args.status_file, work_items=work_items)
             if args.once:
                 break

@@ -1317,6 +1317,11 @@ def _dashboard_payload(database: Path) -> dict:
             ):
                 complete_rows += 1
         learning, execution_learning = _learning_surfaces(connection)
+        counts["live_oos_model_groups"] = len({
+            str(row.get("model_identity") or "")
+            for row in learning.get("models", [])
+            if row.get("active_rank") is not None and row.get("model_identity")
+        })
         market_chart = _recent_market_chart(database, connection, now)
         component_times = {
             "quote_bridge": _latest_quote_received(database),
