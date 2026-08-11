@@ -57,6 +57,10 @@ type ExecutionModel = {
   };
 };
 type ExecutionLearning = { models: ExecutionModel[]; shadow_only: boolean; source_model_label?: string; training_contract?: string };
+type ExecutionHistoryResponse = {
+  items: Array<Record<string, string | number>>; total: number;
+  next_cursor: string | null; preview_limited?: boolean;
+};
 type GraphTab = "curve" | "versions" | "market" | "execution";
 type HistoryResponse<T> = { items: T[]; preview_limited?: boolean };
 
@@ -184,7 +188,7 @@ export default function LearningGraphModal({
         {tab === "curve" && <LongCurve curves={curves} historyResource={historyResource} />}
         {tab === "versions" && <VersionLedger groups={versionGroups} historyResource={historyResource} />}
         {tab === "market" && <MarketChart market={resolvedMarket} identity={identity} setIdentity={setIdentity} />}
-        {tab === "execution" && <ExecutionCharts execution={execution} />}
+        {tab === "execution" && <ExecutionCharts execution={execution} historyResource={historyResource} />}
       </div>
       <footer><b>统一口径：</b> 所有曲线只使用模型创建后真正没见过的 30 分钟结果；WAIT 显示为灰色双向箭头，但收益固定为零，不会被画成一笔虚构交易。</footer>
     </section>
@@ -869,7 +873,7 @@ function DecisionPayoff({ selected, resultLabel }: { selected: Decision; resultL
   return <div><small>30分钟结果</small><strong className={(result ?? 0) >= 0 ? "positive" : "negative"}>{selected.recommended_action} {resultLabel(result)}</strong><span>{selected.recommended_action === "WAIT" ? "未持仓，结果固定为零" : (result ?? 0) >= 0 ? "方向正确，成本后为正" : "方向错误，成本后为负"}</span></div>;
 }
 
-function ExecutionCharts({ execution }: { execution?: ExecutionLearning }) {
+function ExecutionCharts({ execution, historyResource }: { execution?: ExecutionLearning; historyResource?: string }) {
   const lot = execution?.models.find(row => row.model_identity === "LOT_RIDGE");
   const exit = execution?.models.find(row => row.model_identity === "EXIT_RIDGE");
   if (!lot && !exit) return <Empty title="暂无仓位与退出结果" text="仓位与退出模型还没有生成可评分的前向预测。" />;
@@ -880,10 +884,68 @@ function ExecutionCharts({ execution }: { execution?: ExecutionLearning }) {
       <article><small>Exit Ridge</small><strong>{exit?.evaluation.score_count ?? 0} 笔已评分</strong><span>{exit?.predictions ?? 0} 次途中检查 · 提前退出 {exit?.action_counts?.EXIT ?? 0} 次 · 继续持有 {exit?.action_counts?.HOLD ?? 0} 次</span></article>
     </div>
     {(exit?.predictions ?? 0) > 0 && (exit?.action_counts?.EXIT ?? 0) === 0 && <p className="execution-callout"><b>目前没有提前退出。</b> Exit Ridge 已正常检查，但每次预测的“从当前继续持有到30分钟”的收益都大于零，因此全部选择继续持有。这是当前模型结果，不是页面遗漏。</p>}
-      <ExecutionLineChart title="仓位倍率：模型选择 vs 固定 1.0x" subtitle="每个点是一笔冻结 Live 方向产生的未来位置；0.5x / 1.0x / 2.0x 只改变同一方向的倍率。" points={lot?.evaluation.points ?? []} sourceCount={lot?.evaluation.chart_source_count} downsampled={lot?.evaluation.chart_downsampled} firstKey="selected_cumulative_return" secondKey="baseline_cumulative_return" firstLabel="Ridge 倍率" secondLabel="固定 1.0x" format={pct} />
-    <ExecutionLineChart title="退出：顺序 Exit Ridge vs 固定持有30分钟" subtitle="每个位置从5分钟开始依次检查；一旦 EXIT，后续检查停止。曲线是整段位置收益，不再累加重复检查点。" points={exit?.evaluation.points ?? []} sourceCount={exit?.evaluation.chart_source_count} downsampled={exit?.evaluation.chart_downsampled} firstKey="selected_cumulative_return" secondKey="baseline_cumulative_return" firstLabel="顺序 Exit Ridge" secondLabel="固定30分钟" format={pct} />
+    <div className="execution-chart-grid">
+      <ExecutionHistoryChart title="仓位倍率" subtitle="模型选择 vs 固定 1.0x" model={lot} historyResource={historyResource} firstKey="selected_cumulative_return" secondKey="baseline_cumulative_return" firstLabel="Ridge 倍率" secondLabel="固定 1.0x" />
+      <ExecutionHistoryChart title="退出动作" subtitle="顺序 Exit Ridge vs 固定持有30分钟" model={exit} historyResource={historyResource} firstKey="selected_cumulative_return" secondKey="baseline_cumulative_return" firstLabel="顺序 Exit Ridge" secondLabel="固定30分钟" />
+    </div>
     <ExecutionResultLists lot={lot} exit={exit} />
   </section>;
+}
+
+function ExecutionHistoryChart({ title, subtitle, model, historyResource, firstKey, secondKey, firstLabel, secondLabel }: {
+  title: string; subtitle: string; model?: ExecutionModel; historyResource?: string;
+  firstKey: string; secondKey: string; firstLabel: string; secondLabel: string;
+}) {
+  const pageSize = 96;
+  const identity = model?.model_identity ?? "";
+  const firstUrl = historyResource && identity
+    ? `${historyResource}?resource=execution-point&identity=${encodeURIComponent(identity)}&limit=${pageSize}` : "";
+  const initial = firstUrl ? readDashboardResource<ExecutionHistoryResponse>(firstUrl) : null;
+  const [page, setPage] = useState(0);
+  const [pages, setPages] = useState<Record<number, Array<Record<string, string | number>>>>(
+    initial ? { 0: initial.items } : {},
+  );
+  const [cursors, setCursors] = useState<Record<number, string | null>>(
+    initial ? { 0: null, 1: initial.next_cursor } : { 0: null },
+  );
+  const [total, setTotal] = useState(initial?.total ?? model?.evaluation.chart_source_count ?? 0);
+  const [error, setError] = useState(false);
+  const [retry, setRetry] = useState(0);
+  const cursor = cursors[page];
+  useEffect(() => {
+    if (!firstUrl || cursor === undefined || pages[page]) return;
+    let cancelled = false;
+    const url = cursor ? `${firstUrl}&cursor=${encodeURIComponent(cursor)}` : firstUrl;
+    const cached = readDashboardResource<ExecutionHistoryResponse>(url);
+    loadDashboardResource<ExecutionHistoryResponse>(url, {
+      force: retry > 0,
+      maxAgeMs: historyCacheAge(cached),
+    }).then(body => {
+      if (cancelled) return;
+      setPages(previous => ({ ...previous, [page]: body.items }));
+      setCursors(previous => ({ ...previous, [page + 1]: body.next_cursor }));
+      setTotal(body.total);
+    }).catch(() => { if (!cancelled) setError(true); });
+    return () => { cancelled = true; };
+  }, [cursor, firstUrl, page, pages, retry]);
+  const remotePoints = pages[page];
+  const fallbackPoints = page === 0 ? model?.evaluation.points ?? [] : [];
+  const points = (remotePoints ?? fallbackPoints).slice().sort((a, b) => Date.parse(String(a.time)) - Date.parse(String(b.time)));
+  const loading = Boolean(firstUrl && !remotePoints && !error);
+  const hasEarlier = typeof cursors[page + 1] === "string";
+  const label = points.length
+    ? `${new Date(String(points[0].time)).toLocaleString("zh-CN", { month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", hour12:false })} — ${new Date(String(points.at(-1)!.time)).toLocaleString("zh-CN", { month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", hour12:false })}`
+    : "暂无时间范围";
+  const controls = firstUrl ? <div className="execution-history-nav" aria-label={`${title}历史时间窗口`}>
+    <button type="button" disabled={!hasEarlier} onClick={() => setPage(value => value + 1)}>← 较早</button>
+    <span>{label}<small>第 {page + 1} 段 · 共 {total} 个历史绘图点</small></span>
+    <button type="button" disabled={page === 0} onClick={() => setPage(value => Math.max(0, value - 1))}>较晚 →</button>
+    {page > 0 && <button type="button" onClick={() => setPage(0)}>最新</button>}
+  </div> : undefined;
+  return <ExecutionLineChart title={title} subtitle={subtitle} points={points}
+    sourceCount={total || model?.evaluation.chart_source_count} downsampled={model?.evaluation.chart_downsampled}
+    firstKey={firstKey} secondKey={secondKey} firstLabel={firstLabel} secondLabel={secondLabel}
+    format={pct} controls={controls} loading={loading} error={error ? () => { setError(false); setRetry(value => value + 1); } : undefined} />;
 }
 
 function ExecutionResultLists({ lot, exit }: { lot?: ExecutionModel; exit?: ExecutionModel }) {
@@ -912,29 +974,37 @@ function ExecutionResultPanel({ title, count, visibleCount, columns, children }:
   return <section className="execution-result-panel"><header><b>{title}</b><span><strong>总计 {count} 笔</strong><small>当前显示最新 {visibleCount} 笔</small></span></header><div className="execution-result-head">{columns.map(value => <span key={value}>{value}</span>)}</div>{children}</section>;
 }
 
-function ExecutionLineChart({ title, subtitle, points, sourceCount, downsampled, firstKey, secondKey, firstLabel, secondLabel, format }: {
+function ExecutionLineChart({ title, subtitle, points, sourceCount, downsampled, firstKey, secondKey, firstLabel, secondLabel, format, controls, loading, error }: {
   title: string; subtitle: string; points: Array<Record<string, string | number>>;
   sourceCount?: number; downsampled?: boolean;
   firstKey: string; secondKey: string; firstLabel: string; secondLabel: string;
-  format: (value: number) => string;
+  format: (value: number) => string; controls?: ReactNode; loading?: boolean; error?: () => void;
 }) {
-  if (!points.length) return <div className="execution-chart-empty"><b>{title}</b><span>已经开始预测，但尚无成熟评分。</span></div>;
+  if (!points.length) return <article className="execution-chart execution-chart-no-data">
+    <div className="chart-caption"><div><b>{title}</b><span>{subtitle}</span></div></div>
+    {controls}
+    {loading ? <GraphLoading label="正在读取历史" compact /> : error ? <GraphLoadError label="历史读取失败" compact onRetry={error} /> : <div className="execution-chart-empty"><span>已经开始预测，但这个时间窗尚无成熟评分。</span></div>}
+  </article>;
   const first = points.map(row => Number(row[firstKey] ?? 0));
   const second = points.map(row => Number(row[secondKey] ?? 0));
   const values = [0, ...first, ...second];
   const low = Math.min(...values); const high = Math.max(...values);
-  const x = (index: number) => 64 + index / Math.max(1, points.length - 1) * 850;
-  const y = (value: number) => 34 + (high - value) / Math.max(.000001, high - low) * 230;
+  const x = (index: number) => 62 + index / Math.max(1, points.length - 1) * 850;
+  const y = (value: number) => 22 + (high - value) / Math.max(.000001, high - low) * 156;
   const line = (rows: number[]) => rows.map((value, index) => `${x(index)},${y(value)}`).join(" ");
   const stamp = (value: string | number) => new Date(String(value)).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-  return <article className="execution-chart"><div className="chart-caption"><div><b>{title}</b><span>{subtitle}</span></div><strong>{format(first.at(-1) ?? 0)}<small> · 累计 {sourceCount ?? points.length} 笔{downsampled ? ` · 图中压缩为 ${points.length} 点` : ""}</small></strong></div>
-    <svg viewBox="0 0 960 320" role="img" aria-label={title}>
+  return <article className="execution-chart"><div className="chart-caption"><div><b>{title}</b><span>{subtitle}</span></div><strong>{format(first.at(-1) ?? 0)}<small>累计 {sourceCount ?? points.length} 笔{downsampled ? ` · 图中压缩为历史绘图点` : ""}</small></strong></div>
+    {controls}
+    {loading && <GraphLoading label="正在更新历史" compact />}
+    {error && <GraphLoadError label="历史读取失败" compact onRetry={error} />}
+    {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
+    <div className="mobile-chart-scroll execution-chart-scroll" tabIndex={0} aria-label={`可左右滑动的${title}图表`}><svg viewBox="0 0 960 220" role="img" aria-label={title}>
       <line x1="64" x2="914" y1={y(0)} y2={y(0)} className="zero-line" />
       <text x="8" y={y(high)+4}>{format(high)}</text><text x="8" y={y(low)+4}>{format(low)}</text>
       <polyline points={line(first)} className="execution-primary-line" />
       <polyline points={line(second)} className="execution-baseline-line" />
-      <text x="64" y="300">{stamp(points[0].time)}</text><text x="914" y="300" textAnchor="end">{stamp(points.at(-1)!.time)}</text>
-    </svg>
+      <text x="62" y="208">{stamp(points[0].time)}</text><text x="912" y="208" textAnchor="end">{stamp(points.at(-1)!.time)}</text>
+    </svg></div>
     <div className="chart-legend"><span><i className="execution-primary-dot" />{firstLabel} <b>{format(first.at(-1) ?? 0)}</b></span><span><i className="execution-baseline-dot" />{secondLabel} <b>{format(second.at(-1) ?? 0)}</b></span></div>
   </article>;
 }

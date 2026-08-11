@@ -66,6 +66,7 @@ test("hydrates preview pages from their immutable build snapshot", () => {
   const vite = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
   const learning = readFileSync(new URL("../build/preview-learning.ts", import.meta.url), "utf8");
   const contract = readFileSync(new URL("../preview-contract.json", import.meta.url), "utf8");
+  const previewBuilder = readFileSync(new URL("../../scripts/build_preview_bundle.py", import.meta.url), "utf8");
   assert.match(vite, /compactPreviewLearning/);
   assert.match(vite, /compactPreviewStatus/);
   assert.match(vite, /compactPreviewNewsIndex/);
@@ -86,6 +87,9 @@ test("hydrates preview pages from their immutable build snapshot", () => {
   assert.match(learning, /execution_learning:/);
   assert.match(learning, /points: points\.slice\(-48\)/);
   assert.match(learning, /results: results\.slice\(-20\)/);
+  assert.match(previewBuilder, /resource=execution-point/);
+  assert.match(previewBuilder, /for identity in \("LOT_RIDGE", "EXIT_RIDGE"\)/);
+  assert.match(previewBuilder, /\[\*learning_history, \*execution_history\]/);
   assert.doesNotMatch(page, /auditView === "league"/);
   assert.match(page, /\[PREVIEW_RESOURCES\.status\]: previewBundle\.status/);
   assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);
@@ -593,6 +597,12 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /总计 \{count\} 笔/);
   assert.match(modal, /当前显示最新 \{visibleCount\} 笔/);
   assert.match(modal, /图中压缩为/);
+  assert.match(modal, /resource=execution-point/);
+  assert.match(modal, /第 \{page \+ 1\} 段 · 共 \{total\} 个历史绘图点/);
+  assert.match(modal, /← 较早/);
+  assert.match(modal, /较晚 →/);
+  assert.match(css, /\.execution-chart-grid \{ display:grid; grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(css, /\.execution-history-nav/);
   assert.match(modal, /目前没有提前退出/);
   assert.doesNotMatch(modal, /等待退出 OOS/);
   assert.match(modal, /WAIT 不创建仓位/);
@@ -729,6 +739,8 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(modal, /openerRef\.current\?\.focus\(\)/);
   assert.match(modal, /event\.key !== "Tab"/);
   assert.match(css, /\.mobile-chart-scroll \{ width:100%; overflow-x:auto/);
+  assert.match(css, /\.execution-history-nav \{ display:flex; flex-wrap:wrap; justify-content:center; \}/);
+  assert.match(css, /\.execution-history-nav button \{ flex:0 1 100px; min-width:0; min-height:44px; \}/);
   assert.match(css, /\.market-history-nav \{[^}]*margin:10px 0 0;[^}]*border:1px solid/);
   assert.match(css, /\.prediction-counts \{[^}]*border-top:0/);
   assert.match(css, /\.chart-block \{ overflow:visible/);
