@@ -277,6 +277,9 @@ function Update-RuntimeCheckout {
     Copy-Item -LiteralPath (Join-Path $moduleRoot "scripts\xauusd_watchdog_guard.ps1") `
         -Destination (Join-Path (Split-Path -Parent $stableScript) "xauusd_watchdog_guard.ps1") `
         -Force
+    Copy-Item -LiteralPath (Join-Path $moduleRoot "scripts\xauusd_watchdog_guard_launcher.vbs") `
+        -Destination (Join-Path (Split-Path -Parent $stableScript) "xauusd_watchdog_guard_launcher.vbs") `
+        -Force
     Write-RuntimeUpdateState @{
         accepted_main_revision = $Revision
         staged_revision = $Revision
@@ -784,13 +787,18 @@ function Register-WatchdogGuardTask {
     $controlRoot = Split-Path -Parent $ControlScript
     $guardSource = Join-Path $moduleRoot "scripts\xauusd_watchdog_guard.ps1"
     $guardPath = Join-Path $controlRoot "xauusd_watchdog_guard.ps1"
+    $launcherSource = Join-Path $moduleRoot "scripts\xauusd_watchdog_guard_launcher.vbs"
+    $launcherPath = Join-Path $controlRoot "xauusd_watchdog_guard_launcher.vbs"
     if (-not $guardSource.Equals($guardPath, [System.StringComparison]::OrdinalIgnoreCase)) {
         Copy-Item -LiteralPath $guardSource -Destination $guardPath -Force
     }
-    $powershell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-    $guardArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -TaskName "{1}" -HeartbeatPath "{2}"' -f `
-        $guardPath, $taskName, $watchdogHeartbeatPath
-    $guardAction = New-ScheduledTaskAction -Execute $powershell -Argument $guardArguments
+    if (-not $launcherSource.Equals($launcherPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Copy-Item -LiteralPath $launcherSource -Destination $launcherPath -Force
+    }
+    $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
+    $guardArguments = '"{0}" "{1}" "{2}" "{3}"' -f `
+        $launcherPath, $guardPath, $taskName, $watchdogHeartbeatPath
+    $guardAction = New-ScheduledTaskAction -Execute $wscript -Argument $guardArguments
     $guardTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
         -RepetitionInterval (New-TimeSpan -Minutes 2)
     $guardSettings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew `

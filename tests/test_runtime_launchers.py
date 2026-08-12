@@ -91,6 +91,8 @@ def test_watchdog_autostart_uses_one_windowless_registration_path(tmp_path) -> N
     ).read_text(encoding="utf-8")
     launcher = ROOT / "scripts" / "xauusd_watchdog_launcher.vbs"
     launcher_text = launcher.read_text(encoding="utf-8")
+    guard_launcher = ROOT / "scripts" / "xauusd_watchdog_guard_launcher.vbs"
+    guard_launcher_text = guard_launcher.read_text(encoding="utf-8")
 
     assert "function Register-AutoStartTask" in control_center
     assert control_center.count("Register-ScheduledTask -TaskName $taskName") == 1
@@ -99,7 +101,11 @@ def test_watchdog_autostart_uses_one_windowless_registration_path(tmp_path) -> N
     assert "Ensure-WatchdogGuardTask" in control_center
     assert '"System32\\wscript.exe"' in control_center
     assert 'Join-Path $moduleRoot "scripts\\xauusd_watchdog_launcher.vbs"' in control_center
+    assert 'Join-Path $moduleRoot "scripts\\xauusd_watchdog_guard_launcher.vbs"' in control_center
     assert "shell.Run(command, 0, True)" in launcher_text
+    assert "shell.Run(command, 0, True)" in guard_launcher_text
+    assert "-WindowStyle Hidden" in guard_launcher_text
+    assert "New-ScheduledTaskAction -Execute $wscript" in control_center
     assert "Loop While exitCode = 75" in launcher_text
     assert "-WindowStyle Hidden -ExecutionPolicy Bypass -File" not in control_center
 
