@@ -7,6 +7,7 @@ import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { PREVIEW_NEWS_PAGE_SIZE } from "../_lib/preview-contract";
+import { resolveNewsMetrics, type NewsMetrics } from "../_lib/news-metrics";
 import LearningGraphModal from "../audit/LearningGraphModal";
 
 type Prediction = {
@@ -219,6 +220,7 @@ type Payload = {
   generated_at: string;
   system: { online: boolean; market_session?: "OPEN" | "CLOSED" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE"; source_of_truth: string; sites_mirror: string; deployment?: { runtime_git_sha: string | null; expected_git_sha: string | null; runtime_dirty: boolean; status: string; storyline_policy_version: string; payload_schema_version: string; payload_generated_at: string; source_database_epoch: string | null } };
   counts: Record<string, number>;
+  news_metrics?: NewsMetrics;
   annotation_queue: {
     ready: number;
     queued: number;
@@ -866,9 +868,10 @@ export default function AuditView() {
   const directionPoolRows = Math.max(0, ...latestVersionGroups
     .filter(row => !row.model_identity.endsWith("NEWS_RESIDUAL"))
     .map(row => row.training_rows));
-  const readableNewsTotal = (newsIndex.readable_total ?? newsIndex.all_total) || payload?.counts?.readable_news_items || 0;
-  const parsedNewsTotal = newsIndex.parsed_total ?? payload?.counts?.parsed_news_items ?? newsIndex.items.filter(row => Boolean(row.parsed_at)).length;
-  const modelCandidateNewsTotal = newsIndex.model_candidate_total ?? payload?.counts?.model_candidate_news_items ?? newsIndex.items.filter(row => row.model_visibility === "MODEL_VISIBLE").length;
+  const newsMetrics = resolveNewsMetrics(payload);
+  const readableNewsTotal = newsMetrics.articles.readable;
+  const parsedNewsTotal = newsMetrics.articles.semantic_reviews_complete;
+  const modelCandidateNewsTotal = newsMetrics.articles.current_model_candidates;
   const newsWaitingTotal = (payload?.annotation_queue?.queued ?? 0)
     + (payload?.annotation_queue?.backing_off ?? 0)
     + (payload?.annotation_queue?.dead_letter ?? 0);
@@ -895,24 +898,12 @@ export default function AuditView() {
   const evidenceModelUses = canonicalEvidence.reduce(
     (total, row) => total + row.frozen_model_uses, 0,
   );
-  const evidenceSummarySeenCount = evidencePayloadHasDuplicates
-    ? seenEvidenceCount
-    : payload?.news_evidence_summary?.model_seen_events ?? seenEvidenceCount;
-  const evidenceSummaryUnseenCount = evidencePayloadHasDuplicates
-    ? unseenEvidenceCount
-    : payload?.news_evidence_summary?.model_unseen_events ?? unseenEvidenceCount;
-  const evidenceSummaryDisplayedCount = evidencePayloadHasDuplicates
-    ? canonicalEvidence.length
-    : payload?.news_evidence_summary?.displayed_events ?? canonicalEvidence.length;
-  const evidenceSummaryEligibleCount = evidencePayloadHasDuplicates
-    ? eligibleEvidenceCount
-    : payload?.news_evidence_summary?.broad_model_eligible ?? eligibleEvidenceCount;
-  const evidenceSummaryDecisionExposures = evidencePayloadHasDuplicates
-    ? evidenceDecisionExposures
-    : payload?.news_evidence_summary?.decision_event_exposures ?? evidenceDecisionExposures;
-  const evidenceSummaryModelUses = evidencePayloadHasDuplicates
-    ? evidenceModelUses
-    : payload?.news_evidence_summary?.frozen_model_uses ?? evidenceModelUses;
+  const evidenceSummarySeenCount = evidencePayloadHasDuplicates ? seenEvidenceCount : newsMetrics.events.used_in_predictions;
+  const evidenceSummaryUnseenCount = evidencePayloadHasDuplicates ? unseenEvidenceCount : newsMetrics.events.never_used;
+  const evidenceSummaryDisplayedCount = evidencePayloadHasDuplicates ? canonicalEvidence.length : newsMetrics.events.auditable;
+  const evidenceSummaryEligibleCount = evidencePayloadHasDuplicates ? eligibleEvidenceCount : newsMetrics.events.currently_model_eligible;
+  const evidenceSummaryDecisionExposures = evidencePayloadHasDuplicates ? evidenceDecisionExposures : newsMetrics.prediction_usage.decision_event_exposures;
+  const evidenceSummaryModelUses = evidencePayloadHasDuplicates ? evidenceModelUses : newsMetrics.prediction_usage.frozen_model_uses;
   const visibleEvidence = canonicalEvidence.filter(row => (
     evidenceMode === "all" || (evidenceMode === "seen" ? row.model_seen : !row.model_seen)
   ));
@@ -975,18 +966,18 @@ export default function AuditView() {
 
       {view === "news" && <>
         <section className="annotation-queue" aria-label="新闻处理进度">
-          <span><b>{readableNewsTotal}</b> 新闻总数</span>
-          <span><b>{parsedNewsTotal}</b> 已完整解析</span>
-          <span><b>{newsNoParsingNeededTotal}</b> 无需解析</span>
-          <span><b>{newsWaitingTotal}</b> 等待处理</span>
-          <span className="is-model-ready"><b>{modelCandidateNewsTotal}</b> 模型可用</span>
+          <span><b>{readableNewsTotal}</b> 篇可读文章</span>
+          <span><b>{parsedNewsTotal}</b> 篇语义复核完成</span>
+          <span><b>{newsNoParsingNeededTotal}</b> 篇无需复核</span>
+          <span><b>{newsWaitingTotal}</b> 篇等待处理</span>
+          <span className="is-model-ready"><b>{modelCandidateNewsTotal}</b> 篇当前模型候选</span>
           <details>
             <summary>查看处理器技术状态</summary>
             <p>真正排队 {payload?.annotation_queue?.queued ?? 0} · 失败后等待重试 {payload?.annotation_queue?.backing_off ?? 0} · 已隔离 {payload?.annotation_queue?.dead_letter ?? 0} · 等待正文 {payload?.annotation_queue?.waiting_content ?? 0} · 正文不可用 {payload?.annotation_queue?.unavailable_content ?? 0}</p>
           </details>
         </section>
         <section className="news-browser" aria-label="新闻自动分类">
-          <div><strong>自动分类</strong><span>按媒体发布时间排序 · 可读 {readableNewsTotal} 篇 · 已解析 {parsedNewsTotal} 篇 · 模型候选 {modelCandidateNewsTotal} 篇 · 每页 {NEWS_PER_PAGE} 篇</span></div>
+          <div><strong>自动分类</strong><span>按媒体发布时间排序 · 可读文章 {readableNewsTotal} 篇 · 语义复核完成 {parsedNewsTotal} 篇 · 当前模型候选 {modelCandidateNewsTotal} 篇 · 每页 {NEWS_PER_PAGE} 篇</span></div>
           <nav>
             {categories.map(category => <button key={category.name} type="button" className={newsCategory === category.name ? "active" : ""} onClick={() => { setNewsCategory(category.name); setNewsPage(1); }}>
               {category.name}<b>{category.count}</b>
@@ -1015,14 +1006,14 @@ export default function AuditView() {
           <div><p className="eyebrow">NEWS USED BY MODEL</p><h2>模型真正用过哪些新闻？</h2><p>按独立事件说明模型用过什么、没用什么。</p></div>
         </header>
         <div className="evidence-summary">
-          <article><span>收到多少篇新闻</span><strong>{payload?.news_evidence_summary?.distinct_articles ?? 0}</strong><small>共保存 {payload?.news_evidence_summary?.raw_article_revisions ?? 0} 个版本；文章更新不会算成新新闻</small></article>
+          <article><span>收到多少篇文章</span><strong>{newsMetrics.articles.received}</strong><small>共保存 {newsMetrics.articles.stored_revisions} 个版本；文章更新不会算成新文章</small></article>
           <article><span>历史上用过多少个事件</span><strong>{evidenceSummarySeenCount}</strong><small>每个都确实参加过至少一次预测</small></article>
           <article><span>影响过多少次预测</span><strong>{evidenceSummaryDecisionExposures}</strong><small>同一事件可以连续影响多个 5 分钟预测</small></article>
           <article><span>模型一共读取多少次</span><strong>{evidenceSummaryModelUses}</strong><small>5 套模型分别记账；这不是新闻数量</small></article>
           <article><span>从未进入预测的事件</span><strong>{evidenceSummaryUnseenCount}</strong><small>可在下方逐条查看没有使用的原因</small></article>
           <article><span>现在仍可用于预测</span><strong>{evidenceSummaryEligibleCount}</strong><small>等待下一次预测读取；不代表历史上用过</small></article>
         </div>
-        <p className="evidence-count-note"><b>{payload?.news_evidence_summary?.current_contract_exposed_rows ?? 0} 条训练记录</b> 来自 <b>{payload?.news_evidence_summary?.current_contract_distinct_events ?? 0} 个当前合格事件</b>；下方的“未用过”是其他独立事件，不是训练还缺的数量。</p>
+        <p className="evidence-count-note"><b>{newsMetrics.training.current_contract_rows} 条训练记录</b> 来自 <b>{newsMetrics.training.distinct_events} 个当前契约事件</b>；文章、独立事件、预测读取和训练记录是四种不同口径。</p>
         <nav className="evidence-filters" aria-label="模型新闻可见性筛选">
           <button type="button" className={evidenceMode === "seen" ? "active" : ""} onClick={() => setEvidenceMode("seen")}>历史上用过 <b>{evidenceSummarySeenCount}</b></button>
           <button type="button" className={evidenceMode === "unseen" ? "active" : ""} onClick={() => setEvidenceMode("unseen")}>从未用过 <b>{evidenceSummaryUnseenCount}</b></button>
