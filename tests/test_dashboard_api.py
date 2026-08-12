@@ -550,7 +550,11 @@ def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
 
     payload = _dashboard_module()._dashboard_payload(database)
     assert payload["recent_news"][0]["headline"] == "2026年6月个人收入与支出"
-    assert len(payload["news_source_health"]) == 18
+    assert len(payload["news_source_health"]) == 17
+    assert all(
+        row["source"] != "non_fed_full_text"
+        for row in payload["news_source_health"]
+    )
     synchronizer = payload["system"]["components"]["sites_synchronizer"]
     assert synchronizer["last_success"] == sync_success
     assert synchronizer["status"] == "OK"
