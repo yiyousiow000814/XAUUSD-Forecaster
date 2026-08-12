@@ -50,6 +50,7 @@ The v15 generation converts EIA and BEA candidates into immutable structured
 release packets and distinct Ridge features. Similar FRED and EIA WTI series
 are deliberately preserved separately; OOS learning decides their value.
 Changing this feature set requires a complete generation handover.
+Collection alone does not silently replace the active generation.
 
 ## 4. Optional synchronized symbols
 
