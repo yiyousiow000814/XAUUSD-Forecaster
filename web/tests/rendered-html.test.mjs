@@ -175,7 +175,7 @@ test("formats server-rendered preview times in one deterministic timezone", () =
   }
 });
 
-test("returns a verified main revision through the existing ingest heartbeat", () => {
+test("returns a verified main revision through the deployment status endpoint", () => {
   const ingest = readFileSync(new URL("../app/api/ingest/route.ts", import.meta.url), "utf8");
   const snapshot = readFileSync(new URL("../app/api/_shared/dashboard-snapshot.ts", import.meta.url), "utf8");
   const vite = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
@@ -184,6 +184,8 @@ test("returns a verified main revision through the existing ingest heartbeat", (
   assert.match(ingest, /deployment\.branch === "main"/);
   assert.match(ingest, /\^\[0-9a-f\]\{40\}\$/);
   assert.match(ingest, /main_revision/);
+  assert.match(ingest, /export async function GET/);
+  assert.match(ingest, /Cache-Control.*no-store/);
   assert.match(ingest, /writeDashboardSnapshot\(request, binding, 1\)/);
   assert.doesNotMatch(ingest, /request\.json\(\)|JSON\.stringify\(|TextEncoder/);
   assert.match(snapshot, /json_valid\(payload\)/);

@@ -18,15 +18,18 @@ $moduleRoot = if ($RuntimeRoot) {
 } else { $scriptRepositoryRoot }
 $logRoot = Join-Path $moduleRoot ".local\forward\logs"
 $taskName = "XAUUSD-Forecaster-Autostart"
+$guardTaskName = "XAUUSD-Forecaster-Watchdog-Guard"
 $dashboardUrl = if ([Environment]::GetEnvironmentVariable("XAUUSD_DASHBOARD_URL", "User")) {
     [Environment]::GetEnvironmentVariable("XAUUSD_DASHBOARD_URL", "User")
 } else {
     "https://aurum-signal-room.yiyousiow1234.chatgpt.site"
 }
 $watchdogLog = Join-Path $logRoot "control-watchdog.jsonl"
+$watchdogHeartbeatPath = Join-Path $moduleRoot ".local\forward\control-watchdog-heartbeat.json"
 $runtimeCodeStatePath = Join-Path $moduleRoot ".local\forward\runtime-code-state.json"
 $runtimeUpdateStatePath = Join-Path $moduleRoot ".local\forward\runtime-update-state.json"
-$remoteMainSignalPath = Join-Path $moduleRoot ".local\forward\remote-main-signal.json"
+$dashboardSyncConfigPath = Join-Path $moduleRoot ".local\forward\dashboard-sync.json"
+$runtimeUpdateCheckInterval = [TimeSpan]::FromMinutes(5)
 $reloadableServiceKeys = @("collector", "annotator", "api", "sync")
 $collectorSecretsPath = Join-Path $repositoryRoot ".local\secrets\collector-keys.json"
 
@@ -154,19 +157,49 @@ function Write-RuntimeUpdateState {
     Move-Item -LiteralPath $temporary -Destination $runtimeUpdateStatePath -Force
 }
 
-function Get-SignaledMainRevision {
-    if (-not (Test-Path -LiteralPath $remoteMainSignalPath)) { return $null }
+function Get-DeploymentStatusUrl {
+    $environmentUrl = [Environment]::GetEnvironmentVariable(
+        "CLOUDFLARE_INGEST_URL", "User"
+    )
+    if ($environmentUrl -and $environmentUrl.StartsWith("https://")) {
+        return $environmentUrl.Trim()
+    }
+    if (-not (Test-Path -LiteralPath $dashboardSyncConfigPath)) { return $null }
     try {
-        $signal = Get-Content -LiteralPath $remoteMainSignalPath -Raw | ConvertFrom-Json
-        $revision = [string]$signal.main_revision
-        if ($revision -match '^[0-9a-f]{40}$') { return $revision }
+        $config = Get-Content -LiteralPath $dashboardSyncConfigPath -Raw | ConvertFrom-Json
+        $targets = @($config.targets | Where-Object {
+            $_.enabled -ne $false -and
+            ([string]$_.remote_ingest_url).StartsWith("https://")
+        })
+        $cloudflare = $targets | Where-Object {
+            ([string]$_.name) -eq "cloudflare" -or
+            ([Uri]$_.remote_ingest_url).Host.EndsWith("workers.dev")
+        } | Select-Object -First 1
+        if ($cloudflare) { return ([string]$cloudflare.remote_ingest_url).Trim() }
+        if (([string]$config.remote_ingest_url).StartsWith("https://")) {
+            return ([string]$config.remote_ingest_url).Trim()
+        }
+    } catch {}
+    return $null
+}
+
+function Get-DeployedMainRevision {
+    $url = Get-DeploymentStatusUrl
+    if (-not $url) { return $null }
+    try {
+        $response = Invoke-RestMethod -Method Get -Uri $url -TimeoutSec 5
+        $revision = [string]$response.main_revision
+        if ($response.status -eq "OK" -and $revision -match '^[0-9a-f]{40}$') {
+            return $revision
+        }
     } catch {}
     return $null
 }
 
 function Get-VerifiedOriginMain {
     try {
-        & git -C $repositoryRoot fetch origin main --quiet 2>$null
+        & git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=30 `
+            -C $repositoryRoot fetch origin main --quiet 2>$null
         if ($LASTEXITCODE -ne 0) { return $null }
         $revision = (& git -C $repositoryRoot rev-parse origin/main 2>$null).Trim()
         if ($LASTEXITCODE -eq 0 -and $revision -match '^[0-9a-f]{40}$') {
@@ -208,31 +241,22 @@ function Test-MainCandidate {
 
 function Get-DesiredMainRevision {
     param([string]$CurrentRevision)
-    $signal = Get-SignaledMainRevision
-    if ($signal -and $signal -eq $CurrentRevision) {
-        Write-RuntimeUpdateState @{ signal_capable = $true }
-        return $null
-    }
-    if ($signal -and $signal -ne $CurrentRevision) {
-        $verified = Get-VerifiedOriginMain
-        if ($verified -eq $signal -and (Test-MainCandidate $CurrentRevision $verified)) {
-            Write-RuntimeUpdateState @{ signal_capable = $true }
-            return $verified
-        }
-    }
-
     $state = Get-RuntimeUpdateState
-    $signalCapable = $state -and [bool]$state.signal_capable
-    $intervalHours = if ($signalCapable) { 24.0 } else { 0.083333 }
     $lastCheck = [DateTimeOffset]::MinValue
     if ($state -and $state.last_remote_check) {
         [DateTimeOffset]::TryParse([string]$state.last_remote_check, [ref]$lastCheck) | Out-Null
     }
-    if (([DateTimeOffset]::UtcNow - $lastCheck).TotalHours -lt $intervalHours) {
+    if (([DateTimeOffset]::UtcNow - $lastCheck) -lt $runtimeUpdateCheckInterval) {
         return $null
     }
+    Write-RuntimeUpdateState @{
+        last_remote_check = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+    $deployed = Get-DeployedMainRevision
+    if (-not $deployed -or $deployed -eq $CurrentRevision) { return $null }
     $verified = Get-VerifiedOriginMain
-    if ($verified -and (Test-MainCandidate $CurrentRevision $verified)) {
+    if ($verified -eq $deployed -and (Test-MainCandidate $CurrentRevision $verified)) {
+        Write-RuntimeUpdateState @{ last_deployed_revision = $deployed }
         return $verified
     }
     return $null
@@ -249,6 +273,9 @@ function Update-RuntimeCheckout {
         -Destination $stableScript -Force
     Copy-Item -LiteralPath (Join-Path $moduleRoot "scripts\xauusd_watchdog_launcher.vbs") `
         -Destination (Join-Path (Split-Path -Parent $stableScript) "xauusd_watchdog_launcher.vbs") `
+        -Force
+    Copy-Item -LiteralPath (Join-Path $moduleRoot "scripts\xauusd_watchdog_guard.ps1") `
+        -Destination (Join-Path (Split-Path -Parent $stableScript) "xauusd_watchdog_guard.ps1") `
         -Force
     Write-RuntimeUpdateState @{
         accepted_main_revision = $Revision
@@ -286,9 +313,69 @@ function Write-RuntimeCodeState {
     Move-Item -LiteralPath $temporary -Destination $runtimeCodeStatePath -Force
 }
 
+function Get-RuntimeHeartbeat {
+    param([string]$Path, [string]$ServiceName)
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    try {
+        $heartbeat = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        $lastSuccess = [DateTimeOffset]::MinValue
+        if ([string]$heartbeat.service -ne $ServiceName -or
+            [string]$heartbeat.state -ne "RUNNING" -or
+            -not [DateTimeOffset]::TryParse(
+                [string]$heartbeat.last_success, [ref]$lastSuccess
+            )) { return $null }
+        return [pscustomobject]@{ LastSuccess = $lastSuccess }
+    } catch { return $null }
+}
+
+function Get-ServiceProcessStartedAt {
+    param([array]$Processes)
+    try {
+        $process = Get-Process -Id $Processes[0].ProcessId -ErrorAction Stop
+        return [DateTimeOffset]$process.StartTime.ToUniversalTime()
+    } catch { return [DateTimeOffset]::MinValue }
+}
+
+function Test-CodeReloadHealth {
+    param([DateTimeOffset]$ReloadStarted)
+    foreach ($service in @($services | Where-Object { $_.Key -in $reloadableServiceKeys })) {
+        if (@(Get-ForecasterProcesses $service).Count -eq 0) { return $false }
+    }
+    foreach ($heartbeatSpec in @(
+        @("collector", "collector-status.json"),
+        @("annotator", "news-annotator-status.json")
+    )) {
+        $heartbeat = Get-RuntimeHeartbeat `
+            -Path (Join-Path $moduleRoot ".local\forward\$($heartbeatSpec[1])") `
+            -ServiceName $heartbeatSpec[0]
+        if (-not $heartbeat -or $heartbeat.LastSuccess -lt $ReloadStarted) {
+            return $false
+        }
+    }
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing `
+            -Uri "http://127.0.0.1:8765/api/health" -TimeoutSec 2
+        if ($response.StatusCode -ne 200) { return $false }
+    } catch { return $false }
+    $statusFile = Join-Path $moduleRoot ".local\forward\dashboard-sync-status.json"
+    if (-not (Test-Path -LiteralPath $statusFile)) { return $false }
+    try {
+        $syncStatus = Get-Content -LiteralPath $statusFile -Raw | ConvertFrom-Json
+        $lastAttempt = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse(
+            [string]$syncStatus.last_attempt, [ref]$lastAttempt
+        )) { return $false }
+        return (
+            $lastAttempt -ge $ReloadStarted -and
+            [string]$syncStatus.status -in @("OK", "DEGRADED")
+        )
+    } catch { return $false }
+}
+
 function Restart-CodeReloadableServices {
     param([string]$Revision)
     $targets = @($services | Where-Object { $_.Key -in $reloadableServiceKeys })
+    $reloadStarted = [DateTimeOffset]::UtcNow
     Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_STARTED" `
         -Service "collector,annotator,api,sync" -State $Revision
     foreach ($service in $targets) { Stop-ForecasterService $service }
@@ -296,16 +383,13 @@ function Restart-CodeReloadableServices {
     foreach ($service in $targets) {
         Start-ForecasterService $service -SkipExistingCheck
     }
-    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(15)
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(180)
     do {
         Start-Sleep -Milliseconds 500
-        $missing = @($targets | Where-Object {
-            @(Get-ForecasterProcesses $_).Count -eq 0
-        })
-    } while ($missing.Count -gt 0 -and [DateTimeOffset]::UtcNow -lt $deadline)
-    if ($missing.Count -gt 0) {
-        throw "Code revision reload failed to start: $($missing.Key -join ',')"
-    }
+        Write-WatchdogHeartbeat
+        $healthy = Test-CodeReloadHealth -ReloadStarted $reloadStarted
+    } while (-not $healthy -and [DateTimeOffset]::UtcNow -lt $deadline)
+    if (-not $healthy) { throw "Code revision reload failed functional health checks." }
     Write-RuntimeCodeState -Revision $Revision
     Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_APPLIED" `
         -Service "collector,annotator,api,sync" -State $Revision
@@ -322,6 +406,24 @@ function Test-ExpectedWeeklyMarketClosure {
     return $false
 }
 
+function Test-BrokerMarketClosure {
+    $path = Join-Path $moduleRoot ".local\forward\quotes\market-session.json"
+    if (-not (Test-Path -LiteralPath $path)) { return $false }
+    try {
+        $session = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $observedAt = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse(
+            [string]$session.observed_at, [ref]$observedAt
+        )) { return $false }
+        $now = [DateTimeOffset]::UtcNow
+        return (
+            $observedAt -le $now.AddSeconds(5) -and
+            ($now - $observedAt).TotalSeconds -le 20 -and
+            $session.is_open -eq $false
+        )
+    } catch { return $false }
+}
+
 function Get-ServiceState {
     param(
         [pscustomobject]$Service,
@@ -329,7 +431,28 @@ function Get-ServiceState {
     )
     if ($Processes.Count -eq 0) { return "STOPPED" }
 
+    if ($Service.Key -in @("collector", "annotator")) {
+        $statusName = if ($Service.Key -eq "collector") {
+            "collector-status.json"
+        } else { "news-annotator-status.json" }
+        $heartbeat = Get-RuntimeHeartbeat `
+            -Path (Join-Path $moduleRoot ".local\forward\$statusName") `
+            -ServiceName $Service.Key
+        $startedAt = Get-ServiceProcessStartedAt -Processes $Processes
+        if ($heartbeat -and
+            $heartbeat.LastSuccess -ge $startedAt -and
+            ([DateTimeOffset]::UtcNow - $heartbeat.LastSuccess).TotalSeconds -le 300) {
+            return "RUNNING"
+        }
+        if ($startedAt -ne [DateTimeOffset]::MinValue -and
+            ([DateTimeOffset]::UtcNow - $startedAt).TotalSeconds -le 180) {
+            return "STARTING"
+        }
+        return "$($Service.Key.ToUpper()) STALE"
+    }
+
     if ($Service.Key -eq "quote") {
+        if (Test-BrokerMarketClosure) { return "MARKET CLOSED" }
         $quoteRoot = Join-Path $moduleRoot ".local\forward\quotes"
         $latestQuote = Get-ChildItem -LiteralPath $quoteRoot -Filter "*.jsonl" `
             -File -Recurse -ErrorAction SilentlyContinue |
@@ -509,6 +632,32 @@ function Write-WatchdogEvent {
     } | ConvertTo-Json -Compress | Add-Content -LiteralPath $watchdogLog -Encoding UTF8
 }
 
+function Write-WatchdogHeartbeat {
+    $directory = Split-Path -Parent $watchdogHeartbeatPath
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $temporary = "$watchdogHeartbeatPath.tmp"
+    [pscustomobject]@{
+        observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+        process_id = $PID
+        revision = Get-CodeRevision
+    } | ConvertTo-Json -Compress | Set-Content -LiteralPath $temporary -Encoding UTF8
+    Move-Item -LiteralPath $temporary -Destination $watchdogHeartbeatPath -Force
+}
+
+function Start-WatchdogReplacement {
+    $controlRoot = Join-Path $repositoryRoot ".local\runtime-control"
+    $controlScript = Join-Path $controlRoot "xauusd_control_center.ps1"
+    $launcher = Join-Path $controlRoot "xauusd_watchdog_launcher.vbs"
+    if (-not (Test-Path -LiteralPath $controlScript) -or
+        -not (Test-Path -LiteralPath $launcher)) {
+        throw "Updated watchdog control files are unavailable."
+    }
+    $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
+    $arguments = '"{0}" "{1}" "{2}" "{3}"' -f `
+        $launcher, $controlScript, $moduleRoot, $repositoryRoot
+    Start-Process -FilePath $wscript -ArgumentList $arguments -WindowStyle Hidden
+}
+
 function Invoke-ForecasterWatchdog {
     $failureCounts = @{}
     $lastRestart = @{}
@@ -517,8 +666,11 @@ function Invoke-ForecasterWatchdog {
         $lastRestart[$service.Key] = [DateTimeOffset]::MinValue
     }
     $lastCodeReload = [DateTimeOffset]::MinValue
+    $watchdogRevisionAtStart = Get-CodeRevision
+    Ensure-WatchdogGuardTask
     Write-WatchdogEvent -Event "WATCHDOG_STARTED" -Service "all" -State "MONITORING"
     while ($true) {
+        Write-WatchdogHeartbeat
         try {
             $currentRevision = Get-CodeRevision
             $desiredRevision = Get-DesiredMainRevision -CurrentRevision $currentRevision
@@ -540,11 +692,21 @@ function Invoke-ForecasterWatchdog {
                     $lastRestart[$service.Key] = [DateTimeOffset]::UtcNow
                     $failureCounts[$service.Key] = 0
                 }
+                if ($currentRevision -ne $watchdogRevisionAtStart) {
+                    # The launcher that started this process may predate its own
+                    # supervisor loop, so start the newly copied launcher before
+                    # this process exits. This makes the first upgrade self-hosting.
+                    Start-WatchdogReplacement
+                    return 0
+                }
             }
             $status = @(Get-ForecasterStatus)
             foreach ($service in $services) {
                 $row = $status | Where-Object Key -eq $service.Key
-                $unhealthy = $row.State -in @("STOPPED", "DATA STALE", "API ERROR")
+                $unhealthy = $row.State -in @(
+                    "STOPPED", "DATA STALE", "API ERROR", "SYNC ERROR", "SYNC STALE",
+                    "COLLECTOR STALE", "ANNOTATOR STALE"
+                )
                 if (-not $unhealthy) {
                     $failureCounts[$service.Key] = 0
                     continue
@@ -571,12 +733,14 @@ function Invoke-ForecasterWatchdog {
             Write-WatchdogEvent -Event "WATCHDOG_CHECK_ERROR" `
                 -Service "all" -State $_.Exception.Message
         }
+        Write-WatchdogHeartbeat
         Start-Sleep -Seconds 30
     }
 }
 
 function Test-AutoStart {
-    $null -ne (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)
+    $null -ne (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) -and
+        $null -ne (Get-ScheduledTask -TaskName $guardTaskName -ErrorAction SilentlyContinue)
 }
 
 function Register-AutoStartTask {
@@ -607,7 +771,49 @@ function Register-AutoStartTask {
         -ExecutionTimeLimit (New-TimeSpan -Days 3650)
     Register-ScheduledTask -TaskName $taskName -Action $taskAction `
         -Trigger $taskTrigger -Principal $principal -Settings $settings -Force | Out-Null
+
+    Register-WatchdogGuardTask -ControlScript $ControlScript -Principal $principal
     Start-ScheduledTask -TaskName $taskName
+}
+
+function Register-WatchdogGuardTask {
+    param(
+        [string]$ControlScript,
+        [object]$Principal
+    )
+    $controlRoot = Split-Path -Parent $ControlScript
+    $guardSource = Join-Path $moduleRoot "scripts\xauusd_watchdog_guard.ps1"
+    $guardPath = Join-Path $controlRoot "xauusd_watchdog_guard.ps1"
+    if (-not $guardSource.Equals($guardPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Copy-Item -LiteralPath $guardSource -Destination $guardPath -Force
+    }
+    $powershell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    $guardArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -TaskName "{1}" -HeartbeatPath "{2}"' -f `
+        $guardPath, $taskName, $watchdogHeartbeatPath
+    $guardAction = New-ScheduledTaskAction -Execute $powershell -Argument $guardArguments
+    $guardTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+        -RepetitionInterval (New-TimeSpan -Minutes 2)
+    $guardSettings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
+    Register-ScheduledTask -TaskName $guardTaskName -Action $guardAction `
+        -Trigger $guardTrigger -Principal $principal -Settings $guardSettings -Force | Out-Null
+}
+
+function Ensure-WatchdogGuardTask {
+    if ($null -ne (Get-ScheduledTask -TaskName $guardTaskName -ErrorAction SilentlyContinue)) {
+        return
+    }
+    try {
+        $principal = New-ScheduledTaskPrincipal `
+            -UserId ("{0}\{1}" -f $env:USERDOMAIN, $env:USERNAME) `
+            -LogonType Interactive -RunLevel Limited
+        Register-WatchdogGuardTask -ControlScript $PSCommandPath -Principal $principal
+        Write-WatchdogEvent -Event "WATCHDOG_GUARD_REGISTERED" `
+            -Service "watchdog" -State "MONITORING"
+    } catch {
+        Write-WatchdogEvent -Event "WATCHDOG_GUARD_REGISTRATION_ERROR" `
+            -Service "watchdog" -State $_.Exception.Message
+    }
 }
 
 function Enable-AutoStart {
@@ -667,6 +873,7 @@ function Install-ProductionRuntime {
     $stableScript = Join-Path $controlRoot "xauusd_control_center.ps1"
     Copy-Item -LiteralPath $PSCommandPath -Destination $stableScript -Force
 
+    Stop-ScheduledTask -TaskName $guardTaskName -ErrorAction SilentlyContinue
     Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     Stop-All
     Register-AutoStartTask -ControlScript $stableScript `
@@ -680,6 +887,7 @@ function Install-ProductionRuntime {
 }
 
 function Disable-AutoStart {
+    Unregister-ScheduledTask -TaskName $guardTaskName -Confirm:$false -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 }
 
@@ -1058,7 +1266,7 @@ switch ($Action) {
         if (-not $target) { throw "Unknown service key: $ServiceKey" }
         Stop-ForecasterService $target
     }
-    "Watchdog" { Start-All; Invoke-ForecasterWatchdog }
+    "Watchdog" { Start-All; exit (Invoke-ForecasterWatchdog) }
     "EnableAutoStart" { Enable-AutoStart; Write-Output "Auto-start enabled." }
     "DisableAutoStart" { Disable-AutoStart; Write-Output "Auto-start disabled." }
     "InstallRuntime" { Install-ProductionRuntime | Format-List }
