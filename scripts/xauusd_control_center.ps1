@@ -27,6 +27,7 @@ $watchdogLog = Join-Path $logRoot "control-watchdog.jsonl"
 $runtimeCodeStatePath = Join-Path $moduleRoot ".local\forward\runtime-code-state.json"
 $runtimeUpdateStatePath = Join-Path $moduleRoot ".local\forward\runtime-update-state.json"
 $remoteMainSignalPath = Join-Path $moduleRoot ".local\forward\remote-main-signal.json"
+$remoteMainSignalMaxAge = [TimeSpan]::FromMinutes(5)
 $reloadableServiceKeys = @("collector", "annotator", "api", "sync")
 $collectorSecretsPath = Join-Path $repositoryRoot ".local\secrets\collector-keys.json"
 
@@ -154,12 +155,21 @@ function Write-RuntimeUpdateState {
     Move-Item -LiteralPath $temporary -Destination $runtimeUpdateStatePath -Force
 }
 
-function Get-SignaledMainRevision {
+function Get-RemoteMainSignal {
     if (-not (Test-Path -LiteralPath $remoteMainSignalPath)) { return $null }
     try {
         $signal = Get-Content -LiteralPath $remoteMainSignalPath -Raw | ConvertFrom-Json
         $revision = [string]$signal.main_revision
-        if ($revision -match '^[0-9a-f]{40}$') { return $revision }
+        $observedAt = [DateTimeOffset]::MinValue
+        if ($revision -match '^[0-9a-f]{40}$' -and
+            [DateTimeOffset]::TryParse(
+                [string]$signal.observed_at, [ref]$observedAt
+            )) {
+            return [pscustomobject]@{
+                Revision = $revision
+                ObservedAt = $observedAt
+            }
+        }
     } catch {}
     return $null
 }
@@ -208,12 +218,16 @@ function Test-MainCandidate {
 
 function Get-DesiredMainRevision {
     param([string]$CurrentRevision)
-    $signal = Get-SignaledMainRevision
-    if ($signal -and $signal -eq $CurrentRevision) {
+    $signalState = Get-RemoteMainSignal
+    $signalFresh = $signalState -and
+        ([DateTimeOffset]::UtcNow - $signalState.ObservedAt) -le $remoteMainSignalMaxAge -and
+        $signalState.ObservedAt -le [DateTimeOffset]::UtcNow.AddMinutes(1)
+    $signal = if ($signalState) { [string]$signalState.Revision } else { "" }
+    if ($signalFresh -and $signal -eq $CurrentRevision) {
         Write-RuntimeUpdateState @{ signal_capable = $true }
         return $null
     }
-    if ($signal -and $signal -ne $CurrentRevision) {
+    if ($signalFresh -and $signal -ne $CurrentRevision) {
         $verified = Get-VerifiedOriginMain
         if ($verified -eq $signal -and (Test-MainCandidate $CurrentRevision $verified)) {
             Write-RuntimeUpdateState @{ signal_capable = $true }
@@ -222,8 +236,10 @@ function Get-DesiredMainRevision {
     }
 
     $state = Get-RuntimeUpdateState
-    $signalCapable = $state -and [bool]$state.signal_capable
-    $intervalHours = if ($signalCapable) { 24.0 } else { 0.083333 }
+    # A live sync signal avoids redundant Git fetches. Once that signal is
+    # stale, poll every five minutes so a broken dashboard sync cannot also
+    # prevent its own already-merged repair from reaching the runtime.
+    $intervalHours = if ($signalFresh) { 24.0 } else { 0.083333 }
     $lastCheck = [DateTimeOffset]::MinValue
     if ($state -and $state.last_remote_check) {
         [DateTimeOffset]::TryParse([string]$state.last_remote_check, [ref]$lastCheck) | Out-Null

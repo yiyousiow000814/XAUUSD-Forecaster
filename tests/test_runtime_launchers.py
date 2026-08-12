@@ -55,7 +55,8 @@ def test_control_center_updates_only_the_isolated_main_runtime() -> None:
     assert 'CODE_REVISION_RELOAD_APPLIED' in control_center
     assert 'Write-RuntimeCodeState -Revision $Revision' in control_center
     assert 'currentRevision -ne $appliedRevision' in control_center
-    assert "Get-SignaledMainRevision" in control_center
+    assert "Get-RemoteMainSignal" in control_center
+    assert "$remoteMainSignalMaxAge = [TimeSpan]::FromMinutes(5)" in control_center
     assert "Get-VerifiedOriginMain" in control_center
     assert "Test-RevisionDescendsFrom" in control_center
     assert "Test-MainCandidate" in control_center
@@ -173,3 +174,29 @@ def test_main_checkpoint_accepts_squash_merge_without_accepting_stale_main(
     ).stdout.strip()
 
     assert result == "True,False"
+
+
+def test_stale_sync_signal_falls_back_to_verified_main_poll(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    signal = repo / ".local" / "forward" / "remote-main-signal.json"
+    signal.parent.mkdir(parents=True)
+    current = "a" * 40
+    candidate = "b" * 40
+    signal.write_text(json.dumps({
+        "main_revision": current,
+        "observed_at": "2026-08-11T00:00:00+00:00",
+    }), encoding="utf-8")
+    script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    command = (
+        f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{repo}' "
+        f"-RepositoryRoot '{repo}'; "
+        f"function Get-VerifiedOriginMain {{ return '{candidate}' }}; "
+        "function Test-MainCandidate { return $true }; "
+        f"Get-DesiredMainRevision -CurrentRevision '{current}'"
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    assert result == candidate
