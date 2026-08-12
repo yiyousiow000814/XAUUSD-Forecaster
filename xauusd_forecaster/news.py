@@ -117,9 +117,6 @@ OFFICIAL_RSS_SOURCES = (
 )
 
 DIRECT_FULL_TEXT_RSS_SOURCES = (
-    RssSource("bls_employment_situation", "https://www.bls.gov/feed/empsit.rss"),
-    RssSource("bls_consumer_price_index", "https://www.bls.gov/feed/cpi.rss"),
-    RssSource("bls_job_openings", "https://www.bls.gov/feed/jolts.rss"),
     RssSource("eia_today_in_energy", "https://www.eia.gov/rss/todayinenergy.xml"),
     RssSource("eia_press_releases", "https://www.eia.gov/rss/press_rss.xml"),
     RssSource("ecb_press_releases", "https://www.ecb.europa.eu/rss/press.html"),
@@ -233,11 +230,6 @@ GOOGLE_NEWS_LANES = (
         GOOGLE_GEO_SOURCE,
         "gold (Fed OR rates OR yield OR dollar OR inflation OR payrolls OR jobs "
         "OR oil OR war OR conflict OR sanctions OR geopolitical OR central bank) when:3d",
-    ),
-    GoogleNewsLane(
-        "google_news_bls_official_releases",
-        'site:bls.gov ("Employment Situation" OR "Consumer Price Index" '
-        'OR "Job Openings and Labor Turnover") when:3d',
     ),
     GoogleNewsLane(
         "google_news_us_employment",
@@ -858,32 +850,7 @@ def collect_direct_full_text_rss_news(
     statuses: list[dict[str, object]] = []
     for source in DIRECT_FULL_TEXT_RSS_SOURCES:
         last_poll = ledger.latest_source_poll_time(source.name)
-        recent_polls = ledger.connection.execute(
-            """SELECT fetched_time,status,error FROM source_polls
-            WHERE source=? ORDER BY fetched_time DESC,poll_id DESC LIMIT 3""",
-            (source.name,),
-        ).fetchall()
-        forbidden_streak = 0
-        for row in recent_polls:
-            if row["status"] == "ERROR" and "403" in str(row["error"] or ""):
-                forbidden_streak += 1
-            else:
-                break
-        circuit_retry_at = (
-            last_poll + timedelta(hours=6)
-            if source.name.startswith("bls_") and forbidden_streak >= 3 and last_poll
-            else None
-        )
-        if circuit_retry_at is not None and fetched_at < circuit_retry_at:
-            statuses.append({
-                "source": source.name,
-                "status": "SKIPPED_CIRCUIT_OPEN",
-                "failure_streak": forbidden_streak,
-                "retry_at": circuit_retry_at.isoformat(),
-                "fallback_source": BLS_SOURCE,
-            })
-            continue
-        interval = timedelta(minutes=5 if source.name.startswith("bls_") else 10)
+        interval = timedelta(minutes=10)
         if last_poll is not None and fetched_at - last_poll < interval:
             statuses.append({"source": source.name, "status": "SKIPPED_INTERVAL"})
             continue
@@ -901,7 +868,7 @@ def collect_direct_full_text_rss_news(
                     eligible_records.append(record)
                 else:
                     rejected[reason] = rejected.get(reason, 0) + 1
-            limit = 12 if source.name.startswith("bls_") else 5
+            limit = 5
             full_text_attempts = 0
             for record in eligible_records:
                 if _has_stored_full_text(
@@ -1547,14 +1514,8 @@ def collect_official_news(
     statuses = collect_federal_reserve_news(
         ledger, fetched_at, fetcher, fed_content_extractor
     )
-    direct_rss = collect_direct_full_text_rss_news(ledger, fetched_at, fetcher)
-    statuses.extend(direct_rss)
-    force_bls = any(
-        str(item.get("source", "")).startswith("bls_")
-        and int(item.get("inserted_revisions", 0)) > 0
-        for item in direct_rss
-    )
-    statuses.append(collect_bls_macro(ledger, fetched_at, force=force_bls))
+    statuses.extend(collect_direct_full_text_rss_news(ledger, fetched_at, fetcher))
+    statuses.append(collect_bls_macro(ledger, fetched_at))
     statuses.append(collect_fred_macro(ledger, fetched_at))
     statuses.append(collect_eia_macro(ledger, fetched_at))
     statuses.append(collect_bea_macro(ledger, fetched_at))
