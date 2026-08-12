@@ -24,9 +24,29 @@ reachable even though the BLS RSS pages return HTTP 403. Payrolls, earnings,
 unemployment, headline/core CPI, and JOLTS values are stored with first-seen
 time and later revisions. Without a free BLS registration key the collector
 polls within the public 25-query daily limit; a free key permits five-minute
-polling around the clock. A `bls.gov`-restricted Google News lane supplies a
+polling around the clock. Store the registration key only in the user-level
+`BLS_API_KEY` environment variable; the Control Center injects it into the
+collector process without writing it to source control or logs. A
+`bls.gov`-restricted Google News lane supplies a
 conservative release-page discovery fallback. Its later Google/local receipt
 time is retained; it never backdates visibility to the publisher timestamp.
+
+The Control Center also recognizes `BEA_API_KEY`, `FRED_API_KEY`, and
+`EIA_API_KEY`. Official-data keys may
+be backed up in the ignored local file
+`.local/secrets/collector-keys.json`; user-level environment variables take
+precedence. Secret values are never returned by the dashboard or written to
+collector logs. The BEA Data API is separate from BEA news-release pages and
+uses two hourly NIPA requests for quarterly real-GDP growth, the GDP price
+index, and the PCE price index. The collector records these as point-in-time
+Forward candidates and does not assign model permission. A versioned generation
+contract decides whether and how a model consumes them.
+
+With a registered FRED key, the hourly background collector uses the official
+JSON observations API for its six configured series instead of the public graph
+CSV transport. The EIA adapter makes at most one request per hour and stores the
+latest two official daily WTI observations as point-in-time Forward candidates.
+Collection does not silently replace the active feature source or generation.
 
 ## 4. Optional synchronized symbols
 

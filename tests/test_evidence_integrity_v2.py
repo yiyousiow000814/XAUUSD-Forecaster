@@ -25,6 +25,7 @@ from xauusd_forecaster.live_v2 import (
 )
 from xauusd_forecaster.market import MarketObservation
 from xauusd_forecaster.news_evidence import EVIDENCE_POLICY_VERSION, event_evidence_rows
+from xauusd_forecaster.news_identity import canonical_source_organization
 from xauusd_forecaster.news_contracts import (
     CURRENT_NEWS_CONTRACT,
     NewsContract,
@@ -46,6 +47,22 @@ from xauusd_forecaster.execution_learning import (
     score_execution_predictions, train_due_execution,
 )
 from xauusd_forecaster.training import MARKET_FEATURES
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("federal_reserve_monetary", "federal_reserve"),
+        ("federal_reserve_speeches_testimony", "federal_reserve"),
+        ("bls_consumer_price_index", "bureau_of_labor_statistics"),
+        ("google_news_bls_official_releases", "bureau_of_labor_statistics"),
+        ("finance.yahoo.com", "yahoo_finance"),
+        ("kitco_news", "kitco"),
+        ("bitcoinworld", "bitcoin_world"),
+    ],
+)
+def test_reporting_source_aliases_share_one_identity(raw: str, expected: str) -> None:
+    assert canonical_source_organization(raw) == expected
 
 
 def test_install_repairs_invalid_execution_score_foreign_key() -> None:

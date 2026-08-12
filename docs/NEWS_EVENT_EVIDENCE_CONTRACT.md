@@ -6,6 +6,30 @@ The evidence layer converts a wide news feed into reproducible event-level
 inputs without granting every headline model authority. It preserves broad
 awareness while keeping the training boundary point-in-time and auditable.
 
+## Source intake
+
+Direct official feeds and listing pages apply only objective pre-AI controls:
+the Forward epoch, a 72-hour publication window, immutable item deduplication,
+complete publisher text, and a fixed per-source fetch limit. They do not use
+headline or body keywords to decide XAUUSD meaning. Complete bounded documents
+proceed to semantic review, which may classify them as irrelevant or background
+without granting model authority.
+
+Collector lanes are not independent publishers. Google News and GDELT are
+discovery mechanisms; source trust uses the first-party collector identity or
+the normalized reporting organization. A successful transport poll with no
+recent complete document is reported separately from a healthy
+evidence-producing source. A current candidate whose publisher body cannot be
+fetched is degraded, not successful.
+
+GDELT discovery reads the official 15-minute GKG update archive rather than the
+rate-limited DOC API. The collector verifies the manifest size and MD5 digest,
+bounds compressed and expanded payloads, and selects at most 25 gold-related
+GKG candidates before retrieving publisher text. Gold metadata only scopes the
+discovery lane; it does not decide semantic relevance or model permission. A
+`PAGE_PRECISEPUBTIMESTAMP` is retained when available. Otherwise the GKG batch
+timestamp is a conservative visibility clock, not an inferred event time.
+
 ## Event construction
 
 Only complete stored bodies with a matching immutable Gemini annotation are
@@ -39,6 +63,11 @@ events. Both permissions share the same event identity, time validity,
 materiality, semantic-schema, and point-in-time checks.
 
 ## Model separation
+
+Collection is permission-neutral. A news document or macro observation that
+passes the objective intake checks is retained as a Forward candidate; the
+collector never assigns a model role. Model permission belongs to the versioned
+generation contract and may change only through a complete verified handover.
 
 The official News-residual and Full models remain an independent baseline.
 Broad News-residual learns the residual after cross-fitted Market-only

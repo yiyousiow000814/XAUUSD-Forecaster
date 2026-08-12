@@ -102,17 +102,23 @@ def _reliable_domain(host: str) -> str | None:
 
 
 def _source_organization(row: dict) -> str | None:
-    """Return the reporting identity without granting it reliability."""
+    """Return a stable reporting identity for trust and budgeting."""
     annotation = json.loads(row.get("annotation_json") or "{}")
     declared = canonical_source_organization(
         annotation.get("source_organization_id")
     )
-    publisher = canonical_source_organization(row.get("publisher_domain"))
+    publisher = canonical_source_organization(
+        row.get("reliable_domain") or row.get("publisher_domain")
+    )
     direct_official = (
         canonical_source_organization(row.get("source"))
         if row.get("source") in BROAD_PRIMARY_SOURCES else None
     )
-    return declared or publisher or direct_official
+    # Collector identity is authoritative for first-party feeds.  For external
+    # articles the declared reporting organization keeps syndicated copies with
+    # their origin; deterministic aliases collapse spelling variants.  The
+    # resolved publisher domain remains the auditable fallback.
+    return direct_official or declared or publisher
 
 
 def _topics(row: dict) -> tuple[str, ...]:
