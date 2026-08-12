@@ -402,7 +402,14 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
     by_source = {row["source"]: row for row in rows}
     gdelt = by_source.get("gdelt_gold_geopolitics")
     fallback = by_source.get("google_news_gold_context")
-    if gdelt and fallback and "429" in str(gdelt.get("last_error") or ""):
+    # Historical failures remain visible for audit, but only the current poll
+    # may activate a recovery mode. A later successful GKG poll clears the old
+    # DOC API 429 instead of leaving the source permanently rate-limited.
+    if (
+        gdelt and fallback
+        and gdelt.get("latest_status") == "ERROR"
+        and "429" in str(gdelt.get("last_error") or "")
+    ):
         recent = connection.execute(
             """SELECT fetched_time,status,error FROM source_polls
                WHERE source='gdelt_gold_geopolitics'
