@@ -1,6 +1,6 @@
 # PR 35: News Metrics Source Of Truth
 
-Status: placeholder; implementation has not started.
+Status: implemented and verified.
 
 ## Scope
 
