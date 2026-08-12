@@ -588,9 +588,7 @@ const IMPACT_CLASS_LABELS: Record<string, string> = {
   BACKGROUND: "背景资料",
 };
 
-function NewsRow({ row, keyCount, requestsPerMinute }: {
-  row: News; keyCount: number; requestsPerMinute: number;
-}) {
+function NewsRow({ row }: { row: News }) {
   const [detail, setDetail] = useState<Partial<News> | null>(
     row.summary_zh !== undefined ? row : null,
   );
@@ -670,7 +668,7 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
         {annotationStatus === "READY" ? <section className="gemini-summary">
           <span>GEMINI 中文摘要 · 完整读取 {row.content_characters.toLocaleString("zh-CN")} 字符</span><p>{current.summary_zh}</p>
         </section> : annotationStatus === "QUEUED" ? <section className="gemini-summary summary-queued">
-          <span>FLASH-LITE 摘要排队中</span><p>正文已经完整入库，不会截断。系统正通过 {keyCount} 个 key 轮换，每分钟最多生成 {requestsPerMinute} 篇中文摘要；标题翻译会独立交给 Gemma。</p>
+          <span>中文摘要排队中</span><p>正文已经完整入库，不会截断；系统会依序生成中文摘要，标题翻译独立处理。</p>
         </section> : annotationStatus === "BACKING_OFF" ? <section className="gemini-summary summary-queued">
           <span>暂时退避</span><p>本次模型响应未通过验证；系统已停止每分钟重试，将在退避到期后有限重试。</p>
         </section> : annotationStatus === "DEAD_LETTER" ? <section className="gemini-summary summary-waiting">
@@ -991,8 +989,6 @@ export default function AuditView() {
           {visibleNews.map(row => <NewsRow
             key={`${row.source}-${row.source_item_id}-${row.revision_number}`}
             row={row}
-            keyCount={payload?.annotation_queue?.configured_key_count ?? 0}
-            requestsPerMinute={payload?.annotation_queue?.requests_per_minute ?? 0}
           />)}
           {Array.from({ length: emptyNewsRows }, (_, index) => <div className="news-row-placeholder" aria-hidden="true" key={`empty-news-row-${index}`} />)}
         </section>

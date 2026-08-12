@@ -49,7 +49,7 @@ footer { position:relative; z-index:1; display:flex; justify-content:space-betwe
 .news-browser>div strong { font-family:var(--font-display); font-size:26px; }
 .news-browser>div span { color:var(--muted); font-size:12px; }
 .news-browser nav { display:flex; flex-wrap:wrap; gap:7px; }
-.news-browser button,.news-pagination button { border:1px solid var(--ink); background:transparent; color:var(--ink); padding:9px 12px; font:700 12px var(--font-mono); cursor:pointer; }
+.news-browser button,.news-pagination button { min-height:44px; border:1px solid var(--ink); background:transparent; color:var(--ink); padding:9px 12px; font:700 12px var(--font-mono); cursor:pointer; }
 .news-browser button b { margin-left:9px; font-family:var(--font-display); font-size:16px; }
 .news-browser button:hover,.news-browser button:focus-visible,.news-pagination button:hover:not(:disabled),.news-pagination button:focus-visible { background:#d9d2c1; outline:2px solid var(--acid); outline-offset:-2px; }
 .news-browser button.active { background:var(--ink); color:var(--paper); }
