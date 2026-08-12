@@ -48,10 +48,14 @@ from xauusd_forecaster.annotation import (  # noqa: E402
     INVALID_CHINESE_TITLE,
     PROMPT_VERSION,
     completed_annotation_records,
-    configured_gemini_api_keys,
     pending_annotation_records,
 )
-from xauusd_forecaster.gemini_quota import GeminiQuotaLedger  # noqa: E402
+from xauusd_forecaster.gemini_quota import (  # noqa: E402
+    GEMINI_REQUESTS_PER_DAY_PER_KEY, GeminiQuotaLedger,
+)
+from xauusd_forecaster.news_scheduler import (  # noqa: E402
+    account_quota_snapshot, configured_api_credentials,
+)
 from xauusd_forecaster.training import MARKET_FEATURES  # noqa: E402
 from xauusd_forecaster.learning_curves import learning_curve_payload  # noqa: E402
 from xauusd_forecaster.execution_costs import net_shadow_log_return  # noqa: E402
@@ -1348,6 +1352,9 @@ def _news_metrics(
 
 def _dashboard_payload(database: Path) -> dict:
     now = datetime.now(UTC)
+    credentials = configured_api_credentials()
+    gemini_keys = tuple(credential.api_key for credential in credentials)
+    scheduler_quotas = None
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=5)
     connection.row_factory = sqlite3.Row
     try:
@@ -1789,6 +1796,33 @@ def _dashboard_payload(database: Path) -> dict:
         decision_event_exposures = connection.execute(
             "SELECT count(*) FROM news_decision_event_snapshots_v1"
         ).fetchone()[0]
+        scheduler_ledger_available = connection.execute(
+            """SELECT 1 FROM sqlite_master
+               WHERE type='table' AND name='news_ai_account_daily_usage_v1'"""
+        ).fetchone() is not None
+        if scheduler_ledger_available:
+            scheduler_quotas = {
+                "gemini": account_quota_snapshot(
+                    connection, credentials,
+                    model_families=(DEFAULT_GEMINI_MODEL,),
+                    daily_limit=GEMINI_REQUESTS_PER_DAY_PER_KEY,
+                    now=now,
+                ),
+                "gemini_31": account_quota_snapshot(
+                    connection, credentials,
+                    model_families=(FALLBACK_GEMINI_MODEL,),
+                    daily_limit=GEMINI_REQUESTS_PER_DAY_PER_KEY,
+                    now=now,
+                ),
+                "gemma": account_quota_snapshot(
+                    connection, credentials,
+                    model_families=(
+                        DEFAULT_GEMMA_MODEL, "gemma-impact", "gemma-title",
+                    ),
+                    daily_limit=GEMMA_REQUESTS_PER_DAY_PER_KEY,
+                    now=now,
+                ),
+            }
     finally:
         connection.close()
 
@@ -1937,17 +1971,21 @@ def _dashboard_payload(database: Path) -> dict:
     if latest_data:
         latest_data["features"] = json.loads(latest_data.pop("features_json"))
         latest_data["reason_codes"] = json.loads(latest_data.pop("reason_codes_json"))
-    gemini_keys = configured_gemini_api_keys()
-    gemini_quota = GeminiQuotaLedger(database.parent / "gemini-quota.json").snapshot(
-        gemini_keys
-    )
-    gemini_31_quota = GeminiQuotaLedger(
-        database.parent / "gemini-3.1-flash-lite-quota.json"
-    ).snapshot(gemini_keys)
-    gemma_quota = GeminiQuotaLedger(
-        database.parent / "gemma-quota.json",
-        daily_limit=GEMMA_REQUESTS_PER_DAY_PER_KEY,
-    ).snapshot(gemini_keys)
+    if scheduler_quotas is not None:
+        gemini_quota = scheduler_quotas["gemini"]
+        gemini_31_quota = scheduler_quotas["gemini_31"]
+        gemma_quota = scheduler_quotas["gemma"]
+    else:
+        gemini_quota = GeminiQuotaLedger(
+            database.parent / "gemini-quota.json"
+        ).snapshot(gemini_keys)
+        gemini_31_quota = GeminiQuotaLedger(
+            database.parent / "gemini-3.1-flash-lite-quota.json"
+        ).snapshot(gemini_keys)
+        gemma_quota = GeminiQuotaLedger(
+            database.parent / "gemma-quota.json",
+            daily_limit=GEMMA_REQUESTS_PER_DAY_PER_KEY,
+        ).snapshot(gemini_keys)
     available_gemini_keys = sum(
         item["status"] == "AVAILABLE" for item in gemini_quota["keys"]
     )

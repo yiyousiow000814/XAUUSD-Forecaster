@@ -15,6 +15,9 @@ from pathlib import Path
 
 from xauusd_forecaster.annotation import INVALID_CHINESE_TITLE, PROMPT_VERSION
 from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.news_scheduler import (
+    configured_api_credentials, reserve_account_request,
+)
 
 
 UTC = timezone.utc
@@ -302,6 +305,40 @@ def test_dashboard_annotation_counts_match_current_worker_policy(tmp_path) -> No
     assert metrics["articles"]["semantic_reviews_complete"] == payload["counts"]["parsed_news_items"]
     assert metrics["training"]["current_contract_rows"] == transition["current_contract_exposed_rows"]
     assert metrics["training"]["distinct_events"] == transition["current_contract_distinct_events"]
+
+
+def test_dashboard_quota_uses_scheduler_ledger(tmp_path, monkeypatch) -> None:
+    now = datetime.now(UTC)
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=now)
+    monkeypatch.setenv("GEMINI_API_KEYS", "key-a;key-b")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    credentials = configured_api_credentials()
+    for credential in credentials:
+        assert reserve_account_request(
+            ledger.connection, account_id=credential.account_id,
+            model_family="gemini-3.5-flash-lite", daily_limit=500,
+            requests_per_minute=12, now=now,
+        )
+    assert reserve_account_request(
+        ledger.connection, account_id=credentials[0].account_id,
+        model_family="gemma-impact", daily_limit=15_000,
+        requests_per_minute=12, now=now,
+    )
+    assert reserve_account_request(
+        ledger.connection, account_id=credentials[0].account_id,
+        model_family="gemma-title", daily_limit=15_000,
+        requests_per_minute=12, now=now,
+    )
+    ledger.close()
+
+    payload = _dashboard_module()._dashboard_payload(database)
+
+    assert payload["gemini_quota"]["accounting_source"] == "SCHEDULER_DB"
+    assert payload["gemini_quota"]["total_sent"] == 2
+    assert [row["sent"] for row in payload["gemini_quota"]["keys"]] == [1, 1]
+    assert payload["gemma_quota"]["total_sent"] == 2
+    assert [row["sent"] for row in payload["gemma_quota"]["keys"]] == [2, 0]
 
 
 def test_status_snapshot_cache_singleflights_concurrent_builds(tmp_path) -> None:
