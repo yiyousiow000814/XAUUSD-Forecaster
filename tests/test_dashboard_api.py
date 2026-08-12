@@ -15,6 +15,7 @@ from pathlib import Path
 
 from xauusd_forecaster.annotation import INVALID_CHINESE_TITLE, PROMPT_VERSION
 from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
 from xauusd_forecaster.news_scheduler import (
     configured_api_credentials, reserve_account_request,
 )
@@ -339,6 +340,28 @@ def test_dashboard_quota_uses_scheduler_ledger(tmp_path, monkeypatch) -> None:
     assert [row["sent"] for row in payload["gemini_quota"]["keys"]] == [1, 1]
     assert payload["gemma_quota"]["total_sent"] == 2
     assert [row["sent"] for row in payload["gemma_quota"]["keys"]] == [2, 0]
+
+
+def test_dashboard_quota_keeps_pre_scheduler_file_compatibility(
+    tmp_path, monkeypatch,
+) -> None:
+    now = datetime.now(UTC)
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=now)
+    ledger.connection.execute("DROP TABLE news_ai_account_daily_usage_v1")
+    ledger.connection.commit()
+    ledger.close()
+    monkeypatch.setenv("GEMINI_API_KEYS", "legacy-key")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    GeminiQuotaLedger(tmp_path / "gemini-quota.json").seed(
+        "legacy-key", 7, now=now,
+    )
+
+    payload = _dashboard_module()._dashboard_payload(database)
+
+    assert payload["gemini_quota"]["total_sent"] == 7
+    assert payload["gemini_quota"]["keys"][0]["sent"] == 7
+    assert "accounting_source" not in payload["gemini_quota"]
 
 
 def test_status_snapshot_cache_singleflights_concurrent_builds(tmp_path) -> None:
