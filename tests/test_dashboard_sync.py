@@ -55,6 +55,28 @@ def test_preview_does_not_call_late_aggregated_news_expired() -> None:
     assert row["annotation_reason"] == "搜索线索：来自聚合发现源，不是独立官方发布"
 
 
+def test_preview_fails_closed_until_semantic_relevance_is_mirrored() -> None:
+    module = _preview_module()
+    legacy = module._gold_preview_index({
+        "items": [{"detail_key": "legacy", "category": "其他"}],
+        "all_total": 200,
+    })
+    classified = module._gold_preview_index({
+        "items": [
+            {"detail_key": "gold", "category": "利率/Fed", "xauusd_relevance": "MACRO_DRIVER"},
+            {"detail_key": "other", "category": "其他", "xauusd_relevance": "CONTEXT_ONLY"},
+        ],
+        "all_total": 2,
+    })
+
+    assert legacy["items"] == []
+    assert legacy["gold_total"] == 0
+    assert legacy["other_total"] == 200
+    assert legacy["semantic_relevance_mirrored"] is False
+    assert [row["detail_key"] for row in classified["items"]] == ["gold"]
+    assert classified["category_counts"] == {"利率/Fed": 1}
+
+
 def test_preview_freezes_both_materialized_curve_overviews(monkeypatch) -> None:
     module = _preview_module()
     requested: list[str] = []

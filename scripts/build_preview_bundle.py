@@ -165,6 +165,36 @@ def _backfill_annotation_reasons(news_index: dict, status: dict) -> None:
         item["annotation_reason"] = reason
 
 
+def _gold_preview_index(news_index: dict) -> dict:
+    """Fail closed when production has not mirrored semantic relevance yet."""
+    items = news_index.get("items")
+    if not isinstance(items, list):
+        items = []
+    classified = [
+        item for item in items
+        if isinstance(item, dict) and item.get("xauusd_relevance") in {
+            "DIRECT", "MACRO_DRIVER",
+        }
+    ]
+    has_relevance = any(
+        isinstance(item, dict) and item.get("xauusd_relevance")
+        for item in items
+    )
+    return {
+        **news_index,
+        "items": classified,
+        "total": len(classified),
+        "gold_total": len(classified),
+        "other_total": max(0, int(news_index.get("all_total") or 0) - len(classified)),
+        "category_counts": {
+            name: sum(1 for item in classified if item.get("category") == name)
+            for name in {str(item.get("category") or "其他") for item in classified}
+        },
+        "scope": "gold",
+        "semantic_relevance_mirrored": has_relevance,
+    }
+
+
 def _rebuild_story_snapshot(status: dict) -> None:
     """Replay serialized story nodes through the branch's current policy.
 
@@ -234,6 +264,7 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
     market_chart = _read_json(base_url, "/api/market-chart")
     market_chart["history_resource"] = "/api/market-history"
     news_index = _read_json(base_url, "/api/news-index?limit=50&scope=gold")
+    news_index = _gold_preview_index(news_index)
 
     status["factor_coverage"] = _rebuild_factor_coverage(status)
     _backfill_annotation_reasons(news_index, status)
