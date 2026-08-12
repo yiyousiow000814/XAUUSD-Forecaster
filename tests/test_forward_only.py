@@ -1414,6 +1414,73 @@ def test_google_news_lane_replaces_unresolved_discovery_url(tmp_path) -> None:
     assert tuple(row) == ("replacement", "https://publisher.example/rates")
 
 
+def test_google_news_lane_bounds_failed_full_text_attempts(tmp_path) -> None:
+    fetched = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+    lane = GoogleNewsLane("google_news_fed_rates", "Federal Reserve")
+    items = "".join(
+        f"""<item><guid>blocked-{index}</guid><title>Rates event {index} - Source {index}</title>
+        <pubDate>Sat, 08 Aug 2026 09:{index:02d}:00 GMT</pubDate>
+        <link>https://blocked-{index}.test/rates</link></item>"""
+        for index in range(30)
+    )
+    calls = []
+
+    def extract(url: str) -> tuple[str, str]:
+        calls.append(url)
+        raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+
+    result = collect_google_news_lane(
+        ledger, fetched, lane,
+        fetcher=lambda _: f"<rss><channel>{items}</channel></rss>".encode(),
+        decoder=lambda url: url, content_extractor=extract, limit=10,
+    )
+
+    assert result["status"] == "PARTIAL"
+    assert result["attempt_budget"] == 20
+    assert result["attempted_items"] == 20
+    assert len(calls) == 20
+    assert ledger.count("news_discovery_failures") == 20
+
+
+def test_google_news_lane_defers_then_retries_failed_candidate(tmp_path) -> None:
+    fetched = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+    lane = GoogleNewsLane("google_news_fed_rates", "Federal Reserve")
+    rss = b"""<rss><channel><item><guid>blocked</guid>
+      <title>Federal Reserve outlook - Source Alpha</title>
+      <pubDate>Sat, 08 Aug 2026 09:59:00 GMT</pubDate>
+      <link>https://blocked.test/rates</link></item></channel></rss>"""
+    calls = []
+
+    def extract(url: str) -> tuple[str, str]:
+        calls.append(url)
+        raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+
+    first = collect_google_news_lane(
+        ledger, fetched, lane, fetcher=lambda _: rss, decoder=lambda url: url,
+        content_extractor=extract, limit=1,
+    )
+    deferred = collect_google_news_lane(
+        ledger, fetched + timedelta(minutes=20), lane,
+        fetcher=lambda _: rss, decoder=lambda url: url,
+        content_extractor=extract, limit=1,
+    )
+    retried = collect_google_news_lane(
+        ledger, fetched + timedelta(hours=6, minutes=1), lane,
+        fetcher=lambda _: rss, decoder=lambda url: url,
+        content_extractor=extract, limit=1,
+    )
+
+    assert first["attempted_items"] == 1
+    assert deferred["status"] == "PARTIAL"
+    assert deferred["attempted_items"] == 0
+    assert deferred["deferred_items"] == 1
+    assert retried["attempted_items"] == 1
+    assert len(calls) == 2
+    assert ledger.count("news_discovery_failures") == 2
+
+
 def test_google_news_lane_rejects_old_but_sends_fresh_results_to_ai(tmp_path) -> None:
     fetched = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
