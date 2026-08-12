@@ -296,6 +296,12 @@ def test_dashboard_annotation_counts_match_current_worker_policy(tmp_path) -> No
     transition = payload["learning_curves"]["news_contract_transition"]
     assert payload["news_evidence_summary"]["current_contract_exposed_rows"] == transition["current_contract_exposed_rows"]
     assert payload["news_evidence_summary"]["current_contract_distinct_events"] == transition["current_contract_distinct_events"]
+    metrics = payload["news_metrics"]
+    assert metrics["schema_version"] == "news-metrics-v1"
+    assert metrics["articles"]["stored_revisions"] == payload["counts"]["news_revisions"]
+    assert metrics["articles"]["semantic_reviews_complete"] == payload["counts"]["parsed_news_items"]
+    assert metrics["training"]["current_contract_rows"] == transition["current_contract_exposed_rows"]
+    assert metrics["training"]["distinct_events"] == transition["current_contract_distinct_events"]
 
 
 def test_status_snapshot_cache_singleflights_concurrent_builds(tmp_path) -> None:

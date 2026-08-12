@@ -267,7 +267,7 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /按独立事件说明模型用过什么、没用什么/);
   assert.match(source, /evidence-intro evidence-intro-compact/);
   assert.match(source, /查看统计规则/);
-  assert.match(source, /收到多少篇新闻/);
+  assert.match(source, /收到多少篇文章/);
   assert.match(source, /历史上用过多少个事件/);
   assert.match(source, /影响过多少次预测/);
   assert.match(source, /模型一共读取多少次/);
@@ -296,10 +296,10 @@ test("renders the news and decision audit route", async () => {
   assert.doesNotMatch(source, /payload\?\.system\.online && !error/);
   assert.match(source, /列表与正文详情分开保存/);
   assert.doesNotMatch(source, /这些新闻处理到哪里了/);
-  assert.match(source, /新闻总数/);
-  assert.match(source, /无需解析/);
+  assert.match(source, /篇可读文章/);
+  assert.match(source, /篇无需复核/);
   assert.match(source, /row\.model_visibility !== "NOT_YET_PARSED"/);
-  assert.match(source, /模型可用/);
+  assert.match(source, /篇当前模型候选/);
   assert.ok(source.indexOf('<nav className="audit-tabs"') < source.indexOf('<section className="annotation-queue"'));
   assert.doesNotMatch(source, /已经积累多少结果|真实上线后结果|当前模型学到哪里|距离下次学习/);
   assert.match(source, /上一次学习/);
@@ -839,9 +839,22 @@ test("loads market history by bounded range instead of one growing snapshot", ()
 
 test("explains training rows separately from independent news events", () => {
   const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
-  assert.match(source, /news_evidence_summary\?\.current_contract_exposed_rows/);
-  assert.match(source, /news_evidence_summary\?\.current_contract_distinct_events/);
-  assert.match(source, /不是训练还缺的数量/);
+  const metrics = readFileSync(new URL("../app/_lib/news-metrics.ts", import.meta.url), "utf8");
+  assert.match(source, /newsMetrics\.training\.current_contract_rows/);
+  assert.match(source, /newsMetrics\.training\.distinct_events/);
+  assert.match(source, /文章、独立事件、预测读取和训练记录是四种不同口径/);
+  assert.match(metrics, /schema_version: "news-metrics-v1"/);
+  assert.match(metrics, /One compatibility boundary; views never reinterpret news counts themselves/);
+  assert.doesNotMatch(source, /news_evidence_summary\?\./);
+});
+
+test("live room reports articles and independent events instead of revision rows", () => {
+  const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
+  assert.match(source, /NEWS ARTICLES/);
+  assert.match(source, /newsMetrics\.articles\.received/);
+  assert.match(source, /newsMetrics\.events\.independent/);
+  assert.doesNotMatch(source, /NEWS REVISIONS/);
+  assert.doesNotMatch(source, /counts\.news_revisions/);
 });
 
 test("shows residual and news-only research directions without implying execution", () => {

@@ -5,6 +5,7 @@ import DashboardLink from "../_components/DashboardLink";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
+import { resolveNewsMetrics, type NewsMetrics } from "../_lib/news-metrics";
 
 type Decision = {
   decision_time: string;
@@ -57,6 +58,7 @@ type Payload = {
   } | null;
   u5_context: { percentile: number | null; samples: number; label: string };
   counts: Record<string, number>;
+  news_metrics?: NewsMetrics;
   outcome_summary: {
     samples: number;
     avg_long: number | null;
@@ -191,6 +193,7 @@ export default function LiveRoomView() {
     : marketUnavailable
       ? "无行情"
       : forecastAction;
+  const newsMetrics = resolveNewsMetrics(payload);
 
   return (
     <main>
@@ -257,9 +260,9 @@ export default function LiveRoomView() {
           <small>{payload?.outcome_summary.samples ?? 0} 个有效样本</small>
         </article>
         <article>
-          <span>NEWS REVISIONS</span>
-          <strong>{payload?.counts.news_revisions ?? 0}</strong>
-          <small>LLM {payload?.sources.llm === "ENABLED" ? "已启用" : "Gemini 标注中"}</small>
+          <span>NEWS ARTICLES</span>
+          <strong>{newsMetrics.articles.received}</strong>
+          <small>{newsMetrics.events.independent} 个独立事件 · {newsMetrics.articles.stored_revisions} 个保存版本</small>
         </article>
       </section>
 

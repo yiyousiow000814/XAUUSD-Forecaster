@@ -1088,7 +1088,60 @@ def _news_evidence_display_rows(
         ),
         reverse=True,
     )
-    return rows[:100]
+    return rows
+
+
+def _news_metrics(
+    *,
+    counts: dict[str, int],
+    raw_article_revisions: int,
+    distinct_articles: int,
+    all_news_evidence: list[dict],
+    auditable_events: list[dict],
+    decision_event_exposures: int,
+    learning: dict,
+) -> dict:
+    """Publish one named news-count contract for every public surface."""
+    transition = learning.get("news_contract_transition", {})
+    return {
+        "schema_version": "news-metrics-v1",
+        "articles": {
+            "received": distinct_articles,
+            "stored_revisions": raw_article_revisions,
+            "readable": int(counts.get("readable_news_items", 0)),
+            "semantic_reviews_complete": int(counts.get("parsed_news_items", 0)),
+            "current_model_candidates": int(
+                counts.get("model_candidate_news_items", 0)
+            ),
+        },
+        "events": {
+            "independent": len(all_news_evidence),
+            "auditable": len(auditable_events),
+            "currently_model_eligible": sum(
+                int(row["broad_model_eligible"]) for row in all_news_evidence
+            ),
+            "used_in_predictions": sum(
+                int(row["model_seen"]) for row in auditable_events
+            ),
+            "never_used": sum(
+                int(not row["model_seen"]) for row in auditable_events
+            ),
+        },
+        "prediction_usage": {
+            "decision_event_exposures": decision_event_exposures,
+            "frozen_model_uses": sum(
+                int(row["frozen_model_uses"]) for row in auditable_events
+            ),
+        },
+        "training": {
+            "current_contract_rows": int(
+                transition.get("current_contract_exposed_rows", 0)
+            ),
+            "distinct_events": int(
+                transition.get("current_contract_distinct_events", 0)
+            ),
+        },
+    }
 
 
 def _dashboard_payload(database: Path) -> dict:
@@ -1521,7 +1574,10 @@ def _dashboard_payload(database: Path) -> dict:
         evidence_topics = Counter(
             topic for row in all_news_evidence for topic in row["topics"]
         )
-        news_evidence = _news_evidence_display_rows(connection, all_news_evidence)
+        auditable_news_events = _news_evidence_display_rows(
+            connection, all_news_evidence
+        )
+        news_evidence = auditable_news_events[:100]
         raw_article_revisions = connection.execute(
             "SELECT count(*) FROM news_revisions"
         ).fetchone()[0]
@@ -1862,19 +1918,34 @@ def _dashboard_payload(database: Path) -> dict:
             "unassigned_total": len(event_graph["unassigned_events"]),
             "display_only": True,
         },
+        "news_metrics": _news_metrics(
+            counts=counts,
+            raw_article_revisions=raw_article_revisions,
+            distinct_articles=distinct_articles,
+            all_news_evidence=all_news_evidence,
+            auditable_events=auditable_news_events,
+            decision_event_exposures=decision_event_exposures,
+            learning=learning,
+        ),
         "news_evidence_summary": {
             "policy_version": EVIDENCE_POLICY_VERSION,
             "raw_article_revisions": raw_article_revisions,
             "distinct_articles": distinct_articles,
             "decision_event_exposures": decision_event_exposures,
             "total_events": len(all_news_evidence),
-            "displayed_events": len(news_evidence),
+            "displayed_events": len(auditable_news_events),
             "broad_model_eligible": sum(
                 int(row["broad_model_eligible"]) for row in all_news_evidence
             ),
-            "model_seen_events": sum(int(row["model_seen"]) for row in news_evidence),
-            "model_unseen_events": sum(int(not row["model_seen"]) for row in news_evidence),
-            "frozen_model_uses": sum(int(row["frozen_model_uses"]) for row in news_evidence),
+            "model_seen_events": sum(
+                int(row["model_seen"]) for row in auditable_news_events
+            ),
+            "model_unseen_events": sum(
+                int(not row["model_seen"]) for row in auditable_news_events
+            ),
+            "frozen_model_uses": sum(
+                int(row["frozen_model_uses"]) for row in auditable_news_events
+            ),
             # Reuse the learning contract's sole row/event calculation. These
             # compact fields survive the PR preview bundle even when the heavy
             # learning-curve payload is intentionally removed.
