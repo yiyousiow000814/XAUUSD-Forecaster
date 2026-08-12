@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 import subprocess
 import textwrap
+from datetime import datetime, timedelta, timezone
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,7 +31,8 @@ def test_control_center_treats_weekly_close_as_healthy() -> None:
     assert "Test-ExpectedWeeklyMarketClosure" in control_center
     assert 'return "MARKET CLOSED"' in control_center
     assert '"MARKET CLOSED", "API OK"' in control_center
-    assert '@("STOPPED", "DATA STALE", "API ERROR")' in control_center
+    assert '"SYNC ERROR", "SYNC STALE"' in control_center
+    assert '"COLLECTOR STALE", "ANNOTATOR STALE"' in control_center
 
 
 def test_control_center_loads_collector_keys_without_exposing_them() -> None:
@@ -233,6 +235,15 @@ def test_code_reload_health_requires_fresh_successful_sync(tmp_path) -> None:
         "last_attempt": "2026-08-12T08:00:01+00:00",
         "status": "OK",
     }), encoding="utf-8")
+    for name, service in (
+        ("collector-status.json", "collector"),
+        ("news-annotator-status.json", "annotator"),
+    ):
+        (status.parent / name).write_text(json.dumps({
+            "service": service,
+            "state": "RUNNING",
+            "last_success": "2026-08-12T08:00:01+00:00",
+        }), encoding="utf-8")
     script = ROOT / "scripts" / "xauusd_control_center.ps1"
     command = (
         f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{repo}' "
@@ -252,3 +263,36 @@ def test_code_reload_health_requires_fresh_successful_sync(tmp_path) -> None:
     ).stdout.strip()
 
     assert result == "True,False"
+
+
+def test_service_state_rejects_stale_worker_heartbeat(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    status = repo / ".local" / "forward" / "collector-status.json"
+    status.parent.mkdir(parents=True)
+    now = datetime.now(timezone.utc)
+    status.write_text(json.dumps({
+        "service": "collector",
+        "state": "RUNNING",
+        "last_success": now.isoformat(),
+    }), encoding="utf-8")
+    old_start = (now - timedelta(minutes=10)).isoformat()
+    stale = (now - timedelta(minutes=6)).isoformat()
+    script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    command = (
+        f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{repo}' "
+        f"-RepositoryRoot '{repo}'; "
+        f"function Get-ServiceProcessStartedAt {{ return [DateTimeOffset]::Parse('{old_start}') }}; "
+        "$service = [pscustomobject]@{ Key = 'collector' }; "
+        "$processes = @([pscustomobject]@{ ProcessId = 1 }); "
+        "$fresh = Get-ServiceState -Service $service -Processes $processes; "
+        f"@{{ service = 'collector'; state = 'RUNNING'; last_success = '{stale}' }} "
+        f"| ConvertTo-Json | Set-Content -LiteralPath '{status}'; "
+        "$old = Get-ServiceState -Service $service -Processes $processes; "
+        "Write-Output \"$fresh,$old\""
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    assert result == "RUNNING,COLLECTOR STALE"

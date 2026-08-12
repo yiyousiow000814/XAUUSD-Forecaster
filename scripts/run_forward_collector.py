@@ -31,6 +31,7 @@ from xauusd_forecaster.execution_learning import (  # noqa: E402
     append_due_exit_predictions,
     train_due_execution,
 )
+from xauusd_forecaster.runtime_health import write_runtime_heartbeat  # noqa: E402
 
 
 UTC = timezone.utc
@@ -94,11 +95,13 @@ def main() -> int:
     parser.add_argument("--news-poll-seconds", type=float, default=60.0)
     parser.add_argument("--minimum-training-rows", type=int, default=200)
     parser.add_argument("--retrain-interval", type=int, default=50)
+    parser.add_argument("--status-file", type=Path)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
 
     local_root = args.local_root.resolve()
     local_root.mkdir(parents=True, exist_ok=True)
+    status_file = args.status_file or local_root / "collector-status.json"
     initialized_at = datetime.now(UTC)
     ledger = ForwardLedger(local_root / "forward-evidence.sqlite3", now=initialized_at)
     epoch_receipt = local_root / "forward-epoch.json"
@@ -150,6 +153,9 @@ def main() -> int:
         ),
         flush=True,
     )
+    write_runtime_heartbeat(
+        status_file, service="collector", state="STARTING",
+    )
     # Reconcile at startup even in --once mode.  A rule release must build its
     # compatible news generation from already matured point-in-time evidence;
     # it must not wait for 96 brand-new direction rows.
@@ -163,6 +169,7 @@ def main() -> int:
         ),
         flush=True,
     )
+    write_runtime_heartbeat(status_file, service="collector")
     if args.once:
         ledger.close()
         return 0
@@ -267,6 +274,11 @@ def main() -> int:
                     ),
                     flush=True,
                 )
+            write_runtime_heartbeat(
+                status_file,
+                service="collector",
+                work_items=len(appended_decisions) + len(completed_outcomes),
+            )
             time.sleep(max(1.0, args.poll_seconds))
     finally:
         ledger.close()

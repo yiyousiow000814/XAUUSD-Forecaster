@@ -279,11 +279,15 @@ def test_preemptible_quota_deferral_flows_to_routine_account(
         ),
     )
 
-    statuses = runner.run_scheduled_batch(ledger, batch_size=2)
+    progress = []
+    statuses = runner.run_scheduled_batch(
+        ledger, batch_size=2, progress_callback=progress.append,
+    )
 
     assert [status["pool"] for status in statuses] == [
         PREEMPTIBLE_POOL, ROUTINE_POOL,
     ]
+    assert progress == [1, 2]
     assert ledger.connection.execute(
         "SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
     ).fetchone()["state"] == "COMPLETED"
