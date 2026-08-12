@@ -314,9 +314,9 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /列表与正文详情分开保存/);
   assert.doesNotMatch(source, /这些新闻处理到哪里了/);
   assert.match(source, /条近60天可读新闻/);
-  assert.match(source, /篇无需复核/);
+  assert.match(source, /条无需复核/);
   assert.match(source, /row\.model_visibility !== "NOT_YET_PARSED"/);
-  assert.match(source, /篇当前模型候选/);
+  assert.match(source, /个当前模型候选事件/);
   assert.doesNotMatch(source, /个 key 轮换|每分钟最多生成/);
   assert.ok(source.indexOf('<nav className="audit-tabs"') < source.indexOf('<section className="annotation-queue"'));
   assert.doesNotMatch(source, /已经积累多少结果|真实上线后结果|当前模型学到哪里|距离下次学习/);
