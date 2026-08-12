@@ -63,13 +63,9 @@ def _append_after_full_text(
     extractor: Callable[[str], tuple[str, str]],
 ) -> tuple[bool, str]:
     """Append exactly once, and only after auditable publisher text exists."""
-    latest = ledger.connection.execute(
-        """SELECT body FROM news_revisions
-           WHERE source=? AND source_item_id=?
-           ORDER BY revision_number DESC LIMIT 1""",
-        (record["source"], record["source_item_id"]),
-    ).fetchone()
-    if latest is not None and str(latest["body"] or "").startswith("[FULL_TEXT"):
+    if _has_stored_full_text(
+        ledger, str(record["source"]), str(record["source_item_id"])
+    ):
         return False, "UNCHANGED_FULL_TEXT"
     link = str(record.get("link") or "").strip()
     if not link:
@@ -85,6 +81,21 @@ def _append_after_full_text(
     ).hexdigest()
     _, created = ledger.append_news_revision(record)
     return created, "INSERTED" if created else "UNCHANGED_FULL_TEXT"
+
+
+def _has_stored_full_text(
+    ledger: ForwardLedger, source: str, source_item_id: str,
+) -> bool:
+    latest = ledger.connection.execute(
+        """SELECT body FROM news_revisions
+           WHERE source=? AND source_item_id=?
+           ORDER BY revision_number DESC LIMIT 1""",
+        (source, source_item_id),
+    ).fetchone()
+    return bool(
+        latest is not None
+        and str(latest["body"] or "").startswith("[FULL_TEXT")
+    )
 
 
 OFFICIAL_RSS_SOURCES = (
@@ -111,7 +122,6 @@ class HtmlNewsSource:
     name: str
     url: str
     link_prefix: str
-    relevance_terms: tuple[str, ...]
 
 
 DIRECT_FULL_TEXT_HTML_SOURCES = (
@@ -119,46 +129,13 @@ DIRECT_FULL_TEXT_HTML_SOURCES = (
         "us_treasury_press_releases",
         "https://home.treasury.gov/news/press-releases",
         "/news/press-releases/",
-        (
-            "sanction", "iran", "russia", "war", "terror", "oil", "hormuz",
-            "foreign exchange", "currency", "borrowing", "treasury market",
-            "financial stability", "debt",
-        ),
     ),
     HtmlNewsSource(
         "bea_economic_releases",
         "https://www.bea.gov/news/current-releases",
         "/news/20",
-        (
-            "gross domestic product", "gdp", "personal income", "outlays",
-            "pce", "international trade", "corporate profits",
-        ),
     ),
 )
-DIRECT_RSS_RELEVANCE_TERMS = {
-    "bls_employment_situation": (
-        "employment situation", "nonfarm payroll", "payroll employment",
-        "unemployment rate", "average hourly earnings",
-    ),
-    "bls_consumer_price_index": (
-        "consumer price index", "cpi", "inflation",
-    ),
-    "bls_job_openings": (
-        "job openings", "jolts", "labor turnover",
-    ),
-    "eia_today_in_energy": (
-        "oil", "crude", "petroleum", "gasoline", "diesel", "opec",
-        "hormuz", "strait", "production", "global demand", "supply disruption",
-    ),
-    "eia_press_releases": (
-        "oil", "crude", "petroleum", "gasoline", "diesel", "opec",
-        "hormuz", "strait", "production", "global demand", "supply disruption",
-    ),
-    "ecb_press_releases": (
-        "monetary policy", "interest rate", "inflation", "liquidity",
-        "balance sheet", "exchange rate", "financial stability", "euro area economy",
-    ),
-}
 
 BLS_API_URL = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
 BLS_SOURCE = "bls_public_api"
@@ -616,18 +593,25 @@ def collect_direct_full_text_rss_news(
             inserted = 0
             unchanged = 0
             rejected: dict[str, int] = {}
-            relevant = []
-            terms = DIRECT_RSS_RELEVANCE_TERMS[source.name]
-            for record in parse_rss(raw, source, fetched_at):
-                searchable = f"{record['headline']} {record['body']}".lower()
-                if any(term in searchable for term in terms):
-                    relevant.append(record)
-            limit = 12 if source.name.startswith("bls_") else 5
-            for record in relevant[:limit]:
+            candidates = parse_rss(raw, source, fetched_at)
+            eligible_records = []
+            for record in candidates:
                 eligible, reason = _current_forward_news(record, ledger, fetched_at)
-                if not eligible:
+                if eligible:
+                    eligible_records.append(record)
+                else:
                     rejected[reason] = rejected.get(reason, 0) + 1
+            limit = 12 if source.name.startswith("bls_") else 5
+            full_text_attempts = 0
+            for record in eligible_records:
+                if _has_stored_full_text(
+                    ledger, str(record["source"]), str(record["source_item_id"])
+                ):
+                    unchanged += 1
                     continue
+                if full_text_attempts >= limit:
+                    continue
+                full_text_attempts += 1
                 created, reason = _append_after_full_text(
                     ledger, record, content_extractor
                 )
@@ -635,19 +619,30 @@ def collect_direct_full_text_rss_news(
                 unchanged += int(reason == "UNCHANGED_FULL_TEXT")
                 if reason not in {"INSERTED", "UNCHANGED_FULL_TEXT"}:
                     rejected[reason] = rejected.get(reason, 0) + 1
+            content_blocked = bool(rejected.get("FULL_TEXT_UNAVAILABLE"))
+            poll_status = "PARTIAL" if content_blocked else "OK"
             ledger.append_source_poll(
                 {
                     "poll_id": poll_id,
                     "source": source.name,
                     "fetched_time": fetched_at,
-                    "status": "OK",
+                    "status": poll_status,
                     "payload_hash": hashlib.sha256(raw).hexdigest(),
+                    "error_type": "PublisherContentUnavailable" if content_blocked else None,
+                    "error": (
+                        "Eligible official release found, but publisher full text was unavailable"
+                        if content_blocked else None
+                    ),
                 }
             )
             statuses.append(
                 {
                     "source": source.name,
-                    "status": "OK",
+                    "status": poll_status,
+                    "candidate_items": len(candidates),
+                    "eligible_items": len(eligible_records),
+                    "full_text_attempt_limit": limit,
+                    "full_text_attempts": full_text_attempts,
                     "inserted_revisions": inserted,
                     "unchanged_items": unchanged,
                     "rejected_reasons": rejected,
@@ -700,9 +695,7 @@ def collect_direct_full_text_html_news(
                 if not path.startswith(source.link_prefix) or not headline:
                     continue
                 link = urllib.parse.urljoin(source.url, path)
-                if link in seen or not any(
-                    term in headline.lower() for term in source.relevance_terms
-                ):
+                if link in seen:
                     continue
                 seen.add(link)
                 body = f"Official {source.name} listing discovery"
@@ -726,24 +719,15 @@ def collect_direct_full_text_html_news(
                 records[-1]["content_hash"] = hashlib.sha256(
                     f"{headline}\n{body}\n{link}\n{published}".encode()
                 ).hexdigest()
-                if len(records) >= 5:
-                    break
             inserted = 0
             unchanged = 0
             preserved_full_text = 0
             rejected: dict[str, int] = {}
+            eligible_items = 0
+            full_text_attempts = 0
             for record in records:
-                latest = ledger.connection.execute(
-                    """SELECT headline, body, link FROM news_revisions
-                    WHERE source=? AND source_item_id=?
-                    ORDER BY revision_number DESC LIMIT 1""",
-                    (record["source"], record["source_item_id"]),
-                ).fetchone()
-                if (
-                    latest is not None
-                    and str(latest["body"] or "").startswith("[FULL_TEXT")
-                    and str(latest["headline"] or "") == record["headline"]
-                    and str(latest["link"] or "") == record["link"]
+                if _has_stored_full_text(
+                    ledger, str(record["source"]), str(record["source_item_id"])
                 ):
                     # A listing page proves that the article still exists; it
                     # does not supersede an already captured article body.
@@ -754,6 +738,10 @@ def collect_direct_full_text_html_news(
                 if not eligible:
                     rejected[reason] = rejected.get(reason, 0) + 1
                     continue
+                eligible_items += 1
+                if full_text_attempts >= 5:
+                    continue
+                full_text_attempts += 1
                 created, reason = _append_after_full_text(
                     ledger, record, content_extractor
                 )
@@ -762,20 +750,31 @@ def collect_direct_full_text_html_news(
                 if reason not in {"INSERTED", "UNCHANGED_FULL_TEXT"}:
                     rejected[reason] = rejected.get(reason, 0) + 1
             if not records:
-                raise ValueError(f"{source.name} returned no relevant direct links")
+                raise ValueError(f"{source.name} returned no direct article links")
+            content_blocked = bool(rejected.get("FULL_TEXT_UNAVAILABLE"))
+            poll_status = "PARTIAL" if content_blocked else "OK"
             ledger.append_source_poll(
                 {
                     "poll_id": poll_id,
                     "source": source.name,
                     "fetched_time": fetched_at,
-                    "status": "OK",
+                    "status": poll_status,
                     "payload_hash": hashlib.sha256(raw).hexdigest(),
+                    "error_type": "PublisherContentUnavailable" if content_blocked else None,
+                    "error": (
+                        "Eligible official release found, but publisher full text was unavailable"
+                        if content_blocked else None
+                    ),
                 }
             )
             statuses.append(
                 {
                     "source": source.name,
-                    "status": "OK",
+                    "status": poll_status,
+                    "candidate_items": len(records),
+                    "eligible_items": eligible_items,
+                    "full_text_attempt_limit": 5,
+                    "full_text_attempts": full_text_attempts,
                     "inserted_revisions": inserted,
                     "unchanged_items": unchanged,
                     "preserved_full_text": preserved_full_text,
@@ -1175,12 +1174,16 @@ def collect_federal_reserve_news(
     fed_content_extractor: Callable[[str], tuple[str, str]] = extract_federal_reserve_full_text,
 ) -> list[dict[str, object]]:
     statuses: list[dict[str, object]] = []
+    payload_hashes: list[str] = []
+    errors: list[str] = []
     for source in OFFICIAL_RSS_SOURCES:
         inserted = 0
         unchanged = 0
         rejected: dict[str, int] = {}
         try:
-            for record in parse_rss(fetcher(source), source, fetched_at):
+            payload = fetcher(source)
+            payload_hashes.append(hashlib.sha256(payload).hexdigest())
+            for record in parse_rss(payload, source, fetched_at):
                 eligible, reason = _current_forward_news(record, ledger, fetched_at)
                 if not eligible:
                     rejected[reason] = rejected.get(reason, 0) + 1
@@ -1201,7 +1204,13 @@ def collect_federal_reserve_news(
                     "rejected_reasons": rejected,
                 }
             )
+            if rejected.get("FULL_TEXT_UNAVAILABLE"):
+                errors.append(
+                    f"{source.name}:FullTextUnavailable:"
+                    f"{rejected['FULL_TEXT_UNAVAILABLE']}"
+                )
         except Exception as error:  # source failure must not hide other feeds
+            errors.append(f"{source.name}:{type(error).__name__}:{str(error)[:160]}")
             statuses.append(
                 {
                     "source": source.name,
@@ -1210,6 +1219,22 @@ def collect_federal_reserve_news(
                     "error": str(error)[:500],
                 }
             )
+    aggregate_status = (
+        "OK" if not errors else "PARTIAL" if len(errors) < len(OFFICIAL_RSS_SOURCES)
+        else "ERROR"
+    )
+    ledger.append_source_poll({
+        "poll_id": str(uuid.uuid5(
+            uuid.NAMESPACE_URL, f"federal_reserve_full_text|{fetched_at.isoformat()}"
+        )),
+        "source": "federal_reserve_full_text",
+        "fetched_time": fetched_at,
+        "status": aggregate_status,
+        "payload_hash": hashlib.sha256("|".join(payload_hashes).encode()).hexdigest()
+        if payload_hashes else None,
+        "error_type": "FeedErrors" if errors else None,
+        "error": " | ".join(errors)[:500] if errors else None,
+    })
     return statuses
 
 

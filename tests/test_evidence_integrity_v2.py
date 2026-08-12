@@ -375,7 +375,7 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
         "record_kind": record_kind,
         "actor": entities[0] if entities else "official source",
         "action": "reported",
-        "object": entities[1] if len(entities) > 1 else item,
+        "object": entities[1] if len(entities) > 1 else (material_event_key or item),
         "location": "",
         "event_time": (
             (published_at or first_seen).isoformat()
@@ -385,7 +385,9 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
         "materiality": materiality,
         "canonical_actor_id": "official_source",
         "action_family": "OTHER_FACT",
-        "canonical_object_id": "reported_event",
+        "canonical_object_id": (
+            entities[1] if len(entities) > 1 else (material_event_key or item)
+        ),
         "canonical_location_id": "",
         "episode_key": "",
         "primary_story_title_zh": item,
@@ -395,6 +397,14 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
         "material_event_key": material_event_key,
         "source_organization_id": source_organization_id or source,
         "evidence_role": evidence_role,
+        "xauusd_relevance": (
+            "IRRELEVANT" if primary_category == "regulation_other" else "MACRO_DRIVER"
+        ),
+        "review_priority": "FAST",
+        "material_change": impact_update_type,
+        "time_sensitivity": "SAME_DAY",
+        "semantic_reason_zh": "完整正文显示这是可能影响黄金的宏观事件。",
+        "supporting_evidence": ["publisher full body"],
     }
     annotation.update(annotation_overrides or {})
     ledger.append_annotation({
@@ -403,7 +413,7 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
         "entities": entities, "hawkishness": impulse, "inflation_impulse": 0.0,
         "growth_impulse": 0.0, "geopolitical_risk": 0.0, "usd_impulse": 0.0,
         "novelty": 1.0, "confidence": 1.0, "llm_model_version": "gemini-3.5-flash-lite",
-        "prompt_version": "news-json-v14-material-event-evidence",
+        "prompt_version": "news-json-v15-ai-semantic-review",
         "parse_started_at": parsed_at, "parsed_at": parsed_at,
         "annotation": annotation,
     })
@@ -414,7 +424,7 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
             "source": source, "source_item_id": item, "revision_number": 1,
             "raw_content_hash": digest, "annotation_id": item,
             "llm_model_version": "gemma-4-31b-it",
-            "prompt_version": "news-impact-v2-semantic-prior-candidates",
+            "prompt_version": "news-impact-v3-independent-semantic-review",
             "parse_started_at": assessed_at, "assessed_at": assessed_at,
             "impact_class": impact_class,
             "event_state": "ACTIVE" if impact_class != "BACKGROUND" else "BACKGROUND",
@@ -1135,6 +1145,7 @@ def _attach_event_exposure(rows: list[dict], *, event_days: int = 1,
                 start + timedelta(days=event_index % event_days)
             ).isoformat(),
             "raw_weight": 1.0,
+            "source_budget_id": f"source-{event_index}",
         }
         row["news_exposed"] = True
         row["broad_news_exposed"] = True
@@ -1502,11 +1513,8 @@ def test_retired_contract_cannot_remain_active_after_cleanup(tmp_path) -> None:
     assert inference_v2._has_activated_generation(
         ledger, base + timedelta(minutes=2),
     ) is True
-    assert inference_v2._allow_activated_transition_contract(
-        ledger, base + timedelta(minutes=2),
-    ) is False
     transition = learning_curve_payload(ledger.connection)["news_contract_transition"]
-    assert transition["state"] == "BLOCKED_UNSUPPORTED_ACTIVE_CONTRACT"
+    assert transition["state"] == "BLOCKED_RETIRED_GENERATION"
     assert transition["active_contract"]["policy_version"] == retired.policy_version
     assert transition["target_contract"]["name"] == CURRENT_NEWS_CONTRACT.name
     ledger.close()
@@ -1620,7 +1628,7 @@ def test_news_generation_stays_inactive_until_all_five_news_models_exist() -> No
 
     active = inference_v2._active_updates(updates)
 
-    assert [row["model_version"] for row in active] == ["market-current"]
+    assert active == []
     status = inference_v2.news_model_activation_status(updates)
     assert {
         row["model_identity"]: row["status"] for row in status
@@ -1633,7 +1641,7 @@ def test_news_generation_stays_inactive_until_all_five_news_models_exist() -> No
     }
 
 
-def test_active_updates_reject_old_news_eligibility_but_keep_market() -> None:
+def test_active_updates_reject_entire_generation_with_old_news_eligibility() -> None:
     updates = [
         {"model_identity": "FULL", "model_version": "old-full",
          "eligibility_version": "news-source-eligibility-v2-event-evidence"},
@@ -1642,7 +1650,7 @@ def test_active_updates_reject_old_news_eligibility_but_keep_market() -> None:
         {"model_identity": "MARKET_ONLY", "model_version": "market-current"},
     ]
     active = inference_v2._active_updates(updates)
-    assert [row["model_version"] for row in active] == ["market-current"]
+    assert active == []
 
 
 def test_active_updates_do_not_revive_frozen_legacy_news() -> None:
@@ -1656,10 +1664,10 @@ def test_active_updates_do_not_revive_frozen_legacy_news() -> None:
         {"model_identity": "MARKET_ONLY", "model_version": "market-current"},
     ]
     active = inference_v2._active_updates(updates, {legacy, legacy_broad})
-    assert [row["model_version"] for row in active] == ["market-current"]
+    assert active == []
 
 
-def test_transition_set_requires_an_explicit_exact_contract() -> None:
+def test_noncurrent_contract_is_never_runnable() -> None:
     contract = NewsContract(
         name="transition-test-contract",
         policy_version="transition-policy",
@@ -1684,21 +1692,16 @@ def test_transition_set_requires_an_explicit_exact_contract() -> None:
          ),
          "eligibility_version": contract.eligibility_version},
     ]
-    blocked = inference_v2._active_updates(
-        updates, {contract.eligibility_version}, enforce_current_contract=False,
-    )
-    assert [row["model_version"] for row in blocked] == ["market-live"]
+    blocked = inference_v2._active_updates(updates, {contract.eligibility_version})
+    assert blocked == []
 
-    active = inference_v2._active_updates(
-        updates, {contract.eligibility_version}, enforce_current_contract=False,
-        news_contract=contract,
-    )
-    assert {row["model_version"] for row in active} == {
-        "market-live", "news-live", "full-live", "broad-news-live", "broad-full-live",
-    }
+    statuses = inference_v2.news_model_activation_status(updates)
+    assert {
+        row["status"] for row in statuses if row["model_identity"] != "NEWS_ONLY"
+    } == {"POLICY_MISMATCH"}
 
 
-def test_transition_contract_keeps_exact_old_four_model_set_during_handover() -> None:
+def test_retired_four_model_set_cannot_bypass_five_model_contract() -> None:
     contract = NewsContract(
         name="transition-test-contract",
         policy_version="transition-policy",
@@ -1724,33 +1727,18 @@ def test_transition_contract_keeps_exact_old_four_model_set_during_handover() ->
          "eligibility_version": contract.eligibility_version},
     ]
 
-    active = inference_v2._active_updates(
-        updates, {contract.eligibility_version},
-        enforce_current_contract=False, news_contract=contract,
-    )
-    assert {row["model_version"] for row in active} == {
-        "market-live", "news-live", "full-live", "broad-news-live", "broad-full-live",
-    }
-    statuses = inference_v2.news_model_activation_status(
-        updates, allow_transition_contract=True, transition_contract=contract,
-    )
+    active = inference_v2._active_updates(updates, {contract.eligibility_version})
+    assert active == []
+    statuses = inference_v2.news_model_activation_status(updates)
     by_identity = {row["model_identity"]: row for row in statuses}
     assert {
         row["status"] for identity, row in by_identity.items()
         if identity != "NEWS_ONLY"
-    } == {"TRANSITION_ACTIVE"}
+    } == {"POLICY_MISMATCH"}
     assert by_identity["NEWS_ONLY"]["status"] == "NOT_TRAINED"
-    assert all(
-        "整组切换" in row["reason"]
-        for identity, row in by_identity.items() if identity != "NEWS_ONLY"
-    )
-
     updates[-1]["feature_version"] = "corrupt-contract"
-    blocked = inference_v2._active_updates(
-        updates, {contract.eligibility_version},
-        enforce_current_contract=False, news_contract=contract,
-    )
-    assert [row["model_version"] for row in blocked] == ["market-live"]
+    blocked = inference_v2._active_updates(updates, {contract.eligibility_version})
+    assert blocked == []
 
 
 def test_news_exposure_flag_prevents_residual_without_visible_event() -> None:
@@ -1778,7 +1766,7 @@ def test_newest_news_policy_mismatch_blocks_older_current_model() -> None:
         {"model_identity": "MARKET_ONLY", "model_version": "market-current"},
     ]
     active = inference_v2._active_updates(updates)
-    assert [row["model_version"] for row in active] == ["market-current"]
+    assert active == []
 
 
 def test_news_activation_reports_policy_mismatch() -> None:
@@ -1963,7 +1951,7 @@ def test_event_budget_preserves_freshness_between_events() -> None:
         }]},
     ]
 
-    weights, receipts, summary = training_v2._event_budget_weights(
+    weights, receipts, _, summary = training_v2._event_budget_weights(
         rows, "official_events"
     )
     event_totals = {
@@ -1988,9 +1976,37 @@ def test_single_reliable_training_rows_keep_absolute_35_percent_trust() -> None:
         for index in range(3)
     ]
 
-    weights, _, _ = training_v2._event_budget_weights(rows, "broad_events")
+    weights, _, _, _ = training_v2._event_budget_weights(rows, "broad_events")
 
     assert weights.mean() == pytest.approx(0.35)
+
+
+def test_multiple_events_from_one_source_share_one_source_budget() -> None:
+    rows = [
+        {"decision_id": "a-1", "broad_events": [{
+            "event_id": "event-a-1", "event_version_id": "event-a-1-v1",
+            "raw_weight": 1.0, "source_budget_id": "source-a",
+        }]},
+        {"decision_id": "a-2", "broad_events": [{
+            "event_id": "event-a-2", "event_version_id": "event-a-2-v1",
+            "raw_weight": 1.0, "source_budget_id": "source-a",
+        }]},
+        {"decision_id": "b-1", "broad_events": [{
+            "event_id": "event-b-1", "event_version_id": "event-b-1-v1",
+            "raw_weight": 1.0, "source_budget_id": "source-b",
+        }]},
+    ]
+
+    _, _, source_receipts, summary = training_v2._event_budget_weights(
+        rows, "broad_events",
+    )
+    budgets = {
+        receipt["source_budget_id"]: receipt["bounded_weight"]
+        for receipt in source_receipts
+    }
+
+    assert budgets == {"source-a": pytest.approx(1.0), "source-b": pytest.approx(1.0)}
+    assert summary["maximum_source_weight_share"] == pytest.approx(0.5)
 
 
 def test_commentary_and_low_materiality_are_not_training_evidence(tmp_path) -> None:

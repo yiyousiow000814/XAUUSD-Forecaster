@@ -126,6 +126,20 @@ def append_missing_current_news_snapshots(
                         recomputed_at.isoformat(),
                     ),
                 )
+                source_budget_id = str(event["source_budget_id"])
+                ledger.connection.execute(
+                    """INSERT OR IGNORE INTO news_event_source_budgets_v1
+                    VALUES (?,?,?,?)""",
+                    (
+                        event["event_version_id"], source_budget_id,
+                        (
+                            "REPORTING_ORGANIZATION"
+                            if source_budget_id != event["canonical_source"]
+                            else "COLLECTOR_SOURCE"
+                        ),
+                        recomputed_at.isoformat(),
+                    ),
+                )
                 event_snapshot_hash = canonical_hash((
                     decision_id, decision_time.isoformat(), event["event_id"],
                     event["event_version_id"], event["model_permission"],

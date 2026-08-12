@@ -100,9 +100,8 @@ application-level character slice and appends a concise Simplified-Chinese
 summary together with the structured impulse fields. A new prompt version is a
 new immutable annotation; it never rewrites an earlier interpretation.
 
-The active annotation contract remains
-`news-json-v14-material-event-evidence` while
-`news-json-v15-ai-semantic-review` is built beside it. V15 adds explicit
+The active annotation contract is
+`news-json-v15-ai-semantic-review`. V15 adds explicit
 semantic relevance, review priority, material-change, time-sensitivity,
 reason, and source-evidence fields. Its evidence excerpts must occur in the
 stored headline or body. Casing, spelling, one keyword, or publisher identity
@@ -256,7 +255,8 @@ Each event receives one total training budget within a generation. Its
 five-minute decision exposures divide that budget according to the frozen
 freshness and evidence weight. Ridge fits use the resulting `sample_weight`, so
 repeated visibility preserves continuous estimation without turning one event
-into many independent votes. Official 30-minute evaluation uses fixed,
+into many independent votes. Events attributed to the same canonical reporting
+organization also share one bounded source budget. Official 30-minute evaluation uses fixed,
 non-overlapping `:00` and `:30` decisions; five-minute results remain a clearly
 labelled overlapping diagnostic.
 

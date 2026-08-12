@@ -9,10 +9,10 @@ from pathlib import Path
 from typing import Any
 
 
-CURRENT_NEWS_PROMPT_VERSION = "news-json-v14-material-event-evidence"
-TARGET_NEWS_PROMPT_VERSION = "news-json-v15-ai-semantic-review"
+LEGACY_NEWS_PROMPT_VERSION = "news-json-v14-material-event-evidence"
+CURRENT_NEWS_PROMPT_VERSION = "news-json-v15-ai-semantic-review"
 V1_NEWS_PROMPT_VERSIONS = (
-    CURRENT_NEWS_PROMPT_VERSION,
+    LEGACY_NEWS_PROMPT_VERSION,
     "news-json-v13-event-claims",
     "news-json-v12-gemini-story-identity",
     "news-json-v11-gemini-story-subjects",
@@ -20,17 +20,16 @@ V1_NEWS_PROMPT_VERSIONS = (
 )
 GENERATED_NEWS_PROMPT_VERSIONS = frozenset({
     CURRENT_NEWS_PROMPT_VERSION,
-    TARGET_NEWS_PROMPT_VERSION,
 })
 SUPPORTED_NEWS_PROMPT_VERSIONS = frozenset({
     *V1_NEWS_PROMPT_VERSIONS,
-    TARGET_NEWS_PROMPT_VERSION,
+    CURRENT_NEWS_PROMPT_VERSION,
 })
 
 _SCHEMA_PATH = Path(__file__).with_name("news_annotation.schema.json")
 
 
-TARGET_SEMANTIC_FIELDS = {
+AI_SEMANTIC_FIELDS = {
     "xauusd_relevance": {
         "type": "string",
         "enum": ["DIRECT", "MACRO_DRIVER", "CONTEXT_ONLY", "IRRELEVANT"],
@@ -72,10 +71,10 @@ def news_annotation_schema(
     prompt_version: str = CURRENT_NEWS_PROMPT_VERSION,
 ) -> dict:
     schema = json.loads(_SCHEMA_PATH.read_text(encoding="utf-8"))
-    if prompt_version == TARGET_NEWS_PROMPT_VERSION:
+    if prompt_version == CURRENT_NEWS_PROMPT_VERSION:
         schema["$id"] = "xauusd.forward.news-annotation.v15"
-        schema["required"].extend(TARGET_SEMANTIC_FIELDS)
-        schema["properties"].update(TARGET_SEMANTIC_FIELDS)
+        schema["required"].extend(AI_SEMANTIC_FIELDS)
+        schema["properties"].update(AI_SEMANTIC_FIELDS)
     elif prompt_version not in V1_NEWS_PROMPT_VERSIONS:
         raise ValueError(f"unsupported news prompt version: {prompt_version}")
     return schema
@@ -182,7 +181,7 @@ def validate_news_annotation(
     secondary = annotation["secondary_categories"]
     if annotation["primary_category"] in secondary:
         raise ValueError("annotation category cannot be both primary and secondary")
-    if prompt_version == TARGET_NEWS_PROMPT_VERSION:
+    if prompt_version == CURRENT_NEWS_PROMPT_VERSION:
         if source_text is None:
             raise ValueError("v15 annotation validation requires source text")
         normalized_source = " ".join(source_text.split()).casefold()

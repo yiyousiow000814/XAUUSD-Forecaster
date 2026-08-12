@@ -6,6 +6,22 @@ The evidence layer converts a wide news feed into reproducible event-level
 inputs without granting every headline model authority. It preserves broad
 awareness while keeping the training boundary point-in-time and auditable.
 
+## Source intake
+
+Direct official feeds and listing pages apply only objective pre-AI controls:
+the Forward epoch, a 72-hour publication window, immutable item deduplication,
+complete publisher text, and a fixed per-source fetch limit. They do not use
+headline or body keywords to decide XAUUSD meaning. Complete bounded documents
+proceed to the v15 semantic review, which may classify them as irrelevant or
+background without granting model authority.
+
+Collector lanes are not independent publishers. Google News and GDELT are
+discovery mechanisms; source trust and generation budgets use the first-party
+collector identity or the normalized reporting organization. A successful
+transport poll with no recent complete document is reported separately from a
+healthy evidence-producing source. A current candidate whose publisher body
+cannot be fetched is degraded, not successful.
+
 ## Event construction
 
 Only complete stored bodies with a matching immutable Gemini annotation are
@@ -34,9 +50,9 @@ and risk sentiment. The topic mapper is deterministic and versioned.
 
 The same eligibility engine grants `OFFICIAL_MODEL`, `BROAD_MODEL`, or
 `DISPLAY_ONLY` permission. `OFFICIAL_MODEL` additionally requires a configured
-official source. `BROAD_MODEL` accepts qualified `PRIMARY` and `CORROBORATED`
-events. Both permissions share the same event identity, time validity,
-materiality, semantic-schema, and point-in-time checks.
+official source. `BROAD_MODEL` accepts qualified `PRIMARY`, `CORROBORATED`, and
+bounded `SINGLE_RELIABLE` events. Both permissions share the same event
+identity, time validity, materiality, semantic-schema, and point-in-time checks.
 
 ## Model separation
 
@@ -50,7 +66,9 @@ manual owner approval for any future promotion.
 Every event has one total weight budget per generation. Repeated five-minute
 exposures split that budget using their frozen freshness weights. The news
 residual Ridge consumes these values as `sample_weight`; repeated visibility
-does not create additional event votes.
+does not create additional event votes. Canonical reporting organizations also
+receive one bounded source budget, so several events from one publisher cannot
+dominate several independent sources merely through volume.
 
 One complete generation contains Market-only, News residual, Full, Broad News
 residual, and Broad Full. All five share one cutoff, policy version, event

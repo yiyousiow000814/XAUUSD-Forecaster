@@ -32,7 +32,8 @@ NEWS_EXPERIMENTAL_MIN_CLUSTERS = 1
 NEWS_EXPERIMENTAL_MIN_EVENT_DAYS = 1
 NEWS_MIN_EVENT_DAYS = 3
 CROSSFIT_VERSION = "expanding-market-purge30m-v1"
-EVENT_WEIGHTING_VERSION = "absolute-trust-event-budget-v5-independent-origin"
+EVENT_WEIGHTING_VERSION = "event-and-source-budget-v6-canonical-origin"
+SOURCE_WEIGHT_BUDGET = 1.0
 BROAD_MODEL_FEATURES = (*NEWS_FEATURES, *BROAD_NEWS_FEATURES)
 
 
@@ -89,9 +90,11 @@ def complete_training_rows(ledger, cutoff: datetime) -> list[dict]:
         event_rows = ledger.connection.execute(
             """SELECT s.event_id,s.event_version_id,s.model_permission,s.raw_weight,
                        c.event_occurred_at,c.event_clock_source,c.event_time_precision,
-                       c.evidence_grade
+                       c.evidence_grade,
+                       coalesce(b.source_budget_id,c.canonical_source) AS source_budget_id
             FROM news_decision_event_snapshots_v1 s
             JOIN news_event_catalog_v1 c USING(event_version_id)
+            LEFT JOIN news_event_source_budgets_v1 b USING(event_version_id)
             WHERE s.source_decision_id=? AND s.policy_version=?
             ORDER BY s.model_permission,s.event_id,s.event_version_id""",
             (decision_id, EVIDENCE_POLICY_VERSION),
@@ -197,10 +200,11 @@ def _event_coverage(rows: list[dict], field: str) -> tuple[int, int]:
 
 def _event_budget_weights(
     rows: list[dict], field: str,
-) -> tuple[np.ndarray, list[dict], dict]:
+) -> tuple[np.ndarray, list[dict], list[dict], dict]:
     totals: dict[str, float] = defaultdict(float)
     event_budgets: dict[str, float] = defaultdict(float)
     reference_budgets: dict[str, float] = defaultdict(float)
+    event_sources: dict[str, tuple[float, str]] = {}
     for row in rows:
         for event in row.get(field, []):
             event_id = str(event["event_id"])
@@ -217,8 +221,26 @@ def _event_budget_weights(
                 reference_budgets[event_id] = max(
                     reference_budgets[event_id], raw / trust,
                 )
+            source_id = str(event.get("source_budget_id") or "unknown_source")
+            if event_id not in event_sources or raw > event_sources[event_id][0]:
+                event_sources[event_id] = (raw, source_id)
     if not totals:
         raise ValueError("news residual rows require at least one eligible event")
+    source_unbounded: dict[str, float] = defaultdict(float)
+    for event_id, budget in event_budgets.items():
+        source_unbounded[event_sources[event_id][1]] += budget
+    source_scales = {
+        source_id: min(1.0, SOURCE_WEIGHT_BUDGET / total)
+        for source_id, total in source_unbounded.items()
+    }
+    bounded_event_budgets = {
+        event_id: budget * source_scales[event_sources[event_id][1]]
+        for event_id, budget in event_budgets.items()
+    }
+    bounded_reference_budgets = {
+        event_id: budget * source_scales[event_sources[event_id][1]]
+        for event_id, budget in reference_budgets.items()
+    }
     row_weights = []
     receipts = []
     for row in rows:
@@ -226,7 +248,7 @@ def _event_budget_weights(
         for event in row.get(field, []):
             event_id = str(event["event_id"])
             raw = float(event["raw_weight"])
-            normalized = raw / totals[event_id] * event_budgets[event_id]
+            normalized = raw / totals[event_id] * bounded_event_budgets[event_id]
             budget += normalized
             receipts.append({
                 "source_decision_id": row["decision_id"],
@@ -237,16 +259,29 @@ def _event_budget_weights(
             })
         row_weights.append(budget)
     weights = np.asarray(row_weights, dtype=np.float64)
-    reference_total = sum(reference_budgets.values())
+    reference_total = sum(bounded_reference_budgets.values())
     if reference_total <= 0:
         raise ValueError("news residual rows require trusted event evidence")
     weights *= len(weights) / reference_total
     effective_rows = float(weights.sum() ** 2 / np.square(weights).sum())
-    total_event_budget = sum(event_budgets.values())
+    total_event_budget = sum(bounded_event_budgets.values())
     shares = sorted(
-        (budget / total_event_budget for budget in event_budgets.values()),
+        (budget / total_event_budget for budget in bounded_event_budgets.values()),
         reverse=True,
     )
+    source_bounded = {
+        source_id: total * source_scales[source_id]
+        for source_id, total in source_unbounded.items()
+    }
+    source_shares = sorted(
+        (budget / total_event_budget for budget in source_bounded.values()),
+        reverse=True,
+    )
+    source_receipts = [{
+        "source_budget_id": source_id,
+        "unbounded_weight": source_unbounded[source_id],
+        "bounded_weight": source_bounded[source_id],
+    } for source_id in sorted(source_unbounded)]
     summary = {
         "raw_training_rows": len(rows),
         "distinct_event_count": len(totals),
@@ -254,9 +289,12 @@ def _event_budget_weights(
         "effective_weighted_rows": effective_rows,
         "maximum_event_weight_share": shares[0],
         "top_three_event_weight_share": sum(shares[:3]),
+        "distinct_source_count": len(source_bounded),
+        "maximum_source_weight_share": source_shares[0],
+        "top_three_source_weight_share": sum(source_shares[:3]),
         "total_sample_weight": float(weights.sum()),
     }
-    return weights, receipts, summary
+    return weights, receipts, source_receipts, summary
 
 
 def _latest_generation(connection, stage: str):
@@ -281,7 +319,7 @@ def _write_manifest(path: Path, payload: dict) -> str:
 
 
 def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[dict]:
-    """Build and atomically activate one complete six-model generation."""
+    """Build and atomically activate five core models plus one diagnostic."""
     rows = complete_training_rows(ledger, cutoff)
     count = len(rows)
     if count < PREVIEW_ROWS:
@@ -341,10 +379,12 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
         return [{"status": "NEWS_GENERATION_CROSSFIT_INSUFFICIENT",
                  "official_rows": len(official_residual), "broad_rows": len(broad_residual)}]
 
-    official_weights, official_weight_receipts, official_summary = _event_budget_weights(
+    (official_weights, official_weight_receipts,
+     official_source_receipts, official_summary) = _event_budget_weights(
         official_residual, "official_events"
     )
-    broad_weights, broad_weight_receipts, broad_summary = _event_budget_weights(
+    (broad_weights, broad_weight_receipts,
+     broad_source_receipts, broad_summary) = _event_budget_weights(
         broad_residual, "broad_events"
     )
     official_hash = canonical_hash([
@@ -512,7 +552,7 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
             "INSERT INTO news_model_generation_activations_v1 VALUES (?,?,?,?,?)",
             (str(uuid.uuid5(uuid.NAMESPACE_URL, f"activate:{generation_id}")), generation_id,
              previous["generation_id"] if previous else None, now.isoformat(),
-             "COMPLETE_SIX_MODEL_GENERATION"),
+             "COMPLETE_FIVE_MODEL_GENERATION_WITH_NEWS_ONLY_DIAGNOSTIC"),
         )
         for lane, receipts in (
             ("OFFICIAL", official_weight_receipts), ("BROAD", broad_weight_receipts),
@@ -525,6 +565,21 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
                     (generation_id, lane, receipt["source_decision_id"],
                      receipt["event_id"], receipt["event_version_id"],
                      receipt["raw_weight"], receipt["normalized_event_weight"], receipt_hash),
+                )
+        for lane, receipts in (
+            ("OFFICIAL", official_source_receipts),
+            ("BROAD", broad_source_receipts),
+        ):
+            for receipt in receipts:
+                receipt_hash = canonical_hash((generation_id, lane, receipt))
+                ledger.connection.execute(
+                    """INSERT INTO news_training_source_budget_receipts_v1
+                    VALUES (?,?,?,?,?,?)""",
+                    (
+                        generation_id, lane, receipt["source_budget_id"],
+                        receipt["unbounded_weight"], receipt["bounded_weight"],
+                        receipt_hash,
+                    ),
                 )
     return [{
         "status": "TRAINED", "model_identity": update[1],

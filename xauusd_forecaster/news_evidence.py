@@ -18,6 +18,7 @@ from .news_impact import (
 )
 from .news_contracts import CURRENT_NEWS_CONTRACT
 from .news_identity import (
+    canonical_id,
     canonical_material_event_anchor,
     canonical_source_organization,
 )
@@ -102,17 +103,23 @@ def _reliable_domain(host: str) -> str | None:
 
 
 def _source_organization(row: dict) -> str | None:
-    """Return the reporting identity without granting it reliability."""
+    """Return a stable verified publisher identity for trust and budgeting."""
     annotation = json.loads(row.get("annotation_json") or "{}")
     declared = canonical_source_organization(
         annotation.get("source_organization_id")
     )
-    publisher = canonical_source_organization(row.get("publisher_domain"))
+    publisher = canonical_source_organization(
+        row.get("reliable_domain") or row.get("publisher_domain")
+    )
     direct_official = (
         canonical_source_organization(row.get("source"))
         if row.get("source") in BROAD_PRIMARY_SOURCES else None
     )
-    return declared or publisher or direct_official
+    # Collector identity is authoritative for first-party feeds.  For external
+    # articles the declared reporting organization keeps syndicated copies with
+    # their origin; deterministic aliases collapse spelling variants.  The
+    # resolved publisher domain remains the auditable fallback.
+    return direct_official or declared or publisher
 
 
 def _topics(row: dict) -> tuple[str, ...]:
@@ -131,20 +138,24 @@ def _event_key(
         "collector_first_seen_time": row.get("collector_first_seen_time"),
     }
     anchor = canonical_material_event_anchor(structured)
-    # A system-level canonical development may repair divergent LLM keys. For
-    # ordinary events, an explicit shared material key remains the strongest
-    # identity and must win over a broader structured fallback.
-    if (
-        use_material_event_key and anchor is not None
-        and anchor[0] == "canonical-development"
-    ):
-        return hashlib.sha256(repr(anchor).encode("utf-8")).hexdigest()
     material_event_key = str(annotation.get("material_event_key") or "").strip().casefold()
+    canonical_object = canonical_id(
+        annotation.get("canonical_object_id") or annotation.get("object")
+    )
+    if (
+        use_material_event_key and material_event_key
+        and canonical_id(material_event_key) == canonical_object
+    ):
+        identity = ("material-event", material_event_key)
+        return hashlib.sha256(repr(identity).encode("utf-8")).hexdigest()
+    # Structured occurrence identity is the system source of truth.  Free-form
+    # LLM keys are only a fallback, otherwise two reports of the same fact can
+    # become two training events merely because their generated slugs differ.
+    if use_material_event_key and anchor is not None:
+        return hashlib.sha256(repr(anchor).encode("utf-8")).hexdigest()
     if use_material_event_key and material_event_key:
         identity = ("material-event", material_event_key)
         return hashlib.sha256(repr(identity).encode("utf-8")).hexdigest()
-    if use_material_event_key and anchor is not None:
-        return hashlib.sha256(repr(anchor).encode("utf-8")).hexdigest()
     actor = str(annotation.get("canonical_actor_id") or annotation.get("actor") or "").strip().casefold()
     action = str(annotation.get("action_family") or annotation.get("action") or "").strip().casefold()
     object_id = str(annotation.get("canonical_object_id") or annotation.get("object") or "").strip().casefold()
@@ -363,10 +374,23 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             event_clock is not None
             and event_clock <= decision_time
         )
+        event_age_minutes = (
+            max(0.0, (decision_time - event_clock).total_seconds() / 60.0)
+            if event_clock_valid else None
+        )
+        maximum_age, _ = impact_time_rule(str(canonical.get("impact_class") or "BACKGROUND"))
+        event_lifetime_valid = bool(
+            event_age_minutes is not None
+            and event_age_minutes <= maximum_age.total_seconds() / 60.0
+        )
+        semantic_relevance = str(annotation.get("xauusd_relevance") or "")
+        material_change = str(annotation.get("material_change") or "")
         semantic_eligible = (
             record_kind in ACTIONABLE_RECORD_KINDS
             and evidence_role in ACTIONABLE_EVIDENCE_ROLES
             and materiality >= MIN_ACTIONABLE_MATERIALITY
+            and semantic_relevance in {"DIRECT", "MACRO_DRIVER"}
+            and material_change in {"NEW_EVENT", "MATERIAL_UPDATE"}
         )
         relevant = controlled_category in ACTIONABLE_CATEGORIES
         eligible = (
@@ -376,6 +400,7 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             and relevant
             and semantic_eligible
             and event_clock_valid
+            and event_lifetime_valid
         )
         official_eligible = eligible and canonical["source"] in CORE_OFFICIAL_SOURCES
         source_names = sorted({row["source"] for row in members})
@@ -412,8 +437,14 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             reasons.append("EVIDENCE_ROLE_NOT_ACTIONABLE")
         if materiality < MIN_ACTIONABLE_MATERIALITY:
             reasons.append("LOW_MATERIALITY")
+        if semantic_relevance not in {"DIRECT", "MACRO_DRIVER"}:
+            reasons.append("XAUUSD_SEMANTICALLY_INELIGIBLE")
+        if material_change not in {"NEW_EVENT", "MATERIAL_UPDATE"}:
+            reasons.append("NO_MATERIAL_CHANGE")
         if not event_clock_valid:
             reasons.append("EVENT_TIME_INVALID")
+        elif not event_lifetime_valid:
+            reasons.append("EVENT_LIFETIME_EXPIRED")
         entities = sorted({
             str(value).strip()
             for row in members
@@ -457,6 +488,10 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
                 row["source_identity_organization"] for row in members
                 if row["source_identity_organization"]
             }),
+            "source_budget_id": (
+                canonical.get("source_identity_organization")
+                or canonical["source"]
+            ),
             "canonical_source": canonical["source"],
             "canonical_source_item_id": canonical["source_item_id"],
             "publisher_domain": canonical["publisher_domain"],
@@ -486,6 +521,8 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             "relation_to_prior": annotation.get("relation_to_prior"),
             "document_kind": annotation.get("document_kind"),
             "material_event_key": annotation.get("material_event_key"),
+            "xauusd_relevance": semantic_relevance,
+            "material_change": material_change,
             "source_organization_id": annotation.get("source_organization_id"),
             "evidence_role": annotation.get("evidence_role"),
             "impact_assessment_id": canonical.get("impact_assessment_id"),
@@ -499,7 +536,11 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
                 canonical["time_assessment"].event_time.isoformat()
                 if canonical["time_assessment"].event_time else None
             ),
-            "economic_age_minutes": canonical["time_assessment"].age_minutes,
+            "economic_age_minutes": (
+                event_age_minutes
+                if event_age_minutes is not None
+                else canonical["time_assessment"].age_minutes
+            ),
             "freshness_status": canonical["time_assessment"].reason_code,
             "collector_first_seen_time": min(row["collector_first_seen_time"] for row in members),
             "parsed_at": canonical["parsed_at"],

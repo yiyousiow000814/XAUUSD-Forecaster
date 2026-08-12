@@ -14,13 +14,13 @@ from xauusd_forecaster.forward_ledger import ForwardLedger
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
 from xauusd_forecaster.news_semantics import (
     CURRENT_NEWS_PROMPT_VERSION,
-    TARGET_NEWS_PROMPT_VERSION,
+    LEGACY_NEWS_PROMPT_VERSION,
     news_annotation_schema,
     validate_news_annotation,
 )
 from xauusd_forecaster.news_evidence import event_evidence_rows
 from xauusd_forecaster.news_impact import (
-    TARGET_IMPACT_PROMPT_VERSION,
+    IMPACT_PROMPT_VERSION,
     pending_impact_records,
 )
 
@@ -71,13 +71,13 @@ def _target_annotation(evidence: str) -> dict:
 
 
 def test_v15_schema_is_versioned_without_mutating_v14() -> None:
+    legacy = news_annotation_schema(LEGACY_NEWS_PROMPT_VERSION)
     active = news_annotation_schema(CURRENT_NEWS_PROMPT_VERSION)
-    target = news_annotation_schema(TARGET_NEWS_PROMPT_VERSION)
 
-    assert "review_priority" not in active["properties"]
-    assert "review_priority" in target["required"]
-    assert active["$id"] == "xauusd.forward.news-annotation.v1"
-    assert target["$id"] == "xauusd.forward.news-annotation.v15"
+    assert "review_priority" not in legacy["properties"]
+    assert "review_priority" in active["required"]
+    assert legacy["$id"] == "xauusd.forward.news-annotation.v1"
+    assert active["$id"] == "xauusd.forward.news-annotation.v15"
 
 
 def test_v15_requires_evidence_copied_from_the_source() -> None:
@@ -85,7 +85,7 @@ def test_v15_requires_evidence_copied_from_the_source() -> None:
     annotation = _target_annotation("job openings fell in June")
     validate_news_annotation(
         annotation,
-        prompt_version=TARGET_NEWS_PROMPT_VERSION,
+        prompt_version=CURRENT_NEWS_PROMPT_VERSION,
         source_text=source,
     )
 
@@ -93,14 +93,14 @@ def test_v15_requires_evidence_copied_from_the_source() -> None:
     with pytest.raises(ValueError, match="evidence is absent"):
         validate_news_annotation(
             annotation,
-            prompt_version=TARGET_NEWS_PROMPT_VERSION,
+            prompt_version=CURRENT_NEWS_PROMPT_VERSION,
             source_text=source,
         )
 
 
 def test_v15_prompt_uses_context_not_keyword_or_casing() -> None:
     prompt = annotation_module._annotation_prompt(
-        TARGET_NEWS_PROMPT_VERSION,
+        CURRENT_NEWS_PROMPT_VERSION,
         "earthquake jolts city",
         "A local earthquake damaged buildings.",
     )
@@ -145,7 +145,7 @@ def test_target_backfill_cannot_consume_active_priority_reserve(
         provider="gemini",
         api_key=key,
         limit=1,
-        prompt_version=TARGET_NEWS_PROMPT_VERSION,
+        prompt_version=CURRENT_NEWS_PROMPT_VERSION,
         allow_priority_reserve=False,
     )
 
@@ -156,23 +156,23 @@ def test_target_backfill_cannot_consume_active_priority_reserve(
     ledger.close()
 
 
-def test_target_contract_fails_closed_for_non_gemini_provider(tmp_path) -> None:
+def test_current_contract_fails_closed_for_non_gemini_provider(tmp_path) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
 
     statuses = annotate_pending_news(
         ledger,
         provider="ollama",
-        prompt_version=TARGET_NEWS_PROMPT_VERSION,
+        prompt_version=CURRENT_NEWS_PROMPT_VERSION,
     )
 
     assert statuses == [{
         "status": "DISABLED",
-        "reason": "TARGET_CONTRACT_REQUIRES_GEMINI",
+        "reason": "CURRENT_CONTRACT_REQUIRES_GEMINI",
     }]
     ledger.close()
 
 
-def test_target_annotation_pipeline_persists_versioned_receipt(
+def test_current_annotation_pipeline_persists_versioned_receipt(
     tmp_path, monkeypatch
 ) -> None:
     now = datetime(2026, 8, 11, 10, 0, tzinfo=UTC)
@@ -211,21 +211,21 @@ def test_target_annotation_pipeline_persists_versioned_receipt(
         provider="gemini",
         api_key="test-key",
         limit=1,
-        prompt_version=TARGET_NEWS_PROMPT_VERSION,
+        prompt_version=CURRENT_NEWS_PROMPT_VERSION,
         allow_priority_reserve=False,
     )
 
     assert [status["status"] for status in statuses] == ["OK"]
-    assert seen_versions == [TARGET_NEWS_PROMPT_VERSION]
+    assert seen_versions == [CURRENT_NEWS_PROMPT_VERSION]
     row = ledger.connection.execute(
         "SELECT prompt_version FROM news_annotations WHERE annotation_id=?",
         (statuses[0]["annotation_id"],),
     ).fetchone()
-    assert row["prompt_version"] == TARGET_NEWS_PROMPT_VERSION
+    assert row["prompt_version"] == CURRENT_NEWS_PROMPT_VERSION
     ledger.close()
 
 
-def test_v14_and_v15_annotations_coexist_without_activating_v15(tmp_path) -> None:
+def test_v14_history_and_active_v15_annotations_coexist(tmp_path) -> None:
     now = datetime(2026, 8, 11, 10, 0, tzinfo=UTC)
     body = (
         "The Bureau of Labor Statistics reported job openings fell in June. "
@@ -264,23 +264,23 @@ def test_v14_and_v15_annotations_coexist_without_activating_v15(tmp_path) -> Non
     ledger.append_annotation({
         **common,
         "annotation_id": "active",
-        "prompt_version": CURRENT_NEWS_PROMPT_VERSION,
+        "prompt_version": LEGACY_NEWS_PROMPT_VERSION,
         "annotation": active,
     })
 
     assert pending_annotation_records(
         ledger.connection,
-        prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+        prompt_version=LEGACY_NEWS_PROMPT_VERSION,
     ) == []
     assert len(pending_annotation_records(
         ledger.connection,
-        prompt_version=TARGET_NEWS_PROMPT_VERSION,
+        prompt_version=CURRENT_NEWS_PROMPT_VERSION,
     )) == 1
 
     ledger.append_annotation({
         **common,
         "annotation_id": "target",
-        "prompt_version": TARGET_NEWS_PROMPT_VERSION,
+        "prompt_version": CURRENT_NEWS_PROMPT_VERSION,
         "annotation": target,
     })
     rows = ledger.connection.execute(
@@ -288,19 +288,19 @@ def test_v14_and_v15_annotations_coexist_without_activating_v15(tmp_path) -> Non
     ).fetchall()
     assert {row["prompt_version"] for row in rows} == {
         CURRENT_NEWS_PROMPT_VERSION,
-        TARGET_NEWS_PROMPT_VERSION,
+        LEGACY_NEWS_PROMPT_VERSION,
     }
     target_impacts = pending_impact_records(
         ledger.connection,
         observed_at=now,
-        annotation_prompt_version=TARGET_NEWS_PROMPT_VERSION,
-        impact_prompt_version=TARGET_IMPACT_PROMPT_VERSION,
+        annotation_prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+        impact_prompt_version=IMPACT_PROMPT_VERSION,
     )
     assert [row["annotation_id"] for row in target_impacts] == ["target"]
     ledger.close()
 
 
-def test_target_annotation_is_not_visible_to_active_evidence(tmp_path) -> None:
+def test_active_annotation_requires_independent_impact_before_model_visibility(tmp_path) -> None:
     now = datetime(2026, 8, 11, 10, 0, tzinfo=UTC)
     body = (
         "The Bureau of Labor Statistics reported job openings fell in June. "
@@ -326,11 +326,14 @@ def test_target_annotation_is_not_visible_to_active_evidence(tmp_path) -> None:
         "revision_number": 1,
         "raw_content_hash": digest,
         "llm_model_version": annotation_module.DEFAULT_GEMINI_MODEL,
-        "prompt_version": TARGET_NEWS_PROMPT_VERSION,
+        "prompt_version": CURRENT_NEWS_PROMPT_VERSION,
         "parse_started_at": now,
         "parsed_at": now,
         "annotation": _target_annotation("job openings fell in June"),
     })
 
-    assert event_evidence_rows(ledger, now) == []
+    events = event_evidence_rows(ledger, now)
+    assert len(events) == 1
+    assert events[0]["broad_model_eligible"] is False
+    assert "IMPACT_NOT_ASSESSED" in events[0]["reason_codes"]
     ledger.close()

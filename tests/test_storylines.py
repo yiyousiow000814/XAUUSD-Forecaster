@@ -12,7 +12,7 @@ def event(key, time, headline, **overrides):
         "source_published_time": time,
         "canonical_headline": headline,
         "evidence_grade": "SINGLE_RELIABLE",
-        "prompt_version": "news-json-v14-material-event-evidence",
+        "prompt_version": "news-json-v15-ai-semantic-review",
         "parsed_at": time,
         "independent_publishers": 1,
         "publisher_domains": ("reuters.com",),

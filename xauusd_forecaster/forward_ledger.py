@@ -10,9 +10,9 @@ from pathlib import Path
 from typing import Any
 
 from .news_semantics import (
+    CURRENT_NEWS_PROMPT_VERSION,
     NEWS_CATEGORIES,
     RECORD_KINDS,
-    TARGET_NEWS_PROMPT_VERSION,
     news_annotation_schema,
     validate_news_annotation,
 )
@@ -595,7 +595,7 @@ class ForwardLedger:
             "evidence_role",
         }
         target_semantic_fields = set(
-            news_annotation_schema(TARGET_NEWS_PROMPT_VERSION)["required"]
+            news_annotation_schema(CURRENT_NEWS_PROMPT_VERSION)["required"]
         )
         if set(vector) not in (
             legacy_fields, summary_fields, translated_fields, classified_fields,

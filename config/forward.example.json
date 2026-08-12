@@ -22,7 +22,8 @@
   },
   "news": {
     "official_rss_only": true,
-    "historical_backfill": false
+    "historical_backfill": false,
+    "bls_api_key_environment_variable": "BLS_API_KEY"
   },
   "annotation": {
     "provider": "Google Gemini API",

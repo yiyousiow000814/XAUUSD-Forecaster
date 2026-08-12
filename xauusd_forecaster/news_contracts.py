@@ -13,15 +13,15 @@ class NewsContract:
     policy_version: str
 
 
-SEMANTIC_IMPACT_V10 = NewsContract(
-    name="semantic-impact-v10",
-    feature_version="eligible-news-event-evidence-v12-fact-only",
-    eligibility_version="news-source-eligibility-v10-fact-only",
-    policy_version="news-event-evidence-v10-fact-only",
+AI_SEMANTIC_REVIEW_V15 = NewsContract(
+    name="ai-semantic-review-v15",
+    feature_version="eligible-news-event-evidence-v13-ai-semantic-review",
+    eligibility_version="news-source-eligibility-v11-ai-semantic-review",
+    policy_version="news-event-evidence-v11-canonical-source-budget",
 )
 
 SUPPORTED_NEWS_CONTRACTS = (
-    SEMANTIC_IMPACT_V10,
+    AI_SEMANTIC_REVIEW_V15,
 )
 CURRENT_NEWS_CONTRACT = SUPPORTED_NEWS_CONTRACTS[-1]
 NEWS_CONTRACT_BY_ELIGIBILITY = {
@@ -38,13 +38,3 @@ def generation_matches_contract(generation, contract: NewsContract) -> bool:
         and generation["eligibility_version"] == contract.eligibility_version
         and generation["policy_version"] == contract.policy_version
     )
-
-
-def supported_generation_contract(generation) -> NewsContract | None:
-    """Resolve an activated generation only when its full contract is supported."""
-    if generation is None:
-        return None
-    for contract in SUPPORTED_NEWS_CONTRACTS:
-        if generation_matches_contract(generation, contract):
-            return contract
-    return None

@@ -394,6 +394,9 @@ function Start-ForecasterService {
         $env:GEMINI_API_KEY = [Environment]::GetEnvironmentVariable("GEMINI_API_KEY", "User")
         $env:GEMINI_API_KEYS = [Environment]::GetEnvironmentVariable("GEMINI_API_KEYS", "User")
     }
+    if ($Service.Key -eq "collector") {
+        $env:BLS_API_KEY = [Environment]::GetEnvironmentVariable("BLS_API_KEY", "User")
+    }
     if ($Service.Key -eq "sync") {
         $env:SITES_BYPASS_TOKEN = [Environment]::GetEnvironmentVariable(
             "SITES_BYPASS_TOKEN", "User"

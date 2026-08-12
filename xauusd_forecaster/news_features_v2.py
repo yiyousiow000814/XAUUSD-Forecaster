@@ -233,6 +233,7 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
                 "event_clock_source": row["event_clock_source"],
                 "event_time_precision": row["event_time_precision"],
                 "canonical_source": row["canonical_source"],
+                "source_budget_id": row["source_budget_id"],
                 "canonical_source_item_id": row["canonical_source_item_id"],
                 "source_hash": row["source_hash"],
                 "evidence_grade": row["evidence_grade"],
