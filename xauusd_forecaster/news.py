@@ -1282,12 +1282,10 @@ def collect_google_news_lane(
             inserted += int(created)
             unchanged += int(not created)
             full_text_records.append(record)
-        content_blocked = (
-            bool(selected)
-            and not full_text_records
-            and any(rejected.get(reason, 0) for reason in (
+        content_blocked = any(
+            rejected.get(reason, 0) for reason in (
                 "PUBLISHER_URL_UNRESOLVED", "FULL_TEXT_UNAVAILABLE",
-            ))
+            )
         )
         poll_status = "PARTIAL" if content_blocked else "OK"
         ledger.append_source_poll({
