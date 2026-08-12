@@ -70,6 +70,7 @@ def test_preview_fails_closed_until_semantic_relevance_is_mirrored() -> None:
     })
 
     assert legacy["items"] == []
+    assert legacy["readable_total"] == 200
     assert legacy["gold_total"] == 0
     assert legacy["other_total"] == 200
     assert legacy["archive_total"] == 200

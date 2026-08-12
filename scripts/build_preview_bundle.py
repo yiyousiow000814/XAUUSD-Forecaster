@@ -180,14 +180,19 @@ def _gold_preview_index(news_index: dict) -> dict:
         isinstance(item, dict) and item.get("xauusd_relevance")
         for item in items
     )
+    readable_total = int(
+        news_index.get("readable_total") or news_index.get("all_total") or 0
+    )
     return {
         **news_index,
         "items": classified,
         "total": len(classified),
+        "all_total": readable_total,
+        "readable_total": readable_total,
         "gold_total": len(classified),
-        "other_total": max(0, int(news_index.get("all_total") or 0) - len(classified)),
+        "other_total": max(0, readable_total - len(classified)),
         "archive_total": int(
-            news_index.get("archive_total") or news_index.get("all_total") or 0
+            news_index.get("archive_total") or readable_total
         ),
         "window_days": 60,
         "category_counts": {
