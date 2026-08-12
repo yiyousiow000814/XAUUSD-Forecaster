@@ -9,6 +9,23 @@ declare const __AURUM_DEPLOYMENT__: {
   commit_sha: string;
 };
 
+function deploymentStatus() {
+  const deployment = __AURUM_DEPLOYMENT__;
+  return {
+    status: "OK",
+    main_revision:
+      deployment.branch === "main" && /^[0-9a-f]{40}$/.test(deployment.commit_sha)
+        ? deployment.commit_sha
+        : null,
+  };
+}
+
+export async function GET() {
+  return NextResponse.json(deploymentStatus(), {
+    headers: { "Cache-Control": "no-store" },
+  });
+}
+
 export async function POST(request: Request) {
   const previewRejection = rejectPreviewWrite();
   if (previewRejection) return previewRejection;
@@ -26,12 +43,5 @@ export async function POST(request: Request) {
   if (writeResult === "invalid") {
     return NextResponse.json({ error: "invalid status payload" }, { status: 400 });
   }
-  const deployment = __AURUM_DEPLOYMENT__;
-  return NextResponse.json({
-    status: "OK",
-    main_revision:
-      deployment.branch === "main" && /^[0-9a-f]{40}$/.test(deployment.commit_sha)
-        ? deployment.commit_sha
-        : null,
-  });
+  return NextResponse.json(deploymentStatus());
 }

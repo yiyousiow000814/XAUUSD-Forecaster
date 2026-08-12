@@ -54,8 +54,11 @@ def test_control_center_updates_only_the_isolated_main_runtime() -> None:
     assert '$reloadableServiceKeys = @("collector", "annotator", "api", "sync")' in control_center
     assert 'CODE_REVISION_RELOAD_APPLIED' in control_center
     assert 'Write-RuntimeCodeState -Revision $Revision' in control_center
+    assert 'Test-CodeReloadHealth -ReloadStarted $reloadStarted' in control_center
+    assert 'Start-WatchdogReplacement' in control_center
     assert 'currentRevision -ne $appliedRevision' in control_center
-    assert "Get-SignaledMainRevision" in control_center
+    assert "Get-DeployedMainRevision" in control_center
+    assert "$runtimeUpdateCheckInterval = [TimeSpan]::FromMinutes(5)" in control_center
     assert "Get-VerifiedOriginMain" in control_center
     assert "Test-RevisionDescendsFrom" in control_center
     assert "Test-MainCandidate" in control_center
@@ -91,6 +94,7 @@ def test_watchdog_autostart_uses_one_windowless_registration_path(tmp_path) -> N
     assert '"System32\\wscript.exe"' in control_center
     assert 'Join-Path $moduleRoot "scripts\\xauusd_watchdog_launcher.vbs"' in control_center
     assert "shell.Run(command, 0, True)" in launcher_text
+    assert "Loop While exitCode = 75" in launcher_text
     assert "-WindowStyle Hidden -ExecutionPolicy Bypass -File" not in control_center
 
     marker = tmp_path / "watchdog-marker.txt"
@@ -166,6 +170,81 @@ def test_main_checkpoint_accepts_squash_merge_without_accepting_stale_main(
         f"-CandidateRevision '{squash}'; "
         f"$stale = Test-MainCandidate -CurrentRevision '{feature}' "
         f"-CandidateRevision '{base}'; Write-Output \"$advance,$stale\""
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    assert result == "True,False"
+
+
+def test_runtime_update_requires_matching_deployed_and_verified_main(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    current = "a" * 40
+    candidate = "b" * 40
+    script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    command = (
+        f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{repo}' "
+        f"-RepositoryRoot '{repo}'; "
+        f"function Get-DeployedMainRevision {{ return '{candidate}' }}; "
+        f"function Get-VerifiedOriginMain {{ return '{candidate}' }}; "
+        "function Test-MainCandidate { return $true }; "
+        f"Get-DesiredMainRevision -CurrentRevision '{current}'"
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    assert result == candidate
+
+
+def test_runtime_update_rejects_deployment_git_mismatch(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    current = "a" * 40
+    deployed = "b" * 40
+    verified = "c" * 40
+    script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    command = (
+        f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{repo}' "
+        f"-RepositoryRoot '{repo}'; "
+        f"function Get-DeployedMainRevision {{ return '{deployed}' }}; "
+        f"function Get-VerifiedOriginMain {{ return '{verified}' }}; "
+        "function Test-MainCandidate { return $true }; "
+        f"$result = Get-DesiredMainRevision -CurrentRevision '{current}'; "
+        "if ($null -eq $result) { Write-Output 'REJECTED' }"
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    assert result == "REJECTED"
+
+
+def test_code_reload_health_requires_fresh_successful_sync(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    status = repo / ".local" / "forward" / "dashboard-sync-status.json"
+    status.parent.mkdir(parents=True)
+    status.write_text(json.dumps({
+        "last_attempt": "2026-08-12T08:00:01+00:00",
+        "status": "OK",
+    }), encoding="utf-8")
+    script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    command = (
+        f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{repo}' "
+        f"-RepositoryRoot '{repo}'; "
+        "function Get-ForecasterProcesses { return [pscustomobject]@{ ProcessId = 1 } }; "
+        "function Invoke-WebRequest { return [pscustomobject]@{ StatusCode = 200 } }; "
+        "$started = [DateTimeOffset]::Parse('2026-08-12T08:00:00+00:00'); "
+        "$healthy = Test-CodeReloadHealth -ReloadStarted $started; "
+        f"@{{ last_attempt = '2026-08-12T08:00:01+00:00'; status = 'ERROR' }} "
+        f"| ConvertTo-Json | Set-Content -LiteralPath '{status}'; "
+        "$failed = Test-CodeReloadHealth -ReloadStarted $started; "
+        "Write-Output \"$healthy,$failed\""
     )
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
