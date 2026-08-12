@@ -27,6 +27,7 @@ IMMUTABLE_TABLES = (
     "news_title_translations",
     "news_llm_failures",
     "news_content_failures",
+    "news_discovery_failures",
     "macro_observations",
     "source_polls",
     "decision_events",
@@ -196,6 +197,21 @@ CREATE TABLE IF NOT EXISTS news_content_failures (
 
 CREATE INDEX IF NOT EXISTS news_content_failures_lookup
 ON news_content_failures(source, source_item_id, revision_number, attempt_number);
+
+CREATE TABLE IF NOT EXISTS news_discovery_failures (
+    failure_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    source_item_id TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL CHECK(attempt_number >= 1),
+    error_type TEXT NOT NULL,
+    error TEXT NOT NULL,
+    failed_at TEXT NOT NULL,
+    next_retry_at TEXT NOT NULL,
+    UNIQUE(source, source_item_id, attempt_number)
+);
+
+CREATE INDEX IF NOT EXISTS news_discovery_failures_lookup
+ON news_discovery_failures(source, source_item_id, attempt_number);
 
 CREATE TABLE IF NOT EXISTS macro_observations (
     source TEXT NOT NULL,
@@ -837,6 +853,22 @@ class ForwardLedger:
                     record["error"], _iso(record["failed_at"]),
                     _iso(next_retry) if next_retry else None,
                     int(bool(record.get("is_terminal"))),
+                ),
+            )
+
+    def append_discovery_failure(self, record: dict[str, Any]) -> None:
+        next_retry = record["next_retry_at"]
+        if next_retry <= record["failed_at"]:
+            raise ValueError("discovery retry time must follow failure time")
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO news_discovery_failures VALUES
+                (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    record["failure_id"], record["source"],
+                    record["source_item_id"], record["attempt_number"],
+                    record["error_type"], record["error"],
+                    _iso(record["failed_at"]), _iso(next_retry),
                 ),
             )
 

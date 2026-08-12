@@ -10,6 +10,7 @@ import json
 import os
 import re
 import urllib.parse
+import urllib.error
 import urllib.request
 import uuid
 import xml.etree.ElementTree as ET
@@ -26,15 +27,13 @@ from .content import (
     extract_federal_reserve_full_text,
 )
 from .forward_ledger import ForwardLedger
-from .news_relevance import (
-    google_news_item_is_relevant,
-    google_news_quality_rank,
-)
+from .news_relevance import google_news_item_is_relevant
 
 
 UTC = timezone.utc
 USER_AGENT = "XAUUSD-Forward-Evidence/0.1 (+local research collector)"
 NEWS_INTAKE_MAX_AGE = timedelta(hours=72)
+GOOGLE_NEWS_ATTEMPT_MULTIPLIER = 2
 
 
 @dataclass(frozen=True)
@@ -1234,7 +1233,6 @@ def collect_google_news_lane(
                     "SELECT 1 FROM news_revisions WHERE source=? AND source_item_id=? LIMIT 1",
                     (record["source"], record["source_item_id"]),
                 ).fetchone() is not None,
-                google_news_quality_rank(str(record.get("headline") or "")),
                 -(record["source_published_time"].timestamp()
                   if record.get("source_published_time") else 0.0),
                 str(record["source_item_id"]),
@@ -1242,9 +1240,13 @@ def collect_google_news_lane(
         )
         # ``cluster_id``/``source_item_id`` above are the single mechanical
         # deduplication boundary. Event meaning belongs to the AI annotator.
-        selected = ranked[:limit]
         full_text_records = []
-        for record in selected:
+        attempted = 0
+        attempt_budget = max(limit, limit * GOOGLE_NEWS_ATTEMPT_MULTIPLIER)
+        deferred = 0
+        for record in ranked:
+            if len(full_text_records) >= limit:
+                break
             existing = ledger.connection.execute(
                 """SELECT link, body FROM news_revisions
                 WHERE source=? AND source_item_id=?
@@ -1257,6 +1259,20 @@ def collect_google_news_lane(
                 unchanged += 1
                 full_text_records.append(record)
                 continue
+            if attempted >= attempt_budget:
+                break
+            retry = ledger.connection.execute(
+                """SELECT next_retry_at FROM news_discovery_failures
+                   WHERE source=? AND source_item_id=?
+                   ORDER BY attempt_number DESC LIMIT 1""",
+                (record["source"], record["source_item_id"]),
+            ).fetchone()
+            if retry is not None and datetime.fromisoformat(
+                str(retry["next_retry_at"])
+            ) > fetched_at:
+                deferred += 1
+                continue
+            attempted += 1
             if existing_link and urllib.parse.urlparse(existing_link).hostname != "news.google.com":
                 resolved = existing_link
             else:
@@ -1265,13 +1281,21 @@ def collect_google_news_lane(
                 rejected["PUBLISHER_URL_UNRESOLVED"] = rejected.get(
                     "PUBLISHER_URL_UNRESOLVED", 0
                 ) + 1
+                _append_discovery_failure(
+                    ledger, record, fetched_at, "PUBLISHER_URL_UNRESOLVED",
+                    "Google discovery URL could not be resolved",
+                )
                 continue
             try:
                 text, source_url = content_extractor(resolved)
-            except Exception:
+            except Exception as error:
                 rejected["FULL_TEXT_UNAVAILABLE"] = rejected.get(
                     "FULL_TEXT_UNAVAILABLE", 0
                 ) + 1
+                _append_discovery_failure(
+                    ledger, record, fetched_at, type(error).__name__, str(error),
+                    error=error,
+                )
                 continue
             record["link"] = source_url
             record["body"] = f"[FULL_TEXT source={source_url} chars={len(text)}]\n{text}"
@@ -1282,11 +1306,8 @@ def collect_google_news_lane(
             inserted += int(created)
             unchanged += int(not created)
             full_text_records.append(record)
-        content_blocked = any(
-            rejected.get(reason, 0) for reason in (
-                "PUBLISHER_URL_UNRESOLVED", "FULL_TEXT_UNAVAILABLE",
-            )
-        )
+        target_count = min(limit, len(ranked))
+        content_blocked = len(full_text_records) < target_count
         poll_status = "PARTIAL" if content_blocked else "OK"
         ledger.append_source_poll({
             "poll_id": poll_id, "source": lane.name, "fetched_time": fetched_at,
@@ -1294,7 +1315,7 @@ def collect_google_news_lane(
             "payload_hash": hashlib.sha256(raw).hexdigest(),
             "error_type": "PublisherContentUnavailable" if content_blocked else None,
             "error": (
-                "Relevant search result found, but publisher full text was unavailable"
+                "Full-text target was not filled within retry and attempt limits"
                 if content_blocked else None
             ),
         })
@@ -1303,7 +1324,9 @@ def collect_google_news_lane(
             "status": poll_status,
             "feed_items": len(records),
             "deduped_items": len(deduped),
-            "attempted_items": len(selected),
+            "attempted_items": attempted,
+            "deferred_items": deferred,
+            "attempt_budget": attempt_budget,
             "processed_items": len(full_text_records),
             "rejected_items": sum(rejected.values()),
             "rejected_reasons": rejected,
@@ -1313,6 +1336,46 @@ def collect_google_news_lane(
     except Exception as error:
         ledger.append_source_poll({"poll_id": poll_id, "source": lane.name, "fetched_time": fetched_at, "status": "ERROR", "error_type": type(error).__name__, "error": str(error)[:500]})
         return {"source": lane.name, "status": "ERROR", "error_type": type(error).__name__, "error": str(error)[:500]}
+
+
+def _append_discovery_failure(
+    ledger: ForwardLedger,
+    record: dict[str, object],
+    failed_at: datetime,
+    error_type: str,
+    message: str,
+    *,
+    error: Exception | None = None,
+) -> None:
+    prior = ledger.connection.execute(
+        """SELECT attempt_number FROM news_discovery_failures
+           WHERE source=? AND source_item_id=?
+           ORDER BY attempt_number DESC LIMIT 1""",
+        (record["source"], record["source_item_id"]),
+    ).fetchone()
+    attempt = 1 if prior is None else int(prior["attempt_number"]) + 1
+    http_code = error.code if isinstance(error, urllib.error.HTTPError) else None
+    if http_code in {401, 403, 404, 410, 451} or isinstance(error, ValueError):
+        delay = timedelta(hours=6)
+    elif http_code == 429 or (http_code is not None and http_code >= 500):
+        delay = timedelta(minutes=30)
+    else:
+        delay = timedelta(hours=1)
+    identity = "|".join(
+        (str(record["source"]), str(record["source_item_id"]), str(attempt))
+    )
+    ledger.append_discovery_failure(
+        {
+            "failure_id": str(uuid.uuid5(uuid.NAMESPACE_URL, identity)),
+            "source": record["source"],
+            "source_item_id": record["source_item_id"],
+            "attempt_number": attempt,
+            "error_type": error_type,
+            "error": re.sub(r"\s+", " ", message).strip()[:500],
+            "failed_at": failed_at,
+            "next_retry_at": failed_at + delay,
+        }
+    )
 
 
 def collect_bls_macro(

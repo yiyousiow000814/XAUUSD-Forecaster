@@ -9,17 +9,10 @@ AI semantic annotation; only objective timing failures are rejected here.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-import re
 
 
 GOOGLE_NEWS_MAX_AGE = timedelta(hours=72)
 GOOGLE_NEWS_FUTURE_TOLERANCE = timedelta(minutes=10)
-
-_HIGH_QUALITY_PUBLISHERS = (
-    "reuters", "bloomberg", "associated press", " ap news", "cnbc",
-    "financial times", "wall street journal", "bureau of labor statistics",
-    "federal reserve", "u.s. department of labor", "world gold council",
-)
 
 _GOOGLE_NEWS_SOURCES = frozenset({
     "google_news_gold_context",
@@ -58,10 +51,3 @@ def google_news_item_is_relevant(
     if observed - published > GOOGLE_NEWS_MAX_AGE:
         return False, "SEARCH_RESULT_TOO_OLD"
     return True, "AI_SEMANTIC_REVIEW_REQUIRED"
-
-
-def google_news_quality_rank(headline: str) -> int:
-    """Prefer official and established publishers within the same fresh feed."""
-    text = " " + re.sub(r"\s+", " ", (headline or "").casefold()).strip() + " "
-    publisher = text.rsplit(" - ", 1)[-1]
-    return 0 if any(name in publisher for name in _HIGH_QUALITY_PUBLISHERS) else 1
