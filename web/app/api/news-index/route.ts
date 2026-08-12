@@ -56,22 +56,23 @@ export async function GET(request: Request) {
       const readableArchiveEvidence = `
         json_extract(ni.payload, '$.content_status') IN ('FULL_TEXT', 'SOURCE_CONTENT')
         AND COALESCE(json_extract(ni.payload, '$.model_visibility'), 'COLLECT_ONLY') <> 'COLLECT_ONLY'
-        AND COALESCE(json_extract(ni.payload, '$.xauusd_relevance'),
-                     json_extract(nd.payload, '$.xauusd_relevance'), '') <> 'IRRELEVANT'
         AND ${latestRevision}`;
       const readerWindow = `datetime(COALESCE(
         json_extract(ni.payload, '$.source_published_time'),
         ni.collector_first_seen_time
       )) >= datetime('now', '-${NEWS_READER_WINDOW_DAYS} days')`;
       const readableEvidence = `${readableArchiveEvidence} AND ${readerWindow}`;
+      const relevance = `COALESCE(json_extract(ni.payload, '$.xauusd_relevance'),
+                                   json_extract(nd.payload, '$.xauusd_relevance'), '')`;
+      const visibleEvidence = `${readableEvidence}
+        AND ${relevance} IN ('DIRECT', 'MACRO_DRIVER', 'CONTEXT_ONLY')`;
       const goldEvidence = `${readableEvidence}
-        AND COALESCE(json_extract(ni.payload, '$.xauusd_relevance'),
-                     json_extract(nd.payload, '$.xauusd_relevance')) IN ('DIRECT', 'MACRO_DRIVER')`;
+        AND ${relevance} IN ('DIRECT', 'MACRO_DRIVER')`;
       const otherEvidence = `${readableEvidence}
-        AND COALESCE(json_extract(ni.payload, '$.xauusd_relevance'),
-                     json_extract(nd.payload, '$.xauusd_relevance'), '') NOT IN ('DIRECT', 'MACRO_DRIVER')`;
+        AND ${relevance} = 'CONTEXT_ONLY'`;
+      const unclassifiedEvidence = `${readableEvidence} AND ${relevance} = ''`;
       const scopedEvidence = scope === "other" ? otherEvidence : goldEvidence;
-      const parsedEvidence = `${readableEvidence}
+      const parsedEvidence = `${visibleEvidence}
         AND COALESCE(json_extract(ni.payload, '$.parsed_at'), '') <> ''`;
       const modelCandidateEvidence = `${parsedEvidence}
         AND json_extract(ni.payload, '$.model_visibility') = 'MODEL_VISIBLE'`;
@@ -80,7 +81,7 @@ export async function GET(request: Request) {
         : `WHERE ${scopedEvidence}`;
       const bindValues = category ? [category] : [];
       const offset = (page - 1) * pageSize;
-      const [rows, totalRow, allTotalRow, archiveTotalRow, goldTotalRow, otherTotalRow, parsedTotalRow, modelCandidateTotalRow, categoryRows] = await Promise.all([
+      const [rows, totalRow, allTotalRow, archiveTotalRow, goldTotalRow, otherTotalRow, unclassifiedTotalRow, parsedTotalRow, modelCandidateTotalRow, categoryRows] = await Promise.all([
         binding.prepare(
           `SELECT json_patch(COALESCE(nd.payload, '{}'), ni.payload) AS payload
            FROM news_index ni LEFT JOIN news_details nd USING(detail_key) ${where}
@@ -90,13 +91,15 @@ export async function GET(request: Request) {
         ).bind(...bindValues, pageSize, offset).all<{ payload: string }>(),
         binding.prepare(`SELECT count(*) AS count FROM news_index ni LEFT JOIN news_details nd USING(detail_key) ${where}`)
           .bind(...bindValues).first<{ count: number }>(),
-        binding.prepare(`SELECT count(*) AS count FROM news_index ni LEFT JOIN news_details nd USING(detail_key) WHERE ${readableEvidence}`)
+        binding.prepare(`SELECT count(*) AS count FROM news_index ni LEFT JOIN news_details nd USING(detail_key) WHERE ${visibleEvidence}`)
           .first<{ count: number }>(),
         binding.prepare(`SELECT count(*) AS count FROM news_index ni LEFT JOIN news_details nd USING(detail_key) WHERE ${readableArchiveEvidence}`)
           .first<{ count: number }>(),
         binding.prepare(`SELECT count(*) AS count FROM news_index ni LEFT JOIN news_details nd USING(detail_key) WHERE ${goldEvidence}`)
           .first<{ count: number }>(),
         binding.prepare(`SELECT count(*) AS count FROM news_index ni LEFT JOIN news_details nd USING(detail_key) WHERE ${otherEvidence}`)
+          .first<{ count: number }>(),
+        binding.prepare(`SELECT count(*) AS count FROM news_index ni LEFT JOIN news_details nd USING(detail_key) WHERE ${unclassifiedEvidence}`)
           .first<{ count: number }>(),
         binding.prepare(`SELECT count(*) AS count FROM news_index ni LEFT JOIN news_details nd USING(detail_key) WHERE ${parsedEvidence}`)
           .first<{ count: number }>(),
@@ -116,6 +119,8 @@ export async function GET(request: Request) {
         archive_total: archiveTotalRow?.count ?? 0,
         gold_total: goldTotalRow?.count ?? 0,
         other_total: otherTotalRow?.count ?? 0,
+        unclassified_total: unclassifiedTotalRow?.count ?? 0,
+        classification_complete: (unclassifiedTotalRow?.count ?? 0) === 0,
         parsed_total: parsedTotalRow?.count ?? 0,
         model_candidate_total: modelCandidateTotalRow?.count ?? 0,
         category_counts: Object.fromEntries(
@@ -147,7 +152,7 @@ export async function GET(request: Request) {
         signal: AbortSignal.timeout(4_000),
       });
       const payload = await response.json() as { recent_news?: NewsIndexItem[] };
-      const archivedReadable = (payload.recent_news ?? []).filter(row => row.xauusd_relevance !== "IRRELEVANT");
+      const archivedReadable = payload.recent_news ?? [];
       const cutoff = Date.now() - NEWS_READER_WINDOW_DAYS * 24 * 60 * 60 * 1_000;
       const readable = archivedReadable.filter(row => {
         const published = String(row.source_published_time ?? row.collector_first_seen_time ?? "");
@@ -155,7 +160,9 @@ export async function GET(request: Request) {
         return Number.isFinite(timestamp) && timestamp >= cutoff;
       });
       const gold = readable.filter(row => row.xauusd_relevance === "DIRECT" || row.xauusd_relevance === "MACRO_DRIVER");
-      const other = readable.filter(row => row.xauusd_relevance !== "DIRECT" && row.xauusd_relevance !== "MACRO_DRIVER");
+      const other = readable.filter(row => row.xauusd_relevance === "CONTEXT_ONLY");
+      const unclassified = readable.filter(row => !row.xauusd_relevance);
+      const visible = [...gold, ...other];
       const all = (scope === "other" ? other : gold).sort((left, right) => {
         const leftTime = String(left.source_published_time ?? left.collector_first_seen_time ?? "");
         const rightTime = String(right.source_published_time ?? right.collector_first_seen_time ?? "");
@@ -173,11 +180,13 @@ export async function GET(request: Request) {
       return NextResponse.json({
         items: filtered.slice(offset, offset + pageSize),
         total: filtered.length,
-        all_total: readable.length,
-        readable_total: readable.length,
+        all_total: visible.length,
+        readable_total: visible.length,
         archive_total: archivedReadable.length,
         gold_total: gold.length,
         other_total: other.length,
+        unclassified_total: unclassified.length,
+        classification_complete: unclassified.length === 0,
         parsed_total: parsedTotal,
         model_candidate_total: modelCandidateTotal,
         category_counts: categoryCounts,

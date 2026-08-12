@@ -67,12 +67,17 @@ def test_preview_fails_closed_until_semantic_relevance_is_mirrored() -> None:
             {"detail_key": "other", "category": "其他", "xauusd_relevance": "CONTEXT_ONLY"},
         ],
         "all_total": 2,
+        "readable_total": 2,
+        "other_total": 1,
+        "classification_complete": True,
     })
 
     assert legacy["items"] == []
-    assert legacy["readable_total"] == 200
+    assert legacy["readable_total"] == 0
     assert legacy["gold_total"] == 0
-    assert legacy["other_total"] == 200
+    assert legacy["other_total"] == 0
+    assert legacy["unclassified_total"] == 200
+    assert legacy["classification_complete"] is False
     assert legacy["archive_total"] == 200
     assert legacy["window_days"] == 60
     assert legacy["semantic_relevance_mirrored"] is False

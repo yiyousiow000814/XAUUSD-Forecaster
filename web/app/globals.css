@@ -55,6 +55,7 @@ footer { position:relative; z-index:1; display:flex; justify-content:space-betwe
 .news-browser button b { margin-left:9px; font-family:var(--font-display); font-size:16px; }
 .news-browser button:hover,.news-browser button:focus-visible,.news-pagination button:hover:not(:disabled),.news-pagination button:focus-visible { background:#d9d2c1; outline:2px solid var(--acid); outline-offset:-2px; }
 .news-browser button.active { background:var(--ink); color:var(--paper); }
+.news-browser button:disabled { cursor:not-allowed; opacity:.45; }
 .news-meta { display:grid; grid-template-columns:1fr auto; gap:5px 16px; }
 .news-meta>b { grid-column:2; grid-row:1/3; align-self:center; border:1px solid var(--ink); padding:7px 9px; color:var(--ink); }
 .news-pagination { display:flex; justify-content:center; align-items:center; gap:20px; border:1px solid var(--ink); border-top:0; padding:18px; background:var(--paper); }

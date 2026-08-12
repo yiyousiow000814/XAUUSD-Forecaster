@@ -397,6 +397,9 @@ type NewsIndexResponse = {
   model_candidate_total?: number;
   gold_total?: number;
   other_total?: number;
+  unclassified_total?: number;
+  classification_complete?: boolean;
+  semantic_relevance_mirrored?: boolean;
   window_days?: number;
   category_counts: Record<string, number>;
   page: number;
@@ -878,8 +881,13 @@ export default function AuditView() {
   const readableNewsTotal = newsIndex.readable_total ?? newsMetrics.articles.readable;
   const parsedNewsTotal = newsIndex.parsed_total ?? newsMetrics.articles.semantic_reviews_complete;
   const modelCandidateNewsTotal = newsIndex.model_candidate_total ?? newsMetrics.articles.current_model_candidates;
-  const newsArchiveTotal = newsIndex.archive_total ?? readableNewsTotal;
   const newsWindowDays = newsIndex.window_days ?? 60;
+  const newsClassificationReady = newsIndex.classification_complete
+    ?? newsIndex.semantic_relevance_mirrored
+    ?? false;
+  const publicNewsCount = (value: number | undefined) => (
+    newsClassificationReady ? (value ?? 0) : "—"
+  );
   const newsWaitingTotal = (payload?.annotation_queue?.queued ?? 0)
     + (payload?.annotation_queue?.backing_off ?? 0)
     + (payload?.annotation_queue?.dead_letter ?? 0);
@@ -961,7 +969,7 @@ export default function AuditView() {
       <div className="audit-tabs-shell">
       <button type="button" className="audit-tabs-scroll" onClick={() => scrollAuditTabs(-1)} aria-label="向左查看更多审计视图"><span aria-hidden="true">‹</span></button>
       <nav ref={auditTabsRef} className="audit-tabs" aria-label="审计视图">
-        <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>近{newsWindowDays}天新闻 <b>{readableNewsTotal}</b></a>
+        <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>近{newsWindowDays}天新闻 <b>{publicNewsCount(readableNewsTotal)}</b></a>
         <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>新闻证据管理 <b>{evidenceSummarySeenCount}</b></a>
         <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件脉络 <b>{activeEventTotal}</b></a>
         <a href="/audit?view=decisions" className={view === "decisions" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("decisions"); }}>决策与30分钟结果 <b>{payload?.counts?.decision_events ?? 0}</b></a>
@@ -973,22 +981,22 @@ export default function AuditView() {
 
       {view === "news" && <>
         <section className="annotation-queue" aria-label="新闻处理进度">
-          <span><b>{readableNewsTotal}</b> 篇近{newsWindowDays}天文章</span>
-          <span><b>{parsedNewsTotal}</b> 篇语义复核完成</span>
-          <span><b>{newsIndex.gold_total ?? 0}</b> 篇黄金相关</span>
-          <span><b>{newsIndex.other_total ?? 0}</b> 篇其他</span>
+          <span><b>{publicNewsCount(readableNewsTotal)}</b> 篇近{newsWindowDays}天文章</span>
+          <span><b>{publicNewsCount(parsedNewsTotal)}</b> 篇语义复核完成</span>
+          <span><b>{publicNewsCount(newsIndex.gold_total)}</b> 篇黄金相关</span>
+          <span><b>{publicNewsCount(newsIndex.other_total)}</b> 篇其他背景</span>
           <span><b>{newsWaitingTotal}</b> 篇等待处理</span>
-          <span className="is-model-ready"><b>{modelCandidateNewsTotal}</b> 篇当前模型候选</span>
+          <span className="is-model-ready"><b>{publicNewsCount(modelCandidateNewsTotal)}</b> 篇当前模型候选</span>
           <details>
             <summary>查看处理器技术状态</summary>
             <p>真正排队 {payload?.annotation_queue?.queued ?? 0} · 失败后等待重试 {payload?.annotation_queue?.backing_off ?? 0} · 已隔离 {payload?.annotation_queue?.dead_letter ?? 0} · 等待正文 {payload?.annotation_queue?.waiting_content ?? 0} · 正文不可用 {payload?.annotation_queue?.unavailable_content ?? 0}</p>
           </details>
         </section>
         <section className="news-browser" aria-label="新闻自动分类">
-          <div><strong>新闻阅读</strong><span>按媒体发布时间排序 · 近{newsWindowDays}天 {readableNewsTotal} 篇 · 完整归档 {newsArchiveTotal} 篇 · 每页 {NEWS_PER_PAGE} 篇</span></div>
+          <div><strong>新闻阅读</strong><span>{newsClassificationReady ? `按媒体发布时间排序 · 近${newsWindowDays}天 · 每页 ${NEWS_PER_PAGE} 篇` : "正在同步 Gemini 相关性；旧索引不会显示为“其他”"}</span></div>
           <nav className="news-scope-tabs" aria-label="新闻相关性">
-            <button type="button" className={newsScope === "gold" ? "active" : ""} onClick={() => { setNewsScope("gold"); setNewsCategory("全部"); setNewsPage(1); }}>黄金相关<b>{newsIndex.gold_total ?? 0}</b></button>
-            <button type="button" className={newsScope === "other" ? "active" : ""} onClick={() => { setNewsScope("other"); setNewsCategory("全部"); setNewsPage(1); }}>其他<b>{newsIndex.other_total ?? 0}</b></button>
+            <button type="button" disabled={!newsClassificationReady} className={newsScope === "gold" ? "active" : ""} onClick={() => { setNewsScope("gold"); setNewsCategory("全部"); setNewsPage(1); }}>黄金相关<b>{publicNewsCount(newsIndex.gold_total)}</b></button>
+            <button type="button" disabled={!newsClassificationReady} className={newsScope === "other" ? "active" : ""} onClick={() => { setNewsScope("other"); setNewsCategory("全部"); setNewsPage(1); }}>其他背景<b>{publicNewsCount(newsIndex.other_total)}</b></button>
           </nav>
           <nav className="news-category-tabs" aria-label="新闻主题分类">
             {categories.map(category => <button key={category.name} type="button" className={newsCategory === category.name ? "active" : ""} onClick={() => { setNewsCategory(category.name); setNewsPage(1); }}>
@@ -1002,7 +1010,7 @@ export default function AuditView() {
             key={`${row.source}-${row.source_item_id}-${row.revision_number}`}
             row={row}
           />)}
-          {visibleNews.length === 0 ? <div className="news-reader-empty"><strong>{newsScope === "gold" ? "暂时没有黄金相关新闻" : "暂时没有其他新闻"}</strong><span>等待新闻完成语义复核，或选择另一个分区查看。</span></div> : Array.from({ length: emptyNewsRows }, (_, index) => <div className="news-row-placeholder" aria-hidden="true" key={`empty-news-row-${index}`} />)}
+          {visibleNews.length === 0 ? <div className="news-reader-empty"><strong>{!newsClassificationReady ? "新闻相关性正在同步" : newsScope === "gold" ? "暂时没有黄金相关新闻" : "暂时没有其他背景新闻"}</strong><span>{!newsClassificationReady ? "完成 Gemini 回填后，这里才会显示真实的近60天分类结果。" : "等待新的新闻完成语义复核，或选择另一个分区查看。"}</span></div> : Array.from({ length: emptyNewsRows }, (_, index) => <div className="news-row-placeholder" aria-hidden="true" key={`empty-news-row-${index}`} />)}
         </section>
         {newsPageCount > 1 && <nav className="news-pagination" aria-label="新闻分页">
           <button type="button" disabled={currentNewsPage === 1} onClick={() => setNewsPage(page => Math.max(1, page - 1))}>← 上一页</button>

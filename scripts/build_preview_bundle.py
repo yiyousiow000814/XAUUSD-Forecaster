@@ -176,13 +176,19 @@ def _gold_preview_index(news_index: dict) -> dict:
             "DIRECT", "MACRO_DRIVER",
         }
     ]
-    has_relevance = any(
-        isinstance(item, dict) and item.get("xauusd_relevance")
-        for item in items
-    )
+    classification_complete = bool(news_index.get("classification_complete"))
     readable_total = int(
         news_index.get("readable_total") or news_index.get("all_total") or 0
     )
+    archive_total = int(news_index.get("archive_total") or readable_total)
+    legacy_total = int(news_index.get("all_total") or 0)
+    unclassified_total = int(
+        news_index.get("unclassified_total")
+        or (legacy_total if not classification_complete else 0)
+    )
+    if not classification_complete:
+        classified = []
+        readable_total = 0
     return {
         **news_index,
         "items": classified,
@@ -190,17 +196,20 @@ def _gold_preview_index(news_index: dict) -> dict:
         "all_total": readable_total,
         "readable_total": readable_total,
         "gold_total": len(classified),
-        "other_total": max(0, readable_total - len(classified)),
-        "archive_total": int(
-            news_index.get("archive_total") or readable_total
+        "other_total": (
+            int(news_index.get("other_total") or 0)
+            if classification_complete else 0
         ),
+        "archive_total": archive_total,
         "window_days": 60,
         "category_counts": {
             name: sum(1 for item in classified if item.get("category") == name)
             for name in {str(item.get("category") or "其他") for item in classified}
         },
         "scope": "gold",
-        "semantic_relevance_mirrored": has_relevance,
+        "unclassified_total": unclassified_total,
+        "classification_complete": classification_complete,
+        "semantic_relevance_mirrored": classification_complete,
     }
 
 
