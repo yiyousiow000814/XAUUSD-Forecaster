@@ -25,8 +25,6 @@ from xauusd_forecaster.annotation import (  # noqa: E402
     GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
     IMPACT_PROMPT_VERSION,
     PROMPT_VERSION,
-    TARGET_IMPACT_PROMPT_VERSION,
-    TARGET_PROMPT_VERSION,
     TITLE_PROMPT_VERSION,
     annotate_pending_news,
     assess_pending_news_impacts,
@@ -82,7 +80,7 @@ def _execute_job(
     record = pending_record_for_job(ledger.connection, job, now=now)
     if record is None:
         return {"status": "NOT_CURRENT"}
-    is_annotation = job.task_type in {"ACTIVE_ANNOTATION", "TARGET_ANNOTATION"}
+    is_annotation = job.task_type == "ACTIVE_ANNOTATION"
     urgent = job.priority in {"IMMEDIATE", "FAST"}
 
     def reserver_for(model_family: str, *, reserve_total: int = 0):
@@ -104,15 +102,12 @@ def _execute_job(
             )
         return reserve
 
-    if job.task_type in {"ACTIVE_ANNOTATION", "TARGET_ANNOTATION"}:
+    if job.task_type == "ACTIVE_ANNOTATION":
         common = {
             "ledger": ledger,
             "api_key": credential.api_key,
             "limit": 1,
-            "prompt_version": (
-                PROMPT_VERSION
-                if job.task_type == "ACTIVE_ANNOTATION" else TARGET_PROMPT_VERSION
-            ),
+            "prompt_version": PROMPT_VERSION,
             "allow_priority_reserve": False,
             "records": [record],
         }
@@ -131,16 +126,13 @@ def _execute_job(
                 request_reserver=reserver_for(FALLBACK_GEMINI_MODEL),
             )[0]
         return status
-    if job.task_type in {"ACTIVE_IMPACT", "TARGET_IMPACT"}:
-        target = job.task_type == "TARGET_IMPACT"
+    if job.task_type == "ACTIVE_IMPACT":
         return assess_pending_news_impacts(
             ledger,
             api_key=credential.api_key,
             limit=1,
-            annotation_prompt_version=TARGET_PROMPT_VERSION if target else PROMPT_VERSION,
-            impact_prompt_version=(
-                TARGET_IMPACT_PROMPT_VERSION if target else IMPACT_PROMPT_VERSION
-            ),
+            annotation_prompt_version=PROMPT_VERSION,
+            impact_prompt_version=IMPACT_PROMPT_VERSION,
             records=[record],
             request_reserver=reserver_for("gemma-impact"),
         )[0]

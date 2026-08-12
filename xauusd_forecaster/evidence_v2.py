@@ -31,12 +31,14 @@ V2_IMMUTABLE_TABLES = (
     "news_model_visibility_events_v1",
     "news_model_visibility_receipts_v1",
     "news_event_catalog_v1",
+    "news_event_source_budgets_v1",
     "news_decision_event_snapshots_v1",
     "news_model_generations_v1",
     "news_model_generation_members_v1",
     "news_model_generation_aux_members_v1",
     "news_model_generation_activations_v1",
     "news_training_weight_receipts_v1",
+    "news_training_source_budget_receipts_v1",
     "news_only_visibility_receipts_v1",
     "news_item_classifications_v1",
     "news_impact_assessments_v1",
@@ -322,6 +324,14 @@ CREATE TABLE IF NOT EXISTS news_decision_event_snapshots_v1 (
     PRIMARY KEY(source_decision_id,event_version_id,model_permission)
 );
 
+CREATE TABLE IF NOT EXISTS news_event_source_budgets_v1 (
+    event_version_id TEXT PRIMARY KEY REFERENCES news_event_catalog_v1(event_version_id),
+    source_budget_id TEXT NOT NULL,
+    identity_basis TEXT NOT NULL CHECK(identity_basis IN (
+        'REPORTING_ORGANIZATION','COLLECTOR_SOURCE')),
+    first_recorded_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS news_model_generations_v1 (
     generation_id TEXT PRIMARY KEY,
     model_stage TEXT NOT NULL CHECK(model_stage IN ('PREVIEW_ONLY','SHADOW')),
@@ -375,6 +385,16 @@ CREATE TABLE IF NOT EXISTS news_training_weight_receipts_v1 (
     normalized_event_weight REAL NOT NULL CHECK(normalized_event_weight >= 0),
     receipt_hash TEXT NOT NULL,
     PRIMARY KEY(generation_id,evidence_lane,source_decision_id,event_version_id)
+);
+
+CREATE TABLE IF NOT EXISTS news_training_source_budget_receipts_v1 (
+    generation_id TEXT NOT NULL REFERENCES news_model_generations_v1(generation_id),
+    evidence_lane TEXT NOT NULL CHECK(evidence_lane IN ('OFFICIAL','BROAD')),
+    source_budget_id TEXT NOT NULL,
+    unbounded_weight REAL NOT NULL CHECK(unbounded_weight >= 0),
+    bounded_weight REAL NOT NULL CHECK(bounded_weight >= 0),
+    receipt_hash TEXT NOT NULL,
+    PRIMARY KEY(generation_id,evidence_lane,source_budget_id)
 );
 
 CREATE TABLE IF NOT EXISTS news_only_visibility_receipts_v1 (
@@ -639,6 +659,8 @@ CREATE INDEX IF NOT EXISTS news_event_catalog_identity_v1
 ON news_event_catalog_v1(event_id,event_occurred_at);
 CREATE INDEX IF NOT EXISTS news_decision_event_time_v1
 ON news_decision_event_snapshots_v1(decision_time,event_id);
+CREATE INDEX IF NOT EXISTS news_event_source_budget_id_v1
+ON news_event_source_budgets_v1(source_budget_id,event_version_id);
 CREATE INDEX IF NOT EXISTS news_generation_activation_time_v1
 ON news_model_generation_activations_v1(activated_at,generation_id);
 CREATE INDEX IF NOT EXISTS news_only_visibility_event_v1

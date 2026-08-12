@@ -100,9 +100,8 @@ application-level character slice and appends a concise Simplified-Chinese
 summary together with the structured impulse fields. A new prompt version is a
 new immutable annotation; it never rewrites an earlier interpretation.
 
-The active annotation contract remains
-`news-json-v14-material-event-evidence` while
-`news-json-v15-ai-semantic-review` is built beside it. V15 adds explicit
+The active annotation contract is
+`news-json-v15-ai-semantic-review`. V15 adds explicit
 semantic relevance, review priority, material-change, time-sensitivity,
 reason, and source-evidence fields. Its evidence excerpts must occur in the
 stored headline or body. Casing, spelling, one keyword, or publisher identity
@@ -235,20 +234,23 @@ classifications such as `CONTENT_UNAVAILABLE`, `DUPLICATE_DOCUMENT`, and
 
 ## Active free source boundary
 
-The official News-residual path accepts source-qualified official full bodies.
+The official News-residual path accepts objectively qualified official full bodies.
 Official and Broad news paths share one event snapshot and event-clock policy.
 The Broad permission uses these evidence grades:
 
 - `PRIMARY`: a complete annotated body from a configured first-party source;
 - `CORROBORATED`: complete annotated bodies about the same event from at least
-  two independent publishers on the reliable-domain list;
-- `SINGLE_RELIABLE`: one reliable publisher, display-only;
-- `DISCOVERY_ONLY`: unconfirmed discovery or aggregation source, display-only.
+  two independently identified publishers;
+- `SINGLE_RELIABLE`: one publisher on the reliability registry;
+- `SINGLE_SOURCE`: one identified publisher outside that registry;
+- `DISCOVERY_ONLY`: no publisher identity can be verified, display-only.
 
 An event also needs at least one declared XAUUSD topic before it can enter Broad
 features. Topics cover rates/Fed, inflation, employment, growth, USD/liquidity,
 oil/energy, war/geopolitics, central-bank gold, and risk sentiment. Source
-identity never grants media content model permission by itself. Event grouping,
+identity never grants media content model permission by itself. Officiality,
+reliability, independent-source count, corroboration, and syndication are model
+features instead of source bans. Event grouping,
 evidence grade, permission, members, first-seen cutoff, and source hash are
 deterministic and visible on the evidence dashboard.
 
@@ -256,7 +258,8 @@ Each event receives one total training budget within a generation. Its
 five-minute decision exposures divide that budget according to the frozen
 freshness and evidence weight. Ridge fits use the resulting `sample_weight`, so
 repeated visibility preserves continuous estimation without turning one event
-into many independent votes. Official 30-minute evaluation uses fixed,
+into many independent votes. Events attributed to the same canonical reporting
+organization also share one bounded source budget. Official 30-minute evaluation uses fixed,
 non-overlapping `:00` and `:30` decisions; five-minute results remain a clearly
 labelled overlapping diagnostic.
 

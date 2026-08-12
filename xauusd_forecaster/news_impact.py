@@ -11,8 +11,7 @@ from .news_semantics import CURRENT_NEWS_PROMPT_VERSION
 
 
 IMPACT_MODEL = "gemma-4-31b-it"
-IMPACT_PROMPT_VERSION = "news-impact-v2-semantic-prior-candidates"
-TARGET_IMPACT_PROMPT_VERSION = "news-impact-v3-independent-semantic-review"
+IMPACT_PROMPT_VERSION = "news-impact-v3-independent-semantic-review"
 
 IMPACT_TIME_RULES = {
     "IMMEDIATE": (timedelta(hours=2), 30.0),

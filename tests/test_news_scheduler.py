@@ -24,7 +24,6 @@ from xauusd_forecaster.news_scheduler import (
 from xauusd_forecaster.forward_ledger import ForwardLedger
 from xauusd_forecaster.news_semantics import (
     CURRENT_NEWS_PROMPT_VERSION,
-    TARGET_NEWS_PROMPT_VERSION,
 )
 
 
@@ -222,13 +221,6 @@ def test_sync_uses_v15_semantic_priority_not_headline_keywords(tmp_path) -> None
         "semantic_reason_zh": "完整正文显示行政更新已经生效。",
         "supporting_evidence": ["administrative update took effect"],
     }
-    active = {
-        key: value for key, value in target.items()
-        if key not in {
-            "xauusd_relevance", "review_priority", "material_change",
-            "time_sensitivity", "semantic_reason_zh", "supporting_evidence",
-        }
-    }
     common = {
         "source": "semantic-scheduler-test",
         "source_item_id": "ordinary-headline",
@@ -239,12 +231,8 @@ def test_sync_uses_v15_semantic_priority_not_headline_keywords(tmp_path) -> None
         "parsed_at": NOW,
     }
     ledger.append_annotation({
-        **common, "annotation_id": "active", "annotation": active,
+        **common, "annotation_id": "active", "annotation": target,
         "prompt_version": CURRENT_NEWS_PROMPT_VERSION,
-    })
-    ledger.append_annotation({
-        **common, "annotation_id": "target", "annotation": target,
-        "prompt_version": TARGET_NEWS_PROMPT_VERSION,
     })
 
     sync_pending_jobs(ledger.connection, now=NOW)
@@ -252,9 +240,9 @@ def test_sync_uses_v15_semantic_priority_not_headline_keywords(tmp_path) -> None
         ledger.connection, worker_id="urgent", pool=PREEMPTIBLE_POOL, now=NOW,
     )
 
-    assert job and job.task_type == "TARGET_IMPACT"
+    assert job and job.task_type == "ACTIVE_IMPACT"
     assert job.priority == "FAST"
-    assert job.annotation_id == "target"
+    assert job.annotation_id == "active"
     ledger.close()
 
 
@@ -267,7 +255,7 @@ def test_preemptible_quota_deferral_flows_to_routine_account(
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     job_id = enqueue_job(
         ledger.connection,
-        task_type="TARGET_IMPACT",
+        task_type="ACTIVE_IMPACT",
         source="source",
         source_item_id="urgent",
         revision_number=1,

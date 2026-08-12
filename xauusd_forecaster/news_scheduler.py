@@ -23,16 +23,13 @@ PRIORITIES = ("IMMEDIATE", "FAST", "NORMAL", "BACKGROUND")
 TASKS = (
     "ACTIVE_ANNOTATION",
     "ACTIVE_IMPACT",
-    "TARGET_ANNOTATION",
-    "TARGET_IMPACT",
     "TITLE_TRANSLATION",
 )
 SCHEDULER_SCHEMA = """
 CREATE TABLE IF NOT EXISTS news_ai_jobs_v1 (
     job_id TEXT PRIMARY KEY,
     task_type TEXT NOT NULL CHECK(task_type IN (
-        'ACTIVE_ANNOTATION','ACTIVE_IMPACT','TARGET_ANNOTATION',
-        'TARGET_IMPACT','TITLE_TRANSLATION')),
+        'ACTIVE_ANNOTATION','ACTIVE_IMPACT','TITLE_TRANSLATION')),
     source TEXT NOT NULL,
     source_item_id TEXT NOT NULL,
     revision_number INTEGER NOT NULL,
@@ -290,14 +287,14 @@ def claim_job(
         row = connection.execute(
             f"""SELECT * FROM news_ai_jobs_v1
                 WHERE state IN ('QUEUED','BACKING_OFF')
+                  AND task_type IN (
+                    'ACTIVE_ANNOTATION','ACTIVE_IMPACT','TITLE_TRANSLATION')
                   AND available_at<=? {priority_filter}
                 ORDER BY
                   CASE priority WHEN 'IMMEDIATE' THEN 0 WHEN 'FAST' THEN 1
                                 WHEN 'NORMAL' THEN 2 ELSE 3 END,
                   CASE task_type WHEN 'ACTIVE_IMPACT' THEN 0
-                                 WHEN 'TARGET_IMPACT' THEN 1
-                                 WHEN 'ACTIVE_ANNOTATION' THEN 2
-                                 WHEN 'TARGET_ANNOTATION' THEN 3 ELSE 4 END,
+                                 WHEN 'ACTIVE_ANNOTATION' THEN 1 ELSE 2 END,
                   created_at,job_id
                 LIMIT 1""",
             (timestamp,),
@@ -461,7 +458,9 @@ def reserve_account_request(
 
 def scheduler_counts(connection: sqlite3.Connection) -> dict[str, int]:
     rows = connection.execute(
-        "SELECT state,count(*) AS total FROM news_ai_jobs_v1 GROUP BY state"
+        """SELECT state,count(*) AS total FROM news_ai_jobs_v1
+        WHERE task_type IN ('ACTIVE_ANNOTATION','ACTIVE_IMPACT','TITLE_TRANSLATION')
+        GROUP BY state"""
     ).fetchall()
     counts = {str(row["state"]): int(row["total"]) for row in rows}
     return {state.lower(): counts.get(state, 0) for state in (
@@ -487,8 +486,6 @@ def sync_pending_jobs(
     from .annotation import (
         IMPACT_PROMPT_VERSION,
         PROMPT_VERSION,
-        TARGET_IMPACT_PROMPT_VERSION,
-        TARGET_PROMPT_VERSION,
         TITLE_PROMPT_VERSION,
         pending_annotation_records,
         pending_impact_records,
@@ -499,39 +496,17 @@ def sync_pending_jobs(
     active_annotations = pending_annotation_records(
         connection, observed_at=instant, limit=limit, prompt_version=PROMPT_VERSION,
     )
-    target_annotations = [
-        row for row in pending_annotation_records(
-            connection, observed_at=instant, limit=max(100_000, limit * 10),
-            prompt_version=TARGET_PROMPT_VERSION,
-        )
-        if connection.execute(
-            """SELECT 1 FROM news_annotations
-               WHERE source=? AND source_item_id=? AND revision_number=?
-                 AND prompt_version=? LIMIT 1""",
-            (
-                row["source"], row["source_item_id"], row["revision_number"],
-                PROMPT_VERSION,
-            ),
-        ).fetchone()
-    ][:limit]
     active_impacts = pending_impact_records(
         connection, observed_at=instant, limit=limit,
         annotation_prompt_version=PROMPT_VERSION,
         impact_prompt_version=IMPACT_PROMPT_VERSION,
-    )
-    target_impacts = pending_impact_records(
-        connection, observed_at=instant, limit=limit,
-        annotation_prompt_version=TARGET_PROMPT_VERSION,
-        impact_prompt_version=TARGET_IMPACT_PROMPT_VERSION,
     )
     titles = pending_title_translation_records(
         connection, observed_at=instant, limit=limit,
     )
     batches = (
         ("ACTIVE_ANNOTATION", PROMPT_VERSION, active_annotations),
-        ("TARGET_ANNOTATION", TARGET_PROMPT_VERSION, target_annotations),
         ("ACTIVE_IMPACT", IMPACT_PROMPT_VERSION, active_impacts),
-        ("TARGET_IMPACT", TARGET_IMPACT_PROMPT_VERSION, target_impacts),
         ("TITLE_TRANSLATION", TITLE_PROMPT_VERSION, titles),
     )
     discovered: dict[str, int] = {}
@@ -548,7 +523,7 @@ def sync_pending_jobs(
                 prompt_version=prompt_version,
                 priority=(
                     _annotation_priority(row)
-                    if task_type in {"ACTIVE_IMPACT", "TARGET_IMPACT"}
+                    if task_type == "ACTIVE_IMPACT"
                     else "BACKGROUND" if task_type == "TITLE_TRANSLATION"
                     else "NORMAL"
                 ),
@@ -573,12 +548,12 @@ def reconcile_completed_jobs(
                SET state='COMPLETED',lease_owner=NULL,lease_expires_at=NULL,
                    updated_at=?,completed_at=?
                WHERE state<>'COMPLETED' AND (
-                 (task_type IN ('ACTIVE_ANNOTATION','TARGET_ANNOTATION') AND EXISTS (
+                 (task_type='ACTIVE_ANNOTATION' AND EXISTS (
                    SELECT 1 FROM news_annotations a
                    WHERE a.source=j.source AND a.source_item_id=j.source_item_id
                      AND a.revision_number=j.revision_number
                      AND a.prompt_version=j.prompt_version))
-                 OR (task_type IN ('ACTIVE_IMPACT','TARGET_IMPACT') AND EXISTS (
+                 OR (task_type='ACTIVE_IMPACT' AND EXISTS (
                    SELECT 1 FROM news_impact_assessments_v1 i
                    WHERE i.annotation_id=j.annotation_id
                      AND i.prompt_version=j.prompt_version))
@@ -605,30 +580,22 @@ def pending_record_for_job(
     from .annotation import (
         IMPACT_PROMPT_VERSION,
         PROMPT_VERSION,
-        TARGET_IMPACT_PROMPT_VERSION,
-        TARGET_PROMPT_VERSION,
         pending_annotation_records,
         pending_impact_records,
         pending_title_translation_records,
     )
 
     instant = now or datetime.now(UTC)
-    if job.task_type in {"ACTIVE_ANNOTATION", "TARGET_ANNOTATION"}:
+    if job.task_type == "ACTIVE_ANNOTATION":
         rows = pending_annotation_records(
             connection, observed_at=instant, limit=100_000,
-            prompt_version=(
-                PROMPT_VERSION if job.task_type == "ACTIVE_ANNOTATION"
-                else TARGET_PROMPT_VERSION
-            ),
+            prompt_version=PROMPT_VERSION,
         )
-    elif job.task_type in {"ACTIVE_IMPACT", "TARGET_IMPACT"}:
-        target = job.task_type == "TARGET_IMPACT"
+    elif job.task_type == "ACTIVE_IMPACT":
         rows = pending_impact_records(
             connection, observed_at=instant, limit=100_000,
-            annotation_prompt_version=TARGET_PROMPT_VERSION if target else PROMPT_VERSION,
-            impact_prompt_version=(
-                TARGET_IMPACT_PROMPT_VERSION if target else IMPACT_PROMPT_VERSION
-            ),
+            annotation_prompt_version=PROMPT_VERSION,
+            impact_prompt_version=IMPACT_PROMPT_VERSION,
         )
     else:
         rows = pending_title_translation_records(

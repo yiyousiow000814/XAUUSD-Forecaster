@@ -67,6 +67,30 @@ from xauusd_forecaster.training import (
 )
 
 
+def _v15_annotation(vector: dict, evidence: str, **overrides) -> dict:
+    current = {
+        **vector,
+        "primary_category": "regulation_other",
+        "secondary_categories": [],
+        "emerging_topic_zh": "测试事件",
+        "record_kind": "BACKGROUND",
+        "actor": "", "action": "", "object": "", "location": "",
+        "event_time": "", "claim_status": "NOT_APPLICABLE", "materiality": 0.0,
+        "canonical_actor_id": "", "action_family": "OTHER_FACT",
+        "canonical_object_id": "", "canonical_location_id": "", "episode_key": "",
+        "primary_story_title_zh": "", "secondary_contexts_zh": [],
+        "relation_to_prior": "NONE", "document_kind": "BACKGROUND",
+        "material_event_key": "", "source_organization_id": "",
+        "evidence_role": "BACKGROUND", "xauusd_relevance": "IRRELEVANT",
+        "review_priority": "BACKGROUND", "material_change": "HISTORICAL_CONTEXT",
+        "time_sensitivity": "BACKGROUND",
+        "semantic_reason_zh": "完整正文显示该条目不进入当前模型。",
+        "supporting_evidence": [evidence],
+    }
+    current.update(overrides)
+    return current
+
+
 UTC = timezone.utc
 
 
@@ -2325,12 +2349,23 @@ def test_gemma_impact_assessment_is_append_only_and_versioned(
         "headline": "Federal Reserve announces policy decision", "body": body,
         "content_hash": content_hash, "cluster_id": "impact-cluster",
     })
-    vector = {
+    vector = _v15_annotation({
         "event_type": "monetary_policy", "entities": ["Federal Reserve"],
         "hawkishness": 0.0, "inflation_impulse": 0.0,
         "growth_impulse": 0.0, "geopolitical_risk": 0.0,
         "usd_impulse": 0.0, "novelty": 0.8, "confidence": 0.9,
-    }
+        "headline_zh": "美联储公布政策决定",
+        "summary_zh": "美联储公布一项完整政策决定，可能持续影响市场利率预期。",
+    }, "Complete policy report", primary_category="rates_fed",
+       record_kind="OFFICIAL_CLAIM", actor="Federal Reserve", action="announces",
+       object="policy decision", event_time=now.isoformat(), claim_status="CONFIRMED",
+       materiality=0.9, canonical_actor_id="federal_reserve",
+       action_family="POLICY_DECISION", canonical_object_id="policy_decision",
+       episode_key="policy_decision", document_kind="OFFICIAL_STATEMENT",
+       material_event_key="policy_decision", source_organization_id="federal_reserve",
+       evidence_role="CORE_CLAIM", xauusd_relevance="MACRO_DRIVER",
+       review_priority="IMMEDIATE", material_change="NEW_EVENT",
+       time_sensitivity="MULTI_DAY")
     ledger.append_annotation({
         "annotation_id": "impact-annotation", "source": "federal_reserve_monetary",
         "source_item_id": "impact-one", "revision_number": 1,
@@ -2399,6 +2434,10 @@ def test_impact_context_finds_semantically_similar_prior_event(tmp_path) -> None
         "canonical_location_id": "us", "primary_story_title_zh": "丽莎库克罢免争议",
         "secondary_contexts_zh": [], "relation_to_prior": "NONE",
         "document_kind": "NEWS_REPORT", "source_organization_id": "test-source",
+        "xauusd_relevance": "MACRO_DRIVER", "review_priority": "FAST",
+        "material_change": "NEW_EVENT", "time_sensitivity": "ONGOING",
+        "semantic_reason_zh": "完整正文显示这是美联储治理相关的新事件。",
+        "supporting_evidence": ["Trump effort"],
     }
     for index, material_key in enumerate((
         "trump_removes_lisa_cook", "cook_firing_attempt",
@@ -2511,7 +2550,7 @@ def test_gemini_annotation_does_not_treat_other_model_as_complete(
             "cluster_id": "cluster",
         }
     )
-    vector = {
+    vector = _v15_annotation({
         "headline_zh": "政策更新",
         "summary_zh": "这是一份政策更新的完整中文摘要，内容足以用于测试。",
         "event_type": "monetary_policy",
@@ -2523,7 +2562,7 @@ def test_gemini_annotation_does_not_treat_other_model_as_complete(
         "usd_impulse": 0.0,
         "novelty": 0.5,
         "confidence": 0.8,
-    }
+    }, "Neutral source")
     ledger.append_annotation(
         {
             "annotation_id": "old-model",
@@ -2753,7 +2792,7 @@ def test_gemini_31_has_an_independent_fallback_quota(tmp_path) -> None:
     ) == 500
 
 
-def test_gemini_31_annotation_is_training_visible_and_not_reprocessed(
+def test_gemini_31_current_annotation_is_persisted_and_not_reprocessed(
     tmp_path, monkeypatch
 ) -> None:
     now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
@@ -2768,14 +2807,23 @@ def test_gemini_31_annotation_is_training_visible_and_not_reprocessed(
             "cluster_id": "fallback-test-cluster",
         }
     )
-    vector = {
+    vector = _v15_annotation({
         "headline_zh": "黄金地缘局势更新",
         "summary_zh": "来源报道黄金相关地缘局势出现更新，内容已经完整保存。",
         "event_type": "geopolitical", "entities": [],
         "hawkishness": 0.0, "inflation_impulse": 0.0,
         "growth_impulse": 0.0, "geopolitical_risk": 0.8,
         "usd_impulse": 0.0, "novelty": 0.7, "confidence": 0.9,
-    }
+    }, "Gold geopolitical", primary_category="war_geopolitics",
+       record_kind="FACT_EVENT", actor="geopolitical actors", action="updated",
+       object="geopolitical situation", event_time=now.isoformat(),
+       claim_status="REPORTED", materiality=0.8,
+       canonical_actor_id="geopolitical_actors", action_family="OTHER_FACT",
+       canonical_object_id="geopolitical_situation", episode_key="geopolitical_update",
+       document_kind="NEWS_REPORT", material_event_key="geopolitical_update",
+       source_organization_id="fallback-test", evidence_role="CORE_CLAIM",
+       xauusd_relevance="DIRECT", review_priority="FAST",
+       material_change="NEW_EVENT", time_sensitivity="SAME_DAY")
 
     def fallback_call(_key, model, *_args):
         assert model == annotation_module.FALLBACK_GEMINI_MODEL
@@ -2790,10 +2838,12 @@ def test_gemini_31_annotation_is_training_visible_and_not_reprocessed(
         limit=1,
     )
     assert statuses[0]["status"] == "OK"
-    features = aggregate_news_features(
-        ledger, datetime.now(UTC) + timedelta(minutes=1)
-    )
-    assert features["news_geopolitical_risk"] == pytest.approx(0.8)
+    stored = ledger.connection.execute(
+        """SELECT geopolitical_risk,prompt_version FROM news_annotations
+        WHERE source='fallback-test' AND source_item_id='one'"""
+    ).fetchone()
+    assert stored["geopolitical_risk"] == pytest.approx(0.8)
+    assert stored["prompt_version"] == annotation_module.PROMPT_VERSION
     assert annotate_pending_news(
         ledger,
         provider="gemini",

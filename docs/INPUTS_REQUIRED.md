@@ -46,7 +46,11 @@ With a registered FRED key, the hourly background collector uses the official
 JSON observations API for its six configured series instead of the public graph
 CSV transport. The EIA adapter makes at most one request per hour and stores the
 latest two official daily WTI observations as point-in-time Forward candidates.
-Collection does not silently replace the active feature source or generation.
+The v15 generation converts EIA and BEA candidates into immutable structured
+release packets and distinct Ridge features. Similar FRED and EIA WTI series
+are deliberately preserved separately; OOS learning decides their value.
+Changing this feature set requires a complete generation handover.
+Collection alone does not silently replace the active generation.
 
 ## 4. Optional synchronized symbols
 
