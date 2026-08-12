@@ -307,10 +307,44 @@ function Write-RuntimeCodeState {
     Move-Item -LiteralPath $temporary -Destination $runtimeCodeStatePath -Force
 }
 
+function Get-RuntimeHeartbeat {
+    param([string]$Path, [string]$ServiceName)
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    try {
+        $heartbeat = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        $lastSuccess = [DateTimeOffset]::MinValue
+        if ([string]$heartbeat.service -ne $ServiceName -or
+            [string]$heartbeat.state -ne "RUNNING" -or
+            -not [DateTimeOffset]::TryParse(
+                [string]$heartbeat.last_success, [ref]$lastSuccess
+            )) { return $null }
+        return [pscustomobject]@{ LastSuccess = $lastSuccess }
+    } catch { return $null }
+}
+
+function Get-ServiceProcessStartedAt {
+    param([array]$Processes)
+    try {
+        $process = Get-Process -Id $Processes[0].ProcessId -ErrorAction Stop
+        return [DateTimeOffset]$process.StartTime.ToUniversalTime()
+    } catch { return [DateTimeOffset]::MinValue }
+}
+
 function Test-CodeReloadHealth {
     param([DateTimeOffset]$ReloadStarted)
     foreach ($service in @($services | Where-Object { $_.Key -in $reloadableServiceKeys })) {
         if (@(Get-ForecasterProcesses $service).Count -eq 0) { return $false }
+    }
+    foreach ($heartbeatSpec in @(
+        @("collector", "collector-status.json"),
+        @("annotator", "news-annotator-status.json")
+    )) {
+        $heartbeat = Get-RuntimeHeartbeat `
+            -Path (Join-Path $moduleRoot ".local\forward\$($heartbeatSpec[1])") `
+            -ServiceName $heartbeatSpec[0]
+        if (-not $heartbeat -or $heartbeat.LastSuccess -lt $ReloadStarted) {
+            return $false
+        }
     }
     try {
         $response = Invoke-WebRequest -UseBasicParsing `
@@ -343,7 +377,7 @@ function Restart-CodeReloadableServices {
     foreach ($service in $targets) {
         Start-ForecasterService $service -SkipExistingCheck
     }
-    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(45)
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(180)
     do {
         Start-Sleep -Milliseconds 500
         $healthy = Test-CodeReloadHealth -ReloadStarted $reloadStarted
@@ -371,6 +405,26 @@ function Get-ServiceState {
         [array]$Processes
     )
     if ($Processes.Count -eq 0) { return "STOPPED" }
+
+    if ($Service.Key -in @("collector", "annotator")) {
+        $statusName = if ($Service.Key -eq "collector") {
+            "collector-status.json"
+        } else { "news-annotator-status.json" }
+        $heartbeat = Get-RuntimeHeartbeat `
+            -Path (Join-Path $moduleRoot ".local\forward\$statusName") `
+            -ServiceName $Service.Key
+        $startedAt = Get-ServiceProcessStartedAt -Processes $Processes
+        if ($heartbeat -and
+            $heartbeat.LastSuccess -ge $startedAt -and
+            ([DateTimeOffset]::UtcNow - $heartbeat.LastSuccess).TotalSeconds -le 300) {
+            return "RUNNING"
+        }
+        if ($startedAt -ne [DateTimeOffset]::MinValue -and
+            ([DateTimeOffset]::UtcNow - $startedAt).TotalSeconds -le 180) {
+            return "STARTING"
+        }
+        return "$($Service.Key.ToUpper()) STALE"
+    }
 
     if ($Service.Key -eq "quote") {
         $quoteRoot = Join-Path $moduleRoot ".local\forward\quotes"
@@ -609,7 +663,10 @@ function Invoke-ForecasterWatchdog {
             $status = @(Get-ForecasterStatus)
             foreach ($service in $services) {
                 $row = $status | Where-Object Key -eq $service.Key
-                $unhealthy = $row.State -in @("STOPPED", "DATA STALE", "API ERROR")
+                $unhealthy = $row.State -in @(
+                    "STOPPED", "DATA STALE", "API ERROR", "SYNC ERROR", "SYNC STALE",
+                    "COLLECTOR STALE", "ANNOTATOR STALE"
+                )
                 if (-not $unhealthy) {
                     $failureCounts[$service.Key] = 0
                     continue

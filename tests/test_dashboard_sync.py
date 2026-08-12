@@ -970,6 +970,8 @@ def test_annotator_heartbeat_reports_idle_loop_as_healthy(tmp_path) -> None:
     status_file = tmp_path / "news-annotator-status.json"
     module.write_heartbeat(status_file, work_items=0)
     status = json.loads(status_file.read_text(encoding="utf-8"))
+    assert status["service"] == "annotator"
+    assert status["state"] == "RUNNING"
     assert datetime.fromisoformat(status["last_success"])
     assert status["last_error"] is None
     assert status["work_items"] == 0

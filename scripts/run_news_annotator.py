@@ -11,6 +11,7 @@ import sys
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Callable
 
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
@@ -46,18 +47,13 @@ from xauusd_forecaster.news_scheduler import (  # noqa: E402
     scheduler_counts,
     sync_pending_jobs,
 )
+from xauusd_forecaster.runtime_health import write_runtime_heartbeat  # noqa: E402
 
 
 def write_heartbeat(path: Path, *, work_items: int) -> None:
-    now = datetime.now(UTC).isoformat()
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(
-            {"last_success": now, "last_error": None, "work_items": work_items}
-        ),
-        encoding="utf-8",
+    write_runtime_heartbeat(
+        path, service="annotator", work_items=work_items,
     )
-    temporary.replace(path)
 
 
 def _next_retry(status: dict[str, object], now: datetime) -> datetime:
@@ -148,6 +144,7 @@ def run_scheduled_batch(
     ledger: ForwardLedger,
     *,
     batch_size: int | None,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> list[dict[str, object]]:
     now = datetime.now(UTC)
     sync_pending_jobs(ledger.connection, now=now)
@@ -230,6 +227,8 @@ def run_scheduled_batch(
                 "account_id": credential.account_id,
                 **status,
             })
+            if progress_callback is not None:
+                progress_callback(len(statuses))
     return statuses
 
 
@@ -256,7 +255,14 @@ def main() -> int:
     try:
         while True:
             limit = None if args.batch_size <= 0 else args.batch_size
-            statuses = run_scheduled_batch(ledger, batch_size=limit)
+            write_heartbeat(args.status_file, work_items=0)
+            statuses = run_scheduled_batch(
+                ledger,
+                batch_size=limit,
+                progress_callback=lambda count: write_heartbeat(
+                    args.status_file, work_items=count,
+                ),
+            )
             print(
                 json.dumps(
                     {
