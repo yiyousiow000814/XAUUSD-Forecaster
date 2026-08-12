@@ -990,6 +990,35 @@ def test_market_history_ingest_batches_are_bounded_and_complete() -> None:
     assert module._overlap_cursor("2026-08-07T04:00:00Z") == "2026-08-07T02:00:00+00:00"
 
 
+def test_market_decision_overview_payload_is_bounded_and_keeps_edges() -> None:
+    module = _sync_module()
+    decisions = [{
+        "source_decision_id": f"d-{index}",
+        "decision_time": f"2026-08-07T{index // 60:02d}:{index % 60:02d}:00+00:00",
+        "model_identity": "BROAD_FULL",
+        "recommended_action": "LONG",
+        "explanation": "x" * 2_000,
+    } for index in range(480)]
+    summary = {
+        "model_identity": "BROAD_FULL",
+        "frequency": "5m",
+        "source_decision_count": len(decisions),
+        "decision_count": len(decisions),
+        "decision_downsampled": False,
+        "decisions": decisions,
+    }
+
+    payload = module._market_decision_overview_payload(summary)
+    bounded = json.loads(payload)["decision_overviews"][0]
+
+    assert len(payload) <= module.MARKET_HISTORY_BATCH_LIMIT_BYTES
+    assert bounded["decisions"][0]["source_decision_id"] == "d-0"
+    assert bounded["decisions"][-1]["source_decision_id"] == "d-479"
+    assert bounded["source_decision_count"] == 480
+    assert bounded["decision_count"] == len(bounded["decisions"])
+    assert bounded["decision_downsampled"] is True
+
+
 def test_annotator_heartbeat_reports_idle_loop_as_healthy(tmp_path) -> None:
     module = _annotator_module()
     status_file = tmp_path / "news-annotator-status.json"

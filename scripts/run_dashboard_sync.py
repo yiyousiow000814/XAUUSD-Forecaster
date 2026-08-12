@@ -59,7 +59,7 @@ LEARNING_SUMMARY_GROUPS_PER_IDENTITY = 6
 LEARNING_SUMMARY_EXECUTION_RESULTS = 20
 LEARNING_OVERVIEW_CURVE_POINTS = 240
 LEARNING_OVERVIEW_GROUPS_PER_IDENTITY = 60
-MARKET_OVERVIEW_DECISIONS_PER_SERIES = 480
+MARKET_OVERVIEW_DECISIONS_PER_SERIES = 240
 REMOTE_MARKET_DECISION_LIMIT = 288 * 5
 REMOTE_MARKET_CANDLE_LIMIT = 576
 REMOTE_MARKET_DENSE_LIMITS = (1440, 1152, 864, 576, 288, 0)
@@ -1050,6 +1050,32 @@ def _market_history_payloads(candles: list[dict], decisions: list[dict]) -> list
     return payloads
 
 
+def _market_decision_overview_payload(summary: dict) -> bytes:
+    """Bound a replace-in-place overview without splitting its D1 row."""
+    source = summary.get("decisions", [])
+    decisions = [row for row in source if isinstance(row, dict)]
+    limit = min(len(decisions), MARKET_OVERVIEW_DECISIONS_PER_SERIES)
+    while True:
+        bounded = {
+            **summary,
+            "decisions": _visual_decision_overview(decisions, limit),
+        }
+        bounded["decision_count"] = len(bounded["decisions"])
+        bounded["decision_downsampled"] = (
+            int(bounded.get("source_decision_count") or 0)
+            > bounded["decision_count"]
+        )
+        encoded = json.dumps(
+            {"decision_overviews": [bounded]}, ensure_ascii=False,
+            allow_nan=False, separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) <= MARKET_HISTORY_BATCH_LIMIT_BYTES:
+            return encoded
+        if limit <= 1:
+            raise ValueError("market decision overview row exceeds payload limit")
+        limit = max(1, limit // 2)
+
+
 def _local_market_history_url(config: dict, after: str | None) -> str:
     status_url = urllib.parse.urlsplit(config["local_status_url"])
     query = {"limit": "500"}
@@ -1126,10 +1152,9 @@ def _sync_market_history(config: dict) -> None:
             raise RuntimeError("market history backfill exceeded 1000 pages")
         after = str(next_cursor)
     for summary in decision_overviews.values():
-        _post_json(remote_url, json.dumps(
-            {"decision_overviews": [summary]}, ensure_ascii=False,
-            allow_nan=False, separators=(",", ":"),
-        ).encode("utf-8"), config)
+        _post_json(
+            remote_url, _market_decision_overview_payload(summary), config,
+        )
 
 
 def _local_news_archive_url(config: dict, after: str | None) -> str:
