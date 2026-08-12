@@ -1235,6 +1235,39 @@ def test_google_news_lane_does_not_merge_distinct_events_before_ai(tmp_path) -> 
     assert result["rejected_reasons"] == {}
 
 
+def test_google_news_lane_reports_partial_content_coverage(tmp_path) -> None:
+    fetched = datetime(2026, 8, 5, 10, 40, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+    lane = GoogleNewsLane("google_news_fed_rates", "Federal Reserve")
+    rss = b"""<rss><channel>
+      <item><guid>readable</guid><title>Federal Reserve rate outlook - Reuters</title>
+        <pubDate>Wed, 05 Aug 2026 10:30:00 GMT</pubDate>
+        <link>https://publisher.example/readable</link></item>
+      <item><guid>blocked</guid><title>Treasury yields await Federal Reserve - WSJ</title>
+        <pubDate>Wed, 05 Aug 2026 10:35:00 GMT</pubDate>
+        <link>https://publisher.example/blocked</link></item>
+    </channel></rss>"""
+
+    def extract(url: str) -> tuple[str, str]:
+        if url.endswith("/blocked"):
+            raise ValueError("publisher blocked automated access")
+        return "complete rates evidence " * 40, url
+
+    result = collect_google_news_lane(
+        ledger, fetched, lane, fetcher=lambda _: rss, decoder=lambda url: url,
+        content_extractor=extract,
+    )
+
+    assert result["status"] == "PARTIAL"
+    assert result["inserted_revisions"] == 1
+    assert result["processed_items"] == 1
+    assert result["rejected_reasons"] == {"FULL_TEXT_UNAVAILABLE": 1}
+    poll = ledger.connection.execute(
+        "SELECT status,error_type FROM source_polls ORDER BY fetched_time DESC LIMIT 1"
+    ).fetchone()
+    assert tuple(poll) == ("PARTIAL", "PublisherContentUnavailable")
+
+
 def test_fresh_discovery_candidates_reach_ai_despite_headline_semantics() -> None:
     observed = datetime(2026, 8, 8, 16, 0, tzinfo=UTC)
     candidates = (
