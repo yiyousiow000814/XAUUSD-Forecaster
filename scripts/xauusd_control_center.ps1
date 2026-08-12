@@ -28,6 +28,22 @@ $runtimeCodeStatePath = Join-Path $moduleRoot ".local\forward\runtime-code-state
 $runtimeUpdateStatePath = Join-Path $moduleRoot ".local\forward\runtime-update-state.json"
 $remoteMainSignalPath = Join-Path $moduleRoot ".local\forward\remote-main-signal.json"
 $reloadableServiceKeys = @("collector", "annotator", "api", "sync")
+$collectorSecretsPath = Join-Path $repositoryRoot ".local\secrets\collector-keys.json"
+
+function Get-CollectorSecret {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    $userValue = [Environment]::GetEnvironmentVariable($Name, "User")
+    if ($userValue) { return $userValue.Trim() }
+    if (-not (Test-Path -LiteralPath $collectorSecretsPath)) { return "" }
+    try {
+        $secrets = Get-Content -LiteralPath $collectorSecretsPath -Raw | ConvertFrom-Json
+        $property = $secrets.PSObject.Properties[$Name]
+        if ($property -and $property.Value) { return ([string]$property.Value).Trim() }
+    } catch {
+        return ""
+    }
+    return ""
+}
 
 $services = @(
     [pscustomobject]@{
@@ -395,7 +411,10 @@ function Start-ForecasterService {
         $env:GEMINI_API_KEYS = [Environment]::GetEnvironmentVariable("GEMINI_API_KEYS", "User")
     }
     if ($Service.Key -eq "collector") {
-        $env:BLS_API_KEY = [Environment]::GetEnvironmentVariable("BLS_API_KEY", "User")
+        $env:BLS_API_KEY = Get-CollectorSecret -Name "BLS_API_KEY"
+        $env:BEA_API_KEY = Get-CollectorSecret -Name "BEA_API_KEY"
+        $env:FRED_API_KEY = Get-CollectorSecret -Name "FRED_API_KEY"
+        $env:EIA_API_KEY = Get-CollectorSecret -Name "EIA_API_KEY"
     }
     if ($Service.Key -eq "sync") {
         $env:SITES_BYPASS_TOKEN = [Environment]::GetEnvironmentVariable(

@@ -79,6 +79,11 @@ BROAD_NEWS_FEATURES = (
     "broad_news_event_count",
     "broad_primary_event_count",
     "broad_corroborated_event_count",
+    "broad_single_source_event_count",
+    "broad_official_source_count",
+    "broad_independent_source_count",
+    "broad_source_reliability",
+    "broad_syndicated_duplicate_count",
     *TOPIC_FEATURES,
 )
 
@@ -103,7 +108,7 @@ def _reliable_domain(host: str) -> str | None:
 
 
 def _source_organization(row: dict) -> str | None:
-    """Return a stable verified publisher identity for trust and budgeting."""
+    """Return a stable publisher identity without assigning model permission."""
     annotation = json.loads(row.get("annotation_json") or "{}")
     declared = canonical_source_organization(
         annotation.get("source_organization_id")
@@ -119,7 +124,8 @@ def _source_organization(row: dict) -> str | None:
     # articles the declared reporting organization keeps syndicated copies with
     # their origin; deterministic aliases collapse spelling variants.  The
     # resolved publisher domain remains the auditable fallback.
-    return direct_official or declared or publisher
+    external = (declared or publisher) if publisher else None
+    return direct_official or external
 
 
 def _topics(row: dict) -> tuple[str, ...]:
@@ -310,9 +316,7 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             continue
         row["reliable_domain"] = _reliable_domain(row["publisher_domain"])
         row["source_identity_organization"] = _source_organization(row)
-        row["source_organization"] = (
-            row["source_identity_organization"] if row["reliable_domain"] else None
-        )
+        row["source_organization"] = row["source_identity_organization"]
         row["topics"] = _topics(row)
         row["event_cluster_id"] = _event_key(
             row, row["topics"],
@@ -328,23 +332,24 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
         reliable_domains = {
             row["reliable_domain"] for row in evidence_members if row["reliable_domain"]
         }
-        reliable_organizations = {
+        source_organizations = {
             row["source_organization"]
             for row in evidence_members if row["source_organization"]
         }
-        reliable_sources = reliable_organizations
         if primary:
             grade = "PRIMARY"
-        elif len(reliable_sources) >= 2:
+        elif len(source_organizations) >= 2:
             grade = "CORROBORATED"
-        elif reliable_sources:
-            grade = "SINGLE_RELIABLE"
+        elif source_organizations:
+            grade = (
+                "SINGLE_RELIABLE" if reliable_domains else "SINGLE_SOURCE"
+            )
         else:
             grade = "DISCOVERY_ONLY"
         candidates = primary or [
             row for row in evidence_members
             if (
-                row["source_organization"] in reliable_sources
+                row["source_organization"] in source_organizations
             )
         ] or evidence_members
         canonical = max(
@@ -368,7 +373,7 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
         event_clock, event_clock_source, event_time_precision = resolve_event_clock(
             canonical,
             primary_source=canonical["source"] in primary_sources,
-            reliable_publisher=bool(canonical["reliable_domain"]),
+            reliable_publisher=bool(canonical["source_organization"]),
         )
         event_clock_valid = bool(
             event_clock is not None
@@ -395,7 +400,9 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
         relevant = controlled_category in ACTIONABLE_CATEGORIES
         eligible = (
             bool(timely)
-            and grade in {"PRIMARY", "CORROBORATED", "SINGLE_RELIABLE"}
+            and grade in {
+                "PRIMARY", "CORROBORATED", "SINGLE_RELIABLE", "SINGLE_SOURCE",
+            }
             and bool(ACTION_TOPICS & set(topics))
             and relevant
             and semantic_eligible
@@ -414,7 +421,19 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             for row in primary
         }
         independent_publishers = (
-            len(reliable_organizations) if not primary else len(primary_organizations)
+            len(source_organizations) if not primary else len(primary_organizations)
+        )
+        official_source = bool(primary)
+        if primary:
+            source_reliability = 1.0
+        elif reliable_domains:
+            source_reliability = 0.75
+        elif source_organizations:
+            source_reliability = 0.35
+        else:
+            source_reliability = 0.0
+        syndicated_duplicate_count = max(
+            0, len(evidence_members) - independent_publishers
         )
         reasons = [f"EVIDENCE_{grade}"]
         if event_clock_source == "SOURCE_STRUCTURED_TIME":
@@ -427,10 +446,10 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             reasons.append("CATEGORY_NOT_ACTIONABLE")
         if not (ACTION_TOPICS & set(topics)):
             reasons.append("NO_ACTION_TOPIC")
-        elif grade == "SINGLE_RELIABLE":
-            reasons.append("RELIABLE_SINGLE_SOURCE_PROVISIONAL")
-        elif timely and grade not in {"PRIMARY", "CORROBORATED"}:
-            reasons.append("NEEDS_CONFIRMATION")
+        elif grade in {"SINGLE_RELIABLE", "SINGLE_SOURCE"}:
+            reasons.append("SINGLE_SOURCE_ATTRIBUTE")
+        elif timely and grade == "DISCOVERY_ONLY":
+            reasons.append("PUBLISHER_IDENTITY_MISSING")
         if record_kind not in ACTIONABLE_RECORD_KINDS:
             reasons.append("RECORD_KIND_NOT_ACTIONABLE")
         if evidence_role not in ACTIONABLE_EVIDENCE_ROLES:
@@ -480,10 +499,13 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             "broad_model_eligible": eligible,
             "official_model_eligible": official_eligible,
             "independent_publishers": independent_publishers,
+            "official_source": official_source,
+            "source_reliability": source_reliability,
+            "syndicated_duplicate_count": syndicated_duplicate_count,
             "member_count": len(members),
             "source_names": source_names,
             "publisher_domains": publisher_domains,
-            "source_organizations": sorted(reliable_organizations),
+            "source_organizations": sorted(source_organizations),
             "source_identity_organizations": sorted({
                 row["source_identity_organization"] for row in members
                 if row["source_identity_organization"]

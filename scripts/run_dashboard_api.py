@@ -56,7 +56,8 @@ from xauusd_forecaster.news_relevance import (  # noqa: E402
     GOOGLE_NEWS_MAX_AGE,
     google_news_item_is_relevant,
 )
-from xauusd_forecaster.news_features_v2 import SOURCE_RULES  # noqa: E402
+from xauusd_forecaster.news_contracts import CURRENT_NEWS_CONTRACT  # noqa: E402
+from xauusd_forecaster.news_features_v2 import COLLECTION_SOURCES  # noqa: E402
 from xauusd_forecaster.news_impact import (  # noqa: E402
     IMPACT_MODEL,
     IMPACT_PROMPT_VERSION,
@@ -1470,23 +1471,19 @@ def _dashboard_payload(database: Path) -> dict:
     seen_news_links = set()
     for row in news_rows:
         item = dict(row)
-        source_tier, _, _, _ = SOURCE_RULES.get(
-            str(item.get("source") or ""),
-            ("COLLECT_ONLY", True, 200, "unlisted source"),
+        listed_source = str(item.get("source") or "") in COLLECTION_SOURCES
+        # Intake is permission-neutral. The registry describes active collector
+        # lanes; it is not a source allowlist and unlisted readable evidence is
+        # still shown for audit and semantic review.
+        item["source_eligibility"] = (
+            "SEMANTIC_CANDIDATE" if listed_source else "UNLISTED_CANDIDATE"
         )
-        # SOURCE_RULES is the runtime authority.  The SQLite rule ledger is an
-        # audit mirror and can legitimately lag a freshly deployed rule
-        # version; treating a missing mirror row as COLLECT_ONLY made every
-        # readable item disappear after a policy update.
-        item["source_eligibility"] = source_tier
-        if source_tier == "COLLECT_ONLY":
-            continue
         item["model_visibility"] = (
             "IMPACT_PENDING"
-            if source_tier == "MODEL_ELIGIBLE" and item.get("parsed_at")
+            if item.get("parsed_at")
             else "NOT_YET_PARSED"
-            if source_tier == "MODEL_ELIGIBLE"
-            else source_tier
+            if item.get("annotation_status") in {"QUEUED", "READY"}
+            else str(item.get("annotation_status") or "WAITING_CONTENT")
         )
         annotation_key = (
             str(item.get("source") or ""),
@@ -1508,8 +1505,7 @@ def _dashboard_payload(database: Path) -> dict:
             reason_code, reason = _not_required_reason(item, epoch)
             item["annotation_reason_code"] = reason_code
             item["annotation_reason"] = reason
-        if source_tier == "MODEL_ELIGIBLE":
-            _apply_impact_status(item, now)
+        _apply_impact_status(item, now)
         # The reader page shows every retained article with readable source
         # content. Parsing is a separate state: an unparsed article remains
         # visible for audit, but model_visibility prevents it from entering
@@ -1540,7 +1536,7 @@ def _dashboard_payload(database: Path) -> dict:
             if secondary_categories_json else []
         )
         item["category"] = _news_category(item)
-        item["eligibility_version"] = "news-source-eligibility-v4-live-delay-materiality"
+        item["eligibility_version"] = CURRENT_NEWS_CONTRACT.eligibility_version
         news.append(item)
         if len(news) >= 200:
             break

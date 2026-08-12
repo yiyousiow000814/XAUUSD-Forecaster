@@ -31,6 +31,26 @@ collector process without writing it to source control or logs. A
 conservative release-page discovery fallback. Its later Google/local receipt
 time is retained; it never backdates visibility to the publisher timestamp.
 
+The Control Center also recognizes `BEA_API_KEY`, `FRED_API_KEY`, and
+`EIA_API_KEY`. Official-data keys may
+be backed up in the ignored local file
+`.local/secrets/collector-keys.json`; user-level environment variables take
+precedence. Secret values are never returned by the dashboard or written to
+collector logs. The BEA Data API is separate from BEA news-release pages and
+uses two hourly NIPA requests for quarterly real-GDP growth, the GDP price
+index, and the PCE price index. The collector records these as point-in-time
+Forward candidates and does not assign model permission. A versioned generation
+contract decides whether and how a model consumes them.
+
+With a registered FRED key, the hourly background collector uses the official
+JSON observations API for its six configured series instead of the public graph
+CSV transport. The EIA adapter makes at most one request per hour and stores the
+latest two official daily WTI observations as point-in-time Forward candidates.
+The v15 generation converts EIA and BEA candidates into immutable structured
+release packets and distinct Ridge features. Similar FRED and EIA WTI series
+are deliberately preserved separately; OOS learning decides their value.
+Changing this feature set requires a complete generation handover.
+
 ## 4. Optional synchronized symbols
 
 Confirmed: collect XAUUSD only. The market-provider and symbol-validation

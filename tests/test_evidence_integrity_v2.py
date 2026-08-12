@@ -24,7 +24,12 @@ from xauusd_forecaster.live_v2 import (
     append_live_outcome_v2,
 )
 from xauusd_forecaster.market import MarketObservation
+from xauusd_forecaster.macro_release import (
+    macro_release_features_at,
+    macro_release_packets_at,
+)
 from xauusd_forecaster.news_evidence import EVIDENCE_POLICY_VERSION, event_evidence_rows
+from xauusd_forecaster.news_identity import canonical_source_organization
 from xauusd_forecaster.news_contracts import (
     CURRENT_NEWS_CONTRACT,
     NewsContract,
@@ -46,6 +51,22 @@ from xauusd_forecaster.execution_learning import (
     score_execution_predictions, train_due_execution,
 )
 from xauusd_forecaster.training import MARKET_FEATURES
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("federal_reserve_monetary", "federal_reserve"),
+        ("federal_reserve_speeches_testimony", "federal_reserve"),
+        ("bls_consumer_price_index", "bureau_of_labor_statistics"),
+        ("google_news_bls_official_releases", "bureau_of_labor_statistics"),
+        ("finance.yahoo.com", "yahoo_finance"),
+        ("kitco_news", "kitco"),
+        ("bitcoinworld", "bitcoin_world"),
+    ],
+)
+def test_reporting_source_aliases_share_one_identity(raw: str, expected: str) -> None:
+    assert canonical_source_organization(raw) == expected
 
 
 def test_install_repairs_invalid_execution_score_foreign_key() -> None:
@@ -620,7 +641,7 @@ def test_single_reliable_publisher_is_provisional_and_downweighted(tmp_path) -> 
     assert event["evidence_grade"] == "SINGLE_RELIABLE"
     assert event["broad_model_eligible"] is True
     assert event["model_permission"] == "BROAD_MODEL"
-    assert "RELIABLE_SINGLE_SOURCE_PROVISIONAL" in event["reason_codes"]
+    assert "SINGLE_SOURCE_ATTRIBUTE" in event["reason_codes"]
     assert event_raw_weight(event) == pytest.approx(
         0.35 * 2 ** (-10 / 1440)
     )
@@ -631,6 +652,29 @@ def test_single_reliable_publisher_is_provisional_and_downweighted(tmp_path) -> 
     assert features["broad_news_event_count"] == pytest.approx(
         0.35 * 2 ** (-10 / 1440)
     )
+    ledger.close()
+
+
+def test_identified_single_publisher_is_candidate_not_source_banned(tmp_path) -> None:
+    cutoff = datetime(2026, 8, 5, 10, 30, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=cutoff - timedelta(hours=1))
+    _append_news(
+        ledger, source="gdelt_gold_geopolitics", item="Regional port is closed",
+        first_seen=cutoff - timedelta(minutes=10), parsed_at=cutoff - timedelta(minutes=5),
+        impulse=0.2, link="https://regional-example.test/report/1",
+        source_organization_id="regional-example", entities=["Port", "closure"],
+        event_type="geopolitical_conflict",
+    )
+
+    event = event_evidence_rows(ledger, cutoff)[0]
+    features = aggregate_news_features_v2(ledger, cutoff)["features"]
+
+    assert event["evidence_grade"] == "SINGLE_SOURCE"
+    assert event["broad_model_eligible"] is True
+    assert event["source_reliability"] == pytest.approx(0.35)
+    assert event["independent_publishers"] == 1
+    assert features["broad_single_source_event_count"] > 0
+    assert features["broad_source_reliability"] > 0
     ledger.close()
 
 
@@ -656,6 +700,9 @@ def test_two_independent_publishers_corroborate_same_event(tmp_path) -> None:
     assert events[0]["evidence_grade"] == "CORROBORATED"
     assert events[0]["independent_publishers"] == 2
     assert events[0]["broad_model_eligible"] is True
+    features = aggregate_news_features_v2(ledger, cutoff)["features"]
+    assert features["broad_independent_source_count"] > 1.0
+    assert features["broad_corroborated_event_count"] > 0
     ledger.close()
 
 
@@ -738,7 +785,58 @@ def test_syndicated_copy_does_not_create_independent_confirmation(tmp_path) -> N
 
     assert event["evidence_grade"] == "SINGLE_RELIABLE"
     assert event["independent_publishers"] == 1
+    assert event["syndicated_duplicate_count"] == 1
     assert event["source_organizations"] == ["reuters"]
+    features = aggregate_news_features_v2(ledger, cutoff)["features"]
+    assert features["broad_syndicated_duplicate_count"] > 0
+    ledger.close()
+
+
+def test_macro_release_packets_are_point_in_time_and_keep_revisions(tmp_path) -> None:
+    start = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=start)
+
+    def append(period: str, value: float, seen: datetime) -> None:
+        payload = {
+            "title": "Cushing, OK WTI Spot Price FOB",
+            "value": value,
+            "expectation_value": None,
+        }
+        ledger.append_macro_observation({
+            "source": "eia_open_data_v2", "series_id": "EIA_RWTC",
+            "observation_period": period, "collector_first_seen_time": seen,
+            "fetched_time": seen, "value": value, "unit": "USD/barrel",
+            "payload": payload,
+            "content_hash": canonical_hash((period, value)),
+        })
+
+    append("2026-08-04", 70.0, start)
+    append("2026-08-05", 71.0, start + timedelta(hours=1))
+    append("2026-08-05", 72.0, start + timedelta(hours=3))
+
+    early = macro_release_packets_at(ledger, start + timedelta(minutes=30))[0]
+    visible = macro_release_packets_at(ledger, start + timedelta(hours=2))[0]
+    revised = macro_release_packets_at(ledger, start + timedelta(hours=4))[0]
+    features, packets = macro_release_features_at(
+        ledger, start + timedelta(hours=2)
+    )
+
+    assert early["current_value"] == 70.0
+    assert early["previous_period_value"] is None
+    assert visible["current_value"] == 71.0
+    assert visible["previous_period_value"] == 70.0
+    assert visible["prior_revision_value"] is None
+    assert visible["expectation_value"] is None
+    assert revised["current_value"] == 72.0
+    assert revised["prior_revision_value"] == 71.0
+    assert revised["revision_delta"] == 1.0
+    assert revised["relation_to_prior"] == "REVISION"
+    assert features["eia_wti_level"] == 71.0
+    assert features["eia_wti_change"] == 1.0
+    assert features["eia_wti_revision_delta"] == 0.0
+    assert datetime.fromisoformat(packets[0]["collector_first_seen_time"]) == (
+        start + timedelta(hours=1)
+    )
     ledger.close()
 
 
@@ -2203,7 +2301,7 @@ def test_canonical_occurrence_deduplicates_alias_keys_for_model(tmp_path) -> Non
     ledger.close()
 
 
-def test_source_identity_is_visible_without_granting_reliability(tmp_path) -> None:
+def test_source_identity_is_a_feature_without_granting_high_reliability(tmp_path) -> None:
     epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
     _append_news(
@@ -2214,8 +2312,11 @@ def test_source_identity_is_visible_without_granting_reliability(tmp_path) -> No
     )
     event = event_evidence_rows(ledger, epoch + timedelta(minutes=10))[0]
     assert event["source_identity_organizations"] == ["example_media"]
-    assert event["source_organizations"] == []
-    assert event["independent_publishers"] == 0
+    assert event["source_organizations"] == ["example_media"]
+    assert event["independent_publishers"] == 1
+    assert event["evidence_grade"] == "SINGLE_SOURCE"
+    assert event["source_reliability"] == pytest.approx(0.35)
+    assert event["broad_model_eligible"] is True
     ledger.close()
 
 

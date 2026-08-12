@@ -22,6 +22,14 @@ transport poll with no recent complete document is reported separately from a
 healthy evidence-producing source. A current candidate whose publisher body
 cannot be fetched is degraded, not successful.
 
+GDELT discovery reads the official 15-minute GKG update archive rather than the
+rate-limited DOC API. The collector verifies the manifest size and MD5 digest,
+bounds compressed and expanded payloads, and selects at most 25 gold-related
+GKG candidates before retrieving publisher text. Gold metadata only scopes the
+discovery lane; it does not decide semantic relevance or model permission. A
+`PAGE_PRECISEPUBTIMESTAMP` is retained when available. Otherwise the GKG batch
+timestamp is a conservative visibility clock, not an inferred event time.
+
 ## Event construction
 
 Only complete stored bodies with a matching immutable Gemini annotation are
@@ -33,8 +41,10 @@ changes create a new immutable `event_version_id` under the same event.
 
 Training requires a precise event timestamp known at the decision cutoff.
 Explicit body time is preferred. Official primary releases may use their
-precise publication timestamp because publication is the event. Missing,
-date-only, future, and media-publication substitute clocks remain display-only.
+precise publication timestamp because publication is the event. An identified
+publisher's structured timestamp is an auditable fallback and its reliability
+remains a model feature. Missing, date-only, and future clocks remain
+display-only.
 
 The current actionable topics are rates/Fed, inflation, employment,
 growth/economy, USD/liquidity, oil/energy, war/geopolitics, central-bank gold,
@@ -43,18 +53,36 @@ and risk sentiment. The topic mapper is deterministic and versioned.
 ## Evidence grades
 
 1. `PRIMARY`: configured first-party complete content.
-2. `CORROBORATED`: at least two independent reliable publisher domains report
-   the same event with complete annotated content.
+2. `CORROBORATED`: at least two independently identified publishers report the
+   same event with complete annotated content.
 3. `SINGLE_RELIABLE`: one reliable publisher reports the event.
-4. `DISCOVERY_ONLY`: an aggregation or unconfirmed source provides the item.
+4. `SINGLE_SOURCE`: one identified publisher outside the reliability registry
+   reports the event.
+5. `DISCOVERY_ONLY`: no publisher identity can be verified from the item.
 
 The same eligibility engine grants `OFFICIAL_MODEL`, `BROAD_MODEL`, or
 `DISPLAY_ONLY` permission. `OFFICIAL_MODEL` additionally requires a configured
-official source. `BROAD_MODEL` accepts qualified `PRIMARY`, `CORROBORATED`, and
-bounded `SINGLE_RELIABLE` events. Both permissions share the same event
+official source. `BROAD_MODEL` accepts all four identified-publisher grades;
+official status, reliability, independent-source count, corroboration, and
+syndicated-duplicate count are frozen numeric attributes rather than source
+permission gates. Both permissions share the same event
 identity, time validity, materiality, semantic-schema, and point-in-time checks.
 
+Official EIA and BEA observations are converted into point-in-time release
+packets. Each packet carries the current value, previous-period value, previous
+visible revision, revision delta, nullable market expectation, release time
+when supplied by an authoritative source, collector first-seen time, series
+definition, and relation to the prior packet. Missing expectations remain null;
+the semantic model may not invent them. EIA and BEA receive separate features
+even when another series describes a similar economic signal, so Ridge OOS
+evidence, not a collector rule, determines whether either coefficient is useful.
+
 ## Model separation
+
+Collection is permission-neutral. A news document or macro observation that
+passes the objective intake checks is retained as a Forward candidate; the
+collector never assigns a model role. Model permission belongs to the versioned
+generation contract and may change only through a complete verified handover.
 
 The official News-residual and Full models remain an independent baseline.
 Broad News-residual learns the residual after cross-fitted Market-only

@@ -18,13 +18,14 @@ be silently replaced by an LLM opinion.
 
 ## Active boundary
 
-XAUUSD Bid/Ask is the only action-bearing live market source. News uses
-`news-source-eligibility-v1`: official Federal Reserve monetary, press, and
-speech/testimony bodies, BEA releases, and U.S. Treasury releases may be
-`MODEL_ELIGIBLE`; every item must still pass full-body, first-seen, parsed-at,
-and content-hash checks. Other sources are `CANDIDATE_ONLY`, `DISPLAY_ONLY`, or
-`COLLECT_ONLY`. BLS observations remain collected macro evidence until a
-versioned release-body rule is added. News never receives order authority.
+XAUUSD Bid/Ask is the only action-bearing live market source. News intake is
+permission-neutral: every item must pass publisher-identity, full-body,
+first-seen, parsed-at, event-time, and content-hash checks. Source officiality,
+reliability, corroboration, independence, and syndication are versioned model
+features rather than source allowlists. BLS, EIA, BEA, and FRED observations are
+retained point-in-time; configured v15 series are exposed as separate numeric
+features so OOS learning determines their incremental value. News never
+receives order authority.
 
 Rates, real yields, direct USD market observations, oil, broad geopolitical
 news, central-bank purchases, liquidity, and risk-asset proxies remain explicit

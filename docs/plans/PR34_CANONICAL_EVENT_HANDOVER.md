@@ -14,6 +14,10 @@ Status: implementation complete; live activation is evidence-gated.
   publisher-body failures as degraded.
 - Normalize first-party and syndicated reporting identities before applying
   source budgets; collector lanes never count as independent publishers.
+- Replace source allowlists with frozen source attributes: officiality,
+  reliability, independent-source count, corroboration, and syndication.
+- Convert EIA and BEA observations into point-in-time structured release
+  packets and distinct v15 Ridge features without pre-judging usefulness.
 - Retrain all five models under the complete v15 contract.
 - Verify and switch the generation as one complete set.
 - Remove superseded v14 runtime and transition code after verification.

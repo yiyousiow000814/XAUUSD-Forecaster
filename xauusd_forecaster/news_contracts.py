@@ -15,9 +15,9 @@ class NewsContract:
 
 AI_SEMANTIC_REVIEW_V15 = NewsContract(
     name="ai-semantic-review-v15",
-    feature_version="eligible-news-event-evidence-v13-ai-semantic-review",
-    eligibility_version="news-source-eligibility-v11-ai-semantic-review",
-    policy_version="news-event-evidence-v11-canonical-source-budget",
+    feature_version="eligible-news-event-evidence-v14-release-packets",
+    eligibility_version="news-source-eligibility-v12-permission-neutral",
+    policy_version="news-event-evidence-v12-source-attributes",
 )
 
 SUPPORTED_NEWS_CONTRACTS = (
