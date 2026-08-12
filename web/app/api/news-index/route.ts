@@ -5,6 +5,8 @@ import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/previ
 
 export const dynamic = "force-dynamic";
 
+const NEWS_READER_WINDOW_DAYS = 60;
+
 type NewsIndexItem = {
   detail_key?: unknown;
   category?: unknown;
@@ -51,12 +53,17 @@ export async function GET(request: Request) {
           AND CAST(json_extract(newer.payload, '$.revision_number') AS INTEGER)
               > CAST(json_extract(ni.payload, '$.revision_number') AS INTEGER)
       )`;
-      const readableEvidence = `
+      const readableArchiveEvidence = `
         json_extract(ni.payload, '$.content_status') IN ('FULL_TEXT', 'SOURCE_CONTENT')
         AND COALESCE(json_extract(ni.payload, '$.model_visibility'), 'COLLECT_ONLY') <> 'COLLECT_ONLY'
         AND COALESCE(json_extract(ni.payload, '$.xauusd_relevance'),
                      json_extract(nd.payload, '$.xauusd_relevance'), '') <> 'IRRELEVANT'
         AND ${latestRevision}`;
+      const readerWindow = `datetime(COALESCE(
+        json_extract(ni.payload, '$.source_published_time'),
+        ni.collector_first_seen_time
+      )) >= datetime('now', '-${NEWS_READER_WINDOW_DAYS} days')`;
+      const readableEvidence = `${readableArchiveEvidence} AND ${readerWindow}`;
       const goldEvidence = `${readableEvidence}
         AND COALESCE(json_extract(ni.payload, '$.xauusd_relevance'),
                      json_extract(nd.payload, '$.xauusd_relevance')) IN ('DIRECT', 'MACRO_DRIVER')`;
@@ -73,7 +80,7 @@ export async function GET(request: Request) {
         : `WHERE ${scopedEvidence}`;
       const bindValues = category ? [category] : [];
       const offset = (page - 1) * pageSize;
-      const [rows, totalRow, allTotalRow, goldTotalRow, otherTotalRow, parsedTotalRow, modelCandidateTotalRow, categoryRows] = await Promise.all([
+      const [rows, totalRow, allTotalRow, archiveTotalRow, goldTotalRow, otherTotalRow, parsedTotalRow, modelCandidateTotalRow, categoryRows] = await Promise.all([
         binding.prepare(
           `SELECT json_patch(COALESCE(nd.payload, '{}'), ni.payload) AS payload
            FROM news_index ni LEFT JOIN news_details nd USING(detail_key) ${where}
@@ -84,6 +91,8 @@ export async function GET(request: Request) {
         binding.prepare(`SELECT count(*) AS count FROM news_index ni LEFT JOIN news_details nd USING(detail_key) ${where}`)
           .bind(...bindValues).first<{ count: number }>(),
         binding.prepare(`SELECT count(*) AS count FROM news_index ni LEFT JOIN news_details nd USING(detail_key) WHERE ${readableEvidence}`)
+          .first<{ count: number }>(),
+        binding.prepare(`SELECT count(*) AS count FROM news_index ni LEFT JOIN news_details nd USING(detail_key) WHERE ${readableArchiveEvidence}`)
           .first<{ count: number }>(),
         binding.prepare(`SELECT count(*) AS count FROM news_index ni LEFT JOIN news_details nd USING(detail_key) WHERE ${goldEvidence}`)
           .first<{ count: number }>(),
@@ -104,6 +113,7 @@ export async function GET(request: Request) {
         total: totalRow?.count ?? 0,
         all_total: allTotalRow?.count ?? 0,
         readable_total: allTotalRow?.count ?? 0,
+        archive_total: archiveTotalRow?.count ?? 0,
         gold_total: goldTotalRow?.count ?? 0,
         other_total: otherTotalRow?.count ?? 0,
         parsed_total: parsedTotalRow?.count ?? 0,
@@ -114,6 +124,7 @@ export async function GET(request: Request) {
         page,
         page_size: pageSize,
         scope,
+        window_days: NEWS_READER_WINDOW_DAYS,
       }, { headers: { "Cache-Control": "no-store, max-age=0" } });
     }
   } catch {
@@ -136,7 +147,13 @@ export async function GET(request: Request) {
         signal: AbortSignal.timeout(4_000),
       });
       const payload = await response.json() as { recent_news?: NewsIndexItem[] };
-      const readable = (payload.recent_news ?? []).filter(row => row.xauusd_relevance !== "IRRELEVANT");
+      const archivedReadable = (payload.recent_news ?? []).filter(row => row.xauusd_relevance !== "IRRELEVANT");
+      const cutoff = Date.now() - NEWS_READER_WINDOW_DAYS * 24 * 60 * 60 * 1_000;
+      const readable = archivedReadable.filter(row => {
+        const published = String(row.source_published_time ?? row.collector_first_seen_time ?? "");
+        const timestamp = Date.parse(published);
+        return Number.isFinite(timestamp) && timestamp >= cutoff;
+      });
       const gold = readable.filter(row => row.xauusd_relevance === "DIRECT" || row.xauusd_relevance === "MACRO_DRIVER");
       const other = readable.filter(row => row.xauusd_relevance !== "DIRECT" && row.xauusd_relevance !== "MACRO_DRIVER");
       const all = (scope === "other" ? other : gold).sort((left, right) => {
@@ -158,6 +175,7 @@ export async function GET(request: Request) {
         total: filtered.length,
         all_total: readable.length,
         readable_total: readable.length,
+        archive_total: archivedReadable.length,
         gold_total: gold.length,
         other_total: other.length,
         parsed_total: parsedTotal,
@@ -166,6 +184,7 @@ export async function GET(request: Request) {
         page,
         page_size: pageSize,
         scope,
+        window_days: NEWS_READER_WINDOW_DAYS,
       }, { status: response.status, headers: { "Cache-Control": "no-store, max-age=0" } });
     } catch {
       // Return a single public-facing error below.

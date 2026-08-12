@@ -72,6 +72,8 @@ def test_preview_fails_closed_until_semantic_relevance_is_mirrored() -> None:
     assert legacy["items"] == []
     assert legacy["gold_total"] == 0
     assert legacy["other_total"] == 200
+    assert legacy["archive_total"] == 200
+    assert legacy["window_days"] == 60
     assert legacy["semantic_relevance_mirrored"] is False
     assert [row["detail_key"] for row in classified["items"]] == ["gold"]
     assert classified["category_counts"] == {"利率/Fed": 1}

@@ -392,10 +392,12 @@ type NewsIndexResponse = {
   total: number;
   all_total: number;
   readable_total?: number;
+  archive_total?: number;
   parsed_total?: number;
   model_candidate_total?: number;
   gold_total?: number;
   other_total?: number;
+  window_days?: number;
   category_counts: Record<string, number>;
   page: number;
   page_size: number;
@@ -876,6 +878,8 @@ export default function AuditView() {
   const readableNewsTotal = newsIndex.readable_total ?? newsMetrics.articles.readable;
   const parsedNewsTotal = newsIndex.parsed_total ?? newsMetrics.articles.semantic_reviews_complete;
   const modelCandidateNewsTotal = newsIndex.model_candidate_total ?? newsMetrics.articles.current_model_candidates;
+  const newsArchiveTotal = newsIndex.archive_total ?? readableNewsTotal;
+  const newsWindowDays = newsIndex.window_days ?? 60;
   const newsWaitingTotal = (payload?.annotation_queue?.queued ?? 0)
     + (payload?.annotation_queue?.backing_off ?? 0)
     + (payload?.annotation_queue?.dead_letter ?? 0);
@@ -957,7 +961,7 @@ export default function AuditView() {
       <div className="audit-tabs-shell">
       <button type="button" className="audit-tabs-scroll" onClick={() => scrollAuditTabs(-1)} aria-label="向左查看更多审计视图"><span aria-hidden="true">‹</span></button>
       <nav ref={auditTabsRef} className="audit-tabs" aria-label="审计视图">
-        <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻 <b>{readableNewsTotal}</b></a>
+        <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>近{newsWindowDays}天新闻 <b>{readableNewsTotal}</b></a>
         <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>新闻证据管理 <b>{evidenceSummarySeenCount}</b></a>
         <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件脉络 <b>{activeEventTotal}</b></a>
         <a href="/audit?view=decisions" className={view === "decisions" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("decisions"); }}>决策与30分钟结果 <b>{payload?.counts?.decision_events ?? 0}</b></a>
@@ -969,7 +973,7 @@ export default function AuditView() {
 
       {view === "news" && <>
         <section className="annotation-queue" aria-label="新闻处理进度">
-          <span><b>{readableNewsTotal}</b> 篇阅读区文章</span>
+          <span><b>{readableNewsTotal}</b> 篇近{newsWindowDays}天文章</span>
           <span><b>{parsedNewsTotal}</b> 篇语义复核完成</span>
           <span><b>{newsIndex.gold_total ?? 0}</b> 篇黄金相关</span>
           <span><b>{newsIndex.other_total ?? 0}</b> 篇其他</span>
@@ -981,7 +985,7 @@ export default function AuditView() {
           </details>
         </section>
         <section className="news-browser" aria-label="新闻自动分类">
-          <div><strong>新闻阅读</strong><span>按媒体发布时间排序 · 默认展示与黄金有关的新闻 · 每页 {NEWS_PER_PAGE} 篇</span></div>
+          <div><strong>新闻阅读</strong><span>按媒体发布时间排序 · 近{newsWindowDays}天 {readableNewsTotal} 篇 · 完整归档 {newsArchiveTotal} 篇 · 每页 {NEWS_PER_PAGE} 篇</span></div>
           <nav className="news-scope-tabs" aria-label="新闻相关性">
             <button type="button" className={newsScope === "gold" ? "active" : ""} onClick={() => { setNewsScope("gold"); setNewsCategory("全部"); setNewsPage(1); }}>黄金相关<b>{newsIndex.gold_total ?? 0}</b></button>
             <button type="button" className={newsScope === "other" ? "active" : ""} onClick={() => { setNewsScope("other"); setNewsCategory("全部"); setNewsPage(1); }}>其他<b>{newsIndex.other_total ?? 0}</b></button>

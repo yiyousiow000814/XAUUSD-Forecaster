@@ -264,7 +264,7 @@ test("renders the news and decision audit route", async () => {
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /Aurum Evidence Desk/);
-  assert.match(html, />新闻 <b>/);
+  assert.match(html, /天新闻 <b>/);
   assert.match(html, /新闻证据管理/);
   const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   assert.match(source, /模型真正用过哪些新闻/);
@@ -300,7 +300,7 @@ test("renders the news and decision audit route", async () => {
   assert.doesNotMatch(source, /payload\?\.system\.online && !error/);
   assert.match(source, /列表与正文详情分开保存/);
   assert.doesNotMatch(source, /这些新闻处理到哪里了/);
-  assert.match(source, /篇阅读区文章/);
+  assert.match(source, /篇近\{newsWindowDays\}天文章/);
   assert.match(source, /篇黄金相关/);
   assert.match(source, /篇其他/);
   assert.match(source, /row\.model_visibility !== "NOT_YET_PARSED"/);
@@ -341,9 +341,13 @@ test("separates gold news and hides explicitly irrelevant semantic reviews", () 
   assert.match(route, /LEFT JOIN news_details nd USING\(detail_key\)/);
   assert.match(route, /IN \('DIRECT', 'MACRO_DRIVER'\)/);
   assert.match(route, /scope === "other" \? otherEvidence : goldEvidence/);
+  assert.match(route, /NEWS_READER_WINDOW_DAYS = 60/);
+  assert.match(route, /archive_total: archiveTotalRow\?\.count \?\? 0/);
   assert.match(source, /scope: newsScope/);
-  assert.match(source, /默认展示与黄金有关的新闻/);
+  assert.match(source, /完整归档 \{newsArchiveTotal\} 篇/);
+  assert.match(source, /近\{newsWindowDays\}天新闻/);
   assert.match(readFileSync(new URL("../app/globals.css", import.meta.url), "utf8"), /news-browser button,.news-pagination button \{ min-height:44px/);
+  assert.match(readFileSync(new URL("../app/globals.css", import.meta.url), "utf8"), /\.annotation-queue \{ grid-template-columns:repeat\(6,1fr\)/);
   assert.match(sync, /news-readable-append-only-v2/);
   assert.match(sync, /\/api\/news-backfill/);
 });

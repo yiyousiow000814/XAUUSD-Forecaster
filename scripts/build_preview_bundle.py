@@ -186,6 +186,10 @@ def _gold_preview_index(news_index: dict) -> dict:
         "total": len(classified),
         "gold_total": len(classified),
         "other_total": max(0, int(news_index.get("all_total") or 0) - len(classified)),
+        "archive_total": int(
+            news_index.get("archive_total") or news_index.get("all_total") or 0
+        ),
+        "window_days": 60,
         "category_counts": {
             name: sum(1 for item in classified if item.get("category") == name)
             for name in {str(item.get("category") or "其他") for item in classified}
