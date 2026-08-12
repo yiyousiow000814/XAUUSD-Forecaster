@@ -286,7 +286,6 @@ NEWS_SOURCE_DEFINITIONS = {
     "google_news_us_inflation": ("Google News U.S. Inflation", "发现源", 45, ("google_news_us_inflation",)),
     "google_news_fed_rates": ("Google News Fed & Rates", "发现源", 45, ("google_news_fed_rates",)),
     "world_gold_council_central_banks": ("World Gold Council", "发布源", 420, ("world_gold_council_central_banks",)),
-    "non_fed_full_text": ("非 Fed 正文解析器", "正文链路", 45, ()),
 }
 
 
@@ -310,9 +309,7 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
     for source, (label, role, stale_minutes, revision_sources) in NEWS_SOURCE_DEFINITIONS.items():
         polls = connection.execute(
             """SELECT count(*) total,
-                      sum(status='OK' OR
-                          (source='non_fed_full_text'
-                           AND error_type='HydrationErrors')) ok_count,
+                      sum(status='OK') ok_count,
                       sum(status='PARTIAL') partial_count,
                       sum(status='ERROR') error_count,
                       max(CASE WHEN status='OK' THEN fetched_time END) last_success
