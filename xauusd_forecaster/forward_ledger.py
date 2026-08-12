@@ -128,6 +128,13 @@ CREATE TABLE IF NOT EXISTS news_annotations (
         REFERENCES news_revisions(source, source_item_id, revision_number)
 );
 
+CREATE INDEX IF NOT EXISTS news_annotations_revision_contract
+ON news_annotations(source, source_item_id, revision_number,
+                    llm_model_version, prompt_version);
+
+CREATE INDEX IF NOT EXISTS news_revisions_cluster_latest
+ON news_revisions(cluster_id, source, source_item_id, revision_number);
+
 CREATE TABLE IF NOT EXISTS news_title_translations (
     translation_id TEXT PRIMARY KEY,
     source TEXT NOT NULL,

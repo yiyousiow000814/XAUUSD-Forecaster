@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 from types import SimpleNamespace
 from collections import Counter
@@ -27,7 +28,11 @@ PAYLOAD_SCHEMA_VERSION = "xauusd-dashboard-v4-event-episode"
 MARKET_DETAIL_CANDLE_LIMIT = 7 * 288
 MARKET_OVERVIEW_CANDLE_LIMIT = 480
 MARKET_HISTORY_PAGE_LIMIT = 500
-_QUOTE_CANDLE_CACHE: dict[tuple[str, int, int], list[dict]] = {}
+STATUS_SNAPSHOT_TTL_SECONDS = 15.0
+STATUS_SNAPSHOT_WAIT_SECONDS = 5.0
+STATUS_SNAPSHOT_MAX_STALE_SECONDS = 90.0
+_QUOTE_CANDLE_CACHE_LOCK = threading.Lock()
+_QUOTE_CANDLE_CACHE: dict[str, dict] = {}
 
 from xauusd_forecaster.factors import factor_coverage  # noqa: E402
 from xauusd_forecaster.annotation import (  # noqa: E402
@@ -126,6 +131,116 @@ _LEARNING_REVISION_TABLES = (
 )
 _LEARNING_CACHE_LOCK = threading.Lock()
 _LEARNING_CACHE: dict[str, object] = {}
+
+
+class StatusSnapshotUnavailable(RuntimeError):
+    """Raised when no bounded-age dashboard snapshot can be served."""
+
+
+class StatusSnapshotCache:
+    """Serialize one dashboard snapshot at a time and fail closed while stale."""
+
+    def __init__(
+        self,
+        *,
+        ttl_seconds: float = STATUS_SNAPSHOT_TTL_SECONDS,
+        wait_seconds: float = STATUS_SNAPSHOT_WAIT_SECONDS,
+        max_stale_seconds: float = STATUS_SNAPSHOT_MAX_STALE_SECONDS,
+        clock=time.monotonic,
+    ) -> None:
+        self.ttl_seconds = ttl_seconds
+        self.wait_seconds = wait_seconds
+        self.max_stale_seconds = max_stale_seconds
+        self.clock = clock
+        self._condition = threading.Condition()
+        self._database: Path | None = None
+        self._body: bytes | None = None
+        self._built_at = 0.0
+        self._refreshing = False
+        self._last_error: str | None = None
+
+    def _age(self) -> float | None:
+        if self._body is None:
+            return None
+        return max(0.0, self.clock() - self._built_at)
+
+    def health(self) -> tuple[int, dict]:
+        with self._condition:
+            age = self._age()
+            if age is None:
+                return 503, {
+                    "status": "STARTING" if self._refreshing else "UNAVAILABLE",
+                    "snapshot_age_seconds": None,
+                    "last_error": self._last_error,
+                }
+            if self._last_error:
+                return 503, {
+                    "status": "ERROR",
+                    "snapshot_age_seconds": age,
+                    "last_error": self._last_error,
+                }
+            if age > self.max_stale_seconds:
+                return 503, {
+                    "status": "STALE",
+                    "snapshot_age_seconds": age,
+                    "last_error": self._last_error,
+                }
+            return 200, {
+                "status": "OK",
+                "snapshot_age_seconds": age,
+                "refreshing": self._refreshing,
+            }
+
+    def get(self, database: Path, builder) -> tuple[bytes, str, float]:
+        database = database.resolve()
+        with self._condition:
+            if self._database != database:
+                self._database = database
+                self._body = None
+                self._built_at = 0.0
+                self._last_error = None
+            age = self._age()
+            if self._body is not None and age is not None and age <= self.ttl_seconds:
+                return self._body, "fresh", age
+            build_here = not self._refreshing
+            if build_here:
+                self._refreshing = True
+
+        if build_here:
+            try:
+                body = json.dumps(
+                    builder(database), allow_nan=False, separators=(",", ":"),
+                ).encode()
+            except Exception as error:
+                with self._condition:
+                    self._refreshing = False
+                    self._last_error = f"{type(error).__name__}: {str(error)[:400]}"
+                    self._condition.notify_all()
+                raise
+            with self._condition:
+                self._body = body
+                self._built_at = self.clock()
+                self._refreshing = False
+                self._last_error = None
+                self._condition.notify_all()
+                return body, "fresh", 0.0
+
+        with self._condition:
+            refresh_finished = self._condition.wait_for(
+                lambda: not self._refreshing, timeout=self.wait_seconds,
+            )
+            if not refresh_finished:
+                raise StatusSnapshotUnavailable(
+                    "dashboard snapshot refresh is still running"
+                )
+            age = self._age()
+            if self._last_error:
+                raise StatusSnapshotUnavailable(self._last_error)
+            if self._body is not None and age is not None:
+                return self._body, "fresh", age
+            raise StatusSnapshotUnavailable(
+                "dashboard snapshot refresh completed without a result"
+            )
 
 
 def _learning_revision(connection: sqlite3.Connection) -> tuple[object, ...]:
@@ -554,56 +669,93 @@ def _quote_history_files(directory: Path) -> list[Path]:
     return [by_day[day] for day in sorted(by_day)]
 
 
+def _append_quote_candle(buckets: dict[datetime, dict], raw: str | bytes) -> None:
+    try:
+        quote = json.loads(raw)
+        observed = datetime.fromisoformat(
+            str(quote["received_time"]).replace("Z", "+00:00")
+        )
+        observed = (
+            observed.replace(tzinfo=UTC)
+            if observed.tzinfo is None else observed.astimezone(UTC)
+        )
+        bid = float(quote["bid"])
+        ask = float(quote["ask"])
+        midpoint = (bid + ask) / 2.0
+        minute = observed.replace(second=0, microsecond=0)
+        bucket = minute - timedelta(minutes=minute.minute % 5)
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return
+    candle = buckets.get(bucket)
+    if candle is None:
+        buckets[bucket] = {
+            "time": bucket.isoformat(), "open": midpoint,
+            "high": midpoint, "low": midpoint, "close": midpoint,
+            "ticks": 1,
+        }
+    else:
+        candle["high"] = max(candle["high"], midpoint)
+        candle["low"] = min(candle["low"], midpoint)
+        candle["close"] = midpoint
+        candle["ticks"] += 1
+
+
 def _quote_file_candles(path: Path) -> list[dict]:
-    """Aggregate one daily quote file and cache immutable archive results."""
+    """Aggregate archives once and consume only new bytes from live quote files."""
     try:
         stat = path.stat()
     except OSError:
         return []
-    key = (str(path), stat.st_size, stat.st_mtime_ns)
-    cached = _QUOTE_CANDLE_CACHE.get(key)
-    if cached is not None:
-        return cached
-    for stale in [candidate for candidate in _QUOTE_CANDLE_CACHE if candidate[0] == str(path)]:
-        del _QUOTE_CANDLE_CACHE[stale]
-    buckets: dict[datetime, dict] = {}
-    opener = gzip.open if path.suffix == ".gz" else open
-    try:
-        with opener(path, "rt", encoding="utf-8") as handle:
-            for line in handle:
-                try:
-                    quote = json.loads(line)
-                    observed = datetime.fromisoformat(
-                        str(quote["received_time"]).replace("Z", "+00:00")
-                    )
-                    observed = (
-                        observed.replace(tzinfo=UTC)
-                        if observed.tzinfo is None else observed.astimezone(UTC)
-                    )
-                    bid = float(quote["bid"])
-                    ask = float(quote["ask"])
-                    midpoint = (bid + ask) / 2.0
-                    minute = observed.replace(second=0, microsecond=0)
-                    bucket = minute - timedelta(minutes=minute.minute % 5)
-                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-                    continue
-                candle = buckets.get(bucket)
-                if candle is None:
-                    buckets[bucket] = {
-                        "time": bucket.isoformat(), "open": midpoint,
-                        "high": midpoint, "low": midpoint, "close": midpoint,
-                        "ticks": 1,
-                    }
-                else:
-                    candle["high"] = max(candle["high"], midpoint)
-                    candle["low"] = min(candle["low"], midpoint)
-                    candle["close"] = midpoint
-                    candle["ticks"] += 1
-    except OSError:
-        return []
-    candles = [buckets[bucket] for bucket in sorted(buckets)]
-    _QUOTE_CANDLE_CACHE[key] = candles
-    return candles
+    key = str(path)
+    with _QUOTE_CANDLE_CACHE_LOCK:
+        cached = _QUOTE_CANDLE_CACHE.get(key)
+        if path.suffix == ".gz":
+            signature = (stat.st_size, stat.st_mtime_ns)
+            if cached and cached.get("signature") == signature:
+                return cached["candles"]
+            buckets: dict[datetime, dict] = {}
+            try:
+                with gzip.open(path, "rt", encoding="utf-8") as handle:
+                    for line in handle:
+                        _append_quote_candle(buckets, line)
+            except OSError:
+                return []
+            candles = [buckets[bucket] for bucket in sorted(buckets)]
+            _QUOTE_CANDLE_CACHE[key] = {
+                "signature": signature, "candles": candles,
+            }
+            return candles
+
+        if cached and int(cached.get("offset", 0)) <= stat.st_size:
+            buckets = cached["buckets"]
+            offset = int(cached["offset"])
+            remainder = bytes(cached.get("remainder", b""))
+        else:
+            buckets = {}
+            offset = 0
+            remainder = b""
+        if offset == stat.st_size:
+            return [dict(candle) for candle in cached["candles"]] if cached else []
+        try:
+            with path.open("rb") as handle:
+                handle.seek(offset)
+                chunk = handle.read()
+                next_offset = handle.tell()
+        except OSError:
+            return []
+        lines = (remainder + chunk).split(b"\n")
+        remainder = lines.pop()
+        for line in lines:
+            if line:
+                _append_quote_candle(buckets, line)
+        candles = [buckets[bucket] for bucket in sorted(buckets)]
+        _QUOTE_CANDLE_CACHE[key] = {
+            "offset": next_offset,
+            "remainder": remainder,
+            "buckets": buckets,
+            "candles": candles,
+        }
+        return [dict(candle) for candle in candles]
 
 
 def _downsample_candles(candles: list[dict], limit: int) -> list[dict]:
@@ -1356,7 +1508,6 @@ def _dashboard_payload(database: Path) -> dict:
             "news_collector": connection.execute("SELECT max(fetched_time) FROM source_polls").fetchone()[0],
             "gemini_annotator": connection.execute("SELECT max(parsed_at) FROM news_annotations").fetchone()[0],
         }
-        integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
         news_source_health = _news_source_health(connection, now)
         monitored_news_sources = {
             row["source"] for row in news_source_health if row["health"] == "HEALTHY"
@@ -1469,6 +1620,10 @@ def _dashboard_payload(database: Path) -> dict:
     backup_time = datetime.fromtimestamp(backup_files[-1].stat().st_mtime, UTC).isoformat() if backup_files else None
     component_times["sites_synchronizer"] = sync_time
     component_times["sqlite_backup"] = backup_time
+    backup_integrity_component = component(
+        "sqlite_backup", 172800,
+        None if backup_time else "No verified daily SQLite backup is available",
+    )
     sites_sync_component = component(
         "sites_synchronizer", 120, sync_status.get("last_error")
     )
@@ -1673,9 +1828,10 @@ def _dashboard_payload(database: Path) -> dict:
                 "gemini_annotator": component("gemini_annotator", 900),
                 "sites_synchronizer": sites_sync_component,
                 "sqlite_backup": component("sqlite_backup", 172800),
-                "integrity_check": {"last_success": now.isoformat(), "age_seconds": 0,
-                                    "status": "OK" if integrity == "ok" else "ERROR",
-                                    "last_error": None if integrity == "ok" else integrity},
+                # Daily online backups are published only after the complete
+                # SQLite integrity check succeeds. Reuse that durable proof;
+                # never scan the growing live database on a status request.
+                "integrity_check": backup_integrity_component,
             },
         },
         "latest": latest_data,
@@ -1809,18 +1965,28 @@ def _dashboard_payload(database: Path) -> dict:
 
 class Handler(BaseHTTPRequestHandler):
     database: Path
+    status_cache = StatusSnapshotCache()
+
+    def _write_json(self, status: int, body: bytes, **headers: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        for name, value in headers.items():
+            self.send_header(name.replace("_", "-"), value)
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            pass
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path.rstrip("/")
         if path == "/api/health":
-            body = b'{"status":"OK"}'
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            status, payload = self.status_cache.health()
+            body = json.dumps(payload, separators=(",", ":")).encode()
+            self._write_json(status, body)
             return
         if path == "/api/market-history":
             query = urllib.parse.parse_qs(parsed.query)
@@ -1841,30 +2007,33 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     connection.close()
                 body = json.dumps(payload, allow_nan=False).encode()
-                self.send_response(200)
+                status = 200
             except (OSError, sqlite3.Error, TypeError, ValueError) as error:
                 body = json.dumps({"error": str(error)[:500]}).encode()
-                self.send_response(400)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+                status = 400
+            self._write_json(status, body)
             return
         if path != "/api/status":
             self.send_error(404)
             return
         try:
-            body = json.dumps(_dashboard_payload(self.database), allow_nan=False).encode()
-            self.send_response(200)
+            body, snapshot_state, snapshot_age = self.status_cache.get(
+                self.database, _dashboard_payload,
+            )
+            status = 200
+        except StatusSnapshotUnavailable as error:
+            body = json.dumps({"error": str(error)[:500]}).encode()
+            status = 503
         except Exception as error:
             body = json.dumps({"error": str(error)[:500]}).encode()
-            self.send_response(500)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+            status = 500
+        headers = {}
+        if status == 200:
+            headers = {
+                "X_Dashboard_Snapshot_State": snapshot_state,
+                "X_Dashboard_Snapshot_Age": f"{snapshot_age:.3f}",
+            }
+        self._write_json(status, body, **headers)
 
     def log_message(self, format: str, *args: object) -> None:
         return
