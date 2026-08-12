@@ -103,7 +103,11 @@ def skipped_grid_reason(
         return "BROKER_MARKET_STATUS_UNAVAILABLE"
     if not broker_session.is_open:
         return "BROKER_MARKET_CLOSED"
-    if broker_session.time_till_close <= timedelta(minutes=30):
+    # The duration belongs to the heartbeat's observed_at, not to this collector
+    # iteration. Comparing the raw duration can admit a close-crossing decision
+    # while a still-fresh heartbeat ages for up to 20 seconds.
+    estimated_close = broker_session.observed_at + broker_session.time_till_close
+    if estimated_close <= decision_time + timedelta(minutes=30):
         return "FIXED_HORIZON_CROSSES_BROKER_CLOSE"
 
     if has_fresh_quote(observations, decision_time):

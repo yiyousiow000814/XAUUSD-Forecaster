@@ -99,6 +99,26 @@ def test_broker_daily_close_and_horizon_boundary_block_new_decisions() -> None:
     ) == "FIXED_HORIZON_CROSSES_BROKER_CLOSE"
 
 
+def test_fresh_but_aging_heartbeat_cannot_cross_absolute_close() -> None:
+    decision = datetime(2026, 8, 11, 20, 30, tzinfo=UTC)
+    heartbeat_at = decision - timedelta(seconds=9)
+    quote = MarketObservation(
+        decision - timedelta(seconds=2), decision - timedelta(seconds=1),
+        4300, 4300.1,
+    )
+    session = broker_session(
+        heartbeat_at, time_till_close=timedelta(minutes=30, seconds=9)
+    )
+
+    assert session.is_fresh(decision + timedelta(seconds=9))
+    assert session.observed_at + session.time_till_close == (
+        decision + timedelta(minutes=30)
+    )
+    assert skipped_grid_reason(
+        decision, decision, [quote], session, decision + timedelta(seconds=9)
+    ) == "FIXED_HORIZON_CROSSES_BROKER_CLOSE"
+
+
 def test_missing_or_stale_broker_status_fails_closed() -> None:
     decision = datetime(2026, 8, 11, 21, 0, tzinfo=UTC)
     quote = MarketObservation(

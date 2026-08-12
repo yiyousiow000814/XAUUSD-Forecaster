@@ -145,6 +145,7 @@ export default function LiveRoomView() {
     (payload?.system.market_session === "CLOSED" ||
       payload?.system.market_session === "WEEKLY_CLOSED") && !error
   );
+  const marketUnavailable = Boolean(payload && !online && !marketClosed);
   const mid = latest?.bid && latest.ask ? (latest.bid + latest.ask) / 2 : null;
   const u5Percent = latest?.u5 == null ? null : Math.expm1(latest.u5) * 100;
   const u5Dollars = latest?.u5 == null || mid == null ? null : Math.expm1(latest.u5) * mid;
@@ -180,6 +181,16 @@ export default function LiveRoomView() {
               : horizonRemaining > 0
                 ? `观察中 · 剩${horizonMinutes}分钟`
                 : "本轮已结束";
+  const dialState = marketClosed
+    ? "closed"
+    : marketUnavailable
+      ? "unavailable"
+      : forecastAction.toLowerCase();
+  const dialAction = marketClosed
+    ? "休市"
+    : marketUnavailable
+      ? "无行情"
+      : forecastAction;
 
   return (
     <main>
@@ -217,10 +228,10 @@ export default function LiveRoomView() {
 
         <div className="decision-dial">
           <span className="dial-label">30分钟预测</span>
-          <div className={`action action-${marketClosed ? "closed" : forecastAction.toLowerCase()}`}>
-            {marketClosed ? "休市" : forecastAction}
+          <div className={`action action-${dialState}`}>
+            {dialAction}
           </div>
-          {forecastStatus && (marketClosed || (signalRemaining > 0 && online)) && <strong className="forecast-state is-current">{forecastStatus}</strong>}
+          {forecastStatus && (marketClosed || marketUnavailable || (signalRemaining > 0 && online)) && <strong className="forecast-state is-current">{forecastStatus}</strong>}
         </div>
       </section>
 
