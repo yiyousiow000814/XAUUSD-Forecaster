@@ -29,11 +29,12 @@ def test_control_center_treats_weekly_close_as_healthy() -> None:
     ).read_text(encoding="utf-8")
 
     assert "Test-ExpectedWeeklyMarketClosure" in control_center
-    assert "Test-BrokerMarketClosure" in control_center
+    assert "Get-BrokerMarketSession" in control_center
     assert 'return "MARKET CLOSED"' in control_center
     assert '"MARKET CLOSED", "API OK"' in control_center
     assert '"SYNC ERROR", "SYNC STALE"' in control_center
     assert '"COLLECTOR STALE", "ANNOTATOR STALE"' in control_center
+    assert '"SESSION STALE"' in control_center
 
 
 def test_control_center_loads_collector_keys_without_exposing_them() -> None:
@@ -161,6 +162,27 @@ def test_broker_closed_heartbeat_is_healthy_without_fresh_ticks(tmp_path) -> Non
     ).stdout.strip()
 
     assert result == "MARKET CLOSED"
+
+
+def test_fresh_quotes_without_broker_session_trigger_bridge_recovery(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    quotes = repo / ".local" / "forward" / "quotes"
+    quotes.mkdir(parents=True)
+    (quotes / "xauusd-quotes.jsonl").write_text("{}\n", encoding="utf-8")
+    script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    command = (
+        f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{repo}' "
+        f"-RepositoryRoot '{repo}'; "
+        "$service = [pscustomobject]@{ Key = 'quote' }; "
+        "$processes = @([pscustomobject]@{ ProcessId = 1 }); "
+        "Get-ServiceState -Service $service -Processes $processes"
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    assert result == "SESSION STALE"
 
 
 def test_watchdog_guard_restarts_only_after_heartbeat_is_stale(tmp_path) -> None:

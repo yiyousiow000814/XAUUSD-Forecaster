@@ -409,22 +409,23 @@ function Test-ExpectedWeeklyMarketClosure {
     return $false
 }
 
-function Test-BrokerMarketClosure {
+function Get-BrokerMarketSession {
     $path = Join-Path $moduleRoot ".local\forward\quotes\market-session.json"
-    if (-not (Test-Path -LiteralPath $path)) { return $false }
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
     try {
         $session = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
         $observedAt = [DateTimeOffset]::MinValue
         if (-not [DateTimeOffset]::TryParse(
             [string]$session.observed_at, [ref]$observedAt
-        )) { return $false }
+        )) { return $null }
         $now = [DateTimeOffset]::UtcNow
-        return (
-            $observedAt -le $now.AddSeconds(5) -and
-            ($now - $observedAt).TotalSeconds -le 20 -and
-            $session.is_open -eq $false
-        )
-    } catch { return $false }
+        if ($observedAt -gt $now.AddSeconds(5) -or
+            ($now - $observedAt).TotalSeconds -gt 20) { return $null }
+        return [pscustomobject]@{
+            ObservedAt = $observedAt
+            IsOpen = $session.is_open -eq $true
+        }
+    } catch { return $null }
 }
 
 function Get-ServiceState {
@@ -455,7 +456,8 @@ function Get-ServiceState {
     }
 
     if ($Service.Key -eq "quote") {
-        if (Test-BrokerMarketClosure) { return "MARKET CLOSED" }
+        $brokerSession = Get-BrokerMarketSession
+        if ($brokerSession -and -not $brokerSession.IsOpen) { return "MARKET CLOSED" }
         $quoteRoot = Join-Path $moduleRoot ".local\forward\quotes"
         $latestQuote = Get-ChildItem -LiteralPath $quoteRoot -Filter "*.jsonl" `
             -File -Recurse -ErrorAction SilentlyContinue |
@@ -465,6 +467,7 @@ function Get-ServiceState {
             if (Test-ExpectedWeeklyMarketClosure) { return "MARKET CLOSED" }
             return "DATA STALE"
         }
+        if (-not $brokerSession) { return "SESSION STALE" }
         return "LIVE"
     }
 
@@ -708,7 +711,7 @@ function Invoke-ForecasterWatchdog {
                 $row = $status | Where-Object Key -eq $service.Key
                 $unhealthy = $row.State -in @(
                     "STOPPED", "DATA STALE", "API ERROR", "SYNC ERROR", "SYNC STALE",
-                    "COLLECTOR STALE", "ANNOTATOR STALE"
+                    "COLLECTOR STALE", "ANNOTATOR STALE", "SESSION STALE"
                 )
                 if (-not $unhealthy) {
                     $failureCounts[$service.Key] = 0
