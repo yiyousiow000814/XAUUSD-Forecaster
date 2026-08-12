@@ -925,6 +925,43 @@ def test_dashboard_does_not_activate_fallback_from_stale_historical_evidence(
     assert gdelt["fallback_health"] == "NO_RECENT_EVIDENCE"
 
 
+def test_dashboard_clears_historical_gdelt_429_after_successful_gkg_poll(
+    tmp_path,
+) -> None:
+    now = datetime(2026, 8, 13, 3, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger.append_source_poll({
+        "poll_id": "gdelt-old-doc-429", "source": "gdelt_gold_geopolitics",
+        "fetched_time": now - timedelta(hours=2), "status": "ERROR",
+        "error_type": "HTTPError", "error": "HTTP Error 429: Too Many Requests",
+    })
+    ledger.append_source_poll({
+        "poll_id": "gdelt-gkg-ok", "source": "gdelt_gold_geopolitics",
+        "fetched_time": now - timedelta(minutes=5), "status": "OK",
+    })
+    body = "current GDELT GKG evidence " * 20
+    ledger.append_news_revision({
+        "source": "gdelt_gold_geopolitics", "source_item_id": "gkg-item",
+        "source_published_time": now - timedelta(minutes=10),
+        "collector_first_seen_time": now - timedelta(minutes=5),
+        "fetched_time": now - timedelta(minutes=5),
+        "headline": "Current GKG report", "body": body,
+        "link": "https://example.test/gkg",
+        "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+        "cluster_id": "gkg-item",
+    })
+
+    rows = _dashboard_module()._news_source_health(ledger.connection, now)
+    gdelt = next(row for row in rows if row["source"] == "gdelt_gold_geopolitics")
+
+    assert gdelt["health"] == "HEALTHY"
+    assert gdelt["latest_status"] == "OK"
+    assert gdelt["recovery_mode"] is None
+    assert gdelt["fallback_label"] is None
+    assert gdelt["next_retry_time"] is None
+    assert "429" in gdelt["last_error"]
+
+
 def test_market_chart_keeps_last_session_on_weekend_and_reads_gzip(tmp_path) -> None:
     module = _dashboard_module()
     now = datetime(2026, 8, 9, 4, 0, tzinfo=UTC)
