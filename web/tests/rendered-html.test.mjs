@@ -755,7 +755,7 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(page, /aria-hidden="true">‹<\/span>/);
   assert.match(page, /aria-hidden="true">›<\/span>/);
   assert.match(css, /\.topbar \{ align-items:stretch; flex-direction:column/);
-  assert.match(css, /\.audit-tabs-shell \{ position:sticky; top:0;[\s\S]*?grid-template-columns:38px minmax\(0,1fr\) 38px/);
+  assert.match(css, /\.audit-tabs-shell \{ position:sticky; top:0;[\s\S]*?grid-template-columns:44px minmax\(0,1fr\) 44px/);
   assert.match(css, /\.audit-tabs \{ position:static; display:flex;[\s\S]*?overflow-x:auto/);
   assert.match(css, /\.audit-main \.audit-intro>div:first-child \{ display:none; \}/);
   assert.match(css, /\.coverage-card \{ display:grid;[\s\S]*?min-height:0;/);
