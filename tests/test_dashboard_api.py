@@ -639,6 +639,45 @@ def test_dashboard_orders_news_by_publisher_time_not_discovery_time(tmp_path) ->
     ]
 
 
+def test_news_archive_is_60_day_bounded_and_cursor_safe(tmp_path) -> None:
+    module = _dashboard_module()
+    now = datetime.now(UTC).replace(microsecond=0)
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=now)
+    for item_id, published_at in (
+        ("current-a", now - timedelta(hours=2)),
+        ("current-b", now - timedelta(hours=1)),
+        ("current-c", now),
+        ("expired", now - timedelta(days=61)),
+    ):
+        body = f"complete reader evidence for {item_id} " * 30
+        ledger.append_news_revision({
+            "source": "bea_economic_releases",
+            "source_item_id": item_id,
+            "source_published_time": published_at,
+            "collector_first_seen_time": now,
+            "fetched_time": now,
+            "headline": item_id,
+            "body": body,
+            "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+            "cluster_id": item_id,
+        })
+
+    first = module._news_archive_page(ledger.connection, None, 2)
+    second = module._news_archive_page(ledger.connection, first["next_cursor"], 2)
+    rows = [*first["items"], *second["items"]]
+
+    assert first["has_more"] is True
+    assert second["has_more"] is False
+    assert first["window_days"] == 60
+    assert {row["source_item_id"] for row in rows} == {
+        "current-a", "current-b", "current-c",
+    }
+    assert len({row["detail_key"] if "detail_key" in row else (
+        row["source"], row["source_item_id"], row["revision_number"]
+    ) for row in rows}) == 3
+
+
 def test_dashboard_distinguishes_unavailable_content_from_pending(tmp_path) -> None:
     now = datetime(2026, 8, 7, 9, 0, tzinfo=UTC)
     database = tmp_path / "forward.sqlite3"

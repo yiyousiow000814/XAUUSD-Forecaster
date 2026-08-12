@@ -396,6 +396,7 @@ type NewsIndexResponse = {
   category_counts: Record<string, number>;
   page: number;
   page_size: number;
+  window_days?: number;
 };
 
 const time = (value?: string | null) => value ? new Intl.DateTimeFormat("zh-CN", {
@@ -587,9 +588,7 @@ const IMPACT_CLASS_LABELS: Record<string, string> = {
   BACKGROUND: "背景资料",
 };
 
-function NewsRow({ row, keyCount, requestsPerMinute }: {
-  row: News; keyCount: number; requestsPerMinute: number;
-}) {
+function NewsRow({ row }: { row: News }) {
   const [detail, setDetail] = useState<Partial<News> | null>(
     row.summary_zh !== undefined ? row : null,
   );
@@ -669,7 +668,7 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
         {annotationStatus === "READY" ? <section className="gemini-summary">
           <span>GEMINI 中文摘要 · 完整读取 {row.content_characters.toLocaleString("zh-CN")} 字符</span><p>{current.summary_zh}</p>
         </section> : annotationStatus === "QUEUED" ? <section className="gemini-summary summary-queued">
-          <span>FLASH-LITE 摘要排队中</span><p>正文已经完整入库，不会截断。系统正通过 {keyCount} 个 key 轮换，每分钟最多生成 {requestsPerMinute} 篇中文摘要；标题翻译会独立交给 Gemma。</p>
+          <span>中文摘要排队中</span><p>正文已经完整入库，不会截断；系统会依序生成中文摘要，标题翻译独立处理。</p>
         </section> : annotationStatus === "BACKING_OFF" ? <section className="gemini-summary summary-queued">
           <span>暂时退避</span><p>本次模型响应未通过验证；系统已停止每分钟重试，将在退避到期后有限重试。</p>
         </section> : annotationStatus === "DEAD_LETTER" ? <section className="gemini-summary summary-waiting">
@@ -869,9 +868,10 @@ export default function AuditView() {
     .filter(row => !row.model_identity.endsWith("NEWS_RESIDUAL"))
     .map(row => row.training_rows));
   const newsMetrics = resolveNewsMetrics(payload);
-  const readableNewsTotal = newsMetrics.articles.readable;
-  const parsedNewsTotal = newsMetrics.articles.semantic_reviews_complete;
-  const modelCandidateNewsTotal = newsMetrics.articles.current_model_candidates;
+  const readableNewsTotal = newsIndex.readable_total ?? newsMetrics.articles.readable;
+  const parsedNewsTotal = newsIndex.parsed_total ?? newsMetrics.articles.semantic_reviews_complete;
+  const modelCandidateNewsTotal = newsIndex.model_candidate_total
+    ?? newsMetrics.articles.current_model_candidates;
   const newsWaitingTotal = (payload?.annotation_queue?.queued ?? 0)
     + (payload?.annotation_queue?.backing_off ?? 0)
     + (payload?.annotation_queue?.dead_letter ?? 0);
@@ -966,18 +966,18 @@ export default function AuditView() {
 
       {view === "news" && <>
         <section className="annotation-queue" aria-label="新闻处理进度">
-          <span><b>{readableNewsTotal}</b> 篇可读文章</span>
-          <span><b>{parsedNewsTotal}</b> 篇语义复核完成</span>
-          <span><b>{newsNoParsingNeededTotal}</b> 篇无需复核</span>
-          <span><b>{newsWaitingTotal}</b> 篇等待处理</span>
-          <span className="is-model-ready"><b>{modelCandidateNewsTotal}</b> 篇当前模型候选</span>
+          <span><b>{readableNewsTotal}</b> 条近60天可读新闻</span>
+          <span><b>{parsedNewsTotal}</b> 条语义复核完成</span>
+          <span><b>{newsNoParsingNeededTotal}</b> 条无需复核</span>
+          <span><b>{newsWaitingTotal}</b> 条等待处理</span>
+          <span className="is-model-ready"><b>{modelCandidateNewsTotal}</b> 个当前模型候选事件</span>
           <details>
             <summary>查看处理器技术状态</summary>
             <p>真正排队 {payload?.annotation_queue?.queued ?? 0} · 失败后等待重试 {payload?.annotation_queue?.backing_off ?? 0} · 已隔离 {payload?.annotation_queue?.dead_letter ?? 0} · 等待正文 {payload?.annotation_queue?.waiting_content ?? 0} · 正文不可用 {payload?.annotation_queue?.unavailable_content ?? 0}</p>
           </details>
         </section>
         <section className="news-browser" aria-label="新闻自动分类">
-          <div><strong>自动分类</strong><span>按媒体发布时间排序 · 可读文章 {readableNewsTotal} 篇 · 语义复核完成 {parsedNewsTotal} 篇 · 当前模型候选 {modelCandidateNewsTotal} 篇 · 每页 {NEWS_PER_PAGE} 篇</span></div>
+          <div><strong>自动分类</strong><span>近60天 · 按媒体发布时间排序 · 共 {readableNewsTotal} 条可读新闻 · 语义复核完成 {parsedNewsTotal} 条 · 当前模型候选 {modelCandidateNewsTotal} 个事件 · 每页 {NEWS_PER_PAGE} 条</span></div>
           <nav>
             {categories.map(category => <button key={category.name} type="button" className={newsCategory === category.name ? "active" : ""} onClick={() => { setNewsCategory(category.name); setNewsPage(1); }}>
               {category.name}<b>{category.count}</b>
@@ -989,8 +989,6 @@ export default function AuditView() {
           {visibleNews.map(row => <NewsRow
             key={`${row.source}-${row.source_item_id}-${row.revision_number}`}
             row={row}
-            keyCount={payload?.annotation_queue?.configured_key_count ?? 0}
-            requestsPerMinute={payload?.annotation_queue?.requests_per_minute ?? 0}
           />)}
           {Array.from({ length: emptyNewsRows }, (_, index) => <div className="news-row-placeholder" aria-hidden="true" key={`empty-news-row-${index}`} />)}
         </section>

@@ -18,14 +18,22 @@ export const newsIndex = sqliteTable(
   {
     detailKey: text("detail_key").primaryKey(),
     category: text("category").notNull(),
+    clusterId: text("cluster_id").notNull(),
+    publishedTime: text("published_time").notNull(),
     collectorFirstSeenTime: text("collector_first_seen_time").notNull(),
+    parsed: integer("parsed").notNull().default(0),
+    modelCandidate: integer("model_candidate").notNull().default(0),
+    impactExpiresAt: text("impact_expires_at"),
+    mirrorContract: text("mirror_contract").notNull().default(""),
     payload: text("payload").notNull(),
     receivedAt: text("received_at").notNull(),
   },
   table => [
     index("news_index_seen_idx").on(table.collectorFirstSeenTime),
-    index("news_index_category_seen_idx").on(
-      table.category, table.collectorFirstSeenTime,
+    index("news_index_published_idx").on(table.publishedTime),
+    index("news_index_cluster_idx").on(table.clusterId),
+    index("news_index_category_published_idx").on(
+      table.category, table.publishedTime,
     ),
   ],
 );

@@ -59,7 +59,7 @@ export async function POST(request: Request) {
       await binding.prepare("DELETE FROM news_details").run();
       return NextResponse.json({ status: "OK", reset: true });
     }
-    if (!Array.isArray(body.items) || body.items.length > 200) {
+    if (!Array.isArray(body.items) || body.items.length > 20) {
       return NextResponse.json({ error: "invalid news detail batch" }, { status: 400 });
     }
     const now = new Date().toISOString();

@@ -114,11 +114,26 @@ test("keeps every audit collection in compact Preview status", () => {
 test("falls through to read-only D1 for later Preview news and details", () => {
   const index = readFileSync(new URL("../app/api/news-index/route.ts", import.meta.url), "utf8");
   const detail = readFileSync(new URL("../app/api/news-content/route.ts", import.meta.url), "utf8");
-  assert.match(index, /previewBundle && page === 1 && !category && pageSize <= inlinePreviewItems\.length/);
-  assert.match(index, /Number\(previewBundle\.news_index\.total \?\? inlinePreviewItems\.length\)/);
+  assert.doesNotMatch(index, /inlinePreviewItems/);
+  assert.match(index, /D1 is the source of truth even on the first Preview page/);
   assert.match(index, /if \(previewBundle\) \{\s*return previewJson\(\{ error: "新闻档案暂时不可用，请稍后重试" \}, 503\)/);
   assert.match(detail, /if \(detail\) return previewJson\(detail\)/);
   assert.doesNotMatch(detail, /该新闻详情不在本次 Preview 快照中/);
+});
+
+test("keeps the 60-day news archive inside bounded D1 work", () => {
+  const index = readFileSync(new URL("../app/api/news-index/route.ts", import.meta.url), "utf8");
+  const detail = readFileSync(new URL("../app/api/news-content/route.ts", import.meta.url), "utf8");
+  const migration = readFileSync(new URL("../drizzle/0007_bounded_news_archive.sql", import.meta.url), "utf8");
+  assert.match(index, /body\.items\.length > 20/);
+  assert.match(detail, /body\.items\.length > 20/);
+  assert.match(index, /ORDER BY published_time DESC/);
+  assert.match(index, /impact_expires_at>\?/);
+  assert.match(index, /item\.model_visibility = "IMPACT_EXPIRED"/);
+  assert.match(index, /DELETE FROM news_index WHERE mirror_contract <> \?/);
+  assert.match(index, /s-maxage=30/);
+  assert.match(migration, /news_index_published_idx/);
+  assert.match(migration, /news_index_category_published_idx/);
 });
 
 test("does not poll immutable Preview snapshots", () => {
@@ -298,10 +313,11 @@ test("renders the news and decision audit route", async () => {
   assert.doesNotMatch(source, /payload\?\.system\.online && !error/);
   assert.match(source, /列表与正文详情分开保存/);
   assert.doesNotMatch(source, /这些新闻处理到哪里了/);
-  assert.match(source, /篇可读文章/);
-  assert.match(source, /篇无需复核/);
+  assert.match(source, /条近60天可读新闻/);
+  assert.match(source, /条无需复核/);
   assert.match(source, /row\.model_visibility !== "NOT_YET_PARSED"/);
-  assert.match(source, /篇当前模型候选/);
+  assert.match(source, /个当前模型候选事件/);
+  assert.doesNotMatch(source, /个 key 轮换|每分钟最多生成/);
   assert.ok(source.indexOf('<nav className="audit-tabs"') < source.indexOf('<section className="annotation-queue"'));
   assert.doesNotMatch(source, /已经积累多少结果|真实上线后结果|当前模型学到哪里|距离下次学习/);
   assert.match(source, /上一次学习/);
@@ -739,7 +755,7 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(page, /aria-hidden="true">‹<\/span>/);
   assert.match(page, /aria-hidden="true">›<\/span>/);
   assert.match(css, /\.topbar \{ align-items:stretch; flex-direction:column/);
-  assert.match(css, /\.audit-tabs-shell \{ position:sticky; top:0;[\s\S]*?grid-template-columns:38px minmax\(0,1fr\) 38px/);
+  assert.match(css, /\.audit-tabs-shell \{ position:sticky; top:0;[\s\S]*?grid-template-columns:44px minmax\(0,1fr\) 44px/);
   assert.match(css, /\.audit-tabs \{ position:static; display:flex;[\s\S]*?overflow-x:auto/);
   assert.match(css, /\.audit-main \.audit-intro>div:first-child \{ display:none; \}/);
   assert.match(css, /\.coverage-card \{ display:grid;[\s\S]*?min-height:0;/);
