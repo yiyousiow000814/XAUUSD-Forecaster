@@ -114,7 +114,9 @@ test("keeps every audit collection in compact Preview status", () => {
 test("falls through to read-only D1 for later Preview news and details", () => {
   const index = readFileSync(new URL("../app/api/news-index/route.ts", import.meta.url), "utf8");
   const detail = readFileSync(new URL("../app/api/news-content/route.ts", import.meta.url), "utf8");
-  assert.match(index, /previewBundle && page === 1 && !category && pageSize <= inlinePreviewItems\.length/);
+  assert.match(index, /previewBundle && page === 1 && !category/);
+  assert.match(index, /scope === String\(previewBundle\.news_index\.scope \?\? "gold"\)/);
+  assert.match(index, /inlinePreviewItems\.every\(item => typeof item\.xauusd_relevance === "string"\)/);
   assert.match(index, /Number\(previewBundle\.news_index\.total \?\? inlinePreviewItems\.length\)/);
   assert.match(index, /if \(previewBundle\) \{\s*return previewJson\(\{ error: "新闻档案暂时不可用，请稍后重试" \}, 503\)/);
   assert.match(detail, /if \(detail\) return previewJson\(detail\)/);
@@ -298,10 +300,15 @@ test("renders the news and decision audit route", async () => {
   assert.doesNotMatch(source, /payload\?\.system\.online && !error/);
   assert.match(source, /列表与正文详情分开保存/);
   assert.doesNotMatch(source, /这些新闻处理到哪里了/);
-  assert.match(source, /篇可读文章/);
-  assert.match(source, /篇无需复核/);
+  assert.match(source, /篇阅读区文章/);
+  assert.match(source, /篇黄金相关/);
+  assert.match(source, /篇其他/);
   assert.match(source, /row\.model_visibility !== "NOT_YET_PARSED"/);
   assert.match(source, /篇当前模型候选/);
+  assert.match(source, /news-scope-tabs/);
+  assert.match(source, />黄金相关<b>/);
+  assert.match(source, />其他<b>/);
+  assert.doesNotMatch(source, /个 key 轮换|每分钟最多生成/);
   assert.ok(source.indexOf('<nav className="audit-tabs"') < source.indexOf('<section className="annotation-queue"'));
   assert.doesNotMatch(source, /已经积累多少结果|真实上线后结果|当前模型学到哪里|距离下次学习/);
   assert.match(source, /上一次学习/);
@@ -318,12 +325,26 @@ test("renders the news and decision audit route", async () => {
   if (process.env.WORKERS_CI_BRANCH && process.env.WORKERS_CI_BRANCH !== "main") {
     assert.doesNotMatch(html, /news-row-placeholder/);
   } else {
-    assert.match(html, /news-row-placeholder/);
+    assert.match(html, /news-row-placeholder|news-reader-empty/);
   }
   assert.match(html, /决策与30分钟结果/);
   assert.match(html, /Live OOS 学习曲线/);
   assert.match(html, /大视野覆盖/);
   assert.match(html, /学习进度/);
+});
+
+test("separates gold news and hides explicitly irrelevant semantic reviews", () => {
+  const route = readFileSync(new URL("../app/api/news-index/route.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  const sync = readFileSync(new URL("../../scripts/run_dashboard_sync.py", import.meta.url), "utf8");
+  assert.match(route, /json_extract\(nd\.payload, '\$\.xauusd_relevance'\), ''\) <> 'IRRELEVANT'/);
+  assert.match(route, /LEFT JOIN news_details nd USING\(detail_key\)/);
+  assert.match(route, /IN \('DIRECT', 'MACRO_DRIVER'\)/);
+  assert.match(route, /scope === "other" \? otherEvidence : goldEvidence/);
+  assert.match(source, /scope: newsScope/);
+  assert.match(source, /默认展示与黄金有关的新闻/);
+  assert.match(sync, /news-readable-append-only-v2/);
+  assert.match(sync, /\/api\/news-backfill/);
 });
 
 test("switches dashboard rooms locally and reuses client data between views", () => {

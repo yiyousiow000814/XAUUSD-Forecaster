@@ -88,6 +88,7 @@ type News = {
   eligibility_version?: string;
   primary_category?: string | null;
   secondary_categories?: string[];
+  xauusd_relevance?: "DIRECT" | "MACRO_DRIVER" | "CONTEXT_ONLY" | "IRRELEVANT";
   emerging_topic_zh: string | null;
 };
 
@@ -393,9 +394,12 @@ type NewsIndexResponse = {
   readable_total?: number;
   parsed_total?: number;
   model_candidate_total?: number;
+  gold_total?: number;
+  other_total?: number;
   category_counts: Record<string, number>;
   page: number;
   page_size: number;
+  scope?: "gold" | "other";
 };
 
 const time = (value?: string | null) => value ? new Intl.DateTimeFormat("zh-CN", {
@@ -587,9 +591,7 @@ const IMPACT_CLASS_LABELS: Record<string, string> = {
   BACKGROUND: "背景资料",
 };
 
-function NewsRow({ row, keyCount, requestsPerMinute }: {
-  row: News; keyCount: number; requestsPerMinute: number;
-}) {
+function NewsRow({ row }: { row: News }) {
   const [detail, setDetail] = useState<Partial<News> | null>(
     row.summary_zh !== undefined ? row : null,
   );
@@ -669,7 +671,7 @@ function NewsRow({ row, keyCount, requestsPerMinute }: {
         {annotationStatus === "READY" ? <section className="gemini-summary">
           <span>GEMINI 中文摘要 · 完整读取 {row.content_characters.toLocaleString("zh-CN")} 字符</span><p>{current.summary_zh}</p>
         </section> : annotationStatus === "QUEUED" ? <section className="gemini-summary summary-queued">
-          <span>FLASH-LITE 摘要排队中</span><p>正文已经完整入库，不会截断。系统正通过 {keyCount} 个 key 轮换，每分钟最多生成 {requestsPerMinute} 篇中文摘要；标题翻译会独立交给 Gemma。</p>
+          <span>中文摘要排队中</span><p>正文已经完整入库，不会截断。完成语义复核后，摘要与相关性判断会自动更新。</p>
         </section> : annotationStatus === "BACKING_OFF" ? <section className="gemini-summary summary-queued">
           <span>暂时退避</span><p>本次模型响应未通过验证；系统已停止每分钟重试，将在退避到期后有限重试。</p>
         </section> : annotationStatus === "DEAD_LETTER" ? <section className="gemini-summary summary-waiting">
@@ -705,8 +707,9 @@ export default function AuditView() {
     ? ({ ...cachedStatus, ...cachedLearning } as Payload)
     : null);
   const [newsIndex, setNewsIndex] = useState<NewsIndexResponse>(() => (
-    readDashboardResource<NewsIndexResponse>(`/api/news-index?page=1&limit=${NEWS_PER_PAGE}`) ?? {
-      items: [], total: 0, all_total: 0, category_counts: {}, page: 1, page_size: NEWS_PER_PAGE,
+    readDashboardResource<NewsIndexResponse>(`/api/news-index?page=1&limit=${NEWS_PER_PAGE}&scope=gold`) ?? {
+      items: [], total: 0, all_total: 0, gold_total: 0, other_total: 0,
+      category_counts: {}, page: 1, page_size: NEWS_PER_PAGE, scope: "gold",
     }
   ));
   const [statusState, setStatusState] = useState<"loading" | "ready" | "error">(cachedStatus ? "ready" : "loading");
@@ -716,6 +719,7 @@ export default function AuditView() {
   const [newsError, setNewsError] = useState<string | null>(null);
   const [view, setView] = useState<"news" | "evidence" | "stories" | "decisions" | "league" | "coverage">(initialView);
   const [newsCategory, setNewsCategory] = useState("全部");
+  const [newsScope, setNewsScope] = useState<"gold" | "other">("gold");
   const [newsPage, setNewsPage] = useState(1);
   const [graphOpen, setGraphOpen] = useState(false);
   const [graphStartTab, setGraphStartTab] = useState<"curve" | "execution">("curve");
@@ -764,13 +768,13 @@ export default function AuditView() {
 
   const refreshNews = useCallback(async (force = false) => {
     const query = new URLSearchParams({
-      page: String(newsPage), limit: String(NEWS_PER_PAGE),
+      page: String(newsPage), limit: String(NEWS_PER_PAGE), scope: newsScope,
     });
     if (newsCategory !== "全部") query.set("category", newsCategory);
     const body = await loadDashboardResource<NewsIndexResponse>(`/api/news-index?${query}`, { force });
     setNewsIndex(body);
     setNewsError(null);
-  }, [newsCategory, newsPage]);
+  }, [newsCategory, newsPage, newsScope]);
 
   useEffect(() => {
     return scheduleDashboardRefresh(
@@ -793,9 +797,9 @@ export default function AuditView() {
       )),
       DASHBOARD_REFRESH_INTERVALS.news,
       immutablePreview,
-      `news-index:${newsCategory}:${newsPage}`,
+      `news-index:${newsScope}:${newsCategory}:${newsPage}`,
     );
-  }, [refreshNews, view, immutablePreview, newsCategory, newsPage]);
+  }, [refreshNews, view, immutablePreview, newsScope, newsCategory, newsPage]);
 
   useEffect(() => {
     if (view !== "league") return;
@@ -846,9 +850,9 @@ export default function AuditView() {
   }, [payload]);
 
   const categories = useMemo(() => [
-    { name: "全部", count: newsIndex.readable_total ?? newsIndex.all_total },
+    { name: "全部", count: newsScope === "gold" ? (newsIndex.gold_total ?? newsIndex.total) : (newsIndex.other_total ?? newsIndex.total) },
     ...CATEGORY_ORDER.filter(name => newsIndex.category_counts[name]).map(name => ({ name, count: newsIndex.category_counts[name] ?? 0 })),
-  ], [newsIndex]);
+  ], [newsIndex, newsScope]);
   const newsPageCount = Math.max(1, Math.ceil(newsIndex.total / NEWS_PER_PAGE));
   const currentNewsPage = Math.min(newsPage, newsPageCount);
   const visibleNews = newsIndex.items;
@@ -869,13 +873,12 @@ export default function AuditView() {
     .filter(row => !row.model_identity.endsWith("NEWS_RESIDUAL"))
     .map(row => row.training_rows));
   const newsMetrics = resolveNewsMetrics(payload);
-  const readableNewsTotal = newsMetrics.articles.readable;
-  const parsedNewsTotal = newsMetrics.articles.semantic_reviews_complete;
-  const modelCandidateNewsTotal = newsMetrics.articles.current_model_candidates;
+  const readableNewsTotal = newsIndex.readable_total ?? newsMetrics.articles.readable;
+  const parsedNewsTotal = newsIndex.parsed_total ?? newsMetrics.articles.semantic_reviews_complete;
+  const modelCandidateNewsTotal = newsIndex.model_candidate_total ?? newsMetrics.articles.current_model_candidates;
   const newsWaitingTotal = (payload?.annotation_queue?.queued ?? 0)
     + (payload?.annotation_queue?.backing_off ?? 0)
     + (payload?.annotation_queue?.dead_letter ?? 0);
-  const newsNoParsingNeededTotal = Math.max(0, readableNewsTotal - parsedNewsTotal - newsWaitingTotal);
   const rowsUntilTraining = statusState === "ready" && payload?.training
     ? Math.max(0, payload.training.next_training_at - payload.training.complete_rows)
     : null;
@@ -966,9 +969,10 @@ export default function AuditView() {
 
       {view === "news" && <>
         <section className="annotation-queue" aria-label="新闻处理进度">
-          <span><b>{readableNewsTotal}</b> 篇可读文章</span>
+          <span><b>{readableNewsTotal}</b> 篇阅读区文章</span>
           <span><b>{parsedNewsTotal}</b> 篇语义复核完成</span>
-          <span><b>{newsNoParsingNeededTotal}</b> 篇无需复核</span>
+          <span><b>{newsIndex.gold_total ?? 0}</b> 篇黄金相关</span>
+          <span><b>{newsIndex.other_total ?? 0}</b> 篇其他</span>
           <span><b>{newsWaitingTotal}</b> 篇等待处理</span>
           <span className="is-model-ready"><b>{modelCandidateNewsTotal}</b> 篇当前模型候选</span>
           <details>
@@ -977,8 +981,12 @@ export default function AuditView() {
           </details>
         </section>
         <section className="news-browser" aria-label="新闻自动分类">
-          <div><strong>自动分类</strong><span>按媒体发布时间排序 · 可读文章 {readableNewsTotal} 篇 · 语义复核完成 {parsedNewsTotal} 篇 · 当前模型候选 {modelCandidateNewsTotal} 篇 · 每页 {NEWS_PER_PAGE} 篇</span></div>
-          <nav>
+          <div><strong>新闻阅读</strong><span>按媒体发布时间排序 · 默认展示与黄金有关的新闻 · 每页 {NEWS_PER_PAGE} 篇</span></div>
+          <nav className="news-scope-tabs" aria-label="新闻相关性">
+            <button type="button" className={newsScope === "gold" ? "active" : ""} onClick={() => { setNewsScope("gold"); setNewsCategory("全部"); setNewsPage(1); }}>黄金相关<b>{newsIndex.gold_total ?? 0}</b></button>
+            <button type="button" className={newsScope === "other" ? "active" : ""} onClick={() => { setNewsScope("other"); setNewsCategory("全部"); setNewsPage(1); }}>其他<b>{newsIndex.other_total ?? 0}</b></button>
+          </nav>
+          <nav className="news-category-tabs" aria-label="新闻主题分类">
             {categories.map(category => <button key={category.name} type="button" className={newsCategory === category.name ? "active" : ""} onClick={() => { setNewsCategory(category.name); setNewsPage(1); }}>
               {category.name}<b>{category.count}</b>
             </button>)}
@@ -989,14 +997,12 @@ export default function AuditView() {
           {visibleNews.map(row => <NewsRow
             key={`${row.source}-${row.source_item_id}-${row.revision_number}`}
             row={row}
-            keyCount={payload?.annotation_queue?.configured_key_count ?? 0}
-            requestsPerMinute={payload?.annotation_queue?.requests_per_minute ?? 0}
           />)}
-          {Array.from({ length: emptyNewsRows }, (_, index) => <div className="news-row-placeholder" aria-hidden="true" key={`empty-news-row-${index}`} />)}
+          {visibleNews.length === 0 ? <div className="news-reader-empty"><strong>{newsScope === "gold" ? "暂时没有黄金相关新闻" : "暂时没有其他新闻"}</strong><span>等待新闻完成语义复核，或选择另一个分区查看。</span></div> : Array.from({ length: emptyNewsRows }, (_, index) => <div className="news-row-placeholder" aria-hidden="true" key={`empty-news-row-${index}`} />)}
         </section>
         {newsPageCount > 1 && <nav className="news-pagination" aria-label="新闻分页">
           <button type="button" disabled={currentNewsPage === 1} onClick={() => setNewsPage(page => Math.max(1, page - 1))}>← 上一页</button>
-          <span>第 <b>{currentNewsPage}</b> / {newsPageCount} 页 · 当前分类 {newsIndex.total} 条</span>
+          <span>第 <b>{currentNewsPage}</b> / {newsPageCount} 页 · {newsScope === "gold" ? "黄金相关" : "其他"} · 当前分类 {newsIndex.total} 条</span>
           <button type="button" disabled={currentNewsPage === newsPageCount} onClick={() => setNewsPage(page => Math.min(newsPageCount, page + 1))}>下一页 →</button>
         </nav>}
       </>}

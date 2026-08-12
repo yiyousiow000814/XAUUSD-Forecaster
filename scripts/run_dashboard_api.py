@@ -28,6 +28,8 @@ PAYLOAD_SCHEMA_VERSION = "xauusd-dashboard-v4-event-episode"
 MARKET_DETAIL_CANDLE_LIMIT = 7 * 288
 MARKET_OVERVIEW_CANDLE_LIMIT = 480
 MARKET_HISTORY_PAGE_LIMIT = 500
+NEWS_STATUS_LIMIT = 200
+NEWS_BACKFILL_LIMIT = 1000
 STATUS_SNAPSHOT_TTL_SECONDS = 15.0
 STATUS_SNAPSHOT_WAIT_SECONDS = 5.0
 STATUS_SNAPSHOT_MAX_STALE_SECONDS = 90.0
@@ -1144,7 +1146,9 @@ def _news_metrics(
     }
 
 
-def _dashboard_payload(database: Path) -> dict:
+def _dashboard_payload(
+    database: Path, *, news_limit: int = NEWS_STATUS_LIMIT,
+) -> dict:
     now = datetime.now(UTC)
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=5)
     connection.row_factory = sqlite3.Row
@@ -1276,6 +1280,7 @@ def _dashboard_payload(database: Path) -> dict:
                       json_extract(a.annotation_json, '$.summary_zh') AS summary_zh,
                       json_extract(a.annotation_json, '$.primary_category') AS primary_category,
                       json_extract(a.annotation_json, '$.secondary_categories') AS secondary_categories_json,
+                      json_extract(a.annotation_json, '$.xauusd_relevance') AS xauusd_relevance,
                        json_extract(a.annotation_json, '$.emerging_topic_zh') AS emerging_topic_zh,
                        json_extract(a.annotation_json, '$.event_time') AS event_time,
                       a.event_type, a.entities_json, a.hawkishness,
@@ -1775,7 +1780,7 @@ def _dashboard_payload(database: Path) -> dict:
         item["category"] = _news_category(item)
         item["eligibility_version"] = CURRENT_NEWS_CONTRACT.eligibility_version
         news.append(item)
-        if len(news) >= 200:
+        if len(news) >= news_limit:
             break
     counts["latest_news_items"] = len(news)
     counts["readable_news_items"] = len(news)
@@ -2082,6 +2087,21 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, sqlite3.Error, TypeError, ValueError) as error:
                 body = json.dumps({"error": str(error)[:500]}).encode()
                 status = 400
+            self._write_json(status, body)
+            return
+        if path == "/api/news-backfill":
+            try:
+                payload = _dashboard_payload(
+                    self.database, news_limit=NEWS_BACKFILL_LIMIT,
+                )
+                body = json.dumps(
+                    {"items": payload.get("recent_news", [])},
+                    allow_nan=False,
+                ).encode()
+                status = 200
+            except Exception as error:
+                body = json.dumps({"error": str(error)[:500]}).encode()
+                status = 500
             self._write_json(status, body)
             return
         if path != "/api/status":

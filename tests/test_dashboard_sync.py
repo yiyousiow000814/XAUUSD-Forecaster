@@ -343,6 +343,7 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
             "annotation_status": "NOT_REQUIRED",
             "annotation_reason_code": "SEARCH_LEAD",
             "annotation_reason": "搜索线索：来自聚合发现源，不是独立官方发布",
+            "xauusd_relevance": "MACRO_DRIVER",
         } for index in range(100)],
         "recent_decisions": [{"id": index} for index in range(30)],
         "news_evidence": [{"id": index} for index in range(100)],
@@ -375,8 +376,10 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
     assert index_rows[0]["content_error_type"] == "HTTPError"
     assert index_rows[0]["annotation_reason_code"] == "SEARCH_LEAD"
     assert index_rows[0]["annotation_reason"].startswith("搜索线索")
+    assert index_rows[0]["xauusd_relevance"] == "MACRO_DRIVER"
     assert "content_fetch_status" not in detail_rows[0]["payload"]
     assert "annotation_reason" not in detail_rows[0]["payload"]
+    assert "xauusd_relevance" not in detail_rows[0]["payload"]
     assert len(detail_rows[0]["detail_key"]) == 64
     assert mirrored["market_chart"]["decisions"] == []
     assert mirrored["market_chart"]["candles"] == []
@@ -398,6 +401,23 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
     assert "learning_curves" not in mirrored
     assert "models" not in mirrored["training"]
     assert len(index_rows) == 100
+
+
+def test_news_backfill_can_exceed_the_live_status_window() -> None:
+    module = _sync_module()
+    rows = [{
+        "source": "example", "source_item_id": str(index),
+        "revision_number": 1, "category": "其他",
+        "collector_first_seen_time": "2026-08-10T00:00:00+00:00",
+    } for index in range(205)]
+
+    live_index, _ = module.news_mirror_parts({"recent_news": rows})
+    backfill_index, _ = module.news_mirror_parts(
+        {"recent_news": rows}, limit=module.REMOTE_NEWS_BACKFILL_LIMIT,
+    )
+
+    assert len(live_index) == module.REMOTE_NEWS_LIMIT == 200
+    assert len(backfill_index) == 205
 
 
 def test_news_detail_batches_stay_bounded() -> None:
@@ -754,9 +774,10 @@ def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> 
 
     module.sync_once(config)
     assert posted.count("https://remote/api/learning") == 1
-    # An unknown mirror contract is reset once before the authoritative rows
-    # are repopulated, so stale remote-only news cannot survive forever.
-    assert posted.count("https://remote/api/news-index") == 2
+    # A new contract backfills the archive without deleting older rows that
+    # have naturally left the rolling local status window.
+    assert posted.count("https://remote/api/news-index") == 1
+    assert posted.count("https://remote/api/news-content") == 1
     assert posted[0] == "https://remote/api/ingest"
 
     posted.clear()
@@ -836,7 +857,8 @@ def test_sync_repopulates_news_index_without_full_refresh_marker(
 
     module.sync_once(config)
 
-    assert posted.count("https://remote/api/news-index") == 2
+    assert posted.count("https://remote/api/news-index") == 1
+    assert posted.count("https://remote/api/news-content") == 1
     state = json.loads(state_file.read_text(encoding="utf-8"))
     assert state["last_index_full_sync"]
     assert state["mirror_contract_version"] == module.NEWS_MIRROR_CONTRACT_VERSION

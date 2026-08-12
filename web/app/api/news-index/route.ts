@@ -17,16 +17,22 @@ const pageRequest = (request: Request) => {
   const query = new URL(request.url).searchParams;
   const page = Math.max(1, Number.parseInt(query.get("page") ?? "1", 10) || 1);
   const pageSize = Math.min(50, Math.max(1, Number.parseInt(query.get("limit") ?? "12", 10) || 12));
-  return { page, pageSize, category: query.get("category")?.trim() ?? "" };
+  const scope = query.get("scope") === "other" ? "other" : "gold";
+  return { page, pageSize, category: query.get("category")?.trim() ?? "", scope };
 };
 
 export async function GET(request: Request) {
-  const { page, pageSize, category } = pageRequest(request);
+  const { page, pageSize, category, scope } = pageRequest(request);
   // The first unfiltered page is the branch-aware immutable snapshot. Other
   // pages and filters are read-only D1 queries; returning an empty sliced
   // bundle here made Preview look as if the rest of the archive did not exist.
   const inlinePreviewItems = previewBundle?.news_index.items ?? [];
-  if (previewBundle && page === 1 && !category && pageSize <= inlinePreviewItems.length) {
+  if (
+    previewBundle && page === 1 && !category
+    && scope === String(previewBundle.news_index.scope ?? "gold")
+    && pageSize <= inlinePreviewItems.length
+    && inlinePreviewItems.every(item => typeof item.xauusd_relevance === "string")
+  ) {
     return previewJson({
       ...previewBundle.news_index,
       items: inlinePreviewItems.slice(0, pageSize),
@@ -38,36 +44,59 @@ export async function GET(request: Request) {
   try {
     const binding = env.DB as D1Database | undefined;
     if (binding) {
+      const latestRevision = `NOT EXISTS (
+        SELECT 1 FROM news_index newer
+        WHERE json_extract(newer.payload, '$.source') = json_extract(ni.payload, '$.source')
+          AND json_extract(newer.payload, '$.source_item_id') = json_extract(ni.payload, '$.source_item_id')
+          AND CAST(json_extract(newer.payload, '$.revision_number') AS INTEGER)
+              > CAST(json_extract(ni.payload, '$.revision_number') AS INTEGER)
+      )`;
       const readableEvidence = `
-        json_extract(payload, '$.content_status') IN ('FULL_TEXT', 'SOURCE_CONTENT')
-        AND COALESCE(json_extract(payload, '$.model_visibility'), 'COLLECT_ONLY') <> 'COLLECT_ONLY'`;
+        json_extract(ni.payload, '$.content_status') IN ('FULL_TEXT', 'SOURCE_CONTENT')
+        AND COALESCE(json_extract(ni.payload, '$.model_visibility'), 'COLLECT_ONLY') <> 'COLLECT_ONLY'
+        AND COALESCE(json_extract(ni.payload, '$.xauusd_relevance'),
+                     json_extract(nd.payload, '$.xauusd_relevance'), '') <> 'IRRELEVANT'
+        AND ${latestRevision}`;
+      const goldEvidence = `${readableEvidence}
+        AND COALESCE(json_extract(ni.payload, '$.xauusd_relevance'),
+                     json_extract(nd.payload, '$.xauusd_relevance')) IN ('DIRECT', 'MACRO_DRIVER')`;
+      const otherEvidence = `${readableEvidence}
+        AND COALESCE(json_extract(ni.payload, '$.xauusd_relevance'),
+                     json_extract(nd.payload, '$.xauusd_relevance'), '') NOT IN ('DIRECT', 'MACRO_DRIVER')`;
+      const scopedEvidence = scope === "other" ? otherEvidence : goldEvidence;
       const parsedEvidence = `${readableEvidence}
-        AND COALESCE(json_extract(payload, '$.parsed_at'), '') <> ''`;
+        AND COALESCE(json_extract(ni.payload, '$.parsed_at'), '') <> ''`;
       const modelCandidateEvidence = `${parsedEvidence}
-        AND json_extract(payload, '$.model_visibility') = 'MODEL_VISIBLE'`;
+        AND json_extract(ni.payload, '$.model_visibility') = 'MODEL_VISIBLE'`;
       const where = category
-        ? `WHERE ${readableEvidence} AND category = ?`
-        : `WHERE ${readableEvidence}`;
+        ? `WHERE ${scopedEvidence} AND ni.category = ?`
+        : `WHERE ${scopedEvidence}`;
       const bindValues = category ? [category] : [];
       const offset = (page - 1) * pageSize;
-      const [rows, totalRow, allTotalRow, parsedTotalRow, modelCandidateTotalRow, categoryRows] = await Promise.all([
+      const [rows, totalRow, allTotalRow, goldTotalRow, otherTotalRow, parsedTotalRow, modelCandidateTotalRow, categoryRows] = await Promise.all([
         binding.prepare(
-          `SELECT payload FROM news_index ${where}
-           ORDER BY COALESCE(json_extract(payload, '$.source_published_time'),
-                             collector_first_seen_time) DESC,
-                    collector_first_seen_time DESC, detail_key DESC LIMIT ? OFFSET ?`,
+          `SELECT json_patch(COALESCE(nd.payload, '{}'), ni.payload) AS payload
+           FROM news_index ni LEFT JOIN news_details nd USING(detail_key) ${where}
+           ORDER BY COALESCE(json_extract(ni.payload, '$.source_published_time'),
+                             ni.collector_first_seen_time) DESC,
+                    ni.collector_first_seen_time DESC, ni.detail_key DESC LIMIT ? OFFSET ?`,
         ).bind(...bindValues, pageSize, offset).all<{ payload: string }>(),
-        binding.prepare(`SELECT count(*) AS count FROM news_index ${where}`)
+        binding.prepare(`SELECT count(*) AS count FROM news_index ni LEFT JOIN news_details nd USING(detail_key) ${where}`)
           .bind(...bindValues).first<{ count: number }>(),
-        binding.prepare(`SELECT count(*) AS count FROM news_index WHERE ${readableEvidence}`)
+        binding.prepare(`SELECT count(*) AS count FROM news_index ni LEFT JOIN news_details nd USING(detail_key) WHERE ${readableEvidence}`)
           .first<{ count: number }>(),
-        binding.prepare(`SELECT count(*) AS count FROM news_index WHERE ${parsedEvidence}`)
+        binding.prepare(`SELECT count(*) AS count FROM news_index ni LEFT JOIN news_details nd USING(detail_key) WHERE ${goldEvidence}`)
           .first<{ count: number }>(),
-        binding.prepare(`SELECT count(*) AS count FROM news_index WHERE ${modelCandidateEvidence}`)
+        binding.prepare(`SELECT count(*) AS count FROM news_index ni LEFT JOIN news_details nd USING(detail_key) WHERE ${otherEvidence}`)
+          .first<{ count: number }>(),
+        binding.prepare(`SELECT count(*) AS count FROM news_index ni LEFT JOIN news_details nd USING(detail_key) WHERE ${parsedEvidence}`)
+          .first<{ count: number }>(),
+        binding.prepare(`SELECT count(*) AS count FROM news_index ni LEFT JOIN news_details nd USING(detail_key) WHERE ${modelCandidateEvidence}`)
           .first<{ count: number }>(),
         binding.prepare(
-          `SELECT category, count(*) AS count FROM news_index
-           WHERE ${readableEvidence} GROUP BY category`,
+          `SELECT ni.category, count(*) AS count FROM news_index ni
+           LEFT JOIN news_details nd USING(detail_key)
+           WHERE ${scopedEvidence} GROUP BY ni.category`,
         ).all<{ category: string; count: number }>(),
       ]);
       return NextResponse.json({
@@ -75,6 +104,8 @@ export async function GET(request: Request) {
         total: totalRow?.count ?? 0,
         all_total: allTotalRow?.count ?? 0,
         readable_total: allTotalRow?.count ?? 0,
+        gold_total: goldTotalRow?.count ?? 0,
+        other_total: otherTotalRow?.count ?? 0,
         parsed_total: parsedTotalRow?.count ?? 0,
         model_candidate_total: modelCandidateTotalRow?.count ?? 0,
         category_counts: Object.fromEntries(
@@ -82,6 +113,7 @@ export async function GET(request: Request) {
         ),
         page,
         page_size: pageSize,
+        scope,
       }, { headers: { "Cache-Control": "no-store, max-age=0" } });
     }
   } catch {
@@ -104,7 +136,10 @@ export async function GET(request: Request) {
         signal: AbortSignal.timeout(4_000),
       });
       const payload = await response.json() as { recent_news?: NewsIndexItem[] };
-      const all = [...(payload.recent_news ?? [])].sort((left, right) => {
+      const readable = (payload.recent_news ?? []).filter(row => row.xauusd_relevance !== "IRRELEVANT");
+      const gold = readable.filter(row => row.xauusd_relevance === "DIRECT" || row.xauusd_relevance === "MACRO_DRIVER");
+      const other = readable.filter(row => row.xauusd_relevance !== "DIRECT" && row.xauusd_relevance !== "MACRO_DRIVER");
+      const all = (scope === "other" ? other : gold).sort((left, right) => {
         const leftTime = String(left.source_published_time ?? left.collector_first_seen_time ?? "");
         const rightTime = String(right.source_published_time ?? right.collector_first_seen_time ?? "");
         return rightTime.localeCompare(leftTime);
@@ -121,13 +156,16 @@ export async function GET(request: Request) {
       return NextResponse.json({
         items: filtered.slice(offset, offset + pageSize),
         total: filtered.length,
-        all_total: all.length,
-        readable_total: all.length,
+        all_total: readable.length,
+        readable_total: readable.length,
+        gold_total: gold.length,
+        other_total: other.length,
         parsed_total: parsedTotal,
         model_candidate_total: modelCandidateTotal,
         category_counts: categoryCounts,
         page,
         page_size: pageSize,
+        scope,
       }, { status: response.status, headers: { "Cache-Control": "no-store, max-age=0" } });
     } catch {
       // Return a single public-facing error below.

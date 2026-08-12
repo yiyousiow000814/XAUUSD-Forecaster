@@ -716,6 +716,33 @@ def test_dashboard_shows_readable_unparsed_news_without_model_visibility(tmp_pat
     assert payload["counts"]["model_candidate_news_items"] == 0
 
 
+def test_dashboard_keeps_status_bounded_but_exposes_news_backfill(tmp_path) -> None:
+    now = datetime(2026, 8, 8, 1, 0, tzinfo=UTC)
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=now)
+    for index in range(205):
+        body = f"readable archive evidence {index} " * 20
+        ledger.append_news_revision({
+            "source": "us_treasury_press_releases",
+            "source_item_id": f"archive-{index:03d}",
+            "source_published_time": now - timedelta(seconds=index),
+            "collector_first_seen_time": now,
+            "fetched_time": now,
+            "headline": f"Archive item {index}",
+            "body": body,
+            "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+            "cluster_id": f"archive-{index:03d}",
+        })
+    ledger.connection.close()
+
+    module = _dashboard_module()
+    status = module._dashboard_payload(database)
+    backfill = module._dashboard_payload(database, news_limit=1000)
+
+    assert len(status["recent_news"]) == module.NEWS_STATUS_LIMIT == 200
+    assert len(backfill["recent_news"]) == 205
+
+
 def test_dashboard_keeps_readable_late_news_for_semantic_impact_review(tmp_path) -> None:
     now = datetime(2026, 8, 8, 1, 0, tzinfo=UTC)
     database = tmp_path / "forward.sqlite3"
@@ -797,6 +824,7 @@ def test_dashboard_explains_active_and_expired_on_receipt_impacts(tmp_path) -> N
 
     assert rows["active"]["impact_status"] == "ACTIVE"
     assert rows["active"]["model_visibility"] == "MODEL_VISIBLE"
+    assert rows["active"]["xauusd_relevance"] == "MACRO_DRIVER"
     assert rows["expired-on-receipt"]["impact_status"] == "EXPIRED_ON_RECEIPT"
     assert rows["expired-on-receipt"]["model_visibility"] == "IMPACT_EXPIRED"
 

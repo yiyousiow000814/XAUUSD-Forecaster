@@ -41,13 +41,14 @@ REMOTE_PAYLOAD_LIMIT_BYTES = 750_000
 LOCAL_STATUS_TIMEOUT_SECONDS = 20
 REMOTE_POST_TIMEOUT_SECONDS = 30
 REMOTE_NEWS_LIMIT = 200
+REMOTE_NEWS_BACKFILL_LIMIT = 1000
 REMOTE_DECISION_LIMIT = 20
 REMOTE_EVIDENCE_LIMIT = 60
 NEWS_DETAIL_BATCH_LIMIT_BYTES = 400_000
 NEWS_INDEX_BATCH_LIMIT_BYTES = 400_000
 NEWS_DETAIL_FULL_REFRESH_SECONDS = 86_400
 NEWS_INDEX_FULL_REFRESH_SECONDS = 86_400
-NEWS_MIRROR_CONTRACT_VERSION = "news-readable-authoritative-v1"
+NEWS_MIRROR_CONTRACT_VERSION = "news-readable-append-only-v2"
 MARKET_HISTORY_CONTRACT_VERSION = "market-history-d1-v2"
 MARKET_HISTORY_BATCH_LIMIT_BYTES = 350_000
 MARKET_HISTORY_OVERLAP_SECONDS = 2 * 3_600
@@ -71,7 +72,7 @@ NEWS_INDEX_FIELDS = (
     "content_characters", "content_status", "content_fetch_status",
     "content_error_type", "annotation_status", "annotation_reason_code",
     "annotation_reason",
-    "model_visibility", "parsed_at", "emerging_topic_zh",
+    "model_visibility", "parsed_at", "emerging_topic_zh", "xauusd_relevance",
     "impact_status", "impact_class", "impact_event_state",
     "impact_update_type", "impact_assessed_at", "impact_expires_at",
     "impact_event_at", "impact_clock_source", "impact_reason_zh",
@@ -99,11 +100,13 @@ def _json_hash(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def news_mirror_parts(payload: dict) -> tuple[list[dict], list[dict]]:
+def news_mirror_parts(
+    payload: dict, *, limit: int = REMOTE_NEWS_LIMIT,
+) -> tuple[list[dict], list[dict]]:
     """Split the complete news rows into a compact index and lazy details."""
     index_rows = []
     detail_rows = []
-    for row in payload.get("recent_news", [])[:REMOTE_NEWS_LIMIT]:
+    for row in payload.get("recent_news", [])[:limit]:
         detail_key = _stable_news_key(row)
         detail_payload = {
             key: value for key, value in row.items() if key not in NEWS_INDEX_FIELDS
@@ -907,6 +910,29 @@ def _write_news_sync_state(path: Path, state: dict) -> None:
     temporary.replace(path)
 
 
+def _local_news_backfill_url(config: dict) -> str:
+    status_url = urllib.parse.urlsplit(config["local_status_url"])
+    return urllib.parse.urlunsplit((
+        status_url.scheme, status_url.netloc, "/api/news-backfill", "", "",
+    ))
+
+
+def _news_sync_rows(local_payload: dict, config: dict, state: dict) -> dict:
+    """Read the bounded live window, with one larger migration backfill."""
+    if state.get("mirror_contract_version") == NEWS_MIRROR_CONTRACT_VERSION:
+        return local_payload
+    with urllib.request.urlopen(
+        _local_news_backfill_url(config), timeout=LOCAL_STATUS_TIMEOUT_SECONDS,
+    ) as response:
+        payload = json.loads(response.read())
+    items = payload.get("items")
+    if not isinstance(items, list):
+        items = payload.get("recent_news")
+    if not isinstance(items, list):
+        raise ValueError("local news backfill did not return an item list")
+    return {"recent_news": items[:REMOTE_NEWS_BACKFILL_LIMIT]}
+
+
 def _sync_learning(local_payload: dict, config: dict) -> None:
     learning_url = config.get("remote_learning_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/learning"
@@ -1121,9 +1147,14 @@ def _sync_market_history(config: dict) -> None:
 
 
 def _sync_news(local_payload: dict, config: dict) -> None:
-    news_index, details = news_mirror_parts(local_payload)
     state_path = Path(config.get("news_state_file", DEFAULT_NEWS_STATE))
     state = _read_news_sync_state(state_path)
+    news_payload = _news_sync_rows(local_payload, config, state)
+    news_limit = (
+        REMOTE_NEWS_BACKFILL_LIMIT
+        if news_payload is not local_payload else REMOTE_NEWS_LIMIT
+    )
+    news_index, details = news_mirror_parts(news_payload, limit=news_limit)
     synced_index_hashes = state.get("index_hashes", {})
     if not isinstance(synced_index_hashes, dict):
         synced_index_hashes = {}
@@ -1136,17 +1167,10 @@ def _sync_news(local_payload: dict, config: dict) -> None:
     news_url = config.get("remote_news_ingest_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/news-content"
     )
-    removed_keys = set(synced_index_hashes) - set(current_index_hashes)
-    reset_required = (
-        state.get("mirror_contract_version") != NEWS_MIRROR_CONTRACT_VERSION
-        or bool(removed_keys)
-    )
-    if reset_required:
-        reset_payload = json.dumps(
-            {"reset": True}, separators=(",", ":"),
-        ).encode("utf-8")
-        _post_json(news_index_url, reset_payload, config)
-        _post_json(news_url, reset_payload, config)
+    if state.get("mirror_contract_version") != NEWS_MIRROR_CONTRACT_VERSION:
+        # The remote reader is an archive, not a mirror of the rolling local
+        # status window. Rebuild local hashes without deleting older durable
+        # rows that have naturally moved beyond the latest 200 articles.
         synced_index_hashes = {}
         state = {"mirror_contract_version": NEWS_MIRROR_CONTRACT_VERSION}
     last_index_full = state.get("last_index_full_sync")
