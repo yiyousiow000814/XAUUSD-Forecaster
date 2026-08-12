@@ -64,6 +64,11 @@ materiality, semantic-schema, and point-in-time checks.
 
 ## Model separation
 
+Collection is permission-neutral. A news document or macro observation that
+passes the objective intake checks is retained as a Forward candidate; the
+collector never assigns a model role. Model permission belongs to the versioned
+generation contract and may change only through a complete verified handover.
+
 The official News-residual and Full models remain an independent baseline.
 Broad News-residual learns the residual after cross-fitted Market-only
 predictions, using official news features plus event-evidence features. Broad

@@ -524,7 +524,7 @@ def collect_eia_macro(
     fetched_at: datetime,
     fetcher: Callable[[str], bytes] = fetch_url,
 ) -> dict[str, object]:
-    """Collect a bounded official EIA WTI snapshot without model activation."""
+    """Collect bounded official EIA WTI observations as Forward evidence."""
     api_key = os.environ.get("EIA_API_KEY", "").strip()
     if not api_key:
         return {"source": EIA_API_SOURCE, "status": "DISABLED_KEY_MISSING"}
@@ -565,7 +565,6 @@ def collect_eia_macro(
                 "value": float(value),
                 "retrieved_from": EIA_API_URL,
                 "transport": "EIA_JSON_API_V2",
-                "model_role": "EVIDENCE_ONLY",
             }
             digest = hashlib.sha256(
                 json.dumps(stored, sort_keys=True, separators=(",", ":")).encode()
@@ -598,7 +597,6 @@ def collect_eia_macro(
             "inserted_revisions": inserted,
             "unchanged_items": unchanged,
             "registered": True,
-            "model_role": "EVIDENCE_ONLY",
         }
     except Exception as error:
         rate_limited = getattr(error, "code", None) == 429
@@ -625,7 +623,7 @@ def collect_bea_macro(
     fetched_at: datetime,
     fetcher: Callable[[str], bytes] = fetch_url,
 ) -> dict[str, object]:
-    """Collect bounded official BEA NIPA snapshots as evidence only."""
+    """Collect bounded official BEA NIPA observations as Forward evidence."""
     api_key = os.environ.get("BEA_API_KEY", "").strip()
     if not api_key:
         return {"source": BEA_API_SOURCE, "status": "DISABLED_KEY_MISSING"}
@@ -692,7 +690,6 @@ def collect_bea_macro(
                         "value": float(raw_value),
                         "retrieved_from": BEA_API_URL,
                         "transport": "BEA_JSON_API",
-                        "model_role": "EVIDENCE_ONLY",
                     }
                     digest = hashlib.sha256(
                         json.dumps(
@@ -735,7 +732,6 @@ def collect_bea_macro(
         "unchanged_items": unchanged,
         "errors": errors,
         "registered": True,
-        "model_role": "EVIDENCE_ONLY",
     }
 
 

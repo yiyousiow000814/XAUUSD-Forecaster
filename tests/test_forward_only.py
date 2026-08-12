@@ -755,7 +755,7 @@ def test_registered_fred_api_is_bounded_and_never_persists_key(
     assert "FRED_JSON_API" in persisted
 
 
-def test_eia_api_is_hourly_evidence_only_and_never_persists_key(
+def test_eia_api_is_hourly_forward_evidence_and_never_assigns_model_role(
     tmp_path, monkeypatch,
 ) -> None:
     api_key = "b" * 40
@@ -782,13 +782,13 @@ def test_eia_api_is_hourly_evidence_only_and_never_persists_key(
         "inserted_revisions": 2,
         "unchanged_items": 0,
         "registered": True,
-        "model_role": "EVIDENCE_ONLY",
     }
     assert second["status"] == "SKIPPED_INTERVAL"
     assert calls == 1
     persisted = "\n".join(ledger.connection.iterdump())
     assert api_key not in persisted
     assert "EIA_JSON_API_V2" in persisted
+    assert "model_role" not in persisted
 
 
 def test_registered_macro_errors_redact_keys(tmp_path, monkeypatch) -> None:
@@ -814,7 +814,7 @@ def test_registered_macro_errors_redact_keys(tmp_path, monkeypatch) -> None:
     assert "[REDACTED]" in persisted
 
 
-def test_bea_api_is_hourly_evidence_only_and_never_persists_key(
+def test_bea_api_is_hourly_forward_evidence_and_never_assigns_model_role(
     tmp_path, monkeypatch,
 ) -> None:
     api_key = "00000000-0000-0000-0000-000000000000"
@@ -846,7 +846,7 @@ def test_bea_api_is_hourly_evidence_only_and_never_persists_key(
     assert first["status"] == "OK"
     assert first["inserted_revisions"] == 6
     assert first["registered"] is True
-    assert first["model_role"] == "EVIDENCE_ONLY"
+    assert "model_role" not in first
     assert second["status"] == "SKIPPED_INTERVAL"
     assert len(calls) == 2
     persisted = "\n".join(ledger.connection.iterdump())
@@ -855,6 +855,7 @@ def test_bea_api_is_hourly_evidence_only_and_never_persists_key(
     assert "BEA_REAL_GDP_GROWTH_QOQ_ANNUALIZED" in persisted
     assert "BEA_GDP_PRICE_INDEX_Q" in persisted
     assert "BEA_PCE_PRICE_INDEX_Q" in persisted
+    assert "model_role" not in persisted
 
 
 def test_world_gold_council_article_date_is_required_and_auditable(tmp_path) -> None:

@@ -38,14 +38,15 @@ be backed up in the ignored local file
 precedence. Secret values are never returned by the dashboard or written to
 collector logs. The BEA Data API is separate from BEA news-release pages and
 uses two hourly NIPA requests for quarterly real-GDP growth, the GDP price
-index, and the PCE price index. These revisions remain evidence-only until a
-future model contract explicitly adopts them.
+index, and the PCE price index. The collector records these as point-in-time
+Forward candidates and does not assign model permission. A versioned generation
+contract decides whether and how a model consumes them.
 
 With a registered FRED key, the hourly background collector uses the official
 JSON observations API for its six configured series instead of the public graph
 CSV transport. The EIA adapter makes at most one request per hour and stores the
-latest two official daily WTI observations as evidence-only macro revisions;
-it does not silently replace the active feature source or model generation.
+latest two official daily WTI observations as point-in-time Forward candidates.
+Collection does not silently replace the active feature source or generation.
 
 ## 4. Optional synchronized symbols
 
