@@ -1242,9 +1242,12 @@ def collect_google_news_lane(
         )
         # ``cluster_id``/``source_item_id`` above are the single mechanical
         # deduplication boundary. Event meaning belongs to the AI annotator.
-        selected = ranked[:limit]
         full_text_records = []
-        for record in selected:
+        attempted = 0
+        for record in ranked:
+            if len(full_text_records) >= limit:
+                break
+            attempted += 1
             existing = ledger.connection.execute(
                 """SELECT link, body FROM news_revisions
                 WHERE source=? AND source_item_id=?
@@ -1282,7 +1285,8 @@ def collect_google_news_lane(
             inserted += int(created)
             unchanged += int(not created)
             full_text_records.append(record)
-        content_blocked = any(
+        target_count = min(limit, len(ranked))
+        content_blocked = len(full_text_records) < target_count and any(
             rejected.get(reason, 0) for reason in (
                 "PUBLISHER_URL_UNRESOLVED", "FULL_TEXT_UNAVAILABLE",
             )
@@ -1303,7 +1307,7 @@ def collect_google_news_lane(
             "status": poll_status,
             "feed_items": len(records),
             "deduped_items": len(deduped),
-            "attempted_items": len(selected),
+            "attempted_items": attempted,
             "processed_items": len(full_text_records),
             "rejected_items": sum(rejected.values()),
             "rejected_reasons": rejected,

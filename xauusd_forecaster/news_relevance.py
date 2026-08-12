@@ -16,7 +16,7 @@ GOOGLE_NEWS_MAX_AGE = timedelta(hours=72)
 GOOGLE_NEWS_FUTURE_TOLERANCE = timedelta(minutes=10)
 
 _HIGH_QUALITY_PUBLISHERS = (
-    "reuters", "bloomberg", "associated press", " ap news", "cnbc",
+    "associated press", "ap news", "cnbc",
     "financial times", "wall street journal", "bureau of labor statistics",
     "federal reserve", "u.s. department of labor", "world gold council",
 )
