@@ -29,6 +29,7 @@ def test_control_center_treats_weekly_close_as_healthy() -> None:
     ).read_text(encoding="utf-8")
 
     assert "Test-ExpectedWeeklyMarketClosure" in control_center
+    assert "Test-BrokerMarketClosure" in control_center
     assert 'return "MARKET CLOSED"' in control_center
     assert '"MARKET CLOSED", "API OK"' in control_center
     assert '"SYNC ERROR", "SYNC STALE"' in control_center
@@ -93,6 +94,9 @@ def test_watchdog_autostart_uses_one_windowless_registration_path(tmp_path) -> N
 
     assert "function Register-AutoStartTask" in control_center
     assert control_center.count("Register-ScheduledTask -TaskName $taskName") == 1
+    assert control_center.count("Register-ScheduledTask -TaskName $guardTaskName") == 1
+    assert 'New-TimeSpan -Minutes 2' in control_center
+    assert "Ensure-WatchdogGuardTask" in control_center
     assert '"System32\\wscript.exe"' in control_center
     assert 'Join-Path $moduleRoot "scripts\\xauusd_watchdog_launcher.vbs"' in control_center
     assert "shell.Run(command, 0, True)" in launcher_text
@@ -125,6 +129,59 @@ def test_watchdog_autostart_uses_one_windowless_registration_path(tmp_path) -> N
     assert marker.read_text(encoding="utf-8-sig").strip() == (
         f"Watchdog|{tmp_path / 'runtime'}|{tmp_path / 'repository'}"
     )
+
+
+def test_broker_closed_heartbeat_is_healthy_without_fresh_ticks(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    quotes = repo / ".local" / "forward" / "quotes"
+    quotes.mkdir(parents=True)
+    now = datetime.now(timezone.utc)
+    (quotes / "market-session.json").write_text(json.dumps({
+        "observed_at": now.isoformat(),
+        "is_open": False,
+        "time_till_open_seconds": 3600,
+    }), encoding="utf-8")
+    script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    command = (
+        f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{repo}' "
+        f"-RepositoryRoot '{repo}'; "
+        "$service = [pscustomobject]@{ Key = 'quote' }; "
+        "$processes = @([pscustomobject]@{ ProcessId = 1 }); "
+        "Get-ServiceState -Service $service -Processes $processes"
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    assert result == "MARKET CLOSED"
+
+
+def test_watchdog_guard_restarts_only_after_heartbeat_is_stale(tmp_path) -> None:
+    heartbeat = tmp_path / "control-watchdog-heartbeat.json"
+    heartbeat.write_text(json.dumps({
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "process_id": 0,
+    }), encoding="utf-8")
+    guard = ROOT / "scripts" / "xauusd_watchdog_guard.ps1"
+    command = (
+        f"$null = . '{guard}' -TaskName 'test-watchdog' "
+        f"-HeartbeatPath '{heartbeat}' -MaxAgeSeconds 120; "
+        "$script:starts = 0; "
+        "function Stop-ScheduledTask {}; "
+        "function Start-ScheduledTask { $script:starts += 1 }; "
+        "$fresh = Invoke-WatchdogGuard; "
+        f"@{{ observed_at = '2020-01-01T00:00:00+00:00'; process_id = 0 }} "
+        f"| ConvertTo-Json | Set-Content -LiteralPath '{heartbeat}'; "
+        "$stale = Invoke-WatchdogGuard; "
+        "Write-Output \"$fresh,$stale,$script:starts\""
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    assert result == "False,True,1"
 
 
 def test_main_checkpoint_accepts_squash_merge_without_accepting_stale_main(
