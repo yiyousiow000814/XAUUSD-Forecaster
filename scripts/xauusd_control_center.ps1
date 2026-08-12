@@ -18,12 +18,14 @@ $moduleRoot = if ($RuntimeRoot) {
 } else { $scriptRepositoryRoot }
 $logRoot = Join-Path $moduleRoot ".local\forward\logs"
 $taskName = "XAUUSD-Forecaster-Autostart"
+$guardTaskName = "XAUUSD-Forecaster-Watchdog-Guard"
 $dashboardUrl = if ([Environment]::GetEnvironmentVariable("XAUUSD_DASHBOARD_URL", "User")) {
     [Environment]::GetEnvironmentVariable("XAUUSD_DASHBOARD_URL", "User")
 } else {
     "https://aurum-signal-room.yiyousiow1234.chatgpt.site"
 }
 $watchdogLog = Join-Path $logRoot "control-watchdog.jsonl"
+$watchdogHeartbeatPath = Join-Path $moduleRoot ".local\forward\control-watchdog-heartbeat.json"
 $runtimeCodeStatePath = Join-Path $moduleRoot ".local\forward\runtime-code-state.json"
 $runtimeUpdateStatePath = Join-Path $moduleRoot ".local\forward\runtime-update-state.json"
 $dashboardSyncConfigPath = Join-Path $moduleRoot ".local\forward\dashboard-sync.json"
@@ -196,7 +198,8 @@ function Get-DeployedMainRevision {
 
 function Get-VerifiedOriginMain {
     try {
-        & git -C $repositoryRoot fetch origin main --quiet 2>$null
+        & git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=30 `
+            -C $repositoryRoot fetch origin main --quiet 2>$null
         if ($LASTEXITCODE -ne 0) { return $null }
         $revision = (& git -C $repositoryRoot rev-parse origin/main 2>$null).Trim()
         if ($LASTEXITCODE -eq 0 -and $revision -match '^[0-9a-f]{40}$') {
@@ -270,6 +273,9 @@ function Update-RuntimeCheckout {
         -Destination $stableScript -Force
     Copy-Item -LiteralPath (Join-Path $moduleRoot "scripts\xauusd_watchdog_launcher.vbs") `
         -Destination (Join-Path (Split-Path -Parent $stableScript) "xauusd_watchdog_launcher.vbs") `
+        -Force
+    Copy-Item -LiteralPath (Join-Path $moduleRoot "scripts\xauusd_watchdog_guard.ps1") `
+        -Destination (Join-Path (Split-Path -Parent $stableScript) "xauusd_watchdog_guard.ps1") `
         -Force
     Write-RuntimeUpdateState @{
         accepted_main_revision = $Revision
@@ -380,6 +386,7 @@ function Restart-CodeReloadableServices {
     $deadline = [DateTimeOffset]::UtcNow.AddSeconds(180)
     do {
         Start-Sleep -Milliseconds 500
+        Write-WatchdogHeartbeat
         $healthy = Test-CodeReloadHealth -ReloadStarted $reloadStarted
     } while (-not $healthy -and [DateTimeOffset]::UtcNow -lt $deadline)
     if (-not $healthy) { throw "Code revision reload failed functional health checks." }
@@ -397,6 +404,24 @@ function Test-ExpectedWeeklyMarketClosure {
     if ($newYork.DayOfWeek -eq [DayOfWeek]::Sunday -and
         $newYork.TimeOfDay -lt [TimeSpan]::FromHours(18)) { return $true }
     return $false
+}
+
+function Test-BrokerMarketClosure {
+    $path = Join-Path $moduleRoot ".local\forward\quotes\market-session.json"
+    if (-not (Test-Path -LiteralPath $path)) { return $false }
+    try {
+        $session = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $observedAt = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse(
+            [string]$session.observed_at, [ref]$observedAt
+        )) { return $false }
+        $now = [DateTimeOffset]::UtcNow
+        return (
+            $observedAt -le $now.AddSeconds(5) -and
+            ($now - $observedAt).TotalSeconds -le 20 -and
+            $session.is_open -eq $false
+        )
+    } catch { return $false }
 }
 
 function Get-ServiceState {
@@ -427,6 +452,7 @@ function Get-ServiceState {
     }
 
     if ($Service.Key -eq "quote") {
+        if (Test-BrokerMarketClosure) { return "MARKET CLOSED" }
         $quoteRoot = Join-Path $moduleRoot ".local\forward\quotes"
         $latestQuote = Get-ChildItem -LiteralPath $quoteRoot -Filter "*.jsonl" `
             -File -Recurse -ErrorAction SilentlyContinue |
@@ -606,6 +632,18 @@ function Write-WatchdogEvent {
     } | ConvertTo-Json -Compress | Add-Content -LiteralPath $watchdogLog -Encoding UTF8
 }
 
+function Write-WatchdogHeartbeat {
+    $directory = Split-Path -Parent $watchdogHeartbeatPath
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $temporary = "$watchdogHeartbeatPath.tmp"
+    [pscustomobject]@{
+        observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+        process_id = $PID
+        revision = Get-CodeRevision
+    } | ConvertTo-Json -Compress | Set-Content -LiteralPath $temporary -Encoding UTF8
+    Move-Item -LiteralPath $temporary -Destination $watchdogHeartbeatPath -Force
+}
+
 function Start-WatchdogReplacement {
     $controlRoot = Join-Path $repositoryRoot ".local\runtime-control"
     $controlScript = Join-Path $controlRoot "xauusd_control_center.ps1"
@@ -629,8 +667,10 @@ function Invoke-ForecasterWatchdog {
     }
     $lastCodeReload = [DateTimeOffset]::MinValue
     $watchdogRevisionAtStart = Get-CodeRevision
+    Ensure-WatchdogGuardTask
     Write-WatchdogEvent -Event "WATCHDOG_STARTED" -Service "all" -State "MONITORING"
     while ($true) {
+        Write-WatchdogHeartbeat
         try {
             $currentRevision = Get-CodeRevision
             $desiredRevision = Get-DesiredMainRevision -CurrentRevision $currentRevision
@@ -693,12 +733,14 @@ function Invoke-ForecasterWatchdog {
             Write-WatchdogEvent -Event "WATCHDOG_CHECK_ERROR" `
                 -Service "all" -State $_.Exception.Message
         }
+        Write-WatchdogHeartbeat
         Start-Sleep -Seconds 30
     }
 }
 
 function Test-AutoStart {
-    $null -ne (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)
+    $null -ne (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) -and
+        $null -ne (Get-ScheduledTask -TaskName $guardTaskName -ErrorAction SilentlyContinue)
 }
 
 function Register-AutoStartTask {
@@ -729,7 +771,49 @@ function Register-AutoStartTask {
         -ExecutionTimeLimit (New-TimeSpan -Days 3650)
     Register-ScheduledTask -TaskName $taskName -Action $taskAction `
         -Trigger $taskTrigger -Principal $principal -Settings $settings -Force | Out-Null
+
+    Register-WatchdogGuardTask -ControlScript $ControlScript -Principal $principal
     Start-ScheduledTask -TaskName $taskName
+}
+
+function Register-WatchdogGuardTask {
+    param(
+        [string]$ControlScript,
+        [object]$Principal
+    )
+    $controlRoot = Split-Path -Parent $ControlScript
+    $guardSource = Join-Path $moduleRoot "scripts\xauusd_watchdog_guard.ps1"
+    $guardPath = Join-Path $controlRoot "xauusd_watchdog_guard.ps1"
+    if (-not $guardSource.Equals($guardPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Copy-Item -LiteralPath $guardSource -Destination $guardPath -Force
+    }
+    $powershell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    $guardArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -TaskName "{1}" -HeartbeatPath "{2}"' -f `
+        $guardPath, $taskName, $watchdogHeartbeatPath
+    $guardAction = New-ScheduledTaskAction -Execute $powershell -Argument $guardArguments
+    $guardTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+        -RepetitionInterval (New-TimeSpan -Minutes 2)
+    $guardSettings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
+    Register-ScheduledTask -TaskName $guardTaskName -Action $guardAction `
+        -Trigger $guardTrigger -Principal $principal -Settings $guardSettings -Force | Out-Null
+}
+
+function Ensure-WatchdogGuardTask {
+    if ($null -ne (Get-ScheduledTask -TaskName $guardTaskName -ErrorAction SilentlyContinue)) {
+        return
+    }
+    try {
+        $principal = New-ScheduledTaskPrincipal `
+            -UserId ("{0}\{1}" -f $env:USERDOMAIN, $env:USERNAME) `
+            -LogonType Interactive -RunLevel Limited
+        Register-WatchdogGuardTask -ControlScript $PSCommandPath -Principal $principal
+        Write-WatchdogEvent -Event "WATCHDOG_GUARD_REGISTERED" `
+            -Service "watchdog" -State "MONITORING"
+    } catch {
+        Write-WatchdogEvent -Event "WATCHDOG_GUARD_REGISTRATION_ERROR" `
+            -Service "watchdog" -State $_.Exception.Message
+    }
 }
 
 function Enable-AutoStart {
@@ -789,6 +873,7 @@ function Install-ProductionRuntime {
     $stableScript = Join-Path $controlRoot "xauusd_control_center.ps1"
     Copy-Item -LiteralPath $PSCommandPath -Destination $stableScript -Force
 
+    Stop-ScheduledTask -TaskName $guardTaskName -ErrorAction SilentlyContinue
     Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     Stop-All
     Register-AutoStartTask -ControlScript $stableScript `
@@ -802,6 +887,7 @@ function Install-ProductionRuntime {
 }
 
 function Disable-AutoStart {
+    Unregister-ScheduledTask -TaskName $guardTaskName -Confirm:$false -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 }
 
