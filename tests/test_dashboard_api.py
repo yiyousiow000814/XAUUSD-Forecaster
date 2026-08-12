@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import gzip
 import importlib.util
 import json
 import sqlite3
 import threading
+import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -295,9 +298,99 @@ def test_dashboard_annotation_counts_match_current_worker_policy(tmp_path) -> No
     assert payload["news_evidence_summary"]["current_contract_distinct_events"] == transition["current_contract_distinct_events"]
 
 
-def test_health_endpoint_does_not_build_dashboard(monkeypatch, tmp_path) -> None:
+def test_status_snapshot_cache_singleflights_concurrent_builds(tmp_path) -> None:
+    module = _dashboard_module()
+    cache = module.StatusSnapshotCache(wait_seconds=1.0)
+    database = tmp_path / "forward.sqlite3"
+    started = threading.Event()
+    release = threading.Event()
+    calls = 0
+    call_lock = threading.Lock()
+
+    def builder(_database):
+        nonlocal calls
+        with call_lock:
+            calls += 1
+        started.set()
+        assert release.wait(timeout=2)
+        return {"generated_at": "2026-08-12T00:00:00+00:00"}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(cache.get, database, builder) for _ in range(8)]
+        assert started.wait(timeout=1)
+        time.sleep(0.05)
+        assert calls == 1
+        release.set()
+        results = [future.result(timeout=2) for future in futures]
+
+    assert calls == 1
+    assert len({body for body, _state, _age in results}) == 1
+    assert {state for _body, state, _age in results} == {"fresh"}
+
+
+def test_status_snapshot_cache_fails_closed_during_slow_refresh(tmp_path) -> None:
+    module = _dashboard_module()
+    now = [0.0]
+    cache = module.StatusSnapshotCache(
+        ttl_seconds=15, wait_seconds=0.01, max_stale_seconds=90,
+        clock=lambda: now[0],
+    )
+    database = tmp_path / "forward.sqlite3"
+    cache.get(database, lambda _database: {"version": 1})
+
+    now[0] = 16.0
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_refresh(_database):
+        started.set()
+        assert release.wait(timeout=2)
+        return {"version": 2}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        refresh = pool.submit(cache.get, database, slow_refresh)
+        assert started.wait(timeout=1)
+        try:
+            cache.get(database, slow_refresh)
+        except module.StatusSnapshotUnavailable as error:
+            assert str(error) == "dashboard snapshot refresh is still running"
+        else:
+            raise AssertionError("a stale snapshot must not look like a sync success")
+        release.set()
+        refreshed_body, refreshed_state, _age = refresh.result(timeout=2)
+
+    assert json.loads(refreshed_body) == {"version": 2}
+    assert refreshed_state == "fresh"
+
+    now[0] = 32.0
+    try:
+        cache.get(
+            database, lambda _database: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+    except RuntimeError as error:
+        assert str(error) == "boom"
+    else:
+        raise AssertionError("a failed refresh must not masquerade as success")
+    health_status, health = cache.health()
+    assert health_status == 503
+    assert health["status"] == "ERROR"
+
+    now[0] = 123.0
+    try:
+        cache.get(
+            database,
+            lambda _database: (_ for _ in ()).throw(RuntimeError("still broken")),
+        )
+    except RuntimeError as error:
+        assert str(error) == "still broken"
+    else:
+        raise AssertionError("expired dashboard snapshot must fail closed")
+
+
+def test_health_endpoint_requires_recent_dashboard_snapshot(monkeypatch, tmp_path) -> None:
     module = _dashboard_module()
     module.Handler.database = tmp_path / "unused.sqlite3"
+    module.Handler.status_cache = module.StatusSnapshotCache()
     monkeypatch.setattr(
         module,
         "_dashboard_payload",
@@ -307,15 +400,97 @@ def test_health_endpoint_does_not_build_dashboard(monkeypatch, tmp_path) -> None
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
+        try:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/api/health", timeout=2
+            )
+        except urllib.error.HTTPError as error:
+            assert error.code == 503
+            assert json.loads(error.read())["status"] == "UNAVAILABLE"
+        else:
+            raise AssertionError("health must fail before a status snapshot exists")
+
+        module.Handler.status_cache.get(
+            module.Handler.database, lambda _database: {"status": "ready"},
+        )
         with urllib.request.urlopen(
             f"http://127.0.0.1:{server.server_port}/api/health", timeout=2
         ) as response:
             assert response.status == 200
-            assert json.loads(response.read()) == {"status": "OK"}
+            assert json.loads(response.read())["status"] == "OK"
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_dashboard_status_does_not_scan_live_database_integrity(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _dashboard_module()
+    now = datetime.now(UTC).replace(microsecond=0)
+    database = tmp_path / "forward.sqlite3"
+    ForwardLedger(database, now=now).close()
+    real_connect = module.sqlite3.connect
+    statements: list[str] = []
+
+    def tracked_connect(target, *args, **kwargs):
+        connection = real_connect(target, *args, **kwargs)
+        if str(database) in str(target):
+            connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(module.sqlite3, "connect", tracked_connect)
+    module._dashboard_payload(database)
+
+    assert not any("integrity_check" in statement.lower() for statement in statements)
+
+
+def test_live_quote_candle_cache_reads_only_appended_bytes(tmp_path) -> None:
+    module = _dashboard_module()
+    quote_file = tmp_path / "xauusd-quotes-20260812.jsonl"
+
+    def quote(second: int, bid: float) -> str:
+        return json.dumps({
+            "received_time": f"2026-08-12T06:30:{second:02d}+00:00",
+            "bid": bid,
+            "ask": bid + 0.1,
+        }) + "\n"
+
+    quote_file.write_text(quote(1, 4300.0) + quote(2, 4301.0), encoding="utf-8")
+    first = module._quote_file_candles(quote_file)
+    first_offset = module._QUOTE_CANDLE_CACHE[str(quote_file)]["offset"]
+
+    with quote_file.open("a", encoding="utf-8") as handle:
+        handle.write(quote(3, 4302.0))
+    second = module._quote_file_candles(quote_file)
+
+    assert first[0]["ticks"] == 2
+    assert second[0]["ticks"] == 3
+    assert second[0]["open"] == 4300.05
+    assert second[0]["close"] == 4302.05
+    assert module._QUOTE_CANDLE_CACHE[str(quote_file)]["offset"] > first_offset
+
+
+def test_forward_ledger_adds_dashboard_news_lookup_indexes(tmp_path) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    try:
+        annotation_indexes = {
+            row[1] for row in ledger.connection.execute(
+                "PRAGMA index_list(news_annotations)"
+            )
+        }
+        revision_indexes = {
+            row[1] for row in ledger.connection.execute(
+                "PRAGMA index_list(news_revisions)"
+            )
+        }
+    finally:
+        ledger.close()
+
+    assert "news_annotations_revision_contract" in annotation_indexes
+    assert "news_revisions_cluster_latest" in revision_indexes
 
 
 def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
