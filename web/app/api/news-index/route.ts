@@ -27,20 +27,9 @@ const pageRequest = (request: Request) => {
 
 export async function GET(request: Request) {
   const { page, pageSize, category } = pageRequest(request);
-  // The first unfiltered page is the branch-aware immutable snapshot. Other
-  // pages and filters are read-only D1 queries; returning an empty sliced
-  // bundle here made Preview look as if the rest of the archive did not exist.
-  const inlinePreviewItems = previewBundle?.news_index.items ?? [];
-  if (previewBundle && page === 1 && !category && pageSize <= inlinePreviewItems.length) {
-    return previewJson({
-      ...previewBundle.news_index,
-      items: inlinePreviewItems.slice(0, pageSize),
-      total: Number(previewBundle.news_index.total ?? inlinePreviewItems.length),
-      window_days: 60,
-      page,
-      page_size: pageSize,
-    });
-  }
+  // D1 is the source of truth even on the first Preview page. Returning the
+  // immutable build bundle here freezes the visible total at build time while
+  // the bounded archive continues to grow.
   try {
     const binding = env.DB as D1Database | undefined;
     if (binding) {

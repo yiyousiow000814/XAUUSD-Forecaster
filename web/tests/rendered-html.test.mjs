@@ -114,8 +114,8 @@ test("keeps every audit collection in compact Preview status", () => {
 test("falls through to read-only D1 for later Preview news and details", () => {
   const index = readFileSync(new URL("../app/api/news-index/route.ts", import.meta.url), "utf8");
   const detail = readFileSync(new URL("../app/api/news-content/route.ts", import.meta.url), "utf8");
-  assert.match(index, /previewBundle && page === 1 && !category && pageSize <= inlinePreviewItems\.length/);
-  assert.match(index, /Number\(previewBundle\.news_index\.total \?\? inlinePreviewItems\.length\)/);
+  assert.doesNotMatch(index, /inlinePreviewItems/);
+  assert.match(index, /D1 is the source of truth even on the first Preview page/);
   assert.match(index, /if \(previewBundle\) \{\s*return previewJson\(\{ error: "新闻档案暂时不可用，请稍后重试" \}, 503\)/);
   assert.match(detail, /if \(detail\) return previewJson\(detail\)/);
   assert.doesNotMatch(detail, /该新闻详情不在本次 Preview 快照中/);
