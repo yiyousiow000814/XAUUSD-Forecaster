@@ -343,6 +343,7 @@ test("separates gold news and hides explicitly irrelevant semantic reviews", () 
   assert.match(route, /scope === "other" \? otherEvidence : goldEvidence/);
   assert.match(source, /scope: newsScope/);
   assert.match(source, /默认展示与黄金有关的新闻/);
+  assert.match(readFileSync(new URL("../app/globals.css", import.meta.url), "utf8"), /news-browser button,.news-pagination button \{ min-height:44px/);
   assert.match(sync, /news-readable-append-only-v2/);
   assert.match(sync, /\/api\/news-backfill/);
 });
