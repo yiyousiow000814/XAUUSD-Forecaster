@@ -410,6 +410,7 @@ def test_news_detail_batches_stay_bounded() -> None:
     assert len(batches) > 1
     assert sum(len(batch) for batch in batches) == len(rows)
     for batch in batches:
+        assert len(batch) <= module.NEWS_WRITE_BATCH_ITEMS
         encoded = json.dumps(
             {"items": batch}, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")
@@ -422,10 +423,11 @@ def test_news_index_batches_stay_bounded() -> None:
         "detail_key": f"{index:064x}", "category": "战争/地缘",
         "collector_first_seen_time": f"2026-08-07T00:{index:02d}:00+00:00",
         "headline": "标题" * 5_000,
-    } for index in range(20)]
+    } for index in range(45)]
     batches = module.news_index_batches(rows)
     assert sum(len(batch) for batch in batches) == len(rows)
     for batch in batches:
+        assert len(batch) <= module.NEWS_WRITE_BATCH_ITEMS
         encoded = json.dumps(
             {"items": batch}, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")
@@ -679,6 +681,7 @@ def test_news_details_are_durable_before_index_is_published(monkeypatch, tmp_pat
     assert posted == [
         "https://remote/api/news-content",
         "https://remote/api/news-index",
+        "https://remote/api/news-index",
     ]
 
 
@@ -742,7 +745,26 @@ def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> 
             return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     posted: list[str] = []
-    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+    news_page_calls = 0
+
+    def urlopen(url, *_args, **_kwargs):
+        nonlocal news_page_calls
+        if "/api/news-archive" in str(url):
+            news_page_calls += 1
+            page = {
+                "items": payload["recent_news"] if news_page_calls in {1, 3} else [],
+                "next_cursor": '["2026-08-07T00:00:00+00:00","example","1",1]',
+                "has_more": False,
+            }
+
+            class NewsResponse(Response):
+                def read(self):
+                    return json.dumps(page, ensure_ascii=False).encode("utf-8")
+
+            return NewsResponse()
+        return Response()
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
     monkeypatch.setattr(module, "_post_json", lambda url, _body, _config: posted.append(url))
     config = {
         "local_status_url": "http://local/status",
@@ -750,6 +772,10 @@ def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> 
         "token": "test",
         "news_state_file": str(tmp_path / "news-state.json"),
         "learning_state_file": str(tmp_path / "learning-state.json"),
+        "targets": [{
+            "name": "sites", "legacy": True,
+            "remote_ingest_url": "https://remote/api/ingest", "token": "test",
+        }],
     }
 
     module.sync_once(config)
@@ -775,9 +801,8 @@ def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> 
     assert posted[0] == "https://remote/api/ingest"
 
     news_state = json.loads((tmp_path / "news-state.json").read_text(encoding="utf-8"))
-    assert len(news_state["hashes"]) == 1
-    assert len(news_state["index_hashes"]) == 1
-    assert news_state["last_index_full_sync"]
+    assert news_state["cursor"].startswith('["2026-08-07T00:00:00')
+    assert news_state["reconciled_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
     assert news_state["mirror_contract_version"] == module.NEWS_MIRROR_CONTRACT_VERSION
 
 
@@ -838,8 +863,8 @@ def test_sync_repopulates_news_index_without_full_refresh_marker(
 
     assert posted.count("https://remote/api/news-index") == 2
     state = json.loads(state_file.read_text(encoding="utf-8"))
-    assert state["last_index_full_sync"]
     assert state["mirror_contract_version"] == module.NEWS_MIRROR_CONTRACT_VERSION
+    assert state["reconciled_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
 
 
 def test_remote_market_chart_is_split_from_status_and_keeps_recent_window() -> None:

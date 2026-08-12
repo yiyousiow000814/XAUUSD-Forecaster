@@ -121,6 +121,21 @@ test("falls through to read-only D1 for later Preview news and details", () => {
   assert.doesNotMatch(detail, /该新闻详情不在本次 Preview 快照中/);
 });
 
+test("keeps the 60-day news archive inside bounded D1 work", () => {
+  const index = readFileSync(new URL("../app/api/news-index/route.ts", import.meta.url), "utf8");
+  const detail = readFileSync(new URL("../app/api/news-content/route.ts", import.meta.url), "utf8");
+  const migration = readFileSync(new URL("../drizzle/0007_bounded_news_archive.sql", import.meta.url), "utf8");
+  assert.match(index, /body\.items\.length > 20/);
+  assert.match(detail, /body\.items\.length > 20/);
+  assert.match(index, /ORDER BY published_time DESC/);
+  assert.match(index, /impact_expires_at>\?/);
+  assert.match(index, /item\.model_visibility = "IMPACT_EXPIRED"/);
+  assert.match(index, /DELETE FROM news_index WHERE mirror_contract <> \?/);
+  assert.match(index, /s-maxage=30/);
+  assert.match(migration, /news_index_published_idx/);
+  assert.match(migration, /news_index_category_published_idx/);
+});
+
 test("does not poll immutable Preview snapshots", () => {
   const helper = readFileSync(new URL("../app/_lib/dashboard-refresh.ts", import.meta.url), "utf8");
   assert.match(helper, /live:\s*15_000/);
@@ -298,7 +313,7 @@ test("renders the news and decision audit route", async () => {
   assert.doesNotMatch(source, /payload\?\.system\.online && !error/);
   assert.match(source, /列表与正文详情分开保存/);
   assert.doesNotMatch(source, /这些新闻处理到哪里了/);
-  assert.match(source, /篇可读文章/);
+  assert.match(source, /篇近60天可读文章/);
   assert.match(source, /篇无需复核/);
   assert.match(source, /row\.model_visibility !== "NOT_YET_PARSED"/);
   assert.match(source, /篇当前模型候选/);

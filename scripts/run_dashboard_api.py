@@ -28,6 +28,8 @@ PAYLOAD_SCHEMA_VERSION = "xauusd-dashboard-v4-event-episode"
 MARKET_DETAIL_CANDLE_LIMIT = 7 * 288
 MARKET_OVERVIEW_CANDLE_LIMIT = 480
 MARKET_HISTORY_PAGE_LIMIT = 500
+NEWS_READER_WINDOW_DAYS = 60
+NEWS_ARCHIVE_PAGE_LIMIT = 20
 STATUS_SNAPSHOT_TTL_SECONDS = 15.0
 STATUS_SNAPSHOT_WAIT_SECONDS = 5.0
 STATUS_SNAPSHOT_MAX_STALE_SECONDS = 90.0
@@ -57,10 +59,7 @@ from xauusd_forecaster.news_evidence import (  # noqa: E402
     EVIDENCE_POLICY_VERSION, event_evidence_rows_from_connection,
     resolve_event_clock,
 )
-from xauusd_forecaster.news_relevance import (  # noqa: E402
-    GOOGLE_NEWS_MAX_AGE,
-    google_news_item_is_relevant,
-)
+from xauusd_forecaster.news_relevance import GOOGLE_NEWS_MAX_AGE  # noqa: E402
 from xauusd_forecaster.news_contracts import CURRENT_NEWS_CONTRACT  # noqa: E402
 from xauusd_forecaster.news_features_v2 import COLLECTION_SOURCES  # noqa: E402
 from xauusd_forecaster.news_impact import (  # noqa: E402
@@ -600,6 +599,245 @@ def _apply_impact_status(item: dict, now: datetime) -> None:
     else:
         item["impact_status"] = "ACTIVE"
         item["model_visibility"] = "MODEL_VISIBLE"
+
+
+def _news_reader_rows(
+    connection: sqlite3.Connection,
+    now: datetime,
+    *,
+    after: str | None = None,
+    limit: int = 200,
+) -> list[sqlite3.Row]:
+    """Read one bounded page from the canonical 60-day reader archive."""
+    cutoff = (now - timedelta(days=NEWS_READER_WINDOW_DAYS)).isoformat(
+        timespec="microseconds"
+    )
+    cursor_clause = ""
+    order_clause = """ORDER BY mirror_updated_at ASC,
+                                  n.source, n.source_item_id,
+                                  n.revision_number"""
+    cursor_parameters: tuple[object, ...] = ()
+    if after:
+        cursor = json.loads(after)
+        if not isinstance(cursor, list) or len(cursor) != 4:
+            raise ValueError("invalid news archive cursor")
+        cursor_clause = """AND (max(n.fetched_time,
+                    COALESCE(t.parsed_at, n.fetched_time),
+                    COALESCE(a.parsed_at, n.fetched_time),
+                    COALESCE(i.assessed_at, n.fetched_time),
+                    COALESCE(f.failed_at, n.fetched_time),
+                    COALESCE(cf.failed_at, n.fetched_time)),
+                    n.source, n.source_item_id, n.revision_number) > (?, ?, ?, ?)"""
+        cursor_parameters = tuple(cursor)
+    return connection.execute(
+        f"""SELECT n.source, n.source_item_id, n.revision_number,
+                   n.cluster_id, n.source_published_time,
+                   n.collector_first_seen_time, n.fetched_time,
+                   max(n.fetched_time,
+                       COALESCE(t.parsed_at, n.fetched_time),
+                       COALESCE(a.parsed_at, n.fetched_time),
+                       COALESCE(i.assessed_at, n.fetched_time),
+                       COALESCE(f.failed_at, n.fetched_time),
+                       COALESCE(cf.failed_at, n.fetched_time)) AS mirror_updated_at,
+                   n.headline AS original_headline,
+                   COALESCE(t.headline_zh, n.headline) AS headline,
+                   length(COALESCE(n.body, '')) AS content_characters,
+                   CASE WHEN n.body LIKE '[FULL_TEXT%' THEN 'FULL_TEXT'
+                        WHEN length(trim(COALESCE(n.body, ''))) >= 240 THEN 'SOURCE_CONTENT'
+                        ELSE 'HEADLINE_ONLY' END AS content_status,
+                   CASE WHEN length(trim(COALESCE(n.body, ''))) >= 240 THEN 'AVAILABLE'
+                        WHEN cf.is_terminal=1 THEN 'UNAVAILABLE'
+                        WHEN cf.next_retry_at IS NOT NULL THEN 'RETRYING'
+                        ELSE 'PENDING' END AS content_fetch_status,
+                   cf.error_type AS content_error_type,
+                   n.link, n.content_hash, n.body,
+                   json_extract(a.annotation_json, '$.summary_zh') AS summary_zh,
+                   json_extract(a.annotation_json, '$.primary_category') AS primary_category,
+                   json_extract(a.annotation_json, '$.secondary_categories') AS secondary_categories_json,
+                   json_extract(a.annotation_json, '$.emerging_topic_zh') AS emerging_topic_zh,
+                   json_extract(a.annotation_json, '$.event_time') AS event_time,
+                   a.event_type, a.entities_json, a.hawkishness,
+                   a.inflation_impulse, a.growth_impulse,
+                   a.geopolitical_risk, a.usd_impulse, a.novelty,
+                   a.confidence, a.llm_model_version, a.prompt_version,
+                   a.parsed_at, i.impact_class,
+                   i.event_state AS impact_event_state,
+                   i.update_type AS impact_update_type,
+                   i.confidence AS impact_confidence,
+                   i.reason_zh AS impact_reason_zh,
+                   i.assessed_at AS impact_assessed_at,
+                   CASE WHEN n.source_published_time IS NOT NULL THEN
+                     (julianday(n.collector_first_seen_time)-julianday(n.source_published_time))*86400
+                   END AS collection_delay_seconds,
+                   CASE WHEN a.parsed_at IS NOT NULL THEN
+                     (julianday(a.parsed_at)-julianday(n.collector_first_seen_time))*86400
+                   END AS processing_delay_seconds,
+                   COALESCE(r.maximum_tier, 'COLLECT_ONLY') AS source_eligibility,
+                   CASE WHEN r.maximum_tier='MODEL_ELIGIBLE'
+                              AND length(trim(COALESCE(n.body,'')))>=r.minimum_body_characters
+                              AND a.parsed_at IS NOT NULL THEN 'MODEL_VISIBLE'
+                        WHEN r.maximum_tier='MODEL_ELIGIBLE'
+                             AND length(trim(COALESCE(n.body,'')))>=r.minimum_body_characters
+                             AND a.parsed_at IS NULL THEN 'NOT_YET_PARSED'
+                        WHEN r.maximum_tier='MODEL_ELIGIBLE' AND cf.is_terminal=1
+                             THEN 'CONTENT_UNAVAILABLE'
+                        WHEN r.maximum_tier='MODEL_ELIGIBLE' THEN 'WAITING_CONTENT'
+                        ELSE COALESCE(r.maximum_tier, 'COLLECT_ONLY') END AS model_visibility,
+                   CASE WHEN a.annotation_id IS NOT NULL THEN 'READY'
+                        WHEN cf.is_terminal=1 THEN 'CONTENT_UNAVAILABLE'
+                        WHEN length(trim(COALESCE(n.body, ''))) < 240 THEN 'WAITING_CONTENT'
+                        WHEN f.is_terminal=1 THEN 'DEAD_LETTER'
+                        WHEN f.next_retry_at > ? THEN 'BACKING_OFF'
+                        WHEN length(trim(COALESCE(n.body, ''))) >= 240 THEN 'QUEUED'
+                        ELSE 'WAITING_CONTENT' END AS annotation_status
+            FROM news_revisions n
+            LEFT JOIN news_title_translations t ON t.translation_id=(
+              SELECT latest_t.translation_id FROM news_title_translations latest_t
+              WHERE latest_t.source=n.source
+                AND latest_t.source_item_id=n.source_item_id
+                AND latest_t.revision_number=n.revision_number
+              ORDER BY (latest_t.headline_zh=?) ASC,
+                       latest_t.parsed_at DESC, latest_t.translation_id DESC LIMIT 1)
+            LEFT JOIN news_annotations a ON a.annotation_id=(
+              SELECT preferred_a.annotation_id FROM news_annotations preferred_a
+              WHERE preferred_a.source=n.source
+                AND preferred_a.source_item_id=n.source_item_id
+                AND preferred_a.revision_number=n.revision_number
+                AND preferred_a.llm_model_version IN (
+                  'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
+                AND preferred_a.prompt_version=?
+              ORDER BY CASE preferred_a.llm_model_version
+                WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
+                preferred_a.parsed_at DESC LIMIT 1)
+            LEFT JOIN news_impact_assessments_v1 i
+              ON i.annotation_id=a.annotation_id
+             AND i.llm_model_version=? AND i.prompt_version=?
+            LEFT JOIN news_llm_failures f ON f.failure_id=(
+              SELECT latest_f.failure_id FROM news_llm_failures latest_f
+              WHERE latest_f.task_type='ANNOTATION'
+                AND latest_f.source=n.source
+                AND latest_f.source_item_id=n.source_item_id
+                AND latest_f.revision_number=n.revision_number
+                AND latest_f.llm_model_version IN (
+                  'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
+                AND latest_f.prompt_version=?
+                AND NOT (latest_f.error_type='RuntimeError'
+                  AND latest_f.error='All configured Gemini keys unavailable for this batch')
+              ORDER BY latest_f.failed_at DESC LIMIT 1)
+            LEFT JOIN news_content_failures cf ON cf.failure_id=(
+              SELECT latest_cf.failure_id FROM news_content_failures latest_cf
+              WHERE latest_cf.source=n.source
+                AND latest_cf.source_item_id=n.source_item_id
+                AND latest_cf.revision_number=n.revision_number
+              ORDER BY latest_cf.attempt_number DESC LIMIT 1)
+            LEFT JOIN source_eligibility_rules r
+              ON r.eligibility_version='news-source-eligibility-v4-live-delay-materiality'
+             AND r.source=n.source
+            WHERE NOT EXISTS (
+              SELECT 1 FROM news_revisions newer
+              WHERE newer.source=n.source
+                AND newer.source_item_id=n.source_item_id
+                AND newer.revision_number>n.revision_number)
+              AND NOT EXISTS (
+                SELECT 1 FROM news_revisions peer
+                WHERE peer.cluster_id=n.cluster_id
+                  AND NOT EXISTS (
+                    SELECT 1 FROM news_revisions peer_newer
+                    WHERE peer_newer.source=peer.source
+                      AND peer_newer.source_item_id=peer.source_item_id
+                      AND peer_newer.revision_number>peer.revision_number)
+                  AND (length(COALESCE(peer.body, '')) > length(COALESCE(n.body, ''))
+                    OR (length(COALESCE(peer.body, '')) = length(COALESCE(n.body, ''))
+                      AND peer.source_item_id < n.source_item_id)))
+              AND length(trim(COALESCE(n.body, ''))) >= 240
+              AND COALESCE(n.source_published_time,
+                           n.collector_first_seen_time) >= ?
+              {cursor_clause}
+            {order_clause}
+            LIMIT ?""",
+        (
+            now.isoformat(timespec="microseconds"), INVALID_CHINESE_TITLE,
+            PROMPT_VERSION, IMPACT_MODEL, IMPACT_PROMPT_VERSION,
+            PROMPT_VERSION, cutoff, *cursor_parameters, limit,
+        ),
+    ).fetchall()
+
+
+def _serialize_news_rows(
+    rows: list[sqlite3.Row], now: datetime, epoch: str,
+    claimable_annotation_keys: set[tuple[str, str, int]],
+) -> list[dict]:
+    """Apply the shared reader-state contract without intake freshness gates."""
+    news: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        listed_source = str(item.get("source") or "") in COLLECTION_SOURCES
+        item["source_eligibility"] = (
+            "SEMANTIC_CANDIDATE" if listed_source else "UNLISTED_CANDIDATE"
+        )
+        item["model_visibility"] = (
+            "IMPACT_PENDING" if item.get("parsed_at")
+            else "NOT_YET_PARSED"
+            if item.get("annotation_status") in {"QUEUED", "READY"}
+            else str(item.get("annotation_status") or "WAITING_CONTENT")
+        )
+        annotation_key = (
+            str(item.get("source") or ""),
+            str(item.get("source_item_id") or ""),
+            int(item.get("revision_number") or 0),
+        )
+        if item.get("parsed_at"):
+            item["annotation_status"] = "READY"
+        elif (
+            item.get("annotation_status") == "QUEUED"
+            and annotation_key not in claimable_annotation_keys
+        ):
+            item["annotation_status"] = "NOT_REQUIRED"
+            reason_code, reason = _not_required_reason(item, epoch)
+            item["annotation_reason_code"] = reason_code
+            item["annotation_reason"] = reason
+        _apply_impact_status(item, now)
+        item["entities"] = (
+            json.loads(item.pop("entities_json"))
+            if item.get("entities_json") else []
+        )
+        secondary = item.pop("secondary_categories_json", None)
+        item["secondary_categories"] = json.loads(secondary) if secondary else []
+        item["category"] = _news_category(item)
+        item["eligibility_version"] = CURRENT_NEWS_CONTRACT.eligibility_version
+        news.append(item)
+    return news
+
+
+def _news_archive_page(
+    connection: sqlite3.Connection, after: str | None, limit: int,
+) -> dict:
+    now = datetime.now(UTC)
+    epoch_row = connection.execute(
+        "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
+    ).fetchone()
+    epoch = str(epoch_row[0])
+    claimable_keys = {
+        (str(row["source"]), str(row["source_item_id"]), int(row["revision_number"]))
+        for row in pending_annotation_records(connection, limit=100_000)
+    }
+    rows = _news_reader_rows(connection, now, after=after, limit=limit + 1)
+    has_more = len(rows) > limit
+    news = _serialize_news_rows(rows[:limit], now, epoch, claimable_keys)
+    next_cursor = (
+        json.dumps([
+            news[-1]["mirror_updated_at"], news[-1]["source"],
+            news[-1]["source_item_id"], news[-1]["revision_number"],
+        ], ensure_ascii=False, separators=(",", ":"))
+        if news else after
+    )
+    return {
+        "items": news,
+        "next_cursor": next_cursor,
+        "has_more": has_more,
+        "window_days": NEWS_READER_WINDOW_DAYS,
+        "window_start": (now - timedelta(days=NEWS_READER_WINDOW_DAYS)).isoformat(),
+    }
 
 
 def _quote_history_files(directory: Path) -> list[Path]:
@@ -1661,79 +1899,11 @@ def _dashboard_payload(database: Path) -> dict:
         item["predictions"] = predictions_by_decision.get(item["decision_id"], [])
         return item
 
-    news = []
-    seen_news_links = set()
-    for row in news_rows:
-        item = dict(row)
-        listed_source = str(item.get("source") or "") in COLLECTION_SOURCES
-        # Intake is permission-neutral. The registry describes active collector
-        # lanes; it is not a source allowlist and unlisted readable evidence is
-        # still shown for audit and semantic review.
-        item["source_eligibility"] = (
-            "SEMANTIC_CANDIDATE" if listed_source else "UNLISTED_CANDIDATE"
-        )
-        item["model_visibility"] = (
-            "IMPACT_PENDING"
-            if item.get("parsed_at")
-            else "NOT_YET_PARSED"
-            if item.get("annotation_status") in {"QUEUED", "READY"}
-            else str(item.get("annotation_status") or "WAITING_CONTENT")
-        )
-        annotation_key = (
-            str(item.get("source") or ""),
-            str(item.get("source_item_id") or ""),
-            int(item.get("revision_number") or 0),
-        )
-        if item.get("parsed_at"):
-            # Legacy-compatible annotations are also complete even when the
-            # current-version LEFT JOIN did not populate a.annotation_id.
-            item["annotation_status"] = "READY"
-        elif (
-            item.get("annotation_status") == "QUEUED"
-            and annotation_key not in claimable_annotation_keys
-        ):
-            # A readable row can be retained for the reader without being a
-            # job the current worker is allowed to claim (duplicate, archival,
-            # or discovered too late). Calling it QUEUED is misleading.
-            item["annotation_status"] = "NOT_REQUIRED"
-            reason_code, reason = _not_required_reason(item, epoch)
-            item["annotation_reason_code"] = reason_code
-            item["annotation_reason"] = reason
-        _apply_impact_status(item, now)
-        # The reader page shows every retained article with readable source
-        # content. Parsing is a separate state: an unparsed article remains
-        # visible for audit, but model_visibility prevents it from entering
-        # any feature snapshot until the annotation has completed.
-        if item.get("content_fetch_status") != "AVAILABLE":
-            continue
-        published_at = (
-            datetime.fromisoformat(item["source_published_time"])
-            if item.get("source_published_time") else None
-        )
-        allowed, _ = google_news_item_is_relevant(
-            str(item["source"]), str(item.get("original_headline") or ""),
-            published_at, now,
-        )
-        if not allowed:
-            continue
-        dedupe_key = item.get("link") or (
-            item["source"],
-            item["source_item_id"],
-        )
-        if dedupe_key in seen_news_links:
-            continue
-        seen_news_links.add(dedupe_key)
-        item["entities"] = json.loads(item.pop("entities_json")) if item.get("entities_json") else []
-        secondary_categories_json = item.pop("secondary_categories_json", None)
-        item["secondary_categories"] = (
-            json.loads(secondary_categories_json)
-            if secondary_categories_json else []
-        )
-        item["category"] = _news_category(item)
-        item["eligibility_version"] = CURRENT_NEWS_CONTRACT.eligibility_version
-        news.append(item)
-        if len(news) >= 200:
-            break
+    # The status snapshot remains a small recent page. The complete bounded
+    # reader archive is exposed separately by /api/news-archive.
+    news = _serialize_news_rows(
+        news_rows[:200], now, epoch, claimable_annotation_keys,
+    )
     counts["latest_news_items"] = len(news)
     counts["readable_news_items"] = len(news)
     counts["parsed_news_items"] = sum(
@@ -2032,6 +2202,29 @@ class Handler(BaseHTTPRequestHandler):
                     payload = _market_history_page(
                         self.database, connection, after, limit,
                     )
+                finally:
+                    connection.close()
+                body = json.dumps(payload, allow_nan=False).encode()
+                status = 200
+            except (OSError, sqlite3.Error, TypeError, ValueError) as error:
+                body = json.dumps({"error": str(error)[:500]}).encode()
+                status = 400
+            self._write_json(status, body)
+            return
+        if path == "/api/news-archive":
+            query = urllib.parse.parse_qs(parsed.query)
+            after = (query.get("after") or [None])[0]
+            try:
+                limit = min(
+                    NEWS_ARCHIVE_PAGE_LIMIT,
+                    max(1, int((query.get("limit") or [NEWS_ARCHIVE_PAGE_LIMIT])[0])),
+                )
+                connection = sqlite3.connect(
+                    f"file:{self.database}?mode=ro", uri=True, timeout=5,
+                )
+                connection.row_factory = sqlite3.Row
+                try:
+                    payload = _news_archive_page(connection, after, limit)
                 finally:
                     connection.close()
                 body = json.dumps(payload, allow_nan=False).encode()

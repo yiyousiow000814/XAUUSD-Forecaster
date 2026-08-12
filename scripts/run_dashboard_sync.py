@@ -15,7 +15,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 
@@ -45,9 +45,9 @@ REMOTE_DECISION_LIMIT = 20
 REMOTE_EVIDENCE_LIMIT = 60
 NEWS_DETAIL_BATCH_LIMIT_BYTES = 400_000
 NEWS_INDEX_BATCH_LIMIT_BYTES = 400_000
-NEWS_DETAIL_FULL_REFRESH_SECONDS = 86_400
-NEWS_INDEX_FULL_REFRESH_SECONDS = 86_400
-NEWS_MIRROR_CONTRACT_VERSION = "news-readable-authoritative-v1"
+NEWS_WRITE_BATCH_ITEMS = 20
+NEWS_READER_WINDOW_DAYS = 60
+NEWS_MIRROR_CONTRACT_VERSION = "news-60-day-incremental-v2"
 MARKET_HISTORY_CONTRACT_VERSION = "market-history-d1-v2"
 MARKET_HISTORY_BATCH_LIMIT_BYTES = 350_000
 MARKET_HISTORY_OVERLAP_SECONDS = 2 * 3_600
@@ -66,7 +66,7 @@ REMOTE_MARKET_DENSE_LIMITS = (1440, 1152, 864, 576, 288, 0)
 REMOTE_MARKET_OVERVIEW_LIMITS = (480, 240, 120, 80, 40)
 
 NEWS_INDEX_FIELDS = (
-    "category", "source", "source_item_id", "revision_number",
+    "category", "source", "source_item_id", "revision_number", "cluster_id",
     "source_published_time", "collector_first_seen_time", "headline",
     "content_characters", "content_status", "content_fetch_status",
     "content_error_type", "annotation_status", "annotation_reason_code",
@@ -75,6 +75,7 @@ NEWS_INDEX_FIELDS = (
     "impact_status", "impact_class", "impact_event_state",
     "impact_update_type", "impact_assessed_at", "impact_expires_at",
     "impact_event_at", "impact_clock_source", "impact_reason_zh",
+    "mirror_updated_at",
 )
 MARKET_DECISION_FIELDS = (
     "source_decision_id", "decision_time", "model_identity",
@@ -103,7 +104,10 @@ def news_mirror_parts(payload: dict) -> tuple[list[dict], list[dict]]:
     """Split the complete news rows into a compact index and lazy details."""
     index_rows = []
     detail_rows = []
-    for row in payload.get("recent_news", [])[:REMOTE_NEWS_LIMIT]:
+    rows = payload.get("items")
+    if not isinstance(rows, list):
+        rows = payload.get("recent_news", [])[:REMOTE_NEWS_LIMIT]
+    for row in rows:
         detail_key = _stable_news_key(row)
         detail_payload = {
             key: value for key, value in row.items() if key not in NEWS_INDEX_FIELDS
@@ -116,6 +120,7 @@ def news_mirror_parts(payload: dict) -> tuple[list[dict], list[dict]]:
         index_rows.append({
             **{key: row.get(key) for key in NEWS_INDEX_FIELDS},
             "detail_key": detail_key,
+            "mirror_contract": NEWS_MIRROR_CONTRACT_VERSION,
         })
         detail_rows.append({
             "detail_key": detail_key,
@@ -126,15 +131,20 @@ def news_mirror_parts(payload: dict) -> tuple[list[dict], list[dict]]:
 
 
 def news_detail_batches(rows: list[dict]) -> list[list[dict]]:
-    return _bounded_item_batches(rows, NEWS_DETAIL_BATCH_LIMIT_BYTES)
+    return _bounded_item_batches(
+        rows, NEWS_DETAIL_BATCH_LIMIT_BYTES, max_items=NEWS_WRITE_BATCH_ITEMS,
+    )
 
 
 def news_index_batches(rows: list[dict]) -> list[list[dict]]:
-    return _bounded_item_batches(rows, NEWS_INDEX_BATCH_LIMIT_BYTES)
+    return _bounded_item_batches(
+        rows, NEWS_INDEX_BATCH_LIMIT_BYTES, max_items=NEWS_WRITE_BATCH_ITEMS,
+    )
 
 
 def _bounded_item_batches(
-    rows: list[dict], limit_bytes: int, *, envelope: str = "items"
+    rows: list[dict], limit_bytes: int, *, envelope: str = "items",
+    max_items: int | None = None,
 ) -> list[list[dict]]:
     batches: list[list[dict]] = []
     current: list[dict] = []
@@ -144,7 +154,9 @@ def _bounded_item_batches(
             {envelope: candidate}, ensure_ascii=False, allow_nan=False,
             separators=(",", ":"),
         ).encode("utf-8"))
-        if current and size > limit_bytes:
+        if current and (
+            size > limit_bytes or (max_items is not None and len(candidate) > max_items)
+        ):
             batches.append(current)
             current = [row]
         else:
@@ -1120,111 +1132,78 @@ def _sync_market_history(config: dict) -> None:
         ).encode("utf-8"), config)
 
 
-def _sync_news(local_payload: dict, config: dict) -> None:
-    news_index, details = news_mirror_parts(local_payload)
+def _local_news_archive_url(config: dict, after: str | None) -> str:
+    status_url = urllib.parse.urlsplit(config["local_status_url"])
+    query = {"limit": str(NEWS_WRITE_BATCH_ITEMS)}
+    if after:
+        query["after"] = after
+    return urllib.parse.urlunsplit((
+        status_url.scheme, status_url.netloc, "/api/news-archive",
+        urllib.parse.urlencode(query), "",
+    ))
+
+
+def _sync_news(_local_payload: dict, config: dict) -> None:
+    """Advance one bounded archive page; never replay the whole archive."""
     state_path = Path(config.get("news_state_file", DEFAULT_NEWS_STATE))
     state = _read_news_sync_state(state_path)
-    synced_index_hashes = state.get("index_hashes", {})
-    if not isinstance(synced_index_hashes, dict):
-        synced_index_hashes = {}
-    current_index_hashes = {
-        row["detail_key"]: _json_hash(row) for row in news_index
-    }
+    if state.get("mirror_contract_version") != NEWS_MIRROR_CONTRACT_VERSION:
+        state = {"mirror_contract_version": NEWS_MIRROR_CONTRACT_VERSION}
+
+    if config.get("local_status_url"):
+        with urllib.request.urlopen(
+            _local_news_archive_url(config, state.get("cursor")),
+            timeout=LOCAL_STATUS_TIMEOUT_SECONDS,
+        ) as response:
+            page = json.loads(response.read())
+    else:
+        page = {"items": _local_payload.get("recent_news", []), "has_more": False}
+    news_index, details = news_mirror_parts(page)
     news_index_url = config.get("remote_news_index_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/news-index"
     )
     news_url = config.get("remote_news_ingest_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/news-content"
     )
-    removed_keys = set(synced_index_hashes) - set(current_index_hashes)
-    reset_required = (
-        state.get("mirror_contract_version") != NEWS_MIRROR_CONTRACT_VERSION
-        or bool(removed_keys)
-    )
-    if reset_required:
-        reset_payload = json.dumps(
-            {"reset": True}, separators=(",", ":"),
-        ).encode("utf-8")
-        _post_json(news_index_url, reset_payload, config)
-        _post_json(news_url, reset_payload, config)
-        synced_index_hashes = {}
-        state = {"mirror_contract_version": NEWS_MIRROR_CONTRACT_VERSION}
-    last_index_full = state.get("last_index_full_sync")
-    try:
-        index_full_refresh_due = (
-            not last_index_full
-            or (
-                datetime.now(UTC) - datetime.fromisoformat(last_index_full)
-            ).total_seconds() >= NEWS_INDEX_FULL_REFRESH_SECONDS
-        )
-    except (TypeError, ValueError):
-        index_full_refresh_due = True
-    synced_hashes = state.get("hashes", {})
-    if not isinstance(synced_hashes, dict):
-        synced_hashes = {}
-    last_full = state.get("last_full_sync")
-    try:
-        full_refresh_due = (
-            not last_full
-            or (datetime.now(UTC) - datetime.fromisoformat(last_full)).total_seconds()
-            >= NEWS_DETAIL_FULL_REFRESH_SECONDS
-        )
-    except (TypeError, ValueError):
-        full_refresh_due = True
-    pending = [
-        row for row in details
-        if full_refresh_due or synced_hashes.get(row["detail_key"]) != row["detail_hash"]
-    ]
-    for batch in news_detail_batches(pending):
-        encoded = json.dumps(
-            {"items": batch}, ensure_ascii=False, allow_nan=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        _post_json(news_url, encoded, config)
-        for row in batch:
-            synced_hashes[row["detail_key"]] = row["detail_hash"]
-        _write_news_sync_state(state_path, {
-            **state,
-            "hashes": synced_hashes,
-            "index_hashes": synced_index_hashes,
-        })
-    if full_refresh_due:
-        state["last_full_sync"] = datetime.now(UTC).isoformat()
 
-    # Publish discoverability only after every referenced detail is durable.
-    # A timeout may leave the old index visible, but can never expose a new
-    # dangling detail_key.
-    pending_index = [
-        row for row in news_index
-        if index_full_refresh_due
-        or synced_index_hashes.get(row["detail_key"])
-        != current_index_hashes[row["detail_key"]]
-    ]
-    for batch in news_index_batches(pending_index):
-        encoded = json.dumps(
+    # Details are durable before their index records become discoverable.
+    for batch in news_detail_batches(details):
+        _post_json(news_url, json.dumps(
             {"items": batch}, ensure_ascii=False, allow_nan=False,
             separators=(",", ":"),
-        ).encode("utf-8")
-        _post_json(news_index_url, encoded, config)
-        for row in batch:
-            synced_index_hashes[row["detail_key"]] = current_index_hashes[
-                row["detail_key"]
-            ]
-        _write_news_sync_state(state_path, {
-            **state,
-            "hashes": synced_hashes,
-            "index_hashes": synced_index_hashes,
-        })
-    if index_full_refresh_due:
-        state["last_index_full_sync"] = datetime.now(UTC).isoformat()
-    current_keys = {row["detail_key"] for row in details}
-    state["hashes"] = {
-        key: value for key, value in synced_hashes.items() if key in current_keys
-    }
-    state["index_hashes"] = {
-        key: current_index_hashes[key] for key in current_index_hashes
-    }
-    state["mirror_contract_version"] = NEWS_MIRROR_CONTRACT_VERSION
+        ).encode("utf-8"), config)
+    for batch in news_index_batches(news_index):
+        _post_json(news_index_url, json.dumps(
+            {"items": batch}, ensure_ascii=False, allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8"), config)
+
+    next_cursor = page.get("next_cursor")
+    if next_cursor:
+        state["cursor"] = str(next_cursor)
+    now = datetime.now(UTC)
+    last_prune = state.get("last_prune")
+    try:
+        prune_due = (
+            not last_prune
+            or (now - datetime.fromisoformat(str(last_prune))).total_seconds() >= 86_400
+        )
+    except ValueError:
+        prune_due = True
+    maintenance: dict[str, str] = {}
+    if prune_due:
+        cutoff = (now - timedelta(days=NEWS_READER_WINDOW_DAYS)).isoformat()
+        maintenance["prune_before"] = cutoff
+        state["last_prune"] = now.isoformat()
+    if not page.get("has_more") and state.get("reconciled_contract") != NEWS_MIRROR_CONTRACT_VERSION:
+        maintenance["reconcile_contract"] = NEWS_MIRROR_CONTRACT_VERSION
+        state["reconciled_contract"] = NEWS_MIRROR_CONTRACT_VERSION
+    if maintenance:
+        _post_json(news_index_url, json.dumps(
+            maintenance, separators=(",", ":"),
+        ).encode("utf-8"), config)
+    state["has_more"] = bool(page.get("has_more"))
+    state["last_success"] = now.isoformat()
     _write_news_sync_state(state_path, state)
 
 

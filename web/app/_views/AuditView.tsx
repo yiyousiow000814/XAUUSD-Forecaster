@@ -396,6 +396,7 @@ type NewsIndexResponse = {
   category_counts: Record<string, number>;
   page: number;
   page_size: number;
+  window_days?: number;
 };
 
 const time = (value?: string | null) => value ? new Intl.DateTimeFormat("zh-CN", {
@@ -869,9 +870,10 @@ export default function AuditView() {
     .filter(row => !row.model_identity.endsWith("NEWS_RESIDUAL"))
     .map(row => row.training_rows));
   const newsMetrics = resolveNewsMetrics(payload);
-  const readableNewsTotal = newsMetrics.articles.readable;
-  const parsedNewsTotal = newsMetrics.articles.semantic_reviews_complete;
-  const modelCandidateNewsTotal = newsMetrics.articles.current_model_candidates;
+  const readableNewsTotal = newsIndex.readable_total ?? newsMetrics.articles.readable;
+  const parsedNewsTotal = newsIndex.parsed_total ?? newsMetrics.articles.semantic_reviews_complete;
+  const modelCandidateNewsTotal = newsIndex.model_candidate_total
+    ?? newsMetrics.articles.current_model_candidates;
   const newsWaitingTotal = (payload?.annotation_queue?.queued ?? 0)
     + (payload?.annotation_queue?.backing_off ?? 0)
     + (payload?.annotation_queue?.dead_letter ?? 0);
@@ -966,7 +968,7 @@ export default function AuditView() {
 
       {view === "news" && <>
         <section className="annotation-queue" aria-label="新闻处理进度">
-          <span><b>{readableNewsTotal}</b> 篇可读文章</span>
+          <span><b>{readableNewsTotal}</b> 篇近60天可读文章</span>
           <span><b>{parsedNewsTotal}</b> 篇语义复核完成</span>
           <span><b>{newsNoParsingNeededTotal}</b> 篇无需复核</span>
           <span><b>{newsWaitingTotal}</b> 篇等待处理</span>
@@ -977,7 +979,7 @@ export default function AuditView() {
           </details>
         </section>
         <section className="news-browser" aria-label="新闻自动分类">
-          <div><strong>自动分类</strong><span>按媒体发布时间排序 · 可读文章 {readableNewsTotal} 篇 · 语义复核完成 {parsedNewsTotal} 篇 · 当前模型候选 {modelCandidateNewsTotal} 篇 · 每页 {NEWS_PER_PAGE} 篇</span></div>
+          <div><strong>自动分类</strong><span>近60天 · 按媒体发布时间排序 · 共 {readableNewsTotal} 篇 · 语义复核完成 {parsedNewsTotal} 篇 · 当前模型候选 {modelCandidateNewsTotal} 篇 · 每页 {NEWS_PER_PAGE} 篇</span></div>
           <nav>
             {categories.map(category => <button key={category.name} type="button" className={newsCategory === category.name ? "active" : ""} onClick={() => { setNewsCategory(category.name); setNewsPage(1); }}>
               {category.name}<b>{category.count}</b>
