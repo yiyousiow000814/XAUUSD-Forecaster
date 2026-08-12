@@ -313,7 +313,7 @@ test("renders the news and decision audit route", async () => {
   assert.doesNotMatch(source, /payload\?\.system\.online && !error/);
   assert.match(source, /列表与正文详情分开保存/);
   assert.doesNotMatch(source, /这些新闻处理到哪里了/);
-  assert.match(source, /篇近60天可读文章/);
+  assert.match(source, /条近60天可读新闻/);
   assert.match(source, /篇无需复核/);
   assert.match(source, /row\.model_visibility !== "NOT_YET_PARSED"/);
   assert.match(source, /篇当前模型候选/);

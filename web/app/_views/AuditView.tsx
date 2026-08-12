@@ -966,18 +966,18 @@ export default function AuditView() {
 
       {view === "news" && <>
         <section className="annotation-queue" aria-label="新闻处理进度">
-          <span><b>{readableNewsTotal}</b> 篇近60天可读文章</span>
-          <span><b>{parsedNewsTotal}</b> 篇语义复核完成</span>
-          <span><b>{newsNoParsingNeededTotal}</b> 篇无需复核</span>
-          <span><b>{newsWaitingTotal}</b> 篇等待处理</span>
-          <span className="is-model-ready"><b>{modelCandidateNewsTotal}</b> 篇当前模型候选</span>
+          <span><b>{readableNewsTotal}</b> 条近60天可读新闻</span>
+          <span><b>{parsedNewsTotal}</b> 条语义复核完成</span>
+          <span><b>{newsNoParsingNeededTotal}</b> 条无需复核</span>
+          <span><b>{newsWaitingTotal}</b> 条等待处理</span>
+          <span className="is-model-ready"><b>{modelCandidateNewsTotal}</b> 个当前模型候选事件</span>
           <details>
             <summary>查看处理器技术状态</summary>
             <p>真正排队 {payload?.annotation_queue?.queued ?? 0} · 失败后等待重试 {payload?.annotation_queue?.backing_off ?? 0} · 已隔离 {payload?.annotation_queue?.dead_letter ?? 0} · 等待正文 {payload?.annotation_queue?.waiting_content ?? 0} · 正文不可用 {payload?.annotation_queue?.unavailable_content ?? 0}</p>
           </details>
         </section>
         <section className="news-browser" aria-label="新闻自动分类">
-          <div><strong>自动分类</strong><span>近60天 · 按媒体发布时间排序 · 共 {readableNewsTotal} 篇 · 语义复核完成 {parsedNewsTotal} 篇 · 当前模型候选 {modelCandidateNewsTotal} 篇 · 每页 {NEWS_PER_PAGE} 篇</span></div>
+          <div><strong>自动分类</strong><span>近60天 · 按媒体发布时间排序 · 共 {readableNewsTotal} 条可读新闻 · 语义复核完成 {parsedNewsTotal} 条 · 当前模型候选 {modelCandidateNewsTotal} 个事件 · 每页 {NEWS_PER_PAGE} 条</span></div>
           <nav>
             {categories.map(category => <button key={category.name} type="button" className={newsCategory === category.name ? "active" : ""} onClick={() => { setNewsCategory(category.name); setNewsPage(1); }}>
               {category.name}<b>{category.count}</b>
