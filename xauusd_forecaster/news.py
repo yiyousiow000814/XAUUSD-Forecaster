@@ -26,10 +26,7 @@ from .content import (
     extract_federal_reserve_full_text,
 )
 from .forward_ledger import ForwardLedger
-from .news_relevance import (
-    google_news_item_is_relevant,
-    google_news_quality_rank,
-)
+from .news_relevance import google_news_item_is_relevant
 
 
 UTC = timezone.utc
@@ -1234,7 +1231,6 @@ def collect_google_news_lane(
                     "SELECT 1 FROM news_revisions WHERE source=? AND source_item_id=? LIMIT 1",
                     (record["source"], record["source_item_id"]),
                 ).fetchone() is not None,
-                google_news_quality_rank(str(record.get("headline") or "")),
                 -(record["source_published_time"].timestamp()
                   if record.get("source_published_time") else 0.0),
                 str(record["source_item_id"]),

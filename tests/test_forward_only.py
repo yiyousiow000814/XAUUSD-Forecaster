@@ -1240,7 +1240,7 @@ def test_google_news_lane_reports_partial_content_coverage(tmp_path) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
     lane = GoogleNewsLane("google_news_fed_rates", "Federal Reserve")
     rss = b"""<rss><channel>
-      <item><guid>readable</guid><title>Federal Reserve rate outlook - CNBC</title>
+      <item><guid>readable</guid><title>Federal Reserve rate outlook - Source Alpha</title>
         <pubDate>Wed, 05 Aug 2026 10:30:00 GMT</pubDate>
         <link>https://publisher.example/readable</link></item>
       <item><guid>blocked</guid><title>Treasury yields await Federal Reserve - WSJ</title>
@@ -1330,15 +1330,15 @@ def test_gdelt_candidates_also_reach_ai_instead_of_keyword_filtering() -> None:
     assert reason == "AI_SEMANTIC_REVIEW_REQUIRED"
 
 
-def test_google_news_lane_prefers_accessible_established_publisher_within_limit(tmp_path) -> None:
+def test_google_news_lane_orders_unstored_candidates_by_publisher_time(tmp_path) -> None:
     fetched = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
     lane = GoogleNewsLane("google_news_fed_rates", "Federal Reserve")
     rss = b"""<rss><channel>
-      <item><guid>blog</guid><title>Federal Reserve rate outlook - Random Market Blog</title>
-        <pubDate>Sat, 08 Aug 2026 09:59:00 GMT</pubDate><link>https://example.test/blog</link></item>
-      <item><guid>ap</guid><title>Federal Reserve split deepens over rates - AP News</title>
-        <pubDate>Sat, 08 Aug 2026 09:50:00 GMT</pubDate><link>https://example.test/ap</link></item>
+      <item><guid>newer</guid><title>Federal Reserve rate outlook - Source Alpha</title>
+        <pubDate>Sat, 08 Aug 2026 09:59:00 GMT</pubDate><link>https://example.test/newer</link></item>
+      <item><guid>older</guid><title>Federal Reserve split deepens over rates - Source Beta</title>
+        <pubDate>Sat, 08 Aug 2026 09:50:00 GMT</pubDate><link>https://example.test/older</link></item>
     </channel></rss>"""
     result = collect_google_news_lane(
         ledger, fetched, lane, fetcher=lambda _: rss, decoder=lambda url: url,
@@ -1346,7 +1346,7 @@ def test_google_news_lane_prefers_accessible_established_publisher_within_limit(
     )
     assert result["inserted_revisions"] == 1
     row = ledger.connection.execute("SELECT headline FROM news_revisions").fetchone()
-    assert row["headline"].endswith("AP News")
+    assert row["headline"].endswith("Source Alpha")
 
 
 def test_google_news_lane_replaces_unavailable_articles_with_other_sources(tmp_path) -> None:
@@ -1354,14 +1354,14 @@ def test_google_news_lane_replaces_unavailable_articles_with_other_sources(tmp_p
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
     lane = GoogleNewsLane("google_news_fed_rates", "Federal Reserve")
     rss = b"""<rss><channel>
-      <item><guid>blocked-one</guid><title>Federal Reserve outlook - Premium Wire</title>
+      <item><guid>blocked-one</guid><title>Federal Reserve outlook - Source Alpha</title>
         <pubDate>Sat, 08 Aug 2026 09:59:00 GMT</pubDate><link>https://blocked-one.test/rates</link></item>
-      <item><guid>blocked-two</guid><title>Federal Reserve outlook - Market Terminal</title>
+      <item><guid>blocked-two</guid><title>Federal Reserve outlook - Source Beta</title>
         <pubDate>Sat, 08 Aug 2026 09:58:00 GMT</pubDate><link>https://blocked-two.test/rates</link></item>
-      <item><guid>cnbc</guid><title>Federal Reserve outlook - CNBC</title>
-        <pubDate>Sat, 08 Aug 2026 09:57:00 GMT</pubDate><link>https://www.cnbc.com/rates</link></item>
-      <item><guid>guardian</guid><title>Federal Reserve outlook - The Guardian</title>
-        <pubDate>Sat, 08 Aug 2026 09:56:00 GMT</pubDate><link>https://www.theguardian.com/rates</link></item>
+      <item><guid>accessible-one</guid><title>Federal Reserve outlook - Source Gamma</title>
+        <pubDate>Sat, 08 Aug 2026 09:57:00 GMT</pubDate><link>https://accessible-one.test/rates</link></item>
+      <item><guid>accessible-two</guid><title>Federal Reserve outlook - Source Delta</title>
+        <pubDate>Sat, 08 Aug 2026 09:56:00 GMT</pubDate><link>https://accessible-two.test/rates</link></item>
     </channel></rss>"""
     def extract(url: str) -> tuple[str, str]:
         if url.startswith("https://blocked-"):
@@ -1380,7 +1380,7 @@ def test_google_news_lane_replaces_unavailable_articles_with_other_sources(tmp_p
     assert {
         row["source_item_id"]
         for row in ledger.connection.execute("SELECT source_item_id FROM news_revisions")
-    } == {"cnbc", "guardian"}
+    } == {"accessible-one", "accessible-two"}
 
 
 def test_google_news_lane_replaces_unresolved_discovery_url(tmp_path) -> None:
@@ -1388,16 +1388,16 @@ def test_google_news_lane_replaces_unresolved_discovery_url(tmp_path) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
     lane = GoogleNewsLane("google_news_fed_rates", "Federal Reserve")
     rss = b"""<rss><channel>
-      <item><guid>hidden</guid><title>Federal Reserve outlook - News Provider</title>
+      <item><guid>hidden</guid><title>Federal Reserve outlook - Source Alpha</title>
         <pubDate>Sat, 08 Aug 2026 09:59:00 GMT</pubDate><link>https://news.google.com/hidden</link></item>
-      <item><guid>replacement</guid><title>Federal Reserve outlook - Public Radio</title>
+      <item><guid>replacement</guid><title>Federal Reserve outlook - Source Beta</title>
         <pubDate>Sat, 08 Aug 2026 09:58:00 GMT</pubDate><link>https://news.google.com/replacement</link></item>
     </channel></rss>"""
 
     def decode(url: str) -> str:
         if url.endswith("/hidden"):
             return url
-        return "https://www.npr.org/rates"
+        return "https://publisher.example/rates"
 
     result = collect_google_news_lane(
         ledger, fetched, lane, fetcher=lambda _: rss, decoder=decode,
@@ -1411,7 +1411,7 @@ def test_google_news_lane_replaces_unresolved_discovery_url(tmp_path) -> None:
     row = ledger.connection.execute(
         "SELECT source_item_id,link FROM news_revisions"
     ).fetchone()
-    assert tuple(row) == ("replacement", "https://www.npr.org/rates")
+    assert tuple(row) == ("replacement", "https://publisher.example/rates")
 
 
 def test_google_news_lane_rejects_old_but_sends_fresh_results_to_ai(tmp_path) -> None:
