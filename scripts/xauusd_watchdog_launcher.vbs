@@ -22,5 +22,8 @@ command = "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass" _
 
 Dim shell, exitCode
 Set shell = CreateObject("WScript.Shell")
-exitCode = shell.Run(command, 0, True)
+Do
+    exitCode = shell.Run(command, 0, True)
+    If exitCode = 75 Then WScript.Sleep 1000
+Loop While exitCode = 75
 WScript.Quit exitCode
