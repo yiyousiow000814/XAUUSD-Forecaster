@@ -17,8 +17,6 @@ from .forward_ledger import canonical_hash
 from .news_contracts import (
     CURRENT_NEWS_CONTRACT,
     NewsContract,
-    generation_matches_contract,
-    supported_generation_contract,
 )
 from .news_evidence import EVIDENCE_POLICY_VERSION
 from .ridge import RidgeArtifact
@@ -33,9 +31,6 @@ MODEL_IDENTITIES = frozenset({
 })
 NEWS_MODEL_IDENTITIES = frozenset({
     "NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL", "NEWS_ONLY",
-})
-TRANSITION_NEWS_MODEL_IDENTITIES = frozenset({
-    "NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL",
 })
 
 
@@ -79,28 +74,11 @@ def _news_contract_matches(
 
 def _news_generation_ready(
     newest: dict, available_news_eligibilities: set[str] | None = None,
-    *, enforce_current_contract: bool = True,
-    news_contract: NewsContract | None = None,
 ) -> bool:
     """Require one complete, runnable generation for every news identity."""
-    required_contract = (
-        news_contract if news_contract is not None
-        else CURRENT_NEWS_CONTRACT if enforce_current_contract
-        else None
-    )
-    if required_contract is None:
-        return False
-    required_identities = (
-        NEWS_MODEL_IDENTITIES
-        if required_contract == CURRENT_NEWS_CONTRACT
-        else TRANSITION_NEWS_MODEL_IDENTITIES
-    )
     return all(
         identity in newest
-        and (
-            required_contract is None
-            or _news_contract_matches(newest[identity], required_contract)
-        )
+        and _news_contract_matches(newest[identity], CURRENT_NEWS_CONTRACT)
         and (
             available_news_eligibilities is None
             or _row_value(newest[identity], "eligibility_version")
@@ -113,22 +91,16 @@ def _news_generation_ready(
                 and Path(newest[identity]["artifact_path"]).exists()
             )
         )
-        for identity in required_identities
+        for identity in NEWS_MODEL_IDENTITIES
     )
 
 
-def news_model_activation_status(
-    updates, *, allow_transition_contract: bool = False,
-    transition_contract: NewsContract | None = None,
-) -> list[dict]:
+def news_model_activation_status(updates) -> list[dict]:
     """Explain whether each news identity has a current-policy runnable artifact."""
     newest = {}
     for update in updates:
         newest.setdefault(update["model_identity"], update)
     generation_ready = _news_generation_ready(newest)
-    transition_generation_ready = allow_transition_contract and _news_generation_ready(
-        newest, enforce_current_contract=False, news_contract=transition_contract,
-    )
     result = []
     for identity in (
         "NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL", "NEWS_ONLY",
@@ -137,9 +109,6 @@ def news_model_activation_status(
         update = newest.get(identity)
         if update is None:
             status, reason = "NOT_TRAINED", "尚未训练当前新闻模型"
-        elif not _news_contract_matches(update) and transition_generation_ready:
-            status = "TRANSITION_ACTIVE"
-            reason = "当前整组模型继续预测，等待新版全部准备好后整组切换"
         elif not _news_contract_matches(update):
             status, reason = "POLICY_MISMATCH", "最新版不符合当前新闻规则"
         else:
@@ -186,8 +155,6 @@ def _news_snapshot_exposed(identity: str, snapshot: dict, features: dict) -> boo
 
 def _active_updates(
     updates, available_news_eligibilities: set[str] | None = None,
-    *, enforce_current_contract: bool = True,
-    news_contract: NewsContract | None = None,
 ) -> list:
     """Select models, activating news only as one complete policy generation."""
     if available_news_eligibilities is None:
@@ -200,14 +167,9 @@ def _active_updates(
         newest_by_identity.setdefault(update["model_identity"], update)
     news_generation_ready = _news_generation_ready(
         newest_by_identity, available_news_eligibilities,
-        enforce_current_contract=enforce_current_contract,
-        news_contract=news_contract,
     )
-    required_contract = (
-        news_contract if news_contract is not None
-        else CURRENT_NEWS_CONTRACT if enforce_current_contract
-        else None
-    )
+    if not news_generation_ready:
+        return []
 
     counts: dict[str, int] = defaultdict(int)
     newest_seen: set[str] = set()
@@ -217,19 +179,13 @@ def _active_updates(
         identity = update["model_identity"]
         if identity not in MODEL_IDENTITIES or counts[identity] >= ACTIVE_VERSIONS_PER_IDENTITY:
             continue
-        if identity in NEWS_MODEL_IDENTITIES and not news_generation_ready:
-            # A rule generation is usable only after all current news identities
-            # have compatible artifacts.  This prevents a policy deployment
-            # from exposing a partial or silently mixed model generation.
-            continue
         if identity in blocked_news:
             continue
         if identity in NEWS_MODEL_IDENTITIES:
             eligibility = _row_value(update, "eligibility_version")
             compatible = (
                 (
-                    required_contract is None
-                    or _news_contract_matches(update, required_contract)
+                    _news_contract_matches(update, CURRENT_NEWS_CONTRACT)
                 )
                 and eligibility in available_news_eligibilities
             )
@@ -291,29 +247,6 @@ def _has_activated_generation(ledger, decision_time: datetime) -> bool:
         WHERE activated_at<? LIMIT 1""",
         (decision_time.isoformat(),),
     ).fetchone() is not None
-
-
-def _activated_generation(ledger, decision_time: datetime):
-    """Return the generation contract that governed this decision time."""
-    return ledger.connection.execute(
-        """SELECT g.* FROM news_model_generation_activations_v1 a
-        JOIN news_model_generations_v1 g USING(generation_id)
-        WHERE a.activated_at<?
-        ORDER BY a.activated_at DESC,a.activation_id DESC LIMIT 1""",
-        (decision_time.isoformat(),),
-    ).fetchone()
-
-
-def _allow_activated_transition_contract(ledger, decision_time: datetime) -> bool:
-    """Keep a supported active generation alive until its atomic replacement."""
-    generation = _activated_generation(ledger, decision_time)
-    if generation is None:
-        return False
-    contract = supported_generation_contract(generation)
-    return (
-        contract is not None
-        and not generation_matches_contract(generation, CURRENT_NEWS_CONTRACT)
-    )
 
 
 def _calibration(ledger, model_identity: str, decision_time: datetime) -> dict:
@@ -400,21 +333,13 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
     )
     created.append({"model_identity": "CHAMPION_0", "model_version": "always-wait-v1"})
 
-    active_generation = _activated_generation(ledger, decision_time)
-    active_contract = supported_generation_contract(active_generation)
-    allow_transition_contract = _allow_activated_transition_contract(
-        ledger, decision_time,
-    )
     updates = _activated_generation_updates(ledger, decision_time)
     features = json.loads(market_snapshot["features_json"])
     snapshots = dict(news_snapshots or {})
     snapshots.setdefault(ELIGIBILITY_VERSION, news_snapshot)
     snapshots.setdefault(f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}", news_snapshot)
     values = [features.get(name) for name in MARKET_FEATURES]
-    for update in _active_updates(
-        updates, set(snapshots), enforce_current_contract=not allow_transition_contract,
-        news_contract=active_contract if allow_transition_contract else None,
-    ):
+    for update in _active_updates(updates, set(snapshots)):
         identity = update["model_identity"]
         update_eligibility = update["eligibility_version"]
         selected_news_snapshot = snapshots.get(update_eligibility, news_snapshot)

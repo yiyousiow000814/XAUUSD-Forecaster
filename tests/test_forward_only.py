@@ -1,9 +1,11 @@
 import hashlib
+import io
 import json
 import math
 import os
 import sqlite3
 import urllib.error
+import zipfile
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -40,9 +42,11 @@ from xauusd_forecaster.market import (
 from xauusd_forecaster.news import (
     GoogleNewsLane,
     RssSource,
+    collect_bea_macro,
     collect_bls_macro,
     collect_direct_full_text_rss_news,
     collect_direct_full_text_html_news,
+    collect_eia_macro,
     collect_fred_macro,
     collect_federal_reserve_news,
     collect_gdelt_news,
@@ -63,7 +67,67 @@ from xauusd_forecaster.training import (
 )
 
 
+def _v15_annotation(vector: dict, evidence: str, **overrides) -> dict:
+    current = {
+        **vector,
+        "primary_category": "regulation_other",
+        "secondary_categories": [],
+        "emerging_topic_zh": "测试事件",
+        "record_kind": "BACKGROUND",
+        "actor": "", "action": "", "object": "", "location": "",
+        "event_time": "", "claim_status": "NOT_APPLICABLE", "materiality": 0.0,
+        "canonical_actor_id": "", "action_family": "OTHER_FACT",
+        "canonical_object_id": "", "canonical_location_id": "", "episode_key": "",
+        "primary_story_title_zh": "", "secondary_contexts_zh": [],
+        "relation_to_prior": "NONE", "document_kind": "BACKGROUND",
+        "material_event_key": "", "source_organization_id": "",
+        "evidence_role": "BACKGROUND", "xauusd_relevance": "IRRELEVANT",
+        "review_priority": "BACKGROUND", "material_change": "HISTORICAL_CONTEXT",
+        "time_sensitivity": "BACKGROUND",
+        "semantic_reason_zh": "完整正文显示该条目不进入当前模型。",
+        "supporting_evidence": [evidence],
+    }
+    current.update(overrides)
+    return current
+
+
 UTC = timezone.utc
+
+
+def _gdelt_gkg_feed(
+    *,
+    title: str = "Gold reacts to sanctions",
+    url: str = "https://example.test/geopolitics",
+    timestamp: str = "20260805100000",
+    themes: str = "ECON_GOLD",
+) -> tuple[bytes, bytes]:
+    fields = [""] * 27
+    fields[0] = f"{timestamp}-1"
+    fields[1] = timestamp
+    fields[3] = "example.test"
+    fields[4] = url
+    fields[7] = themes
+    fields[26] = (
+        f"<PAGE_PRECISEPUBTIMESTAMP>{timestamp}</PAGE_PRECISEPUBTIMESTAMP>"
+        f"<PAGE_TITLE>{title}</PAGE_TITLE>"
+    )
+    payload = ("\t".join(fields) + "\n").encode()
+    archive_buffer = io.BytesIO()
+    with zipfile.ZipFile(archive_buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(f"{timestamp}.gkg.csv", payload)
+    zipped = archive_buffer.getvalue()
+    manifest = (
+        f"{len(zipped)} {hashlib.md5(zipped).hexdigest()} "
+        f"http://data.gdeltproject.org/gdeltv2/{timestamp}.gkg.csv.zip\n"
+    ).encode()
+    return manifest, zipped
+
+
+def _gdelt_fetcher(manifest: bytes, archive: bytes):
+    def fetch(url: str) -> bytes:
+        return manifest if url.endswith("lastupdate.txt") else archive
+
+    return fetch
 
 
 def test_forward_ledger_waits_for_short_writer_collisions(tmp_path) -> None:
@@ -387,6 +451,11 @@ def test_federal_reserve_intake_requires_current_full_text(tmp_path) -> None:
         item["rejected_reasons"] == {"FULL_TEXT_UNAVAILABLE": 1}
         for item in unavailable
     )
+    first_health = ledger.connection.execute(
+        "SELECT status,error_type FROM source_polls "
+        "WHERE source='federal_reserve_full_text' ORDER BY fetched_time DESC LIMIT 1"
+    ).fetchone()
+    assert tuple(first_health) == ("ERROR", "FeedErrors")
 
     accepted = collect_federal_reserve_news(
         ledger,
@@ -396,6 +465,11 @@ def test_federal_reserve_intake_requires_current_full_text(tmp_path) -> None:
     )
     assert ledger.count("news_revisions") == 3
     assert all(item["inserted_revisions"] == 1 for item in accepted)
+    latest_health = ledger.connection.execute(
+        "SELECT status,error_type FROM source_polls "
+        "WHERE source='federal_reserve_full_text' ORDER BY fetched_time DESC LIMIT 1"
+    ).fetchone()
+    assert tuple(latest_health) == ("OK", None)
     assert all(
         str(row["body"]).startswith("[FULL_TEXT")
         for row in ledger.connection.execute("SELECT body FROM news_revisions")
@@ -629,7 +703,10 @@ def test_bls_api_values_are_versioned_and_rate_limited(tmp_path, monkeypatch) ->
     assert ledger.count("source_polls") == 1
 
 
-def test_broad_free_sources_are_first_seen_versioned_and_rate_limited(tmp_path) -> None:
+def test_broad_free_sources_are_first_seen_versioned_and_rate_limited(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.delenv("FRED_API_KEY", raising=False)
     fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
     ledger = ForwardLedger(
         tmp_path / "forward.sqlite3", now=fetched - timedelta(hours=1)
@@ -645,16 +722,9 @@ def test_broad_free_sources_are_first_seen_versioned_and_rate_limited(tmp_path) 
     assert first["inserted_revisions"] == 12
     assert second["status"] == "SKIPPED_INTERVAL"
 
-    gdelt = json.dumps({"articles": [{
-        "url": "https://example.test/geopolitics",
-        "title": "Gold reacts to sanctions",
-        "seendate": "20260805T100000Z",
-        "domain": "example.test",
-        "sourcecountry": "US",
-        "language": "English",
-    }]}).encode()
+    gdelt_manifest, gdelt_archive = _gdelt_gkg_feed()
     assert collect_gdelt_news(
-        ledger, fetched, lambda _: gdelt,
+        ledger, fetched, _gdelt_fetcher(gdelt_manifest, gdelt_archive),
         content_extractor=lambda url: ("geopolitical evidence " * 30, url),
     )["status"] == "OK"
 
@@ -677,6 +747,139 @@ def test_broad_free_sources_are_first_seen_versioned_and_rate_limited(tmp_path) 
     )["status"] == "OK"
     assert ledger.count("macro_observations") == 12
     assert ledger.count("news_revisions") == 3
+
+
+def test_registered_fred_api_is_bounded_and_never_persists_key(
+    tmp_path, monkeypatch,
+) -> None:
+    api_key = "a" * 32
+    monkeypatch.setenv("FRED_API_KEY", api_key)
+    fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+    calls = []
+
+    def fetcher(url: str) -> bytes:
+        calls.append(url)
+        assert f"api_key={api_key}" in url
+        return json.dumps({
+            "observations": [
+                {"date": "2026-08-04", "value": "11.0"},
+                {"date": "2026-08-03", "value": "10.0"},
+            ]
+        }).encode()
+
+    result = collect_fred_macro(ledger, fetched, fetcher)
+
+    assert result["status"] == "OK"
+    assert result["registered"] is True
+    assert result["inserted_revisions"] == 12
+    assert len(calls) == 6
+    persisted = "\n".join(ledger.connection.iterdump())
+    assert api_key not in persisted
+    assert "FRED_JSON_API" in persisted
+
+
+def test_eia_api_is_hourly_forward_evidence_and_never_assigns_model_role(
+    tmp_path, monkeypatch,
+) -> None:
+    api_key = "b" * 40
+    monkeypatch.setenv("EIA_API_KEY", api_key)
+    fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+    calls = 0
+
+    def fetcher(url: str) -> bytes:
+        nonlocal calls
+        calls += 1
+        assert f"api_key={api_key}" in url
+        return json.dumps({"response": {"data": [
+            {"period": "2026-08-04", "value": "65.25"},
+            {"period": "2026-08-03", "value": "64.75"},
+        ]}}).encode()
+
+    first = collect_eia_macro(ledger, fetched, fetcher)
+    second = collect_eia_macro(ledger, fetched + timedelta(minutes=5), fetcher)
+
+    assert first == {
+        "source": "eia_open_data_api",
+        "status": "OK",
+        "inserted_revisions": 2,
+        "unchanged_items": 0,
+        "registered": True,
+    }
+    assert second["status"] == "SKIPPED_INTERVAL"
+    assert calls == 1
+    persisted = "\n".join(ledger.connection.iterdump())
+    assert api_key not in persisted
+    assert "EIA_JSON_API_V2" in persisted
+    assert "model_role" not in persisted
+
+
+def test_registered_macro_errors_redact_keys(tmp_path, monkeypatch) -> None:
+    fred_key = "c" * 32
+    eia_key = "d" * 40
+    monkeypatch.setenv("FRED_API_KEY", fred_key)
+    monkeypatch.setenv("EIA_API_KEY", eia_key)
+    fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+
+    def fail_with_url(url: str) -> bytes:
+        raise ValueError(f"request failed: {url}")
+
+    fred = collect_fred_macro(ledger, fetched, fail_with_url)
+    eia = collect_eia_macro(ledger, fetched, fail_with_url)
+
+    assert fred["status"] == "ERROR"
+    assert eia["status"] == "ERROR"
+    persisted = "\n".join(ledger.connection.iterdump())
+    rendered = json.dumps([fred, eia])
+    assert fred_key not in persisted + rendered
+    assert eia_key not in persisted + rendered
+    assert "[REDACTED]" in persisted
+
+
+def test_bea_api_is_hourly_forward_evidence_and_never_assigns_model_role(
+    tmp_path, monkeypatch,
+) -> None:
+    api_key = "00000000-0000-0000-0000-000000000000"
+    monkeypatch.setenv("BEA_API_KEY", api_key)
+    fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+    calls = []
+
+    def fetcher(url: str) -> bytes:
+        calls.append(url)
+        assert f"UserID={api_key}" in url
+        if "TableName=T10101" in url:
+            rows = [
+                {"LineNumber": "1", "TimePeriod": "2026Q1", "DataValue": "1.0"},
+                {"LineNumber": "1", "TimePeriod": "2026Q2", "DataValue": "2.1"},
+            ]
+        else:
+            rows = [
+                {"LineNumber": "1", "TimePeriod": "2026Q1", "DataValue": "131.1"},
+                {"LineNumber": "1", "TimePeriod": "2026Q2", "DataValue": "132.2"},
+                {"LineNumber": "2", "TimePeriod": "2026Q1", "DataValue": "129.1"},
+                {"LineNumber": "2", "TimePeriod": "2026Q2", "DataValue": "130.2"},
+            ]
+        return json.dumps({"BEAAPI": {"Results": {"Data": rows}}}).encode()
+
+    first = collect_bea_macro(ledger, fetched, fetcher)
+    second = collect_bea_macro(ledger, fetched + timedelta(minutes=5), fetcher)
+
+    assert first["status"] == "OK"
+    assert first["inserted_revisions"] == 6
+    assert first["registered"] is True
+    assert "model_role" not in first
+    assert second["status"] == "SKIPPED_INTERVAL"
+    assert len(calls) == 2
+    persisted = "\n".join(ledger.connection.iterdump())
+    assert api_key not in persisted
+    assert "BEA_JSON_API" in persisted
+    assert "BEA_REAL_GDP_GROWTH_QOQ_ANNUALIZED" in persisted
+    assert "BEA_GDP_PRICE_INDEX_Q" in persisted
+    assert "BEA_PCE_PRICE_INDEX_Q" in persisted
+    assert "model_role" not in persisted
 
 
 def test_world_gold_council_article_date_is_required_and_auditable(tmp_path) -> None:
@@ -737,44 +940,49 @@ def test_central_bank_gold_coverage_is_collecting_when_monitor_is_healthy() -> N
     assert central_bank_gold["status_reason"] == "监测正常，暂无新的正式月度资料"
 
 
-def test_gdelt_429_uses_exponential_backoff_without_blocking_fallback(tmp_path) -> None:
+def test_gdelt_gkg_feed_validates_manifest_and_uses_official_gcs_url(tmp_path) -> None:
     fetched = datetime(2026, 8, 6, 0, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+    ledger = ForwardLedger(
+        tmp_path / "forward.sqlite3", now=fetched - timedelta(days=1)
+    )
+    manifest, archive = _gdelt_gkg_feed(timestamp="20260805234000")
+    urls: list[str] = []
 
-    def rate_limited(_url: str) -> bytes:
-        raise RuntimeError("HTTP Error 429: Too Many Requests")
+    def fetch(url: str) -> bytes:
+        urls.append(url)
+        return manifest if url.endswith("lastupdate.txt") else archive
 
-    failed = collect_gdelt_news(ledger, fetched, rate_limited)
+    result = collect_gdelt_news(
+        ledger, fetched, fetch,
+        content_extractor=lambda url: ("complete gold evidence " * 30, url),
+    )
+    assert result["status"] == "OK"
+    assert result["inserted_revisions"] == 1
+    assert urls[1].startswith("https://storage.googleapis.com/")
+    assert urls[1].endswith(".gkg.csv.zip")
+
+    bad_ledger = ForwardLedger(tmp_path / "bad.sqlite3", now=fetched)
+    bad_manifest = manifest.replace(hashlib.md5(archive).hexdigest().encode(), b"0" * 32)
+    failed = collect_gdelt_news(
+        bad_ledger, fetched, _gdelt_fetcher(bad_manifest, archive),
+    )
     assert failed["status"] == "ERROR"
-    assert failed["fallback_source"] == "google_news_gold_context"
-    assert failed["retry_at"] == (fetched + timedelta(hours=2)).isoformat()
-
-    skipped = collect_gdelt_news(
-        ledger, fetched + timedelta(minutes=61),
-        lambda _url: b'{"articles": []}',
-    )
-    assert skipped["status"] == "SKIPPED_BACKOFF"
-    assert skipped["rate_limit_streak"] == 1
-    assert skipped["retry_at"] == (fetched + timedelta(hours=2)).isoformat()
-
-    recovered = collect_gdelt_news(
-        ledger, fetched + timedelta(hours=2),
-        lambda _url: b'{"articles": []}',
-    )
-    assert recovered["status"] == "OK"
+    assert "MD5" in failed["error"]
+    assert bad_ledger.count("news_revisions") == 0
 
 
 def test_gdelt_fetches_fresh_candidate_body_before_ai_semantic_review(tmp_path) -> None:
     fetched = datetime(2026, 8, 10, 6, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched - timedelta(days=1))
-    payload = json.dumps({"articles": [{
-        "url": "https://example.test/love-story",
-        "title": "A tragic love story remembered after many years",
-        "seendate": "20260810T054000Z",
-    }]}).encode()
+    manifest, archive = _gdelt_gkg_feed(
+        title="A tragic love story remembered after many years",
+        url="https://example.test/love-story",
+        timestamp="20260810054000",
+        themes="ECON_GOLD",
+    )
 
     result = collect_gdelt_news(
-        ledger, fetched, lambda _: payload,
+        ledger, fetched, _gdelt_fetcher(manifest, archive),
         content_extractor=lambda url: ("complete candidate evidence " * 30, url),
     )
 
@@ -796,8 +1004,10 @@ def test_direct_official_rss_sources_are_bounded_and_rate_limited(tmp_path) -> N
             topic = "consumer price index inflation update"
         elif source.name == "bls_job_openings":
             topic = "JOLTS job openings update"
+        elif source.name.startswith("eia_"):
+            topic = "oil production"
         else:
-            topic = "oil production" if source.name.startswith("eia_") else "monetary policy"
+            topic = "generic supervisory calendar notice"
         link = (
             "/pressroom/releases/example.php"
             if source.name == "eia_press_releases"
@@ -822,10 +1032,79 @@ def test_direct_official_rss_sources_are_bounded_and_rate_limited(tmp_path) -> N
         "SKIPPED_INTERVAL", "SKIPPED_INTERVAL", "SKIPPED_INTERVAL",
     ]
     assert ledger.count("news_revisions") == 6
+    ecb = next(item for item in first if item["source"] == "ecb_press_releases")
+    assert ecb["candidate_items"] == 1
+    assert ecb["eligible_items"] == 1
     stored = ledger.connection.execute(
         "SELECT link FROM news_revisions WHERE source='eia_press_releases'"
     ).fetchone()
     assert stored["link"] == "https://www.eia.gov/pressroom/releases/example.php"
+
+
+def test_direct_official_sources_report_partial_when_current_body_is_blocked(
+    tmp_path,
+) -> None:
+    fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched - timedelta(hours=1))
+
+    def rss(source: RssSource) -> bytes:
+        return f"""<rss><channel><item><guid>{source.name}</guid>
+        <title>Current official notice</title>
+        <pubDate>Wed, 05 Aug 2026 10:00:00 GMT</pubDate>
+        <link>https://example.test/{source.name}</link></item></channel></rss>""".encode()
+
+    blocked = lambda _url: (_ for _ in ()).throw(ValueError("blocked"))
+    rss_results = collect_direct_full_text_rss_news(
+        ledger, fetched, rss, blocked,
+    )
+    assert [row["status"] for row in rss_results] == ["PARTIAL"] * 6
+
+    def html(url: str) -> bytes:
+        if "treasury.gov" in url:
+            return b'''<div><time datetime="2026-08-05T10:00:00Z"></time>
+            <a href="/news/press-releases/current">Current notice</a></div>'''
+        return b'''<div><time datetime="2026-08-05T10:00:00Z"></time>
+        <a href="/news/2026/current">Current release</a></div>'''
+
+    html_results = collect_direct_full_text_html_news(
+        ledger, fetched, html, blocked,
+    )
+    assert [row["status"] for row in html_results] == ["PARTIAL"] * 2
+    latest = ledger.connection.execute(
+        "SELECT status,error_type FROM source_polls "
+        "WHERE source='bea_economic_releases' ORDER BY fetched_time DESC LIMIT 1"
+    ).fetchone()
+    assert tuple(latest) == ("PARTIAL", "PublisherContentUnavailable")
+
+
+def test_saved_official_bodies_do_not_starve_later_feed_items(tmp_path) -> None:
+    fetched = datetime(2026, 8, 5, 10, 30, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched - timedelta(hours=1))
+
+    def feed(source: RssSource) -> bytes:
+        count = 6 if source.name == "eia_press_releases" else 1
+        items = "".join(
+            f"""<item><guid>{source.name}-{index}</guid><title>Official item {index}</title>
+            <pubDate>Wed, 05 Aug 2026 10:{index:02d}:00 GMT</pubDate>
+            <link>https://example.test/{source.name}/{index}</link></item>"""
+            for index in range(count)
+        )
+        return f"<rss><channel>{items}</channel></rss>".encode()
+
+    extractor = lambda url: ("complete official body " * 30, url)
+    first = collect_direct_full_text_rss_news(ledger, fetched, feed, extractor)
+    second = collect_direct_full_text_rss_news(
+        ledger, fetched + timedelta(minutes=11), feed, extractor,
+    )
+    first_eia = next(row for row in first if row["source"] == "eia_press_releases")
+    second_eia = next(row for row in second if row["source"] == "eia_press_releases")
+    assert first_eia["inserted_revisions"] == 5
+    assert first_eia["full_text_attempts"] == 5
+    assert second_eia["inserted_revisions"] == 1
+    assert second_eia["full_text_attempts"] == 1
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_revisions WHERE source='eia_press_releases'"
+    ).fetchone()[0] == 6
 
 
 def test_bls_rss_403_circuit_uses_public_api_fallback(tmp_path) -> None:
@@ -852,7 +1131,7 @@ def test_bls_rss_403_circuit_uses_public_api_fallback(tmp_path) -> None:
     assert source not in called
 
 
-def test_direct_official_html_sources_are_filtered_and_bounded(tmp_path) -> None:
+def test_direct_official_html_sources_reach_ai_without_semantic_filtering(tmp_path) -> None:
     fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
     ledger = ForwardLedger(
         tmp_path / "forward.sqlite3", now=fetched - timedelta(hours=2)
@@ -877,12 +1156,16 @@ def test_direct_official_html_sources_are_filtered_and_bounded(tmp_path) -> None
     rows = ledger.connection.execute(
         "SELECT source, headline, link, source_published_time FROM news_revisions ORDER BY source"
     ).fetchall()
-    assert len(rows) == 2
+    assert len(rows) == 4
     assert rows[0]["source"] == "bea_economic_releases"
     assert rows[0]["source_published_time"] == "2026-08-05T09:30:00.000000+00:00"
-    assert rows[1]["source"] == "us_treasury_press_releases"
-    assert rows[1]["source_published_time"] == "2026-08-05T09:00:00.000000+00:00"
-    assert rows[1]["link"].startswith("https://home.treasury.gov/")
+    assert {row["headline"] for row in rows} == {
+        "GDP (Advance Estimate)", "Direct Investment",
+        "Treasury sanctions Iran oil network", "Unrelated office update",
+    }
+    treasury = next(row for row in rows if row["headline"] == "Unrelated office update")
+    assert treasury["source_published_time"] == "2026-08-05T09:00:00.000000+00:00"
+    assert treasury["link"].startswith("https://home.treasury.gov/")
 
 
 def test_google_news_revision_uses_resolved_publisher_url(tmp_path) -> None:
@@ -904,6 +1187,40 @@ def test_google_news_revision_uses_resolved_publisher_url(tmp_path) -> None:
         "SELECT link FROM news_revisions WHERE source='google_news_gold_context'"
     ).fetchone()
     assert row["link"] == "https://publisher.example/gold-rates"
+
+
+def test_google_news_lane_deduplicates_identical_titles_across_polls(tmp_path) -> None:
+    fetched = datetime(2026, 8, 5, 10, 40, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+    lane = GoogleNewsLane("google_news_us_employment", "nonfarm payrolls")
+    items = "".join(
+        f"""<item><guid>jobs-{index}</guid><title>Payroll release</title>
+        <description>Employment situation result</description>
+        <pubDate>Wed, 05 Aug 2026 10:{index:02d}:00 GMT</pubDate>
+        <link>https://publisher.example/jobs-{index}</link></item>"""
+        for index in range(30)
+    )
+    rss = f"<rss><channel>{items}</channel></rss>".encode()
+
+    first = collect_google_news_lane(
+        ledger, fetched, lane, fetcher=lambda _: rss, decoder=lambda url: url,
+        content_extractor=lambda url: ("payroll evidence " * 40, url), limit=10
+    )
+    second = collect_google_news_lane(
+        ledger, fetched + timedelta(minutes=20), lane,
+        fetcher=lambda _: rss, decoder=lambda url: url,
+        content_extractor=lambda url: ("payroll evidence " * 40, url), limit=25,
+    )
+
+    assert first["deduped_items"] == 1
+    assert first["inserted_revisions"] == 1
+    assert first["processed_items"] == 1
+    assert second["feed_items"] == 30
+    assert second["deduped_items"] == 1
+    assert second["processed_items"] == 1
+    assert second["inserted_revisions"] == 0
+    assert second["unchanged_items"] == 1
+    assert ledger.count("news_revisions") == 1
 
 
 def test_google_news_lane_does_not_merge_distinct_events_before_ai(tmp_path) -> None:
@@ -1369,6 +1686,33 @@ def test_jsonl_provider_reads_directory_incrementally_and_ignores_partial_line(
     rows = provider.observations(decision)
     assert len(rows) == 2
     assert rows[-1].bid == 2400.1
+
+
+def test_jsonl_provider_reads_broker_market_session_heartbeat(tmp_path) -> None:
+    observed = datetime(2026, 8, 11, 21, 0, tzinfo=UTC)
+    (tmp_path / "market-session.json").write_text(
+        json.dumps({
+            "schema": "xauusd.forward.market-session.v1",
+            "source": "ctrader-cli",
+            "symbol": "XAUUSD",
+            "observed_at": observed.isoformat(),
+            "server_time": observed.isoformat(),
+            "is_open": False,
+            "time_till_open_seconds": 3600,
+            "time_till_close_seconds": 0,
+            "next_open_time": (observed + timedelta(hours=1)).isoformat(),
+            "next_close_time": None,
+        }),
+        encoding="utf-8",
+    )
+
+    session = JsonlMarketProvider(tmp_path).market_session(observed)
+
+    assert session is not None
+    assert not session.is_open
+    assert session.is_fresh(observed)
+    assert session.time_till_open == timedelta(hours=1)
+    assert session.next_open_time == observed + timedelta(hours=1)
 
 
 def test_gemini_annotation_is_fail_closed_without_key(tmp_path, monkeypatch) -> None:
@@ -2032,12 +2376,23 @@ def test_gemma_impact_assessment_is_append_only_and_versioned(
         "headline": "Federal Reserve announces policy decision", "body": body,
         "content_hash": content_hash, "cluster_id": "impact-cluster",
     })
-    vector = {
+    vector = _v15_annotation({
         "event_type": "monetary_policy", "entities": ["Federal Reserve"],
         "hawkishness": 0.0, "inflation_impulse": 0.0,
         "growth_impulse": 0.0, "geopolitical_risk": 0.0,
         "usd_impulse": 0.0, "novelty": 0.8, "confidence": 0.9,
-    }
+        "headline_zh": "美联储公布政策决定",
+        "summary_zh": "美联储公布一项完整政策决定，可能持续影响市场利率预期。",
+    }, "Complete policy report", primary_category="rates_fed",
+       record_kind="OFFICIAL_CLAIM", actor="Federal Reserve", action="announces",
+       object="policy decision", event_time=now.isoformat(), claim_status="CONFIRMED",
+       materiality=0.9, canonical_actor_id="federal_reserve",
+       action_family="POLICY_DECISION", canonical_object_id="policy_decision",
+       episode_key="policy_decision", document_kind="OFFICIAL_STATEMENT",
+       material_event_key="policy_decision", source_organization_id="federal_reserve",
+       evidence_role="CORE_CLAIM", xauusd_relevance="MACRO_DRIVER",
+       review_priority="IMMEDIATE", material_change="NEW_EVENT",
+       time_sensitivity="MULTI_DAY")
     ledger.append_annotation({
         "annotation_id": "impact-annotation", "source": "federal_reserve_monetary",
         "source_item_id": "impact-one", "revision_number": 1,
@@ -2106,6 +2461,10 @@ def test_impact_context_finds_semantically_similar_prior_event(tmp_path) -> None
         "canonical_location_id": "us", "primary_story_title_zh": "丽莎库克罢免争议",
         "secondary_contexts_zh": [], "relation_to_prior": "NONE",
         "document_kind": "NEWS_REPORT", "source_organization_id": "test-source",
+        "xauusd_relevance": "MACRO_DRIVER", "review_priority": "FAST",
+        "material_change": "NEW_EVENT", "time_sensitivity": "ONGOING",
+        "semantic_reason_zh": "完整正文显示这是美联储治理相关的新事件。",
+        "supporting_evidence": ["Trump effort"],
     }
     for index, material_key in enumerate((
         "trump_removes_lisa_cook", "cook_firing_attempt",
@@ -2218,7 +2577,7 @@ def test_gemini_annotation_does_not_treat_other_model_as_complete(
             "cluster_id": "cluster",
         }
     )
-    vector = {
+    vector = _v15_annotation({
         "headline_zh": "政策更新",
         "summary_zh": "这是一份政策更新的完整中文摘要，内容足以用于测试。",
         "event_type": "monetary_policy",
@@ -2230,7 +2589,7 @@ def test_gemini_annotation_does_not_treat_other_model_as_complete(
         "usd_impulse": 0.0,
         "novelty": 0.5,
         "confidence": 0.8,
-    }
+    }, "Neutral source")
     ledger.append_annotation(
         {
             "annotation_id": "old-model",
@@ -2460,7 +2819,7 @@ def test_gemini_31_has_an_independent_fallback_quota(tmp_path) -> None:
     ) == 500
 
 
-def test_gemini_31_annotation_is_training_visible_and_not_reprocessed(
+def test_gemini_31_current_annotation_is_persisted_and_not_reprocessed(
     tmp_path, monkeypatch
 ) -> None:
     now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
@@ -2475,14 +2834,23 @@ def test_gemini_31_annotation_is_training_visible_and_not_reprocessed(
             "cluster_id": "fallback-test-cluster",
         }
     )
-    vector = {
+    vector = _v15_annotation({
         "headline_zh": "黄金地缘局势更新",
         "summary_zh": "来源报道黄金相关地缘局势出现更新，内容已经完整保存。",
         "event_type": "geopolitical", "entities": [],
         "hawkishness": 0.0, "inflation_impulse": 0.0,
         "growth_impulse": 0.0, "geopolitical_risk": 0.8,
         "usd_impulse": 0.0, "novelty": 0.7, "confidence": 0.9,
-    }
+    }, "Gold geopolitical", primary_category="war_geopolitics",
+       record_kind="FACT_EVENT", actor="geopolitical actors", action="updated",
+       object="geopolitical situation", event_time=now.isoformat(),
+       claim_status="REPORTED", materiality=0.8,
+       canonical_actor_id="geopolitical_actors", action_family="OTHER_FACT",
+       canonical_object_id="geopolitical_situation", episode_key="geopolitical_update",
+       document_kind="NEWS_REPORT", material_event_key="geopolitical_update",
+       source_organization_id="fallback-test", evidence_role="CORE_CLAIM",
+       xauusd_relevance="DIRECT", review_priority="FAST",
+       material_change="NEW_EVENT", time_sensitivity="SAME_DAY")
 
     def fallback_call(_key, model, *_args):
         assert model == annotation_module.FALLBACK_GEMINI_MODEL
@@ -2497,10 +2865,12 @@ def test_gemini_31_annotation_is_training_visible_and_not_reprocessed(
         limit=1,
     )
     assert statuses[0]["status"] == "OK"
-    features = aggregate_news_features(
-        ledger, datetime.now(UTC) + timedelta(minutes=1)
-    )
-    assert features["news_geopolitical_risk"] == pytest.approx(0.8)
+    stored = ledger.connection.execute(
+        """SELECT geopolitical_risk,prompt_version FROM news_annotations
+        WHERE source='fallback-test' AND source_item_id='one'"""
+    ).fetchone()
+    assert stored["geopolitical_risk"] == pytest.approx(0.8)
+    assert stored["prompt_version"] == annotation_module.PROMPT_VERSION
     assert annotate_pending_news(
         ledger,
         provider="gemini",

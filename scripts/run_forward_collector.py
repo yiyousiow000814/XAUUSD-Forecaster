@@ -47,6 +47,45 @@ def reconcile_news_contract(ledger, cutoff: datetime, artifact_root: Path) -> di
 DEFAULT_LOCAL_ROOT = MODULE_ROOT / ".local" / "forward"
 
 
+def append_due_grid_events(
+    ledger: ForwardLedger,
+    engine: ForwardEngine,
+    provider: JsonlMarketProvider | NullMarketProvider,
+    last_decision: datetime,
+    boundary: datetime,
+    collected_at: datetime,
+    news_status: list[dict[str, object]],
+) -> tuple[datetime, list[tuple[datetime, str, str]], dict[str, int]]:
+    """Append only broker-confirmed, quote-backed live decision grids."""
+    try:
+        visible_observations = provider.observations(boundary)
+    except (OSError, ValueError, json.JSONDecodeError):
+        visible_observations = []
+    try:
+        broker_session = provider.market_session(collected_at)
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        broker_session = None
+    appended: list[tuple[datetime, str, str]] = []
+    skipped_grids: dict[str, int] = {}
+    candidate = last_decision + timedelta(minutes=5)
+    while candidate <= boundary:
+        if candidate >= ledger.forward_epoch:
+            skip_reason = skipped_grid_reason(
+                candidate, boundary, visible_observations,
+                broker_session, collected_at,
+            )
+            if skip_reason:
+                skipped_grids[skip_reason] = skipped_grids.get(skip_reason, 0) + 1
+            else:
+                snapshot_id, decision_id = engine.append_clock_event(
+                    candidate, collected_at, news_status
+                )
+                appended.append((candidate, snapshot_id, decision_id))
+        last_decision = candidate
+        candidate += timedelta(minutes=5)
+    return last_decision, appended, skipped_grids
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--local-root", type=Path, default=DEFAULT_LOCAL_ROOT)
@@ -164,38 +203,23 @@ def main() -> int:
                 )
                 last_news_reconciliation = now
             boundary = floor_five_minutes(now)
-            candidate = last_decision + timedelta(minutes=5)
-            try:
-                visible_observations = provider.observations(boundary)
-            except (OSError, ValueError, json.JSONDecodeError):
-                visible_observations = []
-            skipped_grids: dict[str, int] = {}
-            while candidate <= boundary:
-                if candidate >= ledger.forward_epoch:
-                    skip_reason = skipped_grid_reason(
-                        candidate, boundary, visible_observations
-                    )
-                    if skip_reason:
-                        skipped_grids[skip_reason] = skipped_grids.get(skip_reason, 0) + 1
-                    else:
-                        snapshot_id, decision_id = engine.append_clock_event(
-                            candidate, now, news_status
-                        )
-                        print(
-                            json.dumps(
-                                {
-                                    "event": "DECISION_APPENDED",
-                                    "decision_time": candidate.isoformat(),
-                                    "snapshot_id": snapshot_id,
-                                    "decision_id": decision_id,
-                                },
-                                sort_keys=True,
-                            ),
-                            flush=True,
-                        )
-                        u5_state.save(u5_path)
-                last_decision = candidate
-                candidate += timedelta(minutes=5)
+            last_decision, appended_decisions, skipped_grids = append_due_grid_events(
+                ledger, engine, provider, last_decision, boundary, now, news_status
+            )
+            for decision_time, snapshot_id, decision_id in appended_decisions:
+                print(
+                    json.dumps(
+                        {
+                            "event": "DECISION_APPENDED",
+                            "decision_time": decision_time.isoformat(),
+                            "snapshot_id": snapshot_id,
+                            "decision_id": decision_id,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+                u5_state.save(u5_path)
             if skipped_grids:
                 print(
                     json.dumps(

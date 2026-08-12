@@ -11,7 +11,7 @@ from .news_semantics import CURRENT_NEWS_PROMPT_VERSION
 
 
 IMPACT_MODEL = "gemma-4-31b-it"
-IMPACT_PROMPT_VERSION = "news-impact-v2-semantic-prior-candidates"
+IMPACT_PROMPT_VERSION = "news-impact-v3-independent-semantic-review"
 
 IMPACT_TIME_RULES = {
     "IMMEDIATE": (timedelta(hours=2), 30.0),
@@ -120,6 +120,8 @@ def pending_impact_records(
     *,
     observed_at: datetime | None = None,
     limit: int = 500,
+    annotation_prompt_version: str = CURRENT_NEWS_PROMPT_VERSION,
+    impact_prompt_version: str = IMPACT_PROMPT_VERSION,
 ) -> list[dict]:
     """Return current annotations that still need the frozen Gemma assessment."""
     now = observed_at or datetime.now(UTC)
@@ -161,9 +163,9 @@ def pending_impact_records(
                  COALESCE(n.source_published_time,n.collector_first_seen_time) DESC
         LIMIT ?""",
         (
-            CURRENT_NEWS_PROMPT_VERSION,
-            IMPACT_MODEL, IMPACT_PROMPT_VERSION,
-            IMPACT_MODEL, IMPACT_PROMPT_VERSION,
+            annotation_prompt_version,
+            IMPACT_MODEL, impact_prompt_version,
+            IMPACT_MODEL, impact_prompt_version,
             now.isoformat(timespec="microseconds"), max(1, limit * 4),
         ),
     ).fetchall()
@@ -213,8 +215,8 @@ def pending_impact_records(
                                   AND p.revision_number=?)
                        ORDER BY p.collector_first_seen_time DESC LIMIT 50""",
                     (
-                        IMPACT_MODEL, IMPACT_PROMPT_VERSION,
-                        CURRENT_NEWS_PROMPT_VERSION,
+                        IMPACT_MODEL, impact_prompt_version,
+                        annotation_prompt_version,
                         material_event_key, primary_category,
                         row["collector_first_seen_time"], row["source"],
                         row["source_item_id"], row["revision_number"],

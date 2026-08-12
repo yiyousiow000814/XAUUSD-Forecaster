@@ -65,6 +65,7 @@ ENTITY_ALIASES = {
 ROLE_LABELS = {
     "OFFICIAL_PRIMARY": "官方一手",
     "SINGLE_RELIABLE": "单一可靠来源",
+    "SINGLE_SOURCE": "单一已识别来源",
     "INDEPENDENT_CONFIRMATION": "独立交叉确认",
     "PHYSICAL_IMPACT": "实体/现场影响",
     "MARKET_REACTION": "市场反应确认",
@@ -336,7 +337,9 @@ def _record_kind(event: dict) -> str:
 def _is_core(event: dict) -> bool:
     return (
         event.get("prompt_version") == CURRENT_EVENT_PROMPT_VERSION
-        and event.get("evidence_grade") in {"PRIMARY", "CORROBORATED", "SINGLE_RELIABLE"}
+        and event.get("evidence_grade") in {
+            "PRIMARY", "CORROBORATED", "SINGLE_RELIABLE", "SINGLE_SOURCE",
+        }
         and _record_kind(event) in CORE_KINDS
         and float(event.get("materiality") or 0.0) >= 0.50
         and _document_kind(event) not in {"MARKET_REPORT", "ANALYSIS", "BACKGROUND"}
@@ -396,7 +399,10 @@ def _merge_event_evidence(rows: list[dict]) -> list[dict]:
     grouped: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
         grouped[_event_identity(row)].append(row)
-    grade_rank = {"DISCOVERY_ONLY": 0, "SINGLE_RELIABLE": 1, "CORROBORATED": 2, "PRIMARY": 3}
+    grade_rank = {
+        "DISCOVERY_ONLY": 0, "SINGLE_SOURCE": 1, "SINGLE_RELIABLE": 2,
+        "CORROBORATED": 3, "PRIMARY": 4,
+    }
     merged = []
     for event_id, members in grouped.items():
         members = sorted(
@@ -452,7 +458,9 @@ def _core_roles(members: list[dict], attached: list[dict]) -> set[str]:
     reliable_organizations = {
         organization
         for row in members
-        if row.get("evidence_grade") in {"PRIMARY", "CORROBORATED", "SINGLE_RELIABLE"}
+        if row.get("evidence_grade") in {
+            "PRIMARY", "CORROBORATED", "SINGLE_RELIABLE", "SINGLE_SOURCE",
+        }
         for organization in (
             row.get("source_organizations") or _source_organizations(row)
         )
@@ -461,7 +469,11 @@ def _core_roles(members: list[dict], attached: list[dict]) -> set[str]:
     if official:
         roles.add("OFFICIAL_PRIMARY")
     elif len(reliable_organizations) == 1:
-        roles.add("SINGLE_RELIABLE")
+        roles.add(
+            "SINGLE_RELIABLE"
+            if any(row.get("evidence_grade") == "SINGLE_RELIABLE" for row in members)
+            else "SINGLE_SOURCE"
+        )
     # One publisher never becomes independent confirmation. Official + one
     # independent reliable publisher, or two reliable publishers, is required.
     if len(reliable_organizations) >= 2:
@@ -563,7 +575,10 @@ def _story_row(episode: str, core: list[dict], attached: list[dict]) -> dict:
     )
     timeline = [_timeline_row(row, first=index == 0) for index, row in enumerate(core[-20:])]
     identity = hashlib.sha256(episode.encode()).hexdigest()[:16]
-    role_order = ("OFFICIAL_PRIMARY", "SINGLE_RELIABLE", "INDEPENDENT_CONFIRMATION", "PHYSICAL_IMPACT", "MARKET_REACTION")
+    role_order = (
+        "OFFICIAL_PRIMARY", "SINGLE_RELIABLE", "SINGLE_SOURCE",
+        "INDEPENDENT_CONFIRMATION", "PHYSICAL_IMPACT", "MARKET_REACTION",
+    )
     covered = [role for role in role_order if role in roles]
     template_covered = [role for role in required_roles if role in roles]
     missing = [role for role in required_roles if role not in roles]
@@ -578,7 +593,9 @@ def _story_row(episode: str, core: list[dict], attached: list[dict]) -> dict:
         "archival": archival,
         "event_count": len(core),
         "evidence_document_count": sum(int(row.get("evidence_document_count") or 1) for row in core),
-        "reliable_event_count": sum(row["evidence_grade"] in {"PRIMARY", "CORROBORATED", "SINGLE_RELIABLE"} for row in core),
+        "reliable_event_count": sum(row["evidence_grade"] in {
+            "PRIMARY", "CORROBORATED", "SINGLE_RELIABLE",
+        } for row in core),
         "latest_change": core[-1]["canonical_headline"],
         "last_updated": max(row.get("last_evidence_seen_time") or row["collector_first_seen_time"] for row in core),
         "covered_roles": [{"key": role, "label": ROLE_LABELS[role]} for role in covered],

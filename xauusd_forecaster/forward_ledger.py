@@ -9,7 +9,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .news_semantics import NEWS_CATEGORIES, RECORD_KINDS, validate_news_annotation
+from .news_semantics import (
+    CURRENT_NEWS_PROMPT_VERSION,
+    NEWS_CATEGORIES,
+    RECORD_KINDS,
+    news_annotation_schema,
+    validate_news_annotation,
+)
 
 
 UTC = timezone.utc
@@ -121,6 +127,13 @@ CREATE TABLE IF NOT EXISTS news_annotations (
     FOREIGN KEY(source, source_item_id, revision_number)
         REFERENCES news_revisions(source, source_item_id, revision_number)
 );
+
+CREATE INDEX IF NOT EXISTS news_annotations_revision_contract
+ON news_annotations(source, source_item_id, revision_number,
+                    llm_model_version, prompt_version);
+
+CREATE INDEX IF NOT EXISTS news_revisions_cluster_latest
+ON news_revisions(cluster_id, source, source_item_id, revision_number);
 
 CREATE TABLE IF NOT EXISTS news_title_translations (
     translation_id TEXT PRIMARY KEY,
@@ -383,8 +396,10 @@ class ForwardLedger:
         self.connection.execute("PRAGMA busy_timeout=60000")
         self.connection.executescript(SCHEMA)
         from .evidence_v2 import install_v2_schema
+        from .news_scheduler import install_scheduler_schema
 
         install_v2_schema(self.connection)
+        install_scheduler_schema(self.connection)
         self._install_append_only_triggers()
         created = now or datetime.now(UTC)
         with self.connection:
@@ -556,7 +571,7 @@ class ForwardLedger:
             record["source"], record["source_item_id"], record["revision_number"]
         )
         news = self.connection.execute(
-            """SELECT content_hash FROM news_revisions
+            """SELECT content_hash,headline,body FROM news_revisions
             WHERE source=? AND source_item_id=? AND revision_number=?""",
             source_key,
         ).fetchone()
@@ -586,13 +601,24 @@ class ForwardLedger:
             "document_kind", "material_event_key", "source_organization_id",
             "evidence_role",
         }
+        target_semantic_fields = set(
+            news_annotation_schema(CURRENT_NEWS_PROMPT_VERSION)["required"]
+        )
         if set(vector) not in (
             legacy_fields, summary_fields, translated_fields, classified_fields,
             storyline_fields, event_claim_fields, material_event_fields,
+            target_semantic_fields,
         ):
             raise ValueError("annotation does not match frozen JSON schema fields")
-        if set(vector) == material_event_fields:
-            validate_news_annotation(vector)
+        if set(vector) in (material_event_fields, target_semantic_fields):
+            source_text = None
+            if set(vector) == target_semantic_fields:
+                source_text = f"{news['headline']}\n{news['body'] or ''}"
+            validate_news_annotation(
+                vector,
+                prompt_version=record["prompt_version"],
+                source_text=source_text,
+            )
         if "summary_zh" in vector and not str(vector["summary_zh"]).strip():
             raise ValueError("annotation summary_zh is empty")
         if "headline_zh" in vector and not str(vector["headline_zh"]).strip():

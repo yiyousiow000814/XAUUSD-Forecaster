@@ -24,7 +24,12 @@ from xauusd_forecaster.live_v2 import (
     append_live_outcome_v2,
 )
 from xauusd_forecaster.market import MarketObservation
+from xauusd_forecaster.macro_release import (
+    macro_release_features_at,
+    macro_release_packets_at,
+)
 from xauusd_forecaster.news_evidence import EVIDENCE_POLICY_VERSION, event_evidence_rows
+from xauusd_forecaster.news_identity import canonical_source_organization
 from xauusd_forecaster.news_contracts import (
     CURRENT_NEWS_CONTRACT,
     NewsContract,
@@ -46,6 +51,22 @@ from xauusd_forecaster.execution_learning import (
     score_execution_predictions, train_due_execution,
 )
 from xauusd_forecaster.training import MARKET_FEATURES
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("federal_reserve_monetary", "federal_reserve"),
+        ("federal_reserve_speeches_testimony", "federal_reserve"),
+        ("bls_consumer_price_index", "bureau_of_labor_statistics"),
+        ("google_news_bls_official_releases", "bureau_of_labor_statistics"),
+        ("finance.yahoo.com", "yahoo_finance"),
+        ("kitco_news", "kitco"),
+        ("bitcoinworld", "bitcoin_world"),
+    ],
+)
+def test_reporting_source_aliases_share_one_identity(raw: str, expected: str) -> None:
+    assert canonical_source_organization(raw) == expected
 
 
 def test_install_repairs_invalid_execution_score_foreign_key() -> None:
@@ -375,7 +396,7 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
         "record_kind": record_kind,
         "actor": entities[0] if entities else "official source",
         "action": "reported",
-        "object": entities[1] if len(entities) > 1 else item,
+        "object": entities[1] if len(entities) > 1 else (material_event_key or item),
         "location": "",
         "event_time": (
             (published_at or first_seen).isoformat()
@@ -385,7 +406,9 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
         "materiality": materiality,
         "canonical_actor_id": "official_source",
         "action_family": "OTHER_FACT",
-        "canonical_object_id": "reported_event",
+        "canonical_object_id": (
+            entities[1] if len(entities) > 1 else (material_event_key or item)
+        ),
         "canonical_location_id": "",
         "episode_key": "",
         "primary_story_title_zh": item,
@@ -395,6 +418,14 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
         "material_event_key": material_event_key,
         "source_organization_id": source_organization_id or source,
         "evidence_role": evidence_role,
+        "xauusd_relevance": (
+            "IRRELEVANT" if primary_category == "regulation_other" else "MACRO_DRIVER"
+        ),
+        "review_priority": "FAST",
+        "material_change": impact_update_type,
+        "time_sensitivity": "SAME_DAY",
+        "semantic_reason_zh": "完整正文显示这是可能影响黄金的宏观事件。",
+        "supporting_evidence": ["publisher full body"],
     }
     annotation.update(annotation_overrides or {})
     ledger.append_annotation({
@@ -403,7 +434,7 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
         "entities": entities, "hawkishness": impulse, "inflation_impulse": 0.0,
         "growth_impulse": 0.0, "geopolitical_risk": 0.0, "usd_impulse": 0.0,
         "novelty": 1.0, "confidence": 1.0, "llm_model_version": "gemini-3.5-flash-lite",
-        "prompt_version": "news-json-v14-material-event-evidence",
+        "prompt_version": "news-json-v15-ai-semantic-review",
         "parse_started_at": parsed_at, "parsed_at": parsed_at,
         "annotation": annotation,
     })
@@ -414,7 +445,7 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
             "source": source, "source_item_id": item, "revision_number": 1,
             "raw_content_hash": digest, "annotation_id": item,
             "llm_model_version": "gemma-4-31b-it",
-            "prompt_version": "news-impact-v2-semantic-prior-candidates",
+            "prompt_version": "news-impact-v3-independent-semantic-review",
             "parse_started_at": assessed_at, "assessed_at": assessed_at,
             "impact_class": impact_class,
             "event_state": "ACTIVE" if impact_class != "BACKGROUND" else "BACKGROUND",
@@ -610,7 +641,7 @@ def test_single_reliable_publisher_is_provisional_and_downweighted(tmp_path) -> 
     assert event["evidence_grade"] == "SINGLE_RELIABLE"
     assert event["broad_model_eligible"] is True
     assert event["model_permission"] == "BROAD_MODEL"
-    assert "RELIABLE_SINGLE_SOURCE_PROVISIONAL" in event["reason_codes"]
+    assert "SINGLE_SOURCE_ATTRIBUTE" in event["reason_codes"]
     assert event_raw_weight(event) == pytest.approx(
         0.35 * 2 ** (-10 / 1440)
     )
@@ -621,6 +652,29 @@ def test_single_reliable_publisher_is_provisional_and_downweighted(tmp_path) -> 
     assert features["broad_news_event_count"] == pytest.approx(
         0.35 * 2 ** (-10 / 1440)
     )
+    ledger.close()
+
+
+def test_identified_single_publisher_is_candidate_not_source_banned(tmp_path) -> None:
+    cutoff = datetime(2026, 8, 5, 10, 30, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=cutoff - timedelta(hours=1))
+    _append_news(
+        ledger, source="gdelt_gold_geopolitics", item="Regional port is closed",
+        first_seen=cutoff - timedelta(minutes=10), parsed_at=cutoff - timedelta(minutes=5),
+        impulse=0.2, link="https://regional-example.test/report/1",
+        source_organization_id="regional-example", entities=["Port", "closure"],
+        event_type="geopolitical_conflict",
+    )
+
+    event = event_evidence_rows(ledger, cutoff)[0]
+    features = aggregate_news_features_v2(ledger, cutoff)["features"]
+
+    assert event["evidence_grade"] == "SINGLE_SOURCE"
+    assert event["broad_model_eligible"] is True
+    assert event["source_reliability"] == pytest.approx(0.35)
+    assert event["independent_publishers"] == 1
+    assert features["broad_single_source_event_count"] > 0
+    assert features["broad_source_reliability"] > 0
     ledger.close()
 
 
@@ -646,6 +700,9 @@ def test_two_independent_publishers_corroborate_same_event(tmp_path) -> None:
     assert events[0]["evidence_grade"] == "CORROBORATED"
     assert events[0]["independent_publishers"] == 2
     assert events[0]["broad_model_eligible"] is True
+    features = aggregate_news_features_v2(ledger, cutoff)["features"]
+    assert features["broad_independent_source_count"] > 1.0
+    assert features["broad_corroborated_event_count"] > 0
     ledger.close()
 
 
@@ -728,7 +785,58 @@ def test_syndicated_copy_does_not_create_independent_confirmation(tmp_path) -> N
 
     assert event["evidence_grade"] == "SINGLE_RELIABLE"
     assert event["independent_publishers"] == 1
+    assert event["syndicated_duplicate_count"] == 1
     assert event["source_organizations"] == ["reuters"]
+    features = aggregate_news_features_v2(ledger, cutoff)["features"]
+    assert features["broad_syndicated_duplicate_count"] > 0
+    ledger.close()
+
+
+def test_macro_release_packets_are_point_in_time_and_keep_revisions(tmp_path) -> None:
+    start = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=start)
+
+    def append(period: str, value: float, seen: datetime) -> None:
+        payload = {
+            "title": "Cushing, OK WTI Spot Price FOB",
+            "value": value,
+            "expectation_value": None,
+        }
+        ledger.append_macro_observation({
+            "source": "eia_open_data_v2", "series_id": "EIA_RWTC",
+            "observation_period": period, "collector_first_seen_time": seen,
+            "fetched_time": seen, "value": value, "unit": "USD/barrel",
+            "payload": payload,
+            "content_hash": canonical_hash((period, value)),
+        })
+
+    append("2026-08-04", 70.0, start)
+    append("2026-08-05", 71.0, start + timedelta(hours=1))
+    append("2026-08-05", 72.0, start + timedelta(hours=3))
+
+    early = macro_release_packets_at(ledger, start + timedelta(minutes=30))[0]
+    visible = macro_release_packets_at(ledger, start + timedelta(hours=2))[0]
+    revised = macro_release_packets_at(ledger, start + timedelta(hours=4))[0]
+    features, packets = macro_release_features_at(
+        ledger, start + timedelta(hours=2)
+    )
+
+    assert early["current_value"] == 70.0
+    assert early["previous_period_value"] is None
+    assert visible["current_value"] == 71.0
+    assert visible["previous_period_value"] == 70.0
+    assert visible["prior_revision_value"] is None
+    assert visible["expectation_value"] is None
+    assert revised["current_value"] == 72.0
+    assert revised["prior_revision_value"] == 71.0
+    assert revised["revision_delta"] == 1.0
+    assert revised["relation_to_prior"] == "REVISION"
+    assert features["eia_wti_level"] == 71.0
+    assert features["eia_wti_change"] == 1.0
+    assert features["eia_wti_revision_delta"] == 0.0
+    assert datetime.fromisoformat(packets[0]["collector_first_seen_time"]) == (
+        start + timedelta(hours=1)
+    )
     ledger.close()
 
 
@@ -1135,6 +1243,7 @@ def _attach_event_exposure(rows: list[dict], *, event_days: int = 1,
                 start + timedelta(days=event_index % event_days)
             ).isoformat(),
             "raw_weight": 1.0,
+            "source_budget_id": f"source-{event_index}",
         }
         row["news_exposed"] = True
         row["broad_news_exposed"] = True
@@ -1502,11 +1611,8 @@ def test_retired_contract_cannot_remain_active_after_cleanup(tmp_path) -> None:
     assert inference_v2._has_activated_generation(
         ledger, base + timedelta(minutes=2),
     ) is True
-    assert inference_v2._allow_activated_transition_contract(
-        ledger, base + timedelta(minutes=2),
-    ) is False
     transition = learning_curve_payload(ledger.connection)["news_contract_transition"]
-    assert transition["state"] == "BLOCKED_UNSUPPORTED_ACTIVE_CONTRACT"
+    assert transition["state"] == "BLOCKED_RETIRED_GENERATION"
     assert transition["active_contract"]["policy_version"] == retired.policy_version
     assert transition["target_contract"]["name"] == CURRENT_NEWS_CONTRACT.name
     ledger.close()
@@ -1620,7 +1726,7 @@ def test_news_generation_stays_inactive_until_all_five_news_models_exist() -> No
 
     active = inference_v2._active_updates(updates)
 
-    assert [row["model_version"] for row in active] == ["market-current"]
+    assert active == []
     status = inference_v2.news_model_activation_status(updates)
     assert {
         row["model_identity"]: row["status"] for row in status
@@ -1633,7 +1739,7 @@ def test_news_generation_stays_inactive_until_all_five_news_models_exist() -> No
     }
 
 
-def test_active_updates_reject_old_news_eligibility_but_keep_market() -> None:
+def test_active_updates_reject_entire_generation_with_old_news_eligibility() -> None:
     updates = [
         {"model_identity": "FULL", "model_version": "old-full",
          "eligibility_version": "news-source-eligibility-v2-event-evidence"},
@@ -1642,7 +1748,7 @@ def test_active_updates_reject_old_news_eligibility_but_keep_market() -> None:
         {"model_identity": "MARKET_ONLY", "model_version": "market-current"},
     ]
     active = inference_v2._active_updates(updates)
-    assert [row["model_version"] for row in active] == ["market-current"]
+    assert active == []
 
 
 def test_active_updates_do_not_revive_frozen_legacy_news() -> None:
@@ -1656,10 +1762,10 @@ def test_active_updates_do_not_revive_frozen_legacy_news() -> None:
         {"model_identity": "MARKET_ONLY", "model_version": "market-current"},
     ]
     active = inference_v2._active_updates(updates, {legacy, legacy_broad})
-    assert [row["model_version"] for row in active] == ["market-current"]
+    assert active == []
 
 
-def test_transition_set_requires_an_explicit_exact_contract() -> None:
+def test_noncurrent_contract_is_never_runnable() -> None:
     contract = NewsContract(
         name="transition-test-contract",
         policy_version="transition-policy",
@@ -1684,21 +1790,16 @@ def test_transition_set_requires_an_explicit_exact_contract() -> None:
          ),
          "eligibility_version": contract.eligibility_version},
     ]
-    blocked = inference_v2._active_updates(
-        updates, {contract.eligibility_version}, enforce_current_contract=False,
-    )
-    assert [row["model_version"] for row in blocked] == ["market-live"]
+    blocked = inference_v2._active_updates(updates, {contract.eligibility_version})
+    assert blocked == []
 
-    active = inference_v2._active_updates(
-        updates, {contract.eligibility_version}, enforce_current_contract=False,
-        news_contract=contract,
-    )
-    assert {row["model_version"] for row in active} == {
-        "market-live", "news-live", "full-live", "broad-news-live", "broad-full-live",
-    }
+    statuses = inference_v2.news_model_activation_status(updates)
+    assert {
+        row["status"] for row in statuses if row["model_identity"] != "NEWS_ONLY"
+    } == {"POLICY_MISMATCH"}
 
 
-def test_transition_contract_keeps_exact_old_four_model_set_during_handover() -> None:
+def test_retired_four_model_set_cannot_bypass_five_model_contract() -> None:
     contract = NewsContract(
         name="transition-test-contract",
         policy_version="transition-policy",
@@ -1724,33 +1825,18 @@ def test_transition_contract_keeps_exact_old_four_model_set_during_handover() ->
          "eligibility_version": contract.eligibility_version},
     ]
 
-    active = inference_v2._active_updates(
-        updates, {contract.eligibility_version},
-        enforce_current_contract=False, news_contract=contract,
-    )
-    assert {row["model_version"] for row in active} == {
-        "market-live", "news-live", "full-live", "broad-news-live", "broad-full-live",
-    }
-    statuses = inference_v2.news_model_activation_status(
-        updates, allow_transition_contract=True, transition_contract=contract,
-    )
+    active = inference_v2._active_updates(updates, {contract.eligibility_version})
+    assert active == []
+    statuses = inference_v2.news_model_activation_status(updates)
     by_identity = {row["model_identity"]: row for row in statuses}
     assert {
         row["status"] for identity, row in by_identity.items()
         if identity != "NEWS_ONLY"
-    } == {"TRANSITION_ACTIVE"}
+    } == {"POLICY_MISMATCH"}
     assert by_identity["NEWS_ONLY"]["status"] == "NOT_TRAINED"
-    assert all(
-        "整组切换" in row["reason"]
-        for identity, row in by_identity.items() if identity != "NEWS_ONLY"
-    )
-
     updates[-1]["feature_version"] = "corrupt-contract"
-    blocked = inference_v2._active_updates(
-        updates, {contract.eligibility_version},
-        enforce_current_contract=False, news_contract=contract,
-    )
-    assert [row["model_version"] for row in blocked] == ["market-live"]
+    blocked = inference_v2._active_updates(updates, {contract.eligibility_version})
+    assert blocked == []
 
 
 def test_news_exposure_flag_prevents_residual_without_visible_event() -> None:
@@ -1778,7 +1864,7 @@ def test_newest_news_policy_mismatch_blocks_older_current_model() -> None:
         {"model_identity": "MARKET_ONLY", "model_version": "market-current"},
     ]
     active = inference_v2._active_updates(updates)
-    assert [row["model_version"] for row in active] == ["market-current"]
+    assert active == []
 
 
 def test_news_activation_reports_policy_mismatch() -> None:
@@ -1963,7 +2049,7 @@ def test_event_budget_preserves_freshness_between_events() -> None:
         }]},
     ]
 
-    weights, receipts, summary = training_v2._event_budget_weights(
+    weights, receipts, _, summary = training_v2._event_budget_weights(
         rows, "official_events"
     )
     event_totals = {
@@ -1988,9 +2074,37 @@ def test_single_reliable_training_rows_keep_absolute_35_percent_trust() -> None:
         for index in range(3)
     ]
 
-    weights, _, _ = training_v2._event_budget_weights(rows, "broad_events")
+    weights, _, _, _ = training_v2._event_budget_weights(rows, "broad_events")
 
     assert weights.mean() == pytest.approx(0.35)
+
+
+def test_multiple_events_from_one_source_share_one_source_budget() -> None:
+    rows = [
+        {"decision_id": "a-1", "broad_events": [{
+            "event_id": "event-a-1", "event_version_id": "event-a-1-v1",
+            "raw_weight": 1.0, "source_budget_id": "source-a",
+        }]},
+        {"decision_id": "a-2", "broad_events": [{
+            "event_id": "event-a-2", "event_version_id": "event-a-2-v1",
+            "raw_weight": 1.0, "source_budget_id": "source-a",
+        }]},
+        {"decision_id": "b-1", "broad_events": [{
+            "event_id": "event-b-1", "event_version_id": "event-b-1-v1",
+            "raw_weight": 1.0, "source_budget_id": "source-b",
+        }]},
+    ]
+
+    _, _, source_receipts, summary = training_v2._event_budget_weights(
+        rows, "broad_events",
+    )
+    budgets = {
+        receipt["source_budget_id"]: receipt["bounded_weight"]
+        for receipt in source_receipts
+    }
+
+    assert budgets == {"source-a": pytest.approx(1.0), "source-b": pytest.approx(1.0)}
+    assert summary["maximum_source_weight_share"] == pytest.approx(0.5)
 
 
 def test_commentary_and_low_materiality_are_not_training_evidence(tmp_path) -> None:
@@ -2060,7 +2174,7 @@ def test_shadow_composite_keeps_research_direction_visible(tmp_path) -> None:
     ledger.close()
 
 
-def test_controlled_news_semantics_do_not_reclassify_by_substring() -> None:
+def test_controlled_news_semantics_do_not_reclassify_by_headline() -> None:
     annotation = {
         "record_kind": "FACT_EVENT",
         "primary_category": "rates_fed",
@@ -2073,7 +2187,7 @@ def test_controlled_news_semantics_do_not_reclassify_by_substring() -> None:
     ) == "FACT_EVENT"
     assert effective_record_kind(
         annotation, "Gold gains as Treasury yields fall"
-    ) == "MARKET_REACTION"
+    ) == "FACT_EVENT"
     assert annotation_topics(annotation) == ("rates_fed", "growth_economy")
     # These used to trigger substring bugs: war in forward and gain in against.
     assert annotation_topics({
@@ -2081,14 +2195,14 @@ def test_controlled_news_semantics_do_not_reclassify_by_substring() -> None:
     }) == ("rates_fed", "growth_economy")
 
 
-def test_market_wrap_is_display_only_even_when_llm_calls_it_fact(tmp_path) -> None:
+def test_market_wrap_is_display_only_when_ai_calls_it_market_reaction(tmp_path) -> None:
     epoch = datetime(2026, 8, 10, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward-market-wrap.sqlite3", now=epoch)
     _append_news(
         ledger, source="google_news_fed_rates", item="Gold gains as Treasury yields fall",
         first_seen=epoch, parsed_at=epoch + timedelta(seconds=30), impulse=0.2,
         link="https://finance.yahoo.com/example", primary_category="rates_fed",
-        record_kind="FACT_EVENT", materiality=0.8,
+        record_kind="MARKET_REACTION", materiality=0.8,
     )
 
     row = event_evidence_rows(ledger, epoch + timedelta(minutes=5))[0]
@@ -2187,7 +2301,7 @@ def test_canonical_occurrence_deduplicates_alias_keys_for_model(tmp_path) -> Non
     ledger.close()
 
 
-def test_source_identity_is_visible_without_granting_reliability(tmp_path) -> None:
+def test_source_identity_is_a_feature_without_granting_high_reliability(tmp_path) -> None:
     epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
     _append_news(
@@ -2198,8 +2312,11 @@ def test_source_identity_is_visible_without_granting_reliability(tmp_path) -> No
     )
     event = event_evidence_rows(ledger, epoch + timedelta(minutes=10))[0]
     assert event["source_identity_organizations"] == ["example_media"]
-    assert event["source_organizations"] == []
-    assert event["independent_publishers"] == 0
+    assert event["source_organizations"] == ["example_media"]
+    assert event["independent_publishers"] == 1
+    assert event["evidence_grade"] == "SINGLE_SOURCE"
+    assert event["source_reliability"] == pytest.approx(0.35)
+    assert event["broad_model_eligible"] is True
     ledger.close()
 
 

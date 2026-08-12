@@ -12,7 +12,6 @@ from .execution_costs import COMMISSION_STATUS, SLIPPAGE_STATUS, net_shadow_log_
 from .news_contracts import (
     CURRENT_NEWS_CONTRACT,
     generation_matches_contract,
-    supported_generation_contract,
 )
 
 
@@ -195,10 +194,7 @@ def learning_curve_payload(connection) -> dict:
             "WHERE generation_id=?",
             (active_generation["generation_id"],),
         ).fetchone()[0]
-        active_generation["member_count"] = (
-            int(active_generation["member_count"]) + int(auxiliary_members)
-        )
-    active_contract = supported_generation_contract(active_generation)
+        active_generation["auxiliary_member_count"] = int(auxiliary_members)
     active_is_current = generation_matches_contract(
         active_generation, CURRENT_NEWS_CONTRACT,
     )
@@ -215,16 +211,7 @@ def learning_curve_payload(connection) -> dict:
         ).fetchall()
         if active_generation else list(reversed(updates))
     )
-    news_activation = news_model_activation_status(
-        active_updates,
-        allow_transition_contract=(
-            active_contract is not None and not active_is_current
-        ),
-        transition_contract=(
-            active_contract if active_contract is not None and not active_is_current
-            else None
-        ),
-    )
+    news_activation = news_model_activation_status(active_updates)
     current_exposed_rows = connection.execute(
         """SELECT count(DISTINCT n.source_decision_id)
         FROM derived_news_feature_snapshots n
@@ -245,21 +232,15 @@ def learning_curve_payload(connection) -> dict:
     transition_state = (
         "NO_ACTIVE_GENERATION" if active_generation is None
         else "CURRENT" if active_is_current
-        else "BUILDING_REPLACEMENT" if active_contract is not None
-        else "BLOCKED_UNSUPPORTED_ACTIVE_CONTRACT"
+        else "BLOCKED_RETIRED_GENERATION"
     )
     news_contract_transition = {
         "state": transition_state,
         "active_contract": ({
-            "name": active_contract.name,
-            "feature_version": active_contract.feature_version,
-            "eligibility_version": active_contract.eligibility_version,
-            "policy_version": active_contract.policy_version,
-        } if active_contract else ({
             "feature_version": active_generation["feature_version"],
             "eligibility_version": active_generation["eligibility_version"],
             "policy_version": active_generation["policy_version"],
-        } if active_generation else None)),
+        } if active_generation else None),
         "target_contract": {
             "name": CURRENT_NEWS_CONTRACT.name,
             "feature_version": CURRENT_NEWS_CONTRACT.feature_version,

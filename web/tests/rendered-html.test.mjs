@@ -53,7 +53,6 @@ test("keeps branch previews isolated from the production database", async () => 
     .map(entry => readFileSync(`${entry.parentPath}/${entry.name}`, "utf8"))
     .join("\n");
   assert.match(builtPreview, /PREVIEW_SNAPSHOT/);
-  assert.match(builtPreview, /监测正常，暂无新的正式月度资料/);
   assert.match(builtPreview, new RegExp(process.env.WORKERS_CI_BRANCH.replaceAll("/", "\\/")));
 });
 
@@ -67,6 +66,7 @@ test("hydrates preview pages from their immutable build snapshot", () => {
   const vite = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
   const learning = readFileSync(new URL("../build/preview-learning.ts", import.meta.url), "utf8");
   const contract = readFileSync(new URL("../preview-contract.json", import.meta.url), "utf8");
+  const previewBuilder = readFileSync(new URL("../../scripts/build_preview_bundle.py", import.meta.url), "utf8");
   assert.match(vite, /compactPreviewLearning/);
   assert.match(vite, /compactPreviewStatus/);
   assert.match(vite, /compactPreviewNewsIndex/);
@@ -84,6 +84,14 @@ test("hydrates preview pages from their immutable build snapshot", () => {
   assert.match(learning, /models\.filter/);
   assert.match(learning, /lifecycle_status === "LATEST"/);
   assert.match(learning, /identity_curves: \[\]/);
+  assert.match(learning, /execution_learning:/);
+  assert.match(learning, /points: points\.slice\(-48\)/);
+  assert.match(learning, /results: results\.slice\(-20\)/);
+  assert.match(previewBuilder, /resource=execution-point/);
+  assert.match(previewBuilder, /for identity in \("LOT_RIDGE", "EXIT_RIDGE"\)/);
+  assert.match(previewBuilder, /resource=curve-overview&cadence=\{cadence\}/);
+  assert.match(previewBuilder, /for cadence in \("5m", "30m"\)/);
+  assert.match(previewBuilder, /\[\*learning_history, \*execution_history, \*curve_overviews\]/);
   assert.doesNotMatch(page, /auditView === "league"/);
   assert.match(page, /\[PREVIEW_RESOURCES\.status\]: previewBundle\.status/);
   assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);
@@ -169,18 +177,25 @@ test("formats server-rendered preview times in one deterministic timezone", () =
 
 test("returns a verified main revision through the existing ingest heartbeat", () => {
   const ingest = readFileSync(new URL("../app/api/ingest/route.ts", import.meta.url), "utf8");
+  const snapshot = readFileSync(new URL("../app/api/_shared/dashboard-snapshot.ts", import.meta.url), "utf8");
   const vite = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
   assert.match(vite, /__AURUM_DEPLOYMENT__/);
   assert.match(vite, /WORKERS_CI_COMMIT_SHA/);
   assert.match(ingest, /deployment\.branch === "main"/);
   assert.match(ingest, /\^\[0-9a-f\]\{40\}\$/);
   assert.match(ingest, /main_revision/);
+  assert.match(ingest, /writeDashboardSnapshot\(request, binding, 1\)/);
+  assert.doesNotMatch(ingest, /request\.json\(\)|JSON\.stringify\(|TextEncoder/);
+  assert.match(snapshot, /json_valid\(payload\)/);
+  assert.match(snapshot, /content-length/);
+  assert.match(snapshot, /MAX_DASHBOARD_SNAPSHOT_BYTES/);
 });
 
-test("does not show a redundant forecast warning while the market is closed", () => {
+test("replaces the forecast state with the broker reopening countdown", () => {
   const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
-  assert.match(source, /const forecastStatus = marketClosed\s*\? null/);
-  assert.match(source, /forecastStatus && signalRemaining > 0 && online/);
+  assert.match(source, /const forecastStatus = marketClosed/);
+  assert.match(source, /距离重开/);
+  assert.match(source, /marketClosed \|\| marketUnavailable \|\| \(signalRemaining > 0 && online\)/);
   assert.match(source, /等待行情恢复/);
   assert.match(source, /等待最新预测/);
   assert.doesNotMatch(source, /当前不可参考/);
@@ -221,6 +236,23 @@ test("uses one Chinese system-state presentation across every dashboard page", (
     assert.match(source, /SystemStatePill/);
     assert.doesNotMatch(source, /MARKET CLOSED|CONNECTING|市场休市 · 新闻运行中/);
   }
+});
+
+test("live room presents broker-confirmed closure instead of a WAIT prediction", () => {
+  const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
+  assert.match(source, /距离重开/);
+  assert.match(source, /cTrader 已确认 XAUUSD 休市/);
+  assert.match(source, /暂停新增预测与 30 分钟样本/);
+  assert.match(source, /const dialAction = marketClosed/);
+  assert.match(source, /marketUnavailable\s*\? "无行情"/);
+});
+
+test("live room hides a stale forecast when broker status is unavailable", () => {
+  const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
+  assert.match(source, /const marketUnavailable = Boolean\(payload && !online && !marketClosed\)/);
+  assert.match(source, /marketUnavailable\s*\? "unavailable"/);
+  assert.match(source, /marketUnavailable\s*\? "无行情"/);
+  assert.match(source, /marketClosed \|\| marketUnavailable \|\|/);
 });
 
 test("renders the news and decision audit route", async () => {
@@ -280,6 +312,7 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /按事件类型和有效交易时间逐步衰减/);
   assert.match(source, /无效样本/);
   assert.match(source, /activeLearningIdentities/);
+  assert.match(source, /counts\?\.live_oos_model_groups/);
   if (process.env.WORKERS_CI_BRANCH && process.env.WORKERS_CI_BRANCH !== "main") {
     assert.doesNotMatch(html, /news-row-placeholder/);
   } else {
@@ -349,16 +382,137 @@ test("keeps large chart snapshots off the Worker JSON serialization path", () =>
   assert.doesNotMatch(route, /NextResponse\.json\(JSON\.parse\(row\.payload\)/);
 });
 
-test("reads the append-only D1 learning history before the compact live relay", () => {
+test("reads the bounded learning first page before the compact live relay", () => {
   const source = readFileSync(new URL("../app/api/learning/route.ts", import.meta.url), "utf8");
   const d1Read = source.indexOf("dashboard_snapshots WHERE id = ?");
   const relayRead = source.indexOf("process.env.STATUS_RELAY_URL");
   assert.ok(d1Read >= 0, "learning route must read the dedicated D1 snapshot");
   assert.ok(relayRead > d1Read, "the compact relay must remain a fallback");
-  assert.match(source, /append-only learning history stored in D1/);
+  assert.match(source, /append-only learning records stored in D1/);
   assert.match(source, /return new Response\(row\.payload/);
   assert.doesNotMatch(source, /NextResponse\.json\(JSON\.parse\(row\.payload\)/);
-  assert.doesNotMatch(source, /previewBundle\.learning/);
+  assert.match(source, /previewBundle\?\.learning_summary/);
+  assert.match(source, /writeDashboardSnapshot\(request, binding, 3\)/);
+  assert.doesNotMatch(source, /JSON\.parse\(serialized\)|TextEncoder/);
+});
+
+test("stores growing learning history as bounded idempotent D1 records", () => {
+  const route = readFileSync(new URL("../app/api/learning-history/route.ts", import.meta.url), "utf8");
+  const sync = readFileSync(new URL("../../scripts/run_dashboard_sync.py", import.meta.url), "utf8");
+  assert.match(route, /MAX_INGEST_BYTES = 350_000/);
+  assert.match(route, /readBoundedBody\(request, MAX_INGEST_BYTES\)/);
+  assert.match(route, /json_each\(json_extract\(doc,'\$\.records'\)\)/);
+  assert.match(route, /ON CONFLICT\(resource,record_key\) DO UPDATE/);
+  assert.doesNotMatch(route, /JSON\.parse\(body\.serialized\)/);
+  assert.match(route, /MAX_RESPONSE_BYTES = 400_000/);
+  assert.match(route, /json_group_array\(json\(payload\)\)/);
+  assert.match(route, /length\(CAST\(payload AS BLOB\)\)/);
+  assert.match(route, /running_bytes<=\?/);
+  assert.doesNotMatch(route, /results\.map\(row => JSON\.parse\(row\.payload\)\)/);
+  assert.match(route, /next_cursor/);
+  assert.match(sync, /LEARNING_HISTORY_CONTRACT_VERSION = "learning-history-d1-v2"/);
+  assert.match(route, /resource='curve-overview'/);
+  assert.match(route, /resource='version-overview'/);
+  assert.doesNotMatch(route, /row_number\(\) OVER \(PARTITION BY model_identity/);
+  assert.match(sync, /learning_history_records/);
+  assert.match(sync, /LEARNING_SUMMARY_GROUPS_PER_IDENTITY = 6/);
+  assert.match(sync, /LEARNING_SUMMARY_CURVE_POINTS = 48/);
+});
+
+test("uses one D1-validated writer for every large dashboard snapshot", () => {
+  for (const [path, id] of [
+    ["../app/api/ingest/route.ts", 1],
+    ["../app/api/market-chart/route.ts", 2],
+    ["../app/api/learning/route.ts", 3],
+  ]) {
+    const source = readFileSync(new URL(path, import.meta.url), "utf8");
+    assert.match(source, new RegExp(`writeDashboardSnapshot\\(request, binding, ${id}\\)`), path);
+    assert.doesNotMatch(source, /INSERT INTO dashboard_snapshots/, path);
+  }
+});
+
+test("rejects oversized snapshots before preparing a D1 statement", async () => {
+  const { MAX_DASHBOARD_SNAPSHOT_BYTES, writeDashboardSnapshot } = await import(
+    "../app/api/_shared/dashboard-snapshot.ts"
+  );
+  let prepared = false;
+  const binding = { prepare() { prepared = true; } };
+  const request = new Request("https://example.test/api/learning", {
+    method: "POST",
+    headers: { "content-length": String(MAX_DASHBOARD_SNAPSHOT_BYTES + 1) },
+    body: "{}",
+  });
+  assert.equal(await writeDashboardSnapshot(request, binding, 3), "too_large");
+  assert.equal(prepared, false);
+});
+
+test("rejects an oversized snapshot when content-length understates the body", async () => {
+  const { MAX_DASHBOARD_SNAPSHOT_BYTES, writeDashboardSnapshot } = await import(
+    "../app/api/_shared/dashboard-snapshot.ts"
+  );
+  let prepared = false;
+  const binding = { prepare() { prepared = true; } };
+  const body = JSON.stringify({ data: "x".repeat(MAX_DASHBOARD_SNAPSHOT_BYTES) });
+  const request = new Request("https://example.test/api/learning", {
+    method: "POST",
+    headers: { "content-length": "2" },
+    body,
+  });
+  assert.equal(await writeDashboardSnapshot(request, binding, 3), "too_large");
+  assert.equal(prepared, false);
+});
+
+test("bounds a streamed snapshot without content-length", async () => {
+  const { MAX_DASHBOARD_SNAPSHOT_BYTES, writeDashboardSnapshot } = await import(
+    "../app/api/_shared/dashboard-snapshot.ts"
+  );
+  let prepared = false;
+  let cancelled = false;
+  let pulls = 0;
+  const binding = { prepare() { prepared = true; } };
+  const stream = new ReadableStream({
+    pull(controller) {
+      pulls += 1;
+      controller.enqueue(new Uint8Array(
+        pulls === 1 ? MAX_DASHBOARD_SNAPSHOT_BYTES : 1,
+      ));
+    },
+    cancel() { cancelled = true; },
+  });
+  const request = new Request("https://example.test/api/market-chart", {
+    method: "POST",
+    body: stream,
+    duplex: "half",
+  });
+  assert.equal(await writeDashboardSnapshot(request, binding, 2), "too_large");
+  assert.equal(prepared, false);
+  assert.equal(cancelled, true);
+});
+
+test("lets D1 validate raw snapshot JSON in the same write", async () => {
+  const { writeDashboardSnapshot } = await import("../app/api/_shared/dashboard-snapshot.ts");
+  const calls = [];
+  const binding = {
+    prepare(sql) {
+      return {
+        bind(...values) {
+          calls.push({ sql, values });
+          return { run: async () => ({ meta: { changes: 1 } }) };
+        },
+      };
+    },
+  };
+  const body = JSON.stringify({ generated_at: "2026-08-11T12:00:00Z" });
+  const request = new Request("https://example.test/api/ingest", {
+    method: "POST",
+    headers: { "content-length": String(Buffer.byteLength(body)) },
+    body,
+  });
+  assert.equal(await writeDashboardSnapshot(request, binding, 1), "stored");
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].sql, /WHERE json_valid\(payload\)/);
+  assert.equal(calls[0].values[0], body);
+  assert.equal(calls[0].values[1], 1);
 });
 
 test("handles a non-JSON service failure without exposing a parser error", () => {
@@ -403,6 +557,7 @@ test("keeps the learning disclaimer short and explicit", () => {
 test("uses one modal timeline for model generations and market decisions", () => {
   const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(page, /打开交互图表/);
   assert.match(page, /新闻修正量/);
   assert.match(page, /大视野新闻修正量/);
@@ -419,6 +574,13 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /训练组分页（/);
   assert.match(modal, /aria-label="上一页训练组"/);
   assert.match(modal, /aria-label="下一页训练组"/);
+  assert.match(modal, /pendingPageScrollRef/);
+  assert.match(modal, /if \(!pendingPageScrollRef\.current \|\| pageLoading \|\| pageError\) return/);
+  assert.match(modal, /scroller\.scrollTo/);
+  assert.doesNotMatch(modal, /setPage\([\s\S]{0,160}scrollIntoView/);
+  assert.match(modal, /className="version-page-stage" aria-busy=\{pageLoading\}/);
+  assert.match(css, /version-page-stage \{ min-height:560px; display:flex; flex-direction:column/);
+  assert.match(css, /version-pagination-bottom \{ margin-top:auto/);
   assert.match(modal, /position="bottom"/);
   assert.match(modal, /className="version-list-anchor"/);
   assert.match(modal, /共同训练截止量对齐/);
@@ -456,6 +618,12 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /总计 \{count\} 笔/);
   assert.match(modal, /当前显示最新 \{visibleCount\} 笔/);
   assert.match(modal, /图中压缩为/);
+  assert.match(modal, /resource=execution-point/);
+  assert.match(modal, /第 \{page \+ 1\} 段 · 共 \{total\} 个历史绘图点/);
+  assert.match(modal, /← 较早/);
+  assert.match(modal, /较晚 →/);
+  assert.match(css, /\.execution-chart-grid \{ display:grid; grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(css, /\.execution-history-nav/);
   assert.match(modal, /目前没有提前退出/);
   assert.doesNotMatch(modal, /等待退出 OOS/);
   assert.match(modal, /WAIT 不创建仓位/);
@@ -467,7 +635,7 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /全部历史/);
   assert.match(modal, /查看更早行情/);
   assert.match(modal, /查看较新行情/);
-  assert.match(modal, /还没有保存过可绘制的 Bid\/Ask 行情/);
+  assert.match(modal, /title="暂无行情数据"/);
   assert.match(modal, /模型当时尚未开始预测/);
   assert.match(modal, /这段时间没有预测/);
   assert.match(modal, /marketGaps/);
@@ -485,9 +653,9 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /Page through windows that contain real matured results/);
   assert.match(modal, /Plot result time, not wall-clock time/);
   assert.match(modal, /curve-gap-bridge/);
-  assert.match(modal, /休市期间没有成熟结果/);
+  assert.match(modal, /压缩历史轮廓/);
   assert.match(modal, /curve-gap-carry-in/);
-  assert.match(modal, /窗口开始前有真实结果；中间没有成熟结果/);
+  assert.match(modal, /窗口开始前的压缩历史轮廓/);
   assert.doesNotMatch(modal, /points\.unshift\(\{ decision_time: new Date\(start\)/);
   assert.doesNotMatch(modal, /points\.push\(\{ decision_time: new Date\(end\)/);
   assert.match(modal, /成本后EV较高方向/);
@@ -516,15 +684,14 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /无效样本 · 已隔离/);
   assert.doesNotMatch(modal, /三种动作同一30分钟结果/);
   assert.doesNotMatch(modal, /30分钟退出线/);
-  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(css, /\.version-pagination/);
   assert.match(css, /\.version-pagination button \{ width:46px; height:46px/);
   assert.match(css, /font-size:clamp\(24px,7vw,28px\)/);
   assert.match(css, /height:calc\(100dvh - 16px\)/);
   assert.match(css, /grid-template-rows:auto auto minmax\(0,1fr\) auto/);
   assert.match(modal, /graph-modal-\$\{tab\}/);
-  assert.match(css, /graph-modal\.graph-modal-curve \{ height:auto; max-height:calc\(100dvh - 16px\); grid-template-rows:auto auto auto auto/);
-  assert.match(css, /graph-modal\.graph-modal-curve>\.graph-modal-body \{ overflow:visible/);
+  assert.match(css, /graph-modal\.graph-modal-curve,\.graph-modal\.graph-modal-versions \{ height:calc\(100dvh - 16px\); max-height:none; grid-template-rows:auto auto minmax\(0,1fr\) auto/);
+  assert.match(css, /graph-modal\.graph-modal-curve>\.graph-modal-body,\.graph-modal\.graph-modal-versions>\.graph-modal-body \{ min-height:0; max-height:none; overflow:auto/);
   assert.match(css, /scrollbar-gutter:stable/);
   assert.match(css, /long-curve-block>\.learning-svg \{ height:clamp\(390px,48dvh,520px\)/);
   assert.match(css, /\.curve-navigation/);
@@ -593,6 +760,8 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(modal, /openerRef\.current\?\.focus\(\)/);
   assert.match(modal, /event\.key !== "Tab"/);
   assert.match(css, /\.mobile-chart-scroll \{ width:100%; overflow-x:auto/);
+  assert.match(css, /\.execution-history-nav \{ display:flex; flex-wrap:wrap; justify-content:center; \}/);
+  assert.match(css, /\.execution-history-nav button \{ flex:0 1 100px; min-width:0; min-height:44px; \}/);
   assert.match(css, /\.market-history-nav \{[^}]*margin:10px 0 0;[^}]*border:1px solid/);
   assert.match(css, /\.prediction-counts \{[^}]*border-top:0/);
   assert.match(css, /\.chart-block \{ overflow:visible/);
@@ -649,7 +818,7 @@ test("loads market history by bounded range instead of one growing snapshot", ()
   const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
   const route = readFileSync(new URL("../app/api/market-history/route.ts", import.meta.url), "utf8");
   assert.match(modal, /history_resource/);
-  assert.match(modal, /query\.set\("before", before\)/);
+  assert.match(modal, /historyQuery\.set\("before", before\)/);
   assert.match(modal, /setBefore\(candles\[0\]\.time\)/);
   assert.match(route, /OVERVIEW_POINTS = 480/);
   assert.match(route, /OVERVIEW_DECISIONS = 480/);
@@ -659,8 +828,9 @@ test("loads market history by bounded range instead of one growing snapshot", ()
   assert.match(route, /ON CONFLICT\(decision_key\) DO UPDATE/);
   assert.match(route, /MAX_INGEST_BYTES = 400_000/);
   assert.match(route, /ORDER BY decision_epoch,decision_key/);
-  assert.match(modal, /cancelled = true; controller\.abort\(\)/);
-  assert.match(modal, /!detailCandles\.length && !canGoLater/);
+  assert.match(modal, /loadDashboardResource<MarketData>/);
+  assert.match(modal, /return \(\) => \{ cancelled = true; \}/);
+  assert.match(modal, /!candles\.length \? <div className="graph-visual-stage market-empty-stage">/);
   assert.match(modal, /onClick=\{goLater\}>→ 返回较新行情/);
   assert.match(route, /previousCandleEnd/);
   assert.match(modal, /Plot trading time, not wall-clock time/);
@@ -685,8 +855,9 @@ test("shows residual and news-only research directions without implying executio
   assert.doesNotMatch(source, /仅显示修正值，不单独判断方向/);
 });
 
-test("prefetches the complete learning ledger before interactive charts need it", () => {
+test("loads bounded learning history only when interactive charts need it", () => {
   const audit = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
   const compact = readFileSync(new URL("../build/preview-learning.ts", import.meta.url), "utf8");
   assert.match(compact, /learning_preview_summary: true/);
   assert.match(compact, /preview_status_summary: true/);
@@ -694,6 +865,61 @@ test("prefetches the complete learning ledger before interactive charts need it"
   assert.match(audit, /refreshStatus\(!fullStatusReadyRef\.current\)/);
   assert.match(audit, /refreshLearning\(!fullLearningReadyRef\.current\)/);
   assert.match(audit, /if \(!fullLearningReadyRef\.current\) void refreshLearning\(true\)/);
+  assert.match(audit, /historyResource=\{payload\?\.learning_history_resource\}/);
+  assert.match(modal, /resource: "version-group"/);
+  assert.match(modal, /resource=curve-overview/);
+  assert.match(modal, /const resolvedCurves = historyResource \? historyCurves\[cadence\] \?\? \[\] : curves/);
+  assert.doesNotMatch(modal, /const resolvedCurves = historyCurves\[cadence\] \?\? curves/);
+  assert.match(modal, /next_cursor/);
+  assert.match(modal, /const pageCursor = pageCursors\[page\]/);
+  assert.doesNotMatch(modal, /loadedPageKeys/);
+});
+
+test("distinguishes market history loading, empty, and failed states", () => {
+  const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
+  const resource = readFileSync(new URL("../app/_lib/dashboard-resource.ts", import.meta.url), "utf8");
+  const history = readFileSync(new URL("../app/api/market-history/route.ts", import.meta.url), "utf8");
+  const schema = readFileSync(new URL("../db/schema.ts", import.meta.url), "utf8");
+  const migration = readFileSync(new URL("../drizzle/0006_materialized_history_overviews.sql", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(modal, /historyState === "loading"/);
+  assert.match(modal, /historyState === "error"/);
+  assert.match(modal, /正在读取行情/);
+  assert.match(modal, /正在读取长期曲线/);
+  assert.match(modal, /正在读取这组成绩/);
+  assert.match(modal, /graph-state-compact/);
+  assert.doesNotMatch(modal, /if \(pageLoading \|\| overviewState === "loading"\)/);
+  assert.doesNotMatch(modal, /if \(historyLoading\) return <GraphLoading/);
+  assert.doesNotMatch(modal, /historyState === "loading"\) return <GraphLoading/);
+  assert.match(modal, /graph-visual-stage market-empty-stage/);
+  assert.doesNotMatch(modal, /compact-market-empty/);
+  assert.match(css, /graph-visual-stage \{ min-height:clamp\(420px,58dvh,620px\)/);
+  assert.match(modal, /title="暂无行情数据"/);
+  assert.match(modal, /重新读取/);
+  assert.doesNotMatch(modal, /还没有保存过可绘制的 Bid\/Ask 行情/);
+  assert.doesNotMatch(modal, /等待可验证数据/);
+  assert.doesNotMatch(resource, /MIN_VISIBLE_LOADING_MS|waitForMinimumLoading/);
+  assert.match(modal, /loadDashboardResource/);
+  assert.match(modal, /readDashboardResource/);
+  assert.match(modal, /HISTORY_CACHE_MAX_AGE_MS = 60_000/);
+  assert.match(modal, /Number\.POSITIVE_INFINITY/);
+  assert.match(modal, /initialHistoryResult/);
+  assert.doesNotMatch(modal, /waitForMinimumLoading|startedAt/);
+  assert.match(modal, /point\.source_gap_before/);
+  assert.match(modal, /first\.source_gap_before/);
+  assert.match(modal, /overviewStep/);
+  assert.match(modal, /Date\.parse\(point\.decision_time\) - Date\.parse\(previous\.decision_time\) >= overviewStep/);
+  assert.doesNotMatch(modal, /source_gap_before \?\?/);
+  assert.match(history, /market_history_overview/);
+  assert.match(history, /market_decision_overviews/);
+  assert.match(schema, /marketHistoryOverview/);
+  assert.match(schema, /marketDecisionOverviews/);
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS `market_history_overview`/);
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS `market_decision_overviews`/);
+  assert.doesNotMatch(history, /SELECT count\(\*\) count, min\(time_epoch\)/);
+  assert.doesNotMatch(history, /row_number\(\) OVER/);
+  assert.match(css, /graph-data-pulse/);
+  assert.match(css, /prefers-reduced-motion:reduce/);
 });
 
 test("reflows news evidence into readable mobile cards", () => {

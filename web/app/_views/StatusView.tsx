@@ -26,7 +26,7 @@ type QuotaState = {
 type StatusPayload = {
   generated_at: string;
   system: {
-    online: boolean; mode: string; trading_enabled: boolean; market_session?: "OPEN" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE";
+    online: boolean; mode: string; trading_enabled: boolean; market_session?: "OPEN" | "CLOSED" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE";
     source_of_truth: string; sites_mirror: string;
     components: Record<string, { last_success: string | null; age_seconds: number | null; status: string; last_error: string | null }>;
   };

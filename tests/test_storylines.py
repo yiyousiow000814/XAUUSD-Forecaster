@@ -12,7 +12,7 @@ def event(key, time, headline, **overrides):
         "source_published_time": time,
         "canonical_headline": headline,
         "evidence_grade": "SINGLE_RELIABLE",
-        "prompt_version": "news-json-v14-material-event-evidence",
+        "prompt_version": "news-json-v15-ai-semantic-review",
         "parsed_at": time,
         "independent_publishers": 1,
         "publisher_domains": ("reuters.com",),
@@ -153,7 +153,7 @@ def test_gold_price_reaction_cannot_update_core_timeline():
     )
     reaction = event(
         "b", "2026-08-06T02:00:00+00:00", "霍尔木兹消息推动现货黄金上涨",
-        record_kind="FACT_EVENT", actor="现货黄金", canonical_actor_id="spot_gold",
+        record_kind="MARKET_REACTION", actor="现货黄金", canonical_actor_id="spot_gold",
         action="上涨", action_family="OTHER_FACT", object="金价",
         canonical_object_id="gold_price", relation_to_prior="MARKET_REACTS_TO",
     )

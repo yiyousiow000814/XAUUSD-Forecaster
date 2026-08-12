@@ -9,37 +9,29 @@ from datetime import datetime
 from .evidence_v2 import ELIGIBILITY_VERSION
 from .factors import MACRO_FEATURE_MAP, NEWS_FEATURES
 from .forward_ledger import canonical_hash
+from .macro_release import macro_release_features_at
 from .news_evidence import BROAD_NEWS_FEATURES, event_evidence_rows
 from .news_impact import impact_time_rule
 from .news_semantics import ACTIONABLE_CATEGORIES
 
 
-SOURCE_RULES = {
-    "federal_reserve_monetary": ("MODEL_ELIGIBLE", True, 200, "official monetary policy publisher"),
-    "federal_reserve_press_all": ("MODEL_ELIGIBLE", True, 200, "official central-bank publisher"),
-    "federal_reserve_speeches_testimony": ("MODEL_ELIGIBLE", True, 200, "official central-bank publisher"),
-    "bea_economic_releases": ("MODEL_ELIGIBLE", True, 200, "official economic-statistics publisher"),
-    "us_treasury_press_releases": ("MODEL_ELIGIBLE", True, 200, "official fiscal publisher"),
-    "bls_employment_situation": ("MODEL_ELIGIBLE", True, 200, "official labor-market release publisher"),
-    "bls_consumer_price_index": ("MODEL_ELIGIBLE", True, 200, "official inflation release publisher"),
-    "bls_job_openings": ("MODEL_ELIGIBLE", True, 200, "official labor-market release publisher"),
-    "eia_press_releases": ("RESEARCH_CANDIDATE", True, 200, "official energy publisher pending feature audit"),
-    "eia_today_in_energy": ("RESEARCH_CANDIDATE", True, 200, "official energy publisher pending feature audit"),
-    "ecb_press_releases": ("RESEARCH_CANDIDATE", True, 200, "official publisher pending XAUUSD relevance audit"),
-    "world_gold_council_central_banks": ("RESEARCH_CANDIDATE", True, 200, "publisher body retained; source qualification pending"),
-    "gdelt_gold_geopolitics": ("DISPLAY_ONLY", True, 200, "aggregator metadata is not action-bearing"),
-    "google_news_gold_context": ("DISPLAY_ONLY", True, 200, "aggregated discovery is display-only"),
-    "google_news_gold_geopolitics": ("COLLECT_ONLY", True, 200, "headline-only aggregation"),
-    "google_news_bls_official_releases": ("MODEL_ELIGIBLE", True, 200, "official bls.gov body discovered through a delayed Google index"),
-    "google_news_us_employment": ("DISPLAY_ONLY", True, 200, "release discovery lane; publisher qualification required"),
-    "google_news_us_inflation": ("DISPLAY_ONLY", True, 200, "release discovery lane; publisher qualification required"),
-    "google_news_fed_rates": ("DISPLAY_ONLY", True, 200, "policy discovery lane; publisher qualification required"),
-}
+COLLECTION_SOURCES = (
+    "bea_economic_releases", "bls_consumer_price_index",
+    "bls_employment_situation", "bls_job_openings", "ecb_press_releases",
+    "eia_press_releases", "eia_today_in_energy", "federal_reserve_monetary",
+    "federal_reserve_press_all", "federal_reserve_speeches_testimony",
+    "gdelt_gold_geopolitics", "google_news_bls_official_releases",
+    "google_news_fed_rates", "google_news_gold_context",
+    "google_news_gold_geopolitics", "google_news_us_employment",
+    "google_news_us_inflation", "us_treasury_press_releases",
+    "world_gold_council_central_banks",
+)
 
 EVIDENCE_GRADE_WEIGHT = {
     "PRIMARY": 1.0,
     "CORROBORATED": 1.0,
     "SINGLE_RELIABLE": 0.35,
+    "SINGLE_SOURCE": 0.20,
 }
 
 
@@ -85,8 +77,9 @@ def _visibility_event_ref(event: dict | None, news, annotation) -> dict:
 
 def frozen_rule_rows() -> list[tuple[str, str, int, int, str]]:
     return [
-        (source, tier, int(requires_body), minimum, rationale)
-        for source, (tier, requires_body, minimum, rationale) in sorted(SOURCE_RULES.items())
+        (source, "RESEARCH_CANDIDATE", 1, 200,
+         "collection is permission-neutral; generation evaluates source attributes")
+        for source in COLLECTION_SOURCES
     ]
 
 
@@ -170,6 +163,13 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
             )
             evidence.append((series_id, values[-1]["content_hash"]))
 
+    release_features, release_packets = macro_release_features_at(ledger, decision_time)
+    totals.update(release_features)
+    evidence.extend(
+        (packet["series_id"], packet["content_hash"], packet["relation_to_prior"])
+        for packet in release_packets
+    )
+
     broad_totals = {name: 0.0 for name in BROAD_NEWS_FEATURES}
     broad_weight_sum = 0.0
     broad_evidence = []
@@ -197,6 +197,20 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
             broad_totals["broad_primary_event_count"] += freshness
         elif row["evidence_grade"] == "CORROBORATED":
             broad_totals["broad_corroborated_event_count"] += freshness
+        else:
+            broad_totals["broad_single_source_event_count"] += freshness
+        broad_totals["broad_official_source_count"] += (
+            freshness * float(row.get("official_source") or 0.0)
+        )
+        broad_totals["broad_independent_source_count"] += (
+            freshness * float(row.get("independent_publishers") or 0.0)
+        )
+        broad_totals["broad_source_reliability"] += (
+            freshness * float(row.get("source_reliability") or 0.0)
+        )
+        broad_totals["broad_syndicated_duplicate_count"] += (
+            freshness * float(row.get("syndicated_duplicate_count") or 0.0)
+        )
         for topic in row["topics"]:
             name = f"broad_topic_{topic}"
             if name in broad_totals:
@@ -233,6 +247,7 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
                 "event_clock_source": row["event_clock_source"],
                 "event_time_precision": row["event_time_precision"],
                 "canonical_source": row["canonical_source"],
+                "source_budget_id": row["source_budget_id"],
                 "canonical_source_item_id": row["canonical_source_item_id"],
                 "source_hash": row["source_hash"],
                 "evidence_grade": row["evidence_grade"],

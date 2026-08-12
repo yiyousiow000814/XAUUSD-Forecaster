@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import gzip
 import importlib.util
 import json
 import sqlite3
 import threading
+import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -33,6 +36,57 @@ def test_deployment_status_does_not_mislabel_local_edits_as_remote_drift() -> No
     assert module._deployment_status("same", "same", True) == "LOCAL_CHANGES"
     assert module._deployment_status("local", "remote", False) == "DEPLOYMENT_DRIFT"
     assert module._deployment_status(None, "remote", False) == "PROVENANCE_UNKNOWN"
+
+
+def test_dashboard_reads_only_fresh_ctrader_market_session(tmp_path) -> None:
+    module = _dashboard_module()
+    now = datetime(2026, 8, 11, 21, 0, tzinfo=UTC)
+    database = tmp_path / "forward-evidence.sqlite3"
+    quotes = tmp_path / "quotes"
+    quotes.mkdir()
+    session_path = quotes / "market-session.json"
+    session_path.write_text(json.dumps({
+        "schema": "xauusd.forward.market-session.v1",
+        "symbol": "XAUUSD",
+        "observed_at": now.isoformat(),
+        "is_open": False,
+        "next_open_time": (now + timedelta(hours=1)).isoformat(),
+        "next_close_time": None,
+    }), encoding="utf-8")
+
+    session = module._broker_market_session(database, now)
+
+    assert session == {
+        "is_open": False,
+        "observed_at": now.isoformat(),
+        "next_open_time": (now + timedelta(hours=1)).isoformat(),
+        "next_close_time": None,
+    }
+    assert module._broker_market_session(database, now + timedelta(seconds=21)) is None
+
+
+def test_dashboard_reports_broker_close_and_reopen_time(tmp_path) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=now).close()
+    quotes = tmp_path / "quotes"
+    quotes.mkdir()
+    reopens_at = now + timedelta(hours=1)
+    (quotes / "market-session.json").write_text(json.dumps({
+        "schema": "xauusd.forward.market-session.v1",
+        "symbol": "XAUUSD",
+        "observed_at": now.isoformat(),
+        "is_open": False,
+        "next_open_time": reopens_at.isoformat(),
+        "next_close_time": None,
+    }), encoding="utf-8")
+
+    payload = _dashboard_module()._dashboard_payload(database)
+
+    assert payload["system"]["market_session"] == "CLOSED"
+    assert payload["system"]["market_reopens_at"] == reopens_at.isoformat()
+    for component in ("quote_bridge", "decision_collector", "outcome_settler"):
+        assert payload["system"]["components"][component]["status"] == "MARKET_CLOSED"
 
 
 def test_news_evidence_display_collapses_frozen_versions_to_one_event() -> None:
@@ -141,9 +195,15 @@ def _append_basic_annotation(
     item_id: str,
     digest: str,
     parsed_at: datetime,
-    prompt_version: str = "news-json-v14-material-event-evidence",
+    prompt_version: str = PROMPT_VERSION,
     event_time: datetime | None = None,
 ) -> None:
+    news = ledger.connection.execute(
+        """SELECT headline,body,source_published_time FROM news_revisions
+        WHERE source=? AND source_item_id=? AND revision_number=1""",
+        (source, item_id),
+    ).fetchone()
+    evidence = " ".join(str(news["body"] or news["headline"]).split())[:120]
     annotation = {
         "event_type": "economic_release",
         "entities": [],
@@ -154,21 +214,28 @@ def _append_basic_annotation(
         "usd_impulse": 0.0,
         "novelty": 0.5,
         "confidence": 0.8,
-        "summary_zh": "已取得正文并完成测试解析。",
+        "summary_zh": "已取得完整来源正文并完成结构化测试解析，相关证据已经保存。",
         "headline_zh": "测试经济数据发布",
+        "primary_category": "growth_economy", "secondary_categories": [],
+        "emerging_topic_zh": "", "record_kind": "FACT_EVENT",
+        "actor": "US Treasury", "action": "published", "object": "official event",
+        "location": "United States",
+        "event_time": (
+            event_time.isoformat() if event_time
+            else str(news["source_published_time"] or parsed_at.isoformat())
+        ),
+        "claim_status": "CONFIRMED", "materiality": 0.8,
+        "canonical_actor_id": "us_treasury", "action_family": "ECONOMIC_RELEASE",
+        "canonical_object_id": item_id, "canonical_location_id": "us",
+        "episode_key": item_id, "primary_story_title_zh": "测试事件",
+        "secondary_contexts_zh": [], "relation_to_prior": "NONE",
+        "document_kind": "REPORT", "material_event_key": item_id,
+        "source_organization_id": source, "evidence_role": "CORE_CLAIM",
+        "xauusd_relevance": "MACRO_DRIVER", "review_priority": "FAST",
+        "material_change": "NEW_EVENT", "time_sensitivity": "SAME_DAY",
+        "semantic_reason_zh": "完整正文显示这是可能影响黄金的宏观事件。",
+        "supporting_evidence": [evidence],
     }
-    if event_time:
-        annotation.update({
-            "primary_category": "growth_economy", "secondary_categories": [],
-            "emerging_topic_zh": "", "record_kind": "FACT_EVENT",
-            "actor": "US Treasury", "action": "published", "object": "official event",
-            "location": "United States", "event_time": event_time.isoformat(),
-            "claim_status": "CONFIRMED", "materiality": 0.8,
-            "canonical_actor_id": "us_treasury", "action_family": "OFFICIAL_RELEASE",
-            "canonical_object_id": "official_event", "canonical_location_id": "us",
-            "episode_key": "official_event", "primary_story_title_zh": "测试事件",
-            "secondary_contexts_zh": [], "relation_to_prior": "NONE",
-        })
     ledger.append_annotation(
         {
             "annotation_id": f"annotation-{source}-{item_id}",
@@ -220,14 +287,110 @@ def test_dashboard_annotation_counts_match_current_worker_policy(tmp_path) -> No
 
     assert payload["annotation_queue"]["ready"] == 1
     assert payload["annotation_queue"]["queued"] == 1
+    active_identities = {
+        row["model_identity"]
+        for row in payload["learning_curves"]["models"]
+        if row["active_rank"] is not None
+    }
+    assert payload["counts"]["live_oos_model_groups"] == len(active_identities)
     transition = payload["learning_curves"]["news_contract_transition"]
     assert payload["news_evidence_summary"]["current_contract_exposed_rows"] == transition["current_contract_exposed_rows"]
     assert payload["news_evidence_summary"]["current_contract_distinct_events"] == transition["current_contract_distinct_events"]
 
 
-def test_health_endpoint_does_not_build_dashboard(monkeypatch, tmp_path) -> None:
+def test_status_snapshot_cache_singleflights_concurrent_builds(tmp_path) -> None:
+    module = _dashboard_module()
+    cache = module.StatusSnapshotCache(wait_seconds=1.0)
+    database = tmp_path / "forward.sqlite3"
+    started = threading.Event()
+    release = threading.Event()
+    calls = 0
+    call_lock = threading.Lock()
+
+    def builder(_database):
+        nonlocal calls
+        with call_lock:
+            calls += 1
+        started.set()
+        assert release.wait(timeout=2)
+        return {"generated_at": "2026-08-12T00:00:00+00:00"}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(cache.get, database, builder) for _ in range(8)]
+        assert started.wait(timeout=1)
+        time.sleep(0.05)
+        assert calls == 1
+        release.set()
+        results = [future.result(timeout=2) for future in futures]
+
+    assert calls == 1
+    assert len({body for body, _state, _age in results}) == 1
+    assert {state for _body, state, _age in results} == {"fresh"}
+
+
+def test_status_snapshot_cache_fails_closed_during_slow_refresh(tmp_path) -> None:
+    module = _dashboard_module()
+    now = [0.0]
+    cache = module.StatusSnapshotCache(
+        ttl_seconds=15, wait_seconds=0.01, max_stale_seconds=90,
+        clock=lambda: now[0],
+    )
+    database = tmp_path / "forward.sqlite3"
+    cache.get(database, lambda _database: {"version": 1})
+
+    now[0] = 16.0
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_refresh(_database):
+        started.set()
+        assert release.wait(timeout=2)
+        return {"version": 2}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        refresh = pool.submit(cache.get, database, slow_refresh)
+        assert started.wait(timeout=1)
+        try:
+            cache.get(database, slow_refresh)
+        except module.StatusSnapshotUnavailable as error:
+            assert str(error) == "dashboard snapshot refresh is still running"
+        else:
+            raise AssertionError("a stale snapshot must not look like a sync success")
+        release.set()
+        refreshed_body, refreshed_state, _age = refresh.result(timeout=2)
+
+    assert json.loads(refreshed_body) == {"version": 2}
+    assert refreshed_state == "fresh"
+
+    now[0] = 32.0
+    try:
+        cache.get(
+            database, lambda _database: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+    except RuntimeError as error:
+        assert str(error) == "boom"
+    else:
+        raise AssertionError("a failed refresh must not masquerade as success")
+    health_status, health = cache.health()
+    assert health_status == 503
+    assert health["status"] == "ERROR"
+
+    now[0] = 123.0
+    try:
+        cache.get(
+            database,
+            lambda _database: (_ for _ in ()).throw(RuntimeError("still broken")),
+        )
+    except RuntimeError as error:
+        assert str(error) == "still broken"
+    else:
+        raise AssertionError("expired dashboard snapshot must fail closed")
+
+
+def test_health_endpoint_requires_recent_dashboard_snapshot(monkeypatch, tmp_path) -> None:
     module = _dashboard_module()
     module.Handler.database = tmp_path / "unused.sqlite3"
+    module.Handler.status_cache = module.StatusSnapshotCache()
     monkeypatch.setattr(
         module,
         "_dashboard_payload",
@@ -237,15 +400,97 @@ def test_health_endpoint_does_not_build_dashboard(monkeypatch, tmp_path) -> None
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
+        try:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/api/health", timeout=2
+            )
+        except urllib.error.HTTPError as error:
+            assert error.code == 503
+            assert json.loads(error.read())["status"] == "UNAVAILABLE"
+        else:
+            raise AssertionError("health must fail before a status snapshot exists")
+
+        module.Handler.status_cache.get(
+            module.Handler.database, lambda _database: {"status": "ready"},
+        )
         with urllib.request.urlopen(
             f"http://127.0.0.1:{server.server_port}/api/health", timeout=2
         ) as response:
             assert response.status == 200
-            assert json.loads(response.read()) == {"status": "OK"}
+            assert json.loads(response.read())["status"] == "OK"
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_dashboard_status_does_not_scan_live_database_integrity(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _dashboard_module()
+    now = datetime.now(UTC).replace(microsecond=0)
+    database = tmp_path / "forward.sqlite3"
+    ForwardLedger(database, now=now).close()
+    real_connect = module.sqlite3.connect
+    statements: list[str] = []
+
+    def tracked_connect(target, *args, **kwargs):
+        connection = real_connect(target, *args, **kwargs)
+        if str(database) in str(target):
+            connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(module.sqlite3, "connect", tracked_connect)
+    module._dashboard_payload(database)
+
+    assert not any("integrity_check" in statement.lower() for statement in statements)
+
+
+def test_live_quote_candle_cache_reads_only_appended_bytes(tmp_path) -> None:
+    module = _dashboard_module()
+    quote_file = tmp_path / "xauusd-quotes-20260812.jsonl"
+
+    def quote(second: int, bid: float) -> str:
+        return json.dumps({
+            "received_time": f"2026-08-12T06:30:{second:02d}+00:00",
+            "bid": bid,
+            "ask": bid + 0.1,
+        }) + "\n"
+
+    quote_file.write_text(quote(1, 4300.0) + quote(2, 4301.0), encoding="utf-8")
+    first = module._quote_file_candles(quote_file)
+    first_offset = module._QUOTE_CANDLE_CACHE[str(quote_file)]["offset"]
+
+    with quote_file.open("a", encoding="utf-8") as handle:
+        handle.write(quote(3, 4302.0))
+    second = module._quote_file_candles(quote_file)
+
+    assert first[0]["ticks"] == 2
+    assert second[0]["ticks"] == 3
+    assert second[0]["open"] == 4300.05
+    assert second[0]["close"] == 4302.05
+    assert module._QUOTE_CANDLE_CACHE[str(quote_file)]["offset"] > first_offset
+
+
+def test_forward_ledger_adds_dashboard_news_lookup_indexes(tmp_path) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    try:
+        annotation_indexes = {
+            row[1] for row in ledger.connection.execute(
+                "PRAGMA index_list(news_annotations)"
+            )
+        }
+        revision_indexes = {
+            row[1] for row in ledger.connection.execute(
+                "PRAGMA index_list(news_revisions)"
+            )
+        }
+    finally:
+        ledger.close()
+
+    assert "news_annotations_revision_contract" in annotation_indexes
+    assert "news_revisions_cluster_latest" in revision_indexes
 
 
 def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
@@ -530,7 +775,7 @@ def test_dashboard_explains_active_and_expired_on_receipt_impacts(tmp_path) -> N
             "raw_content_hash": digest,
             "annotation_id": f"annotation-us_treasury_press_releases-{item_id}",
             "llm_model_version": "gemma-4-31b-it",
-            "prompt_version": "news-impact-v2-semantic-prior-candidates",
+            "prompt_version": "news-impact-v3-independent-semantic-review",
             "parse_started_at": parsed_at,
             "assessed_at": parsed_at + timedelta(seconds=1),
             "impact_class": impact_class,
@@ -576,7 +821,7 @@ def test_dashboard_uses_same_explicit_event_clock_as_model(tmp_path) -> None:
         "raw_content_hash": digest,
         "annotation_id": "annotation-us_treasury_press_releases-old-event",
         "llm_model_version": "gemma-4-31b-it",
-        "prompt_version": "news-impact-v2-semantic-prior-candidates",
+        "prompt_version": "news-impact-v3-independent-semantic-review",
         "parse_started_at": parsed_at, "assessed_at": parsed_at + timedelta(seconds=1),
         "impact_class": "SAME_DAY", "event_state": "ACTIVE",
         "update_type": "NEW_EVENT", "confidence": 0.9,

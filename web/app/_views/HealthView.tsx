@@ -10,7 +10,7 @@ type StatusPayload = {
   generated_at: string;
   system: {
     online: boolean;
-    market_session?: "OPEN" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE";
+    market_session?: "OPEN" | "CLOSED" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE";
     source_of_truth: string;
     sites_mirror: string;
     components: Record<string, { last_success: string | null; age_seconds: number | null; status: string; last_error: string | null }>;

@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from .news_semantics import V1_NEWS_PROMPT_VERSIONS
+from .macro_release import MACRO_RELEASE_FEATURES
 
 if TYPE_CHECKING:
     from .forward_ledger import ForwardLedger
@@ -33,6 +34,7 @@ NEWS_FEATURES = (
     "fed_assets_change",
     "vix_level",
     "vix_change",
+    *MACRO_RELEASE_FEATURES,
 )
 
 NEWS_PROMPT_VERSIONS = V1_NEWS_PROMPT_VERSIONS
