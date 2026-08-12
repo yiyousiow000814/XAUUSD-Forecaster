@@ -318,6 +318,23 @@ def _write_manifest(path: Path, payload: dict) -> str:
     return digest
 
 
+def _neutral_news_artifact(dataset_hash: str) -> RidgeArtifact:
+    """Represent an evidence-empty official lane without inventing a signal."""
+    return RidgeArtifact(
+        feature_names=tuple(NEWS_FEATURES),
+        means=tuple(0.0 for _ in NEWS_FEATURES),
+        scales=tuple(1.0 for _ in NEWS_FEATURES),
+        coefficients=tuple(0.0 for _ in NEWS_FEATURES),
+        intercept=0.0,
+        alpha=100.0,
+        training_dataset_hash=dataset_hash,
+        residual_std=0.0,
+        training_rows=0,
+        weighting_version=EVENT_WEIGHTING_VERSION,
+        weight_summary={"status": "COLD_START_NO_OFFICIAL_EVIDENCE"},
+    )
+
+
 def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[dict]:
     """Build and atomically activate five core models plus one diagnostic."""
     rows = complete_training_rows(ledger, cutoff)
@@ -345,8 +362,10 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
         return [{"status": "NOT_DUE", "complete_rows": count,
                  "generation_id": latest["generation_id"],
                  "next_threshold": int(latest["training_rows"]) + RETRAIN_INTERVAL}]
-    if len(official_rows) < NEWS_MIN_EXPOSED_ROWS or len(broad_rows) < NEWS_MIN_EXPOSED_ROWS \
-            or not official_events or not broad_events:
+    official_cold_start = (
+        len(official_rows) < NEWS_MIN_EXPOSED_ROWS or not official_events
+    )
+    if len(broad_rows) < NEWS_MIN_EXPOSED_ROWS or not broad_events:
         return [{
             "status": "NEWS_GENERATION_EVIDENCE_INSUFFICIENT",
             "official_exposed_rows": len(official_rows),
@@ -375,23 +394,42 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
     crossfit_by_id = {row["decision_id"]: row for row in crossfit}
     official_residual = [row for row in official_rows if row["decision_id"] in crossfit_by_id]
     broad_residual = [row for row in broad_rows if row["decision_id"] in crossfit_by_id]
-    if len(official_residual) < NEWS_MIN_EXPOSED_ROWS or len(broad_residual) < NEWS_MIN_EXPOSED_ROWS:
+    if len(broad_residual) < NEWS_MIN_EXPOSED_ROWS or (
+        not official_cold_start
+        and len(official_residual) < NEWS_MIN_EXPOSED_ROWS
+    ):
         return [{"status": "NEWS_GENERATION_CROSSFIT_INSUFFICIENT",
                  "official_rows": len(official_residual), "broad_rows": len(broad_residual)}]
 
-    (official_weights, official_weight_receipts,
-     official_source_receipts, official_summary) = _event_budget_weights(
-        official_residual, "official_events"
-    )
+    if official_cold_start:
+        official_weights = np.asarray([], dtype=np.float64)
+        official_weight_receipts = []
+        official_source_receipts = []
+        official_summary = {"status": "COLD_START_NO_OFFICIAL_EVIDENCE"}
+    else:
+        (official_weights, official_weight_receipts,
+         official_source_receipts, official_summary) = _event_budget_weights(
+            official_residual, "official_events"
+        )
     (broad_weights, broad_weight_receipts,
      broad_source_receipts, broad_summary) = _event_budget_weights(
         broad_residual, "broad_events"
     )
-    official_hash = canonical_hash([
-        (row["decision_id"], row["receipt"], crossfit_by_id[row["decision_id"]]["artifact_hash"],
-         crossfit_by_id[row["decision_id"]]["residual"], receipt)
-        for row, receipt in zip(official_residual, official_weights.tolist())
-    ])
+    official_hash = canonical_hash(
+        (
+            "COLD_START_NO_OFFICIAL_EVIDENCE",
+            EVIDENCE_POLICY_VERSION,
+            NEWS_FEATURE_VERSION,
+            ELIGIBILITY_VERSION,
+            market_hash,
+        )
+        if official_cold_start else [
+            (row["decision_id"], row["receipt"],
+             crossfit_by_id[row["decision_id"]]["artifact_hash"],
+             crossfit_by_id[row["decision_id"]]["residual"], receipt)
+            for row, receipt in zip(official_residual, official_weights.tolist())
+        ]
+    )
     broad_hash = canonical_hash([
         (row["decision_id"], row["receipt"], crossfit_by_id[row["decision_id"]]["artifact_hash"],
          crossfit_by_id[row["decision_id"]]["residual"], receipt)
@@ -418,11 +456,18 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
         f"news-residual-{evidence_status.lower().replace('_', '-')}-"
         f"{stage.lower()}-{slug}-{official_hash[:12]}"
     )
-    official_artifact = train_ridge(
-        np.asarray([row["news"] for row in official_residual]),
-        np.asarray([crossfit_by_id[row["decision_id"]]["residual"] for row in official_residual]),
-        NEWS_FEATURES, 100.0, official_hash, official_weights,
-        EVENT_WEIGHTING_VERSION, official_summary,
+    official_artifact = (
+        _neutral_news_artifact(official_hash)
+        if official_cold_start else
+        train_ridge(
+            np.asarray([row["news"] for row in official_residual]),
+            np.asarray([
+                crossfit_by_id[row["decision_id"]]["residual"]
+                for row in official_residual
+            ]),
+            NEWS_FEATURES, 100.0, official_hash, official_weights,
+            EVENT_WEIGHTING_VERSION, official_summary,
+        )
     )
     official_path = root / official_version / "model.json"
     if not official_path.exists():
@@ -588,6 +633,10 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
         "event_snapshot_hash": event_snapshot_hash,
         "weighting_version": EVENT_WEIGHTING_VERSION,
         "news_evidence_status": (
-            broad_evidence_status if update[1].startswith("BROAD") else evidence_status
+            broad_evidence_status
+            if update[1] in {"BROAD_NEWS_RESIDUAL", "BROAD_FULL", "NEWS_ONLY"}
+            else "COLD_START_NO_OFFICIAL_EVIDENCE"
+            if official_cold_start and update[1] in {"NEWS_RESIDUAL", "FULL"}
+            else evidence_status
         ),
     } for update in updates]

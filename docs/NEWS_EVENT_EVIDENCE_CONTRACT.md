@@ -102,4 +102,7 @@ One complete generation contains Market-only, News residual, Full, Broad News
 residual, and Broad Full. All five share one cutoff, policy version, event
 snapshot hash, and generation identifier. Activation is a single append-only
 record written only after every artifact and member is valid. Future decisions
-read only the latest activated generation.
+read only the latest activated generation. An evidence-empty Official lane is
+represented by an explicit zero-effect cold-start artifact, never by fabricated
+rows or a partial generation. Once a generation has been activated, every
+healthy decision must publish the complete model identity set or fail visibly.

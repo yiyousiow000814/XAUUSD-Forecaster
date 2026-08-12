@@ -1,6 +1,7 @@
 # PR 34: Canonical Events And Model Handover
 
-Status: implementation complete; live activation is evidence-gated.
+Status: implementation complete; Broad-evidence activation with an explicit
+Official cold-start state.
 
 ## Scope
 
@@ -29,12 +30,12 @@ must not mix v14 and v15 model members.
 
 ## Current Live Gate
 
-The v15 implementation is ready, but a production generation is not fabricated
-from retroactive evidence. As of the implementation audit, point-in-time mature
-rows contain zero official and zero Broad v15 exposures because the historical
-articles were reviewed only after their original decision times. Activation
-therefore remains blocked at the frozen minimum of 30 exposed rows in each lane
-until fresh v15 events mature.
+The v15 implementation does not fabricate retroactive evidence. A complete
+generation may activate after 30 point-in-time Broad exposures. When fewer than
+30 Official exposures exist, the Official residual is an explicit zero-effect
+cold-start artifact and `Full` remains equivalent to Market-only for that
+component. Broad residual, Broad Full, and News Only continue to learn from
+qualified Broad events. No activated generation may silently omit identities.
 
 The implementation audit also found that 527 of 532 retained items came from
 Google News or GDELT discovery lanes, while direct official sources contributed
