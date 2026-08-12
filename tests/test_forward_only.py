@@ -1688,6 +1688,33 @@ def test_jsonl_provider_reads_directory_incrementally_and_ignores_partial_line(
     assert rows[-1].bid == 2400.1
 
 
+def test_jsonl_provider_reads_broker_market_session_heartbeat(tmp_path) -> None:
+    observed = datetime(2026, 8, 11, 21, 0, tzinfo=UTC)
+    (tmp_path / "market-session.json").write_text(
+        json.dumps({
+            "schema": "xauusd.forward.market-session.v1",
+            "source": "ctrader-cli",
+            "symbol": "XAUUSD",
+            "observed_at": observed.isoformat(),
+            "server_time": observed.isoformat(),
+            "is_open": False,
+            "time_till_open_seconds": 3600,
+            "time_till_close_seconds": 0,
+            "next_open_time": (observed + timedelta(hours=1)).isoformat(),
+            "next_close_time": None,
+        }),
+        encoding="utf-8",
+    )
+
+    session = JsonlMarketProvider(tmp_path).market_session(observed)
+
+    assert session is not None
+    assert not session.is_open
+    assert session.is_fresh(observed)
+    assert session.time_till_open == timedelta(hours=1)
+    assert session.next_open_time == observed + timedelta(hours=1)
+
+
 def test_gemini_annotation_is_fail_closed_without_key(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEYS", raising=False)

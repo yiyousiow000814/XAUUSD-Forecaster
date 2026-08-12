@@ -66,7 +66,6 @@ from xauusd_forecaster.news_impact import (  # noqa: E402
 )
 from xauusd_forecaster.storylines import STORYLINE_POLICY_VERSION, temporal_event_graph  # noqa: E402
 from xauusd_forecaster.execution_learning import execution_learning_status  # noqa: E402
-from xauusd_forecaster.market_session import expected_weekly_closure  # noqa: E402
 
 
 def _deployment_status(
@@ -379,6 +378,32 @@ def _latest_quote_received(database: Path) -> str | None:
         except (KeyError, ValueError, json.JSONDecodeError):
             continue
     return None
+
+
+def _broker_market_session(database: Path, now: datetime) -> dict | None:
+    path = database.parent / "quotes" / "market-session.json"
+    if not path.exists():
+        return None
+    try:
+        item = json.loads(path.read_text(encoding="utf-8"))
+        if item.get("schema") != "xauusd.forward.market-session.v1":
+            return None
+        if str(item.get("symbol", "")).casefold() != "xauusd":
+            return None
+        observed_at = datetime.fromisoformat(
+            str(item["observed_at"]).replace("Z", "+00:00")
+        )
+        age = (now - observed_at).total_seconds()
+        if age < -5 or age > 20:
+            return None
+        return {
+            "is_open": bool(item["is_open"]),
+            "observed_at": observed_at.isoformat(),
+            "next_open_time": item.get("next_open_time"),
+            "next_close_time": item.get("next_close_time"),
+        }
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
 
 
 CATEGORY_LABELS = {
@@ -1401,9 +1426,10 @@ def _dashboard_payload(database: Path) -> dict:
                     if decision_success else None)
     online = bool(age_seconds is not None and age_seconds <= 30
                   and decision_age is not None and decision_age <= 420)
+    broker_session = _broker_market_session(database, now)
     market_session = (
-        "OPEN" if online else
-        "WEEKLY_CLOSED" if expected_weekly_closure(now) else
+        "CLOSED" if broker_session and not broker_session["is_open"] else
+        "OPEN" if broker_session and online else
         "DATA_UNAVAILABLE"
     )
     clock_skew_seconds = None
@@ -1592,7 +1618,7 @@ def _dashboard_payload(database: Path) -> dict:
     quote_component = component("quote_bridge", 30)
     decision_component = component("decision_collector", 420)
     outcome_component = component("outcome_settler", 420)
-    if market_session == "WEEKLY_CLOSED":
+    if market_session == "CLOSED":
         for market_component in (
             quote_component, decision_component, outcome_component,
         ):
@@ -1605,6 +1631,15 @@ def _dashboard_payload(database: Path) -> dict:
         "system": {
             "online": online,
             "market_session": market_session,
+            "market_session_observed_at": (
+                broker_session["observed_at"] if broker_session else None
+            ),
+            "market_reopens_at": (
+                broker_session["next_open_time"] if broker_session else None
+            ),
+            "market_closes_at": (
+                broker_session["next_close_time"] if broker_session else None
+            ),
             "deployment": {
                 **DEPLOYMENT_PROVENANCE,
                 "payload_generated_at": now.isoformat(),

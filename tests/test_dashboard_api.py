@@ -35,6 +35,57 @@ def test_deployment_status_does_not_mislabel_local_edits_as_remote_drift() -> No
     assert module._deployment_status(None, "remote", False) == "PROVENANCE_UNKNOWN"
 
 
+def test_dashboard_reads_only_fresh_ctrader_market_session(tmp_path) -> None:
+    module = _dashboard_module()
+    now = datetime(2026, 8, 11, 21, 0, tzinfo=UTC)
+    database = tmp_path / "forward-evidence.sqlite3"
+    quotes = tmp_path / "quotes"
+    quotes.mkdir()
+    session_path = quotes / "market-session.json"
+    session_path.write_text(json.dumps({
+        "schema": "xauusd.forward.market-session.v1",
+        "symbol": "XAUUSD",
+        "observed_at": now.isoformat(),
+        "is_open": False,
+        "next_open_time": (now + timedelta(hours=1)).isoformat(),
+        "next_close_time": None,
+    }), encoding="utf-8")
+
+    session = module._broker_market_session(database, now)
+
+    assert session == {
+        "is_open": False,
+        "observed_at": now.isoformat(),
+        "next_open_time": (now + timedelta(hours=1)).isoformat(),
+        "next_close_time": None,
+    }
+    assert module._broker_market_session(database, now + timedelta(seconds=21)) is None
+
+
+def test_dashboard_reports_broker_close_and_reopen_time(tmp_path) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=now).close()
+    quotes = tmp_path / "quotes"
+    quotes.mkdir()
+    reopens_at = now + timedelta(hours=1)
+    (quotes / "market-session.json").write_text(json.dumps({
+        "schema": "xauusd.forward.market-session.v1",
+        "symbol": "XAUUSD",
+        "observed_at": now.isoformat(),
+        "is_open": False,
+        "next_open_time": reopens_at.isoformat(),
+        "next_close_time": None,
+    }), encoding="utf-8")
+
+    payload = _dashboard_module()._dashboard_payload(database)
+
+    assert payload["system"]["market_session"] == "CLOSED"
+    assert payload["system"]["market_reopens_at"] == reopens_at.isoformat()
+    for component in ("quote_bridge", "decision_collector", "outcome_settler"):
+        assert payload["system"]["components"][component]["status"] == "MARKET_CLOSED"
+
+
 def test_news_evidence_display_collapses_frozen_versions_to_one_event() -> None:
     module = _dashboard_module()
     connection = sqlite3.connect(":memory:")

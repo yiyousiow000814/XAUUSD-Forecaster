@@ -191,10 +191,11 @@ test("returns a verified main revision through the existing ingest heartbeat", (
   assert.match(snapshot, /MAX_DASHBOARD_SNAPSHOT_BYTES/);
 });
 
-test("does not show a redundant forecast warning while the market is closed", () => {
+test("replaces the forecast state with the broker reopening countdown", () => {
   const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
-  assert.match(source, /const forecastStatus = marketClosed\s*\? null/);
-  assert.match(source, /forecastStatus && signalRemaining > 0 && online/);
+  assert.match(source, /const forecastStatus = marketClosed/);
+  assert.match(source, /距离重开/);
+  assert.match(source, /marketClosed \|\| marketUnavailable \|\| \(signalRemaining > 0 && online\)/);
   assert.match(source, /等待行情恢复/);
   assert.match(source, /等待最新预测/);
   assert.doesNotMatch(source, /当前不可参考/);
@@ -235,6 +236,23 @@ test("uses one Chinese system-state presentation across every dashboard page", (
     assert.match(source, /SystemStatePill/);
     assert.doesNotMatch(source, /MARKET CLOSED|CONNECTING|市场休市 · 新闻运行中/);
   }
+});
+
+test("live room presents broker-confirmed closure instead of a WAIT prediction", () => {
+  const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
+  assert.match(source, /距离重开/);
+  assert.match(source, /cTrader 已确认 XAUUSD 休市/);
+  assert.match(source, /暂停新增预测与 30 分钟样本/);
+  assert.match(source, /const dialAction = marketClosed/);
+  assert.match(source, /marketUnavailable\s*\? "无行情"/);
+});
+
+test("live room hides a stale forecast when broker status is unavailable", () => {
+  const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
+  assert.match(source, /const marketUnavailable = Boolean\(payload && !online && !marketClosed\)/);
+  assert.match(source, /marketUnavailable\s*\? "unavailable"/);
+  assert.match(source, /marketUnavailable\s*\? "无行情"/);
+  assert.match(source, /marketClosed \|\| marketUnavailable \|\|/);
 });
 
 test("renders the news and decision audit route", async () => {

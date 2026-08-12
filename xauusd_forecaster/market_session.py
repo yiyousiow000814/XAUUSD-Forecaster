@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from .market import MarketObservation
+from .market import BrokerMarketSession, MarketObservation
 
 
 UTC = timezone.utc
@@ -93,18 +93,25 @@ def skipped_grid_reason(
     decision_time: datetime,
     current_boundary: datetime,
     observations: list[MarketObservation],
+    broker_session: BrokerMarketSession | None = None,
+    session_observed_at: datetime | None = None,
 ) -> str | None:
     """Classify grids that must not be reconstructed as live predictions."""
 
-    if (
-        not expected_weekly_closure(decision_time)
-        and horizon_crosses_weekly_closure(decision_time)
-    ):
-        return "FIXED_HORIZON_CROSSES_WEEKLY_CLOSE"
+    session_clock = session_observed_at or current_boundary
+    if broker_session is None or not broker_session.is_fresh(session_clock):
+        return "BROKER_MARKET_STATUS_UNAVAILABLE"
+    if not broker_session.is_open:
+        return "BROKER_MARKET_CLOSED"
+    # The duration belongs to the heartbeat's observed_at, not to this collector
+    # iteration. Comparing the raw duration can admit a close-crossing decision
+    # while a still-fresh heartbeat ages for up to 20 seconds.
+    estimated_close = broker_session.observed_at + broker_session.time_till_close
+    if estimated_close <= decision_time + timedelta(minutes=30):
+        return "FIXED_HORIZON_CROSSES_BROKER_CLOSE"
+
     if has_fresh_quote(observations, decision_time):
         return None
-    if expected_weekly_closure(decision_time):
-        return "EXPECTED_WEEKLY_MARKET_CLOSURE"
     if decision_time < current_boundary - timedelta(minutes=10):
         return "MISSED_GRID_WITHOUT_POINT_IN_TIME_QUOTE"
-    return None
+    return "CURRENT_GRID_WITHOUT_FRESH_QUOTE"
