@@ -186,10 +186,13 @@ are immutable model-update fields.
 - Only the owner may append a manual promotion approval after forward gates.
 - Unknown, missing, stale, or unhealthy data always produces effective
   `WAIT`; it never invents a replacement direction.
-- Automatic generation training requires 30 event-exposed rows for both the
-  Official and Broad lanes. One event and one event day permit an explicitly
-  experimental Shadow generation; 10 events and three event days establish the
-  standard evidence state.
+- Automatic generation training requires 30 event-exposed rows in the Broad
+  lane. If the Official lane has fewer than 30 rows, its residual is an explicit
+  zero-effect cold-start artifact; `Full` therefore remains Market-only until a
+  later complete generation has enough Official evidence. This keeps all model
+  identities present without fabricating an Official news signal. One event and
+  one event day permit an explicitly experimental Broad Shadow generation; 10
+  events and three event days establish the standard evidence state.
   Artifacts trained from one or two distinct event days are explicitly labelled
   `EXPERIMENTAL_SINGLE_DAY` or `EXPERIMENTAL_TWO_DAY`; three distinct event days
   establish the standard news evidence state. All remain Shadow Challengers.

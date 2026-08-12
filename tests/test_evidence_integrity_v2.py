@@ -1232,7 +1232,7 @@ def _training_rows(count: int) -> list[dict]:
 
 
 def _attach_event_exposure(rows: list[dict], *, event_days: int = 1,
-                           event_count: int = 3) -> None:
+                           event_count: int = 3, official: bool = True) -> None:
     start = datetime(2026, 8, 1, tzinfo=UTC)
     for index, row in enumerate(rows):
         event_index = index % event_count
@@ -1245,11 +1245,13 @@ def _attach_event_exposure(rows: list[dict], *, event_days: int = 1,
             "raw_weight": 1.0,
             "source_budget_id": f"source-{event_index}",
         }
-        row["news_exposed"] = True
+        row["news_exposed"] = official
         row["broad_news_exposed"] = True
-        row["news"] = [0.1] * len(training_v2.NEWS_FEATURES)
+        row["news"] = [0.1 if official else 0.0] * len(training_v2.NEWS_FEATURES)
         row["broad_news"] = [0.1] * len(training_v2.BROAD_MODEL_FEATURES)
-        row["official_events"] = [{**event, "model_permission": "OFFICIAL_MODEL"}]
+        row["official_events"] = (
+            [{**event, "model_permission": "OFFICIAL_MODEL"}] if official else []
+        )
         row["broad_events"] = [{**event, "model_permission": "BROAD_MODEL"}]
 
 
@@ -1378,7 +1380,7 @@ def test_news_models_train_early_with_explicit_experimental_status(
     ledger.close()
 
 
-def test_generation_activates_all_six_models_only_after_news_is_eligible(
+def test_generation_activates_all_six_models_with_broad_news_and_cold_official_lane(
     tmp_path, monkeypatch
 ) -> None:
     first_seen = datetime(2026, 8, 1, 10, tzinfo=UTC)
@@ -1421,7 +1423,7 @@ def test_generation_activates_all_six_models_only_after_news_is_eligible(
         "SELECT count(*) FROM model_updates_v2"
     ).fetchone()[0] == 0
 
-    _attach_event_exposure(rows)
+    _attach_event_exposure(rows, official=False)
     for index in range(3):
         _append_news(
             ledger, source="federal_reserve_monetary", item=f"bootstrap-{index}",
@@ -1435,6 +1437,23 @@ def test_generation_activates_all_six_models_only_after_news_is_eligible(
     assert {
         row.get("model_identity") for row in second_result if row["status"] == "TRAINED"
     } == {
+        "MARKET_ONLY", "NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL",
+        "BROAD_FULL", "NEWS_ONLY",
+    }
+    updates = {
+        row["model_identity"]: row
+        for row in ledger.connection.execute("SELECT * FROM model_updates_v2")
+    }
+    assert updates["NEWS_RESIDUAL"]["news_exposed_rows"] == 0
+    assert updates["FULL"]["news_exposed_rows"] == 0
+    assert updates["BROAD_FULL"]["news_exposed_rows"] >= 30
+    assert "insufficient" in updates["NEWS_RESIDUAL"]["model_version"]
+    active = inference_v2._active_updates(
+        inference_v2._activated_generation_updates(
+            ledger, datetime.now(UTC) + timedelta(minutes=1)
+        )
+    )
+    assert {row["model_identity"] for row in active} == {
         "MARKET_ONLY", "NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL",
         "BROAD_FULL", "NEWS_ONLY",
     }
@@ -1611,6 +1630,12 @@ def test_retired_contract_cannot_remain_active_after_cleanup(tmp_path) -> None:
     assert inference_v2._has_activated_generation(
         ledger, base + timedelta(minutes=2),
     ) is True
+    with pytest.raises(RuntimeError, match="incomplete prediction set"):
+        inference_v2._require_complete_active_generation(
+            ledger,
+            base + timedelta(minutes=2),
+            [{"model_identity": "CHAMPION_0"}],
+        )
     transition = learning_curve_payload(ledger.connection)["news_contract_transition"]
     assert transition["state"] == "BLOCKED_RETIRED_GENERATION"
     assert transition["active_contract"]["policy_version"] == retired.policy_version

@@ -263,7 +263,7 @@ test("renders the news and decision audit route", async () => {
   const html = await response.text();
   assert.match(html, /Aurum Evidence Desk/);
   assert.match(html, />新闻 <b>/);
-  assert.match(html, /新闻证据管理/);
+  assert.match(html, /当前可用新闻事件/);
   const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   assert.match(source, /模型真正用过哪些新闻/);
   assert.match(source, /按独立事件说明模型用过什么、没用什么/);

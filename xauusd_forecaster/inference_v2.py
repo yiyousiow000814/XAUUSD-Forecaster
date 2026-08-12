@@ -249,6 +249,24 @@ def _has_activated_generation(ledger, decision_time: datetime) -> bool:
     ).fetchone() is not None
 
 
+def _require_complete_active_generation(
+    ledger, decision_time: datetime, predictions: list[dict],
+) -> None:
+    """Never let a running collector silently publish a partial model set."""
+    if not _has_activated_generation(ledger, decision_time):
+        return
+    present = {
+        str(row.get("model_identity")) for row in predictions
+        if row.get("model_identity") != "CHAMPION_0"
+    }
+    missing = sorted(MODEL_IDENTITIES - present)
+    if missing:
+        raise RuntimeError(
+            "activated model generation produced an incomplete prediction set: "
+            + ", ".join(missing)
+        )
+
+
 def _calibration(ledger, model_identity: str, decision_time: datetime) -> dict:
     """Calibrate the rolling lineage using the newest model at each prior decision."""
     rows = ledger.connection.execute(
@@ -422,6 +440,11 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
                 "RESEARCH_NEWS_ONLY" if news_exposed
                 else "NO_ELIGIBLE_NEWS"
             )
+        if (
+            identity in {"NEWS_RESIDUAL", "FULL"}
+            and int(_row_value(update, "news_exposed_rows", 0) or 0) == 0
+        ):
+            prediction_status = "COLD_START_NO_OFFICIAL_EVIDENCE"
         _insert_prediction(
             ledger, decision_id=decision_id, decision_time=decision_time, created_at=created_at,
             model_version=update["model_version"], model_identity=identity,
@@ -438,4 +461,5 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
                         "recommended_action": recommended,
                         "raw_recommended_action": raw_recommended,
                         "calibration_status": calibration["status"]})
+    _require_complete_active_generation(ledger, decision_time, created)
     return created
