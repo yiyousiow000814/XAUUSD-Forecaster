@@ -550,9 +550,15 @@ def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
 
     payload = _dashboard_module()._dashboard_payload(database)
     assert payload["recent_news"][0]["headline"] == "2026年6月个人收入与支出"
-    assert len(payload["news_source_health"]) == 17
+    assert len(payload["news_source_health"]) == 13
     assert all(
-        row["source"] != "non_fed_full_text"
+        row["source"] not in {
+            "non_fed_full_text",
+            "bls_employment_situation",
+            "bls_consumer_price_index",
+            "bls_job_openings",
+            "google_news_bls_official_releases",
+        }
         for row in payload["news_source_health"]
     )
     synchronizer = payload["system"]["components"]["sites_synchronizer"]
@@ -560,48 +566,17 @@ def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
     assert synchronizer["status"] == "OK"
 
 
-def test_bls_direct_403_reports_healthy_official_domain_fallback(tmp_path) -> None:
-    now = datetime.now(UTC).replace(microsecond=0)
-    database = tmp_path / "forward.sqlite3"
-    ledger = ForwardLedger(database, now=now)
-    ledger.append_source_poll({
-        "poll_id": "bls-direct-error", "source": "bls_employment_situation",
-        "fetched_time": now, "status": "ERROR", "error_type": "HTTPError",
-        "error": "HTTP Error 403: Forbidden",
-    })
-    ledger.append_source_poll({
-        "poll_id": "bls-fallback-ok", "source": "google_news_bls_official_releases",
-        "fetched_time": now, "status": "OK",
-    })
-    body = "official BLS employment situation body " * 12
-    ledger.append_news_revision({
-        "source": "google_news_bls_official_releases",
-        "source_item_id": "employment-situation", "source_published_time": now,
-        "collector_first_seen_time": now, "fetched_time": now,
-        "headline": "Employment Situation Summary", "body": body,
-        "link": "https://www.bls.gov/news.release/empsit.nr0.htm",
-        "content_hash": hashlib.sha256(body.encode()).hexdigest(),
-        "cluster_id": "employment-situation",
-    })
-
-    rows = _dashboard_module()._news_source_health(ledger.connection, now)
-    direct = next(row for row in rows if row["source"] == "bls_employment_situation")
-    assert direct["health"] == "FALLBACK_ACTIVE"
-    assert direct["recovery_mode"] == "BLS_DIRECT_BLOCKED"
-    assert direct["semantic_status"] == "OFFICIAL_DOMAIN_FALLBACK_ACTIVE"
-
-
 def test_source_error_does_not_claim_polling_is_normal(tmp_path) -> None:
     now = datetime.now(UTC).replace(microsecond=0)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
     ledger.append_source_poll({
-        "poll_id": "bls-direct-error", "source": "bls_employment_situation",
+        "poll_id": "eia-error", "source": "eia_press_releases",
         "fetched_time": now, "status": "ERROR", "error_type": "HTTPError",
         "error": "HTTP Error 403: Forbidden",
     })
 
     rows = _dashboard_module()._news_source_health(ledger.connection, now)
-    direct = next(row for row in rows if row["source"] == "bls_employment_situation")
+    direct = next(row for row in rows if row["source"] == "eia_press_releases")
 
     assert direct["health"] == "ERROR"
     assert direct["semantic_status"] == "SOURCE_ERROR"

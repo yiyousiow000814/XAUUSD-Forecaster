@@ -40,6 +40,9 @@ from xauusd_forecaster.market import (
     build_forward_snapshot,
 )
 from xauusd_forecaster.news import (
+    BLS_SOURCE,
+    DIRECT_FULL_TEXT_RSS_SOURCES,
+    GOOGLE_NEWS_LANES,
     GoogleNewsLane,
     RssSource,
     collect_bea_macro,
@@ -998,13 +1001,7 @@ def test_direct_official_rss_sources_are_bounded_and_rate_limited(tmp_path) -> N
     )
 
     def fetcher(source: RssSource) -> bytes:
-        if source.name == "bls_employment_situation":
-            topic = "employment situation nonfarm payroll update"
-        elif source.name == "bls_consumer_price_index":
-            topic = "consumer price index inflation update"
-        elif source.name == "bls_job_openings":
-            topic = "JOLTS job openings update"
-        elif source.name.startswith("eia_"):
+        if source.name.startswith("eia_"):
             topic = "oil production"
         else:
             topic = "generic supervisory calendar notice"
@@ -1026,12 +1023,9 @@ def test_direct_official_rss_sources_are_bounded_and_rate_limited(tmp_path) -> N
     second = collect_direct_full_text_rss_news(
         ledger, fetched + timedelta(minutes=5), fetcher, extractor
     )
-    assert [item["status"] for item in first] == ["OK"] * 6
-    assert [item["status"] for item in second] == [
-        "OK", "OK", "OK",
-        "SKIPPED_INTERVAL", "SKIPPED_INTERVAL", "SKIPPED_INTERVAL",
-    ]
-    assert ledger.count("news_revisions") == 6
+    assert [item["status"] for item in first] == ["OK"] * 3
+    assert [item["status"] for item in second] == ["SKIPPED_INTERVAL"] * 3
+    assert ledger.count("news_revisions") == 3
     ecb = next(item for item in first if item["source"] == "ecb_press_releases")
     assert ecb["candidate_items"] == 1
     assert ecb["eligible_items"] == 1
@@ -1039,6 +1033,19 @@ def test_direct_official_rss_sources_are_bounded_and_rate_limited(tmp_path) -> N
         "SELECT link FROM news_revisions WHERE source='eia_press_releases'"
     ).fetchone()
     assert stored["link"] == "https://www.eia.gov/pressroom/releases/example.php"
+
+
+def test_active_bls_collection_uses_public_api_only() -> None:
+    retired = {
+        "bls_employment_situation",
+        "bls_consumer_price_index",
+        "bls_job_openings",
+        "google_news_bls_official_releases",
+    }
+
+    assert BLS_SOURCE == "bls_public_api"
+    assert retired.isdisjoint(source.name for source in DIRECT_FULL_TEXT_RSS_SOURCES)
+    assert retired.isdisjoint(lane.name for lane in GOOGLE_NEWS_LANES)
 
 
 def test_direct_official_sources_report_partial_when_current_body_is_blocked(
@@ -1057,7 +1064,7 @@ def test_direct_official_sources_report_partial_when_current_body_is_blocked(
     rss_results = collect_direct_full_text_rss_news(
         ledger, fetched, rss, blocked,
     )
-    assert [row["status"] for row in rss_results] == ["PARTIAL"] * 6
+    assert [row["status"] for row in rss_results] == ["PARTIAL"] * 3
 
     def html(url: str) -> bytes:
         if "treasury.gov" in url:
@@ -1105,30 +1112,6 @@ def test_saved_official_bodies_do_not_starve_later_feed_items(tmp_path) -> None:
     assert ledger.connection.execute(
         "SELECT count(*) FROM news_revisions WHERE source='eia_press_releases'"
     ).fetchone()[0] == 6
-
-
-def test_bls_rss_403_circuit_uses_public_api_fallback(tmp_path) -> None:
-    fetched = datetime(2026, 8, 5, 10, 30, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched - timedelta(hours=1))
-    source = "bls_employment_situation"
-    for minutes in (15, 10, 5):
-        at = fetched - timedelta(minutes=minutes)
-        ledger.append_source_poll({
-            "poll_id": f"bls-403-{minutes}", "source": source,
-            "fetched_time": at, "status": "ERROR",
-            "error_type": "HTTPError", "error": "HTTP Error 403: Forbidden",
-        })
-    called = []
-
-    def fetcher(item: RssSource) -> bytes:
-        called.append(item.name)
-        return b"<rss><channel /></rss>"
-
-    statuses = collect_direct_full_text_rss_news(ledger, fetched, fetcher)
-    employment = next(row for row in statuses if row["source"] == source)
-    assert employment["status"] == "SKIPPED_CIRCUIT_OPEN"
-    assert employment["fallback_source"] == "bls_public_api"
-    assert source not in called
 
 
 def test_direct_official_html_sources_reach_ai_without_semantic_filtering(tmp_path) -> None:
@@ -1250,65 +1233,6 @@ def test_google_news_lane_does_not_merge_distinct_events_before_ai(tmp_path) -> 
     assert result["inserted_revisions"] == len(headlines)
     assert result["processed_items"] == len(headlines)
     assert result["rejected_reasons"] == {}
-
-
-def test_bls_official_fallback_is_collected_after_related_discovery_items(tmp_path) -> None:
-    fetched = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched - timedelta(days=1))
-    for index in range(3):
-        body = "publisher employment report commentary " * 20
-        ledger.append_news_revision({
-            "source": "google_news_us_employment", "source_item_id": f"commentary-{index}",
-            "source_published_time": fetched - timedelta(hours=1),
-            "collector_first_seen_time": fetched - timedelta(minutes=30),
-            "fetched_time": fetched - timedelta(minutes=30),
-            "headline": f"July jobs report commentary {index}", "body": body,
-            "link": f"https://publisher.example/jobs-{index}",
-            "content_hash": hashlib.sha256(f"{body}{index}".encode()).hexdigest(),
-            "cluster_id": f"commentary-{index}",
-        })
-    lane = GoogleNewsLane(
-        "google_news_bls_official_releases", "site:bls.gov Employment Situation",
-    )
-    rss = b"""<rss><channel><item><guid>bls-official</guid>
-      <title>Employment Situation News Release - 2026 M07 Results - Bureau of Labor Statistics (.gov)</title>
-      <pubDate>Sat, 08 Aug 2026 09:30:00 GMT</pubDate>
-      <link>https://news.google.com/rss/articles/bls</link>
-    </item></channel></rss>"""
-    result = collect_google_news_lane(
-        ledger, fetched, lane, fetcher=lambda _: rss,
-        decoder=lambda _: "https://www.bls.gov/news.release/empsit.nr0.htm",
-        content_extractor=lambda url: ("official employment release " * 40, url),
-    )
-    assert result["inserted_revisions"] == 1
-    assert result["rejected_reasons"] == {}
-
-
-def test_google_official_fallback_reports_partial_when_body_is_blocked(tmp_path) -> None:
-    fetched = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched - timedelta(days=1))
-    lane = GoogleNewsLane(
-        "google_news_bls_official_releases", "site:bls.gov Employment Situation",
-    )
-    rss = b"""<rss><channel><item><guid>bls-official</guid>
-      <title>Employment Situation News Release - Bureau of Labor Statistics (.gov)</title>
-      <pubDate>Sat, 08 Aug 2026 09:30:00 GMT</pubDate>
-      <link>https://news.google.com/rss/articles/bls</link>
-    </item></channel></rss>"""
-    result = collect_google_news_lane(
-        ledger, fetched, lane, fetcher=lambda _: rss,
-        decoder=lambda _: "https://www.bls.gov/news.release/empsit.nr0.htm",
-        content_extractor=lambda _url: (_ for _ in ()).throw(
-            urllib.error.HTTPError(_url, 403, "Forbidden", {}, None)
-        ),
-    )
-    assert result["status"] == "PARTIAL"
-    assert result["rejected_reasons"] == {"FULL_TEXT_UNAVAILABLE": 1}
-    poll = ledger.connection.execute(
-        "SELECT status,error_type FROM source_polls ORDER BY fetched_time DESC LIMIT 1"
-    ).fetchone()
-    assert poll["status"] == "PARTIAL"
-    assert poll["error_type"] == "PublisherContentUnavailable"
 
 
 def test_fresh_discovery_candidates_reach_ai_despite_headline_semantics() -> None:

@@ -272,16 +272,12 @@ NEWS_SOURCE_DEFINITIONS = {
     "federal_reserve_full_text": ("Federal Reserve", "发布源", 15, ("federal_reserve_monetary", "federal_reserve_press_all", "federal_reserve_speeches_testimony")),
     "us_treasury_press_releases": ("U.S. Treasury", "发布源", 45, ("us_treasury_press_releases",)),
     "bea_economic_releases": ("U.S. BEA", "发布源", 45, ("bea_economic_releases",)),
-    "bls_employment_situation": ("BLS Employment Situation", "官方发布源", 15, ("bls_employment_situation",)),
-    "bls_consumer_price_index": ("BLS Consumer Price Index", "官方发布源", 15, ("bls_consumer_price_index",)),
-    "bls_job_openings": ("BLS Job Openings", "官方发布源", 15, ("bls_job_openings",)),
     "bls_public_api": ("BLS Public Data API", "数值与修订链路", 75, ()),
     "ecb_press_releases": ("European Central Bank", "发布源", 45, ("ecb_press_releases",)),
     "eia_press_releases": ("U.S. EIA Press", "发布源", 45, ("eia_press_releases",)),
     "eia_today_in_energy": ("U.S. EIA Energy", "发布源", 45, ("eia_today_in_energy",)),
     "gdelt_gold_geopolitics": ("GDELT", "发现源", 75, ("gdelt_gold_geopolitics",)),
     "google_news_gold_context": ("Google News Context", "发现源", 45, ("google_news_gold_context",)),
-    "google_news_bls_official_releases": ("BLS Official Release Fallback", "官方域名备用发现源", 45, ("google_news_bls_official_releases",)),
     "google_news_us_employment": ("Google News U.S. Employment", "发现源", 45, ("google_news_us_employment",)),
     "google_news_us_inflation": ("Google News U.S. Inflation", "发现源", 45, ("google_news_us_inflation",)),
     "google_news_fed_rates": ("Google News Fed & Rates", "发现源", 45, ("google_news_fed_rates",)),
@@ -404,45 +400,6 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
             "semantic_message": semantic_message,
         })
     by_source = {row["source"]: row for row in rows}
-    bls_numeric = by_source.get("bls_public_api")
-    if bls_numeric:
-        numeric_seen = _parse_utc(bls_numeric.get("latest_item_time"))
-        for source in (
-            "bls_employment_situation", "bls_consumer_price_index", "bls_job_openings"
-        ):
-            release = by_source.get(source)
-            release_seen = _parse_utc(release.get("latest_item_time")) if release else None
-            if release and release_seen and (numeric_seen is None or numeric_seen < release_seen):
-                release["health"] = "DEGRADED"
-                release["semantic_status"] = "RELEASE_SEEN_NUMERIC_PENDING"
-                release["semantic_message"] = "正式发布已捕获，但 BLS 数值/修订尚未同步"
-    bls_fallback = by_source.get("google_news_bls_official_releases")
-    if bls_fallback:
-        for source in (
-            "bls_employment_situation", "bls_consumer_price_index", "bls_job_openings"
-        ):
-            release = by_source.get(source)
-            if (
-                release
-                and release.get("latest_status") == "ERROR"
-                and release.get("last_error_type") == "HTTPError"
-                and bls_fallback.get("health") in {"HEALTHY", "DEGRADED"}
-                and bls_fallback.get("recent_evidence")
-            ):
-                fallback_healthy = bls_fallback.get("health") == "HEALTHY"
-                release["health"] = "FALLBACK_ACTIVE" if fallback_healthy else "DEGRADED"
-                release["recovery_mode"] = "BLS_DIRECT_BLOCKED"
-                release["fallback_label"] = bls_fallback["label"]
-                release["fallback_health"] = bls_fallback["health"]
-                release["semantic_status"] = (
-                    "OFFICIAL_DOMAIN_FALLBACK_ACTIVE" if fallback_healthy
-                    else "OFFICIAL_RELEASE_BODY_BLOCKED"
-                )
-                release["semantic_message"] = (
-                    "BLS 直接 RSS 被本机网络拒绝；官方域名备用发现源与 BLS 数值 API 正常运行"
-                    if fallback_healthy else
-                    "已发现 BLS 官方发布，但本机仍无法读取正式正文；BLS 数值 API 独立运行"
-                )
     gdelt = by_source.get("gdelt_gold_geopolitics")
     fallback = by_source.get("google_news_gold_context")
     if gdelt and fallback and "429" in str(gdelt.get("last_error") or ""):
