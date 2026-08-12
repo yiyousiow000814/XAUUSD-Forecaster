@@ -591,6 +591,23 @@ def test_bls_direct_403_reports_healthy_official_domain_fallback(tmp_path) -> No
     assert direct["semantic_status"] == "OFFICIAL_DOMAIN_FALLBACK_ACTIVE"
 
 
+def test_source_error_does_not_claim_polling_is_normal(tmp_path) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger.append_source_poll({
+        "poll_id": "bls-direct-error", "source": "bls_employment_situation",
+        "fetched_time": now, "status": "ERROR", "error_type": "HTTPError",
+        "error": "HTTP Error 403: Forbidden",
+    })
+
+    rows = _dashboard_module()._news_source_health(ledger.connection, now)
+    direct = next(row for row in rows if row["source"] == "bls_employment_situation")
+
+    assert direct["health"] == "ERROR"
+    assert direct["semantic_status"] == "SOURCE_ERROR"
+    assert direct["semantic_message"] == "来源当前轮询失败；请查看最近错误与后备链路状态"
+
+
 def test_polled_release_source_without_items_is_not_reported_healthy(tmp_path) -> None:
     now = datetime.now(UTC).replace(microsecond=0)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)

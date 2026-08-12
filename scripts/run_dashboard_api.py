@@ -369,7 +369,10 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
         else:
             health = "HEALTHY"
         recent_evidence = _has_recent_evidence(latest_item_time, now)
-        if health == "WARMING_UP":
+        if health == "ERROR":
+            semantic_status = "SOURCE_ERROR"
+            semantic_message = "来源当前轮询失败；请查看最近错误与后备链路状态"
+        elif health == "WARMING_UP":
             semantic_status = "NO_RELEASE_CAPTURED"
             semantic_message = "轮询正常，但本机尚未捕获该发布系列的正式条目"
         elif revision_sources and not recent_evidence:
