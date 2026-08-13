@@ -6,7 +6,7 @@ const workerUrl = new URL("../dist/server/index.js", import.meta.url);
 workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
 const { default: worker } = await import(workerUrl.href);
 const { applyFreshness } = await import("../app/api/status/freshness.js");
-const { formatCompactCount, formatExactCount } = await import("../app/_lib/count-format.ts");
+const { countPresentation, formatCompactCount, formatExactCount } = await import("../app/_lib/count-format.ts");
 
 test("formats growing counts through one compact and exact display contract", () => {
   const cases = [
@@ -24,6 +24,25 @@ test("formats growing counts through one compact and exact display contract", ()
   }
   assert.equal(formatCompactCount(null), "—");
   assert.equal(formatCompactCount(Number.NaN), "—");
+
+  assert.deepEqual(countPresentation(1_250, "compact", " 条"), {
+    accessibleValue: "1,250 条",
+    display: "1.3K",
+    exact: "1,250",
+    title: "1,250 条",
+  });
+  assert.deepEqual(countPresentation(1_250, "exact", " 条"), {
+    accessibleValue: "1,250 条",
+    display: "1,250",
+    exact: "1,250",
+    title: undefined,
+  });
+  assert.deepEqual(countPresentation(null), {
+    accessibleValue: "暂无数据",
+    display: "—",
+    exact: "—",
+    title: undefined,
+  });
 });
 
 async function render(path) {

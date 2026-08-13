@@ -255,12 +255,12 @@ export default function LiveRoomView() {
           <strong className={marketClosed || latest?.data_health === "OK" ? "good" : "warn"}>
             {marketClosed ? "休市" : latest?.data_health ?? "—"}
           </strong>
-          <small>{marketClosed ? "最后预测" : "最新决策"} {localTime(latest?.decision_time)}</small>
+          <small className="metric-detail metric-detail-time"><span>{marketClosed ? "最后预测" : "最新决策"}</span><time>{localTime(latest?.decision_time)}</time></small>
         </article>
         <article>
           <span>DECISIONS</span>
           <strong><MetricValue phase={currentPhase}><CountValue value={payload?.counts.decision_events} /></MetricValue></strong>
-          <small>从 Forward Epoch 开始</small>
+          <small className="metric-detail">Forward Epoch 起</small>
         </article>
         <article>
           <span>30M OUTCOMES</span>
@@ -270,7 +270,7 @@ export default function LiveRoomView() {
         <article>
           <span>NEWS ARTICLES</span>
           <strong><MetricValue phase={currentPhase}><CountValue value={newsMetrics.articles.received} /></MetricValue></strong>
-          <small><CountValue value={newsMetrics.events.independent} format="exact" suffix=" 个独立事件" /> · <CountValue value={newsMetrics.articles.stored_revisions} format="exact" suffix=" 个保存版本" /></small>
+          <small className="metric-detail metric-detail-stack"><CountValue value={newsMetrics.events.independent} format="exact" suffix=" 个独立事件" /><CountValue value={newsMetrics.articles.stored_revisions} format="exact" suffix=" 个保存版本" /></small>
         </article>
       </section>
 

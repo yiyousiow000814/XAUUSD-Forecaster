@@ -638,7 +638,7 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
       {tickTimes.map(value => <g key={value} className="time-axis"><line x1={x(value)} x2={x(value)} y1="350" y2="356" /><text x={x(value)} y="374" textAnchor="middle">{axisLabel(value)}</text></g>)}
     </svg>
     </div>
-    <div className="chart-legend">{visibleCurves.map(row => <span key={row.model_identity}><i style={{ background: COLORS[row.model_identity] }} />{LABELS[row.model_identity]} <b>{pct(row.points.at(-1)?.cumulative_quote_return ?? 0)}</b></span>)}{groupedBoundaries.length > 0 && <span><i className="train-dot" />模型换版本{compactBoundaryRail ? `（${boundaryLayouts.length} 个事件点 / ${groupedBoundaries.length} 次）` : groupedBoundaries.length > displayedBoundaries.length ? `（显示 ${displayedBoundaries.length}/${groupedBoundaries.length}）` : ""}</span>}</div>
+    <div className="chart-legend">{visibleCurves.map(row => <span key={row.model_identity}><i style={{ background: COLORS[row.model_identity] }} />{LABELS[row.model_identity]} <b>{pct(row.points.at(-1)?.cumulative_quote_return ?? 0)}</b></span>)}{groupedBoundaries.length > 0 && <span><i className="train-dot" />模型换版本{compactBoundaryRail ? `（${formatExactCount(boundaryLayouts.length)} 个事件点 / ${formatExactCount(groupedBoundaries.length)} 次）` : groupedBoundaries.length > displayedBoundaries.length ? `（显示 ${formatExactCount(displayedBoundaries.length)}/${formatExactCount(groupedBoundaries.length)}）` : ""}</span>}</div>
   </div>;
 }
 
@@ -987,7 +987,7 @@ function ExecutionLineChart({ title, subtitle, points, sourceCount, downsampled,
   const y = (value: number) => 22 + (high - value) / Math.max(.000001, high - low) * 156;
   const line = (rows: number[]) => rows.map((value, index) => `${x(index)},${y(value)}`).join(" ");
   const stamp = (value: string | number) => new Date(String(value)).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-  return <article className="execution-chart"><div className="chart-caption"><div><b>{title}</b><span>{subtitle}</span></div><strong>{format(first.at(-1) ?? 0)}<small>累计 {sourceCount ?? points.length} 笔{downsampled ? ` · 图中压缩为历史绘图点` : ""}</small></strong></div>
+  return <article className="execution-chart"><div className="chart-caption"><div><b>{title}</b><span>{subtitle}</span></div><strong>{format(first.at(-1) ?? 0)}<small>累计 {formatExactCount(sourceCount ?? points.length)} 笔{downsampled ? ` · 图中压缩为历史绘图点` : ""}</small></strong></div>
     {controls}
     {loading && <GraphLoading label="正在更新历史" compact />}
     {error && <GraphLoadError label="历史读取失败" compact onRetry={error} />}

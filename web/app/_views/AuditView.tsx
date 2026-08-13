@@ -987,7 +987,7 @@ export default function AuditView() {
           <div className="training-card-head"><span>学习进度</span></div>
           <div className="training-card-total">
             <strong>{statusState === "ready" && payload?.training
-              ? <><CountValue value={payload.training.complete_rows} /><small> / <CountValue value={payload.training.next_training_at} format="exact" /></small></>
+              ? <><CountValue value={payload.training.complete_rows} format="exact" /><small> / <CountValue value={payload.training.next_training_at} format="exact" /></small></>
               : <small>{statusState === "loading" ? "读取中…" : "暂不可用"}</small>}
             </strong>
             <span>{rowsUntilTraining === null ? "等待数据" : rowsUntilTraining === 0 ? "可以开始下一轮" : `还差 ${formatExactCount(rowsUntilTraining)} 条`}</span>
@@ -1084,20 +1084,20 @@ export default function AuditView() {
         {(payload?.storylines ?? []).length > 0 && <div className="story-grid">{(payload?.storylines ?? []).map(story => <article key={story.storyline_id}>
           <header><div><span>{({ EMERGING:"刚出现", REPORTED:"已有报道", CORROBORATED:"独立交叉确认", OFFICIALLY_CONFIRMED:"官方确认", ESCALATING:"升级中", DEESCALATING:"缓和中", CONTRADICTED:"存在冲突" } as Record<string,string>)[story.state] ?? story.state}</span><h3>{story.title}</h3></div><strong><CountValue value={story.event_count} /><small> 个进展</small></strong></header>
           <p className="story-latest"><b>最新事实变化</b>{story.latest_change}</p>
-          <div className="story-meta"><span>证据文件 {story.evidence_document_count}</span><span>独立组织 {story.independent_organization_count}</span><span>更新 {time(story.last_updated)}</span><span>{story.independent_confirmation ? "跨组织确认" : "尚未跨组织确认"}</span></div>
-          <section className="story-coverage"><div><b>证据覆盖 {story.coverage_count}/{story.coverage_total}</b>{story.covered_roles.map(role => <span key={role.key}>{role.label}</span>)}{story.missing_roles.map(role => <em className="missing" key={role.key}>仍缺：{role.label}</em>)}</div></section>
-          <ol>{story.timeline.map(item => <li key={item.event_key}><time>{time(item.event_time || item.source_published_time || item.first_seen)}</time><b>{({ STARTS:"首次进展", FOLLOWED_BY:"随后发生", CONFIRMS:"确认", CONTRADICTS:"否认/冲突", RESPONDS_TO:"作出回应", ESCALATES:"实际升级", DEESCALATES:"实际缓和", SUPERSEDES:"修订替代" } as Record<string,string>)[item.relation] ?? item.relation}</b><span>{item.headline}</span><small>{item.actor} · {item.action} · {item.evidence_documents} 份文件 · {item.independent_organizations} 个组织<br />发布 {time(item.source_published_time)} · 系统首次看到 {time(item.collector_first_seen_time)}</small></li>)}</ol>
-          {story.market_reactions.length > 0 && <details className="story-attachments"><summary>市场反应 {story.market_reactions.length}</summary>{story.market_reactions.map(item => <p key={item.event_key}>{item.headline}</p>)}</details>}
-          {story.commentary.length > 0 && <details className="story-attachments"><summary>评论与预测 {story.commentary.length}</summary>{story.commentary.map(item => <p key={item.event_key}>{item.headline}</p>)}</details>}
-          {story.background.length > 0 && <details className="story-attachments"><summary>背景材料 {story.background.length}</summary>{story.background.map(item => <p key={item.event_key}>{item.headline}</p>)}</details>}
+          <div className="story-meta"><span>证据文件 {formatExactCount(story.evidence_document_count)}</span><span>独立组织 {formatExactCount(story.independent_organization_count)}</span><span>更新 {time(story.last_updated)}</span><span>{story.independent_confirmation ? "跨组织确认" : "尚未跨组织确认"}</span></div>
+          <section className="story-coverage"><div><b>证据覆盖 {formatExactCount(story.coverage_count)}/{formatExactCount(story.coverage_total)}</b>{story.covered_roles.map(role => <span key={role.key}>{role.label}</span>)}{story.missing_roles.map(role => <em className="missing" key={role.key}>仍缺：{role.label}</em>)}</div></section>
+          <ol>{story.timeline.map(item => <li key={item.event_key}><time>{time(item.event_time || item.source_published_time || item.first_seen)}</time><b>{({ STARTS:"首次进展", FOLLOWED_BY:"随后发生", CONFIRMS:"确认", CONTRADICTS:"否认/冲突", RESPONDS_TO:"作出回应", ESCALATES:"实际升级", DEESCALATES:"实际缓和", SUPERSEDES:"修订替代" } as Record<string,string>)[item.relation] ?? item.relation}</b><span>{item.headline}</span><small>{item.actor} · {item.action} · {formatExactCount(item.evidence_documents)} 份文件 · {formatExactCount(item.independent_organizations)} 个组织<br />发布 {time(item.source_published_time)} · 系统首次看到 {time(item.collector_first_seen_time)}</small></li>)}</ol>
+          {story.market_reactions.length > 0 && <details className="story-attachments"><summary>市场反应 {formatExactCount(story.market_reactions.length)}</summary>{story.market_reactions.map(item => <p key={item.event_key}>{item.headline}</p>)}</details>}
+          {story.commentary.length > 0 && <details className="story-attachments"><summary>评论与预测 {formatExactCount(story.commentary.length)}</summary>{story.commentary.map(item => <p key={item.event_key}>{item.headline}</p>)}</details>}
+          {story.background.length > 0 && <details className="story-attachments"><summary>背景材料 {formatExactCount(story.background.length)}</summary>{story.background.map(item => <p key={item.event_key}>{item.headline}</p>)}</details>}
         </article>)}</div>}
         {(payload?.story_event_candidates ?? []).length > 0 && <section className="single-event-index">
-          <header><div><h3>新发生</h3><span>有后续时会自动接成一条脉络</span></div><strong>{singleEventTotal}</strong></header>
+          <header><div><h3>新发生</h3><span>有后续时会自动接成一条脉络</span></div><strong><CountValue value={singleEventTotal} /></strong></header>
           <div>{(payload?.story_event_candidates ?? []).map(item => <article key={item.candidate_id}>
             <time>{time(item.event_time || item.first_seen)}</time>
             <h3>{item.headline}</h3>
             <span>1 个进展</span>
-            <small>{item.evidence_documents} 篇证据 · {item.independent_publishers} 个独立来源</small>
+            <small>{formatExactCount(item.evidence_documents)} 篇证据 · {formatExactCount(item.independent_publishers)} 个独立来源</small>
           </article>)}</div>
         </section>}
         {activeEventTotal === 0 && <div className="story-empty"><b>还没有收到可确认的独立事件</b><span>新事件出现后会直接显示在这里。</span></div>}
