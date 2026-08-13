@@ -80,6 +80,7 @@ export async function GET(request: Request) {
         page,
         page_size: pageSize,
         window_days: 60,
+        totals_scope: "D1_ARCHIVE",
       }, { headers: { "Cache-Control": "public, max-age=15, s-maxage=30, stale-while-revalidate=120" } });
     }
   } catch {
@@ -126,6 +127,7 @@ export async function GET(request: Request) {
         category_counts: categoryCounts,
         page,
         page_size: pageSize,
+        totals_scope: "RECENT_WINDOW",
       }, { status: response.status, headers: { "Cache-Control": "no-store, max-age=0" } });
     } catch {
       // Return a single public-facing error below.

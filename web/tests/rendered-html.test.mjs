@@ -74,6 +74,7 @@ test("hydrates preview pages from their immutable build snapshot", () => {
   assert.doesNotMatch(learning, /"recent_decisions"/);
   assert.doesNotMatch(learning, /"news_evidence"/);
   assert.match(learning, /items\.slice\(0, PREVIEW_NEWS_PAGE_SIZE\)/);
+  assert.match(learning, /totals_scope: "BUILD_SNAPSHOT"/);
   assert.match(learning, /history_resource: market\.history_resource \?\? PREVIEW_RESOURCES\.marketHistory/);
   assert.match(learning, /training_markers: market\.training_markers \?\? \[\]/);
   for (const key of ["news_evidence", "story_event_candidates", "recent_decisions"]) {
@@ -97,6 +98,29 @@ test("hydrates preview pages from their immutable build snapshot", () => {
   assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);
   assert.match(resources, /DEFAULT_TIMEOUT_MS = 10_000/);
   assert.match(resources, /数据读取超时，页面会自动重试/);
+});
+
+test("only a current D1 archive may publish the 60-day news total", async () => {
+  const { authoritativeNewsTotals } = await import("../app/_lib/news-index-contract.ts");
+  const frozen = {
+    total: 200, all_total: 200, readable_total: 200,
+    parsed_total: 195, model_candidate_total: 14,
+    totals_scope: "BUILD_SNAPSHOT",
+  };
+  assert.equal(authoritativeNewsTotals(frozen), null);
+  assert.deepEqual(authoritativeNewsTotals({
+    ...frozen,
+    total: 1138,
+    all_total: 1138,
+    readable_total: 1138,
+    parsed_total: 1100,
+    model_candidate_total: 31,
+    totals_scope: "D1_ARCHIVE",
+  }), { category: 1138, readable: 1138, parsed: 1100, modelCandidates: 31 });
+  assert.equal(authoritativeNewsTotals({
+    ...frozen,
+    totals_scope: "RECENT_WINDOW",
+  }), null);
 });
 
 test("keeps every audit collection in compact Preview status", () => {

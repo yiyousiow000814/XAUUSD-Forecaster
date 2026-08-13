@@ -34,6 +34,9 @@ export function compactPreviewNewsIndex(index: JsonObject): JsonObject {
     items: items.slice(0, PREVIEW_NEWS_PAGE_SIZE),
     page: 1,
     page_size: PREVIEW_NEWS_PAGE_SIZE,
+    // The embedded page remains useful while D1 loads, but its build-time
+    // aggregates must never masquerade as the current 60-day archive total.
+    totals_scope: "BUILD_SNAPSHOT",
   };
 }
 
