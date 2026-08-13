@@ -7,28 +7,34 @@ import { writeDashboardSnapshot } from "../_shared/dashboard-snapshot";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  if (previewBundle?.learning_summary) {
-    return previewJson(previewBundle.learning_summary);
-  }
   // The fixed-size first page lives in the snapshot table. Older generations
   // and curve points are fetched from /api/learning-history only on demand.
-  const binding = env.DB as D1Database | undefined;
-  if (binding) {
-    const row = await binding
-      .prepare("SELECT payload FROM dashboard_snapshots WHERE id = ?")
-      .bind(3)
-      .first<{ payload: string }>();
-    if (row) {
-      // POST validates the snapshot before storing it. Returning the validated
-      // JSON bytes directly avoids parsing and serializing a growing history on
-      // every poll, which can exceed the Worker CPU limit.
-      return new Response(row.payload, {
-        headers: {
-          "Content-Type": "application/json; charset=utf-8",
-          "Cache-Control": "private, max-age=15",
-        },
-      });
+  try {
+    const binding = env.DB as D1Database | undefined;
+    if (binding) {
+      const row = await binding
+        .prepare("SELECT payload FROM dashboard_snapshots WHERE id = ?")
+        .bind(3)
+        .first<{ payload: string }>();
+      if (row) {
+        // POST validates the snapshot before storing it. Returning the validated
+        // JSON bytes directly avoids parsing and serializing a growing history on
+        // every poll, which can exceed the Worker CPU limit.
+        return new Response(row.payload, {
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+            "Cache-Control": "private, max-age=15",
+            ...(previewBundle ? { "X-Aurum-Preview": "read-only-d1-snapshot" } : {}),
+          },
+        });
+      }
     }
+  } catch {
+    // A read failure may use the immutable Preview summary or compact relay.
+  }
+
+  if (previewBundle?.learning_summary) {
+    return previewJson(previewBundle.learning_summary);
   }
 
   // The relay carries the small live-status heartbeat.  It deliberately keeps
