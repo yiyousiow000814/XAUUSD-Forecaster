@@ -746,6 +746,14 @@ class ForwardLedger:
                 raise ValueError("canonical episode identity is empty")
             if not str(record.get("canonical_event_id") or "").strip():
                 raise ValueError("canonical event identity is empty")
+            comparison = {
+                "identity_anchor_zh": record.get("identity_anchor_zh"),
+                "core_fact_changes_zh": record.get("core_fact_changes_zh"),
+                "identity_differences_zh": record.get("identity_differences_zh"),
+                "context_differences_zh": record.get("context_differences_zh"),
+            }
+            if any(value is None for value in comparison.values()):
+                raise ValueError("impact identity comparison is incomplete")
         with self.connection:
             self.connection.execute(
                 """INSERT INTO news_impact_assessments_v1 VALUES
@@ -762,14 +770,22 @@ class ForwardLedger:
             )
             if has_resolution:
                 self.connection.execute(
-                    """INSERT INTO news_event_identity_resolutions_v1 VALUES
-                    (?,?,?,?,?,?,?,?,?,?)""",
+                    """INSERT INTO news_event_identity_resolutions_v1 (
+                    resolution_id,annotation_id,assessment_id,llm_model_version,
+                    prompt_version,resolved_at,identity_relation,
+                    matched_annotation_id,identity_comparison_json,
+                    canonical_episode_id,canonical_event_id
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         record["resolution_id"], record["annotation_id"],
                         record["assessment_id"], record["llm_model_version"],
                         record["prompt_version"], _iso(record["assessed_at"]),
                         record["identity_relation"],
                         record.get("matched_annotation_id"),
+                        json.dumps(
+                            comparison, ensure_ascii=False, sort_keys=True,
+                            separators=(",", ":"),
+                        ),
                         record["canonical_episode_id"],
                         record["canonical_event_id"],
                     ),

@@ -45,6 +45,7 @@ GEMINI_MAX_PARALLEL_REQUESTS = 3
 GEMINI_DAILY_PRIORITY_RESERVE = 150
 GEMMA_REQUESTS_PER_DAY_PER_KEY = 15_000
 GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL = 20
+GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL = 15_000
 GEMMA_TITLE_BATCH_LIMIT = 10
 GEMMA_IMPACT_BATCH_LIMIT = 10
 PROMPT_VERSION = CURRENT_NEWS_PROMPT_VERSION
@@ -238,7 +239,7 @@ def annotate_pending_news(
     prompt_version: str = PROMPT_VERSION,
     allow_priority_reserve: bool = True,
     records: list[dict[str, object]] | None = None,
-    request_reserver: Callable[[str], bool] | None = None,
+    request_reserver: Callable[[str, int], bool] | None = None,
 ) -> list[dict[str, object]]:
     if prompt_version not in GENERATED_NEWS_PROMPT_VERSIONS:
         raise ValueError(f"unsupported news prompt version: {prompt_version}")
@@ -524,7 +525,7 @@ def translate_pending_headlines(
     api_key: str | None = None,
     model: str | None = None,
     records: list[dict[str, object]] | None = None,
-    request_reserver: Callable[[str], bool] | None = None,
+    request_reserver: Callable[[str, int], bool] | None = None,
 ) -> list[dict[str, object]]:
     """Translate display titles without creating action-bearing news features."""
     keys = configured_gemini_api_keys(api_key)
@@ -630,7 +631,7 @@ def assess_pending_news_impacts(
     annotation_prompt_version: str = PROMPT_VERSION,
     impact_prompt_version: str = IMPACT_PROMPT_VERSION,
     records: list[dict[str, object]] | None = None,
-    request_reserver: Callable[[str], bool] | None = None,
+    request_reserver: Callable[[str, int], bool] | None = None,
 ) -> list[dict[str, object]]:
     """Classify semantic impact lifetime with frozen Gemma 4 buckets."""
     keys = configured_gemini_api_keys(api_key)
@@ -771,7 +772,7 @@ class _GeminiRequestPool:
         *,
         requests_per_key: int = GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
         batch_limit: int | None = None,
-        request_reserver: Callable[[str], bool] | None = None,
+        request_reserver: Callable[[str, int], bool] | None = None,
     ):
         self.api_keys = api_keys
         self.quota = quota
@@ -796,12 +797,12 @@ class _GeminiRequestPool:
         )
         return min(capacity, self.batch_limit) if self.batch_limit else capacity
 
-    def _reserve(self, api_key: str) -> bool:
+    def _reserve(self, api_key: str, input_tokens: int = 0) -> bool:
         with self._lock:
             if self._batch_counts[api_key] >= self.requests_per_key:
                 return False
             if self.request_reserver is not None:
-                reserved = self.request_reserver(api_key)
+                reserved = self.request_reserver(api_key, max(0, input_tokens))
             else:
                 reserved = self.quota.reserve(api_key)
             if not reserved:
@@ -814,9 +815,12 @@ class _GeminiRequestPool:
         *, prompt_version: str = PROMPT_VERSION,
     ) -> tuple[dict, str]:
         last_error: Exception | None = None
+        estimated_tokens = _estimate_input_tokens(
+            _annotation_prompt(prompt_version, headline, body)
+        ) + 512
         for offset in range(len(self.api_keys)):
             key = self.api_keys[(start_index + offset) % len(self.api_keys)]
-            if not self._reserve(key):
+            if not self._reserve(key, estimated_tokens):
                 continue
             try:
                 if prompt_version == PROMPT_VERSION:
@@ -868,7 +872,10 @@ class _GeminiRequestPool:
         last_error: Exception | None = None
         for offset in range(len(self.api_keys)):
             key = self.api_keys[(start_index + offset) % len(self.api_keys)]
-            if not self._reserve(key):
+            repair_tokens = _estimate_input_tokens(json.dumps(
+                result, ensure_ascii=False, separators=(",", ":"),
+            )) + 512
+            if not self._reserve(key, repair_tokens):
                 continue
             try:
                 return _call_gemini_chinese_repair(
@@ -888,11 +895,12 @@ class _GeminiRequestPool:
         self, start_index: int, model: str, headline: str
     ) -> tuple[str, str]:
         last_error: Exception | None = None
+        estimated_tokens = _estimate_input_tokens(headline) + 512
         models = TITLE_TRANSLATION_MODELS if model == DEFAULT_GEMMA_MODEL else (model,)
         for candidate_model in models:
             for offset in range(len(self.api_keys)):
                 key = self.api_keys[(start_index + offset) % len(self.api_keys)]
-                if not self._reserve(key):
+                if not self._reserve(key, estimated_tokens):
                     continue
                 try:
                     return _call_gemini_title(key, candidate_model, headline)
@@ -917,9 +925,30 @@ class _GeminiRequestPool:
     ) -> tuple[dict, str]:
         last_error: Exception | None = None
         last_http_error: urllib.error.HTTPError | None = None
+        prompt = _impact_prompt(row, prompt_version=prompt_version)
+        estimated_tokens = _estimate_input_tokens(prompt) + 1024
+        if self.request_reserver is not None:
+            # Google documents countTokens as the preflight source of truth.
+            # If it is temporarily unavailable, byte length is a deliberately
+            # conservative fallback and may defer rather than overrun TPM.
+            counted_tokens = None
+            for key in self.api_keys:
+                try:
+                    counted_tokens = _count_gemini_input_tokens(
+                        key, IMPACT_MODEL, _impact_payload(prompt),
+                    )
+                    break
+                except Exception:
+                    continue
+            if counted_tokens is None:
+                estimated_tokens = max(
+                    estimated_tokens, len(prompt.encode("utf-8")) + 1024,
+                )
+            else:
+                estimated_tokens = counted_tokens
         for offset in range(len(self.api_keys)):
             key = self.api_keys[(start_index + offset) % len(self.api_keys)]
-            if not self._reserve(key):
+            if not self._reserve(key, estimated_tokens):
                 continue
             try:
                 if prompt_version == IMPACT_PROMPT_VERSION:
@@ -1171,60 +1200,8 @@ def _call_gemini_title(api_key: str, model: str, headline: str) -> tuple[str, st
 def _call_gemini_impact(
     api_key: str, row: dict, *, prompt_version: str = IMPACT_PROMPT_VERSION,
 ) -> tuple[dict, str]:
-    annotation = dict(row.get("annotation") or {})
-    independent_review = ""
-    if prompt_version == IMPACT_PROMPT_VERSION:
-        independent_review = (
-            "你必须独立复核Gemini给出的相关性、优先级和实质变化；这些字段只是候选意见，"
-            "不能照抄。大小写、拼写错误、单一关键词和来源名都不能单独决定重要性。"
-            "结合完整正文判断；地震语境中的jolts不是就业数据，市场被jolted也不是JOLTS，"
-            "小写bls jolts若正文确实描述官方职位空缺数据则仍可能是数据发布。"
-        )
-    else:
-        raise ValueError(f"unsupported impact prompt version: {prompt_version}")
-    prompt = (
-        "判断以下新闻事件从事件发生或发布时间起，通常可能影响XAUUSD相关市场信息多久。"
-        "你只能依据此新闻正文和已给出的事件抽取，不得使用后来发生的事实，不得预测交易方向。"
-        "IMMEDIATE=最长2小时；SAME_DAY=最长12小时；DATA_RELEASE=最长24小时；"
-        "POLICY_SHIFT=最长72小时；ONGOING_EVENT=最长7天；BACKGROUND=不进入模型。"
-        "普通转载、同一事实确认或换标题必须选DUPLICATE_REPORT，不能延长事件寿命；"
-        "只有正文包含新的决定、数据、行动、升级、降级或正式后续才是MATERIAL_UPDATE。"
-        "PRIOR_SAME_EVENT_RECORDS是按人物、对象和主题找到的较早候选，即使事件key不同也必须比较；"
-        "若当前正文没有比候选新增实质事实，必须选DUPLICATE_REPORT。"
-        "你还必须像档案员一样选择事件身份：同一事实选SAME_EVENT并返回候选的candidate_id；"
-        "同一脉络中的真正新进展选SAME_EPISODE并返回候选candidate_id；"
-        "身份判断与XAUUSD影响大小无关，背景级报道仍可能是同一现实事件的重复报道。"
-        "必须先判断现实事件身份，再判断影响寿命。当前报道即使被判BACKGROUND、正文较短、"
-        "annotation key为空或来自不同记者，只要国家或机构、数据系列、统计期和公布值与候选相同，"
-        "仍必须选SAME_EVENT和DUPLICATE_REPORT。只有数据系列、统计期、修订状态或现实事实真的不同，"
-        "才允许NEW_EPISODE；不能因为它对黄金影响小就创建新事件。"
-        "SAME_EVENT只能选择identity_anchor_eligible=true的核心事实候选；"
-        "评论、市场反应和背景可以附着在同一episode，但绝不能成为事实锚点。"
-        "没有任何候选属于同一现实事件才选NEW_EPISODE且matched_candidate_id留空；"
-        "证据不足则选UNRESOLVED且matched_candidate_id留空。不能自己发明candidate_id。"
-        "reason_zh用一句简体中文说明正文依据。只返回JSON。\n"
-        + independent_review +
-        f"PUBLISHED_AT: {row.get('source_published_time') or ''}\n"
-        f"FIRST_SEEN_AT: {row.get('collector_first_seen_time') or ''}\n"
-        f"EVENT_EXTRACTION: {json.dumps(annotation, ensure_ascii=False, separators=(',', ':'))}\n"
-        f"PRIOR_SAME_EVENT_RECORDS: {json.dumps(row.get('prior_event_context') or [], ensure_ascii=False, separators=(',', ':'))}\n"
-        "NEWS_START\n"
-        f"Headline: {row.get('headline') or ''}\nFull content: {row.get('body') or ''}\n"
-        "NEWS_END"
-    )
-    payload = {
-        "systemInstruction": {"parts": [{"text": (
-            "你是受严格约束的新闻影响寿命分类器，不是交易顾问。"
-            "必须遵守固定枚举和时间上限。"
-        )}]},
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseSchema": IMPACT_RESPONSE_SCHEMA,
-            "maxOutputTokens": 500,
-            "temperature": 0,
-        },
-    }
+    prompt = _impact_prompt(row, prompt_version=prompt_version)
+    payload = _impact_payload(prompt)
     request = urllib.request.Request(
         f"https://generativelanguage.googleapis.com/v1beta/models/{IMPACT_MODEL}:generateContent",
         data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
@@ -1252,6 +1229,110 @@ def _call_gemini_impact(
     )
     _require_simplified_chinese(validated["reason_zh"], "reason_zh", 4, 0.5, 12)
     return validated, str(envelope.get("modelVersion") or IMPACT_MODEL)
+
+
+def _impact_payload(prompt: str) -> dict[str, object]:
+    return {
+        "systemInstruction": {"parts": [{"text": (
+            "你是受严格约束的新闻影响寿命分类器，不是交易顾问。"
+            "必须遵守固定枚举和时间上限。"
+        )}]},
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": IMPACT_RESPONSE_SCHEMA,
+            "maxOutputTokens": 700,
+            "temperature": 0,
+        },
+    }
+
+
+def _count_gemini_input_tokens(
+    api_key: str, model: str, generate_content_request: dict[str, object],
+) -> int:
+    """Ask the provider tokenizer for the exact preflight input size."""
+    request = urllib.request.Request(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:countTokens",
+        data=json.dumps({
+            "generateContentRequest": {
+                "model": f"models/{model}", **generate_content_request,
+            },
+        }, separators=(",", ":")).encode("utf-8"),
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=30.0) as response:
+        result = json.loads(response.read())
+    tokens = int(result["totalTokens"])
+    if tokens <= 0:
+        raise ValueError("Gemini token count is not positive")
+    return tokens
+
+
+def _impact_prompt(row: dict, *, prompt_version: str = IMPACT_PROMPT_VERSION) -> str:
+    """Build the single source of truth for Gemma identity input and TPM accounting."""
+    annotation = dict(row.get("annotation") or {})
+    independent_review = ""
+    if prompt_version == IMPACT_PROMPT_VERSION:
+        independent_review = (
+            "你必须独立复核Gemini给出的相关性、优先级和实质变化；这些字段只是候选意见，"
+            "不能照抄。大小写、拼写错误、单一关键词和来源名都不能单独决定重要性。"
+            "结合完整正文判断；地震语境中的jolts不是就业数据，市场被jolted也不是JOLTS，"
+            "小写bls jolts若正文确实描述官方职位空缺数据则仍可能是数据发布。"
+        )
+    else:
+        raise ValueError(f"unsupported impact prompt version: {prompt_version}")
+    return (
+        "判断以下新闻事件从事件发生或发布时间起，通常可能影响XAUUSD相关市场信息多久。"
+        "你只能依据此新闻正文和已给出的事件抽取，不得使用后来发生的事实，不得预测交易方向。"
+        "IMMEDIATE=最长2小时；SAME_DAY=最长12小时；DATA_RELEASE=最长24小时；"
+        "POLICY_SHIFT=最长72小时；ONGOING_EVENT=最长7天；BACKGROUND=不进入模型。"
+        "普通转载、同一事实确认或换标题必须选DUPLICATE_REPORT，不能延长事件寿命；"
+        "只有正文包含新的决定、数据、行动、升级、降级或正式后续才是MATERIAL_UPDATE。"
+        "PRIOR_SAME_EVENT_RECORDS是按人物、对象和主题找到的较早候选，即使事件key不同也必须比较；"
+        "若当前正文没有比候选新增实质事实，必须选DUPLICATE_REPORT。"
+        "你还必须像档案员一样选择事件身份。SAME_EVENT表示核心可验证事实严格等价，"
+        "不是主题、人物或措辞相似；同一事实选SAME_EVENT并返回候选candidate_id。"
+        "同一现实过程中的真正新进展选SAME_EPISODE并返回候选candidate_id。"
+        "身份判断与XAUUSD影响大小无关，背景级报道仍可能是同一现实事件的重复报道。"
+        "比较时先识别主体、行为或测量类型、对象、范围、参考期间和具体发生批次等稳定身份，"
+        "再比较数值、状态、决定、行动、规模、生效时间、结果和修订等可变化核心事实。"
+        "来源、记者、语言、标题、语序和非核心背景差异不能单独创建新事件。"
+        "数值不同不能机械决定关系；必须判断它是否属于同一字段、时点、单位和修订状态，"
+        "以及它是当前报道的核心命题还是附带背景。"
+        "任何新增或改变的核心可验证事实都禁止SAME_EVENT；稳定身份仍相同时必须选"
+        "SAME_EPISODE和MATERIAL_UPDATE。无法从双方证据完成比较时必须选UNRESOLVED。"
+        "必须先判断现实事件身份，再判断影响寿命。当前报道即使被判BACKGROUND、正文较短、"
+        "annotation key为空或来自不同记者，只要国家或机构、数据系列、统计期和公布值与候选相同，"
+        "仍必须选SAME_EVENT和DUPLICATE_REPORT。同一数据系列和统计期的正式修订属于同一episode的"
+        "核心事实变化；只有数据系列、统计期、具体发生批次或其他稳定身份不同才允许NEW_EPISODE。"
+        "不能因为它对黄金影响小就创建新事件。"
+        "SAME_EVENT只能选择identity_anchor_eligible=true的核心事实候选；"
+        "评论、市场反应和背景可以附着在同一episode，但绝不能成为事实锚点。"
+        "没有任何候选属于同一现实事件才选NEW_EPISODE且matched_candidate_id留空；"
+        "证据不足则选UNRESOLVED且matched_candidate_id留空。不能自己发明candidate_id。"
+        "identity_anchor_zh简述用于比较的稳定身份。core_fact_changes_zh逐项列出候选到当前的"
+        "核心事实变化；identity_differences_zh逐项列出不同现实过程的身份差异；"
+        "context_differences_zh只列非核心差异。SAME_EVENT的前两项必须为空；"
+        "SAME_EPISODE必须有core_fact_changes_zh且identity_differences_zh为空；"
+        "NEW_EPISODE必须有identity_differences_zh。reason_zh用一句简体中文说明正文依据。"
+        "只返回JSON。\n"
+        + independent_review + "\n" +
+        f"PUBLISHED_AT: {row.get('source_published_time') or ''}\n"
+        f"FIRST_SEEN_AT: {row.get('collector_first_seen_time') or ''}\n"
+        f"EVENT_EXTRACTION: {json.dumps(annotation, ensure_ascii=False, separators=(',', ':'))}\n"
+        f"PRIOR_SAME_EVENT_RECORDS: {json.dumps(row.get('prior_event_context') or [], ensure_ascii=False, separators=(',', ':'))}\n"
+        "NEWS_START\n"
+        f"Headline: {row.get('headline') or ''}\nFull content: {row.get('body') or ''}\n"
+        "NEWS_END"
+    )
+
+
+def _estimate_input_tokens(text: str) -> int:
+    """Conservatively estimate multilingual input before the provider call."""
+    ascii_count = sum(ord(character) < 128 for character in text)
+    non_ascii_count = len(text) - ascii_count
+    return 256 + (ascii_count + 2) // 3 + (non_ascii_count * 3 + 1) // 2
 
 
 def _require_title_numbers_preserved(translated: str, source: str) -> None:

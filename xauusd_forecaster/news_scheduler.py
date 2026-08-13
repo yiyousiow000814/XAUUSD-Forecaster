@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS news_ai_account_minute_usage_v1 (
     account_id TEXT NOT NULL,
     model_family TEXT NOT NULL,
     request_count INTEGER NOT NULL,
+    input_token_count INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL,
     PRIMARY KEY(minute_bucket,account_id,model_family)
 );
@@ -100,6 +101,17 @@ class ScheduledJob:
 
 def install_scheduler_schema(connection: sqlite3.Connection) -> None:
     connection.executescript(SCHEDULER_SCHEMA)
+    minute_columns = {
+        str(row["name"])
+        for row in connection.execute(
+            "PRAGMA table_info(news_ai_account_minute_usage_v1)"
+        ).fetchall()
+    }
+    if "input_token_count" not in minute_columns:
+        connection.execute(
+            "ALTER TABLE news_ai_account_minute_usage_v1 "
+            "ADD COLUMN input_token_count INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def _iso(value: datetime) -> str:
@@ -469,6 +481,10 @@ def reserve_account_request(
     model_family: str,
     daily_limit: int,
     requests_per_minute: int,
+    input_tokens: int = 0,
+    input_tokens_per_minute: int | None = None,
+    shared_model_families: tuple[str, ...] | None = None,
+    share_minute_across_accounts: bool = False,
     reserve_total: int = 0,
     urgent: bool = False,
     now: datetime | None = None,
@@ -477,23 +493,49 @@ def reserve_account_request(
     instant = now or datetime.now(UTC)
     day = quota_day(instant)
     minute = minute_bucket(instant)
+    recent_minutes = (
+        minute_bucket(instant - timedelta(minutes=1)), minute,
+    )
     timestamp = _iso(instant)
+    estimated_tokens = max(0, int(input_tokens))
+    families = tuple(dict.fromkeys(shared_model_families or (model_family,)))
+    placeholders = ",".join("?" for _ in families)
     usable_daily_limit = daily_limit if urgent else max(0, daily_limit - reserve_total)
     connection.execute("BEGIN IMMEDIATE")
     try:
         daily = connection.execute(
-            """SELECT request_count FROM news_ai_account_daily_usage_v1
-               WHERE quota_day=? AND account_id=? AND model_family=?""",
-            (day, account_id, model_family),
+            f"""SELECT COALESCE(sum(request_count),0) AS request_count
+                FROM news_ai_account_daily_usage_v1
+                WHERE quota_day=? AND account_id=?
+                  AND model_family IN ({placeholders})""",
+            (day, account_id, *families),
         ).fetchone()
-        daily_count = int(daily["request_count"]) if daily else 0
+        daily_count = int(daily["request_count"])
+        account_clause = "" if share_minute_across_accounts else "AND account_id=?"
+        recent_parameters: tuple[object, ...] = (
+            *recent_minutes,
+            *((account_id,) if not share_minute_across_accounts else ()),
+            *families,
+        )
         recent = connection.execute(
-            """SELECT request_count FROM news_ai_account_minute_usage_v1
-               WHERE minute_bucket=? AND account_id=? AND model_family=?""",
-            (minute, account_id, model_family),
+            f"""SELECT COALESCE(sum(request_count),0) AS request_count,
+                       COALESCE(sum(input_token_count),0) AS input_token_count
+                FROM news_ai_account_minute_usage_v1
+                WHERE minute_bucket IN (?,?) {account_clause}
+                  AND model_family IN ({placeholders})""",
+            recent_parameters,
         ).fetchone()
-        minute_count = int(recent["request_count"]) if recent else 0
-        if daily_count >= usable_daily_limit or minute_count >= requests_per_minute:
+        minute_count = int(recent["request_count"])
+        minute_tokens = int(recent["input_token_count"])
+        token_exhausted = (
+            input_tokens_per_minute is not None
+            and minute_tokens + estimated_tokens > input_tokens_per_minute
+        )
+        if (
+            daily_count >= usable_daily_limit
+            or minute_count >= requests_per_minute
+            or token_exhausted
+        ):
             connection.rollback()
             return False
         connection.execute(
@@ -503,10 +545,14 @@ def reserve_account_request(
             (day, account_id, model_family, 1, timestamp),
         )
         connection.execute(
-            """INSERT INTO news_ai_account_minute_usage_v1 VALUES (?,?,?,?,?)
+            """INSERT INTO news_ai_account_minute_usage_v1
+               (minute_bucket,account_id,model_family,request_count,
+                input_token_count,updated_at) VALUES (?,?,?,?,?,?)
                ON CONFLICT(minute_bucket,account_id,model_family) DO UPDATE SET
-                 request_count=request_count+1,updated_at=excluded.updated_at""",
-            (minute, account_id, model_family, 1, timestamp),
+                 request_count=request_count+1,
+                 input_token_count=input_token_count+excluded.input_token_count,
+                 updated_at=excluded.updated_at""",
+            (minute, account_id, model_family, 1, estimated_tokens, timestamp),
         )
         connection.commit()
         return True

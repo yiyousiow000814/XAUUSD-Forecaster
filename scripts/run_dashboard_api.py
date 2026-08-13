@@ -42,6 +42,7 @@ from xauusd_forecaster.annotation import (  # noqa: E402
     DEFAULT_GEMMA_MODEL,
     FALLBACK_GEMINI_MODEL,
     GEMMA_REQUESTS_PER_DAY_PER_KEY,
+    GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
     GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
     GEMINI_DAILY_PRIORITY_RESERVE,
     GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
@@ -2189,6 +2190,7 @@ def _dashboard_payload(database: Path) -> dict:
                 "model": DEFAULT_GEMMA_MODEL,
                 "role": "标题中文翻译，不进入模型训练",
                 "requests_per_minute": GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
+                "input_tokens_per_minute": GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
             },
             "antigravity": {
                 "enabled": False,

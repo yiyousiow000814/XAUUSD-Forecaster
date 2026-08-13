@@ -101,6 +101,51 @@ def test_account_quota_snapshot_uses_scheduler_usage_without_double_counting() -
     assert all("account_id" not in row for row in snapshot["keys"])
 
 
+def test_gemma_minute_budget_is_shared_across_tasks_and_keys() -> None:
+    connection = _connection()
+    shared = ("gemma-impact", "gemma-title")
+    common = {
+        "daily_limit": 15_000,
+        "requests_per_minute": 20,
+        "input_tokens_per_minute": 15_000,
+        "shared_model_families": shared,
+        "share_minute_across_accounts": True,
+        "now": NOW,
+    }
+
+    assert reserve_account_request(
+        connection, account_id="key-a", model_family="gemma-impact",
+        input_tokens=9_000, **common,
+    )
+    assert not reserve_account_request(
+        connection, account_id="key-b", model_family="gemma-title",
+        input_tokens=6_001, **common,
+    )
+    assert reserve_account_request(
+        connection, account_id="key-b", model_family="gemma-title",
+        input_tokens=6_000, **common,
+    )
+
+
+def test_gemma_budget_keeps_previous_bucket_to_prevent_boundary_burst() -> None:
+    connection = _connection()
+    common = {
+        "account_id": "key-a", "model_family": "gemma-impact",
+        "daily_limit": 15_000, "requests_per_minute": 20,
+        "input_tokens_per_minute": 15_000,
+        "shared_model_families": ("gemma-impact", "gemma-title"),
+        "share_minute_across_accounts": True,
+    }
+    before_boundary = NOW.replace(second=59)
+    assert reserve_account_request(
+        connection, input_tokens=9_000, now=before_boundary, **common,
+    )
+    assert not reserve_account_request(
+        connection, input_tokens=6_001,
+        now=before_boundary + timedelta(seconds=2), **common,
+    )
+
+
 def test_account_configuration_rejects_one_key_in_two_accounts() -> None:
     with pytest.raises(ValueError, match="two accounts"):
         configured_api_credentials(raw_accounts=json.dumps([

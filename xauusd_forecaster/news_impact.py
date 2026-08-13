@@ -11,7 +11,7 @@ from .news_semantics import ACTIONABLE_RECORD_KINDS, CURRENT_NEWS_PROMPT_VERSION
 
 
 IMPACT_MODEL = "gemma-4-31b-it"
-IMPACT_PROMPT_VERSION = "news-impact-v4-event-identity-reconciliation"
+IMPACT_PROMPT_VERSION = "news-impact-v5-factual-equivalence"
 HANDOVER_IMPACT_PROMPT_VERSION = "news-impact-v3-independent-semantic-review"
 
 IMPACT_TIME_RULES = {
@@ -38,7 +38,9 @@ IMPACT_RESPONSE_SCHEMA = {
     "type": "object",
     "required": [
         "impact_class", "event_state", "update_type", "identity_relation",
-        "matched_candidate_id", "confidence", "reason_zh",
+        "matched_candidate_id", "identity_anchor_zh", "core_fact_changes_zh",
+        "identity_differences_zh", "context_differences_zh", "confidence",
+        "reason_zh",
     ],
     "properties": {
         "impact_class": {"type": "string", "enum": sorted(IMPACT_CLASSES)},
@@ -46,6 +48,19 @@ IMPACT_RESPONSE_SCHEMA = {
         "update_type": {"type": "string", "enum": sorted(UPDATE_TYPES)},
         "identity_relation": {"type": "string", "enum": sorted(IDENTITY_RELATIONS)},
         "matched_candidate_id": {"type": "string"},
+        "identity_anchor_zh": {"type": "string"},
+        "core_fact_changes_zh": {
+            "type": "array", "maxItems": 4,
+            "items": {"type": "string"},
+        },
+        "identity_differences_zh": {
+            "type": "array", "maxItems": 4,
+            "items": {"type": "string"},
+        },
+        "context_differences_zh": {
+            "type": "array", "maxItems": 4,
+            "items": {"type": "string"},
+        },
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "reason_zh": {"type": "string"},
     },
@@ -102,6 +117,22 @@ def validate_impact_assessment(
         raise ValueError("A material update must resolve inside the same episode")
     if result["update_type"] == "NEW_EVENT" and relation != "NEW_EPISODE":
         raise ValueError("A new event must start a new episode")
+    anchor = str(result["identity_anchor_zh"] or "").strip()
+    core_changes = _comparison_items(result["core_fact_changes_zh"], "core facts")
+    identity_differences = _comparison_items(
+        result["identity_differences_zh"], "identity differences",
+    )
+    context_differences = _comparison_items(
+        result["context_differences_zh"], "context differences",
+    )
+    if relation != "UNRESOLVED" and len(anchor) < 4:
+        raise ValueError("Gemma identity anchor is empty")
+    if relation == "SAME_EVENT" and (core_changes or identity_differences):
+        raise ValueError("Same-event identity requires factual equivalence")
+    if relation == "SAME_EPISODE" and (not core_changes or identity_differences):
+        raise ValueError("Same-episode identity requires a core factual change")
+    if relation == "NEW_EPISODE" and not identity_differences:
+        raise ValueError("New-episode identity requires an anchor difference")
     confidence = float(result["confidence"])
     if not 0.0 <= confidence <= 1.0:
         raise ValueError("Gemma impact confidence is outside [0, 1]")
@@ -114,9 +145,22 @@ def validate_impact_assessment(
         "update_type": str(result["update_type"]),
         "identity_relation": relation,
         "matched_candidate_id": matched,
+        "identity_anchor_zh": anchor,
+        "core_fact_changes_zh": core_changes,
+        "identity_differences_zh": identity_differences,
+        "context_differences_zh": context_differences,
         "confidence": confidence,
         "reason_zh": reason,
     }
+
+
+def _comparison_items(value: object, label: str) -> list[str]:
+    if not isinstance(value, list) or len(value) > 4:
+        raise ValueError(f"Gemma {label} are not a bounded list")
+    items = [str(item or "").strip() for item in value]
+    if any(len(item) < 4 for item in items):
+        raise ValueError(f"Gemma {label} contain an empty explanation")
+    return items
 
 
 def _identity_tokens(annotation: dict) -> set[str]:
@@ -147,6 +191,23 @@ def _prior_similarity(current: dict, prior: dict) -> float:
              or current_object in prior_object or prior_object in current_object)
     )
     return max(overlap, 0.75 if object_match else 0.0)
+
+
+def _claim_snapshot(annotation: dict) -> dict[str, object]:
+    """Expose bounded, symmetric facts for pairwise identity comparison."""
+    return {
+        key: annotation.get(key)
+        for key in (
+            "record_kind", "evidence_role", "actor", "action", "object",
+            "location", "event_time", "material_event_key", "episode_key",
+            "canonical_actor_id", "canonical_object_id", "material_change",
+        )
+    } | {
+        "supporting_evidence": [
+            str(excerpt)[:240]
+            for excerpt in (annotation.get("supporting_evidence") or [])[:3]
+        ],
+    }
 
 
 def pending_impact_records(
@@ -323,6 +384,7 @@ def pending_impact_records(
             candidate["canonical_object_id"] = prior_annotation.get(
                 "canonical_object_id"
             )
+            candidate["event_claim"] = _claim_snapshot(prior_annotation)
             candidate["identity_anchor_eligible"] = bool(
                 str(prior_annotation.get("record_kind") or "")
                 in ACTIONABLE_RECORD_KINDS

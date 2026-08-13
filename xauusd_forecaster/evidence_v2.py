@@ -473,6 +473,7 @@ CREATE TABLE IF NOT EXISTS news_event_identity_resolutions_v1 (
     identity_relation TEXT NOT NULL CHECK(identity_relation IN (
         'SAME_EVENT','SAME_EPISODE','NEW_EPISODE','UNRESOLVED')),
     matched_annotation_id TEXT,
+    identity_comparison_json TEXT NOT NULL,
     canonical_episode_id TEXT NOT NULL,
     canonical_event_id TEXT NOT NULL,
     FOREIGN KEY(annotation_id) REFERENCES news_annotations(annotation_id),
@@ -745,6 +746,17 @@ def _repair_execution_score_foreign_key(connection: sqlite3.Connection) -> None:
 def install_v2_schema(connection: sqlite3.Connection) -> None:
     """Create V2 structures and append-only guards; never mutate old rows."""
     connection.executescript(V2_SCHEMA)
+    identity_columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(news_event_identity_resolutions_v1)"
+        ).fetchall()
+    }
+    if "identity_comparison_json" not in identity_columns:
+        connection.execute(
+            "ALTER TABLE news_event_identity_resolutions_v1 ADD COLUMN "
+            "identity_comparison_json TEXT NOT NULL DEFAULT '{}'"
+        )
     _repair_execution_score_foreign_key(connection)
     for table in V2_IMMUTABLE_TABLES:
         for operation in ("UPDATE", "DELETE"):

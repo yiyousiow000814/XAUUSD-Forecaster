@@ -2530,7 +2530,11 @@ def test_gemma_impact_assessment_is_append_only_and_versioned(
         lambda _key, _row: ({
             "impact_class": "POLICY_SHIFT", "event_state": "ACTIVE",
             "update_type": "NEW_EVENT", "identity_relation": "NEW_EPISODE",
-            "matched_candidate_id": "", "confidence": 0.9,
+            "matched_candidate_id": "",
+            "identity_anchor_zh": "新的政策决定发生批次。",
+            "core_fact_changes_zh": [],
+            "identity_differences_zh": ["当前政策决定属于新的发生批次。"],
+            "context_differences_zh": [], "confidence": 0.9,
             "reason_zh": "政策决定可能持续影响利率预期。",
         }, annotation_module.IMPACT_MODEL),
     )
@@ -2563,6 +2567,44 @@ def test_gemma_impact_preserves_transient_http_error(tmp_path, monkeypatch) -> N
         pool.call_impact(0, {})
 
     assert caught.value.code == 429
+
+
+def test_gemma_impact_reserves_provider_counted_input_tokens(
+    tmp_path, monkeypatch,
+) -> None:
+    reserved = []
+    pool = annotation_module._GeminiRequestPool(
+        ("test-key",), GeminiQuotaLedger(tmp_path / "quota.json"),
+        requests_per_key=1, batch_limit=1,
+        request_reserver=lambda _key, tokens: reserved.append(tokens) or True,
+    )
+    monkeypatch.setattr(
+        annotation_module, "_count_gemini_input_tokens", lambda *_args: 4_321,
+    )
+    monkeypatch.setattr(
+        annotation_module, "_call_gemini_impact",
+        lambda *_args, **_kwargs: ({"ok": True}, annotation_module.IMPACT_MODEL),
+    )
+
+    result, _ = pool.call_impact(0, {
+        "annotation": {}, "prior_event_context": [], "headline": "Headline",
+        "body": "Complete body",
+    })
+
+    assert result == {"ok": True}
+    assert reserved == [4_321]
+
+
+def test_impact_prompt_defines_factual_equivalence_without_domain_examples() -> None:
+    prompt = annotation_module._impact_prompt({
+        "annotation": {}, "prior_event_context": [], "headline": "Headline",
+        "body": "Complete body",
+    })
+
+    assert "SAME_EVENT表示核心可验证事实严格等价" in prompt
+    assert "任何新增或改变的核心可验证事实都禁止SAME_EVENT" in prompt
+    assert "4300" not in prompt
+    assert "黄金价格变化" not in prompt
 
 
 def test_identity_recall_crosses_categories_and_ignores_xau_impact(tmp_path) -> None:
@@ -2634,6 +2676,10 @@ def test_identity_recall_crosses_categories_and_ignores_xau_impact(tmp_path) -> 
                 "reason_zh": "此前已经收到同一事件。",
                 "resolution_id": "prior-resolution",
                 "identity_relation": "NEW_EPISODE",
+                "identity_anchor_zh": "新的事实发生批次。",
+                "core_fact_changes_zh": [],
+                "identity_differences_zh": ["当前事实属于新的发生批次。"],
+                "context_differences_zh": [],
                 "canonical_episode_id": "episode-cook",
                 "canonical_event_id": "event-cook",
             })
@@ -2686,6 +2732,11 @@ def test_identity_recall_crosses_categories_and_ignores_xau_impact(tmp_path) -> 
     assert current["prior_event_context"][0]["canonical_event_id"] == "event-cook"
     assert current["prior_event_context"][0]["identity_anchor_eligible"] is True
     assert current["prior_event_context"][0]["impact_class"] == "BACKGROUND"
+    claim = current["prior_event_context"][0]["event_claim"]
+    assert claim["actor"] == "Donald Trump"
+    assert claim["action"] == "attempts removal"
+    assert claim["object"] == "Lisa Cook"
+    assert claim["supporting_evidence"] == ["Trump effort"]
     candidate_queries = [
         statement for statement in statements
         if "FROM NEWS_REVISIONS P JOIN NEWS_ANNOTATIONS PA" in statement.upper()

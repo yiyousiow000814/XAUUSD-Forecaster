@@ -6,12 +6,18 @@ from xauusd_forecaster.news_impact import validate_impact_assessment
 
 
 def assessment(update_type="DUPLICATE_REPORT", relation="SAME_EVENT", candidate="prior"):
+    core_changes = ["核心状态从先前值变为当前值。"] if relation == "SAME_EPISODE" else []
+    identity_differences = ["当前报道属于不同发生批次。"] if relation == "NEW_EPISODE" else []
     return {
         "impact_class": "DATA_RELEASE",
         "event_state": "COMPLETED",
         "update_type": update_type,
         "identity_relation": relation,
         "matched_candidate_id": candidate,
+        "identity_anchor_zh": "同一主体、对象和发生批次。",
+        "core_fact_changes_zh": core_changes,
+        "identity_differences_zh": identity_differences,
+        "context_differences_zh": [],
         "confidence": 0.95,
         "reason_zh": "正文与候选描述的是同一次官方数据发布。",
     }
@@ -82,6 +88,31 @@ def test_material_change_and_identity_relation_cannot_contradict_each_other(
         validate_impact_assessment(
             assessment(update_type, relation, candidate), candidate_ids={"prior"},
         )
+
+
+@pytest.mark.parametrize("changed_field", [
+    "数值", "状态", "决定", "行动", "规模", "生效时间", "结果", "修订",
+])
+def test_changed_core_fact_cannot_be_collapsed_into_same_event(changed_field):
+    result = assessment()
+    result["core_fact_changes_zh"] = [f"当前报道新增或改变了核心{changed_field}。"]
+
+    with pytest.raises(ValueError, match="factual equivalence"):
+        validate_impact_assessment(
+            result, candidate_ids={"prior"}, same_event_candidate_ids={"prior"},
+        )
+
+
+def test_source_language_and_wording_differences_remain_same_event_context():
+    result = assessment()
+    result["context_differences_zh"] = ["来源、语言和标题措辞不同。"]
+
+    validated = validate_impact_assessment(
+        result, candidate_ids={"prior"}, same_event_candidate_ids={"prior"},
+    )
+
+    assert validated["identity_relation"] == "SAME_EVENT"
+    assert validated["core_fact_changes_zh"] == []
 
 
 def test_batch_resolution_refreshes_a_prior_identity_persisted_after_selection():
