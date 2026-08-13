@@ -354,7 +354,8 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /api\/news-content\?key=/);
   assert.match(source, /api\/news-index\?/);
   assert.match(source, /api\/learning/);
-  assert.match(source, /view !== "news"/);
+  assert.match(source, /if \(view !== "news"\) \{[\s\S]*?fullNewsIndexReadyRef\.current[\s\S]*?refreshNews\(true\)/);
+  assert.match(source, /Do not poll off-screen/);
   assert.match(source, /view !== "league"/);
   assert.match(source, /loadDashboardResource<Payload>\("\/api\/status"/);
   assert.doesNotMatch(source, /Promise\.allSettled/);
