@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import io
 import json
@@ -2766,7 +2767,7 @@ def test_gemini_batch_is_capped_below_provider_rpm_limit(tmp_path, monkeypatch) 
     monkeypatch.setattr(
         annotation_module,
         "_call_gemini",
-        lambda *_: (vector, "gemini-3.5-flash-lite"),
+        lambda *_: (copy.deepcopy(vector), "gemini-3.5-flash-lite"),
     )
     statuses = annotate_pending_news(
         ledger, provider="gemini", api_key="test-key", limit=999
@@ -2804,7 +2805,7 @@ def test_gemini_key_pool_distributes_safe_capacity(tmp_path, monkeypatch) -> Non
 
     def fake_call(key, *_):
         calls.append(key)
-        return vector, "gemini-3.5-flash-lite"
+        return copy.deepcopy(vector), "gemini-3.5-flash-lite"
 
     monkeypatch.setenv("GEMINI_API_KEYS", "key-a;key-b;key-a")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
