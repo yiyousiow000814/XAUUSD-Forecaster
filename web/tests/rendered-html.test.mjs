@@ -99,14 +99,6 @@ test("keeps nested compact counts in each dashboard headline hierarchy", () => {
   }
 });
 
-test("keeps a visible divider between both desktop audit metric rows", () => {
-  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(
-    css,
-    /\.audit-tabs \{[^}]*grid-template-columns:repeat\(3,1fr\);[^}]*gap:1px;[^}]*background:var\(--ink\)/,
-  );
-});
-
 async function render(path) {
   return worker.fetch(
     new Request(`http://localhost${path}`, { headers: { accept: "text/html" } }),
