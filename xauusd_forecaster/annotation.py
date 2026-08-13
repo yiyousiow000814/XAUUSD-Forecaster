@@ -666,8 +666,15 @@ def assess_pending_news_impacts(
             identity = "|".join((
                 str(row["annotation_id"]), exact_model, impact_prompt_version,
             ))
+            from .news_event_identity import resolve_event_identity
+            resolution = resolve_event_identity(
+                row, result, connection=ledger.connection,
+            )
             ledger.append_news_impact_assessment({
                 "assessment_id": str(uuid.uuid5(uuid.NAMESPACE_URL, identity)),
+                "resolution_id": str(uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"event-identity|{identity}"
+                )),
                 "source": row["source"],
                 "source_item_id": row["source_item_id"],
                 "revision_number": row["revision_number"],
@@ -677,6 +684,7 @@ def assess_pending_news_impacts(
                 "prompt_version": impact_prompt_version,
                 "parse_started_at": started,
                 "assessed_at": assessed,
+                **resolution,
                 **result,
             })
             statuses.append({
@@ -1183,6 +1191,17 @@ def _call_gemini_impact(
         "只有正文包含新的决定、数据、行动、升级、降级或正式后续才是MATERIAL_UPDATE。"
         "PRIOR_SAME_EVENT_RECORDS是按人物、对象和主题找到的较早候选，即使事件key不同也必须比较；"
         "若当前正文没有比候选新增实质事实，必须选DUPLICATE_REPORT。"
+        "你还必须像档案员一样选择事件身份：同一事实选SAME_EVENT并返回候选的candidate_id；"
+        "同一脉络中的真正新进展选SAME_EPISODE并返回候选candidate_id；"
+        "身份判断与XAUUSD影响大小无关，背景级报道仍可能是同一现实事件的重复报道。"
+        "必须先判断现实事件身份，再判断影响寿命。当前报道即使被判BACKGROUND、正文较短、"
+        "annotation key为空或来自不同记者，只要国家或机构、数据系列、统计期和公布值与候选相同，"
+        "仍必须选SAME_EVENT和DUPLICATE_REPORT。只有数据系列、统计期、修订状态或现实事实真的不同，"
+        "才允许NEW_EPISODE；不能因为它对黄金影响小就创建新事件。"
+        "SAME_EVENT只能选择identity_anchor_eligible=true的核心事实候选；"
+        "评论、市场反应和背景可以附着在同一episode，但绝不能成为事实锚点。"
+        "没有任何候选属于同一现实事件才选NEW_EPISODE且matched_candidate_id留空；"
+        "证据不足则选UNRESOLVED且matched_candidate_id留空。不能自己发明candidate_id。"
         "reason_zh用一句简体中文说明正文依据。只返回JSON。\n"
         + independent_review +
         f"PUBLISHED_AT: {row.get('source_published_time') or ''}\n"
@@ -1217,7 +1236,20 @@ def _call_gemini_impact(
     result = _decode_json_object(
         envelope["candidates"][0]["content"]["parts"][0]["text"]
     )
-    validated = validate_impact_assessment(result)
+    candidate_ids = {
+        str(candidate.get("candidate_id") or "")
+        for candidate in row.get("prior_event_context") or ()
+        if str(candidate.get("candidate_id") or "")
+    }
+    same_event_candidate_ids = {
+        str(candidate.get("candidate_id") or "")
+        for candidate in row.get("prior_event_context") or ()
+        if candidate.get("identity_anchor_eligible")
+    }
+    validated = validate_impact_assessment(
+        result, candidate_ids=candidate_ids,
+        same_event_candidate_ids=same_event_candidate_ids,
+    )
     _require_simplified_chinese(validated["reason_zh"], "reason_zh", 4, 0.5, 12)
     return validated, str(envelope.get("modelVersion") or IMPACT_MODEL)
 

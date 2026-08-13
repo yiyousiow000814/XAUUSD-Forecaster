@@ -703,7 +703,9 @@ class ForwardLedger:
             )
 
     def append_news_impact_assessment(self, record: dict[str, Any]) -> None:
-        from .news_impact import EVENT_STATES, IMPACT_CLASSES, UPDATE_TYPES
+        from .news_impact import (
+            EVENT_STATES, IDENTITY_RELATIONS, IMPACT_CLASSES, UPDATE_TYPES,
+        )
 
         source_key = (
             record["source"], record["source_item_id"], record["revision_number"]
@@ -733,6 +735,17 @@ class ForwardLedger:
             raise ValueError("impact confidence is outside [0, 1]")
         if not str(record["reason_zh"]).strip():
             raise ValueError("impact reason is empty")
+        has_resolution = record.get("resolution_id") is not None
+        from .news_impact import IMPACT_PROMPT_VERSION
+        if record["prompt_version"] == IMPACT_PROMPT_VERSION and not has_resolution:
+            raise ValueError("current impact assessment requires identity resolution")
+        if has_resolution:
+            if record.get("identity_relation") not in IDENTITY_RELATIONS:
+                raise ValueError("impact identity relation is not controlled")
+            if not str(record.get("canonical_episode_id") or "").strip():
+                raise ValueError("canonical episode identity is empty")
+            if not str(record.get("canonical_event_id") or "").strip():
+                raise ValueError("canonical event identity is empty")
         with self.connection:
             self.connection.execute(
                 """INSERT INTO news_impact_assessments_v1 VALUES
@@ -747,6 +760,20 @@ class ForwardLedger:
                     str(record["reason_zh"]).strip(),
                 ),
             )
+            if has_resolution:
+                self.connection.execute(
+                    """INSERT INTO news_event_identity_resolutions_v1 VALUES
+                    (?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        record["resolution_id"], record["annotation_id"],
+                        record["assessment_id"], record["llm_model_version"],
+                        record["prompt_version"], _iso(record["assessed_at"]),
+                        record["identity_relation"],
+                        record.get("matched_annotation_id"),
+                        record["canonical_episode_id"],
+                        record["canonical_event_id"],
+                    ),
+                )
 
     def append_news_impact_failure(self, record: dict[str, Any]) -> None:
         with self.connection:

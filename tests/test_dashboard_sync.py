@@ -137,7 +137,7 @@ def test_preview_replays_old_story_aliases_through_branch_policy() -> None:
     assert candidates[0]["evidence_documents"] == 3
     assert candidates[0]["independent_publishers"] == 3
     assert status["storyline_summary"]["policy_version"].endswith(
-        "canonical-occurrence-chains"
+        "semantic-identity-resolution"
     )
 
 

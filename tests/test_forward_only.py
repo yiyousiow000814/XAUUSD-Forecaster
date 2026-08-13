@@ -2474,7 +2474,8 @@ def test_gemma_impact_assessment_is_append_only_and_versioned(
         "_call_gemini_impact",
         lambda _key, _row: ({
             "impact_class": "POLICY_SHIFT", "event_state": "ACTIVE",
-            "update_type": "NEW_EVENT", "confidence": 0.9,
+            "update_type": "NEW_EVENT", "identity_relation": "NEW_EPISODE",
+            "matched_candidate_id": "", "confidence": 0.9,
             "reason_zh": "政策决定可能持续影响利率预期。",
         }, annotation_module.IMPACT_MODEL),
     )
@@ -2537,7 +2538,7 @@ def test_impact_context_finds_semantically_similar_prior_event(tmp_path) -> None
         "trump_removes_lisa_cook", "cook_firing_attempt",
     )):
         item_id = f"cook-{index}"
-        seen = now + timedelta(minutes=index * 10)
+        seen = now + timedelta(minutes=index * 70)
         body = f"Trump effort involving Federal Reserve Governor Lisa Cook {index}. " * 20
         digest = hashlib.sha256(body.encode()).hexdigest()
         ledger.append_news_revision({
@@ -2571,15 +2572,54 @@ def test_impact_context_finds_semantically_similar_prior_event(tmp_path) -> None
                 "impact_class": "ONGOING_EVENT", "event_state": "ACTIVE",
                 "update_type": "NEW_EVENT", "confidence": 0.9,
                 "reason_zh": "此前已经收到同一事件。",
+                "resolution_id": "prior-resolution",
+                "identity_relation": "NEW_EPISODE",
+                "canonical_episode_id": "episode-cook",
+                "canonical_event_id": "event-cook",
             })
 
+    # A broad category can receive dozens of newer, unrelated reports before
+    # the next article about the original event. Candidate recall must rank
+    # semantic matches after a bounded scan, not truncate by recency first.
+    for index in range(60):
+        seen = now + timedelta(minutes=index + 1)
+        item_id = f"distractor-{index}"
+        body = f"Unrelated macro report number {index}. " * 20
+        digest = hashlib.sha256(body.encode()).hexdigest()
+        ledger.append_news_revision({
+            "source": "federal_reserve_press_all", "source_item_id": item_id,
+            "source_published_time": seen, "collector_first_seen_time": seen,
+            "fetched_time": seen, "headline": f"Unrelated report {index}",
+            "body": body, "content_hash": digest, "cluster_id": item_id,
+        })
+        ledger.append_annotation({
+            "annotation_id": f"distractor-annotation-{index}",
+            "source": "federal_reserve_press_all", "source_item_id": item_id,
+            "revision_number": 1, "raw_content_hash": digest,
+            "annotation": {
+                **common, "actor": "Other institution", "object": "Other metric",
+                "summary_zh": "这是一条与目标现实事件无关的完整宏观报道，用于验证候选召回不会被近期噪声截断。",
+                "supporting_evidence": ["Unrelated macro report"],
+                "canonical_actor_id": f"other_institution_{index}",
+                "canonical_object_id": f"other_metric_{index}",
+                "material_event_key": f"other_event_{index}",
+                "episode_key": f"other_episode_{index}",
+            },
+            "llm_model_version": annotation_module.DEFAULT_GEMINI_MODEL,
+            "prompt_version": annotation_module.PROMPT_VERSION,
+            "parse_started_at": seen, "parsed_at": seen + timedelta(seconds=1),
+        })
+
     pending = pending_impact_records(
-        ledger.connection, observed_at=now + timedelta(hours=1), limit=10,
+        ledger.connection, observed_at=now + timedelta(hours=2), limit=100,
     )
 
     current = next(row for row in pending if row["source_item_id"] == "cook-1")
     assert current["prior_event_context"]
     assert current["prior_event_context"][0]["source_item_id"] == "cook-0"
+    assert current["prior_event_context"][0]["candidate_id"] == "annotation-0"
+    assert current["prior_event_context"][0]["canonical_event_id"] == "event-cook"
+    assert current["prior_event_context"][0]["identity_anchor_eligible"] is True
 
 
 def test_json_object_decoder_accepts_fence_and_trailing_text() -> None:

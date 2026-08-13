@@ -67,6 +67,7 @@ from xauusd_forecaster.news_relevance import GOOGLE_NEWS_MAX_AGE  # noqa: E402
 from xauusd_forecaster.news_contracts import CURRENT_NEWS_CONTRACT  # noqa: E402
 from xauusd_forecaster.news_features_v2 import COLLECTION_SOURCES  # noqa: E402
 from xauusd_forecaster.news_impact import (  # noqa: E402
+    HANDOVER_IMPACT_PROMPT_VERSION,
     IMPACT_MODEL,
     IMPACT_PROMPT_VERSION,
     impact_is_actionable,
@@ -721,8 +722,14 @@ def _news_reader_rows(
                 WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                 preferred_a.parsed_at DESC LIMIT 1)
             LEFT JOIN news_impact_assessments_v1 i
-              ON i.annotation_id=a.annotation_id
-             AND i.llm_model_version=? AND i.prompt_version=?
+              ON i.assessment_id=(
+                SELECT selected_i.assessment_id
+                FROM news_impact_assessments_v1 selected_i
+                WHERE selected_i.annotation_id=a.annotation_id
+                  AND selected_i.llm_model_version=?
+                  AND selected_i.prompt_version IN (?,?)
+                ORDER BY CASE selected_i.prompt_version WHEN ? THEN 0 ELSE 1 END,
+                         selected_i.assessed_at DESC LIMIT 1)
             LEFT JOIN news_llm_failures f ON f.failure_id=(
               SELECT latest_f.failure_id FROM news_llm_failures latest_f
               WHERE latest_f.task_type='ANNOTATION'
@@ -769,6 +776,7 @@ def _news_reader_rows(
         (
             now.isoformat(timespec="microseconds"), INVALID_CHINESE_TITLE,
             PROMPT_VERSION, IMPACT_MODEL, IMPACT_PROMPT_VERSION,
+            HANDOVER_IMPACT_PROMPT_VERSION, IMPACT_PROMPT_VERSION,
             PROMPT_VERSION, cutoff, *cursor_parameters, limit,
         ),
     ).fetchall()
@@ -1548,9 +1556,14 @@ def _dashboard_payload(database: Path) -> dict:
                        WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                      preferred_a.parsed_at DESC LIMIT 1)
                LEFT JOIN news_impact_assessments_v1 i
-                 ON i.annotation_id=a.annotation_id
-                AND i.llm_model_version=?
-                AND i.prompt_version=?
+                 ON i.assessment_id=(
+                   SELECT selected_i.assessment_id
+                   FROM news_impact_assessments_v1 selected_i
+                   WHERE selected_i.annotation_id=a.annotation_id
+                     AND selected_i.llm_model_version=?
+                     AND selected_i.prompt_version IN (?,?)
+                   ORDER BY CASE selected_i.prompt_version WHEN ? THEN 0 ELSE 1 END,
+                            selected_i.assessed_at DESC LIMIT 1)
                LEFT JOIN news_llm_failures f
                  ON f.failure_id=(
                    SELECT latest_f.failure_id
@@ -1608,6 +1621,7 @@ def _dashboard_payload(database: Path) -> dict:
                 now.isoformat(timespec="microseconds"), INVALID_CHINESE_TITLE,
                 PROMPT_VERSION,
                 IMPACT_MODEL, IMPACT_PROMPT_VERSION,
+                HANDOVER_IMPACT_PROMPT_VERSION, IMPACT_PROMPT_VERSION,
                 PROMPT_VERSION,
             ),
         ).fetchall()

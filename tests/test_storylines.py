@@ -1,3 +1,5 @@
+import pytest
+
 from xauusd_forecaster.storylines import (
     LEGACY_POLICY_STATUS,
     storyline_rows,
@@ -187,6 +189,81 @@ def test_us_july_jobs_aliases_are_one_material_event_not_many_stories():
     assert len(graph["event_candidates"]) == 1
     assert graph["event_candidates"][0]["episode_key"] == "us_employment_report_2026_07"
     assert graph["event_candidates"][0]["evidence_documents"] == 2
+
+
+@pytest.mark.parametrize(
+    ("actor_a", "actor_b", "object_a", "object_b", "episode_a", "episode_b"),
+    [
+        (
+            "Statistics South Africa", "Stats SA", "Quarterly Labour Force Survey",
+            "South Africa unemployment rate 33.6%", "south_africa_unemployment_q2_2026",
+            "south_africa_unemployment_2026_q2",
+        ),
+        (
+            "Bureau of Labor Statistics", "US Labor Department", "Consumer Price Index July 2026",
+            "US CPI for 2026-07", "us_cpi_july_2026", "bls_consumer_prices_2026_07",
+        ),
+        (
+            "Bureau of Economic Analysis", "US BEA", "GDP second quarter 2026",
+            "Q2 2026 gross domestic product", "us_gdp_2026_q2", "bea_gdp_q2_2026",
+        ),
+    ],
+)
+def test_semantically_resolved_economic_release_family_is_one_real_event(
+    actor_a, actor_b, object_a, object_b, episode_a, episode_b,
+):
+    first = event(
+        "release-a", "2026-08-11T10:00:00+00:00", "官方经济数据发布",
+        primary_category="inflation_employment", actor=actor_a,
+        canonical_actor_id=actor_a, action="released", action_family="ECONOMIC_RELEASE",
+        object=object_a, canonical_object_id=object_a, location="",
+        canonical_location_id="", episode_key=episode_a,
+        material_event_key=episode_a, resolved_episode_id="release-family-episode",
+        resolved_event_id="release-family-event",
+    )
+    second = event(
+        "release-b", "2026-08-11T10:05:00+00:00", "媒体以另一种写法报道同一数据",
+        primary_category="inflation_employment", actor=actor_b,
+        canonical_actor_id=actor_b, action="reported", action_family="ECONOMIC_RELEASE",
+        object=object_b, canonical_object_id=object_b, location="",
+        canonical_location_id="", episode_key=episode_b,
+        material_event_key=episode_b, relation_to_prior="CONFIRMS",
+        publisher_domains=("apnews.com",),
+        resolved_episode_id="release-family-episode",
+        resolved_event_id="release-family-event",
+    )
+
+    graph = temporal_event_graph([first, second])
+
+    assert graph["stories"] == []
+    assert len(graph["event_candidates"]) == 1
+    assert graph["event_candidates"][0]["evidence_documents"] == 2
+
+
+def test_semantic_resolution_preserves_a_real_later_release_as_a_new_node():
+    initial = event(
+        "q2", "2026-08-11T10:00:00+00:00", "第二季度失业率发布",
+        actor="Statistics South Africa", action="released",
+        action_family="ECONOMIC_RELEASE", object="Q2 unemployment rate",
+        canonical_actor_id="statistics_south_africa",
+        canonical_object_id="unemployment_q2_2026", episode_key="free_text_a",
+        resolved_episode_id="south-africa-labour-series",
+        resolved_event_id="south-africa-q2-release",
+    )
+    revision = event(
+        "q2-revision", "2026-08-12T10:00:00+00:00", "第二季度数据正式修订",
+        actor="Stats SA", action="revised", action_family="ECONOMIC_RELEASE",
+        object="Q2 unemployment rate revision", canonical_actor_id="stats_sa",
+        canonical_object_id="q2_2026_unemployment_revision", episode_key="free_text_b",
+        relation_to_prior="SUPERSEDES",
+        resolved_episode_id="south-africa-labour-series",
+        resolved_event_id="south-africa-q2-revision",
+    )
+
+    story = storyline_rows([initial, revision])[0]
+
+    assert story["event_count"] == 2
+    assert [row["relation"] for row in story["timeline"]] == ["STARTS", "SUPERSEDES"]
 
 
 def test_market_response_to_jobs_report_cannot_become_core_fact():

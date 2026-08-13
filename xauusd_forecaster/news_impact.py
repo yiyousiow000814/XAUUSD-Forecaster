@@ -7,11 +7,12 @@ import json
 import re
 
 from .news_relevance import google_news_item_is_relevant
-from .news_semantics import CURRENT_NEWS_PROMPT_VERSION
+from .news_semantics import ACTIONABLE_RECORD_KINDS, CURRENT_NEWS_PROMPT_VERSION
 
 
 IMPACT_MODEL = "gemma-4-31b-it"
-IMPACT_PROMPT_VERSION = "news-impact-v3-independent-semantic-review"
+IMPACT_PROMPT_VERSION = "news-impact-v4-event-identity-reconciliation"
+HANDOVER_IMPACT_PROMPT_VERSION = "news-impact-v3-independent-semantic-review"
 
 IMPACT_TIME_RULES = {
     "IMMEDIATE": (timedelta(hours=2), 30.0),
@@ -27,16 +28,22 @@ UPDATE_TYPES = frozenset({
     "NEW_EVENT", "MATERIAL_UPDATE", "DUPLICATE_REPORT", "COMMENTARY",
     "HISTORICAL_CONTEXT",
 })
+IDENTITY_RELATIONS = frozenset({
+    "SAME_EVENT", "SAME_EPISODE", "NEW_EPISODE", "UNRESOLVED",
+})
 
 IMPACT_RESPONSE_SCHEMA = {
     "type": "object",
     "required": [
-        "impact_class", "event_state", "update_type", "confidence", "reason_zh",
+        "impact_class", "event_state", "update_type", "identity_relation",
+        "matched_candidate_id", "confidence", "reason_zh",
     ],
     "properties": {
         "impact_class": {"type": "string", "enum": sorted(IMPACT_CLASSES)},
         "event_state": {"type": "string", "enum": sorted(EVENT_STATES)},
         "update_type": {"type": "string", "enum": sorted(UPDATE_TYPES)},
+        "identity_relation": {"type": "string", "enum": sorted(IDENTITY_RELATIONS)},
+        "matched_candidate_id": {"type": "string"},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "reason_zh": {"type": "string"},
     },
@@ -59,7 +66,10 @@ def impact_is_actionable(assessment: dict | None) -> bool:
     )
 
 
-def validate_impact_assessment(result: dict) -> dict:
+def validate_impact_assessment(
+    result: dict, *, candidate_ids: set[str] | None = None,
+    same_event_candidate_ids: set[str] | None = None,
+) -> dict:
     """Validate the frozen classifier contract before append-only persistence."""
     expected = set(IMPACT_RESPONSE_SCHEMA["required"])
     if set(result) != expected:
@@ -70,6 +80,26 @@ def validate_impact_assessment(result: dict) -> dict:
         raise ValueError("Gemma event state is not controlled")
     if result["update_type"] not in UPDATE_TYPES:
         raise ValueError("Gemma update type is not controlled")
+    relation = str(result["identity_relation"])
+    if relation not in IDENTITY_RELATIONS:
+        raise ValueError("Gemma identity relation is not controlled")
+    matched = str(result["matched_candidate_id"] or "").strip()
+    if relation in {"SAME_EVENT", "SAME_EPISODE"}:
+        if not matched or (candidate_ids is not None and matched not in candidate_ids):
+            raise ValueError("Gemma identity match is not an offered candidate")
+    elif matched:
+        raise ValueError("Gemma identity match must be empty without a prior relation")
+    if result["update_type"] == "DUPLICATE_REPORT" and relation != "SAME_EVENT":
+        raise ValueError("A duplicate report must resolve to the same event")
+    if (
+        relation == "SAME_EVENT" and same_event_candidate_ids is not None
+        and matched not in same_event_candidate_ids
+    ):
+        raise ValueError("Gemma same-event match is not a core fact candidate")
+    if result["update_type"] == "MATERIAL_UPDATE" and relation != "SAME_EPISODE":
+        raise ValueError("A material update must resolve inside the same episode")
+    if result["update_type"] == "NEW_EVENT" and relation != "NEW_EPISODE":
+        raise ValueError("A new event must start a new episode")
     confidence = float(result["confidence"])
     if not 0.0 <= confidence <= 1.0:
         raise ValueError("Gemma impact confidence is outside [0, 1]")
@@ -80,6 +110,8 @@ def validate_impact_assessment(result: dict) -> dict:
         "impact_class": str(result["impact_class"]),
         "event_state": str(result["event_state"]),
         "update_type": str(result["update_type"]),
+        "identity_relation": relation,
+        "matched_candidate_id": matched,
         "confidence": confidence,
         "reason_zh": reason,
     }
@@ -160,7 +192,7 @@ def pending_impact_records(
                    'federal_reserve_monetary','bls_employment_situation',
                    'bls_consumer_price_index','bls_job_openings',
                    'us_treasury_press_releases') THEN 0 ELSE 1 END,
-                 COALESCE(n.source_published_time,n.collector_first_seen_time) DESC
+                 COALESCE(n.source_published_time,n.collector_first_seen_time) ASC
         LIMIT ?""",
         (
             annotation_prompt_version,
@@ -194,17 +226,28 @@ def pending_impact_records(
                 prior_rows = connection.execute(
                     """SELECT p.source,p.source_item_id,p.headline,
                               p.collector_first_seen_time,
-                              pa.annotation_json,
+                              pa.annotation_id AS candidate_id,pa.annotation_json,
                               json_extract(pa.annotation_json,'$.summary_zh') AS summary_zh,
-                              pi.impact_class,pi.update_type
+                              pi.impact_class,pi.update_type,
+                              er.canonical_episode_id,er.canonical_event_id
                        FROM news_revisions p JOIN news_annotations pa
                          ON pa.source=p.source
                         AND pa.source_item_id=p.source_item_id
                         AND pa.revision_number=p.revision_number
                         AND pa.raw_content_hash=p.content_hash
                        LEFT JOIN news_impact_assessments_v1 pi
-                         ON pi.annotation_id=pa.annotation_id
-                        AND pi.llm_model_version=? AND pi.prompt_version=?
+                         ON pi.assessment_id=(
+                           SELECT selected_pi.assessment_id
+                           FROM news_impact_assessments_v1 selected_pi
+                           WHERE selected_pi.annotation_id=pa.annotation_id
+                             AND selected_pi.llm_model_version=?
+                             AND selected_pi.prompt_version IN (?,?)
+                           ORDER BY CASE selected_pi.prompt_version
+                             WHEN ? THEN 0 ELSE 1 END,
+                             selected_pi.assessed_at DESC LIMIT 1)
+                       LEFT JOIN news_event_identity_resolutions_v1 er
+                         ON er.annotation_id=pa.annotation_id
+                        AND er.llm_model_version=? AND er.prompt_version=?
                        WHERE pa.prompt_version=?
                          AND (
                            json_extract(pa.annotation_json,'$.material_event_key')=?
@@ -213,8 +256,10 @@ def pending_impact_records(
                          AND p.collector_first_seen_time<=?
                          AND NOT (p.source=? AND p.source_item_id=?
                                   AND p.revision_number=?)
-                       ORDER BY p.collector_first_seen_time DESC LIMIT 50""",
+                       ORDER BY p.collector_first_seen_time DESC LIMIT 500""",
                     (
+                        IMPACT_MODEL, impact_prompt_version,
+                        HANDOVER_IMPACT_PROMPT_VERSION, impact_prompt_version,
                         IMPACT_MODEL, impact_prompt_version,
                         annotation_prompt_version,
                         material_event_key, primary_category,
@@ -241,10 +286,32 @@ def pending_impact_records(
                     candidate["canonical_object_id"] = prior_annotation.get(
                         "canonical_object_id"
                     )
+                    candidate["identity_anchor_eligible"] = bool(
+                        str(prior_annotation.get("record_kind") or "")
+                        in ACTIONABLE_RECORD_KINDS
+                        and str(prior_annotation.get("evidence_role") or "")
+                        in {"CORE_CLAIM", "EVIDENCE_DOCUMENT"}
+                        and float(prior_annotation.get("materiality") or 0.0) >= 0.5
+                        and candidate.get("update_type")
+                        not in {"COMMENTARY", "HISTORICAL_CONTEXT"}
+                        and candidate.get("impact_class") != "BACKGROUND"
+                    )
                     candidates.append(candidate)
+                current_is_core_fact = bool(
+                    str(row["annotation"].get("record_kind") or "")
+                    in ACTIONABLE_RECORD_KINDS
+                    and str(row["annotation"].get("evidence_role") or "")
+                    in {"CORE_CLAIM", "EVIDENCE_DOCUMENT"}
+                )
+                eligible_candidates = (
+                    [candidate for candidate in candidates
+                     if candidate["identity_anchor_eligible"]]
+                    if current_is_core_fact else candidates
+                )
                 row["prior_event_context"] = sorted(
-                    candidates,
+                    eligible_candidates,
                     key=lambda candidate: (
+                        bool(candidate["identity_anchor_eligible"]),
                         float(candidate["similarity"]),
                         str(candidate["collector_first_seen_time"]),
                     ),
