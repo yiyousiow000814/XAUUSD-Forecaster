@@ -11,7 +11,7 @@ import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefre
 import { PREVIEW_NEWS_PAGE_SIZE } from "../_lib/preview-contract";
 import { resolveNewsMetrics, type NewsMetrics } from "../_lib/news-metrics";
 import { authoritativeNewsTotals, type NewsTotalsScope } from "../_lib/news-index-contract";
-import { formatExactCount, formatProgressPair } from "../_lib/count-format";
+import { formatExactCount, progressCountPresentation } from "../_lib/count-format";
 import LearningGraphModal from "../audit/LearningGraphModal";
 
 type Prediction = {
@@ -926,6 +926,10 @@ export default function AuditView() {
   const rowsUntilTraining = statusState === "ready" && payload?.training
     ? Math.max(0, payload.training.next_training_at - payload.training.complete_rows)
     : null;
+  const trainingProgress = progressCountPresentation(
+    payload?.training?.complete_rows,
+    payload?.training?.next_training_at,
+  );
   const combinedErrors = [
     statusError && `系统状态：${statusError}`,
     view === "league" && learningError && `学习进度：${learningError}`,
@@ -987,11 +991,20 @@ export default function AuditView() {
           <div className="training-card-head"><span>学习进度</span></div>
           <div className="training-card-total">
             <strong>{statusState === "ready" && payload?.training
-              ? formatProgressPair(payload.training.complete_rows, payload.training.next_training_at)
+              ? <span className="training-progress-pair" aria-hidden="true">
+                <span>{trainingProgress.current.main}{trainingProgress.current.remainder && <small>+{trainingProgress.current.remainder}</small>}</span>
+                <i>/</i>
+                <span>{trainingProgress.target.main}{trainingProgress.target.remainder && <small>+{trainingProgress.target.remainder}</small>}</span>
+              </span>
               : <small>{statusState === "loading" ? "读取中…" : "暂不可用"}</small>}
             </strong>
             <span>{rowsUntilTraining === null ? "等待数据" : rowsUntilTraining === 0 ? "可以开始下一轮" : `还差 ${formatExactCount(rowsUntilTraining)} 条`}</span>
           </div>
+          {statusState === "ready" && trainingProgress.showExactDetail && (
+            <small className="training-card-exact">
+              当前 {trainingProgress.current.exact} · 目标 {trainingProgress.target.exact}
+            </small>
+          )}
           <div className="progress-track"><i style={{ width: `${progress}%` }} /></div>
         </div>
       </section>

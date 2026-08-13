@@ -6,7 +6,7 @@ const workerUrl = new URL("../dist/server/index.js", import.meta.url);
 workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
 const { default: worker } = await import(workerUrl.href);
 const { applyFreshness } = await import("../app/api/status/freshness.js");
-const { countPresentation, formatCompactCount, formatExactCount, formatProgressPair } = await import("../app/_lib/count-format.ts");
+const { countPresentation, formatCompactCount, formatExactCount, progressCountPresentation } = await import("../app/_lib/count-format.ts");
 
 test("formats growing counts through one compact and exact display contract", () => {
   const cases = [
@@ -44,13 +44,27 @@ test("formats growing counts through one compact and exact display contract", ()
     title: undefined,
   });
 
-  assert.equal(formatProgressPair(1_449, 1_450), "1,449 / 1,450");
-  assert.equal(formatProgressPair(5_050, 5_500), "5,050 / 5,500");
-  assert.equal(formatProgressPair(12_449_999, 12_450_000), "1245万 / 1245万");
-  assert.equal(formatProgressPair(10_000_000, 12_000_000), "1000万 / 1200万");
-  assert.equal(formatProgressPair(1_200_000_000, 1_500_000_000), "12亿 / 15亿");
-  assert.equal(formatProgressPair(1_200_000_000_000, 1_500_000_000_000), "1.2万亿 / 1.5万亿");
-  assert.equal(formatProgressPair(null, 1_450), "— / —");
+  assert.deepEqual(progressCountPresentation(15_030, 15_050), {
+    current: { exact: "15,030", main: "1.5万", remainder: "30" },
+    isAbbreviated: true,
+    showExactDetail: false,
+    target: { exact: "15,050", main: "1.5万", remainder: "50" },
+  });
+  assert.deepEqual(progressCountPresentation(12_449_999, 12_450_000), {
+    current: { exact: "12,449,999", main: "1244.9万", remainder: "999" },
+    isAbbreviated: true,
+    showExactDetail: false,
+    target: { exact: "12,450,000", main: "1245万" },
+  });
+  assert.deepEqual(progressCountPresentation(1_200_000_000, 1_500_000_000), {
+    current: { exact: "1,200,000,000", main: "12亿" },
+    isAbbreviated: true,
+    showExactDetail: false,
+    target: { exact: "1,500,000,000", main: "15亿" },
+  });
+  assert.equal(progressCountPresentation(1_234_567_890, 1_500_000_000).showExactDetail, true);
+  assert.equal(progressCountPresentation(1_200_000_000_000, 1_500_000_000_000).current.main, "1.2万亿");
+  assert.equal(progressCountPresentation(null, 1_450).current.main, "—");
 });
 
 async function render(path) {

@@ -7,6 +7,19 @@ export type CountPresentation = {
   title?: string;
 };
 
+export type ProgressCountPresentation = {
+  current: ProgressCountValue;
+  isAbbreviated: boolean;
+  showExactDetail: boolean;
+  target: ProgressCountValue;
+};
+
+export type ProgressCountValue = {
+  exact: string;
+  main: string;
+  remainder?: string;
+};
+
 const exactCount = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 0,
   useGrouping: true,
@@ -38,17 +51,32 @@ export function formatCount(value: number | null | undefined, format: CountForma
   return format === "exact" ? formatExactCount(value) : formatCompactCount(value);
 }
 
-export function formatProgressPair(
+export function progressCountPresentation(
   current: number | null | undefined,
   target: number | null | undefined,
-): string {
+): ProgressCountPresentation {
   const normalizedCurrent = normalizedCount(current);
   const normalizedTarget = normalizedCount(target);
-  if (normalizedCurrent === null || normalizedTarget === null) return "— / —";
+  if (normalizedCurrent === null || normalizedTarget === null) {
+    return {
+      current: { exact: "—", main: "—" },
+      isAbbreviated: false,
+      showExactDetail: false,
+      target: { exact: "—", main: "—" },
+    };
+  }
+
+  const currentExact = exactCount.format(normalizedCurrent);
+  const targetExact = exactCount.format(normalizedTarget);
 
   const largest = Math.max(Math.abs(normalizedCurrent), Math.abs(normalizedTarget));
-  if (largest < 1_000_000) {
-    return `${exactCount.format(normalizedCurrent)} / ${exactCount.format(normalizedTarget)}`;
+  if (largest < 10_000) {
+    return {
+      current: { exact: currentExact, main: currentExact },
+      isAbbreviated: false,
+      showExactDetail: false,
+      target: { exact: targetExact, main: targetExact },
+    };
   }
 
   const [divisor, suffix] = largest >= 1_000_000_000_000
@@ -56,11 +84,31 @@ export function formatProgressPair(
     : largest >= 100_000_000
       ? [100_000_000, "亿"]
       : [10_000, "万"];
+  const step = divisor / 10;
   const sharedScale = new Intl.NumberFormat("en-US", {
-    maximumFractionDigits: 2,
+    maximumFractionDigits: 1,
     useGrouping: false,
   });
-  return `${sharedScale.format(normalizedCurrent / divisor)}${suffix} / ${sharedScale.format(normalizedTarget / divisor)}${suffix}`;
+  const compactValue = (value: number, exact: string): ProgressCountValue => {
+    const base = Math.trunc(value / step) * step;
+    const remainder = value - base;
+    return {
+      exact,
+      main: `${sharedScale.format(base / divisor)}${suffix}`,
+      ...(remainder > 0 && remainder <= 999 ? { remainder: exactCount.format(remainder) } : {}),
+    };
+  };
+  const currentValue = compactValue(normalizedCurrent, currentExact);
+  const targetValue = compactValue(normalizedTarget, targetExact);
+  return {
+    current: currentValue,
+    isAbbreviated: true,
+    showExactDetail: (
+      normalizedCurrent - Math.trunc(normalizedCurrent / step) * step > 999
+      || normalizedTarget - Math.trunc(normalizedTarget / step) * step > 999
+    ),
+    target: targetValue,
+  };
 }
 
 export function countPresentation(
