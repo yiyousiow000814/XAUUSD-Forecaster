@@ -47,9 +47,10 @@ production-derived input -> branch implementation -> Preview output
 ```
 
 Production-precomputed output cannot substitute for the changed branch logic.
-The storyline build replay is the current example: captured timeline input is
-replayed through the branch's storyline policy before the Preview artifact is
-built.
+Factor coverage is currently recomputed by the branch from its bounded captured
+inputs. A grouped storyline output is not complete replay input: a storyline-
+logic change must capture the complete bounded or paged independent-event input
+required by that policy before the Preview can claim to verify the change.
 
 ### Snapshot fallback
 
@@ -96,9 +97,9 @@ product requirement.
 ## Current resource behavior
 
 - Status and public learning summaries prefer current read-only D1 and fall back
-  to their immutable build snapshots. Status overlays retain branch-recomputed
-  storyline and factor-coverage output instead of replacing it with production-
-  precomputed output.
+  to their immutable build snapshots. Machine-readable field provenance marks
+  the status keys that remain branch build snapshots; factor coverage is the
+  current branch-recomputed example.
 - The news index reads the bounded current D1 archive. If that complete archive
   is unavailable, Preview reports it unavailable rather than substituting a
   partial relay window.
@@ -106,12 +107,14 @@ product requirement.
   details may be read from D1.
 - Market chart and paged market or learning history currently use bounded data
   frozen into the build artifact.
-- The build snapshot replays captured storyline nodes through the branch
-  storyline implementation so policy changes remain reviewable.
+- Production-precomputed storylines may support presentation review, but they do
+  not prove a changed branch grouping policy. Such a change requires complete
+  independent-event replay input rather than reverse-engineering grouped output.
 
 ## Machine-readable manifest
 
 `web/preview-manifest.json` contains build configuration: resource paths, the
-bounded initial news page size, and status keys retained for first paint. It is
-a manifest, not the source of safety guarantees. Compatibility-sensitive
-changes to its fields must remain atomic across the builder and web consumers.
+bounded initial news page size, status keys retained for first paint, and status
+keys whose values come from the branch build snapshot. It is a manifest, not
+the source of safety guarantees. Compatibility-sensitive changes to its fields
+must remain atomic across the builder and web consumers.

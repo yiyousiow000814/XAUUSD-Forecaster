@@ -1,12 +1,6 @@
-type JsonObject = Record<string, unknown>;
+import { PREVIEW_BRANCH_SNAPSHOT_STATUS_KEYS } from "../../_lib/preview-manifest.ts";
 
-const BRANCH_RECOMPUTED_KEYS = [
-  "factor_coverage",
-  "storyline_summary",
-  "storylines",
-  "market_narrative_candidates",
-  "story_event_candidates",
-] as const;
+type JsonObject = Record<string, unknown>;
 
 /** Keep Preview identity and authority boundaries on current read-only metrics. */
 export function withPreviewIdentity(current: JsonObject, frozen: JsonObject): JsonObject {
@@ -14,10 +8,13 @@ export function withPreviewIdentity(current: JsonObject, frozen: JsonObject): Js
     ? current.system as JsonObject : {};
   const frozenSystem = frozen.system && typeof frozen.system === "object"
     ? frozen.system as JsonObject : {};
+  const frozenPreview = frozen.preview && typeof frozen.preview === "object"
+    ? frozen.preview as JsonObject : {};
+  const branchSnapshotKeys = PREVIEW_BRANCH_SNAPSHOT_STATUS_KEYS.filter(
+    key => Object.hasOwn(frozen, key),
+  );
   const branchRecomputed = Object.fromEntries(
-    BRANCH_RECOMPUTED_KEYS
-      .filter(key => Object.hasOwn(frozen, key))
-      .map(key => [key, frozen[key]]),
+    branchSnapshotKeys.map(key => [key, frozen[key]]),
   );
   const currentQueue = current.annotation_queue && typeof current.annotation_queue === "object"
     ? current.annotation_queue as JsonObject : {};
@@ -28,7 +25,13 @@ export function withPreviewIdentity(current: JsonObject, frozen: JsonObject): Js
     ...branchRecomputed,
     preview_status_summary: false,
     observation_scope: "D1_SNAPSHOT",
-    preview: frozen.preview,
+    preview: {
+      ...frozenPreview,
+      branch_snapshot: {
+        generated_at: frozenPreview.snapshot_generated_at ?? frozen.generated_at ?? null,
+        status_keys: branchSnapshotKeys,
+      },
+    },
     annotation_queue: {
       ...currentQueue,
       requests_per_minute_per_key: frozenQueue.requests_per_minute_per_key,

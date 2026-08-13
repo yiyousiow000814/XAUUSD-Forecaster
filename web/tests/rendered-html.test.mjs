@@ -8,6 +8,7 @@ const { default: worker } = await import(workerUrl.href);
 const { applyFreshness } = await import("../app/api/status/freshness.js");
 const { runtimeUpdateFailurePresentation } = await import("../app/_lib/runtime-update-failure.js");
 const { countPresentation, formatCompactCount, formatExactCount, progressCountPresentation } = await import("../app/_lib/count-format.ts");
+const { statusFieldPhase } = await import("../app/_lib/current-data-provenance.ts");
 const { withPreviewIdentity } = await import("../app/api/_shared/preview-status.ts");
 
 test("keeps branch throughput limits while refreshing Preview metrics from D1", () => {
@@ -211,16 +212,24 @@ test("keeps branch Preview identity and blocks writes", async () => {
   assert.match(builtPreview, new RegExp(process.env.WORKERS_CI_BRANCH.replaceAll("/", "\\/")));
 
   for (const path of [
-    "../app/api/ingest/route.ts", "../app/api/learning/route.ts",
-    "../app/api/learning-history/route.ts", "../app/api/news-index/route.ts",
-    "../app/api/news-content/route.ts", "../app/api/market-chart/route.ts",
-    "../app/api/market-history/route.ts",
+    "/api/ingest", "/api/learning", "/api/learning-history",
+    "/api/news-index", "/api/news-content", "/api/market-chart",
+    "/api/market-history",
   ]) {
-    const route = readFileSync(new URL(path, import.meta.url), "utf8");
-    const rejection = route.indexOf("rejectPreviewWrite()");
-    const authorization = route.indexOf("isIngestAuthorized(request)");
-    assert.ok(rejection >= 0, `${path} must reject Preview writes`);
-    assert.ok(authorization < 0 || rejection < authorization, `${path} must reject before auth or storage`);
+    const forbiddenD1 = new Proxy({}, {
+      get() { throw new Error(`${path} touched D1 before Preview rejection`); },
+    });
+    const response = await worker.fetch(
+      new Request(`http://localhost${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{not-valid-json",
+      }),
+      { DB: forbiddenD1, ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } },
+      { waitUntil() {}, passThroughOnException() {} },
+    );
+    assert.equal(response.status, 403, `${path} must reject Preview writes`);
+    assert.equal(response.headers.get("X-Aurum-Preview"), "write-rejected");
   }
 });
 
@@ -299,15 +308,22 @@ test("uses one current-data contract across every dashboard surface", () => {
   assert.match(learningRoute, /"X-Aurum-Preview": "read-only-d1-snapshot"/);
 });
 
-test("keeps branch recomputation while overlaying current read-only status", async () => {
+test("preserves field-level provenance while overlaying current read-only status", async () => {
   const { withPreviewIdentity } = await import("../app/api/_shared/preview-status.ts");
   const result = withPreviewIdentity({
     counts: { decision_events: 20 },
     factor_coverage: ["production-precomputed"],
     storylines: ["production-precomputed"],
+    storyline_summary: { policy_version: "production-policy" },
+    market_narrative_candidates: ["production-precomputed"],
+    story_event_candidates: ["production-precomputed"],
     system: { online: true, market_session: "OPEN" },
   }, {
-    preview: { is_preview: true, branch: "feature/test", commit_sha: "abc123" },
+    generated_at: "2026-08-13T10:42:03Z",
+    preview: {
+      is_preview: true, branch: "feature/test", commit_sha: "abc123",
+      snapshot_generated_at: "2026-08-13T10:42:03Z",
+    },
     factor_coverage: ["branch-recomputed"],
     storyline_summary: { policy_version: "branch-policy" },
     storylines: ["branch-recomputed"],
@@ -318,14 +334,27 @@ test("keeps branch recomputation while overlaying current read-only status", asy
 
   assert.deepEqual(result.counts, { decision_events: 20 });
   assert.deepEqual(result.factor_coverage, ["branch-recomputed"]);
-  assert.deepEqual(result.storylines, ["branch-recomputed"]);
-  assert.deepEqual(result.storyline_summary, { policy_version: "branch-policy" });
-  assert.deepEqual(result.market_narrative_candidates, ["branch-recomputed"]);
-  assert.deepEqual(result.story_event_candidates, ["branch-recomputed"]);
+  assert.deepEqual(result.storylines, ["production-precomputed"]);
+  assert.deepEqual(result.storyline_summary, { policy_version: "production-policy" });
+  assert.deepEqual(result.market_narrative_candidates, ["production-precomputed"]);
+  assert.deepEqual(result.story_event_candidates, ["production-precomputed"]);
   assert.equal(result.preview.branch, "feature/test");
+  assert.deepEqual(result.preview.branch_snapshot, {
+    generated_at: "2026-08-13T10:42:03Z",
+    status_keys: ["factor_coverage"],
+  });
+  assert.equal(result.preview_status_summary, false);
   assert.equal(result.system.online, false);
   assert.equal(result.system.market_session, "DATA_UNAVAILABLE");
   assert.equal(result.system.source_of_truth, "生产 D1 当前只读数据");
+});
+
+test("marks only declared branch snapshot fields as snapshots", () => {
+  const keys = ["factor_coverage"];
+  assert.equal(statusFieldPhase("ready", keys, "factor_coverage"), "snapshot");
+  assert.equal(statusFieldPhase("ready", keys, "storylines"), "ready");
+  assert.equal(statusFieldPhase("loading", keys, "factor_coverage"), "loading");
+  assert.equal(statusFieldPhase("error", keys, "factor_coverage"), "error");
 });
 
 test("only a current D1 archive may publish the 60-day news total", async () => {
@@ -360,6 +389,7 @@ test("keeps every audit collection in the compact Preview manifest", () => {
     assert.ok(manifest.statusInlineKeys.includes(key), key);
   }
   assert.ok(manifest.statusInlineKeys.includes("preview"));
+  assert.deepEqual(manifest.branchSnapshotStatusKeys, ["factor_coverage"]);
   assert.equal(manifest.resources.marketHistory, "/api/market-history");
 });
 

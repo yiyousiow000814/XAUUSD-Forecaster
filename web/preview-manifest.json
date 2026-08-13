@@ -1,5 +1,6 @@
 {
   "newsPageSize": 12,
+  "branchSnapshotStatusKeys": ["factor_coverage"],
   "resources": {
     "status": "/api/status",
     "learning": "/api/learning",

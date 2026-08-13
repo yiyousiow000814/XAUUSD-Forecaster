@@ -17,11 +17,18 @@ export function MetricValue({ phase, children }: { phase: CurrentDataPhase; chil
   return <>{children}</>;
 }
 
-export function CurrentDataNotice({ phase, snapshotTime }: { phase: CurrentDataPhase; snapshotTime?: string | null }) {
+export function CurrentDataNotice({ phase, snapshotTime, snapshotKind = "fallback" }: {
+  phase: CurrentDataPhase;
+  snapshotTime?: string | null;
+  snapshotKind?: "fallback" | "branch";
+}) {
   if (phase === "loading") {
     return null;
   }
   if (phase === "snapshot") {
+    if (snapshotKind === "branch") {
+      return <div className="current-data-notice is-snapshot"><b>分支构建快照</b><span>此页使用分支重新计算的构建快照{snapshotTime ? ` · ${snapshotTime}` : ""}，不代表当前生产结果。</span></div>;
+    }
     return <div className="current-data-notice is-snapshot"><b>实时同步暂不可用</b><span>当前明确显示构建快照{snapshotTime ? ` · ${snapshotTime}` : ""}，不会冒充实时数字。</span></div>;
   }
   return null;

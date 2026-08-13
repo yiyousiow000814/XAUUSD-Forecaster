@@ -67,3 +67,9 @@ verification.
 
 Production-precomputed output must not bypass the changed branch logic when that
 would prevent the change from being reviewed.
+
+Grouped, summarized, or otherwise lossy output is not complete replay input.
+A Preview must not reconstruct missing independent events from that output and
+then describe the result as verification of changed grouping logic. Logic-level
+verification requires the complete bounded or paged source records governed by
+the changed contract.
