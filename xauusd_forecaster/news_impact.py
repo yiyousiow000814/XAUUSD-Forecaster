@@ -11,7 +11,7 @@ from .news_semantics import ACTIONABLE_RECORD_KINDS, CURRENT_NEWS_PROMPT_VERSION
 
 
 IMPACT_MODEL = "gemma-4-31b-it"
-IMPACT_PROMPT_VERSION = "news-impact-v5-factual-equivalence"
+IMPACT_PROMPT_VERSION = "news-impact-v6-bounded-source-evidence"
 HANDOVER_IMPACT_PROMPT_VERSION = "news-impact-v3-independent-semantic-review"
 
 IMPACT_TIME_RULES = {

@@ -711,7 +711,8 @@ class ForwardLedger:
             record["source"], record["source_item_id"], record["revision_number"]
         )
         news = self.connection.execute(
-            """SELECT content_hash FROM news_revisions
+            """SELECT content_hash,length(body) AS body_character_count
+               FROM news_revisions
             WHERE source=? AND source_item_id=? AND revision_number=?""",
             source_key,
         ).fetchone()
@@ -746,13 +747,32 @@ class ForwardLedger:
                 raise ValueError("canonical episode identity is empty")
             if not str(record.get("canonical_event_id") or "").strip():
                 raise ValueError("canonical event identity is empty")
+            source_context_mode = str(
+                record.get("source_context_mode") or "COMPLETE_BODY"
+            )
+            if source_context_mode not in {"COMPLETE_BODY", "EVIDENCE_WINDOWS"}:
+                raise ValueError("impact source context mode is not controlled")
+            source_body_character_count = int(
+                record.get("source_body_character_count")
+                or news["body_character_count"]
+            )
+            if source_body_character_count <= 0:
+                raise ValueError("impact source body character count is empty")
             comparison = {
                 "identity_anchor_zh": record.get("identity_anchor_zh"),
                 "core_fact_changes_zh": record.get("core_fact_changes_zh"),
                 "identity_differences_zh": record.get("identity_differences_zh"),
                 "context_differences_zh": record.get("context_differences_zh"),
+                "source_context_mode": source_context_mode,
+                "source_body_character_count": source_body_character_count,
             }
-            if any(value is None for value in comparison.values()):
+            if any(
+                comparison[field] is None
+                for field in (
+                    "identity_anchor_zh", "core_fact_changes_zh",
+                    "identity_differences_zh", "context_differences_zh",
+                )
+            ):
                 raise ValueError("impact identity comparison is incomplete")
         with self.connection:
             self.connection.execute(

@@ -100,6 +100,16 @@ token-count endpoint before generation; a conservative byte bound fails closed
 when token counting is unavailable. Key rotation never multiplies the shared
 project budget.
 
+The immutable publisher body and content hash always remain the audit source of
+truth. Gemma receives that complete body whenever it fits the project token
+window. For an oversized body, the existing full-body Gemini annotation anchors
+one exact source window around every validated supporting-evidence excerpt;
+Gemma receives those windows, the complete structured event claim, and the same
+prior-event candidates. This is not presented as complete-body review. The
+context mode and original character count are persisted with the identity
+comparison, and a missing or non-verbatim evidence anchor fails closed rather
+than falling back to arbitrary leading-text truncation.
+
 The official News-residual and Full models remain an independent baseline.
 Broad News-residual learns the residual after cross-fitted Market-only
 predictions, using official news features plus event-evidence features. Broad
