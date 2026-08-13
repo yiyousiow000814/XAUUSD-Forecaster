@@ -55,6 +55,24 @@ def test_preview_does_not_call_late_aggregated_news_expired() -> None:
     assert row["annotation_reason"] == "搜索线索：来自聚合发现源，不是独立官方发布"
 
 
+def test_preview_overlays_branch_owned_model_throughput_contract() -> None:
+    module = _preview_module()
+    status = {
+        "annotation_queue": {
+            "requests_per_minute": 48,
+        },
+    }
+
+    module._apply_branch_runtime_contract(status)
+
+    assert status["annotation_queue"] == {
+        "requests_per_minute_per_key": 12,
+        "requests_per_minute": 12,
+        "input_tokens_per_minute": 225_000,
+        "minute_scope": "PROJECT",
+    }
+
+
 def test_preview_freezes_both_materialized_curve_overviews(monkeypatch) -> None:
     module = _preview_module()
     requested: list[str] = []
@@ -137,7 +155,7 @@ def test_preview_replays_old_story_aliases_through_branch_policy() -> None:
     assert candidates[0]["evidence_documents"] == 3
     assert candidates[0]["independent_publishers"] == 3
     assert status["storyline_summary"]["policy_version"].endswith(
-        "canonical-occurrence-chains"
+        "semantic-identity-resolution"
     )
 
 

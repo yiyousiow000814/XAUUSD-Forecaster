@@ -101,6 +101,70 @@ def test_account_quota_snapshot_uses_scheduler_usage_without_double_counting() -
     assert all("account_id" not in row for row in snapshot["keys"])
 
 
+def test_gemma_minute_budget_is_shared_across_tasks_and_keys() -> None:
+    connection = _connection()
+    shared = ("gemma-impact", "gemma-title")
+    common = {
+        "daily_limit": 15_000,
+        "requests_per_minute": 20,
+        "input_tokens_per_minute": 15_000,
+        "shared_model_families": shared,
+        "share_minute_across_accounts": True,
+        "now": NOW,
+    }
+
+    assert reserve_account_request(
+        connection, account_id="key-a", model_family="gemma-impact",
+        input_tokens=9_000, **common,
+    )
+    assert not reserve_account_request(
+        connection, account_id="key-b", model_family="gemma-title",
+        input_tokens=6_001, **common,
+    )
+    assert reserve_account_request(
+        connection, account_id="key-b", model_family="gemma-title",
+        input_tokens=6_000, **common,
+    )
+
+
+def test_gemma_budget_keeps_previous_bucket_to_prevent_boundary_burst() -> None:
+    connection = _connection()
+    common = {
+        "account_id": "key-a", "model_family": "gemma-impact",
+        "daily_limit": 15_000, "requests_per_minute": 20,
+        "input_tokens_per_minute": 15_000,
+        "shared_model_families": ("gemma-impact", "gemma-title"),
+        "share_minute_across_accounts": True,
+    }
+    before_boundary = NOW.replace(second=59)
+    assert reserve_account_request(
+        connection, input_tokens=9_000, now=before_boundary, **common,
+    )
+    assert not reserve_account_request(
+        connection, input_tokens=6_001,
+        now=before_boundary + timedelta(seconds=2), **common,
+    )
+
+
+def test_gemini_model_tpm_is_shared_across_keys_in_one_project() -> None:
+    connection = _connection()
+    common = {
+        "model_family": "gemini-3.5-flash-lite",
+        "daily_limit": 500, "requests_per_minute": 12,
+        "input_tokens_per_minute": 225_000,
+        "share_minute_across_accounts": True, "now": NOW,
+    }
+    assert reserve_account_request(
+        connection, account_id="key-a", input_tokens=200_000, **common,
+    )
+    assert reserve_account_request(
+        connection, account_id="key-b", input_tokens=25_000, **common,
+    )
+    assert not reserve_account_request(
+        connection, account_id="key-c", input_tokens=1, **common,
+    )
+
+
 def test_account_configuration_rejects_one_key_in_two_accounts() -> None:
     with pytest.raises(ValueError, match="two accounts"):
         configured_api_credentials(raw_accounts=json.dumps([
@@ -275,6 +339,41 @@ def test_sync_uses_v15_semantic_priority_not_headline_keywords(tmp_path) -> None
     assert job.priority == "FAST"
     assert job.annotation_id == "active"
     ledger.close()
+
+
+def test_impact_discovery_advances_old_backfill_and_new_arrivals(
+    tmp_path, monkeypatch,
+) -> None:
+    import xauusd_forecaster.annotation as annotation
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    calls = []
+
+    def impact_rows(_connection, *, limit, selection_order, **_kwargs):
+        calls.append((selection_order, limit))
+        item = "oldest" if selection_order == "oldest" else "newest"
+        return [{
+            "source": "scheduler-fairness",
+            "source_item_id": item,
+            "revision_number": 1,
+            "annotation_id": f"annotation-{item}",
+            "annotation": {"review_priority": "NORMAL"},
+        }]
+
+    monkeypatch.setattr(annotation, "pending_annotation_records", lambda *_a, **_k: [])
+    monkeypatch.setattr(annotation, "pending_title_translation_records", lambda *_a, **_k: [])
+    monkeypatch.setattr(annotation, "pending_impact_records", impact_rows)
+
+    discovered = sync_pending_jobs(ledger.connection, now=NOW, limit=4)
+    queued = {
+        row[0] for row in ledger.connection.execute(
+            "SELECT source_item_id FROM news_ai_jobs_v1 WHERE task_type='ACTIVE_IMPACT'"
+        ).fetchall()
+    }
+
+    assert calls == [("oldest", 2), ("newest", 2)]
+    assert discovered["ACTIVE_IMPACT"] == 2
+    assert queued == {"oldest", "newest"}
 
 
 def test_preemptible_quota_deferral_flows_to_routine_account(

@@ -42,9 +42,11 @@ from xauusd_forecaster.annotation import (  # noqa: E402
     DEFAULT_GEMMA_MODEL,
     FALLBACK_GEMINI_MODEL,
     GEMMA_REQUESTS_PER_DAY_PER_KEY,
+    GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
     GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
     GEMINI_DAILY_PRIORITY_RESERVE,
     GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
+    GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
     INVALID_CHINESE_TITLE,
     PROMPT_VERSION,
     completed_annotation_records,
@@ -70,6 +72,7 @@ from xauusd_forecaster.news_features_v2 import COLLECTION_SOURCES  # noqa: E402
 from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY  # noqa: E402
 from xauusd_forecaster.production_shape import production_contract_snapshot  # noqa: E402
 from xauusd_forecaster.news_impact import (  # noqa: E402
+    HANDOVER_IMPACT_PROMPT_VERSION,
     IMPACT_MODEL,
     IMPACT_PROMPT_VERSION,
     impact_is_actionable,
@@ -712,8 +715,14 @@ def _news_reader_rows(
                 WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                 preferred_a.parsed_at DESC LIMIT 1)
             LEFT JOIN news_impact_assessments_v1 i
-              ON i.annotation_id=a.annotation_id
-             AND i.llm_model_version=? AND i.prompt_version=?
+              ON i.assessment_id=(
+                SELECT selected_i.assessment_id
+                FROM news_impact_assessments_v1 selected_i
+                WHERE selected_i.annotation_id=a.annotation_id
+                  AND selected_i.llm_model_version=?
+                  AND selected_i.prompt_version IN (?,?)
+                ORDER BY CASE selected_i.prompt_version WHEN ? THEN 0 ELSE 1 END,
+                         selected_i.assessed_at DESC LIMIT 1)
             LEFT JOIN news_llm_failures f ON f.failure_id=(
               SELECT latest_f.failure_id FROM news_llm_failures latest_f
               WHERE latest_f.task_type='ANNOTATION'
@@ -760,6 +769,7 @@ def _news_reader_rows(
         (
             now.isoformat(timespec="microseconds"), INVALID_CHINESE_TITLE,
             PROMPT_VERSION, IMPACT_MODEL, IMPACT_PROMPT_VERSION,
+            HANDOVER_IMPACT_PROMPT_VERSION, IMPACT_PROMPT_VERSION,
             PROMPT_VERSION, cutoff, *cursor_parameters, limit,
         ),
     ).fetchall()
@@ -1540,9 +1550,14 @@ def _dashboard_payload(database: Path) -> dict:
                        WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                      preferred_a.parsed_at DESC LIMIT 1)
                LEFT JOIN news_impact_assessments_v1 i
-                 ON i.annotation_id=a.annotation_id
-                AND i.llm_model_version=?
-                AND i.prompt_version=?
+                 ON i.assessment_id=(
+                   SELECT selected_i.assessment_id
+                   FROM news_impact_assessments_v1 selected_i
+                   WHERE selected_i.annotation_id=a.annotation_id
+                     AND selected_i.llm_model_version=?
+                     AND selected_i.prompt_version IN (?,?)
+                   ORDER BY CASE selected_i.prompt_version WHEN ? THEN 0 ELSE 1 END,
+                            selected_i.assessed_at DESC LIMIT 1)
                LEFT JOIN news_llm_failures f
                  ON f.failure_id=(
                    SELECT latest_f.failure_id
@@ -1600,6 +1615,7 @@ def _dashboard_payload(database: Path) -> dict:
                 now.isoformat(timespec="microseconds"), INVALID_CHINESE_TITLE,
                 PROMPT_VERSION,
                 IMPACT_MODEL, IMPACT_PROMPT_VERSION,
+                HANDOVER_IMPACT_PROMPT_VERSION, IMPACT_PROMPT_VERSION,
                 PROMPT_VERSION,
             ),
         ).fetchall()
@@ -2155,10 +2171,9 @@ def _dashboard_payload(database: Path) -> dict:
             "available_key_count": available_gemini_keys,
             "fallback_available_key_count": available_fallback_keys,
             "requests_per_minute_per_key": GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
-            "requests_per_minute": (
-                available_gemini_keys
-                * GEMINI_REQUESTS_PER_MINUTE_PER_KEY
-            ),
+            "requests_per_minute": GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
+            "input_tokens_per_minute": GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
+            "minute_scope": "PROJECT",
             "priority_reserve": flash_priority_reserve,
             "routine_remaining": flash_routine_remaining,
         },
@@ -2175,6 +2190,7 @@ def _dashboard_payload(database: Path) -> dict:
                 "model": DEFAULT_GEMMA_MODEL,
                 "role": "标题中文翻译，不进入模型训练",
                 "requests_per_minute": GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
+                "input_tokens_per_minute": GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
             },
             "antigravity": {
                 "enabled": False,

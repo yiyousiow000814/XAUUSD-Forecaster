@@ -703,13 +703,16 @@ class ForwardLedger:
             )
 
     def append_news_impact_assessment(self, record: dict[str, Any]) -> None:
-        from .news_impact import EVENT_STATES, IMPACT_CLASSES, UPDATE_TYPES
+        from .news_impact import (
+            EVENT_STATES, IDENTITY_RELATIONS, IMPACT_CLASSES, UPDATE_TYPES,
+        )
 
         source_key = (
             record["source"], record["source_item_id"], record["revision_number"]
         )
         news = self.connection.execute(
-            """SELECT content_hash FROM news_revisions
+            """SELECT content_hash,length(body) AS body_character_count
+               FROM news_revisions
             WHERE source=? AND source_item_id=? AND revision_number=?""",
             source_key,
         ).fetchone()
@@ -733,6 +736,44 @@ class ForwardLedger:
             raise ValueError("impact confidence is outside [0, 1]")
         if not str(record["reason_zh"]).strip():
             raise ValueError("impact reason is empty")
+        has_resolution = record.get("resolution_id") is not None
+        from .news_impact import IMPACT_PROMPT_VERSION
+        if record["prompt_version"] == IMPACT_PROMPT_VERSION and not has_resolution:
+            raise ValueError("current impact assessment requires identity resolution")
+        if has_resolution:
+            if record.get("identity_relation") not in IDENTITY_RELATIONS:
+                raise ValueError("impact identity relation is not controlled")
+            if not str(record.get("canonical_episode_id") or "").strip():
+                raise ValueError("canonical episode identity is empty")
+            if not str(record.get("canonical_event_id") or "").strip():
+                raise ValueError("canonical event identity is empty")
+            source_context_mode = str(
+                record.get("source_context_mode") or "COMPLETE_BODY"
+            )
+            if source_context_mode not in {"COMPLETE_BODY", "EVIDENCE_WINDOWS"}:
+                raise ValueError("impact source context mode is not controlled")
+            source_body_character_count = int(
+                record.get("source_body_character_count")
+                or news["body_character_count"]
+            )
+            if source_body_character_count <= 0:
+                raise ValueError("impact source body character count is empty")
+            comparison = {
+                "identity_anchor_zh": record.get("identity_anchor_zh"),
+                "core_fact_changes_zh": record.get("core_fact_changes_zh"),
+                "identity_differences_zh": record.get("identity_differences_zh"),
+                "context_differences_zh": record.get("context_differences_zh"),
+                "source_context_mode": source_context_mode,
+                "source_body_character_count": source_body_character_count,
+            }
+            if any(
+                comparison[field] is None
+                for field in (
+                    "identity_anchor_zh", "core_fact_changes_zh",
+                    "identity_differences_zh", "context_differences_zh",
+                )
+            ):
+                raise ValueError("impact identity comparison is incomplete")
         with self.connection:
             self.connection.execute(
                 """INSERT INTO news_impact_assessments_v1 VALUES
@@ -747,6 +788,28 @@ class ForwardLedger:
                     str(record["reason_zh"]).strip(),
                 ),
             )
+            if has_resolution:
+                self.connection.execute(
+                    """INSERT INTO news_event_identity_resolutions_v1 (
+                    resolution_id,annotation_id,assessment_id,llm_model_version,
+                    prompt_version,resolved_at,identity_relation,
+                    matched_annotation_id,identity_comparison_json,
+                    canonical_episode_id,canonical_event_id
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        record["resolution_id"], record["annotation_id"],
+                        record["assessment_id"], record["llm_model_version"],
+                        record["prompt_version"], _iso(record["assessed_at"]),
+                        record["identity_relation"],
+                        record.get("matched_annotation_id"),
+                        json.dumps(
+                            comparison, ensure_ascii=False, sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        record["canonical_episode_id"],
+                        record["canonical_event_id"],
+                    ),
+                )
 
     def append_news_impact_failure(self, record: dict[str, Any]) -> None:
         with self.connection:

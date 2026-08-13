@@ -41,6 +41,8 @@ type StatusPayload = {
     fallback_available_key_count: number;
     requests_per_minute_per_key: number;
     requests_per_minute: number;
+    input_tokens_per_minute: number;
+    minute_scope: "PROJECT";
     backing_off: number;
     dead_letter: number;
     priority_reserve: number;
@@ -178,7 +180,7 @@ export default function StatusView() {
         <article><span>重要新闻保留</span><strong className="good"><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.priority_reserve} /></MetricValue></strong><small>FOMC、CPI、Payroll 专用</small></article>
         <article><span>错误退避中</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.backing_off} /></MetricValue></strong><small>到期前不会重复请求</small></article>
         <article><span>已隔离</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.dead_letter} /></MetricValue></strong><small>相同永久错误不再消耗配额</small></article>
-        <article><span>安全吞吐</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.requests_per_minute} /></MetricValue></strong><small>RPM · 每 key <CountValue value={payload?.annotation_queue.requests_per_minute_per_key} format="exact" /></small></article>
+        <article><span>安全吞吐</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.requests_per_minute} /></MetricValue></strong><small>RPM · 项目共享 · TPM <CountValue value={payload?.annotation_queue.input_tokens_per_minute} /></small></article>
       </section>
 
       <section className="routing-grid">
