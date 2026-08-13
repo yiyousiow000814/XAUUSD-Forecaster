@@ -144,6 +144,35 @@ test("uses one current-data contract across every dashboard surface", () => {
   assert.match(learningRoute, /"X-Aurum-Preview": "read-only-d1-snapshot"/);
 });
 
+test("keeps branch recomputation while overlaying current read-only status", async () => {
+  const { withPreviewIdentity } = await import("../app/api/_shared/preview-status.ts");
+  const result = withPreviewIdentity({
+    counts: { decision_events: 20 },
+    factor_coverage: ["production-precomputed"],
+    storylines: ["production-precomputed"],
+    system: { online: true, market_session: "OPEN" },
+  }, {
+    preview: { is_preview: true, branch: "feature/test", commit_sha: "abc123" },
+    factor_coverage: ["branch-recomputed"],
+    storyline_summary: { policy_version: "branch-policy" },
+    storylines: ["branch-recomputed"],
+    market_narrative_candidates: ["branch-recomputed"],
+    story_event_candidates: ["branch-recomputed"],
+    system: { deployment: { runtime_git_sha: "abc123" } },
+  });
+
+  assert.deepEqual(result.counts, { decision_events: 20 });
+  assert.deepEqual(result.factor_coverage, ["branch-recomputed"]);
+  assert.deepEqual(result.storylines, ["branch-recomputed"]);
+  assert.deepEqual(result.storyline_summary, { policy_version: "branch-policy" });
+  assert.deepEqual(result.market_narrative_candidates, ["branch-recomputed"]);
+  assert.deepEqual(result.story_event_candidates, ["branch-recomputed"]);
+  assert.equal(result.preview.branch, "feature/test");
+  assert.equal(result.system.online, false);
+  assert.equal(result.system.market_session, "DATA_UNAVAILABLE");
+  assert.equal(result.system.source_of_truth, "生产 D1 当前只读数据");
+});
+
 test("only a current D1 archive may publish the 60-day news total", async () => {
   const { authoritativeNewsTotals } = await import("../app/_lib/news-index-contract.ts");
   const frozen = {

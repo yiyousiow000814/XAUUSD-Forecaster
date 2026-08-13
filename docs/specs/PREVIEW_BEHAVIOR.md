@@ -96,7 +96,9 @@ product requirement.
 ## Current resource behavior
 
 - Status and public learning summaries prefer current read-only D1 and fall back
-  to their immutable build snapshots.
+  to their immutable build snapshots. Status overlays retain branch-recomputed
+  storyline and factor-coverage output instead of replacing it with production-
+  precomputed output.
 - The news index reads the bounded current D1 archive. If that complete archive
   is unavailable, Preview reports it unavailable rather than substituting a
   partial relay window.
