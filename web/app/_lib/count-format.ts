@@ -52,11 +52,14 @@ export function formatProgressPair(
   }
 
   const [divisor, suffix] = largest >= 1_000_000_000_000
-    ? [1_000_000_000_000, "T"]
-    : largest >= 1_000_000_000
-      ? [1_000_000_000, "B"]
-      : [1_000_000, "M"];
-  const sharedScale = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
+    ? [1_000_000_000_000, "万亿"]
+    : largest >= 100_000_000
+      ? [100_000_000, "亿"]
+      : [10_000, "万"];
+  const sharedScale = new Intl.NumberFormat("en-US", {
+    maximumFractionDigits: 2,
+    useGrouping: false,
+  });
   return `${sharedScale.format(normalizedCurrent / divisor)}${suffix} / ${sharedScale.format(normalizedTarget / divisor)}${suffix}`;
 }
 

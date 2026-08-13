@@ -45,10 +45,11 @@ test("formats growing counts through one compact and exact display contract", ()
   });
 
   assert.equal(formatProgressPair(1_449, 1_450), "1,449 / 1,450");
-  assert.equal(formatProgressPair(12_449_999, 12_450_000), "12.45M / 12.45M");
-  assert.equal(formatProgressPair(10_000_000, 12_000_000), "10M / 12M");
-  assert.equal(formatProgressPair(1_200_000_000, 1_500_000_000), "1.2B / 1.5B");
-  assert.equal(formatProgressPair(1_200_000_000_000, 1_500_000_000_000), "1.2T / 1.5T");
+  assert.equal(formatProgressPair(5_050, 5_500), "5,050 / 5,500");
+  assert.equal(formatProgressPair(12_449_999, 12_450_000), "1245万 / 1245万");
+  assert.equal(formatProgressPair(10_000_000, 12_000_000), "1000万 / 1200万");
+  assert.equal(formatProgressPair(1_200_000_000, 1_500_000_000), "12亿 / 15亿");
+  assert.equal(formatProgressPair(1_200_000_000_000, 1_500_000_000_000), "1.2万亿 / 1.5万亿");
   assert.equal(formatProgressPair(null, 1_450), "— / —");
 });
 
