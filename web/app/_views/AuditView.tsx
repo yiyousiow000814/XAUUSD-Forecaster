@@ -3,11 +3,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import DashboardLink from "../_components/DashboardLink";
+import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { PREVIEW_NEWS_PAGE_SIZE } from "../_lib/preview-contract";
 import { resolveNewsMetrics, type NewsMetrics } from "../_lib/news-metrics";
+import { authoritativeNewsTotals, type NewsTotalsScope } from "../_lib/news-index-contract";
 import LearningGraphModal from "../audit/LearningGraphModal";
 
 type Prediction = {
@@ -397,6 +399,7 @@ type NewsIndexResponse = {
   page: number;
   page_size: number;
   window_days?: number;
+  totals_scope?: NewsTotalsScope;
 };
 
 const time = (value?: string | null) => value ? new Intl.DateTimeFormat("zh-CN", {
@@ -700,16 +703,22 @@ export default function AuditView() {
     : "news";
   const cachedStatus = readDashboardResource<Payload>("/api/status");
   const cachedLearning = readDashboardResource<Partial<Payload>>("/api/learning");
+  const cachedNewsIndex = readDashboardResource<NewsIndexResponse>(`/api/news-index?page=1&limit=${NEWS_PER_PAGE}`);
   const [payload, setPayload] = useState<Payload | null>(() => cachedStatus
     ? ({ ...cachedStatus, ...cachedLearning } as Payload)
     : null);
   const [newsIndex, setNewsIndex] = useState<NewsIndexResponse>(() => (
-    readDashboardResource<NewsIndexResponse>(`/api/news-index?page=1&limit=${NEWS_PER_PAGE}`) ?? {
-      items: [], total: 0, all_total: 0, category_counts: {}, page: 1, page_size: NEWS_PER_PAGE,
+    cachedNewsIndex ?? {
+      items: [], total: 0, all_total: 0, category_counts: {}, page: 1,
+      page_size: NEWS_PER_PAGE, totals_scope: "LOADING",
     }
   ));
-  const [statusState, setStatusState] = useState<"loading" | "ready" | "error">(cachedStatus ? "ready" : "loading");
-  const [learningState, setLearningState] = useState<"idle" | "loading" | "ready" | "error">(cachedLearning ? "ready" : "idle");
+  const [statusState, setStatusState] = useState<CurrentDataPhase>(
+    cachedStatus?.preview_status_summary ? "loading" : cachedStatus ? "ready" : "loading",
+  );
+  const [learningState, setLearningState] = useState<CurrentDataPhase | "idle">(
+    cachedLearning?.learning_preview_summary ? "loading" : cachedLearning ? "ready" : "idle",
+  );
   const [statusError, setStatusError] = useState<string | null>(null);
   const [learningError, setLearningError] = useState<string | null>(null);
   const [newsError, setNewsError] = useState<string | null>(null);
@@ -720,6 +729,7 @@ export default function AuditView() {
   const [graphStartTab, setGraphStartTab] = useState<"curve" | "execution">("curve");
   const fullStatusReadyRef = useRef(Boolean(cachedStatus && !cachedStatus.preview_status_summary));
   const fullLearningReadyRef = useRef(Boolean(cachedLearning && !cachedLearning.learning_preview_summary));
+  const fullNewsIndexReadyRef = useRef(cachedNewsIndex?.totals_scope === "D1_ARCHIVE");
   const learningDataAvailableRef = useRef(Boolean(cachedLearning));
   const learningFailureCountRef = useRef(0);
   const [summaryCadence, setSummaryCadence] = useState<EvaluationCadence>("EVERY_5M");
@@ -732,7 +742,7 @@ export default function AuditView() {
       const body = await loadDashboardResource<Payload>("/api/status", { force });
       setPayload(previous => ({ ...previous, ...body }) as Payload);
       if (!body.preview_status_summary) fullStatusReadyRef.current = true;
-      setStatusState("ready");
+      setStatusState(body.preview_status_summary ? "snapshot" : "ready");
       setStatusError(null);
     } catch (reason) {
       setStatusState("error");
@@ -748,7 +758,7 @@ export default function AuditView() {
       learningDataAvailableRef.current = true;
       learningFailureCountRef.current = 0;
       if (!body.learning_preview_summary) fullLearningReadyRef.current = true;
-      setLearningState("ready");
+      setLearningState(body.learning_preview_summary ? "snapshot" : "ready");
       setLearningError(null);
     } catch (reason) {
       learningFailureCountRef.current += 1;
@@ -768,6 +778,7 @@ export default function AuditView() {
     if (newsCategory !== "全部") query.set("category", newsCategory);
     const body = await loadDashboardResource<NewsIndexResponse>(`/api/news-index?${query}`, { force });
     setNewsIndex(body);
+    if (body.totals_scope === "D1_ARCHIVE") fullNewsIndexReadyRef.current = true;
     setNewsError(null);
   }, [newsCategory, newsPage]);
 
@@ -782,9 +793,20 @@ export default function AuditView() {
   }, [refreshStatus, immutablePreview]);
 
   useEffect(() => {
-    if (view !== "news") return;
+    if (view !== "news") {
+      // The archive total is a headline metric, so start its bounded D1 read
+      // even when another audit view is selected.  Do not poll off-screen;
+      // the first news page is reused if the viewer opens the news desk.
+      if (fullNewsIndexReadyRef.current) return;
+      const initial = window.setTimeout(() => {
+        void refreshNews(true).catch(reason => setNewsError(
+          reason instanceof Error ? reason.message : "无法读取新闻索引",
+        ));
+      }, 0);
+      return () => window.clearTimeout(initial);
+    }
     return scheduleDashboardRefresh(
-      () => void refreshNews().catch(reason => setNewsError(
+      () => void refreshNews(!fullNewsIndexReadyRef.current).catch(reason => setNewsError(
         reason instanceof Error ? reason.message : "无法读取新闻索引",
       )),
       () => void refreshNews(true).catch(reason => setNewsError(
@@ -844,11 +866,28 @@ export default function AuditView() {
     return Math.min(100, training.complete_rows / training.next_training_at * 100);
   }, [payload]);
 
+  const archiveTotals = authoritativeNewsTotals(newsIndex);
+  const newsPhase: CurrentDataPhase = archiveTotals
+    ? "ready" : newsError ? "error" : "loading";
+  const currentPagePhase: CurrentDataPhase = statusState === "error"
+    || (view === "news" && newsPhase === "error")
+    || (view === "league" && learningState === "error")
+    ? "error"
+    : statusState === "snapshot" || (view === "league" && learningState === "snapshot")
+      ? "snapshot"
+      : statusState === "loading"
+        || (view === "news" && newsPhase === "loading")
+        || (view === "league" && learningState !== "ready")
+        ? "loading" : "ready";
   const categories = useMemo(() => [
-    { name: "全部", count: newsIndex.readable_total ?? newsIndex.all_total },
-    ...CATEGORY_ORDER.filter(name => newsIndex.category_counts[name]).map(name => ({ name, count: newsIndex.category_counts[name] ?? 0 })),
-  ], [newsIndex]);
-  const newsPageCount = Math.max(1, Math.ceil(newsIndex.total / NEWS_PER_PAGE));
+    { name: "全部", count: archiveTotals?.readable ?? null },
+    ...CATEGORY_ORDER.filter(name => newsIndex.category_counts[name]).map(name => ({
+      name, count: archiveTotals ? newsIndex.category_counts[name] ?? 0 : null,
+    })),
+  ], [archiveTotals, newsIndex.category_counts]);
+  const newsPageCount = archiveTotals
+    ? Math.max(1, Math.ceil(archiveTotals.category / NEWS_PER_PAGE))
+    : 1;
   const currentNewsPage = Math.min(newsPage, newsPageCount);
   const visibleNews = newsIndex.items;
   const emptyNewsRows = Math.max(0, NEWS_PER_PAGE - visibleNews.length);
@@ -861,6 +900,11 @@ export default function AuditView() {
   const liveOosModelGroups = learningState === "ready"
     ? activeLearningIdentities
     : payload?.counts?.live_oos_model_groups;
+  const liveOosPhase: CurrentDataPhase = learningState === "ready"
+    ? "ready"
+    : payload?.counts?.live_oos_model_groups !== undefined
+      ? statusState
+      : learningState === "idle" ? "loading" : learningState;
   const latestVersionGroups = (payload?.learning_curves?.version_groups ?? []).filter(
     row => row.lifecycle_status === "LATEST",
   );
@@ -868,14 +912,15 @@ export default function AuditView() {
     .filter(row => !row.model_identity.endsWith("NEWS_RESIDUAL"))
     .map(row => row.training_rows));
   const newsMetrics = resolveNewsMetrics(payload);
-  const readableNewsTotal = newsIndex.readable_total ?? newsMetrics.articles.readable;
-  const parsedNewsTotal = newsIndex.parsed_total ?? newsMetrics.articles.semantic_reviews_complete;
-  const modelCandidateNewsTotal = newsIndex.model_candidate_total
-    ?? newsMetrics.articles.current_model_candidates;
+  const readableNewsTotal = archiveTotals?.readable ?? null;
+  const parsedNewsTotal = archiveTotals?.parsed ?? null;
+  const modelCandidateNewsTotal = archiveTotals?.modelCandidates ?? null;
   const newsWaitingTotal = (payload?.annotation_queue?.queued ?? 0)
     + (payload?.annotation_queue?.backing_off ?? 0)
     + (payload?.annotation_queue?.dead_letter ?? 0);
-  const newsNoParsingNeededTotal = Math.max(0, readableNewsTotal - parsedNewsTotal - newsWaitingTotal);
+  const newsNoParsingNeededTotal = readableNewsTotal !== null && parsedNewsTotal !== null
+    ? Math.max(0, readableNewsTotal - parsedNewsTotal - newsWaitingTotal)
+    : null;
   const rowsUntilTraining = statusState === "ready" && payload?.training
     ? Math.max(0, payload.training.next_training_at - payload.training.complete_rows)
     : null;
@@ -950,37 +995,38 @@ export default function AuditView() {
       </section>
 
       {combinedErrors && <div className="error-banner">{combinedErrors}。页面会保留上一份成功数据并自动重试。</div>}
+      <CurrentDataNotice phase={currentPagePhase} snapshotTime={payload?.generated_at ? time(payload.generated_at) : null} />
 
       <div className="audit-tabs-shell">
       <button type="button" className="audit-tabs-scroll" onClick={() => scrollAuditTabs(-1)} aria-label="向左查看更多审计视图"><span aria-hidden="true">‹</span></button>
       <nav ref={auditTabsRef} className="audit-tabs" aria-label="审计视图">
-        <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻 <b>{readableNewsTotal}</b></a>
-        <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>当前可用新闻事件 <b>{newsMetrics.events.currently_model_eligible}</b></a>
-        <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件脉络 <b>{activeEventTotal}</b></a>
-        <a href="/audit?view=decisions" className={view === "decisions" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("decisions"); }}>决策与30分钟结果 <b>{payload?.counts?.decision_events ?? 0}</b></a>
-        <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b>{liveOosModelGroups !== undefined ? `${liveOosModelGroups}组` : learningState === "loading" ? "读取中" : "—"}</b></a>
-        <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b>{payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</b></a>
+        <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻 <b><MetricValue phase={newsPhase}>{readableNewsTotal ?? "—"}</MetricValue></b></a>
+        <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>当前可用新闻事件 <b><MetricValue phase={statusState}>{newsMetrics.events.currently_model_eligible}</MetricValue></b></a>
+        <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件脉络 <b><MetricValue phase={statusState}>{activeEventTotal}</MetricValue></b></a>
+        <a href="/audit?view=decisions" className={view === "decisions" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("decisions"); }}>决策与30分钟结果 <b><MetricValue phase={statusState}>{payload?.counts?.decision_events ?? 0}</MetricValue></b></a>
+        <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b><MetricValue phase={liveOosPhase}>{liveOosModelGroups !== undefined ? `${liveOosModelGroups}组` : "—"}</MetricValue></b></a>
+        <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b><MetricValue phase={statusState}>{payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</MetricValue></b></a>
       </nav>
       <button type="button" className="audit-tabs-scroll" onClick={() => scrollAuditTabs(1)} aria-label="向右查看更多审计视图"><span aria-hidden="true">›</span></button>
       </div>
 
       {view === "news" && <>
         <section className="annotation-queue" aria-label="新闻处理进度">
-          <span><b>{readableNewsTotal}</b> 条近60天可读新闻</span>
-          <span><b>{parsedNewsTotal}</b> 条语义复核完成</span>
-          <span><b>{newsNoParsingNeededTotal}</b> 条无需复核</span>
+          <span><b>{readableNewsTotal ?? "—"}</b> {readableNewsTotal === null ? "正在读取近60天新闻总量" : "条近60天可读新闻"}</span>
+          <span><b>{parsedNewsTotal ?? "—"}</b> 条语义复核完成</span>
+          <span><b>{newsNoParsingNeededTotal ?? "—"}</b> 条无需复核</span>
           <span><b>{newsWaitingTotal}</b> 条等待处理</span>
-          <span className="is-model-ready"><b>{modelCandidateNewsTotal}</b> 个当前模型候选事件</span>
+          <span className="is-model-ready"><b>{modelCandidateNewsTotal ?? "—"}</b> 个当前模型候选事件</span>
           <details>
             <summary>查看处理器技术状态</summary>
             <p>真正排队 {payload?.annotation_queue?.queued ?? 0} · 失败后等待重试 {payload?.annotation_queue?.backing_off ?? 0} · 已隔离 {payload?.annotation_queue?.dead_letter ?? 0} · 等待正文 {payload?.annotation_queue?.waiting_content ?? 0} · 正文不可用 {payload?.annotation_queue?.unavailable_content ?? 0}</p>
           </details>
         </section>
         <section className="news-browser" aria-label="新闻自动分类">
-          <div><strong>自动分类</strong><span>近60天 · 按媒体发布时间排序 · 共 {readableNewsTotal} 条可读新闻 · 语义复核完成 {parsedNewsTotal} 条 · 当前模型候选 {modelCandidateNewsTotal} 个事件 · 每页 {NEWS_PER_PAGE} 条</span></div>
+          <div><strong>自动分类</strong><span>{archiveTotals ? `近60天 · 按媒体发布时间排序 · 共 ${readableNewsTotal} 条可读新闻 · 语义复核完成 ${parsedNewsTotal} 条 · 当前模型候选 ${modelCandidateNewsTotal} 个事件 · 每页 ${NEWS_PER_PAGE} 条` : `正在读取近60天新闻总量 · 先显示构建时新闻内容 · 每页 ${NEWS_PER_PAGE} 条`}</span></div>
           <nav>
             {categories.map(category => <button key={category.name} type="button" className={newsCategory === category.name ? "active" : ""} onClick={() => { setNewsCategory(category.name); setNewsPage(1); }}>
-              {category.name}<b>{category.count}</b>
+              {category.name}{category.count !== null && <b>{category.count}</b>}
             </button>)}
           </nav>
         </section>

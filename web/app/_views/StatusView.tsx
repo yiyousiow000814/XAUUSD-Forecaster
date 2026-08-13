@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
 import DashboardLink from "../_components/DashboardLink";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
@@ -24,6 +25,7 @@ type QuotaState = {
 };
 
 type StatusPayload = {
+  preview_status_summary?: boolean;
   generated_at: string;
   system: {
     online: boolean; mode: string; trading_enabled: boolean; market_session?: "OPEN" | "CLOSED" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE";
@@ -57,6 +59,10 @@ type StatusPayload = {
     item_count: number; revision_count: number; full_text_count: number; latest_item_time: string | null;
   }>;
 };
+
+function localTime(value: string): string {
+  return new Date(value).toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Kuala_Lumpur" });
+}
 
 function formatCountdown(target: string | undefined, nowMs: number): string {
   if (!target || !nowMs) return "—";
@@ -93,29 +99,34 @@ function QuotaPanel({ title, eyebrow, quota, nowMs }: { title: string; eyebrow: 
 }
 
 export default function StatusView() {
-  const [payload, setPayload] = useState<StatusPayload | null>(() => readDashboardResource<StatusPayload>("/api/status"));
+  const cachedStatus = readDashboardResource<StatusPayload>("/api/status");
+  const [payload, setPayload] = useState<StatusPayload | null>(() => cachedStatus);
   const [error, setError] = useState<string | null>(null);
+  const [syncingCurrent, setSyncingCurrent] = useState(Boolean(cachedStatus?.preview_status_summary));
   const [nowMs, setNowMs] = useState(0);
   const immutablePreview = isImmutablePreview(payload);
 
-  const refresh = useCallback(async (force = false) => {
+  const refresh = useCallback(async (force = false, showSyncState = false) => {
+    if (showSyncState) setSyncingCurrent(true);
     try {
       setPayload(await loadDashboardResource<StatusPayload>("/api/status", { force }));
       setError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "状态读取失败");
+    } finally {
+      if (showSyncState) setSyncingCurrent(false);
     }
   }, []);
 
   useEffect(() => {
     return scheduleDashboardRefresh(
-      () => void refresh(),
-      () => void refresh(true),
+      () => void refresh(Boolean(payload?.preview_status_summary), Boolean(payload?.preview_status_summary)),
+      () => void refresh(true, Boolean(payload?.preview_status_summary)),
       DASHBOARD_REFRESH_INTERVALS.status,
       immutablePreview,
       "status",
     );
-  }, [refresh, immutablePreview]);
+  }, [refresh, immutablePreview, payload?.preview_status_summary]);
 
   useEffect(() => {
     const initial = window.setTimeout(() => setNowMs(Date.now()), 0);
@@ -129,6 +140,8 @@ export default function StatusView() {
   const quota = payload?.gemini_quota;
   const fallbackQuota = payload?.gemini_31_quota;
   const gemmaQuota = payload?.gemma_quota;
+  const currentPhase: CurrentDataPhase = error
+    ? "error" : !payload || syncingCurrent ? "loading" : payload.preview_status_summary ? "snapshot" : "ready";
   return (
     <main className="status-main">
       <div className="grain" />
@@ -150,17 +163,18 @@ export default function StatusView() {
       </section>
 
       {error ? <div className="error-banner">状态读取失败：{error}</div> : null}
+      <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
 
       <section className="quota-summary">
-        <article><span>已配置 KEY</span><strong>{payload?.annotation_queue.configured_key_count ?? "—"}</strong><small>当前可用 {payload?.annotation_queue.available_key_count ?? "—"} · 只显示匿名编号</small></article>
-        <article><span>Flash 今日已发送</span><strong>{quota?.total_sent ?? "—"}</strong><small>重要正文与训练特征</small></article>
-        <article><span>Flash 今日剩余</span><strong className="good">{quota?.total_remaining ?? "—"}</strong><small>本机账本上限</small></article>
-        <article><span>3.1 今日剩余</span><strong className="good">{fallbackQuota?.total_remaining ?? "—"}</strong><small>3.5 普通额度用尽后接管</small></article>
-        <article><span>普通新闻可用</span><strong>{payload?.annotation_queue.routine_remaining ?? "—"}</strong><small>不会动用重要新闻保留额</small></article>
-        <article><span>重要新闻保留</span><strong className="good">{payload?.annotation_queue.priority_reserve ?? "—"}</strong><small>FOMC、CPI、Payroll 专用</small></article>
-        <article><span>错误退避中</span><strong>{payload?.annotation_queue.backing_off ?? "—"}</strong><small>到期前不会重复请求</small></article>
-        <article><span>已隔离</span><strong>{payload?.annotation_queue.dead_letter ?? "—"}</strong><small>相同永久错误不再消耗配额</small></article>
-        <article><span>安全吞吐</span><strong>{payload?.annotation_queue.requests_per_minute ?? "—"}</strong><small>RPM · 每 key {payload?.annotation_queue.requests_per_minute_per_key ?? "—"}</small></article>
+        <article><span>已配置 KEY</span><strong><MetricValue phase={currentPhase}>{payload?.annotation_queue.configured_key_count ?? "—"}</MetricValue></strong><small>当前可用 {payload?.annotation_queue.available_key_count ?? "—"} · 只显示匿名编号</small></article>
+        <article><span>Flash 今日已发送</span><strong><MetricValue phase={currentPhase}>{quota?.total_sent ?? "—"}</MetricValue></strong><small>重要正文与训练特征</small></article>
+        <article><span>Flash 今日剩余</span><strong className="good"><MetricValue phase={currentPhase}>{quota?.total_remaining ?? "—"}</MetricValue></strong><small>本机账本上限</small></article>
+        <article><span>3.1 今日剩余</span><strong className="good"><MetricValue phase={currentPhase}>{fallbackQuota?.total_remaining ?? "—"}</MetricValue></strong><small>3.5 普通额度用尽后接管</small></article>
+        <article><span>普通新闻可用</span><strong><MetricValue phase={currentPhase}>{payload?.annotation_queue.routine_remaining ?? "—"}</MetricValue></strong><small>不会动用重要新闻保留额</small></article>
+        <article><span>重要新闻保留</span><strong className="good"><MetricValue phase={currentPhase}>{payload?.annotation_queue.priority_reserve ?? "—"}</MetricValue></strong><small>FOMC、CPI、Payroll 专用</small></article>
+        <article><span>错误退避中</span><strong><MetricValue phase={currentPhase}>{payload?.annotation_queue.backing_off ?? "—"}</MetricValue></strong><small>到期前不会重复请求</small></article>
+        <article><span>已隔离</span><strong><MetricValue phase={currentPhase}>{payload?.annotation_queue.dead_letter ?? "—"}</MetricValue></strong><small>相同永久错误不再消耗配额</small></article>
+        <article><span>安全吞吐</span><strong><MetricValue phase={currentPhase}>{payload?.annotation_queue.requests_per_minute ?? "—"}</MetricValue></strong><small>RPM · 每 key {payload?.annotation_queue.requests_per_minute_per_key ?? "—"}</small></article>
       </section>
 
       <section className="routing-grid">

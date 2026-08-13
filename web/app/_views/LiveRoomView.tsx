@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
 import DashboardLink from "../_components/DashboardLink";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
@@ -24,6 +25,7 @@ type Decision = {
 };
 
 type Payload = {
+  preview_status_summary?: boolean;
   generated_at: string;
   forward_epoch: string;
   system: {
@@ -107,9 +109,10 @@ const countdown = (seconds: number) => {
 };
 
 export default function LiveRoomView() {
-  const [payload, setPayload] = useState<Payload | null>(() => readDashboardResource<Payload>("/api/status"));
+  const cachedStatus = readDashboardResource<Payload>("/api/status");
+  const [payload, setPayload] = useState<Payload | null>(() => cachedStatus);
   const [error, setError] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
+  const [refreshing, setRefreshing] = useState(Boolean(cachedStatus?.preview_status_summary));
   const [now, setNow] = useState(() => Date.now());
   const immutablePreview = isImmutablePreview(payload);
 
@@ -127,13 +130,13 @@ export default function LiveRoomView() {
 
   useEffect(() => {
     return scheduleDashboardRefresh(
-      () => void refresh(),
+      () => void refresh(Boolean(payload?.preview_status_summary)),
       () => void refresh(true),
       DASHBOARD_REFRESH_INTERVALS.live,
       immutablePreview,
       "live-status",
     );
-  }, [refresh, immutablePreview]);
+  }, [refresh, immutablePreview, payload?.preview_status_summary]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
@@ -141,7 +144,9 @@ export default function LiveRoomView() {
   }, []);
 
   const latest = payload?.latest;
-  const loading = payload === null && error === null;
+  const loading = (payload === null || (refreshing && payload.preview_status_summary)) && error === null;
+  const currentPhase: CurrentDataPhase = error
+    ? "error" : loading ? "loading" : payload?.preview_status_summary ? "snapshot" : "ready";
   const online = Boolean(payload?.system.online && !error);
   const marketClosed = Boolean(
     (payload?.system.market_session === "CLOSED" ||
@@ -239,6 +244,7 @@ export default function LiveRoomView() {
       </section>
 
       {error && <div className="error-banner">{error}。行情采集可能仍在运行，但网页数据服务已停止。</div>}
+      <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
       {marketClosed && <div className="market-closed-banner">cTrader 已确认 XAUUSD 休市。系统暂停新增预测与 30 分钟样本，新闻采集继续运行。</div>}
 
       <section className="metric-grid">
@@ -251,17 +257,17 @@ export default function LiveRoomView() {
         </article>
         <article>
           <span>DECISIONS</span>
-          <strong>{payload?.counts.decision_events ?? 0}</strong>
+          <strong><MetricValue phase={currentPhase}>{payload?.counts.decision_events ?? 0}</MetricValue></strong>
           <small>从 Forward Epoch 开始</small>
         </article>
         <article>
           <span>30M OUTCOMES</span>
-          <strong>{payload?.counts.outcomes ?? 0}</strong>
+          <strong><MetricValue phase={currentPhase}>{payload?.counts.outcomes ?? 0}</MetricValue></strong>
           <small>{payload?.outcome_summary.samples ?? 0} 个有效样本</small>
         </article>
         <article>
           <span>NEWS ARTICLES</span>
-          <strong>{newsMetrics.articles.received}</strong>
+          <strong><MetricValue phase={currentPhase}>{newsMetrics.articles.received}</MetricValue></strong>
           <small>{newsMetrics.events.independent} 个独立事件 · {newsMetrics.articles.stored_revisions} 个保存版本</small>
         </article>
       </section>
