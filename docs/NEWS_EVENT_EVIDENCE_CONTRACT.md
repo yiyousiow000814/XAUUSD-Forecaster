@@ -49,6 +49,13 @@ new episode. Insufficient evidence remains unresolved. The stable anchor,
 factual changes, identity differences, and contextual differences are retained
 as immutable audit evidence with the resolution.
 
+Candidate identity is never admitted by a shared topic or object alone. It
+requires either the same normalized material/episode key or the same normalized
+actor-and-object pair. Continuous market observations additionally require the
+same observation interval and occurrence; a shared instrument, nearby value,
+calendar month, direction word, or broad driver does not join separate price,
+yield, index, or flow observations into one episode.
+
 Training requires a precise event timestamp known at the decision cutoff.
 Explicit body time is preferred. Official primary releases may use their
 precise publication timestamp because publication is the event. An identified
@@ -94,11 +101,14 @@ passes the objective intake checks is retained as a Forward candidate; the
 collector never assigns a model role. Model permission belongs to the versioned
 generation contract and may change only through a complete verified handover.
 
-Gemma scheduling enforces project-scoped request and input-token windows across
-impact review and title translation. Input size is obtained from the provider's
-token-count endpoint before generation; a conservative byte bound fails closed
-when token counting is unavailable. Key rotation never multiplies the shared
-project budget.
+AI scheduling enforces project-scoped request and input-token windows for each
+Gemini annotation model and across Gemma impact review and title translation.
+Input size is obtained from the provider's token-count endpoint before
+generation; a conservative byte bound fails closed when token counting is
+unavailable. Key rotation never multiplies a shared project budget. If the
+primary Gemini annotation model has no safe capacity, the existing scheduler
+may try the separately metered fallback annotation model; final event-identity
+review remains Gemma-owned rather than silently changing classifier semantics.
 
 The immutable publisher body and content hash always remain the audit source of
 truth. Gemma receives that complete body whenever it fits the project token

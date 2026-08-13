@@ -21,6 +21,7 @@ from xauusd_forecaster.annotation import (  # noqa: E402
     DEFAULT_GEMINI_MODEL,
     FALLBACK_GEMINI_MODEL,
     GEMINI_DAILY_PRIORITY_RESERVE,
+    GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
     GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
     GEMMA_REQUESTS_PER_DAY_PER_KEY,
     GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
@@ -97,7 +98,8 @@ def _execute_job(
                 ),
                 input_tokens=input_tokens,
                 input_tokens_per_minute=(
-                    GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL if is_gemma else None
+                    GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL
+                    if is_gemma else GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL
                 ),
                 shared_model_families=(
                     ("gemma-impact", "gemma-title") if is_gemma else None
@@ -105,7 +107,7 @@ def _execute_job(
                 # API limits are project-scoped, not key-scoped. Legacy keys do
                 # not declare project identity, so one conservative shared Gemma
                 # window prevents key rotation from multiplying apparent quota.
-                share_minute_across_accounts=is_gemma,
+                share_minute_across_accounts=True,
                 reserve_total=reserve_total,
                 urgent=urgent,
             )

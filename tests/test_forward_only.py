@@ -1956,6 +1956,41 @@ def test_gemini_repairs_mixed_language_summary_with_counted_request(
     assert quota.snapshot(("key-a", "key-b"))["total_sent"] == 2
 
 
+def test_gemini_annotation_reserves_provider_counted_input_tokens(
+    tmp_path, monkeypatch,
+) -> None:
+    evidence = "Complete body evidence"
+    vector = _v15_annotation({
+        "headline_zh": "完整正文证据",
+        "summary_zh": "完整正文包含一项可审计证据，本测试验证输入令牌预留。",
+        "event_type": "background", "entities": [],
+        "hawkishness": 0.0, "inflation_impulse": 0.0,
+        "growth_impulse": 0.0, "geopolitical_risk": 0.0,
+        "usd_impulse": 0.0, "novelty": 0.0, "confidence": 0.8,
+    }, evidence)
+    reserved = []
+    pool = annotation_module._GeminiRequestPool(
+        ("key-a",), GeminiQuotaLedger(tmp_path / "quota.json"),
+        request_reserver=lambda _key, tokens: reserved.append(tokens) or True,
+    )
+    monkeypatch.setattr(
+        annotation_module, "_count_gemini_input_tokens", lambda *_args: 12_345,
+    )
+    monkeypatch.setattr(
+        annotation_module, "_call_gemini",
+        lambda *_args, **_kwargs: (
+            dict(vector), annotation_module.DEFAULT_GEMINI_MODEL,
+        ),
+    )
+
+    result, _ = pool.call(
+        0, annotation_module.DEFAULT_GEMINI_MODEL, "Headline", evidence,
+    )
+
+    assert result["supporting_evidence"] == [evidence]
+    assert reserved == [12_345]
+
+
 def test_gemini_repairs_mixed_script_story_identity_with_counted_request(
     tmp_path, monkeypatch
 ) -> None:
@@ -2728,6 +2763,8 @@ def test_impact_prompt_defines_factual_equivalence_without_domain_examples() -> 
     assert "任何新增或改变的核心可验证事实都禁止SAME_EVENT" in prompt
     assert "4300" not in prompt
     assert "黄金价格变化" not in prompt
+    assert "连续变化的市场观测" in prompt
+    assert "同一资产、相近水平" in prompt
     system_text = annotation_module._impact_payload(prompt)[
         "systemInstruction"
     ]["parts"][0]["text"]

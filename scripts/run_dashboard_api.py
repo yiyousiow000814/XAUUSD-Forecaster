@@ -46,6 +46,7 @@ from xauusd_forecaster.annotation import (  # noqa: E402
     GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
     GEMINI_DAILY_PRIORITY_RESERVE,
     GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
+    GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
     INVALID_CHINESE_TITLE,
     PROMPT_VERSION,
     completed_annotation_records,
@@ -2170,10 +2171,9 @@ def _dashboard_payload(database: Path) -> dict:
             "available_key_count": available_gemini_keys,
             "fallback_available_key_count": available_fallback_keys,
             "requests_per_minute_per_key": GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
-            "requests_per_minute": (
-                available_gemini_keys
-                * GEMINI_REQUESTS_PER_MINUTE_PER_KEY
-            ),
+            "requests_per_minute": GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
+            "input_tokens_per_minute": GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
+            "minute_scope": "PROJECT",
             "priority_reserve": flash_priority_reserve,
             "routine_remaining": flash_routine_remaining,
         },

@@ -146,6 +146,25 @@ def test_gemma_budget_keeps_previous_bucket_to_prevent_boundary_burst() -> None:
     )
 
 
+def test_gemini_model_tpm_is_shared_across_keys_in_one_project() -> None:
+    connection = _connection()
+    common = {
+        "model_family": "gemini-3.5-flash-lite",
+        "daily_limit": 500, "requests_per_minute": 12,
+        "input_tokens_per_minute": 225_000,
+        "share_minute_across_accounts": True, "now": NOW,
+    }
+    assert reserve_account_request(
+        connection, account_id="key-a", input_tokens=200_000, **common,
+    )
+    assert reserve_account_request(
+        connection, account_id="key-b", input_tokens=25_000, **common,
+    )
+    assert not reserve_account_request(
+        connection, account_id="key-c", input_tokens=1, **common,
+    )
+
+
 def test_account_configuration_rejects_one_key_in_two_accounts() -> None:
     with pytest.raises(ValueError, match="two accounts"):
         configured_api_credentials(raw_accounts=json.dumps([

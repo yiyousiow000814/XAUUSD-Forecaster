@@ -41,6 +41,7 @@ FALLBACK_GEMINI_MODEL = "gemini-3.1-flash-lite"
 SUPPORTED_GEMINI_MODELS = (DEFAULT_GEMINI_MODEL, FALLBACK_GEMINI_MODEL)
 DEFAULT_GEMMA_MODEL = "gemma-4-31b-it"
 GEMINI_REQUESTS_PER_MINUTE_PER_KEY = 12
+GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL = 225_000
 GEMINI_MAX_PARALLEL_REQUESTS = 3
 GEMINI_DAILY_PRIORITY_RESERVE = 150
 GEMMA_REQUESTS_PER_DAY_PER_KEY = 15_000
@@ -826,9 +827,24 @@ class _GeminiRequestPool:
         *, prompt_version: str = PROMPT_VERSION,
     ) -> tuple[dict, str]:
         last_error: Exception | None = None
-        estimated_tokens = _estimate_input_tokens(
-            _annotation_prompt(prompt_version, headline, body)
-        ) + 512
+        prompt = _annotation_prompt(prompt_version, headline, body)
+        estimated_tokens = _estimate_input_tokens(prompt) + 512
+        if self.request_reserver is not None:
+            counted_tokens = None
+            for key in self.api_keys:
+                try:
+                    counted_tokens = _count_gemini_input_tokens(
+                        key, model, _annotation_payload(prompt, prompt_version),
+                    )
+                    break
+                except Exception:
+                    continue
+            if counted_tokens is None:
+                estimated_tokens = max(
+                    estimated_tokens, len(prompt.encode("utf-8")) + 512,
+                )
+            else:
+                estimated_tokens = counted_tokens
         for offset in range(len(self.api_keys)):
             key = self.api_keys[(start_index + offset) % len(self.api_keys)]
             if not self._reserve(key, estimated_tokens):
@@ -1002,15 +1018,7 @@ def _call_gemini(
     prompt_version: str = PROMPT_VERSION,
 ) -> tuple[dict, str]:
     prompt = _annotation_prompt(prompt_version, headline, body)
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseSchema": _schema(prompt_version),
-            "maxOutputTokens": 2600,
-            "temperature": 0,
-        },
-    }
+    payload = _annotation_payload(prompt, prompt_version)
     request = urllib.request.Request(
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
@@ -1026,6 +1034,18 @@ def _call_gemini(
     result = json.loads(text)
     exact_model = str(envelope.get("modelVersion") or model)
     return result, exact_model
+
+
+def _annotation_payload(prompt: str, prompt_version: str) -> dict[str, object]:
+    return {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": _schema(prompt_version),
+            "maxOutputTokens": 2600,
+            "temperature": 0,
+        },
+    }
 
 
 def _annotation_prompt(prompt_version: str, headline: str, body: str) -> str:
@@ -1441,6 +1461,10 @@ def _impact_prompt(row: dict, *, prompt_version: str = IMPACT_PROMPT_VERSION) ->
         "来源、记者、语言、标题、语序和非核心背景差异不能单独创建新事件。"
         "数值不同不能机械决定关系；必须判断它是否属于同一字段、时点、单位和修订状态，"
         "以及它是当前报道的核心命题还是附带背景。"
+        "对于价格、收益率、指数、流量和其他连续变化的市场观测，同一资产、相近水平、"
+        "相邻日期或同属涨跌行情都不是同一episode的充分条件。只有双方明确报道同一观察"
+        "时段内的同一次变化或同一具体驱动事件，才允许SAME_EVENT或SAME_EPISODE；观察时段、"
+        "变化方向或明确归因的驱动不同，属于不同发生批次。"
         "任何新增或改变的核心可验证事实都禁止SAME_EVENT；稳定身份仍相同时必须选"
         "SAME_EPISODE和MATERIAL_UPDATE。无法从双方证据完成比较时必须选UNRESOLVED。"
         "必须先判断现实事件身份，再判断影响寿命。当前报道即使被判BACKGROUND、正文较短、"

@@ -2,7 +2,9 @@ import pytest
 import sqlite3
 
 from xauusd_forecaster.news_event_identity import resolve_event_identity
-from xauusd_forecaster.news_impact import validate_impact_assessment
+from xauusd_forecaster.news_impact import (
+    prior_identity_similarity, validate_impact_assessment,
+)
 
 
 def assessment(update_type="DUPLICATE_REPORT", relation="SAME_EVENT", candidate="prior"):
@@ -121,6 +123,43 @@ def test_incomplete_candidate_context_cannot_claim_a_new_episode():
             assessment("NEW_EVENT", "NEW_EPISODE", ""),
             candidate_ids={"prior"}, candidate_context_complete=False,
         )
+
+
+def test_same_continuous_market_object_does_not_create_identity_similarity():
+    current = {
+        "material_event_key": "gold_pullback_aug_2026",
+        "episode_key": "gold_pullback_2026_08",
+        "canonical_actor_id": "investors",
+        "canonical_object_id": "gold",
+        "actor": "Investors", "object": "gold", "entities": ["Gold"],
+    }
+    prior = {
+        "material_event_key": "gold_price_surpasses_4400_aug_2026",
+        "episode_key": "gold_price_rebound_2026_08",
+        "canonical_actor_id": "korea_gold_exchange",
+        "canonical_object_id": "gold",
+        "actor": "Korea Gold Exchange", "object": "gold prices",
+        "entities": ["Gold"],
+    }
+
+    assert prior_identity_similarity(current, prior) == 0.0
+
+
+def test_same_actor_and_object_remain_candidates_across_key_wording() -> None:
+    current = {
+        "material_event_key": "south_africa_jobs_q2",
+        "episode_key": "south_africa_labor_2026_q2",
+        "canonical_actor_id": "statistics_south_africa",
+        "canonical_object_id": "unemployment_rate",
+    }
+    prior = {
+        "material_event_key": "za_unemployment_2026q2",
+        "episode_key": "za_jobs_q2_2026",
+        "canonical_actor_id": "statistics_south_africa",
+        "canonical_object_id": "unemployment_rate",
+    }
+
+    assert prior_identity_similarity(current, prior) >= 0.75
 
 
 def test_batch_resolution_refreshes_a_prior_identity_persisted_after_selection():

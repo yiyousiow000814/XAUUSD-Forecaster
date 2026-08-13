@@ -4,14 +4,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 import json
-import re
 
 from .news_relevance import google_news_item_is_relevant
 from .news_semantics import ACTIONABLE_RECORD_KINDS, CURRENT_NEWS_PROMPT_VERSION
 
 
 IMPACT_MODEL = "gemma-4-31b-it"
-IMPACT_PROMPT_VERSION = "news-impact-v6-bounded-source-evidence"
+IMPACT_PROMPT_VERSION = "news-impact-v7-continuous-observation-identity"
 HANDOVER_IMPACT_PROMPT_VERSION = "news-impact-v3-independent-semantic-review"
 
 IMPACT_TIME_RULES = {
@@ -168,34 +167,28 @@ def _comparison_items(value: object, label: str) -> list[str]:
     return items
 
 
-def _identity_tokens(annotation: dict) -> set[str]:
-    values = [
-        annotation.get("material_event_key"), annotation.get("episode_key"),
-        annotation.get("canonical_actor_id"), annotation.get("canonical_object_id"),
-        annotation.get("actor"), annotation.get("object"),
-        *(annotation.get("entities") or []),
-    ]
-    return {
-        token for value in values
-        for token in re.findall(r"[a-z0-9\u4e00-\u9fff]+", str(value or "").casefold())
-        if len(token) >= 3
-    }
-
-
-def _prior_similarity(current: dict, prior: dict) -> float:
-    current_tokens = _identity_tokens(current)
-    prior_tokens = _identity_tokens(prior)
-    if not current_tokens or not prior_tokens:
-        return 0.0
-    overlap = len(current_tokens & prior_tokens) / len(current_tokens | prior_tokens)
+def prior_identity_similarity(current: dict, prior: dict) -> float:
+    """Admit candidates only through stable occurrence anchors."""
+    current_material = str(current.get("material_event_key") or "").casefold()
+    prior_material = str(prior.get("material_event_key") or "").casefold()
+    current_episode = str(current.get("episode_key") or "").casefold()
+    prior_episode = str(prior.get("episode_key") or "").casefold()
+    if (
+        (current_material and current_material == prior_material)
+        or (current_episode and current_episode == prior_episode)
+    ):
+        return 1.0
+    current_actor = str(current.get("canonical_actor_id") or "").casefold()
+    prior_actor = str(prior.get("canonical_actor_id") or "").casefold()
     current_object = str(current.get("canonical_object_id") or "").casefold()
     prior_object = str(prior.get("canonical_object_id") or "").casefold()
+    actor_match = bool(current_actor and current_actor == prior_actor)
     object_match = bool(
         current_object and prior_object
         and (current_object == prior_object
              or current_object in prior_object or prior_object in current_object)
     )
-    return max(overlap, 0.75 if object_match else 0.0)
+    return 0.75 if actor_match and object_match else 0.0
 
 
 def _claim_snapshot(annotation: dict) -> dict[str, object]:
@@ -376,8 +369,10 @@ def pending_impact_records(
                 if key != "annotation"
             }
             prior_annotation = prior["annotation"]
-            similarity = _prior_similarity(row["annotation"], prior_annotation)
-            if similarity < 0.25:
+            similarity = prior_identity_similarity(
+                row["annotation"], prior_annotation,
+            )
+            if similarity <= 0.25:
                 continue
             candidate["similarity"] = round(similarity, 3)
             candidate["material_event_key"] = prior_annotation.get(
