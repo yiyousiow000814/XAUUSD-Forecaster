@@ -80,10 +80,12 @@ export function progressCountPresentation(
   }
 
   const [divisor, suffix] = largest >= 1_000_000_000_000
-    ? [1_000_000_000_000, "万亿"]
-    : largest >= 100_000_000
-      ? [100_000_000, "亿"]
-      : [10_000, "万"];
+    ? [1_000_000_000_000, "T"]
+    : largest >= 1_000_000_000
+      ? [1_000_000_000, "B"]
+      : largest >= 1_000_000
+        ? [1_000_000, "M"]
+        : [1_000, "K"];
   const step = divisor / 10;
   const sharedScale = new Intl.NumberFormat("en-US", {
     maximumFractionDigits: 1,

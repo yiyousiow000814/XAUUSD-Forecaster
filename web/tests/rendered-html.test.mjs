@@ -45,25 +45,25 @@ test("formats growing counts through one compact and exact display contract", ()
   });
 
   assert.deepEqual(progressCountPresentation(15_030, 15_050), {
-    current: { exact: "15,030", main: "1.5万", remainder: "30" },
+    current: { exact: "15,030", main: "15K", remainder: "30" },
     isAbbreviated: true,
     showExactDetail: false,
-    target: { exact: "15,050", main: "1.5万", remainder: "50" },
+    target: { exact: "15,050", main: "15K", remainder: "50" },
   });
   assert.deepEqual(progressCountPresentation(12_449_999, 12_450_000), {
-    current: { exact: "12,449,999", main: "1244.9万", remainder: "999" },
+    current: { exact: "12,449,999", main: "12.4M" },
     isAbbreviated: true,
-    showExactDetail: false,
-    target: { exact: "12,450,000", main: "1245万" },
+    showExactDetail: true,
+    target: { exact: "12,450,000", main: "12.4M" },
   });
   assert.deepEqual(progressCountPresentation(1_200_000_000, 1_500_000_000), {
-    current: { exact: "1,200,000,000", main: "12亿" },
+    current: { exact: "1,200,000,000", main: "1.2B" },
     isAbbreviated: true,
     showExactDetail: false,
-    target: { exact: "1,500,000,000", main: "15亿" },
+    target: { exact: "1,500,000,000", main: "1.5B" },
   });
   assert.equal(progressCountPresentation(1_234_567_890, 1_500_000_000).showExactDetail, true);
-  assert.equal(progressCountPresentation(1_200_000_000_000, 1_500_000_000_000).current.main, "1.2万亿");
+  assert.equal(progressCountPresentation(1_200_000_000_000, 1_500_000_000_000).current.main, "1.2T");
   assert.equal(progressCountPresentation(null, 1_450).current.main, "—");
 });
 
