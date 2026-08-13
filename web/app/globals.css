@@ -23,6 +23,7 @@ main { min-height:100vh; position:relative; overflow:hidden; padding:24px 3vw 18
 .current-data-signal i { width:3px; height:7px; background:var(--green); animation:current-data-pulse .75s ease-in-out infinite alternate; }
 .current-data-signal i:nth-child(2) { height:13px; animation-delay:.12s; }.current-data-signal i:nth-child(3) { height:9px; animation-delay:.24s; }
 .current-metric.is-loading { display:inline-flex; align-items:center; gap:7px; font-family:var(--font-mono); font-size:10px; letter-spacing:.08em; }.current-metric.is-snapshot { display:inline-flex; align-items:baseline; gap:5px; }.current-metric.is-snapshot small { font-family:var(--font-mono); font-size:8px; letter-spacing:.05em; color:var(--gold); }
+.count-value { white-space:nowrap; font-variant-numeric:tabular-nums; }
 @keyframes current-data-pulse { from { transform:scaleY(.45); opacity:.35; } to { transform:scaleY(1); opacity:1; } }
 @media (prefers-reduced-motion:reduce) { .current-data-signal i { animation:none; opacity:.75; } }
 .brand-mark { width:46px; height:46px; display:grid; place-items:center; border-radius:50%; background:var(--ink); color:var(--paper); font-family:var(--font-display); font-size:23px; }

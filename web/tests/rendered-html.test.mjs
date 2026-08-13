@@ -6,6 +6,25 @@ const workerUrl = new URL("../dist/server/index.js", import.meta.url);
 workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
 const { default: worker } = await import(workerUrl.href);
 const { applyFreshness } = await import("../app/api/status/freshness.js");
+const { formatCompactCount, formatExactCount } = await import("../app/_lib/count-format.ts");
+
+test("formats growing counts through one compact and exact display contract", () => {
+  const cases = [
+    [0, "0", "0"],
+    [999, "999", "999"],
+    [1_000, "1K", "1,000"],
+    [1_250, "1.3K", "1,250"],
+    [1_000_000, "1M", "1,000,000"],
+    [1_000_000_000, "1B", "1,000,000,000"],
+  ];
+
+  for (const [value, compact, exact] of cases) {
+    assert.equal(formatCompactCount(value), compact);
+    assert.equal(formatExactCount(value), exact);
+  }
+  assert.equal(formatCompactCount(null), "—");
+  assert.equal(formatCompactCount(Number.NaN), "—");
+});
 
 async function render(path) {
   return worker.fetch(
@@ -685,11 +704,11 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /两套独立实验/);
   assert.match(modal, /仓位倍率 OOS/);
   assert.match(modal, /提前退出 OOS/);
-  assert.match(modal, /总计 \{count\} 笔/);
-  assert.match(modal, /当前显示最新 \{visibleCount\} 笔/);
+  assert.match(modal, /总计 <CountValue value=\{count\} suffix=" 笔" \/>/);
+  assert.match(modal, /当前显示最新 \{formatExactCount\(visibleCount\)\} 笔/);
   assert.match(modal, /图中压缩为/);
   assert.match(modal, /resource=execution-point/);
-  assert.match(modal, /第 \{page \+ 1\} 段 · 共 \{total\} 个历史绘图点/);
+  assert.match(modal, /第 \{formatExactCount\(page \+ 1\)\} 段 · 共 \{formatExactCount\(total\)\} 个历史绘图点/);
   assert.match(modal, /← 较早/);
   assert.match(modal, /较晚 →/);
   assert.match(css, /\.execution-chart-grid \{ display:grid; grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
