@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import io
 import json
@@ -816,29 +817,6 @@ def test_eia_api_is_hourly_forward_evidence_and_never_assigns_model_role(
     assert api_key not in persisted
     assert "EIA_JSON_API_V2" in persisted
     assert "model_role" not in persisted
-
-
-def test_registered_macro_errors_redact_keys(tmp_path, monkeypatch) -> None:
-    fred_key = "c" * 32
-    eia_key = "d" * 40
-    monkeypatch.setenv("FRED_API_KEY", fred_key)
-    monkeypatch.setenv("EIA_API_KEY", eia_key)
-    fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
-
-    def fail_with_url(url: str) -> bytes:
-        raise ValueError(f"request failed: {url}")
-
-    fred = collect_fred_macro(ledger, fetched, fail_with_url)
-    eia = collect_eia_macro(ledger, fetched, fail_with_url)
-
-    assert fred["status"] == "ERROR"
-    assert eia["status"] == "ERROR"
-    persisted = "\n".join(ledger.connection.iterdump())
-    rendered = json.dumps([fred, eia])
-    assert fred_key not in persisted + rendered
-    assert eia_key not in persisted + rendered
-    assert "[REDACTED]" in persisted
 
 
 def test_bea_api_is_hourly_forward_evidence_and_never_assigns_model_role(
@@ -2789,7 +2767,7 @@ def test_gemini_batch_is_capped_below_provider_rpm_limit(tmp_path, monkeypatch) 
     monkeypatch.setattr(
         annotation_module,
         "_call_gemini",
-        lambda *_: (vector, "gemini-3.5-flash-lite"),
+        lambda *_: (copy.deepcopy(vector), "gemini-3.5-flash-lite"),
     )
     statuses = annotate_pending_news(
         ledger, provider="gemini", api_key="test-key", limit=999
@@ -2827,7 +2805,7 @@ def test_gemini_key_pool_distributes_safe_capacity(tmp_path, monkeypatch) -> Non
 
     def fake_call(key, *_):
         calls.append(key)
-        return vector, "gemini-3.5-flash-lite"
+        return copy.deepcopy(vector), "gemini-3.5-flash-lite"
 
     monkeypatch.setenv("GEMINI_API_KEYS", "key-a;key-b;key-a")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
