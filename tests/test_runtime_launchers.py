@@ -1,7 +1,9 @@
 from pathlib import Path
 import json
 import socket
+import sqlite3
 import subprocess
+import sys
 import textwrap
 from datetime import datetime, timedelta, timezone
 
@@ -171,6 +173,55 @@ def test_preflight_selects_an_available_loopback_port(tmp_path) -> None:
     assert result != occupied_port
 
 
+def test_candidate_preflight_migrates_an_isolated_consistent_copy(tmp_path) -> None:
+    source = tmp_path / "legacy.sqlite3"
+    target = tmp_path / "candidate" / "forward.sqlite3"
+    connection = sqlite3.connect(source)
+    connection.execute("CREATE TABLE retained_evidence (value TEXT NOT NULL)")
+    connection.execute("INSERT INTO retained_evidence VALUES ('immutable')")
+    connection.commit()
+    connection.close()
+    (source.parent / "dashboard-sync-status.json").write_text(
+        json.dumps({"status": "OK", "last_success": "2026-08-13T19:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    quotes = source.parent / "quotes"
+    quotes.mkdir()
+    (quotes / "market-session.json").write_text(
+        json.dumps({"is_open": True}), encoding="utf-8",
+    )
+
+    result = _run_control_center_contract(
+        tmp_path,
+        f"New-CandidatePreflightDatabase -Python '{sys.executable}' "
+        f"-StageRoot '{ROOT}' -SourceDatabase '{source}' "
+        f"-TargetDatabase '{target}'; Copy-CandidatePreflightState "
+        f"-SourceDatabase '{source}' -TargetDatabase '{target}'; "
+        "Write-Output 'prepared'",
+    )
+
+    assert result == "prepared"
+    source_connection = sqlite3.connect(source)
+    target_connection = sqlite3.connect(target)
+    assert source_connection.execute(
+        "SELECT name FROM sqlite_master WHERE name='news_event_identity_resolutions_v1'"
+    ).fetchone() is None
+    assert target_connection.execute(
+        "SELECT value FROM retained_evidence"
+    ).fetchone() == ("immutable",)
+    assert target_connection.execute(
+        "SELECT name FROM sqlite_master WHERE name='news_event_identity_resolutions_v1'"
+    ).fetchone() == ("news_event_identity_resolutions_v1",)
+    assert json.loads(
+        (target.parent / "dashboard-sync-status.json").read_text(encoding="utf-8")
+    )["status"] == "OK"
+    assert json.loads(
+        (target.parent / "quotes" / "market-session.json").read_text(encoding="utf-8")
+    )["is_open"] is True
+    source_connection.close()
+    target_connection.close()
+
+
 def test_preflight_failure_always_stops_the_staged_api_process(tmp_path) -> None:
     database = tmp_path / "runtime" / ".local" / "forward" / "forward-evidence.sqlite3"
     database.parent.mkdir(parents=True)
@@ -179,6 +230,7 @@ def test_preflight_failure_always_stops_the_staged_api_process(tmp_path) -> None
         tmp_path,
         "$script:stops = 0; function git { $global:LASTEXITCODE = 0 }; "
         "function Get-Command { return [pscustomobject]@{ Source = 'missing-python.exe' } }; "
+        "function New-CandidatePreflightDatabase {}; "
         "function Start-Process { $process = [pscustomobject]@{ HasExited = $false; Id = 424242 }; "
         "$process | Add-Member ScriptMethod WaitForExit { param($milliseconds) return $true }; "
         "return $process }; function Invoke-WebRequest { return [pscustomobject]@{ StatusCode = 200 } }; "
@@ -642,6 +694,32 @@ def test_runtime_update_requires_matching_deployed_and_verified_main(tmp_path) -
     ).stdout.strip()
 
     assert result == candidate
+
+
+def test_failed_candidate_is_only_blocked_by_the_same_preflight_contract(
+    tmp_path,
+) -> None:
+    candidate = "b" * 40
+    current = "a" * 40
+    same_contract = _run_control_center_contract(
+        tmp_path,
+        "function Test-RevisionDescendsFrom { return $true }; "
+        f"Write-RuntimeUpdateState @{{ accepted_main_revision = '{current}'; "
+        f"failed_revision = '{candidate}'; failed_preflight_contract = "
+        "$runtimePreflightContractVersion }; "
+        f"Write-Output (Test-MainCandidate '{current}' '{candidate}')",
+    )
+    upgraded_contract = _run_control_center_contract(
+        tmp_path,
+        "function Test-RevisionDescendsFrom { return $true }; "
+        f"Write-RuntimeUpdateState @{{ accepted_main_revision = '{current}'; "
+        f"failed_revision = '{candidate}'; failed_preflight_contract = "
+        "'legacy-direct-database-v1' }; "
+        f"Write-Output (Test-MainCandidate '{current}' '{candidate}')",
+    )
+
+    assert same_contract == "False"
+    assert upgraded_contract == "True"
 
 
 def test_runtime_update_rejects_deployment_git_mismatch(tmp_path) -> None:
