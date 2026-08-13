@@ -67,6 +67,13 @@ test("formats growing counts through one compact and exact display contract", ()
   assert.equal(progressCountPresentation(null, 1_450).current.main, "—");
 });
 
+test("keeps compact headline counts at the desktop metric size", () => {
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.metric-grid strong \{[^}]*font-size:44px/);
+  assert.match(css, /\.metric-grid strong \.count-value \{[^}]*font-size:inherit/);
+  assert.doesNotMatch(css, /\.metric-grid span,\.metric-grid small/);
+});
+
 async function render(path) {
   return worker.fetch(
     new Request(`http://localhost${path}`, { headers: { accept: "text/html" } }),

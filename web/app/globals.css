@@ -130,7 +130,8 @@ body { font-weight:500; }
 .price-line .symbol,.price-line .currency { font-size:13px; font-weight:600; }
 .dial-label { font-size:13px; font-weight:700; }
 .source-health-badge.health-fallback_active { background:#e5c35f; color:var(--ink); }
-.metric-grid span,.metric-grid small { font-size:13px; font-weight:600; }
+.metric-grid article>span,.metric-grid article>small { font-size:13px; font-weight:600; }
+.metric-grid strong .count-value { font-size:inherit; font-weight:inherit; letter-spacing:inherit; }
 .tick em { font-size:13px; }
 .factor { font-size:13px; }
 .factor b small { min-width:58px; font-size:13px; font-weight:700; }
