@@ -132,7 +132,7 @@ footer { font-size:13px; font-weight:600; letter-spacing:.06em; }
 .annotation-queue>span b { font-size:32px; }
 .annotation-queue>span.is-model-ready { box-shadow:inset 0 5px var(--acid); }
 .annotation-queue>details { grid-column:1/-1; padding:0; }
-.annotation-queue>details summary { padding:11px 18px; cursor:pointer; color:var(--muted); font-size:12px; font-weight:800; }
+.annotation-queue>details summary { min-height:44px; padding:11px 18px; cursor:pointer; color:var(--muted); font-size:12px; font-weight:800; }
 .annotation-queue>details summary:hover,.annotation-queue>details summary:focus-visible { background:#ded9ca; outline:0; }
 .annotation-queue>details p { margin:0; border-top:1px solid #aaa59a; padding:11px 18px; color:var(--muted); font-size:12px; line-height:1.55; }
 @media (max-width:850px){
