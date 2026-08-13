@@ -403,6 +403,65 @@ def minute_bucket(now: datetime) -> str:
     return now.astimezone(UTC).replace(second=0, microsecond=0).isoformat()
 
 
+def account_quota_snapshot(
+    connection: sqlite3.Connection,
+    credentials: tuple[ApiCredential, ...],
+    *,
+    model_families: tuple[str, ...],
+    daily_limit: int,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Read the scheduler's account ledger without exposing credentials."""
+    instant = now or datetime.now(UTC)
+    day = quota_day(instant)
+    families = tuple(dict.fromkeys(model_families))
+    usage: dict[str, int] = {}
+    if families:
+        placeholders = ",".join("?" for _ in families)
+        rows = connection.execute(
+            f"""SELECT account_id,sum(request_count) AS request_count
+                FROM news_ai_account_daily_usage_v1
+                WHERE quota_day=? AND model_family IN ({placeholders})
+                GROUP BY account_id""",
+            (day, *families),
+        ).fetchall()
+        usage = {
+            str(row["account_id"]): int(row["request_count"])
+            for row in rows
+        }
+
+    accounts: dict[str, list[ApiCredential]] = {}
+    for credential in credentials:
+        accounts.setdefault(credential.account_id, []).append(credential)
+    keys = []
+    for slot, (account_id, account_credentials) in enumerate(accounts.items(), 1):
+        sent = usage.get(account_id, 0)
+        fingerprint = (
+            account_credentials[0].credential_id
+            if len(account_credentials) == 1
+            else hashlib.sha256(account_id.encode("utf-8")).hexdigest()[:12]
+        )
+        keys.append({
+            "slot": slot,
+            "fingerprint": fingerprint,
+            "sent": sent,
+            "remaining": max(0, daily_limit - sent),
+            "status": "AVAILABLE" if sent < daily_limit else "DAILY_LIMIT",
+        })
+    next_midnight = (instant.astimezone(PACIFIC) + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    ).astimezone(UTC)
+    return {
+        "quota_day_pacific": day,
+        "daily_limit_per_key": daily_limit,
+        "next_reset_at": next_midnight.isoformat(),
+        "keys": keys,
+        "total_sent": sum(item["sent"] for item in keys),
+        "total_remaining": sum(item["remaining"] for item in keys),
+        "accounting_source": "SCHEDULER_DB",
+    }
+
+
 def reserve_account_request(
     connection: sqlite3.Connection,
     *,
