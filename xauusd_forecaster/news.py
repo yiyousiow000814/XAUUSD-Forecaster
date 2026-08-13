@@ -114,6 +114,7 @@ OFFICIAL_RSS_SOURCES = (
         "https://www.federalreserve.gov/feeds/speeches_and_testimony.xml",
     ),
 )
+FED_POLL_SOURCE = "federal_reserve_full_text"
 
 DIRECT_FULL_TEXT_RSS_SOURCES = (
     RssSource("eia_today_in_energy", "https://www.eia.gov/rss/todayinenergy.xml"),
@@ -162,6 +163,7 @@ class FredSeries:
 
 
 FRED_SOURCE = "fred_graph_csv"
+FRED_POLL_SOURCE = f"{FRED_SOURCE}:bundle"
 FRED_API_URL = "https://api.stlouisfed.org/fred/series/observations"
 FRED_SERIES = (
     FredSeries("DGS2", "2-Year Treasury Constant Maturity Rate", "percent"),
@@ -248,6 +250,21 @@ GOOGLE_NEWS_LANES = (
 GOOGLE_GEO_URL = GOOGLE_NEWS_LANES[0].url
 WGC_SOURCE = "world_gold_council_central_banks"
 WGC_URL = "https://www.gold.org/blog-categories/central-banks"
+
+# Canonical source identities emitted by the runtime collection pipeline.
+# Monitoring and release validation derive their family from this set.
+RUNTIME_NEWS_POLL_SOURCES = frozenset({
+    FED_POLL_SOURCE,
+    BLS_SOURCE,
+    FRED_POLL_SOURCE,
+    EIA_API_SOURCE,
+    BEA_API_SOURCE,
+    GDELT_SOURCE,
+    WGC_SOURCE,
+    *(source.name for source in DIRECT_FULL_TEXT_RSS_SOURCES),
+    *(source.name for source in DIRECT_FULL_TEXT_HTML_SOURCES),
+    *(lane.name for lane in GOOGLE_NEWS_LANES),
+})
 
 
 def _text(node: ET.Element, names: tuple[str, ...]) -> str:
@@ -408,10 +425,10 @@ def collect_fred_macro(
 ) -> dict[str, object]:
     """Collect bounded official FRED snapshots with first-seen revisions."""
     interval = timedelta(minutes=60)
-    poll_source = f"{FRED_SOURCE}:bundle"
+    poll_source = FRED_POLL_SOURCE
     last_poll = ledger.latest_source_poll_time(poll_source)
     if last_poll is not None and fetched_at - last_poll < interval:
-        return {"source": FRED_SOURCE, "status": "SKIPPED_INTERVAL"}
+        return {"source": FRED_POLL_SOURCE, "status": "SKIPPED_INTERVAL"}
     inserted = 0
     unchanged = 0
     errors: list[str] = []
@@ -501,7 +518,7 @@ def collect_fred_macro(
         }
     )
     return {
-        "source": FRED_SOURCE,
+        "source": FRED_POLL_SOURCE,
         "status": status,
         "inserted_revisions": inserted,
         "unchanged_items": unchanged,
@@ -1553,9 +1570,9 @@ def collect_federal_reserve_news(
     )
     ledger.append_source_poll({
         "poll_id": str(uuid.uuid5(
-            uuid.NAMESPACE_URL, f"federal_reserve_full_text|{fetched_at.isoformat()}"
+            uuid.NAMESPACE_URL, f"{FED_POLL_SOURCE}|{fetched_at.isoformat()}"
         )),
-        "source": "federal_reserve_full_text",
+        "source": FED_POLL_SOURCE,
         "fetched_time": fetched_at,
         "status": aggregate_status,
         "payload_hash": hashlib.sha256("|".join(payload_hashes).encode()).hexdigest()

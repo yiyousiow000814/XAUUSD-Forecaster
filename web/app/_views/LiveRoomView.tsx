@@ -2,10 +2,13 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
+import CountValue from "../_components/CountValue";
 import DashboardLink from "../_components/DashboardLink";
+import RuntimeUpdateFailureBanner, { type RuntimeUpdateFailure } from "../_components/RuntimeUpdateFailureBanner";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
+import { formatExactCount } from "../_lib/count-format";
 import { resolveNewsMetrics, type NewsMetrics } from "../_lib/news-metrics";
 
 type Decision = {
@@ -36,6 +39,7 @@ type Payload = {
     mode: string;
     trading_enabled: boolean;
     symbol: string;
+    runtime_update_failure?: RuntimeUpdateFailure | null;
   };
   latest: Decision & {
     source_event_time: string;
@@ -244,6 +248,7 @@ export default function LiveRoomView() {
       </section>
 
       {error && <div className="error-banner">{error}。行情采集可能仍在运行，但网页数据服务已停止。</div>}
+      <RuntimeUpdateFailureBanner failure={payload?.system.runtime_update_failure} />
       <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
       {marketClosed && <div className="market-closed-banner">cTrader 已确认 XAUUSD 休市。系统暂停新增预测与 30 分钟样本，新闻采集继续运行。</div>}
 
@@ -253,22 +258,22 @@ export default function LiveRoomView() {
           <strong className={marketClosed || latest?.data_health === "OK" ? "good" : "warn"}>
             {marketClosed ? "休市" : latest?.data_health ?? "—"}
           </strong>
-          <small>{marketClosed ? "最后预测" : "最新决策"} {localTime(latest?.decision_time)}</small>
+          <small className="metric-detail metric-detail-time"><span>{marketClosed ? "最后预测" : "最新决策"}</span><time>{localTime(latest?.decision_time)}</time></small>
         </article>
         <article>
           <span>DECISIONS</span>
-          <strong><MetricValue phase={currentPhase}>{payload?.counts.decision_events ?? 0}</MetricValue></strong>
-          <small>从 Forward Epoch 开始</small>
+          <strong><MetricValue phase={currentPhase}><CountValue value={payload?.counts.decision_events} /></MetricValue></strong>
+          <small className="metric-detail">Forward Epoch 起</small>
         </article>
         <article>
           <span>30M OUTCOMES</span>
-          <strong><MetricValue phase={currentPhase}>{payload?.counts.outcomes ?? 0}</MetricValue></strong>
-          <small>{payload?.outcome_summary.samples ?? 0} 个有效样本</small>
+          <strong><MetricValue phase={currentPhase}><CountValue value={payload?.counts.outcomes} /></MetricValue></strong>
+          <small><CountValue value={payload?.outcome_summary.samples} format="exact" suffix=" 个有效样本" /></small>
         </article>
         <article>
           <span>NEWS ARTICLES</span>
-          <strong><MetricValue phase={currentPhase}>{newsMetrics.articles.received}</MetricValue></strong>
-          <small>{newsMetrics.events.independent} 个独立事件 · {newsMetrics.articles.stored_revisions} 个保存版本</small>
+          <strong><MetricValue phase={currentPhase}><CountValue value={newsMetrics.articles.received} /></MetricValue></strong>
+          <small className="metric-detail metric-detail-stack"><CountValue value={newsMetrics.events.independent} format="exact" suffix=" 个独立事件" /><CountValue value={newsMetrics.articles.stored_revisions} format="exact" suffix=" 个保存版本" /></small>
         </article>
       </section>
 
@@ -304,7 +309,7 @@ export default function LiveRoomView() {
             <strong>{payload?.u5_context.label ?? "等待样本"}<small>{u5Percent === null ? "—" : `约 ±${u5Percent.toFixed(2)}% · ±$${u5Dollars?.toFixed(1)}`}</small></strong>
             <em>{riskPercentile.toFixed(0)} / 100</em>
             <div className="risk-scale" aria-label={`历史波动分位 ${riskPercentile.toFixed(0)} / 100`}><i style={{ left: `${Math.min(100, Math.max(0, riskPercentile))}%` }} /></div>
-            <p>箭头表示它在已收集 {payload?.u5_context.samples ?? 0} 个样本中的波动分位；越靠红色，未来30分钟通常波动越剧烈。它不是亏损概率，也不代表方向。</p>
+            <p>箭头表示它在已收集 {formatExactCount(payload?.u5_context.samples)} 个样本中的波动分位；越靠红色，未来30分钟通常波动越剧烈。它不是亏损概率，也不代表方向。</p>
           </div>
         </article>
 

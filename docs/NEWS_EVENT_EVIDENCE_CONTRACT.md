@@ -39,6 +39,23 @@ key or normalized actor, action, object, location, topic, and entity identity;
 calendar date is not part of that identity. Annotation or canonical-document
 changes create a new immutable `event_version_id` under the same event.
 
+Identity reconciliation compares symmetric, bounded claim snapshots from the
+current document and prior candidates. `SAME_EVENT` requires strict equivalence
+of core verifiable facts; publisher, language, headline, wording, and incidental
+context do not create an event. A changed core measurement, state, decision,
+action, scope, effective time, result, or revision remains in the same episode
+but receives a distinct event identity. A distinct occurrence anchor starts a
+new episode. Insufficient evidence remains unresolved. The stable anchor,
+factual changes, identity differences, and contextual differences are retained
+as immutable audit evidence with the resolution.
+
+Candidate identity is never admitted by a shared topic or object alone. It
+requires either the same normalized material/episode key or the same normalized
+actor-and-object pair. Continuous market observations additionally require the
+same observation interval and occurrence; a shared instrument, nearby value,
+calendar month, direction word, or broad driver does not join separate price,
+yield, index, or flow observations into one episode.
+
 Training requires a precise event timestamp known at the decision cutoff.
 Explicit body time is preferred. Official primary releases may use their
 precise publication timestamp because publication is the event. An identified
@@ -87,6 +104,25 @@ Collection is permission-neutral. A news document or macro observation that
 passes the objective intake checks is retained as a Forward candidate; the
 collector never assigns a model role. Model permission belongs to the versioned
 generation contract and may change only through a complete verified handover.
+
+AI scheduling enforces project-scoped request and input-token windows for each
+Gemini annotation model and across Gemma impact review and title translation.
+Input size is obtained from the provider's token-count endpoint before
+generation; a conservative byte bound fails closed when token counting is
+unavailable. Key rotation never multiplies a shared project budget. If the
+primary Gemini annotation model has no safe capacity, the existing scheduler
+may try the separately metered fallback annotation model; final event-identity
+review remains Gemma-owned rather than silently changing classifier semantics.
+
+The immutable publisher body and content hash always remain the audit source of
+truth. Gemma receives that complete body whenever it fits the project token
+window. For an oversized body, the existing full-body Gemini annotation anchors
+one exact source window around every validated supporting-evidence excerpt;
+Gemma receives those windows, the complete structured event claim, and the same
+prior-event candidates. This is not presented as complete-body review. The
+context mode and original character count are persisted with the identity
+comparison, and a missing or non-verbatim evidence anchor fails closed rather
+than falling back to arbitrary leading-text truncation.
 
 Core News-residual learns the residual after cross-fitted Market-only
 predictions from the narrower evidence lane. Core Full equals the same frozen

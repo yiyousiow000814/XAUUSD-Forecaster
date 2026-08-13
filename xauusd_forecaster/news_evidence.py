@@ -11,6 +11,7 @@ from datetime import datetime
 
 from .forward_ledger import canonical_hash
 from .news_impact import (
+    HANDOVER_IMPACT_PROMPT_VERSION,
     IMPACT_MODEL,
     IMPACT_PROMPT_VERSION,
     impact_is_actionable,
@@ -233,14 +234,25 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
                   i.impact_class,i.event_state AS impact_event_state,
                   i.update_type AS impact_update_type,
                   i.confidence AS impact_confidence,
-                  i.reason_zh AS impact_reason_zh
+                  i.reason_zh AS impact_reason_zh,
+                  er.canonical_episode_id AS resolved_episode_id,
+                  er.canonical_event_id AS resolved_event_id,
+                  er.identity_relation AS resolved_identity_relation
            FROM news_revisions n JOIN news_annotations a
              ON a.source=n.source AND a.source_item_id=n.source_item_id
             AND a.revision_number=n.revision_number AND a.raw_content_hash=n.content_hash
            LEFT JOIN news_impact_assessments_v1 i
-             ON i.annotation_id=a.annotation_id
-            AND i.llm_model_version=? AND i.prompt_version=?
-            AND i.assessed_at<=?
+             ON i.assessment_id=(
+               SELECT selected_i.assessment_id
+               FROM news_impact_assessments_v1 selected_i
+               WHERE selected_i.annotation_id=a.annotation_id
+                 AND selected_i.llm_model_version=?
+                 AND selected_i.prompt_version IN (?,?)
+                 AND selected_i.assessed_at<=?
+               ORDER BY CASE selected_i.prompt_version WHEN ? THEN 0 ELSE 1 END,
+                        selected_i.assessed_at DESC LIMIT 1)
+           LEFT JOIN news_event_identity_resolutions_v1 er
+             ON er.assessment_id=i.assessment_id AND er.resolved_at<=?
            WHERE n.collector_first_seen_time<=? AND a.parsed_at<=?
              AND length(trim(coalesce(n.body,'')))>=240
              AND a.llm_model_version IN ('gemini-3.5-flash-lite','gemini-3.1-flash-lite')
@@ -252,7 +264,8 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
                  AND newer.collector_first_seen_time<=?)
            ORDER BY a.parsed_at DESC,a.annotation_id DESC""",
         (
-            IMPACT_MODEL, IMPACT_PROMPT_VERSION, cutoff,
+            IMPACT_MODEL, IMPACT_PROMPT_VERSION, HANDOVER_IMPACT_PROMPT_VERSION,
+            cutoff, IMPACT_PROMPT_VERSION, cutoff,
             cutoff, cutoff, CURRENT_EVENT_PROMPT_VERSION, cutoff,
         ),
     ).fetchall()
@@ -566,6 +579,9 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             "impact_event_state": canonical.get("impact_event_state"),
             "impact_update_type": canonical.get("impact_update_type"),
             "impact_reason_zh": canonical.get("impact_reason_zh"),
+            "resolved_episode_id": canonical.get("resolved_episode_id"),
+            "resolved_event_id": canonical.get("resolved_event_id"),
+            "resolved_identity_relation": canonical.get("resolved_identity_relation"),
             "model_permission": "BROAD_MODEL" if eligible else "DISPLAY_ONLY",
             "source_published_time": (
                 canonical["time_assessment"].event_time.isoformat()

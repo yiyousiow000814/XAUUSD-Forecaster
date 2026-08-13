@@ -12,6 +12,7 @@ from xauusd_forecaster.annotation import (
 )
 from xauusd_forecaster.forward_ledger import ForwardLedger
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
+from xauusd_forecaster.model_gateway import GeminiModelGateway
 from xauusd_forecaster.news_semantics import (
     CURRENT_NEWS_PROMPT_VERSION,
     LEGACY_NEWS_PROMPT_VERSION,
@@ -23,6 +24,7 @@ from xauusd_forecaster.news_impact import (
     IMPACT_PROMPT_VERSION,
     pending_impact_records,
 )
+from tests.model_accounting_fakes import CallbackModelAccountant
 
 
 def _target_annotation(evidence: str) -> dict:
@@ -111,7 +113,7 @@ def test_v15_prompt_uses_context_not_keyword_or_casing() -> None:
     assert "investment guide remains commentary" in prompt
 
 
-def test_target_backfill_cannot_consume_active_priority_reserve(
+def test_target_backfill_cannot_bypass_scheduler_capacity_refusal(
     tmp_path, monkeypatch
 ) -> None:
     now = datetime(2026, 8, 11, 10, 0, tzinfo=UTC)
@@ -128,31 +130,24 @@ def test_target_backfill_cannot_consume_active_priority_reserve(
         "content_hash": hashlib.sha256(body.encode()).hexdigest(),
         "cluster_id": "priority-target",
     })
-    key = "test-key"
-    quota = GeminiQuotaLedger(tmp_path / "gemini-quota.json")
-    quota.seed(
-        key,
-        500 - annotation_module.GEMINI_DAILY_PRIORITY_RESERVE,
-    )
-    monkeypatch.setattr(
-        annotation_module,
-        "_call_gemini",
-        lambda *_args, **_kwargs: pytest.fail("target backfill used reserved quota"),
-    )
+    def post_json(_key, _model, method, _payload, *, timeout):
+        del timeout
+        if method == "countTokens":
+            return {"totalTokens": 1_000}
+        pytest.fail("scheduler-refused generation reached the provider")
+    monkeypatch.setattr(GeminiModelGateway, "_post_json", staticmethod(post_json))
 
     statuses = annotate_pending_news(
         ledger,
         provider="gemini",
-        api_key=key,
+        api_key="test-key",
         limit=1,
         prompt_version=CURRENT_NEWS_PROMPT_VERSION,
         allow_priority_reserve=False,
+        request_accountant=CallbackModelAccountant(lambda _usage: False),
     )
 
-    assert statuses == []
-    assert quota.snapshot((key,))["total_sent"] == (
-        500 - annotation_module.GEMINI_DAILY_PRIORITY_RESERVE
-    )
+    assert statuses[0]["status"] == "DEFERRED"
     ledger.close()
 
 
@@ -196,7 +191,8 @@ def test_current_annotation_pipeline_persists_versioned_receipt(
     seen_versions: list[str] = []
 
     def fake_call(
-        _key, _model, _headline, _body, *, prompt_version=CURRENT_NEWS_PROMPT_VERSION
+        _pool, _index, _model, _headline, _body,
+        *, prompt_version=CURRENT_NEWS_PROMPT_VERSION,
     ):
         seen_versions.append(prompt_version)
         return (
@@ -204,7 +200,7 @@ def test_current_annotation_pipeline_persists_versioned_receipt(
             annotation_module.DEFAULT_GEMINI_MODEL,
         )
 
-    monkeypatch.setattr(annotation_module, "_call_gemini", fake_call)
+    monkeypatch.setattr(annotation_module._GeminiRequestPool, "call", fake_call)
 
     statuses = annotate_pending_news(
         ledger,
@@ -213,6 +209,7 @@ def test_current_annotation_pipeline_persists_versioned_receipt(
         limit=1,
         prompt_version=CURRENT_NEWS_PROMPT_VERSION,
         allow_priority_reserve=False,
+        request_accountant=CallbackModelAccountant(lambda _usage: True),
     )
 
     assert [status["status"] for status in statuses] == ["OK"]

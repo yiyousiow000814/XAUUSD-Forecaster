@@ -6,6 +6,161 @@ const workerUrl = new URL("../dist/server/index.js", import.meta.url);
 workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
 const { default: worker } = await import(workerUrl.href);
 const { applyFreshness } = await import("../app/api/status/freshness.js");
+const { runtimeUpdateFailurePresentation } = await import("../app/_lib/runtime-update-failure.js");
+const { countPresentation, formatCompactCount, formatExactCount, progressCountPresentation } = await import("../app/_lib/count-format.ts");
+const { withPreviewIdentity } = await import("../app/api/_shared/preview-status.ts");
+
+test("keeps branch throughput limits while refreshing Preview metrics from D1", () => {
+  const merged = withPreviewIdentity({
+    annotation_queue: { ready: 9, requests_per_minute: 48 },
+    system: { online: true },
+  }, {
+    annotation_queue: {
+      requests_per_minute_per_key: 12,
+      requests_per_minute: 12,
+      input_tokens_per_minute: 225_000,
+      minute_scope: "PROJECT",
+    },
+    system: {},
+  });
+
+  assert.deepEqual(merged.annotation_queue, {
+    ready: 9,
+    requests_per_minute_per_key: 12,
+    requests_per_minute: 12,
+    input_tokens_per_minute: 225_000,
+    minute_scope: "PROJECT",
+  });
+});
+
+test("runtime update success stays silent while failures have stable presentation", () => {
+  assert.equal(runtimeUpdateFailurePresentation(null), null);
+  assert.deepEqual(runtimeUpdateFailurePresentation({
+    status: "ROLLED_BACK",
+    message: "observation failed",
+    failed_at: "2026-08-13T03:00:00Z",
+  }), {
+    label: "新版运行验证失败，已自动恢复上一版。",
+    failedAt: "2026-08-13T03:00:00Z",
+  });
+  assert.equal(runtimeUpdateFailurePresentation({
+    status: "SWITCH_FAILED", message: "switch failed", failed_at: "now",
+  }).label, "新版切换失败，当前版本继续运行。");
+  assert.equal(runtimeUpdateFailurePresentation({
+    status: "ROLLBACK_FAILED", message: "rollback failed", failed_at: "now",
+  }).label, "新版运行验证失败，自动恢复也失败，请检查本机服务。");
+  assert.equal(runtimeUpdateFailurePresentation({
+    status: "PREFLIGHT_FAILED", message: "preflight failed", failed_at: "now",
+  }).label, "新版预检失败，当前版本继续运行。");
+});
+
+test("formats growing counts through one compact and exact display contract", () => {
+  const cases = [
+    [0, "0", "0"],
+    [999, "999", "999"],
+    [1_000, "1K", "1,000"],
+    [1_250, "1.3K", "1,250"],
+    [1_000_000, "1M", "1,000,000"],
+    [1_000_000_000, "1B", "1,000,000,000"],
+  ];
+
+  for (const [value, compact, exact] of cases) {
+    assert.equal(formatCompactCount(value), compact);
+    assert.equal(formatExactCount(value), exact);
+  }
+  assert.equal(formatCompactCount(null), "—");
+  assert.equal(formatCompactCount(Number.NaN), "—");
+
+  assert.deepEqual(countPresentation(1_250, "compact", " 条"), {
+    accessibleValue: "1,250 条",
+    display: "1.3K",
+    exact: "1,250",
+    title: "1,250 条",
+  });
+  assert.deepEqual(countPresentation(1_250, "exact", " 条"), {
+    accessibleValue: "1,250 条",
+    display: "1,250",
+    exact: "1,250",
+    title: undefined,
+  });
+  assert.deepEqual(countPresentation(null), {
+    accessibleValue: "暂无数据",
+    display: "—",
+    exact: "—",
+    title: undefined,
+  });
+
+  assert.deepEqual(progressCountPresentation(15_030, 15_050), {
+    current: { exact: "15,030", main: "15K", remainder: "30" },
+    isAbbreviated: true,
+    showExactDetail: false,
+    target: { exact: "15,050", main: "15K", remainder: "50" },
+  });
+  assert.deepEqual(progressCountPresentation(12_449_999, 12_450_000), {
+    current: { exact: "12,449,999", main: "12.4M" },
+    isAbbreviated: true,
+    showExactDetail: true,
+    target: { exact: "12,450,000", main: "12.4M" },
+  });
+  assert.deepEqual(progressCountPresentation(1_200_000_000, 1_500_000_000), {
+    current: { exact: "1,200,000,000", main: "1.2B" },
+    isAbbreviated: true,
+    showExactDetail: false,
+    target: { exact: "1,500,000,000", main: "1.5B" },
+  });
+  assert.equal(progressCountPresentation(1_234_567_890, 1_500_000_000).showExactDetail, true);
+  assert.equal(progressCountPresentation(1_200_000_000_000, 1_500_000_000_000).current.main, "1.2T");
+  assert.equal(progressCountPresentation(null, 1_450).current.main, "—");
+});
+
+test("keeps nested compact counts in each dashboard headline hierarchy", () => {
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  for (const [selector, size] of [
+    ["metric-grid strong", "44px"],
+    ["quota-summary strong", "46px"],
+    ["evidence-summary strong", "40px"],
+    ["learning-summary-grid strong", "42px"],
+    ["event-thread-summary b", "25px"],
+    ["theme-streams article strong", "25px"],
+    ["story-grid header>strong", "34px"],
+    ["chart-caption>strong", "24px"],
+    ["execution-scorecards strong", "25px"],
+  ]) {
+    assert.match(css, new RegExp(`\\.${selector.replaceAll(".", "\\.")} \\{[^}]*font-size:${size}`));
+  }
+  assert.match(css, /\.metric-grid strong \.count-value \{[^}]*font-size:inherit/);
+  for (const unsafeSelector of [
+    /\.metric-grid span,\.metric-grid small/,
+    /\.quota-summary span,\.quota-summary small/,
+    /\.evidence-summary span/,
+    /\.learning-summary-grid span,\.learning-summary-grid small/,
+    /\.event-thread-summary span/,
+    /\.theme-streams article span/,
+    /\.story-grid header span/,
+    /\.chart-caption span/,
+    /\.execution-scorecards small,\.execution-scorecards span/,
+    /\.annotation-queue span \{/,
+  ]) {
+    assert.doesNotMatch(css, unsafeSelector);
+  }
+});
+
+test("keeps the desktop audit rows separated by a painted cell boundary", () => {
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  const auditGrid = [...css.matchAll(/\.audit-tabs\s*\{([^}]*)\}/g)]
+    .map((match) => match[1])
+    .find((rule) => /grid-template-columns:repeat\(3,1fr\)/.test(rule)) ?? "";
+  const rowBorderDrawsDivider = [
+    /\.audit-tabs[^{}]*nth-child\(-n\+3\)[^{}]*\{[^}]*border-bottom:\s*(?!0(?:\D|$))/,
+    /\.audit-tabs[^{}]*nth-child\(n\+4\)[^{}]*\{[^}]*border-top:\s*(?!0(?:\D|$))/,
+  ].some((contract) => contract.test(css));
+
+  assert.match(auditGrid, /grid-template-columns:repeat\(3,1fr\)/);
+  assert.ok(
+    rowBorderDrawsDivider,
+    "desktop audit rows need a painted cell boundary; a fractional grid gap is not stable",
+  );
+});
 
 async function render(path) {
   return worker.fetch(
@@ -675,6 +830,9 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(page, /六套模型，现在表现怎样/);
   assert.match(page, /等待新版生成/);
   assert.match(page, /training-card-total/);
+  assert.match(page, /className="training-progress-tail"/);
+  assert.match(css, /\.training-card-total strong \.training-progress-tail \{[^}]*font-size:\.42em/);
+  assert.doesNotMatch(css, /\.training-progress-pair small \{/);
   assert.match(page, /还差/);
   assert.doesNotMatch(page, /含新闻的决策时点/);
   assert.doesNotMatch(page, /重复决策样本，不是文章数/);
@@ -693,11 +851,11 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /两套独立实验/);
   assert.match(modal, /仓位倍率 OOS/);
   assert.match(modal, /提前退出 OOS/);
-  assert.match(modal, /总计 \{count\} 笔/);
-  assert.match(modal, /当前显示最新 \{visibleCount\} 笔/);
+  assert.match(modal, /总计 <CountValue value=\{count\} suffix=" 笔" \/>/);
+  assert.match(modal, /当前显示最新 \{formatExactCount\(visibleCount\)\} 笔/);
   assert.match(modal, /图中压缩为/);
   assert.match(modal, /resource=execution-point/);
-  assert.match(modal, /第 \{page \+ 1\} 段 · 共 \{total\} 个历史绘图点/);
+  assert.match(modal, /第 \{formatExactCount\(page \+ 1\)\} 段 · 共 \{formatExactCount\(total\)\} 个历史绘图点/);
   assert.match(modal, /← 较早/);
   assert.match(modal, /较晚 →/);
   assert.match(css, /\.execution-chart-grid \{ display:grid; grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
