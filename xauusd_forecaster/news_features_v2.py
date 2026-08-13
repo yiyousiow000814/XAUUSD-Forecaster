@@ -10,6 +10,7 @@ from .evidence_v2 import ELIGIBILITY_VERSION
 from .factors import MACRO_FEATURE_MAP, NEWS_FEATURES
 from .forward_ledger import canonical_hash
 from .macro_release import macro_release_features_at
+from .news_contracts import CORE_MODEL_STORAGE_PERMISSION
 from .news_evidence import BROAD_NEWS_FEATURES, event_evidence_rows
 from .news_impact import impact_time_rule
 from .news_semantics import ACTIONABLE_CATEGORIES
@@ -98,15 +99,15 @@ def event_raw_weight(row: dict) -> float:
 
 
 def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
-    """Aggregate one unified event snapshot into official and Broad features."""
+    """Aggregate one unified event snapshot into Core and Broad features."""
     all_evidence_events = event_evidence_rows(ledger, decision_time)
-    official_events = [row for row in all_evidence_events if row["official_model_eligible"]]
+    core_events = [row for row in all_evidence_events if row["core_model_eligible"]]
     broad_events = [row for row in all_evidence_events if row["broad_model_eligible"]]
     totals = {name: 0.0 for name in NEWS_FEATURES}
     weight_sum = 0.0
     event_types = set()
     evidence = []
-    for row in official_events:
+    for row in core_events:
         age_minutes = float(row["economic_age_minutes"])
         _, half_life_minutes = impact_time_rule(str(row.get("impact_class") or "BACKGROUND"))
         freshness = math.exp(-math.log(2.0) * age_minutes / half_life_minutes)
@@ -199,8 +200,8 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
             broad_totals["broad_corroborated_event_count"] += freshness
         else:
             broad_totals["broad_single_source_event_count"] += freshness
-        broad_totals["broad_official_source_count"] += (
-            freshness * float(row.get("official_source") or 0.0)
+        broad_totals["broad_first_party_source_count"] += (
+            freshness * float(row.get("first_party_source") or 0.0)
         )
         broad_totals["broad_independent_source_count"] += (
             freshness * float(row.get("independent_publishers") or 0.0)
@@ -229,14 +230,14 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
         broad_weight_sum,
     )
     totals.update(broad_totals)
-    official_visible_events = [_visibility_event_ref(row, row, row) for row in official_events]
+    core_visible_events = [_visibility_event_ref(row, row, row) for row in core_events]
     broad_visible_events = [
         _visibility_event_ref(row, row, row)
         for row in broad_events
     ]
     event_snapshots = []
     for permission, rows in (
-        ("OFFICIAL_MODEL", official_events), ("BROAD_MODEL", broad_events),
+        (CORE_MODEL_STORAGE_PERMISSION, core_events), ("BROAD_MODEL", broad_events),
     ):
         for row in rows:
             event_snapshots.append({
@@ -253,8 +254,8 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
                 "evidence_grade": row["evidence_grade"],
                 "model_permission": permission,
                 "model_permissions": (
-                    ["OFFICIAL_MODEL", "BROAD_MODEL"]
-                    if row["official_model_eligible"] else ["BROAD_MODEL"]
+                    [CORE_MODEL_STORAGE_PERMISSION, "BROAD_MODEL"]
+                    if row["core_model_eligible"] else ["BROAD_MODEL"]
                 ),
                 "reason_codes": list(row["reason_codes"]),
                 "raw_weight": event_raw_weight(row),
@@ -263,9 +264,9 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
     return {
         "features": totals,
         "eligibility_version": ELIGIBILITY_VERSION,
-        "model_visible_items": len(official_events),
-        "news_exposed": int(bool(official_events)),
-        "distinct_news_clusters": len(official_events),
+        "model_visible_items": len(core_events),
+        "news_exposed": int(bool(core_events)),
+        "distinct_news_clusters": len(core_events),
         "distinct_event_types": len(event_types),
         "broad_model_visible_items": len(broad_events),
         "broad_news_exposed": int(bool(broad_events)),
@@ -274,7 +275,7 @@ def aggregate_news_features_v2(ledger, decision_time: datetime) -> dict:
         "source_evidence_hash": canonical_hash((evidence, broad_evidence)),
         # These references are written to a separate append-only visibility ledger.
         # They are intentionally excluded from the aggregate feature snapshot hash.
-        "official_visible_events": official_visible_events,
+        "core_visible_events": core_visible_events,
         "broad_visible_events": broad_visible_events,
         "event_snapshots": event_snapshots,
     }

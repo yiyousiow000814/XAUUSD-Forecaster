@@ -55,6 +55,24 @@ def test_preview_does_not_call_late_aggregated_news_expired() -> None:
     assert row["annotation_reason"] == "搜索线索：来自聚合发现源，不是独立官方发布"
 
 
+def test_preview_overlays_branch_owned_model_throughput_contract() -> None:
+    module = _preview_module()
+    status = {
+        "annotation_queue": {
+            "requests_per_minute": 48,
+        },
+    }
+
+    module._apply_branch_runtime_contract(status)
+
+    assert status["annotation_queue"] == {
+        "requests_per_minute_per_key": 12,
+        "requests_per_minute": 12,
+        "input_tokens_per_minute": 225_000,
+        "minute_scope": "PROJECT",
+    }
+
+
 def test_preview_freezes_both_materialized_curve_overviews(monkeypatch) -> None:
     module = _preview_module()
     requested: list[str] = []
@@ -137,7 +155,7 @@ def test_preview_replays_old_story_aliases_through_branch_policy() -> None:
     assert candidates[0]["evidence_documents"] == 3
     assert candidates[0]["independent_publishers"] == 3
     assert status["storyline_summary"]["policy_version"].endswith(
-        "canonical-occurrence-chains"
+        "semantic-identity-resolution"
     )
 
 
@@ -192,6 +210,8 @@ def test_sync_status_records_real_success_and_preserves_it_on_error(tmp_path) ->
     assert failed["last_success"] == succeeded["last_success"]
     assert failed["last_error_type"] == "ConnectionResetError"
     assert failed["last_error"] == "remote closed"
+    assert failed["last_error_code"] == "TRANSPORT_UNAVAILABLE"
+    assert failed["degraded_resources"] == []
     assert failed["status"] == "ERROR"
 
 
@@ -207,6 +227,85 @@ def test_sync_status_reports_optional_resource_degradation(tmp_path) -> None:
     assert status["status"] == "DEGRADED"
     assert status["last_error"] is None
     assert status["degraded_resources"] == degraded
+
+
+@pytest.mark.parametrize(
+    "status_code,expected",
+    [
+        (401, "AUTH_REJECTED"),
+        (403, "AUTH_REJECTED"),
+        (413, "PAYLOAD_LIMIT_EXCEEDED"),
+        (429, "RATE_LIMITED"),
+        (503, "REMOTE_UNAVAILABLE"),
+    ],
+)
+def test_transport_error_family_is_persisted_as_structured_code(
+    status_code,
+    expected,
+) -> None:
+    module = _sync_module()
+    error = urllib.error.HTTPError(
+        "https://example.invalid", status_code, "failure", {}, io.BytesIO(),
+    )
+
+    assert module.sync_error_code(error) == expected
+
+
+def test_only_declared_payload_contract_errors_receive_payload_code() -> None:
+    module = _sync_module()
+
+    assert module.sync_error_code(ValueError("invalid configuration")) == "UNCLASSIFIED"
+    assert module.sync_error_code(
+        module.PayloadContractError("bounded payload too large")
+    ) == "PAYLOAD_CONTRACT_REJECTED"
+    assert module.sync_error_code(
+        urllib.error.URLError("name resolution failed")
+    ) == "TRANSPORT_UNAVAILABLE"
+
+
+def test_all_rejected_heartbeat_targets_preserve_structured_failures(
+    monkeypatch,
+) -> None:
+    module = _sync_module()
+    monkeypatch.setattr(
+        module.urllib.request,
+        "urlopen",
+        lambda *args, **kwargs: __import__("contextlib").nullcontext(
+            type("Response", (), {
+                "read": lambda self: b"{}", "status": 200,
+            })()
+        ),
+    )
+    monkeypatch.setattr(module, "remote_snapshot", lambda payload: b"{}")
+    monkeypatch.setattr(
+        module,
+        "configured_targets",
+        lambda config: [{
+            "name": "cloudflare", "remote_ingest_url": "https://example.invalid",
+            "token": "token",
+        }],
+    )
+    monkeypatch.setattr(
+        module,
+        "_post_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            urllib.error.HTTPError(
+                "https://example.invalid", 413, "too large", {}, io.BytesIO(),
+            )
+        ),
+    )
+
+    with pytest.raises(module.AllTargetsRejected) as captured:
+        module.sync_once({"local_status_url": "https://local.invalid"})
+
+    assert module.sync_error_code(captured.value) == "PAYLOAD_LIMIT_EXCEEDED"
+    assert captured.value.degraded_resources == [{
+        "target": "cloudflare",
+        "resource": "heartbeat",
+        "error_type": "HTTPError",
+        "error_code": "PAYLOAD_LIMIT_EXCEEDED",
+        "error": "HTTP Error 413: too large",
+    }]
 
 
 def test_configured_targets_adds_independent_cloudflare_mirror(
@@ -332,7 +431,7 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
             ],
             "identity_curves": [body],
             "full_minus_market": [body],
-            "broad_full_minus_official_full": [body],
+            "broad_full_minus_core_full": [body],
         },
         "recent_news": [{
             "source": "example", "source_item_id": str(index),
@@ -394,7 +493,7 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
     assert learning["learning_history_resource"] == "/api/learning-history"
     assert learning["learning_curves"]["identity_curves"] == [body]
     assert learning["learning_curves"]["full_minus_market"] == [body]
-    assert learning["learning_curves"]["broad_full_minus_official_full"] == [body]
+    assert learning["learning_curves"]["broad_full_minus_core_full"] == [body]
     assert "learning_curves" not in mirrored
     assert "models" not in mirrored["training"]
     assert len(index_rows) == 100

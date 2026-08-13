@@ -28,7 +28,7 @@ def _uuid(namespace: str, value: str) -> str:
 def _current_news_snapshot(decision_id: str, decision_time: datetime, news: dict) -> dict:
     values = {
         key: value for key, value in news.items()
-        if key not in {"official_visible_events", "broad_visible_events", "event_snapshots"}
+        if key not in {"core_visible_events", "broad_visible_events", "event_snapshots"}
     }
     payload = {
         "decision_id": decision_id,

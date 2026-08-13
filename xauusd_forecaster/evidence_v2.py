@@ -42,6 +42,7 @@ V2_IMMUTABLE_TABLES = (
     "news_only_visibility_receipts_v1",
     "news_item_classifications_v1",
     "news_impact_assessments_v1",
+    "news_event_identity_resolutions_v1",
     "news_impact_failures_v1",
     "prediction_scores_v2",
     "calibration_snapshots_v2",
@@ -462,6 +463,30 @@ ON news_impact_assessments_v1(
     source,source_item_id,revision_number,assessed_at
 );
 
+CREATE TABLE IF NOT EXISTS news_event_identity_resolutions_v1 (
+    resolution_id TEXT PRIMARY KEY,
+    annotation_id TEXT NOT NULL,
+    assessment_id TEXT NOT NULL,
+    llm_model_version TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    resolved_at TEXT NOT NULL,
+    identity_relation TEXT NOT NULL CHECK(identity_relation IN (
+        'SAME_EVENT','SAME_EPISODE','NEW_EPISODE','UNRESOLVED')),
+    matched_annotation_id TEXT,
+    identity_comparison_json TEXT NOT NULL,
+    canonical_episode_id TEXT NOT NULL,
+    canonical_event_id TEXT NOT NULL,
+    FOREIGN KEY(annotation_id) REFERENCES news_annotations(annotation_id),
+    FOREIGN KEY(assessment_id) REFERENCES news_impact_assessments_v1(assessment_id),
+    FOREIGN KEY(matched_annotation_id) REFERENCES news_annotations(annotation_id),
+    UNIQUE(annotation_id,llm_model_version,prompt_version)
+);
+
+CREATE INDEX IF NOT EXISTS news_event_identity_resolutions_lookup_v1
+ON news_event_identity_resolutions_v1(
+    canonical_episode_id,canonical_event_id,resolved_at
+);
+
 CREATE TABLE IF NOT EXISTS news_impact_failures_v1 (
     failure_id TEXT PRIMARY KEY,
     source TEXT NOT NULL,
@@ -721,6 +746,17 @@ def _repair_execution_score_foreign_key(connection: sqlite3.Connection) -> None:
 def install_v2_schema(connection: sqlite3.Connection) -> None:
     """Create V2 structures and append-only guards; never mutate old rows."""
     connection.executescript(V2_SCHEMA)
+    identity_columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(news_event_identity_resolutions_v1)"
+        ).fetchall()
+    }
+    if "identity_comparison_json" not in identity_columns:
+        connection.execute(
+            "ALTER TABLE news_event_identity_resolutions_v1 ADD COLUMN "
+            "identity_comparison_json TEXT NOT NULL DEFAULT '{}'"
+        )
     _repair_execution_score_foreign_key(connection)
     for table in V2_IMMUTABLE_TABLES:
         for operation in ("UPDATE", "DELETE"):

@@ -444,7 +444,7 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
             identity in {"NEWS_RESIDUAL", "FULL"}
             and int(_row_value(update, "news_exposed_rows", 0) or 0) == 0
         ):
-            prediction_status = "COLD_START_NO_OFFICIAL_EVIDENCE"
+            prediction_status = "COLD_START_NO_CORE_EVIDENCE"
         _insert_prediction(
             ledger, decision_id=decision_id, decision_time=decision_time, created_at=created_at,
             model_version=update["model_version"], model_identity=identity,

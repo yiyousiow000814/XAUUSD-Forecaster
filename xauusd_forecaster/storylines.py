@@ -19,7 +19,7 @@ from .news_semantics import (
 )
 
 
-STORYLINE_POLICY_VERSION = "temporal-event-graph-v8-canonical-occurrence-chains"
+STORYLINE_POLICY_VERSION = "temporal-event-graph-v9-semantic-identity-resolution"
 CURRENT_EVENT_PROMPT_VERSION = CURRENT_NEWS_PROMPT_VERSION
 LEGACY_POLICY_STATUS = "temporal-event-graph-v2:EXPERIMENTAL_MEMBERSHIP_INVALID"
 MODEL_PERMISSION = "DISPLAY_ONLY"
@@ -219,6 +219,12 @@ def _source_organizations(event: dict) -> set[str]:
 
 def _episode_identity(event: dict) -> str | None:
     """Accept only one explicit, component-backed episode identity."""
+    resolved = (
+        _canonical_id(event.get("resolved_episode_id"))
+        if event.get("resolved_identity_relation") != "UNRESOLVED" else ""
+    )
+    if resolved:
+        return resolved
     episode = _canonical_id(event.get("episode_key"))
     actor = _canonical_id(event.get("canonical_actor_id") or event.get("actor"))
     action = _canonical_id(event.get("action_family") or event.get("action"))
@@ -356,6 +362,12 @@ def _relation(event: dict, *, first: bool) -> str:
 
 def _event_identity(event: dict) -> str:
     """Identify the fact being reported, independently from its article/cluster."""
+    resolved = (
+        str(event.get("resolved_event_id") or "").strip()
+        if event.get("resolved_identity_relation") != "UNRESOLVED" else ""
+    )
+    if resolved:
+        return hashlib.sha256(resolved.encode()).hexdigest()[:20]
     episode = _episode_identity(event) or ""
     action_family = _canonical_id(event.get("action_family") or event.get("action"))
     if episode.startswith(("lisa_cook_rate_policy_", "tbac_meeting_")):

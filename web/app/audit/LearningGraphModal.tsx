@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import CountValue from "../_components/CountValue";
+import { formatExactCount } from "../_lib/count-format";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 
 type CurvePoint = { decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number; source_gap_before?: boolean };
@@ -102,8 +104,8 @@ function curveResponseItems(
 }
 
 const LABELS: Record<string, string> = {
-  CHAMPION_0: "零收益基准", MARKET_ONLY: "黄金自身", NEWS_RESIDUAL: "官方新闻修正量",
-  FULL: "黄金＋官方新闻", BROAD_NEWS_RESIDUAL: "大视野新闻修正量", BROAD_FULL: "黄金＋大视野新闻",
+  CHAMPION_0: "零收益基准", MARKET_ONLY: "黄金自身", NEWS_RESIDUAL: "核心新闻修正量",
+  FULL: "黄金＋核心新闻", BROAD_NEWS_RESIDUAL: "大视野新闻修正量", BROAD_FULL: "黄金＋大视野新闻",
   NEWS_ONLY: "纯新闻方向",
 };
 const COLORS: Record<string, string> = {
@@ -314,7 +316,7 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
   const hoveredMetric = hovered ? metric(hovered) : null;
   return <section className="version-ledger modal-version-ledger"><header><div className="version-ledger-title"><span>共同训练截止量对齐 · 同一坐标叠加比较</span><h3>所有模型的训练组成绩</h3></div><div className="version-ledger-controls"><label className="version-ledger-model"><span>查看模型明细</span><select value={identity} onChange={event => { setIdentity(event.target.value); setPage(0); setRemotePages({}); setPageCursors({ 0: null }); setRemoteTotal(null); setPageError(null); setPageRetry(0); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select></label><label><span>统计频率</span><select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPage(0); }}><option value="EVERY_5M">每5分钟（重叠样本）</option><option value="FIXED_30M">每30分钟（固定 :00 / :30）</option></select></label><label><span>横轴范围</span><select value={cutoffWindow} onChange={event => setCutoffWindow(event.target.value as "20" | "all")}><option value="20">最近20个训练截止点</option><option value="all">全部训练截止点</option></select></label></div></header>
     <section className="version-hover-chart" aria-label="所有模型训练组独立收益图">
-      <div className="version-hover-readout">{hovered && hoveredMetric ? <><b>{LABELS[hovered.model_identity]} · 第 {hovered.generation} 组</b><span>{stamp(hovered.created_at)} · 共同截止 {comparisonCutoff(hovered)} 条 · 自身训练 {hovered.training_rows} 条 · OOS {hoveredMetric.oos_rows} 条 · 收益 {pct(hoveredMetric.cumulative_quote_return)} · PF {hoveredMetric.profit_factor_quote_adjusted?.toFixed(2) ?? "—"} · 出方向 {((hoveredMetric.coverage_rate ?? 0)*100).toFixed(1)}%</span></> : <><b>模型成绩对比</b><span>按同一训练截止点比较。</span></>}</div>
+      <div className="version-hover-readout">{hovered && hoveredMetric ? <><b>{LABELS[hovered.model_identity]} · 第 {hovered.generation} 组</b><span>{stamp(hovered.created_at)} · 共同截止 {formatExactCount(comparisonCutoff(hovered))} 条 · 自身训练 {formatExactCount(hovered.training_rows)} 条 · OOS {formatExactCount(hoveredMetric.oos_rows)} 条 · 收益 {pct(hoveredMetric.cumulative_quote_return)} · PF {hoveredMetric.profit_factor_quote_adjusted?.toFixed(2) ?? "—"} · 出方向 {((hoveredMetric.coverage_rate ?? 0)*100).toFixed(1)}%</span></> : <><b>模型成绩对比</b><span>按同一训练截止点比较。</span></>}</div>
       {overviewState === "loading" ? <GraphLoading label="正在更新训练总览" compact /> : overviewState === "error" ? <GraphLoadError compact label="训练总览读取失败" onRetry={() => {
         setOverviewState("loading");
         setOverviewRetry(value => value + 1);
@@ -331,7 +333,7 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
             const currentIndex = cutoffs.indexOf(comparisonCutoff(row));
             const crossesMissingCutoff = currentIndex !== previousIndex + 1;
             return <line key={`${previous.training_dataset_hash}-${row.training_dataset_hash}`} x1={gx(comparisonCutoff(previous))} y1={gy(metric(previous).cumulative_quote_return)} x2={gx(comparisonCutoff(row))} y2={gy(metric(row).cumulative_quote_return)} stroke={COLORS[key]} strokeWidth={selected ? "3.5" : "2.25"} strokeDasharray={crossesMissingCutoff ? "7 6" : undefined} />;
-          })}{modelRows.map(row => <circle key={row.training_dataset_hash} cx={gx(comparisonCutoff(row))} cy={gy(metric(row).cumulative_quote_return)} r={selected ? "6" : "5"} fill={COLORS[key]} stroke="#eee9dc" strokeWidth="2" tabIndex={0} onMouseEnter={() => setHovered(row)} onMouseLeave={() => setHovered(null)} onFocus={() => setHovered(row)} onBlur={() => setHovered(null)}><title>{`${LABELS[key]} · 共同截止 ${comparisonCutoff(row)} 条 · 自身训练 ${row.training_rows} 条 · 自身第 ${row.generation} 组 · ${pct(metric(row).cumulative_quote_return)}`}</title></circle>)}</g>;
+          })}{modelRows.map(row => <circle key={row.training_dataset_hash} cx={gx(comparisonCutoff(row))} cy={gy(metric(row).cumulative_quote_return)} r={selected ? "6" : "5"} fill={COLORS[key]} stroke="#eee9dc" strokeWidth="2" tabIndex={0} onMouseEnter={() => setHovered(row)} onMouseLeave={() => setHovered(null)} onFocus={() => setHovered(row)} onBlur={() => setHovered(null)}><title>{`${LABELS[key]} · 共同截止 ${formatExactCount(comparisonCutoff(row))} 条 · 自身训练 ${formatExactCount(row.training_rows)} 条 · 自身第 ${row.generation} 组 · ${pct(metric(row).cumulative_quote_return)}`}</title></circle>)}</g>;
         })}
       </svg> : <Empty title="暂无训练组结果" text="这个频率还没有成熟的训练组结果。" />}
       <div className="chart-legend">{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <span key={key}><i style={{ background:COLORS[key] }} />{label}</span>)}</div>
@@ -347,10 +349,10 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
     {visibleRows.map(row => { const selected = metric(row); return <article key={`${row.model_identity}-${row.training_dataset_hash}`} className={row.lifecycle_status === "LATEST" ? "is-latest" : ""}>
       <div className="version-result-head">
         <span className="version-group"><b>第 {row.generation} 组</b><small>{row.lifecycle_status === "LATEST" ? "最新版" : row.lifecycle_status === "PREVIOUS" ? "前一版" : "已归档"}</small></span>
-        <span className="version-training"><b>{row.training_rows} 条</b><small>{stamp(row.created_at)}{row.artifact_rebuilds ? ` · 恢复重建 ${row.artifact_rebuilds} 次` : ""}</small></span>
+        <span className="version-training"><b><CountValue value={row.training_rows} suffix=" 条" /></b><small>{stamp(row.created_at)}{row.artifact_rebuilds ? ` · 恢复重建 ${formatExactCount(row.artifact_rebuilds)} 次` : ""}</small></span>
       </div>
       <div className="version-result-metrics">
-        <span data-label="上线后"><b>{selected.oos_rows} 条</b><small>{selected.distinct_days} 个日期</small></span>
+        <span data-label="上线后"><b><CountValue value={selected.oos_rows} suffix=" 条" /></b><small>{formatExactCount(selected.distinct_days)} 个日期</small></span>
         <strong data-label="本组收益">{selected.oos_rows ? pct(selected.cumulative_quote_return) : "等待结果"}</strong>
         <span data-label="PF / 出方向"><b>{selected.profit_factor_quote_adjusted?.toFixed(2) ?? "—"}</b><small>出方向 {((selected.coverage_rate ?? 0)*100).toFixed(1)}%</small></span>
       </div>
@@ -368,7 +370,7 @@ function VersionPagination({ page, pageCount, total, onPage, position = "top" }:
 }) {
   return <nav className={`version-pagination version-pagination-${position}`} aria-label={`训练组分页（${position === "top" ? "顶部" : "底部"}）`}>
     <button type="button" aria-label="上一页训练组" disabled={page === 0} onClick={() => onPage(page - 1)}>←</button>
-    <span><b>{page + 1}</b> / {pageCount}<small>{total} 组</small></span>
+    <span><b>{formatExactCount(page + 1)}</b> / {formatExactCount(pageCount)}<small><CountValue value={total} suffix=" 组" /></small></span>
     <button type="button" aria-label="下一页训练组" disabled={page >= pageCount - 1} onClick={() => onPage(page + 1)}>→</button>
   </nav>;
 }
@@ -576,14 +578,14 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
   const canGoLater = range !== "all" && activePage > 0;
   const windowLabel = `${axisLabel(new Date(start).toISOString())} — ${axisLabel(new Date(end).toISOString())}`;
   return <div className="chart-block long-curve-block">
-    <div className="chart-caption"><div><b>历史＋实时成熟 OOS（只追加，不重写）</b><span>数据库永久保留每个成熟结果；图表固定宽度，按时间窗口查看，全部历史只画压缩轮廓。</span></div><strong>{sourceTimeCount} 个时点<small> · {sourcePointCount} 条模型评分</small></strong></div>
+    <div className="chart-caption"><div><b>历史＋实时成熟 OOS（只追加，不重写）</b><span>数据库永久保留每个成熟结果；图表固定宽度，按时间窗口查看，全部历史只画压缩轮廓。</span></div><strong><CountValue value={sourceTimeCount} suffix=" 个时点" /><small> · <CountValue value={sourcePointCount} suffix=" 条模型评分" /></small></strong></div>
     <div className="curve-navigation" aria-label="长期 OOS 时间范围">
       <label>统计频率<select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPageOffset(0); }}><option value="EVERY_5M">每5分钟（重叠）</option><option value="FIXED_30M">每30分钟（非重叠）</option></select></label>
       <label>时间窗口<select value={range} onChange={event => { setRange(event.target.value as typeof range); setPageOffset(0); }}><option value="24h">24小时</option><option value="7d">7天</option><option value="30d">30天</option><option value="all">全部总览</option></select></label>
       <button type="button" disabled={!canGoEarlier} onClick={() => setPageOffset(activePage + 1)}>← 较早一段</button>
       <button type="button" disabled={!canGoLater} onClick={() => setPageOffset(Math.max(0, activePage - 1))}>较晚一段 →</button>
       <button type="button" disabled={pageOffset === 0} onClick={() => setPageOffset(0)}>回到最新</button>
-      <span>{windowLabel}{chartDownsampled ? ` · 全历史 ${sourcePointCount} 条已压缩为 ${overviewPoints.length} 个绘图点` : ` · 当前 ${visiblePoints.length} 个绘图点`}</span>
+      <span>{windowLabel}{chartDownsampled ? ` · 全历史 ${formatExactCount(sourcePointCount)} 条已压缩为 ${formatExactCount(overviewPoints.length)} 个绘图点` : ` · 当前 ${formatExactCount(visiblePoints.length)} 个绘图点`}</span>
     </div>
     {historyLoading && <GraphLoading label="正在更新长期曲线" compact />}
     {historyErrors[cadence] && <GraphLoadError compact label="长期曲线更新失败" onRetry={() => {
@@ -591,7 +593,7 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
       setHistoryRetries(previous => ({ ...previous, [cadence]: (previous[cadence] ?? 0) + 1 }));
     }} />}
     {compactBoundaryRail && <div className="curve-event-readout" aria-live="polite">
-      {hoveredBoundary ? <><b>{hoveredBoundary.event_count && hoveredBoundary.event_count > 1 ? `${hoveredBoundary.event_count} 次相近换版 · ` : ""}{axisLabel(hoveredBoundary.decision_time)} · {boundaryLabel(hoveredBoundary)}</b><span>{hoveredBoundary.changes.map(change => `${LABELS[change.model_identity] ?? change.model_identity}（${change.training_rows ?? "—"} 条）`).join(" · ")}</span></> : <><b>模型换版本事件轨道</b><span>相近换版会合并为一个圆点；移到圆点查看准确时间、方向样本、新闻样本与模型明细。</span></>}
+      {hoveredBoundary ? <><b>{hoveredBoundary.event_count && hoveredBoundary.event_count > 1 ? `${formatExactCount(hoveredBoundary.event_count)} 次相近换版 · ` : ""}{axisLabel(hoveredBoundary.decision_time)} · {boundaryLabel(hoveredBoundary)}</b><span>{hoveredBoundary.changes.map(change => `${LABELS[change.model_identity] ?? change.model_identity}（${formatExactCount(change.training_rows)} 条）`).join(" · ")}</span></> : <><b>模型换版本事件轨道</b><span>相近换版会合并为一个圆点；移到圆点查看准确时间、方向样本、新闻样本与模型明细。</span></>}
     </div>}
     <span className="mobile-scroll-hint" role="note">左右滑动查看完整图表</span>
     {/* Keyboard users need focus here so arrow keys can pan the wide chart. */}
@@ -604,7 +606,7 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
       {boundaryLayouts.map(({ boundary, markerX, label, labelWidth, labelX, lane }) => {
         const labelY = 8 + lane * 25;
         return <g key={boundary.decision_time} className="version-boundary">
-          <title>{boundary.event_count && boundary.event_count > 1 ? `${boundary.event_count} 次相近换版\n` : ""}{boundary.changes.map(change => `${LABELS[change.model_identity] ?? change.model_identity} · 训练 ${change.training_rows ?? "—"} 条 · ${change.model_version}`).join("\n")}</title>
+          <title>{boundary.event_count && boundary.event_count > 1 ? `${formatExactCount(boundary.event_count)} 次相近换版\n` : ""}{boundary.changes.map(change => `${LABELS[change.model_identity] ?? change.model_identity} · 训练 ${formatExactCount(change.training_rows)} 条 · ${change.model_version}`).join("\n")}</title>
           <line className="version-boundary-marker" x1={markerX} x2={markerX} y1={boundaryDividerY} y2="350" />
           {compactBoundaryRail ? <circle className="version-event-dot" cx={markerX} cy={boundaryDividerY} r="5" tabIndex={0} onMouseEnter={() => setHoveredBoundary(boundary)} onMouseLeave={() => setHoveredBoundary(null)} onFocus={() => setHoveredBoundary(boundary)} onBlur={() => setHoveredBoundary(null)} /> : <>
             <path className="version-boundary-leader" d={`M ${labelX} ${labelY + 21} L ${labelX} ${boundaryDividerY - 5} L ${markerX} ${boundaryDividerY}`} />
@@ -636,7 +638,7 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
       {tickTimes.map(value => <g key={value} className="time-axis"><line x1={x(value)} x2={x(value)} y1="350" y2="356" /><text x={x(value)} y="374" textAnchor="middle">{axisLabel(value)}</text></g>)}
     </svg>
     </div>
-    <div className="chart-legend">{visibleCurves.map(row => <span key={row.model_identity}><i style={{ background: COLORS[row.model_identity] }} />{LABELS[row.model_identity]} <b>{pct(row.points.at(-1)?.cumulative_quote_return ?? 0)}</b></span>)}{groupedBoundaries.length > 0 && <span><i className="train-dot" />模型换版本{compactBoundaryRail ? `（${boundaryLayouts.length} 个事件点 / ${groupedBoundaries.length} 次）` : groupedBoundaries.length > displayedBoundaries.length ? `（显示 ${displayedBoundaries.length}/${groupedBoundaries.length}）` : ""}</span>}</div>
+    <div className="chart-legend">{visibleCurves.map(row => <span key={row.model_identity}><i style={{ background: COLORS[row.model_identity] }} />{LABELS[row.model_identity]} <b>{pct(row.points.at(-1)?.cumulative_quote_return ?? 0)}</b></span>)}{groupedBoundaries.length > 0 && <span><i className="train-dot" />模型换版本{compactBoundaryRail ? `（${formatExactCount(boundaryLayouts.length)} 个事件点 / ${formatExactCount(groupedBoundaries.length)} 次）` : groupedBoundaries.length > displayedBoundaries.length ? `（显示 ${formatExactCount(displayedBoundaries.length)}/${formatExactCount(groupedBoundaries.length)}）` : ""}</span>}</div>
   </div>;
 }
 
@@ -810,7 +812,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
       <button className={showShort ? "active" : ""} type="button" onClick={() => setShowShort(value => !value)}>看空 SHORT</button>
       <button className={showWait ? "active" : ""} type="button" onClick={() => setShowWait(value => !value)}>等待 WAIT</button>
       <button className={showTraining ? "active" : ""} type="button" onClick={() => setShowTraining(value => !value)}>模型换版本</button>
-      <span>显示 {decisions.length}{activeMarket?.decision_downsampled ? ` / 共 ${activeMarket.source_decision_count ?? decisions.length}` : ""} 次{hiddenByAction > 0 ? ` · 动作筛选隐藏 ${hiddenByAction} 次` : ""}{hiddenByFrequency > 0 ? ` · 频率收起 ${hiddenByFrequency} 次` : ""}</span>
+      <span>显示 {formatExactCount(decisions.length)}{activeMarket?.decision_downsampled ? ` / 共 ${formatExactCount(activeMarket.source_decision_count ?? decisions.length)}` : ""} 次{hiddenByAction > 0 ? ` · 动作筛选隐藏 ${formatExactCount(hiddenByAction)} 次` : ""}{hiddenByFrequency > 0 ? ` · 频率收起 ${formatExactCount(hiddenByFrequency)} 次` : ""}</span>
     </div>
     {historyState === "loading" && candles.length > 0 && <GraphLoading label="正在更新行情" compact />}
     {historyState === "error" && candles.length > 0 && <GraphLoadError compact label="行情更新失败" onRetry={() => setHistoryRetry(value => value + 1)} />}
@@ -819,11 +821,11 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
     </div> : <>
     <div className="market-history-nav" aria-label="历史行情翻页">
       <button type="button" disabled={!canGoEarlier} onClick={goEarlier} aria-label="查看更早行情">←</button>
-      <span>{timeLabel(candles[0].time)} — {timeLabel(candles.at(-1)!.time)}{range === "all" && activeMarket?.overview_downsampled ? ` · 全部 ${activeMarket.source_candle_count ?? ""} 根概览` : ""}</span>
+      <span>{timeLabel(candles[0].time)} — {timeLabel(candles.at(-1)!.time)}{range === "all" && activeMarket?.overview_downsampled ? ` · 全部 ${formatExactCount(activeMarket.source_candle_count)} 根概览` : ""}</span>
       <button type="button" disabled={!canGoLater} onClick={goLater} aria-label="查看较新行情">→</button>
       {(page > 0 || laterPages.length > 0) && <button type="button" onClick={goLatest}>最新</button>}
     </div>
-    <div className="prediction-counts"><b>{scopedDecisions.length ? "成本后EV较高方向" : predictionAvailability}</b>{scopedDecisions.length > 0 && <><span>看多 {counts.LONG}</span><span>看空 {counts.SHORT}</span><span>等待 {counts.WAIT}{unhealthyWaits ? `（数据异常 ${unhealthyWaits}）` : ""}</span>{policyMismatchCount > 0 && <span className="negative">历史规则不一致 {policyMismatchCount}（原记录保留）</span>}</>}</div>
+    <div className="prediction-counts"><b>{scopedDecisions.length ? "成本后EV较高方向" : predictionAvailability}</b>{scopedDecisions.length > 0 && <><span>看多 {formatExactCount(counts.LONG)}</span><span>看空 {formatExactCount(counts.SHORT)}</span><span>等待 {formatExactCount(counts.WAIT)}{unhealthyWaits ? `（数据异常 ${formatExactCount(unhealthyWaits)}）` : ""}</span>{policyMismatchCount > 0 && <span className="negative">历史规则不一致 {formatExactCount(policyMismatchCount)}（原记录保留）</span>}</>}</div>
     <span className="mobile-scroll-hint" role="note">左右滑动查看完整图表</span>
     {/* Keyboard users need focus here so arrow keys can pan the wide chart. */}
     {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
@@ -833,7 +835,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
       {candles.map((row, index) => { const cx = xAtIndex(index); const width = Math.max(1.5, 650 / candles.length); const up = row.close >= row.open; return <g key={row.time}><line x1={cx} x2={cx} y1={y(row.high)} y2={y(row.low)} stroke={up ? "#476b19" : "#c9362b"} /><rect x={cx - width / 2} width={width} y={Math.min(y(row.open), y(row.close))} height={Math.max(1, Math.abs(y(row.open) - y(row.close)))} fill={up ? "#476b19" : "#c9362b"} /></g>; })}
       {selectedX != null && selectedExitX != null && <g className="selected-window"><rect x={selectedX} width={Math.max(2, selectedExitX-selectedX)} y="52" height="280" /><line x1={selectedX} x2={selectedX} y1="52" y2="332" /><line x1={selectedExitX} x2={selectedExitX} y1="52" y2="332" /><text x={selectedX+4} y="49">预测</text><text x={Math.max(selectedX+36, selectedExitX-58)} y="49">30分钟后</text></g>}
       {decisions.map(row => { const candle = byTime(row.decision_time); const cx = xTime(row.decision_time); const action = arrowAction(row); const cy = action === "WAIT" ? 34 : action === "LONG" ? y(candle.low) + 12 : y(candle.high) - 12; const color = action === "LONG" ? "#476b19" : action === "SHORT" ? "#c9362b" : "#555149"; const isSelected = activeSelected?.source_decision_id === row.source_decision_id && activeSelected?.model_identity === row.model_identity && activeSelected?.model_version === row.model_version; return <g key={`${row.source_decision_id}-${row.model_identity}-${row.model_version}`} role="button" tabIndex={0} className={`decision-marker${isSelected ? " selected" : ""}${row.policy_consistent === false ? " policy-mismatch" : ""}`} onClick={() => setSelected(row)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") setSelected(row); }}><title>{`${timeLabel(row.decision_time)} · 成本后EV较高方向 ${action} · 模型版本 ${row.model_version} · 点击查看30分钟结果`}</title>{action === "WAIT" && <circle cx={cx} cy={cy} r="10" fill="#eee9da" stroke={color} strokeWidth="1.5" />}{isSelected && <circle cx={cx} cy={cy} r="14" fill="none" stroke={color} strokeWidth="2" />}{action === "WAIT" ? <path d={`M ${cx-7} ${cy} h 14 M ${cx-7} ${cy} l 4 -4 M ${cx-7} ${cy} l 4 4 M ${cx+7} ${cy} l -4 -4 M ${cx+7} ${cy} l -4 4`} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" /> : <path d={action === "LONG" ? `M ${cx} ${cy-7} l -6 11 h 12 z` : `M ${cx} ${cy+7} l -6 -11 h 12 z`} fill={color} />}</g>; })}
-      {showTraining && (activeMarket?.training_markers ?? []).filter(row => row.model_identity === identity && Date.parse(row.created_at) >= cutoff && Date.parse(row.created_at) < pageEnd).map(row => <g key={`${row.model_identity}-${row.training_dataset_hash}`}><title>{`${timeLabel(row.created_at)} · 第一次使用 ${row.training_rows} 条训练数据${row.artifact_count > 1 ? ` · 后续恢复重建 ${row.artifact_count-1} 次` : ""}`}</title><line x1={xTime(row.created_at)} x2={xTime(row.created_at)} y1="52" y2="332" className="training-line" /><text x={xTime(row.created_at)+4} y="328" className="training-label">{row.training_rows}条新训练</text></g>)}
+      {showTraining && (activeMarket?.training_markers ?? []).filter(row => row.model_identity === identity && Date.parse(row.created_at) >= cutoff && Date.parse(row.created_at) < pageEnd).map(row => <g key={`${row.model_identity}-${row.training_dataset_hash}`}><title>{`${timeLabel(row.created_at)} · 第一次使用 ${formatExactCount(row.training_rows)} 条训练数据${row.artifact_count > 1 ? ` · 后续恢复重建 ${formatExactCount(row.artifact_count-1)} 次` : ""}`}</title><line x1={xTime(row.created_at)} x2={xTime(row.created_at)} y1="52" y2="332" className="training-line" /><text x={xTime(row.created_at)+4} y="328" className="training-label">{formatExactCount(row.training_rows)}条新训练</text></g>)}
       <text x="5" y="64">{high.toFixed(2)}</text><text x="5" y="335">{low.toFixed(2)}</text>
       {timeTickIndices.map(index => <g key={candles[index].time} className="time-axis"><line x1={xAtIndex(index)} x2={xAtIndex(index)} y1="338" y2="344" /><text x={xAtIndex(index)} y="366" textAnchor="middle">{axisTimeLabel(candles[index].time)}</text></g>)}
     </svg>
@@ -872,8 +874,8 @@ function ExecutionCharts({ execution, historyResource }: { execution?: Execution
   return <section className="execution-charts">
     <header><span>CAUSAL EXECUTION OOS</span><h3>跟随同一个 Live 方向，逐笔看仓位与退出。</h3><p>方向固定来自 {execution?.source_model_label ?? "黄金＋大视野新闻 Ridge"}。WAIT 不创建仓位；历史结果只训练，下面只评分模型上线后真正发生的未来位置。</p></header>
     <div className="execution-scorecards">
-      <article><small>仓位倍率 Ridge</small><strong>{lot?.evaluation.score_count ?? 0} 笔已评分</strong><span>每个方向位置只比较 0.5x / 1.0x / 2.0x</span></article>
-      <article><small>Exit Ridge</small><strong>{exit?.evaluation.score_count ?? 0} 笔已评分</strong><span>{exit?.predictions ?? 0} 次途中检查 · 提前退出 {exit?.action_counts?.EXIT ?? 0} 次 · 继续持有 {exit?.action_counts?.HOLD ?? 0} 次</span></article>
+      <article><small>仓位倍率 Ridge</small><strong><CountValue value={lot?.evaluation.score_count} suffix=" 笔已评分" /></strong><span>每个方向位置只比较 0.5x / 1.0x / 2.0x</span></article>
+      <article><small>Exit Ridge</small><strong><CountValue value={exit?.evaluation.score_count} suffix=" 笔已评分" /></strong><span>{formatExactCount(exit?.predictions)} 次途中检查 · 提前退出 {formatExactCount(exit?.action_counts?.EXIT)} 次 · 继续持有 {formatExactCount(exit?.action_counts?.HOLD)} 次</span></article>
     </div>
     {(exit?.predictions ?? 0) > 0 && (exit?.action_counts?.EXIT ?? 0) === 0 && <p className="execution-callout"><b>目前没有提前退出。</b> Exit Ridge 已正常检查，但每次预测的“从当前继续持有到30分钟”的收益都大于零，因此全部选择继续持有。这是当前模型结果，不是页面遗漏。</p>}
     <div className="execution-chart-grid">
@@ -930,7 +932,7 @@ function ExecutionHistoryChart({ title, subtitle, model, historyResource, firstK
     : "暂无时间范围";
   const controls = firstUrl ? <div className="execution-history-nav" aria-label={`${title}历史时间窗口`}>
     <button type="button" disabled={!hasEarlier} onClick={() => setPage(value => value + 1)}>← 较早</button>
-    <span>{label}<small>第 {page + 1} 段 · 共 {total} 个历史绘图点</small></span>
+    <span>{label}<small>第 {formatExactCount(page + 1)} 段 · 共 {formatExactCount(total)} 个历史绘图点</small></span>
     <button type="button" disabled={page === 0} onClick={() => setPage(value => Math.max(0, value - 1))}>较晚 →</button>
     {page > 0 && <button type="button" onClick={() => setPage(0)}>最新</button>}
   </div> : undefined;
@@ -958,12 +960,12 @@ function ExecutionResultLists({ lot, exit }: { lot?: ExecutionModel; exit?: Exec
         {!exitRows.length && <p>还没有完整且成熟的退出路径。</p>}
       </ExecutionResultPanel>
     </div>
-    {incompleteExitPaths > 0 && <p className="execution-path-note">另有 {incompleteExitPaths} 笔已成熟仓位缺少完整的 5/10/15/20/25 分钟因果检查路径，因此退出实验不评分；它们不会再显示成“等待退出”。</p>}
+    {incompleteExitPaths > 0 && <p className="execution-path-note">另有 {formatExactCount(incompleteExitPaths)} 笔已成熟仓位缺少完整的 5/10/15/20/25 分钟因果检查路径，因此退出实验不评分；它们不会再显示成“等待退出”。</p>}
   </section>;
 }
 
 function ExecutionResultPanel({ title, count, visibleCount, columns, children }: { title: string; count: number; visibleCount: number; columns: string[]; children: ReactNode }) {
-  return <section className="execution-result-panel"><header><b>{title}</b><span><strong>总计 {count} 笔</strong><small>当前显示最新 {visibleCount} 笔</small></span></header><div className="execution-result-head">{columns.map(value => <span key={value}>{value}</span>)}</div>{children}</section>;
+  return <section className="execution-result-panel"><header><b>{title}</b><span><strong>总计 <CountValue value={count} suffix=" 笔" /></strong><small>当前显示最新 {formatExactCount(visibleCount)} 笔</small></span></header><div className="execution-result-head">{columns.map(value => <span key={value}>{value}</span>)}</div>{children}</section>;
 }
 
 function ExecutionLineChart({ title, subtitle, points, sourceCount, downsampled, firstKey, secondKey, firstLabel, secondLabel, format, controls, loading, error }: {
@@ -985,7 +987,7 @@ function ExecutionLineChart({ title, subtitle, points, sourceCount, downsampled,
   const y = (value: number) => 22 + (high - value) / Math.max(.000001, high - low) * 156;
   const line = (rows: number[]) => rows.map((value, index) => `${x(index)},${y(value)}`).join(" ");
   const stamp = (value: string | number) => new Date(String(value)).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-  return <article className="execution-chart"><div className="chart-caption"><div><b>{title}</b><span>{subtitle}</span></div><strong>{format(first.at(-1) ?? 0)}<small>累计 {sourceCount ?? points.length} 笔{downsampled ? ` · 图中压缩为历史绘图点` : ""}</small></strong></div>
+  return <article className="execution-chart"><div className="chart-caption"><div><b>{title}</b><span>{subtitle}</span></div><strong>{format(first.at(-1) ?? 0)}<small>累计 {formatExactCount(sourceCount ?? points.length)} 笔{downsampled ? ` · 图中压缩为历史绘图点` : ""}</small></strong></div>
     {controls}
     {loading && <GraphLoading label="正在更新历史" compact />}
     {error && <GraphLoadError label="历史读取失败" compact onRetry={error} />}
