@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
 import CountValue from "../_components/CountValue";
 import DashboardLink from "../_components/DashboardLink";
+import RuntimeUpdateFailureBanner, { type RuntimeUpdateFailure } from "../_components/RuntimeUpdateFailureBanner";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
@@ -31,6 +32,7 @@ type StatusPayload = {
   system: {
     online: boolean; mode: string; trading_enabled: boolean; market_session?: "OPEN" | "CLOSED" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE";
     source_of_truth: string; sites_mirror: string;
+    runtime_update_failure?: RuntimeUpdateFailure | null;
     components: Record<string, { last_success: string | null; age_seconds: number | null; status: string; last_error: string | null }>;
   };
   annotation_queue: {
@@ -164,6 +166,7 @@ export default function StatusView() {
       </section>
 
       {error ? <div className="error-banner">状态读取失败：{error}</div> : null}
+      <RuntimeUpdateFailureBanner failure={payload?.system.runtime_update_failure} />
       <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
 
       <section className="quota-summary">
