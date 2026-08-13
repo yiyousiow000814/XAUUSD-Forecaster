@@ -444,7 +444,10 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
             "annotation_reason": "搜索线索：来自聚合发现源，不是独立官方发布",
         } for index in range(100)],
         "recent_decisions": [{"id": index} for index in range(30)],
-        "news_evidence": [{"id": index} for index in range(100)],
+        "news_evidence": [
+            {"id": index, "model_seen": index < 97}
+            for index in range(202)
+        ],
         "market_chart": {
             "candles": [{"time": "2026-08-06T00:00:00Z", "open": 1,
                          "high": 2, "low": 0.5, "close": 1.5}],
@@ -486,6 +489,10 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
     assert market_decision["model_version"] == "unused-field"
     assert len(mirrored["recent_decisions"]) == module.REMOTE_DECISION_LIMIT
     assert len(mirrored["news_evidence"]) == module.REMOTE_EVIDENCE_LIMIT
+    assert sum(row["model_seen"] for row in mirrored["news_evidence"]) == 30
+    assert sum(not row["model_seen"] for row in mirrored["news_evidence"]) == 30
+    assert mirrored["mirror_window"]["news_evidence_seen"] == 30
+    assert mirrored["mirror_window"]["news_evidence_unseen"] == 30
     assert learning["learning_curves"]["models"] == [
         {"lifecycle_status": "LATEST", "model_version": "latest"},
     ]

@@ -37,6 +37,7 @@ _QUOTE_CANDLE_CACHE_LOCK = threading.Lock()
 _QUOTE_CANDLE_CACHE: dict[str, dict] = {}
 
 from xauusd_forecaster.factors import factor_coverage  # noqa: E402
+from xauusd_forecaster.dashboard_payloads import bounded_evidence_window  # noqa: E402
 from xauusd_forecaster.annotation import (  # noqa: E402
     DEFAULT_GEMINI_MODEL,
     DEFAULT_GEMMA_MODEL,
@@ -1794,7 +1795,7 @@ def _dashboard_payload(database: Path) -> dict:
         auditable_news_events = _news_evidence_display_rows(
             connection, all_news_evidence
         )
-        news_evidence = auditable_news_events[:100]
+        news_evidence = bounded_evidence_window(auditable_news_events, 100)
         raw_article_revisions = connection.execute(
             "SELECT count(*) FROM news_revisions"
         ).fetchone()[0]

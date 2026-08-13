@@ -197,6 +197,9 @@ footer { font-size:13px; font-weight:600; letter-spacing:.06em; }
 .evidence-filters button { min-height:44px; border:1px solid var(--ink); padding:9px 12px; background:var(--paper); color:var(--ink); font-size:13px; font-weight:800; cursor:pointer; }
 .evidence-filters button b { margin-left:7px; }
 .evidence-filters button.active { background:var(--ink); color:var(--paper); box-shadow:inset 0 -4px var(--acid); }
+.evidence-window-note { margin:0; padding:10px 16px; border-bottom:1px solid var(--line); font-size:13px; letter-spacing:.03em; color:var(--muted); }
+.evidence-window-note b { color:var(--ink); }
+.evidence-unavailable-row td { padding:22px!important; text-align:center; color:var(--muted); }
 .evidence-rule-note { border-bottom:1px solid var(--ink); background:var(--paper); }
 .evidence-rule-note summary { min-height:44px; padding:12px 18px; cursor:pointer; color:var(--muted); font-size:12px; font-weight:800; }
 .evidence-rule-note summary:hover,.evidence-rule-note summary:focus-visible { background:#ded9ca; outline:0; }
