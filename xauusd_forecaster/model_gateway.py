@@ -6,6 +6,7 @@ import json
 import threading
 import urllib.error
 import urllib.request
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Callable, TypeVar
 
@@ -19,10 +20,17 @@ class ModelGatewayCapacityExhausted(RuntimeError):
 
 @dataclass(frozen=True)
 class ModelRequestUsage:
-    api_key: str
     model: str
     purpose: str
     input_tokens: int
+
+
+class ModelRequestAccountant(ABC):
+    """Durable accounting boundary required before provider transport."""
+
+    @abstractmethod
+    def reserve(self, usage: ModelRequestUsage) -> bool:
+        """Persist one attempted request when quota is available."""
 
 
 class GeminiModelGateway:
@@ -33,17 +41,17 @@ class GeminiModelGateway:
         api_keys: tuple[str, ...],
         *,
         requests_per_key: int,
-        request_reserver: Callable[[ModelRequestUsage], bool],
+        accountant: ModelRequestAccountant,
         batch_limit: int | None = None,
     ) -> None:
         if not api_keys:
             raise ValueError("model gateway requires at least one API key")
-        if request_reserver is None:
+        if not isinstance(accountant, ModelRequestAccountant):
             raise ValueError("model gateway requires metered request accounting")
         self.api_keys = api_keys
         self.requests_per_key = max(1, int(requests_per_key))
         self.batch_limit = batch_limit
-        self.request_reserver = request_reserver
+        self.accountant = accountant
         self._batch_counts = {key: 0 for key in api_keys}
         self._batch_total = 0
         self._lock = threading.Lock()
@@ -105,12 +113,11 @@ class GeminiModelGateway:
         for offset in range(len(self.api_keys)):
             api_key = self.api_keys[(start_index + offset) % len(self.api_keys)]
             usage = ModelRequestUsage(
-                api_key=api_key,
                 model=model,
                 purpose=purpose,
                 input_tokens=max(0, int(input_tokens)),
             )
-            if not self._reserve(usage):
+            if not self._reserve(api_key, usage):
                 continue
             try:
                 envelope = self._post_json(
@@ -133,15 +140,15 @@ class GeminiModelGateway:
             raise last_http_error
         raise RuntimeError("All metered model attempts failed") from last_error
 
-    def _reserve(self, usage: ModelRequestUsage) -> bool:
+    def _reserve(self, api_key: str, usage: ModelRequestUsage) -> bool:
         with self._lock:
             if self.batch_limit is not None and self._batch_total >= self.batch_limit:
                 return False
-            if self._batch_counts[usage.api_key] >= self.requests_per_key:
+            if self._batch_counts[api_key] >= self.requests_per_key:
                 return False
-            if not self.request_reserver(usage):
+            if not self.accountant.reserve(usage):
                 return False
-            self._batch_counts[usage.api_key] += 1
+            self._batch_counts[api_key] += 1
             self._batch_total += 1
             return True
 

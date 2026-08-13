@@ -10,12 +10,13 @@ from xauusd_forecaster.model_gateway import (
     ModelGatewayCapacityExhausted,
     ModelRequestUsage,
 )
+from tests.model_accounting_fakes import CallbackModelAccountant
 
 
 def test_gateway_requires_accounting_before_it_can_be_constructed() -> None:
     with pytest.raises(ValueError, match="metered request accounting"):
         GeminiModelGateway(
-            ("key",), requests_per_key=1, request_reserver=None,  # type: ignore[arg-type]
+            ("key",), requests_per_key=1, accountant=None,  # type: ignore[arg-type]
         )
 
 
@@ -33,7 +34,8 @@ def test_gateway_reserves_exact_usage_before_transport(monkeypatch) -> None:
 
     monkeypatch.setattr(GeminiModelGateway, "_post_json", staticmethod(post_json))
     gateway = GeminiModelGateway(
-        ("key",), requests_per_key=1, request_reserver=reserve,
+        ("key",), requests_per_key=1,
+        accountant=CallbackModelAccountant(reserve),
     )
 
     result, model = gateway.generate(
@@ -50,7 +52,6 @@ def test_gateway_reserves_exact_usage_before_transport(monkeypatch) -> None:
     assert model == "exact-model"
     assert events == [
         ModelRequestUsage(
-            api_key="key",
             model="requested-model",
             purpose="news-impact",
             input_tokens=4_321,
@@ -66,7 +67,8 @@ def test_gateway_refusal_never_reaches_generation_transport(monkeypatch) -> None
         staticmethod(lambda *_args, **_kwargs: pytest.fail("transport called")),
     )
     gateway = GeminiModelGateway(
-        ("key",), requests_per_key=1, request_reserver=lambda _usage: False,
+        ("key",), requests_per_key=1,
+        accountant=CallbackModelAccountant(lambda _usage: False),
     )
 
     with pytest.raises(ModelGatewayCapacityExhausted):
@@ -85,7 +87,7 @@ def test_gateway_batch_capacity_decreases_after_each_attempt(monkeypatch) -> Non
     )
     gateway = GeminiModelGateway(
         ("key-a", "key-b"), requests_per_key=3, batch_limit=2,
-        request_reserver=lambda _usage: True,
+        accountant=CallbackModelAccountant(lambda _usage: True),
     )
 
     assert gateway.available_batch_capacity() == 2
@@ -109,7 +111,9 @@ def test_failed_provider_attempt_remains_accounted(monkeypatch) -> None:
     )
     gateway = GeminiModelGateway(
         ("key",), requests_per_key=1,
-        request_reserver=lambda usage: usages.append(usage) or True,
+        accountant=CallbackModelAccountant(
+            lambda usage: usages.append(usage) or True
+        ),
     )
 
     with pytest.raises(urllib.error.HTTPError):
@@ -140,7 +144,9 @@ def test_all_generation_families_share_the_same_usage_contract(monkeypatch) -> N
     for purpose in purposes:
         gateway = GeminiModelGateway(
             ("key",), requests_per_key=1,
-            request_reserver=lambda usage: usages.append(usage) or True,
+            accountant=CallbackModelAccountant(
+                lambda usage: usages.append(usage) or True
+            ),
         )
         gateway.generate(
             0, model="model", purpose=purpose, payload={}, input_tokens=1,
@@ -152,14 +158,20 @@ def test_all_generation_families_share_the_same_usage_contract(monkeypatch) -> N
 
 
 def test_google_model_transport_has_one_source_of_truth() -> None:
-    package = Path(__file__).resolve().parents[1] / "xauusd_forecaster"
+    root = Path(__file__).resolve().parents[1]
+    package = root / "xauusd_forecaster"
     owners = []
-    for path in package.glob("*.py"):
-        source = path.read_text(encoding="utf-8")
-        if "generativelanguage.googleapis.com" in source:
-            owners.append(path.name)
+    constructors = []
+    for base in (package, root / "scripts"):
+        for path in base.rglob("*.py"):
+            source = path.read_text(encoding="utf-8")
+            if "generativelanguage.googleapis.com" in source:
+                owners.append(path.relative_to(root).as_posix())
+            if "GeminiModelGateway(" in source:
+                constructors.append(path.relative_to(root).as_posix())
     annotation_source = (package / "annotation.py").read_text(encoding="utf-8")
 
-    assert owners == ["model_gateway.py"]
+    assert owners == ["xauusd_forecaster/model_gateway.py"]
+    assert constructors == ["xauusd_forecaster/annotation.py"]
     assert "def _call_gemini" not in annotation_source
     assert "x-goog-api-key" not in annotation_source

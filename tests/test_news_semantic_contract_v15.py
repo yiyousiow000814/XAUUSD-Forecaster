@@ -24,6 +24,7 @@ from xauusd_forecaster.news_impact import (
     IMPACT_PROMPT_VERSION,
     pending_impact_records,
 )
+from tests.model_accounting_fakes import CallbackModelAccountant
 
 
 def _target_annotation(evidence: str) -> dict:
@@ -143,7 +144,7 @@ def test_target_backfill_cannot_bypass_scheduler_capacity_refusal(
         limit=1,
         prompt_version=CURRENT_NEWS_PROMPT_VERSION,
         allow_priority_reserve=False,
-        request_reserver=lambda _usage: False,
+        request_accountant=CallbackModelAccountant(lambda _usage: False),
     )
 
     assert statuses[0]["status"] == "DEFERRED"
@@ -208,7 +209,7 @@ def test_current_annotation_pipeline_persists_versioned_receipt(
         limit=1,
         prompt_version=CURRENT_NEWS_PROMPT_VERSION,
         allow_priority_reserve=False,
-        request_reserver=lambda _usage: True,
+        request_accountant=CallbackModelAccountant(lambda _usage: True),
     )
 
     assert [status["status"] for status in statuses] == ["OK"]

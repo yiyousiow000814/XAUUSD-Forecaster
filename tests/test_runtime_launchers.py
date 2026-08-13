@@ -1,7 +1,9 @@
 from pathlib import Path
 import json
 import socket
+import sqlite3
 import subprocess
+import sys
 import textwrap
 from datetime import datetime, timedelta, timezone
 
@@ -171,6 +173,38 @@ def test_preflight_selects_an_available_loopback_port(tmp_path) -> None:
     assert result != occupied_port
 
 
+def test_candidate_preflight_migrates_an_isolated_consistent_copy(tmp_path) -> None:
+    source = tmp_path / "legacy.sqlite3"
+    target = tmp_path / "candidate.sqlite3"
+    connection = sqlite3.connect(source)
+    connection.execute("CREATE TABLE retained_evidence (value TEXT NOT NULL)")
+    connection.execute("INSERT INTO retained_evidence VALUES ('immutable')")
+    connection.commit()
+    connection.close()
+
+    result = _run_control_center_contract(
+        tmp_path,
+        f"New-CandidatePreflightDatabase -Python '{sys.executable}' "
+        f"-StageRoot '{ROOT}' -SourceDatabase '{source}' "
+        f"-TargetDatabase '{target}'; Write-Output 'prepared'",
+    )
+
+    assert result == "prepared"
+    source_connection = sqlite3.connect(source)
+    target_connection = sqlite3.connect(target)
+    assert source_connection.execute(
+        "SELECT name FROM sqlite_master WHERE name='news_event_identity_resolutions_v1'"
+    ).fetchone() is None
+    assert target_connection.execute(
+        "SELECT value FROM retained_evidence"
+    ).fetchone() == ("immutable",)
+    assert target_connection.execute(
+        "SELECT name FROM sqlite_master WHERE name='news_event_identity_resolutions_v1'"
+    ).fetchone() == ("news_event_identity_resolutions_v1",)
+    source_connection.close()
+    target_connection.close()
+
+
 def test_preflight_failure_always_stops_the_staged_api_process(tmp_path) -> None:
     database = tmp_path / "runtime" / ".local" / "forward" / "forward-evidence.sqlite3"
     database.parent.mkdir(parents=True)
@@ -179,6 +213,7 @@ def test_preflight_failure_always_stops_the_staged_api_process(tmp_path) -> None
         tmp_path,
         "$script:stops = 0; function git { $global:LASTEXITCODE = 0 }; "
         "function Get-Command { return [pscustomobject]@{ Source = 'missing-python.exe' } }; "
+        "function New-CandidatePreflightDatabase {}; "
         "function Start-Process { $process = [pscustomobject]@{ HasExited = $false; Id = 424242 }; "
         "$process | Add-Member ScriptMethod WaitForExit { param($milliseconds) return $true }; "
         "return $process }; function Invoke-WebRequest { return [pscustomobject]@{ StatusCode = 200 } }; "

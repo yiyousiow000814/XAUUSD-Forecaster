@@ -326,6 +326,42 @@ function Get-AvailableLoopbackPort {
     }
 }
 
+function New-CandidatePreflightDatabase {
+    param(
+        [string]$Python,
+        [string]$StageRoot,
+        [string]$SourceDatabase,
+        [string]$TargetDatabase
+    )
+    $migration = @'
+import sqlite3
+import sys
+from pathlib import Path
+
+stage_root = Path(sys.argv[1]).resolve()
+source_path = Path(sys.argv[2]).resolve()
+target_path = Path(sys.argv[3]).resolve()
+target_path.parent.mkdir(parents=True, exist_ok=True)
+if target_path.exists():
+    target_path.unlink()
+source = sqlite3.connect(source_path.as_uri() + '?mode=ro', uri=True)
+destination = sqlite3.connect(target_path)
+try:
+    source.backup(destination)
+finally:
+    destination.close()
+    source.close()
+sys.path.insert(0, str(stage_root))
+from xauusd_forecaster.forward_ledger import ForwardLedger
+ledger = ForwardLedger(target_path)
+ledger.close()
+'@
+    $result = & $Python -c $migration $StageRoot $SourceDatabase $TargetDatabase 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "candidate evidence migration failed: $result"
+    }
+}
+
 function Invoke-ProductionShapePreflight {
     param([string]$Revision)
     $preflightRoot = Join-Path $repositoryRoot ".local\runtime-preflight"
@@ -349,12 +385,15 @@ function Invoke-ProductionShapePreflight {
         & git -C $repositoryRoot worktree add --detach --quiet $stageRoot $Revision 2>$null
         if ($LASTEXITCODE -ne 0) { throw "cannot stage candidate worktree" }
         $python = (Get-Command python.exe -ErrorAction Stop).Source
+        $candidateDatabase = Join-Path $stageRoot ".local\preflight\forward-evidence.sqlite3"
+        New-CandidatePreflightDatabase -Python $python -StageRoot $stageRoot `
+            -SourceDatabase $database -TargetDatabase $candidateDatabase
         $stdout = Join-Path $logRoot "runtime-preflight.stdout.log"
         $stderr = Join-Path $logRoot "runtime-preflight.stderr.log"
         New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
         $process = Start-Process -FilePath $python -ArgumentList @(
             (Join-Path $stageRoot "scripts\run_dashboard_api.py"),
-            "--database", $database, "--host", "127.0.0.1",
+            "--database", $candidateDatabase, "--host", "127.0.0.1",
             "--port", [string]$preflightPort
         ) -WorkingDirectory $stageRoot -WindowStyle Hidden -PassThru `
             -RedirectStandardOutput $stdout -RedirectStandardError $stderr
