@@ -22,7 +22,7 @@ from .model_limits import (
 from .model_gateway import (
     GeminiModelGateway,
     ModelGatewayCapacityExhausted,
-    ModelRequestUsage,
+    ModelRequestAccountant,
 )
 from .news_relevance import google_news_item_is_relevant
 from .news_impact import (
@@ -244,7 +244,7 @@ def annotate_pending_news(
     prompt_version: str = PROMPT_VERSION,
     allow_priority_reserve: bool = True,
     records: list[dict[str, object]] | None = None,
-    request_reserver: Callable[[ModelRequestUsage], bool] | None = None,
+    request_accountant: ModelRequestAccountant | None = None,
 ) -> list[dict[str, object]]:
     if prompt_version not in GENERATED_NEWS_PROMPT_VERSIONS:
         raise ValueError(f"unsupported news prompt version: {prompt_version}")
@@ -257,7 +257,7 @@ def annotate_pending_news(
     keys = configured_gemini_api_keys(api_key)
     if selected_provider == "gemini" and not keys:
         return [{"status": "DISABLED", "reason": "GEMINI_API_KEY_MISSING"}]
-    if selected_provider == "gemini" and request_reserver is None:
+    if selected_provider == "gemini" and request_accountant is None:
         return [{"status": "DISABLED", "reason": "MODEL_ACCOUNTING_REQUIRED"}]
     if selected_provider not in {"ollama", "gemini"}:
         return [{"status": "DISABLED", "reason": "UNKNOWN_LLM_PROVIDER"}]
@@ -272,7 +272,7 @@ def annotate_pending_news(
     request_pool = None
     if selected_provider == "gemini":
         request_pool = _GeminiRequestPool(
-            keys, request_reserver=request_reserver,
+            keys, request_accountant=request_accountant,
         )
         total_capacity = request_pool.available_batch_capacity()
         if total_capacity <= 0:
@@ -519,20 +519,20 @@ def translate_pending_headlines(
     api_key: str | None = None,
     model: str | None = None,
     records: list[dict[str, object]] | None = None,
-    request_reserver: Callable[[ModelRequestUsage], bool] | None = None,
+    request_accountant: ModelRequestAccountant | None = None,
 ) -> list[dict[str, object]]:
     """Translate display titles without creating action-bearing news features."""
     keys = configured_gemini_api_keys(api_key)
     if not keys:
         return [{"status": "DISABLED", "reason": "GEMINI_API_KEY_MISSING"}]
-    if request_reserver is None:
+    if request_accountant is None:
         return [{"status": "DISABLED", "reason": "MODEL_ACCOUNTING_REQUIRED"}]
     selected_model = model or DEFAULT_GEMMA_MODEL
     request_pool = _GeminiRequestPool(
         keys,
         requests_per_key=GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
         batch_limit=GEMMA_TITLE_BATCH_LIMIT,
-        request_reserver=request_reserver,
+        request_accountant=request_accountant,
     )
     capacity = request_pool.available_batch_capacity()
     if capacity <= 0:
@@ -622,19 +622,19 @@ def assess_pending_news_impacts(
     annotation_prompt_version: str = PROMPT_VERSION,
     impact_prompt_version: str = IMPACT_PROMPT_VERSION,
     records: list[dict[str, object]] | None = None,
-    request_reserver: Callable[[ModelRequestUsage], bool] | None = None,
+    request_accountant: ModelRequestAccountant | None = None,
 ) -> list[dict[str, object]]:
     """Classify semantic impact lifetime with frozen Gemma 4 buckets."""
     keys = configured_gemini_api_keys(api_key)
     if not keys:
         return [{"status": "DISABLED", "reason": "GEMINI_API_KEY_MISSING"}]
-    if request_reserver is None:
+    if request_accountant is None:
         return [{"status": "DISABLED", "reason": "MODEL_ACCOUNTING_REQUIRED"}]
     request_pool = _GeminiRequestPool(
         keys,
         requests_per_key=GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
         batch_limit=GEMMA_IMPACT_BATCH_LIMIT,
-        request_reserver=request_reserver,
+        request_accountant=request_accountant,
     )
     capacity = request_pool.available_batch_capacity()
     if capacity <= 0:
@@ -747,18 +747,18 @@ class _GeminiRequestPool:
         *,
         requests_per_key: int = GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
         batch_limit: int | None = None,
-        request_reserver: Callable[[ModelRequestUsage], bool],
+        request_accountant: ModelRequestAccountant,
     ):
         self.api_keys = api_keys
         self.gateway = GeminiModelGateway(
             api_keys,
             requests_per_key=requests_per_key,
             batch_limit=batch_limit,
-            request_reserver=request_reserver,
+            accountant=request_accountant,
         )
 
     def available_batch_capacity(self, *, reserve_total: int = 0) -> int:
-        # Durable daily reserves are enforced atomically by request_reserver.
+        # Durable daily reserves are enforced atomically by the accountant.
         # This value only bounds how much work this in-memory batch may claim.
         del reserve_total
         return self.gateway.available_batch_capacity()

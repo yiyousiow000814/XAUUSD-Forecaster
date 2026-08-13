@@ -20,12 +20,6 @@ sys.path.insert(0, str(MODULE_ROOT))
 from xauusd_forecaster.annotation import (  # noqa: E402
     DEFAULT_GEMINI_MODEL,
     FALLBACK_GEMINI_MODEL,
-    GEMINI_DAILY_PRIORITY_RESERVE,
-    GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
-    GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
-    GEMMA_REQUESTS_PER_DAY_PER_KEY,
-    GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
-    GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
     IMPACT_PROMPT_VERSION,
     PROMPT_VERSION,
     TITLE_PROMPT_VERSION,
@@ -34,10 +28,6 @@ from xauusd_forecaster.annotation import (  # noqa: E402
     translate_pending_headlines,
 )
 from xauusd_forecaster.forward_ledger import ForwardLedger  # noqa: E402
-from xauusd_forecaster.gemini_quota import (  # noqa: E402
-    GEMINI_REQUESTS_PER_DAY_PER_KEY,
-)
-from xauusd_forecaster.model_gateway import ModelRequestUsage  # noqa: E402
 from xauusd_forecaster.news_scheduler import (  # noqa: E402
     ApiCredential,
     backoff_job,
@@ -46,11 +36,13 @@ from xauusd_forecaster.news_scheduler import (  # noqa: E402
     configured_api_credentials,
     pending_record_for_job,
     release_job,
-    reserve_account_request,
     scheduler_counts,
     sync_pending_jobs,
 )
 from xauusd_forecaster.runtime_health import write_runtime_heartbeat  # noqa: E402
+from xauusd_forecaster.scheduler_model_gateway import (  # noqa: E402
+    SchedulerModelAccountant,
+)
 
 
 def write_heartbeat(path: Path, *, work_items: int) -> None:
@@ -79,40 +71,10 @@ def _execute_job(
     record = pending_record_for_job(ledger.connection, job, now=now)
     if record is None:
         return {"status": "NOT_CURRENT"}
-    is_annotation = job.task_type == "ACTIVE_ANNOTATION"
     urgent = job.priority in {"IMMEDIATE", "FAST"}
-
-    def reserver_for(model_family: str, *, reserve_total: int = 0):
-        def reserve(usage: ModelRequestUsage) -> bool:
-            is_gemma = not is_annotation
-            return reserve_account_request(
-                ledger.connection,
-                account_id=credential.account_id,
-                model_family=model_family,
-                daily_limit=(
-                    GEMINI_REQUESTS_PER_DAY_PER_KEY
-                    if is_annotation else GEMMA_REQUESTS_PER_DAY_PER_KEY
-                ),
-                requests_per_minute=(
-                    GEMINI_REQUESTS_PER_MINUTE_PER_KEY
-                    if is_annotation else GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL
-                ),
-                input_tokens=usage.input_tokens,
-                input_tokens_per_minute=(
-                    GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL
-                    if is_gemma else GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL
-                ),
-                shared_model_families=(
-                    ("gemma-impact", "gemma-title") if is_gemma else None
-                ),
-                # API limits are project-scoped, not key-scoped. Legacy keys do
-                # not declare project identity, so one conservative shared Gemma
-                # window prevents key rotation from multiplying apparent quota.
-                share_minute_across_accounts=True,
-                reserve_total=reserve_total,
-                urgent=urgent,
-            )
-        return reserve
+    accountant = SchedulerModelAccountant(
+        ledger.connection, credential, urgent=urgent,
+    )
 
     if job.task_type == "ACTIVE_ANNOTATION":
         common = {
@@ -126,16 +88,13 @@ def _execute_job(
         status = annotate_pending_news(
             **common,
             model=DEFAULT_GEMINI_MODEL,
-            request_reserver=reserver_for(
-                DEFAULT_GEMINI_MODEL,
-                reserve_total=GEMINI_DAILY_PRIORITY_RESERVE,
-            ),
+            request_accountant=accountant,
         )[0]
         if status.get("status") == "DEFERRED":
             status = annotate_pending_news(
                 **common,
                 model=FALLBACK_GEMINI_MODEL,
-                request_reserver=reserver_for(FALLBACK_GEMINI_MODEL),
+                request_accountant=accountant,
             )[0]
         return status
     if job.task_type == "ACTIVE_IMPACT":
@@ -146,13 +105,13 @@ def _execute_job(
             annotation_prompt_version=PROMPT_VERSION,
             impact_prompt_version=IMPACT_PROMPT_VERSION,
             records=[record],
-            request_reserver=reserver_for("gemma-impact"),
+            request_accountant=accountant,
         )[0]
     return translate_pending_headlines(
         ledger,
         api_key=credential.api_key,
         records=[record],
-        request_reserver=reserver_for("gemma-title"),
+        request_accountant=accountant,
     )[0]
 
 
