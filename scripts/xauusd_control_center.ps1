@@ -33,6 +33,12 @@ $runtimeUpdateCheckInterval = [TimeSpan]::FromMinutes(5)
 $runtimeObservationCycles = 2
 $runtimeObservationTimeout = [TimeSpan]::FromMinutes(15)
 $reloadableServiceKeys = @("collector", "annotator", "api", "sync")
+$runtimeControlFileNames = @(
+    "xauusd_control_center.ps1",
+    "xauusd_watchdog_launcher.vbs",
+    "xauusd_watchdog_guard.ps1",
+    "xauusd_watchdog_guard_launcher.vbs"
+)
 $collectorSecretsPath = Join-Path $repositoryRoot ".local\secrets\collector-keys.json"
 
 function Get-CollectorSecret {
@@ -256,6 +262,58 @@ function Write-RuntimeUpdateFailure {
     Write-WatchdogEvent -Event "RUNTIME_UPDATE_FAILED" -Service "all" -State $Message
 }
 
+function Sync-StableRuntimeControlFiles {
+    param(
+        [string]$SourceRoot = $moduleRoot,
+        [string]$ControlRoot = (Join-Path $repositoryRoot ".local\runtime-control")
+    )
+    $stageRoot = Join-Path $ControlRoot (".staging-{0}" -f [guid]::NewGuid())
+    $backupRoot = Join-Path $ControlRoot (".backup-{0}" -f [guid]::NewGuid())
+    New-Item -ItemType Directory -Path $ControlRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+    try {
+        foreach ($name in $runtimeControlFileNames) {
+            $source = Join-Path $SourceRoot ("scripts\{0}" -f $name)
+            if (-not (Test-Path -LiteralPath $source)) {
+                throw "Missing runtime control file: $source"
+            }
+            Copy-Item -LiteralPath $source -Destination (Join-Path $stageRoot $name) -Force
+        }
+        foreach ($name in $runtimeControlFileNames) {
+            $destination = Join-Path $ControlRoot $name
+            if (Test-Path -LiteralPath $destination) {
+                Copy-Item -LiteralPath $destination `
+                    -Destination (Join-Path $backupRoot $name) -Force
+            }
+        }
+        try {
+            foreach ($name in $runtimeControlFileNames) {
+                Move-Item -LiteralPath (Join-Path $stageRoot $name) `
+                    -Destination (Join-Path $ControlRoot $name) -Force
+            }
+        } catch {
+            foreach ($name in $runtimeControlFileNames) {
+                $destination = Join-Path $ControlRoot $name
+                $backup = Join-Path $backupRoot $name
+                if (Test-Path -LiteralPath $backup) {
+                    Move-Item -LiteralPath $backup -Destination $destination -Force
+                } elseif (Test-Path -LiteralPath $destination) {
+                    Remove-Item -LiteralPath $destination -Force
+                }
+            }
+            throw
+        }
+    } finally {
+        if (Test-Path -LiteralPath $stageRoot) {
+            Remove-Item -LiteralPath $stageRoot -Recurse -Force
+        }
+        if (Test-Path -LiteralPath $backupRoot) {
+            Remove-Item -LiteralPath $backupRoot -Recurse -Force
+        }
+    }
+}
+
 function Get-AvailableLoopbackPort {
     $listener = [System.Net.Sockets.TcpListener]::new(
         [System.Net.IPAddress]::Loopback, 0
@@ -389,18 +447,7 @@ function Update-RuntimeCheckout {
         & git -C $moduleRoot checkout --detach --force --quiet $Revision 2>$null
         if ($LASTEXITCODE -ne 0) { throw "verified revision checkout failed" }
         $checkoutChanged = $true
-        $stableScript = Join-Path $repositoryRoot ".local\runtime-control\xauusd_control_center.ps1"
-        Copy-Item -LiteralPath (Join-Path $moduleRoot "scripts\xauusd_control_center.ps1") `
-            -Destination $stableScript -Force
-        Copy-Item -LiteralPath (Join-Path $moduleRoot "scripts\xauusd_watchdog_launcher.vbs") `
-            -Destination (Join-Path (Split-Path -Parent $stableScript) "xauusd_watchdog_launcher.vbs") `
-            -Force
-        Copy-Item -LiteralPath (Join-Path $moduleRoot "scripts\xauusd_watchdog_guard.ps1") `
-            -Destination (Join-Path (Split-Path -Parent $stableScript) "xauusd_watchdog_guard.ps1") `
-            -Force
-        Copy-Item -LiteralPath (Join-Path $moduleRoot "scripts\xauusd_watchdog_guard_launcher.vbs") `
-            -Destination (Join-Path (Split-Path -Parent $stableScript) "xauusd_watchdog_guard_launcher.vbs") `
-            -Force
+        Sync-StableRuntimeControlFiles
         Write-RuntimeUpdateState @{
             accepted_main_revision = $Revision
             previous_revision = $previousRevision
@@ -416,6 +463,13 @@ function Update-RuntimeCheckout {
             if ($LASTEXITCODE -ne 0) {
                 Write-RuntimeUpdateFailure -Revision $Revision -Status "ROLLBACK_FAILED" `
                     -Message "Candidate switch preparation failed and the previous checkout could not be restored: $reason"
+                return $false
+            }
+            try {
+                Sync-StableRuntimeControlFiles
+            } catch {
+                Write-RuntimeUpdateFailure -Revision $Revision -Status "ROLLBACK_FAILED" `
+                    -Message "Candidate switch preparation failed and the previous control bundle could not be restored: $reason; $($_.Exception.Message)"
                 return $false
             }
         }
@@ -606,9 +660,7 @@ function Invoke-RuntimeRollback {
         }
         & git -C $moduleRoot checkout --detach --force --quiet $PreviousRevision 2>$null
         if ($LASTEXITCODE -ne 0) { throw "cannot restore previous revision" }
-        $stableScript = Join-Path $repositoryRoot ".local\runtime-control\xauusd_control_center.ps1"
-        Copy-Item -LiteralPath (Join-Path $moduleRoot "scripts\xauusd_control_center.ps1") `
-            -Destination $stableScript -Force
+        Sync-StableRuntimeControlFiles
         Restart-CodeReloadableServices -Revision $PreviousRevision
         Write-RuntimeCodeState -Revision $PreviousRevision
         Write-RuntimeUpdateFailure -Revision $FailedRevision -Status "ROLLED_BACK" `
@@ -1102,14 +1154,10 @@ function Register-AutoStartTask {
         [string]$RuntimePath,
         [string]$SourceRepository
     )
-    $launcherSource = Join-Path $moduleRoot "scripts\xauusd_watchdog_launcher.vbs"
-    if (-not (Test-Path -LiteralPath $launcherSource)) {
-        throw "Missing windowless watchdog launcher: $launcherSource"
-    }
     $controlRoot = Split-Path -Parent $ControlScript
     $launcherPath = Join-Path $controlRoot "xauusd_watchdog_launcher.vbs"
-    if (-not $launcherSource.Equals($launcherPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-        Copy-Item -LiteralPath $launcherSource -Destination $launcherPath -Force
+    if (-not (Test-Path -LiteralPath $launcherPath)) {
+        throw "Missing windowless watchdog launcher: $launcherPath"
     }
     $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
     $taskArguments = '"{0}" "{1}" "{2}" "{3}"' -f `
@@ -1135,15 +1183,13 @@ function Register-WatchdogGuardTask {
         [object]$Principal
     )
     $controlRoot = Split-Path -Parent $ControlScript
-    $guardSource = Join-Path $moduleRoot "scripts\xauusd_watchdog_guard.ps1"
     $guardPath = Join-Path $controlRoot "xauusd_watchdog_guard.ps1"
-    $launcherSource = Join-Path $moduleRoot "scripts\xauusd_watchdog_guard_launcher.vbs"
     $launcherPath = Join-Path $controlRoot "xauusd_watchdog_guard_launcher.vbs"
-    if (-not $guardSource.Equals($guardPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-        Copy-Item -LiteralPath $guardSource -Destination $guardPath -Force
+    if (-not (Test-Path -LiteralPath $guardPath)) {
+        throw "Missing watchdog guard: $guardPath"
     }
-    if (-not $launcherSource.Equals($launcherPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-        Copy-Item -LiteralPath $launcherSource -Destination $launcherPath -Force
+    if (-not (Test-Path -LiteralPath $launcherPath)) {
+        throw "Missing windowless watchdog guard launcher: $launcherPath"
     }
     $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
     $guardArguments = '"{0}" "{1}" "{2}" "{3}"' -f `
@@ -1227,9 +1273,8 @@ function Install-ProductionRuntime {
         installed_at = [DateTimeOffset]::UtcNow.ToString("o")
     }
     $controlRoot = Join-Path $sourceLocal "runtime-control"
-    New-Item -ItemType Directory -Path $controlRoot -Force | Out-Null
+    Sync-StableRuntimeControlFiles -SourceRoot $runtime -ControlRoot $controlRoot
     $stableScript = Join-Path $controlRoot "xauusd_control_center.ps1"
-    Copy-Item -LiteralPath $PSCommandPath -Destination $stableScript -Force
 
     Stop-ScheduledTask -TaskName $guardTaskName -ErrorAction SilentlyContinue
     Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
