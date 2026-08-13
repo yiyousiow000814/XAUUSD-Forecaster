@@ -1,4 +1,4 @@
-# PR 34: Canonical Events And Model Handover
+# Canonical Event and Model Handover Report
 
 Status: implementation complete; Broad-evidence activation with an explicit
 Official cold-start state.

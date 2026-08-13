@@ -1,4 +1,4 @@
-# XAUUSD Factor Coverage Contract
+# Factor Coverage Specification
 
 The forecaster must keep a broad view without pretending that every named
 driver is available, timely, or useful at a 30-minute horizon. Every domain is

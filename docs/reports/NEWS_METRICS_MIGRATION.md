@@ -1,4 +1,4 @@
-# PR 35: News Metrics Source Of Truth
+# News Metrics Migration Report
 
 Status: implemented and verified.
 

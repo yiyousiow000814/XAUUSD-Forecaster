@@ -1,4 +1,8 @@
-# Execution Model Research Contract
+# Execution Model Research Protocol
+
+This protocol defines how exposure and exit candidates are evaluated. It does
+not grant runtime or order authority. The governing evidence invariants remain
+in [`FORWARD_ONLY.md`](../contracts/FORWARD_ONLY.md).
 
 ## Separation
 

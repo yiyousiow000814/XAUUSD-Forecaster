@@ -42,6 +42,17 @@
 - Chinese remains appropriate for the product UI, user-provided content, and
   immutable audit evidence; those surfaces are not repository documentation.
 
+## Documentation Taxonomy
+
+- Classify a document by purpose before creating it. Reserve CONTRACT for
+  non-negotiable invariants and boundaries.
+- Use SPEC, PROTOCOL, DESIGN, PLAN, RUNBOOK, AUDIT, REPORT, REFERENCE, or ADR
+  when those meanings fit better. Follow `docs/README.md` for placement.
+- Do not introduce a durable rule only in a test, code comment, pull-request
+  description, or plan when an authoritative document exists.
+- Split a mixed document when its sections have materially different authority
+  instead of choosing an inaccurate umbrella type.
+
 ## Web And Mobile Experience
 
 - Treat desktop and mobile as separate acceptance surfaces. A desktop pass does

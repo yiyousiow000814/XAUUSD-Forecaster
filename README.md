@@ -63,7 +63,8 @@ ignored `.local/forward/` directory and are not uploaded to GitHub.
 
 ## Detailed documentation
 
-- [Product contract](docs/PRODUCT_CONTRACT.md)
-- [System and data boundaries](docs/SYSTEM_CONTRACT.md)
-- [Forward-only learning contract](docs/FORWARD_ONLY_CONTRACT.md)
-- [Cloudflare hosting](docs/CLOUDFLARE_HOSTING.md)
+- [Documentation index and taxonomy](docs/README.md)
+- [Product specification](docs/specs/PRODUCT.md)
+- [System boundaries contract](docs/contracts/SYSTEM_BOUNDARIES.md)
+- [Forward-only evidence contract](docs/contracts/FORWARD_ONLY.md)
+- [Cloudflare hosting design](docs/design/CLOUDFLARE_HOSTING.md)
