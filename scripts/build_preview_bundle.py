@@ -21,7 +21,7 @@ package = types.ModuleType("xauusd_forecaster")
 package.__path__ = [str(MODULE_ROOT / "xauusd_forecaster")]
 sys.modules["xauusd_forecaster"] = package
 factor_coverage = importlib.import_module("xauusd_forecaster.factors").factor_coverage
-annotation = importlib.import_module("xauusd_forecaster.annotation")
+model_limits = importlib.import_module("xauusd_forecaster.model_limits")
 storylines = importlib.import_module("xauusd_forecaster.storylines")
 dashboard_sync = importlib.import_module("scripts.run_dashboard_sync")
 
@@ -45,9 +45,9 @@ def _apply_branch_runtime_contract(status: dict) -> None:
     """Overlay branch-owned limits that an older production snapshot cannot know."""
     queue = status.setdefault("annotation_queue", {})
     queue.update({
-        "requests_per_minute_per_key": annotation.GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
-        "requests_per_minute": annotation.GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
-        "input_tokens_per_minute": annotation.GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
+        "requests_per_minute_per_key": model_limits.GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
+        "requests_per_minute": model_limits.GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
+        "input_tokens_per_minute": model_limits.GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
         "minute_scope": "PROJECT",
     })
 

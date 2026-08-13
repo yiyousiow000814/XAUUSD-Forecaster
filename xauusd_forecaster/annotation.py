@@ -18,6 +18,10 @@ from typing import Callable
 
 from .forward_ledger import ForwardLedger
 from .gemini_quota import GeminiQuotaLedger
+from .model_limits import (
+    GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
+    GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
+)
 from .news_relevance import google_news_item_is_relevant
 from .news_impact import (
     IMPACT_MODEL,
@@ -40,8 +44,6 @@ DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 FALLBACK_GEMINI_MODEL = "gemini-3.1-flash-lite"
 SUPPORTED_GEMINI_MODELS = (DEFAULT_GEMINI_MODEL, FALLBACK_GEMINI_MODEL)
 DEFAULT_GEMMA_MODEL = "gemma-4-31b-it"
-GEMINI_REQUESTS_PER_MINUTE_PER_KEY = 12
-GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL = 225_000
 GEMINI_MAX_PARALLEL_REQUESTS = 3
 GEMINI_DAILY_PRIORITY_RESERVE = 150
 GEMMA_REQUESTS_PER_DAY_PER_KEY = 15_000
