@@ -1,12 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { CurrentDataNotice, type CurrentDataPhase } from "../_components/CurrentDataState";
 import DashboardLink from "../_components/DashboardLink";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 
 type StatusPayload = {
+  preview_status_summary?: boolean;
   generated_at: string;
   system: {
     online: boolean;
@@ -52,27 +54,35 @@ function elapsed(seconds: number | null): string {
 }
 
 export default function HealthView() {
-  const [payload, setPayload] = useState<StatusPayload | null>(() => readDashboardResource<StatusPayload>("/api/status"));
+  const cachedStatus = readDashboardResource<StatusPayload>("/api/status");
+  const [payload, setPayload] = useState<StatusPayload | null>(() => cachedStatus);
   const [error, setError] = useState<string | null>(null);
+  const [syncingCurrent, setSyncingCurrent] = useState(Boolean(cachedStatus?.preview_status_summary));
   const immutablePreview = isImmutablePreview(payload);
-  const refresh = useCallback(async (force = false) => {
+  const refresh = useCallback(async (force = false, showSyncState = false) => {
+    if (showSyncState) setSyncingCurrent(true);
     try {
       setPayload(await loadDashboardResource<StatusPayload>("/api/status", { force }));
       setError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "状态读取失败");
+    } finally {
+      if (showSyncState) setSyncingCurrent(false);
     }
   }, []);
 
   useEffect(() => {
     return scheduleDashboardRefresh(
-      () => void refresh(),
-      () => void refresh(true),
+      () => void refresh(Boolean(payload?.preview_status_summary), Boolean(payload?.preview_status_summary)),
+      () => void refresh(true, Boolean(payload?.preview_status_summary)),
       DASHBOARD_REFRESH_INTERVALS.status,
       immutablePreview,
       "status",
     );
-  }, [refresh, immutablePreview]);
+  }, [refresh, immutablePreview, payload?.preview_status_summary]);
+
+  const currentPhase: CurrentDataPhase = error
+    ? "error" : !payload || syncingCurrent ? "loading" : payload.preview_status_summary ? "snapshot" : "ready";
 
   return <main className="status-main">
     <div className="grain" />
@@ -91,6 +101,7 @@ export default function HealthView() {
       <SystemStatePill loading={payload === null && !error} error={Boolean(error)} online={Boolean(payload?.system.online)} marketSession={payload?.system.market_session} />
     </section>
     {error ? <div className="error-banner">状态读取失败：{error}</div> : null}
+    <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
     <section className="component-status" aria-label="数据链路组件状态">
       <header><div><p className="eyebrow">EVIDENCE PIPELINE</p><h2>系统组件状态</h2></div><p><b>{payload?.system.source_of_truth ?? "Local append-only SQLite"}</b> 是不可修改的证据源；{payload?.system.sites_mirror ?? "Sites D1 read-only materialized display mirror"} 只是展示镜像。</p></header>
       <div>{Object.entries(payload?.system.components ?? {}).map(([name, item]) => <article key={name}>

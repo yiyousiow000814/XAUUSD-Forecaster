@@ -38,7 +38,7 @@ test("renders the live room with an audit-page navigation button", async () => {
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
 });
 
-test("keeps branch previews isolated from the production database", async () => {
+test("keeps branch Preview identity and blocks writes", async () => {
   const source = readFileSync(new URL("../app/api/_shared/preview.ts", import.meta.url), "utf8");
   const layout = readFileSync(new URL("../app/layout.tsx", import.meta.url), "utf8");
   assert.match(source, /PR Preview 是只读快照/);
@@ -98,6 +98,35 @@ test("hydrates preview pages from their immutable build snapshot", () => {
   assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);
   assert.match(resources, /DEFAULT_TIMEOUT_MS = 10_000/);
   assert.match(resources, /数据读取超时，页面会自动重试/);
+});
+
+test("uses one current-data contract across every dashboard surface", () => {
+  const component = readFileSync(new URL("../app/_components/CurrentDataState.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  const statusRoute = readFileSync(new URL("../app/api/status/route.ts", import.meta.url), "utf8");
+  const learningRoute = readFileSync(new URL("../app/api/learning/route.ts", import.meta.url), "utf8");
+
+  assert.match(component, /role="status"/);
+  assert.match(component, /正在同步页面当前指标/);
+  assert.match(component, /显示构建快照/);
+  assert.match(css, /@keyframes current-data-pulse/);
+  assert.match(css, /prefers-reduced-motion:\s*reduce/);
+
+  for (const view of ["AuditView", "LiveRoomView", "StatusView", "HealthView"]) {
+    const source = readFileSync(new URL(`../app/_views/${view}.tsx`, import.meta.url), "utf8");
+    assert.match(source, /CurrentDataNotice/, `${view} must expose current-data state`);
+  }
+  const audit = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  assert.match(audit, /live_oos_model_groups !== undefined\s*\? statusState/);
+
+  const statusD1 = statusRoute.indexOf("dashboard_snapshots WHERE id = ?");
+  const statusPreviewFallback = statusRoute.indexOf("if (previewBundle) return previewJson(previewBundle.status)");
+  const learningD1 = learningRoute.indexOf("dashboard_snapshots WHERE id = ?");
+  const learningPreviewFallback = learningRoute.indexOf("if (previewBundle?.learning_summary)");
+  assert.ok(statusD1 >= 0 && statusPreviewFallback > statusD1, "Preview status must prefer current D1 data");
+  assert.ok(learningD1 >= 0 && learningPreviewFallback > learningD1, "Preview learning must prefer current D1 data");
+  assert.match(statusRoute, /withPreviewIdentity\(current, previewBundle\.status\)/);
+  assert.match(learningRoute, /"X-Aurum-Preview": "read-only-d1-snapshot"/);
 });
 
 test("only a current D1 archive may publish the 60-day news total", async () => {
@@ -204,7 +233,8 @@ test("renders every preview room from the build snapshot", async () => {
     const response = await render(`/?room=audit&view=${view}`);
     assert.equal(response.status, 200, view);
     const html = await response.text();
-    assert.doesNotMatch(html, /读取中/, view);
+    assert.match(html, /正在同步页面当前指标/, view);
+    assert.match(html, /role="status"/, view);
   }
 });
 

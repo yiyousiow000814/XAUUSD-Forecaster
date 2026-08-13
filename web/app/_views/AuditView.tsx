@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import DashboardLink from "../_components/DashboardLink";
+import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
@@ -712,8 +713,12 @@ export default function AuditView() {
       page_size: NEWS_PER_PAGE, totals_scope: "LOADING",
     }
   ));
-  const [statusState, setStatusState] = useState<"loading" | "ready" | "error">(cachedStatus ? "ready" : "loading");
-  const [learningState, setLearningState] = useState<"idle" | "loading" | "ready" | "error">(cachedLearning ? "ready" : "idle");
+  const [statusState, setStatusState] = useState<CurrentDataPhase>(
+    cachedStatus?.preview_status_summary ? "loading" : cachedStatus ? "ready" : "loading",
+  );
+  const [learningState, setLearningState] = useState<CurrentDataPhase | "idle">(
+    cachedLearning?.learning_preview_summary ? "loading" : cachedLearning ? "ready" : "idle",
+  );
   const [statusError, setStatusError] = useState<string | null>(null);
   const [learningError, setLearningError] = useState<string | null>(null);
   const [newsError, setNewsError] = useState<string | null>(null);
@@ -737,7 +742,7 @@ export default function AuditView() {
       const body = await loadDashboardResource<Payload>("/api/status", { force });
       setPayload(previous => ({ ...previous, ...body }) as Payload);
       if (!body.preview_status_summary) fullStatusReadyRef.current = true;
-      setStatusState("ready");
+      setStatusState(body.preview_status_summary ? "snapshot" : "ready");
       setStatusError(null);
     } catch (reason) {
       setStatusState("error");
@@ -753,7 +758,7 @@ export default function AuditView() {
       learningDataAvailableRef.current = true;
       learningFailureCountRef.current = 0;
       if (!body.learning_preview_summary) fullLearningReadyRef.current = true;
-      setLearningState("ready");
+      setLearningState(body.learning_preview_summary ? "snapshot" : "ready");
       setLearningError(null);
     } catch (reason) {
       learningFailureCountRef.current += 1;
@@ -851,6 +856,18 @@ export default function AuditView() {
   }, [payload]);
 
   const archiveTotals = authoritativeNewsTotals(newsIndex);
+  const newsPhase: CurrentDataPhase = archiveTotals
+    ? "ready" : newsError ? "error" : "loading";
+  const currentPagePhase: CurrentDataPhase = statusState === "error"
+    || (view === "news" && newsPhase === "error")
+    || (view === "league" && learningState === "error")
+    ? "error"
+    : statusState === "snapshot" || (view === "league" && learningState === "snapshot")
+      ? "snapshot"
+      : statusState === "loading"
+        || (view === "news" && newsPhase === "loading")
+        || (view === "league" && learningState !== "ready")
+        ? "loading" : "ready";
   const categories = useMemo(() => [
     { name: "全部", count: archiveTotals?.readable ?? null },
     ...CATEGORY_ORDER.filter(name => newsIndex.category_counts[name]).map(name => ({
@@ -872,6 +889,11 @@ export default function AuditView() {
   const liveOosModelGroups = learningState === "ready"
     ? activeLearningIdentities
     : payload?.counts?.live_oos_model_groups;
+  const liveOosPhase: CurrentDataPhase = learningState === "ready"
+    ? "ready"
+    : payload?.counts?.live_oos_model_groups !== undefined
+      ? statusState
+      : learningState === "idle" ? "loading" : learningState;
   const latestVersionGroups = (payload?.learning_curves?.version_groups ?? []).filter(
     row => row.lifecycle_status === "LATEST",
   );
@@ -962,16 +984,17 @@ export default function AuditView() {
       </section>
 
       {combinedErrors && <div className="error-banner">{combinedErrors}。页面会保留上一份成功数据并自动重试。</div>}
+      <CurrentDataNotice phase={currentPagePhase} snapshotTime={payload?.generated_at ? time(payload.generated_at) : null} />
 
       <div className="audit-tabs-shell">
       <button type="button" className="audit-tabs-scroll" onClick={() => scrollAuditTabs(-1)} aria-label="向左查看更多审计视图"><span aria-hidden="true">‹</span></button>
       <nav ref={auditTabsRef} className="audit-tabs" aria-label="审计视图">
-        <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻 <b>{readableNewsTotal ?? "…"}</b></a>
-        <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>当前可用新闻事件 <b>{newsMetrics.events.currently_model_eligible}</b></a>
-        <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件脉络 <b>{activeEventTotal}</b></a>
-        <a href="/audit?view=decisions" className={view === "decisions" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("decisions"); }}>决策与30分钟结果 <b>{payload?.counts?.decision_events ?? 0}</b></a>
-        <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b>{liveOosModelGroups !== undefined ? `${liveOosModelGroups}组` : learningState === "loading" ? "读取中" : "—"}</b></a>
-        <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b>{payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</b></a>
+        <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻 <b><MetricValue phase={newsPhase}>{readableNewsTotal ?? "—"}</MetricValue></b></a>
+        <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>当前可用新闻事件 <b><MetricValue phase={statusState}>{newsMetrics.events.currently_model_eligible}</MetricValue></b></a>
+        <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件脉络 <b><MetricValue phase={statusState}>{activeEventTotal}</MetricValue></b></a>
+        <a href="/audit?view=decisions" className={view === "decisions" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("decisions"); }}>决策与30分钟结果 <b><MetricValue phase={statusState}>{payload?.counts?.decision_events ?? 0}</MetricValue></b></a>
+        <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b><MetricValue phase={liveOosPhase}>{liveOosModelGroups !== undefined ? `${liveOosModelGroups}组` : "—"}</MetricValue></b></a>
+        <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b><MetricValue phase={statusState}>{payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</MetricValue></b></a>
       </nav>
       <button type="button" className="audit-tabs-scroll" onClick={() => scrollAuditTabs(1)} aria-label="向右查看更多审计视图"><span aria-hidden="true">›</span></button>
       </div>

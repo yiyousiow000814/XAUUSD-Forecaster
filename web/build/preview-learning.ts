@@ -8,7 +8,10 @@ type JsonObject = Record<string, unknown>;
 
 /** Keep Worker startup memory independent of the growing audit snapshot. */
 export function compactPreviewStatus(status: JsonObject): JsonObject {
-  const result: JsonObject = { preview_status_summary: true };
+  const result: JsonObject = {
+    preview_status_summary: true,
+    observation_scope: "BUILD_SNAPSHOT",
+  };
   for (const key of PREVIEW_STATUS_INLINE_KEYS) result[key] = status[key];
   const market = status.market_chart && typeof status.market_chart === "object"
     ? status.market_chart as JsonObject
