@@ -5,10 +5,14 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.ai_provider_registry import AI_QUOTA_SURFACES
 from xauusd_forecaster.inference_v2 import MODEL_IDENTITIES
 from xauusd_forecaster.news_scheduler import reserve_account_request
-from xauusd_forecaster.news_source_registry import MONITORED_NEWS_SOURCES
-from xauusd_forecaster.production_shape import production_shape_violations
+from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY
+from xauusd_forecaster.production_shape import (
+    production_contract_snapshot,
+    production_shape_violations,
+)
 
 
 NOW = datetime(2026, 8, 13, 3, 0, tzinfo=UTC)
@@ -33,7 +37,7 @@ def _status() -> dict:
         "news_source_health": [{
             "source": source, "health": "HEALTHY", "latest_status": "OK",
             "recovery_mode": None, "next_retry_time": None,
-        } for source in MONITORED_NEWS_SOURCES],
+        } for source in (spec.source for spec in NEWS_SOURCE_REGISTRY)],
     }
 
 
@@ -80,6 +84,7 @@ def _append_complete_decision(
     ledger: ForwardLedger,
     *,
     omitted_identity: str | None = None,
+    mismatched_identity: str | None = None,
 ) -> str:
     decision_time = NOW + timedelta(minutes=5)
     ledger.append_snapshot({
@@ -95,13 +100,23 @@ def _append_complete_decision(
         "snapshot_id": "snapshot-live", "data_health": "HEALTHY",
         "reason_codes": [], "predictions": [], "created_at": decision_time,
     })
+    if mismatched_identity:
+        ledger.connection.execute(
+            "INSERT INTO model_updates_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("old-model-version", mismatched_identity, "SHADOW", NOW.isoformat(),
+             NOW.isoformat(), 0, 0, 0, 0, 0, 0, "old-hash", "features",
+             "eligibility", "artifact", "old-artifact", "CHALLENGER"),
+        )
     for identity in sorted(MODEL_IDENTITIES):
         if identity == omitted_identity:
             continue
         ledger.connection.execute(
             """INSERT INTO predictions_v2 VALUES
                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            ("decision-live", f"model-{identity.lower()}", identity,
+            ("decision-live", (
+                "old-model-version" if identity == mismatched_identity
+                else f"model-{identity.lower()}"
+            ), identity,
              decision_time.isoformat(), decision_time.isoformat(), "LIVE_OOS",
              "snapshot-hash", 0.0, 0.0, 0.0, 0.0, None, None,
              "UTC_DAY_BLOCK_OOS_ABS_RESIDUAL_Q95", "calibration", 0, 0, 0,
@@ -130,7 +145,7 @@ def complete_shape(tmp_path) -> tuple[ForwardLedger, dict]:
     _seed_active_generation(ledger)
     _append_complete_decision(ledger)
     _seed_scheduler_usage(ledger)
-    for source in MONITORED_NEWS_SOURCES:
+    for source in (spec.source for spec in NEWS_SOURCE_REGISTRY):
         ledger.append_source_poll({
             "poll_id": f"{source}-ok", "source": source,
             "fetched_time": NOW, "status": "OK",
@@ -144,12 +159,11 @@ def _violations(
     *,
     sync_status: dict | None = None,
 ) -> list[str]:
-    return production_shape_violations(
-        ledger.connection,
-        status,
-        sync_status=sync_status or {"degraded_resources": []},
-        now=VALIDATION_TIME,
+    status["production_contract"] = production_contract_snapshot(
+        ledger.connection, now=VALIDATION_TIME,
     )
+    status["dashboard_sync"] = sync_status or {"degraded_resources": []}
+    return production_shape_violations(status)
 
 
 def test_production_shape_accepts_complete_live_shape(complete_shape) -> None:
@@ -178,6 +192,11 @@ def test_active_generation_requires_a_subsequent_live_decision(tmp_path) -> None
             "live-prediction",
             "latest decision is missing models: FULL", id="live-prediction",
         ),
+        pytest.param(
+            "model-version",
+            "latest decision does not use active generation versions: FULL",
+            id="model-version",
+        ),
     ],
 )
 def test_complete_model_family_is_required_at_generation_and_prediction_boundaries(
@@ -193,6 +212,7 @@ def test_complete_model_family_is_required_at_generation_and_prediction_boundari
     _append_complete_decision(
         ledger,
         omitted_identity="FULL" if boundary == "live-prediction" else None,
+        mismatched_identity="FULL" if boundary == "model-version" else None,
     )
     _seed_scheduler_usage(ledger)
 
@@ -201,7 +221,7 @@ def test_complete_model_family_is_required_at_generation_and_prediction_boundari
 
 @pytest.mark.parametrize(
     "payload_key",
-    ["gemini_quota", "gemini_31_quota", "gemma_quota"],
+    [surface.payload_key for surface in AI_QUOTA_SURFACES],
 )
 def test_every_ai_quota_surface_must_match_scheduler_accounting(
     complete_shape,
@@ -218,7 +238,7 @@ def test_every_ai_quota_surface_must_match_scheduler_accounting(
     )
 
 
-@pytest.mark.parametrize("source", MONITORED_NEWS_SOURCES)
+@pytest.mark.parametrize("source", [spec.source for spec in NEWS_SOURCE_REGISTRY])
 def test_every_successful_news_source_clears_old_degraded_recovery_state(
     complete_shape,
     source,
@@ -250,16 +270,37 @@ def test_broker_confirmed_close_forbids_later_decisions(complete_shape) -> None:
     ]
 
 
-@pytest.mark.parametrize("error", ["HTTP Error 413", "Payload Too Large"])
-def test_market_history_transport_rejects_every_payload_limit_signal(
+@pytest.mark.parametrize(
+    "resource,error_code",
+    [
+        ("market_history", "PAYLOAD_LIMIT_EXCEEDED"),
+        ("learning", "PAYLOAD_CONTRACT_REJECTED"),
+        ("news", "PAYLOAD_LIMIT_EXCEEDED"),
+    ],
+)
+def test_every_sync_resource_rejects_structured_payload_limit_failure(
     complete_shape,
-    error,
+    resource,
+    error_code,
 ) -> None:
     ledger, status = complete_shape
     sync_status = {"degraded_resources": [{
-        "resource": "market_history", "error": error,
+        "resource": resource,
+        "error_code": error_code,
+        "error": "human-readable text is not part of the contract",
     }]}
 
     assert _violations(ledger, status, sync_status=sync_status) == [
-        "market history sync still exceeds the remote payload limit",
+        f"{resource} sync still exceeds the remote payload limit",
     ]
+
+
+def test_validator_does_not_reopen_database_after_snapshot(complete_shape) -> None:
+    ledger, status = complete_shape
+    status["production_contract"] = production_contract_snapshot(
+        ledger.connection, now=VALIDATION_TIME,
+    )
+    status["dashboard_sync"] = {"degraded_resources": []}
+    ledger.close()
+
+    assert production_shape_violations(status) == []

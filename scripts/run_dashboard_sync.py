@@ -751,6 +751,7 @@ def write_sync_status(
                 "last_attempt": now,
                 "last_error": None,
                 "last_error_type": None,
+                "last_error_code": None,
                 "attempts_used": attempts_used,
                 "status": "DEGRADED" if degraded_resources else "OK",
                 "degraded_resources": degraded_resources,
@@ -762,6 +763,7 @@ def write_sync_status(
                 "last_attempt": now,
                 "last_error": str(error)[:500] if error else "Unknown sync error",
                 "last_error_type": type(error).__name__ if error else "UnknownError",
+                "last_error_code": sync_error_code(error),
                 "status": "ERROR",
             }
         )
@@ -769,6 +771,27 @@ def write_sync_status(
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(existing, ensure_ascii=False), encoding="utf-8")
     temporary.replace(path)
+
+
+def sync_error_code(error: Exception | None) -> str:
+    """Classify transport failures once, before they enter persisted status."""
+    if error is None:
+        return "UNKNOWN"
+    if isinstance(error, urllib.error.HTTPError):
+        if error.code == 413:
+            return "PAYLOAD_LIMIT_EXCEEDED"
+        if error.code in {401, 403}:
+            return "AUTH_REJECTED"
+        if error.code == 429:
+            return "RATE_LIMITED"
+        if error.code >= 500:
+            return "REMOTE_UNAVAILABLE"
+        return "HTTP_REJECTED"
+    if isinstance(error, (TimeoutError, ConnectionError, http.client.RemoteDisconnected)):
+        return "TRANSPORT_UNAVAILABLE"
+    if isinstance(error, ValueError):
+        return "PAYLOAD_CONTRACT_REJECTED"
+    return "UNCLASSIFIED"
 
 
 def _write_runtime_signal(payload: object) -> None:
@@ -1253,6 +1276,7 @@ def sync_once(config: dict) -> list[dict]:
                 "target": target_name,
                 "resource": "heartbeat",
                 "error_type": type(error).__name__,
+                "error_code": sync_error_code(error),
                 "error": str(error)[:500],
             })
             continue
@@ -1269,6 +1293,7 @@ def sync_once(config: dict) -> list[dict]:
                     "target": target_name,
                     "resource": resource,
                     "error_type": type(error).__name__,
+                    "error_code": sync_error_code(error),
                     "error": str(error)[:500],
                 })
     if healthy_targets == 0:

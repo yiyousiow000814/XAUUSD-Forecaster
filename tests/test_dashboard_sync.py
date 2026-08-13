@@ -209,6 +209,28 @@ def test_sync_status_reports_optional_resource_degradation(tmp_path) -> None:
     assert status["degraded_resources"] == degraded
 
 
+@pytest.mark.parametrize(
+    "status_code,expected",
+    [
+        (401, "AUTH_REJECTED"),
+        (403, "AUTH_REJECTED"),
+        (413, "PAYLOAD_LIMIT_EXCEEDED"),
+        (429, "RATE_LIMITED"),
+        (503, "REMOTE_UNAVAILABLE"),
+    ],
+)
+def test_transport_error_family_is_persisted_as_structured_code(
+    status_code,
+    expected,
+) -> None:
+    module = _sync_module()
+    error = urllib.error.HTTPError(
+        "https://example.invalid", status_code, "failure", {}, io.BytesIO(),
+    )
+
+    assert module.sync_error_code(error) == expected
+
+
 def test_configured_targets_adds_independent_cloudflare_mirror(
     monkeypatch, tmp_path
 ) -> None:

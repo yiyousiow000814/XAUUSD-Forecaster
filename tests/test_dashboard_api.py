@@ -16,12 +16,13 @@ from pathlib import Path
 import pytest
 
 from xauusd_forecaster.annotation import INVALID_CHINESE_TITLE, PROMPT_VERSION
+from xauusd_forecaster.ai_provider_registry import AI_QUOTA_SURFACES
 from xauusd_forecaster.forward_ledger import ForwardLedger
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
 from xauusd_forecaster.news_scheduler import (
     configured_api_credentials, reserve_account_request,
 )
-from xauusd_forecaster.news_source_registry import MONITORED_NEWS_SOURCES
+from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY
 
 
 UTC = timezone.utc
@@ -343,6 +344,11 @@ def test_dashboard_quota_uses_scheduler_ledger(tmp_path, monkeypatch) -> None:
     assert [row["sent"] for row in payload["gemini_quota"]["keys"]] == [1, 1]
     assert payload["gemma_quota"]["total_sent"] == 2
     assert [row["sent"] for row in payload["gemma_quota"]["keys"]] == [2, 0]
+    scheduler_usage = payload["production_contract"]["scheduler_usage"]
+    for surface in AI_QUOTA_SURFACES:
+        assert scheduler_usage[surface.payload_key] == payload[
+            surface.payload_key
+        ]["total_sent"]
 
 
 def test_dashboard_quota_keeps_pre_scheduler_file_compatibility(
@@ -613,7 +619,9 @@ def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
 
     payload = _dashboard_module()._dashboard_payload(database)
     assert payload["recent_news"][0]["headline"] == "2026年6月个人收入与支出"
-    assert len(payload["news_source_health"]) == 13
+    assert {row["source"] for row in payload["news_source_health"]} == {
+        spec.source for spec in NEWS_SOURCE_REGISTRY
+    }
     assert all(
         row["source"] not in {
             "non_fed_full_text",
@@ -646,7 +654,7 @@ def test_source_error_does_not_claim_polling_is_normal(tmp_path) -> None:
     assert direct["semantic_message"] == "来源当前轮询失败；请查看最近错误与后备链路状态"
 
 
-@pytest.mark.parametrize("source", MONITORED_NEWS_SOURCES)
+@pytest.mark.parametrize("source", [spec.source for spec in NEWS_SOURCE_REGISTRY])
 def test_every_monitored_source_clears_active_failure_state_after_success(
     tmp_path,
     source,
