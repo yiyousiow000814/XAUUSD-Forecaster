@@ -30,7 +30,7 @@ $runtimeCodeStatePath = Join-Path $moduleRoot ".local\forward\runtime-code-state
 $runtimeUpdateStatePath = Join-Path $moduleRoot ".local\forward\runtime-update-state.json"
 $dashboardSyncConfigPath = Join-Path $moduleRoot ".local\forward\dashboard-sync.json"
 $runtimeUpdateCheckInterval = [TimeSpan]::FromMinutes(5)
-$runtimePreflightContractVersion = "isolated-migrated-sqlite-v2"
+$runtimePreflightContractVersion = "isolated-migrated-runtime-state-v3"
 $runtimeObservationCycles = 2
 $runtimeObservationTimeout = [TimeSpan]::FromMinutes(15)
 $reloadableServiceKeys = @("collector", "annotator", "api", "sync")
@@ -368,6 +368,28 @@ ledger.close()
     }
 }
 
+function Copy-CandidatePreflightState {
+    param(
+        [string]$SourceDatabase,
+        [string]$TargetDatabase
+    )
+    $sourceRoot = Split-Path -Parent $SourceDatabase
+    $targetRoot = Split-Path -Parent $TargetDatabase
+    foreach ($name in @("dashboard-sync-status.json", "news-annotator-status.json")) {
+        $source = Join-Path $sourceRoot $name
+        if (Test-Path -LiteralPath $source) {
+            Copy-Item -LiteralPath $source -Destination (Join-Path $targetRoot $name) -Force
+        }
+    }
+    $marketSession = Join-Path $sourceRoot "quotes\market-session.json"
+    if (Test-Path -LiteralPath $marketSession) {
+        $targetQuotes = Join-Path $targetRoot "quotes"
+        New-Item -ItemType Directory -Path $targetQuotes -Force | Out-Null
+        Copy-Item -LiteralPath $marketSession `
+            -Destination (Join-Path $targetQuotes "market-session.json") -Force
+    }
+}
+
 function Invoke-ProductionShapePreflight {
     param([string]$Revision)
     $preflightRoot = Join-Path $repositoryRoot ".local\runtime-preflight"
@@ -394,6 +416,8 @@ function Invoke-ProductionShapePreflight {
         $candidateDatabase = Join-Path $stageRoot ".local\preflight\forward-evidence.sqlite3"
         New-CandidatePreflightDatabase -Python $python -StageRoot $stageRoot `
             -SourceDatabase $database -TargetDatabase $candidateDatabase
+        Copy-CandidatePreflightState -SourceDatabase $database `
+            -TargetDatabase $candidateDatabase
         $stdout = Join-Path $logRoot "runtime-preflight.stdout.log"
         $stderr = Join-Path $logRoot "runtime-preflight.stderr.log"
         New-Item -ItemType Directory -Path $logRoot -Force | Out-Null

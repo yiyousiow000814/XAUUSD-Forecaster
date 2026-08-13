@@ -175,18 +175,29 @@ def test_preflight_selects_an_available_loopback_port(tmp_path) -> None:
 
 def test_candidate_preflight_migrates_an_isolated_consistent_copy(tmp_path) -> None:
     source = tmp_path / "legacy.sqlite3"
-    target = tmp_path / "candidate.sqlite3"
+    target = tmp_path / "candidate" / "forward.sqlite3"
     connection = sqlite3.connect(source)
     connection.execute("CREATE TABLE retained_evidence (value TEXT NOT NULL)")
     connection.execute("INSERT INTO retained_evidence VALUES ('immutable')")
     connection.commit()
     connection.close()
+    (source.parent / "dashboard-sync-status.json").write_text(
+        json.dumps({"status": "OK", "last_success": "2026-08-13T19:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    quotes = source.parent / "quotes"
+    quotes.mkdir()
+    (quotes / "market-session.json").write_text(
+        json.dumps({"is_open": True}), encoding="utf-8",
+    )
 
     result = _run_control_center_contract(
         tmp_path,
         f"New-CandidatePreflightDatabase -Python '{sys.executable}' "
         f"-StageRoot '{ROOT}' -SourceDatabase '{source}' "
-        f"-TargetDatabase '{target}'; Write-Output 'prepared'",
+        f"-TargetDatabase '{target}'; Copy-CandidatePreflightState "
+        f"-SourceDatabase '{source}' -TargetDatabase '{target}'; "
+        "Write-Output 'prepared'",
     )
 
     assert result == "prepared"
@@ -201,6 +212,12 @@ def test_candidate_preflight_migrates_an_isolated_consistent_copy(tmp_path) -> N
     assert target_connection.execute(
         "SELECT name FROM sqlite_master WHERE name='news_event_identity_resolutions_v1'"
     ).fetchone() == ("news_event_identity_resolutions_v1",)
+    assert json.loads(
+        (target.parent / "dashboard-sync-status.json").read_text(encoding="utf-8")
+    )["status"] == "OK"
+    assert json.loads(
+        (target.parent / "quotes" / "market-session.json").read_text(encoding="utf-8")
+    )["is_open"] is True
     source_connection.close()
     target_connection.close()
 
