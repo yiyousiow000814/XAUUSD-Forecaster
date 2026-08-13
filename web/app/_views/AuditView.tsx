@@ -443,8 +443,8 @@ const COVERAGE_STATUS_LABELS: Record<string, string> = {
 const MODEL_LABELS: Record<string, string> = {
   CHAMPION_0: "零收益安全基准",
   MARKET_ONLY: "黄金自身 Ridge",
-  NEWS_RESIDUAL: "新闻修正量 Ridge",
-  FULL: "黄金＋新闻 Ridge",
+  NEWS_RESIDUAL: "核心新闻修正 Ridge",
+  FULL: "黄金＋核心新闻 Ridge",
   BROAD_NEWS_RESIDUAL: "大视野新闻修正量 Ridge",
   BROAD_FULL: "黄金＋大视野新闻 Ridge",
   NEWS_ONLY: "纯新闻方向 Ridge",
@@ -463,7 +463,7 @@ const TOPIC_LABELS: Record<string, string> = {
   central_bank_gold: "央行购金", risk_sentiment: "风险偏好", regulation_other: "监管 / 其他",
 };
 const EVIDENCE_LABELS: Record<string, string> = {
-  PRIMARY: "一手官方证据", CORROBORATED: "多源确认",
+  PRIMARY: "一手完整证据", CORROBORATED: "多源确认",
   SINGLE_RELIABLE: "单一可靠来源 · 35%权重", DISCOVERY_ONLY: "线索来源",
 };
 const EVIDENCE_REASON_LABELS: Record<string, string> = {
@@ -1078,7 +1078,7 @@ export default function AuditView() {
           <button type="button" className={evidenceMode === "unseen" ? "active" : ""} onClick={() => setEvidenceMode("unseen")}>从未用过 <b><CountValue value={evidenceSummaryUnseenCount} /></b></button>
           <button type="button" className={evidenceMode === "all" ? "active" : ""} onClick={() => setEvidenceMode("all")}>查看全部 <b><CountValue value={evidenceSummaryDisplayedCount} /></b></button>
         </nav>
-        <details className="evidence-rule-note"><summary>查看统计规则</summary><p>官方或多源确认使用正常权重；单一可靠来源使用 35% 权重。新闻只从首次收到后生效，按事件类型和有效交易时间逐步衰减。来源身份由固定代码规则统一，不由 Gemini 或 Gemma 自由决定；每个事件下方可直接核对统一身份与原始发布域名。</p></details>
+        <details className="evidence-rule-note"><summary>查看统计规则</summary><p>核心新闻要求一手完整证据或至少两个独立可靠来源确认；大视野新闻还纳入单一可靠来源并降低权重。新闻只从首次收到后生效，按事件类型和有效交易时间逐步衰减。Gemini 与 Gemma 负责理解事件语义，版本化证据规则负责时间、身份、去重与准入；每个事件下方可核对统一身份和原始发布域名。</p></details>
         <div className="evidence-table-wrap"><table className="evidence-table">
           <thead><tr><th>是否用于预测</th><th>新闻事件</th><th>用了多少次 / 为什么没用</th><th>发布时间 / 收到时间</th></tr></thead>
           <tbody>{visibleEvidence.map(row => <tr key={`${evidenceMode}:${row.event_key}`}>

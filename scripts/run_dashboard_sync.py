@@ -559,7 +559,7 @@ def _learning_summary(payload: dict) -> dict:
             for field in ("points", "points_30m"):
                 if isinstance(curve.get(field), list):
                     curve[field] = curve[field][-LEARNING_SUMMARY_CURVE_POINTS:]
-    for field in ("full_minus_market", "broad_full_minus_official_full"):
+    for field in ("full_minus_market", "broad_full_minus_core_full"):
         if isinstance(learning.get(field), list):
             learning[field] = learning[field][-LEARNING_SUMMARY_CURVE_POINTS:]
 

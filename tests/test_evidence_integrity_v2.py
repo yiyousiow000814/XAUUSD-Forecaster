@@ -900,7 +900,7 @@ def test_news_contract_migration_is_point_in_time_and_idempotent(
             "features": [0.25], "model_visible_items": 1, "news_exposed": True,
             "distinct_news_clusters": 1, "distinct_event_types": 1,
             "source_evidence_hash": "news-source",
-            "official_visible_events": [], "broad_visible_events": [],
+            "core_visible_events": [], "broad_visible_events": [],
         }
 
     monkeypatch.setattr(
@@ -1016,7 +1016,7 @@ def test_model_news_visibility_receipt_is_exact_and_append_only(tmp_path) -> Non
         "eligibility_version": f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}",
     }
     news = {
-        "official_visible_events": [],
+        "core_visible_events": [],
         "broad_visible_events": [
             {"event_key": "event-a", "source_hash": "hash-a"},
             {"event_key": "event-b", "source_hash": "hash-b"},
@@ -1226,13 +1226,13 @@ def _training_rows(count: int) -> list[dict]:
         "broad_news": [0.0] * len(training_v2.BROAD_MODEL_FEATURES),
         "news_exposed": False, "broad_news_exposed": False,
         "distinct_news_clusters": 0,
-        "official_events": [], "broad_events": [],
+        "core_events": [], "broad_events": [],
         "receipt": (f"d-{index}", f"m-{index}", f"n-{index}", f"o-{index}"),
     } for index in range(count)]
 
 
 def _attach_event_exposure(rows: list[dict], *, event_days: int = 1,
-                           event_count: int = 3, official: bool = True) -> None:
+                           event_count: int = 3, core: bool = True) -> None:
     start = datetime(2026, 8, 1, tzinfo=UTC)
     for index, row in enumerate(rows):
         event_index = index % event_count
@@ -1245,12 +1245,12 @@ def _attach_event_exposure(rows: list[dict], *, event_days: int = 1,
             "raw_weight": 1.0,
             "source_budget_id": f"source-{event_index}",
         }
-        row["news_exposed"] = official
+        row["news_exposed"] = core
         row["broad_news_exposed"] = True
-        row["news"] = [0.1 if official else 0.0] * len(training_v2.NEWS_FEATURES)
+        row["news"] = [0.1 if core else 0.0] * len(training_v2.NEWS_FEATURES)
         row["broad_news"] = [0.1] * len(training_v2.BROAD_MODEL_FEATURES)
-        row["official_events"] = (
-            [{**event, "model_permission": "OFFICIAL_MODEL"}] if official else []
+        row["core_events"] = (
+            [{**event, "model_permission": "OFFICIAL_MODEL"}] if core else []
         )
         row["broad_events"] = [{**event, "model_permission": "BROAD_MODEL"}]
 
@@ -1269,6 +1269,89 @@ def test_generation_waits_for_news_evidence_without_partial_market_update(
     assert result[0]["status"] == "NEWS_GENERATION_EVIDENCE_INSUFFICIENT"
     assert update is None
     assert ledger.connection.execute("SELECT count(*) FROM predictions_v2").fetchone()[0] == 0
+    ledger.close()
+
+
+def test_current_contract_generation_gate_fails_closed_without_complete_activation(
+    tmp_path,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward-no-generation.sqlite3")
+
+    with pytest.raises(
+        RuntimeError, match="Core/Broad news contract has no active generation"
+    ):
+        training_v2.require_current_contract_generation(ledger.connection)
+
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("stage", "accepted"),
+    [("SHADOW", True), ("PREVIEW_ONLY", False)],
+)
+def test_live_generation_gate_accepts_only_the_live_stage(
+    tmp_path, stage: str, accepted: bool,
+) -> None:
+    """A complete activation is not live-safe unless its stage is SHADOW."""
+    ledger = ForwardLedger(tmp_path / f"forward-{stage.lower()}.sqlite3")
+    created_at = datetime(2026, 8, 5, 12, tzinfo=UTC)
+    generation_id = f"current-{stage.lower()}"
+    identities = (
+        "MARKET_ONLY", "NEWS_RESIDUAL", "FULL",
+        "BROAD_NEWS_RESIDUAL", "BROAD_FULL", "NEWS_ONLY",
+    )
+    for identity in identities:
+        model_version = f"{identity.lower()}-{stage.lower()}"
+        artifact_path = tmp_path / model_version / "artifact.json"
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_text("{}", encoding="utf-8")
+        ledger.connection.execute(
+            "INSERT INTO model_updates_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                model_version, identity, stage, created_at.isoformat(),
+                created_at.isoformat(), 200, 0, 200, 30, 10, 3,
+                f"dataset-{model_version}", "features", None,
+                str(artifact_path), f"hash-{model_version}", "CHALLENGER",
+            ),
+        )
+    ledger.connection.execute(
+        "INSERT INTO news_model_generations_v1 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            generation_id, stage, created_at.isoformat(), created_at.isoformat(),
+            CURRENT_NEWS_CONTRACT.policy_version,
+            CURRENT_NEWS_CONTRACT.feature_version,
+            CURRENT_NEWS_CONTRACT.eligibility_version,
+            "events", "market", "core", "broad",
+            training_v2.EVENT_WEIGHTING_VERSION, 5, "READY",
+        ),
+    )
+    for identity in identities:
+        table = (
+            "news_model_generation_aux_members_v1"
+            if identity == "NEWS_ONLY"
+            else "news_model_generation_members_v1"
+        )
+        ledger.connection.execute(
+            f"INSERT INTO {table} VALUES (?,?,?)",
+            (generation_id, identity, f"{identity.lower()}-{stage.lower()}"),
+        )
+    ledger.connection.execute(
+        "INSERT INTO news_model_generation_activations_v1 VALUES (?,?,?,?,?)",
+        ("activation", generation_id, None, created_at.isoformat(), "TEST"),
+    )
+
+    if accepted:
+        assert training_v2.require_current_contract_generation(
+            ledger.connection
+        ) == generation_id
+    else:
+        with pytest.raises(
+            RuntimeError,
+            match="live collector requires a SHADOW generation; "
+                  "latest active generation is PREVIEW_ONLY",
+        ):
+            training_v2.require_current_contract_generation(ledger.connection)
+
     ledger.close()
 
 
@@ -1380,7 +1463,7 @@ def test_news_models_train_early_with_explicit_experimental_status(
     ledger.close()
 
 
-def test_generation_activates_all_six_models_with_broad_news_and_cold_official_lane(
+def test_generation_activates_all_six_models_with_broad_news_and_cold_core_lane(
     tmp_path, monkeypatch
 ) -> None:
     first_seen = datetime(2026, 8, 1, 10, tzinfo=UTC)
@@ -1423,7 +1506,7 @@ def test_generation_activates_all_six_models_with_broad_news_and_cold_official_l
         "SELECT count(*) FROM model_updates_v2"
     ).fetchone()[0] == 0
 
-    _attach_event_exposure(rows, official=False)
+    _attach_event_exposure(rows, core=False)
     for index in range(3):
         _append_news(
             ledger, source="federal_reserve_monetary", item=f"bootstrap-{index}",
@@ -1457,6 +1540,9 @@ def test_generation_activates_all_six_models_with_broad_news_and_cold_official_l
         "MARKET_ONLY", "NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL",
         "BROAD_FULL", "NEWS_ONLY",
     }
+    assert training_v2.require_current_contract_generation(
+        ledger.connection
+    ) == second_result[0]["generation_id"]
     market_generations = ledger.connection.execute(
         "SELECT count(*) FROM model_updates_v2 WHERE model_identity='MARKET_ONLY'"
     ).fetchone()[0]
@@ -2060,22 +2146,22 @@ def test_material_update_creates_new_version_without_new_event_budget(tmp_path) 
 
 def test_event_budget_preserves_freshness_between_events() -> None:
     rows = [
-        {"decision_id": "fresh-1", "official_events": [{
+        {"decision_id": "fresh-1", "core_events": [{
             "event_id": "fresh", "event_version_id": "fresh-v1",
             "raw_weight": 0.9,
         }]},
-        {"decision_id": "fresh-2", "official_events": [{
+        {"decision_id": "fresh-2", "core_events": [{
             "event_id": "fresh", "event_version_id": "fresh-v1",
             "raw_weight": 0.8,
         }]},
-        {"decision_id": "late-1", "official_events": [{
+        {"decision_id": "late-1", "core_events": [{
             "event_id": "late", "event_version_id": "late-v1",
             "raw_weight": 0.1,
         }]},
     ]
 
     weights, receipts, _, summary = training_v2._event_budget_weights(
-        rows, "official_events"
+        rows, "core_events"
     )
     event_totals = {
         event_id: sum(
@@ -2368,6 +2454,70 @@ def test_reliable_media_publication_time_is_safe_event_clock_proxy(tmp_path) -> 
     assert "EVENT_TIME_INVALID" not in event["reason_codes"]
 
 
+@pytest.mark.parametrize(
+    ("case", "reports", "expected_grade", "expected_core"),
+    (
+        (
+            "first-party",
+            (("eia_today_in_energy", "https://eia.gov/a", None),),
+            "PRIMARY",
+            True,
+        ),
+        (
+            "independent-reliable",
+            (
+                ("gdelt_gold_geopolitics", "https://apnews.com/a", None),
+                ("google_news_gold_context", "https://reuters.com/b", None),
+            ),
+            "CORROBORATED",
+            True,
+        ),
+        (
+            "single-reliable",
+            (("gdelt_gold_geopolitics", "https://apnews.com/a", None),),
+            "SINGLE_RELIABLE",
+            False,
+        ),
+        (
+            "independent-unregistered",
+            (
+                ("gdelt_gold_geopolitics", "https://one.example/a", "publisher_one"),
+                ("google_news_gold_context", "https://two.example/b", "publisher_two"),
+            ),
+            "CORROBORATED",
+            False,
+        ),
+    ),
+)
+def test_core_is_evidence_defined_subset_of_broad(
+    tmp_path, case: str, reports: tuple[tuple[str, str, str | None], ...],
+    expected_grade: str, expected_core: bool,
+) -> None:
+    epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / f"core-{case}.sqlite3", now=epoch)
+    for index, (source, link, organization) in enumerate(reports):
+        _append_news(
+            ledger,
+            source=source,
+            item=f"{case}-{index}",
+            link=link,
+            first_seen=epoch + timedelta(seconds=index),
+            parsed_at=epoch + timedelta(minutes=1, seconds=index),
+            impulse=0.1,
+            primary_category="oil_energy",
+            material_event_key=f"{case}-event",
+            source_organization_id=organization,
+        )
+
+    event = event_evidence_rows(ledger, epoch + timedelta(minutes=10))[0]
+
+    assert event["evidence_grade"] == expected_grade
+    assert event["broad_model_eligible"] is True
+    assert event["core_model_eligible"] is expected_core
+    assert not event["core_model_eligible"] or event["broad_model_eligible"]
+    ledger.close()
+
+
 def test_terminal_429_impact_failure_reenters_pending_queue(tmp_path) -> None:
     epoch = datetime(2026, 8, 7, 12, 30, tzinfo=UTC)
     item = "The Employment Situation - July 2026"
@@ -2410,5 +2560,5 @@ def test_official_release_timestamp_is_valid_event_clock(tmp_path) -> None:
         first_seen=epoch, parsed_at=epoch, impulse=0.3, event_time="",
     )
     event = event_evidence_rows(ledger, epoch + timedelta(minutes=1))[0]
-    assert event["official_model_eligible"] is True
+    assert event["core_model_eligible"] is True
     assert event["event_clock_source"] == "OFFICIAL_RELEASE_TIME"

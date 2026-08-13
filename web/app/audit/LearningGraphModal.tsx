@@ -104,8 +104,8 @@ function curveResponseItems(
 }
 
 const LABELS: Record<string, string> = {
-  CHAMPION_0: "零收益基准", MARKET_ONLY: "黄金自身", NEWS_RESIDUAL: "官方新闻修正量",
-  FULL: "黄金＋官方新闻", BROAD_NEWS_RESIDUAL: "大视野新闻修正量", BROAD_FULL: "黄金＋大视野新闻",
+  CHAMPION_0: "零收益基准", MARKET_ONLY: "黄金自身", NEWS_RESIDUAL: "核心新闻修正量",
+  FULL: "黄金＋核心新闻", BROAD_NEWS_RESIDUAL: "大视野新闻修正量", BROAD_FULL: "黄金＋大视野新闻",
   NEWS_ONLY: "纯新闻方向",
 };
 const COLORS: Record<string, string> = {

@@ -505,7 +505,11 @@ test("renders the news and decision audit route", async () => {
   assert.doesNotMatch(source, /当前达到 Broad 门槛/);
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(css, /\.evidence-summary \{[^}]*grid-template-columns:repeat\(3,1fr\)/);
+  assert.match(css, /\.evidence-filters button \{[^}]*min-height:44px/);
+  assert.match(css, /\.evidence-rule-note summary \{[^}]*min-height:44px/);
   assert.match(source, /多源确认/);
+  assert.match(source, /核心新闻要求一手完整证据或至少两个独立可靠来源确认/);
+  assert.match(source, /大视野新闻还纳入单一可靠来源并降低权重/);
   assert.match(source, /api\/news-content\?key=/);
   assert.match(source, /api\/news-index\?/);
   assert.match(source, /api\/learning/);
@@ -538,7 +542,7 @@ test("renders the news and decision audit route", async () => {
   assert.doesNotMatch(source, /查看技术审计明细/);
   assert.doesNotMatch(source, /旧工程数据|修复后的训练种子|上线后前向结果/);
   assert.doesNotMatch(source, /Legacy Engineering|Repaired Seed|Next fit/);
-  assert.match(source, /单一可靠来源使用 35% 权重/);
+  assert.match(source, /大视野新闻还纳入单一可靠来源并降低权重/);
   assert.match(source, /按事件类型和有效交易时间逐步衰减/);
   assert.match(source, /无效样本/);
   assert.match(source, /activeLearningIdentities/);
@@ -790,6 +794,7 @@ test("uses one modal timeline for model generations and market decisions", () =>
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(page, /打开交互图表/);
   assert.match(page, /新闻修正量/);
+  assert.match(page, /核心新闻修正/);
   assert.match(page, /大视野新闻修正量/);
   assert.match(page, /return-flow/);
   assert.match(page, /本组开始前的历史累计/);
@@ -1177,7 +1182,7 @@ test("reflows news evidence into readable mobile cards", () => {
   assert.match(view, /className="evidence-status-cell"/);
   assert.match(view, /统一来源身份：/);
   assert.match(view, /原始发布域名：/);
-  assert.match(view, /不由 Gemini 或 Gemma 自由决定/);
+  assert.match(view, /Gemini 与 Gemma 负责理解事件语义/);
   assert.match(view, /mergeNewsEvidenceByEvent/);
   assert.match(view, /new Map<string, NewsEvidence>/);
   assert.match(view, /evidenceMode}:\$\{row\.event_key}/);

@@ -8,11 +8,11 @@ awareness while keeping the training boundary point-in-time and auditable.
 
 ## Source intake
 
-Direct official feeds and listing pages apply only objective pre-AI controls:
+Direct first-party feeds and listing pages apply only objective pre-AI controls:
 the Forward epoch, a 72-hour publication window, immutable item deduplication,
 complete publisher text, and a fixed per-source fetch limit. They do not use
 headline or body keywords to decide XAUUSD meaning. Complete bounded documents
-proceed to the v15 semantic review, which may classify them as irrelevant or
+proceed to semantic review, which may classify them as irrelevant or
 background without granting model authority.
 
 Collector lanes are not independent publishers. Google News and GDELT are
@@ -77,13 +77,17 @@ and risk sentiment. The topic mapper is deterministic and versioned.
    reports the event.
 5. `DISCOVERY_ONLY`: no publisher identity can be verified from the item.
 
-The same eligibility engine grants `OFFICIAL_MODEL`, `BROAD_MODEL`, or
-`DISPLAY_ONLY` permission. `OFFICIAL_MODEL` additionally requires a configured
-official source. `BROAD_MODEL` accepts all four identified-publisher grades;
-official status, reliability, independent-source count, corroboration, and
-syndicated-duplicate count are frozen numeric attributes rather than source
-permission gates. Both permissions share the same event
-identity, time validity, materiality, semantic-schema, and point-in-time checks.
+The same eligibility engine grants Core, Broad, or display-only permission.
+Core accepts complete first-party evidence or one event corroborated by at
+least two independently identified reliable publishers. Broad is a strict
+superset: it also accepts single reliable and other identified publishers at
+lower weights. Publisher identity, first-party status, reliability,
+independent-source count, corroboration, and syndicated-duplicate count are
+frozen attributes rather than publisher-name permission gates. Both lanes
+share the same event identity, time validity, materiality, semantic-schema,
+and point-in-time checks. The immutable V2 database tokens `OFFICIAL_MODEL`
+and `OFFICIAL` encode the Core lane for historical schema compatibility; they
+do not describe the active admission rule.
 
 Official EIA and BEA observations are converted into point-in-time release
 packets. Each packet carries the current value, previous-period value, previous
@@ -120,12 +124,12 @@ context mode and original character count are persisted with the identity
 comparison, and a missing or non-verbatim evidence anchor fails closed rather
 than falling back to arbitrary leading-text truncation.
 
-The official News-residual and Full models remain an independent baseline.
-Broad News-residual learns the residual after cross-fitted Market-only
-predictions, using official news features plus event-evidence features. Broad
-Full equals the same frozen Market-only prediction plus the Broad news
-residual. All versions are Shadow-only, run only after creation, and require
-manual owner approval for any future promotion.
+Core News-residual learns the residual after cross-fitted Market-only
+predictions from the narrower evidence lane. Core Full equals the same frozen
+Market-only prediction plus that residual. Broad News-residual uses the Core
+features plus wider event-evidence attributes; Broad Full adds that residual
+to the same Market-only prediction. All versions are Shadow-only, run only
+after creation, and require manual owner approval for any future promotion.
 
 Every event has one total weight budget per generation. Repeated five-minute
 exposures split that budget using their frozen freshness weights. The news
@@ -138,7 +142,7 @@ One complete generation contains Market-only, News residual, Full, Broad News
 residual, and Broad Full. All five share one cutoff, policy version, event
 snapshot hash, and generation identifier. Activation is a single append-only
 record written only after every artifact and member is valid. Future decisions
-read only the latest activated generation. An evidence-empty Official lane is
+read only the latest activated generation. An evidence-empty Core lane is
 represented by an explicit zero-effect cold-start artifact, never by fabricated
 rows or a partial generation. Once a generation has been activated, every
 healthy decision must publish the complete model identity set or fail visibly.

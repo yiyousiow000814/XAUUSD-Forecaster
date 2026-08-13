@@ -621,8 +621,8 @@ def learning_curve_payload(connection) -> dict:
         ), latest AS (SELECT * FROM ranked WHERE version_rank=1)
         SELECT b.decision_time,b.value_quote_return AS broad_value,
                b.recommended_action AS broad_action,
-               o.value_quote_return AS official_value,
-               o.recommended_action AS official_action
+               o.value_quote_return AS core_value,
+               o.recommended_action AS core_action
         FROM latest b JOIN latest o USING(source_decision_id)
         WHERE b.model_identity='BROAD_FULL' AND o.model_identity='FULL'
         ORDER BY b.decision_time"""
@@ -632,7 +632,7 @@ def learning_curve_payload(connection) -> dict:
     for row in broad_paired:
         delta = (
             (0.0 if row["broad_action"] == "WAIT" else net_shadow_log_return(row["broad_value"]))
-            - (0.0 if row["official_action"] == "WAIT" else net_shadow_log_return(row["official_value"]))
+            - (0.0 if row["core_action"] == "WAIT" else net_shadow_log_return(row["core_value"]))
         )
         broad_cumulative += delta
         broad_incremental.append({
@@ -698,6 +698,6 @@ def learning_curve_payload(connection) -> dict:
             "cumulative_quote_return": 0.0, "trained": False, "uses_ai": False,
         },
         "identity_curves": identity_curves, "full_minus_market": incremental,
-        "broad_full_minus_official_full": broad_incremental,
+        "broad_full_minus_core_full": broad_incremental,
         "disclaimer": "早期曲线用于观察学习过程，不代表已证明盈利。",
     }
