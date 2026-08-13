@@ -115,6 +115,14 @@ def test_source_language_and_wording_differences_remain_same_event_context():
     assert validated["core_fact_changes_zh"] == []
 
 
+def test_incomplete_candidate_context_cannot_claim_a_new_episode():
+    with pytest.raises(ValueError, match="complete candidate context"):
+        validate_impact_assessment(
+            assessment("NEW_EVENT", "NEW_EPISODE", ""),
+            candidate_ids={"prior"}, candidate_context_complete=False,
+        )
+
+
 def test_batch_resolution_refreshes_a_prior_identity_persisted_after_selection():
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row

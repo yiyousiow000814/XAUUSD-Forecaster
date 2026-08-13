@@ -86,6 +86,7 @@ def impact_is_actionable(assessment: dict | None) -> bool:
 def validate_impact_assessment(
     result: dict, *, candidate_ids: set[str] | None = None,
     same_event_candidate_ids: set[str] | None = None,
+    candidate_context_complete: bool = True,
 ) -> dict:
     """Validate the frozen classifier contract before append-only persistence."""
     expected = set(IMPACT_RESPONSE_SCHEMA["required"])
@@ -100,6 +101,10 @@ def validate_impact_assessment(
     relation = str(result["identity_relation"])
     if relation not in IDENTITY_RELATIONS:
         raise ValueError("Gemma identity relation is not controlled")
+    if not candidate_context_complete and relation == "NEW_EPISODE":
+        raise ValueError(
+            "New-episode identity requires complete candidate context"
+        )
     matched = str(result["matched_candidate_id"] or "").strip()
     if relation in {"SAME_EVENT", "SAME_EPISODE"}:
         if not matched or (candidate_ids is not None and matched not in candidate_ids):

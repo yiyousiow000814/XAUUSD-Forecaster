@@ -925,7 +925,8 @@ class _GeminiRequestPool:
     ) -> tuple[dict, str]:
         last_error: Exception | None = None
         last_http_error: urllib.error.HTTPError | None = None
-        prompt = _impact_prompt(row, prompt_version=prompt_version)
+        request_row = row
+        prompt = _impact_prompt(request_row, prompt_version=prompt_version)
         estimated_tokens = _estimate_input_tokens(prompt) + 1024
         if self.request_reserver is not None:
             # Google documents countTokens as the preflight source of truth.
@@ -945,6 +946,12 @@ class _GeminiRequestPool:
                     estimated_tokens, len(prompt.encode("utf-8")) + 1024,
                 )
             else:
+                request_row, prompt, counted_tokens = _fit_impact_context_to_tpm(
+                    row,
+                    api_keys=self.api_keys,
+                    initial_tokens=counted_tokens,
+                    prompt_version=prompt_version,
+                )
                 estimated_tokens = counted_tokens
         for offset in range(len(self.api_keys)):
             key = self.api_keys[(start_index + offset) % len(self.api_keys)]
@@ -952,8 +959,10 @@ class _GeminiRequestPool:
                 continue
             try:
                 if prompt_version == IMPACT_PROMPT_VERSION:
-                    return _call_gemini_impact(key, row)
-                return _call_gemini_impact(key, row, prompt_version=prompt_version)
+                    return _call_gemini_impact(key, request_row)
+                return _call_gemini_impact(
+                    key, request_row, prompt_version=prompt_version,
+                )
             except (ValueError, KeyError, json.JSONDecodeError) as error:
                 last_error = error
             except urllib.error.HTTPError as error:
@@ -1226,6 +1235,7 @@ def _call_gemini_impact(
     validated = validate_impact_assessment(
         result, candidate_ids=candidate_ids,
         same_event_candidate_ids=same_event_candidate_ids,
+        candidate_context_complete=not bool(row.get("identity_context_truncated")),
     )
     _require_simplified_chinese(validated["reason_zh"], "reason_zh", 4, 0.5, 12)
     return validated, str(envelope.get("modelVersion") or IMPACT_MODEL)
@@ -1267,6 +1277,44 @@ def _count_gemini_input_tokens(
     if tokens <= 0:
         raise ValueError("Gemini token count is not positive")
     return tokens
+
+
+def _fit_impact_context_to_tpm(
+    row: dict,
+    *,
+    api_keys: tuple[str, ...],
+    initial_tokens: int,
+    prompt_version: str,
+) -> tuple[dict, str, int]:
+    """Keep full source text while fitting optional identity candidates under TPM."""
+    request_row = dict(row)
+    candidates = list(row.get("prior_event_context") or ())
+    request_row["prior_event_context"] = candidates
+    prompt = _impact_prompt(request_row, prompt_version=prompt_version)
+    counted_tokens = initial_tokens
+    while counted_tokens > GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL and candidates:
+        candidates = candidates[:-1]
+        request_row["prior_event_context"] = candidates
+        request_row["identity_context_truncated"] = True
+        prompt = _impact_prompt(request_row, prompt_version=prompt_version)
+        recounted = None
+        for key in api_keys:
+            try:
+                recounted = _count_gemini_input_tokens(
+                    key, IMPACT_MODEL, _impact_payload(prompt),
+                )
+                break
+            except Exception:
+                continue
+        if recounted is None:
+            # Never guess that a reduced request is safe. The caller's atomic
+            # reservation will defer this item until exact preflight recovers.
+            return request_row, prompt, max(
+                counted_tokens,
+                len(prompt.encode("utf-8")) + 1024,
+            )
+        counted_tokens = recounted
+    return request_row, prompt, counted_tokens
 
 
 def _impact_prompt(row: dict, *, prompt_version: str = IMPACT_PROMPT_VERSION) -> str:
@@ -1311,6 +1359,8 @@ def _impact_prompt(row: dict, *, prompt_version: str = IMPACT_PROMPT_VERSION) ->
         "评论、市场反应和背景可以附着在同一episode，但绝不能成为事实锚点。"
         "没有任何候选属于同一现实事件才选NEW_EPISODE且matched_candidate_id留空；"
         "证据不足则选UNRESOLVED且matched_candidate_id留空。不能自己发明candidate_id。"
+        "若CANDIDATE_CONTEXT_TRUNCATED为true，未显示的候选仍可能属于同一现实事件；"
+        "因此找不到匹配时必须选UNRESOLVED，禁止选NEW_EPISODE。"
         "identity_anchor_zh简述用于比较的稳定身份。core_fact_changes_zh逐项列出候选到当前的"
         "核心事实变化；identity_differences_zh逐项列出不同现实过程的身份差异；"
         "context_differences_zh只列非核心差异。SAME_EVENT的前两项必须为空；"
@@ -1321,6 +1371,7 @@ def _impact_prompt(row: dict, *, prompt_version: str = IMPACT_PROMPT_VERSION) ->
         f"PUBLISHED_AT: {row.get('source_published_time') or ''}\n"
         f"FIRST_SEEN_AT: {row.get('collector_first_seen_time') or ''}\n"
         f"EVENT_EXTRACTION: {json.dumps(annotation, ensure_ascii=False, separators=(',', ':'))}\n"
+        f"CANDIDATE_CONTEXT_TRUNCATED: {str(bool(row.get('identity_context_truncated'))).lower()}\n"
         f"PRIOR_SAME_EVENT_RECORDS: {json.dumps(row.get('prior_event_context') or [], ensure_ascii=False, separators=(',', ':'))}\n"
         "NEWS_START\n"
         f"Headline: {row.get('headline') or ''}\nFull content: {row.get('body') or ''}\n"
