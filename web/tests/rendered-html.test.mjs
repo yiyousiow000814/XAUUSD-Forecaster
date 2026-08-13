@@ -730,6 +730,9 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(page, /六套模型，现在表现怎样/);
   assert.match(page, /等待新版生成/);
   assert.match(page, /training-card-total/);
+  assert.match(page, /className="training-progress-tail"/);
+  assert.match(css, /\.training-card-total strong \.training-progress-tail \{[^}]*font-size:\.42em/);
+  assert.doesNotMatch(css, /\.training-progress-pair small \{/);
   assert.match(page, /还差/);
   assert.doesNotMatch(page, /含新闻的决策时点/);
   assert.doesNotMatch(page, /重复决策样本，不是文章数/);

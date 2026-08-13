@@ -992,9 +992,9 @@ export default function AuditView() {
           <div className="training-card-total">
             <strong>{statusState === "ready" && payload?.training
               ? <span className="training-progress-pair" aria-hidden="true">
-                <span>{trainingProgress.current.main}{trainingProgress.current.remainder && <small>+{trainingProgress.current.remainder}</small>}</span>
+                <span>{trainingProgress.current.main}{trainingProgress.current.remainder && <span className="training-progress-tail">+{trainingProgress.current.remainder}</span>}</span>
                 <i>/</i>
-                <span>{trainingProgress.target.main}{trainingProgress.target.remainder && <small>+{trainingProgress.target.remainder}</small>}</span>
+                <span>{trainingProgress.target.main}{trainingProgress.target.remainder && <span className="training-progress-tail">+{trainingProgress.target.remainder}</span>}</span>
               </span>
               : <small>{statusState === "loading" ? "读取中…" : "暂不可用"}</small>}
             </strong>
