@@ -11,6 +11,7 @@ from xauusd_forecaster.news_scheduler import (
     ApiCredential,
     PREEMPTIBLE_POOL,
     ROUTINE_POOL,
+    account_quota_snapshot,
     backoff_job,
     claim_job,
     complete_job,
@@ -68,6 +69,36 @@ def test_account_configuration_groups_keys_without_exposing_secrets() -> None:
         ("urgent-a", PREEMPTIBLE_POOL),
     ]
     assert all("key-" not in item.credential_id for item in credentials)
+
+
+def test_account_quota_snapshot_uses_scheduler_usage_without_double_counting() -> None:
+    connection = _connection()
+    credentials = configured_api_credentials(raw_accounts=json.dumps([
+        {"account_id": "shared", "pool": "routine", "api_keys": ["a", "b"]},
+        {"account_id": "single", "pool": "routine", "api_keys": ["c"]},
+    ]))
+    for family in ("gemma-impact", "gemma-title"):
+        assert reserve_account_request(
+            connection, account_id="shared", model_family=family,
+            daily_limit=15_000, requests_per_minute=10, now=NOW,
+        )
+    assert reserve_account_request(
+        connection, account_id="single", model_family="gemma-impact",
+        daily_limit=15_000, requests_per_minute=10, now=NOW,
+    )
+
+    snapshot = account_quota_snapshot(
+        connection, credentials,
+        model_families=("gemma-impact", "gemma-title"),
+        daily_limit=15_000, now=NOW,
+    )
+
+    assert snapshot["accounting_source"] == "SCHEDULER_DB"
+    assert snapshot["quota_day_pacific"] == "2026-08-11"
+    assert snapshot["total_sent"] == 3
+    assert [row["sent"] for row in snapshot["keys"]] == [2, 1]
+    assert len(snapshot["keys"]) == 2
+    assert all("account_id" not in row for row in snapshot["keys"])
 
 
 def test_account_configuration_rejects_one_key_in_two_accounts() -> None:
