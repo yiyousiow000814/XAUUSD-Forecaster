@@ -30,7 +30,15 @@ $runtimeCodeStatePath = Join-Path $moduleRoot ".local\forward\runtime-code-state
 $runtimeUpdateStatePath = Join-Path $moduleRoot ".local\forward\runtime-update-state.json"
 $dashboardSyncConfigPath = Join-Path $moduleRoot ".local\forward\dashboard-sync.json"
 $runtimeUpdateCheckInterval = [TimeSpan]::FromMinutes(5)
+$runtimeObservationCycles = 2
+$runtimeObservationTimeout = [TimeSpan]::FromMinutes(15)
 $reloadableServiceKeys = @("collector", "annotator", "api", "sync")
+$runtimeControlFileNames = @(
+    "xauusd_control_center.ps1",
+    "xauusd_watchdog_launcher.vbs",
+    "xauusd_watchdog_guard.ps1",
+    "xauusd_watchdog_guard_launcher.vbs"
+)
 $collectorSecretsPath = Join-Path $repositoryRoot ".local\secrets\collector-keys.json"
 
 function Get-CollectorSecret {
@@ -226,6 +234,9 @@ function Test-MainCandidate {
         return $false
     }
     $state = Get-RuntimeUpdateState
+    if ($state -and [string]$state.failed_revision -eq $CandidateRevision) {
+        return $false
+    }
     $acceptedMain = if ($state) { [string]$state.accepted_main_revision } else { "" }
     if ($acceptedMain) {
         # A PR runtime may be bootstrapped before a squash merge.  In that case
@@ -237,6 +248,161 @@ function Test-MainCandidate {
         )
     }
     return Test-RevisionDescendsFrom $CurrentRevision $CandidateRevision
+}
+
+function Write-RuntimeUpdateFailure {
+    param([string]$Revision, [string]$Status, [string]$Message)
+    Write-RuntimeUpdateState @{
+        update_status = $Status
+        failed_revision = $Revision
+        failed_at = [DateTimeOffset]::UtcNow.ToString("o")
+        user_visible_failure = $true
+        failure_message = $Message
+    }
+    Write-WatchdogEvent -Event "RUNTIME_UPDATE_FAILED" -Service "all" -State $Message
+}
+
+function Sync-StableRuntimeControlFiles {
+    param(
+        [string]$SourceRoot = $moduleRoot,
+        [string]$ControlRoot = (Join-Path $repositoryRoot ".local\runtime-control")
+    )
+    $stageRoot = Join-Path $ControlRoot (".staging-{0}" -f [guid]::NewGuid())
+    $backupRoot = Join-Path $ControlRoot (".backup-{0}" -f [guid]::NewGuid())
+    New-Item -ItemType Directory -Path $ControlRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+    try {
+        foreach ($name in $runtimeControlFileNames) {
+            $source = Join-Path $SourceRoot ("scripts\{0}" -f $name)
+            if (-not (Test-Path -LiteralPath $source)) {
+                throw "Missing runtime control file: $source"
+            }
+            Copy-Item -LiteralPath $source -Destination (Join-Path $stageRoot $name) -Force
+        }
+        foreach ($name in $runtimeControlFileNames) {
+            $destination = Join-Path $ControlRoot $name
+            if (Test-Path -LiteralPath $destination) {
+                Copy-Item -LiteralPath $destination `
+                    -Destination (Join-Path $backupRoot $name) -Force
+            }
+        }
+        try {
+            foreach ($name in $runtimeControlFileNames) {
+                Move-Item -LiteralPath (Join-Path $stageRoot $name) `
+                    -Destination (Join-Path $ControlRoot $name) -Force
+            }
+        } catch {
+            foreach ($name in $runtimeControlFileNames) {
+                $destination = Join-Path $ControlRoot $name
+                $backup = Join-Path $backupRoot $name
+                if (Test-Path -LiteralPath $backup) {
+                    Move-Item -LiteralPath $backup -Destination $destination -Force
+                } elseif (Test-Path -LiteralPath $destination) {
+                    Remove-Item -LiteralPath $destination -Force
+                }
+            }
+            throw
+        }
+    } finally {
+        if (Test-Path -LiteralPath $stageRoot) {
+            Remove-Item -LiteralPath $stageRoot -Recurse -Force
+        }
+        if (Test-Path -LiteralPath $backupRoot) {
+            Remove-Item -LiteralPath $backupRoot -Recurse -Force
+        }
+    }
+}
+
+function Get-AvailableLoopbackPort {
+    $listener = [System.Net.Sockets.TcpListener]::new(
+        [System.Net.IPAddress]::Loopback, 0
+    )
+    try {
+        $listener.Start()
+        return ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+    } finally {
+        $listener.Stop()
+    }
+}
+
+function Invoke-ProductionShapePreflight {
+    param([string]$Revision)
+    $preflightRoot = Join-Path $repositoryRoot ".local\runtime-preflight"
+    $stageRoot = Join-Path $preflightRoot $Revision
+    $database = Join-Path $moduleRoot ".local\forward\forward-evidence.sqlite3"
+    $preflightPort = Get-AvailableLoopbackPort
+    $process = $null
+    if (-not (Test-Path -LiteralPath $database)) {
+        Write-RuntimeUpdateFailure -Revision $Revision -Status "PREFLIGHT_FAILED" `
+            -Message "Candidate preflight failed; the current version is still running: production evidence database is missing."
+        return $false
+    }
+    New-Item -ItemType Directory -Path $preflightRoot -Force | Out-Null
+    try {
+        if (Test-Path -LiteralPath $stageRoot) {
+            & git -C $repositoryRoot worktree remove --force $stageRoot 2>$null
+            if (Test-Path -LiteralPath $stageRoot) {
+                throw "stale candidate worktree cannot be cleared"
+            }
+        }
+        & git -C $repositoryRoot worktree add --detach --quiet $stageRoot $Revision 2>$null
+        if ($LASTEXITCODE -ne 0) { throw "cannot stage candidate worktree" }
+        $python = (Get-Command python.exe -ErrorAction Stop).Source
+        $stdout = Join-Path $logRoot "runtime-preflight.stdout.log"
+        $stderr = Join-Path $logRoot "runtime-preflight.stderr.log"
+        New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
+        $process = Start-Process -FilePath $python -ArgumentList @(
+            (Join-Path $stageRoot "scripts\run_dashboard_api.py"),
+            "--database", $database, "--host", "127.0.0.1",
+            "--port", [string]$preflightPort
+        ) -WorkingDirectory $stageRoot -WindowStyle Hidden -PassThru `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        $statusUrl = "http://127.0.0.1:$preflightPort/api/status"
+        $deadline = [DateTimeOffset]::UtcNow.AddSeconds(60)
+        $ready = $false
+        do {
+            Start-Sleep -Milliseconds 500
+            if ($process.HasExited) { break }
+            try {
+                # Readiness is the ability to build one complete status
+                # snapshot. /api/health describes live market availability and
+                # may correctly be non-200 while the candidate is sound.
+                $ready = (Invoke-WebRequest -UseBasicParsing -Uri $statusUrl `
+                    -TimeoutSec 20).StatusCode -eq 200
+            } catch { $ready = $false }
+        } while (-not $ready -and [DateTimeOffset]::UtcNow -lt $deadline)
+        if (-not $ready) { throw "staged dashboard API did not become healthy" }
+        $arguments = @(
+            (Join-Path $stageRoot "scripts\check_production_shape.py"),
+            "--status-url", $statusUrl
+        )
+        $result = & $python @arguments 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "production shape rejected: $result" }
+        Write-RuntimeUpdateState @{
+            update_status = "PREFLIGHT_PASSED"
+            preflight_revision = $Revision
+            preflight_at = [DateTimeOffset]::UtcNow.ToString("o")
+            user_visible_failure = $false
+            failure_message = $null
+        }
+        Write-WatchdogEvent -Event "RUNTIME_PREFLIGHT_PASSED" `
+            -Service "all" -State $Revision
+        return $true
+    } catch {
+        Write-RuntimeUpdateFailure -Revision $Revision -Status "PREFLIGHT_FAILED" `
+            -Message "Candidate preflight failed; the current version is still running: $($_.Exception.Message)"
+        return $false
+    } finally {
+        if ($process -and -not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            $process.WaitForExit(5000) | Out-Null
+        }
+        if (Test-Path -LiteralPath $stageRoot) {
+            & git -C $repositoryRoot worktree remove --force $stageRoot 2>$null
+        }
+        & git -C $repositoryRoot worktree prune 2>$null
+    }
 }
 
 function Get-DesiredMainRevision {
@@ -265,27 +431,52 @@ function Get-DesiredMainRevision {
 function Update-RuntimeCheckout {
     param([string]$Revision)
     if (-not $RuntimeRoot) { return $false }
-    if (-not (Test-MainCandidate (Get-CodeRevision) $Revision)) { return $false }
-    & git -C $moduleRoot checkout --detach --force --quiet $Revision 2>$null
-    if ($LASTEXITCODE -ne 0) { return $false }
-    $stableScript = Join-Path $repositoryRoot ".local\runtime-control\xauusd_control_center.ps1"
-    Copy-Item -LiteralPath (Join-Path $moduleRoot "scripts\xauusd_control_center.ps1") `
-        -Destination $stableScript -Force
-    Copy-Item -LiteralPath (Join-Path $moduleRoot "scripts\xauusd_watchdog_launcher.vbs") `
-        -Destination (Join-Path (Split-Path -Parent $stableScript) "xauusd_watchdog_launcher.vbs") `
-        -Force
-    Copy-Item -LiteralPath (Join-Path $moduleRoot "scripts\xauusd_watchdog_guard.ps1") `
-        -Destination (Join-Path (Split-Path -Parent $stableScript) "xauusd_watchdog_guard.ps1") `
-        -Force
-    Copy-Item -LiteralPath (Join-Path $moduleRoot "scripts\xauusd_watchdog_guard_launcher.vbs") `
-        -Destination (Join-Path (Split-Path -Parent $stableScript) "xauusd_watchdog_guard_launcher.vbs") `
-        -Force
+    $previousRevision = Get-CodeRevision
+    if (-not (Test-MainCandidate $previousRevision $Revision)) { return $false }
+    if (-not (Invoke-ProductionShapePreflight -Revision $Revision)) { return $false }
     Write-RuntimeUpdateState @{
-        accepted_main_revision = $Revision
+        update_status = "SWITCHING"
+        previous_revision = $previousRevision
         staged_revision = $Revision
         staged_at = [DateTimeOffset]::UtcNow.ToString("o")
+        user_visible_failure = $false
+        failure_message = $null
     }
-    return $true
+    $checkoutChanged = $false
+    try {
+        & git -C $moduleRoot checkout --detach --force --quiet $Revision 2>$null
+        if ($LASTEXITCODE -ne 0) { throw "verified revision checkout failed" }
+        $checkoutChanged = $true
+        Sync-StableRuntimeControlFiles
+        Write-RuntimeUpdateState @{
+            accepted_main_revision = $Revision
+            previous_revision = $previousRevision
+            staged_revision = $Revision
+            staged_at = [DateTimeOffset]::UtcNow.ToString("o")
+            update_status = "STAGED"
+        }
+        return $true
+    } catch {
+        $reason = $_.Exception.Message
+        if ($checkoutChanged) {
+            & git -C $moduleRoot checkout --detach --force --quiet $previousRevision 2>$null
+            if ($LASTEXITCODE -ne 0) {
+                Write-RuntimeUpdateFailure -Revision $Revision -Status "ROLLBACK_FAILED" `
+                    -Message "Candidate switch preparation failed and the previous checkout could not be restored: $reason"
+                return $false
+            }
+            try {
+                Sync-StableRuntimeControlFiles
+            } catch {
+                Write-RuntimeUpdateFailure -Revision $Revision -Status "ROLLBACK_FAILED" `
+                    -Message "Candidate switch preparation failed and the previous control bundle could not be restored: $reason; $($_.Exception.Message)"
+                return $false
+            }
+        }
+        Write-RuntimeUpdateFailure -Revision $Revision -Status "SWITCH_FAILED" `
+            -Message "Candidate switch failed before service reload; the current version is still running: $reason"
+        return $false
+    }
 }
 
 function Get-RuntimeCodeState {
@@ -393,9 +584,197 @@ function Restart-CodeReloadableServices {
         $healthy = Test-CodeReloadHealth -ReloadStarted $reloadStarted
     } while (-not $healthy -and [DateTimeOffset]::UtcNow -lt $deadline)
     if (-not $healthy) { throw "Code revision reload failed functional health checks." }
+    Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_HEALTHY" `
+        -Service "collector,annotator,api,sync" -State $Revision
+}
+
+function Invoke-RuntimeCandidateActivation {
+    param([string]$Revision, [string]$PreviousRevision)
+    Restart-CodeReloadableServices -Revision $Revision
+    Start-RuntimeObservation -Revision $Revision `
+        -PreviousRevision $PreviousRevision
+    # Observation is durable before applied_revision. A watchdog restart in
+    # between repeats safe work instead of silently skipping validation.
     Write-RuntimeCodeState -Revision $Revision
     Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_APPLIED" `
         -Service "collector,annotator,api,sync" -State $Revision
+}
+
+function Get-RuntimeDecisionTimes {
+    try {
+        $status = Invoke-RestMethod -Method Get `
+            -Uri "http://127.0.0.1:8765/api/status" -TimeoutSec 10
+        return @(
+            $status.recent_decisions |
+                Where-Object { $_.decision_time } |
+                ForEach-Object { [string]$_.decision_time }
+        )
+    } catch {}
+    return @()
+}
+
+function Get-LatestRuntimeDecisionTime {
+    $times = @(Get-RuntimeDecisionTimes)
+    if ($times.Count -gt 0) { return [string]$times[0] }
+    return $null
+}
+
+function Test-CurrentProductionShape {
+    try {
+        $python = (Get-Command python.exe -ErrorAction Stop).Source
+        $arguments = @(
+            (Join-Path $moduleRoot "scripts\check_production_shape.py"),
+            "--status-url", "http://127.0.0.1:8765/api/status"
+        )
+        $result = & $python @arguments 2>&1
+        if ($LASTEXITCODE -ne 0) { return "production shape rejected: $result" }
+        return $null
+    } catch {
+        return $_.Exception.Message
+    }
+}
+
+function Start-RuntimeObservation {
+    param([string]$Revision, [string]$PreviousRevision)
+    $latestDecision = Get-LatestRuntimeDecisionTime
+    Write-RuntimeUpdateState @{
+        update_status = "OBSERVING"
+        observing_revision = $Revision
+        previous_revision = $PreviousRevision
+        observation_started_at = [DateTimeOffset]::UtcNow.ToString("o")
+        observation_last_decision_time = $latestDecision
+        observation_success_cycles = 0
+        observation_consecutive_failures = 0
+        user_visible_failure = $false
+        failure_message = $null
+    }
+    Write-WatchdogEvent -Event "RUNTIME_OBSERVATION_STARTED" `
+        -Service "all" -State "$Revision cycles=$runtimeObservationCycles"
+}
+
+function Invoke-RuntimeRollback {
+    param([string]$FailedRevision, [string]$PreviousRevision, [string]$Reason)
+    try {
+        if (-not $PreviousRevision -or $PreviousRevision -notmatch '^[0-9a-f]{40}$') {
+            throw "previous revision is unavailable"
+        }
+        & git -C $moduleRoot checkout --detach --force --quiet $PreviousRevision 2>$null
+        if ($LASTEXITCODE -ne 0) { throw "cannot restore previous revision" }
+        Sync-StableRuntimeControlFiles
+        Restart-CodeReloadableServices -Revision $PreviousRevision
+        Write-RuntimeCodeState -Revision $PreviousRevision
+        Write-RuntimeUpdateFailure -Revision $FailedRevision -Status "ROLLED_BACK" `
+            -Message "Candidate observation failed and the previous version was restored: $Reason"
+        Write-WatchdogEvent -Event "RUNTIME_ROLLBACK_APPLIED" `
+            -Service "all" -State $PreviousRevision
+        return $true
+    } catch {
+        Write-RuntimeUpdateFailure -Revision $FailedRevision -Status "ROLLBACK_FAILED" `
+            -Message "Candidate observation and automatic rollback both failed; inspect local services: $Reason; $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Test-RuntimeObservation {
+    $state = Get-RuntimeUpdateState
+    if (-not $state -or [string]$state.update_status -ne "OBSERVING") {
+        return $true
+    }
+    $revision = [string]$state.observing_revision
+    $previousRevision = [string]$state.previous_revision
+    $started = [DateTimeOffset]::MinValue
+    $startedValid = [DateTimeOffset]::TryParse(
+        [string]$state.observation_started_at, [ref]$started
+    )
+    if (-not $startedValid) {
+        Invoke-RuntimeRollback -FailedRevision $revision `
+            -PreviousRevision $previousRevision `
+            -Reason "runtime observation state has an invalid start time" | Out-Null
+        return $false
+    }
+    $failure = $null
+    if (-not (Test-CodeReloadHealth -ReloadStarted $started)) {
+        $failure = "reload health check failed"
+    } else { $failure = Test-CurrentProductionShape }
+    if ($failure) {
+        $failures = 1 + [int]$state.observation_consecutive_failures
+        Write-RuntimeUpdateState @{ observation_consecutive_failures = $failures }
+        if ($failures -ge 3) {
+            Invoke-RuntimeRollback -FailedRevision $revision `
+                -PreviousRevision $previousRevision -Reason $failure | Out-Null
+            return $false
+        }
+        return $true
+    }
+    $decisionTimes = @(Get-RuntimeDecisionTimes)
+    $lastDecision = [string]$state.observation_last_decision_time
+    $cycles = [int]$state.observation_success_cycles
+    $lastInstant = [DateTimeOffset]::MinValue
+    $lastValid = [DateTimeOffset]::TryParse($lastDecision, [ref]$lastInstant)
+    $referenceInstant = if ($lastValid) { $lastInstant } else { $started }
+    $referenceCycle = [Math]::Floor($referenceInstant.ToUnixTimeSeconds() / 300)
+    $newDecisions = @()
+    foreach ($decisionTime in $decisionTimes) {
+        $decisionInstant = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse(
+            [string]$decisionTime, [ref]$decisionInstant
+        )) { continue }
+        $decisionCycle = [Math]::Floor($decisionInstant.ToUnixTimeSeconds() / 300)
+        if ($decisionInstant -gt $referenceInstant -and
+            $decisionCycle -gt $referenceCycle) {
+            $newDecisions += [pscustomobject]@{
+                Cycle = $decisionCycle
+                Instant = $decisionInstant
+                Value = [string]$decisionTime
+            }
+        }
+    }
+    $newCycles = @($newDecisions | Sort-Object Cycle -Unique)
+    if ($newCycles.Count -gt 0) {
+        $latestDecision = ($newDecisions | Sort-Object Instant -Descending |
+            Select-Object -First 1).Value
+        $cycles += $newCycles.Count
+        Write-RuntimeUpdateState @{
+            observation_last_decision_time = $latestDecision
+            observation_success_cycles = $cycles
+            observation_consecutive_failures = 0
+        }
+    } else {
+        Write-RuntimeUpdateState @{ observation_consecutive_failures = 0 }
+    }
+    if ($cycles -ge $runtimeObservationCycles) {
+        Write-RuntimeUpdateState @{
+            update_status = "ACTIVE"
+            activated_revision = $revision
+            activated_at = [DateTimeOffset]::UtcNow.ToString("o")
+            user_visible_failure = $false
+            failure_message = $null
+        }
+        Write-WatchdogEvent -Event "RUNTIME_OBSERVATION_PASSED" `
+            -Service "all" -State "$revision cycles=$cycles"
+        return $true
+    }
+    if (([DateTimeOffset]::UtcNow - $started) -ge $runtimeObservationTimeout) {
+        try {
+            $status = Invoke-RestMethod -Method Get `
+                -Uri "http://127.0.0.1:8765/api/status" -TimeoutSec 5
+            $marketClosed = [string]$status.system.market_session -in @(
+                "CLOSED", "WEEKLY_CLOSED"
+            )
+        } catch { $marketClosed = $false }
+        if ($marketClosed) {
+            # Closed-market time does not consume the two-cycle observation window.
+            Write-RuntimeUpdateState @{
+                observation_started_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+        } else {
+            Invoke-RuntimeRollback -FailedRevision $revision `
+                -PreviousRevision $previousRevision `
+                -Reason "two complete five-minute decision cycles were not observed" | Out-Null
+            return $false
+        }
+    }
+    return $true
 }
 
 function Test-ExpectedWeeklyMarketClosure {
@@ -693,7 +1072,20 @@ function Invoke-ForecasterWatchdog {
                 [DateTimeOffset]::UtcNow - $lastCodeReload
             ).TotalSeconds -ge 120) {
                 $lastCodeReload = [DateTimeOffset]::UtcNow
-                Restart-CodeReloadableServices -Revision $currentRevision
+                $updateState = Get-RuntimeUpdateState
+                $previousRevision = if ($updateState) {
+                    [string]$updateState.previous_revision
+                } else { $appliedRevision }
+                try {
+                    Invoke-RuntimeCandidateActivation `
+                        -Revision $currentRevision `
+                        -PreviousRevision $previousRevision
+                } catch {
+                    Invoke-RuntimeRollback -FailedRevision $currentRevision `
+                        -PreviousRevision $previousRevision `
+                        -Reason $_.Exception.Message | Out-Null
+                    $currentRevision = Get-CodeRevision
+                }
                 foreach ($service in $services) {
                     $lastRestart[$service.Key] = [DateTimeOffset]::UtcNow
                     $failureCounts[$service.Key] = 0
@@ -702,6 +1094,13 @@ function Invoke-ForecasterWatchdog {
                     # The launcher that started this process may predate its own
                     # supervisor loop, so start the newly copied launcher before
                     # this process exits. This makes the first upgrade self-hosting.
+                    Start-WatchdogReplacement
+                    return 0
+                }
+            }
+            if (-not (Test-RuntimeObservation)) {
+                $currentRevision = Get-CodeRevision
+                if ($currentRevision -ne $watchdogRevisionAtStart) {
                     Start-WatchdogReplacement
                     return 0
                 }
@@ -755,14 +1154,10 @@ function Register-AutoStartTask {
         [string]$RuntimePath,
         [string]$SourceRepository
     )
-    $launcherSource = Join-Path $moduleRoot "scripts\xauusd_watchdog_launcher.vbs"
-    if (-not (Test-Path -LiteralPath $launcherSource)) {
-        throw "Missing windowless watchdog launcher: $launcherSource"
-    }
     $controlRoot = Split-Path -Parent $ControlScript
     $launcherPath = Join-Path $controlRoot "xauusd_watchdog_launcher.vbs"
-    if (-not $launcherSource.Equals($launcherPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-        Copy-Item -LiteralPath $launcherSource -Destination $launcherPath -Force
+    if (-not (Test-Path -LiteralPath $launcherPath)) {
+        throw "Missing windowless watchdog launcher: $launcherPath"
     }
     $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
     $taskArguments = '"{0}" "{1}" "{2}" "{3}"' -f `
@@ -788,15 +1183,13 @@ function Register-WatchdogGuardTask {
         [object]$Principal
     )
     $controlRoot = Split-Path -Parent $ControlScript
-    $guardSource = Join-Path $moduleRoot "scripts\xauusd_watchdog_guard.ps1"
     $guardPath = Join-Path $controlRoot "xauusd_watchdog_guard.ps1"
-    $launcherSource = Join-Path $moduleRoot "scripts\xauusd_watchdog_guard_launcher.vbs"
     $launcherPath = Join-Path $controlRoot "xauusd_watchdog_guard_launcher.vbs"
-    if (-not $guardSource.Equals($guardPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-        Copy-Item -LiteralPath $guardSource -Destination $guardPath -Force
+    if (-not (Test-Path -LiteralPath $guardPath)) {
+        throw "Missing watchdog guard: $guardPath"
     }
-    if (-not $launcherSource.Equals($launcherPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-        Copy-Item -LiteralPath $launcherSource -Destination $launcherPath -Force
+    if (-not (Test-Path -LiteralPath $launcherPath)) {
+        throw "Missing windowless watchdog guard launcher: $launcherPath"
     }
     $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
     $guardArguments = '"{0}" "{1}" "{2}" "{3}"' -f `
@@ -880,9 +1273,8 @@ function Install-ProductionRuntime {
         installed_at = [DateTimeOffset]::UtcNow.ToString("o")
     }
     $controlRoot = Join-Path $sourceLocal "runtime-control"
-    New-Item -ItemType Directory -Path $controlRoot -Force | Out-Null
+    Sync-StableRuntimeControlFiles -SourceRoot $runtime -ControlRoot $controlRoot
     $stableScript = Join-Path $controlRoot "xauusd_control_center.ps1"
-    Copy-Item -LiteralPath $PSCommandPath -Destination $stableScript -Force
 
     Stop-ScheduledTask -TaskName $guardTaskName -ErrorAction SilentlyContinue
     Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue

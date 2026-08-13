@@ -13,12 +13,16 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from xauusd_forecaster.annotation import INVALID_CHINESE_TITLE, PROMPT_VERSION
+from xauusd_forecaster.ai_provider_registry import AI_QUOTA_SURFACES
 from xauusd_forecaster.forward_ledger import ForwardLedger
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
 from xauusd_forecaster.news_scheduler import (
     configured_api_credentials, reserve_account_request,
 )
+from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY
 
 
 UTC = timezone.utc
@@ -91,6 +95,31 @@ def test_dashboard_reports_broker_close_and_reopen_time(tmp_path) -> None:
     assert payload["system"]["market_reopens_at"] == reopens_at.isoformat()
     for component in ("quote_bridge", "decision_collector", "outcome_settler"):
         assert payload["system"]["components"][component]["status"] == "MARKET_CLOSED"
+
+
+def test_dashboard_exposes_only_runtime_update_failures(tmp_path) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=now).close()
+    state_path = tmp_path / "runtime-update-state.json"
+    state_path.write_text(json.dumps({
+        "update_status": "ACTIVE", "user_visible_failure": False,
+        "failure_message": None,
+    }), encoding="utf-8")
+
+    healthy = _dashboard_module()._dashboard_payload(database)
+    assert healthy["system"]["runtime_update_failure"] is None
+
+    state_path.write_text(json.dumps({
+        "update_status": "ROLLED_BACK", "user_visible_failure": True,
+        "failure_message": "新版运行验证失败，已自动恢复上一版。",
+        "failed_at": now.isoformat(),
+    }), encoding="utf-8")
+    failed = _dashboard_module()._dashboard_payload(database)
+    assert failed["system"]["runtime_update_failure"] == {
+        "status": "ROLLED_BACK",
+        "failed_at": now.isoformat(),
+    }
 
 
 def test_news_evidence_display_collapses_frozen_versions_to_one_event() -> None:
@@ -340,6 +369,11 @@ def test_dashboard_quota_uses_scheduler_ledger(tmp_path, monkeypatch) -> None:
     assert [row["sent"] for row in payload["gemini_quota"]["keys"]] == [1, 1]
     assert payload["gemma_quota"]["total_sent"] == 2
     assert [row["sent"] for row in payload["gemma_quota"]["keys"]] == [2, 0]
+    scheduler_usage = payload["production_contract"]["scheduler_usage"]
+    for surface in AI_QUOTA_SURFACES:
+        assert scheduler_usage[surface.payload_key] == payload[
+            surface.payload_key
+        ]["total_sent"]
 
 
 def test_dashboard_quota_keeps_pre_scheduler_file_compatibility(
@@ -610,7 +644,9 @@ def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
 
     payload = _dashboard_module()._dashboard_payload(database)
     assert payload["recent_news"][0]["headline"] == "2026年6月个人收入与支出"
-    assert len(payload["news_source_health"]) == 13
+    assert {row["source"] for row in payload["news_source_health"]} == {
+        spec.source for spec in NEWS_SOURCE_REGISTRY
+    }
     assert all(
         row["source"] not in {
             "non_fed_full_text",
@@ -641,6 +677,33 @@ def test_source_error_does_not_claim_polling_is_normal(tmp_path) -> None:
     assert direct["health"] == "ERROR"
     assert direct["semantic_status"] == "SOURCE_ERROR"
     assert direct["semantic_message"] == "来源当前轮询失败；请查看最近错误与后备链路状态"
+
+
+@pytest.mark.parametrize("source", [spec.source for spec in NEWS_SOURCE_REGISTRY])
+def test_every_monitored_source_clears_active_failure_state_after_success(
+    tmp_path,
+    source,
+) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger.append_source_poll({
+        "poll_id": f"{source}-old-error", "source": source,
+        "fetched_time": now - timedelta(minutes=5), "status": "ERROR",
+        "error_type": "HTTPError", "error": "HTTP Error 429: historical",
+    })
+    ledger.append_source_poll({
+        "poll_id": f"{source}-recovered", "source": source,
+        "fetched_time": now, "status": "OK",
+    })
+
+    rows = _dashboard_module()._news_source_health(ledger.connection, now)
+    recovered = next(row for row in rows if row["source"] == source)
+
+    assert recovered["latest_status"] == "OK"
+    assert recovered["health"] not in {"ERROR", "DEGRADED", "FALLBACK_ACTIVE"}
+    assert recovered["recovery_mode"] is None
+    assert recovered["next_retry_time"] is None
+    assert "429" in recovered["last_error"]
 
 
 def test_polled_release_source_without_items_is_not_reported_healthy(tmp_path) -> None:

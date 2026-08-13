@@ -20,12 +20,12 @@ declare const __AURUM_PREVIEW_BUNDLE__: PreviewBundle | null;
 export const previewBundle: PreviewBundle | null = __AURUM_PREVIEW_BUNDLE__;
 export const isPreviewDeployment = previewBundle !== null;
 
-export function previewJson(payload: unknown, status = 200) {
+export function previewJson(payload: unknown, status = 200, source = "immutable-build-snapshot") {
   return NextResponse.json(payload, {
     status,
     headers: {
       "Cache-Control": "no-store, max-age=0",
-      "X-Aurum-Preview": "immutable-build-snapshot",
+      "X-Aurum-Preview": source,
     },
   });
 }

@@ -8,7 +8,10 @@ type JsonObject = Record<string, unknown>;
 
 /** Keep Worker startup memory independent of the growing audit snapshot. */
 export function compactPreviewStatus(status: JsonObject): JsonObject {
-  const result: JsonObject = { preview_status_summary: true };
+  const result: JsonObject = {
+    preview_status_summary: true,
+    observation_scope: "BUILD_SNAPSHOT",
+  };
   for (const key of PREVIEW_STATUS_INLINE_KEYS) result[key] = status[key];
   const market = status.market_chart && typeof status.market_chart === "object"
     ? status.market_chart as JsonObject
@@ -34,6 +37,9 @@ export function compactPreviewNewsIndex(index: JsonObject): JsonObject {
     items: items.slice(0, PREVIEW_NEWS_PAGE_SIZE),
     page: 1,
     page_size: PREVIEW_NEWS_PAGE_SIZE,
+    // The embedded page remains useful while D1 loads, but its build-time
+    // aggregates must never masquerade as the current 60-day archive total.
+    totals_scope: "BUILD_SNAPSHOT",
   };
 }
 

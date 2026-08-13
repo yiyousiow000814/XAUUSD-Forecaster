@@ -65,6 +65,26 @@ REMOTE_MARKET_CANDLE_LIMIT = 576
 REMOTE_MARKET_DENSE_LIMITS = (1440, 1152, 864, 576, 288, 0)
 REMOTE_MARKET_OVERVIEW_LIMITS = (480, 240, 120, 80, 40)
 
+
+class PayloadContractError(ValueError):
+    """A bounded payload still violates the remote transport contract."""
+
+    error_code = "PAYLOAD_CONTRACT_REJECTED"
+
+
+class AllTargetsRejected(RuntimeError):
+    """Every configured target rejected the critical heartbeat."""
+
+    def __init__(self, degraded_resources: list[dict]) -> None:
+        super().__init__("all dashboard mirror targets rejected the heartbeat")
+        self.degraded_resources = degraded_resources
+        codes = {
+            str(item.get("error_code"))
+            for item in degraded_resources
+            if item.get("error_code")
+        }
+        self.error_code = next(iter(codes)) if len(codes) == 1 else "ALL_TARGETS_REJECTED"
+
 NEWS_INDEX_FIELDS = (
     "category", "source", "source_item_id", "revision_number", "cluster_id",
     "source_published_time", "collector_first_seen_time", "headline",
@@ -655,7 +675,7 @@ def market_chart_snapshot(payload: dict) -> bytes:
             last_size = len(encoded)
             if last_size <= REMOTE_PAYLOAD_LIMIT_BYTES:
                 return encoded
-    raise ValueError(
+    raise PayloadContractError(
         f"half-hour market chart payload is {last_size} bytes "
         f"(limit {REMOTE_PAYLOAD_LIMIT_BYTES})"
     )
@@ -668,7 +688,7 @@ def learning_snapshot(payload: dict) -> bytes:
         separators=(",", ":"),
     ).encode("utf-8")
     if len(encoded) > REMOTE_PAYLOAD_LIMIT_BYTES:
-        raise ValueError(
+        raise PayloadContractError(
             f"bounded learning summary is {len(encoded)} bytes "
             f"(limit {REMOTE_PAYLOAD_LIMIT_BYTES})"
         )
@@ -719,7 +739,7 @@ def remote_snapshot(payload: dict) -> bytes:
         snapshot, ensure_ascii=False, allow_nan=False, separators=(",", ":")
     ).encode("utf-8")
     if len(encoded) > REMOTE_PAYLOAD_LIMIT_BYTES:
-        raise ValueError(
+        raise PayloadContractError(
             f"bounded dashboard payload is still {len(encoded)} bytes "
             f"(limit {REMOTE_PAYLOAD_LIMIT_BYTES}); split another large surface "
             "instead of dropping news index rows"
@@ -751,24 +771,57 @@ def write_sync_status(
                 "last_attempt": now,
                 "last_error": None,
                 "last_error_type": None,
+                "last_error_code": None,
                 "attempts_used": attempts_used,
                 "status": "DEGRADED" if degraded_resources else "OK",
                 "degraded_resources": degraded_resources,
             }
         )
     else:
+        current_degraded = list(
+            getattr(error, "degraded_resources", None) or []
+        )
         existing.update(
             {
                 "last_attempt": now,
                 "last_error": str(error)[:500] if error else "Unknown sync error",
                 "last_error_type": type(error).__name__ if error else "UnknownError",
+                "last_error_code": sync_error_code(error),
                 "status": "ERROR",
+                "degraded_resources": current_degraded,
             }
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(existing, ensure_ascii=False), encoding="utf-8")
     temporary.replace(path)
+
+
+def sync_error_code(error: Exception | None) -> str:
+    """Classify transport failures once, before they enter persisted status."""
+    if error is None:
+        return "UNKNOWN"
+    declared = getattr(error, "error_code", None)
+    if declared:
+        return str(declared)
+    if isinstance(error, urllib.error.HTTPError):
+        if error.code == 413:
+            return "PAYLOAD_LIMIT_EXCEEDED"
+        if error.code in {401, 403}:
+            return "AUTH_REJECTED"
+        if error.code == 429:
+            return "RATE_LIMITED"
+        if error.code >= 500:
+            return "REMOTE_UNAVAILABLE"
+        return "HTTP_REJECTED"
+    if isinstance(error, (
+        TimeoutError,
+        ConnectionError,
+        http.client.RemoteDisconnected,
+        urllib.error.URLError,
+    )):
+        return "TRANSPORT_UNAVAILABLE"
+    return "UNCLASSIFIED"
 
 
 def _write_runtime_signal(payload: object) -> None:
@@ -1072,7 +1125,9 @@ def _market_decision_overview_payload(summary: dict) -> bytes:
         if len(encoded) <= MARKET_HISTORY_BATCH_LIMIT_BYTES:
             return encoded
         if limit <= 1:
-            raise ValueError("market decision overview row exceeds payload limit")
+            raise PayloadContractError(
+                "market decision overview row exceeds payload limit"
+            )
         limit = max(1, limit // 2)
 
 
@@ -1253,6 +1308,7 @@ def sync_once(config: dict) -> list[dict]:
                 "target": target_name,
                 "resource": "heartbeat",
                 "error_type": type(error).__name__,
+                "error_code": sync_error_code(error),
                 "error": str(error)[:500],
             })
             continue
@@ -1269,10 +1325,11 @@ def sync_once(config: dict) -> list[dict]:
                     "target": target_name,
                     "resource": resource,
                     "error_type": type(error).__name__,
+                    "error_code": sync_error_code(error),
                     "error": str(error)[:500],
                 })
     if healthy_targets == 0:
-        raise RuntimeError("all dashboard mirror targets rejected the heartbeat")
+        raise AllTargetsRejected(degraded)
     return degraded
 
 

@@ -1,11 +1,18 @@
 from pathlib import Path
 import json
+import socket
 import subprocess
 import textwrap
 from datetime import datetime, timedelta, timezone
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_CONTROL_FILES = (
+    "xauusd_control_center.ps1",
+    "xauusd_watchdog_launcher.vbs",
+    "xauusd_watchdog_guard.ps1",
+    "xauusd_watchdog_guard_launcher.vbs",
+)
 
 
 def test_quote_bridge_uses_standalone_local_configuration() -> None:
@@ -70,6 +77,7 @@ def test_control_center_updates_only_the_isolated_main_runtime() -> None:
     assert "Install-ProductionRuntime" in control_center
     assert 'RuntimeRoot must be separate from the development checkout' in control_center
     assert 'worktree add --detach --quiet' in control_center
+    assert '-WindowStyle Hidden -PassThru' in control_center
     assert '"quote"' not in control_center.split("$reloadableServiceKeys =", 1)[1].splitlines()[0]
 
     reported = subprocess.run(
@@ -84,6 +92,356 @@ def test_control_center_updates_only_the_isolated_main_runtime() -> None:
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     assert reported == expected
+
+
+def _run_control_center_contract(tmp_path, body: str) -> str:
+    runtime = tmp_path / "runtime"
+    repository = tmp_path / "repository"
+    runtime.mkdir(exist_ok=True)
+    repository.mkdir(exist_ok=True)
+    script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    command = (
+        f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{runtime}' "
+        f"-RepositoryRoot '{repository}'; {body}"
+    )
+    return subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+def _write_runtime_observation(tmp_path, **overrides) -> None:
+    state = {
+        "update_status": "OBSERVING",
+        "observing_revision": "b" * 40,
+        "previous_revision": "a" * 40,
+        "observation_started_at": datetime.now(timezone.utc).isoformat(),
+        "observation_last_decision_time": "2026-08-13T03:00:00+00:00",
+        "observation_success_cycles": 0,
+        "observation_consecutive_failures": 0,
+    }
+    state.update(overrides)
+    path = tmp_path / "runtime" / ".local" / "forward" / "runtime-update-state.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+
+def _write_control_bundle(root: Path, label: str, *, scripts_dir: bool = False) -> None:
+    target = root / "scripts" if scripts_dir else root
+    target.mkdir(parents=True, exist_ok=True)
+    for name in RUNTIME_CONTROL_FILES:
+        (target / name).write_text(f"{label}|{name}\n", encoding="utf-8")
+
+
+def _bundle_result_expression(root: str) -> str:
+    names = ",".join(f"'{name}'" for name in RUNTIME_CONTROL_FILES)
+    return (
+        f"$bundle = @({names}) | ForEach-Object {{ "
+        f"(Get-Content -LiteralPath (Join-Path {root} $_) -Raw).Trim() }}; "
+        "Write-Output ($bundle -join ',')"
+    )
+
+
+def test_failed_preflight_never_switches_the_runtime_checkout(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:preflights = 0; $script:checkouts = 0; "
+        "function Get-CodeRevision { return ('a' * 40) }; "
+        "function Test-MainCandidate { return $true }; "
+        "function Invoke-ProductionShapePreflight { $script:preflights += 1; return $false }; "
+        "function git { $script:checkouts += 1; $global:LASTEXITCODE = 0 }; "
+        "$accepted = Update-RuntimeCheckout -Revision ('b' * 40); "
+        'Write-Output "$accepted,$script:preflights,$script:checkouts"',
+    )
+
+    assert result == "False,1,0"
+
+
+def test_preflight_selects_an_available_loopback_port(tmp_path) -> None:
+    with socket.socket() as occupied:
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen()
+        occupied_port = occupied.getsockname()[1]
+        result = int(_run_control_center_contract(
+            tmp_path,
+            "Write-Output (Get-AvailableLoopbackPort)",
+        ))
+
+    assert 0 < result <= 65_535
+    assert result != occupied_port
+
+
+def test_preflight_failure_always_stops_the_staged_api_process(tmp_path) -> None:
+    database = tmp_path / "runtime" / ".local" / "forward" / "forward-evidence.sqlite3"
+    database.parent.mkdir(parents=True)
+    database.write_bytes(b"")
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:stops = 0; function git { $global:LASTEXITCODE = 0 }; "
+        "function Get-Command { return [pscustomobject]@{ Source = 'missing-python.exe' } }; "
+        "function Start-Process { $process = [pscustomobject]@{ HasExited = $false; Id = 424242 }; "
+        "$process | Add-Member ScriptMethod WaitForExit { param($milliseconds) return $true }; "
+        "return $process }; function Invoke-WebRequest { return [pscustomobject]@{ StatusCode = 200 } }; "
+        "function Stop-Process { $script:stops += 1 }; "
+        "$accepted = Invoke-ProductionShapePreflight -Revision ('b' * 40); "
+        "$state = Get-RuntimeUpdateState; "
+        'Write-Output "$accepted,$script:stops,$($state.update_status)"',
+    )
+
+    assert result == "False,1,PREFLIGHT_FAILED"
+
+
+def test_switch_preparation_reports_when_previous_bundle_cannot_be_restored(
+    tmp_path,
+) -> None:
+    previous = "a" * 40
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:checkouts = @(); "
+        f"function Get-CodeRevision {{ return '{previous}' }}; "
+        "function Test-MainCandidate { return $true }; "
+        "function Invoke-ProductionShapePreflight { return $true }; "
+        "function git { if ($args -contains 'checkout') { "
+        "$script:checkouts += [string]$args[-1] }; $global:LASTEXITCODE = 0 }; "
+        "function Copy-Item { throw 'copy failed' }; "
+        f"$accepted = Update-RuntimeCheckout -Revision '{candidate}'; "
+        "$state = Get-RuntimeUpdateState; "
+        'Write-Output "$accepted,$($script:checkouts -join \'|\'),$($state.update_status)"',
+    )
+
+    assert result == f"False,{candidate}|{previous},ROLLBACK_FAILED"
+
+
+def test_candidate_switch_installs_one_complete_runtime_control_bundle(tmp_path) -> None:
+    _write_control_bundle(tmp_path / "runtime", "previous", scripts_dir=True)
+    _write_control_bundle(
+        tmp_path / "repository" / ".local" / "runtime-control", "previous"
+    )
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Get-CodeRevision { return ('a' * 40) }; "
+        "function Test-MainCandidate { return $true }; "
+        "function Invoke-ProductionShapePreflight { return $true }; "
+        "function git { if ($args -contains 'checkout') { foreach ($name in "
+        "$runtimeControlFileNames) { Set-Content -LiteralPath "
+        "(Join-Path $moduleRoot ('scripts\\' + $name)) "
+        f"-Value ('{candidate}|' + $name) }} }}; $global:LASTEXITCODE = 0 }}; "
+        f"$accepted = Update-RuntimeCheckout -Revision '{candidate}'; "
+        "$state = Get-RuntimeUpdateState; "
+        + _bundle_result_expression(
+            "(Join-Path $repositoryRoot '.local\\runtime-control')"
+        )
+        + "; Write-Output \"$accepted,$($state.update_status)\"",
+    ).splitlines()
+
+    assert result == [
+        ",".join(f"{candidate}|{name}" for name in RUNTIME_CONTROL_FILES),
+        "True,STAGED",
+    ]
+
+
+def test_switch_copy_failure_restores_the_complete_previous_control_bundle(
+    tmp_path,
+) -> None:
+    _write_control_bundle(tmp_path / "runtime", "previous", scripts_dir=True)
+    _write_control_bundle(
+        tmp_path / "repository" / ".local" / "runtime-control", "previous"
+    )
+    previous = "a" * 40
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:failedCandidateCopy = $false; "
+        f"function Get-CodeRevision {{ return '{previous}' }}; "
+        "function Test-MainCandidate { return $true }; "
+        "function Invoke-ProductionShapePreflight { return $true }; "
+        "function git { if ($args -contains 'checkout') { $revision = [string]$args[-1]; "
+        "foreach ($name in $runtimeControlFileNames) { Set-Content -LiteralPath "
+        "(Join-Path $moduleRoot ('scripts\\' + $name)) "
+        "-Value ($revision + '|' + $name) } }; $global:LASTEXITCODE = 0 }; "
+        "function Copy-Item { param([string]$LiteralPath,[string]$Destination,[switch]$Force); "
+        "$value = (Get-Content -LiteralPath $LiteralPath -Raw); "
+        f"if (-not $script:failedCandidateCopy -and $value -like '{candidate}*' -and "
+        "$LiteralPath -like '*xauusd_watchdog_guard.ps1') { "
+        "$script:failedCandidateCopy = $true; throw 'candidate copy failed' }; "
+        "Microsoft.PowerShell.Management\\Copy-Item -LiteralPath $LiteralPath "
+        "-Destination $Destination -Force:$Force }; "
+        f"$accepted = Update-RuntimeCheckout -Revision '{candidate}'; "
+        "$state = Get-RuntimeUpdateState; "
+        + _bundle_result_expression(
+            "(Join-Path $repositoryRoot '.local\\runtime-control')"
+        )
+        + "; Write-Output \"$accepted,$($state.update_status)\"",
+    ).splitlines()
+
+    assert result == [
+        ",".join(f"{previous}|{name}" for name in RUNTIME_CONTROL_FILES),
+        "False,SWITCH_FAILED",
+    ]
+
+
+def test_half_installed_candidate_bundle_is_reverted_before_switch_rollback(
+    tmp_path,
+) -> None:
+    _write_control_bundle(tmp_path / "runtime", "previous", scripts_dir=True)
+    _write_control_bundle(
+        tmp_path / "repository" / ".local" / "runtime-control", "previous"
+    )
+    previous = "a" * 40
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:failedCandidateMove = $false; "
+        f"function Get-CodeRevision {{ return '{previous}' }}; "
+        "function Test-MainCandidate { return $true }; "
+        "function Invoke-ProductionShapePreflight { return $true }; "
+        "function git { if ($args -contains 'checkout') { $revision = [string]$args[-1]; "
+        "foreach ($name in $runtimeControlFileNames) { Set-Content -LiteralPath "
+        "(Join-Path $moduleRoot ('scripts\\' + $name)) "
+        "-Value ($revision + '|' + $name) } }; $global:LASTEXITCODE = 0 }; "
+        "function Move-Item { param([string]$LiteralPath,[string]$Destination,[switch]$Force); "
+        f"$value = (Get-Content -LiteralPath $LiteralPath -Raw); if (-not "
+        f"$script:failedCandidateMove -and $value -like '{candidate}*' -and "
+        "$LiteralPath -like '*xauusd_watchdog_guard.ps1') { "
+        "$script:failedCandidateMove = $true; throw 'candidate move failed' }; "
+        "Microsoft.PowerShell.Management\\Move-Item -LiteralPath $LiteralPath "
+        "-Destination $Destination -Force:$Force }; "
+        f"$accepted = Update-RuntimeCheckout -Revision '{candidate}'; "
+        "$state = Get-RuntimeUpdateState; "
+        + _bundle_result_expression(
+            "(Join-Path $repositoryRoot '.local\\runtime-control')"
+        )
+        + "; Write-Output \"$accepted,$($state.update_status)\"",
+    ).splitlines()
+
+    assert result == [
+        ",".join(f"{previous}|{name}" for name in RUNTIME_CONTROL_FILES),
+        "False,SWITCH_FAILED",
+    ]
+
+
+def test_observation_rollback_restores_the_complete_previous_control_bundle(
+    tmp_path,
+) -> None:
+    previous = "a" * 40
+    candidate = "b" * 40
+    _write_control_bundle(tmp_path / "runtime", previous, scripts_dir=True)
+    _write_control_bundle(
+        tmp_path / "repository" / ".local" / "runtime-control", candidate
+    )
+    result = _run_control_center_contract(
+        tmp_path,
+        "function git { $global:LASTEXITCODE = 0 }; "
+        "function Restart-CodeReloadableServices {}; "
+        "function Write-RuntimeCodeState {}; function Write-RuntimeUpdateFailure {}; "
+        "function Write-WatchdogEvent {}; "
+        f"$restored = Invoke-RuntimeRollback -FailedRevision '{candidate}' "
+        f"-PreviousRevision '{previous}' -Reason 'contract test'; "
+        + _bundle_result_expression(
+            "(Join-Path $repositoryRoot '.local\\runtime-control')"
+        )
+        + "; Write-Output $restored",
+    ).splitlines()
+
+    assert result == [
+        ",".join(f"{previous}|{name}" for name in RUNTIME_CONTROL_FILES),
+        "True",
+    ]
+
+
+def test_candidate_observation_is_durable_before_revision_is_marked_applied(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:order = @(); "
+        "function Restart-CodeReloadableServices { $script:order += 'reload' }; "
+        "function Start-RuntimeObservation { $script:order += 'observe' }; "
+        "function Write-RuntimeCodeState { $script:order += 'applied' }; "
+        "function Write-WatchdogEvent {}; "
+        "Invoke-RuntimeCandidateActivation -Revision ('b' * 40) "
+        "-PreviousRevision ('a' * 40); "
+        'Write-Output ($script:order -join ",")',
+    )
+
+    assert result == "reload,observe,applied"
+
+
+def test_two_new_decision_cycles_activate_even_when_observed_together(tmp_path) -> None:
+    _write_runtime_observation(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Test-CodeReloadHealth { return $true }; "
+        "function Test-CurrentProductionShape { return $null }; "
+        "function Get-RuntimeDecisionTimes { return @("
+        "'2026-08-13T03:10:00+00:00','2026-08-13T03:05:00+00:00') }; "
+        "$observed = Test-RuntimeObservation; "
+        "$state = Get-RuntimeUpdateState; "
+        'Write-Output "$observed,$($state.update_status),$($state.observation_success_cycles)"',
+    )
+
+    assert result == "True,ACTIVE,2"
+
+
+def test_observation_counts_only_strictly_new_five_minute_cycles(tmp_path) -> None:
+    _write_runtime_observation(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Test-CodeReloadHealth { return $true }; "
+        "function Test-CurrentProductionShape { return $null }; "
+        "$script:times = @('invalid','2026-08-13T02:55:00+00:00',"
+        "'2026-08-13T03:01:00+00:00','2026-08-13T03:05:00+00:00'); "
+        "$script:index = 0; function Get-RuntimeDecisionTimes { "
+        "$value = $script:times[$script:index]; $script:index += 1; return $value }; "
+        "$null = Test-RuntimeObservation; $null = Test-RuntimeObservation; "
+        "$null = Test-RuntimeObservation; $null = Test-RuntimeObservation; "
+        "$state = Get-RuntimeUpdateState; "
+        'Write-Output "$($state.update_status),$($state.observation_success_cycles),$($state.observation_last_decision_time)"',
+    )
+
+    assert result == "OBSERVING,1,2026-08-13T03:05:00+00:00"
+
+
+def test_three_consecutive_observation_failures_trigger_one_rollback(tmp_path) -> None:
+    _write_runtime_observation(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:rollbacks = 0; function Test-CodeReloadHealth { return $false }; "
+        "function Invoke-RuntimeRollback { $script:rollbacks += 1; "
+        "Write-RuntimeUpdateState @{ update_status = 'ROLLED_BACK' }; return $true }; "
+        "$first = Test-RuntimeObservation; $second = Test-RuntimeObservation; "
+        "$third = Test-RuntimeObservation; $state = Get-RuntimeUpdateState; "
+        'Write-Output "$first,$second,$third,$script:rollbacks,$($state.update_status)"',
+    )
+
+    assert result == "True,True,False,1,ROLLED_BACK"
+
+
+def test_market_closure_pauses_observation_timeout_until_reopen(tmp_path) -> None:
+    _write_runtime_observation(
+        tmp_path,
+        observation_started_at="2020-01-01T00:00:00+00:00",
+    )
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:rollbacks = 0; function Test-CodeReloadHealth { return $true }; "
+        "function Test-CurrentProductionShape { return $null }; "
+        "function Get-RuntimeDecisionTimes { return @('2026-08-13T03:00:00+00:00') }; "
+        "function Invoke-RuntimeRollback { $script:rollbacks += 1; return $true }; "
+        "function Invoke-RestMethod { return [pscustomobject]@{ system = "
+        "[pscustomobject]@{ market_session = 'CLOSED' } } }; "
+        "$closed = Test-RuntimeObservation; $paused = Get-RuntimeUpdateState; "
+        "function Invoke-RestMethod { return [pscustomobject]@{ system = "
+        "[pscustomobject]@{ market_session = 'OPEN' } } }; "
+        "$reopened = Test-RuntimeObservation; "
+        "$wasPaused = [DateTimeOffset]::Parse([string]$paused.observation_started_at) "
+        "-gt [DateTimeOffset]::Parse('2020-01-02T00:00:00+00:00'); "
+        'Write-Output "$closed,$reopened,$wasPaused,$script:rollbacks"',
+    )
+
+    assert result == "True,True,True,0"
 
 
 def test_watchdog_autostart_uses_one_windowless_registration_path(tmp_path) -> None:
@@ -101,8 +459,6 @@ def test_watchdog_autostart_uses_one_windowless_registration_path(tmp_path) -> N
     assert 'New-TimeSpan -Minutes 2' in control_center
     assert "Ensure-WatchdogGuardTask" in control_center
     assert '"System32\\wscript.exe"' in control_center
-    assert 'Join-Path $moduleRoot "scripts\\xauusd_watchdog_launcher.vbs"' in control_center
-    assert 'Join-Path $moduleRoot "scripts\\xauusd_watchdog_guard_launcher.vbs"' in control_center
     assert "shell.Run(command, 0, True)" in launcher_text
     assert "shell.Run(command, 0, True)" in guard_launcher_text
     assert "-WindowStyle Hidden" in guard_launcher_text
