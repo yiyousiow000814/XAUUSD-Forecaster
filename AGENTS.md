@@ -8,6 +8,30 @@
 4. Identify obsolete code.
 5. Add or update tests.
 
+## Testing Discipline
+
+- Tests must protect durable behavior, system contracts, and invariants. Do not add a test merely because code changed.
+- Every bug fix must leave durable regression coverage, but this does not require a new standalone test for every bug.
+- Before adding a new regression test:
+  1. Identify the invariant or contract that the bug violated.
+  2. Identify sibling implementations governed by the same rule.
+  3. Search for an existing test or contract that already represents that rule.
+  4. Prefer extending or parameterizing the existing contract over adding another case-specific test.
+- A bug found in implementation B must trigger a review of equivalent implementations A, C, and other siblings. Do not protect only the instance that happened to fail when the underlying rule applies to a family.
+- Prefer family-level contract coverage for shared behavior such as collectors, model generations, transport payloads, evidence stores, API routes, schedulers, and runtime workers.
+- Keep a specific regression test only when it represents a distinct failure mode that is not clearly covered by a broader contract.
+- Once a broader contract fully subsumes an older regression test, consolidate or remove the redundant test.
+- Tests should assert externally meaningful behavior, persisted state, public contracts, safety properties, or required architecture boundaries. Avoid pinning incidental implementation details, private function names, exact source layout, dynamic copy, or temporary representations unless those details are themselves an explicit contract.
+- A refactor that preserves behavior should not require widespread test rewrites. If many tests fail only because implementation structure changed, review whether those tests are coupled to implementation rather than behavior.
+- Do not preserve stale tests for historical reasons. Update, consolidate, or remove tests whose original requirement no longer exists.
+- Do not optimize for test count. More tests are not automatically safer, and fewer tests are not automatically cleaner. Optimize for meaningful coverage with minimal duplication.
+- Shared test setup, builders, factories, fixtures, and assertions should be extracted when repetition becomes material, but do not hide the business meaning of a test behind a generic test framework.
+- Split oversized test modules by responsibility when a file spans unrelated domains or no longer has one clear contract.
+- Contract and invariant tests should remain explicit and easy to locate. Test organization should make it obvious which system rule is being protected.
+- When changing a test suite, preserve critical coverage for point-in-time correctness, causality, append-only evidence, immutable historical records, execution semantics, credential secrecy, fail-closed behavior, and production/Preview isolation.
+- Before deleting or consolidating a test, prove that its behavior is covered elsewhere or that the underlying requirement is obsolete.
+- A change is not complete merely because the full suite passes. Review whether the new or modified tests cover the correct abstraction level and whether equivalent sibling paths remain untested.
+
 ## Documentation Language
 
 - Write repository documentation in English. This includes the root README,
