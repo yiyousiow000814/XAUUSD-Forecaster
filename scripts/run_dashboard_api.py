@@ -2008,6 +2008,20 @@ def _dashboard_payload(database: Path) -> dict:
             market_component["status"] = "MARKET_CLOSED"
             market_component["last_error"] = None
 
+    runtime_update_failure = None
+    runtime_update_path = database.parent / "runtime-update-state.json"
+    if runtime_update_path.exists():
+        try:
+            runtime_update = json.loads(runtime_update_path.read_text(encoding="utf-8-sig"))
+            if runtime_update.get("user_visible_failure") is True:
+                runtime_update_failure = {
+                    "status": runtime_update.get("update_status"),
+                    "message": runtime_update.get("failure_message"),
+                    "failed_at": runtime_update.get("failed_at"),
+                }
+        except (OSError, ValueError):
+            pass
+
     return {
         "generated_at": now.isoformat(),
         "forward_epoch": epoch,
@@ -2034,6 +2048,7 @@ def _dashboard_payload(database: Path) -> dict:
             "symbol": "XAUUSD",
             "source_of_truth": "Local append-only SQLite",
             "sites_mirror": "read-only materialized display mirror",
+            "runtime_update_failure": runtime_update_failure,
             "components": {
                 "quote_bridge": quote_component,
                 "system_clock": {

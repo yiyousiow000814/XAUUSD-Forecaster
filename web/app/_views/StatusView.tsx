@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import DashboardLink from "../_components/DashboardLink";
+import RuntimeUpdateFailureBanner, { type RuntimeUpdateFailure } from "../_components/RuntimeUpdateFailureBanner";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
@@ -28,6 +29,7 @@ type StatusPayload = {
   system: {
     online: boolean; mode: string; trading_enabled: boolean; market_session?: "OPEN" | "CLOSED" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE";
     source_of_truth: string; sites_mirror: string;
+    runtime_update_failure?: RuntimeUpdateFailure | null;
     components: Record<string, { last_success: string | null; age_seconds: number | null; status: string; last_error: string | null }>;
   };
   annotation_queue: {
@@ -150,6 +152,7 @@ export default function StatusView() {
       </section>
 
       {error ? <div className="error-banner">状态读取失败：{error}</div> : null}
+      <RuntimeUpdateFailureBanner failure={payload?.system.runtime_update_failure} />
 
       <section className="quota-summary">
         <article><span>已配置 KEY</span><strong>{payload?.annotation_queue.configured_key_count ?? "—"}</strong><small>当前可用 {payload?.annotation_queue.available_key_count ?? "—"} · 只显示匿名编号</small></article>

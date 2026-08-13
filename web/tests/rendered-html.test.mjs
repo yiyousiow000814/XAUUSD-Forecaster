@@ -7,6 +7,16 @@ workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
 const { default: worker } = await import(workerUrl.href);
 const { applyFreshness } = await import("../app/api/status/freshness.js");
 
+test("runtime update success stays silent while failures are user-visible", () => {
+  const banner = readFileSync(new URL("../app/_components/RuntimeUpdateFailureBanner.tsx", import.meta.url), "utf8");
+  const status = readFileSync(new URL("../app/_views/StatusView.tsx", import.meta.url), "utf8");
+  const live = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
+  assert.match(banner, /role="alert"/);
+  assert.match(status, /runtime_update_failure/);
+  assert.match(live, /runtime_update_failure/);
+  assert.doesNotMatch(`${banner}${status}${live}`, /更新成功|升级成功/);
+});
+
 async function render(path) {
   return worker.fetch(
     new Request(`http://localhost${path}`, { headers: { accept: "text/html" } }),

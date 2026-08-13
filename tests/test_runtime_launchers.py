@@ -70,6 +70,19 @@ def test_control_center_updates_only_the_isolated_main_runtime() -> None:
     assert "Install-ProductionRuntime" in control_center
     assert 'RuntimeRoot must be separate from the development checkout' in control_center
     assert 'worktree add --detach --quiet' in control_center
+    assert "$runtimeObservationCycles = 2" in control_center
+    assert "$runtimeObservationTimeout = [TimeSpan]::FromMinutes(15)" in control_center
+    assert "Invoke-ProductionShapePreflight" in control_center
+    assert "Start-RuntimeObservation" in control_center
+    assert "Test-RuntimeObservation" in control_center
+    assert "Invoke-RuntimeRollback" in control_center
+    update_checkout = control_center.split("function Update-RuntimeCheckout", 1)[1].split(
+        "function Get-RuntimeCodeState", 1,
+    )[0]
+    assert update_checkout.index("Invoke-ProductionShapePreflight") < update_checkout.index(
+        "checkout --detach --force"
+    )
+    assert '-WindowStyle Hidden -PassThru' in control_center
     assert '"quote"' not in control_center.split("$reloadableServiceKeys =", 1)[1].splitlines()[0]
 
     reported = subprocess.run(

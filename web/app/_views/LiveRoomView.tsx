@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import DashboardLink from "../_components/DashboardLink";
+import RuntimeUpdateFailureBanner, { type RuntimeUpdateFailure } from "../_components/RuntimeUpdateFailureBanner";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
@@ -34,6 +35,7 @@ type Payload = {
     mode: string;
     trading_enabled: boolean;
     symbol: string;
+    runtime_update_failure?: RuntimeUpdateFailure | null;
   };
   latest: Decision & {
     source_event_time: string;
@@ -239,6 +241,7 @@ export default function LiveRoomView() {
       </section>
 
       {error && <div className="error-banner">{error}。行情采集可能仍在运行，但网页数据服务已停止。</div>}
+      <RuntimeUpdateFailureBanner failure={payload?.system.runtime_update_failure} />
       {marketClosed && <div className="market-closed-banner">cTrader 已确认 XAUUSD 休市。系统暂停新增预测与 30 分钟样本，新闻采集继续运行。</div>}
 
       <section className="metric-grid">

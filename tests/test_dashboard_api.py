@@ -93,6 +93,32 @@ def test_dashboard_reports_broker_close_and_reopen_time(tmp_path) -> None:
         assert payload["system"]["components"][component]["status"] == "MARKET_CLOSED"
 
 
+def test_dashboard_exposes_only_runtime_update_failures(tmp_path) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=now).close()
+    state_path = tmp_path / "runtime-update-state.json"
+    state_path.write_text(json.dumps({
+        "update_status": "ACTIVE", "user_visible_failure": False,
+        "failure_message": None,
+    }), encoding="utf-8")
+
+    healthy = _dashboard_module()._dashboard_payload(database)
+    assert healthy["system"]["runtime_update_failure"] is None
+
+    state_path.write_text(json.dumps({
+        "update_status": "ROLLED_BACK", "user_visible_failure": True,
+        "failure_message": "新版运行验证失败，已自动恢复上一版。",
+        "failed_at": now.isoformat(),
+    }), encoding="utf-8")
+    failed = _dashboard_module()._dashboard_payload(database)
+    assert failed["system"]["runtime_update_failure"] == {
+        "status": "ROLLED_BACK",
+        "message": "新版运行验证失败，已自动恢复上一版。",
+        "failed_at": now.isoformat(),
+    }
+
+
 def test_news_evidence_display_collapses_frozen_versions_to_one_event() -> None:
     module = _dashboard_module()
     connection = sqlite3.connect(":memory:")
