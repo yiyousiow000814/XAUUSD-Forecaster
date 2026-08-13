@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import socket
 import subprocess
 import textwrap
 from datetime import datetime, timedelta, timezone
@@ -134,6 +135,20 @@ def test_failed_preflight_never_switches_the_runtime_checkout(tmp_path) -> None:
     assert result == "False,1,0"
 
 
+def test_preflight_selects_an_available_loopback_port(tmp_path) -> None:
+    with socket.socket() as occupied:
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen()
+        occupied_port = occupied.getsockname()[1]
+        result = int(_run_control_center_contract(
+            tmp_path,
+            "Write-Output (Get-AvailableLoopbackPort)",
+        ))
+
+    assert 0 < result <= 65_535
+    assert result != occupied_port
+
+
 def test_preflight_failure_always_stops_the_staged_api_process(tmp_path) -> None:
     database = tmp_path / "runtime" / ".local" / "forward" / "forward-evidence.sqlite3"
     database.parent.mkdir(parents=True)
@@ -154,21 +169,77 @@ def test_preflight_failure_always_stops_the_staged_api_process(tmp_path) -> None
     assert result == "False,1,PREFLIGHT_FAILED"
 
 
-def test_two_new_decision_cycles_activate_the_staged_revision(tmp_path) -> None:
+def test_switch_preparation_failure_restores_previous_checkout(tmp_path) -> None:
+    previous = "a" * 40
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:checkouts = @(); "
+        f"function Get-CodeRevision {{ return '{previous}' }}; "
+        "function Test-MainCandidate { return $true }; "
+        "function Invoke-ProductionShapePreflight { return $true }; "
+        "function git { if ($args -contains 'checkout') { "
+        "$script:checkouts += [string]$args[-1] }; $global:LASTEXITCODE = 0 }; "
+        "function Copy-Item { throw 'copy failed' }; "
+        f"$accepted = Update-RuntimeCheckout -Revision '{candidate}'; "
+        "$state = Get-RuntimeUpdateState; "
+        'Write-Output "$accepted,$($script:checkouts -join \'|\'),$($state.update_status)"',
+    )
+
+    assert result == f"False,{candidate}|{previous},SWITCH_FAILED"
+
+
+def test_candidate_observation_is_durable_before_revision_is_marked_applied(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:order = @(); "
+        "function Restart-CodeReloadableServices { $script:order += 'reload' }; "
+        "function Start-RuntimeObservation { $script:order += 'observe' }; "
+        "function Write-RuntimeCodeState { $script:order += 'applied' }; "
+        "function Write-WatchdogEvent {}; "
+        "Invoke-RuntimeCandidateActivation -Revision ('b' * 40) "
+        "-PreviousRevision ('a' * 40); "
+        'Write-Output ($script:order -join ",")',
+    )
+
+    assert result == "reload,observe,applied"
+
+
+def test_two_new_decision_cycles_activate_even_when_observed_together(tmp_path) -> None:
     _write_runtime_observation(tmp_path)
     result = _run_control_center_contract(
         tmp_path,
         "function Test-CodeReloadHealth { return $true }; "
         "function Test-CurrentProductionShape { return $null }; "
-        "$script:times = @('2026-08-13T03:05:00+00:00','2026-08-13T03:10:00+00:00'); "
-        "$script:index = 0; function Get-LatestRuntimeDecisionTime { "
-        "$value = $script:times[$script:index]; $script:index += 1; return $value }; "
-        "$first = Test-RuntimeObservation; $second = Test-RuntimeObservation; "
+        "function Get-RuntimeDecisionTimes { return @("
+        "'2026-08-13T03:10:00+00:00','2026-08-13T03:05:00+00:00') }; "
+        "$observed = Test-RuntimeObservation; "
         "$state = Get-RuntimeUpdateState; "
-        'Write-Output "$first,$second,$($state.update_status),$($state.observation_success_cycles)"',
+        'Write-Output "$observed,$($state.update_status),$($state.observation_success_cycles)"',
     )
 
-    assert result == "True,True,ACTIVE,2"
+    assert result == "True,ACTIVE,2"
+
+
+def test_observation_counts_only_strictly_new_five_minute_cycles(tmp_path) -> None:
+    _write_runtime_observation(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Test-CodeReloadHealth { return $true }; "
+        "function Test-CurrentProductionShape { return $null }; "
+        "$script:times = @('invalid','2026-08-13T02:55:00+00:00',"
+        "'2026-08-13T03:01:00+00:00','2026-08-13T03:05:00+00:00'); "
+        "$script:index = 0; function Get-RuntimeDecisionTimes { "
+        "$value = $script:times[$script:index]; $script:index += 1; return $value }; "
+        "$null = Test-RuntimeObservation; $null = Test-RuntimeObservation; "
+        "$null = Test-RuntimeObservation; $null = Test-RuntimeObservation; "
+        "$state = Get-RuntimeUpdateState; "
+        'Write-Output "$($state.update_status),$($state.observation_success_cycles),$($state.observation_last_decision_time)"',
+    )
+
+    assert result == "OBSERVING,1,2026-08-13T03:05:00+00:00"
 
 
 def test_three_consecutive_observation_failures_trigger_one_rollback(tmp_path) -> None:
@@ -195,7 +266,7 @@ def test_market_closure_pauses_observation_timeout_until_reopen(tmp_path) -> Non
         tmp_path,
         "$script:rollbacks = 0; function Test-CodeReloadHealth { return $true }; "
         "function Test-CurrentProductionShape { return $null }; "
-        "function Get-LatestRuntimeDecisionTime { return '2026-08-13T03:00:00+00:00' }; "
+        "function Get-RuntimeDecisionTimes { return @('2026-08-13T03:00:00+00:00') }; "
         "function Invoke-RuntimeRollback { $script:rollbacks += 1; return $true }; "
         "function Invoke-RestMethod { return [pscustomobject]@{ system = "
         "[pscustomobject]@{ market_session = 'CLOSED' } } }; "

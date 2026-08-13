@@ -118,7 +118,6 @@ def test_dashboard_exposes_only_runtime_update_failures(tmp_path) -> None:
     failed = _dashboard_module()._dashboard_payload(database)
     assert failed["system"]["runtime_update_failure"] == {
         "status": "ROLLED_BACK",
-        "message": "新版运行验证失败，已自动恢复上一版。",
         "failed_at": now.isoformat(),
     }
 

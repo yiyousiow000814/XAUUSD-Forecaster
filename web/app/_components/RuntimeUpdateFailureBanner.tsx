@@ -2,7 +2,6 @@ import { runtimeUpdateFailurePresentation } from "../_lib/runtime-update-failure
 
 export type RuntimeUpdateFailure = {
   status: string;
-  message: string;
   failed_at: string;
 };
 
@@ -11,6 +10,5 @@ export default function RuntimeUpdateFailureBanner({ failure }: { failure?: Runt
   if (!presentation) return null;
   return <div className="error-banner" role="alert">
     <b>{presentation.label}</b>
-    <small>{presentation.message}</small>
   </div>;
 }

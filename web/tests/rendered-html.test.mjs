@@ -17,7 +17,6 @@ test("runtime update success stays silent while failures have stable presentatio
     failed_at: "2026-08-13T03:00:00Z",
   }), {
     label: "新版运行验证失败，已自动恢复上一版。",
-    message: "observation failed",
     failedAt: "2026-08-13T03:00:00Z",
   });
   assert.equal(runtimeUpdateFailurePresentation({

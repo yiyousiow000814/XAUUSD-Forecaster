@@ -9,7 +9,6 @@ export function runtimeUpdateFailurePresentation(failure) {
   return {
     label: FAILURE_LABELS[failure.status]
       ?? "新版预检失败，当前版本继续运行。",
-    message: failure.message,
     failedAt: failure.failed_at,
   };
 }

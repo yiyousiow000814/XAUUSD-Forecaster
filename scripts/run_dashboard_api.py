@@ -2003,7 +2003,6 @@ def _dashboard_payload(database: Path) -> dict:
             if runtime_update.get("user_visible_failure") is True:
                 runtime_update_failure = {
                     "status": runtime_update.get("update_status"),
-                    "message": runtime_update.get("failure_message"),
                     "failed_at": runtime_update.get("failed_at"),
                 }
         except (OSError, ValueError):
