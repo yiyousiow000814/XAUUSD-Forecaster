@@ -277,6 +277,41 @@ def test_sync_uses_v15_semantic_priority_not_headline_keywords(tmp_path) -> None
     ledger.close()
 
 
+def test_impact_discovery_advances_old_backfill_and_new_arrivals(
+    tmp_path, monkeypatch,
+) -> None:
+    import xauusd_forecaster.annotation as annotation
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    calls = []
+
+    def impact_rows(_connection, *, limit, selection_order, **_kwargs):
+        calls.append((selection_order, limit))
+        item = "oldest" if selection_order == "oldest" else "newest"
+        return [{
+            "source": "scheduler-fairness",
+            "source_item_id": item,
+            "revision_number": 1,
+            "annotation_id": f"annotation-{item}",
+            "annotation": {"review_priority": "NORMAL"},
+        }]
+
+    monkeypatch.setattr(annotation, "pending_annotation_records", lambda *_a, **_k: [])
+    monkeypatch.setattr(annotation, "pending_title_translation_records", lambda *_a, **_k: [])
+    monkeypatch.setattr(annotation, "pending_impact_records", impact_rows)
+
+    discovered = sync_pending_jobs(ledger.connection, now=NOW, limit=4)
+    queued = {
+        row[0] for row in ledger.connection.execute(
+            "SELECT source_item_id FROM news_ai_jobs_v1 WHERE task_type='ACTIVE_IMPACT'"
+        ).fetchall()
+    }
+
+    assert calls == [("oldest", 2), ("newest", 2)]
+    assert discovered["ACTIVE_IMPACT"] == 2
+    assert queued == {"oldest", "newest"}
+
+
 def test_preemptible_quota_deferral_flows_to_routine_account(
     tmp_path, monkeypatch,
 ) -> None:

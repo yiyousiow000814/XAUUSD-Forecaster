@@ -31,6 +31,8 @@ UPDATE_TYPES = frozenset({
 IDENTITY_RELATIONS = frozenset({
     "SAME_EVENT", "SAME_EPISODE", "NEW_EPISODE", "UNRESOLVED",
 })
+IDENTITY_CANDIDATE_SCAN_LIMIT = 500
+IDENTITY_CANDIDATE_UNIVERSE_LIMIT = 10_000
 
 IMPACT_RESPONSE_SCHEMA = {
     "type": "object",
@@ -154,11 +156,24 @@ def pending_impact_records(
     limit: int = 500,
     annotation_prompt_version: str = CURRENT_NEWS_PROMPT_VERSION,
     impact_prompt_version: str = IMPACT_PROMPT_VERSION,
+    selection_order: str = "oldest",
 ) -> list[dict]:
     """Return current annotations that still need the frozen Gemma assessment."""
+    if selection_order not in {"oldest", "newest"}:
+        raise ValueError("impact selection order is not controlled")
     now = observed_at or datetime.now(UTC)
+    official_priority = """CASE WHEN n.source IN (
+                   'federal_reserve_monetary','bls_employment_situation',
+                   'bls_consumer_price_index','bls_job_openings',
+                   'us_treasury_press_releases') THEN 0 ELSE 1 END"""
+    event_time = "COALESCE(n.source_published_time,n.collector_first_seen_time)"
+    pending_order = (
+        f"{official_priority}, {event_time} ASC"
+        if selection_order == "oldest"
+        else f"{event_time} DESC, {official_priority}"
+    )
     rows = connection.execute(
-        """SELECT n.*,a.annotation_id,a.annotation_json,a.parsed_at
+        f"""SELECT n.*,a.annotation_id,a.annotation_json,a.parsed_at
         FROM news_revisions n JOIN news_annotations a
           ON a.source=n.source AND a.source_item_id=n.source_item_id
          AND a.revision_number=n.revision_number
@@ -188,11 +203,7 @@ def pending_impact_records(
                 (f.is_terminal=1 AND f.attempt_number>=5
                  AND NOT (f.error_type='HTTPError' AND f.error LIKE '%429%'))
                 OR (f.next_retry_at IS NOT NULL AND f.next_retry_at>?)))
-        ORDER BY CASE WHEN n.source IN (
-                   'federal_reserve_monetary','bls_employment_situation',
-                   'bls_consumer_price_index','bls_job_openings',
-                   'us_treasury_press_releases') THEN 0 ELSE 1 END,
-                 COALESCE(n.source_published_time,n.collector_first_seen_time) ASC
+        ORDER BY {pending_order}
         LIMIT ?""",
         (
             annotation_prompt_version,
@@ -215,109 +226,130 @@ def pending_impact_records(
         )
         if allowed:
             row["annotation"] = json.loads(row.get("annotation_json") or "{}")
-            material_event_key = str(
-                row["annotation"].get("material_event_key") or ""
-            ).strip()
             row["prior_event_context"] = []
-            primary_category = str(
-                row["annotation"].get("primary_category") or ""
-            ).strip()
-            if material_event_key or primary_category:
-                prior_rows = connection.execute(
-                    """SELECT p.source,p.source_item_id,p.headline,
-                              p.collector_first_seen_time,
-                              pa.annotation_id AS candidate_id,pa.annotation_json,
-                              json_extract(pa.annotation_json,'$.summary_zh') AS summary_zh,
-                              pi.impact_class,pi.update_type,
-                              er.canonical_episode_id,er.canonical_event_id
-                       FROM news_revisions p JOIN news_annotations pa
-                         ON pa.source=p.source
-                        AND pa.source_item_id=p.source_item_id
-                        AND pa.revision_number=p.revision_number
-                        AND pa.raw_content_hash=p.content_hash
-                       LEFT JOIN news_impact_assessments_v1 pi
-                         ON pi.assessment_id=(
-                           SELECT selected_pi.assessment_id
-                           FROM news_impact_assessments_v1 selected_pi
-                           WHERE selected_pi.annotation_id=pa.annotation_id
-                             AND selected_pi.llm_model_version=?
-                             AND selected_pi.prompt_version IN (?,?)
-                           ORDER BY CASE selected_pi.prompt_version
-                             WHEN ? THEN 0 ELSE 1 END,
-                             selected_pi.assessed_at DESC LIMIT 1)
-                       LEFT JOIN news_event_identity_resolutions_v1 er
-                         ON er.annotation_id=pa.annotation_id
-                        AND er.llm_model_version=? AND er.prompt_version=?
-                       WHERE pa.prompt_version=?
-                         AND (
-                           json_extract(pa.annotation_json,'$.material_event_key')=?
-                           OR json_extract(pa.annotation_json,'$.primary_category')=?
-                         )
-                         AND p.collector_first_seen_time<=?
-                         AND NOT (p.source=? AND p.source_item_id=?
-                                  AND p.revision_number=?)
-                       ORDER BY p.collector_first_seen_time DESC LIMIT 500""",
-                    (
-                        IMPACT_MODEL, impact_prompt_version,
-                        HANDOVER_IMPACT_PROMPT_VERSION, impact_prompt_version,
-                        IMPACT_MODEL, impact_prompt_version,
-                        annotation_prompt_version,
-                        material_event_key, primary_category,
-                        row["collector_first_seen_time"], row["source"],
-                        row["source_item_id"], row["revision_number"],
-                    ),
-                ).fetchall()
-                candidates = []
-                for prior in prior_rows:
-                    candidate = dict(prior)
-                    prior_annotation = json.loads(
-                        candidate.pop("annotation_json") or "{}"
-                    )
-                    similarity = _prior_similarity(row["annotation"], prior_annotation)
-                    if similarity < 0.25:
-                        continue
-                    candidate["similarity"] = round(similarity, 3)
-                    candidate["material_event_key"] = prior_annotation.get(
-                        "material_event_key"
-                    )
-                    candidate["canonical_actor_id"] = prior_annotation.get(
-                        "canonical_actor_id"
-                    )
-                    candidate["canonical_object_id"] = prior_annotation.get(
-                        "canonical_object_id"
-                    )
-                    candidate["identity_anchor_eligible"] = bool(
-                        str(prior_annotation.get("record_kind") or "")
-                        in ACTIONABLE_RECORD_KINDS
-                        and str(prior_annotation.get("evidence_role") or "")
-                        in {"CORE_CLAIM", "EVIDENCE_DOCUMENT"}
-                        and float(prior_annotation.get("materiality") or 0.0) >= 0.5
-                        and candidate.get("update_type")
-                        not in {"COMMENTARY", "HISTORICAL_CONTEXT"}
-                        and candidate.get("impact_class") != "BACKGROUND"
-                    )
-                    candidates.append(candidate)
-                current_is_core_fact = bool(
-                    str(row["annotation"].get("record_kind") or "")
-                    in ACTIONABLE_RECORD_KINDS
-                    and str(row["annotation"].get("evidence_role") or "")
-                    in {"CORE_CLAIM", "EVIDENCE_DOCUMENT"}
-                )
-                eligible_candidates = (
-                    [candidate for candidate in candidates
-                     if candidate["identity_anchor_eligible"]]
-                    if current_is_core_fact else candidates
-                )
-                row["prior_event_context"] = sorted(
-                    eligible_candidates,
-                    key=lambda candidate: (
-                        bool(candidate["identity_anchor_eligible"]),
-                        float(candidate["similarity"]),
-                        str(candidate["collector_first_seen_time"]),
-                    ),
-                    reverse=True,
-                )[:5]
             selected.append(row)
         if len(selected) >= limit:
             break
+
+    if not selected:
+        return []
+
+    # Load one bounded point-in-time candidate universe for the whole batch.
+    # Per-row candidate queries make backlog recovery O(pending rows) in SQL
+    # round trips and can block new arrivals for an entire scheduler cycle.
+    candidate_universe_limit = min(
+        IDENTITY_CANDIDATE_UNIVERSE_LIMIT,
+        max(IDENTITY_CANDIDATE_SCAN_LIMIT, len(selected) * 4 + 500),
+    )
+    max_first_seen = max(
+        str(row["collector_first_seen_time"]) for row in selected
+    )
+    prior_rows = connection.execute(
+        """SELECT p.source,p.source_item_id,p.revision_number,p.headline,
+                  p.collector_first_seen_time,
+                  pa.annotation_id AS candidate_id,pa.annotation_json,
+                  json_extract(pa.annotation_json,'$.summary_zh') AS summary_zh,
+                  pi.impact_class,pi.update_type,
+                  er.canonical_episode_id,er.canonical_event_id
+           FROM news_revisions p JOIN news_annotations pa
+             ON pa.source=p.source
+            AND pa.source_item_id=p.source_item_id
+            AND pa.revision_number=p.revision_number
+            AND pa.raw_content_hash=p.content_hash
+           LEFT JOIN news_impact_assessments_v1 pi
+             ON pi.assessment_id=(
+               SELECT selected_pi.assessment_id
+               FROM news_impact_assessments_v1 selected_pi
+               WHERE selected_pi.annotation_id=pa.annotation_id
+                 AND selected_pi.llm_model_version=?
+                 AND selected_pi.prompt_version IN (?,?)
+               ORDER BY CASE selected_pi.prompt_version
+                 WHEN ? THEN 0 ELSE 1 END,
+                 selected_pi.assessed_at DESC LIMIT 1)
+           LEFT JOIN news_event_identity_resolutions_v1 er
+             ON er.annotation_id=pa.annotation_id
+            AND er.llm_model_version=? AND er.prompt_version=?
+           WHERE pa.prompt_version=?
+             AND p.collector_first_seen_time<=?
+           ORDER BY p.collector_first_seen_time DESC LIMIT ?""",
+        (
+            IMPACT_MODEL, impact_prompt_version,
+            HANDOVER_IMPACT_PROMPT_VERSION, impact_prompt_version,
+            IMPACT_MODEL, impact_prompt_version,
+            annotation_prompt_version, max_first_seen, candidate_universe_limit,
+        ),
+    ).fetchall()
+    candidate_universe = []
+    for prior in prior_rows:
+        candidate = dict(prior)
+        candidate["annotation"] = json.loads(
+            candidate.pop("annotation_json") or "{}"
+        )
+        candidate_universe.append(candidate)
+
+    for row in selected:
+        scanned = 0
+        candidates = []
+        for prior in candidate_universe:
+            if (
+                str(prior["collector_first_seen_time"])
+                > str(row["collector_first_seen_time"])
+            ):
+                continue
+            if (
+                prior["source"] == row["source"]
+                and prior["source_item_id"] == row["source_item_id"]
+                and prior["revision_number"] == row["revision_number"]
+            ):
+                continue
+            scanned += 1
+            if scanned > IDENTITY_CANDIDATE_SCAN_LIMIT:
+                break
+            candidate = {
+                key: value for key, value in prior.items()
+                if key != "annotation"
+            }
+            prior_annotation = prior["annotation"]
+            similarity = _prior_similarity(row["annotation"], prior_annotation)
+            if similarity < 0.25:
+                continue
+            candidate["similarity"] = round(similarity, 3)
+            candidate["material_event_key"] = prior_annotation.get(
+                "material_event_key"
+            )
+            candidate["canonical_actor_id"] = prior_annotation.get(
+                "canonical_actor_id"
+            )
+            candidate["canonical_object_id"] = prior_annotation.get(
+                "canonical_object_id"
+            )
+            candidate["identity_anchor_eligible"] = bool(
+                str(prior_annotation.get("record_kind") or "")
+                in ACTIONABLE_RECORD_KINDS
+                and str(prior_annotation.get("evidence_role") or "")
+                in {"CORE_CLAIM", "EVIDENCE_DOCUMENT"}
+                and candidate.get("update_type")
+                not in {"COMMENTARY", "HISTORICAL_CONTEXT"}
+            )
+            candidates.append(candidate)
+        current_is_core_fact = bool(
+            str(row["annotation"].get("record_kind") or "")
+            in ACTIONABLE_RECORD_KINDS
+            and str(row["annotation"].get("evidence_role") or "")
+            in {"CORE_CLAIM", "EVIDENCE_DOCUMENT"}
+        )
+        eligible_candidates = (
+            [candidate for candidate in candidates
+             if candidate["identity_anchor_eligible"]]
+            if current_is_core_fact else candidates
+        )
+        row["prior_event_context"] = sorted(
+            eligible_candidates,
+            key=lambda candidate: (
+                bool(candidate["identity_anchor_eligible"]),
+                float(candidate["similarity"]),
+                str(candidate["collector_first_seen_time"]),
+            ),
+            reverse=True,
+        )[:5]
     return selected

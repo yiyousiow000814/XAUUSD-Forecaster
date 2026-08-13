@@ -2565,7 +2565,7 @@ def test_gemma_impact_preserves_transient_http_error(tmp_path, monkeypatch) -> N
     assert caught.value.code == 429
 
 
-def test_impact_context_finds_semantically_similar_prior_event(tmp_path) -> None:
+def test_identity_recall_crosses_categories_and_ignores_xau_impact(tmp_path) -> None:
     now = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
     common = {
@@ -2610,6 +2610,11 @@ def test_impact_context_finds_semantically_similar_prior_event(tmp_path) -> None
                 **common, "material_event_key": material_key,
                 "episode_key": material_key,
                 "summary_zh": "特朗普再次寻求解除美联储理事丽莎库克的职务。",
+                **({
+                    "primary_category": "regulation_other",
+                    "materiality": 0.1,
+                    "xauusd_relevance": "IRRELEVANT",
+                } if index == 0 else {}),
             },
             "llm_model_version": annotation_module.DEFAULT_GEMINI_MODEL,
             "prompt_version": annotation_module.PROMPT_VERSION,
@@ -2624,7 +2629,7 @@ def test_impact_context_finds_semantically_similar_prior_event(tmp_path) -> None
                 "prompt_version": annotation_module.IMPACT_PROMPT_VERSION,
                 "parse_started_at": seen + timedelta(seconds=1),
                 "assessed_at": seen + timedelta(seconds=2),
-                "impact_class": "ONGOING_EVENT", "event_state": "ACTIVE",
+                "impact_class": "BACKGROUND", "event_state": "ACTIVE",
                 "update_type": "NEW_EVENT", "confidence": 0.9,
                 "reason_zh": "此前已经收到同一事件。",
                 "resolution_id": "prior-resolution",
@@ -2665,9 +2670,14 @@ def test_impact_context_finds_semantically_similar_prior_event(tmp_path) -> None
             "parse_started_at": seen, "parsed_at": seen + timedelta(seconds=1),
         })
 
-    pending = pending_impact_records(
-        ledger.connection, observed_at=now + timedelta(hours=2), limit=100,
-    )
+    statements = []
+    ledger.connection.set_trace_callback(statements.append)
+    try:
+        pending = pending_impact_records(
+            ledger.connection, observed_at=now + timedelta(hours=2), limit=100,
+        )
+    finally:
+        ledger.connection.set_trace_callback(None)
 
     current = next(row for row in pending if row["source_item_id"] == "cook-1")
     assert current["prior_event_context"]
@@ -2675,6 +2685,60 @@ def test_impact_context_finds_semantically_similar_prior_event(tmp_path) -> None
     assert current["prior_event_context"][0]["candidate_id"] == "annotation-0"
     assert current["prior_event_context"][0]["canonical_event_id"] == "event-cook"
     assert current["prior_event_context"][0]["identity_anchor_eligible"] is True
+    assert current["prior_event_context"][0]["impact_class"] == "BACKGROUND"
+    candidate_queries = [
+        statement for statement in statements
+        if "FROM NEWS_REVISIONS P JOIN NEWS_ANNOTATIONS PA" in statement.upper()
+    ]
+    assert len(candidate_queries) == 1
+
+
+def test_impact_selection_has_distinct_old_backfill_and_new_arrival_lanes(
+    tmp_path,
+) -> None:
+    now = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    base = {
+        "headline_zh": "机构发布经济数据",
+        "summary_zh": "机构发布了一项具有完整正文的经济数据，供系统进行独立事件判断。",
+        "event_type": "economic_release", "entities": ["agency"],
+        "hawkishness": 0.0, "inflation_impulse": 0.0,
+        "growth_impulse": 0.0, "geopolitical_risk": 0.0,
+        "usd_impulse": 0.0, "novelty": 0.5, "confidence": 0.8,
+    }
+    for source, item, seen in (
+        ("bls_employment_situation", "old-official", now),
+        ("semantic-scheduler-test", "new-ordinary", now + timedelta(hours=2)),
+    ):
+        body = f"Complete economic release for {item}. " * 20
+        digest = hashlib.sha256(body.encode()).hexdigest()
+        ledger.append_news_revision({
+            "source": source, "source_item_id": item,
+            "source_published_time": seen, "collector_first_seen_time": seen,
+            "fetched_time": seen, "headline": item, "body": body,
+            "content_hash": digest, "cluster_id": item,
+        })
+        ledger.append_annotation({
+            "annotation_id": f"annotation-{item}", "source": source,
+            "source_item_id": item, "revision_number": 1,
+            "raw_content_hash": digest,
+            "annotation": _v15_annotation(base, "Complete economic release"),
+            "llm_model_version": annotation_module.DEFAULT_GEMINI_MODEL,
+            "prompt_version": annotation_module.PROMPT_VERSION,
+            "parse_started_at": seen, "parsed_at": seen + timedelta(seconds=1),
+        })
+
+    old_lane = pending_impact_records(
+        ledger.connection, observed_at=now + timedelta(hours=3), limit=1,
+        selection_order="oldest",
+    )
+    new_lane = pending_impact_records(
+        ledger.connection, observed_at=now + timedelta(hours=3), limit=1,
+        selection_order="newest",
+    )
+
+    assert old_lane[0]["source_item_id"] == "old-official"
+    assert new_lane[0]["source_item_id"] == "new-ordinary"
 
 
 def test_json_object_decoder_accepts_fence_and_trailing_text() -> None:

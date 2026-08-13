@@ -555,11 +555,25 @@ def sync_pending_jobs(
     active_annotations = pending_annotation_records(
         connection, observed_at=instant, limit=limit, prompt_version=PROMPT_VERSION,
     )
-    active_impacts = pending_impact_records(
-        connection, observed_at=instant, limit=limit,
+    oldest_impact_limit = (limit + 1) // 2
+    newest_impact_limit = limit // 2
+    oldest_impacts = pending_impact_records(
+        connection, observed_at=instant, limit=oldest_impact_limit,
         annotation_prompt_version=PROMPT_VERSION,
         impact_prompt_version=IMPACT_PROMPT_VERSION,
+        selection_order="oldest",
     )
+    newest_impacts = pending_impact_records(
+        connection, observed_at=instant, limit=newest_impact_limit,
+        annotation_prompt_version=PROMPT_VERSION,
+        impact_prompt_version=IMPACT_PROMPT_VERSION,
+        selection_order="newest",
+    ) if newest_impact_limit else []
+    active_impacts_by_annotation = {
+        str(row["annotation_id"]): row
+        for row in (*oldest_impacts, *newest_impacts)
+    }
+    active_impacts = list(active_impacts_by_annotation.values())
     titles = pending_title_translation_records(
         connection, observed_at=instant, limit=limit,
     )
