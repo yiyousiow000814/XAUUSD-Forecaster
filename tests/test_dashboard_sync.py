@@ -332,7 +332,7 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
             ],
             "identity_curves": [body],
             "full_minus_market": [body],
-            "broad_full_minus_official_full": [body],
+            "broad_full_minus_core_full": [body],
         },
         "recent_news": [{
             "source": "example", "source_item_id": str(index),
@@ -394,7 +394,7 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
     assert learning["learning_history_resource"] == "/api/learning-history"
     assert learning["learning_curves"]["identity_curves"] == [body]
     assert learning["learning_curves"]["full_minus_market"] == [body]
-    assert learning["learning_curves"]["broad_full_minus_official_full"] == [body]
+    assert learning["learning_curves"]["broad_full_minus_core_full"] == [body]
     assert "learning_curves" not in mirrored
     assert "models" not in mirrored["training"]
     assert len(index_rows) == 100

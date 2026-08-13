@@ -23,7 +23,10 @@ from xauusd_forecaster.maintenance import (  # noqa: E402
     archive_completed_quote_days,
     backup_forward_ledger,
 )
-from xauusd_forecaster.training_v2 import train_due_v2  # noqa: E402
+from xauusd_forecaster.training_v2 import (  # noqa: E402
+    require_current_contract_generation,
+    train_due_v2,
+)
 from xauusd_forecaster.news_contract_migration import (  # noqa: E402
     append_missing_current_news_snapshots,
 )
@@ -42,7 +45,12 @@ def reconcile_news_contract(ledger, cutoff: datetime, artifact_root: Path) -> di
     """Migrate PIT news snapshots and build any missing current generation."""
     migration = append_missing_current_news_snapshots(ledger, cutoff)
     training = train_due_v2(ledger, cutoff, artifact_root)
-    return {"migration": migration, "training": training}
+    generation_id = require_current_contract_generation(ledger.connection)
+    return {
+        "migration": migration,
+        "training": training,
+        "active_generation_id": generation_id,
+    }
 
 
 DEFAULT_LOCAL_ROOT = MODULE_ROOT / ".local" / "forward"
