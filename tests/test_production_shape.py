@@ -2,17 +2,29 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.ai_provider_registry import AI_QUOTA_SURFACES
 from xauusd_forecaster.inference_v2 import MODEL_IDENTITIES
 from xauusd_forecaster.news_scheduler import reserve_account_request
-from xauusd_forecaster.production_shape import production_shape_violations
+from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY
+from xauusd_forecaster.news import RUNTIME_NEWS_POLL_SOURCES
+from xauusd_forecaster.production_shape import (
+    production_contract_snapshot,
+    production_shape_violations,
+)
 
 
-def _status(now: datetime) -> dict:
+NOW = datetime(2026, 8, 13, 3, 0, tzinfo=UTC)
+VALIDATION_TIME = NOW + timedelta(minutes=10)
+
+
+def _status() -> dict:
     return {
         "system": {
             "market_session": "OPEN",
-            "market_session_observed_at": now.isoformat(),
+            "market_session_observed_at": NOW.isoformat(),
         },
         "gemini_quota": {
             "accounting_source": "SCHEDULER_DB", "total_sent": 1,
@@ -24,18 +36,21 @@ def _status(now: datetime) -> dict:
             "accounting_source": "SCHEDULER_DB", "total_sent": 2,
         },
         "news_source_health": [{
-            "source": "gdelt_gold_geopolitics", "health": "HEALTHY",
-            "latest_status": "OK", "recovery_mode": None,
-            "next_retry_time": None,
-        }],
+            "source": source, "health": "HEALTHY", "latest_status": "OK",
+            "recovery_mode": None, "next_retry_time": None,
+        } for source in (spec.source for spec in NEWS_SOURCE_REGISTRY)],
     }
 
 
-def _seed_active_generation(ledger: ForwardLedger, now: datetime) -> str:
+def _seed_active_generation(
+    ledger: ForwardLedger,
+    *,
+    omitted_identity: str | None = None,
+) -> str:
     generation_id = "generation-live"
     ledger.connection.execute(
         "INSERT INTO news_model_generations_v1 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (generation_id, "SHADOW", now.isoformat(), now.isoformat(),
+        (generation_id, "SHADOW", NOW.isoformat(), NOW.isoformat(),
          "policy", "features", "eligibility", "events", "market", "official",
          "broad", "weights", 5, "READY"),
     )
@@ -43,10 +58,12 @@ def _seed_active_generation(ledger: ForwardLedger, now: datetime) -> str:
         version = f"model-{identity.lower()}"
         ledger.connection.execute(
             "INSERT INTO model_updates_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (version, identity, "SHADOW", now.isoformat(), now.isoformat(),
+            (version, identity, "SHADOW", NOW.isoformat(), NOW.isoformat(),
              0, 0, 0, 0, 0, 0, f"hash-{identity}", "features", "eligibility",
              "artifact", f"artifact-{identity}", "CHALLENGER"),
         )
+        if identity == omitted_identity:
+            continue
         table = (
             "news_model_generation_aux_members_v1"
             if identity == "NEWS_ONLY" else "news_model_generation_members_v1"
@@ -58,55 +75,19 @@ def _seed_active_generation(ledger: ForwardLedger, now: datetime) -> str:
     ledger.connection.execute(
         "INSERT INTO news_model_generation_activations_v1 VALUES (?,?,?,?,?)",
         ("activation-live", generation_id, None,
-         (now + timedelta(seconds=1)).isoformat(), "TEST"),
+         (NOW + timedelta(seconds=1)).isoformat(), "TEST"),
     )
     ledger.connection.commit()
     return generation_id
 
 
-def test_production_shape_detects_cross_component_regressions(tmp_path) -> None:
-    now = datetime(2026, 8, 13, 3, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
-    _seed_active_generation(ledger, now)
-    reserve_account_request(
-        ledger.connection, account_id="account", model_family="gemini-3.5-flash-lite",
-        daily_limit=500, requests_per_minute=12, now=now,
-    )
-    for family in ("gemma-impact", "gemma-title"):
-        reserve_account_request(
-            ledger.connection, account_id="account", model_family=family,
-            daily_limit=15_000, requests_per_minute=12, now=now,
-        )
-    ledger.append_source_poll({
-        "poll_id": "gdelt-ok", "source": "gdelt_gold_geopolitics",
-        "fetched_time": now, "status": "OK",
-    })
-    broken = _status(now)
-    broken["gemini_quota"]["total_sent"] = 0
-    broken["news_source_health"][0].update({
-        "health": "DEGRADED", "latest_status": "RATE_LIMITED",
-        "recovery_mode": "FALLBACK_ACTIVE",
-    })
-
-    violations = production_shape_violations(
-        ledger.connection, broken,
-        sync_status={"degraded_resources": [{
-            "resource": "market_history", "error": "HTTP Error 413: Payload Too Large",
-        }]},
-        now=now + timedelta(minutes=5),
-    )
-
-    assert any("no subsequent live decision" in item for item in violations)
-    assert any("gemini_quota" in item for item in violations)
-    assert any("GDELT" in item for item in violations)
-    assert any("payload limit" in item for item in violations)
-
-
-def test_production_shape_accepts_complete_live_shape(tmp_path) -> None:
-    now = datetime(2026, 8, 13, 3, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
-    _seed_active_generation(ledger, now)
-    decision_time = now + timedelta(minutes=5)
+def _append_complete_decision(
+    ledger: ForwardLedger,
+    *,
+    omitted_identity: str | None = None,
+    mismatched_identity: str | None = None,
+) -> str:
+    decision_time = NOW + timedelta(minutes=5)
     ledger.append_snapshot({
         "snapshot_id": "snapshot-live", "decision_time": decision_time,
         "collected_at": decision_time, "data_role": "FORWARD", "source": "TEST",
@@ -120,32 +101,320 @@ def test_production_shape_accepts_complete_live_shape(tmp_path) -> None:
         "snapshot_id": "snapshot-live", "data_health": "HEALTHY",
         "reason_codes": [], "predictions": [], "created_at": decision_time,
     })
+    if mismatched_identity:
+        ledger.connection.execute(
+            "INSERT INTO model_updates_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("old-model-version", mismatched_identity, "SHADOW", NOW.isoformat(),
+             NOW.isoformat(), 0, 0, 0, 0, 0, 0, "old-hash", "features",
+             "eligibility", "artifact", "old-artifact", "CHALLENGER"),
+        )
     for identity in sorted(MODEL_IDENTITIES):
+        if identity == omitted_identity:
+            continue
         ledger.connection.execute(
             """INSERT INTO predictions_v2 VALUES
                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            ("decision-live", f"model-{identity.lower()}", identity,
+            ("decision-live", (
+                "old-model-version" if identity == mismatched_identity
+                else f"model-{identity.lower()}"
+            ), identity,
              decision_time.isoformat(), decision_time.isoformat(), "LIVE_OOS",
              "snapshot-hash", 0.0, 0.0, 0.0, 0.0, None, None,
-                 "UTC_DAY_BLOCK_OOS_ABS_RESIDUAL_Q95", "calibration", 0, 0, 0,
-                 None, "UNCALIBRATED", "WAIT", "WAIT", "PROVISIONAL"),
-            )
+             "UTC_DAY_BLOCK_OOS_ABS_RESIDUAL_Q95", "calibration", 0, 0, 0,
+             None, "UNCALIBRATED", "WAIT", "WAIT", "PROVISIONAL"),
+        )
     ledger.connection.commit()
+    return "decision-live"
+
+
+def _seed_scheduler_usage(ledger: ForwardLedger) -> None:
     reserve_account_request(
-        ledger.connection, account_id="account", model_family="gemini-3.5-flash-lite",
-        daily_limit=500, requests_per_minute=12, now=now,
+        ledger.connection, account_id="account",
+        model_family="gemini-3.5-flash-lite", daily_limit=500,
+        requests_per_minute=12, now=NOW,
     )
     for family in ("gemma-impact", "gemma-title"):
         reserve_account_request(
             ledger.connection, account_id="account", model_family=family,
-            daily_limit=15_000, requests_per_minute=12, now=now,
+            daily_limit=15_000, requests_per_minute=12, now=NOW,
         )
-    ledger.append_source_poll({
-        "poll_id": "gdelt-ok", "source": "gdelt_gold_geopolitics",
-        "fetched_time": now, "status": "OK",
+
+
+@pytest.fixture
+def complete_shape(tmp_path) -> tuple[ForwardLedger, dict]:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    _seed_active_generation(ledger)
+    _append_complete_decision(ledger)
+    _seed_scheduler_usage(ledger)
+    for source in (spec.source for spec in NEWS_SOURCE_REGISTRY):
+        ledger.append_source_poll({
+            "poll_id": f"{source}-ok", "source": source,
+            "fetched_time": NOW, "status": "OK",
+        })
+    return ledger, _status()
+
+
+def _violations(
+    ledger: ForwardLedger,
+    status: dict,
+    *,
+    sync_status: dict | None = None,
+) -> list[str]:
+    status["production_contract"] = production_contract_snapshot(
+        ledger.connection, now=VALIDATION_TIME,
+    )
+    status["dashboard_sync"] = (
+        {"status": "OK", "degraded_resources": []}
+        if sync_status is None else sync_status
+    )
+    return production_shape_violations(status)
+
+
+def test_production_shape_accepts_complete_live_shape(complete_shape) -> None:
+    ledger, status = complete_shape
+    assert _violations(ledger, status) == []
+
+
+def test_news_health_registry_is_the_runtime_collector_family() -> None:
+    assert {spec.source for spec in NEWS_SOURCE_REGISTRY} == set(
+        RUNTIME_NEWS_POLL_SOURCES
+    )
+
+
+def test_missing_active_generation_fails_closed(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    _seed_scheduler_usage(ledger)
+    for source in (spec.source for spec in NEWS_SOURCE_REGISTRY):
+        ledger.append_source_poll({
+            "poll_id": f"{source}-ok", "source": source,
+            "fetched_time": NOW, "status": "OK",
+        })
+
+    assert _violations(ledger, _status()) == [
+        "production has no active model generation",
+    ]
+
+
+def test_missing_scheduler_quota_ledger_fails_closed(complete_shape) -> None:
+    ledger, status = complete_shape
+    contract = production_contract_snapshot(
+        ledger.connection, now=VALIDATION_TIME,
+    )
+    contract["scheduler_usage_available"] = False
+    contract["scheduler_usage"] = {}
+    status["production_contract"] = contract
+    status["dashboard_sync"] = {"status": "OK", "degraded_resources": []}
+
+    violations = production_shape_violations(status)
+
+    assert violations[0] == "scheduler quota ledger is unavailable"
+    assert {
+        violation.rsplit(": ", 1)[-1]
+        for violation in violations[1:]
+    } == {surface.payload_key for surface in AI_QUOTA_SURFACES}
+
+
+def test_missing_source_health_member_fails_closed(complete_shape) -> None:
+    ledger, status = complete_shape
+    missing = NEWS_SOURCE_REGISTRY[-1].source
+    status["news_source_health"] = [
+        row for row in status["news_source_health"]
+        if row["source"] != missing
+    ]
+
+    assert _violations(ledger, status) == [
+        f"source health family mismatch: missing=['{missing}'], unexpected=[]",
+    ]
+
+
+def test_active_generation_requires_a_subsequent_live_decision(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    _seed_active_generation(ledger)
+    _seed_scheduler_usage(ledger)
+
+    assert _violations(ledger, _status()) == [
+        "active generation has no subsequent live decision",
+    ]
+
+
+@pytest.mark.parametrize(
+    "boundary,expected",
+    [
+        pytest.param(
+            "generation-member",
+            "active generation is incomplete: FULL", id="generation-member",
+        ),
+        pytest.param(
+            "live-prediction",
+            "latest decision is missing models: FULL", id="live-prediction",
+        ),
+        pytest.param(
+            "model-version",
+            "latest decision does not use active generation versions: FULL",
+            id="model-version",
+        ),
+    ],
+)
+def test_complete_model_family_is_required_at_generation_and_prediction_boundaries(
+    tmp_path,
+    boundary,
+    expected,
+) -> None:
+    ledger = ForwardLedger(tmp_path / f"{boundary}.sqlite3", now=NOW)
+    _seed_active_generation(
+        ledger,
+        omitted_identity="FULL" if boundary == "generation-member" else None,
+    )
+    _append_complete_decision(
+        ledger,
+        omitted_identity="FULL" if boundary == "live-prediction" else None,
+        mismatched_identity="FULL" if boundary == "model-version" else None,
+    )
+    _seed_scheduler_usage(ledger)
+
+    assert _violations(ledger, _status()) == [expected]
+
+
+@pytest.mark.parametrize(
+    "payload_key",
+    [surface.payload_key for surface in AI_QUOTA_SURFACES],
+)
+def test_every_ai_quota_surface_must_match_scheduler_accounting(
+    complete_shape,
+    payload_key,
+) -> None:
+    ledger, status = complete_shape
+    status[payload_key]["total_sent"] += 1
+
+    violations = _violations(ledger, status)
+
+    assert len(violations) == 1
+    assert violations[0].startswith(
+        f"{payload_key} does not match scheduler usage:"
+    )
+
+
+def test_scheduler_snapshot_counts_only_currently_configured_accounts(
+    complete_shape,
+) -> None:
+    ledger, _ = complete_shape
+    reserve_account_request(
+        ledger.connection, account_id="retired-account",
+        model_family="gemini-3.5-flash-lite", daily_limit=500,
+        requests_per_minute=12, now=NOW,
+    )
+
+    current = production_contract_snapshot(
+        ledger.connection, now=VALIDATION_TIME,
+        account_ids=frozenset({"account"}),
+    )
+    all_accounts = production_contract_snapshot(
+        ledger.connection, now=VALIDATION_TIME,
+    )
+
+    assert current["scheduler_usage"]["gemini_quota"] == 1
+    assert all_accounts["scheduler_usage"]["gemini_quota"] == 2
+
+
+@pytest.mark.parametrize("source", [spec.source for spec in NEWS_SOURCE_REGISTRY])
+def test_every_successful_news_source_clears_old_degraded_recovery_state(
+    complete_shape,
+    source,
+) -> None:
+    ledger, status = complete_shape
+    row = next(
+        item for item in status["news_source_health"]
+        if item["source"] == source
+    )
+    row.update({
+        "health": "DEGRADED", "latest_status": "RATE_LIMITED",
+        "recovery_mode": "FALLBACK_ACTIVE", "next_retry_time": NOW.isoformat(),
     })
 
-    assert production_shape_violations(
-        ledger.connection, _status(now), sync_status={"degraded_resources": []},
-        now=now + timedelta(minutes=10),
-    ) == []
+    assert _violations(ledger, status) == [
+        f"successful source poll is still reported as degraded: {source}",
+    ]
+
+
+def test_broker_confirmed_close_forbids_later_decisions(complete_shape) -> None:
+    ledger, status = complete_shape
+    status["system"].update({
+        "market_session": "CLOSED",
+        "market_session_observed_at": NOW.isoformat(),
+    })
+
+    assert _violations(ledger, status) == [
+        "decision was appended after broker-confirmed market close",
+    ]
+
+
+def test_invalid_market_close_clock_fails_closed(complete_shape) -> None:
+    ledger, status = complete_shape
+    status["system"].update({
+        "market_session": "CLOSED",
+        "market_session_observed_at": "not-a-time",
+    })
+
+    assert _violations(ledger, status) == [
+        "broker market-close observation time is invalid",
+    ]
+
+
+@pytest.mark.parametrize(
+    "resource,error_code",
+    [
+        ("market_history", "PAYLOAD_LIMIT_EXCEEDED"),
+        ("learning", "PAYLOAD_CONTRACT_REJECTED"),
+        ("news", "PAYLOAD_LIMIT_EXCEEDED"),
+    ],
+)
+def test_every_sync_resource_rejects_structured_payload_limit_failure(
+    complete_shape,
+    resource,
+    error_code,
+) -> None:
+    ledger, status = complete_shape
+    sync_status = {"status": "DEGRADED", "degraded_resources": [{
+        "resource": resource,
+        "error_code": error_code,
+        "error": "human-readable text is not part of the contract",
+    }]}
+
+    assert _violations(ledger, status, sync_status=sync_status) == [
+        f"{resource} sync still exceeds the remote payload limit",
+    ]
+
+
+@pytest.mark.parametrize(
+    "sync_status,expected",
+    [
+        pytest.param(
+            {}, "dashboard synchronizer status is unavailable",
+            id="missing-status",
+        ),
+        pytest.param(
+            {"status": "ERROR", "last_error_code": "PAYLOAD_LIMIT_EXCEEDED"},
+            "dashboard heartbeat exceeds the remote payload limit",
+            id="heartbeat-payload-limit",
+        ),
+    ],
+)
+def test_dashboard_sync_contract_fails_closed(
+    complete_shape,
+    sync_status,
+    expected,
+) -> None:
+    ledger, status = complete_shape
+
+    assert _violations(ledger, status, sync_status=sync_status) == [expected]
+
+
+def test_validator_does_not_reopen_database_after_snapshot(complete_shape) -> None:
+    ledger, status = complete_shape
+    status["production_contract"] = production_contract_snapshot(
+        ledger.connection, now=VALIDATION_TIME,
+    )
+    status["dashboard_sync"] = {"status": "OK", "degraded_resources": []}
+    ledger.close()
+
+    assert production_shape_violations(status) == []
