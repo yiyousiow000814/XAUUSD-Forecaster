@@ -30,6 +30,7 @@ from xauusd_forecaster.annotation import (
 )
 from xauusd_forecaster.factors import aggregate_news_features, factor_coverage
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
+from xauusd_forecaster.model_gateway import GeminiModelGateway
 from xauusd_forecaster.news_impact import pending_impact_records
 from xauusd_forecaster.maintenance import (
     archive_completed_quote_days,
@@ -96,6 +97,45 @@ def _v15_annotation(vector: dict, evidence: str, **overrides) -> dict:
     }
     current.update(overrides)
     return current
+
+
+def _allow_model_request(_usage) -> bool:
+    return True
+
+
+def _mock_model_json(monkeypatch, responder, *, tokens: int = 1_000) -> None:
+    """Stub the single provider boundary while exercising real decoders."""
+    def post_json(api_key, model, method, payload, *, timeout):
+        del timeout
+        if method == "countTokens":
+            return {"totalTokens": tokens}
+        value = responder(api_key, model, payload)
+        return {
+            "modelVersion": model,
+            "candidates": [{"content": {"parts": [{
+                "text": json.dumps(value, ensure_ascii=False),
+            }]}}],
+        }
+
+    monkeypatch.setattr(
+        GeminiModelGateway, "_post_json", staticmethod(post_json),
+    )
+
+
+def _impact_model_result() -> dict[str, object]:
+    return {
+        "impact_class": "BACKGROUND",
+        "event_state": "BACKGROUND",
+        "update_type": "HISTORICAL_CONTEXT",
+        "identity_relation": "UNRESOLVED",
+        "matched_candidate_id": "",
+        "identity_anchor_zh": "当前报道属于新的独立事件。",
+        "core_fact_changes_zh": [],
+        "identity_differences_zh": ["当前事实与候选事件的稳定身份不同。"],
+        "context_differences_zh": [],
+        "confidence": 0.8,
+        "reason_zh": "当前内容仅提供背景信息，不应持续进入预测。",
+    }
 
 
 UTC = timezone.utc
@@ -1865,32 +1905,17 @@ def test_gemini_receives_complete_body_and_returns_chinese_summary(monkeypatch) 
         "confidence": 0.8,
     }
 
-    class Response:
-        def __enter__(self):
-            return self
+    def respond(_key, _model, payload):
+        captured["payload"] = payload
+        return vector
 
-        def __exit__(self, *_):
-            return False
-
-        def read(self):
-            return json.dumps(
-                {
-                    "modelVersion": "gemini-3.5-flash-lite",
-                    "candidates": [
-                        {"content": {"parts": [{"text": json.dumps(vector)}]}}
-                    ],
-                }
-            ).encode()
-
-    def fake_urlopen(request, timeout):
-        captured["payload"] = json.loads(request.data)
-        captured["timeout"] = timeout
-        return Response()
-
-    monkeypatch.setattr(annotation_module.urllib.request, "urlopen", fake_urlopen)
+    _mock_model_json(monkeypatch, respond)
     source = "A" * 70_000 + "COMPLETE_END_MARKER"
-    result, model = annotation_module._call_gemini(
-        "test-key", "gemini-3.5-flash-lite", "Policy update", source
+    pool = annotation_module._GeminiRequestPool(
+        ("test-key",), request_reserver=_allow_model_request,
+    )
+    result, model = pool.call(
+        0, "gemini-3.5-flash-lite", "Policy update", source,
     )
     prompt = captured["payload"]["contents"][0]["parts"][0]["text"]
     assert "COMPLETE_END_MARKER" in prompt
@@ -1939,21 +1964,23 @@ def test_gemini_repairs_mixed_language_summary_with_counted_request(
         "summary_zh": "黄金价格上涨，美元走弱，市场正在关注后续经济数据。",
         "primary_story_title_zh": "",
     }
-    monkeypatch.setattr(
-        annotation_module,
-        "_call_gemini",
-        lambda *_: (dict(mixed), "gemini-3.5-flash-lite"),
+    calls = []
+    _mock_model_json(
+        monkeypatch,
+        lambda _key, _model, _payload: calls.append(1) or (
+            mixed if len(calls) == 1 else repaired
+        ),
     )
-    monkeypatch.setattr(
-        annotation_module,
-        "_call_gemini_chinese_repair",
-        lambda *_: dict(repaired),
+    usages = []
+    pool = annotation_module._GeminiRequestPool(
+        ("key-a", "key-b"),
+        request_reserver=lambda usage: usages.append(usage) or True,
     )
-    quota = GeminiQuotaLedger(tmp_path / "quota.json")
-    pool = annotation_module._GeminiRequestPool(("key-a", "key-b"), quota)
     result, _ = pool.call(0, "model", "headline", "body")
     assert result["summary_zh"] == repaired["summary_zh"]
-    assert quota.snapshot(("key-a", "key-b"))["total_sent"] == 2
+    assert [usage.purpose for usage in usages] == [
+        "news-annotation", "chinese-repair",
+    ]
 
 
 def test_gemini_annotation_reserves_provider_counted_input_tokens(
@@ -1970,18 +1997,10 @@ def test_gemini_annotation_reserves_provider_counted_input_tokens(
     }, evidence)
     reserved = []
     pool = annotation_module._GeminiRequestPool(
-        ("key-a",), GeminiQuotaLedger(tmp_path / "quota.json"),
-        request_reserver=lambda _key, tokens: reserved.append(tokens) or True,
+        ("key-a",),
+        request_reserver=lambda usage: reserved.append(usage.input_tokens) or True,
     )
-    monkeypatch.setattr(
-        annotation_module, "_count_gemini_input_tokens", lambda *_args: 12_345,
-    )
-    monkeypatch.setattr(
-        annotation_module, "_call_gemini",
-        lambda *_args, **_kwargs: (
-            dict(vector), annotation_module.DEFAULT_GEMINI_MODEL,
-        ),
-    )
+    _mock_model_json(monkeypatch, lambda *_args: dict(vector), tokens=12_345)
 
     result, _ = pool.call(
         0, annotation_module.DEFAULT_GEMINI_MODEL, "Headline", evidence,
@@ -2003,21 +2022,23 @@ def test_gemini_repairs_mixed_script_story_identity_with_counted_request(
         **mixed,
         "primary_story_title_zh": "霍尔木兹海峡重新开放事件",
     }
-    monkeypatch.setattr(
-        annotation_module,
-        "_call_gemini",
-        lambda *_: (dict(mixed), "gemini-3.5-flash-lite"),
+    calls = []
+    _mock_model_json(
+        monkeypatch,
+        lambda _key, _model, _payload: calls.append(1) or (
+            mixed if len(calls) == 1 else repaired
+        ),
     )
-    monkeypatch.setattr(
-        annotation_module,
-        "_call_gemini_chinese_repair",
-        lambda *_: dict(repaired),
+    usages = []
+    pool = annotation_module._GeminiRequestPool(
+        ("key-a", "key-b"),
+        request_reserver=lambda usage: usages.append(usage) or True,
     )
-    quota = GeminiQuotaLedger(tmp_path / "quota.json")
-    pool = annotation_module._GeminiRequestPool(("key-a", "key-b"), quota)
     result, _ = pool.call(0, "model", "headline", "body")
     assert result["primary_story_title_zh"] == "霍尔木兹海峡重新开放事件"
-    assert quota.snapshot(("key-a", "key-b"))["total_sent"] == 2
+    assert [usage.purpose for usage in usages] == [
+        "news-annotation", "chinese-repair",
+    ]
 
 
 def test_gemini_restores_source_number_lexemes_and_rejects_invention() -> None:
@@ -2191,18 +2212,16 @@ def test_annotation_appends_neutral_record_when_translation_repair_is_unavailabl
         "geopolitical_risk": 0.8, "usd_impulse": 0.5,
         "novelty": 0.9, "confidence": 0.9,
     }
-    monkeypatch.setattr(
-        annotation_module,
-        "_call_gemini",
-        lambda *_: (dict(vector), annotation_module.DEFAULT_GEMINI_MODEL),
-    )
-    monkeypatch.setattr(
-        annotation_module,
-        "_call_gemini_chinese_repair",
-        lambda *_: (_ for _ in ()).throw(RuntimeError("repair unavailable")),
-    )
+    calls = []
+    def respond(_key, _model, _payload):
+        calls.append(1)
+        if len(calls) > 1:
+            raise RuntimeError("repair unavailable")
+        return vector
+    _mock_model_json(monkeypatch, respond)
     statuses = annotate_pending_news(
-        ledger, provider="gemini", api_key="test-key", limit=1
+        ledger, provider="gemini", api_key="test-key", limit=1,
+        request_reserver=_allow_model_request,
     )
     assert statuses[0]["status"] == "OK"
     saved = ledger.connection.execute(
@@ -2230,17 +2249,19 @@ def test_llm_failure_is_persisted_and_blocks_immediate_retry(
     )
     calls = 0
 
-    def fail_once(*_args):
+    def fail_once(*_args, **_kwargs):
         nonlocal calls
         calls += 1
         raise ValueError("Gemini summary_zh contains a number absent from source")
 
-    monkeypatch.setattr(annotation_module, "_call_gemini", fail_once)
+    monkeypatch.setattr(annotation_module._GeminiRequestPool, "call", fail_once)
     first = annotate_pending_news(
-        ledger, provider="gemini", api_key="test-key", limit=1
+        ledger, provider="gemini", api_key="test-key", limit=1,
+        request_reserver=_allow_model_request,
     )
     second = annotate_pending_news(
-        ledger, provider="gemini", api_key="test-key", limit=1
+        ledger, provider="gemini", api_key="test-key", limit=1,
+        request_reserver=_allow_model_request,
     )
     assert first[0]["retry_state"] == "BACKING_OFF"
     assert second == []
@@ -2310,14 +2331,15 @@ def test_batch_rpm_exhaustion_is_deferred_without_failure_row(
     )
 
     statuses = annotate_pending_news(
-        ledger, provider="gemini", api_key="test-key", limit=1
+        ledger, provider="gemini", api_key="test-key", limit=1,
+        request_reserver=_allow_model_request,
     )
 
     assert statuses[0]["status"] == "DEFERRED"
     assert ledger.count("news_llm_failures") == 0
 
 
-def test_flash_reserve_is_unavailable_to_routine_news_but_kept_for_priority(
+def test_annotation_batch_uses_the_mandatory_accounting_boundary(
     tmp_path, monkeypatch
 ) -> None:
     now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
@@ -2336,10 +2358,6 @@ def test_flash_reserve_is_unavailable_to_routine_news_but_kept_for_priority(
                 "cluster_id": f"cluster-{item}",
             }
         )
-    key = "test-key"
-    GeminiQuotaLedger(tmp_path / "gemini-quota.json").seed(
-        key, 500 - annotation_module.GEMINI_DAILY_PRIORITY_RESERVE
-    )
     calls: list[str] = []
     vector = {
         "headline_zh": "联邦公开市场委员会声明",
@@ -2350,16 +2368,20 @@ def test_flash_reserve_is_unavailable_to_routine_news_but_kept_for_priority(
         "usd_impulse": 0.0, "novelty": 0.5, "confidence": 0.8,
     }
 
-    def fake_call(_key, _model, headline, _body):
+    def fake_call(_pool, _index, _model, headline, _body, **_kwargs):
         calls.append(headline)
         return dict(vector), annotation_module.DEFAULT_GEMINI_MODEL
 
-    monkeypatch.setattr(annotation_module, "_call_gemini", fake_call)
+    monkeypatch.setattr(annotation_module._GeminiRequestPool, "call", fake_call)
     statuses = annotate_pending_news(
-        ledger, provider="gemini", api_key=key, limit=10
+        ledger, provider="gemini", api_key="test-key", limit=10,
+        request_reserver=_allow_model_request,
     )
-    assert len(statuses) == 1
-    assert calls == ["FOMC statement"]
+    assert len(statuses) == 2
+    assert set(calls) == {"Ordinary market story", "FOMC statement"}
+    assert annotate_pending_news(
+        ledger, provider="gemini", api_key="test-key", limit=1,
+    ) == [{"status": "DISABLED", "reason": "MODEL_ACCOUNTING_REQUIRED"}]
 
 
 def test_headline_only_translation_is_display_only(tmp_path, monkeypatch) -> None:
@@ -2376,17 +2398,21 @@ def test_headline_only_translation_is_display_only(tmp_path, monkeypatch) -> Non
         }
     )
     called = {}
-    def fake_title_call(_key, model, _headline):
+    def fake_title_call(_pool, _index, model, _headline):
         called["model"] = model
         return "黄金价格上涨", model
-    monkeypatch.setattr(annotation_module, "_call_gemini_title", fake_title_call)
-    statuses = translate_pending_headlines(ledger, api_key="test-key")
+    monkeypatch.setattr(
+        annotation_module._GeminiRequestPool, "call_title", fake_title_call,
+    )
+    statuses = translate_pending_headlines(
+        ledger, api_key="test-key", request_reserver=_allow_model_request,
+    )
     assert statuses[0]["status"] == "OK"
     assert called["model"] == "gemma-4-31b-it"
     assert ledger.count("news_title_translations") == 1
     assert ledger.count("news_annotations") == 0
     assert not (tmp_path / "gemini-quota.json").exists()
-    assert (tmp_path / "gemma-quota.json").exists()
+    assert not (tmp_path / "gemma-quota.json").exists()
 
 
 def test_headline_translation_falls_back_after_non_chinese_response(
@@ -2403,14 +2429,18 @@ def test_headline_translation_falls_back_after_non_chinese_response(
         "cluster_id": "title-fallback",
     })
     models = []
-    def fake_title(_key, model, _headline):
+    def fake_generate(_gateway, _index, *, model, **_kwargs):
         models.append(model)
         if model == annotation_module.DEFAULT_GEMMA_MODEL:
-            raise ValueError("Gemini headline_zh is not Simplified Chinese")
+            raise RuntimeError("Gemini headline_zh is not Simplified Chinese")
         return "美联储就提案征求意见", model
-    monkeypatch.setattr(annotation_module, "_call_gemini_title", fake_title)
+    monkeypatch.setattr(
+        GeminiModelGateway, "generate", fake_generate,
+    )
 
-    statuses = translate_pending_headlines(ledger, api_key="test-key")
+    statuses = translate_pending_headlines(
+        ledger, api_key="test-key", request_reserver=_allow_model_request,
+    )
 
     assert statuses[0]["status"] == "OK"
     assert models == [
@@ -2450,13 +2480,17 @@ def test_placeholder_title_is_retried_append_only(tmp_path, monkeypatch) -> None
         }
     )
     monkeypatch.setattr(
-        annotation_module, "_call_gemini_title",
+        annotation_module._GeminiRequestPool, "call_title",
         lambda *_: ("美联储就提案征求意见", "gemma-4-31b-it"),
     )
-    statuses = translate_pending_headlines(ledger, api_key="test-key")
+    statuses = translate_pending_headlines(
+        ledger, api_key="test-key", request_reserver=_allow_model_request,
+    )
     assert statuses[0]["status"] == "OK"
     assert ledger.count("news_title_translations") == 2
-    assert translate_pending_headlines(ledger, api_key="test-key") == []
+    assert translate_pending_headlines(
+        ledger, api_key="test-key", request_reserver=_allow_model_request,
+    ) == []
 
 
 def test_suspect_numeric_recovery_title_is_retried_append_only(
@@ -2482,15 +2516,19 @@ def test_suspect_numeric_recovery_title_is_retried_append_only(
         "parse_started_at": now, "parsed_at": now,
     })
     monkeypatch.setattr(
-        annotation_module, "_call_gemini_title",
+        annotation_module._GeminiRequestPool, "call_title",
         lambda *_: ("就业报告回顾七月数据", "gemma-4-31b-it"),
     )
 
-    statuses = translate_pending_headlines(ledger, api_key="test-key")
+    statuses = translate_pending_headlines(
+        ledger, api_key="test-key", request_reserver=_allow_model_request,
+    )
 
     assert statuses[0]["status"] == "OK"
     assert ledger.count("news_title_translations") == 2
-    assert translate_pending_headlines(ledger, api_key="test-key") == []
+    assert translate_pending_headlines(
+        ledger, api_key="test-key", request_reserver=_allow_model_request,
+    ) == []
 
 
 def test_ambiguous_google_rate_title_reaches_ai_translation(
@@ -2508,11 +2546,13 @@ def test_ambiguous_google_rate_title_reaches_ai_translation(
         "cluster_id": "irrelevant-mortgage",
     })
     monkeypatch.setattr(
-        annotation_module, "_call_gemini_title",
+        annotation_module._GeminiRequestPool, "call_title",
         lambda *_: ("今日抵押贷款与再融资利率", "gemma-4-31b-it"),
     )
 
-    statuses = translate_pending_headlines(ledger, api_key="test-key")
+    statuses = translate_pending_headlines(
+        ledger, api_key="test-key", request_reserver=_allow_model_request,
+    )
     assert len(statuses) == 1
     assert statuses[0]["status"] == "OK"
     assert ledger.count("news_title_translations") == 1
@@ -2560,9 +2600,9 @@ def test_gemma_impact_assessment_is_append_only_and_versioned(
         "parsed_at": now + timedelta(hours=2, minutes=54),
     })
     monkeypatch.setattr(
-        annotation_module,
-        "_call_gemini_impact",
-        lambda _key, _row: ({
+        annotation_module._GeminiRequestPool,
+        "call_impact",
+        lambda *_args, **_kwargs: ({
             "impact_class": "POLICY_SHIFT", "event_state": "ACTIVE",
             "update_type": "NEW_EVENT", "identity_relation": "NEW_EPISODE",
             "matched_candidate_id": "",
@@ -2574,7 +2614,10 @@ def test_gemma_impact_assessment_is_append_only_and_versioned(
         }, annotation_module.IMPACT_MODEL),
     )
 
-    statuses = assess_pending_news_impacts(ledger, api_key="test-key", limit=1)
+    statuses = assess_pending_news_impacts(
+        ledger, api_key="test-key", limit=1,
+        request_reserver=_allow_model_request,
+    )
 
     assert statuses[0]["status"] == "OK"
     row = ledger.connection.execute(
@@ -2587,20 +2630,27 @@ def test_gemma_impact_assessment_is_append_only_and_versioned(
     ).fetchone()[0])
     assert comparison["source_context_mode"] == "COMPLETE_BODY"
     assert comparison["source_body_character_count"] == len(body)
-    assert assess_pending_news_impacts(ledger, api_key="test-key", limit=1) == []
+    assert assess_pending_news_impacts(
+        ledger, api_key="test-key", limit=1,
+        request_reserver=_allow_model_request,
+    ) == []
 
 
 def test_gemma_impact_preserves_transient_http_error(tmp_path, monkeypatch) -> None:
     pool = annotation_module._GeminiRequestPool(
-        ("test-key",), GeminiQuotaLedger(tmp_path / "quota.json"),
-        requests_per_key=1, batch_limit=1,
+        ("test-key",), requests_per_key=1, batch_limit=1,
+        request_reserver=_allow_model_request,
     )
     transient = urllib.error.HTTPError(
         "https://example", 429, "Too Many Requests", {}, None
     )
+    def post_json(_key, _model, method, _payload, *, timeout):
+        del timeout
+        if method == "countTokens":
+            return {"totalTokens": 100}
+        raise transient
     monkeypatch.setattr(
-        annotation_module, "_call_gemini_impact",
-        lambda *_args: (_ for _ in ()).throw(transient),
+        GeminiModelGateway, "_post_json", staticmethod(post_json),
     )
 
     with pytest.raises(urllib.error.HTTPError) as caught:
@@ -2614,24 +2664,17 @@ def test_gemma_impact_reserves_provider_counted_input_tokens(
 ) -> None:
     reserved = []
     pool = annotation_module._GeminiRequestPool(
-        ("test-key",), GeminiQuotaLedger(tmp_path / "quota.json"),
-        requests_per_key=1, batch_limit=1,
-        request_reserver=lambda _key, tokens: reserved.append(tokens) or True,
+        ("test-key",), requests_per_key=1, batch_limit=1,
+        request_reserver=lambda usage: reserved.append(usage.input_tokens) or True,
     )
-    monkeypatch.setattr(
-        annotation_module, "_count_gemini_input_tokens", lambda *_args: 4_321,
-    )
-    monkeypatch.setattr(
-        annotation_module, "_call_gemini_impact",
-        lambda *_args, **_kwargs: ({"ok": True}, annotation_module.IMPACT_MODEL),
-    )
+    _mock_model_json(monkeypatch, lambda *_args: _impact_model_result(), tokens=4_321)
 
     result, _ = pool.call_impact(0, {
         "annotation": {}, "prior_event_context": [], "headline": "Headline",
         "body": "Complete body",
     })
 
-    assert result == {"ok": True}
+    assert result["impact_class"] == "BACKGROUND"
     assert reserved == [4_321]
 
 
@@ -2639,26 +2682,28 @@ def test_gemma_impact_reduces_optional_candidates_to_fit_tpm(
     tmp_path, monkeypatch,
 ) -> None:
     reserved = []
-    sent_rows = []
     pool = annotation_module._GeminiRequestPool(
-        ("test-key",), GeminiQuotaLedger(tmp_path / "quota.json"),
-        requests_per_key=1, batch_limit=1,
-        request_reserver=lambda _key, tokens: reserved.append(tokens) or True,
+        ("test-key",), requests_per_key=1, batch_limit=1,
+        request_reserver=lambda usage: reserved.append(usage.input_tokens) or True,
     )
 
-    def count_tokens(_key, _model, payload):
+    def count_tokens(_model, payload):
         prompt = payload["contents"][0]["parts"][0]["text"]
         return 15_500 if prompt.count('"candidate_id"') > 1 else 14_500
 
-    monkeypatch.setattr(annotation_module, "_count_gemini_input_tokens", count_tokens)
-    monkeypatch.setattr(
-        annotation_module,
-        "_call_gemini_impact",
-        lambda _key, request_row, **_kwargs: (
-            sent_rows.append(request_row) or {"ok": True},
-            annotation_module.IMPACT_MODEL,
-        ),
-    )
+    sent_payloads = []
+    def post_json(_key, model, method, payload, *, timeout):
+        del timeout
+        if method == "countTokens":
+            return {"totalTokens": count_tokens(model, payload["generateContentRequest"])}
+        sent_payloads.append(payload)
+        return {
+            "modelVersion": model,
+            "candidates": [{"content": {"parts": [{
+                "text": json.dumps(_impact_model_result(), ensure_ascii=False),
+            }]}}],
+        }
+    monkeypatch.setattr(GeminiModelGateway, "_post_json", staticmethod(post_json))
 
     result, _ = pool.call_impact(0, {
         "annotation": {},
@@ -2668,12 +2713,12 @@ def test_gemma_impact_reduces_optional_candidates_to_fit_tpm(
         "headline": "Headline", "body": "Complete body",
     })
 
-    assert result == {"ok": True}
+    assert result["impact_class"] == "BACKGROUND"
     assert reserved == [14_500]
-    assert [item["candidate_id"] for item in sent_rows[0]["prior_event_context"]] == [
-        "nearest"
-    ]
-    assert sent_rows[0]["identity_context_truncated"] is True
+    sent_prompt = sent_payloads[0]["contents"][0]["parts"][0]["text"]
+    assert '"candidate_id":"nearest"' in sent_prompt
+    assert '"candidate_id":"farther"' not in sent_prompt
+    assert "CANDIDATE_CONTEXT_TRUNCATED: true" in sent_prompt
 
 
 def test_gemma_impact_uses_all_evidence_windows_for_oversized_body(
@@ -2688,26 +2733,29 @@ def test_gemma_impact_uses_all_evidence_windows_for_oversized_body(
         + evidence_two
         + (" later live update " * 2_000)
     )
-    sent_rows = []
     reserved = []
     pool = annotation_module._GeminiRequestPool(
-        ("test-key",), GeminiQuotaLedger(tmp_path / "quota.json"),
-        requests_per_key=1, batch_limit=1,
-        request_reserver=lambda _key, tokens: reserved.append(tokens) or True,
+        ("test-key",), requests_per_key=1, batch_limit=1,
+        request_reserver=lambda usage: reserved.append(usage.input_tokens) or True,
     )
 
-    def count_tokens(_key, _model, payload):
+    def count_tokens(_model, payload):
         prompt = payload["contents"][0]["parts"][0]["text"]
         return 39_000 if "SOURCE_CONTEXT_MODE: COMPLETE_BODY" in prompt else 5_200
 
-    monkeypatch.setattr(annotation_module, "_count_gemini_input_tokens", count_tokens)
-    monkeypatch.setattr(
-        annotation_module, "_call_gemini_impact",
-        lambda _key, request_row, **_kwargs: (
-            sent_rows.append(request_row) or {"ok": True},
-            annotation_module.IMPACT_MODEL,
-        ),
-    )
+    sent_payloads = []
+    def post_json(_key, model, method, payload, *, timeout):
+        del timeout
+        if method == "countTokens":
+            return {"totalTokens": count_tokens(model, payload["generateContentRequest"])}
+        sent_payloads.append(payload)
+        return {
+            "modelVersion": model,
+            "candidates": [{"content": {"parts": [{
+                "text": json.dumps(_impact_model_result(), ensure_ascii=False),
+            }]}}],
+        }
+    monkeypatch.setattr(GeminiModelGateway, "_post_json", staticmethod(post_json))
 
     result, _ = pool.call_impact(0, {
         "annotation": {"supporting_evidence": [evidence_one, evidence_two]},
@@ -2717,17 +2765,16 @@ def test_gemma_impact_uses_all_evidence_windows_for_oversized_body(
         "headline": "Live market updates", "body": body,
     })
 
-    assert result == {"ok": True}
+    assert result["impact_class"] == "BACKGROUND"
     assert reserved == [5_200]
-    sent = sent_rows[0]
-    assert sent["source_context_mode"] == "EVIDENCE_WINDOWS"
-    assert sent["source_body_character_count"] == len(body)
-    assert evidence_one in sent["body"]
-    assert evidence_two in sent["body"]
-    assert len(sent["body"]) < len(body) / 10
-    assert [item["candidate_id"] for item in sent["prior_event_context"]] == [
-        "nearest", "farther",
-    ]
+    sent = sent_payloads[0]["contents"][0]["parts"][0]["text"]
+    assert "SOURCE_CONTEXT_MODE: EVIDENCE_WINDOWS" in sent
+    assert f"SOURCE_BODY_CHARACTER_COUNT: {len(body)}" in sent
+    assert evidence_one in sent
+    assert evidence_two in sent
+    assert len(sent) < len(body) / 10
+    assert '"candidate_id":"nearest"' in sent
+    assert '"candidate_id":"farther"' in sent
 
 
 def test_oversized_body_without_verbatim_evidence_fails_closed(
@@ -2735,13 +2782,10 @@ def test_oversized_body_without_verbatim_evidence_fails_closed(
 ) -> None:
     reserved = []
     pool = annotation_module._GeminiRequestPool(
-        ("test-key",), GeminiQuotaLedger(tmp_path / "quota.json"),
-        requests_per_key=1, batch_limit=1,
-        request_reserver=lambda _key, tokens: reserved.append(tokens) or False,
+        ("test-key",), requests_per_key=1, batch_limit=1,
+        request_reserver=lambda usage: reserved.append(usage.input_tokens) or False,
     )
-    monkeypatch.setattr(
-        annotation_module, "_count_gemini_input_tokens", lambda *_args: 39_000,
-    )
+    monkeypatch.setattr(pool.gateway, "count_input_tokens", lambda *_args: 39_000)
 
     with pytest.raises(annotation_module.GeminiBatchCapacityExhausted):
         pool.call_impact(0, {
@@ -3000,12 +3044,13 @@ def test_duplicate_cluster_prefers_full_content_for_annotation(
         "novelty": 0.0, "confidence": 1.0,
     }
     monkeypatch.setattr(
-        annotation_module,
-        "_call_gemini",
+        annotation_module._GeminiRequestPool,
+        "call",
         lambda *_: (dict(vector), "gemini-3.5-flash-lite"),
     )
     statuses = annotate_pending_news(
-        ledger, provider="gemini", api_key="test-key", limit=1
+        ledger, provider="gemini", api_key="test-key", limit=1,
+        request_reserver=_allow_model_request,
     )
     assert statuses[0]["source_item_id"] == "publisher-full"
     assert ledger.count("news_annotations") == 1
@@ -3057,12 +3102,13 @@ def test_gemini_annotation_does_not_treat_other_model_as_complete(
         }
     )
     monkeypatch.setattr(
-        annotation_module,
-        "_call_gemini",
+        annotation_module._GeminiRequestPool,
+        "call",
         lambda *_: (vector, "gemini-3.5-flash-lite"),
     )
     statuses = annotate_pending_news(
-        ledger, provider="gemini", api_key="test-key", limit=1
+        ledger, provider="gemini", api_key="test-key", limit=1,
+        request_reserver=_allow_model_request,
     )
     assert statuses[0]["status"] == "OK"
     assert ledger.count("news_annotations") == 2
@@ -3102,11 +3148,12 @@ def test_v8_success_is_readable_but_receives_one_v10_category_backfill(tmp_path,
         }
     )
     monkeypatch.setattr(
-        annotation_module, "_call_gemini",
+        annotation_module._GeminiRequestPool, "call",
         lambda *_: (vector, annotation_module.DEFAULT_GEMINI_MODEL),
     )
     statuses = annotate_pending_news(
-        ledger, provider="gemini", api_key="test-key", limit=1
+        ledger, provider="gemini", api_key="test-key", limit=1,
+        request_reserver=_allow_model_request,
     )
     assert len(statuses) == 1
     assert statuses[0]["status"] == "OK"
@@ -3115,7 +3162,8 @@ def test_v8_success_is_readable_but_receives_one_v10_category_backfill(tmp_path,
         (annotation_module.PROMPT_VERSION,),
     ).fetchone()[0] == 1
     assert annotate_pending_news(
-        ledger, provider="gemini", api_key="test-key", limit=1
+        ledger, provider="gemini", api_key="test-key", limit=1,
+        request_reserver=_allow_model_request,
     ) == []
 
 
@@ -3150,12 +3198,13 @@ def test_gemini_batch_is_capped_below_provider_rpm_limit(tmp_path, monkeypatch) 
         "confidence": 1.0,
     }
     monkeypatch.setattr(
-        annotation_module,
-        "_call_gemini",
+        annotation_module._GeminiRequestPool,
+        "call",
         lambda *_: (copy.deepcopy(vector), "gemini-3.5-flash-lite"),
     )
     statuses = annotate_pending_news(
-        ledger, provider="gemini", api_key="test-key", limit=999
+        ledger, provider="gemini", api_key="test-key", limit=999,
+        request_reserver=_allow_model_request,
     )
     assert len(statuses) == annotation_module.GEMINI_REQUESTS_PER_MINUTE_PER_KEY
     assert ledger.count("news_annotations") == 12
@@ -3188,36 +3237,43 @@ def test_gemini_key_pool_distributes_safe_capacity(tmp_path, monkeypatch) -> Non
         "novelty": 0.0, "confidence": 1.0,
     }
 
-    def fake_call(key, *_):
-        calls.append(key)
+    def fake_call(_pool, index, *_):
+        calls.append(index)
         return copy.deepcopy(vector), "gemini-3.5-flash-lite"
 
     monkeypatch.setenv("GEMINI_API_KEYS", "key-a;key-b;key-a")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.setattr(annotation_module, "_call_gemini", fake_call)
-    statuses = annotate_pending_news(ledger, provider="gemini", limit=999)
+    monkeypatch.setattr(annotation_module._GeminiRequestPool, "call", fake_call)
+    statuses = annotate_pending_news(
+        ledger, provider="gemini", limit=999,
+        request_reserver=_allow_model_request,
+    )
     assert len(statuses) == expected
-    assert calls.count("key-a") == 12
-    assert calls.count("key-b") == 12
+    assert calls == list(range(expected))
 
 
 def test_gemini_key_pool_falls_back_on_quota_error(monkeypatch) -> None:
     calls: list[str] = []
-
-    def fake_call(key, *_):
+    gateway = GeminiModelGateway(
+        ("exhausted", "available"), requests_per_key=1,
+        request_reserver=_allow_model_request,
+    )
+    def post_json(key, _model, _method, _payload, *, timeout):
+        del timeout
         calls.append(key)
         if key == "exhausted":
-            raise annotation_module.urllib.error.HTTPError(
-                "https://example.invalid", 429, "quota", {}, None
+            raise urllib.error.HTTPError(
+                "https://example.invalid", 429, "quota", {}, None,
             )
-        return {"summary_zh": "ok"}, "gemini-3.5-flash-lite"
-
-    monkeypatch.setattr(annotation_module, "_call_gemini", fake_call)
-    result, model = annotation_module._call_gemini_with_fallback(
-        ("exhausted", "available"), 0, "model", "headline", "body"
+        return {"value": "ok", "modelVersion": "gemini-3.5-flash-lite"}
+    monkeypatch.setattr(GeminiModelGateway, "_post_json", staticmethod(post_json))
+    result, model = gateway.generate(
+        0, model="model", purpose="test", payload={}, input_tokens=10,
+        decode=lambda envelope: envelope["value"],
+        retryable_http_codes=frozenset({429}),
     )
     assert calls == ["exhausted", "available"]
-    assert result == {"summary_zh": "ok"}
+    assert result == "ok"
     assert model == "gemini-3.5-flash-lite"
 
 
@@ -3304,17 +3360,18 @@ def test_gemini_31_current_annotation_is_persisted_and_not_reprocessed(
        xauusd_relevance="DIRECT", review_priority="FAST",
        material_change="NEW_EVENT", time_sensitivity="SAME_DAY")
 
-    def fallback_call(_key, model, *_args):
+    def fallback_call(_pool, _index, model, *_args, **_kwargs):
         assert model == annotation_module.FALLBACK_GEMINI_MODEL
         return dict(vector), model
 
-    monkeypatch.setattr(annotation_module, "_call_gemini", fallback_call)
+    monkeypatch.setattr(annotation_module._GeminiRequestPool, "call", fallback_call)
     statuses = annotate_pending_news(
         ledger,
         provider="gemini",
         api_key="test-key",
         model=annotation_module.FALLBACK_GEMINI_MODEL,
         limit=1,
+        request_reserver=_allow_model_request,
     )
     assert statuses[0]["status"] == "OK"
     stored = ledger.connection.execute(
@@ -3329,6 +3386,7 @@ def test_gemini_31_current_annotation_is_persisted_and_not_reprocessed(
         api_key="test-key",
         model=annotation_module.DEFAULT_GEMINI_MODEL,
         limit=1,
+        request_reserver=_allow_model_request,
     ) == []
 
 

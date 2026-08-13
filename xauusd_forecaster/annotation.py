@@ -6,11 +6,8 @@ import hashlib
 import json
 import os
 import re
-import threading
-import urllib.error
 import urllib.request
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from sqlite3 import Connection
@@ -21,6 +18,11 @@ from .gemini_quota import GeminiQuotaLedger
 from .model_limits import (
     GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
     GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
+)
+from .model_gateway import (
+    GeminiModelGateway,
+    ModelGatewayCapacityExhausted,
+    ModelRequestUsage,
 )
 from .news_relevance import google_news_item_is_relevant
 from .news_impact import (
@@ -44,7 +46,6 @@ DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 FALLBACK_GEMINI_MODEL = "gemini-3.1-flash-lite"
 SUPPORTED_GEMINI_MODELS = (DEFAULT_GEMINI_MODEL, FALLBACK_GEMINI_MODEL)
 DEFAULT_GEMMA_MODEL = "gemma-4-31b-it"
-GEMINI_MAX_PARALLEL_REQUESTS = 3
 GEMINI_DAILY_PRIORITY_RESERVE = 150
 GEMMA_REQUESTS_PER_DAY_PER_KEY = 15_000
 GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL = 20
@@ -62,8 +63,7 @@ TITLE_TRANSLATION_MODELS = (
 HIGH_PRIORITY_NEWS_SOURCES = frozenset({"federal_reserve_monetary"})
 
 
-class GeminiBatchCapacityExhausted(RuntimeError):
-    """The current batch used its local RPM slots; the item remains pending."""
+GeminiBatchCapacityExhausted = ModelGatewayCapacityExhausted
 
 
 def pending_annotation_records(
@@ -244,7 +244,7 @@ def annotate_pending_news(
     prompt_version: str = PROMPT_VERSION,
     allow_priority_reserve: bool = True,
     records: list[dict[str, object]] | None = None,
-    request_reserver: Callable[[str, int], bool] | None = None,
+    request_reserver: Callable[[ModelRequestUsage], bool] | None = None,
 ) -> list[dict[str, object]]:
     if prompt_version not in GENERATED_NEWS_PROMPT_VERSIONS:
         raise ValueError(f"unsupported news prompt version: {prompt_version}")
@@ -257,6 +257,8 @@ def annotate_pending_news(
     keys = configured_gemini_api_keys(api_key)
     if selected_provider == "gemini" and not keys:
         return [{"status": "DISABLED", "reason": "GEMINI_API_KEY_MISSING"}]
+    if selected_provider == "gemini" and request_reserver is None:
+        return [{"status": "DISABLED", "reason": "MODEL_ACCOUNTING_REQUIRED"}]
     if selected_provider not in {"ollama", "gemini"}:
         return [{"status": "DISABLED", "reason": "UNKNOWN_LLM_PROVIDER"}]
     selected_model = model or (
@@ -269,9 +271,8 @@ def annotate_pending_news(
     )
     request_pool = None
     if selected_provider == "gemini":
-        quota = GeminiQuotaLedger(_gemini_quota_path(ledger, selected_model))
         request_pool = _GeminiRequestPool(
-            keys, quota, request_reserver=request_reserver,
+            keys, request_reserver=request_reserver,
         )
         total_capacity = request_pool.available_batch_capacity()
         if total_capacity <= 0:
@@ -358,20 +359,8 @@ def annotate_pending_news(
         pending_records = selected_records
     indexed_records = list(enumerate(pending_records))
     statuses: list[dict[str, object]] = []
-    if (
-        selected_provider == "gemini"
-        and pending_records
-        and request_reserver is None
-    ):
-        with ThreadPoolExecutor(
-            max_workers=min(GEMINI_MAX_PARALLEL_REQUESTS, len(pending_records))
-        ) as pool:
-            futures = [pool.submit(parse, item) for item in indexed_records]
-            for future in as_completed(futures):
-                statuses.append(_persist_parsed_annotation(ledger, future.result()))
-    else:
-        for item in indexed_records:
-            statuses.append(_persist_parsed_annotation(ledger, parse(item)))
+    for item in indexed_records:
+        statuses.append(_persist_parsed_annotation(ledger, parse(item)))
     return statuses
 
 
@@ -530,20 +519,17 @@ def translate_pending_headlines(
     api_key: str | None = None,
     model: str | None = None,
     records: list[dict[str, object]] | None = None,
-    request_reserver: Callable[[str, int], bool] | None = None,
+    request_reserver: Callable[[ModelRequestUsage], bool] | None = None,
 ) -> list[dict[str, object]]:
     """Translate display titles without creating action-bearing news features."""
     keys = configured_gemini_api_keys(api_key)
     if not keys:
         return [{"status": "DISABLED", "reason": "GEMINI_API_KEY_MISSING"}]
+    if request_reserver is None:
+        return [{"status": "DISABLED", "reason": "MODEL_ACCOUNTING_REQUIRED"}]
     selected_model = model or DEFAULT_GEMMA_MODEL
-    quota = GeminiQuotaLedger(
-        ledger.path.parent / "gemma-quota.json",
-        daily_limit=GEMMA_REQUESTS_PER_DAY_PER_KEY,
-    )
     request_pool = _GeminiRequestPool(
         keys,
-        quota,
         requests_per_key=GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
         batch_limit=GEMMA_TITLE_BATCH_LIMIT,
         request_reserver=request_reserver,
@@ -636,18 +622,16 @@ def assess_pending_news_impacts(
     annotation_prompt_version: str = PROMPT_VERSION,
     impact_prompt_version: str = IMPACT_PROMPT_VERSION,
     records: list[dict[str, object]] | None = None,
-    request_reserver: Callable[[str, int], bool] | None = None,
+    request_reserver: Callable[[ModelRequestUsage], bool] | None = None,
 ) -> list[dict[str, object]]:
     """Classify semantic impact lifetime with frozen Gemma 4 buckets."""
     keys = configured_gemini_api_keys(api_key)
     if not keys:
         return [{"status": "DISABLED", "reason": "GEMINI_API_KEY_MISSING"}]
-    quota = GeminiQuotaLedger(
-        ledger.path.parent / "gemma-quota.json",
-        daily_limit=GEMMA_REQUESTS_PER_DAY_PER_KEY,
-    )
+    if request_reserver is None:
+        return [{"status": "DISABLED", "reason": "MODEL_ACCOUNTING_REQUIRED"}]
     request_pool = _GeminiRequestPool(
-        keys, quota,
+        keys,
         requests_per_key=GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
         batch_limit=GEMMA_IMPACT_BATCH_LIMIT,
         request_reserver=request_reserver,
@@ -756,286 +740,289 @@ def gemini_routine_remaining(
     return max(0, int(quota["total_remaining"]) - reserve)
 
 
-def _call_gemini_with_fallback(
-    api_keys: tuple[str, ...],
-    start_index: int,
-    model: str,
-    headline: str,
-    body: str,
-    prompt_version: str = PROMPT_VERSION,
-) -> tuple[dict, str]:
-    last_error: Exception | None = None
-    for offset in range(len(api_keys)):
-        key = api_keys[(start_index + offset) % len(api_keys)]
-        try:
-            if prompt_version == PROMPT_VERSION:
-                return _call_gemini(key, model, headline, body)
-            return _call_gemini(key, model, headline, body, prompt_version=prompt_version)
-        except urllib.error.HTTPError as error:
-            last_error = error
-            if error.code not in {401, 403, 429}:
-                raise
-    raise RuntimeError("All configured Gemini keys rejected or exhausted") from last_error
-
-
 class _GeminiRequestPool:
     def __init__(
         self,
         api_keys: tuple[str, ...],
-        quota: GeminiQuotaLedger,
         *,
         requests_per_key: int = GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
         batch_limit: int | None = None,
-        request_reserver: Callable[[str, int], bool] | None = None,
+        request_reserver: Callable[[ModelRequestUsage], bool],
     ):
         self.api_keys = api_keys
-        self.quota = quota
-        self.requests_per_key = requests_per_key
-        self.batch_limit = batch_limit
-        self.request_reserver = request_reserver
-        self._batch_counts = {key: 0 for key in api_keys}
-        self._lock = threading.Lock()
+        self.gateway = GeminiModelGateway(
+            api_keys,
+            requests_per_key=requests_per_key,
+            batch_limit=batch_limit,
+            request_reserver=request_reserver,
+        )
 
     def available_batch_capacity(self, *, reserve_total: int = 0) -> int:
-        if self.request_reserver is not None:
-            capacity = len(self.api_keys) * self.requests_per_key
-            return min(capacity, self.batch_limit) if self.batch_limit else capacity
-        snapshot = self.quota.snapshot(self.api_keys)
-        capacity = sum(
-            min(item["remaining"], self.requests_per_key)
-            for item in snapshot["keys"]
-        )
-        capacity = min(
-            capacity,
-            max(0, int(snapshot["total_remaining"]) - max(0, reserve_total)),
-        )
-        return min(capacity, self.batch_limit) if self.batch_limit else capacity
+        # Durable daily reserves are enforced atomically by request_reserver.
+        # This value only bounds how much work this in-memory batch may claim.
+        del reserve_total
+        return self.gateway.available_batch_capacity()
 
-    def _reserve(self, api_key: str, input_tokens: int = 0) -> bool:
-        with self._lock:
-            if self._batch_counts[api_key] >= self.requests_per_key:
-                return False
-            if self.request_reserver is not None:
-                reserved = self.request_reserver(api_key, max(0, input_tokens))
-            else:
-                reserved = self.quota.reserve(api_key)
-            if not reserved:
-                return False
-            self._batch_counts[api_key] += 1
-            return True
+    def _count_or_conservative(
+        self,
+        model: str,
+        payload: dict[str, object],
+        *,
+        conservative_tokens: int,
+    ) -> int:
+        try:
+            return self.gateway.count_input_tokens(model, payload)
+        except Exception:
+            return conservative_tokens
 
     def call(
         self, start_index: int, model: str, headline: str, body: str,
         *, prompt_version: str = PROMPT_VERSION,
     ) -> tuple[dict, str]:
-        last_error: Exception | None = None
         prompt = _annotation_prompt(prompt_version, headline, body)
-        estimated_tokens = _estimate_input_tokens(prompt) + 512
-        if self.request_reserver is not None:
-            counted_tokens = None
-            for key in self.api_keys:
-                try:
-                    counted_tokens = _count_gemini_input_tokens(
-                        key, model, _annotation_payload(prompt, prompt_version),
-                    )
-                    break
-                except Exception:
-                    continue
-            if counted_tokens is None:
-                estimated_tokens = max(
-                    estimated_tokens, len(prompt.encode("utf-8")) + 512,
+        payload = _annotation_payload(prompt, prompt_version)
+        input_tokens = self._count_or_conservative(
+            model,
+            payload,
+            conservative_tokens=max(
+                _estimate_input_tokens(prompt) + 512,
+                len(prompt.encode("utf-8")) + 512,
+            ),
+        )
+        result, exact_model = self.gateway.generate(
+            start_index,
+            model=model,
+            purpose="news-annotation",
+            payload=payload,
+            input_tokens=input_tokens,
+            decode=_decode_model_json,
+            retryable_http_codes=frozenset({401, 403, 429}),
+        )
+        _recover_display_fields(result, headline, body)
+        try:
+            _validate_chinese_result(result)
+            if prompt_version == PROMPT_VERSION:
+                _validate_or_neutralize_current_result(
+                    result, headline=headline, body=body,
                 )
-            else:
-                estimated_tokens = counted_tokens
-        for offset in range(len(self.api_keys)):
-            key = self.api_keys[(start_index + offset) % len(self.api_keys)]
-            if not self._reserve(key, estimated_tokens):
-                continue
+            return result, exact_model
+        except ValueError:
             try:
-                if prompt_version == PROMPT_VERSION:
-                    result, exact_model = _call_gemini(
-                        key, model, headline, body
-                    )
-                else:
-                    result, exact_model = _call_gemini(
-                        key, model, headline, body, prompt_version=prompt_version
-                    )
+                repaired = self._repair_chinese(start_index + 1, model, result)
+                result["headline_zh"] = repaired["headline_zh"]
+                result["summary_zh"] = repaired["summary_zh"]
+                result["primary_story_title_zh"] = repaired[
+                    "primary_story_title_zh"
+                ]
                 _recover_display_fields(result, headline, body)
-                try:
-                    _validate_chinese_result(result)
-                    if prompt_version == PROMPT_VERSION:
-                        _validate_or_neutralize_current_result(
-                            result, headline=headline, body=body,
-                        )
-                    return result, exact_model
-                except ValueError:
-                    try:
-                        repaired = self._repair_chinese(
-                            start_index + offset + 1, model, result
-                        )
-                        result["headline_zh"] = repaired["headline_zh"]
-                        result["summary_zh"] = repaired["summary_zh"]
-                        result["primary_story_title_zh"] = repaired["primary_story_title_zh"]
-                        _recover_display_fields(result, headline, body)
-                        _validate_chinese_result(result)
-                    except Exception:
-                        _neutralize_unvalidated_language(result)
-                    if prompt_version == PROMPT_VERSION:
-                        _validate_or_neutralize_current_result(
-                            result, headline=headline, body=body,
-                        )
-                    return result, exact_model
-            except urllib.error.HTTPError as error:
-                last_error = error
-                if error.code not in {401, 403, 429}:
-                    raise
-        if last_error is None:
-            raise GeminiBatchCapacityExhausted(
-                "Gemini RPM slots used; retained for the next batch"
-            )
-        raise RuntimeError("All configured Gemini keys rejected for this batch") from last_error
+                _validate_chinese_result(result)
+            except Exception:
+                _neutralize_unvalidated_language(result)
+            if prompt_version == PROMPT_VERSION:
+                _validate_or_neutralize_current_result(
+                    result, headline=headline, body=body,
+                )
+            return result, exact_model
 
     def _repair_chinese(
         self, start_index: int, model: str, result: dict
     ) -> dict[str, object]:
-        last_error: Exception | None = None
-        for offset in range(len(self.api_keys)):
-            key = self.api_keys[(start_index + offset) % len(self.api_keys)]
-            repair_tokens = _estimate_input_tokens(json.dumps(
-                result, ensure_ascii=False, separators=(",", ":"),
-            )) + 512
-            if not self._reserve(key, repair_tokens):
-                continue
-            try:
-                return _call_gemini_chinese_repair(
-                    key,
-                    model,
-                    result.get("headline_zh"),
-                    result.get("summary_zh"),
-                    result.get("primary_story_title_zh"),
-                )
-            except urllib.error.HTTPError as error:
-                last_error = error
-                if error.code not in {401, 403, 429}:
-                    raise
-        raise RuntimeError("No Gemini quota available for Chinese repair") from last_error
+        payload = _chinese_repair_payload(result)
+        serialized = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+        input_tokens = self._count_or_conservative(
+            model,
+            payload,
+            conservative_tokens=max(
+                _estimate_input_tokens(serialized) + 512,
+                len(serialized.encode("utf-8")) + 512,
+            ),
+        )
+        repaired, _ = self.gateway.generate(
+            start_index,
+            model=model,
+            purpose="chinese-repair",
+            payload=payload,
+            input_tokens=input_tokens,
+            decode=_decode_model_json,
+            retryable_http_codes=frozenset({401, 403, 429}),
+            retryable_decode_errors=(ValueError, KeyError, json.JSONDecodeError),
+        )
+        return repaired
 
     def call_title(
         self, start_index: int, model: str, headline: str
     ) -> tuple[str, str]:
-        last_error: Exception | None = None
-        estimated_tokens = _estimate_input_tokens(headline) + 512
         models = TITLE_TRANSLATION_MODELS if model == DEFAULT_GEMMA_MODEL else (model,)
+        last_error: Exception | None = None
         for candidate_model in models:
-            for offset in range(len(self.api_keys)):
-                key = self.api_keys[(start_index + offset) % len(self.api_keys)]
-                if not self._reserve(key, estimated_tokens):
-                    continue
-                try:
-                    return _call_gemini_title(key, candidate_model, headline)
-                except (ValueError, KeyError, json.JSONDecodeError) as error:
-                    # A schema-valid response can still echo the English title.
-                    # Try another key/model instead of turning a simple display
-                    # translation into a permanent dead letter.
-                    last_error = error
-                except urllib.error.HTTPError as error:
-                    last_error = error
-                    if error.code not in {401, 403, 429}:
-                        raise
-        if last_error is None:
-            raise GeminiBatchCapacityExhausted(
-                "Gemini RPM slots used; retained for the next batch"
+            payload = _title_payload(headline)
+            input_tokens = self._count_or_conservative(
+                candidate_model,
+                payload,
+                conservative_tokens=max(
+                    _estimate_input_tokens(headline) + 512,
+                    len(headline.encode("utf-8")) + 512,
+                ),
             )
+            try:
+                return self.gateway.generate(
+                    start_index,
+                    model=candidate_model,
+                    purpose="headline-translation",
+                    payload=payload,
+                    input_tokens=input_tokens,
+                    decode=lambda envelope: _decode_title(envelope, headline),
+                    retryable_http_codes=frozenset({401, 403, 429}),
+                    retryable_decode_errors=(
+                        ValueError, KeyError, json.JSONDecodeError,
+                    ),
+                )
+            except GeminiBatchCapacityExhausted:
+                raise
+            except RuntimeError as error:
+                last_error = error
         raise RuntimeError("All title translation models failed validation") from last_error
 
     def call_impact(
         self, start_index: int, row: dict, *,
         prompt_version: str = IMPACT_PROMPT_VERSION,
     ) -> tuple[dict, str]:
-        last_error: Exception | None = None
-        last_http_error: urllib.error.HTTPError | None = None
         request_row = row
         prompt = _impact_prompt(request_row, prompt_version=prompt_version)
-        estimated_tokens = _estimate_input_tokens(prompt) + 1024
-        if self.request_reserver is not None:
-            # Google documents countTokens as the preflight source of truth.
-            # If it is temporarily unavailable, byte length is a deliberately
-            # conservative fallback and may defer rather than overrun TPM.
-            counted_tokens = None
-            for key in self.api_keys:
-                try:
-                    counted_tokens = _count_gemini_input_tokens(
-                        key, IMPACT_MODEL, _impact_payload(prompt),
-                    )
-                    break
-                except Exception:
-                    continue
-            if counted_tokens is None:
-                estimated_tokens = max(
-                    estimated_tokens, len(prompt.encode("utf-8")) + 1024,
-                )
-            else:
-                request_row, prompt, counted_tokens = _fit_impact_context_to_tpm(
-                    row,
-                    api_keys=self.api_keys,
-                    initial_tokens=counted_tokens,
-                    prompt_version=prompt_version,
-                )
-                estimated_tokens = counted_tokens
-        for offset in range(len(self.api_keys)):
-            key = self.api_keys[(start_index + offset) % len(self.api_keys)]
-            if not self._reserve(key, estimated_tokens):
-                continue
-            try:
-                if prompt_version == IMPACT_PROMPT_VERSION:
-                    return _call_gemini_impact(key, request_row)
-                return _call_gemini_impact(
-                    key, request_row, prompt_version=prompt_version,
-                )
-            except (ValueError, KeyError, json.JSONDecodeError) as error:
-                last_error = error
-            except urllib.error.HTTPError as error:
-                last_error = error
-                last_http_error = error
-                if error.code not in {401, 403, 429, 500, 502, 503, 504}:
-                    raise
-        if last_error is None:
-            raise GeminiBatchCapacityExhausted(
-                "Gemma RPM slots used; retained for the next batch"
-            )
-        if last_http_error is not None:
-            # Preserve the status code so the failure ledger applies the
-            # bounded transient 429/5xx retry schedule instead of treating it
-            # as a permanent validation failure.
-            raise last_http_error
-        raise RuntimeError("All Gemma impact requests failed validation") from last_error
+        payload = _impact_payload(prompt)
+        counted_tokens = self._count_or_conservative(
+            IMPACT_MODEL,
+            payload,
+            conservative_tokens=max(
+                _estimate_input_tokens(prompt) + 1024,
+                len(prompt.encode("utf-8")) + 1024,
+            ),
+        )
+        request_row, prompt, counted_tokens = _fit_impact_context_to_tpm(
+            row,
+            gateway=self.gateway,
+            initial_tokens=counted_tokens,
+            prompt_version=prompt_version,
+        )
+        return self.gateway.generate(
+            start_index,
+            model=IMPACT_MODEL,
+            purpose="news-impact",
+            payload=_impact_payload(prompt),
+            input_tokens=counted_tokens,
+            decode=lambda envelope: _decode_impact(envelope, request_row),
+            retryable_http_codes=frozenset({401, 403, 429, 500, 502, 503, 504}),
+            retryable_decode_errors=(ValueError, KeyError, json.JSONDecodeError),
+            preserve_last_http_error=True,
+        )
 
 
-def _call_gemini(
-    api_key: str,
-    model: str,
-    headline: str,
-    body: str,
-    *,
-    prompt_version: str = PROMPT_VERSION,
-) -> tuple[dict, str]:
-    prompt = _annotation_prompt(prompt_version, headline, body)
-    payload = _annotation_payload(prompt, prompt_version)
-    request = urllib.request.Request(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-        data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "x-goog-api-key": api_key,
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=120.0) as response:
-        envelope = json.loads(response.read())
+def _decode_model_json(envelope: dict[str, object]) -> dict:
     text = envelope["candidates"][0]["content"]["parts"][0]["text"]
-    result = json.loads(text)
-    exact_model = str(envelope.get("modelVersion") or model)
-    return result, exact_model
+    return _decode_json_object(text)
+
+
+def _chinese_repair_payload(result: dict) -> dict[str, object]:
+    return {
+        "contents": [{"parts": [{"text": (
+            "Translate all JSON values completely into natural Simplified "
+            "Chinese. No sentence may remain in Turkish, English, German, Greek, "
+            "Arabic, Spanish, or another source language. Preserve proper names, "
+            "abbreviations, dates, percentages, prices, and every number exactly. "
+            "Return JSON only.\nSOURCE_JSON\n"
+            + json.dumps(
+                {
+                    "headline_zh": result.get("headline_zh"),
+                    "summary_zh": result.get("summary_zh"),
+                    "primary_story_title_zh": result.get(
+                        "primary_story_title_zh"
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        )}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": {
+                "type": "object",
+                "required": ["headline_zh", "summary_zh", "primary_story_title_zh"],
+                "properties": {
+                    "headline_zh": {"type": "string"},
+                    "summary_zh": {"type": "string"},
+                    "primary_story_title_zh": {"type": "string"},
+                },
+            },
+            "maxOutputTokens": 2048,
+            "temperature": 0,
+        },
+    }
+
+
+def _title_payload(headline: str) -> dict[str, object]:
+    return {
+        "systemInstruction": {"parts": [{"text": (
+            "你是新闻标题翻译器。必须把标题翻译成自然、准确的简体中文，"
+            "不得原样返回英文标题。"
+        )}]},
+        "contents": [{"parts": [{"text": (
+            "请把以下新闻标题忠实翻译成自然的简体中文。保留人名、日期、"
+            "百分比、价格和所有数字，不要总结，不要补充标题以外的事实。"
+            "只返回 JSON。\nHEADLINE_START\n"
+            f"{headline}\nHEADLINE_END"
+        )}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": {
+                "type": "object",
+                "required": ["headline_zh"],
+                "properties": {"headline_zh": {
+                    "type": "string",
+                    "description": "忠实翻译后的简体中文新闻标题",
+                }},
+            },
+            "maxOutputTokens": 300,
+            "temperature": 0,
+        },
+    }
+
+
+def _decode_title(envelope: dict[str, object], headline: str) -> str:
+    result = _decode_model_json(envelope)
+    headline_zh = str(result.get("headline_zh") or "").strip()
+    translated = {"headline_zh": headline_zh}
+    _recover_display_fields(translated, headline, "")
+    headline_zh = translated["headline_zh"]
+    _require_title_numbers_preserved(headline_zh, headline)
+    _require_simplified_chinese(headline_zh, "headline_zh", 2, 4.0, 60)
+    return headline_zh
+
+
+def _decode_impact(envelope: dict[str, object], row: dict) -> dict:
+    result = _decode_model_json(envelope)
+    candidate_ids = {
+        str(candidate.get("candidate_id") or "")
+        for candidate in row.get("prior_event_context") or ()
+        if str(candidate.get("candidate_id") or "")
+    }
+    same_event_candidate_ids = {
+        str(candidate.get("candidate_id") or "")
+        for candidate in row.get("prior_event_context") or ()
+        if candidate.get("identity_anchor_eligible")
+    }
+    validated = validate_impact_assessment(
+        result,
+        candidate_ids=candidate_ids,
+        same_event_candidate_ids=same_event_candidate_ids,
+        candidate_context_complete=not bool(row.get("identity_context_truncated")),
+    )
+    validated["_source_context_mode"] = str(
+        row.get("source_context_mode") or "COMPLETE_BODY"
+    )
+    validated["_source_body_character_count"] = int(
+        row.get("source_body_character_count") or len(str(row.get("body") or ""))
+    )
+    _require_simplified_chinese(validated["reason_zh"], "reason_zh", 4, 0.5, 12)
+    return validated
 
 
 def _annotation_payload(prompt: str, prompt_version: str) -> dict[str, object]:
@@ -1127,57 +1114,6 @@ def _annotation_prompt(prompt_version: str, headline: str, body: str) -> str:
     )
 
 
-def _call_gemini_chinese_repair(
-    api_key: str,
-    model: str,
-    headline: object,
-    summary: object,
-    primary_story_title: object,
-) -> dict[str, object]:
-    payload = {
-        "contents": [{"parts": [{"text": (
-            "Translate all JSON values completely into natural Simplified "
-            "Chinese. No sentence may remain in Turkish, English, German, Greek, "
-            "Arabic, Spanish, or another source language. Preserve proper names, "
-            "abbreviations, dates, percentages, prices, and every number exactly. "
-            "Return JSON only.\nSOURCE_JSON\n"
-            + json.dumps(
-                {
-                    "headline_zh": headline,
-                    "summary_zh": summary,
-                    "primary_story_title_zh": primary_story_title,
-                },
-                ensure_ascii=False,
-            )
-        )}]}],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseSchema": {
-                "type": "object",
-                "required": ["headline_zh", "summary_zh", "primary_story_title_zh"],
-                "properties": {
-                    "headline_zh": {"type": "string"},
-                    "summary_zh": {"type": "string"},
-                    "primary_story_title_zh": {"type": "string"},
-                },
-            },
-            "maxOutputTokens": 2048,
-            "temperature": 0,
-        },
-    }
-    request = urllib.request.Request(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-        data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=120.0) as response:
-        envelope = json.loads(response.read())
-    return _decode_json_object(
-        envelope["candidates"][0]["content"]["parts"][0]["text"]
-    )
-
-
 def _decode_json_object(raw: object) -> dict:
     """Read the first JSON object while tolerating fences or trailing model prose."""
     text = str(raw or "").strip()
@@ -1188,96 +1124,6 @@ def _decode_json_object(raw: object) -> dict:
     if not isinstance(result, dict):
         raise ValueError("LLM response must be a JSON object")
     return result
-
-
-def _call_gemini_title(api_key: str, model: str, headline: str) -> tuple[str, str]:
-    payload = {
-        "systemInstruction": {"parts": [{"text": (
-            "你是新闻标题翻译器。必须把标题翻译成自然、准确的简体中文，"
-            "不得原样返回英文标题。"
-        )}]},
-        "contents": [{"parts": [{"text": (
-            "请把以下新闻标题忠实翻译成自然的简体中文。保留人名、日期、"
-            "百分比、价格和所有数字，不要总结，不要补充标题以外的事实。"
-            "只返回 JSON。\nHEADLINE_START\n"
-            f"{headline}\nHEADLINE_END"
-        )}]}],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseSchema": {
-                "type": "object",
-                "required": ["headline_zh"],
-                "properties": {"headline_zh": {
-                    "type": "string",
-                    "description": "忠实翻译后的简体中文新闻标题",
-                }},
-            },
-            "maxOutputTokens": 300,
-            "temperature": 0,
-        },
-    }
-    request = urllib.request.Request(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-        data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=120.0) as response:
-        envelope = json.loads(response.read())
-    result = _decode_json_object(
-        envelope["candidates"][0]["content"]["parts"][0]["text"]
-    )
-    headline_zh = str(result.get("headline_zh") or "").strip()
-    translated = {"headline_zh": headline_zh}
-    _recover_display_fields(translated, headline, "")
-    headline_zh = translated["headline_zh"]
-    _require_title_numbers_preserved(headline_zh, headline)
-    # Company names, tickers and publisher names legitimately remain in their
-    # source script.  The old 20-letter ceiling rejected valid translations
-    # such as "Public Storage：优先股… (PSA) - Seeking Alpha".
-    _require_simplified_chinese(headline_zh, "headline_zh", 2, 4.0, 60)
-    return headline_zh, str(envelope.get("modelVersion") or model)
-
-
-def _call_gemini_impact(
-    api_key: str, row: dict, *, prompt_version: str = IMPACT_PROMPT_VERSION,
-) -> tuple[dict, str]:
-    prompt = _impact_prompt(row, prompt_version=prompt_version)
-    payload = _impact_payload(prompt)
-    request = urllib.request.Request(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{IMPACT_MODEL}:generateContent",
-        data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=120.0) as response:
-        envelope = json.loads(response.read())
-    result = _decode_json_object(
-        envelope["candidates"][0]["content"]["parts"][0]["text"]
-    )
-    candidate_ids = {
-        str(candidate.get("candidate_id") or "")
-        for candidate in row.get("prior_event_context") or ()
-        if str(candidate.get("candidate_id") or "")
-    }
-    same_event_candidate_ids = {
-        str(candidate.get("candidate_id") or "")
-        for candidate in row.get("prior_event_context") or ()
-        if candidate.get("identity_anchor_eligible")
-    }
-    validated = validate_impact_assessment(
-        result, candidate_ids=candidate_ids,
-        same_event_candidate_ids=same_event_candidate_ids,
-        candidate_context_complete=not bool(row.get("identity_context_truncated")),
-    )
-    validated["_source_context_mode"] = str(
-        row.get("source_context_mode") or "COMPLETE_BODY"
-    )
-    validated["_source_body_character_count"] = int(
-        row.get("source_body_character_count") or len(str(row.get("body") or ""))
-    )
-    _require_simplified_chinese(validated["reason_zh"], "reason_zh", 4, 0.5, 12)
-    return validated, str(envelope.get("modelVersion") or IMPACT_MODEL)
 
 
 def _impact_payload(prompt: str) -> dict[str, object]:
@@ -1297,32 +1143,10 @@ def _impact_payload(prompt: str) -> dict[str, object]:
     }
 
 
-def _count_gemini_input_tokens(
-    api_key: str, model: str, generate_content_request: dict[str, object],
-) -> int:
-    """Ask the provider tokenizer for the exact preflight input size."""
-    request = urllib.request.Request(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:countTokens",
-        data=json.dumps({
-            "generateContentRequest": {
-                "model": f"models/{model}", **generate_content_request,
-            },
-        }, separators=(",", ":")).encode("utf-8"),
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=30.0) as response:
-        result = json.loads(response.read())
-    tokens = int(result["totalTokens"])
-    if tokens <= 0:
-        raise ValueError("Gemini token count is not positive")
-    return tokens
-
-
 def _fit_impact_context_to_tpm(
     row: dict,
     *,
-    api_keys: tuple[str, ...],
+    gateway: GeminiModelGateway,
     initial_tokens: int,
     prompt_version: str,
 ) -> tuple[dict, str, int]:
@@ -1342,7 +1166,7 @@ def _fit_impact_context_to_tpm(
                 evidence_row, prompt_version=prompt_version,
             )
             evidence_tokens = _count_impact_tokens(
-                api_keys, evidence_prompt,
+                gateway, evidence_prompt,
             )
             if evidence_tokens is None:
                 return evidence_row, evidence_prompt, max(
@@ -1359,7 +1183,7 @@ def _fit_impact_context_to_tpm(
         request_row["prior_event_context"] = candidates
         request_row["identity_context_truncated"] = True
         prompt = _impact_prompt(request_row, prompt_version=prompt_version)
-        recounted = _count_impact_tokens(api_keys, prompt)
+        recounted = _count_impact_tokens(gateway, prompt)
         if recounted is None:
             # Never guess that a reduced request is safe. The caller's atomic
             # reservation will defer this item until exact preflight recovers.
@@ -1371,15 +1195,13 @@ def _fit_impact_context_to_tpm(
     return request_row, prompt, counted_tokens
 
 
-def _count_impact_tokens(api_keys: tuple[str, ...], prompt: str) -> int | None:
-    for key in api_keys:
-        try:
-            return _count_gemini_input_tokens(
-                key, IMPACT_MODEL, _impact_payload(prompt),
-            )
-        except Exception:
-            continue
-    return None
+def _count_impact_tokens(
+    gateway: GeminiModelGateway, prompt: str,
+) -> int | None:
+    try:
+        return gateway.count_input_tokens(IMPACT_MODEL, _impact_payload(prompt))
+    except Exception:
+        return None
 
 
 def _impact_evidence_window_row(row: dict) -> dict | None:

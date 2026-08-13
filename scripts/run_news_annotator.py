@@ -37,6 +37,7 @@ from xauusd_forecaster.forward_ledger import ForwardLedger  # noqa: E402
 from xauusd_forecaster.gemini_quota import (  # noqa: E402
     GEMINI_REQUESTS_PER_DAY_PER_KEY,
 )
+from xauusd_forecaster.model_gateway import ModelRequestUsage  # noqa: E402
 from xauusd_forecaster.news_scheduler import (  # noqa: E402
     ApiCredential,
     backoff_job,
@@ -82,7 +83,7 @@ def _execute_job(
     urgent = job.priority in {"IMMEDIATE", "FAST"}
 
     def reserver_for(model_family: str, *, reserve_total: int = 0):
-        def reserve(_api_key: str, input_tokens: int) -> bool:
+        def reserve(usage: ModelRequestUsage) -> bool:
             is_gemma = not is_annotation
             return reserve_account_request(
                 ledger.connection,
@@ -96,7 +97,7 @@ def _execute_job(
                     GEMINI_REQUESTS_PER_MINUTE_PER_KEY
                     if is_annotation else GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL
                 ),
-                input_tokens=input_tokens,
+                input_tokens=usage.input_tokens,
                 input_tokens_per_minute=(
                     GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL
                     if is_gemma else GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL
