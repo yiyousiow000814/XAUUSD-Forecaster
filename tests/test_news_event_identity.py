@@ -162,6 +162,175 @@ def test_same_actor_and_object_remain_candidates_across_key_wording() -> None:
     assert prior_identity_similarity(current, prior) >= 0.75
 
 
+@pytest.mark.parametrize(
+    ("current", "prior", "expected_similarity"),
+    [
+        pytest.param(
+            {
+                "material_event_key": "south-africa-jobs-q2",
+                "episode_key": "south africa labor 2026 q2",
+                "canonical_actor_id": "Statistics-South-Africa",
+                "canonical_object_id": "Unemployment Rate",
+            },
+            {
+                "material_event_key": "za_unemployment_2026q2",
+                "episode_key": "za_jobs_q2_2026",
+                "canonical_actor_id": "statistics_south_africa",
+                "canonical_object_id": "unemployment_rate",
+            },
+            0.75,
+            id="same-release-different-wording",
+        ),
+        pytest.param(
+            {
+                "material_event_key": "fed_holds_rates_july",
+                "episode_key": "fomc_july_2026",
+                "canonical_actor_id": "federal_reserve",
+                "canonical_object_id": "federal_funds_target",
+            },
+            {
+                "material_event_key": "fomc_rate_decision_202607",
+                "episode_key": "fed_meeting_2026_07",
+                "canonical_actor_id": "Federal Reserve",
+                "canonical_object_id": "federal-funds-target",
+            },
+            0.75,
+            id="same-policy-decision-different-keys",
+        ),
+        pytest.param(
+            {
+                "material_event_key": "us_cpi_2026_08",
+                "episode_key": "us_inflation_august_2026",
+                "canonical_actor_id": "bureau_of_labor_statistics",
+                "canonical_object_id": "consumer_price_index",
+            },
+            {
+                "material_event_key": "us_cpi_2026_07",
+                "episode_key": "us_inflation_july_2026",
+                "canonical_actor_id": "bureau_of_labor_statistics",
+                "canonical_object_id": "consumer_price_index",
+            },
+            0.75,
+            id="same-series-new-period-is-still-compared",
+        ),
+        pytest.param(
+            {
+                "material_event_key": "gold_evening_pullback",
+                "episode_key": "gold_market_evening",
+                "canonical_actor_id": "spot_gold_market",
+                "canonical_object_id": "gold_price",
+            },
+            {
+                "material_event_key": "gold_morning_rally",
+                "episode_key": "gold_market_morning",
+                "canonical_actor_id": "korea_gold_exchange",
+                "canonical_object_id": "gold_price",
+            },
+            0.0,
+            id="same-asset-different-actor",
+        ),
+        pytest.param(
+            {
+                "material_event_key": "bls_cpi_release",
+                "episode_key": "us_inflation_release",
+                "canonical_actor_id": "bureau_of_labor_statistics",
+                "canonical_object_id": "consumer_price_index",
+            },
+            {
+                "material_event_key": "bls_payroll_release",
+                "episode_key": "us_employment_release",
+                "canonical_actor_id": "bureau_of_labor_statistics",
+                "canonical_object_id": "nonfarm_payrolls",
+            },
+            0.0,
+            id="same-institution-different-object",
+        ),
+        pytest.param(
+            {
+                "material_event_key": "bls_core_cpi_release",
+                "episode_key": "us_core_inflation_release",
+                "canonical_actor_id": "bureau_of_labor_statistics",
+                "canonical_object_id": "core_consumer_price_index",
+            },
+            {
+                "material_event_key": "bls_cpi_release",
+                "episode_key": "us_inflation_release",
+                "canonical_actor_id": "bureau_of_labor_statistics",
+                "canonical_object_id": "consumer_price_index",
+            },
+            0.5,
+            id="related-multiword-object-is-lower-priority",
+        ),
+        pytest.param(
+            {
+                "material_event_key": "central_bank_rate_comment",
+                "episode_key": "rate_comment",
+                "canonical_actor_id": "federal_reserve",
+                "canonical_object_id": "rate",
+            },
+            {
+                "material_event_key": "fed_interest_rate_decision",
+                "episode_key": "policy_decision",
+                "canonical_actor_id": "federal_reserve",
+                "canonical_object_id": "interest_rate",
+            },
+            0.0,
+            id="generic-single-token-object-does-not-match",
+        ),
+    ],
+)
+def test_candidate_admission_uses_identity_family_not_incident_keywords(
+    current, prior, expected_similarity,
+) -> None:
+    assert prior_identity_similarity(current, prior) == expected_similarity
+
+
+@pytest.mark.parametrize(
+    ("update_type", "relation", "matched", "core_changes", "identity_differences"),
+    [
+        pytest.param(
+            "DUPLICATE_REPORT", "SAME_EVENT", "prior", [], [],
+            id="same-release-from-another-publisher",
+        ),
+        pytest.param(
+            "MATERIAL_UPDATE", "SAME_EPISODE", "prior",
+            ["同一统计期的公布值被正式修订。"], [],
+            id="formal-revision-within-release",
+        ),
+        pytest.param(
+            "NEW_EVENT", "NEW_EPISODE", "", [],
+            ["参考期间不同，属于新的官方发布批次。"],
+            id="same-series-new-reference-period",
+        ),
+        pytest.param(
+            "NEW_EVENT", "NEW_EPISODE", "", [],
+            ["观察时段和明确驱动不同，属于另一段市场变化。"],
+            id="same-asset-separate-observation",
+        ),
+        pytest.param(
+            "COMMENTARY", "UNRESOLVED", "", [], [],
+            id="insufficient-visible-evidence",
+        ),
+    ],
+)
+def test_identity_outcome_matrix_keeps_merge_and_split_paths_open(
+    update_type, relation, matched, core_changes, identity_differences,
+) -> None:
+    result = assessment(update_type, relation, matched)
+    result["core_fact_changes_zh"] = core_changes
+    result["identity_differences_zh"] = identity_differences
+
+    validated = validate_impact_assessment(
+        result,
+        candidate_ids={"prior"},
+        same_event_candidate_ids={"prior"},
+    )
+
+    assert validated["update_type"] == update_type
+    assert validated["identity_relation"] == relation
+    assert validated["matched_candidate_id"] == matched
+
+
 def test_batch_resolution_refreshes_a_prior_identity_persisted_after_selection():
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row

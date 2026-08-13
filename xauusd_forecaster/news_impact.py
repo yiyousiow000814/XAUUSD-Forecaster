@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 import json
 
+from .news_identity import canonical_id
 from .news_relevance import google_news_item_is_relevant
 from .news_semantics import ACTIONABLE_RECORD_KINDS, CURRENT_NEWS_PROMPT_VERSION
 
@@ -169,26 +170,30 @@ def _comparison_items(value: object, label: str) -> list[str]:
 
 def prior_identity_similarity(current: dict, prior: dict) -> float:
     """Admit candidates only through stable occurrence anchors."""
-    current_material = str(current.get("material_event_key") or "").casefold()
-    prior_material = str(prior.get("material_event_key") or "").casefold()
-    current_episode = str(current.get("episode_key") or "").casefold()
-    prior_episode = str(prior.get("episode_key") or "").casefold()
+    current_material = canonical_id(current.get("material_event_key"))
+    prior_material = canonical_id(prior.get("material_event_key"))
+    current_episode = canonical_id(current.get("episode_key"))
+    prior_episode = canonical_id(prior.get("episode_key"))
     if (
         (current_material and current_material == prior_material)
         or (current_episode and current_episode == prior_episode)
     ):
         return 1.0
-    current_actor = str(current.get("canonical_actor_id") or "").casefold()
-    prior_actor = str(prior.get("canonical_actor_id") or "").casefold()
-    current_object = str(current.get("canonical_object_id") or "").casefold()
-    prior_object = str(prior.get("canonical_object_id") or "").casefold()
+    current_actor = canonical_id(current.get("canonical_actor_id"))
+    prior_actor = canonical_id(prior.get("canonical_actor_id"))
+    current_object = canonical_id(current.get("canonical_object_id"))
+    prior_object = canonical_id(prior.get("canonical_object_id"))
     actor_match = bool(current_actor and current_actor == prior_actor)
-    object_match = bool(
-        current_object and prior_object
-        and (current_object == prior_object
-             or current_object in prior_object or prior_object in current_object)
+    if not actor_match or not current_object or not prior_object:
+        return 0.0
+    if current_object == prior_object:
+        return 0.75
+    shorter, longer = sorted((current_object, prior_object), key=len)
+    related_object = (
+        len(shorter.split("_")) >= 2
+        and (longer.startswith(f"{shorter}_") or longer.endswith(f"_{shorter}"))
     )
-    return 0.75 if actor_match and object_match else 0.0
+    return 0.5 if related_object else 0.0
 
 
 def _claim_snapshot(annotation: dict) -> dict[str, object]:
