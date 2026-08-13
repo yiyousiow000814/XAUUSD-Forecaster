@@ -67,11 +67,36 @@ test("formats growing counts through one compact and exact display contract", ()
   assert.equal(progressCountPresentation(null, 1_450).current.main, "—");
 });
 
-test("keeps compact headline counts at the desktop metric size", () => {
+test("keeps nested compact counts in each dashboard headline hierarchy", () => {
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(css, /\.metric-grid strong \{[^}]*font-size:44px/);
+  for (const [selector, size] of [
+    ["metric-grid strong", "44px"],
+    ["quota-summary strong", "46px"],
+    ["evidence-summary strong", "40px"],
+    ["learning-summary-grid strong", "42px"],
+    ["event-thread-summary b", "25px"],
+    ["theme-streams article strong", "25px"],
+    ["story-grid header>strong", "34px"],
+    ["chart-caption>strong", "24px"],
+    ["execution-scorecards strong", "25px"],
+  ]) {
+    assert.match(css, new RegExp(`\\.${selector.replaceAll(".", "\\.")} \\{[^}]*font-size:${size}`));
+  }
   assert.match(css, /\.metric-grid strong \.count-value \{[^}]*font-size:inherit/);
-  assert.doesNotMatch(css, /\.metric-grid span,\.metric-grid small/);
+  for (const unsafeSelector of [
+    /\.metric-grid span,\.metric-grid small/,
+    /\.quota-summary span,\.quota-summary small/,
+    /\.evidence-summary span/,
+    /\.learning-summary-grid span,\.learning-summary-grid small/,
+    /\.event-thread-summary span/,
+    /\.theme-streams article span/,
+    /\.story-grid header span/,
+    /\.chart-caption span/,
+    /\.execution-scorecards small,\.execution-scorecards span/,
+    /\.annotation-queue span \{/,
+  ]) {
+    assert.doesNotMatch(css, unsafeSelector);
+  }
 });
 
 async function render(path) {
