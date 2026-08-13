@@ -30,6 +30,7 @@ from .training import MARKET_FEATURES
 UTC = timezone.utc
 PREVIEW_ROWS = 96
 SHADOW_ROWS = 200
+LIVE_GENERATION_STAGE = "SHADOW"
 RETRAIN_INTERVAL = 50
 NEWS_MIN_EXPOSED_ROWS = 30
 NEWS_MIN_CLUSTERS = 10
@@ -320,7 +321,7 @@ def _latest_generation(connection, stage: str):
 
 
 def require_current_contract_generation(connection) -> str:
-    """Return the active target generation or fail before live decisions run."""
+    """Return the active live-stage generation or fail before decisions run."""
     generation = connection.execute(
         """SELECT g.* FROM news_model_generation_activations_v1 a
         JOIN news_model_generations_v1 g USING(generation_id)
@@ -329,6 +330,11 @@ def require_current_contract_generation(connection) -> str:
     if not generation_matches_contract(generation, CURRENT_NEWS_CONTRACT):
         raise RuntimeError(
             "current Core/Broad news contract has no active generation"
+        )
+    if generation["model_stage"] != LIVE_GENERATION_STAGE:
+        raise RuntimeError(
+            f"live collector requires a {LIVE_GENERATION_STAGE} generation; "
+            f"latest active generation is {generation['model_stage']}"
         )
     members = {
         str(row["model_identity"]): str(row["artifact_path"])

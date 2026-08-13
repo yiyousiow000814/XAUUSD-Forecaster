@@ -1285,6 +1285,76 @@ def test_current_contract_generation_gate_fails_closed_without_complete_activati
     ledger.close()
 
 
+@pytest.mark.parametrize(
+    ("stage", "accepted"),
+    [("SHADOW", True), ("PREVIEW_ONLY", False)],
+)
+def test_live_generation_gate_accepts_only_the_live_stage(
+    tmp_path, stage: str, accepted: bool,
+) -> None:
+    """A complete activation is not live-safe unless its stage is SHADOW."""
+    ledger = ForwardLedger(tmp_path / f"forward-{stage.lower()}.sqlite3")
+    created_at = datetime(2026, 8, 5, 12, tzinfo=UTC)
+    generation_id = f"current-{stage.lower()}"
+    identities = (
+        "MARKET_ONLY", "NEWS_RESIDUAL", "FULL",
+        "BROAD_NEWS_RESIDUAL", "BROAD_FULL", "NEWS_ONLY",
+    )
+    for identity in identities:
+        model_version = f"{identity.lower()}-{stage.lower()}"
+        artifact_path = tmp_path / model_version / "artifact.json"
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_text("{}", encoding="utf-8")
+        ledger.connection.execute(
+            "INSERT INTO model_updates_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                model_version, identity, stage, created_at.isoformat(),
+                created_at.isoformat(), 200, 0, 200, 30, 10, 3,
+                f"dataset-{model_version}", "features", None,
+                str(artifact_path), f"hash-{model_version}", "CHALLENGER",
+            ),
+        )
+    ledger.connection.execute(
+        "INSERT INTO news_model_generations_v1 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            generation_id, stage, created_at.isoformat(), created_at.isoformat(),
+            CURRENT_NEWS_CONTRACT.policy_version,
+            CURRENT_NEWS_CONTRACT.feature_version,
+            CURRENT_NEWS_CONTRACT.eligibility_version,
+            "events", "market", "core", "broad",
+            training_v2.EVENT_WEIGHTING_VERSION, 5, "READY",
+        ),
+    )
+    for identity in identities:
+        table = (
+            "news_model_generation_aux_members_v1"
+            if identity == "NEWS_ONLY"
+            else "news_model_generation_members_v1"
+        )
+        ledger.connection.execute(
+            f"INSERT INTO {table} VALUES (?,?,?)",
+            (generation_id, identity, f"{identity.lower()}-{stage.lower()}"),
+        )
+    ledger.connection.execute(
+        "INSERT INTO news_model_generation_activations_v1 VALUES (?,?,?,?,?)",
+        ("activation", generation_id, None, created_at.isoformat(), "TEST"),
+    )
+
+    if accepted:
+        assert training_v2.require_current_contract_generation(
+            ledger.connection
+        ) == generation_id
+    else:
+        with pytest.raises(
+            RuntimeError,
+            match="live collector requires a SHADOW generation; "
+                  "latest active generation is PREVIEW_ONLY",
+        ):
+            training_v2.require_current_contract_generation(ledger.connection)
+
+    ledger.close()
+
+
 def test_policy_generation_does_not_reuse_legacy_retrain_clock(tmp_path, monkeypatch) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     initial_cutoff = datetime(2026, 8, 1, 12, tzinfo=UTC)
