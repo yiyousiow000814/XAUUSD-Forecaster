@@ -7,6 +7,12 @@ from datetime import datetime, timedelta, timezone
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_CONTROL_FILES = (
+    "xauusd_control_center.ps1",
+    "xauusd_watchdog_launcher.vbs",
+    "xauusd_watchdog_guard.ps1",
+    "xauusd_watchdog_guard_launcher.vbs",
+)
 
 
 def test_quote_bridge_uses_standalone_local_configuration() -> None:
@@ -120,6 +126,22 @@ def _write_runtime_observation(tmp_path, **overrides) -> None:
     path.write_text(json.dumps(state), encoding="utf-8")
 
 
+def _write_control_bundle(root: Path, label: str, *, scripts_dir: bool = False) -> None:
+    target = root / "scripts" if scripts_dir else root
+    target.mkdir(parents=True, exist_ok=True)
+    for name in RUNTIME_CONTROL_FILES:
+        (target / name).write_text(f"{label}|{name}\n", encoding="utf-8")
+
+
+def _bundle_result_expression(root: str) -> str:
+    names = ",".join(f"'{name}'" for name in RUNTIME_CONTROL_FILES)
+    return (
+        f"$bundle = @({names}) | ForEach-Object {{ "
+        f"(Get-Content -LiteralPath (Join-Path {root} $_) -Raw).Trim() }}; "
+        "Write-Output ($bundle -join ',')"
+    )
+
+
 def test_failed_preflight_never_switches_the_runtime_checkout(tmp_path) -> None:
     result = _run_control_center_contract(
         tmp_path,
@@ -169,7 +191,9 @@ def test_preflight_failure_always_stops_the_staged_api_process(tmp_path) -> None
     assert result == "False,1,PREFLIGHT_FAILED"
 
 
-def test_switch_preparation_failure_restores_previous_checkout(tmp_path) -> None:
+def test_switch_preparation_reports_when_previous_bundle_cannot_be_restored(
+    tmp_path,
+) -> None:
     previous = "a" * 40
     candidate = "b" * 40
     result = _run_control_center_contract(
@@ -186,7 +210,145 @@ def test_switch_preparation_failure_restores_previous_checkout(tmp_path) -> None
         'Write-Output "$accepted,$($script:checkouts -join \'|\'),$($state.update_status)"',
     )
 
-    assert result == f"False,{candidate}|{previous},SWITCH_FAILED"
+    assert result == f"False,{candidate}|{previous},ROLLBACK_FAILED"
+
+
+def test_candidate_switch_installs_one_complete_runtime_control_bundle(tmp_path) -> None:
+    _write_control_bundle(tmp_path / "runtime", "previous", scripts_dir=True)
+    _write_control_bundle(
+        tmp_path / "repository" / ".local" / "runtime-control", "previous"
+    )
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Get-CodeRevision { return ('a' * 40) }; "
+        "function Test-MainCandidate { return $true }; "
+        "function Invoke-ProductionShapePreflight { return $true }; "
+        "function git { if ($args -contains 'checkout') { foreach ($name in "
+        "$runtimeControlFileNames) { Set-Content -LiteralPath "
+        "(Join-Path $moduleRoot ('scripts\\' + $name)) "
+        f"-Value ('{candidate}|' + $name) }} }}; $global:LASTEXITCODE = 0 }}; "
+        f"$accepted = Update-RuntimeCheckout -Revision '{candidate}'; "
+        "$state = Get-RuntimeUpdateState; "
+        + _bundle_result_expression(
+            "(Join-Path $repositoryRoot '.local\\runtime-control')"
+        )
+        + "; Write-Output \"$accepted,$($state.update_status)\"",
+    ).splitlines()
+
+    assert result == [
+        ",".join(f"{candidate}|{name}" for name in RUNTIME_CONTROL_FILES),
+        "True,STAGED",
+    ]
+
+
+def test_switch_copy_failure_restores_the_complete_previous_control_bundle(
+    tmp_path,
+) -> None:
+    _write_control_bundle(tmp_path / "runtime", "previous", scripts_dir=True)
+    _write_control_bundle(
+        tmp_path / "repository" / ".local" / "runtime-control", "previous"
+    )
+    previous = "a" * 40
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:failedCandidateCopy = $false; "
+        f"function Get-CodeRevision {{ return '{previous}' }}; "
+        "function Test-MainCandidate { return $true }; "
+        "function Invoke-ProductionShapePreflight { return $true }; "
+        "function git { if ($args -contains 'checkout') { $revision = [string]$args[-1]; "
+        "foreach ($name in $runtimeControlFileNames) { Set-Content -LiteralPath "
+        "(Join-Path $moduleRoot ('scripts\\' + $name)) "
+        "-Value ($revision + '|' + $name) } }; $global:LASTEXITCODE = 0 }; "
+        "function Copy-Item { param([string]$LiteralPath,[string]$Destination,[switch]$Force); "
+        "$value = (Get-Content -LiteralPath $LiteralPath -Raw); "
+        f"if (-not $script:failedCandidateCopy -and $value -like '{candidate}*' -and "
+        "$LiteralPath -like '*xauusd_watchdog_guard.ps1') { "
+        "$script:failedCandidateCopy = $true; throw 'candidate copy failed' }; "
+        "Microsoft.PowerShell.Management\\Copy-Item -LiteralPath $LiteralPath "
+        "-Destination $Destination -Force:$Force }; "
+        f"$accepted = Update-RuntimeCheckout -Revision '{candidate}'; "
+        "$state = Get-RuntimeUpdateState; "
+        + _bundle_result_expression(
+            "(Join-Path $repositoryRoot '.local\\runtime-control')"
+        )
+        + "; Write-Output \"$accepted,$($state.update_status)\"",
+    ).splitlines()
+
+    assert result == [
+        ",".join(f"{previous}|{name}" for name in RUNTIME_CONTROL_FILES),
+        "False,SWITCH_FAILED",
+    ]
+
+
+def test_half_installed_candidate_bundle_is_reverted_before_switch_rollback(
+    tmp_path,
+) -> None:
+    _write_control_bundle(tmp_path / "runtime", "previous", scripts_dir=True)
+    _write_control_bundle(
+        tmp_path / "repository" / ".local" / "runtime-control", "previous"
+    )
+    previous = "a" * 40
+    candidate = "b" * 40
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:failedCandidateMove = $false; "
+        f"function Get-CodeRevision {{ return '{previous}' }}; "
+        "function Test-MainCandidate { return $true }; "
+        "function Invoke-ProductionShapePreflight { return $true }; "
+        "function git { if ($args -contains 'checkout') { $revision = [string]$args[-1]; "
+        "foreach ($name in $runtimeControlFileNames) { Set-Content -LiteralPath "
+        "(Join-Path $moduleRoot ('scripts\\' + $name)) "
+        "-Value ($revision + '|' + $name) } }; $global:LASTEXITCODE = 0 }; "
+        "function Move-Item { param([string]$LiteralPath,[string]$Destination,[switch]$Force); "
+        f"$value = (Get-Content -LiteralPath $LiteralPath -Raw); if (-not "
+        f"$script:failedCandidateMove -and $value -like '{candidate}*' -and "
+        "$LiteralPath -like '*xauusd_watchdog_guard.ps1') { "
+        "$script:failedCandidateMove = $true; throw 'candidate move failed' }; "
+        "Microsoft.PowerShell.Management\\Move-Item -LiteralPath $LiteralPath "
+        "-Destination $Destination -Force:$Force }; "
+        f"$accepted = Update-RuntimeCheckout -Revision '{candidate}'; "
+        "$state = Get-RuntimeUpdateState; "
+        + _bundle_result_expression(
+            "(Join-Path $repositoryRoot '.local\\runtime-control')"
+        )
+        + "; Write-Output \"$accepted,$($state.update_status)\"",
+    ).splitlines()
+
+    assert result == [
+        ",".join(f"{previous}|{name}" for name in RUNTIME_CONTROL_FILES),
+        "False,SWITCH_FAILED",
+    ]
+
+
+def test_observation_rollback_restores_the_complete_previous_control_bundle(
+    tmp_path,
+) -> None:
+    previous = "a" * 40
+    candidate = "b" * 40
+    _write_control_bundle(tmp_path / "runtime", previous, scripts_dir=True)
+    _write_control_bundle(
+        tmp_path / "repository" / ".local" / "runtime-control", candidate
+    )
+    result = _run_control_center_contract(
+        tmp_path,
+        "function git { $global:LASTEXITCODE = 0 }; "
+        "function Restart-CodeReloadableServices {}; "
+        "function Write-RuntimeCodeState {}; function Write-RuntimeUpdateFailure {}; "
+        "function Write-WatchdogEvent {}; "
+        f"$restored = Invoke-RuntimeRollback -FailedRevision '{candidate}' "
+        f"-PreviousRevision '{previous}' -Reason 'contract test'; "
+        + _bundle_result_expression(
+            "(Join-Path $repositoryRoot '.local\\runtime-control')"
+        )
+        + "; Write-Output $restored",
+    ).splitlines()
+
+    assert result == [
+        ",".join(f"{previous}|{name}" for name in RUNTIME_CONTROL_FILES),
+        "True",
+    ]
 
 
 def test_candidate_observation_is_durable_before_revision_is_marked_applied(
@@ -297,8 +459,6 @@ def test_watchdog_autostart_uses_one_windowless_registration_path(tmp_path) -> N
     assert 'New-TimeSpan -Minutes 2' in control_center
     assert "Ensure-WatchdogGuardTask" in control_center
     assert '"System32\\wscript.exe"' in control_center
-    assert 'Join-Path $moduleRoot "scripts\\xauusd_watchdog_launcher.vbs"' in control_center
-    assert 'Join-Path $moduleRoot "scripts\\xauusd_watchdog_guard_launcher.vbs"' in control_center
     assert "shell.Run(command, 0, True)" in launcher_text
     assert "shell.Run(command, 0, True)" in guard_launcher_text
     assert "-WindowStyle Hidden" in guard_launcher_text

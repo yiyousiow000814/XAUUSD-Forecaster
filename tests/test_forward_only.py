@@ -43,6 +43,8 @@ from xauusd_forecaster.market import (
 from xauusd_forecaster.news import (
     BLS_SOURCE,
     DIRECT_FULL_TEXT_RSS_SOURCES,
+    FRED_POLL_SOURCE,
+    FRED_SOURCE,
     GOOGLE_NEWS_LANES,
     GoogleNewsLane,
     RssSource,
@@ -60,6 +62,7 @@ from xauusd_forecaster.news import (
     extract_world_gold_council_article,
     parse_rss,
 )
+from xauusd_forecaster.news_features_v2 import aggregate_news_features_v2
 from xauusd_forecaster.news_relevance import google_news_item_is_relevant
 from xauusd_forecaster.ridge import RidgeArtifact, train_ridge
 from xauusd_forecaster.shadow_simulation import shadow_league
@@ -751,6 +754,58 @@ def test_broad_free_sources_are_first_seen_versioned_and_rate_limited(
     )["status"] == "OK"
     assert ledger.count("macro_observations") == 12
     assert ledger.count("news_revisions") == 3
+
+
+def test_fred_polling_continues_the_existing_macro_evidence_chain(
+    tmp_path, monkeypatch,
+) -> None:
+    monkeypatch.delenv("FRED_API_KEY", raising=False)
+    fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+    ledger.append_macro_observation({
+        "source": FRED_SOURCE,
+        "series_id": "DGS2",
+        "observation_period": "2026-08-03",
+        "collector_first_seen_time": fetched - timedelta(days=1),
+        "fetched_time": fetched - timedelta(days=1),
+        "value": 10.0,
+        "unit": "percent",
+        "payload": {"historical": True},
+        "content_hash": "historical-dgs2",
+    })
+
+    def fetcher(url: str) -> bytes:
+        series = url.split("id=")[1].split("&")[0]
+        return (
+            f"observation_date,{series}\n"
+            "2026-08-03,10.0\n"
+            "2026-08-04,11.0\n"
+        ).encode()
+
+    result = collect_fred_macro(ledger, fetched, fetcher)
+
+    macro_sources = {
+        row[0] for row in ledger.connection.execute(
+            "SELECT DISTINCT source FROM macro_observations"
+        ).fetchall()
+    }
+    poll_sources = {
+        row[0] for row in ledger.connection.execute(
+            "SELECT DISTINCT source FROM source_polls"
+        ).fetchall()
+    }
+    legacy_features = aggregate_news_features(ledger, fetched + timedelta(minutes=1))
+    v2_features = aggregate_news_features_v2(
+        ledger, fetched + timedelta(minutes=1)
+    )["features"]
+
+    assert result["source"] == FRED_POLL_SOURCE
+    assert macro_sources == {FRED_SOURCE}
+    assert poll_sources == {FRED_POLL_SOURCE}
+    assert legacy_features["rate_2y_level"] == 11.0
+    assert legacy_features["rate_2y_change"] == 1.0
+    assert v2_features["rate_2y_level"] == 11.0
+    assert v2_features["rate_2y_change"] == 1.0
 
 
 def test_registered_fred_api_is_bounded_and_never_persists_key(

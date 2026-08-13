@@ -487,7 +487,7 @@ def collect_fred_macro(
                 ).hexdigest()
                 _, created = ledger.append_macro_observation(
                     {
-                        "source": FRED_POLL_SOURCE,
+                        "source": FRED_SOURCE,
                         "series_id": series.series_id,
                         "observation_period": period,
                         "collector_first_seen_time": fetched_at,
