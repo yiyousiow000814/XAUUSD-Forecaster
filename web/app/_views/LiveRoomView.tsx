@@ -1,10 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
+import CountValue from "../_components/CountValue";
 import DashboardLink from "../_components/DashboardLink";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
+import { formatExactCount } from "../_lib/count-format";
 import { resolveNewsMetrics, type NewsMetrics } from "../_lib/news-metrics";
 
 type Decision = {
@@ -24,6 +27,7 @@ type Decision = {
 };
 
 type Payload = {
+  preview_status_summary?: boolean;
   generated_at: string;
   forward_epoch: string;
   system: {
@@ -107,9 +111,10 @@ const countdown = (seconds: number) => {
 };
 
 export default function LiveRoomView() {
-  const [payload, setPayload] = useState<Payload | null>(() => readDashboardResource<Payload>("/api/status"));
+  const cachedStatus = readDashboardResource<Payload>("/api/status");
+  const [payload, setPayload] = useState<Payload | null>(() => cachedStatus);
   const [error, setError] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
+  const [refreshing, setRefreshing] = useState(Boolean(cachedStatus?.preview_status_summary));
   const [now, setNow] = useState(() => Date.now());
   const immutablePreview = isImmutablePreview(payload);
 
@@ -127,13 +132,13 @@ export default function LiveRoomView() {
 
   useEffect(() => {
     return scheduleDashboardRefresh(
-      () => void refresh(),
+      () => void refresh(Boolean(payload?.preview_status_summary)),
       () => void refresh(true),
       DASHBOARD_REFRESH_INTERVALS.live,
       immutablePreview,
       "live-status",
     );
-  }, [refresh, immutablePreview]);
+  }, [refresh, immutablePreview, payload?.preview_status_summary]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
@@ -141,7 +146,9 @@ export default function LiveRoomView() {
   }, []);
 
   const latest = payload?.latest;
-  const loading = payload === null && error === null;
+  const loading = (payload === null || (refreshing && payload.preview_status_summary)) && error === null;
+  const currentPhase: CurrentDataPhase = error
+    ? "error" : loading ? "loading" : payload?.preview_status_summary ? "snapshot" : "ready";
   const online = Boolean(payload?.system.online && !error);
   const marketClosed = Boolean(
     (payload?.system.market_session === "CLOSED" ||
@@ -239,6 +246,7 @@ export default function LiveRoomView() {
       </section>
 
       {error && <div className="error-banner">{error}。行情采集可能仍在运行，但网页数据服务已停止。</div>}
+      <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
       {marketClosed && <div className="market-closed-banner">cTrader 已确认 XAUUSD 休市。系统暂停新增预测与 30 分钟样本，新闻采集继续运行。</div>}
 
       <section className="metric-grid">
@@ -247,22 +255,22 @@ export default function LiveRoomView() {
           <strong className={marketClosed || latest?.data_health === "OK" ? "good" : "warn"}>
             {marketClosed ? "休市" : latest?.data_health ?? "—"}
           </strong>
-          <small>{marketClosed ? "最后预测" : "最新决策"} {localTime(latest?.decision_time)}</small>
+          <small className="metric-detail metric-detail-time"><span>{marketClosed ? "最后预测" : "最新决策"}</span><time>{localTime(latest?.decision_time)}</time></small>
         </article>
         <article>
           <span>DECISIONS</span>
-          <strong>{payload?.counts.decision_events ?? 0}</strong>
-          <small>从 Forward Epoch 开始</small>
+          <strong><MetricValue phase={currentPhase}><CountValue value={payload?.counts.decision_events} /></MetricValue></strong>
+          <small className="metric-detail">Forward Epoch 起</small>
         </article>
         <article>
           <span>30M OUTCOMES</span>
-          <strong>{payload?.counts.outcomes ?? 0}</strong>
-          <small>{payload?.outcome_summary.samples ?? 0} 个有效样本</small>
+          <strong><MetricValue phase={currentPhase}><CountValue value={payload?.counts.outcomes} /></MetricValue></strong>
+          <small><CountValue value={payload?.outcome_summary.samples} format="exact" suffix=" 个有效样本" /></small>
         </article>
         <article>
           <span>NEWS ARTICLES</span>
-          <strong>{newsMetrics.articles.received}</strong>
-          <small>{newsMetrics.events.independent} 个独立事件 · {newsMetrics.articles.stored_revisions} 个保存版本</small>
+          <strong><MetricValue phase={currentPhase}><CountValue value={newsMetrics.articles.received} /></MetricValue></strong>
+          <small className="metric-detail metric-detail-stack"><CountValue value={newsMetrics.events.independent} format="exact" suffix=" 个独立事件" /><CountValue value={newsMetrics.articles.stored_revisions} format="exact" suffix=" 个保存版本" /></small>
         </article>
       </section>
 
@@ -298,7 +306,7 @@ export default function LiveRoomView() {
             <strong>{payload?.u5_context.label ?? "等待样本"}<small>{u5Percent === null ? "—" : `约 ±${u5Percent.toFixed(2)}% · ±$${u5Dollars?.toFixed(1)}`}</small></strong>
             <em>{riskPercentile.toFixed(0)} / 100</em>
             <div className="risk-scale" aria-label={`历史波动分位 ${riskPercentile.toFixed(0)} / 100`}><i style={{ left: `${Math.min(100, Math.max(0, riskPercentile))}%` }} /></div>
-            <p>箭头表示它在已收集 {payload?.u5_context.samples ?? 0} 个样本中的波动分位；越靠红色，未来30分钟通常波动越剧烈。它不是亏损概率，也不代表方向。</p>
+            <p>箭头表示它在已收集 {formatExactCount(payload?.u5_context.samples)} 个样本中的波动分位；越靠红色，未来30分钟通常波动越剧烈。它不是亏损概率，也不代表方向。</p>
           </div>
         </article>
 

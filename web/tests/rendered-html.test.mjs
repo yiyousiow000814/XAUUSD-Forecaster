@@ -6,6 +6,98 @@ const workerUrl = new URL("../dist/server/index.js", import.meta.url);
 workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
 const { default: worker } = await import(workerUrl.href);
 const { applyFreshness } = await import("../app/api/status/freshness.js");
+const { countPresentation, formatCompactCount, formatExactCount, progressCountPresentation } = await import("../app/_lib/count-format.ts");
+
+test("formats growing counts through one compact and exact display contract", () => {
+  const cases = [
+    [0, "0", "0"],
+    [999, "999", "999"],
+    [1_000, "1K", "1,000"],
+    [1_250, "1.3K", "1,250"],
+    [1_000_000, "1M", "1,000,000"],
+    [1_000_000_000, "1B", "1,000,000,000"],
+  ];
+
+  for (const [value, compact, exact] of cases) {
+    assert.equal(formatCompactCount(value), compact);
+    assert.equal(formatExactCount(value), exact);
+  }
+  assert.equal(formatCompactCount(null), "—");
+  assert.equal(formatCompactCount(Number.NaN), "—");
+
+  assert.deepEqual(countPresentation(1_250, "compact", " 条"), {
+    accessibleValue: "1,250 条",
+    display: "1.3K",
+    exact: "1,250",
+    title: "1,250 条",
+  });
+  assert.deepEqual(countPresentation(1_250, "exact", " 条"), {
+    accessibleValue: "1,250 条",
+    display: "1,250",
+    exact: "1,250",
+    title: undefined,
+  });
+  assert.deepEqual(countPresentation(null), {
+    accessibleValue: "暂无数据",
+    display: "—",
+    exact: "—",
+    title: undefined,
+  });
+
+  assert.deepEqual(progressCountPresentation(15_030, 15_050), {
+    current: { exact: "15,030", main: "15K", remainder: "30" },
+    isAbbreviated: true,
+    showExactDetail: false,
+    target: { exact: "15,050", main: "15K", remainder: "50" },
+  });
+  assert.deepEqual(progressCountPresentation(12_449_999, 12_450_000), {
+    current: { exact: "12,449,999", main: "12.4M" },
+    isAbbreviated: true,
+    showExactDetail: true,
+    target: { exact: "12,450,000", main: "12.4M" },
+  });
+  assert.deepEqual(progressCountPresentation(1_200_000_000, 1_500_000_000), {
+    current: { exact: "1,200,000,000", main: "1.2B" },
+    isAbbreviated: true,
+    showExactDetail: false,
+    target: { exact: "1,500,000,000", main: "1.5B" },
+  });
+  assert.equal(progressCountPresentation(1_234_567_890, 1_500_000_000).showExactDetail, true);
+  assert.equal(progressCountPresentation(1_200_000_000_000, 1_500_000_000_000).current.main, "1.2T");
+  assert.equal(progressCountPresentation(null, 1_450).current.main, "—");
+});
+
+test("keeps nested compact counts in each dashboard headline hierarchy", () => {
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  for (const [selector, size] of [
+    ["metric-grid strong", "44px"],
+    ["quota-summary strong", "46px"],
+    ["evidence-summary strong", "40px"],
+    ["learning-summary-grid strong", "42px"],
+    ["event-thread-summary b", "25px"],
+    ["theme-streams article strong", "25px"],
+    ["story-grid header>strong", "34px"],
+    ["chart-caption>strong", "24px"],
+    ["execution-scorecards strong", "25px"],
+  ]) {
+    assert.match(css, new RegExp(`\\.${selector.replaceAll(".", "\\.")} \\{[^}]*font-size:${size}`));
+  }
+  assert.match(css, /\.metric-grid strong \.count-value \{[^}]*font-size:inherit/);
+  for (const unsafeSelector of [
+    /\.metric-grid span,\.metric-grid small/,
+    /\.quota-summary span,\.quota-summary small/,
+    /\.evidence-summary span/,
+    /\.learning-summary-grid span,\.learning-summary-grid small/,
+    /\.event-thread-summary span/,
+    /\.theme-streams article span/,
+    /\.story-grid header span/,
+    /\.chart-caption span/,
+    /\.execution-scorecards small,\.execution-scorecards span/,
+    /\.annotation-queue span \{/,
+  ]) {
+    assert.doesNotMatch(css, unsafeSelector);
+  }
+});
 
 async function render(path) {
   return worker.fetch(
@@ -38,7 +130,7 @@ test("renders the live room with an audit-page navigation button", async () => {
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
 });
 
-test("keeps branch previews isolated from the production database", async () => {
+test("keeps branch Preview identity and blocks writes", async () => {
   const source = readFileSync(new URL("../app/api/_shared/preview.ts", import.meta.url), "utf8");
   const layout = readFileSync(new URL("../app/layout.tsx", import.meta.url), "utf8");
   assert.match(source, /PR Preview 是只读快照/);
@@ -74,6 +166,7 @@ test("hydrates preview pages from their immutable build snapshot", () => {
   assert.doesNotMatch(learning, /"recent_decisions"/);
   assert.doesNotMatch(learning, /"news_evidence"/);
   assert.match(learning, /items\.slice\(0, PREVIEW_NEWS_PAGE_SIZE\)/);
+  assert.match(learning, /totals_scope: "BUILD_SNAPSHOT"/);
   assert.match(learning, /history_resource: market\.history_resource \?\? PREVIEW_RESOURCES\.marketHistory/);
   assert.match(learning, /training_markers: market\.training_markers \?\? \[\]/);
   for (const key of ["news_evidence", "story_event_candidates", "recent_decisions"]) {
@@ -97,6 +190,60 @@ test("hydrates preview pages from their immutable build snapshot", () => {
   assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);
   assert.match(resources, /DEFAULT_TIMEOUT_MS = 10_000/);
   assert.match(resources, /数据读取超时，页面会自动重试/);
+});
+
+test("uses one current-data contract across every dashboard surface", () => {
+  const component = readFileSync(new URL("../app/_components/CurrentDataState.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  const statusRoute = readFileSync(new URL("../app/api/status/route.ts", import.meta.url), "utf8");
+  const learningRoute = readFileSync(new URL("../app/api/learning/route.ts", import.meta.url), "utf8");
+
+  assert.doesNotMatch(component, /正在同步页面当前指标/);
+  assert.doesNotMatch(component, />同步</);
+  assert.match(component, /current-metric-placeholder/);
+  assert.match(component, /role="progressbar"/);
+  assert.match(component, /显示构建快照/);
+  assert.match(css, /@keyframes current-data-pulse/);
+  assert.match(css, /prefers-reduced-motion:\s*reduce/);
+
+  for (const view of ["AuditView", "LiveRoomView", "StatusView", "HealthView"]) {
+    const source = readFileSync(new URL(`../app/_views/${view}.tsx`, import.meta.url), "utf8");
+    assert.match(source, /CurrentDataNotice/, `${view} must expose current-data state`);
+  }
+  const audit = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  assert.match(audit, /live_oos_model_groups !== undefined\s*\? statusState/);
+
+  const statusD1 = statusRoute.indexOf("dashboard_snapshots WHERE id = ?");
+  const statusPreviewFallback = statusRoute.indexOf("if (previewBundle) return previewJson(previewBundle.status)");
+  const learningD1 = learningRoute.indexOf("dashboard_snapshots WHERE id = ?");
+  const learningPreviewFallback = learningRoute.indexOf("if (previewBundle?.learning_summary)");
+  assert.ok(statusD1 >= 0 && statusPreviewFallback > statusD1, "Preview status must prefer current D1 data");
+  assert.ok(learningD1 >= 0 && learningPreviewFallback > learningD1, "Preview learning must prefer current D1 data");
+  assert.match(statusRoute, /withPreviewIdentity\(current, previewBundle\.status\)/);
+  assert.match(learningRoute, /"X-Aurum-Preview": "read-only-d1-snapshot"/);
+});
+
+test("only a current D1 archive may publish the 60-day news total", async () => {
+  const { authoritativeNewsTotals } = await import("../app/_lib/news-index-contract.ts");
+  const frozen = {
+    total: 200, all_total: 200, readable_total: 200,
+    parsed_total: 195, model_candidate_total: 14,
+    totals_scope: "BUILD_SNAPSHOT",
+  };
+  assert.equal(authoritativeNewsTotals(frozen), null);
+  assert.deepEqual(authoritativeNewsTotals({
+    ...frozen,
+    total: 1138,
+    all_total: 1138,
+    readable_total: 1138,
+    parsed_total: 1100,
+    model_candidate_total: 31,
+    totals_scope: "D1_ARCHIVE",
+  }), { category: 1138, readable: 1138, parsed: 1100, modelCandidates: 31 });
+  assert.equal(authoritativeNewsTotals({
+    ...frozen,
+    totals_scope: "RECENT_WINDOW",
+  }), null);
 });
 
 test("keeps every audit collection in compact Preview status", () => {
@@ -180,7 +327,8 @@ test("renders every preview room from the build snapshot", async () => {
     const response = await render(`/?room=audit&view=${view}`);
     assert.equal(response.status, 200, view);
     const html = await response.text();
-    assert.doesNotMatch(html, /读取中/, view);
+    assert.doesNotMatch(html, /正在同步页面当前指标/, view);
+    assert.match(html, /current-metric-placeholder/, view);
   }
 });
 
@@ -298,7 +446,8 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /api\/news-content\?key=/);
   assert.match(source, /api\/news-index\?/);
   assert.match(source, /api\/learning/);
-  assert.match(source, /view !== "news"/);
+  assert.match(source, /if \(view !== "news"\) \{[\s\S]*?fullNewsIndexReadyRef\.current[\s\S]*?refreshNews\(true\)/);
+  assert.match(source, /Do not poll off-screen/);
   assert.match(source, /view !== "league"/);
   assert.match(source, /loadDashboardResource<Payload>\("\/api\/status"/);
   assert.doesNotMatch(source, /Promise\.allSettled/);
@@ -613,6 +762,9 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(page, /六套模型，现在表现怎样/);
   assert.match(page, /等待新版生成/);
   assert.match(page, /training-card-total/);
+  assert.match(page, /className="training-progress-tail"/);
+  assert.match(css, /\.training-card-total strong \.training-progress-tail \{[^}]*font-size:\.42em/);
+  assert.doesNotMatch(css, /\.training-progress-pair small \{/);
   assert.match(page, /还差/);
   assert.doesNotMatch(page, /含新闻的决策时点/);
   assert.doesNotMatch(page, /重复决策样本，不是文章数/);
@@ -631,11 +783,11 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /两套独立实验/);
   assert.match(modal, /仓位倍率 OOS/);
   assert.match(modal, /提前退出 OOS/);
-  assert.match(modal, /总计 \{count\} 笔/);
-  assert.match(modal, /当前显示最新 \{visibleCount\} 笔/);
+  assert.match(modal, /总计 <CountValue value=\{count\} suffix=" 笔" \/>/);
+  assert.match(modal, /当前显示最新 \{formatExactCount\(visibleCount\)\} 笔/);
   assert.match(modal, /图中压缩为/);
   assert.match(modal, /resource=execution-point/);
-  assert.match(modal, /第 \{page \+ 1\} 段 · 共 \{total\} 个历史绘图点/);
+  assert.match(modal, /第 \{formatExactCount\(page \+ 1\)\} 段 · 共 \{formatExactCount\(total\)\} 个历史绘图点/);
   assert.match(modal, /← 较早/);
   assert.match(modal, /较晚 →/);
   assert.match(css, /\.execution-chart-grid \{ display:grid; grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
