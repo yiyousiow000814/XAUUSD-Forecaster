@@ -5,7 +5,7 @@ import { CurrentDataNotice, type CurrentDataPhase } from "../_components/Current
 import DashboardLink from "../_components/DashboardLink";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
-import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
+import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 
 type StatusPayload = {
   preview_status_summary?: boolean;
@@ -58,7 +58,6 @@ export default function HealthView() {
   const [payload, setPayload] = useState<StatusPayload | null>(() => cachedStatus);
   const [error, setError] = useState<string | null>(null);
   const [syncingCurrent, setSyncingCurrent] = useState(Boolean(cachedStatus?.preview_status_summary));
-  const immutablePreview = isImmutablePreview(payload);
   const refresh = useCallback(async (force = false, showSyncState = false) => {
     if (showSyncState) setSyncingCurrent(true);
     try {
@@ -76,10 +75,10 @@ export default function HealthView() {
       () => void refresh(Boolean(payload?.preview_status_summary), Boolean(payload?.preview_status_summary)),
       () => void refresh(true, Boolean(payload?.preview_status_summary)),
       DASHBOARD_REFRESH_INTERVALS.status,
-      immutablePreview,
+      "current",
       "status",
     );
-  }, [refresh, immutablePreview, payload?.preview_status_summary]);
+  }, [refresh, payload?.preview_status_summary]);
 
   const currentPhase: CurrentDataPhase = error
     ? "error" : !payload || syncingCurrent ? "loading" : payload.preview_status_summary ? "snapshot" : "ready";

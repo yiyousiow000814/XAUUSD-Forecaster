@@ -1,4 +1,5 @@
 export type DashboardRefreshCleanup = () => void;
+export type DashboardResourceMode = "current" | "build-snapshot";
 
 export const DASHBOARD_REFRESH_INTERVALS = {
   live: 15_000,
@@ -25,37 +26,29 @@ function mayPoll(coordinationKey: string, intervalMs: number): boolean {
   return true;
 }
 
-/** Run once immediately, then poll only when the payload is live. */
+/** Run once immediately; only current read-only resources may poll. */
 export function scheduleDashboardRefresh(
   initialRefresh: () => void,
   pollRefresh: () => void,
   intervalMs: number,
-  immutablePreview: boolean,
+  resourceMode: DashboardResourceMode,
   coordinationKey = "status",
 ): DashboardRefreshCleanup {
   const initial = window.setTimeout(initialRefresh, 0);
   const pollWhenEligible = () => {
     if (mayPoll(coordinationKey, intervalMs)) pollRefresh();
   };
-  const interval = immutablePreview
-    ? null
-    : window.setInterval(pollWhenEligible, intervalMs);
+  const mayRefresh = resourceMode === "current";
+  const interval = mayRefresh
+    ? window.setInterval(pollWhenEligible, intervalMs)
+    : null;
   const resume = () => {
     if (document.visibilityState === "visible") pollWhenEligible();
   };
-  if (!immutablePreview) document.addEventListener("visibilitychange", resume);
+  if (mayRefresh) document.addEventListener("visibilitychange", resume);
   return () => {
     window.clearTimeout(initial);
     if (interval !== null) window.clearInterval(interval);
     document.removeEventListener("visibilitychange", resume);
   };
-}
-
-export function isImmutablePreview(payload: unknown): boolean {
-  if (!payload || typeof payload !== "object") return false;
-  const preview = (payload as { preview?: unknown }).preview;
-  return Boolean(
-    preview && typeof preview === "object"
-    && (preview as { is_preview?: unknown }).is_preview === true,
-  );
 }

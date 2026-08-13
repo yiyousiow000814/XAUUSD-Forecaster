@@ -6,8 +6,8 @@ import DashboardLink from "../_components/DashboardLink";
 import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
-import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
-import { PREVIEW_NEWS_PAGE_SIZE } from "../_lib/preview-contract";
+import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
+import { PREVIEW_NEWS_PAGE_SIZE } from "../_lib/preview-manifest";
 import { resolveNewsMetrics, type NewsMetrics } from "../_lib/news-metrics";
 import { authoritativeNewsTotals, type NewsTotalsScope } from "../_lib/news-index-contract";
 import LearningGraphModal from "../audit/LearningGraphModal";
@@ -735,7 +735,6 @@ export default function AuditView() {
   const [summaryCadence, setSummaryCadence] = useState<EvaluationCadence>("EVERY_5M");
   const [evidenceMode, setEvidenceMode] = useState<"seen" | "unseen" | "all">("seen");
   const auditTabsRef = useRef<HTMLElement>(null);
-  const immutablePreview = isImmutablePreview(payload);
 
   const refreshStatus = useCallback(async (force = false) => {
     try {
@@ -787,10 +786,10 @@ export default function AuditView() {
       () => void refreshStatus(!fullStatusReadyRef.current),
       () => void refreshStatus(true),
       DASHBOARD_REFRESH_INTERVALS.status,
-      immutablePreview,
+      "current",
       "status",
     );
-  }, [refreshStatus, immutablePreview]);
+  }, [refreshStatus]);
 
   useEffect(() => {
     if (view !== "news") {
@@ -813,10 +812,10 @@ export default function AuditView() {
         reason instanceof Error ? reason.message : "无法读取新闻索引",
       )),
       DASHBOARD_REFRESH_INTERVALS.news,
-      immutablePreview,
+      "current",
       `news-index:${newsCategory}:${newsPage}`,
     );
-  }, [refreshNews, view, immutablePreview, newsCategory, newsPage]);
+  }, [refreshNews, view, newsCategory, newsPage]);
 
   useEffect(() => {
     if (view !== "league") return;
@@ -827,10 +826,10 @@ export default function AuditView() {
       () => void refreshLearning(!fullLearningReadyRef.current),
       () => void refreshLearning(true),
       DASHBOARD_REFRESH_INTERVALS.learning,
-      immutablePreview,
+      "current",
       "learning",
     );
-  }, [refreshLearning, view, immutablePreview]);
+  }, [refreshLearning, view]);
 
   const openLearningGraph = (tab: "curve" | "execution") => {
     setGraphStartTab(tab);

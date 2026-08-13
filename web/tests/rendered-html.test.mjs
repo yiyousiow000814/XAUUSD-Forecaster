@@ -41,7 +41,7 @@ test("renders the live room with an audit-page navigation button", async () => {
 test("keeps branch Preview identity and blocks writes", async () => {
   const source = readFileSync(new URL("../app/api/_shared/preview.ts", import.meta.url), "utf8");
   const layout = readFileSync(new URL("../app/layout.tsx", import.meta.url), "utf8");
-  assert.match(source, /PR Preview 是只读快照/);
+  assert.match(source, /PR Preview 只读且无运行或交易权限/);
   assert.match(source, /X-Aurum-Preview/);
   assert.match(layout, /<PreviewBanner \/>/);
 
@@ -54,9 +54,22 @@ test("keeps branch Preview identity and blocks writes", async () => {
     .join("\n");
   assert.match(builtPreview, /PREVIEW_SNAPSHOT/);
   assert.match(builtPreview, new RegExp(process.env.WORKERS_CI_BRANCH.replaceAll("/", "\\/")));
+
+  for (const path of [
+    "../app/api/ingest/route.ts", "../app/api/learning/route.ts",
+    "../app/api/learning-history/route.ts", "../app/api/news-index/route.ts",
+    "../app/api/news-content/route.ts", "../app/api/market-chart/route.ts",
+    "../app/api/market-history/route.ts",
+  ]) {
+    const route = readFileSync(new URL(path, import.meta.url), "utf8");
+    const rejection = route.indexOf("rejectPreviewWrite()");
+    const authorization = route.indexOf("isIngestAuthorized(request)");
+    assert.ok(rejection >= 0, `${path} must reject Preview writes`);
+    assert.ok(authorization < 0 || rejection < authorization, `${path} must reject before auth or storage`);
+  }
 });
 
-test("hydrates preview pages from their immutable build snapshot", () => {
+test("hydrates Preview first paint from its immutable build snapshot", () => {
   const page = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
   const app = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
   const resources = readFileSync(new URL("../app/_lib/dashboard-resource.ts", import.meta.url), "utf8");
@@ -65,7 +78,7 @@ test("hydrates preview pages from their immutable build snapshot", () => {
   assert.match(page, /previewBundle\.learning_summary/);
   const vite = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
   const learning = readFileSync(new URL("../build/preview-learning.ts", import.meta.url), "utf8");
-  const contract = readFileSync(new URL("../preview-contract.json", import.meta.url), "utf8");
+  const manifest = JSON.parse(readFileSync(new URL("../preview-manifest.json", import.meta.url), "utf8"));
   const previewBuilder = readFileSync(new URL("../../scripts/build_preview_bundle.py", import.meta.url), "utf8");
   assert.match(vite, /compactPreviewLearning/);
   assert.match(vite, /compactPreviewStatus/);
@@ -78,9 +91,9 @@ test("hydrates preview pages from their immutable build snapshot", () => {
   assert.match(learning, /history_resource: market\.history_resource \?\? PREVIEW_RESOURCES\.marketHistory/);
   assert.match(learning, /training_markers: market\.training_markers \?\? \[\]/);
   for (const key of ["news_evidence", "story_event_candidates", "recent_decisions"]) {
-    assert.match(contract, new RegExp(`"${key}"`), key);
+    assert.ok(manifest.statusInlineKeys.includes(key), key);
   }
-  assert.match(contract, /"marketHistory": "\/api\/market-history"/);
+  assert.equal(manifest.resources.marketHistory, "/api/market-history");
   assert.doesNotMatch(page, /function previewRoomResources/);
   assert.match(learning, /models\.filter/);
   assert.match(learning, /lifecycle_status === "LATEST"/);
@@ -154,16 +167,16 @@ test("only a current D1 archive may publish the 60-day news total", async () => 
   }), null);
 });
 
-test("keeps every audit collection in compact Preview status", () => {
-  const contract = readFileSync(new URL("../preview-contract.json", import.meta.url), "utf8");
+test("keeps every audit collection in the compact Preview manifest", () => {
+  const manifest = JSON.parse(readFileSync(new URL("../preview-manifest.json", import.meta.url), "utf8"));
   for (const key of [
     "news_evidence", "storylines", "story_event_candidates", "theme_streams",
     "market_reaction_streams", "recent_decisions",
   ]) {
-    assert.match(contract, new RegExp(`"${key}"`), key);
+    assert.ok(manifest.statusInlineKeys.includes(key), key);
   }
-  assert.match(contract, /"preview"/);
-  assert.match(contract, /"marketHistory": "\/api\/market-history"/);
+  assert.ok(manifest.statusInlineKeys.includes("preview"));
+  assert.equal(manifest.resources.marketHistory, "/api/market-history");
 });
 
 test("falls through to read-only D1 for later Preview news and details", () => {
@@ -171,8 +184,10 @@ test("falls through to read-only D1 for later Preview news and details", () => {
   const detail = readFileSync(new URL("../app/api/news-content/route.ts", import.meta.url), "utf8");
   assert.doesNotMatch(index, /inlinePreviewItems/);
   assert.match(index, /D1 is the source of truth even on the first Preview page/);
-  assert.match(index, /if \(previewBundle\) \{\s*return previewJson\(\{ error: "新闻档案暂时不可用，请稍后重试" \}, 503\)/);
+  assert.match(index, /"read-only-d1-archive"/);
+  assert.match(index, /"current-read-unavailable"/);
   assert.match(detail, /if \(detail\) return previewJson\(detail\)/);
+  assert.match(detail, /"read-only-d1-detail"/);
   assert.doesNotMatch(detail, /该新闻详情不在本次 Preview 快照中/);
 });
 
@@ -191,15 +206,16 @@ test("keeps the 60-day news archive inside bounded D1 work", () => {
   assert.match(migration, /news_index_category_published_idx/);
 });
 
-test("does not poll immutable Preview snapshots", () => {
+test("refreshes current resources without polling build-snapshot-only resources", () => {
   const helper = readFileSync(new URL("../app/_lib/dashboard-refresh.ts", import.meta.url), "utf8");
   assert.match(helper, /live:\s*15_000/);
   assert.match(helper, /status:\s*60_000/);
   assert.match(helper, /news:\s*30_000/);
   assert.match(helper, /learning:\s*300_000/);
   assert.match(helper, /deployment:\s*120_000/);
-  assert.match(helper, /immutablePreview\s*\?\s*null\s*:\s*window\.setInterval\(pollWhenEligible/);
-  assert.match(helper, /is_preview[^=]*=== true/s);
+  assert.match(helper, /DashboardResourceMode = "current" \| "build-snapshot"/);
+  assert.match(helper, /resourceMode === "current"/);
+  assert.match(helper, /mayRefresh\s*\?\s*window\.setInterval\(pollWhenEligible, intervalMs\)\s*:\s*null/);
   assert.match(helper, /document\.visibilityState !== "visible"/);
   assert.match(helper, /navigator\.webdriver/);
   assert.match(helper, /localStorage\.getItem/);
@@ -216,11 +232,12 @@ test("does not poll immutable Preview snapshots", () => {
   ]) {
     const source = readFileSync(new URL(path, import.meta.url), "utf8");
     assert.match(source, /scheduleDashboardRefresh/);
-    assert.match(source, /immutablePreview/);
+    assert.match(source, /DASHBOARD_REFRESH_INTERVALS\.[a-z]+,[\s\S]*?"current"/);
+    assert.doesNotMatch(source, /isImmutablePreview|immutablePreview/);
   }
 });
 
-test("renders every preview room from the build snapshot", async () => {
+test("renders every Preview room from the embedded build snapshot", async () => {
   if (!process.env.WORKERS_CI_BRANCH || process.env.WORKERS_CI_BRANCH === "main") return;
   for (const [path, marker] of [
     ["/", /Aurum Signal Room/],

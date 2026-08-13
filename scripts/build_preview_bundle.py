@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build an immutable, branch-aware dashboard bundle for Worker previews."""
+"""Build an immutable branch snapshot for Worker Previews."""
 
 from __future__ import annotations
 
@@ -34,10 +34,10 @@ SERIES_BY_DOMAIN = {
     "流动性": "WALCL",
     "风险偏好": "VIXCLS",
 }
-PREVIEW_CONTRACT = json.loads(
-    (MODULE_ROOT / "web" / "preview-contract.json").read_text(encoding="utf-8")
+PREVIEW_MANIFEST = json.loads(
+    (MODULE_ROOT / "web" / "preview-manifest.json").read_text(encoding="utf-8")
 )
-PREVIEW_NEWS_PAGE_SIZE = int(PREVIEW_CONTRACT["newsPageSize"])
+PREVIEW_NEWS_PAGE_SIZE = int(PREVIEW_MANIFEST["newsPageSize"])
 
 
 def _read_json(base_url: str, path: str) -> dict:
@@ -52,7 +52,7 @@ def _read_json(base_url: str, path: str) -> dict:
 
 
 def _execution_history_records(base_url: str) -> list[dict]:
-    """Copy bounded public execution pages into the immutable Preview bundle."""
+    """Copy bounded public execution pages into the immutable build snapshot."""
     records: dict[tuple[str, str], dict] = {}
     for identity in ("LOT_RIDGE", "EXIT_RIDGE"):
         cursor: str | None = None

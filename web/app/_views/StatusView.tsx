@@ -5,7 +5,7 @@ import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_compo
 import DashboardLink from "../_components/DashboardLink";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
-import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
+import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 
 type QuotaKey = {
   slot: number;
@@ -104,7 +104,6 @@ export default function StatusView() {
   const [error, setError] = useState<string | null>(null);
   const [syncingCurrent, setSyncingCurrent] = useState(Boolean(cachedStatus?.preview_status_summary));
   const [nowMs, setNowMs] = useState(0);
-  const immutablePreview = isImmutablePreview(payload);
 
   const refresh = useCallback(async (force = false, showSyncState = false) => {
     if (showSyncState) setSyncingCurrent(true);
@@ -123,10 +122,10 @@ export default function StatusView() {
       () => void refresh(Boolean(payload?.preview_status_summary), Boolean(payload?.preview_status_summary)),
       () => void refresh(true, Boolean(payload?.preview_status_summary)),
       DASHBOARD_REFRESH_INTERVALS.status,
-      immutablePreview,
+      "current",
       "status",
     );
-  }, [refresh, immutablePreview, payload?.preview_status_summary]);
+  }, [refresh, payload?.preview_status_summary]);
 
   useEffect(() => {
     const initial = window.setTimeout(() => setNowMs(Date.now()), 0);

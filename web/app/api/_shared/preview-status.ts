@@ -1,6 +1,6 @@
 type JsonObject = Record<string, unknown>;
 
-/** Keep branch identity and safety state while reading current public metrics. */
+/** Keep Preview identity and authority boundaries on current read-only metrics. */
 export function withPreviewIdentity(current: JsonObject, frozen: JsonObject): JsonObject {
   const currentSystem = current.system && typeof current.system === "object"
     ? current.system as JsonObject : {};
@@ -15,8 +15,8 @@ export function withPreviewIdentity(current: JsonObject, frozen: JsonObject): Js
       ...currentSystem,
       online: false,
       market_session: "DATA_UNAVAILABLE",
-      source_of_truth: frozenSystem.source_of_truth,
-      sites_mirror: frozenSystem.sites_mirror,
+      source_of_truth: "生产 D1 当前只读数据",
+      sites_mirror: "PR 分支预览（无运行权限）",
       deployment: frozenSystem.deployment,
     },
   };

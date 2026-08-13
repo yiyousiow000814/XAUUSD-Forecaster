@@ -33,10 +33,11 @@ export async function GET(request: Request) {
   if (!row) {
     return NextResponse.json({ error: "新闻详情仍在同步" }, { status: 404 });
   }
-  return NextResponse.json(
-    { detail_hash: row.detail_hash, payload: JSON.parse(row.payload) },
-    { headers: { "Cache-Control": "private, max-age=300" } },
-  );
+  const payload = { detail_hash: row.detail_hash, payload: JSON.parse(row.payload) };
+  if (previewBundle) return previewJson(payload, 200, "read-only-d1-detail");
+  return NextResponse.json(payload, {
+    headers: { "Cache-Control": "private, max-age=300" },
+  });
 }
 
 export async function POST(request: Request) {
