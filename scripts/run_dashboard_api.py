@@ -66,6 +66,7 @@ from xauusd_forecaster.news_evidence import (  # noqa: E402
 from xauusd_forecaster.news_relevance import GOOGLE_NEWS_MAX_AGE  # noqa: E402
 from xauusd_forecaster.news_contracts import CURRENT_NEWS_CONTRACT  # noqa: E402
 from xauusd_forecaster.news_features_v2 import COLLECTION_SOURCES  # noqa: E402
+from xauusd_forecaster.news_source_registry import MONITORED_NEWS_SOURCES  # noqa: E402
 from xauusd_forecaster.news_impact import (  # noqa: E402
     IMPACT_MODEL,
     IMPACT_PROMPT_VERSION,
@@ -286,6 +287,8 @@ NEWS_SOURCE_DEFINITIONS = {
     "google_news_fed_rates": ("Google News Fed & Rates", "发现源", 45, ("google_news_fed_rates",)),
     "world_gold_council_central_banks": ("World Gold Council", "发布源", 420, ("world_gold_council_central_banks",)),
 }
+if set(NEWS_SOURCE_DEFINITIONS) != set(MONITORED_NEWS_SOURCES):
+    raise RuntimeError("dashboard news-source definitions do not match the registry")
 
 
 def _parse_utc(value: str | None) -> datetime | None:

@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 from .inference_v2 import MODEL_IDENTITIES
 from .news_scheduler import quota_day
+from .news_source_registry import MONITORED_NEWS_SOURCES
 
 
 GEMINI_FAMILIES = ("gemini-3.5-flash-lite",)
@@ -102,23 +103,30 @@ def production_shape_violations(
                     f"expected {expected}, got {actual} from {source or 'unknown'}"
                 )
 
-    latest_gdelt = connection.execute(
-        """SELECT status FROM source_polls WHERE source='gdelt_gold_geopolitics'
-           ORDER BY fetched_time DESC,poll_id DESC LIMIT 1"""
-    ).fetchone()
-    if latest_gdelt is not None and str(latest_gdelt[0]) == "OK":
-        source_rows = status.get("news_source_health", [])
-        gdelt = next((
-            row for row in source_rows
-            if row.get("source") == "gdelt_gold_geopolitics"
-        ), None)
-        if not isinstance(gdelt, dict) or (
-            gdelt.get("health") != "HEALTHY"
-            or gdelt.get("latest_status") != "OK"
-            or gdelt.get("recovery_mode") is not None
-            or gdelt.get("next_retry_time") is not None
+    source_rows = status.get("news_source_health", [])
+    source_health = {
+        str(row.get("source")): row
+        for row in source_rows
+        if isinstance(row, dict) and row.get("source")
+    }
+    for source in MONITORED_NEWS_SOURCES:
+        latest_poll = connection.execute(
+            """SELECT status FROM source_polls WHERE source=?
+               ORDER BY fetched_time DESC,poll_id DESC LIMIT 1""",
+            (source,),
+        ).fetchone()
+        if latest_poll is None or str(latest_poll[0]) != "OK":
+            continue
+        row = source_health.get(source)
+        if not isinstance(row, dict) or (
+            row.get("latest_status") != "OK"
+            or row.get("health") in {"ERROR", "DEGRADED", "FALLBACK_ACTIVE"}
+            or row.get("recovery_mode") is not None
+            or row.get("next_retry_time") is not None
         ):
-            violations.append("successful GDELT poll is still reported as degraded")
+            violations.append(
+                f"successful source poll is still reported as degraded: {source}"
+            )
 
     system = status.get("system", {}) if isinstance(status, dict) else {}
     if system.get("market_session") in {"CLOSED", "WEEKLY_CLOSED"}:

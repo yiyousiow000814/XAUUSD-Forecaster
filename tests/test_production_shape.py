@@ -7,6 +7,7 @@ import pytest
 from xauusd_forecaster.forward_ledger import ForwardLedger
 from xauusd_forecaster.inference_v2 import MODEL_IDENTITIES
 from xauusd_forecaster.news_scheduler import reserve_account_request
+from xauusd_forecaster.news_source_registry import MONITORED_NEWS_SOURCES
 from xauusd_forecaster.production_shape import production_shape_violations
 
 
@@ -30,10 +31,9 @@ def _status() -> dict:
             "accounting_source": "SCHEDULER_DB", "total_sent": 2,
         },
         "news_source_health": [{
-            "source": "gdelt_gold_geopolitics", "health": "HEALTHY",
-            "latest_status": "OK", "recovery_mode": None,
-            "next_retry_time": None,
-        }],
+            "source": source, "health": "HEALTHY", "latest_status": "OK",
+            "recovery_mode": None, "next_retry_time": None,
+        } for source in MONITORED_NEWS_SOURCES],
     }
 
 
@@ -130,10 +130,11 @@ def complete_shape(tmp_path) -> tuple[ForwardLedger, dict]:
     _seed_active_generation(ledger)
     _append_complete_decision(ledger)
     _seed_scheduler_usage(ledger)
-    ledger.append_source_poll({
-        "poll_id": "gdelt-ok", "source": "gdelt_gold_geopolitics",
-        "fetched_time": NOW, "status": "OK",
-    })
+    for source in MONITORED_NEWS_SOURCES:
+        ledger.append_source_poll({
+            "poll_id": f"{source}-ok", "source": source,
+            "fetched_time": NOW, "status": "OK",
+        })
     return ledger, _status()
 
 
@@ -217,17 +218,23 @@ def test_every_ai_quota_surface_must_match_scheduler_accounting(
     )
 
 
-def test_successful_gdelt_poll_clears_all_degraded_recovery_state(
+@pytest.mark.parametrize("source", MONITORED_NEWS_SOURCES)
+def test_every_successful_news_source_clears_old_degraded_recovery_state(
     complete_shape,
+    source,
 ) -> None:
     ledger, status = complete_shape
-    status["news_source_health"][0].update({
+    row = next(
+        item for item in status["news_source_health"]
+        if item["source"] == source
+    )
+    row.update({
         "health": "DEGRADED", "latest_status": "RATE_LIMITED",
-        "recovery_mode": "FALLBACK_ACTIVE",
+        "recovery_mode": "FALLBACK_ACTIVE", "next_retry_time": NOW.isoformat(),
     })
 
     assert _violations(ledger, status) == [
-        "successful GDELT poll is still reported as degraded",
+        f"successful source poll is still reported as degraded: {source}",
     ]
 
 
