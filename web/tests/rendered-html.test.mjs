@@ -350,6 +350,8 @@ test("renders the news and decision audit route", async () => {
   assert.doesNotMatch(source, /当前达到 Broad 门槛/);
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(css, /\.evidence-summary \{[^}]*grid-template-columns:repeat\(3,1fr\)/);
+  assert.match(css, /\.evidence-filters button \{[^}]*min-height:44px/);
+  assert.match(css, /\.evidence-rule-note summary \{[^}]*min-height:44px/);
   assert.match(source, /多源确认/);
   assert.match(source, /核心新闻要求一手完整证据或至少两个独立可靠来源确认/);
   assert.match(source, /大视野新闻还纳入单一可靠来源并降低权重/);
