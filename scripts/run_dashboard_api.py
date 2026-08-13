@@ -56,6 +56,7 @@ from xauusd_forecaster.gemini_quota import (  # noqa: E402
 from xauusd_forecaster.news_scheduler import (  # noqa: E402
     account_quota_snapshot, configured_api_credentials,
 )
+from xauusd_forecaster.ai_provider_registry import AI_QUOTA_SURFACES  # noqa: E402
 from xauusd_forecaster.training import MARKET_FEATURES  # noqa: E402
 from xauusd_forecaster.learning_curves import learning_curve_payload  # noqa: E402
 from xauusd_forecaster.execution_costs import net_shadow_log_return  # noqa: E402
@@ -66,6 +67,8 @@ from xauusd_forecaster.news_evidence import (  # noqa: E402
 from xauusd_forecaster.news_relevance import GOOGLE_NEWS_MAX_AGE  # noqa: E402
 from xauusd_forecaster.news_contracts import CURRENT_NEWS_CONTRACT  # noqa: E402
 from xauusd_forecaster.news_features_v2 import COLLECTION_SOURCES  # noqa: E402
+from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY  # noqa: E402
+from xauusd_forecaster.production_shape import production_contract_snapshot  # noqa: E402
 from xauusd_forecaster.news_impact import (  # noqa: E402
     IMPACT_MODEL,
     IMPACT_PROMPT_VERSION,
@@ -271,23 +274,6 @@ def _learning_surfaces(connection: sqlite3.Connection) -> tuple[dict, dict]:
         return _LEARNING_CACHE["learning"], _LEARNING_CACHE["execution"]
 
 
-NEWS_SOURCE_DEFINITIONS = {
-    "federal_reserve_full_text": ("Federal Reserve", "发布源", 15, ("federal_reserve_monetary", "federal_reserve_press_all", "federal_reserve_speeches_testimony")),
-    "us_treasury_press_releases": ("U.S. Treasury", "发布源", 45, ("us_treasury_press_releases",)),
-    "bea_economic_releases": ("U.S. BEA", "发布源", 45, ("bea_economic_releases",)),
-    "bls_public_api": ("BLS Public Data API", "数值与修订链路", 75, ()),
-    "ecb_press_releases": ("European Central Bank", "发布源", 45, ("ecb_press_releases",)),
-    "eia_press_releases": ("U.S. EIA Press", "发布源", 45, ("eia_press_releases",)),
-    "eia_today_in_energy": ("U.S. EIA Energy", "发布源", 45, ("eia_today_in_energy",)),
-    "gdelt_gold_geopolitics": ("GDELT", "发现源", 75, ("gdelt_gold_geopolitics",)),
-    "google_news_gold_context": ("Google News Context", "发现源", 45, ("google_news_gold_context",)),
-    "google_news_us_employment": ("Google News U.S. Employment", "发现源", 45, ("google_news_us_employment",)),
-    "google_news_us_inflation": ("Google News U.S. Inflation", "发现源", 45, ("google_news_us_inflation",)),
-    "google_news_fed_rates": ("Google News Fed & Rates", "发现源", 45, ("google_news_fed_rates",)),
-    "world_gold_council_central_banks": ("World Gold Council", "发布源", 420, ("world_gold_council_central_banks",)),
-}
-
-
 def _parse_utc(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -305,7 +291,12 @@ def _has_recent_evidence(latest_item_time: str | None, now: datetime) -> bool:
 
 def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[dict]:
     rows = []
-    for source, (label, role, stale_minutes, revision_sources) in NEWS_SOURCE_DEFINITIONS.items():
+    for spec in NEWS_SOURCE_REGISTRY:
+        source = spec.source
+        label = spec.label
+        role = spec.role
+        stale_minutes = spec.stale_minutes
+        revision_sources = spec.revision_sources
         polls = connection.execute(
             """SELECT count(*) total,
                       sum(status='OK') ok_count,
@@ -1357,6 +1348,7 @@ def _dashboard_payload(database: Path) -> dict:
     scheduler_quotas = None
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=5)
     connection.row_factory = sqlite3.Row
+    connection.execute("BEGIN")
     try:
         latest = connection.execute(
             """SELECT d.decision_id, d.decision_time, d.effective_action, d.data_health,
@@ -1802,28 +1794,23 @@ def _dashboard_payload(database: Path) -> dict:
         ).fetchone() is not None
         if scheduler_ledger_available:
             scheduler_quotas = {
-                "gemini": account_quota_snapshot(
+                surface.payload_key: account_quota_snapshot(
                     connection, credentials,
-                    model_families=(DEFAULT_GEMINI_MODEL,),
-                    daily_limit=GEMINI_REQUESTS_PER_DAY_PER_KEY,
+                    model_families=surface.model_families,
+                    daily_limit=surface.daily_limit,
                     now=now,
-                ),
-                "gemini_31": account_quota_snapshot(
-                    connection, credentials,
-                    model_families=(FALLBACK_GEMINI_MODEL,),
-                    daily_limit=GEMINI_REQUESTS_PER_DAY_PER_KEY,
-                    now=now,
-                ),
-                "gemma": account_quota_snapshot(
-                    connection, credentials,
-                    model_families=(
-                        DEFAULT_GEMMA_MODEL, "gemma-impact", "gemma-title",
-                    ),
-                    daily_limit=GEMMA_REQUESTS_PER_DAY_PER_KEY,
-                    now=now,
-                ),
+                )
+                for surface in AI_QUOTA_SURFACES
             }
+        production_contract = production_contract_snapshot(
+            connection,
+            now=now,
+            account_ids=frozenset(
+                credential.account_id for credential in credentials
+            ),
+        )
     finally:
+        connection.rollback()
         connection.close()
 
     latest_data = dict(latest) if latest else None
@@ -1972,9 +1959,9 @@ def _dashboard_payload(database: Path) -> dict:
         latest_data["features"] = json.loads(latest_data.pop("features_json"))
         latest_data["reason_codes"] = json.loads(latest_data.pop("reason_codes_json"))
     if scheduler_quotas is not None:
-        gemini_quota = scheduler_quotas["gemini"]
-        gemini_31_quota = scheduler_quotas["gemini_31"]
-        gemma_quota = scheduler_quotas["gemma"]
+        gemini_quota = scheduler_quotas["gemini_quota"]
+        gemini_31_quota = scheduler_quotas["gemini_31_quota"]
+        gemma_quota = scheduler_quotas["gemma_quota"]
     else:
         gemini_quota = GeminiQuotaLedger(
             database.parent / "gemini-quota.json"
@@ -2010,6 +1997,8 @@ def _dashboard_payload(database: Path) -> dict:
 
     return {
         "generated_at": now.isoformat(),
+        "production_contract": production_contract,
+        "dashboard_sync": sync_status,
         "forward_epoch": epoch,
         "system": {
             "online": online,
