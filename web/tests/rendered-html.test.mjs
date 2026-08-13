@@ -8,6 +8,30 @@ const { default: worker } = await import(workerUrl.href);
 const { applyFreshness } = await import("../app/api/status/freshness.js");
 const { runtimeUpdateFailurePresentation } = await import("../app/_lib/runtime-update-failure.js");
 const { countPresentation, formatCompactCount, formatExactCount, progressCountPresentation } = await import("../app/_lib/count-format.ts");
+const { withPreviewIdentity } = await import("../app/api/_shared/preview-status.ts");
+
+test("keeps branch throughput limits while refreshing Preview metrics from D1", () => {
+  const merged = withPreviewIdentity({
+    annotation_queue: { ready: 9, requests_per_minute: 48 },
+    system: { online: true },
+  }, {
+    annotation_queue: {
+      requests_per_minute_per_key: 12,
+      requests_per_minute: 12,
+      input_tokens_per_minute: 225_000,
+      minute_scope: "PROJECT",
+    },
+    system: {},
+  });
+
+  assert.deepEqual(merged.annotation_queue, {
+    ready: 9,
+    requests_per_minute_per_key: 12,
+    requests_per_minute: 12,
+    input_tokens_per_minute: 225_000,
+    minute_scope: "PROJECT",
+  });
+});
 
 test("runtime update success stays silent while failures have stable presentation", () => {
   assert.equal(runtimeUpdateFailurePresentation(null), null);
