@@ -70,18 +70,6 @@ def test_control_center_updates_only_the_isolated_main_runtime() -> None:
     assert "Install-ProductionRuntime" in control_center
     assert 'RuntimeRoot must be separate from the development checkout' in control_center
     assert 'worktree add --detach --quiet' in control_center
-    assert "$runtimeObservationCycles = 2" in control_center
-    assert "$runtimeObservationTimeout = [TimeSpan]::FromMinutes(15)" in control_center
-    assert "Invoke-ProductionShapePreflight" in control_center
-    assert "Start-RuntimeObservation" in control_center
-    assert "Test-RuntimeObservation" in control_center
-    assert "Invoke-RuntimeRollback" in control_center
-    update_checkout = control_center.split("function Update-RuntimeCheckout", 1)[1].split(
-        "function Get-RuntimeCodeState", 1,
-    )[0]
-    assert update_checkout.index("Invoke-ProductionShapePreflight") < update_checkout.index(
-        "checkout --detach --force"
-    )
     assert '-WindowStyle Hidden -PassThru' in control_center
     assert '"quote"' not in control_center.split("$reloadableServiceKeys =", 1)[1].splitlines()[0]
 
@@ -97,6 +85,130 @@ def test_control_center_updates_only_the_isolated_main_runtime() -> None:
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     assert reported == expected
+
+
+def _run_control_center_contract(tmp_path, body: str) -> str:
+    runtime = tmp_path / "runtime"
+    repository = tmp_path / "repository"
+    runtime.mkdir(exist_ok=True)
+    repository.mkdir(exist_ok=True)
+    script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    command = (
+        f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{runtime}' "
+        f"-RepositoryRoot '{repository}'; {body}"
+    )
+    return subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+def _write_runtime_observation(tmp_path, **overrides) -> None:
+    state = {
+        "update_status": "OBSERVING",
+        "observing_revision": "b" * 40,
+        "previous_revision": "a" * 40,
+        "observation_started_at": datetime.now(timezone.utc).isoformat(),
+        "observation_last_decision_time": "2026-08-13T03:00:00+00:00",
+        "observation_success_cycles": 0,
+        "observation_consecutive_failures": 0,
+    }
+    state.update(overrides)
+    path = tmp_path / "runtime" / ".local" / "forward" / "runtime-update-state.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+
+def test_failed_preflight_never_switches_the_runtime_checkout(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:preflights = 0; $script:checkouts = 0; "
+        "function Get-CodeRevision { return ('a' * 40) }; "
+        "function Test-MainCandidate { return $true }; "
+        "function Invoke-ProductionShapePreflight { $script:preflights += 1; return $false }; "
+        "function git { $script:checkouts += 1; $global:LASTEXITCODE = 0 }; "
+        "$accepted = Update-RuntimeCheckout -Revision ('b' * 40); "
+        'Write-Output "$accepted,$script:preflights,$script:checkouts"',
+    )
+
+    assert result == "False,1,0"
+
+
+def test_preflight_failure_always_stops_the_staged_api_process(tmp_path) -> None:
+    database = tmp_path / "runtime" / ".local" / "forward" / "forward-evidence.sqlite3"
+    database.parent.mkdir(parents=True)
+    database.write_bytes(b"")
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:stops = 0; function git { $global:LASTEXITCODE = 0 }; "
+        "function Get-Command { return [pscustomobject]@{ Source = 'missing-python.exe' } }; "
+        "function Start-Process { $process = [pscustomobject]@{ HasExited = $false; Id = 424242 }; "
+        "$process | Add-Member ScriptMethod WaitForExit { param($milliseconds) return $true }; "
+        "return $process }; function Invoke-WebRequest { return [pscustomobject]@{ StatusCode = 200 } }; "
+        "function Stop-Process { $script:stops += 1 }; "
+        "$accepted = Invoke-ProductionShapePreflight -Revision ('b' * 40); "
+        "$state = Get-RuntimeUpdateState; "
+        'Write-Output "$accepted,$script:stops,$($state.update_status)"',
+    )
+
+    assert result == "False,1,PREFLIGHT_FAILED"
+
+
+def test_two_new_decision_cycles_activate_the_staged_revision(tmp_path) -> None:
+    _write_runtime_observation(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        "function Test-CodeReloadHealth { return $true }; "
+        "function Test-CurrentProductionShape { return $null }; "
+        "$script:times = @('2026-08-13T03:05:00+00:00','2026-08-13T03:10:00+00:00'); "
+        "$script:index = 0; function Get-LatestRuntimeDecisionTime { "
+        "$value = $script:times[$script:index]; $script:index += 1; return $value }; "
+        "$first = Test-RuntimeObservation; $second = Test-RuntimeObservation; "
+        "$state = Get-RuntimeUpdateState; "
+        'Write-Output "$first,$second,$($state.update_status),$($state.observation_success_cycles)"',
+    )
+
+    assert result == "True,True,ACTIVE,2"
+
+
+def test_three_consecutive_observation_failures_trigger_one_rollback(tmp_path) -> None:
+    _write_runtime_observation(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:rollbacks = 0; function Test-CodeReloadHealth { return $false }; "
+        "function Invoke-RuntimeRollback { $script:rollbacks += 1; "
+        "Write-RuntimeUpdateState @{ update_status = 'ROLLED_BACK' }; return $true }; "
+        "$first = Test-RuntimeObservation; $second = Test-RuntimeObservation; "
+        "$third = Test-RuntimeObservation; $state = Get-RuntimeUpdateState; "
+        'Write-Output "$first,$second,$third,$script:rollbacks,$($state.update_status)"',
+    )
+
+    assert result == "True,True,False,1,ROLLED_BACK"
+
+
+def test_market_closure_pauses_observation_timeout_until_reopen(tmp_path) -> None:
+    _write_runtime_observation(
+        tmp_path,
+        observation_started_at="2020-01-01T00:00:00+00:00",
+    )
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:rollbacks = 0; function Test-CodeReloadHealth { return $true }; "
+        "function Test-CurrentProductionShape { return $null }; "
+        "function Get-LatestRuntimeDecisionTime { return '2026-08-13T03:00:00+00:00' }; "
+        "function Invoke-RuntimeRollback { $script:rollbacks += 1; return $true }; "
+        "function Invoke-RestMethod { return [pscustomobject]@{ system = "
+        "[pscustomobject]@{ market_session = 'CLOSED' } } }; "
+        "$closed = Test-RuntimeObservation; $paused = Get-RuntimeUpdateState; "
+        "function Invoke-RestMethod { return [pscustomobject]@{ system = "
+        "[pscustomobject]@{ market_session = 'OPEN' } } }; "
+        "$reopened = Test-RuntimeObservation; "
+        "$wasPaused = [DateTimeOffset]::Parse([string]$paused.observation_started_at) "
+        "-gt [DateTimeOffset]::Parse('2020-01-02T00:00:00+00:00'); "
+        'Write-Output "$closed,$reopened,$wasPaused,$script:rollbacks"',
+    )
+
+    assert result == "True,True,True,0"
 
 
 def test_watchdog_autostart_uses_one_windowless_registration_path(tmp_path) -> None:

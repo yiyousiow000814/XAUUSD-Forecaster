@@ -516,6 +516,25 @@ function Get-LatestRuntimeDecisionTime {
     return $null
 }
 
+function Test-CurrentProductionShape {
+    try {
+        $python = (Get-Command python.exe -ErrorAction Stop).Source
+        $arguments = @(
+            (Join-Path $moduleRoot "scripts\check_production_shape.py"),
+            "--database", (Join-Path $moduleRoot ".local\forward\forward-evidence.sqlite3")
+        )
+        $syncStatus = Join-Path $moduleRoot ".local\forward\dashboard-sync-status.json"
+        if (Test-Path -LiteralPath $syncStatus) {
+            $arguments += @("--sync-status-file", $syncStatus)
+        }
+        $result = & $python @arguments 2>&1
+        if ($LASTEXITCODE -ne 0) { return "production shape rejected: $result" }
+        return $null
+    } catch {
+        return $_.Exception.Message
+    }
+}
+
 function Start-RuntimeObservation {
     param([string]$Revision, [string]$PreviousRevision)
     $latestDecision = Get-LatestRuntimeDecisionTime
@@ -572,21 +591,7 @@ function Test-RuntimeObservation {
     $failure = $null
     if (-not (Test-CodeReloadHealth -ReloadStarted $started)) {
         $failure = "reload health check failed"
-    } else {
-        try {
-            $python = (Get-Command python.exe -ErrorAction Stop).Source
-            $arguments = @(
-                (Join-Path $moduleRoot "scripts\check_production_shape.py"),
-                "--database", (Join-Path $moduleRoot ".local\forward\forward-evidence.sqlite3")
-            )
-            $syncStatus = Join-Path $moduleRoot ".local\forward\dashboard-sync-status.json"
-            if (Test-Path -LiteralPath $syncStatus) {
-                $arguments += @("--sync-status-file", $syncStatus)
-            }
-            $result = & $python @arguments 2>&1
-            if ($LASTEXITCODE -ne 0) { $failure = "production shape rejected: $result" }
-        } catch { $failure = $_.Exception.Message }
-    }
+    } else { $failure = Test-CurrentProductionShape }
     if ($failure) {
         $failures = 1 + [int]$state.observation_consecutive_failures
         Write-RuntimeUpdateState @{ observation_consecutive_failures = $failures }
@@ -630,7 +635,12 @@ function Test-RuntimeObservation {
                 "CLOSED", "WEEKLY_CLOSED"
             )
         } catch { $marketClosed = $false }
-        if (-not $marketClosed) {
+        if ($marketClosed) {
+            # Closed-market time does not consume the two-cycle observation window.
+            Write-RuntimeUpdateState @{
+                observation_started_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+        } else {
             Invoke-RuntimeRollback -FailedRevision $revision `
                 -PreviousRevision $previousRevision `
                 -Reason "two complete five-minute decision cycles were not observed" | Out-Null

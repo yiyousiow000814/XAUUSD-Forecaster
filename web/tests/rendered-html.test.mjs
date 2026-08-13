@@ -6,15 +6,28 @@ const workerUrl = new URL("../dist/server/index.js", import.meta.url);
 workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
 const { default: worker } = await import(workerUrl.href);
 const { applyFreshness } = await import("../app/api/status/freshness.js");
+const { runtimeUpdateFailurePresentation } = await import("../app/_lib/runtime-update-failure.js");
 
-test("runtime update success stays silent while failures are user-visible", () => {
-  const banner = readFileSync(new URL("../app/_components/RuntimeUpdateFailureBanner.tsx", import.meta.url), "utf8");
-  const status = readFileSync(new URL("../app/_views/StatusView.tsx", import.meta.url), "utf8");
-  const live = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
-  assert.match(banner, /role="alert"/);
-  assert.match(status, /runtime_update_failure/);
-  assert.match(live, /runtime_update_failure/);
-  assert.doesNotMatch(`${banner}${status}${live}`, /更新成功|升级成功/);
+test("runtime update success stays silent while failures have stable presentation", () => {
+  assert.equal(runtimeUpdateFailurePresentation(null), null);
+  assert.deepEqual(runtimeUpdateFailurePresentation({
+    status: "ROLLED_BACK",
+    message: "observation failed",
+    failed_at: "2026-08-13T03:00:00Z",
+  }), {
+    label: "新版运行验证失败，已自动恢复上一版。",
+    message: "observation failed",
+    failedAt: "2026-08-13T03:00:00Z",
+  });
+  assert.equal(runtimeUpdateFailurePresentation({
+    status: "SWITCH_FAILED", message: "switch failed", failed_at: "now",
+  }).label, "新版切换失败，当前版本继续运行。");
+  assert.equal(runtimeUpdateFailurePresentation({
+    status: "ROLLBACK_FAILED", message: "rollback failed", failed_at: "now",
+  }).label, "新版运行验证失败，自动恢复也失败，请检查本机服务。");
+  assert.equal(runtimeUpdateFailurePresentation({
+    status: "PREFLIGHT_FAILED", message: "preflight failed", failed_at: "now",
+  }).label, "新版预检失败，当前版本继续运行。");
 });
 
 async function render(path) {
