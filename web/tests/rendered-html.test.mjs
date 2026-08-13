@@ -121,31 +121,11 @@ test("keeps nested compact counts in each dashboard headline hierarchy", () => {
   }
 });
 
-test("keeps the desktop audit rows visibly separated independent of technique", () => {
+test("keeps the desktop audit rows separated by a painted cell boundary", () => {
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   const auditGrid = [...css.matchAll(/\.audit-tabs\s*\{([^}]*)\}/g)]
     .map((match) => match[1])
     .find((rule) => /grid-template-columns:repeat\(3,1fr\)/.test(rule)) ?? "";
-  const root = css.match(/:root\s*\{([^}]*)\}/)?.[1] ?? "";
-  const variables = Object.fromEntries(
-    [...root.matchAll(/(--[\w-]+):\s*([^;]+)/g)].map((match) => [match[1], match[2].trim()]),
-  );
-  const resolveColor = (value) => {
-    const variable = value?.match(/^var\((--[\w-]+)\)$/)?.[1];
-    return variable ? variables[variable] : value;
-  };
-  const gap = Number(auditGrid.match(/(?:^|;)\s*gap:\s*([\d.]+)px/)?.[1] ?? 0);
-  const gridBackground = resolveColor(auditGrid.match(
-    /(?:^|;)\s*background(?:-color)?:\s*([^;]+)/,
-  )?.[1]?.trim());
-  const cellBackground = resolveColor(
-    [...css.matchAll(/\.audit-tabs a\s*\{([^}]*)\}/g)]
-      .map((match) => match[1].match(/(?:^|;)\s*background(?:-color)?:\s*([^;]+)/)?.[1]?.trim())
-      .filter(Boolean)
-      .at(-1),
-  );
-  const gapDrawsDivider = gap > 0 && gridBackground && cellBackground
-    && gridBackground !== cellBackground;
   const rowBorderDrawsDivider = [
     /\.audit-tabs[^{}]*nth-child\(-n\+3\)[^{}]*\{[^}]*border-bottom:\s*(?!0(?:\D|$))/,
     /\.audit-tabs[^{}]*nth-child\(n\+4\)[^{}]*\{[^}]*border-top:\s*(?!0(?:\D|$))/,
@@ -153,8 +133,8 @@ test("keeps the desktop audit rows visibly separated independent of technique", 
 
   assert.match(auditGrid, /grid-template-columns:repeat\(3,1fr\)/);
   assert.ok(
-    gapDrawsDivider || rowBorderDrawsDivider,
-    "desktop audit rows need either a visible grid gap or a top border",
+    rowBorderDrawsDivider,
+    "desktop audit rows need a painted cell boundary; a fractional grid gap is not stable",
   );
 });
 
