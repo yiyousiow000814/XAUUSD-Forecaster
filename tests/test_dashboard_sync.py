@@ -192,6 +192,8 @@ def test_sync_status_records_real_success_and_preserves_it_on_error(tmp_path) ->
     assert failed["last_success"] == succeeded["last_success"]
     assert failed["last_error_type"] == "ConnectionResetError"
     assert failed["last_error"] == "remote closed"
+    assert failed["last_error_code"] == "TRANSPORT_UNAVAILABLE"
+    assert failed["degraded_resources"] == []
     assert failed["status"] == "ERROR"
 
 
@@ -229,6 +231,63 @@ def test_transport_error_family_is_persisted_as_structured_code(
     )
 
     assert module.sync_error_code(error) == expected
+
+
+def test_only_declared_payload_contract_errors_receive_payload_code() -> None:
+    module = _sync_module()
+
+    assert module.sync_error_code(ValueError("invalid configuration")) == "UNCLASSIFIED"
+    assert module.sync_error_code(
+        module.PayloadContractError("bounded payload too large")
+    ) == "PAYLOAD_CONTRACT_REJECTED"
+    assert module.sync_error_code(
+        urllib.error.URLError("name resolution failed")
+    ) == "TRANSPORT_UNAVAILABLE"
+
+
+def test_all_rejected_heartbeat_targets_preserve_structured_failures(
+    monkeypatch,
+) -> None:
+    module = _sync_module()
+    monkeypatch.setattr(
+        module.urllib.request,
+        "urlopen",
+        lambda *args, **kwargs: __import__("contextlib").nullcontext(
+            type("Response", (), {
+                "read": lambda self: b"{}", "status": 200,
+            })()
+        ),
+    )
+    monkeypatch.setattr(module, "remote_snapshot", lambda payload: b"{}")
+    monkeypatch.setattr(
+        module,
+        "configured_targets",
+        lambda config: [{
+            "name": "cloudflare", "remote_ingest_url": "https://example.invalid",
+            "token": "token",
+        }],
+    )
+    monkeypatch.setattr(
+        module,
+        "_post_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            urllib.error.HTTPError(
+                "https://example.invalid", 413, "too large", {}, io.BytesIO(),
+            )
+        ),
+    )
+
+    with pytest.raises(module.AllTargetsRejected) as captured:
+        module.sync_once({"local_status_url": "https://local.invalid"})
+
+    assert module.sync_error_code(captured.value) == "PAYLOAD_LIMIT_EXCEEDED"
+    assert captured.value.degraded_resources == [{
+        "target": "cloudflare",
+        "resource": "heartbeat",
+        "error_type": "HTTPError",
+        "error_code": "PAYLOAD_LIMIT_EXCEEDED",
+        "error": "HTTP Error 413: too large",
+    }]
 
 
 def test_configured_targets_adds_independent_cloudflare_mirror(

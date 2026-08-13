@@ -9,6 +9,7 @@ from xauusd_forecaster.ai_provider_registry import AI_QUOTA_SURFACES
 from xauusd_forecaster.inference_v2 import MODEL_IDENTITIES
 from xauusd_forecaster.news_scheduler import reserve_account_request
 from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY
+from xauusd_forecaster.news import RUNTIME_NEWS_POLL_SOURCES
 from xauusd_forecaster.production_shape import (
     production_contract_snapshot,
     production_shape_violations,
@@ -162,13 +163,68 @@ def _violations(
     status["production_contract"] = production_contract_snapshot(
         ledger.connection, now=VALIDATION_TIME,
     )
-    status["dashboard_sync"] = sync_status or {"degraded_resources": []}
+    status["dashboard_sync"] = (
+        {"status": "OK", "degraded_resources": []}
+        if sync_status is None else sync_status
+    )
     return production_shape_violations(status)
 
 
 def test_production_shape_accepts_complete_live_shape(complete_shape) -> None:
     ledger, status = complete_shape
     assert _violations(ledger, status) == []
+
+
+def test_news_health_registry_is_the_runtime_collector_family() -> None:
+    assert {spec.source for spec in NEWS_SOURCE_REGISTRY} == set(
+        RUNTIME_NEWS_POLL_SOURCES
+    )
+
+
+def test_missing_active_generation_fails_closed(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    _seed_scheduler_usage(ledger)
+    for source in (spec.source for spec in NEWS_SOURCE_REGISTRY):
+        ledger.append_source_poll({
+            "poll_id": f"{source}-ok", "source": source,
+            "fetched_time": NOW, "status": "OK",
+        })
+
+    assert _violations(ledger, _status()) == [
+        "production has no active model generation",
+    ]
+
+
+def test_missing_scheduler_quota_ledger_fails_closed(complete_shape) -> None:
+    ledger, status = complete_shape
+    contract = production_contract_snapshot(
+        ledger.connection, now=VALIDATION_TIME,
+    )
+    contract["scheduler_usage_available"] = False
+    contract["scheduler_usage"] = {}
+    status["production_contract"] = contract
+    status["dashboard_sync"] = {"status": "OK", "degraded_resources": []}
+
+    violations = production_shape_violations(status)
+
+    assert violations[0] == "scheduler quota ledger is unavailable"
+    assert {
+        violation.rsplit(": ", 1)[-1]
+        for violation in violations[1:]
+    } == {surface.payload_key for surface in AI_QUOTA_SURFACES}
+
+
+def test_missing_source_health_member_fails_closed(complete_shape) -> None:
+    ledger, status = complete_shape
+    missing = NEWS_SOURCE_REGISTRY[-1].source
+    status["news_source_health"] = [
+        row for row in status["news_source_health"]
+        if row["source"] != missing
+    ]
+
+    assert _violations(ledger, status) == [
+        f"source health family mismatch: missing=['{missing}'], unexpected=[]",
+    ]
 
 
 def test_active_generation_requires_a_subsequent_live_decision(tmp_path) -> None:
@@ -238,6 +294,28 @@ def test_every_ai_quota_surface_must_match_scheduler_accounting(
     )
 
 
+def test_scheduler_snapshot_counts_only_currently_configured_accounts(
+    complete_shape,
+) -> None:
+    ledger, _ = complete_shape
+    reserve_account_request(
+        ledger.connection, account_id="retired-account",
+        model_family="gemini-3.5-flash-lite", daily_limit=500,
+        requests_per_minute=12, now=NOW,
+    )
+
+    current = production_contract_snapshot(
+        ledger.connection, now=VALIDATION_TIME,
+        account_ids=frozenset({"account"}),
+    )
+    all_accounts = production_contract_snapshot(
+        ledger.connection, now=VALIDATION_TIME,
+    )
+
+    assert current["scheduler_usage"]["gemini_quota"] == 1
+    assert all_accounts["scheduler_usage"]["gemini_quota"] == 2
+
+
 @pytest.mark.parametrize("source", [spec.source for spec in NEWS_SOURCE_REGISTRY])
 def test_every_successful_news_source_clears_old_degraded_recovery_state(
     complete_shape,
@@ -270,6 +348,18 @@ def test_broker_confirmed_close_forbids_later_decisions(complete_shape) -> None:
     ]
 
 
+def test_invalid_market_close_clock_fails_closed(complete_shape) -> None:
+    ledger, status = complete_shape
+    status["system"].update({
+        "market_session": "CLOSED",
+        "market_session_observed_at": "not-a-time",
+    })
+
+    assert _violations(ledger, status) == [
+        "broker market-close observation time is invalid",
+    ]
+
+
 @pytest.mark.parametrize(
     "resource,error_code",
     [
@@ -284,7 +374,7 @@ def test_every_sync_resource_rejects_structured_payload_limit_failure(
     error_code,
 ) -> None:
     ledger, status = complete_shape
-    sync_status = {"degraded_resources": [{
+    sync_status = {"status": "DEGRADED", "degraded_resources": [{
         "resource": resource,
         "error_code": error_code,
         "error": "human-readable text is not part of the contract",
@@ -295,12 +385,36 @@ def test_every_sync_resource_rejects_structured_payload_limit_failure(
     ]
 
 
+@pytest.mark.parametrize(
+    "sync_status,expected",
+    [
+        pytest.param(
+            {}, "dashboard synchronizer status is unavailable",
+            id="missing-status",
+        ),
+        pytest.param(
+            {"status": "ERROR", "last_error_code": "PAYLOAD_LIMIT_EXCEEDED"},
+            "dashboard heartbeat exceeds the remote payload limit",
+            id="heartbeat-payload-limit",
+        ),
+    ],
+)
+def test_dashboard_sync_contract_fails_closed(
+    complete_shape,
+    sync_status,
+    expected,
+) -> None:
+    ledger, status = complete_shape
+
+    assert _violations(ledger, status, sync_status=sync_status) == [expected]
+
+
 def test_validator_does_not_reopen_database_after_snapshot(complete_shape) -> None:
     ledger, status = complete_shape
     status["production_contract"] = production_contract_snapshot(
         ledger.connection, now=VALIDATION_TIME,
     )
-    status["dashboard_sync"] = {"degraded_resources": []}
+    status["dashboard_sync"] = {"status": "OK", "degraded_resources": []}
     ledger.close()
 
     assert production_shape_violations(status) == []

@@ -1802,7 +1802,13 @@ def _dashboard_payload(database: Path) -> dict:
                 )
                 for surface in AI_QUOTA_SURFACES
             }
-        production_contract = production_contract_snapshot(connection, now=now)
+        production_contract = production_contract_snapshot(
+            connection,
+            now=now,
+            account_ids=frozenset(
+                credential.account_id for credential in credentials
+            ),
+        )
     finally:
         connection.rollback()
         connection.close()
