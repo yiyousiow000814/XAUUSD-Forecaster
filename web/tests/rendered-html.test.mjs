@@ -6,7 +6,7 @@ const workerUrl = new URL("../dist/server/index.js", import.meta.url);
 workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
 const { default: worker } = await import(workerUrl.href);
 const { applyFreshness } = await import("../app/api/status/freshness.js");
-const { countPresentation, formatCompactCount, formatExactCount } = await import("../app/_lib/count-format.ts");
+const { countPresentation, formatCompactCount, formatExactCount, formatProgressPair } = await import("../app/_lib/count-format.ts");
 
 test("formats growing counts through one compact and exact display contract", () => {
   const cases = [
@@ -43,6 +43,13 @@ test("formats growing counts through one compact and exact display contract", ()
     exact: "—",
     title: undefined,
   });
+
+  assert.equal(formatProgressPair(1_449, 1_450), "1,449 / 1,450");
+  assert.equal(formatProgressPair(12_449_999, 12_450_000), "12.45M / 12.45M");
+  assert.equal(formatProgressPair(10_000_000, 12_000_000), "10M / 12M");
+  assert.equal(formatProgressPair(1_200_000_000, 1_500_000_000), "1.2B / 1.5B");
+  assert.equal(formatProgressPair(1_200_000_000_000, 1_500_000_000_000), "1.2T / 1.5T");
+  assert.equal(formatProgressPair(null, 1_450), "— / —");
 });
 
 async function render(path) {

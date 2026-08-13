@@ -38,6 +38,28 @@ export function formatCount(value: number | null | undefined, format: CountForma
   return format === "exact" ? formatExactCount(value) : formatCompactCount(value);
 }
 
+export function formatProgressPair(
+  current: number | null | undefined,
+  target: number | null | undefined,
+): string {
+  const normalizedCurrent = normalizedCount(current);
+  const normalizedTarget = normalizedCount(target);
+  if (normalizedCurrent === null || normalizedTarget === null) return "— / —";
+
+  const largest = Math.max(Math.abs(normalizedCurrent), Math.abs(normalizedTarget));
+  if (largest < 1_000_000) {
+    return `${exactCount.format(normalizedCurrent)} / ${exactCount.format(normalizedTarget)}`;
+  }
+
+  const [divisor, suffix] = largest >= 1_000_000_000_000
+    ? [1_000_000_000_000, "T"]
+    : largest >= 1_000_000_000
+      ? [1_000_000_000, "B"]
+      : [1_000_000, "M"];
+  const sharedScale = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
+  return `${sharedScale.format(normalizedCurrent / divisor)}${suffix} / ${sharedScale.format(normalizedTarget / divisor)}${suffix}`;
+}
+
 export function countPresentation(
   value: number | null | undefined,
   format: CountFormat = "compact",

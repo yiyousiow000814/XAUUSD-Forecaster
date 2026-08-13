@@ -11,7 +11,7 @@ import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefre
 import { PREVIEW_NEWS_PAGE_SIZE } from "../_lib/preview-contract";
 import { resolveNewsMetrics, type NewsMetrics } from "../_lib/news-metrics";
 import { authoritativeNewsTotals, type NewsTotalsScope } from "../_lib/news-index-contract";
-import { formatExactCount } from "../_lib/count-format";
+import { formatExactCount, formatProgressPair } from "../_lib/count-format";
 import LearningGraphModal from "../audit/LearningGraphModal";
 
 type Prediction = {
@@ -987,7 +987,7 @@ export default function AuditView() {
           <div className="training-card-head"><span>学习进度</span></div>
           <div className="training-card-total">
             <strong>{statusState === "ready" && payload?.training
-              ? <><CountValue value={payload.training.complete_rows} format="exact" /><small> / <CountValue value={payload.training.next_training_at} format="exact" /></small></>
+              ? formatProgressPair(payload.training.complete_rows, payload.training.next_training_at)
               : <small>{statusState === "loading" ? "读取中…" : "暂不可用"}</small>}
             </strong>
             <span>{rowsUntilTraining === null ? "等待数据" : rowsUntilTraining === 0 ? "可以开始下一轮" : `还差 ${formatExactCount(rowsUntilTraining)} 条`}</span>
