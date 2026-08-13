@@ -795,7 +795,18 @@ export default function AuditView() {
   }, [refreshStatus, immutablePreview]);
 
   useEffect(() => {
-    if (view !== "news") return;
+    if (view !== "news") {
+      // The archive total is a headline metric, so start its bounded D1 read
+      // even when another audit view is selected.  Do not poll off-screen;
+      // the first news page is reused if the viewer opens the news desk.
+      if (fullNewsIndexReadyRef.current) return;
+      const initial = window.setTimeout(() => {
+        void refreshNews(true).catch(reason => setNewsError(
+          reason instanceof Error ? reason.message : "无法读取新闻索引",
+        ));
+      }, 0);
+      return () => window.clearTimeout(initial);
+    }
     return scheduleDashboardRefresh(
       () => void refreshNews(!fullNewsIndexReadyRef.current).catch(reason => setNewsError(
         reason instanceof Error ? reason.message : "无法读取新闻索引",
