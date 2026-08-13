@@ -106,8 +106,10 @@ test("uses one current-data contract across every dashboard surface", () => {
   const statusRoute = readFileSync(new URL("../app/api/status/route.ts", import.meta.url), "utf8");
   const learningRoute = readFileSync(new URL("../app/api/learning/route.ts", import.meta.url), "utf8");
 
-  assert.match(component, /role="status"/);
-  assert.match(component, /正在同步页面当前指标/);
+  assert.doesNotMatch(component, /正在同步页面当前指标/);
+  assert.doesNotMatch(component, />同步</);
+  assert.match(component, /current-metric-placeholder/);
+  assert.match(component, /role="progressbar"/);
   assert.match(component, /显示构建快照/);
   assert.match(css, /@keyframes current-data-pulse/);
   assert.match(css, /prefers-reduced-motion:\s*reduce/);
@@ -233,8 +235,8 @@ test("renders every preview room from the build snapshot", async () => {
     const response = await render(`/?room=audit&view=${view}`);
     assert.equal(response.status, 200, view);
     const html = await response.text();
-    assert.match(html, /正在同步页面当前指标/, view);
-    assert.match(html, /role="status"/, view);
+    assert.doesNotMatch(html, /正在同步页面当前指标/, view);
+    assert.match(html, /current-metric-placeholder/, view);
   }
 });
 
