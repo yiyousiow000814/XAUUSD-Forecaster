@@ -1,7 +1,7 @@
 import DashboardApp from "./_components/DashboardApp";
 import type { AuditViewName, DashboardLocation } from "./_components/DashboardNavigation";
 import { previewBundle } from "./api/_shared/preview";
-import { PREVIEW_NEWS_PAGE_SIZE, PREVIEW_RESOURCES } from "./_lib/preview-contract";
+import { PREVIEW_NEWS_PAGE_SIZE, PREVIEW_RESOURCES } from "./_lib/preview-manifest";
 
 type PageProps = {
   searchParams: Promise<Record<string, string | string[] | undefined>>;

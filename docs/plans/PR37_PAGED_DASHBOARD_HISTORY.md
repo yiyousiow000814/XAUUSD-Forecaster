@@ -58,8 +58,8 @@ The Worker 800 KB check must remain an emergency guard, not the storage model.
    gap from the wider spacing between compressed points.
 10. Graph history uses the shared browser resource cache. Reopening a graph
     shows its last successful result immediately; live data refreshes in the
-    background after 60 seconds, while immutable Preview data is reused for the
-    page lifetime.
+   background after 60 seconds, while immutable build-snapshot data is reused
+   for the page lifetime.
 
 ## Measured Current Data
 

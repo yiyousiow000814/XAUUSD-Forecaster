@@ -7,7 +7,8 @@ import DashboardLink from "../_components/DashboardLink";
 import RuntimeUpdateFailureBanner, { type RuntimeUpdateFailure } from "../_components/RuntimeUpdateFailureBanner";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
-import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
+import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
+import { statusFieldPhase } from "../_lib/current-data-provenance";
 
 type QuotaKey = {
   slot: number;
@@ -28,6 +29,9 @@ type QuotaState = {
 
 type StatusPayload = {
   preview_status_summary?: boolean;
+  preview?: {
+    branch_snapshot?: { generated_at: string | null; status_paths: string[] };
+  };
   generated_at: string;
   system: {
     online: boolean; mode: string; trading_enabled: boolean; market_session?: "OPEN" | "CLOSED" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE";
@@ -109,7 +113,6 @@ export default function StatusView() {
   const [error, setError] = useState<string | null>(null);
   const [syncingCurrent, setSyncingCurrent] = useState(Boolean(cachedStatus?.preview_status_summary));
   const [nowMs, setNowMs] = useState(0);
-  const immutablePreview = isImmutablePreview(payload);
 
   const refresh = useCallback(async (force = false, showSyncState = false) => {
     if (showSyncState) setSyncingCurrent(true);
@@ -128,10 +131,10 @@ export default function StatusView() {
       () => void refresh(Boolean(payload?.preview_status_summary), Boolean(payload?.preview_status_summary)),
       () => void refresh(true, Boolean(payload?.preview_status_summary)),
       DASHBOARD_REFRESH_INTERVALS.status,
-      immutablePreview,
+      "current",
       "status",
     );
-  }, [refresh, immutablePreview, payload?.preview_status_summary]);
+  }, [refresh, payload?.preview_status_summary]);
 
   useEffect(() => {
     const initial = window.setTimeout(() => setNowMs(Date.now()), 0);
@@ -147,6 +150,11 @@ export default function StatusView() {
   const gemmaQuota = payload?.gemma_quota;
   const currentPhase: CurrentDataPhase = error
     ? "error" : !payload || syncingCurrent ? "loading" : payload.preview_status_summary ? "snapshot" : "ready";
+  const throughputPhase = statusFieldPhase(
+    currentPhase,
+    payload?.preview?.branch_snapshot?.status_paths,
+    "annotation_queue.requests_per_minute",
+  );
   return (
     <main className="status-main">
       <div className="grain" />
@@ -180,7 +188,7 @@ export default function StatusView() {
         <article><span>重要新闻保留</span><strong className="good"><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.priority_reserve} /></MetricValue></strong><small>FOMC、CPI、Payroll 专用</small></article>
         <article><span>错误退避中</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.backing_off} /></MetricValue></strong><small>到期前不会重复请求</small></article>
         <article><span>已隔离</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.dead_letter} /></MetricValue></strong><small>相同永久错误不再消耗配额</small></article>
-        <article><span>安全吞吐</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.requests_per_minute} /></MetricValue></strong><small>RPM · 项目共享 · TPM <CountValue value={payload?.annotation_queue.input_tokens_per_minute} /></small></article>
+        <article><span>安全吞吐</span><strong><MetricValue phase={throughputPhase} snapshotLabel="分支配置" snapshotTitle="此吞吐限制来自当前 PR 分支的构建配置，不是生产实时观测"><CountValue value={payload?.annotation_queue.requests_per_minute} /></MetricValue></strong><small>RPM · 项目共享 · TPM <CountValue value={payload?.annotation_queue.input_tokens_per_minute} /> · 分支配置</small></article>
       </section>
 
       <section className="routing-grid">
