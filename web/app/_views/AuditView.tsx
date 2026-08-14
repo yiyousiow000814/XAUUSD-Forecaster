@@ -13,6 +13,7 @@ import { PREVIEW_NEWS_PAGE_SIZE } from "../_lib/preview-manifest";
 import { resolveNewsMetrics, type NewsMetrics } from "../_lib/news-metrics";
 import { authoritativeNewsTotals, type NewsTotalsScope } from "../_lib/news-index-contract";
 import { formatExactCount, progressCountPresentation } from "../_lib/count-format";
+import type { VersionEvaluationStatus } from "../_lib/version-result-state";
 import LearningGraphModal from "../audit/LearningGraphModal";
 
 type Prediction = {
@@ -207,12 +208,14 @@ type VersionGroup = {
   lifecycle_status: "LATEST" | "PREVIOUS" | "ARCHIVED"; created_at: string;
   latest_rebuild_at: string; training_rows: number; artifact_rebuilds: number;
   model_versions: string[]; subsequent_oos_rows: number; distinct_days: number;
+  subsequent_prediction_rows?: number; unscored_oos_rows?: number; overdue_oos_rows?: number;
+  evaluation_status?: VersionEvaluationStatus;
   cumulative_quote_return: number; profit_factor_quote_adjusted: number | null;
   coverage_rate: number | null; average_oracle_regret: number | null;
   cadence_metrics?: Record<EvaluationCadence, CadenceMetric>;
 };
 type EvaluationCadence = "EVERY_5M" | "FIXED_30M";
-type CadenceMetric = { oos_rows: number; distinct_days: number; cumulative_quote_return: number; profit_factor_quote_adjusted: number | null; coverage_rate: number | null };
+type CadenceMetric = { oos_rows: number; distinct_days: number; cumulative_quote_return: number; profit_factor_quote_adjusted: number | null; coverage_rate: number | null; prediction_rows?: number; unscored_oos_rows?: number; overdue_oos_rows?: number; evaluation_status?: VersionEvaluationStatus };
 
 type Payload = {
   preview_status_summary?: boolean;

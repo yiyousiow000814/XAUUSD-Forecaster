@@ -1000,6 +1000,60 @@ def _insert_prediction(connection, decision_id: str, decision_time: datetime, *,
     )
 
 
+def _insert_unscored_prediction(connection, decision_id: str, decision_time: datetime, *,
+                                model_version: str,
+                                model_identity: str = "MARKET_ONLY") -> None:
+    connection.execute(
+        "INSERT INTO predictions_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (decision_id, model_version, model_identity, decision_time.isoformat(),
+         decision_time.isoformat(), "LIVE_OOS", "feature-hash", 0.1, None,
+         0.1, -0.1, None, None, "UTC_DAY_BLOCK_OOS_ABS_RESIDUAL_Q95",
+         "calibration-test", 0, 0, 0, None, "UNCALIBRATED", "LONG", "WAIT",
+         "PROVISIONAL"),
+    )
+
+
+def test_version_group_evaluation_state_distinguishes_pending_from_no_run(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    created = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    _insert_model_update(
+        ledger.connection, "market-never-ran", "MARKET_ONLY", created
+    )
+    _insert_model_update(
+        ledger.connection, "market-pending", "MARKET_ONLY",
+        created + timedelta(hours=1),
+    )
+    _insert_unscored_prediction(
+        ledger.connection, "pending-decision", created + timedelta(hours=1, minutes=5),
+        model_version="market-pending",
+    )
+
+    groups = {
+        row["model_versions"][0]: row
+        for row in learning_curve_payload(
+            ledger.connection, observed_at=created + timedelta(hours=1, minutes=10)
+        )["version_groups"]
+    }
+    assert groups["market-never-ran"]["lifecycle_status"] == "PREVIOUS"
+    assert groups["market-never-ran"]["evaluation_status"] == "NO_PREDICTIONS"
+    assert groups["market-never-ran"]["subsequent_prediction_rows"] == 0
+    assert groups["market-pending"]["evaluation_status"] == "AWAITING_OUTCOME"
+    assert groups["market-pending"]["unscored_oos_rows"] == 1
+    assert (
+        groups["market-pending"]["cadence_metrics"]["FIXED_30M"]["evaluation_status"]
+        == "AWAITING_FIRST_PREDICTION"
+    )
+    settled_groups = {
+        row["model_versions"][0]: row
+        for row in learning_curve_payload(
+            ledger.connection, observed_at=created + timedelta(hours=2)
+        )["version_groups"]
+    }
+    assert settled_groups["market-pending"]["evaluation_status"] == "OUTCOME_UNAVAILABLE"
+    assert settled_groups["market-pending"]["overdue_oos_rows"] == 1
+    ledger.close()
+
+
 def test_model_news_visibility_receipt_is_exact_and_append_only(tmp_path) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     decision = datetime(2026, 8, 8, 1, 0, tzinfo=UTC)
@@ -1175,10 +1229,13 @@ def test_learning_curves_expose_true_fixed_30m_non_overlapping_evaluation(tmp_pa
         if row["model_identity"] == "MARKET_ONLY"
     )
     assert group["cadence_metrics"]["EVERY_5M"]["oos_rows"] == 3
+    assert group["cadence_metrics"]["EVERY_5M"]["evaluation_status"] == "HAS_RESULTS"
+    assert group["cadence_metrics"]["EVERY_5M"]["prediction_rows"] == 3
     assert group["cadence_metrics"]["EVERY_5M"]["cumulative_quote_return"] == pytest.approx(
         sum(net_shadow_log_return(value) for value in (1.0, 2.0, -0.5))
     )
     assert group["cadence_metrics"]["FIXED_30M"]["oos_rows"] == 1
+    assert group["cadence_metrics"]["FIXED_30M"]["evaluation_status"] == "HAS_RESULTS"
     assert group["cadence_metrics"]["FIXED_30M"]["cumulative_quote_return"] == pytest.approx(
         net_shadow_log_return(2.0)
     )

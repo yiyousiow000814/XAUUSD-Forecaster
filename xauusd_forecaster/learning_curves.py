@@ -6,7 +6,7 @@ import json
 import math
 import statistics
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from .execution_costs import COMMISSION_STATUS, SLIPPAGE_STATUS, net_shadow_log_return
 from .news_contracts import (
@@ -16,6 +16,7 @@ from .news_contracts import (
 
 
 MAX_CURVE_POINTS = 1200
+OUTCOME_SETTLEMENT_WINDOW = timedelta(minutes=35)
 
 
 def _bounded_curve(points: list[dict], max_points: int = MAX_CURVE_POINTS) -> list[dict]:
@@ -151,9 +152,58 @@ def _cadence_metrics(rows) -> dict:
     return result
 
 
-def learning_curve_payload(connection) -> dict:
+def _version_cadence_metrics(
+    rows, lifecycle_status: str, observed_at: datetime,
+) -> dict:
+    """Describe whether each cadence has results, pending scores, or no run."""
+    all_rows = list(rows)
+    scored_rows = [row for row in all_rows if row["value_quote_return"] is not None]
+    result = _cadence_metrics(scored_rows)
+    for name, cadence_rows in (
+        ("EVERY_5M", all_rows),
+        ("FIXED_30M", [
+            row for row in all_rows if _is_fixed_30m_grid(row["decision_time"])
+        ]),
+    ):
+        scored_count = sum(
+            row["value_quote_return"] is not None for row in cadence_rows
+        )
+        overdue_count = 0
+        for row in cadence_rows:
+            if row["value_quote_return"] is not None:
+                continue
+            decision_time = datetime.fromisoformat(
+                row["decision_time"].replace("Z", "+00:00")
+            )
+            if decision_time.tzinfo is None:
+                decision_time = decision_time.replace(tzinfo=timezone.utc)
+            if decision_time + OUTCOME_SETTLEMENT_WINDOW <= observed_at:
+                overdue_count += 1
+        if scored_count:
+            evaluation_status = "HAS_RESULTS"
+        elif cadence_rows and overdue_count == len(cadence_rows):
+            evaluation_status = "OUTCOME_UNAVAILABLE"
+        elif cadence_rows:
+            evaluation_status = "AWAITING_OUTCOME"
+        elif lifecycle_status == "LATEST":
+            evaluation_status = "AWAITING_FIRST_PREDICTION"
+        else:
+            evaluation_status = "NO_PREDICTIONS"
+        result[name].update({
+            "prediction_rows": len(cadence_rows),
+            "unscored_oos_rows": len(cadence_rows) - scored_count,
+            "overdue_oos_rows": overdue_count,
+            "evaluation_status": evaluation_status,
+        })
+    return result
+
+
+def learning_curve_payload(connection, observed_at: datetime | None = None) -> dict:
     from .inference_v2 import news_model_activation_status
     from .training_v2 import NEWS_MIN_EXPOSED_ROWS
+    observed_at = observed_at or datetime.now(timezone.utc)
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=timezone.utc)
     epoch = connection.execute(
         "SELECT * FROM evaluation_epochs ORDER BY created_at DESC LIMIT 1"
     ).fetchone()
@@ -428,24 +478,31 @@ def learning_curve_payload(connection) -> dict:
         daily = defaultdict(float)
         for row in scored:
             daily[row["decision_time"][:10]] += _net_row_value(row)
-        cadence_metrics = _cadence_metrics(scored)
-        primary_metrics = cadence_metrics["EVERY_5M"]
         group_number = identity_group_seen[identity]
         total_groups = identity_group_counts[identity]
+        lifecycle_status = (
+            "LATEST" if group_number == total_groups else
+            "PREVIOUS" if group_number == total_groups - 1 else "ARCHIVED"
+        )
+        cadence_metrics = _version_cadence_metrics(
+            rows, lifecycle_status, observed_at,
+        )
+        primary_metrics = cadence_metrics["EVERY_5M"]
         version_groups.append({
             "model_identity": identity,
             "training_dataset_hash": dataset_hash,
             "generation": group_number,
-            "lifecycle_status": (
-                "LATEST" if group_number == total_groups else
-                "PREVIOUS" if group_number == total_groups - 1 else "ARCHIVED"
-            ),
+            "lifecycle_status": lifecycle_status,
             "created_at": group_updates[0]["created_at"],
             "latest_rebuild_at": group_updates[-1]["created_at"],
             "training_rows": group_updates[0]["training_rows"],
             "artifact_rebuilds": max(0, len(group_updates) - 1),
             "model_versions": versions,
             "subsequent_oos_rows": primary_metrics["oos_rows"],
+            "subsequent_prediction_rows": primary_metrics["prediction_rows"],
+            "unscored_oos_rows": primary_metrics["unscored_oos_rows"],
+            "overdue_oos_rows": primary_metrics["overdue_oos_rows"],
+            "evaluation_status": primary_metrics["evaluation_status"],
             "distinct_days": primary_metrics["distinct_days"],
             "cadence_metrics": cadence_metrics,
             **_selection_metrics(scored),
