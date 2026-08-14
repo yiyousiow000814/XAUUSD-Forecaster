@@ -115,11 +115,13 @@ def _run_control_center_contract(tmp_path, body: str) -> str:
 
 
 def _write_runtime_observation(tmp_path, **overrides) -> None:
+    started_at = datetime.now(timezone.utc).isoformat()
     state = {
         "update_status": "OBSERVING",
         "observing_revision": "b" * 40,
         "previous_revision": "a" * 40,
-        "observation_started_at": datetime.now(timezone.utc).isoformat(),
+        "observation_started_at": started_at,
+        "observation_ready_at": started_at,
         "observation_last_decision_time": "2026-08-13T03:00:00+00:00",
         "observation_success_cycles": 0,
         "observation_consecutive_failures": 0,
@@ -507,10 +509,28 @@ def test_three_consecutive_observation_failures_trigger_one_rollback(tmp_path) -
     assert result == "True,True,False,1,ROLLED_BACK"
 
 
+def test_observation_window_waits_for_the_worker_family_to_finish_starting(
+    tmp_path,
+) -> None:
+    _write_runtime_observation(tmp_path, observation_ready_at=None)
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:rollbacks = 0; function Test-CodeReloadHealth { "
+        "param($ReloadStarted, $AllowedWorkerStates); "
+        "return $null -eq $AllowedWorkerStates -or $AllowedWorkerStates.Count -gt 1 }; "
+        "function Invoke-RuntimeRollback { $script:rollbacks += 1; return $true }; "
+        "$observed = Test-RuntimeObservation; $state = Get-RuntimeUpdateState; "
+        'Write-Output "$observed,$($state.update_status),$($null -eq $state.observation_ready_at),$script:rollbacks"',
+    )
+
+    assert result == "True,OBSERVING,True,0"
+
+
 def test_market_closure_pauses_observation_timeout_until_reopen(tmp_path) -> None:
     _write_runtime_observation(
         tmp_path,
         observation_started_at="2020-01-01T00:00:00+00:00",
+        observation_ready_at="2020-01-01T00:00:00+00:00",
     )
     result = _run_control_center_contract(
         tmp_path,
@@ -524,7 +544,7 @@ def test_market_closure_pauses_observation_timeout_until_reopen(tmp_path) -> Non
         "function Invoke-RestMethod { return [pscustomobject]@{ system = "
         "[pscustomobject]@{ market_session = 'OPEN' } } }; "
         "$reopened = Test-RuntimeObservation; "
-        "$wasPaused = [DateTimeOffset]::Parse([string]$paused.observation_started_at) "
+        "$wasPaused = [DateTimeOffset]::Parse([string]$paused.observation_ready_at) "
         "-gt [DateTimeOffset]::Parse('2020-01-02T00:00:00+00:00'); "
         'Write-Output "$closed,$reopened,$wasPaused,$script:rollbacks"',
     )
@@ -892,3 +912,47 @@ def test_service_state_rejects_stale_worker_heartbeat(tmp_path) -> None:
     ).stdout.strip()
 
     assert result == "RUNNING,COLLECTOR STALE"
+
+
+def test_worker_family_keeps_current_startup_alive_but_bounds_stalled_startup(
+    tmp_path,
+) -> None:
+    repo = tmp_path / "repo"
+    status_root = repo / ".local" / "forward"
+    status_root.mkdir(parents=True)
+    now = datetime.now(timezone.utc)
+    current_start = (now - timedelta(minutes=8)).isoformat()
+    stalled_start = (now - timedelta(minutes=16)).isoformat()
+    script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    results = []
+
+    for service, filename in (
+        ("collector", "collector-status.json"),
+        ("annotator", "news-annotator-status.json"),
+    ):
+        status = status_root / filename
+        status.write_text(json.dumps({
+            "service": service,
+            "state": "STARTING",
+            "last_success": (now - timedelta(minutes=8)).isoformat(),
+        }), encoding="utf-8")
+        command = (
+            f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{repo}' "
+            f"-RepositoryRoot '{repo}'; "
+            f"function Get-ServiceProcessStartedAt {{ return [DateTimeOffset]::Parse('{current_start}') }}; "
+            f"$service = [pscustomobject]@{{ Key = '{service}' }}; "
+            "$processes = @([pscustomobject]@{ ProcessId = 1 }); "
+            "$current = Get-ServiceState -Service $service -Processes $processes; "
+            f"function Get-ServiceProcessStartedAt {{ return [DateTimeOffset]::Parse('{stalled_start}') }}; "
+            "$stalled = Get-ServiceState -Service $service -Processes $processes; "
+            "Write-Output \"$current,$stalled\""
+        )
+        results.append(subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip())
+
+    assert results == [
+        "STARTING,COLLECTOR STALE",
+        "STARTING,ANNOTATOR STALE",
+    ]
