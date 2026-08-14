@@ -68,15 +68,6 @@ REMOTE_MARKET_DENSE_LIMITS = (1440, 1152, 864, 576, 288, 0)
 REMOTE_MARKET_OVERVIEW_LIMITS = (480, 240, 120, 80, 40)
 
 from xauusd_forecaster.dashboard_payloads import bounded_evidence_window  # noqa: E402
-from xauusd_forecaster.forward_ledger import ForwardLedger  # noqa: E402
-from xauusd_forecaster.news_qa import answer_news_question  # noqa: E402
-from xauusd_forecaster.news_scheduler import (  # noqa: E402
-    PREEMPTIBLE_POOL,
-    configured_api_credentials,
-)
-from xauusd_forecaster.scheduler_model_gateway import (  # noqa: E402
-    SchedulerModelAccountant,
-)
 
 
 class PayloadContractError(ValueError):
@@ -911,6 +902,17 @@ def _get_json(url: str, config: dict) -> dict:
 
 
 def _sync_news_questions(local_payload: dict, config: dict) -> None:
+    # Preview builds import this module for its pure payload helpers. Keep the
+    # local SQLite/model runtime out of that import path: Cloudflare's build
+    # Python intentionally does not include the optional _sqlite3 extension.
+    from xauusd_forecaster.forward_ledger import ForwardLedger
+    from xauusd_forecaster.news_qa import answer_news_question
+    from xauusd_forecaster.news_scheduler import (
+        PREEMPTIBLE_POOL,
+        configured_api_credentials,
+    )
+    from xauusd_forecaster.scheduler_model_gateway import SchedulerModelAccountant
+
     url = config.get("remote_news_questions_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/news-questions"
     )

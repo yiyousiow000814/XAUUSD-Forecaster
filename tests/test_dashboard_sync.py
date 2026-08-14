@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import subprocess
+import sys
 import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -35,6 +37,37 @@ def _preview_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_preview_bundle_import_does_not_require_sqlite_extension() -> None:
+    """Immutable Preview assembly must remain portable to Cloudflare builds."""
+    root = Path(__file__).resolve().parents[1]
+    code = """
+import importlib.abc
+import importlib.util
+import pathlib
+
+class BlockSqlite(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in {"sqlite3", "_sqlite3"}:
+            raise ModuleNotFoundError(f"blocked optional module: {fullname}")
+        return None
+
+import sys
+sys.meta_path.insert(0, BlockSqlite())
+path = pathlib.Path("scripts/build_preview_bundle.py").resolve()
+spec = importlib.util.spec_from_file_location("preview_without_sqlite", path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_preview_does_not_call_late_aggregated_news_expired() -> None:
