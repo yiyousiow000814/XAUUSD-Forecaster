@@ -213,6 +213,48 @@ def test_same_actor_and_object_remain_candidates_across_key_wording() -> None:
         ),
         pytest.param(
             {
+                "material_event_key": "july_2026_us_jobs_report_release",
+                "canonical_actor_id": "bureau_of_labor_statistics",
+                "canonical_object_id": "us_jobs_report_july",
+            },
+            {
+                "material_event_key": "us_july_2026_jobs_report_release",
+                "canonical_actor_id": "bureau_of_labor_statistics",
+                "canonical_object_id": "us_july_jobs_report",
+            },
+            1.0,
+            id="current-cross-publisher-jobs-example",
+        ),
+        pytest.param(
+            {
+                "canonical_actor_id": "us_bls",
+                "canonical_object_id": "consumer_price_index",
+            },
+            {
+                "canonical_actor_id": "bureau_of_labor_statistics",
+                "canonical_object_id": "consumer_price_index",
+            },
+            0.75,
+            id="current-bls-alias-example",
+        ),
+        pytest.param(
+            {
+                "material_event_key": "us_july_2026_ppi_release",
+                "episode_key": "us_ppi_release_2026_08",
+                "canonical_actor_id": "bureau_of_labor_statistics",
+                "canonical_object_id": "us_ppi_report",
+            },
+            {
+                "material_event_key": "us_cpi_release_2026_08_14",
+                "episode_key": "us_cpi_release_2026_08",
+                "canonical_actor_id": "bureau_of_labor_statistics",
+                "canonical_object_id": "consumer_price_index",
+            },
+            0.0,
+            id="current-bls-ppi-and-cpi-remain-separate",
+        ),
+        pytest.param(
+            {
                 "material_event_key": "fed_holds_rates_july",
                 "episode_key": "fomc_july_2026",
                 "canonical_actor_id": "federal_reserve",

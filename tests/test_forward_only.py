@@ -2840,61 +2840,76 @@ def test_truncated_identity_context_forbids_claiming_a_new_episode() -> None:
     assert "必须选UNRESOLVED，禁止选NEW_EPISODE" in prompt
 
 
-def test_identity_recall_crosses_categories_and_ignores_xau_impact(tmp_path) -> None:
+def test_current_cross_publisher_event_survives_recent_noise(tmp_path) -> None:
     now = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
     common = {
-        "event_type": "fed_independence", "entities": ["Donald Trump", "Lisa Cook"],
+        "event_type": "employment_situation", "entities": ["BLS", "US payrolls"],
         "hawkishness": 0.0, "inflation_impulse": 0.0,
         "growth_impulse": 0.0, "geopolitical_risk": 0.2,
         "usd_impulse": 0.0, "novelty": 0.8, "confidence": 0.9,
-        "primary_category": "rates_fed", "record_kind": "FACT_EVENT",
+        "primary_category": "inflation_employment", "record_kind": "FACT_EVENT",
         "evidence_role": "CORE_CLAIM", "materiality": 0.8,
-        "canonical_actor_id": "donald_trump", "canonical_object_id": "lisa_cook",
-        "headline_zh": "特朗普再次寻求解除丽莎库克职务",
-        "secondary_categories": [], "emerging_topic_zh": "美联储独立性",
-        "actor": "Donald Trump", "action": "attempts removal",
-        "object": "Lisa Cook", "location": "United States", "event_time": "",
-        "claim_status": "CONFIRMED", "action_family": "REGULATORY_ACTION",
-        "canonical_location_id": "us", "primary_story_title_zh": "丽莎库克罢免争议",
+        "canonical_actor_id": "bureau_of_labor_statistics",
+        "canonical_object_id": "us_july_jobs_report",
+        "headline_zh": "美国7月就业报告显示非农减少23,000个岗位",
+        "secondary_categories": [], "emerging_topic_zh": "美国就业",
+        "actor": "Bureau of Labor Statistics", "action": "reports",
+        "object": "July 2026 employment situation", "location": "United States",
+        "event_time": "2026-07", "claim_status": "CONFIRMED",
+        "action_family": "ECONOMIC_RELEASE", "canonical_location_id": "us",
+        "primary_story_title_zh": "美国7月就业报告",
         "secondary_contexts_zh": [], "relation_to_prior": "NONE",
         "document_kind": "NEWS_REPORT", "source_organization_id": "test-source",
         "xauusd_relevance": "MACRO_DRIVER", "review_priority": "FAST",
         "material_change": "NEW_EVENT", "time_sensitivity": "ONGOING",
-        "semantic_reason_zh": "完整正文显示这是美联储治理相关的新事件。",
-        "supporting_evidence": ["Trump effort"],
+        "semantic_reason_zh": "完整正文显示这是同一次美国7月就业数据发布。",
+        "supporting_evidence": ["the economy lost 23,000 nonfarm payroll positions"],
     }
     for index, material_key in enumerate((
-        "trump_removes_lisa_cook", "cook_firing_attempt",
-        "publisher_cook_followup",
+        "us_july_2026_jobs_report_release",
+        "july_2026_us_jobs_report_release",
+        "publisher_jobs_followup",
     )):
-        item_id = f"cook-{index}"
+        item_id = f"jobs-{index}"
+        source = (
+            "google_news_us_employment"
+            if index == 0 else "google_news_gold_context"
+        )
         seen = now + timedelta(minutes=index * 70)
-        body = f"Trump effort involving Federal Reserve Governor Lisa Cook {index}. " * 20
+        body = (
+            "The Bureau of Labor Statistics reported that the economy lost "
+            "23,000 nonfarm payroll positions in July 2026. "
+        ) * 20
         digest = hashlib.sha256(body.encode()).hexdigest()
         ledger.append_news_revision({
-            "source": "federal_reserve_press_all", "source_item_id": item_id,
+            "source": source, "source_item_id": item_id,
             "source_published_time": seen, "collector_first_seen_time": seen,
-            "fetched_time": seen, "headline": f"Fed Governor Lisa Cook report {index}",
+            "fetched_time": seen,
+            "headline": (
+                "Gold and Silver Prices Surge After Weak July Jobs Report"
+                if index != 1 else
+                "Gold Jumps Over $100 After a Shockingly Weak July Jobs Report"
+            ),
             "body": body, "content_hash": digest,
             "cluster_id": (
-                "shared-cook-syndication" if index in {0, 2} else item_id
+                "shared-jobs-syndication" if index in {0, 2} else item_id
             ),
         })
         ledger.append_annotation({
             "annotation_id": f"annotation-{index}",
-            "source": "federal_reserve_press_all", "source_item_id": item_id,
+            "source": source, "source_item_id": item_id,
             "revision_number": 1, "raw_content_hash": digest,
             "annotation": {
                 **common, "material_event_key": material_key,
                 "episode_key": material_key,
-                "summary_zh": "特朗普再次寻求解除美联储理事丽莎库克的职务。",
+                "summary_zh": "美国7月就业报告显示非农岗位减少23,000个。",
                 **({
-                    "canonical_object_id": "federal_reserve_governor_lisa_cook",
+                    "canonical_object_id": "us_jobs_report_july",
                 } if index == 1 else {}),
                 **({
                     "canonical_actor_id": "reporting_publisher",
-                    "canonical_object_id": "federal_reserve_governance",
+                    "canonical_object_id": "employment_report_commentary",
                 } if index == 2 else {}),
                 **({
                     "primary_category": "regulation_other",
@@ -2908,7 +2923,7 @@ def test_identity_recall_crosses_categories_and_ignores_xau_impact(tmp_path) -> 
         })
         if index == 0:
             ledger.append_news_impact_assessment({
-                "assessment_id": "prior-impact", "source": "federal_reserve_press_all",
+                "assessment_id": "prior-impact", "source": source,
                 "source_item_id": item_id, "revision_number": 1,
                 "raw_content_hash": digest, "annotation_id": "annotation-0",
                 "llm_model_version": annotation_module.IMPACT_MODEL,
@@ -2917,15 +2932,15 @@ def test_identity_recall_crosses_categories_and_ignores_xau_impact(tmp_path) -> 
                 "assessed_at": seen + timedelta(seconds=2),
                 "impact_class": "BACKGROUND", "event_state": "ACTIVE",
                 "update_type": "NEW_EVENT", "confidence": 0.9,
-                "reason_zh": "此前已经收到同一事件。",
+                "reason_zh": "此前已经收到同一次就业数据发布。",
                 "resolution_id": "prior-resolution",
                 "identity_relation": "NEW_EPISODE",
                 "identity_anchor_zh": "新的事实发生批次。",
                 "core_fact_changes_zh": [],
                 "identity_differences_zh": ["当前事实属于新的发生批次。"],
                 "context_differences_zh": [],
-                "canonical_episode_id": "episode-cook",
-                "canonical_event_id": "event-cook",
+                "canonical_episode_id": "episode-july-jobs",
+                "canonical_event_id": "event-july-jobs",
             })
 
     # A broad feed can receive more than the old 500-row scan bound before the
@@ -2970,23 +2985,25 @@ def test_identity_recall_crosses_categories_and_ignores_xau_impact(tmp_path) -> 
     finally:
         ledger.connection.set_trace_callback(None)
 
-    current = next(row for row in pending if row["source_item_id"] == "cook-1")
+    current = next(row for row in pending if row["source_item_id"] == "jobs-1")
     assert current["prior_event_context"]
-    assert current["prior_event_context"][0]["source_item_id"] == "cook-0"
+    assert current["prior_event_context"][0]["source_item_id"] == "jobs-0"
     assert current["prior_event_context"][0]["candidate_id"] == "annotation-0"
-    assert current["prior_event_context"][0]["canonical_event_id"] == "event-cook"
+    assert current["prior_event_context"][0]["canonical_event_id"] == "event-july-jobs"
     assert current["prior_event_context"][0]["identity_anchor_eligible"] is True
     assert current["prior_event_context"][0]["impact_class"] == "BACKGROUND"
-    assert current["prior_event_context"][0]["similarity"] == 0.5
+    assert current["prior_event_context"][0]["similarity"] == 1.0
     claim = current["prior_event_context"][0]["event_claim"]
-    assert claim["actor"] == "Donald Trump"
-    assert claim["action"] == "attempts removal"
-    assert claim["object"] == "Lisa Cook"
-    assert claim["supporting_evidence"] == ["Trump effort"]
+    assert claim["actor"] == "Bureau of Labor Statistics"
+    assert claim["action"] == "reports"
+    assert claim["object"] == "July 2026 employment situation"
+    assert claim["supporting_evidence"] == [
+        "the economy lost 23,000 nonfarm payroll positions"
+    ]
     syndicated = next(
-        row for row in pending if row["source_item_id"] == "cook-2"
+        row for row in pending if row["source_item_id"] == "jobs-2"
     )
-    assert syndicated["prior_event_context"][0]["source_item_id"] == "cook-0"
+    assert syndicated["prior_event_context"][0]["source_item_id"] == "jobs-0"
     assert syndicated["prior_event_context"][0]["similarity"] == 1.0
     candidate_queries = [
         statement for statement in statements

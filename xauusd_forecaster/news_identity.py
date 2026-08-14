@@ -35,6 +35,8 @@ SOURCE_ORGANIZATION_ALIASES = {
     "reuters_news": "reuters",
     "theguardian_com": "the_guardian",
     "thomson_reuters": "reuters",
+    "us_bls": "bureau_of_labor_statistics",
+    "us_bureau_of_labor_statistics": "bureau_of_labor_statistics",
     "us_treasury_press_releases": "us_treasury",
     "world_gold_council_central_banks": "world_gold_council",
     "wsj_com": "wall_street_journal",

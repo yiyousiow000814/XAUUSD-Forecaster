@@ -182,6 +182,15 @@ def prior_identity_similarity(current: dict, prior: dict) -> float:
         or (current_episode and current_episode == prior_episode)
     ):
         return 1.0
+    current_material_family = _multiword_identity_signature(current_material)
+    prior_material_family = _multiword_identity_signature(prior_material)
+    current_episode_family = _multiword_identity_signature(current_episode)
+    prior_episode_family = _multiword_identity_signature(prior_episode)
+    if (
+        (current_material_family and current_material_family == prior_material_family)
+        or (current_episode_family and current_episode_family == prior_episode_family)
+    ):
+        return 1.0
     current_actor = canonical_id(current.get("canonical_actor_id"))
     prior_actor = canonical_id(prior.get("canonical_actor_id"))
     current_object = canonical_id(current.get("canonical_object_id"))
@@ -191,12 +200,24 @@ def prior_identity_similarity(current: dict, prior: dict) -> float:
         return 0.0
     if current_object == prior_object:
         return 0.75
+    if (
+        _multiword_identity_signature(current_object)
+        == _multiword_identity_signature(prior_object)
+        != ""
+    ):
+        return 0.75
     shorter, longer = sorted((current_object, prior_object), key=len)
     related_object = (
         len(shorter.split("_")) >= 2
         and (longer.startswith(f"{shorter}_") or longer.endswith(f"_{shorter}"))
     )
     return 0.5 if related_object else 0.0
+
+
+def _multiword_identity_signature(value: object) -> str:
+    """Ignore word order without erasing period or measurement tokens."""
+    parts = canonical_id(value).split("_")
+    return "_".join(sorted(parts)) if len(parts) >= 3 else ""
 
 
 def _identity_lookup_keys(item: dict) -> tuple[tuple[str, str], ...]:
@@ -209,6 +230,9 @@ def _identity_lookup_keys(item: dict) -> tuple[tuple[str, str], ...]:
         value = canonical_id(item.get(field))
         if value:
             keys.append((field, value))
+        signature = _multiword_identity_signature(value)
+        if signature:
+            keys.append((f"{field}_tokens", signature))
     actor = canonical_id(item.get("canonical_actor_id"))
     if actor:
         keys.append(("actor", actor))
