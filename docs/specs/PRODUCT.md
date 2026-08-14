@@ -1,4 +1,4 @@
-# Frozen Product Contract
+# Product Specification
 
 ## Product identity
 
@@ -12,7 +12,7 @@ SHORT, or WAIT?
 
 ## Frozen version 1 behavior
 
-| Surface | Contract |
+| Surface | Required behavior |
 |---|---|
 | Instrument | XAUUSD only |
 | Decision clock | Every 5 minutes |

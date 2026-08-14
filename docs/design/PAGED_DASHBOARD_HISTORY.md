@@ -1,13 +1,13 @@
-# PR 37: Paginate Growing Dashboard History
+# Paged Dashboard History Design
 
 ## Problem
 
-The local dashboard currently produces about 7.8 MB of JSON. The mirror keeps
+At the migration baseline, the local dashboard produced about 7.8 MB of JSON. The mirror kept
 individual uploads below 750 KB through adaptive compaction, but learning and
 market history continue to grow. Compaction can delay the limit; it cannot make
 an append-only history permanently bounded.
 
-Current measured mirror payloads:
+Measured migration-baseline payloads:
 
 - live status: 203 KB
 - learning: 747 KB

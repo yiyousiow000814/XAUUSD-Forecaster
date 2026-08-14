@@ -1,4 +1,4 @@
-# XAUUSD Forecasting System Contract
+# System Boundaries Contract
 
 ## Objective
 
@@ -8,7 +8,7 @@ first implementation should use
 one primary clock and one primary horizon. It must not attempt to explain or
 predict every possible gold narrative.
 
-The product contract must distinguish two questions:
+The product specification distinguishes two questions:
 
 1. **Forecast label:** the counterfactual value at a fixed future horizon.
 2. **Trading policy:** entry, holding, stop, target, sizing, and early-exit
@@ -16,8 +16,8 @@ The product contract must distinguish two questions:
 
 A useful forecast does not by itself prove that a trading policy is profitable.
 
-The version-1 product decisions and quantitative evidence gates are frozen in
-`PRODUCT_CONTRACT.md`.
+The version-1 product behavior and quantitative evidence gates are defined in
+[`PRODUCT.md`](../specs/PRODUCT.md).
 
 ## Production and learning isolation
 
@@ -175,7 +175,7 @@ bootstrap. The secondary user-facing policy replay applies the independent
 30-minute active-signal lock and reports non-overlapping PF, drawdown, Sharpe,
 frequency, and concentration. Neither view may replace the other.
 
-The thresholds are frozen in `PRODUCT_CONTRACT.md`. Passing them still creates
+The thresholds are defined in [`PRODUCT.md`](../specs/PRODUCT.md). Passing them still creates
 research evidence only; this application has no order-submission authority.
 
 

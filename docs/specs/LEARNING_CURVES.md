@@ -1,4 +1,8 @@
-# Live OOS Learning Curve Contract
+# Live OOS Learning Curves Specification
+
+The forward-only scoring, immutability, and generation-atomicity guarantees are
+defined in [`FORWARD_ONLY.md`](../contracts/FORWARD_ONLY.md). This document
+defines the required lifecycle and presentation behavior of learning curves.
 
 ## Training stages
 

@@ -1,4 +1,4 @@
-# News Event Evidence Contract
+# News Evidence Contract
 
 ## Purpose
 

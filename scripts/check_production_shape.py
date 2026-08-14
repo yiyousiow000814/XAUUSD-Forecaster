@@ -19,11 +19,18 @@ from xauusd_forecaster.production_shape import production_shape_violations  # no
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--status-url", default="http://127.0.0.1:8765/api/status")
+    parser.add_argument(
+        "--allow-pending-generation-decision", action="store_true",
+        help="During post-reload observation, wait for the next live boundary.",
+    )
     args = parser.parse_args()
 
     with urllib.request.urlopen(args.status_url, timeout=20) as response:
         status = json.loads(response.read())
-    violations = production_shape_violations(status)
+    violations = production_shape_violations(
+        status,
+        allow_pending_generation_decision=args.allow_pending_generation_decision,
+    )
     print(json.dumps({
         "status": "PASS" if not violations else "FAIL",
         "violations": violations,
