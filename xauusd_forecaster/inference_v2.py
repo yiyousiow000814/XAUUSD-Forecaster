@@ -346,6 +346,19 @@ def _insert_prediction(ledger, *, decision_id: str, decision_time: datetime,
     )
 
 
+def _prediction_receipt(
+    update: dict, *, recommended: str, raw_recommended: str, calibration: dict,
+) -> dict:
+    return {
+        "model_identity": update["model_identity"],
+        "model_version": update["model_version"],
+        "eligibility_version": update["eligibility_version"],
+        "recommended_action": recommended,
+        "raw_recommended_action": raw_recommended,
+        "calibration_status": calibration["status"],
+    }
+
+
 def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datetime,
                                created_at: datetime, market_snapshot: dict,
                                news_snapshot: dict,
@@ -395,6 +408,10 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
                 ev_long=None, ev_short=None, calibration=calibration,
                 recommended="WAIT", status="DATA_UNHEALTHY",
             )
+            created.append(_prediction_receipt(
+                update, recommended="WAIT", raw_recommended="WAIT",
+                calibration=calibration,
+            ))
             continue
         if gate_status == "NEWS_PIPELINE_UNHEALTHY":
             _insert_prediction(
@@ -409,6 +426,10 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
                 calibration=calibration, recommended="WAIT",
                 status="NEWS_PIPELINE_UNHEALTHY",
             )
+            created.append(_prediction_receipt(
+                update, recommended="WAIT", raw_recommended="WAIT",
+                calibration=calibration,
+            ))
             continue
         news_residual = None
         if identity == "MARKET_ONLY":
@@ -490,10 +511,9 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
             ev_long=ev_long, ev_short=ev_short, calibration=calibration,
             recommended=recommended, status=prediction_status,
         )
-        created.append({"model_identity": identity, "model_version": update["model_version"],
-                        "eligibility_version": update_eligibility,
-                        "recommended_action": recommended,
-                        "raw_recommended_action": raw_recommended,
-                        "calibration_status": calibration["status"]})
+        created.append(_prediction_receipt(
+            update, recommended=recommended, raw_recommended=raw_recommended,
+            calibration=calibration,
+        ))
     _require_complete_active_generation(ledger, decision_time, created)
     return created
