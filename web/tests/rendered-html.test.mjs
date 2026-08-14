@@ -1360,6 +1360,8 @@ test("distinguishes market history loading, empty, and failed states", () => {
   assert.match(modal, /activeMarket = remoteHistory \? historyResult\?\.data \?\? market : market/);
   assert.match(modal, /className="market-visual-shell" aria-busy=\{historyState === "loading"\}/);
   assert.match(modal, /className="market-refresh-signal" role="status"/);
+  assert.match(modal, /disabled=\{historyState === "loading" \|\| !canGoEarlier\}/);
+  assert.match(modal, /disabled=\{historyState === "loading" \|\| !canGoLater\}/);
   assert.doesNotMatch(modal, /historyState === "loading" && candles\.length > 0 && <GraphLoading/);
   assert.match(css, /\.market-refresh-signal \{ position:absolute/);
   assert.match(modal, /正在读取长期曲线/);

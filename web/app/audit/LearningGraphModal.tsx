@@ -831,9 +831,9 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
       {historyState === "loading" ? <GraphLoading label="正在读取行情" /> : historyState === "error" ? <GraphLoadError label="行情读取失败" onRetry={() => setHistoryRetry(value => value + 1)} /> : canGoLater ? <div className="market-window-empty"><strong>这段时间没有行情</strong><span>已跳过休市或数据空档，可返回较新的交易时段。</span><button type="button" onClick={goLater}>→ 返回较新行情</button></div> : <Empty title="暂无行情数据" text="当前范围没有 Bid/Ask 行情。" />}
     </div> : <>
     <div className="market-history-nav" aria-label="历史行情翻页">
-      <button type="button" disabled={!canGoEarlier} onClick={goEarlier} aria-label="查看更早行情">←</button>
+      <button type="button" disabled={historyState === "loading" || !canGoEarlier} onClick={goEarlier} aria-label="查看更早行情">←</button>
       <span>{timeLabel(candles[0].time)} — {timeLabel(candles.at(-1)!.time)}{range === "all" && activeMarket?.overview_downsampled ? ` · 全部 ${formatExactCount(activeMarket.source_candle_count)} 根概览` : ""}</span>
-      <button type="button" disabled={!canGoLater} onClick={goLater} aria-label="查看较新行情">→</button>
+      <button type="button" disabled={historyState === "loading" || !canGoLater} onClick={goLater} aria-label="查看较新行情">→</button>
       {(page > 0 || laterPages.length > 0) && <button type="button" onClick={goLatest}>最新</button>}
     </div>
     <div className="prediction-counts"><b>{scopedDecisions.length ? "成本后EV较高方向" : predictionAvailability}</b>{scopedDecisions.length > 0 && <><span>看多 {formatExactCount(counts.LONG)}</span><span>看空 {formatExactCount(counts.SHORT)}</span><span>等待 {formatExactCount(counts.WAIT)}{unhealthyWaits ? `（数据异常 ${formatExactCount(unhealthyWaits)}）` : ""}</span>{policyMismatchCount > 0 && <span className="negative">历史规则不一致 {formatExactCount(policyMismatchCount)}（原记录保留）</span>}</>}</div>
