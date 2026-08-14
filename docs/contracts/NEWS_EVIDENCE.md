@@ -109,7 +109,8 @@ AI scheduling enforces project-scoped request and input-token windows for each
 Gemini annotation model and across Gemma impact review and title translation.
 Input size is obtained from the provider's token-count endpoint before
 generation; a conservative byte bound fails closed when token counting is
-unavailable. Key rotation never multiplies a shared project budget. If the
+unavailable. Keys belonging to one account share that account's budget; keys
+belonging to independently configured accounts are metered independently. If the
 primary Gemini annotation model has no safe capacity, the existing scheduler
 may try the separately metered fallback annotation model; final event-identity
 review remains Gemma-owned rather than silently changing classifier semantics.
