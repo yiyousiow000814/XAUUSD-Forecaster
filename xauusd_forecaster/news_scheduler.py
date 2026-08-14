@@ -20,6 +20,7 @@ ROUTINE_POOL = "ROUTINE"
 PREEMPTIBLE_POOL = "PREEMPTIBLE"
 URGENT_PRIORITIES = frozenset({"IMMEDIATE", "FAST"})
 PRIORITIES = ("IMMEDIATE", "FAST", "NORMAL", "BACKGROUND")
+PRIORITY_HEAD_START = timedelta(minutes=1)
 TASKS = (
     "ACTIVE_ANNOTATION",
     "ACTIVE_IMPACT",
@@ -334,6 +335,7 @@ def claim_job(
         raise ValueError("scheduler worker_id is required")
     instant = now or datetime.now(UTC)
     timestamp = _iso(instant)
+    aged_before = _iso(instant - PRIORITY_HEAD_START)
     lease_expires = _iso(instant + timedelta(seconds=max(30, lease_seconds)))
     priority_filter = (
         "AND priority IN ('IMMEDIATE','FAST')"
@@ -355,13 +357,15 @@ def claim_job(
                     'ACTIVE_ANNOTATION','ACTIVE_IMPACT','TITLE_TRANSLATION')
                   AND available_at<=? {priority_filter}
                 ORDER BY
+                  CASE WHEN created_at<=? THEN 0 ELSE 1 END,
+                  CASE WHEN created_at<=? THEN created_at ELSE NULL END,
                   CASE priority WHEN 'IMMEDIATE' THEN 0 WHEN 'FAST' THEN 1
                                 WHEN 'NORMAL' THEN 2 ELSE 3 END,
                   CASE task_type WHEN 'ACTIVE_IMPACT' THEN 0
                                  WHEN 'ACTIVE_ANNOTATION' THEN 1 ELSE 2 END,
                   created_at,job_id
                 LIMIT 1""",
-            (timestamp,),
+            (timestamp, aged_before, aged_before),
         ).fetchone()
         if row is None:
             connection.commit()
@@ -524,6 +528,84 @@ def account_quota_snapshot(
         "total_remaining": sum(item["remaining"] for item in keys),
         "accounting_source": "SCHEDULER_DB",
     }
+
+
+def rank_accounts_for_models(
+    connection: sqlite3.Connection,
+    credentials: tuple[ApiCredential, ...],
+    *,
+    models: tuple[str, ...],
+    priority_reserve_models: tuple[str, ...] = (),
+    urgent: bool,
+    now: datetime | None = None,
+) -> tuple[str, ...]:
+    """Rank configured accounts by live quota headroom for a model route.
+
+    Keys belonging to one account intentionally share one score.  Adding an
+    independent account therefore increases capacity immediately, while adding
+    another key to an existing account only adds transport redundancy.
+    """
+    from .ai_provider_registry import quota_surface_for_model
+
+    instant = now or datetime.now(UTC)
+    day = quota_day(instant)
+    recent_minutes = (
+        minute_bucket(instant - timedelta(minutes=1)), minute_bucket(instant),
+    )
+    account_order = tuple(dict.fromkeys(item.account_id for item in credentials))
+    route = tuple(dict.fromkeys(models))
+
+    def model_headroom(account_id: str, model: str) -> float:
+        policy = quota_surface_for_model(model)
+        families = policy.model_families
+        placeholders = ",".join("?" for _ in families)
+        reserve = 0
+        if not urgent and model in priority_reserve_models:
+            from .annotation import GEMINI_DAILY_PRIORITY_RESERVE
+            reserve = GEMINI_DAILY_PRIORITY_RESERVE
+        daily_limit = max(0, policy.daily_limit - reserve)
+        daily = connection.execute(
+            f"""SELECT COALESCE(sum(request_count),0) AS requests
+                FROM news_ai_account_daily_usage_v1
+                WHERE quota_day=? AND account_id=?
+                  AND model_family IN ({placeholders})""",
+            (day, account_id, *families),
+        ).fetchone()
+        account_clause = "" if policy.share_minute_across_accounts else "AND account_id=?"
+        parameters: tuple[object, ...] = (
+            *recent_minutes,
+            *((account_id,) if not policy.share_minute_across_accounts else ()),
+            *families,
+        )
+        recent = connection.execute(
+            f"""SELECT COALESCE(sum(request_count),0) AS requests,
+                       COALESCE(sum(input_token_count),0) AS tokens
+                FROM news_ai_account_minute_usage_v1
+                WHERE minute_bucket IN (?,?) {account_clause}
+                  AND model_family IN ({placeholders})""",
+            parameters,
+        ).fetchone()
+        ratios = (
+            max(0.0, (daily_limit - int(daily["requests"])) / max(1, daily_limit)),
+            max(0.0, (policy.requests_per_minute - int(recent["requests"]))
+                / max(1, policy.requests_per_minute)),
+            max(0.0, (policy.input_tokens_per_minute - int(recent["tokens"]))
+                / max(1, policy.input_tokens_per_minute)),
+        )
+        return min(ratios)
+
+    scores = {
+        account_id: max(
+            (model_headroom(account_id, model) for model in route),
+            default=0.0,
+        )
+        for account_id in account_order
+    }
+    order_index = {account_id: index for index, account_id in enumerate(account_order)}
+    return tuple(sorted(
+        account_order,
+        key=lambda account_id: (-scores[account_id], order_index[account_id]),
+    ))
 
 
 def reserve_account_request(

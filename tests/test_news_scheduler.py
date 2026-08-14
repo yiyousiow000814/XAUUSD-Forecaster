@@ -18,6 +18,7 @@ from xauusd_forecaster.news_scheduler import (
     configured_api_credentials,
     enqueue_job,
     install_scheduler_schema,
+    rank_accounts_for_models,
     reconcile_completed_jobs,
     reserve_account_request,
     scheduler_counts,
@@ -455,10 +456,9 @@ def test_preemptible_quota_deferral_flows_to_routine_account(
         ledger, batch_size=2, progress_callback=progress.append,
     )
 
-    assert [status["pool"] for status in statuses] == [
-        PREEMPTIBLE_POOL, ROUTINE_POOL,
-    ]
-    assert progress == [1, 2]
+    assert [status["pool"] for status in statuses] == [ROUTINE_POOL]
+    assert statuses[0]["attempted_accounts"] == 2
+    assert progress == [1]
     assert ledger.connection.execute(
         "SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
     ).fetchone()["state"] == "COMPLETED"
@@ -471,6 +471,212 @@ def test_preemptible_quota_deferral_flows_to_routine_account(
         ("routine-account", "OK", None),
     ]
     ledger.close()
+
+
+def test_aged_fifo_work_cannot_be_starved_by_fresh_priority_work() -> None:
+    connection = _connection()
+    oldest = _enqueue(connection, "oldest", priority="BACKGROUND")
+    enqueue_job(
+        connection, task_type="ACTIVE_IMPACT", source="source",
+        source_item_id="fresh-urgent", revision_number=1,
+        annotation_id="annotation", prompt_version="prompt",
+        priority="IMMEDIATE", now=NOW + timedelta(seconds=61),
+    )
+
+    claimed = claim_job(
+        connection, worker_id="routine", pool=ROUTINE_POOL,
+        now=NOW + timedelta(seconds=62),
+    )
+
+    assert claimed and claimed.job_id == oldest
+
+
+def test_accounts_are_ranked_by_shared_live_model_headroom() -> None:
+    from xauusd_forecaster.news_impact import IMPACT_MODEL
+
+    connection = _connection()
+    credentials = (
+        ApiCredential("busy", ROUTINE_POOL, "key-a", "a"),
+        ApiCredential("free", ROUTINE_POOL, "key-b", "b"),
+        ApiCredential("busy", ROUTINE_POOL, "key-c", "c"),
+    )
+    assert reserve_account_request(
+        connection, account_id="busy", model_family=IMPACT_MODEL,
+        daily_limit=15_000, requests_per_minute=20,
+        input_tokens=14_000, input_tokens_per_minute=15_000,
+        shared_model_families=(IMPACT_MODEL, "gemma-impact", "gemma-title"),
+        now=NOW,
+    )
+
+    ranked = rank_accounts_for_models(
+        connection, credentials, models=(IMPACT_MODEL,), urgent=False, now=NOW,
+    )
+
+    assert ranked == ("free", "busy")
+
+
+def test_scheduler_tries_every_independent_account_before_waiting(
+    tmp_path, monkeypatch,
+) -> None:
+    from scripts import run_news_annotator as runner
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    enqueue_job(
+        ledger.connection, task_type="ACTIVE_IMPACT", source="source",
+        source_item_id="chain", revision_number=1, annotation_id="annotation",
+        prompt_version="prompt", priority="NORMAL",
+        now=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    credentials = tuple(
+        ApiCredential(f"account-{name}", ROUTINE_POOL, f"key-{name}", name)
+        for name in ("a", "b", "c")
+    )
+    monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
+    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    calls = []
+
+    def execute(_ledger, credential, _job, **_kwargs):
+        calls.append(credential.account_id)
+        if credential.account_id == "account-a":
+            return {"status": "DEFERRED", "reason": "quota"}
+        if credential.account_id == "account-b":
+            return {"status": "ERROR", "provider_http_status": 503,
+                    "error": "temporarily unavailable"}
+        return {"status": "OK"}
+
+    monkeypatch.setattr(runner, "_execute_job", execute)
+
+    statuses = runner.run_scheduled_batch(ledger, batch_size=1)
+
+    assert calls == ["account-a", "account-b", "account-c"]
+    assert statuses[0]["status"] == "OK"
+    assert statuses[0]["attempted_accounts"] == 3
+    assert ledger.connection.execute(
+        "SELECT state FROM news_ai_jobs_v1"
+    ).fetchone()["state"] == "COMPLETED"
+    ledger.close()
+
+
+def test_one_capacity_blocked_job_does_not_stop_the_rest_of_the_chain(
+    tmp_path, monkeypatch,
+) -> None:
+    from scripts import run_news_annotator as runner
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    created = datetime.now(UTC) - timedelta(minutes=2)
+    for item, task in (("blocked", "ACTIVE_IMPACT"),
+                       ("ready", "ACTIVE_ANNOTATION")):
+        enqueue_job(
+            ledger.connection, task_type=task, source="source",
+            source_item_id=item, revision_number=1,
+            annotation_id="annotation", prompt_version="prompt",
+            priority="NORMAL", now=created,
+        )
+        created += timedelta(seconds=1)
+    credentials = (
+        ApiCredential("account-a", ROUTINE_POOL, "key-a", "a"),
+        ApiCredential("account-b", ROUTINE_POOL, "key-b", "b"),
+    )
+    monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
+    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+
+    def execute(_ledger, _credential, job, **_kwargs):
+        if job.source_item_id == "blocked":
+            return {"status": "DEFERRED", "reason": "quota"}
+        return {"status": "OK"}
+
+    monkeypatch.setattr(runner, "_execute_job", execute)
+
+    statuses = runner.run_scheduled_batch(ledger, batch_size=2)
+
+    assert [(row["task_type"], row["status"]) for row in statuses] == [
+        ("ACTIVE_IMPACT", "DEFERRED"),
+        ("ACTIVE_ANNOTATION", "OK"),
+    ]
+    rows = ledger.connection.execute(
+        "SELECT source_item_id,state,available_at FROM news_ai_jobs_v1 "
+        "ORDER BY created_at"
+    ).fetchall()
+    assert rows[0]["state"] == "QUEUED"
+    assert datetime.fromisoformat(rows[0]["available_at"]) > datetime.now(UTC)
+    assert rows[1]["state"] == "COMPLETED"
+    ledger.close()
+
+
+def test_every_scheduler_task_has_one_declared_semantic_route() -> None:
+    from xauusd_forecaster.ai_task_registry import AI_TASK_ROUTE_BY_TYPE
+    from xauusd_forecaster.news_scheduler import TASKS
+
+    assert set(AI_TASK_ROUTE_BY_TYPE) == set(TASKS)
+    assert AI_TASK_ROUTE_BY_TYPE["ACTIVE_IMPACT"].semantic_owner == (
+        "NEWS_EVENT_IDENTITY"
+    )
+
+
+def test_extra_key_in_one_account_does_not_inflate_batch_capacity(
+    tmp_path, monkeypatch,
+) -> None:
+    from scripts import run_news_annotator as runner
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    for index in range(12):
+        enqueue_job(
+            ledger.connection, task_type="ACTIVE_ANNOTATION", source="source",
+            source_item_id=f"item-{index}", revision_number=1,
+            prompt_version="prompt", priority="NORMAL",
+            now=datetime.now(UTC) - timedelta(minutes=2),
+        )
+    credentials = (
+        ApiCredential("one-account", ROUTINE_POOL, "key-a", "a"),
+        ApiCredential("one-account", ROUTINE_POOL, "key-b", "b"),
+    )
+    monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
+    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        runner, "_execute_job", lambda *_args, **_kwargs: {"status": "OK"},
+    )
+
+    statuses = runner.run_scheduled_batch(ledger, batch_size=None)
+
+    assert len(statuses) == 10
+    assert scheduler_counts(ledger.connection)["queued"] == 2
+    ledger.close()
+
+
+def test_display_route_uses_declared_fallback_when_gemma_capacity_is_full(
+    monkeypatch,
+) -> None:
+    import xauusd_forecaster.annotation as annotation
+    from xauusd_forecaster.model_gateway import (
+        ModelGatewayCapacityExhausted,
+        ModelRequestAccountant,
+    )
+
+    class Accountant(ModelRequestAccountant):
+        def reserve(self, _usage) -> bool:
+            return True
+
+    pool = annotation._GeminiRequestPool(
+        ("offline-key",), request_accountant=Accountant(),
+    )
+    monkeypatch.setattr(pool.gateway, "count_input_tokens", lambda *_args: 10)
+    calls = []
+
+    def generate(_index, *, model, **_kwargs):
+        calls.append(model)
+        if model == annotation.DEFAULT_GEMMA_MODEL:
+            raise ModelGatewayCapacityExhausted("full")
+        return "中文标题", model
+
+    monkeypatch.setattr(pool.gateway, "generate", generate)
+
+    title, model = pool.call_title(0, annotation.DEFAULT_GEMMA_MODEL, "Headline")
+
+    assert title == "中文标题"
+    assert model == annotation.DEFAULT_GEMINI_MODEL
+    assert calls == [
+        annotation.DEFAULT_GEMMA_MODEL, annotation.DEFAULT_GEMINI_MODEL,
+    ]
 
 
 def test_scheduler_persists_structured_model_failure_without_credentials(
@@ -513,7 +719,7 @@ def test_scheduler_persists_structured_model_failure_without_credentials(
     ledger.close()
 
 
-def test_provider_http_failure_gets_one_bounded_independent_account_failover(
+def test_provider_http_failure_uses_an_independent_account_failover(
     tmp_path, monkeypatch,
 ) -> None:
     from scripts import run_news_annotator as runner

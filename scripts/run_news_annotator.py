@@ -29,14 +29,19 @@ from xauusd_forecaster.annotation import (  # noqa: E402
     translate_pending_headlines,
 )
 from xauusd_forecaster.forward_ledger import ForwardLedger  # noqa: E402
+from xauusd_forecaster.ai_task_registry import route_for_task  # noqa: E402
 from xauusd_forecaster.news_scheduler import (  # noqa: E402
     ApiCredential,
+    PREEMPTIBLE_POOL,
+    ROUTINE_POOL,
+    URGENT_PRIORITIES,
     backoff_job,
     claim_job,
     complete_job,
     configured_api_credentials,
     pending_record_for_job,
     record_job_attempt,
+    rank_accounts_for_models,
     release_job,
     scheduler_counts,
     sync_pending_jobs,
@@ -101,7 +106,7 @@ def _execute_job(
     record = pending_record_for_job(ledger.connection, job, now=now)
     if record is None:
         return {"status": "NOT_CURRENT"}
-    urgent = job.priority in {"IMMEDIATE", "FAST"}
+    urgent = job.priority in URGENT_PRIORITIES
     accountant = SchedulerModelAccountant(
         ledger.connection, credential, urgent=urgent,
     )
@@ -165,27 +170,53 @@ def _execute_job_safely(
         }
 
 
-def _provider_failover_credential(
+def _credentials_for_job(
+    ledger: ForwardLedger,
     credentials: tuple[ApiCredential, ...],
-    current: ApiCredential,
-    status: dict[str, object],
+    job,
     *,
-    priority: str,
-) -> ApiCredential | None:
-    """Select at most one independent account after a provider HTTP failure."""
-    if status.get("provider_http_status") not in {401, 403, 429, 500, 502, 503, 504}:
-        return None
-    return next(
+    now: datetime,
+) -> tuple[ApiCredential, ...]:
+    """Order every compatible credential by current account headroom."""
+    eligible = tuple(sorted(
         (
             credential for credential in credentials
-            if credential.account_id != current.account_id
-            and (
-                credential.pool == "ROUTINE"
-                or priority in {"IMMEDIATE", "FAST"}
-            )
+            if credential.pool == ROUTINE_POOL
+            or job.priority in URGENT_PRIORITIES
         ),
-        None,
+        key=lambda item: (
+            job.priority in URGENT_PRIORITIES
+            and item.pool != PREEMPTIBLE_POOL,
+        ),
+    ))
+    route = route_for_task(job.task_type)
+    accounts = rank_accounts_for_models(
+        ledger.connection,
+        eligible,
+        models=route.models,
+        priority_reserve_models=route.priority_reserve_models,
+        urgent=job.priority in URGENT_PRIORITIES,
+        now=now,
     )
+    by_account: dict[str, list[ApiCredential]] = {}
+    for credential in eligible:
+        by_account.setdefault(credential.account_id, []).append(credential)
+    ordered: list[ApiCredential] = []
+    # Rotate transport keys inside an account without pretending they create
+    # additional account/project quota.
+    for account_id in accounts:
+        keys = sorted(by_account[account_id], key=lambda item: item.credential_id)
+        offset = max(0, job.attempt_count - 1) % len(keys)
+        ordered.extend(keys[offset:] + keys[:offset])
+    return tuple(ordered)
+
+
+def _may_try_another_credential(status: dict[str, object]) -> bool:
+    if status.get("status") in {"DEFERRED", "DISABLED"}:
+        return True
+    return status.get("provider_http_status") in {
+        401, 403, 429, 500, 502, 503, 504,
+    }
 
 
 def run_scheduled_batch(
@@ -196,107 +227,113 @@ def run_scheduled_batch(
 ) -> list[dict[str, object]]:
     now = datetime.now(UTC)
     sync_pending_jobs(ledger.connection, now=now)
-    credentials = tuple(sorted(
-        configured_api_credentials(),
-        key=lambda item: (item.pool != "PREEMPTIBLE", item.account_id, item.credential_id),
-    ))
+    credentials = configured_api_credentials()
     if not credentials:
         return [{"status": "DISABLED", "reason": "GEMINI_API_KEY_MISSING"}]
-    maximum = batch_size or max(1, len(credentials) * 10)
+    account_count = len({item.account_id for item in credentials})
+    maximum = batch_size or max(1, account_count * 10)
     statuses: list[dict[str, object]] = []
     worker_prefix = f"{socket.gethostname()}-{os.getpid()}"
-    empty_credentials: set[str] = set()
-    while len(statuses) < maximum and len(empty_credentials) < len(credentials):
-        for credential in credentials:
-            if len(statuses) >= maximum:
-                break
-            worker_id = f"{worker_prefix}-{credential.credential_id}"
+    has_routine = any(item.pool == ROUTINE_POOL for item in credentials)
+    has_preemptible = any(item.pool == PREEMPTIBLE_POOL for item in credentials)
+    while len(statuses) < maximum:
+        worker_id = f"{worker_prefix}-{len(statuses)}"
+        job = None
+        if has_routine:
             job = claim_job(
                 ledger.connection,
                 worker_id=worker_id,
-                pool=credential.pool,
+                pool=ROUTINE_POOL,
                 now=datetime.now(UTC),
             )
-            if job is None:
-                empty_credentials.add(credential.credential_id)
+        elif has_preemptible:
+            job = claim_job(
+                ledger.connection,
+                worker_id=worker_id,
+                pool=PREEMPTIBLE_POOL,
+                now=datetime.now(UTC),
+            )
+        if job is None:
+            break
+        executed_at = datetime.now(UTC)
+        candidates = _credentials_for_job(
+            ledger, credentials, job, now=executed_at,
+        )
+        status: dict[str, object] = {
+            "status": "DEFERRED", "reason": "NO_COMPATIBLE_ACCOUNT_CAPACITY",
+        }
+        outcome_credential = candidates[0] if candidates else credentials[0]
+        outcome_at = executed_at
+        attempted_credentials = 0
+        attempted_accounts: set[str] = set()
+        blocked_accounts: set[str] = set()
+        for credential in candidates:
+            if credential.account_id in blocked_accounts:
                 continue
-            empty_credentials.discard(credential.credential_id)
-            executed_at = datetime.now(UTC)
+            attempted_at = datetime.now(UTC)
             status = _execute_job_safely(
-                ledger, credential, job, now=executed_at,
+                ledger, credential, job, now=attempted_at,
             )
             record_job_attempt(
                 ledger.connection,
                 job=job,
                 credential=credential,
                 status=status,
-                attempted_at=executed_at,
+                attempted_at=attempted_at,
             )
-            failover = _provider_failover_credential(
-                credentials, credential, status, priority=job.priority,
-            )
+            attempted_credentials += 1
+            attempted_accounts.add(credential.account_id)
             outcome_credential = credential
-            outcome_at = executed_at
-            if failover is not None:
-                failover_at = datetime.now(UTC)
-                status = _execute_job_safely(
-                    ledger, failover, job, now=failover_at,
-                )
-                record_job_attempt(
-                    ledger.connection,
-                    job=job,
-                    credential=failover,
-                    status=status,
-                    attempted_at=failover_at,
-                )
-                outcome_credential = failover
-                outcome_at = failover_at
-            outcome = str(status.get("status") or "ERROR")
-            if outcome == "OK":
-                complete_job(ledger.connection, job.job_id, worker_id)
-            elif outcome == "NOT_CURRENT":
-                if job.attempt_count >= 2:
-                    backoff_job(
-                        ledger.connection, job.job_id, worker_id,
-                        available_at=outcome_at,
-                        error="CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE", terminal=True,
-                    )
-                else:
-                    release_job(
-                        ledger.connection, job.job_id, worker_id,
-                        available_at=outcome_at + timedelta(minutes=1),
-                        error="CURRENT_EVIDENCE_NOT_AVAILABLE",
-                    )
-            elif outcome in {"DEFERRED", "DISABLED"}:
-                empty_credentials.add(outcome_credential.credential_id)
-                release_job(
-                    ledger.connection, job.job_id, worker_id,
-                    available_at=(
-                        outcome_at
-                        if outcome_credential.pool == "PREEMPTIBLE"
-                        else outcome_at + timedelta(minutes=1)
-                    ),
-                    error=str(status.get("reason") or outcome),
-                )
-            else:
-                retry_at = _next_retry(status, outcome_at)
+            outcome_at = attempted_at
+            if not _may_try_another_credential(status):
+                break
+            # Account quota and transient provider pressure are shared by its
+            # keys. Authentication failures may still try another key from the
+            # same account before moving on.
+            if status.get("provider_http_status") not in {401, 403}:
+                blocked_accounts.add(credential.account_id)
+        outcome = str(status.get("status") or "ERROR")
+        if outcome == "OK":
+            complete_job(ledger.connection, job.job_id, worker_id)
+        elif outcome == "NOT_CURRENT":
+            if job.attempt_count >= 2:
                 backoff_job(
                     ledger.connection, job.job_id, worker_id,
-                    available_at=retry_at,
-                    error=str(status.get("error") or outcome),
-                    terminal=bool(status.get("is_terminal")),
+                    available_at=outcome_at,
+                    error="CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE", terminal=True,
                 )
-            statuses.append({
-                "job_id": job.job_id,
-                "task_type": job.task_type,
-                "priority": job.priority,
-                "pool": outcome_credential.pool,
-                "account_id": outcome_credential.account_id,
-                "attempted_accounts": 2 if failover is not None else 1,
-                **status,
-            })
-            if progress_callback is not None:
-                progress_callback(len(statuses))
+            else:
+                release_job(
+                    ledger.connection, job.job_id, worker_id,
+                    available_at=outcome_at + timedelta(minutes=1),
+                    error="CURRENT_EVIDENCE_NOT_AVAILABLE",
+                )
+        elif outcome in {"DEFERRED", "DISABLED"}:
+            release_job(
+                ledger.connection, job.job_id, worker_id,
+                available_at=outcome_at + timedelta(minutes=1),
+                error=str(status.get("reason") or outcome),
+            )
+        else:
+            retry_at = _next_retry(status, outcome_at)
+            backoff_job(
+                ledger.connection, job.job_id, worker_id,
+                available_at=retry_at,
+                error=str(status.get("error") or outcome),
+                terminal=bool(status.get("is_terminal")),
+            )
+        statuses.append({
+            "job_id": job.job_id,
+            "task_type": job.task_type,
+            "priority": job.priority,
+            "pool": outcome_credential.pool,
+            "account_id": outcome_credential.account_id,
+            "attempted_accounts": len(attempted_accounts),
+            "attempted_credentials": attempted_credentials,
+            **status,
+        })
+        if progress_callback is not None:
+            progress_callback(len(statuses))
     return statuses
 
 

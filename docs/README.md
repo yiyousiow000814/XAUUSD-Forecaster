@@ -52,7 +52,7 @@ current rules merely because they discovered one.
 
 ### Designs
 
-- [AI priority scheduler](design/AI_PRIORITY_SCHEDULER.md)
+- [Dynamic AI scheduler](design/AI_PRIORITY_SCHEDULER.md)
 - [Cloudflare hosting](design/CLOUDFLARE_HOSTING.md)
 - [Paged dashboard history](design/PAGED_DASHBOARD_HISTORY.md)
 
