@@ -1030,17 +1030,27 @@ def test_version_group_evaluation_state_distinguishes_pending_from_no_run(tmp_pa
 
     groups = {
         row["model_versions"][0]: row
-        for row in learning_curve_payload(ledger.connection)["version_groups"]
+        for row in learning_curve_payload(
+            ledger.connection, observed_at=created + timedelta(hours=1, minutes=10)
+        )["version_groups"]
     }
     assert groups["market-never-ran"]["lifecycle_status"] == "PREVIOUS"
     assert groups["market-never-ran"]["evaluation_status"] == "NO_PREDICTIONS"
     assert groups["market-never-ran"]["subsequent_prediction_rows"] == 0
     assert groups["market-pending"]["evaluation_status"] == "AWAITING_OUTCOME"
-    assert groups["market-pending"]["pending_oos_rows"] == 1
+    assert groups["market-pending"]["unscored_oos_rows"] == 1
     assert (
         groups["market-pending"]["cadence_metrics"]["FIXED_30M"]["evaluation_status"]
         == "AWAITING_FIRST_PREDICTION"
     )
+    settled_groups = {
+        row["model_versions"][0]: row
+        for row in learning_curve_payload(
+            ledger.connection, observed_at=created + timedelta(hours=2)
+        )["version_groups"]
+    }
+    assert settled_groups["market-pending"]["evaluation_status"] == "OUTCOME_UNAVAILABLE"
+    assert settled_groups["market-pending"]["overdue_oos_rows"] == 1
     ledger.close()
 
 

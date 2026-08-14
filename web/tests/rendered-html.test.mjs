@@ -14,6 +14,7 @@ const { withPreviewIdentity } = await import("../app/api/_shared/preview-status.
 test("labels version results from their durable evaluation state", () => {
   assert.equal(versionResultLabel({ oos_rows: 12, evaluation_status: "HAS_RESULTS" }, "+1.250%"), "+1.250%");
   assert.equal(versionResultLabel({ oos_rows: 0, evaluation_status: "AWAITING_OUTCOME" }, "+0.000%"), "等待结果");
+  assert.equal(versionResultLabel({ oos_rows: 0, evaluation_status: "OUTCOME_UNAVAILABLE" }, "+0.000%"), "结果缺失");
   assert.equal(versionResultLabel({ oos_rows: 0, evaluation_status: "AWAITING_FIRST_PREDICTION" }, "+0.000%"), "等待首个预测");
   assert.equal(versionResultLabel({ oos_rows: 0, evaluation_status: "NO_PREDICTIONS" }, "+0.000%"), "未产生结果");
   assert.equal(versionResultLabel({ oos_rows: 0 }, "+0.000%"), "状态未知");
