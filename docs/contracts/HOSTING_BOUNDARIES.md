@@ -2,6 +2,10 @@
 
 ## Public boundary
 
+- Cloudflare Workers is the only deployment plane for this repository.
+- GitHub is a source-control and validation plane only. Repository automation
+  MUST NOT create GitHub Deployments or GitHub Environments, and pull requests
+  MUST NOT request deployment to a GitHub environment.
 - Public visitors read remote dashboard state and never connect to localhost.
 - Public API reads may be anonymous, but every ingest route requires the Worker
   secret `INGEST_TOKEN`.

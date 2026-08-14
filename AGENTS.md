@@ -87,6 +87,15 @@
   leave a production page open in an automated browser, and never rely on
   background throttling to limit its requests.
 
+## Deployment Control Plane
+
+- Cloudflare Workers is the repository's only deployment plane. GitHub Actions
+  may validate code but must not create GitHub Deployments or Environments.
+- Use an explicit read method for GitHub API inspection (`gh api --method GET`),
+  especially when passing field flags that would otherwise imply a write.
+- Follow `docs/contracts/HOSTING_BOUNDARIES.md` and
+  `docs/runbooks/CLOUDFLARE_DEPLOYMENT.md`.
+
 ## Preview Discipline
 
 - Preview behavior follows `docs/specs/PREVIEW_BEHAVIOR.md`.
