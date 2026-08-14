@@ -25,10 +25,19 @@ cannot be fetched is degraded, not successful.
 GDELT discovery reads the official 15-minute GKG update archive rather than the
 rate-limited DOC API. The collector verifies the manifest size and MD5 digest,
 bounds compressed and expanded payloads, and selects at most 25 gold-related
-GKG candidates before retrieving publisher text. Gold metadata only scopes the
-discovery lane; it does not decide semantic relevance or model permission. A
-`PAGE_PRECISEPUBTIMESTAMP` is retained when available. Otherwise the GKG batch
+GKG candidates before retrieving publisher text. Discovery requires either an
+explicit gold, bullion, or XAUUSD asset anchor in the publisher title, or a GKG
+gold theme accompanied by a distinct macro or geopolitical GKG theme. This is a
+positive discovery boundary, not a negative title blacklist. Gold metadata only
+scopes the discovery lane; it does not decide semantic relevance or model
+permission. A `PAGE_PRECISEPUBTIMESTAMP` is retained when available. Otherwise
+the GKG batch
 timestamp is a conservative visibility clock, not an inferred event time.
+
+An immutable article that semantic review marks `IRRELEVANT` remains in the
+local evidence ledger for audit, but MUST NOT be materialized into the public
+news reader or its bounded D1 mirror. Missing or pending semantic review is not
+equivalent to `IRRELEVANT` and remains visible under its honest processing state.
 
 ## Event construction
 

@@ -431,7 +431,7 @@ const SOURCE_LABELS: Record<string, string> = {
   federal_reserve_monetary: "Federal Reserve · 货币政策",
   federal_reserve_speeches_testimony: "Federal Reserve · 演讲证词",
   federal_reserve_press_all: "Federal Reserve · 新闻与监管",
-  gdelt_gold_geopolitics: "GDELT · 战争与地缘",
+  gdelt_gold_geopolitics: "GDELT · 新闻发现",
   google_news_gold_geopolitics: "Google News · 战争与地缘",
   google_news_gold_context: "Google News · 黄金大视野",
   world_gold_council_central_banks: "World Gold Council · 央行购金",

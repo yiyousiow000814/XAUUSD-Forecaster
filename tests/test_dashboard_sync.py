@@ -920,15 +920,19 @@ def test_sync_repopulates_news_index_without_full_refresh_marker(
     assert state["reconciled_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
 
 
-def test_news_semantic_contract_upgrade_replays_and_reconciles_v2_state(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize("previous_contract", [
+    "news-60-day-incremental-v2",
+    "news-60-day-incremental-v3-semantic-categories",
+])
+def test_news_materialization_contract_upgrade_replays_and_reconciles_old_state(
+    monkeypatch, tmp_path, previous_contract
 ) -> None:
     module = _sync_module()
     state_file = tmp_path / "news-state.json"
     stale_cursor = '["2026-08-13T00:00:00Z","example","old",1]'
     state_file.write_text(json.dumps({
-        "mirror_contract_version": "news-60-day-incremental-v2",
-        "reconciled_contract": "news-60-day-incremental-v2",
+        "mirror_contract_version": previous_contract,
+        "reconciled_contract": previous_contract,
         "cursor": stale_cursor,
     }), encoding="utf-8")
     requested: list[str] = []
@@ -970,7 +974,7 @@ def test_news_semantic_contract_upgrade_replays_and_reconciles_v2_state(
         "token": "test",
     })
 
-    # A changed materialization contract discards the v2 cursor and starts at
+    # A changed materialization contract discards the old cursor and starts at
     # the bounded archive head instead of continuing after a stale row.
     assert len(requested) == 1
     assert "after=" not in requested[0]

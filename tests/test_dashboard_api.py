@@ -230,6 +230,7 @@ def _append_basic_annotation(
     parsed_at: datetime,
     prompt_version: str = PROMPT_VERSION,
     event_time: datetime | None = None,
+    xauusd_relevance: str = "MACRO_DRIVER",
 ) -> None:
     news = ledger.connection.execute(
         """SELECT headline,body,source_published_time FROM news_revisions
@@ -264,7 +265,7 @@ def _append_basic_annotation(
         "secondary_contexts_zh": [], "relation_to_prior": "NONE",
         "document_kind": "REPORT", "material_event_key": item_id,
         "source_organization_id": source, "evidence_role": "CORE_CLAIM",
-        "xauusd_relevance": "MACRO_DRIVER", "review_priority": "FAST",
+        "xauusd_relevance": xauusd_relevance, "review_priority": "FAST",
         "material_change": "NEW_EVENT", "time_sensitivity": "SAME_DAY",
         "semantic_reason_zh": "完整正文显示这是可能影响黄金的宏观事件。",
         "supporting_evidence": [evidence],
@@ -799,6 +800,49 @@ def test_news_archive_is_60_day_bounded_and_cursor_safe(tmp_path) -> None:
     assert len({row["detail_key"] if "detail_key" in row else (
         row["source"], row["source_item_id"], row["revision_number"]
     ) for row in rows}) == 3
+
+
+def test_news_reader_materializations_exclude_semantically_irrelevant_articles(
+    tmp_path,
+) -> None:
+    module = _dashboard_module()
+    now = datetime.now(UTC).replace(microsecond=0)
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=now)
+    for item_id, relevance in (
+        ("relevant-market-report", "MACRO_DRIVER"),
+        ("irrelevant-entertainment-report", "IRRELEVANT"),
+        ("pending-semantic-review", None),
+    ):
+        body = f"complete evidence for {item_id} " * 30
+        digest = hashlib.sha256(body.encode()).hexdigest()
+        ledger.append_news_revision({
+            "source": "gdelt_gold_geopolitics",
+            "source_item_id": item_id,
+            "source_published_time": now,
+            "collector_first_seen_time": now,
+            "fetched_time": now,
+            "headline": item_id,
+            "body": body,
+            "content_hash": digest,
+            "cluster_id": item_id,
+        })
+        if relevance is not None:
+            _append_basic_annotation(
+                ledger,
+                source="gdelt_gold_geopolitics",
+                item_id=item_id,
+                digest=digest,
+                parsed_at=now + timedelta(seconds=1),
+                xauusd_relevance=relevance,
+            )
+    archive = module._news_archive_page(ledger.connection, None, 20)
+    ledger.close()
+    dashboard = module._dashboard_payload(database)
+
+    expected = {"relevant-market-report", "pending-semantic-review"}
+    assert {row["source_item_id"] for row in archive["items"]} == expected
+    assert {row["source_item_id"] for row in dashboard["recent_news"]} == expected
 
 
 def test_dashboard_distinguishes_unavailable_content_from_pending(tmp_path) -> None:
