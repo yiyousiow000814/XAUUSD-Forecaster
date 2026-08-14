@@ -1,0 +1,78 @@
+name: Repository policy
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repository-policy-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hosting-boundary:
+    if: github.event_name == 'pull_request_target'
+    name: Repository policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - name: Check out trusted policy
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: policy
+          persist-credentials: false
+      - name: Check out pull request without executing it
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          persist-credentials: false
+      - name: Check pull-request policy
+        id: policy
+        continue-on-error: true
+        run: python3 policy/scripts/check_repository_policy.py --root candidate
+      - name: Publish merge-time policy result
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          POLICY_OUTCOME: ${{ steps.policy.outcome }}
+        run: |
+          state=failure
+          description="Cloudflare-only hosting policy failed"
+          if [ "$POLICY_OUTCOME" = "success" ]; then
+            state=success
+            description="Cloudflare-only hosting policy passed"
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state="$state" \
+            -f context="Repository policy" \
+            -f description="$description"
+          test "$state" = success
+
+  main-boundary:
+    if: github.event_name != 'pull_request_target'
+    name: Repository policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions:
+      contents: read
+    steps:
+      - name: Check out trusted policy
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: policy
+          persist-credentials: false
+      - name: Check main policy
+        run: python3 policy/scripts/check_repository_policy.py --root policy
