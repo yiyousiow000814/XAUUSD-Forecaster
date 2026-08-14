@@ -905,8 +905,10 @@ class _GeminiRequestPool:
                         ValueError, KeyError, json.JSONDecodeError,
                     ),
                 )
-            except GeminiBatchCapacityExhausted:
-                raise
+            except GeminiBatchCapacityExhausted as error:
+                # Display-only translation may use the next declared model
+                # route when this model's account quota is temporarily full.
+                last_error = error
             except RuntimeError as error:
                 last_error = error
         if last_error is not None:
