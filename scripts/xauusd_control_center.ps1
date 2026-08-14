@@ -1126,6 +1126,18 @@ function Start-WatchdogReplacement {
     Start-Process -FilePath $wscript -ArgumentList $arguments -WindowStyle Hidden
 }
 
+function Invoke-RuntimeCheckoutHandoff {
+    param([string]$Revision)
+    if (-not (Update-RuntimeCheckout -Revision $Revision)) { return $false }
+    Write-WatchdogEvent -Event "MAIN_RUNTIME_UPDATED" `
+        -Service "all" -State $Revision
+    # PowerShell has already parsed this supervisor process, so replacing the
+    # control files on disk cannot update its loaded functions. Hand control to
+    # the newly copied launcher before evaluating candidate health.
+    Start-WatchdogReplacement
+    return $true
+}
+
 function Invoke-ForecasterWatchdog {
     $failureCounts = @{}
     $lastRestart = @{}
@@ -1142,10 +1154,10 @@ function Invoke-ForecasterWatchdog {
         try {
             $currentRevision = Get-CodeRevision
             $desiredRevision = Get-DesiredMainRevision -CurrentRevision $currentRevision
-            if ($desiredRevision -and (Update-RuntimeCheckout -Revision $desiredRevision)) {
-                Write-WatchdogEvent -Event "MAIN_RUNTIME_UPDATED" `
-                    -Service "all" -State $desiredRevision
-                $currentRevision = $desiredRevision
+            if ($desiredRevision -and (
+                Invoke-RuntimeCheckoutHandoff -Revision $desiredRevision
+            )) {
+                return 0
             }
             $runtimeState = Get-RuntimeCodeState
             $appliedRevision = if ($runtimeState) {

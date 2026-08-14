@@ -423,6 +423,22 @@ def test_candidate_observation_is_durable_before_revision_is_marked_applied(
     assert result == "reload,observe,applied"
 
 
+def test_runtime_checkout_hands_off_before_old_supervisor_checks_health(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:order = @(); "
+        "function Update-RuntimeCheckout { $script:order += 'checkout'; return $true }; "
+        "function Write-WatchdogEvent { $script:order += 'event' }; "
+        "function Start-WatchdogReplacement { $script:order += 'replacement' }; "
+        "$handedOff = Invoke-RuntimeCheckoutHandoff -Revision ('b' * 40); "
+        "Write-Output \"$handedOff,$($script:order -join ',')\"",
+    )
+
+    assert result == "True,checkout,event,replacement"
+
+
 def test_two_new_decision_cycles_activate_even_when_observed_together(tmp_path) -> None:
     _write_runtime_observation(tmp_path)
     result = _run_control_center_contract(
