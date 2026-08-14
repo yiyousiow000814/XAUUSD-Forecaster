@@ -968,6 +968,10 @@ export default function AuditView() {
   const visibleEvidence = canonicalEvidence.filter(row => (
     evidenceMode === "all" || (evidenceMode === "seen" ? row.model_seen : !row.model_seen)
   ));
+  const evidenceModeTotal = evidenceMode === "seen"
+    ? evidenceSummarySeenCount
+    : evidenceMode === "unseen" ? evidenceSummaryUnseenCount : evidenceSummaryDisplayedCount;
+  const evidenceWindowPartial = visibleEvidence.length < evidenceModeTotal;
   const deploymentPresentation = DEPLOYMENT_PRESENTATION[
     payload?.system?.deployment?.status ?? "PROVENANCE_UNKNOWN"
   ] ?? DEPLOYMENT_PRESENTATION.PROVENANCE_UNKNOWN;
@@ -1095,10 +1099,15 @@ export default function AuditView() {
           <button type="button" className={evidenceMode === "unseen" ? "active" : ""} onClick={() => setEvidenceMode("unseen")}>从未用过 <b><CountValue value={evidenceSummaryUnseenCount} /></b></button>
           <button type="button" className={evidenceMode === "all" ? "active" : ""} onClick={() => setEvidenceMode("all")}>查看全部 <b><CountValue value={evidenceSummaryDisplayedCount} /></b></button>
         </nav>
+        <p className="evidence-window-note">
+          {evidenceWindowPartial
+            ? <>显示最近 <b>{formatExactCount(visibleEvidence.length)}</b> / {formatExactCount(evidenceModeTotal)} 个；完整总数保留在审计账本。</>
+            : <>已显示全部 <b>{formatExactCount(evidenceModeTotal)}</b> 个。</>}
+        </p>
         <details className="evidence-rule-note"><summary>查看统计规则</summary><p>核心新闻要求一手完整证据或至少两个独立可靠来源确认；大视野新闻还纳入单一可靠来源并降低权重。新闻只从首次收到后生效，按事件类型和有效交易时间逐步衰减。Gemini 与 Gemma 负责理解事件语义，版本化证据规则负责时间、身份、去重与准入；每个事件下方可核对统一身份和原始发布域名。</p></details>
         <div className="evidence-table-wrap"><table className="evidence-table">
           <thead><tr><th>是否用于预测</th><th>新闻事件</th><th>用了多少次 / 为什么没用</th><th>发布时间 / 收到时间</th></tr></thead>
-          <tbody>{visibleEvidence.map(row => <tr key={`${evidenceMode}:${row.event_key}`}>
+          <tbody>{visibleEvidence.length === 0 && evidenceModeTotal > 0 && <tr className="evidence-unavailable-row"><td colSpan={4}>这个分类有记录，但本页尚未载入明细。总数不会被当成空结果。</td></tr>}{visibleEvidence.map(row => <tr key={`${evidenceMode}:${row.event_key}`}>
             <td className="evidence-status-cell"><span className={`model-seen-badge ${row.model_seen ? "is-seen" : "is-unseen"}`}>{row.model_seen ? "已用于预测" : "未用于预测"}</span><small><span className="evidence-grade-label">{EVIDENCE_LABELS[row.evidence_grade] ?? row.evidence_grade}</span><span className="evidence-status-copy">{row.model_seen ? "当时确实参与了模型输入" : row.broad_model_eligible ? "现在符合条件，等待下一次预测" : "现在也不符合使用条件"}</span></small></td>
             <td className="evidence-event-cell"><strong>{row.canonical_headline}</strong><div className="evidence-topics">{(row.topics ?? []).map(topic => <span key={topic}>{TOPIC_LABELS[topic] ?? topic}</span>)}</div><small className="evidence-source-identity"><span>统一来源身份：{(row.source_identity_organizations ?? []).join(" · ") || "未确认"}</span><span>原始发布域名：{row.publisher_domains.join(" · ") || "未记录"}</span></small></td>
             <td className="evidence-usage-cell">{row.model_seen ? <><strong>参与 {formatExactCount(row.frozen_decisions)} 次预测 · 模型读取 {formatExactCount(row.frozen_model_uses)} 次</strong><small><span className="evidence-model-list">{(row.model_identities ?? []).map(identity => MODEL_LABELS[identity] ?? identity).join(" · ") || "模型名称未记录"}</span><span className="evidence-use-window">首次 {time(row.first_model_decision_time)} · 最近 {time(row.last_model_decision_time)}</span></small></> : <><strong>从未进入任何预测</strong><small>{evidenceReason(row)}</small></>}</td>
