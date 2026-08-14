@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 from types import SimpleNamespace
 from collections import Counter
@@ -27,23 +28,39 @@ PAYLOAD_SCHEMA_VERSION = "xauusd-dashboard-v4-event-episode"
 MARKET_DETAIL_CANDLE_LIMIT = 7 * 288
 MARKET_OVERVIEW_CANDLE_LIMIT = 480
 MARKET_HISTORY_PAGE_LIMIT = 500
-_QUOTE_CANDLE_CACHE: dict[tuple[str, int, int], list[dict]] = {}
+NEWS_READER_WINDOW_DAYS = 60
+NEWS_ARCHIVE_PAGE_LIMIT = 20
+STATUS_SNAPSHOT_TTL_SECONDS = 15.0
+STATUS_SNAPSHOT_WAIT_SECONDS = 5.0
+STATUS_SNAPSHOT_MAX_STALE_SECONDS = 90.0
+_QUOTE_CANDLE_CACHE_LOCK = threading.Lock()
+_QUOTE_CANDLE_CACHE: dict[str, dict] = {}
 
 from xauusd_forecaster.factors import factor_coverage  # noqa: E402
+from xauusd_forecaster.dashboard_payloads import bounded_evidence_window  # noqa: E402
+from xauusd_forecaster.daily_brief import recent_daily_briefs  # noqa: E402
 from xauusd_forecaster.annotation import (  # noqa: E402
     DEFAULT_GEMINI_MODEL,
     DEFAULT_GEMMA_MODEL,
     FALLBACK_GEMINI_MODEL,
     GEMMA_REQUESTS_PER_DAY_PER_KEY,
+    GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
     GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
     GEMINI_DAILY_PRIORITY_RESERVE,
     GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
+    GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
     INVALID_CHINESE_TITLE,
+    PROMPT_VERSION,
     completed_annotation_records,
-    configured_gemini_api_keys,
     pending_annotation_records,
 )
-from xauusd_forecaster.gemini_quota import GeminiQuotaLedger  # noqa: E402
+from xauusd_forecaster.gemini_quota import (  # noqa: E402
+    GEMINI_REQUESTS_PER_DAY_PER_KEY, GeminiQuotaLedger,
+)
+from xauusd_forecaster.news_scheduler import (  # noqa: E402
+    account_quota_snapshot, configured_api_credentials,
+)
+from xauusd_forecaster.ai_provider_registry import AI_QUOTA_SURFACES  # noqa: E402
 from xauusd_forecaster.training import MARKET_FEATURES  # noqa: E402
 from xauusd_forecaster.learning_curves import learning_curve_payload  # noqa: E402
 from xauusd_forecaster.execution_costs import net_shadow_log_return  # noqa: E402
@@ -51,9 +68,13 @@ from xauusd_forecaster.news_evidence import (  # noqa: E402
     EVIDENCE_POLICY_VERSION, event_evidence_rows_from_connection,
     resolve_event_clock,
 )
-from xauusd_forecaster.news_relevance import google_news_item_is_relevant  # noqa: E402
-from xauusd_forecaster.news_features_v2 import SOURCE_RULES  # noqa: E402
+from xauusd_forecaster.news_relevance import GOOGLE_NEWS_MAX_AGE  # noqa: E402
+from xauusd_forecaster.news_contracts import CURRENT_NEWS_CONTRACT  # noqa: E402
+from xauusd_forecaster.news_features_v2 import COLLECTION_SOURCES  # noqa: E402
+from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY  # noqa: E402
+from xauusd_forecaster.production_shape import production_contract_snapshot  # noqa: E402
 from xauusd_forecaster.news_impact import (  # noqa: E402
+    HANDOVER_IMPACT_PROMPT_VERSION,
     IMPACT_MODEL,
     IMPACT_PROMPT_VERSION,
     impact_is_actionable,
@@ -61,7 +82,6 @@ from xauusd_forecaster.news_impact import (  # noqa: E402
 )
 from xauusd_forecaster.storylines import STORYLINE_POLICY_VERSION, temporal_event_graph  # noqa: E402
 from xauusd_forecaster.execution_learning import execution_learning_status  # noqa: E402
-from xauusd_forecaster.market_session import expected_weekly_closure  # noqa: E402
 
 
 def _deployment_status(
@@ -124,6 +144,116 @@ _LEARNING_CACHE_LOCK = threading.Lock()
 _LEARNING_CACHE: dict[str, object] = {}
 
 
+class StatusSnapshotUnavailable(RuntimeError):
+    """Raised when no bounded-age dashboard snapshot can be served."""
+
+
+class StatusSnapshotCache:
+    """Serialize one dashboard snapshot at a time and fail closed while stale."""
+
+    def __init__(
+        self,
+        *,
+        ttl_seconds: float = STATUS_SNAPSHOT_TTL_SECONDS,
+        wait_seconds: float = STATUS_SNAPSHOT_WAIT_SECONDS,
+        max_stale_seconds: float = STATUS_SNAPSHOT_MAX_STALE_SECONDS,
+        clock=time.monotonic,
+    ) -> None:
+        self.ttl_seconds = ttl_seconds
+        self.wait_seconds = wait_seconds
+        self.max_stale_seconds = max_stale_seconds
+        self.clock = clock
+        self._condition = threading.Condition()
+        self._database: Path | None = None
+        self._body: bytes | None = None
+        self._built_at = 0.0
+        self._refreshing = False
+        self._last_error: str | None = None
+
+    def _age(self) -> float | None:
+        if self._body is None:
+            return None
+        return max(0.0, self.clock() - self._built_at)
+
+    def health(self) -> tuple[int, dict]:
+        with self._condition:
+            age = self._age()
+            if age is None:
+                return 503, {
+                    "status": "STARTING" if self._refreshing else "UNAVAILABLE",
+                    "snapshot_age_seconds": None,
+                    "last_error": self._last_error,
+                }
+            if self._last_error:
+                return 503, {
+                    "status": "ERROR",
+                    "snapshot_age_seconds": age,
+                    "last_error": self._last_error,
+                }
+            if age > self.max_stale_seconds:
+                return 503, {
+                    "status": "STALE",
+                    "snapshot_age_seconds": age,
+                    "last_error": self._last_error,
+                }
+            return 200, {
+                "status": "OK",
+                "snapshot_age_seconds": age,
+                "refreshing": self._refreshing,
+            }
+
+    def get(self, database: Path, builder) -> tuple[bytes, str, float]:
+        database = database.resolve()
+        with self._condition:
+            if self._database != database:
+                self._database = database
+                self._body = None
+                self._built_at = 0.0
+                self._last_error = None
+            age = self._age()
+            if self._body is not None and age is not None and age <= self.ttl_seconds:
+                return self._body, "fresh", age
+            build_here = not self._refreshing
+            if build_here:
+                self._refreshing = True
+
+        if build_here:
+            try:
+                body = json.dumps(
+                    builder(database), allow_nan=False, separators=(",", ":"),
+                ).encode()
+            except Exception as error:
+                with self._condition:
+                    self._refreshing = False
+                    self._last_error = f"{type(error).__name__}: {str(error)[:400]}"
+                    self._condition.notify_all()
+                raise
+            with self._condition:
+                self._body = body
+                self._built_at = self.clock()
+                self._refreshing = False
+                self._last_error = None
+                self._condition.notify_all()
+                return body, "fresh", 0.0
+
+        with self._condition:
+            refresh_finished = self._condition.wait_for(
+                lambda: not self._refreshing, timeout=self.wait_seconds,
+            )
+            if not refresh_finished:
+                raise StatusSnapshotUnavailable(
+                    "dashboard snapshot refresh is still running"
+                )
+            age = self._age()
+            if self._last_error:
+                raise StatusSnapshotUnavailable(self._last_error)
+            if self._body is not None and age is not None:
+                return self._body, "fresh", age
+            raise StatusSnapshotUnavailable(
+                "dashboard snapshot refresh completed without a result"
+            )
+
+
 def _learning_revision(connection: sqlite3.Connection) -> tuple[object, ...]:
     database_row = connection.execute("PRAGMA database_list").fetchone()
     database_identity = database_row[2] if database_row and database_row[2] else id(connection)
@@ -149,28 +279,6 @@ def _learning_surfaces(connection: sqlite3.Connection) -> tuple[dict, dict]:
         return _LEARNING_CACHE["learning"], _LEARNING_CACHE["execution"]
 
 
-NEWS_SOURCE_DEFINITIONS = {
-    "federal_reserve_full_text": ("Federal Reserve", "发布源", 15, ("federal_reserve_monetary", "federal_reserve_press_all", "federal_reserve_speeches_testimony")),
-    "us_treasury_press_releases": ("U.S. Treasury", "发布源", 45, ("us_treasury_press_releases",)),
-    "bea_economic_releases": ("U.S. BEA", "发布源", 45, ("bea_economic_releases",)),
-    "bls_employment_situation": ("BLS Employment Situation", "官方发布源", 15, ("bls_employment_situation",)),
-    "bls_consumer_price_index": ("BLS Consumer Price Index", "官方发布源", 15, ("bls_consumer_price_index",)),
-    "bls_job_openings": ("BLS Job Openings", "官方发布源", 15, ("bls_job_openings",)),
-    "bls_public_api": ("BLS Public Data API", "数值与修订链路", 75, ()),
-    "ecb_press_releases": ("European Central Bank", "发布源", 45, ("ecb_press_releases",)),
-    "eia_press_releases": ("U.S. EIA Press", "发布源", 45, ("eia_press_releases",)),
-    "eia_today_in_energy": ("U.S. EIA Energy", "发布源", 45, ("eia_today_in_energy",)),
-    "gdelt_gold_geopolitics": ("GDELT", "发现源", 75, ("gdelt_gold_geopolitics",)),
-    "google_news_gold_context": ("Google News Context", "发现源", 45, ("google_news_gold_context",)),
-    "google_news_bls_official_releases": ("BLS Official Release Fallback", "官方域名备用发现源", 45, ("google_news_bls_official_releases",)),
-    "google_news_us_employment": ("Google News U.S. Employment", "发现源", 45, ("google_news_us_employment",)),
-    "google_news_us_inflation": ("Google News U.S. Inflation", "发现源", 45, ("google_news_us_inflation",)),
-    "google_news_fed_rates": ("Google News Fed & Rates", "发现源", 45, ("google_news_fed_rates",)),
-    "world_gold_council_central_banks": ("World Gold Council", "发布源", 420, ("world_gold_council_central_banks",)),
-    "non_fed_full_text": ("非 Fed 正文解析器", "正文链路", 45, ()),
-}
-
-
 def _parse_utc(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -178,14 +286,25 @@ def _parse_utc(value: str | None) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
+def _has_recent_evidence(latest_item_time: str | None, now: datetime) -> bool:
+    latest_item = _parse_utc(latest_item_time)
+    if latest_item is None:
+        return False
+    age = now - latest_item
+    return timedelta(0) <= age <= GOOGLE_NEWS_MAX_AGE
+
+
 def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[dict]:
     rows = []
-    for source, (label, role, stale_minutes, revision_sources) in NEWS_SOURCE_DEFINITIONS.items():
+    for spec in NEWS_SOURCE_REGISTRY:
+        source = spec.source
+        label = spec.label
+        role = spec.role
+        stale_minutes = spec.stale_minutes
+        revision_sources = spec.revision_sources
         polls = connection.execute(
             """SELECT count(*) total,
-                      sum(status='OK' OR
-                          (source='non_fed_full_text'
-                           AND error_type='HydrationErrors')) ok_count,
+                      sum(status='OK') ok_count,
                       sum(status='PARTIAL') partial_count,
                       sum(status='ERROR') error_count,
                       max(CASE WHEN status='OK' THEN fetched_time END) last_success
@@ -240,10 +359,23 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
             health = "DEGRADED"
         elif age_seconds is None or age_seconds > stale_minutes * 60:
             health = "STALE"
-        elif item_count == 0 and source.startswith("bls_"):
+        elif revision_sources and item_count == 0:
             health = "WARMING_UP"
         else:
             health = "HEALTHY"
+        recent_evidence = _has_recent_evidence(latest_item_time, now)
+        if health == "ERROR":
+            semantic_status = "SOURCE_ERROR"
+            semantic_message = "来源当前轮询失败；请查看最近错误与后备链路状态"
+        elif health == "WARMING_UP":
+            semantic_status = "NO_RELEASE_CAPTURED"
+            semantic_message = "轮询正常，但本机尚未捕获该发布系列的正式条目"
+        elif revision_sources and not recent_evidence:
+            semantic_status = "NO_RECENT_EVIDENCE"
+            semantic_message = "来源轮询正常，但最近 72 小时没有捕获可用资料"
+        else:
+            semantic_status = "OK"
+            semantic_message = None
         rows.append({
             "source": source, "label": label, "role": role, "health": health,
             "latest_status": latest_status,
@@ -260,56 +392,23 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
             "error_count": int(polls["error_count"] or 0),
             "item_count": item_count, "revision_count": revision_count,
             "full_text_count": full_text_count, "latest_item_time": latest_item_time,
+            "recent_evidence": recent_evidence,
             "recovery_mode": None, "fallback_label": None,
             "fallback_health": None, "next_retry_time": None,
-            "semantic_status": "NO_RELEASE_CAPTURED" if health == "WARMING_UP" else "OK",
-            "semantic_message": (
-                "轮询正常，但本机尚未捕获该发布系列的正式条目"
-                if health == "WARMING_UP" else None
-            ),
+            "semantic_status": semantic_status,
+            "semantic_message": semantic_message,
         })
     by_source = {row["source"]: row for row in rows}
-    bls_numeric = by_source.get("bls_public_api")
-    if bls_numeric:
-        numeric_seen = _parse_utc(bls_numeric.get("latest_item_time"))
-        for source in (
-            "bls_employment_situation", "bls_consumer_price_index", "bls_job_openings"
-        ):
-            release = by_source.get(source)
-            release_seen = _parse_utc(release.get("latest_item_time")) if release else None
-            if release and release_seen and (numeric_seen is None or numeric_seen < release_seen):
-                release["health"] = "DEGRADED"
-                release["semantic_status"] = "RELEASE_SEEN_NUMERIC_PENDING"
-                release["semantic_message"] = "正式发布已捕获，但 BLS 数值/修订尚未同步"
-    bls_fallback = by_source.get("google_news_bls_official_releases")
-    if bls_fallback:
-        for source in (
-            "bls_employment_situation", "bls_consumer_price_index", "bls_job_openings"
-        ):
-            release = by_source.get(source)
-            if (
-                release
-                and release.get("latest_status") == "ERROR"
-                and release.get("last_error_type") == "HTTPError"
-                and bls_fallback.get("health") in {"HEALTHY", "DEGRADED"}
-            ):
-                fallback_healthy = bls_fallback.get("health") == "HEALTHY"
-                release["health"] = "FALLBACK_ACTIVE" if fallback_healthy else "DEGRADED"
-                release["recovery_mode"] = "BLS_DIRECT_BLOCKED"
-                release["fallback_label"] = bls_fallback["label"]
-                release["fallback_health"] = bls_fallback["health"]
-                release["semantic_status"] = (
-                    "OFFICIAL_DOMAIN_FALLBACK_ACTIVE" if fallback_healthy
-                    else "OFFICIAL_RELEASE_BODY_BLOCKED"
-                )
-                release["semantic_message"] = (
-                    "BLS 直接 RSS 被本机网络拒绝；官方域名备用发现源与 BLS 数值 API 正常运行"
-                    if fallback_healthy else
-                    "已发现 BLS 官方发布，但本机仍无法读取正式正文；BLS 数值 API 独立运行"
-                )
     gdelt = by_source.get("gdelt_gold_geopolitics")
     fallback = by_source.get("google_news_gold_context")
-    if gdelt and fallback and "429" in str(gdelt.get("last_error") or ""):
+    # Historical failures remain visible for audit, but only the current poll
+    # may activate a recovery mode. A later successful GKG poll clears the old
+    # DOC API 429 instead of leaving the source permanently rate-limited.
+    if (
+        gdelt and fallback
+        and gdelt.get("latest_status") == "ERROR"
+        and "429" in str(gdelt.get("last_error") or "")
+    ):
         recent = connection.execute(
             """SELECT fetched_time,status,error FROM source_polls
                WHERE source='gdelt_gold_geopolitics'
@@ -325,12 +424,18 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
         cooldown = min(360, 60 * (2 ** min(streak, 3))) if streak else 60
         gdelt["recovery_mode"] = "RATE_LIMIT_BACKOFF"
         gdelt["fallback_label"] = fallback["label"]
-        gdelt["fallback_health"] = fallback["health"]
+        fallback_ready = bool(
+            fallback["health"] == "HEALTHY" and fallback.get("recent_evidence")
+        )
+        gdelt["fallback_health"] = (
+            fallback["health"]
+            if fallback.get("recent_evidence") else "NO_RECENT_EVIDENCE"
+        )
         gdelt["next_retry_time"] = (
             (latest_poll + timedelta(minutes=cooldown)).isoformat()
             if latest_poll else None
         )
-        if fallback["health"] == "HEALTHY":
+        if fallback_ready:
             gdelt["health"] = "FALLBACK_ACTIVE"
             gdelt["latest_status"] = "RATE_LIMITED"
     return rows
@@ -351,6 +456,32 @@ def _latest_quote_received(database: Path) -> str | None:
         except (KeyError, ValueError, json.JSONDecodeError):
             continue
     return None
+
+
+def _broker_market_session(database: Path, now: datetime) -> dict | None:
+    path = database.parent / "quotes" / "market-session.json"
+    if not path.exists():
+        return None
+    try:
+        item = json.loads(path.read_text(encoding="utf-8"))
+        if item.get("schema") != "xauusd.forward.market-session.v1":
+            return None
+        if str(item.get("symbol", "")).casefold() != "xauusd":
+            return None
+        observed_at = datetime.fromisoformat(
+            str(item["observed_at"]).replace("Z", "+00:00")
+        )
+        age = (now - observed_at).total_seconds()
+        if age < -5 or age > 20:
+            return None
+        return {
+            "is_open": bool(item["is_open"]),
+            "observed_at": observed_at.isoformat(),
+            "next_open_time": item.get("next_open_time"),
+            "next_close_time": item.get("next_close_time"),
+        }
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
 
 
 CATEGORY_LABELS = {
@@ -477,6 +608,252 @@ def _apply_impact_status(item: dict, now: datetime) -> None:
         item["model_visibility"] = "MODEL_VISIBLE"
 
 
+def _news_reader_rows(
+    connection: sqlite3.Connection,
+    now: datetime,
+    *,
+    after: str | None = None,
+    limit: int = 200,
+) -> list[sqlite3.Row]:
+    """Read one bounded page from the canonical 60-day reader archive."""
+    cutoff = (now - timedelta(days=NEWS_READER_WINDOW_DAYS)).isoformat(
+        timespec="microseconds"
+    )
+    cursor_clause = ""
+    order_clause = """ORDER BY mirror_updated_at ASC,
+                                  n.source, n.source_item_id,
+                                  n.revision_number"""
+    cursor_parameters: tuple[object, ...] = ()
+    if after:
+        cursor = json.loads(after)
+        if not isinstance(cursor, list) or len(cursor) != 4:
+            raise ValueError("invalid news archive cursor")
+        cursor_clause = """AND (max(n.fetched_time,
+                    COALESCE(t.parsed_at, n.fetched_time),
+                    COALESCE(a.parsed_at, n.fetched_time),
+                    COALESCE(i.assessed_at, n.fetched_time),
+                    COALESCE(f.failed_at, n.fetched_time),
+                    COALESCE(cf.failed_at, n.fetched_time)),
+                    n.source, n.source_item_id, n.revision_number) > (?, ?, ?, ?)"""
+        cursor_parameters = tuple(cursor)
+    return connection.execute(
+        f"""SELECT n.source, n.source_item_id, n.revision_number,
+                   n.cluster_id, n.source_published_time,
+                   n.collector_first_seen_time, n.fetched_time,
+                   max(n.fetched_time,
+                       COALESCE(t.parsed_at, n.fetched_time),
+                       COALESCE(a.parsed_at, n.fetched_time),
+                       COALESCE(i.assessed_at, n.fetched_time),
+                       COALESCE(f.failed_at, n.fetched_time),
+                       COALESCE(cf.failed_at, n.fetched_time)) AS mirror_updated_at,
+                   n.headline AS original_headline,
+                   COALESCE(t.headline_zh, n.headline) AS headline,
+                   length(COALESCE(n.body, '')) AS content_characters,
+                   CASE WHEN n.body LIKE '[FULL_TEXT%' THEN 'FULL_TEXT'
+                        WHEN length(trim(COALESCE(n.body, ''))) >= 240 THEN 'SOURCE_CONTENT'
+                        ELSE 'HEADLINE_ONLY' END AS content_status,
+                   CASE WHEN length(trim(COALESCE(n.body, ''))) >= 240 THEN 'AVAILABLE'
+                        WHEN cf.is_terminal=1 THEN 'UNAVAILABLE'
+                        WHEN cf.next_retry_at IS NOT NULL THEN 'RETRYING'
+                        ELSE 'PENDING' END AS content_fetch_status,
+                   cf.error_type AS content_error_type,
+                   n.link, n.content_hash, n.body,
+                   json_extract(a.annotation_json, '$.summary_zh') AS summary_zh,
+                   json_extract(a.annotation_json, '$.primary_category') AS primary_category,
+                   json_extract(a.annotation_json, '$.secondary_categories') AS secondary_categories_json,
+                   json_extract(a.annotation_json, '$.emerging_topic_zh') AS emerging_topic_zh,
+                   json_extract(a.annotation_json, '$.event_time') AS event_time,
+                   a.event_type, a.entities_json, a.hawkishness,
+                   a.inflation_impulse, a.growth_impulse,
+                   a.geopolitical_risk, a.usd_impulse, a.novelty,
+                   a.confidence, a.llm_model_version, a.prompt_version,
+                   a.parsed_at, i.impact_class,
+                   i.event_state AS impact_event_state,
+                   i.update_type AS impact_update_type,
+                   i.confidence AS impact_confidence,
+                   i.reason_zh AS impact_reason_zh,
+                   i.assessed_at AS impact_assessed_at,
+                   CASE WHEN n.source_published_time IS NOT NULL THEN
+                     (julianday(n.collector_first_seen_time)-julianday(n.source_published_time))*86400
+                   END AS collection_delay_seconds,
+                   CASE WHEN a.parsed_at IS NOT NULL THEN
+                     (julianday(a.parsed_at)-julianday(n.collector_first_seen_time))*86400
+                   END AS processing_delay_seconds,
+                   COALESCE(r.maximum_tier, 'COLLECT_ONLY') AS source_eligibility,
+                   CASE WHEN r.maximum_tier='MODEL_ELIGIBLE'
+                              AND length(trim(COALESCE(n.body,'')))>=r.minimum_body_characters
+                              AND a.parsed_at IS NOT NULL THEN 'MODEL_VISIBLE'
+                        WHEN r.maximum_tier='MODEL_ELIGIBLE'
+                             AND length(trim(COALESCE(n.body,'')))>=r.minimum_body_characters
+                             AND a.parsed_at IS NULL THEN 'NOT_YET_PARSED'
+                        WHEN r.maximum_tier='MODEL_ELIGIBLE' AND cf.is_terminal=1
+                             THEN 'CONTENT_UNAVAILABLE'
+                        WHEN r.maximum_tier='MODEL_ELIGIBLE' THEN 'WAITING_CONTENT'
+                        ELSE COALESCE(r.maximum_tier, 'COLLECT_ONLY') END AS model_visibility,
+                   CASE WHEN a.annotation_id IS NOT NULL THEN 'READY'
+                        WHEN cf.is_terminal=1 THEN 'CONTENT_UNAVAILABLE'
+                        WHEN length(trim(COALESCE(n.body, ''))) < 240 THEN 'WAITING_CONTENT'
+                        WHEN f.is_terminal=1 THEN 'DEAD_LETTER'
+                        WHEN f.next_retry_at > ? THEN 'BACKING_OFF'
+                        WHEN length(trim(COALESCE(n.body, ''))) >= 240 THEN 'QUEUED'
+                        ELSE 'WAITING_CONTENT' END AS annotation_status
+            FROM news_revisions n
+            LEFT JOIN news_title_translations t ON t.translation_id=(
+              SELECT latest_t.translation_id FROM news_title_translations latest_t
+              WHERE latest_t.source=n.source
+                AND latest_t.source_item_id=n.source_item_id
+                AND latest_t.revision_number=n.revision_number
+              ORDER BY (latest_t.headline_zh=?) ASC,
+                       latest_t.parsed_at DESC, latest_t.translation_id DESC LIMIT 1)
+            LEFT JOIN news_annotations a ON a.annotation_id=(
+              SELECT preferred_a.annotation_id FROM news_annotations preferred_a
+              WHERE preferred_a.source=n.source
+                AND preferred_a.source_item_id=n.source_item_id
+                AND preferred_a.revision_number=n.revision_number
+                AND preferred_a.llm_model_version IN (
+                  'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
+                AND preferred_a.prompt_version=?
+              ORDER BY CASE preferred_a.llm_model_version
+                WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
+                preferred_a.parsed_at DESC LIMIT 1)
+            LEFT JOIN news_impact_assessments_v1 i
+              ON i.assessment_id=(
+                SELECT selected_i.assessment_id
+                FROM news_impact_assessments_v1 selected_i
+                WHERE selected_i.annotation_id=a.annotation_id
+                  AND selected_i.llm_model_version=?
+                  AND selected_i.prompt_version IN (?,?)
+                ORDER BY CASE selected_i.prompt_version WHEN ? THEN 0 ELSE 1 END,
+                         selected_i.assessed_at DESC LIMIT 1)
+            LEFT JOIN news_llm_failures f ON f.failure_id=(
+              SELECT latest_f.failure_id FROM news_llm_failures latest_f
+              WHERE latest_f.task_type='ANNOTATION'
+                AND latest_f.source=n.source
+                AND latest_f.source_item_id=n.source_item_id
+                AND latest_f.revision_number=n.revision_number
+                AND latest_f.llm_model_version IN (
+                  'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
+                AND latest_f.prompt_version=?
+                AND NOT (latest_f.error_type='RuntimeError'
+                  AND latest_f.error='All configured Gemini keys unavailable for this batch')
+              ORDER BY latest_f.failed_at DESC LIMIT 1)
+            LEFT JOIN news_content_failures cf ON cf.failure_id=(
+              SELECT latest_cf.failure_id FROM news_content_failures latest_cf
+              WHERE latest_cf.source=n.source
+                AND latest_cf.source_item_id=n.source_item_id
+                AND latest_cf.revision_number=n.revision_number
+              ORDER BY latest_cf.attempt_number DESC LIMIT 1)
+            LEFT JOIN source_eligibility_rules r
+              ON r.eligibility_version='news-source-eligibility-v4-live-delay-materiality'
+             AND r.source=n.source
+            WHERE NOT EXISTS (
+              SELECT 1 FROM news_revisions newer
+              WHERE newer.source=n.source
+                AND newer.source_item_id=n.source_item_id
+                AND newer.revision_number>n.revision_number)
+              AND NOT EXISTS (
+                SELECT 1 FROM news_revisions peer
+                WHERE peer.cluster_id=n.cluster_id
+                  AND NOT EXISTS (
+                    SELECT 1 FROM news_revisions peer_newer
+                    WHERE peer_newer.source=peer.source
+                      AND peer_newer.source_item_id=peer.source_item_id
+                      AND peer_newer.revision_number>peer.revision_number)
+                  AND (length(COALESCE(peer.body, '')) > length(COALESCE(n.body, ''))
+                    OR (length(COALESCE(peer.body, '')) = length(COALESCE(n.body, ''))
+                      AND peer.source_item_id < n.source_item_id)))
+              AND length(trim(COALESCE(n.body, ''))) >= 240
+              AND COALESCE(n.source_published_time,
+                           n.collector_first_seen_time) >= ?
+              {cursor_clause}
+            {order_clause}
+            LIMIT ?""",
+        (
+            now.isoformat(timespec="microseconds"), INVALID_CHINESE_TITLE,
+            PROMPT_VERSION, IMPACT_MODEL, IMPACT_PROMPT_VERSION,
+            HANDOVER_IMPACT_PROMPT_VERSION, IMPACT_PROMPT_VERSION,
+            PROMPT_VERSION, cutoff, *cursor_parameters, limit,
+        ),
+    ).fetchall()
+
+
+def _serialize_news_rows(
+    rows: list[sqlite3.Row], now: datetime, epoch: str,
+    claimable_annotation_keys: set[tuple[str, str, int]],
+) -> list[dict]:
+    """Apply the shared reader-state contract without intake freshness gates."""
+    news: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        listed_source = str(item.get("source") or "") in COLLECTION_SOURCES
+        item["source_eligibility"] = (
+            "SEMANTIC_CANDIDATE" if listed_source else "UNLISTED_CANDIDATE"
+        )
+        item["model_visibility"] = (
+            "IMPACT_PENDING" if item.get("parsed_at")
+            else "NOT_YET_PARSED"
+            if item.get("annotation_status") in {"QUEUED", "READY"}
+            else str(item.get("annotation_status") or "WAITING_CONTENT")
+        )
+        annotation_key = (
+            str(item.get("source") or ""),
+            str(item.get("source_item_id") or ""),
+            int(item.get("revision_number") or 0),
+        )
+        if item.get("parsed_at"):
+            item["annotation_status"] = "READY"
+        elif (
+            item.get("annotation_status") == "QUEUED"
+            and annotation_key not in claimable_annotation_keys
+        ):
+            item["annotation_status"] = "NOT_REQUIRED"
+            reason_code, reason = _not_required_reason(item, epoch)
+            item["annotation_reason_code"] = reason_code
+            item["annotation_reason"] = reason
+        _apply_impact_status(item, now)
+        item["entities"] = (
+            json.loads(item.pop("entities_json"))
+            if item.get("entities_json") else []
+        )
+        secondary = item.pop("secondary_categories_json", None)
+        item["secondary_categories"] = json.loads(secondary) if secondary else []
+        item["category"] = _news_category(item)
+        item["eligibility_version"] = CURRENT_NEWS_CONTRACT.eligibility_version
+        news.append(item)
+    return news
+
+
+def _news_archive_page(
+    connection: sqlite3.Connection, after: str | None, limit: int,
+) -> dict:
+    now = datetime.now(UTC)
+    epoch_row = connection.execute(
+        "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
+    ).fetchone()
+    epoch = str(epoch_row[0])
+    claimable_keys = {
+        (str(row["source"]), str(row["source_item_id"]), int(row["revision_number"]))
+        for row in pending_annotation_records(connection, limit=100_000)
+    }
+    rows = _news_reader_rows(connection, now, after=after, limit=limit + 1)
+    has_more = len(rows) > limit
+    news = _serialize_news_rows(rows[:limit], now, epoch, claimable_keys)
+    next_cursor = (
+        json.dumps([
+            news[-1]["mirror_updated_at"], news[-1]["source"],
+            news[-1]["source_item_id"], news[-1]["revision_number"],
+        ], ensure_ascii=False, separators=(",", ":"))
+        if news else after
+    )
+    return {
+        "items": news,
+        "next_cursor": next_cursor,
+        "has_more": has_more,
+        "window_days": NEWS_READER_WINDOW_DAYS,
+        "window_start": (now - timedelta(days=NEWS_READER_WINDOW_DAYS)).isoformat(),
+    }
+
+
 def _quote_history_files(directory: Path) -> list[Path]:
     """Choose one authoritative file for each append-only quote date."""
     by_day: dict[str, Path] = {}
@@ -501,56 +878,93 @@ def _quote_history_files(directory: Path) -> list[Path]:
     return [by_day[day] for day in sorted(by_day)]
 
 
+def _append_quote_candle(buckets: dict[datetime, dict], raw: str | bytes) -> None:
+    try:
+        quote = json.loads(raw)
+        observed = datetime.fromisoformat(
+            str(quote["received_time"]).replace("Z", "+00:00")
+        )
+        observed = (
+            observed.replace(tzinfo=UTC)
+            if observed.tzinfo is None else observed.astimezone(UTC)
+        )
+        bid = float(quote["bid"])
+        ask = float(quote["ask"])
+        midpoint = (bid + ask) / 2.0
+        minute = observed.replace(second=0, microsecond=0)
+        bucket = minute - timedelta(minutes=minute.minute % 5)
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return
+    candle = buckets.get(bucket)
+    if candle is None:
+        buckets[bucket] = {
+            "time": bucket.isoformat(), "open": midpoint,
+            "high": midpoint, "low": midpoint, "close": midpoint,
+            "ticks": 1,
+        }
+    else:
+        candle["high"] = max(candle["high"], midpoint)
+        candle["low"] = min(candle["low"], midpoint)
+        candle["close"] = midpoint
+        candle["ticks"] += 1
+
+
 def _quote_file_candles(path: Path) -> list[dict]:
-    """Aggregate one daily quote file and cache immutable archive results."""
+    """Aggregate archives once and consume only new bytes from live quote files."""
     try:
         stat = path.stat()
     except OSError:
         return []
-    key = (str(path), stat.st_size, stat.st_mtime_ns)
-    cached = _QUOTE_CANDLE_CACHE.get(key)
-    if cached is not None:
-        return cached
-    for stale in [candidate for candidate in _QUOTE_CANDLE_CACHE if candidate[0] == str(path)]:
-        del _QUOTE_CANDLE_CACHE[stale]
-    buckets: dict[datetime, dict] = {}
-    opener = gzip.open if path.suffix == ".gz" else open
-    try:
-        with opener(path, "rt", encoding="utf-8") as handle:
-            for line in handle:
-                try:
-                    quote = json.loads(line)
-                    observed = datetime.fromisoformat(
-                        str(quote["received_time"]).replace("Z", "+00:00")
-                    )
-                    observed = (
-                        observed.replace(tzinfo=UTC)
-                        if observed.tzinfo is None else observed.astimezone(UTC)
-                    )
-                    bid = float(quote["bid"])
-                    ask = float(quote["ask"])
-                    midpoint = (bid + ask) / 2.0
-                    minute = observed.replace(second=0, microsecond=0)
-                    bucket = minute - timedelta(minutes=minute.minute % 5)
-                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-                    continue
-                candle = buckets.get(bucket)
-                if candle is None:
-                    buckets[bucket] = {
-                        "time": bucket.isoformat(), "open": midpoint,
-                        "high": midpoint, "low": midpoint, "close": midpoint,
-                        "ticks": 1,
-                    }
-                else:
-                    candle["high"] = max(candle["high"], midpoint)
-                    candle["low"] = min(candle["low"], midpoint)
-                    candle["close"] = midpoint
-                    candle["ticks"] += 1
-    except OSError:
-        return []
-    candles = [buckets[bucket] for bucket in sorted(buckets)]
-    _QUOTE_CANDLE_CACHE[key] = candles
-    return candles
+    key = str(path)
+    with _QUOTE_CANDLE_CACHE_LOCK:
+        cached = _QUOTE_CANDLE_CACHE.get(key)
+        if path.suffix == ".gz":
+            signature = (stat.st_size, stat.st_mtime_ns)
+            if cached and cached.get("signature") == signature:
+                return cached["candles"]
+            buckets: dict[datetime, dict] = {}
+            try:
+                with gzip.open(path, "rt", encoding="utf-8") as handle:
+                    for line in handle:
+                        _append_quote_candle(buckets, line)
+            except OSError:
+                return []
+            candles = [buckets[bucket] for bucket in sorted(buckets)]
+            _QUOTE_CANDLE_CACHE[key] = {
+                "signature": signature, "candles": candles,
+            }
+            return candles
+
+        if cached and int(cached.get("offset", 0)) <= stat.st_size:
+            buckets = cached["buckets"]
+            offset = int(cached["offset"])
+            remainder = bytes(cached.get("remainder", b""))
+        else:
+            buckets = {}
+            offset = 0
+            remainder = b""
+        if offset == stat.st_size:
+            return [dict(candle) for candle in cached["candles"]] if cached else []
+        try:
+            with path.open("rb") as handle:
+                handle.seek(offset)
+                chunk = handle.read()
+                next_offset = handle.tell()
+        except OSError:
+            return []
+        lines = (remainder + chunk).split(b"\n")
+        remainder = lines.pop()
+        for line in lines:
+            if line:
+                _append_quote_candle(buckets, line)
+        candles = [buckets[bucket] for bucket in sorted(buckets)]
+        _QUOTE_CANDLE_CACHE[key] = {
+            "offset": next_offset,
+            "remainder": remainder,
+            "buckets": buckets,
+            "candles": candles,
+        }
+        return [dict(candle) for candle in candles]
 
 
 def _downsample_candles(candles: list[dict], limit: int) -> list[dict]:
@@ -751,8 +1165,18 @@ def _news_evidence_display_rows(
     between "used" and "never used".
     """
     try:
+        aux_receipts = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='news_only_visibility_receipts_v1'"
+        ).fetchone()
+        receipt_source = (
+            "(SELECT * FROM news_model_visibility_receipts_v1 UNION ALL "
+            "SELECT * FROM news_only_visibility_receipts_v1)"
+            if aux_receipts is not None
+            else "news_model_visibility_receipts_v1"
+        )
         visibility_rows = connection.execute(
-            """SELECT event_key,
+            f"""SELECT event_key,
                       count(*) AS frozen_model_uses,
                       count(DISTINCT source_decision_id) AS frozen_decisions,
                       count(DISTINCT event_source_hash) AS frozen_versions,
@@ -760,7 +1184,7 @@ def _news_evidence_display_rows(
                       max(decision_time) AS last_model_decision_time,
                       group_concat(DISTINCT model_identity) AS model_identities,
                       group_concat(DISTINCT model_version) AS model_versions
-               FROM news_model_visibility_receipts_v1
+               FROM {receipt_source}
                GROUP BY event_key"""
         ).fetchall()
         catalog_rows = connection.execute(
@@ -842,7 +1266,7 @@ def _news_evidence_display_rows(
         event_key = row["event_key"]
         if event_key in displayed_events:
             continue
-        if row.get("prompt_version") != "news-json-v14-material-event-evidence":
+        if row.get("prompt_version") != PROMPT_VERSION:
             continue
         if row.get("evidence_grade") not in {
             "PRIMARY", "CORROBORATED", "SINGLE_RELIABLE",
@@ -873,13 +1297,70 @@ def _news_evidence_display_rows(
         ),
         reverse=True,
     )
-    return rows[:100]
+    return rows
+
+
+def _news_metrics(
+    *,
+    counts: dict[str, int],
+    raw_article_revisions: int,
+    distinct_articles: int,
+    all_news_evidence: list[dict],
+    auditable_events: list[dict],
+    decision_event_exposures: int,
+    learning: dict,
+) -> dict:
+    """Publish one named news-count contract for every public surface."""
+    transition = learning.get("news_contract_transition", {})
+    return {
+        "schema_version": "news-metrics-v1",
+        "articles": {
+            "received": distinct_articles,
+            "stored_revisions": raw_article_revisions,
+            "readable": int(counts.get("readable_news_items", 0)),
+            "semantic_reviews_complete": int(counts.get("parsed_news_items", 0)),
+            "current_model_candidates": int(
+                counts.get("model_candidate_news_items", 0)
+            ),
+        },
+        "events": {
+            "independent": len(all_news_evidence),
+            "auditable": len(auditable_events),
+            "currently_model_eligible": sum(
+                int(row["broad_model_eligible"]) for row in all_news_evidence
+            ),
+            "used_in_predictions": sum(
+                int(row["model_seen"]) for row in auditable_events
+            ),
+            "never_used": sum(
+                int(not row["model_seen"]) for row in auditable_events
+            ),
+        },
+        "prediction_usage": {
+            "decision_event_exposures": decision_event_exposures,
+            "frozen_model_uses": sum(
+                int(row["frozen_model_uses"]) for row in auditable_events
+            ),
+        },
+        "training": {
+            "current_contract_rows": int(
+                transition.get("current_contract_exposed_rows", 0)
+            ),
+            "distinct_events": int(
+                transition.get("current_contract_distinct_events", 0)
+            ),
+        },
+    }
 
 
 def _dashboard_payload(database: Path) -> dict:
     now = datetime.now(UTC)
+    credentials = configured_api_credentials()
+    gemini_keys = tuple(credential.api_key for credential in credentials)
+    scheduler_quotas = None
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=5)
     connection.row_factory = sqlite3.Row
+    connection.execute("BEGIN")
     try:
         latest = connection.execute(
             """SELECT d.decision_id, d.decision_time, d.effective_action, d.data_health,
@@ -934,8 +1415,6 @@ def _dashboard_payload(database: Path) -> dict:
                LEFT JOIN outcomes o USING(decision_id)
                ORDER BY d.decision_time DESC LIMIT 30"""
         ).fetchall()
-        from xauusd_forecaster.daily_brief import recent_daily_briefs
-        daily_news_briefs = recent_daily_briefs(connection)
         counts = {
             name: connection.execute(f"SELECT count(*) FROM {name}").fetchone()[0]
             for name in (
@@ -1012,18 +1491,11 @@ def _dashboard_payload(database: Path) -> dict:
                       json_extract(a.annotation_json, '$.secondary_categories') AS secondary_categories_json,
                        json_extract(a.annotation_json, '$.emerging_topic_zh') AS emerging_topic_zh,
                        json_extract(a.annotation_json, '$.event_time') AS event_time,
-                      COALESCE(a.event_type, legacy.event_type, legacy_v3.event_type) AS event_type,
-                      COALESCE(a.entities_json, legacy.entities_json, legacy_v3.entities_json) AS entities_json,
-                      COALESCE(a.hawkishness, legacy.hawkishness, legacy_v3.hawkishness) AS hawkishness,
-                      COALESCE(a.inflation_impulse, legacy.inflation_impulse, legacy_v3.inflation_impulse) AS inflation_impulse,
-                      COALESCE(a.growth_impulse, legacy.growth_impulse, legacy_v3.growth_impulse) AS growth_impulse,
-                      COALESCE(a.geopolitical_risk, legacy.geopolitical_risk, legacy_v3.geopolitical_risk) AS geopolitical_risk,
-                      COALESCE(a.usd_impulse, legacy.usd_impulse, legacy_v3.usd_impulse) AS usd_impulse,
-                      COALESCE(a.novelty, legacy.novelty, legacy_v3.novelty) AS novelty,
-                      COALESCE(a.confidence, legacy.confidence, legacy_v3.confidence) AS confidence,
-                      COALESCE(a.llm_model_version, legacy.llm_model_version, legacy_v3.llm_model_version) AS llm_model_version,
-                      COALESCE(a.prompt_version, legacy.prompt_version, legacy_v3.prompt_version) AS prompt_version,
-                       COALESCE(a.parsed_at, legacy.parsed_at, legacy_v3.parsed_at) AS parsed_at,
+                      a.event_type, a.entities_json, a.hawkishness,
+                      a.inflation_impulse, a.growth_impulse,
+                      a.geopolitical_risk, a.usd_impulse, a.novelty,
+                      a.confidence, a.llm_model_version, a.prompt_version,
+                      a.parsed_at,
                        i.impact_class,
                        i.event_state AS impact_event_state,
                        i.update_type AS impact_update_type,
@@ -1033,8 +1505,8 @@ def _dashboard_payload(database: Path) -> dict:
                        CASE WHEN n.source_published_time IS NOT NULL THEN
                          (julianday(n.collector_first_seen_time)-julianday(n.source_published_time))*86400
                        END AS collection_delay_seconds,
-                       CASE WHEN COALESCE(a.parsed_at, legacy.parsed_at, legacy_v3.parsed_at) IS NOT NULL THEN
-                         (julianday(COALESCE(a.parsed_at, legacy.parsed_at, legacy_v3.parsed_at))-
+                       CASE WHEN a.parsed_at IS NOT NULL THEN
+                         (julianday(a.parsed_at)-
                           julianday(n.collector_first_seen_time))*86400
                        END AS processing_delay_seconds,
                        COALESCE(r.maximum_tier, 'COLLECT_ONLY') AS source_eligibility,
@@ -1075,38 +1547,19 @@ def _dashboard_payload(database: Path) -> dict:
                      AND preferred_a.revision_number=n.revision_number
                      AND preferred_a.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
-                     AND preferred_a.prompt_version IN (
-                       'news-json-v14-material-event-evidence',
-                       'news-json-v13-event-claims',
-                       'news-json-v12-gemini-story-identity',
-                       'news-json-v11-gemini-story-subjects',
-                       'news-json-v10-controlled-category-zh',
-                       'news-json-v9-local-display-recovery')
-                   ORDER BY CASE preferred_a.prompt_version
-                     WHEN 'news-json-v14-material-event-evidence' THEN 0
-                     WHEN 'news-json-v13-event-claims' THEN 1
-                     WHEN 'news-json-v12-gemini-story-identity' THEN 2
-                     WHEN 'news-json-v11-gemini-story-subjects' THEN 3
-                     WHEN 'news-json-v10-controlled-category-zh' THEN 4 ELSE 5 END,
-                     CASE preferred_a.llm_model_version
+                     AND preferred_a.prompt_version=?
+                   ORDER BY CASE preferred_a.llm_model_version
                        WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                      preferred_a.parsed_at DESC LIMIT 1)
-               LEFT JOIN news_annotations legacy
-                 ON legacy.source=n.source
-                AND legacy.source_item_id=n.source_item_id
-                AND legacy.revision_number=n.revision_number
-                AND legacy.llm_model_version='gemini-3.5-flash-lite'
-                AND legacy.prompt_version='news-json-v7-strict-headline-and-summary-zh-verbatim-numbers'
-               LEFT JOIN news_annotations legacy_v3
-                 ON legacy_v3.source=n.source
-                AND legacy_v3.source_item_id=n.source_item_id
-                AND legacy_v3.revision_number=n.revision_number
-                AND legacy_v3.llm_model_version='gemini-3.5-flash-lite'
-                 AND legacy_v3.prompt_version='news-json-v6-headline-and-summary-zh-verbatim-numbers'
                LEFT JOIN news_impact_assessments_v1 i
-                 ON i.annotation_id=a.annotation_id
-                AND i.llm_model_version=?
-                AND i.prompt_version=?
+                 ON i.assessment_id=(
+                   SELECT selected_i.assessment_id
+                   FROM news_impact_assessments_v1 selected_i
+                   WHERE selected_i.annotation_id=a.annotation_id
+                     AND selected_i.llm_model_version=?
+                     AND selected_i.prompt_version IN (?,?)
+                   ORDER BY CASE selected_i.prompt_version WHEN ? THEN 0 ELSE 1 END,
+                            selected_i.assessed_at DESC LIMIT 1)
                LEFT JOIN news_llm_failures f
                  ON f.failure_id=(
                    SELECT latest_f.failure_id
@@ -1117,7 +1570,7 @@ def _dashboard_payload(database: Path) -> dict:
                      AND latest_f.revision_number=n.revision_number
                      AND latest_f.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
-                     AND latest_f.prompt_version='news-json-v14-material-event-evidence'
+                     AND latest_f.prompt_version=?
                      AND NOT (latest_f.error_type='RuntimeError'
                               AND latest_f.error='All configured Gemini keys unavailable for this batch')
                     ORDER BY latest_f.failed_at DESC LIMIT 1)
@@ -1162,7 +1615,10 @@ def _dashboard_payload(database: Path) -> dict:
                LIMIT 1000""",
             (
                 now.isoformat(timespec="microseconds"), INVALID_CHINESE_TITLE,
+                PROMPT_VERSION,
                 IMPACT_MODEL, IMPACT_PROMPT_VERSION,
+                HANDOVER_IMPACT_PROMPT_VERSION, IMPACT_PROMPT_VERSION,
+                PROMPT_VERSION,
             ),
         ).fetchall()
         annotation_queue = connection.execute(
@@ -1195,16 +1651,8 @@ def _dashboard_payload(database: Path) -> dict:
                      AND preferred_a.revision_number=n.revision_number
                      AND preferred_a.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
-                     AND preferred_a.prompt_version IN (
-                       'news-json-v12-gemini-story-identity',
-                       'news-json-v11-gemini-story-subjects',
-                       'news-json-v10-controlled-category-zh',
-                       'news-json-v9-local-display-recovery')
-                   ORDER BY CASE preferred_a.prompt_version
-                     WHEN 'news-json-v12-gemini-story-identity' THEN 0
-                     WHEN 'news-json-v11-gemini-story-subjects' THEN 1
-                     WHEN 'news-json-v10-controlled-category-zh' THEN 2 ELSE 3 END,
-                     CASE preferred_a.llm_model_version
+                     AND preferred_a.prompt_version=?
+                   ORDER BY CASE preferred_a.llm_model_version
                        WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                      preferred_a.parsed_at DESC LIMIT 1)
                LEFT JOIN news_llm_failures f
@@ -1217,7 +1665,7 @@ def _dashboard_payload(database: Path) -> dict:
                      AND latest_f.revision_number=n.revision_number
                      AND latest_f.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
-                     AND latest_f.prompt_version='news-json-v12-gemini-story-identity'
+                     AND latest_f.prompt_version=?
                      AND NOT (latest_f.error_type='RuntimeError'
                               AND latest_f.error='All configured Gemini keys unavailable for this batch')
                    ORDER BY latest_f.failed_at DESC LIMIT 1)
@@ -1248,6 +1696,8 @@ def _dashboard_payload(database: Path) -> dict:
             (
                 now.isoformat(timespec="microseconds"),
                 now.isoformat(timespec="microseconds"),
+                PROMPT_VERSION,
+                PROMPT_VERSION,
             ),
         ).fetchone()
         # The displayed queue is the worker's real claimable queue, not a
@@ -1317,6 +1767,11 @@ def _dashboard_payload(database: Path) -> dict:
             ):
                 complete_rows += 1
         learning, execution_learning = _learning_surfaces(connection)
+        counts["live_oos_model_groups"] = len({
+            str(row.get("model_identity") or "")
+            for row in learning.get("models", [])
+            if row.get("active_rank") is not None and row.get("model_identity")
+        })
         market_chart = _recent_market_chart(database, connection, now)
         component_times = {
             "quote_bridge": _latest_quote_received(database),
@@ -1325,7 +1780,6 @@ def _dashboard_payload(database: Path) -> dict:
             "news_collector": connection.execute("SELECT max(fetched_time) FROM source_polls").fetchone()[0],
             "gemini_annotator": connection.execute("SELECT max(parsed_at) FROM news_annotations").fetchone()[0],
         }
-        integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
         news_source_health = _news_source_health(connection, now)
         monitored_news_sources = {
             row["source"] for row in news_source_health if row["health"] == "HEALTHY"
@@ -1339,7 +1793,10 @@ def _dashboard_payload(database: Path) -> dict:
         evidence_topics = Counter(
             topic for row in all_news_evidence for topic in row["topics"]
         )
-        news_evidence = _news_evidence_display_rows(connection, all_news_evidence)
+        auditable_news_events = _news_evidence_display_rows(
+            connection, all_news_evidence
+        )
+        news_evidence = bounded_evidence_window(auditable_news_events, 100)
         raw_article_revisions = connection.execute(
             "SELECT count(*) FROM news_revisions"
         ).fetchone()[0]
@@ -1349,7 +1806,30 @@ def _dashboard_payload(database: Path) -> dict:
         decision_event_exposures = connection.execute(
             "SELECT count(*) FROM news_decision_event_snapshots_v1"
         ).fetchone()[0]
+        daily_news_briefs = recent_daily_briefs(connection)
+        scheduler_ledger_available = connection.execute(
+            """SELECT 1 FROM sqlite_master
+               WHERE type='table' AND name='news_ai_account_daily_usage_v1'"""
+        ).fetchone() is not None
+        if scheduler_ledger_available:
+            scheduler_quotas = {
+                surface.payload_key: account_quota_snapshot(
+                    connection, credentials,
+                    model_families=surface.model_families,
+                    daily_limit=surface.daily_limit,
+                    now=now,
+                )
+                for surface in AI_QUOTA_SURFACES
+            }
+        production_contract = production_contract_snapshot(
+            connection,
+            now=now,
+            account_ids=frozenset(
+                credential.account_id for credential in credentials
+            ),
+        )
     finally:
+        connection.rollback()
         connection.close()
 
     latest_data = dict(latest) if latest else None
@@ -1395,9 +1875,10 @@ def _dashboard_payload(database: Path) -> dict:
                     if decision_success else None)
     online = bool(age_seconds is not None and age_seconds <= 30
                   and decision_age is not None and decision_age <= 420)
+    broker_session = _broker_market_session(database, now)
     market_session = (
-        "OPEN" if online else
-        "WEEKLY_CLOSED" if expected_weekly_closure(now) else
+        "CLOSED" if broker_session and not broker_session["is_open"] else
+        "OPEN" if broker_session and online else
         "DATA_UNAVAILABLE"
     )
     clock_skew_seconds = None
@@ -1437,6 +1918,10 @@ def _dashboard_payload(database: Path) -> dict:
     backup_time = datetime.fromtimestamp(backup_files[-1].stat().st_mtime, UTC).isoformat() if backup_files else None
     component_times["sites_synchronizer"] = sync_time
     component_times["sqlite_backup"] = backup_time
+    backup_integrity_component = component(
+        "sqlite_backup", 172800,
+        None if backup_time else "No verified daily SQLite backup is available",
+    )
     sites_sync_component = component(
         "sites_synchronizer", 120, sync_status.get("last_error")
     )
@@ -1461,84 +1946,11 @@ def _dashboard_payload(database: Path) -> dict:
         item["predictions"] = predictions_by_decision.get(item["decision_id"], [])
         return item
 
-    news = []
-    seen_news_links = set()
-    for row in news_rows:
-        item = dict(row)
-        source_tier, _, _, _ = SOURCE_RULES.get(
-            str(item.get("source") or ""),
-            ("COLLECT_ONLY", True, 200, "unlisted source"),
-        )
-        # SOURCE_RULES is the runtime authority.  The SQLite rule ledger is an
-        # audit mirror and can legitimately lag a freshly deployed rule
-        # version; treating a missing mirror row as COLLECT_ONLY made every
-        # readable item disappear after a policy update.
-        item["source_eligibility"] = source_tier
-        if source_tier == "COLLECT_ONLY":
-            continue
-        item["model_visibility"] = (
-            "IMPACT_PENDING"
-            if source_tier == "MODEL_ELIGIBLE" and item.get("parsed_at")
-            else "NOT_YET_PARSED"
-            if source_tier == "MODEL_ELIGIBLE"
-            else source_tier
-        )
-        annotation_key = (
-            str(item.get("source") or ""),
-            str(item.get("source_item_id") or ""),
-            int(item.get("revision_number") or 0),
-        )
-        if item.get("parsed_at"):
-            # Legacy-compatible annotations are also complete even when the
-            # current-version LEFT JOIN did not populate a.annotation_id.
-            item["annotation_status"] = "READY"
-        elif (
-            item.get("annotation_status") == "QUEUED"
-            and annotation_key not in claimable_annotation_keys
-        ):
-            # A readable row can be retained for the reader without being a
-            # job the current worker is allowed to claim (duplicate, archival,
-            # or discovered too late). Calling it QUEUED is misleading.
-            item["annotation_status"] = "NOT_REQUIRED"
-            reason_code, reason = _not_required_reason(item, epoch)
-            item["annotation_reason_code"] = reason_code
-            item["annotation_reason"] = reason
-        if source_tier == "MODEL_ELIGIBLE":
-            _apply_impact_status(item, now)
-        # The reader page shows every retained article with readable source
-        # content. Parsing is a separate state: an unparsed article remains
-        # visible for audit, but model_visibility prevents it from entering
-        # any feature snapshot until the annotation has completed.
-        if item.get("content_fetch_status") != "AVAILABLE":
-            continue
-        published_at = (
-            datetime.fromisoformat(item["source_published_time"])
-            if item.get("source_published_time") else None
-        )
-        allowed, _ = google_news_item_is_relevant(
-            str(item["source"]), str(item.get("original_headline") or ""),
-            published_at, now,
-        )
-        if not allowed:
-            continue
-        dedupe_key = item.get("link") or (
-            item["source"],
-            item["source_item_id"],
-        )
-        if dedupe_key in seen_news_links:
-            continue
-        seen_news_links.add(dedupe_key)
-        item["entities"] = json.loads(item.pop("entities_json")) if item.get("entities_json") else []
-        secondary_categories_json = item.pop("secondary_categories_json", None)
-        item["secondary_categories"] = (
-            json.loads(secondary_categories_json)
-            if secondary_categories_json else []
-        )
-        item["category"] = _news_category(item)
-        item["eligibility_version"] = "news-source-eligibility-v4-live-delay-materiality"
-        news.append(item)
-        if len(news) >= 200:
-            break
+    # The status snapshot remains a small recent page. The complete bounded
+    # reader archive is exposed separately by /api/news-archive.
+    news = _serialize_news_rows(
+        news_rows[:200], now, epoch, claimable_annotation_keys,
+    )
     counts["latest_news_items"] = len(news)
     counts["readable_news_items"] = len(news)
     counts["parsed_news_items"] = sum(
@@ -1565,17 +1977,21 @@ def _dashboard_payload(database: Path) -> dict:
     if latest_data:
         latest_data["features"] = json.loads(latest_data.pop("features_json"))
         latest_data["reason_codes"] = json.loads(latest_data.pop("reason_codes_json"))
-    gemini_keys = configured_gemini_api_keys()
-    gemini_quota = GeminiQuotaLedger(database.parent / "gemini-quota.json").snapshot(
-        gemini_keys
-    )
-    gemini_31_quota = GeminiQuotaLedger(
-        database.parent / "gemini-3.1-flash-lite-quota.json"
-    ).snapshot(gemini_keys)
-    gemma_quota = GeminiQuotaLedger(
-        database.parent / "gemma-quota.json",
-        daily_limit=GEMMA_REQUESTS_PER_DAY_PER_KEY,
-    ).snapshot(gemini_keys)
+    if scheduler_quotas is not None:
+        gemini_quota = scheduler_quotas["gemini_quota"]
+        gemini_31_quota = scheduler_quotas["gemini_31_quota"]
+        gemma_quota = scheduler_quotas["gemma_quota"]
+    else:
+        gemini_quota = GeminiQuotaLedger(
+            database.parent / "gemini-quota.json"
+        ).snapshot(gemini_keys)
+        gemini_31_quota = GeminiQuotaLedger(
+            database.parent / "gemini-3.1-flash-lite-quota.json"
+        ).snapshot(gemini_keys)
+        gemma_quota = GeminiQuotaLedger(
+            database.parent / "gemma-quota.json",
+            daily_limit=GEMMA_REQUESTS_PER_DAY_PER_KEY,
+        ).snapshot(gemini_keys)
     available_gemini_keys = sum(
         item["status"] == "AVAILABLE" for item in gemini_quota["keys"]
     )
@@ -1591,19 +2007,43 @@ def _dashboard_payload(database: Path) -> dict:
     quote_component = component("quote_bridge", 30)
     decision_component = component("decision_collector", 420)
     outcome_component = component("outcome_settler", 420)
-    if market_session == "WEEKLY_CLOSED":
+    if market_session == "CLOSED":
         for market_component in (
             quote_component, decision_component, outcome_component,
         ):
             market_component["status"] = "MARKET_CLOSED"
             market_component["last_error"] = None
 
+    runtime_update_failure = None
+    runtime_update_path = database.parent / "runtime-update-state.json"
+    if runtime_update_path.exists():
+        try:
+            runtime_update = json.loads(runtime_update_path.read_text(encoding="utf-8-sig"))
+            if runtime_update.get("user_visible_failure") is True:
+                runtime_update_failure = {
+                    "status": runtime_update.get("update_status"),
+                    "failed_at": runtime_update.get("failed_at"),
+                }
+        except (OSError, ValueError):
+            pass
+
     return {
         "generated_at": now.isoformat(),
+        "production_contract": production_contract,
+        "dashboard_sync": sync_status,
         "forward_epoch": epoch,
         "system": {
             "online": online,
             "market_session": market_session,
+            "market_session_observed_at": (
+                broker_session["observed_at"] if broker_session else None
+            ),
+            "market_reopens_at": (
+                broker_session["next_open_time"] if broker_session else None
+            ),
+            "market_closes_at": (
+                broker_session["next_close_time"] if broker_session else None
+            ),
             "deployment": {
                 **DEPLOYMENT_PROVENANCE,
                 "payload_generated_at": now.isoformat(),
@@ -1615,6 +2055,7 @@ def _dashboard_payload(database: Path) -> dict:
             "symbol": "XAUUSD",
             "source_of_truth": "Local append-only SQLite",
             "sites_mirror": "read-only materialized display mirror",
+            "runtime_update_failure": runtime_update_failure,
             "components": {
                 "quote_bridge": quote_component,
                 "system_clock": {
@@ -1637,9 +2078,10 @@ def _dashboard_payload(database: Path) -> dict:
                 "gemini_annotator": component("gemini_annotator", 900),
                 "sites_synchronizer": sites_sync_component,
                 "sqlite_backup": component("sqlite_backup", 172800),
-                "integrity_check": {"last_success": now.isoformat(), "age_seconds": 0,
-                                    "status": "OK" if integrity == "ok" else "ERROR",
-                                    "last_error": None if integrity == "ok" else integrity},
+                # Daily online backups are published only after the complete
+                # SQLite integrity check succeeds. Reuse that durable proof;
+                # never scan the growing live database on a status request.
+                "integrity_check": backup_integrity_component,
             },
         },
         "latest": latest_data,
@@ -1671,19 +2113,34 @@ def _dashboard_payload(database: Path) -> dict:
             "unassigned_total": len(event_graph["unassigned_events"]),
             "display_only": True,
         },
+        "news_metrics": _news_metrics(
+            counts=counts,
+            raw_article_revisions=raw_article_revisions,
+            distinct_articles=distinct_articles,
+            all_news_evidence=all_news_evidence,
+            auditable_events=auditable_news_events,
+            decision_event_exposures=decision_event_exposures,
+            learning=learning,
+        ),
         "news_evidence_summary": {
             "policy_version": EVIDENCE_POLICY_VERSION,
             "raw_article_revisions": raw_article_revisions,
             "distinct_articles": distinct_articles,
             "decision_event_exposures": decision_event_exposures,
             "total_events": len(all_news_evidence),
-            "displayed_events": len(news_evidence),
+            "displayed_events": len(auditable_news_events),
             "broad_model_eligible": sum(
                 int(row["broad_model_eligible"]) for row in all_news_evidence
             ),
-            "model_seen_events": sum(int(row["model_seen"]) for row in news_evidence),
-            "model_unseen_events": sum(int(not row["model_seen"]) for row in news_evidence),
-            "frozen_model_uses": sum(int(row["frozen_model_uses"]) for row in news_evidence),
+            "model_seen_events": sum(
+                int(row["model_seen"]) for row in auditable_news_events
+            ),
+            "model_unseen_events": sum(
+                int(not row["model_seen"]) for row in auditable_news_events
+            ),
+            "frozen_model_uses": sum(
+                int(row["frozen_model_uses"]) for row in auditable_news_events
+            ),
             # Reuse the learning contract's sole row/event calculation. These
             # compact fields survive the PR preview bundle even when the heavy
             # learning-curve payload is intentionally removed.
@@ -1718,10 +2175,9 @@ def _dashboard_payload(database: Path) -> dict:
             "available_key_count": available_gemini_keys,
             "fallback_available_key_count": available_fallback_keys,
             "requests_per_minute_per_key": GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
-            "requests_per_minute": (
-                available_gemini_keys
-                * GEMINI_REQUESTS_PER_MINUTE_PER_KEY
-            ),
+            "requests_per_minute": GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
+            "input_tokens_per_minute": GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
+            "minute_scope": "PROJECT",
             "priority_reserve": flash_priority_reserve,
             "routine_remaining": flash_routine_remaining,
         },
@@ -1738,6 +2194,7 @@ def _dashboard_payload(database: Path) -> dict:
                 "model": DEFAULT_GEMMA_MODEL,
                 "role": "标题中文翻译，不进入模型训练",
                 "requests_per_minute": GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
+                "input_tokens_per_minute": GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
             },
             "antigravity": {
                 "enabled": False,
@@ -1774,18 +2231,28 @@ def _dashboard_payload(database: Path) -> dict:
 
 class Handler(BaseHTTPRequestHandler):
     database: Path
+    status_cache = StatusSnapshotCache()
+
+    def _write_json(self, status: int, body: bytes, **headers: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        for name, value in headers.items():
+            self.send_header(name.replace("_", "-"), value)
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            pass
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path.rstrip("/")
         if path == "/api/health":
-            body = b'{"status":"OK"}'
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            status, payload = self.status_cache.health()
+            body = json.dumps(payload, separators=(",", ":")).encode()
+            self._write_json(status, body)
             return
         if path == "/api/market-history":
             query = urllib.parse.parse_qs(parsed.query)
@@ -1806,30 +2273,56 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     connection.close()
                 body = json.dumps(payload, allow_nan=False).encode()
-                self.send_response(200)
+                status = 200
             except (OSError, sqlite3.Error, TypeError, ValueError) as error:
                 body = json.dumps({"error": str(error)[:500]}).encode()
-                self.send_response(400)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+                status = 400
+            self._write_json(status, body)
+            return
+        if path == "/api/news-archive":
+            query = urllib.parse.parse_qs(parsed.query)
+            after = (query.get("after") or [None])[0]
+            try:
+                limit = min(
+                    NEWS_ARCHIVE_PAGE_LIMIT,
+                    max(1, int((query.get("limit") or [NEWS_ARCHIVE_PAGE_LIMIT])[0])),
+                )
+                connection = sqlite3.connect(
+                    f"file:{self.database}?mode=ro", uri=True, timeout=5,
+                )
+                connection.row_factory = sqlite3.Row
+                try:
+                    payload = _news_archive_page(connection, after, limit)
+                finally:
+                    connection.close()
+                body = json.dumps(payload, allow_nan=False).encode()
+                status = 200
+            except (OSError, sqlite3.Error, TypeError, ValueError) as error:
+                body = json.dumps({"error": str(error)[:500]}).encode()
+                status = 400
+            self._write_json(status, body)
             return
         if path != "/api/status":
             self.send_error(404)
             return
         try:
-            body = json.dumps(_dashboard_payload(self.database), allow_nan=False).encode()
-            self.send_response(200)
+            body, snapshot_state, snapshot_age = self.status_cache.get(
+                self.database, _dashboard_payload,
+            )
+            status = 200
+        except StatusSnapshotUnavailable as error:
+            body = json.dumps({"error": str(error)[:500]}).encode()
+            status = 503
         except Exception as error:
             body = json.dumps({"error": str(error)[:500]}).encode()
-            self.send_response(500)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+            status = 500
+        headers = {}
+        if status == 200:
+            headers = {
+                "X_Dashboard_Snapshot_State": snapshot_state,
+                "X_Dashboard_Snapshot_Age": f"{snapshot_age:.3f}",
+            }
+        self._write_json(status, body, **headers)
 
     def log_message(self, format: str, *args: object) -> None:
         return

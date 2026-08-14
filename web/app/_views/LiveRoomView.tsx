@@ -1,9 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
+import CountValue from "../_components/CountValue";
 import DashboardLink from "../_components/DashboardLink";
+import RuntimeUpdateFailureBanner, { type RuntimeUpdateFailure } from "../_components/RuntimeUpdateFailureBanner";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
+import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
+import { formatExactCount } from "../_lib/count-format";
+import { resolveNewsMetrics, type NewsMetrics } from "../_lib/news-metrics";
 
 type Decision = {
   decision_time: string;
@@ -22,15 +28,18 @@ type Decision = {
 };
 
 type Payload = {
+  preview_status_summary?: boolean;
   generated_at: string;
   forward_epoch: string;
   system: {
     online: boolean;
-    market_session?: "OPEN" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE";
+    market_session?: "OPEN" | "CLOSED" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE";
+    market_reopens_at?: string | null;
     quote_age_seconds: number | null;
     mode: string;
     trading_enabled: boolean;
     symbol: string;
+    runtime_update_failure?: RuntimeUpdateFailure | null;
   };
   latest: Decision & {
     source_event_time: string;
@@ -55,6 +64,7 @@ type Payload = {
   } | null;
   u5_context: { percentile: number | null; samples: number; label: string };
   counts: Record<string, number>;
+  news_metrics?: NewsMetrics;
   outcome_summary: {
     samples: number;
     avg_long: number | null;
@@ -88,13 +98,25 @@ const localTime = (value?: string) =>
         minute: "2-digit",
         second: "2-digit",
         hour12: false,
+        timeZone: "Asia/Kuala_Lumpur",
       }).format(new Date(value))
     : "—";
 
+const countdown = (seconds: number) => {
+  const safe = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const remainingSeconds = safe % 60;
+  return [hours, minutes, remainingSeconds]
+    .map((value) => value.toString().padStart(2, "0"))
+    .join(":");
+};
+
 export default function LiveRoomView() {
-  const [payload, setPayload] = useState<Payload | null>(() => readDashboardResource<Payload>("/api/status"));
+  const cachedStatus = readDashboardResource<Payload>("/api/status");
+  const [payload, setPayload] = useState<Payload | null>(() => cachedStatus);
   const [error, setError] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
+  const [refreshing, setRefreshing] = useState(Boolean(cachedStatus?.preview_status_summary));
   const [now, setNow] = useState(() => Date.now());
 
   const refresh = useCallback(async (force = false) => {
@@ -110,13 +132,14 @@ export default function LiveRoomView() {
   }, []);
 
   useEffect(() => {
-    const initial = window.setTimeout(() => void refresh(), 0);
-    const interval = window.setInterval(() => void refresh(true), 5_000);
-    return () => {
-      window.clearTimeout(initial);
-      window.clearInterval(interval);
-    };
-  }, [refresh]);
+    return scheduleDashboardRefresh(
+      () => void refresh(Boolean(payload?.preview_status_summary)),
+      () => void refresh(true),
+      DASHBOARD_REFRESH_INTERVALS.live,
+      "current",
+      "live-status",
+    );
+  }, [refresh, payload?.preview_status_summary]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
@@ -124,9 +147,15 @@ export default function LiveRoomView() {
   }, []);
 
   const latest = payload?.latest;
-  const loading = payload === null && error === null;
+  const loading = (payload === null || (refreshing && payload.preview_status_summary)) && error === null;
+  const currentPhase: CurrentDataPhase = error
+    ? "error" : loading ? "loading" : payload?.preview_status_summary ? "snapshot" : "ready";
   const online = Boolean(payload?.system.online && !error);
-  const marketClosed = Boolean(payload?.system.market_session === "WEEKLY_CLOSED" && !error);
+  const marketClosed = Boolean(
+    (payload?.system.market_session === "CLOSED" ||
+      payload?.system.market_session === "WEEKLY_CLOSED") && !error
+  );
+  const marketUnavailable = Boolean(payload && !online && !marketClosed);
   const mid = latest?.bid && latest.ask ? (latest.bid + latest.ask) / 2 : null;
   const u5Percent = latest?.u5 == null ? null : Math.expm1(latest.u5) * 100;
   const u5Dollars = latest?.u5 == null || mid == null ? null : Math.expm1(latest.u5) * mid;
@@ -142,8 +171,13 @@ export default function LiveRoomView() {
   const signalRemaining = forecastAge === null ? 0 : Math.max(0, signalExpiry - forecastAge);
   const horizonRemaining = forecastAge === null ? 0 : Math.max(0, horizon - forecastAge);
   const horizonMinutes = Math.floor(horizonRemaining / 60);
+  const reopenSeconds = payload?.system.market_reopens_at
+    ? Math.max(0, (new Date(payload.system.market_reopens_at).getTime() - now) / 1_000)
+    : null;
   const forecastStatus = marketClosed
-    ? null
+    ? reopenSeconds === null
+      ? "等待 cTrader 提供重开时间"
+      : `距离重开 ${countdown(reopenSeconds)}`
     : loading
       ? "读取中…"
       : error
@@ -157,6 +191,17 @@ export default function LiveRoomView() {
               : horizonRemaining > 0
                 ? `观察中 · 剩${horizonMinutes}分钟`
                 : "本轮已结束";
+  const dialState = marketClosed
+    ? "closed"
+    : marketUnavailable
+      ? "unavailable"
+      : forecastAction.toLowerCase();
+  const dialAction = marketClosed
+    ? "休市"
+    : marketUnavailable
+      ? "无行情"
+      : forecastAction;
+  const newsMetrics = resolveNewsMetrics(payload);
 
   return (
     <main>
@@ -194,37 +239,40 @@ export default function LiveRoomView() {
 
         <div className="decision-dial">
           <span className="dial-label">30分钟预测</span>
-          <div className={`action action-${forecastAction.toLowerCase()}`}>
-            {forecastAction}
+          <div className={`action action-${dialState}`}>
+            {dialAction}
           </div>
-          {forecastStatus && signalRemaining > 0 && online && <strong className="forecast-state is-current">{forecastStatus}</strong>}
+          {forecastStatus && (marketClosed || marketUnavailable || (signalRemaining > 0 && online)) && <strong className="forecast-state is-current">{forecastStatus}</strong>}
         </div>
       </section>
 
       {error && <div className="error-banner">{error}。行情采集可能仍在运行，但网页数据服务已停止。</div>}
+      <RuntimeUpdateFailureBanner failure={payload?.system.runtime_update_failure} />
+      <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
+      {marketClosed && <div className="market-closed-banner">cTrader 已确认 XAUUSD 休市。系统暂停新增预测与 30 分钟样本，新闻采集继续运行。</div>}
 
       <section className="metric-grid">
         <article>
           <span>DATA HEALTH</span>
-          <strong className={latest?.data_health === "OK" ? "good" : "warn"}>
-            {latest?.data_health ?? "—"}
+          <strong className={marketClosed || latest?.data_health === "OK" ? "good" : "warn"}>
+            {marketClosed ? "休市" : latest?.data_health ?? "—"}
           </strong>
-          <small>最新决策 {localTime(latest?.decision_time)}</small>
+          <small className="metric-detail metric-detail-time"><span>{marketClosed ? "最后预测" : "最新决策"}</span><time>{localTime(latest?.decision_time)}</time></small>
         </article>
         <article>
           <span>DECISIONS</span>
-          <strong>{payload?.counts.decision_events ?? 0}</strong>
-          <small>从 Forward Epoch 开始</small>
+          <strong><MetricValue phase={currentPhase}><CountValue value={payload?.counts.decision_events} /></MetricValue></strong>
+          <small className="metric-detail">Forward Epoch 起</small>
         </article>
         <article>
           <span>30M OUTCOMES</span>
-          <strong>{payload?.counts.outcomes ?? 0}</strong>
-          <small>{payload?.outcome_summary.samples ?? 0} 个有效样本</small>
+          <strong><MetricValue phase={currentPhase}><CountValue value={payload?.counts.outcomes} /></MetricValue></strong>
+          <small><CountValue value={payload?.outcome_summary.samples} format="exact" suffix=" 个有效样本" /></small>
         </article>
         <article>
-          <span>NEWS REVISIONS</span>
-          <strong>{payload?.counts.news_revisions ?? 0}</strong>
-          <small>LLM {payload?.sources.llm === "ENABLED" ? "已启用" : "Gemini 标注中"}</small>
+          <span>NEWS ARTICLES</span>
+          <strong><MetricValue phase={currentPhase}><CountValue value={newsMetrics.articles.received} /></MetricValue></strong>
+          <small className="metric-detail metric-detail-stack"><CountValue value={newsMetrics.events.independent} format="exact" suffix=" 个独立事件" /><CountValue value={newsMetrics.articles.stored_revisions} format="exact" suffix=" 个保存版本" /></small>
         </article>
       </section>
 
@@ -260,7 +308,7 @@ export default function LiveRoomView() {
             <strong>{payload?.u5_context.label ?? "等待样本"}<small>{u5Percent === null ? "—" : `约 ±${u5Percent.toFixed(2)}% · ±$${u5Dollars?.toFixed(1)}`}</small></strong>
             <em>{riskPercentile.toFixed(0)} / 100</em>
             <div className="risk-scale" aria-label={`历史波动分位 ${riskPercentile.toFixed(0)} / 100`}><i style={{ left: `${Math.min(100, Math.max(0, riskPercentile))}%` }} /></div>
-            <p>箭头表示它在已收集 {payload?.u5_context.samples ?? 0} 个样本中的波动分位；越靠红色，未来30分钟通常波动越剧烈。它不是亏损概率，也不代表方向。</p>
+            <p>箭头表示它在已收集 {formatExactCount(payload?.u5_context.samples)} 个样本中的波动分位；越靠红色，未来30分钟通常波动越剧烈。它不是亏损概率，也不代表方向。</p>
           </div>
         </article>
 

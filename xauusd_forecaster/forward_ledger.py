@@ -9,6 +9,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .news_semantics import (
+    CURRENT_NEWS_PROMPT_VERSION,
+    NEWS_CATEGORIES,
+    RECORD_KINDS,
+    news_annotation_schema,
+    validate_news_annotation,
+)
+
 
 UTC = timezone.utc
 IMMUTABLE_TABLES = (
@@ -19,6 +27,7 @@ IMMUTABLE_TABLES = (
     "news_title_translations",
     "news_llm_failures",
     "news_content_failures",
+    "news_discovery_failures",
     "daily_news_briefs",
     "macro_observations",
     "source_polls",
@@ -121,6 +130,26 @@ CREATE TABLE IF NOT EXISTS news_annotations (
         REFERENCES news_revisions(source, source_item_id, revision_number)
 );
 
+CREATE INDEX IF NOT EXISTS news_annotations_revision_contract
+ON news_annotations(source, source_item_id, revision_number,
+                    llm_model_version, prompt_version);
+
+CREATE INDEX IF NOT EXISTS news_revisions_cluster_latest
+ON news_revisions(cluster_id, source, source_item_id, revision_number);
+
+CREATE TABLE IF NOT EXISTS daily_news_briefs (
+    brief_date TEXT NOT NULL,
+    revision_number INTEGER NOT NULL,
+    source_hash TEXT NOT NULL,
+    cutoff_at TEXT NOT NULL,
+    generated_at TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    brief_json TEXT NOT NULL,
+    PRIMARY KEY(brief_date, revision_number),
+    UNIQUE(brief_date, source_hash)
+);
+
 CREATE TABLE IF NOT EXISTS news_title_translations (
     translation_id TEXT PRIMARY KEY,
     source TEXT NOT NULL,
@@ -134,19 +163,6 @@ CREATE TABLE IF NOT EXISTS news_title_translations (
     parsed_at TEXT NOT NULL,
     FOREIGN KEY(source, source_item_id, revision_number)
         REFERENCES news_revisions(source, source_item_id, revision_number)
-);
-
-CREATE TABLE IF NOT EXISTS daily_news_briefs (
-    brief_date TEXT NOT NULL,
-    revision_number INTEGER NOT NULL,
-    source_hash TEXT NOT NULL,
-    cutoff_at TEXT NOT NULL,
-    generated_at TEXT NOT NULL,
-    model_version TEXT NOT NULL,
-    prompt_version TEXT NOT NULL,
-    brief_json TEXT NOT NULL,
-    PRIMARY KEY(brief_date, revision_number),
-    UNIQUE(brief_date, source_hash)
 );
 
 CREATE TABLE IF NOT EXISTS news_llm_failures (
@@ -195,6 +211,21 @@ CREATE TABLE IF NOT EXISTS news_content_failures (
 
 CREATE INDEX IF NOT EXISTS news_content_failures_lookup
 ON news_content_failures(source, source_item_id, revision_number, attempt_number);
+
+CREATE TABLE IF NOT EXISTS news_discovery_failures (
+    failure_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    source_item_id TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL CHECK(attempt_number >= 1),
+    error_type TEXT NOT NULL,
+    error TEXT NOT NULL,
+    failed_at TEXT NOT NULL,
+    next_retry_at TEXT NOT NULL,
+    UNIQUE(source, source_item_id, attempt_number)
+);
+
+CREATE INDEX IF NOT EXISTS news_discovery_failures_lookup
+ON news_discovery_failures(source, source_item_id, attempt_number);
 
 CREATE TABLE IF NOT EXISTS macro_observations (
     source TEXT NOT NULL,
@@ -395,8 +426,10 @@ class ForwardLedger:
         self.connection.execute("PRAGMA busy_timeout=60000")
         self.connection.executescript(SCHEMA)
         from .evidence_v2 import install_v2_schema
+        from .news_scheduler import install_scheduler_schema
 
         install_v2_schema(self.connection)
+        install_scheduler_schema(self.connection)
         self._install_append_only_triggers()
         created = now or datetime.now(UTC)
         with self.connection:
@@ -568,7 +601,7 @@ class ForwardLedger:
             record["source"], record["source_item_id"], record["revision_number"]
         )
         news = self.connection.execute(
-            """SELECT content_hash FROM news_revisions
+            """SELECT content_hash,headline,body FROM news_revisions
             WHERE source=? AND source_item_id=? AND revision_number=?""",
             source_key,
         ).fetchone()
@@ -598,21 +631,30 @@ class ForwardLedger:
             "document_kind", "material_event_key", "source_organization_id",
             "evidence_role",
         }
+        target_semantic_fields = set(
+            news_annotation_schema(CURRENT_NEWS_PROMPT_VERSION)["required"]
+        )
         if set(vector) not in (
             legacy_fields, summary_fields, translated_fields, classified_fields,
             storyline_fields, event_claim_fields, material_event_fields,
+            target_semantic_fields,
         ):
             raise ValueError("annotation does not match frozen JSON schema fields")
+        if set(vector) in (material_event_fields, target_semantic_fields):
+            source_text = None
+            if set(vector) == target_semantic_fields:
+                source_text = f"{news['headline']}\n{news['body'] or ''}"
+            validate_news_annotation(
+                vector,
+                prompt_version=record["prompt_version"],
+                source_text=source_text,
+            )
         if "summary_zh" in vector and not str(vector["summary_zh"]).strip():
             raise ValueError("annotation summary_zh is empty")
         if "headline_zh" in vector and not str(vector["headline_zh"]).strip():
             raise ValueError("annotation headline_zh is empty")
         if classified_fields <= set(vector):
-            allowed_categories = {
-                "rates_fed", "inflation_employment", "growth_economy",
-                "usd_liquidity", "oil_energy", "war_geopolitics",
-                "central_bank_gold", "risk_sentiment", "regulation_other",
-            }
+            allowed_categories = NEWS_CATEGORIES
             if vector["primary_category"] not in allowed_categories:
                 raise ValueError("annotation primary_category is not controlled")
             secondary = list(vector["secondary_categories"])
@@ -624,11 +666,8 @@ class ForwardLedger:
                 raise ValueError("annotation category cannot be both primary and secondary")
             if len(str(vector["emerging_topic_zh"])) > 16:
                 raise ValueError("annotation emerging_topic_zh is too long")
-        if set(vector) == event_claim_fields:
-            if vector["record_kind"] not in {
-                "FACT_EVENT", "OFFICIAL_CLAIM", "MARKET_REACTION",
-                "COMMENTARY_FORECAST", "BACKGROUND",
-            }:
+        if event_claim_fields <= set(vector):
+            if vector["record_kind"] not in RECORD_KINDS:
                 raise ValueError("annotation record_kind is not controlled")
             if not 0.0 <= float(vector["materiality"]) <= 1.0:
                 raise ValueError("annotation materiality is outside [0, 1]")
@@ -678,13 +717,16 @@ class ForwardLedger:
             )
 
     def append_news_impact_assessment(self, record: dict[str, Any]) -> None:
-        from .news_impact import EVENT_STATES, IMPACT_CLASSES, UPDATE_TYPES
+        from .news_impact import (
+            EVENT_STATES, IDENTITY_RELATIONS, IMPACT_CLASSES, UPDATE_TYPES,
+        )
 
         source_key = (
             record["source"], record["source_item_id"], record["revision_number"]
         )
         news = self.connection.execute(
-            """SELECT content_hash FROM news_revisions
+            """SELECT content_hash,length(body) AS body_character_count
+               FROM news_revisions
             WHERE source=? AND source_item_id=? AND revision_number=?""",
             source_key,
         ).fetchone()
@@ -708,6 +750,44 @@ class ForwardLedger:
             raise ValueError("impact confidence is outside [0, 1]")
         if not str(record["reason_zh"]).strip():
             raise ValueError("impact reason is empty")
+        has_resolution = record.get("resolution_id") is not None
+        from .news_impact import IMPACT_PROMPT_VERSION
+        if record["prompt_version"] == IMPACT_PROMPT_VERSION and not has_resolution:
+            raise ValueError("current impact assessment requires identity resolution")
+        if has_resolution:
+            if record.get("identity_relation") not in IDENTITY_RELATIONS:
+                raise ValueError("impact identity relation is not controlled")
+            if not str(record.get("canonical_episode_id") or "").strip():
+                raise ValueError("canonical episode identity is empty")
+            if not str(record.get("canonical_event_id") or "").strip():
+                raise ValueError("canonical event identity is empty")
+            source_context_mode = str(
+                record.get("source_context_mode") or "COMPLETE_BODY"
+            )
+            if source_context_mode not in {"COMPLETE_BODY", "EVIDENCE_WINDOWS"}:
+                raise ValueError("impact source context mode is not controlled")
+            source_body_character_count = int(
+                record.get("source_body_character_count")
+                or news["body_character_count"]
+            )
+            if source_body_character_count <= 0:
+                raise ValueError("impact source body character count is empty")
+            comparison = {
+                "identity_anchor_zh": record.get("identity_anchor_zh"),
+                "core_fact_changes_zh": record.get("core_fact_changes_zh"),
+                "identity_differences_zh": record.get("identity_differences_zh"),
+                "context_differences_zh": record.get("context_differences_zh"),
+                "source_context_mode": source_context_mode,
+                "source_body_character_count": source_body_character_count,
+            }
+            if any(
+                comparison[field] is None
+                for field in (
+                    "identity_anchor_zh", "core_fact_changes_zh",
+                    "identity_differences_zh", "context_differences_zh",
+                )
+            ):
+                raise ValueError("impact identity comparison is incomplete")
         with self.connection:
             self.connection.execute(
                 """INSERT INTO news_impact_assessments_v1 VALUES
@@ -722,6 +802,28 @@ class ForwardLedger:
                     str(record["reason_zh"]).strip(),
                 ),
             )
+            if has_resolution:
+                self.connection.execute(
+                    """INSERT INTO news_event_identity_resolutions_v1 (
+                    resolution_id,annotation_id,assessment_id,llm_model_version,
+                    prompt_version,resolved_at,identity_relation,
+                    matched_annotation_id,identity_comparison_json,
+                    canonical_episode_id,canonical_event_id
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        record["resolution_id"], record["annotation_id"],
+                        record["assessment_id"], record["llm_model_version"],
+                        record["prompt_version"], _iso(record["assessed_at"]),
+                        record["identity_relation"],
+                        record.get("matched_annotation_id"),
+                        json.dumps(
+                            comparison, ensure_ascii=False, sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        record["canonical_episode_id"],
+                        record["canonical_event_id"],
+                    ),
+                )
 
     def append_news_impact_failure(self, record: dict[str, Any]) -> None:
         with self.connection:
@@ -828,6 +930,22 @@ class ForwardLedger:
                     record["error"], _iso(record["failed_at"]),
                     _iso(next_retry) if next_retry else None,
                     int(bool(record.get("is_terminal"))),
+                ),
+            )
+
+    def append_discovery_failure(self, record: dict[str, Any]) -> None:
+        next_retry = record["next_retry_at"]
+        if next_retry <= record["failed_at"]:
+            raise ValueError("discovery retry time must follow failure time")
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO news_discovery_failures VALUES
+                (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    record["failure_id"], record["source"],
+                    record["source_item_id"], record["attempt_number"],
+                    record["error_type"], record["error"],
+                    _iso(record["failed_at"]), _iso(next_retry),
                 ),
             )
 

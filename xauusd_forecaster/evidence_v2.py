@@ -31,13 +31,18 @@ V2_IMMUTABLE_TABLES = (
     "news_model_visibility_events_v1",
     "news_model_visibility_receipts_v1",
     "news_event_catalog_v1",
+    "news_event_source_budgets_v1",
     "news_decision_event_snapshots_v1",
     "news_model_generations_v1",
     "news_model_generation_members_v1",
+    "news_model_generation_aux_members_v1",
     "news_model_generation_activations_v1",
     "news_training_weight_receipts_v1",
+    "news_training_source_budget_receipts_v1",
+    "news_only_visibility_receipts_v1",
     "news_item_classifications_v1",
     "news_impact_assessments_v1",
+    "news_event_identity_resolutions_v1",
     "news_impact_failures_v1",
     "prediction_scores_v2",
     "calibration_snapshots_v2",
@@ -320,6 +325,14 @@ CREATE TABLE IF NOT EXISTS news_decision_event_snapshots_v1 (
     PRIMARY KEY(source_decision_id,event_version_id,model_permission)
 );
 
+CREATE TABLE IF NOT EXISTS news_event_source_budgets_v1 (
+    event_version_id TEXT PRIMARY KEY REFERENCES news_event_catalog_v1(event_version_id),
+    source_budget_id TEXT NOT NULL,
+    identity_basis TEXT NOT NULL CHECK(identity_basis IN (
+        'REPORTING_ORGANIZATION','COLLECTOR_SOURCE')),
+    first_recorded_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS news_model_generations_v1 (
     generation_id TEXT PRIMARY KEY,
     model_stage TEXT NOT NULL CHECK(model_stage IN ('PREVIEW_ONLY','SHADOW')),
@@ -346,6 +359,14 @@ CREATE TABLE IF NOT EXISTS news_model_generation_members_v1 (
     UNIQUE(model_version)
 );
 
+CREATE TABLE IF NOT EXISTS news_model_generation_aux_members_v1 (
+    generation_id TEXT NOT NULL REFERENCES news_model_generations_v1(generation_id),
+    model_identity TEXT NOT NULL CHECK(model_identity='NEWS_ONLY'),
+    model_version TEXT NOT NULL REFERENCES model_updates_v2(model_version),
+    PRIMARY KEY(generation_id,model_identity),
+    UNIQUE(model_version)
+);
+
 CREATE TABLE IF NOT EXISTS news_model_generation_activations_v1 (
     activation_id TEXT PRIMARY KEY,
     generation_id TEXT NOT NULL REFERENCES news_model_generations_v1(generation_id),
@@ -365,6 +386,34 @@ CREATE TABLE IF NOT EXISTS news_training_weight_receipts_v1 (
     normalized_event_weight REAL NOT NULL CHECK(normalized_event_weight >= 0),
     receipt_hash TEXT NOT NULL,
     PRIMARY KEY(generation_id,evidence_lane,source_decision_id,event_version_id)
+);
+
+CREATE TABLE IF NOT EXISTS news_training_source_budget_receipts_v1 (
+    generation_id TEXT NOT NULL REFERENCES news_model_generations_v1(generation_id),
+    evidence_lane TEXT NOT NULL CHECK(evidence_lane IN ('OFFICIAL','BROAD')),
+    source_budget_id TEXT NOT NULL,
+    unbounded_weight REAL NOT NULL CHECK(unbounded_weight >= 0),
+    bounded_weight REAL NOT NULL CHECK(bounded_weight >= 0),
+    receipt_hash TEXT NOT NULL,
+    PRIMARY KEY(generation_id,evidence_lane,source_budget_id)
+);
+
+CREATE TABLE IF NOT EXISTS news_only_visibility_receipts_v1 (
+    receipt_id TEXT PRIMARY KEY,
+    source_decision_id TEXT NOT NULL,
+    decision_time TEXT NOT NULL,
+    model_identity TEXT NOT NULL CHECK(model_identity='NEWS_ONLY'),
+    model_version TEXT NOT NULL,
+    eligibility_version TEXT NOT NULL,
+    evidence_policy_version TEXT NOT NULL,
+    evidence_lane TEXT NOT NULL CHECK(evidence_lane='BROAD'),
+    event_key TEXT NOT NULL,
+    event_source_hash TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    receipt_origin TEXT NOT NULL CHECK(receipt_origin IN ('LIVE','POINT_IN_TIME_REPLAY')),
+    UNIQUE(source_decision_id, model_version, evidence_lane, event_key),
+    FOREIGN KEY(source_decision_id, model_version)
+      REFERENCES predictions_v2(source_decision_id, model_version)
 );
 
 CREATE TABLE IF NOT EXISTS news_item_classifications_v1 (
@@ -412,6 +461,30 @@ CREATE TABLE IF NOT EXISTS news_impact_assessments_v1 (
 CREATE INDEX IF NOT EXISTS news_impact_assessments_lookup_v1
 ON news_impact_assessments_v1(
     source,source_item_id,revision_number,assessed_at
+);
+
+CREATE TABLE IF NOT EXISTS news_event_identity_resolutions_v1 (
+    resolution_id TEXT PRIMARY KEY,
+    annotation_id TEXT NOT NULL,
+    assessment_id TEXT NOT NULL,
+    llm_model_version TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    resolved_at TEXT NOT NULL,
+    identity_relation TEXT NOT NULL CHECK(identity_relation IN (
+        'SAME_EVENT','SAME_EPISODE','NEW_EPISODE','UNRESOLVED')),
+    matched_annotation_id TEXT,
+    identity_comparison_json TEXT NOT NULL,
+    canonical_episode_id TEXT NOT NULL,
+    canonical_event_id TEXT NOT NULL,
+    FOREIGN KEY(annotation_id) REFERENCES news_annotations(annotation_id),
+    FOREIGN KEY(assessment_id) REFERENCES news_impact_assessments_v1(assessment_id),
+    FOREIGN KEY(matched_annotation_id) REFERENCES news_annotations(annotation_id),
+    UNIQUE(annotation_id,llm_model_version,prompt_version)
+);
+
+CREATE INDEX IF NOT EXISTS news_event_identity_resolutions_lookup_v1
+ON news_event_identity_resolutions_v1(
+    canonical_episode_id,canonical_event_id,resolved_at
 );
 
 CREATE TABLE IF NOT EXISTS news_impact_failures_v1 (
@@ -611,8 +684,12 @@ CREATE INDEX IF NOT EXISTS news_event_catalog_identity_v1
 ON news_event_catalog_v1(event_id,event_occurred_at);
 CREATE INDEX IF NOT EXISTS news_decision_event_time_v1
 ON news_decision_event_snapshots_v1(decision_time,event_id);
+CREATE INDEX IF NOT EXISTS news_event_source_budget_id_v1
+ON news_event_source_budgets_v1(source_budget_id,event_version_id);
 CREATE INDEX IF NOT EXISTS news_generation_activation_time_v1
 ON news_model_generation_activations_v1(activated_at,generation_id);
+CREATE INDEX IF NOT EXISTS news_only_visibility_event_v1
+ON news_only_visibility_receipts_v1(event_key, decision_time);
 CREATE INDEX IF NOT EXISTS execution_examples_time_v1
 ON execution_training_examples_v1(checkpoint_minutes, observed_at);
 CREATE INDEX IF NOT EXISTS execution_predictions_time_v1
@@ -669,6 +746,17 @@ def _repair_execution_score_foreign_key(connection: sqlite3.Connection) -> None:
 def install_v2_schema(connection: sqlite3.Connection) -> None:
     """Create V2 structures and append-only guards; never mutate old rows."""
     connection.executescript(V2_SCHEMA)
+    identity_columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(news_event_identity_resolutions_v1)"
+        ).fetchall()
+    }
+    if "identity_comparison_json" not in identity_columns:
+        connection.execute(
+            "ALTER TABLE news_event_identity_resolutions_v1 ADD COLUMN "
+            "identity_comparison_json TEXT NOT NULL DEFAULT '{}'"
+        )
     _repair_execution_score_foreign_key(connection)
     for table in V2_IMMUTABLE_TABLES:
         for operation in ("UPDATE", "DELETE"):

@@ -12,14 +12,19 @@ from .news_identity import (
     canonical_source_organization,
     canonical_story_episode,
 )
+from .news_semantics import (
+    ACTIONABLE_RECORD_KINDS,
+    CURRENT_NEWS_PROMPT_VERSION,
+    effective_record_kind,
+)
 
 
-STORYLINE_POLICY_VERSION = "temporal-event-graph-v8-canonical-occurrence-chains"
-CURRENT_EVENT_PROMPT_VERSION = "news-json-v14-material-event-evidence"
+STORYLINE_POLICY_VERSION = "temporal-event-graph-v9-semantic-identity-resolution"
+CURRENT_EVENT_PROMPT_VERSION = CURRENT_NEWS_PROMPT_VERSION
 LEGACY_POLICY_STATUS = "temporal-event-graph-v2:EXPERIMENTAL_MEMBERSHIP_INVALID"
 MODEL_PERMISSION = "DISPLAY_ONLY"
 
-CORE_KINDS = {"FACT_EVENT", "OFFICIAL_CLAIM", "RESPONSE"}
+CORE_KINDS = set(ACTIONABLE_RECORD_KINDS)
 ATTACHMENT_KINDS = {"MARKET_REACTION", "COMMENTARY_FORECAST", "BACKGROUND"}
 RELATIONS = {
     "CONFIRMS", "CONTRADICTS", "RESPONDS_TO", "ESCALATES",
@@ -60,6 +65,7 @@ ENTITY_ALIASES = {
 ROLE_LABELS = {
     "OFFICIAL_PRIMARY": "官方一手",
     "SINGLE_RELIABLE": "单一可靠来源",
+    "SINGLE_SOURCE": "单一已识别来源",
     "INDEPENDENT_CONFIRMATION": "独立交叉确认",
     "PHYSICAL_IMPACT": "实体/现场影响",
     "MARKET_REACTION": "市场反应确认",
@@ -213,6 +219,12 @@ def _source_organizations(event: dict) -> set[str]:
 
 def _episode_identity(event: dict) -> str | None:
     """Accept only one explicit, component-backed episode identity."""
+    resolved = (
+        _canonical_id(event.get("resolved_episode_id"))
+        if event.get("resolved_identity_relation") != "UNRESOLVED" else ""
+    )
+    if resolved:
+        return resolved
     episode = _canonical_id(event.get("episode_key"))
     actor = _canonical_id(event.get("canonical_actor_id") or event.get("actor"))
     action = _canonical_id(event.get("action_family") or event.get("action"))
@@ -323,64 +335,17 @@ def _episode_identity(event: dict) -> str | None:
 
 
 def _record_kind(event: dict) -> str:
-    declared = str(event.get("record_kind") or "").upper()
-    headline = str(event.get("canonical_headline") or "").strip()
-    if declared in CORE_KINDS and headline.endswith(("?", "？")):
-        return "COMMENTARY_FORECAST"
-    actor = _canonical_id(event.get("canonical_actor_id") or event.get("actor"))
-    action = _canonical_id(event.get("action_family") or event.get("action"))
-    object_id = _canonical_id(event.get("canonical_object_id") or event.get("object"))
-    # A price move is a market reaction even when the LLM called it a fact.
-    # This guard changes only story membership; the immutable annotation stays
-    # visible and auditable in the ledger.
-    market_actor = actor in {"gold", "spot_gold", "international_gold_market", "gold_market"}
-    price_object = object_id == "gold" or any(
-        token in object_id for token in ("gold_price", "market_price", "price_", "_price")
+    return effective_record_kind(
+        event, str(event.get("headline_zh") or event.get("headline") or "")
     )
-    if declared == "FACT_EVENT" and (market_actor or price_object):
-        return "MARKET_REACTION"
-    # Gemini occasionally describes a market-response article as a fact about
-    # the underlying release. Keep it visible, but outside the core event
-    # timeline. Both an instrument and a movement verb are required.
-    normalized_headline = _normal(headline)
-    market_instrument = any(token in normalized_headline for token in (
-        "gold", "bullion", "silver", "dollar", "yield", "treasury", "stock", "shares",
-        "futures", "oil", "黄金", "金价", "美元", "收益率", "美债", "股市",
-        "股指", "期货", "油价", "原油", "白银",
-    ))
-    market_move = any(token in normalized_headline for token in (
-        "rise", "rises", "rose", "fall", "falls", "fell", "drop", "drops",
-        "gain", "gains", "climb", "climbs", "steady", "surge", "slip",
-        "上涨", "下跌", "走高", "走低", "攀升", "回落", "持稳", "大涨", "大跌",
-        "突破",
-    ))
-    if declared == "FACT_EVENT" and market_instrument and market_move:
-        return "MARKET_REACTION"
-    market_expectation = any(token in normalized_headline for token in (
-        "market bets", "markets bet", "traders bet", "rate-cut bets",
-        "rate hike bets", "市场押注", "交易员押注", "降息预期", "加息预期",
-    ))
-    monetary_channel = any(token in normalized_headline for token in (
-        "fed", "rate", "yield", "dollar", "美联储", "利率", "收益率", "美元",
-    ))
-    if declared == "FACT_EVENT" and market_expectation and monetary_channel:
-        return "MARKET_REACTION"
-    # Pre-release/watch pieces and generic market narratives are context, not
-    # the material event itself. They remain auditable but cannot start or
-    # update an event story.
-    market_waiting = any(token in normalized_headline for token in (
-        "await", "awaits", "watch", "watches", "in focus", "ahead of",
-        "备受关注", "等待", "关注焦点", "公布前",
-    ))
-    if declared == "FACT_EVENT" and market_waiting:
-        return "BACKGROUND"
-    return declared
 
 
 def _is_core(event: dict) -> bool:
     return (
         event.get("prompt_version") == CURRENT_EVENT_PROMPT_VERSION
-        and event.get("evidence_grade") in {"PRIMARY", "CORROBORATED", "SINGLE_RELIABLE"}
+        and event.get("evidence_grade") in {
+            "PRIMARY", "CORROBORATED", "SINGLE_RELIABLE", "SINGLE_SOURCE",
+        }
         and _record_kind(event) in CORE_KINDS
         and float(event.get("materiality") or 0.0) >= 0.50
         and _document_kind(event) not in {"MARKET_REPORT", "ANALYSIS", "BACKGROUND"}
@@ -397,6 +362,12 @@ def _relation(event: dict, *, first: bool) -> str:
 
 def _event_identity(event: dict) -> str:
     """Identify the fact being reported, independently from its article/cluster."""
+    resolved = (
+        str(event.get("resolved_event_id") or "").strip()
+        if event.get("resolved_identity_relation") != "UNRESOLVED" else ""
+    )
+    if resolved:
+        return hashlib.sha256(resolved.encode()).hexdigest()[:20]
     episode = _episode_identity(event) or ""
     action_family = _canonical_id(event.get("action_family") or event.get("action"))
     if episode.startswith(("lisa_cook_rate_policy_", "tbac_meeting_")):
@@ -440,7 +411,10 @@ def _merge_event_evidence(rows: list[dict]) -> list[dict]:
     grouped: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
         grouped[_event_identity(row)].append(row)
-    grade_rank = {"DISCOVERY_ONLY": 0, "SINGLE_RELIABLE": 1, "CORROBORATED": 2, "PRIMARY": 3}
+    grade_rank = {
+        "DISCOVERY_ONLY": 0, "SINGLE_SOURCE": 1, "SINGLE_RELIABLE": 2,
+        "CORROBORATED": 3, "PRIMARY": 4,
+    }
     merged = []
     for event_id, members in grouped.items():
         members = sorted(
@@ -496,7 +470,9 @@ def _core_roles(members: list[dict], attached: list[dict]) -> set[str]:
     reliable_organizations = {
         organization
         for row in members
-        if row.get("evidence_grade") in {"PRIMARY", "CORROBORATED", "SINGLE_RELIABLE"}
+        if row.get("evidence_grade") in {
+            "PRIMARY", "CORROBORATED", "SINGLE_RELIABLE", "SINGLE_SOURCE",
+        }
         for organization in (
             row.get("source_organizations") or _source_organizations(row)
         )
@@ -505,7 +481,11 @@ def _core_roles(members: list[dict], attached: list[dict]) -> set[str]:
     if official:
         roles.add("OFFICIAL_PRIMARY")
     elif len(reliable_organizations) == 1:
-        roles.add("SINGLE_RELIABLE")
+        roles.add(
+            "SINGLE_RELIABLE"
+            if any(row.get("evidence_grade") == "SINGLE_RELIABLE" for row in members)
+            else "SINGLE_SOURCE"
+        )
     # One publisher never becomes independent confirmation. Official + one
     # independent reliable publisher, or two reliable publishers, is required.
     if len(reliable_organizations) >= 2:
@@ -607,7 +587,10 @@ def _story_row(episode: str, core: list[dict], attached: list[dict]) -> dict:
     )
     timeline = [_timeline_row(row, first=index == 0) for index, row in enumerate(core[-20:])]
     identity = hashlib.sha256(episode.encode()).hexdigest()[:16]
-    role_order = ("OFFICIAL_PRIMARY", "SINGLE_RELIABLE", "INDEPENDENT_CONFIRMATION", "PHYSICAL_IMPACT", "MARKET_REACTION")
+    role_order = (
+        "OFFICIAL_PRIMARY", "SINGLE_RELIABLE", "SINGLE_SOURCE",
+        "INDEPENDENT_CONFIRMATION", "PHYSICAL_IMPACT", "MARKET_REACTION",
+    )
     covered = [role for role in role_order if role in roles]
     template_covered = [role for role in required_roles if role in roles]
     missing = [role for role in required_roles if role not in roles]
@@ -622,7 +605,9 @@ def _story_row(episode: str, core: list[dict], attached: list[dict]) -> dict:
         "archival": archival,
         "event_count": len(core),
         "evidence_document_count": sum(int(row.get("evidence_document_count") or 1) for row in core),
-        "reliable_event_count": sum(row["evidence_grade"] in {"PRIMARY", "CORROBORATED", "SINGLE_RELIABLE"} for row in core),
+        "reliable_event_count": sum(row["evidence_grade"] in {
+            "PRIMARY", "CORROBORATED", "SINGLE_RELIABLE",
+        } for row in core),
         "latest_change": core[-1]["canonical_headline"],
         "last_updated": max(row.get("last_evidence_seen_time") or row["collector_first_seen_time"] for row in core),
         "covered_roles": [{"key": role, "label": ROLE_LABELS[role]} for role in covered],
