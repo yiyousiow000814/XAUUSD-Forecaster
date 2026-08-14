@@ -1811,6 +1811,12 @@ def test_live_decision_writes_only_current_news_contract(tmp_path) -> None:
     append_live_decision_v2(
         ledger, decision_id="current-only", decision_time=decision,
         created_at=decision, snapshot=snapshot,
+        news_pipeline_health={
+            "observed_at": decision.isoformat(), "status": "HEALTHY",
+            "reason_codes": (), "heartbeat_at": decision.isoformat(),
+            "unresolved_items": 0, "oldest_unresolved_at": None,
+            "snapshot_hash": "healthy-news-pipeline",
+        },
     )
 
     versions = ledger.connection.execute(
@@ -2019,6 +2025,21 @@ def test_news_exposure_flag_prevents_residual_without_visible_event() -> None:
         "NEWS_ONLY", {"broad_news_exposed": 0}, features,
     ) is False
     assert inference_v2._news_snapshot_exposed("FULL", {}, features) is True
+
+
+@pytest.mark.parametrize("identity", sorted(inference_v2.NEWS_MODEL_IDENTITIES))
+def test_every_news_model_fails_closed_when_semantic_pipeline_is_unhealthy(
+    identity: str,
+) -> None:
+    assert inference_v2._runtime_gate_status(
+        identity, market_healthy=True, news_pipeline_status="UNHEALTHY",
+    ) == "NEWS_PIPELINE_UNHEALTHY"
+
+
+def test_market_only_remains_observable_during_news_pipeline_failure() -> None:
+    assert inference_v2._runtime_gate_status(
+        "MARKET_ONLY", market_healthy=True, news_pipeline_status="UNHEALTHY",
+    ) is None
 
 
 def test_newest_news_policy_mismatch_blocks_older_current_model() -> None:

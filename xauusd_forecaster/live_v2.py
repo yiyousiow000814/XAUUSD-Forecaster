@@ -106,8 +106,10 @@ def _append_news_visibility_receipts(
     return inserted
 
 
-def append_live_decision_v2(ledger, *, decision_id: str, decision_time: datetime,
-                            created_at: datetime, snapshot: dict) -> list[dict]:
+def append_live_decision_v2(
+    ledger, *, decision_id: str, decision_time: datetime,
+    created_at: datetime, snapshot: dict, news_pipeline_health: dict,
+) -> list[dict]:
     install_v2_schema(ledger.connection)
     epoch = evaluation_epoch(ledger.connection)
     if epoch is None or decision_time < epoch:
@@ -155,6 +157,20 @@ def append_live_decision_v2(ledger, *, decision_id: str, decision_time: datetime
              json.dumps(news["features"], sort_keys=True, separators=(",", ":")),
              news["model_visible_items"], news["news_exposed"], news["distinct_news_clusters"],
              news["distinct_event_types"], news["source_evidence_hash"], news_hash),
+        )
+        ledger.connection.execute(
+            """INSERT INTO news_semantic_health_snapshots_v1 VALUES
+            (?,?,?,?,?,?,?,?,?)""",
+            (
+                decision_id, decision_time.isoformat(),
+                str(news_pipeline_health["observed_at"]),
+                str(news_pipeline_health["status"]),
+                json.dumps(news_pipeline_health["reason_codes"], separators=(",", ":")),
+                news_pipeline_health.get("heartbeat_at"),
+                int(news_pipeline_health.get("unresolved_items") or 0),
+                news_pipeline_health.get("oldest_unresolved_at"),
+                str(news_pipeline_health["snapshot_hash"]),
+            ),
         )
         for event in news["event_snapshots"]:
             permissions = event["model_permissions"]
@@ -214,6 +230,7 @@ def append_live_decision_v2(ledger, *, decision_id: str, decision_time: datetime
                 "news_exposed": news["news_exposed"],
                 "broad_news_exposed": news.get("broad_news_exposed", 0),
             },
+            news_pipeline_health=news_pipeline_health,
         )
         _append_news_visibility_receipts(
             ledger.connection, decision_id=decision_id, decision_time=decision_time,

@@ -23,6 +23,7 @@ V2_IMMUTABLE_TABLES = (
     "source_eligibility_rules",
     "derived_market_snapshots",
     "derived_news_feature_snapshots",
+    "news_semantic_health_snapshots_v1",
     "derived_outcomes",
     "training_eligibility_v2",
     "market_crossfit_predictions",
@@ -429,6 +430,18 @@ CREATE TABLE IF NOT EXISTS news_item_classifications_v1 (
     reason_code TEXT NOT NULL,
     source_hash TEXT NOT NULL,
     UNIQUE(source,source_item_id,revision_number,policy_version)
+);
+
+CREATE TABLE IF NOT EXISTS news_semantic_health_snapshots_v1 (
+    source_decision_id TEXT PRIMARY KEY,
+    decision_time TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('HEALTHY','UNHEALTHY')),
+    reason_codes_json TEXT NOT NULL,
+    heartbeat_at TEXT,
+    unresolved_items INTEGER NOT NULL,
+    oldest_unresolved_at TEXT,
+    snapshot_hash TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS news_impact_assessments_v1 (

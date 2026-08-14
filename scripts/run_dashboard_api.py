@@ -1742,6 +1742,10 @@ def _dashboard_payload(database: Path) -> dict:
             "news_collector": connection.execute("SELECT max(fetched_time) FROM source_polls").fetchone()[0],
             "gemini_annotator": connection.execute("SELECT max(parsed_at) FROM news_annotations").fetchone()[0],
         }
+        latest_semantic_health = connection.execute(
+            """SELECT * FROM news_semantic_health_snapshots_v1
+            ORDER BY observed_at DESC LIMIT 1"""
+        ).fetchone()
         news_source_health = _news_source_health(connection, now)
         monitored_news_sources = {
             row["source"] for row in news_source_health if row["health"] == "HEALTHY"
@@ -1886,6 +1890,29 @@ def _dashboard_payload(database: Path) -> dict:
     sites_sync_component = component(
         "sites_synchronizer", 120, sync_status.get("last_error")
     )
+    semantic_pipeline_component = {
+        "last_success": (
+            latest_semantic_health["heartbeat_at"]
+            if latest_semantic_health is not None else None
+        ),
+        "age_seconds": (
+            max(0.0, (
+                now - datetime.fromisoformat(latest_semantic_health["observed_at"])
+            ).total_seconds())
+            if latest_semantic_health is not None else None
+        ),
+        "status": (
+            "OK" if latest_semantic_health is not None
+            and latest_semantic_health["status"] == "HEALTHY" else "STALE"
+        ),
+        "last_error": (
+            None if latest_semantic_health is not None
+            and latest_semantic_health["status"] == "HEALTHY"
+            else ", ".join(json.loads(latest_semantic_health["reason_codes_json"]))
+            if latest_semantic_health is not None
+            else "尚无决策时点的新闻语义健康记录"
+        ),
+    }
     degraded_resources = sync_status.get("degraded_resources") or []
     if (
         sites_sync_component["status"] == "OK"
@@ -2037,6 +2064,7 @@ def _dashboard_payload(database: Path) -> dict:
                 "outcome_settler": outcome_component,
                 "news_collector": component("news_collector", 300),
                 "gemini_annotator": component("gemini_annotator", 900),
+                "news_semantic_pipeline": semantic_pipeline_component,
                 "sites_synchronizer": sites_sync_component,
                 "sqlite_backup": component("sqlite_backup", 172800),
                 # Daily online backups are published only after the complete
