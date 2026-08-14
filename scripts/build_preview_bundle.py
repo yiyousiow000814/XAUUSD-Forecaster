@@ -117,6 +117,37 @@ def _curve_overview_records(base_url: str) -> list[dict]:
     return list(records.values())
 
 
+def _version_history_records(base_url: str) -> list[dict]:
+    """Freeze the bounded production version overview as pageable Preview rows."""
+    response = _read_json(
+        base_url, "/api/learning-history?resource=version-overview",
+    )
+    groups_by_identity: dict[str, list[dict]] = {}
+    for group in response.get("items", []):
+        if not isinstance(group, dict):
+            continue
+        identity = str(group.get("model_identity") or "")
+        dataset_hash = str(group.get("training_dataset_hash") or "")
+        created_at = group.get("created_at")
+        if not identity or not dataset_hash or not created_at:
+            continue
+        groups_by_identity.setdefault(identity, []).append(group)
+
+    records: dict[tuple[str, str], dict] = {}
+    for identity, groups in groups_by_identity.items():
+        ordered = sorted(groups, key=lambda row: (
+            row.get("created_at") or "", row.get("generation") or 0,
+        ))[-dashboard_sync.LEARNING_OVERVIEW_GROUPS_PER_IDENTITY:]
+        for group in ordered:
+            dataset_hash = str(group["training_dataset_hash"])
+            record = dashboard_sync._learning_record(
+                "version-group", f"{identity}\0{dataset_hash}",
+                dashboard_sync._epoch(group["created_at"]), group,
+            )
+            records[(record["resource"], record["record_key"])] = record
+    return list(records.values())
+
+
 def _rebuild_factor_coverage(status: dict) -> list[dict[str, object]]:
     latest_macro: dict[str, dict[str, object]] = {}
     for row in status.get("factor_coverage", []):
@@ -230,9 +261,23 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
         curve_overviews = _curve_overview_records(base_url)
     except (OSError, RuntimeError, json.JSONDecodeError):
         curve_overviews = []
+    try:
+        version_history = _version_history_records(base_url)
+    except (OSError, RuntimeError, json.JSONDecodeError):
+        version_history = []
+    if version_history:
+        # The Preview route derives its overview from these exact bounded rows.
+        # Drop the smaller first-paint summary so it cannot mask the fuller set.
+        learning_history = [
+            row for row in learning_history
+            if row["resource"] != "version-overview"
+        ]
     indexed_history = {
         (row["resource"], row["record_key"]): row
-        for row in [*learning_history, *execution_history, *curve_overviews]
+        for row in [
+            *learning_history, *execution_history, *curve_overviews,
+            *version_history,
+        ]
     }
 
     return {
