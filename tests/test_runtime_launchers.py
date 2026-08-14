@@ -552,6 +552,40 @@ def test_market_closure_pauses_observation_timeout_until_reopen(tmp_path) -> Non
     assert result == "True,True,True,0"
 
 
+def test_observation_timeout_matches_the_thirty_minute_decision_window(
+    tmp_path,
+) -> None:
+    old = "2020-01-01T00:00:00+00:00"
+    quotes = tmp_path / "runtime" / ".local" / "forward" / "quotes"
+    quotes.mkdir(parents=True)
+    results = []
+    for minutes_to_close in (10, 45):
+        _write_runtime_observation(
+            tmp_path, observation_started_at=old, observation_ready_at=old,
+        )
+        now = datetime.now(timezone.utc)
+        (quotes / "market-session.json").write_text(json.dumps({
+            "observed_at": now.isoformat(),
+            "is_open": True,
+            "next_close_time": (
+                now + timedelta(minutes=minutes_to_close)
+            ).isoformat(),
+        }), encoding="utf-8")
+        results.append(_run_control_center_contract(
+            tmp_path,
+            "$script:rollbacks = 0; function Test-CodeReloadHealth { return $true }; "
+            "function Test-CurrentProductionShape { return $null }; "
+            "function Get-RuntimeDecisionTimes { return @() }; "
+            "function Invoke-RuntimeRollback { $script:rollbacks += 1; return $true }; "
+            "$observed = Test-RuntimeObservation; $state = Get-RuntimeUpdateState; "
+            "$paused = [DateTimeOffset]::Parse([string]$state.observation_ready_at) "
+            "-gt [DateTimeOffset]::Parse('2020-01-02T00:00:00+00:00'); "
+            'Write-Output "$observed,$paused,$script:rollbacks"',
+        ))
+
+    assert results == ["True,True,0", "False,False,1"]
+
+
 def test_watchdog_autostart_uses_one_windowless_registration_path(tmp_path) -> None:
     control_center = (
         ROOT / "scripts" / "xauusd_control_center.ps1"
