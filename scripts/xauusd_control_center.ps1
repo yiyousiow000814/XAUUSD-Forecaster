@@ -31,6 +31,7 @@ $runtimeUpdateStatePath = Join-Path $moduleRoot ".local\forward\runtime-update-s
 $dashboardSyncConfigPath = Join-Path $moduleRoot ".local\forward\dashboard-sync.json"
 $runtimeUpdateCheckInterval = [TimeSpan]::FromMinutes(5)
 $runtimePreflightContractVersion = "isolated-migrated-runtime-state-v3"
+$codeReloadTimeout = [TimeSpan]::FromMinutes(5)
 $runtimeObservationCycles = 2
 $runtimeObservationTimeout = [TimeSpan]::FromMinutes(15)
 $reloadableServiceKeys = @("collector", "annotator", "api", "sync")
@@ -649,7 +650,7 @@ function Restart-CodeReloadableServices {
     foreach ($service in $targets) {
         Start-ForecasterService $service -SkipExistingCheck
     }
-    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(180)
+    $deadline = [DateTimeOffset]::UtcNow.Add($codeReloadTimeout)
     do {
         Start-Sleep -Milliseconds 500
         Write-WatchdogHeartbeat
@@ -901,7 +902,7 @@ function Get-ServiceState {
             return "RUNNING"
         }
         if ($startedAt -ne [DateTimeOffset]::MinValue -and
-            ([DateTimeOffset]::UtcNow - $startedAt).TotalSeconds -le 180) {
+            ([DateTimeOffset]::UtcNow - $startedAt) -le $codeReloadTimeout) {
             return "STARTING"
         }
         return "$($Service.Key.ToUpper()) STALE"

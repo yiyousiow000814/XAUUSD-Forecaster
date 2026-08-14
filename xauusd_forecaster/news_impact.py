@@ -31,7 +31,6 @@ UPDATE_TYPES = frozenset({
 IDENTITY_RELATIONS = frozenset({
     "SAME_EVENT", "SAME_EPISODE", "NEW_EPISODE", "UNRESOLVED",
 })
-IDENTITY_CANDIDATE_SCAN_LIMIT = 500
 IDENTITY_CANDIDATE_UNIVERSE_LIMIT = 10_000
 
 IMPACT_RESPONSE_SCHEMA = {
@@ -170,6 +169,10 @@ def _comparison_items(value: object, label: str) -> list[str]:
 
 def prior_identity_similarity(current: dict, prior: dict) -> float:
     """Admit candidates only through stable occurrence anchors."""
+    current_cluster = str(current.get("cluster_id") or "").strip()
+    prior_cluster = str(prior.get("cluster_id") or "").strip()
+    if current_cluster and current_cluster == prior_cluster:
+        return 1.0
     current_material = canonical_id(current.get("material_event_key"))
     prior_material = canonical_id(prior.get("material_event_key"))
     current_episode = canonical_id(current.get("episode_key"))
@@ -177,6 +180,15 @@ def prior_identity_similarity(current: dict, prior: dict) -> float:
     if (
         (current_material and current_material == prior_material)
         or (current_episode and current_episode == prior_episode)
+    ):
+        return 1.0
+    current_material_family = _multiword_identity_signature(current_material)
+    prior_material_family = _multiword_identity_signature(prior_material)
+    current_episode_family = _multiword_identity_signature(current_episode)
+    prior_episode_family = _multiword_identity_signature(prior_episode)
+    if (
+        (current_material_family and current_material_family == prior_material_family)
+        or (current_episode_family and current_episode_family == prior_episode_family)
     ):
         return 1.0
     current_actor = canonical_id(current.get("canonical_actor_id"))
@@ -188,12 +200,43 @@ def prior_identity_similarity(current: dict, prior: dict) -> float:
         return 0.0
     if current_object == prior_object:
         return 0.75
+    if (
+        _multiword_identity_signature(current_object)
+        == _multiword_identity_signature(prior_object)
+        != ""
+    ):
+        return 0.75
     shorter, longer = sorted((current_object, prior_object), key=len)
     related_object = (
         len(shorter.split("_")) >= 2
         and (longer.startswith(f"{shorter}_") or longer.endswith(f"_{shorter}"))
     )
     return 0.5 if related_object else 0.0
+
+
+def _multiword_identity_signature(value: object) -> str:
+    """Ignore word order without erasing period or measurement tokens."""
+    parts = canonical_id(value).split("_")
+    return "_".join(sorted(parts)) if len(parts) >= 3 else ""
+
+
+def _identity_lookup_keys(item: dict) -> tuple[tuple[str, str], ...]:
+    """Return conservative keys used only to recall candidates for review."""
+    keys = []
+    cluster = str(item.get("cluster_id") or "").strip()
+    if cluster:
+        keys.append(("cluster", cluster))
+    for field in ("material_event_key", "episode_key"):
+        value = canonical_id(item.get(field))
+        if value:
+            keys.append((field, value))
+        signature = _multiword_identity_signature(value)
+        if signature:
+            keys.append((f"{field}_tokens", signature))
+    actor = canonical_id(item.get("canonical_actor_id"))
+    if actor:
+        keys.append(("actor", actor))
+    return tuple(keys)
 
 
 def _claim_snapshot(annotation: dict) -> dict[str, object]:
@@ -301,16 +344,13 @@ def pending_impact_records(
     # Load one bounded point-in-time candidate universe for the whole batch.
     # Per-row candidate queries make backlog recovery O(pending rows) in SQL
     # round trips and can block new arrivals for an entire scheduler cycle.
-    candidate_universe_limit = min(
-        IDENTITY_CANDIDATE_UNIVERSE_LIMIT,
-        max(IDENTITY_CANDIDATE_SCAN_LIMIT, len(selected) * 4 + 500),
-    )
+    candidate_universe_limit = IDENTITY_CANDIDATE_UNIVERSE_LIMIT
     max_first_seen = max(
         str(row["collector_first_seen_time"]) for row in selected
     )
     prior_rows = connection.execute(
         """SELECT p.source,p.source_item_id,p.revision_number,p.headline,
-                  p.collector_first_seen_time,
+                  p.collector_first_seen_time,p.cluster_id,
                   pa.annotation_id AS candidate_id,pa.annotation_json,
                   json_extract(pa.annotation_json,'$.summary_zh') AS summary_zh,
                   pi.impact_class,pi.update_type,
@@ -343,18 +383,29 @@ def pending_impact_records(
             annotation_prompt_version, max_first_seen, candidate_universe_limit,
         ),
     ).fetchall()
-    candidate_universe = []
+    candidate_index: dict[tuple[str, str], list[dict]] = {}
     for prior in prior_rows:
         candidate = dict(prior)
         candidate["annotation"] = json.loads(
             candidate.pop("annotation_json") or "{}"
         )
-        candidate_universe.append(candidate)
+        indexed = {
+            **candidate["annotation"],
+            "cluster_id": candidate.get("cluster_id"),
+        }
+        for key in _identity_lookup_keys(indexed):
+            candidate_index.setdefault(key, []).append(candidate)
 
     for row in selected:
-        scanned = 0
         candidates = []
-        for prior in candidate_universe:
+        current_identity = {
+            **row["annotation"], "cluster_id": row.get("cluster_id"),
+        }
+        recalled: dict[str, dict] = {}
+        for key in _identity_lookup_keys(current_identity):
+            for prior in candidate_index.get(key, ()):
+                recalled[str(prior["candidate_id"])] = prior
+        for prior in recalled.values():
             if (
                 str(prior["collector_first_seen_time"])
                 > str(row["collector_first_seen_time"])
@@ -366,16 +417,14 @@ def pending_impact_records(
                 and prior["revision_number"] == row["revision_number"]
             ):
                 continue
-            scanned += 1
-            if scanned > IDENTITY_CANDIDATE_SCAN_LIMIT:
-                break
             candidate = {
                 key: value for key, value in prior.items()
                 if key != "annotation"
             }
             prior_annotation = prior["annotation"]
             similarity = prior_identity_similarity(
-                row["annotation"], prior_annotation,
+                current_identity,
+                {**prior_annotation, "cluster_id": prior.get("cluster_id")},
             )
             if similarity <= 0.25:
                 continue
