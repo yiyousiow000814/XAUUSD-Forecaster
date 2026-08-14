@@ -22,6 +22,8 @@ from .news_identity import (
     canonical_id,
     canonical_material_event_anchor,
     canonical_source_organization,
+    identity_resolution_status,
+    resolved_identity_ids,
 )
 from .news_time import NewsTimeAssessment, assess_news_time
 from .news_semantics import (
@@ -135,6 +137,10 @@ def _topics(row: dict) -> tuple[str, ...]:
 def _event_key(
     row: dict, topics: tuple[str, ...], *, use_material_event_key: bool = True,
 ) -> str:
+    resolved = resolved_identity_ids(row)
+    if resolved is not None:
+        identity = ("resolved-event", resolved[1])
+        return hashlib.sha256(repr(identity).encode("utf-8")).hexdigest()
     annotation = json.loads(row.get("annotation_json") or "{}")
     structured = {
         **annotation,
@@ -371,7 +377,10 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
         canonical = max(
             candidates,
             key=lambda row: (
-                int(row.get("impact_update_type") == "MATERIAL_UPDATE"),
+                {
+                    "MATERIAL_UPDATE": 2,
+                    "NEW_EVENT": 1,
+                }.get(str(row.get("impact_update_type") or ""), 0),
                 str(row["collector_first_seen_time"]),
                 float(row["confidence"]), len(str(row["body"])),
                 row["source_item_id"],
@@ -413,9 +422,11 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             and semantic_relevance in {"DIRECT", "MACRO_DRIVER"}
             and material_change in {"NEW_EVENT", "MATERIAL_UPDATE"}
         )
+        identity_status = identity_resolution_status(canonical)
         relevant = controlled_category in ACTIONABLE_CATEGORIES
         eligible = (
-            bool(timely)
+            identity_status == "RESOLVED"
+            and bool(timely)
             and grade in {
                 "PRIMARY", "CORROBORATED", "SINGLE_RELIABLE", "SINGLE_SOURCE",
             }
@@ -462,6 +473,10 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             0, len(evidence_members) - independent_publishers
         )
         reasons = [f"EVIDENCE_{grade}"]
+        if identity_status == "UNRESOLVED":
+            reasons.append("IDENTITY_UNRESOLVED")
+        elif identity_status == "MISSING":
+            reasons.append("IDENTITY_NOT_RESOLVED")
         if event_clock_source == "SOURCE_STRUCTURED_TIME":
             reasons.append("RELIABLE_PUBLISHER_TIME_PROXY")
         if not timely:
@@ -503,6 +518,8 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             (
                 row["content_hash"], row["annotation_id"],
                 row.get("impact_assessment_id"), row.get("source_organization"),
+                row.get("resolved_identity_relation"),
+                row.get("resolved_episode_id"), row.get("resolved_event_id"),
             )
             for row in members
         ))
@@ -582,6 +599,7 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             "resolved_episode_id": canonical.get("resolved_episode_id"),
             "resolved_event_id": canonical.get("resolved_event_id"),
             "resolved_identity_relation": canonical.get("resolved_identity_relation"),
+            "identity_status": identity_status,
             "model_permission": "BROAD_MODEL" if eligible else "DISPLAY_ONLY",
             "source_published_time": (
                 canonical["time_assessment"].event_time.isoformat()

@@ -42,6 +42,10 @@ SOURCE_ORGANIZATION_ALIASES = {
     "wsj_com": "wall_street_journal",
 }
 
+RESOLVED_IDENTITY_RELATIONS = frozenset({
+    "NEW_EPISODE", "SAME_EPISODE", "SAME_EVENT",
+})
+
 
 def canonical_id(value: object) -> str:
     value = re.sub(
@@ -57,6 +61,28 @@ def canonical_source_organization(value: object) -> str:
     if value.startswith("yahoo_finance"):
         return "yahoo_finance"
     return SOURCE_ORGANIZATION_ALIASES.get(value, value)
+
+
+def resolved_identity_ids(event: dict) -> tuple[str, str] | None:
+    """Return the sole model-authoritative episode/event identity pair."""
+    relation = str(event.get("resolved_identity_relation") or "").upper()
+    if relation not in RESOLVED_IDENTITY_RELATIONS:
+        return None
+    episode_id = str(
+        event.get("resolved_episode_id") or event.get("canonical_episode_id") or ""
+    ).strip()
+    event_id = str(
+        event.get("resolved_event_id") or event.get("canonical_event_id") or ""
+    ).strip()
+    return (episode_id, event_id) if episode_id and event_id else None
+
+
+def identity_resolution_status(event: dict) -> str:
+    """Classify identity authority without inventing a semantic fallback."""
+    relation = str(event.get("resolved_identity_relation") or "").upper()
+    if relation == "UNRESOLVED":
+        return "UNRESOLVED"
+    return "RESOLVED" if resolved_identity_ids(event) is not None else "MISSING"
 
 
 def _parse_time(value: object) -> datetime | None:

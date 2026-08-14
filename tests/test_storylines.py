@@ -220,6 +220,7 @@ def test_semantically_resolved_economic_release_family_is_one_real_event(
         canonical_location_id="", episode_key=episode_a,
         material_event_key=episode_a, resolved_episode_id="release-family-episode",
         resolved_event_id="release-family-event",
+        resolved_identity_relation="NEW_EPISODE",
     )
     second = event(
         "release-b", "2026-08-11T10:05:00+00:00", "媒体以另一种写法报道同一数据",
@@ -231,6 +232,7 @@ def test_semantically_resolved_economic_release_family_is_one_real_event(
         publisher_domains=("apnews.com",),
         resolved_episode_id="release-family-episode",
         resolved_event_id="release-family-event",
+        resolved_identity_relation="SAME_EVENT",
     )
 
     graph = temporal_event_graph([first, second])
@@ -249,6 +251,7 @@ def test_semantic_resolution_preserves_a_real_later_release_as_a_new_node():
         canonical_object_id="unemployment_q2_2026", episode_key="free_text_a",
         resolved_episode_id="south-africa-labour-series",
         resolved_event_id="south-africa-q2-release",
+        resolved_identity_relation="NEW_EPISODE",
     )
     revision = event(
         "q2-revision", "2026-08-12T10:00:00+00:00", "第二季度数据正式修订",
@@ -258,12 +261,28 @@ def test_semantic_resolution_preserves_a_real_later_release_as_a_new_node():
         relation_to_prior="SUPERSEDES",
         resolved_episode_id="south-africa-labour-series",
         resolved_event_id="south-africa-q2-revision",
+        resolved_identity_relation="SAME_EPISODE",
     )
 
     story = storyline_rows([initial, revision])[0]
 
     assert story["event_count"] == 2
     assert [row["relation"] for row in story["timeline"]] == ["STARTS", "SUPERSEDES"]
+
+
+def test_unresolved_current_identity_cannot_create_a_storyline():
+    unresolved = event(
+        "unresolved", "2026-08-12T10:00:00+00:00", "多事件市场周报",
+        resolved_identity_relation="UNRESOLVED",
+        resolved_episode_id="placeholder-episode",
+        resolved_event_id="placeholder-event",
+    )
+
+    graph = temporal_event_graph([unresolved])
+
+    assert graph["stories"] == []
+    assert graph["event_candidates"] == []
+    assert graph["unassigned_events"][0]["reason"] == "INSUFFICIENT_STORY_MATCH"
 
 
 def test_market_response_to_jobs_report_cannot_become_core_fact():

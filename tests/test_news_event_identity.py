@@ -2,6 +2,10 @@ import pytest
 import sqlite3
 
 from xauusd_forecaster.news_event_identity import resolve_event_identity
+from xauusd_forecaster.news_identity import (
+    identity_resolution_status,
+    resolved_identity_ids,
+)
 from xauusd_forecaster.news_impact import (
     prior_identity_similarity, validate_impact_assessment,
 )
@@ -158,6 +162,28 @@ def test_shared_collection_cluster_recalls_semantically_drifted_syndication():
     }
 
     assert prior_identity_similarity(current, prior) == 1.0
+
+
+def test_persisted_resolution_is_the_only_current_identity_authority() -> None:
+    resolved = {
+        "resolved_identity_relation": "SAME_EVENT",
+        "resolved_episode_id": "semantic-episode-authoritative",
+        "resolved_event_id": "semantic-event-authoritative",
+        "episode_key": "conflicting-free-form-episode",
+        "material_event_key": "conflicting-free-form-event",
+    }
+    unresolved = {
+        **resolved,
+        "resolved_identity_relation": "UNRESOLVED",
+    }
+
+    assert resolved_identity_ids(resolved) == (
+        "semantic-episode-authoritative",
+        "semantic-event-authoritative",
+    )
+    assert identity_resolution_status(resolved) == "RESOLVED"
+    assert resolved_identity_ids(unresolved) is None
+    assert identity_resolution_status(unresolved) == "UNRESOLVED"
 
 
 def test_shared_subject_without_an_occurrence_anchor_is_not_recalled():

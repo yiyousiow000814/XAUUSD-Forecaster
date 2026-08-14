@@ -72,6 +72,8 @@ def test_control_center_updates_only_the_isolated_main_runtime() -> None:
     assert 'currentRevision -ne $appliedRevision' in control_center
     assert "Get-DeployedMainRevision" in control_center
     assert "$runtimeUpdateCheckInterval = [TimeSpan]::FromMinutes(5)" in control_center
+    assert "$codeReloadTimeout = [TimeSpan]::FromMinutes(5)" in control_center
+    assert "Add($codeReloadTimeout)" in control_center
     assert "Get-VerifiedOriginMain" in control_center
     assert "Test-RevisionDescendsFrom" in control_center
     assert "Test-MainCandidate" in control_center
