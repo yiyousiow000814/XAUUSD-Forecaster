@@ -999,22 +999,13 @@ def test_dashboard_uses_same_explicit_event_clock_as_model(tmp_path) -> None:
     assert datetime.fromisoformat(row["impact_expires_at"]) == event_time + timedelta(hours=12)
 
 
-def test_dashboard_uses_gemini_controlled_category_before_source_guess() -> None:
+def test_dashboard_category_is_semantic_not_processing_state() -> None:
     module = _dashboard_module()
-    assert module._news_category({
-        "primary_category": "central_bank_gold",
-        "source": "gdelt_gold_geopolitics",
-        "headline": "Central bank increases gold reserves",
-        "summary_zh": "央行增加黄金储备。",
-        "event_type": "central_bank_purchase",
-    }) == "央行购金"
-    assert module._news_category({
-        "primary_category": None,
-        "source": "federal_reserve_press_all",
-        "headline": "Application approval",
-        "summary_zh": "监管审批。",
-        "event_type": "regulatory_approval",
-    }) == "监管/其他"
+    assert module._news_category_label("central_bank_gold") == "央行购金"
+    assert module._news_category_label("risk_sentiment") == "风险情绪 / 避险"
+    assert module._news_category_label(None) == "其他"
+    assert module._news_category_label("") == "其他"
+    assert module._news_category_label("other-custom-topic") == "其他"
 
 
 def test_dashboard_reports_gdelt_fallback_and_retry_time(tmp_path) -> None:

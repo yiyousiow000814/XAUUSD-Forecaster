@@ -920,6 +920,71 @@ def test_sync_repopulates_news_index_without_full_refresh_marker(
     assert state["reconciled_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
 
 
+def test_news_semantic_contract_upgrade_replays_and_reconciles_v2_state(
+    monkeypatch, tmp_path
+) -> None:
+    module = _sync_module()
+    state_file = tmp_path / "news-state.json"
+    stale_cursor = '["2026-08-13T00:00:00Z","example","old",1]'
+    state_file.write_text(json.dumps({
+        "mirror_contract_version": "news-60-day-incremental-v2",
+        "reconciled_contract": "news-60-day-incremental-v2",
+        "cursor": stale_cursor,
+    }), encoding="utf-8")
+    requested: list[str] = []
+    posted: list[tuple[str, dict]] = []
+    page = {
+        "items": [{
+            "source": "example", "source_item_id": "new", "revision_number": 1,
+            "category": "风险情绪 / 避险",
+            "collector_first_seen_time": "2026-08-14T00:00:00Z",
+            "headline": "新的语义分类",
+        }],
+        "next_cursor": '["2026-08-14T00:00:00Z","example","new",1]',
+        "has_more": False,
+    }
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(page, ensure_ascii=False).encode("utf-8")
+
+    def urlopen(url, *_args, **_kwargs):
+        requested.append(str(url))
+        return Response()
+
+    def post_json(url, body, _config):
+        posted.append((url, json.loads(body)))
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(module, "_post_json", post_json)
+    module._sync_news({}, {
+        "local_status_url": "http://local/status",
+        "remote_ingest_url": "https://remote/api/ingest",
+        "news_state_file": str(state_file),
+        "token": "test",
+    })
+
+    # A changed materialization contract discards the v2 cursor and starts at
+    # the bounded archive head instead of continuing after a stale row.
+    assert len(requested) == 1
+    assert "after=" not in requested[0]
+    assert f"limit={module.NEWS_WRITE_BATCH_ITEMS}" in requested[0]
+    index_payloads = [body for url, body in posted if url.endswith("/news-index")]
+    assert index_payloads[0]["items"][0]["category"] == "风险情绪 / 避险"
+    assert index_payloads[0]["items"][0]["mirror_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
+    assert index_payloads[-1]["reconcile_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    assert state["cursor"] != stale_cursor
+    assert state["mirror_contract_version"] == module.NEWS_MIRROR_CONTRACT_VERSION
+    assert state["reconciled_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
+
+
 def test_remote_market_chart_is_split_from_status_and_keeps_recent_window() -> None:
     module = _sync_module()
     decisions = [{
