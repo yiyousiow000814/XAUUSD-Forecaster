@@ -132,14 +132,18 @@ review remains Gemma-owned rather than silently changing classifier semantics.
 
 Every live decision records semantic-pipeline health. A newly received
 candidate gets one five-minute decision interval to finish its current-contract
-annotation unless its current job is already in backoff or dead letter. Known
-job failure closes the gate immediately; otherwise unresolved work closes it
-after that interval. A stale/missing annotator heartbeat or no usable model
-credential also makes the pipeline unhealthy. Every news-dependent model must then
-append `WAIT` with `NEWS_PIPELINE_UNHEALTHY`; `MARKET_ONLY` remains observable
-as the control. Recovery requires the actual current-contract backlog and
-runtime dependency failures to clear. A provider status page or synthetic
-probe alone cannot reopen the gate.
+annotation. An annotation that satisfies the current model-admission semantics
+gets one interval from annotation completion to finish its current impact and
+identity review. A current job in backoff or dead letter closes the applicable
+gate immediately. Otherwise unresolved work closes it after that interval.
+Only recent evidence still inside its configured actionable lifetime can close
+the decision gate; historical archive and recovery backfill remain observable
+without pausing current inference. A stale/missing annotator heartbeat or no
+usable model credential also makes the pipeline unhealthy. Every news-dependent
+model must then append `WAIT` with `NEWS_PIPELINE_UNHEALTHY`; `MARKET_ONLY`
+remains observable as the control. Recovery requires the actual current-contract
+backlog and runtime dependency failures to clear. A provider status page or
+synthetic probe alone cannot reopen the gate.
 
 The immutable publisher body and content hash always remain the audit source of
 truth. Gemma receives that complete body whenever it fits the project token
