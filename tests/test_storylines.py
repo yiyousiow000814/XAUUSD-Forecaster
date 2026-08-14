@@ -410,7 +410,7 @@ def test_gold_aliases_are_one_theme_stream_not_stories():
         ))
     graph = temporal_event_graph(rows)
     assert graph["stories"] == []
-    assert [(row["title"], row["item_count"]) for row in graph["theme_streams"]] == [("黄金与风险偏好", 3)]
+    assert [(row["title"], row["item_count"]) for row in graph["theme_streams"]] == [("黄金与风险情绪 / 避险", 3)]
 
 
 def test_same_central_bank_documents_are_one_event_and_one_organization():

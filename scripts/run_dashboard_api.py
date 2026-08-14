@@ -483,7 +483,7 @@ def _broker_market_session(database: Path, now: datetime) -> dict | None:
         return None
 
 
-CATEGORY_LABELS = {
+NEWS_CATEGORY_LABELS = {
     "rates_fed": "利率/Fed",
     "inflation_employment": "通胀/就业",
     "growth_economy": "增长/经济",
@@ -491,53 +491,16 @@ CATEGORY_LABELS = {
     "oil_energy": "油价/能源",
     "war_geopolitics": "战争/地缘",
     "central_bank_gold": "央行购金",
-    "risk_sentiment": "风险偏好",
+    "risk_sentiment": "风险情绪 / 避险",
     "regulation_other": "监管/其他",
 }
+OTHER_NEWS_CATEGORY_LABEL = "其他"
 
 
-def _news_category(item: dict) -> str:
-    controlled = CATEGORY_LABELS.get(str(item.get("primary_category") or ""))
-    if controlled:
-        return controlled
-    source = str(item.get("source") or "")
-    searchable = " ".join(
-        str(item.get(key) or "")
-        for key in ("headline", "event_type", "summary_zh")
-    ).lower()
-    if source == "world_gold_council_central_banks":
-        return "央行购金"
-    if source in {"eia_today_in_energy", "eia_press_releases"}:
-        return "油价/能源"
-    if source == "ecb_press_releases":
-        return "利率/Fed"
-    if any(
-        term in searchable
-        for term in (
-            "war", "conflict", "sanction", "iran", "russia", "ukraine",
-            "middle east", "hormuz", "战争", "制裁", "伊朗", "俄罗斯", "乌克兰",
-        )
-    ):
-        return "战争/地缘"
-    if any(term in searchable for term in ("oil", "opec", "crude", "原油", "油价")):
-        return "油价/能源"
-    if any(
-        term in searchable
-        for term in (
-            "inflation", "cpi", "pce", "payroll", "employment", "unemployment",
-            "jobs", "wage", "通胀", "就业", "失业", "薪资",
-        )
-    ):
-        return "通胀/就业"
-    if any(term in searchable for term in ("dollar", "liquidity", "balance sheet", "美元", "流动性")):
-        return "美元/流动性"
-    if any(term in searchable for term in ("gdp", "gross domestic product", "personal income", "growth", "经济增长")):
-        return "增长/经济"
-    if source in {"federal_reserve_monetary", "federal_reserve_speeches_testimony"}:
-        return "利率/Fed"
-    if source == "federal_reserve_press_all":
-        return "监管/其他"
-    return "其他"
+def _news_category_label(primary_category: object) -> str:
+    """Map one completed semantic category without inferring from workflow state."""
+    category = str(primary_category or "").strip()
+    return NEWS_CATEGORY_LABELS.get(category, OTHER_NEWS_CATEGORY_LABEL)
 
 
 def _not_required_reason(item: dict, forward_epoch: str) -> tuple[str, str]:
@@ -816,7 +779,7 @@ def _serialize_news_rows(
         )
         secondary = item.pop("secondary_categories_json", None)
         item["secondary_categories"] = json.loads(secondary) if secondary else []
-        item["category"] = _news_category(item)
+        item["category"] = _news_category_label(item.get("primary_category"))
         item["eligibility_version"] = CURRENT_NEWS_CONTRACT.eligibility_version
         news.append(item)
     return news
