@@ -11,6 +11,7 @@ const { countPresentation, formatCompactCount, formatExactCount, progressCountPr
 const { versionResultLabel } = await import("../app/_lib/version-result-state.ts");
 const { modelVersionMarkers } = await import("../app/_lib/model-version-markers.ts");
 const { statusFieldPhase } = await import("../app/_lib/current-data-provenance.ts");
+const { shouldPollDashboardResource } = await import("../app/_lib/dashboard-refresh-policy.ts");
 const { quoteBridgePresentation } = await import("../app/_lib/quote-bridge-state.ts");
 const { withPreviewIdentity } = await import("../app/api/_shared/preview-status.ts");
 
@@ -500,9 +501,6 @@ test("refreshes current resources without polling build-snapshot-only resources"
   assert.match(helper, /DashboardResourceMode = "current" \| "build-snapshot"/);
   assert.match(helper, /resourceMode === "current"/);
   assert.match(helper, /mayRefresh\s*\?\s*window\.setInterval\(pollWhenEligible, intervalMs\)\s*:\s*null/);
-  assert.match(helper, /document\.visibilityState !== "visible"/);
-  assert.match(helper, /navigator\.webdriver/);
-  assert.match(helper, /localStorage\.getItem/);
   assert.match(helper, /visibilitychange/);
   const statusView = readFileSync(new URL("../app/_views/StatusView.tsx", import.meta.url), "utf8");
   const healthView = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
@@ -519,6 +517,42 @@ test("refreshes current resources without polling build-snapshot-only resources"
     assert.match(source, /DASHBOARD_REFRESH_INTERVALS\.[a-z]+,[\s\S]*?"current"/);
     assert.doesNotMatch(source, /isImmutablePreview|immutablePreview/);
   }
+});
+
+test("a shared polling lease cannot leave another visible tab permanently stale", () => {
+  const intervalMs = 15_000;
+  const common = {
+    visible: true,
+    automated: false,
+    intervalMs,
+    lastLocalPollAt: 100_000,
+  };
+
+  assert.equal(shouldPollDashboardResource({
+    ...common,
+    now: 115_000,
+    lastSharedPollAt: 114_500,
+  }), false, "a recent poll by another tab should suppress duplicate work");
+
+  assert.equal(shouldPollDashboardResource({
+    ...common,
+    now: 130_000,
+    lastSharedPollAt: 129_500,
+  }), true, "each visible tab must refresh after two local intervals");
+
+  assert.equal(shouldPollDashboardResource({
+    ...common,
+    visible: false,
+    now: 145_000,
+    lastSharedPollAt: 144_500,
+  }), false, "hidden tabs must not bypass the request budget");
+
+  assert.equal(shouldPollDashboardResource({
+    ...common,
+    automated: true,
+    now: 145_000,
+    lastSharedPollAt: 0,
+  }), false, "browser automation must not create background polling");
 });
 
 test("renders every Preview room from the embedded build snapshot", async () => {

@@ -1,3 +1,5 @@
+import { shouldPollDashboardResource } from "./dashboard-refresh-policy";
+
 export type DashboardRefreshCleanup = () => void;
 export type DashboardResourceMode = "current" | "build-snapshot";
 
@@ -11,17 +13,37 @@ export const DASHBOARD_REFRESH_INTERVALS = {
 
 const POLL_LEASE_PREFIX = "aurum-dashboard-poll";
 
-function mayPoll(coordinationKey: string, intervalMs: number): boolean {
-  if (document.visibilityState !== "visible" || navigator.webdriver) return false;
+function mayPoll(
+  coordinationKey: string,
+  intervalMs: number,
+  lastLocalPollAt: number,
+  now: number,
+): boolean {
+  let lastSharedPollAt = 0;
   try {
     const key = `${POLL_LEASE_PREFIX}:${coordinationKey}`;
-    const now = Date.now();
-    const lastPoll = Number(window.localStorage.getItem(key) ?? 0);
-    if (Number.isFinite(lastPoll) && now - lastPoll < intervalMs * 0.8) return false;
+    const stored = Number(window.localStorage.getItem(key) ?? 0);
+    if (Number.isFinite(stored)) lastSharedPollAt = stored;
+    if (!shouldPollDashboardResource({
+      visible: document.visibilityState === "visible",
+      automated: navigator.webdriver,
+      now,
+      lastSharedPollAt,
+      lastLocalPollAt,
+      intervalMs,
+    })) return false;
     window.localStorage.setItem(key, String(now));
   } catch {
     // Storage can be unavailable in privacy modes. Visibility gating still
     // protects the request budget in that case.
+    return shouldPollDashboardResource({
+      visible: document.visibilityState === "visible",
+      automated: navigator.webdriver,
+      now,
+      lastSharedPollAt: 0,
+      lastLocalPollAt,
+      intervalMs,
+    });
   }
   return true;
 }
@@ -35,8 +57,13 @@ export function scheduleDashboardRefresh(
   coordinationKey = "status",
 ): DashboardRefreshCleanup {
   const initial = window.setTimeout(initialRefresh, 0);
+  let lastLocalPollAt = Date.now();
   const pollWhenEligible = () => {
-    if (mayPoll(coordinationKey, intervalMs)) pollRefresh();
+    const now = Date.now();
+    if (mayPoll(coordinationKey, intervalMs, lastLocalPollAt, now)) {
+      lastLocalPollAt = now;
+      pollRefresh();
+    }
   };
   const mayRefresh = resourceMode === "current";
   const interval = mayRefresh
