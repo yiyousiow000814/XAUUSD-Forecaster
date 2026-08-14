@@ -90,6 +90,7 @@ def test_unresolved_actionable_news_after_one_interval_fails_closed(
 
     assert health["status"] == "UNHEALTHY"
     assert health["reason_codes"] == ("ACTIONABLE_NEWS_SEMANTICS_PENDING",)
+    assert health["actionable_failure_counts"] == {}
 
 
 def test_expired_failed_candidate_does_not_hold_the_gate_closed(
@@ -154,6 +155,7 @@ def test_known_current_model_failure_fails_closed_without_waiting_for_grace(
 
     assert health["status"] == "UNHEALTHY"
     assert health["reason_codes"] == ("ACTIONABLE_NEWS_SEMANTICS_PENDING",)
+    assert health["actionable_failure_counts"] == {"UNCLASSIFIED": 1}
 
 
 @pytest.mark.parametrize("failure", ["missing", "stale", "credentials"])
