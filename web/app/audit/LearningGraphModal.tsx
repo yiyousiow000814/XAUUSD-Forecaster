@@ -667,9 +667,10 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
   const initialHistoryResult = historyRequestKey
     ? readDashboardResource<MarketData>(historyRequestKey) : null;
   const [historyResult, setHistoryResult] = useState<{
-    key: string; state: "ready" | "error"; data?: MarketData;
+    key: string; identity: string; state: "loading" | "ready" | "error"; data?: MarketData;
   } | undefined>(() => initialHistoryResult ? {
     key: historyRequestKey,
+    identity,
     state: "ready",
     data: {
       ...initialHistoryResult,
@@ -690,6 +691,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
         if (!cancelled) {
           setHistoryResult({
             key: historyRequestKey,
+            identity,
             state: "ready",
             data: {
               ...body,
@@ -702,16 +704,22 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
       .catch(() => {
         if (!cancelled) {
           if (cancelled) return;
-          if (!cached) setHistoryResult({ key: historyRequestKey, state: "error" });
+          if (!cached) setHistoryResult(previous => ({
+            key: historyRequestKey,
+            identity: previous?.data ? previous.identity : identity,
+            state: "error",
+            data: previous?.data,
+          }));
         }
       });
     return () => { cancelled = true; };
-  }, [market, historyQueryString, historyRequestKey, historyRetry]);
+  }, [market, historyQueryString, historyRequestKey, historyRetry, identity]);
   const remoteHistory = Boolean(market?.history_resource);
   const historyState = !remoteHistory ? "ready"
     : historyResult?.key !== historyRequestKey ? "loading" : historyResult.state;
-  const activeMarket = remoteHistory && historyResult?.key === historyRequestKey
-    ? historyResult.data : market;
+  const activeMarket = remoteHistory ? historyResult?.data ?? market : market;
+  const displayedIdentity = remoteHistory && historyResult?.data
+    ? historyResult.identity : identity;
   const detailCandles = activeMarket?.candles ?? [];
   const allCandles = range === "all" && activeMarket?.overview_candles?.length ? activeMarket.overview_candles : detailCandles;
   const candleCount = range === "all" ? allCandles.length : Number(range) * 12;
@@ -742,8 +750,8 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
   };
   const goLatest = () => { setPage(0); setBefore(null); setLaterPages([]); };
   const scopedDecisions = useMemo(() => (activeMarket?.decisions ?? []).filter(row =>
-    row.model_identity === identity && Date.parse(row.decision_time) >= cutoff && Date.parse(row.decision_time) < pageEnd
-  ), [activeMarket, identity, cutoff, pageEnd]);
+    row.model_identity === displayedIdentity && Date.parse(row.decision_time) >= cutoff && Date.parse(row.decision_time) < pageEnd
+  ), [activeMarket, displayedIdentity, cutoff, pageEnd]);
   const arrowAction = (row: Decision) => {
     if (row.ev_long_u5 == null || row.ev_short_u5 == null || row.ev_long_u5 === row.ev_short_u5) return "WAIT";
     const bestAction = row.ev_long_u5 > row.ev_short_u5 ? "LONG" : "SHORT";
@@ -794,7 +802,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
   const hiddenByAction = scopedDecisions.length - candidateDecisions.length;
   const hiddenByFrequency = candidateDecisions.length - decisions.length;
   const counts = decisions.reduce((total, row) => ({ ...total, [arrowAction(row)]: total[arrowAction(row)] + 1 }), { LONG: 0, SHORT: 0, WAIT: 0 } as Record<string, number>);
-  const predictionStart = activeMarket?.prediction_history_start?.[identity];
+  const predictionStart = activeMarket?.prediction_history_start?.[displayedIdentity];
   const predictionAvailability = predictionStart && pageEnd <= Date.parse(predictionStart)
     ? "模型当时尚未开始预测"
     : "这段时间没有预测";
@@ -819,8 +827,6 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
       <button className={showTraining ? "active" : ""} type="button" disabled={!versionMarkers.length} aria-pressed={showTraining} onClick={() => setShowTraining(value => !value)}>模型换版本</button>
       <span>显示 {formatExactCount(decisions.length)}{activeMarket?.decision_downsampled ? ` / 共 ${formatExactCount(activeMarket.source_decision_count ?? decisions.length)}` : ""} 次{hiddenByAction > 0 ? ` · 动作筛选隐藏 ${formatExactCount(hiddenByAction)} 次` : ""}{hiddenByFrequency > 0 ? ` · 频率收起 ${formatExactCount(hiddenByFrequency)} 次` : ""}</span>
     </div>
-    {historyState === "loading" && candles.length > 0 && <GraphLoading label="正在更新行情" compact />}
-    {historyState === "error" && candles.length > 0 && <GraphLoadError compact label="行情更新失败" onRetry={() => setHistoryRetry(value => value + 1)} />}
     {!candles.length ? <div className="graph-visual-stage market-empty-stage">
       {historyState === "loading" ? <GraphLoading label="正在读取行情" /> : historyState === "error" ? <GraphLoadError label="行情读取失败" onRetry={() => setHistoryRetry(value => value + 1)} /> : canGoLater ? <div className="market-window-empty"><strong>这段时间没有行情</strong><span>已跳过休市或数据空档，可返回较新的交易时段。</span><button type="button" onClick={goLater}>→ 返回较新行情</button></div> : <Empty title="暂无行情数据" text="当前范围没有 Bid/Ask 行情。" />}
     </div> : <>
@@ -832,6 +838,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
     </div>
     <div className="prediction-counts"><b>{scopedDecisions.length ? "成本后EV较高方向" : predictionAvailability}</b>{scopedDecisions.length > 0 && <><span>看多 {formatExactCount(counts.LONG)}</span><span>看空 {formatExactCount(counts.SHORT)}</span><span>等待 {formatExactCount(counts.WAIT)}{unhealthyWaits ? `（数据异常 ${formatExactCount(unhealthyWaits)}）` : ""}</span>{policyMismatchCount > 0 && <span className="negative">历史规则不一致 {formatExactCount(policyMismatchCount)}（原记录保留）</span>}</>}</div>
     <span className="mobile-scroll-hint" role="note">左右滑动查看完整图表</span>
+    <div className="market-visual-shell" aria-busy={historyState === "loading"}>
     {/* Keyboard users need focus here so arrow keys can pan the wide chart. */}
     {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
     <div className="mobile-chart-scroll" tabIndex={0} aria-label="可左右滑动的 XAUUSD K线图">
@@ -844,6 +851,9 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
       <text x="5" y="64">{high.toFixed(2)}</text><text x="5" y="335">{low.toFixed(2)}</text>
       {timeTickIndices.map(index => <g key={candles[index].time} className="time-axis"><line x1={xAtIndex(index)} x2={xAtIndex(index)} y1="338" y2="344" /><text x={xAtIndex(index)} y="366" textAnchor="middle">{axisTimeLabel(candles[index].time)}</text></g>)}
     </svg>
+    </div>
+    {historyState === "loading" && <div className="market-refresh-signal" role="status" aria-live="polite"><span className="graph-loading-bars" aria-hidden="true"><i /><i /><i /></span><b>更新中</b></div>}
+    {historyState === "error" && <div className="market-refresh-signal is-error" role="alert"><b>更新失败</b><button type="button" onClick={() => setHistoryRetry(value => value + 1)}>重试</button></div>}
     </div>
     <div className="chart-legend"><span><i className="long-dot" />看多预测</span><span><i className="short-dot" />看空预测</span>{showWait && <span><i className="wait-dot" />↔ 等待，不持仓</span>}{showTraining && <span><i className="train-dot" />图中模型换版</span>}</div>
     <div className="decision-reader" aria-live="polite">{activeSelected ? <>
