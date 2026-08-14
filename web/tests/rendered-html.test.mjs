@@ -12,6 +12,7 @@ const { versionResultLabel } = await import("../app/_lib/version-result-state.ts
 const { modelVersionMarkers } = await import("../app/_lib/model-version-markers.ts");
 const { statusFieldPhase } = await import("../app/_lib/current-data-provenance.ts");
 const { shouldPollDashboardResource } = await import("../app/_lib/dashboard-refresh-policy.ts");
+const { quoteBridgePresentation } = await import("../app/_lib/quote-bridge-state.ts");
 const { withPreviewIdentity } = await import("../app/api/_shared/preview-status.ts");
 
 test("labels version results from their durable evaluation state", () => {
@@ -644,6 +645,21 @@ test("uses one Chinese system-state presentation across every dashboard page", (
     assert.match(source, /SystemStatePill/);
     assert.doesNotMatch(source, /MARKET CLOSED|CONNECTING|市场休市 · 新闻运行中/);
   }
+});
+
+test("reports cTrader health independently from downstream decision lag", () => {
+  assert.deepEqual(quoteBridgePresentation("OK", "DATA_UNAVAILABLE"), {
+    label: "本机在线",
+    good: true,
+  });
+  assert.deepEqual(quoteBridgePresentation("STALE", "DATA_UNAVAILABLE"), {
+    label: "本机中断",
+    good: false,
+  });
+  assert.deepEqual(quoteBridgePresentation("MARKET_CLOSED", "CLOSED"), {
+    label: "市场休市 · 新闻继续",
+    good: true,
+  });
 });
 
 test("live room presents broker-confirmed closure instead of a WAIT prediction", () => {
