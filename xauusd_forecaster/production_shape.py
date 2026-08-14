@@ -152,7 +152,9 @@ def production_contract_snapshot(
     return snapshot
 
 
-def production_shape_violations(status: dict) -> list[str]:
+def production_shape_violations(
+    status: dict, *, allow_pending_generation_decision: bool = False,
+) -> list[str]:
     """Validate externally meaningful contracts within one status snapshot."""
     violations: list[str] = []
     contract = status.get("production_contract")
@@ -183,9 +185,9 @@ def production_shape_violations(status: dict) -> list[str]:
                 + ", ".join(sorted(map(str, duplicate_expected)))
             )
         actual = generation.get("latest_decision_models")
-        if actual is None:
+        if actual is None and not allow_pending_generation_decision:
             violations.append("active generation has no subsequent live decision")
-        else:
+        elif actual is not None:
             missing_predictions = sorted(required - set(actual))
             if missing_predictions:
                 violations.append(

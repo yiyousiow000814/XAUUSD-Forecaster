@@ -1,10 +1,10 @@
-# Storyline Research Contract
+# Storyline Behavior Specification
 
 ## Purpose
 
 The storyline layer is a display-only research view over the append-only news and annotation ledgers. It helps a reader follow event development without treating repeated articles as repeated market votes.
 
-## Point-in-time contract
+## Point-in-time behavior
 
 1. A storyline may use only articles and annotations visible by the dashboard cutoff.
 2. Original articles, revisions, first-seen times, and annotation versions remain the audit authority.
@@ -28,6 +28,8 @@ The storyline layer is a display-only research view over the append-only news an
 4. A proposal does not grant collection or model permission. Feed availability, body retrieval, latency, revision behavior, blocking, and reliability require separate review.
 5. Supported adapter classes are RSS, Atom, JSON API, HTML list, sitemap, article body, and PDF release.
 
-## Promotion gate
-
-Story state deltas may become a separate Challenger only after manual review shows that story assignment, duplicate handling, confirmations, contradictions, and revisions are reliable. Promotion requires a new frozen feature schema and a forward-only incremental-EV test against the existing market-only model.
+Research and promotion procedure is defined in
+[`STORYLINE_PROMOTION.md`](../protocols/STORYLINE_PROMOTION.md). The underlying
+append-only and point-in-time guarantees remain authoritative in
+[`FORWARD_ONLY.md`](../contracts/FORWARD_ONLY.md) and
+[`NEWS_EVIDENCE.md`](../contracts/NEWS_EVIDENCE.md).

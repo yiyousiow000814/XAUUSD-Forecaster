@@ -237,6 +237,21 @@ def test_active_generation_requires_a_subsequent_live_decision(tmp_path) -> None
     ]
 
 
+def test_runtime_observation_may_wait_for_first_generation_decision(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    _seed_active_generation(ledger)
+    _seed_scheduler_usage(ledger)
+    status = _status()
+    status["production_contract"] = production_contract_snapshot(
+        ledger.connection, now=VALIDATION_TIME,
+    )
+    status["dashboard_sync"] = {"status": "OK", "degraded_resources": []}
+
+    assert production_shape_violations(
+        status, allow_pending_generation_decision=True,
+    ) == []
+
+
 @pytest.mark.parametrize(
     "boundary,expected",
     [

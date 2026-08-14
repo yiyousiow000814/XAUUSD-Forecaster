@@ -696,7 +696,8 @@ function Test-CurrentProductionShape {
         $python = (Get-Command python.exe -ErrorAction Stop).Source
         $arguments = @(
             (Join-Path $moduleRoot "scripts\check_production_shape.py"),
-            "--status-url", "http://127.0.0.1:8765/api/status"
+            "--status-url", "http://127.0.0.1:8765/api/status",
+            "--allow-pending-generation-decision"
         )
         $result = & $python @arguments 2>&1
         if ($LASTEXITCODE -ne 0) { return "production shape rejected: $result" }

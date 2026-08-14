@@ -1,6 +1,7 @@
-# PR 33: AI Priority And Key Scheduling
+# AI Priority Scheduler Design
 
-Status: implemented on the PR 33 branch; v15 remains inactive.
+This design records the scheduler architecture implemented by PR 33. Historical
+activation status belongs to the pull request and is not a current rule.
 
 ## Scope
 
@@ -11,7 +12,7 @@ Status: implemented on the PR 33 branch; v15 remains inactive.
 - Track quotas per independent account.
 - Persist queued work with leases, idempotent writes, backoff, and recovery.
 
-## Runtime Contract
+## Runtime design
 
 `news_ai_jobs_v1` is mutable operational state. Its deterministic identity is
 the task type plus immutable news revision, annotation, and prompt version.
@@ -73,7 +74,7 @@ The compact status payload now carries `counts.live_oos_model_groups`. The audit
 navigation can display the Live OOS group count before the user opens the
 learning view, while the larger curve history remains lazy-loaded.
 
-## Acceptance Boundary
+## Original migration boundary
 
 This PR changes scheduling only. It must not activate the v15 news contract or
 switch a model generation.

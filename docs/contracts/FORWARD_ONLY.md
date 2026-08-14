@@ -1,4 +1,4 @@
-# Phase 2F Forward-only Evidence Contract
+# Forward-only Evidence Contract
 
 ## Authority and epoch
 
