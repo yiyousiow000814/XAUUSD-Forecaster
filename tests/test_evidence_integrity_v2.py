@@ -2164,6 +2164,81 @@ def test_market_only_remains_observable_during_news_pipeline_failure() -> None:
     ) is None
 
 
+@pytest.mark.parametrize(
+    ("market_health", "news_health", "expected_status"),
+    [
+        ("STALE", "HEALTHY", "DATA_UNHEALTHY"),
+        ("OK", "UNHEALTHY", "NEWS_PIPELINE_UNHEALTHY"),
+    ],
+)
+def test_generation_receipts_remain_complete_when_runtime_gates_force_wait(
+    monkeypatch, market_health: str, news_health: str, expected_status: str,
+) -> None:
+    updates = [
+        {
+            "model_identity": identity,
+            "model_version": f"{identity.lower()}-live",
+            "eligibility_version": inference_v2.ELIGIBILITY_VERSION,
+            "artifact_path": "unused-artifact",
+        }
+        for identity in sorted(inference_v2.MODEL_IDENTITIES)
+    ]
+    inserted = []
+    monkeypatch.setattr(
+        inference_v2, "_activated_generation_updates", lambda *_: updates,
+    )
+    monkeypatch.setattr(inference_v2, "_active_updates", lambda *_: updates)
+    monkeypatch.setattr(
+        inference_v2, "_calibration", lambda *_: {
+            "version": "test", "rows": 0, "blocks": 0, "days": 0,
+            "half_width": None, "status": "UNCALIBRATED",
+        },
+    )
+    monkeypatch.setattr(
+        inference_v2, "_insert_prediction",
+        lambda _ledger, **values: inserted.append(values),
+    )
+    monkeypatch.setattr(inference_v2, "_has_activated_generation", lambda *_: True)
+
+    class Artifact:
+        feature_names = inference_v2.MARKET_FEATURES
+
+        @staticmethod
+        def predict(_values):
+            return [0.0]
+
+    monkeypatch.setattr(inference_v2.RidgeArtifact, "read", lambda *_: Artifact())
+    market_features = {name: 0.0 for name in inference_v2.MARKET_FEATURES}
+    market_features.update({"decision_bid": 2400.0, "decision_ask": 2400.1})
+    market_snapshot = {
+        "features_json": json.dumps(market_features),
+        "output_hash": "market", "data_health": market_health, "u5": 1.0,
+    }
+    news_snapshot = {
+        "features_json": json.dumps({}), "output_hash": "news",
+        "news_exposed": 0, "broad_news_exposed": 0,
+    }
+
+    created = inference_v2.append_live_predictions_v2(
+        object(), decision_id="decision", decision_time=datetime.now(UTC),
+        created_at=datetime.now(UTC), market_snapshot=market_snapshot,
+        news_snapshot=news_snapshot,
+        news_pipeline_health={"status": news_health, "snapshot_hash": "health"},
+    )
+
+    assert {row["model_identity"] for row in created} == {
+        "CHAMPION_0", *inference_v2.MODEL_IDENTITIES,
+    }
+    gated = [row for row in inserted if row["model_identity"] != "CHAMPION_0"]
+    if expected_status == "NEWS_PIPELINE_UNHEALTHY":
+        gated = [
+            row for row in gated
+            if row["model_identity"] in inference_v2.NEWS_MODEL_IDENTITIES
+        ]
+    assert gated
+    assert {row["status"] for row in gated} == {expected_status}
+
+
 def test_newest_news_policy_mismatch_blocks_older_current_model() -> None:
     current_feature = f"{inference_v2.FEATURE_VERSION}+{inference_v2.NEWS_FEATURE_VERSION}"
     updates = [
