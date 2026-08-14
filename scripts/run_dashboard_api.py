@@ -483,7 +483,7 @@ def _broker_market_session(database: Path, now: datetime) -> dict | None:
         return None
 
 
-CATEGORY_LABELS = {
+NEWS_CATEGORY_LABELS = {
     "rates_fed": "利率/Fed",
     "inflation_employment": "通胀/就业",
     "growth_economy": "增长/经济",
@@ -494,17 +494,14 @@ CATEGORY_LABELS = {
     "risk_sentiment": "避险情绪",
     "regulation_other": "监管/其他",
 }
+OTHER_NEWS_CATEGORY_LABEL = "其他"
 
 
-def _news_category(item: dict) -> str:
-    controlled = CATEGORY_LABELS.get(str(item.get("primary_category") or ""))
-    if controlled:
-        return controlled
-    return {
-        "QUEUED": "待分类",
-        "BACKING_OFF": "分类重试中",
-        "DEAD_LETTER": "分类失败",
-    }.get(str(item.get("annotation_status") or ""), "未分类")
+def _news_category_label(primary_category: object) -> str:
+    """Map one completed semantic category without inferring from workflow state."""
+    return NEWS_CATEGORY_LABELS.get(
+        str(primary_category or ""), OTHER_NEWS_CATEGORY_LABEL,
+    )
 
 
 def _not_required_reason(item: dict, forward_epoch: str) -> tuple[str, str]:
@@ -783,7 +780,7 @@ def _serialize_news_rows(
         )
         secondary = item.pop("secondary_categories_json", None)
         item["secondary_categories"] = json.loads(secondary) if secondary else []
-        item["category"] = _news_category(item)
+        item["category"] = _news_category_label(item.get("primary_category"))
         item["eligibility_version"] = CURRENT_NEWS_CONTRACT.eligibility_version
         news.append(item)
     return news
