@@ -30,7 +30,7 @@ export async function GET() {
       }
     }
   } catch {
-    // A read failure may use the immutable Preview summary or compact relay.
+    // A read failure may use the immutable build-snapshot summary or compact relay.
   }
 
   if (previewBundle?.learning_summary) {

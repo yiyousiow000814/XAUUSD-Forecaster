@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import socket
 import sys
 import time
@@ -45,10 +46,38 @@ from xauusd_forecaster.scheduler_model_gateway import (  # noqa: E402
 )
 
 
-def write_heartbeat(path: Path, *, work_items: int) -> None:
+def write_heartbeat(
+    path: Path, *, work_items: int, state: str = "RUNNING",
+) -> None:
     write_runtime_heartbeat(
-        path, service="annotator", work_items=work_items,
+        path, service="annotator", state=state, work_items=work_items,
     )
+
+
+def run_scheduled_batch_with_lock_retry(
+    ledger: ForwardLedger,
+    *,
+    batch_size: int | None,
+    progress_callback: Callable[[int], None],
+    sleep: Callable[[float], None] = time.sleep,
+) -> list[dict[str, object]]:
+    """Keep the independent annotator alive through transient WAL writer contention."""
+    while True:
+        try:
+            return run_scheduled_batch(
+                ledger,
+                batch_size=batch_size,
+                progress_callback=progress_callback,
+            )
+        except sqlite3.OperationalError as error:
+            if "locked" not in str(error).lower():
+                raise
+            ledger.connection.rollback()
+            print(json.dumps({
+                "event": "NEWS_AI_SCHEDULER_DATABASE_BUSY",
+                "retry_seconds": 5,
+            }), flush=True)
+            sleep(5.0)
 
 
 def _next_retry(status: dict[str, object], now: datetime) -> datetime:
@@ -228,10 +257,15 @@ def main() -> int:
     args = parser.parse_args()
     ledger = ForwardLedger(args.database)
     try:
+        completed_cycle = False
         while True:
             limit = None if args.batch_size <= 0 else args.batch_size
-            write_heartbeat(args.status_file, work_items=0)
-            statuses = run_scheduled_batch(
+            write_heartbeat(
+                args.status_file,
+                work_items=0,
+                state="RUNNING" if completed_cycle else "STARTING",
+            )
+            statuses = run_scheduled_batch_with_lock_retry(
                 ledger,
                 batch_size=limit,
                 progress_callback=lambda count: write_heartbeat(
@@ -249,6 +283,7 @@ def main() -> int:
                 flush=True,
             )
             work_items = len(statuses)
+            completed_cycle = True
             write_heartbeat(args.status_file, work_items=work_items)
             if args.once:
                 break

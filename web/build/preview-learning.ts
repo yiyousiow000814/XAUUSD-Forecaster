@@ -2,7 +2,7 @@ import {
   PREVIEW_NEWS_PAGE_SIZE,
   PREVIEW_RESOURCES,
   PREVIEW_STATUS_INLINE_KEYS,
-} from "../app/_lib/preview-contract";
+} from "../app/_lib/preview-manifest";
 
 type JsonObject = Record<string, unknown>;
 

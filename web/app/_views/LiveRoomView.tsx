@@ -7,7 +7,7 @@ import DashboardLink from "../_components/DashboardLink";
 import RuntimeUpdateFailureBanner, { type RuntimeUpdateFailure } from "../_components/RuntimeUpdateFailureBanner";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
-import { DASHBOARD_REFRESH_INTERVALS, isImmutablePreview, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
+import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { formatExactCount } from "../_lib/count-format";
 import { resolveNewsMetrics, type NewsMetrics } from "../_lib/news-metrics";
 
@@ -118,7 +118,6 @@ export default function LiveRoomView() {
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(Boolean(cachedStatus?.preview_status_summary));
   const [now, setNow] = useState(() => Date.now());
-  const immutablePreview = isImmutablePreview(payload);
 
   const refresh = useCallback(async (force = false) => {
     setRefreshing(true);
@@ -137,10 +136,10 @@ export default function LiveRoomView() {
       () => void refresh(Boolean(payload?.preview_status_summary)),
       () => void refresh(true),
       DASHBOARD_REFRESH_INTERVALS.live,
-      immutablePreview,
+      "current",
       "live-status",
     );
-  }, [refresh, immutablePreview, payload?.preview_status_summary]);
+  }, [refresh, payload?.preview_status_summary]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);

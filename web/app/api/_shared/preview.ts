@@ -32,5 +32,9 @@ export function previewJson(payload: unknown, status = 200, source = "immutable-
 
 export function rejectPreviewWrite() {
   if (!isPreviewDeployment) return null;
-  return previewJson({ error: "PR Preview 是只读快照，不接受同步写入" }, 403);
+  return previewJson(
+    { error: "PR Preview 只读且无运行或交易权限，不接受写入" },
+    403,
+    "write-rejected",
+  );
 }

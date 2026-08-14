@@ -56,7 +56,7 @@ export async function GET(request: Request) {
           `SELECT category, count(*) AS count FROM news_index GROUP BY category`,
         ).all<{ category: string; count: number }>(),
       ]);
-      return NextResponse.json({
+      const payload = {
         items: rows.results.map(row => {
           const item = JSON.parse(row.payload) as NewsIndexItem;
           if (
@@ -81,7 +81,11 @@ export async function GET(request: Request) {
         page_size: pageSize,
         window_days: 60,
         totals_scope: "D1_ARCHIVE",
-      }, { headers: { "Cache-Control": "public, max-age=15, s-maxage=30, stale-while-revalidate=120" } });
+      };
+      if (previewBundle) return previewJson(payload, 200, "read-only-d1-archive");
+      return NextResponse.json(payload, {
+        headers: { "Cache-Control": "public, max-age=15, s-maxage=30, stale-while-revalidate=120" },
+      });
     }
   } catch {
     // Fall through to the relay when D1 is temporarily unavailable.
@@ -91,7 +95,11 @@ export async function GET(request: Request) {
   // a failed archive page with the relay's tiny recent-news window. That would
   // turn a transient D1 error into a convincing but false empty result.
   if (previewBundle) {
-    return previewJson({ error: "新闻档案暂时不可用，请稍后重试" }, 503);
+    return previewJson(
+      { error: "新闻档案暂时不可用，请稍后重试" },
+      503,
+      "current-read-unavailable",
+    );
   }
 
   const relay = process.env.STATUS_RELAY_URL;

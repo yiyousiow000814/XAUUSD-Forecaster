@@ -8,6 +8,7 @@ const { default: worker } = await import(workerUrl.href);
 const { applyFreshness } = await import("../app/api/status/freshness.js");
 const { runtimeUpdateFailurePresentation } = await import("../app/_lib/runtime-update-failure.js");
 const { countPresentation, formatCompactCount, formatExactCount, progressCountPresentation } = await import("../app/_lib/count-format.ts");
+const { statusFieldPhase } = await import("../app/_lib/current-data-provenance.ts");
 const { withPreviewIdentity } = await import("../app/api/_shared/preview-status.ts");
 
 test("keeps branch throughput limits while refreshing Preview metrics from D1", () => {
@@ -31,6 +32,12 @@ test("keeps branch throughput limits while refreshing Preview metrics from D1", 
     input_tokens_per_minute: 225_000,
     minute_scope: "PROJECT",
   });
+  assert.deepEqual(merged.preview.branch_snapshot.status_paths, [
+    "annotation_queue.requests_per_minute_per_key",
+    "annotation_queue.requests_per_minute",
+    "annotation_queue.input_tokens_per_minute",
+    "annotation_queue.minute_scope",
+  ]);
 });
 
 test("runtime update success stays silent while failures have stable presentation", () => {
@@ -196,7 +203,7 @@ test("renders the live room with an audit-page navigation button", async () => {
 test("keeps branch Preview identity and blocks writes", async () => {
   const source = readFileSync(new URL("../app/api/_shared/preview.ts", import.meta.url), "utf8");
   const layout = readFileSync(new URL("../app/layout.tsx", import.meta.url), "utf8");
-  assert.match(source, /PR Preview 是只读快照/);
+  assert.match(source, /PR Preview 只读且无运行或交易权限/);
   assert.match(source, /X-Aurum-Preview/);
   assert.match(layout, /<PreviewBanner \/>/);
 
@@ -209,9 +216,30 @@ test("keeps branch Preview identity and blocks writes", async () => {
     .join("\n");
   assert.match(builtPreview, /PREVIEW_SNAPSHOT/);
   assert.match(builtPreview, new RegExp(process.env.WORKERS_CI_BRANCH.replaceAll("/", "\\/")));
+
+  for (const path of [
+    "/api/ingest", "/api/learning", "/api/learning-history",
+    "/api/news-index", "/api/news-content", "/api/market-chart",
+    "/api/market-history",
+  ]) {
+    const forbiddenD1 = new Proxy({}, {
+      get() { throw new Error(`${path} touched D1 before Preview rejection`); },
+    });
+    const response = await worker.fetch(
+      new Request(`http://localhost${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{not-valid-json",
+      }),
+      { DB: forbiddenD1, ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } },
+      { waitUntil() {}, passThroughOnException() {} },
+    );
+    assert.equal(response.status, 403, `${path} must reject Preview writes`);
+    assert.equal(response.headers.get("X-Aurum-Preview"), "write-rejected");
+  }
 });
 
-test("hydrates preview pages from their immutable build snapshot", () => {
+test("hydrates Preview first paint from its immutable build snapshot", () => {
   const page = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
   const app = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
   const resources = readFileSync(new URL("../app/_lib/dashboard-resource.ts", import.meta.url), "utf8");
@@ -220,7 +248,7 @@ test("hydrates preview pages from their immutable build snapshot", () => {
   assert.match(page, /previewBundle\.learning_summary/);
   const vite = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
   const learning = readFileSync(new URL("../build/preview-learning.ts", import.meta.url), "utf8");
-  const contract = readFileSync(new URL("../preview-contract.json", import.meta.url), "utf8");
+  const manifest = JSON.parse(readFileSync(new URL("../preview-manifest.json", import.meta.url), "utf8"));
   const previewBuilder = readFileSync(new URL("../../scripts/build_preview_bundle.py", import.meta.url), "utf8");
   assert.match(vite, /compactPreviewLearning/);
   assert.match(vite, /compactPreviewStatus/);
@@ -233,9 +261,9 @@ test("hydrates preview pages from their immutable build snapshot", () => {
   assert.match(learning, /history_resource: market\.history_resource \?\? PREVIEW_RESOURCES\.marketHistory/);
   assert.match(learning, /training_markers: market\.training_markers \?\? \[\]/);
   for (const key of ["news_evidence", "story_event_candidates", "recent_decisions"]) {
-    assert.match(contract, new RegExp(`"${key}"`), key);
+    assert.ok(manifest.statusInlineKeys.includes(key), key);
   }
-  assert.match(contract, /"marketHistory": "\/api\/market-history"/);
+  assert.equal(manifest.resources.marketHistory, "/api/market-history");
   assert.doesNotMatch(page, /function previewRoomResources/);
   assert.match(learning, /models\.filter/);
   assert.match(learning, /lifecycle_status === "LATEST"/);
@@ -286,6 +314,77 @@ test("uses one current-data contract across every dashboard surface", () => {
   assert.match(learningRoute, /"X-Aurum-Preview": "read-only-d1-snapshot"/);
 });
 
+test("preserves field-level provenance while overlaying current read-only status", async () => {
+  const { withPreviewIdentity } = await import("../app/api/_shared/preview-status.ts");
+  const result = withPreviewIdentity({
+    counts: { decision_events: 20 },
+    factor_coverage: ["production-precomputed"],
+    storylines: ["production-precomputed"],
+    storyline_summary: { policy_version: "production-policy" },
+    market_narrative_candidates: ["production-precomputed"],
+    story_event_candidates: ["production-precomputed"],
+    annotation_queue: { ready: 9, requests_per_minute: 48 },
+    system: { online: true, market_session: "OPEN" },
+  }, {
+    generated_at: "2026-08-13T10:42:03Z",
+    preview: {
+      is_preview: true, branch: "feature/test", commit_sha: "abc123",
+      snapshot_generated_at: "2026-08-13T10:42:03Z",
+    },
+    factor_coverage: ["branch-recomputed"],
+    storyline_summary: { policy_version: "branch-policy" },
+    storylines: ["branch-recomputed"],
+    market_narrative_candidates: ["branch-recomputed"],
+    story_event_candidates: ["branch-recomputed"],
+    annotation_queue: {
+      requests_per_minute_per_key: 12,
+      requests_per_minute: 12,
+      input_tokens_per_minute: 225_000,
+      minute_scope: "PROJECT",
+    },
+    system: { deployment: { runtime_git_sha: "abc123" } },
+  });
+
+  assert.deepEqual(result.counts, { decision_events: 20 });
+  assert.deepEqual(result.factor_coverage, ["branch-recomputed"]);
+  assert.deepEqual(result.storylines, ["production-precomputed"]);
+  assert.deepEqual(result.storyline_summary, { policy_version: "production-policy" });
+  assert.deepEqual(result.market_narrative_candidates, ["production-precomputed"]);
+  assert.deepEqual(result.story_event_candidates, ["production-precomputed"]);
+  assert.deepEqual(result.annotation_queue, {
+    ready: 9,
+    requests_per_minute_per_key: 12,
+    requests_per_minute: 12,
+    input_tokens_per_minute: 225_000,
+    minute_scope: "PROJECT",
+  });
+  assert.equal(result.preview.branch, "feature/test");
+  assert.deepEqual(result.preview.branch_snapshot, {
+    generated_at: "2026-08-13T10:42:03Z",
+    status_paths: [
+      "factor_coverage",
+      "annotation_queue.requests_per_minute_per_key",
+      "annotation_queue.requests_per_minute",
+      "annotation_queue.input_tokens_per_minute",
+      "annotation_queue.minute_scope",
+    ],
+  });
+  assert.equal(result.preview_status_summary, false);
+  assert.equal(result.system.online, false);
+  assert.equal(result.system.market_session, "DATA_UNAVAILABLE");
+  assert.equal(result.system.source_of_truth, "生产 D1 当前只读数据");
+});
+
+test("marks only declared branch snapshot fields as snapshots", () => {
+  const paths = ["factor_coverage", "annotation_queue.requests_per_minute"];
+  assert.equal(statusFieldPhase("ready", paths, "factor_coverage"), "snapshot");
+  assert.equal(statusFieldPhase("ready", paths, "annotation_queue.requests_per_minute"), "snapshot");
+  assert.equal(statusFieldPhase("ready", paths, "annotation_queue.ready"), "ready");
+  assert.equal(statusFieldPhase("ready", paths, "storylines"), "ready");
+  assert.equal(statusFieldPhase("loading", paths, "factor_coverage"), "loading");
+  assert.equal(statusFieldPhase("error", paths, "factor_coverage"), "error");
+});
+
 test("only a current D1 archive may publish the 60-day news total", async () => {
   const { authoritativeNewsTotals } = await import("../app/_lib/news-index-contract.ts");
   const frozen = {
@@ -309,16 +408,23 @@ test("only a current D1 archive may publish the 60-day news total", async () => 
   }), null);
 });
 
-test("keeps every audit collection in compact Preview status", () => {
-  const contract = readFileSync(new URL("../preview-contract.json", import.meta.url), "utf8");
+test("keeps every audit collection in the compact Preview manifest", () => {
+  const manifest = JSON.parse(readFileSync(new URL("../preview-manifest.json", import.meta.url), "utf8"));
   for (const key of [
     "news_evidence", "storylines", "story_event_candidates", "theme_streams",
     "market_reaction_streams", "recent_decisions",
   ]) {
-    assert.match(contract, new RegExp(`"${key}"`), key);
+    assert.ok(manifest.statusInlineKeys.includes(key), key);
   }
-  assert.match(contract, /"preview"/);
-  assert.match(contract, /"marketHistory": "\/api\/market-history"/);
+  assert.ok(manifest.statusInlineKeys.includes("preview"));
+  assert.deepEqual(manifest.branchSnapshotStatusPaths, [
+    "factor_coverage",
+    "annotation_queue.requests_per_minute_per_key",
+    "annotation_queue.requests_per_minute",
+    "annotation_queue.input_tokens_per_minute",
+    "annotation_queue.minute_scope",
+  ]);
+  assert.equal(manifest.resources.marketHistory, "/api/market-history");
 });
 
 test("falls through to read-only D1 for later Preview news and details", () => {
@@ -326,8 +432,10 @@ test("falls through to read-only D1 for later Preview news and details", () => {
   const detail = readFileSync(new URL("../app/api/news-content/route.ts", import.meta.url), "utf8");
   assert.doesNotMatch(index, /inlinePreviewItems/);
   assert.match(index, /D1 is the source of truth even on the first Preview page/);
-  assert.match(index, /if \(previewBundle\) \{\s*return previewJson\(\{ error: "新闻档案暂时不可用，请稍后重试" \}, 503\)/);
+  assert.match(index, /"read-only-d1-archive"/);
+  assert.match(index, /"current-read-unavailable"/);
   assert.match(detail, /if \(detail\) return previewJson\(detail\)/);
+  assert.match(detail, /"read-only-d1-detail"/);
   assert.doesNotMatch(detail, /该新闻详情不在本次 Preview 快照中/);
 });
 
@@ -346,15 +454,16 @@ test("keeps the 60-day news archive inside bounded D1 work", () => {
   assert.match(migration, /news_index_category_published_idx/);
 });
 
-test("does not poll immutable Preview snapshots", () => {
+test("refreshes current resources without polling build-snapshot-only resources", () => {
   const helper = readFileSync(new URL("../app/_lib/dashboard-refresh.ts", import.meta.url), "utf8");
   assert.match(helper, /live:\s*15_000/);
   assert.match(helper, /status:\s*60_000/);
   assert.match(helper, /news:\s*30_000/);
   assert.match(helper, /learning:\s*300_000/);
   assert.match(helper, /deployment:\s*120_000/);
-  assert.match(helper, /immutablePreview\s*\?\s*null\s*:\s*window\.setInterval\(pollWhenEligible/);
-  assert.match(helper, /is_preview[^=]*=== true/s);
+  assert.match(helper, /DashboardResourceMode = "current" \| "build-snapshot"/);
+  assert.match(helper, /resourceMode === "current"/);
+  assert.match(helper, /mayRefresh\s*\?\s*window\.setInterval\(pollWhenEligible, intervalMs\)\s*:\s*null/);
   assert.match(helper, /document\.visibilityState !== "visible"/);
   assert.match(helper, /navigator\.webdriver/);
   assert.match(helper, /localStorage\.getItem/);
@@ -371,11 +480,12 @@ test("does not poll immutable Preview snapshots", () => {
   ]) {
     const source = readFileSync(new URL(path, import.meta.url), "utf8");
     assert.match(source, /scheduleDashboardRefresh/);
-    assert.match(source, /immutablePreview/);
+    assert.match(source, /DASHBOARD_REFRESH_INTERVALS\.[a-z]+,[\s\S]*?"current"/);
+    assert.doesNotMatch(source, /isImmutablePreview|immutablePreview/);
   }
 });
 
-test("renders every preview room from the build snapshot", async () => {
+test("renders every Preview room from the embedded build snapshot", async () => {
   if (!process.env.WORKERS_CI_BRANCH || process.env.WORKERS_CI_BRANCH === "main") return;
   for (const [path, marker] of [
     ["/", /Aurum Signal Room/],
@@ -438,6 +548,7 @@ test("renders the Gemini quota status route", async () => {
   assert.match(html, /Gemma 4 31B/);
   assert.match(html, /reset-countdown/);
   assert.match(html, /逐 Key 配额/);
+  assert.match(html, /分支配置/);
   assert.match(html, /Pacific midnight/);
   assert.match(html, /组件与新闻源/);
   assert.match(html, /连接中|状态离线/);

@@ -72,9 +72,18 @@
 - After closing, audit Playwright browser processes again. Browser verification
   is incomplete until no process created by the task remains. Report the final
   process count in the pull request when Preview verification was performed.
-- Prefer immutable branch Previews for UI checks. Do not leave a production page
-  open in an automated browser, and never rely on background throttling to limit
-  its requests.
+- Prefer branch Previews with immutable code artifacts for UI checks. Do not
+  leave a production page open in an automated browser, and never rely on
+  background throttling to limit its requests.
+
+## Preview Discipline
+
+- Preview behavior follows `docs/specs/PREVIEW_BEHAVIOR.md`.
+- Preview isolation guarantees follow `docs/contracts/PREVIEW_ISOLATION.md`.
+- Do not introduce a new Preview mutability, isolation, authority, data-source,
+  fallback, provenance, or freshness rule only inside a route, component, test,
+  comment, or pull request.
+- Update the relevant Preview source-of-truth document when such a rule changes.
 
 ## Version Handover
 

@@ -422,3 +422,32 @@ def test_preemptible_quota_deferral_flows_to_routine_account(
         "SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
     ).fetchone()["state"] == "COMPLETED"
     ledger.close()
+
+
+def test_annotator_retries_transient_writer_contention_without_exiting(
+    tmp_path, monkeypatch,
+) -> None:
+    from scripts import run_news_annotator as runner
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    calls = []
+    sleeps = []
+
+    def scheduled_batch(*_args, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return [{"status": "OK"}]
+
+    monkeypatch.setattr(runner, "run_scheduled_batch", scheduled_batch)
+    statuses = runner.run_scheduled_batch_with_lock_retry(
+        ledger,
+        batch_size=1,
+        progress_callback=lambda _count: None,
+        sleep=sleeps.append,
+    )
+
+    assert statuses == [{"status": "OK"}]
+    assert len(calls) == 2
+    assert sleeps == [5.0]
+    ledger.close()
