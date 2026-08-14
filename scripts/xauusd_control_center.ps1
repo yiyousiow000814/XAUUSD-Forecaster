@@ -616,18 +616,14 @@ function Test-CodeReloadHealth {
         @("collector", "collector-status.json"),
         @("annotator", "news-annotator-status.json")
     )) {
-        # The collector performs a required contract reconciliation before it
-        # can enter its decision loop.  A fresh STARTING heartbeat proves that
-        # the candidate process launched; the subsequent observation boundary
-        # still requires real decision cycles and rolls back a stuck startup.
-        $allowedStates = if ($heartbeatSpec[0] -eq "collector") {
-            @("STARTING", "RUNNING")
-        } else {
-            @("RUNNING")
-        }
+        # Collector reconciliation can temporarily keep the annotator waiting
+        # on SQLite during a coordinated reload.  A fresh STARTING heartbeat
+        # proves either candidate process launched; the subsequent observation
+        # boundary still requires real decision cycles and rolls back a stuck
+        # startup.
         $heartbeat = Get-RuntimeHeartbeat `
             -Path (Join-Path $moduleRoot ".local\forward\$($heartbeatSpec[1])") `
-            -ServiceName $heartbeatSpec[0] -AllowedStates $allowedStates
+            -ServiceName $heartbeatSpec[0] -AllowedStates @("STARTING", "RUNNING")
         if (-not $heartbeat -or $heartbeat.LastSuccess -lt $ReloadStarted) {
             return $false
         }
