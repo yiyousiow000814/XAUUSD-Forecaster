@@ -624,6 +624,7 @@ def _news_reader_rows(
                    json_extract(a.annotation_json, '$.primary_category') AS primary_category,
                    json_extract(a.annotation_json, '$.secondary_categories') AS secondary_categories_json,
                    json_extract(a.annotation_json, '$.emerging_topic_zh') AS emerging_topic_zh,
+                   json_extract(a.annotation_json, '$.xauusd_relevance') AS xauusd_relevance,
                    json_extract(a.annotation_json, '$.event_time') AS event_time,
                    a.event_type, a.entities_json, a.hawkishness,
                    a.inflation_impulse, a.growth_impulse,
@@ -725,6 +726,9 @@ def _news_reader_rows(
                     OR (length(COALESCE(peer.body, '')) = length(COALESCE(n.body, ''))
                       AND peer.source_item_id < n.source_item_id)))
               AND length(trim(COALESCE(n.body, ''))) >= 240
+              AND COALESCE(
+                    json_extract(a.annotation_json, '$.xauusd_relevance'), ''
+                  ) <> 'IRRELEVANT'
               AND COALESCE(n.source_published_time,
                            n.collector_first_seen_time) >= ?
               {cursor_clause}
@@ -1452,6 +1456,7 @@ def _dashboard_payload(database: Path) -> dict:
                       json_extract(a.annotation_json, '$.primary_category') AS primary_category,
                       json_extract(a.annotation_json, '$.secondary_categories') AS secondary_categories_json,
                        json_extract(a.annotation_json, '$.emerging_topic_zh') AS emerging_topic_zh,
+                       json_extract(a.annotation_json, '$.xauusd_relevance') AS xauusd_relevance,
                        json_extract(a.annotation_json, '$.event_time') AS event_time,
                       a.event_type, a.entities_json, a.hawkishness,
                       a.inflation_impulse, a.growth_impulse,
@@ -1568,6 +1573,9 @@ def _dashboard_payload(database: Path) -> dict:
                  -- role; headline-only and COLLECT_ONLY intake candidates stay
                  -- out of the payload and therefore cannot accumulate online.
                  AND length(trim(COALESCE(n.body, ''))) >= 240
+                 AND COALESCE(
+                       json_extract(a.annotation_json, '$.xauusd_relevance'), ''
+                     ) <> 'IRRELEVANT'
                -- Reader chronology follows the publisher clock.  First-seen
                -- remains the immutable point-in-time visibility clock.
                ORDER BY COALESCE(n.source_published_time,

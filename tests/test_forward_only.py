@@ -1047,23 +1047,29 @@ def test_gdelt_gkg_feed_validates_manifest_and_uses_official_gcs_url(tmp_path) -
     assert bad_ledger.count("news_revisions") == 0
 
 
-def test_gdelt_fetches_fresh_candidate_body_before_ai_semantic_review(tmp_path) -> None:
+def test_gdelt_fetches_discovery_candidate_before_ai_semantic_review(tmp_path) -> None:
     fetched = datetime(2026, 8, 10, 6, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched - timedelta(days=1))
     manifest, archive = _gdelt_gkg_feed(
-        title="A tragic love story remembered after many years",
+        title="James Marsden joins television hall of fame",
         url="https://example.test/love-story",
         timestamp="20260810054000",
-        themes="ECON_GOLD",
+        themes="WB_2936_GOLD;TAX_FNCACT_ACTOR",
     )
+    extracted: list[str] = []
+
+    def extract(url: str) -> tuple[str, str]:
+        extracted.append(url)
+        return "complete candidate evidence " * 30, url
 
     result = collect_gdelt_news(
         ledger, fetched, _gdelt_fetcher(manifest, archive),
-        content_extractor=lambda url: ("complete candidate evidence " * 30, url),
+        content_extractor=extract,
     )
 
     assert result["status"] == "OK"
     assert result["inserted_revisions"] == 1
+    assert extracted == ["https://example.test/love-story"]
     assert result["rejected_reasons"] == {}
 
 
@@ -1381,7 +1387,7 @@ def test_us_employment_lane_does_not_guess_meaning_from_case_or_keywords() -> No
         assert reason == "AI_SEMANTIC_REVIEW_REQUIRED"
 
 
-def test_gdelt_candidates_also_reach_ai_instead_of_keyword_filtering() -> None:
+def test_gdelt_candidates_reach_ai_without_headline_semantic_filtering() -> None:
     observed = datetime(2026, 8, 10, 6, 0, tzinfo=UTC)
     for headline in (
         "A tragic love story remembered after many years",
@@ -1394,15 +1400,6 @@ def test_gdelt_candidates_also_reach_ai_instead_of_keyword_filtering() -> None:
         )
         assert allowed
         assert reason == "AI_SEMANTIC_REVIEW_REQUIRED"
-    allowed, reason = google_news_item_is_relevant(
-        "gdelt_gold_geopolitics",
-        "Gold rises as Treasury yields fall after US jobs report",
-        observed - timedelta(minutes=20), observed,
-    )
-    assert allowed
-    assert reason == "AI_SEMANTIC_REVIEW_REQUIRED"
-
-
 def test_google_news_lane_orders_unstored_candidates_by_publisher_time(tmp_path) -> None:
     fetched = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
