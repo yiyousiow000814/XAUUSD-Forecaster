@@ -339,7 +339,8 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   assert.match(previewBuilder, /for identity in \("LOT_RIDGE", "EXIT_RIDGE"\)/);
   assert.match(previewBuilder, /resource=curve-overview&cadence=\{cadence\}/);
   assert.match(previewBuilder, /for cadence in \("5m", "30m"\)/);
-  assert.match(previewBuilder, /\[\*learning_history, \*execution_history, \*curve_overviews\]/);
+  assert.match(previewBuilder, /resource=version-overview/);
+  assert.match(previewBuilder, /\*version_history/);
   assert.doesNotMatch(page, /auditView === "league"/);
   assert.match(page, /\[PREVIEW_RESOURCES\.status\]: previewBundle\.status/);
   assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);
