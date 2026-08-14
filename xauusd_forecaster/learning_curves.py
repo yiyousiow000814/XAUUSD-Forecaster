@@ -151,6 +151,36 @@ def _cadence_metrics(rows) -> dict:
     return result
 
 
+def _version_cadence_metrics(rows, lifecycle_status: str) -> dict:
+    """Describe whether each cadence has results, pending scores, or no run."""
+    all_rows = list(rows)
+    scored_rows = [row for row in all_rows if row["value_quote_return"] is not None]
+    result = _cadence_metrics(scored_rows)
+    for name, cadence_rows in (
+        ("EVERY_5M", all_rows),
+        ("FIXED_30M", [
+            row for row in all_rows if _is_fixed_30m_grid(row["decision_time"])
+        ]),
+    ):
+        scored_count = sum(
+            row["value_quote_return"] is not None for row in cadence_rows
+        )
+        if scored_count:
+            evaluation_status = "HAS_RESULTS"
+        elif cadence_rows:
+            evaluation_status = "AWAITING_OUTCOME"
+        elif lifecycle_status == "LATEST":
+            evaluation_status = "AWAITING_FIRST_PREDICTION"
+        else:
+            evaluation_status = "NO_PREDICTIONS"
+        result[name].update({
+            "prediction_rows": len(cadence_rows),
+            "pending_oos_rows": len(cadence_rows) - scored_count,
+            "evaluation_status": evaluation_status,
+        })
+    return result
+
+
 def learning_curve_payload(connection) -> dict:
     from .inference_v2 import news_model_activation_status
     from .training_v2 import NEWS_MIN_EXPOSED_ROWS
@@ -428,24 +458,28 @@ def learning_curve_payload(connection) -> dict:
         daily = defaultdict(float)
         for row in scored:
             daily[row["decision_time"][:10]] += _net_row_value(row)
-        cadence_metrics = _cadence_metrics(scored)
-        primary_metrics = cadence_metrics["EVERY_5M"]
         group_number = identity_group_seen[identity]
         total_groups = identity_group_counts[identity]
+        lifecycle_status = (
+            "LATEST" if group_number == total_groups else
+            "PREVIOUS" if group_number == total_groups - 1 else "ARCHIVED"
+        )
+        cadence_metrics = _version_cadence_metrics(rows, lifecycle_status)
+        primary_metrics = cadence_metrics["EVERY_5M"]
         version_groups.append({
             "model_identity": identity,
             "training_dataset_hash": dataset_hash,
             "generation": group_number,
-            "lifecycle_status": (
-                "LATEST" if group_number == total_groups else
-                "PREVIOUS" if group_number == total_groups - 1 else "ARCHIVED"
-            ),
+            "lifecycle_status": lifecycle_status,
             "created_at": group_updates[0]["created_at"],
             "latest_rebuild_at": group_updates[-1]["created_at"],
             "training_rows": group_updates[0]["training_rows"],
             "artifact_rebuilds": max(0, len(group_updates) - 1),
             "model_versions": versions,
             "subsequent_oos_rows": primary_metrics["oos_rows"],
+            "subsequent_prediction_rows": primary_metrics["prediction_rows"],
+            "pending_oos_rows": primary_metrics["pending_oos_rows"],
+            "evaluation_status": primary_metrics["evaluation_status"],
             "distinct_days": primary_metrics["distinct_days"],
             "cadence_metrics": cadence_metrics,
             **_selection_metrics(scored),

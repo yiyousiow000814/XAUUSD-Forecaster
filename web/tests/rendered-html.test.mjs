@@ -8,7 +8,16 @@ const { default: worker } = await import(workerUrl.href);
 const { applyFreshness } = await import("../app/api/status/freshness.js");
 const { runtimeUpdateFailurePresentation } = await import("../app/_lib/runtime-update-failure.js");
 const { countPresentation, formatCompactCount, formatExactCount, progressCountPresentation } = await import("../app/_lib/count-format.ts");
+const { versionResultLabel } = await import("../app/_lib/version-result-state.ts");
 const { withPreviewIdentity } = await import("../app/api/_shared/preview-status.ts");
+
+test("labels version results from their durable evaluation state", () => {
+  assert.equal(versionResultLabel({ oos_rows: 12, evaluation_status: "HAS_RESULTS" }, "+1.250%"), "+1.250%");
+  assert.equal(versionResultLabel({ oos_rows: 0, evaluation_status: "AWAITING_OUTCOME" }, "+0.000%"), "等待结果");
+  assert.equal(versionResultLabel({ oos_rows: 0, evaluation_status: "AWAITING_FIRST_PREDICTION" }, "+0.000%"), "等待首个预测");
+  assert.equal(versionResultLabel({ oos_rows: 0, evaluation_status: "NO_PREDICTIONS" }, "+0.000%"), "未产生结果");
+  assert.equal(versionResultLabel({ oos_rows: 0 }, "+0.000%"), "状态未知");
+});
 
 test("keeps branch throughput limits while refreshing Preview metrics from D1", () => {
   const merged = withPreviewIdentity({
