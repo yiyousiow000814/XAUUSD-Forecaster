@@ -39,7 +39,7 @@ THEMES = {
     "oil_energy": "油价与能源",
     "war_geopolitics": "战争与地缘",
     "central_bank_gold": "央行购金",
-    "risk_sentiment": "黄金与风险偏好",
+    "risk_sentiment": "黄金与避险情绪",
     "regulation_other": "监管与其他",
 }
 
