@@ -114,6 +114,16 @@ primary Gemini annotation model has no safe capacity, the existing scheduler
 may try the separately metered fallback annotation model; final event-identity
 review remains Gemma-owned rather than silently changing classifier semantics.
 
+Every live decision records semantic-pipeline health. A newly received
+candidate gets one five-minute decision interval to finish its current-contract
+annotation. After that interval, unresolved work, an active annotation job in
+backoff or dead letter, a stale/missing annotator heartbeat, or no usable model
+credential makes the pipeline unhealthy. Every news-dependent model must then
+append `WAIT` with `NEWS_PIPELINE_UNHEALTHY`; `MARKET_ONLY` remains observable
+as the control. Recovery requires the actual current-contract backlog and
+runtime dependency failures to clear. A provider status page or synthetic
+probe alone cannot reopen the gate.
+
 The immutable publisher body and content hash always remain the audit source of
 truth. Gemma receives that complete body whenever it fits the project token
 window. For an oversized body, the existing full-body Gemini annotation anchors
