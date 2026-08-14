@@ -6,12 +6,22 @@ function MetricLoadingSignal() {
   return <span className="current-metric-placeholder" aria-hidden="true"><i /><i /><i /></span>;
 }
 
-export function MetricValue({ phase, children }: { phase: CurrentDataPhase; children: ReactNode }) {
+export function MetricValue({
+  phase,
+  children,
+  snapshotLabel = "快照",
+  snapshotTitle = "实时数据暂不可用，显示构建快照",
+}: {
+  phase: CurrentDataPhase;
+  children: ReactNode;
+  snapshotLabel?: string;
+  snapshotTitle?: string;
+}) {
   if (phase === "loading") {
     return <span className="current-metric is-loading" role="progressbar" aria-label="当前数字读取中"><MetricLoadingSignal /></span>;
   }
   if (phase === "snapshot") {
-    return <span className="current-metric is-snapshot" title="实时数据暂不可用，显示构建快照">{children}<small>快照</small></span>;
+    return <span className="current-metric is-snapshot" title={snapshotTitle}>{children}<small>{snapshotLabel}</small></span>;
   }
   if (phase === "error") return <span aria-label="当前数据暂不可用">—</span>;
   return <>{children}</>;

@@ -217,7 +217,7 @@ type CadenceMetric = { oos_rows: number; distinct_days: number; cumulative_quote
 type Payload = {
   preview_status_summary?: boolean;
   preview?: {
-    branch_snapshot?: { generated_at: string | null; status_keys: string[] };
+    branch_snapshot?: { generated_at: string | null; status_paths: string[] };
   };
   learning_preview_summary?: boolean;
   learning_history_resource?: string;
@@ -874,9 +874,9 @@ export default function AuditView() {
   const archiveTotals = authoritativeNewsTotals(newsIndex);
   const newsPhase: CurrentDataPhase = archiveTotals
     ? "ready" : newsError ? "error" : "loading";
-  const branchSnapshotStatusKeys = payload?.preview?.branch_snapshot?.status_keys;
+  const branchSnapshotStatusPaths = payload?.preview?.branch_snapshot?.status_paths;
   const coveragePhase = statusFieldPhase(
-    statusState, branchSnapshotStatusKeys, "factor_coverage",
+    statusState, branchSnapshotStatusPaths, "factor_coverage",
   );
   const pageUsesBranchSnapshot = view === "coverage"
     && statusState === "ready" && coveragePhase === "snapshot";
@@ -1037,7 +1037,7 @@ export default function AuditView() {
         <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件脉络 <b><MetricValue phase={statusState}><CountValue value={activeEventTotal} /></MetricValue></b></a>
         <a href="/audit?view=decisions" className={view === "decisions" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("decisions"); }}>决策与30分钟结果 <b><MetricValue phase={statusState}><CountValue value={payload?.counts?.decision_events} /></MetricValue></b></a>
         <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b><MetricValue phase={liveOosPhase}>{liveOosModelGroups !== undefined ? `${liveOosModelGroups}组` : "—"}</MetricValue></b></a>
-        <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b><MetricValue phase={coveragePhase}>{payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</MetricValue></b></a>
+        <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b><MetricValue phase={coveragePhase} snapshotLabel="分支快照" snapshotTitle="此覆盖结果由当前 PR 分支在构建时重新计算，不是生产实时观测">{payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</MetricValue></b></a>
       </nav>
       <button type="button" className="audit-tabs-scroll" onClick={() => scrollAuditTabs(1)} aria-label="向右查看更多审计视图"><span aria-hidden="true">›</span></button>
       </div>

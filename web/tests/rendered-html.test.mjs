@@ -32,6 +32,12 @@ test("keeps branch throughput limits while refreshing Preview metrics from D1", 
     input_tokens_per_minute: 225_000,
     minute_scope: "PROJECT",
   });
+  assert.deepEqual(merged.preview.branch_snapshot.status_paths, [
+    "annotation_queue.requests_per_minute_per_key",
+    "annotation_queue.requests_per_minute",
+    "annotation_queue.input_tokens_per_minute",
+    "annotation_queue.minute_scope",
+  ]);
 });
 
 test("runtime update success stays silent while failures have stable presentation", () => {
@@ -317,6 +323,7 @@ test("preserves field-level provenance while overlaying current read-only status
     storyline_summary: { policy_version: "production-policy" },
     market_narrative_candidates: ["production-precomputed"],
     story_event_candidates: ["production-precomputed"],
+    annotation_queue: { ready: 9, requests_per_minute: 48 },
     system: { online: true, market_session: "OPEN" },
   }, {
     generated_at: "2026-08-13T10:42:03Z",
@@ -329,6 +336,12 @@ test("preserves field-level provenance while overlaying current read-only status
     storylines: ["branch-recomputed"],
     market_narrative_candidates: ["branch-recomputed"],
     story_event_candidates: ["branch-recomputed"],
+    annotation_queue: {
+      requests_per_minute_per_key: 12,
+      requests_per_minute: 12,
+      input_tokens_per_minute: 225_000,
+      minute_scope: "PROJECT",
+    },
     system: { deployment: { runtime_git_sha: "abc123" } },
   });
 
@@ -338,10 +351,23 @@ test("preserves field-level provenance while overlaying current read-only status
   assert.deepEqual(result.storyline_summary, { policy_version: "production-policy" });
   assert.deepEqual(result.market_narrative_candidates, ["production-precomputed"]);
   assert.deepEqual(result.story_event_candidates, ["production-precomputed"]);
+  assert.deepEqual(result.annotation_queue, {
+    ready: 9,
+    requests_per_minute_per_key: 12,
+    requests_per_minute: 12,
+    input_tokens_per_minute: 225_000,
+    minute_scope: "PROJECT",
+  });
   assert.equal(result.preview.branch, "feature/test");
   assert.deepEqual(result.preview.branch_snapshot, {
     generated_at: "2026-08-13T10:42:03Z",
-    status_keys: ["factor_coverage"],
+    status_paths: [
+      "factor_coverage",
+      "annotation_queue.requests_per_minute_per_key",
+      "annotation_queue.requests_per_minute",
+      "annotation_queue.input_tokens_per_minute",
+      "annotation_queue.minute_scope",
+    ],
   });
   assert.equal(result.preview_status_summary, false);
   assert.equal(result.system.online, false);
@@ -350,11 +376,13 @@ test("preserves field-level provenance while overlaying current read-only status
 });
 
 test("marks only declared branch snapshot fields as snapshots", () => {
-  const keys = ["factor_coverage"];
-  assert.equal(statusFieldPhase("ready", keys, "factor_coverage"), "snapshot");
-  assert.equal(statusFieldPhase("ready", keys, "storylines"), "ready");
-  assert.equal(statusFieldPhase("loading", keys, "factor_coverage"), "loading");
-  assert.equal(statusFieldPhase("error", keys, "factor_coverage"), "error");
+  const paths = ["factor_coverage", "annotation_queue.requests_per_minute"];
+  assert.equal(statusFieldPhase("ready", paths, "factor_coverage"), "snapshot");
+  assert.equal(statusFieldPhase("ready", paths, "annotation_queue.requests_per_minute"), "snapshot");
+  assert.equal(statusFieldPhase("ready", paths, "annotation_queue.ready"), "ready");
+  assert.equal(statusFieldPhase("ready", paths, "storylines"), "ready");
+  assert.equal(statusFieldPhase("loading", paths, "factor_coverage"), "loading");
+  assert.equal(statusFieldPhase("error", paths, "factor_coverage"), "error");
 });
 
 test("only a current D1 archive may publish the 60-day news total", async () => {
@@ -389,7 +417,13 @@ test("keeps every audit collection in the compact Preview manifest", () => {
     assert.ok(manifest.statusInlineKeys.includes(key), key);
   }
   assert.ok(manifest.statusInlineKeys.includes("preview"));
-  assert.deepEqual(manifest.branchSnapshotStatusKeys, ["factor_coverage"]);
+  assert.deepEqual(manifest.branchSnapshotStatusPaths, [
+    "factor_coverage",
+    "annotation_queue.requests_per_minute_per_key",
+    "annotation_queue.requests_per_minute",
+    "annotation_queue.input_tokens_per_minute",
+    "annotation_queue.minute_scope",
+  ]);
   assert.equal(manifest.resources.marketHistory, "/api/market-history");
 });
 
@@ -514,6 +548,7 @@ test("renders the Gemini quota status route", async () => {
   assert.match(html, /Gemma 4 31B/);
   assert.match(html, /reset-countdown/);
   assert.match(html, /逐 Key 配额/);
+  assert.match(html, /分支配置/);
   assert.match(html, /Pacific midnight/);
   assert.match(html, /组件与新闻源/);
   assert.match(html, /连接中|状态离线/);
