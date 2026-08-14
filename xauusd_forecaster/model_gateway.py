@@ -115,7 +115,6 @@ class GeminiModelGateway:
         decode: Callable[[dict[str, object]], T],
         retryable_http_codes: frozenset[int],
         retryable_decode_errors: tuple[type[Exception], ...] = (),
-        preserve_last_http_error: bool = False,
     ) -> tuple[T, str]:
         """Reserve before each attempt, then decode a provider response."""
         if not purpose.strip():
@@ -146,7 +145,7 @@ class GeminiModelGateway:
             raise ModelGatewayCapacityExhausted(
                 "Model request slots used; retained for the next batch"
             )
-        if preserve_last_http_error and isinstance(last_error, urllib.error.HTTPError):
+        if isinstance(last_error, urllib.error.HTTPError):
             raise last_error
         if isinstance(last_error, retryable_decode_errors):
             raise ModelGatewayResponseInvalid(last_error) from last_error

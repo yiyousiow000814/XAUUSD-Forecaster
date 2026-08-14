@@ -154,6 +154,8 @@ def _execute_job_safely(
 ) -> dict[str, object]:
     try:
         return _execute_job(ledger, credential, job, now=now)
+    except sqlite3.Error:
+        raise
     except Exception as error:
         return {
             "status": "ERROR",
@@ -234,6 +236,7 @@ def run_scheduled_batch(
                 credentials, credential, status, priority=job.priority,
             )
             outcome_credential = credential
+            outcome_at = executed_at
             if failover is not None:
                 failover_at = datetime.now(UTC)
                 status = _execute_job_safely(
@@ -247,6 +250,7 @@ def run_scheduled_batch(
                     attempted_at=failover_at,
                 )
                 outcome_credential = failover
+                outcome_at = failover_at
             outcome = str(status.get("status") or "ERROR")
             if outcome == "OK":
                 complete_job(ledger.connection, job.job_id, worker_id)
@@ -254,28 +258,28 @@ def run_scheduled_batch(
                 if job.attempt_count >= 2:
                     backoff_job(
                         ledger.connection, job.job_id, worker_id,
-                        available_at=executed_at,
+                        available_at=outcome_at,
                         error="CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE", terminal=True,
                     )
                 else:
                     release_job(
                         ledger.connection, job.job_id, worker_id,
-                        available_at=executed_at + timedelta(minutes=1),
+                        available_at=outcome_at + timedelta(minutes=1),
                         error="CURRENT_EVIDENCE_NOT_AVAILABLE",
                     )
             elif outcome in {"DEFERRED", "DISABLED"}:
-                empty_credentials.add(credential.credential_id)
+                empty_credentials.add(outcome_credential.credential_id)
                 release_job(
                     ledger.connection, job.job_id, worker_id,
                     available_at=(
-                        executed_at
-                        if credential.pool == "PREEMPTIBLE"
-                        else executed_at + timedelta(minutes=1)
+                        outcome_at
+                        if outcome_credential.pool == "PREEMPTIBLE"
+                        else outcome_at + timedelta(minutes=1)
                     ),
                     error=str(status.get("reason") or outcome),
                 )
             else:
-                retry_at = _next_retry(status, executed_at)
+                retry_at = _next_retry(status, outcome_at)
                 backoff_job(
                     ledger.connection, job.job_id, worker_id,
                     available_at=retry_at,

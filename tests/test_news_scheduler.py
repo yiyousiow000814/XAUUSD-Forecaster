@@ -564,6 +564,68 @@ def test_provider_http_failure_gets_one_bounded_independent_account_failover(
     ledger.close()
 
 
+def test_failover_deferral_is_owned_by_the_account_that_deferred(
+    tmp_path, monkeypatch,
+) -> None:
+    from scripts import run_news_annotator as runner
+
+    available_now = datetime.now(UTC) - timedelta(seconds=1)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    enqueue_job(
+        ledger.connection, task_type="ACTIVE_IMPACT", source="source",
+        source_item_id="deferred-failover", revision_number=1,
+        annotation_id="annotation", prompt_version="prompt", priority="FAST",
+        now=available_now,
+    )
+    credentials = (
+        ApiCredential("account-a", PREEMPTIBLE_POOL, "key-a", "fingerprint-a"),
+        ApiCredential("account-b", ROUTINE_POOL, "key-b", "fingerprint-b"),
+    )
+    monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
+    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    calls = []
+
+    def execute(_ledger, credential, _job, **_kwargs):
+        calls.append(credential.account_id)
+        if credential.account_id == "account-a":
+            return {
+                "status": "ERROR", "failure_code": "PROVIDER_HTTP_ERROR",
+                "provider_http_status": 503, "error_type": "HTTPError",
+                "error": "Service Unavailable",
+            }
+        return {"status": "DEFERRED", "reason": "quota"}
+
+    monkeypatch.setattr(runner, "_execute_job", execute)
+
+    statuses = runner.run_scheduled_batch(ledger, batch_size=2)
+
+    assert calls == ["account-a", "account-b"]
+    assert len(statuses) == 1
+    assert statuses[0]["account_id"] == "account-b"
+    row = ledger.connection.execute(
+        "SELECT state,available_at FROM news_ai_jobs_v1",
+    ).fetchone()
+    assert row["state"] == "QUEUED"
+    assert datetime.fromisoformat(row["available_at"]) > datetime.now(UTC)
+    ledger.close()
+
+
+def test_job_safety_boundary_does_not_misclassify_database_failures(
+    monkeypatch,
+) -> None:
+    from scripts import run_news_annotator as runner
+
+    monkeypatch.setattr(
+        runner, "_execute_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            sqlite3.OperationalError("database is locked")
+        ),
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        runner._execute_job_safely(None, None, None, now=NOW)
+
+
 def test_annotator_retries_transient_writer_contention_without_exiting(
     tmp_path, monkeypatch,
 ) -> None:

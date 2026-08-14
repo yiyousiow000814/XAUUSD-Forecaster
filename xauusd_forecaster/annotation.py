@@ -943,7 +943,6 @@ class _GeminiRequestPool:
             decode=lambda envelope: _decode_impact(envelope, request_row),
             retryable_http_codes=frozenset({401, 403, 429, 500, 502, 503, 504}),
             retryable_decode_errors=(ValueError, KeyError, json.JSONDecodeError),
-            preserve_last_http_error=True,
         )
 
 

@@ -100,7 +100,13 @@ def test_gateway_batch_capacity_decreases_after_each_attempt(monkeypatch) -> Non
     assert gateway.available_batch_capacity() == 1
 
 
-def test_failed_provider_attempt_remains_accounted(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "purpose",
+    ("news-annotation", "chinese-repair", "headline-translation", "news-impact"),
+)
+def test_failed_provider_attempt_remains_typed_and_accounted(
+    monkeypatch, purpose,
+) -> None:
     usages: list[ModelRequestUsage] = []
     failure = urllib.error.HTTPError(
         "https://example.invalid", 429, "quota", {}, None,
@@ -119,10 +125,9 @@ def test_failed_provider_attempt_remains_accounted(monkeypatch) -> None:
 
     with pytest.raises(urllib.error.HTTPError):
         gateway.generate(
-            0, model="model", purpose="news-annotation", payload={},
+            0, model="model", purpose=purpose, payload={},
             input_tokens=99, decode=lambda envelope: envelope,
             retryable_http_codes=frozenset({429}),
-            preserve_last_http_error=True,
         )
 
     assert len(usages) == 1
@@ -180,7 +185,6 @@ def test_latest_validation_failure_is_not_misreported_as_an_earlier_http_error(
             decode=lambda _envelope: (_ for _ in ()).throw(ValueError("bad JSON")),
             retryable_http_codes=frozenset({503}),
             retryable_decode_errors=(ValueError,),
-            preserve_last_http_error=True,
         )
 
     assert calls == ["key-a", "key-b"]
