@@ -7,9 +7,14 @@ from xauusd_forecaster import (
     ShadowDecisionGate,
     select_recommended_action,
 )
+from xauusd_forecaster.decision import select_post_cost_ev_action
 
 
 UTC = timezone.utc
+
+
+def test_post_cost_ev_action_uses_frozen_ev() -> None:
+    assert select_post_cost_ev_action(0.109, -0.129) is Action.LONG
 
 
 def forecast(at: datetime, **overrides: object) -> Forecast:

@@ -21,14 +21,8 @@ const matches = (row: Record<string, unknown>, query: string) => {
 export async function GET(request: Request) {
   const { query, page, pageSize } = requestValues(request);
   if (!query) return NextResponse.json({ items: [], total: 0, page, page_size: pageSize, query });
-  if (previewBundle) {
-    const filtered = (previewBundle.news_index.items ?? []).filter(row => matches(row, query));
-    const offset = (page - 1) * pageSize;
-    return previewJson({ items: filtered.slice(offset, offset + pageSize), total: filtered.length, page, page_size: pageSize, query });
-  }
   const binding = env.DB as D1Database | undefined;
-  if (!binding) return NextResponse.json({ error: "新闻搜索暂不可用" }, { status: 503 });
-  try {
+  if (binding) try {
     const tokens = query.split(" ").slice(0, 6);
     const searchable = `lower(COALESCE(json_extract(payload,'$.headline'),'') || ' ' ||
       COALESCE(json_extract(payload,'$.source'),'') || ' ' ||
@@ -45,11 +39,19 @@ export async function GET(request: Request) {
       binding.prepare(`SELECT count(*) count FROM news_index WHERE ${where}`)
         .bind(...values).first<{ count: number }>(),
     ]);
-    return NextResponse.json({
+    const payload = {
       items: rows.results.map(row => JSON.parse(row.payload)), total: count?.count ?? 0,
       page, page_size: pageSize, query,
-    }, { headers: { "Cache-Control": "no-store, max-age=0" } });
+    };
+    if (previewBundle) return previewJson(payload, 200, "read-only-d1-archive");
+    return NextResponse.json(payload, { headers: { "Cache-Control": "no-store, max-age=0" } });
   } catch {
-    return NextResponse.json({ error: "新闻搜索暂不可用" }, { status: 503 });
+    // A Preview may fall back to its bounded immutable snapshot below.
   }
+  if (previewBundle) {
+    const filtered = (previewBundle.news_index.items ?? []).filter(row => matches(row, query));
+    const offset = (page - 1) * pageSize;
+    return previewJson({ items: filtered.slice(offset, offset + pageSize), total: filtered.length, page, page_size: pageSize, query });
+  }
+  return NextResponse.json({ error: "新闻搜索暂不可用" }, { status: 503 });
 }

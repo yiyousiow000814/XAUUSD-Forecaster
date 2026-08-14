@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 from xauusd_forecaster import daily_brief
 from xauusd_forecaster.forward_ledger import ForwardLedger
+from tests.model_accounting_fakes import CallbackModelAccountant
 
 
 def _seed_news(ledger: ForwardLedger) -> None:
@@ -37,19 +38,23 @@ def _seed_news(ledger: ForwardLedger) -> None:
 def test_daily_brief_only_calls_model_when_source_changes(tmp_path, monkeypatch) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     _seed_news(ledger)
-    monkeypatch.setattr(daily_brief, "configured_gemini_api_keys", lambda: ("key",))
-    monkeypatch.setattr(daily_brief.GeminiQuotaLedger, "reserve", lambda self, key, now: True)
     calls = []
-    monkeypatch.setattr(daily_brief, "_call_gemma", lambda key, rows: (
-        calls.append(rows) or {"title": "今日黄金新闻", "items": [{
+    monkeypatch.setattr(daily_brief, "generate_metered_json", lambda api_key, **kwargs: (
+        calls.append(kwargs) or {"title": "今日黄金新闻", "items": [{
             "headline": "黄金上涨", "summary": "出现新变化",
             "evidence_ids": ["Reuters:item-1:1"],
         }]}, "gemma-test",
     ))
     now = datetime(2026, 8, 10, 3, tzinfo=UTC)
-    assert daily_brief.update_daily_brief(ledger, now)["status"] == "OK"
-    assert daily_brief.update_daily_brief(ledger, now)["status"] == "UNCHANGED"
+    accountant = CallbackModelAccountant(lambda usage: True)
+    assert daily_brief.update_daily_brief(
+        ledger, api_key="test-key", request_accountant=accountant, now=now,
+    )["status"] == "OK"
+    assert daily_brief.update_daily_brief(
+        ledger, api_key="test-key", request_accountant=accountant, now=now,
+    )["status"] == "UNCHANGED"
     assert len(calls) == 1
+    assert calls[0]["purpose"] == "daily-news-brief"
     assert daily_brief.recent_daily_briefs(ledger.connection)[0]["brief"]["items"][0]["headline"] == "黄金上涨"
     ledger.close()
 

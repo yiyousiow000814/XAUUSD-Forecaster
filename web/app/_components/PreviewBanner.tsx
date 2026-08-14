@@ -24,7 +24,7 @@ export default function PreviewBanner() {
   if (!preview) return null;
   return <aside className="preview-banner" role="status">
     <strong>PR 预览</strong>
-    <span>分支代码 + 构建时数据，不是实时行情</span>
+    <span>分支代码 · 只读不交易 · 数据可能为当前读取或构建快照</span>
     <code>{preview.branch} · {preview.commit_sha?.slice(0, 8)}</code>
   </aside>;
 }

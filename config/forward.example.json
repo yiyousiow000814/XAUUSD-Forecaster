@@ -22,7 +22,12 @@
   },
   "news": {
     "official_rss_only": true,
-    "historical_backfill": false
+    "historical_backfill": false,
+    "bls_api_key_environment_variable": "BLS_API_KEY",
+    "bea_api_key_environment_variable": "BEA_API_KEY",
+    "fred_api_key_environment_variable": "FRED_API_KEY",
+    "eia_api_key_environment_variable": "EIA_API_KEY",
+    "local_secret_file": ".local/secrets/collector-keys.json"
   },
   "annotation": {
     "provider": "Google Gemini API",

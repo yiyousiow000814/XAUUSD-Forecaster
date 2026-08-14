@@ -11,13 +11,12 @@ from pathlib import Path
 import numpy as np
 
 from .evidence_v2 import ELIGIBILITY_VERSION, FEATURE_VERSION, NEWS_FEATURE_VERSION
+from .decision import select_post_cost_ev_action
 from .execution_costs import ROUND_TRIP_COMMISSION_LOG_COST
 from .forward_ledger import canonical_hash
 from .news_contracts import (
     CURRENT_NEWS_CONTRACT,
     NewsContract,
-    generation_matches_contract,
-    supported_generation_contract,
 )
 from .news_evidence import EVIDENCE_POLICY_VERSION
 from .ridge import RidgeArtifact
@@ -28,10 +27,10 @@ MIN_CALIBRATION_BLOCKS = 20
 ACTIVE_VERSIONS_PER_IDENTITY = 1
 MODEL_IDENTITIES = frozenset({
     "MARKET_ONLY", "NEWS_RESIDUAL", "FULL",
-    "BROAD_NEWS_RESIDUAL", "BROAD_FULL",
+    "BROAD_NEWS_RESIDUAL", "BROAD_FULL", "NEWS_ONLY",
 })
 NEWS_MODEL_IDENTITIES = frozenset({
-    "NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL",
+    "NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL", "NEWS_ONLY",
 })
 
 
@@ -53,6 +52,11 @@ def _expected_news_contract(
             f"{FEATURE_VERSION}+{contract.feature_version}+{contract.policy_version}",
             contract.eligibility_version,
         )
+    if identity == "NEWS_ONLY":
+        return (
+            f"{contract.feature_version}+{contract.policy_version}",
+            contract.eligibility_version,
+        )
     return None
 
 
@@ -70,23 +74,11 @@ def _news_contract_matches(
 
 def _news_generation_ready(
     newest: dict, available_news_eligibilities: set[str] | None = None,
-    *, enforce_current_contract: bool = True,
-    news_contract: NewsContract | None = None,
 ) -> bool:
     """Require one complete, runnable generation for every news identity."""
-    required_contract = (
-        news_contract if news_contract is not None
-        else CURRENT_NEWS_CONTRACT if enforce_current_contract
-        else None
-    )
-    if required_contract is None:
-        return False
     return all(
         identity in newest
-        and (
-            required_contract is None
-            or _news_contract_matches(newest[identity], required_contract)
-        )
+        and _news_contract_matches(newest[identity], CURRENT_NEWS_CONTRACT)
         and (
             available_news_eligibilities is None
             or _row_value(newest[identity], "eligibility_version")
@@ -103,27 +95,20 @@ def _news_generation_ready(
     )
 
 
-def news_model_activation_status(
-    updates, *, allow_transition_contract: bool = False,
-    transition_contract: NewsContract | None = None,
-) -> list[dict]:
+def news_model_activation_status(updates) -> list[dict]:
     """Explain whether each news identity has a current-policy runnable artifact."""
     newest = {}
     for update in updates:
         newest.setdefault(update["model_identity"], update)
     generation_ready = _news_generation_ready(newest)
-    transition_generation_ready = allow_transition_contract and _news_generation_ready(
-        newest, enforce_current_contract=False, news_contract=transition_contract,
-    )
     result = []
-    for identity in ("NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL"):
+    for identity in (
+        "NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL", "NEWS_ONLY",
+    ):
         expected_feature, expected_eligibility = _expected_news_contract(identity)
         update = newest.get(identity)
         if update is None:
             status, reason = "NOT_TRAINED", "尚未训练当前新闻模型"
-        elif not _news_contract_matches(update) and transition_generation_ready:
-            status = "TRANSITION_ACTIVE"
-            reason = "当前整组模型继续预测，等待新版全部准备好后整组切换"
         elif not _news_contract_matches(update):
             status, reason = "POLICY_MISMATCH", "最新版不符合当前新闻规则"
         else:
@@ -136,7 +121,7 @@ def news_model_activation_status(
             reason = "当前规则版本已激活" if artifact_valid else "当前模型文件不可用"
             if status == "ACTIVE" and not generation_ready:
                 status = "GENERATION_WAIT"
-                reason = "等待同一规则版本的四套新闻模型全部生成"
+                reason = "等待同一规则版本的五套新闻模型全部生成"
         result.append({
             "model_identity": identity,
             "status": status,
@@ -155,20 +140,12 @@ def _recommended_action(
 ) -> str:
     """Choose the positive post-cost EV direction; uncertainty remains diagnostic."""
     del half_width
-    if ev_long is None or ev_short is None:
-        return "WAIT"
-    if ev_long == ev_short:
-        return "WAIT"
-    if ev_long > ev_short and ev_long > 0:
-        return "LONG"
-    if ev_short > ev_long and ev_short > 0:
-        return "SHORT"
-    return "WAIT"
+    return select_post_cost_ev_action(ev_long, ev_short).value
 
 
 def _news_snapshot_exposed(identity: str, snapshot: dict, features: dict) -> bool:
     """Return whether the selected contract exposed live news to this model lane."""
-    broad = identity in {"BROAD_NEWS_RESIDUAL", "BROAD_FULL"}
+    broad = identity in {"BROAD_NEWS_RESIDUAL", "BROAD_FULL", "NEWS_ONLY"}
     key = "broad_news_exposed" if broad else "news_exposed"
     if key in snapshot:
         return bool(snapshot[key])
@@ -178,8 +155,6 @@ def _news_snapshot_exposed(identity: str, snapshot: dict, features: dict) -> boo
 
 def _active_updates(
     updates, available_news_eligibilities: set[str] | None = None,
-    *, enforce_current_contract: bool = True,
-    news_contract: NewsContract | None = None,
 ) -> list:
     """Select models, activating news only as one complete policy generation."""
     if available_news_eligibilities is None:
@@ -192,14 +167,9 @@ def _active_updates(
         newest_by_identity.setdefault(update["model_identity"], update)
     news_generation_ready = _news_generation_ready(
         newest_by_identity, available_news_eligibilities,
-        enforce_current_contract=enforce_current_contract,
-        news_contract=news_contract,
     )
-    required_contract = (
-        news_contract if news_contract is not None
-        else CURRENT_NEWS_CONTRACT if enforce_current_contract
-        else None
-    )
+    if not news_generation_ready:
+        return []
 
     counts: dict[str, int] = defaultdict(int)
     newest_seen: set[str] = set()
@@ -209,19 +179,13 @@ def _active_updates(
         identity = update["model_identity"]
         if identity not in MODEL_IDENTITIES or counts[identity] >= ACTIVE_VERSIONS_PER_IDENTITY:
             continue
-        if identity in NEWS_MODEL_IDENTITIES and not news_generation_ready:
-            # A rule generation is usable only after all four news identities
-            # have compatible artifacts.  This prevents a policy deployment
-            # from exposing a partial or silently mixed model generation.
-            continue
         if identity in blocked_news:
             continue
         if identity in NEWS_MODEL_IDENTITIES:
             eligibility = _row_value(update, "eligibility_version")
             compatible = (
                 (
-                    required_contract is None
-                    or _news_contract_matches(update, required_contract)
+                    _news_contract_matches(update, CURRENT_NEWS_CONTRACT)
                 )
                 and eligibility in available_news_eligibilities
             )
@@ -260,13 +224,18 @@ def _activated_generation_updates(ledger, decision_time: datetime):
         ).fetchone()
         if generation is not None:
             return ledger.connection.execute(
-                """SELECT u.* FROM news_model_generation_members_v1 m
-                JOIN model_updates_v2 u USING(model_version)
+                """SELECT u.* FROM (
+                    SELECT generation_id,model_version
+                    FROM news_model_generation_members_v1
+                    UNION ALL
+                    SELECT generation_id,model_version
+                    FROM news_model_generation_aux_members_v1
+                ) m JOIN model_updates_v2 u USING(model_version)
                 WHERE m.generation_id=?
                 ORDER BY CASE u.model_identity
                   WHEN 'MARKET_ONLY' THEN 1 WHEN 'NEWS_RESIDUAL' THEN 2
                   WHEN 'FULL' THEN 3 WHEN 'BROAD_NEWS_RESIDUAL' THEN 4
-                  WHEN 'BROAD_FULL' THEN 5 ELSE 99 END""",
+                  WHEN 'BROAD_FULL' THEN 5 WHEN 'NEWS_ONLY' THEN 6 ELSE 99 END""",
                 (generation["generation_id"],),
             ).fetchall()
     return []
@@ -280,27 +249,22 @@ def _has_activated_generation(ledger, decision_time: datetime) -> bool:
     ).fetchone() is not None
 
 
-def _activated_generation(ledger, decision_time: datetime):
-    """Return the generation contract that governed this decision time."""
-    return ledger.connection.execute(
-        """SELECT g.* FROM news_model_generation_activations_v1 a
-        JOIN news_model_generations_v1 g USING(generation_id)
-        WHERE a.activated_at<?
-        ORDER BY a.activated_at DESC,a.activation_id DESC LIMIT 1""",
-        (decision_time.isoformat(),),
-    ).fetchone()
-
-
-def _allow_activated_transition_contract(ledger, decision_time: datetime) -> bool:
-    """Keep a supported active generation alive until its atomic replacement."""
-    generation = _activated_generation(ledger, decision_time)
-    if generation is None:
-        return False
-    contract = supported_generation_contract(generation)
-    return (
-        contract is not None
-        and not generation_matches_contract(generation, CURRENT_NEWS_CONTRACT)
-    )
+def _require_complete_active_generation(
+    ledger, decision_time: datetime, predictions: list[dict],
+) -> None:
+    """Never let a running collector silently publish a partial model set."""
+    if not _has_activated_generation(ledger, decision_time):
+        return
+    present = {
+        str(row.get("model_identity")) for row in predictions
+        if row.get("model_identity") != "CHAMPION_0"
+    }
+    missing = sorted(MODEL_IDENTITIES - present)
+    if missing:
+        raise RuntimeError(
+            "activated model generation produced an incomplete prediction set: "
+            + ", ".join(missing)
+        )
 
 
 def _calibration(ledger, model_identity: str, decision_time: datetime) -> dict:
@@ -387,21 +351,13 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
     )
     created.append({"model_identity": "CHAMPION_0", "model_version": "always-wait-v1"})
 
-    active_generation = _activated_generation(ledger, decision_time)
-    active_contract = supported_generation_contract(active_generation)
-    allow_transition_contract = _allow_activated_transition_contract(
-        ledger, decision_time,
-    )
     updates = _activated_generation_updates(ledger, decision_time)
     features = json.loads(market_snapshot["features_json"])
     snapshots = dict(news_snapshots or {})
     snapshots.setdefault(ELIGIBILITY_VERSION, news_snapshot)
     snapshots.setdefault(f"{ELIGIBILITY_VERSION}+{EVIDENCE_POLICY_VERSION}", news_snapshot)
     values = [features.get(name) for name in MARKET_FEATURES]
-    for update in _active_updates(
-        updates, set(snapshots), enforce_current_contract=not allow_transition_contract,
-        news_contract=active_contract if allow_transition_contract else None,
-    ):
+    for update in _active_updates(updates, set(snapshots)):
         identity = update["model_identity"]
         update_eligibility = update["eligibility_version"]
         selected_news_snapshot = snapshots.get(update_eligibility, news_snapshot)
@@ -433,6 +389,14 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
             else:
                 news_residual = 0.0
             predicted = news_residual
+        elif identity == "NEWS_ONLY":
+            if news_exposed:
+                artifact = RidgeArtifact.read(update["artifact_path"])
+                predicted = float(artifact.predict(np.asarray([[
+                    float(news_features[name]) for name in artifact.feature_names
+                ]]))[0])
+            else:
+                predicted = None
         elif identity in {"FULL", "BROAD_FULL"}:
             manifest = json.loads(open(update["artifact_path"], encoding="utf-8").read())
             market_artifact = RidgeArtifact.read(manifest["market_artifact_path"])
@@ -455,11 +419,32 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
         quote_cost_estimate_u5 = (
             math.log(ask / bid) * 2.0 + ROUND_TRIP_COMMISSION_LOG_COST
         ) / u5
-        ev_long = predicted - quote_cost_estimate_u5
-        ev_short = -predicted - quote_cost_estimate_u5
-        recommended = _recommended_action(
+        ev_long = (
+            predicted - quote_cost_estimate_u5 if predicted is not None else None
+        )
+        ev_short = (
+            -predicted - quote_cost_estimate_u5 if predicted is not None else None
+        )
+        raw_recommended = _recommended_action(
             ev_long, ev_short, calibration["half_width"],
         )
+        recommended = raw_recommended
+        prediction_status = (
+            "READY" if calibration["status"] == "CALIBRATED"
+            else "PROVISIONAL_POST_COST_EV"
+        )
+        if identity in {"NEWS_RESIDUAL", "BROAD_NEWS_RESIDUAL"}:
+            prediction_status = "RESEARCH_RESIDUAL_DIRECTION"
+        elif identity == "NEWS_ONLY":
+            prediction_status = (
+                "RESEARCH_NEWS_ONLY" if news_exposed
+                else "NO_ELIGIBLE_NEWS"
+            )
+        if (
+            identity in {"NEWS_RESIDUAL", "FULL"}
+            and int(_row_value(update, "news_exposed_rows", 0) or 0) == 0
+        ):
+            prediction_status = "COLD_START_NO_CORE_EVIDENCE"
         _insert_prediction(
             ledger, decision_id=decision_id, decision_time=decision_time, created_at=created_at,
             model_version=update["model_version"], model_identity=identity,
@@ -469,12 +454,12 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
             )),
             predicted=predicted, news_residual=news_residual,
             ev_long=ev_long, ev_short=ev_short, calibration=calibration,
-            recommended=recommended, status=(
-                "READY" if calibration["status"] == "CALIBRATED"
-                else "PROVISIONAL_POST_COST_EV"
-            ),
+            recommended=recommended, status=prediction_status,
         )
         created.append({"model_identity": identity, "model_version": update["model_version"],
                         "eligibility_version": update_eligibility,
-                        "recommended_action": recommended, "calibration_status": calibration["status"]})
+                        "recommended_action": recommended,
+                        "raw_recommended_action": raw_recommended,
+                        "calibration_status": calibration["status"]})
+    _require_complete_active_generation(ledger, decision_time, created)
     return created

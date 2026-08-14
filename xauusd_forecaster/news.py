@@ -10,9 +10,11 @@ import json
 import os
 import re
 import urllib.parse
+import urllib.error
 import urllib.request
 import uuid
 import xml.etree.ElementTree as ET
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -25,17 +27,13 @@ from .content import (
     extract_federal_reserve_full_text,
 )
 from .forward_ledger import ForwardLedger
-from .news_relevance import (
-    GOOGLE_NEWS_MAX_ITEMS_PER_EVENT_FAMILY,
-    google_news_candidate_family,
-    google_news_item_is_relevant,
-    google_news_quality_rank,
-)
+from .news_relevance import google_news_item_is_relevant
 
 
 UTC = timezone.utc
 USER_AGENT = "XAUUSD-Forward-Evidence/0.1 (+local research collector)"
 NEWS_INTAKE_MAX_AGE = timedelta(hours=72)
+GOOGLE_NEWS_ATTEMPT_MULTIPLIER = 2
 
 
 @dataclass(frozen=True)
@@ -65,13 +63,9 @@ def _append_after_full_text(
     extractor: Callable[[str], tuple[str, str]],
 ) -> tuple[bool, str]:
     """Append exactly once, and only after auditable publisher text exists."""
-    latest = ledger.connection.execute(
-        """SELECT body FROM news_revisions
-           WHERE source=? AND source_item_id=?
-           ORDER BY revision_number DESC LIMIT 1""",
-        (record["source"], record["source_item_id"]),
-    ).fetchone()
-    if latest is not None and str(latest["body"] or "").startswith("[FULL_TEXT"):
+    if _has_stored_full_text(
+        ledger, str(record["source"]), str(record["source_item_id"])
+    ):
         return False, "UNCHANGED_FULL_TEXT"
     link = str(record.get("link") or "").strip()
     if not link:
@@ -89,6 +83,29 @@ def _append_after_full_text(
     return created, "INSERTED" if created else "UNCHANGED_FULL_TEXT"
 
 
+def _has_stored_full_text(
+    ledger: ForwardLedger, source: str, source_item_id: str,
+) -> bool:
+    latest = ledger.connection.execute(
+        """SELECT body FROM news_revisions
+           WHERE source=? AND source_item_id=?
+           ORDER BY revision_number DESC LIMIT 1""",
+        (source, source_item_id),
+    ).fetchone()
+    return bool(
+        latest is not None
+        and str(latest["body"] or "").startswith("[FULL_TEXT")
+    )
+
+
+def _redacted_error(error: Exception, *secrets: str, limit: int = 500) -> str:
+    text = str(error)
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "[REDACTED]")
+    return text[:limit]
+
+
 OFFICIAL_RSS_SOURCES = (
     RssSource("federal_reserve_press_all", "https://www.federalreserve.gov/feeds/press_all.xml"),
     RssSource("federal_reserve_monetary", "https://www.federalreserve.gov/feeds/press_monetary.xml"),
@@ -97,11 +114,9 @@ OFFICIAL_RSS_SOURCES = (
         "https://www.federalreserve.gov/feeds/speeches_and_testimony.xml",
     ),
 )
+FED_POLL_SOURCE = "federal_reserve_full_text"
 
 DIRECT_FULL_TEXT_RSS_SOURCES = (
-    RssSource("bls_employment_situation", "https://www.bls.gov/feed/empsit.rss"),
-    RssSource("bls_consumer_price_index", "https://www.bls.gov/feed/cpi.rss"),
-    RssSource("bls_job_openings", "https://www.bls.gov/feed/jolts.rss"),
     RssSource("eia_today_in_energy", "https://www.eia.gov/rss/todayinenergy.xml"),
     RssSource("eia_press_releases", "https://www.eia.gov/rss/press_rss.xml"),
     RssSource("ecb_press_releases", "https://www.ecb.europa.eu/rss/press.html"),
@@ -113,7 +128,6 @@ class HtmlNewsSource:
     name: str
     url: str
     link_prefix: str
-    relevance_terms: tuple[str, ...]
 
 
 DIRECT_FULL_TEXT_HTML_SOURCES = (
@@ -121,46 +135,13 @@ DIRECT_FULL_TEXT_HTML_SOURCES = (
         "us_treasury_press_releases",
         "https://home.treasury.gov/news/press-releases",
         "/news/press-releases/",
-        (
-            "sanction", "iran", "russia", "war", "terror", "oil", "hormuz",
-            "foreign exchange", "currency", "borrowing", "treasury market",
-            "financial stability", "debt",
-        ),
     ),
     HtmlNewsSource(
         "bea_economic_releases",
         "https://www.bea.gov/news/current-releases",
         "/news/20",
-        (
-            "gross domestic product", "gdp", "personal income", "outlays",
-            "pce", "international trade", "corporate profits",
-        ),
     ),
 )
-DIRECT_RSS_RELEVANCE_TERMS = {
-    "bls_employment_situation": (
-        "employment situation", "nonfarm payroll", "payroll employment",
-        "unemployment rate", "average hourly earnings",
-    ),
-    "bls_consumer_price_index": (
-        "consumer price index", "cpi", "inflation",
-    ),
-    "bls_job_openings": (
-        "job openings", "jolts", "labor turnover",
-    ),
-    "eia_today_in_energy": (
-        "oil", "crude", "petroleum", "gasoline", "diesel", "opec",
-        "hormuz", "strait", "production", "global demand", "supply disruption",
-    ),
-    "eia_press_releases": (
-        "oil", "crude", "petroleum", "gasoline", "diesel", "opec",
-        "hormuz", "strait", "production", "global demand", "supply disruption",
-    ),
-    "ecb_press_releases": (
-        "monetary policy", "interest rate", "inflation", "liquidity",
-        "balance sheet", "exchange rate", "financial stability", "euro area economy",
-    ),
-}
 
 BLS_API_URL = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
 BLS_SOURCE = "bls_public_api"
@@ -182,6 +163,8 @@ class FredSeries:
 
 
 FRED_SOURCE = "fred_graph_csv"
+FRED_POLL_SOURCE = f"{FRED_SOURCE}:bundle"
+FRED_API_URL = "https://api.stlouisfed.org/fred/series/observations"
 FRED_SERIES = (
     FredSeries("DGS2", "2-Year Treasury Constant Maturity Rate", "percent"),
     FredSeries("DFII10", "10-Year Treasury Inflation-Indexed Security", "percent"),
@@ -190,15 +173,44 @@ FRED_SERIES = (
     FredSeries("WALCL", "Federal Reserve Total Assets", "USD millions"),
     FredSeries("VIXCLS", "CBOE Volatility Index", "index"),
 )
-GDELT_SOURCE = "gdelt_gold_geopolitics"
-GDELT_URL = (
-    "https://api.gdeltproject.org/api/v2/doc/doc?"
-    "query=" + urllib.parse.quote(
-        "gold (war OR conflict OR sanctions OR geopolitical OR Fed OR rates "
-        "OR yield OR dollar OR inflation OR payrolls OR jobs OR oil OR central bank)"
-    )
-    + "&mode=artlist&maxrecords=25&timespan=2h&format=json"
+EIA_API_SOURCE = "eia_open_data_api"
+EIA_API_URL = "https://api.eia.gov/v2/petroleum/pri/spt/data/"
+EIA_WTI_SERIES_ID = "EIA_RWTC"
+BEA_API_SOURCE = "bea_public_api"
+BEA_API_URL = "https://apps.bea.gov/api/data"
+
+
+@dataclass(frozen=True)
+class BeaSeries:
+    series_id: str
+    table_name: str
+    line_number: str
+    title: str
+    unit: str
+
+
+BEA_SERIES = (
+    BeaSeries(
+        "BEA_REAL_GDP_GROWTH_QOQ_ANNUALIZED", "T10101", "1",
+        "Real gross domestic product growth", "percent annual rate",
+    ),
+    BeaSeries(
+        "BEA_GDP_PRICE_INDEX_Q", "T10104", "1",
+        "Gross domestic product price index", "index",
+    ),
+    BeaSeries(
+        "BEA_PCE_PRICE_INDEX_Q", "T10104", "2",
+        "Personal consumption expenditures price index", "index",
+    ),
 )
+GDELT_SOURCE = "gdelt_gold_geopolitics"
+GDELT_LAST_UPDATE_URL = (
+    "https://storage.googleapis.com/data.gdeltproject.org/gdeltv2/lastupdate.txt"
+)
+GDELT_GCS_PREFIX = "https://storage.googleapis.com/data.gdeltproject.org/gdeltv2/"
+GDELT_MAX_COMPRESSED_BYTES = 16 * 1024 * 1024
+GDELT_MAX_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
+GDELT_MAX_CANDIDATES = 25
 GOOGLE_GEO_SOURCE = "google_news_gold_context"
 
 
@@ -221,11 +233,6 @@ GOOGLE_NEWS_LANES = (
         "OR oil OR war OR conflict OR sanctions OR geopolitical OR central bank) when:3d",
     ),
     GoogleNewsLane(
-        "google_news_bls_official_releases",
-        'site:bls.gov ("Employment Situation" OR "Consumer Price Index" '
-        'OR "Job Openings and Labor Turnover") when:3d',
-    ),
-    GoogleNewsLane(
         "google_news_us_employment",
         '("nonfarm payrolls" OR NFP OR "jobs report" OR "employment situation" '
         'OR "unemployment rate" OR "average hourly earnings" OR JOLTS) when:3d',
@@ -243,6 +250,21 @@ GOOGLE_NEWS_LANES = (
 GOOGLE_GEO_URL = GOOGLE_NEWS_LANES[0].url
 WGC_SOURCE = "world_gold_council_central_banks"
 WGC_URL = "https://www.gold.org/blog-categories/central-banks"
+
+# Canonical source identities emitted by the runtime collection pipeline.
+# Monitoring and release validation derive their family from this set.
+RUNTIME_NEWS_POLL_SOURCES = frozenset({
+    FED_POLL_SOURCE,
+    BLS_SOURCE,
+    FRED_POLL_SOURCE,
+    EIA_API_SOURCE,
+    BEA_API_SOURCE,
+    GDELT_SOURCE,
+    WGC_SOURCE,
+    *(source.name for source in DIRECT_FULL_TEXT_RSS_SOURCES),
+    *(source.name for source in DIRECT_FULL_TEXT_HTML_SOURCES),
+    *(lane.name for lane in GOOGLE_NEWS_LANES),
+})
 
 
 def _text(node: ET.Element, names: tuple[str, ...]) -> str:
@@ -401,31 +423,52 @@ def collect_fred_macro(
     fetched_at: datetime,
     fetcher: Callable[[str], bytes] = fetch_url,
 ) -> dict[str, object]:
-    """Collect free public FRED graph CSV snapshots with first-seen revisions."""
+    """Collect bounded official FRED snapshots with first-seen revisions."""
     interval = timedelta(minutes=60)
-    poll_source = f"{FRED_SOURCE}:bundle"
+    poll_source = FRED_POLL_SOURCE
     last_poll = ledger.latest_source_poll_time(poll_source)
     if last_poll is not None and fetched_at - last_poll < interval:
-        return {"source": FRED_SOURCE, "status": "SKIPPED_INTERVAL"}
+        return {"source": FRED_POLL_SOURCE, "status": "SKIPPED_INTERVAL"}
     inserted = 0
     unchanged = 0
     errors: list[str] = []
     hashes: list[str] = []
     start = (fetched_at - timedelta(days=45)).date().isoformat()
+    api_key = os.environ.get("FRED_API_KEY", "").strip()
     for series in FRED_SERIES:
         try:
-            url = (
-                "https://fred.stlouisfed.org/graph/fredgraph.csv?"
-                + urllib.parse.urlencode({"id": series.series_id, "cosd": start})
-            )
+            if api_key:
+                url = FRED_API_URL + "?" + urllib.parse.urlencode({
+                    "series_id": series.series_id,
+                    "api_key": api_key,
+                    "file_type": "json",
+                    "observation_start": start,
+                    "sort_order": "desc",
+                    "limit": 2,
+                })
+                provenance_url = FRED_API_URL
+            else:
+                url = (
+                    "https://fred.stlouisfed.org/graph/fredgraph.csv?"
+                    + urllib.parse.urlencode({"id": series.series_id, "cosd": start})
+                )
+                provenance_url = url
             raw = fetcher(url)
             hashes.append(hashlib.sha256(raw).hexdigest())
-            rows = []
-            for row in csv.DictReader(io.StringIO(raw.decode("utf-8-sig"))):
-                raw_value = (row.get(series.series_id) or "").strip()
-                if not raw_value or raw_value == ".":
-                    continue
-                rows.append((row["observation_date"], float(raw_value)))
+            if api_key:
+                envelope = json.loads(raw)
+                rows = [
+                    (str(row["date"]), float(row["value"]))
+                    for row in reversed(envelope.get("observations", []))
+                    if str(row.get("value") or "").strip() not in {"", "."}
+                ]
+            else:
+                rows = []
+                for row in csv.DictReader(io.StringIO(raw.decode("utf-8-sig"))):
+                    raw_value = (row.get(series.series_id) or "").strip()
+                    if not raw_value or raw_value == ".":
+                        continue
+                    rows.append((row["observation_date"], float(raw_value)))
             if not rows:
                 raise ValueError(f"{series.series_id} returned no finite observations")
             # Two values initialize a current forward state. Their first-seen time is
@@ -436,7 +479,8 @@ def collect_fred_macro(
                     "title": series.title,
                     "observation_period": period,
                     "value": value,
-                    "retrieved_from": url,
+                    "retrieved_from": provenance_url,
+                    "transport": "FRED_JSON_API" if api_key else "FRED_GRAPH_CSV",
                 }
                 digest = hashlib.sha256(
                     json.dumps(stored, sort_keys=True, separators=(",", ":")).encode()
@@ -457,7 +501,10 @@ def collect_fred_macro(
                 inserted += int(created)
                 unchanged += int(not created)
         except Exception as error:
-            errors.append(f"{series.series_id}:{type(error).__name__}:{str(error)[:120]}")
+            errors.append(
+                f"{series.series_id}:{type(error).__name__}:"
+                f"{_redacted_error(error, api_key, limit=120)}"
+            )
     status = "OK" if not errors else ("PARTIAL" if inserted or unchanged else "ERROR")
     ledger.append_source_poll(
         {
@@ -471,11 +518,228 @@ def collect_fred_macro(
         }
     )
     return {
-        "source": FRED_SOURCE,
+        "source": FRED_POLL_SOURCE,
         "status": status,
         "inserted_revisions": inserted,
         "unchanged_items": unchanged,
         "errors": errors,
+        "registered": bool(api_key),
+    }
+
+
+def collect_eia_macro(
+    ledger: ForwardLedger,
+    fetched_at: datetime,
+    fetcher: Callable[[str], bytes] = fetch_url,
+) -> dict[str, object]:
+    """Collect bounded official EIA WTI observations as Forward evidence."""
+    api_key = os.environ.get("EIA_API_KEY", "").strip()
+    if not api_key:
+        return {"source": EIA_API_SOURCE, "status": "DISABLED_KEY_MISSING"}
+    last_poll = ledger.latest_source_poll_time(EIA_API_SOURCE)
+    if last_poll is not None and fetched_at - last_poll < timedelta(hours=1):
+        return {"source": EIA_API_SOURCE, "status": "SKIPPED_INTERVAL"}
+    poll_id = str(uuid.uuid5(
+        uuid.NAMESPACE_URL, f"{EIA_API_SOURCE}|{fetched_at.isoformat()}"
+    ))
+    try:
+        url = EIA_API_URL + "?" + urllib.parse.urlencode({
+            "api_key": api_key,
+            "frequency": "daily",
+            "data[0]": "value",
+            "facets[series][]": "RWTC",
+            "sort[0][column]": "period",
+            "sort[0][direction]": "desc",
+            "offset": 0,
+            "length": 2,
+        })
+        raw = fetcher(url)
+        envelope = json.loads(raw)
+        rows = list(reversed(envelope.get("response", {}).get("data", [])))
+        if not rows:
+            raise ValueError("EIA RWTC returned no observations")
+        inserted = 0
+        unchanged = 0
+        for row in rows:
+            period = str(row.get("period") or "").strip()
+            value = str(row.get("value") or "").strip()
+            if not period or not value or value == ".":
+                continue
+            stored = {
+                "series_id": EIA_WTI_SERIES_ID,
+                "eia_series": "RWTC",
+                "title": "Cushing, OK WTI Spot Price FOB",
+                "observation_period": period,
+                "value": float(value),
+                "retrieved_from": EIA_API_URL,
+                "transport": "EIA_JSON_API_V2",
+            }
+            digest = hashlib.sha256(
+                json.dumps(stored, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            _, created = ledger.append_macro_observation({
+                "source": EIA_API_SOURCE,
+                "series_id": EIA_WTI_SERIES_ID,
+                "observation_period": period,
+                "collector_first_seen_time": fetched_at,
+                "fetched_time": fetched_at,
+                "value": float(value),
+                "unit": "USD/barrel",
+                "payload": stored,
+                "content_hash": digest,
+            })
+            inserted += int(created)
+            unchanged += int(not created)
+        if not inserted and not unchanged:
+            raise ValueError("EIA RWTC returned no finite observations")
+        ledger.append_source_poll({
+            "poll_id": poll_id,
+            "source": EIA_API_SOURCE,
+            "fetched_time": fetched_at,
+            "status": "OK",
+            "payload_hash": hashlib.sha256(raw).hexdigest(),
+        })
+        return {
+            "source": EIA_API_SOURCE,
+            "status": "OK",
+            "inserted_revisions": inserted,
+            "unchanged_items": unchanged,
+            "registered": True,
+        }
+    except Exception as error:
+        rate_limited = getattr(error, "code", None) == 429
+        safe_error = _redacted_error(error, api_key)
+        ledger.append_source_poll({
+            "poll_id": poll_id,
+            "source": EIA_API_SOURCE,
+            "fetched_time": fetched_at,
+            "status": "ERROR",
+            "error_type": "RateLimited" if rate_limited else type(error).__name__,
+            "error": safe_error,
+        })
+        return {
+            "source": EIA_API_SOURCE,
+            "status": "ERROR",
+            "error_type": "RateLimited" if rate_limited else type(error).__name__,
+            "error": safe_error,
+            "registered": True,
+        }
+
+
+def collect_bea_macro(
+    ledger: ForwardLedger,
+    fetched_at: datetime,
+    fetcher: Callable[[str], bytes] = fetch_url,
+) -> dict[str, object]:
+    """Collect bounded official BEA NIPA observations as Forward evidence."""
+    api_key = os.environ.get("BEA_API_KEY", "").strip()
+    if not api_key:
+        return {"source": BEA_API_SOURCE, "status": "DISABLED_KEY_MISSING"}
+    last_poll = ledger.latest_source_poll_time(BEA_API_SOURCE)
+    if last_poll is not None and fetched_at - last_poll < timedelta(hours=1):
+        return {"source": BEA_API_SOURCE, "status": "SKIPPED_INTERVAL"}
+    poll_id = str(uuid.uuid5(
+        uuid.NAMESPACE_URL, f"{BEA_API_SOURCE}|{fetched_at.isoformat()}"
+    ))
+    inserted = 0
+    unchanged = 0
+    hashes: list[str] = []
+    errors: list[str] = []
+    years = f"{fetched_at.year - 1},{fetched_at.year}"
+    by_table: dict[str, list[BeaSeries]] = {}
+    for series in BEA_SERIES:
+        by_table.setdefault(series.table_name, []).append(series)
+    for table_name, configured_series in by_table.items():
+        try:
+            url = BEA_API_URL + "?" + urllib.parse.urlencode({
+                "UserID": api_key,
+                "method": "GetData",
+                "DatasetName": "NIPA",
+                "TableName": table_name,
+                "Frequency": "Q",
+                "Year": years,
+                "ResultFormat": "JSON",
+            })
+            raw = fetcher(url)
+            hashes.append(hashlib.sha256(raw).hexdigest())
+            envelope = json.loads(raw)
+            results = envelope.get("BEAAPI", {}).get("Results", {})
+            error = results.get("Error") or {}
+            if str(error.get("APIErrorCode") or "").strip():
+                raise ValueError(
+                    f"BEA {error.get('APIErrorCode')}: "
+                    f"{error.get('APIErrorDescription')}"
+                )
+            rows = results.get("Data") or []
+            for series in configured_series:
+                selected = sorted(
+                    (
+                        row for row in rows
+                        if str(row.get("LineNumber") or "") == series.line_number
+                    ),
+                    key=lambda row: str(row.get("TimePeriod") or ""),
+                )[-2:]
+                if not selected:
+                    raise ValueError(
+                        f"{table_name} line {series.line_number} returned no observations"
+                    )
+                for row in selected:
+                    period = str(row.get("TimePeriod") or "").strip()
+                    raw_value = str(row.get("DataValue") or "").replace(",", "").strip()
+                    if not period or not raw_value or raw_value == "---":
+                        continue
+                    stored = {
+                        "series_id": series.series_id,
+                        "bea_dataset": "NIPA",
+                        "bea_table": table_name,
+                        "bea_line": series.line_number,
+                        "title": series.title,
+                        "observation_period": period,
+                        "value": float(raw_value),
+                        "retrieved_from": BEA_API_URL,
+                        "transport": "BEA_JSON_API",
+                    }
+                    digest = hashlib.sha256(
+                        json.dumps(
+                            stored, sort_keys=True, separators=(",", ":")
+                        ).encode()
+                    ).hexdigest()
+                    _, created = ledger.append_macro_observation({
+                        "source": BEA_API_SOURCE,
+                        "series_id": series.series_id,
+                        "observation_period": period,
+                        "collector_first_seen_time": fetched_at,
+                        "fetched_time": fetched_at,
+                        "value": float(raw_value),
+                        "unit": series.unit,
+                        "payload": stored,
+                        "content_hash": digest,
+                    })
+                    inserted += int(created)
+                    unchanged += int(not created)
+        except Exception as error:
+            errors.append(
+                f"{table_name}:{type(error).__name__}:"
+                f"{_redacted_error(error, api_key, limit=180)}"
+            )
+    status = "OK" if not errors else ("PARTIAL" if inserted or unchanged else "ERROR")
+    ledger.append_source_poll({
+        "poll_id": poll_id,
+        "source": BEA_API_SOURCE,
+        "fetched_time": fetched_at,
+        "status": status,
+        "payload_hash": hashlib.sha256("".join(hashes).encode()).hexdigest()
+        if hashes else None,
+        "error_type": "TableErrors" if errors else None,
+        "error": " | ".join(errors)[:500] if errors else None,
+    })
+    return {
+        "source": BEA_API_SOURCE,
+        "status": status,
+        "inserted_revisions": inserted,
+        "unchanged_items": unchanged,
+        "errors": errors,
+        "registered": True,
     }
 
 
@@ -485,48 +749,76 @@ def collect_gdelt_news(
     fetcher: Callable[[str], bytes] = fetch_url,
     content_extractor: Callable[[str], tuple[str, str]] = extract_article_full_text,
 ) -> dict[str, object]:
-    """Collect GDELT with an append-only 429 circuit breaker.
-
-    Google News is collected independently, so a GDELT cooldown never stops the
-    geopolitical-news lane.  A successful probe closes the circuit naturally.
-    """
+    """Collect bounded gold candidates from GDELT's official 15-minute GKG feed."""
     last_poll = ledger.latest_source_poll_time(GDELT_SOURCE)
-    recent_polls = ledger.connection.execute(
-        """SELECT fetched_time,status,error FROM source_polls
-           WHERE source=? ORDER BY fetched_time DESC,poll_id DESC LIMIT 8""",
-        (GDELT_SOURCE,),
-    ).fetchall()
-    rate_limit_streak = 0
-    for row in recent_polls:
-        if row["status"] == "ERROR" and "429" in str(row["error"] or ""):
-            rate_limit_streak += 1
-        else:
-            break
-    cooldown_minutes = (
-        min(360, 60 * (2 ** min(rate_limit_streak, 3)))
-        if rate_limit_streak else 60
-    )
-    retry_at = last_poll + timedelta(minutes=cooldown_minutes) if last_poll else None
-    if retry_at is not None and fetched_at < retry_at:
+    if last_poll is not None and fetched_at < last_poll + timedelta(hours=1):
         return {
             "source": GDELT_SOURCE,
-            "status": "SKIPPED_BACKOFF" if rate_limit_streak else "SKIPPED_INTERVAL",
-            "fallback_source": GOOGLE_GEO_SOURCE if rate_limit_streak else None,
-            "retry_at": retry_at.isoformat(),
-            "rate_limit_streak": rate_limit_streak,
+            "status": "SKIPPED_INTERVAL",
         }
     poll_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{GDELT_SOURCE}|{fetched_at.isoformat()}"))
     try:
-        raw = fetcher(GDELT_URL)
+        manifest = fetcher(GDELT_LAST_UPDATE_URL).decode("ascii")
+        manifest_rows = [line.split(maxsplit=2) for line in manifest.splitlines()]
+        gkg = next(
+            parts
+            for parts in manifest_rows
+            if len(parts) == 3 and parts[2].endswith(".gkg.csv.zip")
+        )
+        expected_size = int(gkg[0])
+        expected_md5 = gkg[1].lower()
+        archive_name = urllib.parse.urlparse(gkg[2]).path.rsplit("/", 1)[-1]
+        if not archive_name or expected_size > GDELT_MAX_COMPRESSED_BYTES:
+            raise ValueError("GDELT compressed archive exceeds the safety limit")
+        archive_url = GDELT_GCS_PREFIX + urllib.parse.quote(archive_name)
+        raw = fetcher(archive_url)
+        if len(raw) != expected_size:
+            raise ValueError("GDELT archive size does not match the manifest")
+        if hashlib.md5(raw, usedforsecurity=False).hexdigest().lower() != expected_md5:
+            raise ValueError("GDELT archive MD5 does not match the manifest")
+
+        with zipfile.ZipFile(io.BytesIO(raw)) as zipped:
+            members = [item for item in zipped.infolist() if not item.is_dir()]
+            if len(members) != 1 or members[0].file_size > GDELT_MAX_UNCOMPRESSED_BYTES:
+                raise ValueError("GDELT archive has an unsafe ZIP layout")
+            payload = zipped.read(members[0])
+
         inserted = 0
         unchanged = 0
         rejected: dict[str, int] = {}
-        for article in json.loads(raw).get("articles", [])[:25]:
-            link = str(article.get("url") or "").strip()
-            headline = _clean(str(article.get("title") or ""))
+        discovered = 0
+        rows = csv.reader(
+            io.StringIO(payload.decode("utf-8", errors="replace")), delimiter="\t"
+        )
+        for fields in rows:
+            if len(fields) < 27:
+                rejected["MALFORMED_GKG_ROW"] = (
+                    rejected.get("MALFORMED_GKG_ROW", 0) + 1
+                )
+                continue
+            link = fields[4].strip()
+            extras = fields[26]
+            title_match = re.search(r"<PAGE_TITLE>(.*?)</PAGE_TITLE>", extras, re.DOTALL)
+            headline = _clean(title_match.group(1) if title_match else "")
             if not link or not headline:
                 continue
-            published = _published(str(article.get("seendate") or ""))
+            discovery_text = " ".join((headline, fields[7], fields[8])).lower()
+            if not re.search(
+                r"(?:^|[^a-z])(gold|bullion|xauusd)(?:$|[^a-z])", discovery_text
+            ):
+                continue
+            if discovered >= GDELT_MAX_CANDIDATES:
+                break
+            discovered += 1
+            precise_match = re.search(
+                r"<PAGE_PRECISEPUBTIMESTAMP>(\d{14})</PAGE_PRECISEPUBTIMESTAMP>",
+                extras,
+            )
+            timestamp = precise_match.group(1) if precise_match else fields[1]
+            try:
+                published = datetime.strptime(timestamp, "%Y%m%d%H%M%S").replace(tzinfo=UTC)
+            except ValueError:
+                published = None
             record = {
                 "source": GDELT_SOURCE,
                 "source_item_id": link,
@@ -543,12 +835,6 @@ def collect_gdelt_news(
             if not eligible:
                 rejected[reason] = rejected.get(reason, 0) + 1
                 continue
-            relevant, reason = google_news_item_is_relevant(
-                GDELT_SOURCE, headline, published, fetched_at,
-            )
-            if not relevant:
-                rejected[reason] = rejected.get(reason, 0) + 1
-                continue
             created, reason = _append_after_full_text(ledger, record, content_extractor)
             inserted += int(created)
             unchanged += int(reason == "UNCHANGED_FULL_TEXT")
@@ -556,20 +842,17 @@ def collect_gdelt_news(
                 rejected[reason] = rejected.get(reason, 0) + 1
         ledger.append_source_poll({"poll_id": poll_id, "source": GDELT_SOURCE, "fetched_time": fetched_at, "status": "OK", "payload_hash": hashlib.sha256(raw).hexdigest()})
         return {"source": GDELT_SOURCE, "status": "OK", "inserted_revisions": inserted,
-                "unchanged_items": unchanged, "rejected_reasons": rejected}
+                "unchanged_items": unchanged, "discovered_candidates": discovered,
+                "archive": archive_name, "rejected_reasons": rejected}
     except Exception as error:
         message = str(error)[:500]
         ledger.append_source_poll({"poll_id": poll_id, "source": GDELT_SOURCE, "fetched_time": fetched_at, "status": "ERROR", "error_type": type(error).__name__, "error": message})
-        next_streak = rate_limit_streak + int("429" in message)
-        next_cooldown = min(360, 60 * (2 ** min(next_streak, 3))) if next_streak else 60
         return {
             "source": GDELT_SOURCE,
             "status": "ERROR",
             "error_type": type(error).__name__,
             "error": message,
             "fallback_source": GOOGLE_GEO_SOURCE,
-            "retry_at": (fetched_at + timedelta(minutes=next_cooldown)).isoformat(),
-            "rate_limit_streak": next_streak,
         }
 
 
@@ -583,32 +866,7 @@ def collect_direct_full_text_rss_news(
     statuses: list[dict[str, object]] = []
     for source in DIRECT_FULL_TEXT_RSS_SOURCES:
         last_poll = ledger.latest_source_poll_time(source.name)
-        recent_polls = ledger.connection.execute(
-            """SELECT fetched_time,status,error FROM source_polls
-            WHERE source=? ORDER BY fetched_time DESC,poll_id DESC LIMIT 3""",
-            (source.name,),
-        ).fetchall()
-        forbidden_streak = 0
-        for row in recent_polls:
-            if row["status"] == "ERROR" and "403" in str(row["error"] or ""):
-                forbidden_streak += 1
-            else:
-                break
-        circuit_retry_at = (
-            last_poll + timedelta(hours=6)
-            if source.name.startswith("bls_") and forbidden_streak >= 3 and last_poll
-            else None
-        )
-        if circuit_retry_at is not None and fetched_at < circuit_retry_at:
-            statuses.append({
-                "source": source.name,
-                "status": "SKIPPED_CIRCUIT_OPEN",
-                "failure_streak": forbidden_streak,
-                "retry_at": circuit_retry_at.isoformat(),
-                "fallback_source": BLS_SOURCE,
-            })
-            continue
-        interval = timedelta(minutes=5 if source.name.startswith("bls_") else 10)
+        interval = timedelta(minutes=10)
         if last_poll is not None and fetched_at - last_poll < interval:
             statuses.append({"source": source.name, "status": "SKIPPED_INTERVAL"})
             continue
@@ -618,18 +876,25 @@ def collect_direct_full_text_rss_news(
             inserted = 0
             unchanged = 0
             rejected: dict[str, int] = {}
-            relevant = []
-            terms = DIRECT_RSS_RELEVANCE_TERMS[source.name]
-            for record in parse_rss(raw, source, fetched_at):
-                searchable = f"{record['headline']} {record['body']}".lower()
-                if any(term in searchable for term in terms):
-                    relevant.append(record)
-            limit = 12 if source.name.startswith("bls_") else 5
-            for record in relevant[:limit]:
+            candidates = parse_rss(raw, source, fetched_at)
+            eligible_records = []
+            for record in candidates:
                 eligible, reason = _current_forward_news(record, ledger, fetched_at)
-                if not eligible:
+                if eligible:
+                    eligible_records.append(record)
+                else:
                     rejected[reason] = rejected.get(reason, 0) + 1
+            limit = 5
+            full_text_attempts = 0
+            for record in eligible_records:
+                if _has_stored_full_text(
+                    ledger, str(record["source"]), str(record["source_item_id"])
+                ):
+                    unchanged += 1
                     continue
+                if full_text_attempts >= limit:
+                    continue
+                full_text_attempts += 1
                 created, reason = _append_after_full_text(
                     ledger, record, content_extractor
                 )
@@ -637,19 +902,30 @@ def collect_direct_full_text_rss_news(
                 unchanged += int(reason == "UNCHANGED_FULL_TEXT")
                 if reason not in {"INSERTED", "UNCHANGED_FULL_TEXT"}:
                     rejected[reason] = rejected.get(reason, 0) + 1
+            content_blocked = bool(rejected.get("FULL_TEXT_UNAVAILABLE"))
+            poll_status = "PARTIAL" if content_blocked else "OK"
             ledger.append_source_poll(
                 {
                     "poll_id": poll_id,
                     "source": source.name,
                     "fetched_time": fetched_at,
-                    "status": "OK",
+                    "status": poll_status,
                     "payload_hash": hashlib.sha256(raw).hexdigest(),
+                    "error_type": "PublisherContentUnavailable" if content_blocked else None,
+                    "error": (
+                        "Eligible official release found, but publisher full text was unavailable"
+                        if content_blocked else None
+                    ),
                 }
             )
             statuses.append(
                 {
                     "source": source.name,
-                    "status": "OK",
+                    "status": poll_status,
+                    "candidate_items": len(candidates),
+                    "eligible_items": len(eligible_records),
+                    "full_text_attempt_limit": limit,
+                    "full_text_attempts": full_text_attempts,
                     "inserted_revisions": inserted,
                     "unchanged_items": unchanged,
                     "rejected_reasons": rejected,
@@ -702,9 +978,7 @@ def collect_direct_full_text_html_news(
                 if not path.startswith(source.link_prefix) or not headline:
                     continue
                 link = urllib.parse.urljoin(source.url, path)
-                if link in seen or not any(
-                    term in headline.lower() for term in source.relevance_terms
-                ):
+                if link in seen:
                     continue
                 seen.add(link)
                 body = f"Official {source.name} listing discovery"
@@ -728,24 +1002,15 @@ def collect_direct_full_text_html_news(
                 records[-1]["content_hash"] = hashlib.sha256(
                     f"{headline}\n{body}\n{link}\n{published}".encode()
                 ).hexdigest()
-                if len(records) >= 5:
-                    break
             inserted = 0
             unchanged = 0
             preserved_full_text = 0
             rejected: dict[str, int] = {}
+            eligible_items = 0
+            full_text_attempts = 0
             for record in records:
-                latest = ledger.connection.execute(
-                    """SELECT headline, body, link FROM news_revisions
-                    WHERE source=? AND source_item_id=?
-                    ORDER BY revision_number DESC LIMIT 1""",
-                    (record["source"], record["source_item_id"]),
-                ).fetchone()
-                if (
-                    latest is not None
-                    and str(latest["body"] or "").startswith("[FULL_TEXT")
-                    and str(latest["headline"] or "") == record["headline"]
-                    and str(latest["link"] or "") == record["link"]
+                if _has_stored_full_text(
+                    ledger, str(record["source"]), str(record["source_item_id"])
                 ):
                     # A listing page proves that the article still exists; it
                     # does not supersede an already captured article body.
@@ -756,6 +1021,10 @@ def collect_direct_full_text_html_news(
                 if not eligible:
                     rejected[reason] = rejected.get(reason, 0) + 1
                     continue
+                eligible_items += 1
+                if full_text_attempts >= 5:
+                    continue
+                full_text_attempts += 1
                 created, reason = _append_after_full_text(
                     ledger, record, content_extractor
                 )
@@ -764,20 +1033,31 @@ def collect_direct_full_text_html_news(
                 if reason not in {"INSERTED", "UNCHANGED_FULL_TEXT"}:
                     rejected[reason] = rejected.get(reason, 0) + 1
             if not records:
-                raise ValueError(f"{source.name} returned no relevant direct links")
+                raise ValueError(f"{source.name} returned no direct article links")
+            content_blocked = bool(rejected.get("FULL_TEXT_UNAVAILABLE"))
+            poll_status = "PARTIAL" if content_blocked else "OK"
             ledger.append_source_poll(
                 {
                     "poll_id": poll_id,
                     "source": source.name,
                     "fetched_time": fetched_at,
-                    "status": "OK",
+                    "status": poll_status,
                     "payload_hash": hashlib.sha256(raw).hexdigest(),
+                    "error_type": "PublisherContentUnavailable" if content_blocked else None,
+                    "error": (
+                        "Eligible official release found, but publisher full text was unavailable"
+                        if content_blocked else None
+                    ),
                 }
             )
             statuses.append(
                 {
                     "source": source.name,
-                    "status": "OK",
+                    "status": poll_status,
+                    "candidate_items": len(records),
+                    "eligible_items": eligible_items,
+                    "full_text_attempt_limit": 5,
+                    "full_text_attempts": full_text_attempts,
                     "inserted_revisions": inserted,
                     "unchanged_items": unchanged,
                     "preserved_full_text": preserved_full_text,
@@ -970,60 +1250,20 @@ def collect_google_news_lane(
                     "SELECT 1 FROM news_revisions WHERE source=? AND source_item_id=? LIMIT 1",
                     (record["source"], record["source_item_id"]),
                 ).fetchone() is not None,
-                google_news_quality_rank(str(record.get("headline") or "")),
                 -(record["source_published_time"].timestamp()
                   if record.get("source_published_time") else 0.0),
                 str(record["source_item_id"]),
             ),
         )
-        selected = []
-        family_counts: dict[str, int] = {}
-        # Count already-admitted Google items in the same freshness window so
-        # repeated polls cannot slowly ingest the other 97 rewrites of one
-        # report. Recognized family keys are intentionally shared across lanes.
-        existing_family_rows = ledger.connection.execute(
-            """SELECT existing.source, existing.headline,
-                      existing.source_published_time
-               FROM news_revisions existing
-               WHERE existing.source LIKE 'google_news_%'
-                 AND existing.revision_number=(
-                   SELECT max(newer.revision_number) FROM news_revisions newer
-                   WHERE newer.source=existing.source
-                     AND newer.source_item_id=existing.source_item_id)
-                 AND existing.source_published_time>=?""",
-            ((fetched_at - timedelta(hours=72)).isoformat(),),
-        ).fetchall()
-        for existing_row in existing_family_rows:
-            existing_published = (
-                datetime.fromisoformat(str(existing_row["source_published_time"]))
-                if existing_row["source_published_time"] else None
-            )
-            family = google_news_candidate_family(
-                str(existing_row["source"]),
-                str(existing_row["headline"] or ""),
-                existing_published,
-            )
-            family_counts[family] = family_counts.get(family, 0) + 1
-        for record in ranked:
-            family = google_news_candidate_family(
-                lane.name,
-                str(record.get("headline") or ""),
-                record.get("source_published_time"),
-            )
-            official_bls_fallback = lane.name == "google_news_bls_official_releases"
-            if (
-                not official_bls_fallback
-                and family_counts.get(family, 0) >= GOOGLE_NEWS_MAX_ITEMS_PER_EVENT_FAMILY
-            ):
-                rejected["EVENT_FAMILY_CAP"] = rejected.get("EVENT_FAMILY_CAP", 0) + 1
-                continue
-            if not official_bls_fallback:
-                family_counts[family] = family_counts.get(family, 0) + 1
-            selected.append(record)
-            if len(selected) >= limit:
-                break
+        # ``cluster_id``/``source_item_id`` above are the single mechanical
+        # deduplication boundary. Event meaning belongs to the AI annotator.
         full_text_records = []
-        for record in selected:
+        attempted = 0
+        attempt_budget = max(limit, limit * GOOGLE_NEWS_ATTEMPT_MULTIPLIER)
+        deferred = 0
+        for record in ranked:
+            if len(full_text_records) >= limit:
+                break
             existing = ledger.connection.execute(
                 """SELECT link, body FROM news_revisions
                 WHERE source=? AND source_item_id=?
@@ -1036,6 +1276,20 @@ def collect_google_news_lane(
                 unchanged += 1
                 full_text_records.append(record)
                 continue
+            if attempted >= attempt_budget:
+                break
+            retry = ledger.connection.execute(
+                """SELECT next_retry_at FROM news_discovery_failures
+                   WHERE source=? AND source_item_id=?
+                   ORDER BY attempt_number DESC LIMIT 1""",
+                (record["source"], record["source_item_id"]),
+            ).fetchone()
+            if retry is not None and datetime.fromisoformat(
+                str(retry["next_retry_at"])
+            ) > fetched_at:
+                deferred += 1
+                continue
+            attempted += 1
             if existing_link and urllib.parse.urlparse(existing_link).hostname != "news.google.com":
                 resolved = existing_link
             else:
@@ -1044,13 +1298,21 @@ def collect_google_news_lane(
                 rejected["PUBLISHER_URL_UNRESOLVED"] = rejected.get(
                     "PUBLISHER_URL_UNRESOLVED", 0
                 ) + 1
+                _append_discovery_failure(
+                    ledger, record, fetched_at, "PUBLISHER_URL_UNRESOLVED",
+                    "Google discovery URL could not be resolved",
+                )
                 continue
             try:
                 text, source_url = content_extractor(resolved)
-            except Exception:
+            except Exception as error:
                 rejected["FULL_TEXT_UNAVAILABLE"] = rejected.get(
                     "FULL_TEXT_UNAVAILABLE", 0
                 ) + 1
+                _append_discovery_failure(
+                    ledger, record, fetched_at, type(error).__name__, str(error),
+                    error=error,
+                )
                 continue
             record["link"] = source_url
             record["body"] = f"[FULL_TEXT source={source_url} chars={len(text)}]\n{text}"
@@ -1061,13 +1323,8 @@ def collect_google_news_lane(
             inserted += int(created)
             unchanged += int(not created)
             full_text_records.append(record)
-        content_blocked = (
-            bool(selected)
-            and not full_text_records
-            and any(rejected.get(reason, 0) for reason in (
-                "PUBLISHER_URL_UNRESOLVED", "FULL_TEXT_UNAVAILABLE",
-            ))
-        )
+        target_count = min(limit, len(ranked))
+        content_blocked = len(full_text_records) < target_count
         poll_status = "PARTIAL" if content_blocked else "OK"
         ledger.append_source_poll({
             "poll_id": poll_id, "source": lane.name, "fetched_time": fetched_at,
@@ -1075,7 +1332,7 @@ def collect_google_news_lane(
             "payload_hash": hashlib.sha256(raw).hexdigest(),
             "error_type": "PublisherContentUnavailable" if content_blocked else None,
             "error": (
-                "Relevant search result found, but publisher full text was unavailable"
+                "Full-text target was not filled within retry and attempt limits"
                 if content_blocked else None
             ),
         })
@@ -1084,7 +1341,9 @@ def collect_google_news_lane(
             "status": poll_status,
             "feed_items": len(records),
             "deduped_items": len(deduped),
-            "attempted_items": len(selected),
+            "attempted_items": attempted,
+            "deferred_items": deferred,
+            "attempt_budget": attempt_budget,
             "processed_items": len(full_text_records),
             "rejected_items": sum(rejected.values()),
             "rejected_reasons": rejected,
@@ -1094,6 +1353,46 @@ def collect_google_news_lane(
     except Exception as error:
         ledger.append_source_poll({"poll_id": poll_id, "source": lane.name, "fetched_time": fetched_at, "status": "ERROR", "error_type": type(error).__name__, "error": str(error)[:500]})
         return {"source": lane.name, "status": "ERROR", "error_type": type(error).__name__, "error": str(error)[:500]}
+
+
+def _append_discovery_failure(
+    ledger: ForwardLedger,
+    record: dict[str, object],
+    failed_at: datetime,
+    error_type: str,
+    message: str,
+    *,
+    error: Exception | None = None,
+) -> None:
+    prior = ledger.connection.execute(
+        """SELECT attempt_number FROM news_discovery_failures
+           WHERE source=? AND source_item_id=?
+           ORDER BY attempt_number DESC LIMIT 1""",
+        (record["source"], record["source_item_id"]),
+    ).fetchone()
+    attempt = 1 if prior is None else int(prior["attempt_number"]) + 1
+    http_code = error.code if isinstance(error, urllib.error.HTTPError) else None
+    if http_code in {401, 403, 404, 410, 451} or isinstance(error, ValueError):
+        delay = timedelta(hours=6)
+    elif http_code == 429 or (http_code is not None and http_code >= 500):
+        delay = timedelta(minutes=30)
+    else:
+        delay = timedelta(hours=1)
+    identity = "|".join(
+        (str(record["source"]), str(record["source_item_id"]), str(attempt))
+    )
+    ledger.append_discovery_failure(
+        {
+            "failure_id": str(uuid.uuid5(uuid.NAMESPACE_URL, identity)),
+            "source": record["source"],
+            "source_item_id": record["source_item_id"],
+            "attempt_number": attempt,
+            "error_type": error_type,
+            "error": re.sub(r"\s+", " ", message).strip()[:500],
+            "failed_at": failed_at,
+            "next_retry_at": failed_at + delay,
+        }
+    )
 
 
 def collect_bls_macro(
@@ -1220,12 +1519,16 @@ def collect_federal_reserve_news(
     fed_content_extractor: Callable[[str], tuple[str, str]] = extract_federal_reserve_full_text,
 ) -> list[dict[str, object]]:
     statuses: list[dict[str, object]] = []
+    payload_hashes: list[str] = []
+    errors: list[str] = []
     for source in OFFICIAL_RSS_SOURCES:
         inserted = 0
         unchanged = 0
         rejected: dict[str, int] = {}
         try:
-            for record in parse_rss(fetcher(source), source, fetched_at):
+            payload = fetcher(source)
+            payload_hashes.append(hashlib.sha256(payload).hexdigest())
+            for record in parse_rss(payload, source, fetched_at):
                 eligible, reason = _current_forward_news(record, ledger, fetched_at)
                 if not eligible:
                     rejected[reason] = rejected.get(reason, 0) + 1
@@ -1246,7 +1549,13 @@ def collect_federal_reserve_news(
                     "rejected_reasons": rejected,
                 }
             )
+            if rejected.get("FULL_TEXT_UNAVAILABLE"):
+                errors.append(
+                    f"{source.name}:FullTextUnavailable:"
+                    f"{rejected['FULL_TEXT_UNAVAILABLE']}"
+                )
         except Exception as error:  # source failure must not hide other feeds
+            errors.append(f"{source.name}:{type(error).__name__}:{str(error)[:160]}")
             statuses.append(
                 {
                     "source": source.name,
@@ -1255,6 +1564,22 @@ def collect_federal_reserve_news(
                     "error": str(error)[:500],
                 }
             )
+    aggregate_status = (
+        "OK" if not errors else "PARTIAL" if len(errors) < len(OFFICIAL_RSS_SOURCES)
+        else "ERROR"
+    )
+    ledger.append_source_poll({
+        "poll_id": str(uuid.uuid5(
+            uuid.NAMESPACE_URL, f"{FED_POLL_SOURCE}|{fetched_at.isoformat()}"
+        )),
+        "source": FED_POLL_SOURCE,
+        "fetched_time": fetched_at,
+        "status": aggregate_status,
+        "payload_hash": hashlib.sha256("|".join(payload_hashes).encode()).hexdigest()
+        if payload_hashes else None,
+        "error_type": "FeedErrors" if errors else None,
+        "error": " | ".join(errors)[:500] if errors else None,
+    })
     return statuses
 
 
@@ -1267,15 +1592,11 @@ def collect_official_news(
     statuses = collect_federal_reserve_news(
         ledger, fetched_at, fetcher, fed_content_extractor
     )
-    direct_rss = collect_direct_full_text_rss_news(ledger, fetched_at, fetcher)
-    statuses.extend(direct_rss)
-    force_bls = any(
-        str(item.get("source", "")).startswith("bls_")
-        and int(item.get("inserted_revisions", 0)) > 0
-        for item in direct_rss
-    )
-    statuses.append(collect_bls_macro(ledger, fetched_at, force=force_bls))
+    statuses.extend(collect_direct_full_text_rss_news(ledger, fetched_at, fetcher))
+    statuses.append(collect_bls_macro(ledger, fetched_at))
     statuses.append(collect_fred_macro(ledger, fetched_at))
+    statuses.append(collect_eia_macro(ledger, fetched_at))
+    statuses.append(collect_bea_macro(ledger, fetched_at))
     statuses.extend(collect_direct_full_text_html_news(ledger, fetched_at))
     statuses.append(collect_gdelt_news(ledger, fetched_at))
     for lane in GOOGLE_NEWS_LANES:

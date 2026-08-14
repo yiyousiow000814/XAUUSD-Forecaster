@@ -15,7 +15,12 @@ from .evidence_v2 import (
 )
 from .factors import NEWS_FEATURES
 from .forward_ledger import canonical_hash
-from .news_contracts import CURRENT_NEWS_CONTRACT, generation_matches_contract
+from .news_contracts import (
+    CORE_EVIDENCE_STORAGE_LANE,
+    CORE_MODEL_STORAGE_PERMISSION,
+    CURRENT_NEWS_CONTRACT,
+    generation_matches_contract,
+)
 from .news_evidence import BROAD_NEWS_FEATURES, EVIDENCE_POLICY_VERSION
 from .news_features_v2 import EVIDENCE_GRADE_WEIGHT, aggregate_news_features_v2
 from .ridge import RidgeArtifact, train_ridge
@@ -25,6 +30,7 @@ from .training import MARKET_FEATURES
 UTC = timezone.utc
 PREVIEW_ROWS = 96
 SHADOW_ROWS = 200
+LIVE_GENERATION_STAGE = "SHADOW"
 RETRAIN_INTERVAL = 50
 NEWS_MIN_EXPOSED_ROWS = 30
 NEWS_MIN_CLUSTERS = 10
@@ -32,8 +38,13 @@ NEWS_EXPERIMENTAL_MIN_CLUSTERS = 1
 NEWS_EXPERIMENTAL_MIN_EVENT_DAYS = 1
 NEWS_MIN_EVENT_DAYS = 3
 CROSSFIT_VERSION = "expanding-market-purge30m-v1"
-EVENT_WEIGHTING_VERSION = "absolute-trust-event-budget-v5-independent-origin"
+EVENT_WEIGHTING_VERSION = "event-and-source-budget-v6-canonical-origin"
+SOURCE_WEIGHT_BUDGET = 1.0
 BROAD_MODEL_FEATURES = (*NEWS_FEATURES, *BROAD_NEWS_FEATURES)
+REQUIRED_GENERATION_IDENTITIES = frozenset({
+    "MARKET_ONLY", "NEWS_RESIDUAL", "FULL",
+    "BROAD_NEWS_RESIDUAL", "BROAD_FULL",
+})
 
 
 def news_evidence_status(event_days: int, clusters: int = NEWS_MIN_CLUSTERS) -> str:
@@ -89,9 +100,11 @@ def complete_training_rows(ledger, cutoff: datetime) -> list[dict]:
         event_rows = ledger.connection.execute(
             """SELECT s.event_id,s.event_version_id,s.model_permission,s.raw_weight,
                        c.event_occurred_at,c.event_clock_source,c.event_time_precision,
-                       c.evidence_grade
+                       c.evidence_grade,
+                       coalesce(b.source_budget_id,c.canonical_source) AS source_budget_id
             FROM news_decision_event_snapshots_v1 s
             JOIN news_event_catalog_v1 c USING(event_version_id)
+            LEFT JOIN news_event_source_budgets_v1 b USING(event_version_id)
             WHERE s.source_decision_id=? AND s.policy_version=?
             ORDER BY s.model_permission,s.event_id,s.event_version_id""",
             (decision_id, EVIDENCE_POLICY_VERSION),
@@ -115,9 +128,9 @@ def complete_training_rows(ledger, cutoff: datetime) -> list[dict]:
                 json.loads(row["news_json"]).get("broad_news_event_count", 0.0)
             ),
             "distinct_news_clusters": int(row["distinct_news_clusters"]),
-            "official_events": [
+            "core_events": [
                 event for event in event_snapshots
-                if event["model_permission"] == "OFFICIAL_MODEL"
+                if event["model_permission"] == CORE_MODEL_STORAGE_PERMISSION
             ],
             "broad_events": [
                 event for event in event_snapshots
@@ -197,10 +210,11 @@ def _event_coverage(rows: list[dict], field: str) -> tuple[int, int]:
 
 def _event_budget_weights(
     rows: list[dict], field: str,
-) -> tuple[np.ndarray, list[dict], dict]:
+) -> tuple[np.ndarray, list[dict], list[dict], dict]:
     totals: dict[str, float] = defaultdict(float)
     event_budgets: dict[str, float] = defaultdict(float)
     reference_budgets: dict[str, float] = defaultdict(float)
+    event_sources: dict[str, tuple[float, str]] = {}
     for row in rows:
         for event in row.get(field, []):
             event_id = str(event["event_id"])
@@ -217,8 +231,26 @@ def _event_budget_weights(
                 reference_budgets[event_id] = max(
                     reference_budgets[event_id], raw / trust,
                 )
+            source_id = str(event.get("source_budget_id") or "unknown_source")
+            if event_id not in event_sources or raw > event_sources[event_id][0]:
+                event_sources[event_id] = (raw, source_id)
     if not totals:
         raise ValueError("news residual rows require at least one eligible event")
+    source_unbounded: dict[str, float] = defaultdict(float)
+    for event_id, budget in event_budgets.items():
+        source_unbounded[event_sources[event_id][1]] += budget
+    source_scales = {
+        source_id: min(1.0, SOURCE_WEIGHT_BUDGET / total)
+        for source_id, total in source_unbounded.items()
+    }
+    bounded_event_budgets = {
+        event_id: budget * source_scales[event_sources[event_id][1]]
+        for event_id, budget in event_budgets.items()
+    }
+    bounded_reference_budgets = {
+        event_id: budget * source_scales[event_sources[event_id][1]]
+        for event_id, budget in reference_budgets.items()
+    }
     row_weights = []
     receipts = []
     for row in rows:
@@ -226,7 +258,7 @@ def _event_budget_weights(
         for event in row.get(field, []):
             event_id = str(event["event_id"])
             raw = float(event["raw_weight"])
-            normalized = raw / totals[event_id] * event_budgets[event_id]
+            normalized = raw / totals[event_id] * bounded_event_budgets[event_id]
             budget += normalized
             receipts.append({
                 "source_decision_id": row["decision_id"],
@@ -237,16 +269,29 @@ def _event_budget_weights(
             })
         row_weights.append(budget)
     weights = np.asarray(row_weights, dtype=np.float64)
-    reference_total = sum(reference_budgets.values())
+    reference_total = sum(bounded_reference_budgets.values())
     if reference_total <= 0:
         raise ValueError("news residual rows require trusted event evidence")
     weights *= len(weights) / reference_total
     effective_rows = float(weights.sum() ** 2 / np.square(weights).sum())
-    total_event_budget = sum(event_budgets.values())
+    total_event_budget = sum(bounded_event_budgets.values())
     shares = sorted(
-        (budget / total_event_budget for budget in event_budgets.values()),
+        (budget / total_event_budget for budget in bounded_event_budgets.values()),
         reverse=True,
     )
+    source_bounded = {
+        source_id: total * source_scales[source_id]
+        for source_id, total in source_unbounded.items()
+    }
+    source_shares = sorted(
+        (budget / total_event_budget for budget in source_bounded.values()),
+        reverse=True,
+    )
+    source_receipts = [{
+        "source_budget_id": source_id,
+        "unbounded_weight": source_unbounded[source_id],
+        "bounded_weight": source_bounded[source_id],
+    } for source_id in sorted(source_unbounded)]
     summary = {
         "raw_training_rows": len(rows),
         "distinct_event_count": len(totals),
@@ -254,9 +299,12 @@ def _event_budget_weights(
         "effective_weighted_rows": effective_rows,
         "maximum_event_weight_share": shares[0],
         "top_three_event_weight_share": sum(shares[:3]),
+        "distinct_source_count": len(source_bounded),
+        "maximum_source_weight_share": source_shares[0],
+        "top_three_source_weight_share": sum(source_shares[:3]),
         "total_sample_weight": float(weights.sum()),
     }
-    return weights, receipts, summary
+    return weights, receipts, source_receipts, summary
 
 
 def _latest_generation(connection, stage: str):
@@ -272,6 +320,49 @@ def _latest_generation(connection, stage: str):
     ).fetchone()
 
 
+def require_current_contract_generation(connection) -> str:
+    """Return the active live-stage generation or fail before decisions run."""
+    generation = connection.execute(
+        """SELECT g.* FROM news_model_generation_activations_v1 a
+        JOIN news_model_generations_v1 g USING(generation_id)
+        ORDER BY a.activated_at DESC,a.activation_id DESC LIMIT 1"""
+    ).fetchone()
+    if not generation_matches_contract(generation, CURRENT_NEWS_CONTRACT):
+        raise RuntimeError(
+            "current Core/Broad news contract has no active generation"
+        )
+    if generation["model_stage"] != LIVE_GENERATION_STAGE:
+        raise RuntimeError(
+            f"live collector requires a {LIVE_GENERATION_STAGE} generation; "
+            f"latest active generation is {generation['model_stage']}"
+        )
+    members = {
+        str(row["model_identity"]): str(row["artifact_path"])
+        for row in connection.execute(
+            """SELECT m.model_identity,u.artifact_path
+            FROM news_model_generation_members_v1 m
+            JOIN model_updates_v2 u USING(model_version)
+            WHERE m.generation_id=?""",
+            (generation["generation_id"],),
+        )
+    }
+    if set(members) != REQUIRED_GENERATION_IDENTITIES:
+        raise RuntimeError("active Core/Broad generation is incomplete")
+    auxiliary = connection.execute(
+        """SELECT u.artifact_path FROM news_model_generation_aux_members_v1 m
+        JOIN model_updates_v2 u USING(model_version)
+        WHERE m.generation_id=? AND m.model_identity='NEWS_ONLY'""",
+        (generation["generation_id"],),
+    ).fetchone()
+    paths = [Path(path) for path in members.values()]
+    if auxiliary is None:
+        raise RuntimeError("active Core/Broad generation has no NEWS_ONLY diagnostic")
+    paths.append(Path(str(auxiliary["artifact_path"])))
+    if any(not path.is_absolute() or not path.exists() for path in paths):
+        raise RuntimeError("active Core/Broad generation has unavailable artifacts")
+    return str(generation["generation_id"])
+
+
 def _write_manifest(path: Path, payload: dict) -> str:
     digest = canonical_hash(payload)
     if not path.exists():
@@ -280,8 +371,25 @@ def _write_manifest(path: Path, payload: dict) -> str:
     return digest
 
 
+def _neutral_core_news_artifact(dataset_hash: str) -> RidgeArtifact:
+    """Represent an evidence-empty Core lane without inventing a signal."""
+    return RidgeArtifact(
+        feature_names=tuple(NEWS_FEATURES),
+        means=tuple(0.0 for _ in NEWS_FEATURES),
+        scales=tuple(1.0 for _ in NEWS_FEATURES),
+        coefficients=tuple(0.0 for _ in NEWS_FEATURES),
+        intercept=0.0,
+        alpha=100.0,
+        training_dataset_hash=dataset_hash,
+        residual_std=0.0,
+        training_rows=0,
+        weighting_version=EVENT_WEIGHTING_VERSION,
+        weight_summary={"status": "COLD_START_NO_CORE_EVIDENCE"},
+    )
+
+
 def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[dict]:
-    """Build and atomically activate one complete five-model generation."""
+    """Build and atomically activate five core models plus one diagnostic."""
     rows = complete_training_rows(ledger, cutoff)
     count = len(rows)
     if count < PREVIEW_ROWS:
@@ -289,11 +397,11 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
                  "complete_rows": count, "next_threshold": PREVIEW_ROWS}]
     stage = "SHADOW" if count >= SHADOW_ROWS else "PREVIEW_ONLY"
     training_rows = rows if stage == "PREVIEW_ONLY" else rows[: count - (count % RETRAIN_INTERVAL)]
-    official_rows = [row for row in training_rows if row.get("official_events")]
+    core_rows = [row for row in training_rows if row.get("core_events")]
     broad_rows = [row for row in training_rows if row.get("broad_events")]
-    official_events, official_days = _event_coverage(official_rows, "official_events")
+    core_events, core_days = _event_coverage(core_rows, "core_events")
     broad_events, broad_days = _event_coverage(broad_rows, "broad_events")
-    evidence_status = news_evidence_status(official_days, official_events)
+    core_evidence_status = news_evidence_status(core_days, core_events)
     broad_evidence_status = news_evidence_status(broad_days, broad_events)
     latest = _latest_generation(ledger.connection, stage)
     latest_uses_current_contract = generation_matches_contract(
@@ -307,15 +415,17 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
         return [{"status": "NOT_DUE", "complete_rows": count,
                  "generation_id": latest["generation_id"],
                  "next_threshold": int(latest["training_rows"]) + RETRAIN_INTERVAL}]
-    if len(official_rows) < NEWS_MIN_EXPOSED_ROWS or len(broad_rows) < NEWS_MIN_EXPOSED_ROWS \
-            or not official_events or not broad_events:
+    core_cold_start = (
+        len(core_rows) < NEWS_MIN_EXPOSED_ROWS or not core_events
+    )
+    if len(broad_rows) < NEWS_MIN_EXPOSED_ROWS or not broad_events:
         return [{
             "status": "NEWS_GENERATION_EVIDENCE_INSUFFICIENT",
-            "official_exposed_rows": len(official_rows),
+            "core_exposed_rows": len(core_rows),
             "broad_exposed_rows": len(broad_rows),
-            "official_events": official_events,
+            "core_events": core_events,
             "broad_events": broad_events,
-            "official_evidence_status": evidence_status,
+            "core_evidence_status": core_evidence_status,
             "broad_evidence_status": broad_evidence_status,
             "active_generation_id": latest["generation_id"] if latest else None,
             "active_contract_current": latest_uses_current_contract,
@@ -335,54 +445,86 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
     with ledger.connection:
         crossfit = chronological_crossfit_market(ledger, training_rows, root, now)
     crossfit_by_id = {row["decision_id"]: row for row in crossfit}
-    official_residual = [row for row in official_rows if row["decision_id"] in crossfit_by_id]
+    core_residual = [row for row in core_rows if row["decision_id"] in crossfit_by_id]
     broad_residual = [row for row in broad_rows if row["decision_id"] in crossfit_by_id]
-    if len(official_residual) < NEWS_MIN_EXPOSED_ROWS or len(broad_residual) < NEWS_MIN_EXPOSED_ROWS:
+    if len(broad_residual) < NEWS_MIN_EXPOSED_ROWS or (
+        not core_cold_start
+        and len(core_residual) < NEWS_MIN_EXPOSED_ROWS
+    ):
         return [{"status": "NEWS_GENERATION_CROSSFIT_INSUFFICIENT",
-                 "official_rows": len(official_residual), "broad_rows": len(broad_residual)}]
+                 "core_rows": len(core_residual), "broad_rows": len(broad_residual)}]
 
-    official_weights, official_weight_receipts, official_summary = _event_budget_weights(
-        official_residual, "official_events"
-    )
-    broad_weights, broad_weight_receipts, broad_summary = _event_budget_weights(
+    if core_cold_start:
+        core_weights = np.asarray([], dtype=np.float64)
+        core_weight_receipts = []
+        core_source_receipts = []
+        core_summary = {"status": "COLD_START_NO_CORE_EVIDENCE"}
+    else:
+        (core_weights, core_weight_receipts,
+         core_source_receipts, core_summary) = _event_budget_weights(
+            core_residual, "core_events"
+        )
+    (broad_weights, broad_weight_receipts,
+     broad_source_receipts, broad_summary) = _event_budget_weights(
         broad_residual, "broad_events"
     )
-    official_hash = canonical_hash([
-        (row["decision_id"], row["receipt"], crossfit_by_id[row["decision_id"]]["artifact_hash"],
-         crossfit_by_id[row["decision_id"]]["residual"], receipt)
-        for row, receipt in zip(official_residual, official_weights.tolist())
-    ])
+    core_hash = canonical_hash(
+        (
+            "COLD_START_NO_CORE_EVIDENCE",
+            EVIDENCE_POLICY_VERSION,
+            NEWS_FEATURE_VERSION,
+            ELIGIBILITY_VERSION,
+            market_hash,
+        )
+        if core_cold_start else [
+            (row["decision_id"], row["receipt"],
+             crossfit_by_id[row["decision_id"]]["artifact_hash"],
+             crossfit_by_id[row["decision_id"]]["residual"], receipt)
+            for row, receipt in zip(core_residual, core_weights.tolist())
+        ]
+    )
     broad_hash = canonical_hash([
         (row["decision_id"], row["receipt"], crossfit_by_id[row["decision_id"]]["artifact_hash"],
          crossfit_by_id[row["decision_id"]]["residual"], receipt)
         for row, receipt in zip(broad_residual, broad_weights.tolist())
     ])
+    news_only_hash = canonical_hash([
+        (row["decision_id"], row["receipt"], row["target"], receipt)
+        for row, receipt in zip(broad_residual, broad_weights.tolist())
+    ])
     event_snapshot_hash = canonical_hash(sorted({
         (event["event_id"], event["event_version_id"])
-        for row in training_rows for field in ("official_events", "broad_events")
+        for row in training_rows for field in ("core_events", "broad_events")
         for event in row.get(field, [])
     }))
     generation_seed = canonical_hash((
         stage, cutoff.isoformat(), EVIDENCE_POLICY_VERSION, NEWS_FEATURE_VERSION,
         ELIGIBILITY_VERSION, EVENT_WEIGHTING_VERSION, event_snapshot_hash,
-        market_hash, official_hash, broad_hash,
+        market_hash, core_hash, broad_hash, news_only_hash,
     ))
     generation_id = str(uuid.uuid5(uuid.NAMESPACE_URL, generation_seed))
     slug = generation_id.split("-")[0]
 
-    official_version = (
-        f"news-residual-{evidence_status.lower().replace('_', '-')}-"
-        f"{stage.lower()}-{slug}-{official_hash[:12]}"
+    core_version = (
+        f"core-news-residual-{core_evidence_status.lower().replace('_', '-')}-"
+        f"{stage.lower()}-{slug}-{core_hash[:12]}"
     )
-    official_artifact = train_ridge(
-        np.asarray([row["news"] for row in official_residual]),
-        np.asarray([crossfit_by_id[row["decision_id"]]["residual"] for row in official_residual]),
-        NEWS_FEATURES, 100.0, official_hash, official_weights,
-        EVENT_WEIGHTING_VERSION, official_summary,
+    core_artifact = (
+        _neutral_core_news_artifact(core_hash)
+        if core_cold_start else
+        train_ridge(
+            np.asarray([row["news"] for row in core_residual]),
+            np.asarray([
+                crossfit_by_id[row["decision_id"]]["residual"]
+                for row in core_residual
+            ]),
+            NEWS_FEATURES, 100.0, core_hash, core_weights,
+            EVENT_WEIGHTING_VERSION, core_summary,
+        )
     )
-    official_path = root / official_version / "model.json"
-    if not official_path.exists():
-        official_artifact.write(official_path)
+    core_path = root / core_version / "model.json"
+    if not core_path.exists():
+        core_artifact.write(core_path)
 
     broad_version = (
         f"broad-news-residual-{broad_evidence_status.lower().replace('_', '-')}-"
@@ -398,13 +540,27 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
     if not broad_path.exists():
         broad_artifact.write(broad_path)
 
+    news_only_version = (
+        f"news-only-{broad_evidence_status.lower().replace('_', '-')}-"
+        f"{stage.lower()}-{slug}-{news_only_hash[:12]}"
+    )
+    news_only_artifact = train_ridge(
+        np.asarray([row["broad_news"] for row in broad_residual]),
+        np.asarray([row["target"] for row in broad_residual]),
+        BROAD_MODEL_FEATURES, 100.0, news_only_hash, broad_weights,
+        EVENT_WEIGHTING_VERSION, broad_summary,
+    )
+    news_only_path = root / news_only_version / "model.json"
+    if not news_only_path.exists():
+        news_only_artifact.write(news_only_path)
+
     full_manifest = {
-        "schema": "xauusd.phase2f.full-model.v3", "generation_id": generation_id,
+        "schema": "xauusd.phase2f.core-full-model.v4", "generation_id": generation_id,
         "market_model_version": market_version, "market_artifact_path": str(market_path),
         "market_artifact_hash": market_artifact.artifact_hash,
-        "news_model_version": official_version, "news_artifact_path": str(official_path),
-        "news_artifact_hash": official_artifact.artifact_hash,
-        "training_dataset_hash": market_hash, "news_training_hash": official_hash,
+        "news_model_version": core_version, "news_artifact_path": str(core_path),
+        "news_artifact_hash": core_artifact.artifact_hash,
+        "training_dataset_hash": market_hash, "news_training_hash": core_hash,
         "event_snapshot_hash": event_snapshot_hash,
         "event_weighting_version": EVENT_WEIGHTING_VERSION,
     }
@@ -425,20 +581,23 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
     )
     broad_full_path = root / broad_full_version / "manifest.json"
     broad_full_hash = _write_manifest(broad_full_path, broad_manifest)
-    required_paths = (market_path, official_path, full_path, broad_path, broad_full_path)
+    required_paths = (
+        market_path, core_path, full_path, broad_path, broad_full_path,
+        news_only_path,
+    )
     if any(not path.is_absolute() or not path.exists() for path in required_paths):
         return [{"status": "GENERATION_ARTIFACT_VALIDATION_FAILED",
                  "generation_id": generation_id}]
 
     updates = (
-        (market_version, "MARKET_ONLY", len(training_rows), len(official_residual),
-         official_events, official_days, market_hash, FEATURE_VERSION, None,
+        (market_version, "MARKET_ONLY", len(training_rows), len(core_residual),
+         core_events, core_days, market_hash, FEATURE_VERSION, None,
          market_path, market_artifact.artifact_hash),
-        (official_version, "NEWS_RESIDUAL", len(official_residual), len(official_residual),
-         official_events, official_days, official_hash, NEWS_FEATURE_VERSION,
-         ELIGIBILITY_VERSION, official_path, official_artifact.artifact_hash),
-        (full_version, "FULL", len(training_rows), len(official_residual),
-         official_events, official_days, market_hash,
+        (core_version, "NEWS_RESIDUAL", len(core_residual), len(core_residual),
+         core_events, core_days, core_hash, NEWS_FEATURE_VERSION,
+         ELIGIBILITY_VERSION, core_path, core_artifact.artifact_hash),
+        (full_version, "FULL", len(training_rows), len(core_residual),
+         core_events, core_days, market_hash,
          f"{FEATURE_VERSION}+{NEWS_FEATURE_VERSION}", ELIGIBILITY_VERSION,
          full_path, full_artifact_hash),
         (broad_version, "BROAD_NEWS_RESIDUAL", len(broad_residual), len(broad_residual),
@@ -448,6 +607,10 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
          broad_events, broad_days, market_hash,
          f"{FEATURE_VERSION}+{NEWS_FEATURE_VERSION}+{EVIDENCE_POLICY_VERSION}",
          ELIGIBILITY_VERSION, broad_full_path, broad_full_hash),
+        (news_only_version, "NEWS_ONLY", len(broad_residual), len(broad_residual),
+         broad_events, broad_days, news_only_hash,
+         f"{NEWS_FEATURE_VERSION}+{EVIDENCE_POLICY_VERSION}",
+         ELIGIBILITY_VERSION, news_only_path, news_only_artifact.artifact_hash),
     )
     previous = ledger.connection.execute(
         """SELECT generation_id FROM news_model_generation_activations_v1
@@ -470,22 +633,28 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
             (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (generation_id, stage, now.isoformat(), cutoff.isoformat(),
              EVIDENCE_POLICY_VERSION, NEWS_FEATURE_VERSION, ELIGIBILITY_VERSION,
-             event_snapshot_hash, market_hash, official_hash, broad_hash,
+             event_snapshot_hash, market_hash, core_hash, broad_hash,
              EVENT_WEIGHTING_VERSION, 5, "READY"),
         )
         for update in updates:
+            member_table = (
+                "news_model_generation_aux_members_v1"
+                if update[1] == "NEWS_ONLY"
+                else "news_model_generation_members_v1"
+            )
             ledger.connection.execute(
-                "INSERT INTO news_model_generation_members_v1 VALUES (?,?,?)",
+                f"INSERT INTO {member_table} VALUES (?,?,?)",
                 (generation_id, update[1], update[0]),
             )
         ledger.connection.execute(
             "INSERT INTO news_model_generation_activations_v1 VALUES (?,?,?,?,?)",
             (str(uuid.uuid5(uuid.NAMESPACE_URL, f"activate:{generation_id}")), generation_id,
              previous["generation_id"] if previous else None, now.isoformat(),
-             "COMPLETE_FIVE_MODEL_GENERATION"),
+             "COMPLETE_CORE_BROAD_GENERATION_WITH_NEWS_ONLY_DIAGNOSTIC"),
         )
         for lane, receipts in (
-            ("OFFICIAL", official_weight_receipts), ("BROAD", broad_weight_receipts),
+            (CORE_EVIDENCE_STORAGE_LANE, core_weight_receipts),
+            ("BROAD", broad_weight_receipts),
         ):
             for receipt in receipts:
                 receipt_hash = canonical_hash((generation_id, lane, receipt))
@@ -496,6 +665,21 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
                      receipt["event_id"], receipt["event_version_id"],
                      receipt["raw_weight"], receipt["normalized_event_weight"], receipt_hash),
                 )
+        for lane, receipts in (
+            (CORE_EVIDENCE_STORAGE_LANE, core_source_receipts),
+            ("BROAD", broad_source_receipts),
+        ):
+            for receipt in receipts:
+                receipt_hash = canonical_hash((generation_id, lane, receipt))
+                ledger.connection.execute(
+                    """INSERT INTO news_training_source_budget_receipts_v1
+                    VALUES (?,?,?,?,?,?)""",
+                    (
+                        generation_id, lane, receipt["source_budget_id"],
+                        receipt["unbounded_weight"], receipt["bounded_weight"],
+                        receipt_hash,
+                    ),
+                )
     return [{
         "status": "TRAINED", "model_identity": update[1],
         "model_stage": stage, "model_version": update[0],
@@ -503,6 +687,10 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
         "event_snapshot_hash": event_snapshot_hash,
         "weighting_version": EVENT_WEIGHTING_VERSION,
         "news_evidence_status": (
-            broad_evidence_status if update[1].startswith("BROAD") else evidence_status
+            broad_evidence_status
+            if update[1] in {"BROAD_NEWS_RESIDUAL", "BROAD_FULL", "NEWS_ONLY"}
+            else "COLD_START_NO_CORE_EVIDENCE"
+            if core_cold_start and update[1] in {"NEWS_RESIDUAL", "FULL"}
+            else core_evidence_status
         ),
     } for update in updates]

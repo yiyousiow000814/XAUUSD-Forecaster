@@ -138,7 +138,7 @@ def run_repair(
         connection.execute(
             "INSERT OR IGNORE INTO source_eligibility_versions VALUES (?,?,?,?)",
             (ELIGIBILITY_VERSION, _iso(started_at), rules_hash,
-             "Frozen source ceiling; item body and point-in-time visibility remain mandatory."),
+             "Permission-neutral intake registry; body and point-in-time visibility remain mandatory."),
         )
         for source, tier, requires_body, minimum, rationale in frozen_rules:
             connection.execute(
