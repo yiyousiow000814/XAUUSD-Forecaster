@@ -668,13 +668,14 @@ function Restart-CodeReloadableServices {
     if (-not $healthy) { throw "Code revision reload failed functional health checks." }
     Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_HEALTHY" `
         -Service "collector,annotator,api,sync" -State $Revision
+    return $reloadStarted
 }
 
 function Invoke-RuntimeCandidateActivation {
     param([string]$Revision, [string]$PreviousRevision)
-    Restart-CodeReloadableServices -Revision $Revision
+    $reloadStarted = Restart-CodeReloadableServices -Revision $Revision
     Start-RuntimeObservation -Revision $Revision `
-        -PreviousRevision $PreviousRevision
+        -PreviousRevision $PreviousRevision -HealthBoundary $reloadStarted
     # Observation is durable before applied_revision. A watchdog restart in
     # between repeats safe work instead of silently skipping validation.
     Write-RuntimeCodeState -Revision $Revision
@@ -718,13 +719,18 @@ function Test-CurrentProductionShape {
 }
 
 function Start-RuntimeObservation {
-    param([string]$Revision, [string]$PreviousRevision)
+    param(
+        [string]$Revision,
+        [string]$PreviousRevision,
+        [DateTimeOffset]$HealthBoundary = [DateTimeOffset]::UtcNow
+    )
     $latestDecision = Get-LatestRuntimeDecisionTime
     Write-RuntimeUpdateState @{
         update_status = "OBSERVING"
         observing_revision = $Revision
         previous_revision = $PreviousRevision
         observation_started_at = [DateTimeOffset]::UtcNow.ToString("o")
+        observation_health_boundary_at = $HealthBoundary.ToString("o")
         observation_last_decision_time = $latestDecision
         observation_success_cycles = 0
         observation_consecutive_failures = 0
@@ -776,7 +782,16 @@ function Test-RuntimeObservation {
         return $false
     }
     $failure = $null
-    if (-not (Test-CodeReloadHealth -ReloadStarted $started)) {
+    $healthBoundary = $started
+    if ($state.observation_health_boundary_at) {
+        $candidateBoundary = [DateTimeOffset]::MinValue
+        if ([DateTimeOffset]::TryParse(
+            [string]$state.observation_health_boundary_at, [ref]$candidateBoundary
+        )) {
+            $healthBoundary = $candidateBoundary
+        }
+    }
+    if (-not (Test-CodeReloadHealth -ReloadStarted $healthBoundary)) {
         $failure = "reload health check failed"
     } else { $failure = Test-CurrentProductionShape }
     if ($failure) {

@@ -411,7 +411,8 @@ def test_candidate_observation_is_durable_before_revision_is_marked_applied(
     result = _run_control_center_contract(
         tmp_path,
         "$script:order = @(); "
-        "function Restart-CodeReloadableServices { $script:order += 'reload' }; "
+        "function Restart-CodeReloadableServices { $script:order += 'reload'; "
+        "return [DateTimeOffset]::Parse('2026-08-12T08:00:00+00:00') }; "
         "function Start-RuntimeObservation { $script:order += 'observe' }; "
         "function Write-RuntimeCodeState { $script:order += 'applied' }; "
         "function Write-WatchdogEvent {}; "
@@ -421,6 +422,23 @@ def test_candidate_observation_is_durable_before_revision_is_marked_applied(
     )
 
     assert result == "reload,observe,applied"
+
+
+def test_observation_reuses_the_reload_health_boundary(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:captured = $null; "
+        "function Get-LatestRuntimeDecisionTime { return $null }; "
+        "function Write-WatchdogEvent {}; "
+        "function Write-RuntimeUpdateState { param([hashtable]$Values); "
+        "$script:captured = $Values }; "
+        "$boundary = [DateTimeOffset]::Parse('2026-08-12T08:00:00+00:00'); "
+        "Start-RuntimeObservation -Revision ('b' * 40) -PreviousRevision ('a' * 40) "
+        "-HealthBoundary $boundary; "
+        "Write-Output $script:captured.observation_health_boundary_at",
+    )
+
+    assert result == "2026-08-12T08:00:00.0000000+00:00"
 
 
 def test_runtime_checkout_hands_off_before_old_supervisor_checks_health(
