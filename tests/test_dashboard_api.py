@@ -999,7 +999,7 @@ def test_dashboard_uses_same_explicit_event_clock_as_model(tmp_path) -> None:
     assert datetime.fromisoformat(row["impact_expires_at"]) == event_time + timedelta(hours=12)
 
 
-def test_dashboard_uses_gemini_controlled_category_before_source_guess() -> None:
+def test_dashboard_uses_gemini_controlled_category_without_source_guess() -> None:
     module = _dashboard_module()
     assert module._news_category({
         "primary_category": "central_bank_gold",
@@ -1008,13 +1008,29 @@ def test_dashboard_uses_gemini_controlled_category_before_source_guess() -> None
         "summary_zh": "央行增加黄金储备。",
         "event_type": "central_bank_purchase",
     }) == "央行购金"
-    assert module._news_category({
-        "primary_category": None,
-        "source": "federal_reserve_press_all",
-        "headline": "Application approval",
-        "summary_zh": "监管审批。",
-        "event_type": "regulatory_approval",
-    }) == "监管/其他"
+    expected = {
+        "QUEUED": "待分类",
+        "BACKING_OFF": "分类重试中",
+        "DEAD_LETTER": "分类失败",
+        "NOT_REQUIRED": "未分类",
+        "WAITING_CONTENT": "未分类",
+    }
+    for status, label in expected.items():
+        assert module._news_category({
+            "primary_category": None,
+            "annotation_status": status,
+            "source": "federal_reserve_press_all",
+            "headline": "Application approval",
+            "summary_zh": "监管审批。",
+            "event_type": "regulatory_approval",
+        }) == label
+
+
+def test_dashboard_names_risk_sentiment_for_gold_readers() -> None:
+    assert _dashboard_module()._news_category({
+        "primary_category": "risk_sentiment",
+        "annotation_status": "READY",
+    }) == "避险情绪"
 
 
 def test_dashboard_reports_gdelt_fallback_and_retry_time(tmp_path) -> None:
