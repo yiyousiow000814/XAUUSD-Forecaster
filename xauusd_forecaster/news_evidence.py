@@ -89,6 +89,24 @@ BROAD_NEWS_FEATURES = (
 )
 
 
+def annotation_is_actionable_candidate(
+    annotation: dict[str, object], headline: str = "",
+) -> bool:
+    """Return whether current semantics could admit an assessed event."""
+    return bool(
+        str(annotation.get("primary_category") or "") in ACTIONABLE_CATEGORIES
+        and effective_record_kind(annotation, headline) in ACTIONABLE_RECORD_KINDS
+        and str(annotation.get("evidence_role") or "")
+        in ACTIONABLE_EVIDENCE_ROLES
+        and float(annotation.get("materiality") or 0.0)
+        >= MIN_ACTIONABLE_MATERIALITY
+        and str(annotation.get("xauusd_relevance") or "")
+        in {"DIRECT", "MACRO_DRIVER"}
+        and str(annotation.get("material_change") or "")
+        in {"NEW_EVENT", "MATERIAL_UPDATE"}
+    )
+
+
 _TITLE_STOPWORDS = frozenset({
     "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with",
     "as", "at", "by", "from", "after", "before", "says", "said", "update",
@@ -415,12 +433,8 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
         )
         semantic_relevance = str(annotation.get("xauusd_relevance") or "")
         material_change = str(annotation.get("material_change") or "")
-        semantic_eligible = (
-            record_kind in ACTIONABLE_RECORD_KINDS
-            and evidence_role in ACTIONABLE_EVIDENCE_ROLES
-            and materiality >= MIN_ACTIONABLE_MATERIALITY
-            and semantic_relevance in {"DIRECT", "MACRO_DRIVER"}
-            and material_change in {"NEW_EVENT", "MATERIAL_UPDATE"}
+        semantic_eligible = annotation_is_actionable_candidate(
+            annotation, str(annotation.get("headline_zh") or canonical["headline"]),
         )
         identity_status = identity_resolution_status(canonical)
         relevant = controlled_category in ACTIONABLE_CATEGORIES

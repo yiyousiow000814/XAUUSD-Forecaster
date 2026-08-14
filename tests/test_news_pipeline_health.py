@@ -8,8 +8,15 @@ import pytest
 
 from xauusd_forecaster.forward_ledger import ForwardLedger
 from xauusd_forecaster import news_pipeline_health
-from xauusd_forecaster.annotation import PROMPT_VERSION
-from xauusd_forecaster.news_scheduler import enqueue_job
+from xauusd_forecaster.annotation import DEFAULT_GEMINI_MODEL, PROMPT_VERSION
+from xauusd_forecaster.news_impact import IMPACT_MODEL, IMPACT_PROMPT_VERSION
+from xauusd_forecaster.news_scheduler import (
+    ApiCredential,
+    ROUTINE_POOL,
+    claim_job,
+    enqueue_job,
+    record_job_attempt,
+)
 
 
 def _heartbeat(ledger: ForwardLedger, at: datetime) -> None:
@@ -36,6 +43,91 @@ def _news(ledger: ForwardLedger, received_at: datetime) -> None:
         "link": "https://example.test/report",
         "content_hash": hashlib.sha256(body.encode()).hexdigest(),
         "cluster_id": "cluster-1",
+    })
+
+
+def _impact_candidate(
+    ledger: ForwardLedger, *, published_at: datetime, received_at: datetime,
+    parsed_at: datetime | None = None,
+    annotation_overrides: dict[str, object] | None = None,
+    model_version: str = DEFAULT_GEMINI_MODEL,
+) -> None:
+    body = "The Federal Reserve announced a material policy decision. " * 12
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    parsed = parsed_at or received_at
+    ledger.append_news_revision({
+        "source": "impact-health-source", "source_item_id": "impact-item",
+        "source_published_time": published_at,
+        "collector_first_seen_time": received_at, "fetched_time": received_at,
+        "headline": "Federal Reserve announces material policy decision",
+        "body": body, "link": "https://example.test/impact",
+        "content_hash": digest, "cluster_id": "impact-cluster",
+    })
+    annotation = {
+        "headline_zh": "美联储宣布重大政策决定",
+        "summary_zh": "美联储宣布一项具有完整正文依据的重大政策决定。",
+        "primary_category": "rates_fed", "secondary_categories": [],
+        "emerging_topic_zh": "美联储政策", "event_type": "monetary_policy",
+        "entities": ["Federal Reserve"], "hawkishness": 0.2,
+        "inflation_impulse": 0.0, "growth_impulse": 0.0,
+        "geopolitical_risk": 0.0, "usd_impulse": 0.2,
+        "novelty": 0.9, "confidence": 0.9, "record_kind": "FACT_EVENT",
+        "actor": "Federal Reserve", "action": "announced",
+        "object": "policy decision", "location": "United States",
+        "event_time": published_at.isoformat(), "claim_status": "OFFICIAL",
+        "materiality": 0.9, "canonical_actor_id": "federal_reserve",
+        "action_family": "POLICY_DECISION",
+        "canonical_object_id": "policy_decision",
+        "canonical_location_id": "us", "episode_key": "fed_policy_decision",
+        "primary_story_title_zh": "美联储政策决定",
+        "secondary_contexts_zh": [], "relation_to_prior": "NONE",
+        "document_kind": "OFFICIAL_STATEMENT",
+        "material_event_key": "fed_policy_decision_current",
+        "source_organization_id": "federal_reserve",
+        "evidence_role": "CORE_CLAIM", "xauusd_relevance": "MACRO_DRIVER",
+        "review_priority": "FAST", "material_change": "NEW_EVENT",
+        "time_sensitivity": "SAME_DAY",
+        "semantic_reason_zh": "完整正文显示美联储已宣布重大政策决定。",
+        "supporting_evidence": [
+            "Federal Reserve announced a material policy decision"
+        ],
+    }
+    annotation.update(annotation_overrides or {})
+    ledger.append_annotation({
+        "annotation_id": "impact-annotation",
+        "source": "impact-health-source", "source_item_id": "impact-item",
+        "revision_number": 1, "raw_content_hash": digest,
+        "llm_model_version": model_version,
+        "prompt_version": PROMPT_VERSION,
+        "parse_started_at": parsed, "parsed_at": parsed,
+        "annotation": annotation,
+    })
+
+
+def _complete_impact(ledger: ForwardLedger, at: datetime) -> None:
+    revision = ledger.connection.execute(
+        """SELECT content_hash FROM news_revisions
+           WHERE source='impact-health-source'
+             AND source_item_id='impact-item' AND revision_number=1"""
+    ).fetchone()
+    ledger.append_news_impact_assessment({
+        "assessment_id": "impact-complete", "resolution_id": "resolution-complete",
+        "source": "impact-health-source", "source_item_id": "impact-item",
+        "revision_number": 1, "raw_content_hash": revision["content_hash"],
+        "annotation_id": "impact-annotation", "llm_model_version": IMPACT_MODEL,
+        "prompt_version": IMPACT_PROMPT_VERSION,
+        "parse_started_at": at, "assessed_at": at,
+        "source_context_mode": "COMPLETE_BODY",
+        "source_body_character_count": 720, "impact_class": "SAME_DAY",
+        "event_state": "ACTIVE", "update_type": "NEW_EVENT",
+        "identity_relation": "NEW_EPISODE", "matched_candidate_id": "",
+        "identity_anchor_zh": "美联储当前政策决定",
+        "core_fact_changes_zh": [],
+        "identity_differences_zh": ["这是新的政策决定批次。"],
+        "context_differences_zh": [], "confidence": 0.9,
+        "reason_zh": "完整正文确认新的政策决定。",
+        "canonical_episode_id": "episode-current",
+        "canonical_event_id": "event-current",
     })
 
 
@@ -155,7 +247,193 @@ def test_known_current_model_failure_fails_closed_without_waiting_for_grace(
 
     assert health["status"] == "UNHEALTHY"
     assert health["reason_codes"] == ("ACTIONABLE_NEWS_SEMANTICS_PENDING",)
-    assert health["actionable_failure_counts"] == {"UNCLASSIFIED": 1}
+    assert health["actionable_failure_counts"] == {
+        "ACTIVE_ANNOTATION": {"UNCLASSIFIED": 1},
+    }
+
+
+def test_recent_actionable_impact_pending_past_grace_fails_closed(
+    tmp_path, credentials,
+) -> None:
+    now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    _heartbeat(ledger, now)
+    _impact_candidate(
+        ledger, published_at=now - timedelta(minutes=7),
+        received_at=now - timedelta(minutes=7),
+        parsed_at=now - timedelta(minutes=6),
+    )
+
+    health = news_pipeline_health.news_semantic_pipeline_health(
+        ledger, observed_at=now,
+    )
+
+    assert health["status"] == "UNHEALTHY"
+    assert health["reason_codes"] == ("ACTIONABLE_NEWS_IMPACT_PENDING",)
+    assert health["actionable_failure_counts"] == {}
+
+
+def test_impact_gate_derives_supported_models_from_registry(
+    tmp_path, credentials, monkeypatch,
+) -> None:
+    now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    _heartbeat(ledger, now)
+    future_model = "gemini-future-compatible"
+    monkeypatch.setattr(
+        news_pipeline_health, "SUPPORTED_GEMINI_MODELS",
+        (*news_pipeline_health.SUPPORTED_GEMINI_MODELS, future_model),
+    )
+    monkeypatch.setattr(
+        news_pipeline_health, "pending_annotation_records", lambda *_a, **_k: [],
+    )
+    _impact_candidate(
+        ledger, published_at=now - timedelta(minutes=7),
+        received_at=now - timedelta(minutes=7),
+        parsed_at=now - timedelta(minutes=6), model_version=future_model,
+    )
+
+    health = news_pipeline_health.news_semantic_pipeline_health(
+        ledger, observed_at=now,
+    )
+
+    assert health["status"] == "UNHEALTHY"
+    assert health["reason_codes"] == ("ACTIONABLE_NEWS_IMPACT_PENDING",)
+
+
+def test_recent_actionable_impact_within_grace_keeps_gate_healthy(
+    tmp_path, credentials,
+) -> None:
+    now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    _heartbeat(ledger, now)
+    _impact_candidate(
+        ledger, published_at=now - timedelta(minutes=7),
+        received_at=now - timedelta(minutes=7),
+        parsed_at=now - timedelta(minutes=2),
+    )
+
+    health = news_pipeline_health.news_semantic_pipeline_health(
+        ledger, observed_at=now,
+    )
+
+    assert health["status"] == "HEALTHY"
+
+
+def test_recent_non_actionable_impact_backlog_does_not_close_gate(
+    tmp_path, credentials,
+) -> None:
+    now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    _heartbeat(ledger, now)
+    _impact_candidate(
+        ledger, published_at=now - timedelta(minutes=7),
+        received_at=now - timedelta(minutes=7),
+        parsed_at=now - timedelta(minutes=6),
+        annotation_overrides={
+            "primary_category": "regulation_other",
+            "xauusd_relevance": "IRRELEVANT",
+            "review_priority": "BACKGROUND",
+            "materiality": 0.1,
+        },
+    )
+
+    health = news_pipeline_health.news_semantic_pipeline_health(
+        ledger, observed_at=now,
+    )
+
+    assert health["status"] == "HEALTHY"
+
+
+def test_recent_actionable_impact_backoff_fails_closed_immediately(
+    tmp_path, credentials,
+) -> None:
+    now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    _heartbeat(ledger, now)
+    _impact_candidate(
+        ledger, published_at=now - timedelta(minutes=2),
+        received_at=now - timedelta(minutes=2), parsed_at=now - timedelta(minutes=1),
+    )
+    job_id = enqueue_job(
+        ledger.connection, task_type="ACTIVE_IMPACT",
+        source="impact-health-source", source_item_id="impact-item",
+        revision_number=1, annotation_id="impact-annotation",
+        prompt_version=IMPACT_PROMPT_VERSION, priority="FAST", now=now,
+    )
+    job = claim_job(
+        ledger.connection, worker_id="health-test", pool=ROUTINE_POOL, now=now,
+    )
+    assert job is not None and job.job_id == job_id
+    credential = ApiCredential(
+        "test-account", ROUTINE_POOL, "not-a-real-key", "test-credential",
+    )
+    record_job_attempt(
+        ledger.connection, job=job, credential=credential,
+        status={
+            "status": "ERROR", "failure_code": "PROVIDER_UNAVAILABLE",
+            "provider_http_status": 503,
+        },
+        attempted_at=now,
+    )
+    with ledger.connection:
+        ledger.connection.execute(
+            """UPDATE news_ai_jobs_v1
+               SET state='BACKING_OFF',lease_owner=NULL,lease_expires_at=NULL
+               WHERE job_id=?""",
+            (job_id,),
+        )
+
+    health = news_pipeline_health.news_semantic_pipeline_health(
+        ledger, observed_at=now,
+    )
+
+    assert health["status"] == "UNHEALTHY"
+    assert health["reason_codes"] == ("ACTIONABLE_NEWS_IMPACT_PENDING",)
+    assert health["actionable_failure_counts"] == {
+        "ACTIVE_IMPACT": {"PROVIDER_UNAVAILABLE": 1},
+    }
+
+
+def test_historical_impact_backfill_does_not_close_current_gate(
+    tmp_path, credentials,
+) -> None:
+    now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    _heartbeat(ledger, now)
+    _impact_candidate(
+        ledger, published_at=now - timedelta(days=4),
+        received_at=now - timedelta(minutes=10),
+        parsed_at=now - timedelta(minutes=9),
+    )
+
+    health = news_pipeline_health.news_semantic_pipeline_health(
+        ledger, observed_at=now,
+    )
+
+    assert health["status"] == "HEALTHY"
+    assert health["unresolved_items"] == 0
+
+
+def test_completed_recent_impact_keeps_current_gate_healthy(
+    tmp_path, credentials,
+) -> None:
+    now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    _heartbeat(ledger, now)
+    _impact_candidate(
+        ledger, published_at=now - timedelta(minutes=7),
+        received_at=now - timedelta(minutes=7),
+        parsed_at=now - timedelta(minutes=6),
+    )
+    _complete_impact(ledger, now - timedelta(minutes=5))
+
+    health = news_pipeline_health.news_semantic_pipeline_health(
+        ledger, observed_at=now,
+    )
+
+    assert health["status"] == "HEALTHY"
+    assert health["unresolved_items"] == 0
 
 
 @pytest.mark.parametrize("failure", ["missing", "stale", "credentials"])
