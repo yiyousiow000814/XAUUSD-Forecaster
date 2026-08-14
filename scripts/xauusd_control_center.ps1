@@ -581,13 +581,17 @@ function Write-RuntimeCodeState {
 }
 
 function Get-RuntimeHeartbeat {
-    param([string]$Path, [string]$ServiceName)
+    param(
+        [string]$Path,
+        [string]$ServiceName,
+        [string[]]$AllowedStates = @("RUNNING")
+    )
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
     try {
         $heartbeat = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
         $lastSuccess = [DateTimeOffset]::MinValue
         if ([string]$heartbeat.service -ne $ServiceName -or
-            [string]$heartbeat.state -ne "RUNNING" -or
+            [string]$heartbeat.state -notin $AllowedStates -or
             -not [DateTimeOffset]::TryParse(
                 [string]$heartbeat.last_success, [ref]$lastSuccess
             )) { return $null }
@@ -612,9 +616,18 @@ function Test-CodeReloadHealth {
         @("collector", "collector-status.json"),
         @("annotator", "news-annotator-status.json")
     )) {
+        # The collector performs a required contract reconciliation before it
+        # can enter its decision loop.  A fresh STARTING heartbeat proves that
+        # the candidate process launched; the subsequent observation boundary
+        # still requires real decision cycles and rolls back a stuck startup.
+        $allowedStates = if ($heartbeatSpec[0] -eq "collector") {
+            @("STARTING", "RUNNING")
+        } else {
+            @("RUNNING")
+        }
         $heartbeat = Get-RuntimeHeartbeat `
             -Path (Join-Path $moduleRoot ".local\forward\$($heartbeatSpec[1])") `
-            -ServiceName $heartbeatSpec[0]
+            -ServiceName $heartbeatSpec[0] -AllowedStates $allowedStates
         if (-not $heartbeat -or $heartbeat.LastSuccess -lt $ReloadStarted) {
             return $false
         }
