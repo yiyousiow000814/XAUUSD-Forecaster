@@ -32,6 +32,7 @@ $dashboardSyncConfigPath = Join-Path $moduleRoot ".local\forward\dashboard-sync.
 $runtimeUpdateCheckInterval = [TimeSpan]::FromMinutes(5)
 $runtimePreflightContractVersion = "isolated-migrated-runtime-state-v3"
 $codeReloadTimeout = [TimeSpan]::FromMinutes(5)
+$serviceStartupTimeout = [TimeSpan]::FromMinutes(15)
 $runtimeObservationCycles = 2
 $runtimeObservationTimeout = [TimeSpan]::FromMinutes(15)
 $reloadableServiceKeys = @("collector", "annotator", "api", "sync")
@@ -595,7 +596,10 @@ function Get-RuntimeHeartbeat {
             -not [DateTimeOffset]::TryParse(
                 [string]$heartbeat.last_success, [ref]$lastSuccess
             )) { return $null }
-        return [pscustomobject]@{ LastSuccess = $lastSuccess }
+        return [pscustomobject]@{
+            LastSuccess = $lastSuccess
+            State = [string]$heartbeat.state
+        }
     } catch { return $null }
 }
 
@@ -608,7 +612,10 @@ function Get-ServiceProcessStartedAt {
 }
 
 function Test-CodeReloadHealth {
-    param([DateTimeOffset]$ReloadStarted)
+    param(
+        [DateTimeOffset]$ReloadStarted,
+        [string[]]$AllowedWorkerStates = @("STARTING", "RUNNING")
+    )
     foreach ($service in @($services | Where-Object { $_.Key -in $reloadableServiceKeys })) {
         if (@(Get-ForecasterProcesses $service).Count -eq 0) { return $false }
     }
@@ -623,7 +630,7 @@ function Test-CodeReloadHealth {
         # startup.
         $heartbeat = Get-RuntimeHeartbeat `
             -Path (Join-Path $moduleRoot ".local\forward\$($heartbeatSpec[1])") `
-            -ServiceName $heartbeatSpec[0] -AllowedStates @("STARTING", "RUNNING")
+            -ServiceName $heartbeatSpec[0] -AllowedStates $AllowedWorkerStates
         if (-not $heartbeat -or $heartbeat.LastSuccess -lt $ReloadStarted) {
             return $false
         }
@@ -730,6 +737,7 @@ function Start-RuntimeObservation {
         observing_revision = $Revision
         previous_revision = $PreviousRevision
         observation_started_at = [DateTimeOffset]::UtcNow.ToString("o")
+        observation_ready_at = $null
         observation_health_boundary_at = $HealthBoundary.ToString("o")
         observation_last_decision_time = $latestDecision
         observation_success_cycles = 0
@@ -793,7 +801,30 @@ function Test-RuntimeObservation {
     }
     if (-not (Test-CodeReloadHealth -ReloadStarted $healthBoundary)) {
         $failure = "reload health check failed"
-    } else { $failure = Test-CurrentProductionShape }
+    }
+    $readyAt = [DateTimeOffset]::MinValue
+    $readyValid = $state.observation_ready_at -and [DateTimeOffset]::TryParse(
+        [string]$state.observation_ready_at, [ref]$readyAt
+    )
+    if (-not $failure -and -not $readyValid) {
+        if (Test-CodeReloadHealth $healthBoundary @("RUNNING")) {
+            $readyAt = [DateTimeOffset]::UtcNow
+            $readyValid = $true
+            Write-RuntimeUpdateState @{
+                observation_ready_at = $readyAt.ToString("o")
+                observation_consecutive_failures = 0
+            }
+        } elseif (([DateTimeOffset]::UtcNow - $healthBoundary) -ge $serviceStartupTimeout) {
+            Invoke-RuntimeRollback -FailedRevision $revision `
+                -PreviousRevision $previousRevision `
+                -Reason "workers did not finish startup" | Out-Null
+            return $false
+        } else {
+            Write-RuntimeUpdateState @{ observation_consecutive_failures = 0 }
+            return $true
+        }
+    }
+    if (-not $failure) { $failure = Test-CurrentProductionShape }
     if ($failure) {
         $failures = 1 + [int]$state.observation_consecutive_failures
         Write-RuntimeUpdateState @{ observation_consecutive_failures = $failures }
@@ -852,7 +883,7 @@ function Test-RuntimeObservation {
             -Service "all" -State "$revision cycles=$cycles"
         return $true
     }
-    if (([DateTimeOffset]::UtcNow - $started) -ge $runtimeObservationTimeout) {
+    if (([DateTimeOffset]::UtcNow - $readyAt) -ge $runtimeObservationTimeout) {
         try {
             $status = Invoke-RestMethod -Method Get `
                 -Uri "http://127.0.0.1:8765/api/status" -TimeoutSec 5
@@ -863,7 +894,7 @@ function Test-RuntimeObservation {
         if ($marketClosed) {
             # Closed-market time does not consume the two-cycle observation window.
             Write-RuntimeUpdateState @{
-                observation_started_at = [DateTimeOffset]::UtcNow.ToString("o")
+                observation_ready_at = [DateTimeOffset]::UtcNow.ToString("o")
             }
         } else {
             Invoke-RuntimeRollback -FailedRevision $revision `
@@ -918,12 +949,21 @@ function Get-ServiceState {
         } else { "news-annotator-status.json" }
         $heartbeat = Get-RuntimeHeartbeat `
             -Path (Join-Path $moduleRoot ".local\forward\$statusName") `
-            -ServiceName $Service.Key
+            -ServiceName $Service.Key `
+            -AllowedStates @("RUNNING", "STARTING")
         $startedAt = Get-ServiceProcessStartedAt -Processes $Processes
         if ($heartbeat -and
+            $heartbeat.State -eq "RUNNING" -and
             $heartbeat.LastSuccess -ge $startedAt -and
             ([DateTimeOffset]::UtcNow - $heartbeat.LastSuccess).TotalSeconds -le 300) {
             return "RUNNING"
+        }
+        if ($heartbeat -and
+            $heartbeat.State -eq "STARTING" -and
+            $heartbeat.LastSuccess -ge $startedAt -and
+            $startedAt -ne [DateTimeOffset]::MinValue -and
+            ([DateTimeOffset]::UtcNow - $startedAt) -le $serviceStartupTimeout) {
+            return "STARTING"
         }
         if ($startedAt -ne [DateTimeOffset]::MinValue -and
             ([DateTimeOffset]::UtcNow - $startedAt) -le $codeReloadTimeout) {
