@@ -117,8 +117,8 @@ export async function GET(request: Request) {
         return rightTime.localeCompare(leftTime);
       });
       const categoryCounts = Object.fromEntries(
-        [...new Set(all.map(row => String(row.category ?? "其他")))].map(name => [
-          name, all.filter(row => String(row.category ?? "其他") === name).length,
+        [...new Set(all.map(row => String(row.category ?? "待分类")))].map(name => [
+          name, all.filter(row => String(row.category ?? "待分类") === name).length,
         ]),
       );
       const filtered = category ? all.filter(row => row.category === category) : all;

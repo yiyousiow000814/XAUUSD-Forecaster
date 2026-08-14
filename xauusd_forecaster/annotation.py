@@ -35,6 +35,7 @@ from .news_impact import (
 from .news_semantics import (
     CURRENT_NEWS_PROMPT_VERSION,
     GENERATED_NEWS_PROMPT_VERSIONS,
+    NEWS_CATEGORIES,
     news_annotation_schema,
     validate_news_annotation,
 )
@@ -55,7 +56,7 @@ GEMMA_EVIDENCE_WINDOWS_MAX_CHARS = 8_000
 GEMMA_TITLE_BATCH_LIMIT = 10
 GEMMA_IMPACT_BATCH_LIMIT = 10
 PROMPT_VERSION = CURRENT_NEWS_PROMPT_VERSION
-TITLE_PROMPT_VERSION = "headline-zh-v7-multilingual-month-preservation"
+TITLE_PROMPT_VERSION = "display-enrichment-v1-gemma-category"
 INVALID_CHINESE_TITLE = "来源新闻（中文标题待校验）"
 TITLE_TRANSLATION_MODELS = (
     DEFAULT_GEMMA_MODEL, DEFAULT_GEMINI_MODEL, FALLBACK_GEMINI_MODEL,
@@ -440,13 +441,18 @@ def pending_title_translation_records(
     now = observed_at or datetime.now(UTC)
     pending = connection.execute(
         """SELECT n.* FROM news_revisions n
-        WHERE NOT EXISTS (
+        WHERE (NOT EXISTS (
             SELECT 1 FROM news_title_translations t
             WHERE t.source=n.source AND t.source_item_id=n.source_item_id
               AND t.revision_number=n.revision_number
               AND trim(t.headline_zh)<>?
               AND t.headline_zh NOT LIKE ?
               AND t.headline_zh GLOB '*[一-龥]*')
+          OR NOT EXISTS (
+            SELECT 1 FROM news_display_classifications_v1 d
+            WHERE d.source=n.source AND d.source_item_id=n.source_item_id
+              AND d.revision_number=n.revision_number
+              AND d.prompt_version=?))
           AND NOT EXISTS (
             SELECT 1 FROM news_revisions newer
             WHERE newer.source=n.source
@@ -488,7 +494,8 @@ def pending_title_translation_records(
                           n.collector_first_seen_time) DESC
         LIMIT ?""",
         (
-            INVALID_CHINESE_TITLE, "%相关数值%", model, TITLE_PROMPT_VERSION,
+            INVALID_CHINESE_TITLE, "%相关数值%", TITLE_PROMPT_VERSION,
+            model, TITLE_PROMPT_VERSION,
             now.isoformat(timespec="microseconds"),
             INVALID_CHINESE_TITLE, "%相关数值%", max(1, limit * 4),
         ),
@@ -548,8 +555,8 @@ def translate_pending_headlines(
         row = dict(raw_row)
         started = datetime.now(UTC)
         try:
-            headline_zh, exact_model = request_pool.call_title(
-                index, selected_model, row["headline"]
+            headline_zh, primary_category, exact_model = request_pool.call_title(
+                index, selected_model, row["headline"], str(row.get("body") or "")
             )
             parsed = datetime.now(UTC)
             translation_id = str(
@@ -564,8 +571,7 @@ def translate_pending_headlines(
                     ),
                 )
             )
-            ledger.append_title_translation(
-                {
+            translation_record = {
                     "translation_id": translation_id,
                     "source": row["source"],
                     "source_item_id": row["source_item_id"],
@@ -577,8 +583,43 @@ def translate_pending_headlines(
                     "parse_started_at": started,
                     "parsed_at": parsed,
                 }
+            existing_translation = ledger.connection.execute(
+                "SELECT 1 FROM news_title_translations WHERE translation_id=?",
+                (translation_id,),
+            ).fetchone()
+            if existing_translation is None:
+                ledger.append_title_translation(translation_record)
+            classification_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    "|".join([
+                        "display-category", row["source"], row["source_item_id"],
+                        str(row["revision_number"]), row["content_hash"],
+                        exact_model, TITLE_PROMPT_VERSION,
+                    ]),
+                )
             )
-            statuses.append({"status": "OK", "translation_id": translation_id})
+            existing_classification = ledger.connection.execute(
+                "SELECT 1 FROM news_display_classifications_v1 WHERE classification_id=?",
+                (classification_id,),
+            ).fetchone()
+            if existing_classification is None:
+                ledger.append_news_display_classification({
+                    "classification_id": classification_id,
+                    "source": row["source"],
+                    "source_item_id": row["source_item_id"],
+                    "revision_number": row["revision_number"],
+                    "raw_content_hash": row["content_hash"],
+                    "primary_category": primary_category,
+                    "llm_model_version": exact_model,
+                    "prompt_version": TITLE_PROMPT_VERSION,
+                    "classify_started_at": started,
+                    "classified_at": parsed,
+                })
+            statuses.append({
+                "status": "OK", "translation_id": translation_id,
+                "classification_id": classification_id,
+            })
         except GeminiBatchCapacityExhausted as error:
             statuses.append(
                 {
@@ -850,12 +891,12 @@ class _GeminiRequestPool:
         return repaired
 
     def call_title(
-        self, start_index: int, model: str, headline: str
-    ) -> tuple[str, str]:
+        self, start_index: int, model: str, headline: str, body: str = ""
+    ) -> tuple[str, str, str]:
         models = TITLE_TRANSLATION_MODELS if model == DEFAULT_GEMMA_MODEL else (model,)
         last_error: Exception | None = None
         for candidate_model in models:
-            payload = _title_payload(headline)
+            payload = _title_payload(headline, body)
             input_tokens = self._count_or_conservative(
                 candidate_model,
                 payload,
@@ -865,7 +906,7 @@ class _GeminiRequestPool:
                 ),
             )
             try:
-                return self.gateway.generate(
+                decoded, exact_model = self.gateway.generate(
                     start_index,
                     model=candidate_model,
                     purpose="headline-translation",
@@ -877,6 +918,8 @@ class _GeminiRequestPool:
                         ValueError, KeyError, json.JSONDecodeError,
                     ),
                 )
+                headline_zh, primary_category = decoded
+                return headline_zh, primary_category, exact_model
             except GeminiBatchCapacityExhausted:
                 raise
             except RuntimeError as error:
@@ -958,27 +1001,35 @@ def _chinese_repair_payload(result: dict) -> dict[str, object]:
     }
 
 
-def _title_payload(headline: str) -> dict[str, object]:
+def _title_payload(headline: str, body: str = "") -> dict[str, object]:
+    source_excerpt = body[:4_000]
     return {
         "systemInstruction": {"parts": [{"text": (
-            "你是新闻标题翻译器。必须把标题翻译成自然、准确的简体中文，"
-            "不得原样返回英文标题。"
+            "Translate news headlines into accurate Simplified Chinese and classify "
+            "their main subject. Use meaning, not keyword matching. Never infer facts "
+            "that are absent from the supplied source."
         )}]},
         "contents": [{"parts": [{"text": (
-            "请把以下新闻标题忠实翻译成自然的简体中文。保留人名、日期、"
-            "百分比、价格和所有数字，不要总结，不要补充标题以外的事实。"
-            "只返回 JSON。\nHEADLINE_START\n"
-            f"{headline}\nHEADLINE_END"
+            "Return JSON only. Translate the headline faithfully; preserve names, "
+            "dates, percentages, prices, and every number. Choose exactly one "
+            "primary_category from the schema based on the article's main subject.\n"
+            f"HEADLINE_START\n{headline}\nHEADLINE_END\n"
+            f"SOURCE_EXCERPT_START\n{source_excerpt}\nSOURCE_EXCERPT_END"
         )}]}],
         "generationConfig": {
             "responseMimeType": "application/json",
             "responseSchema": {
                 "type": "object",
-                "required": ["headline_zh"],
-                "properties": {"headline_zh": {
-                    "type": "string",
-                    "description": "忠实翻译后的简体中文新闻标题",
-                }},
+                "required": ["headline_zh", "primary_category"],
+                "properties": {
+                    "headline_zh": {
+                        "type": "string",
+                        "description": "Faithful Simplified Chinese headline",
+                    },
+                    "primary_category": {
+                        "type": "string", "enum": sorted(NEWS_CATEGORIES),
+                    },
+                },
             },
             "maxOutputTokens": 300,
             "temperature": 0,
@@ -986,7 +1037,7 @@ def _title_payload(headline: str) -> dict[str, object]:
     }
 
 
-def _decode_title(envelope: dict[str, object], headline: str) -> str:
+def _decode_title(envelope: dict[str, object], headline: str) -> tuple[str, str]:
     result = _decode_model_json(envelope)
     headline_zh = str(result.get("headline_zh") or "").strip()
     translated = {"headline_zh": headline_zh}
@@ -994,7 +1045,10 @@ def _decode_title(envelope: dict[str, object], headline: str) -> str:
     headline_zh = translated["headline_zh"]
     _require_title_numbers_preserved(headline_zh, headline)
     _require_simplified_chinese(headline_zh, "headline_zh", 2, 4.0, 60)
-    return headline_zh
+    primary_category = str(result.get("primary_category") or "")
+    if primary_category not in NEWS_CATEGORIES:
+        raise ValueError("display primary_category is not controlled")
+    return headline_zh, primary_category
 
 
 def _decode_impact(envelope: dict[str, object], row: dict) -> dict:

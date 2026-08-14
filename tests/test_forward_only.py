@@ -2404,9 +2404,9 @@ def test_headline_only_translation_is_display_only(tmp_path, monkeypatch) -> Non
         }
     )
     called = {}
-    def fake_title_call(_pool, _index, model, _headline):
+    def fake_title_call(_pool, _index, model, _headline, _body):
         called["model"] = model
-        return "黄金价格上涨", model
+        return "黄金价格上涨", "risk_sentiment", model
     monkeypatch.setattr(
         annotation_module._GeminiRequestPool, "call_title", fake_title_call,
     )
@@ -2416,6 +2416,9 @@ def test_headline_only_translation_is_display_only(tmp_path, monkeypatch) -> Non
     assert statuses[0]["status"] == "OK"
     assert called["model"] == "gemma-4-31b-it"
     assert ledger.count("news_title_translations") == 1
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_display_classifications_v1"
+    ).fetchone()[0] == 1
     assert ledger.count("news_annotations") == 0
     assert not (tmp_path / "gemini-quota.json").exists()
     assert not (tmp_path / "gemma-quota.json").exists()
@@ -2439,7 +2442,7 @@ def test_headline_translation_falls_back_after_non_chinese_response(
         models.append(model)
         if model == annotation_module.DEFAULT_GEMMA_MODEL:
             raise RuntimeError("Gemini headline_zh is not Simplified Chinese")
-        return "美联储就提案征求意见", model
+        return ("美联储就提案征求意见", "rates_fed"), model
     monkeypatch.setattr(
         GeminiModelGateway, "generate", fake_generate,
     )
@@ -2487,7 +2490,7 @@ def test_placeholder_title_is_retried_append_only(tmp_path, monkeypatch) -> None
     )
     monkeypatch.setattr(
         annotation_module._GeminiRequestPool, "call_title",
-        lambda *_: ("美联储就提案征求意见", "gemma-4-31b-it"),
+        lambda *_: ("美联储就提案征求意见", "rates_fed", "gemma-4-31b-it"),
     )
     statuses = translate_pending_headlines(
         ledger, api_key="test-key", request_accountant=ALLOW_MODEL_REQUEST,
@@ -2523,7 +2526,7 @@ def test_suspect_numeric_recovery_title_is_retried_append_only(
     })
     monkeypatch.setattr(
         annotation_module._GeminiRequestPool, "call_title",
-        lambda *_: ("就业报告回顾七月数据", "gemma-4-31b-it"),
+        lambda *_: ("就业报告回顾七月数据", "inflation_employment", "gemma-4-31b-it"),
     )
 
     statuses = translate_pending_headlines(
@@ -2553,7 +2556,7 @@ def test_ambiguous_google_rate_title_reaches_ai_translation(
     })
     monkeypatch.setattr(
         annotation_module._GeminiRequestPool, "call_title",
-        lambda *_: ("今日抵押贷款与再融资利率", "gemma-4-31b-it"),
+        lambda *_: ("今日抵押贷款与再融资利率", "rates_fed", "gemma-4-31b-it"),
     )
 
     statuses = translate_pending_headlines(

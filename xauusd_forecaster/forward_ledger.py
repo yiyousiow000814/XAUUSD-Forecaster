@@ -858,6 +858,36 @@ class ForwardLedger:
                 ),
             )
 
+    def append_news_display_classification(self, record: dict[str, Any]) -> None:
+        """Append an AI display category without granting model eligibility."""
+        source_key = (
+            record["source"], record["source_item_id"], record["revision_number"]
+        )
+        news = self.connection.execute(
+            """SELECT content_hash FROM news_revisions
+            WHERE source=? AND source_item_id=? AND revision_number=?""",
+            source_key,
+        ).fetchone()
+        if news is None or news["content_hash"] != record["raw_content_hash"]:
+            raise ValueError("display classification does not match an immutable news revision")
+        if record["classified_at"] < record["classify_started_at"]:
+            raise ValueError("display classification completion precedes start")
+        category = str(record["primary_category"])
+        if category not in NEWS_CATEGORIES:
+            raise ValueError("display primary_category is not controlled")
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO news_display_classifications_v1 VALUES
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    record["classification_id"], *source_key,
+                    record["raw_content_hash"], category,
+                    record["llm_model_version"], record["prompt_version"],
+                    _iso(record["classify_started_at"]),
+                    _iso(record["classified_at"]),
+                ),
+            )
+
     def append_llm_failure(self, record: dict[str, Any]) -> None:
         source_key = (
             record["source"], record["source_item_id"], record["revision_number"]

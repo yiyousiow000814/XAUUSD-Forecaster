@@ -23,6 +23,7 @@ V2_IMMUTABLE_TABLES = (
     "source_eligibility_rules",
     "derived_market_snapshots",
     "derived_news_feature_snapshots",
+    "news_semantic_health_snapshots_v1",
     "derived_outcomes",
     "training_eligibility_v2",
     "market_crossfit_predictions",
@@ -41,6 +42,7 @@ V2_IMMUTABLE_TABLES = (
     "news_training_source_budget_receipts_v1",
     "news_only_visibility_receipts_v1",
     "news_item_classifications_v1",
+    "news_display_classifications_v1",
     "news_impact_assessments_v1",
     "news_event_identity_resolutions_v1",
     "news_impact_failures_v1",
@@ -429,6 +431,41 @@ CREATE TABLE IF NOT EXISTS news_item_classifications_v1 (
     reason_code TEXT NOT NULL,
     source_hash TEXT NOT NULL,
     UNIQUE(source,source_item_id,revision_number,policy_version)
+);
+
+CREATE TABLE IF NOT EXISTS news_semantic_health_snapshots_v1 (
+    source_decision_id TEXT PRIMARY KEY,
+    decision_time TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('HEALTHY','UNHEALTHY')),
+    reason_codes_json TEXT NOT NULL,
+    heartbeat_at TEXT,
+    unresolved_items INTEGER NOT NULL,
+    oldest_unresolved_at TEXT,
+    snapshot_hash TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS news_display_classifications_v1 (
+    classification_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    source_item_id TEXT NOT NULL,
+    revision_number INTEGER NOT NULL,
+    raw_content_hash TEXT NOT NULL,
+    primary_category TEXT NOT NULL CHECK(primary_category IN (
+        'rates_fed','inflation_employment','growth_economy','usd_liquidity',
+        'oil_energy','war_geopolitics','central_bank_gold','risk_sentiment',
+        'regulation_other')),
+    llm_model_version TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    classify_started_at TEXT NOT NULL,
+    classified_at TEXT NOT NULL,
+    FOREIGN KEY(source, source_item_id, revision_number)
+      REFERENCES news_revisions(source, source_item_id, revision_number)
+);
+
+CREATE INDEX IF NOT EXISTS news_display_classifications_revision
+ON news_display_classifications_v1(
+    source, source_item_id, revision_number, prompt_version, classified_at
 );
 
 CREATE TABLE IF NOT EXISTS news_impact_assessments_v1 (

@@ -683,7 +683,12 @@ def reconcile_completed_jobs(
                      AND t.prompt_version=j.prompt_version
                      AND trim(t.headline_zh)<>?
                      AND t.headline_zh NOT LIKE ?
-                     AND t.headline_zh GLOB '*[一-龥]*')))""",
+                     AND t.headline_zh GLOB '*[一-龥]*')
+                   AND EXISTS (
+                     SELECT 1 FROM news_display_classifications_v1 d
+                     WHERE d.source=j.source AND d.source_item_id=j.source_item_id
+                       AND d.revision_number=j.revision_number
+                       AND d.prompt_version=j.prompt_version)))""",
             (timestamp, timestamp, INVALID_CHINESE_TITLE, "%相关数值%"),
         )
     return result.rowcount

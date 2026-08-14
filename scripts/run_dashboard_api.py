@@ -49,6 +49,7 @@ from xauusd_forecaster.annotation import (  # noqa: E402
     GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
     INVALID_CHINESE_TITLE,
     PROMPT_VERSION,
+    TITLE_PROMPT_VERSION,
     completed_annotation_records,
     pending_annotation_records,
 )
@@ -497,46 +498,7 @@ CATEGORY_LABELS = {
 
 def _news_category(item: dict) -> str:
     controlled = CATEGORY_LABELS.get(str(item.get("primary_category") or ""))
-    if controlled:
-        return controlled
-    source = str(item.get("source") or "")
-    searchable = " ".join(
-        str(item.get(key) or "")
-        for key in ("headline", "event_type", "summary_zh")
-    ).lower()
-    if source == "world_gold_council_central_banks":
-        return "央行购金"
-    if source in {"eia_today_in_energy", "eia_press_releases"}:
-        return "油价/能源"
-    if source == "ecb_press_releases":
-        return "利率/Fed"
-    if any(
-        term in searchable
-        for term in (
-            "war", "conflict", "sanction", "iran", "russia", "ukraine",
-            "middle east", "hormuz", "战争", "制裁", "伊朗", "俄罗斯", "乌克兰",
-        )
-    ):
-        return "战争/地缘"
-    if any(term in searchable for term in ("oil", "opec", "crude", "原油", "油价")):
-        return "油价/能源"
-    if any(
-        term in searchable
-        for term in (
-            "inflation", "cpi", "pce", "payroll", "employment", "unemployment",
-            "jobs", "wage", "通胀", "就业", "失业", "薪资",
-        )
-    ):
-        return "通胀/就业"
-    if any(term in searchable for term in ("dollar", "liquidity", "balance sheet", "美元", "流动性")):
-        return "美元/流动性"
-    if any(term in searchable for term in ("gdp", "gross domestic product", "personal income", "growth", "经济增长")):
-        return "增长/经济"
-    if source in {"federal_reserve_monetary", "federal_reserve_speeches_testimony"}:
-        return "利率/Fed"
-    if source == "federal_reserve_press_all":
-        return "监管/其他"
-    return "其他"
+    return controlled or "待分类"
 
 
 def _not_required_reason(item: dict, forward_epoch: str) -> tuple[str, str]:
@@ -657,7 +619,11 @@ def _news_reader_rows(
                    cf.error_type AS content_error_type,
                    n.link, n.content_hash, n.body,
                    json_extract(a.annotation_json, '$.summary_zh') AS summary_zh,
-                   json_extract(a.annotation_json, '$.primary_category') AS primary_category,
+                   COALESCE(json_extract(a.annotation_json, '$.primary_category'),
+                            d.primary_category) AS primary_category,
+                   CASE WHEN a.annotation_id IS NOT NULL THEN 'MODEL_ANNOTATION'
+                        WHEN d.classification_id IS NOT NULL THEN 'DISPLAY_AI'
+                        ELSE 'PENDING' END AS category_provenance,
                    json_extract(a.annotation_json, '$.secondary_categories') AS secondary_categories_json,
                    json_extract(a.annotation_json, '$.emerging_topic_zh') AS emerging_topic_zh,
                    json_extract(a.annotation_json, '$.event_time') AS event_time,
@@ -714,6 +680,14 @@ def _news_reader_rows(
               ORDER BY CASE preferred_a.llm_model_version
                 WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                 preferred_a.parsed_at DESC LIMIT 1)
+            LEFT JOIN news_display_classifications_v1 d ON d.classification_id=(
+              SELECT latest_d.classification_id
+              FROM news_display_classifications_v1 latest_d
+              WHERE latest_d.source=n.source
+                AND latest_d.source_item_id=n.source_item_id
+                AND latest_d.revision_number=n.revision_number
+              ORDER BY (latest_d.prompt_version=?) DESC,
+                       latest_d.classified_at DESC LIMIT 1)
             LEFT JOIN news_impact_assessments_v1 i
               ON i.assessment_id=(
                 SELECT selected_i.assessment_id
@@ -768,7 +742,8 @@ def _news_reader_rows(
             LIMIT ?""",
         (
             now.isoformat(timespec="microseconds"), INVALID_CHINESE_TITLE,
-            PROMPT_VERSION, IMPACT_MODEL, IMPACT_PROMPT_VERSION,
+            PROMPT_VERSION, TITLE_PROMPT_VERSION,
+            IMPACT_MODEL, IMPACT_PROMPT_VERSION,
             HANDOVER_IMPACT_PROMPT_VERSION, IMPACT_PROMPT_VERSION,
             PROMPT_VERSION, cutoff, *cursor_parameters, limit,
         ),
@@ -1485,7 +1460,11 @@ def _dashboard_payload(database: Path) -> dict:
                       cf.error_type AS content_error_type,
                       n.link, n.content_hash,
                       json_extract(a.annotation_json, '$.summary_zh') AS summary_zh,
-                      json_extract(a.annotation_json, '$.primary_category') AS primary_category,
+                      COALESCE(json_extract(a.annotation_json, '$.primary_category'),
+                               d.primary_category) AS primary_category,
+                      CASE WHEN a.annotation_id IS NOT NULL THEN 'MODEL_ANNOTATION'
+                           WHEN d.classification_id IS NOT NULL THEN 'DISPLAY_AI'
+                           ELSE 'PENDING' END AS category_provenance,
                       json_extract(a.annotation_json, '$.secondary_categories') AS secondary_categories_json,
                        json_extract(a.annotation_json, '$.emerging_topic_zh') AS emerging_topic_zh,
                        json_extract(a.annotation_json, '$.event_time') AS event_time,
@@ -1548,7 +1527,16 @@ def _dashboard_payload(database: Path) -> dict:
                      AND preferred_a.prompt_version=?
                    ORDER BY CASE preferred_a.llm_model_version
                        WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
-                     preferred_a.parsed_at DESC LIMIT 1)
+                      preferred_a.parsed_at DESC LIMIT 1)
+               LEFT JOIN news_display_classifications_v1 d
+                 ON d.classification_id=(
+                   SELECT latest_d.classification_id
+                   FROM news_display_classifications_v1 latest_d
+                   WHERE latest_d.source=n.source
+                     AND latest_d.source_item_id=n.source_item_id
+                     AND latest_d.revision_number=n.revision_number
+                   ORDER BY (latest_d.prompt_version=?) DESC,
+                            latest_d.classified_at DESC LIMIT 1)
                LEFT JOIN news_impact_assessments_v1 i
                  ON i.assessment_id=(
                    SELECT selected_i.assessment_id
@@ -1613,7 +1601,7 @@ def _dashboard_payload(database: Path) -> dict:
                LIMIT 1000""",
             (
                 now.isoformat(timespec="microseconds"), INVALID_CHINESE_TITLE,
-                PROMPT_VERSION,
+                 PROMPT_VERSION, TITLE_PROMPT_VERSION,
                 IMPACT_MODEL, IMPACT_PROMPT_VERSION,
                 HANDOVER_IMPACT_PROMPT_VERSION, IMPACT_PROMPT_VERSION,
                 PROMPT_VERSION,
@@ -1778,6 +1766,10 @@ def _dashboard_payload(database: Path) -> dict:
             "news_collector": connection.execute("SELECT max(fetched_time) FROM source_polls").fetchone()[0],
             "gemini_annotator": connection.execute("SELECT max(parsed_at) FROM news_annotations").fetchone()[0],
         }
+        latest_semantic_health = connection.execute(
+            """SELECT * FROM news_semantic_health_snapshots_v1
+            ORDER BY observed_at DESC LIMIT 1"""
+        ).fetchone()
         news_source_health = _news_source_health(connection, now)
         monitored_news_sources = {
             row["source"] for row in news_source_health if row["health"] == "HEALTHY"
@@ -1922,6 +1914,29 @@ def _dashboard_payload(database: Path) -> dict:
     sites_sync_component = component(
         "sites_synchronizer", 120, sync_status.get("last_error")
     )
+    semantic_pipeline_component = {
+        "last_success": (
+            latest_semantic_health["heartbeat_at"]
+            if latest_semantic_health is not None else None
+        ),
+        "age_seconds": (
+            max(0.0, (
+                now - datetime.fromisoformat(latest_semantic_health["observed_at"])
+            ).total_seconds())
+            if latest_semantic_health is not None else None
+        ),
+        "status": (
+            "OK" if latest_semantic_health is not None
+            and latest_semantic_health["status"] == "HEALTHY" else "STALE"
+        ),
+        "last_error": (
+            None if latest_semantic_health is not None
+            and latest_semantic_health["status"] == "HEALTHY"
+            else ", ".join(json.loads(latest_semantic_health["reason_codes_json"]))
+            if latest_semantic_health is not None
+            else "尚无决策时点的新闻语义健康记录"
+        ),
+    }
     degraded_resources = sync_status.get("degraded_resources") or []
     if (
         sites_sync_component["status"] == "OK"
@@ -2073,6 +2088,7 @@ def _dashboard_payload(database: Path) -> dict:
                 "outcome_settler": outcome_component,
                 "news_collector": component("news_collector", 300),
                 "gemini_annotator": component("gemini_annotator", 900),
+                "news_semantic_pipeline": semantic_pipeline_component,
                 "sites_synchronizer": sites_sync_component,
                 "sqlite_backup": component("sqlite_backup", 172800),
                 # Daily online backups are published only after the complete

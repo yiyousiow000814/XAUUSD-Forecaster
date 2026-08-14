@@ -999,7 +999,7 @@ def test_dashboard_uses_same_explicit_event_clock_as_model(tmp_path) -> None:
     assert datetime.fromisoformat(row["impact_expires_at"]) == event_time + timedelta(hours=12)
 
 
-def test_dashboard_uses_gemini_controlled_category_before_source_guess() -> None:
+def test_dashboard_uses_only_ai_controlled_categories() -> None:
     module = _dashboard_module()
     assert module._news_category({
         "primary_category": "central_bank_gold",
@@ -1014,7 +1014,40 @@ def test_dashboard_uses_gemini_controlled_category_before_source_guess() -> None
         "headline": "Application approval",
         "summary_zh": "监管审批。",
         "event_type": "regulatory_approval",
-    }) == "监管/其他"
+    }) == "待分类"
+
+
+def test_dashboard_reads_display_ai_category_without_model_authority(tmp_path) -> None:
+    now = datetime.now(UTC)
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=now - timedelta(hours=1))
+    body = "Complete article about central bank gold reserve purchases. " * 10
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    ledger.append_news_revision({
+        "source": "display-source", "source_item_id": "display-one",
+        "source_published_time": now - timedelta(minutes=5),
+        "collector_first_seen_time": now - timedelta(minutes=4),
+        "fetched_time": now - timedelta(minutes=4),
+        "headline": "Central bank increases gold reserves", "body": body,
+        "link": "https://example.test/gold", "content_hash": digest,
+        "cluster_id": "display-cluster",
+    })
+    ledger.append_news_display_classification({
+        "classification_id": "display-classification", "source": "display-source",
+        "source_item_id": "display-one", "revision_number": 1,
+        "raw_content_hash": digest, "primary_category": "central_bank_gold",
+        "llm_model_version": "gemma-4-31b-it",
+        "prompt_version": "display-enrichment-v1-gemma-category",
+        "classify_started_at": now - timedelta(minutes=3),
+        "classified_at": now - timedelta(minutes=3),
+    })
+    ledger.close()
+
+    row = _dashboard_module()._dashboard_payload(database)["recent_news"][0]
+
+    assert row["category"] == "央行购金"
+    assert row["category_provenance"] == "DISPLAY_AI"
+    assert row["parsed_at"] is None
 
 
 def test_dashboard_reports_gdelt_fallback_and_retry_time(tmp_path) -> None:
