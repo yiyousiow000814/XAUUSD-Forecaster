@@ -66,6 +66,7 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
     cutoff = observed_at - ANNOTATION_DECISION_GRACE
     intake_floor = observed_at - NEWS_INTAKE_MAX_AGE
     unresolved_times: list[datetime] = []
+    actionable_failure_counts: dict[str, int] = {}
     for row in pending_annotation_records(
         ledger.connection, observed_at=observed_at, limit=100_000,
         prompt_version=PROMPT_VERSION,
@@ -76,7 +77,12 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
 
     failed_jobs = ledger.connection.execute(
         """SELECT j.created_at,n.source,n.headline,n.source_published_time,
-                  n.collector_first_seen_time
+                  n.collector_first_seen_time,
+                  COALESCE((
+                    SELECT a.failure_code FROM news_ai_job_attempts_v1 a
+                    WHERE a.job_id=j.job_id AND a.outcome='ERROR'
+                    ORDER BY a.attempt_number DESC,a.attempted_at DESC LIMIT 1
+                  ),'UNCLASSIFIED') AS failure_code
         FROM news_ai_jobs_v1 j
         JOIN news_revisions n
           ON n.source=j.source AND n.source_item_id=j.source_item_id
@@ -110,6 +116,10 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
         )
         if allowed and (created := _instant(row["created_at"])) is not None:
             unresolved_times.append(created)
+            failure_code = str(row["failure_code"])
+            actionable_failure_counts[failure_code] = (
+                actionable_failure_counts.get(failure_code, 0) + 1
+            )
     if unresolved_times:
         reasons.append("ACTIONABLE_NEWS_SEMANTICS_PENDING")
 
@@ -123,5 +133,6 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
         "oldest_unresolved_at": (
             min(unresolved_times).isoformat() if unresolved_times else None
         ),
+        "actionable_failure_counts": actionable_failure_counts,
     }
     return {**payload, "snapshot_hash": canonical_hash(payload)}

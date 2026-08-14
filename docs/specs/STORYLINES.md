@@ -12,6 +12,9 @@ The storyline layer is a display-only research view over the append-only news an
 4. Edges are limited to `STARTS`, `FOLLOWED_BY`, `CONFIRMS`, `ESCALATES`, and `DEESCALATES`.
 5. The system does not infer `CAUSES` from chronology.
 6. Story summaries and state are `DISPLAY_ONLY`; they do not enter Ridge training or affect a decision.
+7. A resolved current-contract event uses the canonical identity from the news
+   evidence contract. `UNRESOLVED` records do not create a storyline. Any legacy
+   display fallback is provisional and never becomes evidence or model authority.
 
 ## Generic event architecture
 

@@ -58,6 +58,14 @@ new episode. Insufficient evidence remains unresolved. The stable anchor,
 factual changes, identity differences, and contextual differences are retained
 as immutable audit evidence with the resolution.
 
+The persisted identity resolution is the sole authority for every resolved
+current-contract event. Training, statistics, weighting, and storylines MUST
+use its canonical episode and event identifiers and MUST NOT derive a competing
+identity from free-form annotation keys. `UNRESOLVED` or missing current-contract
+identity is display-only and MUST NOT receive model permission. A deterministic
+fallback may organize legacy display records, but it is provisional presentation
+state rather than canonical identity and cannot enter training or corroboration.
+
 Candidate identity is never admitted by a shared topic or object alone. It
 requires either the same normalized material/episode key or the same normalized
 actor-and-object pair. Continuous market observations additionally require the

@@ -53,6 +53,26 @@ CREATE TABLE IF NOT EXISTS news_ai_jobs_v1 (
 CREATE INDEX IF NOT EXISTS news_ai_jobs_claim_v1
 ON news_ai_jobs_v1(state,available_at,priority,task_type,created_at);
 
+CREATE TABLE IF NOT EXISTS news_ai_job_attempts_v1 (
+    attempt_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL CHECK(attempt_number >= 1),
+    account_id TEXT NOT NULL,
+    credential_id TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    failure_code TEXT,
+    error_type TEXT,
+    provider_http_status INTEGER,
+    error_detail TEXT,
+    attempted_at TEXT NOT NULL,
+    next_retry_at TEXT,
+    FOREIGN KEY(job_id) REFERENCES news_ai_jobs_v1(job_id),
+    UNIQUE(job_id,attempt_number,account_id,credential_id)
+);
+
+CREATE INDEX IF NOT EXISTS news_ai_job_attempts_lookup_v1
+ON news_ai_job_attempts_v1(job_id,attempt_number,attempted_at);
+
 CREATE TABLE IF NOT EXISTS news_ai_account_daily_usage_v1 (
     quota_day TEXT NOT NULL,
     account_id TEXT NOT NULL,
@@ -245,6 +265,38 @@ def enqueue_job(
             ),
         )
     return job_id
+
+
+def record_job_attempt(
+    connection: sqlite3.Connection,
+    *,
+    job: ScheduledJob,
+    credential: ApiCredential,
+    status: dict[str, object],
+    attempted_at: datetime,
+) -> None:
+    """Persist one sanitized scheduler outcome for diagnosis and recovery."""
+    identity = "|".join((
+        job.job_id, str(job.attempt_count), credential.account_id,
+        credential.credential_id,
+    ))
+    provider_status = status.get("provider_http_status")
+    with connection:
+        connection.execute(
+            """INSERT OR IGNORE INTO news_ai_job_attempts_v1 VALUES
+            (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                hashlib.sha256(identity.encode("utf-8")).hexdigest(),
+                job.job_id, job.attempt_count, credential.account_id,
+                credential.credential_id, str(status.get("status") or "ERROR"),
+                str(status.get("failure_code") or "") or None,
+                str(status.get("error_type") or "") or None,
+                int(provider_status) if isinstance(provider_status, int) else None,
+                str(status.get("error") or status.get("reason") or "")[:500] or None,
+                _iso(attempted_at),
+                str(status.get("next_retry_at") or "") or None,
+            ),
+        )
 
 
 def _job_from_row(row: sqlite3.Row) -> ScheduledJob:
@@ -568,9 +620,17 @@ def scheduler_counts(connection: sqlite3.Connection) -> dict[str, int]:
         GROUP BY state"""
     ).fetchall()
     counts = {str(row["state"]): int(row["total"]) for row in rows}
-    return {state.lower(): counts.get(state, 0) for state in (
+    result = {state.lower(): counts.get(state, 0) for state in (
         "QUEUED", "LEASED", "BACKING_OFF", "COMPLETED", "DEAD_LETTER",
     )}
+    obsolete = int(connection.execute(
+        """SELECT count(*) FROM news_ai_jobs_v1
+        WHERE state='DEAD_LETTER'
+          AND last_error='CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'"""
+    ).fetchone()[0])
+    result["obsolete"] = obsolete
+    result["dead_letter"] = max(0, result["dead_letter"] - obsolete)
+    return result
 
 
 def _annotation_priority(row: dict[str, object]) -> str:
@@ -657,12 +717,12 @@ def reconcile_completed_jobs(
     *,
     now: datetime | None = None,
 ) -> int:
-    """Close leases after a crash when immutable output was already appended."""
+    """Close jobs already satisfied or superseded by immutable evidence."""
     from .annotation import INVALID_CHINESE_TITLE
 
     timestamp = _iso(now or datetime.now(UTC))
     with connection:
-        result = connection.execute(
+        completed = connection.execute(
             """UPDATE news_ai_jobs_v1 AS j
                SET state='COMPLETED',lease_owner=NULL,lease_expires_at=NULL,
                    updated_at=?,completed_at=?
@@ -686,7 +746,20 @@ def reconcile_completed_jobs(
                      AND t.headline_zh GLOB '*[一-龥]*')))""",
             (timestamp, timestamp, INVALID_CHINESE_TITLE, "%相关数值%"),
         )
-    return result.rowcount
+        obsolete = connection.execute(
+            """UPDATE news_ai_jobs_v1 AS j
+               SET state='DEAD_LETTER',lease_owner=NULL,lease_expires_at=NULL,
+                   last_error='CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE',
+                   updated_at=?,completed_at=?
+               WHERE state IN ('QUEUED','BACKING_OFF')
+                 AND EXISTS (
+                   SELECT 1 FROM news_revisions newer
+                   WHERE newer.source=j.source
+                     AND newer.source_item_id=j.source_item_id
+                     AND newer.revision_number>j.revision_number)""",
+            (timestamp, timestamp),
+        )
+    return completed.rowcount + obsolete.rowcount
 
 
 def pending_record_for_job(

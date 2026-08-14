@@ -369,10 +369,13 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
                  event_time: str | None = "__DEFAULT__",
                  impact_class: str = "POLICY_SHIFT",
                   impact_update_type: str = "NEW_EVENT",
-                  impact_assessed_at: datetime | None = None,
-                  source_organization_id: str | None = None,
-                  include_impact: bool = True,
-                  annotation_overrides: dict | None = None) -> None:
+                 impact_assessed_at: datetime | None = None,
+                 source_organization_id: str | None = None,
+                 include_impact: bool = True,
+                 identity_relation: str | None = "NEW_EPISODE",
+                 canonical_episode_id: str | None = None,
+                 canonical_event_id: str | None = None,
+                 annotation_overrides: dict | None = None) -> None:
     entities = entities or []
     body = ("publisher full body " * 30) + item
     digest = hashlib.sha256(body.encode()).hexdigest()
@@ -440,7 +443,8 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
     })
     if include_impact:
         assessed_at = impact_assessed_at or parsed_at
-        ledger.append_news_impact_assessment({
+        identity_anchor = material_event_key or "::".join(entities) or item
+        impact_record = {
             "assessment_id": f"impact:{source}:{item}",
             "source": source, "source_item_id": item, "revision_number": 1,
             "raw_content_hash": digest, "annotation_id": item,
@@ -451,7 +455,92 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
             "event_state": "ACTIVE" if impact_class != "BACKGROUND" else "BACKGROUND",
             "update_type": impact_update_type,
             "confidence": 1.0, "reason_zh": "测试中的固定影响寿命判断。",
-        })
+        }
+        if identity_relation is not None:
+            impact_record.update({
+                "resolution_id": f"resolution:{source}:{item}",
+                "identity_relation": identity_relation,
+                "identity_anchor_zh": "测试中的固定现实事件身份。",
+                "core_fact_changes_zh": [],
+                "identity_differences_zh": (
+                    ["测试中的独立现实事件。"]
+                    if identity_relation == "NEW_EPISODE" else []
+                ),
+                "context_differences_zh": [],
+                "canonical_episode_id": (
+                    canonical_episode_id or f"test-episode:{identity_anchor}"
+                ),
+                "canonical_event_id": (
+                    canonical_event_id or f"test-event:{identity_anchor}"
+                ),
+            })
+        ledger.append_news_impact_assessment(impact_record)
+
+
+def test_event_evidence_groups_only_by_persisted_canonical_identity(tmp_path) -> None:
+    first_seen = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=first_seen)
+    shared = {
+        "canonical_episode_id": "semantic-episode-july-jobs",
+        "canonical_event_id": "semantic-event-july-jobs-release",
+    }
+    _append_news(
+        ledger, source="bls_employment_situation", item="official-jobs",
+        first_seen=first_seen, parsed_at=first_seen, impulse=0.4,
+        material_event_key="us_july_2026_jobs_report_release",
+        identity_relation="NEW_EPISODE", **shared,
+    )
+    _append_news(
+        ledger, source="google_news_gold_context", item="publisher-jobs",
+        first_seen=first_seen + timedelta(minutes=1),
+        parsed_at=first_seen + timedelta(minutes=1), impulse=0.4,
+        material_event_key="july_2026_us_jobs_report_release",
+        impact_update_type="DUPLICATE_REPORT",
+        identity_relation="SAME_EVENT", **shared,
+    )
+
+    events = event_evidence_rows(
+        ledger, first_seen + timedelta(minutes=5),
+    )
+    matching = [
+        event for event in events
+        if event["resolved_event_id"] == shared["canonical_event_id"]
+    ]
+
+    assert len(matching) == 1
+    assert matching[0]["member_count"] == 2
+    assert matching[0]["identity_status"] == "RESOLVED"
+    assert matching[0]["broad_model_eligible"] is True
+
+
+@pytest.mark.parametrize(
+    ("relation", "expected_status", "reason"),
+    [
+        ("UNRESOLVED", "UNRESOLVED", "IDENTITY_UNRESOLVED"),
+        (None, "MISSING", "IDENTITY_NOT_RESOLVED"),
+    ],
+)
+def test_unresolved_or_missing_identity_is_display_only(
+    tmp_path, relation, expected_status, reason,
+) -> None:
+    first_seen = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=first_seen)
+    _append_news(
+        ledger, source="bls_employment_situation", item="identity-pending",
+        first_seen=first_seen, parsed_at=first_seen, impulse=0.4,
+        material_event_key="us_july_2026_jobs_report_release",
+        identity_relation=relation,
+    )
+
+    event = event_evidence_rows(
+        ledger, first_seen + timedelta(minutes=5),
+    )[0]
+
+    assert event["identity_status"] == expected_status
+    assert event["broad_model_eligible"] is False
+    assert event["core_model_eligible"] is False
+    assert event["model_permission"] == "DISPLAY_ONLY"
+    assert reason in event["reason_codes"]
 
 
 def test_news_freshness_ages_from_published_time_not_parsed_at(tmp_path) -> None:
@@ -1635,6 +1724,39 @@ def test_market_crossfit_uses_purged_chronological_training_only(tmp_path, monke
     ledger.close()
 
 
+def test_market_crossfit_reuses_immutable_persisted_predictions(
+    tmp_path, monkeypatch,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    rows = _training_rows(120)
+
+    class Artifact:
+        artifact_hash = "crossfit-artifact"
+
+        def predict(self, values):
+            return [0.25] * len(values)
+
+    monkeypatch.setattr(training_v2, "train_ridge", lambda *_args: Artifact())
+    first = training_v2.chronological_crossfit_market(
+        ledger, rows, tmp_path, datetime(2026, 8, 5, tzinfo=UTC)
+    )
+    assert first
+
+    def unexpected_retrain(*_args):
+        raise AssertionError("an immutable crossfit receipt must be reused")
+
+    monkeypatch.setattr(training_v2, "train_ridge", unexpected_retrain)
+    second = training_v2.chronological_crossfit_market(
+        ledger, rows, tmp_path, datetime(2026, 8, 6, tzinfo=UTC)
+    )
+
+    assert second == first
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM market_crossfit_predictions"
+    ).fetchone()[0] == len(first)
+    ledger.close()
+
+
 def test_rolling_uncertainty_uses_latest_version_per_prior_decision(tmp_path) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     base = datetime(2026, 8, 1, tzinfo=UTC)
@@ -2476,6 +2598,9 @@ def test_canonical_occurrence_deduplicates_alias_keys_for_model(tmp_path) -> Non
             primary_category="regulation_other",
             source_organization_id=organization,
             material_event_key=material,
+            identity_relation=("NEW_EPISODE" if offset == 1 else "SAME_EVENT"),
+            canonical_episode_id="semantic-episode-cook-removal",
+            canonical_event_id="semantic-event-cook-removal-attempt",
             annotation_overrides={
                 "actor": actor, "canonical_actor_id": actor,
                 "action": "renews removal attempt", "action_family": action,

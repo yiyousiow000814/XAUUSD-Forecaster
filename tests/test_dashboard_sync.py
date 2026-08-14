@@ -106,6 +106,56 @@ def test_preview_freezes_both_materialized_curve_overviews(monkeypatch) -> None:
     }
 
 
+def test_preview_freezes_pageable_version_history_beyond_first_page(
+    monkeypatch,
+) -> None:
+    module = _preview_module()
+    groups = [{
+        "model_identity": "MARKET_ONLY",
+        "training_dataset_hash": f"market-{generation}",
+        "created_at": (
+            datetime(2026, 8, 1, tzinfo=timezone.utc)
+            + timedelta(hours=generation)
+        ).isoformat(),
+        "generation": generation,
+        "training_rows": generation * 50,
+    } for generation in range(1, 62)]
+    groups.append({
+        "model_identity": "NEWS_ONLY",
+        "training_dataset_hash": "news-1",
+        "created_at": "2026-08-14T07:00:00+00:00",
+        "generation": 1,
+        "training_rows": 124,
+    })
+
+    monkeypatch.setattr(
+        module, "_read_json",
+        lambda _base_url, path: {"items": groups}
+        if path.endswith("resource=version-overview") else {},
+    )
+    records = module._version_history_records("https://example.test")
+
+    version_groups = [
+        row for row in records if row["resource"] == "version-group"
+    ]
+    assert len(version_groups) == 61
+    market_groups = sorted(
+        (row for row in version_groups
+         if row["payload"]["model_identity"] == "MARKET_ONLY"),
+        key=lambda row: row["sort_epoch"],
+    )
+    assert len(market_groups) == module.dashboard_sync.LEARNING_OVERVIEW_GROUPS_PER_IDENTITY
+    assert market_groups[0]["payload"]["generation"] == 2
+    assert market_groups[-1]["payload"]["generation"] == 61
+
+    bundle = module.build_bundle(
+        "https://example.test", "feature/example", "abcdef12",
+    )
+    stored = bundle["learning_history"]
+    assert len([row for row in stored if row["resource"] == "version-group"]) == 61
+    assert not [row for row in stored if row["resource"] == "version-overview"]
+
+
 def test_sync_retries_transient_disconnect(monkeypatch) -> None:
     module = _sync_module()
     calls = []

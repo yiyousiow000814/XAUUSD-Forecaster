@@ -10,6 +10,7 @@ const { runtimeUpdateFailurePresentation } = await import("../app/_lib/runtime-u
 const { countPresentation, formatCompactCount, formatExactCount, progressCountPresentation } = await import("../app/_lib/count-format.ts");
 const { versionResultLabel } = await import("../app/_lib/version-result-state.ts");
 const { modelVersionMarkers } = await import("../app/_lib/model-version-markers.ts");
+const { buildTrainingCutoffChart } = await import("../app/_lib/training-cutoff-chart.ts");
 const { statusFieldPhase } = await import("../app/_lib/current-data-provenance.ts");
 const { shouldPollDashboardResource } = await import("../app/_lib/dashboard-refresh-policy.ts");
 const { quoteBridgePresentation } = await import("../app/_lib/quote-bridge-state.ts");
@@ -46,6 +47,26 @@ test("derives model handovers from the predictions actually shown", () => {
   assert.deepEqual(modelVersionMarkers([
     { decision_time: "2026-08-14T01:00:00Z", model_version: "version-a" },
   ]), []);
+});
+
+test("aligns models by comparable training cutoff without inventing history", () => {
+  const chart = buildTrainingCutoffChart([
+    { model_identity: "MARKET_ONLY", created_at: "2026-08-14T01:00:00Z", generation: 1, training_rows: 1000 },
+    { model_identity: "MARKET_ONLY", created_at: "2026-08-14T02:00:00Z", generation: 2, training_rows: 1050 },
+    { model_identity: "MARKET_ONLY", created_at: "2026-08-14T03:00:00Z", generation: 3, training_rows: 1100 },
+    { model_identity: "NEWS_ONLY", created_at: "2026-08-14T02:00:00Z", generation: 1, training_rows: 1050 },
+    { model_identity: "NEWS_ONLY", created_at: "2026-08-14T03:00:00Z", generation: 2, training_rows: 1100 },
+    { model_identity: "NEWS_ONLY", created_at: "2026-08-14T03:00:00Z", generation: 3, training_rows: 1100 },
+  ], row => row.training_rows);
+
+  assert.deepEqual(chart.cutoffs, [1000, 1050, 1100]);
+  const market = chart.series.find(series => series.modelIdentity === "MARKET_ONLY");
+  const news = chart.series.find(series => series.modelIdentity === "NEWS_ONLY");
+  assert.deepEqual(market.points.map(point => point.cutoffIndex), [0, 1, 2]);
+  assert.deepEqual(news.points.map(point => point.cutoffIndex), [1, 2, 2]);
+  assert.equal(news.points[0].row.training_rows, 1050);
+  assert.deepEqual(news.points.slice(1).map(point => point.row.generation), [2, 3]);
+  assert.equal(chart.cutoffs.at(-1), 1100);
 });
 
 test("keeps branch throughput limits while refreshing Preview metrics from D1", () => {
@@ -312,7 +333,8 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   assert.match(previewBuilder, /for identity in \("LOT_RIDGE", "EXIT_RIDGE"\)/);
   assert.match(previewBuilder, /resource=curve-overview&cadence=\{cadence\}/);
   assert.match(previewBuilder, /for cadence in \("5m", "30m"\)/);
-  assert.match(previewBuilder, /\[\*learning_history, \*execution_history, \*curve_overviews\]/);
+  assert.match(previewBuilder, /resource=version-overview/);
+  assert.match(previewBuilder, /\*version_history/);
   assert.doesNotMatch(page, /auditView === "league"/);
   assert.match(page, /\[PREVIEW_RESOURCES\.status\]: previewBundle\.status/);
   assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);
@@ -1007,24 +1029,21 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /训练组分页（/);
   assert.match(modal, /aria-label="上一页训练组"/);
   assert.match(modal, /aria-label="下一页训练组"/);
-  assert.match(modal, /pendingPageScrollRef/);
-  assert.match(modal, /if \(!pendingPageScrollRef\.current \|\| pageLoading \|\| pageError\) return/);
-  assert.match(modal, /scroller\.scrollTo/);
-  assert.doesNotMatch(modal, /setPage\([\s\S]{0,160}scrollIntoView/);
-  assert.match(modal, /className="version-page-stage" aria-busy=\{pageLoading\}/);
-  assert.match(css, /version-page-stage \{ min-height:560px; display:flex; flex-direction:column/);
-  assert.match(css, /version-pagination-bottom \{ margin-top:auto/);
+  assert.doesNotMatch(modal, /pendingPageScrollRef|scroller\.scrollTo|scrollIntoView/);
+  assert.match(modal, /className="version-page-results" aria-busy=\{pageLoading\}/);
+  assert.match(modal, /busy=\{pageLoading\}/);
+  assert.match(css, /version-page-results \{ min-height:420px; display:flex; flex-direction:column/);
   assert.match(modal, /position="bottom"/);
-  assert.match(modal, /className="version-list-anchor"/);
+  assert.match(modal, /buildTrainingCutoffChart/);
+  assert.match(modal, /crossesMissingCutoff/);
+  assert.match(modal, /strokeDasharray=\{crossesMissingCutoff \? "7 6"/);
   assert.match(modal, /共同训练截止量对齐/);
   assert.match(modal, /查看模型明细/);
   assert.match(modal, /最近20个训练截止点/);
-  assert.match(modal, /crossesMissingCutoff/);
-  assert.match(modal, /strokeDasharray=\{crossesMissingCutoff/);
-  assert.match(modal, /gx\(comparisonCutoff\(row\)\)/);
-  assert.doesNotMatch(modal, /gx\(row\.generation\)/);
+  assert.match(modal, /图中 \{formatExactCount\(graphRows\.length\)\} \/ \{formatExactCount\(matureRows\.length\)\} 个成熟结果/);
+  assert.match(modal, /组等待结果/);
+  assert.doesNotMatch(modal, /横轴按共同训练运行时间排列|pointerTime/);
   assert.match(modal, /每30分钟（固定 :00 \/ :30）/);
-  assert.match(modal, /同一坐标叠加比较/);
   assert.match(page, /六套模型，现在表现怎样/);
   assert.match(page, /等待新版生成/);
   assert.match(page, /training-card-total/);
@@ -1098,10 +1117,13 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /getUTCMinutes\(\) % 30 === 0/);
   assert.match(modal, /const xAtIndex/);
   assert.match(modal, /条模型评分/);
-  assert.match(modal, /模型成绩对比/);
-  assert.match(modal, /按同一训练截止点比较。/);
-  assert.doesNotMatch(modal, /五种模型叠加在同一坐标/);
-  assert.doesNotMatch(modal, /实线连接相邻训练截止点/);
+  assert.match(modal, /所有模型的训练组成绩/);
+  assert.match(modal, /按同一训练截止点比较/);
+  assert.match(modal, /pendingRows = graphGroups\.length - matureRows\.length/);
+  assert.match(modal, /最近20个训练截止点/);
+  assert.match(modal, /aria-label=\{pointLabel\}/);
+  assert.match(modal, /comparisonCutoff/);
+  assert.doesNotMatch(modal, /activeCycle|hoveredCycle|pinnedCycle/);
   assert.match(modal, /versionBoundaries/);
   assert.match(modal, /pools\.direction !== null && pools\.direction !== state\.lastDirectionRows/);
   assert.match(modal, /pools\.news !== null && pools\.news !== state\.lastNewsRows/);
@@ -1335,6 +1357,13 @@ test("distinguishes market history loading, empty, and failed states", () => {
   assert.match(modal, /historyState === "loading"/);
   assert.match(modal, /historyState === "error"/);
   assert.match(modal, /正在读取行情/);
+  assert.match(modal, /activeMarket = remoteHistory \? historyResult\?\.data \?\? market : market/);
+  assert.match(modal, /className="market-visual-shell" aria-busy=\{historyState === "loading"\}/);
+  assert.match(modal, /className="market-refresh-signal" role="status"/);
+  assert.match(modal, /disabled=\{historyState === "loading" \|\| !canGoEarlier\}/);
+  assert.match(modal, /disabled=\{historyState === "loading" \|\| !canGoLater\}/);
+  assert.doesNotMatch(modal, /historyState === "loading" && candles\.length > 0 && <GraphLoading/);
+  assert.match(css, /\.market-refresh-signal \{ position:absolute/);
   assert.match(modal, /正在读取长期曲线/);
   assert.match(modal, /正在读取这组成绩/);
   assert.match(modal, /graph-state-compact/);
