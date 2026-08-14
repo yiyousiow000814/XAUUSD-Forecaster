@@ -9,6 +9,7 @@ const { applyFreshness } = await import("../app/api/status/freshness.js");
 const { runtimeUpdateFailurePresentation } = await import("../app/_lib/runtime-update-failure.js");
 const { countPresentation, formatCompactCount, formatExactCount, progressCountPresentation } = await import("../app/_lib/count-format.ts");
 const { versionResultLabel } = await import("../app/_lib/version-result-state.ts");
+const { modelVersionMarkers } = await import("../app/_lib/model-version-markers.ts");
 const { statusFieldPhase } = await import("../app/_lib/current-data-provenance.ts");
 const { withPreviewIdentity } = await import("../app/api/_shared/preview-status.ts");
 
@@ -19,6 +20,30 @@ test("labels version results from their durable evaluation state", () => {
   assert.equal(versionResultLabel({ oos_rows: 0, evaluation_status: "AWAITING_FIRST_PREDICTION" }, "+0.000%"), "没行动");
   assert.equal(versionResultLabel({ oos_rows: 0, evaluation_status: "NO_PREDICTIONS" }, "+0.000%"), "没行动");
   assert.equal(versionResultLabel({ oos_rows: 0 }, "+0.000%"), "状态未知");
+});
+
+test("derives model handovers from the predictions actually shown", () => {
+  assert.deepEqual(modelVersionMarkers([
+    { decision_time: "2026-08-14T01:00:00Z", model_version: "version-a" },
+    { decision_time: "2026-08-14T01:05:00Z", model_version: "version-a" },
+    { decision_time: "2026-08-14T01:10:00Z", model_version: "version-b" },
+    { decision_time: "2026-08-14T01:15:00Z", model_version: "version-b" },
+    { decision_time: "2026-08-14T01:20:00Z", model_version: "version-c" },
+  ]), [
+    {
+      decision_time: "2026-08-14T01:10:00Z",
+      previous_model_version: "version-a",
+      model_version: "version-b",
+    },
+    {
+      decision_time: "2026-08-14T01:20:00Z",
+      previous_model_version: "version-b",
+      model_version: "version-c",
+    },
+  ]);
+  assert.deepEqual(modelVersionMarkers([
+    { decision_time: "2026-08-14T01:00:00Z", model_version: "version-a" },
+  ]), []);
 });
 
 test("keeps branch throughput limits while refreshing Preview metrics from D1", () => {
@@ -1028,7 +1053,6 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.doesNotMatch(modal, /五种模型叠加在同一坐标/);
   assert.doesNotMatch(modal, /实线连接相邻训练截止点/);
   assert.match(modal, /versionBoundaries/);
-  assert.match(modal, /新训练数据代/);
   assert.match(modal, /pools\.direction !== null && pools\.direction !== state\.lastDirectionRows/);
   assert.match(modal, /pools\.news !== null && pools\.news !== state\.lastNewsRows/);
   assert.match(modal, /sort\(\(a, b\) => Date\.parse\(a\) - Date\.parse\(b\)\)/);

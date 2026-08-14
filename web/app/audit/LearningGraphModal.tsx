@@ -6,13 +6,14 @@ import CountValue from "../_components/CountValue";
 import { formatExactCount } from "../_lib/count-format";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { versionResultLabel, type VersionEvaluationStatus } from "../_lib/version-result-state";
+import { modelVersionMarkers } from "../_lib/model-version-markers";
 
 type CurvePoint = { decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number; source_gap_before?: boolean };
 type Curve = { model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: CurvePoint[]; source_point_count_30m?: number; chart_point_count_30m?: number; chart_downsampled_30m?: boolean; points_30m?: CurvePoint[] };
 type Candle = { time: string; open: number; high: number; low: number; close: number; ticks?: number };
 type MarketData = {
   candles: Candle[]; overview_candles?: Candle[]; decisions: Decision[];
-  training_markers: TrainingMarker[]; decision_resource?: string; history_resource?: string;
+  decision_resource?: string; history_resource?: string;
   history_start?: string | null; history_end?: string | null; detail_start?: string | null;
   source_candle_count?: number; overview_downsampled?: boolean;
   prediction_history_start?: Record<string, string>;
@@ -30,7 +31,6 @@ type Decision = {
   predicted_direction_u5: number | null; ev_long_u5: number | null;
   ev_short_u5: number | null; lcb_long_u5: number | null; lcb_short_u5: number | null;
 };
-type TrainingMarker = { model_identity: string; training_dataset_hash: string; created_at: string; training_rows: number; artifact_count: number };
 type BoundaryReadout = {
   decision_time: string; direction: number | null; news: number | null;
   changes: Array<{ model_identity: string; model_version: string; training_rows?: number }>;
@@ -673,7 +673,6 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
     state: "ready",
     data: {
       ...initialHistoryResult,
-      training_markers: market?.training_markers ?? [],
       prediction_history_start: market?.prediction_history_start,
       history_resource: market?.history_resource,
     },
@@ -694,7 +693,6 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
             state: "ready",
             data: {
               ...body,
-              training_markers: market.training_markers ?? [],
               prediction_history_start: market.prediction_history_start,
               history_resource: market.history_resource,
             },
@@ -761,6 +759,10 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
     if (dense) return candidateDecisions;
     return candidateDecisions.filter(row => new Date(row.decision_time).getUTCMinutes() % 30 === 0);
   })();
+  const versionMarkers = useMemo(
+    () => modelVersionMarkers(scopedDecisions),
+    [scopedDecisions],
+  );
   const low = candles.length ? Math.min(...candles.map(row => row.low)) : 0;
   const high = candles.length ? Math.max(...candles.map(row => row.high)) : 1;
   const candleSteps = candles.slice(1).map((row, index) =>
@@ -814,7 +816,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
       <button className={showLong ? "active" : ""} type="button" onClick={() => setShowLong(value => !value)}>看多 LONG</button>
       <button className={showShort ? "active" : ""} type="button" onClick={() => setShowShort(value => !value)}>看空 SHORT</button>
       <button className={showWait ? "active" : ""} type="button" onClick={() => setShowWait(value => !value)}>等待 WAIT</button>
-      <button className={showTraining ? "active" : ""} type="button" onClick={() => setShowTraining(value => !value)}>模型换版本</button>
+      <button className={showTraining ? "active" : ""} type="button" disabled={!versionMarkers.length} aria-pressed={showTraining} onClick={() => setShowTraining(value => !value)}>模型换版本</button>
       <span>显示 {formatExactCount(decisions.length)}{activeMarket?.decision_downsampled ? ` / 共 ${formatExactCount(activeMarket.source_decision_count ?? decisions.length)}` : ""} 次{hiddenByAction > 0 ? ` · 动作筛选隐藏 ${formatExactCount(hiddenByAction)} 次` : ""}{hiddenByFrequency > 0 ? ` · 频率收起 ${formatExactCount(hiddenByFrequency)} 次` : ""}</span>
     </div>
     {historyState === "loading" && candles.length > 0 && <GraphLoading label="正在更新行情" compact />}
@@ -838,12 +840,12 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
       {candles.map((row, index) => { const cx = xAtIndex(index); const width = Math.max(1.5, 650 / candles.length); const up = row.close >= row.open; return <g key={row.time}><line x1={cx} x2={cx} y1={y(row.high)} y2={y(row.low)} stroke={up ? "#476b19" : "#c9362b"} /><rect x={cx - width / 2} width={width} y={Math.min(y(row.open), y(row.close))} height={Math.max(1, Math.abs(y(row.open) - y(row.close)))} fill={up ? "#476b19" : "#c9362b"} /></g>; })}
       {selectedX != null && selectedExitX != null && <g className="selected-window"><rect x={selectedX} width={Math.max(2, selectedExitX-selectedX)} y="52" height="280" /><line x1={selectedX} x2={selectedX} y1="52" y2="332" /><line x1={selectedExitX} x2={selectedExitX} y1="52" y2="332" /><text x={selectedX+4} y="49">预测</text><text x={Math.max(selectedX+36, selectedExitX-58)} y="49">30分钟后</text></g>}
       {decisions.map(row => { const candle = byTime(row.decision_time); const cx = xTime(row.decision_time); const action = arrowAction(row); const cy = action === "WAIT" ? 34 : action === "LONG" ? y(candle.low) + 12 : y(candle.high) - 12; const color = action === "LONG" ? "#476b19" : action === "SHORT" ? "#c9362b" : "#555149"; const isSelected = activeSelected?.source_decision_id === row.source_decision_id && activeSelected?.model_identity === row.model_identity && activeSelected?.model_version === row.model_version; return <g key={`${row.source_decision_id}-${row.model_identity}-${row.model_version}`} role="button" tabIndex={0} className={`decision-marker${isSelected ? " selected" : ""}${row.policy_consistent === false ? " policy-mismatch" : ""}`} onClick={() => setSelected(row)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") setSelected(row); }}><title>{`${timeLabel(row.decision_time)} · 成本后EV较高方向 ${action} · 模型版本 ${row.model_version} · 点击查看30分钟结果`}</title>{action === "WAIT" && <circle cx={cx} cy={cy} r="10" fill="#eee9da" stroke={color} strokeWidth="1.5" />}{isSelected && <circle cx={cx} cy={cy} r="14" fill="none" stroke={color} strokeWidth="2" />}{action === "WAIT" ? <path d={`M ${cx-7} ${cy} h 14 M ${cx-7} ${cy} l 4 -4 M ${cx-7} ${cy} l 4 4 M ${cx+7} ${cy} l -4 -4 M ${cx+7} ${cy} l -4 4`} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" /> : <path d={action === "LONG" ? `M ${cx} ${cy-7} l -6 11 h 12 z` : `M ${cx} ${cy+7} l -6 -11 h 12 z`} fill={color} />}</g>; })}
-      {showTraining && (activeMarket?.training_markers ?? []).filter(row => row.model_identity === identity && Date.parse(row.created_at) >= cutoff && Date.parse(row.created_at) < pageEnd).map(row => <g key={`${row.model_identity}-${row.training_dataset_hash}`}><title>{`${timeLabel(row.created_at)} · 第一次使用 ${formatExactCount(row.training_rows)} 条训练数据${row.artifact_count > 1 ? ` · 后续恢复重建 ${formatExactCount(row.artifact_count-1)} 次` : ""}`}</title><line x1={xTime(row.created_at)} x2={xTime(row.created_at)} y1="52" y2="332" className="training-line" /><text x={xTime(row.created_at)+4} y="328" className="training-label">{formatExactCount(row.training_rows)}条新训练</text></g>)}
+      {showTraining && versionMarkers.map(row => <line key={`${row.decision_time}-${row.model_version}`} x1={xTime(row.decision_time)} x2={xTime(row.decision_time)} y1="52" y2="332" className="training-line" />)}
       <text x="5" y="64">{high.toFixed(2)}</text><text x="5" y="335">{low.toFixed(2)}</text>
       {timeTickIndices.map(index => <g key={candles[index].time} className="time-axis"><line x1={xAtIndex(index)} x2={xAtIndex(index)} y1="338" y2="344" /><text x={xAtIndex(index)} y="366" textAnchor="middle">{axisTimeLabel(candles[index].time)}</text></g>)}
     </svg>
     </div>
-    <div className="chart-legend"><span><i className="long-dot" />看多预测</span><span><i className="short-dot" />看空预测</span>{showWait && <span><i className="wait-dot" />↔ 等待，不持仓</span>}{showTraining && <span><i className="train-dot" />新训练数据代</span>}</div>
+    <div className="chart-legend"><span><i className="long-dot" />看多预测</span><span><i className="short-dot" />看空预测</span>{showWait && <span><i className="wait-dot" />↔ 等待，不持仓</span>}{showTraining && <span><i className="train-dot" />图中模型换版</span>}</div>
     <div className="decision-reader" aria-live="polite">{activeSelected ? <>
       <div><small>一次完整观察</small><strong>{timeLabel(activeSelected.decision_time)} · 成本后EV较高 {arrowAction(activeSelected)}</strong><span>版本 {activeSelected.model_version} · → {timeLabel(exitTime(activeSelected))} 固定观察结果{activeSelected.policy_consistent === false ? ` · 当时规则校验异常（原记录保留；应为 ${activeSelected.policy_expected_action}）` : ""}</span></div>
       <DecisionPayoff selected={activeSelected} resultLabel={resultLabel} />
