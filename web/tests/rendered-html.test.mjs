@@ -751,6 +751,8 @@ test("renders the news and decision audit route", async () => {
   assert.doesNotMatch(source, /这些新闻处理到哪里了/);
   assert.match(source, /条近60天可读新闻/);
   assert.match(source, /条无需复核/);
+  assert.match(source, /GDELT · \$\{row\.category\}/);
+  assert.doesNotMatch(source, /GDELT · 新闻发现/);
   assert.match(source, /row\.model_visibility !== "NOT_YET_PARSED"/);
   assert.match(source, /个当前模型候选事件/);
   assert.doesNotMatch(source, /个 key 轮换|每分钟最多生成/);
