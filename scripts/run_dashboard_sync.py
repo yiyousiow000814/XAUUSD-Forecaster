@@ -11,6 +11,7 @@ import json
 import math
 import os
 import re
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -20,6 +21,7 @@ from pathlib import Path
 
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(MODULE_ROOT))
 DEFAULT_CONFIG = MODULE_ROOT / ".local" / "forward" / "dashboard-sync.json"
 DEFAULT_STATUS = MODULE_ROOT / ".local" / "forward" / "dashboard-sync-status.json"
 DEFAULT_RUNTIME_SIGNAL = (
@@ -64,6 +66,8 @@ REMOTE_MARKET_DECISION_LIMIT = 288 * 5
 REMOTE_MARKET_CANDLE_LIMIT = 576
 REMOTE_MARKET_DENSE_LIMITS = (1440, 1152, 864, 576, 288, 0)
 REMOTE_MARKET_OVERVIEW_LIMITS = (480, 240, 120, 80, 40)
+
+from xauusd_forecaster.dashboard_payloads import bounded_evidence_window  # noqa: E402
 
 
 class PayloadContractError(ValueError):
@@ -723,17 +727,30 @@ def remote_snapshot(payload: dict) -> bytes:
     for name, limit in (
         ("recent_news", REMOTE_NEWS_LIMIT),
         ("recent_decisions", REMOTE_DECISION_LIMIT),
-        ("news_evidence", REMOTE_EVIDENCE_LIMIT),
     ):
         rows = snapshot.get(name)
         if isinstance(rows, list):
             snapshot[name] = rows[:limit]
+
+    evidence_rows = snapshot.get("news_evidence")
+    if isinstance(evidence_rows, list):
+        snapshot["news_evidence"] = bounded_evidence_window(
+            evidence_rows, REMOTE_EVIDENCE_LIMIT,
+        )
 
     snapshot["mirror_window"] = {
         "bounded": True,
         "recent_news": len(snapshot.get("recent_news", [])),
         "recent_decisions": len(snapshot.get("recent_decisions", [])),
         "news_evidence": len(snapshot.get("news_evidence", [])),
+        "news_evidence_seen": sum(
+            bool(row.get("model_seen"))
+            for row in snapshot.get("news_evidence", [])
+        ),
+        "news_evidence_unseen": sum(
+            not bool(row.get("model_seen"))
+            for row in snapshot.get("news_evidence", [])
+        ),
     }
     encoded = json.dumps(
         snapshot, ensure_ascii=False, allow_nan=False, separators=(",", ":")

@@ -13,6 +13,7 @@ import { PREVIEW_NEWS_PAGE_SIZE } from "../_lib/preview-manifest";
 import { resolveNewsMetrics, type NewsMetrics } from "../_lib/news-metrics";
 import { authoritativeNewsTotals, type NewsTotalsScope } from "../_lib/news-index-contract";
 import { formatExactCount, progressCountPresentation } from "../_lib/count-format";
+import type { VersionEvaluationStatus } from "../_lib/version-result-state";
 import LearningGraphModal from "../audit/LearningGraphModal";
 
 type Prediction = {
@@ -207,17 +208,19 @@ type VersionGroup = {
   lifecycle_status: "LATEST" | "PREVIOUS" | "ARCHIVED"; created_at: string;
   latest_rebuild_at: string; training_rows: number; artifact_rebuilds: number;
   model_versions: string[]; subsequent_oos_rows: number; distinct_days: number;
+  subsequent_prediction_rows?: number; unscored_oos_rows?: number; overdue_oos_rows?: number;
+  evaluation_status?: VersionEvaluationStatus;
   cumulative_quote_return: number; profit_factor_quote_adjusted: number | null;
   coverage_rate: number | null; average_oracle_regret: number | null;
   cadence_metrics?: Record<EvaluationCadence, CadenceMetric>;
 };
 type EvaluationCadence = "EVERY_5M" | "FIXED_30M";
-type CadenceMetric = { oos_rows: number; distinct_days: number; cumulative_quote_return: number; profit_factor_quote_adjusted: number | null; coverage_rate: number | null };
+type CadenceMetric = { oos_rows: number; distinct_days: number; cumulative_quote_return: number; profit_factor_quote_adjusted: number | null; coverage_rate: number | null; prediction_rows?: number; unscored_oos_rows?: number; overdue_oos_rows?: number; evaluation_status?: VersionEvaluationStatus };
 
 type Payload = {
   preview_status_summary?: boolean;
   preview?: {
-    branch_snapshot?: { generated_at: string | null; status_keys: string[] };
+    branch_snapshot?: { generated_at: string | null; status_paths: string[] };
   };
   learning_preview_summary?: boolean;
   learning_history_resource?: string;
@@ -874,9 +877,9 @@ export default function AuditView() {
   const archiveTotals = authoritativeNewsTotals(newsIndex);
   const newsPhase: CurrentDataPhase = archiveTotals
     ? "ready" : newsError ? "error" : "loading";
-  const branchSnapshotStatusKeys = payload?.preview?.branch_snapshot?.status_keys;
+  const branchSnapshotStatusPaths = payload?.preview?.branch_snapshot?.status_paths;
   const coveragePhase = statusFieldPhase(
-    statusState, branchSnapshotStatusKeys, "factor_coverage",
+    statusState, branchSnapshotStatusPaths, "factor_coverage",
   );
   const pageUsesBranchSnapshot = view === "coverage"
     && statusState === "ready" && coveragePhase === "snapshot";
@@ -968,6 +971,10 @@ export default function AuditView() {
   const visibleEvidence = canonicalEvidence.filter(row => (
     evidenceMode === "all" || (evidenceMode === "seen" ? row.model_seen : !row.model_seen)
   ));
+  const evidenceModeTotal = evidenceMode === "seen"
+    ? evidenceSummarySeenCount
+    : evidenceMode === "unseen" ? evidenceSummaryUnseenCount : evidenceSummaryDisplayedCount;
+  const evidenceWindowPartial = visibleEvidence.length < evidenceModeTotal;
   const deploymentPresentation = DEPLOYMENT_PRESENTATION[
     payload?.system?.deployment?.status ?? "PROVENANCE_UNKNOWN"
   ] ?? DEPLOYMENT_PRESENTATION.PROVENANCE_UNKNOWN;
@@ -1037,7 +1044,7 @@ export default function AuditView() {
         <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件脉络 <b><MetricValue phase={statusState}><CountValue value={activeEventTotal} /></MetricValue></b></a>
         <a href="/audit?view=decisions" className={view === "decisions" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("decisions"); }}>决策与30分钟结果 <b><MetricValue phase={statusState}><CountValue value={payload?.counts?.decision_events} /></MetricValue></b></a>
         <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b><MetricValue phase={liveOosPhase}>{liveOosModelGroups !== undefined ? `${liveOosModelGroups}组` : "—"}</MetricValue></b></a>
-        <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b><MetricValue phase={coveragePhase}>{payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</MetricValue></b></a>
+        <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b><MetricValue phase={coveragePhase} snapshotLabel="分支快照" snapshotTitle="此覆盖结果由当前 PR 分支在构建时重新计算，不是生产实时观测">{payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</MetricValue></b></a>
       </nav>
       <button type="button" className="audit-tabs-scroll" onClick={() => scrollAuditTabs(1)} aria-label="向右查看更多审计视图"><span aria-hidden="true">›</span></button>
       </div>
@@ -1095,10 +1102,15 @@ export default function AuditView() {
           <button type="button" className={evidenceMode === "unseen" ? "active" : ""} onClick={() => setEvidenceMode("unseen")}>从未用过 <b><CountValue value={evidenceSummaryUnseenCount} /></b></button>
           <button type="button" className={evidenceMode === "all" ? "active" : ""} onClick={() => setEvidenceMode("all")}>查看全部 <b><CountValue value={evidenceSummaryDisplayedCount} /></b></button>
         </nav>
+        <p className="evidence-window-note">
+          {evidenceWindowPartial
+            ? <>显示最近 <b>{formatExactCount(visibleEvidence.length)}</b> / {formatExactCount(evidenceModeTotal)} 个；完整总数保留在审计账本。</>
+            : <>已显示全部 <b>{formatExactCount(evidenceModeTotal)}</b> 个。</>}
+        </p>
         <details className="evidence-rule-note"><summary>查看统计规则</summary><p>核心新闻要求一手完整证据或至少两个独立可靠来源确认；大视野新闻还纳入单一可靠来源并降低权重。新闻只从首次收到后生效，按事件类型和有效交易时间逐步衰减。Gemini 与 Gemma 负责理解事件语义，版本化证据规则负责时间、身份、去重与准入；每个事件下方可核对统一身份和原始发布域名。</p></details>
         <div className="evidence-table-wrap"><table className="evidence-table">
           <thead><tr><th>是否用于预测</th><th>新闻事件</th><th>用了多少次 / 为什么没用</th><th>发布时间 / 收到时间</th></tr></thead>
-          <tbody>{visibleEvidence.map(row => <tr key={`${evidenceMode}:${row.event_key}`}>
+          <tbody>{visibleEvidence.length === 0 && evidenceModeTotal > 0 && <tr className="evidence-unavailable-row"><td colSpan={4}>这个分类有记录，但本页尚未载入明细。总数不会被当成空结果。</td></tr>}{visibleEvidence.map(row => <tr key={`${evidenceMode}:${row.event_key}`}>
             <td className="evidence-status-cell"><span className={`model-seen-badge ${row.model_seen ? "is-seen" : "is-unseen"}`}>{row.model_seen ? "已用于预测" : "未用于预测"}</span><small><span className="evidence-grade-label">{EVIDENCE_LABELS[row.evidence_grade] ?? row.evidence_grade}</span><span className="evidence-status-copy">{row.model_seen ? "当时确实参与了模型输入" : row.broad_model_eligible ? "现在符合条件，等待下一次预测" : "现在也不符合使用条件"}</span></small></td>
             <td className="evidence-event-cell"><strong>{row.canonical_headline}</strong><div className="evidence-topics">{(row.topics ?? []).map(topic => <span key={topic}>{TOPIC_LABELS[topic] ?? topic}</span>)}</div><small className="evidence-source-identity"><span>统一来源身份：{(row.source_identity_organizations ?? []).join(" · ") || "未确认"}</span><span>原始发布域名：{row.publisher_domains.join(" · ") || "未记录"}</span></small></td>
             <td className="evidence-usage-cell">{row.model_seen ? <><strong>参与 {formatExactCount(row.frozen_decisions)} 次预测 · 模型读取 {formatExactCount(row.frozen_model_uses)} 次</strong><small><span className="evidence-model-list">{(row.model_identities ?? []).map(identity => MODEL_LABELS[identity] ?? identity).join(" · ") || "模型名称未记录"}</span><span className="evidence-use-window">首次 {time(row.first_model_decision_time)} · 最近 {time(row.last_model_decision_time)}</span></small></> : <><strong>从未进入任何预测</strong><small>{evidenceReason(row)}</small></>}</td>

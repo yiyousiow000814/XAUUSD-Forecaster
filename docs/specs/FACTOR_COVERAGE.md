@@ -1,5 +1,12 @@
 # Factor Coverage Specification
 
+This specification defines coverage states, feature exposure, and dashboard
+behavior. It does not redefine the hard system, point-in-time, append-only, or
+news-authority invariants owned by the
+[`SYSTEM_BOUNDARIES`](../contracts/SYSTEM_BOUNDARIES.md),
+[`FORWARD_ONLY`](../contracts/FORWARD_ONLY.md), and
+[`NEWS_EVIDENCE`](../contracts/NEWS_EVIDENCE.md) contracts.
+
 The forecaster must keep a broad view without pretending that every named
 driver is available, timely, or useful at a 30-minute horizon. Every domain is
 reported as `LIVE`, `COLLECTING`, `NEWS_ONLY`, `LIMITED_NEWS`, or

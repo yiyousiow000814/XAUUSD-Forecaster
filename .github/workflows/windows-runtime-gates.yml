@@ -3,31 +3,21 @@ name: Windows runtime gates
 on:
   pull_request:
     paths:
-      - ".github/workflows/windows-runtime-gates.yml"
-      - "scripts/run_news_annotator.py"
-      - "scripts/xauusd_control_center.ps1"
-      - "scripts/xauusd_watchdog*.ps1"
-      - "scripts/xauusd_watchdog*.vbs"
-      - "xauusd_forecaster/forward_ledger.py"
-      - "xauusd_forecaster/news_scheduler.py"
-      - "xauusd_forecaster/runtime_health.py"
-      - "tests/test_news_scheduler.py"
-      - "tests/test_runtime_health.py"
-      - "tests/test_runtime_launchers.py"
+      - ".github/workflows/**"
+      - "ctrader/**"
+      - "scripts/**"
+      - "xauusd_forecaster/**"
+      - "tests/**"
+      - "pyproject.toml"
   push:
     branches: [main]
     paths:
-      - ".github/workflows/windows-runtime-gates.yml"
-      - "scripts/run_news_annotator.py"
-      - "scripts/xauusd_control_center.ps1"
-      - "scripts/xauusd_watchdog*.ps1"
-      - "scripts/xauusd_watchdog*.vbs"
-      - "xauusd_forecaster/forward_ledger.py"
-      - "xauusd_forecaster/news_scheduler.py"
-      - "xauusd_forecaster/runtime_health.py"
-      - "tests/test_news_scheduler.py"
-      - "tests/test_runtime_health.py"
-      - "tests/test_runtime_launchers.py"
+      - ".github/workflows/**"
+      - "ctrader/**"
+      - "scripts/**"
+      - "xauusd_forecaster/**"
+      - "tests/**"
+      - "pyproject.toml"
   workflow_dispatch:
 
 permissions:

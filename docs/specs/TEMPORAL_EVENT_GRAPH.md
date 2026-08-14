@@ -4,6 +4,13 @@ Status: `DISPLAY_ONLY`
 
 Policy: `temporal-event-graph-v5-material-event`
 
+This specification defines display and feature semantics for the graph. It
+does not re-author point-in-time integrity, append-only evidence, model
+authority, or no-order boundaries; those remain governed by the
+[`SYSTEM_BOUNDARIES`](../contracts/SYSTEM_BOUNDARIES.md),
+[`FORWARD_ONLY`](../contracts/FORWARD_ONLY.md), and
+[`NEWS_EVIDENCE`](../contracts/NEWS_EVIDENCE.md) contracts.
+
 ## Purpose
 
 The graph presents auditable, time-bounded real-world episodes. It separates original articles, claims, evidence documents, material events, and episodes. It has no permission to affect Ridge features or Long, Short, or Wait decisions.

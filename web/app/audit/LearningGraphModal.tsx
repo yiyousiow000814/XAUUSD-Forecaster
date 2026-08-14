@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import CountValue from "../_components/CountValue";
 import { formatExactCount } from "../_lib/count-format";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
+import { versionResultLabel, type VersionEvaluationStatus } from "../_lib/version-result-state";
 
 type CurvePoint = { decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number; source_gap_before?: boolean };
 type Curve = { model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: CurvePoint[]; source_point_count_30m?: number; chart_point_count_30m?: number; chart_downsampled_30m?: boolean; points_30m?: CurvePoint[] };
@@ -40,12 +41,14 @@ type VersionGroup = {
   lifecycle_status: "LATEST" | "PREVIOUS" | "ARCHIVED"; created_at: string;
   latest_rebuild_at: string; training_rows: number; artifact_rebuilds: number;
   model_versions: string[]; subsequent_oos_rows: number; distinct_days: number;
+  subsequent_prediction_rows?: number; unscored_oos_rows?: number; overdue_oos_rows?: number;
+  evaluation_status?: VersionEvaluationStatus;
   cumulative_quote_return: number; profit_factor_quote_adjusted: number | null;
   coverage_rate: number | null; average_oracle_regret: number | null;
   cadence_metrics?: Record<EvaluationCadence, CadenceMetric>;
 };
 type EvaluationCadence = "EVERY_5M" | "FIXED_30M";
-type CadenceMetric = { oos_rows: number; distinct_days: number; cumulative_quote_return: number; profit_factor_quote_adjusted: number | null; coverage_rate: number | null };
+type CadenceMetric = { oos_rows: number; distinct_days: number; cumulative_quote_return: number; profit_factor_quote_adjusted: number | null; coverage_rate: number | null; prediction_rows?: number; unscored_oos_rows?: number; overdue_oos_rows?: number; evaluation_status?: VersionEvaluationStatus };
 type ExecutionModel = {
   model_identity: string; training_rows: number; training_decisions?: number;
   training_observations?: number; predictions: number; scores: number;
@@ -353,7 +356,7 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
       </div>
       <div className="version-result-metrics">
         <span data-label="上线后"><b><CountValue value={selected.oos_rows} suffix=" 条" /></b><small>{formatExactCount(selected.distinct_days)} 个日期</small></span>
-        <strong data-label="本组收益">{selected.oos_rows ? pct(selected.cumulative_quote_return) : "等待结果"}</strong>
+        <strong data-label="本组收益">{versionResultLabel(selected, pct(selected.cumulative_quote_return))}</strong>
         <span data-label="PF / 出方向"><b>{selected.profit_factor_quote_adjusted?.toFixed(2) ?? "—"}</b><small>出方向 {((selected.coverage_rate ?? 0)*100).toFixed(1)}%</small></span>
       </div>
     </article>})}

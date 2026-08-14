@@ -1,6 +1,30 @@
-import { PREVIEW_BRANCH_SNAPSHOT_STATUS_KEYS } from "../../_lib/preview-manifest.ts";
+import { PREVIEW_BRANCH_SNAPSHOT_STATUS_PATHS } from "../../_lib/preview-manifest.ts";
 
 type JsonObject = Record<string, unknown>;
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function overlayPath(target: JsonObject, source: JsonObject, path: string): boolean {
+  const segments = path.split(".");
+  let sourceCursor: JsonObject = source;
+  let targetCursor: JsonObject = target;
+  for (let index = 0; index < segments.length - 1; index += 1) {
+    const segment = segments[index];
+    const sourceValue = sourceCursor[segment];
+    if (!isJsonObject(sourceValue)) return false;
+    sourceCursor = sourceValue;
+    const targetValue = targetCursor[segment];
+    const nextTarget = isJsonObject(targetValue) ? { ...targetValue } : {};
+    targetCursor[segment] = nextTarget;
+    targetCursor = nextTarget;
+  }
+  const leaf = segments.at(-1);
+  if (!leaf || !Object.hasOwn(sourceCursor, leaf)) return false;
+  targetCursor[leaf] = sourceCursor[leaf];
+  return true;
+}
 
 /** Keep Preview identity and authority boundaries on current read-only metrics. */
 export function withPreviewIdentity(current: JsonObject, frozen: JsonObject): JsonObject {
@@ -10,34 +34,16 @@ export function withPreviewIdentity(current: JsonObject, frozen: JsonObject): Js
     ? frozen.system as JsonObject : {};
   const frozenPreview = frozen.preview && typeof frozen.preview === "object"
     ? frozen.preview as JsonObject : {};
-  const branchSnapshotKeys = PREVIEW_BRANCH_SNAPSHOT_STATUS_KEYS.filter(
-    key => Object.hasOwn(frozen, key),
-  );
-  const branchRecomputed = Object.fromEntries(
-    branchSnapshotKeys.map(key => [key, frozen[key]]),
-  );
-  const currentQueue = current.annotation_queue && typeof current.annotation_queue === "object"
-    ? current.annotation_queue as JsonObject : {};
-  const frozenQueue = frozen.annotation_queue && typeof frozen.annotation_queue === "object"
-    ? frozen.annotation_queue as JsonObject : {};
-  return {
+  const merged: JsonObject = {
     ...current,
-    ...branchRecomputed,
     preview_status_summary: false,
     observation_scope: "D1_SNAPSHOT",
     preview: {
       ...frozenPreview,
       branch_snapshot: {
         generated_at: frozenPreview.snapshot_generated_at ?? frozen.generated_at ?? null,
-        status_keys: branchSnapshotKeys,
+        status_paths: [],
       },
-    },
-    annotation_queue: {
-      ...currentQueue,
-      requests_per_minute_per_key: frozenQueue.requests_per_minute_per_key,
-      requests_per_minute: frozenQueue.requests_per_minute,
-      input_tokens_per_minute: frozenQueue.input_tokens_per_minute,
-      minute_scope: frozenQueue.minute_scope,
     },
     system: {
       ...currentSystem,
@@ -48,4 +54,11 @@ export function withPreviewIdentity(current: JsonObject, frozen: JsonObject): Js
       deployment: frozenSystem.deployment,
     },
   };
+  const appliedPaths = PREVIEW_BRANCH_SNAPSHOT_STATUS_PATHS.filter(
+    path => overlayPath(merged, frozen, path),
+  );
+  const preview = merged.preview as JsonObject;
+  const branchSnapshot = preview.branch_snapshot as JsonObject;
+  branchSnapshot.status_paths = appliedPaths;
+  return merged;
 }
