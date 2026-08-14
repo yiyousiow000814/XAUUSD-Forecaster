@@ -23,7 +23,10 @@ from xauusd_forecaster.maintenance import (  # noqa: E402
     archive_completed_quote_days,
     backup_forward_ledger,
 )
-from xauusd_forecaster.training_v2 import train_due_v2  # noqa: E402
+from xauusd_forecaster.training_v2 import (  # noqa: E402
+    require_current_contract_generation,
+    train_due_v2,
+)
 from xauusd_forecaster.news_contract_migration import (  # noqa: E402
     append_missing_current_news_snapshots,
 )
@@ -31,6 +34,7 @@ from xauusd_forecaster.execution_learning import (  # noqa: E402
     append_due_exit_predictions,
     train_due_execution,
 )
+from xauusd_forecaster.runtime_health import write_runtime_heartbeat  # noqa: E402
 
 
 UTC = timezone.utc
@@ -41,10 +45,54 @@ def reconcile_news_contract(ledger, cutoff: datetime, artifact_root: Path) -> di
     """Migrate PIT news snapshots and build any missing current generation."""
     migration = append_missing_current_news_snapshots(ledger, cutoff)
     training = train_due_v2(ledger, cutoff, artifact_root)
-    return {"migration": migration, "training": training}
+    generation_id = require_current_contract_generation(ledger.connection)
+    return {
+        "migration": migration,
+        "training": training,
+        "active_generation_id": generation_id,
+    }
 
 
 DEFAULT_LOCAL_ROOT = MODULE_ROOT / ".local" / "forward"
+
+
+def append_due_grid_events(
+    ledger: ForwardLedger,
+    engine: ForwardEngine,
+    provider: JsonlMarketProvider | NullMarketProvider,
+    last_decision: datetime,
+    boundary: datetime,
+    collected_at: datetime,
+    news_status: list[dict[str, object]],
+) -> tuple[datetime, list[tuple[datetime, str, str]], dict[str, int]]:
+    """Append only broker-confirmed, quote-backed live decision grids."""
+    try:
+        visible_observations = provider.observations(boundary)
+    except (OSError, ValueError, json.JSONDecodeError):
+        visible_observations = []
+    try:
+        broker_session = provider.market_session(collected_at)
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        broker_session = None
+    appended: list[tuple[datetime, str, str]] = []
+    skipped_grids: dict[str, int] = {}
+    candidate = last_decision + timedelta(minutes=5)
+    while candidate <= boundary:
+        if candidate >= ledger.forward_epoch:
+            skip_reason = skipped_grid_reason(
+                candidate, boundary, visible_observations,
+                broker_session, collected_at,
+            )
+            if skip_reason:
+                skipped_grids[skip_reason] = skipped_grids.get(skip_reason, 0) + 1
+            else:
+                snapshot_id, decision_id = engine.append_clock_event(
+                    candidate, collected_at, news_status
+                )
+                appended.append((candidate, snapshot_id, decision_id))
+        last_decision = candidate
+        candidate += timedelta(minutes=5)
+    return last_decision, appended, skipped_grids
 
 
 def main() -> int:
@@ -55,11 +103,13 @@ def main() -> int:
     parser.add_argument("--news-poll-seconds", type=float, default=60.0)
     parser.add_argument("--minimum-training-rows", type=int, default=200)
     parser.add_argument("--retrain-interval", type=int, default=50)
+    parser.add_argument("--status-file", type=Path)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
 
     local_root = args.local_root.resolve()
     local_root.mkdir(parents=True, exist_ok=True)
+    status_file = args.status_file or local_root / "collector-status.json"
     initialized_at = datetime.now(UTC)
     ledger = ForwardLedger(local_root / "forward-evidence.sqlite3", now=initialized_at)
     epoch_receipt = local_root / "forward-epoch.json"
@@ -111,6 +161,9 @@ def main() -> int:
         ),
         flush=True,
     )
+    write_runtime_heartbeat(
+        status_file, service="collector", state="STARTING",
+    )
     # Reconcile at startup even in --once mode.  A rule release must build its
     # compatible news generation from already matured point-in-time evidence;
     # it must not wait for 96 brand-new direction rows.
@@ -124,6 +177,7 @@ def main() -> int:
         ),
         flush=True,
     )
+    write_runtime_heartbeat(status_file, service="collector")
     if args.once:
         ledger.close()
         return 0
@@ -164,38 +218,23 @@ def main() -> int:
                 )
                 last_news_reconciliation = now
             boundary = floor_five_minutes(now)
-            candidate = last_decision + timedelta(minutes=5)
-            try:
-                visible_observations = provider.observations(boundary)
-            except (OSError, ValueError, json.JSONDecodeError):
-                visible_observations = []
-            skipped_grids: dict[str, int] = {}
-            while candidate <= boundary:
-                if candidate >= ledger.forward_epoch:
-                    skip_reason = skipped_grid_reason(
-                        candidate, boundary, visible_observations
-                    )
-                    if skip_reason:
-                        skipped_grids[skip_reason] = skipped_grids.get(skip_reason, 0) + 1
-                    else:
-                        snapshot_id, decision_id = engine.append_clock_event(
-                            candidate, now, news_status
-                        )
-                        print(
-                            json.dumps(
-                                {
-                                    "event": "DECISION_APPENDED",
-                                    "decision_time": candidate.isoformat(),
-                                    "snapshot_id": snapshot_id,
-                                    "decision_id": decision_id,
-                                },
-                                sort_keys=True,
-                            ),
-                            flush=True,
-                        )
-                        u5_state.save(u5_path)
-                last_decision = candidate
-                candidate += timedelta(minutes=5)
+            last_decision, appended_decisions, skipped_grids = append_due_grid_events(
+                ledger, engine, provider, last_decision, boundary, now, news_status
+            )
+            for decision_time, snapshot_id, decision_id in appended_decisions:
+                print(
+                    json.dumps(
+                        {
+                            "event": "DECISION_APPENDED",
+                            "decision_time": decision_time.isoformat(),
+                            "snapshot_id": snapshot_id,
+                            "decision_id": decision_id,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+                u5_state.save(u5_path)
             if skipped_grids:
                 print(
                     json.dumps(
@@ -243,6 +282,11 @@ def main() -> int:
                     ),
                     flush=True,
                 )
+            write_runtime_heartbeat(
+                status_file,
+                service="collector",
+                work_items=len(appended_decisions) + len(completed_outcomes),
+            )
             time.sleep(max(1.0, args.poll_seconds))
     finally:
         ledger.close()

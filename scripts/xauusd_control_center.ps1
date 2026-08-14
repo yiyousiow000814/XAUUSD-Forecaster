@@ -18,16 +18,44 @@ $moduleRoot = if ($RuntimeRoot) {
 } else { $scriptRepositoryRoot }
 $logRoot = Join-Path $moduleRoot ".local\forward\logs"
 $taskName = "XAUUSD-Forecaster-Autostart"
+$guardTaskName = "XAUUSD-Forecaster-Watchdog-Guard"
 $dashboardUrl = if ([Environment]::GetEnvironmentVariable("XAUUSD_DASHBOARD_URL", "User")) {
     [Environment]::GetEnvironmentVariable("XAUUSD_DASHBOARD_URL", "User")
 } else {
     "https://aurum-signal-room.yiyousiow1234.chatgpt.site"
 }
 $watchdogLog = Join-Path $logRoot "control-watchdog.jsonl"
+$watchdogHeartbeatPath = Join-Path $moduleRoot ".local\forward\control-watchdog-heartbeat.json"
 $runtimeCodeStatePath = Join-Path $moduleRoot ".local\forward\runtime-code-state.json"
 $runtimeUpdateStatePath = Join-Path $moduleRoot ".local\forward\runtime-update-state.json"
-$remoteMainSignalPath = Join-Path $moduleRoot ".local\forward\remote-main-signal.json"
+$dashboardSyncConfigPath = Join-Path $moduleRoot ".local\forward\dashboard-sync.json"
+$runtimeUpdateCheckInterval = [TimeSpan]::FromMinutes(5)
+$runtimePreflightContractVersion = "isolated-migrated-runtime-state-v3"
+$runtimeObservationCycles = 2
+$runtimeObservationTimeout = [TimeSpan]::FromMinutes(15)
 $reloadableServiceKeys = @("collector", "annotator", "api", "sync")
+$runtimeControlFileNames = @(
+    "xauusd_control_center.ps1",
+    "xauusd_watchdog_launcher.vbs",
+    "xauusd_watchdog_guard.ps1",
+    "xauusd_watchdog_guard_launcher.vbs"
+)
+$collectorSecretsPath = Join-Path $repositoryRoot ".local\secrets\collector-keys.json"
+
+function Get-CollectorSecret {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    $userValue = [Environment]::GetEnvironmentVariable($Name, "User")
+    if ($userValue) { return $userValue.Trim() }
+    if (-not (Test-Path -LiteralPath $collectorSecretsPath)) { return "" }
+    try {
+        $secrets = Get-Content -LiteralPath $collectorSecretsPath -Raw | ConvertFrom-Json
+        $property = $secrets.PSObject.Properties[$Name]
+        if ($property -and $property.Value) { return ([string]$property.Value).Trim() }
+    } catch {
+        return ""
+    }
+    return ""
+}
 
 $services = @(
     [pscustomobject]@{
@@ -138,19 +166,49 @@ function Write-RuntimeUpdateState {
     Move-Item -LiteralPath $temporary -Destination $runtimeUpdateStatePath -Force
 }
 
-function Get-SignaledMainRevision {
-    if (-not (Test-Path -LiteralPath $remoteMainSignalPath)) { return $null }
+function Get-DeploymentStatusUrl {
+    $environmentUrl = [Environment]::GetEnvironmentVariable(
+        "CLOUDFLARE_INGEST_URL", "User"
+    )
+    if ($environmentUrl -and $environmentUrl.StartsWith("https://")) {
+        return $environmentUrl.Trim()
+    }
+    if (-not (Test-Path -LiteralPath $dashboardSyncConfigPath)) { return $null }
     try {
-        $signal = Get-Content -LiteralPath $remoteMainSignalPath -Raw | ConvertFrom-Json
-        $revision = [string]$signal.main_revision
-        if ($revision -match '^[0-9a-f]{40}$') { return $revision }
+        $config = Get-Content -LiteralPath $dashboardSyncConfigPath -Raw | ConvertFrom-Json
+        $targets = @($config.targets | Where-Object {
+            $_.enabled -ne $false -and
+            ([string]$_.remote_ingest_url).StartsWith("https://")
+        })
+        $cloudflare = $targets | Where-Object {
+            ([string]$_.name) -eq "cloudflare" -or
+            ([Uri]$_.remote_ingest_url).Host.EndsWith("workers.dev")
+        } | Select-Object -First 1
+        if ($cloudflare) { return ([string]$cloudflare.remote_ingest_url).Trim() }
+        if (([string]$config.remote_ingest_url).StartsWith("https://")) {
+            return ([string]$config.remote_ingest_url).Trim()
+        }
+    } catch {}
+    return $null
+}
+
+function Get-DeployedMainRevision {
+    $url = Get-DeploymentStatusUrl
+    if (-not $url) { return $null }
+    try {
+        $response = Invoke-RestMethod -Method Get -Uri $url -TimeoutSec 5
+        $revision = [string]$response.main_revision
+        if ($response.status -eq "OK" -and $revision -match '^[0-9a-f]{40}$') {
+            return $revision
+        }
     } catch {}
     return $null
 }
 
 function Get-VerifiedOriginMain {
     try {
-        & git -C $repositoryRoot fetch origin main --quiet 2>$null
+        & git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=30 `
+            -C $repositoryRoot fetch origin main --quiet 2>$null
         if ($LASTEXITCODE -ne 0) { return $null }
         $revision = (& git -C $repositoryRoot rev-parse origin/main 2>$null).Trim()
         if ($LASTEXITCODE -eq 0 -and $revision -match '^[0-9a-f]{40}$') {
@@ -177,6 +235,13 @@ function Test-MainCandidate {
         return $false
     }
     $state = Get-RuntimeUpdateState
+    if (
+        $state -and
+        [string]$state.failed_revision -eq $CandidateRevision -and
+        [string]$state.failed_preflight_contract -eq $runtimePreflightContractVersion
+    ) {
+        return $false
+    }
     $acceptedMain = if ($state) { [string]$state.accepted_main_revision } else { "" }
     if ($acceptedMain) {
         # A PR runtime may be bootstrapped before a squash merge.  In that case
@@ -190,33 +255,246 @@ function Test-MainCandidate {
     return Test-RevisionDescendsFrom $CurrentRevision $CandidateRevision
 }
 
-function Get-DesiredMainRevision {
-    param([string]$CurrentRevision)
-    $signal = Get-SignaledMainRevision
-    if ($signal -and $signal -eq $CurrentRevision) {
-        Write-RuntimeUpdateState @{ signal_capable = $true }
-        return $null
+function Write-RuntimeUpdateFailure {
+    param([string]$Revision, [string]$Status, [string]$Message)
+    Write-RuntimeUpdateState @{
+        update_status = $Status
+        failed_revision = $Revision
+        failed_preflight_contract = $runtimePreflightContractVersion
+        failed_at = [DateTimeOffset]::UtcNow.ToString("o")
+        user_visible_failure = $true
+        failure_message = $Message
     }
-    if ($signal -and $signal -ne $CurrentRevision) {
-        $verified = Get-VerifiedOriginMain
-        if ($verified -eq $signal -and (Test-MainCandidate $CurrentRevision $verified)) {
-            Write-RuntimeUpdateState @{ signal_capable = $true }
-            return $verified
+    Write-WatchdogEvent -Event "RUNTIME_UPDATE_FAILED" -Service "all" -State $Message
+}
+
+function Sync-StableRuntimeControlFiles {
+    param(
+        [string]$SourceRoot = $moduleRoot,
+        [string]$ControlRoot = (Join-Path $repositoryRoot ".local\runtime-control")
+    )
+    $stageRoot = Join-Path $ControlRoot (".staging-{0}" -f [guid]::NewGuid())
+    $backupRoot = Join-Path $ControlRoot (".backup-{0}" -f [guid]::NewGuid())
+    New-Item -ItemType Directory -Path $ControlRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+    try {
+        foreach ($name in $runtimeControlFileNames) {
+            $source = Join-Path $SourceRoot ("scripts\{0}" -f $name)
+            if (-not (Test-Path -LiteralPath $source)) {
+                throw "Missing runtime control file: $source"
+            }
+            Copy-Item -LiteralPath $source -Destination (Join-Path $stageRoot $name) -Force
+        }
+        foreach ($name in $runtimeControlFileNames) {
+            $destination = Join-Path $ControlRoot $name
+            if (Test-Path -LiteralPath $destination) {
+                Copy-Item -LiteralPath $destination `
+                    -Destination (Join-Path $backupRoot $name) -Force
+            }
+        }
+        try {
+            foreach ($name in $runtimeControlFileNames) {
+                Move-Item -LiteralPath (Join-Path $stageRoot $name) `
+                    -Destination (Join-Path $ControlRoot $name) -Force
+            }
+        } catch {
+            foreach ($name in $runtimeControlFileNames) {
+                $destination = Join-Path $ControlRoot $name
+                $backup = Join-Path $backupRoot $name
+                if (Test-Path -LiteralPath $backup) {
+                    Move-Item -LiteralPath $backup -Destination $destination -Force
+                } elseif (Test-Path -LiteralPath $destination) {
+                    Remove-Item -LiteralPath $destination -Force
+                }
+            }
+            throw
+        }
+    } finally {
+        if (Test-Path -LiteralPath $stageRoot) {
+            Remove-Item -LiteralPath $stageRoot -Recurse -Force
+        }
+        if (Test-Path -LiteralPath $backupRoot) {
+            Remove-Item -LiteralPath $backupRoot -Recurse -Force
         }
     }
+}
 
+function Get-AvailableLoopbackPort {
+    $listener = [System.Net.Sockets.TcpListener]::new(
+        [System.Net.IPAddress]::Loopback, 0
+    )
+    try {
+        $listener.Start()
+        return ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+    } finally {
+        $listener.Stop()
+    }
+}
+
+function New-CandidatePreflightDatabase {
+    param(
+        [string]$Python,
+        [string]$StageRoot,
+        [string]$SourceDatabase,
+        [string]$TargetDatabase
+    )
+    $migration = @'
+import sqlite3
+import sys
+from pathlib import Path
+
+stage_root = Path(sys.argv[1]).resolve()
+source_path = Path(sys.argv[2]).resolve()
+target_path = Path(sys.argv[3]).resolve()
+target_path.parent.mkdir(parents=True, exist_ok=True)
+if target_path.exists():
+    target_path.unlink()
+source = sqlite3.connect(source_path.as_uri() + '?mode=ro', uri=True)
+destination = sqlite3.connect(target_path)
+try:
+    source.backup(destination)
+finally:
+    destination.close()
+    source.close()
+sys.path.insert(0, str(stage_root))
+from xauusd_forecaster.forward_ledger import ForwardLedger
+ledger = ForwardLedger(target_path)
+ledger.close()
+'@
+    $result = & $Python -c $migration $StageRoot $SourceDatabase $TargetDatabase 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "candidate evidence migration failed: $result"
+    }
+}
+
+function Copy-CandidatePreflightState {
+    param(
+        [string]$SourceDatabase,
+        [string]$TargetDatabase
+    )
+    $sourceRoot = Split-Path -Parent $SourceDatabase
+    $targetRoot = Split-Path -Parent $TargetDatabase
+    foreach ($name in @("dashboard-sync-status.json", "news-annotator-status.json")) {
+        $source = Join-Path $sourceRoot $name
+        if (Test-Path -LiteralPath $source) {
+            Copy-Item -LiteralPath $source -Destination (Join-Path $targetRoot $name) -Force
+        }
+    }
+    $marketSession = Join-Path $sourceRoot "quotes\market-session.json"
+    if (Test-Path -LiteralPath $marketSession) {
+        $targetQuotes = Join-Path $targetRoot "quotes"
+        New-Item -ItemType Directory -Path $targetQuotes -Force | Out-Null
+        Copy-Item -LiteralPath $marketSession `
+            -Destination (Join-Path $targetQuotes "market-session.json") -Force
+    }
+}
+
+function Invoke-ProductionShapePreflight {
+    param([string]$Revision)
+    $preflightRoot = Join-Path $repositoryRoot ".local\runtime-preflight"
+    $stageRoot = Join-Path $preflightRoot $Revision
+    $database = Join-Path $moduleRoot ".local\forward\forward-evidence.sqlite3"
+    $preflightPort = Get-AvailableLoopbackPort
+    $process = $null
+    if (-not (Test-Path -LiteralPath $database)) {
+        Write-RuntimeUpdateFailure -Revision $Revision -Status "PREFLIGHT_FAILED" `
+            -Message "Candidate preflight failed; the current version is still running: production evidence database is missing."
+        return $false
+    }
+    New-Item -ItemType Directory -Path $preflightRoot -Force | Out-Null
+    try {
+        if (Test-Path -LiteralPath $stageRoot) {
+            & git -C $repositoryRoot worktree remove --force $stageRoot 2>$null
+            if (Test-Path -LiteralPath $stageRoot) {
+                throw "stale candidate worktree cannot be cleared"
+            }
+        }
+        & git -C $repositoryRoot worktree add --detach --quiet $stageRoot $Revision 2>$null
+        if ($LASTEXITCODE -ne 0) { throw "cannot stage candidate worktree" }
+        $python = (Get-Command python.exe -ErrorAction Stop).Source
+        $candidateDatabase = Join-Path $stageRoot ".local\preflight\forward-evidence.sqlite3"
+        New-CandidatePreflightDatabase -Python $python -StageRoot $stageRoot `
+            -SourceDatabase $database -TargetDatabase $candidateDatabase
+        Copy-CandidatePreflightState -SourceDatabase $database `
+            -TargetDatabase $candidateDatabase
+        $stdout = Join-Path $logRoot "runtime-preflight.stdout.log"
+        $stderr = Join-Path $logRoot "runtime-preflight.stderr.log"
+        New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
+        $process = Start-Process -FilePath $python -ArgumentList @(
+            (Join-Path $stageRoot "scripts\run_dashboard_api.py"),
+            "--database", $candidateDatabase, "--host", "127.0.0.1",
+            "--port", [string]$preflightPort
+        ) -WorkingDirectory $stageRoot -WindowStyle Hidden -PassThru `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        $statusUrl = "http://127.0.0.1:$preflightPort/api/status"
+        $deadline = [DateTimeOffset]::UtcNow.AddSeconds(60)
+        $ready = $false
+        do {
+            Start-Sleep -Milliseconds 500
+            if ($process.HasExited) { break }
+            try {
+                # Readiness is the ability to build one complete status
+                # snapshot. /api/health describes live market availability and
+                # may correctly be non-200 while the candidate is sound.
+                $ready = (Invoke-WebRequest -UseBasicParsing -Uri $statusUrl `
+                    -TimeoutSec 20).StatusCode -eq 200
+            } catch { $ready = $false }
+        } while (-not $ready -and [DateTimeOffset]::UtcNow -lt $deadline)
+        if (-not $ready) { throw "staged dashboard API did not become healthy" }
+        $arguments = @(
+            (Join-Path $stageRoot "scripts\check_production_shape.py"),
+            "--status-url", $statusUrl
+        )
+        $result = & $python @arguments 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "production shape rejected: $result" }
+        Write-RuntimeUpdateState @{
+            update_status = "PREFLIGHT_PASSED"
+            preflight_revision = $Revision
+            preflight_at = [DateTimeOffset]::UtcNow.ToString("o")
+            user_visible_failure = $false
+            failure_message = $null
+            failed_revision = $null
+            failed_at = $null
+            failed_preflight_contract = $null
+        }
+        Write-WatchdogEvent -Event "RUNTIME_PREFLIGHT_PASSED" `
+            -Service "all" -State $Revision
+        return $true
+    } catch {
+        Write-RuntimeUpdateFailure -Revision $Revision -Status "PREFLIGHT_FAILED" `
+            -Message "Candidate preflight failed; the current version is still running: $($_.Exception.Message)"
+        return $false
+    } finally {
+        if ($process -and -not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            $process.WaitForExit(5000) | Out-Null
+        }
+        if (Test-Path -LiteralPath $stageRoot) {
+            & git -C $repositoryRoot worktree remove --force $stageRoot 2>$null
+        }
+        & git -C $repositoryRoot worktree prune 2>$null
+    }
+}
+
+function Get-DesiredMainRevision {
+    param([string]$CurrentRevision)
     $state = Get-RuntimeUpdateState
-    $signalCapable = $state -and [bool]$state.signal_capable
-    $intervalHours = if ($signalCapable) { 24.0 } else { 0.083333 }
     $lastCheck = [DateTimeOffset]::MinValue
     if ($state -and $state.last_remote_check) {
         [DateTimeOffset]::TryParse([string]$state.last_remote_check, [ref]$lastCheck) | Out-Null
     }
-    if (([DateTimeOffset]::UtcNow - $lastCheck).TotalHours -lt $intervalHours) {
+    if (([DateTimeOffset]::UtcNow - $lastCheck) -lt $runtimeUpdateCheckInterval) {
         return $null
     }
+    Write-RuntimeUpdateState @{
+        last_remote_check = [DateTimeOffset]::UtcNow.ToString("o")
+    }
+    $deployed = Get-DeployedMainRevision
+    if (-not $deployed -or $deployed -eq $CurrentRevision) { return $null }
     $verified = Get-VerifiedOriginMain
-    if ($verified -and (Test-MainCandidate $CurrentRevision $verified)) {
+    if ($verified -eq $deployed -and (Test-MainCandidate $CurrentRevision $verified)) {
+        Write-RuntimeUpdateState @{ last_deployed_revision = $deployed }
         return $verified
     }
     return $null
@@ -225,18 +503,52 @@ function Get-DesiredMainRevision {
 function Update-RuntimeCheckout {
     param([string]$Revision)
     if (-not $RuntimeRoot) { return $false }
-    if (-not (Test-MainCandidate (Get-CodeRevision) $Revision)) { return $false }
-    & git -C $moduleRoot checkout --detach --force --quiet $Revision 2>$null
-    if ($LASTEXITCODE -ne 0) { return $false }
-    $stableScript = Join-Path $repositoryRoot ".local\runtime-control\xauusd_control_center.ps1"
-    Copy-Item -LiteralPath (Join-Path $moduleRoot "scripts\xauusd_control_center.ps1") `
-        -Destination $stableScript -Force
+    $previousRevision = Get-CodeRevision
+    if (-not (Test-MainCandidate $previousRevision $Revision)) { return $false }
+    if (-not (Invoke-ProductionShapePreflight -Revision $Revision)) { return $false }
     Write-RuntimeUpdateState @{
-        accepted_main_revision = $Revision
+        update_status = "SWITCHING"
+        previous_revision = $previousRevision
         staged_revision = $Revision
         staged_at = [DateTimeOffset]::UtcNow.ToString("o")
+        user_visible_failure = $false
+        failure_message = $null
     }
-    return $true
+    $checkoutChanged = $false
+    try {
+        & git -C $moduleRoot checkout --detach --force --quiet $Revision 2>$null
+        if ($LASTEXITCODE -ne 0) { throw "verified revision checkout failed" }
+        $checkoutChanged = $true
+        Sync-StableRuntimeControlFiles
+        Write-RuntimeUpdateState @{
+            accepted_main_revision = $Revision
+            previous_revision = $previousRevision
+            staged_revision = $Revision
+            staged_at = [DateTimeOffset]::UtcNow.ToString("o")
+            update_status = "STAGED"
+        }
+        return $true
+    } catch {
+        $reason = $_.Exception.Message
+        if ($checkoutChanged) {
+            & git -C $moduleRoot checkout --detach --force --quiet $previousRevision 2>$null
+            if ($LASTEXITCODE -ne 0) {
+                Write-RuntimeUpdateFailure -Revision $Revision -Status "ROLLBACK_FAILED" `
+                    -Message "Candidate switch preparation failed and the previous checkout could not be restored: $reason"
+                return $false
+            }
+            try {
+                Sync-StableRuntimeControlFiles
+            } catch {
+                Write-RuntimeUpdateFailure -Revision $Revision -Status "ROLLBACK_FAILED" `
+                    -Message "Candidate switch preparation failed and the previous control bundle could not be restored: $reason; $($_.Exception.Message)"
+                return $false
+            }
+        }
+        Write-RuntimeUpdateFailure -Revision $Revision -Status "SWITCH_FAILED" `
+            -Message "Candidate switch failed before service reload; the current version is still running: $reason"
+        return $false
+    }
 }
 
 function Get-RuntimeCodeState {
@@ -267,9 +579,69 @@ function Write-RuntimeCodeState {
     Move-Item -LiteralPath $temporary -Destination $runtimeCodeStatePath -Force
 }
 
+function Get-RuntimeHeartbeat {
+    param([string]$Path, [string]$ServiceName)
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    try {
+        $heartbeat = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        $lastSuccess = [DateTimeOffset]::MinValue
+        if ([string]$heartbeat.service -ne $ServiceName -or
+            [string]$heartbeat.state -ne "RUNNING" -or
+            -not [DateTimeOffset]::TryParse(
+                [string]$heartbeat.last_success, [ref]$lastSuccess
+            )) { return $null }
+        return [pscustomobject]@{ LastSuccess = $lastSuccess }
+    } catch { return $null }
+}
+
+function Get-ServiceProcessStartedAt {
+    param([array]$Processes)
+    try {
+        $process = Get-Process -Id $Processes[0].ProcessId -ErrorAction Stop
+        return [DateTimeOffset]$process.StartTime.ToUniversalTime()
+    } catch { return [DateTimeOffset]::MinValue }
+}
+
+function Test-CodeReloadHealth {
+    param([DateTimeOffset]$ReloadStarted)
+    foreach ($service in @($services | Where-Object { $_.Key -in $reloadableServiceKeys })) {
+        if (@(Get-ForecasterProcesses $service).Count -eq 0) { return $false }
+    }
+    foreach ($heartbeatSpec in @(
+        @("collector", "collector-status.json"),
+        @("annotator", "news-annotator-status.json")
+    )) {
+        $heartbeat = Get-RuntimeHeartbeat `
+            -Path (Join-Path $moduleRoot ".local\forward\$($heartbeatSpec[1])") `
+            -ServiceName $heartbeatSpec[0]
+        if (-not $heartbeat -or $heartbeat.LastSuccess -lt $ReloadStarted) {
+            return $false
+        }
+    }
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing `
+            -Uri "http://127.0.0.1:8765/api/health" -TimeoutSec 2
+        if ($response.StatusCode -ne 200) { return $false }
+    } catch { return $false }
+    $statusFile = Join-Path $moduleRoot ".local\forward\dashboard-sync-status.json"
+    if (-not (Test-Path -LiteralPath $statusFile)) { return $false }
+    try {
+        $syncStatus = Get-Content -LiteralPath $statusFile -Raw | ConvertFrom-Json
+        $lastAttempt = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse(
+            [string]$syncStatus.last_attempt, [ref]$lastAttempt
+        )) { return $false }
+        return (
+            $lastAttempt -ge $ReloadStarted -and
+            [string]$syncStatus.status -in @("OK", "DEGRADED")
+        )
+    } catch { return $false }
+}
+
 function Restart-CodeReloadableServices {
     param([string]$Revision)
     $targets = @($services | Where-Object { $_.Key -in $reloadableServiceKeys })
+    $reloadStarted = [DateTimeOffset]::UtcNow
     Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_STARTED" `
         -Service "collector,annotator,api,sync" -State $Revision
     foreach ($service in $targets) { Stop-ForecasterService $service }
@@ -277,19 +649,205 @@ function Restart-CodeReloadableServices {
     foreach ($service in $targets) {
         Start-ForecasterService $service -SkipExistingCheck
     }
-    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(15)
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(180)
     do {
         Start-Sleep -Milliseconds 500
-        $missing = @($targets | Where-Object {
-            @(Get-ForecasterProcesses $_).Count -eq 0
-        })
-    } while ($missing.Count -gt 0 -and [DateTimeOffset]::UtcNow -lt $deadline)
-    if ($missing.Count -gt 0) {
-        throw "Code revision reload failed to start: $($missing.Key -join ',')"
-    }
+        Write-WatchdogHeartbeat
+        $healthy = Test-CodeReloadHealth -ReloadStarted $reloadStarted
+    } while (-not $healthy -and [DateTimeOffset]::UtcNow -lt $deadline)
+    if (-not $healthy) { throw "Code revision reload failed functional health checks." }
+    Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_HEALTHY" `
+        -Service "collector,annotator,api,sync" -State $Revision
+}
+
+function Invoke-RuntimeCandidateActivation {
+    param([string]$Revision, [string]$PreviousRevision)
+    Restart-CodeReloadableServices -Revision $Revision
+    Start-RuntimeObservation -Revision $Revision `
+        -PreviousRevision $PreviousRevision
+    # Observation is durable before applied_revision. A watchdog restart in
+    # between repeats safe work instead of silently skipping validation.
     Write-RuntimeCodeState -Revision $Revision
     Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_APPLIED" `
         -Service "collector,annotator,api,sync" -State $Revision
+}
+
+function Get-RuntimeDecisionTimes {
+    try {
+        $status = Invoke-RestMethod -Method Get `
+            -Uri "http://127.0.0.1:8765/api/status" -TimeoutSec 10
+        return @(
+            $status.recent_decisions |
+                Where-Object { $_.decision_time } |
+                ForEach-Object { [string]$_.decision_time }
+        )
+    } catch {}
+    return @()
+}
+
+function Get-LatestRuntimeDecisionTime {
+    $times = @(Get-RuntimeDecisionTimes)
+    if ($times.Count -gt 0) { return [string]$times[0] }
+    return $null
+}
+
+function Test-CurrentProductionShape {
+    try {
+        $python = (Get-Command python.exe -ErrorAction Stop).Source
+        $arguments = @(
+            (Join-Path $moduleRoot "scripts\check_production_shape.py"),
+            "--status-url", "http://127.0.0.1:8765/api/status",
+            "--allow-pending-generation-decision"
+        )
+        $result = & $python @arguments 2>&1
+        if ($LASTEXITCODE -ne 0) { return "production shape rejected: $result" }
+        return $null
+    } catch {
+        return $_.Exception.Message
+    }
+}
+
+function Start-RuntimeObservation {
+    param([string]$Revision, [string]$PreviousRevision)
+    $latestDecision = Get-LatestRuntimeDecisionTime
+    Write-RuntimeUpdateState @{
+        update_status = "OBSERVING"
+        observing_revision = $Revision
+        previous_revision = $PreviousRevision
+        observation_started_at = [DateTimeOffset]::UtcNow.ToString("o")
+        observation_last_decision_time = $latestDecision
+        observation_success_cycles = 0
+        observation_consecutive_failures = 0
+        user_visible_failure = $false
+        failure_message = $null
+    }
+    Write-WatchdogEvent -Event "RUNTIME_OBSERVATION_STARTED" `
+        -Service "all" -State "$Revision cycles=$runtimeObservationCycles"
+}
+
+function Invoke-RuntimeRollback {
+    param([string]$FailedRevision, [string]$PreviousRevision, [string]$Reason)
+    try {
+        if (-not $PreviousRevision -or $PreviousRevision -notmatch '^[0-9a-f]{40}$') {
+            throw "previous revision is unavailable"
+        }
+        & git -C $moduleRoot checkout --detach --force --quiet $PreviousRevision 2>$null
+        if ($LASTEXITCODE -ne 0) { throw "cannot restore previous revision" }
+        Sync-StableRuntimeControlFiles
+        Restart-CodeReloadableServices -Revision $PreviousRevision
+        Write-RuntimeCodeState -Revision $PreviousRevision
+        Write-RuntimeUpdateFailure -Revision $FailedRevision -Status "ROLLED_BACK" `
+            -Message "Candidate observation failed and the previous version was restored: $Reason"
+        Write-WatchdogEvent -Event "RUNTIME_ROLLBACK_APPLIED" `
+            -Service "all" -State $PreviousRevision
+        return $true
+    } catch {
+        Write-RuntimeUpdateFailure -Revision $FailedRevision -Status "ROLLBACK_FAILED" `
+            -Message "Candidate observation and automatic rollback both failed; inspect local services: $Reason; $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Test-RuntimeObservation {
+    $state = Get-RuntimeUpdateState
+    if (-not $state -or [string]$state.update_status -ne "OBSERVING") {
+        return $true
+    }
+    $revision = [string]$state.observing_revision
+    $previousRevision = [string]$state.previous_revision
+    $started = [DateTimeOffset]::MinValue
+    $startedValid = [DateTimeOffset]::TryParse(
+        [string]$state.observation_started_at, [ref]$started
+    )
+    if (-not $startedValid) {
+        Invoke-RuntimeRollback -FailedRevision $revision `
+            -PreviousRevision $previousRevision `
+            -Reason "runtime observation state has an invalid start time" | Out-Null
+        return $false
+    }
+    $failure = $null
+    if (-not (Test-CodeReloadHealth -ReloadStarted $started)) {
+        $failure = "reload health check failed"
+    } else { $failure = Test-CurrentProductionShape }
+    if ($failure) {
+        $failures = 1 + [int]$state.observation_consecutive_failures
+        Write-RuntimeUpdateState @{ observation_consecutive_failures = $failures }
+        if ($failures -ge 3) {
+            Invoke-RuntimeRollback -FailedRevision $revision `
+                -PreviousRevision $previousRevision -Reason $failure | Out-Null
+            return $false
+        }
+        return $true
+    }
+    $decisionTimes = @(Get-RuntimeDecisionTimes)
+    $lastDecision = [string]$state.observation_last_decision_time
+    $cycles = [int]$state.observation_success_cycles
+    $lastInstant = [DateTimeOffset]::MinValue
+    $lastValid = [DateTimeOffset]::TryParse($lastDecision, [ref]$lastInstant)
+    $referenceInstant = if ($lastValid) { $lastInstant } else { $started }
+    $referenceCycle = [Math]::Floor($referenceInstant.ToUnixTimeSeconds() / 300)
+    $newDecisions = @()
+    foreach ($decisionTime in $decisionTimes) {
+        $decisionInstant = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse(
+            [string]$decisionTime, [ref]$decisionInstant
+        )) { continue }
+        $decisionCycle = [Math]::Floor($decisionInstant.ToUnixTimeSeconds() / 300)
+        if ($decisionInstant -gt $referenceInstant -and
+            $decisionCycle -gt $referenceCycle) {
+            $newDecisions += [pscustomobject]@{
+                Cycle = $decisionCycle
+                Instant = $decisionInstant
+                Value = [string]$decisionTime
+            }
+        }
+    }
+    $newCycles = @($newDecisions | Sort-Object Cycle -Unique)
+    if ($newCycles.Count -gt 0) {
+        $latestDecision = ($newDecisions | Sort-Object Instant -Descending |
+            Select-Object -First 1).Value
+        $cycles += $newCycles.Count
+        Write-RuntimeUpdateState @{
+            observation_last_decision_time = $latestDecision
+            observation_success_cycles = $cycles
+            observation_consecutive_failures = 0
+        }
+    } else {
+        Write-RuntimeUpdateState @{ observation_consecutive_failures = 0 }
+    }
+    if ($cycles -ge $runtimeObservationCycles) {
+        Write-RuntimeUpdateState @{
+            update_status = "ACTIVE"
+            activated_revision = $revision
+            activated_at = [DateTimeOffset]::UtcNow.ToString("o")
+            user_visible_failure = $false
+            failure_message = $null
+        }
+        Write-WatchdogEvent -Event "RUNTIME_OBSERVATION_PASSED" `
+            -Service "all" -State "$revision cycles=$cycles"
+        return $true
+    }
+    if (([DateTimeOffset]::UtcNow - $started) -ge $runtimeObservationTimeout) {
+        try {
+            $status = Invoke-RestMethod -Method Get `
+                -Uri "http://127.0.0.1:8765/api/status" -TimeoutSec 5
+            $marketClosed = [string]$status.system.market_session -in @(
+                "CLOSED", "WEEKLY_CLOSED"
+            )
+        } catch { $marketClosed = $false }
+        if ($marketClosed) {
+            # Closed-market time does not consume the two-cycle observation window.
+            Write-RuntimeUpdateState @{
+                observation_started_at = [DateTimeOffset]::UtcNow.ToString("o")
+            }
+        } else {
+            Invoke-RuntimeRollback -FailedRevision $revision `
+                -PreviousRevision $previousRevision `
+                -Reason "two complete five-minute decision cycles were not observed" | Out-Null
+            return $false
+        }
+    }
+    return $true
 }
 
 function Test-ExpectedWeeklyMarketClosure {
@@ -303,6 +861,25 @@ function Test-ExpectedWeeklyMarketClosure {
     return $false
 }
 
+function Get-BrokerMarketSession {
+    $path = Join-Path $moduleRoot ".local\forward\quotes\market-session.json"
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    try {
+        $session = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $observedAt = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse(
+            [string]$session.observed_at, [ref]$observedAt
+        )) { return $null }
+        $now = [DateTimeOffset]::UtcNow
+        if ($observedAt -gt $now.AddSeconds(5) -or
+            ($now - $observedAt).TotalSeconds -gt 20) { return $null }
+        return [pscustomobject]@{
+            ObservedAt = $observedAt
+            IsOpen = $session.is_open -eq $true
+        }
+    } catch { return $null }
+}
+
 function Get-ServiceState {
     param(
         [pscustomobject]$Service,
@@ -310,7 +887,29 @@ function Get-ServiceState {
     )
     if ($Processes.Count -eq 0) { return "STOPPED" }
 
+    if ($Service.Key -in @("collector", "annotator")) {
+        $statusName = if ($Service.Key -eq "collector") {
+            "collector-status.json"
+        } else { "news-annotator-status.json" }
+        $heartbeat = Get-RuntimeHeartbeat `
+            -Path (Join-Path $moduleRoot ".local\forward\$statusName") `
+            -ServiceName $Service.Key
+        $startedAt = Get-ServiceProcessStartedAt -Processes $Processes
+        if ($heartbeat -and
+            $heartbeat.LastSuccess -ge $startedAt -and
+            ([DateTimeOffset]::UtcNow - $heartbeat.LastSuccess).TotalSeconds -le 300) {
+            return "RUNNING"
+        }
+        if ($startedAt -ne [DateTimeOffset]::MinValue -and
+            ([DateTimeOffset]::UtcNow - $startedAt).TotalSeconds -le 180) {
+            return "STARTING"
+        }
+        return "$($Service.Key.ToUpper()) STALE"
+    }
+
     if ($Service.Key -eq "quote") {
+        $brokerSession = Get-BrokerMarketSession
+        if ($brokerSession -and -not $brokerSession.IsOpen) { return "MARKET CLOSED" }
         $quoteRoot = Join-Path $moduleRoot ".local\forward\quotes"
         $latestQuote = Get-ChildItem -LiteralPath $quoteRoot -Filter "*.jsonl" `
             -File -Recurse -ErrorAction SilentlyContinue |
@@ -320,6 +919,7 @@ function Get-ServiceState {
             if (Test-ExpectedWeeklyMarketClosure) { return "MARKET CLOSED" }
             return "DATA STALE"
         }
+        if (-not $brokerSession) { return "SESSION STALE" }
         return "LIVE"
     }
 
@@ -390,6 +990,12 @@ function Start-ForecasterService {
     if ($Service.Key -in @("annotator", "api")) {
         $env:GEMINI_API_KEY = [Environment]::GetEnvironmentVariable("GEMINI_API_KEY", "User")
         $env:GEMINI_API_KEYS = [Environment]::GetEnvironmentVariable("GEMINI_API_KEYS", "User")
+    }
+    if ($Service.Key -eq "collector") {
+        $env:BLS_API_KEY = Get-CollectorSecret -Name "BLS_API_KEY"
+        $env:BEA_API_KEY = Get-CollectorSecret -Name "BEA_API_KEY"
+        $env:FRED_API_KEY = Get-CollectorSecret -Name "FRED_API_KEY"
+        $env:EIA_API_KEY = Get-CollectorSecret -Name "EIA_API_KEY"
     }
     if ($Service.Key -eq "sync") {
         $env:SITES_BYPASS_TOKEN = [Environment]::GetEnvironmentVariable(
@@ -484,6 +1090,32 @@ function Write-WatchdogEvent {
     } | ConvertTo-Json -Compress | Add-Content -LiteralPath $watchdogLog -Encoding UTF8
 }
 
+function Write-WatchdogHeartbeat {
+    $directory = Split-Path -Parent $watchdogHeartbeatPath
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $temporary = "$watchdogHeartbeatPath.tmp"
+    [pscustomobject]@{
+        observed_at = [DateTimeOffset]::UtcNow.ToString("o")
+        process_id = $PID
+        revision = Get-CodeRevision
+    } | ConvertTo-Json -Compress | Set-Content -LiteralPath $temporary -Encoding UTF8
+    Move-Item -LiteralPath $temporary -Destination $watchdogHeartbeatPath -Force
+}
+
+function Start-WatchdogReplacement {
+    $controlRoot = Join-Path $repositoryRoot ".local\runtime-control"
+    $controlScript = Join-Path $controlRoot "xauusd_control_center.ps1"
+    $launcher = Join-Path $controlRoot "xauusd_watchdog_launcher.vbs"
+    if (-not (Test-Path -LiteralPath $controlScript) -or
+        -not (Test-Path -LiteralPath $launcher)) {
+        throw "Updated watchdog control files are unavailable."
+    }
+    $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
+    $arguments = '"{0}" "{1}" "{2}" "{3}"' -f `
+        $launcher, $controlScript, $moduleRoot, $repositoryRoot
+    Start-Process -FilePath $wscript -ArgumentList $arguments -WindowStyle Hidden
+}
+
 function Invoke-ForecasterWatchdog {
     $failureCounts = @{}
     $lastRestart = @{}
@@ -492,8 +1124,11 @@ function Invoke-ForecasterWatchdog {
         $lastRestart[$service.Key] = [DateTimeOffset]::MinValue
     }
     $lastCodeReload = [DateTimeOffset]::MinValue
+    $watchdogRevisionAtStart = Get-CodeRevision
+    Ensure-WatchdogGuardTask
     Write-WatchdogEvent -Event "WATCHDOG_STARTED" -Service "all" -State "MONITORING"
     while ($true) {
+        Write-WatchdogHeartbeat
         try {
             $currentRevision = Get-CodeRevision
             $desiredRevision = Get-DesiredMainRevision -CurrentRevision $currentRevision
@@ -510,16 +1145,46 @@ function Invoke-ForecasterWatchdog {
                 [DateTimeOffset]::UtcNow - $lastCodeReload
             ).TotalSeconds -ge 120) {
                 $lastCodeReload = [DateTimeOffset]::UtcNow
-                Restart-CodeReloadableServices -Revision $currentRevision
+                $updateState = Get-RuntimeUpdateState
+                $previousRevision = if ($updateState) {
+                    [string]$updateState.previous_revision
+                } else { $appliedRevision }
+                try {
+                    Invoke-RuntimeCandidateActivation `
+                        -Revision $currentRevision `
+                        -PreviousRevision $previousRevision
+                } catch {
+                    Invoke-RuntimeRollback -FailedRevision $currentRevision `
+                        -PreviousRevision $previousRevision `
+                        -Reason $_.Exception.Message | Out-Null
+                    $currentRevision = Get-CodeRevision
+                }
                 foreach ($service in $services) {
                     $lastRestart[$service.Key] = [DateTimeOffset]::UtcNow
                     $failureCounts[$service.Key] = 0
+                }
+                if ($currentRevision -ne $watchdogRevisionAtStart) {
+                    # The launcher that started this process may predate its own
+                    # supervisor loop, so start the newly copied launcher before
+                    # this process exits. This makes the first upgrade self-hosting.
+                    Start-WatchdogReplacement
+                    return 0
+                }
+            }
+            if (-not (Test-RuntimeObservation)) {
+                $currentRevision = Get-CodeRevision
+                if ($currentRevision -ne $watchdogRevisionAtStart) {
+                    Start-WatchdogReplacement
+                    return 0
                 }
             }
             $status = @(Get-ForecasterStatus)
             foreach ($service in $services) {
                 $row = $status | Where-Object Key -eq $service.Key
-                $unhealthy = $row.State -in @("STOPPED", "DATA STALE", "API ERROR")
+                $unhealthy = $row.State -in @(
+                    "STOPPED", "DATA STALE", "API ERROR", "SYNC ERROR", "SYNC STALE",
+                    "COLLECTOR STALE", "ANNOTATOR STALE", "SESSION STALE"
+                )
                 if (-not $unhealthy) {
                     $failureCounts[$service.Key] = 0
                     continue
@@ -546,23 +1211,31 @@ function Invoke-ForecasterWatchdog {
             Write-WatchdogEvent -Event "WATCHDOG_CHECK_ERROR" `
                 -Service "all" -State $_.Exception.Message
         }
+        Write-WatchdogHeartbeat
         Start-Sleep -Seconds 30
     }
 }
 
 function Test-AutoStart {
-    $null -ne (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)
+    $null -ne (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) -and
+        $null -ne (Get-ScheduledTask -TaskName $guardTaskName -ErrorAction SilentlyContinue)
 }
 
-function Enable-AutoStart {
-    $quotedScript = '"{0}"' -f $PSCommandPath
-    $runtimeArguments = if ($RuntimeRoot) {
-        ' -RuntimeRoot "{0}" -RepositoryRoot "{1}"' -f $moduleRoot, $repositoryRoot
-    } else { "" }
-    $taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument (
-        "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File {0} -Action Watchdog{1}" -f `
-            $quotedScript, $runtimeArguments
+function Register-AutoStartTask {
+    param(
+        [string]$ControlScript,
+        [string]$RuntimePath,
+        [string]$SourceRepository
     )
+    $controlRoot = Split-Path -Parent $ControlScript
+    $launcherPath = Join-Path $controlRoot "xauusd_watchdog_launcher.vbs"
+    if (-not (Test-Path -LiteralPath $launcherPath)) {
+        throw "Missing windowless watchdog launcher: $launcherPath"
+    }
+    $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
+    $taskArguments = '"{0}" "{1}" "{2}" "{3}"' -f `
+        $launcherPath, $ControlScript, $RuntimePath, $SourceRepository
+    $taskAction = New-ScheduledTaskAction -Execute $wscript -Argument $taskArguments
     $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
     $principal = New-ScheduledTaskPrincipal `
         -UserId ("{0}\{1}" -f $env:USERDOMAIN, $env:USERNAME) `
@@ -572,7 +1245,57 @@ function Enable-AutoStart {
         -ExecutionTimeLimit (New-TimeSpan -Days 3650)
     Register-ScheduledTask -TaskName $taskName -Action $taskAction `
         -Trigger $taskTrigger -Principal $principal -Settings $settings -Force | Out-Null
+
+    Register-WatchdogGuardTask -ControlScript $ControlScript -Principal $principal
     Start-ScheduledTask -TaskName $taskName
+}
+
+function Register-WatchdogGuardTask {
+    param(
+        [string]$ControlScript,
+        [object]$Principal
+    )
+    $controlRoot = Split-Path -Parent $ControlScript
+    $guardPath = Join-Path $controlRoot "xauusd_watchdog_guard.ps1"
+    $launcherPath = Join-Path $controlRoot "xauusd_watchdog_guard_launcher.vbs"
+    if (-not (Test-Path -LiteralPath $guardPath)) {
+        throw "Missing watchdog guard: $guardPath"
+    }
+    if (-not (Test-Path -LiteralPath $launcherPath)) {
+        throw "Missing windowless watchdog guard launcher: $launcherPath"
+    }
+    $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
+    $guardArguments = '"{0}" "{1}" "{2}" "{3}"' -f `
+        $launcherPath, $guardPath, $taskName, $watchdogHeartbeatPath
+    $guardAction = New-ScheduledTaskAction -Execute $wscript -Argument $guardArguments
+    $guardTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+        -RepetitionInterval (New-TimeSpan -Minutes 2)
+    $guardSettings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
+    Register-ScheduledTask -TaskName $guardTaskName -Action $guardAction `
+        -Trigger $guardTrigger -Principal $principal -Settings $guardSettings -Force | Out-Null
+}
+
+function Ensure-WatchdogGuardTask {
+    if ($null -ne (Get-ScheduledTask -TaskName $guardTaskName -ErrorAction SilentlyContinue)) {
+        return
+    }
+    try {
+        $principal = New-ScheduledTaskPrincipal `
+            -UserId ("{0}\{1}" -f $env:USERDOMAIN, $env:USERNAME) `
+            -LogonType Interactive -RunLevel Limited
+        Register-WatchdogGuardTask -ControlScript $PSCommandPath -Principal $principal
+        Write-WatchdogEvent -Event "WATCHDOG_GUARD_REGISTERED" `
+            -Service "watchdog" -State "MONITORING"
+    } catch {
+        Write-WatchdogEvent -Event "WATCHDOG_GUARD_REGISTRATION_ERROR" `
+            -Service "watchdog" -State $_.Exception.Message
+    }
+}
+
+function Enable-AutoStart {
+    Register-AutoStartTask -ControlScript $PSCommandPath `
+        -RuntimePath $moduleRoot -SourceRepository $repositoryRoot
 }
 
 function Install-ProductionRuntime {
@@ -623,25 +1346,14 @@ function Install-ProductionRuntime {
         installed_at = [DateTimeOffset]::UtcNow.ToString("o")
     }
     $controlRoot = Join-Path $sourceLocal "runtime-control"
-    New-Item -ItemType Directory -Path $controlRoot -Force | Out-Null
+    Sync-StableRuntimeControlFiles -SourceRoot $runtime -ControlRoot $controlRoot
     $stableScript = Join-Path $controlRoot "xauusd_control_center.ps1"
-    Copy-Item -LiteralPath $PSCommandPath -Destination $stableScript -Force
 
+    Stop-ScheduledTask -TaskName $guardTaskName -ErrorAction SilentlyContinue
     Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     Stop-All
-    $stableArgs = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Action Watchdog -RuntimeRoot "{1}" -RepositoryRoot "{2}"' -f `
-        $stableScript, $runtime, $source
-    $taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $stableArgs
-    $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-    $principal = New-ScheduledTaskPrincipal `
-        -UserId ("{0}\{1}" -f $env:USERDOMAIN, $env:USERNAME) `
-        -LogonType Interactive -RunLevel Limited
-    $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew `
-        -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) `
-        -ExecutionTimeLimit (New-TimeSpan -Days 3650)
-    Register-ScheduledTask -TaskName $taskName -Action $taskAction `
-        -Trigger $taskTrigger -Principal $principal -Settings $settings -Force | Out-Null
-    Start-ScheduledTask -TaskName $taskName
+    Register-AutoStartTask -ControlScript $stableScript `
+        -RuntimePath $runtime -SourceRepository $source
     [pscustomobject]@{
         runtime_root = $runtime
         state_root = $sourceLocal
@@ -651,6 +1363,7 @@ function Install-ProductionRuntime {
 }
 
 function Disable-AutoStart {
+    Unregister-ScheduledTask -TaskName $guardTaskName -Confirm:$false -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 }
 
@@ -1029,7 +1742,7 @@ switch ($Action) {
         if (-not $target) { throw "Unknown service key: $ServiceKey" }
         Stop-ForecasterService $target
     }
-    "Watchdog" { Start-All; Invoke-ForecasterWatchdog }
+    "Watchdog" { Start-All; exit (Invoke-ForecasterWatchdog) }
     "EnableAutoStart" { Enable-AutoStart; Write-Output "Auto-start enabled." }
     "DisableAutoStart" { Disable-AutoStart; Write-Output "Auto-start disabled." }
     "InstallRuntime" { Install-ProductionRuntime | Format-List }

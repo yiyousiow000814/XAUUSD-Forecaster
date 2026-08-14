@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import urllib.request
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from .annotation import DEFAULT_GEMMA_MODEL, configured_gemini_api_keys
+from .annotation import DEFAULT_GEMMA_MODEL, generate_metered_json
 from .forward_ledger import ForwardLedger
-from .gemini_quota import GeminiQuotaLedger
+from .model_gateway import ModelGatewayCapacityExhausted, ModelRequestAccountant
 
 
 BRIEF_PROMPT_VERSION = "daily-news-brief-v1"
@@ -61,7 +60,7 @@ def _source_hash(rows: list[dict]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _call_gemma(api_key: str, rows: list[dict]) -> tuple[dict, str]:
+def _brief_payload(rows: list[dict]) -> dict[str, object]:
     evidence = [
         {
             "id": f"{row['source']}:{row['source_item_id']}:{row['revision_number']}",
@@ -99,13 +98,10 @@ def _call_gemma(api_key: str, rows: list[dict]) -> tuple[dict, str]:
             },
         },
     }
-    request = urllib.request.Request(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{DEFAULT_GEMMA_MODEL}:generateContent",
-        data=json.dumps(payload, separators=(",", ":")).encode(),
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key}, method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=120) as response:
-        envelope = json.loads(response.read())
+    return payload
+
+
+def _decode_brief(envelope: dict[str, object], rows: list[dict]) -> dict:
     result = json.loads(envelope["candidates"][0]["content"]["parts"][0]["text"])
     if not isinstance(result.get("items"), list) or not str(result.get("title") or "").strip():
         raise ValueError("Gemma daily brief returned an invalid result")
@@ -117,10 +113,16 @@ def _call_gemma(api_key: str, rows: list[dict]) -> tuple[dict, str]:
         if not refs or any(ref not in allowed for ref in refs):
             raise ValueError("Gemma daily brief cited unknown evidence")
     result["items"] = result["items"][:8]
-    return result, str(envelope.get("modelVersion") or DEFAULT_GEMMA_MODEL)
+    return result
 
 
-def update_daily_brief(ledger: ForwardLedger, now: datetime | None = None) -> dict:
+def update_daily_brief(
+    ledger: ForwardLedger,
+    *,
+    api_key: str,
+    request_accountant: ModelRequestAccountant,
+    now: datetime | None = None,
+) -> dict:
     instant = (now or datetime.now(UTC)).astimezone(UTC)
     day = instant.astimezone(KUALA_LUMPUR).date().isoformat()
     rows = _source_rows(ledger, day)
@@ -132,12 +134,17 @@ def update_daily_brief(ledger: ForwardLedger, now: datetime | None = None) -> di
     ).fetchone()
     if existing:
         return {"status": "UNCHANGED", "brief_date": day}
-    keys = configured_gemini_api_keys()
-    quota = GeminiQuotaLedger(ledger.path.parent / "gemma-4-31b-it-quota.json")
-    key = next((candidate for candidate in keys if quota.reserve(candidate, instant)), None)
-    if not key:
+    try:
+        brief, model = generate_metered_json(
+            api_key,
+            model=DEFAULT_GEMMA_MODEL,
+            purpose="daily-news-brief",
+            payload=_brief_payload(rows),
+            decode=lambda envelope: _decode_brief(envelope, rows),
+            request_accountant=request_accountant,
+        )
+    except ModelGatewayCapacityExhausted:
         return {"status": "DEFERRED", "brief_date": day, "reason": "NO_GEMMA_CAPACITY"}
-    brief, model = _call_gemma(key, rows)
     revision = ledger.connection.execute(
         "SELECT COALESCE(max(revision_number),0)+1 FROM daily_news_briefs WHERE brief_date=?", (day,)
     ).fetchone()[0]

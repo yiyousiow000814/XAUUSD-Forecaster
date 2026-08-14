@@ -6,17 +6,17 @@ import json
 import math
 import statistics
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from .execution_costs import COMMISSION_STATUS, SLIPPAGE_STATUS, net_shadow_log_return
 from .news_contracts import (
     CURRENT_NEWS_CONTRACT,
     generation_matches_contract,
-    supported_generation_contract,
 )
 
 
 MAX_CURVE_POINTS = 1200
+OUTCOME_SETTLEMENT_WINDOW = timedelta(minutes=35)
 
 
 def _bounded_curve(points: list[dict], max_points: int = MAX_CURVE_POINTS) -> list[dict]:
@@ -152,9 +152,58 @@ def _cadence_metrics(rows) -> dict:
     return result
 
 
-def learning_curve_payload(connection) -> dict:
+def _version_cadence_metrics(
+    rows, lifecycle_status: str, observed_at: datetime,
+) -> dict:
+    """Describe whether each cadence has results, pending scores, or no run."""
+    all_rows = list(rows)
+    scored_rows = [row for row in all_rows if row["value_quote_return"] is not None]
+    result = _cadence_metrics(scored_rows)
+    for name, cadence_rows in (
+        ("EVERY_5M", all_rows),
+        ("FIXED_30M", [
+            row for row in all_rows if _is_fixed_30m_grid(row["decision_time"])
+        ]),
+    ):
+        scored_count = sum(
+            row["value_quote_return"] is not None for row in cadence_rows
+        )
+        overdue_count = 0
+        for row in cadence_rows:
+            if row["value_quote_return"] is not None:
+                continue
+            decision_time = datetime.fromisoformat(
+                row["decision_time"].replace("Z", "+00:00")
+            )
+            if decision_time.tzinfo is None:
+                decision_time = decision_time.replace(tzinfo=timezone.utc)
+            if decision_time + OUTCOME_SETTLEMENT_WINDOW <= observed_at:
+                overdue_count += 1
+        if scored_count:
+            evaluation_status = "HAS_RESULTS"
+        elif cadence_rows and overdue_count == len(cadence_rows):
+            evaluation_status = "OUTCOME_UNAVAILABLE"
+        elif cadence_rows:
+            evaluation_status = "AWAITING_OUTCOME"
+        elif lifecycle_status == "LATEST":
+            evaluation_status = "AWAITING_FIRST_PREDICTION"
+        else:
+            evaluation_status = "NO_PREDICTIONS"
+        result[name].update({
+            "prediction_rows": len(cadence_rows),
+            "unscored_oos_rows": len(cadence_rows) - scored_count,
+            "overdue_oos_rows": overdue_count,
+            "evaluation_status": evaluation_status,
+        })
+    return result
+
+
+def learning_curve_payload(connection, observed_at: datetime | None = None) -> dict:
     from .inference_v2 import news_model_activation_status
     from .training_v2 import NEWS_MIN_EXPOSED_ROWS
+    observed_at = observed_at or datetime.now(timezone.utc)
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=timezone.utc)
     epoch = connection.execute(
         "SELECT * FROM evaluation_epochs ORDER BY created_at DESC LIMIT 1"
     ).fetchone()
@@ -189,29 +238,30 @@ def learning_curve_payload(connection) -> dict:
         ORDER BY a.activated_at DESC,a.activation_id DESC LIMIT 1"""
     ).fetchone()
     active_generation = dict(active_generation_row) if active_generation_row else None
-    active_contract = supported_generation_contract(active_generation)
+    if active_generation is not None:
+        auxiliary_members = connection.execute(
+            "SELECT count(*) FROM news_model_generation_aux_members_v1 "
+            "WHERE generation_id=?",
+            (active_generation["generation_id"],),
+        ).fetchone()[0]
+        active_generation["auxiliary_member_count"] = int(auxiliary_members)
     active_is_current = generation_matches_contract(
         active_generation, CURRENT_NEWS_CONTRACT,
     )
     active_updates = (
         connection.execute(
-            """SELECT u.* FROM news_model_generation_members_v1 m
+            """SELECT u.* FROM (
+                SELECT generation_id,model_version FROM news_model_generation_members_v1
+                UNION ALL
+                SELECT generation_id,model_version FROM news_model_generation_aux_members_v1
+            ) m
             JOIN model_updates_v2 u USING(model_version)
             WHERE m.generation_id=? ORDER BY u.model_identity""",
             (active_generation["generation_id"],),
         ).fetchall()
         if active_generation else list(reversed(updates))
     )
-    news_activation = news_model_activation_status(
-        active_updates,
-        allow_transition_contract=(
-            active_contract is not None and not active_is_current
-        ),
-        transition_contract=(
-            active_contract if active_contract is not None and not active_is_current
-            else None
-        ),
-    )
+    news_activation = news_model_activation_status(active_updates)
     current_exposed_rows = connection.execute(
         """SELECT count(DISTINCT n.source_decision_id)
         FROM derived_news_feature_snapshots n
@@ -232,21 +282,15 @@ def learning_curve_payload(connection) -> dict:
     transition_state = (
         "NO_ACTIVE_GENERATION" if active_generation is None
         else "CURRENT" if active_is_current
-        else "BUILDING_REPLACEMENT" if active_contract is not None
-        else "BLOCKED_UNSUPPORTED_ACTIVE_CONTRACT"
+        else "BLOCKED_RETIRED_GENERATION"
     )
     news_contract_transition = {
         "state": transition_state,
         "active_contract": ({
-            "name": active_contract.name,
-            "feature_version": active_contract.feature_version,
-            "eligibility_version": active_contract.eligibility_version,
-            "policy_version": active_contract.policy_version,
-        } if active_contract else ({
             "feature_version": active_generation["feature_version"],
             "eligibility_version": active_generation["eligibility_version"],
             "policy_version": active_generation["policy_version"],
-        } if active_generation else None)),
+        } if active_generation else None),
         "target_contract": {
             "name": CURRENT_NEWS_CONTRACT.name,
             "feature_version": CURRENT_NEWS_CONTRACT.feature_version,
@@ -263,13 +307,17 @@ def learning_curve_payload(connection) -> dict:
     generation_by_version = {
         row["model_version"]: row["generation_id"]
         for row in connection.execute(
-            "SELECT generation_id,model_version FROM news_model_generation_members_v1"
+            """SELECT generation_id,model_version FROM news_model_generation_members_v1
+            UNION ALL SELECT generation_id,model_version
+            FROM news_model_generation_aux_members_v1"""
         )
     }
     active_generation_versions = {
         row["model_version"] for row in connection.execute(
-            "SELECT model_version FROM news_model_generation_members_v1 WHERE generation_id=?",
-            (active_generation["generation_id"],),
+            """SELECT model_version FROM news_model_generation_members_v1
+            WHERE generation_id=? UNION ALL SELECT model_version
+            FROM news_model_generation_aux_members_v1 WHERE generation_id=?""",
+            (active_generation["generation_id"], active_generation["generation_id"]),
         )
     } if active_generation else set()
     weight_rows = connection.execute(
@@ -430,24 +478,31 @@ def learning_curve_payload(connection) -> dict:
         daily = defaultdict(float)
         for row in scored:
             daily[row["decision_time"][:10]] += _net_row_value(row)
-        cadence_metrics = _cadence_metrics(scored)
-        primary_metrics = cadence_metrics["EVERY_5M"]
         group_number = identity_group_seen[identity]
         total_groups = identity_group_counts[identity]
+        lifecycle_status = (
+            "LATEST" if group_number == total_groups else
+            "PREVIOUS" if group_number == total_groups - 1 else "ARCHIVED"
+        )
+        cadence_metrics = _version_cadence_metrics(
+            rows, lifecycle_status, observed_at,
+        )
+        primary_metrics = cadence_metrics["EVERY_5M"]
         version_groups.append({
             "model_identity": identity,
             "training_dataset_hash": dataset_hash,
             "generation": group_number,
-            "lifecycle_status": (
-                "LATEST" if group_number == total_groups else
-                "PREVIOUS" if group_number == total_groups - 1 else "ARCHIVED"
-            ),
+            "lifecycle_status": lifecycle_status,
             "created_at": group_updates[0]["created_at"],
             "latest_rebuild_at": group_updates[-1]["created_at"],
             "training_rows": group_updates[0]["training_rows"],
             "artifact_rebuilds": max(0, len(group_updates) - 1),
             "model_versions": versions,
             "subsequent_oos_rows": primary_metrics["oos_rows"],
+            "subsequent_prediction_rows": primary_metrics["prediction_rows"],
+            "unscored_oos_rows": primary_metrics["unscored_oos_rows"],
+            "overdue_oos_rows": primary_metrics["overdue_oos_rows"],
+            "evaluation_status": primary_metrics["evaluation_status"],
             "distinct_days": primary_metrics["distinct_days"],
             "cadence_metrics": cadence_metrics,
             **_selection_metrics(scored),
@@ -460,7 +515,7 @@ def learning_curve_payload(connection) -> dict:
     rolling_processes = []
     for identity in (
         "MARKET_ONLY", "NEWS_RESIDUAL", "FULL",
-        "BROAD_NEWS_RESIDUAL", "BROAD_FULL",
+        "BROAD_NEWS_RESIDUAL", "BROAD_FULL", "NEWS_ONLY",
     ):
         rows = connection.execute(
             """WITH ranked AS (
@@ -510,7 +565,7 @@ def learning_curve_payload(connection) -> dict:
     identity_curves = []
     for identity in (
         "CHAMPION_0", "MARKET_ONLY", "NEWS_RESIDUAL", "FULL",
-        "BROAD_NEWS_RESIDUAL", "BROAD_FULL",
+        "BROAD_NEWS_RESIDUAL", "BROAD_FULL", "NEWS_ONLY",
     ):
         if identity == "CHAMPION_0":
             rows = connection.execute(
@@ -623,8 +678,8 @@ def learning_curve_payload(connection) -> dict:
         ), latest AS (SELECT * FROM ranked WHERE version_rank=1)
         SELECT b.decision_time,b.value_quote_return AS broad_value,
                b.recommended_action AS broad_action,
-               o.value_quote_return AS official_value,
-               o.recommended_action AS official_action
+               o.value_quote_return AS core_value,
+               o.recommended_action AS core_action
         FROM latest b JOIN latest o USING(source_decision_id)
         WHERE b.model_identity='BROAD_FULL' AND o.model_identity='FULL'
         ORDER BY b.decision_time"""
@@ -634,7 +689,7 @@ def learning_curve_payload(connection) -> dict:
     for row in broad_paired:
         delta = (
             (0.0 if row["broad_action"] == "WAIT" else net_shadow_log_return(row["broad_value"]))
-            - (0.0 if row["official_action"] == "WAIT" else net_shadow_log_return(row["official_value"]))
+            - (0.0 if row["core_action"] == "WAIT" else net_shadow_log_return(row["core_value"]))
         )
         broad_cumulative += delta
         broad_incremental.append({
@@ -700,6 +755,6 @@ def learning_curve_payload(connection) -> dict:
             "cumulative_quote_return": 0.0, "trained": False, "uses_ai": False,
         },
         "identity_curves": identity_curves, "full_minus_market": incremental,
-        "broad_full_minus_official_full": broad_incremental,
+        "broad_full_minus_core_full": broad_incremental,
         "disclaimer": "早期曲线用于观察学习过程，不代表已证明盈利。",
     }

@@ -7,6 +7,8 @@ import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 
 def _sync_module():
     path = Path(__file__).resolve().parents[1] / "scripts" / "run_dashboard_sync.py"
@@ -53,57 +55,55 @@ def test_preview_does_not_call_late_aggregated_news_expired() -> None:
     assert row["annotation_reason"] == "搜索线索：来自聚合发现源，不是独立官方发布"
 
 
-def test_preview_replays_old_story_aliases_through_branch_policy() -> None:
+def test_preview_overlays_branch_owned_model_throughput_contract() -> None:
     module = _preview_module()
     status = {
-        "storylines": [
-            {
-                "episode_key": episode,
-                "title": headline,
-                "source_organizations": [source],
-                "timeline": [{
-                    "event_key": f"event-{index}",
-                    "first_seen": f"2026-08-08T0{index}:00:00+00:00",
-                    "event_time": f"2026-08-07T2{index}:00:00+00:00",
-                    "source_published_time": f"2026-08-07T2{index}:00:00+00:00",
-                    "collector_first_seen_time": f"2026-08-08T0{index}:00:00+00:00",
-                    "headline": headline,
-                    "actor": "Donald Trump",
-                    "action": action,
-                    "object": "Lisa Cook",
-                    "location": "Washington, DC",
-                    "claim_status": "REPORTED",
-                    "materiality": 0.75,
-                    "evidence_grade": "SINGLE_RELIABLE",
-                    "independent_publishers": 1,
-                    "evidence_documents": 1,
-                    "document_kinds": ["NEWS_REPORT"],
-                    "archival": False,
-                    "relation": "STARTS",
-                }],
-                "market_reactions": [], "commentary": [], "background": [],
-            }
-            for index, (episode, headline, action, source) in enumerate((
-                ("trump_fires_lisa_cook_2026_08", "特朗普重启解雇丽莎库克", "considering", "cnbc"),
-                ("trump_fire_cook_aug_2026", "特朗普再次企图解雇丽莎库克", "renews bid to fire", "the_guardian"),
-                ("trump_fires_lisa_cook_aug_2026", "特朗普再度推动解雇丽莎库克", "threatens to fire", "npr"),
-            ), start=1)
-        ],
-        "story_event_candidates": [],
-        "storyline_summary": {},
+        "annotation_queue": {
+            "requests_per_minute": 48,
+        },
     }
 
-    module._rebuild_story_snapshot(status)
+    module._apply_branch_runtime_contract(status)
 
-    assert status["storylines"] == []
-    candidates = status["story_event_candidates"]
-    assert len(candidates) == 1
-    assert candidates[0]["episode_key"] == "lisa_cook_removal_2026_08"
-    assert candidates[0]["evidence_documents"] == 3
-    assert candidates[0]["independent_publishers"] == 3
-    assert status["storyline_summary"]["policy_version"].endswith(
-        "canonical-occurrence-chains"
-    )
+    assert status["annotation_queue"] == {
+        "requests_per_minute_per_key": 12,
+        "requests_per_minute": 12,
+        "input_tokens_per_minute": 225_000,
+        "minute_scope": "PROJECT",
+    }
+
+
+def test_preview_freezes_both_materialized_curve_overviews(monkeypatch) -> None:
+    module = _preview_module()
+    requested: list[str] = []
+
+    def fake_read_json(_base_url: str, path: str) -> dict:
+        requested.append(path)
+        cadence = path.rsplit("=", 1)[-1]
+        return {"items": [{
+            "model_identity": "MARKET_ONLY",
+            "cadence": cadence,
+            "source_point_count": 1059 if cadence == "5m" else 174,
+            "chart_point_count": 1,
+            "chart_downsampled": True,
+            "points": [{
+                "decision_time": "2026-08-12T01:00:00+00:00",
+                "cumulative_quote_return": 0.1,
+            }],
+        }]}
+
+    monkeypatch.setattr(module, "_read_json", fake_read_json)
+    records = module._curve_overview_records("https://example.test")
+
+    assert requested == [
+        "/api/learning-history?resource=curve-overview&cadence=5m",
+        "/api/learning-history?resource=curve-overview&cadence=30m",
+    ]
+    assert {(row["record_key"], row["payload"]["source_point_count"])
+            for row in records} == {
+        ("5m\0MARKET_ONLY", 1059),
+        ("30m\0MARKET_ONLY", 174),
+    }
 
 
 def test_sync_retries_transient_disconnect(monkeypatch) -> None:
@@ -157,6 +157,8 @@ def test_sync_status_records_real_success_and_preserves_it_on_error(tmp_path) ->
     assert failed["last_success"] == succeeded["last_success"]
     assert failed["last_error_type"] == "ConnectionResetError"
     assert failed["last_error"] == "remote closed"
+    assert failed["last_error_code"] == "TRANSPORT_UNAVAILABLE"
+    assert failed["degraded_resources"] == []
     assert failed["status"] == "ERROR"
 
 
@@ -172,6 +174,85 @@ def test_sync_status_reports_optional_resource_degradation(tmp_path) -> None:
     assert status["status"] == "DEGRADED"
     assert status["last_error"] is None
     assert status["degraded_resources"] == degraded
+
+
+@pytest.mark.parametrize(
+    "status_code,expected",
+    [
+        (401, "AUTH_REJECTED"),
+        (403, "AUTH_REJECTED"),
+        (413, "PAYLOAD_LIMIT_EXCEEDED"),
+        (429, "RATE_LIMITED"),
+        (503, "REMOTE_UNAVAILABLE"),
+    ],
+)
+def test_transport_error_family_is_persisted_as_structured_code(
+    status_code,
+    expected,
+) -> None:
+    module = _sync_module()
+    error = urllib.error.HTTPError(
+        "https://example.invalid", status_code, "failure", {}, io.BytesIO(),
+    )
+
+    assert module.sync_error_code(error) == expected
+
+
+def test_only_declared_payload_contract_errors_receive_payload_code() -> None:
+    module = _sync_module()
+
+    assert module.sync_error_code(ValueError("invalid configuration")) == "UNCLASSIFIED"
+    assert module.sync_error_code(
+        module.PayloadContractError("bounded payload too large")
+    ) == "PAYLOAD_CONTRACT_REJECTED"
+    assert module.sync_error_code(
+        urllib.error.URLError("name resolution failed")
+    ) == "TRANSPORT_UNAVAILABLE"
+
+
+def test_all_rejected_heartbeat_targets_preserve_structured_failures(
+    monkeypatch,
+) -> None:
+    module = _sync_module()
+    monkeypatch.setattr(
+        module.urllib.request,
+        "urlopen",
+        lambda *args, **kwargs: __import__("contextlib").nullcontext(
+            type("Response", (), {
+                "read": lambda self: b"{}", "status": 200,
+            })()
+        ),
+    )
+    monkeypatch.setattr(module, "remote_snapshot", lambda payload: b"{}")
+    monkeypatch.setattr(
+        module,
+        "configured_targets",
+        lambda config: [{
+            "name": "cloudflare", "remote_ingest_url": "https://example.invalid",
+            "token": "token",
+        }],
+    )
+    monkeypatch.setattr(
+        module,
+        "_post_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            urllib.error.HTTPError(
+                "https://example.invalid", 413, "too large", {}, io.BytesIO(),
+            )
+        ),
+    )
+
+    with pytest.raises(module.AllTargetsRejected) as captured:
+        module.sync_once({"local_status_url": "https://local.invalid"})
+
+    assert module.sync_error_code(captured.value) == "PAYLOAD_LIMIT_EXCEEDED"
+    assert captured.value.degraded_resources == [{
+        "target": "cloudflare",
+        "resource": "heartbeat",
+        "error_type": "HTTPError",
+        "error_code": "PAYLOAD_LIMIT_EXCEEDED",
+        "error": "HTTP Error 413: too large",
+    }]
 
 
 def test_configured_targets_adds_independent_cloudflare_mirror(
@@ -297,7 +378,7 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
             ],
             "identity_curves": [body],
             "full_minus_market": [body],
-            "broad_full_minus_official_full": [body],
+            "broad_full_minus_core_full": [body],
         },
         "recent_news": [{
             "source": "example", "source_item_id": str(index),
@@ -310,8 +391,17 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
             "annotation_reason": "搜索线索：来自聚合发现源，不是独立官方发布",
         } for index in range(100)],
         "recent_decisions": [{"id": index} for index in range(30)],
-        "news_evidence": [{"id": index} for index in range(100)],
-        "market_chart": {"decisions": [{
+        "news_evidence": [
+            {"id": index, "model_seen": index < 97}
+            for index in range(202)
+        ],
+        "market_chart": {
+            "candles": [{"time": "2026-08-06T00:00:00Z", "open": 1,
+                         "high": 2, "low": 0.5, "close": 1.5}],
+            "overview_candles": [{"time": "2026-08-05T00:00:00Z", "open": 1,
+                                  "high": 2, "low": 0.5, "close": 1.5}],
+            "training_markers": [{"time": "2026-08-06T00:00:00Z"}],
+            "decisions": [{
             "source_decision_id": "d1", "decision_time": "2026-08-06T00:00:00+00:00",
             "model_identity": "MARKET_ONLY", "model_version": "large-unused-field",
             "recommended_action": "SHORT", "ev_long_u5": -0.2,
@@ -338,19 +428,26 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
     assert "annotation_reason" not in detail_rows[0]["payload"]
     assert len(detail_rows[0]["detail_key"]) == 64
     assert mirrored["market_chart"]["decisions"] == []
+    assert mirrored["market_chart"]["candles"] == []
+    assert mirrored["market_chart"]["overview_candles"] == []
+    assert mirrored["market_chart"]["training_markers"] == []
     market_decision = json.loads(module.market_chart_snapshot(payload))["decisions"][0]
     assert market_decision["source_decision_id"] == "d1"
     assert market_decision["model_version"] == "unused-field"
     assert len(mirrored["recent_decisions"]) == module.REMOTE_DECISION_LIMIT
     assert len(mirrored["news_evidence"]) == module.REMOTE_EVIDENCE_LIMIT
+    assert sum(row["model_seen"] for row in mirrored["news_evidence"]) == 30
+    assert sum(not row["model_seen"] for row in mirrored["news_evidence"]) == 30
+    assert mirrored["mirror_window"]["news_evidence_seen"] == 30
+    assert mirrored["mirror_window"]["news_evidence_unseen"] == 30
     assert learning["learning_curves"]["models"] == [
         {"lifecycle_status": "LATEST", "model_version": "latest"},
-        {"lifecycle_status": "ARCHIVED", "model_version": "old"},
     ]
     assert learning["learning_curves"]["archived_model_count"] == 1
+    assert learning["learning_history_resource"] == "/api/learning-history"
     assert learning["learning_curves"]["identity_curves"] == [body]
     assert learning["learning_curves"]["full_minus_market"] == [body]
-    assert learning["learning_curves"]["broad_full_minus_official_full"] == [body]
+    assert learning["learning_curves"]["broad_full_minus_core_full"] == [body]
     assert "learning_curves" not in mirrored
     assert "models" not in mirrored["training"]
     assert len(index_rows) == 100
@@ -366,6 +463,7 @@ def test_news_detail_batches_stay_bounded() -> None:
     assert len(batches) > 1
     assert sum(len(batch) for batch in batches) == len(rows)
     for batch in batches:
+        assert len(batch) <= module.NEWS_WRITE_BATCH_ITEMS
         encoded = json.dumps(
             {"items": batch}, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")
@@ -378,14 +476,299 @@ def test_news_index_batches_stay_bounded() -> None:
         "detail_key": f"{index:064x}", "category": "战争/地缘",
         "collector_first_seen_time": f"2026-08-07T00:{index:02d}:00+00:00",
         "headline": "标题" * 5_000,
-    } for index in range(20)]
+    } for index in range(45)]
     batches = module.news_index_batches(rows)
     assert sum(len(batch) for batch in batches) == len(rows)
     for batch in batches:
+        assert len(batch) <= module.NEWS_WRITE_BATCH_ITEMS
         encoded = json.dumps(
             {"items": batch}, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")
         assert len(encoded) <= module.NEWS_INDEX_BATCH_LIMIT_BYTES
+
+
+def test_learning_history_records_have_stable_keys_and_bounded_batches() -> None:
+    module = _sync_module()
+    payload = {
+        "learning_curves": {
+            "models": [{
+                "model_identity": "FULL", "model_version": "model-v1",
+                "created_at": "2026-08-10T01:00:00+00:00",
+            }],
+            "version_groups": [{
+                "model_identity": "FULL", "training_dataset_hash": "hash-1",
+                "created_at": "2026-08-10T01:00:00+00:00", "generation": 3,
+            }],
+            "identity_curves": [{
+                "model_identity": "FULL",
+                "points": [{
+                    "decision_time": "2026-08-10T01:05:00+00:00",
+                    "cumulative_quote_return": 0.01,
+                }],
+                "points_30m": [{
+                    "decision_time": "2026-08-10T01:30:00+00:00",
+                    "cumulative_quote_return": 0.02,
+                }],
+            }],
+        },
+        "execution_learning": {"models": []},
+    }
+
+    first = module.learning_history_records(payload)
+    second = module.learning_history_records(payload)
+
+    assert first == second
+    assert {row["resource"] for row in first} == {
+        "model", "version-group", "curve-5m", "curve-30m",
+        "curve-overview", "version-overview",
+    }
+    assert all(len(row["payload_hash"]) == 64 for row in first)
+    batches = module.learning_history_batches(first * 2_000)
+    assert len(batches) > 1
+    for batch in batches:
+        encoded = json.dumps(
+            {"records": batch}, ensure_ascii=False, separators=(",", ":"),
+        ).encode("utf-8")
+        assert len(encoded) <= module.LEARNING_HISTORY_BATCH_LIMIT_BYTES
+
+
+def test_visual_overviews_stay_bounded_and_preserve_the_full_span() -> None:
+    module = _sync_module()
+    points = [{
+        "decision_time": (
+            datetime(2026, 1, 1, tzinfo=timezone.utc)
+            + timedelta(minutes=5 * index)
+        ).isoformat(),
+        "cumulative_quote_return": (-1 if index == 50_000 else index / 100_000),
+    } for index in range(100_000)]
+
+    overview = module._visual_curve_overview(points, 240)
+
+    assert len(overview) <= 240
+    assert overview[0]["decision_time"] == points[0]["decision_time"]
+    assert overview[-1]["decision_time"] == points[-1]["decision_time"]
+    assert any(
+        row["decision_time"] == points[50_000]["decision_time"]
+        for row in overview
+    )
+    assert not any(row["source_gap_before"] for row in overview)
+
+    groups = [{
+        "created_at": point["decision_time"],
+        "generation": index,
+        "cumulative_quote_return": point["cumulative_quote_return"],
+        "cadence_metrics": {
+            "FIXED_30M": {
+                "cumulative_quote_return": 2 if index == 75_000 else -index / 100_000,
+            },
+        },
+    } for index, point in enumerate(points)]
+    group_overview = module._visual_version_overview(groups, 60)
+
+    assert len(group_overview) <= 60
+    assert group_overview[0] == groups[0]
+    assert group_overview[-1] == groups[-1]
+    assert groups[50_000] in group_overview
+    assert groups[75_000] in group_overview
+
+
+def test_curve_overview_marks_only_real_source_gaps() -> None:
+    module = _sync_module()
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    offsets = [0, 5, 10, 120, 125]
+    points = [{
+        "decision_time": (start + timedelta(minutes=offset)).isoformat(),
+        "cumulative_quote_return": index / 100,
+    } for index, offset in enumerate(offsets)]
+
+    overview = module._visual_curve_overview(points, 240)
+
+    assert [row["source_gap_before"] for row in overview] == [
+        False, False, False, True, False,
+    ]
+
+    compressed_source = module._visual_curve_overview(
+        points, 240, infer_source_gaps=False,
+    )
+    assert not any(row["source_gap_before"] for row in compressed_source)
+
+
+def test_decision_overviews_are_incremental_bounded_and_frequency_scoped() -> None:
+    module = _sync_module()
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    decisions = [{
+        "source_decision_id": f"decision-{index}",
+        "decision_time": (start + timedelta(minutes=5 * index)).isoformat(),
+        "model_identity": "FULL",
+        "recommended_action": ("SHORT" if index % 7 == 0 else "LONG"),
+    } for index in range(2_000)]
+
+    summaries = module._update_decision_overviews({}, decisions, None)
+    five = summaries["FULL\0" "5m"]
+    half_hour = summaries["FULL\0" "30m"]
+
+    assert five["source_decision_count"] == 2_000
+    assert len(five["decisions"]) <= module.MARKET_OVERVIEW_DECISIONS_PER_SERIES
+    assert five["decisions"][0]["source_decision_id"] == "decision-0"
+    assert five["decisions"][-1]["source_decision_id"] == "decision-1999"
+    assert half_hour["source_decision_count"] == 334
+    assert all(
+        datetime.fromisoformat(row["decision_time"]).minute % 30 == 0
+        for row in half_hour["decisions"]
+    )
+
+    unchanged = module._update_decision_overviews(
+        summaries, decisions[-24:], decisions[-1]["decision_time"],
+    )
+    assert unchanged == summaries
+
+    settled = {
+        **five["decisions"][0],
+        "outcome_status": "MATURE",
+        "value_quote_return": 0.001,
+    }
+    refreshed = module._update_decision_overviews(
+        summaries, [settled], decisions[-1]["decision_time"],
+    )
+    refreshed_five = refreshed["FULL\0" "5m"]
+    assert refreshed_five["source_decision_count"] == 2_000
+    refreshed_row = next(
+        row for row in refreshed_five["decisions"]
+        if row["source_decision_id"] == settled["source_decision_id"]
+    )
+    assert refreshed_row["outcome_status"] == "MATURE"
+    assert refreshed_row["value_quote_return"] == 0.001
+
+
+def test_learning_summary_size_is_fixed_as_history_grows() -> None:
+    module = _sync_module()
+    groups = []
+    points = []
+    for index in range(1_000):
+        stamp = (datetime(2026, 8, 1, tzinfo=timezone.utc)
+                 + timedelta(minutes=5 * index)).isoformat()
+        groups.append({
+            "model_identity": "FULL", "training_dataset_hash": f"hash-{index}",
+            "created_at": stamp, "generation": index, "lifecycle_status": "ARCHIVED",
+        })
+        points.append({"decision_time": stamp, "cumulative_quote_return": index / 1000})
+    payload = {
+        "learning_curves": {
+            "models": [], "version_groups": groups,
+            "identity_curves": [{"model_identity": "FULL", "points": points}],
+        },
+        "execution_learning": {"models": []},
+    }
+
+    summary = json.loads(module.learning_snapshot(payload))
+
+    assert len(summary["learning_curves"]["version_groups"]) == 6
+    assert len(summary["learning_curves"]["identity_curves"][0]["points"]) == 48
+    assert summary["learning_history_manifest"]["version_group_total"] == 1_000
+    assert len(module.learning_snapshot(payload)) < 100_000
+
+
+def test_learning_history_is_durable_before_summary_and_retries_idempotently(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _sync_module()
+    payload = {
+        "learning_curves": {
+            "models": [],
+            "version_groups": [{
+                "model_identity": "FULL", "training_dataset_hash": "hash-1",
+                "created_at": "2026-08-10T01:00:00+00:00", "generation": 1,
+            }],
+            "identity_curves": [],
+        },
+        "execution_learning": {"models": []},
+    }
+    posted: list[str] = []
+    monkeypatch.setattr(
+        module, "_post_json", lambda url, _body, _config: posted.append(url)
+    )
+    config = {
+        "remote_ingest_url": "https://worker.example/api/ingest",
+        "token": "test",
+        "learning_state_file": str(tmp_path / "summary.json"),
+        "learning_history_state_file": str(tmp_path / "history.json"),
+    }
+
+    module._sync_learning(payload, config)
+
+    assert posted == [
+        "https://worker.example/api/learning-history",
+        "https://worker.example/api/learning",
+    ]
+    posted.clear()
+    module._sync_learning(payload, config)
+    assert posted == []
+
+
+def test_news_details_are_durable_before_index_is_published(monkeypatch, tmp_path) -> None:
+    module = _sync_module()
+    payload = {
+        "recent_news": [{
+            "source": "example", "source_item_id": "1", "revision_number": 1,
+            "category": "其他",
+            "collector_first_seen_time": "2026-08-10T00:00:00+00:00",
+            "headline": "新闻", "summary_zh": "完整摘要",
+        }],
+    }
+    state_file = tmp_path / "news-state.json"
+    state_file.write_text(json.dumps({
+        "mirror_contract_version": module.NEWS_MIRROR_CONTRACT_VERSION,
+        "hashes": {}, "index_hashes": {},
+    }), encoding="utf-8")
+    posted: list[str] = []
+    monkeypatch.setattr(
+        module, "_post_json", lambda url, _body, _config: posted.append(url)
+    )
+    config = {
+        "remote_ingest_url": "https://remote/api/ingest",
+        "news_state_file": str(state_file), "token": "test",
+    }
+
+    module._sync_news(payload, config)
+
+    assert posted == [
+        "https://remote/api/news-content",
+        "https://remote/api/news-index",
+        "https://remote/api/news-index",
+    ]
+
+
+def test_news_detail_failure_never_publishes_dangling_index(monkeypatch, tmp_path) -> None:
+    module = _sync_module()
+    payload = {
+        "recent_news": [{
+            "source": "example", "source_item_id": "1", "revision_number": 1,
+            "category": "其他",
+            "collector_first_seen_time": "2026-08-10T00:00:00+00:00",
+            "headline": "新闻", "summary_zh": "完整摘要",
+        }],
+    }
+    state_file = tmp_path / "news-state.json"
+    state_file.write_text(json.dumps({
+        "mirror_contract_version": module.NEWS_MIRROR_CONTRACT_VERSION,
+        "hashes": {}, "index_hashes": {},
+    }), encoding="utf-8")
+    posted: list[str] = []
+
+    def fail_detail(url, _body, _config):
+        posted.append(url)
+        raise TimeoutError("detail upload timed out")
+
+    monkeypatch.setattr(module, "_post_json", fail_detail)
+    config = {
+        "remote_ingest_url": "https://remote/api/ingest",
+        "news_state_file": str(state_file), "token": "test",
+    }
+
+    with pytest.raises(TimeoutError, match="detail upload timed out"):
+        module._sync_news(payload, config)
+
+    assert posted == ["https://remote/api/news-content"]
 
 
 def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> None:
@@ -415,7 +798,26 @@ def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> 
             return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     posted: list[str] = []
-    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+    news_page_calls = 0
+
+    def urlopen(url, *_args, **_kwargs):
+        nonlocal news_page_calls
+        if "/api/news-archive" in str(url):
+            news_page_calls += 1
+            page = {
+                "items": payload["recent_news"] if news_page_calls in {1, 3} else [],
+                "next_cursor": '["2026-08-07T00:00:00+00:00","example","1",1]',
+                "has_more": False,
+            }
+
+            class NewsResponse(Response):
+                def read(self):
+                    return json.dumps(page, ensure_ascii=False).encode("utf-8")
+
+            return NewsResponse()
+        return Response()
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
     monkeypatch.setattr(module, "_post_json", lambda url, _body, _config: posted.append(url))
     config = {
         "local_status_url": "http://local/status",
@@ -423,6 +825,10 @@ def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> 
         "token": "test",
         "news_state_file": str(tmp_path / "news-state.json"),
         "learning_state_file": str(tmp_path / "learning-state.json"),
+        "targets": [{
+            "name": "sites", "legacy": True,
+            "remote_ingest_url": "https://remote/api/ingest", "token": "test",
+        }],
     }
 
     module.sync_once(config)
@@ -448,9 +854,8 @@ def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> 
     assert posted[0] == "https://remote/api/ingest"
 
     news_state = json.loads((tmp_path / "news-state.json").read_text(encoding="utf-8"))
-    assert len(news_state["hashes"]) == 1
-    assert len(news_state["index_hashes"]) == 1
-    assert news_state["last_index_full_sync"]
+    assert news_state["cursor"].startswith('["2026-08-07T00:00:00')
+    assert news_state["reconciled_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
     assert news_state["mirror_contract_version"] == module.NEWS_MIRROR_CONTRACT_VERSION
 
 
@@ -511,11 +916,11 @@ def test_sync_repopulates_news_index_without_full_refresh_marker(
 
     assert posted.count("https://remote/api/news-index") == 2
     state = json.loads(state_file.read_text(encoding="utf-8"))
-    assert state["last_index_full_sync"]
     assert state["mirror_contract_version"] == module.NEWS_MIRROR_CONTRACT_VERSION
+    assert state["reconciled_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
 
 
-def test_remote_market_chart_is_split_from_status_and_keeps_complete_window() -> None:
+def test_remote_market_chart_is_split_from_status_and_keeps_recent_window() -> None:
     module = _sync_module()
     decisions = [{
         "source_decision_id": f"d-{index}",
@@ -543,12 +948,12 @@ def test_remote_market_chart_is_split_from_status_and_keeps_complete_window() ->
 
     market = json.loads(module.market_chart_snapshot(payload))
     retained = market["decisions"]
-    assert len(retained) == module.REMOTE_MARKET_DECISION_LIMIT + 1
-    assert retained[0]["source_decision_id"] == "d-0"
-    assert all(row["source_decision_id"] != "d-1" for row in retained)
+    assert len(retained) == module.REMOTE_MARKET_DECISION_LIMIT
+    assert retained[0]["source_decision_id"] == "d-20"
+    assert all(row["source_decision_id"] != "d-0" for row in retained)
     assert retained[-1]["source_decision_id"] == f"d-{len(decisions) - 1}"
     assert "exit_time" not in retained[1]
-    assert retained[1]["model_version"] == "model-20"
+    assert retained[1]["model_version"] == "model-21"
     assert len(market["candles"]) == 1
     assert market["candles"][0]["open"] == 1.123
     assert market["candles"][0]["time"] == "2026-08-05T00:00:00Z"
@@ -557,7 +962,7 @@ def test_remote_market_chart_is_split_from_status_and_keeps_complete_window() ->
     assert market["source_candle_count"] == 736
 
 
-def test_seven_day_market_snapshot_keeps_every_half_hour_under_limit() -> None:
+def test_seven_day_market_snapshot_is_recent_only_under_limit() -> None:
     module = _sync_module()
     start = datetime(2026, 8, 1, tzinfo=timezone.utc)
     identities = ("MARKET_ONLY", "NEWS_RESIDUAL", "FULL", "BROAD_NEWS_RESIDUAL", "BROAD_FULL")
@@ -590,15 +995,10 @@ def test_seven_day_market_snapshot_keeps_every_half_hour_under_limit() -> None:
     market = json.loads(encoded)
 
     assert len(encoded) <= module.REMOTE_PAYLOAD_LIMIT_BYTES
-    assert len(market["candles"]) == 7 * 288
-    assert 0 < len(market["overview_candles"]) < 480
-    retained_half_hours = {
-        row["decision_time"] for row in market["decisions"]
-        if row["model_identity"] == "MARKET_ONLY" and row["decision_time"][14:16] in ("00", "30")
-    }
-    assert len(retained_half_hours) == 7 * 48
-    assert min(retained_half_hours) == "2026-08-01T00:00:00Z"
-    assert max(retained_half_hours) == "2026-08-07T23:30:00Z"
+    assert len(market["candles"]) == module.REMOTE_MARKET_CANDLE_LIMIT
+    assert 0 < len(market["overview_candles"]) <= 480
+    assert len(market["decisions"]) <= module.REMOTE_MARKET_DECISION_LIMIT
+    assert min(row["decision_time"] for row in market["decisions"]) > "2026-08-01T00:00:00Z"
 
 
 def test_market_overview_downsampling_preserves_ohlc_extremes() -> None:
@@ -643,22 +1043,33 @@ def test_market_history_ingest_batches_are_bounded_and_complete() -> None:
     assert module._overlap_cursor("2026-08-07T04:00:00Z") == "2026-08-07T02:00:00+00:00"
 
 
-def test_curve_compaction_preserves_extremes_and_version_boundaries() -> None:
+def test_market_decision_overview_payload_is_bounded_and_keeps_edges() -> None:
     module = _sync_module()
-    points = [{
-        "decision_time": f"point-{index}",
-        "cumulative_quote_return": float(index),
-        **({"model_version": "new-version"} if index == 501 else {}),
-    } for index in range(960)]
-    points[410]["cumulative_quote_return"] = -999.0
-    points[720]["cumulative_quote_return"] = 999.0
-    compact = module.compact_curve_points(points)
-    retained = {point["cumulative_quote_return"] for point in compact}
-    assert -999.0 in retained
-    assert 999.0 in retained
-    assert any(point.get("model_version") == "new-version" for point in compact)
-    assert compact[0] == points[0]
-    assert compact[-1] == points[-1]
+    decisions = [{
+        "source_decision_id": f"d-{index}",
+        "decision_time": f"2026-08-07T{index // 60:02d}:{index % 60:02d}:00+00:00",
+        "model_identity": "BROAD_FULL",
+        "recommended_action": "LONG",
+        "explanation": "x" * 2_000,
+    } for index in range(480)]
+    summary = {
+        "model_identity": "BROAD_FULL",
+        "frequency": "5m",
+        "source_decision_count": len(decisions),
+        "decision_count": len(decisions),
+        "decision_downsampled": False,
+        "decisions": decisions,
+    }
+
+    payload = module._market_decision_overview_payload(summary)
+    bounded = json.loads(payload)["decision_overviews"][0]
+
+    assert len(payload) <= module.MARKET_HISTORY_BATCH_LIMIT_BYTES
+    assert bounded["decisions"][0]["source_decision_id"] == "d-0"
+    assert bounded["decisions"][-1]["source_decision_id"] == "d-479"
+    assert bounded["source_decision_count"] == 480
+    assert bounded["decision_count"] == len(bounded["decisions"])
+    assert bounded["decision_downsampled"] is True
 
 
 def test_annotator_heartbeat_reports_idle_loop_as_healthy(tmp_path) -> None:
@@ -666,6 +1077,8 @@ def test_annotator_heartbeat_reports_idle_loop_as_healthy(tmp_path) -> None:
     status_file = tmp_path / "news-annotator-status.json"
     module.write_heartbeat(status_file, work_items=0)
     status = json.loads(status_file.read_text(encoding="utf-8"))
+    assert status["service"] == "annotator"
+    assert status["state"] == "RUNNING"
     assert datetime.fromisoformat(status["last_success"])
     assert status["last_error"] is None
     assert status["work_items"] == 0

@@ -1,17 +1,28 @@
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import gzip
 import importlib.util
 import json
 import sqlite3
 import threading
+import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from xauusd_forecaster.annotation import INVALID_CHINESE_TITLE, PROMPT_VERSION
+from xauusd_forecaster.ai_provider_registry import AI_QUOTA_SURFACES
 from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
+from xauusd_forecaster.news_scheduler import (
+    configured_api_credentials, reserve_account_request,
+)
+from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY
 
 
 UTC = timezone.utc
@@ -33,6 +44,82 @@ def test_deployment_status_does_not_mislabel_local_edits_as_remote_drift() -> No
     assert module._deployment_status("same", "same", True) == "LOCAL_CHANGES"
     assert module._deployment_status("local", "remote", False) == "DEPLOYMENT_DRIFT"
     assert module._deployment_status(None, "remote", False) == "PROVENANCE_UNKNOWN"
+
+
+def test_dashboard_reads_only_fresh_ctrader_market_session(tmp_path) -> None:
+    module = _dashboard_module()
+    now = datetime(2026, 8, 11, 21, 0, tzinfo=UTC)
+    database = tmp_path / "forward-evidence.sqlite3"
+    quotes = tmp_path / "quotes"
+    quotes.mkdir()
+    session_path = quotes / "market-session.json"
+    session_path.write_text(json.dumps({
+        "schema": "xauusd.forward.market-session.v1",
+        "symbol": "XAUUSD",
+        "observed_at": now.isoformat(),
+        "is_open": False,
+        "next_open_time": (now + timedelta(hours=1)).isoformat(),
+        "next_close_time": None,
+    }), encoding="utf-8")
+
+    session = module._broker_market_session(database, now)
+
+    assert session == {
+        "is_open": False,
+        "observed_at": now.isoformat(),
+        "next_open_time": (now + timedelta(hours=1)).isoformat(),
+        "next_close_time": None,
+    }
+    assert module._broker_market_session(database, now + timedelta(seconds=21)) is None
+
+
+def test_dashboard_reports_broker_close_and_reopen_time(tmp_path) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=now).close()
+    quotes = tmp_path / "quotes"
+    quotes.mkdir()
+    reopens_at = now + timedelta(hours=1)
+    (quotes / "market-session.json").write_text(json.dumps({
+        "schema": "xauusd.forward.market-session.v1",
+        "symbol": "XAUUSD",
+        "observed_at": now.isoformat(),
+        "is_open": False,
+        "next_open_time": reopens_at.isoformat(),
+        "next_close_time": None,
+    }), encoding="utf-8")
+
+    payload = _dashboard_module()._dashboard_payload(database)
+
+    assert payload["system"]["market_session"] == "CLOSED"
+    assert payload["system"]["market_reopens_at"] == reopens_at.isoformat()
+    for component in ("quote_bridge", "decision_collector", "outcome_settler"):
+        assert payload["system"]["components"][component]["status"] == "MARKET_CLOSED"
+
+
+def test_dashboard_exposes_only_runtime_update_failures(tmp_path) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=now).close()
+    state_path = tmp_path / "runtime-update-state.json"
+    state_path.write_text(json.dumps({
+        "update_status": "ACTIVE", "user_visible_failure": False,
+        "failure_message": None,
+    }), encoding="utf-8")
+
+    healthy = _dashboard_module()._dashboard_payload(database)
+    assert healthy["system"]["runtime_update_failure"] is None
+
+    state_path.write_text(json.dumps({
+        "update_status": "ROLLED_BACK", "user_visible_failure": True,
+        "failure_message": "新版运行验证失败，已自动恢复上一版。",
+        "failed_at": now.isoformat(),
+    }), encoding="utf-8")
+    failed = _dashboard_module()._dashboard_payload(database)
+    assert failed["system"]["runtime_update_failure"] == {
+        "status": "ROLLED_BACK",
+        "failed_at": now.isoformat(),
+    }
 
 
 def test_news_evidence_display_collapses_frozen_versions_to_one_event() -> None:
@@ -141,9 +228,15 @@ def _append_basic_annotation(
     item_id: str,
     digest: str,
     parsed_at: datetime,
-    prompt_version: str = "news-json-v9-local-display-recovery",
+    prompt_version: str = PROMPT_VERSION,
     event_time: datetime | None = None,
 ) -> None:
+    news = ledger.connection.execute(
+        """SELECT headline,body,source_published_time FROM news_revisions
+        WHERE source=? AND source_item_id=? AND revision_number=1""",
+        (source, item_id),
+    ).fetchone()
+    evidence = " ".join(str(news["body"] or news["headline"]).split())[:120]
     annotation = {
         "event_type": "economic_release",
         "entities": [],
@@ -154,21 +247,28 @@ def _append_basic_annotation(
         "usd_impulse": 0.0,
         "novelty": 0.5,
         "confidence": 0.8,
-        "summary_zh": "已取得正文并完成测试解析。",
+        "summary_zh": "已取得完整来源正文并完成结构化测试解析，相关证据已经保存。",
         "headline_zh": "测试经济数据发布",
+        "primary_category": "growth_economy", "secondary_categories": [],
+        "emerging_topic_zh": "", "record_kind": "FACT_EVENT",
+        "actor": "US Treasury", "action": "published", "object": "official event",
+        "location": "United States",
+        "event_time": (
+            event_time.isoformat() if event_time
+            else str(news["source_published_time"] or parsed_at.isoformat())
+        ),
+        "claim_status": "CONFIRMED", "materiality": 0.8,
+        "canonical_actor_id": "us_treasury", "action_family": "ECONOMIC_RELEASE",
+        "canonical_object_id": item_id, "canonical_location_id": "us",
+        "episode_key": item_id, "primary_story_title_zh": "测试事件",
+        "secondary_contexts_zh": [], "relation_to_prior": "NONE",
+        "document_kind": "REPORT", "material_event_key": item_id,
+        "source_organization_id": source, "evidence_role": "CORE_CLAIM",
+        "xauusd_relevance": "MACRO_DRIVER", "review_priority": "FAST",
+        "material_change": "NEW_EVENT", "time_sensitivity": "SAME_DAY",
+        "semantic_reason_zh": "完整正文显示这是可能影响黄金的宏观事件。",
+        "supporting_evidence": [evidence],
     }
-    if event_time:
-        annotation.update({
-            "primary_category": "growth_economy", "secondary_categories": [],
-            "emerging_topic_zh": "", "record_kind": "FACT_EVENT",
-            "actor": "US Treasury", "action": "published", "object": "official event",
-            "location": "United States", "event_time": event_time.isoformat(),
-            "claim_status": "CONFIRMED", "materiality": 0.8,
-            "canonical_actor_id": "us_treasury", "action_family": "OFFICIAL_RELEASE",
-            "canonical_object_id": "official_event", "canonical_location_id": "us",
-            "episode_key": "official_event", "primary_story_title_zh": "测试事件",
-            "secondary_contexts_zh": [], "relation_to_prior": "NONE",
-        })
     ledger.append_annotation(
         {
             "annotation_id": f"annotation-{source}-{item_id}",
@@ -220,14 +320,177 @@ def test_dashboard_annotation_counts_match_current_worker_policy(tmp_path) -> No
 
     assert payload["annotation_queue"]["ready"] == 1
     assert payload["annotation_queue"]["queued"] == 1
+    active_identities = {
+        row["model_identity"]
+        for row in payload["learning_curves"]["models"]
+        if row["active_rank"] is not None
+    }
+    assert payload["counts"]["live_oos_model_groups"] == len(active_identities)
     transition = payload["learning_curves"]["news_contract_transition"]
     assert payload["news_evidence_summary"]["current_contract_exposed_rows"] == transition["current_contract_exposed_rows"]
     assert payload["news_evidence_summary"]["current_contract_distinct_events"] == transition["current_contract_distinct_events"]
+    metrics = payload["news_metrics"]
+    assert metrics["schema_version"] == "news-metrics-v1"
+    assert metrics["articles"]["stored_revisions"] == payload["counts"]["news_revisions"]
+    assert metrics["articles"]["semantic_reviews_complete"] == payload["counts"]["parsed_news_items"]
+    assert metrics["training"]["current_contract_rows"] == transition["current_contract_exposed_rows"]
+    assert metrics["training"]["distinct_events"] == transition["current_contract_distinct_events"]
 
 
-def test_health_endpoint_does_not_build_dashboard(monkeypatch, tmp_path) -> None:
+def test_dashboard_quota_uses_scheduler_ledger(tmp_path, monkeypatch) -> None:
+    now = datetime.now(UTC)
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=now)
+    monkeypatch.setenv("GEMINI_API_KEYS", "key-a;key-b")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    credentials = configured_api_credentials()
+    for credential in credentials:
+        assert reserve_account_request(
+            ledger.connection, account_id=credential.account_id,
+            model_family="gemini-3.5-flash-lite", daily_limit=500,
+            requests_per_minute=12, now=now,
+        )
+    assert reserve_account_request(
+        ledger.connection, account_id=credentials[0].account_id,
+        model_family="gemma-impact", daily_limit=15_000,
+        requests_per_minute=12, now=now,
+    )
+    assert reserve_account_request(
+        ledger.connection, account_id=credentials[0].account_id,
+        model_family="gemma-title", daily_limit=15_000,
+        requests_per_minute=12, now=now,
+    )
+    ledger.close()
+
+    payload = _dashboard_module()._dashboard_payload(database)
+
+    assert payload["gemini_quota"]["accounting_source"] == "SCHEDULER_DB"
+    assert payload["gemini_quota"]["total_sent"] == 2
+    assert [row["sent"] for row in payload["gemini_quota"]["keys"]] == [1, 1]
+    assert payload["gemma_quota"]["total_sent"] == 2
+    assert [row["sent"] for row in payload["gemma_quota"]["keys"]] == [2, 0]
+    scheduler_usage = payload["production_contract"]["scheduler_usage"]
+    for surface in AI_QUOTA_SURFACES:
+        assert scheduler_usage[surface.payload_key] == payload[
+            surface.payload_key
+        ]["total_sent"]
+
+
+def test_dashboard_quota_keeps_pre_scheduler_file_compatibility(
+    tmp_path, monkeypatch,
+) -> None:
+    now = datetime.now(UTC)
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=now)
+    ledger.connection.execute("DROP TABLE news_ai_account_daily_usage_v1")
+    ledger.connection.commit()
+    ledger.close()
+    monkeypatch.setenv("GEMINI_API_KEYS", "legacy-key")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    GeminiQuotaLedger(tmp_path / "gemini-quota.json").seed(
+        "legacy-key", 7, now=now,
+    )
+
+    payload = _dashboard_module()._dashboard_payload(database)
+
+    assert payload["gemini_quota"]["total_sent"] == 7
+    assert payload["gemini_quota"]["keys"][0]["sent"] == 7
+    assert "accounting_source" not in payload["gemini_quota"]
+
+
+def test_status_snapshot_cache_singleflights_concurrent_builds(tmp_path) -> None:
+    module = _dashboard_module()
+    cache = module.StatusSnapshotCache(wait_seconds=1.0)
+    database = tmp_path / "forward.sqlite3"
+    started = threading.Event()
+    release = threading.Event()
+    calls = 0
+    call_lock = threading.Lock()
+
+    def builder(_database):
+        nonlocal calls
+        with call_lock:
+            calls += 1
+        started.set()
+        assert release.wait(timeout=2)
+        return {"generated_at": "2026-08-12T00:00:00+00:00"}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(cache.get, database, builder) for _ in range(8)]
+        assert started.wait(timeout=1)
+        time.sleep(0.05)
+        assert calls == 1
+        release.set()
+        results = [future.result(timeout=2) for future in futures]
+
+    assert calls == 1
+    assert len({body for body, _state, _age in results}) == 1
+    assert {state for _body, state, _age in results} == {"fresh"}
+
+
+def test_status_snapshot_cache_fails_closed_during_slow_refresh(tmp_path) -> None:
+    module = _dashboard_module()
+    now = [0.0]
+    cache = module.StatusSnapshotCache(
+        ttl_seconds=15, wait_seconds=0.01, max_stale_seconds=90,
+        clock=lambda: now[0],
+    )
+    database = tmp_path / "forward.sqlite3"
+    cache.get(database, lambda _database: {"version": 1})
+
+    now[0] = 16.0
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_refresh(_database):
+        started.set()
+        assert release.wait(timeout=2)
+        return {"version": 2}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        refresh = pool.submit(cache.get, database, slow_refresh)
+        assert started.wait(timeout=1)
+        try:
+            cache.get(database, slow_refresh)
+        except module.StatusSnapshotUnavailable as error:
+            assert str(error) == "dashboard snapshot refresh is still running"
+        else:
+            raise AssertionError("a stale snapshot must not look like a sync success")
+        release.set()
+        refreshed_body, refreshed_state, _age = refresh.result(timeout=2)
+
+    assert json.loads(refreshed_body) == {"version": 2}
+    assert refreshed_state == "fresh"
+
+    now[0] = 32.0
+    try:
+        cache.get(
+            database, lambda _database: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+    except RuntimeError as error:
+        assert str(error) == "boom"
+    else:
+        raise AssertionError("a failed refresh must not masquerade as success")
+    health_status, health = cache.health()
+    assert health_status == 503
+    assert health["status"] == "ERROR"
+
+    now[0] = 123.0
+    try:
+        cache.get(
+            database,
+            lambda _database: (_ for _ in ()).throw(RuntimeError("still broken")),
+        )
+    except RuntimeError as error:
+        assert str(error) == "still broken"
+    else:
+        raise AssertionError("expired dashboard snapshot must fail closed")
+
+
+def test_health_endpoint_requires_recent_dashboard_snapshot(monkeypatch, tmp_path) -> None:
     module = _dashboard_module()
     module.Handler.database = tmp_path / "unused.sqlite3"
+    module.Handler.status_cache = module.StatusSnapshotCache()
     monkeypatch.setattr(
         module,
         "_dashboard_payload",
@@ -237,15 +500,97 @@ def test_health_endpoint_does_not_build_dashboard(monkeypatch, tmp_path) -> None
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
+        try:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/api/health", timeout=2
+            )
+        except urllib.error.HTTPError as error:
+            assert error.code == 503
+            assert json.loads(error.read())["status"] == "UNAVAILABLE"
+        else:
+            raise AssertionError("health must fail before a status snapshot exists")
+
+        module.Handler.status_cache.get(
+            module.Handler.database, lambda _database: {"status": "ready"},
+        )
         with urllib.request.urlopen(
             f"http://127.0.0.1:{server.server_port}/api/health", timeout=2
         ) as response:
             assert response.status == 200
-            assert json.loads(response.read()) == {"status": "OK"}
+            assert json.loads(response.read())["status"] == "OK"
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_dashboard_status_does_not_scan_live_database_integrity(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _dashboard_module()
+    now = datetime.now(UTC).replace(microsecond=0)
+    database = tmp_path / "forward.sqlite3"
+    ForwardLedger(database, now=now).close()
+    real_connect = module.sqlite3.connect
+    statements: list[str] = []
+
+    def tracked_connect(target, *args, **kwargs):
+        connection = real_connect(target, *args, **kwargs)
+        if str(database) in str(target):
+            connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(module.sqlite3, "connect", tracked_connect)
+    module._dashboard_payload(database)
+
+    assert not any("integrity_check" in statement.lower() for statement in statements)
+
+
+def test_live_quote_candle_cache_reads_only_appended_bytes(tmp_path) -> None:
+    module = _dashboard_module()
+    quote_file = tmp_path / "xauusd-quotes-20260812.jsonl"
+
+    def quote(second: int, bid: float) -> str:
+        return json.dumps({
+            "received_time": f"2026-08-12T06:30:{second:02d}+00:00",
+            "bid": bid,
+            "ask": bid + 0.1,
+        }) + "\n"
+
+    quote_file.write_text(quote(1, 4300.0) + quote(2, 4301.0), encoding="utf-8")
+    first = module._quote_file_candles(quote_file)
+    first_offset = module._QUOTE_CANDLE_CACHE[str(quote_file)]["offset"]
+
+    with quote_file.open("a", encoding="utf-8") as handle:
+        handle.write(quote(3, 4302.0))
+    second = module._quote_file_candles(quote_file)
+
+    assert first[0]["ticks"] == 2
+    assert second[0]["ticks"] == 3
+    assert second[0]["open"] == 4300.05
+    assert second[0]["close"] == 4302.05
+    assert module._QUOTE_CANDLE_CACHE[str(quote_file)]["offset"] > first_offset
+
+
+def test_forward_ledger_adds_dashboard_news_lookup_indexes(tmp_path) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    try:
+        annotation_indexes = {
+            row[1] for row in ledger.connection.execute(
+                "PRAGMA index_list(news_annotations)"
+            )
+        }
+        revision_indexes = {
+            row[1] for row in ledger.connection.execute(
+                "PRAGMA index_list(news_revisions)"
+            )
+        }
+    finally:
+        ledger.close()
+
+    assert "news_annotations_revision_contract" in annotation_indexes
+    assert "news_revisions_cluster_latest" in revision_indexes
 
 
 def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
@@ -278,7 +623,7 @@ def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
         {
             **common, "translation_id": "placeholder",
             "headline_zh": INVALID_CHINESE_TITLE,
-            "prompt_version": "news-json-v9-local-display-recovery",
+            "prompt_version": "headline-zh-placeholder-test",
             "parsed_at": now + timedelta(seconds=1),
         }
     )
@@ -299,41 +644,81 @@ def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
 
     payload = _dashboard_module()._dashboard_payload(database)
     assert payload["recent_news"][0]["headline"] == "2026年6月个人收入与支出"
-    assert len(payload["news_source_health"]) == 18
+    assert {row["source"] for row in payload["news_source_health"]} == {
+        spec.source for spec in NEWS_SOURCE_REGISTRY
+    }
+    assert all(
+        row["source"] not in {
+            "non_fed_full_text",
+            "bls_employment_situation",
+            "bls_consumer_price_index",
+            "bls_job_openings",
+            "google_news_bls_official_releases",
+        }
+        for row in payload["news_source_health"]
+    )
     synchronizer = payload["system"]["components"]["sites_synchronizer"]
     assert synchronizer["last_success"] == sync_success
     assert synchronizer["status"] == "OK"
 
 
-def test_bls_direct_403_reports_healthy_official_domain_fallback(tmp_path) -> None:
+def test_source_error_does_not_claim_polling_is_normal(tmp_path) -> None:
     now = datetime.now(UTC).replace(microsecond=0)
-    database = tmp_path / "forward.sqlite3"
-    ledger = ForwardLedger(database, now=now)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
     ledger.append_source_poll({
-        "poll_id": "bls-direct-error", "source": "bls_employment_situation",
+        "poll_id": "eia-error", "source": "eia_press_releases",
         "fetched_time": now, "status": "ERROR", "error_type": "HTTPError",
         "error": "HTTP Error 403: Forbidden",
     })
+
+    rows = _dashboard_module()._news_source_health(ledger.connection, now)
+    direct = next(row for row in rows if row["source"] == "eia_press_releases")
+
+    assert direct["health"] == "ERROR"
+    assert direct["semantic_status"] == "SOURCE_ERROR"
+    assert direct["semantic_message"] == "来源当前轮询失败；请查看最近错误与后备链路状态"
+
+
+@pytest.mark.parametrize("source", [spec.source for spec in NEWS_SOURCE_REGISTRY])
+def test_every_monitored_source_clears_active_failure_state_after_success(
+    tmp_path,
+    source,
+) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
     ledger.append_source_poll({
-        "poll_id": "bls-fallback-ok", "source": "google_news_bls_official_releases",
-        "fetched_time": now, "status": "OK",
+        "poll_id": f"{source}-old-error", "source": source,
+        "fetched_time": now - timedelta(minutes=5), "status": "ERROR",
+        "error_type": "HTTPError", "error": "HTTP Error 429: historical",
     })
-    body = "official BLS employment situation body " * 12
-    ledger.append_news_revision({
-        "source": "google_news_bls_official_releases",
-        "source_item_id": "employment-situation", "source_published_time": now,
-        "collector_first_seen_time": now, "fetched_time": now,
-        "headline": "Employment Situation Summary", "body": body,
-        "link": "https://www.bls.gov/news.release/empsit.nr0.htm",
-        "content_hash": hashlib.sha256(body.encode()).hexdigest(),
-        "cluster_id": "employment-situation",
+    ledger.append_source_poll({
+        "poll_id": f"{source}-recovered", "source": source,
+        "fetched_time": now, "status": "OK",
     })
 
     rows = _dashboard_module()._news_source_health(ledger.connection, now)
-    direct = next(row for row in rows if row["source"] == "bls_employment_situation")
-    assert direct["health"] == "FALLBACK_ACTIVE"
-    assert direct["recovery_mode"] == "BLS_DIRECT_BLOCKED"
-    assert direct["semantic_status"] == "OFFICIAL_DOMAIN_FALLBACK_ACTIVE"
+    recovered = next(row for row in rows if row["source"] == source)
+
+    assert recovered["latest_status"] == "OK"
+    assert recovered["health"] not in {"ERROR", "DEGRADED", "FALLBACK_ACTIVE"}
+    assert recovered["recovery_mode"] is None
+    assert recovered["next_retry_time"] is None
+    assert "429" in recovered["last_error"]
+
+
+def test_polled_release_source_without_items_is_not_reported_healthy(tmp_path) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger.append_source_poll({
+        "poll_id": "bea-empty-ok", "source": "bea_economic_releases",
+        "fetched_time": now, "status": "OK",
+    })
+
+    rows = _dashboard_module()._news_source_health(ledger.connection, now)
+    bea = next(row for row in rows if row["source"] == "bea_economic_releases")
+    assert bea["health"] == "WARMING_UP"
+    assert bea["semantic_status"] == "NO_RELEASE_CAPTURED"
+    assert bea["item_count"] == 0
 
 
 def test_dashboard_orders_news_by_publisher_time_not_discovery_time(tmp_path) -> None:
@@ -375,6 +760,45 @@ def test_dashboard_orders_news_by_publisher_time_not_discovery_time(tmp_path) ->
         "visible-first",
         "arrived-first",
     ]
+
+
+def test_news_archive_is_60_day_bounded_and_cursor_safe(tmp_path) -> None:
+    module = _dashboard_module()
+    now = datetime.now(UTC).replace(microsecond=0)
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=now)
+    for item_id, published_at in (
+        ("current-a", now - timedelta(hours=2)),
+        ("current-b", now - timedelta(hours=1)),
+        ("current-c", now),
+        ("expired", now - timedelta(days=61)),
+    ):
+        body = f"complete reader evidence for {item_id} " * 30
+        ledger.append_news_revision({
+            "source": "bea_economic_releases",
+            "source_item_id": item_id,
+            "source_published_time": published_at,
+            "collector_first_seen_time": now,
+            "fetched_time": now,
+            "headline": item_id,
+            "body": body,
+            "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+            "cluster_id": item_id,
+        })
+
+    first = module._news_archive_page(ledger.connection, None, 2)
+    second = module._news_archive_page(ledger.connection, first["next_cursor"], 2)
+    rows = [*first["items"], *second["items"]]
+
+    assert first["has_more"] is True
+    assert second["has_more"] is False
+    assert first["window_days"] == 60
+    assert {row["source_item_id"] for row in rows} == {
+        "current-a", "current-b", "current-c",
+    }
+    assert len({row["detail_key"] if "detail_key" in row else (
+        row["source"], row["source_item_id"], row["revision_number"]
+    ) for row in rows}) == 3
 
 
 def test_dashboard_distinguishes_unavailable_content_from_pending(tmp_path) -> None:
@@ -515,7 +939,7 @@ def test_dashboard_explains_active_and_expired_on_receipt_impacts(tmp_path) -> N
             "raw_content_hash": digest,
             "annotation_id": f"annotation-us_treasury_press_releases-{item_id}",
             "llm_model_version": "gemma-4-31b-it",
-            "prompt_version": "news-impact-v2-semantic-prior-candidates",
+            "prompt_version": "news-impact-v3-independent-semantic-review",
             "parse_started_at": parsed_at,
             "assessed_at": parsed_at + timedelta(seconds=1),
             "impact_class": impact_class,
@@ -561,7 +985,7 @@ def test_dashboard_uses_same_explicit_event_clock_as_model(tmp_path) -> None:
         "raw_content_hash": digest,
         "annotation_id": "annotation-us_treasury_press_releases-old-event",
         "llm_model_version": "gemma-4-31b-it",
-        "prompt_version": "news-impact-v2-semantic-prior-candidates",
+        "prompt_version": "news-impact-v3-independent-semantic-review",
         "parse_started_at": parsed_at, "assessed_at": parsed_at + timedelta(seconds=1),
         "impact_class": "SAME_DAY", "event_state": "ACTIVE",
         "update_type": "NEW_EVENT", "confidence": 0.9,
@@ -605,6 +1029,17 @@ def test_dashboard_reports_gdelt_fallback_and_retry_time(tmp_path) -> None:
         "poll_id": "google-ok", "source": "google_news_gold_context",
         "fetched_time": now - timedelta(minutes=5), "status": "OK",
     })
+    body = "complete Google News fallback evidence " * 12
+    ledger.append_news_revision({
+        "source": "google_news_gold_context", "source_item_id": "fallback-item",
+        "source_published_time": now - timedelta(minutes=10),
+        "collector_first_seen_time": now - timedelta(minutes=5),
+        "fetched_time": now - timedelta(minutes=5),
+        "headline": "Gold rises as Treasury yields fall",
+        "body": body, "link": "https://example.test/fallback",
+        "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+        "cluster_id": "fallback-item",
+    })
     connection = ledger.connection
     rows = _dashboard_module()._news_source_health(connection, now)
     gdelt = next(row for row in rows if row["source"] == "gdelt_gold_geopolitics")
@@ -613,6 +1048,80 @@ def test_dashboard_reports_gdelt_fallback_and_retry_time(tmp_path) -> None:
     assert gdelt["fallback_label"] == "Google News Context"
     assert gdelt["fallback_health"] == "HEALTHY"
     assert gdelt["next_retry_time"] == (now + timedelta(minutes=90)).isoformat()
+
+
+def test_dashboard_does_not_activate_fallback_from_stale_historical_evidence(
+    tmp_path,
+) -> None:
+    now = datetime(2026, 8, 11, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now - timedelta(days=10))
+    ledger.append_source_poll({
+        "poll_id": "gdelt-429", "source": "gdelt_gold_geopolitics",
+        "fetched_time": now - timedelta(minutes=5), "status": "ERROR",
+        "error_type": "HTTPError", "error": "HTTP Error 429: Too Many Requests",
+    })
+    ledger.append_source_poll({
+        "poll_id": "google-empty-now", "source": "google_news_gold_context",
+        "fetched_time": now - timedelta(minutes=5), "status": "OK",
+    })
+    body = "historical Google News evidence " * 20
+    ledger.append_news_revision({
+        "source": "google_news_gold_context", "source_item_id": "old-item",
+        "source_published_time": now - timedelta(days=10),
+        "collector_first_seen_time": now - timedelta(days=10),
+        "fetched_time": now - timedelta(days=10),
+        "headline": "Old gold report", "body": body,
+        "link": "https://example.test/old",
+        "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+        "cluster_id": "old-item",
+    })
+
+    rows = _dashboard_module()._news_source_health(ledger.connection, now)
+    google = next(row for row in rows if row["source"] == "google_news_gold_context")
+    gdelt = next(row for row in rows if row["source"] == "gdelt_gold_geopolitics")
+
+    assert google["health"] == "HEALTHY"
+    assert google["semantic_status"] == "NO_RECENT_EVIDENCE"
+    assert google["recent_evidence"] is False
+    assert gdelt["health"] == "ERROR"
+    assert gdelt["fallback_health"] == "NO_RECENT_EVIDENCE"
+
+
+def test_dashboard_clears_historical_gdelt_429_after_successful_gkg_poll(
+    tmp_path,
+) -> None:
+    now = datetime(2026, 8, 13, 3, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger.append_source_poll({
+        "poll_id": "gdelt-old-doc-429", "source": "gdelt_gold_geopolitics",
+        "fetched_time": now - timedelta(hours=2), "status": "ERROR",
+        "error_type": "HTTPError", "error": "HTTP Error 429: Too Many Requests",
+    })
+    ledger.append_source_poll({
+        "poll_id": "gdelt-gkg-ok", "source": "gdelt_gold_geopolitics",
+        "fetched_time": now - timedelta(minutes=5), "status": "OK",
+    })
+    body = "current GDELT GKG evidence " * 20
+    ledger.append_news_revision({
+        "source": "gdelt_gold_geopolitics", "source_item_id": "gkg-item",
+        "source_published_time": now - timedelta(minutes=10),
+        "collector_first_seen_time": now - timedelta(minutes=5),
+        "fetched_time": now - timedelta(minutes=5),
+        "headline": "Current GKG report", "body": body,
+        "link": "https://example.test/gkg",
+        "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+        "cluster_id": "gkg-item",
+    })
+
+    rows = _dashboard_module()._news_source_health(ledger.connection, now)
+    gdelt = next(row for row in rows if row["source"] == "gdelt_gold_geopolitics")
+
+    assert gdelt["health"] == "HEALTHY"
+    assert gdelt["latest_status"] == "OK"
+    assert gdelt["recovery_mode"] is None
+    assert gdelt["fallback_label"] is None
+    assert gdelt["next_retry_time"] is None
+    assert "429" in gdelt["last_error"]
 
 
 def test_market_chart_keeps_last_session_on_weekend_and_reads_gzip(tmp_path) -> None:

@@ -28,7 +28,7 @@ def _uuid(namespace: str, value: str) -> str:
 def _current_news_snapshot(decision_id: str, decision_time: datetime, news: dict) -> dict:
     values = {
         key: value for key, value in news.items()
-        if key not in {"official_visible_events", "broad_visible_events", "event_snapshots"}
+        if key not in {"core_visible_events", "broad_visible_events", "event_snapshots"}
     }
     payload = {
         "decision_id": decision_id,
@@ -123,6 +123,20 @@ def append_missing_current_news_snapshots(
                         event["source_hash"], event["evidence_grade"],
                         json.dumps(event["model_permissions"], separators=(",", ":")),
                         json.dumps(event["reason_codes"], separators=(",", ":")),
+                        recomputed_at.isoformat(),
+                    ),
+                )
+                source_budget_id = str(event["source_budget_id"])
+                ledger.connection.execute(
+                    """INSERT OR IGNORE INTO news_event_source_budgets_v1
+                    VALUES (?,?,?,?)""",
+                    (
+                        event["event_version_id"], source_budget_id,
+                        (
+                            "REPORTING_ORGANIZATION"
+                            if source_budget_id != event["canonical_source"]
+                            else "COLLECTOR_SOURCE"
+                        ),
                         recomputed_at.isoformat(),
                     ),
                 )

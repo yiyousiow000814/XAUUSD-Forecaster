@@ -12,7 +12,10 @@ from .evidence_v2 import (
 )
 from .forward_ledger import canonical_hash
 from .inference_v2 import append_live_predictions_v2
-from .news_contracts import NEWS_CONTRACT_BY_ELIGIBILITY
+from .news_contracts import (
+    CORE_EVIDENCE_STORAGE_LANE,
+    NEWS_CONTRACT_BY_ELIGIBILITY,
+)
 from .news_features_v2 import aggregate_news_features_v2
 from .news_evidence import EVIDENCE_POLICY_VERSION
 from .repair_v2 import LANE_RULE_VERSION, TRAINING_ELIGIBILITY_VERSION
@@ -42,10 +45,11 @@ def _append_news_visibility_receipts(
 ) -> int:
     """Freeze which point-in-time news events each created model could consume."""
     lane_by_identity = {
-        "NEWS_RESIDUAL": ("OFFICIAL", "official_visible_events"),
-        "FULL": ("OFFICIAL", "official_visible_events"),
+        "NEWS_RESIDUAL": (CORE_EVIDENCE_STORAGE_LANE, "core_visible_events"),
+        "FULL": (CORE_EVIDENCE_STORAGE_LANE, "core_visible_events"),
         "BROAD_NEWS_RESIDUAL": ("BROAD", "broad_visible_events"),
         "BROAD_FULL": ("BROAD", "broad_visible_events"),
+        "NEWS_ONLY": ("BROAD", "broad_visible_events"),
     }
     inserted = 0
     for prediction in predictions:
@@ -80,8 +84,13 @@ def _append_news_visibility_receipts(
                 "news-visibility",
                 f"{decision_id}:{prediction['model_version']}:{lane}:{event['event_key']}",
             )
+            receipt_table = (
+                "news_only_visibility_receipts_v1"
+                if prediction["model_identity"] == "NEWS_ONLY"
+                else "news_model_visibility_receipts_v1"
+            )
             cursor = connection.execute(
-                """INSERT OR IGNORE INTO news_model_visibility_receipts_v1
+                f"""INSERT OR IGNORE INTO {receipt_table}
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     receipt_id, decision_id, decision_time.isoformat(),
@@ -122,7 +131,7 @@ def append_live_decision_v2(ledger, *, decision_id: str, decision_time: datetime
     news = aggregate_news_features_v2(ledger, decision_time)
     news_snapshot_values = {
         key: value for key, value in news.items()
-        if key not in {"official_visible_events", "broad_visible_events", "event_snapshots"}
+        if key not in {"core_visible_events", "broad_visible_events", "event_snapshots"}
     }
     news_payload = {"decision_id": decision_id, "decision_time": decision_time.isoformat(),
                     "feature_version": NEWS_FEATURE_VERSION,
@@ -159,6 +168,20 @@ def append_live_decision_v2(ledger, *, decision_id: str, decision_time: datetime
                     event["canonical_source_item_id"], event["source_hash"],
                     event["evidence_grade"], json.dumps(permissions, separators=(",", ":")),
                     json.dumps(event["reason_codes"], separators=(",", ":")),
+                    created_at.isoformat(),
+                ),
+            )
+            source_budget_id = str(event["source_budget_id"])
+            ledger.connection.execute(
+                """INSERT OR IGNORE INTO news_event_source_budgets_v1
+                VALUES (?,?,?,?)""",
+                (
+                    event["event_version_id"], source_budget_id,
+                    (
+                        "REPORTING_ORGANIZATION"
+                        if source_budget_id != event["canonical_source"]
+                        else "COLLECTOR_SOURCE"
+                    ),
                     created_at.isoformat(),
                 ),
             )

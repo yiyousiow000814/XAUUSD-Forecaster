@@ -1,0 +1,48 @@
+from __future__ import annotations
+
+import pytest
+
+from xauusd_forecaster.dashboard_payloads import bounded_evidence_window
+
+
+@pytest.mark.parametrize(
+    ("seen_count", "unseen_count", "limit", "expected_seen", "expected_unseen"),
+    [
+        (97, 105, 60, 30, 30),
+        (97, 105, 100, 50, 50),
+        (4, 100, 60, 4, 56),
+        (100, 3, 60, 57, 3),
+        (2, 2, 60, 2, 2),
+    ],
+)
+def test_bounded_evidence_window_keeps_each_visibility_state_inspectable(
+    seen_count: int,
+    unseen_count: int,
+    limit: int,
+    expected_seen: int,
+    expected_unseen: int,
+) -> None:
+    rows = [
+        {"event_key": f"seen-{index}", "model_seen": True}
+        for index in range(seen_count)
+    ] + [
+        {"event_key": f"unseen-{index}", "model_seen": False}
+        for index in range(unseen_count)
+    ]
+
+    bounded = bounded_evidence_window(rows, limit)
+
+    assert len(bounded) == min(len(rows), limit)
+    assert sum(bool(row["model_seen"]) for row in bounded) == expected_seen
+    assert sum(not bool(row["model_seen"]) for row in bounded) == expected_unseen
+    assert [row["event_key"] for row in bounded if row["model_seen"]] == [
+        f"seen-{index}" for index in range(expected_seen)
+    ]
+    assert [row["event_key"] for row in bounded if not row["model_seen"]] == [
+        f"unseen-{index}" for index in range(expected_unseen)
+    ]
+
+
+def test_bounded_evidence_window_rejects_invalid_limit() -> None:
+    with pytest.raises(ValueError, match="must not be negative"):
+        bounded_evidence_window([], -1)

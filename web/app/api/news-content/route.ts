@@ -18,9 +18,9 @@ export async function GET(request: Request) {
   }
   if (previewBundle) {
     const detail = previewBundle.news_details[detailKey];
-    return detail
-      ? previewJson(detail)
-      : previewJson({ error: "该新闻详情不在本次 Preview 快照中" }, 404);
+    if (detail) return previewJson(detail);
+    // Only the visible first page is compiled into the Worker. Older details
+    // remain readable from D1; Preview writes are still rejected below.
   }
   const binding = env.DB as D1Database | undefined;
   if (!binding) {
@@ -33,10 +33,11 @@ export async function GET(request: Request) {
   if (!row) {
     return NextResponse.json({ error: "新闻详情仍在同步" }, { status: 404 });
   }
-  return NextResponse.json(
-    { detail_hash: row.detail_hash, payload: JSON.parse(row.payload) },
-    { headers: { "Cache-Control": "private, max-age=300" } },
-  );
+  const payload = { detail_hash: row.detail_hash, payload: JSON.parse(row.payload) };
+  if (previewBundle) return previewJson(payload, 200, "read-only-d1-detail");
+  return NextResponse.json(payload, {
+    headers: { "Cache-Control": "private, max-age=300" },
+  });
 }
 
 export async function POST(request: Request) {
@@ -59,7 +60,7 @@ export async function POST(request: Request) {
       await binding.prepare("DELETE FROM news_details").run();
       return NextResponse.json({ status: "OK", reset: true });
     }
-    if (!Array.isArray(body.items) || body.items.length > 200) {
+    if (!Array.isArray(body.items) || body.items.length > 20) {
       return NextResponse.json({ error: "invalid news detail batch" }, { status: 400 });
     }
     const now = new Date().toISOString();

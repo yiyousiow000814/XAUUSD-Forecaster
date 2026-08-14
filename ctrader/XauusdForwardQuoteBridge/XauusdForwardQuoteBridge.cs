@@ -13,8 +13,10 @@ namespace CAlgo.Robots
         private StreamWriter writer;
         private DateTime activeDateUtc;
         private string activePath;
+        private string marketSessionPath;
         private long sequence;
         private long invalidQuotes;
+        private long marketSessionWrites;
 
         [Parameter("Output Directory", DefaultValue = "")]
         public string OutputDirectory
@@ -54,7 +56,9 @@ namespace CAlgo.Robots
             string outputDirectory = Path.GetFullPath(this.OutputDirectory.Trim());
             Directory.CreateDirectory(outputDirectory);
             this.OutputDirectory = outputDirectory;
+            this.marketSessionPath = Path.Combine(outputDirectory, "market-session.json");
             this.OpenDailyFile(this.UtcNow());
+            this.WriteMarketSession();
             this.Timer.Start(TimeSpan.FromSeconds(Math.Max(1, this.FlushIntervalSeconds)));
             this.Print(
                 "XAU_FORWARD_BRIDGE|start|symbol={0}|output={1}|orders=disabled",
@@ -109,6 +113,8 @@ namespace CAlgo.Robots
             {
                 this.writer.Flush();
             }
+
+            this.WriteMarketSession();
         }
 
         protected override void OnStop()
@@ -122,11 +128,58 @@ namespace CAlgo.Robots
             }
 
             this.Print(
-                "XAU_FORWARD_BRIDGE|stop|symbol={0}|rows={1}|invalid_quotes={2}|path={3}",
+                "XAU_FORWARD_BRIDGE|stop|symbol={0}|rows={1}|invalid_quotes={2}|session_writes={3}|path={4}",
                 this.SymbolName,
                 this.sequence,
                 this.invalidQuotes,
+                this.marketSessionWrites,
                 this.activePath ?? string.Empty);
+        }
+
+        private void WriteMarketSession()
+        {
+            DateTime observedAt = this.UtcNow();
+            DateTime serverTime = DateTime.SpecifyKind(this.Server.Time, DateTimeKind.Utc);
+            bool isOpen = this.Symbol.MarketHours.IsOpened();
+            TimeSpan timeTillOpen = this.Symbol.MarketHours.TimeTillOpen();
+            TimeSpan timeTillClose = this.Symbol.MarketHours.TimeTillClose();
+            DateTime? nextOpenTime = isOpen ? null : serverTime.Add(timeTillOpen);
+            DateTime? nextCloseTime = isOpen ? serverTime.Add(timeTillClose) : null;
+            StringBuilder payload = new StringBuilder(512);
+            payload.Append('{');
+            payload.Append("\"schema\":\"xauusd.forward.market-session.v1\",");
+            payload.Append("\"source\":\"ctrader-cli\",");
+            payload.Append("\"symbol\":\"").Append(this.EscapeJson(this.SymbolName)).Append("\",");
+            payload.Append("\"observed_at\":\"").Append(observedAt.ToString("O", CultureInfo.InvariantCulture)).Append("\",");
+            payload.Append("\"server_time\":\"").Append(serverTime.ToString("O", CultureInfo.InvariantCulture)).Append("\",");
+            payload.Append("\"is_open\":").Append(isOpen ? "true" : "false").Append(',');
+            payload.Append("\"time_till_open_seconds\":").Append(Math.Max(0.0d, timeTillOpen.TotalSeconds).ToString("R", CultureInfo.InvariantCulture)).Append(',');
+            payload.Append("\"time_till_close_seconds\":").Append(Math.Max(0.0d, timeTillClose.TotalSeconds).ToString("R", CultureInfo.InvariantCulture)).Append(',');
+            payload.Append("\"next_open_time\":").Append(this.JsonTimestamp(nextOpenTime)).Append(',');
+            payload.Append("\"next_close_time\":").Append(this.JsonTimestamp(nextCloseTime));
+            payload.Append('}');
+
+            string temporaryPath = this.marketSessionPath + ".tmp";
+            try
+            {
+                System.IO.File.WriteAllText(temporaryPath, payload.ToString(), new UTF8Encoding(false));
+                System.IO.File.Move(temporaryPath, this.marketSessionPath, true);
+                this.marketSessionWrites += 1;
+            }
+            finally
+            {
+                if (System.IO.File.Exists(temporaryPath))
+                {
+                    System.IO.File.Delete(temporaryPath);
+                }
+            }
+        }
+
+        private string JsonTimestamp(DateTime? value)
+        {
+            return value.HasValue
+                ? "\"" + value.Value.ToString("O", CultureInfo.InvariantCulture) + "\""
+                : "null";
         }
 
         private DateTime UtcNow()

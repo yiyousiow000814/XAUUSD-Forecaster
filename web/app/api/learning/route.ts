@@ -2,33 +2,44 @@ import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
 import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
+import { writeDashboardSnapshot } from "../_shared/dashboard-snapshot";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  if (previewBundle) return previewJson(previewBundle.learning);
-  const binding = env.DB as D1Database | undefined;
-  if (binding) {
-    const row = await binding
-      .prepare("SELECT payload FROM dashboard_snapshots WHERE id = ?")
-      .bind(3)
-      .first<{ payload: string }>();
-    if (row) {
-      // POST validates the snapshot before storing it. Returning the validated
-      // JSON bytes directly avoids parsing and serializing a growing history on
-      // every poll, which can exceed the Worker CPU limit.
-      return new Response(row.payload, {
-        headers: {
-          "Content-Type": "application/json; charset=utf-8",
-          "Cache-Control": "private, max-age=15",
-        },
-      });
+  // The fixed-size first page lives in the snapshot table. Older generations
+  // and curve points are fetched from /api/learning-history only on demand.
+  try {
+    const binding = env.DB as D1Database | undefined;
+    if (binding) {
+      const row = await binding
+        .prepare("SELECT payload FROM dashboard_snapshots WHERE id = ?")
+        .bind(3)
+        .first<{ payload: string }>();
+      if (row) {
+        // POST validates the snapshot before storing it. Returning the validated
+        // JSON bytes directly avoids parsing and serializing a growing history on
+        // every poll, which can exceed the Worker CPU limit.
+        return new Response(row.payload, {
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+            "Cache-Control": "private, max-age=15",
+            ...(previewBundle ? { "X-Aurum-Preview": "read-only-d1-snapshot" } : {}),
+          },
+        });
+      }
     }
+  } catch {
+    // A read failure may use the immutable build-snapshot summary or compact relay.
+  }
+
+  if (previewBundle?.learning_summary) {
+    return previewJson(previewBundle.learning_summary);
   }
 
   // The relay carries the small live-status heartbeat.  It deliberately keeps
   // only active model versions, so it is a fallback—not the authority for the
-  // append-only learning history stored in D1.
+  // append-only learning records stored in D1.
   const relay = process.env.STATUS_RELAY_URL;
   if (relay) {
     try {
@@ -57,22 +68,14 @@ export async function POST(request: Request) {
   if (!await isIngestAuthorized(request)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
-  const serialized = await request.text();
-  if (new TextEncoder().encode(serialized).byteLength > 800_000) {
-    return NextResponse.json({ error: "payload too large" }, { status: 413 });
-  }
   const binding = env.DB as D1Database | undefined;
   if (!binding) return NextResponse.json({ error: "database unavailable" }, { status: 503 });
-  try {
-    JSON.parse(serialized);
-    await binding.prepare(
-      `INSERT INTO dashboard_snapshots (id, payload, received_at)
-       VALUES (?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET
-         payload=excluded.payload, received_at=excluded.received_at`,
-    ).bind(3, serialized, new Date().toISOString()).run();
-    return NextResponse.json({ status: "OK" });
-  } catch {
+  const writeResult = await writeDashboardSnapshot(request, binding, 3);
+  if (writeResult === "too_large") {
+    return NextResponse.json({ error: "payload too large" }, { status: 413 });
+  }
+  if (writeResult === "invalid") {
     return NextResponse.json({ error: "invalid learning payload" }, { status: 400 });
   }
+  return NextResponse.json({ status: "OK" });
 }
