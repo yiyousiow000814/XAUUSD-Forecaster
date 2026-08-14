@@ -786,6 +786,47 @@ def test_code_reload_health_requires_fresh_successful_sync(tmp_path) -> None:
     assert result == "True,False"
 
 
+def test_code_reload_accepts_collector_startup_but_not_annotator_startup(
+    tmp_path,
+) -> None:
+    repo = tmp_path / "repo"
+    status = repo / ".local" / "forward" / "dashboard-sync-status.json"
+    status.parent.mkdir(parents=True)
+    status.write_text(json.dumps({
+        "last_attempt": "2026-08-12T08:00:01+00:00",
+        "status": "OK",
+    }), encoding="utf-8")
+    (status.parent / "collector-status.json").write_text(json.dumps({
+        "service": "collector", "state": "STARTING",
+        "last_success": "2026-08-12T08:00:01+00:00",
+    }), encoding="utf-8")
+    annotator = status.parent / "news-annotator-status.json"
+    annotator.write_text(json.dumps({
+        "service": "annotator", "state": "RUNNING",
+        "last_success": "2026-08-12T08:00:01+00:00",
+    }), encoding="utf-8")
+    script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    command = (
+        f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{repo}' "
+        f"-RepositoryRoot '{repo}'; "
+        "function Get-ForecasterProcesses { return [pscustomobject]@{ ProcessId = 1 } }; "
+        "function Invoke-WebRequest { return [pscustomobject]@{ StatusCode = 200 } }; "
+        "$started = [DateTimeOffset]::Parse('2026-08-12T08:00:00+00:00'); "
+        "$collectorStarting = Test-CodeReloadHealth -ReloadStarted $started; "
+        f"@{{ service = 'annotator'; state = 'STARTING'; "
+        f"last_success = '2026-08-12T08:00:01+00:00' }} "
+        f"| ConvertTo-Json | Set-Content -LiteralPath '{annotator}'; "
+        "$annotatorStarting = Test-CodeReloadHealth -ReloadStarted $started; "
+        "Write-Output \"$collectorStarting,$annotatorStarting\""
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    assert result == "True,False"
+
+
 def test_service_state_rejects_stale_worker_heartbeat(tmp_path) -> None:
     repo = tmp_path / "repo"
     status = repo / ".local" / "forward" / "collector-status.json"
