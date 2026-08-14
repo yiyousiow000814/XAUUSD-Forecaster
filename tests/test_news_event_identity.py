@@ -145,6 +145,36 @@ def test_same_continuous_market_object_does_not_create_identity_similarity():
     assert prior_identity_similarity(current, prior) == 0.0
 
 
+def test_shared_collection_cluster_recalls_semantically_drifted_syndication():
+    current = {
+        "cluster_id": "shared-source-document",
+        "canonical_actor_id": "television_academy",
+        "canonical_object_id": "hall_of_fame_inductees",
+    }
+    prior = {
+        "cluster_id": "shared-source-document",
+        "canonical_actor_id": "the_television_academy",
+        "canonical_object_id": "jean_smart_and_ted_danson",
+    }
+
+    assert prior_identity_similarity(current, prior) == 1.0
+
+
+def test_shared_subject_without_an_occurrence_anchor_is_not_recalled():
+    current = {
+        "cluster_id": "morning-report",
+        "canonical_actor_id": "market_participants",
+        "canonical_object_id": "gold_price",
+    }
+    prior = {
+        "cluster_id": "evening-report",
+        "canonical_actor_id": "different_market_observer",
+        "canonical_object_id": "gold_price",
+    }
+
+    assert prior_identity_similarity(current, prior) == 0.0
+
+
 def test_same_actor_and_object_remain_candidates_across_key_wording() -> None:
     current = {
         "material_event_key": "south_africa_jobs_q2",

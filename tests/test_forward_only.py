@@ -2866,6 +2866,7 @@ def test_identity_recall_crosses_categories_and_ignores_xau_impact(tmp_path) -> 
     }
     for index, material_key in enumerate((
         "trump_removes_lisa_cook", "cook_firing_attempt",
+        "publisher_cook_followup",
     )):
         item_id = f"cook-{index}"
         seen = now + timedelta(minutes=index * 70)
@@ -2875,7 +2876,10 @@ def test_identity_recall_crosses_categories_and_ignores_xau_impact(tmp_path) -> 
             "source": "federal_reserve_press_all", "source_item_id": item_id,
             "source_published_time": seen, "collector_first_seen_time": seen,
             "fetched_time": seen, "headline": f"Fed Governor Lisa Cook report {index}",
-            "body": body, "content_hash": digest, "cluster_id": item_id,
+            "body": body, "content_hash": digest,
+            "cluster_id": (
+                "shared-cook-syndication" if index in {0, 2} else item_id
+            ),
         })
         ledger.append_annotation({
             "annotation_id": f"annotation-{index}",
@@ -2885,6 +2889,13 @@ def test_identity_recall_crosses_categories_and_ignores_xau_impact(tmp_path) -> 
                 **common, "material_event_key": material_key,
                 "episode_key": material_key,
                 "summary_zh": "特朗普再次寻求解除美联储理事丽莎库克的职务。",
+                **({
+                    "canonical_object_id": "federal_reserve_governor_lisa_cook",
+                } if index == 1 else {}),
+                **({
+                    "canonical_actor_id": "reporting_publisher",
+                    "canonical_object_id": "federal_reserve_governance",
+                } if index == 2 else {}),
                 **({
                     "primary_category": "regulation_other",
                     "materiality": 0.1,
@@ -2917,11 +2928,11 @@ def test_identity_recall_crosses_categories_and_ignores_xau_impact(tmp_path) -> 
                 "canonical_event_id": "event-cook",
             })
 
-    # A broad category can receive dozens of newer, unrelated reports before
-    # the next article about the original event. Candidate recall must rank
-    # semantic matches after a bounded scan, not truncate by recency first.
-    for index in range(60):
-        seen = now + timedelta(minutes=index + 1)
+    # A broad feed can receive more than the old 500-row scan bound before the
+    # next report about the original event. Recall must use stable identity
+    # anchors across the bounded universe, not truncate by recency first.
+    for index in range(620):
+        seen = now + timedelta(seconds=index + 1)
         item_id = f"distractor-{index}"
         body = f"Unrelated macro report number {index}. " * 20
         digest = hashlib.sha256(body.encode()).hexdigest()
@@ -2953,7 +2964,8 @@ def test_identity_recall_crosses_categories_and_ignores_xau_impact(tmp_path) -> 
     ledger.connection.set_trace_callback(statements.append)
     try:
         pending = pending_impact_records(
-            ledger.connection, observed_at=now + timedelta(hours=2), limit=100,
+            ledger.connection, observed_at=now + timedelta(hours=3), limit=100,
+            selection_order="newest",
         )
     finally:
         ledger.connection.set_trace_callback(None)
@@ -2965,11 +2977,17 @@ def test_identity_recall_crosses_categories_and_ignores_xau_impact(tmp_path) -> 
     assert current["prior_event_context"][0]["canonical_event_id"] == "event-cook"
     assert current["prior_event_context"][0]["identity_anchor_eligible"] is True
     assert current["prior_event_context"][0]["impact_class"] == "BACKGROUND"
+    assert current["prior_event_context"][0]["similarity"] == 0.5
     claim = current["prior_event_context"][0]["event_claim"]
     assert claim["actor"] == "Donald Trump"
     assert claim["action"] == "attempts removal"
     assert claim["object"] == "Lisa Cook"
     assert claim["supporting_evidence"] == ["Trump effort"]
+    syndicated = next(
+        row for row in pending if row["source_item_id"] == "cook-2"
+    )
+    assert syndicated["prior_event_context"][0]["source_item_id"] == "cook-0"
+    assert syndicated["prior_event_context"][0]["similarity"] == 1.0
     candidate_queries = [
         statement for statement in statements
         if "FROM NEWS_REVISIONS P JOIN NEWS_ANNOTATIONS PA" in statement.upper()
