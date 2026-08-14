@@ -1361,6 +1361,7 @@ test("keeps Gemma questions asynchronous and evidence bounded", () => {
   const route = readFileSync(new URL("../app/api/news-questions/route.ts", import.meta.url), "utf8");
   assert.match(view, /Gemma 正在根据新闻证据回答/);
   assert.match(view, /setInterval\(\(\) => void check\(\), 10_000\)/);
+  assert.match(view, /view !== "qa" \|\| !question\?\.id/);
   assert.match(route, /pending\?\.count \?\? 0\) >= 10/);
   assert.match(route, /evidence_ids\) \? body\.evidence_ids\.slice\(0, 12\)/);
   assert.match(route, /rejectPreviewWrite/);
