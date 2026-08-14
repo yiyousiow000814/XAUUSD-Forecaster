@@ -213,58 +213,6 @@ GDELT_MAX_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
 GDELT_MAX_CANDIDATES = 25
 GOOGLE_GEO_SOURCE = "google_news_gold_context"
 
-# GKG may attach ECON_GOLD to pages that merely contain the word "gold" in an
-# unrelated context.  Treat that theme as discovery evidence, not sufficient
-# relevance by itself.  A candidate must either name the traded asset directly
-# or carry a second structured macro/market/geopolitical theme.
-GDELT_GOLD_THEMES = frozenset({
-    "ECON_GOLD",
-    "ECON_GOLDPRICE",
-    "WB_2936_GOLD",
-})
-GDELT_CONTEXT_THEME_PREFIXES = (
-    "ECON_CENTRALBANK",
-    "ECON_CURRENCY",
-    "ECON_DEBT",
-    "ECON_INFLATION",
-    "ECON_INTEREST",
-    "ECON_MONETARY",
-    "ECON_WORLDCURRENCIES",
-    "ARMEDCONFLICT",
-    "MILITARY",
-    "SANCTION",
-    "TERROR",
-)
-GDELT_ASSET_ANCHOR_PATTERN = re.compile(
-    r"(?:^|[^a-z])(gold|bullion|xauusd)(?:$|[^a-z])",
-    re.IGNORECASE,
-)
-
-
-def _gdelt_theme_names(*raw_theme_fields: str) -> frozenset[str]:
-    """Return GKG theme identifiers without offsets or occurrence metadata."""
-    return frozenset(
-        entry.split(",", 1)[0].strip().upper()
-        for raw_themes in raw_theme_fields
-        for entry in raw_themes.split(";")
-        if entry.strip()
-    )
-
-
-def _gdelt_candidate_is_relevant(
-    headline: str, *raw_theme_fields: str,
-) -> bool:
-    """Apply a cheap positive GKG gate before body retrieval or model work."""
-    if GDELT_ASSET_ANCHOR_PATTERN.search(headline):
-        return True
-    themes = _gdelt_theme_names(*raw_theme_fields)
-    if not themes.intersection(GDELT_GOLD_THEMES):
-        return False
-    return any(
-        theme.startswith(GDELT_CONTEXT_THEME_PREFIXES)
-        for theme in themes
-    )
-
 
 @dataclass(frozen=True)
 class GoogleNewsLane:
@@ -854,10 +802,10 @@ def collect_gdelt_news(
             headline = _clean(title_match.group(1) if title_match else "")
             if not link or not headline:
                 continue
-            if not _gdelt_candidate_is_relevant(headline, fields[7], fields[8]):
-                rejected["IRRELEVANT_GKG_SIGNAL"] = (
-                    rejected.get("IRRELEVANT_GKG_SIGNAL", 0) + 1
-                )
+            discovery_text = " ".join((headline, fields[7], fields[8])).lower()
+            if not re.search(
+                r"(?:^|[^a-z])(gold|bullion|xauusd)(?:$|[^a-z])", discovery_text
+            ):
                 continue
             if discovered >= GDELT_MAX_CANDIDATES:
                 break

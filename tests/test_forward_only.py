@@ -147,7 +147,6 @@ def _gdelt_gkg_feed(
     url: str = "https://example.test/geopolitics",
     timestamp: str = "20260805100000",
     themes: str = "ECON_GOLD",
-    v2_themes: str = "",
 ) -> tuple[bytes, bytes]:
     fields = [""] * 27
     fields[0] = f"{timestamp}-1"
@@ -155,7 +154,6 @@ def _gdelt_gkg_feed(
     fields[3] = "example.test"
     fields[4] = url
     fields[7] = themes
-    fields[8] = v2_themes
     fields[26] = (
         f"<PAGE_PRECISEPUBTIMESTAMP>{timestamp}</PAGE_PRECISEPUBTIMESTAMP>"
         f"<PAGE_TITLE>{title}</PAGE_TITLE>"
@@ -1049,31 +1047,14 @@ def test_gdelt_gkg_feed_validates_manifest_and_uses_official_gcs_url(tmp_path) -
     assert bad_ledger.count("news_revisions") == 0
 
 
-@pytest.mark.parametrize(
-    ("title", "themes", "v2_themes", "expected"),
-    (
-        ("Gold rises as Treasury yields fall", "", "", True),
-        ("Central banks lift bullion demand", "", "", True),
-        ("Sanctions disrupt regional trade", "WB_2936_GOLD", "SANCTIONS,42", True),
-        ("Rates decision reshapes safe-haven demand", "ECON_GOLDPRICE;ECON_INTEREST_RATES", "", True),
-        ("Ten superhero films ranked", "WB_2936_GOLD", "", False),
-        ("James Marsden joins television hall of fame", "WB_2936_GOLD;TAX_FNCACT_ACTOR", "", False),
-        ("Golden Globe television nominees announced", "WB_2936_GOLD", "", False),
-        ("Coeur Mining reports quarterly revenue", "WB_2936_GOLD;ECON_STOCKMARKET", "", False),
-        ("Visible gold found in drilling results", "WB_2936_GOLD;ENV_MINING", "", True),
-    ),
-)
-def test_gdelt_structured_intake_preserves_market_candidates_without_entertainment(
-    tmp_path, title: str, themes: str, v2_themes: str, expected: bool,
-) -> None:
+def test_gdelt_fetches_discovery_candidate_before_ai_semantic_review(tmp_path) -> None:
     fetched = datetime(2026, 8, 10, 6, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched - timedelta(days=1))
     manifest, archive = _gdelt_gkg_feed(
-        title=title,
+        title="James Marsden joins television hall of fame",
         url="https://example.test/love-story",
         timestamp="20260810054000",
-        themes=themes,
-        v2_themes=v2_themes,
+        themes="WB_2936_GOLD;TAX_FNCACT_ACTOR",
     )
     extracted: list[str] = []
 
@@ -1087,11 +1068,9 @@ def test_gdelt_structured_intake_preserves_market_candidates_without_entertainme
     )
 
     assert result["status"] == "OK"
-    assert result["inserted_revisions"] == int(expected)
-    assert extracted == (["https://example.test/love-story"] if expected else [])
-    assert result["rejected_reasons"] == (
-        {} if expected else {"IRRELEVANT_GKG_SIGNAL": 1}
-    )
+    assert result["inserted_revisions"] == 1
+    assert extracted == ["https://example.test/love-story"]
+    assert result["rejected_reasons"] == {}
 
 
 def test_direct_official_rss_sources_are_bounded_and_rate_limited(tmp_path) -> None:
@@ -1408,12 +1387,12 @@ def test_us_employment_lane_does_not_guess_meaning_from_case_or_keywords() -> No
         assert reason == "AI_SEMANTIC_REVIEW_REQUIRED"
 
 
-def test_gdelt_discovery_eligible_candidates_reach_ai_without_second_filter() -> None:
+def test_gdelt_candidates_reach_ai_without_headline_semantic_filtering() -> None:
     observed = datetime(2026, 8, 10, 6, 0, tzinfo=UTC)
     for headline in (
-        "Gold rises as Treasury yields fall after US jobs report",
-        "XAUUSD reacts to the central bank decision",
-        "Sanctions disrupt regional trade",
+        "A tragic love story remembered after many years",
+        "Cek Harga Emas Hari Ini Senin 10 Agustus 2026",
+        "Giá vàng chiều 5/8: Vàng SJC tiếp tục đi lên",
     ):
         allowed, reason = google_news_item_is_relevant(
             "gdelt_gold_geopolitics", headline,
