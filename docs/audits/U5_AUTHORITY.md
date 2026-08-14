@@ -4,7 +4,8 @@
 
 The repository authority is `finite-memory-u5-v5` (`SCALE-022`) in the RMG
 formula registry and `alpha2_universal_risk_unit_finite_memory_v5.json`.
-`SYSTEM_CONTRACT.md`, `REPLAY_CONTRACT.md`, and `u5_state.py` use the same
+[`SYSTEM_BOUNDARIES.md`](../contracts/SYSTEM_BOUNDARIES.md),
+[`REPLAY.md`](../contracts/REPLAY.md), and `u5_state.py` use the same
 formula:
 
 ```text

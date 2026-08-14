@@ -1,8 +1,15 @@
-# Temporal Event Graph V5 Contract
+# Temporal Event Graph V5 Specification
 
 Status: `DISPLAY_ONLY`
 
 Policy: `temporal-event-graph-v5-material-event`
+
+This specification defines display and feature semantics for the graph. It
+does not re-author point-in-time integrity, append-only evidence, model
+authority, or no-order boundaries; those remain governed by the
+[`SYSTEM_BOUNDARIES`](../contracts/SYSTEM_BOUNDARIES.md),
+[`FORWARD_ONLY`](../contracts/FORWARD_ONLY.md), and
+[`NEWS_EVIDENCE`](../contracts/NEWS_EVIDENCE.md) contracts.
 
 ## Purpose
 
@@ -41,7 +48,7 @@ Each supported episode family has one named coverage template. The view reports 
 5. Market reactions cannot replace the latest core change.
 6. Commentary and headline questions cannot become material events.
 7. A Hormuz group without a core fact is shown only as a market-narrative candidate.
-8. Coverage counts and role labels must use the same coverage contract.
+8. Coverage counts and role labels must use the same coverage definition.
 9. Every card reports material-event count, evidence-document count, and independent-organization count separately.
 10. The rendered page reports both Runtime Git SHA and Story Policy Version.
 

@@ -1,4 +1,9 @@
-# Free Data Feasibility Plan
+# Initial Free Data Feasibility Report
+
+This report preserves the Phase 2F source assessment at the time it was made.
+Its status lines are historical and must not be used as the current provider
+inventory. See [`INPUTS.md`](../reference/INPUTS.md) for current confirmed
+inputs and provider configuration.
 
 Free does not mean decision-time safe. Phase 2F admits a source only after its
 real Forward receipt time, revision behavior, latency, and license are logged.

@@ -1,4 +1,4 @@
-# Confirmed Phase 2F Inputs
+# Input and Provider Reference
 
 These owner decisions configure evidence collection only. They do not grant
 trading authority. Only one secret remains to enable optional LLM annotation.
