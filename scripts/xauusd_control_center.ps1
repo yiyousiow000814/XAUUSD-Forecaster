@@ -35,6 +35,7 @@ $codeReloadTimeout = [TimeSpan]::FromMinutes(5)
 $serviceStartupTimeout = [TimeSpan]::FromMinutes(15)
 $runtimeObservationCycles = 2
 $runtimeObservationTimeout = [TimeSpan]::FromMinutes(15)
+$runtimeDecisionHorizon = [TimeSpan]::FromMinutes(30)
 $reloadableServiceKeys = @("collector", "annotator", "api", "sync")
 $runtimeControlFileNames = @(
     "xauusd_control_center.ps1",
@@ -884,15 +885,9 @@ function Test-RuntimeObservation {
         return $true
     }
     if (([DateTimeOffset]::UtcNow - $readyAt) -ge $runtimeObservationTimeout) {
-        try {
-            $status = Invoke-RestMethod -Method Get `
-                -Uri "http://127.0.0.1:8765/api/status" -TimeoutSec 5
-            $marketClosed = [string]$status.system.market_session -in @(
-                "CLOSED", "WEEKLY_CLOSED"
-            )
-        } catch { $marketClosed = $false }
-        if ($marketClosed) {
-            # Closed-market time does not consume the two-cycle observation window.
+        if (Test-RuntimeObservationMarketPause) {
+            # Time without an eligible 30-minute decision does not consume the
+            # two-cycle observation window, including the pre-close boundary.
             Write-RuntimeUpdateState @{
                 observation_ready_at = [DateTimeOffset]::UtcNow.ToString("o")
             }
@@ -929,11 +924,36 @@ function Get-BrokerMarketSession {
         $now = [DateTimeOffset]::UtcNow
         if ($observedAt -gt $now.AddSeconds(5) -or
             ($now - $observedAt).TotalSeconds -gt 20) { return $null }
+        $closesAt = [DateTimeOffset]::MinValue
+        $closesAtValid = [DateTimeOffset]::TryParse(
+            [string]$session.next_close_time, [ref]$closesAt
+        )
         return [pscustomobject]@{
             ObservedAt = $observedAt
             IsOpen = $session.is_open -eq $true
+            ClosesAt = if ($closesAtValid) { $closesAt } else { $null }
         }
     } catch { return $null }
+}
+
+function Test-RuntimeObservationMarketPause {
+    $session = Get-BrokerMarketSession
+    if ($session) {
+        if (-not $session.IsOpen) { return $true }
+        if ($session.ClosesAt -and
+            $session.ClosesAt -gt [DateTimeOffset]::UtcNow -and
+            ($session.ClosesAt - [DateTimeOffset]::UtcNow) -le $runtimeDecisionHorizon) {
+            return $true
+        }
+        return $false
+    }
+    try {
+        $status = Invoke-RestMethod -Method Get `
+            -Uri "http://127.0.0.1:8765/api/status" -TimeoutSec 5
+        return [string]$status.system.market_session -in @(
+            "CLOSED", "WEEKLY_CLOSED"
+        )
+    } catch { return $false }
 }
 
 function Get-ServiceState {
