@@ -18,6 +18,18 @@ class ModelGatewayCapacityExhausted(RuntimeError):
     """No metered request slot is available for this gateway batch."""
 
 
+class ModelGatewayResponseInvalid(RuntimeError):
+    """A metered provider response could not satisfy the requested contract."""
+
+    def __init__(self, error: Exception) -> None:
+        self.cause_type = type(error).__name__
+        self.cause_message = str(error)
+        super().__init__(
+            f"Model response failed validation: {self.cause_type}: "
+            f"{self.cause_message}"
+        )
+
+
 @dataclass(frozen=True)
 class ModelRequestUsage:
     model: str
@@ -109,7 +121,6 @@ class GeminiModelGateway:
         if not purpose.strip():
             raise ValueError("model request purpose is required")
         last_error: Exception | None = None
-        last_http_error: urllib.error.HTTPError | None = None
         for offset in range(len(self.api_keys)):
             api_key = self.api_keys[(start_index + offset) % len(self.api_keys)]
             usage = ModelRequestUsage(
@@ -129,16 +140,17 @@ class GeminiModelGateway:
                 last_error = error
             except urllib.error.HTTPError as error:
                 last_error = error
-                last_http_error = error
                 if error.code not in retryable_http_codes:
                     raise
         if last_error is None:
             raise ModelGatewayCapacityExhausted(
                 "Model request slots used; retained for the next batch"
             )
-        if preserve_last_http_error and last_http_error is not None:
-            raise last_http_error
-        raise RuntimeError("All metered model attempts failed") from last_error
+        if preserve_last_http_error and isinstance(last_error, urllib.error.HTTPError):
+            raise last_error
+        if isinstance(last_error, retryable_decode_errors):
+            raise ModelGatewayResponseInvalid(last_error) from last_error
+        raise RuntimeError("Metered model request failed") from last_error
 
     def _reserve(self, api_key: str, usage: ModelRequestUsage) -> bool:
         with self._lock:

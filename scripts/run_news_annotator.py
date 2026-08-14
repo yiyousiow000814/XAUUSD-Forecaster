@@ -36,6 +36,7 @@ from xauusd_forecaster.news_scheduler import (  # noqa: E402
     complete_job,
     configured_api_credentials,
     pending_record_for_job,
+    record_job_attempt,
     release_job,
     scheduler_counts,
     sync_pending_jobs,
@@ -144,6 +145,47 @@ def _execute_job(
     )[0]
 
 
+def _execute_job_safely(
+    ledger: ForwardLedger,
+    credential: ApiCredential,
+    job,
+    *,
+    now: datetime,
+) -> dict[str, object]:
+    try:
+        return _execute_job(ledger, credential, job, now=now)
+    except Exception as error:
+        return {
+            "status": "ERROR",
+            "failure_code": "SCHEDULER_EXECUTION_FAILED",
+            "error_type": type(error).__name__,
+            "error": str(error)[:500],
+        }
+
+
+def _provider_failover_credential(
+    credentials: tuple[ApiCredential, ...],
+    current: ApiCredential,
+    status: dict[str, object],
+    *,
+    priority: str,
+) -> ApiCredential | None:
+    """Select at most one independent account after a provider HTTP failure."""
+    if status.get("provider_http_status") not in {401, 403, 429, 500, 502, 503, 504}:
+        return None
+    return next(
+        (
+            credential for credential in credentials
+            if credential.account_id != current.account_id
+            and (
+                credential.pool == "ROUTINE"
+                or priority in {"IMMEDIATE", "FAST"}
+            )
+        ),
+        None,
+    )
+
+
 def run_scheduled_batch(
     ledger: ForwardLedger,
     *,
@@ -178,16 +220,33 @@ def run_scheduled_batch(
                 continue
             empty_credentials.discard(credential.credential_id)
             executed_at = datetime.now(UTC)
-            try:
-                status = _execute_job(
-                    ledger, credential, job, now=executed_at,
+            status = _execute_job_safely(
+                ledger, credential, job, now=executed_at,
+            )
+            record_job_attempt(
+                ledger.connection,
+                job=job,
+                credential=credential,
+                status=status,
+                attempted_at=executed_at,
+            )
+            failover = _provider_failover_credential(
+                credentials, credential, status, priority=job.priority,
+            )
+            outcome_credential = credential
+            if failover is not None:
+                failover_at = datetime.now(UTC)
+                status = _execute_job_safely(
+                    ledger, failover, job, now=failover_at,
                 )
-            except Exception as error:
-                status = {
-                    "status": "ERROR",
-                    "error_type": type(error).__name__,
-                    "error": str(error)[:500],
-                }
+                record_job_attempt(
+                    ledger.connection,
+                    job=job,
+                    credential=failover,
+                    status=status,
+                    attempted_at=failover_at,
+                )
+                outcome_credential = failover
             outcome = str(status.get("status") or "ERROR")
             if outcome == "OK":
                 complete_job(ledger.connection, job.job_id, worker_id)
@@ -227,8 +286,9 @@ def run_scheduled_batch(
                 "job_id": job.job_id,
                 "task_type": job.task_type,
                 "priority": job.priority,
-                "pool": credential.pool,
-                "account_id": credential.account_id,
+                "pool": outcome_credential.pool,
+                "account_id": outcome_credential.account_id,
+                "attempted_accounts": 2 if failover is not None else 1,
                 **status,
             })
             if progress_callback is not None:

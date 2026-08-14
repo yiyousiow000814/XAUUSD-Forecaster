@@ -22,6 +22,7 @@ from .model_limits import (
 from .model_gateway import (
     GeminiModelGateway,
     ModelGatewayCapacityExhausted,
+    ModelGatewayResponseInvalid,
     ModelRequestAccountant,
 )
 from .news_relevance import google_news_item_is_relevant
@@ -64,6 +65,31 @@ HIGH_PRIORITY_NEWS_SOURCES = frozenset({"federal_reserve_monetary"})
 
 
 GeminiBatchCapacityExhausted = ModelGatewayCapacityExhausted
+
+
+def _model_failure_details(error: Exception) -> dict[str, object]:
+    """Return stable failure semantics without exposing credentials or payloads."""
+    provider_status = getattr(error, "code", None)
+    if isinstance(error, ModelGatewayResponseInvalid):
+        return {
+            "failure_code": "MODEL_OUTPUT_INVALID",
+            "error_type": error.cause_type,
+            "error": error.cause_message[:500],
+            "provider_http_status": None,
+        }
+    if isinstance(provider_status, int):
+        return {
+            "failure_code": "PROVIDER_HTTP_ERROR",
+            "error_type": type(error).__name__,
+            "error": str(error)[:500],
+            "provider_http_status": provider_status,
+        }
+    return {
+        "failure_code": "MODEL_REQUEST_FAILED",
+        "error_type": type(error).__name__,
+        "error": str(error)[:500],
+        "provider_http_status": None,
+    }
 
 
 def pending_annotation_records(
@@ -336,12 +362,12 @@ def annotate_pending_news(
                 "prompt_version": prompt_version,
             }
         except Exception as error:
+            failure_details = _model_failure_details(error)
             return {
                 "status": "ERROR",
                 "row": row,
-                "error_type": type(error).__name__,
-                "error": str(error)[:500],
-                "error_code": getattr(error, "code", None),
+                **failure_details,
+                "error_code": failure_details["provider_http_status"],
                 "model_version": expected_model_identity,
                 "prompt_version": prompt_version,
             }
@@ -387,6 +413,8 @@ def _persist_parsed_annotation(
             "revision_number": row["revision_number"],
             "error_type": parsed_record["error_type"],
             "error": parsed_record["error"],
+            "failure_code": parsed_record.get("failure_code"),
+            "provider_http_status": parsed_record.get("provider_http_status"),
             **failure,
         }
     result = parsed_record["result"]
@@ -589,13 +617,13 @@ def translate_pending_headlines(
                 }
             )
         except Exception as error:
+            failure_details = _model_failure_details(error)
             failure = _append_llm_failure(
                 ledger,
                 {
                     "row": row,
-                    "error_type": type(error).__name__,
-                    "error": str(error)[:500],
-                    "error_code": getattr(error, "code", None),
+                    **failure_details,
+                    "error_code": failure_details["provider_http_status"],
                     "model_version": selected_model,
                 },
                 "TITLE_TRANSLATION",
@@ -606,8 +634,7 @@ def translate_pending_headlines(
                     "status": "ERROR",
                     "source": row["source"],
                     "source_item_id": row["source_item_id"],
-                    "error_type": type(error).__name__,
-                    "error": str(error)[:500],
+                    **failure_details,
                     **failure,
                 }
             )
@@ -698,6 +725,7 @@ def assess_pending_news_impacts(
                 "source_item_id": row["source_item_id"], "reason": str(error),
             })
         except Exception as error:
+            failure_details = _model_failure_details(error)
             failure = _append_impact_failure(
                 ledger, row, error, model_version=IMPACT_MODEL,
                 prompt_version=impact_prompt_version,
@@ -705,7 +733,7 @@ def assess_pending_news_impacts(
             statuses.append({
                 "status": "ERROR", "source": row["source"],
                 "source_item_id": row["source_item_id"],
-                "error_type": type(error).__name__, "error": str(error)[:500],
+                **failure_details,
                 **failure,
             })
     return statuses
@@ -881,7 +909,9 @@ class _GeminiRequestPool:
                 raise
             except RuntimeError as error:
                 last_error = error
-        raise RuntimeError("All title translation models failed validation") from last_error
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Title translation model selection was empty")
 
     def call_impact(
         self, start_index: int, row: dict, *,
@@ -1614,6 +1644,9 @@ def _append_llm_failure(
         "retry_state": "DEAD_LETTER" if terminal else "BACKING_OFF",
         "attempt_number": attempt,
         "next_retry_at": next_retry.isoformat() if next_retry else None,
+        "is_terminal": terminal,
+        "failure_code": parsed_record.get("failure_code") or "MODEL_REQUEST_FAILED",
+        "provider_http_status": parsed_record.get("provider_http_status"),
     }
 
 
@@ -1625,8 +1658,9 @@ def _append_impact_failure(
     model_version: str,
     prompt_version: str = IMPACT_PROMPT_VERSION,
 ) -> dict[str, object]:
-    error_type = type(error).__name__
-    normalized = re.sub(r"\s+", " ", str(error)).strip()[:500]
+    details = _model_failure_details(error)
+    error_type = str(details["error_type"])
+    normalized = re.sub(r"\s+", " ", str(details["error"])).strip()[:500]
     signature = hashlib.sha256(
         f"{error_type}|{normalized}".encode("utf-8")
     ).hexdigest()
@@ -1637,8 +1671,9 @@ def _append_impact_failure(
         (row["annotation_id"], model_version, prompt_version),
     ).fetchone()
     attempt = 1 if prior is None else int(prior["attempt_number"]) + 1
-    transient = getattr(error, "code", None) in {429, 500, 502, 503, 504}
-    terminal = False if transient else attempt >= 5
+    same_error = prior is not None and prior["error_signature"] == signature
+    transient = details["provider_http_status"] in {429, 500, 502, 503, 504}
+    terminal = attempt >= 5 if transient else (same_error and attempt >= 2)
     failed_at = datetime.now(UTC)
     if terminal:
         next_retry = None
@@ -1669,6 +1704,9 @@ def _append_impact_failure(
         "retry_state": "DEAD_LETTER" if terminal else "BACKING_OFF",
         "attempt_number": attempt,
         "next_retry_at": next_retry.isoformat() if next_retry else None,
+        "is_terminal": terminal,
+        "failure_code": details["failure_code"],
+        "provider_http_status": details["provider_http_status"],
     }
 
 

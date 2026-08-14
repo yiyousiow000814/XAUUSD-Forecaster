@@ -18,6 +18,7 @@ from xauusd_forecaster.news_scheduler import (
     configured_api_credentials,
     enqueue_job,
     install_scheduler_schema,
+    reconcile_completed_jobs,
     reserve_account_request,
     scheduler_counts,
     sync_pending_jobs,
@@ -275,6 +276,46 @@ def test_dead_letter_is_terminal() -> None:
     assert scheduler_counts(connection)["dead_letter"] == 1
 
 
+def test_superseded_jobs_are_reconciled_without_another_model_attempt(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    first_body = "First complete article body. " * 20
+    second_body = "Corrected complete article body. " * 20
+    common = {
+        "source": "revision-source",
+        "source_item_id": "item",
+        "source_published_time": NOW,
+        "collector_first_seen_time": NOW,
+        "headline": "Report",
+        "link": "https://example.test/report",
+        "cluster_id": "revision-cluster",
+    }
+    ledger.append_news_revision({
+        **common, "fetched_time": NOW, "body": first_body,
+        "content_hash": hashlib.sha256(first_body.encode()).hexdigest(),
+    })
+    job_id = enqueue_job(
+        ledger.connection, task_type="ACTIVE_ANNOTATION",
+        source="revision-source", source_item_id="item", revision_number=1,
+        prompt_version="prompt", priority="NORMAL", now=NOW,
+    )
+    ledger.append_news_revision({
+        **common, "fetched_time": NOW + timedelta(minutes=1), "body": second_body,
+        "content_hash": hashlib.sha256(second_body.encode()).hexdigest(),
+    })
+
+    assert reconcile_completed_jobs(
+        ledger.connection, now=NOW + timedelta(minutes=2),
+    ) == 1
+    row = ledger.connection.execute(
+        "SELECT state,last_error FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
+    ).fetchone()
+    assert tuple(row) == ("DEAD_LETTER", "CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE")
+    counts = scheduler_counts(ledger.connection)
+    assert counts["obsolete"] == 1
+    assert counts["dead_letter"] == 0
+    ledger.close()
+
+
 def test_sync_uses_v15_semantic_priority_not_headline_keywords(tmp_path) -> None:
     body = "The agency reported that its ordinary administrative update took effect. " * 8
     digest = hashlib.sha256(body.encode()).hexdigest()
@@ -421,6 +462,105 @@ def test_preemptible_quota_deferral_flows_to_routine_account(
     assert ledger.connection.execute(
         "SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
     ).fetchone()["state"] == "COMPLETED"
+    attempts = ledger.connection.execute(
+        """SELECT account_id,outcome,error_detail
+        FROM news_ai_job_attempts_v1 ORDER BY attempted_at,account_id"""
+    ).fetchall()
+    assert [tuple(row) for row in attempts] == [
+        ("urgent-account", "DEFERRED", "quota"),
+        ("routine-account", "OK", None),
+    ]
+    ledger.close()
+
+
+def test_scheduler_persists_structured_model_failure_without_credentials(
+    tmp_path, monkeypatch,
+) -> None:
+    from scripts import run_news_annotator as runner
+
+    available_now = datetime.now(UTC) - timedelta(seconds=1)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    job_id = enqueue_job(
+        ledger.connection, task_type="ACTIVE_IMPACT", source="source",
+        source_item_id="failed", revision_number=1, annotation_id="annotation",
+        prompt_version="prompt", priority="NORMAL", now=available_now,
+    )
+    credential = ApiCredential(
+        "account-a", ROUTINE_POOL, "secret-api-key", "safe-fingerprint",
+    )
+    monkeypatch.setattr(runner, "configured_api_credentials", lambda: (credential,))
+    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        runner, "_execute_job",
+        lambda *_args, **_kwargs: {
+            "status": "ERROR", "failure_code": "PROVIDER_HTTP_ERROR",
+            "provider_http_status": 503, "error_type": "HTTPError",
+            "error": "Service Unavailable",
+            "next_retry_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
+        },
+    )
+
+    runner.run_scheduled_batch(ledger, batch_size=1)
+
+    attempt = ledger.connection.execute(
+        "SELECT * FROM news_ai_job_attempts_v1 WHERE job_id=?", (job_id,),
+    ).fetchone()
+    assert attempt["failure_code"] == "PROVIDER_HTTP_ERROR"
+    assert attempt["provider_http_status"] == 503
+    assert attempt["account_id"] == "account-a"
+    assert attempt["credential_id"] == "safe-fingerprint"
+    assert "secret-api-key" not in json.dumps(dict(attempt))
+    ledger.close()
+
+
+def test_provider_http_failure_gets_one_bounded_independent_account_failover(
+    tmp_path, monkeypatch,
+) -> None:
+    from scripts import run_news_annotator as runner
+
+    available_now = datetime.now(UTC) - timedelta(seconds=1)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    job_id = enqueue_job(
+        ledger.connection, task_type="ACTIVE_IMPACT", source="source",
+        source_item_id="recover", revision_number=1, annotation_id="annotation",
+        prompt_version="prompt", priority="NORMAL", now=available_now,
+    )
+    credentials = (
+        ApiCredential("account-a", ROUTINE_POOL, "key-a", "fingerprint-a"),
+        ApiCredential("account-b", ROUTINE_POOL, "key-b", "fingerprint-b"),
+    )
+    monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
+    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    calls = []
+
+    def execute(_ledger, credential, _job, **_kwargs):
+        calls.append(credential.account_id)
+        if credential.account_id == "account-a":
+            return {
+                "status": "ERROR", "failure_code": "PROVIDER_HTTP_ERROR",
+                "provider_http_status": 503, "error_type": "HTTPError",
+                "error": "Service Unavailable",
+            }
+        return {"status": "OK"}
+
+    monkeypatch.setattr(runner, "_execute_job", execute)
+
+    statuses = runner.run_scheduled_batch(ledger, batch_size=1)
+
+    assert calls == ["account-a", "account-b"]
+    assert statuses[0]["status"] == "OK"
+    assert statuses[0]["account_id"] == "account-b"
+    assert statuses[0]["attempted_accounts"] == 2
+    assert ledger.connection.execute(
+        "SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
+    ).fetchone()["state"] == "COMPLETED"
+    attempts = ledger.connection.execute(
+        """SELECT account_id,outcome FROM news_ai_job_attempts_v1
+        WHERE job_id=? ORDER BY account_id""", (job_id,),
+    ).fetchall()
+    assert [tuple(row) for row in attempts] == [
+        ("account-a", "ERROR"), ("account-b", "OK"),
+    ]
     ledger.close()
 
 
