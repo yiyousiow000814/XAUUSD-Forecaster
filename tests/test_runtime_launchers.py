@@ -786,7 +786,7 @@ def test_code_reload_health_requires_fresh_successful_sync(tmp_path) -> None:
     assert result == "True,False"
 
 
-def test_code_reload_accepts_collector_startup_but_not_annotator_startup(
+def test_code_reload_accepts_fresh_service_startup_but_rejects_failed_state(
     tmp_path,
 ) -> None:
     repo = tmp_path / "repo"
@@ -802,7 +802,7 @@ def test_code_reload_accepts_collector_startup_but_not_annotator_startup(
     }), encoding="utf-8")
     annotator = status.parent / "news-annotator-status.json"
     annotator.write_text(json.dumps({
-        "service": "annotator", "state": "RUNNING",
+        "service": "annotator", "state": "STARTING",
         "last_success": "2026-08-12T08:00:01+00:00",
     }), encoding="utf-8")
     script = ROOT / "scripts" / "xauusd_control_center.ps1"
@@ -812,12 +812,12 @@ def test_code_reload_accepts_collector_startup_but_not_annotator_startup(
         "function Get-ForecasterProcesses { return [pscustomobject]@{ ProcessId = 1 } }; "
         "function Invoke-WebRequest { return [pscustomobject]@{ StatusCode = 200 } }; "
         "$started = [DateTimeOffset]::Parse('2026-08-12T08:00:00+00:00'); "
-        "$collectorStarting = Test-CodeReloadHealth -ReloadStarted $started; "
-        f"@{{ service = 'annotator'; state = 'STARTING'; "
+        "$servicesStarting = Test-CodeReloadHealth -ReloadStarted $started; "
+        f"@{{ service = 'annotator'; state = 'ERROR'; "
         f"last_success = '2026-08-12T08:00:01+00:00' }} "
         f"| ConvertTo-Json | Set-Content -LiteralPath '{annotator}'; "
-        "$annotatorStarting = Test-CodeReloadHealth -ReloadStarted $started; "
-        "Write-Output \"$collectorStarting,$annotatorStarting\""
+        "$failed = Test-CodeReloadHealth -ReloadStarted $started; "
+        "Write-Output \"$servicesStarting,$failed\""
     )
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
