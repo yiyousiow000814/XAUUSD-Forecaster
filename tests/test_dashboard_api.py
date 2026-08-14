@@ -1005,7 +1005,7 @@ def test_dashboard_category_is_semantic_not_processing_state() -> None:
     assert module._news_category_label("risk_sentiment") == "风险情绪 / 避险"
     assert module._news_category_label(None) == "其他"
     assert module._news_category_label("") == "其他"
-    assert module._news_category_label("unknown-future-value") == "分类不兼容"
+    assert module._news_category_label("other-custom-topic") == "其他"
 
 
 def test_dashboard_reports_gdelt_fallback_and_retry_time(tmp_path) -> None:

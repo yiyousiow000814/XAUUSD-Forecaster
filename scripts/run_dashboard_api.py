@@ -495,15 +495,12 @@ NEWS_CATEGORY_LABELS = {
     "regulation_other": "监管/其他",
 }
 OTHER_NEWS_CATEGORY_LABEL = "其他"
-UNKNOWN_NEWS_CATEGORY_LABEL = "分类不兼容"
 
 
 def _news_category_label(primary_category: object) -> str:
     """Map one completed semantic category without inferring from workflow state."""
     category = str(primary_category or "").strip()
-    if not category:
-        return OTHER_NEWS_CATEGORY_LABEL
-    return NEWS_CATEGORY_LABELS.get(category, UNKNOWN_NEWS_CATEGORY_LABEL)
+    return NEWS_CATEGORY_LABELS.get(category, OTHER_NEWS_CATEGORY_LABEL)
 
 
 def _not_required_reason(item: dict, forward_epoch: str) -> tuple[str, str]:
