@@ -2311,6 +2311,42 @@ def test_repeated_same_validation_failure_enters_dead_letter(tmp_path) -> None:
     assert latest["next_retry_at"] is None
 
 
+def test_repeated_same_impact_validation_failure_gets_one_recovery_attempt(
+    tmp_path,
+) -> None:
+    now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger.connection.execute("PRAGMA foreign_keys=OFF")
+    row = {
+        "source": "impact-failure-test", "source_item_id": "one",
+        "revision_number": 1, "content_hash": "hash",
+        "annotation_id": "annotation",
+    }
+    failure = annotation_module.ModelGatewayResponseInvalid(
+        ValueError("identity relation contradicts material update")
+    )
+
+    first = annotation_module._append_impact_failure(
+        ledger, row, failure, model_version=annotation_module.IMPACT_MODEL,
+    )
+    second = annotation_module._append_impact_failure(
+        ledger, row, failure, model_version=annotation_module.IMPACT_MODEL,
+    )
+
+    assert first["retry_state"] == "BACKING_OFF"
+    assert first["failure_code"] == "MODEL_OUTPUT_INVALID"
+    assert second["retry_state"] == "DEAD_LETTER"
+    assert second["is_terminal"] is True
+    latest = ledger.connection.execute(
+        """SELECT error_type,error,is_terminal,next_retry_at
+        FROM news_impact_failures_v1 ORDER BY attempt_number DESC LIMIT 1"""
+    ).fetchone()
+    assert tuple(latest) == (
+        "ValueError", "identity relation contradicts material update", 1, None,
+    )
+    ledger.close()
+
+
 def test_batch_rpm_exhaustion_is_deferred_without_failure_row(
     tmp_path, monkeypatch
 ) -> None:
