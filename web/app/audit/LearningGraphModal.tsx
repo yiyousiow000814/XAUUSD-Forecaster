@@ -233,8 +233,6 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
   );
   const [overviewRetry, setOverviewRetry] = useState(0);
   const [pageRetry, setPageRetry] = useState(0);
-  const resultListRef = useRef<HTMLDivElement>(null);
-  const pendingPageScrollRef = useRef(false);
   const rows = groups.filter(row => row.model_identity === identity).sort((a,b) => b.generation-a.generation);
   const pageCursor = pageCursors[page];
   useEffect(() => {
@@ -288,24 +286,8 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
     ?? rows.slice(safePage * pageSize, (safePage + 1) * pageSize);
   const pageLoading = Boolean(historyResource && !remotePages[safePage] && !pageError);
   const goToPage = (nextPage: number) => {
-    pendingPageScrollRef.current = true;
     setPage(Math.max(0, Math.min(pageCount - 1, nextPage)));
   };
-  useEffect(() => {
-    if (!pendingPageScrollRef.current || pageLoading || pageError) return;
-    pendingPageScrollRef.current = false;
-    const frame = window.requestAnimationFrame(() => {
-      const anchor = resultListRef.current;
-      const scroller = anchor?.closest<HTMLElement>(".graph-modal-body");
-      if (!anchor || !scroller) return;
-      const top = scroller.scrollTop + anchor.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
-      scroller.scrollTo({
-        top,
-        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
-      });
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [pageLoading, pageError, safePage]);
   const stamp = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12:false, month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" });
   const metric = (row: VersionGroup) => row.cadence_metrics?.[cadence] ?? { oos_rows: row.subsequent_oos_rows, distinct_days: row.distinct_days, cumulative_quote_return: row.cumulative_quote_return, profit_factor_quote_adjusted: row.profit_factor_quote_adjusted, coverage_rate: row.coverage_rate };
   const graphGroups = overviewGroups ?? groups;
@@ -325,9 +307,12 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
   );
   const values = graphRows.map(row => metric(row).cumulative_quote_return).concat(0);
   const low = Math.min(...values); const high = Math.max(...values);
+  const cycleTimes = cycles.map(cycle => Date.parse(cycle));
+  const firstCycleTime = cycleTimes.at(0) ?? 0;
+  const lastCycleTime = cycleTimes.at(-1) ?? firstCycleTime;
   const gx = (cycle: string) => cycles.length === 1
     ? 480
-    : 90 + cycles.indexOf(cycle) / Math.max(1, cycles.length - 1) * 780;
+    : 90 + (Date.parse(cycle) - firstCycleTime) / Math.max(1, lastCycleTime - firstCycleTime) * 780;
   const gy = (value: number) => 28 + (high-value)/Math.max(.000001,high-low)*218;
   const axisTickCount = Math.min(6, cycles.length);
   const axisTickIndexes = new Set(Array.from({ length: axisTickCount }, (_, index) => axisTickCount === 1
@@ -366,7 +351,8 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
         const bounds = event.currentTarget.getBoundingClientRect();
         const chartX = (event.clientX - bounds.left) / Math.max(1, bounds.width) * 960;
         const ratio = Math.max(0, Math.min(1, (chartX - 90) / 780));
-        setHoveredCycle(cycles[Math.round(ratio * Math.max(0, cycles.length - 1))] ?? null);
+        const pointerTime = firstCycleTime + ratio * Math.max(1, lastCycleTime - firstCycleTime);
+        setHoveredCycle(cycles.reduce((nearest, cycle) => Math.abs(Date.parse(cycle) - pointerTime) < Math.abs(Date.parse(nearest) - pointerTime) ? cycle : nearest, cycles[0]) ?? null);
       }} onPointerLeave={() => setHoveredCycle(null)} onClick={() => setPinnedCycle(previous => previous === activeCycle ? null : activeCycle)}>
         <line x1="70" x2="890" y1={gy(0)} y2={gy(0)} className="zero-line" />
         <text x="12" y={gy(high)+4}>{pct(high)}</text><text x="12" y={gy(low)+4}>{pct(low)}</text>
@@ -375,23 +361,23 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
         {availableIdentities.map(key => {
           const modelRows = rowsForIdentity(key);
           const selected = !focusedIdentity || focusedIdentity === key;
-          return <g key={key} className={selected ? "primary-model-series" : "comparison-model-series"} opacity={selected ? .92 : .14}>{modelRows.slice(1).map((row, index) => {
+          return <g key={key} className={selected ? "primary-model-series" : "comparison-model-series"} opacity={selected ? (focusedIdentity ? .96 : .72) : .12}>{modelRows.slice(1).map((row, index) => {
             const previous = modelRows[index];
-            if (cycles.indexOf(row.created_at) !== cycles.indexOf(previous.created_at) + 1) return null;
-            return <line key={`${previous.training_dataset_hash}-${row.training_dataset_hash}`} x1={gx(previous.created_at)} y1={gy(metric(previous).cumulative_quote_return)} x2={gx(row.created_at)} y2={gy(metric(row).cumulative_quote_return)} stroke={COLORS[key]} strokeWidth={selected ? "2.75" : "1.5"} />;
-          })}{modelRows.map(row => { const pointLabel = `${LABELS[key]}，第 ${row.generation} 组，${stamp(row.created_at)}，自身训练 ${formatExactCount(row.training_rows)} 条，收益 ${pct(metric(row).cumulative_quote_return)}`; const cycleSelected = row.created_at === activeCycle; return <circle key={row.training_dataset_hash} className="version-cycle-point" cx={gx(row.created_at)} cy={gy(metric(row).cumulative_quote_return)} r={cycleSelected ? "5" : "3"} fill={COLORS[key]} stroke="#eee9dc" strokeWidth="2" opacity={cycleSelected ? 1 : 0} tabIndex={0} aria-label={pointLabel} onMouseEnter={() => { setHovered(row); setHoveredIdentity(key); setHoveredCycle(row.created_at); }} onMouseLeave={() => { setHovered(null); setHoveredIdentity(null); setHoveredCycle(null); }} onFocus={() => { setHovered(row); setHoveredIdentity(key); setHoveredCycle(row.created_at); }} onBlur={() => { setHovered(null); setHoveredIdentity(null); setHoveredCycle(null); }}><title>{pointLabel}</title></circle>})}</g>;
+            const spansMissingCycle = cycles.indexOf(row.created_at) > cycles.indexOf(previous.created_at) + 1;
+            return <line key={`${previous.training_dataset_hash}-${row.training_dataset_hash}`} className={spansMissingCycle ? "version-cycle-gap" : undefined} x1={gx(previous.created_at)} y1={gy(metric(previous).cumulative_quote_return)} x2={gx(row.created_at)} y2={gy(metric(row).cumulative_quote_return)} stroke={COLORS[key]} strokeWidth={focusedIdentity === key ? "3" : selected ? "2" : "1.5"} />;
+          })}{modelRows.map(row => { const pointLabel = `${LABELS[key]}，第 ${row.generation} 组，${stamp(row.created_at)}，自身训练 ${formatExactCount(row.training_rows)} 条，收益 ${pct(metric(row).cumulative_quote_return)}`; const cycleSelected = row.created_at === activeCycle; return <circle key={row.training_dataset_hash} className="version-cycle-point" cx={gx(row.created_at)} cy={gy(metric(row).cumulative_quote_return)} r={cycleSelected ? "5" : "2.5"} fill={COLORS[key]} stroke="#eee9dc" strokeWidth={cycleSelected ? "2" : "1"} opacity={cycleSelected ? 1 : .72} tabIndex={0} aria-label={pointLabel} onMouseEnter={() => { setHovered(row); setHoveredIdentity(key); setHoveredCycle(row.created_at); }} onMouseLeave={() => { setHovered(null); setHoveredIdentity(null); setHoveredCycle(null); }} onFocus={() => { setHovered(row); setHoveredIdentity(key); setHoveredCycle(row.created_at); }} onBlur={() => { setHovered(null); setHoveredIdentity(null); setHoveredCycle(null); }}><title>{pointLabel}</title></circle>})}</g>;
         })}
       </svg> : <Empty title="暂无训练组结果" text="这个频率还没有成熟的训练组结果。" />}
-      <div className="chart-legend version-focus-legend"><span>移动查看同一周期 · 点击图表固定 · 空白代表该模型尚未加入或本轮未训练</span></div>
+      <div className="chart-legend version-focus-legend"><span>实线连接连续训练 · 虚线跨过该模型未训练的周期 · 模型从真实加入时间开始</span></div>
     </section>
-    <div ref={resultListRef} className="version-list-anchor" aria-hidden="true" />
-    <div className="version-page-stage" aria-busy={pageLoading}>
+    <div className="version-page-stage">
+    {pageCount > 1 && <VersionPagination page={safePage} pageCount={pageCount} total={totalRows} busy={pageLoading} onPage={goToPage} />}
+    <div className="version-ledger-head"><span>组别 / 状态</span><span>训练与上线</span><span>创建后 OOS</span><span>本组独立收益</span><span>PF / 出方向</span></div>
+    <div className="version-page-results" aria-busy={pageLoading}>
     {pageLoading ? <GraphLoading label="正在读取这组成绩" compact /> : pageError ? <GraphLoadError compact label={pageError} onRetry={() => {
       setPageError(null);
       setPageRetry(value => value + 1);
     }} /> : <>
-    {pageCount > 1 && <VersionPagination page={safePage} pageCount={pageCount} total={totalRows} onPage={goToPage} />}
-    <div className="version-ledger-head"><span>组别 / 状态</span><span>训练与上线</span><span>创建后 OOS</span><span>本组独立收益</span><span>PF / 出方向</span></div>
     {visibleRows.map(row => { const selected = metric(row); return <article key={`${row.model_identity}-${row.training_dataset_hash}`} className={row.lifecycle_status === "LATEST" ? "is-latest" : ""}>
       <div className="version-result-head">
         <span className="version-group"><b>第 {row.generation} 组</b><small>{row.lifecycle_status === "LATEST" ? "最新版" : row.lifecycle_status === "PREVIOUS" ? "前一版" : "已归档"}</small></span>
@@ -403,21 +389,22 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
         <span data-label="PF / 出方向"><b>{selected.profit_factor_quote_adjusted?.toFixed(2) ?? "—"}</b><small>出方向 {((selected.coverage_rate ?? 0)*100).toFixed(1)}%</small></span>
       </div>
     </article>})}
-    {pageCount > 1 && <VersionPagination page={safePage} pageCount={pageCount} total={totalRows} onPage={goToPage} position="bottom" />}
     {!totalRows && <p>这个模型还没有真实训练版本。</p>}
     </>}
+    </div>
+    {pageCount > 1 && <VersionPagination page={safePage} pageCount={pageCount} total={totalRows} busy={pageLoading} onPage={goToPage} position="bottom" />}
     </div>
   </section>;
 }
 
-function VersionPagination({ page, pageCount, total, onPage, position = "top" }: {
+function VersionPagination({ page, pageCount, total, busy, onPage, position = "top" }: {
   page: number; pageCount: number; total: number;
-  onPage: (page: number) => void; position?: "top" | "bottom";
+  busy: boolean; onPage: (page: number) => void; position?: "top" | "bottom";
 }) {
   return <nav className={`version-pagination version-pagination-${position}`} aria-label={`训练组分页（${position === "top" ? "顶部" : "底部"}）`}>
-    <button type="button" aria-label="上一页训练组" disabled={page === 0} onClick={() => onPage(page - 1)}>←</button>
+    <button type="button" aria-label="上一页训练组" disabled={busy || page === 0} onClick={() => onPage(page - 1)}>←</button>
     <span><b>{formatExactCount(page + 1)}</b> / {formatExactCount(pageCount)}<small><CountValue value={total} suffix=" 组" /></small></span>
-    <button type="button" aria-label="下一页训练组" disabled={page >= pageCount - 1} onClick={() => onPage(page + 1)}>→</button>
+    <button type="button" aria-label="下一页训练组" disabled={busy || page >= pageCount - 1} onClick={() => onPage(page + 1)}>→</button>
   </nav>;
 }
 
