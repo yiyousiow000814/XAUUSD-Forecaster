@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import CountValue from "../_components/CountValue";
-import { formatExactCount } from "../_lib/count-format";
+import { formatCompactCount, formatExactCount } from "../_lib/count-format";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { versionResultLabel, type VersionEvaluationStatus } from "../_lib/version-result-state";
 import { modelVersionMarkers } from "../_lib/model-version-markers";
@@ -205,6 +205,7 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
   const [identity, setIdentity] = useState("BROAD_FULL");
   const [cadence, setCadence] = useState<EvaluationCadence>("EVERY_5M");
   const [cutoffWindow, setCutoffWindow] = useState<"20" | "all">("20");
+  const [comparisonIdentity, setComparisonIdentity] = useState<string | null>(null);
   const [hovered, setHovered] = useState<VersionGroup | null>(null);
   const [page, setPage] = useState(0);
   const overviewUrl = historyResource ? `${historyResource}?resource=version-overview` : "";
@@ -310,36 +311,57 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
   const allCutoffs = [...new Set(matureRows.map(comparisonCutoff))].sort((a, b) => a - b);
   const cutoffs = cutoffWindow === "all" ? allCutoffs : allCutoffs.slice(-20);
   const graphRows = matureRows.filter(row => cutoffs.includes(comparisonCutoff(row)));
-  const values = graphRows.map(row => metric(row).cumulative_quote_return).concat(0);
+  const availableIdentities = Object.keys(LABELS).filter(key => key !== "CHAMPION_0"
+    && graphRows.some(row => row.model_identity === key));
+  const visibleIdentities = [identity, ...(comparisonIdentity && comparisonIdentity !== identity ? [comparisonIdentity] : [])]
+    .filter(key => availableIdentities.includes(key));
+  const visibleGraphRows = graphRows.filter(row => visibleIdentities.includes(row.model_identity));
+  const values = visibleGraphRows.map(row => metric(row).cumulative_quote_return).concat(0);
   const low = Math.min(...values); const high = Math.max(...values);
   const gx = (trainingRows: number) => cutoffs.length === 1
     ? 480
     : 90 + cutoffs.indexOf(trainingRows) / Math.max(1, cutoffs.length - 1) * 780;
   const gy = (value: number) => 28 + (high-value)/Math.max(.000001,high-low)*218;
+  const axisTickCount = Math.min(6, cutoffs.length);
+  const axisTickIndexes = new Set(Array.from({ length: axisTickCount }, (_, index) => axisTickCount === 1
+    ? 0
+    : Math.round(index * (cutoffs.length - 1) / (axisTickCount - 1))));
+  const axisCutoffs = cutoffs.filter((_, index) => axisTickIndexes.has(index));
+  const toggleComparison = (modelIdentity: string) => {
+    setHovered(null);
+    setComparisonIdentity(previous => previous === modelIdentity ? null : modelIdentity);
+  };
   const hoveredMetric = hovered ? metric(hovered) : null;
-  return <section className="version-ledger modal-version-ledger"><header><div className="version-ledger-title"><span>共同训练截止量对齐 · 同一坐标叠加比较</span><h3>所有模型的训练组成绩</h3></div><div className="version-ledger-controls"><label className="version-ledger-model"><span>查看模型明细</span><select value={identity} onChange={event => { setIdentity(event.target.value); setPage(0); setRemotePages({}); setPageCursors({ 0: null }); setRemoteTotal(null); setPageError(null); setPageRetry(0); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select></label><label><span>统计频率</span><select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPage(0); }}><option value="EVERY_5M">每5分钟（重叠样本）</option><option value="FIXED_30M">每30分钟（固定 :00 / :30）</option></select></label><label><span>横轴范围</span><select value={cutoffWindow} onChange={event => setCutoffWindow(event.target.value as "20" | "all")}><option value="20">最近20个训练截止点</option><option value="all">全部训练截止点</option></select></label></div></header>
-    <section className="version-hover-chart" aria-label="所有模型训练组独立收益图">
-      <div className="version-hover-readout">{hovered && hoveredMetric ? <><b>{LABELS[hovered.model_identity]} · 第 {hovered.generation} 组</b><span>{stamp(hovered.created_at)} · 共同截止 {formatExactCount(comparisonCutoff(hovered))} 条 · 自身训练 {formatExactCount(hovered.training_rows)} 条 · OOS {formatExactCount(hoveredMetric.oos_rows)} 条 · 收益 {pct(hoveredMetric.cumulative_quote_return)} · PF {hoveredMetric.profit_factor_quote_adjusted?.toFixed(2) ?? "—"} · 出方向 {((hoveredMetric.coverage_rate ?? 0)*100).toFixed(1)}%</span></> : <><b>模型成绩对比</b><span>按同一训练截止点比较。</span></>}</div>
+  return <section className="version-ledger modal-version-ledger"><header><div className="version-ledger-title"><span>共同训练截止量对齐 · 聚焦一个模型</span><h3>训练组成绩对比</h3></div><div className="version-ledger-controls"><label className="version-ledger-model"><span>主模型</span><select value={identity} onChange={event => { const nextIdentity = event.target.value; setIdentity(nextIdentity); setComparisonIdentity(previous => previous === nextIdentity ? null : previous); setHovered(null); setPage(0); setRemotePages({}); setPageCursors({ 0: null }); setRemoteTotal(null); setPageError(null); setPageRetry(0); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select></label><label><span>统计频率</span><select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setHovered(null); setPage(0); }}><option value="EVERY_5M">每5分钟（重叠样本）</option><option value="FIXED_30M">每30分钟（固定 :00 / :30）</option></select></label><label><span>横轴范围</span><select value={cutoffWindow} onChange={event => { setCutoffWindow(event.target.value as "20" | "all"); setHovered(null); }}><option value="20">最近20个训练截止点</option><option value="all">全部训练截止点</option></select></label></div></header>
+    <section className="version-hover-chart" aria-label="模型训练组独立收益对比图">
+      <div className="version-hover-readout" aria-live="polite">{hovered && hoveredMetric ? <><b>{LABELS[hovered.model_identity]} · 第 {hovered.generation} 组</b><span>{stamp(hovered.created_at)} · 共同截止 {formatExactCount(comparisonCutoff(hovered))} 条 · 自身训练 {formatExactCount(hovered.training_rows)} 条 · OOS {formatExactCount(hoveredMetric.oos_rows)} 条 · 收益 {pct(hoveredMetric.cumulative_quote_return)} · PF {hoveredMetric.profit_factor_quote_adjusted?.toFixed(2) ?? "—"} · 出方向 {((hoveredMetric.coverage_rate ?? 0)*100).toFixed(1)}%</span></> : <><b>{LABELS[identity]}</b><span>主模型保持突出；悬停或用键盘聚焦数据点查看完整成绩。</span></>}</div>
+      <div className="version-comparison-toolbar">
+        <div><b>添加一个对比</b><small>默认只显示主模型，按需叠加一条参照曲线。</small></div>
+        <div role="group" aria-label="选择对比模型">{availableIdentities.filter(key => key !== identity).map(key => {
+          const active = comparisonIdentity === key;
+          return <button key={key} type="button" aria-pressed={active} onClick={() => toggleComparison(key)}><i style={{ background:COLORS[key] }} />{LABELS[key]}</button>;
+        })}{comparisonIdentity && comparisonIdentity !== identity && <button type="button" className="comparison-clear" onClick={() => { setComparisonIdentity(null); setHovered(null); }}>清除对比</button>}</div>
+      </div>
       {overviewState === "loading" ? <GraphLoading label="正在更新训练总览" compact /> : overviewState === "error" ? <GraphLoadError compact label="训练总览读取失败" onRetry={() => {
         setOverviewState("loading");
         setOverviewRetry(value => value + 1);
-      }} /> : graphRows.length ? <svg viewBox="0 0 960 300" role="img">
+      }} /> : visibleGraphRows.length ? <svg viewBox="0 0 960 300" role="img">
         <line x1="70" x2="890" y1={gy(0)} y2={gy(0)} className="zero-line" />
         <text x="12" y={gy(high)+4}>{pct(high)}</text><text x="12" y={gy(low)+4}>{pct(low)}</text>
-        {cutoffs.map(trainingRows => <g key={trainingRows} className="generation-axis"><line x1={gx(trainingRows)} x2={gx(trainingRows)} y1="252" y2="258" /><text x={gx(trainingRows)} y="279" textAnchor="middle">{trainingRows} 条</text></g>)}
-        {Object.keys(LABELS).filter(key => key !== "CHAMPION_0").map(key => {
-          const modelRows = graphRows.filter(row => row.model_identity === key).sort((a,b) => comparisonCutoff(a)-comparisonCutoff(b));
+        {axisCutoffs.map(trainingRows => <g key={trainingRows} className="generation-axis"><line x1={gx(trainingRows)} x2={gx(trainingRows)} y1="252" y2="258" /><text x={gx(trainingRows)} y="279" textAnchor="middle">{formatCompactCount(trainingRows)} 条</text></g>)}
+        {visibleIdentities.map(key => {
+          const modelRows = visibleGraphRows.filter(row => row.model_identity === key).sort((a,b) => comparisonCutoff(a)-comparisonCutoff(b));
           const selected = key === identity;
-          return <g key={key} opacity={selected ? 1 : .48}>{modelRows.slice(1).map((row, index) => {
+          return <g key={key} className={selected ? "primary-model-series" : "comparison-model-series"} opacity={selected ? 1 : .58}>{modelRows.slice(1).map((row, index) => {
             const previous = modelRows[index];
             const previousIndex = cutoffs.indexOf(comparisonCutoff(previous));
             const currentIndex = cutoffs.indexOf(comparisonCutoff(row));
             const crossesMissingCutoff = currentIndex !== previousIndex + 1;
             return <line key={`${previous.training_dataset_hash}-${row.training_dataset_hash}`} x1={gx(comparisonCutoff(previous))} y1={gy(metric(previous).cumulative_quote_return)} x2={gx(comparisonCutoff(row))} y2={gy(metric(row).cumulative_quote_return)} stroke={COLORS[key]} strokeWidth={selected ? "3.5" : "2.25"} strokeDasharray={crossesMissingCutoff ? "7 6" : undefined} />;
-          })}{modelRows.map(row => <circle key={row.training_dataset_hash} cx={gx(comparisonCutoff(row))} cy={gy(metric(row).cumulative_quote_return)} r={selected ? "6" : "5"} fill={COLORS[key]} stroke="#eee9dc" strokeWidth="2" tabIndex={0} onMouseEnter={() => setHovered(row)} onMouseLeave={() => setHovered(null)} onFocus={() => setHovered(row)} onBlur={() => setHovered(null)}><title>{`${LABELS[key]} · 共同截止 ${formatExactCount(comparisonCutoff(row))} 条 · 自身训练 ${formatExactCount(row.training_rows)} 条 · 自身第 ${row.generation} 组 · ${pct(metric(row).cumulative_quote_return)}`}</title></circle>)}</g>;
+          })}{modelRows.map(row => { const pointLabel = `${LABELS[key]}，第 ${row.generation} 组，共同截止 ${formatExactCount(comparisonCutoff(row))} 条，收益 ${pct(metric(row).cumulative_quote_return)}`; return <circle key={row.training_dataset_hash} cx={gx(comparisonCutoff(row))} cy={gy(metric(row).cumulative_quote_return)} r={selected ? "6" : "4.5"} fill={COLORS[key]} stroke="#eee9dc" strokeWidth="2" tabIndex={0} aria-label={pointLabel} onMouseEnter={() => setHovered(row)} onMouseLeave={() => setHovered(null)} onFocus={() => setHovered(row)} onBlur={() => setHovered(null)}><title>{pointLabel}</title></circle>})}</g>;
         })}
       </svg> : <Empty title="暂无训练组结果" text="这个频率还没有成熟的训练组结果。" />}
-      <div className="chart-legend">{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <span key={key}><i style={{ background:COLORS[key] }} />{label}</span>)}</div>
+      <div className="chart-legend version-focus-legend">{visibleIdentities.map(key => <span key={key} className={key === identity ? "is-primary" : ""}><i style={{ background:COLORS[key] }} />{LABELS[key]}{key === identity && <small>主模型</small>}</span>)}</div>
     </section>
     <div ref={resultListRef} className="version-list-anchor" aria-hidden="true" />
     <div className="version-page-stage" aria-busy={pageLoading}>
