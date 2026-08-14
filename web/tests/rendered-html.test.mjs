@@ -10,7 +10,7 @@ const { runtimeUpdateFailurePresentation } = await import("../app/_lib/runtime-u
 const { countPresentation, formatCompactCount, formatExactCount, progressCountPresentation } = await import("../app/_lib/count-format.ts");
 const { versionResultLabel } = await import("../app/_lib/version-result-state.ts");
 const { modelVersionMarkers } = await import("../app/_lib/model-version-markers.ts");
-const { buildVersionCycleChart } = await import("../app/_lib/version-cycle-chart.ts");
+const { buildTrainingCutoffChart } = await import("../app/_lib/training-cutoff-chart.ts");
 const { statusFieldPhase } = await import("../app/_lib/current-data-provenance.ts");
 const { shouldPollDashboardResource } = await import("../app/_lib/dashboard-refresh-policy.ts");
 const { quoteBridgePresentation } = await import("../app/_lib/quote-bridge-state.ts");
@@ -49,30 +49,24 @@ test("derives model handovers from the predictions actually shown", () => {
   ]), []);
 });
 
-test("aligns every model to the shared training cycle without inventing history", () => {
-  const chart = buildVersionCycleChart([
+test("aligns models by comparable training cutoff without inventing history", () => {
+  const chart = buildTrainingCutoffChart([
     { model_identity: "MARKET_ONLY", created_at: "2026-08-14T01:00:00Z", generation: 1, training_rows: 1000 },
     { model_identity: "MARKET_ONLY", created_at: "2026-08-14T02:00:00Z", generation: 2, training_rows: 1050 },
     { model_identity: "MARKET_ONLY", created_at: "2026-08-14T03:00:00Z", generation: 3, training_rows: 1100 },
-    { model_identity: "NEWS_ONLY", created_at: "2026-08-14T02:00:00Z", generation: 1, training_rows: 124 },
-    { model_identity: "NEWS_ONLY", created_at: "2026-08-14T03:00:00Z", generation: 2, training_rows: 174 },
-    { model_identity: "NEWS_ONLY", created_at: "2026-08-14T03:00:00Z", generation: 3, training_rows: 174 },
-    { model_identity: "MARKET_ONLY", created_at: "2026-08-14T04:00:00Z", generation: 4, training_rows: 1150, oos_rows: 0 },
-  ]);
+    { model_identity: "NEWS_ONLY", created_at: "2026-08-14T02:00:00Z", generation: 1, training_rows: 1050 },
+    { model_identity: "NEWS_ONLY", created_at: "2026-08-14T03:00:00Z", generation: 2, training_rows: 1100 },
+    { model_identity: "NEWS_ONLY", created_at: "2026-08-14T03:00:00Z", generation: 3, training_rows: 1100 },
+  ], row => row.training_rows);
 
-  assert.deepEqual(chart.cycles, [
-    "2026-08-14T01:00:00Z",
-    "2026-08-14T02:00:00Z",
-    "2026-08-14T03:00:00Z",
-    "2026-08-14T04:00:00Z",
-  ]);
+  assert.deepEqual(chart.cutoffs, [1000, 1050, 1100]);
   const market = chart.series.find(series => series.modelIdentity === "MARKET_ONLY");
   const news = chart.series.find(series => series.modelIdentity === "NEWS_ONLY");
-  assert.deepEqual(market.points.map(point => point.cycleIndex), [0, 1, 2, 3]);
-  assert.deepEqual(news.points.map(point => point.cycleIndex), [1, 2]);
-  assert.equal(news.points[0].row.training_rows, 124);
-  assert.equal(news.points[1].row.generation, 3);
-  assert.equal(chart.cycles.at(-1), "2026-08-14T04:00:00Z");
+  assert.deepEqual(market.points.map(point => point.cutoffIndex), [0, 1, 2]);
+  assert.deepEqual(news.points.map(point => point.cutoffIndex), [1, 2, 2]);
+  assert.equal(news.points[0].row.training_rows, 1050);
+  assert.deepEqual(news.points.slice(1).map(point => point.row.generation), [2, 3]);
+  assert.equal(chart.cutoffs.at(-1), 1100);
 });
 
 test("keeps branch throughput limits while refreshing Preview metrics from D1", () => {
@@ -1028,7 +1022,7 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(page, /本组独立贡献/);
   assert.match(modal, /长期 OOS 曲线/);
   assert.match(modal, /每组独立成绩/);
-  assert.match(modal, /训练组成绩对比/);
+  assert.match(modal, /所有模型的训练组成绩/);
   assert.match(modal, /const pageSize = 6/);
   assert.match(modal, /visibleRows\.map/);
   assert.match(modal, /function VersionPagination/);
@@ -1040,15 +1034,16 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /busy=\{pageLoading\}/);
   assert.match(css, /version-page-results \{ min-height:420px; display:flex; flex-direction:column/);
   assert.match(modal, /position="bottom"/);
-  assert.match(modal, /spansMissingCycle/);
-  assert.match(modal, /className=\{spansMissingCycle \? "version-cycle-gap"/);
-  assert.match(css, /version-cycle-gap \{ stroke-dasharray:6 5; opacity:\.42/);
-  assert.match(modal, /统一训练周期/);
+  assert.match(modal, /buildTrainingCutoffChart/);
+  assert.match(modal, /crossesMissingCutoff/);
+  assert.match(modal, /strokeDasharray=\{crossesMissingCutoff \? "7 6"/);
+  assert.match(modal, /共同训练截止量对齐/);
   assert.match(modal, /查看模型明细/);
-  assert.match(modal, /最近20个训练周期/);
-  assert.match(modal, /六模型始终同屏/);
+  assert.match(modal, /最近20个训练截止点/);
+  assert.match(modal, /图中 \{formatExactCount\(graphRows\.length\)\} \/ \{formatExactCount\(matureRows\.length\)\} 个成熟结果/);
+  assert.match(modal, /组等待结果/);
+  assert.doesNotMatch(modal, /横轴按共同训练运行时间排列|pointerTime/);
   assert.match(modal, /每30分钟（固定 :00 \/ :30）/);
-  assert.match(modal, /模型半路加入时从真实加入周期开始/);
   assert.match(page, /六套模型，现在表现怎样/);
   assert.match(page, /等待新版生成/);
   assert.match(page, /training-card-total/);
@@ -1122,14 +1117,13 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /getUTCMinutes\(\) % 30 === 0/);
   assert.match(modal, /const xAtIndex/);
   assert.match(modal, /条模型评分/);
-  assert.match(modal, /训练组成绩对比/);
-  assert.match(modal, /六条曲线不会隐藏/);
-  assert.match(modal, /本轮未训练/);
-  assert.match(modal, /已训练 · 等待结果/);
-  assert.match(modal, /aria-pressed=\{active\}/);
-  assert.match(modal, /const activeCycle = hoveredCycle \?\? pinnedCycle \?\? latestCycle/);
+  assert.match(modal, /所有模型的训练组成绩/);
+  assert.match(modal, /按同一训练截止点比较/);
+  assert.match(modal, /pendingRows = graphGroups\.length - matureRows\.length/);
+  assert.match(modal, /最近20个训练截止点/);
   assert.match(modal, /aria-label=\{pointLabel\}/);
-  assert.doesNotMatch(modal, /comparisonCutoff/);
+  assert.match(modal, /comparisonCutoff/);
+  assert.doesNotMatch(modal, /activeCycle|hoveredCycle|pinnedCycle/);
   assert.match(modal, /versionBoundaries/);
   assert.match(modal, /pools\.direction !== null && pools\.direction !== state\.lastDirectionRows/);
   assert.match(modal, /pools\.news !== null && pools\.news !== state\.lastNewsRows/);
