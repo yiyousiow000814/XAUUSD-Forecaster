@@ -1002,12 +1002,10 @@ def test_dashboard_uses_same_explicit_event_clock_as_model(tmp_path) -> None:
 def test_dashboard_category_is_semantic_not_processing_state() -> None:
     module = _dashboard_module()
     assert module._news_category_label("central_bank_gold") == "央行购金"
+    assert module._news_category_label("risk_sentiment") == "风险情绪 / 避险"
     assert module._news_category_label(None) == "其他"
-    assert module._news_category_label("unknown-future-value") == "其他"
-
-
-def test_dashboard_names_risk_sentiment_for_gold_readers() -> None:
-    assert _dashboard_module()._news_category_label("risk_sentiment") == "避险情绪"
+    assert module._news_category_label("") == "其他"
+    assert module._news_category_label("unknown-future-value") == "分类不兼容"
 
 
 def test_dashboard_reports_gdelt_fallback_and_retry_time(tmp_path) -> None:

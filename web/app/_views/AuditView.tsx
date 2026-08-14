@@ -426,7 +426,7 @@ const outcomeReason = (codes: string[]) => codes.some(code => code.includes("CLO
       : "报价证据不完整，样本已隔离且不进入训练";
 const impulse = (value?: number | null) => value === null || value === undefined ? "—" : `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
 const NEWS_PER_PAGE = PREVIEW_NEWS_PAGE_SIZE;
-const CATEGORY_ORDER = ["战争/地缘", "利率/Fed", "央行购金", "通胀/就业", "增长/经济", "油价/能源", "美元/流动性", "避险情绪", "监管/其他", "其他"];
+const CATEGORY_ORDER = ["战争/地缘", "利率/Fed", "央行购金", "通胀/就业", "增长/经济", "油价/能源", "美元/流动性", "风险情绪 / 避险", "监管/其他", "分类不兼容", "其他"];
 const SOURCE_LABELS: Record<string, string> = {
   federal_reserve_monetary: "Federal Reserve · 货币政策",
   federal_reserve_speeches_testimony: "Federal Reserve · 演讲证词",
@@ -467,7 +467,7 @@ const TOPIC_LABELS: Record<string, string> = {
   rates_fed: "利率 / Fed", inflation: "通胀", employment: "就业", inflation_employment: "通胀 / 就业",
   growth_economy: "增长 / 经济", usd_liquidity: "美元 / 流动性",
   oil_energy: "油价 / 能源", war_geopolitics: "战争 / 地缘",
-  central_bank_gold: "央行购金", risk_sentiment: "避险情绪", regulation_other: "监管 / 其他",
+  central_bank_gold: "央行购金", risk_sentiment: "风险情绪 / 避险", regulation_other: "监管 / 其他",
 };
 const EVIDENCE_LABELS: Record<string, string> = {
   PRIMARY: "一手完整证据", CORROBORATED: "多源确认",
