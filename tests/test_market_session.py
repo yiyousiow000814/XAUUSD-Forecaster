@@ -9,7 +9,10 @@ from xauusd_forecaster.market_session import (
 )
 from xauusd_forecaster.forward_engine import ForwardEngine
 from xauusd_forecaster.forward_ledger import ForwardLedger
-from scripts.run_forward_collector import append_due_grid_events
+from scripts.run_forward_collector import (
+    append_current_grid_events,
+    append_due_grid_events,
+)
 
 
 UTC = timezone.utc
@@ -161,3 +164,35 @@ def test_collector_does_not_append_prediction_during_broker_close(tmp_path) -> N
     assert appended == []
     assert skipped == {"BROKER_MARKET_CLOSED": 1}
     assert ledger.connection.execute("SELECT count(*) FROM decision_events").fetchone()[0] == 0
+
+
+def test_collector_takes_decision_time_after_blocking_maintenance() -> None:
+    fresh = datetime(2026, 8, 14, 10, 20, 10, tzinfo=UTC)
+    observed: dict[str, datetime] = {}
+
+    class RecordingProvider:
+        def observations(self, boundary):
+            observed["boundary"] = boundary
+            return []
+
+        def market_session(self, collected_at):
+            observed["collected_at"] = collected_at
+            return broker_session(collected_at)
+
+    collected_at, last_decision, appended, skipped = append_current_grid_events(
+        object(),
+        object(),
+        RecordingProvider(),
+        fresh,
+        [],
+        clock=lambda: fresh,
+    )
+
+    assert collected_at == fresh
+    assert observed == {
+        "boundary": datetime(2026, 8, 14, 10, 20, tzinfo=UTC),
+        "collected_at": fresh,
+    }
+    assert last_decision == fresh
+    assert appended == []
+    assert skipped == {}

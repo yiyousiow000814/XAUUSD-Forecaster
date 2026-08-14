@@ -95,6 +95,35 @@ def append_due_grid_events(
     return last_decision, appended, skipped_grids
 
 
+def append_current_grid_events(
+    ledger: ForwardLedger,
+    engine: ForwardEngine,
+    provider: JsonlMarketProvider | NullMarketProvider,
+    last_decision: datetime,
+    news_status: list[dict[str, object]],
+    *,
+    clock=lambda: datetime.now(UTC),
+) -> tuple[
+    datetime,
+    datetime,
+    list[tuple[datetime, str, str]],
+    dict[str, int],
+]:
+    """Append due grids against a timestamp taken after blocking maintenance."""
+    collected_at = clock()
+    boundary = floor_five_minutes(collected_at)
+    next_decision, appended, skipped = append_due_grid_events(
+        ledger,
+        engine,
+        provider,
+        last_decision,
+        boundary,
+        collected_at,
+        news_status,
+    )
+    return collected_at, next_decision, appended, skipped
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--local-root", type=Path, default=DEFAULT_LOCAL_ROOT)
@@ -217,9 +246,10 @@ def main() -> int:
                     flush=True,
                 )
                 last_news_reconciliation = now
-            boundary = floor_five_minutes(now)
-            last_decision, appended_decisions, skipped_grids = append_due_grid_events(
-                ledger, engine, provider, last_decision, boundary, now, news_status
+            now, last_decision, appended_decisions, skipped_grids = (
+                append_current_grid_events(
+                    ledger, engine, provider, last_decision, news_status,
+                )
             )
             for decision_time, snapshot_id, decision_id in appended_decisions:
                 print(
