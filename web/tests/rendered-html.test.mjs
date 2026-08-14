@@ -1103,7 +1103,8 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /默认只显示主模型，按需叠加一条参照曲线。/);
   assert.match(modal, /aria-pressed=\{active\}/);
   assert.match(modal, /setComparisonIdentity\(previous => previous === modelIdentity \? null : modelIdentity\)/);
-  assert.match(modal, /const axisTickCount = Math\.min\(6, cutoffs\.length\)/);
+  assert.match(modal, /const axisTickCount = Math\.min\(6, chartCutoffs\.length\)/);
+  assert.match(modal, /const chartCutoffs = cutoffs\.filter/);
   assert.match(modal, /formatCompactCount\(trainingRows\)/);
   assert.match(modal, /aria-label=\{pointLabel\}/);
   assert.doesNotMatch(modal, /五种模型叠加在同一坐标/);

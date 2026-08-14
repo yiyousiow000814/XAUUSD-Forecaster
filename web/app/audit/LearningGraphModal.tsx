@@ -316,17 +316,18 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
   const visibleIdentities = [identity, ...(comparisonIdentity && comparisonIdentity !== identity ? [comparisonIdentity] : [])]
     .filter(key => availableIdentities.includes(key));
   const visibleGraphRows = graphRows.filter(row => visibleIdentities.includes(row.model_identity));
+  const chartCutoffs = cutoffs.filter(cutoff => visibleGraphRows.some(row => comparisonCutoff(row) === cutoff));
   const values = visibleGraphRows.map(row => metric(row).cumulative_quote_return).concat(0);
   const low = Math.min(...values); const high = Math.max(...values);
-  const gx = (trainingRows: number) => cutoffs.length === 1
+  const gx = (trainingRows: number) => chartCutoffs.length === 1
     ? 480
-    : 90 + cutoffs.indexOf(trainingRows) / Math.max(1, cutoffs.length - 1) * 780;
+    : 90 + chartCutoffs.indexOf(trainingRows) / Math.max(1, chartCutoffs.length - 1) * 780;
   const gy = (value: number) => 28 + (high-value)/Math.max(.000001,high-low)*218;
-  const axisTickCount = Math.min(6, cutoffs.length);
+  const axisTickCount = Math.min(6, chartCutoffs.length);
   const axisTickIndexes = new Set(Array.from({ length: axisTickCount }, (_, index) => axisTickCount === 1
     ? 0
-    : Math.round(index * (cutoffs.length - 1) / (axisTickCount - 1))));
-  const axisCutoffs = cutoffs.filter((_, index) => axisTickIndexes.has(index));
+    : Math.round(index * (chartCutoffs.length - 1) / (axisTickCount - 1))));
+  const axisCutoffs = chartCutoffs.filter((_, index) => axisTickIndexes.has(index));
   const toggleComparison = (modelIdentity: string) => {
     setHovered(null);
     setComparisonIdentity(previous => previous === modelIdentity ? null : modelIdentity);
