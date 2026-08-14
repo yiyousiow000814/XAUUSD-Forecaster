@@ -127,6 +127,35 @@ def test_gemma_minute_budget_is_shared_across_tasks_and_keys() -> None:
     )
 
 
+def test_registered_model_limits_are_independent_between_accounts() -> None:
+    from xauusd_forecaster.ai_provider_registry import AI_QUOTA_SURFACES
+
+    assert AI_QUOTA_SURFACES
+    assert all(
+        surface.share_minute_across_accounts is False
+        for surface in AI_QUOTA_SURFACES
+    )
+    for surface in AI_QUOTA_SURFACES:
+        connection = _connection()
+        common = {
+            "daily_limit": surface.daily_limit,
+            "requests_per_minute": surface.requests_per_minute,
+            "input_tokens_per_minute": surface.input_tokens_per_minute,
+            "shared_model_families": surface.model_families,
+            "share_minute_across_accounts": surface.share_minute_across_accounts,
+            "now": NOW,
+        }
+        assert reserve_account_request(
+            connection, account_id="account-a",
+            model_family=surface.model_families[0],
+            input_tokens=surface.input_tokens_per_minute, **common,
+        )
+        assert reserve_account_request(
+            connection, account_id="account-b",
+            model_family=surface.model_families[0], input_tokens=1, **common,
+        )
+
+
 def test_gemma_budget_keeps_previous_bucket_to_prevent_boundary_burst() -> None:
     connection = _connection()
     common = {
