@@ -405,11 +405,13 @@ def test_every_native_model_turn_uses_capacity_and_locks_the_selected_model(
         api_key="secret-key-material",
         credential_id="credential-fingerprint-a",
     )
+    lease_renewals: list[int] = []
     invoker = CapacityRoutedAssistantModelInvoker(
         ledger.connection,
         (credential,),
         profiles=(_profile(),),
         policies=(_policy(),),
+        before_model_attempt=lambda: lease_renewals.append(len(envelopes)),
         now=NOW,
     )
     budgets = replace(
@@ -442,5 +444,6 @@ def test_every_native_model_turn_uses_capacity_and_locks_the_selected_model(
     assert result.model_version == "gemma-4-31b-it-exact"
     assert "secret-key-material" not in json.dumps(result.provenance)
     assert invoker.locked_profile == _profile()
+    assert lease_renewals == [2, 1]
     assert envelopes == []
     ledger.close()

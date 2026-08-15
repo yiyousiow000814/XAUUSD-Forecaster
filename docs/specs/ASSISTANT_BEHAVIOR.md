@@ -79,7 +79,9 @@ If asynchronous work is used, the durable queue exposes these states:
 A worker claim records a lease expiry and attempt count. A crashed worker cannot
 leave `PROCESSING` permanently: lease recovery returns eligible work to
 `PENDING` or moves exhausted work to `FAILED`. Retries are bounded and preserve
-the prior failure receipt.
+the prior failure receipt. An active worker renews the same lease immediately
+before a provider attempt. Renewal does not consume another attempt, requires
+the unexpired lease token, and is capped by the immutable turn expiry.
 
 A worker that holds a valid lease but cannot obtain safe model capacity records
 `CAPACITY_DEFERRED`, clears the lease, applies bounded backoff, and returns the
@@ -188,6 +190,13 @@ atomically appends the canonical Assistant message, answer events, terminal
 conversation event, turn status, conversation activity, and first-title job
 admission. Compaction scheduling happens afterward and cannot invalidate that
 final.
+
+The Windows producer emits the deterministic public reasoning class before
+model work. After each successful native run it projects exact public tool
+receipts into closed start/finish batches before publishing the final; retry
+attempts use distinct bounded public call identities. Unknown rejected tools
+without an authoritative version remain in model provenance but do not receive
+a fabricated presentation event.
 
 ## Progress and reasoning display
 

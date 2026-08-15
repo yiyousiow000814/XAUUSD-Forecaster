@@ -284,6 +284,41 @@ def test_capacity_router_rejects_naive_accounting_time(tmp_path) -> None:
     ledger.close()
 
 
+def test_pre_invoke_gate_runs_before_any_capacity_reservation(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    profile = _profile("large-v1", "large-model", ModelCapacityClass.LARGE)
+    invoked = False
+
+    def invoke(*_args):
+        nonlocal invoked
+        invoked = True
+        return "must-not-run"
+
+    def reject_stale_lease() -> None:
+        raise RuntimeError("chat lease was lost")
+
+    with pytest.raises(RuntimeError, match="lease was lost"):
+        execute_assistant_capacity_route(
+            ledger.connection,
+            _plan((profile,)),
+            (_credential("pool-a"),),
+            service_priority=AssistantServicePriority.INTERACTIVE,
+            policies=(_policy("pool-a", profile.model_id),),
+            invoke=invoke,
+            before_invoke=reject_stale_lease,
+            now=NOW,
+        )
+
+    assert invoked is False
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM assistant_capacity_reservations_v1",
+    ).fetchone()[0] == 0
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_ai_account_daily_usage_v1",
+    ).fetchone()[0] == 0
+    ledger.close()
+
+
 def test_router_uses_another_pool_before_crossing_soft_rpd(
     tmp_path,
 ) -> None:

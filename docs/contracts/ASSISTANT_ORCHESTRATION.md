@@ -120,6 +120,11 @@ metered gateway may send. A reservation has a finite lease so a stopped worker
 cannot strand in-flight capacity. Provider throttles and repeated transport
 failures update pair-specific health and cooldown state.
 
+For a durable chat turn, the worker MUST prove that its publication lease is
+still renewable immediately before each provider attempt. That gate runs before
+capacity reservation, so a stale or cancelled worker cannot consume a model
+reservation and can never extend its lease past the turn expiry.
+
 Each model-consuming routing receipt MUST include a validated capacity receipt
 with service priority, an anonymous pool fingerprint, pool class, bounded
 candidate/attempt counts, admission estimate, applied soft cap, and whether a
@@ -204,6 +209,13 @@ canonical Assistant state nor user-visible reasoning. Each model turn crosses
 the Model Router, Capacity Router, and metered gateway. The selected model is
 fixed for one native sequence while an eligible credential pool may change;
 later user turns may select a different compatible model.
+
+The operational Windows worker builds the canonical owner-scoped context first,
+registers the shared `search_news_v1` adapter, and then runs this loop. The news
+adapter fixes `received_to` to the admitted turn cutoff and rejects a fallback
+or mismatched evidence receipt. Model credentials remain inside the capacity
+router and metered gateway; neither the tool request nor D1 completion receives
+raw credential material.
 
 Every tool has a versioned input/output schema, authorization policy, timeout,
 result bound, and provenance contract. The initial Assistant registry is

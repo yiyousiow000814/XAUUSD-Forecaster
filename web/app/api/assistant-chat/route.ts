@@ -12,6 +12,7 @@ import {
   failAssistantChatTurn,
   getOwnerAssistantChatTurn,
   listOwnerAssistantTurnEvents,
+  renewAssistantChatTurn,
 } from "../_shared/assistant-chat";
 import {
   ASSISTANT_EVENT_PROTOCOL_VERSION,
@@ -159,7 +160,12 @@ export async function POST(request: Request) {
       const body = await boundedBody(request, 340_000);
       const action = String(body.action ?? "").trim().toUpperCase();
       let item: unknown = null;
-      if (action === "EVENTS") {
+      if (action === "RENEW") {
+        item = await renewAssistantChatTurn(binding, {
+          id: body.id,
+          lease_token: body.lease_token,
+        });
+      } else if (action === "EVENTS") {
         item = await appendAssistantChatEvents(binding, {
           id: body.id,
           lease_token: body.lease_token,

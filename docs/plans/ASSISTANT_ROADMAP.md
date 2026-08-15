@@ -125,12 +125,13 @@ temporary stack is acceptable only when a dependency cannot be reviewed or
 tested independently; it must be collapsed promptly.
 
 Current implementation has reached the server-side typed native function-
-calling core, cross-runtime `assistant.event.v1`, and the owner-authenticated D1
-chat turn/event runtime. The event layer is presentation transport and does not
-replace canonical messages. The next independent scope connects the Windows
-worker to claim a turn, build bounded context, run the native Agent, emit
-progress, and publish the validated final. Responsive browser chat follows as a
-separate PR; structured rich content remains separate after that UI baseline.
+calling core, cross-runtime `assistant.event.v1`, the owner-authenticated D1
+chat turn/event runtime, and the Windows producer that builds bounded context,
+runs the capacity-routed Agent, emits public progress, and publishes the
+validated final. The event layer is presentation transport and does not replace
+canonical messages. The next independent scope is the responsive authenticated
+browser chat and finite replay consumer; structured rich content remains
+separate after that UI baseline.
 
 ## Per-PR completion rule
 

@@ -481,7 +481,8 @@ export async function claimAssistantChatTurn(
   const leaseExpiresAt = new Date(now.getTime() + ASSISTANT_CHAT_LIMITS.leaseMs).toISOString();
   const row = await binding.prepare(
     `UPDATE assistant_turn_jobs SET status='PROCESSING',lease_owner=?,lease_token=?,
-     processing_started_at=?,lease_expires_at=?,attempt_count=attempt_count+1,
+     processing_started_at=?,lease_expires_at=MIN(?,expires_at),
+     attempt_count=attempt_count+1,
      failure_code=NULL,attempt_history_json=json_insert(
        attempt_history_json,'$[#]',json_object(
          'event','CLAIMED','at',?,'attempt',attempt_count+1
@@ -516,6 +517,37 @@ export async function claimAssistantChatTurn(
     attempt_count: Number(row.attempt_count),
     event_sequence: Number(row.event_sequence),
   };
+}
+
+export async function renewAssistantChatTurn(
+  binding: D1Database,
+  input: { id: unknown; lease_token: unknown },
+  now = new Date(),
+) {
+  const turnId = strictObjectId(input.id, "turn_id");
+  const leaseToken = strictObjectId(input.lease_token, "lease_token");
+  const timestamp = now.toISOString();
+  const proposedExpiry = new Date(
+    now.getTime() + ASSISTANT_CHAT_LIMITS.leaseMs,
+  ).toISOString();
+  const row = await binding.prepare(
+    `UPDATE assistant_turn_jobs SET
+     lease_expires_at=MIN(?,expires_at),
+     attempt_history_json=${attemptHistory("LEASE_RENEWED")}
+     WHERE id=? AND status='PROCESSING' AND lease_token=?
+       AND lease_expires_at>? AND expires_at>? AND cancel_requested=0
+     RETURNING id,lease_token,lease_expires_at,expires_at,attempt_count`,
+  ).bind(
+    proposedExpiry, timestamp,
+    turnId, leaseToken, timestamp, timestamp,
+  ).first<AssistantTurnRow>();
+  return row ? {
+    id: row.id,
+    lease_token: row.lease_token,
+    lease_expires_at: row.lease_expires_at,
+    expires_at: row.expires_at,
+    attempt_count: Number(row.attempt_count),
+  } : null;
 }
 
 type EventDraft = {

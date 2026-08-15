@@ -628,6 +628,7 @@ class CapacityRoutedAssistantModelInvoker:
         *,
         profiles: tuple[ModelProfile, ...] | None = None,
         policies: tuple[AssistantCapacityPolicy, ...] | None = None,
+        before_model_attempt: Callable[[], None] | None = None,
         now: datetime | None = None,
     ) -> None:
         self.connection = connection
@@ -636,6 +637,7 @@ class CapacityRoutedAssistantModelInvoker:
             configured_assistant_model_profiles() if profiles is None else profiles
         )
         self.policies = policies
+        self.before_model_attempt = before_model_attempt
         self.now = now
         self.locked_profile: ModelProfile | None = None
         self.locked_planned_tool_calls: int | None = None
@@ -691,6 +693,7 @@ class CapacityRoutedAssistantModelInvoker:
             service_priority=AssistantServicePriority.INTERACTIVE,
             policies=self.policies,
             invoke=invoke,
+            before_invoke=self.before_model_attempt,
             now=self.now,
         )
         turn, exact_model = routed.value
@@ -718,6 +721,7 @@ def run_capacity_routed_assistant_agent(
     budgets: AssistantAgentBudgets | None = None,
     profiles: tuple[ModelProfile, ...] | None = None,
     policies: tuple[AssistantCapacityPolicy, ...] | None = None,
+    before_model_attempt: Callable[[], None] | None = None,
     now: datetime | None = None,
 ) -> AssistantAgentResult:
     invoker = CapacityRoutedAssistantModelInvoker(
@@ -725,6 +729,7 @@ def run_capacity_routed_assistant_agent(
         credentials,
         profiles=profiles,
         policies=policies,
+        before_model_attempt=before_model_attempt,
         now=now,
     )
     return run_bounded_assistant_agent(
