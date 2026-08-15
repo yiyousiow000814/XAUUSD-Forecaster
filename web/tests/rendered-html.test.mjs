@@ -1357,6 +1357,7 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(modal, /const selectNearestDecision = \(event: ReactMouseEvent<SVGSVGElement>\)/);
   assert.match(modal, /onClick=\{selectNearestDecision\}/);
   assert.match(modal, /左右滑动浏览 · 点击箭头查看30分钟结果/);
+  assert.match(modal, />预测 → 30分钟后<\/text>/);
   assert.match(modal, /左右滑动浏览长期曲线 · 文字与时间轴保持可读大小/);
   assert.match(css, /\.market-chart-block>\.chart-legend \{ display:flex; flex-wrap:wrap;/);
   assert.match(css, /\.execution-scorecards \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); border-width:1px 0; \}/);
