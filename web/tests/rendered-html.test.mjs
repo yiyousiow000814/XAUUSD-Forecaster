@@ -527,7 +527,11 @@ test("separates completed, processing, and isolated news by durable review state
   assert.match(route, /review_state_counts/);
   assert.match(route, /json_extract\(payload, '\$\.annotation_status'\)/);
   assert.match(css, /\.news-review-zones button \{[^}]*min-height:104px/);
-  assert.match(css, /overflow-x:auto; scroll-snap-type:x mandatory/);
+  assert.match(view, /className="news-category-picker"/);
+  assert.match(css, /\.news-review-zones \{ grid-template-columns:repeat\(3,minmax\(0,1fr\)\);[^}]*overflow:visible/);
+  assert.match(css, /\.news-browser nav \{ display:none; \}/);
+  assert.match(css, /\.news-category-picker select \{[^}]*min-height:48px/);
+  assert.match(css, /\.news-row>summary \{ grid-template-columns:1fr;/);
 });
 
 test("keeps the 60-day news archive inside bounded D1 work", () => {
@@ -716,6 +720,13 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(html, /系统组件状态/);
   assert.match(html, /新闻来源状态/);
   assert.match(html, /AI 模型用量/);
+  const view = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(view, /componentHasAttention/);
+  assert.match(view, /sourceHasAttention/);
+  assert.match(view, /className=\{healthy \? "is-healthy" : "is-attention"\}/);
+  assert.match(css, /\.component-status\.has-attention:not\(\.show-healthy\) article\.is-healthy/);
+  assert.match(css, /\.health-reveal-button \{ display:block;[^}]*min-height:48px/);
 });
 
 test("uses one Chinese system-state presentation across every dashboard page", () => {
@@ -1050,6 +1061,9 @@ test("shows single events immediately and keeps later changes in one thread", ()
   assert.match(page, /市场反应流/);
   assert.match(page, /新发生/);
   assert.match(page, /有后续时会自动接成一条脉络/);
+  assert.match(page, /showAllStoryEvents/);
+  assert.match(css, /\.single-event-index>div:not\(\.show-all-mobile-items\)>article:nth-child\(n\+9\)/);
+  assert.match(css, /\.single-event-index>\.mobile-reveal-button \{ display:block;[^}]*min-height:48px/);
   assert.doesNotMatch(page, /暂无后续进展/);
   assert.match(page, /第一次进展立即显示，后续变化接在一起/);
   assert.ok(page.indexOf('className="story-grid"') < page.indexOf('className="theme-streams"'), "events must appear before secondary topic streams");
@@ -1484,6 +1498,7 @@ test("reflows news evidence into readable mobile cards", () => {
   assert.match(view, /统一来源身份：/);
   assert.match(view, /原始发布域名：/);
   assert.match(view, /Gemini 与 Gemma 负责理解事件语义/);
+  assert.match(view, /showAllEvidence/);
   assert.match(view, /mergeNewsEvidenceByEvent/);
   assert.match(view, /new Map<string, NewsEvidence>/);
   assert.match(view, /evidenceMode}:\$\{row\.event_key}/);
@@ -1496,6 +1511,8 @@ test("reflows news evidence into readable mobile cards", () => {
   assert.match(css, /\.evidence-time-cell \{ grid-area:time/);
   assert.match(css, /\.evidence-status-copy \{ display:none!important/);
   assert.match(css, /\.evidence-model-list \{ display:none!important/);
+  assert.match(css, /\.evidence-table-wrap:not\(\.show-all-mobile-items\) \.evidence-table tbody>tr:nth-child\(n\+9\)/);
+  assert.match(css, /\.evidence-desk>\.mobile-reveal-button \{ display:block;[^}]*min-height:48px/);
 });
 
 test("keeps shared news retrieval bounded and phone readable", () => {

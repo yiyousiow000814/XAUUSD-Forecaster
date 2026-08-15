@@ -854,6 +854,8 @@ export default function AuditView() {
   const [newsCategory, setNewsCategory] = useState("全部");
   const [newsPage, setNewsPage] = useState(1);
   const [newsReviewState, setNewsReviewState] = useState<NewsReviewState>("COMPLETED");
+  const [showAllEvidence, setShowAllEvidence] = useState(false);
+  const [showAllStoryEvents, setShowAllStoryEvents] = useState(false);
   const pageDetailKeys = newsIndex.items
     .map(row => row.detail_key)
     .filter((key): key is string => Boolean(key))
@@ -1407,6 +1409,12 @@ export default function AuditView() {
               {category.name}{category.count !== null && <b><CountValue value={category.count} /></b>}
             </button>)}
           </nav>
+          <label className="news-category-picker">
+            <span>新闻分类</span>
+            <select value={newsCategory} onChange={(event) => { setNewsCategory(event.target.value); setNewsPage(1); }}>
+              {categories.map(category => <option key={category.name} value={category.name}>{category.name}{category.count !== null ? ` · ${formatExactCount(category.count)}` : ""}</option>)}
+            </select>
+          </label>
         </section>
         <section className="news-table">
           <header className="news-table-head"><span>分类 / 发布时间</span><span>新闻与来源</span><span>正文 / 状态</span></header>
@@ -1438,9 +1446,9 @@ export default function AuditView() {
         </div>
         <p className="evidence-count-note"><b>{formatExactCount(newsMetrics.training.current_contract_rows)} 条训练记录</b> 来自 <b>{formatExactCount(newsMetrics.training.distinct_events)} 个当前契约事件</b>；文章、独立事件、预测读取和训练记录是四种不同口径。</p>
         <nav className="evidence-filters" aria-label="模型新闻可见性筛选">
-          <button type="button" className={evidenceMode === "seen" ? "active" : ""} onClick={() => setEvidenceMode("seen")}>历史上用过 <b><CountValue value={evidenceSummarySeenCount} /></b></button>
-          <button type="button" className={evidenceMode === "unseen" ? "active" : ""} onClick={() => setEvidenceMode("unseen")}>从未用过 <b><CountValue value={evidenceSummaryUnseenCount} /></b></button>
-          <button type="button" className={evidenceMode === "all" ? "active" : ""} onClick={() => setEvidenceMode("all")}>查看全部 <b><CountValue value={evidenceSummaryDisplayedCount} /></b></button>
+          <button type="button" className={evidenceMode === "seen" ? "active" : ""} onClick={() => { setEvidenceMode("seen"); setShowAllEvidence(false); }}>历史上用过 <b><CountValue value={evidenceSummarySeenCount} /></b></button>
+          <button type="button" className={evidenceMode === "unseen" ? "active" : ""} onClick={() => { setEvidenceMode("unseen"); setShowAllEvidence(false); }}>从未用过 <b><CountValue value={evidenceSummaryUnseenCount} /></b></button>
+          <button type="button" className={evidenceMode === "all" ? "active" : ""} onClick={() => { setEvidenceMode("all"); setShowAllEvidence(false); }}>查看全部 <b><CountValue value={evidenceSummaryDisplayedCount} /></b></button>
         </nav>
         <p className="evidence-window-note">
           {evidenceWindowPartial
@@ -1448,7 +1456,7 @@ export default function AuditView() {
             : <>已显示全部 <b>{formatExactCount(evidenceModeTotal)}</b> 个。</>}
         </p>
         <details className="evidence-rule-note"><summary>查看统计规则</summary><p>核心新闻要求一手完整证据或至少两个独立可靠来源确认；大视野新闻还纳入单一可靠来源并降低权重。新闻只从首次收到后生效，按事件类型和有效交易时间逐步衰减。Gemini 与 Gemma 负责理解事件语义，版本化证据规则负责时间、身份、去重与准入；每个事件下方可核对统一身份和原始发布域名。</p></details>
-        <div className="evidence-table-wrap"><table className="evidence-table">
+        <div className={`evidence-table-wrap ${showAllEvidence ? "show-all-mobile-items" : ""}`}><table className="evidence-table">
           <thead><tr><th>是否用于预测</th><th>新闻事件</th><th>用了多少次 / 为什么没用</th><th>发布时间 / 收到时间</th></tr></thead>
           <tbody>{visibleEvidence.length === 0 && evidenceModeTotal > 0 && <tr className="evidence-unavailable-row"><td colSpan={4}>这个分类有记录，但本页尚未载入明细。总数不会被当成空结果。</td></tr>}{visibleEvidence.map(row => <tr key={`${evidenceMode}:${row.event_key}`}>
             <td className="evidence-status-cell"><span className={`model-seen-badge ${row.model_seen ? "is-seen" : "is-unseen"}`}>{row.model_seen ? "已用于预测" : "未用于预测"}</span><small><span className="evidence-grade-label">{EVIDENCE_LABELS[row.evidence_grade] ?? row.evidence_grade}</span><span className="evidence-status-copy">{row.model_seen ? "当时确实参与了模型输入" : row.broad_model_eligible ? "现在符合条件，等待下一次预测" : "现在也不符合使用条件"}</span></small></td>
@@ -1457,6 +1465,7 @@ export default function AuditView() {
             <td className="evidence-time-cell"><time><span>发布</span>{row.source_published_time ? time(row.source_published_time) : "时间未知"}</time><small><span>收到 {time(row.collector_first_seen_time)}</span><span>{formatExactCount(row.independent_publishers)} 个独立来源 · {formatExactCount(row.member_count)} 篇新闻</span></small></td>
           </tr>)}</tbody>
         </table></div>
+        {visibleEvidence.length > 8 && <button className="mobile-reveal-button" type="button" aria-expanded={showAllEvidence} onClick={() => setShowAllEvidence(value => !value)}>{showAllEvidence ? "收起证据" : `显示本页其余 ${formatExactCount(visibleEvidence.length - 8)} 个事件`}</button>}
       </section>}
 
       {view === "stories" && <section className="story-desk">
@@ -1475,12 +1484,13 @@ export default function AuditView() {
         </article>)}</div>}
         {(payload?.story_event_candidates ?? []).length > 0 && <section className="single-event-index">
           <header><div><h3>新发生</h3><span>有后续时会自动接成一条脉络</span></div><strong><CountValue value={singleEventTotal} /></strong></header>
-          <div>{(payload?.story_event_candidates ?? []).map(item => <article key={item.candidate_id}>
+          <div className={showAllStoryEvents ? "show-all-mobile-items" : ""}>{(payload?.story_event_candidates ?? []).map(item => <article key={item.candidate_id}>
             <time>{time(item.event_time || item.first_seen)}</time>
             <h3>{item.headline}</h3>
             <span>1 个进展</span>
             <small>{formatExactCount(item.evidence_documents)} 篇证据 · {formatExactCount(item.independent_publishers)} 个独立来源</small>
           </article>)}</div>
+          {(payload?.story_event_candidates ?? []).length > 8 && <button className="mobile-reveal-button" type="button" aria-expanded={showAllStoryEvents} onClick={() => setShowAllStoryEvents(value => !value)}>{showAllStoryEvents ? "收起新事件" : `显示其余 ${formatExactCount((payload?.story_event_candidates ?? []).length - 8)} 个新事件`}</button>}
         </section>}
         {activeEventTotal === 0 && <div className="story-empty"><b>还没有收到可确认的独立事件</b><span>新事件出现后会直接显示在这里。</span></div>}
         <section className="theme-streams"><header><h3>主题流</h3><span>不声称构成单一事件</span></header><div>{(payload?.theme_streams ?? []).map(theme => <article key={theme.theme_id}><b>{theme.title}</b><strong><CountValue value={theme.item_count} /></strong><span>{theme.latest_headline}</span><small>{time(theme.last_updated)}</small></article>)}</div></section>
