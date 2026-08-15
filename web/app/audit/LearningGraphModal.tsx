@@ -388,6 +388,7 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
   const [cadence, setCadence] = useState<EvaluationCadence>("EVERY_5M");
   const [pageOffset, setPageOffset] = useState(0);
   const [hoveredBoundary, setHoveredBoundary] = useState<BoundaryReadout | null>(null);
+  const chartScrollRef = useRef<HTMLDivElement>(null);
   const initialHistoryUrl = historyResource
     ? `${historyResource}?resource=curve-overview&cadence=5m` : "";
   const initialHistory = initialHistoryUrl
@@ -397,6 +398,13 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
   );
   const [historyErrors, setHistoryErrors] = useState<Partial<Record<EvaluationCadence, boolean>>>({});
   const [historyRetries, setHistoryRetries] = useState<Partial<Record<EvaluationCadence, number>>>({});
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      const chart = chartScrollRef.current;
+      if (chart) chart.scrollLeft = chart.scrollWidth - chart.clientWidth;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [range, cadence, pageOffset, historyCurves]);
   useEffect(() => {
     if (!historyResource || historyErrors[cadence]) return;
     const cadenceQuery = cadence === "FIXED_30M" ? "30m" : "5m";
@@ -605,10 +613,10 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
     {compactBoundaryRail && <div className="curve-event-readout" aria-live="polite">
       {hoveredBoundary ? <><b>{hoveredBoundary.event_count && hoveredBoundary.event_count > 1 ? `${formatExactCount(hoveredBoundary.event_count)} 次相近换版 · ` : ""}{axisLabel(hoveredBoundary.decision_time)} · {boundaryLabel(hoveredBoundary)}</b><span>{hoveredBoundary.changes.map(change => `${LABELS[change.model_identity] ?? change.model_identity}（${formatExactCount(change.training_rows)} 条）`).join(" · ")}</span></> : <><b>模型换版本事件轨道</b><span>相近换版会合并为一个圆点；移到圆点查看准确时间、方向样本、新闻样本与模型明细。</span></>}
     </div>}
-    <span className="mobile-scroll-hint" role="note">左右滑动查看完整图表</span>
+    <span className="mobile-scroll-hint long-curve-interaction-hint" role="note">左右滑动浏览长期曲线 · 文字与时间轴保持可读大小</span>
     {/* Keyboard users need focus here so arrow keys can pan the wide chart. */}
     {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
-    <div className="mobile-chart-scroll" tabIndex={0} aria-label="可左右滑动的长期 OOS 图表">
+    <div ref={chartScrollRef} className="mobile-chart-scroll" tabIndex={0} aria-label="可左右滑动的长期 OOS 图表">
     <svg className="learning-svg" viewBox="0 0 960 400" role="img" aria-label="各模型历史与实时成熟 OOS 曲线">
       {boundaryLayouts.length > 0 && <line x1="58" x2="920" y1={boundaryDividerY} y2={boundaryDividerY} className={compactBoundaryRail ? "version-event-rail" : "version-label-divider"} />}
       <line x1="58" x2="920" y1={y(0)} y2={y(0)} className="zero-line" />
@@ -664,6 +672,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
   const [dense, setDense] = useState(false);
   const [showTraining, setShowTraining] = useState(false);
   const [selected, setSelected] = useState<Decision | null>(null);
+  const chartScrollRef = useRef<HTMLDivElement>(null);
   const historyQuery = new URLSearchParams({
       range, identity, frequency: dense ? "5m" : "30m",
   });
@@ -823,6 +832,13 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
   const axisTimeLabel = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
   const timeTickIndices = Array.from(new Set([0, .25, .5, .75, 1].map(part => Math.round((candles.length - 1) * part))));
   const resultLabel = (value: number | null) => value == null ? "等待30分钟结果" : pct(value);
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      const chart = chartScrollRef.current;
+      if (chart) chart.scrollLeft = chart.scrollWidth - chart.clientWidth;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [range, page, before, displayedIdentity, dense]);
   return <div className="chart-block market-chart-block">
     <div className="chart-caption"><div><b>每根K线5分钟 · 每个箭头预测未来30分钟</b></div><select value={identity} onChange={event => { setIdentity(event.target.value); setSelected(null); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key, label]) => <option key={key} value={key}>{label}{key.includes("RESIDUAL") ? "（修正量）" : ""}</option>)}</select></div>
     <details className="market-reading-guide"><summary>图表怎么看</summary><p>绿色向上、红色向下、灰色双向代表 WAIT。新闻修正量也显示自己的方向：LONG 表示向上修正，SHORT 表示向下修正；完整方向请看“黄金＋新闻”。</p></details>
@@ -847,16 +863,16 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
       {(page > 0 || laterPages.length > 0) && <button type="button" onClick={goLatest}>最新</button>}
     </div>
     <div className="prediction-counts"><b>{scopedDecisions.length ? "成本后EV较高方向" : predictionAvailability}</b>{scopedDecisions.length > 0 && <><span>看多 {formatExactCount(counts.LONG)}</span><span>看空 {formatExactCount(counts.SHORT)}</span><span>等待 {formatExactCount(counts.WAIT)}{unhealthyWaits ? `（数据异常 ${formatExactCount(unhealthyWaits)}）` : ""}</span>{policyMismatchCount > 0 && <span className="negative">历史规则不一致 {formatExactCount(policyMismatchCount)}（原记录保留）</span>}</>}</div>
-    <span className="mobile-scroll-hint" role="note">左右滑动查看完整图表</span>
+    <span className="mobile-scroll-hint market-interaction-hint" role="note">左右滑动浏览 · 点击箭头查看30分钟结果</span>
     <div className="market-visual-shell" aria-busy={historyState === "loading"}>
     {/* Keyboard users need focus here so arrow keys can pan the wide chart. */}
     {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
-    <div className="mobile-chart-scroll" tabIndex={0} aria-label="可左右滑动的 XAUUSD K线图">
+    <div ref={chartScrollRef} className="mobile-chart-scroll" tabIndex={0} aria-label="可左右滑动的 XAUUSD K线图">
     <svg className="learning-svg" viewBox="0 0 960 400" role="img" aria-label="XAUUSD K线与模型决策">
       {marketGaps.map(gap => <g key={`${gap.start}-${gap.end}`} className="market-gap"><rect x={gap.start} y="52" width={Math.max(2, gap.end-gap.start)} height="280" /><text x={(gap.start+gap.end)/2} y="190" textAnchor="middle">{gap.duration >= 45 * 60_000 ? "休市" : "数据缺口"}</text></g>)}
       {candles.map((row, index) => { const cx = xAtIndex(index); const width = Math.max(1.5, 650 / candles.length); const up = row.close >= row.open; return <g key={row.time}><line x1={cx} x2={cx} y1={y(row.high)} y2={y(row.low)} stroke={up ? "#476b19" : "#c9362b"} /><rect x={cx - width / 2} width={width} y={Math.min(y(row.open), y(row.close))} height={Math.max(1, Math.abs(y(row.open) - y(row.close)))} fill={up ? "#476b19" : "#c9362b"} /></g>; })}
       {selectedX != null && selectedExitX != null && <g className="selected-window"><rect x={selectedX} width={Math.max(2, selectedExitX-selectedX)} y="52" height="280" /><line x1={selectedX} x2={selectedX} y1="52" y2="332" /><line x1={selectedExitX} x2={selectedExitX} y1="52" y2="332" /><text x={selectedX+4} y="49">预测</text><text x={Math.max(selectedX+36, selectedExitX-58)} y="49">30分钟后</text></g>}
-      {decisions.map(row => { const candle = byTime(row.decision_time); const cx = xTime(row.decision_time); const action = arrowAction(row); const cy = action === "WAIT" ? 34 : action === "LONG" ? y(candle.low) + 12 : y(candle.high) - 12; const color = action === "LONG" ? "#476b19" : action === "SHORT" ? "#c9362b" : "#555149"; const isSelected = activeSelected?.source_decision_id === row.source_decision_id && activeSelected?.model_identity === row.model_identity && activeSelected?.model_version === row.model_version; return <g key={`${row.source_decision_id}-${row.model_identity}-${row.model_version}`} role="button" tabIndex={0} className={`decision-marker${isSelected ? " selected" : ""}${row.policy_consistent === false ? " policy-mismatch" : ""}`} onClick={() => setSelected(row)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") setSelected(row); }}><title>{`${timeLabel(row.decision_time)} · 成本后EV较高方向 ${action} · 模型版本 ${row.model_version} · 点击查看30分钟结果`}</title>{action === "WAIT" && <circle cx={cx} cy={cy} r="10" fill="#eee9da" stroke={color} strokeWidth="1.5" />}{isSelected && <circle cx={cx} cy={cy} r="14" fill="none" stroke={color} strokeWidth="2" />}{action === "WAIT" ? <path d={`M ${cx-7} ${cy} h 14 M ${cx-7} ${cy} l 4 -4 M ${cx-7} ${cy} l 4 4 M ${cx+7} ${cy} l -4 -4 M ${cx+7} ${cy} l -4 4`} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" /> : <path d={action === "LONG" ? `M ${cx} ${cy-7} l -6 11 h 12 z` : `M ${cx} ${cy+7} l -6 -11 h 12 z`} fill={color} />}</g>; })}
+      {decisions.map(row => { const candle = byTime(row.decision_time); const cx = xTime(row.decision_time); const action = arrowAction(row); const cy = action === "WAIT" ? 34 : action === "LONG" ? y(candle.low) + 12 : y(candle.high) - 12; const color = action === "LONG" ? "#476b19" : action === "SHORT" ? "#c9362b" : "#555149"; const isSelected = activeSelected?.source_decision_id === row.source_decision_id && activeSelected?.model_identity === row.model_identity && activeSelected?.model_version === row.model_version; return <g key={`${row.source_decision_id}-${row.model_identity}-${row.model_version}`} role="button" tabIndex={0} className={`decision-marker${isSelected ? " selected" : ""}${row.policy_consistent === false ? " policy-mismatch" : ""}`} onClick={() => setSelected(row)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") setSelected(row); }}><title>{`${timeLabel(row.decision_time)} · 成本后EV较高方向 ${action} · 模型版本 ${row.model_version} · 点击查看30分钟结果`}</title><circle className="decision-hit-target" cx={cx} cy={cy} r="30" />{action === "WAIT" && <circle cx={cx} cy={cy} r="10" fill="#eee9da" stroke={color} strokeWidth="1.5" />}{isSelected && <circle cx={cx} cy={cy} r="14" fill="none" stroke={color} strokeWidth="2" />}{action === "WAIT" ? <path d={`M ${cx-7} ${cy} h 14 M ${cx-7} ${cy} l 4 -4 M ${cx-7} ${cy} l 4 4 M ${cx+7} ${cy} l -4 -4 M ${cx+7} ${cy} l -4 4`} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" /> : <path d={action === "LONG" ? `M ${cx} ${cy-7} l -6 11 h 12 z` : `M ${cx} ${cy+7} l -6 -11 h 12 z`} fill={color} />}</g>; })}
       {showTraining && versionMarkers.map(row => <line key={`${row.decision_time}-${row.model_version}`} x1={xTime(row.decision_time)} x2={xTime(row.decision_time)} y1="52" y2="332" className="training-line" />)}
       <text x="5" y="64">{high.toFixed(2)}</text><text x="5" y="335">{low.toFixed(2)}</text>
       {timeTickIndices.map(index => <g key={candles[index].time} className="time-axis"><line x1={xAtIndex(index)} x2={xAtIndex(index)} y1="338" y2="344" /><text x={xAtIndex(index)} y="366" textAnchor="middle">{axisTimeLabel(candles[index].time)}</text></g>)}
