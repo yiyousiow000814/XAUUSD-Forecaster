@@ -1563,6 +1563,9 @@ test("keeps chat admission owner-authenticated and event replay finite", () => {
   const migration = readFileSync(
     new URL("../drizzle/0011_assistant_chat_runtime.sql", import.meta.url), "utf8",
   );
+  const leaseMigration = readFileSync(
+    new URL("../drizzle/0012_assistant_turn_lease_bound.sql", import.meta.url), "utf8",
+  );
   const postRoute = route.slice(route.indexOf("export async function POST"));
   assert.ok(
     postRoute.indexOf("rejectPreviewWrite()")
@@ -1578,9 +1581,12 @@ test("keeps chat admission owner-authenticated and event replay finite", () => {
   assert.match(runtime, /activePerOwner: 2/);
   assert.match(runtime, /activeGlobal: 10/);
   assert.match(runtime, /lease_expires_at>\?/);
+  assert.match(runtime, /LEASE_RENEWED/);
+  assert.match(route, /action === "RENEW"/);
   assert.match(runtime, /automaticAssistantTitleStatements/);
   assert.match(runtime, /scheduleAssistantCompaction/);
   assert.match(migration, /assistant_turn_events_immutable_update/);
   assert.match(migration, /assistant_turn_jobs_terminal_immutable/);
   assert.match(migration, /assistant event sequence must be contiguous/);
+  assert.match(leaseMigration, /assistant lease cannot outlive turn/);
 });

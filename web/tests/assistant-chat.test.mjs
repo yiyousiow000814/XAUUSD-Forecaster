@@ -12,6 +12,7 @@ import {
   failAssistantChatTurn,
   getOwnerAssistantChatTurn,
   listOwnerAssistantTurnEvents,
+  renewAssistantChatTurn,
 } from "../app/api/_shared/assistant-chat.ts";
 import { getOwnerAssistantConversation, listOwnerAssistantMessages } from
   "../app/api/_shared/assistant-conversations.ts";
@@ -241,6 +242,51 @@ test("leased workers append only closed, validated, idempotent progress batches"
     ownerId: otherOwner,
     turnId: claim.id,
   }), null);
+});
+
+test("the active worker renews its lease without outliving the turn", async () => {
+  const database = new D1TestDatabase();
+  await createTurn(database);
+  const claim = await claimAssistantChatTurn(database, "worker:chat", atSeconds(1));
+  const renewed = await renewAssistantChatTurn(database, {
+    id: claim.id,
+    lease_token: claim.lease_token,
+  }, atSeconds(250));
+  assert.equal(renewed.lease_expires_at, atSeconds(550).toISOString());
+  assert.equal(renewed.attempt_count, 1);
+  assert.equal(await renewAssistantChatTurn(database, {
+    id: claim.id,
+    lease_token: "wrong-lease-token",
+  }, atSeconds(251)), null);
+  const events = await appendAssistantChatEvents(database, {
+    id: claim.id,
+    lease_token: claim.lease_token,
+    events: [{
+      idempotency_key: "renewed-reasoning-event-0001",
+      type: "reasoning.started",
+      payload: { reasoning_class: "ANALYTICAL" },
+    }],
+    now: atSeconds(302),
+  });
+  assert.equal(events[0].sequence, 2);
+  const history = JSON.parse(database.database.prepare(
+    "SELECT attempt_history_json FROM assistant_turn_jobs WHERE id=?",
+  ).get(claim.id).attempt_history_json);
+  assert.deepEqual(history.map(item => item.event), ["CLAIMED", "LEASE_RENEWED"]);
+
+  const lateDatabase = new D1TestDatabase();
+  await createTurn(lateDatabase);
+  const late = await claimAssistantChatTurn(
+    lateDatabase, "worker:late", atSeconds(1_600),
+  );
+  assert.equal(late.lease_expires_at, atSeconds(1_800).toISOString());
+  assert.equal(await renewAssistantChatTurn(lateDatabase, {
+    id: late.id,
+    lease_token: late.lease_token,
+  }, atSeconds(1_801)), null);
+  assert.throws(() => lateDatabase.database.prepare(
+    "UPDATE assistant_turn_jobs SET lease_expires_at=? WHERE id=?",
+  ).run(atSeconds(1_900).toISOString(), late.id), /lease cannot outlive turn/);
 });
 
 test("progress reserves enough sequence capacity for the largest final answer", async () => {

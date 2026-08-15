@@ -70,7 +70,8 @@ The operational `/api/assistant-chat` boundary follows that separation. Human
 send, cancel, turn-read, and SSE-replay requests require the verified owner.
 Machine claim, progress, completion, failure, and capacity-defer requests
 require `INGEST_TOKEN`; every mutation after claim must also present the exact
-unexpired lease token. Neither credential class is accepted as the other.
+unexpired lease token. Lease renewal requires the same token and cannot extend
+past the turn expiry. Neither credential class is accepted as the other.
 
 ## Ownership enforcement
 

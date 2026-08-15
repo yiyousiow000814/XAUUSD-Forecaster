@@ -860,6 +860,7 @@ def execute_assistant_capacity_route(
     invoke: Callable[
         [ModelProfile, ApiCredential, str | None, ModelRequestAccountant], T
     ],
+    before_invoke: Callable[[], None] | None = None,
     policies: tuple[AssistantCapacityPolicy, ...] | None = None,
     now: datetime | None = None,
 ) -> AssistantCapacityResult[T]:
@@ -868,6 +869,8 @@ def execute_assistant_capacity_route(
         priority = AssistantServicePriority(str(service_priority))
     except ValueError as error:
         raise ValueError("Assistant service priority is invalid") from error
+    if before_invoke is not None and not callable(before_invoke):
+        raise ValueError("Assistant capacity pre-invoke callback is invalid")
     instant = now or datetime.now(UTC)
     _iso(instant)
 
@@ -944,6 +947,8 @@ def execute_assistant_capacity_route(
                 if attempts >= MAX_ASSISTANT_CAPACITY_ATTEMPTS:
                     saw_capacity_pressure = True
                     break
+                if before_invoke is not None:
+                    before_invoke()
                 reservation = _reserve_assistant_capacity(
                     connection,
                     policy=policy,
