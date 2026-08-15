@@ -1047,23 +1047,29 @@ def test_gdelt_gkg_feed_validates_manifest_and_uses_official_gcs_url(tmp_path) -
     assert bad_ledger.count("news_revisions") == 0
 
 
-def test_gdelt_fetches_fresh_candidate_body_before_ai_semantic_review(tmp_path) -> None:
+def test_gdelt_fetches_discovery_candidate_before_ai_semantic_review(tmp_path) -> None:
     fetched = datetime(2026, 8, 10, 6, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched - timedelta(days=1))
     manifest, archive = _gdelt_gkg_feed(
-        title="A tragic love story remembered after many years",
+        title="James Marsden joins television hall of fame",
         url="https://example.test/love-story",
         timestamp="20260810054000",
-        themes="ECON_GOLD",
+        themes="WB_2936_GOLD;TAX_FNCACT_ACTOR",
     )
+    extracted: list[str] = []
+
+    def extract(url: str) -> tuple[str, str]:
+        extracted.append(url)
+        return "complete candidate evidence " * 30, url
 
     result = collect_gdelt_news(
         ledger, fetched, _gdelt_fetcher(manifest, archive),
-        content_extractor=lambda url: ("complete candidate evidence " * 30, url),
+        content_extractor=extract,
     )
 
     assert result["status"] == "OK"
     assert result["inserted_revisions"] == 1
+    assert extracted == ["https://example.test/love-story"]
     assert result["rejected_reasons"] == {}
 
 
@@ -1381,7 +1387,7 @@ def test_us_employment_lane_does_not_guess_meaning_from_case_or_keywords() -> No
         assert reason == "AI_SEMANTIC_REVIEW_REQUIRED"
 
 
-def test_gdelt_candidates_also_reach_ai_instead_of_keyword_filtering() -> None:
+def test_gdelt_candidates_reach_ai_without_headline_semantic_filtering() -> None:
     observed = datetime(2026, 8, 10, 6, 0, tzinfo=UTC)
     for headline in (
         "A tragic love story remembered after many years",
@@ -1394,15 +1400,6 @@ def test_gdelt_candidates_also_reach_ai_instead_of_keyword_filtering() -> None:
         )
         assert allowed
         assert reason == "AI_SEMANTIC_REVIEW_REQUIRED"
-    allowed, reason = google_news_item_is_relevant(
-        "gdelt_gold_geopolitics",
-        "Gold rises as Treasury yields fall after US jobs report",
-        observed - timedelta(minutes=20), observed,
-    )
-    assert allowed
-    assert reason == "AI_SEMANTIC_REVIEW_REQUIRED"
-
-
 def test_google_news_lane_orders_unstored_candidates_by_publisher_time(tmp_path) -> None:
     fetched = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
@@ -1934,14 +1931,44 @@ def test_gemini_rejects_non_chinese_translation_fields() -> None:
         "novelty": 0.0, "confidence": 1.0,
     }
 
-    with pytest.raises(ValueError, match="headline_zh is not Simplified Chinese"):
+    with pytest.raises(ValueError, match="NO_CHINESE_PROSE"):
+        annotation_module._validate_chinese_result(vector)
+
+    vector["headline_zh"] = "黄金市场更新"
+    with pytest.raises(ValueError, match="NO_CHINESE_PROSE"):
+        annotation_module._validate_chinese_result(vector)
+
+    vector["summary_zh"] = (
+        "这是一段中文开头用于掩饰后续内容：Federal Reserve kept rates unchanged "
+        "and Powell said inflation remains elevated while officials continue to "
+        "watch incoming economic data before considering any future policy change"
+    )
+    with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
         annotation_module._validate_chinese_result(vector)
 
 
-def test_gemini_accepts_chinese_title_with_preserved_proper_names() -> None:
+@pytest.mark.parametrize("display_text", [
+    "美联储维持利率不变，Powell 表示通胀仍然偏高。",
+    "较高的实际收益率可能继续对 XAUUSD 构成压力。",
+    "FOMC 会议纪要和 CPI、PCE、NFP 数据影响降息预期。",
+    "NVIDIA 财报推动科技股上涨，但风险情绪可能削弱黄金的避险需求。",
+    "市场共识认为通胀持续性仍会影响实际收益率和降息预期。",
+    "BlackRock、JPMorgan、NVIDIA 与 Bank of America 发布财报，市场风险偏好改善。",
+    "José 与 Beyoncé 的姓名保留拉丁字母，但正文仍然使用自然中文。",
+    "苹果发布 iPhone 17 Pro Max，供应链变化可能影响市场风险情绪。",
+    "COMEX 黄金和 SPDR Gold Shares ETF 持仓变化受到市场关注。",
+    "C++ 与 .NET 相关企业上涨，但这只是风险情绪的背景信息。",
+    "Powell 表示通胀仍高 📈，XAUUSD 随后承压。",
+    "S&P 500 与 U.S. 10Y Treasury 收益率上升，黄金因此承压。",
+    "貝萊德調整 GLD 持倉，市場仍關注實際利率。",
+    "Beyonce\u0301 与 Societe\u0301 Generale 的名称含组合重音，正文仍为中文。",
+])
+def test_gemini_accepts_chinese_primary_prose_with_natural_english_names(
+    display_text,
+) -> None:
     vector = {
-        "headline_zh": "Public Storage：优先股有望从利率下降中获益（PSA）- Seeking Alpha",
-        "summary_zh": "该报道讨论利率下降对优先股估值的影响，并完整保留公司名称和股票缩写。",
+        "headline_zh": display_text,
+        "summary_zh": display_text,
         "event_type": "analyst_report", "entities": ["Public Storage"],
         "hawkishness": 0.0, "inflation_impulse": 0.0,
         "growth_impulse": 0.0, "geopolitical_risk": 0.0,
@@ -1949,6 +1976,170 @@ def test_gemini_accepts_chinese_title_with_preserved_proper_names() -> None:
     }
 
     annotation_module._validate_chinese_result(vector)
+
+
+@pytest.mark.parametrize("foreign_text", [
+    "市场更新：Федеральная резервная система сохранила ставку。",
+    "市场更新：الذهب ارتفع بعد قرار البنك المركزي。",
+    "市场更新：金価格が上昇し、市場が反応した。",
+    "市场更新：금 가격이 중앙은행 결정 이후 상승했다。",
+    "市场更新：Η κεντρική τράπεζα διατήρησε τα επιτόκια。",
+])
+def test_gemini_rejects_non_chinese_non_latin_scripts(foreign_text) -> None:
+    vector = {
+        "headline_zh": "市场语言检查",
+        "summary_zh": foreign_text,
+    }
+
+    with pytest.raises(ValueError, match="THIRD_SCRIPT_PRESENT"):
+        annotation_module._validate_chinese_result(vector)
+
+
+@pytest.mark.parametrize("english_dominant", [
+    "中文提示：Federal Reserve kept rates unchanged and markets reduced near-term cut bets.",
+    "黄金市场受到实际收益率影响。Federal Reserve kept rates unchanged and markets reduced cut bets.",
+    "摘要：Federal Reserve Bank of America BlackRock NVIDIA",
+    "美国 CPI 高于预期，Gold ETF flows remained weak after the release.",
+    "市场更新：Bu metin Türkçe olarak devam ediyor ve henüz çevrilmedi.",
+])
+def test_gemini_rejects_english_or_latin_prose_dominating_chinese(
+    english_dominant,
+) -> None:
+    vector = {
+        "headline_zh": "市场语言检查",
+        "summary_zh": english_dominant,
+    }
+
+    with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
+        annotation_module._validate_chinese_result(vector)
+
+
+def test_gemini_distinguishes_translated_prose_from_english_identifiers() -> None:
+    valid = {
+        "headline_zh": "美国 CPI 高于预期",
+        "summary_zh": "美国 CPI 高于预期，Gold ETF 资金流仍然疲弱。",
+    }
+    invalid = {
+        **valid,
+        "summary_zh": "美国 CPI 高于预期，Gold ETF flows remained weak after the release.",
+    }
+
+    annotation_module._validate_chinese_result(valid)
+    with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
+        annotation_module._validate_chinese_result(invalid)
+
+
+def test_gemini_validates_semantic_reason_as_chinese_primary_display() -> None:
+    valid = {
+        "headline_zh": "美国 CPI 高于预期",
+        "summary_zh": "美国 CPI 高于预期，市场重新评估美联储降息路径。",
+        "semantic_reason_zh": "CPI 改变利率预期，可能通过美元影响 XAUUSD。",
+    }
+    invalid = {
+        **valid,
+        "semantic_reason_zh": (
+            "Federal Reserve policy expectations changed and the dollar "
+            "reaction may affect gold prices."
+        ),
+    }
+
+    annotation_module._validate_chinese_result(valid)
+    with pytest.raises(ValueError, match="NO_CHINESE_PROSE"):
+        annotation_module._validate_chinese_result(invalid)
+
+
+def test_gemini_repairs_only_invalid_semantic_reason(monkeypatch) -> None:
+    evidence = "CPI changed rate expectations and the dollar outlook."
+    invalid_reason = (
+        "Federal Reserve policy expectations changed and the dollar "
+        "reaction may affect gold prices."
+    )
+    vector = _v15_annotation({
+        "headline_zh": "美国 CPI 高于预期",
+        "summary_zh": "美国 CPI 高于预期，市场重新评估美联储降息路径。",
+        "event_type": "economic_release", "entities": ["CPI"],
+        "hawkishness": 0.0, "inflation_impulse": 0.5,
+        "growth_impulse": 0.0, "geopolitical_risk": 0.0,
+        "usd_impulse": 0.3, "novelty": 0.8, "confidence": 0.8,
+    }, evidence, semantic_reason_zh=invalid_reason)
+    repaired_reason = "CPI 改变利率预期，可能通过美元影响 XAUUSD。"
+    repaired = {
+        "headline_zh": vector["headline_zh"],
+        "summary_zh": vector["summary_zh"],
+        "primary_story_title_zh": vector["primary_story_title_zh"],
+        "semantic_reason_zh": repaired_reason,
+    }
+    calls = []
+    _mock_model_json(
+        monkeypatch,
+        lambda _key, _model, _payload: calls.append(1) or (
+            vector if len(calls) == 1 else repaired
+        ),
+    )
+    pool = annotation_module._GeminiRequestPool(
+        ("key-a", "key-b"), request_accountant=ALLOW_MODEL_REQUEST,
+    )
+
+    result, _ = pool.call(0, "model", "headline", evidence)
+
+    assert result["semantic_reason_zh"] == repaired_reason
+    assert result["headline_zh"] == vector["headline_zh"]
+    assert result["summary_zh"] == vector["summary_zh"]
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(("invalid_display", "repaired_fields"), [
+    (
+        {"headline_zh": "金", "summary_zh": "黄金上涨，但摘要长度不足。"},
+        ("headline_zh", "summary_zh"),
+    ),
+    (
+        {"headline_zh": "黄金市场更新", "summary_zh": "金" * 1601},
+        ("summary_zh",),
+    ),
+    (
+        {"headline_zh": "金" * 301,
+         "summary_zh": "黄金市场出现新的变化，投资者关注后续经济数据。"},
+        ("headline_zh",),
+    ),
+])
+def test_display_schema_bounds_are_repaired_before_model_admission(
+    invalid_display, repaired_fields, monkeypatch,
+) -> None:
+    evidence = "Complete source evidence without numeric claims."
+    vector = _v15_annotation(
+        {
+            **invalid_display,
+            "event_type": "background", "entities": [],
+            "hawkishness": 0.0, "inflation_impulse": 0.0,
+            "growth_impulse": 0.0, "geopolitical_risk": 0.0,
+            "usd_impulse": 0.0, "novelty": 0.0, "confidence": 0.8,
+        },
+        evidence,
+    )
+    repaired = {
+        "headline_zh": "黄金市场更新",
+        "summary_zh": "完整来源正文显示黄金市场出现变化，投资者继续关注经济数据。",
+        "primary_story_title_zh": "",
+    }
+    calls = []
+    _mock_model_json(
+        monkeypatch,
+        lambda _key, _model, _payload: calls.append(1) or (
+            vector if len(calls) == 1 else repaired
+        ),
+    )
+    pool = annotation_module._GeminiRequestPool(
+        ("key-a", "key-b"), request_accountant=ALLOW_MODEL_REQUEST,
+    )
+
+    result, _ = pool.call(0, "model", "headline", evidence)
+
+    for field in ("headline_zh", "summary_zh"):
+        expected = repaired[field] if field in repaired_fields else invalid_display[field]
+        assert result[field] == expected
+    assert result["confidence"] == 0.8
+    assert len(calls) == 2
 
 
 def test_gemini_repairs_mixed_language_summary_with_counted_request(
@@ -1961,7 +2152,7 @@ def test_gemini_repairs_mixed_language_summary_with_counted_request(
     }
     repaired = {
         "headline_zh": "黄金上涨",
-        "summary_zh": "黄金价格上涨，美元走弱，市场正在关注后续经济数据。",
+        "summary_zh": "Powell 表示通胀仍高，市场关注 XAUUSD 后续走势和经济数据。",
         "primary_story_title_zh": "",
     }
     calls = []
@@ -1980,9 +2171,34 @@ def test_gemini_repairs_mixed_language_summary_with_counted_request(
     )
     result, _ = pool.call(0, "model", "headline", "body")
     assert result["summary_zh"] == repaired["summary_zh"]
+    assert "Powell" in result["summary_zh"]
+    assert "XAUUSD" in result["summary_zh"]
     assert [usage.purpose for usage in usages] == [
         "news-annotation", "chinese-repair",
     ]
+
+
+def test_chinese_repair_policy_preserves_natural_english_identifiers() -> None:
+    payload = annotation_module._chinese_repair_payload({
+        "headline_zh": "Powell comments on XAUUSD",
+        "summary_zh": "NVIDIA and FOMC were mentioned.",
+        "primary_story_title_zh": "",
+        "semantic_reason_zh": "Rate expectations changed.",
+    })
+    instruction = payload["contents"][0]["parts"][0]["text"]
+    schema = payload["generationConfig"]["responseSchema"]
+    assert "proper nouns in English" in instruction
+    assert "primarily in natural Simplified Chinese" in instruction
+    assert "No sentence may remain" not in instruction
+    assert "semantic_reason_zh" in instruction
+    assert "semantic_reason_zh" in schema["required"]
+
+    legacy_schema = annotation_module._chinese_repair_payload({
+        "headline_zh": "Gold update",
+        "summary_zh": "Gold moved.",
+        "primary_story_title_zh": "",
+    })["generationConfig"]["responseSchema"]
+    assert "semantic_reason_zh" not in legacy_schema["required"]
 
 
 def test_gemini_annotation_reserves_provider_counted_input_tokens(
@@ -2162,40 +2378,10 @@ def test_gemini_locally_recovers_unverifiable_display_numbers() -> None:
     assert "2.0" not in result["headline_zh"]
     assert "相关数值" in result["headline_zh"]
     assert "相关数值" in result["summary_zh"]
-    assert result["confidence"] == 0.5
+    assert result["confidence"] == 0.9
 
 
-def test_invalid_language_fallback_is_neutral_and_auditable() -> None:
-    result = {
-        "headline_zh": "Gold market update",
-        "summary_zh": "This response was not translated into Chinese.",
-        "hawkishness": 0.8, "inflation_impulse": 0.7,
-        "growth_impulse": -0.4, "geopolitical_risk": 0.9,
-        "usd_impulse": 0.6, "novelty": 0.8, "confidence": 0.9,
-    }
-    annotation_module._neutralize_unvalidated_language(result)
-    annotation_module._validate_chinese_result(result)
-    assert result["confidence"] == 0.0
-    assert result["geopolitical_risk"] == 0.0
-    assert "用于审计" in result["summary_zh"]
-
-
-def test_invalid_summary_does_not_erase_a_valid_chinese_headline() -> None:
-    result = {
-        "headline_zh": "美联储就利率政策发布更新",
-        "summary_zh": "This summary was not translated.",
-        "hawkishness": 0.8, "inflation_impulse": 0.7,
-        "growth_impulse": 0.0, "geopolitical_risk": 0.0,
-        "usd_impulse": 0.4, "novelty": 0.8, "confidence": 0.9,
-    }
-
-    annotation_module._neutralize_unvalidated_language(result)
-
-    assert result["headline_zh"] == "美联储就利率政策发布更新"
-    assert result["confidence"] == 0.0
-
-
-def test_annotation_appends_neutral_record_when_translation_repair_is_unavailable(
+def test_display_failure_withholds_semantics_until_readable_output_exists(
     tmp_path, monkeypatch
 ) -> None:
     now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
@@ -2210,7 +2396,7 @@ def test_annotation_appends_neutral_record_when_translation_repair_is_unavailabl
             "cluster_id": "language-cluster",
         }
     )
-    vector = {
+    semantic = {
         "headline_zh": "Gold market update 99",
         "summary_zh": "This response remained in English and invented 99.",
         "event_type": "other", "entities": [], "hawkishness": 0.7,
@@ -2218,6 +2404,13 @@ def test_annotation_appends_neutral_record_when_translation_repair_is_unavailabl
         "geopolitical_risk": 0.8, "usd_impulse": 0.5,
         "novelty": 0.9, "confidence": 0.9,
     }
+    vector = _v15_annotation(
+        semantic,
+        "Complete source text without numeric claims.",
+        xauusd_relevance="MACRO_DRIVER",
+        review_priority="IMMEDIATE",
+        semantic_reason_zh="来源证据显示该事件可能影响黄金。",
+    )
     calls = []
     def respond(_key, _model, _payload):
         calls.append(1)
@@ -2229,13 +2422,36 @@ def test_annotation_appends_neutral_record_when_translation_repair_is_unavailabl
         ledger, provider="gemini", api_key="test-key", limit=1,
         request_accountant=ALLOW_MODEL_REQUEST,
     )
-    assert statuses[0]["status"] == "OK"
-    saved = ledger.connection.execute(
-        "SELECT * FROM news_annotations WHERE source='language-test'"
-    ).fetchone()
-    assert saved["confidence"] == 0.0
-    assert saved["geopolitical_risk"] == 0.0
-    assert ledger.count("news_llm_failures") == 0
+    assert statuses[0]["status"] == "ERROR"
+    assert "semantic annotation withheld" in statuses[0]["error"]
+    assert ledger.count("news_annotations") == 0
+    assert ledger.count("news_llm_failures") == 1
+
+
+def test_semantic_failure_does_not_trigger_display_repair(monkeypatch) -> None:
+    vector = _v15_annotation(
+        {
+            "headline_zh": "黄金市场更新",
+            "summary_zh": "来源显示黄金市场出现新的变化，并可能影响近期价格走势。",
+            "event_type": "other", "entities": [], "hawkishness": 0.0,
+            "inflation_impulse": 0.0, "growth_impulse": 0.0,
+            "geopolitical_risk": 0.0, "usd_impulse": 0.0,
+            "novelty": 0.5, "confidence": 0.8,
+        },
+        "evidence absent from source",
+    )
+    calls = []
+    _mock_model_json(
+        monkeypatch,
+        lambda _key, _model, _payload: calls.append(1) or vector,
+    )
+    pool = annotation_module._GeminiRequestPool(
+        ("test-key",), request_accountant=ALLOW_MODEL_REQUEST,
+    )
+
+    with pytest.raises(ValueError, match="supporting evidence is absent"):
+        pool.call(0, annotation_module.DEFAULT_GEMINI_MODEL, "Gold", "Source body")
+    assert len(calls) == 1
 
 
 def test_llm_failure_is_persisted_and_blocks_immediate_retry(
@@ -2309,6 +2525,42 @@ def test_repeated_same_validation_failure_enters_dead_letter(tmp_path) -> None:
     ).fetchone()
     assert latest["is_terminal"] == 1
     assert latest["next_retry_at"] is None
+
+
+def test_repeated_same_impact_validation_failure_gets_one_recovery_attempt(
+    tmp_path,
+) -> None:
+    now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger.connection.execute("PRAGMA foreign_keys=OFF")
+    row = {
+        "source": "impact-failure-test", "source_item_id": "one",
+        "revision_number": 1, "content_hash": "hash",
+        "annotation_id": "annotation",
+    }
+    failure = annotation_module.ModelGatewayResponseInvalid(
+        ValueError("identity relation contradicts material update")
+    )
+
+    first = annotation_module._append_impact_failure(
+        ledger, row, failure, model_version=annotation_module.IMPACT_MODEL,
+    )
+    second = annotation_module._append_impact_failure(
+        ledger, row, failure, model_version=annotation_module.IMPACT_MODEL,
+    )
+
+    assert first["retry_state"] == "BACKING_OFF"
+    assert first["failure_code"] == "MODEL_OUTPUT_INVALID"
+    assert second["retry_state"] == "DEAD_LETTER"
+    assert second["is_terminal"] is True
+    latest = ledger.connection.execute(
+        """SELECT error_type,error,is_terminal,next_retry_at
+        FROM news_impact_failures_v1 ORDER BY attempt_number DESC LIMIT 1"""
+    ).fetchone()
+    assert tuple(latest) == (
+        "ValueError", "identity relation contradicts material update", 1, None,
+    )
+    ledger.close()
 
 
 def test_batch_rpm_exhaustion_is_deferred_without_failure_row(
@@ -2840,51 +3092,77 @@ def test_truncated_identity_context_forbids_claiming_a_new_episode() -> None:
     assert "必须选UNRESOLVED，禁止选NEW_EPISODE" in prompt
 
 
-def test_identity_recall_crosses_categories_and_ignores_xau_impact(tmp_path) -> None:
+def test_current_cross_publisher_event_survives_recent_noise(tmp_path) -> None:
     now = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
     common = {
-        "event_type": "fed_independence", "entities": ["Donald Trump", "Lisa Cook"],
+        "event_type": "employment_situation", "entities": ["BLS", "US payrolls"],
         "hawkishness": 0.0, "inflation_impulse": 0.0,
         "growth_impulse": 0.0, "geopolitical_risk": 0.2,
         "usd_impulse": 0.0, "novelty": 0.8, "confidence": 0.9,
-        "primary_category": "rates_fed", "record_kind": "FACT_EVENT",
+        "primary_category": "inflation_employment", "record_kind": "FACT_EVENT",
         "evidence_role": "CORE_CLAIM", "materiality": 0.8,
-        "canonical_actor_id": "donald_trump", "canonical_object_id": "lisa_cook",
-        "headline_zh": "特朗普再次寻求解除丽莎库克职务",
-        "secondary_categories": [], "emerging_topic_zh": "美联储独立性",
-        "actor": "Donald Trump", "action": "attempts removal",
-        "object": "Lisa Cook", "location": "United States", "event_time": "",
-        "claim_status": "CONFIRMED", "action_family": "REGULATORY_ACTION",
-        "canonical_location_id": "us", "primary_story_title_zh": "丽莎库克罢免争议",
+        "canonical_actor_id": "bureau_of_labor_statistics",
+        "canonical_object_id": "us_july_jobs_report",
+        "headline_zh": "美国7月就业报告显示非农减少23,000个岗位",
+        "secondary_categories": [], "emerging_topic_zh": "美国就业",
+        "actor": "Bureau of Labor Statistics", "action": "reports",
+        "object": "July 2026 employment situation", "location": "United States",
+        "event_time": "2026-07", "claim_status": "CONFIRMED",
+        "action_family": "ECONOMIC_RELEASE", "canonical_location_id": "us",
+        "primary_story_title_zh": "美国7月就业报告",
         "secondary_contexts_zh": [], "relation_to_prior": "NONE",
         "document_kind": "NEWS_REPORT", "source_organization_id": "test-source",
         "xauusd_relevance": "MACRO_DRIVER", "review_priority": "FAST",
         "material_change": "NEW_EVENT", "time_sensitivity": "ONGOING",
-        "semantic_reason_zh": "完整正文显示这是美联储治理相关的新事件。",
-        "supporting_evidence": ["Trump effort"],
+        "semantic_reason_zh": "完整正文显示这是同一次美国7月就业数据发布。",
+        "supporting_evidence": ["the economy lost 23,000 nonfarm payroll positions"],
     }
     for index, material_key in enumerate((
-        "trump_removes_lisa_cook", "cook_firing_attempt",
+        "us_july_2026_jobs_report_release",
+        "july_2026_us_jobs_report_release",
+        "publisher_jobs_followup",
     )):
-        item_id = f"cook-{index}"
+        item_id = f"jobs-{index}"
+        source = (
+            "google_news_us_employment"
+            if index == 0 else "google_news_gold_context"
+        )
         seen = now + timedelta(minutes=index * 70)
-        body = f"Trump effort involving Federal Reserve Governor Lisa Cook {index}. " * 20
+        body = (
+            "The Bureau of Labor Statistics reported that the economy lost "
+            "23,000 nonfarm payroll positions in July 2026. "
+        ) * 20
         digest = hashlib.sha256(body.encode()).hexdigest()
         ledger.append_news_revision({
-            "source": "federal_reserve_press_all", "source_item_id": item_id,
+            "source": source, "source_item_id": item_id,
             "source_published_time": seen, "collector_first_seen_time": seen,
-            "fetched_time": seen, "headline": f"Fed Governor Lisa Cook report {index}",
-            "body": body, "content_hash": digest, "cluster_id": item_id,
+            "fetched_time": seen,
+            "headline": (
+                "Gold and Silver Prices Surge After Weak July Jobs Report"
+                if index != 1 else
+                "Gold Jumps Over $100 After a Shockingly Weak July Jobs Report"
+            ),
+            "body": body, "content_hash": digest,
+            "cluster_id": (
+                "shared-jobs-syndication" if index in {0, 2} else item_id
+            ),
         })
         ledger.append_annotation({
             "annotation_id": f"annotation-{index}",
-            "source": "federal_reserve_press_all", "source_item_id": item_id,
+            "source": source, "source_item_id": item_id,
             "revision_number": 1, "raw_content_hash": digest,
             "annotation": {
                 **common, "material_event_key": material_key,
                 "episode_key": material_key,
-                "summary_zh": "特朗普再次寻求解除美联储理事丽莎库克的职务。",
+                "summary_zh": "美国7月就业报告显示非农岗位减少23,000个。",
+                **({
+                    "canonical_object_id": "us_jobs_report_july",
+                } if index == 1 else {}),
+                **({
+                    "canonical_actor_id": "reporting_publisher",
+                    "canonical_object_id": "employment_report_commentary",
+                } if index == 2 else {}),
                 **({
                     "primary_category": "regulation_other",
                     "materiality": 0.1,
@@ -2897,7 +3175,7 @@ def test_identity_recall_crosses_categories_and_ignores_xau_impact(tmp_path) -> 
         })
         if index == 0:
             ledger.append_news_impact_assessment({
-                "assessment_id": "prior-impact", "source": "federal_reserve_press_all",
+                "assessment_id": "prior-impact", "source": source,
                 "source_item_id": item_id, "revision_number": 1,
                 "raw_content_hash": digest, "annotation_id": "annotation-0",
                 "llm_model_version": annotation_module.IMPACT_MODEL,
@@ -2906,22 +3184,22 @@ def test_identity_recall_crosses_categories_and_ignores_xau_impact(tmp_path) -> 
                 "assessed_at": seen + timedelta(seconds=2),
                 "impact_class": "BACKGROUND", "event_state": "ACTIVE",
                 "update_type": "NEW_EVENT", "confidence": 0.9,
-                "reason_zh": "此前已经收到同一事件。",
+                "reason_zh": "此前已经收到同一次就业数据发布。",
                 "resolution_id": "prior-resolution",
                 "identity_relation": "NEW_EPISODE",
                 "identity_anchor_zh": "新的事实发生批次。",
                 "core_fact_changes_zh": [],
                 "identity_differences_zh": ["当前事实属于新的发生批次。"],
                 "context_differences_zh": [],
-                "canonical_episode_id": "episode-cook",
-                "canonical_event_id": "event-cook",
+                "canonical_episode_id": "episode-july-jobs",
+                "canonical_event_id": "event-july-jobs",
             })
 
-    # A broad category can receive dozens of newer, unrelated reports before
-    # the next article about the original event. Candidate recall must rank
-    # semantic matches after a bounded scan, not truncate by recency first.
-    for index in range(60):
-        seen = now + timedelta(minutes=index + 1)
+    # A broad feed can receive more than the old 500-row scan bound before the
+    # next report about the original event. Recall must use stable identity
+    # anchors across the bounded universe, not truncate by recency first.
+    for index in range(620):
+        seen = now + timedelta(seconds=index + 1)
         item_id = f"distractor-{index}"
         body = f"Unrelated macro report number {index}. " * 20
         digest = hashlib.sha256(body.encode()).hexdigest()
@@ -2953,23 +3231,32 @@ def test_identity_recall_crosses_categories_and_ignores_xau_impact(tmp_path) -> 
     ledger.connection.set_trace_callback(statements.append)
     try:
         pending = pending_impact_records(
-            ledger.connection, observed_at=now + timedelta(hours=2), limit=100,
+            ledger.connection, observed_at=now + timedelta(hours=3), limit=100,
+            selection_order="newest",
         )
     finally:
         ledger.connection.set_trace_callback(None)
 
-    current = next(row for row in pending if row["source_item_id"] == "cook-1")
+    current = next(row for row in pending if row["source_item_id"] == "jobs-1")
     assert current["prior_event_context"]
-    assert current["prior_event_context"][0]["source_item_id"] == "cook-0"
+    assert current["prior_event_context"][0]["source_item_id"] == "jobs-0"
     assert current["prior_event_context"][0]["candidate_id"] == "annotation-0"
-    assert current["prior_event_context"][0]["canonical_event_id"] == "event-cook"
+    assert current["prior_event_context"][0]["canonical_event_id"] == "event-july-jobs"
     assert current["prior_event_context"][0]["identity_anchor_eligible"] is True
     assert current["prior_event_context"][0]["impact_class"] == "BACKGROUND"
+    assert current["prior_event_context"][0]["similarity"] == 1.0
     claim = current["prior_event_context"][0]["event_claim"]
-    assert claim["actor"] == "Donald Trump"
-    assert claim["action"] == "attempts removal"
-    assert claim["object"] == "Lisa Cook"
-    assert claim["supporting_evidence"] == ["Trump effort"]
+    assert claim["actor"] == "Bureau of Labor Statistics"
+    assert claim["action"] == "reports"
+    assert claim["object"] == "July 2026 employment situation"
+    assert claim["supporting_evidence"] == [
+        "the economy lost 23,000 nonfarm payroll positions"
+    ]
+    syndicated = next(
+        row for row in pending if row["source_item_id"] == "jobs-2"
+    )
+    assert syndicated["prior_event_context"][0]["source_item_id"] == "jobs-0"
+    assert syndicated["prior_event_context"][0]["similarity"] == 1.0
     candidate_queries = [
         statement for statement in statements
         if "FROM NEWS_REVISIONS P JOIN NEWS_ANNOTATIONS PA" in statement.upper()
@@ -3341,7 +3628,7 @@ def test_gemini_31_has_an_independent_fallback_quota(tmp_path) -> None:
     ) == 500
 
 
-def test_gemini_31_current_annotation_is_persisted_and_not_reprocessed(
+def test_valid_annotation_is_not_reprocessed_but_legacy_neutralization_is(
     tmp_path, monkeypatch
 ) -> None:
     now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
@@ -3394,6 +3681,50 @@ def test_gemini_31_current_annotation_is_persisted_and_not_reprocessed(
     ).fetchone()
     assert stored["geopolitical_risk"] == pytest.approx(0.8)
     assert stored["prompt_version"] == annotation_module.PROMPT_VERSION
+    assert annotate_pending_news(
+        ledger,
+        provider="gemini",
+        api_key="test-key",
+        model=annotation_module.DEFAULT_GEMINI_MODEL,
+        limit=1,
+        request_accountant=ALLOW_MODEL_REQUEST,
+    ) == []
+
+    legacy_body = "Gold geopolitical evidence requires semantic recovery. " * 20
+    legacy_digest = hashlib.sha256(legacy_body.encode()).hexdigest()
+    ledger.append_news_revision({
+        "source": "fallback-test", "source_item_id": "legacy-invalid",
+        "collector_first_seen_time": now, "fetched_time": now,
+        "headline": "Gold semantic recovery", "body": legacy_body,
+        "content_hash": legacy_digest, "cluster_id": "legacy-invalid-cluster",
+    })
+    stored_json = dict(vector)
+    stored_json.update({
+        "xauusd_relevance": "IRRELEVANT",
+        "semantic_reason_zh": "语言或结构一致性检查未通过，禁止进入当前模型。",
+    })
+    ledger.append_annotation({
+        "annotation_id": "legacy-invalid-annotation",
+        "source": "fallback-test", "source_item_id": "legacy-invalid",
+        "revision_number": 1, "raw_content_hash": legacy_digest,
+        "llm_model_version": annotation_module.FALLBACK_GEMINI_MODEL,
+        "prompt_version": annotation_module.PROMPT_VERSION,
+        "parse_started_at": now, "parsed_at": now,
+        "annotation": stored_json,
+    })
+
+    recovered = annotate_pending_news(
+        ledger,
+        provider="gemini",
+        api_key="test-key",
+        model=annotation_module.FALLBACK_GEMINI_MODEL,
+        limit=1,
+        request_accountant=ALLOW_MODEL_REQUEST,
+    )
+    assert recovered[0]["status"] == "OK"
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_annotations WHERE source_item_id='legacy-invalid'"
+    ).fetchone()[0] == 2
     assert annotate_pending_news(
         ledger,
         provider="gemini",

@@ -31,8 +31,11 @@ $runtimeUpdateStatePath = Join-Path $moduleRoot ".local\forward\runtime-update-s
 $dashboardSyncConfigPath = Join-Path $moduleRoot ".local\forward\dashboard-sync.json"
 $runtimeUpdateCheckInterval = [TimeSpan]::FromMinutes(5)
 $runtimePreflightContractVersion = "isolated-migrated-runtime-state-v3"
+$codeReloadTimeout = [TimeSpan]::FromMinutes(5)
+$serviceStartupTimeout = [TimeSpan]::FromMinutes(15)
 $runtimeObservationCycles = 2
 $runtimeObservationTimeout = [TimeSpan]::FromMinutes(15)
+$runtimeDecisionHorizon = [TimeSpan]::FromMinutes(30)
 $reloadableServiceKeys = @("collector", "annotator", "api", "sync")
 $runtimeControlFileNames = @(
     "xauusd_control_center.ps1",
@@ -580,17 +583,24 @@ function Write-RuntimeCodeState {
 }
 
 function Get-RuntimeHeartbeat {
-    param([string]$Path, [string]$ServiceName)
+    param(
+        [string]$Path,
+        [string]$ServiceName,
+        [string[]]$AllowedStates = @("RUNNING")
+    )
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
     try {
         $heartbeat = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
         $lastSuccess = [DateTimeOffset]::MinValue
         if ([string]$heartbeat.service -ne $ServiceName -or
-            [string]$heartbeat.state -ne "RUNNING" -or
+            [string]$heartbeat.state -notin $AllowedStates -or
             -not [DateTimeOffset]::TryParse(
                 [string]$heartbeat.last_success, [ref]$lastSuccess
             )) { return $null }
-        return [pscustomobject]@{ LastSuccess = $lastSuccess }
+        return [pscustomobject]@{
+            LastSuccess = $lastSuccess
+            State = [string]$heartbeat.state
+        }
     } catch { return $null }
 }
 
@@ -603,7 +613,10 @@ function Get-ServiceProcessStartedAt {
 }
 
 function Test-CodeReloadHealth {
-    param([DateTimeOffset]$ReloadStarted)
+    param(
+        [DateTimeOffset]$ReloadStarted,
+        [string[]]$AllowedWorkerStates = @("STARTING", "RUNNING")
+    )
     foreach ($service in @($services | Where-Object { $_.Key -in $reloadableServiceKeys })) {
         if (@(Get-ForecasterProcesses $service).Count -eq 0) { return $false }
     }
@@ -611,9 +624,14 @@ function Test-CodeReloadHealth {
         @("collector", "collector-status.json"),
         @("annotator", "news-annotator-status.json")
     )) {
+        # Collector reconciliation can temporarily keep the annotator waiting
+        # on SQLite during a coordinated reload.  A fresh STARTING heartbeat
+        # proves either candidate process launched; the subsequent observation
+        # boundary still requires real decision cycles and rolls back a stuck
+        # startup.
         $heartbeat = Get-RuntimeHeartbeat `
             -Path (Join-Path $moduleRoot ".local\forward\$($heartbeatSpec[1])") `
-            -ServiceName $heartbeatSpec[0]
+            -ServiceName $heartbeatSpec[0] -AllowedStates $AllowedWorkerStates
         if (-not $heartbeat -or $heartbeat.LastSuccess -lt $ReloadStarted) {
             return $false
         }
@@ -649,7 +667,7 @@ function Restart-CodeReloadableServices {
     foreach ($service in $targets) {
         Start-ForecasterService $service -SkipExistingCheck
     }
-    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(180)
+    $deadline = [DateTimeOffset]::UtcNow.Add($codeReloadTimeout)
     do {
         Start-Sleep -Milliseconds 500
         Write-WatchdogHeartbeat
@@ -658,13 +676,14 @@ function Restart-CodeReloadableServices {
     if (-not $healthy) { throw "Code revision reload failed functional health checks." }
     Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_HEALTHY" `
         -Service "collector,annotator,api,sync" -State $Revision
+    return $reloadStarted
 }
 
 function Invoke-RuntimeCandidateActivation {
     param([string]$Revision, [string]$PreviousRevision)
-    Restart-CodeReloadableServices -Revision $Revision
+    $reloadStarted = Restart-CodeReloadableServices -Revision $Revision
     Start-RuntimeObservation -Revision $Revision `
-        -PreviousRevision $PreviousRevision
+        -PreviousRevision $PreviousRevision -HealthBoundary $reloadStarted
     # Observation is durable before applied_revision. A watchdog restart in
     # between repeats safe work instead of silently skipping validation.
     Write-RuntimeCodeState -Revision $Revision
@@ -708,13 +727,19 @@ function Test-CurrentProductionShape {
 }
 
 function Start-RuntimeObservation {
-    param([string]$Revision, [string]$PreviousRevision)
+    param(
+        [string]$Revision,
+        [string]$PreviousRevision,
+        [DateTimeOffset]$HealthBoundary = [DateTimeOffset]::UtcNow
+    )
     $latestDecision = Get-LatestRuntimeDecisionTime
     Write-RuntimeUpdateState @{
         update_status = "OBSERVING"
         observing_revision = $Revision
         previous_revision = $PreviousRevision
         observation_started_at = [DateTimeOffset]::UtcNow.ToString("o")
+        observation_ready_at = $null
+        observation_health_boundary_at = $HealthBoundary.ToString("o")
         observation_last_decision_time = $latestDecision
         observation_success_cycles = 0
         observation_consecutive_failures = 0
@@ -766,9 +791,41 @@ function Test-RuntimeObservation {
         return $false
     }
     $failure = $null
-    if (-not (Test-CodeReloadHealth -ReloadStarted $started)) {
+    $healthBoundary = $started
+    if ($state.observation_health_boundary_at) {
+        $candidateBoundary = [DateTimeOffset]::MinValue
+        if ([DateTimeOffset]::TryParse(
+            [string]$state.observation_health_boundary_at, [ref]$candidateBoundary
+        )) {
+            $healthBoundary = $candidateBoundary
+        }
+    }
+    if (-not (Test-CodeReloadHealth -ReloadStarted $healthBoundary)) {
         $failure = "reload health check failed"
-    } else { $failure = Test-CurrentProductionShape }
+    }
+    $readyAt = [DateTimeOffset]::MinValue
+    $readyValid = $state.observation_ready_at -and [DateTimeOffset]::TryParse(
+        [string]$state.observation_ready_at, [ref]$readyAt
+    )
+    if (-not $failure -and -not $readyValid) {
+        if (Test-CodeReloadHealth $healthBoundary @("RUNNING")) {
+            $readyAt = [DateTimeOffset]::UtcNow
+            $readyValid = $true
+            Write-RuntimeUpdateState @{
+                observation_ready_at = $readyAt.ToString("o")
+                observation_consecutive_failures = 0
+            }
+        } elseif (([DateTimeOffset]::UtcNow - $healthBoundary) -ge $serviceStartupTimeout) {
+            Invoke-RuntimeRollback -FailedRevision $revision `
+                -PreviousRevision $previousRevision `
+                -Reason "workers did not finish startup" | Out-Null
+            return $false
+        } else {
+            Write-RuntimeUpdateState @{ observation_consecutive_failures = 0 }
+            return $true
+        }
+    }
+    if (-not $failure) { $failure = Test-CurrentProductionShape }
     if ($failure) {
         $failures = 1 + [int]$state.observation_consecutive_failures
         Write-RuntimeUpdateState @{ observation_consecutive_failures = $failures }
@@ -827,18 +884,12 @@ function Test-RuntimeObservation {
             -Service "all" -State "$revision cycles=$cycles"
         return $true
     }
-    if (([DateTimeOffset]::UtcNow - $started) -ge $runtimeObservationTimeout) {
-        try {
-            $status = Invoke-RestMethod -Method Get `
-                -Uri "http://127.0.0.1:8765/api/status" -TimeoutSec 5
-            $marketClosed = [string]$status.system.market_session -in @(
-                "CLOSED", "WEEKLY_CLOSED"
-            )
-        } catch { $marketClosed = $false }
-        if ($marketClosed) {
-            # Closed-market time does not consume the two-cycle observation window.
+    if (([DateTimeOffset]::UtcNow - $readyAt) -ge $runtimeObservationTimeout) {
+        if (Test-RuntimeObservationMarketPause) {
+            # Time without an eligible 30-minute decision does not consume the
+            # two-cycle observation window, including the pre-close boundary.
             Write-RuntimeUpdateState @{
-                observation_started_at = [DateTimeOffset]::UtcNow.ToString("o")
+                observation_ready_at = [DateTimeOffset]::UtcNow.ToString("o")
             }
         } else {
             Invoke-RuntimeRollback -FailedRevision $revision `
@@ -873,11 +924,36 @@ function Get-BrokerMarketSession {
         $now = [DateTimeOffset]::UtcNow
         if ($observedAt -gt $now.AddSeconds(5) -or
             ($now - $observedAt).TotalSeconds -gt 20) { return $null }
+        $closesAt = [DateTimeOffset]::MinValue
+        $closesAtValid = [DateTimeOffset]::TryParse(
+            [string]$session.next_close_time, [ref]$closesAt
+        )
         return [pscustomobject]@{
             ObservedAt = $observedAt
             IsOpen = $session.is_open -eq $true
+            ClosesAt = if ($closesAtValid) { $closesAt } else { $null }
         }
     } catch { return $null }
+}
+
+function Test-RuntimeObservationMarketPause {
+    $session = Get-BrokerMarketSession
+    if ($session) {
+        if (-not $session.IsOpen) { return $true }
+        if ($session.ClosesAt -and
+            $session.ClosesAt -gt [DateTimeOffset]::UtcNow -and
+            ($session.ClosesAt - [DateTimeOffset]::UtcNow) -le $runtimeDecisionHorizon) {
+            return $true
+        }
+        return $false
+    }
+    try {
+        $status = Invoke-RestMethod -Method Get `
+            -Uri "http://127.0.0.1:8765/api/status" -TimeoutSec 5
+        return [string]$status.system.market_session -in @(
+            "CLOSED", "WEEKLY_CLOSED"
+        )
+    } catch { return $false }
 }
 
 function Get-ServiceState {
@@ -893,15 +969,24 @@ function Get-ServiceState {
         } else { "news-annotator-status.json" }
         $heartbeat = Get-RuntimeHeartbeat `
             -Path (Join-Path $moduleRoot ".local\forward\$statusName") `
-            -ServiceName $Service.Key
+            -ServiceName $Service.Key `
+            -AllowedStates @("RUNNING", "STARTING")
         $startedAt = Get-ServiceProcessStartedAt -Processes $Processes
         if ($heartbeat -and
+            $heartbeat.State -eq "RUNNING" -and
             $heartbeat.LastSuccess -ge $startedAt -and
             ([DateTimeOffset]::UtcNow - $heartbeat.LastSuccess).TotalSeconds -le 300) {
             return "RUNNING"
         }
+        if ($heartbeat -and
+            $heartbeat.State -eq "STARTING" -and
+            $heartbeat.LastSuccess -ge $startedAt -and
+            $startedAt -ne [DateTimeOffset]::MinValue -and
+            ([DateTimeOffset]::UtcNow - $startedAt) -le $serviceStartupTimeout) {
+            return "STARTING"
+        }
         if ($startedAt -ne [DateTimeOffset]::MinValue -and
-            ([DateTimeOffset]::UtcNow - $startedAt).TotalSeconds -le 180) {
+            ([DateTimeOffset]::UtcNow - $startedAt) -le $codeReloadTimeout) {
             return "STARTING"
         }
         return "$($Service.Key.ToUpper()) STALE"
@@ -1116,6 +1201,18 @@ function Start-WatchdogReplacement {
     Start-Process -FilePath $wscript -ArgumentList $arguments -WindowStyle Hidden
 }
 
+function Invoke-RuntimeCheckoutHandoff {
+    param([string]$Revision)
+    if (-not (Update-RuntimeCheckout -Revision $Revision)) { return $false }
+    Write-WatchdogEvent -Event "MAIN_RUNTIME_UPDATED" `
+        -Service "all" -State $Revision
+    # PowerShell has already parsed this supervisor process, so replacing the
+    # control files on disk cannot update its loaded functions. Hand control to
+    # the newly copied launcher before evaluating candidate health.
+    Start-WatchdogReplacement
+    return $true
+}
+
 function Invoke-ForecasterWatchdog {
     $failureCounts = @{}
     $lastRestart = @{}
@@ -1132,10 +1229,10 @@ function Invoke-ForecasterWatchdog {
         try {
             $currentRevision = Get-CodeRevision
             $desiredRevision = Get-DesiredMainRevision -CurrentRevision $currentRevision
-            if ($desiredRevision -and (Update-RuntimeCheckout -Revision $desiredRevision)) {
-                Write-WatchdogEvent -Event "MAIN_RUNTIME_UPDATED" `
-                    -Service "all" -State $desiredRevision
-                $currentRevision = $desiredRevision
+            if ($desiredRevision -and (
+                Invoke-RuntimeCheckoutHandoff -Revision $desiredRevision
+            )) {
+                return 0
             }
             $runtimeState = Get-RuntimeCodeState
             $appliedRevision = if ($runtimeState) {

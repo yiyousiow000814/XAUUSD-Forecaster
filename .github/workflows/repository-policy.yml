@@ -1,0 +1,34 @@
+name: Repository policy
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repository-policy-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  policy:
+    name: Repository policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Check out trusted policy
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: policy
+          persist-credentials: false
+      - name: Check out pull request without executing it
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          persist-credentials: false
+      - name: Check pull-request policy
+        run: python3 policy/scripts/check_repository_policy.py --root candidate

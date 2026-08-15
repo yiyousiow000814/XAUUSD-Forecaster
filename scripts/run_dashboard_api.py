@@ -14,7 +14,7 @@ import threading
 import time
 import urllib.parse
 from types import SimpleNamespace
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -69,6 +69,7 @@ from xauusd_forecaster.news_evidence import (  # noqa: E402
     resolve_event_clock,
 )
 from xauusd_forecaster.news_relevance import GOOGLE_NEWS_MAX_AGE  # noqa: E402
+from xauusd_forecaster.news_semantics import validated_annotation_predicate  # noqa: E402
 from xauusd_forecaster.news_contracts import CURRENT_NEWS_CONTRACT  # noqa: E402
 from xauusd_forecaster.news_features_v2 import COLLECTION_SOURCES  # noqa: E402
 from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY  # noqa: E402
@@ -484,7 +485,7 @@ def _broker_market_session(database: Path, now: datetime) -> dict | None:
         return None
 
 
-CATEGORY_LABELS = {
+NEWS_CATEGORY_LABELS = {
     "rates_fed": "利率/Fed",
     "inflation_employment": "通胀/就业",
     "growth_economy": "增长/经济",
@@ -492,53 +493,16 @@ CATEGORY_LABELS = {
     "oil_energy": "油价/能源",
     "war_geopolitics": "战争/地缘",
     "central_bank_gold": "央行购金",
-    "risk_sentiment": "风险偏好",
+    "risk_sentiment": "风险情绪 / 避险",
     "regulation_other": "监管/其他",
 }
+OTHER_NEWS_CATEGORY_LABEL = "其他"
 
 
-def _news_category(item: dict) -> str:
-    controlled = CATEGORY_LABELS.get(str(item.get("primary_category") or ""))
-    if controlled:
-        return controlled
-    source = str(item.get("source") or "")
-    searchable = " ".join(
-        str(item.get(key) or "")
-        for key in ("headline", "event_type", "summary_zh")
-    ).lower()
-    if source == "world_gold_council_central_banks":
-        return "央行购金"
-    if source in {"eia_today_in_energy", "eia_press_releases"}:
-        return "油价/能源"
-    if source == "ecb_press_releases":
-        return "利率/Fed"
-    if any(
-        term in searchable
-        for term in (
-            "war", "conflict", "sanction", "iran", "russia", "ukraine",
-            "middle east", "hormuz", "战争", "制裁", "伊朗", "俄罗斯", "乌克兰",
-        )
-    ):
-        return "战争/地缘"
-    if any(term in searchable for term in ("oil", "opec", "crude", "原油", "油价")):
-        return "油价/能源"
-    if any(
-        term in searchable
-        for term in (
-            "inflation", "cpi", "pce", "payroll", "employment", "unemployment",
-            "jobs", "wage", "通胀", "就业", "失业", "薪资",
-        )
-    ):
-        return "通胀/就业"
-    if any(term in searchable for term in ("dollar", "liquidity", "balance sheet", "美元", "流动性")):
-        return "美元/流动性"
-    if any(term in searchable for term in ("gdp", "gross domestic product", "personal income", "growth", "经济增长")):
-        return "增长/经济"
-    if source in {"federal_reserve_monetary", "federal_reserve_speeches_testimony"}:
-        return "利率/Fed"
-    if source == "federal_reserve_press_all":
-        return "监管/其他"
-    return "其他"
+def _news_category_label(primary_category: object) -> str:
+    """Map one completed semantic category without inferring from workflow state."""
+    category = str(primary_category or "").strip()
+    return NEWS_CATEGORY_LABELS.get(category, OTHER_NEWS_CATEGORY_LABEL)
 
 
 def _not_required_reason(item: dict, forward_epoch: str) -> tuple[str, str]:
@@ -662,6 +626,8 @@ def _news_reader_rows(
                    json_extract(a.annotation_json, '$.primary_category') AS primary_category,
                    json_extract(a.annotation_json, '$.secondary_categories') AS secondary_categories_json,
                    json_extract(a.annotation_json, '$.emerging_topic_zh') AS emerging_topic_zh,
+                   json_extract(a.annotation_json, '$.xauusd_relevance') AS xauusd_relevance,
+                   json_extract(a.annotation_json, '$.semantic_reason_zh') AS semantic_reason_zh,
                    json_extract(a.annotation_json, '$.event_time') AS event_time,
                    a.event_type, a.entities_json, a.hawkishness,
                    a.inflation_impulse, a.growth_impulse,
@@ -713,6 +679,7 @@ def _news_reader_rows(
                 AND preferred_a.llm_model_version IN (
                   'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
                 AND preferred_a.prompt_version=?
+                AND {validated_annotation_predicate('preferred_a')}
               ORDER BY CASE preferred_a.llm_model_version
                 WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                 preferred_a.parsed_at DESC LIMIT 1)
@@ -817,7 +784,7 @@ def _serialize_news_rows(
         )
         secondary = item.pop("secondary_categories_json", None)
         item["secondary_categories"] = json.loads(secondary) if secondary else []
-        item["category"] = _news_category(item)
+        item["category"] = _news_category_label(item.get("primary_category"))
         item["eligibility_version"] = CURRENT_NEWS_CONTRACT.eligibility_version
         news.append(item)
     return news
@@ -837,16 +804,30 @@ def _news_archive_page(
     }
     rows = _news_reader_rows(connection, now, after=after, limit=limit + 1)
     has_more = len(rows) > limit
-    news = _serialize_news_rows(rows[:limit], now, epoch, claimable_keys)
+    serialized = _serialize_news_rows(rows[:limit], now, epoch, claimable_keys)
+    withdrawals = [
+        {
+            "source": item["source"],
+            "source_item_id": item["source_item_id"],
+            "revision_number": item["revision_number"],
+        }
+        for item in serialized
+        if item.get("xauusd_relevance") == "IRRELEVANT"
+    ]
+    news = [
+        item for item in serialized
+        if item.get("xauusd_relevance") != "IRRELEVANT"
+    ]
     next_cursor = (
         json.dumps([
-            news[-1]["mirror_updated_at"], news[-1]["source"],
-            news[-1]["source_item_id"], news[-1]["revision_number"],
+            serialized[-1]["mirror_updated_at"], serialized[-1]["source"],
+            serialized[-1]["source_item_id"], serialized[-1]["revision_number"],
         ], ensure_ascii=False, separators=(",", ":"))
-        if news else after
+        if serialized else after
     )
     return {
         "items": news,
+        "withdrawals": withdrawals,
         "next_cursor": next_cursor,
         "has_more": has_more,
         "window_days": NEWS_READER_WINDOW_DAYS,
@@ -1154,6 +1135,14 @@ def _recent_market_chart(
     }
 
 
+def _frozen_event_article_identity(row: dict) -> tuple[str, ...]:
+    """Identify one frozen article across event-identity contract versions."""
+    return tuple(str(row.get(field) or "").strip() for field in (
+        "canonical_source", "canonical_headline", "source_published_time",
+        "collector_first_seen_time",
+    ))
+
+
 def _news_evidence_display_rows(
     connection: sqlite3.Connection, all_news_evidence: list[dict],
 ) -> list[dict]:
@@ -1164,6 +1153,13 @@ def _news_evidence_display_rows(
     same headline and also produced duplicate React keys when users switched
     between "used" and "never used".
     """
+    current_by_event = {
+        str(row["event_key"]): row for row in all_news_evidence
+    }
+    current_keys_by_article: dict[tuple[str, ...], set[str]] = defaultdict(set)
+    for event_key, row in current_by_event.items():
+        current_keys_by_article[_frozen_event_article_identity(row)].add(event_key)
+
     try:
         aux_receipts = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' "
@@ -1175,8 +1171,31 @@ def _news_evidence_display_rows(
             if aux_receipts is not None
             else "news_model_visibility_receipts_v1"
         )
+        catalog_rows = connection.execute(
+            """SELECT * FROM news_model_visibility_events_v1
+               ORDER BY collector_first_seen_time DESC,event_key"""
+        ).fetchall()
+        event_key_aliases: dict[str, str] = {}
+        catalog_keys_by_article: dict[tuple[str, ...], set[str]] = defaultdict(set)
+        for raw in catalog_rows:
+            row = dict(raw)
+            catalog_keys_by_article[
+                _frozen_event_article_identity(row)
+            ].add(str(row["event_key"]))
+        for article_identity, catalog_keys in catalog_keys_by_article.items():
+            current_keys = current_keys_by_article.get(article_identity, set())
+            if len(current_keys) == 1:
+                canonical_key = next(iter(current_keys))
+            elif not current_keys and len(catalog_keys) > 1:
+                canonical_key = min(catalog_keys)
+            else:
+                continue
+            for event_key in catalog_keys:
+                if event_key != canonical_key:
+                    event_key_aliases[event_key] = canonical_key
+
         visibility_rows = connection.execute(
-            f"""SELECT event_key,
+            f"""SELECT canonical_event_key AS event_key,
                       count(*) AS frozen_model_uses,
                       count(DISTINCT source_decision_id) AS frozen_decisions,
                       count(DISTINCT event_source_hash) AS frozen_versions,
@@ -1184,26 +1203,28 @@ def _news_evidence_display_rows(
                       max(decision_time) AS last_model_decision_time,
                       group_concat(DISTINCT model_identity) AS model_identities,
                       group_concat(DISTINCT model_version) AS model_versions
-               FROM {receipt_source}
-               GROUP BY event_key"""
-        ).fetchall()
-        catalog_rows = connection.execute(
-            """SELECT * FROM news_model_visibility_events_v1
-               ORDER BY collector_first_seen_time DESC,event_key"""
+               FROM (
+                 SELECT receipt.*,
+                        COALESCE(alias.value, receipt.event_key)
+                          AS canonical_event_key
+                 FROM {receipt_source} AS receipt
+                 LEFT JOIN json_each(?) AS alias
+                   ON alias.key=receipt.event_key
+               )
+               GROUP BY canonical_event_key""",
+            (json.dumps(event_key_aliases, sort_keys=True),),
         ).fetchall()
     except sqlite3.OperationalError:
         visibility_rows = []
         catalog_rows = []
+        event_key_aliases = {}
 
     receipts = {row["event_key"]: dict(row) for row in visibility_rows}
     catalog_by_event: dict[str, dict] = {}
     for raw in catalog_rows:
         row = dict(raw)
-        catalog_by_event.setdefault(row["event_key"], row)
-
-    current_by_event: dict[str, dict] = {}
-    for row in all_news_evidence:
-        current_by_event[row["event_key"]] = row
+        event_key = event_key_aliases.get(str(row["event_key"]), row["event_key"])
+        catalog_by_event.setdefault(str(event_key), row)
 
     display_fields = (
         "event_key", "source_hash", "canonical_headline", "canonical_source",
@@ -1471,7 +1492,7 @@ def _dashboard_payload(database: Path) -> dict:
                 item = dict(prediction)
                 predictions_by_decision[item.pop("decision_id")].append(item)
         news_rows = connection.execute(
-            """SELECT n.source, n.source_item_id, n.revision_number,
+                f"""SELECT n.source, n.source_item_id, n.revision_number,
                        n.source_published_time, n.collector_first_seen_time,
                        n.fetched_time,
                       n.headline AS original_headline,
@@ -1490,6 +1511,7 @@ def _dashboard_payload(database: Path) -> dict:
                       json_extract(a.annotation_json, '$.primary_category') AS primary_category,
                       json_extract(a.annotation_json, '$.secondary_categories') AS secondary_categories_json,
                        json_extract(a.annotation_json, '$.emerging_topic_zh') AS emerging_topic_zh,
+                       json_extract(a.annotation_json, '$.xauusd_relevance') AS xauusd_relevance,
                        json_extract(a.annotation_json, '$.event_time') AS event_time,
                       a.event_type, a.entities_json, a.hawkishness,
                       a.inflation_impulse, a.growth_impulse,
@@ -1548,6 +1570,7 @@ def _dashboard_payload(database: Path) -> dict:
                      AND preferred_a.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
                      AND preferred_a.prompt_version=?
+                     AND {validated_annotation_predicate('preferred_a')}
                    ORDER BY CASE preferred_a.llm_model_version
                        WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                      preferred_a.parsed_at DESC LIMIT 1)
@@ -1606,6 +1629,9 @@ def _dashboard_payload(database: Path) -> dict:
                  -- role; headline-only and COLLECT_ONLY intake candidates stay
                  -- out of the payload and therefore cannot accumulate online.
                  AND length(trim(COALESCE(n.body, ''))) >= 240
+                 AND COALESCE(
+                       json_extract(a.annotation_json, '$.xauusd_relevance'), ''
+                     ) <> 'IRRELEVANT'
                -- Reader chronology follows the publisher clock.  First-seen
                -- remains the immutable point-in-time visibility clock.
                ORDER BY COALESCE(n.source_published_time,
@@ -1622,7 +1648,7 @@ def _dashboard_payload(database: Path) -> dict:
             ),
         ).fetchall()
         annotation_queue = connection.execute(
-            """SELECT
+            f"""SELECT
                  sum(CASE WHEN length(trim(COALESCE(n.body, ''))) >= 240
                            AND a.annotation_id IS NOT NULL THEN 1 ELSE 0 END) AS ready,
                  sum(CASE WHEN length(trim(COALESCE(n.body, ''))) >= 240
@@ -1652,6 +1678,7 @@ def _dashboard_payload(database: Path) -> dict:
                      AND preferred_a.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
                      AND preferred_a.prompt_version=?
+                     AND {validated_annotation_predicate('preferred_a')}
                    ORDER BY CASE preferred_a.llm_model_version
                        WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                      preferred_a.parsed_at DESC LIMIT 1)
@@ -1780,6 +1807,10 @@ def _dashboard_payload(database: Path) -> dict:
             "news_collector": connection.execute("SELECT max(fetched_time) FROM source_polls").fetchone()[0],
             "gemini_annotator": connection.execute("SELECT max(parsed_at) FROM news_annotations").fetchone()[0],
         }
+        latest_semantic_health = connection.execute(
+            """SELECT * FROM news_semantic_health_snapshots_v1
+            ORDER BY observed_at DESC LIMIT 1"""
+        ).fetchone()
         news_source_health = _news_source_health(connection, now)
         monitored_news_sources = {
             row["source"] for row in news_source_health if row["health"] == "HEALTHY"
@@ -1925,6 +1956,29 @@ def _dashboard_payload(database: Path) -> dict:
     sites_sync_component = component(
         "sites_synchronizer", 120, sync_status.get("last_error")
     )
+    semantic_pipeline_component = {
+        "last_success": (
+            latest_semantic_health["heartbeat_at"]
+            if latest_semantic_health is not None else None
+        ),
+        "age_seconds": (
+            max(0.0, (
+                now - datetime.fromisoformat(latest_semantic_health["observed_at"])
+            ).total_seconds())
+            if latest_semantic_health is not None else None
+        ),
+        "status": (
+            "OK" if latest_semantic_health is not None
+            and latest_semantic_health["status"] == "HEALTHY" else "STALE"
+        ),
+        "last_error": (
+            None if latest_semantic_health is not None
+            and latest_semantic_health["status"] == "HEALTHY"
+            else ", ".join(json.loads(latest_semantic_health["reason_codes_json"]))
+            if latest_semantic_health is not None
+            else "尚无决策时点的新闻语义健康记录"
+        ),
+    }
     degraded_resources = sync_status.get("degraded_resources") or []
     if (
         sites_sync_component["status"] == "OK"
@@ -2076,6 +2130,7 @@ def _dashboard_payload(database: Path) -> dict:
                 "outcome_settler": outcome_component,
                 "news_collector": component("news_collector", 300),
                 "gemini_annotator": component("gemini_annotator", 900),
+                "news_semantic_pipeline": semantic_pipeline_component,
                 "sites_synchronizer": sites_sync_component,
                 "sqlite_backup": component("sqlite_backup", 172800),
                 # Daily online backups are published only after the complete

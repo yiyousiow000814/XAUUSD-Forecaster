@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import unicodedata
 import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -22,6 +23,7 @@ from .model_limits import (
 from .model_gateway import (
     GeminiModelGateway,
     ModelGatewayCapacityExhausted,
+    ModelGatewayResponseInvalid,
     ModelRequestAccountant,
 )
 from .news_relevance import google_news_item_is_relevant
@@ -35,7 +37,9 @@ from .news_impact import (
 from .news_semantics import (
     CURRENT_NEWS_PROMPT_VERSION,
     GENERATED_NEWS_PROMPT_VERSIONS,
+    LEGACY_INVALID_SEMANTIC_REASON_PREFIX,
     news_annotation_schema,
+    validated_annotation_predicate,
     validate_news_annotation,
 )
 
@@ -66,6 +70,31 @@ HIGH_PRIORITY_NEWS_SOURCES = frozenset({"federal_reserve_monetary"})
 GeminiBatchCapacityExhausted = ModelGatewayCapacityExhausted
 
 
+def _model_failure_details(error: Exception) -> dict[str, object]:
+    """Return stable failure semantics without exposing credentials or payloads."""
+    provider_status = getattr(error, "code", None)
+    if isinstance(error, ModelGatewayResponseInvalid):
+        return {
+            "failure_code": "MODEL_OUTPUT_INVALID",
+            "error_type": error.cause_type,
+            "error": error.cause_message[:500],
+            "provider_http_status": None,
+        }
+    if isinstance(provider_status, int):
+        return {
+            "failure_code": "PROVIDER_HTTP_ERROR",
+            "error_type": type(error).__name__,
+            "error": str(error)[:500],
+            "provider_http_status": provider_status,
+        }
+    return {
+        "failure_code": "MODEL_REQUEST_FAILED",
+        "error_type": type(error).__name__,
+        "error": str(error)[:500],
+        "provider_http_status": None,
+    }
+
+
 def pending_annotation_records(
     connection: Connection,
     *,
@@ -83,11 +112,12 @@ def pending_annotation_records(
     """
     now = observed_at or datetime.now(UTC)
     rows = connection.execute(
-        """SELECT n.* FROM news_revisions n
+        f"""SELECT n.* FROM news_revisions n
         LEFT JOIN news_annotations a
          ON a.source=n.source AND a.source_item_id=n.source_item_id
          AND a.revision_number=n.revision_number
          AND a.llm_model_version IN (?, ?) AND a.prompt_version IN (?, ?)
+         AND {validated_annotation_predicate('a')}
         WHERE a.annotation_id IS NULL
           AND length(trim(COALESCE(n.body, ''))) >= 240
           AND NOT EXISTS (
@@ -165,14 +195,15 @@ def completed_annotation_records(
     """Return current-policy rows already completed by the annotator."""
     now = observed_at or datetime.now(UTC)
     rows = connection.execute(
-        """SELECT n.* FROM news_revisions n
+        f"""SELECT n.* FROM news_revisions n
         WHERE length(trim(COALESCE(n.body, ''))) >= 240
           AND EXISTS (
             SELECT 1 FROM news_annotations a
             WHERE a.source=n.source AND a.source_item_id=n.source_item_id
               AND a.revision_number=n.revision_number
               AND a.llm_model_version IN (?, ?)
-              AND a.prompt_version=?)
+              AND a.prompt_version=?
+              AND {validated_annotation_predicate('a')})
           AND NOT EXISTS (
             SELECT 1 FROM news_revisions newer
             WHERE newer.source=n.source
@@ -336,12 +367,12 @@ def annotate_pending_news(
                 "prompt_version": prompt_version,
             }
         except Exception as error:
+            failure_details = _model_failure_details(error)
             return {
                 "status": "ERROR",
                 "row": row,
-                "error_type": type(error).__name__,
-                "error": str(error)[:500],
-                "error_code": getattr(error, "code", None),
+                **failure_details,
+                "error_code": failure_details["provider_http_status"],
                 "model_version": expected_model_identity,
                 "prompt_version": prompt_version,
             }
@@ -387,19 +418,30 @@ def _persist_parsed_annotation(
             "revision_number": row["revision_number"],
             "error_type": parsed_record["error_type"],
             "error": parsed_record["error"],
+            "failure_code": parsed_record.get("failure_code"),
+            "provider_http_status": parsed_record.get("provider_http_status"),
             **failure,
         }
     result = parsed_record["result"]
-    if prompt_version == PROMPT_VERSION:
-        _validate_or_neutralize_current_result(
-            result, headline=str(row["headline"]), body=str(row["body"] or ""),
-            require_complete=True,
-        )
     exact_model = str(parsed_record["exact_model"])
     identity = [
         row["source"], row["source_item_id"], str(row["revision_number"]),
         row["content_hash"], exact_model, prompt_version,
     ]
+    legacy_invalid = ledger.connection.execute(
+        """SELECT 1 FROM news_annotations
+           WHERE source=? AND source_item_id=? AND revision_number=?
+             AND llm_model_version=? AND prompt_version=?
+             AND COALESCE(json_extract(annotation_json, '$.semantic_reason_zh'), '')
+                 LIKE ? LIMIT 1""",
+        (
+            row["source"], row["source_item_id"], row["revision_number"],
+            exact_model, prompt_version,
+            f"{LEGACY_INVALID_SEMANTIC_REASON_PREFIX}%",
+        ),
+    ).fetchone()
+    if legacy_invalid:
+        identity.append("validated-recovery-v1")
     annotation_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "|".join(identity)))
     common = {
         "source": row["source"], "source_item_id": row["source_item_id"],
@@ -589,13 +631,13 @@ def translate_pending_headlines(
                 }
             )
         except Exception as error:
+            failure_details = _model_failure_details(error)
             failure = _append_llm_failure(
                 ledger,
                 {
                     "row": row,
-                    "error_type": type(error).__name__,
-                    "error": str(error)[:500],
-                    "error_code": getattr(error, "code", None),
+                    **failure_details,
+                    "error_code": failure_details["provider_http_status"],
                     "model_version": selected_model,
                 },
                 "TITLE_TRANSLATION",
@@ -606,8 +648,7 @@ def translate_pending_headlines(
                     "status": "ERROR",
                     "source": row["source"],
                     "source_item_id": row["source_item_id"],
-                    "error_type": type(error).__name__,
-                    "error": str(error)[:500],
+                    **failure_details,
                     **failure,
                 }
             )
@@ -698,6 +739,7 @@ def assess_pending_news_impacts(
                 "source_item_id": row["source_item_id"], "reason": str(error),
             })
         except Exception as error:
+            failure_details = _model_failure_details(error)
             failure = _append_impact_failure(
                 ledger, row, error, model_version=IMPACT_MODEL,
                 prompt_version=impact_prompt_version,
@@ -705,7 +747,7 @@ def assess_pending_news_impacts(
             statuses.append({
                 "status": "ERROR", "source": row["source"],
                 "source_item_id": row["source_item_id"],
-                "error_type": type(error).__name__, "error": str(error)[:500],
+                **failure_details,
                 **failure,
             })
     return statuses
@@ -824,31 +866,31 @@ class _GeminiRequestPool:
             decode=_decode_model_json,
             retryable_http_codes=frozenset({401, 403, 429}),
         )
-        _recover_display_fields(result, headline, body)
+        if prompt_version == PROMPT_VERSION:
+            # Semantic validity is independent from display-language quality.
+            # Never spend a translation retry on a schema/evidence failure.
+            _validate_current_semantics(result, headline=headline, body=body)
+        invalid_display_fields: tuple[str, ...]
         try:
+            _recover_display_fields(result, headline, body)
             _validate_chinese_result(result)
             if prompt_version == PROMPT_VERSION:
-                _validate_or_neutralize_current_result(
-                    result, headline=headline, body=body,
-                )
-            return result, exact_model
+                _validate_current_result(result, headline=headline, body=body)
         except ValueError:
+            invalid_display_fields = _invalid_chinese_display_fields(result)
             try:
                 repaired = self._repair_chinese(start_index + 1, model, result)
-                result["headline_zh"] = repaired["headline_zh"]
-                result["summary_zh"] = repaired["summary_zh"]
-                result["primary_story_title_zh"] = repaired[
-                    "primary_story_title_zh"
-                ]
+                for field in invalid_display_fields:
+                    result[field] = repaired[field]
                 _recover_display_fields(result, headline, body)
                 _validate_chinese_result(result)
-            except Exception:
-                _neutralize_unvalidated_language(result)
-            if prompt_version == PROMPT_VERSION:
-                _validate_or_neutralize_current_result(
-                    result, headline=headline, body=body,
-                )
-            return result, exact_model
+                if prompt_version == PROMPT_VERSION:
+                    _validate_current_result(result, headline=headline, body=body)
+            except Exception as error:
+                raise ValueError(
+                    "Gemini display repair failed; semantic annotation withheld"
+                ) from error
+        return result, exact_model
 
     def _repair_chinese(
         self, start_index: int, model: str, result: dict
@@ -903,11 +945,15 @@ class _GeminiRequestPool:
                         ValueError, KeyError, json.JSONDecodeError,
                     ),
                 )
-            except GeminiBatchCapacityExhausted:
-                raise
+            except GeminiBatchCapacityExhausted as error:
+                # Display-only translation may use the next declared model
+                # route when this model's account quota is temporarily full.
+                last_error = error
             except RuntimeError as error:
                 last_error = error
-        raise RuntimeError("All title translation models failed validation") from last_error
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Title translation model selection was empty")
 
     def call_impact(
         self, start_index: int, row: dict, *,
@@ -939,7 +985,6 @@ class _GeminiRequestPool:
             decode=lambda envelope: _decode_impact(envelope, request_row),
             retryable_http_codes=frozenset({401, 403, 429, 500, 502, 503, 504}),
             retryable_decode_errors=(ValueError, KeyError, json.JSONDecodeError),
-            preserve_last_http_error=True,
         )
 
 
@@ -971,21 +1016,22 @@ def _decode_model_json(envelope: dict[str, object]) -> dict:
 
 
 def _chinese_repair_payload(result: dict) -> dict[str, object]:
+    repair_fields = ["headline_zh", "summary_zh", "primary_story_title_zh"]
+    if "semantic_reason_zh" in result:
+        repair_fields.append("semantic_reason_zh")
     return {
         "contents": [{"parts": [{"text": (
-            "Translate all JSON values completely into natural Simplified "
-            "Chinese. No sentence may remain in Turkish, English, German, Greek, "
-            "Arabic, Spanish, or another source language. Preserve proper names, "
-            "abbreviations, dates, percentages, prices, and every number exactly. "
+            "Rewrite the prose primarily in natural Simplified Chinese. Use common "
+            "Chinese expressions for financial concepts when they exist. Preserve "
+            "personal and company names, tickers, widely used abbreviations, "
+            "identifiers, and proper nouns in English when that is more natural or "
+            "accurate. Do not leave entire explanatory sentences unnecessarily in "
+            "English or another source language, and do not force proper nouns "
+            "into awkward translations. "
+            "Preserve dates, percentages, prices, and every number exactly. "
             "Return JSON only.\nSOURCE_JSON\n"
             + json.dumps(
-                {
-                    "headline_zh": result.get("headline_zh"),
-                    "summary_zh": result.get("summary_zh"),
-                    "primary_story_title_zh": result.get(
-                        "primary_story_title_zh"
-                    ),
-                },
+                {field: result.get(field) for field in repair_fields},
                 ensure_ascii=False,
             )
         )}]}],
@@ -993,11 +1039,9 @@ def _chinese_repair_payload(result: dict) -> dict[str, object]:
             "responseMimeType": "application/json",
             "responseSchema": {
                 "type": "object",
-                "required": ["headline_zh", "summary_zh", "primary_story_title_zh"],
+                "required": repair_fields,
                 "properties": {
-                    "headline_zh": {"type": "string"},
-                    "summary_zh": {"type": "string"},
-                    "primary_story_title_zh": {"type": "string"},
+                    field: {"type": "string"} for field in repair_fields
                 },
             },
             "maxOutputTokens": 2048,
@@ -1041,7 +1085,7 @@ def _decode_title(envelope: dict[str, object], headline: str) -> str:
     _recover_display_fields(translated, headline, "")
     headline_zh = translated["headline_zh"]
     _require_title_numbers_preserved(headline_zh, headline)
-    _require_simplified_chinese(headline_zh, "headline_zh", 2, 4.0, 60)
+    _require_chinese_primary(headline_zh, "headline_zh")
     return headline_zh
 
 
@@ -1069,7 +1113,7 @@ def _decode_impact(envelope: dict[str, object], row: dict) -> dict:
     validated["_source_body_character_count"] = int(
         row.get("source_body_character_count") or len(str(row.get("body") or ""))
     )
-    _require_simplified_chinese(validated["reason_zh"], "reason_zh", 4, 0.5, 12)
+    _require_chinese_primary(validated["reason_zh"], "reason_zh")
     return validated
 
 
@@ -1111,9 +1155,11 @@ def _annotation_prompt(prompt_version: str, headline: str, body: str) -> str:
     return (
         "Read the complete delimited source and convert it into the requested "
         "measurement JSON. Regardless of the source language, translate "
-        "headline_zh into natural Simplified Chinese and write summary_zh "
-        "entirely in clear Simplified Chinese. Do not leave either field in "
-        "English, Turkish, Greek, Spanish, or any other source language. "
+        "headline_zh and summary_zh primarily in natural Simplified Chinese. Use "
+        "common Chinese financial terms, while preserving names, companies, "
+        "tickers, widely used abbreviations, identifiers and proper nouns in "
+        "English when that is more natural or accurate. Do not leave whole "
+        "explanatory sentences unnecessarily in another language. "
         "For summary_zh: "
         "summarize the actual event, the decisive facts and numbers, and why "
         "it may or may not matter to XAUUSD in 3-6 concise sentences. "
@@ -1397,17 +1443,61 @@ def _require_title_numbers_preserved(translated: str, source: str) -> None:
 
 
 def _validate_chinese_result(result: dict) -> None:
-    _require_simplified_chinese(result.get("headline_zh"), "headline_zh", 2, 4.0, 60)
-    _require_simplified_chinese(result.get("summary_zh"), "summary_zh", 10, 0.20, 25)
+    for field in ("headline_zh", "summary_zh"):
+        _validate_chinese_display_field(result.get(field), field)
     story_title = str(result.get("primary_story_title_zh") or "").strip()
     if story_title:
-        _require_simplified_chinese(story_title, "primary_story_title_zh", 2, 0.20, 12)
-        if re.search(r"(?<=[\u3400-\u9fff])[a-z]+|[a-z]+(?=[\u3400-\u9fff])", story_title):
-            raise ValueError("Gemini primary_story_title_zh contains a mixed-script word")
+        _validate_chinese_display_field(story_title, "primary_story_title_zh")
     if "semantic_reason_zh" in result:
-        _require_simplified_chinese(
-            result.get("semantic_reason_zh"), "semantic_reason_zh", 2, 1.0, 24
+        _validate_chinese_display_field(
+            result.get("semantic_reason_zh"), "semantic_reason_zh"
         )
+
+
+def _validate_chinese_display_field(value: object, field: str) -> None:
+    _require_chinese_primary(value, field)
+    text = str(value or "")
+    if "相关数值" in text:
+        raise ValueError(
+            f"SOURCE_NUMBER_MISMATCH: Gemini {field} contains an unresolved number"
+        )
+    if field == "primary_story_title_zh" and re.search(
+        r"(?<=[\u3400-\u9fff])[a-z]{3,}(?=[\u3400-\u9fff])", text,
+    ):
+        raise ValueError(
+            "Gemini primary_story_title_zh contains an untranslated word fragment"
+        )
+
+
+def _invalid_chinese_display_fields(result: dict) -> tuple[str, ...]:
+    rules = (("headline_zh", 2), ("summary_zh", 10))
+    if "primary_story_title_zh" not in result:
+        rules += (("primary_story_title_zh", 0),)
+    elif str(result.get("primary_story_title_zh") or "").strip():
+        rules += (("primary_story_title_zh", 2),)
+    if "semantic_reason_zh" in result:
+        rules += (("semantic_reason_zh", 2),)
+    invalid = []
+    schema_properties = news_annotation_schema(PROMPT_VERSION)["properties"]
+    for field, minimum in rules:
+        try:
+            value = result.get(field)
+            if minimum:
+                _validate_chinese_display_field(value, field)
+            elif field not in result:
+                raise ValueError(f"Gemini {field} is missing")
+            rule = schema_properties[field]
+            length = len(str(value or ""))
+            if length < int(rule.get("minLength", 0)):
+                raise ValueError(f"Gemini {field} is too short")
+            if length > int(rule.get("maxLength", length)):
+                raise ValueError(f"Gemini {field} is too long")
+        except ValueError:
+            invalid.append(field)
+    # Number recovery can fail even when language is already valid. Repair both
+    # auditable display fields so the model gets one bounded chance to restore
+    # the exact source lexemes without touching semantic measurements.
+    return tuple(invalid or ("headline_zh", "summary_zh"))
 
 
 def _restore_source_number_lexemes(
@@ -1452,94 +1542,46 @@ def _recover_display_fields(result: dict, headline: str, body: str) -> None:
     by_digits: dict[str, set[str]] = {}
     for token in source_tokens:
         by_digits.setdefault(re.sub(r"\D", "", token), set()).add(token)
-    unsupported = False
     for field in ("headline_zh", "summary_zh"):
         if field not in result:
             continue
 
         def recover(match: re.Match[str]) -> str:
-            nonlocal unsupported
             token = re.sub(r"\s+", "", match.group(0))
             if token in source_tokens:
                 return token
             candidates = by_digits.get(re.sub(r"\D", "", token), set())
             if len(candidates) == 1:
                 return next(iter(candidates))
-            unsupported = True
             return "相关数值"
 
         result[field] = token_pattern.sub(recover, str(result.get(field) or ""))
-    if unsupported and "confidence" in result:
-        result["confidence"] = min(0.5, float(result.get("confidence") or 0.0))
     _restore_source_number_lexemes(result, headline, body)
 
 
-def _source_evidence_excerpt(headline: str, body: str) -> str:
-    source = " ".join((body or headline).split())
-    return source[:240] if len(source) >= 4 else "source unavailable"
-
-
-def _neutralize_unvalidated_language(
-    result: dict, *, headline: str = "", body: str = "",
-) -> None:
-    """Keep the receipt while preventing an unreliable translation from voting."""
-    # Validation is field-specific. A bad summary must not erase a headline
-    # that is already valid Simplified Chinese; the display translator can
-    # repair only the fields that actually failed.
-    try:
-        _require_simplified_chinese(
-            result.get("headline_zh"), "headline_zh", 2, 4.0, 60
-        )
-    except ValueError:
-        result["headline_zh"] = INVALID_CHINESE_TITLE
-    result["summary_zh"] = (
-        "来源正文已完整保存，但自动中文摘要未通过语言一致性检查。"
-        "本条记录保留用于审计，结构化方向影响已设为中性。"
-    )
-    result["primary_category"] = "regulation_other"
-    result["secondary_categories"] = []
-    result["emerging_topic_zh"] = "语言待校验"
-    result.update({
-        "event_type": "other", "entities": [],
-        "record_kind": "BACKGROUND", "actor": "", "action": "", "object": "",
-        "location": "", "event_time": "", "claim_status": "NOT_APPLICABLE",
-        "materiality": 0.0, "canonical_actor_id": "", "action_family": "OTHER_FACT",
-        "canonical_object_id": "", "canonical_location_id": "", "episode_key": "",
-        "primary_story_title_zh": "", "secondary_contexts_zh": [],
-        "relation_to_prior": "NONE",
-        "document_kind": "BACKGROUND", "material_event_key": "",
-        "source_organization_id": "", "evidence_role": "BACKGROUND",
-    })
-    result.update({
-        "xauusd_relevance": "IRRELEVANT",
-        "review_priority": "BACKGROUND",
-        "material_change": "HISTORICAL_CONTEXT",
-        "time_sensitivity": "BACKGROUND",
-        "semantic_reason_zh": "语言或结构一致性检查未通过，禁止进入当前模型。",
-        "supporting_evidence": [_source_evidence_excerpt(headline, body)],
-    })
-    for field in (
-        "hawkishness", "inflation_impulse", "growth_impulse",
-        "geopolitical_risk", "usd_impulse", "novelty", "confidence",
-    ):
-        result[field] = 0.0
-
-
-def _validate_or_neutralize_current_result(
-    result: dict, *, headline: str, body: str, require_complete: bool = False,
-) -> None:
-    if not require_complete and "xauusd_relevance" not in result:
+def _validate_current_result(result: dict, *, headline: str, body: str) -> None:
+    """Reject invalid current semantics without manufacturing irrelevance."""
+    if "xauusd_relevance" not in result:
         return
-    source_text = f"{headline}\n{body}"
-    try:
-        validate_news_annotation(
-            result, prompt_version=PROMPT_VERSION, source_text=source_text,
-        )
-    except ValueError:
-        _neutralize_unvalidated_language(result, headline=headline, body=body)
-        validate_news_annotation(
-            result, prompt_version=PROMPT_VERSION, source_text=source_text,
-        )
+    validate_news_annotation(
+        result, prompt_version=PROMPT_VERSION,
+        source_text=f"{headline}\n{body}",
+    )
+
+
+def _validate_current_semantics(result: dict, *, headline: str, body: str) -> None:
+    """Validate semantic fields without making display prose semantic authority."""
+    if "xauusd_relevance" not in result:
+        return
+    semantic_candidate = dict(result)
+    semantic_candidate.update({
+        "headline_zh": "来源新闻",
+        "summary_zh": "完整来源正文已经保存，语义测量独立接受结构和证据校验。",
+        "primary_story_title_zh": "",
+    })
+    _validate_current_result(
+        semantic_candidate, headline=headline, body=body,
+    )
 
 
 def _normalize_translated_named_months(result: dict, source: str) -> None:
@@ -1662,6 +1704,9 @@ def _append_llm_failure(
         "retry_state": "DEAD_LETTER" if terminal else "BACKING_OFF",
         "attempt_number": attempt,
         "next_retry_at": next_retry.isoformat() if next_retry else None,
+        "is_terminal": terminal,
+        "failure_code": parsed_record.get("failure_code") or "MODEL_REQUEST_FAILED",
+        "provider_http_status": parsed_record.get("provider_http_status"),
     }
 
 
@@ -1673,8 +1718,9 @@ def _append_impact_failure(
     model_version: str,
     prompt_version: str = IMPACT_PROMPT_VERSION,
 ) -> dict[str, object]:
-    error_type = type(error).__name__
-    normalized = re.sub(r"\s+", " ", str(error)).strip()[:500]
+    details = _model_failure_details(error)
+    error_type = str(details["error_type"])
+    normalized = re.sub(r"\s+", " ", str(details["error"])).strip()[:500]
     signature = hashlib.sha256(
         f"{error_type}|{normalized}".encode("utf-8")
     ).hexdigest()
@@ -1685,8 +1731,9 @@ def _append_impact_failure(
         (row["annotation_id"], model_version, prompt_version),
     ).fetchone()
     attempt = 1 if prior is None else int(prior["attempt_number"]) + 1
-    transient = getattr(error, "code", None) in {429, 500, 502, 503, 504}
-    terminal = False if transient else attempt >= 5
+    same_error = prior is not None and prior["error_signature"] == signature
+    transient = details["provider_http_status"] in {429, 500, 502, 503, 504}
+    terminal = attempt >= 5 if transient else (same_error and attempt >= 2)
     failed_at = datetime.now(UTC)
     if terminal:
         next_retry = None
@@ -1717,26 +1764,103 @@ def _append_impact_failure(
         "retry_state": "DEAD_LETTER" if terminal else "BACKING_OFF",
         "attempt_number": attempt,
         "next_retry_at": next_retry.isoformat() if next_retry else None,
+        "is_terminal": terminal,
+        "failure_code": details["failure_code"],
+        "provider_http_status": details["provider_http_status"],
     }
 
 
-def _require_simplified_chinese(
-    value: object,
-    field: str,
-    minimum: int,
-    maximum_foreign_ratio: float,
-    foreign_floor: int,
-) -> None:
-    text = str(value or "")
-    chinese = len(re.findall(r"[\u3400-\u9fff]", text))
-    foreign_letters = sum(
-        character.isalpha() and not "\u3400" <= character <= "\u9fff"
+def _is_han(character: str) -> bool:
+    codepoint = ord(character)
+    return (
+        0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0xF900 <= codepoint <= 0xFAFF
+        or 0x20000 <= codepoint <= 0x2FA1F
+    )
+
+
+def _is_latin_letter(character: str) -> bool:
+    return character.isalpha() and "LATIN" in unicodedata.name(character, "")
+
+
+def _word_runs(text: str) -> tuple[str, ...]:
+    runs: list[str] = []
+    current: list[str] = []
+    for character in text:
+        if character.isalnum() or character in "'._/-":
+            current.append(character)
+        elif current:
+            runs.append("".join(current).strip("'._/-"))
+            current = []
+    if current:
+        runs.append("".join(current).strip("'._/-"))
+    return tuple(run for run in runs if run)
+
+
+def _latin_identifier_like(token: str) -> bool:
+    letters = [character for character in token if _is_latin_letter(character)]
+    if not letters:
+        return False
+    word = "".join(letters)
+    return (
+        any(character.isdigit() for character in token)
+        or word.isupper()
+        or (any(character.isupper() for character in word)
+            and any(character.islower() for character in word))
+    )
+
+
+def _latin_prose_profile(text: str) -> tuple[int, int, int]:
+    identifier_letters = 0
+    prose_letters = 0
+    prose_words = 0
+    for token in _word_runs(text):
+        latin_letters = sum(_is_latin_letter(character) for character in token)
+        if not latin_letters:
+            continue
+        if _latin_identifier_like(token):
+            identifier_letters += latin_letters
+        else:
+            prose_letters += latin_letters
+            prose_words += 1
+    return identifier_letters, prose_letters, prose_words
+
+
+def _require_chinese_primary(value: object, field: str) -> None:
+    """Reject obvious non-Chinese prose while allowing readable English names."""
+    text = str(value or "").strip()
+    han_letters = sum(_is_han(character) for character in text)
+    if not han_letters:
+        raise ValueError(f"NO_CHINESE_PROSE: Gemini {field} has no Chinese prose")
+    other_script_letters = sum(
+        character.isalpha()
+        and not _is_han(character)
+        and not _is_latin_letter(character)
         for character in text
     )
-    if chinese < minimum or foreign_letters > max(
-        foreign_floor, int(chinese * maximum_foreign_ratio)
-    ):
-        raise ValueError(f"Gemini {field} is not Simplified Chinese")
+    if other_script_letters:
+        raise ValueError(
+            f"THIRD_SCRIPT_PRESENT: Gemini {field} contains non-Chinese/Latin text"
+        )
+
+    for clause in re.split(r"[。！？!?；;\n]+", text):
+        clause_han = sum(_is_han(character) for character in clause)
+        identifiers, latin_prose, prose_words = _latin_prose_profile(clause)
+        if not identifiers and not latin_prose:
+            continue
+        if not clause_han:
+            raise ValueError(
+                f"ENGLISH_PROSE_DOMINANT: Gemini {field} has a non-Chinese clause"
+            )
+        weighted_latin = latin_prose + identifiers * 0.20
+        chinese_share = clause_han / (clause_han + weighted_latin)
+        if chinese_share < 0.50 and (
+            prose_words >= 3 or identifiers > clause_han * 4
+        ):
+            raise ValueError(
+                f"ENGLISH_PROSE_DOMINANT: Gemini {field} is not Chinese-primary"
+            )
 
 
 def _call_ollama(model: str, headline: str, body: str) -> tuple[dict, str]:

@@ -15,6 +15,21 @@ headline or body keywords to decide XAUUSD meaning. Complete bounded documents
 proceed to semantic review, which may classify them as irrelevant or
 background without granting model authority.
 
+Chinese display text is Chinese-primary rather than Chinese-only. Natural
+names, company names, tickers, identifiers, and common abbreviations MAY remain
+in English when English improves readability. Display-language repair MUST NOT
+rewrite an otherwise valid semantic category, direction, impact, evidence, or
+confidence measurement. If readable Chinese-primary display text cannot be
+produced, the annotation MUST be withheld from model permission and retried; it
+MUST NOT be persisted as irrelevant or admitted behind a placeholder. A
+semantic-schema or source-evidence failure MUST fail independently and MUST NOT
+be disguised as a translation failure.
+Language validation MUST distinguish ordinary untranslated prose from natural
+English identifiers and names. A complete foreign-language clause or a script
+other than Chinese and Latin requires repair; punctuation, numbers, symbols,
+and natural English proper nouns do not by themselves make Chinese display
+unreadable.
+
 Collector lanes are not independent publishers. Google News and GDELT are
 discovery mechanisms; source trust and generation budgets use the first-party
 collector identity or the normalized reporting organization. A successful
@@ -26,9 +41,16 @@ GDELT discovery reads the official 15-minute GKG update archive rather than the
 rate-limited DOC API. The collector verifies the manifest size and MD5 digest,
 bounds compressed and expanded payloads, and selects at most 25 gold-related
 GKG candidates before retrieving publisher text. Gold metadata only scopes the
-discovery lane; it does not decide semantic relevance or model permission. A
-`PAGE_PRECISEPUBTIMESTAMP` is retained when available. Otherwise the GKG batch
+discovery lane; it does not decide semantic relevance or model permission. The
+collector MUST NOT infer article meaning from title words or provider-specific
+theme combinations. A `PAGE_PRECISEPUBTIMESTAMP` is retained when available.
+Otherwise the GKG batch
 timestamp is a conservative visibility clock, not an inferred event time.
+
+An immutable article that semantic review marks `IRRELEVANT` remains in the
+local evidence ledger for audit, but MUST NOT be materialized into the public
+news reader or its bounded D1 mirror. Missing or pending semantic review is not
+equivalent to `IRRELEVANT` and remains visible under its honest processing state.
 
 ## Event construction
 
@@ -48,6 +70,14 @@ but receives a distinct event identity. A distinct occurrence anchor starts a
 new episode. Insufficient evidence remains unresolved. The stable anchor,
 factual changes, identity differences, and contextual differences are retained
 as immutable audit evidence with the resolution.
+
+The persisted identity resolution is the sole authority for every resolved
+current-contract event. Training, statistics, weighting, and storylines MUST
+use its canonical episode and event identifiers and MUST NOT derive a competing
+identity from free-form annotation keys. `UNRESOLVED` or missing current-contract
+identity is display-only and MUST NOT receive model permission. A deterministic
+fallback may organize legacy display records, but it is provisional presentation
+state rather than canonical identity and cannot enter training or corroboration.
 
 Candidate identity is never admitted by a shared topic or object alone. It
 requires either the same normalized material/episode key or the same normalized
@@ -109,10 +139,26 @@ AI scheduling enforces project-scoped request and input-token windows for each
 Gemini annotation model and across Gemma impact review and title translation.
 Input size is obtained from the provider's token-count endpoint before
 generation; a conservative byte bound fails closed when token counting is
-unavailable. Key rotation never multiplies a shared project budget. If the
+unavailable. Keys belonging to one account share that account's budget; keys
+belonging to independently configured accounts are metered independently. If the
 primary Gemini annotation model has no safe capacity, the existing scheduler
 may try the separately metered fallback annotation model; final event-identity
 review remains Gemma-owned rather than silently changing classifier semantics.
+
+Every live decision records semantic-pipeline health. A newly received
+candidate gets one five-minute decision interval to finish its current-contract
+annotation. An annotation that satisfies the current model-admission semantics
+gets one interval from annotation completion to finish its current impact and
+identity review. A current job in backoff or dead letter closes the applicable
+gate immediately. Otherwise unresolved work closes it after that interval.
+Only recent evidence still inside its configured actionable lifetime can close
+the decision gate; historical archive and recovery backfill remain observable
+without pausing current inference. A stale/missing annotator heartbeat or no
+usable model credential also makes the pipeline unhealthy. Every news-dependent
+model must then append `WAIT` with `NEWS_PIPELINE_UNHEALTHY`; `MARKET_ONLY`
+remains observable as the control. Recovery requires the actual current-contract
+backlog and runtime dependency failures to clear. A provider status page or
+synthetic probe alone cannot reopen the gate.
 
 The immutable publisher body and content hash always remain the audit source of
 truth. Gemma receives that complete body whenever it fits the project token

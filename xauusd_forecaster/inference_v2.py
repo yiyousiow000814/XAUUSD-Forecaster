@@ -34,6 +34,17 @@ NEWS_MODEL_IDENTITIES = frozenset({
 })
 
 
+def _runtime_gate_status(
+    identity: str, *, market_healthy: bool, news_pipeline_status: str,
+) -> str | None:
+    """Apply one fail-closed gate to the whole news-model family."""
+    if not market_healthy:
+        return "DATA_UNHEALTHY"
+    if identity in NEWS_MODEL_IDENTITIES and news_pipeline_status != "HEALTHY":
+        return "NEWS_PIPELINE_UNHEALTHY"
+    return None
+
+
 def _row_value(row, key: str, default=None):
     return row[key] if key in row.keys() else default
 
@@ -335,10 +346,24 @@ def _insert_prediction(ledger, *, decision_id: str, decision_time: datetime,
     )
 
 
+def _prediction_receipt(
+    update: dict, *, recommended: str, raw_recommended: str, calibration: dict,
+) -> dict:
+    return {
+        "model_identity": update["model_identity"],
+        "model_version": update["model_version"],
+        "eligibility_version": update["eligibility_version"],
+        "recommended_action": recommended,
+        "raw_recommended_action": raw_recommended,
+        "calibration_status": calibration["status"],
+    }
+
+
 def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datetime,
                                created_at: datetime, market_snapshot: dict,
                                news_snapshot: dict,
-                               news_snapshots: dict[str, dict] | None = None) -> list[dict]:
+                               news_snapshots: dict[str, dict] | None = None,
+                               news_pipeline_health: dict) -> list[dict]:
     """Append only models that existed before this decision; never backfill."""
     created = []
     empty_cal = {"version": "always-wait-no-calibration", "rows": 0, "blocks": 0,
@@ -366,8 +391,16 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
             identity, selected_news_snapshot, news_features,
         )
         calibration = _calibration(ledger, identity, decision_time)
-        if market_snapshot["data_health"] != "OK" or market_snapshot["u5"] is None \
-                or any(value is None for value in values):
+        gate_status = _runtime_gate_status(
+            identity,
+            market_healthy=(
+                market_snapshot["data_health"] == "OK"
+                and market_snapshot["u5"] is not None
+                and not any(value is None for value in values)
+            ),
+            news_pipeline_status=str(news_pipeline_health.get("status") or "UNHEALTHY"),
+        )
+        if gate_status == "DATA_UNHEALTHY":
             _insert_prediction(
                 ledger, decision_id=decision_id, decision_time=decision_time, created_at=created_at,
                 model_version=update["model_version"], model_identity=identity,
@@ -375,6 +408,28 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
                 ev_long=None, ev_short=None, calibration=calibration,
                 recommended="WAIT", status="DATA_UNHEALTHY",
             )
+            created.append(_prediction_receipt(
+                update, recommended="WAIT", raw_recommended="WAIT",
+                calibration=calibration,
+            ))
+            continue
+        if gate_status == "NEWS_PIPELINE_UNHEALTHY":
+            _insert_prediction(
+                ledger, decision_id=decision_id, decision_time=decision_time,
+                created_at=created_at, model_version=update["model_version"],
+                model_identity=identity,
+                feature_hash=canonical_hash((
+                    market_snapshot["output_hash"], selected_news_snapshot["output_hash"],
+                    update_eligibility, news_pipeline_health.get("snapshot_hash"),
+                )),
+                predicted=None, news_residual=None, ev_long=None, ev_short=None,
+                calibration=calibration, recommended="WAIT",
+                status="NEWS_PIPELINE_UNHEALTHY",
+            )
+            created.append(_prediction_receipt(
+                update, recommended="WAIT", raw_recommended="WAIT",
+                calibration=calibration,
+            ))
             continue
         news_residual = None
         if identity == "MARKET_ONLY":
@@ -456,10 +511,9 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
             ev_long=ev_long, ev_short=ev_short, calibration=calibration,
             recommended=recommended, status=prediction_status,
         )
-        created.append({"model_identity": identity, "model_version": update["model_version"],
-                        "eligibility_version": update_eligibility,
-                        "recommended_action": recommended,
-                        "raw_recommended_action": raw_recommended,
-                        "calibration_status": calibration["status"]})
+        created.append(_prediction_receipt(
+            update, recommended=recommended, raw_recommended=raw_recommended,
+            calibration=calibration,
+        ))
     _require_complete_active_generation(ledger, decision_time, created)
     return created

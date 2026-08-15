@@ -2,6 +2,10 @@ import pytest
 import sqlite3
 
 from xauusd_forecaster.news_event_identity import resolve_event_identity
+from xauusd_forecaster.news_identity import (
+    identity_resolution_status,
+    resolved_identity_ids,
+)
 from xauusd_forecaster.news_impact import (
     prior_identity_similarity, validate_impact_assessment,
 )
@@ -145,6 +149,58 @@ def test_same_continuous_market_object_does_not_create_identity_similarity():
     assert prior_identity_similarity(current, prior) == 0.0
 
 
+def test_shared_collection_cluster_recalls_semantically_drifted_syndication():
+    current = {
+        "cluster_id": "shared-source-document",
+        "canonical_actor_id": "television_academy",
+        "canonical_object_id": "hall_of_fame_inductees",
+    }
+    prior = {
+        "cluster_id": "shared-source-document",
+        "canonical_actor_id": "the_television_academy",
+        "canonical_object_id": "jean_smart_and_ted_danson",
+    }
+
+    assert prior_identity_similarity(current, prior) == 1.0
+
+
+def test_persisted_resolution_is_the_only_current_identity_authority() -> None:
+    resolved = {
+        "resolved_identity_relation": "SAME_EVENT",
+        "resolved_episode_id": "semantic-episode-authoritative",
+        "resolved_event_id": "semantic-event-authoritative",
+        "episode_key": "conflicting-free-form-episode",
+        "material_event_key": "conflicting-free-form-event",
+    }
+    unresolved = {
+        **resolved,
+        "resolved_identity_relation": "UNRESOLVED",
+    }
+
+    assert resolved_identity_ids(resolved) == (
+        "semantic-episode-authoritative",
+        "semantic-event-authoritative",
+    )
+    assert identity_resolution_status(resolved) == "RESOLVED"
+    assert resolved_identity_ids(unresolved) is None
+    assert identity_resolution_status(unresolved) == "UNRESOLVED"
+
+
+def test_shared_subject_without_an_occurrence_anchor_is_not_recalled():
+    current = {
+        "cluster_id": "morning-report",
+        "canonical_actor_id": "market_participants",
+        "canonical_object_id": "gold_price",
+    }
+    prior = {
+        "cluster_id": "evening-report",
+        "canonical_actor_id": "different_market_observer",
+        "canonical_object_id": "gold_price",
+    }
+
+    assert prior_identity_similarity(current, prior) == 0.0
+
+
 def test_same_actor_and_object_remain_candidates_across_key_wording() -> None:
     current = {
         "material_event_key": "south_africa_jobs_q2",
@@ -180,6 +236,48 @@ def test_same_actor_and_object_remain_candidates_across_key_wording() -> None:
             },
             0.75,
             id="same-release-different-wording",
+        ),
+        pytest.param(
+            {
+                "material_event_key": "july_2026_us_jobs_report_release",
+                "canonical_actor_id": "bureau_of_labor_statistics",
+                "canonical_object_id": "us_jobs_report_july",
+            },
+            {
+                "material_event_key": "us_july_2026_jobs_report_release",
+                "canonical_actor_id": "bureau_of_labor_statistics",
+                "canonical_object_id": "us_july_jobs_report",
+            },
+            1.0,
+            id="current-cross-publisher-jobs-example",
+        ),
+        pytest.param(
+            {
+                "canonical_actor_id": "us_bls",
+                "canonical_object_id": "consumer_price_index",
+            },
+            {
+                "canonical_actor_id": "bureau_of_labor_statistics",
+                "canonical_object_id": "consumer_price_index",
+            },
+            0.75,
+            id="current-bls-alias-example",
+        ),
+        pytest.param(
+            {
+                "material_event_key": "us_july_2026_ppi_release",
+                "episode_key": "us_ppi_release_2026_08",
+                "canonical_actor_id": "bureau_of_labor_statistics",
+                "canonical_object_id": "us_ppi_report",
+            },
+            {
+                "material_event_key": "us_cpi_release_2026_08_14",
+                "episode_key": "us_cpi_release_2026_08",
+                "canonical_actor_id": "bureau_of_labor_statistics",
+                "canonical_object_id": "consumer_price_index",
+            },
+            0.0,
+            id="current-bls-ppi-and-cpi-remain-separate",
         ),
         pytest.param(
             {

@@ -35,6 +35,7 @@ const componentLabels: Record<string, string> = {
   outcome_settler: "30 分钟结果结算器",
   news_collector: "新闻收集器",
   gemini_annotator: "Gemini 新闻分析器",
+  news_semantic_pipeline: "新闻语义决策门槛",
   sites_synchronizer: "网页同步器",
   sqlite_backup: "SQLite 备份",
   integrity_check: "数据库完整性检查",

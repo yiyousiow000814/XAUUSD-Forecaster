@@ -172,6 +172,83 @@ def test_news_evidence_display_collapses_frozen_versions_to_one_event() -> None:
     assert rows[0]["frozen_decisions"] == 2
 
 
+def test_news_evidence_display_reconciles_event_identity_handover() -> None:
+    module = _dashboard_module()
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.executescript(
+        """
+        CREATE TABLE news_model_visibility_receipts_v1 (
+          source_decision_id TEXT, decision_time TEXT, model_identity TEXT,
+          model_version TEXT, event_key TEXT, event_source_hash TEXT
+        );
+        CREATE TABLE news_model_visibility_events_v1 (
+          event_source_hash TEXT, event_key TEXT, canonical_headline TEXT,
+          canonical_source TEXT, source_published_time TEXT,
+          collector_first_seen_time TEXT, topics_json TEXT,
+          evidence_grade TEXT
+        );
+        """
+    )
+    article = (
+        "同一篇新闻", "google_news_gold_context",
+        "2026-08-10T01:00:00+00:00", "2026-08-10T01:01:00+00:00",
+    )
+    for event_key, source_hash in (("legacy-key", "hash-v1"), ("canonical-key", "hash-v2")):
+        connection.execute(
+            "INSERT INTO news_model_visibility_events_v1 VALUES (?,?,?,?,?,?,?,?)",
+            (source_hash, event_key, article[0], article[1], article[2], article[3],
+             "[]", "SINGLE_RELIABLE"),
+        )
+    connection.execute(
+        "INSERT INTO news_model_visibility_events_v1 VALUES (?,?,?,?,?,?,?,?)",
+        ("hash-other", "other-key", article[0], article[1], article[2],
+         "2026-08-10T01:02:00+00:00", "[]", "SINGLE_RELIABLE"),
+    )
+    connection.execute(
+        "INSERT INTO news_model_visibility_events_v1 VALUES (?,?,?,?,?,?,?,?)",
+        ("hash-other-v2", "other-key-v2", article[0], article[1], article[2],
+         "2026-08-10T01:02:00+00:00", "[]", "SINGLE_RELIABLE"),
+    )
+    for decision_id, event_key, source_hash in (
+        ("decision-shared", "legacy-key", "hash-v1"),
+        ("decision-shared", "canonical-key", "hash-v2"),
+        ("decision-new", "canonical-key", "hash-v2"),
+        ("decision-other", "other-key", "hash-other"),
+        ("decision-other-v2", "other-key-v2", "hash-other-v2"),
+    ):
+        connection.execute(
+            "INSERT INTO news_model_visibility_receipts_v1 VALUES (?,?,?,?,?,?)",
+            (decision_id, "2026-08-10T02:00:00+00:00", "FULL", "model-v1",
+             event_key, source_hash),
+        )
+    current = [{
+        "event_key": "canonical-key", "source_hash": "hash-v2",
+        "canonical_headline": article[0], "canonical_source": article[1],
+        "source_published_time": article[2], "collector_first_seen_time": article[3],
+        "economic_age_minutes": 60, "freshness_status": "ACTIVE", "topics": [],
+        "evidence_grade": "SINGLE_RELIABLE", "broad_model_eligible": True,
+        "model_permission": "BROAD_MODEL", "member_count": 1,
+        "independent_publishers": 1, "source_names": [article[1]],
+        "publisher_domains": ["fxstreet.com"],
+        "source_identity_organizations": ["fxstreet"], "reason_codes": [],
+        "prompt_version": "news-json-v14-material-event-evidence",
+    }]
+
+    rows = module._news_evidence_display_rows(connection, current)
+
+    canonical = next(row for row in rows if row["event_key"] == "canonical-key")
+    assert len(rows) == 2
+    assert canonical["frozen_model_uses"] == 3
+    assert canonical["frozen_decisions"] == 2
+    assert canonical["frozen_versions"] == 2
+    assert canonical["publisher_domains"] == ["fxstreet.com"]
+    assert canonical["source_identity_organizations"] == ["fxstreet"]
+    other = next(row for row in rows if row["event_key"] == "other-key")
+    assert other["frozen_model_uses"] == 2
+    assert other["frozen_decisions"] == 2
+
+
 def test_deployment_provenance_discovers_git_from_standalone_module_root(
     monkeypatch,
     tmp_path: Path,
@@ -230,6 +307,7 @@ def _append_basic_annotation(
     parsed_at: datetime,
     prompt_version: str = PROMPT_VERSION,
     event_time: datetime | None = None,
+    xauusd_relevance: str = "MACRO_DRIVER",
 ) -> None:
     news = ledger.connection.execute(
         """SELECT headline,body,source_published_time FROM news_revisions
@@ -264,7 +342,7 @@ def _append_basic_annotation(
         "secondary_contexts_zh": [], "relation_to_prior": "NONE",
         "document_kind": "REPORT", "material_event_key": item_id,
         "source_organization_id": source, "evidence_role": "CORE_CLAIM",
-        "xauusd_relevance": "MACRO_DRIVER", "review_priority": "FAST",
+        "xauusd_relevance": xauusd_relevance, "review_priority": "FAST",
         "material_change": "NEW_EVENT", "time_sensitivity": "SAME_DAY",
         "semantic_reason_zh": "完整正文显示这是可能影响黄金的宏观事件。",
         "supporting_evidence": [evidence],
@@ -801,6 +879,54 @@ def test_news_archive_is_60_day_bounded_and_cursor_safe(tmp_path) -> None:
     ) for row in rows}) == 3
 
 
+def test_news_reader_materializations_exclude_semantically_irrelevant_articles(
+    tmp_path,
+) -> None:
+    module = _dashboard_module()
+    now = datetime.now(UTC).replace(microsecond=0)
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=now)
+    for item_id, relevance in (
+        ("relevant-market-report", "MACRO_DRIVER"),
+        ("irrelevant-entertainment-report", "IRRELEVANT"),
+        ("pending-semantic-review", None),
+    ):
+        body = f"complete evidence for {item_id} " * 30
+        digest = hashlib.sha256(body.encode()).hexdigest()
+        ledger.append_news_revision({
+            "source": "gdelt_gold_geopolitics",
+            "source_item_id": item_id,
+            "source_published_time": now,
+            "collector_first_seen_time": now,
+            "fetched_time": now,
+            "headline": item_id,
+            "body": body,
+            "content_hash": digest,
+            "cluster_id": item_id,
+        })
+        if relevance is not None:
+            _append_basic_annotation(
+                ledger,
+                source="gdelt_gold_geopolitics",
+                item_id=item_id,
+                digest=digest,
+                parsed_at=now + timedelta(seconds=1),
+                xauusd_relevance=relevance,
+            )
+    archive = module._news_archive_page(ledger.connection, None, 20)
+    ledger.close()
+    dashboard = module._dashboard_payload(database)
+
+    expected = {"relevant-market-report", "pending-semantic-review"}
+    assert {row["source_item_id"] for row in archive["items"]} == expected
+    assert archive["withdrawals"] == [{
+        "source": "gdelt_gold_geopolitics",
+        "source_item_id": "irrelevant-entertainment-report",
+        "revision_number": 1,
+    }]
+    assert {row["source_item_id"] for row in dashboard["recent_news"]} == expected
+
+
 def test_dashboard_distinguishes_unavailable_content_from_pending(tmp_path) -> None:
     now = datetime(2026, 8, 7, 9, 0, tzinfo=UTC)
     database = tmp_path / "forward.sqlite3"
@@ -999,22 +1125,13 @@ def test_dashboard_uses_same_explicit_event_clock_as_model(tmp_path) -> None:
     assert datetime.fromisoformat(row["impact_expires_at"]) == event_time + timedelta(hours=12)
 
 
-def test_dashboard_uses_gemini_controlled_category_before_source_guess() -> None:
+def test_dashboard_category_is_semantic_not_processing_state() -> None:
     module = _dashboard_module()
-    assert module._news_category({
-        "primary_category": "central_bank_gold",
-        "source": "gdelt_gold_geopolitics",
-        "headline": "Central bank increases gold reserves",
-        "summary_zh": "央行增加黄金储备。",
-        "event_type": "central_bank_purchase",
-    }) == "央行购金"
-    assert module._news_category({
-        "primary_category": None,
-        "source": "federal_reserve_press_all",
-        "headline": "Application approval",
-        "summary_zh": "监管审批。",
-        "event_type": "regulatory_approval",
-    }) == "监管/其他"
+    assert module._news_category_label("central_bank_gold") == "央行购金"
+    assert module._news_category_label("risk_sentiment") == "风险情绪 / 避险"
+    assert module._news_category_label(None) == "其他"
+    assert module._news_category_label("") == "其他"
+    assert module._news_category_label("other-custom-topic") == "其他"
 
 
 def test_dashboard_reports_gdelt_fallback_and_retry_time(tmp_path) -> None:

@@ -1,0 +1,222 @@
+# Assistant Orchestration Contract
+
+## Purpose
+
+This contract defines the bounded path from an authenticated user turn to model
+selection, capacity admission, tool execution, evidence validation, and a final
+answer. It extends the existing metered model gateway and news evidence
+boundaries; it does not grant trading authority.
+
+## Separate policy stages
+
+The following decisions MUST remain separate:
+
+```text
+User task
+  -> Reasoning Policy
+  -> Model Router
+  -> candidate ModelProfile(s)
+  -> Capacity Router
+  -> CredentialPool x model
+  -> metered Model Gateway
+```
+
+Reasoning Policy classifies the work and chooses a permitted effort profile.
+The Model Router chooses models that can satisfy the task contract. The Capacity
+Router chooses usable provider capacity for those models. A credential MUST NOT
+implicitly decide task semantics.
+
+The first reasoning router SHOULD be deterministic and request-local. It MUST
+NOT spend another model request merely to ask how much reasoning to use. Initial
+classes MAY include `SIMPLE`, `ANALYTICAL`, and `TOOL_HEAVY`.
+
+## Model profiles and task policy
+
+A model is described by operational data equivalent to:
+
+```text
+ModelProfile
+- model_id
+- provider
+- context_limit
+- supports_thinking
+- supports_function_calling
+- supports_streaming
+- capacity_class
+- enabled
+```
+
+Conversation storage MUST NOT depend on these fields. A task policy MAY prefer
+a larger model and permit a declared smaller fallback. A task marked as
+requiring a particular model class MUST fail or defer honestly when that class
+is unavailable; it MUST NOT silently downgrade.
+
+For example, title generation is a low-complexity background task and MAY use a
+smaller permitted model with minimal reasoning and tiny context. Conflicting
+macro evidence, causal analysis, multi-period comparison, and multi-source
+synthesis MAY require a larger analytical profile. Model names and context
+limits remain configuration, not conversation schema.
+
+## Credential pools and capacity
+
+Credentials are represented by server-side references equivalent to:
+
+```text
+CredentialPool
+- id
+- provider
+- credential_ref
+- enabled
+- health
+```
+
+Conversation rows MUST NOT contain `CredentialPool` ownership. Capacity is
+tracked at `CredentialPool x model`, because one provider account may expose
+different limits and health for different models.
+
+Admission MUST consider at least:
+
+- rolling input tokens per minute;
+- rolling requests per minute;
+- provider-day request use;
+- estimated request tokens;
+- in-flight work, failures, throttles, cooldown, and health; and
+- configurable headroom for estimation error and retries.
+
+Provider TPM, RPM, RPD, reset windows, and soft-cap ratios are operational
+configuration. Current provider values MUST NOT be frozen into this contract.
+The provider console remains authoritative; repository settings are conservative
+local safety limits. Account grouping follows
+[`AI_PROVIDER_QUOTAS.md`](../AI_PROVIDER_QUOTAS.md).
+
+The Capacity Router SHOULD try another compatible credential pool, a declared
+fallback model, smaller retrieval, safe compaction, deferral, or a bounded queue
+before graceful rejection. It MUST protect soft capacity before relying on a
+provider `429` as flow control.
+
+## Unified metered gateway
+
+Every model-generating request MUST cross a shared server-side gateway that:
+
+1. identifies purpose, model, and credential pool;
+2. obtains or conservatively bounds input tokens;
+3. durably reserves applicable capacity before transport;
+4. sends the provider request without exposing credentials;
+5. validates the response contract; and
+6. records model, prompt, usage, timing, and failure provenance.
+
+Feature code MUST NOT call provider generation endpoints directly. Title,
+compaction, daily brief, Q&A, tool planning, and final-answer requests all use
+the same accounting boundary even when they have different priorities.
+
+The existing news scheduler design is documented in
+[`AI_PRIORITY_SCHEDULER.md`](../design/AI_PRIORITY_SCHEDULER.md). Reusing it does
+not mean current news routes already implement the Assistant router.
+
+## Priority and admission
+
+Interactive authenticated turns have a declared service priority. Daily brief,
+title generation, compaction refresh, and memory indexing are lower-priority or
+preemptible background work. Background work MUST defer before consuming the
+headroom reserved for current semantic-pipeline health and interactive turns.
+
+Admission MUST occur before queue creation or model transport where the relevant
+identity, payload, or capacity condition is already known. Retry and queue
+limits are enforced per actor and globally.
+
+## Bounded tool loop
+
+Every user turn has configured finite budgets equivalent to:
+
+```text
+MAX_MODEL_TURNS_PER_USER_TURN
+MAX_TOOL_CALLS_PER_USER_TURN
+MAX_PARALLEL_TOOL_CALLS
+MAX_TOOL_RESULT_TOKENS
+MAX_RETRIEVED_EVIDENCE
+MAX_ACTIVE_CONTEXT_TOKENS
+MAX_OUTPUT_TOKENS
+```
+
+The architecture does not freeze their initial numeric values, but no value may
+be unbounded. An infinite or open-ended agent loop is forbidden.
+
+The target loop is:
+
+```text
+model plans zero or more typed tool calls
+  -> backend authorizes and executes calls
+  -> backend validates and compacts results
+  -> model receives bounded results
+  -> optional bounded second tool round
+  -> final answer
+```
+
+When calls are independent, one model turn SHOULD plan them together and the
+backend SHOULD execute them in parallel within the configured limit. Tool
+results remain ordered deterministically in the context. A tool failure is a
+typed result; it MUST NOT be hidden as an empty success.
+
+Every tool has a versioned input/output schema, authorization policy, timeout,
+result bound, and provenance contract. The initial Assistant registry is
+read-only. No order-placement, broker-control, model-promotion, or autonomous
+trading tool may be registered.
+
+## Shared news retrieval
+
+Search UI, Q&A, the future Assistant, and future news tools MUST use one shared
+news retrieval service rather than parallel query logic. At minimum it supports:
+
+- normalized Chinese and multi-token queries;
+- headline, source, emerging topic, and impact-reason fields;
+- published-time and received-time ranges;
+- evidence ID and optional source/category filters;
+- bounded result count and page size; and
+- deterministic ordering with a stable tie-break key.
+
+Escaping for `%`, `_`, backslash, and provider query syntax MUST be correct.
+Failure to reach the authoritative store MUST return an explicit unavailable or
+valid labeled Preview-fallback result. A recent-news slice is not retrieval.
+Keyword and metadata matching MUST NOT be described as semantic or vector
+search.
+
+## Compact evidence packets
+
+Tool results sent to a model MUST omit irrelevant raw fields and oversized
+bodies. A default news packet contains only bounded fields such as:
+
+```text
+evidence_id
+published_at
+received_at
+source
+headline
+summary
+category
+impact
+```
+
+The tool response records query, filters, ordering, cutoff, result limit, source
+mode, and the canonical IDs returned. Complete immutable publisher content
+remains in the evidence store governed by
+[`NEWS_EVIDENCE.md`](NEWS_EVIDENCE.md); compaction does not alter it.
+
+## Evidence-grounded answers
+
+An evidence-grounded answer MUST satisfy all of the following:
+
+- every cited evidence ID came from the retrieved packet for that turn;
+- evidence-required claims have at least one validated citation;
+- answer and evidence counts are bounded;
+- model, prompt, retrieval, and time provenance are persisted; and
+- no evidence produces an honest `INSUFFICIENT_EVIDENCE` result rather than a
+  model guess.
+
+Unknown or fabricated IDs are rejected, not silently accepted. Filtering an
+invented ID out of an otherwise unsupported answer is insufficient validation.
+The system MUST NOT claim claim-level factual entailment unless a separate,
+documented validator actually proves it.
+
+Daily Brief and Q&A are display and decision-support outputs. They MUST remain
+excluded from forecasting training and MUST NOT change Champion, Shadow, or
+`WAIT` policy.

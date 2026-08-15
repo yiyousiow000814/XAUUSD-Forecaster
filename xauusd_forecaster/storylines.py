@@ -11,6 +11,8 @@ from .news_identity import (
     canonical_material_event_anchor,
     canonical_source_organization,
     canonical_story_episode,
+    identity_resolution_status,
+    resolved_identity_ids,
 )
 from .news_semantics import (
     ACTIONABLE_RECORD_KINDS,
@@ -39,7 +41,7 @@ THEMES = {
     "oil_energy": "油价与能源",
     "war_geopolitics": "战争与地缘",
     "central_bank_gold": "央行购金",
-    "risk_sentiment": "黄金与风险偏好",
+    "risk_sentiment": "黄金与风险情绪 / 避险",
     "regulation_other": "监管与其他",
 }
 
@@ -219,12 +221,11 @@ def _source_organizations(event: dict) -> set[str]:
 
 def _episode_identity(event: dict) -> str | None:
     """Accept only one explicit, component-backed episode identity."""
-    resolved = (
-        _canonical_id(event.get("resolved_episode_id"))
-        if event.get("resolved_identity_relation") != "UNRESOLVED" else ""
-    )
-    if resolved:
-        return resolved
+    resolved = resolved_identity_ids(event)
+    if resolved is not None:
+        return _canonical_id(resolved[0])
+    if identity_resolution_status(event) != "MISSING":
+        return None
     episode = _canonical_id(event.get("episode_key"))
     actor = _canonical_id(event.get("canonical_actor_id") or event.get("actor"))
     action = _canonical_id(event.get("action_family") or event.get("action"))
@@ -362,12 +363,9 @@ def _relation(event: dict, *, first: bool) -> str:
 
 def _event_identity(event: dict) -> str:
     """Identify the fact being reported, independently from its article/cluster."""
-    resolved = (
-        str(event.get("resolved_event_id") or "").strip()
-        if event.get("resolved_identity_relation") != "UNRESOLVED" else ""
-    )
-    if resolved:
-        return hashlib.sha256(resolved.encode()).hexdigest()[:20]
+    resolved = resolved_identity_ids(event)
+    if resolved is not None:
+        return hashlib.sha256(resolved[1].encode()).hexdigest()[:20]
     episode = _episode_identity(event) or ""
     action_family = _canonical_id(event.get("action_family") or event.get("action"))
     if episode.startswith(("lisa_cook_rate_policy_", "tbac_meeting_")):

@@ -7,6 +7,7 @@ import { formatExactCount } from "../_lib/count-format";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { versionResultLabel, type VersionEvaluationStatus } from "../_lib/version-result-state";
 import { modelVersionMarkers } from "../_lib/model-version-markers";
+import { buildTrainingCutoffChart } from "../_lib/training-cutoff-chart";
 
 type CurvePoint = { decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number; source_gap_before?: boolean };
 type Curve = { model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: CurvePoint[]; source_point_count_30m?: number; chart_point_count_30m?: number; chart_downsampled_30m?: boolean; points_30m?: CurvePoint[] };
@@ -228,8 +229,6 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
   );
   const [overviewRetry, setOverviewRetry] = useState(0);
   const [pageRetry, setPageRetry] = useState(0);
-  const resultListRef = useRef<HTMLDivElement>(null);
-  const pendingPageScrollRef = useRef(false);
   const rows = groups.filter(row => row.model_identity === identity).sort((a,b) => b.generation-a.generation);
   const pageCursor = pageCursors[page];
   useEffect(() => {
@@ -283,52 +282,52 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
     ?? rows.slice(safePage * pageSize, (safePage + 1) * pageSize);
   const pageLoading = Boolean(historyResource && !remotePages[safePage] && !pageError);
   const goToPage = (nextPage: number) => {
-    pendingPageScrollRef.current = true;
     setPage(Math.max(0, Math.min(pageCount - 1, nextPage)));
   };
-  useEffect(() => {
-    if (!pendingPageScrollRef.current || pageLoading || pageError) return;
-    pendingPageScrollRef.current = false;
-    const frame = window.requestAnimationFrame(() => {
-      const anchor = resultListRef.current;
-      const scroller = anchor?.closest<HTMLElement>(".graph-modal-body");
-      if (!anchor || !scroller) return;
-      const top = scroller.scrollTop + anchor.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
-      scroller.scrollTo({
-        top,
-        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
-      });
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [pageLoading, pageError, safePage]);
   const stamp = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12:false, month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" });
   const metric = (row: VersionGroup) => row.cadence_metrics?.[cadence] ?? { oos_rows: row.subsequent_oos_rows, distinct_days: row.distinct_days, cumulative_quote_return: row.cumulative_quote_return, profit_factor_quote_adjusted: row.profit_factor_quote_adjusted, coverage_rate: row.coverage_rate };
   const graphGroups = overviewGroups ?? groups;
   const matureRows = graphGroups.filter(row => metric(row).oos_rows > 0);
-  const fullCutoffByCreatedAt = new Map(graphGroups.filter(row => row.model_identity === "FULL" || row.model_identity === "BROAD_FULL").map(row => [row.created_at, row.training_rows]));
-  const comparisonCutoff = (row: VersionGroup) => row.model_identity.endsWith("NEWS_RESIDUAL") ? fullCutoffByCreatedAt.get(row.created_at) ?? row.training_rows : row.training_rows;
-  const allCutoffs = [...new Set(matureRows.map(comparisonCutoff))].sort((a, b) => a - b);
-  const cutoffs = cutoffWindow === "all" ? allCutoffs : allCutoffs.slice(-20);
-  const graphRows = matureRows.filter(row => cutoffs.includes(comparisonCutoff(row)));
+  const pendingRows = graphGroups.length - matureRows.length;
+  const fullCutoffByCreatedAt = new Map(graphGroups
+    .filter(row => row.model_identity === "FULL" || row.model_identity === "BROAD_FULL")
+    .map(row => [row.created_at, row.training_rows]));
+  const comparisonCutoff = (row: VersionGroup) => row.model_identity.endsWith("NEWS_RESIDUAL")
+    ? fullCutoffByCreatedAt.get(row.created_at) ?? row.training_rows
+    : row.training_rows;
+  const cutoffChart = buildTrainingCutoffChart(
+    matureRows,
+    comparisonCutoff,
+    cutoffWindow === "20" ? 20 : undefined,
+  );
+  const cutoffs = cutoffChart.cutoffs;
+  const graphRows = cutoffChart.series.flatMap(series => series.points.map(point => point.row));
   const values = graphRows.map(row => metric(row).cumulative_quote_return).concat(0);
   const low = Math.min(...values); const high = Math.max(...values);
   const gx = (trainingRows: number) => cutoffs.length === 1
     ? 480
     : 90 + cutoffs.indexOf(trainingRows) / Math.max(1, cutoffs.length - 1) * 780;
   const gy = (value: number) => 28 + (high-value)/Math.max(.000001,high-low)*218;
+  const axisTickCount = Math.min(cutoffWindow === "20" ? cutoffs.length : 10, cutoffs.length);
+  const axisTickIndexes = new Set(Array.from({ length: axisTickCount }, (_, index) => axisTickCount === 1
+    ? 0
+    : Math.round(index * (cutoffs.length - 1) / (axisTickCount - 1))));
+  const axisCutoffs = cutoffs.filter((_, index) => axisTickIndexes.has(index));
+  const rowsForIdentity = (modelIdentity: string) => cutoffChart.series
+    .find(series => series.modelIdentity === modelIdentity)?.points.map(point => point.row) ?? [];
   const hoveredMetric = hovered ? metric(hovered) : null;
-  return <section className="version-ledger modal-version-ledger"><header><div className="version-ledger-title"><span>共同训练截止量对齐 · 同一坐标叠加比较</span><h3>所有模型的训练组成绩</h3></div><div className="version-ledger-controls"><label className="version-ledger-model"><span>查看模型明细</span><select value={identity} onChange={event => { setIdentity(event.target.value); setPage(0); setRemotePages({}); setPageCursors({ 0: null }); setRemoteTotal(null); setPageError(null); setPageRetry(0); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select></label><label><span>统计频率</span><select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPage(0); }}><option value="EVERY_5M">每5分钟（重叠样本）</option><option value="FIXED_30M">每30分钟（固定 :00 / :30）</option></select></label><label><span>横轴范围</span><select value={cutoffWindow} onChange={event => setCutoffWindow(event.target.value as "20" | "all")}><option value="20">最近20个训练截止点</option><option value="all">全部训练截止点</option></select></label></div></header>
+  return <section className="version-ledger modal-version-ledger"><header><div className="version-ledger-title"><span>共同训练截止量对齐 · 同一坐标叠加比较</span><h3>所有模型的训练组成绩</h3></div><div className="version-ledger-controls"><label className="version-ledger-model"><span>查看模型明细</span><select value={identity} onChange={event => { setIdentity(event.target.value); setHovered(null); setPage(0); setRemotePages({}); setPageCursors({ 0: null }); setRemoteTotal(null); setPageError(null); setPageRetry(0); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <option key={key} value={key}>{label}</option>)}</select></label><label><span>统计频率</span><select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setHovered(null); setPage(0); }}><option value="EVERY_5M">每5分钟（重叠样本）</option><option value="FIXED_30M">每30分钟（固定 :00 / :30）</option></select></label><label><span>横轴范围</span><select value={cutoffWindow} onChange={event => { setCutoffWindow(event.target.value as "20" | "all"); setHovered(null); }}><option value="20">最近20个训练截止点</option><option value="all">全部训练截止点</option></select></label></div></header>
     <section className="version-hover-chart" aria-label="所有模型训练组独立收益图">
-      <div className="version-hover-readout">{hovered && hoveredMetric ? <><b>{LABELS[hovered.model_identity]} · 第 {hovered.generation} 组</b><span>{stamp(hovered.created_at)} · 共同截止 {formatExactCount(comparisonCutoff(hovered))} 条 · 自身训练 {formatExactCount(hovered.training_rows)} 条 · OOS {formatExactCount(hoveredMetric.oos_rows)} 条 · 收益 {pct(hoveredMetric.cumulative_quote_return)} · PF {hoveredMetric.profit_factor_quote_adjusted?.toFixed(2) ?? "—"} · 出方向 {((hoveredMetric.coverage_rate ?? 0)*100).toFixed(1)}%</span></> : <><b>模型成绩对比</b><span>按同一训练截止点比较。</span></>}</div>
+      <div className="version-hover-readout" aria-live="polite">{hovered && hoveredMetric ? <><b>{LABELS[hovered.model_identity]} · 第 {hovered.generation} 组</b><span>{stamp(hovered.created_at)} · 共同截止 {formatExactCount(comparisonCutoff(hovered))} 条 · 自身训练 {formatExactCount(hovered.training_rows)} 条 · OOS {formatExactCount(hoveredMetric.oos_rows)} 条 · 收益 {pct(hoveredMetric.cumulative_quote_return)} · PF {hoveredMetric.profit_factor_quote_adjusted?.toFixed(2) ?? "—"} · 出方向 {((hoveredMetric.coverage_rate ?? 0)*100).toFixed(1)}%</span></> : <><b>模型成绩对比</b><span>按同一训练截止点比较 · 图中 {formatExactCount(graphRows.length)} / {formatExactCount(matureRows.length)} 个成熟结果{pendingRows > 0 ? ` · ${formatExactCount(pendingRows)} 组等待结果` : ""}</span></>}</div>
       {overviewState === "loading" ? <GraphLoading label="正在更新训练总览" compact /> : overviewState === "error" ? <GraphLoadError compact label="训练总览读取失败" onRetry={() => {
         setOverviewState("loading");
         setOverviewRetry(value => value + 1);
       }} /> : graphRows.length ? <svg viewBox="0 0 960 300" role="img">
         <line x1="70" x2="890" y1={gy(0)} y2={gy(0)} className="zero-line" />
         <text x="12" y={gy(high)+4}>{pct(high)}</text><text x="12" y={gy(low)+4}>{pct(low)}</text>
-        {cutoffs.map(trainingRows => <g key={trainingRows} className="generation-axis"><line x1={gx(trainingRows)} x2={gx(trainingRows)} y1="252" y2="258" /><text x={gx(trainingRows)} y="279" textAnchor="middle">{trainingRows} 条</text></g>)}
+        {axisCutoffs.map(trainingRows => <g key={trainingRows} className="generation-axis"><line x1={gx(trainingRows)} x2={gx(trainingRows)} y1="252" y2="258" /><text x={gx(trainingRows)} y="279" textAnchor="middle">{formatExactCount(trainingRows)} 条</text></g>)}
         {Object.keys(LABELS).filter(key => key !== "CHAMPION_0").map(key => {
-          const modelRows = graphRows.filter(row => row.model_identity === key).sort((a,b) => comparisonCutoff(a)-comparisonCutoff(b));
+          const modelRows = rowsForIdentity(key);
           const selected = key === identity;
           return <g key={key} opacity={selected ? 1 : .48}>{modelRows.slice(1).map((row, index) => {
             const previous = modelRows[index];
@@ -336,19 +335,19 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
             const currentIndex = cutoffs.indexOf(comparisonCutoff(row));
             const crossesMissingCutoff = currentIndex !== previousIndex + 1;
             return <line key={`${previous.training_dataset_hash}-${row.training_dataset_hash}`} x1={gx(comparisonCutoff(previous))} y1={gy(metric(previous).cumulative_quote_return)} x2={gx(comparisonCutoff(row))} y2={gy(metric(row).cumulative_quote_return)} stroke={COLORS[key]} strokeWidth={selected ? "3.5" : "2.25"} strokeDasharray={crossesMissingCutoff ? "7 6" : undefined} />;
-          })}{modelRows.map(row => <circle key={row.training_dataset_hash} cx={gx(comparisonCutoff(row))} cy={gy(metric(row).cumulative_quote_return)} r={selected ? "6" : "5"} fill={COLORS[key]} stroke="#eee9dc" strokeWidth="2" tabIndex={0} onMouseEnter={() => setHovered(row)} onMouseLeave={() => setHovered(null)} onFocus={() => setHovered(row)} onBlur={() => setHovered(null)}><title>{`${LABELS[key]} · 共同截止 ${formatExactCount(comparisonCutoff(row))} 条 · 自身训练 ${formatExactCount(row.training_rows)} 条 · 自身第 ${row.generation} 组 · ${pct(metric(row).cumulative_quote_return)}`}</title></circle>)}</g>;
+          })}{modelRows.map(row => { const pointLabel = `${LABELS[key]}，共同截止 ${formatExactCount(comparisonCutoff(row))} 条，自身第 ${row.generation} 组，收益 ${pct(metric(row).cumulative_quote_return)}`; return <circle key={row.training_dataset_hash} cx={gx(comparisonCutoff(row))} cy={gy(metric(row).cumulative_quote_return)} r={selected ? "6" : "5"} fill={COLORS[key]} stroke="#eee9dc" strokeWidth="2" tabIndex={0} aria-label={pointLabel} onMouseEnter={() => setHovered(row)} onMouseLeave={() => setHovered(null)} onFocus={() => setHovered(row)} onBlur={() => setHovered(null)}><title>{pointLabel}</title></circle>})}</g>;
         })}
       </svg> : <Empty title="暂无训练组结果" text="这个频率还没有成熟的训练组结果。" />}
       <div className="chart-legend">{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key,label]) => <span key={key}><i style={{ background:COLORS[key] }} />{label}</span>)}</div>
     </section>
-    <div ref={resultListRef} className="version-list-anchor" aria-hidden="true" />
-    <div className="version-page-stage" aria-busy={pageLoading}>
+    <div className="version-page-stage">
+    {pageCount > 1 && <VersionPagination page={safePage} pageCount={pageCount} total={totalRows} busy={pageLoading} onPage={goToPage} />}
+    <div className="version-ledger-head"><span>组别 / 状态</span><span>训练与上线</span><span>创建后 OOS</span><span>本组独立收益</span><span>PF / 出方向</span></div>
+    <div className="version-page-results" aria-busy={pageLoading}>
     {pageLoading ? <GraphLoading label="正在读取这组成绩" compact /> : pageError ? <GraphLoadError compact label={pageError} onRetry={() => {
       setPageError(null);
       setPageRetry(value => value + 1);
     }} /> : <>
-    {pageCount > 1 && <VersionPagination page={safePage} pageCount={pageCount} total={totalRows} onPage={goToPage} />}
-    <div className="version-ledger-head"><span>组别 / 状态</span><span>训练与上线</span><span>创建后 OOS</span><span>本组独立收益</span><span>PF / 出方向</span></div>
     {visibleRows.map(row => { const selected = metric(row); return <article key={`${row.model_identity}-${row.training_dataset_hash}`} className={row.lifecycle_status === "LATEST" ? "is-latest" : ""}>
       <div className="version-result-head">
         <span className="version-group"><b>第 {row.generation} 组</b><small>{row.lifecycle_status === "LATEST" ? "最新版" : row.lifecycle_status === "PREVIOUS" ? "前一版" : "已归档"}</small></span>
@@ -360,21 +359,22 @@ function VersionLedger({ groups, historyResource }: { groups: VersionGroup[]; hi
         <span data-label="PF / 出方向"><b>{selected.profit_factor_quote_adjusted?.toFixed(2) ?? "—"}</b><small>出方向 {((selected.coverage_rate ?? 0)*100).toFixed(1)}%</small></span>
       </div>
     </article>})}
-    {pageCount > 1 && <VersionPagination page={safePage} pageCount={pageCount} total={totalRows} onPage={goToPage} position="bottom" />}
     {!totalRows && <p>这个模型还没有真实训练版本。</p>}
     </>}
+    </div>
+    {pageCount > 1 && <VersionPagination page={safePage} pageCount={pageCount} total={totalRows} busy={pageLoading} onPage={goToPage} position="bottom" />}
     </div>
   </section>;
 }
 
-function VersionPagination({ page, pageCount, total, onPage, position = "top" }: {
+function VersionPagination({ page, pageCount, total, busy, onPage, position = "top" }: {
   page: number; pageCount: number; total: number;
-  onPage: (page: number) => void; position?: "top" | "bottom";
+  busy: boolean; onPage: (page: number) => void; position?: "top" | "bottom";
 }) {
   return <nav className={`version-pagination version-pagination-${position}`} aria-label={`训练组分页（${position === "top" ? "顶部" : "底部"}）`}>
-    <button type="button" aria-label="上一页训练组" disabled={page === 0} onClick={() => onPage(page - 1)}>←</button>
+    <button type="button" aria-label="上一页训练组" disabled={busy || page === 0} onClick={() => onPage(page - 1)}>←</button>
     <span><b>{formatExactCount(page + 1)}</b> / {formatExactCount(pageCount)}<small><CountValue value={total} suffix=" 组" /></small></span>
-    <button type="button" aria-label="下一页训练组" disabled={page >= pageCount - 1} onClick={() => onPage(page + 1)}>→</button>
+    <button type="button" aria-label="下一页训练组" disabled={busy || page >= pageCount - 1} onClick={() => onPage(page + 1)}>→</button>
   </nav>;
 }
 
@@ -667,9 +667,10 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
   const initialHistoryResult = historyRequestKey
     ? readDashboardResource<MarketData>(historyRequestKey) : null;
   const [historyResult, setHistoryResult] = useState<{
-    key: string; state: "ready" | "error"; data?: MarketData;
+    key: string; identity: string; state: "loading" | "ready" | "error"; data?: MarketData;
   } | undefined>(() => initialHistoryResult ? {
     key: historyRequestKey,
+    identity,
     state: "ready",
     data: {
       ...initialHistoryResult,
@@ -690,6 +691,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
         if (!cancelled) {
           setHistoryResult({
             key: historyRequestKey,
+            identity,
             state: "ready",
             data: {
               ...body,
@@ -702,16 +704,22 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
       .catch(() => {
         if (!cancelled) {
           if (cancelled) return;
-          if (!cached) setHistoryResult({ key: historyRequestKey, state: "error" });
+          if (!cached) setHistoryResult(previous => ({
+            key: historyRequestKey,
+            identity: previous?.data ? previous.identity : identity,
+            state: "error",
+            data: previous?.data,
+          }));
         }
       });
     return () => { cancelled = true; };
-  }, [market, historyQueryString, historyRequestKey, historyRetry]);
+  }, [market, historyQueryString, historyRequestKey, historyRetry, identity]);
   const remoteHistory = Boolean(market?.history_resource);
   const historyState = !remoteHistory ? "ready"
     : historyResult?.key !== historyRequestKey ? "loading" : historyResult.state;
-  const activeMarket = remoteHistory && historyResult?.key === historyRequestKey
-    ? historyResult.data : market;
+  const activeMarket = remoteHistory ? historyResult?.data ?? market : market;
+  const displayedIdentity = remoteHistory && historyResult?.data
+    ? historyResult.identity : identity;
   const detailCandles = activeMarket?.candles ?? [];
   const allCandles = range === "all" && activeMarket?.overview_candles?.length ? activeMarket.overview_candles : detailCandles;
   const candleCount = range === "all" ? allCandles.length : Number(range) * 12;
@@ -742,8 +750,8 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
   };
   const goLatest = () => { setPage(0); setBefore(null); setLaterPages([]); };
   const scopedDecisions = useMemo(() => (activeMarket?.decisions ?? []).filter(row =>
-    row.model_identity === identity && Date.parse(row.decision_time) >= cutoff && Date.parse(row.decision_time) < pageEnd
-  ), [activeMarket, identity, cutoff, pageEnd]);
+    row.model_identity === displayedIdentity && Date.parse(row.decision_time) >= cutoff && Date.parse(row.decision_time) < pageEnd
+  ), [activeMarket, displayedIdentity, cutoff, pageEnd]);
   const arrowAction = (row: Decision) => {
     if (row.ev_long_u5 == null || row.ev_short_u5 == null || row.ev_long_u5 === row.ev_short_u5) return "WAIT";
     const bestAction = row.ev_long_u5 > row.ev_short_u5 ? "LONG" : "SHORT";
@@ -794,7 +802,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
   const hiddenByAction = scopedDecisions.length - candidateDecisions.length;
   const hiddenByFrequency = candidateDecisions.length - decisions.length;
   const counts = decisions.reduce((total, row) => ({ ...total, [arrowAction(row)]: total[arrowAction(row)] + 1 }), { LONG: 0, SHORT: 0, WAIT: 0 } as Record<string, number>);
-  const predictionStart = activeMarket?.prediction_history_start?.[identity];
+  const predictionStart = activeMarket?.prediction_history_start?.[displayedIdentity];
   const predictionAvailability = predictionStart && pageEnd <= Date.parse(predictionStart)
     ? "模型当时尚未开始预测"
     : "这段时间没有预测";
@@ -819,19 +827,18 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
       <button className={showTraining ? "active" : ""} type="button" disabled={!versionMarkers.length} aria-pressed={showTraining} onClick={() => setShowTraining(value => !value)}>模型换版本</button>
       <span>显示 {formatExactCount(decisions.length)}{activeMarket?.decision_downsampled ? ` / 共 ${formatExactCount(activeMarket.source_decision_count ?? decisions.length)}` : ""} 次{hiddenByAction > 0 ? ` · 动作筛选隐藏 ${formatExactCount(hiddenByAction)} 次` : ""}{hiddenByFrequency > 0 ? ` · 频率收起 ${formatExactCount(hiddenByFrequency)} 次` : ""}</span>
     </div>
-    {historyState === "loading" && candles.length > 0 && <GraphLoading label="正在更新行情" compact />}
-    {historyState === "error" && candles.length > 0 && <GraphLoadError compact label="行情更新失败" onRetry={() => setHistoryRetry(value => value + 1)} />}
     {!candles.length ? <div className="graph-visual-stage market-empty-stage">
       {historyState === "loading" ? <GraphLoading label="正在读取行情" /> : historyState === "error" ? <GraphLoadError label="行情读取失败" onRetry={() => setHistoryRetry(value => value + 1)} /> : canGoLater ? <div className="market-window-empty"><strong>这段时间没有行情</strong><span>已跳过休市或数据空档，可返回较新的交易时段。</span><button type="button" onClick={goLater}>→ 返回较新行情</button></div> : <Empty title="暂无行情数据" text="当前范围没有 Bid/Ask 行情。" />}
     </div> : <>
     <div className="market-history-nav" aria-label="历史行情翻页">
-      <button type="button" disabled={!canGoEarlier} onClick={goEarlier} aria-label="查看更早行情">←</button>
+      <button type="button" disabled={historyState === "loading" || !canGoEarlier} onClick={goEarlier} aria-label="查看更早行情">←</button>
       <span>{timeLabel(candles[0].time)} — {timeLabel(candles.at(-1)!.time)}{range === "all" && activeMarket?.overview_downsampled ? ` · 全部 ${formatExactCount(activeMarket.source_candle_count)} 根概览` : ""}</span>
-      <button type="button" disabled={!canGoLater} onClick={goLater} aria-label="查看较新行情">→</button>
+      <button type="button" disabled={historyState === "loading" || !canGoLater} onClick={goLater} aria-label="查看较新行情">→</button>
       {(page > 0 || laterPages.length > 0) && <button type="button" onClick={goLatest}>最新</button>}
     </div>
     <div className="prediction-counts"><b>{scopedDecisions.length ? "成本后EV较高方向" : predictionAvailability}</b>{scopedDecisions.length > 0 && <><span>看多 {formatExactCount(counts.LONG)}</span><span>看空 {formatExactCount(counts.SHORT)}</span><span>等待 {formatExactCount(counts.WAIT)}{unhealthyWaits ? `（数据异常 ${formatExactCount(unhealthyWaits)}）` : ""}</span>{policyMismatchCount > 0 && <span className="negative">历史规则不一致 {formatExactCount(policyMismatchCount)}（原记录保留）</span>}</>}</div>
     <span className="mobile-scroll-hint" role="note">左右滑动查看完整图表</span>
+    <div className="market-visual-shell" aria-busy={historyState === "loading"}>
     {/* Keyboard users need focus here so arrow keys can pan the wide chart. */}
     {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
     <div className="mobile-chart-scroll" tabIndex={0} aria-label="可左右滑动的 XAUUSD K线图">
@@ -844,6 +851,9 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
       <text x="5" y="64">{high.toFixed(2)}</text><text x="5" y="335">{low.toFixed(2)}</text>
       {timeTickIndices.map(index => <g key={candles[index].time} className="time-axis"><line x1={xAtIndex(index)} x2={xAtIndex(index)} y1="338" y2="344" /><text x={xAtIndex(index)} y="366" textAnchor="middle">{axisTimeLabel(candles[index].time)}</text></g>)}
     </svg>
+    </div>
+    {historyState === "loading" && <div className="market-refresh-signal" role="status" aria-live="polite"><span className="graph-loading-bars" aria-hidden="true"><i /><i /><i /></span><b>更新中</b></div>}
+    {historyState === "error" && <div className="market-refresh-signal is-error" role="alert"><b>更新失败</b><button type="button" onClick={() => setHistoryRetry(value => value + 1)}>重试</button></div>}
     </div>
     <div className="chart-legend"><span><i className="long-dot" />看多预测</span><span><i className="short-dot" />看空预测</span>{showWait && <span><i className="wait-dot" />↔ 等待，不持仓</span>}{showTraining && <span><i className="train-dot" />图中模型换版</span>}</div>
     <div className="decision-reader" aria-live="polite">{activeSelected ? <>

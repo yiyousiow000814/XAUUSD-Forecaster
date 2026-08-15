@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ from typing import Any
 
 LEGACY_NEWS_PROMPT_VERSION = "news-json-v14-material-event-evidence"
 CURRENT_NEWS_PROMPT_VERSION = "news-json-v15-ai-semantic-review"
+LEGACY_INVALID_SEMANTIC_REASON_PREFIX = "语言或结构一致性检查未通过"
 V1_NEWS_PROMPT_VERSIONS = (
     LEGACY_NEWS_PROMPT_VERSION,
     "news-json-v13-event-claims",
@@ -27,6 +29,17 @@ SUPPORTED_NEWS_PROMPT_VERSIONS = frozenset({
 })
 
 _SCHEMA_PATH = Path(__file__).with_name("news_annotation.schema.json")
+
+
+def validated_annotation_predicate(alias: str) -> str:
+    """One SQL contract for annotations that may drive downstream behavior."""
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", alias):
+        raise ValueError("invalid SQL alias")
+    return (
+        f"COALESCE(json_extract({alias}.annotation_json, "
+        "'$.semantic_reason_zh'), '') NOT LIKE "
+        f"'{LEGACY_INVALID_SEMANTIC_REASON_PREFIX}%'"
+    )
 
 
 AI_SEMANTIC_FIELDS = {
