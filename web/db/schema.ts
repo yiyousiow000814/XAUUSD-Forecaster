@@ -1,4 +1,4 @@
-import { index, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const dashboardSnapshots = sqliteTable("dashboard_snapshots", {
   id: integer("id").primaryKey(),
@@ -64,6 +64,49 @@ export const marketDecisions = sqliteTable(
     index("market_decisions_model_time_idx").on(
       table.modelIdentity, table.decisionEpoch,
     ),
+  ],
+);
+
+export const newsQuestions = sqliteTable(
+  "news_questions",
+  {
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    questionHash: text("question_hash").notNull(),
+    question: text("question").notNull(),
+    retrievalQuery: text("retrieval_query").notNull(),
+    status: text("status").notNull(),
+    askedAt: text("asked_at").notNull(),
+    availableAt: text("available_at").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    processingStartedAt: text("processing_started_at"),
+    leaseOwner: text("lease_owner"),
+    leaseToken: text("lease_token"),
+    leaseExpiresAt: text("lease_expires_at"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(3),
+    attemptHistoryJson: text("attempt_history_json").notNull().default("[]"),
+    failureCode: text("failure_code"),
+    answer: text("answer"),
+    answerStatus: text("answer_status"),
+    evidenceJson: text("evidence_json"),
+    retrievalJson: text("retrieval_json"),
+    answeredAt: text("answered_at"),
+    modelVersion: text("model_version"),
+    promptVersion: text("prompt_version").notNull(),
+  },
+  table => [
+    uniqueIndex("news_questions_owner_idempotency_idx")
+      .on(table.ownerId, table.idempotencyKey),
+    uniqueIndex("news_questions_owner_hash_idx")
+      .on(table.ownerId, table.questionHash),
+    index("news_questions_claim_idx")
+      .on(table.status, table.availableAt, table.askedAt),
+    index("news_questions_owner_time_idx")
+      .on(table.ownerId, table.askedAt),
+    index("news_questions_lease_idx")
+      .on(table.status, table.leaseExpiresAt),
   ],
 );
 

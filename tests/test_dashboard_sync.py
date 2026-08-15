@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import subprocess
+import sys
 import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -35,6 +37,37 @@ def _preview_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_preview_bundle_import_does_not_require_sqlite_extension() -> None:
+    """Immutable Preview assembly must remain portable to Cloudflare builds."""
+    root = Path(__file__).resolve().parents[1]
+    code = """
+import importlib.abc
+import importlib.util
+import pathlib
+
+class BlockSqlite(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in {"sqlite3", "_sqlite3"}:
+            raise ModuleNotFoundError(f"blocked optional module: {fullname}")
+        return None
+
+import sys
+sys.meta_path.insert(0, BlockSqlite())
+path = pathlib.Path("scripts/build_preview_bundle.py").resolve()
+spec = importlib.util.spec_from_file_location("preview_without_sqlite", path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_preview_does_not_call_late_aggregated_news_expired() -> None:
@@ -1240,3 +1273,212 @@ def test_annotator_heartbeat_reports_idle_loop_as_healthy(tmp_path) -> None:
     assert datetime.fromisoformat(status["last_success"])
     assert status["last_error"] is None
     assert status["work_items"] == 0
+
+
+def test_news_question_sync_uses_shared_retrieval_and_skips_model_without_evidence(
+    monkeypatch,
+) -> None:
+    module = _sync_module()
+    from xauusd_forecaster import news_scheduler
+
+    monkeypatch.setattr(news_scheduler, "configured_api_credentials", lambda: ())
+    claim_calls = 0
+    requested_urls: list[str] = []
+
+    def get_json(url: str, config: dict) -> dict:
+        nonlocal claim_calls
+        requested_urls.append(url)
+        if "/news-search?" in url:
+            return {
+                "items": [], "query": "美联储 利率",
+                "source_mode": "D1_ARCHIVE", "archive_complete": True,
+                "retrieval": {
+                    "ordering": [
+                        "published_time DESC", "collector_first_seen_time DESC",
+                        "detail_key DESC",
+                    ],
+                    "cutoff": "2026-08-15T10:00:00.000Z",
+                    "result_limit": 20,
+                    "canonical_evidence_ids": [],
+                },
+            }
+        claim_calls += 1
+        if claim_calls == 1:
+            return {"item": {
+                "id": "question-1", "question": "今天美联储说了什么？",
+                "retrieval_query": "美联储 利率",
+                "retrieval_cutoff": "2026-08-15T10:00:00.000Z",
+                "lease_token": "lease-1",
+            }}
+        return {"item": None}
+
+    posted: list[dict] = []
+    monkeypatch.setattr(module, "_get_json", get_json)
+    monkeypatch.setattr(
+        module,
+        "_post_json",
+        lambda url, payload, config: posted.append(json.loads(payload)) or {},
+    )
+    module._sync_news_questions(
+        {"recent_news": [{"headline": "poison recent slice"}]},
+        {"remote_ingest_url": "https://example.test/api/ingest", "token": "x"},
+    )
+
+    assert any("/news-search?" in url for url in requested_urls)
+    assert posted[0]["action"] == "COMPLETE"
+    assert posted[0]["answer_status"] == "INSUFFICIENT_EVIDENCE"
+    assert posted[0]["evidence_ids"] == []
+    assert "poison recent slice" not in json.dumps(posted, ensure_ascii=False)
+
+
+def test_news_question_sync_uses_interactive_accounting_and_persists_retrieval(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    module = _sync_module()
+    from xauusd_forecaster import (
+        forward_ledger,
+        news_qa,
+        news_scheduler,
+        scheduler_model_gateway,
+    )
+
+    credential = news_scheduler.ApiCredential(
+        account_id="account-a", pool=news_scheduler.PREEMPTIBLE_POOL,
+        api_key="secret-key", credential_id="credential-a",
+    )
+    monkeypatch.setattr(
+        news_scheduler, "configured_api_credentials", lambda: (credential,),
+    )
+    ledger_state = {"closed": False}
+
+    class FakeLedger:
+        def __init__(self, path: Path) -> None:
+            self.connection = object()
+
+        def close(self) -> None:
+            ledger_state["closed"] = True
+
+    accountant_calls: list[dict] = []
+
+    def accountant(connection, selected, *, urgent):
+        accountant_calls.append({
+            "connection": connection, "credential": selected, "urgent": urgent,
+        })
+        return "accountant"
+
+    answer_calls: list[dict] = []
+
+    def answer(question, rows, **kwargs):
+        answer_calls.append({"question": question, "rows": rows, **kwargs})
+        return {
+            "answer_status": "ANSWERED", "answer": "有证据的回答",
+            "evidence_ids": ["a" * 64], "model_version": "gemma-test",
+            "prompt_version": "news-qa-v2",
+        }
+
+    monkeypatch.setattr(forward_ledger, "ForwardLedger", FakeLedger)
+    monkeypatch.setattr(
+        scheduler_model_gateway, "SchedulerModelAccountant", accountant,
+    )
+    monkeypatch.setattr(news_qa, "answer_news_question", answer)
+    claim_calls = 0
+
+    def get_json(url: str, config: dict) -> dict:
+        nonlocal claim_calls
+        if "/news-search?" in url:
+            return {
+                "items": [{"evidence_id": "a" * 64, "headline": "美联储表态"}],
+                "query": "美联储 利率", "source_mode": "D1_ARCHIVE",
+                "archive_complete": True,
+                "retrieval": {
+                    "ordering": [
+                        "published_time DESC", "collector_first_seen_time DESC",
+                        "detail_key DESC",
+                    ],
+                    "cutoff": "2026-08-15T10:00:00.000Z", "result_limit": 20,
+                    "canonical_evidence_ids": ["a" * 64],
+                },
+            }
+        claim_calls += 1
+        if claim_calls == 1:
+            return {"item": {
+                "id": "question-1", "question": "美联储为什么影响黄金？",
+                "retrieval_query": "美联储 利率",
+                "retrieval_cutoff": "2026-08-15T10:00:00.000Z",
+                "lease_token": "lease-1",
+            }}
+        return {"item": None}
+
+    posted: list[dict] = []
+    monkeypatch.setattr(module, "_get_json", get_json)
+    monkeypatch.setattr(
+        module,
+        "_post_json",
+        lambda url, payload, config: posted.append(json.loads(payload)) or {},
+    )
+    module._sync_news_questions({}, {
+        "remote_ingest_url": "https://example.test/api/ingest",
+        "token": "x", "local_database": tmp_path / "forward.sqlite3",
+    })
+
+    assert accountant_calls == [{
+        "connection": accountant_calls[0]["connection"],
+        "credential": credential,
+        "urgent": True,
+    }]
+    assert answer_calls[0]["rows"][0]["evidence_id"] == "a" * 64
+    assert answer_calls[0]["api_key"] == "secret-key"
+    assert answer_calls[0]["request_accountant"] == "accountant"
+    assert posted[0]["retrieval"]["canonical_evidence_ids"] == ["a" * 64]
+    assert posted[0]["action"] == "COMPLETE"
+    assert ledger_state["closed"] is True
+
+
+def test_news_question_sync_reports_capacity_failure_without_aborting_queue(
+    monkeypatch,
+) -> None:
+    module = _sync_module()
+    from xauusd_forecaster import news_scheduler
+
+    monkeypatch.setattr(news_scheduler, "configured_api_credentials", lambda: ())
+    claim_calls = 0
+
+    def get_json(url: str, config: dict) -> dict:
+        nonlocal claim_calls
+        if "/news-search?" in url:
+            return {
+                "items": [{"evidence_id": "a" * 64, "headline": "有证据"}],
+                "query": "黄金", "source_mode": "D1_ARCHIVE",
+                "archive_complete": True,
+                "retrieval": {
+                    "ordering": [
+                        "published_time DESC", "collector_first_seen_time DESC",
+                        "detail_key DESC",
+                    ],
+                    "cutoff": "2026-08-15T10:00:00.000Z", "result_limit": 20,
+                    "canonical_evidence_ids": ["a" * 64],
+                },
+            }
+        claim_calls += 1
+        return {"item": {
+            "id": "question-1", "question": "黄金怎么了？",
+            "retrieval_query": "黄金",
+            "retrieval_cutoff": "2026-08-15T10:00:00.000Z",
+            "lease_token": "lease-1",
+        }} if claim_calls == 1 else {"item": None}
+
+    posted: list[dict] = []
+    monkeypatch.setattr(module, "_get_json", get_json)
+    monkeypatch.setattr(
+        module,
+        "_post_json",
+        lambda url, payload, config: posted.append(json.loads(payload)) or {},
+    )
+    module._sync_news_questions(
+        {}, {"remote_ingest_url": "https://example.test/api/ingest", "token": "x"},
+    )
+    assert posted == [{
+        "action": "FAIL", "id": "question-1", "lease_token": "lease-1",
+        "failure_code": "NO_MODEL_CAPACITY",
+    }]

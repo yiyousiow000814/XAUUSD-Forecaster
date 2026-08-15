@@ -5,8 +5,7 @@ const digest = async (value: string) => new Uint8Array(
 );
 
 export async function isIngestAuthorized(request: Request): Promise<boolean> {
-  const runtimeEnv = env as unknown as { INGEST_TOKEN?: string };
-  const expected = runtimeEnv.INGEST_TOKEN ?? process.env.INGEST_TOKEN;
+  const expected = env.INGEST_TOKEN ?? process.env.INGEST_TOKEN;
   const header = request.headers.get("authorization") ?? "";
   const match = /^Bearer\s+(.+)$/i.exec(header);
   if (!expected || !match?.[1]) return false;

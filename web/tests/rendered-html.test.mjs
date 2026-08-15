@@ -278,7 +278,7 @@ test("keeps branch Preview identity and blocks writes", async () => {
   for (const path of [
     "/api/ingest", "/api/learning", "/api/learning-history",
     "/api/news-index", "/api/news-content", "/api/market-chart",
-    "/api/market-history",
+    "/api/market-history", "/api/news-questions",
   ]) {
     const forbiddenD1 = new Proxy({}, {
       get() { throw new Error(`${path} touched D1 before Preview rejection`); },
@@ -1446,4 +1446,41 @@ test("keeps shared news retrieval bounded and phone readable", () => {
   assert.match(retrieval, /IMMUTABLE_PREVIEW_SNAPSHOT/);
   assert.match(css, /\.search-pages button \{[^}]*min-width:44px;[^}]*min-height:44px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.search-filter-grid \{ grid-template-columns:1fr; \}/);
+});
+
+test("keeps private news Q&A authenticated, lease-backed, and phone readable", () => {
+  const view = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  const route = readFileSync(new URL("../app/api/news-questions/route.ts", import.meta.url), "utf8");
+  const queue = readFileSync(new URL("../app/api/_shared/news-questions.ts", import.meta.url), "utf8");
+  const auth = readFileSync(new URL("../app/api/_shared/assistant-auth.ts", import.meta.url), "utf8");
+  const sync = readFileSync(new URL("../../scripts/run_dashboard_sync.py", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+
+  assert.match(view, /view === "qa"/);
+  assert.match(view, /PRIVATE · EVIDENCE GROUNDED/);
+  assert.match(view, /questionAccess !== "authorized"/);
+  assert.match(view, /if \(view !== "qa"\) return/);
+  assert.match(view, /Idempotency-Key/);
+  assert.match(route, /rejectPreviewWrite\(\)/);
+  const postRoute = route.slice(route.indexOf("export async function POST"));
+  assert.ok(
+    postRoute.indexOf("rejectPreviewWrite()") < postRoute.indexOf("authenticateAssistantRequest(request, env)"),
+    "Preview writes must reject before human authentication",
+  );
+  assert.match(route, /isIngestAuthorized\(request\)/);
+  assert.match(route, /authenticateAssistantRequest\(request, env\)/);
+  assert.match(auth, /jwtVerify/);
+  assert.match(auth, /algorithms: \["RS256"\]/);
+  assert.match(queue, /status='PROCESSING'/);
+  assert.match(queue, /lease_expires_at/);
+  assert.match(queue, /attempt_count>=max_attempts/);
+  assert.match(queue, /owner_id=\?/);
+  const qaSync = sync.slice(
+    sync.indexOf("def _sync_news_questions("),
+    sync.indexOf("\ndef ", sync.indexOf("def _sync_news_questions(") + 1),
+  );
+  assert.match(qaSync, /\/news-search\?/);
+  assert.doesNotMatch(qaSync, /recent_news/);
+  assert.match(css, /\.news-qa-desk form button \{[^}]*min-height:44px/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.news-qa-desk form \{ grid-template-columns:1fr/);
 });

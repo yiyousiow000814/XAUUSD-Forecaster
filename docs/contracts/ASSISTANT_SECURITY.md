@@ -36,6 +36,29 @@ system is not required.
 Application persistence uses a stable `actor_id` and owner scope. Email and
 display name are attributes, not authorization keys or schema ownership.
 
+### Current Cloudflare Access profile
+
+The bounded News Q&A MVP verifies `Cf-Access-Jwt-Assertion` on the server. It
+MUST validate the RS256 signature against the configured team JWKS, issuer,
+audience, expiry, application-token type, non-empty subject, and configured
+owner membership. Merely receiving an identity-looking header is never
+sufficient. The persisted actor identity is `cloudflare-access:<subject>`;
+email may match deployment membership policy but is never persisted as object
+ownership.
+
+Production activation requires runtime configuration outside source control:
+
+- `CF_ACCESS_TEAM_DOMAIN` identifies the Access team issuer and JWKS endpoint;
+- `CF_ACCESS_AUD` declares one or more accepted Access application audiences;
+- `ASSISTANT_OWNER_SUBJECTS` and/or `ASSISTANT_OWNER_EMAILS` declares the
+  current `OWNER` membership; and
+- `INGEST_TOKEN` remains the independent machine identity.
+
+The Cloudflare Access application and policy MUST be provisioned before the
+private UI is enabled for use. Missing or malformed configuration fails closed;
+it does not fall back to an anonymous queue, a browser credential, or the
+machine ingest token.
+
 ### Machine synchronization
 
 The local Windows synchronizer and other services use a machine or service

@@ -904,6 +904,143 @@ def _post_json(url: str, payload: bytes, config: dict) -> dict:
     return result if isinstance(result, dict) else {}
 
 
+def _get_json(url: str, config: dict) -> dict:
+    request = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {config['token']}",
+        "Accept": "application/json",
+        "User-Agent": "AurumSignalRoomMirror/1.0",
+    })
+    with urllib.request.urlopen(
+        request, timeout=REMOTE_POST_TIMEOUT_SECONDS,
+    ) as response:
+        return json.loads(response.read())
+
+
+def _sync_news_questions(local_payload: dict, config: dict) -> None:
+    # Preview builds import this module for its pure payload helpers. Keep the
+    # local SQLite/model runtime out of that import path: Cloudflare's build
+    # Python intentionally does not include the optional _sqlite3 extension.
+    from xauusd_forecaster.forward_ledger import ForwardLedger
+    from xauusd_forecaster.news_qa import answer_news_question
+    from xauusd_forecaster.model_gateway import ModelGatewayCapacityExhausted
+    from xauusd_forecaster.news_scheduler import (
+        PREEMPTIBLE_POOL,
+        configured_api_credentials,
+    )
+    from xauusd_forecaster.scheduler_model_gateway import SchedulerModelAccountant
+
+    url = config.get("remote_news_questions_url") or (
+        config["remote_ingest_url"].rsplit("/", 1)[0] + "/news-questions"
+    )
+    api_root = url.rsplit("/", 1)[0]
+    worker_suffix = re.sub(
+        r"[^A-Za-z0-9._:-]", "-",
+        os.environ.get("COMPUTERNAME", "windows-sync"),
+    )[:64]
+    worker_id = f"dashboard-sync:{worker_suffix}"
+    credential = next(
+        (item for item in configured_api_credentials()
+         if item.pool == PREEMPTIBLE_POOL),
+        None,
+    )
+    database = Path(config.get(
+        "local_database", MODULE_ROOT / ".local" / "forward" / "forward.sqlite3",
+    ))
+    ledger = None
+    accountant = None
+
+    def failure_code(error: Exception) -> str:
+        if isinstance(error, ModelGatewayCapacityExhausted):
+            return "NO_MODEL_CAPACITY"
+        if isinstance(error, (urllib.error.URLError, TimeoutError)):
+            return "NEWS_RETRIEVAL_UNAVAILABLE"
+        if isinstance(error, ValueError):
+            return "MODEL_OUTPUT_INVALID"
+        if str(error) == "NO_INTERACTIVE_MODEL_ACCOUNT":
+            return "NO_MODEL_CAPACITY"
+        return "WORKER_FAILURE"
+
+    try:
+        for _ in range(3):
+            claim_url = url + "?" + urllib.parse.urlencode({
+                "mode": "claim", "worker_id": worker_id,
+            })
+            item = _get_json(claim_url, config).get("item")
+            if not isinstance(item, dict):
+                break
+            try:
+                retrieval_url = api_root + "/news-search?" + urllib.parse.urlencode({
+                    "q": str(item.get("retrieval_query") or ""),
+                    "received_to": str(item.get("retrieval_cutoff") or ""),
+                    "page": 1,
+                    "limit": 20,
+                })
+                retrieval = _get_json(retrieval_url, config)
+                rows = retrieval.get("items")
+                metadata = retrieval.get("retrieval")
+                if (
+                    not isinstance(rows, list)
+                    or not isinstance(metadata, dict)
+                    or retrieval.get("source_mode") != "D1_ARCHIVE"
+                    or retrieval.get("archive_complete") is not True
+                ):
+                    raise RuntimeError("AUTHORITATIVE_RETRIEVAL_REQUIRED")
+                canonical_ids = [
+                    str(row.get("evidence_id") or "")
+                    for row in rows if isinstance(row, dict)
+                ]
+                if canonical_ids != list(metadata.get("canonical_evidence_ids") or []):
+                    raise RuntimeError("RETRIEVAL_PROVENANCE_MISMATCH")
+
+                if rows and credential is None:
+                    raise RuntimeError("NO_INTERACTIVE_MODEL_ACCOUNT")
+                if rows and accountant is None:
+                    ledger = ForwardLedger(database)
+                    accountant = SchedulerModelAccountant(
+                        ledger.connection, credential, urgent=True,
+                    )
+                result = answer_news_question(
+                    str(item.get("question") or ""),
+                    [row for row in rows if isinstance(row, dict)],
+                    api_key=credential.api_key if credential else None,
+                    request_accountant=accountant,
+                )
+                provenance = {
+                    "query": retrieval.get("query"),
+                    "source_mode": retrieval.get("source_mode"),
+                    "archive_complete": retrieval.get("archive_complete"),
+                    "ordering": metadata.get("ordering"),
+                    "cutoff": metadata.get("cutoff"),
+                    "result_limit": metadata.get("result_limit"),
+                    "canonical_evidence_ids": canonical_ids,
+                }
+                _post_json(
+                    url + "?mode=machine",
+                    json.dumps({
+                        "action": "COMPLETE",
+                        "id": item.get("id"),
+                        "lease_token": item.get("lease_token"),
+                        "retrieval": provenance,
+                        **result,
+                    }, ensure_ascii=False).encode("utf-8"),
+                    config,
+                )
+            except Exception as error:
+                _post_json(
+                    url + "?mode=machine",
+                    json.dumps({
+                        "action": "FAIL",
+                        "id": item.get("id"),
+                        "lease_token": item.get("lease_token"),
+                        "failure_code": failure_code(error),
+                    }).encode("utf-8"),
+                    config,
+                )
+    finally:
+        if ledger is not None:
+            ledger.close()
+
+
 def _target_state_path(path: Path, target_name: str, *, legacy: bool) -> Path:
     if legacy or target_name == "sites":
         return path
@@ -1356,6 +1493,7 @@ def sync_once(config: dict) -> list[dict]:
             ("market_chart", _sync_market),
             ("market_history", lambda _payload, scoped: _sync_market_history(scoped)),
             ("news", _sync_news),
+            ("news_questions", _sync_news_questions),
         ):
             try:
                 operation(local_payload, target)
