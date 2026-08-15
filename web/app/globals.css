@@ -1188,7 +1188,12 @@ body.modal-open { overflow:hidden; }
   .source-health article small { font-size:12px; line-height:1.65; }
   .source-health-error { padding:13px!important; background:#e6e0d2; }
 
-  .decision-audit { border-top:1px solid rgba(17,17,15,.55); }
+  .daily-brief-desk,
+  .news-search-desk,
+  .news-qa-desk,
+  .decision-audit,
+  .shadow-league,
+  .coverage-grid { border-top:1px solid rgba(17,17,15,.55); }
 
   .graph-modal>header h2 { min-width:0; white-space:normal; }
   .long-curve-block .mobile-scroll-hint { display:none; }

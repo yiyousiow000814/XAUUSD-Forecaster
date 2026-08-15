@@ -1332,7 +1332,7 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.graph-modal-backdrop \{ position:fixed; inset:0; z-index:1100/);
   assert.match(css, /\.audit-intro>div:first-child \.eyebrow \{ display:none/);
   assert.match(css, /\.audit-intro h1 \{ font-size:clamp\(32px,9vw,38px\)/);
-  assert.match(css, /\.decision-audit \{ border-top:1px solid rgba\(17,17,15,\.55\); \}/);
+  assert.match(css, /\.daily-brief-desk,\s*\.news-search-desk,\s*\.news-qa-desk,\s*\.decision-audit,\s*\.shadow-league,\s*\.coverage-grid \{ border-top:1px solid rgba\(17,17,15,\.55\); \}/);
 });
 
 test("keeps expanded news readable by progressively revealing technical evidence on phones", () => {
