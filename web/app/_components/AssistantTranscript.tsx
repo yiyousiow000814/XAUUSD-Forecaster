@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { AssistantEventEnvelope } from "../api/_shared/assistant-events";
+import AssistantContentBlocks from "./AssistantContentBlocks";
 import {
   assistantAnswerDraft,
   assistantProgressItems,
@@ -47,7 +48,9 @@ function AssistantMessageCard({ message, index }: { message: AssistantMessage; i
       <span>{message.role === "USER" ? "YOU / REQUEST" : "AURUM / RESPONSE"}</span>
       <span>MSG {String(index + 1).padStart(2, "0")} · {timeLabel(message.created_at)}</span>
     </header>
-    <p>{message.content}</p>
+    {message.content_document
+      ? <AssistantContentBlocks document={message.content_document} />
+      : <p>{message.content}</p>}
     {audit ? <details className="assistant-message-audit">
       <summary>查看回答凭据</summary>
       <dl>

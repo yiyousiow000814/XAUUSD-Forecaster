@@ -592,6 +592,7 @@ def run_assistant_chat_worker(
                     "lease_token": claim["lease_token"],
                     "answer": result.answer,
                     "model_version": result.model_version,
+                    "content_document": copy.deepcopy(result.content_document),
                     "provenance": copy.deepcopy(result.provenance),
                 })
                 answered += 1

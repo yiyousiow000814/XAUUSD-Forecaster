@@ -1,4 +1,8 @@
 import {
+  MAX_ASSISTANT_CONTENT_BLOCKS,
+  verifyAssistantContentDocument,
+} from "./assistant-content";
+import {
   ASSISTANT_ACTIVE_TURN_STATUSES_SQL,
   automaticAssistantTitleStatements,
   provisionalAssistantTitle,
@@ -31,7 +35,7 @@ export const ASSISTANT_CHAT_LIMITS = {
 const ANSWER_DELTA_BYTES = 4_096;
 const MAX_COMPLETION_EVENTS = Math.ceil(
   ASSISTANT_CHAT_LIMITS.maxAnswerBytes / ANSWER_DELTA_BYTES,
-) + 3;
+) + MAX_ASSISTANT_CONTENT_BLOCKS + 3;
 
 export type AssistantChatStatus =
   | "PENDING"
@@ -1013,7 +1017,9 @@ export async function completeAssistantChatTurn(
   if (Number(turn.cancel_requested) === 1) {
     return terminalizeTurn(binding, turn, "CANCELLED", "USER_CANCELLED", now);
   }
-  const answer = typeof input.answer === "string" ? input.answer.trim() : "";
+  const answer = typeof input.answer === "string"
+    ? input.answer.replace(/\r\n?/gu, "\n").trim()
+    : "";
   const modelVersion = typeof input.model_version === "string" ? input.model_version.trim() : "";
   if (!answer || hasUnsafeTextControl(answer)
     || new TextEncoder().encode(answer).length > ASSISTANT_CHAT_LIMITS.maxAnswerBytes
@@ -1022,6 +1028,14 @@ export async function completeAssistantChatTurn(
   }
   const provenance = await parseAgentProvenance(input.provenance, turn, modelVersion);
   const evidenceIds = provenance.evidence_ids as string[];
+  const contentDocument = await verifyAssistantContentDocument(
+    input.content_document, {
+      answer,
+      evidenceIds,
+    },
+  ).catch(() => inputError(
+    "INVALID_ASSISTANT_CONTENT", "Assistant 结构化回答无效",
+  ));
   const assistantMessageId = crypto.randomUUID();
   const answerHash = await hexDigest(answer);
   const existingSequence = new AssistantEventSequence();
@@ -1048,6 +1062,12 @@ export async function completeAssistantChatTurn(
   splitUtf8(answer).forEach((text, index) => add(
     "answer.delta", { text }, `completion:answer-delta:${index}`,
   ));
+  contentDocument.blocks.forEach((block, index) => add("content.block", {
+    block_id: block.id,
+    block_type: block.type,
+    block_version: block.version,
+    content_sha256: block.content_sha256,
+  }, `completion:content-block:${index}`));
   add("answer.completed", {
     content_sha256: answerHash,
     evidence_ids: evidenceIds,
@@ -1066,15 +1086,18 @@ export async function completeAssistantChatTurn(
   });
   const statements = [binding.prepare(
     `INSERT INTO assistant_messages (
-     id,conversation_id,role,content,created_at,provenance_json,source_kind,source_id
+     id,conversation_id,role,content,created_at,provenance_json,source_kind,source_id,
+     content_protocol,content_document_json,content_document_sha256
      )
-     SELECT ?,conversation_id,'ASSISTANT',?,?,?,'ASSISTANT_CHAT',id
+     SELECT ?,conversation_id,'ASSISTANT',?,?,?,'ASSISTANT_CHAT',id,?,?,?
      FROM assistant_turn_jobs
      WHERE id=? AND status='PROCESSING' AND lease_token=? AND lease_expires_at>?
        AND cancel_requested=0
      ON CONFLICT DO NOTHING RETURNING *`,
   ).bind(
     assistantMessageId, answer, timestamp, assistantProvenance,
+    contentDocument.protocol, JSON.stringify(contentDocument),
+    contentDocument.document_sha256,
     turn.id, leaseToken, timestamp,
   )];
   for (const item of terminalEvents) {

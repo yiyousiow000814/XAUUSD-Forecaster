@@ -89,9 +89,10 @@ conversation and does not verify the model, retrieval, or persistence path.
 The responsive Assistant workbench may install its branch-owned fixture only
 after the Preview API returns the labeled synthetic-empty Assistant state. The
 fixture remains visibly labeled, never enters an API request, and may be used
-only for local selection, paging, and progress-presentation review. Composer,
-rename, title regeneration, archive, cancellation, and every other mutation
-remain disabled.
+only for local selection, paging, progress presentation, and responsive
+rendering of the five validated v1 content-block types. Synthetic content and
+links remain explicitly non-authoritative. Composer, rename, title regeneration,
+archive, cancellation, and every other mutation remain disabled.
 
 For `/api/assistant-chat`, every POST and machine claim returns the standard
 write rejection before authentication, body parsing, or D1 access. Human turn

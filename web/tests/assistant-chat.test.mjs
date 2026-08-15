@@ -16,6 +16,8 @@ import {
 } from "../app/api/_shared/assistant-chat.ts";
 import { getOwnerAssistantConversation, listOwnerAssistantMessages } from
   "../app/api/_shared/assistant-conversations.ts";
+import { buildAssistantTextContentDocument } from
+  "../app/api/_shared/assistant-content.ts";
 import { assistantRouting } from "./assistant-routing-fixture.mjs";
 import { D1TestDatabase } from "./d1-test-database.mjs";
 
@@ -304,7 +306,7 @@ test("progress reserves enough sequence capacity for the largest final answer", 
   const database = new D1TestDatabase();
   await createTurn(database);
   const claim = await claimAssistantChatTurn(database, "worker:chat", atSeconds(1));
-  const pairs = Array.from({ length: 122 }, (_, index) => ([
+  const pairs = Array.from({ length: 116 }, (_, index) => ([
     {
       idempotency_key: `budget-tool-start-${String(index).padStart(4, "0")}`,
       type: "tool.started",
@@ -358,10 +360,11 @@ test("progress reserves enough sequence capacity for the largest final answer", 
     lease_token: claim.lease_token,
     answer,
     model_version: "gemma-4-31b-it",
+    content_document: await buildAssistantTextContentDocument(answer),
     provenance,
   }, atSeconds(3));
   assert.equal(completed.status, "ANSWERED");
-  assert.equal(completed.event_sequence, 256);
+  assert.equal(completed.event_sequence, 246);
 });
 
 test("answer completion atomically persists the canonical final and terminal stream", async () => {
@@ -374,17 +377,21 @@ test("answer completion atomically persists the canonical final and terminal str
     lease_token: claim.lease_token,
     answer,
     model_version: "gemma-4-31b-it",
+    content_document: await buildAssistantTextContentDocument(answer),
     provenance: directAgentProvenance(claim),
   }, atSeconds(2));
   assert.equal(completed.status, "ANSWERED");
   assert.ok(completed.assistant_message_id);
-  assert.equal(completed.event_sequence, 5);
+  assert.equal(completed.event_sequence, 7);
 
   const messages = await listOwnerAssistantMessages(
     database, owner, claim.conversation_id,
   );
   assert.deepEqual(messages.items.map(item => item.role), ["USER", "ASSISTANT"]);
   assert.equal(messages.items[1].content, answer);
+  assert.deepEqual(messages.items[1].content_document.blocks.map(block => block.type), [
+    "markdown", "callout",
+  ]);
   assert.equal(messages.items[1].provenance.kind, "ASSISTANT_CHAT");
   assert.equal(messages.items[1].provenance.agent.run_sha256,
     directAgentProvenance(claim).run_sha256);
@@ -395,10 +402,14 @@ test("answer completion atomically persists the canonical final and terminal str
   });
   assert.deepEqual(stream.events.map(item => item.type), [
     "conversation.started", "answer.started", "answer.delta",
+    "content.block", "content.block",
     "answer.completed", "conversation.completed",
   ]);
-  assert.equal(stream.events[3].message_id, completed.assistant_message_id);
-  assert.equal(stream.events[3].payload.content_sha256, digest(answer));
+  assert.equal(stream.events[5].message_id, completed.assistant_message_id);
+  assert.equal(stream.events[5].payload.content_sha256, digest(answer));
+  assert.deepEqual(stream.events.slice(3, 5).map(event => event.payload.block_id), [
+    "block:answer", "block:boundary",
+  ]);
 
   const conversation = await getOwnerAssistantConversation(
     database, owner, claim.conversation_id,
@@ -455,6 +466,30 @@ test("completion rejects forged, secret-bearing, or cross-turn agent provenance"
   }
 });
 
+test("completion rejects rich content that drifts from the canonical answer", async () => {
+  const database = new D1TestDatabase();
+  await createTurn(database);
+  const claim = await claimAssistantChatTurn(database, "worker:chat", atSeconds(1));
+  const answer = "结构化输出必须与规范回答一致。";
+  const content = await buildAssistantTextContentDocument(answer);
+  content.blocks[1].data.body = "被篡改的边界";
+
+  await assert.rejects(completeAssistantChatTurn(database, {
+    id: claim.id,
+    lease_token: claim.lease_token,
+    answer,
+    model_version: "gemma-4-31b-it",
+    content_document: content,
+    provenance: directAgentProvenance(claim),
+  }, atSeconds(2)), error => (
+    error instanceof AssistantChatInputError
+      && error.code === "INVALID_ASSISTANT_CONTENT"
+  ));
+  assert.equal(database.database.prepare(
+    "SELECT count(*) AS n FROM assistant_messages WHERE role='ASSISTANT'",
+  ).get().n, 0);
+});
+
 test("completion accepts exact owner-bound native tool receipts", async () => {
   const rejectedDatabase = new D1TestDatabase();
   await createTurn(rejectedDatabase);
@@ -493,6 +528,10 @@ test("completion accepts exact owner-bound native tool receipts", async () => {
     lease_token: claim.lease_token,
     answer: "根据已收录新闻，当前证据仍支持谨慎判断。",
     model_version: "gemma-4-31b-it",
+    content_document: await buildAssistantTextContentDocument(
+      "根据已收录新闻，当前证据仍支持谨慎判断。",
+      { evidenceIds: ["evidence:tool-1"] },
+    ),
     provenance: toolAgentProvenance(claim),
   }, atSeconds(2));
   assert.equal(completed.status, "ANSWERED");
@@ -586,4 +625,9 @@ test("database triggers keep turn inputs, events, and sequence receipts immutabl
   assert.throws(() => database.database.prepare(
     "DELETE FROM assistant_turn_jobs WHERE id=?",
   ).run(created.item.id), /jobs are immutable/);
+  assert.throws(() => database.database.prepare(
+    `INSERT INTO assistant_messages (
+     id,conversation_id,role,content,created_at,provenance_json,source_kind,source_id
+     ) VALUES ('forged-rich-message',?,'ASSISTANT','forged',?,'{}','ASSISTANT_CHAT','forged-rich')`,
+  ).run(created.item.conversation_id, atSeconds(2).toISOString()), /content contract/);
 });

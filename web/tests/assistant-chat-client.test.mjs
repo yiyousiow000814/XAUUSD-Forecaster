@@ -36,7 +36,7 @@ test("finite Assistant SSE replay validates ids, cursors, and public progress", 
           "Content-Type": "text/event-stream",
           "X-Assistant-Event-Protocol": "assistant.event.v1",
           "X-Assistant-Turn-Status": "ANSWERED",
-          "X-Assistant-Next-Sequence": "8",
+          "X-Assistant-Next-Sequence": "14",
           "X-Assistant-Has-More": "false",
         },
       });
@@ -46,9 +46,14 @@ test("finite Assistant SSE replay validates ids, cursors, and public progress", 
   assert.equal(new Headers(request.init.headers).get("last-event-id"), "0");
   assert.equal(request.init.credentials, "same-origin");
   assert.equal(replay.turn_status, "ANSWERED");
-  assert.equal(replay.next_sequence, 8);
+  assert.equal(replay.next_sequence, 14);
   assert.equal(replay.has_more, false);
-  assert.equal(replay.events.length, 8);
+  assert.equal(replay.events.length, 14);
+  assert.deepEqual(
+    replay.events.filter(event => event.type === "content.block")
+      .map(event => event.payload.block_type),
+    ["markdown", "metric", "news_card", "news_card", "table", "callout"],
+  );
 
   const progress = assistantProgressItems(replay.events);
   assert.deepEqual(progress.map(item => item.state), [

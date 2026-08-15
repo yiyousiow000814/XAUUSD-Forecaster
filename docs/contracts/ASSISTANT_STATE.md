@@ -49,6 +49,7 @@ Message
 - conversation_id
 - role
 - content
+- validated content document and hash (Assistant messages when available)
 - created_at
 - provenance
 
@@ -75,6 +76,14 @@ Original accepted user messages and completed Assistant messages are canonical
 history. Compaction MUST NOT rewrite or delete them merely to reduce model
 context. Corrections, regenerated answers, and derived summaries MUST remain
 distinguishable from the records from which they were produced.
+
+For a runtime Assistant message, plain `content` remains the canonical readable
+answer and its `assistant.content.v1` document is an immutable typed rendering
+of that same answer. The first markdown block equals `content`; every other
+block is bounded, hashed, and validated before the message transaction. Rich
+content never becomes a second conversation history. Messages created before
+the structured-content migration may retain a null document and render their
+canonical text unchanged.
 
 ## Persistence and recovery
 

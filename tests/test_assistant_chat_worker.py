@@ -8,6 +8,7 @@ import pytest
 from xauusd_forecaster import assistant_chat_worker as worker
 from xauusd_forecaster.assistant_agent import AssistantAgentResult
 from xauusd_forecaster.assistant_capacity import AssistantCapacityUnavailable
+from xauusd_forecaster.assistant_content import build_assistant_content_document
 from xauusd_forecaster.assistant_tools import (
     NEWS_SEARCH_TOOL_NAME,
     AssistantToolCall,
@@ -165,10 +166,17 @@ def test_worker_builds_owner_context_runs_native_news_tool_and_completes(
         )[0]
         assert result.status is AssistantToolStatus.SUCCEEDED
         assert "raw body" not in str(result.output)
+        answer = "新闻证据显示利率预期仍是黄金的主要驱动。"
         return AssistantAgentResult(
-            answer="新闻证据显示利率预期仍是黄金的主要驱动。",
+            answer=answer,
             model_version="gemma-4-31b-it",
             evidence_ids=result.evidence_ids,
+            content_document=build_assistant_content_document(
+                answer,
+                evidence_items=result.output["items"],
+                evidence_ids=result.evidence_ids,
+                retrieval_cutoff=request.retrieval_cutoff,
+            ),
             provenance={
                 "policy_version": "assistant-agent-v1",
                 "tool_execution": [[result.receipt()]],
@@ -219,6 +227,10 @@ def test_worker_builds_owner_context_runs_native_news_tool_and_completes(
     complete = transport.posts[4][1]
     assert complete["answer"].startswith("新闻证据")
     assert complete["model_version"] == "gemma-4-31b-it"
+    assert complete["content_document"]["protocol"] == "assistant.content.v1"
+    assert "news_card" in {
+        block["type"] for block in complete["content_document"]["blocks"]
+    }
     assert complete["provenance"]["tool_execution"][0][0]["call_id"] == (
         "provider-call-1"
     )

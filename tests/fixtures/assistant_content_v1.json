@@ -1,0 +1,93 @@
+{
+  "protocol": "assistant.content.v1",
+  "blocks": [
+    {
+      "id": "block:answer",
+      "type": "markdown",
+      "version": "v1",
+      "data": {
+        "text": "实际利率是持有无息黄金的机会成本。已收录证据显示，市场在重新评估政策利率维持高位的时间；当实际利率预期上升时，美元与短端收益率通常同步走强，黄金因此承压。\n\n这不是交易指令。当前更值得观察的是实际利率、美元与黄金是否继续同向重定价，以及新的政策证据是否在决策时间前已经被系统收到。"
+      },
+      "content_sha256": "81e514f062f5fa982676a14badc2f66b4bf44056e22e8e00382d11b332340f07"
+    },
+    {
+      "id": "block:metric:evidence",
+      "type": "metric",
+      "version": "v1",
+      "data": {
+        "label": "本轮检索证据",
+        "value": "2",
+        "unit": "条",
+        "trend": "UNKNOWN",
+        "detail": "检索截止 2026-08-15T10:00:00.000Z"
+      },
+      "content_sha256": "543be2dc3569e5f5b3e772f427bdcf6e8a20c38f841c5efccae77080d78fd032"
+    },
+    {
+      "id": "block:news:1:2b374918875f",
+      "type": "news_card",
+      "version": "v1",
+      "data": {
+        "evidence_id": "preview-evidence-1",
+        "source": "Reuters",
+        "published_at": "2026-08-15T09:42:00.000Z",
+        "received_at": "2026-08-15T09:43:00.000Z",
+        "headline": "Fed officials signal rates may remain restrictive",
+        "summary": "政策官员继续强调利率可能维持高位，市场重新评估实际利率路径。",
+        "category": "MONETARY POLICY",
+        "impact": "实际利率与美元走强会提高持有无息黄金的机会成本。",
+        "relevance": null,
+        "source_url": "https://example.com/preview-evidence-1"
+      },
+      "content_sha256": "094c8c1ef1eb6e121fe857dd269b50676d401432d8c6ecd4a90fb58b36581def"
+    },
+    {
+      "id": "block:news:2:2bc04c7b4ddb",
+      "type": "news_card",
+      "version": "v1",
+      "data": {
+        "evidence_id": "preview-evidence-2",
+        "source": "Aurum Evidence",
+        "published_at": "2026-08-15T09:10:00.000Z",
+        "received_at": "2026-08-15T09:12:00.000Z",
+        "headline": "Dollar and short yields rise together",
+        "summary": "美元与短端收益率同步走强，黄金价格承压。",
+        "category": "MARKET RESPONSE",
+        "impact": "跨市场同步变化为黄金重定价提供背景。",
+        "relevance": null,
+        "source_url": "https://example.com/preview-evidence-2"
+      },
+      "content_sha256": "6cd69015de2b79309a8043a363f0dc9fba350a29d1b4986bef80bb16cd53cf42"
+    },
+    {
+      "id": "block:table:evidence-times",
+      "type": "table",
+      "version": "v1",
+      "data": {
+        "caption": "本轮检索证据时间",
+        "columns": [
+          { "key": "source", "label": "来源", "align": "left" },
+          { "key": "published", "label": "发布时间", "align": "left" },
+          { "key": "received", "label": "系统收到", "align": "left" }
+        ],
+        "rows": [
+          ["Reuters", "2026-08-15T09:42:00.000Z", "2026-08-15T09:43:00.000Z"],
+          ["Aurum Evidence", "2026-08-15T09:10:00.000Z", "2026-08-15T09:12:00.000Z"]
+        ]
+      },
+      "content_sha256": "8876338f53a291719f4dbb35f0848a3cb332dd8827db4b08b2b5ed88573ef336"
+    },
+    {
+      "id": "block:boundary",
+      "type": "callout",
+      "version": "v1",
+      "data": {
+        "tone": "BOUNDARY",
+        "title": "决策支持边界",
+        "body": "该回答不会下单、执行交易或自动晋升模型；请按证据时间与来源自行判断。"
+      },
+      "content_sha256": "2068814e4d606974d4b080e7c16b478d2728ee033b44d1a73276935844a040ca"
+    }
+  ],
+  "document_sha256": "34ffe46b719d66b1a711a7b051c2905eafe3ead0e6b0104ccc4809bd8300123a"
+}

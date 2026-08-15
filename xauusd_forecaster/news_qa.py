@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import urllib.parse
 from typing import Any
 
 from .annotation import DEFAULT_GEMMA_MODEL, generate_metered_json
@@ -24,6 +25,21 @@ def _bounded_text(value: object, limit: int) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
+def _bounded_source_url(value: object) -> str | None:
+    url = str(value or "").strip()[:2_048]
+    if not url:
+        return None
+    parsed = urllib.parse.urlsplit(url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    return url
+
+
 def build_news_evidence_packet(news: list[dict]) -> list[dict[str, object]]:
     """Reduce shared retrieval rows to the only fields the model may receive."""
     packet: list[dict[str, object]] = []
@@ -36,7 +52,7 @@ def build_news_evidence_packet(news: list[dict]) -> list[dict[str, object]]:
         if not evidence_id or evidence_id in seen or not headline:
             continue
         seen.add(evidence_id)
-        packet.append({
+        item: dict[str, object] = {
             "evidence_id": evidence_id,
             "published_at": _bounded_text(
                 row.get("source_published_time") or row.get("published_time"), 64
@@ -53,7 +69,11 @@ def build_news_evidence_packet(news: list[dict]) -> list[dict[str, object]]:
             "impact": _bounded_text(
                 row.get("impact_reason_zh") or row.get("impact_status"), 600
             ),
-        })
+        }
+        source_url = _bounded_source_url(row.get("source_url") or row.get("link"))
+        if source_url:
+            item["source_url"] = source_url
+        packet.append(item)
     return packet
 
 

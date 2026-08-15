@@ -58,6 +58,16 @@ def test_news_question_uses_only_the_bounded_shared_retrieval_packet(monkeypatch
     assert prompt.count('"evidence_id"') == news_qa.MAX_RETRIEVED_EVIDENCE
 
 
+def test_compact_evidence_packet_keeps_only_safe_public_source_links() -> None:
+    secure, unsafe = news_qa.build_news_evidence_packet([
+        _news("secure", link="https://example.com/evidence"),
+        _news("unsafe", link="javascript:alert(1)"),
+    ])
+
+    assert secure["source_url"] == "https://example.com/evidence"
+    assert "source_url" not in unsafe
+
+
 def test_news_question_rejects_the_whole_answer_if_any_evidence_is_invented(
     monkeypatch,
 ) -> None:
