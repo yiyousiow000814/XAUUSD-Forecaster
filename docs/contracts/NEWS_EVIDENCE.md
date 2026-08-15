@@ -47,10 +47,22 @@ theme combinations. A `PAGE_PRECISEPUBTIMESTAMP` is retained when available.
 Otherwise the GKG batch
 timestamp is a conservative visibility clock, not an inferred event time.
 
+GKG field bounds apply to archive metadata, not publisher article length. A
+single oversized or malformed GKG row MUST be rejected independently and MUST
+NOT abort the remaining archive. The collector retains at most ten immutable
+row-rejection receipts per poll containing the archive name, row number, row
+hash, reason code, and bounded size diagnostics; it MUST NOT retain the full
+rejected row. Archive-wide rejection is reserved for manifest, digest, ZIP
+layout, compressed-size, or expanded-size failures that make the batch itself
+untrustworthy.
+
 An immutable article that semantic review marks `IRRELEVANT` remains in the
 local evidence ledger for audit, but MUST NOT be materialized into the public
 news reader or its bounded D1 mirror. Missing or pending semantic review is not
-equivalent to `IRRELEVANT` and remains visible under its honest processing state.
+equivalent to `IRRELEVANT`. The public reader MUST default to completed review
+and present pending work and terminally isolated work in separate, explicitly
+labelled review zones. These records remain inspectable for diagnosis, but MUST
+NOT be mixed into the completed-news list.
 
 ## Event construction
 

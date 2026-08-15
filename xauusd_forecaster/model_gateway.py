@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import urllib.error
@@ -24,6 +25,7 @@ class ModelGatewayResponseInvalid(RuntimeError):
     def __init__(self, error: Exception) -> None:
         self.cause_type = type(error).__name__
         self.cause_message = str(error)
+        self.failure_evidence = getattr(error, "failure_evidence", None)
         super().__init__(
             f"Model response failed validation: {self.cause_type}: "
             f"{self.cause_message}"
@@ -136,6 +138,28 @@ class GeminiModelGateway:
                 result = decode(envelope)
                 return result, str(envelope.get("modelVersion") or model)
             except retryable_decode_errors as error:
+                if getattr(error, "failure_evidence", None) is None:
+                    try:
+                        raw_output = str(
+                            envelope["candidates"][0]["content"]["parts"][0]["text"]
+                        )
+                    except (KeyError, IndexError, TypeError):
+                        raw_output = json.dumps(
+                            envelope, ensure_ascii=False, sort_keys=True,
+                            separators=(",", ":"), default=str,
+                        )
+                    error.failure_evidence = {
+                        "failure_code": "MODEL_OUTPUT_INVALID",
+                        "failure_stage": "RESPONSE_DECODE",
+                        "response_hash": hashlib.sha256(
+                            raw_output.encode("utf-8")
+                        ).hexdigest(),
+                        "selected_output": {
+                            "bounded_response_prefix": raw_output[:500],
+                        },
+                        "cause_type": type(error).__name__,
+                        "cause": str(error)[:500],
+                    }
                 last_error = error
             except urllib.error.HTTPError as error:
                 last_error = error

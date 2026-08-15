@@ -26,8 +26,10 @@ IMMUTABLE_TABLES = (
     "news_annotations",
     "news_title_translations",
     "news_llm_failures",
+    "news_llm_failure_evidence_v1",
     "news_content_failures",
     "news_discovery_failures",
+    "news_intake_rejections_v1",
     "daily_news_briefs",
     "macro_observations",
     "source_polls",
@@ -200,6 +202,18 @@ CREATE INDEX IF NOT EXISTS news_llm_failures_lookup
 ON news_llm_failures(task_type, source, source_item_id, revision_number,
                      llm_model_version, prompt_version, attempt_number);
 
+CREATE TABLE IF NOT EXISTS news_llm_failure_evidence_v1 (
+    evidence_id TEXT PRIMARY KEY,
+    failure_id TEXT NOT NULL UNIQUE REFERENCES news_llm_failures(failure_id),
+    failure_code TEXT NOT NULL,
+    failure_stage TEXT NOT NULL,
+    response_hash TEXT NOT NULL,
+    selected_output_json TEXT NOT NULL,
+    cause_type TEXT NOT NULL,
+    cause TEXT NOT NULL,
+    captured_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS news_content_failures (
     failure_id TEXT PRIMARY KEY,
     source TEXT NOT NULL,
@@ -235,6 +249,19 @@ CREATE TABLE IF NOT EXISTS news_discovery_failures (
 
 CREATE INDEX IF NOT EXISTS news_discovery_failures_lookup
 ON news_discovery_failures(source, source_item_id, attempt_number);
+
+CREATE TABLE IF NOT EXISTS news_intake_rejections_v1 (
+    rejection_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    poll_id TEXT NOT NULL REFERENCES source_polls(poll_id),
+    batch_name TEXT NOT NULL,
+    row_number INTEGER NOT NULL CHECK(row_number >= 1),
+    row_hash TEXT NOT NULL,
+    reason_code TEXT NOT NULL,
+    diagnostics_json TEXT NOT NULL,
+    rejected_at TEXT NOT NULL,
+    UNIQUE(source, poll_id, row_number)
+);
 
 CREATE TABLE IF NOT EXISTS macro_observations (
     source TEXT NOT NULL,
@@ -897,6 +924,17 @@ class ForwardLedger:
             raise ValueError("LLM retry time precedes failure time")
         if record.get("is_terminal") and next_retry is not None:
             raise ValueError("terminal LLM failure cannot have a retry time")
+        failure_evidence = record.get("failure_evidence")
+        selected_output_json = None
+        if failure_evidence is not None:
+            selected_output_json = json.dumps(
+                failure_evidence.get("selected_output", {}),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if len(selected_output_json.encode("utf-8")) > 4096:
+                raise ValueError("LLM failure evidence exceeds bounded storage")
         with self.connection:
             self.connection.execute(
                 """INSERT INTO news_llm_failures VALUES
@@ -911,6 +949,23 @@ class ForwardLedger:
                     int(bool(record.get("is_terminal"))),
                 ),
             )
+            if failure_evidence is not None:
+                evidence_id = hashlib.sha256(
+                    f"{record['failure_id']}|failure-evidence-v1".encode("utf-8")
+                ).hexdigest()
+                self.connection.execute(
+                    """INSERT INTO news_llm_failure_evidence_v1 VALUES
+                    (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        evidence_id, record["failure_id"],
+                        failure_evidence["failure_code"],
+                        failure_evidence["failure_stage"],
+                        failure_evidence["response_hash"], selected_output_json,
+                        failure_evidence["cause_type"],
+                        str(failure_evidence["cause"])[:500],
+                        _iso(record["failed_at"]),
+                    ),
+                )
 
     def append_content_failure(self, record: dict[str, Any]) -> None:
         source_key = (
@@ -955,6 +1010,24 @@ class ForwardLedger:
                     record["source_item_id"], record["attempt_number"],
                     record["error_type"], record["error"],
                     _iso(record["failed_at"]), _iso(next_retry),
+                ),
+            )
+
+    def append_intake_rejection(self, record: dict[str, Any]) -> None:
+        diagnostics_json = json.dumps(
+            record.get("diagnostics", {}), sort_keys=True, separators=(",", ":")
+        )
+        if len(diagnostics_json.encode("utf-8")) > 1024:
+            raise ValueError("news intake rejection diagnostics exceed bounded storage")
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO news_intake_rejections_v1 VALUES
+                (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    record["rejection_id"], record["source"], record["poll_id"],
+                    record["batch_name"], record["row_number"],
+                    record["row_hash"], record["reason_code"], diagnostics_json,
+                    _iso(record["rejected_at"]),
                 ),
             )
 

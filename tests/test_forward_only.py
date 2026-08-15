@@ -46,6 +46,7 @@ from xauusd_forecaster.news import (
     DIRECT_FULL_TEXT_RSS_SOURCES,
     FRED_POLL_SOURCE,
     FRED_SOURCE,
+    GDELT_MAX_FIELD_CHARS,
     GOOGLE_NEWS_LANES,
     GoogleNewsLane,
     RssSource,
@@ -147,6 +148,7 @@ def _gdelt_gkg_feed(
     url: str = "https://example.test/geopolitics",
     timestamp: str = "20260805100000",
     themes: str = "ECON_GOLD",
+    extra_metadata: str = "",
 ) -> tuple[bytes, bytes]:
     fields = [""] * 27
     fields[0] = f"{timestamp}-1"
@@ -157,6 +159,7 @@ def _gdelt_gkg_feed(
     fields[26] = (
         f"<PAGE_PRECISEPUBTIMESTAMP>{timestamp}</PAGE_PRECISEPUBTIMESTAMP>"
         f"<PAGE_TITLE>{title}</PAGE_TITLE>"
+        f"{extra_metadata}"
     )
     payload = ("\t".join(fields) + "\n").encode()
     archive_buffer = io.BytesIO()
@@ -1045,6 +1048,114 @@ def test_gdelt_gkg_feed_validates_manifest_and_uses_official_gcs_url(tmp_path) -
     assert failed["status"] == "ERROR"
     assert "MD5" in failed["error"]
     assert bad_ledger.count("news_revisions") == 0
+
+
+def test_gdelt_accepts_metadata_fields_larger_than_python_csv_default(tmp_path) -> None:
+    fetched = datetime(2026, 8, 15, 10, 20, tzinfo=UTC)
+    ledger = ForwardLedger(
+        tmp_path / "forward.sqlite3", now=fetched - timedelta(days=1)
+    )
+    manifest, archive = _gdelt_gkg_feed(
+        timestamp="20260815100000",
+        extra_metadata=f"<LARGE_METADATA>{'x' * 131_073}</LARGE_METADATA>",
+    )
+
+    result = collect_gdelt_news(
+        ledger,
+        fetched,
+        _gdelt_fetcher(manifest, archive),
+        content_extractor=lambda url: ("complete gold evidence " * 30, url),
+    )
+
+    assert result["status"] == "OK"
+    assert result["inserted_revisions"] == 1
+
+
+def test_gdelt_isolates_one_oversized_metadata_row_and_keeps_the_batch(tmp_path) -> None:
+    fetched = datetime(2026, 8, 15, 10, 20, tzinfo=UTC)
+    ledger = ForwardLedger(
+        tmp_path / "forward.sqlite3", now=fetched - timedelta(days=1)
+    )
+    _, oversized_archive = _gdelt_gkg_feed(
+        timestamp="20260815100000",
+        title="Oversized metadata row",
+        url="https://example.test/oversized",
+        extra_metadata="x" * (GDELT_MAX_FIELD_CHARS + 1),
+    )
+    _, valid_archive = _gdelt_gkg_feed(
+        timestamp="20260815100000",
+        title="Gold market update",
+        url="https://example.test/valid",
+    )
+    with zipfile.ZipFile(io.BytesIO(oversized_archive)) as archive:
+        oversized_row = archive.read(archive.namelist()[0])
+    with zipfile.ZipFile(io.BytesIO(valid_archive)) as archive:
+        valid_row = archive.read(archive.namelist()[0])
+    combined_buffer = io.BytesIO()
+    with zipfile.ZipFile(combined_buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("20260815100000.gkg.csv", oversized_row + valid_row)
+    combined_archive = combined_buffer.getvalue()
+    manifest = (
+        f"{len(combined_archive)} {hashlib.md5(combined_archive).hexdigest()} "
+        "http://data.gdeltproject.org/gdeltv2/"
+        "20260815100000.gkg.csv.zip\n"
+    ).encode()
+
+    result = collect_gdelt_news(
+        ledger,
+        fetched,
+        _gdelt_fetcher(manifest, combined_archive),
+        content_extractor=lambda url: ("complete gold evidence " * 30, url),
+    )
+
+    assert result["status"] == "OK"
+    assert result["inserted_revisions"] == 1
+    assert result["rejected_reasons"] == {"GKG_ROW_FIELD_LIMIT": 1}
+    assert result["rejection_receipts"] == 1
+    receipt = ledger.connection.execute(
+        "SELECT * FROM news_intake_rejections_v1"
+    ).fetchone()
+    assert receipt["batch_name"] == "20260815100000.gkg.csv.zip"
+    assert receipt["row_number"] == 1
+    assert receipt["reason_code"] == "GKG_ROW_FIELD_LIMIT"
+    assert len(receipt["row_hash"]) == 64
+
+
+def test_gdelt_keeps_bounded_receipt_for_malformed_metadata_row(tmp_path) -> None:
+    fetched = datetime(2026, 8, 15, 10, 20, tzinfo=UTC)
+    ledger = ForwardLedger(
+        tmp_path / "forward.sqlite3", now=fetched - timedelta(days=1)
+    )
+    _, valid_archive = _gdelt_gkg_feed(timestamp="20260815100000")
+    with zipfile.ZipFile(io.BytesIO(valid_archive)) as archive:
+        valid_row = archive.read(archive.namelist()[0])
+    malformed_row = b"too\tfew\tfields\n"
+    combined_buffer = io.BytesIO()
+    with zipfile.ZipFile(combined_buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "20260815100000.gkg.csv", malformed_row + valid_row,
+        )
+    combined_archive = combined_buffer.getvalue()
+    manifest = (
+        f"{len(combined_archive)} {hashlib.md5(combined_archive).hexdigest()} "
+        "http://data.gdeltproject.org/gdeltv2/"
+        "20260815100000.gkg.csv.zip\n"
+    ).encode()
+
+    result = collect_gdelt_news(
+        ledger,
+        fetched,
+        _gdelt_fetcher(manifest, combined_archive),
+        content_extractor=lambda url: ("complete gold evidence " * 30, url),
+    )
+
+    assert result["status"] == "OK"
+    assert result["inserted_revisions"] == 1
+    assert result["rejected_reasons"] == {"MALFORMED_GKG_ROW": 1}
+    receipt = ledger.connection.execute(
+        "SELECT diagnostics_json FROM news_intake_rejections_v1"
+    ).fetchone()
+    assert json.loads(receipt["diagnostics_json"])["parsed_field_count"] == 3
 
 
 def test_gdelt_fetches_discovery_candidate_before_ai_semantic_review(tmp_path) -> None:
@@ -2454,6 +2565,59 @@ def test_semantic_failure_does_not_trigger_display_repair(monkeypatch) -> None:
     assert len(calls) == 1
 
 
+def test_semantic_contract_failure_keeps_bounded_diagnostic_evidence(
+    tmp_path, monkeypatch,
+) -> None:
+    now = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "The source says gold demand was unchanged. " * 20
+    ledger.append_news_revision({
+        "source": "failure-test", "source_item_id": "bounded-evidence",
+        "collector_first_seen_time": now, "fetched_time": now,
+        "headline": "Gold demand update", "body": body,
+        "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+        "cluster_id": "bounded-evidence-cluster",
+    })
+    vector = _v15_annotation(
+        {
+            "headline_zh": "黄金需求更新",
+            "summary_zh": "来源显示黄金需求保持不变。",
+            "event_type": "other", "entities": [], "hawkishness": 0.0,
+            "inflation_impulse": 0.0, "growth_impulse": 0.0,
+            "geopolitical_risk": 0.0, "usd_impulse": 0.0,
+            "novelty": 0.2, "confidence": 0.7,
+        },
+        "Gold demand increased sharply",
+        xauusd_relevance="DIRECT",
+        review_priority="SAME_DAY",
+        semantic_reason_zh="模型认为黄金需求发生变化。",
+    )
+    _mock_model_json(monkeypatch, lambda *_args: vector)
+
+    statuses = annotate_pending_news(
+        ledger, provider="gemini", api_key="test-key", limit=1,
+        request_accountant=ALLOW_MODEL_REQUEST,
+    )
+
+    assert statuses[0]["failure_code"] == "MODEL_OUTPUT_CONTRACT_FAILED"
+    failure = ledger.connection.execute(
+        "SELECT * FROM news_llm_failures"
+    ).fetchone()
+    evidence = ledger.connection.execute(
+        "SELECT * FROM news_llm_failure_evidence_v1"
+    ).fetchone()
+    selected = json.loads(evidence["selected_output_json"])
+    assert evidence["failure_id"] == failure["failure_id"]
+    assert evidence["failure_stage"] == "SEMANTIC_CONTRACT"
+    assert evidence["failure_code"] == "MODEL_OUTPUT_CONTRACT_FAILED"
+    assert selected["supporting_evidence"] == ["Gold demand increased sharply"]
+    assert "body" not in selected
+    assert len(evidence["response_hash"]) == 64
+    assert datetime.fromisoformat(failure["next_retry_at"]) - datetime.fromisoformat(
+        failure["failed_at"]
+    ) == timedelta(minutes=5)
+
+
 def test_llm_failure_is_persisted_and_blocks_immediate_retry(
     tmp_path, monkeypatch
 ) -> None:
@@ -3576,6 +3740,35 @@ def test_gemini_key_pool_falls_back_on_quota_error(monkeypatch) -> None:
     assert calls == ["exhausted", "available"]
     assert result == "ok"
     assert model == "gemini-3.5-flash-lite"
+
+
+def test_invalid_model_json_keeps_only_bounded_decode_evidence(monkeypatch) -> None:
+    raw_output = "{invalid-json " + ("x" * 2_000)
+    gateway = GeminiModelGateway(
+        ("test-key",), requests_per_key=1, accountant=ALLOW_MODEL_REQUEST,
+    )
+    monkeypatch.setattr(
+        GeminiModelGateway,
+        "_post_json",
+        staticmethod(lambda *_args, **_kwargs: {
+            "modelVersion": "test-model",
+            "candidates": [{"content": {"parts": [{"text": raw_output}]}}],
+        }),
+    )
+
+    with pytest.raises(annotation_module.ModelGatewayResponseInvalid) as caught:
+        gateway.generate(
+            0, model="test-model", purpose="test", payload={}, input_tokens=10,
+            decode=annotation_module._decode_model_json,
+            retryable_http_codes=frozenset(),
+            retryable_decode_errors=(ValueError, json.JSONDecodeError),
+        )
+
+    evidence = caught.value.failure_evidence
+    assert evidence["failure_stage"] == "RESPONSE_DECODE"
+    assert evidence["failure_code"] == "MODEL_OUTPUT_INVALID"
+    assert evidence["selected_output"]["bounded_response_prefix"] == raw_output[:500]
+    assert len(evidence["response_hash"]) == 64
 
 
 def test_gold_investment_guide_reaches_ai_instead_of_keyword_rejection() -> None:

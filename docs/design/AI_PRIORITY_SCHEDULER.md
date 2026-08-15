@@ -81,9 +81,15 @@ and previous UTC minute buckets to prevent boundary bursts.
 
 - `QUEUED`: ready now or at `available_at`.
 - `LEASED`: exclusively owned until the lease expires.
-- `BACKING_OFF`: retryable after a provider-specified time.
+- `BACKING_OFF`: retryable after its declared `available_at` time.
 - `COMPLETED`: immutable output exists or the job completed.
 - `DEAD_LETTER`: terminal failure; never reclaimed automatically.
+
+`BACKING_OFF` applies to the AI task, not publisher-content retrieval. A local
+model-output contract failure becomes available again after five minutes and
+gets one recovery attempt; the same repeated failure moves to `DEAD_LETTER`.
+Provider rate limits and transient server failures keep their separate bounded
+progressive schedule.
 
 Scheduler rows are mutable operational state. News revisions, annotations,
 impact assessments, translations, failures, model metadata, and historical

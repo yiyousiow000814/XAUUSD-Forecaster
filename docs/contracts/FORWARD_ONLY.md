@@ -134,10 +134,19 @@ lexemes. Unsupported numbers are replaced by a nonnumeric disclosure and lower
 display confidence instead of rejecting the structured receipt. If a Chinese
 repair cannot pass validation, the display text becomes an explicit audit notice and
 all directional impulses, novelty, and confidence become zero. Provider,
-transport, or malformed-JSON failures append a `news_llm_failures` row before
-retry. HTTP 429 and transient 5xx failures use bounded progressive backoff and
-become terminal after five attempts. Terminal rows remain auditable and are
-not automatically requeued. The primary Flash budget keeps 150 requests reserved
+transport, malformed-JSON, and model-output contract failures append a
+`news_llm_failures` row before retry. A rejected structured response also
+appends bounded diagnostic evidence: its failure stage and code, response hash,
+validation cause, and only the selected output fields needed to reproduce the
+failure. When structured fields cannot be decoded, only a 500-character output
+prefix and the complete response hash may replace selected fields. Full rejected
+responses, source bodies, prompts, and credentials MUST NOT be duplicated into
+the failure evidence table. Model-output contract
+failures retry once after five minutes and become terminal when the same failure
+repeats; waiting six hours would outlive the decision value of timely news.
+HTTP 429 and transient 5xx failures use bounded progressive backoff and become
+terminal after five attempts. Terminal rows remain auditable and are not
+automatically requeued. The primary Flash budget keeps 150 requests reserved
 for monetary-policy, CPI, and payroll events; routine news cannot consume that
 reserve. Exhausting the current minute's local request slots leaves the item
 pending for the next batch and does not create a failure record.
