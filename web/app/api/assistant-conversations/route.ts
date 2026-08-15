@@ -5,6 +5,7 @@ import {
   AssistantConversationInputError,
   claimAssistantTitleJob,
   completeAssistantTitleJob,
+  deferAssistantTitleJob,
   failAssistantTitleJob,
   getOwnerAssistantConversation,
   listOwnerAssistantConversations,
@@ -20,6 +21,7 @@ import {
   claimAssistantCompactionJob,
   completeAssistantCompactionJob,
   createAssistantPinnedEntry,
+  deferAssistantCompactionJob,
   failAssistantCompactionJob,
   scheduleAssistantCompaction,
 } from "../_shared/assistant-memory";
@@ -140,11 +142,14 @@ export async function POST(request: Request) {
       const action = String(body.action ?? "");
       let item: unknown = null;
       if (action === "COMPLETE_TITLE") item = await completeAssistantTitleJob(binding, body);
+      else if (action === "DEFER_TITLE") item = await deferAssistantTitleJob(binding, body);
       else if (action === "FAIL_TITLE") item = await failAssistantTitleJob(binding, body);
       else if (action === "COMPLETE_COMPACTION") {
         item = await completeAssistantCompactionJob(binding, body);
       } else if (action === "FAIL_COMPACTION") {
         item = await failAssistantCompactionJob(binding, body);
+      } else if (action === "DEFER_COMPACTION") {
+        item = await deferAssistantCompactionJob(binding, body);
       } else if (action === "SCHEDULE_COMPACTION") {
         const conversationId = String(body.conversation_id ?? "").trim();
         if (!validObjectId(conversationId)) {

@@ -637,3 +637,39 @@ export async function failNewsQuestion(
     .first<NewsQuestionRow>();
   return row ? publicNewsQuestion(row) : null;
 }
+
+export async function deferNewsQuestion(
+  binding: D1Database,
+  input: Record<string, unknown>,
+  now = new Date(),
+) {
+  const id = String(input.id ?? "");
+  const leaseToken = String(input.lease_token ?? "");
+  const timestamp = now.toISOString();
+  const leased = await binding.prepare(
+    `SELECT * FROM news_questions
+     WHERE id=? AND status='PROCESSING' AND lease_token=? AND lease_expires_at>?`,
+  ).bind(id, leaseToken, timestamp).first<NewsQuestionRow>();
+  if (!leased) return null;
+  const expired = Date.parse(leased.expires_at) <= now.getTime();
+  const exhausted = Number(leased.attempt_count) >= Number(leased.max_attempts);
+  const status: NewsQuestionStatus = expired ? "EXPIRED" : exhausted ? "FAILED" : "PENDING";
+  const availableAt = status === "PENDING"
+    ? new Date(now.getTime() + 60_000).toISOString() : timestamp;
+  const row = await binding.prepare(
+    `UPDATE news_questions SET status=?,available_at=?,
+     failure_code='NO_MODEL_CAPACITY',
+     processing_started_at=NULL,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,
+     attempt_history_json=json_insert(
+       CASE WHEN json_valid(attempt_history_json) THEN attempt_history_json ELSE '[]' END,
+       '$[#]',json_object('event','CAPACITY_DEFERRED','at',?,
+         'attempt',attempt_count,'failure_code','NO_MODEL_CAPACITY','terminal',?))
+     WHERE id=? AND status='PROCESSING' AND lease_token=? AND lease_expires_at>?
+     RETURNING *`,
+  ).bind(
+    status, availableAt, timestamp, status === "PENDING" ? 0 : 1,
+    id, leaseToken, timestamp,
+  )
+    .first<NewsQuestionRow>();
+  return row ? publicNewsQuestion(row) : null;
+}

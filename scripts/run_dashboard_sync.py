@@ -924,12 +924,17 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
         ASSISTANT_COMPACTION_MAX_OUTPUT_TOKENS,
         compact_assistant_context,
     )
+    from xauusd_forecaster.assistant_capacity import (
+        AssistantCapacityUnavailable,
+        AssistantServicePriority,
+        configured_assistant_capacity_policies,
+        execute_assistant_capacity_route,
+    )
     from xauusd_forecaster.assistant_routing import (
         AssistantModelRoutingUnavailable,
         AssistantTaskType,
         configured_assistant_model_profiles,
         conservative_assistant_token_estimate,
-        execute_assistant_route,
         plan_assistant_route,
     )
     from xauusd_forecaster.assistant_titles import (
@@ -942,12 +947,10 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
         answer_news_question,
         build_news_evidence_packet,
     )
-    from xauusd_forecaster.model_gateway import ModelGatewayCapacityExhausted
     from xauusd_forecaster.news_scheduler import (
-        PREEMPTIBLE_POOL,
+        ROUTINE_POOL,
         configured_api_credentials,
     )
-    from xauusd_forecaster.scheduler_model_gateway import SchedulerModelAccountant
 
     url = config.get("remote_news_questions_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/news-questions"
@@ -958,21 +961,18 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
         os.environ.get("COMPUTERNAME", "windows-sync"),
     )[:64]
     worker_id = f"dashboard-sync:{worker_suffix}"
-    credential = next(
-        (item for item in configured_api_credentials()
-         if item.pool == PREEMPTIBLE_POOL),
-        None,
-    )
+    credentials = configured_api_credentials()
     database = Path(config.get(
         "local_database", MODULE_ROOT / ".local" / "forward" / "forward.sqlite3",
     ))
     ledger = None
-    accountant = None
-    background_accountant = None
     model_profiles = configured_assistant_model_profiles()
+    capacity_policies = configured_assistant_capacity_policies(
+        credentials, model_profiles,
+    )
 
     def failure_code(error: Exception) -> str:
-        if isinstance(error, ModelGatewayCapacityExhausted):
+        if isinstance(error, AssistantCapacityUnavailable):
             return "NO_MODEL_CAPACITY"
         if isinstance(error, AssistantModelRoutingUnavailable):
             return "NO_COMPATIBLE_MODEL"
@@ -980,8 +980,6 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
             return "NEWS_RETRIEVAL_UNAVAILABLE"
         if isinstance(error, ValueError):
             return "MODEL_OUTPUT_INVALID"
-        if str(error) == "NO_INTERACTIVE_MODEL_ACCOUNT":
-            return "NO_MODEL_CAPACITY"
         return "WORKER_FAILURE"
 
     try:
@@ -1016,13 +1014,8 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                 if canonical_ids != list(metadata.get("canonical_evidence_ids") or []):
                     raise RuntimeError("RETRIEVAL_PROVENANCE_MISMATCH")
 
-                if rows and credential is None:
-                    raise RuntimeError("NO_INTERACTIVE_MODEL_ACCOUNT")
-                if rows and accountant is None:
+                if rows and ledger is None:
                     ledger = ForwardLedger(database)
-                    accountant = SchedulerModelAccountant(
-                        ledger.connection, credential, urgent=True,
-                    )
                 question = str(item.get("question") or "")
                 evidence_rows = [row for row in rows if isinstance(row, dict)]
                 if evidence_rows:
@@ -1037,17 +1030,28 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                         planned_tool_calls=1,
                         profiles=model_profiles,
                     )
-                    routed = execute_assistant_route(
-                        plan,
-                        lambda profile, thinking_level: answer_news_question(
+
+                    def invoke_question(
+                        profile, selected_credential,
+                        thinking_level, request_accountant,
+                    ):
+                        return answer_news_question(
                             question,
                             evidence_rows,
                             prompt_version=str(item.get("prompt_version") or ""),
-                            api_key=credential.api_key if credential else None,
-                            request_accountant=accountant,
+                            api_key=selected_credential.api_key,
+                            request_accountant=request_accountant,
                             model=profile.model_id,
                             thinking_level=thinking_level,
-                        ),
+                        )
+
+                    routed = execute_assistant_capacity_route(
+                        ledger.connection,
+                        plan,
+                        credentials,
+                        service_priority=AssistantServicePriority.INTERACTIVE,
+                        policies=capacity_policies,
+                        invoke=invoke_question,
                     )
                     result = {**routed.value, "routing": routed.routing}
                 else:
@@ -1080,16 +1084,26 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                 _post_json(
                     url + "?mode=machine",
                     json.dumps({
-                        "action": "FAIL",
+                        "action": (
+                            "DEFER"
+                            if isinstance(error, AssistantCapacityUnavailable)
+                            else "FAIL"
+                        ),
                         "id": item.get("id"),
                         "lease_token": item.get("lease_token"),
                         "failure_code": failure_code(error),
                     }).encode("utf-8"),
                     config,
                 )
-        # Title work is preemptible. Leave jobs pending when no permitted
-        # credential exists instead of consuming their finite retry budget.
-        if credential is None:
+        # Background work must not consume the pool reserved for interactive
+        # requests. Leave it unclaimed when no routine pool is configured.
+        routine_pool_ids = {
+            item.account_id for item in credentials if item.pool == ROUTINE_POOL
+        }
+        if not routine_pool_ids or not any(
+            policy.enabled and policy.credential_pool_id in routine_pool_ids
+            for policy in capacity_policies
+        ):
             return
         title_url = api_root + "/assistant-conversations"
         for _ in range(3):
@@ -1100,12 +1114,8 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
             if not isinstance(item, dict):
                 break
             try:
-                if background_accountant is None:
-                    if ledger is None:
-                        ledger = ForwardLedger(database)
-                    background_accountant = SchedulerModelAccountant(
-                        ledger.connection, credential, urgent=False,
-                    )
+                if ledger is None:
+                    ledger = ForwardLedger(database)
                 first_user_message = str(item.get("first_user_message") or "")
                 latest_assistant_message = str(
                     item.get("latest_assistant_message") or ""
@@ -1119,17 +1129,28 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                     reserved_output_tokens=ASSISTANT_TITLE_MAX_OUTPUT_TOKENS,
                     profiles=model_profiles,
                 )
-                routed = execute_assistant_route(
-                    plan,
-                    lambda profile, thinking_level: generate_assistant_title(
+
+                def invoke_title(
+                    profile, selected_credential,
+                    thinking_level, request_accountant,
+                ):
+                    return generate_assistant_title(
                         first_user_message,
                         latest_assistant_message,
                         prompt_version=str(item.get("prompt_version") or ""),
-                        api_key=credential.api_key,
-                        request_accountant=background_accountant,
+                        api_key=selected_credential.api_key,
+                        request_accountant=request_accountant,
                         model=profile.model_id,
                         thinking_level=thinking_level,
-                    ),
+                    )
+
+                routed = execute_assistant_capacity_route(
+                    ledger.connection,
+                    plan,
+                    credentials,
+                    service_priority=AssistantServicePriority.BACKGROUND,
+                    policies=capacity_policies,
+                    invoke=invoke_title,
                 )
                 result = {**routed.value, "routing": routed.routing}
                 _post_json(
@@ -1146,7 +1167,11 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                 _post_json(
                     title_url + "?mode=machine",
                     json.dumps({
-                        "action": "FAIL_TITLE",
+                        "action": (
+                            "DEFER_TITLE"
+                            if isinstance(error, AssistantCapacityUnavailable)
+                            else "FAIL_TITLE"
+                        ),
                         "id": item.get("id"),
                         "lease_token": item.get("lease_token"),
                         "failure_code": failure_code(error),
@@ -1161,12 +1186,8 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
             if not isinstance(item, dict):
                 break
             try:
-                if background_accountant is None:
-                    if ledger is None:
-                        ledger = ForwardLedger(database)
-                    background_accountant = SchedulerModelAccountant(
-                        ledger.connection, credential, urgent=False,
-                    )
+                if ledger is None:
+                    ledger = ForwardLedger(database)
                 prior_summary = (
                     item.get("prior_summary")
                     if isinstance(item.get("prior_summary"), dict) else None
@@ -1189,19 +1210,32 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                     reserved_output_tokens=ASSISTANT_COMPACTION_MAX_OUTPUT_TOKENS,
                     profiles=model_profiles,
                 )
-                routed = execute_assistant_route(
-                    plan,
-                    lambda profile, thinking_level: compact_assistant_context(
+
+                def invoke_compaction(
+                    profile, selected_credential,
+                    thinking_level, request_accountant,
+                ):
+                    return compact_assistant_context(
                         prior_summary,
                         pinned_state,
                         source_messages,
                         prompt_version=str(item.get("prompt_version") or ""),
-                        context_profile_id=str(item.get("context_profile_id") or ""),
-                        api_key=credential.api_key,
-                        request_accountant=background_accountant,
+                        context_profile_id=str(
+                            item.get("context_profile_id") or ""
+                        ),
+                        api_key=selected_credential.api_key,
+                        request_accountant=request_accountant,
                         model=profile.model_id,
                         thinking_level=thinking_level,
-                    ),
+                    )
+
+                routed = execute_assistant_capacity_route(
+                    ledger.connection,
+                    plan,
+                    credentials,
+                    service_priority=AssistantServicePriority.BACKGROUND,
+                    policies=capacity_policies,
+                    invoke=invoke_compaction,
                 )
                 result = {**routed.value, "routing": routed.routing}
                 _post_json(
@@ -1218,7 +1252,11 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                 _post_json(
                     title_url + "?mode=machine",
                     json.dumps({
-                        "action": "FAIL_COMPACTION",
+                        "action": (
+                            "DEFER_COMPACTION"
+                            if isinstance(error, AssistantCapacityUnavailable)
+                            else "FAIL_COMPACTION"
+                        ),
                         "id": item.get("id"),
                         "lease_token": item.get("lease_token"),
                         "failure_code": failure_code(error),

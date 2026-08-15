@@ -5,6 +5,7 @@ import {
   claimNewsQuestion,
   completeNewsQuestion,
   createNewsQuestion,
+  deferNewsQuestion,
   deriveRetrievalQuery,
   failNewsQuestion,
   getOwnerNewsQuestion,
@@ -201,6 +202,40 @@ test("worker failures back off and terminate after the bounded attempt budget", 
   assert.equal(failed.status, "FAILED");
   assert.equal(failed.attempt_count, 3);
   assert.equal(await claimNewsQuestion(database, "worker:a", minute(4)), null);
+});
+
+test("capacity deferral releases Q&A under the finite attempt budget", async () => {
+  const database = new D1TestDatabase();
+  const created = await create(database, 1);
+  const claimed = await claimNewsQuestion(database, "worker:a", minute(0));
+
+  const deferred = await deferNewsQuestion(database, {
+    id: created.item.id,
+    lease_token: claimed.lease_token,
+  }, minute(0));
+
+  assert.equal(deferred.status, "PENDING");
+  assert.equal(deferred.attempt_count, 1);
+  assert.equal(await claimNewsQuestion(database, "worker:early", minute(0.5)), null);
+  const reclaimed = await claimNewsQuestion(database, "worker:later", minute(1));
+  assert.equal(reclaimed.attempt_count, 2);
+  assert.equal((await deferNewsQuestion(database, {
+    id: created.item.id, lease_token: reclaimed.lease_token,
+  }, minute(1))).status, "PENDING");
+  const finalClaim = await claimNewsQuestion(database, "worker:final", minute(2));
+  assert.equal(finalClaim.attempt_count, 3);
+  assert.equal((await deferNewsQuestion(database, {
+    id: created.item.id, lease_token: finalClaim.lease_token,
+  }, minute(2))).status, "FAILED");
+  assert.equal(await claimNewsQuestion(database, "worker:late", minute(3)), null);
+  assert.deepEqual(
+    JSON.parse(database.row(created.item.id).attempt_history_json)
+      .map(receipt => receipt.event),
+    [
+      "CLAIMED", "CAPACITY_DEFERRED", "CLAIMED",
+      "CAPACITY_DEFERRED", "CLAIMED", "CAPACITY_DEFERRED",
+    ],
+  );
 });
 
 test("pending work expires instead of consuming stale model capacity", async () => {

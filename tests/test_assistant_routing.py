@@ -17,10 +17,9 @@ from xauusd_forecaster.assistant_routing import (
     apply_provider_thinking_level,
     classify_assistant_reasoning,
     configured_assistant_model_profiles,
-    execute_assistant_route,
     plan_assistant_route,
+    routing_provenance,
 )
-from xauusd_forecaster.model_gateway import ModelGatewayCapacityExhausted
 
 
 def _profile(
@@ -69,7 +68,7 @@ def test_reasoning_policy_is_deterministic_and_request_local(
     ) is expected
 
 
-def test_simple_route_prefers_small_and_uses_only_declared_fallbacks() -> None:
+def test_simple_route_prefers_small_and_declares_only_bounded_fallbacks() -> None:
     plan = plan_assistant_route(
         AssistantTaskType.NEWS_QA,
         estimated_input_tokens=1_000,
@@ -78,29 +77,18 @@ def test_simple_route_prefers_small_and_uses_only_declared_fallbacks() -> None:
         planned_tool_calls=1,
         profiles=(LARGE, SMALL),
     )
-    calls: list[tuple[str, str | None]] = []
-
-    def invoke(profile: ModelProfile, thinking_level: str | None) -> str:
-        calls.append((profile.profile_id, thinking_level))
-        if profile is SMALL:
-            raise ModelGatewayCapacityExhausted("small full")
-        return "ok"
-
-    routed = execute_assistant_route(plan, invoke)
-
     assert plan.reasoning_class is ReasoningClass.SIMPLE
     assert plan.thinking_level is ThinkingLevel.MINIMAL
     assert plan.model_requirement is ModelRequirement.SMALL_PREFERRED
     assert [profile.profile_id for profile in plan.candidate_profiles] == [
         "small", "large",
     ]
-    assert calls == [("small", "minimal"), ("large", "minimal")]
-    assert routed.profile is LARGE
-    assert routed.routing["candidate_profile_ids"] == ["small", "large"]
-    assert routed.routing["selected_profile_id"] == "large"
-    assert routed.routing["policy_version"] == ASSISTANT_ROUTING_POLICY_VERSION
-    assert routed.routing["provider_thinking_level"] == "minimal"
-    assert routed.routing["supports_thinking"] is True
+    selected = routing_provenance(plan, LARGE)
+    assert selected["candidate_profile_ids"] == ["small", "large"]
+    assert selected["selected_profile_id"] == "large"
+    assert selected["policy_version"] == ASSISTANT_ROUTING_POLICY_VERSION
+    assert selected["provider_thinking_level"] == "minimal"
+    assert selected["supports_thinking"] is True
 
 
 def test_candidate_fallback_list_is_bounded_and_preserves_declared_order() -> None:
@@ -136,15 +124,6 @@ def test_analytical_route_requires_thinking_large_and_never_downgrades() -> None
     assert plan.thinking_level is ThinkingLevel.HIGH
     assert plan.model_requirement is ModelRequirement.LARGE_REQUIRED
     assert plan.candidate_profiles == (LARGE,)
-
-    with pytest.raises(ModelGatewayCapacityExhausted):
-        execute_assistant_route(
-            plan,
-            lambda _profile, _thinking: (_ for _ in ()).throw(
-                ModelGatewayCapacityExhausted("large full")
-            ),
-        )
-
 
 def test_context_and_tool_capabilities_fail_closed_before_transport() -> None:
     with pytest.raises(AssistantModelRoutingUnavailable, match="LARGE_REQUIRED"):

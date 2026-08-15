@@ -8,6 +8,7 @@ import {
   claimAssistantCompactionJob,
   completeAssistantCompactionJob,
   createAssistantPinnedEntry,
+  deferAssistantCompactionJob,
   failAssistantCompactionJob,
   scheduleAssistantCompaction,
 } from "../app/api/_shared/assistant-memory.ts";
@@ -281,6 +282,48 @@ test("compaction leases recover finitely and stale workers cannot publish", asyn
   assert.equal(failedJob.output_summary_version, 1);
   assert.equal(replacementJob.output_summary_version, 1);
   assert.ok(replacementJob.input_version > failedJob.input_version);
+});
+
+test("capacity deferral releases compaction under the finite attempt budget", async () => {
+  const database = new D1TestDatabase();
+  const seeded = seedConversation(database);
+  await scheduleAssistantCompaction(database, seeded.conversationId, {
+    now: instant(11), profile: compactProfile,
+  });
+  const claimed = await claimAssistantCompactionJob(database, "worker:a", instant(11));
+
+  const deferred = await deferAssistantCompactionJob(database, {
+    id: claimed.id,
+    lease_token: claimed.lease_token,
+  }, instant(11));
+
+  assert.equal(deferred.status, "PENDING");
+  assert.equal(
+    database.row(claimed.id, "assistant_compaction_jobs").attempt_count,
+    1,
+  );
+  assert.equal(
+    await claimAssistantCompactionJob(database, "worker:early", instant(11.5)),
+    null,
+  );
+  const reclaimed = await claimAssistantCompactionJob(
+    database, "worker:later", instant(12),
+  );
+  assert.equal(reclaimed.attempt_count, 2);
+  assert.equal((await deferAssistantCompactionJob(database, {
+    id: reclaimed.id, lease_token: reclaimed.lease_token,
+  }, instant(12))).status, "PENDING");
+  const finalClaim = await claimAssistantCompactionJob(
+    database, "worker:final", instant(13),
+  );
+  assert.equal(finalClaim.attempt_count, 3);
+  assert.equal((await deferAssistantCompactionJob(database, {
+    id: finalClaim.id, lease_token: finalClaim.lease_token,
+  }, instant(13))).status, "FAILED");
+  assert.equal(
+    database.row(seeded.conversationId, "assistant_conversations").pending_compaction_job_id,
+    null,
+  );
 });
 
 test("compaction admission bounds active background work per owner", async () => {

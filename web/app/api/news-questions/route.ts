@@ -7,6 +7,7 @@ import {
   claimNewsQuestion,
   completeNewsQuestion,
   createNewsQuestion,
+  deferNewsQuestion,
   failNewsQuestion,
   getOwnerNewsQuestion,
   listOwnerNewsQuestions,
@@ -110,6 +111,7 @@ export async function POST(request: Request) {
       const action = String(body.action ?? "");
       let item;
       if (action === "COMPLETE") item = await completeNewsQuestion(binding, body);
+      else if (action === "DEFER") item = await deferNewsQuestion(binding, body);
       else if (action === "FAIL") item = await failNewsQuestion(binding, body);
       else throw new NewsQuestionInputError("INVALID_ACTION", "机器动作无效");
       return item

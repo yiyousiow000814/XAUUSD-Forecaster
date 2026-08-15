@@ -1,4 +1,20 @@
 export const ASSISTANT_ROUTING_POLICY_VERSION = "assistant-routing-v1";
+export const ASSISTANT_CAPACITY_POLICY_VERSION = "assistant-capacity-v1";
+
+export type AssistantCapacityProvenance = {
+  policy_version: string;
+  service_priority: "INTERACTIVE" | "BACKGROUND";
+  selected_pool_fingerprint: string;
+  selected_pool_type: "PREEMPTIBLE" | "ROUTINE";
+  candidate_pool_count: number;
+  candidate_pair_count: number;
+  attempt_count: number;
+  estimated_input_tokens: number;
+  soft_cap_basis_points: number;
+  max_in_flight: number;
+  policy_source: "CONFIGURED" | "REGISTRY_DEFAULT";
+  model_fallback_used: boolean;
+};
 
 export type AssistantRoutingTask =
   | "NEWS_QA"
@@ -25,6 +41,7 @@ export type AssistantRoutingProvenance = {
   supports_thinking: boolean;
   supports_function_calling: boolean;
   supports_streaming: boolean;
+  capacity: AssistantCapacityProvenance;
 };
 
 const identifier = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$/;
@@ -38,6 +55,10 @@ const thinkingLevels = new Set(["MINIMAL", "HIGH"]);
 const modelRequirements = new Set(["SMALL_PREFERRED", "LARGE_REQUIRED"]);
 const capacityClasses = new Set(["SMALL", "LARGE"]);
 const installedProvider = "GOOGLE_GENERATIVE_LANGUAGE";
+const poolFingerprint = /^[a-f0-9]{16}$/;
+const servicePriorities = new Set(["INTERACTIVE", "BACKGROUND"]);
+const poolTypes = new Set(["PREEMPTIBLE", "ROUTINE"]);
+const policySources = new Set(["CONFIGURED", "REGISTRY_DEFAULT"]);
 
 const boundedInteger = (value: unknown, minimum: number, maximum: number) => (
   typeof value === "number" && Number.isSafeInteger(value)
@@ -101,6 +122,7 @@ export function parseAssistantRoutingProvenance(
     ? raw.planned_tool_calls : Number.NaN;
   const contextLimit = typeof raw.context_limit === "number"
     ? raw.context_limit : Number.NaN;
+  const rawCapacity = raw.capacity;
   if (
     !boundedInteger(estimatedInputTokens, 1, 1_000_000)
     || !boundedInteger(reservedOutputTokens, 1, 1_000_000)
@@ -110,6 +132,48 @@ export function parseAssistantRoutingProvenance(
     || requiredContextTokens !== estimatedInputTokens + reservedOutputTokens
     || contextLimit < requiredContextTokens
   ) throw new Error("Assistant routing token budget is invalid");
+  if (!rawCapacity || typeof rawCapacity !== "object" || Array.isArray(rawCapacity)) {
+    throw new Error("Assistant capacity provenance is required");
+  }
+  const capacityValue = rawCapacity as Record<string, unknown>;
+  const capacityPolicyVersion = String(capacityValue.policy_version ?? "").trim();
+  const servicePriority = String(capacityValue.service_priority ?? "").trim();
+  const selectedPoolFingerprint = String(
+    capacityValue.selected_pool_fingerprint ?? "",
+  ).trim();
+  const selectedPoolType = String(capacityValue.selected_pool_type ?? "").trim();
+  const policySource = String(capacityValue.policy_source ?? "").trim();
+  const candidatePoolCount = typeof capacityValue.candidate_pool_count === "number"
+    ? capacityValue.candidate_pool_count : Number.NaN;
+  const candidatePairCount = typeof capacityValue.candidate_pair_count === "number"
+    ? capacityValue.candidate_pair_count : Number.NaN;
+  const attemptCount = typeof capacityValue.attempt_count === "number"
+    ? capacityValue.attempt_count : Number.NaN;
+  const capacityEstimatedInputTokens = typeof capacityValue.estimated_input_tokens === "number"
+    ? capacityValue.estimated_input_tokens : Number.NaN;
+  const softCapBasisPoints = typeof capacityValue.soft_cap_basis_points === "number"
+    ? capacityValue.soft_cap_basis_points : Number.NaN;
+  const maxInFlight = typeof capacityValue.max_in_flight === "number"
+    ? capacityValue.max_in_flight : Number.NaN;
+  if (
+    capacityPolicyVersion !== ASSISTANT_CAPACITY_POLICY_VERSION
+    || !servicePriorities.has(servicePriority)
+    || !poolFingerprint.test(selectedPoolFingerprint)
+    || !poolTypes.has(selectedPoolType)
+    || !policySources.has(policySource)
+    || !boundedInteger(candidatePoolCount, 1, 16)
+    || !boundedInteger(candidatePairCount, 1, 128)
+    || !boundedInteger(attemptCount, 1, 128)
+    || !boundedInteger(capacityEstimatedInputTokens, 1, 1_000_000)
+    || !boundedInteger(softCapBasisPoints, 1, 10_000)
+    || !boundedInteger(maxInFlight, 1, 1_000)
+    || typeof capacityValue.model_fallback_used !== "boolean"
+    || candidatePoolCount > candidatePairCount
+    || capacityEstimatedInputTokens !== estimatedInputTokens
+    || (servicePriority === "BACKGROUND" && selectedPoolType !== "ROUTINE")
+    || capacityValue.model_fallback_used
+      !== (normalizedCandidates.indexOf(selectedProfileId) > 0)
+  ) throw new Error("Assistant capacity provenance is invalid");
   if (
     (reasoningClass === "SIMPLE" && thinkingLevel !== "MINIMAL")
     || (reasoningClass !== "SIMPLE" && thinkingLevel !== "HIGH")
@@ -147,5 +211,19 @@ export function parseAssistantRoutingProvenance(
     supports_thinking: raw.supports_thinking,
     supports_function_calling: raw.supports_function_calling,
     supports_streaming: raw.supports_streaming,
+    capacity: {
+      policy_version: capacityPolicyVersion,
+      service_priority: servicePriority as AssistantCapacityProvenance["service_priority"],
+      selected_pool_fingerprint: selectedPoolFingerprint,
+      selected_pool_type: selectedPoolType as AssistantCapacityProvenance["selected_pool_type"],
+      candidate_pool_count: candidatePoolCount as number,
+      candidate_pair_count: candidatePairCount as number,
+      attempt_count: attemptCount as number,
+      estimated_input_tokens: capacityEstimatedInputTokens as number,
+      soft_cap_basis_points: softCapBasisPoints as number,
+      max_in_flight: maxInFlight as number,
+      policy_source: policySource as AssistantCapacityProvenance["policy_source"],
+      model_fallback_used: capacityValue.model_fallback_used,
+    },
   };
 }
