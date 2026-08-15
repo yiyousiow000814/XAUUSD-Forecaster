@@ -829,10 +829,12 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
     <div className="market-controls" aria-label="K线图显示控制">
       <label>时间<select value={range} onChange={event => { setRange(event.target.value); setPage(0); setBefore(null); setLaterPages([]); setSelected(null); if (event.target.value === "168") setDense(false); }}><option value="3">3小时</option><option value="6">6小时</option><option value="12">12小时</option><option value="24">24小时</option><option value="168">7天</option><option value="all">全部历史</option></select></label>
       <label>频率<select value={dense ? "all" : "clear"} disabled={range === "168"} onChange={event => setDense(event.target.value === "all")}><option value="clear">每小时 :00 / :30</option><option value="all">每5分钟</option></select></label>
-      <button className={showLong ? "active" : ""} type="button" onClick={() => setShowLong(value => !value)}>看多 LONG</button>
-      <button className={showShort ? "active" : ""} type="button" onClick={() => setShowShort(value => !value)}>看空 SHORT</button>
-      <button className={showWait ? "active" : ""} type="button" onClick={() => setShowWait(value => !value)}>等待 WAIT</button>
-      <button className={showTraining ? "active" : ""} type="button" disabled={!versionMarkers.length} aria-pressed={showTraining} onClick={() => setShowTraining(value => !value)}>模型换版本</button>
+      <div className="market-action-filters" aria-label="预测方向筛选">
+        <button className={showLong ? "active" : ""} type="button" aria-pressed={showLong} onClick={() => setShowLong(value => !value)}>LONG <span>看多</span></button>
+        <button className={showShort ? "active" : ""} type="button" aria-pressed={showShort} onClick={() => setShowShort(value => !value)}>SHORT <span>看空</span></button>
+        <button className={showWait ? "active" : ""} type="button" aria-pressed={showWait} onClick={() => setShowWait(value => !value)}>WAIT <span>等待</span></button>
+      </div>
+      <button className={`market-version-toggle${showTraining ? " active" : ""}`} type="button" disabled={!versionMarkers.length} aria-pressed={showTraining} onClick={() => setShowTraining(value => !value)}>模型换版标记</button>
       <span>显示 {formatExactCount(decisions.length)}{activeMarket?.decision_downsampled ? ` / 共 ${formatExactCount(activeMarket.source_decision_count ?? decisions.length)}` : ""} 次{hiddenByAction > 0 ? ` · 动作筛选隐藏 ${formatExactCount(hiddenByAction)} 次` : ""}{hiddenByFrequency > 0 ? ` · 频率收起 ${formatExactCount(hiddenByFrequency)} 次` : ""}</span>
     </div>
     {!candles.length ? <div className="graph-visual-stage market-empty-stage">
@@ -954,9 +956,9 @@ function ExecutionHistoryChart({ title, subtitle, model, historyResource, firstK
     ? `${new Date(String(points[0].time)).toLocaleString("zh-CN", { month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", hour12:false })} — ${new Date(String(points.at(-1)!.time)).toLocaleString("zh-CN", { month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", hour12:false })}`
     : "暂无时间范围";
   const controls = firstUrl ? <div className="execution-history-nav" aria-label={`${title}历史时间窗口`}>
-    <button type="button" disabled={!hasEarlier} onClick={() => setPage(value => value + 1)}>← 较早</button>
+    <button type="button" aria-label="查看较早时间段" disabled={!hasEarlier} onClick={() => setPage(value => value + 1)}>←</button>
     <span>{label}<small>第 {formatExactCount(page + 1)} 段 · 共 {formatExactCount(total)} 个历史绘图点</small></span>
-    <button type="button" disabled={page === 0} onClick={() => setPage(value => Math.max(0, value - 1))}>较晚 →</button>
+    <button type="button" aria-label="查看较晚时间段" disabled={page === 0} onClick={() => setPage(value => Math.max(0, value - 1))}>→</button>
     {page > 0 && <button type="button" onClick={() => setPage(0)}>最新</button>}
   </div> : undefined;
   return <ExecutionLineChart title={title} subtitle={subtitle} points={points}
