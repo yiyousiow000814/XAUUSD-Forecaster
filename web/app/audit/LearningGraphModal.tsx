@@ -143,7 +143,7 @@ export default function LearningGraphModal({
   };
   useLayoutEffect(() => {
     if (pendingScrollTop.current === null) return;
-    settleResponsiveScroll(options => bodyRef.current?.scrollTo(options), pendingScrollTop.current!);
+    settleResponsiveScroll(options => bodyRef.current?.scrollTo(options), () => bodyRef.current?.scrollTop ?? 0, pendingScrollTop.current!);
     pendingScrollTop.current = null;
   }, [tab]);
   useEffect(() => { onCloseRef.current = onClose; }, [onClose]);

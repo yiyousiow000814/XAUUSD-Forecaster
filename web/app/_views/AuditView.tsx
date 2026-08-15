@@ -1007,7 +1007,7 @@ export default function AuditView() {
 
   useLayoutEffect(() => {
     if (pendingScrollTop.current === null) return;
-    settleResponsiveScroll(options => window.scrollTo(options), pendingScrollTop.current!);
+    settleResponsiveScroll(options => window.scrollTo(options), () => window.scrollY, pendingScrollTop.current!);
     pendingScrollTop.current = null;
   }, [view]);
 
