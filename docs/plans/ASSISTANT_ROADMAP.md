@@ -131,10 +131,11 @@ runs the capacity-routed Agent, emits public progress, and publishes the
 validated final. The event layer is presentation transport and does not replace
 canonical messages. Merged work also includes the responsive authenticated browser
 workbench, active-turn recovery, finite replay consumer, and validated
-`assistant.content.v1` rendering. This bounded scope adds long-term historical
-memory with canonical, owner-scoped, point-in-time lexical retrieval and
-explicit incomplete-index receipts. Advanced evidence validation is the next
-independent scope; production activation remains a later handover.
+`assistant.content.v1` rendering, long-term historical memory, and
+cross-runtime `assistant.evidence.v1` claim-to-citation coverage. The evidence
+receipt proves exact packet membership and complete structural citation
+coverage without claiming semantic entailment. Production migration and worker
+activation are the remaining handover scope.
 
 ## Per-PR completion rule
 

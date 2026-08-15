@@ -1480,7 +1480,7 @@ def test_news_question_sync_uses_shared_retrieval_and_skips_model_without_eviden
                 "retrieval_query": "美联储 利率",
                 "retrieval_cutoff": "2026-08-15T10:00:00.000Z",
                 "lease_token": "lease-1",
-                "prompt_version": "news-qa-v2",
+                "prompt_version": "news-qa-v3",
             }}
         return {"item": None}
 
@@ -1502,6 +1502,7 @@ def test_news_question_sync_uses_shared_retrieval_and_skips_model_without_eviden
     assert posted[0]["action"] == "COMPLETE"
     assert posted[0]["answer_status"] == "INSUFFICIENT_EVIDENCE"
     assert posted[0]["evidence_ids"] == []
+    assert posted[0]["evidence_validation"]["mode"] == "INSUFFICIENT_EVIDENCE"
     assert "poison recent slice" not in json.dumps(posted, ensure_ascii=False)
 
 
@@ -1535,11 +1536,23 @@ def test_news_question_sync_uses_interactive_accounting_and_persists_retrieval(
     answer_calls: list[dict] = []
 
     def answer(question, rows, **kwargs):
+        from xauusd_forecaster.assistant_evidence import (
+            validate_assistant_evidence_claims,
+        )
+
         answer_calls.append({"question": question, "rows": rows, **kwargs})
+        validation = validate_assistant_evidence_claims(
+            {"claims": [{
+                "text": "有证据的回答",
+                "evidence_ids": ["a" * 64],
+            }]},
+            ["a" * 64],
+        )
         return {
-            "answer_status": "ANSWERED", "answer": "有证据的回答",
+            "answer_status": "ANSWERED", "answer": validation.answer,
             "evidence_ids": ["a" * 64], "model_version": "gemma-test",
-            "prompt_version": "news-qa-v2",
+            "prompt_version": "news-qa-v3",
+            "evidence_validation": validation.receipt,
         }
 
     monkeypatch.setattr(forward_ledger, "ForwardLedger", FakeLedger)
@@ -1570,7 +1583,7 @@ def test_news_question_sync_uses_interactive_accounting_and_persists_retrieval(
                 "retrieval_query": "美联储 利率",
                 "retrieval_cutoff": "2026-08-15T10:00:00.000Z",
                 "lease_token": "lease-1",
-                "prompt_version": "news-qa-v2",
+                "prompt_version": "news-qa-v3",
             }}
         return {"item": None}
 
@@ -1592,7 +1605,7 @@ def test_news_question_sync_uses_interactive_accounting_and_persists_retrieval(
     assert answer_calls[0]["rows"][0]["evidence_id"] == "a" * 64
     assert answer_calls[0]["api_key"] == "secret-key"
     assert answer_calls[0]["request_accountant"] == "accountant"
-    assert answer_calls[0]["prompt_version"] == "news-qa-v2"
+    assert answer_calls[0]["prompt_version"] == "news-qa-v3"
     assert answer_calls[0]["model"] == "gemma-4-31b-it"
     assert answer_calls[0]["thinking_level"] == "high"
     assert posted[0]["retrieval"]["canonical_evidence_ids"] == ["a" * 64]
@@ -1601,6 +1614,7 @@ def test_news_question_sync_uses_interactive_accounting_and_persists_retrieval(
     assert posted[0]["routing"]["model_requirement"] == "LARGE_REQUIRED"
     assert posted[0]["routing"]["selected_model_id"] == "gemma-4-31b-it"
     assert posted[0]["routing"]["capacity"]["service_priority"] == "INTERACTIVE"
+    assert posted[0]["evidence_validation"]["mode"] == "CITATION_COVERAGE"
     assert ledger_state["closed"] is True
 
 
@@ -1636,7 +1650,7 @@ def test_news_question_sync_reports_capacity_failure_without_aborting_queue(
             "retrieval_query": "黄金",
             "retrieval_cutoff": "2026-08-15T10:00:00.000Z",
             "lease_token": "lease-1",
-            "prompt_version": "news-qa-v2",
+            "prompt_version": "news-qa-v3",
         }} if claim_calls == 1 else {"item": None}
 
     posted: list[dict] = []

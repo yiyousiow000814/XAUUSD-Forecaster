@@ -4,13 +4,17 @@ import {
   provisionalAssistantTitle,
 } from "./assistant-conversations";
 import { buildAssistantTextContentDocument } from "./assistant-content";
+import {
+  type AssistantEvidenceReceipt,
+  parseAssistantEvidenceReceipt,
+} from "./assistant-evidence";
 import { scheduleAssistantCompaction } from "./assistant-memory";
 import {
   type AssistantRoutingProvenance,
   parseAssistantRoutingProvenance,
 } from "./assistant-routing";
 
-export const NEWS_QA_PROMPT_VERSION = "news-qa-v2";
+export const NEWS_QA_PROMPT_VERSION = "news-qa-v3";
 export const INSUFFICIENT_EVIDENCE_ANSWER = "当前已收录且可追溯的新闻证据不足，无法可靠回答这个问题。";
 
 export const NEWS_QUESTION_LIMITS = {
@@ -43,6 +47,7 @@ export type PublicNewsQuestion = {
   answer: string | null;
   answer_status: "ANSWERED" | "INSUFFICIENT_EVIDENCE" | null;
   evidence_ids: string[];
+  evidence_validation: AssistantEvidenceReceipt | null;
   answered_at: string | null;
   model_version: string | null;
   prompt_version: string;
@@ -163,6 +168,7 @@ const parsedJson = (value: unknown, fallback: unknown) => {
 export function publicNewsQuestion(row: Record<string, unknown>): PublicNewsQuestion {
   const evidence = parsedJson(row.evidence_json, []);
   const retrieval = parsedJson(row.retrieval_json, null);
+  const evidenceValidation = parsedJson(row.evidence_validation_json, null);
   return {
     id: String(row.id),
     conversation_id: typeof row.conversation_id === "string" ? row.conversation_id : null,
@@ -177,6 +183,10 @@ export function publicNewsQuestion(row: Record<string, unknown>): PublicNewsQues
       ? row.answer_status
       : null,
     evidence_ids: Array.isArray(evidence) ? evidence.map(String) : [],
+    evidence_validation: evidenceValidation && typeof evidenceValidation === "object"
+      && !Array.isArray(evidenceValidation)
+      ? evidenceValidation as AssistantEvidenceReceipt
+      : null,
     answered_at: typeof row.answered_at === "string" ? row.answered_at : null,
     model_version: typeof row.model_version === "string" ? row.model_version : null,
     prompt_version: String(row.prompt_version ?? NEWS_QA_PROMPT_VERSION),
@@ -468,11 +478,14 @@ export async function completeNewsQuestion(
 
   const provenance = completionProvenance(input.retrieval, leased);
   const answerStatus = String(input.answer_status ?? "");
-  const requestedEvidence = Array.isArray(input.evidence_ids)
-    ? [...new Set(input.evidence_ids.map(String))]
-    : [];
+  if (
+    !Array.isArray(input.evidence_ids)
+    || input.evidence_ids.some(value => typeof value !== "string")
+  ) throw new NewsQuestionInputError("UNVERIFIED_EVIDENCE", "回答证据格式无效");
+  const requestedEvidence = input.evidence_ids as string[];
   if (
     requestedEvidence.length > 12
+    || new Set(requestedEvidence).size !== requestedEvidence.length
     || requestedEvidence.some(idValue => !provenance.canonical_evidence_ids.includes(idValue))
   ) throw new NewsQuestionInputError("UNVERIFIED_EVIDENCE", "回答引用了检索结果之外的证据");
 
@@ -480,6 +493,7 @@ export async function completeNewsQuestion(
   let evidence: string[];
   let modelVersion: string | null;
   let routing: AssistantRoutingProvenance | null;
+  let evidenceValidation: AssistantEvidenceReceipt;
   if (answerStatus === "INSUFFICIENT_EVIDENCE") {
     if (
       provenance.canonical_evidence_ids.length !== 0
@@ -492,9 +506,24 @@ export async function completeNewsQuestion(
     evidence = [];
     modelVersion = null;
     routing = null;
+    try {
+      evidenceValidation = await parseAssistantEvidenceReceipt(
+        input.evidence_validation,
+        {
+          answer,
+          availableEvidenceIds: [],
+          mode: "INSUFFICIENT_EVIDENCE",
+          maxCitedEvidence: 12,
+        },
+      );
+    } catch {
+      throw new NewsQuestionInputError(
+        "INVALID_EVIDENCE_VALIDATION", "证据不足验证回执无效",
+      );
+    }
   } else if (answerStatus === "ANSWERED") {
     answer = String(input.answer ?? "")
-      .normalize("NFKC")
+      .normalize("NFC")
       .replace(/\r\n?/gu, "\n")
       .trim();
     modelVersion = String(input.model_version ?? "").trim();
@@ -510,6 +539,26 @@ export async function completeNewsQuestion(
       throw new NewsQuestionInputError("INVALID_ROUTING_PROVENANCE", "模型路由来源无效");
     }
     evidence = requestedEvidence;
+    try {
+      evidenceValidation = await parseAssistantEvidenceReceipt(
+        input.evidence_validation,
+        {
+          answer,
+          availableEvidenceIds: provenance.canonical_evidence_ids,
+          mode: "CITATION_COVERAGE",
+          maxCitedEvidence: 12,
+        },
+      );
+    } catch {
+      throw new NewsQuestionInputError(
+        "INVALID_EVIDENCE_VALIDATION", "回答证据验证回执无效",
+      );
+    }
+    if (JSON.stringify(evidenceValidation.cited_evidence_ids) !== JSON.stringify(evidence)) {
+      throw new NewsQuestionInputError(
+        "UNVERIFIED_EVIDENCE", "回答证据与验证回执不一致",
+      );
+    }
   } else {
     throw new NewsQuestionInputError("INVALID_ANSWER_STATUS", "回答状态无效");
   }
@@ -536,6 +585,7 @@ export async function completeNewsQuestion(
     model_version: modelVersion,
     prompt_version: leased.prompt_version,
     routing,
+    evidence_validation: evidenceValidation,
   });
   const results = await binding.batch<NewsQuestionRow>([
     binding.prepare(
@@ -555,7 +605,7 @@ export async function completeNewsQuestion(
     ),
     binding.prepare(
       `UPDATE news_questions SET status='ANSWERED',answer_status=?,answer=?,
-       evidence_json=?,retrieval_json=?,answered_at=?,model_version=?,
+       evidence_json=?,retrieval_json=?,evidence_validation_json=?,answered_at=?,model_version=?,
        assistant_message_id=?,failure_code=NULL,
        lease_owner=NULL,lease_token=NULL,processing_started_at=NULL,lease_expires_at=NULL,
        attempt_history_json=${history("ANSWERED")}
@@ -563,7 +613,7 @@ export async function completeNewsQuestion(
        RETURNING *`,
     ).bind(
       answerStatus, answer, JSON.stringify(evidence), JSON.stringify(provenance),
-      timestamp, modelVersion, assistantMessageId,
+      JSON.stringify(evidenceValidation), timestamp, modelVersion, assistantMessageId,
       timestamp, id, leaseToken, timestamp,
     ),
     binding.prepare(

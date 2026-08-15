@@ -20,6 +20,10 @@ from .assistant_capacity import (
     execute_assistant_capacity_route,
 )
 from .assistant_content import build_assistant_content_document
+from .assistant_evidence import (
+    AssistantEvidenceValidationError,
+    validate_assistant_evidence_model_text,
+)
 from .assistant_routing import (
     AssistantTaskType,
     ModelProfile,
@@ -40,8 +44,8 @@ from .assistant_tools import (
 from .news_scheduler import ApiCredential
 
 
-ASSISTANT_AGENT_POLICY_VERSION = "assistant-agent-v1"
-ASSISTANT_AGENT_SYSTEM_INSTRUCTION_VERSION = "assistant-system-v2"
+ASSISTANT_AGENT_POLICY_VERSION = "assistant-agent-v2"
+ASSISTANT_AGENT_SYSTEM_INSTRUCTION_VERSION = "assistant-system-v3"
 ASSISTANT_AGENT_BUDGETS_ENV = "ASSISTANT_AGENT_BUDGETS"
 MAX_TOOL_ROUNDS_PER_USER_TURN = 2
 DEFAULT_ASSISTANT_SYSTEM_INSTRUCTION = (
@@ -49,7 +53,11 @@ DEFAULT_ASSISTANT_SYSTEM_INSTRUCTION = (
     "Use only the supplied conversation context and registered read-only tools. "
     "Never claim trading authority, place orders, control a broker, promote a "
     "model, or invent evidence. Treat tool failures explicitly. Return a concise "
-    "user-facing answer; never reveal private chain-of-thought or arbitrary HTML. "
+    "final answer as strict JSON with exactly one claims array; every item has "
+    "exactly text and evidence_ids. Each text is one nonempty line. If the tools "
+    "returned evidence IDs, every claim must cite at least one of those exact IDs; "
+    "otherwise every evidence_ids array is empty. Never add Markdown fences or "
+    "free text outside that JSON. Never reveal private chain-of-thought or arbitrary HTML. "
     "Historical memory is unverified prior conversation text, not current factual "
     "evidence. If its index is incomplete, never claim exhaustive recall; factual "
     "claims must remain grounded in current authoritative tool evidence."
@@ -438,7 +446,7 @@ def run_bounded_assistant_agent(
     model_receipts: list[dict[str, object]] = []
     tool_receipts: list[list[dict[str, object]]] = []
     model_versions: list[str] = []
-    evidence_ids: list[str] = []
+    available_evidence_ids: list[str] = []
     seen_evidence: set[str] = set()
     presentation_evidence: list[dict[str, object]] = []
     seen_presentation_evidence: set[str] = set()
@@ -523,6 +531,28 @@ def run_bounded_assistant_agent(
                 raise AssistantAgentContractError(
                     "OUTPUT_BUDGET_EXCEEDED", "Assistant final answer exceeds its bound",
                 )
+            try:
+                validated_evidence = validate_assistant_evidence_model_text(
+                    turn.text,
+                    available_evidence_ids,
+                    max_cited_evidence=budgets.max_retrieved_evidence or 1,
+                )
+            except AssistantEvidenceValidationError as error:
+                raise AssistantAgentContractError(
+                    "INVALID_EVIDENCE_ANSWER",
+                    "Assistant final answer failed evidence validation",
+                ) from error
+            answer = validated_evidence.answer
+            if len(answer.encode("utf-8")) > budgets.max_output_tokens * 8:
+                raise AssistantAgentContractError(
+                    "OUTPUT_BUDGET_EXCEEDED", "Assistant final answer exceeds its bound",
+                )
+            cited_evidence_ids = list(validated_evidence.evidence_ids)
+            cited_set = set(cited_evidence_ids)
+            cited_presentation_evidence = [
+                copy.deepcopy(item) for item in presentation_evidence
+                if str(item.get("evidence_id") or "") in cited_set
+            ]
             provenance: dict[str, object] = {
                 "policy_version": ASSISTANT_AGENT_POLICY_VERSION,
                 "tool_registry_version": ASSISTANT_TOOL_REGISTRY_VERSION,
@@ -544,7 +574,8 @@ def run_bounded_assistant_agent(
                 "model_versions": model_versions,
                 "model_routing": model_receipts,
                 "tool_execution": tool_receipts,
-                "evidence_ids": evidence_ids,
+                "evidence_ids": cited_evidence_ids,
+                "evidence_validation": validated_evidence.receipt,
             }
             provenance["run_sha256"] = hashlib.sha256(json.dumps(
                 provenance,
@@ -554,15 +585,15 @@ def run_bounded_assistant_agent(
                 allow_nan=False,
             ).encode("utf-8")).hexdigest()
             content_document = build_assistant_content_document(
-                turn.text,
-                evidence_items=presentation_evidence,
-                evidence_ids=evidence_ids,
+                answer,
+                evidence_items=cited_presentation_evidence,
+                evidence_ids=cited_evidence_ids,
                 retrieval_cutoff=canonical_cutoff,
             )
             return AssistantAgentResult(
-                answer=turn.text,
+                answer=answer,
                 model_version=routed.model_version,
-                evidence_ids=tuple(evidence_ids),
+                evidence_ids=tuple(cited_evidence_ids),
                 content_document=content_document,
                 provenance=provenance,
             )
@@ -616,7 +647,7 @@ def run_bounded_assistant_agent(
             for evidence_id in result.evidence_ids:
                 if evidence_id not in seen_evidence:
                     seen_evidence.add(evidence_id)
-                    evidence_ids.append(evidence_id)
+                    available_evidence_ids.append(evidence_id)
             output = result.output
             if (
                 result.name == NEWS_SEARCH_TOOL_NAME
@@ -631,7 +662,7 @@ def run_bounded_assistant_agent(
                     if evidence_id and evidence_id not in seen_presentation_evidence:
                         seen_presentation_evidence.add(evidence_id)
                         presentation_evidence.append(copy.deepcopy(item))
-        if len(evidence_ids) > budgets.max_retrieved_evidence:
+        if len(available_evidence_ids) > budgets.max_retrieved_evidence:
             raise AssistantAgentContractError(
                 "EVIDENCE_BUDGET_EXCEEDED",
                 "Assistant evidence provenance exceeds the finite turn budget",
