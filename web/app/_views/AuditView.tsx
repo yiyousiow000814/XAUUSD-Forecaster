@@ -217,7 +217,29 @@ type VersionGroup = {
 type EvaluationCadence = "EVERY_5M" | "FIXED_30M";
 type CadenceMetric = { oos_rows: number; distinct_days: number; cumulative_quote_return: number; profit_factor_quote_adjusted: number | null; coverage_rate: number | null; prediction_rows?: number; unscored_oos_rows?: number; overdue_oos_rows?: number; evaluation_status?: VersionEvaluationStatus };
 type DailyNewsBrief = { brief_date: string; revision_number: number; cutoff_at: string; generated_at: string; model_version: string; prompt_version: string; brief: { title: string; items: Array<{ headline: string; summary: string; evidence_ids: string[] }> } };
-type NewsSearchResponse = { items: News[]; total: number; page: number; page_size: number; query: string };
+type NewsSearchResponse = {
+  items: News[];
+  total: number;
+  page: number;
+  page_size: number;
+  query: string;
+  filters: {
+    published_from: string | null; published_to: string | null;
+    received_from: string | null; received_to: string | null;
+    evidence_id: string | null; source: string | null; category: string | null;
+  };
+  source_mode: "D1_ARCHIVE" | "READ_ONLY_D1_ARCHIVE" | "IMMUTABLE_PREVIEW_SNAPSHOT" | "NOT_QUERIED";
+  archive_complete: boolean | null;
+};
+
+const emptyNewsSearch = (): NewsSearchResponse => ({
+  items: [], total: 0, page: 1, page_size: 10, query: "",
+  filters: {
+    published_from: null, published_to: null, received_from: null, received_to: null,
+    evidence_id: null, source: null, category: null,
+  },
+  source_mode: "NOT_QUERIED", archive_complete: null,
+});
 
 type Payload = {
   preview_status_summary?: boolean;
@@ -740,7 +762,10 @@ export default function AuditView() {
   const [view, setView] = useState<"briefs" | "search" | "news" | "evidence" | "stories" | "decisions" | "league" | "coverage">(initialView);
   const [briefDate, setBriefDate] = useState<string | null>(null);
   const [searchInput, setSearchInput] = useState("");
-  const [searchResults, setSearchResults] = useState<NewsSearchResponse>({ items: [], total: 0, page: 1, page_size: 10, query: "" });
+  const [searchTimeField, setSearchTimeField] = useState<"published" | "received">("published");
+  const [searchDateFrom, setSearchDateFrom] = useState("");
+  const [searchDateTo, setSearchDateTo] = useState("");
+  const [searchResults, setSearchResults] = useState<NewsSearchResponse>(emptyNewsSearch);
   const [searchBusy, setSearchBusy] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [newsCategory, setNewsCategory] = useState("全部");
@@ -862,16 +887,27 @@ export default function AuditView() {
     window.history.replaceState(null, "", `/?room=audit&view=${next}`);
   };
 
-  const runNewsSearch = async (page = 1) => {
-    const query = searchInput.trim();
-    if (!query) {
-      setSearchResults({ items: [], total: 0, page: 1, page_size: 10, query: "" });
+  const runNewsSearch = async (page = 1, applied?: NewsSearchResponse) => {
+    const query = applied?.query ?? searchInput.trim();
+    const appliedFilters = applied?.filters;
+    if (!query && !searchDateFrom && !searchDateTo && !appliedFilters) {
+      setSearchResults(emptyNewsSearch());
       setSearchError(null);
       return;
     }
     setSearchBusy(true);
     try {
-      setSearchResults(await loadDashboardResource<NewsSearchResponse>(`/api/news-search?q=${encodeURIComponent(query)}&page=${page}&limit=10`, { force: true }));
+      const params = new URLSearchParams({ page: String(page), limit: "10" });
+      if (query) params.set("q", query);
+      if (appliedFilters) {
+        for (const [name, value] of Object.entries(appliedFilters)) {
+          if (value) params.set(name, value);
+        }
+      } else {
+        if (searchDateFrom) params.set(`${searchTimeField}_from`, searchDateFrom);
+        if (searchDateTo) params.set(`${searchTimeField}_to`, searchDateTo);
+      }
+      setSearchResults(await loadDashboardResource<NewsSearchResponse>(`/api/news-search?${params}`, { force: true }));
       setSearchError(null);
     } catch (reason) {
       setSearchError(reason instanceof Error ? reason.message : "新闻搜索暂不可用");
@@ -1092,11 +1128,21 @@ export default function AuditView() {
       })()}
 
       {view === "search" && <section className="news-search-desk">
-        <form onSubmit={event => { event.preventDefault(); void runNewsSearch(); }}><label htmlFor="news-search">搜索新闻</label><div><input id="news-search" value={searchInput} maxLength={80} onChange={event => setSearchInput(event.target.value)} placeholder="标题、来源或主题" /><button type="submit" disabled={searchBusy}>{searchBusy ? "搜索中" : "搜索"}</button></div></form>
+        <form onSubmit={event => { event.preventDefault(); void runNewsSearch(); }}>
+          <label htmlFor="news-search">搜索新闻</label>
+          <div className="search-query-row"><input id="news-search" value={searchInput} maxLength={80} onChange={event => setSearchInput(event.target.value)} placeholder="标题、来源或主题" /><button type="submit" disabled={searchBusy}>{searchBusy ? "搜索中" : "搜索"}</button></div>
+          <fieldset className="search-filter-grid">
+            <legend>可选日期范围</legend>
+            <label htmlFor="news-search-time-field">时间字段<select id="news-search-time-field" value={searchTimeField} onChange={event => setSearchTimeField(event.target.value as "published" | "received")}><option value="published">媒体发布</option><option value="received">系统收到</option></select></label>
+            <label htmlFor="news-search-from">从<input id="news-search-from" type="date" value={searchDateFrom} onChange={event => setSearchDateFrom(event.target.value)} /></label>
+            <label htmlFor="news-search-to">到<input id="news-search-to" type="date" value={searchDateTo} onChange={event => setSearchDateTo(event.target.value)} /></label>
+          </fieldset>
+        </form>
         {searchError && <p className="search-error" role="alert">{searchError}</p>}
-        {searchResults.query && <p className="search-count">“{searchResults.query}” 找到 <CountValue value={searchResults.total} format="exact" /> 条</p>}
-        <div className="search-results">{searchResults.items.map(row => <article key={`${row.source}-${row.source_item_id}-${row.revision_number}`}><time>{time(row.source_published_time ?? row.collector_first_seen_time)}</time><h3>{row.headline}</h3><p>{row.emerging_topic_zh || row.impact_reason_zh || row.source}</p><small>{row.source} · {row.category}</small></article>)}</div>
-        {searchResults.total > searchResults.page_size && <nav className="search-pages"><button type="button" disabled={searchResults.page <= 1 || searchBusy} onClick={() => void runNewsSearch(searchResults.page - 1)}>←</button><span>{formatExactCount(searchResults.page)} / {formatExactCount(Math.ceil(searchResults.total / searchResults.page_size))}</span><button type="button" disabled={searchResults.page >= Math.ceil(searchResults.total / searchResults.page_size) || searchBusy} onClick={() => void runNewsSearch(searchResults.page + 1)}>→</button></nav>}
+        {searchResults.source_mode !== "NOT_QUERIED" && <p className="search-count">{searchResults.query ? `“${searchResults.query}”` : "所选日期范围"} 找到 <CountValue value={searchResults.total} format="exact" /> 条 · {searchResults.source_mode === "IMMUTABLE_PREVIEW_SNAPSHOT" ? "Preview 构建快照（非完整档案）" : "当前新闻档案"}</p>}
+        <div className="search-results">{searchResults.items.map(row => <article key={row.detail_key}><time>{time(row.source_published_time ?? row.collector_first_seen_time)}</time><h3>{row.headline}</h3><p>{row.emerging_topic_zh || row.impact_reason_zh || row.source}</p><small>{row.source} · {row.category} · 证据 {row.detail_key.slice(0, 12)}…</small></article>)}</div>
+        {searchResults.source_mode !== "NOT_QUERIED" && searchResults.total === 0 && <p className="search-empty">没有符合条件的新闻证据。</p>}
+        {searchResults.total > searchResults.page_size && <nav className="search-pages" aria-label="搜索结果分页"><button type="button" aria-label="上一页搜索结果" disabled={searchResults.page <= 1 || searchBusy} onClick={() => void runNewsSearch(searchResults.page - 1, searchResults)}>←</button><span>{formatExactCount(searchResults.page)} / {formatExactCount(Math.ceil(searchResults.total / searchResults.page_size))}</span><button type="button" aria-label="下一页搜索结果" disabled={searchResults.page >= Math.ceil(searchResults.total / searchResults.page_size) || searchBusy} onClick={() => void runNewsSearch(searchResults.page + 1, searchResults)}>→</button></nav>}
       </section>}
       {view === "news" && <>
         <section className="annotation-queue" aria-label="新闻处理进度">

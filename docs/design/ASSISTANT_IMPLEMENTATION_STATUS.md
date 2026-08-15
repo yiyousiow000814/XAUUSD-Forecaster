@@ -2,9 +2,10 @@
 
 ## Snapshot scope
 
-This status was assessed on 2026-08-15 against `main` parent commit `4eb2187`
-(merged PR #102). This Architecture branch changes documentation only. Open PRs
-are proposals and do not count as implemented on `main`.
+This status is maintained as the Assistant architecture and its bounded
+implementation PRs land. PR #103 established the contracts, and PR #20 is now
+merged on `main`. The shared-retrieval row describes the post-merge state of
+PR #21; an unmerged branch does not alter the copy visible on `main`.
 
 Status values have precise meanings:
 
@@ -21,8 +22,8 @@ Status values have precise meanings:
 
 | Capability | Contract | Current status | Evidence and limitation |
 | --- | --- | --- | --- |
-| Daily Brief | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `NOT_IMPLEMENTED` | Exists only in open PR #20. |
-| Shared news retrieval | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `NOT_IMPLEMENTED` | Open PR #21 adds one route, not a shared Search/Q&A/tool service. |
+| Daily Brief | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | PR #20 is merged: complete point-in-time state fingerprinting, bounded candidates, durable debounce, capacity defer, append-only output, and evidence validation are covered. A Preview backed by an older public snapshot may still show the explicit empty state. |
+| Shared news retrieval | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | PR #21 provides one reusable D1/Preview service with bounded Chinese/multi-token queries, published/received ranges, metadata filters, stable evidence IDs, deterministic pagination, and family-level tests. Search is the first caller; Q&A adoption remains PR #22. |
 | Evidence-grounded Q&A | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `NOT_IMPLEMENTED` | Exists only in open PR #22. |
 | Conversation persistence | [State](../contracts/ASSISTANT_STATE.md) | `NOT_IMPLEMENTED` | No Forecaster-owned Conversation/Message store exists. |
 | Conversation title | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `NOT_IMPLEMENTED` | No provisional, AI, manual, or regeneration lifecycle exists. |
@@ -47,42 +48,37 @@ Status values have precise meanings:
 | Evidence provenance through compaction | [State](../contracts/ASSISTANT_STATE.md) | `PARTIAL` | News evidence has stable provenance, but no conversation/compaction path carries it. |
 | Assistant Preview isolation | [Security](../contracts/ASSISTANT_SECURITY.md) | `PARTIAL` | General Preview write rejection exists; Assistant routes and fixtures do not yet exist. |
 
-## Open PR stack audit
+## Historical stack remediation
 
-The only open pull requests at assessment time are:
+The old stack is being collapsed into `main` in dependency order rather than
+extended with more stacked work:
 
 ```text
-main
-  -> #20 feat/daily-news-brief
-       -> #21 feat/news-search
-            -> #22 feat/gemma-news-qa
+#103 Assistant Architecture -> main
+#20 Daily Brief             -> main
+#21 Shared Retrieval        -> this revision -> main
+#22 Q&A Foundation          -> refresh from main after #21
 ```
 
-Their latest GitHub checks were green when inspected, but passing current tests
-does not satisfy the broader architecture acceptance criteria below.
+### PR #20: Daily Brief remediation
 
-### PR #20: Daily Brief
+PR #20 was repaired and merged. It fingerprints the complete visible daily
+state before selecting at most 60 deterministic candidates. A persisted refresh
+record preserves the material-change settling window across restarts, and
+capacity or evidence failures defer or fail closed without inventing a brief.
 
-The branch adds an append-only brief, a metered Gemma request, UI output, and a
-`DEFERRED` capacity path. It is not merge-ready under this architecture because:
+### PR #21: Shared Retrieval remediation
 
-- source selection applies `ORDER BY collector_first_seen_time LIMIT 60` before
-  hashing, so a 61st or later eligible item cannot affect the fingerprint or
-  candidate set;
-- every changed limited subset can trigger regeneration; no durable material-
-  change/debounce policy exists; and
-- coverage does not prove full-state fingerprinting, deterministic later-item
-  selection, restart-safe debounce, or the complete capacity-defer family.
+This revision resolves the architecture gaps found in the old Search branch:
 
-### PR #21: News Search
-
-The branch adds bounded D1 search, deterministic ordering, pagination, escaped
-LIKE tokens, UI, and a Preview snapshot fallback. It is not merge-ready because:
-
-- query logic is embedded in one web route instead of a reusable retrieval
-  service shared with Q&A and tools;
-- published/received date-range filtering is absent; and
-- the retrieval contract and its family-level tests do not yet exist.
+- query parsing, SQL construction, in-memory Preview matching, ordering, and
+  provenance live in one reusable service rather than the route;
+- both published-time and received-time ranges are supported alongside source,
+  category, and evidence-ID filters;
+- `%`, `_`, backslash, Chinese, multi-token, empty, bounded-page, D1 failure,
+  and Preview-fallback behavior share one contract suite; and
+- the UI exposes date filtering and labels an incomplete Preview build snapshot
+  rather than presenting it as the complete archive.
 
 ### PR #22: News Q&A
 
@@ -103,5 +99,8 @@ because:
 ## Update rule
 
 Every implementation PR updates this matrix only for behavior merged to
-`main`. A future target is never promoted to `MVP` or `IMPLEMENTED` merely
-because a branch, schema draft, test stub, or pull-request description exists.
+`main`. The implementation PR carrying a row update may describe its post-merge
+state only when the same diff contains the working behavior and its local, CI,
+and required Preview evidence; merge is the final publication gate. A future
+target is never promoted merely because a schema draft, test stub, or pull-
+request description exists.
