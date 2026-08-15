@@ -7,3 +7,17 @@ build/
 *.egg-info/
 ctrader/**/bin/
 ctrader/**/obj/
+
+# Local credentials and provider configuration
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json

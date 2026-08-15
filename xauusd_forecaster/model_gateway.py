@@ -6,6 +6,7 @@ import hashlib
 import json
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -196,8 +197,17 @@ class GeminiModelGateway:
         *,
         timeout: float,
     ) -> dict[str, object]:
+        provider_methods = {
+            "countTokens": "countTokens",
+            "generateContent": "generateContent",
+        }
+        provider_method = provider_methods.get(method)
+        if provider_method is None:
+            raise ValueError(f"unsupported model provider method: {method}")
+        encoded_model = urllib.parse.quote(model, safe="")
         request = urllib.request.Request(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:{method}",
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{encoded_model}:{provider_method}",
             data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
             headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
             method="POST",

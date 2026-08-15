@@ -93,6 +93,33 @@ def test_rejects_forbidden_workflow_architecture(
     assert expected in boundaries(tmp_path)
 
 
+def test_rejects_mutable_action_tags_and_accepts_immutable_refs(tmp_path: Path) -> None:
+    write(
+        tmp_path,
+        ".github/workflows/unsafe.yml",
+        """jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+""",
+    )
+    assert "GitHub Action must be pinned to a full commit SHA" in boundaries(tmp_path)
+
+    write(
+        tmp_path,
+        ".github/workflows/unsafe.yml",
+        """jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/local
+""",
+    )
+    assert check_repository(tmp_path) == []
+
+
 @pytest.mark.parametrize(
     "source",
     [

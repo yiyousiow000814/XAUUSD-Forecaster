@@ -114,6 +114,13 @@ spec.loader.exec_module(module)
     assert result.returncode == 0, result.stderr
 
 
+def test_preview_reader_rejects_a_noncanonical_source() -> None:
+    module = _preview_module()
+
+    with pytest.raises(ValueError, match="canonical production origin"):
+        module._read_json("http://127.0.0.1:8765", "/api/status")
+
+
 def test_preview_does_not_call_late_aggregated_news_expired() -> None:
     module = _preview_module()
     news_index = {"items": [{

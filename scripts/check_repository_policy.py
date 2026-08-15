@@ -45,6 +45,11 @@ YAML_WRITE_ALL = re.compile(
     r"(?:write-all|'write-all'|\"write-all\")(?:\s*[,}]|\s*$)",
     re.IGNORECASE,
 )
+YAML_ACTION_USES = re.compile(
+    r"^\s*(?:-\s*)?uses:\s*['\"]?(?P<target>[^'\"#\s]+)",
+    re.IGNORECASE,
+)
+IMMUTABLE_ACTION_REF = re.compile(r"^[^@\s]+@[0-9a-f]{40}$", re.IGNORECASE)
 GITHUB_DEPLOYMENT_API_URL = re.compile(
     r"https?://api\.github\.com/repos/[^/\s'\"`]+/[^/\s'\"`]+/"
     r"(?:deployments|environments)(?:[/\s'\"`]|$)",
@@ -176,6 +181,21 @@ def check_repository(root: Path) -> list[PolicyViolation]:
         text = path.read_text(encoding="utf-8", errors="replace")
         if relative.parts[:2] == (".github", "workflows"):
             for number, line in _active_yaml_lines(path, text):
+                action = YAML_ACTION_USES.match(line)
+                if action:
+                    target = action.group("target")
+                    if (
+                        not target.startswith("./")
+                        and not target.startswith("docker://")
+                        and not IMMUTABLE_ACTION_REF.fullmatch(target)
+                    ):
+                        violations.append(
+                            PolicyViolation(
+                                relative,
+                                number,
+                                "GitHub Action must be pinned to a full commit SHA",
+                            )
+                        )
                 if YAML_ENVIRONMENT_KEY.search(line):
                     violations.append(
                         PolicyViolation(relative, number, "GitHub Actions environment is forbidden")
