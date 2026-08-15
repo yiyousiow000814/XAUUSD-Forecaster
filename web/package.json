@@ -10,7 +10,7 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "npm run build && node --import ./tests/register-cloudflare-worker-loader.mjs --test tests/rendered-html.test.mjs",
+    "test": "npm run build && node --import ./tests/register-cloudflare-worker-loader.mjs --test tests/rendered-html.test.mjs tests/news-retrieval.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
     "cf:types": "wrangler types worker-configuration.d.ts",

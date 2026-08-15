@@ -1427,3 +1427,23 @@ test("reflows news evidence into readable mobile cards", () => {
   assert.match(css, /\.evidence-status-copy \{ display:none!important/);
   assert.match(css, /\.evidence-model-list \{ display:none!important/);
 });
+
+test("keeps shared news retrieval bounded and phone readable", () => {
+  const view = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  const route = readFileSync(new URL("../app/api/news-search/route.ts", import.meta.url), "utf8");
+  const retrieval = readFileSync(new URL("../app/api/_shared/news-retrieval.ts", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(view, /view === "search"/);
+  assert.match(view, /placeholder="标题、来源或主题"/);
+  assert.match(view, /id="news-search-from" type="date"/);
+  assert.match(view, /id="news-search-to" type="date"/);
+  assert.match(route, /parseNewsRetrievalRequest/);
+  assert.match(route, /retrieveNews/);
+  assert.doesNotMatch(route, /SELECT .* FROM news_index/);
+  assert.match(retrieval, /MAX_QUERY_CHARACTERS = 80/);
+  assert.match(retrieval, /MAX_PAGE_SIZE = 20/);
+  assert.match(retrieval, /LIMIT \? OFFSET \?/);
+  assert.match(retrieval, /IMMUTABLE_PREVIEW_SNAPSHOT/);
+  assert.match(css, /\.search-pages button \{[^}]*min-width:44px;[^}]*min-height:44px/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.search-filter-grid \{ grid-template-columns:1fr; \}/);
+});
