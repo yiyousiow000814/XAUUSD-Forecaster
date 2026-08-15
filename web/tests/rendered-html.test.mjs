@@ -1640,3 +1640,37 @@ test("renders a recoverable responsive Assistant workbench without unsafe HTML",
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-open-rail \{ display:block/);
   assert.match(css, /\.assistant-message>p \{[^}]*overflow-wrap:anywhere; white-space:pre-wrap/);
 });
+
+test("renders only validated Assistant content blocks with phone-owned overflow", () => {
+  const renderer = readFileSync(
+    new URL("../app/_components/AssistantContentBlocks.tsx", import.meta.url), "utf8",
+  );
+  const transcript = readFileSync(
+    new URL("../app/_components/AssistantTranscript.tsx", import.meta.url), "utf8",
+  );
+  const protocol = readFileSync(
+    new URL("../app/api/_shared/assistant-content.ts", import.meta.url), "utf8",
+  );
+  const migration = readFileSync(
+    new URL("../drizzle/0014_assistant_structured_content.sql", import.meta.url), "utf8",
+  );
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+
+  assert.match(protocol, /assistant\.content\.v1/);
+  for (const blockType of ["markdown", "news_card", "table", "metric", "callout"]) {
+    assert.match(protocol, new RegExp(`"${blockType}"`));
+    assert.match(renderer, new RegExp(`block\\.type === "${blockType}"`));
+  }
+  assert.match(transcript, /<AssistantContentBlocks document=\{message\.content_document\}/);
+  assert.doesNotMatch(renderer, /dangerouslySetInnerHTML|innerHTML|srcDoc/);
+  assert.match(renderer, /rel="noopener noreferrer"/);
+  assert.match(renderer, /scope="col"/);
+  assert.match(migration, /content_document_json/);
+  assert.match(migration, /assistant_messages_structured_content_contract/);
+  assert.match(css, /\.assistant-content-table>div \{[^}]*max-width:100%; overflow-x:auto/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-content-blocks \{ grid-template-columns:minmax\(0,1fr\)/);
+  assert.match(css, /\.preview-banner\{[^}]*z-index:1000/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-workbench \{[^}]*z-index:auto/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-conversation-rail \{[^}]*z-index:1020/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-rail-scrim \{[^}]*z-index:1010/);
+});

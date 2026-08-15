@@ -130,8 +130,9 @@ chat turn/event runtime, and the Windows producer that builds bounded context,
 runs the capacity-routed Agent, emits public progress, and publishes the
 validated final. The event layer is presentation transport and does not replace
 canonical messages. It now also includes the responsive authenticated browser
-workbench, active-turn recovery, and finite replay consumer. The next independent
-scope is structured rich content; long-term historical memory and production
+workbench, active-turn recovery, finite replay consumer, and validated
+`assistant.content.v1` rendering in this branch. The next independent scope is
+long-term historical memory; advanced evidence validation and production
 activation remain later bounded scopes.
 
 ## Per-PR completion rule

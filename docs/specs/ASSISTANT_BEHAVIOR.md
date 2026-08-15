@@ -185,9 +185,10 @@ reasoning text. SSE uses the numeric sequence as `Last-Event-ID`/resume state
 and includes one complete JSON envelope in each `data` record.
 
 `content.block` carries only a bounded block identity, version, type, and
-content hash in v1. The separately versioned rich-content contract owns the
-actual validated block data; the event transport never treats arbitrary model
-HTML as renderable content.
+content hash in v1. During completion the server validates the separately
+versioned rich-content document, persists it with the canonical message, and
+appends one reference event per block in the same transaction. The event
+transport never treats arbitrary model HTML as renderable content.
 
 The event protocol is independently versioned from message storage. Streaming
 can therefore be added or replaced without migrating canonical conversation
@@ -234,8 +235,9 @@ drawer and all primary controls remain reachable without horizontal overflow.
 
 ## Structured content protocol
 
-Assistant output is a validated `assistant.content.v1` document containing a
-bounded sequence of typed blocks. Initial block types are:
+Operational Assistant output is a validated `assistant.content.v1` document
+containing at most 12 typed blocks and 65,536 canonical JSON bytes. Initial
+block types are:
 
 - `markdown`;
 - `news_card`;
@@ -249,8 +251,23 @@ Future compatible types may include `price_chart`, `timeline`,
 
 The frontend owns rendering, responsive layout, link behavior, and
 accessibility. A model MUST NOT emit arbitrary HTML, scripts, styles, event
-handlers, or unvalidated component names. Unknown block types fail validation
-or degrade to safe plain text; they are never injected as HTML.
+handlers, or unvalidated component names. Unknown block types fail validation;
+pre-migration messages without a document continue to render their canonical
+plain text. Neither path injects HTML.
+
+Every block has an immutable ID, `v1` block version, typed data, and SHA-256 of
+its canonical core. The document has an independent SHA-256 over its protocol
+and ordered blocks. IDs are unique, hashes are verified by the web persistence
+boundary, and the first block is markdown whose text exactly equals the
+canonical message `content`. Runtime worker output that is absent, malformed,
+over budget, hash-inconsistent, or detached from the answer fails closed before
+the message is inserted.
+
+The Windows worker builds the document deterministically from the final answer
+and authoritative compact tool packets. It may add evidence metrics, news
+cards, a received-time table, and the fixed decision-support boundary. The
+model does not choose arbitrary frontend components. News-card evidence IDs
+must be a unique subset of the exact successful tool provenance for the turn.
 
 ### News cards
 
@@ -272,12 +289,19 @@ source_url
 The evidence ID, publication time, receipt time, and source link remain
 available in the expanded view. The card does not imply that a publisher,
 headline, and independent event are interchangeable.
+Only public HTTPS links without embedded credentials are renderable. Missing or
+unsafe links remain unavailable instead of becoming executable navigation.
 
 ### Tables
 
 Tables contain structured columns and bounded rows. The backend validates cell
 types and limits; the frontend decides desktop and mobile rendering. Models do
 not generate `<table>` markup.
+
+The current renderer uses semantic JSX for all five v1 types. Table overflow is
+contained inside a keyboard-focusable region on narrow screens; news-card
+details use a native disclosure; canonical markdown is rendered as text rather
+than interpreted as HTML.
 
 ## Failure behavior
 

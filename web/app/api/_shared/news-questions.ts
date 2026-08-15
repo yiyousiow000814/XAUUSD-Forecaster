@@ -3,6 +3,7 @@ import {
   automaticAssistantTitleStatements,
   provisionalAssistantTitle,
 } from "./assistant-conversations";
+import { buildAssistantTextContentDocument } from "./assistant-content";
 import { scheduleAssistantCompaction } from "./assistant-memory";
 import {
   type AssistantRoutingProvenance,
@@ -492,7 +493,10 @@ export async function completeNewsQuestion(
     modelVersion = null;
     routing = null;
   } else if (answerStatus === "ANSWERED") {
-    answer = String(input.answer ?? "").normalize("NFKC").trim();
+    answer = String(input.answer ?? "")
+      .normalize("NFKC")
+      .replace(/\r\n?/gu, "\n")
+      .trim();
     modelVersion = String(input.model_version ?? "").trim();
     if (!answer || answer.length > 4_000 || !modelVersion || modelVersion.length > 120) {
       throw new NewsQuestionInputError("INVALID_MODEL_ANSWER", "模型回答无效");
@@ -514,6 +518,10 @@ export async function completeNewsQuestion(
     throw new NewsQuestionInputError("MISSING_CONVERSATION_STATE", "问题缺少规范会话状态");
   }
   const assistantMessageId = crypto.randomUUID();
+  const contentDocument = await buildAssistantTextContentDocument(answer, {
+    evidenceIds: evidence,
+    insufficientEvidence: answerStatus === "INSUFFICIENT_EVIDENCE",
+  });
   const automaticTitle = automaticAssistantTitleStatements(binding, {
     conversationId: leased.conversation_id,
     assistantMessageId,
@@ -532,14 +540,17 @@ export async function completeNewsQuestion(
   const results = await binding.batch<NewsQuestionRow>([
     binding.prepare(
       `INSERT INTO assistant_messages (
-       id,conversation_id,role,content,created_at,provenance_json,source_kind,source_id
+       id,conversation_id,role,content,created_at,provenance_json,source_kind,source_id,
+       content_protocol,content_document_json,content_document_sha256
        )
-       SELECT ?,conversation_id,'ASSISTANT',?,?,?,'NEWS_QA',id
+       SELECT ?,conversation_id,'ASSISTANT',?,?,?,'NEWS_QA',id,?,?,?
        FROM news_questions
        WHERE id=? AND status='PROCESSING' AND lease_token=? AND lease_expires_at>?
        ON CONFLICT DO NOTHING RETURNING *`,
     ).bind(
       assistantMessageId, answer, timestamp, assistantProvenance,
+      contentDocument.protocol, JSON.stringify(contentDocument),
+      contentDocument.document_sha256,
       id, leaseToken, timestamp,
     ),
     binding.prepare(

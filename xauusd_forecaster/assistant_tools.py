@@ -777,6 +777,10 @@ NEWS_EVIDENCE_ITEM_SCHEMA: dict[str, object] = {
         "summary": {"type": "string", "maxLength": 600},
         "category": {"type": "string", "maxLength": 80},
         "impact": {"type": "string", "maxLength": 600},
+        "source_url": {
+            "type": "string", "minLength": 1, "maxLength": 2_048,
+            "pattern": "^https://[^\\s]+$",
+        },
     },
 }
 
