@@ -14,7 +14,7 @@ import threading
 import time
 import urllib.parse
 from types import SimpleNamespace
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1120,6 +1120,14 @@ def _recent_market_chart(
     }
 
 
+def _frozen_event_article_identity(row: dict) -> tuple[str, ...]:
+    """Identify one frozen article across event-identity contract versions."""
+    return tuple(str(row.get(field) or "").strip() for field in (
+        "canonical_source", "canonical_headline", "source_published_time",
+        "collector_first_seen_time",
+    ))
+
+
 def _news_evidence_display_rows(
     connection: sqlite3.Connection, all_news_evidence: list[dict],
 ) -> list[dict]:
@@ -1130,6 +1138,13 @@ def _news_evidence_display_rows(
     same headline and also produced duplicate React keys when users switched
     between "used" and "never used".
     """
+    current_by_event = {
+        str(row["event_key"]): row for row in all_news_evidence
+    }
+    current_keys_by_article: dict[tuple[str, ...], set[str]] = defaultdict(set)
+    for event_key, row in current_by_event.items():
+        current_keys_by_article[_frozen_event_article_identity(row)].add(event_key)
+
     try:
         aux_receipts = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' "
@@ -1141,8 +1156,31 @@ def _news_evidence_display_rows(
             if aux_receipts is not None
             else "news_model_visibility_receipts_v1"
         )
+        catalog_rows = connection.execute(
+            """SELECT * FROM news_model_visibility_events_v1
+               ORDER BY collector_first_seen_time DESC,event_key"""
+        ).fetchall()
+        event_key_aliases: dict[str, str] = {}
+        catalog_keys_by_article: dict[tuple[str, ...], set[str]] = defaultdict(set)
+        for raw in catalog_rows:
+            row = dict(raw)
+            catalog_keys_by_article[
+                _frozen_event_article_identity(row)
+            ].add(str(row["event_key"]))
+        for article_identity, catalog_keys in catalog_keys_by_article.items():
+            current_keys = current_keys_by_article.get(article_identity, set())
+            if len(current_keys) == 1:
+                canonical_key = next(iter(current_keys))
+            elif not current_keys and len(catalog_keys) > 1:
+                canonical_key = min(catalog_keys)
+            else:
+                continue
+            for event_key in catalog_keys:
+                if event_key != canonical_key:
+                    event_key_aliases[event_key] = canonical_key
+
         visibility_rows = connection.execute(
-            f"""SELECT event_key,
+            f"""SELECT canonical_event_key AS event_key,
                       count(*) AS frozen_model_uses,
                       count(DISTINCT source_decision_id) AS frozen_decisions,
                       count(DISTINCT event_source_hash) AS frozen_versions,
@@ -1150,26 +1188,28 @@ def _news_evidence_display_rows(
                       max(decision_time) AS last_model_decision_time,
                       group_concat(DISTINCT model_identity) AS model_identities,
                       group_concat(DISTINCT model_version) AS model_versions
-               FROM {receipt_source}
-               GROUP BY event_key"""
-        ).fetchall()
-        catalog_rows = connection.execute(
-            """SELECT * FROM news_model_visibility_events_v1
-               ORDER BY collector_first_seen_time DESC,event_key"""
+               FROM (
+                 SELECT receipt.*,
+                        COALESCE(alias.value, receipt.event_key)
+                          AS canonical_event_key
+                 FROM {receipt_source} AS receipt
+                 LEFT JOIN json_each(?) AS alias
+                   ON alias.key=receipt.event_key
+               )
+               GROUP BY canonical_event_key""",
+            (json.dumps(event_key_aliases, sort_keys=True),),
         ).fetchall()
     except sqlite3.OperationalError:
         visibility_rows = []
         catalog_rows = []
+        event_key_aliases = {}
 
     receipts = {row["event_key"]: dict(row) for row in visibility_rows}
     catalog_by_event: dict[str, dict] = {}
     for raw in catalog_rows:
         row = dict(raw)
-        catalog_by_event.setdefault(row["event_key"], row)
-
-    current_by_event: dict[str, dict] = {}
-    for row in all_news_evidence:
-        current_by_event[row["event_key"]] = row
+        event_key = event_key_aliases.get(str(row["event_key"]), row["event_key"])
+        catalog_by_event.setdefault(str(event_key), row)
 
     display_fields = (
         "event_key", "source_hash", "canonical_headline", "canonical_source",

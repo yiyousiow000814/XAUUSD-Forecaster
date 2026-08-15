@@ -172,6 +172,83 @@ def test_news_evidence_display_collapses_frozen_versions_to_one_event() -> None:
     assert rows[0]["frozen_decisions"] == 2
 
 
+def test_news_evidence_display_reconciles_event_identity_handover() -> None:
+    module = _dashboard_module()
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.executescript(
+        """
+        CREATE TABLE news_model_visibility_receipts_v1 (
+          source_decision_id TEXT, decision_time TEXT, model_identity TEXT,
+          model_version TEXT, event_key TEXT, event_source_hash TEXT
+        );
+        CREATE TABLE news_model_visibility_events_v1 (
+          event_source_hash TEXT, event_key TEXT, canonical_headline TEXT,
+          canonical_source TEXT, source_published_time TEXT,
+          collector_first_seen_time TEXT, topics_json TEXT,
+          evidence_grade TEXT
+        );
+        """
+    )
+    article = (
+        "同一篇新闻", "google_news_gold_context",
+        "2026-08-10T01:00:00+00:00", "2026-08-10T01:01:00+00:00",
+    )
+    for event_key, source_hash in (("legacy-key", "hash-v1"), ("canonical-key", "hash-v2")):
+        connection.execute(
+            "INSERT INTO news_model_visibility_events_v1 VALUES (?,?,?,?,?,?,?,?)",
+            (source_hash, event_key, article[0], article[1], article[2], article[3],
+             "[]", "SINGLE_RELIABLE"),
+        )
+    connection.execute(
+        "INSERT INTO news_model_visibility_events_v1 VALUES (?,?,?,?,?,?,?,?)",
+        ("hash-other", "other-key", article[0], article[1], article[2],
+         "2026-08-10T01:02:00+00:00", "[]", "SINGLE_RELIABLE"),
+    )
+    connection.execute(
+        "INSERT INTO news_model_visibility_events_v1 VALUES (?,?,?,?,?,?,?,?)",
+        ("hash-other-v2", "other-key-v2", article[0], article[1], article[2],
+         "2026-08-10T01:02:00+00:00", "[]", "SINGLE_RELIABLE"),
+    )
+    for decision_id, event_key, source_hash in (
+        ("decision-shared", "legacy-key", "hash-v1"),
+        ("decision-shared", "canonical-key", "hash-v2"),
+        ("decision-new", "canonical-key", "hash-v2"),
+        ("decision-other", "other-key", "hash-other"),
+        ("decision-other-v2", "other-key-v2", "hash-other-v2"),
+    ):
+        connection.execute(
+            "INSERT INTO news_model_visibility_receipts_v1 VALUES (?,?,?,?,?,?)",
+            (decision_id, "2026-08-10T02:00:00+00:00", "FULL", "model-v1",
+             event_key, source_hash),
+        )
+    current = [{
+        "event_key": "canonical-key", "source_hash": "hash-v2",
+        "canonical_headline": article[0], "canonical_source": article[1],
+        "source_published_time": article[2], "collector_first_seen_time": article[3],
+        "economic_age_minutes": 60, "freshness_status": "ACTIVE", "topics": [],
+        "evidence_grade": "SINGLE_RELIABLE", "broad_model_eligible": True,
+        "model_permission": "BROAD_MODEL", "member_count": 1,
+        "independent_publishers": 1, "source_names": [article[1]],
+        "publisher_domains": ["fxstreet.com"],
+        "source_identity_organizations": ["fxstreet"], "reason_codes": [],
+        "prompt_version": "news-json-v14-material-event-evidence",
+    }]
+
+    rows = module._news_evidence_display_rows(connection, current)
+
+    canonical = next(row for row in rows if row["event_key"] == "canonical-key")
+    assert len(rows) == 2
+    assert canonical["frozen_model_uses"] == 3
+    assert canonical["frozen_decisions"] == 2
+    assert canonical["frozen_versions"] == 2
+    assert canonical["publisher_domains"] == ["fxstreet.com"]
+    assert canonical["source_identity_organizations"] == ["fxstreet"]
+    other = next(row for row in rows if row["event_key"] == "other-key")
+    assert other["frozen_model_uses"] == 2
+    assert other["frozen_decisions"] == 2
+
+
 def test_deployment_provenance_discovers_git_from_standalone_module_root(
     monkeypatch,
     tmp_path: Path,
