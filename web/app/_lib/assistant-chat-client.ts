@@ -492,6 +492,11 @@ const reasoningLabel: Record<string, string> = {
   ANALYTICAL: "正在核对上下文与证据",
   TOOL_HEAVY: "正在规划证据检索",
 };
+const reasoningCompletedLabel: Record<string, string> = {
+  SIMPLE: "直接回答已整理",
+  ANALYTICAL: "上下文与证据已核对",
+  TOOL_HEAVY: "证据检索规划已完成",
+};
 
 const toolLabel = (name: unknown) => (
   name === "search_news_v1" || name === "news_retrieval_v1"
@@ -520,6 +525,7 @@ export function assistantProgressItems(
   const items: AssistantProgressItem[] = [];
   const tools = new Map<string, number>();
   let reasoningIndex: number | null = null;
+  let reasoningClass = "";
   let answerIndex: number | null = null;
   const closeStates = (
     states: AssistantProgressItem["state"][],
@@ -528,6 +534,23 @@ export function assistantProgressItems(
     for (let index = 0; index < items.length; index += 1) {
       if (states.includes(items[index].state)) items[index] = { ...items[index], state: next };
     }
+  };
+  const completeReasoning = () => {
+    if (reasoningIndex === null) return;
+    items[reasoningIndex] = {
+      ...items[reasoningIndex],
+      label: reasoningCompletedLabel[reasoningClass] ?? "公开分析阶段已完成",
+      state: "COMPLETED",
+    };
+  };
+  const completeAnswer = () => {
+    if (answerIndex === null) return;
+    items[answerIndex] = {
+      ...items[answerIndex],
+      label: "回答整理已完成",
+      detail: "最终回答已通过持久化门槛",
+      state: "COMPLETED",
+    };
   };
   for (const event of events) {
     if (event.type === "conversation.started") {
@@ -540,16 +563,15 @@ export function assistantProgressItems(
     } else if (event.type === "reasoning.started") {
       closeStates(["QUEUED"], "COMPLETED");
       reasoningIndex = items.length;
+      reasoningClass = String(event.payload.reasoning_class);
       items.push({
         id: event.event_id,
-        label: reasoningLabel[String(event.payload.reasoning_class)] ?? "正在分析",
+        label: reasoningLabel[reasoningClass] ?? "正在分析",
         detail: "仅显示公开策略阶段，不展示私有思维过程",
         state: "ACTIVE",
       });
     } else if (event.type === "tool.started") {
-      if (reasoningIndex !== null) {
-        items[reasoningIndex] = { ...items[reasoningIndex], state: "COMPLETED" };
-      }
+      completeReasoning();
       tools.set(String(event.payload.call_id), items.length);
       items.push({
         id: event.event_id,
@@ -571,9 +593,7 @@ export function assistantProgressItems(
         state: event.type === "tool.completed" ? "COMPLETED" : "FAILED",
       };
     } else if (event.type === "retrieval.started") {
-      if (reasoningIndex !== null) {
-        items[reasoningIndex] = { ...items[reasoningIndex], state: "COMPLETED" };
-      }
+      completeReasoning();
       tools.set(String(event.payload.operation_id), items.length);
       items.push({
         id: event.event_id,
@@ -591,6 +611,7 @@ export function assistantProgressItems(
         state: "COMPLETED",
       };
     } else if (event.type === "answer.started") {
+      completeReasoning();
       closeStates(["ACTIVE", "QUEUED"], "COMPLETED");
       answerIndex = items.length;
       items.push({
@@ -600,10 +621,10 @@ export function assistantProgressItems(
         state: "ACTIVE",
       });
     } else if (event.type === "answer.completed") {
-      if (answerIndex !== null) {
-        items[answerIndex] = { ...items[answerIndex], state: "COMPLETED" };
-      }
+      completeAnswer();
     } else if (event.type === "conversation.completed") {
+      completeReasoning();
+      completeAnswer();
       closeStates(["ACTIVE", "QUEUED"], "COMPLETED");
       items.push({
         id: event.event_id,

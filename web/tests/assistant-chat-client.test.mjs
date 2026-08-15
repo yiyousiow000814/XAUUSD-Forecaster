@@ -55,8 +55,24 @@ test("finite Assistant SSE replay validates ids, cursors, and public progress", 
     "COMPLETED", "COMPLETED", "COMPLETED", "COMPLETED", "COMPLETED",
   ]);
   assert.match(progress[2].detail, /2 条证据/);
+  assert.equal(progress[1].label, "证据检索规划已完成");
+  assert.equal(progress[3].label, "回答整理已完成");
+  assert.equal(progress[3].detail, "最终回答已通过持久化门槛");
   assert.equal(JSON.stringify(progress).includes("chain-of-thought"), false);
   assert.equal(assistantAnswerDraft(replay.events), "实际利率是持有无息黄金的机会成本。");
+
+  const parallelProgress = assistantProgressItems([
+    ...assistantPreviewEvents.slice(0, 3),
+    {
+      ...assistantPreviewEvents[2],
+      event_id: "event-preview-parallel-tool",
+      sequence: 4,
+      payload: { ...assistantPreviewEvents[2].payload, call_id: "call-preview-market" },
+    },
+  ]);
+  assert.deepEqual(parallelProgress.map(item => item.state), [
+    "COMPLETED", "COMPLETED", "ACTIVE", "ACTIVE",
+  ]);
 });
 
 test("Assistant SSE rejects transport identity drift and sequence gaps", () => {
