@@ -4,6 +4,15 @@
   "main": "./worker/index.ts",
   "compatibility_date": "2026-08-07",
   "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
+  "secrets": {
+    "required": [
+      "INGEST_TOKEN"
+    ]
+  },
   "observability": {
     "enabled": true
   },

@@ -1,6 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import {
@@ -14,70 +12,7 @@ import {
   listOwnerNewsQuestions,
   NewsQuestionInputError,
 } from "../app/api/_shared/news-questions.ts";
-
-class BoundStatement {
-  constructor(database, sql, bindings = []) {
-    this.database = database;
-    this.sql = sql;
-    this.bindings = bindings;
-  }
-
-  bind(...bindings) {
-    return new BoundStatement(this.database, this.sql, bindings);
-  }
-
-  execute() {
-    const statement = this.database.prepare(this.sql);
-    if (statement.columns().length > 0) {
-      return { success: true, results: statement.all(...this.bindings), meta: { changes: 0 } };
-    }
-    const result = statement.run(...this.bindings);
-    return { success: true, results: [], meta: { changes: Number(result.changes) } };
-  }
-
-  async first() {
-    return this.execute().results[0] ?? null;
-  }
-
-  async all() {
-    return this.execute();
-  }
-
-  async run() {
-    return this.execute();
-  }
-}
-
-class D1TestDatabase {
-  constructor() {
-    this.database = new DatabaseSync(":memory:");
-    const migration = readFileSync(
-      new URL("../drizzle/0008_news_questions.sql", import.meta.url),
-      "utf8",
-    );
-    this.database.exec(migration);
-  }
-
-  prepare(sql) {
-    return new BoundStatement(this.database, sql);
-  }
-
-  async batch(statements) {
-    this.database.exec("BEGIN IMMEDIATE");
-    try {
-      const results = statements.map(statement => statement.execute());
-      this.database.exec("COMMIT");
-      return results;
-    } catch (error) {
-      this.database.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  row(id) {
-    return this.database.prepare("SELECT * FROM news_questions WHERE id=?").get(id);
-  }
-}
+import { D1TestDatabase } from "./d1-test-database.mjs";
 
 const minute = value => new Date(Date.parse("2026-08-15T10:00:00.000Z") + value * 60_000);
 const key = suffix => `00000000-0000-4000-8000-${String(suffix).padStart(12, "0")}`;
@@ -131,6 +66,12 @@ test("admission is owner-scoped, idempotent, bounded, and private reads do not d
 
   assert.equal((await create(database, 2)).kind, "CREATED");
   assert.deepEqual(await create(database, 3), { kind: "CAPACITY" });
+  assert.equal(database.database.prepare(
+    "SELECT count(*) AS n FROM assistant_conversations",
+  ).get().n, 3);
+  assert.equal(database.database.prepare(
+    "SELECT count(*) AS n FROM assistant_messages",
+  ).get().n, 3);
 });
 
 test("expired leases recover, stale lease tokens cannot publish, and completion persists verified provenance", async () => {
@@ -157,9 +98,23 @@ test("expired leases recover, stale lease tokens cannot publish, and completion 
       id: created.item.id,
       lease_token: recovered.lease_token,
       answer_status: "ANSWERED",
+      answer: "错误版本不应发布。",
+      evidence_ids: [evidenceId],
+      model_version: "gemma-test",
+      prompt_version: "news-qa-v1",
+      retrieval: provenance(recovered, [evidenceId]),
+    }, minute(4)),
+    error => error instanceof NewsQuestionInputError && error.code === "INVALID_PROMPT_PROVENANCE",
+  );
+  await assert.rejects(
+    completeNewsQuestion(database, {
+      id: created.item.id,
+      lease_token: recovered.lease_token,
+      answer_status: "ANSWERED",
       answer: "美联储表态改变了利率预期。",
       evidence_ids: ["invented"],
       model_version: "gemma-test",
+      prompt_version: recovered.prompt_version,
       retrieval: provenance(recovered, [evidenceId]),
     }, minute(4)),
     error => error instanceof NewsQuestionInputError && error.code === "UNVERIFIED_EVIDENCE",
@@ -172,6 +127,7 @@ test("expired leases recover, stale lease tokens cannot publish, and completion 
     answer: "美联储表态改变了利率预期。",
     evidence_ids: [evidenceId],
     model_version: "gemma-test",
+    prompt_version: recovered.prompt_version,
     retrieval: provenance(recovered, [evidenceId]),
   }, minute(4));
   assert.equal(completed.status, "ANSWERED");
@@ -181,6 +137,12 @@ test("expired leases recover, stale lease tokens cannot publish, and completion 
   assert.deepEqual(
     JSON.parse(database.row(created.item.id).attempt_history_json).map(item => item.event),
     ["CLAIMED", "LEASE_EXPIRED", "CLAIMED", "ANSWERED"],
+  );
+  assert.throws(
+    () => database.database.prepare(
+      "UPDATE news_questions SET prompt_version='news-qa-v1' WHERE id=?",
+    ).run(created.item.id),
+    /prompt version is immutable/,
   );
 });
 
@@ -195,12 +157,16 @@ test("no retrieval evidence publishes the fixed honest result without a model id
     answer: "untrusted copy",
     evidence_ids: [],
     model_version: "untrusted-model",
+    prompt_version: claim.prompt_version,
     retrieval: provenance(claim, []),
   }, minute(0));
   assert.equal(completed.answer, INSUFFICIENT_EVIDENCE_ANSWER);
   assert.equal(completed.answer_status, "INSUFFICIENT_EVIDENCE");
   assert.equal(completed.model_version, null);
   assert.deepEqual(completed.evidence_ids, []);
+  const message = database.row(completed.assistant_message_id, "assistant_messages");
+  assert.equal(message.content, INSUFFICIENT_EVIDENCE_ANSWER);
+  assert.equal(JSON.parse(message.provenance_json).model_version, null);
 });
 
 test("worker failures back off and terminate after the bounded attempt budget", async () => {

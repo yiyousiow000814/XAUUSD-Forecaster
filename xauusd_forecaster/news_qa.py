@@ -59,9 +59,12 @@ def answer_news_question(
     question: str,
     news: list[dict],
     *,
+    prompt_version: str,
     api_key: str | None = None,
     request_accountant: ModelRequestAccountant | None = None,
 ) -> dict[str, Any]:
+    if prompt_version != NEWS_QA_PROMPT_VERSION:
+        raise ValueError(f"Unsupported news Q&A prompt version: {prompt_version}")
     evidence = build_news_evidence_packet(news)
     if not evidence:
         return {
@@ -69,7 +72,7 @@ def answer_news_question(
             "answer": INSUFFICIENT_EVIDENCE_ANSWER,
             "evidence_ids": [],
             "model_version": None,
-            "prompt_version": NEWS_QA_PROMPT_VERSION,
+            "prompt_version": prompt_version,
         }
     if not api_key or request_accountant is None:
         raise ValueError("news Q&A model credential and accountant are required")
@@ -131,5 +134,5 @@ def answer_news_question(
         "answer": answer,
         "evidence_ids": refs,
         "model_version": model_version,
-        "prompt_version": NEWS_QA_PROMPT_VERSION,
+        "prompt_version": prompt_version,
     }

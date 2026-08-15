@@ -920,6 +920,7 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
     # Preview builds import this module for its pure payload helpers. Keep the
     # local SQLite/model runtime out of that import path: Cloudflare's build
     # Python intentionally does not include the optional _sqlite3 extension.
+    from xauusd_forecaster.assistant_titles import generate_assistant_title
     from xauusd_forecaster.forward_ledger import ForwardLedger
     from xauusd_forecaster.news_qa import answer_news_question
     from xauusd_forecaster.model_gateway import ModelGatewayCapacityExhausted
@@ -948,6 +949,7 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
     ))
     ledger = None
     accountant = None
+    title_accountant = None
 
     def failure_code(error: Exception) -> str:
         if isinstance(error, ModelGatewayCapacityExhausted):
@@ -1002,6 +1004,7 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                 result = answer_news_question(
                     str(item.get("question") or ""),
                     [row for row in rows if isinstance(row, dict)],
+                    prompt_version=str(item.get("prompt_version") or ""),
                     api_key=credential.api_key if credential else None,
                     request_accountant=accountant,
                 )
@@ -1030,6 +1033,53 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                     url + "?mode=machine",
                     json.dumps({
                         "action": "FAIL",
+                        "id": item.get("id"),
+                        "lease_token": item.get("lease_token"),
+                        "failure_code": failure_code(error),
+                    }).encode("utf-8"),
+                    config,
+                )
+        # Title work is preemptible. Leave jobs pending when no permitted
+        # credential exists instead of consuming their finite retry budget.
+        if credential is None:
+            return
+        title_url = api_root + "/assistant-conversations"
+        for _ in range(3):
+            claim_url = title_url + "?" + urllib.parse.urlencode({
+                "mode": "title-claim", "worker_id": worker_id,
+            })
+            item = _get_json(claim_url, config).get("item")
+            if not isinstance(item, dict):
+                break
+            try:
+                if title_accountant is None:
+                    if ledger is None:
+                        ledger = ForwardLedger(database)
+                    title_accountant = SchedulerModelAccountant(
+                        ledger.connection, credential, urgent=False,
+                    )
+                result = generate_assistant_title(
+                    str(item.get("first_user_message") or ""),
+                    str(item.get("latest_assistant_message") or ""),
+                    prompt_version=str(item.get("prompt_version") or ""),
+                    api_key=credential.api_key,
+                    request_accountant=title_accountant,
+                )
+                _post_json(
+                    title_url + "?mode=machine",
+                    json.dumps({
+                        "action": "COMPLETE_TITLE",
+                        "id": item.get("id"),
+                        "lease_token": item.get("lease_token"),
+                        **result,
+                    }, ensure_ascii=False).encode("utf-8"),
+                    config,
+                )
+            except Exception as error:
+                _post_json(
+                    title_url + "?mode=machine",
+                    json.dumps({
+                        "action": "FAIL_TITLE",
                         "id": item.get("id"),
                         "lease_token": item.get("lease_token"),
                         "failure_code": failure_code(error),

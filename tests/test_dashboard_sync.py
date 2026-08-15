@@ -1309,6 +1309,7 @@ def test_news_question_sync_uses_shared_retrieval_and_skips_model_without_eviden
                 "retrieval_query": "美联储 利率",
                 "retrieval_cutoff": "2026-08-15T10:00:00.000Z",
                 "lease_token": "lease-1",
+                "prompt_version": "news-qa-v2",
             }}
         return {"item": None}
 
@@ -1325,6 +1326,7 @@ def test_news_question_sync_uses_shared_retrieval_and_skips_model_without_eviden
     )
 
     assert any("/news-search?" in url for url in requested_urls)
+    assert not any("/assistant-conversations?" in url for url in requested_urls)
     assert posted[0]["action"] == "COMPLETE"
     assert posted[0]["answer_status"] == "INSUFFICIENT_EVIDENCE"
     assert posted[0]["evidence_ids"] == []
@@ -1407,6 +1409,7 @@ def test_news_question_sync_uses_interactive_accounting_and_persists_retrieval(
                 "retrieval_query": "美联储 利率",
                 "retrieval_cutoff": "2026-08-15T10:00:00.000Z",
                 "lease_token": "lease-1",
+                "prompt_version": "news-qa-v2",
             }}
         return {"item": None}
 
@@ -1430,6 +1433,7 @@ def test_news_question_sync_uses_interactive_accounting_and_persists_retrieval(
     assert answer_calls[0]["rows"][0]["evidence_id"] == "a" * 64
     assert answer_calls[0]["api_key"] == "secret-key"
     assert answer_calls[0]["request_accountant"] == "accountant"
+    assert answer_calls[0]["prompt_version"] == "news-qa-v2"
     assert posted[0]["retrieval"]["canonical_evidence_ids"] == ["a" * 64]
     assert posted[0]["action"] == "COMPLETE"
     assert ledger_state["closed"] is True
@@ -1466,6 +1470,7 @@ def test_news_question_sync_reports_capacity_failure_without_aborting_queue(
             "retrieval_query": "黄金",
             "retrieval_cutoff": "2026-08-15T10:00:00.000Z",
             "lease_token": "lease-1",
+            "prompt_version": "news-qa-v2",
         }} if claim_calls == 1 else {"item": None}
 
     posted: list[dict] = []
@@ -1482,3 +1487,109 @@ def test_news_question_sync_reports_capacity_failure_without_aborting_queue(
         "action": "FAIL", "id": "question-1", "lease_token": "lease-1",
         "failure_code": "NO_MODEL_CAPACITY",
     }]
+
+
+def test_assistant_title_sync_uses_low_priority_metered_accounting(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    module = _sync_module()
+    from xauusd_forecaster import (
+        assistant_titles,
+        forward_ledger,
+        news_scheduler,
+        scheduler_model_gateway,
+    )
+
+    credential = news_scheduler.ApiCredential(
+        account_id="account-a", pool=news_scheduler.PREEMPTIBLE_POOL,
+        api_key="secret-key", credential_id="credential-a",
+    )
+    monkeypatch.setattr(
+        news_scheduler, "configured_api_credentials", lambda: (credential,),
+    )
+    ledger_state = {"closed": False}
+
+    class FakeLedger:
+        def __init__(self, path: Path) -> None:
+            self.connection = object()
+
+        def close(self) -> None:
+            ledger_state["closed"] = True
+
+    accountant_calls: list[dict] = []
+
+    def accountant(connection, selected, *, urgent):
+        accountant_calls.append({
+            "connection": connection, "credential": selected, "urgent": urgent,
+        })
+        return "title-accountant"
+
+    title_calls: list[dict] = []
+
+    def generate(first_user_message, latest_assistant_message, **kwargs):
+        title_calls.append({
+            "first_user_message": first_user_message,
+            "latest_assistant_message": latest_assistant_message,
+            **kwargs,
+        })
+        return {
+            "title": "美联储利率与黄金重定价",
+            "model_version": "gemma-title-test",
+            "prompt_version": "assistant-title-v1",
+        }
+
+    monkeypatch.setattr(forward_ledger, "ForwardLedger", FakeLedger)
+    monkeypatch.setattr(
+        scheduler_model_gateway, "SchedulerModelAccountant", accountant,
+    )
+    monkeypatch.setattr(assistant_titles, "generate_assistant_title", generate)
+    title_claims = 0
+
+    def get_json(url: str, config: dict) -> dict:
+        nonlocal title_claims
+        if "/news-questions?" in url:
+            return {"item": None}
+        if "/assistant-conversations?" in url:
+            title_claims += 1
+            if title_claims == 1:
+                return {"item": {
+                    "id": "title-job-1", "lease_token": "title-lease-1",
+                    "first_user_message": "美联储为什么影响黄金？",
+                    "latest_assistant_message": "利率预期影响美元和黄金。",
+                    "prompt_version": "assistant-title-v1",
+                }}
+            return {"item": None}
+        raise AssertionError(f"unexpected URL: {url}")
+
+    posted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(module, "_get_json", get_json)
+    monkeypatch.setattr(
+        module,
+        "_post_json",
+        lambda url, payload, config: posted.append((url, json.loads(payload))) or {},
+    )
+    module._sync_news_questions({}, {
+        "remote_ingest_url": "https://example.test/api/ingest",
+        "token": "x", "local_database": tmp_path / "forward.sqlite3",
+    })
+
+    assert [call["urgent"] for call in accountant_calls] == [False]
+    assert title_calls == [{
+        "first_user_message": "美联储为什么影响黄金？",
+        "latest_assistant_message": "利率预期影响美元和黄金。",
+        "prompt_version": "assistant-title-v1",
+        "api_key": "secret-key",
+        "request_accountant": "title-accountant",
+    }]
+    assert posted == [(
+        "https://example.test/api/assistant-conversations?mode=machine",
+        {
+            "action": "COMPLETE_TITLE", "id": "title-job-1",
+            "lease_token": "title-lease-1",
+            "title": "美联储利率与黄金重定价",
+            "model_version": "gemma-title-test",
+            "prompt_version": "assistant-title-v1",
+        },
+    )]
+    assert ledger_state["closed"] is True

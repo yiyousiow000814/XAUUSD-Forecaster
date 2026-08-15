@@ -24,7 +24,9 @@ npm run build
 - `wrangler.jsonc` declares D1 and runtime bindings.
 - `drizzle/` contains the append-only dashboard migrations.
 - the local synchronizer writes Sites and Cloudflare independently.
-- `INGEST_TOKEN` is a Worker secret; it must never be committed.
+- `INGEST_TOKEN` is a required generated binding. Production-only relay and
+  Access values remain optional, fail-closed Cloudflare bindings so isolated
+  branch Previews can deploy without production authority.
 
 ## Workspace Auth Headers
 
@@ -94,6 +96,7 @@ actions tied to the current ChatGPT user. Leave public content anonymous.
 - `npm run lint`: lint source code while excluding generated hosting artifacts
 - `npm run db:generate`: generate Drizzle migrations after schema changes
 - `npm run cf:types`: refresh Cloudflare binding types
+- `npm run cf:types:check`: fail when committed binding types drift from config
 - `npm run cf:deploy`: test and deploy the Worker
 
 ## One-time Cloudflare Setup
@@ -102,8 +105,20 @@ actions tied to the current ChatGPT user. Leave public content anonymous.
 npx wrangler login
 npx wrangler d1 migrations apply aurum-signal-room --remote
 npx wrangler secret put INGEST_TOKEN
+npx wrangler secret put STATUS_RELAY_URL
+npx wrangler secret put CF_ACCESS_TEAM_DOMAIN
+npx wrangler secret put CF_ACCESS_AUD
+npx wrangler secret put ASSISTANT_OWNER_SUBJECTS
+npx wrangler secret put ASSISTANT_OWNER_EMAILS
 npm run cf:deploy
 ```
+
+Cloudflare Access and at least one matching owner subject or email must be
+configured before private Assistant routes are enabled. Both owner allowlist
+names remain explicit runtime contracts; set an unused allowlist to a
+non-matching sentinel value rather than placing owner identity in source. These
+production-only values are intentionally not `secrets.required`: branch Preview
+versions have no model authority and must remain deployable without them.
 
 The local Control Center reads these user-level environment variables when it
 starts `Dashboard Mirrors`:

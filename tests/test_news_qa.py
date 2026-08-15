@@ -35,6 +35,7 @@ def test_news_question_uses_only_the_bounded_shared_retrieval_packet(monkeypatch
     result = news_qa.answer_news_question(
         "今天市场关注什么？",
         [_news()] + [_news(f"evidence-{index}") for index in range(2, 30)],
+        prompt_version=news_qa.NEWS_QA_PROMPT_VERSION,
         api_key="test-key",
         request_accountant=CallbackModelAccountant(lambda usage: True),
     )
@@ -65,6 +66,7 @@ def test_news_question_rejects_the_whole_answer_if_any_evidence_is_invented(
         news_qa.answer_news_question(
             "今天市场关注什么？",
             [_news()],
+            prompt_version=news_qa.NEWS_QA_PROMPT_VERSION,
             api_key="test-key",
             request_accountant=CallbackModelAccountant(lambda usage: True),
         )
@@ -78,7 +80,9 @@ def test_no_retrieval_evidence_returns_honest_insufficiency_without_model_call(
         "generate_metered_json",
         lambda *args, **kwargs: pytest.fail("model must not run without evidence"),
     )
-    result = news_qa.answer_news_question("没有匹配资料吗？", [])
+    result = news_qa.answer_news_question(
+        "没有匹配资料吗？", [], prompt_version=news_qa.NEWS_QA_PROMPT_VERSION,
+    )
     assert result == {
         "answer_status": "INSUFFICIENT_EVIDENCE",
         "answer": news_qa.INSUFFICIENT_EVIDENCE_ANSWER,
@@ -95,4 +99,11 @@ def test_grounded_question_requires_unified_gateway_accounting(monkeypatch) -> N
         lambda *args, **kwargs: pytest.fail("validation must fail before transport"),
     )
     with pytest.raises(ValueError, match="credential and accountant"):
-        news_qa.answer_news_question("今天市场关注什么？", [_news()])
+        news_qa.answer_news_question(
+            "今天市场关注什么？", [_news()],
+            prompt_version=news_qa.NEWS_QA_PROMPT_VERSION,
+        )
+    with pytest.raises(ValueError, match="Unsupported"):
+        news_qa.answer_news_question(
+            "今天市场关注什么？", [], prompt_version="news-qa-v1",
+        )
