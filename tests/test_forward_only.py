@@ -2197,7 +2197,7 @@ def test_gemini_locally_recovers_unverifiable_display_numbers() -> None:
     assert result["confidence"] == 0.9
 
 
-def test_display_failure_keeps_valid_semantics_with_auditable_fallback(
+def test_display_failure_withholds_semantics_until_readable_output_exists(
     tmp_path, monkeypatch
 ) -> None:
     now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
@@ -2238,18 +2238,10 @@ def test_display_failure_keeps_valid_semantics_with_auditable_fallback(
         ledger, provider="gemini", api_key="test-key", limit=1,
         request_accountant=ALLOW_MODEL_REQUEST,
     )
-    assert statuses[0]["status"] == "OK"
-    saved = ledger.connection.execute(
-        "SELECT annotation_json FROM news_annotations WHERE source='language-test'"
-    ).fetchone()
-    stored = json.loads(saved["annotation_json"])
-    assert stored["headline_zh"] == annotation_module.SAFE_CHINESE_HEADLINE_FALLBACK
-    assert stored["summary_zh"].startswith("中文摘要暂不可用")
-    assert stored["xauusd_relevance"] == "MACRO_DRIVER"
-    assert stored["review_priority"] == "IMMEDIATE"
-    assert stored["hawkishness"] == 0.7
-    assert stored["confidence"] == 0.9
-    assert ledger.count("news_llm_failures") == 0
+    assert statuses[0]["status"] == "ERROR"
+    assert "semantic annotation withheld" in statuses[0]["error"]
+    assert ledger.count("news_annotations") == 0
+    assert ledger.count("news_llm_failures") == 1
 
 
 def test_semantic_failure_does_not_trigger_display_repair(monkeypatch) -> None:

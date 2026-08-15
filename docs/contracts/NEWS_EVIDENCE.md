@@ -17,10 +17,13 @@ background without granting model authority.
 
 Chinese display text is Chinese-primary rather than Chinese-only. Natural
 names, company names, tickers, identifiers, and common abbreviations MAY remain
-in their original script. Display-language repair MUST NOT rewrite or
-neutralize an otherwise valid semantic category, direction, impact, evidence,
-or confidence measurement. A semantic-schema or source-evidence failure MUST
-fail independently and MUST NOT be disguised as a translation failure.
+in English when English improves readability. Display-language repair MUST NOT
+rewrite an otherwise valid semantic category, direction, impact, evidence, or
+confidence measurement. If readable Chinese-primary display text cannot be
+produced, the annotation MUST be withheld from model permission and retried; it
+MUST NOT be persisted as irrelevant or admitted behind a placeholder. A
+semantic-schema or source-evidence failure MUST fail independently and MUST NOT
+be disguised as a translation failure.
 
 Collector lanes are not independent publishers. Google News and GDELT are
 discovery mechanisms; source trust and generation budgets use the first-party

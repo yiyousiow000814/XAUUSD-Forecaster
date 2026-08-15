@@ -60,7 +60,6 @@ GEMMA_IMPACT_BATCH_LIMIT = 10
 PROMPT_VERSION = CURRENT_NEWS_PROMPT_VERSION
 TITLE_PROMPT_VERSION = "headline-zh-v7-multilingual-month-preservation"
 INVALID_CHINESE_TITLE = "来源新闻（中文标题待校验）"
-SAFE_CHINESE_HEADLINE_FALLBACK = "来源新闻（查看原文）"
 TITLE_TRANSLATION_MODELS = (
     DEFAULT_GEMMA_MODEL, DEFAULT_GEMINI_MODEL, FALLBACK_GEMINI_MODEL,
 )
@@ -860,11 +859,10 @@ class _GeminiRequestPool:
                 _validate_chinese_result(result)
                 if prompt_version == PROMPT_VERSION:
                     _validate_current_result(result, headline=headline, body=body)
-            except Exception:
-                _apply_safe_display_fallback(result, invalid_display_fields)
-                _validate_chinese_result(result)
-                if prompt_version == PROMPT_VERSION:
-                    _validate_current_result(result, headline=headline, body=body)
+            except Exception as error:
+                raise ValueError(
+                    "Gemini display repair failed; semantic annotation withheld"
+                ) from error
         return result, exact_model
 
     def _repair_chinese(
@@ -1451,19 +1449,6 @@ def _invalid_chinese_display_fields(result: dict) -> tuple[str, ...]:
     # auditable display fields so the model gets one bounded chance to restore
     # the exact source lexemes without touching semantic measurements.
     return tuple(invalid or ("headline_zh", "summary_zh"))
-
-
-def _apply_safe_display_fallback(
-    result: dict, invalid_fields: tuple[str, ...],
-) -> None:
-    """Keep valid semantics while making an unavailable display field honest."""
-    fallbacks = {
-        "headline_zh": SAFE_CHINESE_HEADLINE_FALLBACK,
-        "summary_zh": "中文摘要暂不可用；完整来源正文已保存，可供查阅与审计。",
-        "primary_story_title_zh": "",
-    }
-    for field in invalid_fields:
-        result[field] = fallbacks[field]
 
 
 def _restore_source_number_lexemes(
