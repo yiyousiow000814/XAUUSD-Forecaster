@@ -1,3 +1,4 @@
+-- Keep this trigger-bearing migration LF-only; remote D1 rejects CRLF compound SQL.
 CREATE TABLE IF NOT EXISTS `assistant_conversations` (
 	`id` text PRIMARY KEY NOT NULL,
 	`owner_id` text NOT NULL,

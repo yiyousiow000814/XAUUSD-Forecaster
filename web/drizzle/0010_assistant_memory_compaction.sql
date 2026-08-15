@@ -1,3 +1,4 @@
+-- Keep this trigger-bearing migration LF-only; remote D1 rejects CRLF compound SQL.
 ALTER TABLE `assistant_conversations` ADD COLUMN `pending_compaction_job_id` text;
 --> statement-breakpoint
 ALTER TABLE `assistant_conversations` ADD COLUMN `compaction_request_version` integer NOT NULL DEFAULT 0;
