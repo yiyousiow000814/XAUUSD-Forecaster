@@ -10,6 +10,8 @@ The branch and commit code artifact is fixed for a deployment. Its immutable
 build snapshot is also fixed. Bounded, explicitly read-only production data may
 change after deployment when freshness is part of the feature being reviewed.
 Neither data mode grants runtime, write, model-promotion, or trading authority.
+Neither mode grants permission to consume production model capacity or create
+production Assistant state.
 
 ## Data modes
 
@@ -63,6 +65,13 @@ Some features require an authoritative complete current view. For example, a
 failed current archive read must not be replaced by a smaller recent window that
 looks complete. Such a feature returns an unavailable state instead.
 
+### Assistant presentation fixtures
+
+When an Assistant surface exists, a branch Preview may use explicitly labeled
+synthetic fixtures or an immutable build snapshot to review layout, streaming
+presentation, and content blocks. It cannot submit model-consuming work, create
+production conversations, or present fixture output as a live grounded answer.
+
 ## Semantic display states
 
 - **Loading**: the current authority has not resolved yet.
@@ -110,6 +119,8 @@ product requirement.
 - Production-precomputed storylines may support presentation review, but they do
   not prove a changed branch grouping policy. Such a change requires complete
   independent-event replay input rather than reverse-engineering grouped output.
+- Assistant presentation may use labeled synthetic or frozen fixtures; its
+  model-consuming and conversation-mutating routes remain unavailable.
 
 ## Machine-readable manifest
 
