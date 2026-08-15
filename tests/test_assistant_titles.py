@@ -20,6 +20,8 @@ def test_title_generation_uses_bounded_context_and_the_metered_gateway(monkeypat
         prompt_version=assistant_titles.ASSISTANT_TITLE_PROMPT_VERSION,
         api_key="test-key",
         request_accountant=CallbackModelAccountant(lambda usage: True),
+        model="gemma-small-routed",
+        thinking_level="minimal",
     )
     assert result == {
         "title": "CPI 后黄金反常上涨分析",
@@ -27,6 +29,10 @@ def test_title_generation_uses_bounded_context_and_the_metered_gateway(monkeypat
         "prompt_version": assistant_titles.ASSISTANT_TITLE_PROMPT_VERSION,
     }
     assert calls[0][1]["purpose"] == "assistant-conversation-title"
+    assert calls[0][1]["model"] == "gemma-small-routed"
+    assert calls[0][1]["payload"]["generationConfig"]["thinkingConfig"] == {
+        "thinkingLevel": "minimal",
+    }
     prompt = calls[0][1]["payload"]["contents"][0]["parts"][0]["text"]
     assert len(prompt) <= assistant_titles.MAX_TITLE_INPUT_CHARACTERS
     assert 900 <= prompt.count("甲") <= 1_000

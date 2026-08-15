@@ -12,6 +12,7 @@ import {
   scheduleAssistantCompaction,
 } from "../app/api/_shared/assistant-memory.ts";
 import { D1TestDatabase } from "./d1-test-database.mjs";
+import { assistantRouting } from "./assistant-routing-fixture.mjs";
 
 const owner = "cloudflare-access:memory-owner";
 const otherOwner = "cloudflare-access:other-owner";
@@ -98,6 +99,7 @@ const completePayload = (claim, summary, pins = []) => ({
   model_version: "gemma-compaction-contract-test",
   prompt_version: claim.prompt_version,
   context_profile_id: claim.context_profile_id,
+  routing: assistantRouting("CONTEXT_COMPACTION"),
 });
 
 test("compaction advances incrementally and retains canonical history, pins, and evidence anchors", async () => {
@@ -146,6 +148,11 @@ test("compaction advances incrementally and retains canonical history, pins, and
     JSON.parse(database.row(first.id, "assistant_compaction_jobs").attempt_history_json)
       .map(receipt => receipt.event),
     ["CLAIMED", "COMPLETED"],
+  );
+  assert.equal(
+    JSON.parse(database.row(first.id, "assistant_compaction_jobs").attempt_history_json)
+      .at(-1).routing.task_type,
+    "CONTEXT_COMPACTION",
   );
   assert.throws(
     () => database.database.prepare(

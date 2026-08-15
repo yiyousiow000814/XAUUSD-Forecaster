@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 
 from .annotation import DEFAULT_GEMMA_MODEL, generate_metered_json
+from .assistant_routing import apply_provider_thinking_level
 from .model_gateway import ModelRequestAccountant
 
 
 ASSISTANT_TITLE_PROMPT_VERSION = "assistant-title-v1"
 MAX_TITLE_INPUT_CHARACTERS = 3_000
 MAX_TITLE_RESPONSE_CHARACTERS = 128
+ASSISTANT_TITLE_MAX_OUTPUT_TOKENS = 80
 
 
 def _bounded_text(value: object, limit: int) -> str:
@@ -24,6 +26,8 @@ def generate_assistant_title(
     prompt_version: str,
     api_key: str | None,
     request_accountant: ModelRequestAccountant | None,
+    model: str = DEFAULT_GEMMA_MODEL,
+    thinking_level: str | None = None,
 ) -> dict[str, str]:
     """Return one candidate; the server remains the grapheme-limit authority."""
     if prompt_version != ASSISTANT_TITLE_PROMPT_VERSION:
@@ -46,7 +50,7 @@ def generate_assistant_title(
         "generationConfig": {
             "responseMimeType": "application/json",
             "temperature": 0,
-            "maxOutputTokens": 80,
+            "maxOutputTokens": ASSISTANT_TITLE_MAX_OUTPUT_TOKENS,
             "responseSchema": {
                 "type": "object",
                 "required": ["title"],
@@ -65,9 +69,9 @@ def generate_assistant_title(
 
     result, model_version = generate_metered_json(
         api_key,
-        model=DEFAULT_GEMMA_MODEL,
+        model=model,
         purpose="assistant-conversation-title",
-        payload=payload,
+        payload=apply_provider_thinking_level(payload, thinking_level),
         decode=decode,
         request_accountant=request_accountant,
     )

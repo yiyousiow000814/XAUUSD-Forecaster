@@ -1476,8 +1476,13 @@ def test_news_question_sync_uses_interactive_accounting_and_persists_retrieval(
     assert answer_calls[0]["api_key"] == "secret-key"
     assert answer_calls[0]["request_accountant"] == "accountant"
     assert answer_calls[0]["prompt_version"] == "news-qa-v2"
+    assert answer_calls[0]["model"] == "gemma-4-31b-it"
+    assert answer_calls[0]["thinking_level"] == "high"
     assert posted[0]["retrieval"]["canonical_evidence_ids"] == ["a" * 64]
     assert posted[0]["action"] == "COMPLETE"
+    assert posted[0]["routing"]["reasoning_class"] == "ANALYTICAL"
+    assert posted[0]["routing"]["model_requirement"] == "LARGE_REQUIRED"
+    assert posted[0]["routing"]["selected_model_id"] == "gemma-4-31b-it"
     assert ledger_state["closed"] is True
 
 
@@ -1623,17 +1628,19 @@ def test_assistant_title_sync_uses_low_priority_metered_accounting(
         "prompt_version": "assistant-title-v1",
         "api_key": "secret-key",
         "request_accountant": "title-accountant",
+        "model": "gemma-4-31b-it",
+        "thinking_level": "minimal",
     }]
-    assert posted == [(
-        "https://example.test/api/assistant-conversations?mode=machine",
-        {
-            "action": "COMPLETE_TITLE", "id": "title-job-1",
-            "lease_token": "title-lease-1",
-            "title": "美联储利率与黄金重定价",
-            "model_version": "gemma-title-test",
-            "prompt_version": "assistant-title-v1",
-        },
-    )]
+    assert posted[0][0] == "https://example.test/api/assistant-conversations?mode=machine"
+    assert {key: value for key, value in posted[0][1].items() if key != "routing"} == {
+        "action": "COMPLETE_TITLE", "id": "title-job-1",
+        "lease_token": "title-lease-1",
+        "title": "美联储利率与黄金重定价",
+        "model_version": "gemma-title-test",
+        "prompt_version": "assistant-title-v1",
+    }
+    assert posted[0][1]["routing"]["reasoning_class"] == "SIMPLE"
+    assert posted[0][1]["routing"]["thinking_level"] == "MINIMAL"
     assert ledger_state["closed"] is True
 
 
@@ -1736,7 +1743,9 @@ def test_assistant_compaction_sync_uses_incremental_claim_and_low_priority_gatew
         "message-1", "message-2",
     ]
     assert compaction_calls[0]["request_accountant"] == "compaction-accountant"
-    assert posted == [{
+    assert compaction_calls[0]["model"] == "gemma-4-31b-it"
+    assert compaction_calls[0]["thinking_level"] == "minimal"
+    assert {key: value for key, value in posted[0].items() if key != "routing"} == {
         "action": "COMPLETE_COMPACTION",
         "id": "compaction-job-1",
         "lease_token": "compaction-lease-1",
@@ -1746,5 +1755,7 @@ def test_assistant_compaction_sync_uses_incremental_claim_and_low_priority_gatew
         "model_version": "gemma-compaction-test",
         "prompt_version": "assistant-compaction-v1",
         "context_profile_id": "assistant-context-default-v1",
-    }]
+    }
+    assert posted[0]["routing"]["task_type"] == "CONTEXT_COMPACTION"
+    assert posted[0]["routing"]["model_requirement"] == "SMALL_PREFERRED"
     assert closed["value"] is True

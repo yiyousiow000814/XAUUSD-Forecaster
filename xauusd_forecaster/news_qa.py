@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from .annotation import DEFAULT_GEMMA_MODEL, generate_metered_json
+from .assistant_routing import apply_provider_thinking_level
 from .model_gateway import ModelRequestAccountant
 
 
@@ -16,6 +17,7 @@ INSUFFICIENT_EVIDENCE_ANSWER = (
 MAX_RETRIEVED_EVIDENCE = 20
 MAX_CITED_EVIDENCE = 12
 MAX_ANSWER_CHARACTERS = 4_000
+NEWS_QA_MAX_OUTPUT_TOKENS = 1_200
 
 
 def _bounded_text(value: object, limit: int) -> str:
@@ -62,6 +64,8 @@ def answer_news_question(
     prompt_version: str,
     api_key: str | None = None,
     request_accountant: ModelRequestAccountant | None = None,
+    model: str = DEFAULT_GEMMA_MODEL,
+    thinking_level: str | None = None,
 ) -> dict[str, Any]:
     if prompt_version != NEWS_QA_PROMPT_VERSION:
         raise ValueError(f"Unsupported news Q&A prompt version: {prompt_version}")
@@ -90,7 +94,7 @@ def answer_news_question(
         "generationConfig": {
             "responseMimeType": "application/json",
             "temperature": 0,
-            "maxOutputTokens": 1_200,
+            "maxOutputTokens": NEWS_QA_MAX_OUTPUT_TOKENS,
             "responseSchema": {
                 "type": "object",
                 "required": ["answer", "evidence_ids"],
@@ -111,9 +115,9 @@ def answer_news_question(
 
     result, model_version = generate_metered_json(
         api_key,
-        model=DEFAULT_GEMMA_MODEL,
+        model=model,
         purpose="news-question-answer",
-        payload=payload,
+        payload=apply_provider_thinking_level(payload, thinking_level),
         decode=decode,
         request_accountant=request_accountant,
     )

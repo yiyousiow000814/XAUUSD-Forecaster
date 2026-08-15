@@ -1,3 +1,5 @@
+import { parseAssistantRoutingProvenance } from "./assistant-routing";
+
 export const ASSISTANT_TITLE_PROMPT_VERSION = "assistant-title-v1";
 export const MAX_TITLE_GRAPHEMES = 32;
 
@@ -485,6 +487,12 @@ export async function completeAssistantTitleJob(
   if (!modelVersion || modelVersion.length > 120 || !promptVersion || promptVersion.length > 120) {
     throw new AssistantConversationInputError("INVALID_TITLE_PROVENANCE", "标题来源无效");
   }
+  let routing;
+  try {
+    routing = parseAssistantRoutingProvenance(input.routing, "CONVERSATION_TITLE");
+  } catch {
+    throw new AssistantConversationInputError("INVALID_TITLE_PROVENANCE", "标题来源无效");
+  }
   const timestamp = now.toISOString();
   const job = await binding.prepare(
     `SELECT * FROM assistant_title_jobs
@@ -498,11 +506,15 @@ export async function completeAssistantTitleJob(
     binding.prepare(
       `UPDATE assistant_title_jobs SET status='COMPLETED',generated_title=?,model_version=?,completed_at=?,
        failure_code=NULL,attempt_history_json=json_insert(attempt_history_json,'$[#]',
-         json_object('event','COMPLETED','occurred_at',?,'attempt',attempt_count)),
+         json_object('event','COMPLETED','occurred_at',?,'attempt',attempt_count,
+           'routing',json(?))),
        ${titleJobHistoryCleanup}
        WHERE id=? AND status='PROCESSING' AND lease_token=? AND lease_expires_at>?
        RETURNING *`,
-    ).bind(title, modelVersion, timestamp, timestamp, id, leaseToken, timestamp),
+    ).bind(
+      title, modelVersion, timestamp, timestamp, JSON.stringify(routing),
+      id, leaseToken, timestamp,
+    ),
     binding.prepare(
       `UPDATE assistant_conversations SET title=?,title_source='AI',
        title_revision=title_revision+1,pending_title_job_id=NULL

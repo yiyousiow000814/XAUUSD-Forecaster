@@ -920,10 +920,28 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
     # Preview builds import this module for its pure payload helpers. Keep the
     # local SQLite/model runtime out of that import path: Cloudflare's build
     # Python intentionally does not include the optional _sqlite3 extension.
-    from xauusd_forecaster.assistant_compaction import compact_assistant_context
-    from xauusd_forecaster.assistant_titles import generate_assistant_title
+    from xauusd_forecaster.assistant_compaction import (
+        ASSISTANT_COMPACTION_MAX_OUTPUT_TOKENS,
+        compact_assistant_context,
+    )
+    from xauusd_forecaster.assistant_routing import (
+        AssistantModelRoutingUnavailable,
+        AssistantTaskType,
+        configured_assistant_model_profiles,
+        conservative_assistant_token_estimate,
+        execute_assistant_route,
+        plan_assistant_route,
+    )
+    from xauusd_forecaster.assistant_titles import (
+        ASSISTANT_TITLE_MAX_OUTPUT_TOKENS,
+        generate_assistant_title,
+    )
     from xauusd_forecaster.forward_ledger import ForwardLedger
-    from xauusd_forecaster.news_qa import answer_news_question
+    from xauusd_forecaster.news_qa import (
+        NEWS_QA_MAX_OUTPUT_TOKENS,
+        answer_news_question,
+        build_news_evidence_packet,
+    )
     from xauusd_forecaster.model_gateway import ModelGatewayCapacityExhausted
     from xauusd_forecaster.news_scheduler import (
         PREEMPTIBLE_POOL,
@@ -951,10 +969,13 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
     ledger = None
     accountant = None
     background_accountant = None
+    model_profiles = configured_assistant_model_profiles()
 
     def failure_code(error: Exception) -> str:
         if isinstance(error, ModelGatewayCapacityExhausted):
             return "NO_MODEL_CAPACITY"
+        if isinstance(error, AssistantModelRoutingUnavailable):
+            return "NO_COMPATIBLE_MODEL"
         if isinstance(error, (urllib.error.URLError, TimeoutError)):
             return "NEWS_RETRIEVAL_UNAVAILABLE"
         if isinstance(error, ValueError):
@@ -1002,13 +1023,39 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                     accountant = SchedulerModelAccountant(
                         ledger.connection, credential, urgent=True,
                     )
-                result = answer_news_question(
-                    str(item.get("question") or ""),
-                    [row for row in rows if isinstance(row, dict)],
-                    prompt_version=str(item.get("prompt_version") or ""),
-                    api_key=credential.api_key if credential else None,
-                    request_accountant=accountant,
-                )
+                question = str(item.get("question") or "")
+                evidence_rows = [row for row in rows if isinstance(row, dict)]
+                if evidence_rows:
+                    plan = plan_assistant_route(
+                        AssistantTaskType.NEWS_QA,
+                        estimated_input_tokens=conservative_assistant_token_estimate({
+                            "question": question,
+                            "evidence": build_news_evidence_packet(evidence_rows),
+                        }),
+                        reserved_output_tokens=NEWS_QA_MAX_OUTPUT_TOKENS,
+                        user_text=question,
+                        planned_tool_calls=1,
+                        profiles=model_profiles,
+                    )
+                    routed = execute_assistant_route(
+                        plan,
+                        lambda profile, thinking_level: answer_news_question(
+                            question,
+                            evidence_rows,
+                            prompt_version=str(item.get("prompt_version") or ""),
+                            api_key=credential.api_key if credential else None,
+                            request_accountant=accountant,
+                            model=profile.model_id,
+                            thinking_level=thinking_level,
+                        ),
+                    )
+                    result = {**routed.value, "routing": routed.routing}
+                else:
+                    result = answer_news_question(
+                        question,
+                        evidence_rows,
+                        prompt_version=str(item.get("prompt_version") or ""),
+                    )
                 provenance = {
                     "query": retrieval.get("query"),
                     "source_mode": retrieval.get("source_mode"),
@@ -1059,13 +1106,32 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                     background_accountant = SchedulerModelAccountant(
                         ledger.connection, credential, urgent=False,
                     )
-                result = generate_assistant_title(
-                    str(item.get("first_user_message") or ""),
-                    str(item.get("latest_assistant_message") or ""),
-                    prompt_version=str(item.get("prompt_version") or ""),
-                    api_key=credential.api_key,
-                    request_accountant=background_accountant,
+                first_user_message = str(item.get("first_user_message") or "")
+                latest_assistant_message = str(
+                    item.get("latest_assistant_message") or ""
                 )
+                plan = plan_assistant_route(
+                    AssistantTaskType.CONVERSATION_TITLE,
+                    estimated_input_tokens=conservative_assistant_token_estimate({
+                        "first_user_message": first_user_message,
+                        "latest_assistant_message": latest_assistant_message,
+                    }),
+                    reserved_output_tokens=ASSISTANT_TITLE_MAX_OUTPUT_TOKENS,
+                    profiles=model_profiles,
+                )
+                routed = execute_assistant_route(
+                    plan,
+                    lambda profile, thinking_level: generate_assistant_title(
+                        first_user_message,
+                        latest_assistant_message,
+                        prompt_version=str(item.get("prompt_version") or ""),
+                        api_key=credential.api_key,
+                        request_accountant=background_accountant,
+                        model=profile.model_id,
+                        thinking_level=thinking_level,
+                    ),
+                )
+                result = {**routed.value, "routing": routed.routing}
                 _post_json(
                     title_url + "?mode=machine",
                     json.dumps({
@@ -1101,18 +1167,43 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                     background_accountant = SchedulerModelAccountant(
                         ledger.connection, credential, urgent=False,
                     )
-                result = compact_assistant_context(
+                prior_summary = (
                     item.get("prior_summary")
-                    if isinstance(item.get("prior_summary"), dict) else None,
-                    item.get("pinned_state")
-                    if isinstance(item.get("pinned_state"), list) else [],
-                    item.get("source_messages")
-                    if isinstance(item.get("source_messages"), list) else [],
-                    prompt_version=str(item.get("prompt_version") or ""),
-                    context_profile_id=str(item.get("context_profile_id") or ""),
-                    api_key=credential.api_key,
-                    request_accountant=background_accountant,
+                    if isinstance(item.get("prior_summary"), dict) else None
                 )
+                pinned_state = (
+                    item.get("pinned_state")
+                    if isinstance(item.get("pinned_state"), list) else []
+                )
+                source_messages = (
+                    item.get("source_messages")
+                    if isinstance(item.get("source_messages"), list) else []
+                )
+                plan = plan_assistant_route(
+                    AssistantTaskType.CONTEXT_COMPACTION,
+                    estimated_input_tokens=conservative_assistant_token_estimate({
+                        "prior_summary": prior_summary,
+                        "pinned_state": pinned_state,
+                        "source_messages": source_messages,
+                    }),
+                    reserved_output_tokens=ASSISTANT_COMPACTION_MAX_OUTPUT_TOKENS,
+                    profiles=model_profiles,
+                )
+                routed = execute_assistant_route(
+                    plan,
+                    lambda profile, thinking_level: compact_assistant_context(
+                        prior_summary,
+                        pinned_state,
+                        source_messages,
+                        prompt_version=str(item.get("prompt_version") or ""),
+                        context_profile_id=str(item.get("context_profile_id") or ""),
+                        api_key=credential.api_key,
+                        request_accountant=background_accountant,
+                        model=profile.model_id,
+                        thinking_level=thinking_level,
+                    ),
+                )
+                result = {**routed.value, "routing": routed.routing}
                 _post_json(
                     title_url + "?mode=machine",
                     json.dumps({

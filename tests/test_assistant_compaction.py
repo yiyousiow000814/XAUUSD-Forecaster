@@ -68,6 +68,8 @@ def test_compaction_uses_only_prior_summary_and_next_chunk_through_metered_gatew
         context_profile_id="assistant-context-default-v1",
         api_key="test-key",
         request_accountant=CallbackModelAccountant(lambda usage: True),
+        model="gemma-compaction-routed",
+        thinking_level="minimal",
     )
 
     assert result["covered_message_ids"] == ["message-1", "message-2"]
@@ -75,6 +77,10 @@ def test_compaction_uses_only_prior_summary_and_next_chunk_through_metered_gatew
     assert result["model_version"] == "gemma-compaction-test"
     assert result["context_profile_id"] == "assistant-context-default-v1"
     assert calls[0][1]["purpose"] == "assistant-context-compaction"
+    assert calls[0][1]["model"] == "gemma-compaction-routed"
+    assert calls[0][1]["payload"]["generationConfig"]["thinkingConfig"] == {
+        "thinkingLevel": "minimal",
+    }
     prompt = calls[0][1]["payload"]["contents"][0]["parts"][0]["text"]
     inputs = json.loads(prompt)
     assert inputs["prior_summary"]["version"] == 1

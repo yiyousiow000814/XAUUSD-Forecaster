@@ -38,6 +38,8 @@ def test_news_question_uses_only_the_bounded_shared_retrieval_packet(monkeypatch
         prompt_version=news_qa.NEWS_QA_PROMPT_VERSION,
         api_key="test-key",
         request_accountant=CallbackModelAccountant(lambda usage: True),
+        model="gemma-routed",
+        thinking_level="high",
     )
     assert result == {
         "answer_status": "ANSWERED",
@@ -47,6 +49,10 @@ def test_news_question_uses_only_the_bounded_shared_retrieval_packet(monkeypatch
         "prompt_version": news_qa.NEWS_QA_PROMPT_VERSION,
     }
     assert calls[0]["purpose"] == "news-question-answer"
+    assert calls[0]["model"] == "gemma-routed"
+    assert calls[0]["payload"]["generationConfig"]["thinkingConfig"] == {
+        "thinkingLevel": "high",
+    }
     prompt = calls[0]["payload"]["contents"][0]["parts"][0]["text"]
     assert "this raw body" not in prompt
     assert prompt.count('"evidence_id"') == news_qa.MAX_RETRIEVED_EVIDENCE
