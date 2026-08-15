@@ -66,6 +66,12 @@ identity. Machine routes MUST NOT rely on a human browser cookie, and human
 Assistant routes MUST NOT accept the ingest token as a user identity. Machine
 and human authorization are separate policies even when they share hosting.
 
+The operational `/api/assistant-chat` boundary follows that separation. Human
+send, cancel, turn-read, and SSE-replay requests require the verified owner.
+Machine claim, progress, completion, failure, and capacity-defer requests
+require `INGEST_TOKEN`; every mutation after claim must also present the exact
+unexpired lease token. Neither credential class is accepted as the other.
+
 ## Ownership enforcement
 
 Every conversation, message, title change, queue item, stream, and memory read
@@ -76,6 +82,12 @@ perform the same owner check.
 Authentication and authorization occur again on the server for every request;
 frontend state is not an authority. Error responses MUST not reveal whether a
 conversation belonging to another actor exists.
+
+Event replay is finite and owner-scoped on every request. An object ID or
+`Last-Event-ID` never grants access, and reconnecting does not weaken the owner
+check. Machine completion provenance is strict JSON, bounded, tied to the exact
+conversation and user message, checked against routing/tool receipts, and
+rejected if it contains credential-like fields or an invalid run hash.
 
 ## Credential secrecy
 

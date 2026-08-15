@@ -121,6 +121,9 @@ product requirement.
   independent-event replay input rather than reverse-engineering grouped output.
 - Assistant presentation may use labeled synthetic or frozen fixtures; its
   model-consuming and conversation-mutating routes remain unavailable.
+- `/api/assistant-chat` returns a labeled synthetic empty turn or finite empty
+  `assistant.event.v1` stream for reads. POST and machine-claim modes reject
+  before identity, body, D1, queue, or model work.
 
 ## Machine-readable manifest
 

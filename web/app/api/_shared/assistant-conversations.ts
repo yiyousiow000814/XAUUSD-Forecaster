@@ -394,6 +394,57 @@ export async function requestAssistantTitleRegeneration(
     : { kind: "ALREADY_PENDING" };
 }
 
+export function automaticAssistantTitleStatements(
+  binding: D1Database,
+  input: { conversationId: string; assistantMessageId: string; now?: Date },
+) {
+  const timestamp = (input.now ?? new Date()).toISOString();
+  const titleJobId = crypto.randomUUID();
+  return {
+    titleJobId,
+    statements: [
+      binding.prepare(
+        `UPDATE assistant_conversations SET
+         title_request_version=title_request_version+1,pending_title_job_id=?
+         WHERE id=? AND title_source='PROVISIONAL' AND title_request_version=0
+           AND pending_title_job_id IS NULL
+           AND EXISTS (
+             SELECT 1 FROM assistant_messages
+             WHERE id=? AND conversation_id=assistant_conversations.id AND role='ASSISTANT'
+           )
+         RETURNING *`,
+      ).bind(titleJobId, input.conversationId, input.assistantMessageId),
+      binding.prepare(
+        `INSERT INTO assistant_title_jobs (
+         id,conversation_id,idempotency_key,requested_by,input_version,
+         expected_title_revision,first_user_message_id,assistant_message_id,
+         status,available_at,attempt_count,max_attempts,prompt_version,created_at
+         )
+         SELECT ?,id,?,'AUTOMATIC',title_request_version,title_revision,
+         (SELECT id FROM assistant_messages
+          WHERE conversation_id=assistant_conversations.id AND role='USER'
+          ORDER BY created_at,id LIMIT 1),?,'PENDING',?,0,?,?,?
+         FROM assistant_conversations WHERE pending_title_job_id=?
+         ON CONFLICT DO NOTHING RETURNING *`,
+      ).bind(
+        titleJobId, `automatic:${input.assistantMessageId}`,
+        input.assistantMessageId, timestamp,
+        ASSISTANT_CONVERSATION_LIMITS.titleJobMaxAttempts,
+        ASSISTANT_TITLE_PROMPT_VERSION, timestamp, titleJobId,
+      ),
+    ],
+  };
+}
+
+export async function scheduleAutomaticAssistantTitle(
+  binding: D1Database,
+  input: { conversationId: string; assistantMessageId: string; now?: Date },
+) {
+  const prepared = automaticAssistantTitleStatements(binding, input);
+  const results = await binding.batch<TitleJobRow>(prepared.statements);
+  return results[1]?.results?.[0] ?? null;
+}
+
 const titleJobHistoryCleanup = `lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL`;
 
 export async function claimAssistantTitleJob(
