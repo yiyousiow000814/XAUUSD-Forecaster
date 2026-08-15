@@ -550,6 +550,18 @@ test("keeps the 60-day news archive inside bounded D1 work", () => {
   assert.match(migration, /news_index_category_published_idx/);
 });
 
+test("keeps every D1 migration LF-only for remote compound-statement parsing", () => {
+  const attributes = readFileSync(new URL("../../.gitattributes", import.meta.url), "utf8");
+  assert.match(attributes, /^web\/drizzle\/\*\.sql text eol=lf$/m);
+  const migrations = readdirSync(new URL("../drizzle/", import.meta.url))
+    .filter(name => name.endsWith(".sql"));
+  assert.ok(migrations.length > 0);
+  for (const migration of migrations) {
+    const sql = readFileSync(new URL(`../drizzle/${migration}`, import.meta.url), "utf8");
+    assert.doesNotMatch(sql, /\r\n/, `${migration} must remain LF-only`);
+  }
+});
+
 test("prefetches bounded news details and avoids a fast loading-label flash", () => {
   const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
