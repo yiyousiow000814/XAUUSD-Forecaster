@@ -5,6 +5,10 @@ import {
   provisionalAssistantTitle,
 } from "./assistant-conversations";
 import { scheduleAssistantCompaction } from "./assistant-memory";
+import {
+  type AssistantRoutingProvenance,
+  parseAssistantRoutingProvenance,
+} from "./assistant-routing";
 
 export const NEWS_QA_PROMPT_VERSION = "news-qa-v2";
 export const INSUFFICIENT_EVIDENCE_ANSWER = "当前已收录且可追溯的新闻证据不足，无法可靠回答这个问题。";
@@ -475,13 +479,19 @@ export async function completeNewsQuestion(
   let answer: string;
   let evidence: string[];
   let modelVersion: string | null;
+  let routing: AssistantRoutingProvenance | null;
   if (answerStatus === "INSUFFICIENT_EVIDENCE") {
-    if (provenance.canonical_evidence_ids.length !== 0 || requestedEvidence.length !== 0) {
+    if (
+      provenance.canonical_evidence_ids.length !== 0
+      || requestedEvidence.length !== 0
+      || input.routing != null
+    ) {
       throw new NewsQuestionInputError("INVALID_INSUFFICIENT_RESULT", "证据不足结果不能携带证据");
     }
     answer = INSUFFICIENT_EVIDENCE_ANSWER;
     evidence = [];
     modelVersion = null;
+    routing = null;
   } else if (answerStatus === "ANSWERED") {
     answer = String(input.answer ?? "").normalize("NFKC").trim();
     modelVersion = String(input.model_version ?? "").trim();
@@ -490,6 +500,11 @@ export async function completeNewsQuestion(
     }
     if (requestedEvidence.length === 0) {
       throw new NewsQuestionInputError("UNVERIFIED_EVIDENCE", "回答必须引用已检索证据");
+    }
+    try {
+      routing = parseAssistantRoutingProvenance(input.routing, "NEWS_QA");
+    } catch {
+      throw new NewsQuestionInputError("INVALID_ROUTING_PROVENANCE", "模型路由来源无效");
     }
     evidence = requestedEvidence;
   } else {
@@ -509,6 +524,7 @@ export async function completeNewsQuestion(
     retrieval: provenance,
     model_version: modelVersion,
     prompt_version: leased.prompt_version,
+    routing,
   });
   const results = await binding.batch<NewsQuestionRow>([
     binding.prepare(

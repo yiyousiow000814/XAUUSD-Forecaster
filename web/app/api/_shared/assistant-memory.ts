@@ -1,4 +1,5 @@
 import { AssistantConversationInputError } from "./assistant-conversations";
+import { parseAssistantRoutingProvenance } from "./assistant-routing";
 
 export const ASSISTANT_COMPACTION_PROMPT_VERSION = "assistant-compaction-v1";
 
@@ -933,6 +934,14 @@ export async function completeAssistantCompactionJob(
     "INVALID_COMPACTION_PROVENANCE", "摘要规则或上下文 profile 无效",
   );
   const modelVersion = canonicalText(input.model_version, 120, "model version");
+  let routing;
+  try {
+    routing = parseAssistantRoutingProvenance(input.routing, "CONTEXT_COMPACTION");
+  } catch {
+    throw new AssistantConversationInputError(
+      "INVALID_COMPACTION_PROVENANCE", "摘要模型路由来源无效",
+    );
+  }
   const summaryContent = canonicalText(
     input.summary, ASSISTANT_MEMORY_LIMITS.maxSummaryCharacters, "summary",
   );
@@ -1003,11 +1012,15 @@ export async function completeAssistantCompactionJob(
     binding.prepare(
       `UPDATE assistant_compaction_jobs SET status='COMPLETED',model_version=?,completed_at=?,
        failure_code=NULL,attempt_history_json=json_insert(attempt_history_json,'$[#]',
-         json_object('event','COMPLETED','occurred_at',?,'attempt',attempt_count)),
+         json_object('event','COMPLETED','occurred_at',?,'attempt',attempt_count,
+           'routing',json(?))),
        ${compactionLeaseCleanup}
        WHERE id=? AND status='PROCESSING' AND lease_token=? AND lease_expires_at>?
        RETURNING *`,
-    ).bind(modelVersion, timestamp, timestamp, id, leaseToken, timestamp),
+    ).bind(
+      modelVersion, timestamp, timestamp, JSON.stringify(routing),
+      id, leaseToken, timestamp,
+    ),
     binding.prepare(
       `INSERT INTO assistant_summaries (
        id,conversation_id,version,prior_summary_id,source_job_id,

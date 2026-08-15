@@ -21,6 +21,7 @@ import {
   createNewsQuestion,
 } from "../app/api/_shared/news-questions.ts";
 import { D1TestDatabase } from "./d1-test-database.mjs";
+import { assistantRouting } from "./assistant-routing-fixture.mjs";
 
 const owner = "cloudflare-access:owner-a";
 const otherOwner = "cloudflare-access:owner-b";
@@ -62,6 +63,7 @@ async function completeQuestion(database, created, at = instant(1)) {
     retrieval: provenance(claim),
     model_version: "gemma-test",
     prompt_version: claim.prompt_version,
+    routing: assistantRouting("NEWS_QA"),
   }, at);
 }
 
@@ -125,6 +127,10 @@ test("answer completion atomically appends one immutable Assistant message and s
   assert.deepEqual(messages.items.map(item => item.role), ["USER", "ASSISTANT"]);
   assert.equal(messages.items[1].provenance.model_version, "gemma-test");
   assert.deepEqual(messages.items[1].provenance.evidence_ids, ["evidence:1"]);
+  assert.equal(
+    messages.items[1].provenance.routing.policy_version,
+    "assistant-routing-v1",
+  );
   const conversation = await getOwnerAssistantConversation(
     database, owner, created.item.conversation_id,
   );
@@ -203,6 +209,7 @@ test("AI and manual title work never changes conversation activity or overwrites
     title: "“美联储利率与黄金重定价”",
     model_version: "gemma-title-test",
     prompt_version: "assistant-title-v1",
+    routing: assistantRouting("CONVERSATION_TITLE"),
   }, instant(2.5));
   assert.deepEqual(applied, {
     job_id: job.id,
@@ -220,6 +227,11 @@ test("AI and manual title work never changes conversation activity or overwrites
     JSON.parse(database.row(job.id, "assistant_title_jobs").attempt_history_json)
       .map(receipt => receipt.event),
     ["CLAIMED", "COMPLETED"],
+  );
+  assert.equal(
+    JSON.parse(database.row(job.id, "assistant_title_jobs").attempt_history_json)
+      .at(-1).routing.task_type,
+    "CONVERSATION_TITLE",
   );
   assert.throws(
     () => database.database.prepare(
@@ -263,6 +275,7 @@ test("AI and manual title work never changes conversation activity or overwrites
     title: "不应覆盖用户标题",
     model_version: "gemma-title-test",
     prompt_version: "assistant-title-v1",
+    routing: assistantRouting("CONVERSATION_TITLE"),
   }, instant(4)), null);
   conversation = await getOwnerAssistantConversation(
     database, owner, created.item.conversation_id,
@@ -338,6 +351,7 @@ test("expired title leases are reclaimed and stale workers cannot apply a title"
     title: "过期工作者标题",
     model_version: "gemma-title-test",
     prompt_version: "assistant-title-v1",
+    routing: assistantRouting("CONVERSATION_TITLE"),
   }, instant(6)), null);
   assert.equal((await completeAssistantTitleJob(database, {
     id: recovered.id,
@@ -345,6 +359,7 @@ test("expired title leases are reclaimed and stale workers cannot apply a title"
     title: "恢复后的有效标题",
     model_version: "gemma-title-test",
     prompt_version: "assistant-title-v1",
+    routing: assistantRouting("CONVERSATION_TITLE"),
   }, instant(6))).title_applied, true);
 });
 

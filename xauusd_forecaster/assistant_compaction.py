@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from .annotation import DEFAULT_GEMMA_MODEL, generate_metered_json
+from .assistant_routing import apply_provider_thinking_level
 from .model_gateway import ModelRequestAccountant
 
 
@@ -27,6 +28,7 @@ MAX_SUMMARY_CHARACTERS = 8_000
 MAX_PIN_CONTENT_CHARACTERS = 1_200
 MAX_REFERENCE_ITEMS = 64
 MAX_INPUT_CHARACTERS = 40_000
+ASSISTANT_COMPACTION_MAX_OUTPUT_TOKENS = 2_400
 
 
 def _references(value: object, field: str) -> list[str]:
@@ -138,6 +140,8 @@ def compact_assistant_context(
     context_profile_id: str,
     api_key: str | None,
     request_accountant: ModelRequestAccountant | None,
+    model: str = DEFAULT_GEMMA_MODEL,
+    thinking_level: str | None = None,
 ) -> dict[str, Any]:
     """Summarize only the prior summary plus the next frozen message chunk."""
     if prompt_version != ASSISTANT_COMPACTION_PROMPT_VERSION:
@@ -172,7 +176,7 @@ def compact_assistant_context(
         "generationConfig": {
             "responseMimeType": "application/json",
             "temperature": 0,
-            "maxOutputTokens": 2_400,
+            "maxOutputTokens": ASSISTANT_COMPACTION_MAX_OUTPUT_TOKENS,
             "responseSchema": {
                 "type": "object",
                 "required": ["summary", "covered_message_ids", "pinned_entries"],
@@ -225,9 +229,9 @@ def compact_assistant_context(
 
     result, model_version = generate_metered_json(
         api_key,
-        model=DEFAULT_GEMMA_MODEL,
+        model=model,
         purpose="assistant-context-compaction",
-        payload=payload,
+        payload=apply_provider_thinking_level(payload, thinking_level),
         decode=decode,
         request_accountant=request_accountant,
     )

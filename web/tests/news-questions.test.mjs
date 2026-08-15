@@ -13,6 +13,7 @@ import {
   NewsQuestionInputError,
 } from "../app/api/_shared/news-questions.ts";
 import { D1TestDatabase } from "./d1-test-database.mjs";
+import { assistantRouting } from "./assistant-routing-fixture.mjs";
 
 const minute = value => new Date(Date.parse("2026-08-15T10:00:00.000Z") + value * 60_000);
 const key = suffix => `00000000-0000-4000-8000-${String(suffix).padStart(12, "0")}`;
@@ -129,6 +130,7 @@ test("expired leases recover, stale lease tokens cannot publish, and completion 
     model_version: "gemma-test",
     prompt_version: recovered.prompt_version,
     retrieval: provenance(recovered, [evidenceId]),
+    routing: assistantRouting("NEWS_QA"),
   }, minute(4));
   assert.equal(completed.status, "ANSWERED");
   assert.equal(database.row(created.item.id).processing_started_at, null);

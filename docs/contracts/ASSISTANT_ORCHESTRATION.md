@@ -30,6 +30,13 @@ The first reasoning router SHOULD be deterministic and request-local. It MUST
 NOT spend another model request merely to ask how much reasoning to use. Initial
 classes MAY include `SIMPLE`, `ANALYTICAL`, and `TOOL_HEAVY`.
 
+Every model-consuming Assistant result MUST retain a versioned routing receipt
+that identifies the task type, reasoning class, requested thinking level,
+model requirement, bounded input/output estimate, declared candidate profiles,
+and selected profile/model. The receipt records the decision made before
+transport; it MUST NOT contain credentials. A no-model result such as a fixed
+insufficient-evidence answer MUST NOT invent a routing receipt.
+
 ## Model profiles and task policy
 
 A model is described by operational data equivalent to:
@@ -56,6 +63,14 @@ smaller permitted model with minimal reasoning and tiny context. Conflicting
 macro evidence, causal analysis, multi-period comparison, and multi-source
 synthesis MAY require a larger analytical profile. Model names and context
 limits remain configuration, not conversation schema.
+
+Operational model-profile configuration MAY enable multiple sizes. The router
+MUST filter disabled profiles, insufficient context limits, missing thinking
+support for high-effort work, and missing function-calling support for a tool
+plan before transport. A simple task may use a declared smaller-to-larger
+fallback. Analytical or tool-heavy work marked `LARGE_REQUIRED` MUST expose an
+unavailable result when no compatible large profile exists rather than silently
+downgrading.
 
 ## Credential pools and capacity
 

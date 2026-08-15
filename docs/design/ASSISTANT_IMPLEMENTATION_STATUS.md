@@ -4,8 +4,8 @@
 
 This status is maintained as the Assistant architecture and its bounded
 implementation PRs land. PR #103 established the contracts; PRs #20, #21, #22,
-and #104 are merged on `main`. The rows describe the post-merge state carried by
-the bounded conversation and incremental-memory implementations.
+#104, and #106 are merged on `main`. The rows describe the post-merge state
+carried by the bounded conversation and incremental-memory implementations.
 
 Status values have precise meanings:
 
@@ -31,9 +31,9 @@ Status values have precise meanings:
 | Short-term memory | [State](../contracts/ASSISTANT_STATE.md) | `MVP` | The owner-scoped Context Builder assembles Pinned State, the current rolling summary, bounded optional historical inputs, recent verbatim turns, the canonical current user message, and compact tool evidence under an operational profile. Required pins, provenance, or evidence fail closed when they cannot fit; the long-term retrieval index remains separate. |
 | Long-term memory | [State](../contracts/ASSISTANT_STATE.md) | `NOT_IMPLEMENTED` | No owner-scoped historical memory index exists. |
 | Incremental compaction | [State](../contracts/ASSISTANT_STATE.md) | `MVP` | Migration `0010` adds immutable versioned summaries, append-only origin-linked pins, and leased compaction receipts that freeze exactly the next ordered message chunk. The low-priority Windows worker sends only `summary vN + new chunk + pinned snapshot` through the metered gateway; invalid or failed output leaves the prior summary active. Production activation requires migration `0010` and the updated sync worker. |
-| Reasoning router | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `NOT_IMPLEMENTED` | No Assistant task/effort classification exists. |
-| Model routing | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `PARTIAL` | `ai_task_registry.py` declares routes for existing news AI tasks; there is no Assistant router. |
-| Multi-model routing | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `PARTIAL` | Existing annotation/title routes have declared fallbacks; mixed Assistant 31B/26B policy is absent. |
+| Reasoning router | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | `assistant_routing.py` classifies current Q&A, title, and compaction work deterministically as `SIMPLE`, `ANALYTICAL`, or `TOOL_HEAVY` before transport. It never spends a model request to choose effort; future general chat intents may extend the versioned policy. |
+| Model routing | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | Current Assistant model calls use enabled operational `ModelProfile` records, context/capability gates, declared candidate order, and a persisted `assistant-routing-v1` receipt. `LARGE_REQUIRED` work fails closed instead of silently selecting a smaller profile. |
+| Multi-model routing | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | Simple tasks support a declared small-to-large fallback and complex tasks retain a large-only contract. The checked-in safe default enables only the current large model; an actually permitted smaller model must be enabled through `ASSISTANT_MODEL_PROFILES`, so deployment does not guess a provider model ID. |
 | Multi-credential routing | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `PARTIAL` | The news scheduler ranks independent accounts; Assistant tasks are not integrated. |
 | TPM/RPM/RPD accounting | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | Q&A reserves interactive model use through the durable account/model scheduler accountant. A general Assistant capacity router and mixed-model policy remain future work. |
 | Unified model gateway | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | `model_gateway.py` is the single metered Google generation boundary used by the news semantic chain, Daily Brief, Q&A, titles, and compaction. |
