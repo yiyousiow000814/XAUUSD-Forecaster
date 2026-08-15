@@ -659,6 +659,11 @@ test("database triggers keep turn inputs, events, and sequence receipts immutabl
   assert.throws(() => database.database.prepare(
     `INSERT INTO assistant_turn_events (
      id,turn_id,protocol,sequence,type,message_id,occurred_at,payload_json,idempotency_key
+     ) VALUES ('missing-turn','missing-turn','assistant.event.v1',1,'reasoning.started',NULL,?,'{"reasoning_class":"SIMPLE"}','missing-turn-event-0001')`,
+  ).run(atSeconds(1).toISOString()), /requires admitted turn/);
+  assert.throws(() => database.database.prepare(
+    `INSERT INTO assistant_turn_events (
+     id,turn_id,protocol,sequence,type,message_id,occurred_at,payload_json,idempotency_key
      ) VALUES ('oversized',?,'assistant.event.v1',2,'reasoning.started',NULL,?,?,'oversized-event-0001')`,
   ).run(created.item.id, atSeconds(1).toISOString(), oversizedUtf8), /constraint/);
   assert.throws(() => database.database.prepare(

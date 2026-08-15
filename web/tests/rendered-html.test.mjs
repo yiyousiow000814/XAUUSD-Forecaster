@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
+import { unstable_splitSqlQuery } from "wrangler";
 
 const workerUrl = new URL("../dist/server/index.js", import.meta.url);
 workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
@@ -560,7 +561,7 @@ test("keeps the 60-day news archive inside bounded D1 work", () => {
   assert.match(migration, /news_index_category_published_idx/);
 });
 
-test("keeps every D1 migration LF-only for remote compound-statement parsing", () => {
+test("keeps every D1 migration compatible with remote compound-statement parsing", () => {
   const attributes = readFileSync(new URL("../../.gitattributes", import.meta.url), "utf8");
   assert.match(attributes, /^web\/drizzle\/\*\.sql text eol=lf$/m);
   const migrations = readdirSync(new URL("../drizzle/", import.meta.url))
@@ -569,6 +570,15 @@ test("keeps every D1 migration LF-only for remote compound-statement parsing", (
   for (const migration of migrations) {
     const sql = readFileSync(new URL(`../drizzle/${migration}`, import.meta.url), "utf8");
     assert.doesNotMatch(sql, /\r\n/, `${migration} must remain LF-only`);
+    const triggers = unstable_splitSqlQuery(sql)
+      .filter(statement => /^CREATE TRIGGER\b/i.test(statement));
+    for (const trigger of triggers) {
+      assert.doesNotMatch(
+        trigger,
+        /\bSELECT\s+CASE\b/i,
+        `${migration} trigger bodies must avoid SELECT CASE for remote D1 query parsing`,
+      );
+    }
   }
 });
 
