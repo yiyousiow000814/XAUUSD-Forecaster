@@ -274,7 +274,8 @@ test("keeps branch Preview identity and blocks writes", async () => {
     .map(entry => readFileSync(`${entry.parentPath}/${entry.name}`, "utf8"))
     .join("\n");
   assert.match(builtPreview, /PREVIEW_SNAPSHOT/);
-  assert.match(builtPreview, new RegExp(process.env.WORKERS_CI_BRANCH.replaceAll("/", "\\/")));
+  const escapedBranch = process.env.WORKERS_CI_BRANCH.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  assert.match(builtPreview, new RegExp(escapedBranch));
 
   for (const path of [
     "/api/ingest", "/api/learning", "/api/learning-history",
