@@ -9,8 +9,6 @@ to train the next model group.
 
 **It does not place orders or connect to a trading account.**
 
-[Open the live research dashboard](https://aurum-signal-room.yiyousiow1234.workers.dev/)
-
 ## Open-source boundary
 
 The source code is available under the [MIT License](LICENSE). Training data,
@@ -18,6 +16,10 @@ runtime databases, market quotes, news archives, trained model artifacts,
 credentials, and production configuration are not published. A user of this
 repository must provide lawful data sources and train their own models; cloning
 the repository does not reproduce the deployed forecasts.
+
+This is a personal, owner-maintained repository published to support its CI
+workflow. External contributions, issues, feature requests, and support requests
+are not accepted.
 
 ## What you can see
 
