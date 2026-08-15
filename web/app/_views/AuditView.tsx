@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import DashboardLink from "../_components/DashboardLink";
+import MobileDashboardNav, { type MobileDashboardSection } from "../_components/MobileDashboardNav";
 import CountValue from "../_components/CountValue";
 import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
 import SystemStatePill from "../_components/SystemStatePill";
@@ -29,6 +30,8 @@ type Prediction = {
   effective_action: string;
   prediction_status: string;
 };
+
+type AuditDeskView = "briefs" | "search" | "qa" | "news" | "evidence" | "stories" | "decisions" | "league" | "coverage";
 
 type Decision = {
   decision_id: string;
@@ -833,7 +836,7 @@ export default function AuditView() {
   const [learningError, setLearningError] = useState<string | null>(null);
   const [newsError, setNewsError] = useState<string | null>(null);
   const [newsDetails, setNewsDetails] = useState<Record<string, Partial<News>>>({});
-  const [view, setView] = useState<"briefs" | "search" | "qa" | "news" | "evidence" | "stories" | "decisions" | "league" | "coverage">(initialView);
+  const [view, setView] = useState<AuditDeskView>(initialView);
   const [briefDate, setBriefDate] = useState<string | null>(null);
   const [searchInput, setSearchInput] = useState("");
   const [searchTimeField, setSearchTimeField] = useState<"published" | "received">("published");
@@ -882,7 +885,6 @@ export default function AuditView() {
   const learningFailureCountRef = useRef(0);
   const [summaryCadence, setSummaryCadence] = useState<EvaluationCadence>("EVERY_5M");
   const [evidenceMode, setEvidenceMode] = useState<"seen" | "unseen" | "all">("seen");
-  const auditTabsRef = useRef<HTMLElement>(null);
 
   const refreshStatus = useCallback(async (force = false) => {
     try {
@@ -986,9 +988,10 @@ export default function AuditView() {
     if (!fullLearningReadyRef.current) void refreshLearning(true);
   };
 
-  const selectView = (next: "briefs" | "search" | "qa" | "news" | "evidence" | "stories" | "decisions" | "league" | "coverage") => {
+  const selectView = (next: AuditDeskView) => {
     setView(next);
     window.history.replaceState(null, "", `/?room=audit&view=${next}`);
+    window.scrollTo({ top: 0, behavior: "instant" });
   };
 
   const runNewsSearch = async (page = 1, applied?: NewsSearchResponse) => {
@@ -1087,23 +1090,6 @@ export default function AuditView() {
       window.clearInterval(interval);
     };
   }, [hasActiveQuestion, refreshNewsQuestions, view]);
-
-  const scrollAuditTabs = (direction: -1 | 1) => {
-    const nav = auditTabsRef.current;
-    if (!nav) return;
-    nav.scrollBy({ left: direction * Math.max(180, nav.clientWidth * 0.75), behavior: "smooth" });
-  };
-
-  useEffect(() => {
-    if (!window.matchMedia("(max-width: 850px)").matches) return;
-    const nav = auditTabsRef.current;
-    const active = nav?.querySelector<HTMLElement>("a.active");
-    if (!nav || !active) return;
-    nav.scrollTo({
-      left: Math.max(0, active.offsetLeft - (nav.clientWidth - active.clientWidth) / 2),
-      behavior: "smooth",
-    });
-  }, [view]);
 
   const progress = useMemo(() => {
     const training = payload?.training;
@@ -1225,6 +1211,7 @@ export default function AuditView() {
   const continuedEventTotal = payload?.storyline_summary?.total ?? 0;
   const singleEventTotal = payload?.storyline_summary?.candidate_total ?? 0;
   const activeEventTotal = continuedEventTotal + singleEventTotal;
+  const mobileDashboardSection: MobileDashboardSection = view === "league" ? "learning" : "audit";
 
   return (
     <main className="audit-main">
@@ -1239,6 +1226,7 @@ export default function AuditView() {
           <DashboardLink className="audit-link" href="/" replace>← 返回实时室</DashboardLink>
           <SystemStatePill loading={statusState === "loading"} error={statusState === "error"} online={Boolean(payload?.system?.online)} marketSession={payload?.system?.market_session} />
         </div>
+        <MobileDashboardNav current={mobileDashboardSection} status={<SystemStatePill loading={statusState === "loading"} error={statusState === "error"} online={Boolean(payload?.system?.online)} marketSession={payload?.system?.market_session} />} />
       </header>
 
       <section className="audit-intro">
@@ -1281,8 +1269,7 @@ export default function AuditView() {
       />
 
       <div className="audit-tabs-shell">
-      <button type="button" className="audit-tabs-scroll" onClick={() => scrollAuditTabs(-1)} aria-label="向左查看更多审计视图"><span aria-hidden="true">‹</span></button>
-      <nav ref={auditTabsRef} className="audit-tabs" aria-label="审计视图">
+      <nav className="audit-tabs" aria-label="审计视图">
         <a href="/audit?view=briefs" className={view === "briefs" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("briefs"); }}>每日简报 <b><MetricValue phase={statusState}><CountValue value={payload?.daily_news_briefs?.length} /></MetricValue></b></a>
         <a href="/audit?view=search" className={view === "search" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("search"); }}>搜索 <b aria-hidden="true">⌕</b></a>
         <a href="/audit?view=qa" className={view === "qa" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("qa"); }}>私有问答 <b aria-hidden="true">?</b></a>
@@ -1293,8 +1280,22 @@ export default function AuditView() {
         <a href="/audit?view=league" className={view === "league" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("league"); }}>Live OOS 学习曲线 <b><MetricValue phase={liveOosPhase}>{liveOosModelGroups !== undefined ? `${liveOosModelGroups}组` : "—"}</MetricValue></b></a>
         <a href="/audit?view=coverage" className={view === "coverage" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("coverage"); }}>大视野覆盖 <b><MetricValue phase={coveragePhase} snapshotLabel="分支快照" snapshotTitle="此覆盖结果由当前 PR 分支在构建时重新计算，不是生产实时观测">{payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length ?? 0}/11</MetricValue></b></a>
       </nav>
-      <button type="button" className="audit-tabs-scroll" onClick={() => scrollAuditTabs(1)} aria-label="向右查看更多审计视图"><span aria-hidden="true">›</span></button>
       </div>
+
+      <label className="audit-view-picker">
+        <span>证据台页面</span>
+        <select aria-label="切换证据台页面" value={view} onChange={event => selectView(event.currentTarget.value as AuditDeskView)}>
+          <option value="briefs">每日简报 · {formatExactCount(payload?.daily_news_briefs?.length)}</option>
+          <option value="search">搜索新闻</option>
+          <option value="qa">私有问答</option>
+          <option value="news">新闻 · {formatExactCount(readableNewsTotal)}</option>
+          <option value="evidence">当前可用新闻事件 · {formatExactCount(newsMetrics.events.currently_model_eligible)}</option>
+          <option value="stories">事件脉络 · {formatExactCount(activeEventTotal)}</option>
+          <option value="decisions">决策与30分钟结果 · {formatExactCount(payload?.counts?.decision_events)}</option>
+          <option value="league">Live OOS 学习曲线 · {formatExactCount(liveOosModelGroups)}组</option>
+          <option value="coverage">大视野覆盖 · {formatExactCount(payload?.factor_coverage?.filter(row => row.status === "LIVE" || row.status === "COLLECTING").length)}/11</option>
+        </select>
+      </label>
 
       {view === "briefs" && (() => {
         const briefs = payload?.daily_news_briefs ?? [];

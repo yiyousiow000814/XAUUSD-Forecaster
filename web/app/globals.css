@@ -848,19 +848,21 @@ body.modal-open { overflow:hidden; }
 }
 
 .audit-tabs-shell { display:contents; }
-.audit-tabs-scroll { display:none; }
+.audit-view-picker,.mobile-dashboard-nav { display:none; }
 
 /* Mobile usability: preserve the desktop information architecture while making
    navigation, touch targets, and dense research views usable on a phone. */
 @media (max-width:850px){
   main { padding:14px; }
-  .topbar { align-items:stretch; flex-direction:column; gap:14px; padding-bottom:14px; }
+  .topbar { align-items:stretch; flex-direction:column; gap:10px; padding-bottom:12px; }
   .brand { width:max-content; max-width:100%; }
-  .top-actions { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; width:100%; }
-  .top-actions .audit-link,.top-actions .live-pill { min-width:0; min-height:46px; justify-content:center; padding:8px 7px; text-align:center; white-space:nowrap; line-height:1.3; }
-  .top-actions .audit-link { font-size:12px; }
-  .top-actions .live-pill { gap:6px; border-radius:0; font-size:10px; letter-spacing:.05em; }
-  .top-actions .live-pill span { flex:0 0 auto; }
+  .top-actions { display:none; }
+  .mobile-dashboard-nav { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; width:100%; }
+  .mobile-dashboard-nav>label { position:relative; display:grid; grid-template-columns:auto minmax(0,1fr); align-items:center; min-width:0; min-height:46px; border:1px solid var(--ink); background:var(--paper); }
+  .mobile-dashboard-nav>label>span { align-self:stretch; display:grid; place-items:center; border-right:1px solid var(--ink); padding:0 11px; color:var(--muted); font-size:9px; font-weight:800; letter-spacing:.12em; }
+  .mobile-dashboard-nav select { width:100%; min-width:0; min-height:44px; border:0; border-radius:0; padding:8px 34px 8px 12px; background:var(--paper); color:var(--ink); font-family:var(--font-sans),sans-serif; font-size:14px; font-weight:800; }
+  .mobile-dashboard-nav select:focus-visible { outline:3px solid var(--acid); outline-offset:-3px; }
+  .mobile-dashboard-status .live-pill { min-height:46px; border-radius:0; padding:8px 10px; white-space:nowrap; }
 
   .audit-intro { gap:16px; padding:18px 0 16px; }
   .audit-intro>div:first-child .eyebrow { display:none; }
@@ -870,14 +872,11 @@ body.modal-open { overflow:hidden; }
   .training-card-total { margin-bottom:9px; }
   .training-card-total strong { font-size:31px; }
 
-  .audit-tabs-shell { position:sticky; top:0; z-index:10; display:grid; grid-template-columns:44px minmax(0,1fr) 44px; gap:1px; border:1px solid var(--ink); background:var(--ink); }
-  .audit-tabs-scroll { display:grid; place-items:center; min-width:0; min-height:52px; border:0; background:#d9d2c1; color:var(--ink); cursor:pointer; }
-  .audit-tabs-scroll span { display:block; transform:translateY(-1px); font-family:var(--font-display); font-size:30px; font-weight:700; line-height:1; }
-  .audit-tabs-scroll:active,.audit-tabs-scroll:focus-visible { background:var(--acid); outline:2px solid var(--ink); outline-offset:-3px; }
-  .audit-tabs { position:static; display:flex; gap:1px; min-width:0; overflow-x:auto; padding:1px; border:0; scroll-padding-inline:14px; scroll-snap-type:x proximity; scrollbar-width:none; overscroll-behavior-inline:contain; touch-action:pan-x; }
-  .audit-tabs::-webkit-scrollbar { display:none; }
-  .audit-tabs a { flex:0 0 auto; min-width:max-content; min-height:52px; gap:12px; padding:10px 14px; border:0; white-space:nowrap; scroll-snap-align:center; }
-  .audit-tabs b { font-size:21px; }
+  .audit-tabs-shell { display:none; }
+  .audit-view-picker { position:sticky; top:0; z-index:10; display:grid; grid-template-columns:auto minmax(0,1fr); align-items:center; min-height:52px; border:1px solid var(--ink); background:var(--ink); box-shadow:inset 0 4px var(--acid); }
+  .audit-view-picker>span { align-self:stretch; display:grid; place-items:center; padding:4px 11px 0; color:var(--paper); font-size:9px; font-weight:800; letter-spacing:.1em; white-space:nowrap; }
+  .audit-view-picker select { width:100%; min-width:0; min-height:50px; border:0; border-radius:0; padding:8px 34px 8px 12px; background:var(--paper); color:var(--ink); font-family:var(--font-sans),sans-serif; font-size:14px; font-weight:800; }
+  .audit-view-picker select:focus-visible { outline:3px solid var(--acid); outline-offset:-3px; }
 
   .news-search-desk form { padding:18px; }
   .search-filter-grid { grid-template-columns:1fr; }

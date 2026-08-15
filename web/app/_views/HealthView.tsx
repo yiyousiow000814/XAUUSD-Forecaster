@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { CurrentDataNotice, type CurrentDataPhase } from "../_components/CurrentDataState";
 import CountValue from "../_components/CountValue";
 import DashboardLink from "../_components/DashboardLink";
+import MobileDashboardNav from "../_components/MobileDashboardNav";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
@@ -96,6 +97,7 @@ export default function HealthView() {
         <DashboardLink className="audit-link" href="/audit?view=news">新闻与决策</DashboardLink>
         <DashboardLink className="audit-link" href="/" replace>← 返回实时室</DashboardLink>
       </div>
+      <MobileDashboardNav current="health" />
     </header>
     <section className="status-hero">
       <div><p className="eyebrow">OPERATIONAL HEARTBEATS / SOURCE HEALTH</p><h1>系统健康状态</h1></div>
