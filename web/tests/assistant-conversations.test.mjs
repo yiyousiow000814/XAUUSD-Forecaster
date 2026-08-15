@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   claimAssistantTitleJob,
   completeAssistantTitleJob,
+  deferAssistantTitleJob,
   failAssistantTitleJob,
   getOwnerAssistantConversation,
   listOwnerAssistantConversations,
@@ -330,6 +331,44 @@ test("title leases retry finitely and archive/list operations preserve activity 
     [older.item.conversation_id],
   );
   assert.notEqual(activity, archived.last_activity_at);
+});
+
+test("capacity deferral releases a title lease under the finite attempt budget", async () => {
+  const database = new D1TestDatabase();
+  const created = await createQuestion(database);
+  await completeQuestion(database, created, instant(1));
+  const claimed = await claimAssistantTitleJob(database, "worker:title", instant(2));
+
+  const deferred = await deferAssistantTitleJob(database, {
+    id: claimed.id,
+    lease_token: claimed.lease_token,
+  }, instant(2));
+
+  assert.equal(deferred.status, "PENDING");
+  assert.equal(database.row(claimed.id, "assistant_title_jobs").attempt_count, 1);
+  assert.equal(await claimAssistantTitleJob(database, "worker:early", instant(2.5)), null);
+  const reclaimed = await claimAssistantTitleJob(database, "worker:later", instant(3));
+  assert.equal(reclaimed.attempt_count, 2);
+  assert.equal((await deferAssistantTitleJob(database, {
+    id: reclaimed.id, lease_token: reclaimed.lease_token,
+  }, instant(3))).status, "PENDING");
+  const finalClaim = await claimAssistantTitleJob(database, "worker:final", instant(4));
+  assert.equal(finalClaim.attempt_count, 3);
+  assert.equal((await deferAssistantTitleJob(database, {
+    id: finalClaim.id, lease_token: finalClaim.lease_token,
+  }, instant(4))).status, "FAILED");
+  assert.equal(
+    database.row(created.item.conversation_id, "assistant_conversations").pending_title_job_id,
+    null,
+  );
+  assert.deepEqual(
+    JSON.parse(database.row(claimed.id, "assistant_title_jobs").attempt_history_json)
+      .map(receipt => receipt.event),
+    [
+      "CLAIMED", "CAPACITY_DEFERRED", "CLAIMED",
+      "CAPACITY_DEFERRED", "CLAIMED", "CAPACITY_DEFERRED",
+    ],
+  );
 });
 
 test("expired title leases are reclaimed and stale workers cannot apply a title", async () => {

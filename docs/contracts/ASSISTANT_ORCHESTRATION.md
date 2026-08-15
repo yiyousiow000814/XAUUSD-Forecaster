@@ -109,6 +109,20 @@ fallback model, smaller retrieval, safe compaction, deferral, or a bounded queue
 before graceful rejection. It MUST protect soft capacity before relying on a
 provider `429` as flow control.
 
+The current operational boundary is `assistant-capacity-v1`. It expands the
+already-fixed model candidate plan into bounded pool/model pairs, ranks usable
+headroom, and durably reserves request, token, and in-flight capacity before the
+metered gateway may send. A reservation has a finite lease so a stopped worker
+cannot strand in-flight capacity. Provider throttles and repeated transport
+failures update pair-specific health and cooldown state.
+
+Each model-consuming routing receipt MUST include a validated capacity receipt
+with service priority, an anonymous pool fingerprint, pool class, bounded
+candidate/attempt counts, admission estimate, applied soft cap, and whether a
+declared model fallback was used. It MUST NOT contain an account ID, API key,
+credential reference, or secret. Persistent conversation state remains usable
+when a later turn selects a different pool.
+
 ## Unified metered gateway
 
 Every model-generating request MUST cross a shared server-side gateway that:
@@ -134,6 +148,11 @@ Interactive authenticated turns have a declared service priority. Daily brief,
 title generation, compaction refresh, and memory indexing are lower-priority or
 preemptible background work. Background work MUST defer before consuming the
 headroom reserved for current semantic-pipeline health and interactive turns.
+The current Google account registry treats `PREEMPTIBLE` pools as interactive-
+eligible reserved capacity and permits `ROUTINE` pools to serve background work
+or interactive overflow. A capacity-only deferral releases the remote work
+lease with bounded backoff without sending a model request. Deferrals remain
+inside the finite orchestration-attempt and task-expiry budgets.
 
 Admission MUST occur before queue creation or model transport where the relevant
 identity, payload, or capacity condition is already known. Retry and queue

@@ -8,10 +8,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Callable, Generic, TypeVar
-
 from .annotation import DEFAULT_GEMMA_MODEL
-from .model_gateway import ModelGatewayCapacityExhausted
 
 
 ASSISTANT_ROUTING_POLICY_VERSION = "assistant-routing-v1"
@@ -80,16 +77,6 @@ class AssistantRoutePlan:
     @property
     def required_context_tokens(self) -> int:
         return self.estimated_input_tokens + self.reserved_output_tokens
-
-
-T = TypeVar("T")
-
-
-@dataclass(frozen=True)
-class RoutedAssistantResult(Generic[T]):
-    value: T
-    profile: ModelProfile
-    routing: dict[str, object]
 
 
 DEFAULT_ASSISTANT_MODEL_PROFILES = (
@@ -413,27 +400,6 @@ def routing_provenance(
         "supports_function_calling": profile.supports_function_calling,
         "supports_streaming": profile.supports_streaming,
     }
-
-
-def execute_assistant_route(
-    plan: AssistantRoutePlan,
-    invoke: Callable[[ModelProfile, str | None], T],
-) -> RoutedAssistantResult[T]:
-    """Try only declared model fallbacks; required-large plans never downgrade."""
-    last_capacity_error: ModelGatewayCapacityExhausted | None = None
-    for profile in plan.candidate_profiles:
-        try:
-            value = invoke(profile, provider_thinking_level(plan, profile))
-            return RoutedAssistantResult(
-                value=value,
-                profile=profile,
-                routing=routing_provenance(plan, profile),
-            )
-        except ModelGatewayCapacityExhausted as error:
-            last_capacity_error = error
-    if last_capacity_error is not None:
-        raise last_capacity_error
-    raise AssistantModelRoutingUnavailable("Assistant model route is empty")
 
 
 def apply_provider_thinking_level(

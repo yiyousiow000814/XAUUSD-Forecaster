@@ -81,6 +81,12 @@ leave `PROCESSING` permanently: lease recovery returns eligible work to
 `PENDING` or moves exhausted work to `FAILED`. Retries are bounded and preserve
 the prior failure receipt.
 
+A worker that holds a valid lease but cannot obtain safe model capacity records
+`CAPACITY_DEFERRED`, clears the lease, applies bounded backoff, and returns the
+item to `PENDING` when the orchestration budget remains. No model request is
+sent, but the finite claim budget and task expiry still apply. The transition
+cannot revive expired, stale-lease, or terminal work.
+
 Authentication occurs before queue creation. Per-owner concurrency and global
 capacity are bounded, so anonymous or single-user traffic cannot starve the
 queue.

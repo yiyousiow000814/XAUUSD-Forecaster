@@ -8,6 +8,7 @@ import sys
 import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,6 +20,49 @@ def _sync_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _stub_assistant_capacity_route(monkeypatch, accountant_value: str) -> list[dict]:
+    from xauusd_forecaster import assistant_capacity, assistant_routing
+
+    calls: list[dict] = []
+
+    def execute(connection, plan, credentials, *, service_priority, policies, invoke):
+        selected = credentials[0]
+        profile = plan.candidate_profiles[0]
+        calls.append({
+            "connection": connection,
+            "credentials": credentials,
+            "service_priority": service_priority,
+            "policies": policies,
+        })
+        value = invoke(
+            profile,
+            selected,
+            assistant_routing.provider_thinking_level(plan, profile),
+            accountant_value,
+        )
+        routing = assistant_routing.routing_provenance(plan, profile)
+        routing["capacity"] = {
+            "policy_version": "assistant-capacity-v1",
+            "service_priority": service_priority.value,
+            "selected_pool_fingerprint": "0123456789abcdef",
+            "selected_pool_type": selected.pool,
+            "candidate_pool_count": 1,
+            "candidate_pair_count": 1,
+            "attempt_count": 1,
+            "estimated_input_tokens": plan.estimated_input_tokens,
+            "soft_cap_basis_points": 8_000,
+            "max_in_flight": 2,
+            "policy_source": "REGISTRY_DEFAULT",
+            "model_fallback_used": False,
+        }
+        return SimpleNamespace(value=value, profile=profile, routing=routing)
+
+    monkeypatch.setattr(
+        assistant_capacity, "execute_assistant_capacity_route", execute,
+    )
+    return calls
 
 
 def _annotator_module():
@@ -1384,7 +1428,6 @@ def test_news_question_sync_uses_interactive_accounting_and_persists_retrieval(
         forward_ledger,
         news_qa,
         news_scheduler,
-        scheduler_model_gateway,
     )
 
     credential = news_scheduler.ApiCredential(
@@ -1403,14 +1446,6 @@ def test_news_question_sync_uses_interactive_accounting_and_persists_retrieval(
         def close(self) -> None:
             ledger_state["closed"] = True
 
-    accountant_calls: list[dict] = []
-
-    def accountant(connection, selected, *, urgent):
-        accountant_calls.append({
-            "connection": connection, "credential": selected, "urgent": urgent,
-        })
-        return "accountant"
-
     answer_calls: list[dict] = []
 
     def answer(question, rows, **kwargs):
@@ -1422,9 +1457,7 @@ def test_news_question_sync_uses_interactive_accounting_and_persists_retrieval(
         }
 
     monkeypatch.setattr(forward_ledger, "ForwardLedger", FakeLedger)
-    monkeypatch.setattr(
-        scheduler_model_gateway, "SchedulerModelAccountant", accountant,
-    )
+    capacity_calls = _stub_assistant_capacity_route(monkeypatch, "accountant")
     monkeypatch.setattr(news_qa, "answer_news_question", answer)
     claim_calls = 0
 
@@ -1467,11 +1500,9 @@ def test_news_question_sync_uses_interactive_accounting_and_persists_retrieval(
         "token": "x", "local_database": tmp_path / "forward.sqlite3",
     })
 
-    assert accountant_calls == [{
-        "connection": accountant_calls[0]["connection"],
-        "credential": credential,
-        "urgent": True,
-    }]
+    assert len(capacity_calls) == 1
+    assert capacity_calls[0]["credentials"] == (credential,)
+    assert capacity_calls[0]["service_priority"].value == "INTERACTIVE"
     assert answer_calls[0]["rows"][0]["evidence_id"] == "a" * 64
     assert answer_calls[0]["api_key"] == "secret-key"
     assert answer_calls[0]["request_accountant"] == "accountant"
@@ -1483,11 +1514,13 @@ def test_news_question_sync_uses_interactive_accounting_and_persists_retrieval(
     assert posted[0]["routing"]["reasoning_class"] == "ANALYTICAL"
     assert posted[0]["routing"]["model_requirement"] == "LARGE_REQUIRED"
     assert posted[0]["routing"]["selected_model_id"] == "gemma-4-31b-it"
+    assert posted[0]["routing"]["capacity"]["service_priority"] == "INTERACTIVE"
     assert ledger_state["closed"] is True
 
 
 def test_news_question_sync_reports_capacity_failure_without_aborting_queue(
     monkeypatch,
+    tmp_path,
 ) -> None:
     module = _sync_module()
     from xauusd_forecaster import news_scheduler
@@ -1528,10 +1561,13 @@ def test_news_question_sync_reports_capacity_failure_without_aborting_queue(
         lambda url, payload, config: posted.append(json.loads(payload)) or {},
     )
     module._sync_news_questions(
-        {}, {"remote_ingest_url": "https://example.test/api/ingest", "token": "x"},
+        {}, {
+            "remote_ingest_url": "https://example.test/api/ingest",
+            "token": "x", "local_database": tmp_path / "forward.sqlite3",
+        },
     )
     assert posted == [{
-        "action": "FAIL", "id": "question-1", "lease_token": "lease-1",
+        "action": "DEFER", "id": "question-1", "lease_token": "lease-1",
         "failure_code": "NO_MODEL_CAPACITY",
     }]
 
@@ -1545,11 +1581,10 @@ def test_assistant_title_sync_uses_low_priority_metered_accounting(
         assistant_titles,
         forward_ledger,
         news_scheduler,
-        scheduler_model_gateway,
     )
 
     credential = news_scheduler.ApiCredential(
-        account_id="account-a", pool=news_scheduler.PREEMPTIBLE_POOL,
+        account_id="account-a", pool=news_scheduler.ROUTINE_POOL,
         api_key="secret-key", credential_id="credential-a",
     )
     monkeypatch.setattr(
@@ -1563,14 +1598,6 @@ def test_assistant_title_sync_uses_low_priority_metered_accounting(
 
         def close(self) -> None:
             ledger_state["closed"] = True
-
-    accountant_calls: list[dict] = []
-
-    def accountant(connection, selected, *, urgent):
-        accountant_calls.append({
-            "connection": connection, "credential": selected, "urgent": urgent,
-        })
-        return "title-accountant"
 
     title_calls: list[dict] = []
 
@@ -1587,8 +1614,8 @@ def test_assistant_title_sync_uses_low_priority_metered_accounting(
         }
 
     monkeypatch.setattr(forward_ledger, "ForwardLedger", FakeLedger)
-    monkeypatch.setattr(
-        scheduler_model_gateway, "SchedulerModelAccountant", accountant,
+    capacity_calls = _stub_assistant_capacity_route(
+        monkeypatch, "title-accountant",
     )
     monkeypatch.setattr(assistant_titles, "generate_assistant_title", generate)
     title_claims = 0
@@ -1621,7 +1648,9 @@ def test_assistant_title_sync_uses_low_priority_metered_accounting(
         "token": "x", "local_database": tmp_path / "forward.sqlite3",
     })
 
-    assert [call["urgent"] for call in accountant_calls] == [False]
+    assert [call["service_priority"].value for call in capacity_calls] == [
+        "BACKGROUND",
+    ]
     assert title_calls == [{
         "first_user_message": "美联储为什么影响黄金？",
         "latest_assistant_message": "利率预期影响美元和黄金。",
@@ -1641,6 +1670,7 @@ def test_assistant_title_sync_uses_low_priority_metered_accounting(
     }
     assert posted[0][1]["routing"]["reasoning_class"] == "SIMPLE"
     assert posted[0][1]["routing"]["thinking_level"] == "MINIMAL"
+    assert posted[0][1]["routing"]["capacity"]["selected_pool_type"] == "ROUTINE"
     assert ledger_state["closed"] is True
 
 
@@ -1653,11 +1683,10 @@ def test_assistant_compaction_sync_uses_incremental_claim_and_low_priority_gatew
         assistant_compaction,
         forward_ledger,
         news_scheduler,
-        scheduler_model_gateway,
     )
 
     credential = news_scheduler.ApiCredential(
-        account_id="account-a", pool=news_scheduler.PREEMPTIBLE_POOL,
+        account_id="account-a", pool=news_scheduler.ROUTINE_POOL,
         api_key="secret-key", credential_id="credential-a",
     )
     monkeypatch.setattr(
@@ -1671,12 +1700,6 @@ def test_assistant_compaction_sync_uses_incremental_claim_and_low_priority_gatew
 
         def close(self) -> None:
             closed["value"] = True
-
-    accountant_calls: list[bool] = []
-
-    def accountant(connection, selected, *, urgent):
-        accountant_calls.append(urgent)
-        return "compaction-accountant"
 
     compaction_calls: list[dict] = []
 
@@ -1697,8 +1720,8 @@ def test_assistant_compaction_sync_uses_incremental_claim_and_low_priority_gatew
         }
 
     monkeypatch.setattr(forward_ledger, "ForwardLedger", FakeLedger)
-    monkeypatch.setattr(
-        scheduler_model_gateway, "SchedulerModelAccountant", accountant,
+    capacity_calls = _stub_assistant_capacity_route(
+        monkeypatch, "compaction-accountant",
     )
     monkeypatch.setattr(assistant_compaction, "compact_assistant_context", compact)
     claims = 0
@@ -1737,7 +1760,9 @@ def test_assistant_compaction_sync_uses_incremental_claim_and_low_priority_gatew
         "token": "x", "local_database": tmp_path / "forward.sqlite3",
     })
 
-    assert accountant_calls == [False]
+    assert [call["service_priority"].value for call in capacity_calls] == [
+        "BACKGROUND",
+    ]
     assert compaction_calls[0]["prior_summary"]["version"] == 1
     assert [item["id"] for item in compaction_calls[0]["source_messages"]] == [
         "message-1", "message-2",

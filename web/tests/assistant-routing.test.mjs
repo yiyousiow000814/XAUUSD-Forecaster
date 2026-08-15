@@ -60,3 +60,32 @@ test("tool-heavy routing requires multiple planned calls and a large model", () 
     /policy decision/i,
   );
 });
+
+test("capacity provenance rejects credential leaks and policy contradictions", () => {
+  const routing = assistantRouting("NEWS_QA");
+  const invalid = [
+    { ...routing, capacity: undefined },
+    { ...routing, capacity: { ...routing.capacity, selected_pool_fingerprint: "pool-a" } },
+    { ...routing, capacity: { ...routing.capacity, estimated_input_tokens: 999 } },
+    { ...routing, capacity: { ...routing.capacity, candidate_pool_count: 3 } },
+    { ...routing, capacity: { ...routing.capacity, model_fallback_used: true } },
+    assistantRouting("CONVERSATION_TITLE", {
+      capacity: {
+        ...assistantRouting("CONVERSATION_TITLE").capacity,
+        selected_pool_type: "PREEMPTIBLE",
+      },
+    }),
+  ];
+
+  for (const value of invalid) {
+    assert.throws(() => parseAssistantRoutingProvenance(value), /capacity/i);
+  }
+  const withSecret = {
+    ...routing,
+    capacity: { ...routing.capacity, api_key: "must-not-persist" },
+  };
+  assert.equal(
+    JSON.stringify(parseAssistantRoutingProvenance(withSecret)).includes("must-not-persist"),
+    false,
+  );
+});

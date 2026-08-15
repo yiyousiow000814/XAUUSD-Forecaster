@@ -1111,3 +1111,43 @@ export async function failAssistantCompactionJob(
   const row = results[0]?.results?.[0];
   return row ? { job_id: id, status: String(row.status) } : null;
 }
+
+export async function deferAssistantCompactionJob(
+  binding: D1Database,
+  input: Record<string, unknown>,
+  now = new Date(),
+) {
+  const id = String(input.id ?? "");
+  const leaseToken = String(input.lease_token ?? "");
+  const timestamp = now.toISOString();
+  const job = await binding.prepare(
+    `SELECT * FROM assistant_compaction_jobs
+     WHERE id=? AND status='PROCESSING' AND lease_token=? AND lease_expires_at>?`,
+  ).bind(id, leaseToken, timestamp).first<AssistantCompactionJobRow>();
+  if (!job) return null;
+  const terminal = Number(job.attempt_count) >= Number(job.max_attempts);
+  const availableAt = terminal
+    ? timestamp : new Date(now.getTime() + 60_000).toISOString();
+  const results = await binding.batch<Record<string, unknown>>([
+    binding.prepare(
+      `UPDATE assistant_compaction_jobs SET status=?,available_at=?,
+       failure_code='NO_MODEL_CAPACITY',completed_at=?,
+       attempt_history_json=json_insert(attempt_history_json,'$[#]',
+         json_object('event','CAPACITY_DEFERRED','occurred_at',?,
+           'attempt',attempt_count,'failure_code','NO_MODEL_CAPACITY','terminal',?)),
+       ${compactionLeaseCleanup}
+       WHERE id=? AND status='PROCESSING' AND lease_token=? AND lease_expires_at>?
+       RETURNING *`,
+    ).bind(
+      terminal ? "FAILED" : "PENDING", availableAt,
+      terminal ? timestamp : null, timestamp, terminal ? 1 : 0,
+      id, leaseToken, timestamp,
+    ),
+    binding.prepare(
+      `UPDATE assistant_conversations SET pending_compaction_job_id=NULL
+       WHERE pending_compaction_job_id=? AND ?=1`,
+    ).bind(id, terminal ? 1 : 0),
+  ]);
+  const row = results[0]?.results?.[0];
+  return row ? { job_id: id, status: String(row.status) } : null;
+}
