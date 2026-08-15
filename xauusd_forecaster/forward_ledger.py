@@ -150,6 +150,15 @@ CREATE TABLE IF NOT EXISTS daily_news_briefs (
     UNIQUE(brief_date, source_hash)
 );
 
+CREATE TABLE IF NOT EXISTS daily_news_brief_refresh_state (
+    brief_date TEXT PRIMARY KEY,
+    last_generated_candidate_hash TEXT,
+    pending_source_hash TEXT,
+    pending_candidate_hash TEXT,
+    pending_since TEXT,
+    last_observed_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS news_title_translations (
     translation_id TEXT PRIMARY KEY,
     source TEXT NOT NULL,

@@ -217,8 +217,29 @@ type VersionGroup = {
 type EvaluationCadence = "EVERY_5M" | "FIXED_30M";
 type CadenceMetric = { oos_rows: number; distinct_days: number; cumulative_quote_return: number; profit_factor_quote_adjusted: number | null; coverage_rate: number | null; prediction_rows?: number; unscored_oos_rows?: number; overdue_oos_rows?: number; evaluation_status?: VersionEvaluationStatus };
 type DailyNewsBrief = { brief_date: string; revision_number: number; cutoff_at: string; generated_at: string; model_version: string; prompt_version: string; brief: { title: string; items: Array<{ headline: string; summary: string; evidence_ids: string[] }> } };
-type NewsSearchResponse = { items: News[]; total: number; page: number; page_size: number; query: string };
-type NewsQuestion = { id: string; question: string; status: "PENDING" | "ANSWERED"; asked_at: string; answer?: string; evidence_ids?: string[]; answered_at?: string; model_version?: string };
+type NewsSearchResponse = {
+  items: News[];
+  total: number;
+  page: number;
+  page_size: number;
+  query: string;
+  filters: {
+    published_from: string | null; published_to: string | null;
+    received_from: string | null; received_to: string | null;
+    evidence_id: string | null; source: string | null; category: string | null;
+  };
+  source_mode: "D1_ARCHIVE" | "READ_ONLY_D1_ARCHIVE" | "IMMUTABLE_PREVIEW_SNAPSHOT" | "NOT_QUERIED";
+  archive_complete: boolean | null;
+};
+
+const emptyNewsSearch = (): NewsSearchResponse => ({
+  items: [], total: 0, page: 1, page_size: 10, query: "",
+  filters: {
+    published_from: null, published_to: null, received_from: null, received_to: null,
+    evidence_id: null, source: null, category: null,
+  },
+  source_mode: "NOT_QUERIED", archive_complete: null,
+});
 
 type Payload = {
   preview_status_summary?: boolean;
@@ -430,12 +451,11 @@ const outcomeReason = (codes: string[]) => codes.some(code => code.includes("CLO
       : "报价证据不完整，样本已隔离且不进入训练";
 const impulse = (value?: number | null) => value === null || value === undefined ? "—" : `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
 const NEWS_PER_PAGE = PREVIEW_NEWS_PAGE_SIZE;
-const CATEGORY_ORDER = ["战争/地缘", "利率/Fed", "央行购金", "通胀/就业", "增长/经济", "油价/能源", "美元/流动性", "风险偏好", "监管/其他", "其他"];
+const CATEGORY_ORDER = ["战争/地缘", "利率/Fed", "央行购金", "通胀/就业", "增长/经济", "油价/能源", "美元/流动性", "风险情绪 / 避险", "监管/其他", "其他"];
 const SOURCE_LABELS: Record<string, string> = {
   federal_reserve_monetary: "Federal Reserve · 货币政策",
   federal_reserve_speeches_testimony: "Federal Reserve · 演讲证词",
   federal_reserve_press_all: "Federal Reserve · 新闻与监管",
-  gdelt_gold_geopolitics: "GDELT · 战争与地缘",
   google_news_gold_geopolitics: "Google News · 战争与地缘",
   google_news_gold_context: "Google News · 黄金大视野",
   world_gold_council_central_banks: "World Gold Council · 央行购金",
@@ -445,6 +465,10 @@ const SOURCE_LABELS: Record<string, string> = {
   us_treasury_press_releases: "U.S. Treasury · 官方发布",
   bea_economic_releases: "U.S. BEA · 经济数据发布",
 };
+function newsSourceLabel(row: Pick<News, "source" | "category">): string {
+  if (row.source === "gdelt_gold_geopolitics") return `GDELT · ${row.category}`;
+  return SOURCE_LABELS[row.source] ?? row.source.replaceAll("_", " ");
+}
 
 const COVERAGE_STATUS_LABELS: Record<string, string> = {
   LIVE: "实时",
@@ -471,7 +495,7 @@ const TOPIC_LABELS: Record<string, string> = {
   rates_fed: "利率 / Fed", inflation: "通胀", employment: "就业", inflation_employment: "通胀 / 就业",
   growth_economy: "增长 / 经济", usd_liquidity: "美元 / 流动性",
   oil_energy: "油价 / 能源", war_geopolitics: "战争 / 地缘",
-  central_bank_gold: "央行购金", risk_sentiment: "风险偏好", regulation_other: "监管 / 其他",
+  central_bank_gold: "央行购金", risk_sentiment: "风险情绪 / 避险", regulation_other: "监管 / 其他",
 };
 const EVIDENCE_LABELS: Record<string, string> = {
   PRIMARY: "一手完整证据", CORROBORATED: "多源确认",
@@ -664,7 +688,7 @@ function NewsRow({ row }: { row: News }) {
   return <details ref={detailElement} className="news-row" onToggle={loadDetail}>
     <summary>
       <div className="news-row-stamp"><b>{row.category}</b><time title="媒体发布时间；列表按此时间排序">发布 {row.source_published_time ? time(row.source_published_time) : "未知"}</time><small title="系统第一次收到；决定模型当时能否看见">收到 {time(row.collector_first_seen_time)}</small><small className={`eligibility-badge eligibility-${row.model_visibility.toLowerCase().replaceAll("_", "-")}`}>{VISIBILITY_LABELS[row.model_visibility] ?? row.model_visibility.replaceAll("_", " ")}</small></div>
-      <div className="news-row-title"><strong>{row.headline}</strong><small>{SOURCE_LABELS[row.source] ?? row.source.replaceAll("_", " ")}{translated ? " · Gemini 中文标题" : ""}{row.emerging_topic_zh ? ` · ${row.emerging_topic_zh}` : ""}</small></div>
+      <div className="news-row-title"><strong>{row.headline}</strong><small>{newsSourceLabel(row)}{translated ? " · Gemini 中文标题" : ""}{row.emerging_topic_zh ? ` · ${row.emerging_topic_zh}` : ""}</small></div>
       <div className={`news-row-state state-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
         <b>{row.content_status === "FULL_TEXT" ? `${formatExactCount(row.content_characters)} 字符` : row.content_fetch_status === "UNAVAILABLE" ? "正文不可用" : row.content_fetch_status === "RETRYING" ? "自动重试中" : row.source === "google_news_gold_geopolitics" ? "聚合标题" : "等待正文"}</b>
         <small>{annotationStatus === "READY" ? (impactLabel ?? "等待 Gemma 判断") : annotationStatus === "NOT_REQUIRED" ? annotationReasonLabel : row.content_fetch_status === "UNAVAILABLE" ? "保留标题 · 不阻塞" : row.content_fetch_status === "RETRYING" ? "备用抓取中" : annotationStatus === "QUEUED" ? "AI 等待处理中" : annotationStatus === "BACKING_OFF" ? "失败后等待重试" : annotationStatus === "DEAD_LETTER" ? "已隔离待审" : "禁止判断"}</small>
@@ -711,7 +735,7 @@ function NewsRow({ row }: { row: News }) {
 export default function AuditView() {
   const searchParams = useSearchParams();
   const requestedView = searchParams.get("view");
-  const initialView = requestedView === "briefs" || requestedView === "search" || requestedView === "qa" || requestedView === "news" || requestedView === "evidence" || requestedView === "stories" || requestedView === "decisions" || requestedView === "league" || requestedView === "coverage"
+  const initialView = requestedView === "briefs" || requestedView === "search" || requestedView === "news" || requestedView === "evidence" || requestedView === "stories" || requestedView === "decisions" || requestedView === "league" || requestedView === "coverage"
     ? requestedView
     : "news";
   const cachedStatus = readDashboardResource<Payload>("/api/status");
@@ -735,15 +759,15 @@ export default function AuditView() {
   const [statusError, setStatusError] = useState<string | null>(null);
   const [learningError, setLearningError] = useState<string | null>(null);
   const [newsError, setNewsError] = useState<string | null>(null);
-  const [view, setView] = useState<"briefs" | "search" | "qa" | "news" | "evidence" | "stories" | "decisions" | "league" | "coverage">(initialView);
+  const [view, setView] = useState<"briefs" | "search" | "news" | "evidence" | "stories" | "decisions" | "league" | "coverage">(initialView);
   const [briefDate, setBriefDate] = useState<string | null>(null);
   const [searchInput, setSearchInput] = useState("");
-  const [searchResults, setSearchResults] = useState<NewsSearchResponse>({ items: [], total: 0, page: 1, page_size: 10, query: "" });
+  const [searchTimeField, setSearchTimeField] = useState<"published" | "received">("published");
+  const [searchDateFrom, setSearchDateFrom] = useState("");
+  const [searchDateTo, setSearchDateTo] = useState("");
+  const [searchResults, setSearchResults] = useState<NewsSearchResponse>(emptyNewsSearch);
   const [searchBusy, setSearchBusy] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
-  const [questionInput, setQuestionInput] = useState("");
-  const [question, setQuestion] = useState<NewsQuestion | null>(null);
-  const [questionError, setQuestionError] = useState<string | null>(null);
   const [newsCategory, setNewsCategory] = useState("全部");
   const [newsPage, setNewsPage] = useState(1);
   const [graphOpen, setGraphOpen] = useState(false);
@@ -858,21 +882,32 @@ export default function AuditView() {
     if (!fullLearningReadyRef.current) void refreshLearning(true);
   };
 
-  const selectView = (next: "briefs" | "search" | "qa" | "news" | "evidence" | "stories" | "decisions" | "league" | "coverage") => {
+  const selectView = (next: "briefs" | "search" | "news" | "evidence" | "stories" | "decisions" | "league" | "coverage") => {
     setView(next);
     window.history.replaceState(null, "", `/?room=audit&view=${next}`);
   };
 
-  const runNewsSearch = async (page = 1) => {
-    const query = searchInput.trim();
-    if (!query) {
-      setSearchResults({ items: [], total: 0, page: 1, page_size: 10, query: "" });
+  const runNewsSearch = async (page = 1, applied?: NewsSearchResponse) => {
+    const query = applied?.query ?? searchInput.trim();
+    const appliedFilters = applied?.filters;
+    if (!query && !searchDateFrom && !searchDateTo && !appliedFilters) {
+      setSearchResults(emptyNewsSearch());
       setSearchError(null);
       return;
     }
     setSearchBusy(true);
     try {
-      setSearchResults(await loadDashboardResource<NewsSearchResponse>(`/api/news-search?q=${encodeURIComponent(query)}&page=${page}&limit=10`, { force: true }));
+      const params = new URLSearchParams({ page: String(page), limit: "10" });
+      if (query) params.set("q", query);
+      if (appliedFilters) {
+        for (const [name, value] of Object.entries(appliedFilters)) {
+          if (value) params.set(name, value);
+        }
+      } else {
+        if (searchDateFrom) params.set(`${searchTimeField}_from`, searchDateFrom);
+        if (searchDateTo) params.set(`${searchTimeField}_to`, searchDateTo);
+      }
+      setSearchResults(await loadDashboardResource<NewsSearchResponse>(`/api/news-search?${params}`, { force: true }));
       setSearchError(null);
     } catch (reason) {
       setSearchError(reason instanceof Error ? reason.message : "新闻搜索暂不可用");
@@ -880,39 +915,6 @@ export default function AuditView() {
       setSearchBusy(false);
     }
   };
-
-  const askNewsQuestion = async () => {
-    const value = questionInput.trim();
-    if (value.length < 4) {
-      setQuestionError("请把问题写完整一点");
-      return;
-    }
-    setQuestionError(null);
-    try {
-      const response = await fetch("/api/news-questions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: value }),
-      });
-      const body = await response.json() as NewsQuestion & { error?: string };
-      if (!response.ok) throw new Error(body.error || "暂时无法提交问题");
-      setQuestion(body);
-    } catch (reason) {
-      setQuestionError(reason instanceof Error ? reason.message : "暂时无法提交问题");
-    }
-  };
-
-  useEffect(() => {
-    if (view !== "qa" || !question?.id || question.status !== "PENDING") return;
-    const check = async () => {
-      try {
-        const response = await fetch(`/api/news-questions?id=${encodeURIComponent(question.id)}`, { cache: "no-store" });
-        if (response.ok) setQuestion(await response.json() as NewsQuestion);
-      } catch { /* Keep the queued question visible and retry later. */ }
-    };
-    const interval = window.setInterval(() => void check(), 10_000);
-    return () => window.clearInterval(interval);
-  }, [question?.id, question?.status, view]);
 
   const scrollAuditTabs = (direction: -1 | 1) => {
     const nav = auditTabsRef.current;
@@ -1104,7 +1106,6 @@ export default function AuditView() {
       <nav ref={auditTabsRef} className="audit-tabs" aria-label="审计视图">
         <a href="/audit?view=briefs" className={view === "briefs" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("briefs"); }}>每日简报 <b><MetricValue phase={statusState}><CountValue value={payload?.daily_news_briefs?.length} /></MetricValue></b></a>
         <a href="/audit?view=search" className={view === "search" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("search"); }}>搜索 <b aria-hidden="true">⌕</b></a>
-        <a href="/audit?view=qa" className={view === "qa" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("qa"); }}>问新闻 <b aria-hidden="true">?</b></a>
         <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻 <b><MetricValue phase={newsPhase}><CountValue value={readableNewsTotal} /></MetricValue></b></a>
         <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>当前可用新闻事件 <b><MetricValue phase={statusState}><CountValue value={newsMetrics.events.currently_model_eligible} /></MetricValue></b></a>
         <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件脉络 <b><MetricValue phase={statusState}><CountValue value={activeEventTotal} /></MetricValue></b></a>
@@ -1127,21 +1128,22 @@ export default function AuditView() {
       })()}
 
       {view === "search" && <section className="news-search-desk">
-        <form onSubmit={event => { event.preventDefault(); void runNewsSearch(); }}><label htmlFor="news-search">搜索新闻</label><div><input id="news-search" value={searchInput} maxLength={80} onChange={event => setSearchInput(event.target.value)} placeholder="标题、来源或主题" /><button type="submit" disabled={searchBusy}>{searchBusy ? "搜索中" : "搜索"}</button></div></form>
+        <form onSubmit={event => { event.preventDefault(); void runNewsSearch(); }}>
+          <label htmlFor="news-search">搜索新闻</label>
+          <div className="search-query-row"><input id="news-search" value={searchInput} maxLength={80} onChange={event => setSearchInput(event.target.value)} placeholder="标题、来源或主题" /><button type="submit" disabled={searchBusy}>{searchBusy ? "搜索中" : "搜索"}</button></div>
+          <fieldset className="search-filter-grid">
+            <legend>可选日期范围</legend>
+            <label htmlFor="news-search-time-field">时间字段<select id="news-search-time-field" value={searchTimeField} onChange={event => setSearchTimeField(event.target.value as "published" | "received")}><option value="published">媒体发布</option><option value="received">系统收到</option></select></label>
+            <label htmlFor="news-search-from">从<input id="news-search-from" type="date" value={searchDateFrom} onChange={event => setSearchDateFrom(event.target.value)} /></label>
+            <label htmlFor="news-search-to">到<input id="news-search-to" type="date" value={searchDateTo} onChange={event => setSearchDateTo(event.target.value)} /></label>
+          </fieldset>
+        </form>
         {searchError && <p className="search-error" role="alert">{searchError}</p>}
-        {searchResults.query && <p className="search-count">“{searchResults.query}” 找到 <CountValue value={searchResults.total} format="exact" /> 条</p>}
-        <div className="search-results">{searchResults.items.map(row => <article key={`${row.source}-${row.source_item_id}-${row.revision_number}`}><time>{time(row.source_published_time ?? row.collector_first_seen_time)}</time><h3>{row.headline}</h3><p>{row.emerging_topic_zh || row.impact_reason_zh || row.source}</p><small>{row.source} · {row.category}</small></article>)}</div>
-        {searchResults.total > searchResults.page_size && <nav className="search-pages"><button type="button" disabled={searchResults.page <= 1 || searchBusy} onClick={() => void runNewsSearch(searchResults.page - 1)}>←</button><span>{formatExactCount(searchResults.page)} / {formatExactCount(Math.ceil(searchResults.total / searchResults.page_size))}</span><button type="button" disabled={searchResults.page >= Math.ceil(searchResults.total / searchResults.page_size) || searchBusy} onClick={() => void runNewsSearch(searchResults.page + 1)}>→</button></nav>}
+        {searchResults.source_mode !== "NOT_QUERIED" && <p className="search-count">{searchResults.query ? `“${searchResults.query}”` : "所选日期范围"} 找到 <CountValue value={searchResults.total} format="exact" /> 条 · {searchResults.source_mode === "IMMUTABLE_PREVIEW_SNAPSHOT" ? "Preview 构建快照（非完整档案）" : "当前新闻档案"}</p>}
+        <div className="search-results">{searchResults.items.map(row => <article key={row.detail_key}><time>{time(row.source_published_time ?? row.collector_first_seen_time)}</time><h3>{row.headline}</h3><p>{row.emerging_topic_zh || row.impact_reason_zh || row.source}</p><small>{row.source} · {row.category} · 证据 {row.detail_key.slice(0, 12)}…</small></article>)}</div>
+        {searchResults.source_mode !== "NOT_QUERIED" && searchResults.total === 0 && <p className="search-empty">没有符合条件的新闻证据。</p>}
+        {searchResults.total > searchResults.page_size && <nav className="search-pages" aria-label="搜索结果分页"><button type="button" aria-label="上一页搜索结果" disabled={searchResults.page <= 1 || searchBusy} onClick={() => void runNewsSearch(searchResults.page - 1, searchResults)}>←</button><span>{formatExactCount(searchResults.page)} / {formatExactCount(Math.ceil(searchResults.total / searchResults.page_size))}</span><button type="button" aria-label="下一页搜索结果" disabled={searchResults.page >= Math.ceil(searchResults.total / searchResults.page_size) || searchBusy} onClick={() => void runNewsSearch(searchResults.page + 1, searchResults)}>→</button></nav>}
       </section>}
-
-      {view === "qa" && <section className="news-qa-desk">
-        <header><p className="eyebrow">GEMMA NEWS Q&amp;A</p><h2>问这批新闻</h2></header>
-        <form onSubmit={event => { event.preventDefault(); void askNewsQuestion(); }}><textarea maxLength={200} value={questionInput} onChange={event => setQuestionInput(event.target.value)} placeholder="例如：今天哪些消息可能继续影响黄金？" /><button type="submit">提问</button></form>
-        {questionError && <p className="qa-error" role="alert">{questionError}</p>}
-        {question && <article><small>{question.status === "PENDING" ? "Gemma 正在根据新闻证据回答" : <><CountValue value={question.evidence_ids?.length} format="exact" /> 份新闻证据</>}</small><h3>{question.question}</h3>{question.answer && <p>{question.answer}</p>}</article>}
-        <footer>只依据已收录新闻回答 · 不提供交易建议</footer>
-      </section>}
-
       {view === "news" && <>
         <section className="annotation-queue" aria-label="新闻处理进度">
           <span><b><CountValue value={readableNewsTotal} /></b> {readableNewsTotal === null ? "正在读取近60天新闻总量" : "条近60天可读新闻"}</span>

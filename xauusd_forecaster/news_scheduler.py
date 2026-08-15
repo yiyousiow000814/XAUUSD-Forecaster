@@ -20,6 +20,7 @@ ROUTINE_POOL = "ROUTINE"
 PREEMPTIBLE_POOL = "PREEMPTIBLE"
 URGENT_PRIORITIES = frozenset({"IMMEDIATE", "FAST"})
 PRIORITIES = ("IMMEDIATE", "FAST", "NORMAL", "BACKGROUND")
+PRIORITY_HEAD_START = timedelta(minutes=1)
 TASKS = (
     "ACTIVE_ANNOTATION",
     "ACTIVE_IMPACT",
@@ -52,6 +53,26 @@ CREATE TABLE IF NOT EXISTS news_ai_jobs_v1 (
 
 CREATE INDEX IF NOT EXISTS news_ai_jobs_claim_v1
 ON news_ai_jobs_v1(state,available_at,priority,task_type,created_at);
+
+CREATE TABLE IF NOT EXISTS news_ai_job_attempts_v1 (
+    attempt_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL CHECK(attempt_number >= 1),
+    account_id TEXT NOT NULL,
+    credential_id TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    failure_code TEXT,
+    error_type TEXT,
+    provider_http_status INTEGER,
+    error_detail TEXT,
+    attempted_at TEXT NOT NULL,
+    next_retry_at TEXT,
+    FOREIGN KEY(job_id) REFERENCES news_ai_jobs_v1(job_id),
+    UNIQUE(job_id,attempt_number,account_id,credential_id)
+);
+
+CREATE INDEX IF NOT EXISTS news_ai_job_attempts_lookup_v1
+ON news_ai_job_attempts_v1(job_id,attempt_number,attempted_at);
 
 CREATE TABLE IF NOT EXISTS news_ai_account_daily_usage_v1 (
     quota_day TEXT NOT NULL,
@@ -247,6 +268,38 @@ def enqueue_job(
     return job_id
 
 
+def record_job_attempt(
+    connection: sqlite3.Connection,
+    *,
+    job: ScheduledJob,
+    credential: ApiCredential,
+    status: dict[str, object],
+    attempted_at: datetime,
+) -> None:
+    """Persist one sanitized scheduler outcome for diagnosis and recovery."""
+    identity = "|".join((
+        job.job_id, str(job.attempt_count), credential.account_id,
+        credential.credential_id,
+    ))
+    provider_status = status.get("provider_http_status")
+    with connection:
+        connection.execute(
+            """INSERT OR IGNORE INTO news_ai_job_attempts_v1 VALUES
+            (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                hashlib.sha256(identity.encode("utf-8")).hexdigest(),
+                job.job_id, job.attempt_count, credential.account_id,
+                credential.credential_id, str(status.get("status") or "ERROR"),
+                str(status.get("failure_code") or "") or None,
+                str(status.get("error_type") or "") or None,
+                int(provider_status) if isinstance(provider_status, int) else None,
+                str(status.get("error") or status.get("reason") or "")[:500] or None,
+                _iso(attempted_at),
+                str(status.get("next_retry_at") or "") or None,
+            ),
+        )
+
+
 def _job_from_row(row: sqlite3.Row) -> ScheduledJob:
     return ScheduledJob(
         job_id=str(row["job_id"]),
@@ -282,6 +335,7 @@ def claim_job(
         raise ValueError("scheduler worker_id is required")
     instant = now or datetime.now(UTC)
     timestamp = _iso(instant)
+    aged_before = _iso(instant - PRIORITY_HEAD_START)
     lease_expires = _iso(instant + timedelta(seconds=max(30, lease_seconds)))
     priority_filter = (
         "AND priority IN ('IMMEDIATE','FAST')"
@@ -303,13 +357,15 @@ def claim_job(
                     'ACTIVE_ANNOTATION','ACTIVE_IMPACT','TITLE_TRANSLATION')
                   AND available_at<=? {priority_filter}
                 ORDER BY
+                  CASE WHEN created_at<=? THEN 0 ELSE 1 END,
+                  CASE WHEN created_at<=? THEN created_at ELSE NULL END,
                   CASE priority WHEN 'IMMEDIATE' THEN 0 WHEN 'FAST' THEN 1
                                 WHEN 'NORMAL' THEN 2 ELSE 3 END,
                   CASE task_type WHEN 'ACTIVE_IMPACT' THEN 0
                                  WHEN 'ACTIVE_ANNOTATION' THEN 1 ELSE 2 END,
                   created_at,job_id
                 LIMIT 1""",
-            (timestamp,),
+            (timestamp, aged_before, aged_before),
         ).fetchone()
         if row is None:
             connection.commit()
@@ -474,6 +530,84 @@ def account_quota_snapshot(
     }
 
 
+def rank_accounts_for_models(
+    connection: sqlite3.Connection,
+    credentials: tuple[ApiCredential, ...],
+    *,
+    models: tuple[str, ...],
+    priority_reserve_models: tuple[str, ...] = (),
+    urgent: bool,
+    now: datetime | None = None,
+) -> tuple[str, ...]:
+    """Rank configured accounts by live quota headroom for a model route.
+
+    Keys belonging to one account intentionally share one score.  Adding an
+    independent account therefore increases capacity immediately, while adding
+    another key to an existing account only adds transport redundancy.
+    """
+    from .ai_provider_registry import quota_surface_for_model
+
+    instant = now or datetime.now(UTC)
+    day = quota_day(instant)
+    recent_minutes = (
+        minute_bucket(instant - timedelta(minutes=1)), minute_bucket(instant),
+    )
+    account_order = tuple(dict.fromkeys(item.account_id for item in credentials))
+    route = tuple(dict.fromkeys(models))
+
+    def model_headroom(account_id: str, model: str) -> float:
+        policy = quota_surface_for_model(model)
+        families = policy.model_families
+        placeholders = ",".join("?" for _ in families)
+        reserve = 0
+        if not urgent and model in priority_reserve_models:
+            from .annotation import GEMINI_DAILY_PRIORITY_RESERVE
+            reserve = GEMINI_DAILY_PRIORITY_RESERVE
+        daily_limit = max(0, policy.daily_limit - reserve)
+        daily = connection.execute(
+            f"""SELECT COALESCE(sum(request_count),0) AS requests
+                FROM news_ai_account_daily_usage_v1
+                WHERE quota_day=? AND account_id=?
+                  AND model_family IN ({placeholders})""",
+            (day, account_id, *families),
+        ).fetchone()
+        account_clause = "" if policy.share_minute_across_accounts else "AND account_id=?"
+        parameters: tuple[object, ...] = (
+            *recent_minutes,
+            *((account_id,) if not policy.share_minute_across_accounts else ()),
+            *families,
+        )
+        recent = connection.execute(
+            f"""SELECT COALESCE(sum(request_count),0) AS requests,
+                       COALESCE(sum(input_token_count),0) AS tokens
+                FROM news_ai_account_minute_usage_v1
+                WHERE minute_bucket IN (?,?) {account_clause}
+                  AND model_family IN ({placeholders})""",
+            parameters,
+        ).fetchone()
+        ratios = (
+            max(0.0, (daily_limit - int(daily["requests"])) / max(1, daily_limit)),
+            max(0.0, (policy.requests_per_minute - int(recent["requests"]))
+                / max(1, policy.requests_per_minute)),
+            max(0.0, (policy.input_tokens_per_minute - int(recent["tokens"]))
+                / max(1, policy.input_tokens_per_minute)),
+        )
+        return min(ratios)
+
+    scores = {
+        account_id: max(
+            (model_headroom(account_id, model) for model in route),
+            default=0.0,
+        )
+        for account_id in account_order
+    }
+    order_index = {account_id: index for index, account_id in enumerate(account_order)}
+    return tuple(sorted(
+        account_order,
+        key=lambda account_id: (-scores[account_id], order_index[account_id]),
+    ))
+
+
 def reserve_account_request(
     connection: sqlite3.Connection,
     *,
@@ -568,9 +702,17 @@ def scheduler_counts(connection: sqlite3.Connection) -> dict[str, int]:
         GROUP BY state"""
     ).fetchall()
     counts = {str(row["state"]): int(row["total"]) for row in rows}
-    return {state.lower(): counts.get(state, 0) for state in (
+    result = {state.lower(): counts.get(state, 0) for state in (
         "QUEUED", "LEASED", "BACKING_OFF", "COMPLETED", "DEAD_LETTER",
     )}
+    obsolete = int(connection.execute(
+        """SELECT count(*) FROM news_ai_jobs_v1
+        WHERE state='DEAD_LETTER'
+          AND last_error='CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'"""
+    ).fetchone()[0])
+    result["obsolete"] = obsolete
+    result["dead_letter"] = max(0, result["dead_letter"] - obsolete)
+    return result
 
 
 def _annotation_priority(row: dict[str, object]) -> str:
@@ -657,12 +799,12 @@ def reconcile_completed_jobs(
     *,
     now: datetime | None = None,
 ) -> int:
-    """Close leases after a crash when immutable output was already appended."""
+    """Close jobs already satisfied or superseded by immutable evidence."""
     from .annotation import INVALID_CHINESE_TITLE
 
     timestamp = _iso(now or datetime.now(UTC))
     with connection:
-        result = connection.execute(
+        completed = connection.execute(
             """UPDATE news_ai_jobs_v1 AS j
                SET state='COMPLETED',lease_owner=NULL,lease_expires_at=NULL,
                    updated_at=?,completed_at=?
@@ -686,7 +828,20 @@ def reconcile_completed_jobs(
                      AND t.headline_zh GLOB '*[一-龥]*')))""",
             (timestamp, timestamp, INVALID_CHINESE_TITLE, "%相关数值%"),
         )
-    return result.rowcount
+        obsolete = connection.execute(
+            """UPDATE news_ai_jobs_v1 AS j
+               SET state='DEAD_LETTER',lease_owner=NULL,lease_expires_at=NULL,
+                   last_error='CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE',
+                   updated_at=?,completed_at=?
+               WHERE state IN ('QUEUED','BACKING_OFF')
+                 AND EXISTS (
+                   SELECT 1 FROM news_revisions newer
+                   WHERE newer.source=j.source
+                     AND newer.source_item_id=j.source_item_id
+                     AND newer.revision_number>j.revision_number)""",
+            (timestamp, timestamp),
+        )
+    return completed.rowcount + obsolete.rowcount
 
 
 def pending_record_for_job(

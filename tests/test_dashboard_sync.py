@@ -139,6 +139,56 @@ def test_preview_freezes_both_materialized_curve_overviews(monkeypatch) -> None:
     }
 
 
+def test_preview_freezes_pageable_version_history_beyond_first_page(
+    monkeypatch,
+) -> None:
+    module = _preview_module()
+    groups = [{
+        "model_identity": "MARKET_ONLY",
+        "training_dataset_hash": f"market-{generation}",
+        "created_at": (
+            datetime(2026, 8, 1, tzinfo=timezone.utc)
+            + timedelta(hours=generation)
+        ).isoformat(),
+        "generation": generation,
+        "training_rows": generation * 50,
+    } for generation in range(1, 62)]
+    groups.append({
+        "model_identity": "NEWS_ONLY",
+        "training_dataset_hash": "news-1",
+        "created_at": "2026-08-14T07:00:00+00:00",
+        "generation": 1,
+        "training_rows": 124,
+    })
+
+    monkeypatch.setattr(
+        module, "_read_json",
+        lambda _base_url, path: {"items": groups}
+        if path.endswith("resource=version-overview") else {},
+    )
+    records = module._version_history_records("https://example.test")
+
+    version_groups = [
+        row for row in records if row["resource"] == "version-group"
+    ]
+    assert len(version_groups) == 61
+    market_groups = sorted(
+        (row for row in version_groups
+         if row["payload"]["model_identity"] == "MARKET_ONLY"),
+        key=lambda row: row["sort_epoch"],
+    )
+    assert len(market_groups) == module.dashboard_sync.LEARNING_OVERVIEW_GROUPS_PER_IDENTITY
+    assert market_groups[0]["payload"]["generation"] == 2
+    assert market_groups[-1]["payload"]["generation"] == 61
+
+    bundle = module.build_bundle(
+        "https://example.test", "feature/example", "abcdef12",
+    )
+    stored = bundle["learning_history"]
+    assert len([row for row in stored if row["resource"] == "version-group"]) == 61
+    assert not [row for row in stored if row["resource"] == "version-overview"]
+
+
 def test_sync_retries_transient_disconnect(monkeypatch) -> None:
     module = _sync_module()
     calls = []
@@ -951,6 +1001,114 @@ def test_sync_repopulates_news_index_without_full_refresh_marker(
     state = json.loads(state_file.read_text(encoding="utf-8"))
     assert state["mirror_contract_version"] == module.NEWS_MIRROR_CONTRACT_VERSION
     assert state["reconciled_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
+
+
+@pytest.mark.parametrize("previous_contract", [
+    "news-60-day-incremental-v2",
+    "news-60-day-incremental-v3-semantic-categories",
+    "news-60-day-incremental-v4-relevance-filter",
+])
+def test_news_materialization_contract_upgrade_replays_and_reconciles_old_state(
+    monkeypatch, tmp_path, previous_contract
+) -> None:
+    module = _sync_module()
+    state_file = tmp_path / "news-state.json"
+    stale_cursor = '["2026-08-13T00:00:00Z","example","old",1]'
+    state_file.write_text(json.dumps({
+        "mirror_contract_version": previous_contract,
+        "reconciled_contract": previous_contract,
+        "cursor": stale_cursor,
+    }), encoding="utf-8")
+    requested: list[str] = []
+    posted: list[tuple[str, dict]] = []
+    page = {
+        "items": [{
+            "source": "example", "source_item_id": "new", "revision_number": 1,
+            "category": "风险情绪 / 避险",
+            "collector_first_seen_time": "2026-08-14T00:00:00Z",
+            "headline": "新的语义分类",
+        }],
+        "next_cursor": '["2026-08-14T00:00:00Z","example","new",1]',
+        "has_more": False,
+    }
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(page, ensure_ascii=False).encode("utf-8")
+
+    def urlopen(url, *_args, **_kwargs):
+        requested.append(str(url))
+        return Response()
+
+    def post_json(url, body, _config):
+        posted.append((url, json.loads(body)))
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(module, "_post_json", post_json)
+    module._sync_news({}, {
+        "local_status_url": "http://local/status",
+        "remote_ingest_url": "https://remote/api/ingest",
+        "news_state_file": str(state_file),
+        "token": "test",
+    })
+
+    # A changed materialization contract discards the old cursor and starts at
+    # the bounded archive head instead of continuing after a stale row.
+    assert len(requested) == 1
+    assert "after=" not in requested[0]
+    assert f"limit={module.NEWS_WRITE_BATCH_ITEMS}" in requested[0]
+    index_payloads = [body for url, body in posted if url.endswith("/news-index")]
+    assert index_payloads[0]["items"][0]["category"] == "风险情绪 / 避险"
+    assert index_payloads[0]["items"][0]["mirror_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
+    assert index_payloads[-1]["reconcile_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    assert state["cursor"] != stale_cursor
+    assert state["mirror_contract_version"] == module.NEWS_MIRROR_CONTRACT_VERSION
+    assert state["reconciled_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
+
+
+def test_news_sync_forwards_exact_semantic_withdrawals(monkeypatch, tmp_path) -> None:
+    module = _sync_module()
+    page = {
+        "items": [],
+        "withdrawals": [{
+            "source": "gdelt_gold_geopolitics",
+            "source_item_id": "entertainment-one",
+            "revision_number": 1,
+        }],
+        "next_cursor": '["2026-08-15T00:00:00Z","gdelt","one",1]',
+        "has_more": True,
+    }
+
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def read(self): return json.dumps(page).encode()
+
+    posted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k: Response())
+    monkeypatch.setattr(
+        module, "_post_json",
+        lambda url, body, _config: posted.append((url, json.loads(body))),
+    )
+    module._sync_news({}, {
+        "local_status_url": "http://local/status",
+        "remote_ingest_url": "https://remote/api/ingest",
+        "news_state_file": str(tmp_path / "news-state.json"),
+        "token": "test",
+    })
+
+    withdrawals = [
+        body["withdraw_detail_keys"] for url, body in posted
+        if url.endswith("/news-index") and "withdraw_detail_keys" in body
+    ]
+    assert withdrawals == [[module._stable_news_key(page["withdrawals"][0])]]
 
 
 def test_remote_market_chart_is_split_from_status_and_keeps_recent_window() -> None:

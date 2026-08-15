@@ -49,7 +49,7 @@ NEWS_DETAIL_BATCH_LIMIT_BYTES = 400_000
 NEWS_INDEX_BATCH_LIMIT_BYTES = 400_000
 NEWS_WRITE_BATCH_ITEMS = 20
 NEWS_READER_WINDOW_DAYS = 60
-NEWS_MIRROR_CONTRACT_VERSION = "news-60-day-incremental-v2"
+NEWS_MIRROR_CONTRACT_VERSION = "news-60-day-incremental-v5-withdrawals"
 MARKET_HISTORY_CONTRACT_VERSION = "market-history-d1-v2"
 MARKET_HISTORY_BATCH_LIMIT_BYTES = 350_000
 MARKET_HISTORY_OVERLAP_SECONDS = 2 * 3_600
@@ -114,6 +114,21 @@ def _stable_news_key(row: dict) -> str:
         str(row.get("revision_number", "")),
     ))
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def news_withdrawal_keys(payload: dict) -> list[str]:
+    """Return stable keys withdrawn by a completed semantic decision."""
+    rows = payload.get("withdrawals")
+    if not isinstance(rows, list):
+        return []
+    keys: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict) or not all(
+            key in row for key in ("source", "source_item_id", "revision_number")
+        ):
+            raise PayloadContractError("invalid news withdrawal identity")
+        keys.append(_stable_news_key(row))
+    return keys
 
 
 def _json_hash(value: object) -> str:
@@ -1321,6 +1336,7 @@ def _sync_news(_local_payload: dict, config: dict) -> None:
     else:
         page = {"items": _local_payload.get("recent_news", []), "has_more": False}
     news_index, details = news_mirror_parts(page)
+    withdrawal_keys = news_withdrawal_keys(page)
     news_index_url = config.get("remote_news_index_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/news-index"
     )
@@ -1338,6 +1354,12 @@ def _sync_news(_local_payload: dict, config: dict) -> None:
         _post_json(news_index_url, json.dumps(
             {"items": batch}, ensure_ascii=False, allow_nan=False,
             separators=(",", ":"),
+        ).encode("utf-8"), config)
+    for start in range(0, len(withdrawal_keys), NEWS_WRITE_BATCH_ITEMS):
+        _post_json(news_index_url, json.dumps(
+            {"withdraw_detail_keys": withdrawal_keys[
+                start:start + NEWS_WRITE_BATCH_ITEMS
+            ]}, separators=(",", ":"),
         ).encode("utf-8"), config)
 
     next_cursor = page.get("next_cursor")

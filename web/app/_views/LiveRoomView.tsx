@@ -9,6 +9,7 @@ import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { formatExactCount } from "../_lib/count-format";
+import { quoteBridgePresentation } from "../_lib/quote-bridge-state";
 import { resolveNewsMetrics, type NewsMetrics } from "../_lib/news-metrics";
 
 type Decision = {
@@ -40,6 +41,9 @@ type Payload = {
     trading_enabled: boolean;
     symbol: string;
     runtime_update_failure?: RuntimeUpdateFailure | null;
+    components?: {
+      quote_bridge?: { status?: string | null };
+    };
   };
   latest: Decision & {
     source_event_time: string;
@@ -202,6 +206,10 @@ export default function LiveRoomView() {
       ? "无行情"
       : forecastAction;
   const newsMetrics = resolveNewsMetrics(payload);
+  const quoteBridge = quoteBridgePresentation(
+    payload?.system.components?.quote_bridge?.status,
+    payload?.system.market_session,
+  );
 
   return (
     <main>
@@ -322,7 +330,7 @@ export default function LiveRoomView() {
 
         <article className="panel source-panel">
           <div className="panel-head"><div><span>SOURCE HEALTH</span><h2>数据链路</h2></div></div>
-          <Source name="cTrader XAUUSD · 本机 Algo" state={online ? "本机在线" : marketClosed ? "市场休市 · 新闻继续" : "本机中断"} good={online || marketClosed} />
+          <Source name="cTrader XAUUSD · 本机 Algo" state={quoteBridge.label} good={quoteBridge.good} />
           <Source name="Federal Reserve · 官方源" state="采集中" good />
           <Source name="BLS Public API · 官方源" state={payload?.sources.bls === "ONLINE" ? "采集中" : "准备中"} good={payload?.sources.bls === "ONLINE"} />
           <Source name="Gemini 3.5 Flash-Lite · API" state={payload?.sources.llm === "ENABLED" ? "标注中" : "等待标注"} good={payload?.sources.llm === "ENABLED"} />

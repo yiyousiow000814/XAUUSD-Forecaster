@@ -68,3 +68,4 @@ ignored `.local/forward/` directory and are not uploaded to GitHub.
 - [System boundaries contract](docs/contracts/SYSTEM_BOUNDARIES.md)
 - [Forward-only evidence contract](docs/contracts/FORWARD_ONLY.md)
 - [Cloudflare hosting design](docs/design/CLOUDFLARE_HOSTING.md)
+- [Assistant target architecture](docs/design/ASSISTANT_ARCHITECTURE.md)

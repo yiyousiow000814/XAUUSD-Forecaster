@@ -20,8 +20,16 @@ CORE_BROAD_NEWS_V16 = NewsContract(
     policy_version="news-event-evidence-v13-core-broad",
 )
 
+CANONICAL_IDENTITY_NEWS_V17 = NewsContract(
+    name="canonical-identity-news-v17",
+    feature_version="eligible-news-event-evidence-v16-canonical-identity",
+    eligibility_version="news-source-eligibility-v14-resolved-identity",
+    policy_version="news-event-evidence-v14-canonical-identity",
+)
+
 SUPPORTED_NEWS_CONTRACTS = (
     CORE_BROAD_NEWS_V16,
+    CANONICAL_IDENTITY_NEWS_V17,
 )
 CURRENT_NEWS_CONTRACT = SUPPORTED_NEWS_CONTRACTS[-1]
 # These values are immutable database tokens from the original V2 schema.

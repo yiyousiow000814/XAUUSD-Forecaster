@@ -26,7 +26,7 @@ class AiQuotaSurface:
     daily_limit: int
     requests_per_minute: int
     input_tokens_per_minute: int
-    share_minute_across_accounts: bool = True
+    share_minute_across_accounts: bool = False
 
 
 AI_QUOTA_SURFACES = (

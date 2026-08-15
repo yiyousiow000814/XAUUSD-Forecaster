@@ -10,7 +10,10 @@ const { runtimeUpdateFailurePresentation } = await import("../app/_lib/runtime-u
 const { countPresentation, formatCompactCount, formatExactCount, progressCountPresentation } = await import("../app/_lib/count-format.ts");
 const { versionResultLabel } = await import("../app/_lib/version-result-state.ts");
 const { modelVersionMarkers } = await import("../app/_lib/model-version-markers.ts");
+const { buildTrainingCutoffChart } = await import("../app/_lib/training-cutoff-chart.ts");
 const { statusFieldPhase } = await import("../app/_lib/current-data-provenance.ts");
+const { shouldPollDashboardResource } = await import("../app/_lib/dashboard-refresh-policy.ts");
+const { quoteBridgePresentation } = await import("../app/_lib/quote-bridge-state.ts");
 const { withPreviewIdentity } = await import("../app/api/_shared/preview-status.ts");
 
 test("labels version results from their durable evaluation state", () => {
@@ -44,6 +47,26 @@ test("derives model handovers from the predictions actually shown", () => {
   assert.deepEqual(modelVersionMarkers([
     { decision_time: "2026-08-14T01:00:00Z", model_version: "version-a" },
   ]), []);
+});
+
+test("aligns models by comparable training cutoff without inventing history", () => {
+  const chart = buildTrainingCutoffChart([
+    { model_identity: "MARKET_ONLY", created_at: "2026-08-14T01:00:00Z", generation: 1, training_rows: 1000 },
+    { model_identity: "MARKET_ONLY", created_at: "2026-08-14T02:00:00Z", generation: 2, training_rows: 1050 },
+    { model_identity: "MARKET_ONLY", created_at: "2026-08-14T03:00:00Z", generation: 3, training_rows: 1100 },
+    { model_identity: "NEWS_ONLY", created_at: "2026-08-14T02:00:00Z", generation: 1, training_rows: 1050 },
+    { model_identity: "NEWS_ONLY", created_at: "2026-08-14T03:00:00Z", generation: 2, training_rows: 1100 },
+    { model_identity: "NEWS_ONLY", created_at: "2026-08-14T03:00:00Z", generation: 3, training_rows: 1100 },
+  ], row => row.training_rows);
+
+  assert.deepEqual(chart.cutoffs, [1000, 1050, 1100]);
+  const market = chart.series.find(series => series.modelIdentity === "MARKET_ONLY");
+  const news = chart.series.find(series => series.modelIdentity === "NEWS_ONLY");
+  assert.deepEqual(market.points.map(point => point.cutoffIndex), [0, 1, 2]);
+  assert.deepEqual(news.points.map(point => point.cutoffIndex), [1, 2, 2]);
+  assert.equal(news.points[0].row.training_rows, 1050);
+  assert.deepEqual(news.points.slice(1).map(point => point.row.generation), [2, 3]);
+  assert.equal(chart.cutoffs.at(-1), 1100);
 });
 
 test("keeps branch throughput limits while refreshing Preview metrics from D1", () => {
@@ -310,7 +333,8 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   assert.match(previewBuilder, /for identity in \("LOT_RIDGE", "EXIT_RIDGE"\)/);
   assert.match(previewBuilder, /resource=curve-overview&cadence=\{cadence\}/);
   assert.match(previewBuilder, /for cadence in \("5m", "30m"\)/);
-  assert.match(previewBuilder, /\[\*learning_history, \*execution_history, \*curve_overviews\]/);
+  assert.match(previewBuilder, /resource=version-overview/);
+  assert.match(previewBuilder, /\*version_history/);
   assert.doesNotMatch(page, /auditView === "league"/);
   assert.match(page, /\[PREVIEW_RESOURCES\.status\]: previewBundle\.status/);
   assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);
@@ -484,6 +508,9 @@ test("keeps the 60-day news archive inside bounded D1 work", () => {
   assert.match(index, /impact_expires_at>\?/);
   assert.match(index, /item\.model_visibility = "IMPACT_EXPIRED"/);
   assert.match(index, /DELETE FROM news_index WHERE mirror_contract <> \?/);
+  assert.match(index, /body\.withdraw_detail_keys\.length > 20/);
+  assert.match(index, /DELETE FROM news_index WHERE detail_key = \?/);
+  assert.match(index, /DELETE FROM news_details WHERE detail_key = \?/);
   assert.match(index, /s-maxage=30/);
   assert.match(migration, /news_index_published_idx/);
   assert.match(migration, /news_index_category_published_idx/);
@@ -499,9 +526,6 @@ test("refreshes current resources without polling build-snapshot-only resources"
   assert.match(helper, /DashboardResourceMode = "current" \| "build-snapshot"/);
   assert.match(helper, /resourceMode === "current"/);
   assert.match(helper, /mayRefresh\s*\?\s*window\.setInterval\(pollWhenEligible, intervalMs\)\s*:\s*null/);
-  assert.match(helper, /document\.visibilityState !== "visible"/);
-  assert.match(helper, /navigator\.webdriver/);
-  assert.match(helper, /localStorage\.getItem/);
   assert.match(helper, /visibilitychange/);
   const statusView = readFileSync(new URL("../app/_views/StatusView.tsx", import.meta.url), "utf8");
   const healthView = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
@@ -518,6 +542,42 @@ test("refreshes current resources without polling build-snapshot-only resources"
     assert.match(source, /DASHBOARD_REFRESH_INTERVALS\.[a-z]+,[\s\S]*?"current"/);
     assert.doesNotMatch(source, /isImmutablePreview|immutablePreview/);
   }
+});
+
+test("a shared polling lease cannot leave another visible tab permanently stale", () => {
+  const intervalMs = 15_000;
+  const common = {
+    visible: true,
+    automated: false,
+    intervalMs,
+    lastLocalPollAt: 100_000,
+  };
+
+  assert.equal(shouldPollDashboardResource({
+    ...common,
+    now: 115_000,
+    lastSharedPollAt: 114_500,
+  }), false, "a recent poll by another tab should suppress duplicate work");
+
+  assert.equal(shouldPollDashboardResource({
+    ...common,
+    now: 130_000,
+    lastSharedPollAt: 129_500,
+  }), true, "each visible tab must refresh after two local intervals");
+
+  assert.equal(shouldPollDashboardResource({
+    ...common,
+    visible: false,
+    now: 145_000,
+    lastSharedPollAt: 144_500,
+  }), false, "hidden tabs must not bypass the request budget");
+
+  assert.equal(shouldPollDashboardResource({
+    ...common,
+    automated: true,
+    now: 145_000,
+    lastSharedPollAt: 0,
+  }), false, "browser automation must not create background polling");
 });
 
 test("renders every Preview room from the embedded build snapshot", async () => {
@@ -612,6 +672,21 @@ test("uses one Chinese system-state presentation across every dashboard page", (
   }
 });
 
+test("reports cTrader health independently from downstream decision lag", () => {
+  assert.deepEqual(quoteBridgePresentation("OK", "DATA_UNAVAILABLE"), {
+    label: "本机在线",
+    good: true,
+  });
+  assert.deepEqual(quoteBridgePresentation("STALE", "DATA_UNAVAILABLE"), {
+    label: "本机中断",
+    good: false,
+  });
+  assert.deepEqual(quoteBridgePresentation("MARKET_CLOSED", "CLOSED"), {
+    label: "市场休市 · 新闻继续",
+    good: true,
+  });
+});
+
 test("live room presents broker-confirmed closure instead of a WAIT prediction", () => {
   const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
   assert.match(source, /距离重开/);
@@ -679,6 +754,8 @@ test("renders the news and decision audit route", async () => {
   assert.doesNotMatch(source, /这些新闻处理到哪里了/);
   assert.match(source, /条近60天可读新闻/);
   assert.match(source, /条无需复核/);
+  assert.match(source, /GDELT · \$\{row\.category\}/);
+  assert.doesNotMatch(source, /GDELT · 新闻发现/);
   assert.match(source, /row\.model_visibility !== "NOT_YET_PARSED"/);
   assert.match(source, /个当前模型候选事件/);
   assert.doesNotMatch(source, /个 key 轮换|每分钟最多生成/);
@@ -957,24 +1034,21 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /训练组分页（/);
   assert.match(modal, /aria-label="上一页训练组"/);
   assert.match(modal, /aria-label="下一页训练组"/);
-  assert.match(modal, /pendingPageScrollRef/);
-  assert.match(modal, /if \(!pendingPageScrollRef\.current \|\| pageLoading \|\| pageError\) return/);
-  assert.match(modal, /scroller\.scrollTo/);
-  assert.doesNotMatch(modal, /setPage\([\s\S]{0,160}scrollIntoView/);
-  assert.match(modal, /className="version-page-stage" aria-busy=\{pageLoading\}/);
-  assert.match(css, /version-page-stage \{ min-height:560px; display:flex; flex-direction:column/);
-  assert.match(css, /version-pagination-bottom \{ margin-top:auto/);
+  assert.doesNotMatch(modal, /pendingPageScrollRef|scroller\.scrollTo|scrollIntoView/);
+  assert.match(modal, /className="version-page-results" aria-busy=\{pageLoading\}/);
+  assert.match(modal, /busy=\{pageLoading\}/);
+  assert.match(css, /version-page-results \{ min-height:420px; display:flex; flex-direction:column/);
   assert.match(modal, /position="bottom"/);
-  assert.match(modal, /className="version-list-anchor"/);
+  assert.match(modal, /buildTrainingCutoffChart/);
+  assert.match(modal, /crossesMissingCutoff/);
+  assert.match(modal, /strokeDasharray=\{crossesMissingCutoff \? "7 6"/);
   assert.match(modal, /共同训练截止量对齐/);
   assert.match(modal, /查看模型明细/);
   assert.match(modal, /最近20个训练截止点/);
-  assert.match(modal, /crossesMissingCutoff/);
-  assert.match(modal, /strokeDasharray=\{crossesMissingCutoff/);
-  assert.match(modal, /gx\(comparisonCutoff\(row\)\)/);
-  assert.doesNotMatch(modal, /gx\(row\.generation\)/);
+  assert.match(modal, /图中 \{formatExactCount\(graphRows\.length\)\} \/ \{formatExactCount\(matureRows\.length\)\} 个成熟结果/);
+  assert.match(modal, /组等待结果/);
+  assert.doesNotMatch(modal, /横轴按共同训练运行时间排列|pointerTime/);
   assert.match(modal, /每30分钟（固定 :00 \/ :30）/);
-  assert.match(modal, /同一坐标叠加比较/);
   assert.match(page, /六套模型，现在表现怎样/);
   assert.match(page, /等待新版生成/);
   assert.match(page, /training-card-total/);
@@ -1048,10 +1122,13 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /getUTCMinutes\(\) % 30 === 0/);
   assert.match(modal, /const xAtIndex/);
   assert.match(modal, /条模型评分/);
-  assert.match(modal, /模型成绩对比/);
-  assert.match(modal, /按同一训练截止点比较。/);
-  assert.doesNotMatch(modal, /五种模型叠加在同一坐标/);
-  assert.doesNotMatch(modal, /实线连接相邻训练截止点/);
+  assert.match(modal, /所有模型的训练组成绩/);
+  assert.match(modal, /按同一训练截止点比较/);
+  assert.match(modal, /pendingRows = graphGroups\.length - matureRows\.length/);
+  assert.match(modal, /最近20个训练截止点/);
+  assert.match(modal, /aria-label=\{pointLabel\}/);
+  assert.match(modal, /comparisonCutoff/);
+  assert.doesNotMatch(modal, /activeCycle|hoveredCycle|pinnedCycle/);
   assert.match(modal, /versionBoundaries/);
   assert.match(modal, /pools\.direction !== null && pools\.direction !== state\.lastDirectionRows/);
   assert.match(modal, /pools\.news !== null && pools\.news !== state\.lastNewsRows/);
@@ -1285,6 +1362,13 @@ test("distinguishes market history loading, empty, and failed states", () => {
   assert.match(modal, /historyState === "loading"/);
   assert.match(modal, /historyState === "error"/);
   assert.match(modal, /正在读取行情/);
+  assert.match(modal, /activeMarket = remoteHistory \? historyResult\?\.data \?\? market : market/);
+  assert.match(modal, /className="market-visual-shell" aria-busy=\{historyState === "loading"\}/);
+  assert.match(modal, /className="market-refresh-signal" role="status"/);
+  assert.match(modal, /disabled=\{historyState === "loading" \|\| !canGoEarlier\}/);
+  assert.match(modal, /disabled=\{historyState === "loading" \|\| !canGoLater\}/);
+  assert.doesNotMatch(modal, /historyState === "loading" && candles\.length > 0 && <GraphLoading/);
+  assert.match(css, /\.market-refresh-signal \{ position:absolute/);
   assert.match(modal, /正在读取长期曲线/);
   assert.match(modal, /正在读取这组成绩/);
   assert.match(modal, /graph-state-compact/);
@@ -1344,25 +1428,22 @@ test("reflows news evidence into readable mobile cards", () => {
   assert.match(css, /\.evidence-model-list \{ display:none!important/);
 });
 
-test("keeps news search server bounded and phone readable", () => {
+test("keeps shared news retrieval bounded and phone readable", () => {
   const view = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const route = readFileSync(new URL("../app/api/news-search/route.ts", import.meta.url), "utf8");
+  const retrieval = readFileSync(new URL("../app/api/_shared/news-retrieval.ts", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(view, /view === "search"/);
   assert.match(view, /placeholder="标题、来源或主题"/);
-  assert.match(route, /slice\(0, 80\)/);
-  assert.match(route, /Math\.min\(20/);
-  assert.match(route, /LIMIT \? OFFSET \?/);
-  assert.ok(route.indexOf("if (binding) try") < route.indexOf("if (previewBundle) {"));
-  assert.match(route, /read-only-d1-archive/);
-});
-
-test("keeps Gemma questions asynchronous and evidence bounded", () => {
-  const view = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
-  const route = readFileSync(new URL("../app/api/news-questions/route.ts", import.meta.url), "utf8");
-  assert.match(view, /Gemma 正在根据新闻证据回答/);
-  assert.match(view, /setInterval\(\(\) => void check\(\), 10_000\)/);
-  assert.match(view, /view !== "qa" \|\| !question\?\.id/);
-  assert.match(route, /pending\?\.count \?\? 0\) >= 10/);
-  assert.match(route, /evidence_ids\) \? body\.evidence_ids\.slice\(0, 12\)/);
-  assert.match(route, /rejectPreviewWrite/);
+  assert.match(view, /id="news-search-from" type="date"/);
+  assert.match(view, /id="news-search-to" type="date"/);
+  assert.match(route, /parseNewsRetrievalRequest/);
+  assert.match(route, /retrieveNews/);
+  assert.doesNotMatch(route, /SELECT .* FROM news_index/);
+  assert.match(retrieval, /MAX_QUERY_CHARACTERS = 80/);
+  assert.match(retrieval, /MAX_PAGE_SIZE = 20/);
+  assert.match(retrieval, /LIMIT \? OFFSET \?/);
+  assert.match(retrieval, /IMMUTABLE_PREVIEW_SNAPSHOT/);
+  assert.match(css, /\.search-pages button \{[^}]*min-width:44px;[^}]*min-height:44px/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.search-filter-grid \{ grid-template-columns:1fr; \}/);
 });
