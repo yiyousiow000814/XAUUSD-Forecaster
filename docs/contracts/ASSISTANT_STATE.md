@@ -49,6 +49,7 @@ Message
 - conversation_id
 - role
 - content
+- validated content document and hash (Assistant messages when available)
 - created_at
 - provenance
 
@@ -75,6 +76,14 @@ Original accepted user messages and completed Assistant messages are canonical
 history. Compaction MUST NOT rewrite or delete them merely to reduce model
 context. Corrections, regenerated answers, and derived summaries MUST remain
 distinguishable from the records from which they were produced.
+
+For a runtime Assistant message, plain `content` remains the canonical readable
+answer and its `assistant.content.v1` document is an immutable typed rendering
+of that same answer. The first markdown block equals `content`; every other
+block is bounded, hashed, and validated before the message transaction. Rich
+content never becomes a second conversation history. Messages created before
+the structured-content migration may retain a null document and render their
+canonical text unchanged.
 
 ## Persistence and recovery
 
@@ -188,8 +197,41 @@ Older history is retrieved only when relevant to the current turn. Retrieval
 MUST be bounded and owner-scoped. The system MUST NOT inject all historical
 messages into every request.
 
-Long-term memory is an optional future derived index. It MUST link back to
-canonical messages and MUST NOT silently become a second conversation store.
+Long-term memory is a versioned derived index. Every index entry MUST link back
+to one immutable canonical message. It MUST NOT copy message content into a
+second conversation store; selected text is read from the canonical message at
+Context Builder time and its content digest is checked against the derived
+entry.
+
+Indexing is deterministic, model-free background work with finite leases and
+attempts. Inserting a canonical message atomically schedules its index input.
+A completed entry records only source identity, version, digest, bounded terms,
+and indexing metadata. Failed or incomplete indexing leaves canonical history
+unchanged and MUST NOT advance conversation activity.
+
+Retrieval uses the current user message as its query and MUST enforce all of
+these boundaries:
+
+- only messages owned by the current actor are eligible;
+- messages from the active conversation are excluded because Rolling Summary
+  and Recent Verbatim Turns own that context;
+- a source message must have `created_at` strictly before the current user
+  message; equal cross-conversation timestamps are excluded because unrelated
+  message IDs cannot establish received-time order;
+- ranking, candidate count, selected-item count, and token use are bounded and
+  deterministic; and
+- selected text retains its canonical message ID and immutable provenance.
+
+The current lexical index is metadata retrieval, not semantic search. Context
+metadata MUST say when eligible jobs are pending, processing, failed, missing a
+derived entry, or fail an integrity check. An incomplete index MAY return the
+bounded valid matches it has, but neither the model nor UI may describe those
+matches as exhaustive recall.
+
+Retrieved conversation text is always labeled unverified. It can restore prior
+constraints or discussion context, but it MUST NOT establish a current factual
+claim. Current factual grounding continues to require authoritative tool
+evidence under the evidence contract.
 
 ## Compaction admission and integrity
 

@@ -352,6 +352,7 @@ export default function AssistantView() {
         conversation_id: turn.conversation_id,
         role: "USER",
         content: message,
+        content_document: null,
         created_at: turn.created_at,
         provenance: { kind: "PENDING_SERVER_CONFIRMATION", turn_id: turn.id },
       }]));

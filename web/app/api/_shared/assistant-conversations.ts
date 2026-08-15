@@ -1,4 +1,8 @@
 import { parseAssistantRoutingProvenance } from "./assistant-routing";
+import {
+  parseAssistantContentDocument,
+  type AssistantContentDocument,
+} from "./assistant-content";
 
 export const ASSISTANT_TITLE_PROMPT_VERSION = "assistant-title-v1";
 export const MAX_TITLE_GRAPHEMES = 32;
@@ -49,6 +53,7 @@ export type PublicAssistantMessage = {
   conversation_id: string;
   role: AssistantMessageRole;
   content: string;
+  content_document: AssistantContentDocument | null;
   created_at: string;
   provenance: Record<string, unknown>;
 };
@@ -196,13 +201,53 @@ export function publicAssistantConversation(
 export function publicAssistantMessage(
   row: Record<string, unknown>,
 ): PublicAssistantMessage {
+  const provenance = parsedObject(row.provenance_json);
+  const agent = provenance.agent && typeof provenance.agent === "object"
+    && !Array.isArray(provenance.agent)
+    ? provenance.agent as Record<string, unknown>
+    : null;
+  const rawEvidence = Array.isArray(agent?.evidence_ids)
+    ? agent.evidence_ids
+    : Array.isArray(provenance.evidence_ids) ? provenance.evidence_ids : [];
+  const evidenceIds = rawEvidence.filter(
+    (item): item is string => typeof item === "string",
+  );
+  let contentDocument: AssistantContentDocument | null = null;
+  if (typeof row.content_document_json === "string") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.content_document_json);
+    } catch {
+      throw new AssistantConversationInputError(
+        "INVALID_STORED_CONTENT", "Assistant 历史内容无效",
+      );
+    }
+    contentDocument = parseAssistantContentDocument(parsed, {
+      answer: String(row.content),
+      evidenceIds,
+    });
+    if (row.content_protocol !== contentDocument.protocol
+      || row.content_document_sha256 !== contentDocument.document_sha256) {
+      throw new AssistantConversationInputError(
+        "INVALID_STORED_CONTENT", "Assistant 历史内容来源不一致",
+      );
+    }
+  } else if (
+    (row.content_protocol !== null && row.content_protocol !== undefined)
+    || (row.content_document_sha256 !== null && row.content_document_sha256 !== undefined)
+  ) {
+    throw new AssistantConversationInputError(
+      "INVALID_STORED_CONTENT", "Assistant 历史内容不完整",
+    );
+  }
   return {
     id: String(row.id),
     conversation_id: String(row.conversation_id),
     role: String(row.role) as AssistantMessageRole,
     content: String(row.content),
+    content_document: contentDocument,
     created_at: String(row.created_at),
-    provenance: parsedObject(row.provenance_json),
+    provenance,
   };
 }
 

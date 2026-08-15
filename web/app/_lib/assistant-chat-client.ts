@@ -4,6 +4,10 @@ import {
   parseAssistantEvent,
   type AssistantEventEnvelope,
 } from "../api/_shared/assistant-events";
+import {
+  parseAssistantContentDocument,
+  type AssistantContentDocument,
+} from "../api/_shared/assistant-content";
 
 export const ASSISTANT_ACTIVE_STATUSES = ["PENDING", "PROCESSING"] as const;
 export const ASSISTANT_TERMINAL_STATUSES = [
@@ -39,6 +43,7 @@ export type AssistantMessage = {
   conversation_id: string;
   role: "USER" | "ASSISTANT";
   content: string;
+  content_document: AssistantContentDocument | null;
   created_at: string;
   provenance: Record<string, unknown>;
 };
@@ -200,13 +205,32 @@ export function parseAssistantMessage(value: unknown): AssistantMessage {
   if (raw.role !== "USER" && raw.role !== "ASSISTANT") {
     fail("INVALID_ASSISTANT_RESPONSE", "message role 无效");
   }
+  const content = stringValue(raw.content, "message content");
+  const provenance = objectValue(raw.provenance, "message provenance");
+  const agent = provenance.agent && typeof provenance.agent === "object"
+    && !Array.isArray(provenance.agent)
+    ? provenance.agent as Record<string, unknown>
+    : null;
+  const rawEvidence = Array.isArray(agent?.evidence_ids)
+    ? agent.evidence_ids
+    : Array.isArray(provenance.evidence_ids) ? provenance.evidence_ids : [];
+  const evidenceIds = rawEvidence.filter(
+    (item): item is string => typeof item === "string",
+  );
+  const contentDocument = raw.content_document === null
+    ? null
+    : parseAssistantContentDocument(raw.content_document, { answer: content, evidenceIds });
+  if (raw.role === "USER" && contentDocument !== null) {
+    fail("INVALID_ASSISTANT_RESPONSE", "user message 不能携带 Assistant blocks");
+  }
   return {
     id: idValue(raw.id, "message id"),
     conversation_id: idValue(raw.conversation_id, "message conversation id"),
     role: raw.role,
-    content: stringValue(raw.content, "message content"),
+    content,
+    content_document: contentDocument,
     created_at: timeValue(raw.created_at, "message created_at"),
-    provenance: objectValue(raw.provenance, "message provenance"),
+    provenance,
   };
 }
 

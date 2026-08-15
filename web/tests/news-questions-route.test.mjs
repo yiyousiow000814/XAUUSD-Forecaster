@@ -112,6 +112,17 @@ test("Preview conversation routes reject mutations and expose only labeled empty
   assert.equal(compactionClaim.status, 403);
   assert.equal(compactionClaim.headers.get("x-aurum-preview"), "write-rejected");
   assert.equal(touched, false);
+
+  const memoryClaim = await worker.fetch(
+    new Request(
+      "http://localhost/api/assistant-conversations?mode=memory-index-claim&worker_id=test-worker",
+    ),
+    bindings,
+    executionContext,
+  );
+  assert.equal(memoryClaim.status, 403);
+  assert.equal(memoryClaim.headers.get("x-aurum-preview"), "write-rejected");
+  assert.equal(touched, false);
 });
 
 test("Preview chat runtime rejects every mutation and exposes a finite empty event stream", async t => {

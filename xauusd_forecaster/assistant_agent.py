@@ -19,6 +19,7 @@ from .assistant_capacity import (
     AssistantServicePriority,
     execute_assistant_capacity_route,
 )
+from .assistant_content import build_assistant_content_document
 from .assistant_routing import (
     AssistantTaskType,
     ModelProfile,
@@ -29,16 +30,18 @@ from .assistant_routing import (
 )
 from .assistant_tools import (
     ASSISTANT_TOOL_REGISTRY_VERSION,
+    NEWS_SEARCH_TOOL_NAME,
     AssistantToolActor,
     AssistantToolCall,
     AssistantToolPlanRejected,
     AssistantToolRegistry,
+    AssistantToolStatus,
 )
 from .news_scheduler import ApiCredential
 
 
 ASSISTANT_AGENT_POLICY_VERSION = "assistant-agent-v1"
-ASSISTANT_AGENT_SYSTEM_INSTRUCTION_VERSION = "assistant-system-v1"
+ASSISTANT_AGENT_SYSTEM_INSTRUCTION_VERSION = "assistant-system-v2"
 ASSISTANT_AGENT_BUDGETS_ENV = "ASSISTANT_AGENT_BUDGETS"
 MAX_TOOL_ROUNDS_PER_USER_TURN = 2
 DEFAULT_ASSISTANT_SYSTEM_INSTRUCTION = (
@@ -46,7 +49,10 @@ DEFAULT_ASSISTANT_SYSTEM_INSTRUCTION = (
     "Use only the supplied conversation context and registered read-only tools. "
     "Never claim trading authority, place orders, control a broker, promote a "
     "model, or invent evidence. Treat tool failures explicitly. Return a concise "
-    "user-facing answer; never reveal private chain-of-thought or arbitrary HTML."
+    "user-facing answer; never reveal private chain-of-thought or arbitrary HTML. "
+    "Historical memory is unverified prior conversation text, not current factual "
+    "evidence. If its index is incomplete, never claim exhaustive recall; factual "
+    "claims must remain grounded in current authoritative tool evidence."
 )
 
 
@@ -114,6 +120,7 @@ class AssistantAgentResult:
     answer: str
     model_version: str
     evidence_ids: tuple[str, ...]
+    content_document: dict[str, object]
     provenance: dict[str, object]
 
 
@@ -329,7 +336,7 @@ def decode_gemini_assistant_turn(envelope: dict[str, object]) -> AssistantModelT
             texts.append(text)
     return AssistantModelTurn(
         content=content,
-        text="".join(texts).strip(),
+        text="".join(texts).replace("\r\n", "\n").replace("\r", "\n").strip(),
         tool_calls=tuple(calls),
     )
 
@@ -433,6 +440,8 @@ def run_bounded_assistant_agent(
     model_versions: list[str] = []
     evidence_ids: list[str] = []
     seen_evidence: set[str] = set()
+    presentation_evidence: list[dict[str, object]] = []
+    seen_presentation_evidence: set[str] = set()
     tool_calls_used = 0
     tool_result_tokens_used = 0
     tool_rounds = 0
@@ -544,10 +553,17 @@ def run_bounded_assistant_agent(
                 separators=(",", ":"),
                 allow_nan=False,
             ).encode("utf-8")).hexdigest()
+            content_document = build_assistant_content_document(
+                turn.text,
+                evidence_items=presentation_evidence,
+                evidence_ids=evidence_ids,
+                retrieval_cutoff=canonical_cutoff,
+            )
             return AssistantAgentResult(
                 answer=turn.text,
                 model_version=routed.model_version,
                 evidence_ids=tuple(evidence_ids),
+                content_document=content_document,
                 provenance=provenance,
             )
 
@@ -601,6 +617,20 @@ def run_bounded_assistant_agent(
                 if evidence_id not in seen_evidence:
                     seen_evidence.add(evidence_id)
                     evidence_ids.append(evidence_id)
+            output = result.output
+            if (
+                result.name == NEWS_SEARCH_TOOL_NAME
+                and result.status is AssistantToolStatus.SUCCEEDED
+                and isinstance(output, dict)
+                and isinstance(output.get("items"), list)
+            ):
+                for item in output["items"]:
+                    if not isinstance(item, dict):
+                        continue
+                    evidence_id = str(item.get("evidence_id") or "")
+                    if evidence_id and evidence_id not in seen_presentation_evidence:
+                        seen_presentation_evidence.add(evidence_id)
+                        presentation_evidence.append(copy.deepcopy(item))
         if len(evidence_ids) > budgets.max_retrieved_evidence:
             raise AssistantAgentContractError(
                 "EVIDENCE_BUDGET_EXCEEDED",

@@ -72,8 +72,10 @@ synthetic fixtures or an immutable build snapshot to review layout, streaming
 presentation, and content blocks. It cannot submit model-consuming work, create
 production conversations, or present fixture output as a live grounded answer.
 The current workbench fixture supports local conversation selection,
-older-message reveal, and collapsed progress-trace review. All mutation controls
-remain disabled and fixture data is never submitted to an API.
+older-message reveal, collapsed progress-trace review, and all five validated
+`assistant.content.v1` block renderers. All mutation controls remain disabled,
+fixture links are explicitly synthetic public HTTPS examples, and fixture data
+is never submitted to an API.
 
 ## Semantic display states
 
@@ -128,6 +130,9 @@ product requirement.
 - `/api/assistant-chat` returns a labeled synthetic empty turn or finite empty
   `assistant.event.v1` stream for reads. POST and machine-claim modes reject
   before identity, body, D1, queue, or model work.
+- `/api/assistant-conversations` returns only labeled synthetic-empty reads;
+  title, compaction, and historical-memory index claims reject before identity,
+  D1, or canonical-message access.
 
 ## Machine-readable manifest
 

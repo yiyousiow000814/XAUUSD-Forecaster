@@ -175,6 +175,11 @@ def test_native_turn_parser_preserves_signature_and_hides_thought_text() -> None
         }]})
     assert truncated.value.error_code == "MODEL_TURN_INCOMPLETE"
 
+    normalized = decode_gemini_assistant_turn({"candidates": [{"content": {
+        "role": "model", "parts": [{"text": "第一行\r\n第二行\r"}],
+    }}]})
+    assert normalized.text == "第一行\n第二行"
+
 
 def test_agent_may_answer_directly_without_executing_a_tool() -> None:
     payloads: list[dict[str, object]] = []
@@ -186,9 +191,15 @@ def test_agent_may_answer_directly_without_executing_a_tool() -> None:
     result = run_bounded_assistant_agent(_request(), _registry(), invoke)
 
     assert result.answer == "直接回答。"
+    assert [block["type"] for block in result.content_document["blocks"]] == [
+        "markdown", "callout",
+    ]
     assert result.provenance["model_turn_count"] == 1
     assert result.provenance["tool_call_count"] == 0
-    assert result.provenance["system_instruction_version"] == "assistant-system-v1"
+    assert result.provenance["system_instruction_version"] == "assistant-system-v2"
+    assert "unverified prior conversation text" in (
+        payloads[0]["systemInstruction"]["parts"][0]["text"]
+    )
     assert len(result.provenance["system_instruction_sha256"]) == 64
     assert len(result.provenance["active_context_sha256"]) == 64
     assert result.provenance["retrieval_cutoff"] == "2026-08-15T12:00:00.000Z"
@@ -233,6 +244,7 @@ def test_one_tool_round_preserves_model_content_and_exact_function_response_id()
     result = run_bounded_assistant_agent(_request(), _registry(), invoke)
 
     assert result.answer == "当前价格为 4321.00。"
+    assert result.content_document["blocks"][0]["data"]["text"] == result.answer
     assert result.provenance["model_turn_count"] == 2
     assert result.provenance["tool_round_count"] == 1
     assert result.provenance["tool_call_count"] == 1

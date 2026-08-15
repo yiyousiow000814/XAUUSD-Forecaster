@@ -111,7 +111,7 @@ After the existing stack is collapsed, create small PRs from already merged
 | PR scope | Depends on | Explicitly leaves for later |
 | --- | --- | --- |
 | Conversation persistence and title lifecycle | Authenticated Q&A foundation | Memory, tools, streaming |
-| Incremental memory and compaction | Conversation persistence | Long-term semantic memory |
+| Incremental memory and compaction | Conversation persistence | Long-term historical retrieval |
 | Deterministic reasoning and model router | Bounded Context Builder | Capacity-pool expansion |
 | Assistant capacity integration | Model router and existing scheduler | Tool loop and UI |
 | Typed function-calling loop | Shared retrieval and capacity integration | Streaming UI |
@@ -129,10 +129,12 @@ calling core, cross-runtime `assistant.event.v1`, the owner-authenticated D1
 chat turn/event runtime, and the Windows producer that builds bounded context,
 runs the capacity-routed Agent, emits public progress, and publishes the
 validated final. The event layer is presentation transport and does not replace
-canonical messages. It now also includes the responsive authenticated browser
-workbench, active-turn recovery, and finite replay consumer. The next independent
-scope is structured rich content; long-term historical memory and production
-activation remain later bounded scopes.
+canonical messages. Merged work also includes the responsive authenticated browser
+workbench, active-turn recovery, finite replay consumer, and validated
+`assistant.content.v1` rendering. This bounded scope adds long-term historical
+memory with canonical, owner-scoped, point-in-time lexical retrieval and
+explicit incomplete-index receipts. Advanced evidence validation is the next
+independent scope; production activation remains a later handover.
 
 ## Per-PR completion rule
 

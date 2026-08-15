@@ -157,7 +157,7 @@ export async function POST(request: Request) {
     const binding = env.DB;
     if (!binding) return unavailable();
     try {
-      const body = await boundedBody(request, 340_000);
+      const body = await boundedBody(request, 384_000);
       const action = String(body.action ?? "").trim().toUpperCase();
       let item: unknown = null;
       if (action === "RENEW") {
