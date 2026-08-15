@@ -95,6 +95,12 @@ export const newsQuestions = sqliteTable(
     answeredAt: text("answered_at"),
     modelVersion: text("model_version"),
     promptVersion: text("prompt_version").notNull(),
+    conversationId: text("conversation_id")
+      .references(() => assistantConversations.id),
+    userMessageId: text("user_message_id")
+      .references(() => assistantMessages.id),
+    assistantMessageId: text("assistant_message_id")
+      .references(() => assistantMessages.id),
   },
   table => [
     uniqueIndex("news_questions_owner_idempotency_idx")
@@ -106,6 +112,93 @@ export const newsQuestions = sqliteTable(
     index("news_questions_owner_time_idx")
       .on(table.ownerId, table.askedAt),
     index("news_questions_lease_idx")
+      .on(table.status, table.leaseExpiresAt),
+    index("news_questions_conversation_idx").on(table.conversationId),
+  ],
+);
+
+export const assistantConversations = sqliteTable(
+  "assistant_conversations",
+  {
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id").notNull(),
+    initialIdempotencyKey: text("initial_idempotency_key").notNull(),
+    title: text("title").notNull(),
+    titleSource: text("title_source").notNull(),
+    titleRevision: integer("title_revision").notNull().default(0),
+    titleRequestVersion: integer("title_request_version").notNull().default(0),
+    pendingTitleJobId: text("pending_title_job_id"),
+    createdAt: text("created_at").notNull(),
+    lastActivityAt: text("last_activity_at").notNull(),
+    archivedAt: text("archived_at"),
+    summaryVersion: integer("summary_version").notNull().default(0),
+    status: text("status").notNull().default("ACTIVE"),
+  },
+  table => [
+    uniqueIndex("assistant_conversations_owner_idempotency_idx")
+      .on(table.ownerId, table.initialIdempotencyKey),
+    index("assistant_conversations_owner_activity_idx")
+      .on(table.ownerId, table.status, table.lastActivityAt, table.id),
+  ],
+);
+
+export const assistantMessages = sqliteTable(
+  "assistant_messages",
+  {
+    id: text("id").primaryKey(),
+    conversationId: text("conversation_id").notNull()
+      .references(() => assistantConversations.id),
+    role: text("role").notNull(),
+    content: text("content").notNull(),
+    createdAt: text("created_at").notNull(),
+    provenanceJson: text("provenance_json").notNull(),
+    sourceKind: text("source_kind").notNull(),
+    sourceId: text("source_id").notNull(),
+  },
+  table => [
+    uniqueIndex("assistant_messages_source_idx")
+      .on(table.sourceKind, table.sourceId, table.role),
+    index("assistant_messages_conversation_time_idx")
+      .on(table.conversationId, table.createdAt, table.id),
+  ],
+);
+
+export const assistantTitleJobs = sqliteTable(
+  "assistant_title_jobs",
+  {
+    id: text("id").primaryKey(),
+    conversationId: text("conversation_id").notNull()
+      .references(() => assistantConversations.id),
+    idempotencyKey: text("idempotency_key").notNull(),
+    requestedBy: text("requested_by").notNull(),
+    inputVersion: integer("input_version").notNull(),
+    expectedTitleRevision: integer("expected_title_revision").notNull(),
+    firstUserMessageId: text("first_user_message_id").notNull()
+      .references(() => assistantMessages.id),
+    assistantMessageId: text("assistant_message_id").notNull()
+      .references(() => assistantMessages.id),
+    status: text("status").notNull(),
+    availableAt: text("available_at").notNull(),
+    leaseOwner: text("lease_owner"),
+    leaseToken: text("lease_token"),
+    leaseExpiresAt: text("lease_expires_at"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(3),
+    promptVersion: text("prompt_version").notNull(),
+    modelVersion: text("model_version"),
+    createdAt: text("created_at").notNull(),
+    completedAt: text("completed_at"),
+    generatedTitle: text("generated_title"),
+    failureCode: text("failure_code"),
+  },
+  table => [
+    uniqueIndex("assistant_title_jobs_version_idx")
+      .on(table.conversationId, table.inputVersion),
+    uniqueIndex("assistant_title_jobs_idempotency_idx")
+      .on(table.conversationId, table.idempotencyKey),
+    index("assistant_title_jobs_claim_idx")
+      .on(table.status, table.availableAt, table.createdAt),
+    index("assistant_title_jobs_lease_idx")
       .on(table.status, table.leaseExpiresAt),
   ],
 );

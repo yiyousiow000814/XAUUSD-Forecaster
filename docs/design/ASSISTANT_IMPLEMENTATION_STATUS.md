@@ -3,9 +3,9 @@
 ## Snapshot scope
 
 This status is maintained as the Assistant architecture and its bounded
-implementation PRs land. PR #103 established the contracts, and PRs #20 and
-#21 are merged on `main`. The Q&A rows describe the post-merge state carried by
-PR #22; an unmerged branch does not alter the copy visible on `main`.
+implementation PRs land. PR #103 established the contracts, and PRs #20, #21,
+and #22 are merged on `main`. The conversation rows describe the post-merge
+state carried by the bounded conversation-foundation implementation.
 
 Status values have precise meanings:
 
@@ -25,9 +25,9 @@ Status values have precise meanings:
 | Daily Brief | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | PR #20 is merged: complete point-in-time state fingerprinting, bounded candidates, durable debounce, capacity defer, append-only output, and evidence validation are covered. A Preview backed by an older public snapshot may still show the explicit empty state. |
 | Shared news retrieval | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | PR #21 is merged. Search and PR #22 Q&A reuse one D1 service with bounded Chinese/multi-token queries, published/received ranges, metadata filters, stable evidence IDs, deterministic ordering, and explicit provenance. |
 | Evidence-grounded Q&A | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | PR #22 provides authenticated asynchronous single-question Q&A through shared retrieval, a compact packet, the metered gateway, strict cited-ID validation, and persisted model/prompt/retrieval provenance. It is not a general agent or multi-turn chat. |
-| Conversation persistence | [State](../contracts/ASSISTANT_STATE.md) | `NOT_IMPLEMENTED` | No Forecaster-owned Conversation/Message store exists. |
-| Conversation title | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `NOT_IMPLEMENTED` | No provisional, AI, manual, or regeneration lifecycle exists. |
-| Conversation ordering | [State](../contracts/ASSISTANT_STATE.md) | `NOT_IMPLEMENTED` | No `last_activity_at` conversation list exists. |
+| Conversation persistence | [State](../contracts/ASSISTANT_STATE.md) | `MVP` | Owner-scoped D1 Conversation and immutable Message records now form provider-independent canonical history. Q&A creates the first user/Assistant pair atomically; production activation requires migration `0009`, and general multi-turn orchestration remains future work. |
+| Conversation title | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `MVP` | First-message titles use a 32-grapheme provisional excerpt. Answer completion schedules a leased, metered, low-priority AI title job; manual rename, explicit regeneration, bounded retry, and stale-job cancellation are implemented. Production generation requires the updated Windows sync worker; chat UI controls remain future work. |
+| Conversation ordering | [State](../contracts/ASSISTANT_STATE.md) | `MVP` | Owner lists use `last_activity_at DESC,id DESC`. Only accepted user messages and persisted Assistant finals advance activity; title, rename, regeneration, and archive work are covered as non-activity. |
 | Short-term memory | [State](../contracts/ASSISTANT_STATE.md) | `NOT_IMPLEMENTED` | No pinned/summary/recent-turn Context Builder exists. |
 | Long-term memory | [State](../contracts/ASSISTANT_STATE.md) | `NOT_IMPLEMENTED` | No owner-scoped historical memory index exists. |
 | Incremental compaction | [State](../contracts/ASSISTANT_STATE.md) | `NOT_IMPLEMENTED` | No versioned summary lifecycle exists. |
@@ -45,8 +45,8 @@ Status values have precise meanings:
 | Human authentication | [Security](../contracts/ASSISTANT_SECURITY.md) | `MVP` | News Q&A validates a Cloudflare Access JWT signature, issuer, audience, user identity, and configured owner membership before parsing or storage. Runtime Access policy and owner configuration are deployment prerequisites. |
 | Machine authentication | [Security](../contracts/ASSISTANT_SECURITY.md) | `MVP` | `INGEST_TOKEN` protects machine writes; a general service-actor model is not implemented. |
 | Assistant queue recovery | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `MVP` | D1 records enforce owner/global admission, idempotency, expiry, `PENDING`/`PROCESSING` leases, bounded backoff, exhausted `FAILED`, stale-lease recovery, and attempt receipts. Cancellation is future work. |
-| Evidence provenance through compaction | [State](../contracts/ASSISTANT_STATE.md) | `PARTIAL` | Q&A now persists stable evidence, retrieval, prompt, model, and timestamps. No conversation or compaction path exists yet to carry that provenance through summaries. |
-| Assistant Preview isolation | [Security](../contracts/ASSISTANT_SECURITY.md) | `MVP` | Q&A writes reject before authentication, parsing, D1, or model work. Preview GET returns only a labeled synthetic empty private history and the form remains disabled. |
+| Evidence provenance through compaction | [State](../contracts/ASSISTANT_STATE.md) | `PARTIAL` | Canonical Assistant messages now retain stable evidence, retrieval, prompt, model, and timestamp provenance. No compaction path exists yet to carry it through summaries. |
+| Assistant Preview isolation | [Security](../contracts/ASSISTANT_SECURITY.md) | `MVP` | Q&A and conversation writes reject before authentication, parsing, D1, or model work. Preview GET returns only a labeled synthetic empty private history and the form remains disabled. |
 
 ## Historical stack remediation
 
@@ -57,7 +57,7 @@ extended with more stacked work:
 #103 Assistant Architecture -> main
 #20 Daily Brief             -> main
 #21 Shared Retrieval        -> main
-#22 Q&A Foundation          -> this revision -> main
+#22 Q&A Foundation          -> main
 ```
 
 ### PR #20: Daily Brief remediation
@@ -83,7 +83,7 @@ old Search branch:
 
 ### PR #22: News Q&A
 
-This revision replaces the old public two-state queue with a bounded private
+PR #22 replaced the old public two-state queue with a bounded private
 foundation:
 
 - Cloudflare Access JWT verification and explicit owner membership occur before
@@ -100,10 +100,11 @@ foundation:
 - final answer, evidence IDs, retrieval ordering/cutoff, model, prompt, and
   timestamps persist together under the valid lease.
 
-The deliberately excluded boundary remains important: PR #22 does not create
-canonical Conversation/Message storage, titles, memory, compaction, streaming,
-function calling, a general model router, or rich content blocks. Those remain
-separate roadmap PRs created from merged `main`.
+PR #22 deliberately excluded canonical Conversation/Message storage. The
+conversation foundation now supplies that storage and title lifecycle without
+adding memory, compaction, streaming, function calling, a general model router,
+or rich content blocks. Those remain separate roadmap PRs created from merged
+`main`.
 
 ## Update rule
 

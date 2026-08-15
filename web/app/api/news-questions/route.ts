@@ -49,10 +49,13 @@ const inputError = (error: NewsQuestionInputError) => noStoreJson(
 );
 
 export async function GET(request: Request) {
+  const params = new URL(request.url).searchParams;
   if (isPreviewDeployment) {
+    if (params.get("mode") === "claim") {
+      return rejectPreviewWrite() ?? previewJson({ error: "Preview 只读" }, 403, "write-rejected");
+    }
     return previewJson({ items: [], preview: true }, 200, "synthetic-empty-assistant");
   }
-  const params = new URL(request.url).searchParams;
   if (params.get("mode") === "claim") {
     if (!await isIngestAuthorized(request)) return unauthorized();
     const binding = env.DB;

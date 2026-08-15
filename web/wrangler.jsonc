@@ -4,6 +4,20 @@
   "main": "./worker/index.ts",
   "compatibility_date": "2026-08-07",
   "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
+  "secrets": {
+    "required": [
+      "INGEST_TOKEN",
+      "STATUS_RELAY_URL",
+      "CF_ACCESS_TEAM_DOMAIN",
+      "CF_ACCESS_AUD",
+      "ASSISTANT_OWNER_SUBJECTS",
+      "ASSISTANT_OWNER_EMAILS"
+    ]
+  },
   "observability": {
     "enabled": true
   },

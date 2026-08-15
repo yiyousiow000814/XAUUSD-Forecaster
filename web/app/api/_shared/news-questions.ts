@@ -1,4 +1,10 @@
 // Mutable queue state is bounded; completed answers retain immutable provenance fields.
+import {
+  ASSISTANT_CONVERSATION_LIMITS,
+  ASSISTANT_TITLE_PROMPT_VERSION,
+  provisionalAssistantTitle,
+} from "./assistant-conversations";
+
 export const NEWS_QA_PROMPT_VERSION = "news-qa-v2";
 export const INSUFFICIENT_EVIDENCE_ANSWER = "当前已收录且可追溯的新闻证据不足，无法可靠回答这个问题。";
 
@@ -22,6 +28,10 @@ export type NewsQuestionStatus =
 
 export type PublicNewsQuestion = {
   id: string;
+  conversation_id: string | null;
+  user_message_id: string | null;
+  assistant_message_id: string | null;
+  conversation_title: string | null;
   question: string;
   status: NewsQuestionStatus;
   asked_at: string;
@@ -51,6 +61,10 @@ type NewsQuestionRow = Record<string, unknown> & {
   lease_expires_at: string | null;
   attempt_count: number;
   max_attempts: number;
+  prompt_version: string;
+  conversation_id: string | null;
+  user_message_id: string | null;
+  assistant_message_id: string | null;
 };
 
 export class NewsQuestionInputError extends Error {
@@ -146,6 +160,10 @@ export function publicNewsQuestion(row: Record<string, unknown>): PublicNewsQues
   const retrieval = parsedJson(row.retrieval_json, null);
   return {
     id: String(row.id),
+    conversation_id: typeof row.conversation_id === "string" ? row.conversation_id : null,
+    user_message_id: typeof row.user_message_id === "string" ? row.user_message_id : null,
+    assistant_message_id: typeof row.assistant_message_id === "string" ? row.assistant_message_id : null,
+    conversation_title: typeof row.conversation_title === "string" ? row.conversation_title : null,
     question: String(row.question),
     status: String(row.status) as NewsQuestionStatus,
     asked_at: String(row.asked_at),
@@ -184,38 +202,85 @@ export async function createNewsQuestion(
   const rateSince = new Date(now.getTime() - 60_000).toISOString();
   const retrievalQuery = deriveRetrievalQuery(input.question);
   if (!retrievalQuery) throw new NewsQuestionInputError("NO_RETRIEVAL_QUERY", "问题缺少可检索主题");
+  const provisionalTitle = provisionalAssistantTitle(input.question);
   const questionHash = await hexDigest(
     `${askedAt.slice(0, 10)}\n${normalizedQuestion(input.question).toLocaleLowerCase("zh-CN")}`,
   );
-  const row = await binding.prepare(
-    `INSERT INTO news_questions (
+  const questionId = crypto.randomUUID();
+  const conversationId = crypto.randomUUID();
+  const userMessageId = crypto.randomUUID();
+  const results = await binding.batch<NewsQuestionRow>([
+    binding.prepare(
+      `INSERT INTO assistant_conversations (
+       id,owner_id,initial_idempotency_key,title,title_source,created_at,
+       last_activity_at,summary_version,status
+       )
+       SELECT ?,?,?,?,'PROVISIONAL',?,?,0,'ACTIVE'
+       WHERE (SELECT count(*) FROM news_questions
+              WHERE owner_id=? AND status IN ('PENDING','PROCESSING')) < ?
+         AND (SELECT count(*) FROM news_questions
+              WHERE status IN ('PENDING','PROCESSING')) < ?
+         AND (SELECT count(*) FROM news_questions
+              WHERE owner_id=? AND asked_at>=?) < ?
+         AND NOT EXISTS (
+           SELECT 1 FROM news_questions
+           WHERE owner_id=? AND (idempotency_key=? OR question_hash=?)
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM assistant_conversations
+           WHERE owner_id=? AND initial_idempotency_key=?
+         )
+       ON CONFLICT DO NOTHING RETURNING *`,
+    ).bind(
+      conversationId, input.ownerId, input.idempotencyKey, provisionalTitle,
+      askedAt, askedAt,
+      input.ownerId, NEWS_QUESTION_LIMITS.activePerOwner,
+      NEWS_QUESTION_LIMITS.activeGlobal,
+      input.ownerId, rateSince, NEWS_QUESTION_LIMITS.admittedPerOwnerPerMinute,
+      input.ownerId, input.idempotencyKey, questionHash,
+      input.ownerId, input.idempotencyKey,
+    ),
+    binding.prepare(
+      `INSERT INTO assistant_messages (
+       id,conversation_id,role,content,created_at,provenance_json,source_kind,source_id
+       )
+       SELECT ?,id,'USER',?,?,?,'NEWS_QA',?
+       FROM assistant_conversations WHERE id=? AND owner_id=?
+       ON CONFLICT DO NOTHING RETURNING *`,
+    ).bind(
+      userMessageId, input.question, askedAt,
+      JSON.stringify({ kind: "USER_SUBMISSION", question_id: questionId }),
+      questionId, conversationId, input.ownerId,
+    ),
+    binding.prepare(
+      `INSERT INTO news_questions (
        id,owner_id,idempotency_key,question_hash,question,retrieval_query,status,
        asked_at,available_at,expires_at,attempt_count,max_attempts,prompt_version,
-       attempt_history_json
-     )
-     SELECT ?,?,?,?,?,?,'PENDING',?,?,?,0,?,?,'[]'
-     WHERE (SELECT count(*) FROM news_questions
-            WHERE owner_id=? AND status IN ('PENDING','PROCESSING')) < ?
-       AND (SELECT count(*) FROM news_questions
-            WHERE status IN ('PENDING','PROCESSING')) < ?
-       AND (SELECT count(*) FROM news_questions
-            WHERE owner_id=? AND asked_at>=?) < ?
-     ON CONFLICT DO NOTHING
-     RETURNING *`,
-  ).bind(
-    crypto.randomUUID(), input.ownerId, input.idempotencyKey, questionHash,
-    input.question, retrievalQuery, askedAt, askedAt, expiresAt,
-    NEWS_QUESTION_LIMITS.maxAttempts, NEWS_QA_PROMPT_VERSION,
-    input.ownerId, NEWS_QUESTION_LIMITS.activePerOwner,
-    NEWS_QUESTION_LIMITS.activeGlobal,
-    input.ownerId, rateSince, NEWS_QUESTION_LIMITS.admittedPerOwnerPerMinute,
-  ).first<NewsQuestionRow>();
-  if (row) return { kind: "CREATED", item: publicNewsQuestion(row) };
+       attempt_history_json,conversation_id,user_message_id
+       )
+       SELECT ?,?,?,?,?,?,'PENDING',?,?,?,0,?,?,'[]',id,?
+       FROM assistant_conversations WHERE id=? AND owner_id=?
+       ON CONFLICT DO NOTHING RETURNING *`,
+    ).bind(
+      questionId, input.ownerId, input.idempotencyKey, questionHash,
+      input.question, retrievalQuery, askedAt, askedAt, expiresAt,
+      NEWS_QUESTION_LIMITS.maxAttempts, NEWS_QA_PROMPT_VERSION,
+      userMessageId, conversationId, input.ownerId,
+    ),
+  ]);
+  const row = results.at(-1)?.results?.[0];
+  if (row) {
+    return {
+      kind: "CREATED",
+      item: publicNewsQuestion({ ...row, conversation_title: provisionalTitle }),
+    };
+  }
 
   const existing = await binding.prepare(
-    `SELECT * FROM news_questions
-     WHERE owner_id=? AND (idempotency_key=? OR question_hash=?)
-     ORDER BY CASE WHEN idempotency_key=? THEN 0 ELSE 1 END
+    `SELECT q.*,c.title AS conversation_title FROM news_questions q
+     LEFT JOIN assistant_conversations c ON c.id=q.conversation_id
+     WHERE q.owner_id=? AND (q.idempotency_key=? OR q.question_hash=?)
+     ORDER BY CASE WHEN q.idempotency_key=? THEN 0 ELSE 1 END
      LIMIT 1`,
   ).bind(input.ownerId, input.idempotencyKey, questionHash, input.idempotencyKey)
     .first<NewsQuestionRow>();
@@ -236,8 +301,9 @@ export async function listOwnerNewsQuestions(
 ) {
   const boundedLimit = Math.max(1, Math.min(NEWS_QUESTION_LIMITS.listSize, limit));
   const rows = await binding.prepare(
-    `SELECT * FROM news_questions
-     WHERE owner_id=? ORDER BY asked_at DESC,id DESC LIMIT ?`,
+    `SELECT q.*,c.title AS conversation_title FROM news_questions q
+     LEFT JOIN assistant_conversations c ON c.id=q.conversation_id
+     WHERE q.owner_id=? ORDER BY q.asked_at DESC,q.id DESC LIMIT ?`,
   ).bind(ownerId, boundedLimit).all<NewsQuestionRow>();
   return rows.results.map(publicNewsQuestion);
 }
@@ -248,7 +314,9 @@ export async function getOwnerNewsQuestion(
   id: string,
 ) {
   const row = await binding.prepare(
-    "SELECT * FROM news_questions WHERE owner_id=? AND id=?",
+    `SELECT q.*,c.title AS conversation_title FROM news_questions q
+     LEFT JOIN assistant_conversations c ON c.id=q.conversation_id
+     WHERE q.owner_id=? AND q.id=?`,
   ).bind(ownerId, id).first<NewsQuestionRow>();
   return row ? publicNewsQuestion(row) : null;
 }
@@ -318,6 +386,7 @@ export async function claimNewsQuestion(
     lease_token: String(row.lease_token),
     lease_expires_at: String(row.lease_expires_at),
     attempt_count: Number(row.attempt_count),
+    prompt_version: String(row.prompt_version),
   };
 }
 
@@ -387,6 +456,10 @@ export async function completeNewsQuestion(
      WHERE id=? AND status='PROCESSING' AND lease_token=? AND lease_expires_at>?`,
   ).bind(id, leaseToken, timestamp).first<NewsQuestionRow>();
   if (!leased) return null;
+  const promptVersion = String(input.prompt_version ?? "").trim();
+  if (promptVersion !== leased.prompt_version) {
+    throw new NewsQuestionInputError("INVALID_PROMPT_PROVENANCE", "回答规则版本无效");
+  }
 
   const provenance = completionProvenance(input.retrieval, leased);
   const answerStatus = String(input.answer_status ?? "");
@@ -422,19 +495,87 @@ export async function completeNewsQuestion(
     throw new NewsQuestionInputError("INVALID_ANSWER_STATUS", "回答状态无效");
   }
 
-  const row = await binding.prepare(
-    `UPDATE news_questions SET status='ANSWERED',answer_status=?,answer=?,
-     evidence_json=?,retrieval_json=?,answered_at=?,model_version=?,
-     prompt_version=?,failure_code=NULL,lease_owner=NULL,lease_token=NULL,
-     processing_started_at=NULL,lease_expires_at=NULL,attempt_history_json=${history("ANSWERED")}
-     WHERE id=? AND status='PROCESSING' AND lease_token=? AND lease_expires_at>?
-     RETURNING *`,
-  ).bind(
-    answerStatus, answer, JSON.stringify(evidence), JSON.stringify(provenance),
-    timestamp, modelVersion, NEWS_QA_PROMPT_VERSION, timestamp,
-    id, leaseToken, timestamp,
-  ).first<NewsQuestionRow>();
-  return row ? publicNewsQuestion(row) : null;
+  if (!leased.conversation_id || !leased.user_message_id) {
+    throw new NewsQuestionInputError("MISSING_CONVERSATION_STATE", "问题缺少规范会话状态");
+  }
+  const assistantMessageId = crypto.randomUUID();
+  const titleJobId = crypto.randomUUID();
+  const assistantProvenance = JSON.stringify({
+    kind: "NEWS_QA",
+    question_id: id,
+    answer_status: answerStatus,
+    evidence_ids: evidence,
+    retrieval: provenance,
+    model_version: modelVersion,
+    prompt_version: leased.prompt_version,
+  });
+  const results = await binding.batch<NewsQuestionRow>([
+    binding.prepare(
+      `INSERT INTO assistant_messages (
+       id,conversation_id,role,content,created_at,provenance_json,source_kind,source_id
+       )
+       SELECT ?,conversation_id,'ASSISTANT',?,?,?,'NEWS_QA',id
+       FROM news_questions
+       WHERE id=? AND status='PROCESSING' AND lease_token=? AND lease_expires_at>?
+       ON CONFLICT DO NOTHING RETURNING *`,
+    ).bind(
+      assistantMessageId, answer, timestamp, assistantProvenance,
+      id, leaseToken, timestamp,
+    ),
+    binding.prepare(
+      `UPDATE news_questions SET status='ANSWERED',answer_status=?,answer=?,
+       evidence_json=?,retrieval_json=?,answered_at=?,model_version=?,
+       assistant_message_id=?,failure_code=NULL,
+       lease_owner=NULL,lease_token=NULL,processing_started_at=NULL,lease_expires_at=NULL,
+       attempt_history_json=${history("ANSWERED")}
+       WHERE id=? AND status='PROCESSING' AND lease_token=? AND lease_expires_at>?
+       RETURNING *`,
+    ).bind(
+      answerStatus, answer, JSON.stringify(evidence), JSON.stringify(provenance),
+      timestamp, modelVersion, assistantMessageId,
+      timestamp, id, leaseToken, timestamp,
+    ),
+    binding.prepare(
+      `UPDATE assistant_conversations SET last_activity_at=?
+       WHERE id=(SELECT conversation_id FROM news_questions
+                 WHERE id=? AND assistant_message_id=?)`,
+    ).bind(timestamp, id, assistantMessageId),
+    binding.prepare(
+      `UPDATE assistant_conversations SET
+       title_request_version=title_request_version+1,pending_title_job_id=?
+       WHERE id=(SELECT conversation_id FROM news_questions
+                 WHERE id=? AND assistant_message_id=?)
+         AND title_source='PROVISIONAL' AND title_request_version=0
+         AND pending_title_job_id IS NULL
+       RETURNING *`,
+    ).bind(titleJobId, id, assistantMessageId),
+    binding.prepare(
+      `INSERT INTO assistant_title_jobs (
+       id,conversation_id,idempotency_key,requested_by,input_version,
+       expected_title_revision,first_user_message_id,assistant_message_id,
+       status,available_at,attempt_count,max_attempts,prompt_version,created_at
+       )
+       SELECT ?,id,?,'AUTOMATIC',title_request_version,title_revision,
+       (SELECT id FROM assistant_messages
+        WHERE conversation_id=assistant_conversations.id AND role='USER'
+        ORDER BY created_at,id LIMIT 1),?,'PENDING',?,0,?,?,?
+       FROM assistant_conversations WHERE pending_title_job_id=?
+       ON CONFLICT DO NOTHING RETURNING *`,
+    ).bind(
+      titleJobId, `automatic:${assistantMessageId}`, assistantMessageId, timestamp,
+      ASSISTANT_CONVERSATION_LIMITS.titleJobMaxAttempts,
+      ASSISTANT_TITLE_PROMPT_VERSION, timestamp, titleJobId,
+    ),
+  ]);
+  const row = results[1]?.results?.[0];
+  if (!row) return null;
+  const conversation = await binding.prepare(
+    "SELECT title FROM assistant_conversations WHERE id=?",
+  ).bind(leased.conversation_id).first<{ title: string }>();
+  return publicNewsQuestion({
+    ...row,
+    conversation_title: conversation?.title ?? null,
+  });
 }
 
 export async function failNewsQuestion(
