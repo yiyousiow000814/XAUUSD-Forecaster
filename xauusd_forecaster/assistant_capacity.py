@@ -453,9 +453,7 @@ def _validated_capacity_policies(
         if not _MODEL_ID.fullmatch(policy.model_id):
             raise ValueError("Assistant capacity model_id is invalid")
         expected_provider = providers_by_model.get(policy.model_id)
-        if expected_provider is None:
-            raise ValueError("Assistant capacity policy names an unknown model")
-        if policy.provider != expected_provider:
+        if expected_provider is not None and policy.provider != expected_provider:
             raise ValueError("Assistant capacity provider does not match model")
         if (
             not policy.shared_model_ids
