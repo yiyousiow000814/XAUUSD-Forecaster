@@ -85,3 +85,16 @@ queue admission, or provider transport.
 A Preview may render explicitly labeled synthetic Assistant fixtures or an
 immutable build snapshot for presentation review. Such output is not a live
 conversation and does not verify the model, retrieval, or persistence path.
+
+The responsive Assistant workbench may install its branch-owned fixture only
+after the Preview API returns the labeled synthetic-empty Assistant state. The
+fixture remains visibly labeled, never enters an API request, and may be used
+only for local selection, paging, and progress-presentation review. Composer,
+rename, title regeneration, archive, cancellation, and every other mutation
+remain disabled.
+
+For `/api/assistant-chat`, every POST and machine claim returns the standard
+write rejection before authentication, body parsing, or D1 access. Human turn
+reads return a labeled synthetic empty object, and event reads return a finite
+empty `assistant.event.v1` SSE response. Neither response probes production
+Assistant ownership or state.

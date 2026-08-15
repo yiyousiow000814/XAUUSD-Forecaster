@@ -279,7 +279,7 @@ test("keeps branch Preview identity and blocks writes", async () => {
   for (const path of [
     "/api/ingest", "/api/learning", "/api/learning-history",
     "/api/news-index", "/api/news-content", "/api/market-chart",
-    "/api/market-history", "/api/news-questions",
+    "/api/market-history", "/api/news-questions", "/api/assistant-chat",
   ]) {
     const forbiddenD1 = new Proxy({}, {
       get() { throw new Error(`${path} touched D1 before Preview rejection`); },
@@ -1298,6 +1298,7 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   const live = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
   const status = readFileSync(new URL("../app/_views/StatusView.tsx", import.meta.url), "utf8");
   const health = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
+  const assistant = readFileSync(new URL("../app/_views/AssistantView.tsx", import.meta.url), "utf8");
   const mobileNav = readFileSync(new URL("../app/_components/MobileDashboardNav.tsx", import.meta.url), "utf8");
   const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
@@ -1306,10 +1307,10 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(page, /aria-label="切换证据台页面"/);
   assert.match(page, /window\.scrollTo\(\{ top: 0, behavior: "instant" \}\)/);
   assert.doesNotMatch(page, /scrollAuditTabs|auditTabsRef|向左查看更多审计视图|向右查看更多审计视图/);
-  for (const [source, current] of [[live, "live"], [page, "mobileDashboardSection"], [status, "status"], [health, "health"]]) {
+  for (const [source, current] of [[live, "live"], [page, "mobileDashboardSection"], [status, "status"], [health, "health"], [assistant, "assistant"]]) {
     assert.match(source, new RegExp(`<MobileDashboardNav current=\\{?"?${current}`));
   }
-  for (const label of ["实时室", "新闻与证据", "学习曲线", "AI 模型用量", "系统健康"]) {
+  for (const label of ["实时室", "Assistant 私有分析", "新闻与证据", "学习曲线", "AI 模型用量", "系统健康"]) {
     assert.match(mobileNav, new RegExp(label));
   }
   assert.match(mobileNav, /aria-label="切换主要区域"/);
@@ -1638,4 +1639,89 @@ test("keeps private news Q&A authenticated, lease-backed, and phone readable", (
   assert.doesNotMatch(qaSync, /recent_news/);
   assert.match(css, /\.news-qa-desk form button \{[^}]*min-height:44px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.news-qa-desk form \{ grid-template-columns:1fr/);
+});
+
+test("keeps chat admission owner-authenticated and event replay finite", () => {
+  const route = readFileSync(new URL("../app/api/assistant-chat/route.ts", import.meta.url), "utf8");
+  const runtime = readFileSync(
+    new URL("../app/api/_shared/assistant-chat.ts", import.meta.url), "utf8",
+  );
+  const migration = readFileSync(
+    new URL("../drizzle/0011_assistant_chat_runtime.sql", import.meta.url), "utf8",
+  );
+  const leaseMigration = readFileSync(
+    new URL("../drizzle/0012_assistant_turn_lease_bound.sql", import.meta.url), "utf8",
+  );
+  const postRoute = route.slice(route.indexOf("export async function POST"));
+  assert.ok(
+    postRoute.indexOf("rejectPreviewWrite()")
+      < postRoute.indexOf("authenticateAssistantRequest(request, env)"),
+    "Preview chat writes must reject before human authentication",
+  );
+  assert.match(route, /isIngestAuthorized\(request\)/);
+  assert.match(route, /authenticateAssistantRequest\(request, env\)/);
+  assert.match(route, /last-event-id/);
+  assert.match(route, /text\/event-stream/);
+  assert.match(route, /X-Assistant-Next-Sequence/);
+  assert.doesNotMatch(route, /ReadableStream|setInterval|setTimeout/);
+  assert.match(runtime, /activePerOwner: 2/);
+  assert.match(runtime, /activeGlobal: 10/);
+  assert.match(runtime, /lease_expires_at>\?/);
+  assert.match(runtime, /LEASE_RENEWED/);
+  assert.match(route, /action === "RENEW"/);
+  assert.match(runtime, /automaticAssistantTitleStatements/);
+  assert.match(runtime, /scheduleAssistantCompaction/);
+  assert.match(migration, /assistant_turn_events_immutable_update/);
+  assert.match(migration, /assistant_turn_jobs_terminal_immutable/);
+  assert.match(migration, /assistant event sequence must be contiguous/);
+  assert.match(leaseMigration, /assistant lease cannot outlive turn/);
+});
+
+test("renders a recoverable responsive Assistant workbench without unsafe HTML", () => {
+  const app = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
+  const view = readFileSync(new URL("../app/_views/AssistantView.tsx", import.meta.url), "utf8");
+  const rail = readFileSync(
+    new URL("../app/_components/AssistantConversationRail.tsx", import.meta.url), "utf8",
+  );
+  const transcript = readFileSync(
+    new URL("../app/_components/AssistantTranscript.tsx", import.meta.url), "utf8",
+  );
+  const client = readFileSync(
+    new URL("../app/_lib/assistant-chat-client.ts", import.meta.url), "utf8",
+  );
+  const fixture = readFileSync(
+    new URL("../app/_lib/assistant-preview-fixture.ts", import.meta.url), "utf8",
+  );
+  const conversations = readFileSync(
+    new URL("../app/api/_shared/assistant-conversations.ts", import.meta.url), "utf8",
+  );
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+
+  assert.match(app, /room === "assistant"/);
+  assert.match(app, /<AssistantView \/>/);
+  assert.match(view, /fetchAssistantConversations/);
+  assert.match(view, /replayAssistantEvents/);
+  assert.match(view, /document\.visibilityState === "hidden"/);
+  assert.match(view, /31 \* 60 \* 1_000/);
+  assert.doesNotMatch(view, /EventSource|setInterval/);
+  assert.match(client, /"Last-Event-ID": String\(after\)/);
+  assert.match(view, /sequence\.terminal/);
+  assert.match(conversations, /active_turn: PublicAssistantActiveTurn \| null/);
+  assert.match(conversations, /ASSISTANT_ACTIVE_TURN_STATUSES_SQL/);
+  assert.match(rail, /aria-label="Assistant 会话列表"/);
+  assert.match(rail, /已归档/);
+  assert.match(transcript, /加载更早消息/);
+  assert.match(transcript, /取消本轮/);
+  assert.match(transcript, /查看本轮分析过程/);
+  assert.match(transcript, /assistant-transcript-banners/);
+  assert.match(transcript, /AURUM \/ PROVISIONAL/);
+  assert.match(transcript, /16,000 bytes/);
+  assert.doesNotMatch(transcript, /dangerouslySetInnerHTML/);
+  assert.match(fixture, /不是真实会话 · 不调用模型/);
+  assert.match(css, /\.assistant-workbench \{[^}]*grid-template-columns:300px minmax\(0,1fr\)/);
+  assert.match(css, /body:has\(> \.preview-banner\):has\(\.assistant-main\)[^{]*\{[^}]*grid-template-rows:auto minmax\(0,1fr\)/);
+  assert.match(css, /\.assistant-conversation-rail\.is-open \{ transform:translateX\(0\); \}/);
+  assert.match(css, /\.assistant-composer-meta button \{[^}]*min-height:46px/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-open-rail \{ display:block/);
+  assert.match(css, /\.assistant-message>p \{[^}]*overflow-wrap:anywhere; white-space:pre-wrap/);
 });

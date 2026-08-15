@@ -11,7 +11,7 @@ from enum import StrEnum
 from .annotation import DEFAULT_GEMMA_MODEL
 
 
-ASSISTANT_ROUTING_POLICY_VERSION = "assistant-routing-v1"
+ASSISTANT_ROUTING_POLICY_VERSION = "assistant-routing-v2"
 ASSISTANT_MODEL_PROFILES_ENV = "ASSISTANT_MODEL_PROFILES"
 GOOGLE_GENERATIVE_LANGUAGE = "GOOGLE_GENERATIVE_LANGUAGE"
 ASSISTANT_REQUEST_ENVELOPE_RESERVE = 4_096
@@ -19,6 +19,7 @@ MAX_ASSISTANT_MODEL_CANDIDATES = 8
 
 
 class AssistantTaskType(StrEnum):
+    ASSISTANT_CHAT = "ASSISTANT_CHAT"
     NEWS_QA = "NEWS_QA"
     CONVERSATION_TITLE = "CONVERSATION_TITLE"
     CONTEXT_COMPACTION = "CONTEXT_COMPACTION"
@@ -86,7 +87,7 @@ DEFAULT_ASSISTANT_MODEL_PROFILES = (
         provider=GOOGLE_GENERATIVE_LANGUAGE,
         context_limit=32_768,
         supports_thinking=True,
-        supports_function_calling=False,
+        supports_function_calling=True,
         supports_streaming=False,
         capacity_class=ModelCapacityClass.LARGE,
     ),
@@ -242,7 +243,9 @@ def configured_assistant_model_profiles(
 def conservative_assistant_token_estimate(value: object) -> int:
     serialized = (
         value if isinstance(value, str)
-        else json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        else json.dumps(
+            value, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+        )
     )
     return max(
         1,
@@ -322,7 +325,7 @@ def plan_assistant_route(
         profile for profile in configured_profiles
         if profile.enabled and profile.context_limit >= input_tokens + output_tokens
     )
-    if reasoning is ReasoningClass.TOOL_HEAVY:
+    if tool_calls > 0:
         available = tuple(
             profile for profile in available if profile.supports_function_calling
         )

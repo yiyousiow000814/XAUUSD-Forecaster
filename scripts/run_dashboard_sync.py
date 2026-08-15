@@ -879,16 +879,23 @@ def _write_runtime_signal(payload: object) -> None:
     temporary.replace(target)
 
 
-def _post_json(url: str, payload: bytes, config: dict) -> dict:
+def _remote_request_headers(url: str, config: dict) -> dict[str, str]:
     headers = {
         "Authorization": f"Bearer {config['token']}",
-        "Content-Type": "application/json",
         "User-Agent": "AurumSignalRoomMirror/1.0",
     }
     sites_bypass_token = os.environ.get("SITES_BYPASS_TOKEN", "").strip()
     remote_host = (urllib.parse.urlsplit(url).hostname or "").lower()
     if sites_bypass_token and remote_host.endswith(".chatgpt.site"):
         headers["OAI-Sites-Authorization"] = f"Bearer {sites_bypass_token}"
+    return headers
+
+
+def _post_json(url: str, payload: bytes, config: dict) -> dict:
+    headers = {
+        **_remote_request_headers(url, config),
+        "Content-Type": "application/json",
+    }
     request = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     with urllib.request.urlopen(
         request, timeout=REMOTE_POST_TIMEOUT_SECONDS
@@ -904,16 +911,79 @@ def _post_json(url: str, payload: bytes, config: dict) -> dict:
     return result if isinstance(result, dict) else {}
 
 
-def _get_json(url: str, config: dict) -> dict:
+def _get_json(
+    url: str,
+    config: dict,
+    *,
+    timeout_seconds: float = REMOTE_POST_TIMEOUT_SECONDS,
+) -> dict:
+    if (
+        not isinstance(timeout_seconds, (int, float))
+        or isinstance(timeout_seconds, bool)
+        or not math.isfinite(float(timeout_seconds))
+        or float(timeout_seconds) <= 0
+    ):
+        raise ValueError("dashboard GET timeout is invalid")
     request = urllib.request.Request(url, headers={
-        "Authorization": f"Bearer {config['token']}",
+        **_remote_request_headers(url, config),
         "Accept": "application/json",
-        "User-Agent": "AurumSignalRoomMirror/1.0",
     })
     with urllib.request.urlopen(
-        request, timeout=REMOTE_POST_TIMEOUT_SECONDS,
+        request, timeout=min(REMOTE_POST_TIMEOUT_SECONDS, float(timeout_seconds)),
     ) as response:
         return json.loads(response.read())
+
+
+def _assistant_worker_id() -> str:
+    worker_suffix = re.sub(
+        r"[^A-Za-z0-9._:-]", "-",
+        os.environ.get("COMPUTERNAME", "windows-sync"),
+    )[:64]
+    return f"dashboard-sync:{worker_suffix}"
+
+
+def _sync_assistant_chat(_local_payload: dict, config: dict):
+    # Keep SQLite and the model runtime outside Preview's pure-helper import path.
+    from xauusd_forecaster.assistant_capacity import (
+        configured_assistant_capacity_policies,
+    )
+    from xauusd_forecaster.assistant_chat_worker import (
+        AssistantChatTransport,
+        run_assistant_chat_worker,
+    )
+    from xauusd_forecaster.assistant_routing import (
+        configured_assistant_model_profiles,
+    )
+    from xauusd_forecaster.news_scheduler import configured_api_credentials
+
+    chat_url = config.get("remote_assistant_chat_url") or (
+        config["remote_ingest_url"].rsplit("/", 1)[0] + "/assistant-chat"
+    )
+    credentials = configured_api_credentials()
+    profiles = configured_assistant_model_profiles()
+    policies = configured_assistant_capacity_policies(credentials, profiles)
+    database = Path(config.get(
+        "local_database", MODULE_ROOT / ".local" / "forward" / "forward.sqlite3",
+    ))
+    transport = AssistantChatTransport(
+        get_json=lambda url, timeout: _get_json(
+            url, config, timeout_seconds=timeout,
+        ),
+        post_json=lambda url, payload: _post_json(
+            url,
+            json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            config,
+        ),
+    )
+    return run_assistant_chat_worker(
+        chat_url=str(chat_url),
+        worker_id=_assistant_worker_id(),
+        database=database,
+        credentials=credentials,
+        transport=transport,
+        profiles=profiles,
+        policies=policies,
+    )
 
 
 def _sync_news_questions(local_payload: dict, config: dict) -> None:
@@ -956,11 +1026,7 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/news-questions"
     )
     api_root = url.rsplit("/", 1)[0]
-    worker_suffix = re.sub(
-        r"[^A-Za-z0-9._:-]", "-",
-        os.environ.get("COMPUTERNAME", "windows-sync"),
-    )[:64]
-    worker_id = f"dashboard-sync:{worker_suffix}"
+    worker_id = _assistant_worker_id()
     credentials = configured_api_credentials()
     database = Path(config.get(
         "local_database", MODULE_ROOT / ".local" / "forward" / "forward.sqlite3",
@@ -1027,7 +1093,9 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                         }),
                         reserved_output_tokens=NEWS_QA_MAX_OUTPUT_TOKENS,
                         user_text=question,
-                        planned_tool_calls=1,
+                        # Retrieval completed deterministically before this model
+                        # request; this Q&A path is not native function calling.
+                        planned_tool_calls=0,
                         profiles=model_profiles,
                     )
 
@@ -1720,6 +1788,7 @@ def sync_once(config: dict) -> list[dict]:
             ("market_chart", _sync_market),
             ("market_history", lambda _payload, scoped: _sync_market_history(scoped)),
             ("news", _sync_news),
+            ("assistant_chat", _sync_assistant_chat),
             ("news_questions", _sync_news_questions),
         ):
             try:

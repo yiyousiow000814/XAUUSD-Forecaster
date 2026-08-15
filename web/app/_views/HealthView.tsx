@@ -121,6 +121,7 @@ export default function HealthView() {
         <span className="brand-mark">AU</span><div><strong>Aurum System Health</strong><small>组件心跳 · 新闻来源</small></div>
       </DashboardLink>
       <div className="top-actions">
+        <DashboardLink className="audit-link" href="/assistant">Assistant</DashboardLink>
         <DashboardLink className="audit-link" href="/status">AI 模型用量</DashboardLink>
         <DashboardLink className="audit-link" href="/audit?view=news">新闻与决策</DashboardLink>
         <DashboardLink className="audit-link" href="/" replace>← 返回实时室</DashboardLink>

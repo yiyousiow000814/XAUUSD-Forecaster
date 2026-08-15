@@ -224,6 +224,7 @@ export default function LiveRoomView() {
           </div>
         </div>
         <div className="top-actions">
+          <DashboardLink className="audit-link" href="/assistant">Assistant</DashboardLink>
           <DashboardLink className="audit-link" href="/status">系统状态</DashboardLink>
           <DashboardLink ariaLabel="新闻、决策与结果" className="audit-link" href="/audit?view=decisions">新闻 / 结果 <span aria-hidden="true">→</span></DashboardLink>
           <SystemStatePill loading={loading} error={Boolean(error)} online={Boolean(payload?.system.online)} marketSession={payload?.system.market_session} />

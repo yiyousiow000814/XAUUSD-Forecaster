@@ -113,3 +113,56 @@ test("Preview conversation routes reject mutations and expose only labeled empty
   assert.equal(compactionClaim.headers.get("x-aurum-preview"), "write-rejected");
   assert.equal(touched, false);
 });
+
+test("Preview chat runtime rejects every mutation and exposes a finite empty event stream", async t => {
+  if (!process.env.WORKERS_CI_BRANCH || process.env.WORKERS_CI_BRANCH === "main") {
+    t.skip("the ordinary local build has no embedded branch Preview bundle");
+    return;
+  }
+  let touched = false;
+  const bindings = {
+    DB: new Proxy({}, { get() { touched = true; throw new Error("D1 must stay untouched"); } }),
+    ASSETS: assets,
+  };
+  const write = await worker.fetch(
+    new Request("http://localhost/api/assistant-chat", {
+      method: "POST",
+      body: "not-json",
+    }),
+    bindings,
+    executionContext,
+  );
+  assert.equal(write.status, 403);
+  assert.equal(write.headers.get("x-aurum-preview"), "write-rejected");
+  assert.equal(touched, false);
+
+  const claim = await worker.fetch(
+    new Request("http://localhost/api/assistant-chat?mode=claim&worker_id=test-worker"),
+    bindings,
+    executionContext,
+  );
+  assert.equal(claim.status, 403);
+  assert.equal(touched, false);
+
+  const read = await worker.fetch(
+    new Request("http://localhost/api/assistant-chat?id=foreign-turn"),
+    bindings,
+    executionContext,
+  );
+  assert.equal(read.status, 200);
+  assert.deepEqual(await read.json(), { item: null, preview: true });
+  assert.equal(read.headers.get("x-aurum-preview"), "synthetic-empty-assistant");
+  assert.equal(touched, false);
+
+  const events = await worker.fetch(
+    new Request("http://localhost/api/assistant-chat?mode=events&id=foreign-turn"),
+    bindings,
+    executionContext,
+  );
+  assert.equal(events.status, 200);
+  assert.match(events.headers.get("content-type"), /^text\/event-stream/);
+  assert.equal(events.headers.get("x-assistant-event-protocol"), "assistant.event.v1");
+  assert.equal(events.headers.get("x-aurum-preview"), "synthetic-empty-assistant");
+  assert.match(await events.text(), /immutable Preview/);
+  assert.equal(touched, false);
+});

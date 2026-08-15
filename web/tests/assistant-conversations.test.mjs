@@ -130,7 +130,7 @@ test("answer completion atomically appends one immutable Assistant message and s
   assert.deepEqual(messages.items[1].provenance.evidence_ids, ["evidence:1"]);
   assert.equal(
     messages.items[1].provenance.routing.policy_version,
-    "assistant-routing-v1",
+    "assistant-routing-v2",
   );
   const conversation = await getOwnerAssistantConversation(
     database, owner, created.item.conversation_id,

@@ -471,7 +471,9 @@ def test_configured_targets_can_disable_retired_sites_mirror(
     assert targets[0]["remote_ingest_url"].endswith("workers.dev/api/ingest")
 
 
-def test_sites_bypass_header_is_not_sent_to_cloudflare(monkeypatch) -> None:
+def test_sites_bypass_header_is_shared_by_get_and_post_but_not_cloudflare(
+    monkeypatch,
+) -> None:
     module = _sync_module()
     monkeypatch.setenv("SITES_BYPASS_TOKEN", "sites-bypass")
     captured = []
@@ -498,11 +500,18 @@ def test_sites_bypass_header_is_not_sent_to_cloudflare(monkeypatch) -> None:
     module._post_json(
         "https://example.chatgpt.site/api/ingest", b"{}", config
     )
+    module._get_json("https://example.chatgpt.site/api/assistant-chat", config)
     module._post_json("https://example.workers.dev/api/ingest", b"{}", config)
+    module._get_json("https://example.workers.dev/api/assistant-chat", config)
 
     assert "Oai-sites-authorization" in captured[0]
-    assert "Oai-sites-authorization" not in captured[1]
-    assert captured[1]["User-agent"] == "AurumSignalRoomMirror/1.0"
+    assert "Oai-sites-authorization" in captured[1]
+    assert "Oai-sites-authorization" not in captured[2]
+    assert "Oai-sites-authorization" not in captured[3]
+    assert all(
+        headers["User-agent"] == "AurumSignalRoomMirror/1.0"
+        for headers in captured
+    )
 
 
 def test_ingest_response_records_valid_main_revision(tmp_path, monkeypatch) -> None:
@@ -1359,6 +1368,82 @@ def test_annotator_heartbeat_reports_idle_loop_as_healthy(tmp_path) -> None:
     assert datetime.fromisoformat(status["last_success"])
     assert status["last_error"] is None
     assert status["work_items"] == 0
+
+
+def test_assistant_chat_sync_wires_one_bounded_native_worker(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _sync_module()
+    from xauusd_forecaster import (
+        assistant_capacity,
+        assistant_chat_worker,
+        assistant_routing,
+        news_scheduler,
+    )
+
+    credentials = (SimpleNamespace(account_id="pool-a"),)
+    profiles = (SimpleNamespace(model_id="gemma-test"),)
+    policies = (SimpleNamespace(enabled=True),)
+    monkeypatch.setattr(
+        news_scheduler, "configured_api_credentials", lambda: credentials,
+    )
+    monkeypatch.setattr(
+        assistant_routing, "configured_assistant_model_profiles", lambda: profiles,
+    )
+    monkeypatch.setattr(
+        assistant_capacity,
+        "configured_assistant_capacity_policies",
+        lambda actual_credentials, actual_profiles: (
+            policies
+            if actual_credentials == credentials and actual_profiles == profiles
+            else pytest.fail("capacity inputs changed")
+        ),
+    )
+    monkeypatch.setenv("COMPUTERNAME", "Desk Top!")
+    transport_calls: list[tuple] = []
+
+    def get_json(url, config, *, timeout_seconds):
+        transport_calls.append(("GET", url, config["token"], timeout_seconds))
+        return {"item": None}
+
+    def post_json(url, payload, config):
+        transport_calls.append(("POST", url, config["token"], json.loads(payload)))
+        return {"status": "OK", "item": {"id": "turn-1"}}
+
+    monkeypatch.setattr(module, "_get_json", get_json)
+    monkeypatch.setattr(module, "_post_json", post_json)
+    captured: dict = {}
+
+    def run_worker(**kwargs):
+        captured.update(kwargs)
+        kwargs["transport"].get_json("https://example.test/read", 4.25)
+        kwargs["transport"].post_json(
+            "https://example.test/write", {"action": "EVENTS"},
+        )
+        return "worker-result"
+
+    monkeypatch.setattr(
+        assistant_chat_worker, "run_assistant_chat_worker", run_worker,
+    )
+    result = module._sync_assistant_chat({}, {
+        "remote_ingest_url": "https://example.test/api/ingest",
+        "token": "machine-token",
+        "local_database": str(tmp_path / "forward.sqlite3"),
+    })
+
+    assert result == "worker-result"
+    assert captured["chat_url"] == "https://example.test/api/assistant-chat"
+    assert captured["worker_id"] == "dashboard-sync:Desk-Top-"
+    assert captured["database"] == tmp_path / "forward.sqlite3"
+    assert captured["credentials"] == credentials
+    assert captured["profiles"] == profiles
+    assert captured["policies"] == policies
+    assert transport_calls == [
+        ("GET", "https://example.test/read", "machine-token", 4.25),
+        ("POST", "https://example.test/write", "machine-token", {
+            "action": "EVENTS",
+        }),
+    ]
 
 
 def test_news_question_sync_uses_shared_retrieval_and_skips_model_without_evidence(

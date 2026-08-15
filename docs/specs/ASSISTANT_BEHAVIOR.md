@@ -79,7 +79,9 @@ If asynchronous work is used, the durable queue exposes these states:
 A worker claim records a lease expiry and attempt count. A crashed worker cannot
 leave `PROCESSING` permanently: lease recovery returns eligible work to
 `PENDING` or moves exhausted work to `FAILED`. Retries are bounded and preserve
-the prior failure receipt.
+the prior failure receipt. An active worker renews the same lease immediately
+before a provider attempt. Renewal does not consume another attempt, requires
+the unexpired lease token, and is capped by the immutable turn expiry.
 
 A worker that holds a valid lease but cannot obtain safe model capacity records
 `CAPACITY_DEFERRED`, clears the lease, applies bounded backoff, and returns the
@@ -91,6 +93,14 @@ Authentication occurs before queue creation. Per-owner concurrency and global
 capacity are bounded, so anonymous or single-user traffic cannot starve the
 queue.
 
+The operational chat queue admits at most one active turn per conversation,
+two active turns per owner, ten globally, and five new turns per owner per
+minute. A turn expires after 30 minutes, a processing lease after five minutes,
+and at most three claims may be consumed. These are bounded v1 operational
+values, not permanent product constants. An accepted user message, its turn
+job, and `conversation.started` are one transaction; admission failure leaves
+none of them behind. Owner cancellation is idempotent and terminal.
+
 ## Streaming event protocol
 
 Streaming is a versioned event stream, not an alternate conversation database.
@@ -98,6 +108,7 @@ The initial target envelope is equivalent to:
 
 ```text
 assistant.event.v1
+- protocol
 - event_id
 - conversation_id
 - user_turn_id
@@ -111,6 +122,34 @@ assistant.event.v1
 `sequence` is monotonic within one user turn. Reconnection MAY resume from a
 known sequence, but replayed transport events do not create duplicate canonical
 messages.
+
+The operational web transport returns a finite owner-authenticated SSE replay,
+not an indefinitely held Worker connection. The client sends the last consumed
+numeric sequence in `Last-Event-ID` or `after`, consumes the bounded page, and
+reconnects while the turn is non-terminal or more events remain. Every replay
+rechecks owner authorization. A response may therefore be empty without
+meaning that the turn failed.
+
+The authenticated browser recovers an admitted `PENDING` or `PROCESSING` turn
+from the owner conversation read, replays its immutable event sequence from the
+beginning through bounded pages, and resumes from the last contiguous sequence.
+It pauses reconnect work while the document is hidden and aborts requests when
+the view is left. Reconnect attempts have a finite retry count and cannot run
+past the turn's bounded orchestration lifetime. After a terminal event the
+browser refreshes canonical conversation and message records. Interrupted
+presentation deltas are labeled as provisional and never become a locally
+invented final answer; they disappear after failure or cancellation.
+
+The operational v1 codec is shared by the Python orchestrator and TypeScript
+web boundary. Envelopes and type-specific payloads use exact fields and strict
+JSON: unknown fields, non-finite numbers, malformed identifiers, oversized
+payloads, and unsupported protocol versions fail closed. A turn carries at
+most 256 events, one payload at most 16,384 UTF-8 bytes, one answer delta at
+most 4,096 bytes, and all presentation deltas/block references at most 65,536
+bytes. These are versioned operational safety values rather than assumed model
+or provider limits. Progress admission reserves enough sequence capacity for
+the largest permitted final-answer event set, so progress cannot prevent a turn
+from reaching one durable terminal state.
 
 The initial event vocabulary is:
 
@@ -135,9 +174,39 @@ cancelled
 validated canonical final message. A partial stream interrupted before final
 persistence MUST NOT be presented later as a completed answer.
 
+The first event is exactly `conversation.started`. Tool and retrieval
+completions must match a prior start; all active operations close before
+`answer.started`. Only deltas and validated content-block references occur
+while the answer is open. `answer.completed` is the only event allowed to name
+the canonical Assistant message, and `conversation.completed` follows it.
+`error` and `cancelled` are terminal, and no event follows a terminal event.
+Reasoning progress contains only the public reasoning class, never private
+reasoning text. SSE uses the numeric sequence as `Last-Event-ID`/resume state
+and includes one complete JSON envelope in each `data` record.
+
+`content.block` carries only a bounded block identity, version, type, and
+content hash in v1. The separately versioned rich-content contract owns the
+actual validated block data; the event transport never treats arbitrary model
+HTML as renderable content.
+
 The event protocol is independently versioned from message storage. Streaming
 can therefore be added or replaced without migrating canonical conversation
 history.
+
+Machine progress writes require the active turn lease. Tool and retrieval start
+and finish records are admitted together as one closed idempotent batch; a
+transport failure cannot persist an unclosed operation. Final persistence
+atomically appends the canonical Assistant message, answer events, terminal
+conversation event, turn status, conversation activity, and first-title job
+admission. Compaction scheduling happens afterward and cannot invalidate that
+final.
+
+The Windows producer emits the deterministic public reasoning class before
+model work. After each successful native run it projects exact public tool
+receipts into closed start/finish batches before publishing the final; retry
+attempts use distinct bounded public call identities. Unknown rejected tools
+without an authoritative version remain in model provenance but do not receive
+a fabricated presentation event.
 
 ## Progress and reasoning display
 
@@ -156,6 +225,12 @@ The system MUST NOT spend an extra model call merely to generate "thinking"
 copy. `reasoning.started` reports a phase and selected public policy metadata;
 it never exposes private chain-of-thought. A completed progress trace MAY be
 collapsed behind `查看分析过程`.
+
+The responsive workbench exposes conversation selection, older-message paging,
+title controls, archive and restore, turn cancellation, and the finite progress
+trace on both desktop and phone layouts. Canonical message text is rendered as
+text, not arbitrary model HTML. The phone conversation rail is a dismissible
+drawer and all primary controls remain reachable without horizontal overflow.
 
 ## Structured content protocol
 
