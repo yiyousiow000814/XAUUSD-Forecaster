@@ -968,6 +968,9 @@ def _decode_model_json(envelope: dict[str, object]) -> dict:
 
 
 def _chinese_repair_payload(result: dict) -> dict[str, object]:
+    repair_fields = ["headline_zh", "summary_zh", "primary_story_title_zh"]
+    if "semantic_reason_zh" in result:
+        repair_fields.append("semantic_reason_zh")
     return {
         "contents": [{"parts": [{"text": (
             "Rewrite the prose primarily in natural Simplified Chinese. Use common "
@@ -980,13 +983,7 @@ def _chinese_repair_payload(result: dict) -> dict[str, object]:
             "Preserve dates, percentages, prices, and every number exactly. "
             "Return JSON only.\nSOURCE_JSON\n"
             + json.dumps(
-                {
-                    "headline_zh": result.get("headline_zh"),
-                    "summary_zh": result.get("summary_zh"),
-                    "primary_story_title_zh": result.get(
-                        "primary_story_title_zh"
-                    ),
-                },
+                {field: result.get(field) for field in repair_fields},
                 ensure_ascii=False,
             )
         )}]}],
@@ -994,11 +991,9 @@ def _chinese_repair_payload(result: dict) -> dict[str, object]:
             "responseMimeType": "application/json",
             "responseSchema": {
                 "type": "object",
-                "required": ["headline_zh", "summary_zh", "primary_story_title_zh"],
+                "required": repair_fields,
                 "properties": {
-                    "headline_zh": {"type": "string"},
-                    "summary_zh": {"type": "string"},
-                    "primary_story_title_zh": {"type": "string"},
+                    field: {"type": "string"} for field in repair_fields
                 },
             },
             "maxOutputTokens": 2048,
@@ -1405,6 +1400,10 @@ def _validate_chinese_result(result: dict) -> None:
     story_title = str(result.get("primary_story_title_zh") or "").strip()
     if story_title:
         _validate_chinese_display_field(story_title, "primary_story_title_zh")
+    if "semantic_reason_zh" in result:
+        _validate_chinese_display_field(
+            result.get("semantic_reason_zh"), "semantic_reason_zh"
+        )
 
 
 def _validate_chinese_display_field(value: object, field: str) -> None:
@@ -1428,6 +1427,8 @@ def _invalid_chinese_display_fields(result: dict) -> tuple[str, ...]:
         rules += (("primary_story_title_zh", 0),)
     elif str(result.get("primary_story_title_zh") or "").strip():
         rules += (("primary_story_title_zh", 2),)
+    if "semantic_reason_zh" in result:
+        rules += (("semantic_reason_zh", 2),)
     invalid = []
     schema_properties = news_annotation_schema(PROMPT_VERSION)["properties"]
     for field, minimum in rules:

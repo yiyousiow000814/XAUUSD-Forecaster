@@ -2029,6 +2029,65 @@ def test_gemini_distinguishes_translated_prose_from_english_identifiers() -> Non
         annotation_module._validate_chinese_result(invalid)
 
 
+def test_gemini_validates_semantic_reason_as_chinese_primary_display() -> None:
+    valid = {
+        "headline_zh": "美国 CPI 高于预期",
+        "summary_zh": "美国 CPI 高于预期，市场重新评估美联储降息路径。",
+        "semantic_reason_zh": "CPI 改变利率预期，可能通过美元影响 XAUUSD。",
+    }
+    invalid = {
+        **valid,
+        "semantic_reason_zh": (
+            "Federal Reserve policy expectations changed and the dollar "
+            "reaction may affect gold prices."
+        ),
+    }
+
+    annotation_module._validate_chinese_result(valid)
+    with pytest.raises(ValueError, match="NO_CHINESE_PROSE"):
+        annotation_module._validate_chinese_result(invalid)
+
+
+def test_gemini_repairs_only_invalid_semantic_reason(monkeypatch) -> None:
+    evidence = "CPI changed rate expectations and the dollar outlook."
+    invalid_reason = (
+        "Federal Reserve policy expectations changed and the dollar "
+        "reaction may affect gold prices."
+    )
+    vector = _v15_annotation({
+        "headline_zh": "美国 CPI 高于预期",
+        "summary_zh": "美国 CPI 高于预期，市场重新评估美联储降息路径。",
+        "event_type": "economic_release", "entities": ["CPI"],
+        "hawkishness": 0.0, "inflation_impulse": 0.5,
+        "growth_impulse": 0.0, "geopolitical_risk": 0.0,
+        "usd_impulse": 0.3, "novelty": 0.8, "confidence": 0.8,
+    }, evidence, semantic_reason_zh=invalid_reason)
+    repaired_reason = "CPI 改变利率预期，可能通过美元影响 XAUUSD。"
+    repaired = {
+        "headline_zh": vector["headline_zh"],
+        "summary_zh": vector["summary_zh"],
+        "primary_story_title_zh": vector["primary_story_title_zh"],
+        "semantic_reason_zh": repaired_reason,
+    }
+    calls = []
+    _mock_model_json(
+        monkeypatch,
+        lambda _key, _model, _payload: calls.append(1) or (
+            vector if len(calls) == 1 else repaired
+        ),
+    )
+    pool = annotation_module._GeminiRequestPool(
+        ("key-a", "key-b"), request_accountant=ALLOW_MODEL_REQUEST,
+    )
+
+    result, _ = pool.call(0, "model", "headline", evidence)
+
+    assert result["semantic_reason_zh"] == repaired_reason
+    assert result["headline_zh"] == vector["headline_zh"]
+    assert result["summary_zh"] == vector["summary_zh"]
+    assert len(calls) == 2
+
+
 @pytest.mark.parametrize(("invalid_display", "repaired_fields"), [
     (
         {"headline_zh": "金", "summary_zh": "黄金上涨，但摘要长度不足。"},
@@ -2124,11 +2183,22 @@ def test_chinese_repair_policy_preserves_natural_english_identifiers() -> None:
         "headline_zh": "Powell comments on XAUUSD",
         "summary_zh": "NVIDIA and FOMC were mentioned.",
         "primary_story_title_zh": "",
+        "semantic_reason_zh": "Rate expectations changed.",
     })
     instruction = payload["contents"][0]["parts"][0]["text"]
+    schema = payload["generationConfig"]["responseSchema"]
     assert "proper nouns in English" in instruction
     assert "primarily in natural Simplified Chinese" in instruction
     assert "No sentence may remain" not in instruction
+    assert "semantic_reason_zh" in instruction
+    assert "semantic_reason_zh" in schema["required"]
+
+    legacy_schema = annotation_module._chinese_repair_payload({
+        "headline_zh": "Gold update",
+        "summary_zh": "Gold moved.",
+        "primary_story_title_zh": "",
+    })["generationConfig"]["responseSchema"]
+    assert "semantic_reason_zh" not in legacy_schema["required"]
 
 
 def test_gemini_annotation_reserves_provider_counted_input_tokens(
