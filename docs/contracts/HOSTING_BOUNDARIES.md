@@ -7,8 +7,10 @@
   MUST NOT create GitHub Deployments or GitHub Environments, and pull requests
   MUST NOT request deployment to a GitHub environment.
 - Public visitors read remote dashboard state and never connect to localhost.
-- Public API reads may be anonymous, but every ingest route requires the Worker
-  secret `INGEST_TOKEN`.
+- Public research API reads may be anonymous, but model-consuming Assistant
+  routes are private under
+  [`ASSISTANT_SECURITY.md`](ASSISTANT_SECURITY.md). Every ingest route requires
+  the Worker secret `INGEST_TOKEN`.
 - Local secrets remain outside Git and must not appear in public responses or
   logs.
 - The ChatGPT Sites bypass header may be sent only to `*.chatgpt.site`; it must

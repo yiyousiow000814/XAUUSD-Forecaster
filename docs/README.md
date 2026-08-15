@@ -35,6 +35,9 @@ current rules merely because they discovered one.
 - [Evidence lanes](contracts/EVIDENCE_LANES.md)
 - [Hosting boundaries](contracts/HOSTING_BOUNDARIES.md)
 - [Preview isolation](contracts/PREVIEW_ISOLATION.md)
+- [Assistant state](contracts/ASSISTANT_STATE.md)
+- [Assistant orchestration](contracts/ASSISTANT_ORCHESTRATION.md)
+- [Assistant security boundaries](contracts/ASSISTANT_SECURITY.md)
 
 ### Specifications
 
@@ -44,6 +47,7 @@ current rules merely because they discovered one.
 - [Preview behavior](specs/PREVIEW_BEHAVIOR.md)
 - [Storylines](specs/STORYLINES.md)
 - [Temporal event graph](specs/TEMPORAL_EVENT_GRAPH.md)
+- [Assistant behavior](specs/ASSISTANT_BEHAVIOR.md)
 
 ### Protocols
 
@@ -55,11 +59,26 @@ current rules merely because they discovered one.
 - [Dynamic AI scheduler](design/AI_PRIORITY_SCHEDULER.md)
 - [Cloudflare hosting](design/CLOUDFLARE_HOSTING.md)
 - [Paged dashboard history](design/PAGED_DASHBOARD_HISTORY.md)
+- [Assistant architecture](design/ASSISTANT_ARCHITECTURE.md)
+- [Assistant implementation status](design/ASSISTANT_IMPLEMENTATION_STATUS.md)
+
+### Architecture decisions
+
+- [ADR-001: Forecaster-owned provider-independent Assistant state](decisions/ADR-001-provider-independent-assistant-state.md)
+- [ADR-002: Persistent history and incremental active context](decisions/ADR-002-persistent-history-and-incremental-context.md)
+- [ADR-003: Shared retrieval and bounded tool loop](decisions/ADR-003-shared-retrieval-and-bounded-tool-loop.md)
+- [ADR-004: Private Assistant authentication](decisions/ADR-004-private-assistant-authentication.md)
+- [ADR-005: Versioned events and structured content](decisions/ADR-005-versioned-events-and-structured-content.md)
+
+### Current plans
+
+- [Assistant implementation roadmap](plans/ASSISTANT_ROADMAP.md)
 
 ### Operations and reference
 
 - [Cloudflare deployment runbook](runbooks/CLOUDFLARE_DEPLOYMENT.md)
 - [Input and provider reference](reference/INPUTS.md)
+- [AI provider quota reference](AI_PROVIDER_QUOTAS.md)
 
 ### Historical evidence
 
