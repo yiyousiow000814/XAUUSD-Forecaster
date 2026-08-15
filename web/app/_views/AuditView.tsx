@@ -855,6 +855,7 @@ export default function AuditView() {
   const [newsPage, setNewsPage] = useState(1);
   const [newsReviewState, setNewsReviewState] = useState<NewsReviewState>("COMPLETED");
   const [showAllEvidence, setShowAllEvidence] = useState(false);
+  const [showEvidenceMetrics, setShowEvidenceMetrics] = useState(false);
   const [showAllStoryEvents, setShowAllStoryEvents] = useState(false);
   const pageDetailKeys = newsIndex.items
     .map(row => row.detail_key)
@@ -1436,15 +1437,18 @@ export default function AuditView() {
         <header className="evidence-intro evidence-intro-compact">
           <div><p className="eyebrow">NEWS USED BY MODEL</p><h2>模型真正用过哪些新闻？</h2><p>按独立事件说明模型用过什么、没用什么。</p></div>
         </header>
-        <div className="evidence-summary">
-          <article><span>收到多少篇文章</span><strong><CountValue value={newsMetrics.articles.received} /></strong><small>共保存 {formatExactCount(newsMetrics.articles.stored_revisions)} 个版本；文章更新不会算成新文章</small></article>
-          <article><span>历史上用过多少个事件</span><strong><CountValue value={evidenceSummarySeenCount} /></strong><small>每个都确实参加过至少一次预测</small></article>
-          <article><span>影响过多少次预测</span><strong><CountValue value={evidenceSummaryDecisionExposures} /></strong><small>同一事件可以连续影响多个 5 分钟预测</small></article>
-          <article><span>模型一共读取多少次</span><strong><CountValue value={evidenceSummaryModelUses} /></strong><small>5 套模型分别记账；这不是新闻数量</small></article>
-          <article><span>从未进入预测的事件</span><strong><CountValue value={evidenceSummaryUnseenCount} /></strong><small>可在下方逐条查看没有使用的原因</small></article>
-          <article><span>现在仍可用于预测</span><strong><CountValue value={evidenceSummaryEligibleCount} /></strong><small>等待下一次预测读取；不代表历史上用过</small></article>
+        <button className="evidence-metrics-toggle" type="button" aria-expanded={showEvidenceMetrics} onClick={() => setShowEvidenceMetrics(value => !value)}>{showEvidenceMetrics ? "收起统计口径" : "查看统计口径"}<span>{formatExactCount(evidenceSummarySeenCount)} 个事件历史上用过 · {formatExactCount(evidenceSummaryEligibleCount)} 个现在可用</span></button>
+        <div className={`evidence-metrics-block ${showEvidenceMetrics ? "is-open" : ""}`}>
+          <div className="evidence-summary">
+            <article><span>收到多少篇文章</span><strong><CountValue value={newsMetrics.articles.received} /></strong><small>共保存 {formatExactCount(newsMetrics.articles.stored_revisions)} 个版本；文章更新不会算成新文章</small></article>
+            <article><span>历史上用过多少个事件</span><strong><CountValue value={evidenceSummarySeenCount} /></strong><small>每个都确实参加过至少一次预测</small></article>
+            <article><span>影响过多少次预测</span><strong><CountValue value={evidenceSummaryDecisionExposures} /></strong><small>同一事件可以连续影响多个 5 分钟预测</small></article>
+            <article><span>模型一共读取多少次</span><strong><CountValue value={evidenceSummaryModelUses} /></strong><small>5 套模型分别记账；这不是新闻数量</small></article>
+            <article><span>从未进入预测的事件</span><strong><CountValue value={evidenceSummaryUnseenCount} /></strong><small>可在下方逐条查看没有使用的原因</small></article>
+            <article><span>现在仍可用于预测</span><strong><CountValue value={evidenceSummaryEligibleCount} /></strong><small>等待下一次预测读取；不代表历史上用过</small></article>
+          </div>
+          <p className="evidence-count-note"><b>{formatExactCount(newsMetrics.training.current_contract_rows)} 条训练记录</b> 来自 <b>{formatExactCount(newsMetrics.training.distinct_events)} 个当前契约事件</b>；文章、独立事件、预测读取和训练记录是四种不同口径。</p>
         </div>
-        <p className="evidence-count-note"><b>{formatExactCount(newsMetrics.training.current_contract_rows)} 条训练记录</b> 来自 <b>{formatExactCount(newsMetrics.training.distinct_events)} 个当前契约事件</b>；文章、独立事件、预测读取和训练记录是四种不同口径。</p>
         <nav className="evidence-filters" aria-label="模型新闻可见性筛选">
           <button type="button" className={evidenceMode === "seen" ? "active" : ""} onClick={() => { setEvidenceMode("seen"); setShowAllEvidence(false); }}>历史上用过 <b><CountValue value={evidenceSummarySeenCount} /></b></button>
           <button type="button" className={evidenceMode === "unseen" ? "active" : ""} onClick={() => { setEvidenceMode("unseen"); setShowAllEvidence(false); }}>从未用过 <b><CountValue value={evidenceSummaryUnseenCount} /></b></button>

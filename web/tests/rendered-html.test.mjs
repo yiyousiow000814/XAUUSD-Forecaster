@@ -532,6 +532,9 @@ test("separates completed, processing, and isolated news by durable review state
   assert.match(css, /\.news-browser nav \{ display:none; \}/);
   assert.match(css, /\.news-category-picker select \{[^}]*min-height:48px/);
   assert.match(css, /\.news-row>summary \{ grid-template-columns:1fr;/);
+  assert.match(css, /\.annotation-queue>span:nth-of-type\(4\),\.annotation-queue>span:nth-of-type\(5\) \{ display:flex/);
+  assert.match(css, /\.news-row-title \{ order:1; \}/);
+  assert.match(css, /\.news-table \{ display:grid; gap:15px; border:0/);
 });
 
 test("keeps the 60-day news archive inside bounded D1 work", () => {
@@ -727,6 +730,8 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(view, /className=\{healthy \? "is-healthy" : "is-attention"\}/);
   assert.match(css, /\.component-status\.has-attention:not\(\.show-healthy\) article\.is-healthy/);
   assert.match(css, /\.health-reveal-button \{ display:block;[^}]*min-height:48px/);
+  assert.match(css, /\.component-status>header p \{ display:none; \}/);
+  assert.match(css, /\.component-status>div \{ gap:13px; background:transparent; \}/);
 });
 
 test("uses one Chinese system-state presentation across every dashboard page", () => {
@@ -1064,6 +1069,7 @@ test("shows single events immediately and keeps later changes in one thread", ()
   assert.match(page, /showAllStoryEvents/);
   assert.match(css, /\.single-event-index>div:not\(\.show-all-mobile-items\)>article:nth-child\(n\+9\)/);
   assert.match(css, /\.single-event-index>\.mobile-reveal-button \{ display:block;[^}]*min-height:48px/);
+  assert.match(css, /\.story-grid \{ gap:18px; border:0; background:transparent; \}/);
   assert.doesNotMatch(page, /暂无后续进展/);
   assert.match(page, /第一次进展立即显示，后续变化接在一起/);
   assert.ok(page.indexOf('className="story-grid"') < page.indexOf('className="theme-streams"'), "events must appear before secondary topic streams");
@@ -1499,6 +1505,8 @@ test("reflows news evidence into readable mobile cards", () => {
   assert.match(view, /原始发布域名：/);
   assert.match(view, /Gemini 与 Gemma 负责理解事件语义/);
   assert.match(view, /showAllEvidence/);
+  assert.match(view, /showEvidenceMetrics/);
+  assert.match(view, /className="evidence-metrics-toggle"/);
   assert.match(view, /mergeNewsEvidenceByEvent/);
   assert.match(view, /new Map<string, NewsEvidence>/);
   assert.match(view, /evidenceMode}:\$\{row\.event_key}/);
@@ -1513,6 +1521,8 @@ test("reflows news evidence into readable mobile cards", () => {
   assert.match(css, /\.evidence-model-list \{ display:none!important/);
   assert.match(css, /\.evidence-table-wrap:not\(\.show-all-mobile-items\) \.evidence-table tbody>tr:nth-child\(n\+9\)/);
   assert.match(css, /\.evidence-desk>\.mobile-reveal-button \{ display:block;[^}]*min-height:48px/);
+  assert.match(css, /\.evidence-metrics-block \{ display:none/);
+  assert.match(css, /grid-template-areas:"event" "status" "time" "usage"/);
 });
 
 test("keeps shared news retrieval bounded and phone readable", () => {
