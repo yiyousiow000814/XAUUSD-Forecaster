@@ -1007,8 +1007,9 @@ export default function AuditView() {
 
   useLayoutEffect(() => {
     if (pendingScrollTop.current === null) return;
-    settleResponsiveScroll(options => window.scrollTo(options), () => window.scrollY, pendingScrollTop.current!);
+    const cancel = settleResponsiveScroll(options => window.scrollTo(options), () => window.scrollY, pendingScrollTop.current!);
     pendingScrollTop.current = null;
+    return cancel;
   }, [view]);
 
   const runNewsSearch = async (page = 1, applied?: NewsSearchResponse) => {

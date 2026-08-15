@@ -1256,7 +1256,7 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(css, /height:calc\(100dvh - 16px\)/);
   assert.match(css, /grid-template-rows:auto auto minmax\(0,1fr\) auto/);
   assert.match(modal, /graph-modal-\$\{tab\}/);
-  assert.match(modal, /useLayoutEffect\(\(\) => \{[\s\S]*settleResponsiveScroll\(options => bodyRef\.current\?\.scrollTo\(options\), \(\) => bodyRef\.current\?\.scrollTop \?\? 0, pendingScrollTop\.current!\);[\s\S]*\}, \[tab\]\)/);
+  assert.match(modal, /useLayoutEffect\(\(\) => \{[\s\S]*const cancel = settleResponsiveScroll\(options => bodyRef\.current\?\.scrollTo\(options\), \(\) => bodyRef\.current\?\.scrollTop \?\? 0, pendingScrollTop\.current!\);[\s\S]*return cancel;[\s\S]*\}, \[tab\]\)/);
   assert.match(modal, /graph-scope-mobile/);
   assert.match(css, /graph-modal\.graph-modal-curve,\.graph-modal\.graph-modal-versions \{ height:calc\(100dvh - 16px\); max-height:none; grid-template-rows:auto auto minmax\(0,1fr\) auto/);
   assert.match(css, /graph-modal\.graph-modal-curve>\.graph-modal-body,\.graph-modal\.graph-modal-versions>\.graph-modal-body \{ min-height:0; max-height:none; overflow:auto/);
@@ -1307,13 +1307,14 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(page, /className="audit-tabs"/);
   assert.match(page, /className="audit-view-picker"/);
   assert.match(page, /aria-label="切换证据台页面"/);
-  assert.match(page, /pendingScrollTop\.current = window\.scrollY;[\s\S]*useLayoutEffect\(\(\) => \{[\s\S]*settleResponsiveScroll\(options => window\.scrollTo\(options\), \(\) => window\.scrollY, pendingScrollTop\.current!\);[\s\S]*\}, \[view\]\)/);
-  assert.match(dashboard, /pendingScrollTop\.current = currentScrollTop;[\s\S]*useLayoutEffect\(\(\) => \{[\s\S]*settleResponsiveScroll\(options => window\.scrollTo\(options\), \(\) => window\.scrollY, pendingScrollTop\.current!\);[\s\S]*\}, \[location\]\)/);
+  assert.match(page, /pendingScrollTop\.current = window\.scrollY;[\s\S]*useLayoutEffect\(\(\) => \{[\s\S]*const cancel = settleResponsiveScroll\(options => window\.scrollTo\(options\), \(\) => window\.scrollY, pendingScrollTop\.current!\);[\s\S]*return cancel;[\s\S]*\}, \[view\]\)/);
+  assert.match(dashboard, /pendingScrollTop\.current = currentScrollTop;[\s\S]*useLayoutEffect\(\(\) => \{[\s\S]*const cancel = settleResponsiveScroll\(options => window\.scrollTo\(options\), \(\) => window\.scrollY, pendingScrollTop\.current!\);[\s\S]*return cancel;[\s\S]*\}, \[location\]\)/);
   assert.match(responsiveScroll, /matchMedia\("\(max-width: 850px\)"\)\.matches/);
   assert.match(responsiveScroll, /if \(isPhoneViewport\(\)\) \{[\s\S]*scroll\(\{ top: 0, left: 0, behavior: "instant" \}\)/);
   assert.match(responsiveScroll, /let remainingFrames = 30/);
   assert.match(responsiveScroll, /stableFrames = Math\.abs\(readTop\(\) - desktopTop\) <= 1 \? stableFrames \+ 1 : 0/);
   assert.match(responsiveScroll, /stableFrames < 6 && remainingFrames > 0/);
+  assert.match(responsiveScroll, /cancelAnimationFrame\(frame\)/);
   assert.doesNotMatch(page, /scrollAuditTabs|auditTabsRef|向左查看更多审计视图|向右查看更多审计视图/);
   for (const [source, current] of [[live, "live"], [page, "mobileDashboardSection"], [status, "status"], [health, "health"], [assistant, "assistant"]]) {
     assert.match(source, new RegExp(`<MobileDashboardNav current=\\{?"?${current}`));
@@ -1348,6 +1349,7 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(modal, /openerRef\.current\?\.focus\(\)/);
   assert.match(modal, /event\.key !== "Tab"/);
   assert.match(modal, /select:not\(\[disabled\]\), summary, \[href\]/);
+  assert.match(modal, /element\.getClientRects\(\)\.length > 0/);
   assert.match(css, /\.mobile-chart-scroll \{ width:100%; overflow-x:auto/);
   assert.match(css, /\.long-curve-block \.mobile-chart-scroll \{ overflow-x:auto; \}/);
   assert.match(css, /\.long-curve-block \.mobile-chart-scroll>\.learning-svg \{ width:720px; min-width:720px; min-height:300px; height:300px;/);

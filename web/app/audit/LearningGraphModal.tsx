@@ -143,8 +143,9 @@ export default function LearningGraphModal({
   };
   useLayoutEffect(() => {
     if (pendingScrollTop.current === null) return;
-    settleResponsiveScroll(options => bodyRef.current?.scrollTo(options), () => bodyRef.current?.scrollTop ?? 0, pendingScrollTop.current!);
+    const cancel = settleResponsiveScroll(options => bodyRef.current?.scrollTo(options), () => bodyRef.current?.scrollTop ?? 0, pendingScrollTop.current!);
     pendingScrollTop.current = null;
+    return cancel;
   }, [tab]);
   useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
   useEffect(() => {
@@ -159,7 +160,7 @@ export default function LearningGraphModal({
       if (event.key !== "Tab" || !dialogRef.current) return;
       const focusable = [...dialogRef.current.querySelectorAll<HTMLElement>(
         'button:not([disabled]), select:not([disabled]), summary, [href], [tabindex]:not([tabindex="-1"])',
-      )].filter(element => !element.hasAttribute("disabled"));
+      )].filter(element => !element.hasAttribute("disabled") && element.getClientRects().length > 0);
       if (!focusable.length) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
