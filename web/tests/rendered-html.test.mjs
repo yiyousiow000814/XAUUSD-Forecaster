@@ -712,6 +712,8 @@ test("renders the Gemini quota status route", async () => {
   assert.match(html, /逐 Key 配额/);
   assert.match(source, /今日已发送 \/ 上限/);
   assert.match(source, /className="quota-value"/);
+  assert.match(source, /<details className="quota-note">/);
+  assert.match(source, /查看账本与 Google 额度的区别/);
   assert.match(html, /分支配置/);
   assert.match(html, /Pacific midnight/);
   assert.match(html, /组件与新闻源/);
@@ -1125,6 +1127,7 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /const pageSize = 6/);
   assert.match(modal, /visibleRows\.map/);
   assert.match(modal, /function VersionPagination/);
+  assert.match(modal, /第 \{formatExactCount\(page \+ 1\)\} \/ \{formatExactCount\(pageCount\)\} 页/);
   assert.match(modal, /训练组分页（/);
   assert.match(modal, /aria-label="上一页训练组"/);
   assert.match(modal, /aria-label="下一页训练组"/);
@@ -1162,6 +1165,8 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.doesNotMatch(modal, /成本后 EV 较优方向/);
   assert.doesNotMatch(modal, /setArrowMode/);
   assert.match(modal, /U5 只是统一波动尺度，不是 WAIT 开关/);
+  assert.match(modal, /<details className="wait-explainer"><summary>方向怎样产生<\/summary>/);
+  assert.match(modal, /<details className="market-reading-guide"><summary>图表怎么看<\/summary>/);
   assert.match(modal, /模型选择 vs 固定 1\.0x/);
   assert.match(modal, /顺序 Exit Ridge vs 固定持有30分钟/);
   assert.match(modal, /两套独立实验/);
@@ -1330,6 +1335,7 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(modal, /closeButtonRef\.current\?\.focus\(\)/);
   assert.match(modal, /openerRef\.current\?\.focus\(\)/);
   assert.match(modal, /event\.key !== "Tab"/);
+  assert.match(modal, /select:not\(\[disabled\]\), summary, \[href\]/);
   assert.match(css, /\.mobile-chart-scroll \{ width:100%; overflow-x:auto/);
   assert.match(css, /\.long-curve-block \.mobile-chart-scroll \{ overflow-x:hidden; \}/);
   assert.match(css, /\.long-curve-block \.mobile-chart-scroll>\.learning-svg \{ width:100%; min-width:0;/);
@@ -1338,6 +1344,11 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.execution-history-nav button \{ flex:0 1 100px; min-width:0; min-height:44px; \}/);
   assert.match(css, /\.market-history-nav \{[^}]*margin:10px 0 0;[^}]*border:1px solid/);
   assert.match(css, /\.prediction-counts \{[^}]*border-top:0/);
+  assert.match(css, /\.curve-navigation-actions \{ grid-column:1\/-1; display:grid; grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
+  assert.match(css, /\.version-page-results,\.version-page-results>\.graph-state-compact \{ min-height:0; \}/);
+  assert.match(css, /\.market-chart-block \.mobile-chart-scroll \{ overflow-x:hidden; \}/);
+  assert.match(css, /\.execution-scorecards \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); border-width:1px 0; \}/);
+  assert.match(css, /\.quota-row \{ grid-template-columns:minmax\(72px,\.8fr\) minmax\(88px,1fr\) auto;/);
   assert.match(css, /\.chart-block \{ overflow:visible/);
   assert.match(css, /\.graph-modal-backdrop \{ position:fixed; inset:0; z-index:1100/);
   assert.match(css, /\.audit-intro>div:first-child \.eyebrow \{ display:none/);
