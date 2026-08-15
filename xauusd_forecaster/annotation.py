@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from sqlite3 import Connection
-from typing import Callable
+from typing import Callable, TypeVar
 
 from .forward_ledger import ForwardLedger
 from .gemini_quota import GeminiQuotaLedger
@@ -68,6 +68,7 @@ HIGH_PRIORITY_NEWS_SOURCES = frozenset({"federal_reserve_monetary"})
 
 
 GeminiBatchCapacityExhausted = ModelGatewayCapacityExhausted
+T = TypeVar("T")
 
 
 class ModelOutputContractFailed(ValueError):
@@ -1063,6 +1064,26 @@ class _GeminiRequestPool:
         )
 
 
+def generate_metered_response(
+    api_key: str,
+    *,
+    model: str,
+    purpose: str,
+    payload: dict[str, object],
+    decode: Callable[[dict[str, object]], T],
+    request_accountant: ModelRequestAccountant,
+) -> tuple[T, str]:
+    """Expose one metered GenerateContent call through the shared transport."""
+    pool = _GeminiRequestPool(
+        (api_key,), requests_per_key=1, batch_limit=1,
+        request_accountant=request_accountant,
+    )
+    result, exact_model = pool.call_json(
+        model, purpose=purpose, payload=payload, decode=decode,
+    )
+    return result, exact_model
+
+
 def generate_metered_json(
     api_key: str,
     *,
@@ -1072,13 +1093,14 @@ def generate_metered_json(
     decode: Callable[[dict[str, object]], dict],
     request_accountant: ModelRequestAccountant,
 ) -> tuple[dict, str]:
-    """Expose structured generation without exposing the provider transport."""
-    pool = _GeminiRequestPool(
-        (api_key,), requests_per_key=1, batch_limit=1,
+    """Expose structured JSON generation without exposing provider transport."""
+    result, exact_model = generate_metered_response(
+        api_key,
+        model=model,
+        purpose=purpose,
+        payload=payload,
+        decode=decode,
         request_accountant=request_accountant,
-    )
-    result, exact_model = pool.call_json(
-        model, purpose=purpose, payload=payload, decode=decode,
     )
     if not isinstance(result, dict):
         raise ValueError("structured model result is not a JSON object")

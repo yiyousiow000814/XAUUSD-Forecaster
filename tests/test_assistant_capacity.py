@@ -114,7 +114,7 @@ def _plan(
         estimated_input_tokens=estimated_input_tokens,
         reserved_output_tokens=80 if simple else 1_200,
         user_text="为什么黄金变化？",
-        planned_tool_calls=0 if simple else 1,
+        planned_tool_calls=0,
         profiles=profiles,
     )
 

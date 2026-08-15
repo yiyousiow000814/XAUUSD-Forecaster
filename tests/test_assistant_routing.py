@@ -62,7 +62,7 @@ def test_reasoning_policy_is_deterministic_and_request_local(
     expected: ReasoningClass,
 ) -> None:
     assert classify_assistant_reasoning(
-        AssistantTaskType.NEWS_QA,
+        AssistantTaskType.ASSISTANT_CHAT,
         user_text=text,
         planned_tool_calls=tool_calls,
     ) is expected
@@ -74,7 +74,7 @@ def test_simple_route_prefers_small_and_declares_only_bounded_fallbacks() -> Non
         estimated_input_tokens=1_000,
         reserved_output_tokens=500,
         user_text="列出最新新闻",
-        planned_tool_calls=1,
+        planned_tool_calls=0,
         profiles=(LARGE, SMALL),
     )
     assert plan.reasoning_class is ReasoningClass.SIMPLE
@@ -125,10 +125,11 @@ def test_analytical_route_requires_thinking_large_and_never_downgrades() -> None
     assert plan.model_requirement is ModelRequirement.LARGE_REQUIRED
     assert plan.candidate_profiles == (LARGE,)
 
+
 def test_context_and_tool_capabilities_fail_closed_before_transport() -> None:
     with pytest.raises(AssistantModelRoutingUnavailable, match="LARGE_REQUIRED"):
         plan_assistant_route(
-            AssistantTaskType.NEWS_QA,
+            AssistantTaskType.ASSISTANT_CHAT,
             estimated_input_tokens=31_000,
             reserved_output_tokens=2_000,
             user_text="为什么？",
@@ -139,7 +140,7 @@ def test_context_and_tool_capabilities_fail_closed_before_transport() -> None:
 
     with pytest.raises(AssistantModelRoutingUnavailable, match="LARGE_REQUIRED"):
         plan_assistant_route(
-            AssistantTaskType.NEWS_QA,
+            AssistantTaskType.ASSISTANT_CHAT,
             estimated_input_tokens=1_000,
             reserved_output_tokens=2_000,
             user_text="分析三个来源",
@@ -147,11 +148,21 @@ def test_context_and_tool_capabilities_fail_closed_before_transport() -> None:
             profiles=(LARGE,),
         )
 
+    with pytest.raises(AssistantModelRoutingUnavailable, match="SMALL_PREFERRED"):
+        plan_assistant_route(
+            AssistantTaskType.ASSISTANT_CHAT,
+            estimated_input_tokens=1_000,
+            reserved_output_tokens=500,
+            user_text="列出最新新闻",
+            planned_tool_calls=1,
+            profiles=(SMALL, LARGE),
+        )
+
     tool_large = _profile(
         "tool-large", ModelCapacityClass.LARGE, tools=True,
     )
     plan = plan_assistant_route(
-        AssistantTaskType.NEWS_QA,
+        AssistantTaskType.ASSISTANT_CHAT,
         estimated_input_tokens=1_000,
         reserved_output_tokens=2_000,
         user_text="分析三个来源",
@@ -159,6 +170,19 @@ def test_context_and_tool_capabilities_fail_closed_before_transport() -> None:
         profiles=(SMALL, tool_large),
     )
     assert plan.candidate_profiles == (tool_large,)
+
+    tool_small = _profile(
+        "tool-small", ModelCapacityClass.SMALL, tools=True,
+    )
+    single_tool_plan = plan_assistant_route(
+        AssistantTaskType.ASSISTANT_CHAT,
+        estimated_input_tokens=1_000,
+        reserved_output_tokens=500,
+        user_text="列出最新新闻",
+        planned_tool_calls=1,
+        profiles=(SMALL, tool_small, tool_large),
+    )
+    assert single_tool_plan.candidate_profiles == (tool_small, tool_large)
 
 
 @pytest.mark.parametrize(
@@ -183,7 +207,7 @@ def test_routing_budgets_reject_invalid_values_instead_of_coercing(
     arguments[field] = value
     with pytest.raises(ValueError, match=field):
         plan_assistant_route(
-            AssistantTaskType.NEWS_QA,
+            AssistantTaskType.ASSISTANT_CHAT,
             user_text="列出最新新闻",
             profiles=(SMALL, LARGE),
             **arguments,
@@ -205,6 +229,7 @@ def test_provider_thinking_level_is_added_without_mutating_the_payload() -> None
 
 
 def test_operational_profiles_are_strict_and_do_not_contain_credentials() -> None:
+    assert configured_assistant_model_profiles()[0].supports_function_calling is True
     raw = json.dumps([
         {
             "profile_id": "small-v1",

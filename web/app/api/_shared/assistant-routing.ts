@@ -1,4 +1,5 @@
-export const ASSISTANT_ROUTING_POLICY_VERSION = "assistant-routing-v1";
+export const ASSISTANT_ROUTING_POLICY_VERSION = "assistant-routing-v2";
+export const LEGACY_ASSISTANT_ROUTING_POLICY_VERSION = "assistant-routing-v1";
 export const ASSISTANT_CAPACITY_POLICY_VERSION = "assistant-capacity-v1";
 
 export type AssistantCapacityProvenance = {
@@ -17,6 +18,7 @@ export type AssistantCapacityProvenance = {
 };
 
 export type AssistantRoutingTask =
+  | "ASSISTANT_CHAT"
   | "NEWS_QA"
   | "CONVERSATION_TITLE"
   | "CONTEXT_COMPACTION";
@@ -48,6 +50,9 @@ const identifier = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$/;
 const modelIdentifier = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/;
 const providerIdentifier = /^[A-Z][A-Z0-9_]{2,63}$/;
 const tasks = new Set<AssistantRoutingTask>([
+  "ASSISTANT_CHAT", "NEWS_QA", "CONVERSATION_TITLE", "CONTEXT_COMPACTION",
+]);
+const legacyTasks = new Set<AssistantRoutingTask>([
   "NEWS_QA", "CONVERSATION_TITLE", "CONTEXT_COMPACTION",
 ]);
 const reasoningClasses = new Set(["SIMPLE", "ANALYTICAL", "TOOL_HEAVY"]);
@@ -85,9 +90,11 @@ export function parseAssistantRoutingProvenance(
   const provider = String(raw.provider ?? "").trim();
   const capacityClass = String(raw.capacity_class ?? "").trim();
   const candidateProfileIds = raw.candidate_profile_ids;
+  const currentPolicy = policyVersion === ASSISTANT_ROUTING_POLICY_VERSION;
+  const legacyPolicy = policyVersion === LEGACY_ASSISTANT_ROUTING_POLICY_VERSION;
   if (
-    policyVersion !== ASSISTANT_ROUTING_POLICY_VERSION
-    || !tasks.has(taskType)
+    (!currentPolicy && !legacyPolicy)
+    || (currentPolicy ? !tasks.has(taskType) : !legacyTasks.has(taskType))
     || (expectedTask && taskType !== expectedTask)
     || !reasoningClasses.has(reasoningClass)
     || !thinkingLevels.has(thinkingLevel)
@@ -178,14 +185,25 @@ export function parseAssistantRoutingProvenance(
     (reasoningClass === "SIMPLE" && thinkingLevel !== "MINIMAL")
     || (reasoningClass !== "SIMPLE" && thinkingLevel !== "HIGH")
     || (reasoningClass === "TOOL_HEAVY" && plannedToolCalls <= 1)
-    || (reasoningClass === "TOOL_HEAVY" && raw.supports_function_calling !== true)
+    || (reasoningClass !== "TOOL_HEAVY" && plannedToolCalls > 1)
+    || (currentPolicy && plannedToolCalls > 0
+      && raw.supports_function_calling !== true)
+    || (legacyPolicy && reasoningClass === "TOOL_HEAVY"
+      && raw.supports_function_calling !== true)
     || (reasoningClass !== "SIMPLE" && raw.supports_thinking !== true)
     || (raw.supports_thinking === false && providerThinkingLevel !== null)
     || (raw.supports_thinking === true
       && providerThinkingLevel !== thinkingLevel.toLowerCase())
     || (modelRequirement === "LARGE_REQUIRED" && capacityClass !== "LARGE")
     || (reasoningClass !== "SIMPLE" && modelRequirement !== "LARGE_REQUIRED")
-    || (taskType !== "NEWS_QA" && (
+    || (currentPolicy && taskType === "NEWS_QA" && plannedToolCalls !== 0)
+    || (currentPolicy
+      && new Set(["CONVERSATION_TITLE", "CONTEXT_COMPACTION"]).has(taskType) && (
+        reasoningClass !== "SIMPLE"
+        || modelRequirement !== "SMALL_PREFERRED"
+        || plannedToolCalls !== 0
+      ))
+    || (legacyPolicy && taskType !== "NEWS_QA" && (
       reasoningClass !== "SIMPLE"
       || modelRequirement !== "SMALL_PREFERRED"
       || plannedToolCalls !== 0

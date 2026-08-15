@@ -1027,7 +1027,9 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                         }),
                         reserved_output_tokens=NEWS_QA_MAX_OUTPUT_TOKENS,
                         user_text=question,
-                        planned_tool_calls=1,
+                        # Retrieval completed deterministically before this model
+                        # request; this Q&A path is not native function calling.
+                        planned_tool_calls=0,
                         profiles=model_profiles,
                     )
 
