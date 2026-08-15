@@ -1934,11 +1934,32 @@ def test_gemini_rejects_non_chinese_translation_fields() -> None:
     with pytest.raises(ValueError, match="headline_zh is not Simplified Chinese"):
         annotation_module._validate_chinese_result(vector)
 
+    vector["headline_zh"] = "黄金市场更新"
+    with pytest.raises(ValueError, match="summary_zh is not Simplified Chinese"):
+        annotation_module._validate_chinese_result(vector)
 
-def test_gemini_accepts_chinese_title_with_preserved_proper_names() -> None:
+    vector["summary_zh"] = (
+        "这是一段中文开头用于掩饰后续内容：Federal Reserve kept rates unchanged "
+        "and Powell said inflation remains elevated while officials continue to "
+        "watch incoming economic data before considering any future policy change"
+    )
+    with pytest.raises(ValueError, match="untranslated sentence"):
+        annotation_module._validate_chinese_result(vector)
+
+
+@pytest.mark.parametrize("display_text", [
+    "美联储维持利率不变，Powell 表示通胀仍然偏高。",
+    "较高的实际收益率可能继续对 XAUUSD 构成压力。",
+    "FOMC 会议纪要和 CPI、PCE、NFP 数据影响降息预期。",
+    "NVIDIA 财报推动科技股上涨，但风险情绪可能削弱黄金的避险需求。",
+    "市场共识认为通胀持续性仍会影响实际收益率和降息预期。",
+])
+def test_gemini_accepts_chinese_primary_prose_with_natural_english_names(
+    display_text,
+) -> None:
     vector = {
-        "headline_zh": "Public Storage：优先股有望从利率下降中获益（PSA）- Seeking Alpha",
-        "summary_zh": "该报道讨论利率下降对优先股估值的影响，并完整保留公司名称和股票缩写。",
+        "headline_zh": display_text,
+        "summary_zh": display_text,
         "event_type": "analyst_report", "entities": ["Public Storage"],
         "hawkishness": 0.0, "inflation_impulse": 0.0,
         "growth_impulse": 0.0, "geopolitical_risk": 0.0,
@@ -1958,7 +1979,7 @@ def test_gemini_repairs_mixed_language_summary_with_counted_request(
     }
     repaired = {
         "headline_zh": "黄金上涨",
-        "summary_zh": "黄金价格上涨，美元走弱，市场正在关注后续经济数据。",
+        "summary_zh": "Powell 表示通胀仍高，市场关注 XAUUSD 后续走势和经济数据。",
         "primary_story_title_zh": "",
     }
     calls = []
@@ -1977,9 +1998,23 @@ def test_gemini_repairs_mixed_language_summary_with_counted_request(
     )
     result, _ = pool.call(0, "model", "headline", "body")
     assert result["summary_zh"] == repaired["summary_zh"]
+    assert "Powell" in result["summary_zh"]
+    assert "XAUUSD" in result["summary_zh"]
     assert [usage.purpose for usage in usages] == [
         "news-annotation", "chinese-repair",
     ]
+
+
+def test_chinese_repair_policy_preserves_natural_english_identifiers() -> None:
+    payload = annotation_module._chinese_repair_payload({
+        "headline_zh": "Powell comments on XAUUSD",
+        "summary_zh": "NVIDIA and FOMC were mentioned.",
+        "primary_story_title_zh": "",
+    })
+    instruction = payload["contents"][0]["parts"][0]["text"]
+    assert "proper nouns in English" in instruction
+    assert "primarily in natural Simplified Chinese" in instruction
+    assert "No sentence may remain" not in instruction
 
 
 def test_gemini_annotation_reserves_provider_counted_input_tokens(
@@ -2159,10 +2194,10 @@ def test_gemini_locally_recovers_unverifiable_display_numbers() -> None:
     assert "2.0" not in result["headline_zh"]
     assert "相关数值" in result["headline_zh"]
     assert "相关数值" in result["summary_zh"]
-    assert result["confidence"] == 0.5
+    assert result["confidence"] == 0.9
 
 
-def test_invalid_annotation_is_retried_instead_of_manufacturing_irrelevance(
+def test_display_failure_keeps_valid_semantics_with_auditable_fallback(
     tmp_path, monkeypatch
 ) -> None:
     now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
@@ -2177,7 +2212,7 @@ def test_invalid_annotation_is_retried_instead_of_manufacturing_irrelevance(
             "cluster_id": "language-cluster",
         }
     )
-    vector = {
+    semantic = {
         "headline_zh": "Gold market update 99",
         "summary_zh": "This response remained in English and invented 99.",
         "event_type": "other", "entities": [], "hawkishness": 0.7,
@@ -2185,6 +2220,13 @@ def test_invalid_annotation_is_retried_instead_of_manufacturing_irrelevance(
         "geopolitical_risk": 0.8, "usd_impulse": 0.5,
         "novelty": 0.9, "confidence": 0.9,
     }
+    vector = _v15_annotation(
+        semantic,
+        "Complete source text without numeric claims.",
+        xauusd_relevance="MACRO_DRIVER",
+        review_priority="IMMEDIATE",
+        semantic_reason_zh="来源证据显示该事件可能影响黄金。",
+    )
     calls = []
     def respond(_key, _model, _payload):
         calls.append(1)
@@ -2196,9 +2238,44 @@ def test_invalid_annotation_is_retried_instead_of_manufacturing_irrelevance(
         ledger, provider="gemini", api_key="test-key", limit=1,
         request_accountant=ALLOW_MODEL_REQUEST,
     )
-    assert statuses[0]["status"] == "ERROR"
-    assert ledger.count("news_annotations") == 0
-    assert ledger.count("news_llm_failures") == 1
+    assert statuses[0]["status"] == "OK"
+    saved = ledger.connection.execute(
+        "SELECT annotation_json FROM news_annotations WHERE source='language-test'"
+    ).fetchone()
+    stored = json.loads(saved["annotation_json"])
+    assert stored["headline_zh"] == annotation_module.SAFE_CHINESE_HEADLINE_FALLBACK
+    assert stored["summary_zh"].startswith("中文摘要暂不可用")
+    assert stored["xauusd_relevance"] == "MACRO_DRIVER"
+    assert stored["review_priority"] == "IMMEDIATE"
+    assert stored["hawkishness"] == 0.7
+    assert stored["confidence"] == 0.9
+    assert ledger.count("news_llm_failures") == 0
+
+
+def test_semantic_failure_does_not_trigger_display_repair(monkeypatch) -> None:
+    vector = _v15_annotation(
+        {
+            "headline_zh": "黄金市场更新",
+            "summary_zh": "来源显示黄金市场出现新的变化，并可能影响近期价格走势。",
+            "event_type": "other", "entities": [], "hawkishness": 0.0,
+            "inflation_impulse": 0.0, "growth_impulse": 0.0,
+            "geopolitical_risk": 0.0, "usd_impulse": 0.0,
+            "novelty": 0.5, "confidence": 0.8,
+        },
+        "evidence absent from source",
+    )
+    calls = []
+    _mock_model_json(
+        monkeypatch,
+        lambda _key, _model, _payload: calls.append(1) or vector,
+    )
+    pool = annotation_module._GeminiRequestPool(
+        ("test-key",), request_accountant=ALLOW_MODEL_REQUEST,
+    )
+
+    with pytest.raises(ValueError, match="supporting evidence is absent"):
+        pool.call(0, annotation_module.DEFAULT_GEMINI_MODEL, "Gold", "Source body")
+    assert len(calls) == 1
 
 
 def test_llm_failure_is_persisted_and_blocks_immediate_retry(

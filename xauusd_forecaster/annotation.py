@@ -60,6 +60,7 @@ GEMMA_IMPACT_BATCH_LIMIT = 10
 PROMPT_VERSION = CURRENT_NEWS_PROMPT_VERSION
 TITLE_PROMPT_VERSION = "headline-zh-v7-multilingual-month-preservation"
 INVALID_CHINESE_TITLE = "来源新闻（中文标题待校验）"
+SAFE_CHINESE_HEADLINE_FALLBACK = "来源新闻（查看原文）"
 TITLE_TRANSLATION_MODELS = (
     DEFAULT_GEMMA_MODEL, DEFAULT_GEMINI_MODEL, FALLBACK_GEMINI_MODEL,
 )
@@ -839,29 +840,32 @@ class _GeminiRequestPool:
             decode=_decode_model_json,
             retryable_http_codes=frozenset({401, 403, 429}),
         )
-        _recover_display_fields(result, headline, body)
+        if prompt_version == PROMPT_VERSION:
+            # Semantic validity is independent from display-language quality.
+            # Never spend a translation retry on a schema/evidence failure.
+            _validate_current_semantics(result, headline=headline, body=body)
+        invalid_display_fields: tuple[str, ...]
         try:
+            _recover_display_fields(result, headline, body)
             _validate_chinese_result(result)
             if prompt_version == PROMPT_VERSION:
                 _validate_current_result(result, headline=headline, body=body)
-            return result, exact_model
         except ValueError:
+            invalid_display_fields = _invalid_chinese_display_fields(result)
             try:
                 repaired = self._repair_chinese(start_index + 1, model, result)
-                result["headline_zh"] = repaired["headline_zh"]
-                result["summary_zh"] = repaired["summary_zh"]
-                result["primary_story_title_zh"] = repaired[
-                    "primary_story_title_zh"
-                ]
+                for field in invalid_display_fields:
+                    result[field] = repaired[field]
                 _recover_display_fields(result, headline, body)
                 _validate_chinese_result(result)
-            except Exception as error:
-                raise ValueError(
-                    "Gemini annotation failed display or semantic validation after repair"
-                ) from error
-            if prompt_version == PROMPT_VERSION:
-                _validate_current_result(result, headline=headline, body=body)
-            return result, exact_model
+                if prompt_version == PROMPT_VERSION:
+                    _validate_current_result(result, headline=headline, body=body)
+            except Exception:
+                _apply_safe_display_fallback(result, invalid_display_fields)
+                _validate_chinese_result(result)
+                if prompt_version == PROMPT_VERSION:
+                    _validate_current_result(result, headline=headline, body=body)
+        return result, exact_model
 
     def _repair_chinese(
         self, start_index: int, model: str, result: dict
@@ -967,10 +971,13 @@ def _decode_model_json(envelope: dict[str, object]) -> dict:
 def _chinese_repair_payload(result: dict) -> dict[str, object]:
     return {
         "contents": [{"parts": [{"text": (
-            "Translate all JSON values completely into natural Simplified "
-            "Chinese. No sentence may remain in Turkish, English, German, Greek, "
-            "Arabic, Spanish, or another source language. Preserve proper names, "
-            "abbreviations, dates, percentages, prices, and every number exactly. "
+            "Rewrite the prose primarily in natural Simplified Chinese. Use common "
+            "Chinese expressions for financial concepts when they exist. Preserve "
+            "personal and company names, tickers, widely used abbreviations, "
+            "identifiers, and proper nouns in English when that is more natural or "
+            "accurate. Do not leave entire explanatory sentences unnecessarily in "
+            "English, and do not force proper nouns into awkward translations. "
+            "Preserve dates, percentages, prices, and every number exactly. "
             "Return JSON only.\nSOURCE_JSON\n"
             + json.dumps(
                 {
@@ -1035,7 +1042,7 @@ def _decode_title(envelope: dict[str, object], headline: str) -> str:
     _recover_display_fields(translated, headline, "")
     headline_zh = translated["headline_zh"]
     _require_title_numbers_preserved(headline_zh, headline)
-    _require_simplified_chinese(headline_zh, "headline_zh", 2, 4.0, 60)
+    _require_simplified_chinese(headline_zh, "headline_zh", 2)
     return headline_zh
 
 
@@ -1063,7 +1070,7 @@ def _decode_impact(envelope: dict[str, object], row: dict) -> dict:
     validated["_source_body_character_count"] = int(
         row.get("source_body_character_count") or len(str(row.get("body") or ""))
     )
-    _require_simplified_chinese(validated["reason_zh"], "reason_zh", 4, 0.5, 12)
+    _require_simplified_chinese(validated["reason_zh"], "reason_zh", 4)
     return validated
 
 
@@ -1105,9 +1112,11 @@ def _annotation_prompt(prompt_version: str, headline: str, body: str) -> str:
     return (
         "Read the complete delimited source and convert it into the requested "
         "measurement JSON. Regardless of the source language, translate "
-        "headline_zh into natural Simplified Chinese and write summary_zh "
-        "entirely in clear Simplified Chinese. Do not leave either field in "
-        "English, Turkish, Greek, Spanish, or any other source language. "
+        "headline_zh and summary_zh primarily in natural Simplified Chinese. Use "
+        "common Chinese financial terms, while preserving names, companies, "
+        "tickers, widely used abbreviations, identifiers and proper nouns in "
+        "English when that is more natural or accurate. Do not leave whole "
+        "explanatory sentences unnecessarily in another language. "
         "For summary_zh: "
         "summarize the actual event, the decisive facts and numbers, and why "
         "it may or may not matter to XAUUSD in 3-6 concise sentences. "
@@ -1391,17 +1400,70 @@ def _require_title_numbers_preserved(translated: str, source: str) -> None:
 
 
 def _validate_chinese_result(result: dict) -> None:
-    _require_simplified_chinese(result.get("headline_zh"), "headline_zh", 2, 4.0, 60)
-    _require_simplified_chinese(result.get("summary_zh"), "summary_zh", 10, 0.20, 25)
+    for field, minimum in (("headline_zh", 2), ("summary_zh", 10)):
+        _validate_chinese_display_field(result.get(field), field, minimum)
     story_title = str(result.get("primary_story_title_zh") or "").strip()
     if story_title:
-        _require_simplified_chinese(story_title, "primary_story_title_zh", 2, 0.20, 12)
-        if re.search(r"(?<=[\u3400-\u9fff])[a-z]+|[a-z]+(?=[\u3400-\u9fff])", story_title):
-            raise ValueError("Gemini primary_story_title_zh contains a mixed-script word")
-    if "semantic_reason_zh" in result:
-        _require_simplified_chinese(
-            result.get("semantic_reason_zh"), "semantic_reason_zh", 2, 1.0, 24
+        _validate_chinese_display_field(
+            story_title, "primary_story_title_zh", 2,
         )
+
+
+def _validate_chinese_display_field(
+    value: object, field: str, minimum: int,
+) -> None:
+    _require_simplified_chinese(value, field, minimum)
+    text = str(value or "")
+    if "相关数值" in text:
+        raise ValueError(f"Gemini {field} contains an unresolved source number")
+    if field == "primary_story_title_zh" and re.search(
+        r"(?<=[\u3400-\u9fff])[a-z]{3,}(?=[\u3400-\u9fff])", text,
+    ):
+        raise ValueError(
+            "Gemini primary_story_title_zh contains an untranslated word fragment"
+        )
+
+
+def _invalid_chinese_display_fields(result: dict) -> tuple[str, ...]:
+    rules = (("headline_zh", 2), ("summary_zh", 10))
+    if "primary_story_title_zh" not in result:
+        rules += (("primary_story_title_zh", 0),)
+    elif str(result.get("primary_story_title_zh") or "").strip():
+        rules += (("primary_story_title_zh", 2),)
+    invalid = []
+    schema_properties = news_annotation_schema(PROMPT_VERSION)["properties"]
+    for field, minimum in rules:
+        try:
+            value = result.get(field)
+            if minimum:
+                _validate_chinese_display_field(value, field, minimum)
+            elif field not in result:
+                raise ValueError(f"Gemini {field} is missing")
+            rule = schema_properties[field]
+            length = len(str(value or ""))
+            if length < int(rule.get("minLength", 0)):
+                raise ValueError(f"Gemini {field} is too short")
+            if length > int(rule.get("maxLength", length)):
+                raise ValueError(f"Gemini {field} is too long")
+        except ValueError:
+            invalid.append(field)
+    # Number recovery can fail even when language is already valid. Repair both
+    # auditable display fields so the model gets one bounded chance to restore
+    # the exact source lexemes without touching semantic measurements.
+    return tuple(invalid or ("headline_zh", "summary_zh"))
+
+
+def _apply_safe_display_fallback(
+    result: dict, invalid_fields: tuple[str, ...],
+) -> None:
+    """Keep valid semantics while making an unavailable display field honest."""
+    fallbacks = {
+        "headline_zh": SAFE_CHINESE_HEADLINE_FALLBACK,
+        "summary_zh": "中文摘要暂不可用；完整来源正文已保存，可供查阅与审计。",
+        "primary_story_title_zh": "",
+    }
+    for field in invalid_fields:
+        result[field] = fallbacks[field]
 
 
 def _restore_source_number_lexemes(
@@ -1446,25 +1508,20 @@ def _recover_display_fields(result: dict, headline: str, body: str) -> None:
     by_digits: dict[str, set[str]] = {}
     for token in source_tokens:
         by_digits.setdefault(re.sub(r"\D", "", token), set()).add(token)
-    unsupported = False
     for field in ("headline_zh", "summary_zh"):
         if field not in result:
             continue
 
         def recover(match: re.Match[str]) -> str:
-            nonlocal unsupported
             token = re.sub(r"\s+", "", match.group(0))
             if token in source_tokens:
                 return token
             candidates = by_digits.get(re.sub(r"\D", "", token), set())
             if len(candidates) == 1:
                 return next(iter(candidates))
-            unsupported = True
             return "相关数值"
 
         result[field] = token_pattern.sub(recover, str(result.get(field) or ""))
-    if unsupported and "confidence" in result:
-        result["confidence"] = min(0.5, float(result.get("confidence") or 0.0))
     _restore_source_number_lexemes(result, headline, body)
 
 
@@ -1475,6 +1532,21 @@ def _validate_current_result(result: dict, *, headline: str, body: str) -> None:
     validate_news_annotation(
         result, prompt_version=PROMPT_VERSION,
         source_text=f"{headline}\n{body}",
+    )
+
+
+def _validate_current_semantics(result: dict, *, headline: str, body: str) -> None:
+    """Validate semantic fields without making display prose semantic authority."""
+    if "xauusd_relevance" not in result:
+        return
+    semantic_candidate = dict(result)
+    semantic_candidate.update({
+        "headline_zh": "来源新闻",
+        "summary_zh": "完整来源正文已经保存，语义测量独立接受结构和证据校验。",
+        "primary_story_title_zh": "",
+    })
+    _validate_current_result(
+        semantic_candidate, headline=headline, body=body,
     )
 
 
@@ -1668,19 +1740,17 @@ def _require_simplified_chinese(
     value: object,
     field: str,
     minimum: int,
-    maximum_foreign_ratio: float,
-    foreign_floor: int,
 ) -> None:
+    """Require Chinese-primary prose without rejecting natural proper nouns."""
     text = str(value or "")
     chinese = len(re.findall(r"[\u3400-\u9fff]", text))
-    foreign_letters = sum(
-        character.isalpha() and not "\u3400" <= character <= "\u9fff"
-        for character in text
-    )
-    if chinese < minimum or foreign_letters > max(
-        foreign_floor, int(chinese * maximum_foreign_ratio)
-    ):
+    if chinese < minimum:
         raise ValueError(f"Gemini {field} is not Simplified Chinese")
+    for clause in re.split(r"[。！？!?；;\n]+", text):
+        latin_words = re.findall(r"[A-Za-z][A-Za-z0-9'._/-]*", clause)
+        clause_chinese = len(re.findall(r"[\u3400-\u9fff]", clause))
+        if len(latin_words) >= 3 and len(latin_words) > clause_chinese:
+            raise ValueError(f"Gemini {field} contains an untranslated sentence")
 
 
 def _call_ollama(model: str, headline: str, body: str) -> tuple[dict, str]:
