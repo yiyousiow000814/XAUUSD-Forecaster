@@ -216,6 +216,7 @@ type VersionGroup = {
 };
 type EvaluationCadence = "EVERY_5M" | "FIXED_30M";
 type CadenceMetric = { oos_rows: number; distinct_days: number; cumulative_quote_return: number; profit_factor_quote_adjusted: number | null; coverage_rate: number | null; prediction_rows?: number; unscored_oos_rows?: number; overdue_oos_rows?: number; evaluation_status?: VersionEvaluationStatus };
+type DailyNewsBrief = { brief_date: string; revision_number: number; cutoff_at: string; generated_at: string; model_version: string; prompt_version: string; brief: { title: string; items: Array<{ headline: string; summary: string; evidence_ids: string[] }> } };
 
 type Payload = {
   preview_status_summary?: boolean;
@@ -244,6 +245,7 @@ type Payload = {
     requests_per_minute: number;
   };
   recent_news?: News[];
+  daily_news_briefs?: DailyNewsBrief[];
   news_evidence: NewsEvidence[];
   news_evidence_summary: {
     policy_version: string;
@@ -710,7 +712,7 @@ function NewsRow({ row }: { row: News }) {
 export default function AuditView() {
   const searchParams = useSearchParams();
   const requestedView = searchParams.get("view");
-  const initialView = requestedView === "news" || requestedView === "evidence" || requestedView === "stories" || requestedView === "decisions" || requestedView === "league" || requestedView === "coverage"
+  const initialView = requestedView === "briefs" || requestedView === "news" || requestedView === "evidence" || requestedView === "stories" || requestedView === "decisions" || requestedView === "league" || requestedView === "coverage"
     ? requestedView
     : "news";
   const cachedStatus = readDashboardResource<Payload>("/api/status");
@@ -734,7 +736,8 @@ export default function AuditView() {
   const [statusError, setStatusError] = useState<string | null>(null);
   const [learningError, setLearningError] = useState<string | null>(null);
   const [newsError, setNewsError] = useState<string | null>(null);
-  const [view, setView] = useState<"news" | "evidence" | "stories" | "decisions" | "league" | "coverage">(initialView);
+  const [view, setView] = useState<"briefs" | "news" | "evidence" | "stories" | "decisions" | "league" | "coverage">(initialView);
+  const [briefDate, setBriefDate] = useState<string | null>(null);
   const [newsCategory, setNewsCategory] = useState("全部");
   const [newsPage, setNewsPage] = useState(1);
   const [graphOpen, setGraphOpen] = useState(false);
@@ -849,7 +852,7 @@ export default function AuditView() {
     if (!fullLearningReadyRef.current) void refreshLearning(true);
   };
 
-  const selectView = (next: "news" | "evidence" | "stories" | "decisions" | "league" | "coverage") => {
+  const selectView = (next: "briefs" | "news" | "evidence" | "stories" | "decisions" | "league" | "coverage") => {
     setView(next);
     window.history.replaceState(null, "", `/?room=audit&view=${next}`);
   };
@@ -1042,6 +1045,7 @@ export default function AuditView() {
       <div className="audit-tabs-shell">
       <button type="button" className="audit-tabs-scroll" onClick={() => scrollAuditTabs(-1)} aria-label="向左查看更多审计视图"><span aria-hidden="true">‹</span></button>
       <nav ref={auditTabsRef} className="audit-tabs" aria-label="审计视图">
+        <a href="/audit?view=briefs" className={view === "briefs" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("briefs"); }}>每日简报 <b><MetricValue phase={statusState}><CountValue value={payload?.daily_news_briefs?.length} /></MetricValue></b></a>
         <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻 <b><MetricValue phase={newsPhase}><CountValue value={readableNewsTotal} /></MetricValue></b></a>
         <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>当前可用新闻事件 <b><MetricValue phase={statusState}><CountValue value={newsMetrics.events.currently_model_eligible} /></MetricValue></b></a>
         <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件脉络 <b><MetricValue phase={statusState}><CountValue value={activeEventTotal} /></MetricValue></b></a>
@@ -1051,6 +1055,17 @@ export default function AuditView() {
       </nav>
       <button type="button" className="audit-tabs-scroll" onClick={() => scrollAuditTabs(1)} aria-label="向右查看更多审计视图"><span aria-hidden="true">›</span></button>
       </div>
+
+      {view === "briefs" && (() => {
+        const briefs = payload?.daily_news_briefs ?? [];
+        const selected = briefs.find(row => row.brief_date === briefDate) ?? briefs[0];
+        return <section className="daily-brief-desk">
+          <header><div><p className="eyebrow">DAILY NEWS BRIEF</p><h2>{selected?.brief.title ?? "今日还没有简报"}</h2></div>
+            <nav aria-label="选择简报日期">{briefs.map(row => <button type="button" key={row.brief_date} className={selected?.brief_date === row.brief_date ? "active" : ""} onClick={() => setBriefDate(row.brief_date)}>{row.brief_date.slice(5)}</button>)}</nav>
+          </header>
+          {selected ? <><ol>{selected.brief.items.map((item, index) => <li key={`${selected.brief_date}-${index}`}><span>{String(index + 1).padStart(2, "0")}</span><div><h3>{item.headline}</h3><p>{item.summary}</p><small>{formatExactCount(item.evidence_ids.length)} 份来源证据</small></div></li>)}</ol><footer>更新 {time(selected.generated_at)} · 仅供阅读，不进入模型训练</footer></> : <p className="brief-empty">收到并完成当天新闻语义复核后，系统会自动生成。</p>}
+        </section>;
+      })()}
 
       {view === "news" && <>
         <section className="annotation-queue" aria-label="新闻处理进度">

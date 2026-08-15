@@ -28,6 +28,7 @@ IMMUTABLE_TABLES = (
     "news_llm_failures",
     "news_content_failures",
     "news_discovery_failures",
+    "daily_news_briefs",
     "macro_observations",
     "source_polls",
     "decision_events",
@@ -135,6 +136,28 @@ ON news_annotations(source, source_item_id, revision_number,
 
 CREATE INDEX IF NOT EXISTS news_revisions_cluster_latest
 ON news_revisions(cluster_id, source, source_item_id, revision_number);
+
+CREATE TABLE IF NOT EXISTS daily_news_briefs (
+    brief_date TEXT NOT NULL,
+    revision_number INTEGER NOT NULL,
+    source_hash TEXT NOT NULL,
+    cutoff_at TEXT NOT NULL,
+    generated_at TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    brief_json TEXT NOT NULL,
+    PRIMARY KEY(brief_date, revision_number),
+    UNIQUE(brief_date, source_hash)
+);
+
+CREATE TABLE IF NOT EXISTS daily_news_brief_refresh_state (
+    brief_date TEXT PRIMARY KEY,
+    last_generated_candidate_hash TEXT,
+    pending_source_hash TEXT,
+    pending_candidate_hash TEXT,
+    pending_since TEXT,
+    last_observed_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS news_title_translations (
     translation_id TEXT PRIMARY KEY,

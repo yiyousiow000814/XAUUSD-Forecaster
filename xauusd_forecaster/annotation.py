@@ -817,6 +817,32 @@ class _GeminiRequestPool:
         except Exception:
             return conservative_tokens
 
+    def call_json(
+        self,
+        model: str,
+        *,
+        purpose: str,
+        payload: dict[str, object],
+        decode: Callable[[dict[str, object]], object],
+    ) -> tuple[object, str]:
+        """Send one metered structured request through the shared transport."""
+        serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        input_tokens = self._count_or_conservative(
+            model,
+            payload,
+            conservative_tokens=max(512, len(serialized.encode("utf-8")) + 512),
+        )
+        return self.gateway.generate(
+            0,
+            model=model,
+            purpose=purpose,
+            payload=payload,
+            input_tokens=input_tokens,
+            decode=decode,
+            retryable_http_codes=frozenset({401, 403, 429}),
+            retryable_decode_errors=(ValueError, KeyError, json.JSONDecodeError),
+        )
+
     def call(
         self, start_index: int, model: str, headline: str, body: str,
         *, prompt_version: str = PROMPT_VERSION,
@@ -960,6 +986,28 @@ class _GeminiRequestPool:
             retryable_http_codes=frozenset({401, 403, 429, 500, 502, 503, 504}),
             retryable_decode_errors=(ValueError, KeyError, json.JSONDecodeError),
         )
+
+
+def generate_metered_json(
+    api_key: str,
+    *,
+    model: str,
+    purpose: str,
+    payload: dict[str, object],
+    decode: Callable[[dict[str, object]], dict],
+    request_accountant: ModelRequestAccountant,
+) -> tuple[dict, str]:
+    """Expose structured generation without exposing the provider transport."""
+    pool = _GeminiRequestPool(
+        (api_key,), requests_per_key=1, batch_limit=1,
+        request_accountant=request_accountant,
+    )
+    result, exact_model = pool.call_json(
+        model, purpose=purpose, payload=payload, decode=decode,
+    )
+    if not isinstance(result, dict):
+        raise ValueError("structured model result is not a JSON object")
+    return result, exact_model
 
 
 def _decode_model_json(envelope: dict[str, object]) -> dict:

@@ -28,6 +28,7 @@ from xauusd_forecaster.annotation import (  # noqa: E402
     assess_pending_news_impacts,
     translate_pending_headlines,
 )
+from xauusd_forecaster.daily_brief import update_daily_brief  # noqa: E402
 from xauusd_forecaster.forward_ledger import ForwardLedger  # noqa: E402
 from xauusd_forecaster.ai_task_registry import route_for_task  # noqa: E402
 from xauusd_forecaster.news_scheduler import (  # noqa: E402
@@ -381,6 +382,27 @@ def main() -> int:
                         "queue": scheduler_counts(ledger.connection),
                     }
                 ),
+                flush=True,
+            )
+            brief_credential = next(
+                (credential for credential in configured_api_credentials()
+                 if credential.pool == "PREEMPTIBLE"),
+                None,
+            )
+            if brief_credential is None:
+                brief_status = {
+                    "status": "DISABLED", "reason": "NO_PREEMPTIBLE_ACCOUNT",
+                }
+            else:
+                brief_status = update_daily_brief(
+                    ledger,
+                    api_key=brief_credential.api_key,
+                    request_accountant=SchedulerModelAccountant(
+                        ledger.connection, brief_credential, urgent=False,
+                    ),
+                )
+            print(
+                json.dumps({"event": "DAILY_NEWS_BRIEF", **brief_status}),
                 flush=True,
             )
             work_items = len(statuses)
