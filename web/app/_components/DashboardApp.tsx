@@ -13,10 +13,12 @@ import {
 const loadStatusView = () => import("../_views/StatusView");
 const loadHealthView = () => import("../_views/HealthView");
 const loadAuditView = () => import("../_views/AuditView");
+const loadAssistantView = () => import("../_views/AssistantView");
 
 const StatusView = lazy(loadStatusView);
 const HealthView = lazy(loadHealthView);
 const AuditView = lazy(loadAuditView);
+const AssistantView = lazy(loadAssistantView);
 
 const AUDIT_VIEWS = new Set<AuditViewName>(["news", "evidence", "stories", "decisions", "league", "coverage"]);
 
@@ -27,10 +29,11 @@ function validAuditView(value: string | null | undefined): AuditViewName {
 function parseDashboardUrl(url: URL): DashboardLocation | null {
   if (url.pathname === "/status") return { room: "status", auditView: "news" };
   if (url.pathname === "/health") return { room: "health", auditView: "news" };
+  if (url.pathname === "/assistant") return { room: "assistant", auditView: "news" };
   if (url.pathname === "/audit") return { room: "audit", auditView: validAuditView(url.searchParams.get("view")) };
   if (url.pathname !== "/") return null;
   const room = url.searchParams.get("room");
-  if (room === "status" || room === "health") return { room, auditView: "news" };
+  if (room === "assistant" || room === "status" || room === "health") return { room, auditView: "news" };
   if (room === "audit") return { room, auditView: validAuditView(url.searchParams.get("view")) };
   return { room: "live", auditView: "news" };
 }
@@ -45,6 +48,7 @@ function preloadRoom(room: DashboardRoom): Promise<unknown> {
   if (room === "status") return loadStatusView();
   if (room === "health") return loadHealthView();
   if (room === "audit") return loadAuditView();
+  if (room === "assistant") return loadAssistantView();
   return Promise.resolve();
 }
 
@@ -114,6 +118,7 @@ export default function DashboardApp({
       {location.room === "status" && <StatusView />}
       {location.room === "health" && <HealthView />}
       {location.room === "audit" && <AuditView key={location.auditView} />}
+      {location.room === "assistant" && <AssistantView />}
     </Suspense>
   </DashboardNavigationProvider>;
 }

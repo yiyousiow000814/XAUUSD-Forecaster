@@ -130,6 +130,16 @@ reconnects while the turn is non-terminal or more events remain. Every replay
 rechecks owner authorization. A response may therefore be empty without
 meaning that the turn failed.
 
+The authenticated browser recovers an admitted `PENDING` or `PROCESSING` turn
+from the owner conversation read, replays its immutable event sequence from the
+beginning through bounded pages, and resumes from the last contiguous sequence.
+It pauses reconnect work while the document is hidden and aborts requests when
+the view is left. Reconnect attempts have a finite retry count and cannot run
+past the turn's bounded orchestration lifetime. After a terminal event the
+browser refreshes canonical conversation and message records. Interrupted
+presentation deltas are labeled as provisional and never become a locally
+invented final answer; they disappear after failure or cancellation.
+
 The operational v1 codec is shared by the Python orchestrator and TypeScript
 web boundary. Envelopes and type-specific payloads use exact fields and strict
 JSON: unknown fields, non-finite numbers, malformed identifiers, oversized
@@ -215,6 +225,12 @@ The system MUST NOT spend an extra model call merely to generate "thinking"
 copy. `reasoning.started` reports a phase and selected public policy metadata;
 it never exposes private chain-of-thought. A completed progress trace MAY be
 collapsed behind `查看分析过程`.
+
+The responsive workbench exposes conversation selection, older-message paging,
+title controls, archive and restore, turn cancellation, and the finite progress
+trace on both desktop and phone layouts. Canonical message text is rendered as
+text, not arbitrary model HTML. The phone conversation rail is a dismissible
+drawer and all primary controls remain reachable without horizontal overflow.
 
 ## Structured content protocol
 

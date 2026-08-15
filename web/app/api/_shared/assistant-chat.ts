@@ -1,4 +1,5 @@
 import {
+  ASSISTANT_ACTIVE_TURN_STATUSES_SQL,
   automaticAssistantTitleStatements,
   provisionalAssistantTitle,
 } from "./assistant-conversations";
@@ -105,7 +106,7 @@ const errorCode = /^[A-Z][A-Z0-9_]{2,63}$/;
 const modelId = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/;
 const sha256 = /^[0-9a-f]{64}$/;
 const toolName = /^[a-z][a-z0-9_]{1,54}_v[1-9][0-9]*$/;
-const activeStatuses = "'PENDING','PROCESSING'";
+const activeStatuses = ASSISTANT_ACTIVE_TURN_STATUSES_SQL;
 
 const hasUnsafeTextControl = (value: string) => [...value].some(character => (
   character.charCodeAt(0) === 0

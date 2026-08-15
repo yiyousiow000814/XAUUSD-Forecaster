@@ -101,6 +101,13 @@ terminal turn transition, and activity timestamp commit together. Progress,
 retry, lease, cancellation, title, and compaction records do not advance
 conversation activity.
 
+An owner conversation read exposes at most one active-turn summary when its
+canonical turn is `PENDING` or `PROCESSING`. The summary contains only the turn
+identity, status, current event sequence, and creation time needed for browser
+recovery; it is not a second queue authority. Terminal turns disappear from
+this summary, and their final state remains represented by canonical messages
+and immutable transport events.
+
 ## Activity ordering
 
 Conversation lists sort by `last_activity_at DESC` with a deterministic

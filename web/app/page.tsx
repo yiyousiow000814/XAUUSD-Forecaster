@@ -25,7 +25,7 @@ export default async function HomePage({ searchParams }: PageProps) {
   const roomValue = Array.isArray(query.room) ? query.room[0] : query.room;
   const viewValue = Array.isArray(query.view) ? query.view[0] : query.view;
   const auditView = viewValue && AUDIT_VIEWS.has(viewValue as AuditViewName) ? viewValue as AuditViewName : "news";
-  const room = roomValue === "status" || roomValue === "health" || roomValue === "audit" ? roomValue : "live";
+  const room = roomValue === "assistant" || roomValue === "status" || roomValue === "health" || roomValue === "audit" ? roomValue : "live";
   const initialLocation: DashboardLocation = { room, auditView };
   const initialResources = previewResources();
   return <DashboardApp initialLocation={initialLocation} initialResources={initialResources} />;

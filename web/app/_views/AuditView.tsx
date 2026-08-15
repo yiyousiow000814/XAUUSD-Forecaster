@@ -1222,6 +1222,7 @@ export default function AuditView() {
           <div><strong>Aurum Evidence Desk</strong><small>新闻 · 决策 · 因子覆盖</small></div>
         </DashboardLink>
         <div className="top-actions">
+          <DashboardLink className="audit-link" href="/assistant">Assistant</DashboardLink>
           <DashboardLink className="audit-link" href="/status">系统状态</DashboardLink>
           <DashboardLink className="audit-link" href="/" replace>← 返回实时室</DashboardLink>
           <SystemStatePill loading={statusState === "loading"} error={statusState === "error"} online={Boolean(payload?.system?.online)} marketSession={payload?.system?.market_session} />
