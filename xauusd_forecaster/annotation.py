@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import unicodedata
 import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -974,7 +975,8 @@ def _chinese_repair_payload(result: dict) -> dict[str, object]:
             "personal and company names, tickers, widely used abbreviations, "
             "identifiers, and proper nouns in English when that is more natural or "
             "accurate. Do not leave entire explanatory sentences unnecessarily in "
-            "English, and do not force proper nouns into awkward translations. "
+            "English or another source language, and do not force proper nouns "
+            "into awkward translations. "
             "Preserve dates, percentages, prices, and every number exactly. "
             "Return JSON only.\nSOURCE_JSON\n"
             + json.dumps(
@@ -1040,7 +1042,7 @@ def _decode_title(envelope: dict[str, object], headline: str) -> str:
     _recover_display_fields(translated, headline, "")
     headline_zh = translated["headline_zh"]
     _require_title_numbers_preserved(headline_zh, headline)
-    _require_simplified_chinese(headline_zh, "headline_zh", 2)
+    _require_chinese_primary(headline_zh, "headline_zh")
     return headline_zh
 
 
@@ -1068,7 +1070,7 @@ def _decode_impact(envelope: dict[str, object], row: dict) -> dict:
     validated["_source_body_character_count"] = int(
         row.get("source_body_character_count") or len(str(row.get("body") or ""))
     )
-    _require_simplified_chinese(validated["reason_zh"], "reason_zh", 4)
+    _require_chinese_primary(validated["reason_zh"], "reason_zh")
     return validated
 
 
@@ -1398,22 +1400,20 @@ def _require_title_numbers_preserved(translated: str, source: str) -> None:
 
 
 def _validate_chinese_result(result: dict) -> None:
-    for field, minimum in (("headline_zh", 2), ("summary_zh", 10)):
-        _validate_chinese_display_field(result.get(field), field, minimum)
+    for field in ("headline_zh", "summary_zh"):
+        _validate_chinese_display_field(result.get(field), field)
     story_title = str(result.get("primary_story_title_zh") or "").strip()
     if story_title:
-        _validate_chinese_display_field(
-            story_title, "primary_story_title_zh", 2,
-        )
+        _validate_chinese_display_field(story_title, "primary_story_title_zh")
 
 
-def _validate_chinese_display_field(
-    value: object, field: str, minimum: int,
-) -> None:
-    _require_simplified_chinese(value, field, minimum)
+def _validate_chinese_display_field(value: object, field: str) -> None:
+    _require_chinese_primary(value, field)
     text = str(value or "")
     if "相关数值" in text:
-        raise ValueError(f"Gemini {field} contains an unresolved source number")
+        raise ValueError(
+            f"SOURCE_NUMBER_MISMATCH: Gemini {field} contains an unresolved number"
+        )
     if field == "primary_story_title_zh" and re.search(
         r"(?<=[\u3400-\u9fff])[a-z]{3,}(?=[\u3400-\u9fff])", text,
     ):
@@ -1434,7 +1434,7 @@ def _invalid_chinese_display_fields(result: dict) -> tuple[str, ...]:
         try:
             value = result.get(field)
             if minimum:
-                _validate_chinese_display_field(value, field, minimum)
+                _validate_chinese_display_field(value, field)
             elif field not in result:
                 raise ValueError(f"Gemini {field} is missing")
             rule = schema_properties[field]
@@ -1721,21 +1721,97 @@ def _append_impact_failure(
     }
 
 
-def _require_simplified_chinese(
-    value: object,
-    field: str,
-    minimum: int,
-) -> None:
-    """Require Chinese-primary prose without rejecting natural proper nouns."""
-    text = str(value or "")
-    chinese = len(re.findall(r"[\u3400-\u9fff]", text))
-    if chinese < minimum:
-        raise ValueError(f"Gemini {field} is not Simplified Chinese")
+def _is_han(character: str) -> bool:
+    codepoint = ord(character)
+    return (
+        0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0xF900 <= codepoint <= 0xFAFF
+        or 0x20000 <= codepoint <= 0x2FA1F
+    )
+
+
+def _is_latin_letter(character: str) -> bool:
+    return character.isalpha() and "LATIN" in unicodedata.name(character, "")
+
+
+def _word_runs(text: str) -> tuple[str, ...]:
+    runs: list[str] = []
+    current: list[str] = []
+    for character in text:
+        if character.isalnum() or character in "'._/-":
+            current.append(character)
+        elif current:
+            runs.append("".join(current).strip("'._/-"))
+            current = []
+    if current:
+        runs.append("".join(current).strip("'._/-"))
+    return tuple(run for run in runs if run)
+
+
+def _latin_identifier_like(token: str) -> bool:
+    letters = [character for character in token if _is_latin_letter(character)]
+    if not letters:
+        return False
+    word = "".join(letters)
+    return (
+        any(character.isdigit() for character in token)
+        or word.isupper()
+        or (any(character.isupper() for character in word)
+            and any(character.islower() for character in word))
+    )
+
+
+def _latin_prose_profile(text: str) -> tuple[int, int, int]:
+    identifier_letters = 0
+    prose_letters = 0
+    prose_words = 0
+    for token in _word_runs(text):
+        latin_letters = sum(_is_latin_letter(character) for character in token)
+        if not latin_letters:
+            continue
+        if _latin_identifier_like(token):
+            identifier_letters += latin_letters
+        else:
+            prose_letters += latin_letters
+            prose_words += 1
+    return identifier_letters, prose_letters, prose_words
+
+
+def _require_chinese_primary(value: object, field: str) -> None:
+    """Reject obvious non-Chinese prose while allowing readable English names."""
+    text = str(value or "").strip()
+    han_letters = sum(_is_han(character) for character in text)
+    if not han_letters:
+        raise ValueError(f"NO_CHINESE_PROSE: Gemini {field} has no Chinese prose")
+    other_script_letters = sum(
+        character.isalpha()
+        and not _is_han(character)
+        and not _is_latin_letter(character)
+        for character in text
+    )
+    if other_script_letters:
+        raise ValueError(
+            f"THIRD_SCRIPT_PRESENT: Gemini {field} contains non-Chinese/Latin text"
+        )
+
     for clause in re.split(r"[。！？!?；;\n]+", text):
-        latin_words = re.findall(r"[A-Za-z][A-Za-z0-9'._/-]*", clause)
-        clause_chinese = len(re.findall(r"[\u3400-\u9fff]", clause))
-        if len(latin_words) >= 3 and len(latin_words) > clause_chinese:
-            raise ValueError(f"Gemini {field} contains an untranslated sentence")
+        clause_han = sum(_is_han(character) for character in clause)
+        identifiers, latin_prose, prose_words = _latin_prose_profile(clause)
+        if not identifiers and not latin_prose:
+            continue
+        if not clause_han:
+            raise ValueError(
+                f"ENGLISH_PROSE_DOMINANT: Gemini {field} has a non-Chinese clause"
+            )
+        weighted_latin = latin_prose + identifiers * 0.20
+        chinese_share = clause_han / (clause_han + weighted_latin)
+        if chinese_share < 0.50 and (
+            prose_words >= 3 or identifiers > clause_han * 4
+        ):
+            raise ValueError(
+                f"ENGLISH_PROSE_DOMINANT: Gemini {field} is not Chinese-primary"
+            )
 
 
 def _call_ollama(model: str, headline: str, body: str) -> tuple[dict, str]:

@@ -1931,11 +1931,11 @@ def test_gemini_rejects_non_chinese_translation_fields() -> None:
         "novelty": 0.0, "confidence": 1.0,
     }
 
-    with pytest.raises(ValueError, match="headline_zh is not Simplified Chinese"):
+    with pytest.raises(ValueError, match="NO_CHINESE_PROSE"):
         annotation_module._validate_chinese_result(vector)
 
     vector["headline_zh"] = "黄金市场更新"
-    with pytest.raises(ValueError, match="summary_zh is not Simplified Chinese"):
+    with pytest.raises(ValueError, match="NO_CHINESE_PROSE"):
         annotation_module._validate_chinese_result(vector)
 
     vector["summary_zh"] = (
@@ -1943,7 +1943,7 @@ def test_gemini_rejects_non_chinese_translation_fields() -> None:
         "and Powell said inflation remains elevated while officials continue to "
         "watch incoming economic data before considering any future policy change"
     )
-    with pytest.raises(ValueError, match="untranslated sentence"):
+    with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
         annotation_module._validate_chinese_result(vector)
 
 
@@ -1953,6 +1953,15 @@ def test_gemini_rejects_non_chinese_translation_fields() -> None:
     "FOMC 会议纪要和 CPI、PCE、NFP 数据影响降息预期。",
     "NVIDIA 财报推动科技股上涨，但风险情绪可能削弱黄金的避险需求。",
     "市场共识认为通胀持续性仍会影响实际收益率和降息预期。",
+    "BlackRock、JPMorgan、NVIDIA 与 Bank of America 发布财报，市场风险偏好改善。",
+    "José 与 Beyoncé 的姓名保留拉丁字母，但正文仍然使用自然中文。",
+    "苹果发布 iPhone 17 Pro Max，供应链变化可能影响市场风险情绪。",
+    "COMEX 黄金和 SPDR Gold Shares ETF 持仓变化受到市场关注。",
+    "C++ 与 .NET 相关企业上涨，但这只是风险情绪的背景信息。",
+    "Powell 表示通胀仍高 📈，XAUUSD 随后承压。",
+    "S&P 500 与 U.S. 10Y Treasury 收益率上升，黄金因此承压。",
+    "貝萊德調整 GLD 持倉，市場仍關注實際利率。",
+    "Beyonce\u0301 与 Societe\u0301 Generale 的名称含组合重音，正文仍为中文。",
 ])
 def test_gemini_accepts_chinese_primary_prose_with_natural_english_names(
     display_text,
@@ -1967,6 +1976,111 @@ def test_gemini_accepts_chinese_primary_prose_with_natural_english_names(
     }
 
     annotation_module._validate_chinese_result(vector)
+
+
+@pytest.mark.parametrize("foreign_text", [
+    "市场更新：Федеральная резервная система сохранила ставку。",
+    "市场更新：الذهب ارتفع بعد قرار البنك المركزي。",
+    "市场更新：金価格が上昇し、市場が反応した。",
+    "市场更新：금 가격이 중앙은행 결정 이후 상승했다。",
+    "市场更新：Η κεντρική τράπεζα διατήρησε τα επιτόκια。",
+])
+def test_gemini_rejects_non_chinese_non_latin_scripts(foreign_text) -> None:
+    vector = {
+        "headline_zh": "市场语言检查",
+        "summary_zh": foreign_text,
+    }
+
+    with pytest.raises(ValueError, match="THIRD_SCRIPT_PRESENT"):
+        annotation_module._validate_chinese_result(vector)
+
+
+@pytest.mark.parametrize("english_dominant", [
+    "中文提示：Federal Reserve kept rates unchanged and markets reduced near-term cut bets.",
+    "黄金市场受到实际收益率影响。Federal Reserve kept rates unchanged and markets reduced cut bets.",
+    "摘要：Federal Reserve Bank of America BlackRock NVIDIA",
+    "美国 CPI 高于预期，Gold ETF flows remained weak after the release.",
+    "市场更新：Bu metin Türkçe olarak devam ediyor ve henüz çevrilmedi.",
+])
+def test_gemini_rejects_english_or_latin_prose_dominating_chinese(
+    english_dominant,
+) -> None:
+    vector = {
+        "headline_zh": "市场语言检查",
+        "summary_zh": english_dominant,
+    }
+
+    with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
+        annotation_module._validate_chinese_result(vector)
+
+
+def test_gemini_distinguishes_translated_prose_from_english_identifiers() -> None:
+    valid = {
+        "headline_zh": "美国 CPI 高于预期",
+        "summary_zh": "美国 CPI 高于预期，Gold ETF 资金流仍然疲弱。",
+    }
+    invalid = {
+        **valid,
+        "summary_zh": "美国 CPI 高于预期，Gold ETF flows remained weak after the release.",
+    }
+
+    annotation_module._validate_chinese_result(valid)
+    with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
+        annotation_module._validate_chinese_result(invalid)
+
+
+@pytest.mark.parametrize(("invalid_display", "repaired_fields"), [
+    (
+        {"headline_zh": "金", "summary_zh": "黄金上涨，但摘要长度不足。"},
+        ("headline_zh", "summary_zh"),
+    ),
+    (
+        {"headline_zh": "黄金市场更新", "summary_zh": "金" * 1601},
+        ("summary_zh",),
+    ),
+    (
+        {"headline_zh": "金" * 301,
+         "summary_zh": "黄金市场出现新的变化，投资者关注后续经济数据。"},
+        ("headline_zh",),
+    ),
+])
+def test_display_schema_bounds_are_repaired_before_model_admission(
+    invalid_display, repaired_fields, monkeypatch,
+) -> None:
+    evidence = "Complete source evidence without numeric claims."
+    vector = _v15_annotation(
+        {
+            **invalid_display,
+            "event_type": "background", "entities": [],
+            "hawkishness": 0.0, "inflation_impulse": 0.0,
+            "growth_impulse": 0.0, "geopolitical_risk": 0.0,
+            "usd_impulse": 0.0, "novelty": 0.0, "confidence": 0.8,
+        },
+        evidence,
+    )
+    repaired = {
+        "headline_zh": "黄金市场更新",
+        "summary_zh": "完整来源正文显示黄金市场出现变化，投资者继续关注经济数据。",
+        "primary_story_title_zh": "",
+    }
+    calls = []
+    _mock_model_json(
+        monkeypatch,
+        lambda _key, _model, _payload: calls.append(1) or (
+            vector if len(calls) == 1 else repaired
+        ),
+    )
+    pool = annotation_module._GeminiRequestPool(
+        ("key-a", "key-b"), request_accountant=ALLOW_MODEL_REQUEST,
+    )
+
+    result, _ = pool.call(0, "model", "headline", evidence)
+
+    for field in ("headline_zh", "summary_zh"):
+        expected = repaired[field] if field in repaired_fields else invalid_display[field]
+        assert result[field] == expected
+    assert result["confidence"] == 0.8
+    assert len(calls) == 2
 
 
 def test_gemini_repairs_mixed_language_summary_with_counted_request(
