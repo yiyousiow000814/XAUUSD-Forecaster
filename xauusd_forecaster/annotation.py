@@ -36,7 +36,9 @@ from .news_impact import (
 from .news_semantics import (
     CURRENT_NEWS_PROMPT_VERSION,
     GENERATED_NEWS_PROMPT_VERSIONS,
+    LEGACY_INVALID_SEMANTIC_REASON_PREFIX,
     news_annotation_schema,
+    validated_annotation_predicate,
     validate_news_annotation,
 )
 
@@ -109,11 +111,12 @@ def pending_annotation_records(
     """
     now = observed_at or datetime.now(UTC)
     rows = connection.execute(
-        """SELECT n.* FROM news_revisions n
+        f"""SELECT n.* FROM news_revisions n
         LEFT JOIN news_annotations a
          ON a.source=n.source AND a.source_item_id=n.source_item_id
          AND a.revision_number=n.revision_number
          AND a.llm_model_version IN (?, ?) AND a.prompt_version IN (?, ?)
+         AND {validated_annotation_predicate('a')}
         WHERE a.annotation_id IS NULL
           AND length(trim(COALESCE(n.body, ''))) >= 240
           AND NOT EXISTS (
@@ -191,14 +194,15 @@ def completed_annotation_records(
     """Return current-policy rows already completed by the annotator."""
     now = observed_at or datetime.now(UTC)
     rows = connection.execute(
-        """SELECT n.* FROM news_revisions n
+        f"""SELECT n.* FROM news_revisions n
         WHERE length(trim(COALESCE(n.body, ''))) >= 240
           AND EXISTS (
             SELECT 1 FROM news_annotations a
             WHERE a.source=n.source AND a.source_item_id=n.source_item_id
               AND a.revision_number=n.revision_number
               AND a.llm_model_version IN (?, ?)
-              AND a.prompt_version=?)
+              AND a.prompt_version=?
+              AND {validated_annotation_predicate('a')})
           AND NOT EXISTS (
             SELECT 1 FROM news_revisions newer
             WHERE newer.source=n.source
@@ -418,16 +422,25 @@ def _persist_parsed_annotation(
             **failure,
         }
     result = parsed_record["result"]
-    if prompt_version == PROMPT_VERSION:
-        _validate_or_neutralize_current_result(
-            result, headline=str(row["headline"]), body=str(row["body"] or ""),
-            require_complete=True,
-        )
     exact_model = str(parsed_record["exact_model"])
     identity = [
         row["source"], row["source_item_id"], str(row["revision_number"]),
         row["content_hash"], exact_model, prompt_version,
     ]
+    legacy_invalid = ledger.connection.execute(
+        """SELECT 1 FROM news_annotations
+           WHERE source=? AND source_item_id=? AND revision_number=?
+             AND llm_model_version=? AND prompt_version=?
+             AND COALESCE(json_extract(annotation_json, '$.semantic_reason_zh'), '')
+                 LIKE ? LIMIT 1""",
+        (
+            row["source"], row["source_item_id"], row["revision_number"],
+            exact_model, prompt_version,
+            f"{LEGACY_INVALID_SEMANTIC_REASON_PREFIX}%",
+        ),
+    ).fetchone()
+    if legacy_invalid:
+        identity.append("validated-recovery-v1")
     annotation_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "|".join(identity)))
     common = {
         "source": row["source"], "source_item_id": row["source_item_id"],
@@ -830,9 +843,7 @@ class _GeminiRequestPool:
         try:
             _validate_chinese_result(result)
             if prompt_version == PROMPT_VERSION:
-                _validate_or_neutralize_current_result(
-                    result, headline=headline, body=body,
-                )
+                _validate_current_result(result, headline=headline, body=body)
             return result, exact_model
         except ValueError:
             try:
@@ -844,12 +855,12 @@ class _GeminiRequestPool:
                 ]
                 _recover_display_fields(result, headline, body)
                 _validate_chinese_result(result)
-            except Exception:
-                _neutralize_unvalidated_language(result)
+            except Exception as error:
+                raise ValueError(
+                    "Gemini annotation failed display or semantic validation after repair"
+                ) from error
             if prompt_version == PROMPT_VERSION:
-                _validate_or_neutralize_current_result(
-                    result, headline=headline, body=body,
-                )
+                _validate_current_result(result, headline=headline, body=body)
             return result, exact_model
 
     def _repair_chinese(
@@ -1457,72 +1468,14 @@ def _recover_display_fields(result: dict, headline: str, body: str) -> None:
     _restore_source_number_lexemes(result, headline, body)
 
 
-def _source_evidence_excerpt(headline: str, body: str) -> str:
-    source = " ".join((body or headline).split())
-    return source[:240] if len(source) >= 4 else "source unavailable"
-
-
-def _neutralize_unvalidated_language(
-    result: dict, *, headline: str = "", body: str = "",
-) -> None:
-    """Keep the receipt while preventing an unreliable translation from voting."""
-    # Validation is field-specific. A bad summary must not erase a headline
-    # that is already valid Simplified Chinese; the display translator can
-    # repair only the fields that actually failed.
-    try:
-        _require_simplified_chinese(
-            result.get("headline_zh"), "headline_zh", 2, 4.0, 60
-        )
-    except ValueError:
-        result["headline_zh"] = INVALID_CHINESE_TITLE
-    result["summary_zh"] = (
-        "来源正文已完整保存，但自动中文摘要未通过语言一致性检查。"
-        "本条记录保留用于审计，结构化方向影响已设为中性。"
-    )
-    result["primary_category"] = "regulation_other"
-    result["secondary_categories"] = []
-    result["emerging_topic_zh"] = "语言待校验"
-    result.update({
-        "event_type": "other", "entities": [],
-        "record_kind": "BACKGROUND", "actor": "", "action": "", "object": "",
-        "location": "", "event_time": "", "claim_status": "NOT_APPLICABLE",
-        "materiality": 0.0, "canonical_actor_id": "", "action_family": "OTHER_FACT",
-        "canonical_object_id": "", "canonical_location_id": "", "episode_key": "",
-        "primary_story_title_zh": "", "secondary_contexts_zh": [],
-        "relation_to_prior": "NONE",
-        "document_kind": "BACKGROUND", "material_event_key": "",
-        "source_organization_id": "", "evidence_role": "BACKGROUND",
-    })
-    result.update({
-        "xauusd_relevance": "IRRELEVANT",
-        "review_priority": "BACKGROUND",
-        "material_change": "HISTORICAL_CONTEXT",
-        "time_sensitivity": "BACKGROUND",
-        "semantic_reason_zh": "语言或结构一致性检查未通过，禁止进入当前模型。",
-        "supporting_evidence": [_source_evidence_excerpt(headline, body)],
-    })
-    for field in (
-        "hawkishness", "inflation_impulse", "growth_impulse",
-        "geopolitical_risk", "usd_impulse", "novelty", "confidence",
-    ):
-        result[field] = 0.0
-
-
-def _validate_or_neutralize_current_result(
-    result: dict, *, headline: str, body: str, require_complete: bool = False,
-) -> None:
-    if not require_complete and "xauusd_relevance" not in result:
+def _validate_current_result(result: dict, *, headline: str, body: str) -> None:
+    """Reject invalid current semantics without manufacturing irrelevance."""
+    if "xauusd_relevance" not in result:
         return
-    source_text = f"{headline}\n{body}"
-    try:
-        validate_news_annotation(
-            result, prompt_version=PROMPT_VERSION, source_text=source_text,
-        )
-    except ValueError:
-        _neutralize_unvalidated_language(result, headline=headline, body=body)
-        validate_news_annotation(
-            result, prompt_version=PROMPT_VERSION, source_text=source_text,
-        )
+    validate_news_annotation(
+        result, prompt_version=PROMPT_VERSION,
+        source_text=f"{headline}\n{body}",
+    )
 
 
 def _normalize_translated_named_months(result: dict, source: str) -> None:

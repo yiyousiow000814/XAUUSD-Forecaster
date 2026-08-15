@@ -2162,37 +2162,7 @@ def test_gemini_locally_recovers_unverifiable_display_numbers() -> None:
     assert result["confidence"] == 0.5
 
 
-def test_invalid_language_fallback_is_neutral_and_auditable() -> None:
-    result = {
-        "headline_zh": "Gold market update",
-        "summary_zh": "This response was not translated into Chinese.",
-        "hawkishness": 0.8, "inflation_impulse": 0.7,
-        "growth_impulse": -0.4, "geopolitical_risk": 0.9,
-        "usd_impulse": 0.6, "novelty": 0.8, "confidence": 0.9,
-    }
-    annotation_module._neutralize_unvalidated_language(result)
-    annotation_module._validate_chinese_result(result)
-    assert result["confidence"] == 0.0
-    assert result["geopolitical_risk"] == 0.0
-    assert "用于审计" in result["summary_zh"]
-
-
-def test_invalid_summary_does_not_erase_a_valid_chinese_headline() -> None:
-    result = {
-        "headline_zh": "美联储就利率政策发布更新",
-        "summary_zh": "This summary was not translated.",
-        "hawkishness": 0.8, "inflation_impulse": 0.7,
-        "growth_impulse": 0.0, "geopolitical_risk": 0.0,
-        "usd_impulse": 0.4, "novelty": 0.8, "confidence": 0.9,
-    }
-
-    annotation_module._neutralize_unvalidated_language(result)
-
-    assert result["headline_zh"] == "美联储就利率政策发布更新"
-    assert result["confidence"] == 0.0
-
-
-def test_annotation_appends_neutral_record_when_translation_repair_is_unavailable(
+def test_invalid_annotation_is_retried_instead_of_manufacturing_irrelevance(
     tmp_path, monkeypatch
 ) -> None:
     now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
@@ -2226,13 +2196,9 @@ def test_annotation_appends_neutral_record_when_translation_repair_is_unavailabl
         ledger, provider="gemini", api_key="test-key", limit=1,
         request_accountant=ALLOW_MODEL_REQUEST,
     )
-    assert statuses[0]["status"] == "OK"
-    saved = ledger.connection.execute(
-        "SELECT * FROM news_annotations WHERE source='language-test'"
-    ).fetchone()
-    assert saved["confidence"] == 0.0
-    assert saved["geopolitical_risk"] == 0.0
-    assert ledger.count("news_llm_failures") == 0
+    assert statuses[0]["status"] == "ERROR"
+    assert ledger.count("news_annotations") == 0
+    assert ledger.count("news_llm_failures") == 1
 
 
 def test_llm_failure_is_persisted_and_blocks_immediate_retry(
@@ -3409,7 +3375,7 @@ def test_gemini_31_has_an_independent_fallback_quota(tmp_path) -> None:
     ) == 500
 
 
-def test_gemini_31_current_annotation_is_persisted_and_not_reprocessed(
+def test_valid_annotation_is_not_reprocessed_but_legacy_neutralization_is(
     tmp_path, monkeypatch
 ) -> None:
     now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
@@ -3462,6 +3428,50 @@ def test_gemini_31_current_annotation_is_persisted_and_not_reprocessed(
     ).fetchone()
     assert stored["geopolitical_risk"] == pytest.approx(0.8)
     assert stored["prompt_version"] == annotation_module.PROMPT_VERSION
+    assert annotate_pending_news(
+        ledger,
+        provider="gemini",
+        api_key="test-key",
+        model=annotation_module.DEFAULT_GEMINI_MODEL,
+        limit=1,
+        request_accountant=ALLOW_MODEL_REQUEST,
+    ) == []
+
+    legacy_body = "Gold geopolitical evidence requires semantic recovery. " * 20
+    legacy_digest = hashlib.sha256(legacy_body.encode()).hexdigest()
+    ledger.append_news_revision({
+        "source": "fallback-test", "source_item_id": "legacy-invalid",
+        "collector_first_seen_time": now, "fetched_time": now,
+        "headline": "Gold semantic recovery", "body": legacy_body,
+        "content_hash": legacy_digest, "cluster_id": "legacy-invalid-cluster",
+    })
+    stored_json = dict(vector)
+    stored_json.update({
+        "xauusd_relevance": "IRRELEVANT",
+        "semantic_reason_zh": "语言或结构一致性检查未通过，禁止进入当前模型。",
+    })
+    ledger.append_annotation({
+        "annotation_id": "legacy-invalid-annotation",
+        "source": "fallback-test", "source_item_id": "legacy-invalid",
+        "revision_number": 1, "raw_content_hash": legacy_digest,
+        "llm_model_version": annotation_module.FALLBACK_GEMINI_MODEL,
+        "prompt_version": annotation_module.PROMPT_VERSION,
+        "parse_started_at": now, "parsed_at": now,
+        "annotation": stored_json,
+    })
+
+    recovered = annotate_pending_news(
+        ledger,
+        provider="gemini",
+        api_key="test-key",
+        model=annotation_module.FALLBACK_GEMINI_MODEL,
+        limit=1,
+        request_accountant=ALLOW_MODEL_REQUEST,
+    )
+    assert recovered[0]["status"] == "OK"
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_annotations WHERE source_item_id='legacy-invalid'"
+    ).fetchone()[0] == 2
     assert annotate_pending_news(
         ledger,
         provider="gemini",

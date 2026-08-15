@@ -160,11 +160,34 @@ export async function POST(request: Request) {
   try {
     const body = JSON.parse(serialized) as {
       items?: NewsIndexItem[]; reset?: unknown; prune_before?: unknown;
-      reconcile_contract?: unknown;
+      reconcile_contract?: unknown; withdraw_detail_keys?: unknown;
     };
     if (body.reset === true) {
       await binding.prepare("DELETE FROM news_index").run();
       return NextResponse.json({ status: "OK", reset: true });
+    }
+    if (body.withdraw_detail_keys !== undefined) {
+      if (
+        !Array.isArray(body.withdraw_detail_keys)
+        || body.withdraw_detail_keys.length > 20
+        || body.withdraw_detail_keys.some(
+          key => typeof key !== "string" || !/^[a-f0-9]{64}$/.test(key),
+        )
+      ) {
+        return NextResponse.json({ error: "invalid news withdrawal batch" }, { status: 400 });
+      }
+      const keys = body.withdraw_detail_keys as string[];
+      const statements = keys.flatMap(key => [
+        binding.prepare("DELETE FROM news_index WHERE detail_key = ?").bind(key),
+        binding.prepare("DELETE FROM news_details WHERE detail_key = ?").bind(key),
+      ]);
+      const results = statements.length ? await binding.batch(statements) : [];
+      return NextResponse.json({
+        status: "OK",
+        withdrawn: results.reduce(
+          (sum, result) => sum + (result.meta.changes ?? 0), 0,
+        ),
+      });
     }
     if (typeof body.prune_before === "string" || typeof body.reconcile_contract === "string") {
       const statements: D1PreparedStatement[] = [];

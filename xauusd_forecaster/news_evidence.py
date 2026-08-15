@@ -32,6 +32,7 @@ from .news_semantics import (
     CURRENT_NEWS_PROMPT_VERSION,
     annotation_topics,
     effective_record_kind,
+    validated_annotation_predicate,
 )
 
 
@@ -249,7 +250,7 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
     # visible under SQLite's lexicographic timestamp comparison.
     cutoff = decision_time.isoformat(timespec="microseconds")
     raw_rows = connection.execute(
-        """SELECT n.*,a.annotation_id,a.event_type,a.entities_json,a.hawkishness,
+        f"""SELECT n.*,a.annotation_id,a.event_type,a.entities_json,a.hawkishness,
                   a.inflation_impulse,a.growth_impulse,a.geopolitical_risk,
                   a.usd_impulse,a.novelty,a.confidence,a.annotation_json,a.parsed_at,
                   a.prompt_version,a.llm_model_version,
@@ -281,6 +282,7 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
              AND length(trim(coalesce(n.body,'')))>=240
              AND a.llm_model_version IN ('gemini-3.5-flash-lite','gemini-3.1-flash-lite')
              AND a.prompt_version=?
+             AND {validated_annotation_predicate('a')}
              AND NOT EXISTS (
                SELECT 1 FROM news_revisions newer
                WHERE newer.source=n.source AND newer.source_item_id=n.source_item_id

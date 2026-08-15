@@ -919,6 +919,11 @@ def test_news_reader_materializations_exclude_semantically_irrelevant_articles(
 
     expected = {"relevant-market-report", "pending-semantic-review"}
     assert {row["source_item_id"] for row in archive["items"]} == expected
+    assert archive["withdrawals"] == [{
+        "source": "gdelt_gold_geopolitics",
+        "source_item_id": "irrelevant-entertainment-report",
+        "revision_number": 1,
+    }]
     assert {row["source_item_id"] for row in dashboard["recent_news"]} == expected
 
 

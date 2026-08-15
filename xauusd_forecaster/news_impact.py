@@ -7,7 +7,11 @@ import json
 
 from .news_identity import canonical_id
 from .news_relevance import google_news_item_is_relevant
-from .news_semantics import ACTIONABLE_RECORD_KINDS, CURRENT_NEWS_PROMPT_VERSION
+from .news_semantics import (
+    ACTIONABLE_RECORD_KINDS,
+    CURRENT_NEWS_PROMPT_VERSION,
+    validated_annotation_predicate,
+)
 
 
 IMPACT_MODEL = "gemma-4-31b-it"
@@ -287,6 +291,7 @@ def pending_impact_records(
          AND a.raw_content_hash=n.content_hash
         WHERE length(trim(COALESCE(n.body,'')))>=240
           AND a.prompt_version=?
+          AND {validated_annotation_predicate('a')}
           AND a.llm_model_version IN (
             'gemini-3.5-flash-lite','gemini-3.1-flash-lite')
           AND NOT EXISTS (
@@ -349,7 +354,7 @@ def pending_impact_records(
         str(row["collector_first_seen_time"]) for row in selected
     )
     prior_rows = connection.execute(
-        """SELECT p.source,p.source_item_id,p.revision_number,p.headline,
+        f"""SELECT p.source,p.source_item_id,p.revision_number,p.headline,
                   p.collector_first_seen_time,p.cluster_id,
                   pa.annotation_id AS candidate_id,pa.annotation_json,
                   json_extract(pa.annotation_json,'$.summary_zh') AS summary_zh,
@@ -360,6 +365,7 @@ def pending_impact_records(
             AND pa.source_item_id=p.source_item_id
             AND pa.revision_number=p.revision_number
             AND pa.raw_content_hash=p.content_hash
+            AND {validated_annotation_predicate('pa')}
            LEFT JOIN news_impact_assessments_v1 pi
              ON pi.assessment_id=(
                SELECT selected_pi.assessment_id
