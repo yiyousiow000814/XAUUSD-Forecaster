@@ -4,9 +4,9 @@
 
 This status is maintained as the Assistant architecture and its bounded
 implementation PRs land. PR #103 established the contracts; PRs #20, #21, #22,
-#104, #106, #108, #110, #111, and #113 are merged on `main`. The rows describe
-the bounded Assistant foundations covered by those merged PRs and by the
-current server-side native tool-loop implementation.
+#104, #106, #108, #110, #111, #113, and #114 are merged on `main`. The rows
+describe the bounded Assistant foundations covered by those merged PRs and by
+the current cross-runtime streaming-protocol implementation.
 
 Status values have precise meanings:
 
@@ -40,7 +40,7 @@ Status values have precise meanings:
 | Unified model gateway | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | `model_gateway.py` is the single metered Google generation boundary used by the news semantic chain, Daily Brief, Q&A, titles, compaction, and the capacity-routed native Assistant agent core. |
 | Function calling | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `PARTIAL` | The server core sends native declarations, preserves exact call IDs and opaque thought signatures inside the ephemeral provider sequence, authorizes read-only calls, and enforces finite context/output/evidence/result/call/turn budgets with at most two tool rounds. Every model turn is metered and capacity-routed while its model remains locked for the sequence. No authenticated user-facing chat queue invokes this core yet. |
 | Parallel tool execution | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `PARTIAL` | Independent calls planned in one model turn execute concurrently within the configured bound, return in deterministic plan order, and retain typed timeout, authorization, schema, adapter, and result failures. The only application adapter currently defined is authoritative compact news retrieval; market and calendar adapters remain future work. |
-| Streaming | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `NOT_IMPLEMENTED` | No versioned Assistant event transport exists. |
+| Streaming | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `PARTIAL` | Python and TypeScript now share the strict `assistant.event.v1` envelope, type payloads, finite state machine, safety budgets, canonical-message boundary, and SSE encoder through one cross-runtime fixture. Durable owner-authenticated replay and a live producer/consumer route remain the next chat-runtime scope. |
 | Commentary/progress | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `NOT_IMPLEMENTED` | No real tool-event progress surface exists. |
 | Rich UI blocks | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `NOT_IMPLEMENTED` | No validated Assistant content-block protocol exists. |
 | Human authentication | [Security](../contracts/ASSISTANT_SECURITY.md) | `MVP` | News Q&A validates a Cloudflare Access JWT signature, issuer, audience, user identity, and configured owner membership before parsing or storage. Runtime Access policy and owner configuration are deployment prerequisites. |

@@ -125,11 +125,11 @@ temporary stack is acceptable only when a dependency cannot be reviewed or
 tested independently; it must be collapsed promptly.
 
 Current implementation has reached the server-side typed native function-
-calling core: a versioned read-only registry, bounded parallel executor, exact
-provider call/response continuity, and capacity-routed model turns. It remains
-`PARTIAL` until an authenticated chat runtime invokes it. The next independent
-scope is the versioned streaming protocol; it will not need to rewrite
-canonical conversation or tool contracts.
+calling core and the cross-runtime `assistant.event.v1` protocol codec/state
+machine. The event layer is presentation transport and does not replace
+canonical messages. The next independent scope is an owner-authenticated,
+durable replay/chat runtime that invokes the agent and emits these events;
+structured rich content remains a separate contract after that runtime.
 
 ## Per-PR completion rule
 

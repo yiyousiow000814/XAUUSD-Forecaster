@@ -1,0 +1,142 @@
+[
+  {
+    "protocol": "assistant.event.v1",
+    "event_id": "event-1",
+    "conversation_id": "conversation-1",
+    "user_turn_id": "turn-1",
+    "message_id": null,
+    "sequence": 1,
+    "type": "conversation.started",
+    "occurred_at": "2026-08-15T10:00:00.000Z",
+    "payload": {}
+  },
+  {
+    "protocol": "assistant.event.v1",
+    "event_id": "event-2",
+    "conversation_id": "conversation-1",
+    "user_turn_id": "turn-1",
+    "message_id": null,
+    "sequence": 2,
+    "type": "reasoning.started",
+    "occurred_at": "2026-08-15T10:00:00.010Z",
+    "payload": { "reasoning_class": "TOOL_HEAVY" }
+  },
+  {
+    "protocol": "assistant.event.v1",
+    "event_id": "event-3",
+    "conversation_id": "conversation-1",
+    "user_turn_id": "turn-1",
+    "message_id": null,
+    "sequence": 3,
+    "type": "retrieval.started",
+    "occurred_at": "2026-08-15T10:00:00.020Z",
+    "payload": { "operation_id": "retrieval-1", "tool_name": "news_retrieval_v1" }
+  },
+  {
+    "protocol": "assistant.event.v1",
+    "event_id": "event-4",
+    "conversation_id": "conversation-1",
+    "user_turn_id": "turn-1",
+    "message_id": null,
+    "sequence": 4,
+    "type": "retrieval.completed",
+    "occurred_at": "2026-08-15T10:00:00.030Z",
+    "payload": {
+      "operation_id": "retrieval-1",
+      "evidence_count": 2,
+      "source_mode": "D1_ARCHIVE",
+      "result_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "protocol": "assistant.event.v1",
+    "event_id": "event-5",
+    "conversation_id": "conversation-1",
+    "user_turn_id": "turn-1",
+    "message_id": null,
+    "sequence": 5,
+    "type": "tool.started",
+    "occurred_at": "2026-08-15T10:00:00.040Z",
+    "payload": { "call_id": "call-1", "tool_name": "news_retrieval_v1", "tool_version": "v1" }
+  },
+  {
+    "protocol": "assistant.event.v1",
+    "event_id": "event-6",
+    "conversation_id": "conversation-1",
+    "user_turn_id": "turn-1",
+    "message_id": null,
+    "sequence": 6,
+    "type": "tool.completed",
+    "occurred_at": "2026-08-15T10:00:00.050Z",
+    "payload": {
+      "call_id": "call-1",
+      "tool_name": "news_retrieval_v1",
+      "status": "SUCCEEDED",
+      "result_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "evidence_count": 2
+    }
+  },
+  {
+    "protocol": "assistant.event.v1",
+    "event_id": "event-7",
+    "conversation_id": "conversation-1",
+    "user_turn_id": "turn-1",
+    "message_id": null,
+    "sequence": 7,
+    "type": "answer.started",
+    "occurred_at": "2026-08-15T10:00:00.060Z",
+    "payload": {}
+  },
+  {
+    "protocol": "assistant.event.v1",
+    "event_id": "event-8",
+    "conversation_id": "conversation-1",
+    "user_turn_id": "turn-1",
+    "message_id": null,
+    "sequence": 8,
+    "type": "answer.delta",
+    "occurred_at": "2026-08-15T10:00:00.070Z",
+    "payload": { "text": "黄金受实际利率与美元共同影响。" }
+  },
+  {
+    "protocol": "assistant.event.v1",
+    "event_id": "event-9",
+    "conversation_id": "conversation-1",
+    "user_turn_id": "turn-1",
+    "message_id": null,
+    "sequence": 9,
+    "type": "content.block",
+    "occurred_at": "2026-08-15T10:00:00.080Z",
+    "payload": {
+      "block_id": "block-1",
+      "block_type": "markdown",
+      "block_version": "assistant.block.v1",
+      "content_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  },
+  {
+    "protocol": "assistant.event.v1",
+    "event_id": "event-10",
+    "conversation_id": "conversation-1",
+    "user_turn_id": "turn-1",
+    "message_id": "message-assistant-1",
+    "sequence": 10,
+    "type": "answer.completed",
+    "occurred_at": "2026-08-15T10:00:00.090Z",
+    "payload": {
+      "content_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "evidence_ids": ["news:1", "news:2"]
+    }
+  },
+  {
+    "protocol": "assistant.event.v1",
+    "event_id": "event-11",
+    "conversation_id": "conversation-1",
+    "user_turn_id": "turn-1",
+    "message_id": null,
+    "sequence": 11,
+    "type": "conversation.completed",
+    "occurred_at": "2026-08-15T10:00:00.100Z",
+    "payload": {}
+  }
+]

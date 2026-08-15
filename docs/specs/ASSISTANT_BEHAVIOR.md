@@ -98,6 +98,7 @@ The initial target envelope is equivalent to:
 
 ```text
 assistant.event.v1
+- protocol
 - event_id
 - conversation_id
 - user_turn_id
@@ -111,6 +112,15 @@ assistant.event.v1
 `sequence` is monotonic within one user turn. Reconnection MAY resume from a
 known sequence, but replayed transport events do not create duplicate canonical
 messages.
+
+The operational v1 codec is shared by the Python orchestrator and TypeScript
+web boundary. Envelopes and type-specific payloads use exact fields and strict
+JSON: unknown fields, non-finite numbers, malformed identifiers, oversized
+payloads, and unsupported protocol versions fail closed. A turn carries at
+most 256 events, one payload at most 16,384 UTF-8 bytes, one answer delta at
+most 4,096 bytes, and all presentation deltas/block references at most 65,536
+bytes. These are versioned operational safety values rather than assumed model
+or provider limits.
 
 The initial event vocabulary is:
 
@@ -134,6 +144,21 @@ cancelled
 `answer.delta` is presentation transport. `answer.completed` identifies the
 validated canonical final message. A partial stream interrupted before final
 persistence MUST NOT be presented later as a completed answer.
+
+The first event is exactly `conversation.started`. Tool and retrieval
+completions must match a prior start; all active operations close before
+`answer.started`. Only deltas and validated content-block references occur
+while the answer is open. `answer.completed` is the only event allowed to name
+the canonical Assistant message, and `conversation.completed` follows it.
+`error` and `cancelled` are terminal, and no event follows a terminal event.
+Reasoning progress contains only the public reasoning class, never private
+reasoning text. SSE uses the numeric sequence as `Last-Event-ID`/resume state
+and includes one complete JSON envelope in each `data` record.
+
+`content.block` carries only a bounded block identity, version, type, and
+content hash in v1. The separately versioned rich-content contract owns the
+actual validated block data; the event transport never treats arbitrary model
+HTML as renderable content.
 
 The event protocol is independently versioned from message storage. Streaming
 can therefore be added or replaced without migrating canonical conversation
