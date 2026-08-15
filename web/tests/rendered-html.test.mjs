@@ -1374,7 +1374,9 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.market-selected-window-caption \{ display:flex;/);
   assert.match(modal, /左右滑动浏览长期曲线 · 文字与时间轴保持可读大小/);
   assert.match(css, /\.market-chart-block>\.chart-legend \{ display:flex; flex-wrap:wrap;/);
-  assert.match(css, /\.execution-scorecards \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); border-width:1px 0; \}/);
+  assert.match(css, /\.execution-scorecards \{ grid-template-columns:minmax\(0,1fr\); gap:0; border-width:1px 0; background:transparent; \}/);
+  assert.match(css, /\.execution-scorecards article\+article \{ border-top:1px solid rgba\(17,17,15,\.36\); \}/);
+  assert.match(css, /\.execution-scorecards article>span \{ max-width:34ch; font-size:11px; line-height:1\.55; \}/);
   assert.match(css, /\.quota-row \{ grid-template-columns:minmax\(72px,\.8fr\) minmax\(88px,1fr\) auto;/);
   assert.match(css, /\.chart-block \{ overflow:visible/);
   assert.match(css, /\.graph-modal-backdrop \{ position:fixed; inset:0; z-index:1100/);
