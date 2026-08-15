@@ -12,7 +12,7 @@ const AUDIT_VIEWS = new Set<AuditViewName>(["news", "evidence", "stories", "deci
 function previewResources(): Record<string, unknown> {
   if (!previewBundle) return {};
   const resources: Record<string, unknown> = { [PREVIEW_RESOURCES.status]: previewBundle.status };
-  resources[`${PREVIEW_RESOURCES.newsIndex}?page=1&limit=${PREVIEW_NEWS_PAGE_SIZE}`] = previewBundle.news_index;
+  resources[`${PREVIEW_RESOURCES.newsIndex}?page=1&limit=${PREVIEW_NEWS_PAGE_SIZE}&review_state=COMPLETED`] = previewBundle.news_index;
 
   const learning = previewBundle.learning_summary;
   if (!learning) return resources;

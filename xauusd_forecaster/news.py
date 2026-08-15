@@ -210,7 +210,9 @@ GDELT_LAST_UPDATE_URL = (
 GDELT_GCS_PREFIX = "https://storage.googleapis.com/data.gdeltproject.org/gdeltv2/"
 GDELT_MAX_COMPRESSED_BYTES = 16 * 1024 * 1024
 GDELT_MAX_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
+GDELT_MAX_FIELD_CHARS = 4 * 1024 * 1024
 GDELT_MAX_CANDIDATES = 25
+GDELT_MAX_REJECTION_RECEIPTS = 10
 GOOGLE_GEO_SOURCE = "google_news_gold_context"
 
 
@@ -786,15 +788,51 @@ def collect_gdelt_news(
         inserted = 0
         unchanged = 0
         rejected: dict[str, int] = {}
+        rejection_receipts: list[dict[str, object]] = []
         discovered = 0
-        rows = csv.reader(
-            io.StringIO(payload.decode("utf-8", errors="replace")), delimiter="\t"
-        )
-        for fields in rows:
-            if len(fields) < 27:
-                rejected["MALFORMED_GKG_ROW"] = (
-                    rejected.get("MALFORMED_GKG_ROW", 0) + 1
+        def retain_row_rejection(
+            row_number: int, raw_line: str, reason: str, diagnostics: dict,
+        ) -> None:
+            rejected[reason] = rejected.get(reason, 0) + 1
+            if len(rejection_receipts) >= GDELT_MAX_REJECTION_RECEIPTS:
+                return
+            rejection_receipts.append({
+                "rejection_id": str(uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"{poll_id}|{row_number}|{reason}",
+                )),
+                "source": GDELT_SOURCE,
+                "poll_id": poll_id,
+                "batch_name": archive_name,
+                "row_number": row_number,
+                "row_hash": hashlib.sha256(raw_line.encode()).hexdigest(),
+                "reason_code": reason,
+                "diagnostics": diagnostics,
+                "rejected_at": fetched_at,
+            })
+        # GKG metadata fields can legitimately exceed Python's 128 KiB CSV
+        # default. Parse one physical GKG row at a time so one pathological row
+        # is isolated instead of aborting the complete 15-minute archive.
+        csv.field_size_limit(GDELT_MAX_FIELD_CHARS)
+        decoded = io.StringIO(payload.decode("utf-8", errors="replace"))
+        for row_number, raw_line in enumerate(decoded, start=1):
+            try:
+                fields = next(csv.reader((raw_line,), delimiter="\t"))
+            except csv.Error as error:
+                reason = "GKG_ROW_FIELD_LIMIT" if "field limit" in str(error) else (
+                    "MALFORMED_GKG_ROW"
                 )
+                retain_row_rejection(row_number, raw_line, reason, {
+                    "row_characters": len(raw_line),
+                    "field_limit_characters": GDELT_MAX_FIELD_CHARS,
+                    "parser_error": str(error)[:200],
+                })
+                continue
+            if len(fields) < 27:
+                retain_row_rejection(row_number, raw_line, "MALFORMED_GKG_ROW", {
+                    "row_characters": len(raw_line),
+                    "parsed_field_count": len(fields),
+                    "required_field_count": 27,
+                })
                 continue
             link = fields[4].strip()
             extras = fields[26]
@@ -841,9 +879,12 @@ def collect_gdelt_news(
             if reason not in {"INSERTED", "UNCHANGED_FULL_TEXT"}:
                 rejected[reason] = rejected.get(reason, 0) + 1
         ledger.append_source_poll({"poll_id": poll_id, "source": GDELT_SOURCE, "fetched_time": fetched_at, "status": "OK", "payload_hash": hashlib.sha256(raw).hexdigest()})
+        for receipt in rejection_receipts:
+            ledger.append_intake_rejection(receipt)
         return {"source": GDELT_SOURCE, "status": "OK", "inserted_revisions": inserted,
                 "unchanged_items": unchanged, "discovered_candidates": discovered,
-                "archive": archive_name, "rejected_reasons": rejected}
+                "archive": archive_name, "rejected_reasons": rejected,
+                "rejection_receipts": len(rejection_receipts)}
     except Exception as error:
         message = str(error)[:500]
         ledger.append_source_poll({"poll_id": poll_id, "source": GDELT_SOURCE, "fetched_time": fetched_at, "status": "ERROR", "error_type": type(error).__name__, "error": message})

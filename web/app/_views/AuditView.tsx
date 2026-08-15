@@ -12,6 +12,7 @@ import { statusFieldPhase } from "../_lib/current-data-provenance";
 import { PREVIEW_NEWS_PAGE_SIZE } from "../_lib/preview-manifest";
 import { resolveNewsMetrics, type NewsMetrics } from "../_lib/news-metrics";
 import { authoritativeNewsTotals, type NewsTotalsScope } from "../_lib/news-index-contract";
+import type { NewsReviewState } from "../_lib/news-review-state";
 import { formatExactCount, progressCountPresentation } from "../_lib/count-format";
 import type { VersionEvaluationStatus } from "../_lib/version-result-state";
 import LearningGraphModal from "../audit/LearningGraphModal";
@@ -458,10 +459,18 @@ type NewsIndexResponse = {
   parsed_total?: number;
   model_candidate_total?: number;
   category_counts: Record<string, number>;
+  review_state?: NewsReviewState;
+  review_state_counts?: Partial<Record<NewsReviewState, number>>;
   page: number;
   page_size: number;
   window_days?: number;
   totals_scope?: NewsTotalsScope;
+};
+
+type NewsDetailResponse = { payload: Partial<News> };
+type NewsDetailBatchResponse = {
+  items: Record<string, NewsDetailResponse>;
+  missing: string[];
 };
 
 const time = (value?: string | null) => value ? new Intl.DateTimeFormat("zh-CN", {
@@ -479,6 +488,22 @@ const outcomeReason = (codes: string[]) => codes.some(code => code.includes("CLO
       : "报价证据不完整，样本已隔离且不进入训练";
 const impulse = (value?: number | null) => value === null || value === undefined ? "—" : `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
 const NEWS_PER_PAGE = PREVIEW_NEWS_PAGE_SIZE;
+const NEWS_REVIEW_PRESENTATION: Record<NewsReviewState, {
+  label: string; description: string;
+}> = {
+  COMPLETED: {
+    label: "已完成",
+    description: "已通过语义复核，或已明确无需 AI 复核",
+  },
+  PROCESSING: {
+    label: "处理中",
+    description: "仍在排队、有限重试或等待必要证据",
+  },
+  ISOLATED: {
+    label: "已隔离",
+    description: "自动处理已停止，保留有限证据等待检查",
+  },
+};
 const CATEGORY_ORDER = ["战争/地缘", "利率/Fed", "央行购金", "通胀/就业", "增长/经济", "油价/能源", "美元/流动性", "风险情绪 / 避险", "监管/其他", "其他"];
 const SOURCE_LABELS: Record<string, string> = {
   federal_reserve_monetary: "Federal Reserve · 货币政策",
@@ -644,7 +669,7 @@ const IMPACT_STATUS_LABELS: Record<string, string> = {
   DUPLICATE_REPORT: "重复报道",
   COMMENTARY_ONLY: "评论内容",
   HISTORICAL_CONTEXT: "历史资料",
-  BACKGROUND: "背景资料",
+  BACKGROUND: "非当前影响",
   MISSING_PUBLICATION_TIME: "缺少发布时间",
 };
 const IMPACT_CLASS_LABELS: Record<string, string> = {
@@ -656,16 +681,23 @@ const IMPACT_CLASS_LABELS: Record<string, string> = {
   BACKGROUND: "背景资料",
 };
 
-function NewsRow({ row }: { row: News }) {
+function NewsRow({
+  row, prefetchedDetail,
+}: {
+  row: News;
+  prefetchedDetail?: Partial<News>;
+}) {
   const [detail, setDetail] = useState<Partial<News> | null>(
-    row.summary_zh !== undefined ? row : null,
+    row.summary_zh !== undefined ? row : (prefetchedDetail ?? null),
   );
   const [detailState, setDetailState] = useState<"idle" | "loading" | "ready" | "error">(
-    row.summary_zh !== undefined ? "ready" : "idle",
+    row.summary_zh !== undefined || prefetchedDetail ? "ready" : "idle",
   );
   const detailElement = useRef<HTMLDetailsElement>(null);
   const [detailRetryCount, setDetailRetryCount] = useState(0);
-  const current = { ...row, ...(detail ?? {}) };
+  const [showSlowLoading, setShowSlowLoading] = useState(false);
+  const resolvedDetailState = prefetchedDetail ? "ready" : detailState;
+  const current = { ...row, ...(detail ?? prefetchedDetail ?? {}) };
   const annotationStatus = row.annotation_status === "QUEUED"
     && row.model_visibility !== "NOT_YET_PARSED"
     ? "NOT_REQUIRED"
@@ -674,6 +706,12 @@ function NewsRow({ row }: { row: News }) {
     current.annotation_reason_code ?? ""
   ] ?? "无需 AI 解析";
   const impactLabel = IMPACT_STATUS_LABELS[current.impact_status ?? ""];
+  const impactClassLabel = current.impact_class
+    ? IMPACT_CLASS_LABELS[current.impact_class] ?? current.impact_class
+    : null;
+  const impactLabels = [...new Set([
+    impactLabel ?? "等待 Gemma 判断", impactClassLabel,
+  ].filter((label): label is string => Boolean(label)))];
   const translated = Boolean(
     current.original_headline && current.headline !== current.original_headline,
   );
@@ -682,13 +720,13 @@ function NewsRow({ row }: { row: News }) {
       setDetailState("error");
       return;
     }
+    setShowSlowLoading(false);
     setDetailState("loading");
     try {
-      const response = await fetch(`/api/news-content?key=${encodeURIComponent(row.detail_key)}`, {
-        cache: "no-store",
-      });
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
+      const body = await loadDashboardResource<NewsDetailResponse>(
+        `/api/news-content?key=${encodeURIComponent(row.detail_key)}`,
+        { maxAgeMs: Number.POSITIVE_INFINITY },
+      );
       setDetail(body.payload);
       setDetailState("ready");
       setDetailRetryCount(0);
@@ -697,7 +735,7 @@ function NewsRow({ row }: { row: News }) {
     }
   }, [row.detail_key]);
   const loadDetail = (event: React.SyntheticEvent<HTMLDetailsElement>) => {
-    if (!event.currentTarget.open || detailState === "loading" || detailState === "ready") return;
+    if (!event.currentTarget.open || resolvedDetailState === "loading" || resolvedDetailState === "ready") return;
     void fetchDetail();
   };
   const retryDetail = () => {
@@ -705,15 +743,20 @@ function NewsRow({ row }: { row: News }) {
     void fetchDetail();
   };
   useEffect(() => {
-    if (detailState !== "error" || detailRetryCount >= 3) return;
+    if (resolvedDetailState !== "error" || detailRetryCount >= 3) return;
     const timer = window.setTimeout(() => {
       if (!detailElement.current?.open) return;
       setDetailRetryCount(count => count + 1);
       void fetchDetail();
     }, 3000);
     return () => window.clearTimeout(timer);
-  }, [detailRetryCount, detailState, fetchDetail]);
-  return <details ref={detailElement} className="news-row" onToggle={loadDetail}>
+  }, [detailRetryCount, resolvedDetailState, fetchDetail]);
+  useEffect(() => {
+    if (resolvedDetailState !== "loading" || !detailElement.current?.open) return;
+    const timer = window.setTimeout(() => setShowSlowLoading(true), 180);
+    return () => window.clearTimeout(timer);
+  }, [resolvedDetailState]);
+  return <details ref={detailElement} className="news-row" onToggle={loadDetail} aria-busy={resolvedDetailState === "loading"}>
     <summary>
       <div className="news-row-stamp"><b>{row.category}</b><time title="媒体发布时间；列表按此时间排序">发布 {row.source_published_time ? time(row.source_published_time) : "未知"}</time><small title="系统第一次收到；决定模型当时能否看见">收到 {time(row.collector_first_seen_time)}</small><small className={`eligibility-badge eligibility-${row.model_visibility.toLowerCase().replaceAll("_", "-")}`}>{VISIBILITY_LABELS[row.model_visibility] ?? row.model_visibility.replaceAll("_", " ")}</small></div>
       <div className="news-row-title"><strong>{row.headline}</strong><small>{newsSourceLabel(row)}{translated ? " · Gemini 中文标题" : ""}{row.emerging_topic_zh ? ` · ${row.emerging_topic_zh}` : ""}</small></div>
@@ -723,8 +766,8 @@ function NewsRow({ row }: { row: News }) {
       </div>
     </summary>
     <div className="news-row-detail">
-      {detailState === "loading" ? <section className="gemini-summary summary-loading"><span>正在读取新闻详情</span><p>列表与正文详情分开保存，这里只加载你点开的这一条。</p></section>
-      : detailState === "error" ? <section className="gemini-summary summary-waiting"><span>详情暂未到达</span><p>{detailRetryCount >= 3 ? "自动重试已停止。" : "系统正在自动重试。"}<button type="button" onClick={retryDetail}>立即重试</button></p></section>
+      {resolvedDetailState === "loading" ? <section className={`news-detail-skeleton ${showSlowLoading ? "is-visible" : ""}`} aria-hidden="true"><i /><i /><i /></section>
+      : resolvedDetailState === "error" ? <section className="gemini-summary summary-waiting"><span>详情暂未到达</span><p>{detailRetryCount >= 3 ? "自动重试已停止。" : "系统正在自动重试。"}<button type="button" onClick={retryDetail}>立即重试</button></p></section>
       : <>
         <div className="news-detail-top">
           <div className={`content-proof content-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
@@ -749,7 +792,7 @@ function NewsRow({ row }: { row: News }) {
           <span>{row.content_fetch_status === "RETRYING" ? "正文自动重试中" : "等待来源正文"}</span><p>当前只有标题或短描述，不会进入模型，也不会假装已经理解内容。</p>
         </section>}
         {annotationStatus === "READY" && <section className={`gemini-summary ${current.impact_status === "ACTIVE" ? "" : "summary-queued"}`}>
-          <span>{impactLabel ?? "等待 Gemma 判断"}{current.impact_class ? ` · ${IMPACT_CLASS_LABELS[current.impact_class] ?? current.impact_class}` : ""}</span>
+          <span>{impactLabels.join(" · ")}</span>
           <p>{current.impact_reason_zh ?? "Gemma 将根据新闻内容判断它现在是否仍会影响市场。晚收到只影响可见时间，不会改写过去。"}</p>
         </section>}
         {current.event_type && <div className="news-classification"><b>{current.event_type}</b><span>鹰派 {impulse(current.hawkishness)}</span><span>通胀 {impulse(current.inflation_impulse)}</span><span>增长 {impulse(current.growth_impulse)}</span><span>地缘 {impulse(current.geopolitical_risk)}</span><span>美元 {impulse(current.usd_impulse)}</span><span>新颖 {number(current.novelty)}</span><span>置信 {number(current.confidence)}</span></div>}
@@ -768,7 +811,7 @@ export default function AuditView() {
     : "news";
   const cachedStatus = readDashboardResource<Payload>("/api/status");
   const cachedLearning = readDashboardResource<Partial<Payload>>("/api/learning");
-  const cachedNewsIndex = readDashboardResource<NewsIndexResponse>(`/api/news-index?page=1&limit=${NEWS_PER_PAGE}`);
+  const cachedNewsIndex = readDashboardResource<NewsIndexResponse>(`/api/news-index?page=1&limit=${NEWS_PER_PAGE}&review_state=COMPLETED`);
   const [payload, setPayload] = useState<Payload | null>(() => cachedStatus
     ? ({ ...cachedStatus, ...cachedLearning } as Payload)
     : null);
@@ -776,6 +819,8 @@ export default function AuditView() {
     cachedNewsIndex ?? {
       items: [], total: 0, all_total: 0, category_counts: {}, page: 1,
       page_size: NEWS_PER_PAGE, totals_scope: "LOADING",
+      review_state: "COMPLETED",
+      review_state_counts: { COMPLETED: 0, PROCESSING: 0, ISOLATED: 0 },
     }
   ));
   const [statusState, setStatusState] = useState<CurrentDataPhase>(
@@ -787,6 +832,7 @@ export default function AuditView() {
   const [statusError, setStatusError] = useState<string | null>(null);
   const [learningError, setLearningError] = useState<string | null>(null);
   const [newsError, setNewsError] = useState<string | null>(null);
+  const [newsDetails, setNewsDetails] = useState<Record<string, Partial<News>>>({});
   const [view, setView] = useState<"briefs" | "search" | "qa" | "news" | "evidence" | "stories" | "decisions" | "league" | "coverage">(initialView);
   const [briefDate, setBriefDate] = useState<string | null>(null);
   const [searchInput, setSearchInput] = useState("");
@@ -804,6 +850,29 @@ export default function AuditView() {
   const questionIdempotencyRef = useRef<string | null>(null);
   const [newsCategory, setNewsCategory] = useState("全部");
   const [newsPage, setNewsPage] = useState(1);
+  const [newsReviewState, setNewsReviewState] = useState<NewsReviewState>("COMPLETED");
+  const pageDetailKeys = newsIndex.items
+    .map(row => row.detail_key)
+    .filter((key): key is string => Boolean(key))
+    .join(",");
+  useEffect(() => {
+    if (view !== "news" || !pageDetailKeys) return;
+    let cancelled = false;
+    void loadDashboardResource<NewsDetailBatchResponse>(
+      `/api/news-content?keys=${encodeURIComponent(pageDetailKeys)}`,
+      { maxAgeMs: Number.POSITIVE_INFINITY },
+    ).then(body => {
+      if (cancelled) return;
+      setNewsDetails(currentDetails => {
+        const next = { ...currentDetails };
+        for (const [key, item] of Object.entries(body.items)) next[key] = item.payload;
+        return next;
+      });
+    }).catch(() => {
+      // Opening one row still uses the existing single-detail retry path.
+    });
+    return () => { cancelled = true; };
+  }, [pageDetailKeys, view]);
   const [graphOpen, setGraphOpen] = useState(false);
   const [graphStartTab, setGraphStartTab] = useState<"curve" | "execution">("curve");
   const fullStatusReadyRef = useRef(Boolean(cachedStatus && !cachedStatus.preview_status_summary));
@@ -852,13 +921,14 @@ export default function AuditView() {
   const refreshNews = useCallback(async (force = false) => {
     const query = new URLSearchParams({
       page: String(newsPage), limit: String(NEWS_PER_PAGE),
+      review_state: newsReviewState,
     });
     if (newsCategory !== "全部") query.set("category", newsCategory);
     const body = await loadDashboardResource<NewsIndexResponse>(`/api/news-index?${query}`, { force });
     setNewsIndex(body);
     if (body.totals_scope === "D1_ARCHIVE") fullNewsIndexReadyRef.current = true;
     setNewsError(null);
-  }, [newsCategory, newsPage]);
+  }, [newsCategory, newsPage, newsReviewState]);
 
   useEffect(() => {
     return scheduleDashboardRefresh(
@@ -892,9 +962,9 @@ export default function AuditView() {
       )),
       DASHBOARD_REFRESH_INTERVALS.news,
       "current",
-      `news-index:${newsCategory}:${newsPage}`,
+      `news-index:${newsReviewState}:${newsCategory}:${newsPage}`,
     );
-  }, [refreshNews, view, newsCategory, newsPage]);
+  }, [refreshNews, view, newsCategory, newsPage, newsReviewState]);
 
   useEffect(() => {
     if (view !== "league") return;
@@ -1062,16 +1132,23 @@ export default function AuditView() {
         || (view === "league" && learningState !== "ready")
         ? "loading" : "ready";
   const categories = useMemo(() => [
-    { name: "全部", count: archiveTotals?.readable ?? null },
+    {
+      name: "全部",
+      count: archiveTotals
+        ? newsIndex.review_state_counts?.[newsReviewState] ?? 0
+        : null,
+    },
     ...CATEGORY_ORDER.filter(name => newsIndex.category_counts[name]).map(name => ({
       name, count: archiveTotals ? newsIndex.category_counts[name] ?? 0 : null,
     })),
-  ], [archiveTotals, newsIndex.category_counts]);
+  ], [archiveTotals, newsIndex.category_counts, newsIndex.review_state_counts, newsReviewState]);
   const newsPageCount = archiveTotals
     ? Math.max(1, Math.ceil(archiveTotals.category / NEWS_PER_PAGE))
     : 1;
   const currentNewsPage = Math.min(newsPage, newsPageCount);
-  const visibleNews = newsIndex.items;
+  const visibleNews = (newsIndex.review_state ?? "COMPLETED") === newsReviewState
+    ? newsIndex.items
+    : [];
   const emptyNewsRows = Math.max(0, NEWS_PER_PAGE - visibleNews.length);
   const activeLearningModels = (payload?.learning_curves?.models ?? []).filter(
     row => row.active_rank !== null,
@@ -1302,8 +1379,28 @@ export default function AuditView() {
             <p>真正排队 {formatExactCount(payload?.annotation_queue?.queued)} · 失败后等待重试 {formatExactCount(payload?.annotation_queue?.backing_off)} · 已隔离 {formatExactCount(payload?.annotation_queue?.dead_letter)} · 等待正文 {formatExactCount(payload?.annotation_queue?.waiting_content)} · 正文不可用 {formatExactCount(payload?.annotation_queue?.unavailable_content)}</p>
           </details>
         </section>
+        <nav className="news-review-zones" aria-label="新闻审核区域">
+          {(Object.keys(NEWS_REVIEW_PRESENTATION) as NewsReviewState[]).map(state => {
+            const presentation = NEWS_REVIEW_PRESENTATION[state];
+            return <button
+              key={state}
+              type="button"
+              className={newsReviewState === state ? "active" : ""}
+              aria-pressed={newsReviewState === state}
+              onClick={() => {
+                setNewsReviewState(state);
+                setNewsCategory("全部");
+                setNewsPage(1);
+              }}
+            >
+              <span>{presentation.label}</span>
+              <b><CountValue value={archiveTotals ? newsIndex.review_state_counts?.[state] ?? 0 : null} /></b>
+              <small>{presentation.description}</small>
+            </button>;
+          })}
+        </nav>
         <section className="news-browser" aria-label="新闻自动分类">
-          <div><strong>自动分类</strong><span>{archiveTotals ? `近60天 · 按媒体发布时间排序 · 共 ${formatExactCount(readableNewsTotal)} 条可读新闻 · 语义复核完成 ${formatExactCount(parsedNewsTotal)} 条 · 当前模型候选 ${formatExactCount(modelCandidateNewsTotal)} 个事件 · 每页 ${formatExactCount(NEWS_PER_PAGE)} 条` : `正在读取近60天新闻总量 · 先显示构建时新闻内容 · 每页 ${formatExactCount(NEWS_PER_PAGE)} 条`}</span></div>
+          <div><strong>{NEWS_REVIEW_PRESENTATION[newsReviewState].label}新闻</strong><span>{archiveTotals ? `${NEWS_REVIEW_PRESENTATION[newsReviewState].description} · 按媒体发布时间排序 · 每页 ${formatExactCount(NEWS_PER_PAGE)} 条` : `正在读取近60天新闻总量 · 每页 ${formatExactCount(NEWS_PER_PAGE)} 条`}</span></div>
           <nav>
             {categories.map(category => <button key={category.name} type="button" className={newsCategory === category.name ? "active" : ""} onClick={() => { setNewsCategory(category.name); setNewsPage(1); }}>
               {category.name}{category.count !== null && <b><CountValue value={category.count} /></b>}
@@ -1315,12 +1412,13 @@ export default function AuditView() {
           {visibleNews.map(row => <NewsRow
             key={`${row.source}-${row.source_item_id}-${row.revision_number}`}
             row={row}
+            prefetchedDetail={newsDetails[row.detail_key]}
           />)}
           {Array.from({ length: emptyNewsRows }, (_, index) => <div className="news-row-placeholder" aria-hidden="true" key={`empty-news-row-${index}`} />)}
         </section>
         {newsPageCount > 1 && <nav className="news-pagination" aria-label="新闻分页">
           <button type="button" disabled={currentNewsPage === 1} onClick={() => setNewsPage(page => Math.max(1, page - 1))}>← 上一页</button>
-          <span>第 <b>{formatExactCount(currentNewsPage)}</b> / {formatExactCount(newsPageCount)} 页 · 当前分类 {formatExactCount(newsIndex.total)} 条</span>
+          <span>第 <b>{formatExactCount(currentNewsPage)}</b> / {formatExactCount(newsPageCount)} 页 · {NEWS_REVIEW_PRESENTATION[newsReviewState].label} · 当前分类 {formatExactCount(newsIndex.total)} 条</span>
           <button type="button" disabled={currentNewsPage === newsPageCount} onClick={() => setNewsPage(page => Math.min(newsPageCount, page + 1))}>下一页 →</button>
         </nav>}
       </>}

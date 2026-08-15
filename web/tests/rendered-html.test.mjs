@@ -15,6 +15,7 @@ const { statusFieldPhase } = await import("../app/_lib/current-data-provenance.t
 const { shouldPollDashboardResource } = await import("../app/_lib/dashboard-refresh-policy.ts");
 const { quoteBridgePresentation } = await import("../app/_lib/quote-bridge-state.ts");
 const { withPreviewIdentity } = await import("../app/api/_shared/preview-status.ts");
+const { newsReviewStateOf, parseNewsReviewState } = await import("../app/_lib/news-review-state.ts");
 
 test("labels version results from their durable evaluation state", () => {
   assert.equal(versionResultLabel({ oos_rows: 12, evaluation_status: "HAS_RESULTS" }, "+1.250%"), "+1.250%");
@@ -302,6 +303,7 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   const app = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
   const resources = readFileSync(new URL("../app/_lib/dashboard-resource.ts", import.meta.url), "utf8");
   assert.match(page, /function previewResources/);
+  assert.match(page, /review_state=COMPLETED/);
   assert.match(page, /previewBundle\.status/);
   assert.match(page, /previewBundle\.learning_summary/);
   const vite = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
@@ -498,12 +500,44 @@ test("falls through to read-only D1 for later Preview news and details", () => {
   assert.doesNotMatch(detail, /该新闻详情不在本次 Preview 快照中/);
 });
 
+test("separates completed, processing, and isolated news by durable review state", () => {
+  assert.equal(parseNewsReviewState(null), "COMPLETED");
+  assert.equal(parseNewsReviewState("COMPLETED"), "COMPLETED");
+  assert.equal(parseNewsReviewState("PROCESSING"), "PROCESSING");
+  assert.equal(parseNewsReviewState("ISOLATED"), "ISOLATED");
+  assert.equal(parseNewsReviewState("UNKNOWN"), null);
+
+  for (const status of ["READY", "NOT_REQUIRED"]) {
+    assert.equal(newsReviewStateOf({ annotation_status: status }), "COMPLETED");
+  }
+  for (const status of ["QUEUED", "BACKING_OFF", "WAITING_CONTENT", undefined]) {
+    assert.equal(newsReviewStateOf({ annotation_status: status }), "PROCESSING");
+  }
+  for (const status of ["DEAD_LETTER", "CONTENT_UNAVAILABLE"]) {
+    assert.equal(newsReviewStateOf({ annotation_status: status }), "ISOLATED");
+  }
+
+  const view = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  const route = readFileSync(new URL("../app/api/news-index/route.ts", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(view, /className="news-review-zones"/);
+  assert.match(view, /review_state: newsReviewState/);
+  assert.match(view, /setNewsCategory\("全部"\)/);
+  assert.match(route, /invalid review state/);
+  assert.match(route, /review_state_counts/);
+  assert.match(route, /json_extract\(payload, '\$\.annotation_status'\)/);
+  assert.match(css, /\.news-review-zones button \{[^}]*min-height:104px/);
+  assert.match(css, /overflow-x:auto; scroll-snap-type:x mandatory/);
+});
+
 test("keeps the 60-day news archive inside bounded D1 work", () => {
   const index = readFileSync(new URL("../app/api/news-index/route.ts", import.meta.url), "utf8");
   const detail = readFileSync(new URL("../app/api/news-content/route.ts", import.meta.url), "utf8");
   const migration = readFileSync(new URL("../drizzle/0007_bounded_news_archive.sql", import.meta.url), "utf8");
   assert.match(index, /body\.items\.length > 20/);
   assert.match(detail, /body\.items\.length > 20/);
+  assert.match(detail, /DETAIL_BATCH_LIMIT = 12/);
+  assert.match(detail, /WHERE detail_key IN \(\$\{placeholders\}\)/);
   assert.match(index, /ORDER BY published_time DESC/);
   assert.match(index, /impact_expires_at>\?/);
   assert.match(index, /item\.model_visibility = "IMPACT_EXPIRED"/);
@@ -514,6 +548,18 @@ test("keeps the 60-day news archive inside bounded D1 work", () => {
   assert.match(index, /s-maxage=30/);
   assert.match(migration, /news_index_published_idx/);
   assert.match(migration, /news_index_category_published_idx/);
+});
+
+test("prefetches bounded news details and avoids a fast loading-label flash", () => {
+  const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(source, /api\/news-content\?keys=/);
+  assert.match(source, /setShowSlowLoading\(true\), 180/);
+  assert.doesNotMatch(source, /正在读取新闻详情/);
+  assert.match(css, /\.news-detail-skeleton\.is-visible/);
+  assert.match(css, /prefers-reduced-motion:reduce/);
+  assert.match(source, /BACKGROUND: "非当前影响"/);
+  assert.match(source, /new Set\(\[/);
 });
 
 test("refreshes current resources without polling build-snapshot-only resources", () => {
@@ -750,7 +796,7 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /学习数据暂不可用|暂不可用/);
   assert.match(source, /页面会保留上一份成功数据并自动重试/);
   assert.doesNotMatch(source, /payload\?\.system\.online && !error/);
-  assert.match(source, /列表与正文详情分开保存/);
+  assert.match(source, /api\/news-content\?keys=/);
   assert.doesNotMatch(source, /这些新闻处理到哪里了/);
   assert.match(source, /条近60天可读新闻/);
   assert.match(source, /条无需复核/);

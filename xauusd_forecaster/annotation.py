@@ -70,14 +70,80 @@ HIGH_PRIORITY_NEWS_SOURCES = frozenset({"federal_reserve_monetary"})
 GeminiBatchCapacityExhausted = ModelGatewayCapacityExhausted
 
 
+class ModelOutputContractFailed(ValueError):
+    """Carry bounded rejected output evidence without retaining the full response."""
+
+    def __init__(
+        self, error: Exception, result: dict, *, stage: str,
+        initial_error: Exception | None = None,
+        public_message: str | None = None,
+    ) -> None:
+        serialized = json.dumps(
+            result, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            default=str,
+        )
+        selected: dict[str, object] = {}
+        limits = {
+            "headline_zh": 300,
+            "summary_zh": 800,
+            "semantic_reason_zh": 300,
+            "xauusd_relevance": 40,
+            "primary_category": 80,
+            "material_change": 80,
+            "review_priority": 40,
+        }
+        for name, limit in limits.items():
+            if name in result:
+                selected[name] = str(result.get(name) or "")[:limit]
+        evidence = result.get("supporting_evidence")
+        if isinstance(evidence, list):
+            selected["supporting_evidence"] = [
+                str(item)[:240] for item in evidence[:3]
+            ]
+        self.failure_evidence = {
+            "failure_code": "MODEL_OUTPUT_CONTRACT_FAILED",
+            "failure_stage": stage,
+            "response_hash": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+            "selected_output": selected,
+            "cause_type": type(error).__name__,
+            "cause": str(error)[:500],
+        }
+        if initial_error is not None:
+            self.failure_evidence["selected_output"]["initial_error"] = (
+                f"{type(initial_error).__name__}: {str(initial_error)[:300]}"
+            )
+        super().__init__(public_message or str(error))
+
+
 def _model_failure_details(error: Exception) -> dict[str, object]:
     """Return stable failure semantics without exposing credentials or payloads."""
     provider_status = getattr(error, "code", None)
     if isinstance(error, ModelGatewayResponseInvalid):
-        return {
+        details = {
             "failure_code": "MODEL_OUTPUT_INVALID",
             "error_type": error.cause_type,
             "error": error.cause_message[:500],
+            "provider_http_status": None,
+        }
+        if error.failure_evidence is not None:
+            details["failure_code"] = error.failure_evidence.get(
+                "failure_code", "MODEL_OUTPUT_INVALID"
+            )
+            details["failure_evidence"] = error.failure_evidence
+        return details
+    if isinstance(error, ModelOutputContractFailed):
+        return {
+            "failure_code": "MODEL_OUTPUT_CONTRACT_FAILED",
+            "error_type": error.failure_evidence["cause_type"],
+            "error": str(error)[:500],
+            "provider_http_status": None,
+            "failure_evidence": error.failure_evidence,
+        }
+    if isinstance(error, ValueError):
+        return {
+            "failure_code": "MODEL_OUTPUT_CONTRACT_FAILED",
+            "error_type": type(error).__name__,
+            "error": str(error)[:500],
             "provider_http_status": None,
         }
     if isinstance(provider_status, int):
@@ -869,14 +935,19 @@ class _GeminiRequestPool:
         if prompt_version == PROMPT_VERSION:
             # Semantic validity is independent from display-language quality.
             # Never spend a translation retry on a schema/evidence failure.
-            _validate_current_semantics(result, headline=headline, body=body)
+            try:
+                _validate_current_semantics(result, headline=headline, body=body)
+            except ValueError as error:
+                raise ModelOutputContractFailed(
+                    error, result, stage="SEMANTIC_CONTRACT",
+                ) from error
         invalid_display_fields: tuple[str, ...]
         try:
             _recover_display_fields(result, headline, body)
             _validate_chinese_result(result)
             if prompt_version == PROMPT_VERSION:
                 _validate_current_result(result, headline=headline, body=body)
-        except ValueError:
+        except ValueError as initial_display_error:
             invalid_display_fields = _invalid_chinese_display_fields(result)
             try:
                 repaired = self._repair_chinese(start_index + 1, model, result)
@@ -887,8 +958,12 @@ class _GeminiRequestPool:
                 if prompt_version == PROMPT_VERSION:
                     _validate_current_result(result, headline=headline, body=body)
             except Exception as error:
-                raise ValueError(
-                    "Gemini display repair failed; semantic annotation withheld"
+                raise ModelOutputContractFailed(
+                    error, result, stage="DISPLAY_REPAIR",
+                    initial_error=initial_display_error,
+                    public_message=(
+                        "Gemini display repair failed; semantic annotation withheld"
+                    ),
                 ) from error
         return result, exact_model
 
@@ -1082,10 +1157,15 @@ def _decode_title(envelope: dict[str, object], headline: str) -> str:
     result = _decode_model_json(envelope)
     headline_zh = str(result.get("headline_zh") or "").strip()
     translated = {"headline_zh": headline_zh}
-    _recover_display_fields(translated, headline, "")
-    headline_zh = translated["headline_zh"]
-    _require_title_numbers_preserved(headline_zh, headline)
-    _require_chinese_primary(headline_zh, "headline_zh")
+    try:
+        _recover_display_fields(translated, headline, "")
+        headline_zh = translated["headline_zh"]
+        _require_title_numbers_preserved(headline_zh, headline)
+        _require_chinese_primary(headline_zh, "headline_zh")
+    except ValueError as error:
+        raise ModelOutputContractFailed(
+            error, translated, stage="TITLE_TRANSLATION_CONTRACT",
+        ) from error
     return headline_zh
 
 
@@ -1662,6 +1742,9 @@ def _append_llm_failure(
     attempt = 1 if prior is None else int(prior["attempt_number"]) + 1
     same_error = prior is not None and prior["error_signature"] == signature
     error_code = parsed_record.get("error_code")
+    failure_code = str(
+        parsed_record.get("failure_code") or "MODEL_REQUEST_FAILED"
+    )
     transient = error_code in {429, 500, 502, 503, 504} or (
         error_type == "RuntimeError"
         and "unavailable" in normalized_error.casefold()
@@ -1669,6 +1752,11 @@ def _append_llm_failure(
     if transient:
         terminal = attempt >= 5
         delay = timedelta(minutes=(15, 60, 360, 720)[min(attempt - 1, 3)])
+    elif failure_code in {
+        "MODEL_OUTPUT_CONTRACT_FAILED", "MODEL_OUTPUT_INVALID",
+    }:
+        terminal = (same_error and attempt >= 2) or attempt >= 3
+        delay = timedelta(minutes=5)
     else:
         terminal = (same_error and attempt >= 2) or attempt >= 3
         delay = timedelta(hours=6)
@@ -1681,6 +1769,7 @@ def _append_llm_failure(
             str(attempt), signature,
         ]
     )
+    failure_evidence = parsed_record.get("failure_evidence")
     ledger.append_llm_failure(
         {
             "failure_id": str(uuid.uuid5(uuid.NAMESPACE_URL, identity)),
@@ -1698,6 +1787,10 @@ def _append_llm_failure(
             "failed_at": failed_at,
             "next_retry_at": next_retry,
             "is_terminal": terminal,
+            "failure_evidence": (
+                {**failure_evidence, "failure_code": failure_code}
+                if isinstance(failure_evidence, dict) else None
+            ),
         }
     )
     return {
@@ -1705,7 +1798,7 @@ def _append_llm_failure(
         "attempt_number": attempt,
         "next_retry_at": next_retry.isoformat() if next_retry else None,
         "is_terminal": terminal,
-        "failure_code": parsed_record.get("failure_code") or "MODEL_REQUEST_FAILED",
+        "failure_code": failure_code,
         "provider_http_status": parsed_record.get("provider_http_status"),
     }
 

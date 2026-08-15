@@ -5,6 +5,9 @@ import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/previ
 
 export const dynamic = "force-dynamic";
 
+const DETAIL_KEY_PATTERN = /^[a-f0-9]{64}$/;
+const DETAIL_BATCH_LIMIT = 12;
+
 type NewsDetailItem = {
   detail_key?: unknown;
   detail_hash?: unknown;
@@ -12,8 +15,45 @@ type NewsDetailItem = {
 };
 
 export async function GET(request: Request) {
-  const detailKey = new URL(request.url).searchParams.get("key");
-  if (!detailKey || !/^[a-f0-9]{64}$/.test(detailKey)) {
+  const query = new URL(request.url).searchParams;
+  const detailKeys = [...new Set(
+    (query.get("keys") ?? "").split(",").map(key => key.trim()).filter(Boolean),
+  )];
+  if (detailKeys.length) {
+    if (
+      detailKeys.length > DETAIL_BATCH_LIMIT
+      || detailKeys.some(key => !DETAIL_KEY_PATTERN.test(key))
+    ) {
+      return NextResponse.json({ error: "invalid news detail keys" }, { status: 400 });
+    }
+    const items: Record<string, { detail_hash?: unknown; payload?: unknown }> = {};
+    if (previewBundle) {
+      for (const key of detailKeys) {
+        if (previewBundle.news_details[key]) items[key] = previewBundle.news_details[key];
+      }
+    }
+    const missing = detailKeys.filter(key => !items[key]);
+    const binding = env.DB as D1Database | undefined;
+    if (missing.length && binding) {
+      const placeholders = missing.map(() => "?").join(",");
+      const rows = await binding.prepare(
+        `SELECT detail_key, payload, detail_hash FROM news_details
+         WHERE detail_key IN (${placeholders})`,
+      ).bind(...missing).all<{ detail_key: string; payload: string; detail_hash: string }>();
+      for (const row of rows.results) {
+        items[row.detail_key] = {
+          detail_hash: row.detail_hash,
+          payload: JSON.parse(row.payload),
+        };
+      }
+    }
+    return NextResponse.json({ items, missing: detailKeys.filter(key => !items[key]) }, {
+      headers: { "Cache-Control": "private, max-age=300" },
+    });
+  }
+
+  const detailKey = query.get("key");
+  if (!detailKey || !DETAIL_KEY_PATTERN.test(detailKey)) {
     return NextResponse.json({ error: "invalid news detail key" }, { status: 400 });
   }
   if (previewBundle) {

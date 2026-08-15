@@ -2,6 +2,12 @@ import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
 import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
+import {
+  NEWS_REVIEW_STATES,
+  newsReviewStateOf,
+  parseNewsReviewState,
+  type NewsReviewState,
+} from "../../_lib/news-review-state";
 
 export const dynamic = "force-dynamic";
 
@@ -15,6 +21,7 @@ type NewsIndexItem = {
   model_visibility?: unknown;
   impact_expires_at?: unknown;
   mirror_contract?: unknown;
+  annotation_status?: unknown;
   [key: string]: unknown;
 };
 
@@ -22,22 +29,41 @@ const pageRequest = (request: Request) => {
   const query = new URL(request.url).searchParams;
   const page = Math.max(1, Number.parseInt(query.get("page") ?? "1", 10) || 1);
   const pageSize = Math.min(50, Math.max(1, Number.parseInt(query.get("limit") ?? "12", 10) || 12));
-  return { page, pageSize, category: query.get("category")?.trim() ?? "" };
+  return {
+    page, pageSize,
+    category: query.get("category")?.trim() ?? "",
+    reviewState: parseNewsReviewState(query.get("review_state")),
+  };
+};
+
+const REVIEW_STATE_SQL: Record<NewsReviewState, string> = {
+  COMPLETED: "json_extract(payload, '$.annotation_status') IN ('READY','NOT_REQUIRED')",
+  ISOLATED: "json_extract(payload, '$.annotation_status') IN ('DEAD_LETTER','CONTENT_UNAVAILABLE')",
+  PROCESSING: "COALESCE(json_extract(payload, '$.annotation_status'), '') NOT IN ('READY','NOT_REQUIRED','DEAD_LETTER','CONTENT_UNAVAILABLE')",
 };
 
 export async function GET(request: Request) {
-  const { page, pageSize, category } = pageRequest(request);
+  const { page, pageSize, category, reviewState } = pageRequest(request);
+  if (reviewState === null) {
+    return NextResponse.json({ error: "invalid review state" }, { status: 400 });
+  }
   // D1 is the source of truth even on the first Preview page. Returning the
   // immutable build bundle here freezes the visible total at build time while
   // the bounded archive continues to grow.
   try {
     const binding = env.DB as D1Database | undefined;
     if (binding) {
-      const where = category ? "WHERE category = ?" : "";
-      const bindValues = category ? [category] : [];
+      const conditions = [REVIEW_STATE_SQL[reviewState]];
+      const bindValues: string[] = [];
+      if (category) {
+        conditions.push("category = ?");
+        bindValues.push(category);
+      }
+      const where = `WHERE ${conditions.join(" AND ")}`;
+      const reviewWhere = `WHERE ${REVIEW_STATE_SQL[reviewState]}`;
       const offset = (page - 1) * pageSize;
       const now = new Date().toISOString();
-      const [rows, totalRow, totalsRow, categoryRows] = await Promise.all([
+      const [rows, totalRow, totalsRow, categoryRows, reviewRows] = await Promise.all([
         binding.prepare(
           `SELECT payload FROM news_index ${where}
            ORDER BY published_time DESC,
@@ -53,8 +79,16 @@ export async function GET(request: Request) {
            FROM news_index`,
         ).bind(now).first<{ count: number; parsed: number; model_candidate: number }>(),
         binding.prepare(
-          `SELECT category, count(*) AS count FROM news_index GROUP BY category`,
+          `SELECT category, count(*) AS count FROM news_index ${reviewWhere}
+           GROUP BY category`,
         ).all<{ category: string; count: number }>(),
+        binding.prepare(
+          `SELECT CASE
+             WHEN json_extract(payload, '$.annotation_status') IN ('READY','NOT_REQUIRED') THEN 'COMPLETED'
+             WHEN json_extract(payload, '$.annotation_status') IN ('DEAD_LETTER','CONTENT_UNAVAILABLE') THEN 'ISOLATED'
+             ELSE 'PROCESSING' END AS review_state, count(*) AS count
+           FROM news_index GROUP BY review_state`,
+        ).all<{ review_state: NewsReviewState; count: number }>(),
       ]);
       const payload = {
         items: rows.results.map(row => {
@@ -76,6 +110,13 @@ export async function GET(request: Request) {
         model_candidate_total: totalsRow?.model_candidate ?? 0,
         category_counts: Object.fromEntries(
           categoryRows.results.map(row => [row.category, row.count]),
+        ),
+        review_state: reviewState,
+        review_state_counts: Object.fromEntries(
+          NEWS_REVIEW_STATES.map(state => [
+            state,
+            reviewRows.results.find(row => row.review_state === state)?.count ?? 0,
+          ]),
         ),
         page,
         page_size: pageSize,
@@ -116,12 +157,15 @@ export async function GET(request: Request) {
         const rightTime = String(right.source_published_time ?? right.collector_first_seen_time ?? "");
         return rightTime.localeCompare(leftTime);
       });
+      const stateItems = all.filter(row => newsReviewStateOf(row) === reviewState);
       const categoryCounts = Object.fromEntries(
-        [...new Set(all.map(row => String(row.category ?? "其他")))].map(name => [
-          name, all.filter(row => String(row.category ?? "其他") === name).length,
+        [...new Set(stateItems.map(row => String(row.category ?? "其他")))].map(name => [
+          name, stateItems.filter(row => String(row.category ?? "其他") === name).length,
         ]),
       );
-      const filtered = category ? all.filter(row => row.category === category) : all;
+      const filtered = category
+        ? stateItems.filter(row => row.category === category)
+        : stateItems;
       const parsedTotal = all.filter(row => typeof row.parsed_at === "string" && row.parsed_at.length > 0).length;
       const modelCandidateTotal = all.filter(row => row.model_visibility === "MODEL_VISIBLE").length;
       const offset = (page - 1) * pageSize;
@@ -133,6 +177,12 @@ export async function GET(request: Request) {
         parsed_total: parsedTotal,
         model_candidate_total: modelCandidateTotal,
         category_counts: categoryCounts,
+        review_state: reviewState,
+        review_state_counts: Object.fromEntries(
+          NEWS_REVIEW_STATES.map(state => [
+            state, all.filter(row => newsReviewStateOf(row) === state).length,
+          ]),
+        ),
         page,
         page_size: pageSize,
         totals_scope: "RECENT_WINDOW",
