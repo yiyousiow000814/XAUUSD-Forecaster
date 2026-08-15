@@ -14,7 +14,7 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "pypdf>=5.0",
     "googlenewsdecoder==0.1.7",
-    "requests==2.32.3",
+    "requests==2.33.0",
 ]
 
 [tool.pytest.ini_options]
