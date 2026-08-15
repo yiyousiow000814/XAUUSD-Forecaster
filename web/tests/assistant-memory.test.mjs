@@ -672,12 +672,17 @@ test("historical context reports incomplete indexing without claiming false reca
     ownerId: owner,
     conversationId: current.conversationId,
     currentUserMessageId: current.messageIds[0],
+    historicalMemory: [{
+      content: "caller-supplied poison must never enter authoritative memory",
+      canonical_message_ids: [current.messageIds[0]],
+    }],
   });
   const history = context.layers[2];
   assert.deepEqual(history.items, []);
   assert.equal(history.retrieval.index_complete, false);
   assert.equal(history.retrieval.pending_messages, historical.messageIds.length);
   assert.equal(history.retrieval.indexed_messages, 0);
+  assert.doesNotMatch(JSON.stringify(history), /caller-supplied poison/);
 });
 
 test("memory indexing rejects forged derivations and commits exact canonical terms atomically", async () => {
