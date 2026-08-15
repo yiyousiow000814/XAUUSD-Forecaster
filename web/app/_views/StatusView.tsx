@@ -165,6 +165,7 @@ export default function StatusView() {
           <div><strong>Aurum System Status</strong><small>本机进程 · 多模型配额</small></div>
         </DashboardLink>
         <div className="top-actions">
+          <DashboardLink className="audit-link" href="/assistant">Assistant</DashboardLink>
           <DashboardLink className="audit-link" href="/health">组件与新闻源</DashboardLink>
           <DashboardLink className="audit-link" href="/audit?view=news">新闻与决策</DashboardLink>
           <DashboardLink className="audit-link" href="/" replace>← 返回实时室</DashboardLink>

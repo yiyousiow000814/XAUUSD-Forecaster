@@ -3,10 +3,11 @@
 import type { ReactNode } from "react";
 import { useDashboardNavigation } from "./DashboardNavigation";
 
-export type MobileDashboardSection = "live" | "audit" | "learning" | "status" | "health";
+export type MobileDashboardSection = "live" | "assistant" | "audit" | "learning" | "status" | "health";
 
 const SECTIONS: Array<{ href: string; label: string; value: MobileDashboardSection }> = [
   { href: "/", label: "实时室", value: "live" },
+  { href: "/assistant", label: "Assistant 私有分析", value: "assistant" },
   { href: "/audit?view=news", label: "新闻与证据", value: "audit" },
   { href: "/audit?view=league", label: "学习曲线", value: "learning" },
   { href: "/status", label: "AI 模型用量", value: "status" },

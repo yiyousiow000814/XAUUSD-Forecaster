@@ -19,6 +19,17 @@ export type AssistantTitleJobStatus =
   | "COMPLETED"
   | "FAILED"
   | "CANCELLED";
+export const ASSISTANT_ACTIVE_TURN_STATUSES = ["PENDING", "PROCESSING"] as const;
+export const ASSISTANT_ACTIVE_TURN_STATUSES_SQL = ASSISTANT_ACTIVE_TURN_STATUSES
+  .map(status => `'${status}'`)
+  .join(",");
+
+export type PublicAssistantActiveTurn = {
+  id: string;
+  status: typeof ASSISTANT_ACTIVE_TURN_STATUSES[number];
+  event_sequence: number;
+  created_at: string;
+};
 
 export type PublicAssistantConversation = {
   id: string;
@@ -30,6 +41,7 @@ export type PublicAssistantConversation = {
   summary_version: number;
   status: AssistantConversationStatus;
   title_job_status: AssistantTitleJobStatus | null;
+  active_turn: PublicAssistantActiveTurn | null;
 };
 
 export type PublicAssistantMessage = {
@@ -172,6 +184,12 @@ export function publicAssistantConversation(
     title_job_status: typeof jobStatus === "string"
       ? jobStatus as AssistantTitleJobStatus
       : null,
+    active_turn: typeof row.active_turn_id === "string" ? {
+      id: row.active_turn_id,
+      status: String(row.active_turn_status) as PublicAssistantActiveTurn["status"],
+      event_sequence: Number(row.active_turn_event_sequence),
+      created_at: String(row.active_turn_created_at),
+    } : null,
   };
 }
 
@@ -190,8 +208,18 @@ export function publicAssistantMessage(
 
 const conversationSelect = `SELECT c.*,
   (SELECT j.status FROM assistant_title_jobs j
-   WHERE j.id=c.pending_title_job_id) AS title_job_status
-  FROM assistant_conversations c`;
+   WHERE j.id=c.pending_title_job_id) AS title_job_status,
+  active_turn.id AS active_turn_id,
+  active_turn.status AS active_turn_status,
+  active_turn.event_sequence AS active_turn_event_sequence,
+  active_turn.created_at AS active_turn_created_at
+  FROM assistant_conversations c
+  LEFT JOIN assistant_turn_jobs active_turn ON active_turn.id=(
+    SELECT candidate.id FROM assistant_turn_jobs candidate
+    WHERE candidate.conversation_id=c.id
+      AND candidate.status IN (${ASSISTANT_ACTIVE_TURN_STATUSES_SQL})
+    ORDER BY candidate.created_at DESC,candidate.id DESC LIMIT 1
+  )`;
 
 export async function listOwnerAssistantConversations(
   binding: D1Database,
@@ -291,7 +319,9 @@ export async function renameOwnerAssistantConversation(
     ).bind(title, ownerId, conversationId),
   ]);
   const row = results.at(-1)?.results?.[0];
-  return row ? publicAssistantConversation(row) : null;
+  return row
+    ? getOwnerAssistantConversation(binding, ownerId, conversationId)
+    : null;
 }
 
 export async function setOwnerAssistantConversationArchived(

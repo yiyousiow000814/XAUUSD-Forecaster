@@ -71,6 +71,9 @@ When an Assistant surface exists, a branch Preview may use explicitly labeled
 synthetic fixtures or an immutable build snapshot to review layout, streaming
 presentation, and content blocks. It cannot submit model-consuming work, create
 production conversations, or present fixture output as a live grounded answer.
+The current workbench fixture supports local conversation selection,
+older-message reveal, and collapsed progress-trace review. All mutation controls
+remain disabled and fixture data is never submitted to an API.
 
 ## Semantic display states
 
@@ -119,8 +122,9 @@ product requirement.
 - Production-precomputed storylines may support presentation review, but they do
   not prove a changed branch grouping policy. Such a change requires complete
   independent-event replay input rather than reverse-engineering grouped output.
-- Assistant presentation may use labeled synthetic or frozen fixtures; its
-  model-consuming and conversation-mutating routes remain unavailable.
+- Assistant presentation may use a visibly labeled branch-owned fixture for
+  local selection, older-message reveal, and progress-trace review; its
+  composer and every conversation mutation remain unavailable.
 - `/api/assistant-chat` returns a labeled synthetic empty turn or finite empty
   `assistant.event.v1` stream for reads. POST and machine-claim modes reject
   before identity, body, D1, queue, or model work.

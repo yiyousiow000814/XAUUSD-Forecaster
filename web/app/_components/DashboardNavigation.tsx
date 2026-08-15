@@ -2,7 +2,7 @@
 
 import { createContext, useContext, type ReactNode } from "react";
 
-export type DashboardRoom = "live" | "status" | "health" | "audit";
+export type DashboardRoom = "live" | "assistant" | "status" | "health" | "audit";
 export type AuditViewName = "news" | "evidence" | "stories" | "decisions" | "league" | "coverage";
 
 export type DashboardLocation = {

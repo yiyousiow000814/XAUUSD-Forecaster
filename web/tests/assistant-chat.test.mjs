@@ -125,6 +125,17 @@ test("chat admission is atomic, owner scoped, capacity bounded, and replay safe"
   assert.equal(created.kind, "CREATED");
   assert.equal(created.item.status, "PENDING");
   assert.equal(created.item.event_sequence, 1);
+  assert.deepEqual(
+    (await getOwnerAssistantConversation(
+      database, owner, created.item.conversation_id,
+    )).active_turn,
+    {
+      id: created.item.id,
+      status: "PENDING",
+      event_sequence: 1,
+      created_at: atSeconds(0).toISOString(),
+    },
+  );
 
   const replay = await createTurn(database);
   assert.equal(replay.kind, "EXISTING");
@@ -394,6 +405,7 @@ test("answer completion atomically persists the canonical final and terminal str
   );
   assert.equal(conversation.last_activity_at, atSeconds(2).toISOString());
   assert.equal(conversation.title_job_status, "PENDING");
+  assert.equal(conversation.active_turn, null);
   assert.equal(database.database.prepare(
     "SELECT count(*) AS n FROM assistant_title_jobs WHERE conversation_id=?",
   ).get(claim.conversation_id).n, 1);

@@ -1,0 +1,241 @@
+import type { AssistantEventEnvelope } from "../api/_shared/assistant-events";
+import type {
+  AssistantConversation,
+  AssistantMessage,
+  AssistantMessageCursor,
+} from "./assistant-chat-client";
+
+export const ASSISTANT_PREVIEW_FIXTURE_LABEL =
+  "交互预览样本 · 不是真实会话 · 不调用模型";
+
+const modelProvenance = {
+  kind: "ASSISTANT_CHAT",
+  model_version: "gemma-4-31b-it-preview-fixture",
+  agent: {
+    model_routing: [{ reasoning_class: "TOOL_HEAVY" }],
+    tool_execution: [[{
+      name: "search_news_v1",
+      status: "SUCCEEDED",
+      evidence_ids: ["preview-evidence-1", "preview-evidence-2"],
+    }]],
+    evidence_ids: ["preview-evidence-1", "preview-evidence-2"],
+  },
+};
+
+export const assistantPreviewConversations: AssistantConversation[] = [
+  {
+    id: "conversation-preview-rates",
+    title: "美联储利率与黄金重定价",
+    title_source: "AI",
+    created_at: "2026-08-15T09:30:00.000Z",
+    last_activity_at: "2026-08-15T10:03:00.000Z",
+    archived_at: null,
+    summary_version: 1,
+    status: "ACTIVE",
+    title_job_status: null,
+    active_turn: null,
+  },
+  {
+    id: "conversation-preview-opening",
+    title: "周末开盘前的证据清单",
+    title_source: "USER",
+    created_at: "2026-08-14T14:00:00.000Z",
+    last_activity_at: "2026-08-14T14:04:00.000Z",
+    archived_at: null,
+    summary_version: 0,
+    status: "ACTIVE",
+    title_job_status: null,
+    active_turn: null,
+  },
+  {
+    id: "conversation-preview-inflation",
+    title: "CPI 公布后的反常上涨",
+    title_source: "PROVISIONAL",
+    created_at: "2026-08-13T12:30:00.000Z",
+    last_activity_at: "2026-08-13T12:33:00.000Z",
+    archived_at: null,
+    summary_version: 0,
+    status: "ACTIVE",
+    title_job_status: "PENDING",
+    active_turn: null,
+  },
+];
+
+const previewMessages: Record<string, AssistantMessage[]> = {
+  "conversation-preview-rates": [
+    {
+      id: "message-preview-user-1",
+      conversation_id: "conversation-preview-rates",
+      role: "USER",
+      content: "请结合最新已收录新闻，解释为什么实际利率变化会影响黄金。",
+      created_at: "2026-08-15T10:00:00.000Z",
+      provenance: { kind: "PREVIEW_FIXTURE" },
+    },
+    {
+      id: "message-preview-assistant-1",
+      conversation_id: "conversation-preview-rates",
+      role: "ASSISTANT",
+      content: "实际利率是持有无息黄金的机会成本。已收录证据显示，市场在重新评估政策利率维持高位的时间；当实际利率预期上升时，美元与短端收益率通常同步走强，黄金因此承压。\n\n这不是交易指令。当前更值得观察的是实际利率、美元与黄金是否继续同向重定价，以及新的政策证据是否在决策时间前已经被系统收到。",
+      created_at: "2026-08-15T10:03:00.000Z",
+      provenance: modelProvenance,
+    },
+  ],
+  "conversation-preview-opening": [
+    {
+      id: "message-preview-user-2",
+      conversation_id: "conversation-preview-opening",
+      role: "USER",
+      content: "周末开盘前，我应该优先核对哪些证据？",
+      created_at: "2026-08-14T14:00:00.000Z",
+      provenance: { kind: "PREVIEW_FIXTURE" },
+    },
+    {
+      id: "message-preview-assistant-2",
+      conversation_id: "conversation-preview-opening",
+      role: "ASSISTANT",
+      content: "优先核对三组有明确时间戳的证据：最新地缘事件是否有独立来源确认、美元与实际利率是否在休市前已经重定价、以及开盘后点差是否恢复到可比较范围。信息不足时应保持 WAIT，而不是把周末叙事当成已经可交易的事实。",
+      created_at: "2026-08-14T14:04:00.000Z",
+      provenance: { ...modelProvenance, model_version: "gemma-4-31b-it-preview-fixture" },
+    },
+  ],
+  "conversation-preview-inflation": [
+    {
+      id: "message-preview-user-3",
+      conversation_id: "conversation-preview-inflation",
+      role: "USER",
+      content: "CPI 高于预期，为什么黄金当时仍然上涨？",
+      created_at: "2026-08-13T12:30:00.000Z",
+      provenance: { kind: "PREVIEW_FIXTURE" },
+    },
+    {
+      id: "message-preview-assistant-3",
+      conversation_id: "conversation-preview-inflation",
+      role: "ASSISTANT",
+      content: "单一数据方向不足以解释价格。需要同时检查市场此前定价、分项修订、美元反应、实际利率与避险需求；如果这些链路没有同一决策时点的完整证据，就只能标记为解释不足。",
+      created_at: "2026-08-13T12:33:00.000Z",
+      provenance: modelProvenance,
+    },
+  ],
+};
+
+export const assistantPreviewOlderMessages: Record<string, AssistantMessage[]> = {
+  "conversation-preview-rates": [
+    {
+      id: "message-preview-old-user",
+      conversation_id: "conversation-preview-rates",
+      role: "USER",
+      content: "先记住：只使用系统在决策时间前已经收到的证据。",
+      created_at: "2026-08-15T09:30:00.000Z",
+      provenance: { kind: "PREVIEW_FIXTURE" },
+    },
+    {
+      id: "message-preview-old-assistant",
+      conversation_id: "conversation-preview-rates",
+      role: "ASSISTANT",
+      content: "明白。后续分析会保留收到时间、来源与证据编号，不会用事后材料回填。",
+      created_at: "2026-08-15T09:31:00.000Z",
+      provenance: modelProvenance,
+    },
+  ],
+};
+
+export const assistantPreviewCursor: Record<string, AssistantMessageCursor | null> = {
+  "conversation-preview-rates": {
+    before_created_at: "2026-08-15T10:00:00.000Z",
+    before_id: "message-preview-user-1",
+  },
+  "conversation-preview-opening": null,
+  "conversation-preview-inflation": null,
+};
+
+export function assistantPreviewMessages(conversationId: string) {
+  return structuredClone(previewMessages[conversationId] ?? []);
+}
+
+const eventBase = {
+  protocol: "assistant.event.v1" as const,
+  conversation_id: "conversation-preview-rates",
+  user_turn_id: "turn-preview-rates",
+  message_id: null,
+};
+
+export const assistantPreviewEvents: AssistantEventEnvelope[] = [
+  {
+    ...eventBase,
+    event_id: "event-preview-1",
+    sequence: 1,
+    type: "conversation.started",
+    occurred_at: "2026-08-15T10:00:00.000Z",
+    payload: {},
+  },
+  {
+    ...eventBase,
+    event_id: "event-preview-2",
+    sequence: 2,
+    type: "reasoning.started",
+    occurred_at: "2026-08-15T10:00:00.010Z",
+    payload: { reasoning_class: "TOOL_HEAVY" },
+  },
+  {
+    ...eventBase,
+    event_id: "event-preview-3",
+    sequence: 3,
+    type: "tool.started",
+    occurred_at: "2026-08-15T10:00:00.020Z",
+    payload: {
+      call_id: "call-preview-news",
+      tool_name: "search_news_v1",
+      tool_version: "v1",
+    },
+  },
+  {
+    ...eventBase,
+    event_id: "event-preview-4",
+    sequence: 4,
+    type: "tool.completed",
+    occurred_at: "2026-08-15T10:00:00.030Z",
+    payload: {
+      call_id: "call-preview-news",
+      tool_name: "search_news_v1",
+      status: "SUCCEEDED",
+      result_sha256: "a".repeat(64),
+      evidence_count: 2,
+    },
+  },
+  {
+    ...eventBase,
+    event_id: "event-preview-5",
+    sequence: 5,
+    type: "answer.started",
+    occurred_at: "2026-08-15T10:00:00.040Z",
+    payload: {},
+  },
+  {
+    ...eventBase,
+    event_id: "event-preview-6",
+    sequence: 6,
+    type: "answer.delta",
+    occurred_at: "2026-08-15T10:00:00.050Z",
+    payload: { text: "实际利率是持有无息黄金的机会成本。" },
+  },
+  {
+    ...eventBase,
+    event_id: "event-preview-7",
+    message_id: "message-preview-assistant-1",
+    sequence: 7,
+    type: "answer.completed",
+    occurred_at: "2026-08-15T10:03:00.000Z",
+    payload: {
+      content_sha256: "b".repeat(64),
+      evidence_ids: ["preview-evidence-1", "preview-evidence-2"],
+    },
+  },
+  {
+    ...eventBase,
+    event_id: "event-preview-8",
+    sequence: 8,
+    type: "conversation.completed",
+    occurred_at: "2026-08-15T10:03:00.010Z",
+    payload: {},
+  },
+];
