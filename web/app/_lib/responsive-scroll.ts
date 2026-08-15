@@ -5,5 +5,5 @@ export const settleResponsiveScroll = (
   desktopTop: number,
 ) => {
   const top = isPhoneViewport() ? 0 : desktopTop;
-  window.requestAnimationFrame(() => scroll({ top, left: 0, behavior: "instant" }));
+  scroll({ top, left: 0, behavior: "instant" });
 };

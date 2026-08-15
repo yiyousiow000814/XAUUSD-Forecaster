@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import DashboardLink from "../_components/DashboardLink";
 import MobileDashboardNav, { type MobileDashboardSection } from "../_components/MobileDashboardNav";
@@ -842,6 +842,7 @@ export default function AuditView() {
   const [newsError, setNewsError] = useState<string | null>(null);
   const [newsDetails, setNewsDetails] = useState<Record<string, Partial<News>>>({});
   const [view, setView] = useState<AuditDeskView>(initialView);
+  const pendingScrollTop = useRef<number | null>(null);
   const [briefDate, setBriefDate] = useState<string | null>(null);
   const [searchInput, setSearchInput] = useState("");
   const [searchTimeField, setSearchTimeField] = useState<"published" | "received">("published");
@@ -999,11 +1000,16 @@ export default function AuditView() {
   };
 
   const selectView = (next: AuditDeskView) => {
-    const currentScrollTop = window.scrollY;
+    pendingScrollTop.current = window.scrollY;
     setView(next);
     window.history.replaceState(null, "", `/?room=audit&view=${next}`);
-    settleResponsiveScroll(options => window.scrollTo(options), currentScrollTop);
   };
+
+  useLayoutEffect(() => {
+    if (pendingScrollTop.current === null) return;
+    settleResponsiveScroll(options => window.scrollTo(options), pendingScrollTop.current!);
+    pendingScrollTop.current = null;
+  }, [view]);
 
   const runNewsSearch = async (page = 1, applied?: NewsSearchResponse) => {
     const query = applied?.query ?? searchInput.trim();

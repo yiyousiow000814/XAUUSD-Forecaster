@@ -136,11 +136,16 @@ export default function LearningGraphModal({
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
+  const pendingScrollTop = useRef<number | null>(null);
   const selectTab = (nextTab: GraphTab) => {
-    const currentScrollTop = bodyRef.current?.scrollTop ?? 0;
+    pendingScrollTop.current = bodyRef.current?.scrollTop ?? 0;
     setTab(nextTab);
-    settleResponsiveScroll(options => bodyRef.current?.scrollTo(options), currentScrollTop);
   };
+  useLayoutEffect(() => {
+    if (pendingScrollTop.current === null) return;
+    settleResponsiveScroll(options => bodyRef.current?.scrollTo(options), pendingScrollTop.current!);
+    pendingScrollTop.current = null;
+  }, [tab]);
   useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
   useEffect(() => {
     if (!open) return;

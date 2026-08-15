@@ -1,6 +1,6 @@
 "use client";
 
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import LiveRoomView from "../_views/LiveRoomView";
 import { primeDashboardResources } from "../_lib/dashboard-resource";
 import { settleResponsiveScroll } from "../_lib/responsive-scroll";
@@ -62,6 +62,7 @@ export default function DashboardApp({
   primeDashboardResources(initialResources);
   const [location, setLocation] = useState(initialLocation);
   const navigationSequence = useRef(0);
+  const pendingScrollTop = useRef<number | null>(null);
 
   const preload = useCallback((href: string) => {
     const destination = parseDashboardUrl(new URL(href, window.location.href));
@@ -83,9 +84,15 @@ export default function DashboardApp({
     const nextHref = canonicalHref(destination);
     if (replace) window.history.replaceState(null, "", nextHref);
     else window.history.pushState(null, "", nextHref);
+    pendingScrollTop.current = currentScrollTop;
     setLocation(destination);
-    settleResponsiveScroll(options => window.scrollTo(options), currentScrollTop);
   }, []);
+
+  useLayoutEffect(() => {
+    if (pendingScrollTop.current === null) return;
+    settleResponsiveScroll(options => window.scrollTo(options), pendingScrollTop.current!);
+    pendingScrollTop.current = null;
+  }, [location]);
 
   useEffect(() => {
     void loadStatusView();
