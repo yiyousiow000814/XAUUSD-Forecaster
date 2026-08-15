@@ -3,9 +3,9 @@
 ## Snapshot scope
 
 This status is maintained as the Assistant architecture and its bounded
-implementation PRs land. PR #103 established the contracts, and PR #20 is now
-merged on `main`. The shared-retrieval row describes the post-merge state of
-PR #21; an unmerged branch does not alter the copy visible on `main`.
+implementation PRs land. PR #103 established the contracts, and PRs #20 and
+#21 are merged on `main`. The Q&A rows describe the post-merge state carried by
+PR #22; an unmerged branch does not alter the copy visible on `main`.
 
 Status values have precise meanings:
 
@@ -23,8 +23,8 @@ Status values have precise meanings:
 | Capability | Contract | Current status | Evidence and limitation |
 | --- | --- | --- | --- |
 | Daily Brief | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | PR #20 is merged: complete point-in-time state fingerprinting, bounded candidates, durable debounce, capacity defer, append-only output, and evidence validation are covered. A Preview backed by an older public snapshot may still show the explicit empty state. |
-| Shared news retrieval | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | PR #21 provides one reusable D1/Preview service with bounded Chinese/multi-token queries, published/received ranges, metadata filters, stable evidence IDs, deterministic pagination, and family-level tests. Search is the first caller; Q&A adoption remains PR #22. |
-| Evidence-grounded Q&A | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `NOT_IMPLEMENTED` | Exists only in open PR #22. |
+| Shared news retrieval | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | PR #21 is merged. Search and PR #22 Q&A reuse one D1 service with bounded Chinese/multi-token queries, published/received ranges, metadata filters, stable evidence IDs, deterministic ordering, and explicit provenance. |
+| Evidence-grounded Q&A | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | PR #22 provides authenticated asynchronous single-question Q&A through shared retrieval, a compact packet, the metered gateway, strict cited-ID validation, and persisted model/prompt/retrieval provenance. It is not a general agent or multi-turn chat. |
 | Conversation persistence | [State](../contracts/ASSISTANT_STATE.md) | `NOT_IMPLEMENTED` | No Forecaster-owned Conversation/Message store exists. |
 | Conversation title | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `NOT_IMPLEMENTED` | No provisional, AI, manual, or regeneration lifecycle exists. |
 | Conversation ordering | [State](../contracts/ASSISTANT_STATE.md) | `NOT_IMPLEMENTED` | No `last_activity_at` conversation list exists. |
@@ -35,18 +35,18 @@ Status values have precise meanings:
 | Model routing | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `PARTIAL` | `ai_task_registry.py` declares routes for existing news AI tasks; there is no Assistant router. |
 | Multi-model routing | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `PARTIAL` | Existing annotation/title routes have declared fallbacks; mixed Assistant 31B/26B policy is absent. |
 | Multi-credential routing | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `PARTIAL` | The news scheduler ranks independent accounts; Assistant tasks are not integrated. |
-| TPM/RPM/RPD accounting | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `PARTIAL` | Durable news-AI accounting exists at account/model scope; no Assistant admission path exists. |
-| Unified model gateway | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | `model_gateway.py` is the single metered Google generation boundary used by the current news chain. |
+| TPM/RPM/RPD accounting | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | Q&A reserves interactive model use through the durable account/model scheduler accountant. A general Assistant capacity router and mixed-model policy remain future work. |
+| Unified model gateway | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | `model_gateway.py` is the single metered Google generation boundary used by the news semantic chain, Daily Brief, and Q&A. |
 | Function calling | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `NOT_IMPLEMENTED` | No typed Assistant tool loop exists. |
 | Parallel tool execution | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `NOT_IMPLEMENTED` | No Assistant tool planner/executor exists. |
 | Streaming | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `NOT_IMPLEMENTED` | No versioned Assistant event transport exists. |
 | Commentary/progress | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `NOT_IMPLEMENTED` | No real tool-event progress surface exists. |
 | Rich UI blocks | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `NOT_IMPLEMENTED` | No validated Assistant content-block protocol exists. |
-| Human authentication | [Security](../contracts/ASSISTANT_SECURITY.md) | `PARTIAL` | A Sites identity helper exists, but no owner-authorized model-consuming Assistant endpoint exists. |
+| Human authentication | [Security](../contracts/ASSISTANT_SECURITY.md) | `MVP` | News Q&A validates a Cloudflare Access JWT signature, issuer, audience, user identity, and configured owner membership before parsing or storage. Runtime Access policy and owner configuration are deployment prerequisites. |
 | Machine authentication | [Security](../contracts/ASSISTANT_SECURITY.md) | `MVP` | `INGEST_TOKEN` protects machine writes; a general service-actor model is not implemented. |
-| Assistant queue recovery | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `NOT_IMPLEMENTED` | No leased Assistant queue with bounded recovery exists. |
-| Evidence provenance through compaction | [State](../contracts/ASSISTANT_STATE.md) | `PARTIAL` | News evidence has stable provenance, but no conversation/compaction path carries it. |
-| Assistant Preview isolation | [Security](../contracts/ASSISTANT_SECURITY.md) | `PARTIAL` | General Preview write rejection exists; Assistant routes and fixtures do not yet exist. |
+| Assistant queue recovery | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `MVP` | D1 records enforce owner/global admission, idempotency, expiry, `PENDING`/`PROCESSING` leases, bounded backoff, exhausted `FAILED`, stale-lease recovery, and attempt receipts. Cancellation is future work. |
+| Evidence provenance through compaction | [State](../contracts/ASSISTANT_STATE.md) | `PARTIAL` | Q&A now persists stable evidence, retrieval, prompt, model, and timestamps. No conversation or compaction path exists yet to carry that provenance through summaries. |
+| Assistant Preview isolation | [Security](../contracts/ASSISTANT_SECURITY.md) | `MVP` | Q&A writes reject before authentication, parsing, D1, or model work. Preview GET returns only a labeled synthetic empty private history and the form remains disabled. |
 
 ## Historical stack remediation
 
@@ -56,8 +56,8 @@ extended with more stacked work:
 ```text
 #103 Assistant Architecture -> main
 #20 Daily Brief             -> main
-#21 Shared Retrieval        -> this revision -> main
-#22 Q&A Foundation          -> refresh from main after #21
+#21 Shared Retrieval        -> main
+#22 Q&A Foundation          -> this revision -> main
 ```
 
 ### PR #20: Daily Brief remediation
@@ -69,7 +69,8 @@ capacity or evidence failures defer or fail closed without inventing a brief.
 
 ### PR #21: Shared Retrieval remediation
 
-This revision resolves the architecture gaps found in the old Search branch:
+PR #21 was repaired and merged. It resolves the architecture gaps found in the
+old Search branch:
 
 - query parsing, SQL construction, in-memory Preview matching, ordering, and
   provenance live in one reusable service rather than the route;
@@ -82,19 +83,27 @@ This revision resolves the architecture gaps found in the old Search branch:
 
 ### PR #22: News Q&A
 
-The branch adds a public question queue, a metered Gemma answer, evidence-ID
-filtering, D1 persistence, and Preview write rejection. It is not merge-ready
-because:
+This revision replaces the old public two-state queue with a bounded private
+foundation:
 
-- anonymous users can create model-consuming queue items;
-- the worker reads `recent_news[:200]` instead of shared relevant retrieval;
-- queue state is effectively `PENDING`/`ANSWERED`, without leases, crash
-  recovery, bounded retry, terminal failure, rejection, or expiry;
-- questions and answers have no owner-scoped conversation/message foundation;
-- filtering invented evidence IDs does not prove that the remaining answer is
-  grounded; and
-- no-evidence handling raises a worker error instead of persisting an honest
-  insufficient-evidence result.
+- Cloudflare Access JWT verification and explicit owner membership occur before
+  human payload parsing or D1 access; the ingest bearer remains machine-only;
+- owner-scoped idempotency, per-owner/global admission, expiry, time-bounded
+  processing leases, stale-lease recovery, retry backoff, and terminal failure
+  are persisted in D1;
+- the Windows worker calls PR #21 shared retrieval with the question cutoff,
+  sends only a compact evidence packet to Gemma through the metered gateway,
+  and never uses `recent_news[:200]`;
+- any invented evidence ID rejects the entire model result, while an empty
+  retrieval publishes a fixed `INSUFFICIENT_EVIDENCE` answer without a model
+  call; and
+- final answer, evidence IDs, retrieval ordering/cutoff, model, prompt, and
+  timestamps persist together under the valid lease.
+
+The deliberately excluded boundary remains important: PR #22 does not create
+canonical Conversation/Message storage, titles, memory, compaction, streaming,
+function calling, a general model router, or rich content blocks. Those remain
+separate roadmap PRs created from merged `main`.
 
 ## Update rule
 
