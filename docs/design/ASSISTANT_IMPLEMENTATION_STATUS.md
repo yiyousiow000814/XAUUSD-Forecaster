@@ -4,8 +4,9 @@
 
 This status is maintained as the Assistant architecture and its bounded
 implementation PRs land. PR #103 established the contracts; PRs #20, #21, #22,
-#104, and #106 are merged on `main`. The rows describe the post-merge state
-carried by the bounded conversation and incremental-memory implementations.
+#104, #106, #108, #110, and #111 are merged on `main`. The rows describe the
+bounded Assistant foundations covered by those merged PRs and by the current
+server-side tool-registry implementation.
 
 Status values have precise meanings:
 
@@ -37,8 +38,8 @@ Status values have precise meanings:
 | Multi-credential routing | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | Q&A, title, and compaction now pass their fixed model plan to one durable pool-by-model Capacity Router. It ranks independent accounts, rotates transport keys without inventing account capacity, tries compatible pools before model fallback, and never stores a raw account or key in completion provenance. The current installed provider remains Google Generative Language. |
 | TPM/RPM/RPD accounting | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | Assistant admission now applies operational pool/model RPD, rolling RPM/TPM, soft-cap headroom, finite in-flight leases, pair health, failure counts, 429 cooldown, and exact-token confirmation against the existing durable scheduler ledger. Capacity-only Q&A/title/compaction deferrals remain inside the finite work budget. |
 | Unified model gateway | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | `model_gateway.py` is the single metered Google generation boundary used by the news semantic chain, Daily Brief, Q&A, titles, and compaction. |
-| Function calling | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `NOT_IMPLEMENTED` | No typed Assistant tool loop exists. |
-| Parallel tool execution | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `NOT_IMPLEMENTED` | No Assistant tool planner/executor exists. |
+| Function calling | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `NOT_IMPLEMENTED` | A versioned read-only tool registry now exists, but no native model/function-response loop invokes it yet. |
+| Parallel tool execution | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `PARTIAL` | The registry can authorize and execute one bounded batch concurrently through controlled deadline-aware adapters, then return results in deterministic plan order. Over-budget batches execute no subset, and timeout, authorization, schema, adapter, and result-bound failures remain typed. The only application adapter currently defined is authoritative compact news retrieval; model planning, market, and calendar adapters remain future work. |
 | Streaming | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `NOT_IMPLEMENTED` | No versioned Assistant event transport exists. |
 | Commentary/progress | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `NOT_IMPLEMENTED` | No real tool-event progress surface exists. |
 | Rich UI blocks | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `NOT_IMPLEMENTED` | No validated Assistant content-block protocol exists. |

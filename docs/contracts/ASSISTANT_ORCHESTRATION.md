@@ -191,10 +191,18 @@ backend SHOULD execute them in parallel within the configured limit. Tool
 results remain ordered deterministically in the context. A tool failure is a
 typed result; it MUST NOT be hidden as an empty success.
 
+The backend MUST reject an over-budget call plan before executing any subset.
+
 Every tool has a versioned input/output schema, authorization policy, timeout,
 result bound, and provenance contract. The initial Assistant registry is
 read-only. No order-placement, broker-control, model-promotion, or autonomous
 trading tool may be registered.
+
+Registered executors are controlled application adapters, not arbitrary plugin
+code. Each adapter MUST honor the supplied deadline and apply its own network or
+storage timeout. The orchestrator stops waiting at the deadline and reports a
+typed timeout, but it does not claim that a Python thread can forcibly terminate
+arbitrary non-cooperative code.
 
 ## Shared news retrieval
 
@@ -234,6 +242,7 @@ The tool response records query, filters, ordering, cutoff, result limit, source
 mode, and the canonical IDs returned. Complete immutable publisher content
 remains in the evidence store governed by
 [`NEWS_EVIDENCE.md`](NEWS_EVIDENCE.md); compaction does not alter it.
+The server, not the model, fixes the received-time cutoff for an Assistant turn.
 
 ## Evidence-grounded answers
 

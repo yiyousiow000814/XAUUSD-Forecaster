@@ -124,6 +124,13 @@ Independent scopes may proceed in parallel from the same merged base. A short
 temporary stack is acceptable only when a dependency cannot be reviewed or
 tested independently; it must be collapsed promptly.
 
+Current implementation has reached a versioned read-only tool registry and
+bounded parallel executor. Conversation persistence, bounded memory/compaction,
+deterministic model routing, and pool-by-model capacity routing are already on
+`main`. The next independent scope is the native bounded model/tool loop; the
+later streaming protocol will not need to rewrite canonical conversation or
+tool contracts.
+
 ## Per-PR completion rule
 
 Every implementation PR:
