@@ -508,6 +508,9 @@ test("keeps the 60-day news archive inside bounded D1 work", () => {
   assert.match(index, /impact_expires_at>\?/);
   assert.match(index, /item\.model_visibility = "IMPACT_EXPIRED"/);
   assert.match(index, /DELETE FROM news_index WHERE mirror_contract <> \?/);
+  assert.match(index, /body\.withdraw_detail_keys\.length > 20/);
+  assert.match(index, /DELETE FROM news_index WHERE detail_key = \?/);
+  assert.match(index, /DELETE FROM news_details WHERE detail_key = \?/);
   assert.match(index, /s-maxage=30/);
   assert.match(migration, /news_index_published_idx/);
   assert.match(migration, /news_index_category_published_idx/);

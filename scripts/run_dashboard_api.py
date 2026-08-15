@@ -68,6 +68,7 @@ from xauusd_forecaster.news_evidence import (  # noqa: E402
     resolve_event_clock,
 )
 from xauusd_forecaster.news_relevance import GOOGLE_NEWS_MAX_AGE  # noqa: E402
+from xauusd_forecaster.news_semantics import validated_annotation_predicate  # noqa: E402
 from xauusd_forecaster.news_contracts import CURRENT_NEWS_CONTRACT  # noqa: E402
 from xauusd_forecaster.news_features_v2 import COLLECTION_SOURCES  # noqa: E402
 from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY  # noqa: E402
@@ -625,6 +626,7 @@ def _news_reader_rows(
                    json_extract(a.annotation_json, '$.secondary_categories') AS secondary_categories_json,
                    json_extract(a.annotation_json, '$.emerging_topic_zh') AS emerging_topic_zh,
                    json_extract(a.annotation_json, '$.xauusd_relevance') AS xauusd_relevance,
+                   json_extract(a.annotation_json, '$.semantic_reason_zh') AS semantic_reason_zh,
                    json_extract(a.annotation_json, '$.event_time') AS event_time,
                    a.event_type, a.entities_json, a.hawkishness,
                    a.inflation_impulse, a.growth_impulse,
@@ -676,6 +678,7 @@ def _news_reader_rows(
                 AND preferred_a.llm_model_version IN (
                   'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
                 AND preferred_a.prompt_version=?
+                AND {validated_annotation_predicate('preferred_a')}
               ORDER BY CASE preferred_a.llm_model_version
                 WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                 preferred_a.parsed_at DESC LIMIT 1)
@@ -726,9 +729,6 @@ def _news_reader_rows(
                     OR (length(COALESCE(peer.body, '')) = length(COALESCE(n.body, ''))
                       AND peer.source_item_id < n.source_item_id)))
               AND length(trim(COALESCE(n.body, ''))) >= 240
-              AND COALESCE(
-                    json_extract(a.annotation_json, '$.xauusd_relevance'), ''
-                  ) <> 'IRRELEVANT'
               AND COALESCE(n.source_published_time,
                            n.collector_first_seen_time) >= ?
               {cursor_clause}
@@ -803,16 +803,30 @@ def _news_archive_page(
     }
     rows = _news_reader_rows(connection, now, after=after, limit=limit + 1)
     has_more = len(rows) > limit
-    news = _serialize_news_rows(rows[:limit], now, epoch, claimable_keys)
+    serialized = _serialize_news_rows(rows[:limit], now, epoch, claimable_keys)
+    withdrawals = [
+        {
+            "source": item["source"],
+            "source_item_id": item["source_item_id"],
+            "revision_number": item["revision_number"],
+        }
+        for item in serialized
+        if item.get("xauusd_relevance") == "IRRELEVANT"
+    ]
+    news = [
+        item for item in serialized
+        if item.get("xauusd_relevance") != "IRRELEVANT"
+    ]
     next_cursor = (
         json.dumps([
-            news[-1]["mirror_updated_at"], news[-1]["source"],
-            news[-1]["source_item_id"], news[-1]["revision_number"],
+            serialized[-1]["mirror_updated_at"], serialized[-1]["source"],
+            serialized[-1]["source_item_id"], serialized[-1]["revision_number"],
         ], ensure_ascii=False, separators=(",", ":"))
-        if news else after
+        if serialized else after
     )
     return {
         "items": news,
+        "withdrawals": withdrawals,
         "next_cursor": next_cursor,
         "has_more": has_more,
         "window_days": NEWS_READER_WINDOW_DAYS,
@@ -1477,7 +1491,7 @@ def _dashboard_payload(database: Path) -> dict:
                 item = dict(prediction)
                 predictions_by_decision[item.pop("decision_id")].append(item)
         news_rows = connection.execute(
-            """SELECT n.source, n.source_item_id, n.revision_number,
+                f"""SELECT n.source, n.source_item_id, n.revision_number,
                        n.source_published_time, n.collector_first_seen_time,
                        n.fetched_time,
                       n.headline AS original_headline,
@@ -1555,6 +1569,7 @@ def _dashboard_payload(database: Path) -> dict:
                      AND preferred_a.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
                      AND preferred_a.prompt_version=?
+                     AND {validated_annotation_predicate('preferred_a')}
                    ORDER BY CASE preferred_a.llm_model_version
                        WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                      preferred_a.parsed_at DESC LIMIT 1)
@@ -1632,7 +1647,7 @@ def _dashboard_payload(database: Path) -> dict:
             ),
         ).fetchall()
         annotation_queue = connection.execute(
-            """SELECT
+            f"""SELECT
                  sum(CASE WHEN length(trim(COALESCE(n.body, ''))) >= 240
                            AND a.annotation_id IS NOT NULL THEN 1 ELSE 0 END) AS ready,
                  sum(CASE WHEN length(trim(COALESCE(n.body, ''))) >= 240
@@ -1662,6 +1677,7 @@ def _dashboard_payload(database: Path) -> dict:
                      AND preferred_a.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
                      AND preferred_a.prompt_version=?
+                     AND {validated_annotation_predicate('preferred_a')}
                    ORDER BY CASE preferred_a.llm_model_version
                        WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                      preferred_a.parsed_at DESC LIMIT 1)

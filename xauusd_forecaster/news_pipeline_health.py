@@ -18,6 +18,7 @@ from .news_impact import IMPACT_MODEL, IMPACT_PROMPT_VERSION
 from .news_relevance import google_news_item_is_relevant
 from .news_scheduler import configured_api_credentials
 from .news_time import category_time_rule
+from .news_semantics import validated_annotation_predicate
 
 
 ANNOTATOR_HEARTBEAT_MAX_AGE = timedelta(minutes=5)
@@ -58,6 +59,7 @@ def _current_actionable_impact_rows(
             AND j.annotation_id=a.annotation_id
             AND j.prompt_version=?
            WHERE a.prompt_version=?
+             AND {validated_annotation_predicate('a')}
              AND a.llm_model_version IN ({model_placeholders})
              AND length(trim(COALESCE(n.body,'')))>=240
              AND NOT EXISTS (

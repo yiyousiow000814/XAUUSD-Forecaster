@@ -15,6 +15,21 @@ headline or body keywords to decide XAUUSD meaning. Complete bounded documents
 proceed to semantic review, which may classify them as irrelevant or
 background without granting model authority.
 
+Chinese display text is Chinese-primary rather than Chinese-only. Natural
+names, company names, tickers, identifiers, and common abbreviations MAY remain
+in English when English improves readability. Display-language repair MUST NOT
+rewrite an otherwise valid semantic category, direction, impact, evidence, or
+confidence measurement. If readable Chinese-primary display text cannot be
+produced, the annotation MUST be withheld from model permission and retried; it
+MUST NOT be persisted as irrelevant or admitted behind a placeholder. A
+semantic-schema or source-evidence failure MUST fail independently and MUST NOT
+be disguised as a translation failure.
+Language validation MUST distinguish ordinary untranslated prose from natural
+English identifiers and names. A complete foreign-language clause or a script
+other than Chinese and Latin requires repair; punctuation, numbers, symbols,
+and natural English proper nouns do not by themselves make Chinese display
+unreadable.
+
 Collector lanes are not independent publishers. Google News and GDELT are
 discovery mechanisms; source trust and generation budgets use the first-party
 collector identity or the normalized reporting organization. A successful

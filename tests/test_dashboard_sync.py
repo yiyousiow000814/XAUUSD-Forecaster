@@ -973,6 +973,7 @@ def test_sync_repopulates_news_index_without_full_refresh_marker(
 @pytest.mark.parametrize("previous_contract", [
     "news-60-day-incremental-v2",
     "news-60-day-incremental-v3-semantic-categories",
+    "news-60-day-incremental-v4-relevance-filter",
 ])
 def test_news_materialization_contract_upgrade_replays_and_reconciles_old_state(
     monkeypatch, tmp_path, previous_contract
@@ -1037,6 +1038,44 @@ def test_news_materialization_contract_upgrade_replays_and_reconciles_old_state(
     assert state["cursor"] != stale_cursor
     assert state["mirror_contract_version"] == module.NEWS_MIRROR_CONTRACT_VERSION
     assert state["reconciled_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
+
+
+def test_news_sync_forwards_exact_semantic_withdrawals(monkeypatch, tmp_path) -> None:
+    module = _sync_module()
+    page = {
+        "items": [],
+        "withdrawals": [{
+            "source": "gdelt_gold_geopolitics",
+            "source_item_id": "entertainment-one",
+            "revision_number": 1,
+        }],
+        "next_cursor": '["2026-08-15T00:00:00Z","gdelt","one",1]',
+        "has_more": True,
+    }
+
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def read(self): return json.dumps(page).encode()
+
+    posted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k: Response())
+    monkeypatch.setattr(
+        module, "_post_json",
+        lambda url, body, _config: posted.append((url, json.loads(body))),
+    )
+    module._sync_news({}, {
+        "local_status_url": "http://local/status",
+        "remote_ingest_url": "https://remote/api/ingest",
+        "news_state_file": str(tmp_path / "news-state.json"),
+        "token": "test",
+    })
+
+    withdrawals = [
+        body["withdraw_detail_keys"] for url, body in posted
+        if url.endswith("/news-index") and "withdraw_detail_keys" in body
+    ]
+    assert withdrawals == [[module._stable_news_key(page["withdrawals"][0])]]
 
 
 def test_remote_market_chart_is_split_from_status_and_keeps_recent_window() -> None:
