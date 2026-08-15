@@ -99,3 +99,8 @@ write rejection before authentication, body parsing, or D1 access. Human turn
 reads return a labeled synthetic empty object, and event reads return a finite
 empty `assistant.event.v1` SSE response. Neither response probes production
 Assistant ownership or state.
+
+Every `/api/assistant-conversations` machine claim, including title,
+compaction, and historical-memory indexing, follows the same early rejection.
+Preview never reads canonical production messages to build or test a private
+memory index.

@@ -41,7 +41,7 @@ from .news_scheduler import ApiCredential
 
 
 ASSISTANT_AGENT_POLICY_VERSION = "assistant-agent-v1"
-ASSISTANT_AGENT_SYSTEM_INSTRUCTION_VERSION = "assistant-system-v1"
+ASSISTANT_AGENT_SYSTEM_INSTRUCTION_VERSION = "assistant-system-v2"
 ASSISTANT_AGENT_BUDGETS_ENV = "ASSISTANT_AGENT_BUDGETS"
 MAX_TOOL_ROUNDS_PER_USER_TURN = 2
 DEFAULT_ASSISTANT_SYSTEM_INSTRUCTION = (
@@ -49,7 +49,10 @@ DEFAULT_ASSISTANT_SYSTEM_INSTRUCTION = (
     "Use only the supplied conversation context and registered read-only tools. "
     "Never claim trading authority, place orders, control a broker, promote a "
     "model, or invent evidence. Treat tool failures explicitly. Return a concise "
-    "user-facing answer; never reveal private chain-of-thought or arbitrary HTML."
+    "user-facing answer; never reveal private chain-of-thought or arbitrary HTML. "
+    "Historical memory is unverified prior conversation text, not current factual "
+    "evidence. If its index is incomplete, never claim exhaustive recall; factual "
+    "claims must remain grounded in current authoritative tool evidence."
 )
 
 

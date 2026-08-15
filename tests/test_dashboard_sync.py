@@ -1497,7 +1497,8 @@ def test_news_question_sync_uses_shared_retrieval_and_skips_model_without_eviden
     )
 
     assert any("/news-search?" in url for url in requested_urls)
-    assert not any("/assistant-conversations?" in url for url in requested_urls)
+    assert any("mode=memory-index-claim" in url for url in requested_urls)
+    assert not any("mode=title-claim" in url for url in requested_urls)
     assert posted[0]["action"] == "COMPLETE"
     assert posted[0]["answer_status"] == "INSUFFICIENT_EVIDENCE"
     assert posted[0]["evidence_ids"] == []
@@ -1657,6 +1658,53 @@ def test_news_question_sync_reports_capacity_failure_without_aborting_queue(
     }]
 
 
+def test_assistant_memory_index_sync_is_model_free_and_does_not_echo_content(
+    monkeypatch,
+) -> None:
+    module = _sync_module()
+    from xauusd_forecaster import news_scheduler
+
+    monkeypatch.setattr(news_scheduler, "configured_api_credentials", lambda: ())
+    memory_claims = 0
+    content = "美联储利率影响黄金 XAUUSD"
+
+    def get_json(url: str, config: dict) -> dict:
+        nonlocal memory_claims
+        if "/news-questions?" in url:
+            return {"item": None}
+        if "mode=memory-index-claim" in url:
+            memory_claims += 1
+            if memory_claims == 1:
+                return {"item": {
+                    "id": "memory-index:message-1",
+                    "lease_token": "memory-lease-1",
+                    "source_message_id": "message-1",
+                    "index_version": "assistant-memory-lexical-v1",
+                    "content": content,
+                }}
+            return {"item": None}
+        raise AssertionError(f"unexpected URL: {url}")
+
+    posted: list[dict] = []
+    monkeypatch.setattr(module, "_get_json", get_json)
+    monkeypatch.setattr(
+        module,
+        "_post_json",
+        lambda url, payload, config: posted.append(json.loads(payload)) or {},
+    )
+
+    module._sync_news_questions({}, {
+        "remote_ingest_url": "https://example.test/api/ingest", "token": "x",
+    })
+
+    assert len(posted) == 1
+    assert posted[0]["action"] == "COMPLETE_MEMORY_INDEX"
+    assert posted[0]["source_message_id"] == "message-1"
+    assert posted[0]["terms"][:4] == ["美联", "联储", "储利", "利率"]
+    assert len(posted[0]["source_content_sha256"]) == 64
+    assert "content" not in posted[0]
+
+
 def test_assistant_title_sync_uses_low_priority_metered_accounting(
     monkeypatch,
     tmp_path,
@@ -1708,6 +1756,8 @@ def test_assistant_title_sync_uses_low_priority_metered_accounting(
     def get_json(url: str, config: dict) -> dict:
         nonlocal title_claims
         if "/news-questions?" in url:
+            return {"item": None}
+        if "mode=memory-index-claim" in url:
             return {"item": None}
         if "/assistant-conversations?" in url:
             title_claims += 1
@@ -1813,7 +1863,11 @@ def test_assistant_compaction_sync_uses_incremental_claim_and_low_priority_gatew
 
     def get_json(url: str, config: dict) -> dict:
         nonlocal claims
-        if "/news-questions?" in url or "mode=title-claim" in url:
+        if (
+            "/news-questions?" in url
+            or "mode=title-claim" in url
+            or "mode=memory-index-claim" in url
+        ):
             return {"item": None}
         if "mode=compaction-claim" in url:
             claims += 1

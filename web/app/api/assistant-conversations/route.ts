@@ -25,6 +25,11 @@ import {
   failAssistantCompactionJob,
   scheduleAssistantCompaction,
 } from "../_shared/assistant-memory";
+import {
+  claimAssistantMemoryIndexJob,
+  completeAssistantMemoryIndexJob,
+  failAssistantMemoryIndexJob,
+} from "../_shared/assistant-memory-index";
 import { readBoundedBody } from "../_shared/dashboard-snapshot";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
 import { isPreviewDeployment, previewJson, rejectPreviewWrite } from "../_shared/preview";
@@ -69,12 +74,20 @@ export async function GET(request: Request) {
   const params = new URL(request.url).searchParams;
   const mode = params.get("mode");
   if (isPreviewDeployment) {
-    if (mode === "title-claim" || mode === "compaction-claim") {
+    if (
+      mode === "title-claim"
+      || mode === "compaction-claim"
+      || mode === "memory-index-claim"
+    ) {
       return rejectPreviewWrite() ?? previewJson({ error: "Preview 只读" }, 403, "write-rejected");
     }
     return previewJson({ items: [], preview: true }, 200, "synthetic-empty-assistant");
   }
-  if (mode === "title-claim" || mode === "compaction-claim") {
+  if (
+    mode === "title-claim"
+    || mode === "compaction-claim"
+    || mode === "memory-index-claim"
+  ) {
     if (!await isIngestAuthorized(request)) return unauthorized();
     const binding = env.DB;
     if (!binding) return unavailable();
@@ -85,7 +98,9 @@ export async function GET(request: Request) {
     try {
       const item = mode === "title-claim"
         ? await claimAssistantTitleJob(binding, workerId)
-        : await claimAssistantCompactionJob(binding, workerId);
+        : mode === "compaction-claim"
+          ? await claimAssistantCompactionJob(binding, workerId)
+          : await claimAssistantMemoryIndexJob(binding, workerId);
       return noStoreJson({ item });
     } catch {
       return unavailable();
@@ -150,6 +165,10 @@ export async function POST(request: Request) {
         item = await failAssistantCompactionJob(binding, body);
       } else if (action === "DEFER_COMPACTION") {
         item = await deferAssistantCompactionJob(binding, body);
+      } else if (action === "COMPLETE_MEMORY_INDEX") {
+        item = await completeAssistantMemoryIndexJob(binding, body);
+      } else if (action === "FAIL_MEMORY_INDEX") {
+        item = await failAssistantMemoryIndexJob(binding, body);
       } else if (action === "SCHEDULE_COMPACTION") {
         const conversationId = String(body.conversation_id ?? "").trim();
         if (!validObjectId(conversationId)) {

@@ -1,0 +1,22 @@
+[
+  {
+    "text": "美联储利率 XAUUSD 31B，美联储。",
+    "maximum_terms": 64,
+    "terms": ["美联", "联储", "储利", "利率", "xauusd", "31b"]
+  },
+  {
+    "text": "ＣＰＩ / gold_4H；黄金上涨",
+    "maximum_terms": 64,
+    "terms": ["cpi", "gold", "4h", "黄金", "金上", "上涨"]
+  },
+  {
+    "text": "A a A 123 单",
+    "maximum_terms": 64,
+    "terms": ["a", "123", "单"]
+  },
+  {
+    "text": "黄金价格美元利率",
+    "maximum_terms": 3,
+    "terms": ["黄金", "金价", "价格"]
+  }
+]
