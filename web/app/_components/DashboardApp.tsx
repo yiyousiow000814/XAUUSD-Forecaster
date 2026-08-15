@@ -1,8 +1,9 @@
 "use client";
 
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import LiveRoomView from "../_views/LiveRoomView";
 import { primeDashboardResources } from "../_lib/dashboard-resource";
+import { settleResponsiveScroll } from "../_lib/responsive-scroll";
 import {
   DashboardNavigationProvider,
   type AuditViewName,
@@ -61,6 +62,7 @@ export default function DashboardApp({
   primeDashboardResources(initialResources);
   const [location, setLocation] = useState(initialLocation);
   const navigationSequence = useRef(0);
+  const pendingScrollTop = useRef<number | null>(null);
 
   const preload = useCallback((href: string) => {
     const destination = parseDashboardUrl(new URL(href, window.location.href));
@@ -68,6 +70,7 @@ export default function DashboardApp({
   }, []);
 
   const navigate = useCallback(async (href: string, replace = false) => {
+    const currentScrollTop = window.scrollY;
     const destinationUrl = new URL(href, window.location.href);
     const destination = parseDashboardUrl(destinationUrl);
     if (!destination) {
@@ -81,9 +84,16 @@ export default function DashboardApp({
     const nextHref = canonicalHref(destination);
     if (replace) window.history.replaceState(null, "", nextHref);
     else window.history.pushState(null, "", nextHref);
+    pendingScrollTop.current = currentScrollTop;
     setLocation(destination);
-    window.scrollTo({ top: 0, behavior: "instant" });
   }, []);
+
+  useLayoutEffect(() => {
+    if (pendingScrollTop.current === null) return;
+    const cancel = settleResponsiveScroll(options => window.scrollTo(options), () => window.scrollY, pendingScrollTop.current!);
+    pendingScrollTop.current = null;
+    return cancel;
+  }, [location]);
 
   useEffect(() => {
     void loadStatusView();

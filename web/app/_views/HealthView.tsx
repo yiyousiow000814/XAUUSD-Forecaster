@@ -56,11 +56,29 @@ function elapsed(seconds: number | null): string {
   return `距上次成功 ${hours} 小时 ${minutes % 60} 分`;
 }
 
+type NewsSourceHealth = StatusPayload["news_source_health"][number];
+
+function SourceHealthCard({ item }: { item: NewsSourceHealth }) {
+  const healthy = item.health === "HEALTHY";
+  const [showDetails, setShowDetails] = useState(false);
+  return <article className={`${healthy ? "is-healthy" : "is-attention"} ${showDetails ? "is-detail-open" : ""}`}>
+    <div><strong>{item.label}</strong><small>{item.role} · {item.source}</small></div>
+    <div><b className={`source-health-badge health-${item.health.toLowerCase()}`}>{item.health === "FALLBACK_ACTIVE" ? "后备源接管中" : item.health === "WARMING_UP" ? "等待首次正式发布" : item.health}</b><small>{localTime(item.latest_poll_time)}</small><small>最近成功 {localTime(item.last_success)}</small>{item.next_retry_time ? <small>自动重试 {localTime(item.next_retry_time)}</small> : null}{item.semantic_message ? <small>{item.semantic_message}</small> : null}</div>
+    {healthy && <button className="source-detail-toggle" type="button" aria-expanded={showDetails} onClick={() => setShowDetails(value => !value)}>{showDetails ? "收起来源证据" : "查看来源证据"}</button>}
+    <div className="news-source-details">
+      <div><strong><CountValue value={item.item_count} suffix=" 篇" /></strong><small><CountValue value={item.revision_count} format="exact" suffix=" revisions" /> · 完整正文 <CountValue value={item.full_text_count} format="exact" /></small><small>轮询 <CountValue value={item.ok_count} format="exact" />/<CountValue value={item.poll_count} format="exact" /> 完成</small></div>
+      <div className="source-health-error"><strong>{item.recovery_mode === "RATE_LIMIT_BACKOFF" ? `GDELT 限流 · ${item.fallback_label} 自动接管` : item.last_error_type ? `${healthy ? "历史异常 · 已恢复" : "当前异常"} · ${item.last_error_type}` : "无已记录异常"}</strong><small>{item.last_error_time ? localTime(item.last_error_time) : ""} {item.last_error ?? "链路轮询正常"}</small>{item.fallback_label ? <small>后备链路：{item.fallback_label} · {item.fallback_health}</small> : null}</div>
+    </div>
+  </article>;
+}
+
 export default function HealthView() {
   const cachedStatus = readDashboardResource<StatusPayload>("/api/status");
   const [payload, setPayload] = useState<StatusPayload | null>(() => cachedStatus);
   const [error, setError] = useState<string | null>(null);
   const [syncingCurrent, setSyncingCurrent] = useState(Boolean(cachedStatus?.preview_status_summary));
+  const [showHealthyComponents, setShowHealthyComponents] = useState(false);
+  const [showHealthySources, setShowHealthySources] = useState(false);
   const refresh = useCallback(async (force = false, showSyncState = false) => {
     if (showSyncState) setSyncingCurrent(true);
     try {
@@ -85,6 +103,16 @@ export default function HealthView() {
 
   const currentPhase: CurrentDataPhase = error
     ? "error" : !payload || syncingCurrent ? "loading" : payload.preview_status_summary ? "snapshot" : "ready";
+  const components = Object.entries(payload?.system.components ?? {}).map(([name, item]) => ({
+    name,
+    item,
+    healthy: item.status === "OK" || item.status === "MARKET_CLOSED",
+  }));
+  const healthyComponentCount = components.filter(component => component.healthy).length;
+  const componentHasAttention = components.some(component => !component.healthy);
+  const sources = payload?.news_source_health ?? [];
+  const healthySourceCount = sources.filter(source => source.health === "HEALTHY").length;
+  const sourceHasAttention = sources.some(source => source.health !== "HEALTHY");
 
   return <main className="status-main">
     <div className="grain" />
@@ -106,24 +134,21 @@ export default function HealthView() {
     </section>
     {error ? <div className="error-banner">状态读取失败：{error}</div> : null}
     <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
-    <section className="component-status" aria-label="数据链路组件状态">
+    <section className={`component-status ${componentHasAttention ? "has-attention" : ""} ${showHealthyComponents ? "show-healthy" : ""}`} aria-label="数据链路组件状态">
       <header><div><p className="eyebrow">EVIDENCE PIPELINE</p><h2>系统组件状态</h2></div><p><b>{payload?.system.source_of_truth ?? "Local append-only SQLite"}</b> 是不可修改的证据源；{payload?.system.sites_mirror ?? "Sites D1 read-only materialized display mirror"} 只是展示镜像。</p></header>
-      <div>{Object.entries(payload?.system.components ?? {}).map(([name, item]) => <article key={name}>
+      {componentHasAttention && healthyComponentCount > 0 && <button className="health-reveal-button" type="button" aria-expanded={showHealthyComponents} onClick={() => setShowHealthyComponents(value => !value)}>{showHealthyComponents ? "只看异常组件" : `另有 ${healthyComponentCount} 个正常组件`}</button>}
+      <div>{components.map(({ name, item, healthy }) => <article className={healthy ? "is-healthy" : "is-attention"} key={name}>
         <span className={item.status === "OK" || item.status === "MARKET_CLOSED" ? "component-ok" : "component-stale"}>{item.status === "MARKET_CLOSED" ? "市场休市" : item.status}</span>
         <strong>{componentLabels[name] ?? name.replaceAll("_", " ")}</strong>
         <small>最后成功 {localTime(item.last_success)}</small><small>{elapsed(item.age_seconds)}</small>
         {item.last_error ? <em>{item.last_error}</em> : null}
       </article>)}</div>
     </section>
-    <section className="source-health" aria-label="新闻来源状态">
+    <section className={`source-health ${sourceHasAttention ? "has-attention" : ""} ${showHealthySources ? "show-healthy" : ""}`} aria-label="新闻来源状态">
       <header><div><p className="eyebrow">NEWS INGEST / SOURCE-BY-SOURCE</p><h2>新闻来源状态</h2></div><p>发布源和正文解析器分别判断。<b>正文链路降级不会伪装成全部新闻中断</b>；错误会保留最近一次成功时间和具体原因。</p></header>
+      {sourceHasAttention && healthySourceCount > 0 && <button className="health-reveal-button" type="button" aria-expanded={showHealthySources} onClick={() => setShowHealthySources(value => !value)}>{showHealthySources ? "只看异常来源" : `另有 ${healthySourceCount} 个正常来源`}</button>}
       <div className="source-health-head"><span>来源 / 角色</span><span>状态 / 最近轮询</span><span>证据</span><span>最近错误</span></div>
-      {(payload?.news_source_health ?? []).map((item) => <article key={item.source}>
-        <div><strong>{item.label}</strong><small>{item.role} · {item.source}</small></div>
-        <div><b className={`source-health-badge health-${item.health.toLowerCase()}`}>{item.health === "FALLBACK_ACTIVE" ? "后备源接管中" : item.health === "WARMING_UP" ? "等待首次正式发布" : item.health}</b><small>{localTime(item.latest_poll_time)}</small><small>最近成功 {localTime(item.last_success)}</small>{item.next_retry_time ? <small>自动重试 {localTime(item.next_retry_time)}</small> : null}{item.semantic_message ? <small>{item.semantic_message}</small> : null}</div>
-        <div><strong><CountValue value={item.item_count} suffix=" 篇" /></strong><small><CountValue value={item.revision_count} format="exact" suffix=" revisions" /> · 完整正文 <CountValue value={item.full_text_count} format="exact" /></small><small>轮询 <CountValue value={item.ok_count} format="exact" />/<CountValue value={item.poll_count} format="exact" /> 完成</small></div>
-        <div className="source-health-error"><strong>{item.recovery_mode === "RATE_LIMIT_BACKOFF" ? `GDELT 限流 · ${item.fallback_label} 自动接管` : item.last_error_type ? `${item.health === "HEALTHY" ? "历史异常 · 已恢复" : "当前异常"} · ${item.last_error_type}` : "无已记录异常"}</strong><small>{item.last_error_time ? localTime(item.last_error_time) : ""} {item.last_error ?? "链路轮询正常"}</small>{item.fallback_label ? <small>后备链路：{item.fallback_label} · {item.fallback_health}</small> : null}</div>
-      </article>)}
+      {sources.map((item) => <SourceHealthCard item={item} key={item.source} />)}
     </section>
     <footer><span>每 {DASHBOARD_REFRESH_INTERVALS.status / 1000} 秒刷新 · SHADOW ONLY</span><span>最后状态：{payload?.generated_at ? localTime(payload.generated_at) : "—"}</span></footer>
   </main>;

@@ -527,7 +527,14 @@ test("separates completed, processing, and isolated news by durable review state
   assert.match(route, /review_state_counts/);
   assert.match(route, /json_extract\(payload, '\$\.annotation_status'\)/);
   assert.match(css, /\.news-review-zones button \{[^}]*min-height:104px/);
-  assert.match(css, /overflow-x:auto; scroll-snap-type:x mandatory/);
+  assert.match(view, /className="news-category-picker"/);
+  assert.match(css, /\.news-review-zones \{ grid-template-columns:repeat\(3,minmax\(0,1fr\)\);[^}]*overflow:visible/);
+  assert.match(css, /\.news-browser nav \{ display:none; \}/);
+  assert.match(css, /\.news-category-picker select \{[^}]*min-height:48px/);
+  assert.match(css, /\.news-row>summary \{ grid-template-columns:1fr;/);
+  assert.match(css, /\.annotation-queue>span:nth-of-type\(4\),\.annotation-queue>span:nth-of-type\(5\) \{ display:flex/);
+  assert.match(css, /\.news-row-title \{ order:1; \}/);
+  assert.match(css, /\.news-table \{ display:grid; gap:15px; border:0/);
 });
 
 test("keeps the 60-day news archive inside bounded D1 work", () => {
@@ -694,6 +701,7 @@ test("replaces the forecast state with the broker reopening countdown", () => {
 });
 
 test("renders the Gemini quota status route", async () => {
+  const source = readFileSync(new URL("../app/_views/StatusView.tsx", import.meta.url), "utf8");
   const { response, html } = await renderSettled("/?room=status", /AI 模型使用状态/);
   assert.equal(response.status, 200);
   assert.match(html, /AI 模型使用状态/);
@@ -702,6 +710,10 @@ test("renders the Gemini quota status route", async () => {
   assert.match(html, /Gemma 4 31B/);
   assert.match(html, /reset-countdown/);
   assert.match(html, /逐 Key 配额/);
+  assert.match(source, /今日已发送 \/ 上限/);
+  assert.match(source, /className="quota-value"/);
+  assert.match(source, /<details className="quota-note">/);
+  assert.match(source, /查看账本与 Google 额度的区别/);
   assert.match(html, /分支配置/);
   assert.match(html, /Pacific midnight/);
   assert.match(html, /组件与新闻源/);
@@ -716,6 +728,20 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(html, /系统组件状态/);
   assert.match(html, /新闻来源状态/);
   assert.match(html, /AI 模型用量/);
+  const view = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(view, /componentHasAttention/);
+  assert.match(view, /sourceHasAttention/);
+  assert.match(view, /function SourceHealthCard/);
+  assert.match(view, /className="source-detail-toggle"/);
+  assert.match(view, /className="news-source-details"/);
+  assert.match(view, /showDetails \? "收起来源证据" : "查看来源证据"/);
+  assert.match(css, /\.component-status\.has-attention:not\(\.show-healthy\) article\.is-healthy/);
+  assert.match(css, /\.health-reveal-button \{ display:block;[^}]*min-height:48px/);
+  assert.match(css, /\.component-status>header p \{ display:none; \}/);
+  assert.match(css, /\.component-status>div \{ gap:13px; background:transparent; \}/);
+  assert.match(css, /\.source-health\.show-healthy article\.is-healthy \.news-source-details \{ display:none; \}/);
+  assert.match(css, /\.source-health\.show-healthy article\.is-healthy\.is-detail-open \.news-source-details \{ display:contents; \}/);
 });
 
 test("uses one Chinese system-state presentation across every dashboard page", () => {
@@ -822,7 +848,9 @@ test("renders the news and decision audit route", async () => {
   assert.doesNotMatch(source, /已经积累多少结果|真实上线后结果|当前模型学到哪里|距离下次学习/);
   assert.match(source, /上一次学习/);
   assert.match(source, /下一次学习/);
-  assert.match(source, /目标 − 目前已有 = 还差多少/);
+  assert.match(source, /还差 \$\{formatExactCount\(rowsUntilTraining\)\} 条/);
+  assert.match(source, /目标 \$\{formatExactCount\(payload\?\.training\?\.next_training_at\)\} 条/);
+  assert.doesNotMatch(source, /next_training_at\)} − \$\{formatExactCount/);
   assert.doesNotMatch(source, /查看技术审计明细/);
   assert.doesNotMatch(source, /旧工程数据|修复后的训练种子|上线后前向结果/);
   assert.doesNotMatch(source, /Legacy Engineering|Repaired Seed|Next fit/);
@@ -1050,6 +1078,15 @@ test("shows single events immediately and keeps later changes in one thread", ()
   assert.match(page, /市场反应流/);
   assert.match(page, /新发生/);
   assert.match(page, /有后续时会自动接成一条脉络/);
+  assert.match(page, /showAllStoryEvents/);
+  assert.match(page, /showAllStorylines/);
+  assert.match(page, /expandedStorylines/);
+  assert.match(css, /\.single-event-index>div:not\(\.show-all-mobile-items\)>article:nth-child\(n\+9\)/);
+  assert.match(css, /\.story-grid:not\(\.show-all-mobile-items\)>article:nth-child\(n\+5\)/);
+  assert.match(css, /\.story-grid ol\.story-timeline \{ display:none/);
+  assert.match(css, /\.story-grid ol\.story-timeline\.is-open \{ display:block/);
+  assert.match(css, /\.single-event-index>\.mobile-reveal-button \{ display:block;[^}]*min-height:48px/);
+  assert.match(css, /\.story-grid \{ gap:18px; border:0; background:transparent; \}/);
   assert.doesNotMatch(page, /暂无后续进展/);
   assert.match(page, /第一次进展立即显示，后续变化接在一起/);
   assert.ok(page.indexOf('className="story-grid"') < page.indexOf('className="theme-streams"'), "events must appear before secondary topic streams");
@@ -1090,6 +1127,7 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /const pageSize = 6/);
   assert.match(modal, /visibleRows\.map/);
   assert.match(modal, /function VersionPagination/);
+  assert.match(modal, /第 \{formatExactCount\(page \+ 1\)\} \/ \{formatExactCount\(pageCount\)\} 页/);
   assert.match(modal, /训练组分页（/);
   assert.match(modal, /aria-label="上一页训练组"/);
   assert.match(modal, /aria-label="下一页训练组"/);
@@ -1127,6 +1165,8 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.doesNotMatch(modal, /成本后 EV 较优方向/);
   assert.doesNotMatch(modal, /setArrowMode/);
   assert.match(modal, /U5 只是统一波动尺度，不是 WAIT 开关/);
+  assert.match(modal, /<details className="wait-explainer"><summary>方向怎样产生<\/summary>/);
+  assert.match(modal, /<details className="market-reading-guide"><summary>图表怎么看<\/summary>/);
   assert.match(modal, /模型选择 vs 固定 1\.0x/);
   assert.match(modal, /顺序 Exit Ridge vs 固定持有30分钟/);
   assert.match(modal, /两套独立实验/);
@@ -1137,8 +1177,11 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /图中压缩为/);
   assert.match(modal, /resource=execution-point/);
   assert.match(modal, /第 \{formatExactCount\(page \+ 1\)\} 段 · 共 \{formatExactCount\(total\)\} 个历史绘图点/);
-  assert.match(modal, /← 较早/);
-  assert.match(modal, /较晚 →/);
+  assert.match(modal, /aria-label="查看较早时间段"/);
+  assert.match(modal, /aria-label="查看较晚时间段"/);
+  assert.match(modal, /className="market-action-filters"/);
+  assert.match(modal, /LONG <span>看多<\/span>/);
+  assert.match(modal, /market-version-toggle/);
   assert.match(css, /\.execution-chart-grid \{ display:grid; grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
   assert.match(css, /\.execution-history-nav/);
   assert.match(modal, /目前没有提前退出/);
@@ -1213,6 +1256,8 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(css, /height:calc\(100dvh - 16px\)/);
   assert.match(css, /grid-template-rows:auto auto minmax\(0,1fr\) auto/);
   assert.match(modal, /graph-modal-\$\{tab\}/);
+  assert.match(modal, /useLayoutEffect\(\(\) => \{[\s\S]*const cancel = settleResponsiveScroll\(options => bodyRef\.current\?\.scrollTo\(options\), \(\) => bodyRef\.current\?\.scrollTop \?\? 0, pendingScrollTop\.current!\);[\s\S]*return cancel;[\s\S]*\}, \[tab\]\)/);
+  assert.match(modal, /graph-scope-mobile/);
   assert.match(css, /graph-modal\.graph-modal-curve,\.graph-modal\.graph-modal-versions \{ height:calc\(100dvh - 16px\); max-height:none; grid-template-rows:auto auto minmax\(0,1fr\) auto/);
   assert.match(css, /graph-modal\.graph-modal-curve>\.graph-modal-body,\.graph-modal\.graph-modal-versions>\.graph-modal-body \{ min-height:0; max-height:none; overflow:auto/);
   assert.match(css, /scrollbar-gutter:stable/);
@@ -1249,6 +1294,8 @@ test("keeps the learning page focused and folds secondary research below the sco
 });
 
 test("keeps dashboard navigation and graph controls usable on phones", () => {
+  const dashboard = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
+  const responsiveScroll = readFileSync(new URL("../app/_lib/responsive-scroll.ts", import.meta.url), "utf8");
   const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const live = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
   const status = readFileSync(new URL("../app/_views/StatusView.tsx", import.meta.url), "utf8");
@@ -1260,7 +1307,14 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(page, /className="audit-tabs"/);
   assert.match(page, /className="audit-view-picker"/);
   assert.match(page, /aria-label="切换证据台页面"/);
-  assert.match(page, /window\.scrollTo\(\{ top: 0, behavior: "instant" \}\)/);
+  assert.match(page, /pendingScrollTop\.current = window\.scrollY;[\s\S]*useLayoutEffect\(\(\) => \{[\s\S]*const cancel = settleResponsiveScroll\(options => window\.scrollTo\(options\), \(\) => window\.scrollY, pendingScrollTop\.current!\);[\s\S]*return cancel;[\s\S]*\}, \[view\]\)/);
+  assert.match(dashboard, /pendingScrollTop\.current = currentScrollTop;[\s\S]*useLayoutEffect\(\(\) => \{[\s\S]*const cancel = settleResponsiveScroll\(options => window\.scrollTo\(options\), \(\) => window\.scrollY, pendingScrollTop\.current!\);[\s\S]*return cancel;[\s\S]*\}, \[location\]\)/);
+  assert.match(responsiveScroll, /matchMedia\("\(max-width: 850px\)"\)\.matches/);
+  assert.match(responsiveScroll, /if \(isPhoneViewport\(\)\) \{[\s\S]*scroll\(\{ top: 0, left: 0, behavior: "instant" \}\)/);
+  assert.match(responsiveScroll, /let remainingFrames = 30/);
+  assert.match(responsiveScroll, /stableFrames = Math\.abs\(readTop\(\) - desktopTop\) <= 1 \? stableFrames \+ 1 : 0/);
+  assert.match(responsiveScroll, /stableFrames < 6 && remainingFrames > 0/);
+  assert.match(responsiveScroll, /cancelAnimationFrame\(frame\)/);
   assert.doesNotMatch(page, /scrollAuditTabs|auditTabsRef|向左查看更多审计视图|向右查看更多审计视图/);
   for (const [source, current] of [[live, "live"], [page, "mobileDashboardSection"], [status, "status"], [health, "health"], [assistant, "assistant"]]) {
     assert.match(source, new RegExp(`<MobileDashboardNav current=\\{?"?${current}`));
@@ -1276,7 +1330,7 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.audit-view-picker \{ position:sticky; top:0;[\s\S]*?grid-template-columns:auto minmax\(0,1fr\)/);
   assert.match(css, /\.audit-main \.audit-intro>div:first-child \{ display:none; \}/);
   assert.match(css, /\.coverage-card \{ display:grid;[\s\S]*?min-height:0;/);
-  assert.match(css, /\.evidence-summary \{ grid-template-columns:repeat\(3,minmax\(0,1fr\)\); \}/);
+  assert.match(css, /\.evidence-summary \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); gap:8px/);
   assert.match(css, /\.quota-summary \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); \}/);
   assert.match(css, /\.graph-modal>nav \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
   assert.match(css, /\.graph-modal,\.graph-modal\.graph-modal-curve,\.graph-modal\.graph-modal-versions \{ width:100vw; height:100dvh/);
@@ -1290,19 +1344,60 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.return-value>span,\.return-value>strong \{ overflow:visible;[\s\S]*?font-size:clamp\(14px,4\.4vw,17px\)/);
   assert.match(css, /\.summary-cadence \{ display:grid; grid-template-columns:minmax\(0,1fr\) minmax\(0,1fr\)/);
   assert.match(modal, /mobile-chart-scroll/);
-  assert.match(modal, /左右滑动查看完整图表/);
+  assert.match(modal, /左右滑动浏览/);
   assert.match(modal, /closeButtonRef\.current\?\.focus\(\)/);
   assert.match(modal, /openerRef\.current\?\.focus\(\)/);
   assert.match(modal, /event\.key !== "Tab"/);
+  assert.match(modal, /select:not\(\[disabled\]\), summary, \[href\]/);
+  assert.match(modal, /element\.getClientRects\(\)\.length > 0/);
   assert.match(css, /\.mobile-chart-scroll \{ width:100%; overflow-x:auto/);
-  assert.match(css, /\.execution-history-nav \{ display:flex; flex-wrap:wrap; justify-content:center; \}/);
-  assert.match(css, /\.execution-history-nav button \{ flex:0 1 100px; min-width:0; min-height:44px; \}/);
+  assert.match(css, /\.long-curve-block \.mobile-chart-scroll \{ overflow-x:auto; \}/);
+  assert.match(css, /\.long-curve-block \.mobile-chart-scroll>\.learning-svg \{ width:720px; min-width:720px; min-height:300px; height:300px;/);
+  assert.match(css, /\.execution-chart \.mobile-chart-scroll \{ overflow-x:hidden; \}/);
+  assert.match(css, /\.execution-history-nav \{ display:grid; grid-template-columns:44px minmax\(0,1fr\) 44px;/);
+  assert.match(css, /\.execution-history-nav button \{ width:44px; min-width:44px; min-height:44px;/);
   assert.match(css, /\.market-history-nav \{[^}]*margin:10px 0 0;[^}]*border:1px solid/);
   assert.match(css, /\.prediction-counts \{[^}]*border-top:0/);
+  assert.match(css, /\.curve-navigation-actions \{ grid-column:1\/-1; display:grid; grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
+  assert.match(css, /\.version-page-results \{ min-height:0; gap:10px; padding:12px 14px;/);
+  assert.match(css, /\.version-page-results>article \{ border:1px solid rgba\(17,17,15,\.36\); padding:0; background:var\(--paper\); \}/);
+  assert.match(css, /\.market-chart-block \.mobile-chart-scroll \{ overflow-x:auto; \}/);
+  assert.match(css, /\.market-chart-block \.mobile-chart-scroll>\.learning-svg \{ display:block; width:720px; min-width:720px; min-height:300px; height:300px;/);
+  assert.match(css, /\.market-action-filters \{ grid-column:1\/-1; display:grid; grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
+  assert.match(css, /\.market-action-filters button\.active\+button\.active \{ border-left-color:rgba\(239,235,223,\.58\); \}/);
+  assert.match(modal, /const selectNearestDecision = \(event: ReactMouseEvent<SVGSVGElement>\)/);
+  assert.match(modal, /onClick=\{selectNearestDecision\}/);
+  assert.match(modal, /左右滑动浏览 · 点击箭头查看30分钟结果/);
+  assert.match(modal, /className="market-selected-window-caption"/);
+  assert.match(modal, /预测 \{timeLabel\(activeSelected\.decision_time\)\} → 30分钟后/);
+  assert.doesNotMatch(modal, /selected-window[^\n]*<text/);
+  assert.match(modal, /useLayoutEffect\(\(\) => \{[\s\S]*?chart\.scrollLeft = chart\.scrollWidth - chart\.clientWidth;[\s\S]*?historyState, latestCandleTime/);
+  assert.match(modal, /Math\.max\(88, Math\.min\(220, 30 \+ label\.length \* 14\)\)/);
+  assert.match(css, /\.market-selected-window-caption \{ display:flex;/);
+  assert.match(modal, /左右滑动浏览长期曲线 · 文字与时间轴保持可读大小/);
+  assert.match(css, /\.market-chart-block>\.chart-legend \{ display:flex; flex-wrap:wrap;/);
+  assert.match(css, /\.execution-scorecards \{ grid-template-columns:minmax\(0,1fr\); gap:0; border-width:1px 0; background:transparent; \}/);
+  assert.match(css, /\.execution-scorecards article\+article \{ border-top:1px solid rgba\(17,17,15,\.36\); \}/);
+  assert.match(css, /\.execution-scorecards article>span \{ max-width:34ch; font-size:11px; line-height:1\.55; \}/);
+  assert.match(css, /\.quota-row \{ grid-template-columns:minmax\(72px,\.8fr\) minmax\(88px,1fr\) auto;/);
   assert.match(css, /\.chart-block \{ overflow:visible/);
   assert.match(css, /\.graph-modal-backdrop \{ position:fixed; inset:0; z-index:1100/);
   assert.match(css, /\.audit-intro>div:first-child \.eyebrow \{ display:none/);
   assert.match(css, /\.audit-intro h1 \{ font-size:clamp\(32px,9vw,38px\)/);
+  assert.match(css, /\.daily-brief-desk,\s*\.news-search-desk,\s*\.news-qa-desk,\s*\.decision-audit,\s*\.shadow-league,\s*\.coverage-grid \{ border-top:1px solid rgba\(17,17,15,\.55\); \}/);
+});
+
+test("keeps expanded news readable by progressively revealing technical evidence on phones", () => {
+  const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(page, /showSupportingEvidence/);
+  assert.match(page, /className="news-secondary-toggle"/);
+  assert.match(page, /news-secondary-evidence \$\{showSupportingEvidence \? "is-open" : ""\}/);
+  assert.match(page, /查看证据、分类与时间线/);
+  assert.match(css, /\.news-secondary-toggle \{ display:none; \}/);
+  assert.match(css, /\.news-secondary-evidence \{ display:none; padding-top:15px; \}/);
+  assert.match(css, /\.news-secondary-evidence\.is-open \{ display:block; \}/);
+  assert.match(css, /\.news-row \{ scroll-margin-top:46px;/);
 });
 
 test("explains U5 as a risk scale rather than a probability", () => {
@@ -1485,6 +1580,9 @@ test("reflows news evidence into readable mobile cards", () => {
   assert.match(view, /统一来源身份：/);
   assert.match(view, /原始发布域名：/);
   assert.match(view, /Gemini 与 Gemma 负责理解事件语义/);
+  assert.match(view, /showAllEvidence/);
+  assert.match(view, /showEvidenceMetrics/);
+  assert.match(view, /className="evidence-metrics-toggle"/);
   assert.match(view, /mergeNewsEvidenceByEvent/);
   assert.match(view, /new Map<string, NewsEvidence>/);
   assert.match(view, /evidenceMode}:\$\{row\.event_key}/);
@@ -1497,6 +1595,10 @@ test("reflows news evidence into readable mobile cards", () => {
   assert.match(css, /\.evidence-time-cell \{ grid-area:time/);
   assert.match(css, /\.evidence-status-copy \{ display:none!important/);
   assert.match(css, /\.evidence-model-list \{ display:none!important/);
+  assert.match(css, /\.evidence-table-wrap:not\(\.show-all-mobile-items\) \.evidence-table tbody>tr:nth-child\(n\+9\)/);
+  assert.match(css, /\.evidence-desk>\.mobile-reveal-button \{ display:block;[^}]*min-height:48px/);
+  assert.match(css, /\.evidence-metrics-block \{ display:none/);
+  assert.match(css, /grid-template-areas:"event" "status" "time" "usage"/);
 });
 
 test("keeps shared news retrieval bounded and phone readable", () => {
