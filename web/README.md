@@ -24,8 +24,9 @@ npm run build
 - `wrangler.jsonc` declares D1 and runtime bindings.
 - `drizzle/` contains the append-only dashboard migrations.
 - the local synchronizer writes Sites and Cloudflare independently.
-- required secret names are declared for generated types, but values remain in
-  Cloudflare secrets and must never be committed.
+- `INGEST_TOKEN` is a required generated binding. Production-only relay and
+  Access values remain optional, fail-closed Cloudflare bindings so isolated
+  branch Previews can deploy without production authority.
 
 ## Workspace Auth Headers
 
@@ -113,9 +114,11 @@ npm run cf:deploy
 ```
 
 Cloudflare Access and at least one matching owner subject or email must be
-configured before private Assistant routes are enabled. Both owner secret names
-are declared so generated bindings remain exact; set an unused allowlist to a
-non-matching sentinel value rather than placing owner identity in source.
+configured before private Assistant routes are enabled. Both owner allowlist
+names remain explicit runtime contracts; set an unused allowlist to a
+non-matching sentinel value rather than placing owner identity in source. These
+production-only values are intentionally not `secrets.required`: branch Preview
+versions have no model authority and must remain deployable without them.
 
 The local Control Center reads these user-level environment variables when it
 starts `Dashboard Mirrors`:

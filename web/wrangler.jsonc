@@ -10,12 +10,7 @@
   },
   "secrets": {
     "required": [
-      "INGEST_TOKEN",
-      "STATUS_RELAY_URL",
-      "CF_ACCESS_TEAM_DOMAIN",
-      "CF_ACCESS_AUD",
-      "ASSISTANT_OWNER_SUBJECTS",
-      "ASSISTANT_OWNER_EMAILS"
+      "INGEST_TOKEN"
     ]
   },
   "observability": {
