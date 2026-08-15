@@ -1354,7 +1354,8 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.market-chart-block \.mobile-chart-scroll>\.learning-svg \{ display:block; width:720px; min-width:720px; min-height:300px; height:300px;/);
   assert.match(css, /\.market-action-filters \{ grid-column:1\/-1; display:grid; grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
   assert.match(css, /\.market-action-filters button\.active\+button\.active \{ border-left-color:rgba\(239,235,223,\.58\); \}/);
-  assert.match(modal, /className="decision-hit-target"[^>]*r="30"/);
+  assert.match(modal, /const selectNearestDecision = \(event: ReactMouseEvent<SVGSVGElement>\)/);
+  assert.match(modal, /onClick=\{selectNearestDecision\}/);
   assert.match(modal, /左右滑动浏览 · 点击箭头查看30分钟结果/);
   assert.match(modal, /左右滑动浏览长期曲线 · 文字与时间轴保持可读大小/);
   assert.match(css, /\.market-chart-block>\.chart-legend \{ display:flex; flex-wrap:wrap;/);
