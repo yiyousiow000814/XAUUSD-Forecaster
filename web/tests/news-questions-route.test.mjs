@@ -59,6 +59,7 @@ test("Preview returns only an explicit synthetic empty private history", async t
   );
   assert.equal(machineClaim.status, 403);
   assert.equal(touched, false);
+
 });
 
 test("Preview conversation routes reject mutations and expose only labeled empty fixtures", async t => {
@@ -99,5 +100,16 @@ test("Preview conversation routes reject mutations and expose only labeled empty
     executionContext,
   );
   assert.equal(machineClaim.status, 403);
+  assert.equal(touched, false);
+
+  const compactionClaim = await worker.fetch(
+    new Request(
+      "http://localhost/api/assistant-conversations?mode=compaction-claim&worker_id=test-worker",
+    ),
+    bindings,
+    executionContext,
+  );
+  assert.equal(compactionClaim.status, 403);
+  assert.equal(compactionClaim.headers.get("x-aurum-preview"), "write-rejected");
   assert.equal(touched, false);
 });

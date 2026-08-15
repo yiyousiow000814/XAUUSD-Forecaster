@@ -1593,3 +1593,116 @@ def test_assistant_title_sync_uses_low_priority_metered_accounting(
         },
     )]
     assert ledger_state["closed"] is True
+
+
+def test_assistant_compaction_sync_uses_incremental_claim_and_low_priority_gateway(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    module = _sync_module()
+    from xauusd_forecaster import (
+        assistant_compaction,
+        forward_ledger,
+        news_scheduler,
+        scheduler_model_gateway,
+    )
+
+    credential = news_scheduler.ApiCredential(
+        account_id="account-a", pool=news_scheduler.PREEMPTIBLE_POOL,
+        api_key="secret-key", credential_id="credential-a",
+    )
+    monkeypatch.setattr(
+        news_scheduler, "configured_api_credentials", lambda: (credential,),
+    )
+    closed = {"value": False}
+
+    class FakeLedger:
+        def __init__(self, path: Path) -> None:
+            self.connection = object()
+
+        def close(self) -> None:
+            closed["value"] = True
+
+    accountant_calls: list[bool] = []
+
+    def accountant(connection, selected, *, urgent):
+        accountant_calls.append(urgent)
+        return "compaction-accountant"
+
+    compaction_calls: list[dict] = []
+
+    def compact(prior_summary, pinned_state, source_messages, **kwargs):
+        compaction_calls.append({
+            "prior_summary": prior_summary,
+            "pinned_state": pinned_state,
+            "source_messages": source_messages,
+            **kwargs,
+        })
+        return {
+            "summary": "增量摘要",
+            "covered_message_ids": ["message-1", "message-2"],
+            "pinned_entries": [],
+            "model_version": "gemma-compaction-test",
+            "prompt_version": "assistant-compaction-v1",
+            "context_profile_id": "assistant-context-default-v1",
+        }
+
+    monkeypatch.setattr(forward_ledger, "ForwardLedger", FakeLedger)
+    monkeypatch.setattr(
+        scheduler_model_gateway, "SchedulerModelAccountant", accountant,
+    )
+    monkeypatch.setattr(assistant_compaction, "compact_assistant_context", compact)
+    claims = 0
+
+    def get_json(url: str, config: dict) -> dict:
+        nonlocal claims
+        if "/news-questions?" in url or "mode=title-claim" in url:
+            return {"item": None}
+        if "mode=compaction-claim" in url:
+            claims += 1
+            if claims == 1:
+                return {"item": {
+                    "id": "compaction-job-1",
+                    "lease_token": "compaction-lease-1",
+                    "prior_summary": {"version": 1, "content": "旧摘要"},
+                    "pinned_state": [{"kind": "UNRESOLVED", "content": "待处理"}],
+                    "source_messages": [
+                        {"id": "message-1", "role": "USER", "content": "问题"},
+                        {"id": "message-2", "role": "ASSISTANT", "content": "回答"},
+                    ],
+                    "prompt_version": "assistant-compaction-v1",
+                    "context_profile_id": "assistant-context-default-v1",
+                }}
+            return {"item": None}
+        raise AssertionError(f"unexpected URL: {url}")
+
+    posted: list[dict] = []
+    monkeypatch.setattr(module, "_get_json", get_json)
+    monkeypatch.setattr(
+        module,
+        "_post_json",
+        lambda url, payload, config: posted.append(json.loads(payload)) or {},
+    )
+    module._sync_news_questions({}, {
+        "remote_ingest_url": "https://example.test/api/ingest",
+        "token": "x", "local_database": tmp_path / "forward.sqlite3",
+    })
+
+    assert accountant_calls == [False]
+    assert compaction_calls[0]["prior_summary"]["version"] == 1
+    assert [item["id"] for item in compaction_calls[0]["source_messages"]] == [
+        "message-1", "message-2",
+    ]
+    assert compaction_calls[0]["request_accountant"] == "compaction-accountant"
+    assert posted == [{
+        "action": "COMPLETE_COMPACTION",
+        "id": "compaction-job-1",
+        "lease_token": "compaction-lease-1",
+        "summary": "增量摘要",
+        "covered_message_ids": ["message-1", "message-2"],
+        "pinned_entries": [],
+        "model_version": "gemma-compaction-test",
+        "prompt_version": "assistant-compaction-v1",
+        "context_profile_id": "assistant-context-default-v1",
+    }]
+    assert closed["value"] is True

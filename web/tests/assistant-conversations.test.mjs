@@ -216,6 +216,17 @@ test("AI and manual title work never changes conversation activity or overwrites
   assert.equal(conversation.title_source, "AI");
   assert.equal(conversation.last_activity_at, activity);
   assert.equal(database.row(job.id, "assistant_title_jobs").model_version, "gemma-title-test");
+  assert.deepEqual(
+    JSON.parse(database.row(job.id, "assistant_title_jobs").attempt_history_json)
+      .map(receipt => receipt.event),
+    ["CLAIMED", "COMPLETED"],
+  );
+  assert.throws(
+    () => database.database.prepare(
+      "UPDATE assistant_title_jobs SET attempt_history_json='[]' WHERE id=?",
+    ).run(job.id),
+    /append-only/,
+  );
 
   const requested = await requestAssistantTitleRegeneration(database, {
     ownerId: owner,
@@ -313,6 +324,11 @@ test("expired title leases are reclaimed and stale workers cannot apply a title"
   const created = await createQuestion(database);
   await completeQuestion(database, created);
   const stale = await claimAssistantTitleJob(database, "worker:stale", instant(2));
+  assert.equal(await failAssistantTitleJob(database, {
+    id: stale.id,
+    lease_token: stale.lease_token,
+    failure_code: "LATE_WORKER_FAILURE",
+  }, instant(6)), null);
   const recovered = await claimAssistantTitleJob(database, "worker:recovered", instant(6));
   assert.equal(recovered.id, stale.id);
   assert.equal(recovered.attempt_count, 2);

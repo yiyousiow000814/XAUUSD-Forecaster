@@ -35,7 +35,11 @@ class BoundStatement {
 }
 
 export class D1TestDatabase {
-  constructor(migrations = ["0008_news_questions.sql", "0009_assistant_conversations.sql"]) {
+  constructor(migrations = [
+    "0008_news_questions.sql",
+    "0009_assistant_conversations.sql",
+    "0010_assistant_memory_compaction.sql",
+  ]) {
     this.database = new DatabaseSync(":memory:");
     this.database.exec("PRAGMA foreign_keys=ON");
     for (const migrationName of migrations) {

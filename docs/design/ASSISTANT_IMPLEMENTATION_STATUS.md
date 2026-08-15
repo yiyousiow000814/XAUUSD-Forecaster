@@ -3,9 +3,9 @@
 ## Snapshot scope
 
 This status is maintained as the Assistant architecture and its bounded
-implementation PRs land. PR #103 established the contracts, and PRs #20, #21,
-and #22 are merged on `main`. The conversation rows describe the post-merge
-state carried by the bounded conversation-foundation implementation.
+implementation PRs land. PR #103 established the contracts; PRs #20, #21, #22,
+and #104 are merged on `main`. The rows describe the post-merge state carried by
+the bounded conversation and incremental-memory implementations.
 
 Status values have precise meanings:
 
@@ -28,15 +28,15 @@ Status values have precise meanings:
 | Conversation persistence | [State](../contracts/ASSISTANT_STATE.md) | `MVP` | Owner-scoped D1 Conversation and immutable Message records now form provider-independent canonical history. Q&A creates the first user/Assistant pair atomically; production activation requires migration `0009`, and general multi-turn orchestration remains future work. |
 | Conversation title | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `MVP` | First-message titles use a 32-grapheme provisional excerpt. Answer completion schedules a leased, metered, low-priority AI title job; manual rename, explicit regeneration, bounded retry, and stale-job cancellation are implemented. Production generation requires the updated Windows sync worker; chat UI controls remain future work. |
 | Conversation ordering | [State](../contracts/ASSISTANT_STATE.md) | `MVP` | Owner lists use `last_activity_at DESC,id DESC`. Only accepted user messages and persisted Assistant finals advance activity; title, rename, regeneration, and archive work are covered as non-activity. |
-| Short-term memory | [State](../contracts/ASSISTANT_STATE.md) | `NOT_IMPLEMENTED` | No pinned/summary/recent-turn Context Builder exists. |
+| Short-term memory | [State](../contracts/ASSISTANT_STATE.md) | `MVP` | The owner-scoped Context Builder assembles Pinned State, the current rolling summary, bounded optional historical inputs, recent verbatim turns, the canonical current user message, and compact tool evidence under an operational profile. Required pins, provenance, or evidence fail closed when they cannot fit; the long-term retrieval index remains separate. |
 | Long-term memory | [State](../contracts/ASSISTANT_STATE.md) | `NOT_IMPLEMENTED` | No owner-scoped historical memory index exists. |
-| Incremental compaction | [State](../contracts/ASSISTANT_STATE.md) | `NOT_IMPLEMENTED` | No versioned summary lifecycle exists. |
+| Incremental compaction | [State](../contracts/ASSISTANT_STATE.md) | `MVP` | Migration `0010` adds immutable versioned summaries, append-only origin-linked pins, and leased compaction receipts that freeze exactly the next ordered message chunk. The low-priority Windows worker sends only `summary vN + new chunk + pinned snapshot` through the metered gateway; invalid or failed output leaves the prior summary active. Production activation requires migration `0010` and the updated sync worker. |
 | Reasoning router | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `NOT_IMPLEMENTED` | No Assistant task/effort classification exists. |
 | Model routing | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `PARTIAL` | `ai_task_registry.py` declares routes for existing news AI tasks; there is no Assistant router. |
 | Multi-model routing | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `PARTIAL` | Existing annotation/title routes have declared fallbacks; mixed Assistant 31B/26B policy is absent. |
 | Multi-credential routing | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `PARTIAL` | The news scheduler ranks independent accounts; Assistant tasks are not integrated. |
 | TPM/RPM/RPD accounting | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | Q&A reserves interactive model use through the durable account/model scheduler accountant. A general Assistant capacity router and mixed-model policy remain future work. |
-| Unified model gateway | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | `model_gateway.py` is the single metered Google generation boundary used by the news semantic chain, Daily Brief, and Q&A. |
+| Unified model gateway | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | `model_gateway.py` is the single metered Google generation boundary used by the news semantic chain, Daily Brief, Q&A, titles, and compaction. |
 | Function calling | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `NOT_IMPLEMENTED` | No typed Assistant tool loop exists. |
 | Parallel tool execution | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `NOT_IMPLEMENTED` | No Assistant tool planner/executor exists. |
 | Streaming | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `NOT_IMPLEMENTED` | No versioned Assistant event transport exists. |
@@ -44,9 +44,9 @@ Status values have precise meanings:
 | Rich UI blocks | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `NOT_IMPLEMENTED` | No validated Assistant content-block protocol exists. |
 | Human authentication | [Security](../contracts/ASSISTANT_SECURITY.md) | `MVP` | News Q&A validates a Cloudflare Access JWT signature, issuer, audience, user identity, and configured owner membership before parsing or storage. Runtime Access policy and owner configuration are deployment prerequisites. |
 | Machine authentication | [Security](../contracts/ASSISTANT_SECURITY.md) | `MVP` | `INGEST_TOKEN` protects machine writes; a general service-actor model is not implemented. |
-| Assistant queue recovery | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `MVP` | D1 records enforce owner/global admission, idempotency, expiry, `PENDING`/`PROCESSING` leases, bounded backoff, exhausted `FAILED`, stale-lease recovery, and attempt receipts. Cancellation is future work. |
-| Evidence provenance through compaction | [State](../contracts/ASSISTANT_STATE.md) | `PARTIAL` | Canonical Assistant messages now retain stable evidence, retrieval, prompt, model, and timestamp provenance. No compaction path exists yet to carry it through summaries. |
-| Assistant Preview isolation | [Security](../contracts/ASSISTANT_SECURITY.md) | `MVP` | Q&A and conversation writes reject before authentication, parsing, D1, or model work. Preview GET returns only a labeled synthetic empty private history and the form remains disabled. |
+| Assistant queue recovery | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `MVP` | Q&A, title, and compaction D1 records use bounded attempts, append-only attempt receipts, and time-limited leases; expired work is reclaimed and stale workers cannot publish or consume a failure attempt. Q&A and compaction admission are bounded per owner and globally. User-turn cancellation is future work. |
+| Evidence provenance through compaction | [State](../contracts/ASSISTANT_STATE.md) | `MVP` | Summary rows retain a reproducible prior-summary/source-job chain. Server-derived anchors carry canonical evidence IDs, source references, important timestamps, and tool/artifact references, while every pin names canonical origin messages. Advanced claim validation remains separate. |
+| Assistant Preview isolation | [Security](../contracts/ASSISTANT_SECURITY.md) | `MVP` | Q&A, conversation, pin, context, and compaction writes or claims reject before authentication, parsing, D1, or model work. Preview GET returns only a labeled synthetic empty private history and the form remains disabled. |
 
 ## Historical stack remediation
 
@@ -102,9 +102,9 @@ foundation:
 
 PR #22 deliberately excluded canonical Conversation/Message storage. The
 conversation foundation now supplies that storage and title lifecycle without
-adding memory, compaction, streaming, function calling, a general model router,
-or rich content blocks. Those remain separate roadmap PRs created from merged
-`main`.
+adding streaming, function calling, a general model router, or rich content
+blocks. A later bounded implementation adds incremental memory and compaction as
+its own scope; long-term retrieval remains a separate roadmap PR.
 
 ## Update rule
 
