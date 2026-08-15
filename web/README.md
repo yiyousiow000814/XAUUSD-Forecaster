@@ -120,6 +120,12 @@ non-matching sentinel value rather than placing owner identity in source. These
 production-only values are intentionally not `secrets.required`: branch Preview
 versions have no model authority and must remain deployable without them.
 
+Protect `/assistant`, `/api/assistant-chat`,
+`/api/assistant-conversations`, and `/api/news-questions` with the Access
+application. Keep `/api/assistant-worker/*` outside that application; it is the
+non-browser control plane and accepts only `INGEST_TOKEN` plus the applicable
+job lease.
+
 The local Control Center reads these user-level environment variables when it
 starts `Dashboard Mirrors`:
 

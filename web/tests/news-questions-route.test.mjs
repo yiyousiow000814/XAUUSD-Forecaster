@@ -50,7 +50,7 @@ test("Preview returns only an explicit synthetic empty private history", async t
   assert.equal(touched, false);
 
   const machineClaim = await worker.fetch(
-    new Request("http://localhost/api/news-questions?mode=claim&worker_id=test-worker"),
+    new Request("http://localhost/api/assistant-worker/news-questions?worker_id=test-worker"),
     {
       DB: new Proxy({}, { get() { touched = true; throw new Error("D1 must stay untouched"); } }),
       ASSETS: assets,
@@ -95,7 +95,9 @@ test("Preview conversation routes reject mutations and expose only labeled empty
   assert.equal(touched, false);
 
   const machineClaim = await worker.fetch(
-    new Request("http://localhost/api/assistant-conversations?mode=title-claim&worker_id=test-worker"),
+    new Request(
+      "http://localhost/api/assistant-worker/conversations?queue=title&worker_id=test-worker",
+    ),
     bindings,
     executionContext,
   );
@@ -104,7 +106,7 @@ test("Preview conversation routes reject mutations and expose only labeled empty
 
   const compactionClaim = await worker.fetch(
     new Request(
-      "http://localhost/api/assistant-conversations?mode=compaction-claim&worker_id=test-worker",
+      "http://localhost/api/assistant-worker/conversations?queue=compaction&worker_id=test-worker",
     ),
     bindings,
     executionContext,
@@ -115,7 +117,7 @@ test("Preview conversation routes reject mutations and expose only labeled empty
 
   const memoryClaim = await worker.fetch(
     new Request(
-      "http://localhost/api/assistant-conversations?mode=memory-index-claim&worker_id=test-worker",
+      "http://localhost/api/assistant-worker/conversations?queue=memory-index&worker_id=test-worker",
     ),
     bindings,
     executionContext,
@@ -148,7 +150,7 @@ test("Preview chat runtime rejects every mutation and exposes a finite empty eve
   assert.equal(touched, false);
 
   const claim = await worker.fetch(
-    new Request("http://localhost/api/assistant-chat?mode=claim&worker_id=test-worker"),
+    new Request("http://localhost/api/assistant-worker/chat?worker_id=test-worker"),
     bindings,
     executionContext,
   );

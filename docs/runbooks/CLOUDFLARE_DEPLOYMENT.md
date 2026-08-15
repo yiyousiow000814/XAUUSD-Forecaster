@@ -11,11 +11,29 @@ npx wrangler d1 migrations apply aurum-signal-room --remote
 npx wrangler deploy
 ```
 
+Before enabling the private Assistant, configure one Cloudflare Access
+self-hosted application for these production paths only:
+
+- `/assistant`
+- `/api/assistant-chat`
+- `/api/assistant-conversations`
+- `/api/news-questions`
+
+Allow only the configured owner identity and set `CF_ACCESS_TEAM_DOMAIN`,
+`CF_ACCESS_AUD`, and at least one owner allowlist secret to match that
+application. Do not add `/api/assistant-worker/*` to the Access application.
+The Windows synchronizer reaches that separate control plane with
+`INGEST_TOKEN`; unauthenticated requests to it must receive `401` from the
+Worker.
+
 After changing a Worker secret, restart `Dashboard Mirrors` in the Control
 Center so the child process receives the current user-level environment.
 
 Verify the deployed Worker, required API routes, and dashboard synchronization
-before describing the deployment as recovered.
+before describing the deployment as recovered. Verification includes an Access
+login through `/assistant`, an authenticated human API request, an
+unauthenticated machine-route rejection, a successful Windows claim cycle, and
+`SYNC OK` at the exact deployed main revision.
 
 GitHub checks validate the branch; they do not deploy it. Do not add a workflow
 `environment:` key or call GitHub's Deployments API. When inspecting GitHub API

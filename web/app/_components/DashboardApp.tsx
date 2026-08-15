@@ -72,6 +72,11 @@ export default function DashboardApp({
   const navigate = useCallback(async (href: string, replace = false) => {
     const currentScrollTop = window.scrollY;
     const destinationUrl = new URL(href, window.location.href);
+    if (destinationUrl.pathname === "/assistant") {
+      if (replace) window.location.replace(destinationUrl.href);
+      else window.location.assign(destinationUrl.href);
+      return;
+    }
     const destination = parseDashboardUrl(destinationUrl);
     if (!destination) {
       if (replace) window.location.replace(destinationUrl.href);

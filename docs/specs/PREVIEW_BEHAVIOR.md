@@ -128,11 +128,12 @@ product requirement.
   local selection, older-message reveal, and progress-trace review; its
   composer and every conversation mutation remain unavailable.
 - `/api/assistant-chat` returns a labeled synthetic empty turn or finite empty
-  `assistant.event.v1` stream for reads. POST and machine-claim modes reject
-  before identity, body, D1, queue, or model work.
+  `assistant.event.v1` stream for reads. POST rejects before identity, body,
+  D1, queue, or model work.
 - `/api/assistant-conversations` returns only labeled synthetic-empty reads;
-  title, compaction, and historical-memory index claims reject before identity,
-  D1, or canonical-message access.
+  every mutation remains unavailable.
+- Every `/api/assistant-worker/*` claim or completion request rejects before
+  machine identity, body, D1, queue, model, or canonical-message access.
 
 ## Machine-readable manifest
 

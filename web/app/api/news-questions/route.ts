@@ -2,13 +2,8 @@ import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
 import { authenticateAssistantRequest } from "../_shared/assistant-auth";
 import { readBoundedBody } from "../_shared/dashboard-snapshot";
-import { isIngestAuthorized } from "../_shared/ingest-auth";
 import {
-  claimNewsQuestion,
-  completeNewsQuestion,
   createNewsQuestion,
-  deferNewsQuestion,
-  failNewsQuestion,
   getOwnerNewsQuestion,
   listOwnerNewsQuestions,
   NewsQuestionInputError,
@@ -52,29 +47,14 @@ const inputError = (error: NewsQuestionInputError) => noStoreJson(
 export async function GET(request: Request) {
   const params = new URL(request.url).searchParams;
   if (isPreviewDeployment) {
-    if (params.get("mode") === "claim") {
-      return rejectPreviewWrite() ?? previewJson({ error: "Preview 只读" }, 403, "write-rejected");
-    }
     return previewJson({ items: [], preview: true }, 200, "synthetic-empty-assistant");
-  }
-  if (params.get("mode") === "claim") {
-    if (!await isIngestAuthorized(request)) return unauthorized();
-    const binding = env.DB;
-    if (!binding) return unavailable();
-    const workerId = (params.get("worker_id") ?? "").trim();
-    if (!/^[A-Za-z0-9._:-]{3,96}$/.test(workerId)) {
-      return noStoreJson({ error: "invalid worker identity" }, 400);
-    }
-    try {
-      const item = await claimNewsQuestion(binding, workerId);
-      return noStoreJson({ item });
-    } catch {
-      return unavailable();
-    }
   }
 
   const actor = await authenticateAssistantRequest(request, env);
   if (!actor) return unauthorized();
+  if (params.has("mode")) {
+    return inputError(new NewsQuestionInputError("INVALID_MODE", "新闻问答查询模式无效"));
+  }
   const binding = env.DB;
   if (!binding) return unavailable();
   const id = params.get("id")?.trim();
@@ -101,30 +81,11 @@ export async function POST(request: Request) {
   const previewRejection = rejectPreviewWrite();
   if (previewRejection) return previewRejection;
   const mode = new URL(request.url).searchParams.get("mode");
-
-  if (mode === "machine") {
-    if (!await isIngestAuthorized(request)) return unauthorized();
-    const binding = env.DB;
-    if (!binding) return unavailable();
-    try {
-      const body = await boundedBody(request);
-      const action = String(body.action ?? "");
-      let item;
-      if (action === "COMPLETE") item = await completeNewsQuestion(binding, body);
-      else if (action === "DEFER") item = await deferNewsQuestion(binding, body);
-      else if (action === "FAIL") item = await failNewsQuestion(binding, body);
-      else throw new NewsQuestionInputError("INVALID_ACTION", "机器动作无效");
-      return item
-        ? noStoreJson({ status: "OK", item })
-        : noStoreJson({ error: "租约已失效" }, 409);
-    } catch (error) {
-      if (error instanceof NewsQuestionInputError) return inputError(error);
-      return unavailable();
-    }
-  }
-
   const actor = await authenticateAssistantRequest(request, env);
   if (!actor) return unauthorized();
+  if (mode !== null) {
+    return inputError(new NewsQuestionInputError("INVALID_MODE", "新闻问答写入模式无效"));
+  }
   const binding = env.DB;
   if (!binding) return unavailable();
   try {

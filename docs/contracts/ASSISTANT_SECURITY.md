@@ -59,6 +59,12 @@ private UI is enabled for use. Missing or malformed configuration fails closed;
 it does not fall back to an anonymous queue, a browser credential, or the
 machine ingest token.
 
+The Access application protects `/assistant`, `/api/assistant-chat`,
+`/api/assistant-conversations`, and `/api/news-questions`. Those application
+paths are the human boundary. `/api/assistant-worker/*` is deliberately outside
+the Access application because it has no browser identity and is authorized by
+the independent machine policy below.
+
 ### Machine synchronization
 
 The local Windows synchronizer and other services use a machine or service
@@ -66,12 +72,14 @@ identity. Machine routes MUST NOT rely on a human browser cookie, and human
 Assistant routes MUST NOT accept the ingest token as a user identity. Machine
 and human authorization are separate policies even when they share hosting.
 
-The operational `/api/assistant-chat` boundary follows that separation. Human
-send, cancel, turn-read, and SSE-replay requests require the verified owner.
-Machine claim, progress, completion, failure, and capacity-defer requests
-require `INGEST_TOKEN`; every mutation after claim must also present the exact
-unexpired lease token. Lease renewal requires the same token and cannot extend
-past the turn expiry. Neither credential class is accepted as the other.
+Human send, cancel, turn-read, SSE-replay, conversation, and News Q&A requests
+exist only on the Access-protected human routes. Machine claim, context,
+progress, completion, failure, and capacity-defer requests exist only under
+`/api/assistant-worker/*` and require `INGEST_TOKEN`. Every mutation after a
+claim must also present the exact unexpired lease token. Lease renewal requires
+the same token and cannot extend past the turn expiry. Human routes do not
+accept machine modes, and machine routes do not accept Access as a substitute
+for `INGEST_TOKEN`.
 
 ## Ownership enforcement
 

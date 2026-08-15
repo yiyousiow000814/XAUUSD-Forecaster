@@ -133,6 +133,28 @@ test("conversation transport preserves active-turn recovery and Preview labeling
   });
 });
 
+test("Access login HTML is never accepted as an Assistant API response", async () => {
+  const loginPage = () => new Response("<!doctype html><title>Access login</title>", {
+    status: 200,
+    headers: { "Content-Type": "text/html; charset=utf-8" },
+  });
+  await assert.rejects(
+    fetchAssistantConversations(false, async () => loginPage()),
+    error => error instanceof AssistantClientError
+      && error.code === "ACCESS_LOGIN_REQUIRED"
+      && error.status === 401,
+  );
+  await assert.rejects(
+    replayAssistantEvents(
+      "turn-preview-rates", 0, new AbortController().signal,
+      async () => loginPage(),
+    ),
+    error => error instanceof AssistantClientError
+      && error.code === "ACCESS_LOGIN_REQUIRED"
+      && error.status === 401,
+  );
+});
+
 test("message paging deduplicates immutable history and rejects changed copies", () => {
   const messages = assistantPreviewMessages("conversation-preview-rates");
   assert.deepEqual(

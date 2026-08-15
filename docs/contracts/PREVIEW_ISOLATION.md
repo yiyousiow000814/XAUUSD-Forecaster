@@ -94,13 +94,14 @@ rendering of the five validated v1 content-block types. Synthetic content and
 links remain explicitly non-authoritative. Composer, rename, title regeneration,
 archive, cancellation, and every other mutation remain disabled.
 
-For `/api/assistant-chat`, every POST and machine claim returns the standard
-write rejection before authentication, body parsing, or D1 access. Human turn
-reads return a labeled synthetic empty object, and event reads return a finite
-empty `assistant.event.v1` SSE response. Neither response probes production
-Assistant ownership or state.
+For `/api/assistant-chat`, every POST returns the standard write rejection
+before authentication, body parsing, or D1 access. Human turn reads return a
+labeled synthetic empty object, and event reads return a finite empty
+`assistant.event.v1` SSE response. Neither response probes production Assistant
+ownership or state. `/api/assistant-conversations` follows the same human-read
+and mutation boundary.
 
-Every `/api/assistant-conversations` machine claim, including title,
-compaction, and historical-memory indexing, follows the same early rejection.
-Preview never reads canonical production messages to build or test a private
-memory index.
+Every `/api/assistant-worker/*` GET or POST follows the early write rejection,
+including chat, News Q&A, title, compaction, and historical-memory indexing.
+Preview never authenticates a machine, claims work, or reads canonical
+production messages to build or test private memory.

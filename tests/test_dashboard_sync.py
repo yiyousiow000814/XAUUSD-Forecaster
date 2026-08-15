@@ -500,9 +500,9 @@ def test_sites_bypass_header_is_shared_by_get_and_post_but_not_cloudflare(
     module._post_json(
         "https://example.chatgpt.site/api/ingest", b"{}", config
     )
-    module._get_json("https://example.chatgpt.site/api/assistant-chat", config)
+    module._get_json("https://example.chatgpt.site/api/assistant-worker/chat", config)
     module._post_json("https://example.workers.dev/api/ingest", b"{}", config)
-    module._get_json("https://example.workers.dev/api/assistant-chat", config)
+    module._get_json("https://example.workers.dev/api/assistant-worker/chat", config)
 
     assert "Oai-sites-authorization" in captured[0]
     assert "Oai-sites-authorization" in captured[1]
@@ -1432,7 +1432,9 @@ def test_assistant_chat_sync_wires_one_bounded_native_worker(
     })
 
     assert result == "worker-result"
-    assert captured["chat_url"] == "https://example.test/api/assistant-chat"
+    assert captured["chat_url"] == (
+        "https://example.test/api/assistant-worker/chat"
+    )
     assert captured["worker_id"] == "dashboard-sync:Desk-Top-"
     assert captured["database"] == tmp_path / "forward.sqlite3"
     assert captured["credentials"] == credentials
@@ -1497,13 +1499,25 @@ def test_news_question_sync_uses_shared_retrieval_and_skips_model_without_eviden
     )
 
     assert any("/news-search?" in url for url in requested_urls)
-    assert any("mode=memory-index-claim" in url for url in requested_urls)
-    assert not any("mode=title-claim" in url for url in requested_urls)
+    assert any("queue=memory-index" in url for url in requested_urls)
+    assert not any("queue=title" in url for url in requested_urls)
     assert posted[0]["action"] == "COMPLETE"
     assert posted[0]["answer_status"] == "INSUFFICIENT_EVIDENCE"
     assert posted[0]["evidence_ids"] == []
     assert posted[0]["evidence_validation"]["mode"] == "INSUFFICIENT_EVIDENCE"
     assert "poison recent slice" not in json.dumps(posted, ensure_ascii=False)
+
+
+def test_news_worker_override_cannot_target_a_human_route() -> None:
+    module = _sync_module()
+    with pytest.raises(ValueError, match="machine control plane"):
+        module._sync_news_questions({}, {
+            "remote_ingest_url": "https://example.test/api/ingest",
+            "remote_assistant_worker_news_url": (
+                "https://example.test/api/news-questions"
+            ),
+            "token": "x",
+        })
 
 
 def test_news_question_sync_uses_interactive_accounting_and_persists_retrieval(
@@ -1684,9 +1698,9 @@ def test_assistant_memory_index_sync_is_model_free_and_does_not_echo_content(
 
     def get_json(url: str, config: dict) -> dict:
         nonlocal memory_claims
-        if "/news-questions?" in url:
+        if "/assistant-worker/news-questions?" in url:
             return {"item": None}
-        if "mode=memory-index-claim" in url:
+        if "queue=memory-index" in url:
             memory_claims += 1
             if memory_claims == 1:
                 return {"item": {
@@ -1769,11 +1783,13 @@ def test_assistant_title_sync_uses_low_priority_metered_accounting(
 
     def get_json(url: str, config: dict) -> dict:
         nonlocal title_claims
-        if "/news-questions?" in url:
+        if "/assistant-worker/news-questions?" in url:
             return {"item": None}
-        if "mode=memory-index-claim" in url:
+        if "queue=memory-index" in url:
             return {"item": None}
-        if "/assistant-conversations?" in url:
+        if "queue=compaction" in url:
+            return {"item": None}
+        if "queue=title" in url:
             title_claims += 1
             if title_claims == 1:
                 return {"item": {
@@ -1809,7 +1825,9 @@ def test_assistant_title_sync_uses_low_priority_metered_accounting(
         "model": "gemma-4-31b-it",
         "thinking_level": "minimal",
     }]
-    assert posted[0][0] == "https://example.test/api/assistant-conversations?mode=machine"
+    assert posted[0][0] == (
+        "https://example.test/api/assistant-worker/conversations"
+    )
     assert {key: value for key, value in posted[0][1].items() if key != "routing"} == {
         "action": "COMPLETE_TITLE", "id": "title-job-1",
         "lease_token": "title-lease-1",
@@ -1878,12 +1896,12 @@ def test_assistant_compaction_sync_uses_incremental_claim_and_low_priority_gatew
     def get_json(url: str, config: dict) -> dict:
         nonlocal claims
         if (
-            "/news-questions?" in url
-            or "mode=title-claim" in url
-            or "mode=memory-index-claim" in url
+            "/assistant-worker/news-questions?" in url
+            or "queue=title" in url
+            or "queue=memory-index" in url
         ):
             return {"item": None}
-        if "mode=compaction-claim" in url:
+        if "queue=compaction" in url:
             claims += 1
             if claims == 1:
                 return {"item": {
