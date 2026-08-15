@@ -727,11 +727,16 @@ test("renders component and news-source health on a separate route", async () =>
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(view, /componentHasAttention/);
   assert.match(view, /sourceHasAttention/);
-  assert.match(view, /className=\{healthy \? "is-healthy" : "is-attention"\}/);
+  assert.match(view, /function SourceHealthCard/);
+  assert.match(view, /className="source-detail-toggle"/);
+  assert.match(view, /className="news-source-details"/);
+  assert.match(view, /showDetails \? "收起来源证据" : "查看来源证据"/);
   assert.match(css, /\.component-status\.has-attention:not\(\.show-healthy\) article\.is-healthy/);
   assert.match(css, /\.health-reveal-button \{ display:block;[^}]*min-height:48px/);
   assert.match(css, /\.component-status>header p \{ display:none; \}/);
   assert.match(css, /\.component-status>div \{ gap:13px; background:transparent; \}/);
+  assert.match(css, /\.source-health\.show-healthy article\.is-healthy \.news-source-details \{ display:none; \}/);
+  assert.match(css, /\.source-health\.show-healthy article\.is-healthy\.is-detail-open \.news-source-details \{ display:contents; \}/);
 });
 
 test("uses one Chinese system-state presentation across every dashboard page", () => {

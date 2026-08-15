@@ -1073,6 +1073,8 @@ body.modal-open { overflow:hidden; }
 .evidence-metrics-toggle { display:none; }
 .evidence-metrics-block { display:block; }
 .news-secondary-toggle { display:none; }
+.source-detail-toggle { display:none; }
+.news-source-details { display:contents; }
 
 /* On phones this evidence console becomes an editorial reading surface. The
    desktop keeps its dense operational layout; mobile reveals detail by intent. */
@@ -1181,6 +1183,7 @@ body.modal-open { overflow:hidden; }
   .source-health article { gap:15px; }
   .source-health article>div { padding-top:13px; border-top:1px solid rgba(17,17,15,.16); }
   .source-health article>div:first-child { padding-top:0; border-top:0; }
+  .source-health article .news-source-details>div { padding-top:13px; border-top:1px solid rgba(17,17,15,.16); }
   .source-health article strong { font-size:16px; line-height:1.4; }
   .source-health article small { font-size:12px; line-height:1.65; }
   .source-health-error { padding:13px!important; background:#e6e0d2; }
@@ -1202,8 +1205,13 @@ body.modal-open { overflow:hidden; }
   .component-status.show-healthy article.is-healthy { display:grid; grid-template-columns:auto minmax(0,1fr); align-items:center; gap:5px 10px; padding:13px 15px; }
   .component-status.show-healthy article.is-healthy strong { margin:0; }
   .component-status.show-healthy article.is-healthy small { grid-column:2; }
-  .source-health.show-healthy article.is-healthy { gap:8px; padding:14px 15px; }
-  .source-health.show-healthy article.is-healthy>div { padding-top:8px; }
+  .source-health.show-healthy article.is-healthy { grid-template-columns:minmax(0,1fr) auto; gap:8px 12px; padding:14px 15px; }
+  .source-health.show-healthy article.is-healthy>div:nth-child(2) { border-top:0; padding-top:0; text-align:right; }
+  .source-health.show-healthy article.is-healthy>div:nth-child(2) small { display:none; }
+  .source-health.show-healthy article.is-healthy .source-detail-toggle { display:block; grid-column:1/-1; width:100%; min-height:44px; border:1px solid rgba(17,17,15,.35); background:transparent; color:var(--ink); font-weight:900; cursor:pointer; }
+  .source-health.show-healthy article.is-healthy .news-source-details { display:none; }
+  .source-health.show-healthy article.is-healthy.is-detail-open .news-source-details { display:contents; }
+  .source-health.show-healthy article.is-healthy .news-source-details>div { grid-column:1/-1; padding-top:9px; }
   .source-health.show-healthy article.is-healthy .source-health-error { padding:9px 10px!important; }
 }
 
