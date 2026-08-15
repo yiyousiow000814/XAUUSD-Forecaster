@@ -1312,7 +1312,8 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(responsiveScroll, /matchMedia\("\(max-width: 850px\)"\)\.matches/);
   assert.match(responsiveScroll, /if \(isPhoneViewport\(\)\) \{[\s\S]*scroll\(\{ top: 0, left: 0, behavior: "instant" \}\)/);
   assert.match(responsiveScroll, /let remainingFrames = 30/);
-  assert.match(responsiveScroll, /Math\.abs\(readTop\(\) - desktopTop\) > 1/);
+  assert.match(responsiveScroll, /stableFrames = Math\.abs\(readTop\(\) - desktopTop\) <= 1 \? stableFrames \+ 1 : 0/);
+  assert.match(responsiveScroll, /stableFrames < 6 && remainingFrames > 0/);
   assert.doesNotMatch(page, /scrollAuditTabs|auditTabsRef|向左查看更多审计视图|向右查看更多审计视图/);
   for (const [source, current] of [[live, "live"], [page, "mobileDashboardSection"], [status, "status"], [health, "health"], [assistant, "assistant"]]) {
     assert.match(source, new RegExp(`<MobileDashboardNav current=\\{?"?${current}`));

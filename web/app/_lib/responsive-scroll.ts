@@ -11,12 +11,14 @@ export const settleResponsiveScroll = (
   }
   // Lazy views may commit a short Suspense shell before their full content.
   // Retry only while the browser has clamped the requested desktop position;
-  // stop immediately once the original reading position is reachable.
+  // require a few stable frames so a late Suspense commit cannot move it again.
   let remainingFrames = 30;
+  let stableFrames = 0;
   const settle = () => {
     scroll({ top: desktopTop, left: 0, behavior: "instant" });
     remainingFrames -= 1;
-    if (Math.abs(readTop() - desktopTop) > 1 && remainingFrames > 0) {
+    stableFrames = Math.abs(readTop() - desktopTop) <= 1 ? stableFrames + 1 : 0;
+    if (stableFrames < 6 && remainingFrames > 0) {
       window.requestAnimationFrame(settle);
     }
   };
