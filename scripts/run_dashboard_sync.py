@@ -994,6 +994,10 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
         ASSISTANT_COMPACTION_MAX_OUTPUT_TOKENS,
         compact_assistant_context,
     )
+    from xauusd_forecaster.assistant_memory_index import (
+        ASSISTANT_MEMORY_MAX_CLAIMS_PER_SYNC,
+        build_assistant_memory_index_result,
+    )
     from xauusd_forecaster.assistant_capacity import (
         AssistantCapacityUnavailable,
         AssistantServicePriority,
@@ -1163,7 +1167,34 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                     }).encode("utf-8"),
                     config,
                 )
-        # Background work must not consume the pool reserved for interactive
+        conversation_url = api_root + "/assistant-conversations"
+        for _ in range(ASSISTANT_MEMORY_MAX_CLAIMS_PER_SYNC):
+            claim_url = conversation_url + "?" + urllib.parse.urlencode({
+                "mode": "memory-index-claim", "worker_id": worker_id,
+            })
+            item = _get_json(claim_url, config).get("item")
+            if not isinstance(item, dict):
+                break
+            try:
+                result = build_assistant_memory_index_result(item)
+                _post_json(
+                    conversation_url + "?mode=machine",
+                    json.dumps(result, ensure_ascii=False).encode("utf-8"),
+                    config,
+                )
+            except Exception:
+                _post_json(
+                    conversation_url + "?mode=machine",
+                    json.dumps({
+                        "action": "FAIL_MEMORY_INDEX",
+                        "id": item.get("id"),
+                        "lease_token": item.get("lease_token"),
+                        "failure_code": "MEMORY_INDEX_INVALID",
+                    }).encode("utf-8"),
+                    config,
+                )
+
+        # Background model work must not consume the pool reserved for interactive
         # requests. Leave it unclaimed when no routine pool is configured.
         routine_pool_ids = {
             item.account_id for item in credentials if item.pool == ROUTINE_POOL
@@ -1173,7 +1204,7 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
             for policy in capacity_policies
         ):
             return
-        title_url = api_root + "/assistant-conversations"
+        title_url = conversation_url
         for _ in range(3):
             claim_url = title_url + "?" + urllib.parse.urlencode({
                 "mode": "title-claim", "worker_id": worker_id,

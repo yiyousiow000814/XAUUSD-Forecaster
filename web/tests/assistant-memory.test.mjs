@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -7,12 +9,20 @@ import {
   buildAssistantContext,
   claimAssistantCompactionJob,
   completeAssistantCompactionJob,
+  conservativeAssistantTokenEstimate,
   createAssistantPinnedEntry,
   deferAssistantCompactionJob,
   failAssistantCompactionJob,
   scheduleAssistantCompaction,
 } from "../app/api/_shared/assistant-memory.ts";
-import { D1TestDatabase } from "./d1-test-database.mjs";
+import {
+  ASSISTANT_MEMORY_INDEX_VERSION,
+  claimAssistantMemoryIndexJob,
+  completeAssistantMemoryIndexJob,
+  failAssistantMemoryIndexJob,
+  tokenizeAssistantMemory,
+} from "../app/api/_shared/assistant-memory-index.ts";
+import { ASSISTANT_TEST_MIGRATIONS, D1TestDatabase } from "./d1-test-database.mjs";
 import { assistantRouting } from "./assistant-routing-fixture.mjs";
 
 const owner = "cloudflare-access:memory-owner";
@@ -46,7 +56,10 @@ function seedConversation(database, {
   actor = owner,
   turns = 5,
   contentSize = 36,
+  startMinute = 0,
+  messages = null,
 } = {}) {
+  const messageCount = messages?.length ?? turns * 2;
   database.database.prepare(
     `INSERT INTO assistant_conversations (
        id,owner_id,initial_idempotency_key,title,title_source,created_at,
@@ -56,8 +69,8 @@ function seedConversation(database, {
     id,
     actor,
     `memory-idempotency-${id}`,
-    instant(0).toISOString(),
-    instant(turns * 2).toISOString(),
+    instant(startMinute).toISOString(),
+    instant(startMinute + messageCount).toISOString(),
   );
   const insert = database.database.prepare(
     `INSERT INTO assistant_messages (
@@ -65,7 +78,7 @@ function seedConversation(database, {
      ) VALUES (?,?,?,?,?,?,?,?)`,
   );
   const ids = [];
-  for (let index = 1; index <= turns * 2; index += 1) {
+  for (let index = 1; index <= messageCount; index += 1) {
     const messageId = `${id}-message-${String(index).padStart(2, "0")}`;
     ids.push(messageId);
     const provenance = index === 2 ? {
@@ -81,14 +94,35 @@ function seedConversation(database, {
       messageId,
       id,
       index % 2 ? "USER" : "ASSISTANT",
-      `${index % 2 ? "用户约束" : "回答"}-${index}-` + "甲".repeat(contentSize),
-      instant(index).toISOString(),
+      messages?.[index - 1]
+        ?? `${index % 2 ? "用户约束" : "回答"}-${index}-` + "甲".repeat(contentSize),
+      instant(startMinute + index).toISOString(),
       JSON.stringify(provenance),
       "MEMORY_TEST",
       `${id}-source-${index}`,
     );
   }
   return { conversationId: id, messageIds: ids };
+}
+
+const memoryCompletionPayload = claim => ({
+  id: claim.id,
+  lease_token: claim.lease_token,
+  source_message_id: claim.source_message_id,
+  index_version: claim.index_version,
+  source_content_sha256: createHash("sha256").update(claim.content).digest("hex"),
+  terms: tokenizeAssistantMemory(claim.content),
+});
+
+async function drainMemoryIndex(database, now = instant(100)) {
+  const completed = [];
+  while (true) {
+    const claim = await claimAssistantMemoryIndexJob(database, "worker:memory-index", now);
+    if (!claim) return completed;
+    completed.push(await completeAssistantMemoryIndexJob(
+      database, memoryCompletionPayload(claim), now,
+    ));
+  }
 }
 
 const completePayload = (claim, summary, pins = []) => ({
@@ -445,39 +479,6 @@ test("Context Builder preserves ordered layers and fails closed for owner or req
       ownerId: owner,
       conversationId: seeded.conversationId,
       currentUserMessageId: seeded.messageIds.at(-2),
-      historicalMemory: [{
-        content: "foreign memory",
-        canonical_message_ids: [foreign.messageIds[0]],
-      }],
-    }),
-    error => error.code === "HISTORICAL_MEMORY_NOT_OWNER_SCOPED",
-  );
-  await assert.rejects(
-    buildAssistantContext(database, {
-      ownerId: owner,
-      conversationId: seeded.conversationId,
-      currentUserMessageId: seeded.messageIds.at(-2),
-      historicalMemory: [{
-        content: "future memory",
-        canonical_message_ids: [seeded.messageIds.at(-1)],
-      }],
-    }),
-    error => error.code === "HISTORICAL_MEMORY_NOT_OWNER_SCOPED",
-  );
-  await assert.rejects(
-    buildAssistantContext(database, {
-      ownerId: owner,
-      conversationId: seeded.conversationId,
-      currentUserMessageId: seeded.messageIds.at(-2),
-      historicalMemory: [{ content: "unlinked memory", canonical_message_ids: [] }],
-    }),
-    error => error.code === "HISTORICAL_MEMORY_NOT_OWNER_SCOPED",
-  );
-  await assert.rejects(
-    buildAssistantContext(database, {
-      ownerId: owner,
-      conversationId: seeded.conversationId,
-      currentUserMessageId: seeded.messageIds.at(-2),
     }, {
       ...DEFAULT_ASSISTANT_CONTEXT_PROFILE,
       id: "assistant-context-recent-message-bound-v1",
@@ -506,5 +507,246 @@ test("Context Builder preserves ordered layers and fails closed for owner or req
        ) VALUES ('invalid-pin',?,'invalid-pin-key','TOPIC','bad',?,'[]','[]','[]','[]','[]','SYSTEM',?)`,
     ).run(seeded.conversationId, JSON.stringify([foreign.messageIds[0]]), instant(20).toISOString()),
     /canonical origins/,
+  );
+});
+
+test("historical memory tokenizer matches the shared Python fixture", () => {
+  const fixture = JSON.parse(readFileSync(
+    new URL("../../tests/fixtures/assistant_memory_tokenizer.json", import.meta.url),
+    "utf8",
+  ));
+  for (const item of fixture) {
+    assert.deepEqual(
+      tokenizeAssistantMemory(item.text, item.maximum_terms),
+      item.terms,
+    );
+  }
+});
+
+test("historical memory migration backfills every existing canonical message", () => {
+  const database = new D1TestDatabase(ASSISTANT_TEST_MIGRATIONS.slice(0, -1));
+  const seeded = seedConversation(database, {
+    id: "conversation-memory-backfill",
+    messages: ["第一条旧消息。", "第二条旧回答。", "第三条旧消息。"],
+  });
+
+  database.applyMigration("0015_assistant_historical_memory.sql");
+
+  assert.equal(
+    database.database.prepare(
+      "SELECT count(*) AS count FROM assistant_memory_index_jobs",
+    ).get().count,
+    seeded.messageIds.length,
+  );
+  assert.deepEqual(
+    database.database.prepare(
+      "SELECT source_message_id FROM assistant_memory_index_jobs ORDER BY source_created_at,id",
+    ).all().map(row => row.source_message_id),
+    seeded.messageIds,
+  );
+});
+
+test("historical memory is owner-scoped, point-in-time, canonical, and deterministic", async () => {
+  const database = new D1TestDatabase();
+  const primary = seedConversation(database, {
+    id: "conversation-history-primary",
+    startMinute: 0,
+    messages: [
+      "美联储利率决议曾经令黄金快速上涨。",
+      "当时的回答记录了 XAUUSD 与美元利率的关系。",
+    ],
+  });
+  const secondary = seedConversation(database, {
+    id: "conversation-history-secondary",
+    startMinute: 5,
+    messages: [
+      "黄金价格回顾。",
+      "这是一条较弱的相关回答。",
+    ],
+  });
+  const foreign = seedConversation(database, {
+    id: "conversation-history-foreign",
+    actor: otherOwner,
+    startMinute: 2,
+    messages: ["美联储利率黄金外部用户内容。"],
+  });
+  const current = seedConversation(database, {
+    id: "conversation-history-current",
+    startMinute: 20,
+    messages: ["美联储利率现在还会影响黄金吗？", "尚未到达的回答。"],
+  });
+  const future = seedConversation(database, {
+    id: "conversation-history-future",
+    startMinute: 30,
+    messages: ["未来的美联储利率黄金消息。"],
+  });
+  const originalActivity = Object.fromEntries([
+    primary, secondary, current,
+  ].map(item => [
+    item.conversationId,
+    database.row(item.conversationId, "assistant_conversations").last_activity_at,
+  ]));
+
+  await drainMemoryIndex(database);
+  const first = await buildAssistantContext(database, {
+    ownerId: owner,
+    conversationId: current.conversationId,
+    currentUserMessageId: current.messageIds[0],
+  });
+  const second = await buildAssistantContext(database, {
+    ownerId: owner,
+    conversationId: current.conversationId,
+    currentUserMessageId: current.messageIds[0],
+  });
+  assert.deepEqual(second, first);
+  const history = first.layers[2];
+  assert.equal(history.type, "HISTORICAL_MEMORY");
+  assert.equal(history.retrieval.index_version, ASSISTANT_MEMORY_INDEX_VERSION);
+  assert.equal(history.retrieval.index_complete, true);
+  assert.equal(history.retrieval.current_conversation_excluded, true);
+  assert.equal(history.retrieval.trust, "UNVERIFIED_CONVERSATION_TEXT");
+  assert.ok(history.items.length >= 2);
+  assert.equal(history.items[0].source_conversation_id, primary.conversationId);
+  assert.ok(history.items.every(item => item.trust === "UNVERIFIED_CONVERSATION_TEXT"));
+  assert.ok(history.items.every(item => item.source_conversation_id !== current.conversationId));
+  assert.ok(history.items.every(item => item.source_conversation_id !== foreign.conversationId));
+  assert.ok(history.items.every(item => item.source_conversation_id !== future.conversationId));
+  assert.ok(history.items.every(item => item.canonical_message_ids.length === 1));
+  assert.ok(history.items.every(item => item.created_at < instant(21).toISOString()));
+  assert.equal(
+    history.items[0].content,
+    database.row(history.items[0].canonical_message_ids[0], "assistant_messages").content,
+  );
+  assert.ok(history.token_estimate <= DEFAULT_ASSISTANT_CONTEXT_PROFILE.historicalMemoryTokenBudget);
+  assert.equal(
+    history.token_estimate,
+    conservativeAssistantTokenEstimate({
+      retrieval: history.retrieval,
+      items: history.items,
+    }),
+  );
+
+  const entryColumns = database.database.prepare(
+    "PRAGMA table_info(assistant_memory_entries)",
+  ).all().map(column => column.name);
+  assert.equal(entryColumns.includes("content"), false);
+  assert.equal(entryColumns.includes("provenance_json"), false);
+  assert.equal(
+    database.database.prepare("SELECT count(*) AS count FROM assistant_memory_entries").get().count,
+    database.database.prepare("SELECT count(*) AS count FROM assistant_messages").get().count,
+  );
+  for (const [conversationId, activity] of Object.entries(originalActivity)) {
+    assert.equal(
+      database.row(conversationId, "assistant_conversations").last_activity_at,
+      activity,
+    );
+  }
+  assert.throws(
+    () => database.database.prepare(
+      "UPDATE assistant_memory_entries SET term_count=0 WHERE id=?",
+    ).run(database.database.prepare("SELECT id FROM assistant_memory_entries LIMIT 1").get().id),
+    /immutable/,
+  );
+});
+
+test("historical context reports incomplete indexing without claiming false recall", async () => {
+  const database = new D1TestDatabase();
+  const historical = seedConversation(database, {
+    id: "conversation-history-pending",
+    startMinute: 0,
+    messages: ["黄金与美联储利率的旧问题。", "旧回答。"],
+  });
+  const current = seedConversation(database, {
+    id: "conversation-history-query",
+    startMinute: 10,
+    messages: ["美联储利率如何影响黄金？"],
+  });
+
+  const context = await buildAssistantContext(database, {
+    ownerId: owner,
+    conversationId: current.conversationId,
+    currentUserMessageId: current.messageIds[0],
+  });
+  const history = context.layers[2];
+  assert.deepEqual(history.items, []);
+  assert.equal(history.retrieval.index_complete, false);
+  assert.equal(history.retrieval.pending_messages, historical.messageIds.length);
+  assert.equal(history.retrieval.indexed_messages, 0);
+});
+
+test("memory indexing rejects forged derivations and commits exact canonical terms atomically", async () => {
+  const database = new D1TestDatabase();
+  const seeded = seedConversation(database, {
+    id: "conversation-index-integrity",
+    messages: ["美联储利率影响黄金。"],
+  });
+  const claim = await claimAssistantMemoryIndexJob(database, "worker:index", instant(10));
+  assert.equal(claim.source_message_id, seeded.messageIds[0]);
+  await assert.rejects(
+    completeAssistantMemoryIndexJob(database, {
+      ...memoryCompletionPayload(claim),
+      terms: ["forged"],
+    }, instant(10)),
+    error => error.code === "INVALID_MEMORY_INDEX_RESULT",
+  );
+  assert.equal(
+    database.database.prepare("SELECT count(*) AS count FROM assistant_memory_entries").get().count,
+    0,
+  );
+  await assert.rejects(
+    completeAssistantMemoryIndexJob(database, {
+      ...memoryCompletionPayload(claim),
+      source_content_sha256: "0".repeat(64),
+    }, instant(10)),
+    error => error.code === "INVALID_MEMORY_INDEX_RESULT",
+  );
+  const completed = await completeAssistantMemoryIndexJob(
+    database, memoryCompletionPayload(claim), instant(10),
+  );
+  assert.equal(completed.status, "COMPLETED");
+  assert.equal(completed.term_count, tokenizeAssistantMemory(claim.content).length);
+  assert.deepEqual(
+    database.database.prepare(
+      "SELECT term FROM assistant_memory_terms ORDER BY rowid",
+    ).all().map(row => row.term),
+    tokenizeAssistantMemory(claim.content),
+  );
+  assert.throws(
+    () => database.database.prepare(
+      "UPDATE assistant_memory_index_jobs SET attempt_history_json='[]' WHERE id=?",
+    ).run(claim.id),
+    /immutable|append-only/,
+  );
+});
+
+test("memory index leases recover finitely and stale workers cannot publish", async () => {
+  const database = new D1TestDatabase();
+  seedConversation(database, {
+    id: "conversation-index-lease",
+    messages: ["黄金历史记忆。"],
+  });
+  const stale = await claimAssistantMemoryIndexJob(database, "worker:stale", instant(10));
+  assert.equal(await completeAssistantMemoryIndexJob(
+    database, memoryCompletionPayload(stale), instant(13),
+  ), null);
+  const recovered = await claimAssistantMemoryIndexJob(database, "worker:recovered", instant(13));
+  assert.equal(recovered.id, stale.id);
+  assert.equal(recovered.attempt_count, 2);
+  assert.equal((await failAssistantMemoryIndexJob(database, {
+    id: recovered.id,
+    lease_token: recovered.lease_token,
+    failure_code: "INDEX_RUNTIME_FAILURE",
+  }, instant(13))).status, "PENDING");
+  const finalClaim = await claimAssistantMemoryIndexJob(database, "worker:final", instant(14));
+  assert.equal(finalClaim.attempt_count, 3);
+  assert.equal((await failAssistantMemoryIndexJob(database, {
+    id: finalClaim.id,
+    lease_token: finalClaim.lease_token,
+    failure_code: "INDEX_RUNTIME_FAILURE",
+  }, instant(14))).status, "FAILED");
+  assert.equal(database.row(stale.id, "assistant_memory_index_jobs").status, "FAILED");
+  assert.equal(
+    database.database.prepare("SELECT count(*) AS count FROM assistant_memory_entries").get().count,
+    0,
   );
 });

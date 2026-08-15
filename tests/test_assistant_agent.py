@@ -196,7 +196,10 @@ def test_agent_may_answer_directly_without_executing_a_tool() -> None:
     ]
     assert result.provenance["model_turn_count"] == 1
     assert result.provenance["tool_call_count"] == 0
-    assert result.provenance["system_instruction_version"] == "assistant-system-v1"
+    assert result.provenance["system_instruction_version"] == "assistant-system-v2"
+    assert "unverified prior conversation text" in (
+        payloads[0]["systemInstruction"]["parts"][0]["text"]
+    )
     assert len(result.provenance["system_instruction_sha256"]) == 64
     assert len(result.provenance["active_context_sha256"]) == 64
     assert result.provenance["retrieval_cutoff"] == "2026-08-15T12:00:00.000Z"

@@ -1,4 +1,5 @@
 import { AssistantConversationInputError } from "./assistant-conversations";
+import { retrieveAssistantHistoricalMemory } from "./assistant-memory-index";
 import { parseAssistantRoutingProvenance } from "./assistant-routing";
 
 export const ASSISTANT_COMPACTION_PROMPT_VERSION = "assistant-compaction-v1";
@@ -313,7 +314,6 @@ export async function buildAssistantContext(
     ownerId: string;
     conversationId: string;
     currentUserMessageId: string;
-    historicalMemory?: Array<{ content: string; canonical_message_ids: string[] }>;
     toolEvidence?: Array<{ evidence_id: string; content: unknown }>;
   },
   profile = DEFAULT_ASSISTANT_CONTEXT_PROFILE,
@@ -356,45 +356,20 @@ export async function buildAssistantContext(
     anchors: parsedJson(summary.anchors_json, {}),
     covered_through_message_id: summary.covered_through_message_id,
   } : null;
-  const historicalMemory = input.historicalMemory ?? [];
   const toolEvidence = input.toolEvidence ?? [];
-  if (historicalMemory.length > 16 || toolEvidence.length > 32) {
+  if (toolEvidence.length > 32) {
     throw new AssistantConversationInputError("CONTEXT_LAYER_EXCEEDS_BUDGET", "上下文资料过多");
   }
-  const historicalIds = orderedUniqueStrings(
-    historicalMemory.flatMap(item => item.canonical_message_ids),
-    "canonical_message_ids",
-    128,
-  );
-  if (historicalIds.length) {
-    const placeholders = historicalIds.map(() => "?").join(",");
-    const owned = await binding.prepare(
-      `SELECT count(*) AS count FROM assistant_messages
-       WHERE conversation_id=? AND id IN (${placeholders})
-         AND (created_at<? OR (created_at=? AND id<=?))`,
-    ).bind(
-      input.conversationId, ...historicalIds,
-      currentUser.created_at, currentUser.created_at, currentUser.id,
-    ).first<{ count: number }>();
-    if (Number(owned?.count ?? 0) !== historicalIds.length) {
-      throw new AssistantConversationInputError(
-        "HISTORICAL_MEMORY_NOT_OWNER_SCOPED", "历史记忆来源无效",
-      );
-    }
-  }
-  const normalizedHistory = historicalMemory.map(item => {
-    const canonicalMessageIds = orderedUniqueStrings(
-      item.canonical_message_ids, "canonical_message_ids",
-    );
-    if (!canonicalMessageIds.length) {
-      throw new AssistantConversationInputError(
-        "HISTORICAL_MEMORY_NOT_OWNER_SCOPED", "历史记忆缺少规范消息来源",
-      );
-    }
-    return {
-      content: canonicalText(item.content, 4_000, "historical memory"),
-      canonical_message_ids: canonicalMessageIds,
-    };
+  const historicalMemory = await retrieveAssistantHistoricalMemory(binding, {
+    ownerId: input.ownerId,
+    conversationId: input.conversationId,
+    currentUser: {
+      id: currentUser.id,
+      content: currentUser.content,
+      created_at: currentUser.created_at,
+    },
+    tokenBudget: profile.historicalMemoryTokenBudget,
+    estimateTokens: conservativeAssistantTokenEstimate,
   });
   const normalizedEvidence = toolEvidence.map(item => ({
     evidence_id: orderedUniqueStrings([item.evidence_id], "evidence_id", 1)[0],
@@ -457,8 +432,7 @@ export async function buildAssistantContext(
 
   const pinnedTokens = conservativeAssistantTokenEstimate(pinnedPayload);
   const summaryTokens = summaryPayload ? conservativeAssistantTokenEstimate(summaryPayload) : 0;
-  const historicalTokens = normalizedHistory.length
-    ? conservativeAssistantTokenEstimate(normalizedHistory) : 0;
+  const historicalTokens = historicalMemory.tokenEstimate;
   const currentUserTokens = conservativeAssistantTokenEstimate({
     id: currentUser.id, content: currentUser.content, created_at: currentUser.created_at,
   });
@@ -497,7 +471,8 @@ export async function buildAssistantContext(
     layers: [
       { type: "PINNED_STATE", token_estimate: pinnedTokens, items: pinnedPayload },
       { type: "ROLLING_SUMMARY", token_estimate: summaryTokens, item: summaryPayload },
-      { type: "HISTORICAL_MEMORY", token_estimate: historicalTokens, items: normalizedHistory },
+      { type: "HISTORICAL_MEMORY", token_estimate: historicalTokens,
+        items: historicalMemory.items, retrieval: historicalMemory.retrieval },
       { type: "RECENT_VERBATIM_TURNS", token_estimate: recent.tokens, items: recent.messages.map(
         message => ({ id: message.id, role: message.role, content: message.content,
           created_at: message.created_at, provenance: parsedJson(message.provenance_json, {}) }),

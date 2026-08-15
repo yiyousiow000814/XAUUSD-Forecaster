@@ -315,6 +315,9 @@ than interpreted as HTML.
   gracefully. It does not silently change a required model policy.
 - Title or compaction failure does not erase the conversation or replace the
   last valid derived record.
+- Pending or failed historical indexing leaves canonical messages available and
+  marks recall incomplete; it never converts an empty partial index into a
+  claim that no relevant history exists.
 - Error events contain public error codes and recovery guidance, not secrets,
   provider payloads, or private reasoning.
 
