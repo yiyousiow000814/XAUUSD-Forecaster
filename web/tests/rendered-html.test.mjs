@@ -1669,4 +1669,7 @@ test("renders only validated Assistant content blocks with phone-owned overflow"
   assert.match(migration, /assistant_messages_structured_content_contract/);
   assert.match(css, /\.assistant-content-table>div \{[^}]*max-width:100%; overflow-x:auto/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-content-blocks \{ grid-template-columns:minmax\(0,1fr\)/);
+  assert.match(css, /\.preview-banner\{[^}]*z-index:1000/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-conversation-rail \{[^}]*z-index:1020/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-rail-scrim \{[^}]*z-index:1010/);
 });
