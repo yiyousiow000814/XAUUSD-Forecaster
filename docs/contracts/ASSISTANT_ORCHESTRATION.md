@@ -30,6 +30,10 @@ The first reasoning router SHOULD be deterministic and request-local. It MUST
 NOT spend another model request merely to ask how much reasoning to use. Initial
 classes MAY include `SIMPLE`, `ANALYTICAL`, and `TOOL_HEAVY`.
 
+One user turn fixes this task/effort policy before its first model request; a
+later final-only model call may disable tools but MUST NOT silently downgrade
+the effort policy while synthesizing results from the same native sequence.
+
 Every model-consuming Assistant result MUST retain a versioned routing receipt
 that identifies the task type, reasoning class, requested thinking level,
 model requirement, bounded input/output estimate, declared candidate profiles,
@@ -192,6 +196,14 @@ results remain ordered deterministically in the context. A tool failure is a
 typed result; it MUST NOT be hidden as an empty success.
 
 The backend MUST reject an over-budget call plan before executing any subset.
+
+Every native `functionCall` MUST retain its exact provider call ID, and every
+`functionResponse` MUST match that ID. Opaque provider thought signatures are
+preserved only inside the ephemeral native request sequence; they are neither
+canonical Assistant state nor user-visible reasoning. Each model turn crosses
+the Model Router, Capacity Router, and metered gateway. The selected model is
+fixed for one native sequence while an eligible credential pool may change;
+later user turns may select a different compatible model.
 
 Every tool has a versioned input/output schema, authorization policy, timeout,
 result bound, and provenance contract. The initial Assistant registry is

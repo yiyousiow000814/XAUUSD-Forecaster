@@ -124,12 +124,12 @@ Independent scopes may proceed in parallel from the same merged base. A short
 temporary stack is acceptable only when a dependency cannot be reviewed or
 tested independently; it must be collapsed promptly.
 
-Current implementation has reached a versioned read-only tool registry and
-bounded parallel executor. Conversation persistence, bounded memory/compaction,
-deterministic model routing, and pool-by-model capacity routing are already on
-`main`. The next independent scope is the native bounded model/tool loop; the
-later streaming protocol will not need to rewrite canonical conversation or
-tool contracts.
+Current implementation has reached the server-side typed native function-
+calling core: a versioned read-only registry, bounded parallel executor, exact
+provider call/response continuity, and capacity-routed model turns. It remains
+`PARTIAL` until an authenticated chat runtime invokes it. The next independent
+scope is the versioned streaming protocol; it will not need to rewrite
+canonical conversation or tool contracts.
 
 ## Per-PR completion rule
 

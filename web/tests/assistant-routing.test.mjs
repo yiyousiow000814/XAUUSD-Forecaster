@@ -41,7 +41,7 @@ test("routing provenance rejects task, effort, downgrade, and budget contradicti
 });
 
 test("tool-heavy routing requires multiple planned calls and a large model", () => {
-  const routing = assistantRouting("NEWS_QA", {
+  const routing = assistantRouting("ASSISTANT_CHAT", {
     reasoning_class: "TOOL_HEAVY",
     thinking_level: "HIGH",
     model_requirement: "LARGE_REQUIRED",
@@ -50,14 +50,52 @@ test("tool-heavy routing requires multiple planned calls and a large model", () 
   });
 
   assert.equal(
-    parseAssistantRoutingProvenance(routing, "NEWS_QA").planned_tool_calls,
+    parseAssistantRoutingProvenance(routing, "ASSISTANT_CHAT").planned_tool_calls,
     3,
   );
   assert.throws(
     () => parseAssistantRoutingProvenance(
-      { ...routing, planned_tool_calls: 1 }, "NEWS_QA",
+      { ...routing, planned_tool_calls: 1 }, "ASSISTANT_CHAT",
     ),
     /policy decision/i,
+  );
+});
+
+test("every native call requires capability while prefetched Q&A declares zero", () => {
+  assert.throws(
+    () => parseAssistantRoutingProvenance(assistantRouting("ASSISTANT_CHAT", {
+      planned_tool_calls: 1,
+      supports_function_calling: false,
+    })),
+    /policy decision/i,
+  );
+  assert.throws(
+    () => parseAssistantRoutingProvenance(assistantRouting("NEWS_QA", {
+      planned_tool_calls: 1,
+    })),
+    /policy decision/i,
+  );
+  assert.equal(
+    parseAssistantRoutingProvenance(assistantRouting("NEWS_QA")).planned_tool_calls,
+    0,
+  );
+});
+
+test("historical v1 receipts remain auditable without enabling the old runtime", () => {
+  const historical = assistantRouting("NEWS_QA", {
+    policy_version: "assistant-routing-v1",
+    planned_tool_calls: 1,
+    supports_function_calling: false,
+  });
+  assert.equal(
+    parseAssistantRoutingProvenance(historical, "NEWS_QA").policy_version,
+    "assistant-routing-v1",
+  );
+  assert.throws(
+    () => parseAssistantRoutingProvenance(assistantRouting("ASSISTANT_CHAT", {
+      policy_version: "assistant-routing-v1",
+    })),
+    /routing provenance/i,
   );
 });
 
