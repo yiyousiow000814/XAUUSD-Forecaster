@@ -39,6 +39,7 @@ export class D1TestDatabase {
     "0008_news_questions.sql",
     "0009_assistant_conversations.sql",
     "0010_assistant_memory_compaction.sql",
+    "0011_assistant_chat_runtime.sql",
   ]) {
     this.database = new DatabaseSync(":memory:");
     this.database.exec("PRAGMA foreign_keys=ON");

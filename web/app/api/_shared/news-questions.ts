@@ -1,7 +1,6 @@
 // Mutable queue state is bounded; completed answers retain immutable provenance fields.
 import {
-  ASSISTANT_CONVERSATION_LIMITS,
-  ASSISTANT_TITLE_PROMPT_VERSION,
+  automaticAssistantTitleStatements,
   provisionalAssistantTitle,
 } from "./assistant-conversations";
 import { scheduleAssistantCompaction } from "./assistant-memory";
@@ -515,7 +514,11 @@ export async function completeNewsQuestion(
     throw new NewsQuestionInputError("MISSING_CONVERSATION_STATE", "问题缺少规范会话状态");
   }
   const assistantMessageId = crypto.randomUUID();
-  const titleJobId = crypto.randomUUID();
+  const automaticTitle = automaticAssistantTitleStatements(binding, {
+    conversationId: leased.conversation_id,
+    assistantMessageId,
+    now,
+  });
   const assistantProvenance = JSON.stringify({
     kind: "NEWS_QA",
     question_id: id,
@@ -557,32 +560,7 @@ export async function completeNewsQuestion(
        WHERE id=(SELECT conversation_id FROM news_questions
                  WHERE id=? AND assistant_message_id=?)`,
     ).bind(timestamp, id, assistantMessageId),
-    binding.prepare(
-      `UPDATE assistant_conversations SET
-       title_request_version=title_request_version+1,pending_title_job_id=?
-       WHERE id=(SELECT conversation_id FROM news_questions
-                 WHERE id=? AND assistant_message_id=?)
-         AND title_source='PROVISIONAL' AND title_request_version=0
-         AND pending_title_job_id IS NULL
-       RETURNING *`,
-    ).bind(titleJobId, id, assistantMessageId),
-    binding.prepare(
-      `INSERT INTO assistant_title_jobs (
-       id,conversation_id,idempotency_key,requested_by,input_version,
-       expected_title_revision,first_user_message_id,assistant_message_id,
-       status,available_at,attempt_count,max_attempts,prompt_version,created_at
-       )
-       SELECT ?,id,?,'AUTOMATIC',title_request_version,title_revision,
-       (SELECT id FROM assistant_messages
-        WHERE conversation_id=assistant_conversations.id AND role='USER'
-        ORDER BY created_at,id LIMIT 1),?,'PENDING',?,0,?,?,?
-       FROM assistant_conversations WHERE pending_title_job_id=?
-       ON CONFLICT DO NOTHING RETURNING *`,
-    ).bind(
-      titleJobId, `automatic:${assistantMessageId}`, assistantMessageId, timestamp,
-      ASSISTANT_CONVERSATION_LIMITS.titleJobMaxAttempts,
-      ASSISTANT_TITLE_PROMPT_VERSION, timestamp, titleJobId,
-    ),
+    ...automaticTitle.statements,
   ]);
   const row = results[1]?.results?.[0];
   if (!row) return null;

@@ -279,7 +279,7 @@ test("keeps branch Preview identity and blocks writes", async () => {
   for (const path of [
     "/api/ingest", "/api/learning", "/api/learning-history",
     "/api/news-index", "/api/news-content", "/api/market-chart",
-    "/api/market-history", "/api/news-questions",
+    "/api/market-history", "/api/news-questions", "/api/assistant-chat",
   ]) {
     const forbiddenD1 = new Proxy({}, {
       get() { throw new Error(`${path} touched D1 before Preview rejection`); },
@@ -1553,4 +1553,34 @@ test("keeps private news Q&A authenticated, lease-backed, and phone readable", (
   assert.doesNotMatch(qaSync, /recent_news/);
   assert.match(css, /\.news-qa-desk form button \{[^}]*min-height:44px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.news-qa-desk form \{ grid-template-columns:1fr/);
+});
+
+test("keeps chat admission owner-authenticated and event replay finite", () => {
+  const route = readFileSync(new URL("../app/api/assistant-chat/route.ts", import.meta.url), "utf8");
+  const runtime = readFileSync(
+    new URL("../app/api/_shared/assistant-chat.ts", import.meta.url), "utf8",
+  );
+  const migration = readFileSync(
+    new URL("../drizzle/0011_assistant_chat_runtime.sql", import.meta.url), "utf8",
+  );
+  const postRoute = route.slice(route.indexOf("export async function POST"));
+  assert.ok(
+    postRoute.indexOf("rejectPreviewWrite()")
+      < postRoute.indexOf("authenticateAssistantRequest(request, env)"),
+    "Preview chat writes must reject before human authentication",
+  );
+  assert.match(route, /isIngestAuthorized\(request\)/);
+  assert.match(route, /authenticateAssistantRequest\(request, env\)/);
+  assert.match(route, /last-event-id/);
+  assert.match(route, /text\/event-stream/);
+  assert.match(route, /X-Assistant-Next-Sequence/);
+  assert.doesNotMatch(route, /ReadableStream|setInterval|setTimeout/);
+  assert.match(runtime, /activePerOwner: 2/);
+  assert.match(runtime, /activeGlobal: 10/);
+  assert.match(runtime, /lease_expires_at>\?/);
+  assert.match(runtime, /automaticAssistantTitleStatements/);
+  assert.match(runtime, /scheduleAssistantCompaction/);
+  assert.match(migration, /assistant_turn_events_immutable_update/);
+  assert.match(migration, /assistant_turn_jobs_terminal_immutable/);
+  assert.match(migration, /assistant event sequence must be contiguous/);
 });

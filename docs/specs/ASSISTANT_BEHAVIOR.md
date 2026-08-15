@@ -91,6 +91,14 @@ Authentication occurs before queue creation. Per-owner concurrency and global
 capacity are bounded, so anonymous or single-user traffic cannot starve the
 queue.
 
+The operational chat queue admits at most one active turn per conversation,
+two active turns per owner, ten globally, and five new turns per owner per
+minute. A turn expires after 30 minutes, a processing lease after five minutes,
+and at most three claims may be consumed. These are bounded v1 operational
+values, not permanent product constants. An accepted user message, its turn
+job, and `conversation.started` are one transaction; admission failure leaves
+none of them behind. Owner cancellation is idempotent and terminal.
+
 ## Streaming event protocol
 
 Streaming is a versioned event stream, not an alternate conversation database.
@@ -113,6 +121,13 @@ assistant.event.v1
 known sequence, but replayed transport events do not create duplicate canonical
 messages.
 
+The operational web transport returns a finite owner-authenticated SSE replay,
+not an indefinitely held Worker connection. The client sends the last consumed
+numeric sequence in `Last-Event-ID` or `after`, consumes the bounded page, and
+reconnects while the turn is non-terminal or more events remain. Every replay
+rechecks owner authorization. A response may therefore be empty without
+meaning that the turn failed.
+
 The operational v1 codec is shared by the Python orchestrator and TypeScript
 web boundary. Envelopes and type-specific payloads use exact fields and strict
 JSON: unknown fields, non-finite numbers, malformed identifiers, oversized
@@ -120,7 +135,9 @@ payloads, and unsupported protocol versions fail closed. A turn carries at
 most 256 events, one payload at most 16,384 UTF-8 bytes, one answer delta at
 most 4,096 bytes, and all presentation deltas/block references at most 65,536
 bytes. These are versioned operational safety values rather than assumed model
-or provider limits.
+or provider limits. Progress admission reserves enough sequence capacity for
+the largest permitted final-answer event set, so progress cannot prevent a turn
+from reaching one durable terminal state.
 
 The initial event vocabulary is:
 
@@ -163,6 +180,14 @@ HTML as renderable content.
 The event protocol is independently versioned from message storage. Streaming
 can therefore be added or replaced without migrating canonical conversation
 history.
+
+Machine progress writes require the active turn lease. Tool and retrieval start
+and finish records are admitted together as one closed idempotent batch; a
+transport failure cannot persist an unclosed operation. Final persistence
+atomically appends the canonical Assistant message, answer events, terminal
+conversation event, turn status, conversation activity, and first-title job
+admission. Compaction scheduling happens afterward and cannot invalidate that
+final.
 
 ## Progress and reasoning display
 

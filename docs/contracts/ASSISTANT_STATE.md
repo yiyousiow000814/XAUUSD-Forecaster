@@ -51,6 +51,20 @@ Message
 - content
 - created_at
 - provenance
+
+Turn
+- id
+- owner_id
+- conversation_id
+- user_message_id
+- status and bounded lease/attempt receipts
+- assistant_message_id (only after atomic completion)
+
+TransportEvent
+- turn_id
+- protocol and contiguous sequence
+- type, occurrence time, and bounded payload
+- canonical message ID (only for answer completion)
 ```
 
 `owner_id` is a stable Forecaster actor identity. Email addresses and provider
@@ -78,6 +92,14 @@ Title, summary, compaction, and memory-index jobs are idempotent by their input
 version. A worker restart reclaims expired leases rather than depending on
 in-memory timers. Failed derived work leaves the last valid canonical or derived
 record active.
+
+Turn jobs and transport events are durable orchestration receipts, not a second
+conversation history. They never substitute for canonical Message rows. Events
+are append-only and contiguous within a turn; only `answer.completed` may link
+to the immutable final Assistant message. The final message, completion events,
+terminal turn transition, and activity timestamp commit together. Progress,
+retry, lease, cancellation, title, and compaction records do not advance
+conversation activity.
 
 ## Activity ordering
 
