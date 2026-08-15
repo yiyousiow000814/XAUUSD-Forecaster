@@ -207,13 +207,53 @@ def _backfill_annotation_reasons(news_index: dict, status: dict) -> None:
         item["annotation_reason"] = reason
 
 
+def _read_completed_news_index(base_url: str) -> dict:
+    """Read completed news across the old and current public API contracts."""
+    completed: list[dict] = []
+    first_page: dict | None = None
+    for page in range(1, 11):
+        payload = _read_json(
+            base_url,
+            f"/api/news-index?page={page}&limit=50&review_state=COMPLETED",
+        )
+        if first_page is None:
+            first_page = payload
+        if payload.get("review_state") == "COMPLETED":
+            return payload
+        rows = payload.get("items", [])
+        completed.extend(
+            row for row in rows
+            if row.get("annotation_status") in {"READY", "NOT_REQUIRED"}
+        )
+        if len(completed) >= PREVIEW_NEWS_PAGE_SIZE or len(rows) < 50:
+            break
+
+    fallback = dict(first_page or {})
+    fallback["items"] = completed[:PREVIEW_NEWS_PAGE_SIZE]
+    fallback["total"] = len(completed)
+    fallback["category_counts"] = {
+        category: sum(
+            1 for row in completed if str(row.get("category") or "其他") == category
+        )
+        for category in {
+            str(row.get("category") or "其他") for row in completed
+        }
+    }
+    fallback["review_state"] = "COMPLETED"
+    fallback["review_state_counts"] = {"COMPLETED": len(completed)}
+    # The compatibility fallback sees only a bounded old-API window. It must
+    # never advertise those partial counts as the authoritative D1 archive.
+    fallback["totals_scope"] = "BUILD_SNAPSHOT"
+    return fallback
+
+
 def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
     status = _read_json(base_url, "/api/status")
     _apply_branch_runtime_contract(status)
     learning = _read_json(base_url, "/api/learning")
     market_chart = _read_json(base_url, "/api/market-chart")
     market_chart["history_resource"] = "/api/market-history"
-    news_index = _read_json(base_url, "/api/news-index?limit=50")
+    news_index = _read_completed_news_index(base_url)
 
     status["factor_coverage"] = _rebuild_factor_coverage(status)
     _backfill_annotation_reasons(news_index, status)

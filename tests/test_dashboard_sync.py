@@ -88,6 +88,48 @@ def test_preview_does_not_call_late_aggregated_news_expired() -> None:
     assert row["annotation_reason"] == "搜索线索：来自聚合发现源，不是独立官方发布"
 
 
+def test_preview_reads_completed_news_from_old_and_current_api_contracts(
+    monkeypatch,
+) -> None:
+    module = _preview_module()
+    requested: list[str] = []
+
+    def old_api(_base_url: str, path: str) -> dict:
+        requested.append(path)
+        page = int(path.split("page=", 1)[1].split("&", 1)[0])
+        rows = [
+            {
+                "annotation_status": "QUEUED" if page == 1 else "READY",
+                "detail_key": f"{page:02d}-{index:02d}",
+                "category": "其他",
+            }
+            for index in range(50)
+        ]
+        return {"items": rows, "total": 500, "totals_scope": "D1_ARCHIVE"}
+
+    monkeypatch.setattr(module, "_read_json", old_api)
+    compatible = module._read_completed_news_index("https://example.test")
+    assert len(requested) == 2
+    assert len(compatible["items"]) == module.PREVIEW_NEWS_PAGE_SIZE
+    assert {row["annotation_status"] for row in compatible["items"]} == {"READY"}
+    assert compatible["review_state"] == "COMPLETED"
+    assert compatible["totals_scope"] == "BUILD_SNAPSHOT"
+
+    monkeypatch.setattr(
+        module,
+        "_read_json",
+        lambda _base_url, _path: {
+            "items": [{"annotation_status": "READY"}],
+            "review_state": "COMPLETED",
+            "review_state_counts": {"COMPLETED": 120},
+            "totals_scope": "D1_ARCHIVE",
+        },
+    )
+    current = module._read_completed_news_index("https://example.test")
+    assert current["review_state_counts"] == {"COMPLETED": 120}
+    assert current["totals_scope"] == "D1_ARCHIVE"
+
+
 def test_preview_overlays_branch_owned_model_throughput_contract() -> None:
     module = _preview_module()
     status = {

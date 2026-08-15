@@ -303,6 +303,7 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   const app = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
   const resources = readFileSync(new URL("../app/_lib/dashboard-resource.ts", import.meta.url), "utf8");
   assert.match(page, /function previewResources/);
+  assert.match(page, /review_state=COMPLETED/);
   assert.match(page, /previewBundle\.status/);
   assert.match(page, /previewBundle\.learning_summary/);
   const vite = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
