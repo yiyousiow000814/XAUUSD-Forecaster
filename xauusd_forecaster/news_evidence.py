@@ -22,6 +22,8 @@ from .news_identity import (
     canonical_id,
     canonical_material_event_anchor,
     canonical_source_organization,
+    identity_resolution_status,
+    resolved_identity_ids,
 )
 from .news_time import NewsTimeAssessment, assess_news_time
 from .news_semantics import (
@@ -30,6 +32,7 @@ from .news_semantics import (
     CURRENT_NEWS_PROMPT_VERSION,
     annotation_topics,
     effective_record_kind,
+    validated_annotation_predicate,
 )
 
 
@@ -87,6 +90,24 @@ BROAD_NEWS_FEATURES = (
 )
 
 
+def annotation_is_actionable_candidate(
+    annotation: dict[str, object], headline: str = "",
+) -> bool:
+    """Return whether current semantics could admit an assessed event."""
+    return bool(
+        str(annotation.get("primary_category") or "") in ACTIONABLE_CATEGORIES
+        and effective_record_kind(annotation, headline) in ACTIONABLE_RECORD_KINDS
+        and str(annotation.get("evidence_role") or "")
+        in ACTIONABLE_EVIDENCE_ROLES
+        and float(annotation.get("materiality") or 0.0)
+        >= MIN_ACTIONABLE_MATERIALITY
+        and str(annotation.get("xauusd_relevance") or "")
+        in {"DIRECT", "MACRO_DRIVER"}
+        and str(annotation.get("material_change") or "")
+        in {"NEW_EVENT", "MATERIAL_UPDATE"}
+    )
+
+
 _TITLE_STOPWORDS = frozenset({
     "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with",
     "as", "at", "by", "from", "after", "before", "says", "said", "update",
@@ -135,6 +156,10 @@ def _topics(row: dict) -> tuple[str, ...]:
 def _event_key(
     row: dict, topics: tuple[str, ...], *, use_material_event_key: bool = True,
 ) -> str:
+    resolved = resolved_identity_ids(row)
+    if resolved is not None:
+        identity = ("resolved-event", resolved[1])
+        return hashlib.sha256(repr(identity).encode("utf-8")).hexdigest()
     annotation = json.loads(row.get("annotation_json") or "{}")
     structured = {
         **annotation,
@@ -225,7 +250,7 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
     # visible under SQLite's lexicographic timestamp comparison.
     cutoff = decision_time.isoformat(timespec="microseconds")
     raw_rows = connection.execute(
-        """SELECT n.*,a.annotation_id,a.event_type,a.entities_json,a.hawkishness,
+        f"""SELECT n.*,a.annotation_id,a.event_type,a.entities_json,a.hawkishness,
                   a.inflation_impulse,a.growth_impulse,a.geopolitical_risk,
                   a.usd_impulse,a.novelty,a.confidence,a.annotation_json,a.parsed_at,
                   a.prompt_version,a.llm_model_version,
@@ -257,6 +282,7 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
              AND length(trim(coalesce(n.body,'')))>=240
              AND a.llm_model_version IN ('gemini-3.5-flash-lite','gemini-3.1-flash-lite')
              AND a.prompt_version=?
+             AND {validated_annotation_predicate('a')}
              AND NOT EXISTS (
                SELECT 1 FROM news_revisions newer
                WHERE newer.source=n.source AND newer.source_item_id=n.source_item_id
@@ -371,7 +397,10 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
         canonical = max(
             candidates,
             key=lambda row: (
-                int(row.get("impact_update_type") == "MATERIAL_UPDATE"),
+                {
+                    "MATERIAL_UPDATE": 2,
+                    "NEW_EVENT": 1,
+                }.get(str(row.get("impact_update_type") or ""), 0),
                 str(row["collector_first_seen_time"]),
                 float(row["confidence"]), len(str(row["body"])),
                 row["source_item_id"],
@@ -406,16 +435,14 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
         )
         semantic_relevance = str(annotation.get("xauusd_relevance") or "")
         material_change = str(annotation.get("material_change") or "")
-        semantic_eligible = (
-            record_kind in ACTIONABLE_RECORD_KINDS
-            and evidence_role in ACTIONABLE_EVIDENCE_ROLES
-            and materiality >= MIN_ACTIONABLE_MATERIALITY
-            and semantic_relevance in {"DIRECT", "MACRO_DRIVER"}
-            and material_change in {"NEW_EVENT", "MATERIAL_UPDATE"}
+        semantic_eligible = annotation_is_actionable_candidate(
+            annotation, str(annotation.get("headline_zh") or canonical["headline"]),
         )
+        identity_status = identity_resolution_status(canonical)
         relevant = controlled_category in ACTIONABLE_CATEGORIES
         eligible = (
-            bool(timely)
+            identity_status == "RESOLVED"
+            and bool(timely)
             and grade in {
                 "PRIMARY", "CORROBORATED", "SINGLE_RELIABLE", "SINGLE_SOURCE",
             }
@@ -462,6 +489,10 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             0, len(evidence_members) - independent_publishers
         )
         reasons = [f"EVIDENCE_{grade}"]
+        if identity_status == "UNRESOLVED":
+            reasons.append("IDENTITY_UNRESOLVED")
+        elif identity_status == "MISSING":
+            reasons.append("IDENTITY_NOT_RESOLVED")
         if event_clock_source == "SOURCE_STRUCTURED_TIME":
             reasons.append("RELIABLE_PUBLISHER_TIME_PROXY")
         if not timely:
@@ -503,6 +534,8 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             (
                 row["content_hash"], row["annotation_id"],
                 row.get("impact_assessment_id"), row.get("source_organization"),
+                row.get("resolved_identity_relation"),
+                row.get("resolved_episode_id"), row.get("resolved_event_id"),
             )
             for row in members
         ))
@@ -582,6 +615,7 @@ def event_evidence_rows_from_connection(connection, decision_time: datetime) -> 
             "resolved_episode_id": canonical.get("resolved_episode_id"),
             "resolved_event_id": canonical.get("resolved_event_id"),
             "resolved_identity_relation": canonical.get("resolved_identity_relation"),
+            "identity_status": identity_status,
             "model_permission": "BROAD_MODEL" if eligible else "DISPLAY_ONLY",
             "source_published_time": (
                 canonical["time_assessment"].event_time.isoformat()

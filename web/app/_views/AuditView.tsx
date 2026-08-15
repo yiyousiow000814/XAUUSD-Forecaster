@@ -429,12 +429,11 @@ const outcomeReason = (codes: string[]) => codes.some(code => code.includes("CLO
       : "报价证据不完整，样本已隔离且不进入训练";
 const impulse = (value?: number | null) => value === null || value === undefined ? "—" : `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
 const NEWS_PER_PAGE = PREVIEW_NEWS_PAGE_SIZE;
-const CATEGORY_ORDER = ["战争/地缘", "利率/Fed", "央行购金", "通胀/就业", "增长/经济", "油价/能源", "美元/流动性", "风险偏好", "监管/其他", "其他"];
+const CATEGORY_ORDER = ["战争/地缘", "利率/Fed", "央行购金", "通胀/就业", "增长/经济", "油价/能源", "美元/流动性", "风险情绪 / 避险", "监管/其他", "其他"];
 const SOURCE_LABELS: Record<string, string> = {
   federal_reserve_monetary: "Federal Reserve · 货币政策",
   federal_reserve_speeches_testimony: "Federal Reserve · 演讲证词",
   federal_reserve_press_all: "Federal Reserve · 新闻与监管",
-  gdelt_gold_geopolitics: "GDELT · 战争与地缘",
   google_news_gold_geopolitics: "Google News · 战争与地缘",
   google_news_gold_context: "Google News · 黄金大视野",
   world_gold_council_central_banks: "World Gold Council · 央行购金",
@@ -444,6 +443,10 @@ const SOURCE_LABELS: Record<string, string> = {
   us_treasury_press_releases: "U.S. Treasury · 官方发布",
   bea_economic_releases: "U.S. BEA · 经济数据发布",
 };
+function newsSourceLabel(row: Pick<News, "source" | "category">): string {
+  if (row.source === "gdelt_gold_geopolitics") return `GDELT · ${row.category}`;
+  return SOURCE_LABELS[row.source] ?? row.source.replaceAll("_", " ");
+}
 
 const COVERAGE_STATUS_LABELS: Record<string, string> = {
   LIVE: "实时",
@@ -470,7 +473,7 @@ const TOPIC_LABELS: Record<string, string> = {
   rates_fed: "利率 / Fed", inflation: "通胀", employment: "就业", inflation_employment: "通胀 / 就业",
   growth_economy: "增长 / 经济", usd_liquidity: "美元 / 流动性",
   oil_energy: "油价 / 能源", war_geopolitics: "战争 / 地缘",
-  central_bank_gold: "央行购金", risk_sentiment: "风险偏好", regulation_other: "监管 / 其他",
+  central_bank_gold: "央行购金", risk_sentiment: "风险情绪 / 避险", regulation_other: "监管 / 其他",
 };
 const EVIDENCE_LABELS: Record<string, string> = {
   PRIMARY: "一手完整证据", CORROBORATED: "多源确认",
@@ -663,7 +666,7 @@ function NewsRow({ row }: { row: News }) {
   return <details ref={detailElement} className="news-row" onToggle={loadDetail}>
     <summary>
       <div className="news-row-stamp"><b>{row.category}</b><time title="媒体发布时间；列表按此时间排序">发布 {row.source_published_time ? time(row.source_published_time) : "未知"}</time><small title="系统第一次收到；决定模型当时能否看见">收到 {time(row.collector_first_seen_time)}</small><small className={`eligibility-badge eligibility-${row.model_visibility.toLowerCase().replaceAll("_", "-")}`}>{VISIBILITY_LABELS[row.model_visibility] ?? row.model_visibility.replaceAll("_", " ")}</small></div>
-      <div className="news-row-title"><strong>{row.headline}</strong><small>{SOURCE_LABELS[row.source] ?? row.source.replaceAll("_", " ")}{translated ? " · Gemini 中文标题" : ""}{row.emerging_topic_zh ? ` · ${row.emerging_topic_zh}` : ""}</small></div>
+      <div className="news-row-title"><strong>{row.headline}</strong><small>{newsSourceLabel(row)}{translated ? " · Gemini 中文标题" : ""}{row.emerging_topic_zh ? ` · ${row.emerging_topic_zh}` : ""}</small></div>
       <div className={`news-row-state state-${row.content_status.toLowerCase().replaceAll("_", "-")}`}>
         <b>{row.content_status === "FULL_TEXT" ? `${formatExactCount(row.content_characters)} 字符` : row.content_fetch_status === "UNAVAILABLE" ? "正文不可用" : row.content_fetch_status === "RETRYING" ? "自动重试中" : row.source === "google_news_gold_geopolitics" ? "聚合标题" : "等待正文"}</b>
         <small>{annotationStatus === "READY" ? (impactLabel ?? "等待 Gemma 判断") : annotationStatus === "NOT_REQUIRED" ? annotationReasonLabel : row.content_fetch_status === "UNAVAILABLE" ? "保留标题 · 不阻塞" : row.content_fetch_status === "RETRYING" ? "备用抓取中" : annotationStatus === "QUEUED" ? "AI 等待处理中" : annotationStatus === "BACKING_OFF" ? "失败后等待重试" : annotationStatus === "DEAD_LETTER" ? "已隔离待审" : "禁止判断"}</small>
@@ -1095,7 +1098,6 @@ export default function AuditView() {
         <div className="search-results">{searchResults.items.map(row => <article key={`${row.source}-${row.source_item_id}-${row.revision_number}`}><time>{time(row.source_published_time ?? row.collector_first_seen_time)}</time><h3>{row.headline}</h3><p>{row.emerging_topic_zh || row.impact_reason_zh || row.source}</p><small>{row.source} · {row.category}</small></article>)}</div>
         {searchResults.total > searchResults.page_size && <nav className="search-pages"><button type="button" disabled={searchResults.page <= 1 || searchBusy} onClick={() => void runNewsSearch(searchResults.page - 1)}>←</button><span>{formatExactCount(searchResults.page)} / {formatExactCount(Math.ceil(searchResults.total / searchResults.page_size))}</span><button type="button" disabled={searchResults.page >= Math.ceil(searchResults.total / searchResults.page_size) || searchBusy} onClick={() => void runNewsSearch(searchResults.page + 1)}>→</button></nav>}
       </section>}
-
       {view === "news" && <>
         <section className="annotation-queue" aria-label="新闻处理进度">
           <span><b><CountValue value={readableNewsTotal} /></b> {readableNewsTotal === null ? "正在读取近60天新闻总量" : "条近60天可读新闻"}</span>

@@ -72,6 +72,8 @@ def test_control_center_updates_only_the_isolated_main_runtime() -> None:
     assert 'currentRevision -ne $appliedRevision' in control_center
     assert "Get-DeployedMainRevision" in control_center
     assert "$runtimeUpdateCheckInterval = [TimeSpan]::FromMinutes(5)" in control_center
+    assert "$codeReloadTimeout = [TimeSpan]::FromMinutes(5)" in control_center
+    assert "Add($codeReloadTimeout)" in control_center
     assert "Get-VerifiedOriginMain" in control_center
     assert "Test-RevisionDescendsFrom" in control_center
     assert "Test-MainCandidate" in control_center
@@ -113,11 +115,13 @@ def _run_control_center_contract(tmp_path, body: str) -> str:
 
 
 def _write_runtime_observation(tmp_path, **overrides) -> None:
+    started_at = datetime.now(timezone.utc).isoformat()
     state = {
         "update_status": "OBSERVING",
         "observing_revision": "b" * 40,
         "previous_revision": "a" * 40,
-        "observation_started_at": datetime.now(timezone.utc).isoformat(),
+        "observation_started_at": started_at,
+        "observation_ready_at": started_at,
         "observation_last_decision_time": "2026-08-13T03:00:00+00:00",
         "observation_success_cycles": 0,
         "observation_consecutive_failures": 0,
@@ -409,7 +413,8 @@ def test_candidate_observation_is_durable_before_revision_is_marked_applied(
     result = _run_control_center_contract(
         tmp_path,
         "$script:order = @(); "
-        "function Restart-CodeReloadableServices { $script:order += 'reload' }; "
+        "function Restart-CodeReloadableServices { $script:order += 'reload'; "
+        "return [DateTimeOffset]::Parse('2026-08-12T08:00:00+00:00') }; "
         "function Start-RuntimeObservation { $script:order += 'observe' }; "
         "function Write-RuntimeCodeState { $script:order += 'applied' }; "
         "function Write-WatchdogEvent {}; "
@@ -419,6 +424,39 @@ def test_candidate_observation_is_durable_before_revision_is_marked_applied(
     )
 
     assert result == "reload,observe,applied"
+
+
+def test_observation_reuses_the_reload_health_boundary(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:captured = $null; "
+        "function Get-LatestRuntimeDecisionTime { return $null }; "
+        "function Write-WatchdogEvent {}; "
+        "function Write-RuntimeUpdateState { param([hashtable]$Values); "
+        "$script:captured = $Values }; "
+        "$boundary = [DateTimeOffset]::Parse('2026-08-12T08:00:00+00:00'); "
+        "Start-RuntimeObservation -Revision ('b' * 40) -PreviousRevision ('a' * 40) "
+        "-HealthBoundary $boundary; "
+        "Write-Output $script:captured.observation_health_boundary_at",
+    )
+
+    assert result == "2026-08-12T08:00:00.0000000+00:00"
+
+
+def test_runtime_checkout_hands_off_before_old_supervisor_checks_health(
+    tmp_path,
+) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:order = @(); "
+        "function Update-RuntimeCheckout { $script:order += 'checkout'; return $true }; "
+        "function Write-WatchdogEvent { $script:order += 'event' }; "
+        "function Start-WatchdogReplacement { $script:order += 'replacement' }; "
+        "$handedOff = Invoke-RuntimeCheckoutHandoff -Revision ('b' * 40); "
+        "Write-Output \"$handedOff,$($script:order -join ',')\"",
+    )
+
+    assert result == "True,checkout,event,replacement"
 
 
 def test_two_new_decision_cycles_activate_even_when_observed_together(tmp_path) -> None:
@@ -471,10 +509,28 @@ def test_three_consecutive_observation_failures_trigger_one_rollback(tmp_path) -
     assert result == "True,True,False,1,ROLLED_BACK"
 
 
+def test_observation_window_waits_for_the_worker_family_to_finish_starting(
+    tmp_path,
+) -> None:
+    _write_runtime_observation(tmp_path, observation_ready_at=None)
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:rollbacks = 0; function Test-CodeReloadHealth { "
+        "param($ReloadStarted, $AllowedWorkerStates); "
+        "return $null -eq $AllowedWorkerStates -or $AllowedWorkerStates.Count -gt 1 }; "
+        "function Invoke-RuntimeRollback { $script:rollbacks += 1; return $true }; "
+        "$observed = Test-RuntimeObservation; $state = Get-RuntimeUpdateState; "
+        'Write-Output "$observed,$($state.update_status),$($null -eq $state.observation_ready_at),$script:rollbacks"',
+    )
+
+    assert result == "True,OBSERVING,True,0"
+
+
 def test_market_closure_pauses_observation_timeout_until_reopen(tmp_path) -> None:
     _write_runtime_observation(
         tmp_path,
         observation_started_at="2020-01-01T00:00:00+00:00",
+        observation_ready_at="2020-01-01T00:00:00+00:00",
     )
     result = _run_control_center_contract(
         tmp_path,
@@ -488,12 +544,46 @@ def test_market_closure_pauses_observation_timeout_until_reopen(tmp_path) -> Non
         "function Invoke-RestMethod { return [pscustomobject]@{ system = "
         "[pscustomobject]@{ market_session = 'OPEN' } } }; "
         "$reopened = Test-RuntimeObservation; "
-        "$wasPaused = [DateTimeOffset]::Parse([string]$paused.observation_started_at) "
+        "$wasPaused = [DateTimeOffset]::Parse([string]$paused.observation_ready_at) "
         "-gt [DateTimeOffset]::Parse('2020-01-02T00:00:00+00:00'); "
         'Write-Output "$closed,$reopened,$wasPaused,$script:rollbacks"',
     )
 
     assert result == "True,True,True,0"
+
+
+def test_observation_timeout_matches_the_thirty_minute_decision_window(
+    tmp_path,
+) -> None:
+    old = "2020-01-01T00:00:00+00:00"
+    quotes = tmp_path / "runtime" / ".local" / "forward" / "quotes"
+    quotes.mkdir(parents=True)
+    results = []
+    for minutes_to_close in (10, 45):
+        _write_runtime_observation(
+            tmp_path, observation_started_at=old, observation_ready_at=old,
+        )
+        now = datetime.now(timezone.utc)
+        (quotes / "market-session.json").write_text(json.dumps({
+            "observed_at": now.isoformat(),
+            "is_open": True,
+            "next_close_time": (
+                now + timedelta(minutes=minutes_to_close)
+            ).isoformat(),
+        }), encoding="utf-8")
+        results.append(_run_control_center_contract(
+            tmp_path,
+            "$script:rollbacks = 0; function Test-CodeReloadHealth { return $true }; "
+            "function Test-CurrentProductionShape { return $null }; "
+            "function Get-RuntimeDecisionTimes { return @() }; "
+            "function Invoke-RuntimeRollback { $script:rollbacks += 1; return $true }; "
+            "$observed = Test-RuntimeObservation; $state = Get-RuntimeUpdateState; "
+            "$paused = [DateTimeOffset]::Parse([string]$state.observation_ready_at) "
+            "-gt [DateTimeOffset]::Parse('2020-01-02T00:00:00+00:00'); "
+            'Write-Output "$observed,$paused,$script:rollbacks"',
+        ))
+
+    assert results == ["True,True,0", "False,False,1"]
 
 
 def test_watchdog_autostart_uses_one_windowless_registration_path(tmp_path) -> None:
@@ -784,6 +874,47 @@ def test_code_reload_health_requires_fresh_successful_sync(tmp_path) -> None:
     assert result == "True,False"
 
 
+def test_code_reload_accepts_fresh_service_startup_but_rejects_failed_state(
+    tmp_path,
+) -> None:
+    repo = tmp_path / "repo"
+    status = repo / ".local" / "forward" / "dashboard-sync-status.json"
+    status.parent.mkdir(parents=True)
+    status.write_text(json.dumps({
+        "last_attempt": "2026-08-12T08:00:01+00:00",
+        "status": "OK",
+    }), encoding="utf-8")
+    (status.parent / "collector-status.json").write_text(json.dumps({
+        "service": "collector", "state": "STARTING",
+        "last_success": "2026-08-12T08:00:01+00:00",
+    }), encoding="utf-8")
+    annotator = status.parent / "news-annotator-status.json"
+    annotator.write_text(json.dumps({
+        "service": "annotator", "state": "STARTING",
+        "last_success": "2026-08-12T08:00:01+00:00",
+    }), encoding="utf-8")
+    script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    command = (
+        f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{repo}' "
+        f"-RepositoryRoot '{repo}'; "
+        "function Get-ForecasterProcesses { return [pscustomobject]@{ ProcessId = 1 } }; "
+        "function Invoke-WebRequest { return [pscustomobject]@{ StatusCode = 200 } }; "
+        "$started = [DateTimeOffset]::Parse('2026-08-12T08:00:00+00:00'); "
+        "$servicesStarting = Test-CodeReloadHealth -ReloadStarted $started; "
+        f"@{{ service = 'annotator'; state = 'ERROR'; "
+        f"last_success = '2026-08-12T08:00:01+00:00' }} "
+        f"| ConvertTo-Json | Set-Content -LiteralPath '{annotator}'; "
+        "$failed = Test-CodeReloadHealth -ReloadStarted $started; "
+        "Write-Output \"$servicesStarting,$failed\""
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    assert result == "True,False"
+
+
 def test_service_state_rejects_stale_worker_heartbeat(tmp_path) -> None:
     repo = tmp_path / "repo"
     status = repo / ".local" / "forward" / "collector-status.json"
@@ -815,3 +946,47 @@ def test_service_state_rejects_stale_worker_heartbeat(tmp_path) -> None:
     ).stdout.strip()
 
     assert result == "RUNNING,COLLECTOR STALE"
+
+
+def test_worker_family_keeps_current_startup_alive_but_bounds_stalled_startup(
+    tmp_path,
+) -> None:
+    repo = tmp_path / "repo"
+    status_root = repo / ".local" / "forward"
+    status_root.mkdir(parents=True)
+    now = datetime.now(timezone.utc)
+    current_start = (now - timedelta(minutes=8)).isoformat()
+    stalled_start = (now - timedelta(minutes=16)).isoformat()
+    script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    results = []
+
+    for service, filename in (
+        ("collector", "collector-status.json"),
+        ("annotator", "news-annotator-status.json"),
+    ):
+        status = status_root / filename
+        status.write_text(json.dumps({
+            "service": service,
+            "state": "STARTING",
+            "last_success": (now - timedelta(minutes=8)).isoformat(),
+        }), encoding="utf-8")
+        command = (
+            f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{repo}' "
+            f"-RepositoryRoot '{repo}'; "
+            f"function Get-ServiceProcessStartedAt {{ return [DateTimeOffset]::Parse('{current_start}') }}; "
+            f"$service = [pscustomobject]@{{ Key = '{service}' }}; "
+            "$processes = @([pscustomobject]@{ ProcessId = 1 }); "
+            "$current = Get-ServiceState -Service $service -Processes $processes; "
+            f"function Get-ServiceProcessStartedAt {{ return [DateTimeOffset]::Parse('{stalled_start}') }}; "
+            "$stalled = Get-ServiceState -Service $service -Processes $processes; "
+            "Write-Output \"$current,$stalled\""
+        )
+        results.append(subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip())
+
+    assert results == [
+        "STARTING,COLLECTOR STALE",
+        "STARTING,ANNOTATOR STALE",
+    ]

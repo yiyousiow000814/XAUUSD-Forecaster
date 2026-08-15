@@ -23,6 +23,7 @@ A Preview must never mutate production-owned state, including:
 - trading or order state;
 - model activation or promotion state;
 - scheduler state;
+- Assistant conversations, messages, memory, or queue state;
 - production configuration; or
 - any other authoritative production-owned state.
 
@@ -73,3 +74,14 @@ A Preview must not reconstruct missing independent events from that output and
 then describe the result as verification of changed grouping logic. Logic-level
 verification requires the complete bounded or paged source records governed by
 the changed contract.
+
+## No production model consumption
+
+A branch Preview must not spend production model capacity, use production model
+credentials, or create production Assistant work. Assistant write and
+model-consuming routes reject before authentication, parsing, storage access,
+queue admission, or provider transport.
+
+A Preview may render explicitly labeled synthetic Assistant fixtures or an
+immutable build snapshot for presentation review. Such output is not a live
+conversation and does not verify the model, retrieval, or persistence path.
