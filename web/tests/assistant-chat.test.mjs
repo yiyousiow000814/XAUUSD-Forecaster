@@ -54,13 +54,36 @@ async function createTurn(database, suffix = 1, overrides = {}) {
   });
 }
 
-function directAgentProvenance(claim, overrides = {}) {
+const evidenceValidation = (answer, available = [], cited = []) => {
+  const claimRows = answer.split("\n").map((text, index) => ({
+    claim_id: `claim-${index + 1}`,
+    line_index: index,
+    text_sha256: digest(text),
+    evidence_ids: available.length ? cited : [],
+  }));
+  const withoutHash = {
+    protocol: "assistant.evidence.v1",
+    validator_version: "assistant-evidence-validator-v1",
+    mode: available.length ? "CITATION_COVERAGE" : "NO_CITABLE_EVIDENCE",
+    claim_count: claimRows.length,
+    citation_count: claimRows.reduce((total, item) => total + item.evidence_ids.length, 0),
+    available_evidence_ids: available,
+    cited_evidence_ids: cited,
+    claims: claimRows,
+    coverage_complete: available.length > 0,
+    entailment_status: "NOT_VERIFIED",
+    answer_sha256: digest(answer),
+  };
+  return { ...withoutHash, receipt_sha256: digest(canonicalJson(withoutHash)) };
+};
+
+function directAgentProvenance(claim, answer, overrides = {}) {
   const provenance = {
-    policy_version: "assistant-agent-v1",
+    policy_version: "assistant-agent-v2",
     tool_registry_version: "assistant-tool-registry-v1",
     conversation_id: claim.conversation_id,
     user_message_id: claim.user_message_id,
-    system_instruction_version: "assistant-system-v1",
+    system_instruction_version: "assistant-system-v3",
     system_instruction_sha256: "a".repeat(64),
     active_context_sha256: "b".repeat(64),
     retrieval_cutoff: claim.retrieval_cutoff,
@@ -81,13 +104,15 @@ function directAgentProvenance(claim, overrides = {}) {
     model_routing: [assistantRouting("ASSISTANT_CHAT")],
     tool_execution: [],
     evidence_ids: [],
+    evidence_validation: evidenceValidation(answer),
     ...overrides,
   };
   return rehash(provenance);
 }
 
-function toolAgentProvenance(claim) {
-  return directAgentProvenance(claim, {
+function toolAgentProvenance(claim, answer) {
+  const evidenceIds = ["evidence:tool-1"];
+  return directAgentProvenance(claim, answer, {
     model_turn_count: 2,
     tool_round_count: 1,
     tool_call_count: 1,
@@ -105,19 +130,20 @@ function toolAgentProvenance(claim) {
       error_code: null,
       result_tokens: 128,
       result_sha256: "c".repeat(64),
-      evidence_ids: ["evidence:tool-1"],
+      evidence_ids: evidenceIds,
       provenance: {
         registry_version: "assistant-tool-registry-v1",
         actor_fingerprint: digest(
           `assistant-tool-registry-v1:${claim.owner_id}:${claim.id}`,
         ).slice(0, 16),
         source_mode: "D1_ARCHIVE",
-        canonical_evidence_ids: ["evidence:tool-1"],
+        canonical_evidence_ids: evidenceIds,
       },
       started_at: "2026-08-16T01:00:01.000000+00:00",
       completed_at: "2026-08-16T01:00:01.100000+00:00",
     }]],
-    evidence_ids: ["evidence:tool-1"],
+    evidence_ids: evidenceIds,
+    evidence_validation: evidenceValidation(answer, evidenceIds, evidenceIds),
   });
 }
 
@@ -350,8 +376,12 @@ test("progress reserves enough sequence capacity for the largest final answer", 
     error instanceof AssistantChatInputError && error.code === "EVENT_BUDGET_EXCEEDED"
   ));
 
-  const answer = "a".repeat(32_000);
-  const provenance = directAgentProvenance(claim);
+  const answer = [
+    ...Array.from({ length: 7 }, () => "a".repeat(3_999)),
+    "a".repeat(4_000),
+  ].join("\n");
+  assert.equal(Buffer.byteLength(answer), 32_000);
+  const provenance = directAgentProvenance(claim, answer);
   provenance.budgets.MAX_ACTIVE_CONTEXT_TOKENS = 32_768;
   provenance.budgets.MAX_OUTPUT_TOKENS = 4_096;
   rehash(provenance);
@@ -378,7 +408,7 @@ test("answer completion atomically persists the canonical final and terminal str
     answer,
     model_version: "gemma-4-31b-it",
     content_document: await buildAssistantTextContentDocument(answer),
-    provenance: directAgentProvenance(claim),
+    provenance: directAgentProvenance(claim, answer),
   }, atSeconds(2));
   assert.equal(completed.status, "ANSWERED");
   assert.ok(completed.assistant_message_id);
@@ -394,7 +424,7 @@ test("answer completion atomically persists the canonical final and terminal str
   ]);
   assert.equal(messages.items[1].provenance.kind, "ASSISTANT_CHAT");
   assert.equal(messages.items[1].provenance.agent.run_sha256,
-    directAgentProvenance(claim).run_sha256);
+    directAgentProvenance(claim, answer).run_sha256);
 
   const stream = await listOwnerAssistantTurnEvents(database, {
     ownerId: owner,
@@ -425,7 +455,7 @@ test("answer completion atomically persists the canonical final and terminal str
     lease_token: claim.lease_token,
     answer,
     model_version: "gemma-4-31b-it",
-    provenance: directAgentProvenance(claim),
+    provenance: directAgentProvenance(claim, answer),
   }, atSeconds(3)), null);
   assert.equal(database.database.prepare(
     "SELECT count(*) AS n FROM assistant_messages WHERE role='ASSISTANT'",
@@ -449,7 +479,7 @@ test("completion rejects forged, secret-bearing, or cross-turn agent provenance"
     const database = new D1TestDatabase();
     await createTurn(database, index + 1);
     const claim = await claimAssistantChatTurn(database, "worker:chat", atSeconds(1));
-    const provenance = mutate(directAgentProvenance(claim));
+    const provenance = mutate(directAgentProvenance(claim, "回答"));
     await assert.rejects(
       completeAssistantChatTurn(database, {
         id: claim.id,
@@ -480,7 +510,7 @@ test("completion rejects rich content that drifts from the canonical answer", as
     answer,
     model_version: "gemma-4-31b-it",
     content_document: content,
-    provenance: directAgentProvenance(claim),
+    provenance: directAgentProvenance(claim, answer),
   }, atSeconds(2)), error => (
     error instanceof AssistantChatInputError
       && error.code === "INVALID_ASSISTANT_CONTENT"
@@ -496,43 +526,60 @@ test("completion accepts exact owner-bound native tool receipts", async () => {
   const rejectedClaim = await claimAssistantChatTurn(
     rejectedDatabase, "worker:chat", atSeconds(1),
   );
-  const crossOwner = toolAgentProvenance(rejectedClaim);
+  const crossOwnerAnswer = "不能接受错误 owner receipt。";
+  const crossOwner = toolAgentProvenance(rejectedClaim, crossOwnerAnswer);
   crossOwner.tool_execution[0][0].provenance.actor_fingerprint = "0".repeat(16);
   rehash(crossOwner);
   await assert.rejects(completeAssistantChatTurn(rejectedDatabase, {
     id: rejectedClaim.id,
     lease_token: rejectedClaim.lease_token,
-    answer: "不能接受错误 owner receipt。",
+    answer: crossOwnerAnswer,
     model_version: "gemma-4-31b-it",
     provenance: crossOwner,
   }, atSeconds(2)), /工具 receipt/);
 
-  const nestedSecret = toolAgentProvenance(rejectedClaim);
+  const secretAnswer = "不能接受嵌套敏感字段。";
+  const nestedSecret = toolAgentProvenance(rejectedClaim, secretAnswer);
   nestedSecret.tool_execution[0][0].provenance.api_key_value = "must-not-persist";
   rehash(nestedSecret);
   await assert.rejects(completeAssistantChatTurn(rejectedDatabase, {
     id: rejectedClaim.id,
     lease_token: rejectedClaim.lease_token,
-    answer: "不能接受嵌套敏感字段。",
+    answer: secretAnswer,
     model_version: "gemma-4-31b-it",
     provenance: nestedSecret,
   }, atSeconds(2)), error => (
     error instanceof AssistantChatInputError && error.code === "SECRET_IN_PROVENANCE"
   ));
 
+  const driftedAnswer = toolAgentProvenance(
+    rejectedClaim, "这份回执属于另一份答案。",
+  );
+  await assert.rejects(completeAssistantChatTurn(rejectedDatabase, {
+    id: rejectedClaim.id,
+    lease_token: rejectedClaim.lease_token,
+    answer: "当前答案不能复用另一份证据回执。",
+    model_version: "gemma-4-31b-it",
+    provenance: driftedAnswer,
+  }, atSeconds(2)), error => (
+    error instanceof AssistantChatInputError
+      && error.code === "INVALID_EVIDENCE_VALIDATION"
+  ));
+
   const database = new D1TestDatabase();
   await createTurn(database);
   const claim = await claimAssistantChatTurn(database, "worker:chat", atSeconds(1));
+  const answer = "根据已收录新闻，当前证据仍支持谨慎判断。";
   const completed = await completeAssistantChatTurn(database, {
     id: claim.id,
     lease_token: claim.lease_token,
-    answer: "根据已收录新闻，当前证据仍支持谨慎判断。",
+    answer,
     model_version: "gemma-4-31b-it",
     content_document: await buildAssistantTextContentDocument(
-      "根据已收录新闻，当前证据仍支持谨慎判断。",
+      answer,
       { evidenceIds: ["evidence:tool-1"] },
     ),
-    provenance: toolAgentProvenance(claim),
+    provenance: toolAgentProvenance(claim, answer),
   }, atSeconds(2));
   assert.equal(completed.status, "ANSWERED");
   const stream = await listOwnerAssistantTurnEvents(database, {

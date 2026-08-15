@@ -15,6 +15,9 @@ import {
 } from "../app/api/_shared/news-questions.ts";
 import { D1TestDatabase } from "./d1-test-database.mjs";
 import { assistantRouting } from "./assistant-routing-fixture.mjs";
+import {
+  buildAssistantEvidenceValidation,
+} from "../app/api/_shared/assistant-evidence.ts";
 
 const minute = value => new Date(Date.parse("2026-08-15T10:00:00.000Z") + value * 60_000);
 const key = suffix => `00000000-0000-4000-8000-${String(suffix).padStart(12, "0")}`;
@@ -41,6 +44,15 @@ const provenance = (claim, ids) => ({
   result_limit: 20,
   canonical_evidence_ids: ids,
 });
+
+const validation = async (answer, ids, mode = "CITATION_COVERAGE") => (
+  await buildAssistantEvidenceValidation({
+    claims: [{ text: answer, evidence_ids: mode === "CITATION_COVERAGE" ? ids : [] }],
+  }, mode === "CITATION_COVERAGE" ? ids : [], {
+    mode,
+    maxCitedEvidence: 12,
+  })
+).receipt;
 
 test("derives a bounded keyword query instead of sending a natural-language sentence as one token", () => {
   assert.equal(deriveRetrievalQuery("今天黄金市场为什么关注美联储利率？"), "黄金 美联储 利率");
@@ -95,6 +107,12 @@ test("expired leases recover, stale lease tokens cannot publish, and completion 
   }, minute(4)), null);
 
   const evidenceId = "a".repeat(64);
+  assert.throws(
+    () => database.database.prepare(
+      "UPDATE news_questions SET status='ANSWERED' WHERE id=?",
+    ).run(created.item.id),
+    /current news answer requires evidence validation/,
+  );
   await assert.rejects(
     completeNewsQuestion(database, {
       id: created.item.id,
@@ -122,12 +140,34 @@ test("expired leases recover, stale lease tokens cannot publish, and completion 
     error => error instanceof NewsQuestionInputError && error.code === "UNVERIFIED_EVIDENCE",
   );
 
+  const answer = "美联储表态改变了利率预期。";
+  const evidenceValidation = await validation(answer, [evidenceId]);
+  const forgedValidation = structuredClone(evidenceValidation);
+  forgedValidation.answer_sha256 = "0".repeat(64);
+  await assert.rejects(
+    completeNewsQuestion(database, {
+      id: created.item.id,
+      lease_token: recovered.lease_token,
+      answer_status: "ANSWERED",
+      answer,
+      evidence_ids: [evidenceId],
+      evidence_validation: forgedValidation,
+      model_version: "gemma-test",
+      prompt_version: recovered.prompt_version,
+      retrieval: provenance(recovered, [evidenceId]),
+      routing: assistantRouting("NEWS_QA"),
+    }, minute(4)),
+    error => error instanceof NewsQuestionInputError
+      && error.code === "INVALID_EVIDENCE_VALIDATION",
+  );
+
   const completed = await completeNewsQuestion(database, {
     id: created.item.id,
     lease_token: recovered.lease_token,
     answer_status: "ANSWERED",
-    answer: "美联储表态改变了利率预期。",
+    answer,
     evidence_ids: [evidenceId],
+    evidence_validation: evidenceValidation,
     model_version: "gemma-test",
     prompt_version: recovered.prompt_version,
     retrieval: provenance(recovered, [evidenceId]),
@@ -136,6 +176,8 @@ test("expired leases recover, stale lease tokens cannot publish, and completion 
   assert.equal(completed.status, "ANSWERED");
   assert.equal(database.row(created.item.id).processing_started_at, null);
   assert.deepEqual(completed.evidence_ids, [evidenceId]);
+  assert.deepEqual(completed.evidence_validation, evidenceValidation);
+  assert.equal(completed.evidence_validation.entailment_status, "NOT_VERIFIED");
   assert.equal(completed.retrieval.source_mode, "D1_ARCHIVE");
   assert.deepEqual(
     JSON.parse(database.row(created.item.id).attempt_history_json).map(item => item.event),
@@ -147,18 +189,30 @@ test("expired leases recover, stale lease tokens cannot publish, and completion 
     ).run(created.item.id),
     /prompt version is immutable/,
   );
+  assert.throws(
+    () => database.database.prepare(
+      "UPDATE news_questions SET evidence_validation_json='{}' WHERE id=?",
+    ).run(created.item.id),
+    /news evidence validation is immutable/,
+  );
 });
 
 test("no retrieval evidence publishes the fixed honest result without a model identity", async () => {
   const database = new D1TestDatabase();
   const created = await create(database, 1);
   const claim = await claimNewsQuestion(database, "worker:a", minute(0));
+  const evidenceValidation = await validation(
+    INSUFFICIENT_EVIDENCE_ANSWER,
+    [],
+    "INSUFFICIENT_EVIDENCE",
+  );
   const completed = await completeNewsQuestion(database, {
     id: created.item.id,
     lease_token: claim.lease_token,
     answer_status: "INSUFFICIENT_EVIDENCE",
     answer: "untrusted copy",
     evidence_ids: [],
+    evidence_validation: evidenceValidation,
     model_version: "untrusted-model",
     prompt_version: claim.prompt_version,
     retrieval: provenance(claim, []),
@@ -167,6 +221,7 @@ test("no retrieval evidence publishes the fixed honest result without a model id
   assert.equal(completed.answer_status, "INSUFFICIENT_EVIDENCE");
   assert.equal(completed.model_version, null);
   assert.deepEqual(completed.evidence_ids, []);
+  assert.deepEqual(completed.evidence_validation, evidenceValidation);
   const message = database.row(completed.assistant_message_id, "assistant_messages");
   assert.equal(message.content, INSUFFICIENT_EVIDENCE_ANSWER);
   assert.equal(JSON.parse(message.provenance_json).model_version, null);

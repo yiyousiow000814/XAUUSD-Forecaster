@@ -7,11 +7,18 @@ import urllib.parse
 from typing import Any
 
 from .annotation import DEFAULT_GEMMA_MODEL, generate_metered_json
+from .assistant_evidence import (
+    MAX_CLAIM_CHARACTERS,
+    MAX_EVIDENCE_CLAIMS,
+    MAX_EVIDENCE_PER_CLAIM,
+    insufficient_evidence_validation,
+    validate_assistant_evidence_claims,
+)
 from .assistant_routing import apply_provider_thinking_level
 from .model_gateway import ModelRequestAccountant
 
 
-NEWS_QA_PROMPT_VERSION = "news-qa-v2"
+NEWS_QA_PROMPT_VERSION = "news-qa-v3"
 INSUFFICIENT_EVIDENCE_ANSWER = (
     "当前已收录且可追溯的新闻证据不足，无法可靠回答这个问题。"
 )
@@ -91,10 +98,14 @@ def answer_news_question(
         raise ValueError(f"Unsupported news Q&A prompt version: {prompt_version}")
     evidence = build_news_evidence_packet(news)
     if not evidence:
+        validated = insufficient_evidence_validation(
+            INSUFFICIENT_EVIDENCE_ANSWER,
+        )
         return {
             "answer_status": "INSUFFICIENT_EVIDENCE",
-            "answer": INSUFFICIENT_EVIDENCE_ANSWER,
-            "evidence_ids": [],
+            "answer": validated.answer,
+            "evidence_ids": list(validated.evidence_ids),
+            "evidence_validation": validated.receipt,
             "model_version": None,
             "prompt_version": prompt_version,
         }
@@ -104,8 +115,9 @@ def answer_news_question(
     payload = {
         "systemInstruction": {"parts": [{"text": (
             "你只能根据 EVIDENCE 中的新闻证据回答。不得补充外部事实，不得提供交易建议。"
-            "每项事实性说明都必须由返回的 evidence_ids 支持；证据冲突时明确说明。"
-            "使用简体中文，回答保持简洁。"
+            "将回答拆成最多 12 个单行 claims；每个 claim 必须至少引用一个只来自"
+            "本次 EVIDENCE 的 evidence_id。不得输出 claims 之外的字段。"
+            "证据冲突时作为一个有引用的 claim 明确说明。使用简体中文，回答保持简洁。"
         )}]},
         "contents": [{"parts": [{"text": (
             f"问题：{_bounded_text(question, 200)}\nEVIDENCE\n"
@@ -117,13 +129,28 @@ def answer_news_question(
             "maxOutputTokens": NEWS_QA_MAX_OUTPUT_TOKENS,
             "responseSchema": {
                 "type": "object",
-                "required": ["answer", "evidence_ids"],
+                "required": ["claims"],
                 "properties": {
-                    "answer": {"type": "string", "maxLength": MAX_ANSWER_CHARACTERS},
-                    "evidence_ids": {
+                    "claims": {
                         "type": "array",
-                        "maxItems": MAX_CITED_EVIDENCE,
-                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": MAX_EVIDENCE_CLAIMS,
+                        "items": {
+                            "type": "object",
+                            "required": ["text", "evidence_ids"],
+                            "properties": {
+                                "text": {
+                                    "type": "string",
+                                    "maxLength": MAX_CLAIM_CHARACTERS,
+                                },
+                                "evidence_ids": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "maxItems": MAX_EVIDENCE_PER_CLAIM,
+                                    "items": {"type": "string"},
+                                },
+                            },
+                        },
                     },
                 },
             },
@@ -141,22 +168,19 @@ def answer_news_question(
         decode=decode,
         request_accountant=request_accountant,
     )
-    allowed = {str(row["evidence_id"]) for row in evidence}
-    raw_refs = result.get("evidence_ids")
-    if not isinstance(raw_refs, list) or len(raw_refs) > MAX_CITED_EVIDENCE:
-        raise ValueError("Gemma answer has invalid news evidence")
-    refs = list(dict.fromkeys(str(ref) for ref in raw_refs))
-    if any(ref not in allowed for ref in refs):
-        raise ValueError("Gemma answer cited unknown news evidence")
-    answer = str(result.get("answer") or "").strip()
-    if not answer or len(answer) > MAX_ANSWER_CHARACTERS:
+    validated = validate_assistant_evidence_claims(
+        result,
+        [str(row["evidence_id"]) for row in evidence],
+        mode="CITATION_COVERAGE",
+        max_cited_evidence=MAX_CITED_EVIDENCE,
+    )
+    if len(validated.answer) > MAX_ANSWER_CHARACTERS:
         raise ValueError("Gemma returned an invalid answer")
-    if not refs:
-        raise ValueError("Gemma answer has no verified news evidence")
     return {
         "answer_status": "ANSWERED",
-        "answer": answer,
-        "evidence_ids": refs,
+        "answer": validated.answer,
+        "evidence_ids": list(validated.evidence_ids),
+        "evidence_validation": validated.receipt,
         "model_version": model_version,
         "prompt_version": prompt_version,
     }

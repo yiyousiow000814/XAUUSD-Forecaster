@@ -101,6 +101,7 @@ export const newsQuestions = sqliteTable(
       .references(() => assistantMessages.id),
     assistantMessageId: text("assistant_message_id")
       .references(() => assistantMessages.id),
+    evidenceValidationJson: text("evidence_validation_json"),
   },
   table => [
     uniqueIndex("news_questions_owner_idempotency_idx")

@@ -49,6 +49,26 @@ OUTPUT_SCHEMA = {
     "required": ["value"],
     "properties": {"value": {"type": "string", "minLength": 1, "maxLength": 64}},
 }
+EVIDENCE_OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["value", "provenance"],
+    "properties": {
+        "value": {"type": "string", "minLength": 1, "maxLength": 64},
+        "provenance": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["canonical_evidence_ids"],
+            "properties": {
+                "canonical_evidence_ids": {
+                    "type": "array",
+                    "maxItems": 20,
+                    "items": {"type": "string", "minLength": 1, "maxLength": 128},
+                },
+            },
+        },
+    },
+}
 
 
 def _actor() -> AssistantToolActor:
@@ -91,9 +111,30 @@ def _registry(executed: list[str] | None = None) -> AssistantToolRegistry:
     ),))
 
 
+def _evidence_registry() -> AssistantToolRegistry:
+    return AssistantToolRegistry((AssistantToolDefinition(
+        name="market_price_v1",
+        version="v1",
+        description="Read an evidence-linked XAUUSD market price snapshot.",
+        capability=AssistantToolCapability.MARKET_DATA_READ,
+        input_schema=INPUT_SCHEMA,
+        output_schema=EVIDENCE_OUTPUT_SCHEMA,
+        timeout_seconds=1,
+        max_result_tokens=512,
+        provenance_fields=("canonical_evidence_ids",),
+        executor=lambda _arguments, _context: {
+            "value": "4321.00",
+            "provenance": {
+                "canonical_evidence_ids": ["evidence-1", "evidence-2"],
+            },
+        },
+    ),))
+
+
 def _model_content(
     *,
     text: str | None = None,
+    evidence_ids: tuple[str, ...] = (),
     call_id: str | None = None,
     signature: str | None = None,
 ) -> dict[str, object]:
@@ -109,7 +150,12 @@ def _model_content(
             part["thoughtSignature"] = signature
         parts = [part]
     else:
-        parts = [{"text": text or ""}]
+        parts = [{"text": json.dumps({
+            "claims": [{
+                "text": text or "",
+                "evidence_ids": list(evidence_ids),
+            }],
+        }, ensure_ascii=False, separators=(",", ":"))}]
     return {"role": "model", "parts": parts}
 
 
@@ -196,7 +242,14 @@ def test_agent_may_answer_directly_without_executing_a_tool() -> None:
     ]
     assert result.provenance["model_turn_count"] == 1
     assert result.provenance["tool_call_count"] == 0
-    assert result.provenance["system_instruction_version"] == "assistant-system-v2"
+    assert result.provenance["system_instruction_version"] == "assistant-system-v3"
+    assert result.provenance["policy_version"] == "assistant-agent-v2"
+    assert result.provenance["evidence_validation"]["mode"] == (
+        "NO_CITABLE_EVIDENCE"
+    )
+    assert result.provenance["evidence_validation"]["entailment_status"] == (
+        "NOT_VERIFIED"
+    )
     assert "unverified prior conversation text" in (
         payloads[0]["systemInstruction"]["parts"][0]["text"]
     )
@@ -249,6 +302,52 @@ def test_one_tool_round_preserves_model_content_and_exact_function_response_id()
     assert result.provenance["tool_round_count"] == 1
     assert result.provenance["tool_call_count"] == 1
     assert len(result.provenance["run_sha256"]) == 64
+
+
+def test_agent_persists_claim_level_coverage_for_only_the_cited_subset() -> None:
+    turns = 0
+
+    def invoke(_payload, **_kwargs):
+        nonlocal turns
+        turns += 1
+        if turns == 1:
+            return _routed(_model_content(call_id="call-1"), turns)
+        return _routed(_model_content(
+            text="当前回答只依赖第一项证据。",
+            evidence_ids=("evidence-1",),
+        ), turns)
+
+    result = run_bounded_assistant_agent(
+        _request(), _evidence_registry(), invoke,
+    )
+
+    assert result.evidence_ids == ("evidence-1",)
+    validation = result.provenance["evidence_validation"]
+    assert validation["available_evidence_ids"] == ["evidence-1", "evidence-2"]
+    assert validation["cited_evidence_ids"] == ["evidence-1"]
+    assert validation["claims"][0]["evidence_ids"] == ["evidence-1"]
+    assert validation["entailment_status"] == "NOT_VERIFIED"
+
+
+@pytest.mark.parametrize("evidence_ids", [(), ("invented",)])
+def test_agent_rejects_uncited_or_fabricated_evidence_claims(
+    evidence_ids: tuple[str, ...],
+) -> None:
+    turns = 0
+
+    def invoke(_payload, **_kwargs):
+        nonlocal turns
+        turns += 1
+        if turns == 1:
+            return _routed(_model_content(call_id="call-1"), turns)
+        return _routed(_model_content(
+            text="这项事实没有有效引用。",
+            evidence_ids=evidence_ids,
+        ), turns)
+
+    with pytest.raises(AssistantAgentContractError) as captured:
+        run_bounded_assistant_agent(_request(), _evidence_registry(), invoke)
+    assert captured.value.error_code == "INVALID_EVIDENCE_ANSWER"
 
 
 def test_agent_allows_at_most_a_bounded_second_tool_round_then_disables_tools() -> None:

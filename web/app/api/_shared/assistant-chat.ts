@@ -2,6 +2,7 @@ import {
   MAX_ASSISTANT_CONTENT_BLOCKS,
   verifyAssistantContentDocument,
 } from "./assistant-content";
+import { parseAssistantEvidenceReceipt } from "./assistant-evidence";
 import {
   ASSISTANT_ACTIVE_TURN_STATUSES_SQL,
   automaticAssistantTitleStatements,
@@ -795,6 +796,7 @@ const parseAgentProvenance = async (
   value: unknown,
   turn: AssistantTurnRow,
   finalModelVersion: string,
+  answer: string,
 ) => {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     inputError("INVALID_AGENT_PROVENANCE", "Assistant 来源无效");
@@ -810,11 +812,11 @@ const parseAgentProvenance = async (
     "system_instruction_version", "system_instruction_sha256", "active_context_sha256",
     "retrieval_cutoff", "budgets", "model_turn_count", "tool_round_count",
     "tool_call_count", "tool_result_tokens", "model_versions", "model_routing",
-    "tool_execution", "evidence_ids", "run_sha256",
+    "tool_execution", "evidence_ids", "evidence_validation", "run_sha256",
   ]);
   if (Object.keys(raw).length !== requiredKeys.size
     || Object.keys(raw).some(key => !requiredKeys.has(key))
-    || raw.policy_version !== "assistant-agent-v1"
+    || raw.policy_version !== "assistant-agent-v2"
     || raw.tool_registry_version !== "assistant-tool-registry-v1"
     || raw.conversation_id !== turn.conversation_id
     || raw.user_message_id !== turn.user_message_id
@@ -986,11 +988,30 @@ const parseAgentProvenance = async (
     }
   }
   if (receipts !== toolCallCount || resultTokens !== toolResultTokens
+    || evidence.length > Number(budget.MAX_RETRIEVED_EVIDENCE)
     || !Array.isArray(raw.evidence_ids)
-    || raw.evidence_ids.length > 20
     || raw.evidence_ids.length > Number(budget.MAX_RETRIEVED_EVIDENCE)
-    || JSON.stringify(raw.evidence_ids) !== JSON.stringify(evidence)) {
+    || new Set(raw.evidence_ids).size !== raw.evidence_ids.length
+    || raw.evidence_ids.some(item => typeof item !== "string" || !objectId.test(item))) {
     inputError("INVALID_AGENT_PROVENANCE", "工具来源计数不一致");
+  }
+  let evidenceValidation;
+  try {
+    evidenceValidation = await parseAssistantEvidenceReceipt(
+      raw.evidence_validation,
+      {
+        answer,
+        availableEvidenceIds: evidence,
+        mode: evidence.length ? "CITATION_COVERAGE" : "NO_CITABLE_EVIDENCE",
+        maxCitedEvidence: Math.max(1, Number(budget.MAX_RETRIEVED_EVIDENCE)),
+      },
+    );
+  } catch {
+    inputError("INVALID_EVIDENCE_VALIDATION", "Assistant 证据验证回执无效");
+  }
+  if (JSON.stringify(raw.evidence_ids)
+    !== JSON.stringify(evidenceValidation.cited_evidence_ids)) {
+    inputError("INVALID_EVIDENCE_VALIDATION", "Assistant 引用证据与回执不一致");
   }
   const expectedRunHash = await hexDigest(canonicalJson(
     Object.fromEntries(Object.entries(raw).filter(([key]) => key !== "run_sha256")),
@@ -1026,7 +1047,9 @@ export async function completeAssistantChatTurn(
     || !modelId.test(modelVersion)) {
     inputError("INVALID_ASSISTANT_ANSWER", "Assistant 回答无效");
   }
-  const provenance = await parseAgentProvenance(input.provenance, turn, modelVersion);
+  const provenance = await parseAgentProvenance(
+    input.provenance, turn, modelVersion, answer,
+  );
   const evidenceIds = provenance.evidence_ids as string[];
   const contentDocument = await verifyAssistantContentDocument(
     input.content_document, {

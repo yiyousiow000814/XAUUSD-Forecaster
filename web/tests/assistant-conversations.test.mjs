@@ -21,7 +21,13 @@ import {
   completeNewsQuestion,
   createNewsQuestion,
 } from "../app/api/_shared/news-questions.ts";
-import { D1TestDatabase } from "./d1-test-database.mjs";
+import {
+  buildAssistantEvidenceValidation,
+} from "../app/api/_shared/assistant-evidence.ts";
+import {
+  ASSISTANT_TEST_MIGRATIONS,
+  D1TestDatabase,
+} from "./d1-test-database.mjs";
 import { assistantRouting } from "./assistant-routing-fixture.mjs";
 
 const owner = "cloudflare-access:owner-a";
@@ -55,12 +61,17 @@ const provenance = (claim, ids = ["evidence:1"]) => ({
 async function completeQuestion(database, created, at = instant(1)) {
   const claim = await claimNewsQuestion(database, "worker:test", instant(0));
   assert.equal(claim.id, created.item.id);
+  const answer = "根据已收录证据，利率预期正在影响美元与黄金定价。";
+  const evidenceValidation = await buildAssistantEvidenceValidation({
+    claims: [{ text: answer, evidence_ids: ["evidence:1"] }],
+  }, ["evidence:1"], { mode: "CITATION_COVERAGE", maxCitedEvidence: 12 });
   return completeNewsQuestion(database, {
     id: claim.id,
     lease_token: claim.lease_token,
     answer_status: "ANSWERED",
-    answer: "根据已收录证据，利率预期正在影响美元与黄金定价。",
+    answer,
     evidence_ids: ["evidence:1"],
+    evidence_validation: evidenceValidation.receipt,
     retrieval: provenance(claim),
     model_version: "gemma-test",
     prompt_version: claim.prompt_version,
@@ -263,7 +274,7 @@ test("AI and manual title work never changes conversation activity or overwrites
   const claimed = await claimAssistantTitleJob(database, "worker:title", instant(3));
   assert.equal(
     claimed.latest_assistant_message,
-    "根据已收录证据,利率预期正在影响美元与黄金定价。",
+    "根据已收录证据，利率预期正在影响美元与黄金定价。",
   );
   const renamed = await renameOwnerAssistantConversation(
     database, owner, created.item.conversation_id, "我的黄金研究标题",
@@ -439,7 +450,7 @@ test("message history is bounded and paginates deterministically", async () => {
   );
 });
 
-test("migration backfills legacy Q&A into canonical conversations without rewriting evidence", () => {
+test("migrations preserve legacy evidence and terminalize superseded active Q&A", () => {
   const database = new D1TestDatabase(["0008_news_questions.sql"]);
   database.database.prepare(
     `INSERT INTO news_questions (
@@ -462,7 +473,19 @@ test("migration backfills legacy Q&A into canonical conversations without rewrit
     "legacy-incomplete", owner, key(501), "incomplete-hash", "遗留不完整问题", "黄金",
     instant(0).toISOString(), instant(0).toISOString(), instant(30).toISOString(),
   );
-  database.applyMigration("0009_assistant_conversations.sql");
+  database.database.prepare(
+    `INSERT INTO news_questions (
+     id,owner_id,idempotency_key,question_hash,question,retrieval_query,status,
+     asked_at,available_at,expires_at,attempt_count,max_attempts,prompt_version,
+     attempt_history_json
+     ) VALUES (?,?,?,?,?,?,'PENDING',?,?,?,1,3,'news-qa-v2','[]')`,
+  ).run(
+    "legacy-pending", owner, key(502), "pending-hash", "仍在排队的旧问题", "黄金",
+    instant(0).toISOString(), instant(0).toISOString(), instant(30).toISOString(),
+  );
+  for (const migration of ASSISTANT_TEST_MIGRATIONS.slice(1)) {
+    database.applyMigration(migration);
+  }
   const question = database.row("legacy-question");
   assert.equal(question.conversation_id, "conversation:legacy-question");
   assert.equal(question.user_message_id, "message:user:legacy-question");
@@ -472,4 +495,17 @@ test("migration backfills legacy Q&A into canonical conversations without rewrit
   assert.deepEqual(legacyProvenance.evidence_ids, ["legacy:1"]);
   assert.equal(legacyProvenance.retrieval, null);
   assert.equal(database.row("legacy-incomplete").assistant_message_id, null);
+  const superseded = database.row("legacy-pending");
+  assert.equal(superseded.status, "FAILED");
+  assert.equal(superseded.failure_code, "PROMPT_VERSION_SUPERSEDED");
+  assert.equal(
+    JSON.parse(superseded.attempt_history_json).at(-1).event,
+    "PROMPT_VERSION_SUPERSEDED",
+  );
+  assert.throws(
+    () => database.database.prepare(
+      "UPDATE news_questions SET evidence_validation_json='{}' WHERE id='legacy-question'",
+    ).run(),
+    /news evidence validation is immutable/,
+  );
 });

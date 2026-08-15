@@ -4,9 +4,9 @@
 
 This status is maintained as the Assistant architecture and its bounded
 implementation PRs land. PR #103 established the contracts; PRs #20, #21, #22,
-#104, #106, #108, #110, #111, #113, #114, #116, #117, #118, #119, and #120 are
-merged on `main`. The rows describe those bounded foundations and the
-historical-memory implementation added by the current bounded scope.
+#104, #106, #108, #110, #111, #113, #114, #116, #117, #118, #119, #120, and
+#121 are merged on `main`. The rows describe those bounded foundations and the
+advanced evidence validation added by the current bounded scope.
 
 Status values have precise meanings:
 
@@ -25,7 +25,8 @@ Status values have precise meanings:
 | --- | --- | --- | --- |
 | Daily Brief | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | PR #20 is merged: complete point-in-time state fingerprinting, bounded candidates, durable debounce, capacity defer, append-only output, and evidence validation are covered. A Preview backed by an older public snapshot may still show the explicit empty state. |
 | Shared news retrieval | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | PR #21 is merged. Search and PR #22 Q&A reuse one D1 service with bounded Chinese/multi-token queries, published/received ranges, metadata filters, stable evidence IDs, deterministic ordering, and explicit provenance. |
-| Evidence-grounded Q&A | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | PR #22 provides authenticated asynchronous single-question Q&A through shared retrieval, a compact packet, the metered gateway, strict cited-ID validation, and persisted model/prompt/retrieval provenance. It is not a general agent or multi-turn chat. |
+| Evidence-grounded Q&A | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | PR #22 provides authenticated asynchronous single-question Q&A through shared retrieval and the metered gateway. The current bounded scope upgrades new `news-qa-v3` answers to claim-level citation coverage with server-recomputed receipts while preserving historical v2 rows as immutable audit evidence. |
+| Advanced evidence validation | [Orchestration](../contracts/ASSISTANT_ORCHESTRATION.md) | `MVP` | Q&A and native Agent finals share deterministic cross-runtime `assistant.evidence.v1`. Canonical answers contain only bounded claim lines; every line must cite an ID from the exact current packet when evidence exists. Unknown, uncited, forged, mismatched, or over-budget finals fail closed. Receipts explicitly record `entailment_status: NOT_VERIFIED`; semantic entailment is not implemented or claimed. Migration `0016` preserves completed v2 audit rows and terminalizes active v2 jobs instead of retaining a legacy executor. Production activation requires that migration and the updated Windows sync worker. |
 | Conversation persistence | [State](../contracts/ASSISTANT_STATE.md) | `MVP` | Owner-scoped D1 Conversation and immutable Message records form provider-independent canonical history. Chat admission appends a canonical user message, worker completion atomically appends one final Assistant message, and owner reads expose the one indexed active turn needed for browser recovery. Production activation requires migrations `0009` through `0014`. |
 | Conversation title | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `MVP` | First-message titles use a 32-grapheme provisional excerpt. Answer completion schedules a leased, metered, low-priority AI title job; the responsive workbench exposes manual rename and explicit regeneration while bounded retry and stale-job cancellation remain server-owned. Production generation requires the updated Windows sync worker. |
 | Conversation ordering | [State](../contracts/ASSISTANT_STATE.md) | `MVP` | Owner lists use `last_activity_at DESC,id DESC`. Only accepted user messages and persisted Assistant finals advance activity; title, rename, regeneration, and archive work are covered as non-activity. |
@@ -47,7 +48,7 @@ Status values have precise meanings:
 | Human authentication | [Security](../contracts/ASSISTANT_SECURITY.md) | `MVP` | News Q&A validates a Cloudflare Access JWT signature, issuer, audience, user identity, and configured owner membership before parsing or storage. Runtime Access policy and owner configuration are deployment prerequisites. |
 | Machine authentication | [Security](../contracts/ASSISTANT_SECURITY.md) | `MVP` | `INGEST_TOKEN` protects machine writes; a general service-actor model is not implemented. |
 | Assistant queue recovery | [Behavior](../specs/ASSISTANT_BEHAVIOR.md) | `MVP` | Q&A, title, compaction, and chat-turn D1 records use bounded attempts, append-only receipts, expiry, and time-limited leases. Chat adds atomic admission, one active turn per conversation, owner/global/rate gates, stale-lease recovery, capacity defer, and idempotent owner cancellation. Stale workers cannot append progress or publish a final. |
-| Evidence provenance through compaction | [State](../contracts/ASSISTANT_STATE.md) | `MVP` | Summary rows retain a reproducible prior-summary/source-job chain. Server-derived anchors carry canonical evidence IDs, source references, important timestamps, and tool/artifact references, while every pin and retrieved memory item names canonical origin messages. Advanced claim validation remains separate. |
+| Evidence provenance through compaction | [State](../contracts/ASSISTANT_STATE.md) | `MVP` | Summary rows retain a reproducible prior-summary/source-job chain. Server-derived anchors carry canonical evidence IDs, source references, important timestamps, and tool/artifact references, while every pin and retrieved memory item names canonical origin messages. Historical memory remains context rather than current evidence. |
 | Assistant Preview isolation | [Security](../contracts/ASSISTANT_SECURITY.md) | `MVP` | Q&A, conversation, memory, and chat writes or claims reject before authentication, parsing, D1, or model work. Chat turn reads return a labeled synthetic empty object and event reads a finite empty SSE stream; neither accesses production Assistant state. |
 
 ## Historical stack remediation

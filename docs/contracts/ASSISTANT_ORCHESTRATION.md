@@ -284,6 +284,36 @@ invented ID out of an otherwise unsupported answer is insufficient validation.
 The system MUST NOT claim claim-level factual entailment unless a separate,
 documented validator actually proves it.
 
+Current Q&A and native Agent finals use `assistant.evidence.v1`. The model must
+return an exact `claims` array; each item contains one bounded single-line claim
+and its evidence IDs. The canonical answer is the claims joined by `LF`, so no
+unmapped free text can enter the persisted answer. When a current tool or
+retrieval packet contains citable evidence, every claim must cite at least one
+ID from that exact packet. An unknown ID, an uncited claim, a duplicate ID, an
+extra envelope field, or a count violation rejects the complete final.
+
+The deterministic validation receipt records:
+
+- protocol and validator versions;
+- validation mode, claim count, and citation count;
+- ordered available and actually cited evidence IDs;
+- each claim's line index, text SHA-256, and cited IDs;
+- canonical answer and canonical receipt SHA-256 values; and
+- `coverage_complete` plus `entailment_status: NOT_VERIFIED`.
+
+Python and the Cloudflare boundary share fixtures for the exact receipt. The
+Cloudflare boundary reconstructs it from the canonical answer and authoritative
+retrieval or tool receipts instead of trusting worker-supplied validation.
+`CITATION_COVERAGE` means only that every persisted claim has a structurally
+valid citation. It does not mean that the cited source semantically entails the
+claim. `NO_CITABLE_EVIDENCE` explicitly marks a general chat answer with no
+current citable packet; Q&A instead publishes the fixed
+`INSUFFICIENT_EVIDENCE` result. Model, prompt, routing, retrieval cutoff, and
+completion timestamps remain in the surrounding immutable provenance.
+The v3 handover does not keep a permanent v2 execution path: migration `0016`
+preserves completed v2 rows as audit evidence and terminalizes still-active v2
+jobs with `PROMPT_VERSION_SUPERSEDED` so callers can submit a current request.
+
 Daily Brief and Q&A are display and decision-support outputs. They MUST remain
 excluded from forecasting training and MUST NOT change Champion, Shadow, or
 `WAIT` policy.

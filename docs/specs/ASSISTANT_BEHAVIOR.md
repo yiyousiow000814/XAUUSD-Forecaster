@@ -309,6 +309,10 @@ than interpreted as HTML.
   revealing private object existence.
 - No relevant evidence produces an explicit insufficient-evidence answer, not a
   fabricated market explanation.
+- A final with available evidence is rejected as a whole when any answer line
+  lacks a retrieved citation, cites an unknown ID, or fails its deterministic
+  `assistant.evidence.v1` receipt. Citation coverage is shown as structural
+  validation only; the product does not claim semantic entailment.
 - A failed independent tool is shown as unavailable; successful tool results may
   still support a bounded partial answer when policy permits.
 - Capacity exhaustion may defer, queue, offer a declared fallback, or reject

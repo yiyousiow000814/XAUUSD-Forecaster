@@ -1,0 +1,125 @@
+{
+  "cases": [
+    {
+      "name": "citation_coverage",
+      "input": {
+        "claims": [
+          {
+            "text": "利率预期抬升。",
+            "evidence_ids": ["ev:fed-1"]
+          },
+          {
+            "text": "黄金波动扩大。",
+            "evidence_ids": ["ev:fed-1", "ev:gold-2"]
+          }
+        ]
+      },
+      "available_evidence_ids": ["ev:fed-1", "ev:gold-2"],
+      "mode": "CITATION_COVERAGE",
+      "max_cited_evidence": 12,
+      "answer": "利率预期抬升。\n黄金波动扩大。",
+      "evidence_ids": ["ev:fed-1", "ev:gold-2"],
+      "receipt": {
+        "protocol": "assistant.evidence.v1",
+        "validator_version": "assistant-evidence-validator-v1",
+        "mode": "CITATION_COVERAGE",
+        "claim_count": 2,
+        "citation_count": 3,
+        "available_evidence_ids": ["ev:fed-1", "ev:gold-2"],
+        "cited_evidence_ids": ["ev:fed-1", "ev:gold-2"],
+        "claims": [
+          {
+            "claim_id": "claim-1",
+            "line_index": 0,
+            "text_sha256": "1ab196d901a0a168f05a4da27d612c886b2baa7d14f913ef388bab2518221a6f",
+            "evidence_ids": ["ev:fed-1"]
+          },
+          {
+            "claim_id": "claim-2",
+            "line_index": 1,
+            "text_sha256": "a82173b47b3971d34e915b20ba38699e3c4834420a13359fd440a95920497c86",
+            "evidence_ids": ["ev:fed-1", "ev:gold-2"]
+          }
+        ],
+        "coverage_complete": true,
+        "entailment_status": "NOT_VERIFIED",
+        "answer_sha256": "a3a5a3f1114133e6329796c40eb652142774c56974910d17a247d5d74fe1a73a",
+        "receipt_sha256": "b33957810ea4337507dcd2f013c8c5a62b25a7cc63201fb8d3ffd32f6782f67b"
+      }
+    },
+    {
+      "name": "no_citable_evidence",
+      "input": {
+        "claims": [
+          {
+            "text": "我可以解释当前会话中的内容。",
+            "evidence_ids": []
+          }
+        ]
+      },
+      "available_evidence_ids": [],
+      "mode": "NO_CITABLE_EVIDENCE",
+      "max_cited_evidence": 12,
+      "answer": "我可以解释当前会话中的内容。",
+      "evidence_ids": [],
+      "receipt": {
+        "protocol": "assistant.evidence.v1",
+        "validator_version": "assistant-evidence-validator-v1",
+        "mode": "NO_CITABLE_EVIDENCE",
+        "claim_count": 1,
+        "citation_count": 0,
+        "available_evidence_ids": [],
+        "cited_evidence_ids": [],
+        "claims": [
+          {
+            "claim_id": "claim-1",
+            "line_index": 0,
+            "text_sha256": "7237ac7c6a796fa3fce625facfe8599ee349b951f05f0e0390ab356e3f1c1102",
+            "evidence_ids": []
+          }
+        ],
+        "coverage_complete": false,
+        "entailment_status": "NOT_VERIFIED",
+        "answer_sha256": "7237ac7c6a796fa3fce625facfe8599ee349b951f05f0e0390ab356e3f1c1102",
+        "receipt_sha256": "dc83b916a76effce259e84e0b41e66cd0721f2414717d9b4498a8041317cfc2f"
+      }
+    },
+    {
+      "name": "insufficient_evidence",
+      "input": {
+        "claims": [
+          {
+            "text": "当前没有足够证据。",
+            "evidence_ids": []
+          }
+        ]
+      },
+      "available_evidence_ids": [],
+      "mode": "INSUFFICIENT_EVIDENCE",
+      "max_cited_evidence": 12,
+      "answer": "当前没有足够证据。",
+      "evidence_ids": [],
+      "receipt": {
+        "protocol": "assistant.evidence.v1",
+        "validator_version": "assistant-evidence-validator-v1",
+        "mode": "INSUFFICIENT_EVIDENCE",
+        "claim_count": 1,
+        "citation_count": 0,
+        "available_evidence_ids": [],
+        "cited_evidence_ids": [],
+        "claims": [
+          {
+            "claim_id": "claim-1",
+            "line_index": 0,
+            "text_sha256": "51a8ef75b7a707a38be8bdb15a4252a57250c34068681619d66e8ee4dec41356",
+            "evidence_ids": []
+          }
+        ],
+        "coverage_complete": false,
+        "entailment_status": "NOT_VERIFIED",
+        "answer_sha256": "51a8ef75b7a707a38be8bdb15a4252a57250c34068681619d66e8ee4dec41356",
+        "receipt_sha256": "05ecdc7c1c0384e62eb4f963d22bdaca8fc4dd0caccc329d9fe53158902314d7"
+      }
+    }
+  ]
+}

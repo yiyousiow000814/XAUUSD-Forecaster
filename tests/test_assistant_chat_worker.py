@@ -178,7 +178,7 @@ def test_worker_builds_owner_context_runs_native_news_tool_and_completes(
                 retrieval_cutoff=request.retrieval_cutoff,
             ),
             provenance={
-                "policy_version": "assistant-agent-v1",
+                "policy_version": "assistant-agent-v2",
                 "tool_execution": [[result.receipt()]],
             },
         )
