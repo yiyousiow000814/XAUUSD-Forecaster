@@ -142,6 +142,10 @@ Summary vN + newly compactable messages -> Summary vN+1
 The system MUST NOT re-summarize the complete growing history on every turn.
 The summary input range, prior summary version, output version, model profile,
 and completion status MUST be reproducible from persisted metadata.
+Admission freezes the exact ordered canonical message identities in the next
+compactable range. Messages accepted later cannot enter an already admitted
+job, and independently persisted Pinned State is not replaced by asking the
+model to repeat it inside every summary.
 
 ### Recent Verbatim Turns
 
@@ -163,6 +167,9 @@ canonical messages and MUST NOT silently become a second conversation store.
 Compaction begins before hard context exhaustion. Implementations MUST expose
 conceptual `GREEN`, `YELLOW`, and `RED` capacity states; their thresholds remain
 operational configuration per model profile.
+The bounded recent-turn or recent-message window MAY trigger incremental
+compaction while token capacity is still `GREEN`; a turn-count trigger records
+the real capacity state rather than relabeling it as token pressure.
 
 Every compaction result MUST preserve:
 

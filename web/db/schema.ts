@@ -132,6 +132,8 @@ export const assistantConversations = sqliteTable(
     lastActivityAt: text("last_activity_at").notNull(),
     archivedAt: text("archived_at"),
     summaryVersion: integer("summary_version").notNull().default(0),
+    pendingCompactionJobId: text("pending_compaction_job_id"),
+    compactionRequestVersion: integer("compaction_request_version").notNull().default(0),
     status: text("status").notNull().default("ACTIVE"),
   },
   table => [
@@ -184,6 +186,7 @@ export const assistantTitleJobs = sqliteTable(
     leaseExpiresAt: text("lease_expires_at"),
     attemptCount: integer("attempt_count").notNull().default(0),
     maxAttempts: integer("max_attempts").notNull().default(3),
+    attemptHistoryJson: text("attempt_history_json").notNull().default("[]"),
     promptVersion: text("prompt_version").notNull(),
     modelVersion: text("model_version"),
     createdAt: text("created_at").notNull(),
@@ -200,6 +203,112 @@ export const assistantTitleJobs = sqliteTable(
       .on(table.status, table.availableAt, table.createdAt),
     index("assistant_title_jobs_lease_idx")
       .on(table.status, table.leaseExpiresAt),
+  ],
+);
+
+export const assistantCompactionJobs = sqliteTable(
+  "assistant_compaction_jobs",
+  {
+    id: text("id").primaryKey(),
+    conversationId: text("conversation_id").notNull()
+      .references(() => assistantConversations.id),
+    inputVersion: integer("input_version").notNull(),
+    priorSummaryVersion: integer("prior_summary_version").notNull(),
+    outputSummaryVersion: integer("output_summary_version").notNull(),
+    sourceMessageIdsJson: text("source_message_ids_json").notNull(),
+    sourceMessageCount: integer("source_message_count").notNull(),
+    firstSourceMessageId: text("first_source_message_id").notNull()
+      .references(() => assistantMessages.id),
+    lastSourceMessageId: text("last_source_message_id").notNull()
+      .references(() => assistantMessages.id),
+    pinnedSnapshotJson: text("pinned_snapshot_json").notNull(),
+    contextProfileId: text("context_profile_id").notNull(),
+    capacityState: text("capacity_state").notNull(),
+    estimatedContextTokens: integer("estimated_context_tokens").notNull(),
+    status: text("status").notNull(),
+    availableAt: text("available_at").notNull(),
+    leaseOwner: text("lease_owner"),
+    leaseToken: text("lease_token"),
+    leaseExpiresAt: text("lease_expires_at"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(3),
+    attemptHistoryJson: text("attempt_history_json").notNull().default("[]"),
+    promptVersion: text("prompt_version").notNull(),
+    modelVersion: text("model_version"),
+    createdAt: text("created_at").notNull(),
+    completedAt: text("completed_at"),
+    failureCode: text("failure_code"),
+  },
+  table => [
+    uniqueIndex("assistant_compaction_jobs_version_idx")
+      .on(table.conversationId, table.inputVersion),
+    index("assistant_compaction_jobs_output_idx")
+      .on(table.conversationId, table.outputSummaryVersion, table.status),
+    index("assistant_compaction_jobs_claim_idx")
+      .on(table.status, table.availableAt, table.createdAt),
+    index("assistant_compaction_jobs_lease_idx")
+      .on(table.status, table.leaseExpiresAt),
+  ],
+);
+
+export const assistantPinnedEntries = sqliteTable(
+  "assistant_pinned_entries",
+  {
+    id: text("id").primaryKey(),
+    conversationId: text("conversation_id").notNull()
+      .references(() => assistantConversations.id),
+    idempotencyKey: text("idempotency_key").notNull(),
+    kind: text("kind").notNull(),
+    content: text("content").notNull(),
+    originMessageIdsJson: text("origin_message_ids_json").notNull(),
+    evidenceIdsJson: text("evidence_ids_json").notNull(),
+    sourceRefsJson: text("source_refs_json").notNull(),
+    importantTimestampsJson: text("important_timestamps_json").notNull(),
+    toolRefsJson: text("tool_refs_json").notNull(),
+    artifactRefsJson: text("artifact_refs_json").notNull(),
+    createdBy: text("created_by").notNull(),
+    sourceJobId: text("source_job_id")
+      .references(() => assistantCompactionJobs.id),
+    createdAt: text("created_at").notNull(),
+  },
+  table => [
+    uniqueIndex("assistant_pinned_entries_idempotency_idx")
+      .on(table.conversationId, table.idempotencyKey),
+    index("assistant_pinned_entries_conversation_idx")
+      .on(table.conversationId, table.createdAt, table.id),
+  ],
+);
+
+export const assistantSummaries = sqliteTable(
+  "assistant_summaries",
+  {
+    id: text("id").primaryKey(),
+    conversationId: text("conversation_id").notNull()
+      .references(() => assistantConversations.id),
+    version: integer("version").notNull(),
+    priorSummaryId: text("prior_summary_id"),
+    sourceJobId: text("source_job_id").notNull()
+      .references(() => assistantCompactionJobs.id),
+    firstSourceMessageId: text("first_source_message_id").notNull()
+      .references(() => assistantMessages.id),
+    coveredThroughMessageId: text("covered_through_message_id").notNull()
+      .references(() => assistantMessages.id),
+    coveredThroughCreatedAt: text("covered_through_created_at").notNull(),
+    sourceMessageCount: integer("source_message_count").notNull(),
+    content: text("content").notNull(),
+    anchorsJson: text("anchors_json").notNull(),
+    estimatedTokens: integer("estimated_tokens").notNull(),
+    contextProfileId: text("context_profile_id").notNull(),
+    promptVersion: text("prompt_version").notNull(),
+    modelVersion: text("model_version").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  table => [
+    uniqueIndex("assistant_summaries_version_idx")
+      .on(table.conversationId, table.version),
+    uniqueIndex("assistant_summaries_source_job_idx").on(table.sourceJobId),
+    index("assistant_summaries_conversation_idx")
+      .on(table.conversationId, table.version),
   ],
 );
 

@@ -4,6 +4,7 @@ import {
   ASSISTANT_TITLE_PROMPT_VERSION,
   provisionalAssistantTitle,
 } from "./assistant-conversations";
+import { scheduleAssistantCompaction } from "./assistant-memory";
 
 export const NEWS_QA_PROMPT_VERSION = "news-qa-v2";
 export const INSUFFICIENT_EVIDENCE_ANSWER = "当前已收录且可追溯的新闻证据不足，无法可靠回答这个问题。";
@@ -569,6 +570,12 @@ export async function completeNewsQuestion(
   ]);
   const row = results[1]?.results?.[0];
   if (!row) return null;
+  try {
+    await scheduleAssistantCompaction(binding, String(leased.conversation_id), { now });
+  } catch {
+    // The canonical answer is already durable. Derived memory work is retried
+    // after a later final answer or through the machine scheduling endpoint.
+  }
   const conversation = await binding.prepare(
     "SELECT title FROM assistant_conversations WHERE id=?",
   ).bind(leased.conversation_id).first<{ title: string }>();

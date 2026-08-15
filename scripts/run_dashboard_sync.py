@@ -920,6 +920,7 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
     # Preview builds import this module for its pure payload helpers. Keep the
     # local SQLite/model runtime out of that import path: Cloudflare's build
     # Python intentionally does not include the optional _sqlite3 extension.
+    from xauusd_forecaster.assistant_compaction import compact_assistant_context
     from xauusd_forecaster.assistant_titles import generate_assistant_title
     from xauusd_forecaster.forward_ledger import ForwardLedger
     from xauusd_forecaster.news_qa import answer_news_question
@@ -949,7 +950,7 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
     ))
     ledger = None
     accountant = None
-    title_accountant = None
+    background_accountant = None
 
     def failure_code(error: Exception) -> str:
         if isinstance(error, ModelGatewayCapacityExhausted):
@@ -1052,10 +1053,10 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
             if not isinstance(item, dict):
                 break
             try:
-                if title_accountant is None:
+                if background_accountant is None:
                     if ledger is None:
                         ledger = ForwardLedger(database)
-                    title_accountant = SchedulerModelAccountant(
+                    background_accountant = SchedulerModelAccountant(
                         ledger.connection, credential, urgent=False,
                     )
                 result = generate_assistant_title(
@@ -1063,7 +1064,7 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                     str(item.get("latest_assistant_message") or ""),
                     prompt_version=str(item.get("prompt_version") or ""),
                     api_key=credential.api_key,
-                    request_accountant=title_accountant,
+                    request_accountant=background_accountant,
                 )
                 _post_json(
                     title_url + "?mode=machine",
@@ -1080,6 +1081,53 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                     title_url + "?mode=machine",
                     json.dumps({
                         "action": "FAIL_TITLE",
+                        "id": item.get("id"),
+                        "lease_token": item.get("lease_token"),
+                        "failure_code": failure_code(error),
+                    }).encode("utf-8"),
+                    config,
+                )
+        for _ in range(3):
+            claim_url = title_url + "?" + urllib.parse.urlencode({
+                "mode": "compaction-claim", "worker_id": worker_id,
+            })
+            item = _get_json(claim_url, config).get("item")
+            if not isinstance(item, dict):
+                break
+            try:
+                if background_accountant is None:
+                    if ledger is None:
+                        ledger = ForwardLedger(database)
+                    background_accountant = SchedulerModelAccountant(
+                        ledger.connection, credential, urgent=False,
+                    )
+                result = compact_assistant_context(
+                    item.get("prior_summary")
+                    if isinstance(item.get("prior_summary"), dict) else None,
+                    item.get("pinned_state")
+                    if isinstance(item.get("pinned_state"), list) else [],
+                    item.get("source_messages")
+                    if isinstance(item.get("source_messages"), list) else [],
+                    prompt_version=str(item.get("prompt_version") or ""),
+                    context_profile_id=str(item.get("context_profile_id") or ""),
+                    api_key=credential.api_key,
+                    request_accountant=background_accountant,
+                )
+                _post_json(
+                    title_url + "?mode=machine",
+                    json.dumps({
+                        "action": "COMPLETE_COMPACTION",
+                        "id": item.get("id"),
+                        "lease_token": item.get("lease_token"),
+                        **result,
+                    }, ensure_ascii=False).encode("utf-8"),
+                    config,
+                )
+            except Exception as error:
+                _post_json(
+                    title_url + "?mode=machine",
+                    json.dumps({
+                        "action": "FAIL_COMPACTION",
                         "id": item.get("id"),
                         "lease_token": item.get("lease_token"),
                         "failure_code": failure_code(error),

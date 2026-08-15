@@ -15,6 +15,14 @@ import {
   requestAssistantTitleRegeneration,
   setOwnerAssistantConversationArchived,
 } from "../_shared/assistant-conversations";
+import {
+  buildAssistantContext,
+  claimAssistantCompactionJob,
+  completeAssistantCompactionJob,
+  createAssistantPinnedEntry,
+  failAssistantCompactionJob,
+  scheduleAssistantCompaction,
+} from "../_shared/assistant-memory";
 import { readBoundedBody } from "../_shared/dashboard-snapshot";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
 import { isPreviewDeployment, previewJson, rejectPreviewWrite } from "../_shared/preview";
@@ -30,8 +38,8 @@ const unauthorized = () => noStoreJson({ error: "Assistant 身份验证失败" }
 const unavailable = () => noStoreJson({ error: "Assistant 会话暂不可用" }, 503);
 const notFound = () => noStoreJson({ error: "找不到这个会话" }, 404);
 
-const boundedBody = async (request: Request) => {
-  const body = await readBoundedBody(request, 10_000);
+const boundedBody = async (request: Request, maximumBytes = 10_000) => {
+  const body = await readBoundedBody(request, maximumBytes);
   if (body.status === "too_large") {
     throw new AssistantConversationInputError("PAYLOAD_TOO_LARGE", "内容过长");
   }
@@ -57,13 +65,14 @@ const validObjectId = (value: string) => /^[A-Za-z0-9:._-]{1,128}$/.test(value);
 
 export async function GET(request: Request) {
   const params = new URL(request.url).searchParams;
+  const mode = params.get("mode");
   if (isPreviewDeployment) {
-    if (params.get("mode") === "title-claim") {
+    if (mode === "title-claim" || mode === "compaction-claim") {
       return rejectPreviewWrite() ?? previewJson({ error: "Preview 只读" }, 403, "write-rejected");
     }
     return previewJson({ items: [], preview: true }, 200, "synthetic-empty-assistant");
   }
-  if (params.get("mode") === "title-claim") {
+  if (mode === "title-claim" || mode === "compaction-claim") {
     if (!await isIngestAuthorized(request)) return unauthorized();
     const binding = env.DB;
     if (!binding) return unavailable();
@@ -72,7 +81,10 @@ export async function GET(request: Request) {
       return noStoreJson({ error: "invalid worker identity" }, 400);
     }
     try {
-      return noStoreJson({ item: await claimAssistantTitleJob(binding, workerId) });
+      const item = mode === "title-claim"
+        ? await claimAssistantTitleJob(binding, workerId)
+        : await claimAssistantCompactionJob(binding, workerId);
+      return noStoreJson({ item });
     } catch {
       return unavailable();
     }
@@ -124,14 +136,50 @@ export async function POST(request: Request) {
     const binding = env.DB;
     if (!binding) return unavailable();
     try {
-      const body = await boundedBody(request);
+      const body = await boundedBody(request, 64_000);
       const action = String(body.action ?? "");
-      const item = action === "COMPLETE_TITLE"
-        ? await completeAssistantTitleJob(binding, body)
-        : action === "FAIL_TITLE"
-          ? await failAssistantTitleJob(binding, body)
-          : null;
-      if (!item && action !== "COMPLETE_TITLE" && action !== "FAIL_TITLE") {
+      let item: unknown = null;
+      if (action === "COMPLETE_TITLE") item = await completeAssistantTitleJob(binding, body);
+      else if (action === "FAIL_TITLE") item = await failAssistantTitleJob(binding, body);
+      else if (action === "COMPLETE_COMPACTION") {
+        item = await completeAssistantCompactionJob(binding, body);
+      } else if (action === "FAIL_COMPACTION") {
+        item = await failAssistantCompactionJob(binding, body);
+      } else if (action === "SCHEDULE_COMPACTION") {
+        const conversationId = String(body.conversation_id ?? "").trim();
+        if (!validObjectId(conversationId)) {
+          throw new AssistantConversationInputError("INVALID_CONVERSATION_ID", "会话编号无效");
+        }
+        item = await scheduleAssistantCompaction(binding, conversationId);
+      } else if (action === "PIN_STATE" || action === "BUILD_CONTEXT") {
+        const conversationId = String(body.conversation_id ?? "").trim();
+        if (!validObjectId(conversationId)) {
+          throw new AssistantConversationInputError("INVALID_CONVERSATION_ID", "会话编号无效");
+        }
+        const conversation = await binding.prepare(
+          "SELECT owner_id FROM assistant_conversations WHERE id=?",
+        ).bind(conversationId).first<{ owner_id: string }>();
+        if (!conversation) return notFound();
+        if (action === "PIN_STATE") {
+          item = await createAssistantPinnedEntry(binding, {
+            ownerId: conversation.owner_id,
+            conversationId,
+            idempotencyKey: parseAssistantIdempotencyKey(
+              request.headers.get("idempotency-key"),
+            ),
+            entry: body.entry,
+          });
+        } else {
+          item = await buildAssistantContext(binding, {
+            ownerId: conversation.owner_id,
+            conversationId,
+            currentUserMessageId: String(body.current_user_message_id ?? ""),
+            toolEvidence: Array.isArray(body.tool_evidence)
+              ? body.tool_evidence as Array<{ evidence_id: string; content: unknown }>
+              : [],
+          });
+        }
+      } else {
         throw new AssistantConversationInputError("INVALID_ACTION", "机器动作无效");
       }
       return item

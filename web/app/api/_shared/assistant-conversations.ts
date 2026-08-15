@@ -275,11 +275,13 @@ export async function renameOwnerAssistantConversation(
   const results = await binding.batch<ConversationRow>([
     binding.prepare(
       `UPDATE assistant_title_jobs SET status='CANCELLED',completed_at=?,failure_code='USER_RENAMED',
+       attempt_history_json=json_insert(attempt_history_json,'$[#]',
+         json_object('event','CANCELLED','occurred_at',?,'failure_code','USER_RENAMED')),
        lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL
        WHERE id=(SELECT pending_title_job_id FROM assistant_conversations
                  WHERE owner_id=? AND id=?)
          AND status IN ('PENDING','PROCESSING')`,
-    ).bind(timestamp, ownerId, conversationId),
+    ).bind(timestamp, timestamp, ownerId, conversationId),
     binding.prepare(
       `UPDATE assistant_conversations SET title=?,title_source='USER',
        title_revision=title_revision+1,pending_title_job_id=NULL
@@ -412,22 +414,29 @@ export async function claimAssistantTitleJob(
     ).bind(timestamp),
     binding.prepare(
       `UPDATE assistant_title_jobs SET status='FAILED',failure_code='LEASE_EXPIRED',
-       completed_at=?,${titleJobHistoryCleanup}
+       completed_at=?,attempt_history_json=json_insert(attempt_history_json,'$[#]',
+         json_object('event','LEASE_EXPIRED','occurred_at',?,'attempt',attempt_count,
+           'terminal',1)),${titleJobHistoryCleanup}
        WHERE status='PROCESSING' AND lease_expires_at<=? AND attempt_count>=max_attempts`,
-    ).bind(timestamp, timestamp),
+    ).bind(timestamp, timestamp, timestamp),
     binding.prepare(
       `UPDATE assistant_title_jobs SET status='PENDING',failure_code='LEASE_EXPIRED',
-       available_at=?,${titleJobHistoryCleanup}
+       available_at=?,attempt_history_json=json_insert(attempt_history_json,'$[#]',
+         json_object('event','LEASE_EXPIRED','occurred_at',?,'attempt',attempt_count,
+           'terminal',0)),${titleJobHistoryCleanup}
        WHERE status='PROCESSING' AND lease_expires_at<=? AND attempt_count<max_attempts`,
-    ).bind(timestamp, timestamp),
+    ).bind(timestamp, timestamp, timestamp),
     binding.prepare(
       `UPDATE assistant_title_jobs SET status='PROCESSING',lease_owner=?,lease_token=?,
-       lease_expires_at=?,attempt_count=attempt_count+1,failure_code=NULL
+       lease_expires_at=?,attempt_count=attempt_count+1,failure_code=NULL,
+       attempt_history_json=json_insert(attempt_history_json,'$[#]',
+         json_object('event','CLAIMED','occurred_at',?,'attempt',attempt_count+1,
+           'worker_id',?))
        WHERE id=(SELECT id FROM assistant_title_jobs
          WHERE status='PENDING' AND available_at<=?
          ORDER BY created_at,id LIMIT 1)
        RETURNING *`,
-    ).bind(workerId, leaseToken, leaseExpiresAt, timestamp),
+    ).bind(workerId, leaseToken, leaseExpiresAt, timestamp, workerId, timestamp),
   ]);
   const job = results.at(-1)?.results?.[0];
   if (!job) return null;
@@ -488,10 +497,12 @@ export async function completeAssistantTitleJob(
   const results = await binding.batch<Record<string, unknown>>([
     binding.prepare(
       `UPDATE assistant_title_jobs SET status='COMPLETED',generated_title=?,model_version=?,completed_at=?,
-       failure_code=NULL,${titleJobHistoryCleanup}
+       failure_code=NULL,attempt_history_json=json_insert(attempt_history_json,'$[#]',
+         json_object('event','COMPLETED','occurred_at',?,'attempt',attempt_count)),
+       ${titleJobHistoryCleanup}
        WHERE id=? AND status='PROCESSING' AND lease_token=? AND lease_expires_at>?
        RETURNING *`,
-    ).bind(title, modelVersion, timestamp, id, leaseToken, timestamp),
+    ).bind(title, modelVersion, timestamp, timestamp, id, leaseToken, timestamp),
     binding.prepare(
       `UPDATE assistant_conversations SET title=?,title_source='AI',
        title_revision=title_revision+1,pending_title_job_id=NULL
@@ -520,12 +531,13 @@ export async function failAssistantTitleJob(
   if (!/^[A-Z0-9_]{3,64}$/.test(failureCode)) {
     throw new AssistantConversationInputError("INVALID_FAILURE_CODE", "失败代码无效");
   }
+  const timestamp = now.toISOString();
   const job = await binding.prepare(
-    "SELECT * FROM assistant_title_jobs WHERE id=? AND status='PROCESSING' AND lease_token=?",
-  ).bind(id, leaseToken).first<TitleJobRow>();
+    `SELECT * FROM assistant_title_jobs
+     WHERE id=? AND status='PROCESSING' AND lease_token=? AND lease_expires_at>?`,
+  ).bind(id, leaseToken, timestamp).first<TitleJobRow>();
   if (!job) return null;
   const terminal = Number(job.attempt_count) >= Number(job.max_attempts);
-  const timestamp = now.toISOString();
   const delaySeconds = Math.min(120, 30 * (2 ** Math.max(0, Number(job.attempt_count) - 1)));
   const availableAt = terminal
     ? timestamp
@@ -533,11 +545,15 @@ export async function failAssistantTitleJob(
   const results = await binding.batch<Record<string, unknown>>([
     binding.prepare(
       `UPDATE assistant_title_jobs SET status=?,available_at=?,failure_code=?,
-       completed_at=?,${titleJobHistoryCleanup}
-       WHERE id=? AND status='PROCESSING' AND lease_token=? RETURNING *`,
+       completed_at=?,attempt_history_json=json_insert(attempt_history_json,'$[#]',
+         json_object('event','FAILED','occurred_at',?,'attempt',attempt_count,
+           'failure_code',?,'terminal',?)),${titleJobHistoryCleanup}
+       WHERE id=? AND status='PROCESSING' AND lease_token=? AND lease_expires_at>?
+       RETURNING *`,
     ).bind(
       terminal ? "FAILED" : "PENDING", availableAt, failureCode,
-      terminal ? timestamp : null, id, leaseToken,
+      terminal ? timestamp : null, timestamp, failureCode, terminal ? 1 : 0,
+      id, leaseToken, timestamp,
     ),
     binding.prepare(
       `UPDATE assistant_conversations SET pending_title_job_id=NULL
