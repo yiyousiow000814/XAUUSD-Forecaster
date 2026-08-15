@@ -1051,6 +1051,8 @@ body.modal-open { overflow:hidden; }
 .sr-only { position:absolute!important; width:1px!important; height:1px!important; margin:-1px!important; padding:0!important; overflow:hidden!important; clip:rect(0,0,0,0)!important; white-space:nowrap!important; border:0!important; }
 .top-actions { flex-wrap:wrap; justify-content:flex-end; }
 .assistant-main { height:100dvh; min-height:680px; display:grid; grid-template-rows:auto minmax(0,1fr); overflow:hidden; padding:18px 2vw; }
+body:has(> .preview-banner):has(.assistant-main) { height:100dvh; display:grid; grid-template-rows:auto minmax(0,1fr); overflow:hidden; }
+body:has(> .preview-banner):has(.assistant-main) .assistant-main { height:100%; min-height:0; }
 .assistant-topbar { min-height:64px; padding-bottom:14px; }
 .assistant-owner-pill { min-height:44px; display:inline-flex; align-items:center; gap:9px; border:1px solid var(--ink); padding:9px 12px; font-size:10px; font-weight:900; letter-spacing:.13em; }
 .assistant-owner-pill i { width:8px; height:8px; border-radius:50%; background:var(--green); box-shadow:0 0 0 4px rgba(71,107,25,.14); }

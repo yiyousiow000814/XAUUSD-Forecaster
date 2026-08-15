@@ -1634,6 +1634,7 @@ test("renders a recoverable responsive Assistant workbench without unsafe HTML",
   assert.doesNotMatch(transcript, /dangerouslySetInnerHTML/);
   assert.match(fixture, /不是真实会话 · 不调用模型/);
   assert.match(css, /\.assistant-workbench \{[^}]*grid-template-columns:300px minmax\(0,1fr\)/);
+  assert.match(css, /body:has\(> \.preview-banner\):has\(\.assistant-main\)[^{]*\{[^}]*grid-template-rows:auto minmax\(0,1fr\)/);
   assert.match(css, /\.assistant-conversation-rail\.is-open \{ transform:translateX\(0\); \}/);
   assert.match(css, /\.assistant-composer-meta button \{[^}]*min-height:46px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-open-rail \{ display:block/);
