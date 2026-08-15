@@ -99,8 +99,8 @@ function QuotaPanel({ title, eyebrow, quota, nowMs }: { title: string; eyebrow: 
       const used = Math.min(100, (key.sent / limit) * 100);
       return <article className="quota-row" key={key.fingerprint}>
         <div><b>KEY {key.slot}</b><small>…{key.fingerprint.slice(-6)}</small></div>
-        <strong><CountValue value={key.sent} format="exact" /> / <CountValue value={limit} format="exact" /></strong>
-        <strong><CountValue value={key.remaining} format="exact" /></strong>
+        <div className="quota-value"><small>今日已发送 / 上限</small><strong><CountValue value={key.sent} format="exact" /> / <CountValue value={limit} format="exact" /></strong></div>
+        <div className="quota-value"><small>剩余</small><strong><CountValue value={key.remaining} format="exact" /></strong></div>
         <span className={key.status === "AVAILABLE" ? "quota-ok" : "quota-stop"}>{key.status === "AVAILABLE" ? "可用" : "今日已停用"}</span>
         <div className="quota-progress"><i style={{ width: `${used}%` }} /></div>
       </article>;

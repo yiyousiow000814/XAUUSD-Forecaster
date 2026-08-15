@@ -701,6 +701,7 @@ test("replaces the forecast state with the broker reopening countdown", () => {
 });
 
 test("renders the Gemini quota status route", async () => {
+  const source = readFileSync(new URL("../app/_views/StatusView.tsx", import.meta.url), "utf8");
   const { response, html } = await renderSettled("/?room=status", /AI 模型使用状态/);
   assert.equal(response.status, 200);
   assert.match(html, /AI 模型使用状态/);
@@ -709,6 +710,8 @@ test("renders the Gemini quota status route", async () => {
   assert.match(html, /Gemma 4 31B/);
   assert.match(html, /reset-countdown/);
   assert.match(html, /逐 Key 配额/);
+  assert.match(source, /今日已发送 \/ 上限/);
+  assert.match(source, /className="quota-value"/);
   assert.match(html, /分支配置/);
   assert.match(html, /Pacific midnight/);
   assert.match(html, /组件与新闻源/);
@@ -1074,7 +1077,12 @@ test("shows single events immediately and keeps later changes in one thread", ()
   assert.match(page, /新发生/);
   assert.match(page, /有后续时会自动接成一条脉络/);
   assert.match(page, /showAllStoryEvents/);
+  assert.match(page, /showAllStorylines/);
+  assert.match(page, /expandedStorylines/);
   assert.match(css, /\.single-event-index>div:not\(\.show-all-mobile-items\)>article:nth-child\(n\+9\)/);
+  assert.match(css, /\.story-grid:not\(\.show-all-mobile-items\)>article:nth-child\(n\+5\)/);
+  assert.match(css, /\.story-grid ol\.story-timeline \{ display:none/);
+  assert.match(css, /\.story-grid ol\.story-timeline\.is-open \{ display:block/);
   assert.match(css, /\.single-event-index>\.mobile-reveal-button \{ display:block;[^}]*min-height:48px/);
   assert.match(css, /\.story-grid \{ gap:18px; border:0; background:transparent; \}/);
   assert.doesNotMatch(page, /暂无后续进展/);
@@ -1240,6 +1248,8 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(css, /height:calc\(100dvh - 16px\)/);
   assert.match(css, /grid-template-rows:auto auto minmax\(0,1fr\) auto/);
   assert.match(modal, /graph-modal-\$\{tab\}/);
+  assert.match(modal, /bodyRef\.current\?\.scrollTo\(\{ top: 0, left: 0, behavior: "instant" \}\)/);
+  assert.match(modal, /graph-scope-mobile/);
   assert.match(css, /graph-modal\.graph-modal-curve,\.graph-modal\.graph-modal-versions \{ height:calc\(100dvh - 16px\); max-height:none; grid-template-rows:auto auto minmax\(0,1fr\) auto/);
   assert.match(css, /graph-modal\.graph-modal-curve>\.graph-modal-body,\.graph-modal\.graph-modal-versions>\.graph-modal-body \{ min-height:0; max-height:none; overflow:auto/);
   assert.match(css, /scrollbar-gutter:stable/);

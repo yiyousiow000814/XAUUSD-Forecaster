@@ -131,9 +131,14 @@ export default function LearningGraphModal({
     ? readDashboardResource<typeof market>(market.decision_resource) ?? undefined
     : undefined);
   const dialogRef = useRef<HTMLElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
+  const selectTab = (nextTab: GraphTab) => {
+    setTab(nextTab);
+    bodyRef.current?.scrollTo({ top: 0, left: 0, behavior: "instant" });
+  };
   useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
   useEffect(() => {
     if (!open) return;
@@ -185,18 +190,18 @@ export default function LearningGraphModal({
     <section ref={dialogRef} className={`graph-modal graph-modal-${tab}`} role="dialog" aria-modal="true" aria-labelledby="graph-modal-title">
       <header><div><span>SHADOW EVIDENCE VISUALIZER</span><h2 id="graph-modal-title">模型与 XAUUSD 时间轴</h2></div><button ref={closeButtonRef} type="button" onClick={onClose} aria-label="关闭图表">×</button></header>
       <nav aria-label="图表类型">
-        <button className={tab === "curve" ? "active" : ""} onClick={() => setTab("curve")}>长期 OOS 曲线</button>
-        <button className={tab === "versions" ? "active" : ""} onClick={() => setTab("versions")}>每组独立成绩</button>
-        <button className={tab === "market" ? "active" : ""} onClick={() => setTab("market")}>K线与决策</button>
-        <button className={tab === "execution" ? "active" : ""} onClick={() => setTab("execution")}>仓位与退出</button>
+        <button className={tab === "curve" ? "active" : ""} onClick={() => selectTab("curve")}>长期 OOS 曲线</button>
+        <button className={tab === "versions" ? "active" : ""} onClick={() => selectTab("versions")}>每组独立成绩</button>
+        <button className={tab === "market" ? "active" : ""} onClick={() => selectTab("market")}>K线与决策</button>
+        <button className={tab === "execution" ? "active" : ""} onClick={() => selectTab("execution")}>仓位与退出</button>
       </nav>
-      <div className="graph-modal-body">
+      <div ref={bodyRef} className="graph-modal-body">
         {tab === "curve" && <LongCurve curves={curves} historyResource={historyResource} />}
         {tab === "versions" && <VersionLedger groups={versionGroups} historyResource={historyResource} />}
         {tab === "market" && <MarketChart market={resolvedMarket} identity={identity} setIdentity={setIdentity} />}
         {tab === "execution" && <ExecutionCharts execution={execution} historyResource={historyResource} />}
       </div>
-      <footer><b>统一口径：</b> 所有曲线只使用模型创建后真正没见过的 30 分钟结果；WAIT 显示为灰色双向箭头，但收益固定为零，不会被画成一笔虚构交易。</footer>
+      <footer><span className="graph-scope-full"><b>统一口径：</b> 所有曲线只使用模型创建后真正没见过的 30 分钟结果；WAIT 显示为灰色双向箭头，但收益固定为零，不会被画成一笔虚构交易。</span><details className="graph-scope-mobile"><summary>查看统计口径</summary><p>所有曲线只使用模型创建后真正没见过的 30 分钟结果；WAIT 收益固定为零，不会被画成虚构交易。</p></details></footer>
     </section>
   </div>;
 }
