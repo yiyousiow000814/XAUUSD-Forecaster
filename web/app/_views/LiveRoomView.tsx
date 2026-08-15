@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
 import CountValue from "../_components/CountValue";
 import DashboardLink from "../_components/DashboardLink";
+import MobileDashboardNav from "../_components/MobileDashboardNav";
 import RuntimeUpdateFailureBanner, { type RuntimeUpdateFailure } from "../_components/RuntimeUpdateFailureBanner";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
@@ -227,6 +228,7 @@ export default function LiveRoomView() {
           <DashboardLink ariaLabel="新闻、决策与结果" className="audit-link" href="/audit?view=decisions">新闻 / 结果 <span aria-hidden="true">→</span></DashboardLink>
           <SystemStatePill loading={loading} error={Boolean(error)} online={Boolean(payload?.system.online)} marketSession={payload?.system.market_session} />
         </div>
+        <MobileDashboardNav current="live" status={<SystemStatePill loading={loading} error={Boolean(error)} online={Boolean(payload?.system.online)} marketSession={payload?.system.market_session} />} />
       </header>
 
       <section className="hero">

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
 import CountValue from "../_components/CountValue";
 import DashboardLink from "../_components/DashboardLink";
+import MobileDashboardNav from "../_components/MobileDashboardNav";
 import RuntimeUpdateFailureBanner, { type RuntimeUpdateFailure } from "../_components/RuntimeUpdateFailureBanner";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
@@ -168,6 +169,7 @@ export default function StatusView() {
           <DashboardLink className="audit-link" href="/audit?view=news">新闻与决策</DashboardLink>
           <DashboardLink className="audit-link" href="/" replace>← 返回实时室</DashboardLink>
         </div>
+        <MobileDashboardNav current="status" />
       </header>
 
       <section className="status-hero">

@@ -1250,18 +1250,29 @@ test("keeps the learning page focused and folds secondary research below the sco
 
 test("keeps dashboard navigation and graph controls usable on phones", () => {
   const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  const live = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
+  const status = readFileSync(new URL("../app/_views/StatusView.tsx", import.meta.url), "utf8");
+  const health = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
+  const mobileNav = readFileSync(new URL("../app/_components/MobileDashboardNav.tsx", import.meta.url), "utf8");
   const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(page, /ref=\{auditTabsRef\} className="audit-tabs"/);
-  assert.match(page, /active\.offsetLeft - \(nav\.clientWidth - active\.clientWidth\) \/ 2/);
-  assert.match(page, /scrollAuditTabs/);
-  assert.match(page, /aria-label="向左查看更多审计视图"/);
-  assert.match(page, /aria-label="向右查看更多审计视图"/);
-  assert.match(page, /aria-hidden="true">‹<\/span>/);
-  assert.match(page, /aria-hidden="true">›<\/span>/);
+  assert.match(page, /className="audit-tabs"/);
+  assert.match(page, /className="audit-view-picker"/);
+  assert.match(page, /aria-label="切换证据台页面"/);
+  assert.match(page, /window\.scrollTo\(\{ top: 0, behavior: "instant" \}\)/);
+  assert.doesNotMatch(page, /scrollAuditTabs|auditTabsRef|向左查看更多审计视图|向右查看更多审计视图/);
+  for (const [source, current] of [[live, "live"], [page, "mobileDashboardSection"], [status, "status"], [health, "health"]]) {
+    assert.match(source, new RegExp(`<MobileDashboardNav current=\\{?"?${current}`));
+  }
+  for (const label of ["实时室", "新闻与证据", "学习曲线", "AI 模型用量", "系统健康"]) {
+    assert.match(mobileNav, new RegExp(label));
+  }
+  assert.match(mobileNav, /aria-label="切换主要区域"/);
   assert.match(css, /\.topbar \{ align-items:stretch; flex-direction:column/);
-  assert.match(css, /\.audit-tabs-shell \{ position:sticky; top:0;[\s\S]*?grid-template-columns:44px minmax\(0,1fr\) 44px/);
-  assert.match(css, /\.audit-tabs \{ position:static; display:flex;[\s\S]*?overflow-x:auto/);
+  assert.match(css, /\.top-actions \{ display:none; \}/);
+  assert.match(css, /\.mobile-dashboard-nav \{ display:grid;[\s\S]*?grid-template-columns:minmax\(0,1fr\) auto/);
+  assert.match(css, /\.audit-tabs-shell \{ display:none; \}/);
+  assert.match(css, /\.audit-view-picker \{ position:sticky; top:0;[\s\S]*?grid-template-columns:auto minmax\(0,1fr\)/);
   assert.match(css, /\.audit-main \.audit-intro>div:first-child \{ display:none; \}/);
   assert.match(css, /\.coverage-card \{ display:grid;[\s\S]*?min-height:0;/);
   assert.match(css, /\.evidence-summary \{ grid-template-columns:repeat\(3,minmax\(0,1fr\)\); \}/);
