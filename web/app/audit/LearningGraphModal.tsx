@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import CountValue from "../_components/CountValue";
 import { formatExactCount } from "../_lib/count-format";
@@ -8,6 +8,7 @@ import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-
 import { versionResultLabel, type VersionEvaluationStatus } from "../_lib/version-result-state";
 import { modelVersionMarkers } from "../_lib/model-version-markers";
 import { buildTrainingCutoffChart } from "../_lib/training-cutoff-chart";
+import { isPhoneViewport } from "../_lib/responsive-scroll";
 
 type CurvePoint = { decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number; source_gap_before?: boolean };
 type Curve = { model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: CurvePoint[]; source_point_count_30m?: number; chart_point_count_30m?: number; chart_downsampled_30m?: boolean; points_30m?: CurvePoint[] };
@@ -137,7 +138,7 @@ export default function LearningGraphModal({
   const onCloseRef = useRef(onClose);
   const selectTab = (nextTab: GraphTab) => {
     setTab(nextTab);
-    bodyRef.current?.scrollTo({ top: 0, left: 0, behavior: "instant" });
+    if (isPhoneViewport()) bodyRef.current?.scrollTo({ top: 0, left: 0, behavior: "instant" });
   };
   useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
   useEffect(() => {
@@ -398,7 +399,7 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
   );
   const [historyErrors, setHistoryErrors] = useState<Partial<Record<EvaluationCadence, boolean>>>({});
   const [historyRetries, setHistoryRetries] = useState<Partial<Record<EvaluationCadence, number>>>({});
-  useEffect(() => {
+  useLayoutEffect(() => {
     const frame = requestAnimationFrame(() => {
       const chart = chartScrollRef.current;
       if (chart) chart.scrollLeft = chart.scrollWidth - chart.clientWidth;
@@ -574,16 +575,18 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
     };
     const markerX = group.reduce((total, item) => total + x(item.decision_time), 0) / group.length;
     const label = boundaryLabel(boundary);
-    const labelWidth = Math.max(62, Math.min(132, 22 + label.length * 7));
+    // SVG text grows on phones, so lane allocation must reserve the rendered
+    // glyph width rather than the smaller desktop font width.
+    const labelWidth = Math.max(88, Math.min(220, 30 + label.length * 14));
     const idealLabelX = Math.max(58 + labelWidth / 2, Math.min(920 - labelWidth / 2, markerX));
     const idealLeft = idealLabelX - labelWidth / 2;
-    let lane = laneEnds.findIndex(endX => idealLeft >= endX + 8);
+    let lane = laneEnds.findIndex(endX => idealLeft >= endX + 12);
     if (lane < 0) lane = laneEnds.length;
     laneEnds[lane] = idealLabelX + labelWidth / 2;
     return { boundary, markerX, label, labelWidth, labelX: idealLabelX, lane };
   });
   const boundaryLaneCount = compactBoundaryRail || !boundaryLayouts.length ? 0 : Math.max(...boundaryLayouts.map(layout => layout.lane)) + 1;
-  const boundaryDividerY = compactBoundaryRail ? 18 : boundaryLaneCount ? 14 + boundaryLaneCount * 25 : 56;
+  const boundaryDividerY = compactBoundaryRail ? 18 : boundaryLaneCount ? 16 + boundaryLaneCount * 29 : 56;
   const plotTop = compactBoundaryRail ? 46 : boundaryLaneCount ? boundaryDividerY + 14 : 70;
   const plotHeight = Math.max(118, 338 - plotTop);
   const y = (value: number) => plotTop + (high - value) / Math.max(.000001, high - low) * plotHeight;
@@ -622,14 +625,14 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
       <line x1="58" x2="920" y1={y(0)} y2={y(0)} className="zero-line" />
       <text x="8" y={y(high) + 5}>{pct(high)}</text><text x="8" y={y(low) + 5}>{pct(low)}</text>
       {boundaryLayouts.map(({ boundary, markerX, label, labelWidth, labelX, lane }) => {
-        const labelY = 8 + lane * 25;
+        const labelY = 8 + lane * 29;
         return <g key={boundary.decision_time} className="version-boundary">
           <title>{boundary.event_count && boundary.event_count > 1 ? `${formatExactCount(boundary.event_count)} 次相近换版\n` : ""}{boundary.changes.map(change => `${LABELS[change.model_identity] ?? change.model_identity} · 训练 ${formatExactCount(change.training_rows)} 条 · ${change.model_version}`).join("\n")}</title>
           <line className="version-boundary-marker" x1={markerX} x2={markerX} y1={boundaryDividerY} y2="350" />
           {compactBoundaryRail ? <circle className="version-event-dot" cx={markerX} cy={boundaryDividerY} r="5" tabIndex={0} onMouseEnter={() => setHoveredBoundary(boundary)} onMouseLeave={() => setHoveredBoundary(null)} onFocus={() => setHoveredBoundary(boundary)} onBlur={() => setHoveredBoundary(null)} /> : <>
-            <path className="version-boundary-leader" d={`M ${labelX} ${labelY + 21} L ${labelX} ${boundaryDividerY - 5} L ${markerX} ${boundaryDividerY}`} />
-            <rect className="version-boundary-badge" x={labelX - labelWidth / 2} y={labelY} width={labelWidth} height="21" rx="3" />
-            <text x={labelX} textAnchor="middle" y={labelY + 14}>{label}</text>
+            <path className="version-boundary-leader" d={`M ${labelX} ${labelY + 24} L ${labelX} ${boundaryDividerY - 5} L ${markerX} ${boundaryDividerY}`} />
+            <rect className="version-boundary-badge" x={labelX - labelWidth / 2} y={labelY} width={labelWidth} height="24" rx="3" />
+            <text x={labelX} textAnchor="middle" y={labelY + 17}>{label}</text>
           </>}
         </g>;
       })}
@@ -855,13 +858,14 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
     }, null as { row: Decision; distance: number } | null);
     if (nearest) setSelected(nearest.row);
   };
-  useEffect(() => {
+  const latestCandleTime = candles.at(-1)?.time;
+  useLayoutEffect(() => {
     const frame = requestAnimationFrame(() => {
       const chart = chartScrollRef.current;
       if (chart) chart.scrollLeft = chart.scrollWidth - chart.clientWidth;
     });
     return () => cancelAnimationFrame(frame);
-  }, [range, page, before, displayedIdentity, dense]);
+  }, [range, page, before, displayedIdentity, dense, historyState, latestCandleTime]);
   return <div className="chart-block market-chart-block">
     <div className="chart-caption"><div><b>每根K线5分钟 · 每个箭头预测未来30分钟</b></div><select value={identity} onChange={event => { setIdentity(event.target.value); setSelected(null); }}>{Object.entries(LABELS).filter(([key]) => key !== "CHAMPION_0").map(([key, label]) => <option key={key} value={key}>{label}{key.includes("RESIDUAL") ? "（修正量）" : ""}</option>)}</select></div>
     <details className="market-reading-guide"><summary>图表怎么看</summary><p>绿色向上、红色向下、灰色双向代表 WAIT。新闻修正量也显示自己的方向：LONG 表示向上修正，SHORT 表示向下修正；完整方向请看“黄金＋新闻”。</p></details>
@@ -887,6 +891,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
     </div>
     <div className="prediction-counts"><b>{scopedDecisions.length ? "成本后EV较高方向" : predictionAvailability}</b>{scopedDecisions.length > 0 && <><span>看多 {formatExactCount(counts.LONG)}</span><span>看空 {formatExactCount(counts.SHORT)}</span><span>等待 {formatExactCount(counts.WAIT)}{unhealthyWaits ? `（数据异常 ${formatExactCount(unhealthyWaits)}）` : ""}</span>{policyMismatchCount > 0 && <span className="negative">历史规则不一致 {formatExactCount(policyMismatchCount)}（原记录保留）</span>}</>}</div>
     <span className="mobile-scroll-hint market-interaction-hint" role="note">左右滑动浏览 · 点击箭头查看30分钟结果</span>
+    {activeSelected && <div className="market-selected-window-caption" aria-live="polite"><span>选中观察窗</span><b>预测 {timeLabel(activeSelected.decision_time)} → 30分钟后 {timeLabel(exitTime(activeSelected))}</b></div>}
     <div className="market-visual-shell" aria-busy={historyState === "loading"}>
     {/* Keyboard users need focus here so arrow keys can pan the wide chart. */}
     {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
@@ -894,7 +899,7 @@ function MarketChart({ market, identity, setIdentity }: { market?: MarketData; i
     <svg className="learning-svg" viewBox="0 0 960 400" role="img" aria-label="XAUUSD K线与模型决策" onClick={selectNearestDecision}>
       {marketGaps.map(gap => <g key={`${gap.start}-${gap.end}`} className="market-gap"><rect x={gap.start} y="52" width={Math.max(2, gap.end-gap.start)} height="280" /><text x={(gap.start+gap.end)/2} y="190" textAnchor="middle">{gap.duration >= 45 * 60_000 ? "休市" : "数据缺口"}</text></g>)}
       {candles.map((row, index) => { const cx = xAtIndex(index); const width = Math.max(1.5, 650 / candles.length); const up = row.close >= row.open; return <g key={row.time}><line x1={cx} x2={cx} y1={y(row.high)} y2={y(row.low)} stroke={up ? "#476b19" : "#c9362b"} /><rect x={cx - width / 2} width={width} y={Math.min(y(row.open), y(row.close))} height={Math.max(1, Math.abs(y(row.open) - y(row.close)))} fill={up ? "#476b19" : "#c9362b"} /></g>; })}
-      {selectedX != null && selectedExitX != null && <g className="selected-window"><rect x={selectedX} width={Math.max(2, selectedExitX-selectedX)} y="52" height="280" /><line x1={selectedX} x2={selectedX} y1="52" y2="332" /><line x1={selectedExitX} x2={selectedExitX} y1="52" y2="332" /><text x={Math.max(90, Math.min(870, (selectedX+selectedExitX)/2))} y="49" textAnchor="middle">预测 → 30分钟后</text></g>}
+      {selectedX != null && selectedExitX != null && <g className="selected-window"><rect x={selectedX} width={Math.max(2, selectedExitX-selectedX)} y="52" height="280" /><line x1={selectedX} x2={selectedX} y1="52" y2="332" /><line x1={selectedExitX} x2={selectedExitX} y1="52" y2="332" /></g>}
       {decisions.map(row => { const { cx, cy, action } = decisionPosition(row); const color = action === "LONG" ? "#476b19" : action === "SHORT" ? "#c9362b" : "#555149"; const isSelected = activeSelected?.source_decision_id === row.source_decision_id && activeSelected?.model_identity === row.model_identity && activeSelected?.model_version === row.model_version; return <g key={`${row.source_decision_id}-${row.model_identity}-${row.model_version}`} role="button" tabIndex={0} className={`decision-marker${isSelected ? " selected" : ""}${row.policy_consistent === false ? " policy-mismatch" : ""}`} onClick={() => setSelected(row)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") setSelected(row); }}><title>{`${timeLabel(row.decision_time)} · 成本后EV较高方向 ${action} · 模型版本 ${row.model_version} · 点击查看30分钟结果`}</title>{action === "WAIT" && <circle cx={cx} cy={cy} r="10" fill="#eee9da" stroke={color} strokeWidth="1.5" />}{isSelected && <circle cx={cx} cy={cy} r="14" fill="none" stroke={color} strokeWidth="2" />}{action === "WAIT" ? <path d={`M ${cx-7} ${cy} h 14 M ${cx-7} ${cy} l 4 -4 M ${cx-7} ${cy} l 4 4 M ${cx+7} ${cy} l -4 -4 M ${cx+7} ${cy} l -4 4`} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" /> : <path d={action === "LONG" ? `M ${cx} ${cy-7} l -6 11 h 12 z` : `M ${cx} ${cy+7} l -6 -11 h 12 z`} fill={color} />}</g>; })}
       {showTraining && versionMarkers.map(row => <line key={`${row.decision_time}-${row.model_version}`} x1={xTime(row.decision_time)} x2={xTime(row.decision_time)} y1="52" y2="332" className="training-line" />)}
       <text x="5" y="64">{high.toFixed(2)}</text><text x="5" y="335">{low.toFixed(2)}</text>

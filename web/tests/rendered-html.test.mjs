@@ -1256,7 +1256,7 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(css, /height:calc\(100dvh - 16px\)/);
   assert.match(css, /grid-template-rows:auto auto minmax\(0,1fr\) auto/);
   assert.match(modal, /graph-modal-\$\{tab\}/);
-  assert.match(modal, /bodyRef\.current\?\.scrollTo\(\{ top: 0, left: 0, behavior: "instant" \}\)/);
+  assert.match(modal, /if \(isPhoneViewport\(\)\) bodyRef\.current\?\.scrollTo\(\{ top: 0, left: 0, behavior: "instant" \}\)/);
   assert.match(modal, /graph-scope-mobile/);
   assert.match(css, /graph-modal\.graph-modal-curve,\.graph-modal\.graph-modal-versions \{ height:calc\(100dvh - 16px\); max-height:none; grid-template-rows:auto auto minmax\(0,1fr\) auto/);
   assert.match(css, /graph-modal\.graph-modal-curve>\.graph-modal-body,\.graph-modal\.graph-modal-versions>\.graph-modal-body \{ min-height:0; max-height:none; overflow:auto/);
@@ -1294,6 +1294,8 @@ test("keeps the learning page focused and folds secondary research below the sco
 });
 
 test("keeps dashboard navigation and graph controls usable on phones", () => {
+  const dashboard = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
+  const responsiveScroll = readFileSync(new URL("../app/_lib/responsive-scroll.ts", import.meta.url), "utf8");
   const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const live = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
   const status = readFileSync(new URL("../app/_views/StatusView.tsx", import.meta.url), "utf8");
@@ -1305,7 +1307,9 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(page, /className="audit-tabs"/);
   assert.match(page, /className="audit-view-picker"/);
   assert.match(page, /aria-label="切换证据台页面"/);
-  assert.match(page, /window\.scrollTo\(\{ top: 0, behavior: "instant" \}\)/);
+  assert.match(page, /if \(isPhoneViewport\(\)\) window\.scrollTo\(\{ top: 0, behavior: "instant" \}\)/);
+  assert.match(dashboard, /if \(isPhoneViewport\(\)\) window\.scrollTo\(\{ top: 0, behavior: "instant" \}\)/);
+  assert.match(responsiveScroll, /matchMedia\("\(max-width: 850px\)"\)\.matches/);
   assert.doesNotMatch(page, /scrollAuditTabs|auditTabsRef|向左查看更多审计视图|向右查看更多审计视图/);
   for (const [source, current] of [[live, "live"], [page, "mobileDashboardSection"], [status, "status"], [health, "health"], [assistant, "assistant"]]) {
     assert.match(source, new RegExp(`<MobileDashboardNav current=\\{?"?${current}`));
@@ -1358,7 +1362,12 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(modal, /const selectNearestDecision = \(event: ReactMouseEvent<SVGSVGElement>\)/);
   assert.match(modal, /onClick=\{selectNearestDecision\}/);
   assert.match(modal, /左右滑动浏览 · 点击箭头查看30分钟结果/);
-  assert.match(modal, />预测 → 30分钟后<\/text>/);
+  assert.match(modal, /className="market-selected-window-caption"/);
+  assert.match(modal, /预测 \{timeLabel\(activeSelected\.decision_time\)\} → 30分钟后/);
+  assert.doesNotMatch(modal, /selected-window[^\n]*<text/);
+  assert.match(modal, /useLayoutEffect\(\(\) => \{[\s\S]*?chart\.scrollLeft = chart\.scrollWidth - chart\.clientWidth;[\s\S]*?historyState, latestCandleTime/);
+  assert.match(modal, /Math\.max\(88, Math\.min\(220, 30 \+ label\.length \* 14\)\)/);
+  assert.match(css, /\.market-selected-window-caption \{ display:flex;/);
   assert.match(modal, /左右滑动浏览长期曲线 · 文字与时间轴保持可读大小/);
   assert.match(css, /\.market-chart-block>\.chart-legend \{ display:flex; flex-wrap:wrap;/);
   assert.match(css, /\.execution-scorecards \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); border-width:1px 0; \}/);

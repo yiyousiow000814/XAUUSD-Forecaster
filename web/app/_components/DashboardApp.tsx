@@ -3,6 +3,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import LiveRoomView from "../_views/LiveRoomView";
 import { primeDashboardResources } from "../_lib/dashboard-resource";
+import { isPhoneViewport } from "../_lib/responsive-scroll";
 import {
   DashboardNavigationProvider,
   type AuditViewName,
@@ -82,7 +83,7 @@ export default function DashboardApp({
     if (replace) window.history.replaceState(null, "", nextHref);
     else window.history.pushState(null, "", nextHref);
     setLocation(destination);
-    window.scrollTo({ top: 0, behavior: "instant" });
+    if (isPhoneViewport()) window.scrollTo({ top: 0, behavior: "instant" });
   }, []);
 
   useEffect(() => {
