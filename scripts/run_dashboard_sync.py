@@ -956,8 +956,9 @@ def _sync_assistant_chat(_local_payload: dict, config: dict):
     )
     from xauusd_forecaster.news_scheduler import configured_api_credentials
 
-    chat_url = config.get("remote_assistant_chat_url") or (
-        config["remote_ingest_url"].rsplit("/", 1)[0] + "/assistant-chat"
+    chat_url = config.get("remote_assistant_worker_chat_url") or (
+        config["remote_ingest_url"].rsplit("/", 1)[0]
+        + "/assistant-worker/chat"
     )
     credentials = configured_api_credentials()
     profiles = configured_assistant_model_profiles()
@@ -1026,10 +1027,22 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
         configured_api_credentials,
     )
 
-    url = config.get("remote_news_questions_url") or (
-        config["remote_ingest_url"].rsplit("/", 1)[0] + "/news-questions"
+    url = config.get("remote_assistant_worker_news_url") or (
+        config["remote_ingest_url"].rsplit("/", 1)[0]
+        + "/assistant-worker/news-questions"
     )
-    api_root = url.rsplit("/", 1)[0]
+    if (
+        not isinstance(url, str)
+        or not url.startswith("https://")
+        or not urllib.parse.urlsplit(url).path.endswith(
+            "/assistant-worker/news-questions"
+        )
+    ):
+        raise ValueError(
+            "Assistant news worker URL must target the machine control plane"
+        )
+    worker_root = url.rsplit("/", 1)[0]
+    api_root = worker_root.rsplit("/", 1)[0]
     worker_id = _assistant_worker_id()
     credentials = configured_api_credentials()
     database = Path(config.get(
@@ -1055,7 +1068,7 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
     try:
         for _ in range(3):
             claim_url = url + "?" + urllib.parse.urlencode({
-                "mode": "claim", "worker_id": worker_id,
+                "worker_id": worker_id,
             })
             item = _get_json(claim_url, config).get("item")
             if not isinstance(item, dict):
@@ -1142,7 +1155,7 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                     "canonical_evidence_ids": canonical_ids,
                 }
                 _post_json(
-                    url + "?mode=machine",
+                    url,
                     json.dumps({
                         "action": "COMPLETE",
                         "id": item.get("id"),
@@ -1154,7 +1167,7 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                 )
             except Exception as error:
                 _post_json(
-                    url + "?mode=machine",
+                    url,
                     json.dumps({
                         "action": (
                             "DEFER"
@@ -1167,10 +1180,10 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                     }).encode("utf-8"),
                     config,
                 )
-        conversation_url = api_root + "/assistant-conversations"
+        conversation_url = worker_root + "/conversations"
         for _ in range(ASSISTANT_MEMORY_MAX_CLAIMS_PER_SYNC):
             claim_url = conversation_url + "?" + urllib.parse.urlencode({
-                "mode": "memory-index-claim", "worker_id": worker_id,
+                "queue": "memory-index", "worker_id": worker_id,
             })
             item = _get_json(claim_url, config).get("item")
             if not isinstance(item, dict):
@@ -1178,13 +1191,13 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
             try:
                 result = build_assistant_memory_index_result(item)
                 _post_json(
-                    conversation_url + "?mode=machine",
+                    conversation_url,
                     json.dumps(result, ensure_ascii=False).encode("utf-8"),
                     config,
                 )
             except Exception:
                 _post_json(
-                    conversation_url + "?mode=machine",
+                    conversation_url,
                     json.dumps({
                         "action": "FAIL_MEMORY_INDEX",
                         "id": item.get("id"),
@@ -1207,7 +1220,7 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
         title_url = conversation_url
         for _ in range(3):
             claim_url = title_url + "?" + urllib.parse.urlencode({
-                "mode": "title-claim", "worker_id": worker_id,
+                "queue": "title", "worker_id": worker_id,
             })
             item = _get_json(claim_url, config).get("item")
             if not isinstance(item, dict):
@@ -1253,7 +1266,7 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                 )
                 result = {**routed.value, "routing": routed.routing}
                 _post_json(
-                    title_url + "?mode=machine",
+                    title_url,
                     json.dumps({
                         "action": "COMPLETE_TITLE",
                         "id": item.get("id"),
@@ -1264,7 +1277,7 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                 )
             except Exception as error:
                 _post_json(
-                    title_url + "?mode=machine",
+                    title_url,
                     json.dumps({
                         "action": (
                             "DEFER_TITLE"
@@ -1279,7 +1292,7 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                 )
         for _ in range(3):
             claim_url = title_url + "?" + urllib.parse.urlencode({
-                "mode": "compaction-claim", "worker_id": worker_id,
+                "queue": "compaction", "worker_id": worker_id,
             })
             item = _get_json(claim_url, config).get("item")
             if not isinstance(item, dict):
@@ -1338,7 +1351,7 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                 )
                 result = {**routed.value, "routing": routed.routing}
                 _post_json(
-                    title_url + "?mode=machine",
+                    title_url,
                     json.dumps({
                         "action": "COMPLETE_COMPACTION",
                         "id": item.get("id"),
@@ -1349,7 +1362,7 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                 )
             except Exception as error:
                 _post_json(
-                    title_url + "?mode=machine",
+                    title_url,
                     json.dumps({
                         "action": (
                             "DEFER_COMPACTION"

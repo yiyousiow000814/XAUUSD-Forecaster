@@ -2,24 +2,17 @@ import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
 import { authenticateAssistantRequest } from "../_shared/assistant-auth";
 import {
-  appendAssistantChatEvents,
   AssistantChatInputError,
   cancelOwnerAssistantChatTurn,
-  claimAssistantChatTurn,
-  completeAssistantChatTurn,
   createAssistantChatTurn,
-  deferAssistantChatTurn,
-  failAssistantChatTurn,
   getOwnerAssistantChatTurn,
   listOwnerAssistantTurnEvents,
-  renewAssistantChatTurn,
 } from "../_shared/assistant-chat";
 import {
   ASSISTANT_EVENT_PROTOCOL_VERSION,
   encodeAssistantSse,
 } from "../_shared/assistant-events";
 import { readBoundedBody } from "../_shared/dashboard-snapshot";
-import { isIngestAuthorized } from "../_shared/ingest-auth";
 import { isPreviewDeployment, previewJson, rejectPreviewWrite } from "../_shared/preview";
 
 export const dynamic = "force-dynamic";
@@ -84,32 +77,16 @@ export async function GET(request: Request) {
   const params = new URL(request.url).searchParams;
   const mode = params.get("mode");
   if (isPreviewDeployment) {
-    if (mode === "claim") {
-      return rejectPreviewWrite()
-        ?? previewJson({ error: "Preview 只读" }, 403, "write-rejected");
-    }
     return mode === "events"
       ? previewEvents()
       : previewJson({ item: null, preview: true }, 200, "synthetic-empty-assistant");
   }
 
-  if (mode === "claim") {
-    if (!await isIngestAuthorized(request)) return unauthorized();
-    const binding = env.DB;
-    if (!binding) return unavailable();
-    try {
-      const item = await claimAssistantChatTurn(
-        binding, params.get("worker_id")?.trim() ?? "",
-      );
-      return noStoreJson({ item });
-    } catch (error) {
-      if (error instanceof AssistantChatInputError) return inputError(error);
-      return unavailable();
-    }
-  }
-
   const actor = await authenticateAssistantRequest(request, env);
   if (!actor) return unauthorized();
+  if (mode !== null && mode !== "events") {
+    return inputError(new AssistantChatInputError("INVALID_MODE", "Assistant 查询模式无效"));
+  }
   const binding = env.DB;
   if (!binding) return unavailable();
   const turnId = params.get("id")?.trim() ?? "";
@@ -137,9 +114,6 @@ export async function GET(request: Request) {
         },
       });
     }
-    if (mode !== null) {
-      throw new AssistantChatInputError("INVALID_MODE", "Assistant 查询模式无效");
-    }
     const item = await getOwnerAssistantChatTurn(binding, actor.actor_id, turnId);
     return item ? noStoreJson(item) : notFound();
   } catch (error) {
@@ -152,48 +126,11 @@ export async function POST(request: Request) {
   const previewRejection = rejectPreviewWrite();
   if (previewRejection) return previewRejection;
   const mode = new URL(request.url).searchParams.get("mode");
-  if (mode === "machine") {
-    if (!await isIngestAuthorized(request)) return unauthorized();
-    const binding = env.DB;
-    if (!binding) return unavailable();
-    try {
-      const body = await boundedBody(request, 384_000);
-      const action = String(body.action ?? "").trim().toUpperCase();
-      let item: unknown = null;
-      if (action === "RENEW") {
-        item = await renewAssistantChatTurn(binding, {
-          id: body.id,
-          lease_token: body.lease_token,
-        });
-      } else if (action === "EVENTS") {
-        item = await appendAssistantChatEvents(binding, {
-          id: body.id,
-          lease_token: body.lease_token,
-          events: body.events,
-        });
-      } else if (action === "COMPLETE") {
-        item = await completeAssistantChatTurn(binding, body);
-      } else if (action === "FAIL") {
-        item = await failAssistantChatTurn(binding, body);
-      } else if (action === "DEFER") {
-        item = await deferAssistantChatTurn(binding, body);
-      } else {
-        throw new AssistantChatInputError("INVALID_ACTION", "机器动作无效");
-      }
-      return item
-        ? noStoreJson({ status: "OK", item })
-        : conflict();
-    } catch (error) {
-      if (error instanceof AssistantChatInputError) return inputError(error);
-      return unavailable();
-    }
-  }
+  const actor = await authenticateAssistantRequest(request, env);
+  if (!actor) return unauthorized();
   if (mode !== null) {
     return inputError(new AssistantChatInputError("INVALID_MODE", "Assistant 写入模式无效"));
   }
-
-  const actor = await authenticateAssistantRequest(request, env);
-  if (!actor) return unauthorized();
   const binding = env.DB;
   if (!binding) return unavailable();
   try {

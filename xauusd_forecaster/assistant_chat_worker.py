@@ -429,7 +429,10 @@ def run_assistant_chat_worker(
     if not isinstance(chat_url, str) or not chat_url.startswith("https://"):
         raise ValueError("Assistant chat URL must use HTTPS")
     chat_url = chat_url.rstrip("/")
-    api_root = chat_url.rsplit("/", 1)[0]
+    if not urllib.parse.urlsplit(chat_url).path.endswith("/assistant-worker/chat"):
+        raise ValueError("Assistant chat URL must target the machine control plane")
+    worker_root = chat_url.rsplit("/", 1)[0]
+    api_root = worker_root.rsplit("/", 1)[0]
     if not isinstance(worker_id, str) or not _WORKER_ID.fullmatch(worker_id):
         raise ValueError("Assistant chat worker identity is invalid")
     if (
@@ -443,8 +446,8 @@ def run_assistant_chat_worker(
     selected_budgets = (
         configured_assistant_agent_budgets() if budgets is None else budgets
     )
-    machine_url = chat_url + "?mode=machine"
-    conversation_url = api_root + "/assistant-conversations?mode=machine"
+    machine_url = chat_url
+    conversation_url = worker_root + "/conversations"
     news_url = api_root + "/news-search"
     ledger: ForwardLedger | None = None
     claimed = answered = deferred = failed_attempts = 0
@@ -453,7 +456,7 @@ def run_assistant_chat_worker(
         for _ in range(max_claims):
             claim_response = transport.get_json(
                 chat_url + "?" + urllib.parse.urlencode({
-                    "mode": "claim", "worker_id": worker_id,
+                    "worker_id": worker_id,
                 }),
                 ASSISTANT_CHAT_REMOTE_TIMEOUT_SECONDS,
             )

@@ -67,13 +67,24 @@ const waitUntilVisible = (signal: AbortSignal) => {
   });
 };
 
-const errorMessage = (reason: unknown) => {
+type AssistantViewError = {
+  message: string;
+  accessLoginRequired: boolean;
+};
+
+const assistantViewError = (reason: unknown, prefix = ""): AssistantViewError => {
+  let message: string;
   if (reason instanceof AssistantClientError) {
-    if (reason.status === 401) return "Assistant 身份尚未通过验证，请刷新并完成 Cloudflare Access 登录。";
-    if (reason.status === 429) return "Assistant 当前繁忙，请稍后再试。";
-    return reason.message;
+    if (reason.status === 401) message = "Assistant 身份尚未通过 Cloudflare Access 验证。";
+    else if (reason.status === 429) message = "Assistant 当前繁忙，请稍后再试。";
+    else message = reason.message;
+  } else {
+    message = reason instanceof Error ? reason.message : "Assistant 暂时无法连接";
   }
-  return reason instanceof Error ? reason.message : "Assistant 暂时无法连接";
+  return {
+    message: `${prefix}${message}`,
+    accessLoginRequired: reason instanceof AssistantClientError && reason.status === 401,
+  };
 };
 
 const activeTurnFrom = (turn: AssistantChatTurn) => (
@@ -118,7 +129,7 @@ export default function AssistantView() {
   const [sending, setSending] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [mutating, setMutating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<AssistantViewError | null>(null);
   const [listRevision, setListRevision] = useState(0);
   const [detailRevision, setDetailRevision] = useState(0);
   const [monitorRevision, setMonitorRevision] = useState(0);
@@ -176,7 +187,7 @@ export default function AssistantView() {
       setError(null);
     }).catch(reason => {
       if (controller.signal.aborted) return;
-      setError(errorMessage(reason));
+      setError(assistantViewError(reason));
       setConversations([]);
       setSelectedId(null);
       setMessages([]);
@@ -209,7 +220,7 @@ export default function AssistantView() {
       }
       setError(null);
     }).catch(reason => {
-      if (!controller.signal.aborted) setError(errorMessage(reason));
+      if (!controller.signal.aborted) setError(assistantViewError(reason));
     }).finally(() => {
       if (requestId === detailRequest.current) setDetailLoading(false);
     });
@@ -258,7 +269,7 @@ export default function AssistantView() {
           if (controller.signal.aborted) return;
           consecutiveErrors += 1;
           if (consecutiveErrors >= 4) {
-            setError(`事件连接已暂停：${errorMessage(reason)}`);
+            setError(assistantViewError(reason, "事件连接已暂停："));
             return;
           }
           try {
@@ -271,7 +282,10 @@ export default function AssistantView() {
         }
       }
       if (!controller.signal.aborted) {
-        setError("本轮已超过浏览器自动重连窗口，请重新连接确认最终状态。");
+        setError({
+          message: "本轮已超过浏览器自动重连窗口，请重新连接确认最终状态。",
+          accessLoginRequired: false,
+        });
       }
     };
     void monitor();
@@ -361,7 +375,7 @@ export default function AssistantView() {
       setDetailRevision(value => value + 1);
       setDetailLoading(true);
     } catch (reason) {
-      setError(errorMessage(reason));
+      setError(assistantViewError(reason));
     } finally {
       setSending(false);
     }
@@ -379,7 +393,7 @@ export default function AssistantView() {
       setDetailLoading(true);
       setMonitorRevision(value => value + 1);
     } catch (reason) {
-      setError(errorMessage(reason));
+      setError(assistantViewError(reason));
     } finally {
       setCancelling(false);
     }
@@ -402,7 +416,7 @@ export default function AssistantView() {
       }
       setError(null);
     } catch (reason) {
-      setError(errorMessage(reason));
+      setError(assistantViewError(reason));
     } finally {
       setLoadingOlder(false);
     }
@@ -438,7 +452,7 @@ export default function AssistantView() {
         action !== "ARCHIVE" && action !== "UNARCHIVE" && Boolean(selectedConversation),
       );
     } catch (reason) {
-      setError(errorMessage(reason));
+      setError(assistantViewError(reason));
     } finally {
       setMutating(false);
     }
@@ -500,7 +514,8 @@ export default function AssistantView() {
         conversation={selectedConversation}
         cursor={cursor}
         draft={draft}
-        error={error}
+        accessLoginRequired={error?.accessLoginRequired ?? false}
+        error={error?.message ?? null}
         events={traceTurnId ? events : []}
         loading={detailLoading}
         loadingOlder={loadingOlder}

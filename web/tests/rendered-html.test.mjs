@@ -281,6 +281,8 @@ test("keeps branch Preview identity and blocks writes", async () => {
     "/api/ingest", "/api/learning", "/api/learning-history",
     "/api/news-index", "/api/news-content", "/api/market-chart",
     "/api/market-history", "/api/news-questions", "/api/assistant-chat",
+    "/api/assistant-worker/chat", "/api/assistant-worker/conversations",
+    "/api/assistant-worker/news-questions",
   ]) {
     const forbiddenD1 = new Proxy({}, {
       get() { throw new Error(`${path} touched D1 before Preview rejection`); },
@@ -1625,6 +1627,9 @@ test("keeps shared news retrieval bounded and phone readable", () => {
 test("keeps private news Q&A authenticated, lease-backed, and phone readable", () => {
   const view = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const route = readFileSync(new URL("../app/api/news-questions/route.ts", import.meta.url), "utf8");
+  const workerRoute = readFileSync(
+    new URL("../app/api/assistant-worker/news-questions/route.ts", import.meta.url), "utf8",
+  );
   const queue = readFileSync(new URL("../app/api/_shared/news-questions.ts", import.meta.url), "utf8");
   const auth = readFileSync(new URL("../app/api/_shared/assistant-auth.ts", import.meta.url), "utf8");
   const sync = readFileSync(new URL("../../scripts/run_dashboard_sync.py", import.meta.url), "utf8");
@@ -1633,6 +1638,8 @@ test("keeps private news Q&A authenticated, lease-backed, and phone readable", (
   assert.match(view, /view === "qa"/);
   assert.match(view, /PRIVATE · EVIDENCE GROUNDED/);
   assert.match(view, /questionAccess !== "authorized"/);
+  assert.match(view, /href="\/assistant">\u9a8c\u8bc1 Access \u8eab\u4efd/);
+  assert.match(view, /response\.redirected \|\| responseType\.includes\("text\/html"\)/);
   assert.match(view, /if \(view !== "qa"\) return/);
   assert.match(view, /Idempotency-Key/);
   assert.match(route, /rejectPreviewWrite\(\)/);
@@ -1641,8 +1648,10 @@ test("keeps private news Q&A authenticated, lease-backed, and phone readable", (
     postRoute.indexOf("rejectPreviewWrite()") < postRoute.indexOf("authenticateAssistantRequest(request, env)"),
     "Preview writes must reject before human authentication",
   );
-  assert.match(route, /isIngestAuthorized\(request\)/);
   assert.match(route, /authenticateAssistantRequest\(request, env\)/);
+  assert.doesNotMatch(route, /isIngestAuthorized|claimNewsQuestion|completeNewsQuestion/);
+  assert.match(workerRoute, /isIngestAuthorized\(request\)/);
+  assert.match(workerRoute, /claimNewsQuestion/);
   assert.match(auth, /jwtVerify/);
   assert.match(auth, /algorithms: \["RS256"\]/);
   assert.match(queue, /status='PROCESSING'/);
@@ -1656,11 +1665,15 @@ test("keeps private news Q&A authenticated, lease-backed, and phone readable", (
   assert.match(qaSync, /\/news-search\?/);
   assert.doesNotMatch(qaSync, /recent_news/);
   assert.match(css, /\.news-qa-desk form button \{[^}]*min-height:44px/);
+  assert.match(css, /\.qa-notice a,\.qa-error a \{[^}]*min-height:44px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.news-qa-desk form \{ grid-template-columns:1fr/);
 });
 
 test("keeps chat admission owner-authenticated and event replay finite", () => {
   const route = readFileSync(new URL("../app/api/assistant-chat/route.ts", import.meta.url), "utf8");
+  const workerRoute = readFileSync(
+    new URL("../app/api/assistant-worker/chat/route.ts", import.meta.url), "utf8",
+  );
   const runtime = readFileSync(
     new URL("../app/api/_shared/assistant-chat.ts", import.meta.url), "utf8",
   );
@@ -1676,8 +1689,9 @@ test("keeps chat admission owner-authenticated and event replay finite", () => {
       < postRoute.indexOf("authenticateAssistantRequest(request, env)"),
     "Preview chat writes must reject before human authentication",
   );
-  assert.match(route, /isIngestAuthorized\(request\)/);
   assert.match(route, /authenticateAssistantRequest\(request, env\)/);
+  assert.doesNotMatch(route, /isIngestAuthorized|claimAssistantChatTurn|completeAssistantChatTurn/);
+  assert.match(workerRoute, /isIngestAuthorized\(request\)/);
   assert.match(route, /last-event-id/);
   assert.match(route, /text\/event-stream/);
   assert.match(route, /X-Assistant-Next-Sequence/);
@@ -1686,13 +1700,55 @@ test("keeps chat admission owner-authenticated and event replay finite", () => {
   assert.match(runtime, /activeGlobal: 10/);
   assert.match(runtime, /lease_expires_at>\?/);
   assert.match(runtime, /LEASE_RENEWED/);
-  assert.match(route, /action === "RENEW"/);
+  assert.match(workerRoute, /action === "RENEW"/);
   assert.match(runtime, /automaticAssistantTitleStatements/);
   assert.match(runtime, /scheduleAssistantCompaction/);
   assert.match(migration, /assistant_turn_events_immutable_update/);
   assert.match(migration, /assistant_turn_jobs_terminal_immutable/);
   assert.match(migration, /assistant event sequence must be contiguous/);
   assert.match(leaseMigration, /assistant lease cannot outlive turn/);
+});
+
+test("separates Access-owned human APIs from the ingest worker control plane", () => {
+  const humanRoutes = [
+    "../app/api/assistant-chat/route.ts",
+    "../app/api/assistant-conversations/route.ts",
+    "../app/api/news-questions/route.ts",
+  ].map(path => readFileSync(new URL(path, import.meta.url), "utf8"));
+  const workerRoutes = [
+    "../app/api/assistant-worker/chat/route.ts",
+    "../app/api/assistant-worker/conversations/route.ts",
+    "../app/api/assistant-worker/news-questions/route.ts",
+  ].map(path => readFileSync(new URL(path, import.meta.url), "utf8"));
+  const sync = readFileSync(new URL("../../scripts/run_dashboard_sync.py", import.meta.url), "utf8");
+  const chatWorker = readFileSync(
+    new URL("../../xauusd_forecaster/assistant_chat_worker.py", import.meta.url), "utf8",
+  );
+  const security = readFileSync(
+    new URL("../../docs/contracts/ASSISTANT_SECURITY.md", import.meta.url), "utf8",
+  );
+
+  for (const route of humanRoutes) {
+    assert.match(route, /authenticateAssistantRequest\(request, env\)/);
+    assert.doesNotMatch(route, /isIngestAuthorized|mode === "machine"/);
+  }
+  for (const route of workerRoutes) {
+    assert.match(route, /isIngestAuthorized\(request\)/);
+    assert.doesNotMatch(route, /authenticateAssistantRequest/);
+    const getRoute = route.slice(route.indexOf("export async function GET"));
+    assert.ok(
+      getRoute.indexOf("rejectPreviewWrite()")
+        < getRoute.indexOf("isIngestAuthorized(request)"),
+      "Preview worker claims must reject before machine authentication",
+    );
+  }
+  assert.match(sync, /\/assistant-worker\/chat/);
+  assert.match(sync, /\/assistant-worker\/news-questions/);
+  assert.match(sync, /worker_root \+ "\/conversations"/);
+  assert.match(chatWorker, /\/assistant-worker\/chat/);
+  assert.doesNotMatch(sync, /mode=machine|mode.*claim/);
+  assert.match(security, /human boundary/);
+  assert.match(security, /\/api\/assistant-worker\/\*/);
 });
 
 test("renders a recoverable responsive Assistant workbench without unsafe HTML", () => {
@@ -1717,12 +1773,15 @@ test("renders a recoverable responsive Assistant workbench without unsafe HTML",
 
   assert.match(app, /room === "assistant"/);
   assert.match(app, /<AssistantView \/>/);
+  assert.match(app, /destinationUrl\.pathname === "\/assistant"/);
+  assert.match(app, /window\.location\.assign\(destinationUrl\.href\)/);
   assert.match(view, /fetchAssistantConversations/);
   assert.match(view, /replayAssistantEvents/);
   assert.match(view, /document\.visibilityState === "hidden"/);
   assert.match(view, /31 \* 60 \* 1_000/);
   assert.doesNotMatch(view, /EventSource|setInterval/);
   assert.match(client, /"Last-Event-ID": String\(after\)/);
+  assert.match(client, /ACCESS_LOGIN_REQUIRED/);
   assert.match(view, /sequence\.terminal/);
   assert.match(conversations, /active_turn: PublicAssistantActiveTurn \| null/);
   assert.match(conversations, /ASSISTANT_ACTIVE_TURN_STATUSES_SQL/);
@@ -1732,6 +1791,7 @@ test("renders a recoverable responsive Assistant workbench without unsafe HTML",
   assert.match(transcript, /取消本轮/);
   assert.match(transcript, /查看本轮分析过程/);
   assert.match(transcript, /assistant-transcript-banners/);
+  assert.match(transcript, /href="\/assistant">\u5b8c\u6210 Access \u767b\u5f55/);
   assert.match(transcript, /AURUM \/ PROVISIONAL/);
   assert.match(transcript, /16,000 bytes/);
   assert.doesNotMatch(transcript, /dangerouslySetInnerHTML/);
@@ -1740,6 +1800,7 @@ test("renders a recoverable responsive Assistant workbench without unsafe HTML",
   assert.match(css, /body:has\(> \.preview-banner\):has\(\.assistant-main\)[^{]*\{[^}]*grid-template-rows:auto minmax\(0,1fr\)/);
   assert.match(css, /\.assistant-conversation-rail\.is-open \{ transform:translateX\(0\); \}/);
   assert.match(css, /\.assistant-composer-meta button \{[^}]*min-height:46px/);
+  assert.match(css, /\.assistant-chat-error button,\.assistant-chat-error a \{[^}]*min-height:44px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-open-rail \{ display:block/);
   assert.match(css, /\.assistant-message>p \{[^}]*overflow-wrap:anywhere; white-space:pre-wrap/);
 });

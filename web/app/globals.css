@@ -516,6 +516,7 @@ body.modal-open { overflow:hidden; }
 .qa-notice,.qa-error,.qa-empty { margin:0; padding:14px 24px; border-bottom:1px solid rgba(17,17,15,.25); }
 .qa-notice { background:#ded9ca; }
 .qa-error { color:var(--red); }
+.qa-notice a,.qa-error a { min-height:44px; margin-left:12px; padding:8px 10px; border:1px solid currentColor; color:inherit; display:inline-flex; align-items:center; font-size:10px; font-weight:900; text-decoration:none; }
 .qa-list article { padding:20px 24px; border-bottom:1px solid rgba(17,17,15,.25); }
 .qa-list article>header,.qa-list article>footer { display:flex; justify-content:space-between; align-items:center; gap:12px; }
 .qa-list article h3 { margin:10px 0; font-family:var(--font-display); font-size:25px; }
@@ -1436,7 +1437,7 @@ body:has(> .preview-banner):has(.assistant-main) .assistant-main { height:100%; 
 .assistant-preview-notice b { border:1px solid var(--ink); padding:5px 7px; font-size:8px; letter-spacing:.08em; }
 .assistant-preview-notice span { color:#5f4b23; }
 .assistant-chat-error { justify-content:space-between; background:#e7b0a9; }
-.assistant-chat-error button { min-height:36px; border:1px solid var(--ink); background:var(--paper); padding:7px 10px; font-size:9px; font-weight:900; cursor:pointer; }
+.assistant-chat-error button,.assistant-chat-error a { min-height:44px; border:1px solid var(--ink); background:var(--paper); color:var(--ink); padding:7px 10px; font-size:9px; font-weight:900; cursor:pointer; display:inline-flex; align-items:center; text-decoration:none; }
 
 .assistant-message-scroll { min-height:0; overflow-y:auto; overscroll-behavior:contain; scroll-behavior:smooth; padding:26px clamp(18px,5vw,74px) 34px; position:relative; z-index:1; }
 .assistant-load-older { display:block; min-height:44px; margin:0 auto 22px; border:1px solid var(--ink); padding:8px 16px; background:transparent; font-size:10px; font-weight:900; cursor:pointer; }
@@ -1574,7 +1575,7 @@ body:has(> .preview-banner):has(.assistant-main) .assistant-main { height:100%; 
   .assistant-thread-actions button { flex:1 0 86px; }
   .assistant-thread-heading form { grid-column:1/-1; }
   .assistant-preview-notice,.assistant-chat-error { align-items:flex-start; flex-direction:column; gap:6px; padding:9px 12px; }
-  .assistant-chat-error button { align-self:stretch; min-height:44px; }
+  .assistant-chat-error button,.assistant-chat-error a { align-self:stretch; justify-content:center; min-height:44px; }
   .assistant-message-scroll { padding:18px 12px 26px; }
   .assistant-message { margin-bottom:21px; box-shadow:5px 5px 0 rgba(17,17,15,.95); }
   .assistant-message.is-user { width:90%; box-shadow:5px 5px 0 var(--gold); }

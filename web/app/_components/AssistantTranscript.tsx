@@ -69,6 +69,7 @@ export default function AssistantTranscript({
   events,
   draft,
   preview,
+  accessLoginRequired,
   error,
   loading,
   sending,
@@ -91,6 +92,7 @@ export default function AssistantTranscript({
   events: AssistantEventEnvelope[];
   draft: string;
   preview: boolean;
+  accessLoginRequired: boolean;
   error: string | null;
   loading: boolean;
   sending: boolean;
@@ -188,7 +190,9 @@ export default function AssistantTranscript({
         <b>PREVIEW FIXTURE</b><span>{ASSISTANT_PREVIEW_FIXTURE_LABEL}</span>
       </div> : null}
       {error ? <div className="assistant-chat-error" role="alert">
-        <span>{error}</span><button onClick={onRetry} type="button">重新连接</button>
+        <span>{error}</span>{accessLoginRequired
+          ? <a href="/assistant">完成 Access 登录</a>
+          : <button onClick={onRetry} type="button">重新连接</button>}
       </div> : null}
     </div>
 

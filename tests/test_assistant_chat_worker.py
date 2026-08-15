@@ -95,7 +95,7 @@ class RecordingTransport:
         self.gets.append((url, timeout))
         parsed = urllib.parse.urlsplit(url)
         query = urllib.parse.parse_qs(parsed.query)
-        if parsed.path.endswith("/assistant-chat"):
+        if parsed.path.endswith("/assistant-worker/chat"):
             if self.claimed:
                 return {"item": None}
             self.claimed = True
@@ -134,6 +134,20 @@ class RecordingTransport:
 
     def value(self) -> worker.AssistantChatTransport:
         return worker.AssistantChatTransport(self.get_json, self.post_json)
+
+
+def test_worker_requires_the_dedicated_machine_control_plane(tmp_path) -> None:
+    transport = RecordingTransport(_claim())
+    with pytest.raises(ValueError, match="machine control plane"):
+        worker.run_assistant_chat_worker(
+            chat_url="https://example.test/api/assistant-chat",
+            worker_id="dashboard-sync:test",
+            database=tmp_path / "forward.sqlite3",
+            credentials=(),
+            transport=transport.value(),
+        )
+    assert transport.gets == []
+    assert transport.posts == []
 
 
 def test_worker_builds_owner_context_runs_native_news_tool_and_completes(
@@ -185,7 +199,7 @@ def test_worker_builds_owner_context_runs_native_news_tool_and_completes(
 
     monkeypatch.setattr(worker, "run_capacity_routed_assistant_agent", run_agent)
     outcome = worker.run_assistant_chat_worker(
-        chat_url="https://example.test/api/assistant-chat",
+        chat_url="https://example.test/api/assistant-worker/chat",
         worker_id="dashboard-sync:test",
         database=tmp_path / "forward.sqlite3",
         credentials=(),
@@ -259,7 +273,7 @@ def test_capacity_failure_defers_under_the_same_turn_lease(
         worker, "run_capacity_routed_assistant_agent", no_capacity,
     )
     outcome = worker.run_assistant_chat_worker(
-        chat_url="https://example.test/api/assistant-chat",
+        chat_url="https://example.test/api/assistant-worker/chat",
         worker_id="dashboard-sync:test",
         database=tmp_path / "forward.sqlite3",
         credentials=(),
@@ -293,7 +307,7 @@ def test_context_identity_mismatch_fails_before_model_or_tool_execution(
         worker, "run_capacity_routed_assistant_agent", must_not_run,
     )
     outcome = worker.run_assistant_chat_worker(
-        chat_url="https://example.test/api/assistant-chat",
+        chat_url="https://example.test/api/assistant-worker/chat",
         worker_id="dashboard-sync:test",
         database=tmp_path / "forward.sqlite3",
         credentials=(),
@@ -368,7 +382,7 @@ def test_invalid_claim_identity_never_opens_the_local_ledger(
     monkeypatch.setattr(worker, "ForwardLedger", ForbiddenLedger)
     with pytest.raises(worker.AssistantChatWorkerError, match="claim|invalid"):
         worker.run_assistant_chat_worker(
-            chat_url="https://example.test/api/assistant-chat",
+            chat_url="https://example.test/api/assistant-worker/chat",
             worker_id="dashboard-sync:test",
             database=tmp_path / "forward.sqlite3",
             credentials=(),

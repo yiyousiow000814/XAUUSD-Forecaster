@@ -1046,6 +1046,13 @@ export default function AuditView() {
       cache: "no-store",
       headers: { Accept: "application/json" },
     });
+    const responseType = response.headers.get("content-type")?.toLowerCase() ?? "";
+    if (response.redirected || responseType.includes("text/html")) {
+      setQuestionAccess("denied");
+      setQuestions([]);
+      setQuestionError("需要先完成 Cloudflare Access 登录");
+      return;
+    }
     const body = await response.json().catch(() => ({})) as {
       items?: NewsQuestion[]; preview?: boolean; error?: string;
     };
@@ -1079,6 +1086,12 @@ export default function AuditView() {
         },
         body: JSON.stringify({ question }),
       });
+      const responseType = response.headers.get("content-type")?.toLowerCase() ?? "";
+      if (response.redirected || responseType.includes("text/html") || response.status === 401) {
+        setQuestionAccess("denied");
+        setQuestionError("需要重新完成 Cloudflare Access 登录");
+        return;
+      }
       const body = await response.json().catch(() => ({})) as NewsQuestion & { error?: string };
       if (!response.ok) throw new Error(body.error || "无法提交问题");
       setQuestions(previous => [body, ...previous.filter(item => item.id !== body.id)].slice(0, 10));
@@ -1351,7 +1364,10 @@ export default function AuditView() {
           <p>只检索有稳定证据 ID 的新闻；没有足够资料时会明确说不知道。</p>
         </header>
         {questionAccess === "preview" && <p className="qa-notice">PR Preview 只展示只读界面，不读取私人历史、不创建队列，也不调用模型。</p>}
-        {questionAccess === "denied" && <p className="qa-notice">这个入口只向 Cloudflare Access 中配置的 OWNER 开放。</p>}
+        {questionAccess === "denied" && <p className="qa-notice">
+          这个入口只向 Cloudflare Access 中配置的 OWNER 开放。
+          <a href="/assistant">完成 Access 登录</a>
+        </p>}
         <form onSubmit={event => { event.preventDefault(); void askNewsQuestion(); }}>
           <label htmlFor="news-question">新闻问题</label>
           <textarea
@@ -1369,7 +1385,11 @@ export default function AuditView() {
             {questionBusy ? "提交中" : questionAccess === "unknown" ? "验证身份中" : "提交问题"}
           </button>
         </form>
-        {questionError && <p className="qa-error" role="alert">{questionError}</p>}
+        {questionError && <p className="qa-error" role="alert">
+          {questionError}
+          {questionAccess !== "authorized" && questionAccess !== "preview"
+            ? <a href="/assistant">验证 Access 身份</a> : null}
+        </p>}
         <div className="qa-list">
           {questions.map(item => <article key={item.id}>
             <header><span className={`qa-status qa-status-${item.status.toLocaleLowerCase("en-US")}`}>{QUESTION_STATUS_LABELS[item.status]}</span><time>{time(item.asked_at)}</time></header>

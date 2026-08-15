@@ -262,7 +262,17 @@ const previewResponse = (response: Response) => (
   response.headers.get("x-aurum-preview") === "synthetic-empty-assistant"
 );
 
+const rejectAccessLoginResponse = (response: Response) => {
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  if (response.redirected || contentType.includes("text/html")) {
+    throw new AssistantClientError(
+      "ACCESS_LOGIN_REQUIRED", "需要完成 Cloudflare Access 登录", 401,
+    );
+  }
+};
+
 async function jsonResponse(response: Response) {
+  rejectAccessLoginResponse(response);
   const text = await response.text();
   let parsed: unknown = {};
   try {
@@ -459,6 +469,7 @@ export async function replayAssistantEvents(
     }),
     signal,
   });
+  rejectAccessLoginResponse(response);
   if (!response.ok) await jsonResponse(response);
   if (response.headers.get("x-assistant-event-protocol")
     !== ASSISTANT_EVENT_PROTOCOL_VERSION) {
