@@ -21,6 +21,11 @@ EvidenceValidationMode = Literal[
     "NO_CITABLE_EVIDENCE",
     "INSUFFICIENT_EVIDENCE",
 ]
+_EVIDENCE_VALIDATION_MODES = {
+    "CITATION_COVERAGE",
+    "NO_CITABLE_EVIDENCE",
+    "INSUFFICIENT_EVIDENCE",
+}
 
 _EVIDENCE_ID = re.compile(r"^[A-Za-z0-9:._-]{1,128}$")
 
@@ -99,9 +104,13 @@ def validate_assistant_evidence_claims(
         or not 1 <= len(raw_claims) <= MAX_EVIDENCE_CLAIMS
     ):
         raise AssistantEvidenceValidationError("Evidence claim count is invalid")
-    selected_mode: EvidenceValidationMode = mode or (
-        "CITATION_COVERAGE" if available else "NO_CITABLE_EVIDENCE"
+    selected_mode: EvidenceValidationMode = (
+        mode
+        if mode is not None
+        else ("CITATION_COVERAGE" if available else "NO_CITABLE_EVIDENCE")
     )
+    if selected_mode not in _EVIDENCE_VALIDATION_MODES:
+        raise AssistantEvidenceValidationError("Evidence validation mode is invalid")
     if selected_mode == "CITATION_COVERAGE" and not available:
         raise AssistantEvidenceValidationError("Citation coverage requires evidence")
     if selected_mode in {"NO_CITABLE_EVIDENCE", "INSUFFICIENT_EVIDENCE"} and available:

@@ -68,4 +68,8 @@ test("available packet bounds stay separate from cited coverage", async () => {
   await assert.rejects(buildAssistantEvidenceValidation({
     claims: [{ text: "没有引用。", evidence_ids: [] }],
   }, available, { maxCitedEvidence: 12 }), AssistantEvidenceValidationError);
+
+  await assert.rejects(buildAssistantEvidenceValidation({
+    claims: [{ text: "未知模式。", evidence_ids: [] }],
+  }, [], { mode: "UNKNOWN" }), AssistantEvidenceValidationError);
 });

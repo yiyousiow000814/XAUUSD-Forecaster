@@ -38,6 +38,11 @@ export type AssistantEvidenceReceipt = {
 export class AssistantEvidenceValidationError extends Error {}
 
 const evidenceId = /^[A-Za-z0-9:._-]{1,128}$/;
+const evidenceModes = new Set<AssistantEvidenceMode>([
+  "CITATION_COVERAGE",
+  "NO_CITABLE_EVIDENCE",
+  "INSUFFICIENT_EVIDENCE",
+]);
 
 const digest = async (value: string) => {
   const output = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
@@ -100,6 +105,9 @@ export async function buildAssistantEvidenceValidation(
     throw new AssistantEvidenceValidationError("Evidence claim count is invalid");
   }
   const mode = options.mode ?? (available.length ? "CITATION_COVERAGE" : "NO_CITABLE_EVIDENCE");
+  if (!evidenceModes.has(mode)) {
+    throw new AssistantEvidenceValidationError("Evidence validation mode is invalid");
+  }
   if (mode === "CITATION_COVERAGE" && !available.length) {
     throw new AssistantEvidenceValidationError("Citation coverage requires evidence");
   }

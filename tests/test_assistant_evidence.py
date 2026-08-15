@@ -74,3 +74,13 @@ def test_model_output_must_be_strict_json() -> None:
             '```json\n{"claims": []}\n```',
             [],
         )
+
+
+@pytest.mark.parametrize("mode", ["UNKNOWN", ""])
+def test_evidence_validation_rejects_an_unknown_runtime_mode(mode: str) -> None:
+    with pytest.raises(AssistantEvidenceValidationError, match="mode"):
+        validate_assistant_evidence_claims(
+            {"claims": [{"text": "回答。", "evidence_ids": []}]},
+            [],
+            mode=mode,  # type: ignore[arg-type]
+        )
