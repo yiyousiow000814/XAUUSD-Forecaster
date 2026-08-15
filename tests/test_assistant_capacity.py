@@ -250,17 +250,23 @@ def test_capacity_router_rejects_one_key_fingerprint_across_independent_pools(
     ledger.close()
 
 
-def test_capacity_router_rejects_policy_outside_fixed_model_plan(tmp_path) -> None:
+def test_capacity_router_ignores_policy_outside_fixed_model_plan(tmp_path) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     profile = _profile("large-v1", "large-model", ModelCapacityClass.LARGE)
 
-    with pytest.raises(ValueError, match="unknown model"):
-        execute_assistant_capacity_route(
-            ledger.connection, _plan((profile,)), (_credential("pool-a"),),
-            service_priority=AssistantServicePriority.INTERACTIVE,
-            policies=(_policy("pool-a", "undeclared-model"),),
-            invoke=_success("unused"), now=NOW,
-        )
+    result = execute_assistant_capacity_route(
+        ledger.connection, _plan((profile,)), (_credential("pool-a"),),
+        service_priority=AssistantServicePriority.INTERACTIVE,
+        policies=(
+            _policy("pool-a", "configured-small-model"),
+            _policy("pool-a", profile.model_id),
+        ),
+        invoke=_success("ok"), now=NOW,
+    )
+
+    assert result.value == "ok"
+    assert result.profile == profile
+    assert result.routing["capacity"]["candidate_pair_count"] == 1
     ledger.close()
 
 
