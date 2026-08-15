@@ -838,7 +838,9 @@ test("renders the news and decision audit route", async () => {
   assert.doesNotMatch(source, /已经积累多少结果|真实上线后结果|当前模型学到哪里|距离下次学习/);
   assert.match(source, /上一次学习/);
   assert.match(source, /下一次学习/);
-  assert.match(source, /目标 − 目前已有 = 还差多少/);
+  assert.match(source, /还差 \$\{formatExactCount\(rowsUntilTraining\)\} 条/);
+  assert.match(source, /目标 \$\{formatExactCount\(payload\?\.training\?\.next_training_at\)\} 条/);
+  assert.doesNotMatch(source, /next_training_at\)} − \$\{formatExactCount/);
   assert.doesNotMatch(source, /查看技术审计明细/);
   assert.doesNotMatch(source, /旧工程数据|修复后的训练种子|上线后前向结果/);
   assert.doesNotMatch(source, /Legacy Engineering|Repaired Seed|Next fit/);
@@ -1295,7 +1297,7 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.audit-view-picker \{ position:sticky; top:0;[\s\S]*?grid-template-columns:auto minmax\(0,1fr\)/);
   assert.match(css, /\.audit-main \.audit-intro>div:first-child \{ display:none; \}/);
   assert.match(css, /\.coverage-card \{ display:grid;[\s\S]*?min-height:0;/);
-  assert.match(css, /\.evidence-summary \{ grid-template-columns:repeat\(3,minmax\(0,1fr\)\); \}/);
+  assert.match(css, /\.evidence-summary \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); gap:8px/);
   assert.match(css, /\.quota-summary \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); \}/);
   assert.match(css, /\.graph-modal>nav \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
   assert.match(css, /\.graph-modal,\.graph-modal\.graph-modal-curve,\.graph-modal\.graph-modal-versions \{ width:100vw; height:100dvh/);
@@ -1314,6 +1316,9 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(modal, /openerRef\.current\?\.focus\(\)/);
   assert.match(modal, /event\.key !== "Tab"/);
   assert.match(css, /\.mobile-chart-scroll \{ width:100%; overflow-x:auto/);
+  assert.match(css, /\.long-curve-block \.mobile-chart-scroll \{ overflow-x:hidden; \}/);
+  assert.match(css, /\.long-curve-block \.mobile-chart-scroll>\.learning-svg \{ width:100%; min-width:0;/);
+  assert.match(css, /\.execution-chart \.mobile-chart-scroll \{ overflow-x:hidden; \}/);
   assert.match(css, /\.execution-history-nav \{ display:flex; flex-wrap:wrap; justify-content:center; \}/);
   assert.match(css, /\.execution-history-nav button \{ flex:0 1 100px; min-width:0; min-height:44px; \}/);
   assert.match(css, /\.market-history-nav \{[^}]*margin:10px 0 0;[^}]*border:1px solid/);
@@ -1322,6 +1327,20 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.graph-modal-backdrop \{ position:fixed; inset:0; z-index:1100/);
   assert.match(css, /\.audit-intro>div:first-child \.eyebrow \{ display:none/);
   assert.match(css, /\.audit-intro h1 \{ font-size:clamp\(32px,9vw,38px\)/);
+  assert.match(css, /\.decision-audit \{ border-top:1px solid rgba\(17,17,15,\.55\); \}/);
+});
+
+test("keeps expanded news readable by progressively revealing technical evidence on phones", () => {
+  const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(page, /showSupportingEvidence/);
+  assert.match(page, /className="news-secondary-toggle"/);
+  assert.match(page, /news-secondary-evidence \$\{showSupportingEvidence \? "is-open" : ""\}/);
+  assert.match(page, /查看证据、分类与时间线/);
+  assert.match(css, /\.news-secondary-toggle \{ display:none; \}/);
+  assert.match(css, /\.news-secondary-evidence \{ display:none; padding-top:15px; \}/);
+  assert.match(css, /\.news-secondary-evidence\.is-open \{ display:block; \}/);
+  assert.match(css, /\.news-row \{ scroll-margin-top:46px;/);
 });
 
 test("explains U5 as a risk scale rather than a probability", () => {
