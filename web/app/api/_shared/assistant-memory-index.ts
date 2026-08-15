@@ -334,10 +334,10 @@ export async function retrieveAssistantHistoricalMemory(
     estimateTokens: TokenEstimator;
   },
 ) {
-  const cutoffSql = "(source_created_at<? OR (source_created_at=? AND source_message_id<?))";
-  const cutoffBindings = [
-    input.currentUser.created_at, input.currentUser.created_at, input.currentUser.id,
-  ];
+  // Cross-conversation UUIDs cannot prove ordering inside one millisecond.
+  // Exclude equal timestamps entirely so historical recall remains forward-only.
+  const cutoffSql = "source_created_at<?";
+  const cutoffBindings = [input.currentUser.created_at];
   const counts = await binding.prepare(
     `SELECT count(*) AS total_messages,
        COALESCE(sum(CASE WHEN status='COMPLETED' AND EXISTS (
@@ -368,8 +368,7 @@ export async function retrieveAssistantHistoricalMemory(
        WHERE memory_term.owner_id=? AND entry.owner_id=?
          AND conversation.owner_id=? AND entry.index_version=?
          AND entry.conversation_id!=? AND memory_term.term IN (${placeholders})
-         AND (entry.source_created_at<?
-           OR (entry.source_created_at=? AND entry.source_message_id<?))
+         AND entry.source_created_at<?
        GROUP BY entry.id
        ORDER BY overlap_count DESC,entry.source_created_at DESC,entry.source_message_id DESC
        LIMIT ?`,

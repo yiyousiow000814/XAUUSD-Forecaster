@@ -575,6 +575,11 @@ test("historical memory is owner-scoped, point-in-time, canonical, and determini
     startMinute: 20,
     messages: ["美联储利率现在还会影响黄金吗？", "尚未到达的回答。"],
   });
+  const sameTime = seedConversation(database, {
+    id: "conversation-history-same-time",
+    startMinute: 20,
+    messages: ["同一时间戳的美联储利率黄金内容。"],
+  });
   const future = seedConversation(database, {
     id: "conversation-history-future",
     startMinute: 30,
@@ -611,6 +616,7 @@ test("historical memory is owner-scoped, point-in-time, canonical, and determini
   assert.ok(history.items.every(item => item.source_conversation_id !== current.conversationId));
   assert.ok(history.items.every(item => item.source_conversation_id !== foreign.conversationId));
   assert.ok(history.items.every(item => item.source_conversation_id !== future.conversationId));
+  assert.ok(history.items.every(item => item.source_conversation_id !== sameTime.conversationId));
   assert.ok(history.items.every(item => item.canonical_message_ids.length === 1));
   assert.ok(history.items.every(item => item.created_at < instant(21).toISOString()));
   assert.equal(

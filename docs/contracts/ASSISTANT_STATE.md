@@ -215,8 +215,9 @@ these boundaries:
 - only messages owned by the current actor are eligible;
 - messages from the active conversation are excluded because Rolling Summary
   and Recent Verbatim Turns own that context;
-- a source message must precede the current user message under canonical
-  `(created_at, id)` ordering;
+- a source message must have `created_at` strictly before the current user
+  message; equal cross-conversation timestamps are excluded because unrelated
+  message IDs cannot establish received-time order;
 - ranking, candidate count, selected-item count, and token use are bounded and
   deterministic; and
 - selected text retains its canonical message ID and immutable provenance.
