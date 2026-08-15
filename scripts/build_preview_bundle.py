@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-import os
 import sys
 import types
 import urllib.parse
@@ -52,8 +51,10 @@ def _apply_branch_runtime_contract(status: dict) -> None:
 
 
 def _read_json(base_url: str, path: str) -> dict:
+    if base_url.rstrip("/") != DEFAULT_SOURCE:
+        raise ValueError("Preview snapshots must read the canonical production origin")
     request = urllib.request.Request(
-        urllib.parse.urljoin(f"{base_url.rstrip('/')}/", path.lstrip("/")),
+        urllib.parse.urljoin(f"{DEFAULT_SOURCE}/", path.lstrip("/")),
         headers={"Accept": "application/json", "User-Agent": "aurum-preview-builder/1"},
     )
     with urllib.request.urlopen(request, timeout=20) as response:
@@ -339,13 +340,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--branch", required=True)
     parser.add_argument("--commit", required=True)
-    parser.add_argument(
-        "--source",
-        default=os.environ.get("AURUM_PREVIEW_SOURCE_URL", DEFAULT_SOURCE),
-    )
     args = parser.parse_args()
     json.dump(
-        build_bundle(args.source, args.branch, args.commit),
+        build_bundle(DEFAULT_SOURCE, args.branch, args.commit),
         sys.stdout,
         ensure_ascii=False,
         allow_nan=False,

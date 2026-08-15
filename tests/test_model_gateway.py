@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,41 @@ def test_gateway_requires_accounting_before_it_can_be_constructed() -> None:
     with pytest.raises(ValueError, match="metered request accounting"):
         GeminiModelGateway(
             ("key",), requests_per_key=1, accountant=None,  # type: ignore[arg-type]
+        )
+
+
+def test_provider_transport_keeps_the_host_fixed_and_encodes_the_model(monkeypatch) -> None:
+    requested_urls: list[str] = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        @staticmethod
+        def read() -> bytes:
+            return b"{}"
+
+    def urlopen(request, *, timeout):
+        assert timeout == 1.0
+        requested_urls.append(request.full_url)
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+
+    GeminiModelGateway._post_json(
+        "key", "../../other-model", "generateContent", {}, timeout=1.0,
+    )
+
+    assert requested_urls == [
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "..%2F..%2Fother-model:generateContent"
+    ]
+    with pytest.raises(ValueError, match="unsupported model provider method"):
+        GeminiModelGateway._post_json(
+            "key", "model", "../other-method", {}, timeout=1.0,
         )
 
 
