@@ -8,7 +8,7 @@ import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-
 import { versionResultLabel, type VersionEvaluationStatus } from "../_lib/version-result-state";
 import { modelVersionMarkers } from "../_lib/model-version-markers";
 import { buildTrainingCutoffChart } from "../_lib/training-cutoff-chart";
-import { isPhoneViewport } from "../_lib/responsive-scroll";
+import { settleResponsiveScroll } from "../_lib/responsive-scroll";
 
 type CurvePoint = { decision_time: string; model_version?: string; training_rows?: number; training_dataset_hash?: string; cumulative_quote_return: number; source_gap_before?: boolean };
 type Curve = { model_identity: string; source_point_count?: number; chart_point_count?: number; chart_downsampled?: boolean; points: CurvePoint[]; source_point_count_30m?: number; chart_point_count_30m?: number; chart_downsampled_30m?: boolean; points_30m?: CurvePoint[] };
@@ -137,8 +137,9 @@ export default function LearningGraphModal({
   const openerRef = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
   const selectTab = (nextTab: GraphTab) => {
+    const currentScrollTop = bodyRef.current?.scrollTop ?? 0;
     setTab(nextTab);
-    if (isPhoneViewport()) bodyRef.current?.scrollTo({ top: 0, left: 0, behavior: "instant" });
+    settleResponsiveScroll(options => bodyRef.current?.scrollTo(options), currentScrollTop);
   };
   useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
   useEffect(() => {

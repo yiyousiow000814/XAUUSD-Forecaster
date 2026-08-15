@@ -13,7 +13,7 @@ import { statusFieldPhase } from "../_lib/current-data-provenance";
 import { PREVIEW_NEWS_PAGE_SIZE } from "../_lib/preview-manifest";
 import { resolveNewsMetrics, type NewsMetrics } from "../_lib/news-metrics";
 import { authoritativeNewsTotals, type NewsTotalsScope } from "../_lib/news-index-contract";
-import { isPhoneViewport } from "../_lib/responsive-scroll";
+import { settleResponsiveScroll } from "../_lib/responsive-scroll";
 import type { NewsReviewState } from "../_lib/news-review-state";
 import { formatExactCount, progressCountPresentation } from "../_lib/count-format";
 import type { VersionEvaluationStatus } from "../_lib/version-result-state";
@@ -999,9 +999,10 @@ export default function AuditView() {
   };
 
   const selectView = (next: AuditDeskView) => {
+    const currentScrollTop = window.scrollY;
     setView(next);
     window.history.replaceState(null, "", `/?room=audit&view=${next}`);
-    if (isPhoneViewport()) window.scrollTo({ top: 0, behavior: "instant" });
+    settleResponsiveScroll(options => window.scrollTo(options), currentScrollTop);
   };
 
   const runNewsSearch = async (page = 1, applied?: NewsSearchResponse) => {

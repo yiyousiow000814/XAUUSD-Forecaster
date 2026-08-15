@@ -1256,7 +1256,7 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(css, /height:calc\(100dvh - 16px\)/);
   assert.match(css, /grid-template-rows:auto auto minmax\(0,1fr\) auto/);
   assert.match(modal, /graph-modal-\$\{tab\}/);
-  assert.match(modal, /if \(isPhoneViewport\(\)\) bodyRef\.current\?\.scrollTo\(\{ top: 0, left: 0, behavior: "instant" \}\)/);
+  assert.match(modal, /settleResponsiveScroll\(options => bodyRef\.current\?\.scrollTo\(options\), currentScrollTop\)/);
   assert.match(modal, /graph-scope-mobile/);
   assert.match(css, /graph-modal\.graph-modal-curve,\.graph-modal\.graph-modal-versions \{ height:calc\(100dvh - 16px\); max-height:none; grid-template-rows:auto auto minmax\(0,1fr\) auto/);
   assert.match(css, /graph-modal\.graph-modal-curve>\.graph-modal-body,\.graph-modal\.graph-modal-versions>\.graph-modal-body \{ min-height:0; max-height:none; overflow:auto/);
@@ -1307,9 +1307,11 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(page, /className="audit-tabs"/);
   assert.match(page, /className="audit-view-picker"/);
   assert.match(page, /aria-label="切换证据台页面"/);
-  assert.match(page, /if \(isPhoneViewport\(\)\) window\.scrollTo\(\{ top: 0, behavior: "instant" \}\)/);
-  assert.match(dashboard, /if \(isPhoneViewport\(\)\) window\.scrollTo\(\{ top: 0, behavior: "instant" \}\)/);
+  assert.match(page, /const currentScrollTop = window\.scrollY;[\s\S]*settleResponsiveScroll\(options => window\.scrollTo\(options\), currentScrollTop\)/);
+  assert.match(dashboard, /const currentScrollTop = window\.scrollY;[\s\S]*settleResponsiveScroll\(options => window\.scrollTo\(options\), currentScrollTop\)/);
   assert.match(responsiveScroll, /matchMedia\("\(max-width: 850px\)"\)\.matches/);
+  assert.match(responsiveScroll, /const top = isPhoneViewport\(\) \? 0 : desktopTop/);
+  assert.match(responsiveScroll, /requestAnimationFrame\(\(\) => scroll\(\{ top, left: 0, behavior: "instant" \}\)\)/);
   assert.doesNotMatch(page, /scrollAuditTabs|auditTabsRef|向左查看更多审计视图|向右查看更多审计视图/);
   for (const [source, current] of [[live, "live"], [page, "mobileDashboardSection"], [status, "status"], [health, "health"], [assistant, "assistant"]]) {
     assert.match(source, new RegExp(`<MobileDashboardNav current=\\{?"?${current}`));
