@@ -56,32 +56,33 @@ def _population_rows(
     rows = ledger.connection.execute(
         f"""WITH population AS (
                SELECT n.* FROM news_revisions n
-               WHERE n.collector_first_seen_time>=? AND n.collector_first_seen_time<?
-                 AND n.collector_first_seen_time<=?
+               WHERE julianday(n.collector_first_seen_time)>=julianday(?)
+                 AND julianday(n.collector_first_seen_time)<julianday(?)
+                 AND julianday(n.collector_first_seen_time)<=julianday(?)
                  AND length(trim(COALESCE(n.body,'')))>=240
                  AND NOT EXISTS (
                    SELECT 1 FROM news_revisions newer
                    WHERE newer.source=n.source
                      AND newer.source_item_id=n.source_item_id
                      AND newer.revision_number>n.revision_number
-                     AND newer.collector_first_seen_time>=?
-                     AND newer.collector_first_seen_time<?
-                     AND newer.collector_first_seen_time<=?)
+                     AND julianday(newer.collector_first_seen_time)>=julianday(?)
+                     AND julianday(newer.collector_first_seen_time)<julianday(?)
+                     AND julianday(newer.collector_first_seen_time)<=julianday(?))
                  AND NOT EXISTS (
                    SELECT 1 FROM news_revisions peer
                    WHERE peer.cluster_id=n.cluster_id
-                     AND peer.collector_first_seen_time>=?
-                     AND peer.collector_first_seen_time<?
-                     AND peer.collector_first_seen_time<=?
+                     AND julianday(peer.collector_first_seen_time)>=julianday(?)
+                     AND julianday(peer.collector_first_seen_time)<julianday(?)
+                     AND julianday(peer.collector_first_seen_time)<=julianday(?)
                      AND length(trim(COALESCE(peer.body,'')))>=240
                      AND NOT EXISTS (
                        SELECT 1 FROM news_revisions peer_newer
                        WHERE peer_newer.source=peer.source
                          AND peer_newer.source_item_id=peer.source_item_id
                          AND peer_newer.revision_number>peer.revision_number
-                         AND peer_newer.collector_first_seen_time>=?
-                         AND peer_newer.collector_first_seen_time<?
-                         AND peer_newer.collector_first_seen_time<=?)
+                         AND julianday(peer_newer.collector_first_seen_time)>=julianday(?)
+                         AND julianday(peer_newer.collector_first_seen_time)<julianday(?)
+                         AND julianday(peer_newer.collector_first_seen_time)<=julianday(?))
                      AND (length(COALESCE(peer.body,''))>length(COALESCE(n.body,''))
                        OR (length(COALESCE(peer.body,''))=length(COALESCE(n.body,''))
                          AND (peer.source<n.source OR
@@ -109,28 +110,35 @@ def _population_rows(
                AND candidate_a.revision_number=p.revision_number
                AND candidate_a.raw_content_hash=p.content_hash
                AND candidate_a.llm_model_version IN (?,?)
-               AND candidate_a.prompt_version=? AND candidate_a.parsed_at<=?
+               AND candidate_a.prompt_version=?
+               AND julianday(candidate_a.parsed_at)<=julianday(?)
                AND {valid}
-             ORDER BY candidate_a.parsed_at DESC,candidate_a.annotation_id DESC LIMIT 1)
+             ORDER BY julianday(candidate_a.parsed_at) DESC,
+                      candidate_a.parsed_at DESC,candidate_a.annotation_id DESC LIMIT 1)
            LEFT JOIN news_title_translations t ON t.translation_id=(
              SELECT candidate_t.translation_id FROM news_title_translations candidate_t
              WHERE candidate_t.source=p.source
                AND candidate_t.source_item_id=p.source_item_id
                AND candidate_t.revision_number=p.revision_number
                AND candidate_t.raw_content_hash=p.content_hash
-               AND candidate_t.parsed_at<=?
-             ORDER BY candidate_t.parsed_at DESC,candidate_t.translation_id DESC LIMIT 1)
+               AND julianday(candidate_t.parsed_at)<=julianday(?)
+             ORDER BY julianday(candidate_t.parsed_at) DESC,
+                      candidate_t.parsed_at DESC,candidate_t.translation_id DESC LIMIT 1)
            LEFT JOIN news_impact_assessments_v1 i ON i.assessment_id=(
              SELECT candidate_i.assessment_id FROM news_impact_assessments_v1 candidate_i
              WHERE candidate_i.annotation_id=a.annotation_id
-               AND candidate_i.assessed_at<=?
-             ORDER BY candidate_i.assessed_at DESC,candidate_i.assessment_id DESC LIMIT 1)
+               AND julianday(candidate_i.assessed_at)<=julianday(?)
+             ORDER BY julianday(candidate_i.assessed_at) DESC,
+                      candidate_i.assessed_at DESC,candidate_i.assessment_id DESC LIMIT 1)
            LEFT JOIN news_event_identity_resolutions_v1 er ON er.resolution_id=(
              SELECT candidate_er.resolution_id FROM news_event_identity_resolutions_v1 candidate_er
              WHERE candidate_er.assessment_id=i.assessment_id
-               AND candidate_er.resolved_at<=?
-             ORDER BY candidate_er.resolved_at DESC,candidate_er.resolution_id DESC LIMIT 1)
-           ORDER BY p.collector_first_seen_time,p.source,p.source_item_id,p.revision_number""",
+               AND julianday(candidate_er.resolved_at)<=julianday(?)
+             ORDER BY julianday(candidate_er.resolved_at) DESC,
+                      candidate_er.resolved_at DESC,candidate_er.resolution_id DESC LIMIT 1)
+           ORDER BY julianday(p.collector_first_seen_time),
+                    p.collector_first_seen_time,p.source,p.source_item_id,
+                    p.revision_number""",
         parameters,
     ).fetchall()
     return [dict(row) for row in rows]
@@ -159,6 +167,13 @@ def _source_hash(rows: list[dict]) -> str:
         allow_nan=False,
     )
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _instant_key(value: object) -> str:
+    """Canonicalize an ISO timestamp before deterministic ordering."""
+    return datetime.fromisoformat(str(value)).astimezone(UTC).isoformat(
+        timespec="microseconds",
+    )
 
 
 def _population_hash(rows: list[dict]) -> str:
@@ -190,7 +205,7 @@ def _importance(row: dict) -> tuple:
         update.get(str(row.get("impact_update_type") or ""), 0), major,
         float(row.get("materiality") or 0), float(row.get("novelty") or 0),
         float(row.get("impact_confidence") or row.get("confidence") or 0),
-        str(row["collector_first_seen_time"]), str(row["source"]),
+        _instant_key(row["collector_first_seen_time"]), str(row["source"]),
         str(row["source_item_id"]),
     )
 
@@ -210,7 +225,7 @@ def _candidate_rows(rows: list[dict]) -> list[dict]:
             by_event[key] = row
     selected = sorted(by_event.values(), key=_importance, reverse=True)[:BRIEF_EVIDENCE_LIMIT]
     return sorted(selected, key=lambda row: (
-        str(row["collector_first_seen_time"]), str(row["source"]),
+        _instant_key(row["collector_first_seen_time"]), str(row["source"]),
         str(row["source_item_id"]), int(row["revision_number"]),
     ))
 
@@ -482,7 +497,8 @@ def brief_dates_to_process(
     rows = connection.execute(
         """WITH receipt_days AS (
              SELECT DISTINCT substr(datetime(collector_first_seen_time,'+8 hours'),1,10) AS day
-             FROM news_revisions WHERE collector_first_seen_time<=?
+             FROM news_revisions
+             WHERE julianday(collector_first_seen_time)<=julianday(?)
            )
            SELECT d.day FROM receipt_days d
            LEFT JOIN daily_news_brief_finalizations_v1 f ON f.brief_date=d.day

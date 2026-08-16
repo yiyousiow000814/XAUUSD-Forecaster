@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
+
+import pytest
 
 from xauusd_forecaster import daily_brief
 from xauusd_forecaster.forward_ledger import ForwardLedger
@@ -19,8 +21,11 @@ def _seed_news_item(
     parsed_at: datetime | None = None,
     review_priority: str = "NORMAL",
     material_event_key: str | None = None,
+    received_at: datetime | None = None,
 ) -> None:
-    received = datetime(2026, 8, 10, 1, tzinfo=UTC) + timedelta(minutes=minute)
+    received = received_at or (
+        datetime(2026, 8, 10, 1, tzinfo=UTC) + timedelta(minutes=minute)
+    )
     parsed = parsed_at or received + timedelta(minutes=1)
     with ledger.connection:
         ledger.connection.execute(
@@ -135,6 +140,37 @@ def test_daily_brief_only_calls_model_when_source_changes(tmp_path, monkeypatch)
         daily_brief.recent_daily_briefs(ledger.connection)[0]["brief"]["items"][0]["headline"]
         == "黄金新闻 item-1"
     )
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    "received",
+    (
+        datetime(2026, 8, 16, 9, tzinfo=UTC),
+        datetime(2026, 8, 16, 17, tzinfo=timezone(timedelta(hours=8))),
+    ),
+)
+def test_receipt_day_and_cutoff_are_offset_invariant(
+    tmp_path, monkeypatch, received: datetime,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    _seed_news_item(ledger, "offset-news", minute=0, received_at=received)
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        daily_brief, "generate_metered_json", _fake_generation(calls),
+    )
+
+    result = daily_brief.update_daily_brief(
+        ledger,
+        api_key="test-key",
+        request_accountant=CallbackModelAccountant(lambda usage: True),
+        now=datetime(2026, 8, 16, 12, tzinfo=UTC),
+    )
+
+    assert result["status"] == "OK"
+    assert result["brief_date"] == "2026-08-16"
+    assert (result["received_items"], result["reviewed_items"]) == (1, 1)
+    assert len(calls) == 1
     ledger.close()
 
 
