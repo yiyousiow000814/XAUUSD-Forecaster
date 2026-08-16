@@ -480,6 +480,42 @@ def test_important_early_event_survives_full_day_candidate_bound(tmp_path, monke
     ledger.close()
 
 
+def test_daily_brief_packet_keeps_strongest_evidence_within_tpm_budget(
+    tmp_path, monkeypatch,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    for index in range(60):
+        _seed_news_item(
+            ledger, f"ordinary-{index:03d}", minute=index + 1,
+            summary="黄金市场背景与宏观变化" * 60,
+        )
+    _seed_news_item(
+        ledger, "priority-policy", minute=0, review_priority="IMMEDIATE",
+        summary="重要政策变化" * 80,
+    )
+    calls: list[dict] = []
+    monkeypatch.setattr(daily_brief, "generate_metered_json", _fake_generation(calls))
+
+    result = daily_brief.update_daily_brief(
+        ledger, api_key="test", request_accountant=CallbackModelAccountant(lambda _: True),
+        now=datetime(2026, 8, 10, 3, tzinfo=UTC),
+    )
+
+    serialized = json.dumps(
+        calls[0]["payload"], ensure_ascii=False, separators=(",", ":"),
+    )
+    assert result["candidate_items"] == daily_brief.BRIEF_EVIDENCE_LIMIT
+    assert len(calls[0]["evidence"]) < result["candidate_items"]
+    assert any(
+        row["id"] == "Reuters:priority-policy:1" for row in calls[0]["evidence"]
+    )
+    assert (
+        daily_brief.conservative_input_token_estimate(serialized)
+        <= daily_brief.BRIEF_INPUT_TOKEN_BUDGET
+    )
+    ledger.close()
+
+
 def test_duplicate_event_flood_consumes_one_candidate(tmp_path, monkeypatch) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     for index in range(40):

@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from .annotation import (
     DEFAULT_GEMINI_MODEL, DEFAULT_GEMMA_MODEL, FALLBACK_GEMINI_MODEL,
-    PROMPT_VERSION, generate_metered_json,
+    PROMPT_VERSION, conservative_input_token_estimate, generate_metered_json,
 )
 from .forward_ledger import ForwardLedger
 from .model_gateway import ModelGatewayCapacityExhausted, ModelRequestAccountant
@@ -19,6 +19,7 @@ from .news_semantics import validated_annotation_predicate
 
 BRIEF_PROMPT_VERSION = "daily-news-brief-v2"
 BRIEF_EVIDENCE_LIMIT = 60
+BRIEF_INPUT_TOKEN_BUDGET = 12_000
 BRIEF_BACKLOG_LIMIT = 14
 BRIEF_REGENERATION_DEBOUNCE = timedelta(minutes=10)
 BRIEF_CAPACITY_RETRY = timedelta(minutes=1)
@@ -245,6 +246,24 @@ def _evidence_packet(rows: list[dict]) -> list[dict[str, object]]:
         "published_at": row["source_published_time"],
         "received_at": row["collector_first_seen_time"],
     } for row in rows]
+
+
+def _budgeted_evidence_packet(
+    day: str, rows: list[dict],
+) -> list[dict[str, object]]:
+    """Keep the strongest evidence that fits one Gemma TPM reservation."""
+    selected = list(rows)
+    while selected:
+        packet = _evidence_packet(selected)
+        serialized = json.dumps(
+            _brief_payload(day, packet),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        if conservative_input_token_estimate(serialized) <= BRIEF_INPUT_TOKEN_BUDGET:
+            return packet
+        selected.remove(min(selected, key=_importance))
+    return []
 
 
 def _brief_payload(day: str, evidence: list[dict[str, object]]) -> dict[str, object]:
@@ -549,7 +568,7 @@ def update_daily_brief(
     counts = _counts(rows)
     reviewed = _reviewed_rows(rows)
     candidates = _candidate_rows(reviewed)
-    packet = _evidence_packet(candidates)
+    packet = _budgeted_evidence_packet(day, candidates)
     population_hash = _population_hash(rows)
     candidate_hash = _source_hash(packet) if packet else None
     latest = _latest_brief(ledger.connection, day)
