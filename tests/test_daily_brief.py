@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
-from xauusd_forecaster import daily_brief
+from xauusd_forecaster import annotation, daily_brief
 from xauusd_forecaster.forward_ledger import ForwardLedger
 from xauusd_forecaster.model_gateway import (
     ModelGatewayCapacityExhausted, ModelGatewayResponseInvalid,
@@ -95,6 +95,26 @@ def _seed_news_item(
 
 def _seed_news(ledger: ForwardLedger) -> None:
     _seed_news_item(ledger, "item-1", minute=1)
+
+
+def _seed_unannotated_revision(
+    ledger: ForwardLedger, item_id: str, *, received_at: datetime,
+    cluster_id: str, body_length: int,
+) -> None:
+    with ledger.connection:
+        ledger.connection.execute(
+            """INSERT INTO news_revisions
+               (source,source_item_id,revision_number,source_published_time,
+                collector_first_seen_time,item_first_seen_time,fetched_time,
+                headline,body,link,content_hash,cluster_id,collector_latency_seconds)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "Reuters", item_id, 1, received_at.isoformat(),
+                received_at.isoformat(), received_at.isoformat(), received_at.isoformat(),
+                f"Headline {item_id}", "x" * body_length,
+                f"https://example.com/{item_id}", f"hash-{item_id}", cluster_id, 0,
+            ),
+        )
 
 
 def _seed_bulk_news(
@@ -651,7 +671,8 @@ def test_structured_brief_output_budget_covers_multi_item_contract() -> None:
     assert config["maxOutputTokens"] == daily_brief.BRIEF_OUTPUT_TOKEN_BUDGET
     assert config["maxOutputTokens"] >= 4_096
     assert config["responseSchema"]["required"] == ["title", "overview", "items"]
-    assert config["responseSchema"]["properties"]["items"]["maxItems"] == 8
+    assert config["responseSchema"]["properties"]["items"]["maxItems"] == 5
+    assert config["thinkingConfig"] == {"thinkingLevel": "minimal"}
     prompt = payload["contents"][0]["parts"][0]["text"]
     packet = json.loads(prompt.split("\nEVIDENCE\n", 1)[1])
     assert packet[0]["ref"] == "E01"
@@ -659,6 +680,19 @@ def test_structured_brief_output_budget_covers_multi_item_contract() -> None:
     assert config["responseSchema"]["properties"]["items"]["items"][
         "properties"
     ]["evidence_ids"]["items"]["enum"] == ["E01"]
+
+
+def test_daily_brief_rejects_incomplete_provider_completion() -> None:
+    evidence = [{"id": "source:item:1"}]
+    envelope = {
+        "candidates": [{
+            "finishReason": "MAX_TOKENS",
+            "content": {"parts": [{"text": '{"title":"truncated"'}]},
+        }],
+    }
+
+    with pytest.raises(ValueError, match="ended with MAX_TOKENS"):
+        daily_brief._decode_brief(envelope, evidence)
 
 
 def test_short_citation_is_mapped_to_exact_evidence_id() -> None:
@@ -863,7 +897,7 @@ def test_terminal_annotation_failure_settles_historical_date_as_degraded(tmp_pat
     ledger.close()
 
 
-def test_superseding_evidence_settles_unclaimable_historical_items(tmp_path) -> None:
+def test_cross_date_superseding_evidence_does_not_settle_historical_items(tmp_path) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     now = datetime(2026, 8, 11, 3, tzinfo=UTC)
     _seed_news_item(
@@ -905,9 +939,84 @@ def test_superseding_evidence_settles_unclaimable_historical_items(tmp_path) -> 
         api_key=None, request_accountant=None,
     )
 
-    assert result["phase"] == "DEGRADED"
-    assert result["pending_items"] == 0
-    assert result["terminal_failure_items"] == 2
+    assert result["phase"] == "UPDATING"
+    assert result["pending_items"] == 2
+    assert result["terminal_failure_items"] == 0
+    ledger.close()
+
+
+def test_protected_brief_day_claims_its_representative_despite_cross_date_peer(
+    tmp_path,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    _seed_unannotated_revision(
+        ledger, "day-one", received_at=datetime(2026, 8, 10, 2, tzinfo=UTC),
+        cluster_id="shared-cluster", body_length=300,
+    )
+    _seed_unannotated_revision(
+        ledger, "day-two", received_at=datetime(2026, 8, 11, 2, tzinfo=UTC),
+        cluster_id="shared-cluster", body_length=400,
+    )
+
+    general = annotation.pending_annotation_records(
+        ledger.connection, observed_at=datetime(2026, 8, 12, tzinfo=UTC),
+    )
+    protected = annotation.pending_annotation_records(
+        ledger.connection, observed_at=datetime(2026, 8, 12, tzinfo=UTC),
+        priority_receipt_days=("2026-08-10",),
+    )
+
+    assert [row["source_item_id"] for row in general] == ["day-two"]
+    assert {row["source_item_id"] for row in protected} == {"day-one", "day-two"}
+    ledger.close()
+
+
+def test_same_date_superseding_evidence_keeps_new_representatives_pending(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    now = datetime(2026, 8, 11, 3, tzinfo=UTC)
+    same_day_later = datetime(2026, 8, 10, 4, tzinfo=UTC).isoformat()
+    _seed_news_item(
+        ledger, "superseded-revision", minute=1,
+        parsed_at=now + timedelta(hours=1),
+    )
+    _seed_news_item(
+        ledger, "superseded-cluster", minute=2,
+        parsed_at=now + timedelta(hours=1),
+    )
+    with ledger.connection:
+        ledger.connection.execute(
+            """INSERT INTO news_revisions
+               (source,source_item_id,revision_number,source_published_time,
+                collector_first_seen_time,item_first_seen_time,fetched_time,
+                headline,body,link,content_hash,cluster_id,collector_latency_seconds)
+               SELECT source,source_item_id,2,source_published_time,?,
+                      item_first_seen_time,?,headline,body,link,?,cluster_id,
+                      collector_latency_seconds
+               FROM news_revisions WHERE source_item_id='superseded-revision'""",
+            (same_day_later, same_day_later, "hash-superseded-revision-v2"),
+        )
+        ledger.connection.execute(
+            """INSERT INTO news_revisions
+               (source,source_item_id,revision_number,source_published_time,
+                collector_first_seen_time,item_first_seen_time,fetched_time,
+                headline,body,link,content_hash,cluster_id,collector_latency_seconds)
+               SELECT 'Preferred', 'preferred-peer', 1, source_published_time, ?,
+                      ?, ?, 'Preferred peer', body || ' longer',
+                      'https://example.com/preferred-peer', 'hash-preferred-peer',
+                      cluster_id, collector_latency_seconds
+               FROM news_revisions
+               WHERE source_item_id='superseded-cluster'""",
+            (same_day_later, same_day_later, same_day_later),
+        )
+
+    result = daily_brief.update_daily_brief(
+        ledger, brief_date="2026-08-10", now=now,
+        api_key=None, request_accountant=None,
+    )
+
+    assert result["phase"] == "UPDATING"
+    assert result["pending_items"] == 2
+    assert result["terminal_failure_items"] == 0
     ledger.close()
 
 
@@ -974,4 +1083,55 @@ def test_historical_generation_failure_has_finite_degraded_fallback(
     assert ledger.connection.execute(
         "SELECT COUNT(*) FROM daily_news_brief_failures_v1"
     ).fetchone()[0] == daily_brief.BRIEF_FAILURE_ATTEMPT_LIMIT
+    ledger.close()
+
+
+def test_degraded_finalization_is_recovered_with_append_only_correction(
+    tmp_path, monkeypatch,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    _seed_news(ledger)
+    monkeypatch.setattr(
+        daily_brief, "generate_metered_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad output")),
+    )
+    start = datetime(2026, 8, 11, 3, tzinfo=UTC)
+    for attempt in range(daily_brief.BRIEF_FAILURE_ATTEMPT_LIMIT):
+        daily_brief.update_daily_brief(
+            ledger, brief_date="2026-08-10", api_key="test",
+            request_accountant=CallbackModelAccountant(lambda _: True),
+            now=start + timedelta(hours=attempt * 2),
+        )
+
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        daily_brief, "generate_metered_json", _fake_generation(calls),
+    )
+    recovered = daily_brief.update_daily_brief(
+        ledger, brief_date="2026-08-10", api_key="test",
+        request_accountant=CallbackModelAccountant(lambda _: True),
+        now=start + timedelta(hours=12),
+    )
+
+    assert recovered["phase"] == "FINAL"
+    assert recovered["revision_number"] == 2
+    assert ledger.connection.execute(
+        """SELECT final_status FROM daily_news_brief_finalizations_v1
+           WHERE brief_date='2026-08-10'"""
+    ).fetchone()[0] == "DEGRADED"
+    correction = ledger.connection.execute(
+        """SELECT final_status,revision_number
+           FROM daily_news_brief_finalization_corrections_v1
+           WHERE brief_date='2026-08-10'"""
+    ).fetchone()
+    assert tuple(correction) == ("FINAL", 2)
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        ledger.connection.execute(
+            """UPDATE daily_news_brief_finalization_corrections_v1
+               SET final_status='DEGRADED' WHERE brief_date='2026-08-10'"""
+        )
+    assert daily_brief.recent_daily_briefs(ledger.connection)[0]["model_version"] == "gemma-test"
+    assert "2026-08-10" not in daily_brief.brief_dates_to_process(
+        ledger.connection, now=start + timedelta(hours=13),
+    )
     ledger.close()

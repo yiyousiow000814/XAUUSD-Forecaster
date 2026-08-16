@@ -18,11 +18,13 @@ content hash has a valid annotation under the active annotation prompt and an
 approved annotation model by the cutoff. Title translation and impact analysis
 are optional presentation and ranking inputs; they are not completion gates.
 
-An unreviewed item is settled when its active annotation job reaches an
-explicit terminal state or when a later immutable revision supersedes the
-date-scoped revision. A date-scoped cluster member is likewise settled when a
-globally preferred immutable peer makes it unclaimable by the current annotator.
-Settled terminal items are counted separately and do not block the date forever.
+The population query first chooses the latest, body-qualified representative
+for each source item and cluster within the receipt date. Superseded rows are
+therefore absent rather than terminal. An unreviewed representative is settled
+only when its active annotation job reaches an explicit terminal state. A peer
+received on another date must not remove or terminally settle that date's
+representative. Settled terminal items are counted separately and do not block
+the date forever.
 
 ## Lifecycle
 
@@ -49,6 +51,10 @@ starve their remaining semantic reviews.
 Generated revisions and finalization/failure evidence are append-only.
 Operational refresh state is mutable. The UI reads the authoritative latest
 revision for a date and never overwrites older revisions.
+When a lifecycle defect made an earlier degraded finalization incorrect, a
+versioned append-only correction may reopen that date once and record a new
+effective finalization. The original finalization remains immutable audit
+evidence; processing and display use the correction for that recovery version.
 The generation source hash covers both the bounded evidence packet and the
 prompt contract version, so a new synthesis contract creates a new immutable
 revision even when the underlying candidates are unchanged.
@@ -61,8 +67,8 @@ deduplication and ranking is the packet capped. Arrival order alone cannot push
 an important early event out of the packet.
 
 The generated product is a synthesis, not an evidence index. Every current
-revision contains a model-written overview that relates the day's material
-events, followed by a bounded set of summarized developments with exact
+revision contains a concise model-written overview that relates the day's
+material events, followed by at most five summarized developments with exact
 evidence IDs. The model receives bounded short citation references; validated
 references are mapped back to exact internal evidence IDs before persistence,
 so copying a long opaque identifier is never part of the model task. Raw
@@ -77,7 +83,8 @@ accounting. A PREEMPTIBLE credential is not required. Missing capacity becomes
 `DEFERRED` with a retry time. Account headroom is re-ranked for each date in a
 batch, so one exhausted account cannot starve the remaining bounded backlog.
 
-Malformed JSON, schema violations, unknown evidence references, and provider
+Malformed or incomplete JSON, non-STOP provider completion, schema violations,
+unknown evidence references, and provider
 errors fail closed: no brief is written, an immutable failure is recorded, and
 bounded exponential retry state is persisted. Unknown evidence references use
 `MODEL_OUTPUT_CONTRACT_FAILED`; malformed response structure uses

@@ -215,6 +215,29 @@ def pending_annotation_records(
         if recovery_table_exists else ""
     )
     prioritized_days = tuple(dict.fromkeys(priority_receipt_days))
+    protected_day_membership = (
+        "substr(datetime(n.collector_first_seen_time,'+8 hours'),1,10) IN ("
+        + ",".join("?" for _ in prioritized_days) + ")"
+        if prioritized_days else "0"
+    )
+    revision_scope = (
+        "AND (NOT (" + protected_day_membership + ") OR "
+        "substr(datetime(newer.collector_first_seen_time,'+8 hours'),1,10)="
+        "substr(datetime(n.collector_first_seen_time,'+8 hours'),1,10))"
+        if prioritized_days else ""
+    )
+    peer_scope = (
+        "AND (NOT (" + protected_day_membership + ") OR "
+        "substr(datetime(peer.collector_first_seen_time,'+8 hours'),1,10)="
+        "substr(datetime(n.collector_first_seen_time,'+8 hours'),1,10))"
+        if prioritized_days else ""
+    )
+    peer_revision_scope = (
+        "AND (NOT (" + protected_day_membership + ") OR "
+        "substr(datetime(peer_newer.collector_first_seen_time,'+8 hours'),1,10)="
+        "substr(datetime(n.collector_first_seen_time,'+8 hours'),1,10))"
+        if prioritized_days else ""
+    )
     day_order = (
         "CASE substr(datetime(n.collector_first_seen_time,'+8 hours'),1,10) "
         + " ".join(
@@ -236,18 +259,24 @@ def pending_annotation_records(
             SELECT 1 FROM news_revisions newer
             WHERE newer.source=n.source
               AND newer.source_item_id=n.source_item_id
-              AND newer.revision_number>n.revision_number)
+              AND newer.revision_number>n.revision_number
+              {revision_scope})
           AND NOT EXISTS (
             SELECT 1 FROM news_revisions peer
             WHERE peer.cluster_id=n.cluster_id
+              AND length(trim(COALESCE(peer.body, ''))) >= 240
+              {peer_scope}
               AND NOT EXISTS (
                 SELECT 1 FROM news_revisions peer_newer
                 WHERE peer_newer.source=peer.source
                   AND peer_newer.source_item_id=peer.source_item_id
-                  AND peer_newer.revision_number>peer.revision_number)
+                  AND peer_newer.revision_number>peer.revision_number
+                  {peer_revision_scope})
               AND (length(COALESCE(peer.body, '')) > length(COALESCE(n.body, ''))
                    OR (length(COALESCE(peer.body, '')) = length(COALESCE(n.body, ''))
-                       AND peer.source_item_id < n.source_item_id)))
+                       AND (peer.source < n.source OR
+                            (peer.source=n.source
+                             AND peer.source_item_id < n.source_item_id)))))
           AND NOT EXISTS (
             SELECT 1 FROM news_llm_failures f
             WHERE f.task_type='ANNOTATION'
@@ -278,6 +307,7 @@ def pending_annotation_records(
         LIMIT ?""",
         (
             *compatible_models, prompt_version, prompt_version,
+            *(prioritized_days * 3),
             expected_model_identity, prompt_version,
             *(
                 (ANNOTATION_FAILURE_RECOVERY_VERSION,)
