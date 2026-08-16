@@ -1615,8 +1615,8 @@ body:has(> .preview-banner):has(.assistant-main) .assistant-main { height:100%; 
   .assistant-news-card-trigger>span:first-child { align-items:flex-start; flex-direction:column; gap:4px; font-size:11px; }
   .assistant-news-card-trigger>strong { font-size:19px; line-height:1.22; }
   .assistant-news-card-trigger>small em { flex-basis:100%; margin:4px 0 0; }
-  .assistant-news-dialog { inset:0; width:100vw; max-width:none; height:100dvh; max-height:none; margin:0; border:0; box-shadow:none; }
-  .assistant-news-dialog>article { height:100dvh; max-height:100dvh; }
+  .assistant-news-dialog { inset:0; width:calc(100vw - 24px); max-width:none; height:auto; max-height:calc(100dvh - 24px); margin:auto; border:1px solid var(--ink); box-shadow:6px 6px 0 var(--ink); }
+  .assistant-news-dialog>article { height:auto; max-height:calc(100dvh - 24px); }
   .assistant-news-dialog>article>header { padding:14px; }
   .assistant-news-dialog h2 { font-size:clamp(22px,6vw,27px); line-height:1.12; }
   .assistant-news-dialog-body { gap:12px; padding:14px; }
