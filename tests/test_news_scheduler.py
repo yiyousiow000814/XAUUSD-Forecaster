@@ -950,6 +950,45 @@ def test_concurrent_account_lanes_do_not_duplicate_capacity_probes(
     ledger.close()
 
 
+def test_daily_brief_capacity_reserves_only_its_own_account(
+    tmp_path, monkeypatch,
+) -> None:
+    from scripts import run_news_annotator as runner
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    for index in range(4):
+        enqueue_job(
+            ledger.connection, task_type="ACTIVE_IMPACT", source="source",
+            source_item_id=f"impact-{index}", revision_number=1,
+            annotation_id=f"annotation-{index}", prompt_version="prompt",
+            priority="NORMAL", now=datetime.now(UTC) - timedelta(minutes=2),
+        )
+    credentials = (
+        ApiCredential("brief-account", ROUTINE_POOL, "key-a", "a"),
+        ApiCredential("impact-account", ROUTINE_POOL, "key-b", "b"),
+    )
+    monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
+    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    attempted_accounts: list[str] = []
+
+    def execute(_ledger, credential, _job, **_kwargs):
+        attempted_accounts.append(credential.account_id)
+        return {"status": "OK"}
+
+    monkeypatch.setattr(runner, "_execute_job", execute)
+
+    statuses = runner.run_scheduled_batch(
+        ledger,
+        batch_size=None,
+        gemma_reserved_accounts=frozenset({"brief-account"}),
+    )
+
+    assert len(statuses) == 4
+    assert attempted_accounts == ["impact-account"] * 4
+    assert scheduler_counts(ledger.connection)["completed"] == 4
+    ledger.close()
+
+
 def test_display_route_uses_declared_fallback_when_gemma_capacity_is_full(
     monkeypatch,
 ) -> None:

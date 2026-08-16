@@ -627,16 +627,19 @@ def test_capacity_blocked_brief_leaves_gemma_window_for_retry(
 ) -> None:
     from scripts import run_news_annotator as runner
 
-    scheduled: list[tuple[str, ...] | None] = []
+    scheduled: list[frozenset[str]] = []
     monkeypatch.setattr(
         runner, "run_daily_brief_batch",
         lambda ledger: [{
             "status": "DEFERRED", "reason": "NO_GEMMA_CAPACITY",
+            "account_id": "brief-account",
         }],
     )
     monkeypatch.setattr(
         runner, "run_scheduled_batch_with_lock_retry",
-        lambda ledger, **kwargs: scheduled.append(kwargs.get("task_types")) or [],
+        lambda ledger, **kwargs: scheduled.append(
+            kwargs.get("gemma_reserved_accounts", frozenset())
+        ) or [],
     )
     monkeypatch.setattr(
         sys, "argv",
@@ -649,7 +652,7 @@ def test_capacity_blocked_brief_leaves_gemma_window_for_retry(
     )
 
     assert runner.main() == 0
-    assert scheduled == [("ACTIVE_ANNOTATION",)]
+    assert scheduled == [frozenset({"brief-account"})]
 
 
 def test_terminal_annotation_failure_settles_historical_date_as_degraded(tmp_path) -> None:
