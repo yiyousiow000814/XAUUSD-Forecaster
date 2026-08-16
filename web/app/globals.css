@@ -1639,7 +1639,7 @@ body:has(> .preview-banner):has(.assistant-main) .assistant-main { height:100%; 
   .assistant-composer-shell { padding:8px; }
   .assistant-composer-shell form { grid-template-columns:minmax(0,1fr) 52px; gap:8px; }
   .assistant-composer-shell label,.assistant-composer-meta>span,.assistant-composer-shell>small { display:none; }
-  .assistant-composer-shell textarea { grid-column:1; min-height:52px; max-height:120px; padding:13px; resize:none; font-size:16px; }
+  .assistant-composer-shell textarea { grid-column:1; height:52px; min-height:52px; max-height:52px; padding:13px; resize:none; font-size:16px; }
   .assistant-composer-meta { display:contents; }
   .assistant-composer-meta button { grid-column:2; width:52px; min-width:52px; min-height:52px; padding:0; justify-content:center; }
   .assistant-composer-meta button span { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0,0,0,0); }
