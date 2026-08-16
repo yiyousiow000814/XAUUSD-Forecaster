@@ -381,6 +381,75 @@ def test_sync_status_reports_optional_resource_degradation(tmp_path) -> None:
     assert status["degraded_resources"] == degraded
 
 
+def test_news_mirror_health_verifies_completed_contract(monkeypatch) -> None:
+    module = _sync_module()
+    requested = []
+    monkeypatch.setattr(
+        module, "_get_json",
+        lambda url, _config: requested.append(url) or {
+            "status": "OK", "violation_count": 0, "checks": [],
+        },
+    )
+
+    module._verify_news_mirror_state(
+        "https://worker.example/api/news-index", {"token": "test"},
+        expected_contract=module.NEWS_MIRROR_CONTRACT_VERSION,
+    )
+
+    assert requested == [
+        "https://worker.example/api/news-index?health_check=1&expected_contract="
+        + module.NEWS_MIRROR_CONTRACT_VERSION
+    ]
+
+
+def test_news_mirror_health_preserves_bounded_invariant_evidence(monkeypatch) -> None:
+    module = _sync_module()
+    monkeypatch.setattr(module, "_get_json", lambda *_a, **_k: {
+        "status": "ERROR",
+        "error_code": "NEWS_MIRROR_STATE_INVARIANT_VIOLATION",
+        "violation_count": 21,
+        "checks": [{"code": "NEWS_REVIEW_STATE_INVALID", "count": 21}],
+    })
+
+    with pytest.raises(module.RemoteInvariantViolation) as captured:
+        module._verify_news_mirror_state(
+            "https://worker.example/api/news-index", {"token": "test"},
+            expected_contract=None,
+        )
+
+    assert module.sync_error_code(captured.value) == (
+        "NEWS_MIRROR_STATE_INVARIANT_VIOLATION"
+    )
+    assert captured.value.evidence == {
+        "violation_count": 21,
+        "checks": [{"code": "NEWS_REVIEW_STATE_INVALID", "count": 21}],
+    }
+
+
+def test_remote_write_rejection_preserves_declared_error_code(monkeypatch) -> None:
+    module = _sync_module()
+    body = io.BytesIO(json.dumps({
+        "error_code": "NEWS_MIRROR_STATE_INVARIANT_VIOLATION",
+        "violation_count": 1,
+        "checks": [{"code": "NEWS_REVIEW_STATE_INVALID", "count": 1}],
+    }).encode())
+    monkeypatch.setattr(
+        module.urllib.request, "urlopen",
+        lambda *_a, **_k: (_ for _ in ()).throw(urllib.error.HTTPError(
+            "https://worker.example/api/news-index", 409, "Conflict", {}, body,
+        )),
+    )
+
+    with pytest.raises(module.RemoteInvariantViolation) as captured:
+        module._post_json(
+            "https://worker.example/api/news-index", b"{}", {"token": "test"},
+        )
+
+    assert module.sync_error_code(captured.value) == (
+        "NEWS_MIRROR_STATE_INVARIANT_VIOLATION"
+    )
+
+
 @pytest.mark.parametrize(
     "status_code,expected",
     [
@@ -921,6 +990,7 @@ def test_learning_history_is_durable_before_summary_and_retries_idempotently(
 
 def test_news_details_are_durable_before_index_is_published(monkeypatch, tmp_path) -> None:
     module = _sync_module()
+    monkeypatch.setattr(module, "_verify_news_mirror_state", lambda *_a, **_k: None)
     payload = {
         "recent_news": [{
             "source": "example", "source_item_id": "1", "revision_number": 1,
@@ -954,6 +1024,7 @@ def test_news_details_are_durable_before_index_is_published(monkeypatch, tmp_pat
 
 def test_news_detail_failure_never_publishes_dangling_index(monkeypatch, tmp_path) -> None:
     module = _sync_module()
+    monkeypatch.setattr(module, "_verify_news_mirror_state", lambda *_a, **_k: None)
     payload = {
         "recent_news": [{
             "source": "example", "source_item_id": "1", "revision_number": 1,
@@ -987,6 +1058,7 @@ def test_news_detail_failure_never_publishes_dangling_index(monkeypatch, tmp_pat
 
 def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> None:
     module = _sync_module()
+    monkeypatch.setattr(module, "_verify_news_mirror_state", lambda *_a, **_k: None)
     payload = {
         "generated_at": "2026-08-07T00:00:00+00:00",
         "learning_curves": {"learning_stage": "EARLY"},
@@ -1078,6 +1150,7 @@ def test_sync_repopulates_news_index_without_full_refresh_marker(
     monkeypatch, tmp_path
 ) -> None:
     module = _sync_module()
+    monkeypatch.setattr(module, "_verify_news_mirror_state", lambda *_a, **_k: None)
     payload = {
         "generated_at": "2026-08-07T00:00:00+00:00",
         "learning_curves": {},
@@ -1139,11 +1212,13 @@ def test_sync_repopulates_news_index_without_full_refresh_marker(
     "news-60-day-incremental-v2",
     "news-60-day-incremental-v3-semantic-categories",
     "news-60-day-incremental-v4-relevance-filter",
+    "news-60-day-incremental-v7-semantic-handover",
 ])
 def test_news_materialization_contract_upgrade_replays_and_reconciles_old_state(
     monkeypatch, tmp_path, previous_contract
 ) -> None:
     module = _sync_module()
+    monkeypatch.setattr(module, "_verify_news_mirror_state", lambda *_a, **_k: None)
     state_file = tmp_path / "news-state.json"
     stale_cursor = '["2026-08-13T00:00:00Z","example","old",1]'
     state_file.write_text(json.dumps({
@@ -1211,6 +1286,7 @@ def test_news_materialization_contract_upgrade_replays_and_reconciles_old_state(
 
 def test_news_sync_forwards_exact_semantic_withdrawals(monkeypatch, tmp_path) -> None:
     module = _sync_module()
+    monkeypatch.setattr(module, "_verify_news_mirror_state", lambda *_a, **_k: None)
     page = {
         "items": [],
         "withdrawals": [{

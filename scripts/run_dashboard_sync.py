@@ -49,7 +49,7 @@ NEWS_DETAIL_BATCH_LIMIT_BYTES = 400_000
 NEWS_INDEX_BATCH_LIMIT_BYTES = 400_000
 NEWS_WRITE_BATCH_ITEMS = 20
 NEWS_READER_WINDOW_DAYS = 60
-NEWS_MIRROR_CONTRACT_VERSION = "news-60-day-incremental-v7-semantic-handover"
+NEWS_MIRROR_CONTRACT_VERSION = "news-60-day-incremental-v8-recovery-state"
 MARKET_HISTORY_CONTRACT_VERSION = "market-history-d1-v2"
 MARKET_HISTORY_BATCH_LIMIT_BYTES = 350_000
 MARKET_HISTORY_OVERLAP_SECONDS = 2 * 3_600
@@ -88,6 +88,24 @@ class AllTargetsRejected(RuntimeError):
             if item.get("error_code")
         }
         self.error_code = next(iter(codes)) if len(codes) == 1 else "ALL_TARGETS_REJECTED"
+
+
+class RemoteInvariantViolation(RuntimeError):
+    """A remote resource answered but its persisted state is contradictory."""
+
+    def __init__(self, payload: dict) -> None:
+        self.error_code = str(
+            payload.get("error_code") or "REMOTE_STATE_INVARIANT_VIOLATION"
+        )
+        checks = payload.get("checks")
+        self.evidence = {
+            "violation_count": int(payload.get("violation_count") or 0),
+            "checks": checks[:12] if isinstance(checks, list) else [],
+        }
+        super().__init__(
+            f"remote invariant check failed: {self.error_code} "
+            f"({self.evidence['violation_count']} violations)"
+        )
 
 NEWS_INDEX_FIELDS = (
     "category", "source", "source_item_id", "revision_number", "cluster_id",
@@ -897,12 +915,21 @@ def _post_json(url: str, payload: bytes, config: dict) -> dict:
         "Content-Type": "application/json",
     }
     request = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-    with urllib.request.urlopen(
-        request, timeout=REMOTE_POST_TIMEOUT_SECONDS
-    ) as response:
-        if response.status != 200:
-            raise RuntimeError(f"dashboard sync returned HTTP {response.status}")
-        body = response.read()
+    try:
+        with urllib.request.urlopen(
+            request, timeout=REMOTE_POST_TIMEOUT_SECONDS
+        ) as response:
+            if response.status != 200:
+                raise RuntimeError(f"dashboard sync returned HTTP {response.status}")
+            body = response.read()
+    except urllib.error.HTTPError as error:
+        try:
+            failure = json.loads(error.read())
+        except (TypeError, ValueError):
+            raise error
+        if isinstance(failure, dict) and failure.get("error_code"):
+            raise RemoteInvariantViolation(failure) from error
+        raise error
     try:
         result = json.loads(body) if body else {}
     except (TypeError, ValueError):
@@ -928,10 +955,19 @@ def _get_json(
         **_remote_request_headers(url, config),
         "Accept": "application/json",
     })
-    with urllib.request.urlopen(
-        request, timeout=min(REMOTE_POST_TIMEOUT_SECONDS, float(timeout_seconds)),
-    ) as response:
-        return json.loads(response.read())
+    try:
+        with urllib.request.urlopen(
+            request, timeout=min(REMOTE_POST_TIMEOUT_SECONDS, float(timeout_seconds)),
+        ) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        try:
+            payload = json.loads(error.read())
+        except (TypeError, ValueError):
+            raise error
+        if isinstance(payload, dict) and payload.get("error_code"):
+            raise RemoteInvariantViolation(payload) from error
+        raise error
 
 
 def _assistant_worker_id() -> str:
@@ -1731,6 +1767,23 @@ def _local_news_archive_url(config: dict, after: str | None) -> str:
     ))
 
 
+def _verify_news_mirror_state(
+    news_index_url: str,
+    config: dict,
+    *,
+    expected_contract: str | None,
+) -> None:
+    """Verify persisted D1 relationships after a bounded mirror write."""
+    query = {"health_check": "1"}
+    if expected_contract:
+        query["expected_contract"] = expected_contract
+    payload = _get_json(
+        news_index_url + "?" + urllib.parse.urlencode(query), config,
+    )
+    if payload.get("status") != "OK":
+        raise RemoteInvariantViolation(payload)
+
+
 def _sync_news(_local_payload: dict, config: dict) -> None:
     """Advance one bounded archive page; never replay the whole archive."""
     state_path = Path(config.get("news_state_file", DEFAULT_NEWS_STATE))
@@ -1805,6 +1858,13 @@ def _sync_news(_local_payload: dict, config: dict) -> None:
         _post_json(news_index_url, json.dumps(
             maintenance, separators=(",", ":"),
         ).encode("utf-8"), config)
+    _verify_news_mirror_state(
+        news_index_url,
+        config,
+        expected_contract=(
+            NEWS_MIRROR_CONTRACT_VERSION if not page.get("has_more") else None
+        ),
+    )
     state["has_more"] = bool(page.get("has_more"))
     state["last_success"] = now.isoformat()
     _write_news_sync_state(state_path, state)
@@ -1846,13 +1906,17 @@ def sync_once(config: dict) -> list[dict]:
             try:
                 operation(local_payload, target)
             except Exception as error:
-                degraded.append({
+                failure = {
                     "target": target_name,
                     "resource": resource,
                     "error_type": type(error).__name__,
                     "error_code": sync_error_code(error),
                     "error": str(error)[:500],
-                })
+                }
+                evidence = getattr(error, "evidence", None)
+                if isinstance(evidence, dict):
+                    failure["evidence"] = evidence
+                degraded.append(failure)
     if healthy_targets == 0:
         raise AllTargetsRejected(degraded)
     return degraded

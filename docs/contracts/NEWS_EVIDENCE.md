@@ -84,6 +84,12 @@ failure receipts remain immutable audit evidence; their old operational status
 MUST NOT be presented as the current backlog, current candidates, or current
 isolation count. Runtime cutover MUST preserve every incremental mirror cursor;
 losing a cursor MUST NOT masquerade as a new annotation-contract handover.
+Every persisted change that affects a public review state, including an
+explicit failure-recovery authorization, MUST advance that record's incremental
+mirror clock. A changed state derivation that cannot advance existing record
+clocks MUST revise the mirror contract and replay the bounded archive. A sync
+MUST NOT report success while D1 retains an earlier review state for work that
+the current worker can claim.
 
 ## Event construction
 

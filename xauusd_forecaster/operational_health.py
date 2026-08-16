@@ -300,12 +300,17 @@ def extend_with_component_alerts(
     news_sources: list[dict[str, object]],
     runtime_update_failure: dict[str, object] | None,
     daily_news_brief: dict[str, object] | None = None,
+    sync_degraded_resources: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """Cover every published component/source with the same alert contract."""
     alerts = list(snapshot.get("alerts") or [])
+    sync_degraded_resources = sync_degraded_resources or []
     for name, component in components.items():
         status = str(component.get("status") or "UNKNOWN")
-        if status not in {"OK", "MARKET_CLOSED"}:
+        if (
+            status not in {"OK", "MARKET_CLOSED"}
+            and not (name == "sites_synchronizer" and sync_degraded_resources)
+        ):
             alerts.append(_alert(
                 "OPS_COMPONENT_UNHEALTHY",
                 severity="ERROR" if status in {"ERROR", "STALE"} else "WARNING",
@@ -398,6 +403,37 @@ def extend_with_component_alerts(
                     ),
                 },
             ))
+    for resource in sync_degraded_resources:
+        target = str(resource.get("target") or "unknown")
+        name = str(resource.get("resource") or "unknown")
+        upstream_code = str(resource.get("error_code") or "UNCLASSIFIED")
+        mirror_diverged = upstream_code in {
+            "NEWS_MIRROR_STATE_INVARIANT_VIOLATION",
+            "NEWS_MIRROR_HEALTH_UNAVAILABLE",
+        }
+        alerts.append(_alert(
+            (
+                "OPS_NEWS_MIRROR_STATE_DIVERGED"
+                if mirror_diverged else "OPS_SYNC_RESOURCE_FAILED"
+            ),
+            severity=(
+                "ERROR" if mirror_diverged or name == "heartbeat" else "WARNING"
+            ),
+            scope=f"{target}:{name}",
+            message_zh=(
+                "公开新闻镜像与预期状态不一致，已停止把本轮同步视为健康。"
+                if mirror_diverged else f"同步资源 {target}/{name} 本轮失败。"
+            ),
+            blocking=mirror_diverged or name == "heartbeat",
+            evidence={
+                "target": target,
+                "resource": name,
+                "upstream_error_code": upstream_code,
+                "error_type": resource.get("error_type"),
+                "error": resource.get("error"),
+                "details": resource.get("evidence"),
+            },
+        ))
     alerts.sort(key=lambda item: (
         SEVERITY_ORDER[str(item["severity"])], str(item["code"]),
         str(item["scope"]),

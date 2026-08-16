@@ -27,6 +27,8 @@ The initial cross-component catalog is:
 | `OPS_COMPONENT_UNHEALTHY` | A published runtime component is warning, stale, or in error. |
 | `OPS_NEWS_SOURCE_UNHEALTHY` | A monitored news source is degraded, stale, or failing. |
 | `OPS_RUNTIME_UPDATE_FAILED` | A runtime update failed and was retained or rolled back. |
+| `OPS_SYNC_RESOURCE_FAILED` | A named mirror resource failed while the target heartbeat remained available; evidence preserves its upstream error code. |
+| `OPS_NEWS_MIRROR_STATE_DIVERGED` | The public news mirror is reachable but violates its state, detail, derived-column, cluster, or completed-contract invariants. |
 | `OPS_DAILY_BRIEF_DEFERRED` | Daily Brief generation is waiting for a retry after a coded failure or capacity deferral. |
 | `OPS_DAILY_BRIEF_STALLED` | Daily Brief generation remained pending beyond its 30-minute progress boundary. |
 | `OPS_DAILY_BRIEF_DEGRADED` | Daily Brief finalized with terminally unreviewed inputs. |
@@ -79,6 +81,17 @@ The production health route separately reads aggregate Cloudflare D1 state for
 Assistant turns, news questions, titles, compaction, and memory indexing. These
 queues remain separate from local scheduler counters and expose their own
 claimable, scheduled-retry, progress, failure, age, and attempt evidence.
+
+A successful transport response is not proof that a materialized resource is
+healthy. Write routes reject rows that violate their public state contract.
+After each bounded news synchronization, the synchronizer checks the persisted
+D1 state machine, required detail relationship, derived index columns, active
+cluster uniqueness, and (after replay completes) the active mirror contract.
+Any mismatch is retained as a resource-level error with bounded counts and is
+promoted to `OPS_NEWS_MIRROR_STATE_DIVERGED`. Every other optional mirror
+resource failure retains its own upstream code under
+`OPS_SYNC_RESOURCE_FAILED`; it must not collapse into an uncoded component
+warning.
 
 Preview never presents production D1 alerts as branch-current evidence. A
 separate scheduled GitHub Actions probe checks the public live, status, and
