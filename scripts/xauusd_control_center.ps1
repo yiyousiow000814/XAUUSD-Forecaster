@@ -730,8 +730,18 @@ function Test-CurrentProductionShape {
             "--status-url", "http://127.0.0.1:8765/api/status",
             "--allow-pending-generation-decision"
         )
-        $result = & $python @arguments 2>&1
-        if ($LASTEXITCODE -ne 0) { return "production shape rejected: $result" }
+        $result = @(& $python @arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+        $resultText = ($result | ForEach-Object { [string]$_ }) -join "`n"
+        if ($exitCode -eq 75) {
+            try {
+                $payload = $resultText | ConvertFrom-Json -ErrorAction Stop
+                $code = [string]$payload.error_code
+                if ($code) { return "DEFERRED:$code" }
+            } catch {}
+            return "DEFERRED:STATUS_SNAPSHOT_REFRESH_IN_PROGRESS"
+        }
+        if ($exitCode -ne 0) { return "production shape rejected: $resultText" }
         return $null
     } catch {
         return $_.Exception.Message
@@ -837,7 +847,23 @@ function Test-RuntimeObservation {
             return $true
         }
     }
-    if (-not $failure) { $failure = Test-CurrentProductionShape }
+    if (-not $failure) {
+        $shapeResult = Test-CurrentProductionShape
+        if ($shapeResult -and [string]$shapeResult -like "DEFERRED:*") {
+            $deferredCode = ([string]$shapeResult).Substring("DEFERRED:".Length)
+            if ([string]$state.observation_deferred_code -ne $deferredCode) {
+                Write-WatchdogEvent -Event "RUNTIME_OBSERVATION_DEFERRED" `
+                    -Service "api" -State $deferredCode
+            }
+            Write-RuntimeUpdateState @{
+                observation_deferred_code = $deferredCode
+                observation_deferred_at = [DateTimeOffset]::UtcNow.ToString("o")
+                observation_consecutive_failures = 0
+            }
+            return $true
+        }
+        $failure = $shapeResult
+    }
     if ($failure) {
         $failures = 1 + [int]$state.observation_consecutive_failures
         Write-RuntimeUpdateState @{ observation_consecutive_failures = $failures }
@@ -847,6 +873,14 @@ function Test-RuntimeObservation {
             return $false
         }
         return $true
+    }
+    if ($state.observation_deferred_code) {
+        Write-WatchdogEvent -Event "RUNTIME_OBSERVATION_RESUMED" `
+            -Service "api" -State ([string]$state.observation_deferred_code)
+        Write-RuntimeUpdateState @{
+            observation_deferred_code = $null
+            observation_deferred_at = $null
+        }
     }
     $decisionTimes = @(Get-RuntimeDecisionTimes)
     $lastDecision = [string]$state.observation_last_decision_time

@@ -57,6 +57,11 @@ Task-level failure evidence uses these existing stable families:
 | `PROVIDER_HTTP_ERROR` | The provider returned an HTTP failure. |
 | `MODEL_REQUEST_FAILED` | Transport or request execution failed without a more specific provider code. |
 | `SCHEDULER_EXECUTION_FAILED` | The scheduler caught an unexpected task execution exception. |
+| `STATUS_SNAPSHOT_REFRESH_IN_PROGRESS` | The local status API is rebuilding its bounded snapshot; runtime observation is deferred without consuming its rollback budget. |
+| `STATUS_ENDPOINT_HTTP_ERROR` | The local status API returned an HTTP failure other than the known refresh deferral. |
+| `STATUS_ENDPOINT_UNAVAILABLE` | Runtime observation could not reach the local status API. |
+| `STATUS_ENDPOINT_URL_INVALID` | A production-shape probe was pointed outside the permitted loopback status endpoint. |
+| `STATUS_RESPONSE_INVALID` | The local status API responded but did not return the required JSON object. |
 
 New code paths must reuse one of these meanings or add a documented code. They
 must not persist a changing exception sentence as the only diagnostic key.
@@ -96,6 +101,13 @@ promoted to `OPS_NEWS_MIRROR_STATE_DIVERGED`. Every other optional mirror
 resource failure retains its own upstream code under
 `OPS_SYNC_RESOURCE_FAILED`; it must not collapse into an uncoded component
 warning.
+
+Runtime rollout observation is also a state machine, not a binary HTTP probe.
+The explicit `STATUS_SNAPSHOT_REFRESH_IN_PROGRESS` response is a bounded
+deferral while the status cache is rebuilding and must not consume the
+candidate rollback budget. Other HTTP, transport, schema, or production-shape
+failures remain failures. The update state records the deferral code and time,
+and clears them only after a complete production snapshot passes again.
 
 Preview never presents production D1 alerts as branch-current evidence. A
 separate scheduled GitHub Actions probe checks the public live, status, and

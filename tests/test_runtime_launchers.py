@@ -521,6 +521,27 @@ def test_three_consecutive_observation_failures_trigger_one_rollback(tmp_path) -
     assert result == "True,True,False,1,ROLLED_BACK"
 
 
+def test_snapshot_refresh_defers_observation_without_consuming_failure_budget(
+    tmp_path,
+) -> None:
+    _write_runtime_observation(tmp_path)
+    result = _run_control_center_contract(
+        tmp_path,
+        "$script:rollbacks = 0; function Test-CodeReloadHealth { return $true }; "
+        "function Test-CurrentProductionShape { "
+        "return 'DEFERRED:STATUS_SNAPSHOT_REFRESH_IN_PROGRESS' }; "
+        "function Invoke-RuntimeRollback { $script:rollbacks += 1; return $true }; "
+        "$observed = Test-RuntimeObservation; $state = Get-RuntimeUpdateState; "
+        'Write-Output "$observed,$($state.update_status),'
+        '$($state.observation_consecutive_failures),'
+        '$($state.observation_deferred_code),$script:rollbacks"',
+    )
+
+    assert result == (
+        "True,OBSERVING,0,STATUS_SNAPSHOT_REFRESH_IN_PROGRESS,0"
+    )
+
+
 def test_observation_window_waits_for_the_worker_family_to_finish_starting(
     tmp_path,
 ) -> None:
