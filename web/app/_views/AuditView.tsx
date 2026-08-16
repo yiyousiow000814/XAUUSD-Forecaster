@@ -1297,7 +1297,7 @@ export default function AuditView() {
               <p>{overview}</p>
             </div>
             <ol>{visibleItems.map(renderBriefItem)}</ol>
-            {additionalItems.length > 0 && <details className="brief-more-stories">
+            {additionalItems.length > 0 && <details key={selectedDate} className="brief-more-stories">
               <summary>继续阅读 {formatExactCount(additionalItems.length)} 个重点</summary>
               <ol>{additionalItems.map((item, index) => renderBriefItem(item, index + visibleItems.length))}</ol>
             </details>}
