@@ -1816,7 +1816,7 @@ test("renders a recoverable responsive Assistant workbench without unsafe HTML",
   assert.match(transcript, /AURUM \/ PROVISIONAL/);
   assert.match(transcript, /16,000 bytes/);
   assert.doesNotMatch(transcript, /dangerouslySetInnerHTML/);
-  assert.match(fixture, /不是真实会话 · 不调用模型/);
+  assert.match(fixture, /管理与发送仅生产可用 · 不调用模型/);
   assert.match(css, /\.assistant-workbench \{[^}]*grid-template-columns:300px minmax\(0,1fr\)/);
   assert.match(css, /body:has\(> \.preview-banner\):has\(\.assistant-main\)[^{]*\{[^}]*grid-template-rows:auto minmax\(0,1fr\)/);
   assert.match(css, /\.assistant-conversation-rail\.is-open \{ transform:translateX\(0\); \}/);
@@ -1854,6 +1854,7 @@ test("renders only validated Assistant content blocks with phone-owned overflow"
   assert.match(renderer, /\/api\/news-content\?key=/);
   assert.match(renderer, /GEMINI 中文摘要/);
   assert.match(renderer, /GEMMA 市场影响判断/);
+  assert.doesNotMatch(renderer, /<footer>[\s\S]*完成<\/button>[\s\S]*<\/footer>/);
   assert.match(renderer, /block\.data\.tone === "BOUNDARY"\) return null/);
   assert.doesNotMatch(transcript, /assistant-user-prompt-mobile|openPromptId/);
   assert.doesNotMatch(transcript, /回答属于决策支持/);
@@ -1879,6 +1880,9 @@ test("renders only validated Assistant content blocks with phone-owned overflow"
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-message\.is-user>p \{[^}]*font-size:15px; line-height:1\.68/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-news-card-trigger>strong \{[^}]*font-size:19px; line-height:1\.22/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-action-menu \{[^}]*width:min\(136px,calc\(100vw - 24px\)\)/);
+  assert.match(css, /\.assistant-news-dialog-body \{[^}]*align-content:start/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-news-dialog-body dl \{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-news-dialog>article>footer \{[^}]*flex-direction:row/);
   assert.match(css, /\.assistant-news-card-trigger>span:first-child \{[^}]*font-size:11px/);
   assert.match(css, /\.assistant-transcript-head \{ grid-row:1/);
   assert.match(css, /\.assistant-transcript-banners \{ grid-row:2/);
