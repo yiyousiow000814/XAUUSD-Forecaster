@@ -1139,6 +1139,7 @@ def test_sync_repopulates_news_index_without_full_refresh_marker(
     "news-60-day-incremental-v2",
     "news-60-day-incremental-v3-semantic-categories",
     "news-60-day-incremental-v4-relevance-filter",
+    "news-60-day-incremental-v7-semantic-handover",
 ])
 def test_news_materialization_contract_upgrade_replays_and_reconciles_old_state(
     monkeypatch, tmp_path, previous_contract

@@ -15,12 +15,18 @@ from pathlib import Path
 
 import pytest
 
-from xauusd_forecaster.annotation import INVALID_CHINESE_TITLE, PROMPT_VERSION
+from xauusd_forecaster.annotation import (
+    ANNOTATION_FAILURE_RECOVERY_VERSION,
+    INVALID_CHINESE_TITLE,
+    PROMPT_VERSION,
+)
 from xauusd_forecaster.ai_provider_registry import AI_QUOTA_SURFACES
 from xauusd_forecaster.forward_ledger import ForwardLedger
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
 from xauusd_forecaster.news_scheduler import (
-    configured_api_credentials, reserve_account_request,
+    authorize_repairable_annotation_failures,
+    configured_api_credentials,
+    reserve_account_request,
 )
 from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY
 
@@ -1046,6 +1052,81 @@ def test_news_archive_reemits_legacy_invalid_annotation_for_recovery(tmp_path) -
     assert changed["items"][0]["annotation_status"] == "QUEUED"
     assert changed["items"][0]["mirror_updated_at"] == parsed_at.isoformat()
     assert changed["withdrawals"] == []
+    ledger.close()
+
+
+def test_news_archive_reemits_failure_when_recovery_is_authorized(tmp_path) -> None:
+    module = _dashboard_module()
+    now = datetime.now(UTC).replace(microsecond=0)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "Complete source body with one exact evidence sentence. " * 20
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    ledger.append_news_revision({
+        "source": "google_news_fed_rates", "source_item_id": "recover-failure",
+        "source_published_time": now, "collector_first_seen_time": now,
+        "fetched_time": now, "headline": "Fed policy report", "body": body,
+        "content_hash": digest, "cluster_id": "recover-failure",
+    })
+    cause = "annotation supporting evidence is absent from source"
+    ledger.append_llm_failure({
+        "failure_id": "recoverable-failure", "task_type": "ANNOTATION",
+        "source": "google_news_fed_rates", "source_item_id": "recover-failure",
+        "revision_number": 1, "raw_content_hash": digest,
+        "llm_model_version": "gemini-3.5-flash-lite",
+        "prompt_version": PROMPT_VERSION, "attempt_number": 2,
+        "error_type": "ValueError",
+        "error_signature": hashlib.sha256(cause.encode()).hexdigest(),
+        "error": cause, "failed_at": now, "is_terminal": True,
+        "failure_evidence": {
+            "failure_code": "MODEL_OUTPUT_CONTRACT_FAILED",
+            "failure_stage": "SEMANTIC_CONTRACT", "response_hash": "a" * 64,
+            "selected_output": {"supporting_evidence": ["bounded excerpt"]},
+            "cause_type": "ValueError", "cause": cause,
+        },
+    })
+    before = module._news_archive_page(ledger.connection, None, 20)
+    authorized_at = now + timedelta(seconds=1)
+
+    recovered = authorize_repairable_annotation_failures(
+        ledger.connection,
+        prompt_version=PROMPT_VERSION,
+        recovery_version=ANNOTATION_FAILURE_RECOVERY_VERSION,
+        now=authorized_at,
+    )
+    changed = module._news_archive_page(
+        ledger.connection, before["next_cursor"], 20,
+    )
+
+    assert recovered == 1
+    assert [row["source_item_id"] for row in changed["items"]] == [
+        "recover-failure",
+    ]
+    assert changed["items"][0]["annotation_status"] == "QUEUED"
+    assert changed["items"][0]["model_visibility"] == "NOT_YET_PARSED"
+    assert changed["items"][0]["mirror_updated_at"] == authorized_at.isoformat(
+        timespec="microseconds",
+    )
+    ledger.close()
+
+
+def test_news_archive_does_not_mark_nonclaimable_news_as_waiting(tmp_path) -> None:
+    module = _dashboard_module()
+    now = datetime.now(UTC).replace(microsecond=0)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "Complete but stale source evidence. " * 30
+    ledger.append_news_revision({
+        "source": "google_news_fed_rates", "source_item_id": "stale-at-intake",
+        "source_published_time": now - timedelta(days=4),
+        "collector_first_seen_time": now, "fetched_time": now,
+        "headline": "Old market report", "body": body,
+        "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+        "cluster_id": "stale-at-intake",
+    })
+
+    item = module._news_archive_page(ledger.connection, None, 20)["items"][0]
+
+    assert item["annotation_status"] == "NOT_REQUIRED"
+    assert item["model_visibility"] == "MODEL_INELIGIBLE"
     ledger.close()
 
 
