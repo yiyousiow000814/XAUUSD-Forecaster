@@ -416,6 +416,13 @@ def test_dashboard_annotation_counts_match_current_worker_policy(tmp_path) -> No
 
 
 def test_dashboard_quota_uses_scheduler_ledger(tmp_path, monkeypatch) -> None:
+    import xauusd_forecaster.news_scheduler as news_scheduler
+
+    configured = {"GEMINI_API_KEYS": "key-a;key-b", "GEMINI_API_KEY": ""}
+    monkeypatch.setattr(
+        news_scheduler, "_runtime_environment_value",
+        lambda name: configured.get(name, ""),
+    )
     now = datetime.now(UTC)
     database = tmp_path / "forward.sqlite3"
     ledger = ForwardLedger(database, now=now)
@@ -457,6 +464,13 @@ def test_dashboard_quota_uses_scheduler_ledger(tmp_path, monkeypatch) -> None:
 def test_dashboard_quota_keeps_pre_scheduler_file_compatibility(
     tmp_path, monkeypatch,
 ) -> None:
+    import xauusd_forecaster.news_scheduler as news_scheduler
+
+    configured = {"GEMINI_API_KEYS": "legacy-key", "GEMINI_API_KEY": ""}
+    monkeypatch.setattr(
+        news_scheduler, "_runtime_environment_value",
+        lambda name: configured.get(name, ""),
+    )
     now = datetime.now(UTC)
     database = tmp_path / "forward.sqlite3"
     ledger = ForwardLedger(database, now=now)

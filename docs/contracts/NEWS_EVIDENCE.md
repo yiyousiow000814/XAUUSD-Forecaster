@@ -167,6 +167,12 @@ Collection is permission-neutral. A news document or macro observation that
 passes the objective intake checks is retained as a Forward candidate; the
 collector never assigns a model role. Model permission belongs to the versioned
 generation contract and may change only through a complete verified handover.
+Discovery-lane freshness is evaluated against the immutable collector
+first-seen time. Delayed semantic processing must not turn a candidate that was
+fresh at intake into an expired item. Conversely, replay does not rescue a
+candidate that was already stale, future-dated, or missing required publication
+time when first observed. Source type alone never exempts a complete body from
+semantic review.
 
 AI scheduling enforces project-scoped request and input-token windows for each
 Gemini annotation model and across Gemma impact review and title translation.
@@ -192,6 +198,13 @@ model must then append `WAIT` with `NEWS_PIPELINE_UNHEALTHY`; `MARKET_ONLY`
 remains observable as the control. Recovery requires the actual current-contract
 backlog and runtime dependency failures to clear. A provider status page or
 synthetic probe alone cannot reopen the gate.
+
+Archive semantic recovery consumes the same metered scheduler and never
+backdates model visibility, training eligibility, decisions, or predictions.
+Successful Gemini recovery enters the ordinary Gemma impact and identity queue.
+Terminal display or evidence failures may receive one explicitly versioned,
+persisted recovery authorization after the responsible contract is fixed. A
+new failure from that recovery is terminal again and cannot loop automatically.
 
 The immutable publisher body and content hash always remain the audit source of
 truth. Gemma receives that complete body whenever it fits the project token

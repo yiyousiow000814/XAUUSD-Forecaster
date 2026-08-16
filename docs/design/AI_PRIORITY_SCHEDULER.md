@@ -83,13 +83,19 @@ and previous UTC minute buckets to prevent boundary bursts.
 - `LEASED`: exclusively owned until the lease expires.
 - `BACKING_OFF`: retryable after its declared `available_at` time.
 - `COMPLETED`: immutable output exists or the job completed.
-- `DEAD_LETTER`: terminal failure; never reclaimed automatically.
+- `DEAD_LETTER`: terminal failure; not reclaimed without a versioned recovery
+  authorization tied to a deployed contract fix.
 
 `BACKING_OFF` applies to the AI task, not publisher-content retrieval. A local
 model-output contract failure becomes available again after five minutes and
 gets one recovery attempt; the same repeated failure moves to `DEAD_LETTER`.
 Provider rate limits and transient server failures keep their separate bounded
 progressive schedule.
+
+A recovery version can authorize one additional attempt for the exact bounded
+failure family it fixes. The authorization is persisted by failure ID. It does
+not reset attempt history, and a later failure is not covered by the earlier
+authorization.
 
 Scheduler rows are mutable operational state. News revisions, annotations,
 impact assessments, translations, failures, model metadata, and historical

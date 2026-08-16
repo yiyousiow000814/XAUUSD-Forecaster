@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+import xauusd_forecaster.news_scheduler as news_scheduler_module
 from xauusd_forecaster.news_scheduler import (
     ApiCredential,
     PREEMPTIBLE_POOL,
@@ -183,6 +184,28 @@ def test_legacy_keys_are_independent_routine_accounts() -> None:
     assert {item.pool for item in credentials} == {ROUTINE_POOL}
 
 
+def test_runtime_credentials_hot_reload_user_configuration(monkeypatch) -> None:
+    configured = {
+        "GEMINI_API_ACCOUNTS": "",
+        "GEMINI_API_KEYS": "key-a",
+        "GEMINI_API_KEY": "",
+    }
+    monkeypatch.setattr(
+        news_scheduler_module, "_runtime_environment_value",
+        lambda name: configured.get(name, ""),
+    )
+
+    first = configured_api_credentials()
+    configured["GEMINI_API_KEYS"] = "key-a;key-b"
+    second = configured_api_credentials()
+
+    assert len(first) == 1
+    assert len(second) == 2
+    assert {item.credential_id for item in first} < {
+        item.credential_id for item in second
+    }
+
+
 def test_enqueue_is_idempotent_and_lease_is_exclusive() -> None:
     connection = _connection()
     first = _enqueue(connection, "one")
@@ -275,6 +298,89 @@ def test_dead_letter_is_terminal() -> None:
 
     assert claim_job(connection, worker_id="next", pool=ROUTINE_POOL, now=NOW) is None
     assert scheduler_counts(connection)["dead_letter"] == 1
+
+
+@pytest.mark.parametrize(("stage", "cause"), (
+    ("DISPLAY_REPAIR", "number mismatch"),
+    (
+        "SEMANTIC_CONTRACT",
+        "annotation supporting evidence is absent from source",
+    ),
+))
+def test_repair_version_reopens_matching_annotation_failure_only_once(
+    tmp_path, stage, cause,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    body = "Complete source evidence for one bounded recovery attempt. " * 12
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    ledger.append_news_revision({
+        "source": "google_news_fed_rates", "source_item_id": "repair-once",
+        "source_published_time": NOW, "collector_first_seen_time": NOW,
+        "fetched_time": NOW, "headline": "Fed policy report", "body": body,
+        "content_hash": digest, "cluster_id": "repair-once",
+    })
+    job_id = enqueue_job(
+        ledger.connection, task_type="ACTIVE_ANNOTATION",
+        source="google_news_fed_rates", source_item_id="repair-once",
+        revision_number=1, prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+        priority="NORMAL", now=NOW,
+    )
+    first_claim = claim_job(
+        ledger.connection, worker_id="old-worker", pool=ROUTINE_POOL, now=NOW,
+    )
+    assert first_claim and first_claim.job_id == job_id
+    backoff_job(
+        ledger.connection, job_id, "old-worker", available_at=NOW,
+        error="display repair failed", terminal=True,
+    )
+
+    def append_failure(attempt: int, failure_id: str) -> None:
+        ledger.append_llm_failure({
+            "failure_id": failure_id, "task_type": "ANNOTATION",
+            "source": "google_news_fed_rates", "source_item_id": "repair-once",
+            "revision_number": 1, "raw_content_hash": digest,
+            "llm_model_version": "gemini-3.5-flash-lite",
+            "prompt_version": CURRENT_NEWS_PROMPT_VERSION,
+            "attempt_number": attempt, "error_type": "ValueError",
+            "error_signature": f"signature-{attempt}",
+            "error": "display repair failed", "failed_at": NOW,
+            "is_terminal": True,
+            "failure_evidence": {
+                "failure_code": "MODEL_OUTPUT_CONTRACT_FAILED",
+                "failure_stage": stage,
+                "response_hash": str(attempt) * 64,
+                "selected_output": {"headline_zh": "bounded"},
+                "cause_type": "ValueError", "cause": cause,
+            },
+        })
+
+    append_failure(2, "old-display-failure")
+    sync_pending_jobs(ledger.connection, now=NOW + timedelta(minutes=1))
+    recovered = ledger.connection.execute(
+        "SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
+    ).fetchone()
+    assert recovered["state"] == "QUEUED"
+
+    second_claim = claim_job(
+        ledger.connection, worker_id="new-worker", pool=ROUTINE_POOL,
+        now=NOW + timedelta(minutes=1),
+    )
+    assert second_claim and second_claim.job_id == job_id
+    backoff_job(
+        ledger.connection, job_id, "new-worker", available_at=NOW,
+        error="display repair still failed", terminal=True,
+    )
+    append_failure(3, "new-display-failure")
+    sync_pending_jobs(ledger.connection, now=NOW + timedelta(minutes=2))
+    stopped = ledger.connection.execute(
+        "SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
+    ).fetchone()
+    receipts = ledger.connection.execute(
+        "SELECT count(*) FROM news_ai_failure_recoveries_v1",
+    ).fetchone()[0]
+    assert stopped["state"] == "DEAD_LETTER"
+    assert receipts == 1
+    ledger.close()
 
 
 def test_superseded_jobs_are_reconciled_without_another_model_attempt(tmp_path) -> None:

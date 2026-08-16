@@ -121,7 +121,7 @@ def test_preview_reader_rejects_a_noncanonical_source() -> None:
         module._read_json("http://127.0.0.1:8765", "/api/status")
 
 
-def test_preview_does_not_call_late_aggregated_news_expired() -> None:
+def test_preview_does_not_reject_fresh_aggregated_news_by_source() -> None:
     module = _preview_module()
     news_index = {"items": [{
         "annotation_status": "NOT_REQUIRED",
@@ -135,8 +135,8 @@ def test_preview_does_not_call_late_aggregated_news_expired() -> None:
     )
 
     row = news_index["items"][0]
-    assert row["annotation_reason_code"] == "SEARCH_LEAD"
-    assert row["annotation_reason"] == "搜索线索：来自聚合发现源，不是独立官方发布"
+    assert row["annotation_reason_code"] == "QUEUE_INVARIANT_MISMATCH"
+    assert row["annotation_reason"] == "正文符合条件但未进入语义队列，需要检查"
 
 
 def test_preview_reads_completed_news_from_old_and_current_api_contracts(

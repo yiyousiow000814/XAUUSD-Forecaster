@@ -136,7 +136,9 @@ publication is itself the event. Date-only, missing, future, and media-derived
 substitute clocks fail closed for training.
 
 Display-number formatting is repaired deterministically against source
-lexemes. Unsupported numbers are replaced by a nonnumeric disclosure and lower
+lexemes. The repair model receives a bounded list of exact source-number
+spellings and may copy those spellings or remove the unsupported numeric claim;
+it may never convert units or magnitudes. Unsupported numbers are replaced by a nonnumeric disclosure and lower
 display confidence instead of rejecting the structured receipt. If a Chinese
 repair cannot pass validation, the display text becomes an explicit audit notice and
 all directional impulses, novelty, and confidence become zero. Provider,

@@ -68,7 +68,9 @@ from xauusd_forecaster.news_evidence import (  # noqa: E402
     EVIDENCE_POLICY_VERSION, event_evidence_rows_from_connection,
     resolve_event_clock,
 )
-from xauusd_forecaster.news_relevance import GOOGLE_NEWS_MAX_AGE  # noqa: E402
+from xauusd_forecaster.news_relevance import (  # noqa: E402
+    GOOGLE_NEWS_MAX_AGE, google_news_item_is_relevant,
+)
 from xauusd_forecaster.news_semantics import validated_annotation_predicate  # noqa: E402
 from xauusd_forecaster.news_contracts import CURRENT_NEWS_CONTRACT  # noqa: E402
 from xauusd_forecaster.news_features_v2 import COLLECTION_SOURCES  # noqa: E402
@@ -514,10 +516,23 @@ def _not_required_reason(item: dict, forward_epoch: str) -> tuple[str, str]:
     epoch = datetime.fromisoformat(forward_epoch)
     if published < epoch:
         return "HISTORICAL_MATERIAL", "历史资料：发布时间早于系统开始记录"
-    source = str(item.get("source") or "")
-    if source.startswith("google_news_") or source.startswith("gdelt_"):
-        return "SEARCH_LEAD", "搜索线索：来自聚合发现源，不是独立官方发布"
-    return "DUPLICATE_CONTENT", "重复内容：同一事件已有正文更完整的版本"
+    first_seen_raw = item.get("collector_first_seen_time")
+    first_seen = (
+        datetime.fromisoformat(str(first_seen_raw)) if first_seen_raw else epoch
+    )
+    allowed, intake_reason = google_news_item_is_relevant(
+        str(item.get("source") or ""), str(item.get("headline") or ""),
+        published, first_seen,
+    )
+    if intake_reason == "SEARCH_RESULT_TOO_OLD":
+        return "STALE_AT_INTAKE", "收到时已超过72小时，不进入语义处理"
+    if intake_reason == "FUTURE_PUBLISHED_TIME":
+        return "INVALID_PUBLISHED_TIME", "发布时间晚于收到时间，时间证据无效"
+    if intake_reason == "MISSING_PUBLISHED_TIME":
+        return "HISTORICAL_MATERIAL", "历史资料：缺少可靠发布时间"
+    if allowed:
+        return "QUEUE_INVARIANT_MISMATCH", "正文符合条件但未进入语义队列，需要检查"
+    return "INTAKE_REJECTED", "未通过客观采集条件，不进入语义处理"
 
 
 def _annotation_failure_reason(error: object, failure_code: object) -> str:
