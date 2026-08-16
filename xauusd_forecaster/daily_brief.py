@@ -21,7 +21,7 @@ from .news_semantics import validated_annotation_predicate
 
 
 BRIEF_PROMPT_VERSION = "daily-news-brief-v4-concise-synthesis"
-BRIEF_RECOVERY_VERSION = "daily-brief-recovery-v1-date-scoped-peers"
+BRIEF_RECOVERY_VERSION = "daily-brief-recovery-v2-protected-lease"
 BRIEF_EVIDENCE_LIMIT = 60
 BRIEF_INPUT_TOKEN_BUDGET = 12_000
 BRIEF_OUTPUT_TOKEN_BUDGET = 8_192
