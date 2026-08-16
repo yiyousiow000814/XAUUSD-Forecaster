@@ -1110,12 +1110,15 @@ def pending_record_for_job(
         pending_impact_records,
         pending_title_translation_records,
     )
+    from .daily_brief import brief_dates_to_process
 
     instant = now or datetime.now(UTC)
     if job.task_type == "ACTIVE_ANNOTATION":
+        protected_days = tuple(brief_dates_to_process(connection, now=instant)[1:])
         rows = pending_annotation_records(
             connection, observed_at=instant, limit=100_000,
             prompt_version=PROMPT_VERSION,
+            priority_receipt_days=protected_days,
         )
     elif job.task_type == "ACTIVE_IMPACT":
         rows = pending_impact_records(
