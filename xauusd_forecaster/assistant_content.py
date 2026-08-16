@@ -392,11 +392,6 @@ def build_assistant_content_document(
                     card["source"], card["published_at"], card["received_at"],
                 ] for card in cards],
             }))
-    blocks.append(_block("block:boundary", "callout", {
-        "tone": "BOUNDARY",
-        "title": "决策支持边界",
-        "body": "该回答不会下单、执行交易或自动晋升模型；请按证据时间与来源自行判断。",
-    }))
     core = {"protocol": ASSISTANT_CONTENT_PROTOCOL_VERSION, "blocks": blocks}
     document = {**core, "document_sha256": _sha256(core)}
     return validate_assistant_content_document(

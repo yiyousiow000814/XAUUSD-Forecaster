@@ -84,3 +84,14 @@ test("text-only content builder remains typed and never invents news cards", asy
     document.blocks,
   );
 });
+
+test("successful text-only content does not add the obsolete generic boundary", async () => {
+  const answer = "当前问题不需要外部新闻检索。";
+  const document = await buildAssistantTextContentDocument(answer);
+
+  assert.deepEqual(document.blocks.map(block => block.type), ["markdown"]);
+  assert.deepEqual(
+    parseAssistantContentDocument(document, { answer }).blocks,
+    document.blocks,
+  );
+});

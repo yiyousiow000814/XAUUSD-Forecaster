@@ -83,7 +83,7 @@ function directAgentProvenance(claim, answer, overrides = {}) {
     tool_registry_version: "assistant-tool-registry-v1",
     conversation_id: claim.conversation_id,
     user_message_id: claim.user_message_id,
-    system_instruction_version: "assistant-system-v3",
+    system_instruction_version: "assistant-system-v4",
     system_instruction_sha256: "a".repeat(64),
     active_context_sha256: "b".repeat(64),
     retrieval_cutoff: claim.retrieval_cutoff,
@@ -394,7 +394,7 @@ test("progress reserves enough sequence capacity for the largest final answer", 
     provenance,
   }, atSeconds(3));
   assert.equal(completed.status, "ANSWERED");
-  assert.equal(completed.event_sequence, 246);
+  assert.equal(completed.event_sequence, 245);
 });
 
 test("answer completion atomically persists the canonical final and terminal stream", async () => {
@@ -412,7 +412,7 @@ test("answer completion atomically persists the canonical final and terminal str
   }, atSeconds(2));
   assert.equal(completed.status, "ANSWERED");
   assert.ok(completed.assistant_message_id);
-  assert.equal(completed.event_sequence, 7);
+  assert.equal(completed.event_sequence, 6);
 
   const messages = await listOwnerAssistantMessages(
     database, owner, claim.conversation_id,
@@ -420,7 +420,7 @@ test("answer completion atomically persists the canonical final and terminal str
   assert.deepEqual(messages.items.map(item => item.role), ["USER", "ASSISTANT"]);
   assert.equal(messages.items[1].content, answer);
   assert.deepEqual(messages.items[1].content_document.blocks.map(block => block.type), [
-    "markdown", "callout",
+    "markdown",
   ]);
   assert.equal(messages.items[1].provenance.kind, "ASSISTANT_CHAT");
   assert.equal(messages.items[1].provenance.agent.run_sha256,
@@ -432,13 +432,12 @@ test("answer completion atomically persists the canonical final and terminal str
   });
   assert.deepEqual(stream.events.map(item => item.type), [
     "conversation.started", "answer.started", "answer.delta",
-    "content.block", "content.block",
-    "answer.completed", "conversation.completed",
+    "content.block", "answer.completed", "conversation.completed",
   ]);
-  assert.equal(stream.events[5].message_id, completed.assistant_message_id);
-  assert.equal(stream.events[5].payload.content_sha256, digest(answer));
-  assert.deepEqual(stream.events.slice(3, 5).map(event => event.payload.block_id), [
-    "block:answer", "block:boundary",
+  assert.equal(stream.events[4].message_id, completed.assistant_message_id);
+  assert.equal(stream.events[4].payload.content_sha256, digest(answer));
+  assert.deepEqual(stream.events.slice(3, 4).map(event => event.payload.block_id), [
+    "block:answer",
   ]);
 
   const conversation = await getOwnerAssistantConversation(
@@ -502,7 +501,7 @@ test("completion rejects rich content that drifts from the canonical answer", as
   const claim = await claimAssistantChatTurn(database, "worker:chat", atSeconds(1));
   const answer = "结构化输出必须与规范回答一致。";
   const content = await buildAssistantTextContentDocument(answer);
-  content.blocks[1].data.body = "被篡改的边界";
+  content.blocks[0].data.text = "被篡改的回答";
 
   await assert.rejects(completeAssistantChatTurn(database, {
     id: claim.id,

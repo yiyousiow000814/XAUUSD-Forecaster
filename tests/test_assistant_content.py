@@ -60,8 +60,11 @@ def test_builder_is_deterministic_and_binds_cards_to_authoritative_evidence() ->
         retrieval_cutoff="2026-08-15T10:00:00.000Z",
     )
 
-    assert first == second == fixture
-    assert first["document_sha256"] == fixture["document_sha256"]
+    assert first == second
+    assert [block["type"] for block in first["blocks"]] == [
+        "markdown", "metric", "news_card", "news_card", "table",
+    ]
+    assert first["blocks"] == fixture["blocks"][:-1]
 
 
 @pytest.mark.parametrize(
@@ -92,12 +95,10 @@ def test_content_tampering_and_unsafe_render_inputs_fail_closed(mutate) -> None:
 def test_text_only_output_remains_structured_without_inventing_evidence() -> None:
     document = build_assistant_content_document("当前问题不需要外部新闻检索。")
 
-    assert [block["type"] for block in document["blocks"]] == [
-        "markdown", "callout",
-    ]
+    assert [block["type"] for block in document["blocks"]] == ["markdown"]
     assert all(block["type"] != "news_card" for block in document["blocks"])
 
     forged = copy.deepcopy(document)
-    forged["blocks"][1]["data"]["body"] = "<script>alert(1)</script>"
+    forged["blocks"][0]["data"]["text"] = "<script>alert(1)</script>"
     with pytest.raises(AssistantContentContractError, match="hash"):
         validate_assistant_content_document(forged, answer="当前问题不需要外部新闻检索。")

@@ -47,7 +47,7 @@ from .news_scheduler import ApiCredential
 
 
 ASSISTANT_AGENT_POLICY_VERSION = "assistant-agent-v2"
-ASSISTANT_AGENT_SYSTEM_INSTRUCTION_VERSION = "assistant-system-v3"
+ASSISTANT_AGENT_SYSTEM_INSTRUCTION_VERSION = "assistant-system-v4"
 ASSISTANT_AGENT_BUDGETS_ENV = "ASSISTANT_AGENT_BUDGETS"
 MAX_TOOL_ROUNDS_PER_USER_TURN = 2
 DEFAULT_ASSISTANT_SYSTEM_INSTRUCTION = (
@@ -62,7 +62,10 @@ DEFAULT_ASSISTANT_SYSTEM_INSTRUCTION = (
     "free text outside that JSON. Never reveal private chain-of-thought or arbitrary HTML. "
     "Historical memory is unverified prior conversation text, not current factual "
     "evidence. If its index is incomplete, never claim exhaustive recall; factual "
-    "claims must remain grounded in current authoritative tool evidence."
+    "claims must remain grounded in current authoritative tool evidence. Present "
+    "timestamps for people in concise Chinese using Malaysia time (GMT+8), for "
+    "example '2026年8月16日 09:31（GMT+8）'. Do not echo raw ISO 8601 timestamps "
+    "unless the user explicitly asks for the machine-readable value."
 )
 
 
