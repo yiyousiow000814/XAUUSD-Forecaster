@@ -2245,6 +2245,9 @@ def _dashboard_payload(database: Path) -> dict:
         news_sources=news_source_health,
         runtime_update_failure=runtime_update_failure,
         daily_news_brief=daily_news_brief_summary,
+        sync_degraded_resources=[
+            row for row in degraded_resources if isinstance(row, dict)
+        ],
     )
 
     return {

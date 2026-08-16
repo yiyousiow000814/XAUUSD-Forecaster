@@ -217,6 +217,59 @@ def test_daily_brief_deferral_keeps_the_underlying_failure_code() -> None:
     }
 
 
+def test_sync_resource_failures_keep_codes_and_promote_state_divergence() -> None:
+    connection = _connection()
+    snapshot = scheduler_health_snapshot(connection, now=NOW)
+
+    result = extend_with_component_alerts(
+        snapshot,
+        components={
+            "sites_synchronizer": {
+                "status": "WARN", "age_seconds": 10,
+                "last_error": "resource degraded",
+            },
+        },
+        news_sources=[],
+        runtime_update_failure=None,
+        sync_degraded_resources=[{
+            "target": "cloudflare",
+            "resource": "news",
+            "error_type": "RemoteInvariantViolation",
+            "error_code": "NEWS_MIRROR_STATE_INVARIANT_VIOLATION",
+            "error": "21 violations",
+            "evidence": {
+                "violation_count": 21,
+                "checks": [{
+                    "code": "NEWS_REVIEW_STATE_INVALID", "count": 21,
+                }],
+            },
+        }, {
+            "target": "cloudflare",
+            "resource": "learning",
+            "error_type": "HTTPError",
+            "error_code": "RATE_LIMITED",
+            "error": "HTTP 429",
+        }],
+    )
+
+    assert result["status"] == "ERROR"
+    alerts = {alert["code"]: alert for alert in result["alerts"]}
+    assert set(alerts) == {
+        "OPS_NEWS_MIRROR_STATE_DIVERGED", "OPS_SYNC_RESOURCE_FAILED",
+    }
+    assert alerts["OPS_NEWS_MIRROR_STATE_DIVERGED"]["blocking"] is True
+    assert alerts["OPS_NEWS_MIRROR_STATE_DIVERGED"]["evidence"][
+        "upstream_error_code"
+    ] == "NEWS_MIRROR_STATE_INVARIANT_VIOLATION"
+    assert alerts["OPS_NEWS_MIRROR_STATE_DIVERGED"]["evidence"]["details"] == {
+        "violation_count": 21,
+        "checks": [{"code": "NEWS_REVIEW_STATE_INVALID", "count": 21}],
+    }
+    assert alerts["OPS_SYNC_RESOURCE_FAILED"]["evidence"][
+        "upstream_error_code"
+    ] == "RATE_LIMITED"
+
+
 def test_future_backoff_is_scheduled_retry_not_overdue_backlog() -> None:
     connection = _connection()
     job_id = enqueue_job(

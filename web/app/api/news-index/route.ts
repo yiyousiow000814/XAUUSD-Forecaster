@@ -3,7 +3,10 @@ import { NextResponse } from "next/server";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
 import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
 import {
+  ACTIVE_NEWS_SQL,
+  NEWS_REVIEW_STATE_INVARIANT_SQL,
   NEWS_REVIEW_STATES,
+  newsReviewStateInvariantHolds,
   newsReviewStateOf,
   parseNewsReviewState,
   type NewsReviewState,
@@ -42,10 +45,10 @@ const REVIEW_STATE_SQL: Record<NewsReviewState, string> = {
   ISOLATED: "json_extract(payload, '$.annotation_status') IN ('DEAD_LETTER','CONTENT_UNAVAILABLE')",
   PROCESSING: "COALESCE(json_extract(payload, '$.annotation_status'), '') NOT IN ('READY','NOT_REQUIRED','DEAD_LETTER','CONTENT_UNAVAILABLE')",
 };
-const ACTIVE_NEWS_SQL =
-  "COALESCE(json_extract(payload, '$.annotation_status'), '') <> 'SUPERSEDED_CONTRACT'";
-
 export async function GET(request: Request) {
+  const query = new URL(request.url).searchParams;
+  const healthCheck = query.get("health_check") === "1";
+  const expectedContract = query.get("expected_contract")?.trim() ?? "";
   const { page, pageSize, category, reviewState } = pageRequest(request);
   if (reviewState === null) {
     return NextResponse.json({ error: "invalid review state" }, { status: 400 });
@@ -55,7 +58,65 @@ export async function GET(request: Request) {
   // the bounded archive continues to grow.
   try {
     const binding = env.DB as D1Database | undefined;
+    if (!binding && healthCheck) {
+      return NextResponse.json({
+        status: "ERROR",
+        error_code: "NEWS_MIRROR_HEALTH_UNAVAILABLE",
+        error: "DatabaseUnavailable",
+      }, { status: 503, headers: { "Cache-Control": "no-store, max-age=0" } });
+    }
     if (binding) {
+      if (healthCheck) {
+        const checks = await binding.prepare(
+          `SELECT 'NEWS_REVIEW_STATE_INVALID' AS code, count(*) AS count
+             FROM news_index
+            WHERE ${ACTIVE_NEWS_SQL} AND NOT ${NEWS_REVIEW_STATE_INVARIANT_SQL}
+           UNION ALL
+           SELECT 'NEWS_DETAIL_MISSING', count(*)
+             FROM news_index i
+            WHERE ${ACTIVE_NEWS_SQL.replaceAll("payload", "i.payload")}
+              AND NOT EXISTS (
+                SELECT 1 FROM news_details d WHERE d.detail_key=i.detail_key
+              )
+           UNION ALL
+           SELECT 'NEWS_PARSED_FLAG_MISMATCH', count(*)
+             FROM news_index
+            WHERE ${ACTIVE_NEWS_SQL}
+              AND parsed <> CASE
+                WHEN json_extract(payload, '$.parsed_at') IS NOT NULL THEN 1 ELSE 0 END
+           UNION ALL
+           SELECT 'NEWS_CANDIDATE_FLAG_MISMATCH', count(*)
+             FROM news_index
+            WHERE ${ACTIVE_NEWS_SQL}
+              AND model_candidate <> CASE
+                WHEN json_extract(payload, '$.model_visibility')='MODEL_VISIBLE'
+                THEN 1 ELSE 0 END
+           UNION ALL
+           SELECT 'NEWS_DUPLICATE_ACTIVE_CLUSTER', count(*) FROM (
+             SELECT cluster_id FROM news_index
+              WHERE ${ACTIVE_NEWS_SQL}
+              GROUP BY cluster_id HAVING count(*) > 1
+           )`,
+        ).all<{ code: string; count: number }>();
+        const failures = checks.results
+          .map(row => ({ code: row.code, count: Number(row.count ?? 0) }))
+          .filter(row => row.count > 0);
+        if (expectedContract) {
+          const contractRow = await binding.prepare(
+            `SELECT count(*) AS count FROM news_index
+              WHERE ${ACTIVE_NEWS_SQL} AND mirror_contract <> ?`,
+          ).bind(expectedContract).first<{ count: number }>();
+          const count = Number(contractRow?.count ?? 0);
+          if (count > 0) failures.push({ code: "NEWS_MIRROR_CONTRACT_STALE", count });
+        }
+        const violations = failures.reduce((sum, row) => sum + row.count, 0);
+        return NextResponse.json({
+          status: violations ? "ERROR" : "OK",
+          error_code: violations ? "NEWS_MIRROR_STATE_INVARIANT_VIOLATION" : null,
+          violation_count: violations,
+          checks: failures.slice(0, 12),
+        }, { headers: { "Cache-Control": "no-store, max-age=0" } });
+      }
       const conditions = [ACTIVE_NEWS_SQL, REVIEW_STATE_SQL[reviewState]];
       const bindValues: string[] = [];
       if (category) {
@@ -132,7 +193,14 @@ export async function GET(request: Request) {
         headers: { "Cache-Control": "public, max-age=15, s-maxage=30, stale-while-revalidate=120" },
       });
     }
-  } catch {
+  } catch (error) {
+    if (healthCheck) {
+      return NextResponse.json({
+        status: "ERROR",
+        error_code: "NEWS_MIRROR_HEALTH_UNAVAILABLE",
+        error: error instanceof Error ? error.name : "UnknownError",
+      }, { status: 503, headers: { "Cache-Control": "no-store, max-age=0" } });
+    }
     // Fall through to the relay when D1 is temporarily unavailable.
   }
 
@@ -292,14 +360,7 @@ export async function POST(request: Request) {
                '$.impact_status', 'SUPERSEDED_CONTRACT'
              )
          WHERE mirror_contract <> ?
-           AND (
-             COALESCE(json_extract(payload, '$.annotation_status'), '')
-               NOT IN ('READY','NOT_REQUIRED')
-             OR (
-               json_extract(payload, '$.annotation_status')='NOT_REQUIRED'
-               AND json_extract(payload, '$.model_visibility')='NOT_YET_PARSED'
-             )
-           )`,
+           AND NOT ${NEWS_REVIEW_STATE_INVARIANT_SQL}`,
         ).bind(contract),
       ]);
       return NextResponse.json({
@@ -310,6 +371,12 @@ export async function POST(request: Request) {
     }
     if (!Array.isArray(body.items) || body.items.length > 20) {
       return NextResponse.json({ error: "invalid news index batch" }, { status: 400 });
+    }
+    if (body.items.some(item => !newsReviewStateInvariantHolds(item))) {
+      return NextResponse.json({
+        error: "news review state invariant violation",
+        error_code: "NEWS_MIRROR_STATE_INVARIANT_VIOLATION",
+      }, { status: 409 });
     }
     const now = new Date().toISOString();
     const statements = body.items.flatMap(item => {

@@ -16,7 +16,7 @@ const { statusFieldPhase } = await import("../app/_lib/current-data-provenance.t
 const { shouldPollDashboardResource } = await import("../app/_lib/dashboard-refresh-policy.ts");
 const { quoteBridgePresentation } = await import("../app/_lib/quote-bridge-state.ts");
 const { withPreviewIdentity } = await import("../app/api/_shared/preview-status.ts");
-const { newsReviewStateOf, parseNewsReviewState } = await import("../app/_lib/news-review-state.ts");
+const { newsReviewStateInvariantHolds, newsReviewStateOf, parseNewsReviewState } = await import("../app/_lib/news-review-state.ts");
 const { publicImpactReason, publicNewsRecord } = await import("../app/_lib/public-news-copy.ts");
 const { summarizeAssistantQueue } = await import("../app/api/_shared/assistant-operational-health.ts");
 const { globalOperationalAlerts } = await import("../app/_lib/operational-health.ts");
@@ -654,6 +654,26 @@ test("separates completed, processing, and isolated news by durable review state
   for (const status of ["DEAD_LETTER", "CONTENT_UNAVAILABLE"]) {
     assert.equal(newsReviewStateOf({ annotation_status: status }), "ISOLATED");
   }
+  assert.equal(newsReviewStateInvariantHolds({
+    annotation_status: "NOT_REQUIRED",
+    model_visibility: "MODEL_INELIGIBLE",
+    parsed_at: null,
+  }), true);
+  assert.equal(newsReviewStateInvariantHolds({
+    annotation_status: "NOT_REQUIRED",
+    model_visibility: "NOT_YET_PARSED",
+    parsed_at: null,
+  }), false);
+  assert.equal(newsReviewStateInvariantHolds({
+    annotation_status: "BACKING_OFF",
+    model_visibility: "BACKING_OFF",
+    parsed_at: null,
+  }), true);
+  assert.equal(newsReviewStateInvariantHolds({
+    annotation_status: "BACKING_OFF",
+    model_visibility: "MODEL_VISIBLE",
+    parsed_at: "2026-08-17T00:00:00Z",
+  }), false);
 
   const view = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const route = readFileSync(new URL("../app/api/news-index/route.ts", import.meta.url), "utf8");
@@ -679,6 +699,7 @@ test("separates completed, processing, and isolated news by durable review state
 
 test("keeps the 60-day news archive inside bounded D1 work", () => {
   const index = readFileSync(new URL("../app/api/news-index/route.ts", import.meta.url), "utf8");
+  const reviewState = readFileSync(new URL("../app/_lib/news-review-state.ts", import.meta.url), "utf8");
   const detail = readFileSync(new URL("../app/api/news-content/route.ts", import.meta.url), "utf8");
   const migration = readFileSync(new URL("../drizzle/0007_bounded_news_archive.sql", import.meta.url), "utf8");
   assert.match(index, /body\.items\.length > 20/);
@@ -691,8 +712,16 @@ test("keeps the 60-day news archive inside bounded D1 work", () => {
   assert.match(index, /DELETE FROM news_index WHERE mirror_contract <> \?/);
   assert.match(index, /neutralize_operational_state_for_contract/);
   assert.match(index, /CONTRACT_HANDOVER_PENDING/);
-  assert.match(index, /annotation_status'\)='NOT_REQUIRED'/);
-  assert.match(index, /model_visibility'\)='NOT_YET_PARSED'/);
+  assert.match(reviewState, /annotation_status'\)='NOT_REQUIRED'/);
+  assert.match(reviewState, /model_visibility'\)='NOT_YET_PARSED'/);
+  assert.match(index, /health_check/);
+  assert.match(index, /NEWS_DETAIL_MISSING/);
+  assert.match(index, /NEWS_PARSED_FLAG_MISMATCH/);
+  assert.match(index, /NEWS_CANDIDATE_FLAG_MISMATCH/);
+  assert.match(index, /NEWS_DUPLICATE_ACTIVE_CLUSTER/);
+  assert.match(index, /NEWS_MIRROR_CONTRACT_STALE/);
+  assert.match(index, /NEWS_MIRROR_HEALTH_UNAVAILABLE/);
+  assert.match(index, /news review state invariant violation/);
   assert.match(index, /SET model_candidate=0 WHERE mirror_contract <> \?/);
   assert.match(index, /SET parsed=0,/);
   assert.match(index, /body\.withdraw_detail_keys\.length > 20/);
@@ -1019,7 +1048,7 @@ test("renders the news and decision audit route", async () => {
   assert.match(newsIndexRoute, /FROM news_index WHERE \$\{ACTIVE_NEWS_SQL\} GROUP BY review_state/);
   assert.match(newsIndexRoute, /neutralize_operational_state_for_contract/);
   assert.match(newsIndexRoute, /SET model_candidate=0 WHERE mirror_contract <> \?/);
-  assert.match(newsIndexRoute, /NOT IN \('READY','NOT_REQUIRED'\)/);
+  assert.match(newsIndexRoute, /NOT IN \('READY','NOT_REQUIRED','DEAD_LETTER','CONTENT_UNAVAILABLE'\)/);
   assert.match(source, /evidenceMode === "eligible"/);
   assert.match(source, />当前可用 <b>/);
   assert.match(source, />历史上用过 <b>/);
