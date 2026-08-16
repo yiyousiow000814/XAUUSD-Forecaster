@@ -79,6 +79,7 @@ from xauusd_forecaster.news_contracts import CURRENT_NEWS_CONTRACT  # noqa: E402
 from xauusd_forecaster.news_features_v2 import COLLECTION_SOURCES  # noqa: E402
 from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY  # noqa: E402
 from xauusd_forecaster.production_shape import production_contract_snapshot  # noqa: E402
+from xauusd_forecaster.market_session import expected_weekly_closure  # noqa: E402
 from xauusd_forecaster.operational_health import (  # noqa: E402
     extend_with_component_alerts,
     scheduler_health_snapshot,
@@ -492,6 +493,22 @@ def _broker_market_session(database: Path, now: datetime) -> dict | None:
         }
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
         return None
+
+
+def _market_session_status(
+    broker_session: dict | None,
+    *,
+    online: bool,
+    now: datetime,
+) -> str:
+    """Classify expected weekend silence without weakening open-market gates."""
+    if broker_session is not None:
+        if not broker_session["is_open"]:
+            return "CLOSED"
+        return "OPEN" if online else "DATA_UNAVAILABLE"
+    if not online and expected_weekly_closure(now):
+        return "WEEKLY_CLOSED"
+    return "DATA_UNAVAILABLE"
 
 
 NEWS_CATEGORY_LABELS = {
@@ -1992,10 +2009,10 @@ def _dashboard_payload(database: Path) -> dict:
     online = bool(age_seconds is not None and age_seconds <= 30
                   and decision_age is not None and decision_age <= 420)
     broker_session = _broker_market_session(database, now)
-    market_session = (
-        "CLOSED" if broker_session and not broker_session["is_open"] else
-        "OPEN" if broker_session and online else
-        "DATA_UNAVAILABLE"
+    market_session = _market_session_status(
+        broker_session,
+        online=online,
+        now=now,
     )
     clock_skew_seconds = None
     if latest and latest["source_event_time"] and latest["source_received_time"]:
@@ -2146,7 +2163,7 @@ def _dashboard_payload(database: Path) -> dict:
     quote_component = component("quote_bridge", 30)
     decision_component = component("decision_collector", 420)
     outcome_component = component("outcome_settler", 420)
-    if market_session == "CLOSED":
+    if market_session in {"CLOSED", "WEEKLY_CLOSED"}:
         for market_component in (
             quote_component, decision_component, outcome_component,
         ):
