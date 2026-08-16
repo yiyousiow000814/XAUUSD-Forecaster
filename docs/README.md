@@ -45,6 +45,7 @@ current rules merely because they discovered one.
 - [Factor coverage](specs/FACTOR_COVERAGE.md)
 - [Learning curves](specs/LEARNING_CURVES.md)
 - [Preview behavior](specs/PREVIEW_BEHAVIOR.md)
+- [Dashboard presentation](specs/DASHBOARD_PRESENTATION.md)
 - [Storylines](specs/STORYLINES.md)
 - [Temporal event graph](specs/TEMPORAL_EVENT_GRAPH.md)
 - [Assistant behavior](specs/ASSISTANT_BEHAVIOR.md)

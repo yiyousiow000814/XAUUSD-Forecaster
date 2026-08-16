@@ -256,12 +256,17 @@ test("keeps every remaining audit destination in one balanced desktop grid", () 
     .map((match) => match[1])
     .find((rule) => /grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/.test(rule)) ?? "";
   assert.match(auditGrid, /grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/);
-  assert.match(auditGrid, /gap:1px/);
+  assert.match(auditGrid, /gap:0/);
   assert.match(auditGrid, /padding:0/);
-  assert.match(auditGrid, /background:var\(--ink\)/);
+  assert.match(auditGrid, /background:var\(--paper\)/);
   assert.match(css, /\.audit-tabs a \{ border:0; background:var\(--paper\); \}/);
+  assert.match(css, /\.audit-tabs a:not\(:nth-child\(4n\+1\)\) \{ border-left:1px solid var\(--ink\); \}/);
+  assert.match(css, /\.audit-tabs a:nth-child\(n\+5\) \{ border-top:1px solid var\(--ink\); \}/);
   assert.doesNotMatch(view, /audit-tab-primary/);
   assert.equal(view.match(/<a href="\/audit\?view=/g)?.length, 8);
+  assert.match(css, /\.annotation-queue \{ grid-template-columns:repeat\(5,1fr\); gap:0;[^}]*background:var\(--paper\); \}/);
+  assert.match(css, /\.annotation-queue>span\+span \{ border-left:1px solid var\(--ink\); \}/);
+  assert.match(css, /\.annotation-queue>details \{ grid-column:1\/-1; border-top:1px solid var\(--ink\); padding:0; \}/);
   assert.match(css, /\.news-timeline \{[^}]*gap:0/);
   assert.match(css, /\.news-timeline div:not\(:nth-child\(3n\+1\)\) \{ border-left:1px solid/);
   assert.match(css, /\.news-timeline div:nth-child\(n\+4\) \{ border-top:1px solid/);

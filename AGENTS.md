@@ -65,6 +65,11 @@
 - Exercise the complete affected flow on a phone: open, navigate, scroll,
   select, paginate or expand, return, and close as applicable. Interactive
   targets should be at least 44x44 CSS pixels.
+- For changes to grids, tables, or shared border selectors, inspect every outer
+  edge and internal divider across the complete component and its sibling
+  layouts, including spanning, incomplete, expanded, and collapsed rows. Follow
+  `docs/specs/DASHBOARD_PRESENTATION.md`; do not validate only the edge named in
+  the bug report.
 - Add or update automated coverage, and record the Preview URL and responsive
   checks in the pull request before calling the change complete.
 
