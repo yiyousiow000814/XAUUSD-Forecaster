@@ -22,6 +22,8 @@ from .assistant_capacity import (
 from .assistant_content import build_assistant_content_document
 from .assistant_evidence import (
     AssistantEvidenceValidationError,
+    MAX_EVIDENCE_CLAIMS,
+    MAX_EVIDENCE_PER_CLAIM,
     validate_assistant_evidence_model_text,
 )
 from .assistant_routing import (
@@ -366,6 +368,58 @@ def _initial_contents(request: AssistantAgentRequest) -> list[dict[str, object]]
     }]
 
 
+def _final_answer_json_schema(
+    available_evidence_ids: tuple[str, ...],
+    *,
+    max_cited_evidence: int,
+) -> dict[str, object]:
+    evidence_ids = list(available_evidence_ids)
+    if evidence_ids:
+        evidence_item_schema: dict[str, object] = {
+            "type": "string",
+            "enum": evidence_ids,
+        }
+        minimum_evidence_per_claim = 1
+        maximum_evidence_per_claim = min(
+            MAX_EVIDENCE_PER_CLAIM,
+            max_cited_evidence,
+            len(evidence_ids),
+        )
+    else:
+        evidence_item_schema = {"type": "string"}
+        minimum_evidence_per_claim = 0
+        maximum_evidence_per_claim = 0
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["claims"],
+        "properties": {
+            "claims": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": MAX_EVIDENCE_CLAIMS,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["text", "evidence_ids"],
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": "One concise, nonempty answer line.",
+                        },
+                        "evidence_ids": {
+                            "type": "array",
+                            "minItems": minimum_evidence_per_claim,
+                            "maxItems": maximum_evidence_per_claim,
+                            "items": evidence_item_schema,
+                        },
+                    },
+                },
+            },
+        },
+    }
+
+
 def _gemini_payload(
     request: AssistantAgentRequest,
     contents: list[dict[str, object]],
@@ -373,7 +427,7 @@ def _gemini_payload(
     budgets: AssistantAgentBudgets,
     *,
     tools_allowed: bool,
-    include_tool_definitions: bool,
+    available_evidence_ids: tuple[str, ...],
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "systemInstruction": {
@@ -386,13 +440,23 @@ def _gemini_payload(
             "maxOutputTokens": budgets.max_output_tokens,
         },
     }
-    if include_tool_definitions:
+    if tools_allowed:
         payload["tools"] = registry.gemini_tools(request.actor)
         payload["toolConfig"] = {
             "functionCallingConfig": {
                 "mode": "AUTO" if tools_allowed else "NONE",
             },
         }
+    else:
+        # Keep the exact function-response history while removing the provider
+        # tool surface, so the final synthesis cannot extend the finite loop.
+        generation_config = payload["generationConfig"]
+        assert isinstance(generation_config, dict)
+        generation_config["responseMimeType"] = "application/json"
+        generation_config["responseJsonSchema"] = _final_answer_json_schema(
+            available_evidence_ids,
+            max_cited_evidence=budgets.max_retrieved_evidence or 1,
+        )
     return payload
 
 
@@ -473,7 +537,7 @@ def run_bounded_assistant_agent(
             registry,
             budgets,
             tools_allowed=tools_allowed,
-            include_tool_definitions=tools_allowed or tool_rounds > 0,
+            available_evidence_ids=tuple(available_evidence_ids),
         )
         estimated_input_tokens = conservative_assistant_token_estimate(payload)
         if (
