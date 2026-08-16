@@ -73,6 +73,7 @@ def run_scheduled_batch_with_lock_retry(
     batch_size: int | None,
     progress_callback: Callable[[int], None],
     task_types: tuple[str, ...] | None = None,
+    gemma_reserved_accounts: frozenset[str] = frozenset(),
     sleep: Callable[[float], None] = time.sleep,
 ) -> list[dict[str, object]]:
     """Keep the independent annotator alive through transient WAL writer contention."""
@@ -83,6 +84,7 @@ def run_scheduled_batch_with_lock_retry(
                 batch_size=batch_size,
                 progress_callback=progress_callback,
                 task_types=task_types,
+                gemma_reserved_accounts=gemma_reserved_accounts,
             )
         except sqlite3.OperationalError as error:
             if "locked" not in str(error).lower():
@@ -255,6 +257,7 @@ def _run_scheduled_lane(
     maximum: int,
     worker_prefix: str,
     task_types: tuple[str, ...] | None = None,
+    gemma_reserved_accounts: frozenset[str] = frozenset(),
     preferred_account_id: str | None = None,
     progress_callback: Callable[[], None] | None = None,
 ) -> list[dict[str, object]]:
@@ -290,6 +293,11 @@ def _run_scheduled_lane(
             ledger, credentials, job, now=executed_at,
             preferred_account_id=preferred_account_id,
         )
+        if job.task_type in {"ACTIVE_IMPACT", "TITLE_TRANSLATION"}:
+            candidates = tuple(
+                item for item in candidates
+                if item.account_id not in gemma_reserved_accounts
+            )
         status: dict[str, object] = {
             "status": "DEFERRED",
             "reason": "NO_COMPATIBLE_ACCOUNT_CAPACITY",
@@ -381,6 +389,7 @@ def run_scheduled_batch(
     batch_size: int | None,
     progress_callback: Callable[[int], None] | None = None,
     task_types: tuple[str, ...] | None = None,
+    gemma_reserved_accounts: frozenset[str] = frozenset(),
 ) -> list[dict[str, object]]:
     now = datetime.now(UTC)
     sync_pending_jobs(ledger.connection, now=now)
@@ -388,6 +397,8 @@ def run_scheduled_batch(
     if not credentials:
         return [{"status": "DISABLED", "reason": "GEMINI_API_KEY_MISSING"}]
     account_ids = tuple(dict.fromkeys(item.account_id for item in credentials))
+    if not gemma_reserved_accounts.issubset(account_ids):
+        raise ValueError("Gemma reserved account is not configured")
     maximum = batch_size or max(1, len(account_ids) * 10)
     worker_prefix = f"{socket.gethostname()}-{os.getpid()}"
 
@@ -414,6 +425,7 @@ def run_scheduled_batch(
             maximum=maximum,
             worker_prefix=worker_prefix,
             task_types=task_types,
+            gemma_reserved_accounts=gemma_reserved_accounts,
             progress_callback=report_progress,
         )
 
@@ -439,6 +451,13 @@ def run_scheduled_batch(
         # connection it creates and closes inside that same worker thread.
         lane_ledger = ForwardLedger(ledger.path)
         try:
+            lane_task_types = task_types
+            if account_id in gemma_reserved_accounts:
+                lane_task_types = (
+                    ("ACTIVE_ANNOTATION",)
+                    if task_types is None or "ACTIVE_ANNOTATION" in task_types
+                    else ()
+                )
             return _run_scheduled_lane(
                 lane_ledger,
                 credentials=tuple(
@@ -447,7 +466,8 @@ def run_scheduled_batch(
                 ),
                 maximum=allocation,
                 worker_prefix=f"{worker_prefix}-account-{index}",
-                task_types=task_types,
+                task_types=lane_task_types,
+                gemma_reserved_accounts=gemma_reserved_accounts,
                 preferred_account_id=account_id,
                 progress_callback=report_progress,
             )
@@ -534,21 +554,19 @@ def main() -> int:
                             "statuses": brief_statuses}),
                 flush=True,
             )
-            task_types = None
-            if any(
-                status.get("reason") == "NO_GEMMA_CAPACITY"
+            gemma_reserved_accounts = frozenset(
+                str(status["account_id"])
                 for status in brief_statuses
-            ):
-                # Keep causal Gemini annotation moving while leaving the shared
-                # two-minute Gemma TPM window clear for the next brief retry.
-                task_types = ("ACTIVE_ANNOTATION",)
+                if status.get("reason") == "NO_GEMMA_CAPACITY"
+                and status.get("account_id")
+            )
             statuses = run_scheduled_batch_with_lock_retry(
                 ledger,
                 batch_size=limit,
                 progress_callback=lambda count: write_heartbeat(
                     args.status_file, work_items=count,
                 ),
-                task_types=task_types,
+                gemma_reserved_accounts=gemma_reserved_accounts,
             )
             print(
                 json.dumps(

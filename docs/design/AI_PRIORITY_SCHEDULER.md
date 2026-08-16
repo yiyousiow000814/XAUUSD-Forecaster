@@ -41,6 +41,11 @@ After a lane proves one model route has no capacity, it skips that route for
 the remainder of the batch and continues with other ready routes. It does not
 claim and defer every remaining job behind the same exhausted capacity gate.
 
+Daily Brief capacity protection is account-scoped. If its selected account
+fills the shared Gemma window, only that account's lane is temporarily limited
+to Gemini annotation. Other independent accounts must continue impact and
+title work; one account can never suspend the global Gemma queue.
+
 Multiple keys in one account share quota and therefore share one capacity
 score. Extra keys add transport redundancy, not imaginary quota. Independent
 accounts add real capacity automatically on the next cycle. Authentication
