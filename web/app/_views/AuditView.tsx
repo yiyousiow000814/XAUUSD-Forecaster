@@ -1268,16 +1268,13 @@ export default function AuditView() {
               ? `Gemma 汇总未生成，当前为系统整理版；另有 ${formatExactCount(terminal)} 条资料因正文缺失或复核失败未纳入。`
               : "Gemma 汇总未生成，当前为系统整理版。"
           : null;
-        const overview = selected?.brief.overview ?? (generatedByGemma
-          ? "本版以重点摘要格式保存；以下内容由 Gemma 4 根据引用证据生成。"
-          : "Gemma 汇总未完成；以下内容由系统从已复核资料中整理。");
-        const visibleItems = selected?.brief.items.slice(0, 3) ?? [];
-        const additionalItems = selected?.brief.items.slice(3) ?? [];
-        const readingMinutes = selected ? Math.max(1, Math.ceil(selected.brief.items.length / 3)) : 1;
-        const renderBriefItem = (item: DailyNewsBrief["brief"]["items"][number], index: number) => <li key={`${selectedDate}-${index}`} className={index === 0 ? "brief-lead-story" : undefined}>
+        const overview = selected?.brief.overview?.trim() || null;
+        const overviewReadingSeconds = overview
+          ? Math.min(60, Math.max(15, Math.ceil(overview.length / 4)))
+          : null;
+        const renderBriefItem = (item: DailyNewsBrief["brief"]["items"][number], index: number) => <li key={`${selectedDate}-${index}`}>
           <span>{String(index + 1).padStart(2, "0")}</span>
           <div>
-            {index === 0 && <small className="brief-story-kicker">最值得关注</small>}
             <h3>{item.headline}</h3>
             <p>{item.summary}</p>
             <small>{formatExactCount(item.evidence_ids.length)} 份来源证据</small>
@@ -1303,14 +1300,18 @@ export default function AuditView() {
             {qualityNote && <p className="brief-quality-note">{qualityNote}</p>}
           </div>
           {selected ? <>
-            <div className={`brief-overview ${generatedByGemma ? "is-gemma" : "is-fallback"}`}>
-              <div><strong>{generatedByGemma ? "GEMMA 4 · 今日先看" : "重点速览"}</strong><span>{formatExactCount(selected.brief.items.length)} 个重点 · 约 {formatExactCount(readingMinutes)} 分钟</span></div>
-              <p>{overview}</p>
+            <div className={`brief-overview ${generatedByGemma ? "is-gemma" : "is-fallback"} ${overview ? "" : "is-missing"}`}>
+              <div className="brief-overview-head">
+                <div><small>{generatedByGemma ? "GEMMA 4 · 综合摘要" : "系统整理"}</small><strong>{isCurrent ? "今日黄金脉络" : "当日黄金脉络"}</strong></div>
+                <span>{overviewReadingSeconds ? `约 ${formatExactCount(overviewReadingSeconds)} 秒读完` : "总摘要暂缺"}</span>
+              </div>
+              {overview
+                ? <p>{overview}</p>
+                : <p className="brief-overview-missing">这版没有保存总摘要，可展开查看重点依据。</p>}
             </div>
-            <ol>{visibleItems.map(renderBriefItem)}</ol>
-            {additionalItems.length > 0 && <details key={selectedDate} className="brief-more-stories">
-              <summary>继续阅读 {formatExactCount(additionalItems.length)} 个重点</summary>
-              <ol>{additionalItems.map((item, index) => renderBriefItem(item, index + visibleItems.length))}</ol>
+            {selected.brief.items.length > 0 && <details key={selectedDate} className="brief-evidence-stories">
+              <summary><span>查看 {formatExactCount(selected.brief.items.length)} 个重点依据</span><small>标题、摘要与来源证据</small></summary>
+              <ol>{selected.brief.items.map(renderBriefItem)}</ol>
             </details>}
             <footer>{phase === "FINAL" || phase === "DEGRADED" ? "该日期已完成" : "随已复核资料滚动更新"} · 第 {selected.revision_number} 版 · 仅供阅读，不进入模型训练</footer>
           </> : <p className="brief-empty">{phase === "EMPTY" ? `${shortBriefDate(selectedDate)} 没有符合简报范围的新闻。` : `等待 ${shortBriefDate(selectedDate)} 首批已复核新闻。系统会在有足够资料后生成，并随新资料持续更新。`}</p>}
