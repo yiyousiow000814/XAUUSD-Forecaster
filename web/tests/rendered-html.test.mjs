@@ -115,9 +115,10 @@ test("keeps branch throughput limits while refreshing Preview metrics from D1", 
   }, {
     annotation_queue: {
       requests_per_minute_per_key: 12,
+      requests_per_minute_per_account: 12,
       requests_per_minute: 12,
       input_tokens_per_minute: 225_000,
-      minute_scope: "PROJECT",
+      minute_scope: "ACCOUNT",
     },
     system: {},
   });
@@ -125,12 +126,14 @@ test("keeps branch throughput limits while refreshing Preview metrics from D1", 
   assert.deepEqual(merged.annotation_queue, {
     ready: 9,
     requests_per_minute_per_key: 12,
+    requests_per_minute_per_account: 12,
     requests_per_minute: 12,
     input_tokens_per_minute: 225_000,
-    minute_scope: "PROJECT",
+    minute_scope: "ACCOUNT",
   });
   assert.deepEqual(merged.preview.branch_snapshot.status_paths, [
     "annotation_queue.requests_per_minute_per_key",
+    "annotation_queue.requests_per_minute_per_account",
     "annotation_queue.requests_per_minute",
     "annotation_queue.input_tokens_per_minute",
     "annotation_queue.minute_scope",
@@ -448,9 +451,10 @@ test("preserves field-level provenance while overlaying current read-only status
     story_event_candidates: ["branch-recomputed"],
     annotation_queue: {
       requests_per_minute_per_key: 12,
+      requests_per_minute_per_account: 12,
       requests_per_minute: 12,
       input_tokens_per_minute: 225_000,
-      minute_scope: "PROJECT",
+      minute_scope: "ACCOUNT",
     },
     system: { deployment: { runtime_git_sha: "abc123" } },
   });
@@ -464,9 +468,10 @@ test("preserves field-level provenance while overlaying current read-only status
   assert.deepEqual(result.annotation_queue, {
     ready: 9,
     requests_per_minute_per_key: 12,
+    requests_per_minute_per_account: 12,
     requests_per_minute: 12,
     input_tokens_per_minute: 225_000,
-    minute_scope: "PROJECT",
+    minute_scope: "ACCOUNT",
   });
   assert.equal(result.preview.branch, "feature/test");
   assert.deepEqual(result.preview.branch_snapshot, {
@@ -474,6 +479,7 @@ test("preserves field-level provenance while overlaying current read-only status
     status_paths: [
       "factor_coverage",
       "annotation_queue.requests_per_minute_per_key",
+      "annotation_queue.requests_per_minute_per_account",
       "annotation_queue.requests_per_minute",
       "annotation_queue.input_tokens_per_minute",
       "annotation_queue.minute_scope",
@@ -530,6 +536,7 @@ test("keeps every audit collection in the compact Preview manifest", () => {
   assert.deepEqual(manifest.branchSnapshotStatusPaths, [
     "factor_coverage",
     "annotation_queue.requests_per_minute_per_key",
+    "annotation_queue.requests_per_minute_per_account",
     "annotation_queue.requests_per_minute",
     "annotation_queue.input_tokens_per_minute",
     "annotation_queue.minute_scope",

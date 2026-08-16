@@ -1442,6 +1442,9 @@ def _dashboard_payload(database: Path) -> dict:
     now = datetime.now(UTC)
     credentials = configured_api_credentials()
     gemini_keys = tuple(credential.api_key for credential in credentials)
+    gemini_account_count = len({
+        credential.account_id for credential in credentials
+    })
     scheduler_quotas = None
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=5)
     connection.row_factory = sqlite3.Row
@@ -2300,12 +2303,18 @@ def _dashboard_payload(database: Path) -> dict:
             "waiting_content": int(annotation_queue["waiting_content"] or 0),
             "unavailable_content": int(annotation_queue["unavailable_content"] or 0),
             "configured_key_count": len(gemini_keys),
+            "configured_account_count": gemini_account_count,
             "available_key_count": available_gemini_keys,
             "fallback_available_key_count": available_fallback_keys,
             "requests_per_minute_per_key": GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
-            "requests_per_minute": GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
-            "input_tokens_per_minute": GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
-            "minute_scope": "PROJECT",
+            "requests_per_minute_per_account": GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
+            "requests_per_minute": (
+                GEMINI_REQUESTS_PER_MINUTE_PER_KEY * gemini_account_count
+            ),
+            "input_tokens_per_minute": (
+                GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL * gemini_account_count
+            ),
+            "minute_scope": "ACCOUNT",
             "priority_reserve": flash_priority_reserve,
             "routine_remaining": flash_routine_remaining,
         },

@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import sqlite3
 import socket
 import sys
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -177,6 +179,7 @@ def _credentials_for_job(
     job,
     *,
     now: datetime,
+    preferred_account_id: str | None = None,
 ) -> tuple[ApiCredential, ...]:
     """Order every compatible credential by current account headroom."""
     eligible = tuple(sorted(
@@ -199,6 +202,11 @@ def _credentials_for_job(
         urgent=job.priority in URGENT_PRIORITIES,
         now=now,
     )
+    if preferred_account_id in accounts:
+        accounts = (
+            preferred_account_id,
+            *(account for account in accounts if account != preferred_account_id),
+        )
     by_account: dict[str, list[ApiCredential]] = {}
     for credential in eligible:
         by_account.setdefault(credential.account_id, []).append(credential)
@@ -220,21 +228,16 @@ def _may_try_another_credential(status: dict[str, object]) -> bool:
     }
 
 
-def run_scheduled_batch(
+def _run_scheduled_lane(
     ledger: ForwardLedger,
     *,
-    batch_size: int | None,
-    progress_callback: Callable[[int], None] | None = None,
+    credentials: tuple[ApiCredential, ...],
+    maximum: int,
+    worker_prefix: str,
+    preferred_account_id: str | None = None,
+    progress_callback: Callable[[], None] | None = None,
 ) -> list[dict[str, object]]:
-    now = datetime.now(UTC)
-    sync_pending_jobs(ledger.connection, now=now)
-    credentials = configured_api_credentials()
-    if not credentials:
-        return [{"status": "DISABLED", "reason": "GEMINI_API_KEY_MISSING"}]
-    account_count = len({item.account_id for item in credentials})
-    maximum = batch_size or max(1, account_count * 10)
     statuses: list[dict[str, object]] = []
-    worker_prefix = f"{socket.gethostname()}-{os.getpid()}"
     has_routine = any(item.pool == ROUTINE_POOL for item in credentials)
     has_preemptible = any(item.pool == PREEMPTIBLE_POOL for item in credentials)
     while len(statuses) < maximum:
@@ -259,6 +262,7 @@ def run_scheduled_batch(
         executed_at = datetime.now(UTC)
         candidates = _credentials_for_job(
             ledger, credentials, job, now=executed_at,
+            preferred_account_id=preferred_account_id,
         )
         status: dict[str, object] = {
             "status": "DEFERRED", "reason": "NO_COMPATIBLE_ACCOUNT_CAPACITY",
@@ -334,8 +338,94 @@ def run_scheduled_batch(
             **status,
         })
         if progress_callback is not None:
-            progress_callback(len(statuses))
+            progress_callback()
     return statuses
+
+
+def run_scheduled_batch(
+    ledger: ForwardLedger,
+    *,
+    batch_size: int | None,
+    progress_callback: Callable[[int], None] | None = None,
+) -> list[dict[str, object]]:
+    now = datetime.now(UTC)
+    sync_pending_jobs(ledger.connection, now=now)
+    credentials = configured_api_credentials()
+    if not credentials:
+        return [{"status": "DISABLED", "reason": "GEMINI_API_KEY_MISSING"}]
+    account_ids = tuple(dict.fromkeys(item.account_id for item in credentials))
+    maximum = batch_size or max(1, len(account_ids) * 10)
+    worker_prefix = f"{socket.gethostname()}-{os.getpid()}"
+
+    # Explicit batches preserve deterministic maintenance/test behavior. The
+    # production default uses one lane per independent account so synchronous
+    # provider latency on one account cannot idle all other account capacity.
+    concurrent = (
+        batch_size is None
+        and len(account_ids) > 1
+        and str(ledger.path) != ":memory:"
+    )
+    if not concurrent:
+        completed = 0
+
+        def report_progress() -> None:
+            nonlocal completed
+            completed += 1
+            if progress_callback is not None:
+                progress_callback(completed)
+
+        return _run_scheduled_lane(
+            ledger,
+            credentials=credentials,
+            maximum=maximum,
+            worker_prefix=worker_prefix,
+            progress_callback=report_progress,
+        )
+
+    base, remainder = divmod(maximum, len(account_ids))
+    allocations = tuple(
+        base + (1 if index < remainder else 0)
+        for index in range(len(account_ids))
+    )
+    progress_lock = threading.Lock()
+    completed = 0
+
+    def report_progress() -> None:
+        nonlocal completed
+        with progress_lock:
+            completed += 1
+            if progress_callback is not None:
+                progress_callback(completed)
+
+    def run_account_lane(
+        account_id: str, allocation: int, index: int,
+    ) -> list[dict[str, object]]:
+        # sqlite connections are thread-affine; each account lane owns the
+        # connection it creates and closes inside that same worker thread.
+        lane_ledger = ForwardLedger(ledger.path)
+        try:
+            return _run_scheduled_lane(
+                lane_ledger,
+                credentials=credentials,
+                maximum=allocation,
+                worker_prefix=f"{worker_prefix}-account-{index}",
+                preferred_account_id=account_id,
+                progress_callback=report_progress,
+            )
+        finally:
+            lane_ledger.close()
+
+    with ThreadPoolExecutor(
+        max_workers=len(account_ids), thread_name_prefix="news-ai-account",
+    ) as executor:
+        futures = [
+            executor.submit(run_account_lane, account_id, allocation, index)
+            for index, (account_id, allocation) in enumerate(
+                zip(account_ids, allocations, strict=True)
+            )
+            if allocation > 0
+        ]
+        return [status for future in futures for status in future.result()]
 
 
 def main() -> int:

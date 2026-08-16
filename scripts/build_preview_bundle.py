@@ -42,11 +42,21 @@ PREVIEW_NEWS_PAGE_SIZE = int(PREVIEW_MANIFEST["newsPageSize"])
 def _apply_branch_runtime_contract(status: dict) -> None:
     """Overlay branch-owned limits that an older production snapshot cannot know."""
     queue = status.setdefault("annotation_queue", {})
+    account_count = max(
+        1,
+        int(queue.get("configured_account_count")
+            or queue.get("configured_key_count") or 0),
+    )
     queue.update({
         "requests_per_minute_per_key": model_limits.GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
-        "requests_per_minute": model_limits.GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
-        "input_tokens_per_minute": model_limits.GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
-        "minute_scope": "PROJECT",
+        "requests_per_minute_per_account": model_limits.GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
+        "requests_per_minute": (
+            model_limits.GEMINI_REQUESTS_PER_MINUTE_PER_KEY * account_count
+        ),
+        "input_tokens_per_minute": (
+            model_limits.GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL * account_count
+        ),
+        "minute_scope": "ACCOUNT",
     })
 
 

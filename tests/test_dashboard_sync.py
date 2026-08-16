@@ -193,9 +193,10 @@ def test_preview_overlays_branch_owned_model_throughput_contract() -> None:
 
     assert status["annotation_queue"] == {
         "requests_per_minute_per_key": 12,
+        "requests_per_minute_per_account": 12,
         "requests_per_minute": 12,
         "input_tokens_per_minute": 225_000,
-        "minute_scope": "PROJECT",
+        "minute_scope": "ACCOUNT",
     }
 
 
