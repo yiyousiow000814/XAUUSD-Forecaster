@@ -20,10 +20,11 @@ from .model_gateway import (
 from .news_semantics import validated_annotation_predicate
 
 
-BRIEF_PROMPT_VERSION = "daily-news-brief-v3-synthesis-overview"
+BRIEF_PROMPT_VERSION = "daily-news-brief-v4-concise-synthesis"
+BRIEF_RECOVERY_VERSION = "daily-brief-recovery-v1-date-scoped-peers"
 BRIEF_EVIDENCE_LIMIT = 60
 BRIEF_INPUT_TOKEN_BUDGET = 12_000
-BRIEF_OUTPUT_TOKEN_BUDGET = 4_096
+BRIEF_OUTPUT_TOKEN_BUDGET = 8_192
 BRIEF_BACKLOG_LIMIT = 14
 BRIEF_REGENERATION_DEBOUNCE = timedelta(minutes=10)
 BRIEF_CAPACITY_RETRY = timedelta(minutes=1)
@@ -138,22 +139,6 @@ def _population_rows(
                       AND j.source=p.source AND j.source_item_id=p.source_item_id
                       AND j.revision_number=p.revision_number
                       AND j.prompt_version=? AND j.state='DEAD_LETTER'
-                  ) THEN 1 WHEN a.annotation_id IS NULL AND EXISTS (
-                    SELECT 1 FROM news_revisions superseding
-                    WHERE superseding.source=p.source
-                      AND superseding.source_item_id=p.source_item_id
-                      AND superseding.revision_number>p.revision_number
-                  ) THEN 1 WHEN a.annotation_id IS NULL AND EXISTS (
-                    SELECT 1 FROM news_revisions preferred_peer
-                    WHERE preferred_peer.cluster_id=p.cluster_id
-                      AND NOT EXISTS (
-                        SELECT 1 FROM news_revisions preferred_peer_newer
-                        WHERE preferred_peer_newer.source=preferred_peer.source
-                          AND preferred_peer_newer.source_item_id=preferred_peer.source_item_id
-                          AND preferred_peer_newer.revision_number>preferred_peer.revision_number)
-                      AND (length(COALESCE(preferred_peer.body,''))>length(COALESCE(p.body,''))
-                        OR (length(COALESCE(preferred_peer.body,''))=length(COALESCE(p.body,''))
-                          AND preferred_peer.source_item_id<p.source_item_id))
                   ) THEN 1 ELSE 0 END AS terminal_failure
            FROM population p
            LEFT JOIN news_annotations a ON a.annotation_id=(
@@ -333,7 +318,7 @@ def _brief_payload(day: str, evidence: list[dict[str, object]]) -> dict[str, obj
             "使用简短自然的简体中文，不得把输入标题或摘要原样堆叠成简报。"
         )}]},
         "contents": [{"parts": [{"text": (
-            f"生成 {day} 每日简报。返回标题、3至5句综合overview和最多8条重点；"
+            f"生成 {day} 每日简报。返回标题、2至3句综合overview和最多5条重点；"
             "每条必须从资料中的ref原样选择支持它的evidence_ids；不得复制或猜测内部ID。"
             "如果资料不足，宁可少写。"
             "只返回JSON。\nEVIDENCE\n" +
@@ -342,16 +327,17 @@ def _brief_payload(day: str, evidence: list[dict[str, object]]) -> dict[str, obj
         "generationConfig": {
             "responseMimeType": "application/json", "temperature": 0,
             "maxOutputTokens": BRIEF_OUTPUT_TOKEN_BUDGET,
+            "thinkingConfig": {"thinkingLevel": "minimal"},
             "responseSchema": {
                 "type": "object", "required": ["title", "overview", "items"],
                 "properties": {
                     "title": {"type": "string", "maxLength": 120},
-                    "overview": {"type": "string", "maxLength": 1200},
-                    "items": {"type": "array", "maxItems": 8, "items": {
+                    "overview": {"type": "string", "maxLength": 500},
+                    "items": {"type": "array", "maxItems": 5, "items": {
                         "type": "object", "required": ["headline", "summary", "evidence_ids"],
                         "properties": {
-                            "headline": {"type": "string", "maxLength": 240},
-                            "summary": {"type": "string", "maxLength": 800},
+                            "headline": {"type": "string", "maxLength": 90},
+                            "summary": {"type": "string", "maxLength": 280},
                             "evidence_ids": {"type": "array", "minItems": 1,
                                 "maxItems": 8, "items": {
                                     "type": "string", "enum": citation_refs,
@@ -365,26 +351,30 @@ def _brief_payload(day: str, evidence: list[dict[str, object]]) -> dict[str, obj
 
 
 def _decode_brief(envelope: dict[str, object], evidence: list[dict[str, object]]) -> dict:
-    result = json.loads(envelope["candidates"][0]["content"]["parts"][0]["text"])
+    candidate = envelope["candidates"][0]
+    finish_reason = candidate.get("finishReason")
+    if finish_reason not in (None, "STOP"):
+        raise ValueError(f"Gemma daily brief ended with {finish_reason!s}")
+    result = json.loads(candidate["content"]["parts"][0]["text"])
     if not isinstance(result, dict):
         raise ValueError("Gemma daily brief returned a non-object result")
     title = str(result.get("title") or "").strip()
     overview = str(result.get("overview") or "").strip()
     items = result.get("items")
     if (not isinstance(items, list) or not title or len(title) > 120
-            or not overview or len(overview) > 1200):
+            or not overview or len(overview) > 500 or len(items) > 5):
         raise ValueError("Gemma daily brief returned an invalid result")
     citation_map = {
         f"E{index:02d}": str(row["id"])
         for index, row in enumerate(evidence, start=1)
     }
     canonical = []
-    for item in items[:8]:
+    for item in items:
         if not isinstance(item, dict):
             raise ValueError("Gemma daily brief returned an invalid item")
         headline, summary, refs = item.get("headline"), item.get("summary"), item.get("evidence_ids")
-        if (not isinstance(headline, str) or not headline.strip() or len(headline.strip()) > 240
-                or not isinstance(summary, str) or not summary.strip() or len(summary.strip()) > 800
+        if (not isinstance(headline, str) or not headline.strip() or len(headline.strip()) > 90
+                or not isinstance(summary, str) or not summary.strip() or len(summary.strip()) > 280
                 or not isinstance(refs, list) or not 1 <= len(refs) <= 8
                 or any(not isinstance(ref, str) for ref in refs)):
             raise ValueError("Gemma daily brief returned an invalid item")
@@ -412,6 +402,23 @@ def _latest_brief(connection, day: str):
         "FROM daily_news_briefs WHERE brief_date=? "
         "ORDER BY revision_number DESC LIMIT 1", (day,),
     ).fetchone()
+
+
+def _effective_finalization(connection, day: str):
+    correction = connection.execute(
+        """SELECT * FROM daily_news_brief_finalization_corrections_v1
+           WHERE brief_date=? AND recovery_version=?""",
+        (day, BRIEF_RECOVERY_VERSION),
+    ).fetchone()
+    if correction:
+        return correction
+    original = connection.execute(
+        "SELECT * FROM daily_news_brief_finalizations_v1 WHERE brief_date=?",
+        (day,),
+    ).fetchone()
+    if original and str(original["final_status"]) == "DEGRADED":
+        return None
+    return original
 
 
 def _write_state(
@@ -459,13 +466,31 @@ def _finalize(ledger: ForwardLedger, day: str, *, instant: datetime,
               force_degraded: bool = False) -> str:
     phase = "DEGRADED" if counts["terminal_failure_items"] or force_degraded else "FINAL"
     with ledger.connection:
-        ledger.connection.execute(
-            """INSERT OR IGNORE INTO daily_news_brief_finalizations_v1
-               (brief_date,revision_number,final_status,received_items,reviewed_items,
-                terminal_failure_items,cutoff_at,finalized_at) VALUES (?,?,?,?,?,?,?,?)""",
-            (day, latest_revision, phase, counts["received_items"], counts["reviewed_items"],
-             counts["terminal_failure_items"], _iso(instant), _iso(instant)),
-        )
+        original = ledger.connection.execute(
+            "SELECT 1 FROM daily_news_brief_finalizations_v1 WHERE brief_date=?", (day,),
+        ).fetchone()
+        if original:
+            correction_id = hashlib.sha256(
+                f"{day}:{BRIEF_RECOVERY_VERSION}".encode("utf-8")
+            ).hexdigest()
+            ledger.connection.execute(
+                """INSERT OR IGNORE INTO daily_news_brief_finalization_corrections_v1
+                   (correction_id,brief_date,recovery_version,revision_number,
+                    final_status,received_items,reviewed_items,terminal_failure_items,
+                    cutoff_at,finalized_at) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (correction_id, day, BRIEF_RECOVERY_VERSION, latest_revision, phase,
+                 counts["received_items"], counts["reviewed_items"],
+                 counts["terminal_failure_items"], _iso(instant), _iso(instant)),
+            )
+        else:
+            ledger.connection.execute(
+                """INSERT OR IGNORE INTO daily_news_brief_finalizations_v1
+                   (brief_date,revision_number,final_status,received_items,reviewed_items,
+                    terminal_failure_items,cutoff_at,finalized_at) VALUES (?,?,?,?,?,?,?,?)""",
+                (day, latest_revision, phase, counts["received_items"],
+                 counts["reviewed_items"], counts["terminal_failure_items"],
+                 _iso(instant), _iso(instant)),
+            )
     _write_state(ledger, day, instant=instant, phase=phase, counts=counts,
                  latest_revision=latest_revision, last_generated_at=last_generated_at,
                  candidate_hash=candidate_hash, finalized_at=_iso(instant))
@@ -623,9 +648,12 @@ def brief_dates_to_process(
            )
            SELECT d.day FROM receipt_days d
            LEFT JOIN daily_news_brief_finalizations_v1 f ON f.brief_date=d.day
+           LEFT JOIN daily_news_brief_finalization_corrections_v1 c
+             ON c.brief_date=d.day AND c.recovery_version=?
            WHERE f.brief_date IS NULL
+              OR (f.final_status='DEGRADED' AND c.brief_date IS NULL)
            ORDER BY d.day DESC LIMIT ?""",
-        (_iso(instant), max(1, int(limit))),
+        (_iso(instant), BRIEF_RECOVERY_VERSION, max(1, int(limit))),
     ).fetchall()
     available = [str(row[0]) for row in rows if row[0]]
     backlog = [day for day in available if day != current_day]
@@ -643,10 +671,14 @@ def update_daily_brief(
     day = brief_date or current_day
     date.fromisoformat(day)
 
-    finalized = ledger.connection.execute(
-        "SELECT * FROM daily_news_brief_finalizations_v1 WHERE brief_date=?",
-        (day,),
+    original_finalization = ledger.connection.execute(
+        "SELECT * FROM daily_news_brief_finalizations_v1 WHERE brief_date=?", (day,),
     ).fetchone()
+    finalized = _effective_finalization(ledger.connection, day)
+    recovering = bool(
+        finalized is None and original_finalization
+        and str(original_finalization["final_status"]) == "DEGRADED"
+    )
     if finalized:
         latest = _latest_brief(ledger.connection, day)
         counts = {
@@ -673,12 +705,24 @@ def update_daily_brief(
     packet = _budgeted_evidence_packet(day, candidates)
     population_hash = _population_hash(rows)
     candidate_hash = _source_hash([
-        {"prompt_version": BRIEF_PROMPT_VERSION}, *packet,
+        {"prompt_version": BRIEF_PROMPT_VERSION},
+        *([{"recovery_version": BRIEF_RECOVERY_VERSION}] if recovering else []),
+        *packet,
     ]) if packet else None
     latest = _latest_brief(ledger.connection, day)
     state = ledger.connection.execute(
         "SELECT * FROM daily_news_brief_refresh_state WHERE brief_date=?", (day,),
     ).fetchone()
+    if recovering and state and str(state["phase"]) == "DEGRADED":
+        _write_state(
+            ledger, day, instant=instant, phase="UPDATING", counts=counts,
+            latest_revision=int(latest["revision_number"]) if latest else None,
+            last_generated_at=str(latest["generated_at"]) if latest else None,
+            pending_source_hash=population_hash,
+        )
+        state = ledger.connection.execute(
+            "SELECT * FROM daily_news_brief_refresh_state WHERE brief_date=?", (day,),
+        ).fetchone()
 
     if not rows:
         phase = "WAITING" if day == current_day else "EMPTY"
@@ -734,7 +778,7 @@ def update_daily_brief(
         if state and state["last_generated_candidate_hash"]
         else latest["source_hash"] if latest else None
     )
-    if (latest and generated_hash == candidate_hash
+    if (not recovering and latest and generated_hash == candidate_hash
             and latest["prompt_version"] == BRIEF_PROMPT_VERSION):
         if day != current_day and counts["pending_items"] == 0:
             phase = _finalize(
@@ -852,20 +896,24 @@ def update_daily_brief(
 
 def recent_daily_briefs(connection: sqlite3.Connection, *, limit: int = 14) -> list[dict]:
     rows = connection.execute(
-        """SELECT b.*,COALESCE(s.phase,f.final_status,'UPDATING') AS phase,
-                  COALESCE(s.received_items,f.received_items,0) AS received_items,
-                  COALESCE(s.reviewed_items,f.reviewed_items,0) AS reviewed_items,
+        """SELECT b.*,COALESCE(s.phase,c.final_status,f.final_status,'UPDATING') AS phase,
+                  COALESCE(s.received_items,c.received_items,f.received_items,0) AS received_items,
+                  COALESCE(s.reviewed_items,c.reviewed_items,f.reviewed_items,0) AS reviewed_items,
                   COALESCE(s.pending_items,0) AS pending_items,
-                  COALESCE(s.terminal_failure_items,f.terminal_failure_items,0)
+                  COALESCE(s.terminal_failure_items,c.terminal_failure_items,
+                           f.terminal_failure_items,0)
                     AS terminal_failure_items,
-                  s.next_retry_at,COALESCE(s.finalized_at,f.finalized_at) AS finalized_at
+                  s.next_retry_at,COALESCE(s.finalized_at,c.finalized_at,f.finalized_at)
+                    AS finalized_at
            FROM daily_news_briefs b
            JOIN (SELECT brief_date,MAX(revision_number) revision_number
                  FROM daily_news_briefs GROUP BY brief_date) latest
              ON latest.brief_date=b.brief_date AND latest.revision_number=b.revision_number
            LEFT JOIN daily_news_brief_refresh_state s ON s.brief_date=b.brief_date
            LEFT JOIN daily_news_brief_finalizations_v1 f ON f.brief_date=b.brief_date
-           ORDER BY b.brief_date DESC LIMIT ?""", (limit,),
+           LEFT JOIN daily_news_brief_finalization_corrections_v1 c
+             ON c.brief_date=b.brief_date AND c.recovery_version=?
+           ORDER BY b.brief_date DESC LIMIT ?""", (BRIEF_RECOVERY_VERSION, limit),
     ).fetchall()
     return [{**dict(row), "is_final": row["phase"] in FINAL_PHASES,
              "brief": json.loads(str(row["brief_json"]))} for row in rows]

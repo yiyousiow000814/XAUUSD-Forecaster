@@ -32,6 +32,7 @@ IMMUTABLE_TABLES = (
     "news_intake_rejections_v1",
     "daily_news_briefs",
     "daily_news_brief_finalizations_v1",
+    "daily_news_brief_finalization_corrections_v1",
     "daily_news_brief_failures_v1",
     "macro_observations",
     "source_polls",
@@ -185,6 +186,22 @@ CREATE TABLE IF NOT EXISTS daily_news_brief_finalizations_v1 (
     terminal_failure_items INTEGER NOT NULL,
     cutoff_at TEXT NOT NULL,
     finalized_at TEXT NOT NULL,
+    FOREIGN KEY(brief_date,revision_number)
+        REFERENCES daily_news_briefs(brief_date,revision_number)
+);
+
+CREATE TABLE IF NOT EXISTS daily_news_brief_finalization_corrections_v1 (
+    correction_id TEXT PRIMARY KEY,
+    brief_date TEXT NOT NULL,
+    recovery_version TEXT NOT NULL,
+    revision_number INTEGER,
+    final_status TEXT NOT NULL CHECK(final_status IN ('FINAL','DEGRADED','EMPTY')),
+    received_items INTEGER NOT NULL,
+    reviewed_items INTEGER NOT NULL,
+    terminal_failure_items INTEGER NOT NULL,
+    cutoff_at TEXT NOT NULL,
+    finalized_at TEXT NOT NULL,
+    UNIQUE(brief_date,recovery_version),
     FOREIGN KEY(brief_date,revision_number)
         REFERENCES daily_news_briefs(brief_date,revision_number)
 );
