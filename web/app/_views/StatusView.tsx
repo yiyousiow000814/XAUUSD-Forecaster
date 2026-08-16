@@ -42,12 +42,14 @@ type StatusPayload = {
   };
   annotation_queue: {
     configured_key_count: number;
+    configured_account_count?: number;
     available_key_count: number;
     fallback_available_key_count: number;
     requests_per_minute_per_key: number;
+    requests_per_minute_per_account?: number;
     requests_per_minute: number;
     input_tokens_per_minute: number;
-    minute_scope: "PROJECT";
+    minute_scope: "ACCOUNT";
     backing_off: number;
     dead_letter: number;
     priority_reserve: number;
@@ -191,7 +193,7 @@ export default function StatusView() {
         <article><span>重要新闻保留</span><strong className="good"><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.priority_reserve} /></MetricValue></strong><small>FOMC、CPI、Payroll 专用</small></article>
         <article><span>错误退避中</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.backing_off} /></MetricValue></strong><small>到期前不会重复请求</small></article>
         <article><span>已隔离</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.dead_letter} /></MetricValue></strong><small>相同永久错误不再消耗配额</small></article>
-        <article><span>安全吞吐</span><strong><MetricValue phase={throughputPhase} snapshotLabel="分支配置" snapshotTitle="此吞吐限制来自当前 PR 分支的构建配置，不是生产实时观测"><CountValue value={payload?.annotation_queue.requests_per_minute} /></MetricValue></strong><small>RPM · 项目共享 · TPM <CountValue value={payload?.annotation_queue.input_tokens_per_minute} /> · 分支配置</small></article>
+        <article><span>安全吞吐</span><strong><MetricValue phase={throughputPhase} snapshotLabel="分支配置" snapshotTitle="此吞吐限制来自当前 PR 分支的构建配置，不是生产实时观测"><CountValue value={payload?.annotation_queue.requests_per_minute} /></MetricValue></strong><small>总 RPM · 每账户 <CountValue value={payload?.annotation_queue.requests_per_minute_per_account} format="exact" /> · TPM <CountValue value={payload?.annotation_queue.input_tokens_per_minute} /> · 分支配置</small></article>
       </section>
 
       <section className="routing-grid">

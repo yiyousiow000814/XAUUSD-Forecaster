@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import hashlib
 import sqlite3
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -806,6 +808,60 @@ def test_extra_key_in_one_account_does_not_inflate_batch_capacity(
 
     assert len(statuses) == 10
     assert scheduler_counts(ledger.connection)["queued"] == 2
+    ledger.close()
+
+
+def test_default_batch_runs_independent_accounts_concurrently(
+    tmp_path, monkeypatch,
+) -> None:
+    from scripts import run_news_annotator as runner
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    for index in range(20):
+        enqueue_job(
+            ledger.connection, task_type="ACTIVE_ANNOTATION", source="source",
+            source_item_id=f"concurrent-{index}", revision_number=1,
+            prompt_version="prompt", priority="NORMAL",
+            now=datetime.now(UTC) - timedelta(minutes=2),
+        )
+    credentials = (
+        ApiCredential("account-a", ROUTINE_POOL, "key-a", "a"),
+        ApiCredential("account-b", ROUTINE_POOL, "key-b", "b"),
+    )
+    monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
+    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    first_calls = threading.Barrier(2)
+    lock = threading.Lock()
+    active = 0
+    maximum_active = 0
+    started_accounts: set[str] = set()
+
+    def execute(_ledger, credential, _job, **_kwargs):
+        nonlocal active, maximum_active
+        with lock:
+            first_for_account = credential.account_id not in started_accounts
+            started_accounts.add(credential.account_id)
+            active += 1
+            maximum_active = max(maximum_active, active)
+        if first_for_account:
+            first_calls.wait(timeout=5)
+        time.sleep(0.01)
+        with lock:
+            active -= 1
+        return {"status": "OK"}
+
+    monkeypatch.setattr(runner, "_execute_job", execute)
+    progress: list[int] = []
+
+    statuses = runner.run_scheduled_batch(
+        ledger, batch_size=None, progress_callback=progress.append,
+    )
+
+    assert len(statuses) == 20
+    assert maximum_active == 2
+    assert started_accounts == {"account-a", "account-b"}
+    assert progress == list(range(1, 21))
+    assert scheduler_counts(ledger.connection)["completed"] == 20
     ledger.close()
 
 
