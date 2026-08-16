@@ -89,10 +89,24 @@ export type AssistantProgressItem = {
   state: "ACTIVE" | "COMPLETED" | "FAILED" | "QUEUED";
 };
 
+export type AssistantConversationSelectionPlan =
+  | "REFRESH_CURRENT"
+  | "LOAD_PREVIEW"
+  | "LOAD_REMOTE";
+
 export type AssistantFetcher = (
   input: RequestInfo | URL,
   init?: RequestInit,
 ) => Promise<Response>;
+
+export function planAssistantConversationSelection(
+  currentConversationId: string | null,
+  nextConversationId: string,
+  preview: boolean,
+): AssistantConversationSelectionPlan {
+  if (currentConversationId === nextConversationId) return "REFRESH_CURRENT";
+  return preview ? "LOAD_PREVIEW" : "LOAD_REMOTE";
+}
 
 const identifier = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$/;
 const canonicalTime = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
