@@ -69,6 +69,7 @@ def scheduler_health_snapshot(
             "backing_off": 0,
             "dead_letter": 0,
             "completed_15m": 0,
+            "retired_15m": 0,
             "deferred_15m": 0,
             "errors_15m": 0,
             "failure_codes_15m": {},
@@ -133,6 +134,7 @@ def scheduler_health_snapshot(
     ).fetchall()
     outcome_fields = {
         "OK": "completed_15m",
+        "NOT_CURRENT": "retired_15m",
         "DEFERRED": "deferred_15m",
         "DISABLED": "deferred_15m",
         "ERROR": "errors_15m",
@@ -167,6 +169,8 @@ def scheduler_health_snapshot(
             "queued", "leased", "backing_off",
         ))
         completed = int(summary["completed_15m"])
+        retired = int(summary["retired_15m"])
+        progressed = completed + retired
         deferred = int(summary["deferred_15m"])
         errors = int(summary["errors_15m"])
         max_claims = int(summary["max_claim_count"])
@@ -198,7 +202,7 @@ def scheduler_health_snapshot(
                     "completed_15m": completed,
                 },
             ))
-        if active and completed == 0 and oldest_age >= int(
+        if active and progressed == 0 and oldest_age >= int(
             MONITOR_WINDOW.total_seconds()
         ):
             alerts.append(_alert(
