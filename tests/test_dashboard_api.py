@@ -1001,23 +1001,63 @@ def test_news_archive_explains_terminal_model_contract_failure(tmp_path) -> None
             "cause_type": "ValueError", "cause": cause,
         },
     })
+    ledger.append_news_revision({
+        "source": "google_news_fed_rates", "source_item_id": "provider-backoff",
+        "source_published_time": now - timedelta(minutes=1),
+        "collector_first_seen_time": now, "fetched_time": now,
+        "headline": "Fed service retry", "body": body,
+        "content_hash": digest, "cluster_id": "provider-backoff",
+    })
+    provider_cause = "HTTP Error 429: quota temporarily unavailable"
+    ledger.append_llm_failure({
+        "failure_id": "provider-backoff", "task_type": "ANNOTATION",
+        "source": "google_news_fed_rates", "source_item_id": "provider-backoff",
+        "revision_number": 1, "raw_content_hash": digest,
+        "llm_model_version": "gemini-3.5-flash-lite",
+        "prompt_version": PROMPT_VERSION, "attempt_number": 1,
+        "error_type": "HTTPError",
+        "error_signature": hashlib.sha256(provider_cause.encode()).hexdigest(),
+        "error": provider_cause, "failed_at": now,
+        "next_retry_at": now + timedelta(minutes=10), "is_terminal": False,
+        "failure_evidence": {
+            "failure_code": "PROVIDER_HTTP_ERROR",
+            "failure_stage": "PROVIDER_REQUEST", "response_hash": "b" * 64,
+            "selected_output": {}, "cause_type": "HTTPError",
+            "cause": provider_cause,
+        },
+    })
 
     archive = module._news_archive_page(ledger.connection, None, 20)
     ledger.close()
     dashboard = module._dashboard_payload(tmp_path / "forward.sqlite3")
+    archive_by_id = {row["source_item_id"]: row for row in archive["items"]}
+    dashboard_by_id = {
+        row["source_item_id"]: row for row in dashboard["recent_news"]
+    }
 
-    assert archive["items"][0]["annotation_status"] == "DEAD_LETTER"
-    assert archive["items"][0]["annotation_reason_code"] == (
+    terminal = archive_by_id["contract-failure"]
+    assert terminal["annotation_status"] == "DEAD_LETTER"
+    assert terminal["annotation_reason_code"] == (
         "MODEL_OUTPUT_CONTRACT_FAILED"
     )
-    assert archive["items"][0]["annotation_reason"] == (
+    assert terminal["annotation_reason"] == (
         "Gemini 返回的证据片段无法在来源正文中逐字找到。"
     )
-    assert dashboard["recent_news"][0]["annotation_reason_code"] == (
+    assert archive_by_id["provider-backoff"]["annotation_status"] == "BACKING_OFF"
+    assert archive_by_id["provider-backoff"]["annotation_reason_code"] == (
+        "PROVIDER_HTTP_ERROR"
+    )
+    assert archive_by_id["provider-backoff"]["annotation_reason"] == (
+        "Gemini 服务返回 HTTP 错误。"
+    )
+    assert dashboard_by_id["contract-failure"]["annotation_reason_code"] == (
         "MODEL_OUTPUT_CONTRACT_FAILED"
     )
-    assert dashboard["recent_news"][0]["annotation_reason"] == (
+    assert dashboard_by_id["contract-failure"]["annotation_reason"] == (
         "Gemini 返回的证据片段无法在来源正文中逐字找到。"
+    )
+    assert dashboard_by_id["provider-backoff"]["annotation_reason_code"] == (
+        "PROVIDER_HTTP_ERROR"
     )
 
 

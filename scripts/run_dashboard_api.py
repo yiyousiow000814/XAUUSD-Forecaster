@@ -520,16 +520,23 @@ def _not_required_reason(item: dict, forward_epoch: str) -> tuple[str, str]:
     return "DUPLICATE_CONTENT", "重复内容：同一事件已有正文更完整的版本"
 
 
-def _annotation_failure_reason(error: object) -> str:
+def _annotation_failure_reason(error: object, failure_code: object) -> str:
     """Explain a bounded model failure without exposing rejected output."""
     message = str(error or "")
+    code = str(failure_code or "")
     if "supporting evidence is absent from source" in message:
         return "Gemini 返回的证据片段无法在来源正文中逐字找到。"
     if "supporting_evidence contains a long item" in message:
         return "Gemini 返回的证据片段超过允许长度。"
     if "display repair failed" in message:
         return "Gemini 的语义响应已收到，但中文展示字段修复仍未通过。"
-    return "模型响应连续未通过当前输出合同；已停止自动重试。"
+    if code == "MODEL_OUTPUT_CONTRACT_FAILED":
+        return "Gemini 响应未通过当前输出合同。"
+    if code == "MODEL_OUTPUT_INVALID":
+        return "Gemini 返回的内容无法解析为当前 JSON 合同。"
+    if code == "PROVIDER_HTTP_ERROR":
+        return "Gemini 服务返回 HTTP 错误。"
+    return "Gemini 请求未成功完成；已保留有限诊断证据。"
 
 
 def _apply_impact_status(item: dict, now: datetime) -> None:
@@ -656,7 +663,7 @@ def _news_reader_rows(
                    a.geopolitical_risk, a.usd_impulse, a.novelty,
                    a.confidence, a.llm_model_version, a.prompt_version,
                    a.parsed_at, i.impact_class,
-                   CASE WHEN f.is_terminal=1 THEN COALESCE(
+                   CASE WHEN f.failure_id IS NOT NULL THEN COALESCE(
                      fe.failure_code,
                      CASE WHEN f.error_type='ValueError'
                        THEN 'MODEL_OUTPUT_CONTRACT_FAILED'
@@ -815,7 +822,7 @@ def _serialize_news_rows(
                 annotation_failure_code or "MODEL_REQUEST_FAILED"
             )
             item["annotation_reason"] = _annotation_failure_reason(
-                annotation_failure
+                annotation_failure, annotation_failure_code
             )
         _apply_impact_status(item, now)
         item["entities"] = (
@@ -1558,7 +1565,7 @@ def _dashboard_payload(database: Path) -> dict:
                       a.geopolitical_risk, a.usd_impulse, a.novelty,
                       a.confidence, a.llm_model_version, a.prompt_version,
                        a.parsed_at,
-                       CASE WHEN f.is_terminal=1 THEN COALESCE(
+                       CASE WHEN f.failure_id IS NOT NULL THEN COALESCE(
                          fe.failure_code,
                          CASE WHEN f.error_type='ValueError'
                            THEN 'MODEL_OUTPUT_CONTRACT_FAILED'
