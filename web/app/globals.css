@@ -1596,7 +1596,7 @@ body:has(> .preview-banner):has(.assistant-main) .assistant-main { height:100%; 
   .assistant-thread-heading h1 { margin:0; font-size:clamp(18px,4.8vw,20px); line-height:1.12; }
   .assistant-thread-actions { justify-content:flex-end; }
   .assistant-manage-toggle { display:block; min-width:56px; }
-  .assistant-action-menu { position:absolute; top:calc(100% + 7px); right:0; z-index:20; width:min(136px,calc(100vw - 24px)); display:none; border:1px solid var(--ink); padding:4px; background:var(--paper); box-shadow:5px 5px 0 var(--ink); }
+  .assistant-action-menu { position:absolute; top:calc(100% + 7px); right:0; z-index:20; width:min(136px,calc(100vw - 24px)); display:none; grid-template-columns:minmax(0,1fr); justify-content:stretch; gap:0; border:1px solid var(--ink); padding:4px; background:var(--paper); box-shadow:5px 5px 0 var(--ink); }
   .assistant-action-menu.is-open { display:grid; }
   .assistant-action-menu button { width:100%; min-height:46px; border:0; border-bottom:1px solid var(--ink); padding:10px 12px; text-align:center; }
   .assistant-action-menu button:last-child { border-bottom:0; }
