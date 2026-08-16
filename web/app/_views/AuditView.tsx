@@ -224,7 +224,7 @@ type EvaluationCadence = "EVERY_5M" | "FIXED_30M";
 type CadenceMetric = { oos_rows: number; distinct_days: number; cumulative_quote_return: number; profit_factor_quote_adjusted: number | null; coverage_rate: number | null; prediction_rows?: number; unscored_oos_rows?: number; overdue_oos_rows?: number; evaluation_status?: VersionEvaluationStatus };
 type DailyBriefPhase = "WAITING" | "UPDATING" | "DEFERRED" | "FINAL" | "DEGRADED" | "EMPTY";
 type DailyNewsBrief = { brief_date: string; revision_number: number; cutoff_at: string; generated_at: string; model_version: string; prompt_version: string; phase?: DailyBriefPhase; received_items?: number; reviewed_items?: number; pending_items?: number; terminal_failure_items?: number; next_retry_at?: string | null; finalized_at?: string | null; brief: { title: string; items: Array<{ headline: string; summary: string; evidence_ids: string[] }> } };
-type DailyNewsBriefSummary = { brief_date: string; phase: DailyBriefPhase; received_items: number; reviewed_items: number; pending_items: number; terminal_failure_items: number; latest_revision: number | null; last_generated_at: string | null; next_retry_at: string | null; is_final: boolean; total_brief_days: number };
+type DailyNewsBriefSummary = { brief_date: string; phase: DailyBriefPhase; received_items: number | null; reviewed_items: number | null; pending_items: number | null; terminal_failure_items: number | null; latest_revision: number | null; last_generated_at: string | null; next_retry_at: string | null; is_final: boolean; total_brief_days: number | null; observation_scope?: "BUILD_SNAPSHOT_COMPATIBILITY" };
 type NewsSearchResponse = {
   items: News[];
   total: number;
