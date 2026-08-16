@@ -658,7 +658,7 @@ body.modal-open { overflow:hidden; }
   .brief-overview { margin:18px; padding:20px 18px 22px; }
   .brief-overview-head { align-items:flex-start; flex-direction:column; gap:8px; margin-bottom:13px; }
   .brief-overview-head strong { font-size:25px; }
-  .brief-overview p { font-size:17px; line-height:1.7; }
+  .daily-brief-desk .brief-overview p { font-size:17px; line-height:1.7; }
   .daily-brief-desk li { grid-template-columns:34px 1fr; gap:10px; padding:16px 18px; }
   .daily-brief-desk li>span { font-size:22px; }
   .daily-brief-desk h3 { font-size:21px; }
