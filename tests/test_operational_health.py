@@ -110,6 +110,41 @@ def test_scheduler_retirement_is_progress_without_becoming_completion() -> None:
     )
 
 
+def test_background_route_stalls_only_after_its_own_sla() -> None:
+    connection = _connection()
+    job_id = enqueue_job(
+        connection,
+        task_type="TITLE_TRANSLATION",
+        source="source",
+        source_item_id="waiting",
+        revision_number=1,
+        annotation_id="",
+        prompt_version="prompt",
+        priority="BACKGROUND",
+        now=NOW - timedelta(hours=1),
+    )
+
+    within_sla = scheduler_health_snapshot(connection, now=NOW)
+    assert not any(
+        alert["code"] == "OPS_AI_PIPELINE_STALLED"
+        and alert["scope"] == "TITLE_TRANSLATION"
+        for alert in within_sla["alerts"]
+    )
+
+    connection.execute(
+        "UPDATE news_ai_jobs_v1 SET created_at=? WHERE job_id=?",
+        ((NOW - timedelta(hours=3)).isoformat(), job_id),
+    )
+    connection.commit()
+    overdue = scheduler_health_snapshot(connection, now=NOW)
+    stalled = next(
+        alert for alert in overdue["alerts"]
+        if alert["code"] == "OPS_AI_PIPELINE_STALLED"
+        and alert["scope"] == "TITLE_TRANSLATION"
+    )
+    assert stalled["evidence"]["stall_sla_seconds"] == 2 * 60 * 60
+
+
 def test_component_and_source_failures_use_the_same_alert_contract() -> None:
     connection = _connection()
     snapshot = scheduler_health_snapshot(connection, now=NOW)

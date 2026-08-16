@@ -20,7 +20,7 @@ The initial cross-component catalog is:
 | --- | --- |
 | `OPS_AI_JOB_RETRY_LOOP` | One active AI job has been claimed unusually often. |
 | `OPS_AI_ROUTE_CAPACITY_SATURATED` | Capacity deferrals exceed useful completions for a model route. |
-| `OPS_AI_PIPELINE_STALLED` | Work is waiting but the route has completed nothing during the monitoring window. |
+| `OPS_AI_PIPELINE_STALLED` | Work exceeded its route-specific SLA and the route made no progress during the monitoring window. |
 | `OPS_AI_BACKLOG_OVERDUE` | The oldest active work exceeded its task-specific queue SLA. |
 | `OPS_AI_FAILURE_RATE_HIGH` | Recent model, transport, or validation failures exceed the expected rate. |
 | `OPS_AI_NEW_DEAD_LETTER` | New terminally isolated work appeared during the monitoring window. |
@@ -83,5 +83,7 @@ completion while a bounded provider or I/O operation is in progress. Progress
 counters supplement this pulse; they are not the only proof of liveness.
 Expected weekly market closure is the only exception to market-component
 freshness alarms: quote, decision, and outcome components report
-`MARKET_CLOSED` during that clock window. Missing broker evidence outside the
-weekly closure remains `DATA_UNAVAILABLE` and must not be normalized to healthy.
+`MARKET_CLOSED` during that clock window. A clock-classified weekly closure
+records the payload generation time as its observation boundary. Missing broker
+evidence outside the weekly closure remains `DATA_UNAVAILABLE` and must not be
+normalized to healthy.

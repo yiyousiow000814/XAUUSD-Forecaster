@@ -202,9 +202,8 @@ def scheduler_health_snapshot(
                     "completed_15m": completed,
                 },
             ))
-        if active and progressed == 0 and oldest_age >= int(
-            MONITOR_WINDOW.total_seconds()
-        ):
+        stall_sla = int(TASK_QUEUE_SLA[task].total_seconds())
+        if active and progressed == 0 and oldest_age >= stall_sla:
             alerts.append(_alert(
                 "OPS_AI_PIPELINE_STALLED",
                 severity="ERROR", scope=task,
@@ -215,6 +214,7 @@ def scheduler_health_snapshot(
                 evidence={
                     "active_jobs": active,
                     "oldest_age_seconds": oldest_age,
+                    "stall_sla_seconds": stall_sla,
                 },
             ))
         if active and oldest_age >= int(TASK_QUEUE_SLA[task].total_seconds()):
