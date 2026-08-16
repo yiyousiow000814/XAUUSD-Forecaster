@@ -2561,7 +2561,10 @@ def test_semantic_failure_does_not_trigger_display_repair(monkeypatch) -> None:
     )
 
     with pytest.raises(ValueError, match="supporting evidence is absent"):
-        pool.call(0, annotation_module.DEFAULT_GEMINI_MODEL, "Gold", "Source body")
+        pool.call(
+            0, annotation_module.DEFAULT_GEMINI_MODEL, "Gold", "Source body",
+            prompt_version=annotation_module.PROMPT_VERSION,
+        )
     assert len(calls) == 1
 
 
