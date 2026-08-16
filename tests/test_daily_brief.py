@@ -1162,3 +1162,111 @@ def test_degraded_finalization_is_recovered_with_append_only_correction(
         ("daily-brief-test-recovery-next", "FINAL", 3),
     ]
     ledger.close()
+
+
+def test_recovery_resumes_revision_after_finalization_interruption(
+    tmp_path, monkeypatch,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    _seed_news(ledger)
+    monkeypatch.setattr(
+        daily_brief, "generate_metered_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad output")),
+    )
+    start = datetime(2026, 8, 11, 3, tzinfo=UTC)
+    for attempt in range(daily_brief.BRIEF_FAILURE_ATTEMPT_LIMIT):
+        daily_brief.update_daily_brief(
+            ledger, brief_date="2026-08-10", api_key="test",
+            request_accountant=CallbackModelAccountant(lambda _: True),
+            now=start + timedelta(hours=attempt * 2),
+        )
+
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        daily_brief, "generate_metered_json", _fake_generation(calls),
+    )
+    original_finalize = daily_brief._finalize
+    monkeypatch.setattr(
+        daily_brief, "_finalize",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("simulated finalization interruption")
+        ),
+    )
+    with pytest.raises(RuntimeError, match="finalization interruption"):
+        daily_brief.update_daily_brief(
+            ledger, brief_date="2026-08-10", api_key="test",
+            request_accountant=CallbackModelAccountant(lambda _: True),
+            now=start + timedelta(hours=12),
+        )
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM daily_news_briefs WHERE brief_date='2026-08-10'",
+    ).fetchone()[0] == 2
+
+    monkeypatch.setattr(daily_brief, "_finalize", original_finalize)
+    resumed = daily_brief.update_daily_brief(
+        ledger, brief_date="2026-08-10", api_key="test",
+        request_accountant=CallbackModelAccountant(lambda _: True),
+        now=start + timedelta(hours=13),
+    )
+
+    assert resumed["status"] == "UNCHANGED"
+    assert resumed["phase"] == "FINAL"
+    assert ledger.connection.execute(
+        """SELECT revision_number FROM daily_news_brief_finalization_corrections_v1
+           WHERE brief_date='2026-08-10'""",
+    ).fetchone()[0] == 2
+    assert len(calls) == 1
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM daily_news_briefs WHERE brief_date='2026-08-10'",
+    ).fetchone()[0] == 2
+    ledger.close()
+
+
+def test_degraded_fallback_resumes_after_finalization_interruption(
+    tmp_path, monkeypatch,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    _seed_news(ledger)
+    monkeypatch.setattr(
+        daily_brief, "generate_metered_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad output")),
+    )
+    start = datetime(2026, 8, 11, 3, tzinfo=UTC)
+    for attempt in range(daily_brief.BRIEF_FAILURE_ATTEMPT_LIMIT - 1):
+        daily_brief.update_daily_brief(
+            ledger, brief_date="2026-08-10", api_key="test",
+            request_accountant=CallbackModelAccountant(lambda _: True),
+            now=start + timedelta(hours=attempt * 2),
+        )
+
+    original_finalize = daily_brief._finalize
+    monkeypatch.setattr(
+        daily_brief, "_finalize",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("simulated fallback finalization interruption")
+        ),
+    )
+    with pytest.raises(RuntimeError, match="fallback finalization interruption"):
+        daily_brief.update_daily_brief(
+            ledger, brief_date="2026-08-10", api_key="test",
+            request_accountant=CallbackModelAccountant(lambda _: True),
+            now=start + timedelta(hours=12),
+        )
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM daily_news_briefs WHERE brief_date='2026-08-10'",
+    ).fetchone()[0] == 1
+
+    monkeypatch.setattr(daily_brief, "_finalize", original_finalize)
+    resumed = daily_brief.update_daily_brief(
+        ledger, brief_date="2026-08-10", api_key="test",
+        request_accountant=CallbackModelAccountant(lambda _: True),
+        now=start + timedelta(hours=13),
+    )
+
+    assert resumed["status"] == "OK"
+    assert resumed["phase"] == "DEGRADED"
+    assert resumed["revision_number"] == 1
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM daily_news_briefs WHERE brief_date='2026-08-10'",
+    ).fetchone()[0] == 1
+    ledger.close()
