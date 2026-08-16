@@ -8,6 +8,7 @@ import {
   parseAssistantContentDocument,
   type AssistantContentDocument,
 } from "../api/_shared/assistant-content";
+import { isAssistantModelIdentifier } from "../api/_shared/assistant-routing";
 
 export const ASSISTANT_ACTIVE_STATUSES = ["PENDING", "PROCESSING"] as const;
 export const ASSISTANT_TERMINAL_STATUSES = [
@@ -108,12 +109,10 @@ export function planAssistantConversationSelection(
   return preview ? "LOAD_PREVIEW" : "LOAD_REMOTE";
 }
 
-const assistantModelIdentifier = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/;
-
 const assistantModelVersions = (value: unknown) => (
   Array.isArray(value)
     ? value.filter((item): item is string => (
-      typeof item === "string" && assistantModelIdentifier.test(item)
+      isAssistantModelIdentifier(item)
     ))
     : []
 );
@@ -128,7 +127,7 @@ export function assistantModelLabel(provenance: Record<string, unknown>) {
     if (versions.length) return versions.join(" → ");
   }
   for (const value of [agent?.model_version, provenance.model_version]) {
-    if (typeof value === "string" && assistantModelIdentifier.test(value)) return value;
+    if (isAssistantModelIdentifier(value)) return value;
   }
   return "未记录模型";
 }

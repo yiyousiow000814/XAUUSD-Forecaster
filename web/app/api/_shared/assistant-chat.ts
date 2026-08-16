@@ -17,7 +17,10 @@ import {
   parseAssistantEvent,
 } from "./assistant-events";
 import { scheduleAssistantCompaction } from "./assistant-memory";
-import { parseAssistantRoutingProvenance } from "./assistant-routing";
+import {
+  isAssistantModelIdentifier,
+  parseAssistantRoutingProvenance,
+} from "./assistant-routing";
 
 export const ASSISTANT_CHAT_LIMITS = {
   activePerOwner: 2,
@@ -108,7 +111,6 @@ export class AssistantChatInputError extends Error {
 const objectId = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$/;
 const idempotencyKey = /^[A-Za-z0-9._:-]{16,128}$/;
 const errorCode = /^[A-Z][A-Z0-9_]{2,63}$/;
-const modelId = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/;
 const sha256 = /^[0-9a-f]{64}$/;
 const toolName = /^[a-z][a-z0-9_]{1,54}_v[1-9][0-9]*$/;
 const activeStatuses = ASSISTANT_ACTIVE_TURN_STATUSES_SQL;
@@ -879,7 +881,7 @@ const parseAgentProvenance = async (
     || !Number.isSafeInteger(toolResultTokens) || toolResultTokens < 0
     || toolResultTokens > Number(budget.MAX_TOOL_RESULT_TOKENS)
     || !Array.isArray(versions) || versions.length !== modelTurnCount
-    || versions.some(item => typeof item !== "string" || !modelId.test(item))
+    || versions.some(item => !isAssistantModelIdentifier(item))
     || new Set(versions).size !== 1
     || versions.at(-1) !== finalModelVersion
     || !Array.isArray(routes) || routes.length !== modelTurnCount
@@ -1044,7 +1046,7 @@ export async function completeAssistantChatTurn(
   const modelVersion = typeof input.model_version === "string" ? input.model_version.trim() : "";
   if (!answer || hasUnsafeTextControl(answer)
     || new TextEncoder().encode(answer).length > ASSISTANT_CHAT_LIMITS.maxAnswerBytes
-    || !modelId.test(modelVersion)) {
+    || !isAssistantModelIdentifier(modelVersion)) {
     inputError("INVALID_ASSISTANT_ANSWER", "Assistant 回答无效");
   }
   const provenance = await parseAgentProvenance(
