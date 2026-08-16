@@ -72,6 +72,44 @@ def test_scheduler_health_exposes_retry_capacity_stall_and_age_codes() -> None:
     ]
 
 
+def test_scheduler_retirement_is_progress_without_becoming_completion() -> None:
+    connection = _connection()
+    job_id = enqueue_job(
+        connection,
+        task_type="TITLE_TRANSLATION",
+        source="source",
+        source_item_id="obsolete",
+        revision_number=1,
+        annotation_id="",
+        prompt_version="prompt",
+        priority="BACKGROUND",
+        now=NOW - timedelta(hours=3),
+    )
+    connection.execute(
+        """INSERT INTO news_ai_job_attempts_v1 VALUES
+           (?,?,?,?,?,'NOT_CURRENT',NULL,NULL,NULL,NULL,?,NULL)""",
+        (
+            "retired-attempt", job_id, 1, "account", "credential",
+            (NOW - timedelta(minutes=1)).isoformat(),
+        ),
+    )
+    connection.commit()
+
+    snapshot = scheduler_health_snapshot(connection, now=NOW)
+    title = next(
+        task for task in snapshot["scheduler"]["tasks"]
+        if task["task_type"] == "TITLE_TRANSLATION"
+    )
+
+    assert title["completed_15m"] == 0
+    assert title["retired_15m"] == 1
+    assert not any(
+        alert["code"] == "OPS_AI_PIPELINE_STALLED"
+        and alert["scope"] == "TITLE_TRANSLATION"
+        for alert in snapshot["alerts"]
+    )
+
+
 def test_component_and_source_failures_use_the_same_alert_contract() -> None:
     connection = _connection()
     snapshot = scheduler_health_snapshot(connection, now=NOW)

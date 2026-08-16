@@ -57,13 +57,13 @@ source, every active scheduler task route, and the separately persisted Daily
 Brief state machine. Scheduler evidence includes:
 
 - queued, leased, backing-off, and dead-letter counts;
-- successful, deferred, and failed attempts over the current 15-minute window;
+- successful, deliberately retired, deferred, and failed attempts over the
+  current 15-minute window;
 - oldest active work age;
 - highest active claim count and a bounded non-secret job reference.
 
 Counts from articles, event identities, prediction exposures, and training
 rows remain distinct. One must never substitute for another in health gates.
-
 ## Visibility
 
 Warnings and errors must be visible without expanding a diagnostic control.
@@ -78,3 +78,7 @@ Operational summaries are derived from existing durable job attempts, quota
 reservations, source polls, component heartbeats, and update state. They expose
 no API key, prompt body, article body, account secret, or full internal job ID.
 An absent or unreadable evidence source must never be interpreted as healthy.
+Expected weekly market closure is the only exception to market-component
+freshness alarms: quote, decision, and outcome components report
+`MARKET_CLOSED` during that clock window. Missing broker evidence outside the
+weekly closure remains `DATA_UNAVAILABLE` and must not be normalized to healthy.
