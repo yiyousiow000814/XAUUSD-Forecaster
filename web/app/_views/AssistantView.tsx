@@ -14,6 +14,7 @@ import {
   fetchAssistantConversations,
   isAssistantTurnTerminal,
   mergeAssistantMessages,
+  planAssistantConversationSelection,
   replayAssistantEvents,
   submitAssistantTurn,
   updateAssistantConversation,
@@ -302,17 +303,27 @@ export default function AssistantView() {
   }, [railOpen]);
 
   const selectConversation = useCallback((conversation: AssistantConversation) => {
+    const plan = planAssistantConversationSelection(
+      selectedId, conversation.id, preview,
+    );
+    if (plan === "REFRESH_CURRENT") {
+      if (!preview) setDetailRevision(value => value + 1);
+      setError(null);
+      setRailOpen(false);
+      return;
+    }
     setSelectedId(conversation.id);
-    setMessages(preview ? assistantPreviewMessages(conversation.id) : []);
-    setCursor(preview ? assistantPreviewCursor[conversation.id] ?? null : null);
-    setEvents(preview && conversation.id === "conversation-preview-rates"
+    setMessages(plan === "LOAD_PREVIEW" ? assistantPreviewMessages(conversation.id) : []);
+    setCursor(plan === "LOAD_PREVIEW"
+      ? assistantPreviewCursor[conversation.id] ?? null : null);
+    setEvents(plan === "LOAD_PREVIEW" && conversation.id === "conversation-preview-rates"
       ? structuredClone(assistantPreviewEvents) : []);
-    setTraceTurnId(preview && conversation.id === "conversation-preview-rates"
+    setTraceTurnId(plan === "LOAD_PREVIEW" && conversation.id === "conversation-preview-rates"
       ? "turn-preview-rates" : conversation.active_turn?.id ?? null);
-    setDetailLoading(!preview);
+    setDetailLoading(plan === "LOAD_REMOTE");
     setError(null);
     setRailOpen(false);
-  }, [preview]);
+  }, [preview, selectedId]);
 
   const startNew = useCallback(() => {
     setArchived(false);
