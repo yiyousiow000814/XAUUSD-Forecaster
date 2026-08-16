@@ -624,7 +624,7 @@ body.modal-open { overflow:hidden; }
 .brief-overview.is-missing { border-left-color:var(--muted); }
 .brief-overview-head { margin-bottom:15px; }
 .brief-overview-head strong { display:block; font-family:var(--font-display); font-size:30px; font-weight:500; line-height:1.05; }
-.brief-overview-lead { max-width:46em; margin:0; font-family:var(--font-sans),sans-serif; font-size:19px; font-weight:700; line-height:1.7; }
+.brief-overview-lead { max-width:46em; margin:0; font-family:var(--font-sans),sans-serif; font-size:19px; font-weight:600; line-height:1.7; }
 .brief-overview-points { display:grid; grid-template-columns:minmax(0,1.35fr) minmax(240px,.65fr); gap:1px; margin-top:22px; border:1px solid rgba(17,17,15,.32); background:rgba(17,17,15,.32); }
 .brief-overview-points section { min-width:0; padding:15px 17px 17px; background:#e4e0d2; }
 .brief-overview-points span { display:block; margin-bottom:9px; color:var(--green); font-size:12px; font-weight:900; letter-spacing:.08em; }
