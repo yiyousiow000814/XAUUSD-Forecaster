@@ -71,14 +71,19 @@ materiality, novelty, confidence, and receipt identity. Only after event-level
 deduplication and ranking is the packet capped. Arrival order alone cannot push
 an important early event out of the packet.
 
-The generated product is a synthesis, not an evidence index. Every current
-revision contains a concise model-written overview that relates the day's
-material events, followed by at most five summarized developments with exact
-evidence IDs. The model receives bounded short citation references; validated
-references are mapped back to exact internal evidence IDs before persistence,
-so copying a long opaque identifier is never part of the model task. Raw
-candidate headlines and annotations remain supporting input;
-the UI does not present them as the Daily Brief itself.
+The generated product is a synthesis, not an evidence index. Every revision
+under the current synthesis contract contains one concise conclusion, one to
+three distinct drivers, one supported next item to watch, and at most five
+summarized developments with exact evidence IDs. All synthesis fields are
+required and bounded; incomplete structure fails validation instead of being
+partially published. The model receives bounded short citation references;
+validated references are mapped back to exact internal evidence IDs before
+persistence, so copying a long opaque identifier is never part of the model
+task. Raw candidate headlines and annotations remain supporting input; the UI
+presents the synthesis first, keeps the two highest-ranked developments
+immediately visible, and progressively discloses the remainder. Historical
+revisions that predate the structured synthesis remain readable without
+inventing missing drivers or watch items.
 
 ## Capacity and failure
 
