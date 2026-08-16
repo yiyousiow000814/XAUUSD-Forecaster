@@ -132,7 +132,6 @@ function NewsCard({ block }: { block: AssistantNewsCardBlock }) {
           {data.source_url ? <a href={data.source_url} rel="noopener noreferrer" target="_blank">
             阅读来源 <span aria-hidden="true">↗</span>
           </a> : <span>来源链接未进入当前证据包</span>}
-          <button onClick={() => dialog.current?.close()} type="button">完成</button>
         </footer>
       </article>
     </dialog>
