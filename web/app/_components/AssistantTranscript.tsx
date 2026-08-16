@@ -48,7 +48,13 @@ function AssistantMessageCard({ message, index }: { message: AssistantMessage; i
       <span>{message.role === "USER" ? "YOU / REQUEST" : "AURUM / RESPONSE"}</span>
       <span>MSG {String(index + 1).padStart(2, "0")} · {timeLabel(message.created_at)}</span>
     </header>
-    {message.content_document
+    {message.role === "USER" ? <>
+      <p className="assistant-user-prompt-desktop">{message.content}</p>
+      <details className="assistant-user-prompt-mobile">
+        <summary><span>原问题</span><b>查看全文</b></summary>
+        <p>{message.content}</p>
+      </details>
+    </> : message.content_document
       ? <AssistantContentBlocks document={message.content_document} />
       : <p>{message.content}</p>}
     {audit ? <details className="assistant-message-audit">
@@ -110,6 +116,7 @@ export default function AssistantTranscript({
   onRetry: () => void;
 }) {
   const [editingTitle, setEditingTitle] = useState(false);
+  const [manageOpen, setManageOpen] = useState(false);
   const [title, setTitle] = useState("");
   const messageScroll = useRef<HTMLDivElement>(null);
   const progress = useMemo(() => assistantProgressItems(events), [events]);
@@ -174,14 +181,29 @@ export default function AssistantTranscript({
         </small>
       </div>
       {conversation ? <div className="assistant-thread-actions">
-        <button disabled={mutating || preview} onClick={() => {
-          setTitle(conversation.title);
-          setEditingTitle(true);
-        }} type="button">重命名</button>
-        <button disabled={mutating || preview || messages.every(message => message.role !== "ASSISTANT")} onClick={onRegenerateTitle} type="button">重写标题</button>
-        <button disabled={mutating || preview || Boolean(activeTurn)} onClick={onArchive} type="button">
-          {conversation.status === "ARCHIVED" ? "恢复" : "归档"}
-        </button>
+        <button
+          aria-expanded={manageOpen}
+          className="assistant-manage-toggle"
+          onClick={() => setManageOpen(value => !value)}
+          type="button"
+        >管理</button>
+        <div className={`assistant-action-menu${manageOpen ? " is-open" : ""}`}>
+          <button disabled={mutating || preview} onClick={() => {
+            setManageOpen(false);
+            setTitle(conversation.title);
+            setEditingTitle(true);
+          }} type="button">重命名</button>
+          <button disabled={mutating || preview || messages.every(message => message.role !== "ASSISTANT")} onClick={() => {
+            setManageOpen(false);
+            onRegenerateTitle();
+          }} type="button">重写标题</button>
+          <button disabled={mutating || preview || Boolean(activeTurn)} onClick={() => {
+            setManageOpen(false);
+            onArchive();
+          }} type="button">
+            {conversation.status === "ARCHIVED" ? "恢复" : "归档"}
+          </button>
+        </div>
       </div> : null}
     </header>
 

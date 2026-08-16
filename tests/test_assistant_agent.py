@@ -238,11 +238,11 @@ def test_agent_may_answer_directly_without_executing_a_tool() -> None:
 
     assert result.answer == "直接回答。"
     assert [block["type"] for block in result.content_document["blocks"]] == [
-        "markdown", "callout",
+        "markdown",
     ]
     assert result.provenance["model_turn_count"] == 1
     assert result.provenance["tool_call_count"] == 0
-    assert result.provenance["system_instruction_version"] == "assistant-system-v3"
+    assert result.provenance["system_instruction_version"] == "assistant-system-v4"
     assert result.provenance["policy_version"] == "assistant-agent-v2"
     assert result.provenance["evidence_validation"]["mode"] == (
         "NO_CITABLE_EVIDENCE"
@@ -251,6 +251,12 @@ def test_agent_may_answer_directly_without_executing_a_tool() -> None:
         "NOT_VERIFIED"
     )
     assert "unverified prior conversation text" in (
+        payloads[0]["systemInstruction"]["parts"][0]["text"]
+    )
+    assert "Malaysia time (GMT+8)" in (
+        payloads[0]["systemInstruction"]["parts"][0]["text"]
+    )
+    assert "Do not echo raw ISO 8601 timestamps" in (
         payloads[0]["systemInstruction"]["parts"][0]["text"]
     )
     assert len(result.provenance["system_instruction_sha256"]) == 64

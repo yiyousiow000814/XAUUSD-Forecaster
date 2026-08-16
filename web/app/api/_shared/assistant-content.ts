@@ -391,13 +391,13 @@ export async function buildAssistantTextContentDocument(
       detail: "已通过 shared news retrieval 验证",
     }));
   }
-  blocks.push(await hashedBlock("block:boundary", "callout", {
-    tone: options.insufficientEvidence ? "INSUFFICIENT_EVIDENCE" : "BOUNDARY",
-    title: options.insufficientEvidence ? "证据不足" : "决策支持边界",
-    body: options.insufficientEvidence
-      ? "当前没有足够的已收录证据支持具体市场解释。"
-      : "该回答不会下单、执行交易或自动晋升模型。",
-  }));
+  if (options.insufficientEvidence) {
+    blocks.push(await hashedBlock("block:insufficient-evidence", "callout", {
+      tone: "INSUFFICIENT_EVIDENCE",
+      title: "证据不足",
+      body: "当前没有足够的已收录证据支持具体市场解释。",
+    }));
+  }
   const core = { protocol: ASSISTANT_CONTENT_PROTOCOL_VERSION, blocks };
   const document = { ...core, document_sha256: await sha256(core) };
   return verifyAssistantContentDocument(document, { answer, evidenceIds });

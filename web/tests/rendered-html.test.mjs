@@ -1811,7 +1811,7 @@ test("renders a recoverable responsive Assistant workbench without unsafe HTML",
   assert.match(css, /\.assistant-conversation-rail\.is-open \{ transform:translateX\(0\); \}/);
   assert.match(css, /\.assistant-composer-meta button \{[^}]*min-height:46px/);
   assert.match(css, /\.assistant-chat-error button,\.assistant-chat-error a \{[^}]*min-height:44px/);
-  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-open-rail \{ display:block/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-open-rail \{ display:grid/);
   assert.match(css, /\.assistant-message>p \{[^}]*overflow-wrap:anywhere; white-space:pre-wrap/);
 });
 
@@ -1839,6 +1839,13 @@ test("renders only validated Assistant content blocks with phone-owned overflow"
   assert.doesNotMatch(renderer, /dangerouslySetInnerHTML|innerHTML|srcDoc/);
   assert.match(renderer, /rel="noopener noreferrer"/);
   assert.match(renderer, /scope="col"/);
+  assert.match(renderer, /showModal\(\)/);
+  assert.match(renderer, /\/api\/news-content\?key=/);
+  assert.match(renderer, /GEMINI 中文摘要/);
+  assert.match(renderer, /GEMMA 市场影响判断/);
+  assert.match(renderer, /block\.data\.tone === "BOUNDARY"\) return null/);
+  assert.match(transcript, /assistant-user-prompt-mobile/);
+  assert.match(transcript, /assistant-manage-toggle/);
   assert.match(migration, /content_document_json/);
   assert.match(migration, /assistant_messages_structured_content_contract/);
   assert.match(css, /\.assistant-content-table>div \{[^}]*max-width:100%; overflow-x:auto/);
@@ -1847,4 +1854,7 @@ test("renders only validated Assistant content blocks with phone-owned overflow"
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-workbench \{[^}]*z-index:auto/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-conversation-rail \{[^}]*z-index:1020/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-rail-scrim \{[^}]*z-index:1010/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-news-dialog \{[^}]*width:100vw; height:100dvh/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-user-prompt-desktop \{ display:none/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell form \{[^}]*grid-template-columns:minmax\(0,1fr\) 52px/);
 });
