@@ -8,6 +8,7 @@ import {
   parseNewsReviewState,
   type NewsReviewState,
 } from "../../_lib/news-review-state";
+import { publicNewsRecord } from "../../_lib/public-news-copy";
 
 export const dynamic = "force-dynamic";
 
@@ -104,7 +105,7 @@ export async function GET(request: Request) {
             item.model_visibility = "IMPACT_EXPIRED";
             item.impact_status = "EXPIRED";
           }
-          return item;
+          return publicNewsRecord(item) as NewsIndexItem;
         }),
         total: totalRow?.count ?? 0,
         all_total: totalsRow?.count ?? 0,
@@ -155,11 +156,13 @@ export async function GET(request: Request) {
         signal: AbortSignal.timeout(4_000),
       });
       const payload = await response.json() as { recent_news?: NewsIndexItem[] };
-      const all = [...(payload.recent_news ?? [])].sort((left, right) => {
-        const leftTime = String(left.source_published_time ?? left.collector_first_seen_time ?? "");
-        const rightTime = String(right.source_published_time ?? right.collector_first_seen_time ?? "");
-        return rightTime.localeCompare(leftTime);
-      });
+      const all = [...(payload.recent_news ?? [])]
+        .map(item => publicNewsRecord(item) as NewsIndexItem)
+        .sort((left, right) => {
+          const leftTime = String(left.source_published_time ?? left.collector_first_seen_time ?? "");
+          const rightTime = String(right.source_published_time ?? right.collector_first_seen_time ?? "");
+          return rightTime.localeCompare(leftTime);
+        });
       const stateItems = all.filter(row => newsReviewStateOf(row) === reviewState);
       const categoryCounts = Object.fromEntries(
         [...new Set(stateItems.map(row => String(row.category ?? "其他")))].map(name => [

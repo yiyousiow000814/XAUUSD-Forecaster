@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
 import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
+import { publicNewsRecord } from "../../_lib/public-news-copy";
 
 export const dynamic = "force-dynamic";
 
@@ -29,7 +30,11 @@ export async function GET(request: Request) {
     const items: Record<string, { detail_hash?: unknown; payload?: unknown }> = {};
     if (previewBundle) {
       for (const key of detailKeys) {
-        if (previewBundle.news_details[key]) items[key] = previewBundle.news_details[key];
+        if (previewBundle.news_details[key]) {
+          items[key] = publicNewsRecord(
+            previewBundle.news_details[key],
+          ) as typeof items[string];
+        }
       }
     }
     const missing = detailKeys.filter(key => !items[key]);
@@ -41,10 +46,10 @@ export async function GET(request: Request) {
          WHERE detail_key IN (${placeholders})`,
       ).bind(...missing).all<{ detail_key: string; payload: string; detail_hash: string }>();
       for (const row of rows.results) {
-        items[row.detail_key] = {
+        items[row.detail_key] = publicNewsRecord({
           detail_hash: row.detail_hash,
           payload: JSON.parse(row.payload),
-        };
+        }) as typeof items[string];
       }
     }
     return NextResponse.json({ items, missing: detailKeys.filter(key => !items[key]) }, {
@@ -58,7 +63,7 @@ export async function GET(request: Request) {
   }
   if (previewBundle) {
     const detail = previewBundle.news_details[detailKey];
-    if (detail) return previewJson(detail);
+    if (detail) return previewJson(publicNewsRecord(detail));
     // Only the visible first page is compiled into the Worker. Older details
     // remain readable from D1; Preview writes are still rejected below.
   }
@@ -73,7 +78,9 @@ export async function GET(request: Request) {
   if (!row) {
     return NextResponse.json({ error: "新闻详情仍在同步" }, { status: 404 });
   }
-  const payload = { detail_hash: row.detail_hash, payload: JSON.parse(row.payload) };
+  const payload = publicNewsRecord({
+    detail_hash: row.detail_hash, payload: JSON.parse(row.payload),
+  });
   if (previewBundle) return previewJson(payload, 200, "read-only-d1-detail");
   return NextResponse.json(payload, {
     headers: { "Cache-Control": "private, max-age=300" },

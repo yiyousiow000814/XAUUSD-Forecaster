@@ -1769,6 +1769,9 @@ def _impact_prompt(row: dict, *, prompt_version: str = IMPACT_PROMPT_VERSION) ->
         "context_differences_zh只列非核心差异。SAME_EVENT的前两项必须为空；"
         "SAME_EPISODE必须有core_fact_changes_zh且identity_differences_zh为空；"
         "NEW_EPISODE必须有identity_differences_zh。reason_zh用一句简体中文说明正文依据。"
+        "reason_zh直接展示给普通用户：必须用白话说明为何属于重复报道、同一事件的新进展或"
+        "不同事件，不得出现‘候选’、candidate_id、matched_candidate_id、annotation_id、UUID"
+        "或任何内部标识；需要引用旧记录时写‘系统中已有的一篇报道’，并说明可理解的核心事实。"
         "只返回JSON。\n"
         + independent_review + "\n" +
         f"PUBLISHED_AT: {row.get('source_published_time') or ''}\n"

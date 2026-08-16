@@ -1,3 +1,5 @@
+import { publicNewsRecord } from "../../_lib/public-news-copy";
+
 export const MAX_QUERY_CHARACTERS = 80;
 export const MAX_QUERY_TOKENS = 6;
 export const MAX_PAGE_SIZE = 20;
@@ -230,7 +232,9 @@ const evidenceId = (row: Record<string, unknown>) => String(
 const canonicalItem = (row: Record<string, unknown>, forcedEvidenceId?: string) => {
   const canonicalId = forcedEvidenceId ?? evidenceId(row);
   if (!canonicalId) throw new Error("news retrieval row has no stable evidence id");
-  return { ...row, evidence_id: canonicalId, detail_key: canonicalId } as NewsRetrievalItem;
+  return publicNewsRecord({
+    ...row, evidence_id: canonicalId, detail_key: canonicalId,
+  }) as NewsRetrievalItem;
 };
 
 const rowTime = (row: Record<string, unknown>, kind: "published" | "received") => {

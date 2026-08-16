@@ -184,6 +184,13 @@ primary Gemini annotation model has no safe capacity, the existing scheduler
 may try the separately metered fallback annotation model; final event-identity
 review remains Gemma-owned rather than silently changing classifier semantics.
 
+User-facing semantic and impact explanations use ordinary language. They must
+not expose candidate, annotation, or matched-record identifiers, UUIDs, or
+storage-field names. A comparison may say that the same facts already appear
+in an existing report and describe those facts; the immutable matched ID stays
+in the audit record rather than in display prose. Legacy display prose is
+normalized at the presentation boundary without mutating its stored evidence.
+
 Every live decision records semantic-pipeline health. A newly received
 candidate gets one five-minute decision interval to finish its current-contract
 annotation. An annotation that satisfies the current model-admission semantics

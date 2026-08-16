@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 import json
+import re
 
 from .news_identity import canonical_id
 from .news_relevance import google_news_item_is_relevant
@@ -36,6 +37,30 @@ IDENTITY_RELATIONS = frozenset({
     "SAME_EVENT", "SAME_EPISODE", "NEW_EPISODE", "UNRESOLVED",
 })
 IDENTITY_CANDIDATE_UNIVERSE_LIMIT = 10_000
+
+_INTERNAL_UUID = re.compile(
+    r"(?<![0-9a-f])[0-9a-f]{8}(?:-[0-9a-f]{4}){3}"
+    r"-[0-9a-f]{12}(?![0-9a-f])",
+    re.IGNORECASE,
+)
+_INTERNAL_REASON_FIELD = re.compile(
+    r"\b(?:matched_candidate_id|candidate_id|annotation_id)\b",
+    re.IGNORECASE,
+)
+_LABELED_INTERNAL_ID = re.compile(
+    r"(?:候选|已有报道记录|已有报道)\s*[：:#]?\s*"
+    r"[0-9a-f]{8}[0-9a-f-]{0,40}",
+    re.IGNORECASE,
+)
+
+
+def public_impact_reason(value: object) -> str:
+    """Remove storage vocabulary from the user-facing impact explanation."""
+    reason = str(value or "").strip()
+    reason = _LABELED_INTERNAL_ID.sub("系统中已有的一篇报道", reason)
+    reason = _INTERNAL_UUID.sub("系统中已有的一篇报道", reason)
+    reason = _INTERNAL_REASON_FIELD.sub("系统中已有的一篇报道", reason)
+    return reason.replace("候选", "已有报道")
 
 IMPACT_RESPONSE_SCHEMA = {
     "type": "object",
@@ -144,7 +169,7 @@ def validate_impact_assessment(
     confidence = float(result["confidence"])
     if not 0.0 <= confidence <= 1.0:
         raise ValueError("Gemma impact confidence is outside [0, 1]")
-    reason = str(result["reason_zh"] or "").strip()
+    reason = public_impact_reason(result["reason_zh"])
     if len(reason) < 4:
         raise ValueError("Gemma impact reason is empty")
     return {
