@@ -1818,11 +1818,14 @@ test("renders a recoverable responsive Assistant workbench without unsafe HTML",
   assert.doesNotMatch(transcript, /dangerouslySetInnerHTML/);
   assert.match(fixture, /管理与发送仅生产可用 · 不调用模型/);
   assert.match(css, /\.assistant-workbench \{[^}]*grid-template-columns:300px minmax\(0,1fr\)/);
+  assert.match(css, /\.assistant-workbench \{[^}]*gap:0/);
+  assert.match(css, /\.assistant-transcript \{[^}]*border-left:1px solid var\(--ink\)/);
   assert.match(css, /body:has\(> \.preview-banner\):has\(\.assistant-main\)[^{]*\{[^}]*grid-template-rows:auto minmax\(0,1fr\)/);
   assert.match(css, /\.assistant-conversation-rail\.is-open \{ transform:translateX\(0\); \}/);
   assert.match(css, /\.assistant-composer-meta button \{[^}]*min-height:46px/);
   assert.match(css, /\.assistant-chat-error button,\.assistant-chat-error a \{[^}]*min-height:44px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-open-rail \{ display:grid/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-transcript \{ border-left:0/);
   assert.match(css, /\.assistant-message>p \{[^}]*overflow-wrap:anywhere; white-space:pre-wrap/);
 });
 
