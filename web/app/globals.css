@@ -589,7 +589,7 @@ body.modal-open { overflow:hidden; }
 .component-status article { grid-column:span 2; min-width:0; padding:16px; background:var(--paper); }
 .component-status article:not(:nth-child(3n)) { border-right:1px solid var(--ink); }
 .component-status article:nth-child(n+4) { border-top:1px solid var(--ink); }
-.component-status article:last-child:nth-child(3n+1) { grid-column:span 6; border-right:0; }
+.component-status article:last-child:nth-child(3n+1) { grid-column:span 6; }
 .component-status article:nth-last-child(2):nth-child(3n+1),
 .component-status article:last-child:nth-child(3n+2) { grid-column:span 3; }
 .component-status article:last-child { border-right:0; }
