@@ -1903,7 +1903,7 @@ def _dashboard_payload(database: Path) -> dict:
         auditable_news_events = _news_evidence_display_rows(
             connection, all_news_evidence
         )
-        news_evidence = bounded_evidence_window(auditable_news_events, 100)
+        news_evidence = bounded_evidence_window(auditable_news_events, 60)
         raw_article_revisions = connection.execute(
             "SELECT count(*) FROM news_revisions"
         ).fetchone()[0]
