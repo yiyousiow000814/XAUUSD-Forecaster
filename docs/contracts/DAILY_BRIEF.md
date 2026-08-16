@@ -19,8 +19,10 @@ approved annotation model by the cutoff. Title translation and impact analysis
 are optional presentation and ranking inputs; they are not completion gates.
 
 An unreviewed item is settled when its active annotation job reaches an
-explicit terminal state. Settled terminal items are counted separately and do
-not block the date forever.
+explicit terminal state or when a later immutable revision supersedes the
+date-scoped revision. A date-scoped cluster member is likewise settled when a
+globally preferred immutable peer makes it unclaimable by the current annotator.
+Settled terminal items are counted separately and do not block the date forever.
 
 ## Lifecycle
 
@@ -38,12 +40,18 @@ previous date: each worker cycle processes the current date and a bounded,
 newest-first backlog of unfinished dates. Once a historical date has no pending
 items, finalization is recorded without waiting for the live-day regeneration
 debounce. Restart preserves refresh, retry, and finalization state in SQLite.
+The shared annotation scheduler reserves a bounded part of each discovery batch
+for those unfinished historical dates so continuous current-day arrivals cannot
+starve their remaining semantic reviews.
 
 ## Revisions and candidates
 
 Generated revisions and finalization/failure evidence are append-only.
 Operational refresh state is mutable. The UI reads the authoritative latest
 revision for a date and never overwrites older revisions.
+The generation source hash covers both the bounded evidence packet and the
+prompt contract version, so a new synthesis contract creates a new immutable
+revision even when the underlying candidates are unchanged.
 
 The model packet is selected deterministically from the complete reviewed
 population. It keeps one highest-ranked update per canonical event, then ranks
@@ -51,6 +59,12 @@ by existing review priority, impact/update semantics, major event category,
 materiality, novelty, confidence, and receipt identity. Only after event-level
 deduplication and ranking is the packet capped. Arrival order alone cannot push
 an important early event out of the packet.
+
+The generated product is a synthesis, not an evidence index. Every current
+revision contains a model-written overview that relates the day's material
+events, followed by a bounded set of summarized developments with exact
+evidence IDs. Raw candidate headlines and annotations remain supporting input;
+the UI does not present them as the Daily Brief itself.
 
 ## Capacity and failure
 

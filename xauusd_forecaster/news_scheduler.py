@@ -893,6 +893,7 @@ def sync_pending_jobs(
         pending_impact_records,
         pending_title_translation_records,
     )
+    from .daily_brief import brief_dates_to_process
 
     instant = now or datetime.now(UTC)
     authorize_repairable_annotation_failures(
@@ -901,9 +902,21 @@ def sync_pending_jobs(
         recovery_version=ANNOTATION_FAILURE_RECOVERY_VERSION,
         now=instant,
     )
-    active_annotations = pending_annotation_records(
+    brief_backlog = brief_dates_to_process(connection, now=instant)[1:]
+    protected_limit = (limit + 1) // 2 if brief_backlog else 0
+    protected_annotations = pending_annotation_records(
+        connection, observed_at=instant, limit=max(1, protected_limit),
+        prompt_version=PROMPT_VERSION,
+        priority_receipt_days=tuple(brief_backlog),
+    ) if protected_limit else []
+    general_annotations = pending_annotation_records(
         connection, observed_at=instant, limit=limit, prompt_version=PROMPT_VERSION,
     )
+    active_annotations_by_revision = {
+        (str(row["source"]), str(row["source_item_id"]), int(row["revision_number"])): row
+        for row in (*protected_annotations, *general_annotations)
+    }
+    active_annotations = list(active_annotations_by_revision.values())[:limit]
     oldest_impact_limit = (limit + 1) // 2
     newest_impact_limit = limit // 2
     oldest_impacts = pending_impact_records(

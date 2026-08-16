@@ -611,6 +611,43 @@ def test_impact_discovery_advances_old_backfill_and_new_arrivals(
     assert queued == {"oldest", "newest"}
 
 
+def test_annotation_discovery_reserves_capacity_for_unfinished_brief_dates(
+    tmp_path,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+
+    def append(item: str, received_at: datetime) -> None:
+        body = f"Complete macroeconomic evidence for {item}. " * 20
+        ledger.append_news_revision({
+            "source": "federal_reserve_monetary",
+            "source_item_id": item,
+            "source_published_time": received_at,
+            "collector_first_seen_time": received_at,
+            "fetched_time": received_at,
+            "headline": f"Federal Reserve report {item}",
+            "body": body,
+            "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+            "cluster_id": item,
+        })
+
+    append("unfinished-brief", NOW - timedelta(days=2))
+    for index in range(4):
+        append(f"current-{index}", NOW - timedelta(minutes=index))
+
+    discovered = sync_pending_jobs(ledger.connection, now=NOW, limit=2)
+    queued = {
+        row[0] for row in ledger.connection.execute(
+            "SELECT source_item_id FROM news_ai_jobs_v1 "
+            "WHERE task_type='ACTIVE_ANNOTATION'"
+        ).fetchall()
+    }
+
+    assert discovered["ACTIVE_ANNOTATION"] == 2
+    assert "unfinished-brief" in queued
+    assert len(queued) == 2
+    ledger.close()
+
+
 def test_preemptible_quota_deferral_flows_to_routine_account(
     tmp_path, monkeypatch,
 ) -> None:

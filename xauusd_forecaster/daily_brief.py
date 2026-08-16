@@ -17,7 +17,7 @@ from .model_gateway import ModelGatewayCapacityExhausted, ModelRequestAccountant
 from .news_semantics import validated_annotation_predicate
 
 
-BRIEF_PROMPT_VERSION = "daily-news-brief-v2"
+BRIEF_PROMPT_VERSION = "daily-news-brief-v3-synthesis-overview"
 BRIEF_EVIDENCE_LIMIT = 60
 BRIEF_INPUT_TOKEN_BUDGET = 12_000
 BRIEF_OUTPUT_TOKEN_BUDGET = 4_096
@@ -103,6 +103,22 @@ def _population_rows(
                       AND j.source=p.source AND j.source_item_id=p.source_item_id
                       AND j.revision_number=p.revision_number
                       AND j.prompt_version=? AND j.state='DEAD_LETTER'
+                  ) THEN 1 WHEN a.annotation_id IS NULL AND EXISTS (
+                    SELECT 1 FROM news_revisions superseding
+                    WHERE superseding.source=p.source
+                      AND superseding.source_item_id=p.source_item_id
+                      AND superseding.revision_number>p.revision_number
+                  ) THEN 1 WHEN a.annotation_id IS NULL AND EXISTS (
+                    SELECT 1 FROM news_revisions preferred_peer
+                    WHERE preferred_peer.cluster_id=p.cluster_id
+                      AND NOT EXISTS (
+                        SELECT 1 FROM news_revisions preferred_peer_newer
+                        WHERE preferred_peer_newer.source=preferred_peer.source
+                          AND preferred_peer_newer.source_item_id=preferred_peer.source_item_id
+                          AND preferred_peer_newer.revision_number>preferred_peer.revision_number)
+                      AND (length(COALESCE(preferred_peer.body,''))>length(COALESCE(p.body,''))
+                        OR (length(COALESCE(preferred_peer.body,''))=length(COALESCE(p.body,''))
+                          AND preferred_peer.source_item_id<p.source_item_id))
                   ) THEN 1 ELSE 0 END AS terminal_failure
            FROM population p
            LEFT JOIN news_annotations a ON a.annotation_id=(
@@ -271,10 +287,11 @@ def _brief_payload(day: str, evidence: list[dict[str, object]]) -> dict[str, obj
     return {
         "systemInstruction": {"parts": [{"text": (
             "你是黄金市场新闻编辑。只可总结提供的资料，不作交易建议，不补充外部事实。"
-            "合并重复报道，优先保留真正的新进展，使用简短自然的简体中文。"
+            "合并重复报道，先综合跨事件关系与共同市场背景，再列真正的新进展。"
+            "使用简短自然的简体中文，不得把输入标题或摘要原样堆叠成简报。"
         )}]},
         "contents": [{"parts": [{"text": (
-            f"生成 {day} 每日简报。返回标题和最多8条重点；"
+            f"生成 {day} 每日简报。返回标题、3至5句综合overview和最多8条重点；"
             "每条必须列出支持它的evidence_ids。如果资料不足，宁可少写。"
             "只返回JSON。\nEVIDENCE\n" +
             json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))
@@ -283,9 +300,10 @@ def _brief_payload(day: str, evidence: list[dict[str, object]]) -> dict[str, obj
             "responseMimeType": "application/json", "temperature": 0,
             "maxOutputTokens": BRIEF_OUTPUT_TOKEN_BUDGET,
             "responseSchema": {
-                "type": "object", "required": ["title", "items"],
+                "type": "object", "required": ["title", "overview", "items"],
                 "properties": {
                     "title": {"type": "string", "maxLength": 120},
+                    "overview": {"type": "string", "maxLength": 1200},
                     "items": {"type": "array", "maxItems": 8, "items": {
                         "type": "object", "required": ["headline", "summary", "evidence_ids"],
                         "properties": {
@@ -306,8 +324,10 @@ def _decode_brief(envelope: dict[str, object], evidence: list[dict[str, object]]
     if not isinstance(result, dict):
         raise ValueError("Gemma daily brief returned a non-object result")
     title = str(result.get("title") or "").strip()
+    overview = str(result.get("overview") or "").strip()
     items = result.get("items")
-    if not isinstance(items, list) or not title or len(title) > 120:
+    if (not isinstance(items, list) or not title or len(title) > 120
+            or not overview or len(overview) > 1200):
         raise ValueError("Gemma daily brief returned an invalid result")
     allowed = {str(row["id"]) for row in evidence}
     canonical = []
@@ -322,7 +342,7 @@ def _decode_brief(envelope: dict[str, object], evidence: list[dict[str, object]]
             raise ValueError("Gemma daily brief cited unknown evidence")
         canonical.append({"headline": headline.strip(), "summary": summary.strip(),
                           "evidence_ids": refs})
-    return {"title": title, "items": canonical}
+    return {"title": title, "overview": overview, "items": canonical}
 
 
 def _counts(rows: list[dict]) -> dict[str, int]:
@@ -335,7 +355,8 @@ def _counts(rows: list[dict]) -> dict[str, int]:
 
 def _latest_brief(connection, day: str):
     return connection.execute(
-        "SELECT revision_number,source_hash,generated_at FROM daily_news_briefs WHERE brief_date=? "
+        "SELECT revision_number,source_hash,generated_at,prompt_version "
+        "FROM daily_news_briefs WHERE brief_date=? "
         "ORDER BY revision_number DESC LIMIT 1", (day,),
     ).fetchone()
 
@@ -478,6 +499,7 @@ def _finalize_generation_fallback(
     important = sorted(candidates, key=_importance, reverse=True)[:8]
     brief = {
         "title": f"{day} 每日简报（自动整理）",
+        "overview": "Gemma 汇总未完成；以下内容由系统从已复核资料中按重要性整理。",
         "items": [{
             "headline": _bounded_text(row["headline_zh"], 240),
             "summary": _bounded_text(row["summary"], 800),
@@ -571,7 +593,9 @@ def update_daily_brief(
     candidates = _candidate_rows(reviewed)
     packet = _budgeted_evidence_packet(day, candidates)
     population_hash = _population_hash(rows)
-    candidate_hash = _source_hash(packet) if packet else None
+    candidate_hash = _source_hash([
+        {"prompt_version": BRIEF_PROMPT_VERSION}, *packet,
+    ]) if packet else None
     latest = _latest_brief(ledger.connection, day)
     state = ledger.connection.execute(
         "SELECT * FROM daily_news_brief_refresh_state WHERE brief_date=?", (day,),
@@ -631,7 +655,8 @@ def update_daily_brief(
         if state and state["last_generated_candidate_hash"]
         else latest["source_hash"] if latest else None
     )
-    if latest and generated_hash == candidate_hash:
+    if (latest and generated_hash == candidate_hash
+            and latest["prompt_version"] == BRIEF_PROMPT_VERSION):
         if day != current_day and counts["pending_items"] == 0:
             phase = _finalize(
                 ledger, day, instant=instant, counts=counts,
