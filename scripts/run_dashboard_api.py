@@ -38,7 +38,10 @@ _QUOTE_CANDLE_CACHE: dict[str, dict] = {}
 
 from xauusd_forecaster.factors import factor_coverage  # noqa: E402
 from xauusd_forecaster.dashboard_payloads import bounded_evidence_window  # noqa: E402
-from xauusd_forecaster.daily_brief import recent_daily_briefs  # noqa: E402
+from xauusd_forecaster.daily_brief import (  # noqa: E402
+    daily_brief_summary,
+    recent_daily_briefs,
+)
 from xauusd_forecaster.annotation import (  # noqa: E402
     DEFAULT_GEMINI_MODEL,
     DEFAULT_GEMMA_MODEL,
@@ -1911,6 +1914,7 @@ def _dashboard_payload(database: Path) -> dict:
             "SELECT count(*) FROM news_decision_event_snapshots_v1"
         ).fetchone()[0]
         daily_news_briefs = recent_daily_briefs(connection)
+        daily_news_brief_summary = daily_brief_summary(connection, now=now)
         scheduler_ledger_available = connection.execute(
             """SELECT 1 FROM sqlite_master
                WHERE type='table' AND name='news_ai_account_daily_usage_v1'"""
@@ -2220,6 +2224,7 @@ def _dashboard_payload(database: Path) -> dict:
         "recent_decisions": [serialize_row(row) for row in recent],
         "recent_news": news,
         "daily_news_briefs": daily_news_briefs,
+        "daily_news_brief_summary": daily_news_brief_summary,
         "news_evidence": news_evidence,
         "storylines": storylines[:20],
         "market_narrative_candidates": event_graph["market_narrative_candidates"][:20],

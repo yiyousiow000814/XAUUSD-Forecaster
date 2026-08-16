@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from .annotation import (
     DEFAULT_GEMINI_MODEL,
+    DEFAULT_GEMMA_MODEL,
     FALLBACK_GEMINI_MODEL,
     TITLE_TRANSLATION_MODELS,
 )
@@ -29,6 +30,7 @@ AI_TASK_ROUTES = (
     ),
     AiTaskRoute("ACTIVE_IMPACT", (IMPACT_MODEL,), "NEWS_EVENT_IDENTITY"),
     AiTaskRoute("TITLE_TRANSLATION", TITLE_TRANSLATION_MODELS, "DISPLAY_ONLY"),
+    AiTaskRoute("DAILY_BRIEF", (DEFAULT_GEMMA_MODEL,), "DISPLAY_ONLY"),
 )
 
 AI_TASK_ROUTE_BY_TYPE = {route.task_type: route for route in AI_TASK_ROUTES}

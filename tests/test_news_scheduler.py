@@ -772,7 +772,8 @@ def test_every_scheduler_task_has_one_declared_semantic_route() -> None:
     from xauusd_forecaster.ai_task_registry import AI_TASK_ROUTE_BY_TYPE
     from xauusd_forecaster.news_scheduler import TASKS
 
-    assert set(AI_TASK_ROUTE_BY_TYPE) == set(TASKS)
+    assert set(TASKS).issubset(AI_TASK_ROUTE_BY_TYPE)
+    assert AI_TASK_ROUTE_BY_TYPE["DAILY_BRIEF"].semantic_owner == "DISPLAY_ONLY"
     assert AI_TASK_ROUTE_BY_TYPE["ACTIVE_IMPACT"].semantic_owner == (
         "NEWS_EVENT_IDENTITY"
     )

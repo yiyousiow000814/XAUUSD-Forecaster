@@ -3,11 +3,10 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 
-import pytest
-
 from xauusd_forecaster import daily_brief
 from xauusd_forecaster.forward_ledger import ForwardLedger
 from xauusd_forecaster.model_gateway import ModelGatewayCapacityExhausted
+from xauusd_forecaster.news_scheduler import ApiCredential, ROUTINE_POOL, enqueue_job
 from tests.model_accounting_fakes import CallbackModelAccountant
 
 
@@ -18,6 +17,8 @@ def _seed_news_item(
     minute: int,
     summary: str | None = None,
     parsed_at: datetime | None = None,
+    review_priority: str = "NORMAL",
+    material_event_key: str | None = None,
 ) -> None:
     received = datetime(2026, 8, 10, 1, tzinfo=UTC) + timedelta(minutes=minute)
     parsed = parsed_at or received + timedelta(minutes=1)
@@ -66,14 +67,17 @@ def _seed_news_item(
                 0,
                 0.8,
                 0.9,
-                "gemini",
-                "v1",
+                daily_brief.DEFAULT_GEMINI_MODEL,
+                daily_brief.PROMPT_VERSION,
                 (parsed - timedelta(seconds=5)).isoformat(),
                 parsed.isoformat(),
                 json.dumps(
                     {
                         "summary_zh": summary or f"黄金价格出现新变化 {item_id}",
                         "primary_category": "油价/能源",
+                        "review_priority": review_priority,
+                        "materiality": 0.8,
+                        "material_event_key": material_event_key or f"event-{item_id}",
                     }
                 ),
             ),
@@ -267,11 +271,14 @@ def test_non_candidate_change_does_not_regenerate(tmp_path, monkeypatch) -> None
             (
                 "replacement-bulk-000", "Reuters", "bulk-000", 1,
                 "hash-bulk-000", "market", "[]", 0, 0, 0, 0, 0, 0.8,
-                0.9, "gemini", "v1", "2026-08-10T03:00:00+00:00",
+                0.9, daily_brief.DEFAULT_GEMINI_MODEL, daily_brief.PROMPT_VERSION,
+                "2026-08-10T03:00:00+00:00",
                 "2026-08-10T03:01:00+00:00",
                 json.dumps({
                     "summary_zh": "仅改变候选窗口之外的旧资料",
                     "primary_category": "油价/能源",
+                    "review_priority": "NORMAL", "materiality": 0.8,
+                    "material_event_key": "event-bulk-000",
                 }),
             ),
         )
@@ -281,11 +288,9 @@ def test_non_candidate_change_does_not_regenerate(tmp_path, monkeypatch) -> None
         request_accountant=accountant,
         now=now + timedelta(minutes=2),
     )
-    assert result == {
-        "status": "UNCHANGED",
-        "brief_date": "2026-08-10",
-        "reason": "CANDIDATES_UNCHANGED",
-    }
+    assert result["status"] == "UNCHANGED"
+    assert result["reason"] == "CANDIDATES_UNCHANGED"
+    assert result["phase"] == "UPDATING"
     assert len(calls) == 1
     ledger.close()
 
@@ -326,13 +331,18 @@ def test_daily_brief_rejects_fake_evidence(tmp_path, monkeypatch) -> None:
         return kwargs["decode"](envelope), "gemma-test"
 
     monkeypatch.setattr(daily_brief, "generate_metered_json", fake_generation)
-    with pytest.raises(ValueError, match="unknown evidence"):
-        daily_brief.update_daily_brief(
-            ledger,
-            api_key="test-key",
-            request_accountant=CallbackModelAccountant(lambda usage: True),
-            now=datetime(2026, 8, 10, 3, tzinfo=UTC),
-        )
+    result = daily_brief.update_daily_brief(
+        ledger,
+        api_key="test-key",
+        request_accountant=CallbackModelAccountant(lambda usage: True),
+        now=datetime(2026, 8, 10, 3, tzinfo=UTC),
+    )
+    assert result["status"] == "DEFERRED"
+    assert result["reason"] == "INVALID_MODEL_OUTPUT"
+    failure = ledger.connection.execute(
+        "SELECT failure_code,error_type FROM daily_news_brief_failures_v1"
+    ).fetchone()
+    assert tuple(failure) == ("INVALID_MODEL_OUTPUT", "ValueError")
     assert not ledger.connection.execute("SELECT 1 FROM daily_news_briefs").fetchone()
     ledger.close()
 
@@ -346,12 +356,14 @@ def test_daily_brief_excludes_future_annotations(tmp_path) -> None:
         minute=1,
         parsed_at=cutoff + timedelta(seconds=1),
     )
-    assert daily_brief.update_daily_brief(
+    result = daily_brief.update_daily_brief(
         ledger,
         api_key="test-key",
         request_accountant=CallbackModelAccountant(lambda usage: True),
         now=cutoff,
-    ) == {"status": "NO_NEWS", "brief_date": "2026-08-10"}
+    )
+    assert result["status"] == "NO_REVIEWED_NEWS"
+    assert result["received_items"] == result["pending_items"] == 1
     ledger.close()
 
 
@@ -368,4 +380,220 @@ def test_daily_brief_is_append_only(tmp_path) -> None:
         raise AssertionError("append-only trigger did not fire")
     except Exception as error:
         assert "append-only" in str(error)
+    ledger.close()
+
+
+def test_current_day_reports_partial_review_progress(tmp_path, monkeypatch) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    now = datetime(2026, 8, 10, 3, tzinfo=UTC)
+    _seed_news_item(ledger, "ready", minute=1)
+    _seed_news_item(ledger, "pending", minute=2, parsed_at=now + timedelta(hours=1))
+    monkeypatch.setattr(daily_brief, "generate_metered_json", _fake_generation([]))
+    result = daily_brief.update_daily_brief(
+        ledger, api_key="test", request_accountant=CallbackModelAccountant(lambda _: True),
+        now=now,
+    )
+    assert result["phase"] == "UPDATING"
+    assert (result["reviewed_items"], result["received_items"], result["pending_items"]) == (1, 2, 1)
+    summary = daily_brief.daily_brief_summary(ledger.connection, now=now)
+    assert summary["phase"] == "UPDATING"
+    assert summary["is_final"] is False
+    ledger.close()
+
+
+def test_previous_day_finishes_after_midnight_when_late_annotation_arrives(
+    tmp_path, monkeypatch,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    parsed = datetime(2026, 8, 11, 0, 5, tzinfo=UTC)
+    _seed_news_item(ledger, "late", minute=1, parsed_at=parsed)
+    before = daily_brief.update_daily_brief(
+        ledger, brief_date="2026-08-10", now=parsed - timedelta(minutes=1),
+        api_key="test", request_accountant=CallbackModelAccountant(lambda _: True),
+    )
+    assert before["phase"] == "UPDATING"
+    monkeypatch.setattr(daily_brief, "generate_metered_json", _fake_generation([]))
+    after = daily_brief.update_daily_brief(
+        ledger, brief_date="2026-08-10", now=parsed + timedelta(minutes=1),
+        api_key="test", request_accountant=CallbackModelAccountant(lambda _: True),
+    )
+    assert after["phase"] == "FINAL"
+    assert ledger.connection.execute(
+        "SELECT final_status FROM daily_news_brief_finalizations_v1 WHERE brief_date='2026-08-10'"
+    ).fetchone()[0] == "FINAL"
+    ledger.close()
+
+
+def test_important_early_event_survives_full_day_candidate_bound(tmp_path, monkeypatch) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    for index in range(100):
+        _seed_news_item(
+            ledger, f"ordinary-{index:03d}", minute=index + 1,
+            review_priority="NORMAL",
+        )
+    _seed_news_item(ledger, "morning-policy", minute=0, review_priority="IMMEDIATE")
+    calls: list[dict] = []
+    monkeypatch.setattr(daily_brief, "generate_metered_json", _fake_generation(calls))
+    result = daily_brief.update_daily_brief(
+        ledger, api_key="test", request_accountant=CallbackModelAccountant(lambda _: True),
+        now=datetime(2026, 8, 10, 3, tzinfo=UTC),
+    )
+    assert result["candidate_items"] == daily_brief.BRIEF_EVIDENCE_LIMIT
+    assert any(row["id"] == "Reuters:morning-policy:1" for row in calls[0]["evidence"])
+    ledger.close()
+
+
+def test_duplicate_event_flood_consumes_one_candidate(tmp_path, monkeypatch) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    for index in range(40):
+        _seed_news_item(
+            ledger, f"duplicate-{index:03d}", minute=index,
+            material_event_key="same-real-world-event",
+        )
+    calls: list[dict] = []
+    monkeypatch.setattr(daily_brief, "generate_metered_json", _fake_generation(calls))
+    result = daily_brief.update_daily_brief(
+        ledger, api_key="test", request_accountant=CallbackModelAccountant(lambda _: True),
+        now=datetime(2026, 8, 10, 3, tzinfo=UTC),
+    )
+    assert result["eligible_items"] == 40
+    assert result["candidate_items"] == len(calls[0]["evidence"]) == 1
+    ledger.close()
+
+
+def test_summary_total_is_not_recent_list_length(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    with ledger.connection:
+        for index in range(100):
+            day = (datetime(2026, 1, 1, tzinfo=UTC) + timedelta(days=index)).date().isoformat()
+            ledger.connection.execute(
+                "INSERT INTO daily_news_briefs VALUES (?,?,?,?,?,?,?,?)",
+                (day, 1, f"hash-{index}", f"{day}T00:00:00+00:00",
+                 f"{day}T00:00:00+00:00", "gemma", "v2", '{"title":"x","items":[]}'),
+            )
+    assert len(daily_brief.recent_daily_briefs(ledger.connection, limit=3)) == 3
+    assert daily_brief.daily_brief_summary(
+        ledger.connection, now=datetime(2026, 8, 10, tzinfo=UTC),
+    )["total_brief_days"] == 100
+    ledger.close()
+
+
+def test_closed_empty_date_has_explicit_empty_phase(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    result = daily_brief.update_daily_brief(
+        ledger, brief_date="2026-08-09", now=datetime(2026, 8, 10, 3, tzinfo=UTC),
+        api_key=None, request_accountant=None,
+    )
+    assert result["status"] == "NO_NEWS"
+    assert result["phase"] == "EMPTY"
+    ledger.close()
+
+
+def test_routine_only_account_generates_daily_brief(tmp_path, monkeypatch) -> None:
+    from scripts.run_news_annotator import run_daily_brief_batch
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    _seed_news(ledger)
+    monkeypatch.setattr(daily_brief, "generate_metered_json", _fake_generation([]))
+    statuses = run_daily_brief_batch(
+        ledger, now=datetime(2026, 8, 10, 3, tzinfo=UTC),
+        credentials=(ApiCredential("routine-account", ROUTINE_POOL, "secret", "key-1"),),
+    )
+    current = next(row for row in statuses if row["brief_date"] == "2026-08-10")
+    assert current["status"] == "OK"
+    assert current["pool"] == ROUTINE_POOL
+    assert current["account_id"] == "routine-account"
+    assert "secret" not in json.dumps(statuses)
+    ledger.close()
+
+
+def test_terminal_annotation_failure_settles_historical_date_as_degraded(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    now = datetime(2026, 8, 11, 3, tzinfo=UTC)
+    _seed_news_item(ledger, "terminal", minute=1, parsed_at=now + timedelta(hours=1))
+    enqueue_job(
+        ledger.connection, task_type="ACTIVE_ANNOTATION", source="Reuters",
+        source_item_id="terminal", revision_number=1,
+        prompt_version=daily_brief.PROMPT_VERSION, priority="NORMAL", now=now,
+    )
+    with ledger.connection:
+        ledger.connection.execute(
+            """UPDATE news_ai_jobs_v1 SET state='DEAD_LETTER',updated_at=?
+               WHERE task_type='ACTIVE_ANNOTATION' AND source_item_id='terminal'""",
+            (now.isoformat(),),
+        )
+    result = daily_brief.update_daily_brief(
+        ledger, brief_date="2026-08-10", now=now,
+        api_key=None, request_accountant=None,
+    )
+    assert result["phase"] == "DEGRADED"
+    assert result["pending_items"] == 0
+    assert result["terminal_failure_items"] == 1
+    assert daily_brief.recent_daily_briefs(ledger.connection)[0]["is_final"] is True
+    ledger.close()
+
+
+def test_failed_regeneration_does_not_claim_candidate_was_generated(
+    tmp_path, monkeypatch,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    now = datetime(2026, 8, 10, 3, tzinfo=UTC)
+    _seed_news(ledger)
+    calls: list[dict] = []
+    monkeypatch.setattr(daily_brief, "generate_metered_json", _fake_generation(calls))
+    daily_brief.update_daily_brief(
+        ledger, api_key="test", request_accountant=CallbackModelAccountant(lambda _: True),
+        now=now,
+    )
+    _seed_news_item(ledger, "new-candidate", minute=30)
+    daily_brief.update_daily_brief(
+        ledger, api_key="test", request_accountant=CallbackModelAccountant(lambda _: True),
+        now=now + timedelta(minutes=1),
+    )
+
+    monkeypatch.setattr(
+        daily_brief, "generate_metered_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad output")),
+    )
+    failed = daily_brief.update_daily_brief(
+        ledger, api_key="test", request_accountant=CallbackModelAccountant(lambda _: True),
+        now=now + timedelta(minutes=12),
+    )
+    assert failed["status"] == "DEFERRED"
+
+    monkeypatch.setattr(daily_brief, "generate_metered_json", _fake_generation(calls))
+    recovered = daily_brief.update_daily_brief(
+        ledger, api_key="test", request_accountant=CallbackModelAccountant(lambda _: True),
+        now=now + timedelta(minutes=14),
+    )
+    assert recovered["status"] == "OK"
+    assert recovered["revision_number"] == 2
+    ledger.close()
+
+
+def test_historical_generation_failure_has_finite_degraded_fallback(
+    tmp_path, monkeypatch,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    _seed_news(ledger)
+    monkeypatch.setattr(
+        daily_brief, "generate_metered_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad output")),
+    )
+    start = datetime(2026, 8, 11, 3, tzinfo=UTC)
+    result = None
+    for attempt in range(daily_brief.BRIEF_FAILURE_ATTEMPT_LIMIT):
+        result = daily_brief.update_daily_brief(
+            ledger, brief_date="2026-08-10", api_key="test",
+            request_accountant=CallbackModelAccountant(lambda _: True),
+            now=start + timedelta(hours=attempt * 2),
+        )
+    assert result and result["phase"] == "DEGRADED"
+    assert result["reason"] == "GENERATION_FAILURE_TERMINAL_FALLBACK"
+    row = daily_brief.recent_daily_briefs(ledger.connection)[0]
+    assert row["model_version"] == "system-degraded-fallback"
+    assert row["brief"]["items"][0]["evidence_ids"] == ["Reuters:item-1:1"]
+    assert ledger.connection.execute(
+        "SELECT COUNT(*) FROM daily_news_brief_failures_v1"
+    ).fetchone()[0] == daily_brief.BRIEF_FAILURE_ATTEMPT_LIMIT
     ledger.close()

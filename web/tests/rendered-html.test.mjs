@@ -55,6 +55,17 @@ test("keeps internal matched-news identifiers out of user-facing prose", () => {
   );
 });
 
+test("renders Daily Brief from authoritative date lifecycle state", () => {
+  const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  const manifest = JSON.parse(readFileSync(new URL("../preview-manifest.json", import.meta.url), "utf8"));
+  assert.match(source, /daily_news_brief_summary/);
+  assert.match(source, /已复核 \{formatExactCount\(reviewed\)\} \/ \{formatExactCount\(received\)\} 条/);
+  assert.match(source, /ASIA\/KUALA_LUMPUR/);
+  assert.doesNotMatch(source, /payload\?\.daily_news_briefs\?\.length/);
+  assert.doesNotMatch(source, /今日还没有简报/);
+  assert.ok(manifest.statusInlineKeys.includes("daily_news_brief_summary"));
+});
+
 test("labels version results from their durable evaluation state", () => {
   assert.equal(versionResultLabel({ oos_rows: 12, evaluation_status: "HAS_RESULTS" }, "+1.250%"), "+1.250%");
   assert.equal(versionResultLabel({ oos_rows: 0, evaluation_status: "AWAITING_OUTCOME" }, "+0.000%"), "等待结果");

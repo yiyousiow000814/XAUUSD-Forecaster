@@ -38,6 +38,7 @@ current rules merely because they discovered one.
 - [Assistant state](contracts/ASSISTANT_STATE.md)
 - [Assistant orchestration](contracts/ASSISTANT_ORCHESTRATION.md)
 - [Assistant security boundaries](contracts/ASSISTANT_SECURITY.md)
+- [Daily Brief](contracts/DAILY_BRIEF.md)
 
 ### Specifications
 
