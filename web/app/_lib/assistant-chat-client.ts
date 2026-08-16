@@ -8,6 +8,7 @@ import {
   parseAssistantContentDocument,
   type AssistantContentDocument,
 } from "../api/_shared/assistant-content";
+import { isAssistantModelIdentifier } from "../api/_shared/assistant-routing";
 
 export const ASSISTANT_ACTIVE_STATUSES = ["PENDING", "PROCESSING"] as const;
 export const ASSISTANT_TERMINAL_STATUSES = [
@@ -106,6 +107,29 @@ export function planAssistantConversationSelection(
 ): AssistantConversationSelectionPlan {
   if (currentConversationId === nextConversationId) return "REFRESH_CURRENT";
   return preview ? "LOAD_PREVIEW" : "LOAD_REMOTE";
+}
+
+const assistantModelVersions = (value: unknown) => (
+  Array.isArray(value)
+    ? value.filter((item): item is string => (
+      isAssistantModelIdentifier(item)
+    ))
+    : []
+);
+
+export function assistantModelLabel(provenance: Record<string, unknown>) {
+  const agent = provenance.agent && typeof provenance.agent === "object"
+    && !Array.isArray(provenance.agent)
+    ? provenance.agent as Record<string, unknown>
+    : null;
+  for (const value of [agent?.model_versions, provenance.model_versions]) {
+    const versions = [...new Set(assistantModelVersions(value))];
+    if (versions.length) return versions.join(" → ");
+  }
+  for (const value of [agent?.model_version, provenance.model_version]) {
+    if (isAssistantModelIdentifier(value)) return value;
+  }
+  return "未记录模型";
 }
 
 const identifier = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$/;

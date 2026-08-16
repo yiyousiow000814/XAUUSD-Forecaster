@@ -5,6 +5,7 @@ import type { AssistantEventEnvelope } from "../api/_shared/assistant-events";
 import AssistantContentBlocks from "./AssistantContentBlocks";
 import {
   assistantAnswerDraft,
+  assistantModelLabel,
   assistantProgressItems,
   type AssistantConversation,
   type AssistantMessage,
@@ -36,8 +37,7 @@ function messageAudit(message: AssistantMessage) {
   ), 0);
   const evidenceCount = Array.isArray(agent?.evidence_ids)
     ? agent.evidence_ids.length : 0;
-  const model = typeof provenance.model_version === "string"
-    ? provenance.model_version : "未记录模型";
+  const model = assistantModelLabel(provenance);
   return { model, toolCount, evidenceCount };
 }
 
