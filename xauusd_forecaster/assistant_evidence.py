@@ -28,6 +28,10 @@ _EVIDENCE_VALIDATION_MODES = {
 }
 
 _EVIDENCE_ID = re.compile(r"^[A-Za-z0-9:._-]{1,128}$")
+_SINGLE_JSON_FENCE = re.compile(
+    r"\A```(?:json)?[ \t]*\r?\n(?P<body>[\s\S]*?)\r?\n```[ \t]*\Z",
+    re.IGNORECASE,
+)
 
 
 class AssistantEvidenceValidationError(ValueError):
@@ -175,8 +179,16 @@ def validate_assistant_evidence_model_text(
 ) -> ValidatedAssistantEvidence:
     if not isinstance(value, str):
         raise AssistantEvidenceValidationError("Evidence model output is invalid")
+    model_text = value.strip()
+    if model_text.startswith("```"):
+        fenced = _SINGLE_JSON_FENCE.fullmatch(model_text)
+        if fenced is None:
+            raise AssistantEvidenceValidationError(
+                "Evidence model output must be strict JSON",
+            )
+        model_text = fenced.group("body").strip()
     try:
-        parsed = json.loads(value)
+        parsed = json.loads(model_text)
     except json.JSONDecodeError as error:
         raise AssistantEvidenceValidationError(
             "Evidence model output must be strict JSON",
