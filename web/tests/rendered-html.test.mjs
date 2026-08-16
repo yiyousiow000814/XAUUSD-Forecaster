@@ -879,6 +879,7 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /影响过多少次预测/);
   assert.match(source, /模型一共读取多少次/);
   assert.match(source, /现在仍可用于预测/);
+  assert.match(source, /本筛选已载入/);
   assert.match(source, /完整总数保留在审计账本/);
   assert.match(source, /这个分类有记录，但本页尚未载入明细/);
   assert.match(source, /这不是新闻数量/);

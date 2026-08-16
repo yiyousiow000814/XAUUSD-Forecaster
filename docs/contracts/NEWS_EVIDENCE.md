@@ -217,7 +217,9 @@ The bounded dashboard evidence window retains currently model-eligible events
 before historical-only rows. While the current-event total fits that declared
 window, the headline total and inspectable current-event details must be
 complete and use the same eligibility result, including eligible evidence from
-an earlier prompt version.
+an earlier prompt version. Historical-used and never-used filters receive
+independent bounded windows; they MUST NOT split one shared row allowance that
+makes either filter appear arbitrarily incomplete.
 
 The immutable publisher body and content hash always remain the audit source of
 truth. Gemma receives that complete body whenever it fits the project token

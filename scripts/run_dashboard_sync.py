@@ -44,7 +44,7 @@ LOCAL_STATUS_TIMEOUT_SECONDS = 20
 REMOTE_POST_TIMEOUT_SECONDS = 30
 REMOTE_NEWS_LIMIT = 200
 REMOTE_DECISION_LIMIT = 20
-REMOTE_EVIDENCE_LIMIT = 60
+REMOTE_EVIDENCE_LIMIT_PER_STATE = 60
 NEWS_DETAIL_BATCH_LIMIT_BYTES = 400_000
 NEWS_INDEX_BATCH_LIMIT_BYTES = 400_000
 NEWS_WRITE_BATCH_ITEMS = 20
@@ -750,7 +750,7 @@ def remote_snapshot(payload: dict) -> bytes:
     evidence_rows = snapshot.get("news_evidence")
     if isinstance(evidence_rows, list):
         snapshot["news_evidence"] = bounded_evidence_window(
-            evidence_rows, REMOTE_EVIDENCE_LIMIT,
+            evidence_rows, REMOTE_EVIDENCE_LIMIT_PER_STATE,
         )
 
     snapshot["mirror_window"] = {
