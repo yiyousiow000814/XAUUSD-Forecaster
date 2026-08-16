@@ -1423,7 +1423,9 @@ def _news_evidence_display_rows(
 
     rows.sort(
         key=lambda row: (
-            int(row["model_seen"]), row["collector_first_seen_time"],
+            row.get("source_published_time")
+            or row.get("collector_first_seen_time") or "",
+            row.get("collector_first_seen_time") or "",
             row["event_key"],
         ),
         reverse=True,

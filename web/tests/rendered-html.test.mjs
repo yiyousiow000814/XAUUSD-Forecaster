@@ -18,6 +18,7 @@ const { quoteBridgePresentation } = await import("../app/_lib/quote-bridge-state
 const { withPreviewIdentity } = await import("../app/api/_shared/preview-status.ts");
 const { newsReviewStateInvariantHolds, newsReviewStateOf, parseNewsReviewState } = await import("../app/_lib/news-review-state.ts");
 const { publicImpactReason, publicNewsRecord } = await import("../app/_lib/public-news-copy.ts");
+const { sortNewsEvidenceByTime } = await import("../app/_lib/news-evidence-order.ts");
 const { summarizeAssistantQueue } = await import("../app/api/_shared/assistant-operational-health.ts");
 const { globalOperationalAlerts } = await import("../app/_lib/operational-health.ts");
 
@@ -1833,6 +1834,7 @@ test("reflows news evidence into readable mobile cards", () => {
   assert.match(view, /showEvidenceMetrics/);
   assert.match(view, /className="evidence-metrics-toggle"/);
   assert.match(view, /mergeNewsEvidenceByEvent/);
+  assert.match(view, /sortNewsEvidenceByTime\(merged\.values\(\)\)/);
   assert.match(view, /new Map<string, NewsEvidence>/);
   assert.match(view, /evidenceMode}:\$\{row\.event_key}/);
   assert.doesNotMatch(view, /evidenceMode}:\$\{row\.event_key}:\$\{index}/);
@@ -1848,6 +1850,33 @@ test("reflows news evidence into readable mobile cards", () => {
   assert.match(css, /\.evidence-desk>\.mobile-reveal-button \{ display:block;[^}]*min-height:48px/);
   assert.match(css, /\.evidence-metrics-block \{ display:none/);
   assert.match(css, /grid-template-areas:"event" "status" "time" "usage"/);
+});
+
+test("sorts every news evidence filter by publication time before status", () => {
+  const rows = sortNewsEvidenceByTime([
+    {
+      event_key: "old-used",
+      source_published_time: "2026-08-14T16:55:17+00:00",
+      collector_first_seen_time: "2026-08-14T17:27:49+00:00",
+      model_seen: true,
+    },
+    {
+      event_key: "new-unseen",
+      source_published_time: "2026-08-17T00:45:00+00:00",
+      collector_first_seen_time: "2026-08-17T00:45:04+00:00",
+      model_seen: false,
+    },
+    {
+      event_key: "receipt-fallback",
+      source_published_time: null,
+      collector_first_seen_time: "2026-08-16T20:16:47+00:00",
+      model_seen: false,
+    },
+  ]);
+
+  assert.deepEqual(rows.map(row => row.event_key), [
+    "new-unseen", "receipt-fallback", "old-used",
+  ]);
 });
 
 test("keeps shared news retrieval bounded and phone readable", () => {

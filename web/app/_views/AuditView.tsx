@@ -17,6 +17,7 @@ import { settleResponsiveScroll } from "../_lib/responsive-scroll";
 import type { NewsReviewState } from "../_lib/news-review-state";
 import { formatExactCount, progressCountPresentation } from "../_lib/count-format";
 import { publicImpactReason } from "../_lib/public-news-copy";
+import { sortNewsEvidenceByTime } from "../_lib/news-evidence-order";
 import type { VersionEvaluationStatus } from "../_lib/version-result-state";
 import LearningGraphModal from "../audit/LearningGraphModal";
 
@@ -630,7 +631,7 @@ function mergeNewsEvidenceByEvent(rows: NewsEvidence[]): NewsEvidence[] {
       ]),
     });
   }
-  return Array.from(merged.values());
+  return sortNewsEvidenceByTime(merged.values());
 }
 const DEPLOYMENT_PRESENTATION: Record<string, { className: string; label: string }> = {
   MATCHED: { className: "matched", label: "版本正常" },
