@@ -398,8 +398,10 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   assert.match(vite, /compactPreviewStatus/);
   assert.match(vite, /compactPreviewNewsIndex/);
   assert.match(vite, /delete bundle\.learning/);
-  assert.doesNotMatch(learning, /"recent_decisions"/);
-  assert.doesNotMatch(learning, /"news_evidence"/);
+  assert.match(learning, /daily_news_briefs: 2/);
+  assert.match(learning, /news_evidence: 12/);
+  assert.match(learning, /recent_decisions: 12/);
+  assert.match(learning, /value\.slice\(0, limit\)/);
   assert.match(learning, /items\.slice\(0, PREVIEW_NEWS_PAGE_SIZE\)/);
   assert.match(learning, /totals_scope: "BUILD_SNAPSHOT"/);
   assert.match(learning, /history_resource: market\.history_resource \?\? PREVIEW_RESOURCES\.marketHistory/);

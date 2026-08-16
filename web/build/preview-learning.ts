@@ -6,13 +6,31 @@ import {
 
 type JsonObject = Record<string, unknown>;
 
+const PREVIEW_STATUS_ARRAY_LIMITS: Record<string, number> = {
+  daily_news_briefs: 2,
+  news_evidence: 12,
+  storylines: 5,
+  market_narrative_candidates: 5,
+  archived_storylines: 5,
+  archived_story_event_candidates: 5,
+  story_event_candidates: 10,
+  market_reaction_streams: 5,
+  theme_streams: 5,
+  unassigned_story_events: 10,
+  recent_decisions: 12,
+};
+
 /** Keep Worker startup memory independent of the growing audit snapshot. */
 export function compactPreviewStatus(status: JsonObject): JsonObject {
   const result: JsonObject = {
     preview_status_summary: true,
     observation_scope: "BUILD_SNAPSHOT",
   };
-  for (const key of PREVIEW_STATUS_INLINE_KEYS) result[key] = status[key];
+  for (const key of PREVIEW_STATUS_INLINE_KEYS) {
+    const value = status[key];
+    const limit = PREVIEW_STATUS_ARRAY_LIMITS[key];
+    result[key] = Array.isArray(value) && limit ? value.slice(0, limit) : value;
+  }
   const market = status.market_chart && typeof status.market_chart === "object"
     ? status.market_chart as JsonObject
     : {};
