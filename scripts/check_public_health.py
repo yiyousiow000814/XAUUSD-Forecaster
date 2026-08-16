@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import sys
 import urllib.error
@@ -90,11 +89,11 @@ def check_public_surface(base_url: str) -> list[str]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
-    args = parser.parse_args()
     try:
-        evidence = check_public_surface(args.base_url)
+        # This operational probe intentionally targets one fixed public surface.
+        # Keeping the destination out of CLI input prevents it from becoming a
+        # general-purpose server-side URL fetcher.
+        evidence = check_public_surface(DEFAULT_BASE_URL)
     except ProbeFailure as error:
         print(f"{error.code}: {error}", file=sys.stderr)
         return 1
