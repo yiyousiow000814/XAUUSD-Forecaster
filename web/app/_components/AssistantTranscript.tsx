@@ -286,7 +286,6 @@ export default function AssistantTranscript({
           </button>
         </div>
       </form>}
-      <small>回答属于决策支持，不会进入预测训练，也不会触发交易。</small>
     </div>
   </section>;
 }
