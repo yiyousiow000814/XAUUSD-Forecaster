@@ -1018,7 +1018,10 @@ body.modal-open { overflow:hidden; }
   .component-status h2,.source-health h2 { font-size:27px; }
   .component-status>header p,.source-health header p { font-size:12px; }
   .component-status article,.source-health article { min-height:0; padding:13px; }
-  .component-status article { grid-column:auto; }
+  .component-status article,
+  .component-status article:last-child:nth-child(3n+1),
+  .component-status article:nth-last-child(2):nth-child(3n+1),
+  .component-status article:last-child:nth-child(3n+2) { grid-column:auto; }
 }
 @media (max-width:640px){
 }
@@ -1366,6 +1369,7 @@ body.modal-open { overflow:hidden; }
   .health-reveal-button { width:100%; margin:14px 0 18px; border-color:rgba(17,17,15,.42); background:rgba(239,235,223,.72); }
   .component-status>div { gap:13px; background:transparent; }
   .component-status article,.source-health article { border:1px solid rgba(17,17,15,.4); padding:18px; background:rgba(239,235,223,.78); }
+  .component-status article:last-child { border-right:1px solid rgba(17,17,15,.4); }
   .component-status article strong { margin:12px 0 9px; font-size:16px; line-height:1.4; }
   .component-status article small { font-size:12px; line-height:1.7; }
   .component-status article.is-attention,.source-health article.is-attention { box-shadow:inset 4px 0 var(--red); }
