@@ -16,6 +16,8 @@ from xauusd_forecaster.model_gateway import GeminiModelGateway
 from xauusd_forecaster.news_semantics import (
     CURRENT_NEWS_PROMPT_VERSION,
     LEGACY_NEWS_PROMPT_VERSION,
+    PREVIOUS_NEWS_PROMPT_VERSION,
+    canonicalize_active_annotation,
     news_annotation_schema,
     validate_news_annotation,
 )
@@ -72,17 +74,22 @@ def _target_annotation(evidence: str) -> dict:
     }
 
 
-def test_v15_schema_is_versioned_without_mutating_v14() -> None:
+def test_v16_schema_is_versioned_without_mutating_history() -> None:
+    news_annotation_schema.cache_clear()
     legacy = news_annotation_schema(LEGACY_NEWS_PROMPT_VERSION)
+    previous = news_annotation_schema(PREVIOUS_NEWS_PROMPT_VERSION)
     active = news_annotation_schema(CURRENT_NEWS_PROMPT_VERSION)
 
     assert "review_priority" not in legacy["properties"]
     assert "review_priority" in active["required"]
     assert legacy["$id"] == "xauusd.forward.news-annotation.v1"
-    assert active["$id"] == "xauusd.forward.news-annotation.v15"
+    assert previous["$id"] == "xauusd.forward.news-annotation.v15"
+    assert active["$id"] == "xauusd.forward.news-annotation.v16"
+    assert previous["required"] == active["required"]
+    assert active["properties"]["supporting_evidence"]["items"]["maxLength"] == 240
 
 
-def test_v15_requires_evidence_copied_from_the_source() -> None:
+def test_semantic_generations_require_evidence_copied_from_the_source() -> None:
     source = "The Bureau of Labor Statistics reported job openings fell in June."
     annotation = _target_annotation("job openings fell in June")
     validate_news_annotation(
@@ -93,6 +100,57 @@ def test_v15_requires_evidence_copied_from_the_source() -> None:
 
     annotation["supporting_evidence"] = ["payrolls rose sharply"]
     with pytest.raises(ValueError, match="evidence is absent"):
+        validate_news_annotation(
+            annotation,
+            prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+            source_text=source,
+        )
+
+
+def test_v16_only_applies_lossless_active_cleanup() -> None:
+    source = (
+        "FinCEN announced: it will delete previously reported information. "
+        "The same evidence appears twice. The same evidence appears twice."
+    )
+    annotation = _target_annotation(
+        "FinCEN announced, it will delete previously reported information"
+    )
+    annotation["secondary_categories"] = [
+        "rates_fed", "rates_fed", "inflation_employment",
+    ]
+    annotation["primary_category"] = "inflation_employment"
+    canonicalize_active_annotation(annotation, source_text=source)
+    assert annotation["secondary_categories"] == ["rates_fed"]
+    assert annotation["supporting_evidence"] == [
+        "FinCEN announced: it will delete previously reported information"
+    ]
+    validate_news_annotation(
+        annotation,
+        prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+        source_text=source,
+    )
+
+    long_source = "A" * 260
+    annotation["supporting_evidence"] = [long_source]
+    canonicalize_active_annotation(annotation, source_text=long_source)
+    assert annotation["supporting_evidence"] == ["A" * 240]
+    validate_news_annotation(
+        annotation,
+        prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+        source_text=long_source,
+    )
+
+    for unsafe in (
+        "FinCEN claimed it will delete previously reported information",
+        "The same evidence appears twice",
+    ):
+        annotation["supporting_evidence"] = [unsafe]
+        canonicalize_active_annotation(annotation, source_text=source)
+        assert annotation["supporting_evidence"] == [unsafe]
+
+    annotation["secondary_categories"] = [{"unexpected": "object"}]
+    canonicalize_active_annotation(annotation, source_text=source)
+    with pytest.raises(ValueError, match="contains a non-string"):
         validate_news_annotation(
             annotation,
             prompt_version=CURRENT_NEWS_PROMPT_VERSION,
@@ -111,6 +169,27 @@ def test_v15_prompt_uses_context_not_keyword_or_casing() -> None:
     assert "lowercase 'bls jolts report'" in prompt
     assert "'earthquake jolts city' is not JOLTS" in prompt
     assert "investment guide remains commentary" in prompt
+
+
+def test_v16_requires_current_event_and_transmission_evidence() -> None:
+    prompt = annotation_module._annotation_prompt(
+        CURRENT_NEWS_PROMPT_VERSION,
+        "Miner reports quarterly earnings",
+        "The company mentioned rates while discussing its mine results.",
+    )
+
+    assert "Apply a narrow XAUUSD transmission test" in prompt
+    assert "mine drill results" in prompt
+    assert "Incidental mentions of the Fed" in prompt
+    assert "MACRO_DRIVER requires exact evidence of both" in prompt
+    assert "official US CPI surprise" in prompt
+    assert "CONTEXT_ONLY is not a parking class" in prompt
+    assert "non-US local inflation" in prompt
+    assert "Global or non-US employment" in prompt
+    assert "being official macro data is not enough" in prompt
+    assert "genre does not erase quoted current market facts" in prompt
+    assert "supporting_evidence is a copy field" in prompt
+    assert "Never translate, paraphrase" in prompt
 
 
 def test_target_backfill_cannot_bypass_scheduler_capacity_refusal(
@@ -164,6 +243,19 @@ def test_current_contract_fails_closed_for_non_gemini_provider(tmp_path) -> None
         "status": "DISABLED",
         "reason": "CURRENT_CONTRACT_REQUIRES_GEMINI",
     }]
+    ledger.close()
+
+
+def test_previous_generation_cannot_execute_after_v16_handover(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+
+    with pytest.raises(ValueError, match="unsupported news prompt version"):
+        annotate_pending_news(
+            ledger,
+            provider="gemini",
+            prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
+        )
+
     ledger.close()
 
 
@@ -222,7 +314,7 @@ def test_current_annotation_pipeline_persists_versioned_receipt(
     ledger.close()
 
 
-def test_v14_history_and_active_v15_annotations_coexist(tmp_path) -> None:
+def test_previous_v15_and_active_v16_annotations_coexist(tmp_path) -> None:
     now = datetime(2026, 8, 11, 10, 0, tzinfo=UTC)
     body = (
         "The Bureau of Labor Statistics reported job openings fell in June. "
@@ -242,13 +334,6 @@ def test_v14_history_and_active_v15_annotations_coexist(tmp_path) -> None:
         "cluster_id": "jobs",
     })
     target = _target_annotation("job openings fell in June")
-    active = {
-        key: value for key, value in target.items()
-        if key not in {
-            "xauusd_relevance", "review_priority", "material_change",
-            "time_sensitivity", "semantic_reason_zh", "supporting_evidence",
-        }
-    }
     common = {
         "source": "semantic-contract-test",
         "source_item_id": "jobs",
@@ -260,14 +345,14 @@ def test_v14_history_and_active_v15_annotations_coexist(tmp_path) -> None:
     }
     ledger.append_annotation({
         **common,
-        "annotation_id": "active",
-        "prompt_version": LEGACY_NEWS_PROMPT_VERSION,
-        "annotation": active,
+        "annotation_id": "previous",
+        "prompt_version": PREVIOUS_NEWS_PROMPT_VERSION,
+        "annotation": target,
     })
 
     assert pending_annotation_records(
         ledger.connection,
-        prompt_version=LEGACY_NEWS_PROMPT_VERSION,
+        prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
     ) == []
     assert len(pending_annotation_records(
         ledger.connection,
@@ -285,7 +370,7 @@ def test_v14_history_and_active_v15_annotations_coexist(tmp_path) -> None:
     ).fetchall()
     assert {row["prompt_version"] for row in rows} == {
         CURRENT_NEWS_PROMPT_VERSION,
-        LEGACY_NEWS_PROMPT_VERSION,
+        PREVIOUS_NEWS_PROMPT_VERSION,
     }
     target_impacts = pending_impact_records(
         ledger.connection,

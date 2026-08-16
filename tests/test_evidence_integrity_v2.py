@@ -39,7 +39,11 @@ from xauusd_forecaster.news_features_v2 import (
     event_raw_weight,
 )
 from xauusd_forecaster.news_impact import impact_time_rule, pending_impact_records
-from xauusd_forecaster.news_semantics import annotation_topics, effective_record_kind
+from xauusd_forecaster.news_semantics import (
+    CURRENT_NEWS_PROMPT_VERSION,
+    annotation_topics,
+    effective_record_kind,
+)
 from xauusd_forecaster.news_time import assess_news_time, category_time_rule
 from xauusd_forecaster.repair_v2 import immutable_table_hash
 from xauusd_forecaster import inference_v2, news_contract_migration, training_v2
@@ -437,7 +441,7 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
         "entities": entities, "hawkishness": impulse, "inflation_impulse": 0.0,
         "growth_impulse": 0.0, "geopolitical_risk": 0.0, "usd_impulse": 0.0,
         "novelty": 1.0, "confidence": 1.0, "llm_model_version": "gemini-3.5-flash-lite",
-        "prompt_version": "news-json-v15-ai-semantic-review",
+        "prompt_version": CURRENT_NEWS_PROMPT_VERSION,
         "parse_started_at": parsed_at, "parsed_at": parsed_at,
         "annotation": annotation,
     })

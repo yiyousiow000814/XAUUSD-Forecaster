@@ -35,6 +35,7 @@ from .news_impact import (
     validate_impact_assessment,
 )
 from .news_semantics import (
+    canonicalize_active_annotation,
     CURRENT_NEWS_PROMPT_VERSION,
     GENERATED_NEWS_PROMPT_VERSIONS,
     LEGACY_INVALID_SEMANTIC_REASON_PREFIX,
@@ -347,7 +348,7 @@ def annotate_pending_news(
     if prompt_version not in GENERATED_NEWS_PROMPT_VERSIONS:
         raise ValueError(f"unsupported news prompt version: {prompt_version}")
     selected_provider = (provider or os.environ.get("NEWS_LLM_PROVIDER", "gemini")).lower()
-    if prompt_version == PROMPT_VERSION and selected_provider != "gemini":
+    if prompt_version in GENERATED_NEWS_PROMPT_VERSIONS and selected_provider != "gemini":
         return [{
             "status": "DISABLED",
             "reason": "CURRENT_CONTRACT_REQUIRES_GEMINI",
@@ -933,11 +934,17 @@ class _GeminiRequestPool:
             decode=_decode_model_json,
             retryable_http_codes=frozenset({401, 403, 429}),
         )
-        if prompt_version == PROMPT_VERSION:
+        if prompt_version in GENERATED_NEWS_PROMPT_VERSIONS:
             # Semantic validity is independent from display-language quality.
             # Never spend a translation retry on a schema/evidence failure.
             try:
-                _validate_current_semantics(result, headline=headline, body=body)
+                canonicalize_active_annotation(
+                    result, source_text=f"{headline}\n{body}",
+                )
+                _validate_current_semantics(
+                    result, headline=headline, body=body,
+                    prompt_version=prompt_version,
+                )
             except ValueError as error:
                 raise ModelOutputContractFailed(
                     error, result, stage="SEMANTIC_CONTRACT",
@@ -946,18 +953,26 @@ class _GeminiRequestPool:
         try:
             _recover_display_fields(result, headline, body)
             _validate_chinese_result(result)
-            if prompt_version == PROMPT_VERSION:
-                _validate_current_result(result, headline=headline, body=body)
+            if prompt_version in GENERATED_NEWS_PROMPT_VERSIONS:
+                _validate_current_result(
+                    result, headline=headline, body=body,
+                    prompt_version=prompt_version,
+                )
         except ValueError as initial_display_error:
-            invalid_display_fields = _invalid_chinese_display_fields(result)
+            invalid_display_fields = _invalid_chinese_display_fields(
+                result, prompt_version=prompt_version,
+            )
             try:
                 repaired = self._repair_chinese(start_index + 1, model, result)
                 for field in invalid_display_fields:
                     result[field] = repaired[field]
                 _recover_display_fields(result, headline, body)
                 _validate_chinese_result(result)
-                if prompt_version == PROMPT_VERSION:
-                    _validate_current_result(result, headline=headline, body=body)
+                if prompt_version in GENERATED_NEWS_PROMPT_VERSIONS:
+                    _validate_current_result(
+                        result, headline=headline, body=body,
+                        prompt_version=prompt_version,
+                    )
             except Exception as error:
                 raise ModelOutputContractFailed(
                     error, result, stage="DISPLAY_REPAIR",
@@ -1253,6 +1268,52 @@ def _annotation_prompt(prompt_version: str, headline: str, body: str) -> str:
             "release when the body identifies the dataset; 'earthquake jolts city' "
             "is not JOLTS; 'stocks were jolted' is market narration, not a labor "
             "release; an investment guide remains commentary even if it says gold. "
+    )
+    semantic_contract += (
+            "Apply a narrow XAUUSD transmission test. Company earnings, mine drill "
+            "results, gold-backed loans, jewellery sales, treasure discoveries, "
+            "sports medals, products, and organizations merely named Gold are "
+            "IRRELEVANT unless the source establishes a market-wide bullion supply, "
+            "demand, reserve, flow, policy, or price effect. Incidental mentions of "
+            "the Fed, rates, inflation, jobs, USD, war, or gold do not create a "
+            "MACRO_DRIVER when the article's actual event is company, consumer, "
+            "lifestyle, or local news. DIRECT requires exact evidence of a current "
+            "bullion price, central-bank reserve or purchase, physical or ETF flow, "
+            "or market-wide gold supply/demand action. MACRO_DRIVER requires exact "
+            "evidence of both a current material event and the changed transmission "
+            "variable: a US monetary-policy decision or expectation, US inflation "
+            "or employment release, USD or Treasury-yield move, material energy "
+            "shock, broad risk flow, or major geopolitical escalation. The source "
+            "need not name XAUUSD when it directly reports one of those established "
+            "variables, but topic proximity alone is insufficient. Prefer "
+            "CONTEXT_ONLY for informative background without a current measurable "
+            "driver, but only when that background directly frames an active "
+            "global-bullion, US monetary-policy, USD, Treasury-yield, or major "
+            "geopolitical transmission. CONTEXT_ONLY is not a parking class for "
+            "otherwise irrelevant material: company securities and earnings, "
+            "single-mine operations or permits, non-US local inflation, jobs or "
+            "rates, historical governance, consumer finance, and generic investment "
+            "commentary remain IRRELEVANT without an explicit current XAUUSD "
+            "transmission. Global or non-US employment, inflation, and policy-rate "
+            "statistics are also IRRELEVANT unless the source explicitly reports "
+            "their current effect on bullion, USD, or US Treasury yields; their "
+            "being official macro data is not enough. A source's genre does not "
+            "erase quoted current market "
+            "facts: explicit current bullion prices, central-bank or ETF flows, US "
+            "data, USD, or Treasury-yield changes still qualify under the DIRECT or "
+            "MACRO_DRIVER tests. Positive contrasts: an official US CPI surprise or FOMC rate "
+            "decision is MACRO_DRIVER; an explicit gold-price reaction, central-bank "
+            "gold purchase, or bullion ETF flow is DIRECT. Negative contrasts: a "
+            "miner share-price article, jewellery discount, gold-loan product, or "
+            "company story that only mentions rates is IRRELEVANT. "
+            "supporting_evidence is a copy field, not an explanation field. For "
+            "every relevance class including IRRELEVANT, copy one to three "
+            "contiguous substrings exactly as they appear between NEWS_START and "
+            "NEWS_END. Preserve the source language, characters, numbers, case, "
+            "and punctuation. Never translate, paraphrase, join distant clauses, "
+            "add ellipses, or repair source text. Keep each excerpt between 20 and "
+            "240 characters. Before returning JSON, verify that each excerpt can "
+            "be found verbatim in the supplied headline or full content. "
     )
     return (
         "Read the complete delimited source and convert it into the requested "
@@ -1571,7 +1632,9 @@ def _validate_chinese_display_field(value: object, field: str) -> None:
         )
 
 
-def _invalid_chinese_display_fields(result: dict) -> tuple[str, ...]:
+def _invalid_chinese_display_fields(
+    result: dict, *, prompt_version: str = PROMPT_VERSION,
+) -> tuple[str, ...]:
     rules = (("headline_zh", 2), ("summary_zh", 10))
     if "primary_story_title_zh" not in result:
         rules += (("primary_story_title_zh", 0),)
@@ -1580,7 +1643,7 @@ def _invalid_chinese_display_fields(result: dict) -> tuple[str, ...]:
     if "semantic_reason_zh" in result:
         rules += (("semantic_reason_zh", 2),)
     invalid = []
-    schema_properties = news_annotation_schema(PROMPT_VERSION)["properties"]
+    schema_properties = news_annotation_schema(prompt_version)["properties"]
     for field, minimum in rules:
         try:
             value = result.get(field)
@@ -1661,17 +1724,23 @@ def _recover_display_fields(result: dict, headline: str, body: str) -> None:
     _restore_source_number_lexemes(result, headline, body)
 
 
-def _validate_current_result(result: dict, *, headline: str, body: str) -> None:
+def _validate_current_result(
+    result: dict, *, headline: str, body: str,
+    prompt_version: str = PROMPT_VERSION,
+) -> None:
     """Reject invalid current semantics without manufacturing irrelevance."""
     if "xauusd_relevance" not in result:
         return
     validate_news_annotation(
-        result, prompt_version=PROMPT_VERSION,
+        result, prompt_version=prompt_version,
         source_text=f"{headline}\n{body}",
     )
 
 
-def _validate_current_semantics(result: dict, *, headline: str, body: str) -> None:
+def _validate_current_semantics(
+    result: dict, *, headline: str, body: str,
+    prompt_version: str = PROMPT_VERSION,
+) -> None:
     """Validate semantic fields without making display prose semantic authority."""
     if "xauusd_relevance" not in result:
         return
@@ -1683,6 +1752,7 @@ def _validate_current_semantics(result: dict, *, headline: str, body: str) -> No
     })
     _validate_current_result(
         semantic_candidate, headline=headline, body=body,
+        prompt_version=prompt_version,
     )
 
 

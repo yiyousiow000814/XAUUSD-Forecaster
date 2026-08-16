@@ -66,6 +66,27 @@ handover, not silently substituted under the v15 identifier. That handover
 should follow recovery of this cohort so its quota cost and classification
 delta can be measured separately.
 
+## V16 handover validation
+
+The versioned V16 candidate was evaluated without writing model authority back
+to the production ledger. On the complete 438-record recovery cohort, the
+fallback model produced 425 contract-valid results and 13 fail-closed results.
+The run exposed that the intermediate structured labels were only silver
+labels: they marked several explicit US CPI, payroll, bullion-price,
+central-bank, and ETF-flow records as irrelevant despite contrary source
+evidence. Those labels therefore informed disagreement review but were not
+treated as unquestionable ground truth.
+
+After narrowing CONTEXT_ONLY and global or non-US macro boundaries, a fixed
+96-record stratified sample was rerun with the production primary model. It
+produced 92 contract-valid results and four evidence-contract rejections. Of 32
+records previously flagged for semantic recovery, 30 remained relevant; the
+only valid result filtered out was a promotional futures page whose stored body
+contained a title and risk disclaimer but no substantive market evidence. The
+final prompt also rejected the observed global-youth-unemployment false
+positive while retaining explicit US CPI evidence. Rejected provider output
+remains bounded diagnostic evidence and never receives model authority.
+
 ## Recovery acceptance
 
 - Invalid legacy annotations do not satisfy an active annotation job.

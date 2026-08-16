@@ -1,5 +1,6 @@
 import pytest
 
+from xauusd_forecaster.news_semantics import CURRENT_NEWS_PROMPT_VERSION
 from xauusd_forecaster.storylines import (
     LEGACY_POLICY_STATUS,
     storyline_rows,
@@ -14,7 +15,7 @@ def event(key, time, headline, **overrides):
         "source_published_time": time,
         "canonical_headline": headline,
         "evidence_grade": "SINGLE_RELIABLE",
-        "prompt_version": "news-json-v15-ai-semantic-review",
+        "prompt_version": CURRENT_NEWS_PROMPT_VERSION,
         "parsed_at": time,
         "independent_publishers": 1,
         "publisher_domains": ("reuters.com",),

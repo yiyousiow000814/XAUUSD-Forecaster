@@ -101,13 +101,19 @@ summary together with the structured impulse fields. A new prompt version is a
 new immutable annotation; it never rewrites an earlier interpretation.
 
 The active annotation contract is
-`news-json-v15-ai-semantic-review`. V15 adds explicit
+`news-json-v16-xauusd-transmission-evidence`. V16 retains the explicit
 semantic relevance, review priority, material-change, time-sensitivity,
-reason, and source-evidence fields. Its evidence excerpts must occur in the
-stored headline or body. Casing, spelling, one keyword, or publisher identity
-cannot determine meaning. V15 annotations and their Gemma reviews are stored
-for comparison but are excluded from active features, storylines, training,
-and inference until a complete generation handover is verified.
+reason, and source-evidence fields introduced by V15, while requiring a narrow
+XAUUSD transmission test. Company, product, local, and non-US macro stories do
+not qualify without an explicit current bullion, USD, US Treasury-yield, US
+monetary-policy, or major geopolitical transmission. CONTEXT_ONLY is not a
+fallback for otherwise irrelevant content. Evidence must resolve to a unique
+contiguous excerpt in the stored headline or body; punctuation-only model drift
+may be restored deterministically to the original source characters, while
+changed words, numbers, ordering, or joined clauses fail closed. Casing,
+spelling, one keyword, or publisher identity cannot determine meaning. V15
+annotations remain immutable historical evidence but cannot be generated or
+used by the active feature, storyline, training, or inference paths.
 
 Gemini 3.5 Flash-Lite is the primary annotator. Its last 150 daily local
 requests remain reserved for monetary-policy, CPI, and payroll events. Gemini
