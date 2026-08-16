@@ -17,6 +17,9 @@ export type SchedulerTaskHealth = {
   deferred_15m: number;
   errors_15m: number;
   failure_codes_15m: Array<{ code: string; count: number }>;
+  claimable: number;
+  scheduled_retry: number;
+  earliest_retry_at: string | null;
   oldest_active_at: string | null;
   oldest_age_seconds: number | null;
   max_claim_count: number;

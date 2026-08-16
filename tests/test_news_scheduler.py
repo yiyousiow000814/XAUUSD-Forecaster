@@ -911,20 +911,22 @@ def test_default_batch_runs_independent_accounts_concurrently(
     )
     monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
     monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
-    first_calls = threading.Barrier(2)
+    first_calls = threading.Barrier(4)
     lock = threading.Lock()
     active = 0
     maximum_active = 0
+    started_calls = 0
     started_accounts: set[str] = set()
 
     def execute(_ledger, credential, _job, **_kwargs):
-        nonlocal active, maximum_active
+        nonlocal active, maximum_active, started_calls
         with lock:
-            first_for_account = credential.account_id not in started_accounts
             started_accounts.add(credential.account_id)
+            started_calls += 1
+            synchronize = started_calls <= 4
             active += 1
             maximum_active = max(maximum_active, active)
-        if first_for_account:
+        if synchronize:
             first_calls.wait(timeout=5)
         time.sleep(0.01)
         with lock:
@@ -939,14 +941,14 @@ def test_default_batch_runs_independent_accounts_concurrently(
     )
 
     assert len(statuses) == 20
-    assert maximum_active == 2
+    assert maximum_active == 4
     assert started_accounts == {"account-a", "account-b"}
     assert progress == list(range(1, 21))
     assert scheduler_counts(ledger.connection)["completed"] == 20
     ledger.close()
 
 
-def test_concurrent_account_lanes_do_not_duplicate_capacity_probes(
+def test_concurrent_account_lanes_bound_capacity_probes_per_lane(
     tmp_path, monkeypatch,
 ) -> None:
     from scripts import run_news_annotator as runner
@@ -972,12 +974,17 @@ def test_concurrent_account_lanes_do_not_duplicate_capacity_probes(
 
     statuses = runner.run_scheduled_batch(ledger, batch_size=None)
 
-    assert len(statuses) == 2
+    assert 2 <= len(statuses) <= 4
     attempts = ledger.connection.execute(
         "SELECT job_id,account_id,failure_code FROM news_ai_job_attempts_v1"
     ).fetchall()
-    assert len(attempts) == 2
+    assert len(attempts) == len(statuses)
     assert {row["account_id"] for row in attempts} == {"account-a", "account-b"}
+    per_account = {
+        account_id: sum(row["account_id"] == account_id for row in attempts)
+        for account_id in {"account-a", "account-b"}
+    }
+    assert max(per_account.values()) <= runner.PRODUCTION_LANES_PER_ACCOUNT
     assert {row["failure_code"] for row in attempts} == {
         "MODEL_CAPACITY_DEFERRED",
     }

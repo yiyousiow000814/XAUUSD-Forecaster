@@ -52,15 +52,17 @@ accounts add real capacity automatically on the next cycle. Authentication
 failure may try another key in the same account; shared quota or provider
 pressure skips the remaining keys in that account.
 
-The ordinary unbounded annotator batch runs one synchronous provider lane per
-independent account. Lanes execute concurrently, while work remains serial
-inside each account so one slow provider response cannot idle unrelated
-account capacity. Every lane owns its SQLite connection; the existing atomic
-job lease and quota reservation remain the authorities for duplicate-work
-prevention and admission. Explicit bounded maintenance batches remain serial
-for deterministic operation. Runtime status reports the per-account RPM limit
-and the aggregate limit across configured independent accounts; it must not
-describe independently metered accounts as one project-shared minute budget.
+The ordinary unbounded annotator batch runs two synchronous provider lanes per
+independent account. This bounded fan-out hides provider latency while atomic
+account quota reservation remains authoritative for both RPM and TPM. Lanes
+from one account share route-capacity state, so an exhausted route is skipped
+for the rest of that batch after at most one already in-flight probe per lane,
+instead of repeatedly claiming the remaining queue. Every lane owns its SQLite
+connection. Explicit bounded maintenance
+batches remain serial for deterministic operation. Runtime status reports the
+per-account RPM limit and the aggregate limit across configured independent
+accounts; it must not describe independently metered accounts as one
+project-shared minute budget.
 
 ## Fair queueing
 

@@ -62,6 +62,9 @@ from xauusd_forecaster.scheduler_model_gateway import (  # noqa: E402
 )
 
 
+PRODUCTION_LANES_PER_ACCOUNT = 2
+
+
 def write_heartbeat(
     path: Path, *, work_items: int, state: str = "RUNNING",
 ) -> None:
@@ -263,9 +266,28 @@ def _run_scheduled_lane(
     gemma_reserved_accounts: frozenset[str] = frozenset(),
     preferred_account_id: str | None = None,
     progress_callback: Callable[[], None] | None = None,
+    shared_blocked_task_types: set[str] | None = None,
+    shared_block_lock: threading.Lock | None = None,
 ) -> list[dict[str, object]]:
     statuses: list[dict[str, object]] = []
-    blocked_task_types: set[str] = set()
+    blocked_task_types = (
+        shared_blocked_task_types
+        if shared_blocked_task_types is not None else set()
+    )
+
+    def blocked_snapshot() -> frozenset[str]:
+        if shared_block_lock is None:
+            return frozenset(blocked_task_types)
+        with shared_block_lock:
+            return frozenset(blocked_task_types)
+
+    def block_task_type(task_type: str) -> None:
+        if shared_block_lock is None:
+            blocked_task_types.add(task_type)
+            return
+        with shared_block_lock:
+            blocked_task_types.add(task_type)
+
     has_routine = any(item.pool == ROUTINE_POOL for item in credentials)
     has_preemptible = any(item.pool == PREEMPTIBLE_POOL for item in credentials)
     while len(statuses) < maximum:
@@ -277,7 +299,7 @@ def _run_scheduled_lane(
                 worker_id=worker_id,
                 pool=ROUTINE_POOL,
                 task_types=task_types,
-                excluded_task_types=frozenset(blocked_task_types),
+                excluded_task_types=blocked_snapshot(),
                 now=datetime.now(UTC),
             )
         elif has_preemptible:
@@ -286,7 +308,7 @@ def _run_scheduled_lane(
                 worker_id=worker_id,
                 pool=PREEMPTIBLE_POOL,
                 task_types=task_types,
-                excluded_task_types=frozenset(blocked_task_types),
+                excluded_task_types=blocked_snapshot(),
                 now=datetime.now(UTC),
             )
         if job is None:
@@ -362,7 +384,7 @@ def _run_scheduled_lane(
                 error=str(status.get("failure_code") or outcome),
             )
             if route_capacity_deferred:
-                blocked_task_types.add(job.task_type)
+                block_task_type(job.task_type)
         else:
             retry_at = _next_retry(status, outcome_at)
             backoff_job(
@@ -406,11 +428,10 @@ def run_scheduled_batch(
     worker_prefix = f"{socket.gethostname()}-{os.getpid()}"
 
     # Explicit batches preserve deterministic maintenance/test behavior. The
-    # production default uses one lane per independent account so synchronous
-    # provider latency on one account cannot idle all other account capacity.
+    # production default uses two lanes per independent account. Atomic quota
+    # admission hides provider latency without exceeding account RPM or TPM.
     concurrent = (
         batch_size is None
-        and len(account_ids) > 1
         and str(ledger.path) != ":memory:"
     )
     if not concurrent:
@@ -432,11 +453,20 @@ def run_scheduled_batch(
             progress_callback=report_progress,
         )
 
-    base, remainder = divmod(maximum, len(account_ids))
+    lanes = tuple(
+        (account_id, lane_index)
+        for account_id in account_ids
+        for lane_index in range(PRODUCTION_LANES_PER_ACCOUNT)
+    )
+    base, remainder = divmod(maximum, len(lanes))
     allocations = tuple(
         base + (1 if index < remainder else 0)
-        for index in range(len(account_ids))
+        for index in range(len(lanes))
     )
+    blocked_by_account = {account_id: set() for account_id in account_ids}
+    blocked_locks = {
+        account_id: threading.Lock() for account_id in account_ids
+    }
     progress_lock = threading.Lock()
     completed = 0
 
@@ -448,7 +478,7 @@ def run_scheduled_batch(
                 progress_callback(completed)
 
     def run_account_lane(
-        account_id: str, allocation: int, index: int,
+        account_id: str, lane_index: int, allocation: int, index: int,
     ) -> list[dict[str, object]]:
         # sqlite connections are thread-affine; each account lane owns the
         # connection it creates and closes inside that same worker thread.
@@ -468,22 +498,28 @@ def run_scheduled_batch(
                     if item.account_id == account_id
                 ),
                 maximum=allocation,
-                worker_prefix=f"{worker_prefix}-account-{index}",
+                worker_prefix=(
+                    f"{worker_prefix}-account-{index}-lane-{lane_index}"
+                ),
                 task_types=lane_task_types,
                 gemma_reserved_accounts=gemma_reserved_accounts,
                 preferred_account_id=account_id,
                 progress_callback=report_progress,
+                shared_blocked_task_types=blocked_by_account[account_id],
+                shared_block_lock=blocked_locks[account_id],
             )
         finally:
             lane_ledger.close()
 
     with ThreadPoolExecutor(
-        max_workers=len(account_ids), thread_name_prefix="news-ai-account",
+        max_workers=len(lanes), thread_name_prefix="news-ai-account",
     ) as executor:
         futures = [
-            executor.submit(run_account_lane, account_id, allocation, index)
-            for index, (account_id, allocation) in enumerate(
-                zip(account_ids, allocations, strict=True)
+            executor.submit(
+                run_account_lane, account_id, lane_index, allocation, index,
+            )
+            for index, ((account_id, lane_index), allocation) in enumerate(
+                zip(lanes, allocations, strict=True)
             )
             if allocation > 0
         ]

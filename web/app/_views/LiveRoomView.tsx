@@ -260,7 +260,6 @@ export default function LiveRoomView() {
       {error && <div className="error-banner">{error}。行情采集可能仍在运行，但网页数据服务已停止。</div>}
       <RuntimeUpdateFailureBanner failure={payload?.system.runtime_update_failure} />
       <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
-      {marketClosed && <div className="market-closed-banner">cTrader 已确认 XAUUSD 休市。系统暂停新增预测与 30 分钟样本，新闻采集继续运行。</div>}
 
       <section className="metric-grid">
         <article>

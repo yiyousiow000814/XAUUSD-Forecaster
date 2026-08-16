@@ -73,6 +73,9 @@ def scheduler_health_snapshot(
             "deferred_15m": 0,
             "errors_15m": 0,
             "failure_codes_15m": {},
+            "claimable": 0,
+            "scheduled_retry": 0,
+            "earliest_retry_at": None,
             "oldest_active_at": None,
             "oldest_age_seconds": None,
             "max_claim_count": 0,
@@ -93,18 +96,35 @@ def scheduler_health_snapshot(
         if task in summaries and state in summaries[task]:
             summaries[task][state] = int(row["total"])
 
+    instant_iso = instant.isoformat(timespec="microseconds")
     active_rows = connection.execute(
-        """SELECT task_type,min(created_at) AS oldest_active_at,
+        """SELECT task_type,
+                  sum(CASE WHEN state='LEASED' OR available_at<=? THEN 1 ELSE 0 END)
+                    AS claimable,
+                  sum(CASE WHEN state IN ('QUEUED','BACKING_OFF')
+                                AND available_at>? THEN 1 ELSE 0 END)
+                    AS scheduled_retry,
+                  min(CASE WHEN state IN ('QUEUED','BACKING_OFF')
+                                AND available_at>? THEN available_at END)
+                    AS earliest_retry_at,
+                  min(CASE WHEN state='LEASED' OR available_at<=?
+                           THEN CASE WHEN available_at>created_at
+                                     THEN available_at ELSE created_at END END)
+                    AS oldest_active_at,
                   max(attempt_count) AS max_claim_count
            FROM news_ai_jobs_v1
            WHERE task_type IN ('ACTIVE_ANNOTATION','ACTIVE_IMPACT',
                                'TITLE_TRANSLATION')
              AND state IN ('QUEUED','LEASED','BACKING_OFF')
-           GROUP BY task_type"""
+           GROUP BY task_type""",
+        (instant_iso, instant_iso, instant_iso, instant_iso),
     ).fetchall()
     for row in active_rows:
         task = str(row["task_type"])
         summary = summaries[task]
+        summary["claimable"] = int(row["claimable"] or 0)
+        summary["scheduled_retry"] = int(row["scheduled_retry"] or 0)
+        summary["earliest_retry_at"] = row["earliest_retry_at"]
         oldest = _instant(row["oldest_active_at"])
         summary["oldest_active_at"] = (
             oldest.isoformat() if oldest is not None else None
@@ -165,9 +185,7 @@ def scheduler_health_snapshot(
     alerts: list[dict[str, object]] = []
     for task, summary in summaries.items():
         label = TASK_LABELS[task]
-        active = sum(int(summary[field]) for field in (
-            "queued", "leased", "backing_off",
-        ))
+        active = int(summary["claimable"])
         completed = int(summary["completed_15m"])
         retired = int(summary["retired_15m"])
         progressed = completed + retired
