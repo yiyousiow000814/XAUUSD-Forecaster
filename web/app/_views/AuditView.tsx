@@ -222,7 +222,9 @@ type VersionGroup = {
 };
 type EvaluationCadence = "EVERY_5M" | "FIXED_30M";
 type CadenceMetric = { oos_rows: number; distinct_days: number; cumulative_quote_return: number; profit_factor_quote_adjusted: number | null; coverage_rate: number | null; prediction_rows?: number; unscored_oos_rows?: number; overdue_oos_rows?: number; evaluation_status?: VersionEvaluationStatus };
-type DailyNewsBrief = { brief_date: string; revision_number: number; cutoff_at: string; generated_at: string; model_version: string; prompt_version: string; brief: { title: string; items: Array<{ headline: string; summary: string; evidence_ids: string[] }> } };
+type DailyBriefPhase = "WAITING" | "UPDATING" | "DEFERRED" | "FINAL" | "DEGRADED" | "EMPTY";
+type DailyNewsBrief = { brief_date: string; revision_number: number; cutoff_at: string; generated_at: string; model_version: string; prompt_version: string; phase?: DailyBriefPhase; received_items?: number; reviewed_items?: number; pending_items?: number; terminal_failure_items?: number; next_retry_at?: string | null; finalized_at?: string | null; brief: { title: string; items: Array<{ headline: string; summary: string; evidence_ids: string[] }> } };
+type DailyNewsBriefSummary = { brief_date: string; phase: DailyBriefPhase; received_items: number | null; reviewed_items: number | null; pending_items: number | null; terminal_failure_items: number | null; latest_revision: number | null; last_generated_at: string | null; next_retry_at: string | null; is_final: boolean; total_brief_days: number | null; observation_scope?: "BUILD_SNAPSHOT_COMPATIBILITY" };
 type NewsSearchResponse = {
   items: News[];
   total: number;
@@ -276,6 +278,7 @@ type Payload = {
   };
   recent_news?: News[];
   daily_news_briefs?: DailyNewsBrief[];
+  daily_news_brief_summary?: DailyNewsBriefSummary;
   news_evidence: NewsEvidence[];
   news_evidence_summary: {
     policy_version: string;
@@ -455,6 +458,12 @@ const time = (value?: string | null) => value ? new Intl.DateTimeFormat("zh-CN",
   day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit",
   second: "2-digit", hour12: false, timeZone: "Asia/Kuala_Lumpur",
 }).format(new Date(value)) : "—";
+const dailyBriefPhaseLabel = (phase?: DailyBriefPhase) => ({
+  WAITING: "等待", UPDATING: "更新中", DEFERRED: "延后重试",
+  FINAL: "已完成", DEGRADED: "已完成 · 部分资料不可用",
+  EMPTY: "无符合范围资料",
+}[phase ?? "WAITING"]);
+const shortBriefDate = (value: string) => value.slice(5).replace("-", "/");
 const number = (value?: number | null, digits = 2) => value === null || value === undefined ? "—" : value.toFixed(digits);
 const percent = (value?: number | null) => value === null || value === undefined ? "—" : `${value >= 0 ? "+" : "−"}${Math.abs(value * 100).toFixed(3)}%`;
 const outcomeReason = (codes: string[]) => codes.some(code => code.includes("CLOCK_AHEAD"))
@@ -1204,7 +1213,7 @@ export default function AuditView() {
 
       <div className="audit-tabs-shell">
       <nav className="audit-tabs" aria-label="审计视图">
-        <a href="/audit?view=briefs" className={view === "briefs" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("briefs"); }}>每日简报 <b><MetricValue phase={statusState}><CountValue value={payload?.daily_news_briefs?.length} /></MetricValue></b></a>
+        <a href="/audit?view=briefs" className={view === "briefs" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("briefs"); }}>每日简报 <b><MetricValue phase={statusState}>{dailyBriefPhaseLabel(payload?.daily_news_brief_summary?.phase)}</MetricValue></b></a>
         <a href="/audit?view=search" className={view === "search" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("search"); }}>搜索 <b aria-hidden="true">⌕</b></a>
         <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻 <b><MetricValue phase={newsPhase}><CountValue value={readableNewsTotal} /></MetricValue></b></a>
         <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>当前可用新闻事件 <b><MetricValue phase={statusState}><CountValue value={newsMetrics.events.currently_model_eligible} /></MetricValue></b></a>
@@ -1218,7 +1227,7 @@ export default function AuditView() {
       <label className="audit-view-picker">
         <span>证据台页面</span>
         <select aria-label="切换证据台页面" value={view} onChange={event => selectView(event.currentTarget.value as AuditDeskView)}>
-          <option value="briefs">每日简报 · {formatExactCount(payload?.daily_news_briefs?.length)}</option>
+          <option value="briefs">每日简报 · {dailyBriefPhaseLabel(payload?.daily_news_brief_summary?.phase)}</option>
           <option value="search">搜索新闻</option>
           <option value="news">新闻 · {formatExactCount(readableNewsTotal)}</option>
           <option value="evidence">当前可用新闻事件 · {formatExactCount(newsMetrics.events.currently_model_eligible)}</option>
@@ -1231,12 +1240,23 @@ export default function AuditView() {
 
       {view === "briefs" && (() => {
         const briefs = payload?.daily_news_briefs ?? [];
-        const selected = briefs.find(row => row.brief_date === briefDate) ?? briefs[0];
+        const summary = payload?.daily_news_brief_summary;
+        const dates = Array.from(new Set([summary?.brief_date, ...briefs.map(row => row.brief_date)].filter((value): value is string => Boolean(value))));
+        const selectedDate = dates.includes(briefDate) ? briefDate : (dates[0] ?? "");
+        const selected = briefs.find(row => row.brief_date === selectedDate);
+        const isCurrent = selectedDate === summary?.brief_date;
+        const phase = isCurrent ? summary?.phase : selected?.phase;
+        const received = isCurrent ? summary?.received_items : selected?.received_items;
+        const reviewed = isCurrent ? summary?.reviewed_items : selected?.reviewed_items;
+        const pending = isCurrent ? summary?.pending_items : selected?.pending_items;
+        const terminal = isCurrent ? summary?.terminal_failure_items : selected?.terminal_failure_items;
+        const lastGenerated = isCurrent ? summary?.last_generated_at : selected?.generated_at;
         return <section className="daily-brief-desk">
-          <header><div><p className="eyebrow">DAILY NEWS BRIEF</p><h2>{selected?.brief.title ?? "今日还没有简报"}</h2></div>
-            <nav aria-label="选择简报日期">{briefs.map(row => <button type="button" key={row.brief_date} className={selected?.brief_date === row.brief_date ? "active" : ""} onClick={() => setBriefDate(row.brief_date)}>{row.brief_date.slice(5)}</button>)}</nav>
+          <header><div><p className="eyebrow">DAILY BRIEF · ASIA/KUALA_LUMPUR</p><h2>{selectedDate ? `${shortBriefDate(selectedDate)} 每日简报` : "每日简报"}</h2><p className={`brief-phase phase-${(phase ?? "WAITING").toLowerCase()}`}>{dailyBriefPhaseLabel(phase)}</p></div>
+            <nav aria-label="选择简报日期">{dates.map(date => { const row = briefs.find(item => item.brief_date === date); const datePhase = date === summary?.brief_date ? summary.phase : row?.phase; return <button type="button" key={date} className={selectedDate === date ? "active" : ""} onClick={() => setBriefDate(date)}><span>{shortBriefDate(date)}</span><small>{dailyBriefPhaseLabel(datePhase)}</small></button>; })}</nav>
           </header>
-          {selected ? <><ol>{selected.brief.items.map((item, index) => <li key={`${selected.brief_date}-${index}`}><span>{String(index + 1).padStart(2, "0")}</span><div><h3>{item.headline}</h3><p>{item.summary}</p><small>{formatExactCount(item.evidence_ids.length)} 份来源证据</small></div></li>)}</ol><footer>更新 {time(selected.generated_at)} · 仅供阅读，不进入模型训练</footer></> : <p className="brief-empty">收到并完成当天新闻语义复核后，系统会自动生成。</p>}
+          <div className="brief-progress"><strong>已复核 {formatExactCount(reviewed)} / {formatExactCount(received)} 条</strong><span>{pending === null || pending === undefined ? "处理进度暂不可用" : pending > 0 ? `${formatExactCount(pending)} 条仍在处理中` : "纳入范围的资料已处理"}{terminal ? ` · ${formatExactCount(terminal)} 条无法完成语义复核` : ""}</span>{lastGenerated && <small>最后更新 {time(lastGenerated)}</small>}</div>
+          {selected ? <><h3 className="brief-editorial-title">{selected.brief.title}</h3><ol>{selected.brief.items.map((item, index) => <li key={`${selected.brief_date}-${index}`}><span>{String(index + 1).padStart(2, "0")}</span><div><h3>{item.headline}</h3><p>{item.summary}</p><small>{formatExactCount(item.evidence_ids.length)} 份来源证据</small></div></li>)}</ol><footer>{phase === "FINAL" || phase === "DEGRADED" ? "该日期已完成" : "随已复核资料滚动更新"} · 第 {selected.revision_number} 版 · 仅供阅读，不进入模型训练</footer></> : <p className="brief-empty">{phase === "EMPTY" ? `${shortBriefDate(selectedDate)} 没有符合简报范围的新闻。` : `等待 ${shortBriefDate(selectedDate)} 首批已复核新闻。系统会在有足够资料后生成，并随新资料持续更新。`}</p>}
         </section>;
       })()}
 

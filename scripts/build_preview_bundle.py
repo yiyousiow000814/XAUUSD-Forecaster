@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +59,29 @@ def _apply_branch_runtime_contract(status: dict) -> None:
         ),
         "minute_scope": "ACCOUNT",
     })
+    if (not isinstance(status.get("daily_news_brief_summary"), dict)
+            and status.get("generated_at")):
+        generated = datetime.fromisoformat(str(status["generated_at"]))
+        brief_date = generated.astimezone(ZoneInfo("Asia/Kuala_Lumpur")).date().isoformat()
+        briefs = status.get("daily_news_briefs")
+        current = next((
+            row for row in briefs if isinstance(row, dict)
+            and row.get("brief_date") == brief_date
+        ), None) if isinstance(briefs, list) else None
+        status["daily_news_brief_summary"] = {
+            "brief_date": brief_date,
+            "phase": "UPDATING" if current else "WAITING",
+            "received_items": None,
+            "reviewed_items": None,
+            "pending_items": None,
+            "terminal_failure_items": None,
+            "latest_revision": current.get("revision_number") if current else None,
+            "last_generated_at": current.get("generated_at") if current else None,
+            "next_retry_at": None,
+            "is_final": False,
+            "total_brief_days": None,
+            "observation_scope": "BUILD_SNAPSHOT_COMPATIBILITY",
+        }
 
 
 def _read_json(base_url: str, path: str) -> dict:

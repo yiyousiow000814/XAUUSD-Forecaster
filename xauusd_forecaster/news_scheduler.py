@@ -656,6 +656,35 @@ def rank_accounts_for_models(
     ))
 
 
+def credentials_for_background_task(
+    connection: sqlite3.Connection,
+    credentials: tuple[ApiCredential, ...],
+    *, task_type: str, now: datetime | None = None,
+) -> tuple[ApiCredential, ...]:
+    """Resolve a declared background route to ordered ROUTINE credentials."""
+    from .ai_task_registry import route_for_task
+
+    eligible = tuple(item for item in credentials if item.pool == ROUTINE_POOL)
+    if not eligible:
+        return ()
+    route = route_for_task(task_type)
+    accounts = rank_accounts_for_models(
+        connection, eligible, models=route.models,
+        priority_reserve_models=route.priority_reserve_models,
+        urgent=False, now=now,
+    )
+    by_account: dict[str, list[ApiCredential]] = {}
+    for credential in eligible:
+        by_account.setdefault(credential.account_id, []).append(credential)
+    return tuple(
+        credential
+        for account in accounts
+        for credential in sorted(
+            by_account[account], key=lambda item: item.credential_id,
+        )
+    )
+
+
 def reserve_account_request(
     connection: sqlite3.Connection,
     *,

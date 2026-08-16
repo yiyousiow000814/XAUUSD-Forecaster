@@ -30,7 +30,10 @@ from xauusd_forecaster.annotation import (  # noqa: E402
     assess_pending_news_impacts,
     translate_pending_headlines,
 )
-from xauusd_forecaster.daily_brief import update_daily_brief  # noqa: E402
+from xauusd_forecaster.daily_brief import (  # noqa: E402
+    brief_dates_to_process,
+    update_daily_brief,
+)
 from xauusd_forecaster.forward_ledger import ForwardLedger  # noqa: E402
 from xauusd_forecaster.ai_task_registry import route_for_task  # noqa: E402
 from xauusd_forecaster.news_scheduler import (  # noqa: E402
@@ -42,6 +45,7 @@ from xauusd_forecaster.news_scheduler import (  # noqa: E402
     claim_job,
     complete_job,
     configured_api_credentials,
+    credentials_for_background_task,
     pending_record_for_job,
     record_job_attempt,
     rank_accounts_for_models,
@@ -428,6 +432,34 @@ def run_scheduled_batch(
         return [status for future in futures for status in future.result()]
 
 
+def run_daily_brief_batch(
+    ledger: ForwardLedger, *, now: datetime | None = None,
+    credentials: tuple[ApiCredential, ...] | None = None,
+) -> list[dict[str, object]]:
+    """Advance the bounded brief backlog using scheduler-owned routine capacity."""
+    instant = now or datetime.now(UTC)
+    configured = credentials if credentials is not None else configured_api_credentials()
+    ordered = credentials_for_background_task(
+        ledger.connection, configured, task_type="DAILY_BRIEF", now=instant,
+    )
+    credential = ordered[0] if ordered else None
+    results = []
+    for day in brief_dates_to_process(ledger.connection, now=instant):
+        result = update_daily_brief(
+            ledger, brief_date=day, now=instant,
+            api_key=credential.api_key if credential else None,
+            request_accountant=(SchedulerModelAccountant(
+                ledger.connection, credential, urgent=False,
+            ) if credential else None),
+        )
+        results.append({
+            **result,
+            "pool": credential.pool if credential else ROUTINE_POOL,
+            "account_id": credential.account_id if credential else None,
+        })
+    return results
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -474,25 +506,10 @@ def main() -> int:
                 ),
                 flush=True,
             )
-            brief_credential = next(
-                (credential for credential in configured_api_credentials()
-                 if credential.pool == "PREEMPTIBLE"),
-                None,
-            )
-            if brief_credential is None:
-                brief_status = {
-                    "status": "DISABLED", "reason": "NO_PREEMPTIBLE_ACCOUNT",
-                }
-            else:
-                brief_status = update_daily_brief(
-                    ledger,
-                    api_key=brief_credential.api_key,
-                    request_accountant=SchedulerModelAccountant(
-                        ledger.connection, brief_credential, urgent=False,
-                    ),
-                )
+            brief_statuses = run_daily_brief_batch(ledger)
             print(
-                json.dumps({"event": "DAILY_NEWS_BRIEF", **brief_status}),
+                json.dumps({"event": "DAILY_NEWS_BRIEF_BATCH",
+                            "statuses": brief_statuses}),
                 flush=True,
             )
             work_items = len(statuses)

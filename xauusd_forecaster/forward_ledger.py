@@ -31,6 +31,8 @@ IMMUTABLE_TABLES = (
     "news_discovery_failures",
     "news_intake_rejections_v1",
     "daily_news_briefs",
+    "daily_news_brief_finalizations_v1",
+    "daily_news_brief_failures_v1",
     "macro_observations",
     "source_polls",
     "decision_events",
@@ -158,7 +160,46 @@ CREATE TABLE IF NOT EXISTS daily_news_brief_refresh_state (
     pending_source_hash TEXT,
     pending_candidate_hash TEXT,
     pending_since TEXT,
-    last_observed_at TEXT NOT NULL
+    last_observed_at TEXT NOT NULL,
+    phase TEXT NOT NULL DEFAULT 'WAITING' CHECK(phase IN (
+        'WAITING','UPDATING','DEFERRED','FINAL','DEGRADED','EMPTY')),
+    received_items INTEGER NOT NULL DEFAULT 0,
+    reviewed_items INTEGER NOT NULL DEFAULT 0,
+    pending_items INTEGER NOT NULL DEFAULT 0,
+    terminal_failure_items INTEGER NOT NULL DEFAULT 0,
+    latest_revision INTEGER,
+    last_generated_at TEXT,
+    next_retry_at TEXT,
+    finalized_at TEXT,
+    generation_failure_count INTEGER NOT NULL DEFAULT 0,
+    last_failure_code TEXT,
+    last_failure_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS daily_news_brief_finalizations_v1 (
+    brief_date TEXT PRIMARY KEY,
+    revision_number INTEGER,
+    final_status TEXT NOT NULL CHECK(final_status IN ('FINAL','DEGRADED','EMPTY')),
+    received_items INTEGER NOT NULL,
+    reviewed_items INTEGER NOT NULL,
+    terminal_failure_items INTEGER NOT NULL,
+    cutoff_at TEXT NOT NULL,
+    finalized_at TEXT NOT NULL,
+    FOREIGN KEY(brief_date,revision_number)
+        REFERENCES daily_news_briefs(brief_date,revision_number)
+);
+
+CREATE TABLE IF NOT EXISTS daily_news_brief_failures_v1 (
+    failure_id TEXT PRIMARY KEY,
+    brief_date TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL CHECK(attempt_number>=1),
+    failure_code TEXT NOT NULL,
+    error_type TEXT NOT NULL,
+    error_signature TEXT NOT NULL,
+    error TEXT NOT NULL,
+    failed_at TEXT NOT NULL,
+    next_retry_at TEXT NOT NULL,
+    UNIQUE(brief_date,attempt_number)
 );
 
 CREATE TABLE IF NOT EXISTS news_title_translations (
@@ -468,6 +509,7 @@ class ForwardLedger:
         install_v2_schema(self.connection)
         install_scheduler_schema(self.connection)
         install_assistant_capacity_schema(self.connection)
+        self._install_daily_brief_lifecycle_schema()
         self._install_append_only_triggers()
         created = now or datetime.now(UTC)
         with self.connection:
@@ -500,6 +542,36 @@ class ForwardLedger:
                 ]
             )
         self.connection.executescript("\n".join(statements))
+
+    def _install_daily_brief_lifecycle_schema(self) -> None:
+        """Upgrade mutable Daily Brief state without rewriting evidence rows."""
+        columns = {
+            "phase": "TEXT NOT NULL DEFAULT 'WAITING'",
+            "received_items": "INTEGER NOT NULL DEFAULT 0",
+            "reviewed_items": "INTEGER NOT NULL DEFAULT 0",
+            "pending_items": "INTEGER NOT NULL DEFAULT 0",
+            "terminal_failure_items": "INTEGER NOT NULL DEFAULT 0",
+            "latest_revision": "INTEGER",
+            "last_generated_at": "TEXT",
+            "next_retry_at": "TEXT",
+            "finalized_at": "TEXT",
+            "generation_failure_count": "INTEGER NOT NULL DEFAULT 0",
+            "last_failure_code": "TEXT",
+            "last_failure_at": "TEXT",
+        }
+        existing = {
+            str(row["name"])
+            for row in self.connection.execute(
+                "PRAGMA table_info(daily_news_brief_refresh_state)"
+            ).fetchall()
+        }
+        with self.connection:
+            for name, declaration in columns.items():
+                if name not in existing:
+                    self.connection.execute(
+                        "ALTER TABLE daily_news_brief_refresh_state "
+                        f"ADD COLUMN {name} {declaration}"
+                    )
 
     def append_snapshot(self, record: dict[str, Any]) -> None:
         decision_time = _iso(record["decision_time"])

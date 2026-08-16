@@ -200,6 +200,24 @@ def test_preview_overlays_branch_owned_model_throughput_contract() -> None:
     }
 
 
+def test_preview_backfills_missing_daily_brief_summary_without_fake_counts() -> None:
+    module = _preview_module()
+    status = {
+        "generated_at": "2026-08-16T01:31:55+00:00",
+        "annotation_queue": {},
+        "daily_news_briefs": [],
+    }
+
+    module._apply_branch_runtime_contract(status)
+
+    summary = status["daily_news_brief_summary"]
+    assert summary["brief_date"] == "2026-08-16"
+    assert summary["phase"] == "WAITING"
+    assert summary["received_items"] is None
+    assert summary["total_brief_days"] is None
+    assert summary["observation_scope"] == "BUILD_SNAPSHOT_COMPATIBILITY"
+
+
 def test_preview_freezes_both_materialized_curve_overviews(monkeypatch) -> None:
     module = _preview_module()
     requested: list[str] = []

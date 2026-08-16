@@ -124,6 +124,11 @@ product requirement.
 - Production-precomputed storylines may support presentation review, but they do
   not prove a changed branch grouping policy. Such a change requires complete
   independent-event replay input rather than reverse-engineering grouped output.
+- When production predates the Daily Brief lifecycle summary, the branch build
+  derives only the Kuala Lumpur snapshot date and whether a current brief
+  revision exists. Unknown progress and archive counts remain `null`; the
+  compatibility summary is labeled `BUILD_SNAPSHOT_COMPATIBILITY` and must not
+  be presented as a current production observation.
 - Assistant presentation may use a visibly labeled branch-owned fixture for
   local selection, older-message reveal, and progress-trace review; its
   composer and every conversation mutation remain unavailable.
