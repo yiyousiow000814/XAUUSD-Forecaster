@@ -8,7 +8,7 @@ import MobileDashboardNav from "../_components/MobileDashboardNav";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
-import { schedulerTaskLabel, type OperationalHealth } from "../_lib/operational-health";
+import { schedulerTaskLabel, type AssistantOperationalHealth, type OperationalHealth } from "../_lib/operational-health";
 
 type StatusPayload = {
   preview_status_summary?: boolean;
@@ -83,7 +83,10 @@ function SourceHealthCard({ item }: { item: NewsSourceHealth }) {
 
 export default function HealthView() {
   const cachedStatus = readDashboardResource<StatusPayload>("/api/status");
+  const cachedAssistantHealth = readDashboardResource<AssistantOperationalHealth>("/api/assistant-health");
   const [payload, setPayload] = useState<StatusPayload | null>(() => cachedStatus);
+  const [assistantHealth, setAssistantHealth] = useState<AssistantOperationalHealth | null>(() => cachedAssistantHealth);
+  const [assistantHealthError, setAssistantHealthError] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [syncingCurrent, setSyncingCurrent] = useState(Boolean(cachedStatus?.preview_status_summary));
   const [showHealthyComponents, setShowHealthyComponents] = useState(false);
@@ -99,6 +102,14 @@ export default function HealthView() {
       if (showSyncState) setSyncingCurrent(false);
     }
   }, []);
+  const refreshAssistantHealth = useCallback(async (force = false) => {
+    try {
+      setAssistantHealth(await loadDashboardResource<AssistantOperationalHealth>("/api/assistant-health", { force }));
+      setAssistantHealthError(false);
+    } catch {
+      setAssistantHealthError(true);
+    }
+  }, []);
 
   useEffect(() => {
     return scheduleDashboardRefresh(
@@ -109,6 +120,13 @@ export default function HealthView() {
       "status",
     );
   }, [refresh, payload?.preview_status_summary]);
+  useEffect(() => scheduleDashboardRefresh(
+    () => void refreshAssistantHealth(false),
+    () => void refreshAssistantHealth(true),
+    DASHBOARD_REFRESH_INTERVALS.status,
+    "current",
+    "assistant-health",
+  ), [refreshAssistantHealth]);
 
   const currentPhase: CurrentDataPhase = error
     ? "error" : !payload || syncingCurrent ? "loading" : payload.preview_status_summary ? "snapshot" : "ready";
@@ -167,6 +185,31 @@ export default function HealthView() {
             <div><dt>最高领取</dt><dd>{task.max_claim_count}{task.max_claim_job_ref ? ` · ${task.max_claim_job_ref}` : ""}</dd></div>
           </dl>
           {task.failure_codes_15m.length ? <p className="scheduler-failure-codes">{task.failure_codes_15m.map(item => <code key={item.code}>{item.code} × {item.count}</code>)}</p> : null}
+        </article>)}
+      </div>
+    </section>
+    <section id="assistant-operational-alerts" className={`operational-health-panel is-${assistantHealthError ? "error" : (assistantHealth?.status ?? "healthy").toLowerCase()}`} aria-label="Assistant 云端运行异常与错误码">
+      <header><div><p className="eyebrow">ASSISTANT D1 ERROR CODES</p><h2>Assistant 云端任务</h2></div><p>覆盖对话、新闻问答、标题、上下文压缩与历史记忆索引。这里直接读取 Cloudflare D1 队列，不拿本机新闻队列代替。</p></header>
+      {assistantHealthError ? <div className="operational-alert-list"><article className="is-error"><div><code>OPS_ASSISTANT_HEALTH_UNAVAILABLE</code><b>ASSISTANT_D1</b><span>需要处理</span></div><p>Assistant 云端运行状态无法读取。</p></article></div>
+        : assistantHealth === null ? <p className="operational-all-clear">正在读取 Assistant 云端任务状态…</p>
+          : assistantHealth.current === false ? <p className="operational-all-clear">PR Preview 不把生产 D1 告警伪装成分支实时状态；合并后由生产页面显示。</p>
+          : assistantHealth?.alerts.length ? <div className="operational-alert-list">{assistantHealth.alerts.map((alert, index) => <article key={`${alert.code}-${alert.scope}-${index}`} className={`is-${alert.severity.toLowerCase()}`}><div><code>{alert.code}</code><b>{alert.scope}</b><span>{alert.severity === "ERROR" ? "需要处理" : "需要留意"}</span></div><p>{alert.message_zh}</p><small>{Object.entries(alert.evidence).map(([key, value]) => `${key}=${typeof value === "object" ? JSON.stringify(value) : value ?? "—"}`).join(" · ")}</small></article>)}</div>
+            : <p className="operational-all-clear">当前没有达到告警阈值的 Assistant 云端任务异常。</p>}
+      <div className="scheduler-health-grid">
+        {(assistantHealth?.queues ?? []).map(queue => <article key={queue.queue}>
+          <header><strong>{queue.label}</strong><code>{queue.queue}</code></header>
+          <dl>
+            <div><dt>排队</dt><dd>{queue.queued}</dd></div>
+            <div><dt>处理中</dt><dd>{queue.processing}</dd></div>
+            <div><dt>可立即处理</dt><dd>{queue.claimable}</dd></div>
+            <div><dt>定时重试</dt><dd>{queue.scheduled_retry}</dd></div>
+            <div><dt>15分钟完成</dt><dd>{queue.completed_15m}</dd></div>
+            <div><dt>终止失败</dt><dd>{queue.failed_15m}</dd></div>
+            <div><dt>容量等待</dt><dd>{queue.capacity_deferred}</dd></div>
+            <div><dt>最旧可处理</dt><dd>{compactElapsed(queue.oldest_age_seconds)}</dd></div>
+            <div><dt>最高尝试</dt><dd>{queue.max_attempt_count}</dd></div>
+          </dl>
+          {queue.failure_codes.length ? <p className="scheduler-failure-codes">{queue.failure_codes.map(item => <code key={item.code}>{item.code} × {item.count}</code>)}</p> : null}
         </article>)}
       </div>
     </section>

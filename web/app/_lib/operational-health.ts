@@ -35,6 +35,31 @@ export type OperationalHealth = {
   scheduler: { status: string; tasks: SchedulerTaskHealth[] };
 };
 
+export type AssistantQueueHealth = {
+  queue: string;
+  label: string;
+  queued: number;
+  processing: number;
+  claimable: number;
+  scheduled_retry: number;
+  oldest_active_at: string | null;
+  oldest_age_seconds: number | null;
+  max_attempt_count: number;
+  completed_15m: number;
+  failed_15m: number;
+  capacity_deferred: number;
+  failure_codes: Array<{ code: string; count: number }>;
+};
+
+export type AssistantOperationalHealth = {
+  schema_version: string;
+  observed_at: string | null;
+  status: "HEALTHY" | "WARNING" | "ERROR" | "SNAPSHOT_UNAVAILABLE";
+  alerts: OperationalAlert[];
+  queues: AssistantQueueHealth[];
+  current: boolean;
+};
+
 export const schedulerTaskLabel: Record<string, string> = {
   ACTIVE_ANNOTATION: "Gemini 语义复核",
   ACTIVE_IMPACT: "Gemma 事件与影响复核",

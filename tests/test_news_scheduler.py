@@ -132,7 +132,7 @@ def test_gemma_minute_budget_is_shared_across_tasks_and_keys() -> None:
     )
 
 
-def test_gemma_budget_keeps_previous_bucket_to_prevent_boundary_burst() -> None:
+def test_gemma_budget_uses_an_exact_trailing_sixty_second_window() -> None:
     connection = _connection()
     common = {
         "account_id": "key-a", "model_family": "gemma-impact",
@@ -148,6 +148,35 @@ def test_gemma_budget_keeps_previous_bucket_to_prevent_boundary_burst() -> None:
     assert not reserve_account_request(
         connection, input_tokens=6_001,
         now=before_boundary + timedelta(seconds=2), **common,
+    )
+    assert reserve_account_request(
+        connection, input_tokens=6_001,
+        now=before_boundary + timedelta(seconds=61), **common,
+    )
+
+
+def test_exact_window_migration_preserves_recent_legacy_usage() -> None:
+    connection = _connection()
+    now = datetime.now(UTC)
+    with connection:
+        connection.execute(
+            "DELETE FROM news_ai_scheduler_migrations_v1"
+        )
+        connection.execute(
+            """INSERT INTO news_ai_account_minute_usage_v1
+               VALUES (?,?,?,?,?,?)""",
+            (
+                news_scheduler_module.minute_bucket(now), "account-a",
+                "gemma-impact", 3, 14_000, now.isoformat(),
+            ),
+        )
+
+    install_scheduler_schema(connection)
+
+    assert not reserve_account_request(
+        connection, account_id="account-a", model_family="gemma-impact",
+        daily_limit=15_000, requests_per_minute=20,
+        input_tokens=1_001, input_tokens_per_minute=15_000, now=now,
     )
 
 

@@ -204,6 +204,8 @@ def test_preview_overlays_branch_owned_model_throughput_contract() -> None:
         "requests_per_minute": 20,
         "input_tokens_per_minute_per_account": 15_000,
         "input_tokens_per_minute": 15_000,
+        "provider_lanes_per_account": 2,
+        "maximum_concurrent_requests": 2,
         "minute_scope": "ACCOUNT",
     }
 

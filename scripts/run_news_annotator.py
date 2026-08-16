@@ -62,7 +62,9 @@ from xauusd_forecaster.scheduler_model_gateway import (  # noqa: E402
 )
 
 
-PRODUCTION_LANES_PER_ACCOUNT = 2
+from xauusd_forecaster.model_limits import GEMMA_PROVIDER_LANES_PER_ACCOUNT  # noqa: E402
+
+PRODUCTION_LANES_PER_ACCOUNT = GEMMA_PROVIDER_LANES_PER_ACCOUNT
 
 
 def write_heartbeat(
