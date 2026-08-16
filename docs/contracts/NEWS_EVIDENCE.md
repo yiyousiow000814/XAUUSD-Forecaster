@@ -82,7 +82,8 @@ semantic-review counts remain visible; only old model-candidate flags and
 unfinished operational states are neutralized. Historical local annotations and
 failure receipts remain immutable audit evidence; their old operational status
 MUST NOT be presented as the current backlog, current candidates, or current
-isolation count.
+isolation count. Runtime cutover MUST preserve every incremental mirror cursor;
+losing a cursor MUST NOT masquerade as a new annotation-contract handover.
 
 ## Event construction
 
