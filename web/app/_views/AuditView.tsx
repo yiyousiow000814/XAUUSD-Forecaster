@@ -899,7 +899,7 @@ export default function AuditView() {
   const learningDataAvailableRef = useRef(Boolean(cachedLearning));
   const learningFailureCountRef = useRef(0);
   const [summaryCadence, setSummaryCadence] = useState<EvaluationCadence>("EVERY_5M");
-  const [evidenceMode, setEvidenceMode] = useState<"seen" | "unseen" | "all">("seen");
+  const [evidenceMode, setEvidenceMode] = useState<"eligible" | "seen" | "unseen" | "all">("eligible");
 
   const refreshStatus = useCallback(async (force = false) => {
     try {
@@ -1194,12 +1194,11 @@ export default function AuditView() {
   const newsMetrics = resolveNewsMetrics(payload);
   const readableNewsTotal = archiveTotals?.readable ?? null;
   const parsedNewsTotal = archiveTotals?.parsed ?? null;
-  const modelCandidateNewsTotal = archiveTotals?.modelCandidates ?? null;
-  const newsWaitingTotal = (payload?.annotation_queue?.queued ?? 0)
-    + (payload?.annotation_queue?.backing_off ?? 0)
-    + (payload?.annotation_queue?.dead_letter ?? 0);
-  const newsNoParsingNeededTotal = readableNewsTotal !== null && parsedNewsTotal !== null
-    ? Math.max(0, readableNewsTotal - parsedNewsTotal - newsWaitingTotal)
+  const newsWaitingTotal = archiveTotals
+    ? newsIndex.review_state_counts?.PROCESSING ?? 0
+    : null;
+  const isolatedNewsTotal = archiveTotals
+    ? newsIndex.review_state_counts?.ISOLATED ?? 0
     : null;
   const rowsUntilTraining = statusState === "ready" && payload?.training
     ? Math.max(0, payload.training.next_training_at - payload.training.complete_rows)
@@ -1234,11 +1233,14 @@ export default function AuditView() {
   const evidenceSummaryDecisionExposures = evidencePayloadHasDuplicates ? evidenceDecisionExposures : newsMetrics.prediction_usage.decision_event_exposures;
   const evidenceSummaryModelUses = evidencePayloadHasDuplicates ? evidenceModelUses : newsMetrics.prediction_usage.frozen_model_uses;
   const visibleEvidence = canonicalEvidence.filter(row => (
-    evidenceMode === "all" || (evidenceMode === "seen" ? row.model_seen : !row.model_seen)
+    evidenceMode === "all"
+    || (evidenceMode === "eligible" ? row.broad_model_eligible
+      : evidenceMode === "seen" ? row.model_seen : !row.model_seen)
   ));
-  const evidenceModeTotal = evidenceMode === "seen"
-    ? evidenceSummarySeenCount
-    : evidenceMode === "unseen" ? evidenceSummaryUnseenCount : evidenceSummaryDisplayedCount;
+  const evidenceModeTotal = evidenceMode === "eligible"
+    ? evidenceSummaryEligibleCount
+    : evidenceMode === "seen" ? evidenceSummarySeenCount
+      : evidenceMode === "unseen" ? evidenceSummaryUnseenCount : evidenceSummaryDisplayedCount;
   const evidenceWindowPartial = visibleEvidence.length < evidenceModeTotal;
   const deploymentPresentation = DEPLOYMENT_PRESENTATION[
     payload?.system?.deployment?.status ?? "PROVENANCE_UNKNOWN"
@@ -1415,9 +1417,9 @@ export default function AuditView() {
         <section className="annotation-queue" aria-label="新闻处理进度">
           <span><b><CountValue value={readableNewsTotal} /></b> {readableNewsTotal === null ? "正在读取近60天新闻总量" : "条近60天可读新闻"}</span>
           <span><b><CountValue value={parsedNewsTotal} /></b> 条语义复核完成</span>
-          <span><b><CountValue value={newsNoParsingNeededTotal} /></b> 条无需复核</span>
           <span><b><CountValue value={newsWaitingTotal} /></b> 条等待处理</span>
-          <span className="is-model-ready"><b><CountValue value={modelCandidateNewsTotal} /></b> 个当前模型候选事件</span>
+          <span><b><CountValue value={isolatedNewsTotal} /></b> 条已隔离待查</span>
+          <span className="is-model-ready"><b><CountValue value={newsMetrics.events.currently_model_eligible} /></b> 个当前可用事件</span>
           <details>
             <summary>查看处理器技术状态</summary>
             <p>真正排队 {formatExactCount(payload?.annotation_queue?.queued)} · 失败后等待重试 {formatExactCount(payload?.annotation_queue?.backing_off)} · 已隔离 {formatExactCount(payload?.annotation_queue?.dead_letter)} · 等待正文 {formatExactCount(payload?.annotation_queue?.waiting_content)} · 正文不可用 {formatExactCount(payload?.annotation_queue?.unavailable_content)}</p>
@@ -1490,6 +1492,7 @@ export default function AuditView() {
           <p className="evidence-count-note"><b>{formatExactCount(newsMetrics.training.current_contract_rows)} 条训练记录</b> 来自 <b>{formatExactCount(newsMetrics.training.distinct_events)} 个当前契约事件</b>；文章、独立事件、预测读取和训练记录是四种不同口径。</p>
         </div>
         <nav className="evidence-filters" aria-label="模型新闻可见性筛选">
+          <button type="button" className={evidenceMode === "eligible" ? "active" : ""} onClick={() => { setEvidenceMode("eligible"); setShowAllEvidence(false); }}>当前可用 <b><CountValue value={evidenceSummaryEligibleCount} /></b></button>
           <button type="button" className={evidenceMode === "seen" ? "active" : ""} onClick={() => { setEvidenceMode("seen"); setShowAllEvidence(false); }}>历史上用过 <b><CountValue value={evidenceSummarySeenCount} /></b></button>
           <button type="button" className={evidenceMode === "unseen" ? "active" : ""} onClick={() => { setEvidenceMode("unseen"); setShowAllEvidence(false); }}>从未用过 <b><CountValue value={evidenceSummaryUnseenCount} /></b></button>
           <button type="button" className={evidenceMode === "all" ? "active" : ""} onClick={() => { setEvidenceMode("all"); setShowAllEvidence(false); }}>查看全部 <b><CountValue value={evidenceSummaryDisplayedCount} /></b></button>

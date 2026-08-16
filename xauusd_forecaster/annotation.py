@@ -7,6 +7,7 @@ import json
 import os
 import re
 import unicodedata
+import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -946,9 +947,29 @@ class _GeminiRequestPool:
                     prompt_version=prompt_version,
                 )
             except ValueError as error:
-                raise ModelOutputContractFailed(
-                    error, result, stage="SEMANTIC_CONTRACT",
-                ) from error
+                if str(error) != "annotation supporting evidence is absent from source":
+                    raise ModelOutputContractFailed(
+                        error, result, stage="SEMANTIC_CONTRACT",
+                    ) from error
+                try:
+                    result["supporting_evidence"] = self._repair_evidence_anchors(
+                        start_index + 1, model, result, headline, body,
+                    )
+                    _validate_current_semantics(
+                        result, headline=headline, body=body,
+                        prompt_version=prompt_version,
+                    )
+                except (ModelGatewayCapacityExhausted, urllib.error.HTTPError):
+                    raise
+                except Exception as repair_error:
+                    raise ModelOutputContractFailed(
+                        repair_error, result, stage="EVIDENCE_ANCHOR_REPAIR",
+                        initial_error=error,
+                        public_message=(
+                            "Gemini evidence anchor repair failed; semantic "
+                            "annotation withheld"
+                        ),
+                    ) from repair_error
         invalid_display_fields: tuple[str, ...]
         try:
             _recover_display_fields(result, headline, body)
@@ -1003,6 +1024,35 @@ class _GeminiRequestPool:
             payload=payload,
             input_tokens=input_tokens,
             decode=_decode_model_json,
+            retryable_http_codes=frozenset({401, 403, 429}),
+            retryable_decode_errors=(ValueError, KeyError, json.JSONDecodeError),
+        )
+        return repaired
+
+    def _repair_evidence_anchors(
+        self, start_index: int, model: str, result: dict,
+        headline: str, body: str,
+    ) -> list[str]:
+        candidates = _source_evidence_candidates(headline, body)
+        payload = _evidence_anchor_repair_payload(result, candidates)
+        serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        input_tokens = self._count_or_conservative(
+            model,
+            payload,
+            conservative_tokens=max(
+                _estimate_input_tokens(serialized) + 256,
+                len(serialized.encode("utf-8")) + 256,
+            ),
+        )
+        repaired, _ = self.gateway.generate(
+            start_index,
+            model=model,
+            purpose="evidence-anchor-repair",
+            payload=payload,
+            input_tokens=input_tokens,
+            decode=lambda envelope: _decode_evidence_anchor_selection(
+                envelope, candidates,
+            ),
             retryable_http_codes=frozenset({401, 403, 429}),
             retryable_decode_errors=(ValueError, KeyError, json.JSONDecodeError),
         )
@@ -1125,6 +1175,99 @@ def generate_metered_json(
 def _decode_model_json(envelope: dict[str, object]) -> dict:
     text = envelope["candidates"][0]["content"]["parts"][0]["text"]
     return _decode_json_object(text)
+
+
+def _source_evidence_candidates(
+    headline: str, body: str, *, max_chars: int = 220,
+) -> list[tuple[str, str]]:
+    """Build exact, bounded source spans that a repair request can only select."""
+    source = f"{headline}\n{body}"
+    candidates: list[tuple[str, str]] = []
+    cursor = 0
+    while cursor < len(source) and len(candidates) < 384:
+        while cursor < len(source) and source[cursor].isspace():
+            cursor += 1
+        if cursor >= len(source):
+            break
+        hard_end = min(len(source), cursor + max_chars)
+        end = hard_end
+        if hard_end < len(source):
+            window = source[cursor:hard_end]
+            boundaries = [
+                match.end() for match in re.finditer(r"[.!?。！？;；](?:\s|$)", window)
+                if match.end() >= 20
+            ]
+            if boundaries:
+                end = cursor + boundaries[-1]
+            else:
+                whitespace = max(window.rfind(" "), window.rfind("\n"))
+                if whitespace >= 20:
+                    end = cursor + whitespace
+        excerpt = source[cursor:end].strip()
+        if len(excerpt) >= 4:
+            candidates.append((f"E{len(candidates) + 1:03d}", excerpt))
+        cursor = max(end, cursor + 1)
+    if not candidates:
+        raise ValueError("source has no bounded evidence candidates")
+    return candidates
+
+
+def _evidence_anchor_repair_payload(
+    result: dict, candidates: list[tuple[str, str]],
+) -> dict[str, object]:
+    candidate_ids = [candidate_id for candidate_id, _ in candidates]
+    semantic_context = {
+        name: result.get(name) for name in (
+            "headline_zh", "summary_zh", "xauusd_relevance",
+            "semantic_reason_zh", "primary_category", "material_change",
+        )
+    }
+    return {
+        "contents": [{"parts": [{"text": (
+            "The semantic classification below is frozen. Select one to three "
+            "candidate IDs whose exact source spans best support that classification. "
+            "Return IDs only; do not rewrite, translate, combine, or repair source "
+            "text. If the item is IRRELEVANT, select the span that best identifies "
+            "the article's actual subject.\nSEMANTIC_CLASSIFICATION\n"
+            + json.dumps(semantic_context, ensure_ascii=False, separators=(",", ":"))
+            + "\nEXACT_SOURCE_CANDIDATES\n"
+            + json.dumps(
+                [{"id": candidate_id, "text": excerpt}
+                 for candidate_id, excerpt in candidates],
+                ensure_ascii=False, separators=(",", ":"),
+            )
+        )}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": {
+                "type": "object",
+                "required": ["evidence_ids"],
+                "properties": {"evidence_ids": {
+                    "type": "array", "minItems": 1, "maxItems": 3,
+                    "items": {"type": "string", "enum": candidate_ids},
+                }},
+            },
+            "maxOutputTokens": 128,
+            "temperature": 0,
+        },
+    }
+
+
+def _decode_evidence_anchor_selection(
+    envelope: dict[str, object], candidates: list[tuple[str, str]],
+) -> list[str]:
+    result = _decode_model_json(envelope)
+    selected_ids = result.get("evidence_ids")
+    if not isinstance(selected_ids, list) or not 1 <= len(selected_ids) <= 3:
+        raise ValueError("evidence repair returned an invalid ID count")
+    if any(not isinstance(item, str) for item in selected_ids):
+        raise ValueError("evidence repair returned a non-string ID")
+    if len(selected_ids) != len(set(selected_ids)):
+        raise ValueError("evidence repair returned duplicate IDs")
+    by_id = dict(candidates)
+    if any(item not in by_id for item in selected_ids):
+        raise ValueError("evidence repair returned an unknown ID")
+    return [by_id[item] for item in selected_ids]
 
 
 def _chinese_repair_payload(result: dict) -> dict[str, object]:

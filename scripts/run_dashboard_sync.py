@@ -49,7 +49,7 @@ NEWS_DETAIL_BATCH_LIMIT_BYTES = 400_000
 NEWS_INDEX_BATCH_LIMIT_BYTES = 400_000
 NEWS_WRITE_BATCH_ITEMS = 20
 NEWS_READER_WINDOW_DAYS = 60
-NEWS_MIRROR_CONTRACT_VERSION = "news-60-day-incremental-v6-review-recovery"
+NEWS_MIRROR_CONTRACT_VERSION = "news-60-day-incremental-v7-semantic-handover"
 MARKET_HISTORY_CONTRACT_VERSION = "market-history-d1-v2"
 MARKET_HISTORY_BATCH_LIMIT_BYTES = 350_000
 MARKET_HISTORY_OVERLAP_SECONDS = 2 * 3_600
@@ -1735,7 +1735,10 @@ def _sync_news(_local_payload: dict, config: dict) -> None:
     """Advance one bounded archive page; never replay the whole archive."""
     state_path = Path(config.get("news_state_file", DEFAULT_NEWS_STATE))
     state = _read_news_sync_state(state_path)
-    if state.get("mirror_contract_version") != NEWS_MIRROR_CONTRACT_VERSION:
+    contract_changed = (
+        state.get("mirror_contract_version") != NEWS_MIRROR_CONTRACT_VERSION
+    )
+    if contract_changed:
         state = {"mirror_contract_version": NEWS_MIRROR_CONTRACT_VERSION}
 
     if config.get("local_status_url"):
@@ -1754,6 +1757,11 @@ def _sync_news(_local_payload: dict, config: dict) -> None:
     news_url = config.get("remote_news_ingest_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/news-content"
     )
+
+    if contract_changed:
+        _post_json(news_index_url, json.dumps({
+            "reset_annotation_state_for_contract": NEWS_MIRROR_CONTRACT_VERSION,
+        }, separators=(",", ":")).encode("utf-8"), config)
 
     # Details are durable before their index records become discoverable.
     for batch in news_detail_batches(details):

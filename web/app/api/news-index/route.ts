@@ -41,6 +41,8 @@ const REVIEW_STATE_SQL: Record<NewsReviewState, string> = {
   ISOLATED: "json_extract(payload, '$.annotation_status') IN ('DEAD_LETTER','CONTENT_UNAVAILABLE')",
   PROCESSING: "COALESCE(json_extract(payload, '$.annotation_status'), '') NOT IN ('READY','NOT_REQUIRED','DEAD_LETTER','CONTENT_UNAVAILABLE')",
 };
+const ACTIVE_NEWS_SQL =
+  "COALESCE(json_extract(payload, '$.annotation_status'), '') <> 'SUPERSEDED_CONTRACT'";
 
 export async function GET(request: Request) {
   const { page, pageSize, category, reviewState } = pageRequest(request);
@@ -53,14 +55,14 @@ export async function GET(request: Request) {
   try {
     const binding = env.DB as D1Database | undefined;
     if (binding) {
-      const conditions = [REVIEW_STATE_SQL[reviewState]];
+      const conditions = [ACTIVE_NEWS_SQL, REVIEW_STATE_SQL[reviewState]];
       const bindValues: string[] = [];
       if (category) {
         conditions.push("category = ?");
         bindValues.push(category);
       }
       const where = `WHERE ${conditions.join(" AND ")}`;
-      const reviewWhere = `WHERE ${REVIEW_STATE_SQL[reviewState]}`;
+      const reviewWhere = `WHERE ${ACTIVE_NEWS_SQL} AND ${REVIEW_STATE_SQL[reviewState]}`;
       const offset = (page - 1) * pageSize;
       const now = new Date().toISOString();
       const [rows, totalRow, totalsRow, categoryRows, reviewRows] = await Promise.all([
@@ -72,8 +74,9 @@ export async function GET(request: Request) {
         binding.prepare(`SELECT count(*) AS count FROM news_index ${where}`)
           .bind(...bindValues).first<{ count: number }>(),
         binding.prepare(
-          `SELECT count(*) AS count, COALESCE(sum(parsed), 0) AS parsed,
-                  COALESCE(sum(CASE WHEN model_candidate=1
+          `SELECT count(*) AS count,
+                  COALESCE(sum(CASE WHEN ${ACTIVE_NEWS_SQL} THEN parsed ELSE 0 END), 0) AS parsed,
+                  COALESCE(sum(CASE WHEN ${ACTIVE_NEWS_SQL} AND model_candidate=1
                     AND (impact_expires_at IS NULL OR impact_expires_at='' OR impact_expires_at>?)
                     THEN 1 ELSE 0 END), 0) AS model_candidate
            FROM news_index`,
@@ -87,7 +90,7 @@ export async function GET(request: Request) {
              WHEN json_extract(payload, '$.annotation_status') IN ('READY','NOT_REQUIRED') THEN 'COMPLETED'
              WHEN json_extract(payload, '$.annotation_status') IN ('DEAD_LETTER','CONTENT_UNAVAILABLE') THEN 'ISOLATED'
              ELSE 'PROCESSING' END AS review_state, count(*) AS count
-           FROM news_index GROUP BY review_state`,
+           FROM news_index WHERE ${ACTIVE_NEWS_SQL} GROUP BY review_state`,
         ).all<{ review_state: NewsReviewState; count: number }>(),
       ]);
       const payload = {
@@ -211,6 +214,7 @@ export async function POST(request: Request) {
     const body = JSON.parse(serialized) as {
       items?: NewsIndexItem[]; reset?: unknown; prune_before?: unknown;
       reconcile_contract?: unknown; withdraw_detail_keys?: unknown;
+      reset_annotation_state_for_contract?: unknown;
     };
     if (body.reset === true) {
       await binding.prepare("DELETE FROM news_index").run();
@@ -261,6 +265,28 @@ export async function POST(request: Request) {
       const results = await binding.batch(statements);
       return NextResponse.json({
         status: "OK", removed: results.reduce((sum, result) => sum + (result.meta.changes ?? 0), 0),
+      });
+    }
+    if (typeof body.reset_annotation_state_for_contract === "string") {
+      if (!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(body.reset_annotation_state_for_contract)) {
+        return NextResponse.json({ error: "invalid mirror contract" }, { status: 400 });
+      }
+      const result = await binding.prepare(
+        `UPDATE news_index
+         SET parsed=0, model_candidate=0,
+             payload=json_set(
+               payload,
+               '$.parsed_at', NULL,
+               '$.model_visibility', 'NOT_YET_PARSED',
+               '$.annotation_status', 'SUPERSEDED_CONTRACT',
+               '$.annotation_reason_code', 'CONTRACT_HANDOVER_PENDING',
+               '$.annotation_reason', '旧语义契约已退出当前视图',
+               '$.impact_status', 'SUPERSEDED_CONTRACT'
+             )
+         WHERE mirror_contract <> ?`,
+      ).bind(body.reset_annotation_state_for_contract).run();
+      return NextResponse.json({
+        status: "OK", reset: result.meta.changes ?? 0,
       });
     }
     if (!Array.isArray(body.items) || body.items.length > 20) {

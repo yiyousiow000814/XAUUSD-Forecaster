@@ -30,6 +30,16 @@ other than Chinese and Latin requires repair; punctuation, numbers, symbols,
 and natural English proper nouns do not by themselves make Chinese display
 unreadable.
 
+Supporting evidence MUST be an exact span of the immutable headline or body.
+When an otherwise valid semantic response fails only this anchor check, a
+bounded repair MAY ask the same annotation model to select one to three opaque
+IDs from system-generated exact source spans. The repair MUST freeze every
+semantic and display field, map selected IDs back to source text
+deterministically, and re-run the complete semantic contract. Free-form repaired
+evidence, unknown IDs, or a failed second validation remain a model-output
+contract failure. The rejected output and repair stage remain bounded failure
+evidence for diagnosis.
+
 Collector lanes are not independent publishers. Google News and GDELT are
 discovery mechanisms; source trust and generation budgets use the first-party
 collector identity or the normalized reporting organization. A successful
@@ -63,6 +73,13 @@ equivalent to `IRRELEVANT`. The public reader MUST default to completed review
 and present pending work and terminally isolated work in separate, explicitly
 labelled review zones. These records remain inspectable for diagnosis, but MUST
 NOT be mixed into the completed-news list.
+
+During an annotation-contract handover, the public mirror MUST neutralize stale
+operational annotation states from older contracts before bounded
+current-contract replay begins. Historical local annotations and failure
+receipts remain immutable audit evidence; their old operational status MUST NOT
+be presented as the current backlog, current candidates, or current isolation
+count.
 
 ## Event construction
 

@@ -212,21 +212,16 @@ test("keeps nested compact counts in each dashboard headline hierarchy", () => {
   }
 });
 
-test("keeps the desktop audit rows separated by a painted cell boundary", () => {
+test("paints every desktop audit grid divider exactly once", () => {
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   const auditGrid = [...css.matchAll(/\.audit-tabs\s*\{([^}]*)\}/g)]
     .map((match) => match[1])
     .find((rule) => /grid-template-columns:repeat\(3,1fr\)/.test(rule)) ?? "";
-  const rowBorderDrawsDivider = [
-    /\.audit-tabs[^{}]*nth-child\(-n\+3\)[^{}]*\{[^}]*border-bottom:\s*(?!0(?:\D|$))/,
-    /\.audit-tabs[^{}]*nth-child\(n\+4\)[^{}]*\{[^}]*border-top:\s*(?!0(?:\D|$))/,
-  ].some((contract) => contract.test(css));
-
   assert.match(auditGrid, /grid-template-columns:repeat\(3,1fr\)/);
-  assert.ok(
-    rowBorderDrawsDivider,
-    "desktop audit rows need a painted cell boundary; a fractional grid gap is not stable",
-  );
+  assert.match(auditGrid, /gap:0/);
+  assert.match(auditGrid, /padding:0/);
+  assert.match(css, /\.audit-tabs a:not\(:nth-child\(3n\+1\)\) \{ border-left:1px solid var\(--ink\)/);
+  assert.match(css, /\.audit-tabs a:nth-child\(n\+4\) \{ border-top:1px solid var\(--ink\)/);
 });
 
 async function render(path) {
@@ -537,6 +532,8 @@ test("separates completed, processing, and isolated news by durable review state
   assert.match(css, /\.news-category-picker select \{[^}]*min-height:48px/);
   assert.match(css, /\.news-row>summary \{ grid-template-columns:1fr;/);
   assert.match(css, /\.annotation-queue>span:nth-of-type\(4\),\.annotation-queue>span:nth-of-type\(5\) \{ display:flex/);
+  assert.match(view, /newsIndex\.review_state_counts\?\.PROCESSING/);
+  assert.match(view, /newsIndex\.review_state_counts\?\.ISOLATED/);
   assert.match(css, /\.news-row-title \{ order:1; \}/);
   assert.match(css, /\.news-table \{ display:grid; gap:15px; border:0/);
 });
@@ -553,6 +550,9 @@ test("keeps the 60-day news archive inside bounded D1 work", () => {
   assert.match(index, /impact_expires_at>\?/);
   assert.match(index, /item\.model_visibility = "IMPACT_EXPIRED"/);
   assert.match(index, /DELETE FROM news_index WHERE mirror_contract <> \?/);
+  assert.match(index, /reset_annotation_state_for_contract/);
+  assert.match(index, /CONTRACT_HANDOVER_PENDING/);
+  assert.match(index, /SET parsed=0, model_candidate=0/);
   assert.match(index, /body\.withdraw_detail_keys\.length > 20/);
   assert.match(index, /DELETE FROM news_index WHERE detail_key = \?/);
   assert.match(index, /DELETE FROM news_details WHERE detail_key = \?/);
@@ -851,11 +851,19 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /api\/news-content\?keys=/);
   assert.doesNotMatch(source, /这些新闻处理到哪里了/);
   assert.match(source, /条近60天可读新闻/);
-  assert.match(source, /条无需复核/);
+  assert.match(source, /条已隔离待查/);
   assert.match(source, /GDELT · \$\{row\.category\}/);
   assert.doesNotMatch(source, /GDELT · 新闻发现/);
   assert.match(source, /row\.model_visibility !== "NOT_YET_PARSED"/);
-  assert.match(source, /个当前模型候选事件/);
+  assert.match(source, /个当前可用事件/);
+  const newsIndexRoute = readFileSync(new URL("../app/api/news-index/route.ts", import.meta.url), "utf8");
+  assert.match(newsIndexRoute, /SUPERSEDED_CONTRACT/);
+  assert.match(newsIndexRoute, /CASE WHEN \$\{ACTIVE_NEWS_SQL\} THEN parsed ELSE 0 END/);
+  assert.match(newsIndexRoute, /FROM news_index WHERE \$\{ACTIVE_NEWS_SQL\} GROUP BY review_state/);
+  assert.match(newsIndexRoute, /reset_annotation_state_for_contract/);
+  assert.match(newsIndexRoute, /parsed=0, model_candidate=0/);
+  assert.match(source, /evidenceMode === "eligible"/);
+  assert.match(source, />当前可用 <b>/);
   assert.doesNotMatch(source, /个 key 轮换|每分钟最多生成/);
   assert.ok(source.indexOf('<nav className="audit-tabs"') < source.indexOf('<section className="annotation-queue"'));
   assert.doesNotMatch(source, /已经积累多少结果|真实上线后结果|当前模型学到哪里|距离下次学习/);
@@ -1265,6 +1273,7 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.doesNotMatch(modal, /30分钟退出线/);
   assert.match(css, /\.version-pagination/);
   assert.match(css, /\.version-pagination button \{ width:46px; height:46px/);
+  assert.match(css, /\.execution-history-nav button \{[^}]*min-height:44px;[^}]*font-size:18px/);
   assert.match(css, /font-size:clamp\(24px,7vw,28px\)/);
   assert.match(css, /height:calc\(100dvh - 16px\)/);
   assert.match(css, /grid-template-rows:auto auto minmax\(0,1fr\) auto/);

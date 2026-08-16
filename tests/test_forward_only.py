@@ -2539,7 +2539,9 @@ def test_display_failure_withholds_semantics_until_readable_output_exists(
     assert ledger.count("news_llm_failures") == 1
 
 
-def test_semantic_failure_does_not_trigger_display_repair(monkeypatch) -> None:
+def test_semantic_evidence_failure_uses_exact_source_pointer_repair(
+    monkeypatch,
+) -> None:
     vector = _v15_annotation(
         {
             "headline_zh": "黄金市场更新",
@@ -2552,20 +2554,108 @@ def test_semantic_failure_does_not_trigger_display_repair(monkeypatch) -> None:
         "evidence absent from source",
     )
     calls = []
-    _mock_model_json(
-        monkeypatch,
-        lambda _key, _model, _payload: calls.append(1) or vector,
-    )
+    def respond(_key, _model, payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            return vector
+        candidates = json.loads(
+            payload["contents"][0]["parts"][0]["text"].split(
+                "EXACT_SOURCE_CANDIDATES\n", 1,
+            )[1]
+        )
+        return {"evidence_ids": [candidates[0]["id"]]}
+    _mock_model_json(monkeypatch, respond)
     pool = annotation_module._GeminiRequestPool(
         ("test-key",), request_accountant=ALLOW_MODEL_REQUEST,
     )
 
-    with pytest.raises(ValueError, match="supporting evidence is absent"):
+    result, _ = pool.call(
+        0, annotation_module.DEFAULT_GEMINI_MODEL, "Gold", "Source body",
+        prompt_version=annotation_module.PROMPT_VERSION,
+    )
+    assert result["supporting_evidence"] == ["Gold\nSource body"]
+    assert len(calls) == 2
+    assert calls[1]["generationConfig"]["responseSchema"]["required"] == [
+        "evidence_ids"
+    ]
+
+
+def test_evidence_pointer_repair_preserves_fragmented_source_verbatim(
+    monkeypatch,
+) -> None:
+    body = (
+        "Shares of heating and cooling solutions company AAON\nAAON\n"
+        "jumped 5.2% after quarterly results."
+    )
+    vector = _v15_annotation(
+        {
+            "headline_zh": "AAON 股价上涨",
+            "summary_zh": "AAON 公布季度业绩后股价上涨，该公司新闻与黄金无关。",
+            "event_type": "company_news", "entities": ["AAON"],
+            "hawkishness": 0.0, "inflation_impulse": 0.0,
+            "growth_impulse": 0.0, "geopolitical_risk": 0.0,
+            "usd_impulse": 0.0, "novelty": 0.2, "confidence": 0.9,
+        },
+        "Shares of heating and cooling solutions company AAON jumped 5.2%",
+    )
+    calls = []
+    def respond(_key, _model, payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            return vector
+        candidates = json.loads(
+            payload["contents"][0]["parts"][0]["text"].split(
+                "EXACT_SOURCE_CANDIDATES\n", 1,
+            )[1]
+        )
+        selected = next(
+            item for item in candidates if "heating and cooling" in item["text"]
+        )
+        return {"evidence_ids": [selected["id"]]}
+    _mock_model_json(monkeypatch, respond)
+    pool = annotation_module._GeminiRequestPool(
+        ("test-key",), request_accountant=ALLOW_MODEL_REQUEST,
+    )
+
+    result, _ = pool.call(
+        0, annotation_module.DEFAULT_GEMINI_MODEL, "AAON shares rise", body,
+        prompt_version=annotation_module.PROMPT_VERSION,
+    )
+
+    assert result["supporting_evidence"][0] in f"AAON shares rise\n{body}"
+    assert "AAON\nAAON\njumped" in result["supporting_evidence"][0]
+
+
+def test_evidence_pointer_repair_preserves_capacity_backoff(
+    monkeypatch,
+) -> None:
+    vector = _v15_annotation(
+        {
+            "headline_zh": "黄金市场更新",
+            "summary_zh": "来源显示黄金市场出现新的变化，并可能影响近期价格走势。",
+            "event_type": "other", "entities": [], "hawkishness": 0.0,
+            "inflation_impulse": 0.0, "growth_impulse": 0.0,
+            "geopolitical_risk": 0.0, "usd_impulse": 0.0,
+            "novelty": 0.5, "confidence": 0.8,
+        },
+        "evidence absent from source",
+    )
+    _mock_model_json(monkeypatch, lambda *_args: vector)
+    pool = annotation_module._GeminiRequestPool(
+        ("test-key",), request_accountant=ALLOW_MODEL_REQUEST,
+    )
+    monkeypatch.setattr(
+        pool, "_repair_evidence_anchors",
+        lambda *_args: (_ for _ in ()).throw(
+            annotation_module.GeminiBatchCapacityExhausted("try later")
+        ),
+    )
+
+    with pytest.raises(annotation_module.GeminiBatchCapacityExhausted):
         pool.call(
             0, annotation_module.DEFAULT_GEMINI_MODEL, "Gold", "Source body",
             prompt_version=annotation_module.PROMPT_VERSION,
         )
-    assert len(calls) == 1
 
 
 def test_semantic_contract_failure_keeps_bounded_diagnostic_evidence(
