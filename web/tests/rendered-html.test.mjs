@@ -1530,6 +1530,8 @@ test("presents Daily Brief as a compact Gemma synthesis with readable states", (
   assert.match(page, /选择更早的每日简报/);
   assert.match(page, /visibleItems = selected\?\.brief\.items\.slice\(0, 3\)/);
   assert.match(page, /className="brief-more-stories"/);
+  assert.match(page, /Boolean\(terminal\) && <details key=\{selectedDate\}>/);
+  assert.match(page, /additionalItems\.length > 0 && <details key=\{selectedDate\} className="brief-more-stories">/);
   assert.match(page, /最值得关注/);
   assert.match(page, /继续阅读 \{formatExactCount\(additionalItems\.length\)\} 个重点/);
   assert.match(page, /因正文缺失或复核失败未纳入本版，避免摘要失真/);
