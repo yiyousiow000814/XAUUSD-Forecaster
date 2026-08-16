@@ -68,12 +68,35 @@ def test_available_packet_and_cited_subset_have_independent_bounds() -> None:
     assert result.receipt["available_evidence_ids"] == available
 
 
-def test_model_output_must_be_strict_json() -> None:
+@pytest.mark.parametrize("opening_fence", ["```json", "```JSON", "```"])
+def test_model_output_accepts_one_json_fence_without_changing_validation(
+    opening_fence: str,
+) -> None:
+    raw = json.dumps({
+        "claims": [{"text": "有效回答。", "evidence_ids": ["known"]}],
+    }, ensure_ascii=False)
+
+    direct = validate_assistant_evidence_model_text(raw, ["known"])
+    fenced = validate_assistant_evidence_model_text(
+        f"{opening_fence}\n{raw}\n```",
+        ["known"],
+    )
+
+    assert fenced == direct
+
+
+@pytest.mark.parametrize(
+    "model_text",
+    [
+        "not json",
+        'prefix\n```json\n{"claims": []}\n```',
+        '```python\n{"claims": []}\n```',
+        '```json\n{"claims": []}\n```\ntrailing',
+    ],
+)
+def test_model_output_rejects_non_json_or_non_wrapper_text(model_text: str) -> None:
     with pytest.raises(AssistantEvidenceValidationError, match="strict JSON"):
-        validate_assistant_evidence_model_text(
-            '```json\n{"claims": []}\n```',
-            [],
-        )
+        validate_assistant_evidence_model_text(model_text, [])
 
 
 @pytest.mark.parametrize("mode", ["UNKNOWN", ""])
