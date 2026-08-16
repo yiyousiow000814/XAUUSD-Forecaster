@@ -62,7 +62,7 @@ const reasoningClasses = new Set(["SIMPLE", "ANALYTICAL", "TOOL_HEAVY"]);
 const thinkingLevels = new Set(["MINIMAL", "HIGH"]);
 const modelRequirements = new Set(["SMALL_PREFERRED", "LARGE_REQUIRED"]);
 const capacityClasses = new Set(["SMALL", "LARGE"]);
-const installedProvider = "GOOGLE_GENERATIVE_LANGUAGE";
+const installedProviders = new Set(["GOOGLE_GENERATIVE_LANGUAGE", "OLLAMA_LOCAL"]);
 const poolFingerprint = /^[a-f0-9]{16}$/;
 const servicePriorities = new Set(["INTERACTIVE", "BACKGROUND"]);
 const poolTypes = new Set(["PREEMPTIBLE", "ROUTINE"]);
@@ -107,7 +107,7 @@ export function parseAssistantRoutingProvenance(
     || !identifier.test(selectedProfileId)
     || !isAssistantModelIdentifier(selectedModelId)
     || !providerIdentifier.test(provider)
-    || provider !== installedProvider
+    || !installedProviders.has(provider)
     || !capacityClasses.has(capacityClass)
     || typeof raw.supports_thinking !== "boolean"
     || typeof raw.supports_function_calling !== "boolean"

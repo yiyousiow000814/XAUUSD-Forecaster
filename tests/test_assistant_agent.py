@@ -16,6 +16,7 @@ from xauusd_forecaster.assistant_agent import (
     RoutedAssistantModelTurn,
     configured_assistant_agent_budgets,
     decode_gemini_assistant_turn,
+    decode_ollama_assistant_turn,
     run_bounded_assistant_agent,
 )
 from xauusd_forecaster.assistant_capacity import AssistantCapacityPolicy
@@ -69,6 +70,35 @@ EVIDENCE_OUTPUT_SCHEMA = {
         },
     },
 }
+
+
+def test_local_turn_preserves_exact_tool_identity_and_arguments() -> None:
+    turn = decode_ollama_assistant_turn({
+        "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_provider_exact_1",
+                    "type": "function",
+                    "function": {
+                        "name": "lookup_v1",
+                        "arguments": '{"symbol":"XAUUSD"}',
+                    },
+                }],
+            },
+        }],
+        "model": "qwen3.5:9b-q4_K_M",
+    })
+
+    assert turn.tool_calls == (AssistantToolCall(
+        call_id="call_provider_exact_1",
+        name="lookup_v1",
+        arguments={"symbol": "XAUUSD"},
+    ),)
+    assert turn.content["parts"][0]["functionCall"]["id"] == (
+        "call_provider_exact_1"
+    )
 
 
 def _actor() -> AssistantToolActor:

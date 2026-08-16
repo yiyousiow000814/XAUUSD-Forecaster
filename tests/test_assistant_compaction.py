@@ -15,14 +15,12 @@ def source_messages() -> list[dict[str, object]]:
             "role": "USER",
             "content": "后续回答必须保留证据 ID。",
             "created_at": "2026-08-15T10:00:00.000Z",
-            "provenance": {"evidence_ids": ["evidence:1"]},
         },
         {
             "id": "message-2",
             "role": "ASSISTANT",
             "content": "已根据证据解释利率预期。",
             "created_at": "2026-08-15T10:01:00.000Z",
-            "provenance": {"model_version": "gemma-test"},
         },
     ]
 
@@ -88,6 +86,9 @@ def test_compaction_uses_only_prior_summary_and_next_chunk_through_metered_gatew
         "message-1", "message-2",
     ]
     assert inputs["required_covered_message_ids"] == ["message-1", "message-2"]
+    assert all(
+        "provenance" not in row for row in inputs["newly_compactable_messages"]
+    )
     assert "complete_history" not in inputs
 
 

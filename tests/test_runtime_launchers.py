@@ -64,7 +64,11 @@ def test_control_center_updates_only_the_isolated_main_runtime() -> None:
     path = ROOT / "scripts" / "xauusd_control_center.ps1"
     control_center = path.read_text(encoding="utf-8")
 
-    assert '$reloadableServiceKeys = @("collector", "annotator", "api", "sync")' in control_center
+    assert (
+        '$reloadableServiceKeys = @('
+        '"collector", "annotator", "api", "sync", "assistant")'
+    ) in control_center
+    assert 'Match = "run_assistant_worker.py"' in control_center
     assert 'CODE_REVISION_RELOAD_APPLIED' in control_center
     assert 'Write-RuntimeCodeState -Revision $Revision' in control_center
     assert 'Test-CodeReloadHealth -ReloadStarted $reloadStarted' in control_center
@@ -96,6 +100,18 @@ def test_control_center_updates_only_the_isolated_main_runtime() -> None:
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     assert reported == expected
+
+
+def test_local_assistant_worker_keeps_only_the_primary_model_resident() -> None:
+    worker = (ROOT / "scripts" / "run_assistant_worker.py").read_text(
+        encoding="utf-8",
+    )
+
+    assert '"keep_alive": -1' in worker
+    assert "QWEN_ASSISTANT_MODEL" in worker
+    assert '"resident_primary": QWEN_ASSISTANT_MODEL' in worker
+    assert "MINISTRAL_ASSISTANT_MODEL" in worker
+    assert "configured_api_credentials" not in worker
 
 
 def _run_control_center_contract(tmp_path, body: str) -> str:
@@ -880,6 +896,7 @@ def test_code_reload_health_requires_fresh_successful_sync(tmp_path) -> None:
     for name, service in (
         ("collector-status.json", "collector"),
         ("news-annotator-status.json", "annotator"),
+        ("assistant-worker-status.json", "assistant"),
     ):
         (status.parent / name).write_text(json.dumps({
             "service": service,
@@ -924,6 +941,10 @@ def test_code_reload_accepts_fresh_service_startup_but_rejects_failed_state(
     annotator = status.parent / "news-annotator-status.json"
     annotator.write_text(json.dumps({
         "service": "annotator", "state": "STARTING",
+        "last_success": "2026-08-12T08:00:01+00:00",
+    }), encoding="utf-8")
+    (status.parent / "assistant-worker-status.json").write_text(json.dumps({
+        "service": "assistant", "state": "STARTING",
         "last_success": "2026-08-12T08:00:01+00:00",
     }), encoding="utf-8")
     script = ROOT / "scripts" / "xauusd_control_center.ps1"

@@ -14,6 +14,11 @@ from .annotation import DEFAULT_GEMMA_MODEL
 ASSISTANT_ROUTING_POLICY_VERSION = "assistant-routing-v2"
 ASSISTANT_MODEL_PROFILES_ENV = "ASSISTANT_MODEL_PROFILES"
 GOOGLE_GENERATIVE_LANGUAGE = "GOOGLE_GENERATIVE_LANGUAGE"
+OLLAMA_LOCAL = "OLLAMA_LOCAL"
+INSTALLED_ASSISTANT_PROVIDERS = frozenset({
+    GOOGLE_GENERATIVE_LANGUAGE,
+    OLLAMA_LOCAL,
+})
 ASSISTANT_REQUEST_ENVELOPE_RESERVE = 4_096
 MAX_ASSISTANT_MODEL_CANDIDATES = 8
 
@@ -153,7 +158,7 @@ def _parse_profile(value: object) -> ModelProfile:
         raise ValueError("Assistant model model_id is invalid")
     if not _PROVIDER.fullmatch(provider):
         raise ValueError("Assistant model provider is invalid")
-    if provider != GOOGLE_GENERATIVE_LANGUAGE:
+    if provider not in INSTALLED_ASSISTANT_PROVIDERS:
         raise ValueError("Assistant model provider has no installed gateway")
     context_limit = _strict_integer(
         value.get("context_limit"), "context_limit",
@@ -197,7 +202,7 @@ def _validated_profiles(
             raise ValueError("Assistant model profile_id is invalid")
         if not _MODEL_ID.fullmatch(profile.model_id):
             raise ValueError("Assistant model model_id is invalid")
-        if profile.provider != GOOGLE_GENERATIVE_LANGUAGE:
+        if profile.provider not in INSTALLED_ASSISTANT_PROVIDERS:
             raise ValueError("Assistant model provider has no installed gateway")
         _strict_integer(
             profile.context_limit, "context_limit",

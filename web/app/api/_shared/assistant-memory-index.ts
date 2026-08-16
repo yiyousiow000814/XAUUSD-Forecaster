@@ -39,15 +39,6 @@ type AssistantMemoryCandidateRow = Record<string, unknown> & {
 
 type TokenEstimator = (value: unknown) => number;
 
-const parsedJson = (value: unknown, fallback: unknown) => {
-  if (typeof value !== "string") return fallback;
-  try {
-    return JSON.parse(value) as unknown;
-  } catch {
-    return fallback;
-  }
-};
-
 const isHan = (codepoint: number) => (
   (codepoint >= 0x3400 && codepoint <= 0x4dbf)
   || (codepoint >= 0x4e00 && codepoint <= 0x9fff)
@@ -416,7 +407,6 @@ export async function retrieveAssistantHistoricalMemory(
       match_terms: queryTerms.filter(term => indexedTerms.has(term)),
       overlap_count: Number(candidate.overlap_count),
       trust: "UNVERIFIED_CONVERSATION_TEXT",
-      provenance: parsedJson(candidate.provenance_json, {}),
     };
     const nextRetrieval = { ...retrieval, selected_entries: items.length + 1 };
     const nextEstimate = input.estimateTokens({ retrieval: nextRetrieval, items: [...items, item] });

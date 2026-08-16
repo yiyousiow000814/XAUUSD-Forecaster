@@ -23,6 +23,18 @@ const timeLabel = (value: string) => new Intl.DateTimeFormat("zh-CN", {
 
 const byteLength = (value: string) => new TextEncoder().encode(value).length;
 
+const failureLabel = (code: string | null) => {
+  const labels: Record<string, string> = {
+    NO_MODEL_CAPACITY: "本机模型正在处理其他问题，请稍后重试。",
+    MODEL_OUTPUT_INVALID: "模型回答未通过证据与格式检查。",
+    NO_COMPATIBLE_MODEL: "当前问题超过本机安全上下文。",
+    USER_CANCELLED: "本轮已取消。",
+    TURN_EXPIRED: "本轮等待时间过长，已安全结束。",
+  };
+  return labels[code ?? ""]
+    ?? "回答服务暂时中断，可以把原问题放回输入框重试。";
+};
+
 function messageAudit(message: AssistantMessage) {
   if (message.role !== "ASSISTANT") return null;
   const provenance = message.provenance;
@@ -121,6 +133,13 @@ export default function AssistantTranscript({
   const messageScroll = useRef<HTMLDivElement>(null);
   const progress = useMemo(() => assistantProgressItems(events), [events]);
   const activeTurn = conversation?.active_turn ?? null;
+  const latestTurn = conversation?.latest_turn ?? null;
+  const failedTurn = latestTurn && ["FAILED", "REJECTED", "EXPIRED", "CANCELLED"].includes(
+    latestTurn.status,
+  ) ? latestTurn : null;
+  const failedQuestion = failedTurn
+    ? messages.find(message => message.id === failedTurn.user_message_id)?.content ?? null
+    : null;
   const answerDraft = useMemo(
     () => activeTurn ? assistantAnswerDraft(events) : null,
     [activeTurn, events],
@@ -247,6 +266,13 @@ export default function AssistantTranscript({
         <p>{answerDraft || "正在建立安全的回答输出…"}</p>
       </article> : null}
 
+      {failedTurn ? <article className="assistant-turn-failure" role="alert">
+        <div><b>这次没有生成回答</b><span>{failureLabel(failedTurn.failure_code)}</span></div>
+        {failedQuestion ? <button onClick={() => onDraftChange(failedQuestion)} type="button">
+          放回输入框
+        </button> : null}
+      </article> : null}
+
       {progress.length > 0 ? <details className="assistant-progress" open={Boolean(activeTurn)}>
         <summary>{activeTurn ? "本轮正在进行" : "查看本轮分析过程"}<span>{progress.length} 个公开阶段</span></summary>
         <ol>{progress.map(item => <li className={`is-${item.state.toLowerCase()}`} key={item.id}>
@@ -282,7 +308,10 @@ export default function AssistantTranscript({
         <div className="assistant-composer-meta">
           <span>Enter 发送 · Shift + Enter 换行 · {draftBytes.toLocaleString("zh-CN")}/16,000 bytes</span>
           <button disabled={invalidDraft || sending || Boolean(activeTurn) || preview} type="submit">
-            <span>{sending ? "发送中" : preview ? "只读预览" : "发送问题"}</span><b aria-hidden="true">↗</b>
+            <span>{sending ? "发送中" : preview ? "只读预览" : "发送问题"}</span>
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M5 12h13M13 6l6 6-6 6" fill="none" stroke="currentColor" strokeLinecap="square" strokeWidth="2" />
+            </svg>
           </button>
         </div>
       </form>}

@@ -29,11 +29,13 @@ from .assistant_evidence import (
 from .assistant_routing import (
     AssistantTaskType,
     ModelProfile,
+    OLLAMA_LOCAL,
     apply_provider_thinking_level,
     configured_assistant_model_profiles,
     conservative_assistant_token_estimate,
     plan_assistant_route,
 )
+from .model_gateway import OllamaAssistantGateway
 from .assistant_tools import (
     ASSISTANT_TOOL_REGISTRY_VERSION,
     NEWS_SEARCH_TOOL_NAME,
@@ -350,6 +352,177 @@ def decode_gemini_assistant_turn(envelope: dict[str, object]) -> AssistantModelT
     return AssistantModelTurn(
         content=content,
         text="".join(texts).replace("\r\n", "\n").replace("\r", "\n").strip(),
+        tool_calls=tuple(calls),
+    )
+
+
+def _ollama_openai_payload(
+    payload: dict[str, object], *, model: str, thinking_level: str | None,
+) -> dict[str, object]:
+    """Translate the canonical Assistant envelope without changing its state."""
+    messages: list[dict[str, object]] = []
+    instruction = payload.get("systemInstruction")
+    if isinstance(instruction, dict):
+        parts = instruction.get("parts")
+        if isinstance(parts, list):
+            text = "".join(
+                str(part.get("text") or "") for part in parts
+                if isinstance(part, dict)
+            ).strip()
+            if text:
+                messages.append({"role": "system", "content": text})
+    contents = payload.get("contents")
+    if not isinstance(contents, list):
+        raise ValueError("Assistant model payload lacks contents")
+    for content in contents:
+        if not isinstance(content, dict) or not isinstance(content.get("parts"), list):
+            raise ValueError("Assistant model content is invalid")
+        role = "assistant" if content.get("role") == "model" else "user"
+        texts: list[str] = []
+        tool_calls: list[dict[str, object]] = []
+        tool_results: list[dict[str, object]] = []
+        for part in content["parts"]:
+            if not isinstance(part, dict):
+                raise ValueError("Assistant model part is invalid")
+            if isinstance(part.get("text"), str) and part.get("thought") is not True:
+                texts.append(str(part["text"]))
+            call = part.get("functionCall")
+            if isinstance(call, dict):
+                tool_calls.append({
+                    "id": str(call.get("id") or ""),
+                    "type": "function",
+                    "function": {
+                        "name": str(call.get("name") or ""),
+                        "arguments": json.dumps(
+                            call.get("args", {}), ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                    },
+                })
+            result = part.get("functionResponse")
+            if isinstance(result, dict):
+                tool_results.append({
+                    "role": "tool",
+                    "tool_call_id": str(result.get("id") or ""),
+                    "content": json.dumps(
+                        result.get("response", {}), ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                })
+        if tool_results:
+            messages.extend(tool_results)
+        else:
+            message: dict[str, object] = {
+                "role": role,
+                "content": "".join(texts),
+            }
+            if tool_calls:
+                message["tool_calls"] = tool_calls
+            messages.append(message)
+    generation = payload.get("generationConfig")
+    if not isinstance(generation, dict):
+        raise ValueError("Assistant model payload lacks generationConfig")
+    translated: dict[str, object] = {
+        "model": model,
+        "messages": messages,
+        "temperature": generation.get("temperature", 0),
+        "max_tokens": generation.get("maxOutputTokens", 2_048),
+        "stream": False,
+    }
+    raw_tools = payload.get("tools")
+    if isinstance(raw_tools, list):
+        tools: list[dict[str, object]] = []
+        for group in raw_tools:
+            declarations = group.get("functionDeclarations") if isinstance(group, dict) else None
+            if not isinstance(declarations, list):
+                continue
+            for declaration in declarations:
+                if not isinstance(declaration, dict):
+                    continue
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": declaration.get("name"),
+                        "description": declaration.get("description", ""),
+                        "parameters": declaration.get(
+                            "parametersJsonSchema",
+                            declaration.get("parameters", {"type": "object"}),
+                        ),
+                    },
+                })
+        if tools:
+            translated["tools"] = tools
+            translated["tool_choice"] = "auto"
+    schema = generation.get("responseJsonSchema")
+    if isinstance(schema, dict):
+        translated["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "assistant_answer",
+                "strict": True,
+                "schema": schema,
+            },
+        }
+    if thinking_level is not None:
+        translated["reasoning_effort"] = "high" if thinking_level == "high" else "low"
+    return translated
+
+
+def decode_ollama_assistant_turn(envelope: dict[str, object]) -> AssistantModelTurn:
+    """Normalize one OpenAI-compatible Ollama turn into canonical provider content."""
+    try:
+        choices = envelope["choices"]
+        choice = choices[0]
+        message = choice["message"]
+        if not isinstance(choices, list) or len(choices) != 1:
+            raise TypeError
+        if not isinstance(choice, dict) or not isinstance(message, dict):
+            raise TypeError
+        finish = choice.get("finish_reason")
+        if finish not in {None, "stop", "tool_calls"}:
+            raise AssistantAgentContractError(
+                "MODEL_TURN_INCOMPLETE", f"Local Assistant turn ended with {finish!s}",
+            )
+    except (KeyError, IndexError, TypeError) as error:
+        raise AssistantAgentContractError(
+            "INVALID_MODEL_TURN", "Local model returned an invalid Assistant turn",
+        ) from error
+    parts: list[dict[str, object]] = []
+    text = message.get("content")
+    if isinstance(text, str) and text.strip():
+        parts.append({"text": text})
+    raw_calls = message.get("tool_calls", [])
+    if not isinstance(raw_calls, list):
+        raise AssistantAgentContractError(
+            "INVALID_FUNCTION_CALL", "Local model tool calls are invalid",
+        )
+    calls: list[AssistantToolCall] = []
+    for raw_call in raw_calls:
+        function = raw_call.get("function") if isinstance(raw_call, dict) else None
+        call_id = str(raw_call.get("id") or "").strip() if isinstance(raw_call, dict) else ""
+        if not isinstance(function, dict) or not call_id:
+            raise AssistantAgentContractError(
+                "INVALID_FUNCTION_CALL", "Local model tool call lacks an exact id",
+            )
+        name = str(function.get("name") or "").strip()
+        try:
+            arguments = json.loads(str(function.get("arguments") or "{}"))
+        except json.JSONDecodeError as error:
+            raise AssistantAgentContractError(
+                "INVALID_FUNCTION_CALL", "Local model tool arguments are invalid",
+            ) from error
+        if not name or not isinstance(arguments, dict):
+            raise AssistantAgentContractError(
+                "INVALID_FUNCTION_CALL", "Local model tool call is invalid",
+            )
+        parts.append({"functionCall": {"id": call_id, "name": name, "args": arguments}})
+        calls.append(AssistantToolCall(call_id=call_id, name=name, arguments=arguments))
+    if not parts:
+        raise AssistantAgentContractError("INVALID_MODEL_TURN", "Local model turn is empty")
+    content = {"role": "model", "parts": parts}
+    return AssistantModelTurn(
+        content=content,
+        text=text.strip() if isinstance(text, str) else "",
         tool_calls=tuple(calls),
     )
 
@@ -805,6 +978,17 @@ class CapacityRoutedAssistantModelInvoker:
         purpose = f"assistant-agent-turn-{self.turn_count + 1}"
 
         def invoke(profile, credential, thinking_level, request_accountant):
+            if profile.provider == OLLAMA_LOCAL:
+                return OllamaAssistantGateway(accountant=request_accountant).generate(
+                    model=profile.model_id,
+                    purpose=purpose,
+                    payload=_ollama_openai_payload(
+                        payload, model=profile.model_id,
+                        thinking_level=thinking_level,
+                    ),
+                    input_tokens=conservative_assistant_token_estimate(payload),
+                    decode=decode_ollama_assistant_turn,
+                )
             return generate_metered_response(
                 credential.api_key,
                 model=profile.model_id,

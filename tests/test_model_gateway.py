@@ -8,6 +8,7 @@ import pytest
 
 from xauusd_forecaster.model_gateway import (
     GeminiModelGateway,
+    OllamaAssistantGateway,
     ModelGatewayCapacityExhausted,
     ModelGatewayResponseInvalid,
     ModelRequestUsage,
@@ -20,6 +21,54 @@ def test_gateway_requires_accounting_before_it_can_be_constructed() -> None:
         GeminiModelGateway(
             ("key",), requests_per_key=1, accountant=None,  # type: ignore[arg-type]
         )
+    with pytest.raises(ValueError, match="loopback-only"):
+        OllamaAssistantGateway(
+            accountant=CallbackModelAccountant(lambda _usage: True),
+            endpoint="http://example.com/v1/chat/completions",
+        )
+
+
+def test_local_gateway_reserves_before_loopback_transport(monkeypatch) -> None:
+    events: list[object] = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        @staticmethod
+        def read() -> bytes:
+            return b'{"model":"qwen-local","value":7}'
+
+    def reserve(usage: ModelRequestUsage) -> bool:
+        events.append(usage)
+        return True
+
+    def urlopen(request, *, timeout):
+        events.append((request.full_url, timeout))
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    gateway = OllamaAssistantGateway(
+        accountant=CallbackModelAccountant(reserve),
+    )
+    result, model = gateway.generate(
+        model="qwen-local",
+        purpose="assistant-chat",
+        payload={"messages": []},
+        input_tokens=123,
+        decode=lambda envelope: envelope["value"],
+    )
+
+    assert (result, model) == (7, "qwen-local")
+    assert events == [
+        ModelRequestUsage(
+            model="qwen-local", purpose="assistant-chat", input_tokens=123,
+        ),
+        ("http://127.0.0.1:11434/v1/chat/completions", 180.0),
+    ]
 
 
 def test_provider_transport_keeps_the_host_fixed_and_encodes_the_model(monkeypatch) -> None:

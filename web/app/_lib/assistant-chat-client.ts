@@ -26,6 +26,16 @@ export type AssistantActiveTurn = {
   created_at: string;
 };
 
+export type AssistantLatestTurn = {
+  id: string;
+  user_message_id: string;
+  status: AssistantTurnStatus;
+  failure_code: string | null;
+  event_sequence: number;
+  created_at: string;
+  completed_at: string | null;
+};
+
 export type AssistantConversation = {
   id: string;
   title: string;
@@ -37,6 +47,7 @@ export type AssistantConversation = {
   status: "ACTIVE" | "ARCHIVED";
   title_job_status: "PENDING" | "PROCESSING" | "COMPLETED" | "FAILED" | "CANCELLED" | null;
   active_turn: AssistantActiveTurn | null;
+  latest_turn: AssistantLatestTurn | null;
 };
 
 export type AssistantMessage = {
@@ -214,6 +225,26 @@ export function parseAssistantActiveTurn(value: unknown): AssistantActiveTurn | 
   };
 }
 
+export function parseAssistantLatestTurn(value: unknown): AssistantLatestTurn | null {
+  if (value === null || value === undefined) return null;
+  const raw = objectValue(value, "latest turn");
+  if (typeof raw.status !== "string" || !turnStatuses.has(raw.status)) {
+    fail("INVALID_ASSISTANT_RESPONSE", "latest turn 状态无效");
+  }
+  return {
+    id: idValue(raw.id, "latest turn id"),
+    user_message_id: idValue(raw.user_message_id, "latest turn user message id"),
+    status: raw.status as AssistantTurnStatus,
+    failure_code: nullableString(raw.failure_code, "latest turn failure code"),
+    event_sequence: integerValue(
+      raw.event_sequence, "latest turn event sequence", MAX_ASSISTANT_EVENTS_PER_TURN,
+    ),
+    created_at: timeValue(raw.created_at, "latest turn created_at"),
+    completed_at: raw.completed_at === null
+      ? null : timeValue(raw.completed_at, "latest turn completed_at"),
+  };
+}
+
 export function parseAssistantConversation(value: unknown): AssistantConversation {
   const raw = objectValue(value, "conversation");
   if (typeof raw.title_source !== "string" || !titleSources.has(raw.title_source)
@@ -235,6 +266,7 @@ export function parseAssistantConversation(value: unknown): AssistantConversatio
     status: raw.status as AssistantConversation["status"],
     title_job_status: raw.title_job_status as AssistantConversation["title_job_status"],
     active_turn: parseAssistantActiveTurn(raw.active_turn),
+    latest_turn: parseAssistantLatestTurn(raw.latest_turn),
   };
 }
 

@@ -980,25 +980,23 @@ def _assistant_worker_id() -> str:
 
 def _sync_assistant_chat(_local_payload: dict, config: dict):
     # Keep SQLite and the model runtime outside Preview's pure-helper import path.
-    from xauusd_forecaster.assistant_capacity import (
-        configured_assistant_capacity_policies,
-    )
     from xauusd_forecaster.assistant_chat_worker import (
         AssistantChatTransport,
         run_assistant_chat_worker,
     )
-    from xauusd_forecaster.assistant_routing import (
-        configured_assistant_model_profiles,
+    from xauusd_forecaster.assistant_local_runtime import (
+        local_assistant_capacity_policies,
+        local_assistant_credentials,
+        local_assistant_profiles,
     )
-    from xauusd_forecaster.news_scheduler import configured_api_credentials
 
     chat_url = config.get("remote_assistant_worker_chat_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0]
         + "/assistant-worker/chat"
     )
-    credentials = configured_api_credentials()
-    profiles = configured_assistant_model_profiles()
-    policies = configured_assistant_capacity_policies(credentials, profiles)
+    credentials = local_assistant_credentials()
+    profiles = local_assistant_profiles()
+    policies = local_assistant_capacity_policies()
     database = Path(config.get(
         "local_database", MODULE_ROOT / ".local" / "forward" / "forward.sqlite3",
     ))
@@ -1903,7 +1901,6 @@ def sync_once(config: dict) -> list[dict]:
             ("market_chart", _sync_market),
             ("market_history", lambda _payload, scoped: _sync_market_history(scoped)),
             ("news", _sync_news),
-            ("assistant_chat", _sync_assistant_chat),
             ("news_questions", _sync_news_questions),
         ):
             try:
