@@ -3386,6 +3386,9 @@ def test_impact_prompt_defines_factual_equivalence_without_domain_examples() -> 
     assert "黄金价格变化" not in prompt
     assert "连续变化的市场观测" in prompt
     assert "同一资产、相近水平" in prompt
+    assert "reason_zh直接展示给普通用户" in prompt
+    assert "不得出现‘候选’" in prompt
+    assert "系统中已有的一篇报道" in prompt
     system_text = annotation_module._impact_payload(prompt)[
         "systemInstruction"
     ]["parts"][0]["text"]

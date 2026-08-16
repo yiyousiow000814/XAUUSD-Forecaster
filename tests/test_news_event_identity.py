@@ -7,7 +7,7 @@ from xauusd_forecaster.news_identity import (
     resolved_identity_ids,
 )
 from xauusd_forecaster.news_impact import (
-    prior_identity_similarity, validate_impact_assessment,
+    prior_identity_similarity, public_impact_reason, validate_impact_assessment,
 )
 
 
@@ -25,7 +25,7 @@ def assessment(update_type="DUPLICATE_REPORT", relation="SAME_EVENT", candidate=
         "identity_differences_zh": identity_differences,
         "context_differences_zh": [],
         "confidence": 0.95,
-        "reason_zh": "正文与候选描述的是同一次官方数据发布。",
+        "reason_zh": "正文与系统中已有的一篇报道描述的是同一次官方数据发布。",
     }
 
 
@@ -45,6 +45,31 @@ def test_duplicate_report_reuses_the_selected_prior_identity():
     assert resolved["canonical_episode_id"] == "episode-one"
     assert resolved["canonical_event_id"] == "event-one"
     assert resolved["matched_annotation_id"] == "prior"
+
+
+def test_public_impact_reason_keeps_identity_only_in_structured_audit_field():
+    internal_id = "f63eb3e5-9370-5278-9509-8f917efa04c1"
+    result = assessment(candidate=internal_id)
+    result["reason_zh"] = (
+        "正文前瞻了美联储会议纪要，与候选"
+        f"{internal_id}的核心事实完全一致。"
+    )
+
+    validated = validate_impact_assessment(
+        result, candidate_ids={internal_id}, same_event_candidate_ids={internal_id},
+    )
+
+    assert validated["matched_candidate_id"] == internal_id
+    assert validated["reason_zh"] == (
+        "正文前瞻了美联储会议纪要，与系统中已有的一篇报道的核心事实完全一致。"
+    )
+    assert public_impact_reason(result["reason_zh"]) == validated["reason_zh"]
+    assert public_impact_reason(
+        "正文与已有报道记录02b87ba0-e4f9-556a-820b-0332553f6b完全一致。"
+    ) == "正文与系统中已有的一篇报道完全一致。"
+    assert public_impact_reason(
+        "核心事实与已有报道1d181c31完全一致。"
+    ) == "核心事实与系统中已有的一篇报道完全一致。"
 
 
 def test_material_update_reuses_episode_but_mints_a_distinct_event():

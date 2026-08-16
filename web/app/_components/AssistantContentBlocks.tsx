@@ -8,6 +8,7 @@ import type {
   AssistantTableCell,
 } from "../api/_shared/assistant-content";
 import { loadDashboardResource } from "../_lib/dashboard-resource";
+import { publicImpactReason } from "../_lib/public-news-copy";
 
 const evidenceIdPattern = /^[a-f0-9]{64}$/;
 const canonicalTimePattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -85,7 +86,9 @@ function NewsCard({ block }: { block: AssistantNewsCardBlock }) {
     }).catch(() => setDetailState("error"));
   };
   const summary = boundedDetailText(detail?.summary_zh, 4_000) || data.summary;
-  const impact = boundedDetailText(detail?.impact_reason_zh, 2_000) || data.impact;
+  const impact = publicImpactReason(
+    boundedDetailText(detail?.impact_reason_zh, 2_000) || data.impact,
+  );
   return <>
     <article className="assistant-news-card">
       <button aria-haspopup="dialog" className="assistant-news-card-trigger" onClick={open} ref={trigger} type="button">

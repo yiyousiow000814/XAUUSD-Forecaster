@@ -17,6 +17,43 @@ const { shouldPollDashboardResource } = await import("../app/_lib/dashboard-refr
 const { quoteBridgePresentation } = await import("../app/_lib/quote-bridge-state.ts");
 const { withPreviewIdentity } = await import("../app/api/_shared/preview-status.ts");
 const { newsReviewStateOf, parseNewsReviewState } = await import("../app/_lib/news-review-state.ts");
+const { publicImpactReason, publicNewsRecord } = await import("../app/_lib/public-news-copy.ts");
+
+test("keeps internal matched-news identifiers out of user-facing prose", () => {
+  const internalId = "f63eb3e5-9370-5278-9509-8f917efa04c1";
+  assert.equal(
+    publicImpactReason(`正文与候选${internalId}的核心事实完全一致。`),
+    "正文与系统中已有的一篇报道的核心事实完全一致。",
+  );
+  assert.equal(
+    publicImpactReason("matched_candidate_id 指向同一事件。"),
+    "系统中已有的一篇报道 指向同一事件。",
+  );
+  assert.equal(
+    publicImpactReason("与已有报道记录02b87ba0-e4f9-556a-820b-0332553f6b完全一致。"),
+    "与系统中已有的一篇报道完全一致。",
+  );
+  assert.equal(
+    publicImpactReason("与已有报道1d181c31完全一致。"),
+    "与系统中已有的一篇报道完全一致。",
+  );
+  assert.deepEqual(
+    publicNewsRecord({
+      detail_hash: "a".repeat(64),
+      payload: {
+        impact_reason_zh: "与已有报道1d181c31完全一致。",
+        matched_candidate_id: "1d181c31",
+      },
+    }),
+    {
+      detail_hash: "a".repeat(64),
+      payload: {
+        impact_reason_zh: "与系统中已有的一篇报道完全一致。",
+        matched_candidate_id: "1d181c31",
+      },
+    },
+  );
+});
 
 test("labels version results from their durable evaluation state", () => {
   assert.equal(versionResultLabel({ oos_rows: 12, evaluation_status: "HAS_RESULTS" }, "+1.250%"), "+1.250%");
@@ -499,7 +536,9 @@ test("falls through to read-only D1 for later Preview news and details", () => {
   assert.match(index, /D1 is the source of truth even on the first Preview page/);
   assert.match(index, /"read-only-d1-archive"/);
   assert.match(index, /"current-read-unavailable"/);
-  assert.match(detail, /if \(detail\) return previewJson\(detail\)/);
+  assert.match(detail, /if \(detail\) return previewJson\(publicNewsRecord\(detail\)\)/);
+  assert.match(detail, /payload: publicNewsRecord|const payload = publicNewsRecord/);
+  assert.match(index, /return publicNewsRecord\(item\) as NewsIndexItem/);
   assert.match(detail, /"read-only-d1-detail"/);
   assert.doesNotMatch(detail, /该新闻详情不在本次 Preview 快照中/);
 });

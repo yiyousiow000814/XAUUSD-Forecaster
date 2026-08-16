@@ -107,6 +107,7 @@ test("applies identical Chinese, literal special-character, date, and metadata r
   const later = news({
     detail_key: "b".repeat(64),
     headline: "美联储：利率路径可能保持 100%_谨慎\\",
+    impact_reason_zh: "与已有报道1d181c31完全一致。",
   });
   const earlier = news({
     detail_key: "a".repeat(64),
@@ -135,6 +136,10 @@ test("applies identical Chinese, literal special-character, date, and metadata r
   assert.equal(first.payload.total, 2);
   assert.equal(first.payload.has_more, true);
   assert.equal(first.payload.items[0].evidence_id, "b".repeat(64));
+  assert.equal(
+    first.payload.items[0].impact_reason_zh,
+    "与系统中已有的一篇报道完全一致。",
+  );
   assert.deepEqual(first.payload.retrieval.canonical_evidence_ids, ["b".repeat(64)]);
   assert.equal(first.payload.retrieval.fallback_reason, "AUTHORITATIVE_STORE_UNAVAILABLE");
 
