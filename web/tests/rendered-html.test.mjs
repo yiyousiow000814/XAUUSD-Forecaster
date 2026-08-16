@@ -1845,6 +1845,7 @@ test("renders only validated Assistant content blocks with phone-owned overflow"
   assert.match(renderer, /GEMMA 市场影响判断/);
   assert.match(renderer, /block\.data\.tone === "BOUNDARY"\) return null/);
   assert.match(transcript, /assistant-user-prompt-mobile/);
+  assert.match(transcript, /aria-expanded=\{promptOpen\}/);
   assert.match(transcript, /assistant-manage-toggle/);
   assert.match(migration, /content_document_json/);
   assert.match(migration, /assistant_messages_structured_content_contract/);

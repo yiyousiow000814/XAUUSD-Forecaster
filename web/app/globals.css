@@ -1610,8 +1610,9 @@ body:has(> .preview-banner):has(.assistant-main) .assistant-main { height:100%; 
   .assistant-message>p { padding:16px; font-size:16px; line-height:1.72; }
   .assistant-user-prompt-desktop { display:none; }
   .assistant-user-prompt-mobile { display:block; margin:0; }
-  .assistant-user-prompt-mobile summary { min-height:48px; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 13px; color:#d7d1c2; font-size:12px; font-weight:900; cursor:pointer; }
-  .assistant-user-prompt-mobile summary b { color:var(--paper); }
+  .assistant-user-prompt-mobile>button { width:100%; min-height:48px; display:flex; align-items:center; justify-content:space-between; gap:12px; border:0; padding:10px 13px; background:transparent; color:#d7d1c2; font-size:12px; font-weight:900; cursor:pointer; }
+  .assistant-user-prompt-mobile>button:focus-visible { outline:3px solid var(--acid); outline-offset:-3px; }
+  .assistant-user-prompt-mobile>button b { color:var(--paper); }
   .assistant-user-prompt-mobile p { margin:0; border-top:1px solid #bdb7a9; padding:15px; overflow-wrap:anywhere; white-space:pre-wrap; font:15px/1.7 var(--font-sans),sans-serif; }
   .assistant-content-blocks { grid-template-columns:minmax(0,1fr); gap:10px; padding:15px 14px; }
   .assistant-content-markdown { font-size:16px; line-height:1.72; }

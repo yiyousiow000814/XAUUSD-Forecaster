@@ -43,6 +43,7 @@ function messageAudit(message: AssistantMessage) {
 
 function AssistantMessageCard({ message, index }: { message: AssistantMessage; index: number }) {
   const audit = messageAudit(message);
+  const [promptOpen, setPromptOpen] = useState(false);
   return <article className={`assistant-message is-${message.role.toLowerCase()}`}>
     <header>
       <span>{message.role === "USER" ? "YOU / REQUEST" : "AURUM / RESPONSE"}</span>
@@ -50,10 +51,12 @@ function AssistantMessageCard({ message, index }: { message: AssistantMessage; i
     </header>
     {message.role === "USER" ? <>
       <p className="assistant-user-prompt-desktop">{message.content}</p>
-      <details className="assistant-user-prompt-mobile">
-        <summary><span>原问题</span><b>查看全文</b></summary>
-        <p>{message.content}</p>
-      </details>
+      <div className="assistant-user-prompt-mobile">
+        <button aria-expanded={promptOpen} onClick={() => setPromptOpen(value => !value)} type="button">
+          <span>原问题</span><b>{promptOpen ? "收起" : "查看全文"}</b>
+        </button>
+        {promptOpen ? <p>{message.content}</p> : null}
+      </div>
     </> : message.content_document
       ? <AssistantContentBlocks document={message.content_document} />
       : <p>{message.content}</p>}
