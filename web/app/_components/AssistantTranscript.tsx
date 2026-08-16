@@ -41,9 +41,18 @@ function messageAudit(message: AssistantMessage) {
   return { model, toolCount, evidenceCount };
 }
 
-function AssistantMessageCard({ message, index }: { message: AssistantMessage; index: number }) {
+function AssistantMessageCard({
+  message,
+  index,
+  promptOpen,
+  onPromptToggle,
+}: {
+  message: AssistantMessage;
+  index: number;
+  promptOpen: boolean;
+  onPromptToggle: () => void;
+}) {
   const audit = messageAudit(message);
-  const [promptOpen, setPromptOpen] = useState(false);
   return <article className={`assistant-message is-${message.role.toLowerCase()}`}>
     <header>
       <span>{message.role === "USER" ? "YOU / REQUEST" : "AURUM / RESPONSE"}</span>
@@ -52,7 +61,7 @@ function AssistantMessageCard({ message, index }: { message: AssistantMessage; i
     {message.role === "USER" ? <>
       <p className="assistant-user-prompt-desktop">{message.content}</p>
       <div className="assistant-user-prompt-mobile">
-        <button aria-expanded={promptOpen} onClick={() => setPromptOpen(value => !value)} type="button">
+        <button aria-expanded={promptOpen} onClick={onPromptToggle} type="button">
           <span>原问题</span><b>{promptOpen ? "收起" : "查看全文"}</b>
         </button>
         {promptOpen ? <p>{message.content}</p> : null}
@@ -120,6 +129,7 @@ export default function AssistantTranscript({
 }) {
   const [editingTitle, setEditingTitle] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
+  const [openPromptId, setOpenPromptId] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const messageScroll = useRef<HTMLDivElement>(null);
   const progress = useMemo(() => assistantProgressItems(events), [events]);
@@ -236,6 +246,8 @@ export default function AssistantTranscript({
         index={index}
         key={message.id}
         message={message}
+        onPromptToggle={() => setOpenPromptId(current => current === message.id ? null : message.id)}
+        promptOpen={openPromptId === message.id}
       />)}
 
       {answerDraft !== null ? <article className="assistant-message is-assistant is-streaming">
