@@ -18,6 +18,31 @@ const { quoteBridgePresentation } = await import("../app/_lib/quote-bridge-state
 const { withPreviewIdentity } = await import("../app/api/_shared/preview-status.ts");
 const { newsReviewStateOf, parseNewsReviewState } = await import("../app/_lib/news-review-state.ts");
 const { publicImpactReason, publicNewsRecord } = await import("../app/_lib/public-news-copy.ts");
+const { summarizeAssistantQueue } = await import("../app/api/_shared/assistant-operational-health.ts");
+
+test("summarizes Assistant queue evidence without exposing job content", () => {
+  const now = new Date("2026-08-16T12:15:00.000Z");
+  const summary = summarizeAssistantQueue({
+    queue: "CHAT_TURN", label: "Assistant 对话", table: "assistant_turn_jobs",
+    createdColumn: "created_at", completedExpression: "completed_at",
+    successStatuses: ["ANSWERED"], failureStatuses: ["FAILED"], slaSeconds: 300,
+  }, {
+    queued: 4, processing: 1, claimable: 3, scheduled_retry: 2,
+    oldest_active_at: "2026-08-16T12:05:00.000Z", max_attempt_count: 3,
+    completed_15m: 6, failed_15m: 1, capacity_deferred: 2,
+  }, [
+    { failure_code: "NO_MODEL_CAPACITY", total: 2 },
+    { failure_code: "WORKER_FAILURE", total: 1 },
+  ], now);
+
+  assert.equal(summary.oldest_age_seconds, 600);
+  assert.equal(summary.claimable, 3);
+  assert.deepEqual(summary.failure_codes, [
+    { code: "NO_MODEL_CAPACITY", count: 2 },
+    { code: "WORKER_FAILURE", count: 1 },
+  ]);
+  assert.equal(JSON.stringify(summary).includes("job_id"), false);
+});
 
 test("keeps internal matched-news identifiers out of user-facing prose", () => {
   const internalId = "f63eb3e5-9370-5278-9509-8f917efa04c1";
@@ -144,6 +169,8 @@ test("keeps branch throughput limits while refreshing Preview metrics from D1", 
       requests_per_minute: 20,
       input_tokens_per_minute_per_account: 15_000,
       input_tokens_per_minute: 15_000,
+      provider_lanes_per_account: 2,
+      maximum_concurrent_requests: 2,
       minute_scope: "ACCOUNT",
     } },
     system: {},
@@ -169,6 +196,8 @@ test("keeps branch throughput limits while refreshing Preview metrics from D1", 
     "llm_routing.display_only.requests_per_minute",
     "llm_routing.display_only.input_tokens_per_minute_per_account",
     "llm_routing.display_only.input_tokens_per_minute",
+    "llm_routing.display_only.provider_lanes_per_account",
+    "llm_routing.display_only.maximum_concurrent_requests",
     "llm_routing.display_only.minute_scope",
   ]);
 });
@@ -580,6 +609,8 @@ test("keeps every audit collection in the compact Preview manifest", () => {
     "llm_routing.display_only.requests_per_minute",
     "llm_routing.display_only.input_tokens_per_minute_per_account",
     "llm_routing.display_only.input_tokens_per_minute",
+    "llm_routing.display_only.provider_lanes_per_account",
+    "llm_routing.display_only.maximum_concurrent_requests",
     "llm_routing.display_only.minute_scope",
   ]);
   assert.equal(manifest.resources.marketHistory, "/api/market-history");

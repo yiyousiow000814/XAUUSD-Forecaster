@@ -30,6 +30,15 @@ The initial cross-component catalog is:
 | `OPS_DAILY_BRIEF_DEFERRED` | Daily Brief generation is waiting for a retry after a coded failure or capacity deferral. |
 | `OPS_DAILY_BRIEF_STALLED` | Daily Brief generation remained pending beyond its 30-minute progress boundary. |
 | `OPS_DAILY_BRIEF_DEGRADED` | Daily Brief finalized with terminally unreviewed inputs. |
+| `OPS_ASSISTANT_JOB_RETRY_LOOP` | One active Cloudflare Assistant job reached its bounded retry ceiling. |
+| `OPS_ASSISTANT_PIPELINE_STALLED` | A claimable Assistant queue exceeded its SLA without recent completion. |
+| `OPS_ASSISTANT_BACKLOG_OVERDUE` | The oldest claimable Assistant job exceeded its queue SLA while progress continued. |
+| `OPS_ASSISTANT_NEW_TERMINAL_FAILURE` | A Cloudflare Assistant queue recorded a new terminal failure. |
+| `OPS_ASSISTANT_HEALTH_UNAVAILABLE` | The production page could not read aggregate Assistant D1 health. |
+| `OPS_PUBLIC_ENDPOINT_UNAVAILABLE` | The external probe could not obtain a required public page or API. |
+| `OPS_PUBLIC_RENDER_CONTRACT_FAILED` | A public page responded but omitted its server-rendered identity marker. |
+| `OPS_PUBLIC_RESPONSE_INVALID` | A public operational API returned invalid JSON or the wrong schema. |
+| `OPS_PUBLIC_ASSISTANT_HEALTH_UNAVAILABLE` | The external probe could not obtain current Assistant health. |
 
 Provider work that is rejected before transport uses
 `MODEL_CAPACITY_DEFERRED`. It is not a provider request failure and must not be
@@ -65,12 +74,23 @@ Brief state machine. Scheduler evidence includes:
 Counts from articles, event identities, prediction exposures, and training
 rows remain distinct. One must never substitute for another in health gates.
 
-This contract covers the local forward-prediction and news data plane published
-by the status snapshot. Cloudflare Assistant turn, title, compaction, and memory
-index jobs have their own D1 execution contracts and are not represented by the
-local scheduler counters. Browser rendering failures and loss of the public
-status endpoint itself require an external observer; the application cannot
-reliably declare its own endpoint unreachable.
+The local status snapshot covers the forward-prediction and news data plane.
+The production health route separately reads aggregate Cloudflare D1 state for
+Assistant turns, news questions, titles, compaction, and memory indexing. These
+queues remain separate from local scheduler counters and expose their own
+claimable, scheduled-retry, progress, failure, age, and attempt evidence.
+
+Preview never presents production D1 alerts as branch-current evidence. A
+separate scheduled GitHub Actions probe checks the public live, status, and
+health pages plus the status and Assistant-health APIs from outside Cloudflare.
+It detects endpoint loss, invalid API contracts, and missing server-rendered
+page markers without creating a second deployment plane. Failures are visible
+as failed `Production health` workflow runs with a stable code.
+
+No HTTP probe can prove that every browser and device successfully hydrated or
+painted the page. Client-only rendering faults still require browser telemetry
+or a reproduced browser check. This is an explicit observability boundary, not
+a claim that the client surface is healthy.
 ## Visibility
 
 Warnings and errors must be visible without expanding a diagnostic control.

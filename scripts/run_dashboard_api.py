@@ -64,6 +64,7 @@ from xauusd_forecaster.news_scheduler import (  # noqa: E402
     account_quota_snapshot, configured_api_credentials,
 )
 from xauusd_forecaster.ai_provider_registry import AI_QUOTA_SURFACES  # noqa: E402
+from xauusd_forecaster.model_limits import GEMMA_PROVIDER_LANES_PER_ACCOUNT  # noqa: E402
 from xauusd_forecaster.training import MARKET_FEATURES  # noqa: E402
 from xauusd_forecaster.learning_curves import learning_curve_payload  # noqa: E402
 from xauusd_forecaster.execution_costs import net_shadow_log_return  # noqa: E402
@@ -2402,6 +2403,10 @@ def _dashboard_payload(database: Path) -> dict:
                 "input_tokens_per_minute": (
                     GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL
                     * gemini_account_count
+                ),
+                "provider_lanes_per_account": GEMMA_PROVIDER_LANES_PER_ACCOUNT,
+                "maximum_concurrent_requests": (
+                    GEMMA_PROVIDER_LANES_PER_ACCOUNT * gemini_account_count
                 ),
                 "minute_scope": "ACCOUNT",
             },

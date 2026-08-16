@@ -34,6 +34,7 @@ from .news_scheduler import (
     ApiCredential,
     minute_bucket,
     quota_day,
+    rolling_account_usage,
 )
 
 
@@ -530,21 +531,16 @@ def _usage(
               AND model_family IN ({placeholders})""",
         (quota_day(now), pool_id, *model_ids),
     ).fetchone()
-    minutes = (
-        minute_bucket(now - timedelta(minutes=1)), minute_bucket(now),
+    minute_requests, minute_tokens = rolling_account_usage(
+        connection,
+        account_id=pool_id,
+        model_families=model_ids,
+        now=now,
     )
-    recent = connection.execute(
-        f"""SELECT COALESCE(sum(request_count),0) AS requests,
-                   COALESCE(sum(input_token_count),0) AS tokens
-            FROM news_ai_account_minute_usage_v1
-            WHERE minute_bucket IN (?,?) AND account_id=?
-              AND model_family IN ({placeholders})""",
-        (*minutes, pool_id, *model_ids),
-    ).fetchone()
     return (
         int(daily["requests"]),
-        int(recent["requests"]),
-        int(recent["tokens"]),
+        minute_requests,
+        minute_tokens,
     )
 
 
@@ -653,6 +649,14 @@ def _reserve_assistant_capacity(
             ),
         )
         connection.execute(
+            """INSERT INTO news_ai_account_request_usage_v1
+               VALUES (?,?,?,?,?,?)""",
+            (
+                reservation_id, policy.credential_pool_id, profile.model_id,
+                1, estimated_input_tokens, timestamp,
+            ),
+        )
+        connection.execute(
             """INSERT INTO assistant_capacity_reservations_v1 VALUES (
                  ?,?,?,?,?,?,?,?,?,?,'IN_FLIGHT',NULL,NULL,?,?,NULL)""",
             (
@@ -722,6 +726,12 @@ def _confirm_reserved_tokens(
                 delta, timestamp, row["minute_bucket"],
                 policy.credential_pool_id, reservation.model_id,
             ),
+        )
+        connection.execute(
+            """UPDATE news_ai_account_request_usage_v1
+               SET input_token_count=input_token_count+?
+               WHERE usage_id=?""",
+            (delta, reservation.reservation_id),
         )
         connection.execute(
             """UPDATE assistant_capacity_reservations_v1

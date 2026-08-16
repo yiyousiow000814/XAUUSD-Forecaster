@@ -29,8 +29,8 @@ that every queued task has exactly one declared route.
 ## Dynamic capacity selection
 
 `GEMINI_API_ACCOUNTS` is reloaded for every batch. Each independent account is
-ranked using durable usage from the current Pacific quota day and the current
-plus previous UTC minute bucket. The rank considers the daily request limit,
+ranked using durable usage from the current Pacific quota day and the exact
+trailing 60-second request window. The rank considers the daily request limit,
 requests per minute, and input tokens per minute for the task's model route.
 
 Serial maintenance batches attempt the account with the most headroom first. A
@@ -92,8 +92,12 @@ attempts only by short SHA-256 fingerprints. Legacy `GEMINI_API_KEYS` and
 key is treated as an independent account because no account grouping exists.
 
 Every provider request reserves durable quota before transport. Daily counters
-use the provider's Pacific reset day. Minute counters use conservative current
-and previous UTC minute buckets to prevent boundary bursts.
+use the provider's Pacific reset day. RPM and TPM admission use exact durable
+request timestamps over the trailing 60 seconds. The aggregate minute buckets
+remain a reporting ledger, but they are not an admission window because adding
+two whole buckets can retain a request for almost 120 seconds and unnecessarily
+halve sustained throughput. The migration preserves still-live legacy bucket
+usage during the first rolling window so a deployment cannot create a burst.
 
 ## Operational recovery
 

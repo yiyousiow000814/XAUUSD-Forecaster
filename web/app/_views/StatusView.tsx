@@ -64,6 +64,7 @@ type StatusPayload = {
       model: string; role: string; configured_account_count: number;
       requests_per_minute_per_account: number; requests_per_minute: number;
       input_tokens_per_minute_per_account: number; input_tokens_per_minute: number;
+      provider_lanes_per_account: number; maximum_concurrent_requests: number;
       minute_scope: "ACCOUNT";
     };
     antigravity: { enabled: boolean; reason: string };
@@ -204,7 +205,7 @@ export default function StatusView() {
         <article><span>错误退避中</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.backing_off} /></MetricValue></strong><small>到期前不会重复请求</small></article>
         <article><span>已隔离</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.dead_letter} /></MetricValue></strong><small>相同永久错误不再消耗配额</small></article>
         <article><span>Flash 安全吞吐</span><strong><MetricValue phase={throughputPhase} snapshotLabel="分支配置" snapshotTitle="此吞吐限制来自当前 PR 分支的构建配置，不是生产实时观测"><CountValue value={payload?.annotation_queue.requests_per_minute} /></MetricValue></strong><small>总 RPM · 每账户 <CountValue value={payload?.annotation_queue.requests_per_minute_per_account} format="exact" /> · 总 TPM <CountValue value={payload?.annotation_queue.input_tokens_per_minute} /> · 分支配置</small></article>
-        <article><span>Gemma 安全吞吐</span><strong><MetricValue phase={gemmaThroughputPhase} snapshotLabel="分支配置" snapshotTitle="每个独立账户分别执行 RPM 与 TPM 入场检查"><CountValue value={payload?.llm_routing.display_only.requests_per_minute} /></MetricValue></strong><small>总 RPM · 每账户 <CountValue value={payload?.llm_routing.display_only.requests_per_minute_per_account} format="exact" /> · 总 TPM <CountValue value={payload?.llm_routing.display_only.input_tokens_per_minute} /> · <CountValue value={payload?.llm_routing.display_only.configured_account_count} format="exact" /> 个账户</small></article>
+        <article><span>Gemma 安全吞吐</span><strong><MetricValue phase={gemmaThroughputPhase} snapshotLabel="分支配置" snapshotTitle="每个独立账户分别执行 RPM 与 TPM 入场检查"><CountValue value={payload?.llm_routing.display_only.requests_per_minute} /></MetricValue></strong><small>总 RPM · 总 TPM <CountValue value={payload?.llm_routing.display_only.input_tokens_per_minute} /> · 并发上限 <CountValue value={payload?.llm_routing.display_only.maximum_concurrent_requests} format="exact" /> · <CountValue value={payload?.llm_routing.display_only.configured_account_count} format="exact" /> 个账户</small></article>
       </section>
 
       <section className="routing-grid">

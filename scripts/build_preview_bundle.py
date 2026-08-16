@@ -78,6 +78,10 @@ def _apply_branch_runtime_contract(status: dict) -> None:
             model_limits.GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_PER_ACCOUNT
             * account_count
         ),
+        "provider_lanes_per_account": model_limits.GEMMA_PROVIDER_LANES_PER_ACCOUNT,
+        "maximum_concurrent_requests": (
+            model_limits.GEMMA_PROVIDER_LANES_PER_ACCOUNT * account_count
+        ),
         "minute_scope": "ACCOUNT",
     })
     if (not isinstance(status.get("daily_news_brief_summary"), dict)
