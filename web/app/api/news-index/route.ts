@@ -214,7 +214,7 @@ export async function POST(request: Request) {
     const body = JSON.parse(serialized) as {
       items?: NewsIndexItem[]; reset?: unknown; prune_before?: unknown;
       reconcile_contract?: unknown; withdraw_detail_keys?: unknown;
-      reset_annotation_state_for_contract?: unknown;
+      neutralize_operational_state_for_contract?: unknown;
     };
     if (body.reset === true) {
       await binding.prepare("DELETE FROM news_index").run();
@@ -267,13 +267,18 @@ export async function POST(request: Request) {
         status: "OK", removed: results.reduce((sum, result) => sum + (result.meta.changes ?? 0), 0),
       });
     }
-    if (typeof body.reset_annotation_state_for_contract === "string") {
-      if (!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(body.reset_annotation_state_for_contract)) {
+    if (typeof body.neutralize_operational_state_for_contract === "string") {
+      if (!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(body.neutralize_operational_state_for_contract)) {
         return NextResponse.json({ error: "invalid mirror contract" }, { status: 400 });
       }
-      const result = await binding.prepare(
-        `UPDATE news_index
-         SET parsed=0, model_candidate=0,
+      const contract = body.neutralize_operational_state_for_contract;
+      const results = await binding.batch([
+        binding.prepare(
+          `UPDATE news_index SET model_candidate=0 WHERE mirror_contract <> ?`,
+        ).bind(contract),
+        binding.prepare(
+          `UPDATE news_index
+         SET parsed=0,
              payload=json_set(
                payload,
                '$.parsed_at', NULL,
@@ -283,10 +288,15 @@ export async function POST(request: Request) {
                '$.annotation_reason', '旧语义契约已退出当前视图',
                '$.impact_status', 'SUPERSEDED_CONTRACT'
              )
-         WHERE mirror_contract <> ?`,
-      ).bind(body.reset_annotation_state_for_contract).run();
+         WHERE mirror_contract <> ?
+           AND COALESCE(json_extract(payload, '$.annotation_status'), '')
+             NOT IN ('READY','NOT_REQUIRED')`,
+        ).bind(contract),
+      ]);
       return NextResponse.json({
-        status: "OK", reset: result.meta.changes ?? 0,
+        status: "OK",
+        candidates_neutralized: results[0]?.meta.changes ?? 0,
+        operational_states_neutralized: results[1]?.meta.changes ?? 0,
       });
     }
     if (!Array.isArray(body.items) || body.items.length > 20) {

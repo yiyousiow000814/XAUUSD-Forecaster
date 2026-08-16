@@ -1760,7 +1760,7 @@ def _sync_news(_local_payload: dict, config: dict) -> None:
 
     if contract_changed:
         _post_json(news_index_url, json.dumps({
-            "reset_annotation_state_for_contract": NEWS_MIRROR_CONTRACT_VERSION,
+            "neutralize_operational_state_for_contract": NEWS_MIRROR_CONTRACT_VERSION,
         }, separators=(",", ":")).encode("utf-8"), config)
 
     # Details are durable before their index records become discoverable.

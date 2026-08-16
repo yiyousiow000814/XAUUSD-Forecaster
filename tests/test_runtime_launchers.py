@@ -189,6 +189,14 @@ def test_candidate_preflight_migrates_an_isolated_consistent_copy(tmp_path) -> N
         json.dumps({"status": "OK", "last_success": "2026-08-13T19:00:00+00:00"}),
         encoding="utf-8",
     )
+    incremental_states = {
+        "dashboard-news-sync-state-cloudflare.json": {"cursor": "news-cursor"},
+        "dashboard-learning-sync-state-cloudflare.json": {"hash": "learning"},
+        "dashboard-learning-history-sync-state-cloudflare.json": {"cursor": 42},
+        "dashboard-market-history-sync-state-cloudflare.json": {"cursor": "market"},
+    }
+    for name, payload in incremental_states.items():
+        (source.parent / name).write_text(json.dumps(payload), encoding="utf-8")
     quotes = source.parent / "quotes"
     quotes.mkdir()
     (quotes / "market-session.json").write_text(
@@ -219,6 +227,10 @@ def test_candidate_preflight_migrates_an_isolated_consistent_copy(tmp_path) -> N
     assert json.loads(
         (target.parent / "dashboard-sync-status.json").read_text(encoding="utf-8")
     )["status"] == "OK"
+    for name, payload in incremental_states.items():
+        assert json.loads(
+            (target.parent / name).read_text(encoding="utf-8")
+        ) == payload
     assert json.loads(
         (target.parent / "quotes" / "market-session.json").read_text(encoding="utf-8")
     )["is_open"] is True

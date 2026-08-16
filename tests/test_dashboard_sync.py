@@ -1018,9 +1018,9 @@ def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> 
 
     module.sync_once(config)
     assert posted.count("https://remote/api/learning") == 1
-    # An unknown mirror contract is reset once before the authoritative rows
-    # are repopulated, so stale remote-only news cannot survive forever.
-    # Contract handover, authoritative row replay, then reconciliation.
+    # An unknown mirror contract neutralizes only stale operational state before
+    # authoritative replay. Completed reader history stays visible throughout
+    # the handover; reconciliation removes stale remote-only rows at the end.
     assert posted.count("https://remote/api/news-index") == 3
     assert posted[0] == "https://remote/api/ingest"
 
@@ -1168,7 +1168,7 @@ def test_news_materialization_contract_upgrade_replays_and_reconciles_old_state(
     assert f"limit={module.NEWS_WRITE_BATCH_ITEMS}" in requested[0]
     index_payloads = [body for url, body in posted if url.endswith("/news-index")]
     assert index_payloads[0] == {
-        "reset_annotation_state_for_contract": module.NEWS_MIRROR_CONTRACT_VERSION,
+        "neutralize_operational_state_for_contract": module.NEWS_MIRROR_CONTRACT_VERSION,
     }
     replay_payload = next(payload for payload in index_payloads if "items" in payload)
     assert replay_payload["items"][0]["category"] == "风险情绪 / 避险"

@@ -384,6 +384,18 @@ function Copy-CandidatePreflightState {
             Copy-Item -LiteralPath $source -Destination (Join-Path $targetRoot $name) -Force
         }
     }
+    foreach ($pattern in @(
+        "dashboard-news-sync-state*.json",
+        "dashboard-learning-sync-state*.json",
+        "dashboard-learning-history-sync-state*.json",
+        "dashboard-market-history-sync-state*.json"
+    )) {
+        Get-ChildItem -LiteralPath $sourceRoot -Filter $pattern -File `
+            -ErrorAction SilentlyContinue | ForEach-Object {
+                Copy-Item -LiteralPath $_.FullName `
+                    -Destination (Join-Path $targetRoot $_.Name) -Force
+            }
+    }
     $marketSession = Join-Path $sourceRoot "quotes\market-session.json"
     if (Test-Path -LiteralPath $marketSession) {
         $targetQuotes = Join-Path $targetRoot "quotes"

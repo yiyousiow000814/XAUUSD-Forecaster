@@ -550,9 +550,10 @@ test("keeps the 60-day news archive inside bounded D1 work", () => {
   assert.match(index, /impact_expires_at>\?/);
   assert.match(index, /item\.model_visibility = "IMPACT_EXPIRED"/);
   assert.match(index, /DELETE FROM news_index WHERE mirror_contract <> \?/);
-  assert.match(index, /reset_annotation_state_for_contract/);
+  assert.match(index, /neutralize_operational_state_for_contract/);
   assert.match(index, /CONTRACT_HANDOVER_PENDING/);
-  assert.match(index, /SET parsed=0, model_candidate=0/);
+  assert.match(index, /SET model_candidate=0 WHERE mirror_contract <> \?/);
+  assert.match(index, /SET parsed=0,/);
   assert.match(index, /body\.withdraw_detail_keys\.length > 20/);
   assert.match(index, /DELETE FROM news_index WHERE detail_key = \?/);
   assert.match(index, /DELETE FROM news_details WHERE detail_key = \?/);
@@ -860,8 +861,9 @@ test("renders the news and decision audit route", async () => {
   assert.match(newsIndexRoute, /SUPERSEDED_CONTRACT/);
   assert.match(newsIndexRoute, /CASE WHEN \$\{ACTIVE_NEWS_SQL\} THEN parsed ELSE 0 END/);
   assert.match(newsIndexRoute, /FROM news_index WHERE \$\{ACTIVE_NEWS_SQL\} GROUP BY review_state/);
-  assert.match(newsIndexRoute, /reset_annotation_state_for_contract/);
-  assert.match(newsIndexRoute, /parsed=0, model_candidate=0/);
+  assert.match(newsIndexRoute, /neutralize_operational_state_for_contract/);
+  assert.match(newsIndexRoute, /SET model_candidate=0 WHERE mirror_contract <> \?/);
+  assert.match(newsIndexRoute, /NOT IN \('READY','NOT_REQUIRED'\)/);
   assert.match(source, /evidenceMode === "eligible"/);
   assert.match(source, />当前可用 <b>/);
   assert.doesNotMatch(source, /个 key 轮换|每分钟最多生成/);
