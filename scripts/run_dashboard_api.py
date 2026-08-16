@@ -1557,7 +1557,14 @@ def _dashboard_payload(database: Path) -> dict:
                       a.inflation_impulse, a.growth_impulse,
                       a.geopolitical_risk, a.usd_impulse, a.novelty,
                       a.confidence, a.llm_model_version, a.prompt_version,
-                      a.parsed_at,
+                       a.parsed_at,
+                       CASE WHEN f.is_terminal=1 THEN COALESCE(
+                         fe.failure_code,
+                         CASE WHEN f.error_type='ValueError'
+                           THEN 'MODEL_OUTPUT_CONTRACT_FAILED'
+                           ELSE 'MODEL_REQUEST_FAILED' END)
+                       END AS annotation_failure_code,
+                       f.error AS annotation_failure,
                        i.impact_class,
                        i.event_state AS impact_event_state,
                        i.update_type AS impact_update_type,
@@ -1637,15 +1644,17 @@ def _dashboard_payload(database: Path) -> dict:
                      AND NOT (latest_f.error_type='RuntimeError'
                               AND latest_f.error='All configured Gemini keys unavailable for this batch')
                     ORDER BY latest_f.failed_at DESC LIMIT 1)
-               LEFT JOIN news_content_failures cf
+                LEFT JOIN news_content_failures cf
                  ON cf.failure_id=(
                    SELECT latest_cf.failure_id
                    FROM news_content_failures latest_cf
                    WHERE latest_cf.source=n.source
                      AND latest_cf.source_item_id=n.source_item_id
                      AND latest_cf.revision_number=n.revision_number
-                   ORDER BY latest_cf.attempt_number DESC LIMIT 1)
-               LEFT JOIN source_eligibility_rules r
+                    ORDER BY latest_cf.attempt_number DESC LIMIT 1)
+                LEFT JOIN news_llm_failure_evidence_v1 fe
+                  ON fe.failure_id=f.failure_id
+                LEFT JOIN source_eligibility_rules r
                  ON r.eligibility_version='news-source-eligibility-v4-live-delay-materiality'
                 AND r.source=n.source
                WHERE NOT EXISTS (

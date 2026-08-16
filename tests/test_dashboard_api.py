@@ -1003,6 +1003,8 @@ def test_news_archive_explains_terminal_model_contract_failure(tmp_path) -> None
     })
 
     archive = module._news_archive_page(ledger.connection, None, 20)
+    ledger.close()
+    dashboard = module._dashboard_payload(tmp_path / "forward.sqlite3")
 
     assert archive["items"][0]["annotation_status"] == "DEAD_LETTER"
     assert archive["items"][0]["annotation_reason_code"] == (
@@ -1011,7 +1013,12 @@ def test_news_archive_explains_terminal_model_contract_failure(tmp_path) -> None
     assert archive["items"][0]["annotation_reason"] == (
         "Gemini 返回的证据片段无法在来源正文中逐字找到。"
     )
-    ledger.close()
+    assert dashboard["recent_news"][0]["annotation_reason_code"] == (
+        "MODEL_OUTPUT_CONTRACT_FAILED"
+    )
+    assert dashboard["recent_news"][0]["annotation_reason"] == (
+        "Gemini 返回的证据片段无法在来源正文中逐字找到。"
+    )
 
 
 def test_dashboard_distinguishes_unavailable_content_from_pending(tmp_path) -> None:
