@@ -89,6 +89,12 @@ item to `PENDING` when the orchestration budget remains. No model request is
 sent, but the finite claim budget and task expiry still apply. The transition
 cannot revive expired, stale-lease, or terminal work.
 
+Conversation reads expose the newest turn in addition to any currently active
+turn. Returning from an iOS background state or restoring a page MUST refresh
+both records. A terminal turn without an Assistant message remains visibly
+failed after reload and offers a user-initiated way to restore the exact
+question to the composer. The client MUST NOT silently auto-submit a duplicate.
+
 Authentication occurs before queue creation. Per-owner concurrency and global
 capacity are bounded, so anonymous or single-user traffic cannot starve the
 queue.

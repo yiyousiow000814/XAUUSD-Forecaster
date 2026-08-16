@@ -54,14 +54,12 @@ def _source_packet(source_messages: list[dict[str, object]]) -> list[dict[str, o
         role = str(message.get("role") or "").strip().upper()
         content = str(message.get("content") or "").strip()
         created_at = str(message.get("created_at") or "").strip()
-        provenance = message.get("provenance")
         if (
             not message_id
             or message_id in seen
             or role not in {"USER", "ASSISTANT"}
             or not content
             or not created_at
-            or not isinstance(provenance, dict)
         ):
             raise ValueError("Assistant compaction source message is invalid")
         seen.add(message_id)
@@ -70,7 +68,6 @@ def _source_packet(source_messages: list[dict[str, object]]) -> list[dict[str, o
             "role": role,
             "content": content,
             "created_at": created_at,
-            "provenance": provenance,
         })
     return packet
 

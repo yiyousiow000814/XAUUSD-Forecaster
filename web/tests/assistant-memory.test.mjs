@@ -451,6 +451,14 @@ test("Context Builder preserves ordered layers and fails closed for owner or req
     context.layers[3].items.some(message => message.id === seeded.messageIds.at(-1)),
     false,
   );
+  assert.equal(
+    context.layers[3].items.some(message => "provenance" in message),
+    false,
+  );
+  assert.equal(
+    context.layers[2].items.some(message => "provenance" in message),
+    false,
+  );
   assert.equal(await buildAssistantContext(database, {
     ownerId: otherOwner,
     conversationId: seeded.conversationId,

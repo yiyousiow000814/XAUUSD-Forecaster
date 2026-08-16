@@ -217,3 +217,52 @@ class GeminiModelGateway:
         if not isinstance(envelope, dict):
             raise ValueError("model provider response is not a JSON object")
         return envelope
+
+
+class OllamaAssistantGateway:
+    """Metered loopback-only OpenAI-compatible transport for Assistant turns."""
+
+    def __init__(
+        self,
+        *,
+        accountant: ModelRequestAccountant,
+        endpoint: str = "http://127.0.0.1:11434/v1/chat/completions",
+    ) -> None:
+        if not isinstance(accountant, ModelRequestAccountant):
+            raise ValueError("Ollama gateway requires metered request accounting")
+        if endpoint != "http://127.0.0.1:11434/v1/chat/completions":
+            raise ValueError("Ollama Assistant endpoint must remain loopback-only")
+        self.accountant = accountant
+        self.endpoint = endpoint
+
+    def generate(
+        self,
+        *,
+        model: str,
+        purpose: str,
+        payload: dict[str, object],
+        input_tokens: int,
+        decode: Callable[[dict[str, object]], T],
+    ) -> tuple[T, str]:
+        usage = ModelRequestUsage(
+            model=model,
+            purpose=purpose,
+            input_tokens=max(1, int(input_tokens)),
+        )
+        if not self.accountant.reserve(usage):
+            raise ModelGatewayCapacityExhausted(
+                "Local Assistant request exceeded its reserved capacity"
+            )
+        request = urllib.request.Request(
+            self.endpoint,
+            data=json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8"
+            ),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=180.0) as response:
+            envelope = json.loads(response.read())
+        if not isinstance(envelope, dict):
+            raise ValueError("Ollama response is not a JSON object")
+        return decode(envelope), str(envelope.get("model") or model)

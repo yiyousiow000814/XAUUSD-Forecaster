@@ -35,6 +35,16 @@ export type PublicAssistantActiveTurn = {
   created_at: string;
 };
 
+export type PublicAssistantLatestTurn = {
+  id: string;
+  user_message_id: string;
+  status: "PENDING" | "PROCESSING" | "ANSWERED" | "FAILED" | "REJECTED" | "EXPIRED" | "CANCELLED";
+  failure_code: string | null;
+  event_sequence: number;
+  created_at: string;
+  completed_at: string | null;
+};
+
 export type PublicAssistantConversation = {
   id: string;
   title: string;
@@ -46,6 +56,7 @@ export type PublicAssistantConversation = {
   status: AssistantConversationStatus;
   title_job_status: AssistantTitleJobStatus | null;
   active_turn: PublicAssistantActiveTurn | null;
+  latest_turn: PublicAssistantLatestTurn | null;
 };
 
 export type PublicAssistantMessage = {
@@ -195,6 +206,17 @@ export function publicAssistantConversation(
       event_sequence: Number(row.active_turn_event_sequence),
       created_at: String(row.active_turn_created_at),
     } : null,
+    latest_turn: typeof row.latest_turn_id === "string" ? {
+      id: row.latest_turn_id,
+      user_message_id: String(row.latest_turn_user_message_id),
+      status: String(row.latest_turn_status) as PublicAssistantLatestTurn["status"],
+      failure_code: typeof row.latest_turn_failure_code === "string"
+        ? row.latest_turn_failure_code : null,
+      event_sequence: Number(row.latest_turn_event_sequence),
+      created_at: String(row.latest_turn_created_at),
+      completed_at: typeof row.latest_turn_completed_at === "string"
+        ? row.latest_turn_completed_at : null,
+    } : null,
   };
 }
 
@@ -257,12 +279,24 @@ const conversationSelect = `SELECT c.*,
   active_turn.id AS active_turn_id,
   active_turn.status AS active_turn_status,
   active_turn.event_sequence AS active_turn_event_sequence,
-  active_turn.created_at AS active_turn_created_at
+  active_turn.created_at AS active_turn_created_at,
+  latest_turn.id AS latest_turn_id,
+  latest_turn.user_message_id AS latest_turn_user_message_id,
+  latest_turn.status AS latest_turn_status,
+  latest_turn.failure_code AS latest_turn_failure_code,
+  latest_turn.event_sequence AS latest_turn_event_sequence,
+  latest_turn.created_at AS latest_turn_created_at,
+  latest_turn.completed_at AS latest_turn_completed_at
   FROM assistant_conversations c
   LEFT JOIN assistant_turn_jobs active_turn ON active_turn.id=(
     SELECT candidate.id FROM assistant_turn_jobs candidate
     WHERE candidate.conversation_id=c.id
       AND candidate.status IN (${ASSISTANT_ACTIVE_TURN_STATUSES_SQL})
+    ORDER BY candidate.created_at DESC,candidate.id DESC LIMIT 1
+  )
+  LEFT JOIN assistant_turn_jobs latest_turn ON latest_turn.id=(
+    SELECT candidate.id FROM assistant_turn_jobs candidate
+    WHERE candidate.conversation_id=c.id
     ORDER BY candidate.created_at DESC,candidate.id DESC LIMIT 1
   )`;
 

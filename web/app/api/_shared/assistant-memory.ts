@@ -475,7 +475,7 @@ export async function buildAssistantContext(
         items: historicalMemory.items, retrieval: historicalMemory.retrieval },
       { type: "RECENT_VERBATIM_TURNS", token_estimate: recent.tokens, items: recent.messages.map(
         message => ({ id: message.id, role: message.role, content: message.content,
-          created_at: message.created_at, provenance: parsedJson(message.provenance_json, {}) }),
+          created_at: message.created_at }),
       ) },
       { type: "CURRENT_USER_MESSAGE", token_estimate: currentUserTokens, item: {
         id: currentUser.id, role: currentUser.role, content: currentUser.content,
@@ -609,7 +609,7 @@ export async function scheduleAssistantCompaction(
     : [];
   const aggregate = await binding.prepare(
     `SELECT count(*) AS count,
-       COALESCE(sum(length(CAST(m.content AS BLOB)) + length(CAST(m.provenance_json AS BLOB)) + 24),0) AS tokens
+       COALESCE(sum(length(CAST(m.content AS BLOB)) + 24),0) AS tokens
      FROM assistant_messages m WHERE m.conversation_id=? AND ${afterSql}`,
   ).bind(conversationId, ...afterBindings).first<{ count: number; tokens: number }>();
   const estimatedContextTokens = profileReservedTokens(profile) + pinnedTokens
@@ -637,7 +637,7 @@ export async function scheduleAssistantCompaction(
   for (const candidate of candidates.results) {
     const tokens = conservativeAssistantTokenEstimate({
       id: candidate.id, role: candidate.role, content: candidate.content,
-      created_at: candidate.created_at, provenance: parsedJson(candidate.provenance_json, {}),
+      created_at: candidate.created_at,
     });
     if (!selected.length && tokens > profile.compactionSourceTokenBudget) {
       return { kind: "BLOCKED_SOURCE_TOO_LARGE" };
@@ -806,7 +806,6 @@ export async function claimAssistantCompactionJob(
       role: message.role,
       content: message.content,
       created_at: message.created_at,
-      provenance: parsedJson(message.provenance_json, {}),
     })),
   };
 }

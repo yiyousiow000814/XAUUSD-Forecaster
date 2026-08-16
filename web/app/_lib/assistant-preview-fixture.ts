@@ -34,6 +34,7 @@ export const assistantPreviewConversations: AssistantConversation[] = [
     status: "ACTIVE",
     title_job_status: null,
     active_turn: null,
+    latest_turn: null,
   },
   {
     id: "conversation-preview-opening",
@@ -46,6 +47,7 @@ export const assistantPreviewConversations: AssistantConversation[] = [
     status: "ACTIVE",
     title_job_status: null,
     active_turn: null,
+    latest_turn: null,
   },
   {
     id: "conversation-preview-inflation",
@@ -58,6 +60,7 @@ export const assistantPreviewConversations: AssistantConversation[] = [
     status: "ACTIVE",
     title_job_status: "PENDING",
     active_turn: null,
+    latest_turn: null,
   },
 ];
 

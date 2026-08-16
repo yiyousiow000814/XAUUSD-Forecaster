@@ -7,6 +7,7 @@ import pytest
 from xauusd_forecaster.assistant_routing import (
     ASSISTANT_ROUTING_POLICY_VERSION,
     GOOGLE_GENERATIVE_LANGUAGE,
+    OLLAMA_LOCAL,
     AssistantModelRoutingUnavailable,
     AssistantTaskType,
     ModelCapacityClass,
@@ -106,6 +107,30 @@ def test_candidate_fallback_list_is_bounded_and_preserves_declared_order() -> No
     assert [profile.profile_id for profile in plan.candidate_profiles] == [
         f"small-{index}" for index in range(8)
     ]
+
+
+def test_local_assistant_profiles_use_the_same_fail_closed_route_contract() -> None:
+    local = ModelProfile(
+        profile_id="assistant-qwen-local",
+        model_id="qwen3.5:9b-q4_K_M",
+        provider=OLLAMA_LOCAL,
+        context_limit=32_768,
+        supports_thinking=True,
+        supports_function_calling=True,
+        supports_streaming=False,
+        capacity_class=ModelCapacityClass.LARGE,
+    )
+    plan = plan_assistant_route(
+        AssistantTaskType.ASSISTANT_CHAT,
+        estimated_input_tokens=10_000,
+        reserved_output_tokens=2_048,
+        user_text="为什么黄金上涨？",
+        planned_tool_calls=1,
+        profiles=(local,),
+    )
+
+    assert plan.candidate_profiles == (local,)
+    assert routing_provenance(plan, local)["provider"] == OLLAMA_LOCAL
 
 
 def test_analytical_route_requires_thinking_large_and_never_downgrades() -> None:
