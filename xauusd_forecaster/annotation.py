@@ -931,7 +931,7 @@ class _GeminiRequestPool:
             model,
             payload,
             conservative_tokens=max(
-                _estimate_input_tokens(prompt) + 512,
+                conservative_input_token_estimate(prompt) + 512,
                 len(prompt.encode("utf-8")) + 512,
             ),
         )
@@ -1042,7 +1042,7 @@ class _GeminiRequestPool:
             model,
             payload,
             conservative_tokens=max(
-                _estimate_input_tokens(serialized) + 512,
+                conservative_input_token_estimate(serialized) + 512,
                 len(serialized.encode("utf-8")) + 512,
             ),
         )
@@ -1069,7 +1069,7 @@ class _GeminiRequestPool:
             model,
             payload,
             conservative_tokens=max(
-                _estimate_input_tokens(serialized) + 256,
+                conservative_input_token_estimate(serialized) + 256,
                 len(serialized.encode("utf-8")) + 256,
             ),
         )
@@ -1098,7 +1098,7 @@ class _GeminiRequestPool:
                 candidate_model,
                 payload,
                 conservative_tokens=max(
-                    _estimate_input_tokens(headline) + 512,
+                    conservative_input_token_estimate(headline) + 512,
                     len(headline.encode("utf-8")) + 512,
                 ),
             )
@@ -1136,7 +1136,7 @@ class _GeminiRequestPool:
             IMPACT_MODEL,
             payload,
             conservative_tokens=max(
-                _estimate_input_tokens(prompt) + 1024,
+                conservative_input_token_estimate(prompt) + 1024,
                 len(prompt.encode("utf-8")) + 1024,
             ),
         )
@@ -1787,7 +1787,7 @@ def _impact_prompt(row: dict, *, prompt_version: str = IMPACT_PROMPT_VERSION) ->
     )
 
 
-def _estimate_input_tokens(text: str) -> int:
+def conservative_input_token_estimate(text: str) -> int:
     """Conservatively estimate multilingual input before the provider call."""
     ascii_count = sum(ord(character) < 128 for character in text)
     non_ascii_count = len(text) - ascii_count
