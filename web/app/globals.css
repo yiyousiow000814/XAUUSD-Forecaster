@@ -585,8 +585,10 @@ body.modal-open { overflow:hidden; }
 .component-status>header { display:grid; grid-template-columns:1fr 1fr; gap:24px; align-items:end; padding:22px; border-bottom:1px solid var(--ink); }
 .component-status h2 { margin:5px 0 0; font-family:var(--font-display); font-size:38px; }
 .component-status header p { margin:0; font-size:13px; line-height:1.6; }
-.component-status>div { display:grid; grid-template-columns:repeat(3,1fr); gap:1px; background:#b9b3a5; }
+.component-status>div { display:grid; grid-template-columns:repeat(3,1fr); }
 .component-status article { min-width:0; padding:16px; background:var(--paper); }
+.component-status article:not(:nth-child(3n)) { border-right:1px solid var(--ink); }
+.component-status article:nth-child(n+4) { border-top:1px solid var(--ink); }
 .component-status article strong,.component-status article small { display:block; }
 .component-status article strong { margin:9px 0; font-size:14px; text-transform:uppercase; }
 .component-status article small { color:var(--muted); font-size:11px; line-height:1.6; }
