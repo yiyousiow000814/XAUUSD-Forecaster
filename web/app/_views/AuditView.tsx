@@ -873,7 +873,7 @@ export default function AuditView() {
   const learningDataAvailableRef = useRef(Boolean(cachedLearning));
   const learningFailureCountRef = useRef(0);
   const [summaryCadence, setSummaryCadence] = useState<EvaluationCadence>("EVERY_5M");
-  const [evidenceMode, setEvidenceMode] = useState<"eligible" | "seen" | "unseen" | "all">("eligible");
+  const [evidenceMode, setEvidenceMode] = useState<"eligible" | "seen" | "unseen">("eligible");
 
   const refreshStatus = useCallback(async (force = false) => {
     try {
@@ -1127,19 +1127,16 @@ export default function AuditView() {
   );
   const evidenceSummarySeenCount = evidencePayloadHasDuplicates ? seenEvidenceCount : newsMetrics.events.used_in_predictions;
   const evidenceSummaryUnseenCount = evidencePayloadHasDuplicates ? unseenEvidenceCount : newsMetrics.events.never_used;
-  const evidenceSummaryDisplayedCount = evidencePayloadHasDuplicates ? canonicalEvidence.length : newsMetrics.events.auditable;
   const evidenceSummaryEligibleCount = evidencePayloadHasDuplicates ? eligibleEvidenceCount : newsMetrics.events.currently_model_eligible;
   const evidenceSummaryDecisionExposures = evidencePayloadHasDuplicates ? evidenceDecisionExposures : newsMetrics.prediction_usage.decision_event_exposures;
   const evidenceSummaryModelUses = evidencePayloadHasDuplicates ? evidenceModelUses : newsMetrics.prediction_usage.frozen_model_uses;
   const visibleEvidence = canonicalEvidence.filter(row => (
-    evidenceMode === "all"
-    || (evidenceMode === "eligible" ? row.broad_model_eligible
-      : evidenceMode === "seen" ? row.model_seen : !row.model_seen)
+    evidenceMode === "eligible" ? row.broad_model_eligible
+      : evidenceMode === "seen" ? row.model_seen : !row.model_seen
   ));
   const evidenceModeTotal = evidenceMode === "eligible"
     ? evidenceSummaryEligibleCount
-    : evidenceMode === "seen" ? evidenceSummarySeenCount
-      : evidenceMode === "unseen" ? evidenceSummaryUnseenCount : evidenceSummaryDisplayedCount;
+    : evidenceMode === "seen" ? evidenceSummarySeenCount : evidenceSummaryUnseenCount;
   const evidenceWindowPartial = visibleEvidence.length < evidenceModeTotal;
   const deploymentPresentation = DEPLOYMENT_PRESENTATION[
     payload?.system?.deployment?.status ?? "PROVENANCE_UNKNOWN"
@@ -1342,7 +1339,6 @@ export default function AuditView() {
           <button type="button" className={evidenceMode === "eligible" ? "active" : ""} onClick={() => { setEvidenceMode("eligible"); setShowAllEvidence(false); }}>当前可用 <b><CountValue value={evidenceSummaryEligibleCount} /></b></button>
           <button type="button" className={evidenceMode === "seen" ? "active" : ""} onClick={() => { setEvidenceMode("seen"); setShowAllEvidence(false); }}>历史上用过 <b><CountValue value={evidenceSummarySeenCount} /></b></button>
           <button type="button" className={evidenceMode === "unseen" ? "active" : ""} onClick={() => { setEvidenceMode("unseen"); setShowAllEvidence(false); }}>从未用过 <b><CountValue value={evidenceSummaryUnseenCount} /></b></button>
-          <button type="button" className={evidenceMode === "all" ? "active" : ""} onClick={() => { setEvidenceMode("all"); setShowAllEvidence(false); }}>查看全部 <b><CountValue value={evidenceSummaryDisplayedCount} /></b></button>
         </nav>
         <p className="evidence-window-note">
           {evidenceWindowPartial
