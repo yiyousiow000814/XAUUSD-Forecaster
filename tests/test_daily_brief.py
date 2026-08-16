@@ -110,6 +110,7 @@ def _fake_generation(calls: list[dict]):
         calls.append({**kwargs, "evidence": evidence})
         return ({
             "title": "今日黄金新闻",
+            "overview": "多项宏观变化共同影响黄金市场，重点集中在最新政策与价格反应。",
             "items": [{
                 "headline": str(evidence[-1]["headline"]),
                 "summary": "出现新变化",
@@ -141,6 +142,41 @@ def test_daily_brief_only_calls_model_when_source_changes(tmp_path, monkeypatch)
         daily_brief.recent_daily_briefs(ledger.connection)[0]["brief"]["items"][0]["headline"]
         == "黄金新闻 item-1"
     )
+    assert "宏观变化" in daily_brief.recent_daily_briefs(
+        ledger.connection,
+    )[0]["brief"]["overview"]
+    ledger.close()
+
+
+def test_prompt_contract_change_regenerates_unchanged_candidates(
+    tmp_path, monkeypatch,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    _seed_news(ledger)
+    calls: list[dict] = []
+    monkeypatch.setattr(daily_brief, "generate_metered_json", _fake_generation(calls))
+    monkeypatch.setattr(daily_brief, "BRIEF_PROMPT_VERSION", "daily-news-brief-legacy")
+    now = datetime(2026, 8, 10, 3, tzinfo=UTC)
+    accountant = CallbackModelAccountant(lambda usage: True)
+    assert daily_brief.update_daily_brief(
+        ledger, api_key="test-key", request_accountant=accountant, now=now,
+    )["revision_number"] == 1
+
+    monkeypatch.setattr(
+        daily_brief, "BRIEF_PROMPT_VERSION", "daily-news-brief-v3-synthesis-overview",
+    )
+    settling = daily_brief.update_daily_brief(
+        ledger, api_key="test-key", request_accountant=accountant,
+        now=now + timedelta(minutes=1),
+    )
+    assert settling["reason"] == "SOURCE_SETTLING"
+    result = daily_brief.update_daily_brief(
+        ledger, api_key="test-key", request_accountant=accountant,
+        now=now + timedelta(minutes=12),
+    )
+
+    assert result["revision_number"] == 2
+    assert len(calls) == 2
     ledger.close()
 
 
@@ -527,6 +563,7 @@ def test_structured_brief_output_budget_covers_multi_item_contract() -> None:
 
     assert config["maxOutputTokens"] == daily_brief.BRIEF_OUTPUT_TOKEN_BUDGET
     assert config["maxOutputTokens"] >= 4_096
+    assert config["responseSchema"]["required"] == ["title", "overview", "items"]
     assert config["responseSchema"]["properties"]["items"]["maxItems"] == 8
 
 
@@ -678,6 +715,54 @@ def test_terminal_annotation_failure_settles_historical_date_as_degraded(tmp_pat
     assert result["pending_items"] == 0
     assert result["terminal_failure_items"] == 1
     assert daily_brief.recent_daily_briefs(ledger.connection)[0]["is_final"] is True
+    ledger.close()
+
+
+def test_superseding_evidence_settles_unclaimable_historical_items(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    now = datetime(2026, 8, 11, 3, tzinfo=UTC)
+    _seed_news_item(
+        ledger, "superseded-revision", minute=1,
+        parsed_at=now + timedelta(hours=1),
+    )
+    _seed_news_item(
+        ledger, "superseded-cluster", minute=2,
+        parsed_at=now + timedelta(hours=1),
+    )
+    with ledger.connection:
+        ledger.connection.execute(
+            """INSERT INTO news_revisions
+               (source,source_item_id,revision_number,source_published_time,
+                collector_first_seen_time,item_first_seen_time,fetched_time,
+                headline,body,link,content_hash,cluster_id,collector_latency_seconds)
+               SELECT source,source_item_id,2,source_published_time,?,
+                      item_first_seen_time,?,headline,body,link,?,cluster_id,
+                      collector_latency_seconds
+               FROM news_revisions WHERE source_item_id='superseded-revision'""",
+            (now.isoformat(), now.isoformat(), "hash-superseded-revision-v2"),
+        )
+        ledger.connection.execute(
+            """INSERT INTO news_revisions
+               (source,source_item_id,revision_number,source_published_time,
+                collector_first_seen_time,item_first_seen_time,fetched_time,
+                headline,body,link,content_hash,cluster_id,collector_latency_seconds)
+               SELECT 'Preferred', 'preferred-peer', 1, source_published_time, ?,
+                      ?, ?, 'Preferred peer', body || ' longer',
+                      'https://example.com/preferred-peer', 'hash-preferred-peer',
+                      cluster_id, collector_latency_seconds
+               FROM news_revisions
+               WHERE source_item_id='superseded-cluster'""",
+            (now.isoformat(), now.isoformat(), now.isoformat()),
+        )
+
+    result = daily_brief.update_daily_brief(
+        ledger, brief_date="2026-08-10", now=now,
+        api_key=None, request_accountant=None,
+    )
+
+    assert result["phase"] == "DEGRADED"
+    assert result["pending_items"] == 0
+    assert result["terminal_failure_items"] == 2
     ledger.close()
 
 

@@ -1512,6 +1512,20 @@ test("keeps expanded news readable by progressively revealing technical evidence
   assert.match(css, /\.news-row \{ scroll-margin-top:46px;/);
 });
 
+test("presents Daily Brief as a compact Gemma synthesis with readable states", () => {
+  const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(page, /DEGRADED: "降级版"/);
+  assert.match(page, /EMPTY: "无资料"/);
+  assert.match(page, /UPDATING: isToday \? "今日" : "处理中"/);
+  assert.doesNotMatch(page, /部分资料不可用/);
+  assert.match(page, /GEMMA 4 综合摘要/);
+  assert.match(page, /brief\.overview/);
+  assert.match(page, /total_brief_days/);
+  assert.match(css, /\.daily-brief-desk button small \{ color:inherit; font-size:12px;/);
+  assert.match(css, /\.brief-overview p \{ max-width:76ch; font-size:16px; line-height:1\.75; \}/);
+});
+
 test("explains U5 as a risk scale rather than a probability", () => {
   const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
   assert.match(source, /30分钟波动风险/);

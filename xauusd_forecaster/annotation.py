@@ -189,6 +189,7 @@ def pending_annotation_records(
     observed_at: datetime | None = None,
     limit: int = 500,
     prompt_version: str = PROMPT_VERSION,
+    priority_receipt_days: tuple[str, ...] = (),
 ) -> list[dict[str, object]]:
     """Return exactly the rows that the current annotator may claim.
 
@@ -206,6 +207,15 @@ def pending_annotation_records(
              SELECT 1 FROM news_ai_failure_recoveries_v1 r
              WHERE r.failure_id=f.failure_id AND r.recovery_version=?)"""
         if recovery_table_exists else ""
+    )
+    prioritized_days = tuple(dict.fromkeys(priority_receipt_days))
+    day_order = (
+        "CASE substr(datetime(n.collector_first_seen_time,'+8 hours'),1,10) "
+        + " ".join(
+            f"WHEN ? THEN {index}" for index, _ in enumerate(prioritized_days)
+        )
+        + f" ELSE {len(prioritized_days)} END,"
+        if prioritized_days else ""
     )
     rows = connection.execute(
         f"""SELECT n.* FROM news_revisions n
@@ -249,7 +259,8 @@ def pending_annotation_records(
                   AND f2.prompt_version=f.prompt_version)
               {recovery_clause}
               AND (f.is_terminal=1 OR f.next_retry_at > ?))
-        ORDER BY CASE WHEN n.source='federal_reserve_monetary'
+        ORDER BY {day_order}
+                 CASE WHEN n.source='federal_reserve_monetary'
                            OR lower(n.headline) LIKE '%fomc%'
                            OR lower(n.headline) LIKE '%consumer price%'
                            OR lower(n.headline) LIKE '%payroll%'
@@ -266,7 +277,8 @@ def pending_annotation_records(
                 (ANNOTATION_FAILURE_RECOVERY_VERSION,)
                 if recovery_table_exists else ()
             ),
-            now.isoformat(timespec="microseconds"), max(1, limit),
+            now.isoformat(timespec="microseconds"), *prioritized_days,
+            max(1, limit),
         ),
     ).fetchall()
     records: list[dict[str, object]] = []
