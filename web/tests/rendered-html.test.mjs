@@ -57,6 +57,7 @@ test("keeps internal matched-news identifiers out of user-facing prose", () => {
 
 test("renders Daily Brief from authoritative date lifecycle state", () => {
   const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   const manifest = JSON.parse(readFileSync(new URL("../preview-manifest.json", import.meta.url), "utf8"));
   assert.match(source, /daily_news_brief_summary/);
   assert.match(source, /已复核 \{formatExactCount\(reviewed\)\} \/ \{formatExactCount\(received\)\} 条/);
@@ -64,6 +65,11 @@ test("renders Daily Brief from authoritative date lifecycle state", () => {
   assert.doesNotMatch(source, /payload\?\.daily_news_briefs\?\.length/);
   assert.doesNotMatch(source, /今日还没有简报/);
   assert.ok(manifest.statusInlineKeys.includes("daily_news_brief_summary"));
+  assert.ok(
+    css.indexOf(".brief-progress { grid-template-columns:1fr") >
+      css.indexOf(".brief-progress { display:grid; grid-template-columns:minmax"),
+    "Daily Brief mobile grid must override its desktop grid",
+  );
 });
 
 test("labels version results from their durable evaluation state", () => {
