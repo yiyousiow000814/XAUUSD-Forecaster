@@ -1289,7 +1289,7 @@ export default function AuditView() {
             <strong>本版依据 {formatExactCount(reviewed)} 条已复核资料</strong>
             <span>{pending === null || pending === undefined ? "资料范围确认中" : pending > 0 ? "新资料会纳入下一版" : "资料整理完成"}</span>
             {lastGenerated && <small>更新于 {time(lastGenerated)}</small>}
-            {Boolean(terminal) && <details><summary>资料说明</summary><p>{formatExactCount(terminal)} 条资料因正文缺失或复核失败未纳入本版，避免摘要失真。</p></details>}
+            {Boolean(terminal) && <details key={selectedDate}><summary>资料说明</summary><p>{formatExactCount(terminal)} 条资料因正文缺失或复核失败未纳入本版，避免摘要失真。</p></details>}
           </div>
           {selected ? <>
             <div className={`brief-overview ${generatedByGemma ? "is-gemma" : "is-fallback"}`}>
