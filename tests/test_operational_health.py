@@ -194,6 +194,10 @@ def test_daily_brief_deferral_keeps_the_underlying_failure_code() -> None:
             "last_failure_code": "NO_GEMMA_CAPACITY",
             "generation_failure_count": 4,
             "next_retry_at": (NOW + timedelta(minutes=1)).isoformat(),
+            "last_failure_evidence": {
+                "failure_stage": "DAILY_BRIEF_EVIDENCE_IDS",
+                "selected_output": {"unknown_evidence_ids": ["invented:1"]},
+            },
         },
     )
 
@@ -203,3 +207,6 @@ def test_daily_brief_deferral_keeps_the_underlying_failure_code() -> None:
     )
     assert alert["evidence"]["failure_code"] == "NO_GEMMA_CAPACITY"
     assert alert["evidence"]["failure_count"] == 4
+    assert alert["evidence"]["failure_evidence"]["selected_output"] == {
+        "unknown_evidence_ids": ["invented:1"]
+    }

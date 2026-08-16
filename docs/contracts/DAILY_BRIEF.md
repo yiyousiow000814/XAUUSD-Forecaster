@@ -75,7 +75,13 @@ accounting. A PREEMPTIBLE credential is not required. Missing capacity becomes
 
 Malformed JSON, schema violations, unknown evidence references, and provider
 errors fail closed: no brief is written, an immutable failure is recorded, and
-bounded exponential retry state is persisted. Database errors still surface.
+bounded exponential retry state is persisted. Unknown evidence references use
+`MODEL_OUTPUT_CONTRACT_FAILED`; malformed response structure uses
+`MODEL_OUTPUT_INVALID`; transport failures use `MODEL_REQUEST_FAILED` or the
+more specific provider code. Contract-failure evidence is bounded to a response
+hash, at most eight unknown evidence IDs, and the allowed evidence count. It
+must not retain the prompt, article bodies, or complete model output. Database
+errors still surface.
 One failed brief must not terminate the annotation worker. A closed historical
 date stops synthesis retries after five consecutive failures for the same
 candidate set and records a `DEGRADED` deterministic fallback made only from

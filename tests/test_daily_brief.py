@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 from datetime import UTC, datetime, timedelta, timezone
 
@@ -8,7 +9,9 @@ import pytest
 
 from xauusd_forecaster import daily_brief
 from xauusd_forecaster.forward_ledger import ForwardLedger
-from xauusd_forecaster.model_gateway import ModelGatewayCapacityExhausted
+from xauusd_forecaster.model_gateway import (
+    ModelGatewayCapacityExhausted, ModelGatewayResponseInvalid,
+)
 from xauusd_forecaster.news_scheduler import ApiCredential, ROUTINE_POOL, enqueue_job
 from tests.model_accounting_fakes import CallbackModelAccountant
 
@@ -393,6 +396,7 @@ def test_daily_brief_rejects_fake_evidence(tmp_path, monkeypatch) -> None:
     _seed_news(ledger)
     envelope = {"candidates": [{"content": {"parts": [{"text": json.dumps({
         "title": "今日黄金新闻",
+        "overview": "今日主要变化",
         "items": [{
             "headline": "黄金变化",
             "summary": "没有真实引用",
@@ -401,7 +405,10 @@ def test_daily_brief_rejects_fake_evidence(tmp_path, monkeypatch) -> None:
     })}]}}]}
 
     def fake_generation(_api_key, **kwargs):
-        return kwargs["decode"](envelope), "gemma-test"
+        try:
+            return kwargs["decode"](envelope), "gemma-test"
+        except ValueError as error:
+            raise ModelGatewayResponseInvalid(error) from error
 
     monkeypatch.setattr(daily_brief, "generate_metered_json", fake_generation)
     result = daily_brief.update_daily_brief(
@@ -411,12 +418,76 @@ def test_daily_brief_rejects_fake_evidence(tmp_path, monkeypatch) -> None:
         now=datetime(2026, 8, 10, 3, tzinfo=UTC),
     )
     assert result["status"] == "DEFERRED"
-    assert result["reason"] == "INVALID_MODEL_OUTPUT"
+    assert result["reason"] == "MODEL_OUTPUT_CONTRACT_FAILED"
     failure = ledger.connection.execute(
-        "SELECT failure_code,error_type FROM daily_news_brief_failures_v1"
+        """SELECT failure_code,error_type,error,failure_evidence_json
+           FROM daily_news_brief_failures_v1"""
     ).fetchone()
-    assert tuple(failure) == ("INVALID_MODEL_OUTPUT", "ValueError")
+    assert tuple(failure[:2]) == (
+        "MODEL_OUTPUT_CONTRACT_FAILED", "DailyBriefEvidenceContractFailed",
+    )
+    assert "invented:item:1" in failure["error"]
+    assert "没有真实引用" not in failure["error"]
+    evidence = json.loads(failure["failure_evidence_json"])
+    assert evidence["selected_output"] == {
+        "allowed_evidence_count": 1,
+        "unknown_evidence_ids": ["invented:item:1"],
+    }
+    assert len(evidence["response_hash"]) == 64
+    summary = daily_brief.daily_brief_summary(
+        ledger.connection, now=datetime(2026, 8, 10, 3, tzinfo=UTC),
+    )
+    assert summary["last_failure_evidence"] == evidence
     assert not ledger.connection.execute("SELECT 1 FROM daily_news_briefs").fetchone()
+    ledger.close()
+
+
+def test_daily_brief_classifies_malformed_model_output(tmp_path, monkeypatch) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    _seed_news(ledger)
+
+    def invalid_generation(_api_key, **_kwargs):
+        raise ModelGatewayResponseInvalid(ValueError("invalid response shape"))
+
+    monkeypatch.setattr(daily_brief, "generate_metered_json", invalid_generation)
+    result = daily_brief.update_daily_brief(
+        ledger,
+        api_key="test-key",
+        request_accountant=CallbackModelAccountant(lambda usage: True),
+        now=datetime(2026, 8, 10, 3, tzinfo=UTC),
+    )
+    failure = ledger.connection.execute(
+        "SELECT failure_code,error_type,error FROM daily_news_brief_failures_v1"
+    ).fetchone()
+    assert result["reason"] == "MODEL_OUTPUT_INVALID"
+    assert tuple(failure) == (
+        "MODEL_OUTPUT_INVALID", "ValueError", "invalid response shape",
+    )
+    ledger.close()
+
+
+def test_daily_brief_failure_evidence_column_upgrades_existing_ledger(
+    tmp_path,
+) -> None:
+    path = tmp_path / "legacy.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        """CREATE TABLE daily_news_brief_failures_v1 (
+           failure_id TEXT PRIMARY KEY, brief_date TEXT NOT NULL,
+           attempt_number INTEGER NOT NULL, failure_code TEXT NOT NULL,
+           error_type TEXT NOT NULL, error_signature TEXT NOT NULL,
+           error TEXT NOT NULL, failed_at TEXT NOT NULL,
+           next_retry_at TEXT NOT NULL, UNIQUE(brief_date,attempt_number))"""
+    )
+    connection.close()
+
+    ledger = ForwardLedger(path)
+    columns = {
+        row["name"] for row in ledger.connection.execute(
+            "PRAGMA table_info(daily_news_brief_failures_v1)"
+        )
+    }
+    assert "failure_evidence_json" in columns
     ledger.close()
 
 
