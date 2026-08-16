@@ -44,13 +44,9 @@ function messageAudit(message: AssistantMessage) {
 function AssistantMessageCard({
   message,
   index,
-  promptOpen,
-  onPromptToggle,
 }: {
   message: AssistantMessage;
   index: number;
-  promptOpen: boolean;
-  onPromptToggle: () => void;
 }) {
   const audit = messageAudit(message);
   return <article className={`assistant-message is-${message.role.toLowerCase()}`}>
@@ -58,15 +54,7 @@ function AssistantMessageCard({
       <span>{message.role === "USER" ? "YOU / REQUEST" : "AURUM / RESPONSE"}</span>
       <span>MSG {String(index + 1).padStart(2, "0")} · {timeLabel(message.created_at)}</span>
     </header>
-    {message.role === "USER" ? <>
-      <p className="assistant-user-prompt-desktop">{message.content}</p>
-      <div className="assistant-user-prompt-mobile">
-        <button aria-expanded={promptOpen} onClick={onPromptToggle} type="button">
-          <span>原问题</span><b>{promptOpen ? "收起" : "查看全文"}</b>
-        </button>
-        {promptOpen ? <p>{message.content}</p> : null}
-      </div>
-    </> : message.content_document
+    {message.role === "USER" ? <p>{message.content}</p> : message.content_document
       ? <AssistantContentBlocks document={message.content_document} />
       : <p>{message.content}</p>}
     {audit ? <details className="assistant-message-audit">
@@ -129,7 +117,6 @@ export default function AssistantTranscript({
 }) {
   const [editingTitle, setEditingTitle] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
-  const [openPromptId, setOpenPromptId] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const messageScroll = useRef<HTMLDivElement>(null);
   const progress = useMemo(() => assistantProgressItems(events), [events]);
@@ -193,27 +180,34 @@ export default function AssistantTranscript({
             : "新会话会在消息被认证并接收后立即建立"}
         </small>
       </div>
-      {conversation ? <div className="assistant-thread-actions">
+      {conversation && !preview ? <div className="assistant-thread-actions">
         <button
+          aria-controls="assistant-action-menu"
           aria-expanded={manageOpen}
+          aria-haspopup="menu"
           className="assistant-manage-toggle"
           onClick={() => setManageOpen(value => !value)}
           type="button"
         >管理</button>
-        <div className={`assistant-action-menu${manageOpen ? " is-open" : ""}`}>
+        <div
+          aria-label="会话管理"
+          className={`assistant-action-menu${manageOpen ? " is-open" : ""}`}
+          id="assistant-action-menu"
+          role="menu"
+        >
           <button disabled={mutating || preview} onClick={() => {
             setManageOpen(false);
             setTitle(conversation.title);
             setEditingTitle(true);
-          }} type="button">重命名</button>
+          }} role="menuitem" type="button">重命名</button>
           <button disabled={mutating || preview || messages.every(message => message.role !== "ASSISTANT")} onClick={() => {
             setManageOpen(false);
             onRegenerateTitle();
-          }} type="button">重写标题</button>
+          }} role="menuitem" type="button">重写标题</button>
           <button disabled={mutating || preview || Boolean(activeTurn)} onClick={() => {
             setManageOpen(false);
             onArchive();
-          }} type="button">
+          }} role="menuitem" type="button">
             {conversation.status === "ARCHIVED" ? "恢复" : "归档"}
           </button>
         </div>
@@ -246,8 +240,6 @@ export default function AssistantTranscript({
         index={index}
         key={message.id}
         message={message}
-        onPromptToggle={() => setOpenPromptId(current => current === message.id ? null : message.id)}
-        promptOpen={openPromptId === message.id}
       />)}
 
       {answerDraft !== null ? <article className="assistant-message is-assistant is-streaming">
@@ -283,7 +275,7 @@ export default function AssistantTranscript({
           id="assistant-message-input"
           onChange={event => onDraftChange(event.currentTarget.value)}
           onKeyDown={submitOnEnter}
-          placeholder={preview ? "Preview 只读；生产环境认证后可发送" : "例如：最新已收录的政策证据如何影响黄金？"}
+          placeholder={preview ? "Preview 只读" : "输入问题…"}
           rows={3}
           value={draft}
         />
