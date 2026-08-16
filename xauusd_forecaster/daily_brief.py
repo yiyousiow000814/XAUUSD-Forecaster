@@ -20,7 +20,7 @@ from .model_gateway import (
 from .news_semantics import validated_annotation_predicate
 
 
-BRIEF_PROMPT_VERSION = "daily-news-brief-v4-concise-synthesis"
+BRIEF_PROMPT_VERSION = "daily-news-brief-v5-scannable-synthesis"
 BRIEF_RECOVERY_VERSION = "daily-brief-recovery-v3-reconcile-before-brief"
 BRIEF_EVIDENCE_LIMIT = 60
 BRIEF_INPUT_TOKEN_BUDGET = 12_000
@@ -318,7 +318,9 @@ def _brief_payload(day: str, evidence: list[dict[str, object]]) -> dict[str, obj
             "使用简短自然的简体中文，不得把输入标题或摘要原样堆叠成简报。"
         )}]},
         "contents": [{"parts": [{"text": (
-            f"生成 {day} 每日简报。返回标题、2至3句综合overview和最多5条重点；"
+            f"生成 {day} 每日简报。返回标题、一句明确的overview结论、1至3条简短drivers、"
+            "一句watch_next和最多5条重点。overview先说黄金表现与最主要原因；"
+            "drivers每条只表达一个驱动，不得重复overview；watch_next只写资料支持的后续关注点。"
             "每条必须从资料中的ref原样选择支持它的evidence_ids；不得复制或猜测内部ID。"
             "如果资料不足，宁可少写。"
             "只返回JSON。\nEVIDENCE\n" +
@@ -329,10 +331,14 @@ def _brief_payload(day: str, evidence: list[dict[str, object]]) -> dict[str, obj
             "maxOutputTokens": BRIEF_OUTPUT_TOKEN_BUDGET,
             "thinkingConfig": {"thinkingLevel": "minimal"},
             "responseSchema": {
-                "type": "object", "required": ["title", "overview", "items"],
+                "type": "object",
+                "required": ["title", "overview", "drivers", "watch_next", "items"],
                 "properties": {
                     "title": {"type": "string", "maxLength": 120},
-                    "overview": {"type": "string", "maxLength": 500},
+                    "overview": {"type": "string", "maxLength": 180},
+                    "drivers": {"type": "array", "minItems": 1, "maxItems": 3,
+                        "items": {"type": "string", "maxLength": 120}},
+                    "watch_next": {"type": "string", "maxLength": 160},
                     "items": {"type": "array", "maxItems": 5, "items": {
                         "type": "object", "required": ["headline", "summary", "evidence_ids"],
                         "properties": {
@@ -360,9 +366,15 @@ def _decode_brief(envelope: dict[str, object], evidence: list[dict[str, object]]
         raise ValueError("Gemma daily brief returned a non-object result")
     title = str(result.get("title") or "").strip()
     overview = str(result.get("overview") or "").strip()
+    drivers = result.get("drivers")
+    watch_next = str(result.get("watch_next") or "").strip()
     items = result.get("items")
     if (not isinstance(items, list) or not title or len(title) > 120
-            or not overview or len(overview) > 500 or len(items) > 5):
+            or not overview or len(overview) > 180
+            or not isinstance(drivers, list) or not 1 <= len(drivers) <= 3
+            or any(not isinstance(driver, str) or not driver.strip()
+                   or len(driver.strip()) > 120 for driver in drivers)
+            or not watch_next or len(watch_next) > 160 or len(items) > 5):
         raise ValueError("Gemma daily brief returned an invalid result")
     citation_map = {
         f"E{index:02d}": str(row["id"])
@@ -385,7 +397,13 @@ def _decode_brief(envelope: dict[str, object], evidence: list[dict[str, object]]
             )
         canonical.append({"headline": headline.strip(), "summary": summary.strip(),
                           "evidence_ids": [citation_map[ref] for ref in refs]})
-    return {"title": title, "overview": overview, "items": canonical}
+    return {
+        "title": title,
+        "overview": overview,
+        "drivers": [driver.strip() for driver in drivers],
+        "watch_next": watch_next,
+        "items": canonical,
+    }
 
 
 def _counts(rows: list[dict]) -> dict[str, int]:

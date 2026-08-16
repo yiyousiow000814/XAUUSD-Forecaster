@@ -224,7 +224,7 @@ type VersionGroup = {
 type EvaluationCadence = "EVERY_5M" | "FIXED_30M";
 type CadenceMetric = { oos_rows: number; distinct_days: number; cumulative_quote_return: number; profit_factor_quote_adjusted: number | null; coverage_rate: number | null; prediction_rows?: number; unscored_oos_rows?: number; overdue_oos_rows?: number; evaluation_status?: VersionEvaluationStatus };
 type DailyBriefPhase = "WAITING" | "UPDATING" | "DEFERRED" | "FINAL" | "DEGRADED" | "EMPTY";
-type DailyNewsBrief = { brief_date: string; revision_number: number; cutoff_at: string; generated_at: string; model_version: string; prompt_version: string; phase?: DailyBriefPhase; received_items?: number; reviewed_items?: number; pending_items?: number; terminal_failure_items?: number; next_retry_at?: string | null; finalized_at?: string | null; brief: { title: string; overview?: string; items: Array<{ headline: string; summary: string; evidence_ids: string[] }> } };
+type DailyNewsBrief = { brief_date: string; revision_number: number; cutoff_at: string; generated_at: string; model_version: string; prompt_version: string; phase?: DailyBriefPhase; received_items?: number; reviewed_items?: number; pending_items?: number; terminal_failure_items?: number; next_retry_at?: string | null; finalized_at?: string | null; brief: { title: string; overview?: string; drivers?: string[]; watch_next?: string; items: Array<{ headline: string; summary: string; evidence_ids: string[] }> } };
 type DailyNewsBriefSummary = { brief_date: string; phase: DailyBriefPhase; received_items: number | null; reviewed_items: number | null; pending_items: number | null; terminal_failure_items: number | null; latest_revision: number | null; last_generated_at: string | null; next_retry_at: string | null; is_final: boolean; total_brief_days: number | null; observation_scope?: "BUILD_SNAPSHOT_COMPATIBILITY" };
 type NewsSearchResponse = {
   items: News[];
@@ -1269,9 +1269,10 @@ export default function AuditView() {
               : "Gemma 汇总未生成，当前为系统整理版。"
           : null;
         const overview = selected?.brief.overview?.trim() || null;
-        const overviewReadingSeconds = overview
-          ? Math.min(60, Math.max(15, Math.ceil(overview.length / 4)))
-          : null;
+        const drivers = selected?.brief.drivers?.map(driver => driver.trim()).filter(Boolean) ?? [];
+        const watchNext = selected?.brief.watch_next?.trim() || null;
+        const visibleEvidence = selected?.brief.items.slice(0, 2) ?? [];
+        const remainingEvidence = selected?.brief.items.slice(2) ?? [];
         const renderBriefItem = (item: DailyNewsBrief["brief"]["items"][number], index: number) => <li key={`${selectedDate}-${index}`}>
           <span>{String(index + 1).padStart(2, "0")}</span>
           <div>
@@ -1302,17 +1303,30 @@ export default function AuditView() {
           {selected ? <>
             <div className={`brief-overview ${generatedByGemma ? "is-gemma" : "is-fallback"} ${overview ? "" : "is-missing"}`}>
               <div className="brief-overview-head">
-                <div><small>{generatedByGemma ? "GEMMA 4 · 综合摘要" : "系统整理"}</small><strong>{isCurrent ? "今日黄金脉络" : "当日黄金脉络"}</strong></div>
-                <span>{overviewReadingSeconds ? `约 ${formatExactCount(overviewReadingSeconds)} 秒读完` : "总摘要暂缺"}</span>
+                <strong>{isCurrent ? "今日黄金脉络" : "当日黄金脉络"}</strong>
               </div>
               {overview
-                ? <p>{overview}</p>
+                ? <p className="brief-overview-lead">{overview}</p>
                 : <p className="brief-overview-missing">这版没有保存总摘要，可展开查看重点依据。</p>}
+              {(drivers.length > 0 || watchNext) && <div className="brief-overview-points">
+                {drivers.length > 0 && <section>
+                  <span>关键驱动</span>
+                  <ul>{drivers.map((driver, index) => <li key={`${selectedDate}-driver-${index}`}>{driver}</li>)}</ul>
+                </section>}
+                {watchNext && <section>
+                  <span>接下来关注</span>
+                  <p>{watchNext}</p>
+                </section>}
+              </div>}
             </div>
-            {selected.brief.items.length > 0 && <details key={selectedDate} className="brief-evidence-stories">
-              <summary><span>查看 {formatExactCount(selected.brief.items.length)} 个重点依据</span><small>标题、摘要与来源证据</small></summary>
-              <ol>{selected.brief.items.map(renderBriefItem)}</ol>
-            </details>}
+            {visibleEvidence.length > 0 && <section className="brief-evidence">
+              <header className="brief-evidence-head"><strong>重点依据</strong><span>先看最关键的新闻脉络</span></header>
+              <ol>{visibleEvidence.map(renderBriefItem)}</ol>
+              {remainingEvidence.length > 0 && <details key={selectedDate} className="brief-evidence-stories">
+                <summary><span>再看 {formatExactCount(remainingEvidence.length)} 个依据</span><small>标题、摘要与来源证据</small></summary>
+                <ol>{remainingEvidence.map((item, index) => renderBriefItem(item, index + visibleEvidence.length))}</ol>
+              </details>}
+            </section>}
             <footer>{phase === "FINAL" || phase === "DEGRADED" ? "该日期已完成" : "随已复核资料滚动更新"} · 第 {selected.revision_number} 版 · 仅供阅读，不进入模型训练</footer>
           </> : <p className="brief-empty">{phase === "EMPTY" ? `${shortBriefDate(selectedDate)} 没有符合简报范围的新闻。` : `等待 ${shortBriefDate(selectedDate)} 首批已复核新闻。系统会在有足够资料后生成，并随新资料持续更新。`}</p>}
         </section>;

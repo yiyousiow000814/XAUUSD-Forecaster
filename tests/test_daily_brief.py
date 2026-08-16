@@ -135,6 +135,8 @@ def _fake_generation(calls: list[dict]):
             probe = {"candidates": [{"content": {"parts": [{
                 "text": json.dumps({
                     "title": "引用检查", "overview": "引用检查用于测试。",
+                    "drivers": ["引用关系经过验证。"],
+                    "watch_next": "继续核对引用关系。",
                     "items": [{
                         "headline": "引用检查", "summary": "引用检查。",
                         "evidence_ids": [row["ref"]],
@@ -148,6 +150,8 @@ def _fake_generation(calls: list[dict]):
         result = {
             "title": "今日黄金新闻",
             "overview": "多项宏观变化共同影响黄金市场，重点集中在最新政策与价格反应。",
+            "drivers": ["政策与价格反应共同影响市场。"],
+            "watch_next": "关注后续政策与价格变化。",
             "items": [{
                 "headline": str(evidence[-1]["headline"]),
                 "summary": "出现新变化",
@@ -435,6 +439,8 @@ def test_daily_brief_rejects_fake_evidence(tmp_path, monkeypatch) -> None:
     envelope = {"candidates": [{"content": {"parts": [{"text": json.dumps({
         "title": "今日黄金新闻",
         "overview": "今日主要变化",
+        "drivers": ["资料显示黄金出现变化。"],
+        "watch_next": "继续关注后续变化。",
         "items": [{
             "headline": "黄金变化",
             "summary": "没有真实引用",
@@ -670,7 +676,11 @@ def test_structured_brief_output_budget_covers_multi_item_contract() -> None:
 
     assert config["maxOutputTokens"] == daily_brief.BRIEF_OUTPUT_TOKEN_BUDGET
     assert config["maxOutputTokens"] >= 4_096
-    assert config["responseSchema"]["required"] == ["title", "overview", "items"]
+    assert config["responseSchema"]["required"] == [
+        "title", "overview", "drivers", "watch_next", "items",
+    ]
+    assert config["responseSchema"]["properties"]["drivers"]["maxItems"] == 3
+    assert config["responseSchema"]["properties"]["overview"]["maxLength"] == 180
     assert config["responseSchema"]["properties"]["items"]["maxItems"] == 5
     assert config["thinkingConfig"] == {"thinkingLevel": "minimal"}
     prompt = payload["contents"][0]["parts"][0]["text"]
@@ -700,6 +710,8 @@ def test_short_citation_is_mapped_to_exact_evidence_id() -> None:
     envelope = {"candidates": [{"content": {"parts": [{"text": json.dumps({
         "title": "黄金简报",
         "overview": "宏观资料共同显示市场定价正在变化。",
+        "drivers": ["政策路径正在被重新评估。"],
+        "watch_next": "关注后续政策信号。",
         "items": [{
             "headline": "政策预期变化",
             "summary": "市场重新评估政策路径。",
@@ -710,6 +722,34 @@ def test_short_citation_is_mapped_to_exact_evidence_id() -> None:
     result = daily_brief._decode_brief(envelope, evidence)
 
     assert result["items"][0]["evidence_ids"] == ["Reuters:opaque-long-item:7"]
+    assert result["drivers"] == ["政策路径正在被重新评估。"]
+    assert result["watch_next"] == "关注后续政策信号。"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("overview", ""),
+        ("drivers", []),
+        ("drivers", [""]),
+        ("watch_next", ""),
+    ),
+)
+def test_daily_brief_rejects_incomplete_reading_structure(field, value) -> None:
+    result = {
+        "title": "黄金简报",
+        "overview": "黄金市场定价正在变化。",
+        "drivers": ["政策路径正在被重新评估。"],
+        "watch_next": "关注后续政策信号。",
+        "items": [],
+    }
+    result[field] = value
+    envelope = {"candidates": [{"content": {"parts": [{
+        "text": json.dumps(result),
+    }]}}]}
+
+    with pytest.raises(ValueError, match="returned an invalid result"):
+        daily_brief._decode_brief(envelope, [])
 
 
 def test_duplicate_event_flood_consumes_one_candidate(tmp_path, monkeypatch) -> None:
