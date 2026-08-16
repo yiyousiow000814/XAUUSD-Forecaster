@@ -226,6 +226,11 @@ test("keeps two primary audit actions above a complete six-metric grid", () => {
   assert.match(css, /\.audit-tabs a\.audit-tab-primary \{ grid-column:span 3; \}/);
   assert.equal(view.match(/className=\{`audit-tab-primary/g)?.length, 2);
   assert.equal(view.match(/<a href="\/audit\?view=/g)?.length, 8);
+  assert.match(css, /\.news-timeline \{[^}]*gap:0/);
+  assert.match(css, /\.news-timeline div:not\(:nth-child\(3n\+1\)\) \{ border-left:1px solid/);
+  assert.match(css, /\.news-timeline div:nth-child\(n\+4\) \{ border-top:1px solid/);
+  assert.match(css, /\.news-timeline div:not\(:nth-child\(3n\+1\)\) \{ border-left:0/);
+  assert.match(css, /\.news-timeline div:nth-child\(n\+2\) \{ border-top:1px solid/);
 });
 
 async function render(path) {
