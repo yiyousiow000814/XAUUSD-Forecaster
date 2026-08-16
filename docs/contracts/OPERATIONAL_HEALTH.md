@@ -87,6 +87,10 @@ healthy. Write routes reject rows that violate their public state contract.
 After each bounded news synchronization, the synchronizer checks the persisted
 D1 state machine, required detail relationship, derived index columns, active
 cluster uniqueness, and (after replay completes) the active mirror contract.
+During a contract replay, derived-column checks apply only to rows already
+written under the current contract because handover deliberately neutralizes
+old candidate flags. The completed-contract gate then requires every active row
+to use the current contract.
 Any mismatch is retained as a resource-level error with bounded counts and is
 promoted to `OPS_NEWS_MIRROR_STATE_DIVERGED`. Every other optional mirror
 resource failure retains its own upstream code under

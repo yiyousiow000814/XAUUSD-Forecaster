@@ -718,6 +718,8 @@ test("keeps the 60-day news archive inside bounded D1 work", () => {
   assert.match(index, /NEWS_DETAIL_MISSING/);
   assert.match(index, /NEWS_PARSED_FLAG_MISMATCH/);
   assert.match(index, /NEWS_CANDIDATE_FLAG_MISMATCH/);
+  assert.match(index, /current_contract/);
+  assert.match(index, /mirror_contract=\?/);
   assert.match(index, /NEWS_DUPLICATE_ACTIVE_CLUSTER/);
   assert.match(index, /NEWS_MIRROR_CONTRACT_STALE/);
   assert.match(index, /NEWS_MIRROR_HEALTH_UNAVAILABLE/);
