@@ -60,7 +60,8 @@ test("renders Daily Brief from authoritative date lifecycle state", () => {
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   const manifest = JSON.parse(readFileSync(new URL("../preview-manifest.json", import.meta.url), "utf8"));
   assert.match(source, /daily_news_brief_summary/);
-  assert.match(source, /已复核 \{formatExactCount\(reviewed\)\} \/ \{formatExactCount\(received\)\} 条/);
+  assert.match(source, /本版依据 \{formatExactCount\(reviewed\)\} 条已复核资料/);
+  assert.match(source, /新资料会纳入下一版/);
   assert.match(source, /ASIA\/KUALA_LUMPUR/);
   assert.doesNotMatch(source, /payload\?\.daily_news_briefs\?\.length/);
   assert.doesNotMatch(source, /今日还没有简报/);
@@ -1537,15 +1538,31 @@ test("keeps expanded news readable by progressively revealing technical evidence
 test("presents Daily Brief as a compact Gemma synthesis with readable states", () => {
   const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(page, /DEGRADED: "降级版"/);
+  assert.match(page, /DEGRADED: "已完成"/);
   assert.match(page, /EMPTY: "无资料"/);
   assert.match(page, /UPDATING: isToday \? "今日" : "处理中"/);
   assert.doesNotMatch(page, /部分资料不可用/);
-  assert.match(page, /GEMMA 4 综合摘要/);
+  assert.doesNotMatch(page, /系统降级整理/);
+  assert.match(page, /GEMMA 4 · 今日先看/);
   assert.match(page, /brief\.overview/);
-  assert.match(page, /total_brief_days/);
+  assert.match(page, /daily_news_brief_summary\?\.brief_date/);
+  assert.match(page, /DAILY_BRIEF_VISIBLE_DATES = 4/);
+  assert.match(page, /className=\{`audit-main audit-view-\$\{view\}`\}/);
+  assert.match(page, /className="brief-history-picker"/);
+  assert.match(page, /选择更早的每日简报/);
+  assert.match(page, /visibleItems = selected\?\.brief\.items\.slice\(0, 3\)/);
+  assert.match(page, /className="brief-more-stories"/);
+  assert.match(page, /Boolean\(terminal\) && <details key=\{selectedDate\}>/);
+  assert.match(page, /additionalItems\.length > 0 && <details key=\{selectedDate\} className="brief-more-stories">/);
+  assert.match(page, /最值得关注/);
+  assert.match(page, /继续阅读 \{formatExactCount\(additionalItems\.length\)\} 个重点/);
+  assert.match(page, /因正文缺失或复核失败未纳入本版，避免摘要失真/);
   assert.match(css, /\.daily-brief-desk button small \{ color:inherit; font-size:12px;/);
   assert.match(css, /\.brief-overview p \{ max-width:76ch; font-size:16px; line-height:1\.75; \}/);
+  assert.match(css, /\.daily-brief-desk header nav \{ display:grid; grid-template-columns:repeat\(4,minmax\(0,1fr\)\); width:100%; \}/);
+  assert.match(css, /\.audit-main\.audit-view-briefs \.audit-intro \{ grid-template-columns:minmax\(0,1fr\) minmax\(300px,\.45fr\);/);
+  assert.match(css, /\.brief-history-picker select \{ min-height:44px;/);
+  assert.match(css, /\.brief-more-stories>summary \{ display:flex; align-items:center; min-height:52px;/);
 });
 
 test("explains U5 as a risk scale rather than a probability", () => {
