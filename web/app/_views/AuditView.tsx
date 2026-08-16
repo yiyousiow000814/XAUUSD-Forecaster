@@ -466,6 +466,9 @@ const dailyBriefPhaseLabel = (phase?: DailyBriefPhase, isToday = false) => ({
   DEGRADED: "已完成",
   EMPTY: "无资料",
 }[phase ?? "WAITING"]);
+const dailyBriefDateLabel = (phase?: DailyBriefPhase, isToday = false) => phase === "DEGRADED"
+  ? "需注意"
+  : dailyBriefPhaseLabel(phase, isToday);
 const shortBriefDate = (value: string) => value.slice(5).replace("-", "/");
 const DAILY_BRIEF_VISIBLE_DATES = 4;
 const number = (value?: number | null, digits = 2) => value === null || value === undefined ? "—" : value.toFixed(digits);
@@ -1257,6 +1260,13 @@ export default function AuditView() {
         const terminal = isCurrent ? summary?.terminal_failure_items : selected?.terminal_failure_items;
         const lastGenerated = isCurrent ? summary?.last_generated_at : selected?.generated_at;
         const generatedByGemma = selected && !selected.model_version.startsWith("system-");
+        const qualityNote = phase === "DEGRADED"
+          ? generatedByGemma
+            ? `${formatExactCount(terminal)} 条资料未纳入：正文缺失或复核失败。`
+            : terminal
+              ? `Gemma 汇总未生成，当前为系统整理版；另有 ${formatExactCount(terminal)} 条资料因正文缺失或复核失败未纳入。`
+              : "Gemma 汇总未生成，当前为系统整理版。"
+          : null;
         const overview = selected?.brief.overview ?? (generatedByGemma
           ? "本版以重点摘要格式保存；以下内容由 Gemma 4 根据引用证据生成。"
           : "Gemma 汇总未完成；以下内容由系统从已复核资料中整理。");
@@ -1275,12 +1285,12 @@ export default function AuditView() {
         return <section className="daily-brief-desk">
           <header><div><p className="eyebrow">{selectedDate ? `${shortBriefDate(selectedDate)} · DAILY BRIEF · ASIA/KUALA_LUMPUR` : "DAILY BRIEF · ASIA/KUALA_LUMPUR"}</p><h2>{selected?.brief.title ?? (selectedDate ? `${shortBriefDate(selectedDate)} 每日简报` : "每日简报")}</h2><p className={`brief-phase phase-${(phase ?? "WAITING").toLowerCase()}`}>{dailyBriefPhaseLabel(phase, isCurrent)}</p></div>
             <div className="brief-date-switcher">
-              <nav aria-label="最近简报日期">{recentDates.map(date => { const row = briefs.find(item => item.brief_date === date); const isToday = date === summary?.brief_date; const datePhase = isToday ? summary.phase : row?.phase; return <button type="button" key={date} className={selectedDate === date ? "active" : ""} onClick={() => setBriefDate(date)}><span>{shortBriefDate(date)}</span><small>{dailyBriefPhaseLabel(datePhase, isToday)}</small></button>; })}</nav>
+              <nav aria-label="最近简报日期">{recentDates.map(date => { const row = briefs.find(item => item.brief_date === date); const isToday = date === summary?.brief_date; const datePhase = isToday ? summary.phase : row?.phase; return <button type="button" key={date} className={selectedDate === date ? "active" : ""} onClick={() => setBriefDate(date)}><span>{shortBriefDate(date)}</span><small>{dailyBriefDateLabel(datePhase, isToday)}</small></button>; })}</nav>
               {historicalDates.length > 0 && <label className="brief-history-picker">
                 <span>历史简报</span>
                 <select aria-label="选择更早的每日简报" value={historicalDates.includes(selectedDate) ? selectedDate : ""} onChange={event => event.currentTarget.value && setBriefDate(event.currentTarget.value)}>
                   <option value="">更早日期</option>
-                  {historicalDates.map(date => <option key={date} value={date}>{shortBriefDate(date)} · {dailyBriefPhaseLabel(briefs.find(item => item.brief_date === date)?.phase, false)}</option>)}
+                  {historicalDates.map(date => <option key={date} value={date}>{shortBriefDate(date)} · {dailyBriefDateLabel(briefs.find(item => item.brief_date === date)?.phase, false)}</option>)}
                 </select>
               </label>}
             </div>
@@ -1289,7 +1299,7 @@ export default function AuditView() {
             <strong>本版依据 {formatExactCount(reviewed)} 条已复核资料</strong>
             <span>{pending === null || pending === undefined ? "资料范围确认中" : pending > 0 ? "新资料会纳入下一版" : "资料整理完成"}</span>
             {lastGenerated && <small>更新于 {time(lastGenerated)}</small>}
-            {Boolean(terminal) && <details key={selectedDate}><summary>资料说明</summary><p>{formatExactCount(terminal)} 条资料因正文缺失或复核失败未纳入本版，避免摘要失真。</p></details>}
+            {qualityNote && <p className="brief-quality-note">{qualityNote}</p>}
           </div>
           {selected ? <>
             <div className={`brief-overview ${generatedByGemma ? "is-gemma" : "is-fallback"}`}>
