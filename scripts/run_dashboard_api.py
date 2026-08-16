@@ -511,6 +511,19 @@ def _market_session_status(
     return "DATA_UNAVAILABLE"
 
 
+def _market_session_observed_at(
+    broker_session: dict | None,
+    *,
+    market_session: str,
+    now: datetime,
+) -> str | None:
+    if broker_session is not None:
+        return str(broker_session["observed_at"])
+    if market_session == "WEEKLY_CLOSED":
+        return now.isoformat()
+    return None
+
+
 NEWS_CATEGORY_LABELS = {
     "rates_fed": "利率/Fed",
     "inflation_employment": "通胀/就业",
@@ -2233,8 +2246,10 @@ def _dashboard_payload(database: Path) -> dict:
         "system": {
             "online": online,
             "market_session": market_session,
-            "market_session_observed_at": (
-                broker_session["observed_at"] if broker_session else None
+            "market_session_observed_at": _market_session_observed_at(
+                broker_session,
+                market_session=market_session,
+                now=now,
             ),
             "market_reopens_at": (
                 broker_session["next_open_time"] if broker_session else None
