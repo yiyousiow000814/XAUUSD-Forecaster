@@ -810,12 +810,16 @@ def test_daily_brief_reranks_account_headroom_for_each_date(
     ledger.close()
 
 
-def test_annotator_cycle_reserves_routine_capacity_for_daily_brief_first(
+def test_annotator_cycle_reconciles_jobs_before_brief_and_reserves_capacity(
     tmp_path, monkeypatch,
 ) -> None:
     from scripts import run_news_annotator as runner
 
     calls: list[str] = []
+    monkeypatch.setattr(
+        runner, "sync_pending_jobs",
+        lambda connection, **kwargs: calls.append("reconcile") or {},
+    )
     monkeypatch.setattr(
         runner, "run_daily_brief_batch",
         lambda ledger: calls.append("daily_brief") or [],
@@ -835,7 +839,7 @@ def test_annotator_cycle_reserves_routine_capacity_for_daily_brief_first(
     )
 
     assert runner.main() == 0
-    assert calls == ["daily_brief", "annotation"]
+    assert calls == ["reconcile", "daily_brief", "annotation"]
 
 
 def test_capacity_blocked_brief_leaves_gemma_window_for_retry(
