@@ -1875,6 +1875,11 @@ test("renders only validated Assistant content blocks with phone-owned overflow"
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell \{[^}]*min-height:69px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell textarea \{[^}]*height:52px;[^}]*max-height:52px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-main \{[^}]*height:100dvh; min-height:0/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-thread-heading h1 \{[^}]*font-size:clamp\(18px,4\.8vw,20px\)/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-message\.is-user>p \{[^}]*font-size:15px; line-height:1\.68/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-news-card-trigger>strong \{[^}]*font-size:19px; line-height:1\.22/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-action-menu \{[^}]*width:min\(136px,calc\(100vw - 24px\)\)/);
+  assert.match(css, /\.assistant-news-card-trigger>span:first-child \{[^}]*font-size:11px/);
   assert.match(css, /\.assistant-transcript-head \{ grid-row:1/);
   assert.match(css, /\.assistant-transcript-banners \{ grid-row:2/);
   assert.match(css, /\.assistant-message-scroll \{ grid-row:3/);
