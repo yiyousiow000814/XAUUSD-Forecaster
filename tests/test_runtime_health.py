@@ -1,7 +1,11 @@
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 
-from xauusd_forecaster.runtime_health import write_runtime_heartbeat
+from xauusd_forecaster.runtime_health import (
+    RuntimeHeartbeatPulse,
+    write_runtime_heartbeat,
+)
 
 
 def test_runtime_heartbeat_is_atomic_and_identifies_service(tmp_path) -> None:
@@ -37,4 +41,29 @@ def test_runtime_heartbeat_supports_overlapping_candidate_and_rollback_writers(
     assert payload["service"] == "annotator"
     assert payload["state"] == "RUNNING"
     assert payload["work_items"] in range(40)
+    assert not list(path.parent.glob(f".{path.name}.*.tmp"))
+
+
+def test_runtime_heartbeat_pulse_stays_fresh_during_blocking_work(tmp_path) -> None:
+    path = tmp_path / "forward" / "annotator-status.json"
+
+    with RuntimeHeartbeatPulse(
+        path,
+        service="annotator",
+        work_items=2,
+        interval_seconds=0.02,
+    ) as pulse:
+        first = json.loads(path.read_text(encoding="utf-8"))["last_success"]
+        deadline = time.monotonic() + 1.0
+        current = first
+        while current == first and time.monotonic() < deadline:
+            time.sleep(0.01)
+            current = json.loads(path.read_text(encoding="utf-8"))["last_success"]
+        pulse.update(work_items=3)
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert current != first
+    assert payload["service"] == "annotator"
+    assert payload["state"] == "RUNNING"
+    assert payload["work_items"] == 3
     assert not list(path.parent.glob(f".{path.name}.*.tmp"))

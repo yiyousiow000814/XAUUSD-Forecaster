@@ -4,9 +4,79 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+
+
+class RuntimeHeartbeatPulse:
+    """Keep a supervised service fresh while one bounded operation blocks."""
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        service: str,
+        state: str = "RUNNING",
+        work_items: int = 0,
+        interval_seconds: float = 30.0,
+    ) -> None:
+        if interval_seconds <= 0:
+            raise ValueError("heartbeat pulse interval must be positive")
+        self.path = path
+        self.service = service
+        self.interval_seconds = float(interval_seconds)
+        self._state = state
+        self._work_items = int(work_items)
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _write(self) -> None:
+        with self._lock:
+            state = self._state
+            work_items = self._work_items
+        write_runtime_heartbeat(
+            self.path,
+            service=self.service,
+            state=state,
+            work_items=work_items,
+        )
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            self._write()
+
+    def update(
+        self,
+        *,
+        work_items: int | None = None,
+        state: str | None = None,
+    ) -> None:
+        with self._lock:
+            if work_items is not None:
+                self._work_items = int(work_items)
+            if state is not None:
+                self._state = state
+        self._write()
+
+    def __enter__(self) -> RuntimeHeartbeatPulse:
+        if self._thread is not None:
+            raise RuntimeError("heartbeat pulse is already running")
+        self._write()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"{self.service}-heartbeat",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self.interval_seconds + 1.0)
 
 
 def write_runtime_heartbeat(

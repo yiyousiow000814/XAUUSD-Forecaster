@@ -53,7 +53,10 @@ from xauusd_forecaster.news_scheduler import (  # noqa: E402
     scheduler_counts,
     sync_pending_jobs,
 )
-from xauusd_forecaster.runtime_health import write_runtime_heartbeat  # noqa: E402
+from xauusd_forecaster.runtime_health import (  # noqa: E402
+    RuntimeHeartbeatPulse,
+    write_runtime_heartbeat,
+)
 from xauusd_forecaster.scheduler_model_gateway import (  # noqa: E402
     SchedulerModelAccountant,
 )
@@ -544,30 +547,34 @@ def main() -> int:
                 work_items=0,
                 state="RUNNING" if completed_cycle else "STARTING",
             )
-            # Give the bounded Daily Brief backlog the first opportunity to use
-            # ROUTINE model capacity.  The normal annotation batch can consume
-            # the full shared Gemma TPM window, so running it first would leave
-            # the brief permanently deferred even when daily quota remains.
-            brief_statuses = run_daily_brief_batch(ledger)
-            print(
-                json.dumps({"event": "DAILY_NEWS_BRIEF_BATCH",
-                            "statuses": brief_statuses}),
-                flush=True,
-            )
-            gemma_reserved_accounts = frozenset(
-                str(status["account_id"])
-                for status in brief_statuses
-                if status.get("reason") == "NO_GEMMA_CAPACITY"
-                and status.get("account_id")
-            )
-            statuses = run_scheduled_batch_with_lock_retry(
-                ledger,
-                batch_size=limit,
-                progress_callback=lambda count: write_heartbeat(
-                    args.status_file, work_items=count,
-                ),
-                gemma_reserved_accounts=gemma_reserved_accounts,
-            )
+            with RuntimeHeartbeatPulse(
+                args.status_file,
+                service="annotator",
+                state="RUNNING",
+            ) as heartbeat:
+                # Give the bounded Daily Brief backlog the first opportunity to
+                # use ROUTINE model capacity. The pulse remains fresh while a
+                # provider call is legitimately blocking.
+                brief_statuses = run_daily_brief_batch(ledger)
+                print(
+                    json.dumps({"event": "DAILY_NEWS_BRIEF_BATCH",
+                                "statuses": brief_statuses}),
+                    flush=True,
+                )
+                gemma_reserved_accounts = frozenset(
+                    str(status["account_id"])
+                    for status in brief_statuses
+                    if status.get("reason") == "NO_GEMMA_CAPACITY"
+                    and status.get("account_id")
+                )
+                statuses = run_scheduled_batch_with_lock_retry(
+                    ledger,
+                    batch_size=limit,
+                    progress_callback=lambda count: heartbeat.update(
+                        work_items=count,
+                    ),
+                    gemma_reserved_accounts=gemma_reserved_accounts,
+                )
             print(
                 json.dumps(
                     {
