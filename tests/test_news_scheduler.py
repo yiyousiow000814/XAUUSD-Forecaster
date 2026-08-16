@@ -575,6 +575,20 @@ def test_protected_daily_brief_job_resolves_after_cross_date_dedup(
             (NOW.isoformat(), NOW.isoformat()),
         )
 
+    obsolete_job_id = enqueue_job(
+        ledger.connection, task_type="ACTIVE_ANNOTATION", source="Reuters",
+        source_item_id="old-day", revision_number=1,
+        prompt_version=CURRENT_NEWS_PROMPT_VERSION, priority="NORMAL", now=NOW,
+    )
+    obsolete = claim_job(
+        ledger.connection, worker_id="old-worker", pool=ROUTINE_POOL, now=NOW,
+    )
+    assert obsolete and obsolete.job_id == obsolete_job_id
+    backoff_job(
+        ledger.connection, obsolete_job_id, "old-worker", available_at=NOW,
+        error="CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE", terminal=True,
+    )
+
     discovered = sync_pending_jobs(
         ledger.connection, now=NOW + timedelta(minutes=1), limit=20,
     )
@@ -588,6 +602,8 @@ def test_protected_daily_brief_job_resolves_after_cross_date_dedup(
     )
 
     assert discovered["ACTIVE_ANNOTATION"] >= 1
+    assert row["state"] == "QUEUED"
+    assert row["last_error"] is None
     assert resolved is not None
     assert resolved["source_item_id"] == "old-day"
     ledger.close()
