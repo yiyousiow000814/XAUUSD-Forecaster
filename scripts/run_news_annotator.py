@@ -489,6 +489,16 @@ def main() -> int:
                 work_items=0,
                 state="RUNNING" if completed_cycle else "STARTING",
             )
+            # Give the bounded Daily Brief backlog the first opportunity to use
+            # ROUTINE model capacity.  The normal annotation batch can consume
+            # the full shared Gemma TPM window, so running it first would leave
+            # the brief permanently deferred even when daily quota remains.
+            brief_statuses = run_daily_brief_batch(ledger)
+            print(
+                json.dumps({"event": "DAILY_NEWS_BRIEF_BATCH",
+                            "statuses": brief_statuses}),
+                flush=True,
+            )
             statuses = run_scheduled_batch_with_lock_retry(
                 ledger,
                 batch_size=limit,
@@ -504,12 +514,6 @@ def main() -> int:
                         "queue": scheduler_counts(ledger.connection),
                     }
                 ),
-                flush=True,
-            )
-            brief_statuses = run_daily_brief_batch(ledger)
-            print(
-                json.dumps({"event": "DAILY_NEWS_BRIEF_BATCH",
-                            "statuses": brief_statuses}),
                 flush=True,
             )
             work_items = len(statuses)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -541,6 +542,34 @@ def test_routine_only_account_generates_daily_brief(tmp_path, monkeypatch) -> No
     assert current["account_id"] == "routine-account"
     assert "secret" not in json.dumps(statuses)
     ledger.close()
+
+
+def test_annotator_cycle_reserves_routine_capacity_for_daily_brief_first(
+    tmp_path, monkeypatch,
+) -> None:
+    from scripts import run_news_annotator as runner
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        runner, "run_daily_brief_batch",
+        lambda ledger: calls.append("daily_brief") or [],
+    )
+    monkeypatch.setattr(
+        runner, "run_scheduled_batch_with_lock_retry",
+        lambda ledger, **kwargs: calls.append("annotation") or [],
+    )
+    monkeypatch.setattr(
+        sys, "argv",
+        [
+            "run_news_annotator.py",
+            "--database", str(tmp_path / "forward.sqlite3"),
+            "--status-file", str(tmp_path / "status.json"),
+            "--once",
+        ],
+    )
+
+    assert runner.main() == 0
+    assert calls == ["daily_brief", "annotation"]
 
 
 def test_terminal_annotation_failure_settles_historical_date_as_degraded(tmp_path) -> None:
