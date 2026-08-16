@@ -351,10 +351,20 @@ def test_agent_rejects_uncited_or_fabricated_evidence_claims(
 
 
 def test_agent_allows_at_most_a_bounded_second_tool_round_then_disables_tools() -> None:
-    modes: list[str] = []
+    modes: list[str | None] = []
+    tool_declarations: list[bool] = []
+    response_schemas: list[dict[str, object] | None] = []
 
     def invoke(payload, **_kwargs):
-        modes.append(payload["toolConfig"]["functionCallingConfig"]["mode"])
+        tool_config = payload.get("toolConfig")
+        modes.append(
+            tool_config["functionCallingConfig"]["mode"]
+            if isinstance(tool_config, dict) else None
+        )
+        tool_declarations.append("tools" in payload)
+        response_schemas.append(
+            payload["generationConfig"].get("responseJsonSchema")
+        )
         if len(modes) == 1:
             return _routed(_model_content(call_id="call-1"), 1)
         if len(modes) == 2:
@@ -364,9 +374,75 @@ def test_agent_allows_at_most_a_bounded_second_tool_round_then_disables_tools() 
     result = run_bounded_assistant_agent(_request(), _registry(), invoke)
 
     assert result.answer == "两轮工具后完成。"
-    assert modes == ["AUTO", "AUTO", "NONE"]
+    assert modes == ["AUTO", "AUTO", None]
+    assert tool_declarations == [True, True, False]
+    assert response_schemas[:2] == [None, None]
+    assert response_schemas[2] == {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["claims"],
+        "properties": {
+            "claims": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 12,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["text", "evidence_ids"],
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": "One concise, nonempty answer line.",
+                        },
+                        "evidence_ids": {
+                            "type": "array",
+                            "minItems": 0,
+                            "maxItems": 0,
+                            "items": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        },
+    }
     assert result.provenance["model_turn_count"] == 3
     assert result.provenance["tool_round_count"] == 2
+
+
+def test_final_synthesis_schema_allows_only_retrieved_evidence_ids() -> None:
+    payloads: list[dict[str, object]] = []
+
+    def invoke(payload, **_kwargs):
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return _routed(_model_content(call_id="call-1"), 1)
+        if len(payloads) == 2:
+            return _routed(_model_content(call_id="call-2"), 2)
+        return _routed(_model_content(
+            text="当前回答只依赖第一项证据。",
+            evidence_ids=("evidence-1",),
+        ), 3)
+
+    result = run_bounded_assistant_agent(
+        _request(), _evidence_registry(), invoke,
+    )
+
+    final_generation = payloads[2]["generationConfig"]
+    assert final_generation["responseMimeType"] == "application/json"
+    evidence_schema = final_generation["responseJsonSchema"]["properties"][
+        "claims"
+    ]["items"]["properties"]["evidence_ids"]
+    assert evidence_schema == {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 2,
+        "items": {
+            "type": "string",
+            "enum": ["evidence-1", "evidence-2"],
+        },
+    }
+    assert result.evidence_ids == ("evidence-1",)
 
 
 def test_tool_call_on_final_only_turn_fails_closed() -> None:

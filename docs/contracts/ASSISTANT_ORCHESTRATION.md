@@ -210,6 +210,12 @@ the Model Router, Capacity Router, and metered gateway. The selected model is
 fixed for one native sequence while an eligible credential pool may change;
 later user turns may select a different compatible model.
 
+The final synthesis request MUST omit provider tool declarations rather than
+relying on a provider function-calling mode flag to enforce the loop boundary.
+It MUST constrain the response to the claim-level evidence JSON envelope and
+the backend MUST still validate that envelope, its citation budget, and every
+evidence ID before publishing an answer.
+
 The operational Windows worker builds the canonical owner-scoped context first,
 registers the shared `search_news_v1` adapter, and then runs this loop. The news
 adapter fixes `received_to` to the admitted turn cutoff and rejects a fallback
