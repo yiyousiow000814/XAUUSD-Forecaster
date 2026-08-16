@@ -674,7 +674,11 @@ def _news_reader_rows(
                         AND any_a.revision_number=n.revision_number), n.fetched_time),
                     COALESCE(i.assessed_at, n.fetched_time),
                     COALESCE(f.failed_at, n.fetched_time),
-                    COALESCE(cf.failed_at, n.fetched_time)),
+                    COALESCE(cf.failed_at, n.fetched_time),
+                    COALESCE((SELECT max(recovery.authorized_at)
+                      FROM news_ai_failure_recoveries_v1 recovery
+                      WHERE recovery.failure_id=f.failure_id),
+                      n.fetched_time)),
                     n.source, n.source_item_id, n.revision_number) > (?, ?, ?, ?)"""
         cursor_parameters = tuple(cursor)
     return connection.execute(
@@ -691,7 +695,11 @@ def _news_reader_rows(
                             AND any_a.revision_number=n.revision_number), n.fetched_time),
                         COALESCE(i.assessed_at, n.fetched_time),
                        COALESCE(f.failed_at, n.fetched_time),
-                       COALESCE(cf.failed_at, n.fetched_time)) AS mirror_updated_at,
+                       COALESCE(cf.failed_at, n.fetched_time),
+                       COALESCE((SELECT max(recovery.authorized_at)
+                         FROM news_ai_failure_recoveries_v1 recovery
+                         WHERE recovery.failure_id=f.failure_id),
+                         n.fetched_time)) AS mirror_updated_at,
                    n.headline AS original_headline,
                    COALESCE(t.headline_zh, n.headline) AS headline,
                    length(COALESCE(n.body, '')) AS content_characters,
@@ -847,12 +855,6 @@ def _serialize_news_rows(
         item["source_eligibility"] = (
             "SEMANTIC_CANDIDATE" if listed_source else "UNLISTED_CANDIDATE"
         )
-        item["model_visibility"] = (
-            "IMPACT_PENDING" if item.get("parsed_at")
-            else "NOT_YET_PARSED"
-            if item.get("annotation_status") in {"QUEUED", "READY"}
-            else str(item.get("annotation_status") or "WAITING_CONTENT")
-        )
         annotation_key = (
             str(item.get("source") or ""),
             str(item.get("source_item_id") or ""),
@@ -862,10 +864,9 @@ def _serialize_news_rows(
         annotation_failure = item.pop("annotation_failure", None)
         if item.get("parsed_at"):
             item["annotation_status"] = "READY"
-        elif (
-            item.get("annotation_status") == "QUEUED"
-            and annotation_key not in claimable_annotation_keys
-        ):
+        elif annotation_key in claimable_annotation_keys:
+            item["annotation_status"] = "QUEUED"
+        elif item.get("annotation_status") == "QUEUED":
             item["annotation_status"] = "NOT_REQUIRED"
             reason_code, reason = _not_required_reason(item, epoch)
             item["annotation_reason_code"] = reason_code
@@ -877,6 +878,13 @@ def _serialize_news_rows(
             item["annotation_reason"] = _annotation_failure_reason(
                 annotation_failure, annotation_failure_code
             )
+        item["model_visibility"] = (
+            "IMPACT_PENDING" if item.get("parsed_at")
+            else "NOT_YET_PARSED" if item.get("annotation_status") == "QUEUED"
+            else "MODEL_INELIGIBLE"
+            if item.get("annotation_status") == "NOT_REQUIRED"
+            else str(item.get("annotation_status") or "WAITING_CONTENT")
+        )
         _apply_impact_status(item, now)
         item["entities"] = (
             json.loads(item.pop("entities_json"))
@@ -2237,6 +2245,9 @@ def _dashboard_payload(database: Path) -> dict:
         news_sources=news_source_health,
         runtime_update_failure=runtime_update_failure,
         daily_news_brief=daily_news_brief_summary,
+        sync_degraded_resources=[
+            row for row in degraded_resources if isinstance(row, dict)
+        ],
     )
 
     return {
