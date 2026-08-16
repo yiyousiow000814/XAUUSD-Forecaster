@@ -15,7 +15,9 @@ control remains per account. Provider limits shown by AI Studio remain the
 authority; repository constants are conservative local safety limits.
 
 The runtime reloads this account registry for every scheduler batch and ranks
-independent accounts by current daily, RPM, and TPM headroom. A newly visible
+independent accounts by current daily, RPM, and TPM headroom. On Windows it
+reads the current user-scoped environment registry directly, so adding or
+removing a credential does not require a service restart. A newly visible
 independent account joins routing on the next cycle. An extra key inside an
 existing account adds transport redundancy but does not increase that account's
 quota or the scheduler's automatic batch size.

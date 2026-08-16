@@ -92,6 +92,22 @@ CREATE TABLE IF NOT EXISTS news_ai_account_minute_usage_v1 (
     updated_at TEXT NOT NULL,
     PRIMARY KEY(minute_bucket,account_id,model_family)
 );
+
+CREATE TABLE IF NOT EXISTS news_ai_failure_recoveries_v1 (
+    failure_id TEXT NOT NULL,
+    recovery_version TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_item_id TEXT NOT NULL,
+    revision_number INTEGER NOT NULL,
+    llm_model_version TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    authorized_at TEXT NOT NULL,
+    PRIMARY KEY(
+      recovery_version,source,source_item_id,revision_number,
+      llm_model_version,prompt_version),
+    UNIQUE(failure_id,recovery_version),
+    FOREIGN KEY(failure_id) REFERENCES news_llm_failures(failure_id)
+);
 """
 
 
@@ -145,6 +161,26 @@ def _credential_id(api_key: str) -> str:
     return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
 
 
+def _runtime_environment_value(name: str) -> str:
+    """Read mutable user configuration instead of a stale process snapshot."""
+    if os.name == "nt":
+        try:
+            import winreg
+
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+                value, _ = winreg.QueryValueEx(key, name)
+                return str(value or "")
+        except FileNotFoundError:
+            # Non-interactive deployments may inject secrets only into the
+            # process environment instead of the interactive user's registry.
+            return os.environ.get(name, "")
+        except OSError:
+            # A restricted service account may not have a readable HKCU hive.
+            # Its explicitly injected process environment remains authoritative.
+            pass
+    return os.environ.get(name, "")
+
+
 def configured_api_credentials(
     *,
     raw_accounts: str | None = None,
@@ -156,8 +192,10 @@ def configured_api_credentials(
     ``pool``, and ``api_keys``.  Legacy key variables remain routine-only and
     preserve the previous one-key/one-account behavior.
     """
-    raw = raw_accounts if raw_accounts is not None else os.environ.get(
-        "GEMINI_API_ACCOUNTS", ""
+    raw = (
+        raw_accounts
+        if raw_accounts is not None
+        else _runtime_environment_value("GEMINI_API_ACCOUNTS")
     )
     entries: list[dict[str, object]] = []
     if raw.strip():
@@ -171,8 +209,8 @@ def configured_api_credentials(
     else:
         keys = list(legacy_keys or ())
         if legacy_keys is None:
-            keys.extend(os.environ.get("GEMINI_API_KEYS", "").split(";"))
-            keys.append(os.environ.get("GEMINI_API_KEY", ""))
+            keys.extend(_runtime_environment_value("GEMINI_API_KEYS").split(";"))
+            keys.append(_runtime_environment_value("GEMINI_API_KEY"))
         entries = [
             {
                 "account_id": f"legacy-{_credential_id(key.strip())}",
@@ -733,6 +771,70 @@ def _annotation_priority(row: dict[str, object]) -> str:
     return candidate if candidate in PRIORITIES else "NORMAL"
 
 
+def authorize_repairable_annotation_failures(
+    connection: sqlite3.Connection,
+    *,
+    prompt_version: str,
+    recovery_version: str,
+    now: datetime | None = None,
+) -> int:
+    """Grant one auditable retry to failures fixed by this recovery version."""
+    timestamp = _iso(now or datetime.now(UTC))
+    with connection:
+        inserted = connection.execute(
+            """INSERT OR IGNORE INTO news_ai_failure_recoveries_v1
+               (failure_id,recovery_version,source,source_item_id,
+                revision_number,llm_model_version,prompt_version,authorized_at)
+               SELECT f.failure_id,?,f.source,f.source_item_id,
+                      f.revision_number,f.llm_model_version,f.prompt_version,?
+               FROM news_llm_failures f
+               JOIN news_llm_failure_evidence_v1 e
+                 ON e.failure_id=f.failure_id
+               WHERE f.task_type='ANNOTATION' AND f.prompt_version=?
+                 AND f.is_terminal=1
+                 AND (
+                   e.failure_stage IN (
+                     'DISPLAY_REPAIR','EVIDENCE_ANCHOR_REPAIR')
+                   OR (e.failure_stage='SEMANTIC_CONTRACT'
+                     AND e.cause='annotation supporting evidence is absent from source'))
+                 AND f.attempt_number=(
+                   SELECT max(f2.attempt_number) FROM news_llm_failures f2
+                   WHERE f2.task_type=f.task_type AND f2.source=f.source
+                     AND f2.source_item_id=f.source_item_id
+                     AND f2.revision_number=f.revision_number
+                     AND f2.llm_model_version=f.llm_model_version
+                     AND f2.prompt_version=f.prompt_version)""",
+            (recovery_version, timestamp, prompt_version),
+        ).rowcount
+        connection.execute(
+            """UPDATE news_ai_jobs_v1 AS j
+               SET state='QUEUED',available_at=?,lease_owner=NULL,
+                   lease_expires_at=NULL,last_error=NULL,updated_at=?,
+                   completed_at=NULL
+               WHERE j.task_type='ACTIVE_ANNOTATION'
+                 AND j.prompt_version=? AND j.state='DEAD_LETTER'
+                 AND EXISTS (
+                   SELECT 1 FROM news_llm_failures f
+                   JOIN news_ai_failure_recoveries_v1 r
+                     ON r.failure_id=f.failure_id AND r.recovery_version=?
+                   WHERE f.source=j.source
+                     AND f.source_item_id=j.source_item_id
+                     AND f.revision_number=j.revision_number
+                     AND f.prompt_version=j.prompt_version
+                     AND f.attempt_number=(
+                       SELECT max(f2.attempt_number)
+                       FROM news_llm_failures f2
+                       WHERE f2.task_type=f.task_type
+                         AND f2.source=f.source
+                         AND f2.source_item_id=f.source_item_id
+                         AND f2.revision_number=f.revision_number
+                         AND f2.llm_model_version=f.llm_model_version
+                         AND f2.prompt_version=f.prompt_version))""",
+            (timestamp, timestamp, prompt_version, recovery_version),
+        )
+    return max(0, inserted)
+
+
 def sync_pending_jobs(
     connection: sqlite3.Connection,
     *,
@@ -741,6 +843,7 @@ def sync_pending_jobs(
 ) -> dict[str, int]:
     """Discover eligible evidence work and enqueue deterministic job identities."""
     from .annotation import (
+        ANNOTATION_FAILURE_RECOVERY_VERSION,
         IMPACT_PROMPT_VERSION,
         PROMPT_VERSION,
         TITLE_PROMPT_VERSION,
@@ -750,6 +853,12 @@ def sync_pending_jobs(
     )
 
     instant = now or datetime.now(UTC)
+    authorize_repairable_annotation_failures(
+        connection,
+        prompt_version=PROMPT_VERSION,
+        recovery_version=ANNOTATION_FAILURE_RECOVERY_VERSION,
+        now=instant,
+    )
     active_annotations = pending_annotation_records(
         connection, observed_at=instant, limit=limit, prompt_version=PROMPT_VERSION,
     )

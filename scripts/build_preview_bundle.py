@@ -10,7 +10,7 @@ import sys
 import types
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -193,16 +193,26 @@ def _backfill_annotation_reasons(news_index: dict, status: dict) -> None:
                     "HISTORICAL_MATERIAL", "历史资料：发布时间早于系统开始记录",
                 )
             else:
+                source = str(item.get("source") or "")
                 first_seen = datetime.fromisoformat(
                     str(item["collector_first_seen_time"])
                 )
-                if str(item.get("source") or "").startswith(("google_news_", "gdelt_")):
+                if source.startswith(("google_news_", "gdelt_")) and (
+                    first_seen - published > timedelta(hours=72)
+                ):
                     code, reason = (
-                        "SEARCH_LEAD", "搜索线索：来自聚合发现源，不是独立官方发布",
+                        "STALE_AT_INTAKE", "收到时已超过72小时，不进入语义处理",
+                    )
+                elif source.startswith(("google_news_", "gdelt_")) and (
+                    published - first_seen > timedelta(minutes=10)
+                ):
+                    code, reason = (
+                        "INVALID_PUBLISHED_TIME", "发布时间晚于收到时间，时间证据无效",
                     )
                 else:
                     code, reason = (
-                        "DUPLICATE_CONTENT", "重复内容：同一事件已有正文更完整的版本",
+                        "QUEUE_INVARIANT_MISMATCH",
+                        "正文符合条件但未进入语义队列，需要检查",
                     )
         item["annotation_reason_code"] = code
         item["annotation_reason"] = reason

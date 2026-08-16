@@ -46,3 +46,29 @@ def test_bounded_evidence_window_keeps_each_visibility_state_inspectable(
 def test_bounded_evidence_window_rejects_invalid_limit() -> None:
     with pytest.raises(ValueError, match="must not be negative"):
         bounded_evidence_window([], -1)
+
+
+def test_bounded_evidence_window_retains_every_current_event_before_history(
+) -> None:
+    rows = [
+        {
+            "event_key": f"seen-{index}",
+            "model_seen": True,
+            "broad_model_eligible": False,
+        }
+        for index in range(100)
+    ] + [
+        {
+            "event_key": f"unseen-{index}",
+            "model_seen": False,
+            "broad_model_eligible": 70 <= index < 86,
+        }
+        for index in range(100)
+    ]
+
+    bounded = bounded_evidence_window(rows, 60)
+
+    assert len(bounded) == 60
+    assert {
+        row["event_key"] for row in bounded if row["broad_model_eligible"]
+    } == {f"unseen-{index}" for index in range(70, 86)}

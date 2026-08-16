@@ -172,6 +172,32 @@ def test_news_evidence_display_collapses_frozen_versions_to_one_event() -> None:
     assert rows[0]["frozen_decisions"] == 2
 
 
+def test_news_evidence_display_includes_current_event_from_prior_prompt() -> None:
+    module = _dashboard_module()
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    current = [{
+        "event_key": "prior-prompt-current", "source_hash": "hash-current",
+        "canonical_headline": "仍然有效的事件", "canonical_source": "source",
+        "source_published_time": "2026-08-10T01:00:00+00:00",
+        "collector_first_seen_time": "2026-08-10T01:01:00+00:00",
+        "economic_age_minutes": 60, "freshness_status": "ACTIVE", "topics": [],
+        "evidence_grade": "SINGLE_RELIABLE", "broad_model_eligible": True,
+        "model_permission": "BROAD_MODEL", "member_count": 1,
+        "independent_publishers": 1, "source_names": ["source"],
+        "publisher_domains": ["example.com"],
+        "source_identity_organizations": ["source"], "reason_codes": [],
+        "prompt_version": "prior-prompt-version",
+    }]
+
+    rows = module._news_evidence_display_rows(connection, current)
+
+    assert [row["event_key"] for row in rows] == ["prior-prompt-current"]
+    assert rows[0]["model_unseen_reason_codes"] == [
+        "ELIGIBLE_AWAITING_FROZEN_PREDICTION",
+    ]
+
+
 def test_news_evidence_display_reconciles_event_identity_handover() -> None:
     module = _dashboard_module()
     connection = sqlite3.connect(":memory:")
@@ -416,6 +442,13 @@ def test_dashboard_annotation_counts_match_current_worker_policy(tmp_path) -> No
 
 
 def test_dashboard_quota_uses_scheduler_ledger(tmp_path, monkeypatch) -> None:
+    import xauusd_forecaster.news_scheduler as news_scheduler
+
+    configured = {"GEMINI_API_KEYS": "key-a;key-b", "GEMINI_API_KEY": ""}
+    monkeypatch.setattr(
+        news_scheduler, "_runtime_environment_value",
+        lambda name: configured.get(name, ""),
+    )
     now = datetime.now(UTC)
     database = tmp_path / "forward.sqlite3"
     ledger = ForwardLedger(database, now=now)
@@ -457,6 +490,13 @@ def test_dashboard_quota_uses_scheduler_ledger(tmp_path, monkeypatch) -> None:
 def test_dashboard_quota_keeps_pre_scheduler_file_compatibility(
     tmp_path, monkeypatch,
 ) -> None:
+    import xauusd_forecaster.news_scheduler as news_scheduler
+
+    configured = {"GEMINI_API_KEYS": "legacy-key", "GEMINI_API_KEY": ""}
+    monkeypatch.setattr(
+        news_scheduler, "_runtime_environment_value",
+        lambda name: configured.get(name, ""),
+    )
     now = datetime.now(UTC)
     database = tmp_path / "forward.sqlite3"
     ledger = ForwardLedger(database, now=now)

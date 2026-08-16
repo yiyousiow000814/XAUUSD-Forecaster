@@ -2295,13 +2295,16 @@ def test_chinese_repair_policy_preserves_natural_english_identifiers() -> None:
         "summary_zh": "NVIDIA and FOMC were mentioned.",
         "primary_story_title_zh": "",
         "semantic_reason_zh": "Rate expectations changed.",
-    })
+    }, "Gold rose 4.4%", "Revenue was $4.4B, not 44 billion.")
     instruction = payload["contents"][0]["parts"][0]["text"]
     schema = payload["generationConfig"]["responseSchema"]
     assert "proper nouns in English" in instruction
     assert "primarily in natural Simplified Chinese" in instruction
     assert "No sentence may remain" not in instruction
     assert "semantic_reason_zh" in instruction
+    assert '"4.4%"' in instruction
+    assert '"$4.4B"' in instruction
+    assert "Never convert units or magnitudes" in instruction
     assert "semantic_reason_zh" in schema["required"]
 
     legacy_schema = annotation_module._chinese_repair_payload({
@@ -2310,6 +2313,45 @@ def test_chinese_repair_policy_preserves_natural_english_identifiers() -> None:
         "primary_story_title_zh": "",
     })["generationConfig"]["responseSchema"]
     assert "semantic_reason_zh" not in legacy_schema["required"]
+
+
+def test_failed_display_repair_keeps_auditable_semantics_without_impulse(
+    monkeypatch,
+) -> None:
+    evidence = "Source evidence confirms the reported event."
+    vector = _v15_annotation({
+        "headline_zh": "English headline only",
+        "summary_zh": "English summary that cannot pass Chinese display validation.",
+        "event_type": "other", "entities": [], "hawkishness": 0.4,
+        "inflation_impulse": 0.3, "growth_impulse": -0.2,
+        "geopolitical_risk": 0.1, "usd_impulse": 0.5,
+        "novelty": 0.7, "confidence": 0.8,
+    }, evidence)
+    broken_repair = {
+        "headline_zh": "Still English", "summary_zh": "Still English",
+        "primary_story_title_zh": "Still English",
+        "semantic_reason_zh": "Still English",
+    }
+    responses = iter((vector, broken_repair))
+    _mock_model_json(monkeypatch, lambda *_args: next(responses))
+    pool = annotation_module._GeminiRequestPool(
+        ("test-key",), requests_per_key=2,
+        request_accountant=ALLOW_MODEL_REQUEST,
+    )
+
+    result, _ = pool.call(
+        0, annotation_module.DEFAULT_GEMINI_MODEL, "Source headline", evidence,
+        prompt_version=annotation_module.PROMPT_VERSION,
+    )
+
+    assert result["headline_zh"] == "来源标题暂未生成可靠中文显示"
+    assert "仅供审计" in result["summary_zh"]
+    assert result["xauusd_relevance"] == vector["xauusd_relevance"]
+    for field in (
+        "hawkishness", "inflation_impulse", "growth_impulse",
+        "geopolitical_risk", "usd_impulse", "novelty", "confidence",
+    ):
+        assert result[field] == 0.0
 
 
 def test_gemini_annotation_reserves_provider_counted_input_tokens(
@@ -2490,6 +2532,18 @@ def test_gemini_locally_recovers_unverifiable_display_numbers() -> None:
     assert "相关数值" in result["headline_zh"]
     assert "相关数值" in result["summary_zh"]
     assert result["confidence"] == 0.9
+
+
+def test_display_number_validation_rejects_unit_or_currency_conversion() -> None:
+    result = {
+        "headline_zh": "收入达到4.4 billion美元",
+        "summary_zh": "公司报告收入达到4.4 billion美元。",
+    }
+
+    with pytest.raises(ValueError, match="changed source number magnitude"):
+        annotation_module._recover_display_fields(
+            result, "Revenue reached $4.4B", "The company reported $4.4B.",
+        )
 
 
 def test_display_failure_withholds_semantics_until_readable_output_exists(
@@ -4113,7 +4167,7 @@ def test_archive_is_rejected_but_late_seen_news_reaches_annotation_queue(
         ledger.connection,
         expected_model_identity="ollama:test",
         compatible_models=("ollama:test", "ollama:test"),
-        observed_at=epoch + timedelta(hours=3),
+        observed_at=epoch + timedelta(days=20),
         limit=10,
     )
     assert [row["source_item_id"] for row in rows] == ["late"]

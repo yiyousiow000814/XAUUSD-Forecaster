@@ -61,6 +61,7 @@ GEMMA_EVIDENCE_WINDOWS_MAX_CHARS = 8_000
 GEMMA_TITLE_BATCH_LIMIT = 10
 GEMMA_IMPACT_BATCH_LIMIT = 10
 PROMPT_VERSION = CURRENT_NEWS_PROMPT_VERSION
+ANNOTATION_FAILURE_RECOVERY_VERSION = "annotation-repair-v1-source-grounded-display"
 TITLE_PROMPT_VERSION = "headline-zh-v7-multilingual-month-preservation"
 INVALID_CHINESE_TITLE = "来源新闻（中文标题待校验）"
 TITLE_TRANSLATION_MODELS = (
@@ -164,6 +165,22 @@ def _model_failure_details(error: Exception) -> dict[str, object]:
     }
 
 
+def _eligible_at_intake(
+    row: dict[str, object], *, fallback: datetime,
+) -> tuple[bool, str]:
+    """Evaluate freshness at immutable receipt time, not replay time."""
+    first_seen = row.get("collector_first_seen_time") or fallback
+    if not isinstance(first_seen, datetime):
+        first_seen = datetime.fromisoformat(str(first_seen))
+    published_at = row.get("source_published_time")
+    if published_at is not None and not isinstance(published_at, datetime):
+        published_at = datetime.fromisoformat(str(published_at))
+    return google_news_item_is_relevant(
+        str(row.get("source") or ""), str(row.get("headline") or ""),
+        published_at, first_seen,
+    )
+
+
 def pending_annotation_records(
     connection: Connection,
     *,
@@ -180,6 +197,16 @@ def pending_annotation_records(
     look permanently queued even though the worker could never select them.
     """
     now = observed_at or datetime.now(UTC)
+    recovery_table_exists = connection.execute(
+        """SELECT 1 FROM sqlite_master
+           WHERE type='table' AND name='news_ai_failure_recoveries_v1'"""
+    ).fetchone() is not None
+    recovery_clause = (
+        """AND NOT EXISTS (
+             SELECT 1 FROM news_ai_failure_recoveries_v1 r
+             WHERE r.failure_id=f.failure_id AND r.recovery_version=?)"""
+        if recovery_table_exists else ""
+    )
     rows = connection.execute(
         f"""SELECT n.* FROM news_revisions n
         LEFT JOIN news_annotations a
@@ -220,6 +247,7 @@ def pending_annotation_records(
                   AND f2.revision_number=f.revision_number
                   AND f2.llm_model_version=f.llm_model_version
                   AND f2.prompt_version=f.prompt_version)
+              {recovery_clause}
               AND (f.is_terminal=1 OR f.next_retry_at > ?))
         ORDER BY CASE WHEN n.source='federal_reserve_monetary'
                            OR lower(n.headline) LIKE '%fomc%'
@@ -234,20 +262,17 @@ def pending_annotation_records(
         (
             *compatible_models, prompt_version, prompt_version,
             expected_model_identity, prompt_version,
+            *(
+                (ANNOTATION_FAILURE_RECOVERY_VERSION,)
+                if recovery_table_exists else ()
+            ),
             now.isoformat(timespec="microseconds"), max(1, limit),
         ),
     ).fetchall()
     records: list[dict[str, object]] = []
     for raw_row in rows:
         row = dict(raw_row)
-        published_at = (
-            datetime.fromisoformat(str(row["source_published_time"]))
-            if row.get("source_published_time") else None
-        )
-        allowed, _ = google_news_item_is_relevant(
-            str(row["source"]), str(row.get("headline") or ""),
-            published_at, now,
-        )
+        allowed, _ = _eligible_at_intake(row, fallback=now)
         if allowed:
             records.append(row)
     return records
@@ -301,14 +326,7 @@ def completed_annotation_records(
     records: list[dict[str, object]] = []
     for raw_row in rows:
         row = dict(raw_row)
-        published_at = (
-            datetime.fromisoformat(str(row["source_published_time"]))
-            if row.get("source_published_time") else None
-        )
-        allowed, _ = google_news_item_is_relevant(
-            str(row["source"]), str(row.get("headline") or ""),
-            published_at, now,
-        )
+        allowed, _ = _eligible_at_intake(row, fallback=now)
         if allowed:
             records.append(row)
     return records
@@ -607,16 +625,7 @@ def pending_title_translation_records(
     selected: list[dict[str, object]] = []
     for raw_row in pending:
         row = dict(raw_row)
-        first_seen = row.get("collector_first_seen_time") or now
-        if not isinstance(first_seen, datetime):
-            first_seen = datetime.fromisoformat(str(first_seen))
-        published_at = row.get("source_published_time")
-        if published_at is not None and not isinstance(published_at, datetime):
-            published_at = datetime.fromisoformat(str(published_at))
-        allowed, _ = google_news_item_is_relevant(
-            str(row.get("source") or ""), str(row.get("headline") or ""),
-            published_at, first_seen,
-        )
+        allowed, _ = _eligible_at_intake(row, fallback=now)
         if allowed:
             selected.append(row)
         if len(selected) >= limit:
@@ -984,7 +993,9 @@ class _GeminiRequestPool:
                 result, prompt_version=prompt_version,
             )
             try:
-                repaired = self._repair_chinese(start_index + 1, model, result)
+                repaired = self._repair_chinese(
+                    start_index + 1, model, result, headline, body,
+                )
                 for field in invalid_display_fields:
                     result[field] = repaired[field]
                 _recover_display_fields(result, headline, body)
@@ -994,7 +1005,9 @@ class _GeminiRequestPool:
                         result, headline=headline, body=body,
                         prompt_version=prompt_version,
                     )
-            except Exception as error:
+            except (ModelGatewayCapacityExhausted, urllib.error.HTTPError):
+                raise
+            except RuntimeError as error:
                 raise ModelOutputContractFailed(
                     error, result, stage="DISPLAY_REPAIR",
                     initial_error=initial_display_error,
@@ -1002,12 +1015,28 @@ class _GeminiRequestPool:
                         "Gemini display repair failed; semantic annotation withheld"
                     ),
                 ) from error
+            except Exception as error:
+                if prompt_version not in GENERATED_NEWS_PROMPT_VERSIONS:
+                    raise ModelOutputContractFailed(
+                        error, result, stage="DISPLAY_REPAIR",
+                        initial_error=initial_display_error,
+                        public_message=(
+                            "Gemini display repair failed; semantic annotation withheld"
+                        ),
+                    ) from error
+                _apply_display_audit_fallback(result)
+                _validate_chinese_result(result)
+                _validate_current_result(
+                    result, headline=headline, body=body,
+                    prompt_version=prompt_version,
+                )
         return result, exact_model
 
     def _repair_chinese(
-        self, start_index: int, model: str, result: dict
+        self, start_index: int, model: str, result: dict,
+        headline: str = "", body: str = "",
     ) -> dict[str, object]:
-        payload = _chinese_repair_payload(result)
+        payload = _chinese_repair_payload(result, headline, body)
         serialized = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
         input_tokens = self._count_or_conservative(
             model,
@@ -1270,7 +1299,28 @@ def _decode_evidence_anchor_selection(
     return [by_id[item] for item in selected_ids]
 
 
-def _chinese_repair_payload(result: dict) -> dict[str, object]:
+def _source_number_lexemes(headline: str, body: str) -> list[str]:
+    """Return bounded exact numeric spellings that display repair may reuse."""
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9_])(?:[$£€¥₹]\s*)?\d+(?:[.,:/-]\d+)*"
+        r"(?:\s*%|\s*(?:bps|bp|[KMBT]))?(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    )
+    result: list[str] = []
+    seen: set[str] = set()
+    for match in pattern.finditer(f"{headline}\n{body}"):
+        value = match.group(0).strip()
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+        if len(result) >= 256:
+            break
+    return result
+
+
+def _chinese_repair_payload(
+    result: dict, headline: str = "", body: str = "",
+) -> dict[str, object]:
     repair_fields = ["headline_zh", "summary_zh", "primary_story_title_zh"]
     if "semantic_reason_zh" in result:
         repair_fields.append("semantic_reason_zh")
@@ -1283,11 +1333,19 @@ def _chinese_repair_payload(result: dict) -> dict[str, object]:
             "accurate. Do not leave entire explanatory sentences unnecessarily in "
             "English or another source language, and do not force proper nouns "
             "into awkward translations. "
-            "Preserve dates, percentages, prices, and every number exactly. "
+            "Any numeric claim must copy one exact spelling from "
+            "SOURCE_NUMBER_LEXEMES. Never convert units or magnitudes. If a "
+            "numeric claim cannot be expressed with an exact source lexeme, "
+            "remove that whole claim and retain only supported nonnumeric facts. "
             "Return JSON only.\nSOURCE_JSON\n"
             + json.dumps(
                 {field: result.get(field) for field in repair_fields},
                 ensure_ascii=False,
+            )
+            + "\nSOURCE_NUMBER_LEXEMES\n"
+            + json.dumps(
+                _source_number_lexemes(headline, body), ensure_ascii=False,
+                separators=(",", ":"),
             )
         )}]}],
         "generationConfig": {
@@ -1834,7 +1892,34 @@ def _restore_source_number_lexemes(
                 return candidates[0]
             raise ValueError(f"Gemini {field} contains a number absent from source")
 
-        result[field] = token_pattern.sub(restore, text)
+        restored = token_pattern.sub(restore, text)
+        source_lexemes = {
+            re.sub(r"\s+", "", lexeme)
+            for lexeme in _source_number_lexemes(headline, body)
+        }
+        result_lexemes = {
+            re.sub(r"\s+", "", lexeme)
+            for lexeme in _source_number_lexemes("", restored)
+        }
+        significant_by_digits: dict[str, set[str]] = {}
+        for lexeme in source_lexemes:
+            if re.search(r"[$£€¥₹]", lexeme) or re.search(
+                r"(?:bps|bp|[KMBT])$", lexeme, re.IGNORECASE,
+            ):
+                significant_by_digits.setdefault(
+                    re.sub(r"\D", "", lexeme), set(),
+                ).add(lexeme)
+        for digits, exact_lexemes in significant_by_digits.items():
+            matching_result = {
+                lexeme for lexeme in result_lexemes
+                if re.sub(r"\D", "", lexeme) == digits
+            }
+            if matching_result and matching_result.isdisjoint(exact_lexemes):
+                raise ValueError(
+                    f"SOURCE_NUMBER_MISMATCH: Gemini {field} changed source "
+                    f"number magnitude or currency spelling"
+                )
+        result[field] = restored
 
 
 def _recover_display_fields(result: dict, headline: str, body: str) -> None:
@@ -1897,6 +1982,26 @@ def _validate_current_semantics(
         semantic_candidate, headline=headline, body=body,
         prompt_version=prompt_version,
     )
+
+
+def _apply_display_audit_fallback(result: dict) -> None:
+    """Retain valid semantics without granting a failed display measurement."""
+    result.update({
+        "headline_zh": "来源标题暂未生成可靠中文显示",
+        "summary_zh": (
+            "语义结构和来源证据已经通过校验，但中文展示字段未通过校验；"
+            "本记录仅供审计，方向测量已经归零。"
+        ),
+        "primary_story_title_zh": "",
+        "semantic_reason_zh": "语义已完成，但中文展示未通过校验；本记录仅供审计。",
+        "hawkishness": 0.0,
+        "inflation_impulse": 0.0,
+        "growth_impulse": 0.0,
+        "geopolitical_risk": 0.0,
+        "usd_impulse": 0.0,
+        "novelty": 0.0,
+        "confidence": 0.0,
+    })
 
 
 def _normalize_translated_named_months(result: dict, source: str) -> None:
