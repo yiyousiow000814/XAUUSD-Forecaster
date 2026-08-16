@@ -20,6 +20,7 @@ from .news_semantics import validated_annotation_predicate
 BRIEF_PROMPT_VERSION = "daily-news-brief-v2"
 BRIEF_EVIDENCE_LIMIT = 60
 BRIEF_INPUT_TOKEN_BUDGET = 12_000
+BRIEF_OUTPUT_TOKEN_BUDGET = 4_096
 BRIEF_BACKLOG_LIMIT = 14
 BRIEF_REGENERATION_DEBOUNCE = timedelta(minutes=10)
 BRIEF_CAPACITY_RETRY = timedelta(minutes=1)
@@ -280,7 +281,7 @@ def _brief_payload(day: str, evidence: list[dict[str, object]]) -> dict[str, obj
         )}]}],
         "generationConfig": {
             "responseMimeType": "application/json", "temperature": 0,
-            "maxOutputTokens": 1600,
+            "maxOutputTokens": BRIEF_OUTPUT_TOKEN_BUDGET,
             "responseSchema": {
                 "type": "object", "required": ["title", "items"],
                 "properties": {

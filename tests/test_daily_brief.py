@@ -516,6 +516,20 @@ def test_daily_brief_packet_keeps_strongest_evidence_within_tpm_budget(
     ledger.close()
 
 
+def test_structured_brief_output_budget_covers_multi_item_contract() -> None:
+    payload = daily_brief._brief_payload("2026-08-16", [{
+        "id": "source:item:1", "headline": "标题", "summary": "摘要",
+        "category": "宏观", "impact_class": "DATA_RELEASE",
+        "update_type": "NEW_EVENT", "published_at": None,
+        "received_at": "2026-08-16T00:00:00+00:00",
+    }])
+    config = payload["generationConfig"]
+
+    assert config["maxOutputTokens"] == daily_brief.BRIEF_OUTPUT_TOKEN_BUDGET
+    assert config["maxOutputTokens"] >= 4_096
+    assert config["responseSchema"]["properties"]["items"]["maxItems"] == 8
+
+
 def test_duplicate_event_flood_consumes_one_candidate(tmp_path, monkeypatch) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     for index in range(40):
