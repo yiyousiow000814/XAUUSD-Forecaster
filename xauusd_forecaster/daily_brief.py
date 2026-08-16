@@ -629,7 +629,11 @@ def _finalize_generation_fallback(
     important = sorted(candidates, key=_importance, reverse=True)[:8]
     brief = {
         "title": f"{day} 每日简报（自动整理）",
-        "overview": "Gemma 汇总未完成；以下内容由系统从已复核资料中按重要性整理。",
+        "overview": "Gemma 汇总未完成，当前按已复核资料的重要性展示关键脉络。",
+        "drivers": [
+            _bounded_text(row["summary"], 120) for row in important[:3]
+        ],
+        "watch_next": "关注上述已复核事件是否出现重要更新。",
         "items": [{
             "headline": _bounded_text(row["headline_zh"], 240),
             "summary": _bounded_text(row["summary"], 800),

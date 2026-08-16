@@ -1123,6 +1123,8 @@ def test_historical_generation_failure_has_finite_degraded_fallback(
     assert result["reason"] == "GENERATION_FAILURE_TERMINAL_FALLBACK"
     row = daily_brief.recent_daily_briefs(ledger.connection)[0]
     assert row["model_version"] == "system-degraded-fallback"
+    assert row["brief"]["drivers"]
+    assert row["brief"]["watch_next"] == "关注上述已复核事件是否出现重要更新。"
     assert row["brief"]["items"][0]["evidence_ids"] == ["Reuters:item-1:1"]
     assert ledger.connection.execute(
         "SELECT COUNT(*) FROM daily_news_brief_failures_v1"
