@@ -594,9 +594,10 @@ def main() -> int:
                 service="annotator",
                 state="RUNNING",
             ) as heartbeat:
-                # Give the bounded Daily Brief backlog the first opportunity to
-                # use ROUTINE model capacity. The pulse remains fresh while a
-                # provider call is legitimately blocking.
+                # Reconcile protected backlog jobs before Daily Brief reads
+                # their lifecycle state. Model calls still begin with the
+                # bounded brief, preserving its first use of ROUTINE capacity.
+                sync_pending_jobs(ledger.connection, now=datetime.now(UTC))
                 brief_statuses = run_daily_brief_batch(ledger)
                 print(
                     json.dumps({"event": "DAILY_NEWS_BRIEF_BATCH",
