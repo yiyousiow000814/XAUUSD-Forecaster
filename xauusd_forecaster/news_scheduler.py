@@ -1041,7 +1041,47 @@ def sync_pending_jobs(
                 now=instant,
             )
     reconcile_completed_jobs(connection, now=instant)
+    _reopen_protected_annotation_jobs(
+        connection, protected_annotations, prompt_version=PROMPT_VERSION,
+        now=instant,
+    )
     return discovered
+
+
+def _reopen_protected_annotation_jobs(
+    connection: sqlite3.Connection,
+    records: list[dict[str, object]],
+    *,
+    prompt_version: str,
+    now: datetime,
+) -> int:
+    """Recover only obsolete jobs proven claimable by the protected backlog."""
+    timestamp = _iso(now)
+    job_ids = {
+        _job_id(
+            "ACTIVE_ANNOTATION", str(row["source"]),
+            str(row["source_item_id"]), int(row["revision_number"]), "",
+            prompt_version,
+        )
+        for row in records
+    }
+    if not job_ids:
+        return 0
+    recovered = 0
+    with connection:
+        for job_id in sorted(job_ids):
+            result = connection.execute(
+                """UPDATE news_ai_jobs_v1
+                   SET state='QUEUED',available_at=?,lease_owner=NULL,
+                       lease_expires_at=NULL,last_error=NULL,updated_at=?,
+                       completed_at=NULL
+                   WHERE job_id=? AND task_type='ACTIVE_ANNOTATION'
+                     AND state='DEAD_LETTER'
+                     AND last_error='CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'""",
+                (timestamp, timestamp, job_id),
+            )
+            recovered += result.rowcount
+    return recovered
 
 
 def reconcile_completed_jobs(
