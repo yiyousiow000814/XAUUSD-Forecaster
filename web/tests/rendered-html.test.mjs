@@ -212,16 +212,20 @@ test("keeps nested compact counts in each dashboard headline hierarchy", () => {
   }
 });
 
-test("paints every desktop audit grid divider exactly once", () => {
+test("keeps two primary audit actions above a complete six-metric grid", () => {
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  const view = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const auditGrid = [...css.matchAll(/\.audit-tabs\s*\{([^}]*)\}/g)]
     .map((match) => match[1])
-    .find((rule) => /grid-template-columns:repeat\(3,1fr\)/.test(rule)) ?? "";
-  assert.match(auditGrid, /grid-template-columns:repeat\(3,1fr\)/);
-  assert.match(auditGrid, /gap:0/);
+    .find((rule) => /grid-template-columns:repeat\(6,minmax\(0,1fr\)\)/.test(rule)) ?? "";
+  assert.match(auditGrid, /grid-template-columns:repeat\(6,minmax\(0,1fr\)\)/);
+  assert.match(auditGrid, /gap:1px/);
   assert.match(auditGrid, /padding:0/);
-  assert.match(css, /\.audit-tabs a:not\(:nth-child\(3n\+1\)\) \{ border-left:1px solid var\(--ink\)/);
-  assert.match(css, /\.audit-tabs a:nth-child\(n\+4\) \{ border-top:1px solid var\(--ink\)/);
+  assert.match(auditGrid, /background:var\(--ink\)/);
+  assert.match(css, /\.audit-tabs a \{ grid-column:span 2; border:0; background:var\(--paper\); \}/);
+  assert.match(css, /\.audit-tabs a\.audit-tab-primary \{ grid-column:span 3; \}/);
+  assert.equal(view.match(/className=\{`audit-tab-primary/g)?.length, 2);
+  assert.equal(view.match(/<a href="\/audit\?view=/g)?.length, 8);
 });
 
 async function render(path) {
@@ -1408,7 +1412,7 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.graph-modal-backdrop \{ position:fixed; inset:0; z-index:1100/);
   assert.match(css, /\.audit-intro>div:first-child \.eyebrow \{ display:none/);
   assert.match(css, /\.audit-intro h1 \{ font-size:clamp\(32px,9vw,38px\)/);
-  assert.match(css, /\.daily-brief-desk,\s*\.news-search-desk,\s*\.news-qa-desk,\s*\.decision-audit,\s*\.shadow-league,\s*\.coverage-grid \{ border-top:1px solid rgba\(17,17,15,\.55\); \}/);
+  assert.match(css, /\.daily-brief-desk,\s*\.news-search-desk,\s*\.decision-audit,\s*\.shadow-league,\s*\.coverage-grid \{ border-top:1px solid rgba\(17,17,15,\.55\); \}/);
 });
 
 test("keeps expanded news readable by progressively revealing technical evidence on phones", () => {
@@ -1645,7 +1649,7 @@ test("keeps shared news retrieval bounded and phone readable", () => {
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.search-filter-grid \{ grid-template-columns:1fr; \}/);
 });
 
-test("keeps private news Q&A authenticated, lease-backed, and phone readable", () => {
+test("keeps the legacy news Q&A queue protected without a duplicate user-facing surface", () => {
   const view = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const route = readFileSync(new URL("../app/api/news-questions/route.ts", import.meta.url), "utf8");
   const workerRoute = readFileSync(
@@ -1654,15 +1658,11 @@ test("keeps private news Q&A authenticated, lease-backed, and phone readable", (
   const queue = readFileSync(new URL("../app/api/_shared/news-questions.ts", import.meta.url), "utf8");
   const auth = readFileSync(new URL("../app/api/_shared/assistant-auth.ts", import.meta.url), "utf8");
   const sync = readFileSync(new URL("../../scripts/run_dashboard_sync.py", import.meta.url), "utf8");
-  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
 
-  assert.match(view, /view === "qa"/);
-  assert.match(view, /PRIVATE · EVIDENCE GROUNDED/);
-  assert.match(view, /questionAccess !== "authorized"/);
-  assert.match(view, /href="\/assistant">\u9a8c\u8bc1 Access \u8eab\u4efd/);
-  assert.match(view, /response\.redirected \|\| responseType\.includes\("text\/html"\)/);
-  assert.match(view, /if \(view !== "qa"\) return/);
-  assert.match(view, /Idempotency-Key/);
+  assert.doesNotMatch(view, /view === "qa"/);
+  assert.doesNotMatch(view, /PRIVATE · EVIDENCE GROUNDED|私有问答|\/api\/news-questions/);
+  assert.match(view, /requestedView === "qa"[\s\S]*?\? "briefs"/);
+  assert.match(view, /requestedView === "qa"[\s\S]*?replaceState\(null, "", "\/\?room=audit&view=briefs"\)/);
   assert.match(route, /rejectPreviewWrite\(\)/);
   const postRoute = route.slice(route.indexOf("export async function POST"));
   assert.ok(
@@ -1685,9 +1685,6 @@ test("keeps private news Q&A authenticated, lease-backed, and phone readable", (
   );
   assert.match(qaSync, /\/news-search\?/);
   assert.doesNotMatch(qaSync, /recent_news/);
-  assert.match(css, /\.news-qa-desk form button \{[^}]*min-height:44px/);
-  assert.match(css, /\.qa-notice a,\.qa-error a \{[^}]*min-height:44px/);
-  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.news-qa-desk form \{ grid-template-columns:1fr/);
 });
 
 test("keeps chat admission owner-authenticated and event replay finite", () => {
