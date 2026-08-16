@@ -76,10 +76,13 @@ NOT be mixed into the completed-news list.
 
 During an annotation-contract handover, the public mirror MUST neutralize stale
 operational annotation states from older contracts before bounded
-current-contract replay begins. Historical local annotations and failure
-receipts remain immutable audit evidence; their old operational status MUST NOT
-be presented as the current backlog, current candidates, or current isolation
-count.
+current-contract replay begins. It MUST NOT hide or rewrite completed historical
+reader rows while that replay is in progress. Completed classifications and
+semantic-review counts remain visible; only old model-candidate flags and
+unfinished operational states are neutralized. Historical local annotations and
+failure receipts remain immutable audit evidence; their old operational status
+MUST NOT be presented as the current backlog, current candidates, or current
+isolation count.
 
 ## Event construction
 
