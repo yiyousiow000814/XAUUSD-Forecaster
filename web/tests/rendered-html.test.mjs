@@ -1872,6 +1872,11 @@ test("renders only validated Assistant content blocks with phone-owned overflow"
   assert.match(css, /\.assistant-news-dialog \{[^}]*position:fixed; inset:0;[^}]*width:min\(720px,calc\(100vw - 48px\)\);[^}]*margin:auto/);
   assert.match(css, /\.assistant-topbar \.mobile-dashboard-nav>label \{[^}]*grid-template-columns:minmax\(0,1fr\)/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell form \{[^}]*grid-template-columns:minmax\(0,1fr\) 52px/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell \{[^}]*min-height:69px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell textarea \{[^}]*height:52px;[^}]*max-height:52px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-main \{[^}]*height:100dvh; min-height:0/);
+  assert.match(css, /\.assistant-transcript-head \{ grid-row:1/);
+  assert.match(css, /\.assistant-transcript-banners \{ grid-row:2/);
+  assert.match(css, /\.assistant-message-scroll \{ grid-row:3/);
+  assert.match(css, /\.assistant-composer-shell \{ grid-row:4/);
 });
