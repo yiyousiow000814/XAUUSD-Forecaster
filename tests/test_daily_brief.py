@@ -1134,4 +1134,27 @@ def test_degraded_finalization_is_recovered_with_append_only_correction(
     assert "2026-08-10" not in daily_brief.brief_dates_to_process(
         ledger.connection, now=start + timedelta(hours=13),
     )
+
+    first_recovery_version = daily_brief.BRIEF_RECOVERY_VERSION
+    monkeypatch.setattr(
+        daily_brief, "BRIEF_RECOVERY_VERSION", "daily-brief-test-recovery-next",
+    )
+    assert "2026-08-10" in daily_brief.brief_dates_to_process(
+        ledger.connection, now=start + timedelta(hours=13),
+    )
+    next_recovery = daily_brief.update_daily_brief(
+        ledger, brief_date="2026-08-10", api_key="test",
+        request_accountant=CallbackModelAccountant(lambda _: True),
+        now=start + timedelta(hours=14),
+    )
+    corrections = ledger.connection.execute(
+        """SELECT recovery_version,final_status,revision_number
+           FROM daily_news_brief_finalization_corrections_v1
+           WHERE brief_date='2026-08-10' ORDER BY revision_number"""
+    ).fetchall()
+    assert next_recovery["revision_number"] == 3
+    assert [tuple(row) for row in corrections] == [
+        (first_recovery_version, "FINAL", 2),
+        ("daily-brief-test-recovery-next", "FINAL", 3),
+    ]
     ledger.close()
