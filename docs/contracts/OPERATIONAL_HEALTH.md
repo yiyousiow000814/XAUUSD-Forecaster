@@ -78,6 +78,9 @@ Operational summaries are derived from existing durable job attempts, quota
 reservations, source polls, component heartbeats, and update state. They expose
 no API key, prompt body, article body, account secret, or full internal job ID.
 An absent or unreadable evidence source must never be interpreted as healthy.
+Supervised workers must refresh their runtime heartbeat independently of batch
+completion while a bounded provider or I/O operation is in progress. Progress
+counters supplement this pulse; they are not the only proof of liveness.
 Expected weekly market closure is the only exception to market-component
 freshness alarms: quote, decision, and outcome components report
 `MARKET_CLOSED` during that clock window. Missing broker evidence outside the
