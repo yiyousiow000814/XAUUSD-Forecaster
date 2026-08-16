@@ -497,12 +497,16 @@ def run_daily_brief_batch(
     """Advance the bounded brief backlog using scheduler-owned routine capacity."""
     instant = now or datetime.now(UTC)
     configured = credentials if credentials is not None else configured_api_credentials()
-    ordered = credentials_for_background_task(
-        ledger.connection, configured, task_type="DAILY_BRIEF", now=instant,
-    )
-    credential = ordered[0] if ordered else None
     results = []
     for day in brief_dates_to_process(ledger.connection, now=instant):
+        # Account usage changes after every model request. Re-rank for each
+        # date so one exhausted account cannot starve the remaining backlog.
+        ranking_instant = instant if now is not None else datetime.now(UTC)
+        ordered = credentials_for_background_task(
+            ledger.connection, configured, task_type="DAILY_BRIEF",
+            now=ranking_instant,
+        )
+        credential = ordered[0] if ordered else None
         result = update_daily_brief(
             ledger, brief_date=day, now=instant,
             api_key=credential.api_key if credential else None,
