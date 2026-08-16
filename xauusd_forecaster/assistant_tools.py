@@ -547,7 +547,13 @@ class AssistantToolRegistry:
                 {
                     "name": definition.name,
                     "description": definition.description,
-                    "parameters": copy.deepcopy(definition.input_schema),
+                    # The REST ``parameters`` field accepts only Gemini's
+                    # protobuf Schema subset.  ``parametersJsonSchema`` keeps
+                    # the registry's complete strict JSON Schema, including
+                    # ``additionalProperties: false``.
+                    "parametersJsonSchema": copy.deepcopy(
+                        definition.input_schema,
+                    ),
                 }
                 for definition in definitions
             ],

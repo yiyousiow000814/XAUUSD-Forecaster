@@ -108,13 +108,18 @@ def test_registry_accepts_only_versioned_declared_read_only_capabilities() -> No
     assert declaration[0]["functionDeclarations"][0] == {
         "name": "market_price_v1",
         "description": "Read bounded market_price_v1 data.",
-        "parameters": INPUT_SCHEMA,
+        "parametersJsonSchema": INPUT_SCHEMA,
     }
     definition.input_schema["properties"] = {}
     registry.definitions[0].input_schema["properties"] = {}
-    assert registry.gemini_tools(_actor(
+    provider_declaration = registry.gemini_tools(_actor(
         AssistantToolCapability.MARKET_DATA_READ,
-    ))[0]["functionDeclarations"][0]["parameters"]["required"] == ["value"]
+    ))[0]["functionDeclarations"][0]
+    assert "parameters" not in provider_declaration
+    assert provider_declaration["parametersJsonSchema"]["required"] == ["value"]
+    assert provider_declaration["parametersJsonSchema"][
+        "additionalProperties"
+    ] is False
 
 
 def test_independent_tool_calls_execute_in_parallel_and_return_in_plan_order() -> None:
