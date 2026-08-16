@@ -1774,7 +1774,10 @@ def _verify_news_mirror_state(
     expected_contract: str | None,
 ) -> None:
     """Verify persisted D1 relationships after a bounded mirror write."""
-    query = {"health_check": "1"}
+    query = {
+        "health_check": "1",
+        "current_contract": NEWS_MIRROR_CONTRACT_VERSION,
+    }
     if expected_contract:
         query["expected_contract"] = expected_contract
     payload = _get_json(

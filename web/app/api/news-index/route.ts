@@ -48,6 +48,7 @@ const REVIEW_STATE_SQL: Record<NewsReviewState, string> = {
 export async function GET(request: Request) {
   const query = new URL(request.url).searchParams;
   const healthCheck = query.get("health_check") === "1";
+  const currentContract = query.get("current_contract")?.trim() ?? "";
   const expectedContract = query.get("expected_contract")?.trim() ?? "";
   const { page, pageSize, category, reviewState } = pageRequest(request);
   if (reviewState === null) {
@@ -88,6 +89,7 @@ export async function GET(request: Request) {
            SELECT 'NEWS_CANDIDATE_FLAG_MISMATCH', count(*)
              FROM news_index
             WHERE ${ACTIVE_NEWS_SQL}
+              AND (?='' OR mirror_contract=?)
               AND model_candidate <> CASE
                 WHEN json_extract(payload, '$.model_visibility')='MODEL_VISIBLE'
                 THEN 1 ELSE 0 END
@@ -97,7 +99,8 @@ export async function GET(request: Request) {
               WHERE ${ACTIVE_NEWS_SQL}
               GROUP BY cluster_id HAVING count(*) > 1
            )`,
-        ).all<{ code: string; count: number }>();
+        ).bind(currentContract, currentContract)
+          .all<{ code: string; count: number }>();
         const failures = checks.results
           .map(row => ({ code: row.code, count: Number(row.count ?? 0) }))
           .filter(row => row.count > 0);

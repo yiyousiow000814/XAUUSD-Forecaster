@@ -397,7 +397,9 @@ def test_news_mirror_health_verifies_completed_contract(monkeypatch) -> None:
     )
 
     assert requested == [
-        "https://worker.example/api/news-index?health_check=1&expected_contract="
+        "https://worker.example/api/news-index?health_check=1&current_contract="
+        + module.NEWS_MIRROR_CONTRACT_VERSION
+        + "&expected_contract="
         + module.NEWS_MIRROR_CONTRACT_VERSION
     ]
 
