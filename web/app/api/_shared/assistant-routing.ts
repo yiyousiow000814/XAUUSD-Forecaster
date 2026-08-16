@@ -48,6 +48,9 @@ export type AssistantRoutingProvenance = {
 
 const identifier = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$/;
 const modelIdentifier = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/;
+export const isAssistantModelIdentifier = (value: unknown): value is string => (
+  typeof value === "string" && modelIdentifier.test(value)
+);
 const providerIdentifier = /^[A-Z][A-Z0-9_]{2,63}$/;
 const tasks = new Set<AssistantRoutingTask>([
   "ASSISTANT_CHAT", "NEWS_QA", "CONVERSATION_TITLE", "CONTEXT_COMPACTION",
@@ -102,7 +105,7 @@ export function parseAssistantRoutingProvenance(
       && !new Set(["minimal", "high"]).has(providerThinkingLevel))
     || !modelRequirements.has(modelRequirement)
     || !identifier.test(selectedProfileId)
-    || !modelIdentifier.test(selectedModelId)
+    || !isAssistantModelIdentifier(selectedModelId)
     || !providerIdentifier.test(provider)
     || provider !== installedProvider
     || !capacityClasses.has(capacityClass)

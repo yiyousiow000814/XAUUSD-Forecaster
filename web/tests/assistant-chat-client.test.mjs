@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   AssistantClientError,
   assistantAnswerDraft,
+  assistantModelLabel,
   assistantProgressItems,
   fetchAssistantConversations,
   mergeAssistantMessages,
@@ -35,6 +36,24 @@ test("conversation reselection refreshes in place instead of blanking the transc
     planAssistantConversationSelection(null, "conversation-preview-rates", true),
     "LOAD_PREVIEW",
   );
+});
+
+test("Assistant model credentials prefer canonical agent provenance and preserve legacy records", () => {
+  assert.equal(assistantModelLabel({
+    kind: "ASSISTANT_CHAT",
+    agent: { model_versions: ["gemma-4-31b-it", "gemma-4-31b-it"] },
+  }), "gemma-4-31b-it");
+  assert.equal(assistantModelLabel({
+    agent: { model_versions: ["model-a", "model-b", "model-a"] },
+  }), "model-a → model-b");
+  assert.equal(
+    assistantModelLabel({ kind: "LEGACY", model_version: "gemma-legacy" }),
+    "gemma-legacy",
+  );
+  assert.equal(assistantModelLabel({
+    agent: { model_versions: ["", "bad model id"] },
+    model_version: "also invalid",
+  }), "未记录模型");
 });
 
 test("finite Assistant SSE replay validates ids, cursors, and public progress", async () => {
