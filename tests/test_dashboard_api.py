@@ -93,6 +93,17 @@ def test_dashboard_distinguishes_weekly_close_from_missing_open_market_data() ->
     assert module._market_session_status(
         {"is_open": True}, online=False, now=saturday,
     ) == "DATA_UNAVAILABLE"
+    assert module._market_session_observed_at(
+        None, market_session="WEEKLY_CLOSED", now=saturday,
+    ) == saturday.isoformat()
+    assert module._market_session_observed_at(
+        None, market_session="DATA_UNAVAILABLE", now=monday,
+    ) is None
+    assert module._market_session_observed_at(
+        {"observed_at": monday.isoformat()},
+        market_session="OPEN",
+        now=monday,
+    ) == monday.isoformat()
 
 
 def test_dashboard_reports_broker_close_and_reopen_time(tmp_path) -> None:
