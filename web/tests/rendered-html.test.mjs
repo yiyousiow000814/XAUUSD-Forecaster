@@ -1870,7 +1870,7 @@ test("renders only validated Assistant content blocks with phone-owned overflow"
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-workbench \{[^}]*z-index:auto/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-conversation-rail \{[^}]*z-index:1020/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-rail-scrim \{[^}]*z-index:1010/);
-  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-news-dialog \{[^}]*width:calc\(100vw - 24px\); max-width:none; height:auto; max-height:calc\(100dvh - 24px\); margin:auto/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-news-dialog \{[^}]*inset:50% 12px auto; width:auto; max-width:none; height:auto; max-height:calc\(100dvh - 24px\); margin:0 auto;[^}]*transform:translateY\(-50%\)/);
   assert.match(css, /\.assistant-news-dialog \{[^}]*position:fixed; inset:0;[^}]*width:min\(720px,calc\(100vw - 48px\)\);[^}]*margin:auto/);
   assert.match(css, /\.assistant-topbar \.mobile-dashboard-nav>label \{[^}]*grid-template-columns:minmax\(0,1fr\)/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell form \{[^}]*grid-template-columns:minmax\(0,1fr\) 52px/);
