@@ -539,6 +539,60 @@ def test_pending_contract_reopens_jobs_completed_by_invalid_legacy_annotations(
     ledger.close()
 
 
+def test_protected_daily_brief_job_resolves_after_cross_date_dedup(
+    tmp_path,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    old_received = datetime(2026, 8, 10, 2, tzinfo=UTC)
+    new_received = datetime(2026, 8, 11, 2, tzinfo=UTC)
+    for item_id, received, body_length in (
+        ("old-day", old_received, 300),
+        ("new-day", new_received, 400),
+    ):
+        body = "x" * body_length
+        ledger.append_news_revision({
+            "source": "Reuters", "source_item_id": item_id,
+            "source_published_time": received,
+            "collector_first_seen_time": received, "fetched_time": received,
+            "headline": f"Report {item_id}", "body": body,
+            "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+            "cluster_id": "cross-date-cluster",
+        })
+    with ledger.connection:
+        ledger.connection.execute(
+            """INSERT INTO daily_news_briefs
+               (brief_date,revision_number,source_hash,cutoff_at,generated_at,
+                model_version,prompt_version,brief_json)
+               VALUES ('2026-08-10',1,'old-hash',?,?,
+                       'system-degraded-fallback','old-prompt',?)""",
+            (NOW.isoformat(), NOW.isoformat(), '{"title":"old","items":[]}'),
+        )
+        ledger.connection.execute(
+            """INSERT INTO daily_news_brief_finalizations_v1
+               (brief_date,revision_number,final_status,received_items,
+                reviewed_items,terminal_failure_items,cutoff_at,finalized_at)
+               VALUES ('2026-08-10',1,'DEGRADED',1,0,1,?,?)""",
+            (NOW.isoformat(), NOW.isoformat()),
+        )
+
+    discovered = sync_pending_jobs(
+        ledger.connection, now=NOW + timedelta(minutes=1), limit=20,
+    )
+    row = ledger.connection.execute(
+        """SELECT * FROM news_ai_jobs_v1
+           WHERE task_type='ACTIVE_ANNOTATION' AND source_item_id='old-day'"""
+    ).fetchone()
+    job = news_scheduler_module._job_from_row(row)
+    resolved = news_scheduler_module.pending_record_for_job(
+        ledger.connection, job, now=NOW + timedelta(minutes=1),
+    )
+
+    assert discovered["ACTIVE_ANNOTATION"] >= 1
+    assert resolved is not None
+    assert resolved["source_item_id"] == "old-day"
+    ledger.close()
+
+
 def test_sync_uses_v15_semantic_priority_not_headline_keywords(tmp_path) -> None:
     body = "The agency reported that its ordinary administrative update took effect. " * 8
     digest = hashlib.sha256(body.encode()).hexdigest()
