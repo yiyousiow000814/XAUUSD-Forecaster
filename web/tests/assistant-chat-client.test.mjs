@@ -7,6 +7,7 @@ import {
   assistantProgressItems,
   fetchAssistantConversations,
   mergeAssistantMessages,
+  planAssistantConversationSelection,
   parseAssistantSse,
   replayAssistantEvents,
 } from "../app/_lib/assistant-chat-client.ts";
@@ -16,6 +17,25 @@ import {
   assistantPreviewMessages,
 } from "../app/_lib/assistant-preview-fixture.ts";
 import { encodeAssistantSse } from "../app/api/_shared/assistant-events.ts";
+
+test("conversation reselection refreshes in place instead of blanking the transcript", () => {
+  assert.equal(
+    planAssistantConversationSelection("conversation-1", "conversation-1", false),
+    "REFRESH_CURRENT",
+  );
+  assert.equal(
+    planAssistantConversationSelection("conversation-1", "conversation-1", true),
+    "REFRESH_CURRENT",
+  );
+  assert.equal(
+    planAssistantConversationSelection("conversation-1", "conversation-2", false),
+    "LOAD_REMOTE",
+  );
+  assert.equal(
+    planAssistantConversationSelection(null, "conversation-preview-rates", true),
+    "LOAD_PREVIEW",
+  );
+});
 
 test("finite Assistant SSE replay validates ids, cursors, and public progress", async () => {
   const body = assistantPreviewEvents.map(encodeAssistantSse).join("");
