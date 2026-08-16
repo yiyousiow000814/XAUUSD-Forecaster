@@ -15,6 +15,7 @@ from xauusd_forecaster.news_scheduler import (
     PREEMPTIBLE_POOL,
     ROUTINE_POOL,
     account_quota_snapshot,
+    authorize_repairable_annotation_failures,
     authorize_repairable_impact_failures,
     backoff_job,
     claim_job,
@@ -29,6 +30,7 @@ from xauusd_forecaster.news_scheduler import (
     sync_pending_jobs,
 )
 from xauusd_forecaster.annotation import (
+    ANNOTATION_FAILURE_RECOVERY_VERSION,
     IMPACT_FAILURE_RECOVERY_VERSION,
     IMPACT_MODEL,
     IMPACT_PROMPT_VERSION,
@@ -93,11 +95,12 @@ def test_identity_contract_recovery_requeues_each_impact_only_once(tmp_path) -> 
         error=str(error), terminal=True,
     )
 
+    recovery_at = datetime.now(UTC)
     assert authorize_repairable_impact_failures(
         ledger.connection,
         prompt_version=IMPACT_PROMPT_VERSION,
         recovery_version=IMPACT_FAILURE_RECOVERY_VERSION,
-        now=NOW + timedelta(minutes=1),
+        now=recovery_at,
     ) == 1
     assert ledger.connection.execute(
         "SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
@@ -105,9 +108,8 @@ def test_identity_contract_recovery_requeues_each_impact_only_once(tmp_path) -> 
 
     assert claim_job(
         ledger.connection, worker_id="worker", pool=ROUTINE_POOL,
-        now=NOW + timedelta(minutes=1),
+        now=recovery_at,
     ) is not None
-    _append_impact_failure(ledger, row, error, model_version=IMPACT_MODEL)
     backoff_job(
         ledger.connection, job_id, "worker", available_at=NOW,
         error=str(error), terminal=True,
@@ -116,7 +118,74 @@ def test_identity_contract_recovery_requeues_each_impact_only_once(tmp_path) -> 
         ledger.connection,
         prompt_version=IMPACT_PROMPT_VERSION,
         recovery_version=IMPACT_FAILURE_RECOVERY_VERSION,
-        now=NOW + timedelta(minutes=2),
+        now=recovery_at + timedelta(minutes=1),
+    ) == 0
+    assert ledger.connection.execute(
+        "SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
+    ).fetchone()[0] == "DEAD_LETTER"
+    ledger.close()
+
+
+def test_contract_recovery_requeues_each_annotation_only_once(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    body = "Complete source evidence for one bounded recovery attempt. " * 12
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    ledger.append_news_revision({
+        "source": "source", "source_item_id": "item",
+        "source_published_time": NOW, "collector_first_seen_time": NOW,
+        "fetched_time": NOW, "headline": "Report", "body": body,
+        "content_hash": digest, "cluster_id": "item",
+    })
+    job_id = enqueue_job(
+        ledger.connection, task_type="ACTIVE_ANNOTATION",
+        source="source", source_item_id="item", revision_number=1,
+        prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+        priority="NORMAL", now=NOW,
+    )
+    cause = "annotation supporting evidence is absent from source"
+    ledger.append_llm_failure({
+        "failure_id": "failure", "task_type": "ANNOTATION",
+        "source": "source", "source_item_id": "item", "revision_number": 1,
+        "raw_content_hash": digest, "llm_model_version": "model",
+        "prompt_version": CURRENT_NEWS_PROMPT_VERSION, "attempt_number": 1,
+        "error_type": "ValueError",
+        "error_signature": hashlib.sha256(cause.encode()).hexdigest(),
+        "error": cause, "failed_at": NOW, "is_terminal": True,
+        "failure_evidence": {
+            "failure_code": "MODEL_OUTPUT_CONTRACT_FAILED",
+            "failure_stage": "SEMANTIC_CONTRACT", "response_hash": "a" * 64,
+            "selected_output": {}, "cause_type": "ValueError", "cause": cause,
+        },
+    })
+    assert claim_job(
+        ledger.connection, worker_id="worker", pool=ROUTINE_POOL, now=NOW,
+    ) is not None
+    backoff_job(
+        ledger.connection, job_id, "worker", available_at=NOW,
+        error=cause, terminal=True,
+    )
+
+    recovery_at = datetime.now(UTC)
+    assert authorize_repairable_annotation_failures(
+        ledger.connection,
+        prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+        recovery_version=ANNOTATION_FAILURE_RECOVERY_VERSION,
+        now=recovery_at,
+    ) == 1
+    assert claim_job(
+        ledger.connection, worker_id="worker", pool=ROUTINE_POOL,
+        now=recovery_at,
+    ) is not None
+    backoff_job(
+        ledger.connection, job_id, "worker", available_at=NOW,
+        error=cause, terminal=True,
+    )
+
+    assert authorize_repairable_annotation_failures(
+        ledger.connection,
+        prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+        recovery_version=ANNOTATION_FAILURE_RECOVERY_VERSION,
+        now=recovery_at + timedelta(minutes=1),
     ) == 0
     assert ledger.connection.execute(
         "SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
@@ -474,7 +543,8 @@ def test_repair_version_reopens_matching_annotation_failure_only_once(
         })
 
     append_failure(2, "old-display-failure")
-    sync_pending_jobs(ledger.connection, now=NOW + timedelta(minutes=1))
+    recovery_at = datetime.now(UTC)
+    sync_pending_jobs(ledger.connection, now=recovery_at)
     recovered = ledger.connection.execute(
         "SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
     ).fetchone()
@@ -482,7 +552,7 @@ def test_repair_version_reopens_matching_annotation_failure_only_once(
 
     second_claim = claim_job(
         ledger.connection, worker_id="new-worker", pool=ROUTINE_POOL,
-        now=NOW + timedelta(minutes=1),
+        now=recovery_at,
     )
     assert second_claim and second_claim.job_id == job_id
     backoff_job(
@@ -490,7 +560,7 @@ def test_repair_version_reopens_matching_annotation_failure_only_once(
         error="display repair still failed", terminal=True,
     )
     append_failure(3, "new-display-failure")
-    sync_pending_jobs(ledger.connection, now=NOW + timedelta(minutes=2))
+    sync_pending_jobs(ledger.connection, now=recovery_at + timedelta(minutes=1))
     stopped = ledger.connection.execute(
         "SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
     ).fetchone()

@@ -951,6 +951,7 @@ def authorize_repairable_annotation_failures(
                      AND f.source_item_id=j.source_item_id
                      AND f.revision_number=j.revision_number
                      AND f.prompt_version=j.prompt_version
+                     AND j.updated_at < r.authorized_at
                      AND f.attempt_number=(
                        SELECT max(f2.attempt_number)
                        FROM news_llm_failures f2
@@ -1011,6 +1012,7 @@ def authorize_repairable_impact_failures(
                      ON r.failure_id=f.failure_id AND r.recovery_version=?
                    WHERE f.annotation_id=j.annotation_id
                      AND f.prompt_version=j.prompt_version
+                     AND j.updated_at < r.authorized_at
                      AND f.attempt_number=(
                        SELECT max(f2.attempt_number)
                        FROM news_impact_failures_v1 f2
