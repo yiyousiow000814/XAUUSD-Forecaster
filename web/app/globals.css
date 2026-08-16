@@ -597,6 +597,9 @@ body.modal-open { overflow:hidden; }
 .audit-tabs a:nth-child(n+5) { border-top:1px solid var(--ink); }
 .audit-tabs a.active { background:#d9d2c1; color:var(--ink); box-shadow:inset 0 5px var(--acid); }
 .audit-tabs a:hover,.audit-tabs a:focus-visible { background:#ded9ca; }
+.audit-main.audit-view-briefs .audit-intro { grid-template-columns:minmax(0,1fr) minmax(300px,.45fr); gap:28px; padding:22px 0 18px; }
+.audit-main.audit-view-briefs .audit-intro h1 { font-size:clamp(42px,4.6vw,64px); line-height:.9; }
+.audit-main.audit-view-briefs .training-card { padding:14px 16px; box-shadow:5px 5px 0 var(--ink); }
 .graph-modal>nav { grid-template-columns:repeat(4,1fr); }
 .story-desk { border:1px solid var(--ink); border-top:0; }
 .daily-brief-desk { border:1px solid var(--ink); border-top:0; background:var(--paper); }
@@ -637,6 +640,7 @@ body.modal-open { overflow:hidden; }
 .brief-more-stories[open]>summary { border-bottom:1px solid rgba(17,17,15,.25); }
 .daily-brief-desk footer,.brief-empty { display:block; padding:14px 26px; }
 @media (max-width:850px){
+  .audit-main.audit-view-briefs .audit-intro { grid-template-columns:1fr; }
   .daily-brief-desk>header { align-items:flex-start; flex-direction:column; gap:14px; padding:18px; }
   .daily-brief-desk h2 { font-size:30px; }
   .brief-date-switcher { width:100%; max-width:none; justify-content:flex-start; }

@@ -1525,6 +1525,7 @@ test("presents Daily Brief as a compact Gemma synthesis with readable states", (
   assert.match(page, /brief\.overview/);
   assert.match(page, /daily_news_brief_summary\?\.brief_date/);
   assert.match(page, /DAILY_BRIEF_VISIBLE_DATES = 4/);
+  assert.match(page, /className=\{`audit-main audit-view-\$\{view\}`\}/);
   assert.match(page, /className="brief-history-picker"/);
   assert.match(page, /选择更早的每日简报/);
   assert.match(page, /visibleItems = selected\?\.brief\.items\.slice\(0, 3\)/);
@@ -1535,6 +1536,7 @@ test("presents Daily Brief as a compact Gemma synthesis with readable states", (
   assert.match(css, /\.daily-brief-desk button small \{ color:inherit; font-size:12px;/);
   assert.match(css, /\.brief-overview p \{ max-width:76ch; font-size:16px; line-height:1\.75; \}/);
   assert.match(css, /\.daily-brief-desk header nav \{ display:grid; grid-template-columns:repeat\(4,minmax\(0,1fr\)\); width:100%; \}/);
+  assert.match(css, /\.audit-main\.audit-view-briefs \.audit-intro \{ grid-template-columns:minmax\(0,1fr\) minmax\(300px,\.45fr\);/);
   assert.match(css, /\.brief-history-picker select \{ min-height:44px;/);
   assert.match(css, /\.brief-more-stories>summary \{ display:flex; align-items:center; min-height:52px;/);
 });

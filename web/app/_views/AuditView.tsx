@@ -1160,7 +1160,7 @@ export default function AuditView() {
   const mobileDashboardSection: MobileDashboardSection = view === "league" ? "learning" : "audit";
 
   return (
-    <main className="audit-main">
+    <main className={`audit-main audit-view-${view}`}>
       <div className="grain" />
       <header className="topbar audit-topbar">
         <DashboardLink className="brand audit-brand brand-button" href="/" replace>
