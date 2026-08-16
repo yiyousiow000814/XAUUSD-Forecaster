@@ -375,6 +375,7 @@ def claim_job(
     worker_id: str,
     pool: str,
     task_types: tuple[str, ...] | None = None,
+    excluded_task_types: frozenset[str] = frozenset(),
     now: datetime | None = None,
     lease_seconds: int = 180,
 ) -> ScheduledJob | None:
@@ -385,6 +386,12 @@ def claim_job(
     claimable_tasks = tuple(dict.fromkeys(TASKS if task_types is None else task_types))
     if any(task_type not in TASKS for task_type in claimable_tasks):
         raise ValueError("scheduler task type is not controlled")
+    if not excluded_task_types.issubset(TASKS):
+        raise ValueError("scheduler task exclusion is not controlled")
+    claimable_tasks = tuple(
+        task_type for task_type in claimable_tasks
+        if task_type not in excluded_task_types
+    )
     if not claimable_tasks:
         return None
     instant = now or datetime.now(UTC)

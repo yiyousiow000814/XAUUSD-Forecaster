@@ -819,7 +819,13 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(html, /新闻来源状态/);
   assert.match(html, /AI 模型用量/);
   const view = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
+  const layout = readFileSync(new URL("../app/layout.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(layout, /<OperationalAlertBanner \/>/);
+  assert.match(view, /OPERATIONAL ERROR CODES/);
+  assert.match(view, /alert\.code/);
+  assert.match(view, /completed_15m/);
+  assert.match(view, /deferred_15m/);
   assert.match(view, /componentHasAttention/);
   assert.match(view, /sourceHasAttention/);
   assert.match(view, /function SourceHealthCard/);
@@ -832,6 +838,8 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(css, /\.component-status>div \{ gap:13px; background:transparent; \}/);
   assert.match(css, /\.source-health\.show-healthy article\.is-healthy \.news-source-details \{ display:none; \}/);
   assert.match(css, /\.source-health\.show-healthy article\.is-healthy\.is-detail-open \.news-source-details \{ display:contents; \}/);
+  assert.match(css, /\.operational-alert-banner a \{[^}]*min-height: 44px/);
+  assert.match(css, /@media \(max-width: 640px\)[\s\S]*\.scheduler-health-grid \{ grid-template-columns: 1fr; \}/);
 });
 
 test("uses one Chinese system-state presentation across every dashboard page", () => {

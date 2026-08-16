@@ -684,6 +684,20 @@ def test_aged_fifo_work_cannot_be_starved_by_fresh_priority_work() -> None:
     assert claimed and claimed.job_id == oldest
 
 
+def test_claim_can_skip_a_capacity_blocked_task_route() -> None:
+    connection = _connection()
+    _enqueue(connection, "impact", task_type="ACTIVE_IMPACT")
+    annotation = _enqueue(connection, "annotation")
+
+    claimed = claim_job(
+        connection, worker_id="routine", pool=ROUTINE_POOL,
+        task_types=("ACTIVE_ANNOTATION", "ACTIVE_IMPACT"),
+        excluded_task_types=frozenset({"ACTIVE_IMPACT"}), now=NOW,
+    )
+
+    assert claimed and claimed.job_id == annotation
+
+
 def test_accounts_are_ranked_by_shared_live_model_headroom() -> None:
     from xauusd_forecaster.news_impact import IMPACT_MODEL
 
@@ -750,14 +764,15 @@ def test_scheduler_tries_every_independent_account_before_waiting(
     ledger.close()
 
 
-def test_one_capacity_blocked_job_does_not_stop_the_rest_of_the_chain(
+def test_capacity_blocked_route_is_skipped_for_the_rest_of_the_lane(
     tmp_path, monkeypatch,
 ) -> None:
     from scripts import run_news_annotator as runner
 
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     created = datetime.now(UTC) - timedelta(minutes=2)
-    for item, task in (("blocked", "ACTIVE_IMPACT"),
+    for item, task in (("blocked-1", "ACTIVE_IMPACT"),
+                       ("blocked-2", "ACTIVE_IMPACT"),
                        ("ready", "ACTIVE_ANNOTATION")):
         enqueue_job(
             ledger.connection, task_type=task, source="source",
@@ -774,25 +789,28 @@ def test_one_capacity_blocked_job_does_not_stop_the_rest_of_the_chain(
     monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
 
     def execute(_ledger, _credential, job, **_kwargs):
-        if job.source_item_id == "blocked":
+        if job.task_type == "ACTIVE_IMPACT":
             return {"status": "DEFERRED", "reason": "quota"}
         return {"status": "OK"}
 
     monkeypatch.setattr(runner, "_execute_job", execute)
 
-    statuses = runner.run_scheduled_batch(ledger, batch_size=2)
+    statuses = runner.run_scheduled_batch(ledger, batch_size=3)
 
     assert [(row["task_type"], row["status"]) for row in statuses] == [
         ("ACTIVE_IMPACT", "DEFERRED"),
         ("ACTIVE_ANNOTATION", "OK"),
     ]
     rows = ledger.connection.execute(
-        "SELECT source_item_id,state,available_at FROM news_ai_jobs_v1 "
+        "SELECT source_item_id,state,available_at,attempt_count "
+        "FROM news_ai_jobs_v1 "
         "ORDER BY created_at"
     ).fetchall()
     assert rows[0]["state"] == "QUEUED"
     assert datetime.fromisoformat(rows[0]["available_at"]) > datetime.now(UTC)
-    assert rows[1]["state"] == "COMPLETED"
+    assert rows[1]["state"] == "QUEUED"
+    assert rows[1]["attempt_count"] == 0
+    assert rows[2]["state"] == "COMPLETED"
     ledger.close()
 
 
@@ -888,6 +906,47 @@ def test_default_batch_runs_independent_accounts_concurrently(
     assert started_accounts == {"account-a", "account-b"}
     assert progress == list(range(1, 21))
     assert scheduler_counts(ledger.connection)["completed"] == 20
+    ledger.close()
+
+
+def test_concurrent_account_lanes_do_not_duplicate_capacity_probes(
+    tmp_path, monkeypatch,
+) -> None:
+    from scripts import run_news_annotator as runner
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    for index in range(4):
+        enqueue_job(
+            ledger.connection, task_type="ACTIVE_IMPACT", source="source",
+            source_item_id=f"blocked-{index}", revision_number=1,
+            annotation_id=f"annotation-{index}", prompt_version="prompt",
+            priority="NORMAL", now=datetime.now(UTC) - timedelta(minutes=2),
+        )
+    credentials = (
+        ApiCredential("account-a", ROUTINE_POOL, "key-a", "a"),
+        ApiCredential("account-b", ROUTINE_POOL, "key-b", "b"),
+    )
+    monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
+    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        runner, "_execute_job",
+        lambda *_args, **_kwargs: {"status": "DEFERRED", "reason": "quota"},
+    )
+
+    statuses = runner.run_scheduled_batch(ledger, batch_size=None)
+
+    assert len(statuses) == 2
+    attempts = ledger.connection.execute(
+        "SELECT job_id,account_id,failure_code FROM news_ai_job_attempts_v1"
+    ).fetchall()
+    assert len(attempts) == 2
+    assert {row["account_id"] for row in attempts} == {"account-a", "account-b"}
+    assert {row["failure_code"] for row in attempts} == {
+        "MODEL_CAPACITY_DEFERRED",
+    }
+    assert ledger.connection.execute(
+        "SELECT max(attempt_count) FROM news_ai_jobs_v1"
+    ).fetchone()[0] == 1
     ledger.close()
 
 

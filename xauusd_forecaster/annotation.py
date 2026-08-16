@@ -1664,6 +1664,7 @@ def _count_impact_tokens(
 
 def _impact_evidence_window_row(row: dict) -> dict | None:
     """Build exact source windows around every full-body evidence excerpt."""
+    headline = str(row.get("headline") or "")
     body = str(row.get("body") or "")
     annotation = dict(row.get("annotation") or {})
     excerpts = [
@@ -1675,6 +1676,7 @@ def _impact_evidence_window_row(row: dict) -> dict | None:
         return None
 
     spans: list[tuple[int, int]] = []
+    headline_windows: list[str] = []
     for excerpt in excerpts:
         pattern = re.compile(
             r"\s+".join(re.escape(part) for part in excerpt.split()),
@@ -1682,10 +1684,13 @@ def _impact_evidence_window_row(row: dict) -> dict | None:
         )
         match = pattern.search(body)
         if match is None:
-            # Current semantic validation requires every excerpt to occur in
-            # the immutable source. Refuse a lossy fallback if that invariant
-            # is ever bypassed by imported historical data.
-            return None
+            # Semantic evidence may be anchored in the immutable headline.
+            # Treat it as source evidence instead of forcing an oversized body
+            # through a request that can never fit the model's TPM contract.
+            if pattern.search(headline) is None:
+                return None
+            headline_windows.append(headline)
+            continue
         spans.append((
             max(0, match.start() - GEMMA_EVIDENCE_WINDOW_RADIUS_CHARS),
             min(len(body), match.end() + GEMMA_EVIDENCE_WINDOW_RADIUS_CHARS),
@@ -1697,7 +1702,8 @@ def _impact_evidence_window_row(row: dict) -> dict | None:
             merged[-1][1] = max(merged[-1][1], end)
         else:
             merged.append([start, end])
-    windows = [body[start:end].strip() for start, end in merged]
+    windows = list(dict.fromkeys(headline_windows))
+    windows.extend(body[start:end].strip() for start, end in merged)
     evidence_body = "\n\n--- VERIFIED SOURCE WINDOW ---\n\n".join(windows)
     if len(evidence_body) > GEMMA_EVIDENCE_WINDOWS_MAX_CHARS:
         return None

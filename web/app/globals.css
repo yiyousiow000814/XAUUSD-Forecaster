@@ -98,6 +98,137 @@ footer { position:relative; z-index:1; display:flex; justify-content:space-betwe
   .news-meta { display:grid; grid-template-columns:1fr auto; }
 }
 
+.operational-alert-banner {
+  position: relative;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 52px;
+  padding: 8px max(18px, calc((100vw - 1180px) / 2));
+  border-bottom: 2px solid #9a6500;
+  background: #f1c75b;
+  color: #17130b;
+}
+
+.operational-alert-banner.is-error {
+  border-color: #9d201b;
+  background: #d84a3f;
+  color: #fff;
+}
+
+.operational-alert-banner > div {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+.operational-alert-banner code {
+  padding: 2px 6px;
+  border: 1px solid currentColor;
+  font-weight: 800;
+}
+
+.operational-alert-banner a {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  color: inherit;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.operational-health-panel {
+  margin: 20px 0;
+  border: 1px solid var(--ink);
+  border-top: 5px solid #477719;
+  background: var(--paper);
+}
+
+.operational-health-panel.is-warning { border-top-color: #b57b00; }
+.operational-health-panel.is-error { border-top-color: #bd3028; }
+
+.operational-health-panel > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 20px;
+  border-bottom: 1px solid rgba(17,17,15,.24);
+}
+
+.operational-health-panel > header h2,
+.operational-health-panel > header p { margin: 0; }
+.operational-health-panel > header > p { max-width: 560px; }
+
+.operational-alert-list { border-bottom: 1px solid var(--ink); }
+
+.operational-alert-list > article {
+  padding: 14px 20px;
+  border-top: 1px solid rgba(17,17,15,.24);
+  border-left: 5px solid #b57b00;
+}
+
+.operational-alert-list > article.is-error { border-left-color: #bd3028; }
+.operational-alert-list > article:first-child { border-top: 0; }
+
+.operational-alert-list > article > div {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+.operational-alert-list code,
+.scheduler-health-grid code {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .05em;
+}
+
+.operational-alert-list p { margin: 8px 0 5px; font-weight: 700; }
+.operational-alert-list small { overflow-wrap: anywhere; }
+.operational-all-clear { margin: 0; padding: 18px 20px; border-bottom: 1px solid rgba(17,17,15,.24); }
+
+.scheduler-health-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.scheduler-health-grid > article {
+  padding: 18px;
+  border-right: 1px solid rgba(17,17,15,.24);
+}
+
+.scheduler-health-grid > article:last-child { border-right: 0; }
+.scheduler-health-grid header { display: grid; gap: 5px; }
+.scheduler-health-grid dl { display: grid; grid-template-columns: 1fr 1fr; margin: 16px 0 0; }
+.scheduler-health-grid dl > div { padding: 9px 0; border-top: 1px solid rgba(17,17,15,.24); }
+.scheduler-health-grid dt { font-size: 11px; color: var(--muted); }
+.scheduler-health-grid dd { margin: 4px 0 0; font-weight: 800; }
+.scheduler-failure-codes { display:flex; flex-wrap:wrap; gap:6px; margin:12px 0 0; }
+.scheduler-failure-codes code { padding:4px 6px; border:1px solid rgba(17,17,15,.35); overflow-wrap:anywhere; }
+
+@media (max-width: 640px) {
+  .operational-alert-banner {
+    position: relative;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 2px;
+    padding: 10px 16px;
+  }
+  .operational-alert-banner a { width: fit-content; }
+  .operational-health-panel > header { display: grid; gap: 10px; padding: 16px; }
+  .operational-alert-list > article { padding: 14px 16px; }
+  .scheduler-health-grid { grid-template-columns: 1fr; }
+  .scheduler-health-grid > article {
+    border-right: 0;
+    border-bottom: 1px solid rgba(17,17,15,.24);
+  }
+  .scheduler-health-grid > article:last-child { border-bottom: 0; }
+}
+
 .news-table { border:1px solid var(--ink); border-top:0; background:var(--paper); }
 .news-table-head { display:grid; grid-template-columns:180px minmax(0,1fr) 150px; gap:18px; padding:11px 18px; background:var(--ink); color:var(--paper); font-size:10px; letter-spacing:.12em; text-transform:uppercase; }
 .news-row { border-bottom:1px solid rgba(17,17,15,.32); background:var(--paper); }
