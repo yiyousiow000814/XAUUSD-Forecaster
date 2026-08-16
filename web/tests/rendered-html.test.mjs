@@ -955,8 +955,12 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(css, /\.health-reveal-button \{ display:block;[^}]*min-height:48px/);
   assert.match(css, /\.component-status>header p \{ display:none; \}/);
   assert.match(css, /\.component-status>div \{ gap:13px; background:transparent; \}/);
+  assert.match(css, /\.component-status>div \{ display:grid; grid-template-columns:repeat\(6,1fr\); \}/);
   assert.match(css, /\.component-status article:not\(:nth-child\(3n\)\) \{ border-right:1px solid var\(--ink\); \}/);
   assert.match(css, /\.component-status article:nth-child\(n\+4\) \{ border-top:1px solid var\(--ink\); \}/);
+  assert.match(css, /\.component-status article:last-child:nth-child\(3n\+1\) \{ grid-column:span 6; border-right:0; \}/);
+  assert.match(css, /\.component-status article:nth-last-child\(2\):nth-child\(3n\+1\),[\s\S]*\.component-status article:last-child:nth-child\(3n\+2\) \{ grid-column:span 3; \}/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.component-status article \{ grid-column:auto; \}/);
   assert.match(css, /\.source-health\.show-healthy article\.is-healthy \.news-source-details \{ display:none; \}/);
   assert.match(css, /\.source-health\.show-healthy article\.is-healthy\.is-detail-open \.news-source-details \{ display:contents; \}/);
   assert.match(css, /\.operational-alert-banner a \{[^}]*min-height: 44px/);
