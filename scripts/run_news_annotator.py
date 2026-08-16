@@ -72,6 +72,7 @@ def run_scheduled_batch_with_lock_retry(
     *,
     batch_size: int | None,
     progress_callback: Callable[[int], None],
+    task_types: tuple[str, ...] | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> list[dict[str, object]]:
     """Keep the independent annotator alive through transient WAL writer contention."""
@@ -81,6 +82,7 @@ def run_scheduled_batch_with_lock_retry(
                 ledger,
                 batch_size=batch_size,
                 progress_callback=progress_callback,
+                task_types=task_types,
             )
         except sqlite3.OperationalError as error:
             if "locked" not in str(error).lower():
@@ -238,6 +240,7 @@ def _run_scheduled_lane(
     credentials: tuple[ApiCredential, ...],
     maximum: int,
     worker_prefix: str,
+    task_types: tuple[str, ...] | None = None,
     preferred_account_id: str | None = None,
     progress_callback: Callable[[], None] | None = None,
 ) -> list[dict[str, object]]:
@@ -252,6 +255,7 @@ def _run_scheduled_lane(
                 ledger.connection,
                 worker_id=worker_id,
                 pool=ROUTINE_POOL,
+                task_types=task_types,
                 now=datetime.now(UTC),
             )
         elif has_preemptible:
@@ -259,6 +263,7 @@ def _run_scheduled_lane(
                 ledger.connection,
                 worker_id=worker_id,
                 pool=PREEMPTIBLE_POOL,
+                task_types=task_types,
                 now=datetime.now(UTC),
             )
         if job is None:
@@ -351,6 +356,7 @@ def run_scheduled_batch(
     *,
     batch_size: int | None,
     progress_callback: Callable[[int], None] | None = None,
+    task_types: tuple[str, ...] | None = None,
 ) -> list[dict[str, object]]:
     now = datetime.now(UTC)
     sync_pending_jobs(ledger.connection, now=now)
@@ -383,6 +389,7 @@ def run_scheduled_batch(
             credentials=credentials,
             maximum=maximum,
             worker_prefix=worker_prefix,
+            task_types=task_types,
             progress_callback=report_progress,
         )
 
@@ -413,6 +420,7 @@ def run_scheduled_batch(
                 credentials=credentials,
                 maximum=allocation,
                 worker_prefix=f"{worker_prefix}-account-{index}",
+                task_types=task_types,
                 preferred_account_id=account_id,
                 progress_callback=report_progress,
             )
@@ -499,12 +507,21 @@ def main() -> int:
                             "statuses": brief_statuses}),
                 flush=True,
             )
+            task_types = None
+            if any(
+                status.get("reason") == "NO_GEMMA_CAPACITY"
+                for status in brief_statuses
+            ):
+                # Keep causal Gemini annotation moving while leaving the shared
+                # two-minute Gemma TPM window clear for the next brief retry.
+                task_types = ("ACTIVE_ANNOTATION",)
             statuses = run_scheduled_batch_with_lock_retry(
                 ledger,
                 batch_size=limit,
                 progress_callback=lambda count: write_heartbeat(
                     args.status_file, work_items=count,
                 ),
+                task_types=task_types,
             )
             print(
                 json.dumps(

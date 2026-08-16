@@ -270,6 +270,32 @@ def test_preemptible_claims_ai_urgent_only_and_routine_accepts_overflow() -> Non
     assert overflow and overflow.job_id == overflow_id
 
 
+def test_claim_job_can_preserve_capacity_by_selecting_task_family() -> None:
+    connection = _connection()
+    impact_id = _enqueue(
+        connection, "impact", priority="IMMEDIATE", task_type="ACTIVE_IMPACT",
+    )
+    annotation_id = _enqueue(
+        connection, "annotation", priority="NORMAL", task_type="ACTIVE_ANNOTATION",
+    )
+
+    claimed = claim_job(
+        connection, worker_id="annotation-only", pool=ROUTINE_POOL, now=NOW,
+        task_types=("ACTIVE_ANNOTATION",),
+    )
+
+    assert claimed and claimed.job_id == annotation_id
+    queued = connection.execute(
+        "SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (impact_id,),
+    ).fetchone()
+    assert queued["state"] == "QUEUED"
+
+    assert claim_job(
+        connection, worker_id="none", pool=ROUTINE_POOL, now=NOW,
+        task_types=(),
+    ) is None
+
+
 def test_account_quota_is_shared_by_keys_and_reserve_is_urgent_only() -> None:
     connection = _connection()
     common = {

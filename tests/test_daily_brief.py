@@ -572,6 +572,36 @@ def test_annotator_cycle_reserves_routine_capacity_for_daily_brief_first(
     assert calls == ["daily_brief", "annotation"]
 
 
+def test_capacity_blocked_brief_leaves_gemma_window_for_retry(
+    tmp_path, monkeypatch,
+) -> None:
+    from scripts import run_news_annotator as runner
+
+    scheduled: list[tuple[str, ...] | None] = []
+    monkeypatch.setattr(
+        runner, "run_daily_brief_batch",
+        lambda ledger: [{
+            "status": "DEFERRED", "reason": "NO_GEMMA_CAPACITY",
+        }],
+    )
+    monkeypatch.setattr(
+        runner, "run_scheduled_batch_with_lock_retry",
+        lambda ledger, **kwargs: scheduled.append(kwargs.get("task_types")) or [],
+    )
+    monkeypatch.setattr(
+        sys, "argv",
+        [
+            "run_news_annotator.py",
+            "--database", str(tmp_path / "forward.sqlite3"),
+            "--status-file", str(tmp_path / "status.json"),
+            "--once",
+        ],
+    )
+
+    assert runner.main() == 0
+    assert scheduled == [("ACTIVE_ANNOTATION",)]
+
+
 def test_terminal_annotation_failure_settles_historical_date_as_degraded(tmp_path) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
     now = datetime(2026, 8, 11, 3, tzinfo=UTC)
