@@ -136,6 +136,32 @@ def test_dashboard_reports_broker_close_and_reopen_time(tmp_path) -> None:
         assert payload["system"]["components"][component]["status"] == "MARKET_CLOSED"
 
 
+def test_outcome_settler_health_uses_successful_loop_heartbeat_not_output_age(
+    tmp_path,
+) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=now).close()
+    (tmp_path / "collector-status.json").write_text(json.dumps({
+        "service": "collector",
+        "state": "RUNNING",
+        "last_success": now.isoformat(),
+        "last_error": None,
+        "work_items": 0,
+    }), encoding="utf-8")
+
+    payload = _dashboard_module()._dashboard_payload(database)
+
+    outcome = payload["system"]["components"]["outcome_settler"]
+    assert outcome["status"] == "OK"
+    assert outcome["last_success"] == now.isoformat()
+    assert not any(
+        alert["code"] == "OPS_COMPONENT_UNHEALTHY"
+        and alert["scope"] == "outcome_settler"
+        for alert in payload["operational_health"]["alerts"]
+    )
+
+
 def test_dashboard_exposes_only_runtime_update_failures(tmp_path) -> None:
     now = datetime.now(UTC).replace(microsecond=0)
     database = tmp_path / "forward-evidence.sqlite3"

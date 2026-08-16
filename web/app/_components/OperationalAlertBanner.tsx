@@ -17,6 +17,7 @@ export default function OperationalAlertBanner() {
   const [payload, setPayload] = useState<AlertPayload | null>(() => cached);
   const [assistant, setAssistant] = useState<AssistantOperationalHealth | null>(() => cachedAssistant);
   const [assistantUnavailable, setAssistantUnavailable] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const refresh = useCallback(async (force = false) => {
     try {
       setPayload(await loadDashboardResource<AlertPayload>("/api/status", { force }));
@@ -69,9 +70,24 @@ export default function OperationalAlertBanner() {
   }
   const status = alerts.some(alert => alert.severity === "ERROR") ? "error" : "warning";
   const first = alerts[0];
-  return <aside className={`operational-alert-banner is-${status}`} role="alert">
-    <div>
-      <b>{status === "error" ? "后台运行异常" : "后台运行提醒"}</b>
+  const title = status === "error" ? "后台运行异常" : "后台运行提醒";
+  return <aside className={`operational-alert-banner is-${status}${expanded ? " is-expanded" : ""}`} role="alert">
+    <div className="operational-alert-heading">
+      <b>{title}</b>
+      <span>{alerts.length} 项</span>
+    </div>
+    <button
+      type="button"
+      className="operational-alert-toggle"
+      aria-expanded={expanded}
+      aria-controls="operational-alert-details"
+      onClick={() => setExpanded(value => !value)}
+    >
+      <b>{title}</b>
+      <span>{alerts.length} 项</span>
+      <i aria-hidden="true">{expanded ? "−" : "+"}</i>
+    </button>
+    <div className="operational-alert-detail" id="operational-alert-details">
       <code>{first.code}</code>
       <span>{first.message_zh}{alerts.length > 1 ? ` · 另有 ${alerts.length - 1} 项` : ""}</span>
     </div>

@@ -15,6 +15,7 @@ from xauusd_forecaster.news_scheduler import (
     PREEMPTIBLE_POOL,
     ROUTINE_POOL,
     account_quota_snapshot,
+    authorize_repairable_impact_failures,
     backoff_job,
     claim_job,
     complete_job,
@@ -26,6 +27,12 @@ from xauusd_forecaster.news_scheduler import (
     reserve_account_request,
     scheduler_counts,
     sync_pending_jobs,
+)
+from xauusd_forecaster.annotation import (
+    IMPACT_FAILURE_RECOVERY_VERSION,
+    IMPACT_MODEL,
+    IMPACT_PROMPT_VERSION,
+    _append_impact_failure,
 )
 from xauusd_forecaster.forward_ledger import ForwardLedger
 from xauusd_forecaster.news_semantics import (
@@ -60,6 +67,61 @@ def _enqueue(
         priority=priority,
         now=NOW,
     )
+
+
+def test_identity_contract_recovery_requeues_each_impact_only_once(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    ledger.connection.execute("PRAGMA foreign_keys=OFF")
+    job_id = enqueue_job(
+        ledger.connection, task_type="ACTIVE_IMPACT",
+        source="source", source_item_id="item", revision_number=1,
+        annotation_id="annotation", prompt_version=IMPACT_PROMPT_VERSION,
+        priority="NORMAL", now=NOW,
+    )
+    row = {
+        "source": "source", "source_item_id": "item", "revision_number": 1,
+        "content_hash": "hash", "annotation_id": "annotation",
+    }
+    error = ValueError("New-episode identity requires an anchor difference")
+    _append_impact_failure(ledger, row, error, model_version=IMPACT_MODEL)
+    _append_impact_failure(ledger, row, error, model_version=IMPACT_MODEL)
+    assert claim_job(
+        ledger.connection, worker_id="worker", pool=ROUTINE_POOL, now=NOW,
+    ) is not None
+    backoff_job(
+        ledger.connection, job_id, "worker", available_at=NOW,
+        error=str(error), terminal=True,
+    )
+
+    assert authorize_repairable_impact_failures(
+        ledger.connection,
+        prompt_version=IMPACT_PROMPT_VERSION,
+        recovery_version=IMPACT_FAILURE_RECOVERY_VERSION,
+        now=NOW + timedelta(minutes=1),
+    ) == 1
+    assert ledger.connection.execute(
+        "SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
+    ).fetchone()[0] == "QUEUED"
+
+    assert claim_job(
+        ledger.connection, worker_id="worker", pool=ROUTINE_POOL,
+        now=NOW + timedelta(minutes=1),
+    ) is not None
+    _append_impact_failure(ledger, row, error, model_version=IMPACT_MODEL)
+    backoff_job(
+        ledger.connection, job_id, "worker", available_at=NOW,
+        error=str(error), terminal=True,
+    )
+    assert authorize_repairable_impact_failures(
+        ledger.connection,
+        prompt_version=IMPACT_PROMPT_VERSION,
+        recovery_version=IMPACT_FAILURE_RECOVERY_VERSION,
+        now=NOW + timedelta(minutes=2),
+    ) == 0
+    assert ledger.connection.execute(
+        "SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
+    ).fetchone()[0] == "DEAD_LETTER"
+    ledger.close()
 
 
 def test_account_configuration_groups_keys_without_exposing_secrets() -> None:

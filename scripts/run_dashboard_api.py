@@ -470,6 +470,21 @@ def _latest_quote_received(database: Path) -> str | None:
     return None
 
 
+def _runtime_heartbeat(path: Path, *, service: str) -> dict[str, object]:
+    """Read one supervised loop heartbeat without treating output as liveness."""
+    if not path.exists():
+        return {}
+    try:
+        item = json.loads(path.read_text(encoding="utf-8-sig"))
+        if not isinstance(item, dict):
+            return {}
+        if item.get("service") != service:
+            return {}
+        return item
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return {}
+
+
 def _broker_market_session(database: Path, now: datetime) -> dict | None:
     path = database.parent / "quotes" / "market-session.json"
     if not path.exists():
@@ -1924,10 +1939,17 @@ def _dashboard_payload(database: Path) -> dict:
             if row.get("active_rank") is not None and row.get("model_identity")
         })
         market_chart = _recent_market_chart(database, connection, now)
+        collector_heartbeat = _runtime_heartbeat(
+            database.parent / "collector-status.json", service="collector",
+        )
         component_times = {
             "quote_bridge": _latest_quote_received(database),
             "decision_collector": connection.execute("SELECT max(created_at) FROM decision_events").fetchone()[0],
-            "outcome_settler": connection.execute("SELECT max(appended_at) FROM outcomes").fetchone()[0],
+            # The collector invokes the settler on every successful loop. No
+            # newly appended outcome is expected until a decision reaches its
+            # 30-minute horizon, so output recency is not worker health.
+            "outcome_settler": collector_heartbeat.get("last_success")
+            or connection.execute("SELECT max(appended_at) FROM outcomes").fetchone()[0],
             "news_collector": connection.execute("SELECT max(fetched_time) FROM source_polls").fetchone()[0],
             "gemini_annotator": connection.execute("SELECT max(parsed_at) FROM news_annotations").fetchone()[0],
         }
@@ -2186,7 +2208,10 @@ def _dashboard_payload(database: Path) -> dict:
     )
     quote_component = component("quote_bridge", 30)
     decision_component = component("decision_collector", 420)
-    outcome_component = component("outcome_settler", 420)
+    outcome_component = component(
+        "outcome_settler", 420,
+        str(collector_heartbeat.get("last_error") or "") or None,
+    )
     if market_session in {"CLOSED", "WEEKLY_CLOSED"}:
         for market_component in (
             quote_component, decision_component, outcome_component,
