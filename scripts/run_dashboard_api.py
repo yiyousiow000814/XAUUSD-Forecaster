@@ -79,6 +79,10 @@ from xauusd_forecaster.news_contracts import CURRENT_NEWS_CONTRACT  # noqa: E402
 from xauusd_forecaster.news_features_v2 import COLLECTION_SOURCES  # noqa: E402
 from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY  # noqa: E402
 from xauusd_forecaster.production_shape import production_contract_snapshot  # noqa: E402
+from xauusd_forecaster.operational_health import (  # noqa: E402
+    extend_with_component_alerts,
+    scheduler_health_snapshot,
+)
 from xauusd_forecaster.news_impact import (  # noqa: E402
     HANDOVER_IMPACT_PROMPT_VERSION,
     IMPACT_MODEL,
@@ -1939,6 +1943,7 @@ def _dashboard_payload(database: Path) -> dict:
                 credential.account_id for credential in credentials
             ),
         )
+        operational_health = scheduler_health_snapshot(connection, now=now)
     finally:
         connection.rollback()
         connection.close()
@@ -2161,6 +2166,48 @@ def _dashboard_payload(database: Path) -> dict:
         except (OSError, ValueError):
             pass
 
+    system_components = {
+        "quote_bridge": quote_component,
+        "system_clock": {
+            "last_success": latest["source_received_time"] if latest else None,
+            "age_seconds": (
+                abs(clock_skew_seconds)
+                if clock_skew_seconds is not None else None
+            ),
+            "status": (
+                "OK" if clock_skew_seconds is not None
+                and abs(clock_skew_seconds) <= 5
+                else "WARN" if clock_skew_seconds is not None
+                and abs(clock_skew_seconds) <= 20
+                else "ERROR"
+            ),
+            "last_error": (
+                None if clock_skew_seconds is not None
+                and abs(clock_skew_seconds) <= 5
+                else f"偏差 {abs(clock_skew_seconds):.2f} 秒；仍在20秒样本隔离上限内，不影响当前评分。请用管理员 PowerShell 启动 Windows Time 并强制同步"
+                if clock_skew_seconds is not None
+                else "尚无报价时钟样本"
+            ),
+        },
+        "decision_collector": decision_component,
+        "outcome_settler": outcome_component,
+        "news_collector": component("news_collector", 300),
+        "gemini_annotator": component("gemini_annotator", 900),
+        "news_semantic_pipeline": semantic_pipeline_component,
+        "sites_synchronizer": sites_sync_component,
+        "sqlite_backup": component("sqlite_backup", 172800),
+        # Daily online backups are published only after the complete SQLite
+        # integrity check succeeds. Reuse that durable proof.
+        "integrity_check": backup_integrity_component,
+    }
+    operational_health = extend_with_component_alerts(
+        operational_health,
+        components=system_components,
+        news_sources=news_source_health,
+        runtime_update_failure=runtime_update_failure,
+        daily_news_brief=daily_news_brief_summary,
+    )
+
     return {
         "generated_at": now.isoformat(),
         "production_contract": production_contract,
@@ -2190,35 +2237,9 @@ def _dashboard_payload(database: Path) -> dict:
             "source_of_truth": "Local append-only SQLite",
             "sites_mirror": "read-only materialized display mirror",
             "runtime_update_failure": runtime_update_failure,
-            "components": {
-                "quote_bridge": quote_component,
-                "system_clock": {
-                    "last_success": latest["source_received_time"] if latest else None,
-                    "age_seconds": abs(clock_skew_seconds) if clock_skew_seconds is not None else None,
-                    "status": (
-                        "OK" if clock_skew_seconds is not None and abs(clock_skew_seconds) <= 5
-                        else "WARN" if clock_skew_seconds is not None and abs(clock_skew_seconds) <= 20
-                        else "ERROR"
-                    ),
-                    "last_error": (
-                        None if clock_skew_seconds is not None and abs(clock_skew_seconds) <= 5
-                        else f"偏差 {abs(clock_skew_seconds):.2f} 秒；仍在20秒样本隔离上限内，不影响当前评分。请用管理员 PowerShell 启动 Windows Time 并强制同步"
-                        if clock_skew_seconds is not None else "尚无报价时钟样本"
-                    ),
-                },
-                "decision_collector": decision_component,
-                "outcome_settler": outcome_component,
-                "news_collector": component("news_collector", 300),
-                "gemini_annotator": component("gemini_annotator", 900),
-                "news_semantic_pipeline": semantic_pipeline_component,
-                "sites_synchronizer": sites_sync_component,
-                "sqlite_backup": component("sqlite_backup", 172800),
-                # Daily online backups are published only after the complete
-                # SQLite integrity check succeeds. Reuse that durable proof;
-                # never scan the growing live database on a status request.
-                "integrity_check": backup_integrity_component,
-            },
+            "components": system_components,
         },
+        "operational_health": operational_health,
         "latest": latest_data,
         "research_forecast": research_forecast,
         "u5_context": u5_context,

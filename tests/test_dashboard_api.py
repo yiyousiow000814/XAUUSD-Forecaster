@@ -120,6 +120,10 @@ def test_dashboard_exposes_only_runtime_update_failures(tmp_path) -> None:
         "status": "ROLLED_BACK",
         "failed_at": now.isoformat(),
     }
+    assert any(
+        alert["code"] == "OPS_RUNTIME_UPDATE_FAILED"
+        for alert in failed["operational_health"]["alerts"]
+    )
 
 
 def test_news_evidence_display_collapses_frozen_versions_to_one_event() -> None:

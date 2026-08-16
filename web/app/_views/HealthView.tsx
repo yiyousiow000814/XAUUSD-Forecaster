@@ -8,6 +8,7 @@ import MobileDashboardNav from "../_components/MobileDashboardNav";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
+import { schedulerTaskLabel, type OperationalHealth } from "../_lib/operational-health";
 
 type StatusPayload = {
   preview_status_summary?: boolean;
@@ -27,6 +28,7 @@ type StatusPayload = {
     recovery_mode: string | null; fallback_label: string | null; fallback_health: string | null; next_retry_time: string | null;
     semantic_status: string; semantic_message: string | null;
   }>;
+  operational_health?: OperationalHealth;
 };
 
 const componentLabels: Record<string, string> = {
@@ -54,6 +56,13 @@ function elapsed(seconds: number | null): string {
   if (minutes < 60) return `距上次成功 ${minutes} 分 ${whole % 60} 秒`;
   const hours = Math.floor(minutes / 60);
   return `距上次成功 ${hours} 小时 ${minutes % 60} 分`;
+}
+
+function compactElapsed(seconds: number | null): string {
+  if (seconds === null) return "无等待";
+  if (seconds < 60) return `${Math.round(seconds)} 秒`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟`;
+  return `${Math.floor(seconds / 3600)} 小时 ${Math.floor((seconds % 3600) / 60)} 分`;
 }
 
 type NewsSourceHealth = StatusPayload["news_source_health"][number];
@@ -134,6 +143,30 @@ export default function HealthView() {
     </section>
     {error ? <div className="error-banner">状态读取失败：{error}</div> : null}
     <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
+    <section id="operational-alerts" className={`operational-health-panel is-${(payload?.operational_health?.status ?? "HEALTHY").toLowerCase()}`} aria-label="运行异常与错误码">
+      <header><div><p className="eyebrow">OPERATIONAL ERROR CODES</p><h2>运行异常与定位证据</h2></div><p>心跳、吞吐、容量、重试、队龄、隔离、来源和同步使用同一套错误码；正常运行不等于正在产生进展。</p></header>
+      {(payload?.operational_health?.alerts ?? []).length ? <div className="operational-alert-list">
+        {payload?.operational_health?.alerts.map((alert, index) => <article key={`${alert.code}-${alert.scope}-${index}`} className={`is-${alert.severity.toLowerCase()}`}>
+          <div><code>{alert.code}</code><b>{alert.scope}</b><span>{alert.severity === "ERROR" ? "需要处理" : "需要留意"}</span></div>
+          <p>{alert.message_zh}</p>
+          <small>{Object.entries(alert.evidence).map(([key, value]) => `${key}=${value ?? "—"}`).join(" · ")}</small>
+        </article>)}
+      </div> : <p className="operational-all-clear">当前没有达到告警阈值的运行异常。</p>}
+      <div className="scheduler-health-grid">
+        {(payload?.operational_health?.scheduler.tasks ?? []).map(task => <article key={task.task_type}>
+          <header><strong>{schedulerTaskLabel[task.task_type] ?? task.task_type}</strong><code>{task.task_type}</code></header>
+          <dl>
+            <div><dt>当前工作</dt><dd>{task.queued + task.leased + task.backing_off}</dd></div>
+            <div><dt>15分钟完成</dt><dd>{task.completed_15m}</dd></div>
+            <div><dt>容量延后</dt><dd>{task.deferred_15m}</dd></div>
+            <div><dt>失败</dt><dd>{task.errors_15m}</dd></div>
+            <div><dt>最旧等待</dt><dd>{compactElapsed(task.oldest_age_seconds)}</dd></div>
+            <div><dt>最高领取</dt><dd>{task.max_claim_count}{task.max_claim_job_ref ? ` · ${task.max_claim_job_ref}` : ""}</dd></div>
+          </dl>
+          {task.failure_codes_15m.length ? <p className="scheduler-failure-codes">{task.failure_codes_15m.map(item => <code key={item.code}>{item.code} × {item.count}</code>)}</p> : null}
+        </article>)}
+      </div>
+    </section>
     <section className={`component-status ${componentHasAttention ? "has-attention" : ""} ${showHealthyComponents ? "show-healthy" : ""}`} aria-label="数据链路组件状态">
       <header><div><p className="eyebrow">EVIDENCE PIPELINE</p><h2>系统组件状态</h2></div><p><b>{payload?.system.source_of_truth ?? "Local append-only SQLite"}</b> 是不可修改的证据源；{payload?.system.sites_mirror ?? "Sites D1 read-only materialized display mirror"} 只是展示镜像。</p></header>
       {componentHasAttention && healthyComponentCount > 0 && <button className="health-reveal-button" type="button" aria-expanded={showHealthyComponents} onClick={() => setShowHealthyComponents(value => !value)}>{showHealthyComponents ? "只看异常组件" : `另有 ${healthyComponentCount} 个正常组件`}</button>}

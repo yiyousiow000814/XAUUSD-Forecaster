@@ -33,12 +33,13 @@ ranked using durable usage from the current Pacific quota day and the current
 plus previous UTC minute bucket. The rank considers the daily request limit,
 requests per minute, and input tokens per minute for the task's model route.
 
-The scheduler attempts the account with the most headroom first. A capacity
-deferral, provider throttle, or transient provider error advances immediately
-to the next compatible independent account. Only after all compatible accounts
-are unavailable is that job delayed until the next one-minute cycle. Other
-ready jobs continue in the same batch, so one blocked stage does not freeze the
-whole chain.
+Serial maintenance batches attempt the account with the most headroom first. A
+capacity deferral, provider throttle, or transient provider error advances to
+the next compatible independent account. Production account lanes use only
+their assigned account; they must not duplicate another lane's account probes.
+After a lane proves one model route has no capacity, it skips that route for
+the remainder of the batch and continues with other ready routes. It does not
+claim and defer every remaining job behind the same exhausted capacity gate.
 
 Multiple keys in one account share quota and therefore share one capacity
 score. Extra keys add transport redundancy, not imaginary quota. Independent

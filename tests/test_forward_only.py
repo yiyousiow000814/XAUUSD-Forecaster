@@ -3352,6 +3352,44 @@ def test_gemma_impact_uses_all_evidence_windows_for_oversized_body(
     assert '"candidate_id":"farther"' in sent
 
 
+def test_gemma_impact_accepts_headline_evidence_for_oversized_body(
+    monkeypatch,
+) -> None:
+    headline = "AM Edition: Top 10 Politics Articles"
+    body = "unrelated long-form roundup " * 5_000
+    reserved = []
+    pool = annotation_module._GeminiRequestPool(
+        ("test-key",), requests_per_key=1, batch_limit=1,
+        request_accountant=CallbackModelAccountant(
+            lambda usage: reserved.append(usage.input_tokens) or True
+        ),
+    )
+
+    def post_json(_key, model, method, payload, *, timeout):
+        del timeout
+        if method == "countTokens":
+            prompt = payload["generateContentRequest"]["contents"][0]["parts"][0]["text"]
+            return {
+                "totalTokens": 39_000
+                if "SOURCE_CONTEXT_MODE: COMPLETE_BODY" in prompt else 900
+            }
+        return {
+            "modelVersion": model,
+            "candidates": [{"content": {"parts": [{
+                "text": json.dumps(_impact_model_result(), ensure_ascii=False),
+            }]}}],
+        }
+    monkeypatch.setattr(GeminiModelGateway, "_post_json", staticmethod(post_json))
+
+    result, _ = pool.call_impact(0, {
+        "annotation": {"supporting_evidence": [headline]},
+        "prior_event_context": [], "headline": headline, "body": body,
+    })
+
+    assert result["impact_class"] == "BACKGROUND"
+    assert reserved == [900]
+
+
 def test_oversized_body_without_verbatim_evidence_fails_closed(
     tmp_path, monkeypatch,
 ) -> None:

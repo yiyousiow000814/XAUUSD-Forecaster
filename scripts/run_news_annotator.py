@@ -234,6 +234,20 @@ def _may_try_another_credential(status: dict[str, object]) -> bool:
     }
 
 
+def _with_scheduler_failure_code(
+    status: dict[str, object],
+) -> dict[str, object]:
+    """Attach one stable diagnostic code before persisting an attempt."""
+    if status.get("failure_code"):
+        return status
+    outcome = status.get("status")
+    if outcome == "DEFERRED":
+        return {**status, "failure_code": "MODEL_CAPACITY_DEFERRED"}
+    if outcome == "DISABLED":
+        return {**status, "failure_code": "MODEL_ROUTE_DISABLED"}
+    return status
+
+
 def _run_scheduled_lane(
     ledger: ForwardLedger,
     *,
@@ -245,6 +259,7 @@ def _run_scheduled_lane(
     progress_callback: Callable[[], None] | None = None,
 ) -> list[dict[str, object]]:
     statuses: list[dict[str, object]] = []
+    blocked_task_types: set[str] = set()
     has_routine = any(item.pool == ROUTINE_POOL for item in credentials)
     has_preemptible = any(item.pool == PREEMPTIBLE_POOL for item in credentials)
     while len(statuses) < maximum:
@@ -256,6 +271,7 @@ def _run_scheduled_lane(
                 worker_id=worker_id,
                 pool=ROUTINE_POOL,
                 task_types=task_types,
+                excluded_task_types=frozenset(blocked_task_types),
                 now=datetime.now(UTC),
             )
         elif has_preemptible:
@@ -264,6 +280,7 @@ def _run_scheduled_lane(
                 worker_id=worker_id,
                 pool=PREEMPTIBLE_POOL,
                 task_types=task_types,
+                excluded_task_types=frozenset(blocked_task_types),
                 now=datetime.now(UTC),
             )
         if job is None:
@@ -274,20 +291,23 @@ def _run_scheduled_lane(
             preferred_account_id=preferred_account_id,
         )
         status: dict[str, object] = {
-            "status": "DEFERRED", "reason": "NO_COMPATIBLE_ACCOUNT_CAPACITY",
+            "status": "DEFERRED",
+            "reason": "NO_COMPATIBLE_ACCOUNT_CAPACITY",
+            "failure_code": "MODEL_CAPACITY_DEFERRED",
         }
         outcome_credential = candidates[0] if candidates else credentials[0]
         outcome_at = executed_at
         attempted_credentials = 0
         attempted_accounts: set[str] = set()
         blocked_accounts: set[str] = set()
+        route_capacity_deferred = True
         for credential in candidates:
             if credential.account_id in blocked_accounts:
                 continue
             attempted_at = datetime.now(UTC)
-            status = _execute_job_safely(
+            status = _with_scheduler_failure_code(_execute_job_safely(
                 ledger, credential, job, now=attempted_at,
-            )
+            ))
             record_job_attempt(
                 ledger.connection,
                 job=job,
@@ -299,6 +319,8 @@ def _run_scheduled_lane(
             attempted_accounts.add(credential.account_id)
             outcome_credential = credential
             outcome_at = attempted_at
+            if status.get("status") not in {"DEFERRED", "DISABLED"}:
+                route_capacity_deferred = False
             if not _may_try_another_credential(status):
                 break
             # Account quota and transient provider pressure are shared by its
@@ -326,8 +348,10 @@ def _run_scheduled_lane(
             release_job(
                 ledger.connection, job.job_id, worker_id,
                 available_at=outcome_at + timedelta(minutes=1),
-                error=str(status.get("reason") or outcome),
+                error=str(status.get("failure_code") or outcome),
             )
+            if route_capacity_deferred:
+                blocked_task_types.add(job.task_type)
         else:
             retry_at = _next_retry(status, outcome_at)
             backoff_job(
@@ -417,7 +441,10 @@ def run_scheduled_batch(
         try:
             return _run_scheduled_lane(
                 lane_ledger,
-                credentials=credentials,
+                credentials=tuple(
+                    item for item in credentials
+                    if item.account_id == account_id
+                ),
                 maximum=allocation,
                 worker_prefix=f"{worker_prefix}-account-{index}",
                 task_types=task_types,
