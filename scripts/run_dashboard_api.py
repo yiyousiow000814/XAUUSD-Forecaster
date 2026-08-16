@@ -214,8 +214,35 @@ class StatusSnapshotCache:
                 "refreshing": self._refreshing,
             }
 
+    def _refresh(self, database: Path, builder) -> tuple[bytes, str, float]:
+        try:
+            body = json.dumps(
+                builder(database), allow_nan=False, separators=(",", ":"),
+            ).encode()
+        except Exception as error:
+            with self._condition:
+                self._refreshing = False
+                self._last_error = f"{type(error).__name__}: {str(error)[:400]}"
+                self._condition.notify_all()
+            raise
+        with self._condition:
+            self._body = body
+            self._built_at = self.clock()
+            self._refreshing = False
+            self._last_error = None
+            self._condition.notify_all()
+        return body, "fresh", 0.0
+
+    def _refresh_in_background(self, database: Path, builder) -> None:
+        try:
+            self._refresh(database, builder)
+        except Exception:
+            return
+
     def get(self, database: Path, builder) -> tuple[bytes, str, float]:
         database = database.resolve()
+        stale_result: tuple[bytes, str, float] | None = None
+        start_background_refresh = False
         with self._condition:
             if self._database != database:
                 self._database = database
@@ -225,28 +252,35 @@ class StatusSnapshotCache:
             age = self._age()
             if self._body is not None and age is not None and age <= self.ttl_seconds:
                 return self._body, "fresh", age
-            build_here = not self._refreshing
-            if build_here:
-                self._refreshing = True
+            if self._last_error:
+                raise StatusSnapshotUnavailable(self._last_error)
+            if (
+                self._body is not None
+                and age is not None
+                and age <= self.max_stale_seconds
+            ):
+                stale_result = (self._body, "stale", age)
+                if not self._refreshing:
+                    self._refreshing = True
+                    start_background_refresh = True
+                build_here = False
+            else:
+                build_here = not self._refreshing
+                if build_here:
+                    self._refreshing = True
+
+        if stale_result is not None:
+            if start_background_refresh:
+                threading.Thread(
+                    target=self._refresh_in_background,
+                    args=(database, builder),
+                    daemon=True,
+                    name="dashboard-status-refresh",
+                ).start()
+            return stale_result
 
         if build_here:
-            try:
-                body = json.dumps(
-                    builder(database), allow_nan=False, separators=(",", ":"),
-                ).encode()
-            except Exception as error:
-                with self._condition:
-                    self._refreshing = False
-                    self._last_error = f"{type(error).__name__}: {str(error)[:400]}"
-                    self._condition.notify_all()
-                raise
-            with self._condition:
-                self._body = body
-                self._built_at = self.clock()
-                self._refreshing = False
-                self._last_error = None
-                self._condition.notify_all()
-                return body, "fresh", 0.0
+            return self._refresh(database, builder)
 
         with self._condition:
             refresh_finished = self._condition.wait_for(

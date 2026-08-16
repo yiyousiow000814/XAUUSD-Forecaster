@@ -663,7 +663,9 @@ def test_status_snapshot_cache_singleflights_concurrent_builds(tmp_path) -> None
     assert {state for _body, state, _age in results} == {"fresh"}
 
 
-def test_status_snapshot_cache_fails_closed_during_slow_refresh(tmp_path) -> None:
+def test_status_snapshot_cache_serves_bounded_stale_during_slow_refresh(
+    tmp_path,
+) -> None:
     module = _dashboard_module()
     now = [0.0]
     cache = module.StatusSnapshotCache(
@@ -676,43 +678,56 @@ def test_status_snapshot_cache_fails_closed_during_slow_refresh(tmp_path) -> Non
     now[0] = 16.0
     started = threading.Event()
     release = threading.Event()
+    calls = 0
 
     def slow_refresh(_database):
+        nonlocal calls
+        calls += 1
         started.set()
         assert release.wait(timeout=2)
         return {"version": 2}
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        refresh = pool.submit(cache.get, database, slow_refresh)
-        assert started.wait(timeout=1)
-        try:
-            cache.get(database, slow_refresh)
-        except module.StatusSnapshotUnavailable as error:
-            assert str(error) == "dashboard snapshot refresh is still running"
-        else:
-            raise AssertionError("a stale snapshot must not look like a sync success")
-        release.set()
-        refreshed_body, refreshed_state, _age = refresh.result(timeout=2)
+    stale_body, stale_state, stale_age = cache.get(database, slow_refresh)
+    assert started.wait(timeout=1)
+    second_body, second_state, second_age = cache.get(database, slow_refresh)
+    assert json.loads(stale_body) == {"version": 1}
+    assert json.loads(second_body) == {"version": 1}
+    assert (stale_state, second_state) == ("stale", "stale")
+    assert (stale_age, second_age) == (16.0, 16.0)
+    assert calls == 1
 
+    release.set()
+    for _ in range(100):
+        health_status, health = cache.health()
+        if health_status == 200 and health["refreshing"] is False:
+            break
+        time.sleep(0.01)
+    refreshed_body, refreshed_state, _age = cache.get(database, slow_refresh)
     assert json.loads(refreshed_body) == {"version": 2}
     assert refreshed_state == "fresh"
 
     now[0] = 32.0
-    try:
-        cache.get(
-            database, lambda _database: (_ for _ in ()).throw(RuntimeError("boom")),
-        )
-    except RuntimeError as error:
-        assert str(error) == "boom"
-    else:
-        raise AssertionError("a failed refresh must not masquerade as success")
+    cache.get(
+        database, lambda _database: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    for _ in range(100):
+        health_status, health = cache.health()
+        if health_status == 503:
+            break
+        time.sleep(0.01)
     health_status, health = cache.health()
     assert health_status == 503
     assert health["status"] == "ERROR"
 
-    now[0] = 123.0
+    expired_cache = module.StatusSnapshotCache(
+        ttl_seconds=15, wait_seconds=0.01, max_stale_seconds=90,
+        clock=lambda: now[0],
+    )
+    now[0] = 0.0
+    expired_cache.get(database, lambda _database: {"version": 1})
+    now[0] = 91.0
     try:
-        cache.get(
+        expired_cache.get(
             database,
             lambda _database: (_ for _ in ()).throw(RuntimeError("still broken")),
         )
