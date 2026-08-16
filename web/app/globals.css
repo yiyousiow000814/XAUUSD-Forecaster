@@ -1139,7 +1139,7 @@ body.modal-open { overflow:hidden; }
   .evidence-summary { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; border:0; background:transparent; }
   .evidence-summary article { min-height:92px; border:1px solid rgba(17,17,15,.35); padding:13px; background:rgba(239,235,223,.72); }
   .evidence-count-note { margin-top:8px; border:0; padding:13px 14px; line-height:1.65; }
-  .evidence-filters { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; border:0; padding:0 0 14px; background:transparent; }
+  .evidence-filters { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; border:0; padding:0 0 14px; background:transparent; }
   .evidence-filters button { min-width:0; padding:9px 6px; font-size:11px; line-height:1.35; }
   .evidence-filters button b { display:block; margin:4px 0 0; font-size:15px; }
   .evidence-window-note { border:0; padding:0 2px 14px; line-height:1.55; }

@@ -943,6 +943,9 @@ test("renders the news and decision audit route", async () => {
   assert.match(newsIndexRoute, /NOT IN \('READY','NOT_REQUIRED'\)/);
   assert.match(source, /evidenceMode === "eligible"/);
   assert.match(source, />当前可用 <b>/);
+  assert.match(source, />历史上用过 <b>/);
+  assert.match(source, />从未用过 <b>/);
+  assert.doesNotMatch(source, /查看全部/);
   assert.doesNotMatch(source, /个 key 轮换|每分钟最多生成/);
   assert.ok(source.indexOf('<nav className="audit-tabs"') < source.indexOf('<section className="annotation-queue"'));
   assert.doesNotMatch(source, /已经积累多少结果|真实上线后结果|当前模型学到哪里|距离下次学习/);
