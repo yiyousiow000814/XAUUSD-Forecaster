@@ -119,6 +119,12 @@ failure family it fixes. The authorization is persisted by failure ID. It does
 not reset attempt history, and a later failure is not covered by the earlier
 authorization.
 
+Impact identity validation gets one metered contract-repair request containing
+the rejected JSON, failed invariant, and exact offered candidate universe. The
+repair remains fail-closed. Its versioned recovery authorization requeues only
+terminal identity-shape failures covered by that deployed repair and only once
+per annotation/model/prompt combination.
+
 Scheduler rows are mutable operational state. News revisions, annotations,
 impact assessments, translations, failures, model metadata, and historical
 predictions remain immutable evidence under the repository contracts.

@@ -143,3 +143,8 @@ freshness alarms: quote, decision, and outcome components report
 records the payload generation time as its observation boundary. Missing broker
 evidence outside the weekly closure remains `DATA_UNAVAILABLE` and must not be
 normalized to healthy.
+
+The outcome settler runs inside the supervised collector loop. Its health uses
+that loop's successful heartbeat, not the timestamp of the most recently
+appended outcome. A quiet interval with no decision past its 30-minute horizon
+is valid idle work and must not become a stale-component alert.

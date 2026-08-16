@@ -126,6 +126,19 @@ CREATE TABLE IF NOT EXISTS news_ai_failure_recoveries_v1 (
     UNIQUE(failure_id,recovery_version),
     FOREIGN KEY(failure_id) REFERENCES news_llm_failures(failure_id)
 );
+
+CREATE TABLE IF NOT EXISTS news_ai_impact_failure_recoveries_v1 (
+    failure_id TEXT NOT NULL,
+    recovery_version TEXT NOT NULL,
+    annotation_id TEXT NOT NULL,
+    llm_model_version TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    authorized_at TEXT NOT NULL,
+    PRIMARY KEY(
+      recovery_version,annotation_id,llm_model_version,prompt_version),
+    UNIQUE(failure_id,recovery_version),
+    FOREIGN KEY(failure_id) REFERENCES news_impact_failures_v1(failure_id)
+);
 """
 
 
@@ -952,6 +965,63 @@ def authorize_repairable_annotation_failures(
     return max(0, inserted)
 
 
+def authorize_repairable_impact_failures(
+    connection: sqlite3.Connection,
+    *,
+    prompt_version: str,
+    recovery_version: str,
+    now: datetime | None = None,
+) -> int:
+    """Grant one auditable retry to identity-contract failures now repairable."""
+    timestamp = _iso(now or datetime.now(UTC))
+    repairable_errors = (
+        "Gemma identity match is not an offered candidate",
+        "Gemma same-event match is not a core fact candidate",
+        "New-episode identity requires an anchor difference",
+    )
+    placeholders = ",".join("?" for _ in repairable_errors)
+    with connection:
+        inserted = connection.execute(
+            f"""INSERT OR IGNORE INTO news_ai_impact_failure_recoveries_v1
+               (failure_id,recovery_version,annotation_id,llm_model_version,
+                prompt_version,authorized_at)
+               SELECT f.failure_id,?,f.annotation_id,f.llm_model_version,
+                      f.prompt_version,?
+               FROM news_impact_failures_v1 f
+               WHERE f.prompt_version=? AND f.is_terminal=1
+                 AND f.error IN ({placeholders})
+                 AND f.attempt_number=(
+                   SELECT max(f2.attempt_number)
+                   FROM news_impact_failures_v1 f2
+                   WHERE f2.annotation_id=f.annotation_id
+                     AND f2.llm_model_version=f.llm_model_version
+                     AND f2.prompt_version=f.prompt_version)""",
+            (recovery_version, timestamp, prompt_version, *repairable_errors),
+        ).rowcount
+        connection.execute(
+            """UPDATE news_ai_jobs_v1 AS j
+               SET state='QUEUED',available_at=?,lease_owner=NULL,
+                   lease_expires_at=NULL,last_error=NULL,updated_at=?,
+                   completed_at=NULL
+               WHERE j.task_type='ACTIVE_IMPACT'
+                 AND j.prompt_version=? AND j.state='DEAD_LETTER'
+                 AND EXISTS (
+                   SELECT 1 FROM news_impact_failures_v1 f
+                   JOIN news_ai_impact_failure_recoveries_v1 r
+                     ON r.failure_id=f.failure_id AND r.recovery_version=?
+                   WHERE f.annotation_id=j.annotation_id
+                     AND f.prompt_version=j.prompt_version
+                     AND f.attempt_number=(
+                       SELECT max(f2.attempt_number)
+                       FROM news_impact_failures_v1 f2
+                       WHERE f2.annotation_id=f.annotation_id
+                         AND f2.llm_model_version=f.llm_model_version
+                         AND f2.prompt_version=f.prompt_version))""",
+            (timestamp, timestamp, prompt_version, recovery_version),
+        )
+    return max(0, inserted)
+
+
 def sync_pending_jobs(
     connection: sqlite3.Connection,
     *,
@@ -961,6 +1031,7 @@ def sync_pending_jobs(
     """Discover eligible evidence work and enqueue deterministic job identities."""
     from .annotation import (
         ANNOTATION_FAILURE_RECOVERY_VERSION,
+        IMPACT_FAILURE_RECOVERY_VERSION,
         IMPACT_PROMPT_VERSION,
         PROMPT_VERSION,
         TITLE_PROMPT_VERSION,
@@ -975,6 +1046,12 @@ def sync_pending_jobs(
         connection,
         prompt_version=PROMPT_VERSION,
         recovery_version=ANNOTATION_FAILURE_RECOVERY_VERSION,
+        now=instant,
+    )
+    authorize_repairable_impact_failures(
+        connection,
+        prompt_version=IMPACT_PROMPT_VERSION,
+        recovery_version=IMPACT_FAILURE_RECOVERY_VERSION,
         now=instant,
     )
     brief_backlog = brief_dates_to_process(connection, now=instant)[1:]

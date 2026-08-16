@@ -101,7 +101,8 @@ footer { position:relative; z-index:1; display:flex; justify-content:space-betwe
 .operational-alert-banner {
   position: relative;
   z-index: 90;
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   justify-content: space-between;
   gap: 18px;
@@ -118,11 +119,39 @@ footer { position:relative; z-index:1; display:flex; justify-content:space-betwe
   color: #fff;
 }
 
-.operational-alert-banner > div {
+.operational-alert-heading,
+.operational-alert-toggle {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.operational-alert-toggle { display:none; cursor:pointer; }
+
+.operational-alert-heading span,
+.operational-alert-toggle span {
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.operational-alert-toggle i {
+  display: none;
+  font: 800 22px/1 var(--font-mono);
+}
+
+.operational-alert-detail {
   display: flex;
   align-items: baseline;
   flex-wrap: wrap;
   gap: 8px 14px;
+  min-width: 0;
 }
 
 .operational-alert-banner code {
@@ -212,13 +241,20 @@ footer { position:relative; z-index:1; display:flex; justify-content:space-betwe
 
 @media (max-width: 640px) {
   .operational-alert-banner {
-    position: relative;
-    align-items: stretch;
-    flex-direction: column;
-    gap: 2px;
-    padding: 10px 16px;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+    min-height: 48px;
+    padding: 2px 10px;
   }
-  .operational-alert-banner a { width: fit-content; }
+  .operational-alert-heading { display:none; }
+  .operational-alert-toggle { width:100%; display:flex; justify-content:flex-start; text-align:left; }
+  .operational-alert-toggle span { margin-left:auto; }
+  .operational-alert-toggle i { display:block; width:24px; text-align:center; }
+  .operational-alert-detail,
+  .operational-alert-banner > a { display:none; }
+  .operational-alert-banner.is-expanded { gap:6px; padding-bottom:10px; }
+  .operational-alert-banner.is-expanded .operational-alert-detail { display:flex; padding:4px 2px; font-size:12px; line-height:1.45; }
+  .operational-alert-banner.is-expanded > a { display:inline-flex; width:fit-content; }
   .operational-health-panel > header { display: grid; gap: 10px; padding: 16px; }
   .operational-alert-list > article { padding: 14px 16px; }
   .scheduler-health-grid { grid-template-columns: 1fr; }
@@ -1543,8 +1579,10 @@ body.modal-open { overflow:hidden; }
 .sr-only { position:absolute!important; width:1px!important; height:1px!important; margin:-1px!important; padding:0!important; overflow:hidden!important; clip:rect(0,0,0,0)!important; white-space:nowrap!important; border:0!important; }
 .top-actions { flex-wrap:wrap; justify-content:flex-end; }
 .assistant-main { height:100dvh; min-height:680px; display:grid; grid-template-rows:auto minmax(0,1fr); overflow:hidden; padding:18px 2vw; }
-body:has(> .preview-banner):has(.assistant-main) { height:100dvh; display:grid; grid-template-rows:auto minmax(0,1fr); overflow:hidden; }
-body:has(> .preview-banner):has(.assistant-main) .assistant-main { height:100%; min-height:0; }
+body:has(.assistant-main) { height:100dvh; display:flex; flex-direction:column; overflow:hidden; }
+body:has(.assistant-main) > .preview-banner,
+body:has(.assistant-main) > .operational-alert-banner { flex:0 0 auto; }
+body:has(.assistant-main) > .assistant-main { width:100%; height:auto; min-height:0; flex:1 1 auto; }
 .assistant-topbar { min-height:64px; padding-bottom:14px; }
 .assistant-owner-pill { min-height:44px; display:inline-flex; align-items:center; gap:9px; border:1px solid var(--ink); padding:9px 12px; font-size:11px; font-weight:900; letter-spacing:.13em; }
 .assistant-owner-pill i { width:8px; height:8px; border-radius:50%; background:var(--green); box-shadow:0 0 0 4px rgba(71,107,25,.14); }
