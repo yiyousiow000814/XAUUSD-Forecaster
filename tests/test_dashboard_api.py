@@ -241,6 +241,54 @@ def test_news_evidence_display_includes_current_event_from_prior_prompt() -> Non
     ]
 
 
+def test_news_evidence_display_orders_events_by_latest_publication_time() -> None:
+    module = _dashboard_module()
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.executescript(
+        """
+        CREATE TABLE news_model_visibility_receipts_v1 (
+          source_decision_id TEXT, decision_time TEXT, model_identity TEXT,
+          model_version TEXT, event_key TEXT, event_source_hash TEXT
+        );
+        CREATE TABLE news_model_visibility_events_v1 (
+          event_source_hash TEXT, event_key TEXT, canonical_headline TEXT,
+          canonical_source TEXT, source_published_time TEXT,
+          collector_first_seen_time TEXT, topics_json TEXT,
+          evidence_grade TEXT
+        );
+        """
+    )
+    connection.execute(
+        "INSERT INTO news_model_visibility_events_v1 VALUES (?,?,?,?,?,?,?,?)",
+        ("old-hash", "old-used", "较旧且用过", "source",
+         "2026-08-10T01:00:00+00:00", "2026-08-10T01:01:00+00:00",
+         "[]", "SINGLE_RELIABLE"),
+    )
+    connection.execute(
+        "INSERT INTO news_model_visibility_receipts_v1 VALUES (?,?,?,?,?,?)",
+        ("decision-old", "2026-08-10T02:00:00+00:00", "FULL", "model-v1",
+         "old-used", "old-hash"),
+    )
+    current = [{
+        "event_key": "new-unseen", "source_hash": "new-hash",
+        "canonical_headline": "较新且未用", "canonical_source": "source",
+        "source_published_time": "2026-08-11T01:00:00+00:00",
+        "collector_first_seen_time": "2026-08-11T01:01:00+00:00",
+        "economic_age_minutes": 60, "freshness_status": "ACTIVE", "topics": [],
+        "evidence_grade": "SINGLE_RELIABLE", "broad_model_eligible": True,
+        "model_permission": "BROAD_MODEL", "member_count": 1,
+        "independent_publishers": 1, "source_names": ["source"],
+        "publisher_domains": ["example.com"],
+        "source_identity_organizations": ["source"], "reason_codes": [],
+        "prompt_version": "prior-prompt-version",
+    }]
+
+    rows = module._news_evidence_display_rows(connection, current)
+
+    assert [row["event_key"] for row in rows] == ["new-unseen", "old-used"]
+
+
 def test_news_evidence_display_reconciles_event_identity_handover() -> None:
     module = _dashboard_module()
     connection = sqlite3.connect(":memory:")
