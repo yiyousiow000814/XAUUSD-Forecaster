@@ -520,6 +520,25 @@ def _not_required_reason(item: dict, forward_epoch: str) -> tuple[str, str]:
     return "DUPLICATE_CONTENT", "重复内容：同一事件已有正文更完整的版本"
 
 
+def _annotation_failure_reason(error: object, failure_code: object) -> str:
+    """Explain a bounded model failure without exposing rejected output."""
+    message = str(error or "")
+    code = str(failure_code or "")
+    if "supporting evidence is absent from source" in message:
+        return "Gemini 返回的证据片段无法在来源正文中逐字找到。"
+    if "supporting_evidence contains a long item" in message:
+        return "Gemini 返回的证据片段超过允许长度。"
+    if "display repair failed" in message:
+        return "Gemini 的语义响应已收到，但中文展示字段修复仍未通过。"
+    if code == "MODEL_OUTPUT_CONTRACT_FAILED":
+        return "Gemini 响应未通过当前输出合同。"
+    if code == "MODEL_OUTPUT_INVALID":
+        return "Gemini 返回的内容无法解析为当前 JSON 合同。"
+    if code == "PROVIDER_HTTP_ERROR":
+        return "Gemini 服务返回 HTTP 错误。"
+    return "Gemini 请求未成功完成；已保留有限诊断证据。"
+
+
 def _apply_impact_status(item: dict, now: datetime) -> None:
     """Expose the current Gemma lifetime decision in plain, auditable states."""
     if not item.get("parsed_at"):
@@ -595,6 +614,11 @@ def _news_reader_rows(
         cursor_clause = """AND (max(n.fetched_time,
                     COALESCE(t.parsed_at, n.fetched_time),
                     COALESCE(a.parsed_at, n.fetched_time),
+                    COALESCE((SELECT max(any_a.parsed_at)
+                      FROM news_annotations any_a
+                      WHERE any_a.source=n.source
+                        AND any_a.source_item_id=n.source_item_id
+                        AND any_a.revision_number=n.revision_number), n.fetched_time),
                     COALESCE(i.assessed_at, n.fetched_time),
                     COALESCE(f.failed_at, n.fetched_time),
                     COALESCE(cf.failed_at, n.fetched_time)),
@@ -604,10 +628,15 @@ def _news_reader_rows(
         f"""SELECT n.source, n.source_item_id, n.revision_number,
                    n.cluster_id, n.source_published_time,
                    n.collector_first_seen_time, n.fetched_time,
-                   max(n.fetched_time,
-                       COALESCE(t.parsed_at, n.fetched_time),
-                       COALESCE(a.parsed_at, n.fetched_time),
-                       COALESCE(i.assessed_at, n.fetched_time),
+                    max(n.fetched_time,
+                        COALESCE(t.parsed_at, n.fetched_time),
+                        COALESCE(a.parsed_at, n.fetched_time),
+                        COALESCE((SELECT max(any_a.parsed_at)
+                          FROM news_annotations any_a
+                          WHERE any_a.source=n.source
+                            AND any_a.source_item_id=n.source_item_id
+                            AND any_a.revision_number=n.revision_number), n.fetched_time),
+                        COALESCE(i.assessed_at, n.fetched_time),
                        COALESCE(f.failed_at, n.fetched_time),
                        COALESCE(cf.failed_at, n.fetched_time)) AS mirror_updated_at,
                    n.headline AS original_headline,
@@ -634,6 +663,13 @@ def _news_reader_rows(
                    a.geopolitical_risk, a.usd_impulse, a.novelty,
                    a.confidence, a.llm_model_version, a.prompt_version,
                    a.parsed_at, i.impact_class,
+                   CASE WHEN f.failure_id IS NOT NULL THEN COALESCE(
+                     fe.failure_code,
+                     CASE WHEN f.error_type='ValueError'
+                       THEN 'MODEL_OUTPUT_CONTRACT_FAILED'
+                       ELSE 'MODEL_REQUEST_FAILED' END)
+                   END AS annotation_failure_code,
+                   f.error AS annotation_failure,
                    i.event_state AS impact_event_state,
                    i.update_type AS impact_update_type,
                    i.confidence AS impact_confidence,
@@ -710,6 +746,8 @@ def _news_reader_rows(
                 AND latest_cf.source_item_id=n.source_item_id
                 AND latest_cf.revision_number=n.revision_number
               ORDER BY latest_cf.attempt_number DESC LIMIT 1)
+            LEFT JOIN news_llm_failure_evidence_v1 fe
+              ON fe.failure_id=f.failure_id
             LEFT JOIN source_eligibility_rules r
               ON r.eligibility_version='news-source-eligibility-v4-live-delay-materiality'
              AND r.source=n.source
@@ -767,6 +805,8 @@ def _serialize_news_rows(
             str(item.get("source_item_id") or ""),
             int(item.get("revision_number") or 0),
         )
+        annotation_failure_code = item.pop("annotation_failure_code", None)
+        annotation_failure = item.pop("annotation_failure", None)
         if item.get("parsed_at"):
             item["annotation_status"] = "READY"
         elif (
@@ -777,6 +817,13 @@ def _serialize_news_rows(
             reason_code, reason = _not_required_reason(item, epoch)
             item["annotation_reason_code"] = reason_code
             item["annotation_reason"] = reason
+        elif item.get("annotation_status") in {"BACKING_OFF", "DEAD_LETTER"}:
+            item["annotation_reason_code"] = (
+                annotation_failure_code or "MODEL_REQUEST_FAILED"
+            )
+            item["annotation_reason"] = _annotation_failure_reason(
+                annotation_failure, annotation_failure_code
+            )
         _apply_impact_status(item, now)
         item["entities"] = (
             json.loads(item.pop("entities_json"))
@@ -1517,7 +1564,14 @@ def _dashboard_payload(database: Path) -> dict:
                       a.inflation_impulse, a.growth_impulse,
                       a.geopolitical_risk, a.usd_impulse, a.novelty,
                       a.confidence, a.llm_model_version, a.prompt_version,
-                      a.parsed_at,
+                       a.parsed_at,
+                       CASE WHEN f.failure_id IS NOT NULL THEN COALESCE(
+                         fe.failure_code,
+                         CASE WHEN f.error_type='ValueError'
+                           THEN 'MODEL_OUTPUT_CONTRACT_FAILED'
+                           ELSE 'MODEL_REQUEST_FAILED' END)
+                       END AS annotation_failure_code,
+                       f.error AS annotation_failure,
                        i.impact_class,
                        i.event_state AS impact_event_state,
                        i.update_type AS impact_update_type,
@@ -1597,15 +1651,17 @@ def _dashboard_payload(database: Path) -> dict:
                      AND NOT (latest_f.error_type='RuntimeError'
                               AND latest_f.error='All configured Gemini keys unavailable for this batch')
                     ORDER BY latest_f.failed_at DESC LIMIT 1)
-               LEFT JOIN news_content_failures cf
+                LEFT JOIN news_content_failures cf
                  ON cf.failure_id=(
                    SELECT latest_cf.failure_id
                    FROM news_content_failures latest_cf
                    WHERE latest_cf.source=n.source
                      AND latest_cf.source_item_id=n.source_item_id
                      AND latest_cf.revision_number=n.revision_number
-                   ORDER BY latest_cf.attempt_number DESC LIMIT 1)
-               LEFT JOIN source_eligibility_rules r
+                    ORDER BY latest_cf.attempt_number DESC LIMIT 1)
+                LEFT JOIN news_llm_failure_evidence_v1 fe
+                  ON fe.failure_id=f.failure_id
+                LEFT JOIN source_eligibility_rules r
                  ON r.eligibility_version='news-source-eligibility-v4-live-delay-materiality'
                 AND r.source=n.source
                WHERE NOT EXISTS (

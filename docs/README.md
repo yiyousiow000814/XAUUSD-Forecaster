@@ -84,7 +84,8 @@ current rules merely because they discovered one.
 
 - Audits: [test suite](audits/TEST_SUITE.md),
   [U5 authority](audits/U5_AUTHORITY.md), and
-  [documentation inventory](audits/DOCUMENTATION_INVENTORY.md)
+  [documentation inventory](audits/DOCUMENTATION_INVENTORY.md), and
+  [legacy news irrelevance recovery](audits/NEWS_IRRELEVANCE_RECOVERY_2026_08_16.md)
 - Reports: [Phase 2F repair](reports/PHASE2F_REPAIR.md),
   [initial free-data feasibility](reports/FREE_DATA_FEASIBILITY.md),
   [canonical event handover](reports/CANONICAL_EVENT_HANDOVER.md),

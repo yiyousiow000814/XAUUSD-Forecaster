@@ -68,7 +68,7 @@ type News = {
   content_error_type?: string | null;
   summary_zh?: string | null;
   annotation_status: "READY" | "QUEUED" | "BACKING_OFF" | "DEAD_LETTER" | "WAITING_CONTENT" | "CONTENT_UNAVAILABLE" | "NOT_REQUIRED";
-  annotation_reason_code?: "DUPLICATE_CONTENT" | "SEARCH_LEAD" | "HISTORICAL_MATERIAL";
+  annotation_reason_code?: "DUPLICATE_CONTENT" | "SEARCH_LEAD" | "HISTORICAL_MATERIAL" | "MODEL_OUTPUT_CONTRACT_FAILED" | "MODEL_OUTPUT_INVALID" | "PROVIDER_HTTP_ERROR" | "MODEL_REQUEST_FAILED";
   annotation_reason?: string;
   impact_status?: "PENDING_ANNOTATION" | "PENDING_IMPACT" | "ACTIVE" | "EXPIRED_ON_RECEIPT" | "EXPIRED_BEFORE_AVAILABLE" | "EXPIRED" | "DUPLICATE_REPORT" | "COMMENTARY_ONLY" | "HISTORICAL_CONTEXT" | "BACKGROUND" | "MISSING_PUBLICATION_TIME";
   impact_class?: "IMMEDIATE" | "SAME_DAY" | "DATA_RELEASE" | "POLICY_SHIFT" | "ONGOING_EVENT" | "BACKGROUND";
@@ -662,6 +662,10 @@ const ANNOTATION_REASON_LABELS: Record<string, string> = {
   DUPLICATE_CONTENT: "重复内容",
   SEARCH_LEAD: "搜索线索",
   HISTORICAL_MATERIAL: "历史资料",
+  MODEL_OUTPUT_CONTRACT_FAILED: "模型输出未通过验证",
+  MODEL_OUTPUT_INVALID: "模型输出无法读取",
+  PROVIDER_HTTP_ERROR: "模型服务暂时失败",
+  MODEL_REQUEST_FAILED: "模型请求失败",
 };
 const IMPACT_STATUS_LABELS: Record<string, string> = {
   PENDING_ANNOTATION: "等待 Gemini 阅读",
@@ -786,9 +790,9 @@ function NewsRow({
         </section> : annotationStatus === "QUEUED" ? <section className="gemini-summary summary-queued">
           <span>中文摘要排队中</span><p>正文已经完整入库，不会截断；系统会依序生成中文摘要，标题翻译独立处理。</p>
         </section> : annotationStatus === "BACKING_OFF" ? <section className="gemini-summary summary-queued">
-          <span>暂时退避</span><p>本次模型响应未通过验证；系统已停止每分钟重试，将在退避到期后有限重试。</p>
+          <span>暂时退避</span><p>{current.annotation_reason ?? "本次模型响应未通过验证；系统已停止每分钟重试，将在退避到期后有限重试。"}</p>
         </section> : annotationStatus === "DEAD_LETTER" ? <section className="gemini-summary summary-waiting">
-          <span>已隔离</span><p>相同永久错误重复出现，系统不会再自动消耗 Flash 配额；该新闻保留在 Ledger 中等待规则修复或人工复核。</p>
+          <span>{annotationReasonLabel}</span><p>{current.annotation_reason ?? "相同永久错误重复出现，系统不会再自动消耗 Flash 配额；该新闻保留在 Ledger 中等待规则修复或人工复核。"}</p>
         </section> : annotationStatus === "NOT_REQUIRED" ? <section className="gemini-summary summary-queued">
           <span>{annotationReasonLabel}</span><p>{current.annotation_reason ?? "该新闻不满足当前解析条件，不会消耗 AI 配额或进入模型。"}</p>
         </section> : row.content_fetch_status === "UNAVAILABLE" ? <section className="gemini-summary summary-waiting">

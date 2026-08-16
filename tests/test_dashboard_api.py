@@ -927,6 +927,140 @@ def test_news_reader_materializations_exclude_semantically_irrelevant_articles(
     assert {row["source_item_id"] for row in dashboard["recent_news"]} == expected
 
 
+def test_news_archive_reemits_legacy_invalid_annotation_for_recovery(tmp_path) -> None:
+    module = _dashboard_module()
+    now = datetime.now(UTC).replace(microsecond=0)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "Complete source evidence awaiting semantic recovery. " * 20
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    ledger.append_news_revision({
+        "source": "gdelt_gold_geopolitics", "source_item_id": "recover-me",
+        "source_published_time": now, "collector_first_seen_time": now,
+        "fetched_time": now, "headline": "Current market report",
+        "body": body, "content_hash": digest, "cluster_id": "recover-me",
+    })
+    first = module._news_archive_page(ledger.connection, None, 20)
+    invalid = json.dumps({
+        "xauusd_relevance": "IRRELEVANT",
+        "semantic_reason_zh": "语言或结构一致性检查未通过，禁止进入当前模型。",
+    }, ensure_ascii=False)
+    parsed_at = now + timedelta(seconds=1)
+    ledger.connection.execute(
+        """INSERT INTO news_annotations(
+          annotation_id,source,source_item_id,revision_number,raw_content_hash,
+          event_type,entities_json,hawkishness,inflation_impulse,growth_impulse,
+          geopolitical_risk,usd_impulse,novelty,confidence,llm_model_version,
+          prompt_version,parse_started_at,parsed_at,annotation_json)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            "legacy-invalid", "gdelt_gold_geopolitics", "recover-me", 1, digest,
+            "other", "[]", 0, 0, 0, 0, 0, 0, 0,
+            "gemini-3.5-flash-lite", PROMPT_VERSION,
+            parsed_at.isoformat(), parsed_at.isoformat(), invalid,
+        ),
+    )
+    ledger.connection.commit()
+
+    changed = module._news_archive_page(
+        ledger.connection, first["next_cursor"], 20,
+    )
+
+    assert [row["source_item_id"] for row in changed["items"]] == ["recover-me"]
+    assert changed["items"][0]["annotation_status"] == "QUEUED"
+    assert changed["items"][0]["mirror_updated_at"] == parsed_at.isoformat()
+    assert changed["withdrawals"] == []
+    ledger.close()
+
+
+def test_news_archive_explains_terminal_model_contract_failure(tmp_path) -> None:
+    module = _dashboard_module()
+    now = datetime.now(UTC).replace(microsecond=0)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "Complete source body with one exact evidence sentence. " * 20
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    ledger.append_news_revision({
+        "source": "google_news_fed_rates", "source_item_id": "contract-failure",
+        "source_published_time": now, "collector_first_seen_time": now,
+        "fetched_time": now, "headline": "Fed policy report", "body": body,
+        "content_hash": digest, "cluster_id": "contract-failure",
+    })
+    cause = "annotation supporting evidence is absent from source"
+    ledger.append_llm_failure({
+        "failure_id": "terminal-contract-failure", "task_type": "ANNOTATION",
+        "source": "google_news_fed_rates", "source_item_id": "contract-failure",
+        "revision_number": 1, "raw_content_hash": digest,
+        "llm_model_version": "gemini-3.5-flash-lite",
+        "prompt_version": PROMPT_VERSION, "attempt_number": 2,
+        "error_type": "ValueError",
+        "error_signature": hashlib.sha256(cause.encode()).hexdigest(),
+        "error": cause, "failed_at": now, "is_terminal": True,
+        "failure_evidence": {
+            "failure_code": "MODEL_OUTPUT_CONTRACT_FAILED",
+            "failure_stage": "SEMANTIC_CONTRACT", "response_hash": "a" * 64,
+            "selected_output": {"supporting_evidence": ["bounded excerpt"]},
+            "cause_type": "ValueError", "cause": cause,
+        },
+    })
+    ledger.append_news_revision({
+        "source": "google_news_fed_rates", "source_item_id": "provider-backoff",
+        "source_published_time": now - timedelta(minutes=1),
+        "collector_first_seen_time": now, "fetched_time": now,
+        "headline": "Fed service retry", "body": body,
+        "content_hash": digest, "cluster_id": "provider-backoff",
+    })
+    provider_cause = "HTTP Error 429: quota temporarily unavailable"
+    ledger.append_llm_failure({
+        "failure_id": "provider-backoff", "task_type": "ANNOTATION",
+        "source": "google_news_fed_rates", "source_item_id": "provider-backoff",
+        "revision_number": 1, "raw_content_hash": digest,
+        "llm_model_version": "gemini-3.5-flash-lite",
+        "prompt_version": PROMPT_VERSION, "attempt_number": 1,
+        "error_type": "HTTPError",
+        "error_signature": hashlib.sha256(provider_cause.encode()).hexdigest(),
+        "error": provider_cause, "failed_at": now,
+        "next_retry_at": now + timedelta(minutes=10), "is_terminal": False,
+        "failure_evidence": {
+            "failure_code": "PROVIDER_HTTP_ERROR",
+            "failure_stage": "PROVIDER_REQUEST", "response_hash": "b" * 64,
+            "selected_output": {}, "cause_type": "HTTPError",
+            "cause": provider_cause,
+        },
+    })
+
+    archive = module._news_archive_page(ledger.connection, None, 20)
+    ledger.close()
+    dashboard = module._dashboard_payload(tmp_path / "forward.sqlite3")
+    archive_by_id = {row["source_item_id"]: row for row in archive["items"]}
+    dashboard_by_id = {
+        row["source_item_id"]: row for row in dashboard["recent_news"]
+    }
+
+    terminal = archive_by_id["contract-failure"]
+    assert terminal["annotation_status"] == "DEAD_LETTER"
+    assert terminal["annotation_reason_code"] == (
+        "MODEL_OUTPUT_CONTRACT_FAILED"
+    )
+    assert terminal["annotation_reason"] == (
+        "Gemini 返回的证据片段无法在来源正文中逐字找到。"
+    )
+    assert archive_by_id["provider-backoff"]["annotation_status"] == "BACKING_OFF"
+    assert archive_by_id["provider-backoff"]["annotation_reason_code"] == (
+        "PROVIDER_HTTP_ERROR"
+    )
+    assert archive_by_id["provider-backoff"]["annotation_reason"] == (
+        "Gemini 服务返回 HTTP 错误。"
+    )
+    assert dashboard_by_id["contract-failure"]["annotation_reason_code"] == (
+        "MODEL_OUTPUT_CONTRACT_FAILED"
+    )
+    assert dashboard_by_id["contract-failure"]["annotation_reason"] == (
+        "Gemini 返回的证据片段无法在来源正文中逐字找到。"
+    )
+    assert dashboard_by_id["provider-backoff"]["annotation_reason_code"] == (
+        "PROVIDER_HTTP_ERROR"
+    )
+
+
 def test_dashboard_distinguishes_unavailable_content_from_pending(tmp_path) -> None:
     now = datetime(2026, 8, 7, 9, 0, tzinfo=UTC)
     database = tmp_path / "forward.sqlite3"

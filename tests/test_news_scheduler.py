@@ -317,6 +317,65 @@ def test_superseded_jobs_are_reconciled_without_another_model_attempt(tmp_path) 
     ledger.close()
 
 
+def test_pending_contract_reopens_jobs_completed_by_invalid_legacy_annotations(
+    tmp_path,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    body = "Complete source evidence for semantic recovery. " * 20
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    ledger.append_news_revision({
+        "source": "semantic-recovery", "source_item_id": "legacy-invalid",
+        "source_published_time": NOW, "collector_first_seen_time": NOW,
+        "fetched_time": NOW, "headline": "Current macroeconomic report",
+        "body": body, "content_hash": digest, "cluster_id": "legacy-invalid",
+    })
+    job_id = enqueue_job(
+        ledger.connection, task_type="ACTIVE_ANNOTATION",
+        source="semantic-recovery", source_item_id="legacy-invalid",
+        revision_number=1, prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+        priority="NORMAL", now=NOW,
+    )
+    claimed = claim_job(
+        ledger.connection, worker_id="old-worker", pool=ROUTINE_POOL, now=NOW,
+    )
+    assert claimed and claimed.job_id == job_id
+    complete_job(ledger.connection, job_id, "old-worker", now=NOW)
+    legacy_invalid = json.dumps({
+        "xauusd_relevance": "IRRELEVANT",
+        "semantic_reason_zh": "语言或结构一致性检查未通过，禁止进入当前模型。",
+    }, ensure_ascii=False)
+    ledger.connection.execute(
+        """INSERT INTO news_annotations(
+          annotation_id,source,source_item_id,revision_number,raw_content_hash,
+          event_type,entities_json,hawkishness,inflation_impulse,growth_impulse,
+          geopolitical_risk,usd_impulse,novelty,confidence,llm_model_version,
+          prompt_version,parse_started_at,parsed_at,annotation_json)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            "legacy-invalid", "semantic-recovery", "legacy-invalid", 1, digest,
+            "other", "[]", 0, 0, 0, 0, 0, 0, 0,
+            "gemini-3.5-flash-lite", CURRENT_NEWS_PROMPT_VERSION,
+            NOW.isoformat(), NOW.isoformat(), legacy_invalid,
+        ),
+    )
+    ledger.connection.commit()
+
+    discovered = sync_pending_jobs(ledger.connection, now=NOW + timedelta(minutes=1))
+    row = ledger.connection.execute(
+        "SELECT state,attempt_count,completed_at FROM news_ai_jobs_v1 WHERE job_id=?",
+        (job_id,),
+    ).fetchone()
+
+    assert discovered["ACTIVE_ANNOTATION"] == 1
+    assert tuple(row) == ("QUEUED", 1, None)
+    recovered = claim_job(
+        ledger.connection, worker_id="recovery", pool=ROUTINE_POOL,
+        now=NOW + timedelta(minutes=1),
+    )
+    assert recovered and recovered.job_id == job_id
+    ledger.close()
+
+
 def test_sync_uses_v15_semantic_priority_not_headline_keywords(tmp_path) -> None:
     body = "The agency reported that its ordinary administrative update took effect. " * 8
     digest = hashlib.sha256(body.encode()).hexdigest()

@@ -243,6 +243,7 @@ def enqueue_job(
     prompt_version: str,
     priority: str,
     annotation_id: str = "",
+    reopen_completed: bool = False,
     now: datetime | None = None,
 ) -> str:
     if task_type not in TASKS:
@@ -265,6 +266,15 @@ def enqueue_job(
                 None, None, 0, None, timestamp, timestamp, None,
             ),
         )
+        if reopen_completed:
+            connection.execute(
+                """UPDATE news_ai_jobs_v1
+                   SET state='QUEUED',available_at=?,lease_owner=NULL,
+                       lease_expires_at=NULL,last_error=NULL,
+                       updated_at=?,completed_at=NULL
+                   WHERE job_id=? AND state='COMPLETED'""",
+                (timestamp, timestamp, job_id),
+            )
     return job_id
 
 
@@ -788,6 +798,7 @@ def sync_pending_jobs(
                     else "BACKGROUND" if task_type == "TITLE_TRANSLATION"
                     else "NORMAL"
                 ),
+                reopen_completed=task_type == "ACTIVE_ANNOTATION",
                 now=instant,
             )
     reconcile_completed_jobs(connection, now=instant)
@@ -801,19 +812,21 @@ def reconcile_completed_jobs(
 ) -> int:
     """Close jobs already satisfied or superseded by immutable evidence."""
     from .annotation import INVALID_CHINESE_TITLE
+    from .news_semantics import validated_annotation_predicate
 
     timestamp = _iso(now or datetime.now(UTC))
     with connection:
         completed = connection.execute(
-            """UPDATE news_ai_jobs_v1 AS j
+            f"""UPDATE news_ai_jobs_v1 AS j
                SET state='COMPLETED',lease_owner=NULL,lease_expires_at=NULL,
                    updated_at=?,completed_at=?
                WHERE state<>'COMPLETED' AND (
                  (task_type='ACTIVE_ANNOTATION' AND EXISTS (
                    SELECT 1 FROM news_annotations a
-                   WHERE a.source=j.source AND a.source_item_id=j.source_item_id
-                     AND a.revision_number=j.revision_number
-                     AND a.prompt_version=j.prompt_version))
+                    WHERE a.source=j.source AND a.source_item_id=j.source_item_id
+                      AND a.revision_number=j.revision_number
+                      AND a.prompt_version=j.prompt_version
+                      AND {validated_annotation_predicate('a')}))
                  OR (task_type='ACTIVE_IMPACT' AND EXISTS (
                    SELECT 1 FROM news_impact_assessments_v1 i
                    WHERE i.annotation_id=j.annotation_id
