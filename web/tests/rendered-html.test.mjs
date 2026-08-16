@@ -212,19 +212,18 @@ test("keeps nested compact counts in each dashboard headline hierarchy", () => {
   }
 });
 
-test("keeps two primary audit actions above a complete six-metric grid", () => {
+test("keeps every remaining audit destination in one balanced desktop grid", () => {
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   const view = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const auditGrid = [...css.matchAll(/\.audit-tabs\s*\{([^}]*)\}/g)]
     .map((match) => match[1])
-    .find((rule) => /grid-template-columns:repeat\(6,minmax\(0,1fr\)\)/.test(rule)) ?? "";
-  assert.match(auditGrid, /grid-template-columns:repeat\(6,minmax\(0,1fr\)\)/);
+    .find((rule) => /grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/.test(rule)) ?? "";
+  assert.match(auditGrid, /grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/);
   assert.match(auditGrid, /gap:1px/);
   assert.match(auditGrid, /padding:0/);
   assert.match(auditGrid, /background:var\(--ink\)/);
-  assert.match(css, /\.audit-tabs a \{ grid-column:span 2; border:0; background:var\(--paper\); \}/);
-  assert.match(css, /\.audit-tabs a\.audit-tab-primary \{ grid-column:span 3; \}/);
-  assert.equal(view.match(/className=\{`audit-tab-primary/g)?.length, 2);
+  assert.match(css, /\.audit-tabs a \{ border:0; background:var\(--paper\); \}/);
+  assert.doesNotMatch(view, /audit-tab-primary/);
   assert.equal(view.match(/<a href="\/audit\?view=/g)?.length, 8);
   assert.match(css, /\.news-timeline \{[^}]*gap:0/);
   assert.match(css, /\.news-timeline div:not\(:nth-child\(3n\+1\)\) \{ border-left:1px solid/);
