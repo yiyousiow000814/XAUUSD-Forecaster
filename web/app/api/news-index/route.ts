@@ -292,8 +292,14 @@ export async function POST(request: Request) {
                '$.impact_status', 'SUPERSEDED_CONTRACT'
              )
          WHERE mirror_contract <> ?
-           AND COALESCE(json_extract(payload, '$.annotation_status'), '')
-             NOT IN ('READY','NOT_REQUIRED')`,
+           AND (
+             COALESCE(json_extract(payload, '$.annotation_status'), '')
+               NOT IN ('READY','NOT_REQUIRED')
+             OR (
+               json_extract(payload, '$.annotation_status')='NOT_REQUIRED'
+               AND json_extract(payload, '$.model_visibility')='NOT_YET_PARSED'
+             )
+           )`,
         ).bind(contract),
       ]);
       return NextResponse.json({

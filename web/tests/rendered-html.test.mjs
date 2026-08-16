@@ -691,6 +691,8 @@ test("keeps the 60-day news archive inside bounded D1 work", () => {
   assert.match(index, /DELETE FROM news_index WHERE mirror_contract <> \?/);
   assert.match(index, /neutralize_operational_state_for_contract/);
   assert.match(index, /CONTRACT_HANDOVER_PENDING/);
+  assert.match(index, /annotation_status'\)='NOT_REQUIRED'/);
+  assert.match(index, /model_visibility'\)='NOT_YET_PARSED'/);
   assert.match(index, /SET model_candidate=0 WHERE mirror_contract <> \?/);
   assert.match(index, /SET parsed=0,/);
   assert.match(index, /body\.withdraw_detail_keys\.length > 20/);
