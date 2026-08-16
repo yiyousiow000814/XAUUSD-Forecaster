@@ -1366,7 +1366,7 @@ export default function AuditView() {
         </nav>
         <p className="evidence-window-note">
           {evidenceWindowPartial
-            ? <>显示最近 <b>{formatExactCount(visibleEvidence.length)}</b> / {formatExactCount(evidenceModeTotal)} 个；完整总数保留在审计账本。</>
+            ? <>本筛选已载入 <b>{formatExactCount(visibleEvidence.length)}</b> / {formatExactCount(evidenceModeTotal)} 个；完整总数保留在审计账本。</>
             : <>已显示全部 <b>{formatExactCount(evidenceModeTotal)}</b> 个。</>}
         </p>
         <details className="evidence-rule-note"><summary>查看统计规则</summary><p>核心新闻要求一手完整证据或至少两个独立可靠来源确认；大视野新闻还纳入单一可靠来源并降低权重。新闻只从首次收到后生效，按事件类型和有效交易时间逐步衰减。Gemini 与 Gemma 负责理解事件语义，版本化证据规则负责时间、身份、去重与准入；每个事件下方可核对统一身份和原始发布域名。</p></details>

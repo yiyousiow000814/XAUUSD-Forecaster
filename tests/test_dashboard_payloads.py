@@ -8,10 +8,10 @@ from xauusd_forecaster.dashboard_payloads import bounded_evidence_window
 @pytest.mark.parametrize(
     ("seen_count", "unseen_count", "limit", "expected_seen", "expected_unseen"),
     [
-        (97, 105, 60, 30, 30),
-        (97, 105, 100, 50, 50),
-        (4, 100, 60, 4, 56),
-        (100, 3, 60, 57, 3),
+        (97, 105, 60, 60, 60),
+        (97, 105, 100, 97, 100),
+        (4, 100, 60, 4, 60),
+        (100, 3, 60, 60, 3),
         (2, 2, 60, 2, 2),
     ],
 )
@@ -32,7 +32,7 @@ def test_bounded_evidence_window_keeps_each_visibility_state_inspectable(
 
     bounded = bounded_evidence_window(rows, limit)
 
-    assert len(bounded) == min(len(rows), limit)
+    assert len(bounded) == expected_seen + expected_unseen
     assert sum(bool(row["model_seen"]) for row in bounded) == expected_seen
     assert sum(not bool(row["model_seen"]) for row in bounded) == expected_unseen
     assert [row["event_key"] for row in bounded if row["model_seen"]] == [
@@ -68,7 +68,9 @@ def test_bounded_evidence_window_retains_every_current_event_before_history(
 
     bounded = bounded_evidence_window(rows, 60)
 
-    assert len(bounded) == 60
+    assert len(bounded) == 120
     assert {
         row["event_key"] for row in bounded if row["broad_model_eligible"]
     } == {f"unseen-{index}" for index in range(70, 86)}
+    assert sum(bool(row["model_seen"]) for row in bounded) == 60
+    assert sum(not bool(row["model_seen"]) for row in bounded) == 60

@@ -639,11 +639,11 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
     assert market_decision["source_decision_id"] == "d1"
     assert market_decision["model_version"] == "unused-field"
     assert len(mirrored["recent_decisions"]) == module.REMOTE_DECISION_LIMIT
-    assert len(mirrored["news_evidence"]) == module.REMOTE_EVIDENCE_LIMIT
-    assert sum(row["model_seen"] for row in mirrored["news_evidence"]) == 30
-    assert sum(not row["model_seen"] for row in mirrored["news_evidence"]) == 30
-    assert mirrored["mirror_window"]["news_evidence_seen"] == 30
-    assert mirrored["mirror_window"]["news_evidence_unseen"] == 30
+    assert len(mirrored["news_evidence"]) == 2 * module.REMOTE_EVIDENCE_LIMIT_PER_STATE
+    assert sum(row["model_seen"] for row in mirrored["news_evidence"]) == 60
+    assert sum(not row["model_seen"] for row in mirrored["news_evidence"]) == 60
+    assert mirrored["mirror_window"]["news_evidence_seen"] == 60
+    assert mirrored["mirror_window"]["news_evidence_unseen"] == 60
     assert learning["learning_curves"]["models"] == [
         {"lifecycle_status": "LATEST", "model_version": "latest"},
     ]
