@@ -2387,9 +2387,23 @@ def _dashboard_payload(database: Path) -> dict:
             },
             "display_only": {
                 "model": DEFAULT_GEMMA_MODEL,
-                "role": "标题中文翻译，不进入模型训练",
-                "requests_per_minute": GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
-                "input_tokens_per_minute": GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
+                "role": "事件归并与影响说明；低优先级时兼顾中文标题展示",
+                "configured_account_count": gemini_account_count,
+                "requests_per_minute_per_account": (
+                    GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL
+                ),
+                "requests_per_minute": (
+                    GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL
+                    * gemini_account_count
+                ),
+                "input_tokens_per_minute_per_account": (
+                    GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL
+                ),
+                "input_tokens_per_minute": (
+                    GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL
+                    * gemini_account_count
+                ),
+                "minute_scope": "ACCOUNT",
             },
             "antigravity": {
                 "enabled": False,

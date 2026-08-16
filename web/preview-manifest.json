@@ -6,7 +6,13 @@
     "annotation_queue.requests_per_minute_per_account",
     "annotation_queue.requests_per_minute",
     "annotation_queue.input_tokens_per_minute",
-    "annotation_queue.minute_scope"
+    "annotation_queue.minute_scope",
+    "llm_routing.display_only.configured_account_count",
+    "llm_routing.display_only.requests_per_minute_per_account",
+    "llm_routing.display_only.requests_per_minute",
+    "llm_routing.display_only.input_tokens_per_minute_per_account",
+    "llm_routing.display_only.input_tokens_per_minute",
+    "llm_routing.display_only.minute_scope"
   ],
   "resources": {
     "status": "/api/status",

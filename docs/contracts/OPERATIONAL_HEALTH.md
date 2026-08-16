@@ -21,7 +21,7 @@ The initial cross-component catalog is:
 | `OPS_AI_JOB_RETRY_LOOP` | One active AI job has been claimed unusually often. |
 | `OPS_AI_ROUTE_CAPACITY_SATURATED` | Capacity deferrals exceed useful completions for a model route. |
 | `OPS_AI_PIPELINE_STALLED` | Work exceeded its route-specific SLA and the route made no progress during the monitoring window. |
-| `OPS_AI_BACKLOG_OVERDUE` | The oldest active work exceeded its task-specific queue SLA. |
+| `OPS_AI_BACKLOG_OVERDUE` | The oldest currently claimable work exceeded its task-specific queue SLA. Future scheduled retries do not count as overdue backlog. |
 | `OPS_AI_FAILURE_RATE_HIGH` | Recent model, transport, or validation failures exceed the expected rate. |
 | `OPS_AI_NEW_DEAD_LETTER` | New terminally isolated work appeared during the monitoring window. |
 | `OPS_COMPONENT_UNHEALTHY` | A published runtime component is warning, stale, or in error. |
@@ -56,14 +56,21 @@ The status payload must cover every published runtime component and news
 source, every active scheduler task route, and the separately persisted Daily
 Brief state machine. Scheduler evidence includes:
 
-- queued, leased, backing-off, and dead-letter counts;
+- queued, leased, backing-off, claimable, scheduled-retry, and dead-letter counts;
 - successful, deliberately retired, deferred, and failed attempts over the
   current 15-minute window;
-- oldest active work age;
+- oldest claimable work age and the earliest future retry time;
 - highest active claim count and a bounded non-secret job reference.
 
 Counts from articles, event identities, prediction exposures, and training
 rows remain distinct. One must never substitute for another in health gates.
+
+This contract covers the local forward-prediction and news data plane published
+by the status snapshot. Cloudflare Assistant turn, title, compaction, and memory
+index jobs have their own D1 execution contracts and are not represented by the
+local scheduler counters. Browser rendering failures and loss of the public
+status endpoint itself require an external observer; the application cannot
+reliably declare its own endpoint unreachable.
 ## Visibility
 
 Warnings and errors must be visible without expanding a diagnostic control.

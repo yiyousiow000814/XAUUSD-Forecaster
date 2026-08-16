@@ -137,6 +137,14 @@ test("keeps branch throughput limits while refreshing Preview metrics from D1", 
       input_tokens_per_minute: 225_000,
       minute_scope: "ACCOUNT",
     },
+    llm_routing: { display_only: {
+      configured_account_count: 1,
+      requests_per_minute_per_account: 20,
+      requests_per_minute: 20,
+      input_tokens_per_minute_per_account: 15_000,
+      input_tokens_per_minute: 15_000,
+      minute_scope: "ACCOUNT",
+    } },
     system: {},
   });
 
@@ -148,12 +156,19 @@ test("keeps branch throughput limits while refreshing Preview metrics from D1", 
     input_tokens_per_minute: 225_000,
     minute_scope: "ACCOUNT",
   });
+  assert.equal(merged.llm_routing.display_only.requests_per_minute, 20);
   assert.deepEqual(merged.preview.branch_snapshot.status_paths, [
     "annotation_queue.requests_per_minute_per_key",
     "annotation_queue.requests_per_minute_per_account",
     "annotation_queue.requests_per_minute",
     "annotation_queue.input_tokens_per_minute",
     "annotation_queue.minute_scope",
+    "llm_routing.display_only.configured_account_count",
+    "llm_routing.display_only.requests_per_minute_per_account",
+    "llm_routing.display_only.requests_per_minute",
+    "llm_routing.display_only.input_tokens_per_minute_per_account",
+    "llm_routing.display_only.input_tokens_per_minute",
+    "llm_routing.display_only.minute_scope",
   ]);
 });
 
@@ -557,6 +572,12 @@ test("keeps every audit collection in the compact Preview manifest", () => {
     "annotation_queue.requests_per_minute",
     "annotation_queue.input_tokens_per_minute",
     "annotation_queue.minute_scope",
+    "llm_routing.display_only.configured_account_count",
+    "llm_routing.display_only.requests_per_minute_per_account",
+    "llm_routing.display_only.requests_per_minute",
+    "llm_routing.display_only.input_tokens_per_minute_per_account",
+    "llm_routing.display_only.input_tokens_per_minute",
+    "llm_routing.display_only.minute_scope",
   ]);
   assert.equal(manifest.resources.marketHistory, "/api/market-history");
 });
@@ -873,8 +894,7 @@ test("reports cTrader health independently from downstream decision lag", () => 
 test("live room presents broker-confirmed closure instead of a WAIT prediction", () => {
   const source = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
   assert.match(source, /距离重开/);
-  assert.match(source, /cTrader 已确认 XAUUSD 休市/);
-  assert.match(source, /暂停新增预测与 30 分钟样本/);
+  assert.doesNotMatch(source, /cTrader 已确认 XAUUSD 休市/);
   assert.match(source, /const dialAction = marketClosed/);
   assert.match(source, /marketUnavailable\s*\? "无行情"/);
 });

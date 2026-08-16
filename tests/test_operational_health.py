@@ -132,8 +132,13 @@ def test_background_route_stalls_only_after_its_own_sla() -> None:
     )
 
     connection.execute(
-        "UPDATE news_ai_jobs_v1 SET created_at=? WHERE job_id=?",
-        ((NOW - timedelta(hours=3)).isoformat(), job_id),
+        """UPDATE news_ai_jobs_v1 SET created_at=?,available_at=?
+           WHERE job_id=?""",
+        (
+            (NOW - timedelta(hours=3)).isoformat(),
+            (NOW - timedelta(hours=3)).isoformat(),
+            job_id,
+        ),
     )
     connection.commit()
     overdue = scheduler_health_snapshot(connection, now=NOW)
@@ -210,3 +215,44 @@ def test_daily_brief_deferral_keeps_the_underlying_failure_code() -> None:
     assert alert["evidence"]["failure_evidence"]["selected_output"] == {
         "unknown_evidence_ids": ["invented:1"]
     }
+
+
+def test_future_backoff_is_scheduled_retry_not_overdue_backlog() -> None:
+    connection = _connection()
+    job_id = enqueue_job(
+        connection,
+        task_type="ACTIVE_IMPACT",
+        source="source",
+        source_item_id="future-retry",
+        revision_number=1,
+        annotation_id="annotation",
+        prompt_version="prompt",
+        priority="BACKGROUND",
+        now=NOW - timedelta(hours=10),
+    )
+    retry_at = NOW + timedelta(hours=6)
+    connection.execute(
+        """UPDATE news_ai_jobs_v1
+           SET state='BACKING_OFF',available_at=?,attempt_count=2
+           WHERE job_id=?""",
+        (retry_at.isoformat(), job_id),
+    )
+    connection.commit()
+
+    snapshot = scheduler_health_snapshot(connection, now=NOW)
+    impact = next(
+        task for task in snapshot["scheduler"]["tasks"]
+        if task["task_type"] == "ACTIVE_IMPACT"
+    )
+
+    assert impact["backing_off"] == 1
+    assert impact["claimable"] == 0
+    assert impact["scheduled_retry"] == 1
+    assert impact["earliest_retry_at"] == retry_at.isoformat()
+    assert impact["oldest_age_seconds"] is None
+    assert not any(
+        alert["code"] in {
+            "OPS_AI_BACKLOG_OVERDUE", "OPS_AI_PIPELINE_STALLED",
+        }
+        for alert in snapshot["alerts"]
+    )

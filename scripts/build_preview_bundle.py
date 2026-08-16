@@ -59,6 +59,27 @@ def _apply_branch_runtime_contract(status: dict) -> None:
         ),
         "minute_scope": "ACCOUNT",
     })
+    display_only = status.setdefault("llm_routing", {}).setdefault(
+        "display_only", {}
+    )
+    display_only.update({
+        "configured_account_count": account_count,
+        "requests_per_minute_per_account": (
+            model_limits.GEMMA_SAFE_REQUESTS_PER_MINUTE_PER_ACCOUNT
+        ),
+        "requests_per_minute": (
+            model_limits.GEMMA_SAFE_REQUESTS_PER_MINUTE_PER_ACCOUNT
+            * account_count
+        ),
+        "input_tokens_per_minute_per_account": (
+            model_limits.GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_PER_ACCOUNT
+        ),
+        "input_tokens_per_minute": (
+            model_limits.GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_PER_ACCOUNT
+            * account_count
+        ),
+        "minute_scope": "ACCOUNT",
+    })
     if (not isinstance(status.get("daily_news_brief_summary"), dict)
             and status.get("generated_at")):
         generated = datetime.fromisoformat(str(status["generated_at"]))

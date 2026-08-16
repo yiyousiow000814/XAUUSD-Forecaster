@@ -144,7 +144,7 @@ export default function HealthView() {
     {error ? <div className="error-banner">状态读取失败：{error}</div> : null}
     <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
     <section id="operational-alerts" className={`operational-health-panel is-${(payload?.operational_health?.status ?? "HEALTHY").toLowerCase()}`} aria-label="运行异常与错误码">
-      <header><div><p className="eyebrow">OPERATIONAL ERROR CODES</p><h2>运行异常与定位证据</h2></div><p>心跳、吞吐、容量、重试、队龄、隔离、来源和同步使用同一套错误码；正常运行不等于正在产生进展。</p></header>
+      <header><div><p className="eyebrow">OPERATIONAL ERROR CODES</p><h2>运行异常与定位证据</h2></div><p>覆盖本机预测与新闻数据链路、新闻 AI 队列、来源、同步和 Daily Brief；Assistant 云端任务另有独立运行面。正常运行不等于正在产生进展。</p></header>
       {(payload?.operational_health?.alerts ?? []).length ? <div className="operational-alert-list">
         {payload?.operational_health?.alerts.map((alert, index) => <article key={`${alert.code}-${alert.scope}-${index}`} className={`is-${alert.severity.toLowerCase()}`}>
           <div><code>{alert.code}</code><b>{alert.scope}</b><span>{alert.severity === "ERROR" ? "需要处理" : "需要留意"}</span></div>
@@ -157,10 +157,13 @@ export default function HealthView() {
           <header><strong>{schedulerTaskLabel[task.task_type] ?? task.task_type}</strong><code>{task.task_type}</code></header>
           <dl>
             <div><dt>当前工作</dt><dd>{task.queued + task.leased + task.backing_off}</dd></div>
+            <div><dt>可立即处理</dt><dd>{task.claimable}</dd></div>
+            <div><dt>定时重试</dt><dd>{task.scheduled_retry}</dd></div>
             <div><dt>15分钟完成</dt><dd>{task.completed_15m}</dd></div>
             <div><dt>容量延后</dt><dd>{task.deferred_15m}</dd></div>
             <div><dt>失败</dt><dd>{task.errors_15m}</dd></div>
-            <div><dt>最旧等待</dt><dd>{compactElapsed(task.oldest_age_seconds)}</dd></div>
+            <div><dt>最旧可处理</dt><dd>{compactElapsed(task.oldest_age_seconds)}</dd></div>
+            <div><dt>下次重试</dt><dd>{task.earliest_retry_at ? localTime(task.earliest_retry_at) : "—"}</dd></div>
             <div><dt>最高领取</dt><dd>{task.max_claim_count}{task.max_claim_job_ref ? ` · ${task.max_claim_job_ref}` : ""}</dd></div>
           </dl>
           {task.failure_codes_15m.length ? <p className="scheduler-failure-codes">{task.failure_codes_15m.map(item => <code key={item.code}>{item.code} × {item.count}</code>)}</p> : null}

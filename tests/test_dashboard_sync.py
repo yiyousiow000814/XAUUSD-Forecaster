@@ -198,6 +198,14 @@ def test_preview_overlays_branch_owned_model_throughput_contract() -> None:
         "input_tokens_per_minute": 225_000,
         "minute_scope": "ACCOUNT",
     }
+    assert status["llm_routing"]["display_only"] == {
+        "configured_account_count": 1,
+        "requests_per_minute_per_account": 20,
+        "requests_per_minute": 20,
+        "input_tokens_per_minute_per_account": 15_000,
+        "input_tokens_per_minute": 15_000,
+        "minute_scope": "ACCOUNT",
+    }
 
 
 def test_preview_backfills_missing_daily_brief_summary_without_fake_counts() -> None:
