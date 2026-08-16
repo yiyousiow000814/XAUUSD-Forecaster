@@ -1349,12 +1349,14 @@ def _news_evidence_display_rows(
         event_key = row["event_key"]
         if event_key in displayed_events:
             continue
-        if row.get("prompt_version") != PROMPT_VERSION:
-            continue
-        if row.get("evidence_grade") not in {
-            "PRIMARY", "CORROBORATED", "SINGLE_RELIABLE",
-        }:
-            continue
+        current_eligible = bool(row.get("broad_model_eligible"))
+        if not current_eligible:
+            if row.get("prompt_version") != PROMPT_VERSION:
+                continue
+            if row.get("evidence_grade") not in {
+                "PRIMARY", "CORROBORATED", "SINGLE_RELIABLE",
+            }:
+                continue
         display = {name: row.get(name) for name in display_fields}
         display.update({
             "model_seen": False,
@@ -1367,7 +1369,7 @@ def _news_evidence_display_rows(
             "model_versions": [],
             "model_unseen_reason_codes": (
                 ["ELIGIBLE_AWAITING_FROZEN_PREDICTION"]
-                if row["broad_model_eligible"] else list(row["reason_codes"])
+                if current_eligible else list(row["reason_codes"])
             ),
         })
         rows.append(display)

@@ -206,6 +206,12 @@ Terminal display or evidence failures may receive one explicitly versioned,
 persisted recovery authorization after the responsible contract is fixed. A
 new failure from that recovery is terminal again and cannot loop automatically.
 
+The bounded dashboard evidence window retains currently model-eligible events
+before historical-only rows. While the current-event total fits that declared
+window, the headline total and inspectable current-event details must be
+complete and use the same eligibility result, including eligible evidence from
+an earlier prompt version.
+
 The immutable publisher body and content hash always remain the audit source of
 truth. Gemma receives that complete body whenever it fits the project token
 window. For an oversized body, the existing full-body Gemini annotation anchors
