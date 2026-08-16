@@ -284,6 +284,13 @@ def _budgeted_evidence_packet(
 
 
 def _brief_payload(day: str, evidence: list[dict[str, object]]) -> dict[str, object]:
+    cited_evidence = [
+        {"ref": f"E{index:02d}", **{
+            key: value for key, value in row.items() if key != "id"
+        }}
+        for index, row in enumerate(evidence, start=1)
+    ]
+    citation_refs = [str(row["ref"]) for row in cited_evidence]
     return {
         "systemInstruction": {"parts": [{"text": (
             "你是黄金市场新闻编辑。只可总结提供的资料，不作交易建议，不补充外部事实。"
@@ -292,9 +299,10 @@ def _brief_payload(day: str, evidence: list[dict[str, object]]) -> dict[str, obj
         )}]},
         "contents": [{"parts": [{"text": (
             f"生成 {day} 每日简报。返回标题、3至5句综合overview和最多8条重点；"
-            "每条必须列出支持它的evidence_ids。如果资料不足，宁可少写。"
+            "每条必须从资料中的ref原样选择支持它的evidence_ids；不得复制或猜测内部ID。"
+            "如果资料不足，宁可少写。"
             "只返回JSON。\nEVIDENCE\n" +
-            json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))
+            json.dumps(cited_evidence, ensure_ascii=False, separators=(",", ":"))
         )}]}],
         "generationConfig": {
             "responseMimeType": "application/json", "temperature": 0,
@@ -310,7 +318,9 @@ def _brief_payload(day: str, evidence: list[dict[str, object]]) -> dict[str, obj
                             "headline": {"type": "string", "maxLength": 240},
                             "summary": {"type": "string", "maxLength": 800},
                             "evidence_ids": {"type": "array", "minItems": 1,
-                                "maxItems": 8, "items": {"type": "string"}},
+                                "maxItems": 8, "items": {
+                                    "type": "string", "enum": citation_refs,
+                                }},
                         },
                     }},
                 },
@@ -329,7 +339,10 @@ def _decode_brief(envelope: dict[str, object], evidence: list[dict[str, object]]
     if (not isinstance(items, list) or not title or len(title) > 120
             or not overview or len(overview) > 1200):
         raise ValueError("Gemma daily brief returned an invalid result")
-    allowed = {str(row["id"]) for row in evidence}
+    citation_map = {
+        f"E{index:02d}": str(row["id"])
+        for index, row in enumerate(evidence, start=1)
+    }
     canonical = []
     for item in items[:8]:
         if not isinstance(item, dict):
@@ -338,10 +351,10 @@ def _decode_brief(envelope: dict[str, object], evidence: list[dict[str, object]]
         if (not isinstance(headline, str) or not headline.strip() or len(headline.strip()) > 240
                 or not isinstance(summary, str) or not summary.strip() or len(summary.strip()) > 800
                 or not isinstance(refs, list) or not 1 <= len(refs) <= 8
-                or any(not isinstance(ref, str) or ref not in allowed for ref in refs)):
+                or any(not isinstance(ref, str) or ref not in citation_map for ref in refs)):
             raise ValueError("Gemma daily brief cited unknown evidence")
         canonical.append({"headline": headline.strip(), "summary": summary.strip(),
-                          "evidence_ids": refs})
+                          "evidence_ids": [citation_map[ref] for ref in refs]})
     return {"title": title, "overview": overview, "items": canonical}
 
 

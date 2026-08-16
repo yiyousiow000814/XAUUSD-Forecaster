@@ -63,7 +63,10 @@ an important early event out of the packet.
 The generated product is a synthesis, not an evidence index. Every current
 revision contains a model-written overview that relates the day's material
 events, followed by a bounded set of summarized developments with exact
-evidence IDs. Raw candidate headlines and annotations remain supporting input;
+evidence IDs. The model receives bounded short citation references; validated
+references are mapped back to exact internal evidence IDs before persistence,
+so copying a long opaque identifier is never part of the model task. Raw
+candidate headlines and annotations remain supporting input;
 the UI does not present them as the Daily Brief itself.
 
 ## Capacity and failure
@@ -71,7 +74,8 @@ the UI does not present them as the Daily Brief itself.
 `DAILY_BRIEF` has a declared model route. The background worker uses only
 normal `ROUTINE` credentials and scheduler-owned account RPM, TPM, and RPD
 accounting. A PREEMPTIBLE credential is not required. Missing capacity becomes
-`DEFERRED` with a retry time.
+`DEFERRED` with a retry time. Account headroom is re-ranked for each date in a
+batch, so one exhausted account cannot starve the remaining bounded backlog.
 
 Malformed JSON, schema violations, unknown evidence references, and provider
 errors fail closed: no brief is written, an immutable failure is recorded, and
