@@ -33,7 +33,7 @@ type Prediction = {
   prediction_status: string;
 };
 
-type AuditDeskView = "briefs" | "search" | "qa" | "news" | "evidence" | "stories" | "decisions" | "league" | "coverage";
+type AuditDeskView = "briefs" | "search" | "news" | "evidence" | "stories" | "decisions" | "league" | "coverage";
 
 type Decision = {
   decision_id: string;
@@ -236,33 +236,6 @@ type NewsSearchResponse = {
   };
   source_mode: "D1_ARCHIVE" | "READ_ONLY_D1_ARCHIVE" | "IMMUTABLE_PREVIEW_SNAPSHOT" | "NOT_QUERIED";
   archive_complete: boolean | null;
-};
-
-type NewsQuestion = {
-  id: string;
-  question: string;
-  status: "PENDING" | "PROCESSING" | "ANSWERED" | "FAILED" | "REJECTED" | "EXPIRED";
-  asked_at: string;
-  answer: string | null;
-  answer_status: "ANSWERED" | "INSUFFICIENT_EVIDENCE" | null;
-  evidence_ids: string[];
-  answered_at: string | null;
-  model_version: string | null;
-  prompt_version: string;
-  retrieval: { source_mode?: string; query?: string } | null;
-  attempt_count: number;
-  failure_code: string | null;
-};
-
-type NewsQuestionAccess = "unknown" | "authorized" | "denied" | "preview";
-
-const QUESTION_STATUS_LABELS: Record<NewsQuestion["status"], string> = {
-  PENDING: "等待处理",
-  PROCESSING: "正在检索并整理",
-  ANSWERED: "已回答",
-  FAILED: "处理失败",
-  REJECTED: "未被接受",
-  EXPIRED: "已过期",
 };
 
 const emptyNewsSearch = (): NewsSearchResponse => ({
@@ -823,7 +796,9 @@ function NewsRow({
 export default function AuditView() {
   const searchParams = useSearchParams();
   const requestedView = searchParams.get("view");
-  const initialView = requestedView === "briefs" || requestedView === "search" || requestedView === "qa" || requestedView === "news" || requestedView === "evidence" || requestedView === "stories" || requestedView === "decisions" || requestedView === "league" || requestedView === "coverage"
+  const initialView = requestedView === "qa"
+    ? "briefs"
+    : requestedView === "briefs" || requestedView === "search" || requestedView === "news" || requestedView === "evidence" || requestedView === "stories" || requestedView === "decisions" || requestedView === "league" || requestedView === "coverage"
     ? requestedView
     : "news";
   const cachedStatus = readDashboardResource<Payload>("/api/status");
@@ -860,12 +835,6 @@ export default function AuditView() {
   const [searchResults, setSearchResults] = useState<NewsSearchResponse>(emptyNewsSearch);
   const [searchBusy, setSearchBusy] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
-  const [questionInput, setQuestionInput] = useState("");
-  const [questions, setQuestions] = useState<NewsQuestion[]>([]);
-  const [questionBusy, setQuestionBusy] = useState(false);
-  const [questionError, setQuestionError] = useState<string | null>(null);
-  const [questionAccess, setQuestionAccess] = useState<NewsQuestionAccess>("unknown");
-  const questionIdempotencyRef = useRef<string | null>(null);
   const [newsCategory, setNewsCategory] = useState("全部");
   const [newsPage, setNewsPage] = useState(1);
   const [newsReviewState, setNewsReviewState] = useState<NewsReviewState>("COMPLETED");
@@ -1050,86 +1019,11 @@ export default function AuditView() {
     }
   };
 
-  const refreshNewsQuestions = useCallback(async () => {
-    const response = await fetch("/api/news-questions?limit=10", {
-      cache: "no-store",
-      headers: { Accept: "application/json" },
-    });
-    const responseType = response.headers.get("content-type")?.toLowerCase() ?? "";
-    if (response.redirected || responseType.includes("text/html")) {
-      setQuestionAccess("denied");
-      setQuestions([]);
-      setQuestionError("需要先完成 Cloudflare Access 登录");
-      return;
-    }
-    const body = await response.json().catch(() => ({})) as {
-      items?: NewsQuestion[]; preview?: boolean; error?: string;
-    };
-    if (response.status === 401) {
-      setQuestionAccess("denied");
-      setQuestions([]);
-      setQuestionError("需要先通过 Cloudflare Access 的 OWNER 身份验证");
-      return;
-    }
-    if (!response.ok) throw new Error(body.error || "新闻问答暂不可用");
-    setQuestions(Array.isArray(body.items) ? body.items : []);
-    setQuestionAccess(body.preview ? "preview" : "authorized");
-    setQuestionError(null);
-  }, []);
-
-  const askNewsQuestion = async () => {
-    const question = questionInput.normalize("NFKC").trim().replace(/\s+/g, " ");
-    if (question.length < 4 || question.length > 200) {
-      setQuestionError("问题需要4至200个字");
-      return;
-    }
-    if (questionAccess !== "authorized") return;
-    setQuestionBusy(true);
-    try {
-      questionIdempotencyRef.current ??= crypto.randomUUID();
-      const response = await fetch("/api/news-questions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Idempotency-Key": questionIdempotencyRef.current,
-        },
-        body: JSON.stringify({ question }),
-      });
-      const responseType = response.headers.get("content-type")?.toLowerCase() ?? "";
-      if (response.redirected || responseType.includes("text/html") || response.status === 401) {
-        setQuestionAccess("denied");
-        setQuestionError("需要重新完成 Cloudflare Access 登录");
-        return;
-      }
-      const body = await response.json().catch(() => ({})) as NewsQuestion & { error?: string };
-      if (!response.ok) throw new Error(body.error || "无法提交问题");
-      setQuestions(previous => [body, ...previous.filter(item => item.id !== body.id)].slice(0, 10));
-      setQuestionInput("");
-      setQuestionError(null);
-      questionIdempotencyRef.current = null;
-    } catch (reason) {
-      setQuestionError(reason instanceof Error ? reason.message : "无法提交问题");
-    } finally {
-      setQuestionBusy(false);
-    }
-  };
-
-  const hasActiveQuestion = questions.some(item => item.status === "PENDING" || item.status === "PROCESSING");
   useEffect(() => {
-    if (view !== "qa") return;
-    const refresh = () => void refreshNewsQuestions().catch(reason => setQuestionError(
-      reason instanceof Error ? reason.message : "新闻问答暂不可用",
-    ));
-    const initial = window.setTimeout(refresh, 0);
-    if (!hasActiveQuestion) return () => window.clearTimeout(initial);
-    const interval = window.setInterval(() => {
-      refresh();
-    }, 5_000);
-    return () => {
-      window.clearTimeout(initial);
-      window.clearInterval(interval);
-    };
-  }, [hasActiveQuestion, refreshNewsQuestions, view]);
+    if (requestedView === "qa") {
+      window.history.replaceState(null, "", "/?room=audit&view=briefs");
+    }
+  }, [requestedView]);
 
   const progress = useMemo(() => {
     const training = payload?.training;
@@ -1315,7 +1209,6 @@ export default function AuditView() {
       <nav className="audit-tabs" aria-label="审计视图">
         <a href="/audit?view=briefs" className={view === "briefs" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("briefs"); }}>每日简报 <b><MetricValue phase={statusState}><CountValue value={payload?.daily_news_briefs?.length} /></MetricValue></b></a>
         <a href="/audit?view=search" className={view === "search" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("search"); }}>搜索 <b aria-hidden="true">⌕</b></a>
-        <a href="/audit?view=qa" className={view === "qa" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("qa"); }}>私有问答 <b aria-hidden="true">?</b></a>
         <a href="/audit?view=news" className={view === "news" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("news"); }}>新闻 <b><MetricValue phase={newsPhase}><CountValue value={readableNewsTotal} /></MetricValue></b></a>
         <a href="/audit?view=evidence" className={view === "evidence" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("evidence"); }}>当前可用新闻事件 <b><MetricValue phase={statusState}><CountValue value={newsMetrics.events.currently_model_eligible} /></MetricValue></b></a>
         <a href="/audit?view=stories" className={view === "stories" ? "active" : ""} onClick={(event) => { event.preventDefault(); selectView("stories"); }}>事件脉络 <b><MetricValue phase={statusState}><CountValue value={activeEventTotal} /></MetricValue></b></a>
@@ -1330,7 +1223,6 @@ export default function AuditView() {
         <select aria-label="切换证据台页面" value={view} onChange={event => selectView(event.currentTarget.value as AuditDeskView)}>
           <option value="briefs">每日简报 · {formatExactCount(payload?.daily_news_briefs?.length)}</option>
           <option value="search">搜索新闻</option>
-          <option value="qa">私有问答</option>
           <option value="news">新闻 · {formatExactCount(readableNewsTotal)}</option>
           <option value="evidence">当前可用新闻事件 · {formatExactCount(newsMetrics.events.currently_model_eligible)}</option>
           <option value="stories">事件脉络 · {formatExactCount(activeEventTotal)}</option>
@@ -1367,56 +1259,6 @@ export default function AuditView() {
         <div className="search-results">{searchResults.items.map(row => <article key={row.detail_key}><time>{time(row.source_published_time ?? row.collector_first_seen_time)}</time><h3>{row.headline}</h3><p>{row.emerging_topic_zh || publicImpactReason(row.impact_reason_zh) || row.source}</p><small>{row.source} · {row.category} · 证据 {row.detail_key.slice(0, 12)}…</small></article>)}</div>
         {searchResults.source_mode !== "NOT_QUERIED" && searchResults.total === 0 && <p className="search-empty">没有符合条件的新闻证据。</p>}
         {searchResults.total > searchResults.page_size && <nav className="search-pages" aria-label="搜索结果分页"><button type="button" aria-label="上一页搜索结果" disabled={searchResults.page <= 1 || searchBusy} onClick={() => void runNewsSearch(searchResults.page - 1, searchResults)}>←</button><span>{formatExactCount(searchResults.page)} / {formatExactCount(Math.ceil(searchResults.total / searchResults.page_size))}</span><button type="button" aria-label="下一页搜索结果" disabled={searchResults.page >= Math.ceil(searchResults.total / searchResults.page_size) || searchBusy} onClick={() => void runNewsSearch(searchResults.page + 1, searchResults)}>→</button></nav>}
-      </section>}
-      {view === "qa" && <section className="news-qa-desk">
-        <header>
-          <p className="eyebrow">PRIVATE · EVIDENCE GROUNDED</p>
-          <h2>问已收录的新闻</h2>
-          <p>只检索有稳定证据 ID 的新闻；没有足够资料时会明确说不知道。</p>
-        </header>
-        {questionAccess === "preview" && <p className="qa-notice">PR Preview 只展示只读界面，不读取私人历史、不创建队列，也不调用模型。</p>}
-        {questionAccess === "denied" && <p className="qa-notice">
-          这个入口只向 Cloudflare Access 中配置的 OWNER 开放。
-          <a href="/assistant">完成 Access 登录</a>
-        </p>}
-        <form onSubmit={event => { event.preventDefault(); void askNewsQuestion(); }}>
-          <label htmlFor="news-question">新闻问题</label>
-          <textarea
-            id="news-question"
-            value={questionInput}
-            maxLength={200}
-            disabled={questionAccess !== "authorized" || questionBusy}
-            onChange={event => {
-              setQuestionInput(event.target.value);
-              questionIdempotencyRef.current = null;
-            }}
-            placeholder="例如：美联储最新表态为什么影响黄金？"
-          />
-          <button type="submit" disabled={questionAccess !== "authorized" || questionBusy}>
-            {questionBusy ? "提交中" : questionAccess === "unknown" ? "验证身份中" : "提交问题"}
-          </button>
-        </form>
-        {questionError && <p className="qa-error" role="alert">
-          {questionError}
-          {questionAccess !== "authorized" && questionAccess !== "preview"
-            ? <a href="/assistant">验证 Access 身份</a> : null}
-        </p>}
-        <div className="qa-list">
-          {questions.map(item => <article key={item.id}>
-            <header><span className={`qa-status qa-status-${item.status.toLocaleLowerCase("en-US")}`}>{QUESTION_STATUS_LABELS[item.status]}</span><time>{time(item.asked_at)}</time></header>
-            <h3>{item.question}</h3>
-            {(item.status === "PENDING" || item.status === "PROCESSING") && <p>后台工作器会在有界租约内完成检索与回答；页面只在本视图轮询。</p>}
-            {item.answer && <p className={item.answer_status === "INSUFFICIENT_EVIDENCE" ? "qa-insufficient" : ""}>{item.answer}</p>}
-            {item.status === "FAILED" && <p>已达到有限重试次数，没有发布未经验证的回答。</p>}
-            {item.status === "EXPIRED" && <p>问题在处理前失去时效；可以重新提交以使用新的检索截止时间。</p>}
-            <footer>
-              <span>{formatExactCount(item.evidence_ids.length)} 份已验证新闻证据</span>
-              <span>{item.model_version ? `${item.model_version} · ` : ""}{item.prompt_version}</span>
-            </footer>
-          </article>)}
-          {questionAccess === "authorized" && questions.length === 0 && <p className="qa-empty">还没有私人新闻问题。</p>}
-        </div>
-        <footer>仅供研究与决策支持 · 不提供交易建议 · 不具备下单权限</footer>
       </section>}
       {view === "news" && <>
         <section className="annotation-queue" aria-label="新闻处理进度">
