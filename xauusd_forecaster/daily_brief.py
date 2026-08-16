@@ -13,7 +13,10 @@ from .annotation import (
     PROMPT_VERSION, conservative_input_token_estimate, generate_metered_json,
 )
 from .forward_ledger import ForwardLedger
-from .model_gateway import ModelGatewayCapacityExhausted, ModelRequestAccountant
+from .model_gateway import (
+    ModelGatewayCapacityExhausted, ModelGatewayResponseInvalid,
+    ModelRequestAccountant,
+)
 from .news_semantics import validated_annotation_predicate
 
 
@@ -28,6 +31,38 @@ BRIEF_FAILURE_RETRY_MAX = timedelta(hours=1)
 BRIEF_FAILURE_ATTEMPT_LIMIT = 5
 KUALA_LUMPUR = ZoneInfo("Asia/Kuala_Lumpur")
 FINAL_PHASES = frozenset({"FINAL", "DEGRADED"})
+GENERATION_FAILURE_CODES = frozenset({
+    "MODEL_OUTPUT_CONTRACT_FAILED", "MODEL_OUTPUT_INVALID",
+    "PROVIDER_HTTP_ERROR", "MODEL_REQUEST_FAILED",
+})
+
+
+class DailyBriefEvidenceContractFailed(ValueError):
+    """A brief referenced evidence outside its bounded input packet."""
+
+    def __init__(self, result: dict[str, object], unknown_ids: list[str],
+                 *, allowed_count: int) -> None:
+        serialized = json.dumps(
+            result, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            default=str,
+        )
+        bounded_ids = [str(value)[:160] for value in unknown_ids[:8]]
+        message = (
+            "Gemma daily brief cited unknown evidence IDs: "
+            + ", ".join(bounded_ids)
+        )
+        self.failure_evidence = {
+            "failure_code": "MODEL_OUTPUT_CONTRACT_FAILED",
+            "failure_stage": "DAILY_BRIEF_EVIDENCE_IDS",
+            "response_hash": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+            "selected_output": {
+                "unknown_evidence_ids": bounded_ids,
+                "allowed_evidence_count": allowed_count,
+            },
+            "cause_type": type(self).__name__,
+            "cause": message[:500],
+        }
+        super().__init__(message)
 
 
 def _iso(value: datetime) -> str:
@@ -351,8 +386,13 @@ def _decode_brief(envelope: dict[str, object], evidence: list[dict[str, object]]
         if (not isinstance(headline, str) or not headline.strip() or len(headline.strip()) > 240
                 or not isinstance(summary, str) or not summary.strip() or len(summary.strip()) > 800
                 or not isinstance(refs, list) or not 1 <= len(refs) <= 8
-                or any(not isinstance(ref, str) or ref not in citation_map for ref in refs)):
-            raise ValueError("Gemma daily brief cited unknown evidence")
+                or any(not isinstance(ref, str) for ref in refs)):
+            raise ValueError("Gemma daily brief returned an invalid item")
+        unknown = [ref for ref in refs if ref not in citation_map]
+        if unknown:
+            raise DailyBriefEvidenceContractFailed(
+                result, unknown, allowed_count=len(citation_map),
+            )
         canonical.append({"headline": headline.strip(), "summary": summary.strip(),
                           "evidence_ids": [citation_map[ref] for ref in refs]})
     return {"title": title, "overview": overview, "items": canonical}
@@ -471,20 +511,46 @@ def _record_generation_failure(ledger: ForwardLedger, day: str, *, instant: date
     consecutive = (
         int(previous["generation_failure_count"]) + 1
         if previous and previous["pending_candidate_hash"] == candidate_hash
-        and previous["last_failure_code"] in {"INVALID_MODEL_OUTPUT", "MODEL_REQUEST_FAILED"}
+        and previous["last_failure_code"] in GENERATION_FAILURE_CODES
         else 1
     )
     minutes = min(2 ** min(consecutive - 1, 6), int(BRIEF_FAILURE_RETRY_MAX.total_seconds() / 60))
     retry_at = instant + timedelta(minutes=minutes)
-    code = "INVALID_MODEL_OUTPUT" if isinstance(error, (ValueError, KeyError, json.JSONDecodeError)) else "MODEL_REQUEST_FAILED"
-    message = str(error)[:500]
-    signature = hashlib.sha256(f"{type(error).__name__}:{message}".encode()).hexdigest()
+    evidence = getattr(error, "failure_evidence", None)
+    if isinstance(evidence, dict):
+        code = str(evidence.get("failure_code") or "MODEL_OUTPUT_INVALID")
+        error_type = str(evidence.get("cause_type") or type(error).__name__)[:120]
+        message = str(evidence.get("cause") or str(error))[:500]
+    elif isinstance(error, ModelGatewayResponseInvalid):
+        code = "MODEL_OUTPUT_INVALID"
+        error_type = str(error.cause_type)[:120]
+        message = str(error.cause_message)[:500]
+    elif isinstance(error, (ValueError, KeyError, json.JSONDecodeError)):
+        code = "MODEL_OUTPUT_INVALID"
+        error_type = type(error).__name__
+        message = str(error)[:500]
+    elif isinstance(getattr(error, "code", None), int):
+        code = "PROVIDER_HTTP_ERROR"
+        error_type = type(error).__name__
+        message = str(error)[:500]
+    else:
+        code = "MODEL_REQUEST_FAILED"
+        error_type = type(error).__name__
+        message = str(error)[:500]
+    signature = hashlib.sha256(f"{error_type}:{message}".encode()).hexdigest()
     failure_id = hashlib.sha256(f"{day}:{attempt}:{_iso(instant)}:{signature}".encode()).hexdigest()
+    evidence_json = (
+        json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if isinstance(evidence, dict) else None
+    )
     with ledger.connection:
         ledger.connection.execute(
-            "INSERT INTO daily_news_brief_failures_v1 VALUES (?,?,?,?,?,?,?,?,?)",
-            (failure_id, day, attempt, code, type(error).__name__, signature,
-             message, _iso(instant), _iso(retry_at)),
+            """INSERT INTO daily_news_brief_failures_v1
+               (failure_id,brief_date,attempt_number,failure_code,error_type,
+                error_signature,error,failed_at,next_retry_at,failure_evidence_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (failure_id, day, attempt, code, error_type, signature,
+             message, _iso(instant), _iso(retry_at), evidence_json),
         )
     _write_state(ledger, day, instant=instant, phase="DEFERRED", counts=counts,
                  latest_revision=int(latest["revision_number"]) if latest else None,
@@ -827,6 +893,20 @@ def daily_brief_summary(
                 "next_retry_at": None,
                 "is_final": False, "total_brief_days": total}
     result = dict(row)
+    latest_failure = (
+        connection.execute(
+            """SELECT failure_evidence_json FROM daily_news_brief_failures_v1
+               WHERE brief_date=? AND failed_at=? AND failure_code=?
+               ORDER BY attempt_number DESC LIMIT 1""",
+            (day, result.get("last_failure_at"), result.get("last_failure_code")),
+        ).fetchone()
+        if result.get("last_failure_at") and result.get("last_failure_code")
+        else None
+    )
+    result["last_failure_evidence"] = (
+        json.loads(str(latest_failure["failure_evidence_json"]))
+        if latest_failure and latest_failure["failure_evidence_json"] else None
+    )
     result["is_final"] = result["phase"] in FINAL_PHASES
     result["total_brief_days"] = total
     return result

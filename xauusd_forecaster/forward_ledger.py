@@ -199,6 +199,7 @@ CREATE TABLE IF NOT EXISTS daily_news_brief_failures_v1 (
     error TEXT NOT NULL,
     failed_at TEXT NOT NULL,
     next_retry_at TEXT NOT NULL,
+    failure_evidence_json TEXT,
     UNIQUE(brief_date,attempt_number)
 );
 
@@ -572,6 +573,17 @@ class ForwardLedger:
                         "ALTER TABLE daily_news_brief_refresh_state "
                         f"ADD COLUMN {name} {declaration}"
                     )
+            failure_columns = {
+                str(row["name"])
+                for row in self.connection.execute(
+                    "PRAGMA table_info(daily_news_brief_failures_v1)"
+                ).fetchall()
+            }
+            if "failure_evidence_json" not in failure_columns:
+                self.connection.execute(
+                    "ALTER TABLE daily_news_brief_failures_v1 "
+                    "ADD COLUMN failure_evidence_json TEXT"
+                )
 
     def append_snapshot(self, record: dict[str, Any]) -> None:
         decision_time = _iso(record["decision_time"])

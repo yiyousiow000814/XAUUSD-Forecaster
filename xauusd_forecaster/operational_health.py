@@ -351,6 +351,9 @@ def extend_with_component_alerts(
                         "generation_failure_count"
                     ),
                     "next_retry_at": daily_news_brief.get("next_retry_at"),
+                    "failure_evidence": daily_news_brief.get(
+                        "last_failure_evidence"
+                    ),
                 },
             ))
         if phase == "UPDATING" and pending_age is not None and pending_age >= 1800:
