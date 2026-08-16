@@ -1855,6 +1855,7 @@ test("renders only validated Assistant content blocks with phone-owned overflow"
   assert.match(renderer, /GEMINI 中文摘要/);
   assert.match(renderer, /GEMMA 市场影响判断/);
   assert.doesNotMatch(renderer, /<footer>[\s\S]*完成<\/button>[\s\S]*<\/footer>/);
+  assert.doesNotMatch(css, /\.assistant-news-dialog>article>footer button/);
   assert.match(renderer, /block\.data\.tone === "BOUNDARY"\) return null/);
   assert.doesNotMatch(transcript, /assistant-user-prompt-mobile|openPromptId/);
   assert.doesNotMatch(transcript, /回答属于决策支持/);
