@@ -108,6 +108,31 @@ export function planAssistantConversationSelection(
   return preview ? "LOAD_PREVIEW" : "LOAD_REMOTE";
 }
 
+const assistantModelIdentifier = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/;
+
+const assistantModelVersions = (value: unknown) => (
+  Array.isArray(value)
+    ? value.filter((item): item is string => (
+      typeof item === "string" && assistantModelIdentifier.test(item)
+    ))
+    : []
+);
+
+export function assistantModelLabel(provenance: Record<string, unknown>) {
+  const agent = provenance.agent && typeof provenance.agent === "object"
+    && !Array.isArray(provenance.agent)
+    ? provenance.agent as Record<string, unknown>
+    : null;
+  for (const value of [agent?.model_versions, provenance.model_versions]) {
+    const versions = [...new Set(assistantModelVersions(value))];
+    if (versions.length) return versions.join(" → ");
+  }
+  for (const value of [agent?.model_version, provenance.model_version]) {
+    if (typeof value === "string" && assistantModelIdentifier.test(value)) return value;
+  }
+  return "未记录模型";
+}
+
 const identifier = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$/;
 const canonicalTime = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const titleSources = new Set(["PROVISIONAL", "AI", "USER"]);

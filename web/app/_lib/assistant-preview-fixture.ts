@@ -10,8 +10,8 @@ export const ASSISTANT_PREVIEW_FIXTURE_LABEL =
 
 const modelProvenance = {
   kind: "ASSISTANT_CHAT",
-  model_version: "gemma-4-31b-it-preview-fixture",
   agent: {
+    model_versions: ["gemma-4-31b-it-preview-fixture"],
     model_routing: [{ reasoning_class: "TOOL_HEAVY" }],
     tool_execution: [[{
       name: "search_news_v1",
@@ -189,7 +189,7 @@ const previewMessages: Record<string, AssistantMessage[]> = {
       content: "优先核对三组有明确时间戳的证据：最新地缘事件是否有独立来源确认、美元与实际利率是否在休市前已经重定价、以及开盘后点差是否恢复到可比较范围。信息不足时应保持 WAIT，而不是把周末叙事当成已经可交易的事实。",
       content_document: null,
       created_at: "2026-08-14T14:04:00.000Z",
-      provenance: { ...modelProvenance, model_version: "gemma-4-31b-it-preview-fixture" },
+      provenance: modelProvenance,
     },
   ],
   "conversation-preview-inflation": [
