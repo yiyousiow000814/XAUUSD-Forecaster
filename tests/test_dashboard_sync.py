@@ -1020,7 +1020,8 @@ def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> 
     assert posted.count("https://remote/api/learning") == 1
     # An unknown mirror contract is reset once before the authoritative rows
     # are repopulated, so stale remote-only news cannot survive forever.
-    assert posted.count("https://remote/api/news-index") == 2
+    # Contract handover, authoritative row replay, then reconciliation.
+    assert posted.count("https://remote/api/news-index") == 3
     assert posted[0] == "https://remote/api/ingest"
 
     posted.clear()
@@ -1099,7 +1100,7 @@ def test_sync_repopulates_news_index_without_full_refresh_marker(
 
     module.sync_once(config)
 
-    assert posted.count("https://remote/api/news-index") == 2
+    assert posted.count("https://remote/api/news-index") == 3
     state = json.loads(state_file.read_text(encoding="utf-8"))
     assert state["mirror_contract_version"] == module.NEWS_MIRROR_CONTRACT_VERSION
     assert state["reconciled_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
@@ -1166,8 +1167,12 @@ def test_news_materialization_contract_upgrade_replays_and_reconciles_old_state(
     assert "after=" not in requested[0]
     assert f"limit={module.NEWS_WRITE_BATCH_ITEMS}" in requested[0]
     index_payloads = [body for url, body in posted if url.endswith("/news-index")]
-    assert index_payloads[0]["items"][0]["category"] == "风险情绪 / 避险"
-    assert index_payloads[0]["items"][0]["mirror_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
+    assert index_payloads[0] == {
+        "reset_annotation_state_for_contract": module.NEWS_MIRROR_CONTRACT_VERSION,
+    }
+    replay_payload = next(payload for payload in index_payloads if "items" in payload)
+    assert replay_payload["items"][0]["category"] == "风险情绪 / 避险"
+    assert replay_payload["items"][0]["mirror_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
     assert index_payloads[-1]["reconcile_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
     state = json.loads(state_file.read_text(encoding="utf-8"))
     assert state["cursor"] != stale_cursor
