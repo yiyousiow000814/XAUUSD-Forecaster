@@ -19,6 +19,14 @@ const { withPreviewIdentity } = await import("../app/api/_shared/preview-status.
 const { newsReviewStateOf, parseNewsReviewState } = await import("../app/_lib/news-review-state.ts");
 const { publicImpactReason, publicNewsRecord } = await import("../app/_lib/public-news-copy.ts");
 const { summarizeAssistantQueue } = await import("../app/api/_shared/assistant-operational-health.ts");
+const { globalOperationalAlerts } = await import("../app/_lib/operational-health.ts");
+
+test("reserves the global shell alert for blocking operational faults", () => {
+  const warning = { code: "OPS_AI_BACKLOG_OVERDUE", severity: "WARNING", scope: "ACTIVE_IMPACT", message_zh: "积压", blocking: false, evidence: {} };
+  const blocking = { code: "OPS_RUNTIME_UPDATE_FAILED", severity: "ERROR", scope: "DEPLOYMENT", message_zh: "更新失败", blocking: true, evidence: {} };
+  assert.deepEqual(globalOperationalAlerts([warning]), []);
+  assert.deepEqual(globalOperationalAlerts([warning, blocking]), [blocking]);
+});
 
 test("summarizes Assistant queue evidence without exposing job content", () => {
   const now = new Date("2026-08-16T12:15:00.000Z");
@@ -847,6 +855,7 @@ test("replaces the forecast state with the broker reopening countdown", () => {
 
 test("renders the Gemini quota status route", async () => {
   const source = readFileSync(new URL("../app/_views/StatusView.tsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   const { response, html } = await renderSettled("/?room=status", /AI 模型使用状态/);
   assert.equal(response.status, 200);
   assert.match(html, /AI 模型使用状态/);
@@ -857,6 +866,11 @@ test("renders the Gemini quota status route", async () => {
   assert.match(html, /逐 Key 配额/);
   assert.match(source, /今日已发送 \/ 上限/);
   assert.match(source, /className="quota-value"/);
+  assert.match(source, /className="quota-summary" aria-label="今日模型额度"/);
+  assert.match(source, /className="throughput-summary" aria-label="模型安全吞吐"/);
+  assert.match(css, /\.quota-summary \{[^}]*grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/);
+  assert.match(css, /\.throughput-summary \{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.doesNotMatch(css, /\.quota-summary article:last-child:nth-child\(odd\)/);
   assert.match(source, /<details className="quota-note">/);
   assert.match(source, /查看账本与 Google 额度的区别/);
   assert.match(html, /分支配置/);
@@ -877,6 +891,7 @@ test("renders component and news-source health on a separate route", async () =>
   const layout = readFileSync(new URL("../app/layout.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(layout, /<OperationalAlertBanner \/>/);
+  assert.match(readFileSync(new URL("../app/_components/OperationalAlertBanner.tsx", import.meta.url), "utf8"), /globalOperationalAlerts/);
   assert.match(view, /OPERATIONAL ERROR CODES/);
   assert.match(view, /alert\.code/);
   assert.match(view, /completed_15m/);
@@ -1498,6 +1513,7 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.coverage-card \{ display:grid;[\s\S]*?min-height:0;/);
   assert.match(css, /\.evidence-summary \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); gap:8px/);
   assert.match(css, /\.quota-summary \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); \}/);
+  assert.match(css, /@media \(max-width:430px\)\{[\s\S]*?\.throughput-summary \{ grid-template-columns:1fr; \}/);
   assert.match(css, /\.graph-modal>nav \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
   assert.match(css, /\.graph-modal,\.graph-modal\.graph-modal-curve,\.graph-modal\.graph-modal-versions \{ width:100vw; height:100dvh/);
   assert.match(page, /return-value return-history/);

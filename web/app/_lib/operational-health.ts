@@ -60,6 +60,11 @@ export type AssistantOperationalHealth = {
   current: boolean;
 };
 
+/** Keep the global shell quiet unless an operator-facing problem is blocking. */
+export const globalOperationalAlerts = (alerts: OperationalAlert[]) => alerts.filter(
+  alert => alert.blocking || alert.severity === "ERROR",
+);
+
 export const schedulerTaskLabel: Record<string, string> = {
   ACTIVE_ANNOTATION: "Gemini 语义复核",
   ACTIVE_IMPACT: "Gemma 事件与影响复核",
