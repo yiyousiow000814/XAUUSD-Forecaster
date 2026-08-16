@@ -58,6 +58,11 @@ evidence; processing and display use the correction for that recovery version.
 The generation source hash covers both the bounded evidence packet and the
 prompt contract version, so a new synthesis contract creates a new immutable
 revision even when the underlying candidates are unchanged.
+Revision persistence and finalization are separate append-only commits. If a
+worker stops after the revision commit, the next run must reuse that exact
+date-and-source-hash revision and finish finalization; it must not call the
+model again or attempt a duplicate insert. The same resume rule applies to the
+deterministic degraded fallback.
 
 The model packet is selected deterministically from the complete reviewed
 population. It keeps one highest-ranked update per canonical event, then ranks

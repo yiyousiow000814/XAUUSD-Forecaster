@@ -398,7 +398,7 @@ def _counts(rows: list[dict]) -> dict[str, int]:
 
 def _latest_brief(connection, day: str):
     return connection.execute(
-        "SELECT revision_number,source_hash,generated_at,prompt_version "
+        "SELECT revision_number,source_hash,generated_at,prompt_version,model_version "
         "FROM daily_news_briefs WHERE brief_date=? "
         "ORDER BY revision_number DESC LIMIT 1", (day,),
     ).fetchone()
@@ -599,7 +599,15 @@ def _finalize_generation_fallback(
     candidates: list[dict],
 ) -> dict[str, object]:
     """Close an irrecoverable historical synthesis with cited reviewed facts."""
-    revision = int(latest["revision_number"]) + 1 if latest else 1
+    existing = ledger.connection.execute(
+        """SELECT revision_number,generated_at FROM daily_news_briefs
+           WHERE brief_date=? AND source_hash=?""",
+        (day, candidate_hash),
+    ).fetchone()
+    if existing:
+        revision = int(existing["revision_number"])
+    else:
+        revision = int(latest["revision_number"]) + 1 if latest else 1
     important = sorted(candidates, key=_importance, reverse=True)[:8]
     brief = {
         "title": f"{day} 每日简报（自动整理）",
@@ -612,17 +620,18 @@ def _finalize_generation_fallback(
             ],
         } for row in important],
     }
-    generated_at = _iso(instant)
-    with ledger.connection:
-        ledger.connection.execute(
-            """INSERT INTO daily_news_briefs
-               (brief_date,revision_number,source_hash,cutoff_at,generated_at,
-                model_version,prompt_version,brief_json) VALUES (?,?,?,?,?,?,?,?)""",
-            (day, revision, candidate_hash, generated_at, generated_at,
-             "system-degraded-fallback", BRIEF_PROMPT_VERSION,
-             json.dumps(brief, ensure_ascii=False, sort_keys=True,
-                        separators=(",", ":"))),
-        )
+    generated_at = str(existing["generated_at"]) if existing else _iso(instant)
+    if not existing:
+        with ledger.connection:
+            ledger.connection.execute(
+                """INSERT INTO daily_news_briefs
+                   (brief_date,revision_number,source_hash,cutoff_at,generated_at,
+                    model_version,prompt_version,brief_json) VALUES (?,?,?,?,?,?,?,?)""",
+                (day, revision, candidate_hash, generated_at, generated_at,
+                 "system-degraded-fallback", BRIEF_PROMPT_VERSION,
+                 json.dumps(brief, ensure_ascii=False, sort_keys=True,
+                            separators=(",", ":"))),
+            )
     phase = _finalize(
         ledger, day, instant=instant, counts=counts, latest_revision=revision,
         last_generated_at=generated_at, candidate_hash=candidate_hash,
@@ -778,8 +787,20 @@ def update_daily_brief(
         if state and state["last_generated_candidate_hash"]
         else latest["source_hash"] if latest else None
     )
-    if (not recovering and latest and generated_hash == candidate_hash
-            and latest["prompt_version"] == BRIEF_PROMPT_VERSION):
+    latest_matches_candidate = bool(
+        latest
+        and latest["source_hash"] == candidate_hash
+        and latest["prompt_version"] == BRIEF_PROMPT_VERSION
+        and latest["model_version"] != "system-degraded-fallback"
+    )
+    state_matches_candidate = bool(
+        not recovering
+        and latest
+        and generated_hash == candidate_hash
+        and latest["prompt_version"] == BRIEF_PROMPT_VERSION
+        and latest["model_version"] != "system-degraded-fallback"
+    )
+    if latest_matches_candidate or state_matches_candidate:
         if day != current_day and counts["pending_items"] == 0:
             phase = _finalize(
                 ledger, day, instant=instant, counts=counts,
