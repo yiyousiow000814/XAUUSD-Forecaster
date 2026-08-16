@@ -6,7 +6,7 @@ import type {
 } from "./assistant-chat-client";
 
 export const ASSISTANT_PREVIEW_FIXTURE_LABEL =
-  "交互预览样本 · 不是真实会话 · 不调用模型";
+  "交互预览样本 · 管理与发送仅生产可用 · 不调用模型";
 
 const modelProvenance = {
   kind: "ASSISTANT_CHAT",
