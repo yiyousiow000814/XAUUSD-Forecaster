@@ -1844,8 +1844,10 @@ test("renders only validated Assistant content blocks with phone-owned overflow"
   assert.match(renderer, /GEMINI 中文摘要/);
   assert.match(renderer, /GEMMA 市场影响判断/);
   assert.match(renderer, /block\.data\.tone === "BOUNDARY"\) return null/);
-  assert.match(transcript, /assistant-user-prompt-mobile/);
-  assert.match(transcript, /aria-expanded=\{promptOpen\}/);
+  assert.doesNotMatch(transcript, /assistant-user-prompt-mobile|openPromptId/);
+  assert.doesNotMatch(transcript, /回答属于决策支持/);
+  assert.match(transcript, /conversation && !preview/);
+  assert.match(transcript, /aria-haspopup="menu"/);
   assert.match(transcript, /assistant-manage-toggle/);
   assert.match(migration, /content_document_json/);
   assert.match(migration, /assistant_messages_structured_content_contract/);
@@ -1855,8 +1857,10 @@ test("renders only validated Assistant content blocks with phone-owned overflow"
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-workbench \{[^}]*z-index:auto/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-conversation-rail \{[^}]*z-index:1020/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-rail-scrim \{[^}]*z-index:1010/);
-  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-news-dialog \{[^}]*width:100vw; height:100dvh/);
-  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-user-prompt-desktop \{ display:none/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-news-dialog \{[^}]*width:100vw; max-width:none; height:100dvh; max-height:none; margin:0/);
+  assert.match(css, /\.assistant-news-dialog \{[^}]*position:fixed; inset:0;[^}]*width:min\(720px,calc\(100vw - 48px\)\);[^}]*margin:auto/);
+  assert.match(css, /\.assistant-topbar \.mobile-dashboard-nav>label \{[^}]*grid-template-columns:minmax\(0,1fr\)/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell form \{[^}]*grid-template-columns:minmax\(0,1fr\) 52px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell textarea \{[^}]*height:52px;[^}]*max-height:52px/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-main \{[^}]*height:100dvh; min-height:0/);
 });
