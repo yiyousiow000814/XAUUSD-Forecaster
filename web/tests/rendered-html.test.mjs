@@ -1547,21 +1547,25 @@ test("presents Daily Brief as a compact Gemma synthesis with readable states", (
   assert.match(page, /brief\.overview/);
   assert.match(page, /daily_news_brief_summary\?\.brief_date/);
   assert.match(page, /DAILY_BRIEF_VISIBLE_DATES = 4/);
+  assert.match(page, /phase === "DEGRADED"[\s\S]*\? "需注意"/);
   assert.match(page, /className=\{`audit-main audit-view-\$\{view\}`\}/);
   assert.match(page, /className="brief-history-picker"/);
   assert.match(page, /选择更早的每日简报/);
   assert.match(page, /visibleItems = selected\?\.brief\.items\.slice\(0, 3\)/);
   assert.match(page, /className="brief-more-stories"/);
-  assert.match(page, /Boolean\(terminal\) && <details key=\{selectedDate\}>/);
+  assert.match(page, /qualityNote && <p className="brief-quality-note">/);
   assert.match(page, /additionalItems\.length > 0 && <details key=\{selectedDate\} className="brief-more-stories">/);
   assert.match(page, /最值得关注/);
   assert.match(page, /继续阅读 \{formatExactCount\(additionalItems\.length\)\} 个重点/);
-  assert.match(page, /因正文缺失或复核失败未纳入本版，避免摘要失真/);
+  assert.match(page, /Gemma 汇总未生成，当前为系统整理版/);
+  assert.match(page, /条资料未纳入：正文缺失或复核失败/);
   assert.match(css, /\.daily-brief-desk button small \{ color:inherit; font-size:12px;/);
   assert.match(css, /\.brief-overview p \{ max-width:76ch; font-size:16px; line-height:1\.75; \}/);
   assert.match(css, /\.daily-brief-desk header nav \{ display:grid; grid-template-columns:repeat\(4,minmax\(0,1fr\)\); width:100%; \}/);
   assert.match(css, /\.audit-main\.audit-view-briefs \.audit-intro \{ grid-template-columns:minmax\(0,1fr\) minmax\(300px,\.45fr\);/);
   assert.match(css, /\.brief-history-picker select \{ min-height:44px;/);
+  assert.match(css, /\.brief-history-picker \{[^}]*font-size:12px;/);
+  assert.match(css, /\.brief-quality-note \{ grid-column:1\/-1;/);
   assert.match(css, /\.brief-more-stories>summary \{ display:flex; align-items:center; min-height:52px;/);
 });
 
