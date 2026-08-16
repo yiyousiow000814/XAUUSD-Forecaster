@@ -195,7 +195,7 @@ export default function StatusView() {
       <RuntimeUpdateFailureBanner failure={payload?.system.runtime_update_failure} />
       <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
 
-      <section className="quota-summary">
+      <section className="quota-summary" aria-label="今日模型额度">
         <article><span>已配置 KEY</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.configured_key_count} /></MetricValue></strong><small>当前可用 <CountValue value={payload?.annotation_queue.available_key_count} format="exact" /> · 只显示匿名编号</small></article>
         <article><span>Flash 今日已发送</span><strong><MetricValue phase={currentPhase}><CountValue value={quota?.total_sent} /></MetricValue></strong><small>重要正文与训练特征</small></article>
         <article><span>Flash 今日剩余</span><strong className="good"><MetricValue phase={currentPhase}><CountValue value={quota?.total_remaining} /></MetricValue></strong><small>本机账本上限</small></article>
@@ -204,8 +204,11 @@ export default function StatusView() {
         <article><span>重要新闻保留</span><strong className="good"><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.priority_reserve} /></MetricValue></strong><small>FOMC、CPI、Payroll 专用</small></article>
         <article><span>错误退避中</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.backing_off} /></MetricValue></strong><small>到期前不会重复请求</small></article>
         <article><span>已隔离</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.dead_letter} /></MetricValue></strong><small>相同永久错误不再消耗配额</small></article>
+      </section>
+
+      <section className="throughput-summary" aria-label="模型安全吞吐">
         <article><span>Flash 安全吞吐</span><strong><MetricValue phase={throughputPhase} snapshotLabel="分支配置" snapshotTitle="此吞吐限制来自当前 PR 分支的构建配置，不是生产实时观测"><CountValue value={payload?.annotation_queue.requests_per_minute} /></MetricValue></strong><small>总 RPM · 每账户 <CountValue value={payload?.annotation_queue.requests_per_minute_per_account} format="exact" /> · 总 TPM <CountValue value={payload?.annotation_queue.input_tokens_per_minute} /> · 分支配置</small></article>
-        <article><span>Gemma 安全吞吐</span><strong><MetricValue phase={gemmaThroughputPhase} snapshotLabel="分支配置" snapshotTitle="每个独立账户分别执行 RPM 与 TPM 入场检查"><CountValue value={payload?.llm_routing.display_only.requests_per_minute} /></MetricValue></strong><small>总 RPM · 总 TPM <CountValue value={payload?.llm_routing.display_only.input_tokens_per_minute} /> · 并发上限 <CountValue value={payload?.llm_routing.display_only.maximum_concurrent_requests} format="exact" /> · <CountValue value={payload?.llm_routing.display_only.configured_account_count} format="exact" /> 个账户</small></article>
+        <article><span>Gemma 安全吞吐</span><strong><MetricValue phase={gemmaThroughputPhase} snapshotLabel="分支配置" snapshotTitle="每个独立账户分别执行 RPM 与 TPM 入场检查"><CountValue value={payload?.llm_routing.display_only.requests_per_minute} /></MetricValue></strong><small>总 RPM · 总 TPM <CountValue value={payload?.llm_routing.display_only.input_tokens_per_minute} /> · 并发 <CountValue value={payload?.llm_routing.display_only.maximum_concurrent_requests} format="exact" /> · <CountValue value={payload?.llm_routing.display_only.configured_account_count} format="exact" /> 个账户</small></article>
       </section>
 
       <section className="routing-grid">

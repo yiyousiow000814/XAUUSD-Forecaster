@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import DashboardLink from "./DashboardLink";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
-import type { AssistantOperationalHealth, OperationalAlert, OperationalHealth } from "../_lib/operational-health";
+import { globalOperationalAlerts, type AssistantOperationalHealth, type OperationalAlert, type OperationalHealth } from "../_lib/operational-health";
 
 type AlertPayload = {
   preview_status_summary?: boolean;
@@ -58,10 +58,10 @@ export default function OperationalAlertBanner() {
     blocking: true,
     evidence: {},
   };
-  const alerts = [
+  const alerts = globalOperationalAlerts([
     ...(health?.alerts ?? []),
     ...(assistantUnavailable ? [unavailableAlert] : assistant?.current ? assistant.alerts : []),
-  ].sort((left, right) => (
+  ]).sort((left, right) => (
     (left.severity === "ERROR" ? 0 : 1) - (right.severity === "ERROR" ? 0 : 1)
   ));
   if (payload?.preview_status_summary || alerts.length === 0) {
