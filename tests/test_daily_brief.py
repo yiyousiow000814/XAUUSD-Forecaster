@@ -110,16 +110,34 @@ def _fake_generation(calls: list[dict]):
         del api_key
         prompt = kwargs["payload"]["contents"][0]["parts"][0]["text"]
         evidence = json.loads(prompt.split("\nEVIDENCE\n", 1)[1])
-        calls.append({**kwargs, "evidence": evidence})
-        return ({
+        resolved_ids = []
+        for row in evidence:
+            probe = {"candidates": [{"content": {"parts": [{
+                "text": json.dumps({
+                    "title": "引用检查", "overview": "引用检查用于测试。",
+                    "items": [{
+                        "headline": "引用检查", "summary": "引用检查。",
+                        "evidence_ids": [row["ref"]],
+                    }],
+                }),
+            }]}}]}
+            resolved_ids.append(
+                kwargs["decode"](probe)["items"][0]["evidence_ids"][0]
+            )
+        calls.append({**kwargs, "evidence": evidence, "evidence_ids": resolved_ids})
+        result = {
             "title": "今日黄金新闻",
             "overview": "多项宏观变化共同影响黄金市场，重点集中在最新政策与价格反应。",
             "items": [{
                 "headline": str(evidence[-1]["headline"]),
                 "summary": "出现新变化",
-                "evidence_ids": [str(evidence[-1]["id"])],
+                "evidence_ids": [str(evidence[-1]["ref"])],
             }],
-        }, "gemma-test")
+        }
+        envelope = {"candidates": [{"content": {"parts": [{
+            "text": json.dumps(result),
+        }]}}]}
+        return kwargs["decode"](envelope), "gemma-test"
 
     return generate
 
@@ -240,8 +258,8 @@ def test_full_state_hash_and_candidates_cover_later_news_deterministically(
     assert first_result["eligible_items"] == second_result["eligible_items"] == 65
     assert first_result["candidate_items"] == second_result["candidate_items"] == 60
 
-    first_ids = [row["id"].split(":", 2)[1] for row in first_calls[0]["evidence"]]
-    second_ids = [row["id"].split(":", 2)[1] for row in second_calls[0]["evidence"]]
+    first_ids = [item.split(":", 2)[1] for item in first_calls[0]["evidence_ids"]]
+    second_ids = [item.split(":", 2)[1] for item in second_calls[0]["evidence_ids"]]
     assert first_ids == second_ids
     assert len(first_ids) == daily_brief.BRIEF_EVIDENCE_LIMIT
     assert first_ids[0] == "bulk-005"
@@ -271,7 +289,7 @@ def test_full_state_hash_and_candidates_cover_later_news_deterministically(
         now=now + timedelta(minutes=12),
     )
     assert later_result["eligible_items"] == 66
-    assert first_calls[-1]["evidence"][-1]["id"] == "Reuters:bulk-065:1"
+    assert first_calls[-1]["evidence_ids"][-1] == "Reuters:bulk-065:1"
     later_hash = first.connection.execute(
         """SELECT source_hash FROM daily_news_briefs
            ORDER BY revision_number DESC LIMIT 1"""
@@ -583,7 +601,7 @@ def test_important_early_event_survives_full_day_candidate_bound(tmp_path, monke
         now=datetime(2026, 8, 10, 3, tzinfo=UTC),
     )
     assert result["candidate_items"] == daily_brief.BRIEF_EVIDENCE_LIMIT
-    assert any(row["id"] == "Reuters:morning-policy:1" for row in calls[0]["evidence"])
+    assert "Reuters:morning-policy:1" in calls[0]["evidence_ids"]
     ledger.close()
 
 
@@ -613,9 +631,7 @@ def test_daily_brief_packet_keeps_strongest_evidence_within_tpm_budget(
     )
     assert result["candidate_items"] == daily_brief.BRIEF_EVIDENCE_LIMIT
     assert len(calls[0]["evidence"]) < result["candidate_items"]
-    assert any(
-        row["id"] == "Reuters:priority-policy:1" for row in calls[0]["evidence"]
-    )
+    assert "Reuters:priority-policy:1" in calls[0]["evidence_ids"]
     assert (
         daily_brief.conservative_input_token_estimate(serialized)
         <= daily_brief.BRIEF_INPUT_TOKEN_BUDGET
@@ -636,6 +652,30 @@ def test_structured_brief_output_budget_covers_multi_item_contract() -> None:
     assert config["maxOutputTokens"] >= 4_096
     assert config["responseSchema"]["required"] == ["title", "overview", "items"]
     assert config["responseSchema"]["properties"]["items"]["maxItems"] == 8
+    prompt = payload["contents"][0]["parts"][0]["text"]
+    packet = json.loads(prompt.split("\nEVIDENCE\n", 1)[1])
+    assert packet[0]["ref"] == "E01"
+    assert "id" not in packet[0]
+    assert config["responseSchema"]["properties"]["items"]["items"][
+        "properties"
+    ]["evidence_ids"]["items"]["enum"] == ["E01"]
+
+
+def test_short_citation_is_mapped_to_exact_evidence_id() -> None:
+    evidence = [{"id": "Reuters:opaque-long-item:7"}]
+    envelope = {"candidates": [{"content": {"parts": [{"text": json.dumps({
+        "title": "黄金简报",
+        "overview": "宏观资料共同显示市场定价正在变化。",
+        "items": [{
+            "headline": "政策预期变化",
+            "summary": "市场重新评估政策路径。",
+            "evidence_ids": ["E01"],
+        }],
+    })}]}}]}
+
+    result = daily_brief._decode_brief(envelope, evidence)
+
+    assert result["items"][0]["evidence_ids"] == ["Reuters:opaque-long-item:7"]
 
 
 def test_duplicate_event_flood_consumes_one_candidate(tmp_path, monkeypatch) -> None:
@@ -699,6 +739,40 @@ def test_routine_only_account_generates_daily_brief(tmp_path, monkeypatch) -> No
     assert current["pool"] == ROUTINE_POOL
     assert current["account_id"] == "routine-account"
     assert "secret" not in json.dumps(statuses)
+    ledger.close()
+
+
+def test_daily_brief_reranks_account_headroom_for_each_date(
+    tmp_path, monkeypatch,
+) -> None:
+    from scripts import run_news_annotator as runner
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    credentials = (
+        ApiCredential("account-a", ROUTINE_POOL, "secret-a", "key-a"),
+        ApiCredential("account-b", ROUTINE_POOL, "secret-b", "key-b"),
+    )
+    rankings = iter(((credentials[0], credentials[1]), (credentials[1], credentials[0])))
+    monkeypatch.setattr(
+        runner, "brief_dates_to_process",
+        lambda *_args, **_kwargs: ["2026-08-16", "2026-08-15"],
+    )
+    monkeypatch.setattr(
+        runner, "credentials_for_background_task",
+        lambda *_args, **_kwargs: next(rankings),
+    )
+    monkeypatch.setattr(
+        runner, "update_daily_brief",
+        lambda _ledger, *, brief_date, **_kwargs: {
+            "status": "OK", "brief_date": brief_date,
+        },
+    )
+
+    statuses = runner.run_daily_brief_batch(
+        ledger, now=datetime(2026, 8, 16, tzinfo=UTC), credentials=credentials,
+    )
+
+    assert [row["account_id"] for row in statuses] == ["account-a", "account-b"]
     ledger.close()
 
 
