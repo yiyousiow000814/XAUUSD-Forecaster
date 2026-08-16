@@ -374,6 +374,7 @@ def claim_job(
     *,
     worker_id: str,
     pool: str,
+    task_types: tuple[str, ...] | None = None,
     now: datetime | None = None,
     lease_seconds: int = 180,
 ) -> ScheduledJob | None:
@@ -381,6 +382,11 @@ def claim_job(
         raise ValueError("scheduler pool is not controlled")
     if not worker_id.strip():
         raise ValueError("scheduler worker_id is required")
+    claimable_tasks = tuple(dict.fromkeys(TASKS if task_types is None else task_types))
+    if any(task_type not in TASKS for task_type in claimable_tasks):
+        raise ValueError("scheduler task type is not controlled")
+    if not claimable_tasks:
+        return None
     instant = now or datetime.now(UTC)
     timestamp = _iso(instant)
     aged_before = _iso(instant - PRIORITY_HEAD_START)
@@ -389,6 +395,7 @@ def claim_job(
         "AND priority IN ('IMMEDIATE','FAST')"
         if pool == PREEMPTIBLE_POOL else ""
     )
+    task_placeholders = ",".join("?" for _ in claimable_tasks)
     connection.execute("BEGIN IMMEDIATE")
     try:
         connection.execute(
@@ -401,8 +408,7 @@ def claim_job(
         row = connection.execute(
             f"""SELECT * FROM news_ai_jobs_v1
                 WHERE state IN ('QUEUED','BACKING_OFF')
-                  AND task_type IN (
-                    'ACTIVE_ANNOTATION','ACTIVE_IMPACT','TITLE_TRANSLATION')
+                  AND task_type IN ({task_placeholders})
                   AND available_at<=? {priority_filter}
                 ORDER BY
                   CASE WHEN created_at<=? THEN 0 ELSE 1 END,
@@ -413,7 +419,7 @@ def claim_job(
                                  WHEN 'ACTIVE_ANNOTATION' THEN 1 ELSE 2 END,
                   created_at,job_id
                 LIMIT 1""",
-            (timestamp, aged_before, aged_before),
+            (*claimable_tasks, timestamp, aged_before, aged_before),
         ).fetchone()
         if row is None:
             connection.commit()
