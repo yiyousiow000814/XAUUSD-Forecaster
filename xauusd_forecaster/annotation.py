@@ -1181,6 +1181,7 @@ class _GeminiRequestPool:
         except ValueError as initial_display_error:
             invalid_display_fields = _invalid_chinese_display_fields(
                 result, prompt_version=prompt_version,
+                headline=headline, body=body,
             )
             try:
                 self._repair_display_until_valid(
@@ -1608,6 +1609,29 @@ def _chinese_repair_payload(
     ]
     if not repair_fields:
         repair_fields = available_fields
+    numeric_rejection = failure_reason.startswith("SOURCE_NUMBER_")
+    rejected_output = {
+        field: result.get(field) for field in repair_fields
+    }
+    source_number_lexemes = _source_number_lexemes(headline, body)
+    numeric_recovery_instruction = ""
+    if numeric_rejection:
+        # A model that already failed exact numeric grounding should not be
+        # invited to select among the same ambiguous values again. Preserve
+        # its nonnumeric prose as a rewrite seed and require a numeric-free
+        # correction; semantic measurements remain frozen in the checkpoint.
+        rejected_output = {
+            field: _numeric_free_display_seed(str(result.get(field) or ""))
+            for field in repair_fields
+        }
+        source_number_lexemes = []
+        numeric_recovery_instruction = (
+            "The validator already rejected numeric grounding. In this retry, "
+            "return no ASCII digits and no numeric claims at all. Omit dates, "
+            "amounts, percentages, counts, ordinals, and ranges rather than "
+            "estimating, converting, or spelling them in Chinese. Rewrite the "
+            "remaining supported facts as complete natural Chinese prose. "
+        )
     return {
         "contents": [{"parts": [{"text": (
             "Your previous display output was rejected by the validator. "
@@ -1625,18 +1649,19 @@ def _chinese_repair_payload(
             "SOURCE_NUMBER_LEXEMES. Never convert units or magnitudes. If a "
             "numeric claim cannot be expressed with an exact source lexeme, "
             "remove that whole claim and retain only supported nonnumeric facts. "
-            "Return JSON only.\nREJECTION_REASON\n"
+            + numeric_recovery_instruction
+            + "Return JSON only.\nREJECTION_REASON\n"
             + failure_reason[:500]
             + "\nREJECTED_FIELDS\n"
             + json.dumps(repair_fields, ensure_ascii=False)
             + "\nREJECTED_OUTPUT\n"
             + json.dumps(
-                {field: result.get(field) for field in repair_fields},
+                rejected_output,
                 ensure_ascii=False,
             )
             + "\nSOURCE_NUMBER_LEXEMES\n"
             + json.dumps(
-                _source_number_lexemes(headline, body), ensure_ascii=False,
+                source_number_lexemes, ensure_ascii=False,
                 separators=(",", ":"),
             )
         )}]}],
@@ -1653,6 +1678,19 @@ def _chinese_repair_payload(
             "temperature": 0,
         },
     }
+
+
+def _numeric_free_display_seed(text: str) -> str:
+    """Remove rejected numeric spans before a numeric-free model retry."""
+    numeric_span = re.compile(
+        r"(?<![A-Za-z0-9_])(?:[$£€¥₹]\s*)?\d+(?:[.,:/-]\d+)*"
+        r"(?:\s*%|\s*(?:bps|bp|[KMBT]))?(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    )
+    cleaned = numeric_span.sub("", text)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\s+([，。；：、,.!?！？])", r"\1", cleaned)
+    return cleaned.strip()
 
 
 def _title_payload(headline: str) -> dict[str, object]:
@@ -2197,6 +2235,7 @@ def _validate_chinese_display_field(value: object, field: str) -> None:
 
 def _invalid_chinese_display_fields(
     result: dict, *, prompt_version: str = PROMPT_VERSION,
+    headline: str = "", body: str = "",
 ) -> tuple[str, ...]:
     rules = (("headline_zh", 2), ("summary_zh", 10))
     if "primary_story_title_zh" not in result:
@@ -2220,6 +2259,8 @@ def _invalid_chinese_display_fields(
                 raise ValueError(f"Gemini {field} is too short")
             if length > int(rule.get("maxLength", length)):
                 raise ValueError(f"Gemini {field} is too long")
+            if field in {"headline_zh", "summary_zh"} and (headline or body):
+                _recover_display_fields({field: value}, headline, body)
         except ValueError:
             invalid.append(field)
     # Number recovery can fail even when language is already valid. Repair both
