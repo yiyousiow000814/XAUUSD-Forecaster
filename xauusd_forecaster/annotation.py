@@ -30,6 +30,7 @@ from .model_gateway import (
     ModelRequestAccountant,
 )
 from .news_relevance import google_news_item_is_relevant
+from .news_identity import preferred_cluster_peer_predicate
 from .news_impact import (
     IMPACT_MODEL,
     IMPACT_PROMPT_VERSION,
@@ -44,7 +45,7 @@ from .news_semantics import (
     LEGACY_INVALID_SEMANTIC_REASON_PREFIX,
     DISPLAY_AUDIT_FALLBACK_REASON_PREFIX,
     news_annotation_schema,
-    validated_annotation_predicate,
+    model_usable_annotation_predicate,
     validate_news_annotation,
 )
 
@@ -271,7 +272,7 @@ def pending_annotation_records(
          ON a.source=n.source AND a.source_item_id=n.source_item_id
          AND a.revision_number=n.revision_number
          AND a.llm_model_version IN (?, ?) AND a.prompt_version IN (?, ?)
-         AND {validated_annotation_predicate('a')}
+         AND {model_usable_annotation_predicate('a')}
         WHERE a.annotation_id IS NULL
           AND length(trim(COALESCE(n.body, ''))) >= 240
           AND NOT EXISTS (
@@ -291,11 +292,7 @@ def pending_annotation_records(
                   AND peer_newer.source_item_id=peer.source_item_id
                   AND peer_newer.revision_number>peer.revision_number
                   {peer_revision_scope})
-              AND (length(COALESCE(peer.body, '')) > length(COALESCE(n.body, ''))
-                   OR (length(COALESCE(peer.body, '')) = length(COALESCE(n.body, ''))
-                       AND (peer.source < n.source OR
-                            (peer.source=n.source
-                             AND peer.source_item_id < n.source_item_id)))))
+              AND {preferred_cluster_peer_predicate('peer', 'n')})
           AND NOT EXISTS (
             SELECT 1 FROM news_llm_failures f
             WHERE f.task_type='ANNOTATION'
@@ -364,7 +361,7 @@ def completed_annotation_records(
               AND a.revision_number=n.revision_number
               AND a.llm_model_version IN (?, ?)
               AND a.prompt_version=?
-              AND {validated_annotation_predicate('a')})
+              AND {model_usable_annotation_predicate('a')})
           AND NOT EXISTS (
             SELECT 1 FROM news_revisions newer
             WHERE newer.source=n.source
@@ -378,9 +375,7 @@ def completed_annotation_records(
                 WHERE peer_newer.source=peer.source
                   AND peer_newer.source_item_id=peer.source_item_id
                   AND peer_newer.revision_number>peer.revision_number)
-              AND (length(COALESCE(peer.body, '')) > length(COALESCE(n.body, ''))
-                   OR (length(COALESCE(peer.body, '')) = length(COALESCE(n.body, ''))
-                       AND peer.source_item_id < n.source_item_id)))
+              AND {preferred_cluster_peer_predicate('peer', 'n')})
         ORDER BY COALESCE(n.source_published_time,
                           n.collector_first_seen_time) DESC,
                  n.collector_first_seen_time, n.source, n.source_item_id
@@ -752,7 +747,7 @@ def pending_title_translation_records(
     """Return display-title work without performing an LLM request."""
     now = observed_at or datetime.now(UTC)
     pending = connection.execute(
-        """SELECT n.* FROM news_revisions n
+        f"""SELECT n.* FROM news_revisions n
         WHERE NOT EXISTS (
             SELECT 1 FROM news_title_translations t
             WHERE t.source=n.source AND t.source_item_id=n.source_item_id
@@ -773,9 +768,7 @@ def pending_title_translation_records(
                 WHERE peer_newer.source=peer.source
                   AND peer_newer.source_item_id=peer.source_item_id
                   AND peer_newer.revision_number>peer.revision_number)
-              AND (length(COALESCE(peer.body, '')) > length(COALESCE(n.body, ''))
-                   OR (length(COALESCE(peer.body, '')) = length(COALESCE(n.body, ''))
-                   AND peer.source_item_id < n.source_item_id)))
+              AND {preferred_cluster_peer_predicate('peer', 'n')})
           AND NOT EXISTS (
             SELECT 1 FROM news_llm_failures f
             WHERE f.task_type='TITLE_TRANSLATION'
@@ -1204,8 +1197,25 @@ class _GeminiRequestPool:
         """Resume display correction without asking for semantic analysis again."""
         result = json.loads(json.dumps(checkpoint["semantic_result"]))
         semantic_model = str(checkpoint["llm_model_version"])
-        invalid_fields = tuple(str(item) for item in checkpoint["invalid_fields"])
-        initial_error = ValueError(str(checkpoint["rejection_reason"]))
+        # Validation rules can be corrected while a durable checkpoint is in
+        # backoff. Revalidate the frozen result before spending another model
+        # request: an already-valid checkpoint can complete without translation
+        # or semantic re-analysis.
+        try:
+            _recover_display_fields(result, headline, body)
+            _validate_chinese_result(result)
+            if prompt_version in GENERATED_NEWS_PROMPT_VERSIONS:
+                _validate_current_result(
+                    result, headline=headline, body=body,
+                    prompt_version=prompt_version,
+                )
+            return result, semantic_model
+        except ValueError as current_error:
+            invalid_fields = _invalid_chinese_display_fields(
+                result, prompt_version=prompt_version,
+                headline=headline, body=body,
+            )
+            initial_error = current_error
         try:
             self._repair_display_until_valid(
                 start_index, DISPLAY_REPAIR_MODELS,
@@ -1254,7 +1264,7 @@ class _GeminiRequestPool:
             rejection, last_result, stage="DISPLAY_REPAIR",
             initial_error=initial_error, invalid_fields=invalid_fields,
             public_message=(
-                "Gemini display repair remains pending; validated semantics retained"
+                "Display repair remains pending; validated semantics retained"
             ),
         ) from rejection
 
@@ -2671,6 +2681,34 @@ def _latin_prose_profile(text: str) -> tuple[int, int, int]:
     return identifier_letters, prose_letters, prose_words
 
 
+def _display_clauses(text: str) -> tuple[str, ...]:
+    """Split prose clauses without treating punctuation in names as syntax."""
+    clauses: list[str] = []
+    current: list[str] = []
+    closers: list[str] = []
+    matching = {"(": ")", "（": "）", "[": "]", "【": "】"}
+    separators = frozenset("。！？!?；;\n")
+    for index, character in enumerate(text):
+        if (
+            character in matching
+            and matching[character] in text[index + 1:]
+        ):
+            closers.append(matching[character])
+        elif closers and character == closers[-1]:
+            closers.pop()
+        if character in separators and not closers:
+            clause = "".join(current).strip()
+            if clause:
+                clauses.append(clause)
+            current = []
+        else:
+            current.append(character)
+    clause = "".join(current).strip()
+    if clause:
+        clauses.append(clause)
+    return tuple(clauses)
+
+
 def _require_chinese_primary(value: object, field: str) -> None:
     """Reject obvious non-Chinese prose while allowing readable English names."""
     text = str(value or "").strip()
@@ -2688,7 +2726,7 @@ def _require_chinese_primary(value: object, field: str) -> None:
             f"THIRD_SCRIPT_PRESENT: Gemini {field} contains non-Chinese/Latin text"
         )
 
-    for clause in re.split(r"[。！？!?；;\n]+", text):
+    for clause in _display_clauses(text):
         clause_han = sum(_is_han(character) for character in clause)
         identifiers, latin_prose, prose_words = _latin_prose_profile(clause)
         if not identifiers and not latin_prose:

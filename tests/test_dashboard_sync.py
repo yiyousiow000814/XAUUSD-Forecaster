@@ -348,12 +348,20 @@ def test_sync_status_records_real_success_and_preserves_it_on_error(tmp_path) ->
     module = _sync_module()
     status_file = tmp_path / "dashboard-sync-status.json"
 
-    module.write_sync_status(status_file, success=True, attempts_used=2)
+    observation = [{
+        "target": "cloudflare", "resource": "news", "status": "OK",
+        "duration_ms": 12.5, "completed_at": "2026-08-17T00:00:00+00:00",
+    }]
+    module.write_sync_status(
+        status_file, success=True, attempts_used=2,
+        resource_observations=observation,
+    )
     succeeded = json.loads(status_file.read_text(encoding="utf-8"))
     assert datetime.fromisoformat(succeeded["last_success"])
     assert succeeded["attempts_used"] == 2
     assert succeeded["last_error"] is None
     assert succeeded["status"] == "OK"
+    assert succeeded["resource_observations"] == observation
 
     module.write_sync_status(
         status_file, success=False, error=ConnectionResetError("remote closed")
@@ -522,13 +530,19 @@ def test_all_rejected_heartbeat_targets_preserve_structured_failures(
         module.sync_once({"local_status_url": "https://local.invalid"})
 
     assert module.sync_error_code(captured.value) == "PAYLOAD_LIMIT_EXCEEDED"
-    assert captured.value.degraded_resources == [{
+    assert len(captured.value.degraded_resources) == 1
+    failure = captured.value.degraded_resources[0]
+    assert {key: failure[key] for key in (
+        "target", "resource", "error_type", "error_code", "error",
+    )} == {
         "target": "cloudflare",
         "resource": "heartbeat",
         "error_type": "HTTPError",
         "error_code": "PAYLOAD_LIMIT_EXCEEDED",
         "error": "HTTP Error 413: too large",
-    }]
+    }
+    assert failure["duration_ms"] >= 0
+    assert captured.value.resource_observations[0]["status"] == "ERROR"
 
 
 def test_configured_targets_adds_independent_cloudflare_mirror(
@@ -1119,7 +1133,14 @@ def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> 
         }],
     }
 
-    module.sync_once(config)
+    first_cycle = module.sync_once(config)
+    assert first_cycle == []
+    assert {row["resource"] for row in first_cycle.resource_observations} == {
+        "heartbeat", "learning", "market_chart", "market_history", "news",
+        "news_questions",
+    }
+    assert all(row["status"] == "OK" for row in first_cycle.resource_observations)
+    assert all(row["duration_ms"] >= 0 for row in first_cycle.resource_observations)
     assert posted.count("https://remote/api/learning") == 1
     # An unknown mirror contract neutralizes only stale operational state before
     # authoritative replay. Completed reader history stays visible throughout

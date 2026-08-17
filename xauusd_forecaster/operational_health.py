@@ -6,9 +6,10 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 
 from .news_scheduler import TASKS
+from .news_identity import preferred_cluster_peer_predicate
 from .news_semantics import (
-    DISPLAY_AUDIT_FALLBACK_REASON_PREFIX,
-    validated_annotation_predicate,
+    display_repair_checkpoint_predicate,
+    model_usable_annotation_predicate,
 )
 
 
@@ -85,6 +86,9 @@ def scheduler_health_snapshot(
             "oldest_age_seconds": None,
             "max_claim_count": 0,
             "max_claim_job_ref": None,
+            "max_claim_state": None,
+            "max_claim_is_claimable": False,
+            "max_claim_next_retry_at": None,
         }
         for task in TASKS
     }
@@ -140,12 +144,21 @@ def scheduler_health_snapshot(
         )
         summary["max_claim_count"] = int(row["max_claim_count"] or 0)
         top = connection.execute(
-            """SELECT job_id FROM news_ai_jobs_v1
+            """SELECT job_id,state,available_at FROM news_ai_jobs_v1
                WHERE task_type=? AND state IN ('QUEUED','LEASED','BACKING_OFF')
                ORDER BY attempt_count DESC,created_at,job_id LIMIT 1""",
             (task,),
         ).fetchone()
         summary["max_claim_job_ref"] = str(top["job_id"])[:12] if top else None
+        if top:
+            state = str(top["state"])
+            available_at = str(top["available_at"])
+            is_claimable = state == "LEASED" or available_at <= instant_iso
+            summary["max_claim_state"] = state
+            summary["max_claim_is_claimable"] = is_claimable
+            summary["max_claim_next_retry_at"] = (
+                None if is_claimable else available_at
+            )
 
     outcome_rows = connection.execute(
         """SELECT j.task_type,a.outcome,a.failure_code,count(*) AS total
@@ -197,19 +210,28 @@ def scheduler_health_snapshot(
         deferred = int(summary["deferred_15m"])
         errors = int(summary["errors_15m"])
         max_claims = int(summary["max_claim_count"])
+        max_claim_is_claimable = bool(summary["max_claim_is_claimable"])
         oldest_age = int(summary["oldest_age_seconds"] or 0)
 
         if max_claims >= RETRY_LOOP_THRESHOLD:
+            scheduled = not max_claim_is_claimable
             alerts.append(_alert(
                 "OPS_AI_JOB_RETRY_LOOP",
-                severity="ERROR", scope=task,
+                severity="WARNING" if scheduled else "ERROR", scope=task,
                 message_zh=(
-                    f"{label}（{task}）有任务被重复领取 {max_claims} 次。"
+                    f"{label}（{task}）有任务已领取 {max_claims} 次，"
+                    + (
+                        "目前按计划等待下次重试。"
+                        if scheduled else "当前仍可处理，需要检查。"
+                    )
                 ),
-                blocking=True,
+                blocking=not scheduled,
                 evidence={
                     "max_claim_count": max_claims,
                     "job_ref": summary["max_claim_job_ref"],
+                    "state": summary["max_claim_state"],
+                    "claimable": max_claim_is_claimable,
+                    "next_retry_at": summary["max_claim_next_retry_at"],
                 },
             ))
         if deferred >= CAPACITY_DEFERRED_THRESHOLD and deferred > completed:
@@ -286,8 +308,7 @@ def scheduler_health_snapshot(
               ON current.source=fallback.source
              AND current.source_item_id=fallback.source_item_id
              AND current.revision_number=fallback.revision_number
-            WHERE COALESCE(json_extract(
-                    fallback.annotation_json,'$.semantic_reason_zh'),'') LIKE ?
+            WHERE {display_repair_checkpoint_predicate('fallback')}
               AND COALESCE(json_extract(
                     fallback.annotation_json,'$.xauusd_relevance'),'IRRELEVANT')
                     <> 'IRRELEVANT'
@@ -304,11 +325,7 @@ def scheduler_health_snapshot(
                     WHERE peer_newer.source=peer.source
                       AND peer_newer.source_item_id=peer.source_item_id
                       AND peer_newer.revision_number>peer.revision_number)
-                  AND (length(COALESCE(peer.body,''))>
-                       length(COALESCE(current.body,''))
-                    OR (length(COALESCE(peer.body,''))=
-                        length(COALESCE(current.body,''))
-                      AND peer.source_item_id<current.source_item_id)))
+                  AND {preferred_cluster_peer_predicate('peer', 'current')})
               AND NOT EXISTS (
                 SELECT 1 FROM news_annotations repaired
                 WHERE repaired.source=fallback.source
@@ -316,8 +333,7 @@ def scheduler_health_snapshot(
                   AND repaired.revision_number=fallback.revision_number
                   AND repaired.prompt_version=fallback.prompt_version
                   AND repaired.parsed_at>fallback.parsed_at
-                  AND {validated_annotation_predicate('repaired')})""",
-        (f"{DISPLAY_AUDIT_FALLBACK_REASON_PREFIX}%",),
+                  AND {model_usable_annotation_predicate('repaired')})""",
     ).fetchone()[0]) if has_annotations else 0
     if invalid_display_rows:
         alerts.append(_alert(

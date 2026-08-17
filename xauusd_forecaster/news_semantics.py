@@ -36,8 +36,8 @@ SUPPORTED_NEWS_PROMPT_VERSIONS = frozenset({
 _SCHEMA_PATH = Path(__file__).with_name("news_annotation.schema.json")
 
 
-def validated_annotation_predicate(alias: str) -> str:
-    """One SQL contract for annotations that may drive downstream behavior."""
+def model_usable_annotation_predicate(alias: str) -> str:
+    """SQL contract for annotations permitted to drive downstream behavior."""
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", alias):
         raise ValueError("invalid SQL alias")
     return (
@@ -48,6 +48,22 @@ def validated_annotation_predicate(alias: str) -> str:
         "'$.semantic_reason_zh'), '') NOT LIKE "
         f"'{DISPLAY_AUDIT_FALLBACK_REASON_PREFIX}%'"
     )
+
+
+def display_repair_checkpoint_predicate(alias: str) -> str:
+    """SQL contract for saved semantics whose Chinese display still needs repair."""
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", alias):
+        raise ValueError("invalid SQL alias")
+    return (
+        f"COALESCE(json_extract({alias}.annotation_json, "
+        "'$.semantic_reason_zh'), '') LIKE "
+        f"'{DISPLAY_AUDIT_FALLBACK_REASON_PREFIX}%'"
+    )
+
+
+def validated_annotation_predicate(alias: str) -> str:
+    """Compatibility name for the model-usable annotation contract."""
+    return model_usable_annotation_predicate(alias)
 
 
 AI_SEMANTIC_FIELDS = {

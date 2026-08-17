@@ -17,7 +17,8 @@ from .model_gateway import (
     ModelGatewayCapacityExhausted, ModelGatewayResponseInvalid,
     ModelRequestAccountant,
 )
-from .news_semantics import validated_annotation_predicate
+from .news_semantics import model_usable_annotation_predicate
+from .news_identity import preferred_cluster_peer_predicate
 
 
 BRIEF_PROMPT_VERSION = "daily-news-brief-v5-scannable-synthesis"
@@ -82,7 +83,7 @@ def _population_rows(
     """Return the exact latest, annotatable population for one receipt day."""
     start, end = _day_bounds(day)
     cutoff_iso = _iso(cutoff)
-    valid = validated_annotation_predicate("candidate_a")
+    valid = model_usable_annotation_predicate("candidate_a")
     parameters = (
         _iso(start), _iso(end), cutoff_iso,
         _iso(start), _iso(end), cutoff_iso,
@@ -121,10 +122,7 @@ def _population_rows(
                          AND julianday(peer_newer.collector_first_seen_time)>=julianday(?)
                          AND julianday(peer_newer.collector_first_seen_time)<julianday(?)
                          AND julianday(peer_newer.collector_first_seen_time)<=julianday(?))
-                     AND (length(COALESCE(peer.body,''))>length(COALESCE(n.body,''))
-                       OR (length(COALESCE(peer.body,''))=length(COALESCE(n.body,''))
-                         AND (peer.source<n.source OR
-                           (peer.source=n.source AND peer.source_item_id<n.source_item_id)))))
+                      AND {preferred_cluster_peer_predicate('peer', 'n')})
            )
            SELECT p.source,p.source_item_id,p.revision_number,p.content_hash,
                   p.cluster_id,p.source_published_time,p.collector_first_seen_time,

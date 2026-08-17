@@ -78,7 +78,8 @@ from xauusd_forecaster.news_evidence import (  # noqa: E402
 from xauusd_forecaster.news_relevance import (  # noqa: E402
     GOOGLE_NEWS_MAX_AGE, google_news_item_is_relevant,
 )
-from xauusd_forecaster.news_semantics import validated_annotation_predicate  # noqa: E402
+from xauusd_forecaster.news_semantics import model_usable_annotation_predicate  # noqa: E402
+from xauusd_forecaster.news_identity import preferred_cluster_peer_predicate  # noqa: E402
 from xauusd_forecaster.news_contracts import CURRENT_NEWS_CONTRACT  # noqa: E402
 from xauusd_forecaster.news_features_v2 import COLLECTION_SOURCES  # noqa: E402
 from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY  # noqa: E402
@@ -832,7 +833,7 @@ def _news_reader_rows(
                 AND preferred_a.llm_model_version IN (
                   'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
                 AND preferred_a.prompt_version=?
-                AND {validated_annotation_predicate('preferred_a')}
+                AND {model_usable_annotation_predicate('preferred_a')}
               ORDER BY CASE preferred_a.llm_model_version
                 WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                 preferred_a.parsed_at DESC LIMIT 1)
@@ -881,9 +882,7 @@ def _news_reader_rows(
                     WHERE peer_newer.source=peer.source
                       AND peer_newer.source_item_id=peer.source_item_id
                       AND peer_newer.revision_number>peer.revision_number)
-                  AND (length(COALESCE(peer.body, '')) > length(COALESCE(n.body, ''))
-                    OR (length(COALESCE(peer.body, '')) = length(COALESCE(n.body, ''))
-                      AND peer.source_item_id < n.source_item_id)))
+                  AND {preferred_cluster_peer_predicate('peer', 'n')})
               AND length(trim(COALESCE(n.body, ''))) >= 240
               AND COALESCE(n.source_published_time,
                            n.collector_first_seen_time) >= ?
@@ -967,11 +966,7 @@ def _news_mirror_candidate_keys(
                     WHERE peer_newer.source=peer.source
                       AND peer_newer.source_item_id=peer.source_item_id
                       AND peer_newer.revision_number>peer.revision_number)
-                  AND (length(COALESCE(peer.body,''))>
-                       length(COALESCE(n.body,''))
-                    OR (length(COALESCE(peer.body,''))=
-                        length(COALESCE(n.body,''))
-                      AND peer.source_item_id<n.source_item_id)))
+                  AND {preferred_cluster_peer_predicate('peer', 'n')})
               AND length(trim(COALESCE(n.body,'')))>=240
               AND COALESCE(n.source_published_time,
                            n.collector_first_seen_time)>=?
@@ -1857,7 +1852,7 @@ def _dashboard_payload(database: Path) -> dict:
                      AND preferred_a.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
                      AND preferred_a.prompt_version=?
-                     AND {validated_annotation_predicate('preferred_a')}
+                     AND {model_usable_annotation_predicate('preferred_a')}
                    ORDER BY CASE preferred_a.llm_model_version
                        WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                      preferred_a.parsed_at DESC LIMIT 1)
@@ -1910,9 +1905,7 @@ def _dashboard_payload(database: Path) -> dict:
                        WHERE peer_newer.source=peer.source
                          AND peer_newer.source_item_id=peer.source_item_id
                          AND peer_newer.revision_number>peer.revision_number)
-                     AND (length(COALESCE(peer.body, '')) > length(COALESCE(n.body, ''))
-                          OR (length(COALESCE(peer.body, '')) = length(COALESCE(n.body, ''))
-                              AND peer.source_item_id < n.source_item_id)))
+                     AND {preferred_cluster_peer_predicate('peer', 'n')})
                  -- The public reader is not the immutable intake ledger.  It
                  -- contains only readable evidence with a declared research
                  -- role; headline-only and COLLECT_ONLY intake candidates stay
@@ -1967,7 +1960,7 @@ def _dashboard_payload(database: Path) -> dict:
                      AND preferred_a.llm_model_version IN (
                        'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
                      AND preferred_a.prompt_version=?
-                     AND {validated_annotation_predicate('preferred_a')}
+                     AND {model_usable_annotation_predicate('preferred_a')}
                    ORDER BY CASE preferred_a.llm_model_version
                        WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
                      preferred_a.parsed_at DESC LIMIT 1)
@@ -2006,9 +1999,7 @@ def _dashboard_payload(database: Path) -> dict:
                        WHERE peer_newer.source=peer.source
                          AND peer_newer.source_item_id=peer.source_item_id
                          AND peer_newer.revision_number>peer.revision_number)
-                     AND (length(COALESCE(peer.body, '')) > length(COALESCE(n.body, ''))
-                          OR (length(COALESCE(peer.body, '')) = length(COALESCE(n.body, ''))
-                              AND peer.source_item_id < n.source_item_id)))""",
+                     AND {preferred_cluster_peer_predicate('peer', 'n')})""",
             (
                 now.isoformat(timespec="microseconds"),
                 now.isoformat(timespec="microseconds"),

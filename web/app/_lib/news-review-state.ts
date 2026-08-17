@@ -2,6 +2,30 @@ export const NEWS_REVIEW_STATES = ["COMPLETED", "PROCESSING", "ISOLATED"] as con
 
 export type NewsReviewState = typeof NEWS_REVIEW_STATES[number];
 
+const COMPLETED_ANNOTATION_STATUSES = ["READY", "NOT_REQUIRED"] as const;
+const ISOLATED_ANNOTATION_STATUSES = ["DEAD_LETTER", "CONTENT_UNAVAILABLE"] as const;
+const ALIGNED_UNPARSED_ANNOTATION_STATUSES = [
+  "REPAIRING_DISPLAY", "BACKING_OFF", "DEAD_LETTER",
+  "WAITING_CONTENT", "CONTENT_UNAVAILABLE",
+] as const;
+
+const sqlValues = (values: readonly string[]) =>
+  values.map(value => `'${value}'`).join(",");
+
+/** SQL and TypeScript readers share one annotation-to-review-state contract. */
+export const NEWS_REVIEW_STATE_SQL: Record<NewsReviewState, string> = {
+  COMPLETED: `json_extract(payload, '$.annotation_status') IN (${sqlValues(COMPLETED_ANNOTATION_STATUSES)})`,
+  ISOLATED: `json_extract(payload, '$.annotation_status') IN (${sqlValues(ISOLATED_ANNOTATION_STATUSES)})`,
+  PROCESSING: `COALESCE(json_extract(payload, '$.annotation_status'), '') NOT IN (${sqlValues([
+    ...COMPLETED_ANNOTATION_STATUSES, ...ISOLATED_ANNOTATION_STATUSES,
+  ])})`,
+};
+
+export const NEWS_REVIEW_STATE_CASE_SQL = `CASE
+  WHEN ${NEWS_REVIEW_STATE_SQL.COMPLETED} THEN 'COMPLETED'
+  WHEN ${NEWS_REVIEW_STATE_SQL.ISOLATED} THEN 'ISOLATED'
+  ELSE 'PROCESSING' END`;
+
 type NewsReviewStateFields = {
   annotation_status?: unknown;
   model_visibility?: unknown;
@@ -22,8 +46,7 @@ export const NEWS_REVIEW_STATE_INVARIANT_SQL = `(
     AND json_extract(payload, '$.model_visibility')<>'NOT_YET_PARSED'
     AND json_extract(payload, '$.parsed_at') IS NOT NULL)
   OR (json_extract(payload, '$.annotation_status') IN (
-      'REPAIRING_DISPLAY','BACKING_OFF','DEAD_LETTER','WAITING_CONTENT',
-      'CONTENT_UNAVAILABLE'
+      ${sqlValues(ALIGNED_UNPARSED_ANNOTATION_STATUSES)}
     )
     AND json_extract(payload, '$.model_visibility') =
         json_extract(payload, '$.annotation_status')
@@ -44,10 +67,8 @@ export const newsReviewStateInvariantHolds = (
     return visibility === "NOT_YET_PARSED" && !parsed;
   }
   if (status === "READY") return visibility !== "NOT_YET_PARSED" && parsed;
-  const alignedUnparsedState = [
-    "REPAIRING_DISPLAY", "BACKING_OFF", "DEAD_LETTER",
-    "WAITING_CONTENT", "CONTENT_UNAVAILABLE",
-  ].includes(status);
+  const alignedUnparsedState = (ALIGNED_UNPARSED_ANNOTATION_STATUSES as readonly string[])
+    .includes(status);
   return alignedUnparsedState && visibility === status && !parsed;
 };
 
@@ -62,8 +83,10 @@ export const newsReviewStateOf = (
   item: NewsReviewStateFields,
 ): NewsReviewState => {
   const status = String(item.annotation_status ?? "");
-  if (status === "READY" || status === "NOT_REQUIRED") return "COMPLETED";
-  if (status === "DEAD_LETTER" || status === "CONTENT_UNAVAILABLE") {
+  if ((COMPLETED_ANNOTATION_STATUSES as readonly string[]).includes(status)) {
+    return "COMPLETED";
+  }
+  if ((ISOLATED_ANNOTATION_STATUSES as readonly string[]).includes(status)) {
     return "ISOLATED";
   }
   return "PROCESSING";
