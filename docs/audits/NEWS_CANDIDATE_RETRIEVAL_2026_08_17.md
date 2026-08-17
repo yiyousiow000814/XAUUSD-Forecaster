@@ -45,3 +45,23 @@ Gemma may still reject that candidate correctly.
 The result is a point-in-time baseline, not a production promotion. The next
 change must compare deterministic-only, lexical, semantic, and combined routes
 against this same manifest.
+
+## Hybrid candidate
+
+The `news-hybrid-retrieval-v1` candidate was replayed over the same manifest
+after a complete append-only backfill with local
+`qwen3-embedding:0.6b` digest
+`ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d`.
+The benchmark itself read stored vectors and made no provider request.
+
+| Route | Recall@1 | Recall@5 | MRR@5 | Empty | Hard-negative exposure@5 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Deterministic | 77% | 93% | 0.8445 | 3% | 27% |
+| Lexical | 54% | 74% | 0.6200 | 0% | 2% |
+| Semantic | 60% | 85% | 0.7100 | 0% | 3% |
+| Combined | 83% | 96% | 0.8892 | 0% | 14% |
+
+The combined route passed every promotion gate: it improved Recall@1,
+Recall@5, and MRR@5, removed empty positive results, and reduced hard-negative
+exposure. Neither lexical nor semantic retrieval is strong enough to replace
+the deterministic route independently.

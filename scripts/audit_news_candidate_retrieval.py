@@ -17,6 +17,9 @@ from xauusd_forecaster.news_retrieval_benchmark import (  # noqa: E402
     evaluate_candidate_retrieval,
     load_benchmark_manifest,
 )
+from xauusd_forecaster.news_retrieval import (  # noqa: E402
+    latest_embedding_profile,
+)
 
 
 def main() -> int:
@@ -24,6 +27,9 @@ def main() -> int:
     parser.add_argument("--database", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--mode", choices=("deterministic", "hybrid"), default="deterministic",
+    )
     args = parser.parse_args()
     database = args.database.resolve()
     manifest = load_benchmark_manifest(args.manifest.resolve())
@@ -32,7 +38,13 @@ def main() -> int:
     )
     connection.row_factory = sqlite3.Row
     try:
-        result = evaluate_candidate_retrieval(connection, manifest)
+        profile = (
+            latest_embedding_profile(connection)
+            if args.mode == "hybrid" else None
+        )
+        result = evaluate_candidate_retrieval(
+            connection, manifest, embedding_profile=profile,
+        )
     finally:
         connection.close()
     rendered = json.dumps(result, ensure_ascii=False, indent=2) + "\n"
