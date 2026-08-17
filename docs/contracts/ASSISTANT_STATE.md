@@ -204,12 +204,15 @@ Context Builder time and its content digest is checked against the derived
 entry.
 
 Indexing is deterministic background work with finite leases and attempts.
-Inserting a canonical message atomically schedules its index input. The Windows
-worker derives bounded lexical terms and one normalized vector with the pinned
-local `qwen3-embedding:0.6b` digest. A completed entry records source identity,
-version, digest, bounded terms, and a Vectorize mutation receipt; message text
-remains only in the canonical store. Failed or incomplete indexing leaves
-canonical history unchanged and MUST NOT advance conversation activity.
+Inserting a canonical message atomically schedules its index input. An active
+index generation MUST pin one embedding model and profile digest before the
+worker derives bounded lexical terms and one normalized vector. A completed
+entry records source identity, version, digest, bounded terms, and a Vectorize
+mutation receipt; message text remains only in the canonical store. Failed or
+incomplete indexing leaves canonical history unchanged and MUST NOT advance
+conversation activity. Assistant indexing is currently paused with Assistant
+generation; the prior local Qwen vector generation is historical and cannot be
+used to activate new indexing work.
 
 Retrieval uses the current user message as its query and MUST enforce all of
 these boundaries:

@@ -16,6 +16,29 @@ from typing import Callable, TypeVar
 T = TypeVar("T")
 
 
+def post_gemini_batch_embeddings(
+    api_key: str,
+    model: str,
+    payload: dict[str, object],
+    *,
+    timeout: float,
+) -> dict[str, object]:
+    """Send an already-accounted embedding batch through the Google boundary."""
+    encoded_model = urllib.parse.quote(model, safe="")
+    request = urllib.request.Request(
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{encoded_model}:batchEmbedContents",
+        data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        envelope = json.loads(response.read())
+    if not isinstance(envelope, dict):
+        raise ValueError("embedding provider response is not a JSON object")
+    return envelope
+
+
 class ModelGatewayCapacityExhausted(RuntimeError):
     """No metered request slot is available for this gateway batch."""
 

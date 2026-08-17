@@ -63,7 +63,10 @@ from xauusd_forecaster.gemini_quota import (  # noqa: E402
 from xauusd_forecaster.news_scheduler import (  # noqa: E402
     account_quota_snapshot, configured_api_credentials,
 )
-from xauusd_forecaster.ai_provider_registry import AI_QUOTA_SURFACES  # noqa: E402
+from xauusd_forecaster.ai_provider_registry import (  # noqa: E402
+    AI_QUOTA_SURFACES,
+    GEMINI_EMBEDDING_REQUESTS_PER_DAY_PER_ACCOUNT,
+)
 from xauusd_forecaster.model_limits import GEMMA_PROVIDER_LANES_PER_ACCOUNT  # noqa: E402
 from xauusd_forecaster.training import MARKET_FEATURES  # noqa: E402
 from xauusd_forecaster.learning_curves import learning_curve_payload  # noqa: E402
@@ -2330,6 +2333,7 @@ def _dashboard_payload(database: Path) -> dict:
         gemini_quota = scheduler_quotas["gemini_quota"]
         gemini_31_quota = scheduler_quotas["gemini_31_quota"]
         gemma_quota = scheduler_quotas["gemma_quota"]
+        gemini_embedding_quota = scheduler_quotas["gemini_embedding_quota"]
     else:
         gemini_quota = GeminiQuotaLedger(
             database.parent / "gemini-quota.json"
@@ -2340,6 +2344,10 @@ def _dashboard_payload(database: Path) -> dict:
         gemma_quota = GeminiQuotaLedger(
             database.parent / "gemma-quota.json",
             daily_limit=GEMMA_REQUESTS_PER_DAY_PER_KEY,
+        ).snapshot(gemini_keys)
+        gemini_embedding_quota = GeminiQuotaLedger(
+            database.parent / "gemini-embedding-2-quota.json",
+            daily_limit=GEMINI_EMBEDDING_REQUESTS_PER_DAY_PER_ACCOUNT,
         ).snapshot(gemini_keys)
     available_gemini_keys = sum(
         item["status"] == "AVAILABLE" for item in gemini_quota["keys"]
@@ -2565,6 +2573,7 @@ def _dashboard_payload(database: Path) -> dict:
         "gemini_quota": gemini_quota,
         "gemini_31_quota": gemini_31_quota,
         "gemma_quota": gemma_quota,
+        "gemini_embedding_quota": gemini_embedding_quota,
         "llm_routing": {
             "action_bearing": {
                 "model": DEFAULT_GEMINI_MODEL,

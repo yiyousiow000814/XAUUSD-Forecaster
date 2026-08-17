@@ -9,13 +9,13 @@ gate.
 
 ## Routes
 
-The active `news-hybrid-retrieval-v1` generation uses:
+The active `news-hybrid-retrieval-v2` generation uses:
 
 1. deterministic recall from collector clusters, material-event keys,
    episode keys, normalized token signatures, and canonical actors;
 2. multilingual lexical recall over the headline, bounded summary, structured
    identity fields, and cited evidence excerpts;
-3. local semantic recall from `qwen3-embedding:0.6b`; and
+3. asymmetric semantic recall from `gemini-embedding-2`; and
 4. deterministic reciprocal-rank fusion that preserves exact identity anchors
    while allowing lexical and semantic candidates into the bounded context.
 
@@ -29,7 +29,7 @@ model still decides `SAME_EVENT`, `SAME_EPISODE`, `NEW_EPISODE`, or
 - The current source revision is never its own candidate.
 - Core facts can only use action-bearing core facts or evidence documents as
   same-event anchors.
-- Embedding text is versioned and bound to the exact local Ollama model digest.
+- Embedding text is versioned and bound to a stable provider/model/task profile.
 - Vectors and retrieval receipts are append-only. A receipt records every route
   ranking, the final selected IDs, and a digest of the candidate universe.
 - Model-tag or text-contract changes create a new vector namespace; they do not
@@ -49,13 +49,15 @@ Before retrieval, the runtime appends a bounded catch-up batch across the whole
 point-in-time candidate universe, including annotations that became eligible
 between deployment backfill and the next impact cycle. If a larger migration is
 still incomplete, impact work is deferred with
-`NEWS_EMBEDDING_BACKFILL_PENDING`; this is maintenance progress, not a provider
-or model failure, and another credential MUST NOT be tried. If the local model
-is absent or its digest changes without a complete backfill, identity assessment
-still fails closed instead of silently claiming complete hybrid context.
+`NEWS_EMBEDDING_BACKFILL_PENDING`; this is maintenance progress rather than an
+identity decision. Provider batches are admitted against each independent
+account's 100 RPM, 30K TPM, and 1K RPD limits. Each embedded content item counts
+as a request even when several items share one HTTP envelope. If capacity is
+temporarily unavailable, work is deferred instead of bypassing the scheduler.
 
-The dedicated embedding model is retrieval infrastructure. Qwen and Ministral
-chat profiles do not generate these vectors, and no Google quota is consumed.
+The dedicated embedding model is retrieval infrastructure, not an Assistant
+chat model. Historical Qwen vectors and receipts remain immutable audit
+evidence but are not active runtime inputs.
 
 ## Promotion evidence
 

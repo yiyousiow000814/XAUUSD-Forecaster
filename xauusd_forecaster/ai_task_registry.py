@@ -11,6 +11,7 @@ from .annotation import (
     TITLE_TRANSLATION_MODELS,
 )
 from .news_impact import IMPACT_MODEL
+from .ai_provider_registry import GEMINI_EMBEDDING_MODEL
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,10 @@ AI_TASK_ROUTES = (
     AiTaskRoute("ACTIVE_IMPACT", (IMPACT_MODEL,), "NEWS_EVENT_IDENTITY"),
     AiTaskRoute("TITLE_TRANSLATION", TITLE_TRANSLATION_MODELS, "DISPLAY_ONLY"),
     AiTaskRoute("DAILY_BRIEF", (DEFAULT_GEMMA_MODEL,), "DISPLAY_ONLY"),
+    AiTaskRoute(
+        "NEWS_EMBEDDING", (GEMINI_EMBEDDING_MODEL,),
+        "NEWS_IDENTITY_RETRIEVAL",
+    ),
 )
 
 AI_TASK_ROUTE_BY_TYPE = {route.task_type: route for route in AI_TASK_ROUTES}

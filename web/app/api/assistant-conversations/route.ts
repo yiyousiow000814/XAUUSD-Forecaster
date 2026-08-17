@@ -14,6 +14,11 @@ import {
 } from "../_shared/assistant-conversations";
 import { readBoundedBody } from "../_shared/dashboard-snapshot";
 import { isPreviewDeployment, previewJson, rejectPreviewWrite } from "../_shared/preview";
+import {
+  ASSISTANT_ACCEPTING_TURNS,
+  ASSISTANT_UNAVAILABLE_CODE,
+  ASSISTANT_UNAVAILABLE_MESSAGE,
+} from "../../_lib/assistant-availability";
 
 export const dynamic = "force-dynamic";
 
@@ -130,6 +135,12 @@ export async function POST(request: Request) {
       return item ? noStoreJson(item) : notFound();
     }
     if (action === "REGENERATE_TITLE") {
+      if (!ASSISTANT_ACCEPTING_TURNS) {
+        return noStoreJson({
+          error: ASSISTANT_UNAVAILABLE_MESSAGE,
+          code: ASSISTANT_UNAVAILABLE_CODE,
+        }, 503);
+      }
       const idempotencyKey = parseAssistantIdempotencyKey(
         request.headers.get("idempotency-key"),
       );

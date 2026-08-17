@@ -29,7 +29,7 @@
     "news_evidence_summary", "daily_news_briefs", "daily_news_brief_summary",
     "storyline_summary", "factor_coverage",
     "annotation_queue", "news_source_health", "llm_routing", "gemini_quota",
-    "gemini_31_quota", "gemma_quota", "latest", "research_forecast",
+    "gemini_31_quota", "gemma_quota", "gemini_embedding_quota", "latest", "research_forecast",
     "u5_context", "outcome_summary", "sources", "forward_epoch",
     "news_feature_policy", "news_evidence", "storylines",
     "market_narrative_candidates", "archived_storylines",

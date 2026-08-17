@@ -66,9 +66,9 @@ def test_control_center_updates_only_the_isolated_main_runtime() -> None:
 
     assert (
         '$reloadableServiceKeys = @('
-        '"collector", "annotator", "api", "sync", "assistant")'
+        '"collector", "annotator", "api", "sync")'
     ) in control_center
-    assert 'Match = "run_assistant_worker.py"' in control_center
+    assert 'Match = "run_assistant_worker.py"' not in control_center
     assert 'CODE_REVISION_RELOAD_APPLIED' in control_center
     assert 'Write-RuntimeCodeState -Revision $Revision' in control_center
     assert 'Test-CodeReloadHealth -ReloadStarted $reloadStarted' in control_center
@@ -106,17 +106,14 @@ def test_control_center_updates_only_the_isolated_main_runtime() -> None:
     assert reported == expected
 
 
-def test_local_assistant_worker_uses_bounded_primary_residency_for_shared_gpu() -> None:
-    worker = (ROOT / "scripts" / "run_assistant_worker.py").read_text(
-        encoding="utf-8",
-    )
+def test_local_assistant_worker_is_not_installed_or_supervised() -> None:
+    control_center = (
+        ROOT / "scripts" / "xauusd_control_center.ps1"
+    ).read_text(encoding="utf-8")
 
-    assert '"keep_alive": "5m"' in worker
-    assert '"keep_alive": -1' not in worker
-    assert "QWEN_ASSISTANT_MODEL" in worker
-    assert '"resident_primary": QWEN_ASSISTANT_MODEL' in worker
-    assert "MINISTRAL_ASSISTANT_MODEL" not in worker
-    assert "configured_api_credentials" not in worker
+    assert not (ROOT / "scripts" / "run_assistant_worker.py").exists()
+    assert not (ROOT / "xauusd_forecaster" / "assistant_local_runtime.py").exists()
+    assert 'Key = "assistant"' not in control_center
 
 
 def _run_control_center_contract(tmp_path, body: str) -> str:

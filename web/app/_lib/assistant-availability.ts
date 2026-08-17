@@ -1,0 +1,4 @@
+export const ASSISTANT_ACCEPTING_TURNS = false;
+export const ASSISTANT_UNAVAILABLE_CODE = "ASSISTANT_MODEL_NOT_CONFIGURED";
+export const ASSISTANT_UNAVAILABLE_MESSAGE =
+  "Assistant 正在等待新的 API 模型，暂不接收问题。";
