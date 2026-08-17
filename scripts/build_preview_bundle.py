@@ -248,6 +248,7 @@ def _backfill_annotation_reasons(news_index: dict, status: dict) -> None:
             annotation_status == "NOT_REQUIRED"
             and item.get("annotation_reason_code")
             and item.get("annotation_reason")
+            and item.get("annotation_reason_code") != "QUEUE_INVARIANT_MISMATCH"
         ):
             continue
         published_raw = item.get("source_published_time")
@@ -283,7 +284,7 @@ def _backfill_annotation_reasons(news_index: dict, status: dict) -> None:
                     )
         if annotation_status == "QUEUED" and code == "QUEUE_INVARIANT_MISMATCH":
             continue
-        if annotation_status == "QUEUED":
+        if code != "QUEUE_INVARIANT_MISMATCH":
             item["annotation_status"] = "NOT_REQUIRED"
             item["model_visibility"] = "MODEL_INELIGIBLE"
             if not item.get("parsed_at"):

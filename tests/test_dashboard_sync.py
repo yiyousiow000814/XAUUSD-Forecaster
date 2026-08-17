@@ -121,10 +121,25 @@ def test_preview_reader_rejects_a_noncanonical_source() -> None:
         module._read_json("http://127.0.0.1:8765", "/api/status")
 
 
-def test_preview_explains_late_discovery_as_model_ineligible() -> None:
+@pytest.mark.parametrize(
+    ("annotation_status", "reason_code", "reason"),
+    (
+        ("QUEUED", None, None),
+        (
+            "NOT_REQUIRED",
+            "QUEUE_INVARIANT_MISMATCH",
+            "正文符合条件但未进入语义队列，需要检查",
+        ),
+    ),
+)
+def test_preview_explains_late_discovery_as_model_ineligible(
+    annotation_status: str, reason_code: str | None, reason: str | None,
+) -> None:
     module = _preview_module()
     news_index = {"items": [{
-        "annotation_status": "QUEUED",
+        "annotation_status": annotation_status,
+        "annotation_reason_code": reason_code,
+        "annotation_reason": reason,
         "impact_status": "PENDING_ANNOTATION",
         "model_visibility": "NOT_YET_PARSED",
         "source": "google_news_gold_context",
