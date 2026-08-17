@@ -1481,6 +1481,15 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /version-boundary-badge/);
   assert.match(modal, /const laneEnds: number\[\] = \[\]/);
   assert.match(modal, /boundaryLayouts/);
+  assert.match(modal, /const compactBoundaryRail = range !== "24h"/);
+  assert.match(modal, /clusterTimelineItems\(displayedBoundaries/);
+  assert.match(modal, /boundaryDividerY = compactBoundaryRail \? 24/);
+  assert.match(modal, /<circle className="version-event-dot" aria-hidden="true"/);
+  assert.doesNotMatch(modal, /version-event-control|version-event-hit|selectedBoundary|hoveredBoundary/);
+  assert.doesNotMatch(modal, /curve-event-readout|完整换版证据|点选图表上方圆点查看/);
+  assert.doesNotMatch(css, /\.version-event-control|\.version-event-hit|\.curve-event-readout/);
+  assert.doesNotMatch(modal, /<title>\{boundary\./);
+  assert.match(css, /\.curve-navigation-actions button \{[^}]*width:44px;[^}]*min-height:44px/);
   assert.match(modal, /version-boundary-leader/);
   assert.match(modal, /boundaryDividerY/);
   assert.doesNotMatch(modal, /标签分别显示方向池与新闻池/);
@@ -1601,7 +1610,8 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.execution-history-nav button \{ width:44px; min-width:44px; min-height:44px;/);
   assert.match(css, /\.market-history-nav \{[^}]*margin:10px 0 0;[^}]*border:1px solid/);
   assert.match(css, /\.prediction-counts \{[^}]*border-top:0/);
-  assert.match(css, /\.curve-navigation-actions \{ grid-column:1\/-1; display:grid; grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
+  assert.match(css, /\.curve-navigation-actions \{ grid-column:1\/-1; display:flex; width:max-content/);
+  assert.match(css, /\.curve-navigation-actions button \{[^}]*flex:0 0 44px;[^}]*width:44px/);
   assert.match(css, /\.version-page-results \{ min-height:0; gap:10px; padding:12px 14px;/);
   assert.match(css, /\.version-page-results>article \{ border:1px solid rgba\(17,17,15,\.36\); padding:0; background:var\(--paper\); \}/);
   assert.match(css, /\.market-chart-block \.mobile-chart-scroll \{ overflow-x:auto; \}/);
