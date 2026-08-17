@@ -95,16 +95,17 @@
 
 ## Browser Automation Lifecycle
 
-- Do not invoke, install, or run Playwright for repository verification. This
-  includes `playwright-cli`, `npx` Playwright packages, Playwright test commands,
-  bundled wrappers, and scripts that launch Playwright. On the user's Windows
-  desktop these terminal-launched sessions open disruptive visible command
-  windows.
-- Prefer the in-app browser-control capability for Preview and responsive UI
-  verification. Do not replace Playwright with another terminal-launched
-  browser tool that creates visible console windows.
-- If in-app browser control is unavailable, report browser verification as
-  blocked and request manual verification instead of bypassing this rule.
+- Playwright is permitted for repository verification only when its launcher
+  and every child process are guaranteed not to open a visible Command Prompt,
+  PowerShell, or terminal window on the user's Windows desktop.
+- Prefer the in-app browser-control capability. When Playwright is required,
+  use a verified hidden or no-window launch path; never invoke `playwright-cli`,
+  `npx` Playwright packages, bundled wrappers, or scripts directly when that
+  invocation can create a visible console window.
+- Before launching browser automation, confirm that the selected launch method
+  suppresses visible terminal windows. If that cannot be guaranteed, use the
+  in-app browser or report browser verification as blocked instead of launching
+  it visibly.
 - Treat every permitted browser-control session as a resource that must be
   explicitly closed. Reuse one session for the complete verification flow and
   close it on every completion path, including failed commands, timeouts,
