@@ -335,7 +335,13 @@ def test_worker_enforces_relative_news_day_on_model_tool_arguments(
     assert query["published_to"] == ["2026-08-15"]
 
 
-@pytest.mark.parametrize("question", ["你是谁", "你能做什么？", "你上一句说什么"])
+@pytest.mark.parametrize("question", [
+    "你是谁",
+    "你能做什么？",
+    "你上一句说什么",
+    "我刚才让你记住的测试短语是什么？",
+    "What did I just ask you to remember?",
+])
 def test_conversation_only_turns_expose_no_news_tool(
     monkeypatch, tmp_path, question,
 ) -> None:

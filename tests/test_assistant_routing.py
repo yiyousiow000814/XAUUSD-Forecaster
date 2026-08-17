@@ -31,6 +31,9 @@ from xauusd_forecaster.assistant_routing import (
         ("你是谁", AssistantToolPolicy.DIRECT),
         ("你能做什么？", AssistantToolPolicy.DIRECT),
         ("你上一句说什么", AssistantToolPolicy.DIRECT),
+        ("我刚才让你记住的测试短语是什么？", AssistantToolPolicy.DIRECT),
+        ("请记住测试短语蓝鲸-73", AssistantToolPolicy.DIRECT),
+        ("What did I just ask you to remember?", AssistantToolPolicy.DIRECT),
         ("为什么你要做新闻检索？", AssistantToolPolicy.DIRECT),
         ("昨天有什么影响黄金的新闻？", AssistantToolPolicy.AUTO),
         ("为什么 CPI 后黄金反常上涨？", AssistantToolPolicy.AUTO),
@@ -71,6 +74,8 @@ LARGE = _profile("large", ModelCapacityClass.LARGE)
     ("text", "tool_calls", "expected"),
     (
         ("列出最新三条美联储新闻", 1, ReasoningClass.SIMPLE),
+        ("我刚才让你记住的测试短语是什么？", 0, ReasoningClass.SIMPLE),
+        ("What did I just ask you to remember?", 0, ReasoningClass.SIMPLE),
         ("Why did gold rise after CPI?", 1, ReasoningClass.ANALYTICAL),
         ("比较昨天和今天，并解释证据冲突", 1, ReasoningClass.ANALYTICAL),
         ("查新闻、价格和日历", 3, ReasoningClass.TOOL_HEAVY),
