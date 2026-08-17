@@ -95,19 +95,23 @@
 
 ## Browser Automation Lifecycle
 
-- Treat every Playwright or browser-control session as a resource that must be
-  explicitly closed. Persistent browser sessions must never be left running
-  after inspection because they can keep polling deployed pages and consume
-  production request quotas.
-- Before browser automation, audit existing Playwright browser processes and
-  record the baseline. Reuse one named session for the complete verification
-  flow; do not open a new browser for each viewport, route, or assertion.
-- Close the named session on every completion path, including failed commands,
-  timeouts, interrupted checks, and task switches. A failed verification does
-  not waive cleanup.
-- After closing, audit Playwright browser processes again. Browser verification
-  is incomplete until no process created by the task remains. Report the final
-  process count in the pull request when Preview verification was performed.
+- Do not invoke, install, or run Playwright for repository verification. This
+  includes `playwright-cli`, `npx` Playwright packages, Playwright test commands,
+  bundled wrappers, and scripts that launch Playwright. On the user's Windows
+  desktop these terminal-launched sessions open disruptive visible command
+  windows.
+- Prefer the in-app browser-control capability for Preview and responsive UI
+  verification. Do not replace Playwright with another terminal-launched
+  browser tool that creates visible console windows.
+- If in-app browser control is unavailable, report browser verification as
+  blocked and request manual verification instead of bypassing this rule.
+- Treat every permitted browser-control session as a resource that must be
+  explicitly closed. Reuse one session for the complete verification flow and
+  close it on every completion path, including failed commands, timeouts,
+  interrupted checks, and task switches.
+- After closing, confirm that no browser session created by the task remains.
+  Report the final session count in the pull request when Preview verification
+  was performed.
 - Prefer branch Previews with immutable code artifacts for UI checks. Do not
   leave a production page open in an automated browser, and never rely on
   background throttling to limit its requests.
