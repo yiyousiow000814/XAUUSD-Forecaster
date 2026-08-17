@@ -43,3 +43,16 @@ that a visible line is continuous after cascade and responsive overrides.
 - Raw ISO 8601 values are not a user-facing presentation. Automatic browser
   timezone detection is intentionally avoided because server rendering and
   hydration must produce the same value.
+
+## OOS chart windows
+
+- The long OOS chart's 24-hour, 7-day, and 30-day ranges are elapsed XAUUSD
+  market-open time, not wall-clock time. The labels must state this explicitly.
+- The expected weekly closure defined by the forward-only market-session
+  contract does not consume a chart window. A 24-hour range opened after the
+  weekend therefore carries backward into Friday's open session.
+- Missing observations during scheduled open time still consume the window and
+  remain visible as data gaps. The UI must not treat every absence as a market
+  closure or silently replace missing evidence with older points.
+- Counts above the chart describe the full retained history and must be labeled
+  as full-history totals rather than current-window totals.
