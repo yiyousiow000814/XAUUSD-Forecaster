@@ -40,11 +40,24 @@ the date forever.
 The current date is never finalized. Crossing midnight does not abandon the
 previous date: each worker cycle processes the current date and a bounded,
 newest-first backlog of unfinished dates. Once a historical date has no pending
-items, finalization is recorded without waiting for the live-day regeneration
-debounce. Restart preserves refresh, retry, and finalization state in SQLite.
+items, finalization is recorded without waiting for live-day refresh eligibility.
+Restart preserves refresh, retry, and finalization state in SQLite.
 The shared annotation scheduler reserves a bounded part of each discovery batch
 for those unfinished historical dates so continuous current-day arrivals cannot
 starve their remaining semantic reviews.
+
+Frequent worker checks do not imply generation. For a changed live-day packet,
+the durable refresh decision combines age since the last successful revision,
+new canonical event or episode identities, material updates, major-event
+semantics, packet information change, annotation and impact backlog, provider
+cooldown, and repeated scheduler deferral. The policy derives its age bands from
+the existing 30-minute progress boundary: a major event may qualify after one
+boundary, accumulated material change after two, ordinary material change as
+the Brief reaches four, quiet low-information change may wait eight, and any
+changed packet qualifies by twelve so continuous pipeline work cannot starve it.
+Pipeline or provider pressure raises the earlier eligibility bands but never the
+twelve-boundary starvation limit. These are conditional age bands, not a cron
+cadence or a replacement fixed debounce.
 
 ## Revisions and candidates
 
@@ -71,6 +84,12 @@ materiality, novelty, confidence, and receipt identity. Only after event-level
 deduplication and ranking is the packet capped. Arrival order alone cannot push
 an important early event out of the packet.
 
+The refresh snapshot uses those same canonical event and episode identities;
+it does not create a second identity system. Syndicated or duplicate rows that
+do not change the selected event packet remain on `CANDIDATES_UNCHANGED` and
+spend no model request. Pending packet, information-gain, next-eligible, and
+provider-deferral state are persisted so restart cannot manufacture a refresh.
+
 The generated product is a synthesis, not an evidence index. Every revision
 under the current synthesis contract contains one concise conclusion, one to
 three distinct drivers, one supported next item to watch, and at most five
@@ -90,7 +109,11 @@ inventing missing drivers or watch items.
 `DAILY_BRIEF` has a declared model route. The background worker uses only
 normal `ROUTINE` credentials and scheduler-owned account RPM, TPM, and RPD
 accounting. A PREEMPTIBLE credential is not required. Missing capacity becomes
-`DEFERRED` with a retry time. Account headroom is re-ranked for each date in a
+`DEFERRED` with a retry time. Local account/model exhaustion is
+`MODEL_CAPACITY_DEFERRED`; provider governor pacing is
+`PROVIDER_DISPATCH_DEFERRED`; missing compatible routine credentials retain
+`NO_COMPATIBLE_ROUTINE_ACCOUNT`. These reasons must not be collapsed.
+Account headroom is re-ranked for each date in a
 batch, so one exhausted account cannot starve the remaining bounded backlog.
 
 Malformed or incomplete JSON, non-STOP provider completion, schema violations,

@@ -31,7 +31,7 @@ The initial cross-component catalog is:
 | `OPS_SYNC_RESOURCE_FAILED` | A named mirror resource failed while the target heartbeat remained available; evidence preserves its upstream error code. |
 | `OPS_NEWS_MIRROR_STATE_DIVERGED` | The public news mirror is reachable but violates its state, detail, derived-column, cluster, or completed-contract invariants. |
 | `OPS_DAILY_BRIEF_DEFERRED` | Daily Brief generation is waiting for a retry after a coded failure or capacity deferral. |
-| `OPS_DAILY_BRIEF_STALLED` | Daily Brief generation remained pending beyond its 30-minute progress boundary. |
+| `OPS_DAILY_BRIEF_STALLED` | Daily Brief generation remained pending at least 30 minutes beyond its durable adaptive next-eligible time. |
 | `OPS_DAILY_BRIEF_DEGRADED` | Daily Brief finalized with terminally unreviewed inputs. |
 | `OPS_ASSISTANT_JOB_RETRY_LOOP` | One active Cloudflare Assistant job reached its bounded retry ceiling. |
 | `OPS_ASSISTANT_PIPELINE_STALLED` | A claimable Assistant queue exceeded its SLA without recent completion. |
@@ -43,15 +43,17 @@ The initial cross-component catalog is:
 | `OPS_PUBLIC_RESPONSE_INVALID` | A public operational API returned invalid JSON or the wrong schema. |
 | `OPS_PUBLIC_ASSISTANT_HEALTH_UNAVAILABLE` | The external probe could not obtain current Assistant health. |
 
-Provider work that is rejected before transport uses
-`MODEL_CAPACITY_DEFERRED`. It is not a provider request failure and must not be
-reported as one.
+Provider work rejected before transport preserves the admission layer that
+deferred it. Local account/model quota uses `MODEL_CAPACITY_DEFERRED`; adaptive
+provider pacing uses `PROVIDER_DISPATCH_DEFERRED`. Neither code proves an HTTP
+request was sent.
 
 Task-level failure evidence uses these existing stable families:
 
 | Code | Meaning |
 | --- | --- |
 | `MODEL_CAPACITY_DEFERRED` | Local quota admission rejected the request before transport. |
+| `PROVIDER_DISPATCH_DEFERRED` | The adaptive provider governor intentionally deferred this task before transport. |
 | `MODEL_ROUTE_DISABLED` | No enabled model route was available for the task. |
 | `NEWS_EMBEDDING_BACKFILL_PENDING` | The append-only identity embedding generation is catching up; defer impact work without counting this maintenance state as a model-output failure. Provider capacity admission remains authoritative for every catch-up batch. |
 | `MODEL_OUTPUT_CONTRACT_FAILED` | A response arrived but violated the semantic or evidence contract. |

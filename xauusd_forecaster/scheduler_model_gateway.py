@@ -39,6 +39,7 @@ class SchedulerModelAccountant(ModelRequestAccountant):
             and usage.purpose == "news-annotation"
             else 0
         )
+        decision: dict[str, str | None] = {}
         reserved = reserve_account_request(
             self.connection,
             account_id=self.credential.account_id,
@@ -52,10 +53,9 @@ class SchedulerModelAccountant(ModelRequestAccountant):
             reserve_total=reserve_total,
             urgent=self.urgent,
             provider_task=usage.purpose,
+            decision=decision,
         )
-        self._next_retry_at = (
-            None if reserved else provider_dispatch_next_eligible(self.connection)
-        )
+        self._next_retry_at = decision.get("next_retry_at")
         return reserved
 
     def reserve_dispatch(self, purpose: str) -> bool:

@@ -667,7 +667,7 @@ def main() -> int:
                 gemma_reserved_accounts = frozenset(
                     str(status["account_id"])
                     for status in brief_statuses
-                    if status.get("reason") == "NO_GEMMA_CAPACITY"
+                    if status.get("reason") == "MODEL_CAPACITY_DEFERRED"
                     and status.get("account_id")
                 )
                 statuses = run_scheduled_batch_with_lock_retry(
