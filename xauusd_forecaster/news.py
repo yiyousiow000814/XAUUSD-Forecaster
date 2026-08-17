@@ -28,7 +28,11 @@ from .content import (
 )
 from .forward_ledger import ForwardLedger
 from .news_relevance import google_news_item_is_relevant
-from .source_polling import classified_poll_error, source_poll_gate
+from .source_polling import (
+    PollFailureClassification,
+    classified_poll_error,
+    source_poll_gate,
+)
 
 
 UTC = timezone.utc
@@ -41,6 +45,25 @@ GOOGLE_NEWS_ATTEMPT_MULTIPLIER = 2
 class RssSource:
     name: str
     url: str
+
+
+def _primary_poll_failure(
+    failures: list[PollFailureClassification],
+) -> PollFailureClassification | None:
+    """Choose the safest aggregate recovery fact for a multi-request poll."""
+    auth = next(
+        (item for item in failures
+         if item.error_type == "AuthConfigurationError"),
+        None,
+    )
+    if auth is not None:
+        return auth
+    rate_limits = [item for item in failures if item.error_type == "RateLimited"]
+    if rate_limits:
+        return max(
+            rate_limits, key=lambda item: item.retry_after_seconds or 0,
+        )
+    return failures[0] if failures else None
 
 
 def _current_forward_news(record: dict[str, object], ledger: ForwardLedger,
@@ -438,7 +461,7 @@ def collect_fred_macro(
     inserted = 0
     unchanged = 0
     errors: list[str] = []
-    error_types: list[str] = []
+    failures = []
     hashes: list[str] = []
     start = (fetched_at - timedelta(days=45)).date().isoformat()
     api_key = os.environ.get("FRED_API_KEY", "").strip()
@@ -508,13 +531,24 @@ def collect_fred_macro(
                 inserted += int(created)
                 unchanged += int(not created)
         except Exception as error:
-            error_type, _ = classified_poll_error(error)
-            error_types.append(error_type)
+            failure = classified_poll_error(
+                error, credentialed=bool(api_key), observed_at=fetched_at,
+            )
+            failures.append(failure)
             errors.append(
-                f"{series.series_id}:{error_type}:"
+                f"{series.series_id}:{failure.error_type}:"
                 f"{_redacted_error(error, api_key, limit=120)}"
             )
     status = "OK" if not errors else ("PARTIAL" if inserted or unchanged else "ERROR")
+    primary_failure = _primary_poll_failure(failures)
+    failure_fields = (
+        primary_failure.poll_fields(" | ".join(errors))
+        if primary_failure is not None else {}
+    )
+    if primary_failure is not None and primary_failure.error_type not in {
+        "AuthConfigurationError", "RateLimited",
+    }:
+        failure_fields["error_type"] = "SeriesErrors"
     ledger.append_source_poll(
         {
             "poll_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{poll_source}|{fetched_at.isoformat()}")),
@@ -522,12 +556,7 @@ def collect_fred_macro(
             "fetched_time": fetched_at,
             "status": status,
             "payload_hash": hashlib.sha256("".join(hashes).encode()).hexdigest() if hashes else None,
-            "error_type": (
-                "AuthConfigurationError" if "AuthConfigurationError" in error_types
-                else "RateLimited" if "RateLimited" in error_types
-                else "SeriesErrors" if errors else None
-            ),
-            "error": " | ".join(errors)[:500] if errors else None,
+            **failure_fields,
         }
     )
     return {
@@ -624,20 +653,21 @@ def collect_eia_macro(
             "registered": True,
         }
     except Exception as error:
-        error_type, _ = classified_poll_error(error)
+        failure = classified_poll_error(
+            error, credentialed=True, observed_at=fetched_at,
+        )
         safe_error = _redacted_error(error, api_key)
         ledger.append_source_poll({
             "poll_id": poll_id,
             "source": EIA_API_SOURCE,
             "fetched_time": fetched_at,
             "status": "ERROR",
-            "error_type": error_type,
-            "error": safe_error,
+            **failure.poll_fields(safe_error),
         })
         return {
             "source": EIA_API_SOURCE,
             "status": "ERROR",
-            "error_type": error_type,
+            "error_type": failure.error_type,
             "error": safe_error,
             "registered": True,
         }
@@ -666,7 +696,7 @@ def collect_bea_macro(
     unchanged = 0
     hashes: list[str] = []
     errors: list[str] = []
-    error_types: list[str] = []
+    failures = []
     years = f"{fetched_at.year - 1},{fetched_at.year}"
     by_table: dict[str, list[BeaSeries]] = {}
     for series in BEA_SERIES:
@@ -740,13 +770,24 @@ def collect_bea_macro(
                     inserted += int(created)
                     unchanged += int(not created)
         except Exception as error:
-            error_type, _ = classified_poll_error(error)
-            error_types.append(error_type)
+            failure = classified_poll_error(
+                error, credentialed=True, observed_at=fetched_at,
+            )
+            failures.append(failure)
             errors.append(
-                f"{table_name}:{error_type}:"
+                f"{table_name}:{failure.error_type}:"
                 f"{_redacted_error(error, api_key, limit=180)}"
             )
     status = "OK" if not errors else ("PARTIAL" if inserted or unchanged else "ERROR")
+    primary_failure = _primary_poll_failure(failures)
+    failure_fields = (
+        primary_failure.poll_fields(" | ".join(errors))
+        if primary_failure is not None else {}
+    )
+    if primary_failure is not None and primary_failure.error_type not in {
+        "AuthConfigurationError", "RateLimited",
+    }:
+        failure_fields["error_type"] = "TableErrors"
     ledger.append_source_poll({
         "poll_id": poll_id,
         "source": BEA_API_SOURCE,
@@ -754,12 +795,7 @@ def collect_bea_macro(
         "status": status,
         "payload_hash": hashlib.sha256("".join(hashes).encode()).hexdigest()
         if hashes else None,
-        "error_type": (
-            "AuthConfigurationError" if "AuthConfigurationError" in error_types
-            else "RateLimited" if "RateLimited" in error_types
-            else "TableErrors" if errors else None
-        ),
-        "error": " | ".join(errors)[:500] if errors else None,
+        **failure_fields,
     })
     return {
         "source": BEA_API_SOURCE,
@@ -912,13 +948,19 @@ def collect_gdelt_news(
                 "archive": archive_name, "rejected_reasons": rejected,
                 "rejection_receipts": len(rejection_receipts)}
     except Exception as error:
-        error_type, message = classified_poll_error(error)
-        message = message[:500]
-        ledger.append_source_poll({"poll_id": poll_id, "source": GDELT_SOURCE, "fetched_time": fetched_at, "status": "ERROR", "error_type": error_type, "error": message})
+        failure = classified_poll_error(
+            error, credentialed=False, observed_at=fetched_at,
+        )
+        message = str(error)[:500]
+        ledger.append_source_poll({
+            "poll_id": poll_id, "source": GDELT_SOURCE,
+            "fetched_time": fetched_at, "status": "ERROR",
+            **failure.poll_fields(message),
+        })
         return {
             "source": GDELT_SOURCE,
             "status": "ERROR",
-            "error_type": error_type,
+            "error_type": failure.error_type,
             "error": message,
             "fallback_source": GOOGLE_GEO_SOURCE,
         }
@@ -1003,22 +1045,24 @@ def collect_direct_full_text_rss_news(
                 }
             )
         except Exception as error:
-            error_type, message = classified_poll_error(error)
+            failure = classified_poll_error(
+                error, credentialed=False, observed_at=fetched_at,
+            )
+            message = str(error)
             ledger.append_source_poll(
                 {
                     "poll_id": poll_id,
                     "source": source.name,
                     "fetched_time": fetched_at,
                     "status": "ERROR",
-                    "error_type": error_type,
-                    "error": message[:500],
+                    **failure.poll_fields(message),
                 }
             )
             statuses.append(
                 {
                     "source": source.name,
                     "status": "ERROR",
-                    "error_type": error_type,
+                    "error_type": failure.error_type,
                     "error": message[:500],
                 }
             )
@@ -1140,22 +1184,24 @@ def collect_direct_full_text_html_news(
                 }
             )
         except Exception as error:
-            error_type, message = classified_poll_error(error)
+            failure = classified_poll_error(
+                error, credentialed=False, observed_at=fetched_at,
+            )
+            message = str(error)
             ledger.append_source_poll(
                 {
                     "poll_id": poll_id,
                     "source": source.name,
                     "fetched_time": fetched_at,
                     "status": "ERROR",
-                    "error_type": error_type,
-                    "error": message[:500],
+                    **failure.poll_fields(message),
                 }
             )
             statuses.append(
                 {
                     "source": source.name,
                     "status": "ERROR",
-                    "error_type": error_type,
+                    "error_type": failure.error_type,
                     "error": message[:500],
                 }
             )
@@ -1259,9 +1305,19 @@ def collect_world_gold_council_news(
         return {"source": WGC_SOURCE, "status": status, "inserted_revisions": inserted,
                 "unchanged_items": unchanged, "rejected_reasons": rejected}
     except Exception as error:
-        error_type, message = classified_poll_error(error)
-        ledger.append_source_poll({"poll_id": poll_id, "source": WGC_SOURCE, "fetched_time": fetched_at, "status": "ERROR", "error_type": error_type, "error": message[:500]})
-        return {"source": WGC_SOURCE, "status": "ERROR", "error_type": error_type, "error": message[:500]}
+        failure = classified_poll_error(
+            error, credentialed=False, observed_at=fetched_at,
+        )
+        message = str(error)
+        ledger.append_source_poll({
+            "poll_id": poll_id, "source": WGC_SOURCE,
+            "fetched_time": fetched_at, "status": "ERROR",
+            **failure.poll_fields(message),
+        })
+        return {
+            "source": WGC_SOURCE, "status": "ERROR",
+            "error_type": failure.error_type, "error": message[:500],
+        }
 
 
 def collect_google_geopolitical_news(
@@ -1434,9 +1490,19 @@ def collect_google_news_lane(
             "unchanged_items": unchanged,
         }
     except Exception as error:
-        error_type, message = classified_poll_error(error)
-        ledger.append_source_poll({"poll_id": poll_id, "source": lane.name, "fetched_time": fetched_at, "status": "ERROR", "error_type": error_type, "error": message[:500]})
-        return {"source": lane.name, "status": "ERROR", "error_type": error_type, "error": message[:500]}
+        failure = classified_poll_error(
+            error, credentialed=False, observed_at=fetched_at,
+        )
+        message = str(error)
+        ledger.append_source_poll({
+            "poll_id": poll_id, "source": lane.name,
+            "fetched_time": fetched_at, "status": "ERROR",
+            **failure.poll_fields(message),
+        })
+        return {
+            "source": lane.name, "status": "ERROR",
+            "error_type": failure.error_type, "error": message[:500],
+        }
 
 
 def _append_discovery_failure(
@@ -1486,7 +1552,8 @@ def collect_bls_macro(
     *,
     force: bool = False,
 ) -> dict[str, object]:
-    key_configured = bool(os.environ.get("BLS_API_KEY", "").strip())
+    api_key = os.environ.get("BLS_API_KEY", "").strip()
+    key_configured = bool(api_key)
     interval = timedelta(minutes=5 if key_configured else 65)
     gate = None if force else source_poll_gate(
         ledger.connection, BLS_SOURCE,
@@ -1576,21 +1643,23 @@ def collect_bls_macro(
             "registered": key_configured,
         }
     except Exception as error:
-        error_type, message = classified_poll_error(error)
+        failure = classified_poll_error(
+            error, credentialed=key_configured, observed_at=fetched_at,
+        )
+        message = _redacted_error(error, api_key)
         ledger.append_source_poll(
             {
                 "poll_id": poll_id,
                 "source": BLS_SOURCE,
                 "fetched_time": fetched_at,
                 "status": "ERROR",
-                "error_type": error_type,
-                "error": message[:500],
+                **failure.poll_fields(message),
             }
         )
         return {
             "source": BLS_SOURCE,
             "status": "ERROR",
-            "error_type": error_type,
+            "error_type": failure.error_type,
             "error": message[:500],
             "registered": key_configured,
         }

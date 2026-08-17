@@ -243,6 +243,59 @@ def test_historical_capacity_debt_does_not_become_a_retry_loop() -> None:
     }
 
 
+def test_interleaved_deferrals_are_neutral_and_retirement_resets_failures() -> None:
+    connection = _connection()
+    job_id = enqueue_job(
+        connection, task_type="ACTIVE_IMPACT", source="source",
+        source_item_id="interleaved-history", revision_number=1,
+        annotation_id="annotation", prompt_version="prompt",
+        priority="BACKGROUND", now=NOW - timedelta(hours=2),
+    )
+    attempts = (
+        (1, "ERROR", "PROVIDER_HTTP_ERROR", "HTTPError", 503),
+        (2, "ERROR", "MODEL_CAPACITY_DEFERRED",
+         "ModelGatewayCapacityExhausted", None),
+        (3, "DEFERRED", "PROVIDER_DISPATCH_DEFERRED", None, None),
+        (4, "DEFERRED", "NEWS_EMBEDDING_COOLDOWN", None, None),
+        (5, "ERROR", "MODEL_REQUEST_FAILED", "TimeoutError", None),
+        (6, "ERROR", "SCHEDULER_MAINTENANCE_DEFERRED", "RuntimeError", None),
+        (7, "NOT_CURRENT", None, None, None),
+        (8, "ERROR", "MODEL_CAPACITY_DEFERRED",
+         "ModelGatewayCapacityExhausted", None),
+        (9, "ERROR", "PROVIDER_HTTP_ERROR", "HTTPError", 503),
+        (10, "DEFERRED", "NEWS_EMBEDDING_BACKFILL_PENDING", None, None),
+        (11, "ERROR", "MODEL_REQUEST_FAILED", "TimeoutError", None),
+    )
+    connection.execute(
+        "UPDATE news_ai_jobs_v1 SET attempt_count=? WHERE job_id=?",
+        (len(attempts), job_id),
+    )
+    for number, outcome, failure_code, error_type, http_status in attempts:
+        connection.execute(
+            """INSERT INTO news_ai_job_attempts_v1 VALUES
+               (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                f"interleaved-{number}", job_id, number, "account", "credential",
+                outcome, failure_code, error_type, http_status,
+                "bounded evidence", (NOW - timedelta(minutes=number)).isoformat(),
+                None,
+            ),
+        )
+    connection.commit()
+
+    snapshot = scheduler_health_snapshot(connection, now=NOW)
+    impact = next(
+        task for task in snapshot["scheduler"]["tasks"]
+        if task["task_type"] == "ACTIVE_IMPACT"
+    )
+
+    assert impact["max_claim_count"] == 11
+    assert impact["max_effective_failure_streak"] == 2
+    assert "OPS_AI_JOB_RETRY_LOOP" not in {
+        alert["code"] for alert in snapshot["alerts"]
+    }
+
+
 def test_embedding_maintenance_is_not_capacity_or_retry_failure() -> None:
     connection = _connection()
     job_id = enqueue_job(

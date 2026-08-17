@@ -266,6 +266,8 @@ def scheduler_health_snapshot(
                          AND COALESCE(a.failure_code,'') NOT IN (
                            'MODEL_CAPACITY_DEFERRED','PROVIDER_DISPATCH_DEFERRED')
                          AND COALESCE(a.failure_code,'') NOT LIKE 'NEWS_EMBEDDING_%'
+                         AND COALESCE(a.failure_code,'') NOT LIKE
+                             'SCHEDULER_MAINTENANCE_%'
                          AND a.attempt_number>COALESCE((
                            SELECT max(a2.attempt_number)
                            FROM news_ai_job_attempts_v1 a2
@@ -514,6 +516,8 @@ def extend_with_component_alerts(
                     "recovery_mode": source.get("recovery_mode"),
                     "last_success": source.get("last_success"),
                     "next_retry_time": source.get("next_retry_time"),
+                    "provider_http_status": source.get("provider_http_status"),
+                    "retry_after_seconds": source.get("retry_after_seconds"),
                     "last_error_type": source.get("last_error_type"),
                     "last_error": source.get("last_error"),
                 },

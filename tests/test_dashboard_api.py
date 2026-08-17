@@ -968,22 +968,25 @@ def test_dashboard_prefers_valid_title_over_later_placeholder(tmp_path) -> None:
     assert synchronizer["status"] == "OK"
 
 
-def test_source_error_does_not_claim_polling_is_normal(tmp_path) -> None:
+def test_public_source_403_does_not_claim_credentials_are_broken(tmp_path) -> None:
     now = datetime.now(UTC).replace(microsecond=0)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
     ledger.append_source_poll({
         "poll_id": "eia-error", "source": "eia_press_releases",
-        "fetched_time": now, "status": "ERROR", "error_type": "HTTPError",
+        "fetched_time": now, "status": "ERROR",
+        "error_type": "RemoteAccessRejected",
         "error": "HTTP Error 403: Forbidden",
+        "provider_http_status": 403,
     })
 
     rows = _dashboard_module()._news_source_health(ledger.connection, now)
     direct = next(row for row in rows if row["source"] == "eia_press_releases")
 
     assert direct["health"] == "ERROR"
-    assert direct["semantic_status"] == "OPERATOR_ACTION_REQUIRED"
-    assert direct["recovery_mode"] == "OPERATOR_ACTION_REQUIRED"
-    assert direct["next_retry_time"] == (now + timedelta(hours=6)).isoformat()
+    assert direct["semantic_status"] == "SOURCE_ERROR"
+    assert direct["recovery_mode"] == "AUTO_RECOVERING"
+    assert direct["next_retry_time"] == (now + timedelta(minutes=5)).isoformat()
+    assert "凭据" not in str(direct["semantic_message"])
 
 
 def test_fresh_source_success_with_transient_failure_is_auto_recovering(
@@ -1031,6 +1034,80 @@ def test_transient_source_failure_escalates_when_last_success_is_stale(
 
     assert eia["health"] == "STALE"
     assert eia["semantic_status"] == "SOURCE_ERROR"
+
+
+def test_newer_partial_is_the_freshness_reference_but_keeps_recovery_active(
+    tmp_path,
+) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    partial_at = now - timedelta(minutes=2)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger.append_source_poll({
+        "poll_id": "eia-old-ok", "source": "eia_open_data_api",
+        "fetched_time": now - timedelta(hours=2), "status": "OK",
+    })
+    ledger.append_source_poll({
+        "poll_id": "eia-new-partial", "source": "eia_open_data_api",
+        "fetched_time": partial_at, "status": "PARTIAL",
+        "error_type": "SeriesErrors", "error": "one sibling failed",
+    })
+
+    rows = _dashboard_module()._news_source_health(ledger.connection, now)
+    eia = next(row for row in rows if row["source"] == "eia_open_data_api")
+
+    assert datetime.fromisoformat(eia["last_success"]) == partial_at
+    assert eia["age_seconds"] == 120
+    assert eia["health"] == "DEGRADED"
+    assert eia["recovery_mode"] == "PARTIAL_RECOVERY"
+    assert eia["next_retry_time"] == (
+        partial_at + timedelta(minutes=5)
+    ).isoformat()
+
+
+def test_newer_complete_success_wins_over_older_partial(tmp_path) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    ok_at = now - timedelta(minutes=2)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger.append_source_poll({
+        "poll_id": "eia-old-partial", "source": "eia_open_data_api",
+        "fetched_time": now - timedelta(minutes=10), "status": "PARTIAL",
+        "error_type": "SeriesErrors", "error": "historical partial",
+    })
+    ledger.append_source_poll({
+        "poll_id": "eia-new-ok", "source": "eia_open_data_api",
+        "fetched_time": ok_at, "status": "OK",
+    })
+
+    rows = _dashboard_module()._news_source_health(ledger.connection, now)
+    eia = next(row for row in rows if row["source"] == "eia_open_data_api")
+
+    assert datetime.fromisoformat(eia["last_success"]) == ok_at
+    assert eia["health"] == "HEALTHY"
+    assert eia["recovery_mode"] is None
+
+
+@pytest.mark.parametrize(
+    ("age", "expected_health"),
+    ((timedelta(minutes=2), "DEGRADED"), (timedelta(hours=2), "STALE")),
+)
+def test_partial_without_historical_ok_has_factual_freshness(
+    tmp_path, age, expected_health,
+) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    partial_at = now - age
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger.append_source_poll({
+        "poll_id": "eia-partial", "source": "eia_open_data_api",
+        "fetched_time": partial_at, "status": "PARTIAL",
+        "error_type": "SeriesErrors", "error": "one sibling failed",
+    })
+
+    rows = _dashboard_module()._news_source_health(ledger.connection, now)
+    eia = next(row for row in rows if row["source"] == "eia_open_data_api")
+
+    assert datetime.fromisoformat(eia["last_success"]) == partial_at
+    assert eia["health"] == expected_health
+    assert eia["recovery_mode"] == "PARTIAL_RECOVERY"
 
 
 @pytest.mark.parametrize("source", [spec.source for spec in NEWS_SOURCE_REGISTRY])
@@ -1721,7 +1798,8 @@ def test_dashboard_reports_gdelt_fallback_and_retry_time(tmp_path) -> None:
     ledger.append_source_poll({
         "poll_id": "gdelt-429", "source": "gdelt_gold_geopolitics",
         "fetched_time": now - timedelta(minutes=30), "status": "ERROR",
-        "error_type": "HTTPError", "error": "HTTP Error 429: Too Many Requests",
+        "error_type": "RateLimited", "error": "HTTP Error 429: Too Many Requests",
+        "provider_http_status": 429,
     })
     ledger.append_source_poll({
         "poll_id": "google-ok", "source": "google_news_gold_context",
@@ -1757,7 +1835,8 @@ def test_dashboard_does_not_activate_fallback_from_stale_historical_evidence(
     ledger.append_source_poll({
         "poll_id": "gdelt-429", "source": "gdelt_gold_geopolitics",
         "fetched_time": now - timedelta(minutes=5), "status": "ERROR",
-        "error_type": "HTTPError", "error": "HTTP Error 429: Too Many Requests",
+        "error_type": "RateLimited", "error": "HTTP Error 429: Too Many Requests",
+        "provider_http_status": 429,
     })
     ledger.append_source_poll({
         "poll_id": "google-empty-now", "source": "google_news_gold_context",

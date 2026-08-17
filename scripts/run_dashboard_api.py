@@ -390,7 +390,9 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
                       sum(status='ERROR') error_count,
                       max(CASE WHEN status='OK' THEN fetched_time END) last_success,
                       max(CASE WHEN status='PARTIAL' THEN fetched_time END)
-                        last_partial_success
+                        last_partial_success,
+                      max(CASE WHEN status IN ('OK','PARTIAL')
+                               THEN fetched_time END) last_usable_success
                FROM source_polls WHERE source=?""",
             (source,),
         ).fetchone()
@@ -401,7 +403,8 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
             (source,),
         ).fetchone()
         latest_error = connection.execute(
-            """SELECT fetched_time, error_type, error
+            """SELECT fetched_time,error_type,error,provider_http_status,
+                      retry_after_seconds
                FROM source_polls WHERE source=? AND status<>'OK'
                ORDER BY fetched_time DESC, poll_id DESC LIMIT 1""",
             (source,),
@@ -434,7 +437,7 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
             revision_count = int(evidence["revision_count"] or 0)
             latest_item_time = evidence["latest_item_time"]
         latest_status = latest["status"] if latest else "NO_DATA"
-        success_reference = polls["last_success"] or polls["last_partial_success"]
+        success_reference = polls["last_usable_success"]
         success_time = _parse_utc(success_reference)
         age_seconds = (
             max(0.0, (now - success_time).total_seconds())
@@ -488,6 +491,12 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
             "last_error_time": latest_error["fetched_time"] if latest_error else None,
             "last_error_type": latest_error["error_type"] if latest_error else None,
             "last_error": latest_error["error"] if latest_error else None,
+            "provider_http_status": (
+                latest_error["provider_http_status"] if latest_error else None
+            ),
+            "retry_after_seconds": (
+                latest_error["retry_after_seconds"] if latest_error else None
+            ),
             "poll_count": int(polls["total"] or 0),
             "ok_count": int(polls["ok_count"] or 0),
             "partial_count": int(polls["partial_count"] or 0),
@@ -512,7 +521,7 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
     if (
         gdelt and fallback
         and gdelt.get("latest_status") == "ERROR"
-        and "429" in str(gdelt.get("last_error") or "")
+        and gdelt.get("recovery_mode") == "RATE_LIMITED"
     ):
         gdelt["fallback_label"] = fallback["label"]
         fallback_ready = bool(

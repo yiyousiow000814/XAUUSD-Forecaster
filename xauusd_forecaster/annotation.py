@@ -26,6 +26,7 @@ from .model_limits import (
 from .model_gateway import (
     GeminiModelGateway,
     ModelGatewayCapacityExhausted,
+    ModelGatewayRequestFailed,
     ModelGatewayResponseInvalid,
     ModelRequestAccountant,
     ModelRequestUsage,
@@ -88,6 +89,11 @@ HIGH_PRIORITY_NEWS_SOURCES = frozenset({"federal_reserve_monetary"})
 
 
 GeminiBatchCapacityExhausted = ModelGatewayCapacityExhausted
+MODEL_REQUEST_FAILURES = (
+    ModelGatewayCapacityExhausted,
+    ModelGatewayRequestFailed,
+    urllib.error.HTTPError,
+)
 T = TypeVar("T")
 
 
@@ -194,7 +200,9 @@ def _model_failure_details(error: Exception) -> dict[str, object]:
     if declared_failure_code:
         return {
             "failure_code": str(declared_failure_code),
-            "error_type": type(error).__name__,
+            "error_type": str(
+                getattr(error, "transport_error_type", type(error).__name__)
+            ),
             "error": str(error)[:500],
             "provider_http_status": None,
             "next_retry_at": declared_next_retry,
@@ -1181,7 +1189,7 @@ class _GeminiRequestPool:
                         result, headline=headline, body=body,
                         prompt_version=prompt_version,
                     )
-                except (ModelGatewayCapacityExhausted, urllib.error.HTTPError):
+                except MODEL_REQUEST_FAILURES:
                     raise
                 except Exception as repair_error:
                     raise ModelOutputContractFailed(
@@ -1287,7 +1295,7 @@ class _GeminiRequestPool:
                 result.clear()
                 result.update(working)
                 return
-            except (ModelGatewayCapacityExhausted, urllib.error.HTTPError):
+            except MODEL_REQUEST_FAILURES:
                 raise
             except Exception as error:
                 rejection = error
@@ -1423,7 +1431,7 @@ class _GeminiRequestPool:
                     prompt_version=prompt_version,
                 )
                 return _validate_impact_result(repaired, request_row), exact_model
-            except (ModelGatewayCapacityExhausted, urllib.error.HTTPError):
+            except MODEL_REQUEST_FAILURES:
                 raise
             except Exception as repair_error:
                 raise ModelOutputContractFailed(
@@ -2787,9 +2795,7 @@ def _require_chinese_primary(
         if chinese_share < 0.50 and (
             prose_words >= 3 or identifiers > clause_han * 4
         ):
-            if not latin_prose and _latin_tokens_are_declared(
-                clause, allowed_latin_identifiers,
-            ):
+            if _latin_tokens_are_declared(clause, allowed_latin_identifiers):
                 continue
             raise ValueError(
                 f"ENGLISH_PROSE_DOMINANT: Gemini {field} is not Chinese-primary"

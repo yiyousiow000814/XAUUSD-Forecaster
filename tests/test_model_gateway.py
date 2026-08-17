@@ -10,6 +10,7 @@ from xauusd_forecaster.model_gateway import (
     GeminiModelGateway,
     OllamaAssistantGateway,
     ModelGatewayCapacityExhausted,
+    ModelGatewayRequestFailed,
     ModelGatewayResponseInvalid,
     ModelRequestAccountant,
     ModelRequestUsage,
@@ -266,6 +267,40 @@ def test_failed_provider_attempt_remains_typed_and_accounted(
 
     assert len(usages) == 1
     assert usages[0].input_tokens == 99
+
+
+@pytest.mark.parametrize(
+    "transport_error",
+    (
+        urllib.error.URLError("connection refused"),
+        TimeoutError("provider timed out"),
+        ConnectionError("connection reset"),
+    ),
+)
+def test_transport_without_response_uses_typed_request_failure(
+    monkeypatch, transport_error,
+) -> None:
+    monkeypatch.setattr(
+        GeminiModelGateway, "_post_json",
+        staticmethod(
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(transport_error)
+        ),
+    )
+    gateway = GeminiModelGateway(
+        ("key",), requests_per_key=1,
+        accountant=CallbackModelAccountant(lambda _usage: True),
+    )
+
+    with pytest.raises(ModelGatewayRequestFailed) as raised:
+        gateway.generate(
+            0, model="model", purpose="chinese-repair", payload={},
+            input_tokens=10, decode=lambda envelope: envelope,
+            retryable_http_codes=frozenset(),
+        )
+
+    assert raised.value.failure_code == "MODEL_REQUEST_FAILED"
+    assert raised.value.transport_error_type == type(transport_error).__name__
+    assert raised.value.__cause__ is transport_error
 
 
 def test_429_retry_after_stops_immediate_cross_account_dispatch(monkeypatch) -> None:

@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import urllib.error
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
+from math import ceil
 
 
 TRANSIENT_RETRY_DELAYS = (
@@ -19,6 +23,27 @@ RATE_LIMIT_RETRY_DELAYS = (
     timedelta(minutes=360),
 )
 AUTH_RETRY_DELAY = timedelta(hours=6)
+MAX_PROVIDER_RETRY_AFTER_SECONDS = 24 * 60 * 60
+RECOVERY_HISTORY_LIMIT = max(
+    len(TRANSIENT_RETRY_DELAYS), len(RATE_LIMIT_RETRY_DELAYS),
+)
+
+
+@dataclass(frozen=True)
+class PollFailureClassification:
+    """Safe structured transport facts for one append-only poll receipt."""
+
+    error_type: str
+    provider_http_status: int | None
+    retry_after_seconds: int | None
+
+    def poll_fields(self, message: str) -> dict[str, object]:
+        return {
+            "error_type": self.error_type,
+            "error": message[:500],
+            "provider_http_status": self.provider_http_status,
+            "retry_after_seconds": self.retry_after_seconds,
+        }
 
 
 def _instant(value: object) -> datetime | None:
@@ -28,14 +53,13 @@ def _instant(value: object) -> datetime | None:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
-def _failure_class(error_type: object, error: object, status: object) -> str:
+def _failure_class(
+    error_type: object, provider_http_status: object, status: object,
+) -> str:
     kind = str(error_type or "")
-    detail = str(error or "")
-    if kind == "RateLimited" or re.search(r"\b(?:HTTP Error )?429\b", detail):
+    if kind == "RateLimited" or provider_http_status == 429:
         return "RATE_LIMITED"
-    if kind == "AuthConfigurationError" or re.search(
-        r"\b(?:HTTP Error )?(?:401|403)\b", detail,
-    ):
+    if kind == "AuthConfigurationError":
         return "OPERATOR_ACTION_REQUIRED"
     if str(status) == "PARTIAL":
         return "PARTIAL_RECOVERY"
@@ -49,11 +73,14 @@ def source_poll_recovery_state(
     observed_at: datetime,
 ) -> dict[str, object] | None:
     """Derive the current bounded retry from append-only poll evidence."""
-    rows = connection.execute(
-        """SELECT fetched_time,status,error_type,error FROM source_polls
-           WHERE source=? ORDER BY fetched_time DESC,poll_id DESC""",
-        (source,),
-    ).fetchall()
+    cursor = connection.execute(
+        """SELECT fetched_time,status,error_type,error,provider_http_status,
+                  retry_after_seconds
+           FROM source_polls WHERE source=?
+           ORDER BY fetched_time DESC,poll_id DESC LIMIT ?""",
+        (source, RECOVERY_HISTORY_LIMIT),
+    )
+    rows = cursor.fetchmany(RECOVERY_HISTORY_LIMIT)
     if not rows or str(rows[0]["status"]) == "OK":
         return None
     failure_rows = []
@@ -64,14 +91,22 @@ def source_poll_recovery_state(
     latest = failure_rows[0]
     failure_count = len(failure_rows)
     recovery_mode = _failure_class(
-        latest["error_type"], latest["error"], latest["status"],
+        latest["error_type"], latest["provider_http_status"], latest["status"],
     )
     if recovery_mode == "OPERATOR_ACTION_REQUIRED":
         delay = AUTH_RETRY_DELAY
     elif recovery_mode == "RATE_LIMITED":
-        delay = RATE_LIMIT_RETRY_DELAYS[
-            min(failure_count - 1, len(RATE_LIMIT_RETRY_DELAYS) - 1)
-        ]
+        retry_after_seconds = latest["retry_after_seconds"]
+        delay = (
+            timedelta(seconds=max(
+                1,
+                min(MAX_PROVIDER_RETRY_AFTER_SECONDS, int(retry_after_seconds)),
+            ))
+            if retry_after_seconds is not None
+            else RATE_LIMIT_RETRY_DELAYS[
+                min(failure_count - 1, len(RATE_LIMIT_RETRY_DELAYS) - 1)
+            ]
+        )
     else:
         delay = TRANSIENT_RETRY_DELAYS[
             min(failure_count - 1, len(TRANSIENT_RETRY_DELAYS) - 1)
@@ -89,6 +124,8 @@ def source_poll_recovery_state(
         "latest_status": str(latest["status"]),
         "last_error_type": latest["error_type"],
         "last_error": latest["error"],
+        "provider_http_status": latest["provider_http_status"],
+        "retry_after_seconds": latest["retry_after_seconds"],
     }
 
 
@@ -114,11 +151,12 @@ def source_poll_gate(
             "next_retry_at": recovery["next_retry_at"].isoformat(),
         }
     row = connection.execute(
-        """SELECT max(fetched_time) AS fetched FROM source_polls
-           WHERE source=? AND status='OK'""",
+        """SELECT fetched_time FROM source_polls
+           WHERE source=? AND status='OK'
+           ORDER BY fetched_time DESC,poll_id DESC LIMIT 1""",
         (source,),
     ).fetchone()
-    last_success = _instant(row["fetched"] if row else None)
+    last_success = _instant(row["fetched_time"] if row else None)
     if last_success is not None and observed_at - last_success < success_interval:
         return {
             "source": source,
@@ -128,13 +166,45 @@ def source_poll_gate(
     return None
 
 
-def classified_poll_error(error: Exception) -> tuple[str, str]:
-    """Classify provider failures without including request URLs or secrets."""
+def _retry_after_seconds(
+    error: Exception, *, observed_at: datetime,
+) -> int | None:
+    if not isinstance(error, urllib.error.HTTPError):
+        return None
+    value = error.headers.get("Retry-After") if error.headers else None
+    if not value:
+        return None
+    normalized = str(value).strip()
+    if re.fullmatch(r"\d+", normalized):
+        return max(1, min(MAX_PROVIDER_RETRY_AFTER_SECONDS, int(normalized)))
+    try:
+        retry_at = parsedate_to_datetime(normalized)
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=UTC)
+        seconds = ceil((retry_at - observed_at).total_seconds())
+        return max(1, min(MAX_PROVIDER_RETRY_AFTER_SECONDS, seconds))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def classified_poll_error(
+    error: Exception,
+    *,
+    credentialed: bool,
+    observed_at: datetime,
+) -> PollFailureClassification:
+    """Classify transport facts from an explicit source authentication contract."""
     code = getattr(error, "code", None)
     if code == 429:
         error_type = "RateLimited"
-    elif code in {401, 403}:
+    elif credentialed and code in {401, 403}:
         error_type = "AuthConfigurationError"
+    elif code in {401, 403}:
+        error_type = "RemoteAccessRejected"
     else:
         error_type = type(error).__name__
-    return error_type, str(error)
+    return PollFailureClassification(
+        error_type=error_type,
+        provider_http_status=code if isinstance(code, int) else None,
+        retry_after_seconds=_retry_after_seconds(error, observed_at=observed_at),
+    )

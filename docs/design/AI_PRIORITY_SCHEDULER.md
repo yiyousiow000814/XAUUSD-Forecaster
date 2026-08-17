@@ -55,9 +55,10 @@ claim and defer every remaining job behind the same exhausted capacity gate.
 
 Operational retry-loop health uses the unresolved streak of genuine job errors,
 not lifetime claim count. Capacity and dispatch deferrals remain immutable audit
-attempts but are neutral for this alert; a later `OK` or `NOT_CURRENT` outcome
-resets the effective streak. Health evidence reports both lifetime claims and
-the effective failure streak.
+attempts but are neutral for this alert, as are embedding and deliberate
+maintenance deferrals; a later `OK` or `NOT_CURRENT` outcome resets the effective
+streak. Health evidence reports both lifetime claims and the effective failure
+streak.
 
 Daily Brief capacity protection is account-scoped. If its selected account
 fills the shared Gemma window, only that account's lane is temporarily limited
