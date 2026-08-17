@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 import math
 import re
 import sqlite3
+import uuid
 
 import numpy as np
 
@@ -33,6 +34,7 @@ NEWS_HYBRID_RETRIEVAL_VERSION = "news-hybrid-retrieval-v2"
 NEWS_EMBEDDING_DIMENSIONS = GEMINI_EMBEDDING_DIMENSIONS
 NEWS_ROUTE_LIMIT = 40
 NEWS_BACKFILL_BATCH = 50
+NEWS_BACKFILL_LEASE_SECONDS = 180
 _LATIN_TOKEN = re.compile(r"[a-z0-9]+")
 _HAN_RUN = re.compile(r"[\u3400-\u9fff]+")
 _LEXICAL_STOPWORDS = frozenset({
@@ -117,6 +119,95 @@ def _embedding_id(annotation_id: str, profile: EmbeddingProfile) -> str:
     return "news-embedding-" + hashlib.sha256(source.encode()).hexdigest()[:32]
 
 
+def _backfill_generation_id(profile: EmbeddingProfile) -> str:
+    source = "|".join((
+        NEWS_EMBEDDING_TEXT_VERSION,
+        profile.model_name,
+        profile.model_digest,
+        str(profile.dimensions),
+    ))
+    return hashlib.sha256(source.encode()).hexdigest()
+
+
+def _open_backfill_lease_connection(
+    connection: sqlite3.Connection,
+) -> sqlite3.Connection:
+    database_path = next(
+        (
+            str(row[2]) for row in connection.execute("PRAGMA database_list")
+            if str(row[1]) == "main" and str(row[2])
+        ),
+        "",
+    )
+    if not database_path:
+        raise ValueError("embedding backfill leases require a file-backed ledger")
+    return sqlite3.connect(database_path, timeout=30.0)
+
+
+def _claim_backfill_lease(
+    connection: sqlite3.Connection,
+    profile: EmbeddingProfile,
+    *,
+    now: datetime | None = None,
+) -> tuple[str, str] | None:
+    """Claim one cross-lane generation lease before provider admission."""
+    instant = now or datetime.now(UTC)
+    generation_id = _backfill_generation_id(profile)
+    owner = str(uuid.uuid4())
+    expires_at = instant + timedelta(seconds=NEWS_BACKFILL_LEASE_SECONDS)
+    lease_connection = _open_backfill_lease_connection(connection)
+    try:
+        lease_connection.execute("BEGIN IMMEDIATE")
+        row = lease_connection.execute(
+            """SELECT lease_expires_at
+               FROM news_identity_embedding_backfill_leases_v1
+               WHERE generation_id=?""",
+            (generation_id,),
+        ).fetchone()
+        if row is not None and datetime.fromisoformat(str(row[0])) > instant:
+            lease_connection.rollback()
+            return None
+        timestamp = instant.isoformat(timespec="microseconds")
+        lease_connection.execute(
+            """INSERT INTO news_identity_embedding_backfill_leases_v1
+               VALUES (?,?,?,?)
+               ON CONFLICT(generation_id) DO UPDATE SET
+                 lease_owner=excluded.lease_owner,
+                 lease_expires_at=excluded.lease_expires_at,
+                 updated_at=excluded.updated_at""",
+            (
+                generation_id,
+                owner,
+                expires_at.isoformat(timespec="microseconds"),
+                timestamp,
+            ),
+        )
+        lease_connection.commit()
+    except Exception:
+        lease_connection.rollback()
+        raise
+    finally:
+        lease_connection.close()
+    return generation_id, owner
+
+
+def _release_backfill_lease(
+    connection: sqlite3.Connection,
+    generation_id: str,
+    owner: str,
+) -> None:
+    lease_connection = _open_backfill_lease_connection(connection)
+    try:
+        with lease_connection:
+            lease_connection.execute(
+                """DELETE FROM news_identity_embedding_backfill_leases_v1
+                   WHERE generation_id=? AND lease_owner=?""",
+                (generation_id, owner),
+            )
+    finally:
+        lease_connection.close()
+
+
 def append_missing_embeddings(
     connection: sqlite3.Connection,
     rows: list[dict],
@@ -126,50 +217,57 @@ def append_missing_embeddings(
 ) -> tuple[EmbeddingProfile, int]:
     """Append a bounded batch of missing immutable vectors."""
     profile = client.profile()
-    existing = {
-        str(row[0])
-        for row in connection.execute(
-            """SELECT annotation_id FROM news_identity_embeddings_v1
-               WHERE embedding_text_version=? AND model_name=?
-                 AND model_digest=?""",
-            (
+    lease = _claim_backfill_lease(connection, profile)
+    if lease is None:
+        return profile, 0
+    generation_id, owner = lease
+    try:
+        existing = {
+            str(row[0])
+            for row in connection.execute(
+                """SELECT annotation_id FROM news_identity_embeddings_v1
+                   WHERE embedding_text_version=? AND model_name=?
+                     AND model_digest=?""",
+                (
+                    NEWS_EMBEDDING_TEXT_VERSION,
+                    profile.model_name,
+                    profile.model_digest,
+                ),
+            ).fetchall()
+        }
+        selected = [
+            row for row in rows
+            if str(row["candidate_id"]) not in existing
+        ][:max(0, limit)]
+        if not selected:
+            return profile, 0
+        texts = [identity_embedding_text(row) for row in selected]
+        vectors = client.embed(texts, profile)
+        embedded_at = datetime.now(UTC).isoformat(timespec="microseconds")
+        records = []
+        for row, text, vector in zip(selected, texts, vectors, strict=True):
+            annotation_id = str(row["candidate_id"])
+            records.append((
+                _embedding_id(annotation_id, profile),
+                annotation_id,
+                str(row["raw_content_hash"]),
+                hashlib.sha256(text.encode("utf-8")).hexdigest(),
                 NEWS_EMBEDDING_TEXT_VERSION,
                 profile.model_name,
                 profile.model_digest,
-            ),
-        ).fetchall()
-    }
-    selected = [
-        row for row in rows
-        if str(row["candidate_id"]) not in existing
-    ][:max(0, limit)]
-    if not selected:
-        return profile, 0
-    texts = [identity_embedding_text(row) for row in selected]
-    vectors = client.embed(texts, profile)
-    embedded_at = datetime.now(UTC).isoformat(timespec="microseconds")
-    records = []
-    for row, text, vector in zip(selected, texts, vectors, strict=True):
-        annotation_id = str(row["candidate_id"])
-        records.append((
-            _embedding_id(annotation_id, profile),
-            annotation_id,
-            str(row["raw_content_hash"]),
-            hashlib.sha256(text.encode("utf-8")).hexdigest(),
-            NEWS_EMBEDDING_TEXT_VERSION,
-            profile.model_name,
-            profile.model_digest,
-            profile.dimensions,
-            np.asarray(vector, dtype="<f4").tobytes(),
-            embedded_at,
-        ))
-    with connection:
-        connection.executemany(
-            """INSERT OR IGNORE INTO news_identity_embeddings_v1
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            records,
-        )
-    return profile, len(records)
+                profile.dimensions,
+                np.asarray(vector, dtype="<f4").tobytes(),
+                embedded_at,
+            ))
+        with connection:
+            connection.executemany(
+                """INSERT OR IGNORE INTO news_identity_embeddings_v1
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                records,
+            )
+        return profile, len(records)
+    finally:
+        _release_backfill_lease(connection, generation_id, owner)
 
 
 def load_embeddings(
