@@ -35,6 +35,11 @@ remains retryable with bounded backoff until valid output exists. It never
 becomes a completed placeholder or terminal semantic rejection. Historical
 placeholders written by the superseded behavior are ineligible for model use
 and are automatically rediscovered for append-only recovery.
+When exact numeric grounding fails, the next corrective request MUST remove
+numeric spans from its rewrite seed and require complete, numeric-free Chinese
+prose instead of asking the model to choose among the same ambiguous values.
+The validator MUST identify every failed display sibling before retrying so an
+unrequested invalid field cannot make an otherwise valid repair impossible.
 Language validation MUST distinguish ordinary untranslated prose from natural
 English identifiers and names. A complete foreign-language clause or a script
 other than Chinese and Latin requires repair; punctuation, numbers, symbols,

@@ -4,6 +4,7 @@ import io
 import json
 import math
 import os
+import re
 import sqlite3
 import urllib.error
 import zipfile
@@ -2330,6 +2331,43 @@ def test_chinese_repair_policy_preserves_natural_english_identifiers() -> None:
     assert "SOURCE_NUMBER_MISMATCH" in targeted_instruction
     assert targeted_schema["required"] == ["headline_zh"]
     assert "xauusd_relevance" not in targeted_schema["properties"]
+
+    numeric_retry = annotation_module._chinese_repair_payload(
+        {
+            "headline_zh": "黄金上涨10.3%",
+            "summary_zh": "金价上涨10.3%，收于C$0.35。",
+            "primary_story_title_zh": "黄金走势",
+        },
+        "Gold rose 10.3%", "Gold last traded at C$0.35.",
+        invalid_fields=("headline_zh", "summary_zh"),
+        failure_reason=(
+            "SOURCE_NUMBER_AMBIGUOUS: Gemini summary_zh contains a number "
+            "that cannot be restored uniquely from source"
+        ),
+    )
+    numeric_instruction = numeric_retry["contents"][0]["parts"][0]["text"]
+    assert "return no ASCII digits and no numeric claims" in numeric_instruction
+    rejected_seed = numeric_instruction.split(
+        "\nREJECTED_OUTPUT\n", 1,
+    )[1].split("\nSOURCE_NUMBER_LEXEMES\n", 1)[0]
+    assert not re.search(r"\d", rejected_seed)
+    assert numeric_instruction.endswith("SOURCE_NUMBER_LEXEMES\n[]")
+
+
+def test_invalid_display_fields_include_numeric_siblings() -> None:
+    result = {
+        "headline_zh": "黄金市场更新",
+        "summary_zh": "金价上涨了2%，市场继续关注政策变化。",
+        "primary_story_title_zh": "Still English",
+    }
+
+    invalid = annotation_module._invalid_chinese_display_fields(
+        result,
+        headline="Gold market update",
+        body="Markets continue to watch policy changes.",
+    )
+
+    assert invalid == ("summary_zh", "primary_story_title_zh")
 
 
 def test_failed_display_repair_withholds_annotation_and_records_failure_fields(
