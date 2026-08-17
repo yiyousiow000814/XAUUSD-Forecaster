@@ -25,6 +25,7 @@ from .local_embeddings import EmbeddingProfile
 from .gemini_embeddings import (
     GEMINI_EMBEDDING_DIMENSIONS,
     GeminiEmbeddingClient,
+    GeminiEmbeddingFailure,
 )
 
 
@@ -35,6 +36,8 @@ NEWS_EMBEDDING_DIMENSIONS = GEMINI_EMBEDDING_DIMENSIONS
 NEWS_ROUTE_LIMIT = 40
 NEWS_BACKFILL_BATCH = 50
 NEWS_BACKFILL_LEASE_SECONDS = 180
+NEWS_BACKFILL_COOLDOWN_BASE_SECONDS = 60
+NEWS_BACKFILL_COOLDOWN_MAX_SECONDS = 1800
 _LATIN_TOKEN = re.compile(r"[a-z0-9]+")
 _HAN_RUN = re.compile(r"[\u3400-\u9fff]+")
 _LEXICAL_STOPWORDS = frozenset({
@@ -51,6 +54,25 @@ class HybridRetrievalResult:
 
 class NewsEmbeddingBackfillPending(RuntimeError):
     """The append-only embedding universe is still catching up."""
+
+
+class NewsEmbeddingPrerequisiteCooldown(RuntimeError):
+    """A durable generation-level embedding prerequisite is cooling down."""
+
+    def __init__(self, row: sqlite3.Row) -> None:
+        self.failure_code = str(
+            row["last_failure_code"] or "NEWS_EMBEDDING_BACKFILL_PENDING"
+        )
+        self.provider_http_status = (
+            int(row["provider_http_status"])
+            if row["provider_http_status"] is not None else None
+        )
+        self.next_retry_at = str(row["cooldown_until"])
+        try:
+            self.diagnostic = json.loads(str(row["diagnostic_json"] or "{}"))
+        except json.JSONDecodeError:
+            self.diagnostic = {}
+        super().__init__(f"{self.failure_code} until {self.next_retry_at}")
 
 
 def identity_embedding_text(row: dict) -> str:
@@ -141,7 +163,9 @@ def _open_backfill_lease_connection(
     )
     if not database_path:
         raise ValueError("embedding backfill leases require a file-backed ledger")
-    return sqlite3.connect(database_path, timeout=30.0)
+    lease_connection = sqlite3.connect(database_path, timeout=30.0)
+    lease_connection.row_factory = sqlite3.Row
+    return lease_connection
 
 
 def _claim_backfill_lease(
@@ -159,17 +183,25 @@ def _claim_backfill_lease(
     try:
         lease_connection.execute("BEGIN IMMEDIATE")
         row = lease_connection.execute(
-            """SELECT lease_expires_at
+            """SELECT lease_expires_at,cooldown_until,last_failure_code,
+                      provider_http_status,diagnostic_json
                FROM news_identity_embedding_backfill_leases_v1
                WHERE generation_id=?""",
             (generation_id,),
         ).fetchone()
+        if (
+            row is not None and row["cooldown_until"]
+            and datetime.fromisoformat(str(row["cooldown_until"])) > instant
+        ):
+            lease_connection.rollback()
+            raise NewsEmbeddingPrerequisiteCooldown(row)
         if row is not None and datetime.fromisoformat(str(row[0])) > instant:
             lease_connection.rollback()
             return None
         timestamp = instant.isoformat(timespec="microseconds")
         lease_connection.execute(
             """INSERT INTO news_identity_embedding_backfill_leases_v1
+               (generation_id,lease_owner,lease_expires_at,updated_at)
                VALUES (?,?,?,?)
                ON CONFLICT(generation_id) DO UPDATE SET
                  lease_owner=excluded.lease_owner,
@@ -199,13 +231,109 @@ def _release_backfill_lease(
     lease_connection = _open_backfill_lease_connection(connection)
     try:
         with lease_connection:
-            lease_connection.execute(
+            row = lease_connection.execute(
+                """SELECT cooldown_until
+                   FROM news_identity_embedding_backfill_leases_v1
+                   WHERE generation_id=? AND lease_owner=?""",
+                (generation_id, owner),
+            ).fetchone()
+            if row is None:
+                return
+            now = datetime.now(UTC)
+            if row[0] and datetime.fromisoformat(str(row[0])) > now:
+                timestamp = now.isoformat(timespec="microseconds")
+                lease_connection.execute(
+                    """UPDATE news_identity_embedding_backfill_leases_v1
+                       SET lease_owner='',lease_expires_at=?,updated_at=?
+                       WHERE generation_id=? AND lease_owner=?""",
+                    (timestamp, timestamp, generation_id, owner),
+                )
+            else:
+                lease_connection.execute(
+                    """DELETE FROM news_identity_embedding_backfill_leases_v1
+                       WHERE generation_id=? AND lease_owner=?""",
+                    (generation_id, owner),
+                )
+    finally:
+        lease_connection.close()
+
+
+def _record_backfill_failure(
+    connection: sqlite3.Connection,
+    generation_id: str,
+    owner: str,
+    error: GeminiEmbeddingFailure,
+) -> None:
+    state = _open_backfill_lease_connection(connection)
+    try:
+        with state:
+            row = state.execute(
+                """SELECT failure_count
+                   FROM news_identity_embedding_backfill_leases_v1
+                   WHERE generation_id=? AND lease_owner=?""",
+                (generation_id, owner),
+            ).fetchone()
+            if row is None:
+                raise ValueError("embedding backfill lease is not owned")
+            failure_count = int(row[0] or 0) + 1
+            fallback = min(
+                NEWS_BACKFILL_COOLDOWN_MAX_SECONDS,
+                NEWS_BACKFILL_COOLDOWN_BASE_SECONDS
+                * (2 ** min(failure_count - 1, 10)),
+            )
+            cooldown_seconds = error.retry_after_seconds or fallback
+            cooldown_seconds = min(86_400, max(1, int(cooldown_seconds)))
+            failed_at = datetime.now(UTC)
+            error.next_retry_at = (
+                failed_at + timedelta(seconds=cooldown_seconds)
+            ).isoformat(timespec="microseconds")
+            diagnostic = {
+                **error.diagnostic,
+                "cooldown_seconds": cooldown_seconds,
+            }
+            serialized = json.dumps(
+                diagnostic, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
+            )
+            if len(serialized) > 1000:
+                diagnostic.pop("quota_identifier", None)
+                diagnostic.pop("quota_reason", None)
+                serialized = json.dumps(
+                    diagnostic, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"),
+                )
+            state.execute(
+                """UPDATE news_identity_embedding_backfill_leases_v1
+                   SET cooldown_until=?,failure_count=?,last_failure_code=?,
+                       provider_http_status=?,diagnostic_json=?,failed_at=?,
+                       updated_at=?
+                   WHERE generation_id=? AND lease_owner=?""",
+                (
+                    error.next_retry_at,
+                    failure_count, error.failure_code,
+                    error.provider_http_status, serialized,
+                    failed_at.isoformat(timespec="microseconds"),
+                    failed_at.isoformat(timespec="microseconds"),
+                    generation_id, owner,
+                ),
+            )
+    finally:
+        state.close()
+
+
+def _clear_backfill_state(
+    connection: sqlite3.Connection, generation_id: str, owner: str,
+) -> None:
+    state = _open_backfill_lease_connection(connection)
+    try:
+        with state:
+            state.execute(
                 """DELETE FROM news_identity_embedding_backfill_leases_v1
                    WHERE generation_id=? AND lease_owner=?""",
                 (generation_id, owner),
             )
     finally:
-        lease_connection.close()
+        state.close()
 
 
 def append_missing_embeddings(
@@ -240,6 +368,7 @@ def append_missing_embeddings(
             if str(row["candidate_id"]) not in existing
         ][:max(0, limit)]
         if not selected:
+            _clear_backfill_state(connection, generation_id, owner)
             return profile, 0
         texts = [identity_embedding_text(row) for row in selected]
         vectors = client.embed(texts, profile)
@@ -265,7 +394,16 @@ def append_missing_embeddings(
                    VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 records,
             )
+        mark_committed = getattr(client, "mark_last_vectors_committed", None)
+        if callable(mark_committed):
+            mark_committed()
+        _clear_backfill_state(connection, generation_id, owner)
         return profile, len(records)
+    except GeminiEmbeddingFailure as error:
+        _record_backfill_failure(
+            connection, generation_id, owner, error,
+        )
+        raise
     finally:
         _release_backfill_lease(connection, generation_id, owner)
 

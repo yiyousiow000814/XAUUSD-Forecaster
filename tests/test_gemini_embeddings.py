@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import io
+import json
+import urllib.error
+
 import numpy as np
+import pytest
 
 from xauusd_forecaster.forward_ledger import ForwardLedger
 from xauusd_forecaster.gemini_embeddings import (
     GEMINI_EMBEDDING_DIMENSIONS,
+    GeminiEmbeddingCapacityDeferred,
     GeminiEmbeddingClient,
+    GeminiEmbeddingFailure,
 )
 from xauusd_forecaster.news_scheduler import ApiCredential, ROUTINE_POOL
 
@@ -85,4 +92,179 @@ def test_embedding_batch_moves_to_an_independent_account_when_rpm_is_full(
     client.embed(["a", "b"], client.profile())
 
     assert used_keys == ["key-open"]
+    ledger.close()
+
+
+def test_embedding_http_429_keeps_bounded_safe_quota_provenance(
+    tmp_path, monkeypatch,
+) -> None:
+    from xauusd_forecaster import gemini_embeddings
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    credential = ApiCredential(
+        "configured-label", ROUTINE_POOL, "secret-key", "fingerprint",
+    )
+    monkeypatch.setattr(
+        gemini_embeddings, "configured_api_credentials", lambda: (credential,),
+    )
+    body = json.dumps({
+        "error": {
+            "status": "RESOURCE_EXHAUSTED",
+            "details": [{
+                "quotaMetric": "generativelanguage.googleapis.com/embed_requests",
+                "quotaId": "EmbedRequestsPerProjectPerMinute",
+                "quotaDimensions": {
+                    "project_number": "project-123", "model": "embedding-2",
+                },
+            }],
+        },
+    }).encode()
+    failure = urllib.error.HTTPError(
+        "https://provider.invalid", 429, "Too Many Requests",
+        {"Retry-After": "300"}, io.BytesIO(body),
+    )
+    client = GeminiEmbeddingClient(ledger.connection)
+    monkeypatch.setattr(
+        client, "_request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+    )
+
+    with pytest.raises(GeminiEmbeddingFailure) as caught:
+        client.embed(["document one", "document two"], client.profile())
+
+    error = caught.value
+    assert error.failure_code == "NEWS_EMBEDDING_PROVIDER_THROTTLED"
+    assert error.provider_http_status == 429
+    assert error.retry_after_seconds == 300
+    assert error.diagnostic["batch_item_count"] == 2
+    assert error.diagnostic["estimated_input_tokens"] > 0
+    assert error.diagnostic["quota_reason"] == "RESOURCE_EXHAUSTED"
+    assert error.diagnostic["quota_metric"].endswith("embed_requests")
+    assert error.diagnostic["quota_limit_name"] == (
+        "EmbedRequestsPerProjectPerMinute"
+    )
+    serialized = json.dumps(error.diagnostic)
+    assert "project-123" in serialized
+    assert "secret-key" not in serialized
+    assert "fingerprint" not in serialized
+    usage = ledger.connection.execute(
+        """SELECT request_count,attempted_at,provider_outcome,
+                  provider_http_status,vectors_committed_at
+           FROM news_ai_account_request_usage_v1"""
+    ).fetchone()
+    assert usage["request_count"] == 2
+    assert usage["attempted_at"] is not None
+    assert usage["provider_outcome"] == "PROVIDER_THROTTLED"
+    assert usage["provider_http_status"] == 429
+    assert usage["vectors_committed_at"] is None
+    ledger.close()
+
+
+def test_embedding_local_admission_has_distinct_failure_code(
+    tmp_path, monkeypatch,
+) -> None:
+    from xauusd_forecaster import gemini_embeddings
+    from xauusd_forecaster.news_scheduler import reserve_account_request
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    credential = ApiCredential("full", ROUTINE_POOL, "key", "fingerprint")
+    monkeypatch.setattr(
+        gemini_embeddings, "configured_api_credentials", lambda: (credential,),
+    )
+    assert reserve_account_request(
+        ledger.connection, account_id="full",
+        model_family="gemini-embedding-2", daily_limit=1_000,
+        requests_per_minute=100, request_count=100,
+    )
+
+    with pytest.raises(GeminiEmbeddingCapacityDeferred) as caught:
+        GeminiEmbeddingClient(ledger.connection).embed(
+            ["document"], GeminiEmbeddingClient(ledger.connection).profile(),
+        )
+
+    assert caught.value.failure_code == "NEWS_EMBEDDING_CAPACITY_DEFERRED"
+    assert caught.value.provider_http_status is None
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_ai_account_request_usage_v1"
+    ).fetchone()[0] == 1
+    ledger.close()
+
+
+def test_first_provider_429_stops_unproven_account_failover(
+    tmp_path, monkeypatch,
+) -> None:
+    from xauusd_forecaster import gemini_embeddings
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    credentials = tuple(
+        ApiCredential(f"account-{index}", ROUTINE_POOL, f"key-{index}", f"fp-{index}")
+        for index in range(3)
+    )
+    monkeypatch.setattr(
+        gemini_embeddings, "configured_api_credentials", lambda: credentials,
+    )
+    client = GeminiEmbeddingClient(ledger.connection)
+
+    def throttled(*_args, **_kwargs):
+        raise urllib.error.HTTPError(
+            "https://provider.invalid", 429, "Too Many Requests",
+            {}, io.BytesIO(b'{"error":{"status":"RESOURCE_EXHAUSTED"}}'),
+        )
+
+    monkeypatch.setattr(client, "_request", throttled)
+    with pytest.raises(GeminiEmbeddingFailure):
+        client.embed(["one", "two"], client.profile())
+
+    rows = ledger.connection.execute(
+        """SELECT account_id,request_count,provider_outcome
+           FROM news_ai_account_request_usage_v1 ORDER BY account_id"""
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("account-0", 2, "PROVIDER_THROTTLED"),
+    ]
+    daily = ledger.connection.execute(
+        "SELECT request_count FROM news_ai_account_daily_usage_v1 "
+        "WHERE model_family='gemini-embedding-2' ORDER BY account_id"
+    ).fetchall()
+    assert [tuple(row) for row in daily] == [(2,)]
+    ledger.close()
+
+
+@pytest.mark.parametrize(("provider_error", "failure_code"), [
+    (
+        urllib.error.URLError("connection reset"),
+        "NEWS_EMBEDDING_PROVIDER_TRANSPORT_FAILED",
+    ),
+    (
+        ValueError("dimensions do not match contract"),
+        "NEWS_EMBEDDING_PROVIDER_RESPONSE_INVALID",
+    ),
+])
+def test_embedding_provider_failure_family_keeps_distinct_provenance(
+    tmp_path, monkeypatch, provider_error, failure_code,
+) -> None:
+    from xauusd_forecaster import gemini_embeddings
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    credential = ApiCredential("account", ROUTINE_POOL, "key", "fingerprint")
+    monkeypatch.setattr(
+        gemini_embeddings, "configured_api_credentials", lambda: (credential,),
+    )
+    client = GeminiEmbeddingClient(ledger.connection)
+    monkeypatch.setattr(
+        client, "_request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(provider_error),
+    )
+
+    with pytest.raises(GeminiEmbeddingFailure) as caught:
+        client.embed(["document"], client.profile())
+
+    assert caught.value.failure_code == failure_code
+    usage = ledger.connection.execute(
+        "SELECT attempted_at,provider_outcome,provider_http_status "
+        "FROM news_ai_account_request_usage_v1"
+    ).fetchone()
+    assert usage["attempted_at"] is not None
+    assert usage["provider_outcome"] == "PROVIDER_FAILED"
+    assert usage["provider_http_status"] is None
     ledger.close()
