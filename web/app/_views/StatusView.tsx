@@ -58,6 +58,7 @@ type StatusPayload = {
   gemini_quota: QuotaState;
   gemini_31_quota: QuotaState;
   gemma_quota: QuotaState;
+  gemini_embedding_quota: QuotaState;
   llm_routing: {
     action_bearing: { model: string; fallback_model: string; role: string };
     display_only: {
@@ -157,6 +158,7 @@ export default function StatusView() {
   const quota = payload?.gemini_quota;
   const fallbackQuota = payload?.gemini_31_quota;
   const gemmaQuota = payload?.gemma_quota;
+  const embeddingQuota = payload?.gemini_embedding_quota;
   const currentPhase: CurrentDataPhase = error
     ? "error" : !payload || syncingCurrent ? "loading" : payload.preview_status_summary ? "snapshot" : "ready";
   const throughputPhase = statusFieldPhase(
@@ -200,6 +202,7 @@ export default function StatusView() {
         <article><span>Flash 今日已发送</span><strong><MetricValue phase={currentPhase}><CountValue value={quota?.total_sent} /></MetricValue></strong><small>重要正文与训练特征</small></article>
         <article><span>Flash 今日剩余</span><strong className="good"><MetricValue phase={currentPhase}><CountValue value={quota?.total_remaining} /></MetricValue></strong><small>本机账本上限</small></article>
         <article><span>3.1 今日剩余</span><strong className="good"><MetricValue phase={currentPhase}><CountValue value={fallbackQuota?.total_remaining} /></MetricValue></strong><small>3.5 普通额度用尽后接管</small></article>
+        <article><span>Embedding 剩余</span><strong className="good"><MetricValue phase={currentPhase}><CountValue value={embeddingQuota?.total_remaining} /></MetricValue></strong><small>新闻语义召回 · 每账户 1K RPD</small></article>
         <article><span>普通新闻可用</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.routine_remaining} /></MetricValue></strong><small>不会动用重要新闻保留额</small></article>
         <article><span>重要新闻保留</span><strong className="good"><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.priority_reserve} /></MetricValue></strong><small>FOMC、CPI、Payroll 专用</small></article>
         <article><span>错误退避中</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.backing_off} /></MetricValue></strong><small>到期前不会重复请求</small></article>
@@ -209,6 +212,7 @@ export default function StatusView() {
       <section className="throughput-summary" aria-label="模型安全吞吐">
         <article><span>Flash 安全吞吐</span><strong><MetricValue phase={throughputPhase} snapshotLabel="分支配置" snapshotTitle="此吞吐限制来自当前 PR 分支的构建配置，不是生产实时观测"><CountValue value={payload?.annotation_queue.requests_per_minute} /></MetricValue></strong><small>总 RPM · 每账户 <CountValue value={payload?.annotation_queue.requests_per_minute_per_account} format="exact" /> · 总 TPM <CountValue value={payload?.annotation_queue.input_tokens_per_minute} /> · 分支配置</small></article>
         <article><span>Gemma 安全吞吐</span><strong><MetricValue phase={gemmaThroughputPhase} snapshotLabel="分支配置" snapshotTitle="每个独立账户分别执行 RPM 与 TPM 入场检查"><CountValue value={payload?.llm_routing.display_only.requests_per_minute} /></MetricValue></strong><small>总 RPM · 总 TPM <CountValue value={payload?.llm_routing.display_only.input_tokens_per_minute} /> · 并发 <CountValue value={payload?.llm_routing.display_only.maximum_concurrent_requests} format="exact" /> · <CountValue value={payload?.llm_routing.display_only.configured_account_count} format="exact" /> 个账户</small></article>
+        <article><span>Embedding 安全吞吐</span><strong>100</strong><small>每账户 RPM · 30K TPM · 1K RPD · batch 按条计数</small></article>
       </section>
 
       <section className="routing-grid">
@@ -220,10 +224,11 @@ export default function StatusView() {
       <QuotaPanel title="Gemini 3.5 Flash-Lite · 逐 Key 配额" eyebrow="ACTION-BEARING / FULL CONTENT" quota={quota} nowMs={nowMs} />
       <QuotaPanel title="Gemini 3.1 Flash-Lite · 逐 Key 配额" eyebrow="ACTION-BEARING FALLBACK / FULL CONTENT" quota={fallbackQuota} nowMs={nowMs} />
       <QuotaPanel title="Gemma 4 31B · 逐 Key 配额" eyebrow="DISPLAY-ONLY / TITLE TRANSLATION" quota={gemmaQuota} nowMs={nowMs} />
+      <QuotaPanel title="Gemini Embedding 2 · 逐账户配额" eyebrow="NEWS IDENTITY / SEMANTIC RETRIEVAL" quota={embeddingQuota} nowMs={nowMs} />
 
       <details className="quota-note">
         <summary><b>计数规则</b><span>查看账本与 Google 额度的区别</span></summary>
-        <p>每次请求在发往模型前永久计入各自账本，包括被 Google 拒绝的请求。3.5 每 key 本机上限 500，并保留一部分给 FOMC、CPI 与 Payroll；普通额度用尽后才由 3.1 接管。数字格式和中文显示问题会在本地恢复，同一分钟的 RPM 槽位用完只会延后到下一批，不算失败。只有 Google 服务或响应故障才进入持久退避。Gemma 每 key 本机上限 15,000。三个账本都在 Pacific midnight 自动切换。</p>
+        <p>每次请求在发往模型前永久计入各自账本，包括被 Google 拒绝的请求。3.5 每 key 本机上限 500，并保留一部分给 FOMC、CPI 与 Payroll；普通额度用尽后才由 3.1 接管。数字格式和中文显示问题会在本地恢复，同一分钟的 RPM 槽位用完只会延后到下一批，不算失败。只有 Google 服务或响应故障才进入持久退避。Gemma 每 key 本机上限 15,000。Embedding 每个独立账户为 100 RPM、30K TPM、1K RPD，batch 内每条内容分别计一次请求。各账本都在 Pacific midnight 自动切换。</p>
         <p>当前配置把每个账户视为独立额度域；Flash 与 Gemma 的总 RPM/TPM 都按独立账户数汇总。每次请求仍须先通过对应账户的 RPM 与 TPM 原子检查，因此增加并发不会绕过额度。</p>
       </details>
 

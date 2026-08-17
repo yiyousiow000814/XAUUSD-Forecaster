@@ -1969,7 +1969,7 @@ test("keeps shared news retrieval bounded and phone readable", () => {
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.search-filter-grid \{ grid-template-columns:1fr; \}/);
 });
 
-test("keeps the legacy news Q&A queue protected without a duplicate user-facing surface", () => {
+test("keeps the legacy news Q&A queue protected and paused without a duplicate surface", () => {
   const view = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   const route = readFileSync(new URL("../app/api/news-questions/route.ts", import.meta.url), "utf8");
   const workerRoute = readFileSync(
@@ -2003,7 +2003,9 @@ test("keeps the legacy news Q&A queue protected without a duplicate user-facing 
     sync.indexOf("def _sync_news_questions("),
     sync.indexOf("\ndef ", sync.indexOf("def _sync_news_questions(") + 1),
   );
-  assert.match(qaSync, /\/news-search\?/);
+  assert.match(qaSync, /return None/);
+  assert.match(qaSync, /Daily Brief use separate workers/);
+  assert.doesNotMatch(qaSync, /\/news-search\?/);
   assert.doesNotMatch(qaSync, /recent_news/);
 });
 
@@ -2080,10 +2082,9 @@ test("separates Access-owned human APIs from the ingest worker control plane", (
       "Preview worker claims must reject before machine authentication",
     );
   }
-  assert.match(sync, /\/assistant-worker\/chat/);
-  assert.match(sync, /\/assistant-worker\/news-questions/);
-  assert.match(sync, /worker_root \+ "\/conversations"/);
-  assert.match(sync, /"index_version": ASSISTANT_MEMORY_INDEX_VERSION/);
+  assert.match(sync, /PAUSED_NO_MODEL/);
+  assert.doesNotMatch(sync, /\/assistant-worker\/chat/);
+  assert.doesNotMatch(sync, /\/assistant-worker\/news-questions/);
   assert.match(
     workerRoutes[1],
     /params\.get\("index_version"\).*ASSISTANT_MEMORY_INDEX_VERSION/s,
@@ -2136,8 +2137,11 @@ test("renders a recoverable responsive Assistant workbench without unsafe HTML",
   assert.match(transcript, /assistant-transcript-banners/);
   assert.match(transcript, /href="\/assistant">\u5b8c\u6210 Access \u767b\u5f55/);
   assert.match(transcript, /AURUM \/ PROVISIONAL/);
-  assert.match(transcript, /历史自动压缩/);
-  assert.match(transcript, /ASSISTANT_CONTEXT_LIMIT_TOKENS/);
+  assert.match(transcript, /ASSISTANT PAUSED/);
+  assert.match(transcript, /等待新的 API 模型/);
+  assert.doesNotMatch(transcript, /本机模型正在处理其他问题/);
+  assert.match(transcript, /disabled=\{Boolean\(activeTurn\) \|\| preview \|\| paused\}/);
+  assert.doesNotMatch(transcript, /ASSISTANT_CONTEXT_LIMIT_TOKENS/);
   assert.match(transcript, /ASSISTANT_MAX_MESSAGE_BYTES \* 0\.75/);
   assert.doesNotMatch(transcript, /16,000 bytes/);
   assert.doesNotMatch(transcript, /dangerouslySetInnerHTML/);

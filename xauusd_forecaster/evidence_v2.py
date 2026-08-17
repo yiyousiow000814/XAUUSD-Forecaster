@@ -522,6 +522,13 @@ ON news_identity_embeddings_v1(
     embedding_text_version,model_name,model_digest,annotation_id
 );
 
+CREATE TABLE IF NOT EXISTS news_identity_embedding_backfill_leases_v1 (
+    generation_id TEXT PRIMARY KEY,
+    lease_owner TEXT NOT NULL,
+    lease_expires_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS news_identity_retrieval_receipts_v1 (
     receipt_id TEXT PRIMARY KEY,
     annotation_id TEXT NOT NULL,

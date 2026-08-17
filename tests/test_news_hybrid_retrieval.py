@@ -68,6 +68,16 @@ class _FakeEmbeddingClient:
         return np.asarray(vectors)
 
 
+class _ReentrantEmbeddingClient(_FakeEmbeddingClient):
+    def __init__(self, callback) -> None:
+        super().__init__()
+        self._callback = callback
+
+    def embed(self, texts, profile):
+        self._callback()
+        return super().embed(texts, profile)
+
+
 def test_hybrid_retrieval_unions_semantic_recall_without_losing_pinned_match():
     current = _row(
         "current", "Venezuela begins moving sovereign gold reserves",
@@ -129,7 +139,7 @@ def test_lexical_similarity_ignores_shared_field_labels_and_stopwords():
     )
 
 
-def test_embedding_rows_are_versioned_by_exact_local_model_digest(tmp_path):
+def test_embedding_rows_are_versioned_by_exact_provider_model_digest(tmp_path):
     ledger = ForwardLedger(tmp_path / "evidence.sqlite3")
     try:
         row = _row(
@@ -158,6 +168,7 @@ def test_embedding_rows_are_versioned_by_exact_local_model_digest(tmp_path):
                 "{}",
             ),
         )
+        ledger.connection.commit()
         first_profile, first_count = append_missing_embeddings(
             ledger.connection, [row], _FakeEmbeddingClient("a" * 64), limit=1,
         )
@@ -181,6 +192,73 @@ def test_embedding_rows_are_versioned_by_exact_local_model_digest(tmp_path):
             )
     finally:
         ledger.close()
+
+
+def test_embedding_backfill_lease_prevents_duplicate_provider_admission(tmp_path):
+    database = tmp_path / "evidence.sqlite3"
+    first_ledger = ForwardLedger(database)
+    second_ledger = ForwardLedger(database)
+    row = _row(
+        "annotation-1", "Federal Reserve decision",
+        first_seen="2026-08-17T10:00:00+00:00",
+    )
+    second_calls = 0
+
+    class _CountingClient(_FakeEmbeddingClient):
+        def embed(self, texts, profile):
+            nonlocal second_calls
+            second_calls += 1
+            return super().embed(texts, profile)
+
+    def attempt_competing_backfill() -> None:
+        _, count = append_missing_embeddings(
+            second_ledger.connection, [row], _CountingClient(), limit=1,
+        )
+        assert count == 0
+
+    try:
+        first_ledger.connection.execute(
+            """INSERT INTO news_revisions VALUES (
+               'source','annotation-1',1,NULL,?,?,?,'Federal Reserve decision',
+               'body',NULL,?,'cluster',NULL)""",
+            (
+                row["collector_first_seen_time"],
+                row["collector_first_seen_time"],
+                row["collector_first_seen_time"],
+                row["raw_content_hash"],
+            ),
+        )
+        first_ledger.connection.execute(
+            """INSERT INTO news_annotations VALUES (
+               'annotation-1','source','annotation-1',1,?,'EVENT', '[]',
+               0,0,0,0,0,0,1,'model','prompt',?,?,?)""",
+            (
+                row["raw_content_hash"],
+                row["collector_first_seen_time"],
+                row["collector_first_seen_time"],
+                "{}",
+            ),
+        )
+        first_ledger.connection.commit()
+
+        _, count = append_missing_embeddings(
+            first_ledger.connection,
+            [row],
+            _ReentrantEmbeddingClient(attempt_competing_backfill),
+            limit=1,
+        )
+
+        assert count == 1
+        assert second_calls == 0
+        assert first_ledger.connection.execute(
+            "SELECT count(*) FROM news_identity_embeddings_v1"
+        ).fetchone()[0] == 1
+        assert first_ledger.connection.execute(
+            "SELECT count(*) FROM news_identity_embedding_backfill_leases_v1"
+        ).fetchone()[0] == 0
+    finally:
+        second_ledger.close()
+        first_ledger.close()
 
 
 def test_runtime_catches_up_historical_embedding_gap_before_retrieval(

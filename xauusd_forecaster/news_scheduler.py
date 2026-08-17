@@ -797,6 +797,7 @@ def reserve_account_request(
     model_family: str,
     daily_limit: int,
     requests_per_minute: int,
+    request_count: int = 1,
     input_tokens: int = 0,
     input_tokens_per_minute: int | None = None,
     shared_model_families: tuple[str, ...] | None = None,
@@ -805,12 +806,19 @@ def reserve_account_request(
     urgent: bool = False,
     now: datetime | None = None,
 ) -> bool:
-    """Atomically count one attempted request against an independent account."""
+    """Atomically count attempted provider requests against one account.
+
+    Batch APIs may carry several independently quota-counted requests in one
+    HTTP envelope. ``request_count`` represents that provider-visible unit.
+    """
     instant = now or datetime.now(UTC)
     day = quota_day(instant)
     minute = minute_bucket(instant)
     timestamp = _iso(instant)
     estimated_tokens = max(0, int(input_tokens))
+    attempted_requests = int(request_count)
+    if attempted_requests < 1:
+        raise ValueError("request_count must be positive")
     families = tuple(dict.fromkeys(shared_model_families or (model_family,)))
     placeholders = ",".join("?" for _ in families)
     usable_daily_limit = daily_limit if urgent else max(0, daily_limit - reserve_total)
@@ -836,8 +844,8 @@ def reserve_account_request(
             and minute_tokens + estimated_tokens > input_tokens_per_minute
         )
         if (
-            daily_count >= usable_daily_limit
-            or minute_count >= requests_per_minute
+            daily_count + attempted_requests > usable_daily_limit
+            or minute_count + attempted_requests > requests_per_minute
             or token_exhausted
         ):
             connection.rollback()
@@ -845,24 +853,28 @@ def reserve_account_request(
         connection.execute(
             """INSERT INTO news_ai_account_daily_usage_v1 VALUES (?,?,?,?,?)
                ON CONFLICT(quota_day,account_id,model_family) DO UPDATE SET
-                 request_count=request_count+1,updated_at=excluded.updated_at""",
-            (day, account_id, model_family, 1, timestamp),
+                 request_count=request_count+excluded.request_count,
+                 updated_at=excluded.updated_at""",
+            (day, account_id, model_family, attempted_requests, timestamp),
         )
         connection.execute(
             """INSERT INTO news_ai_account_minute_usage_v1
                (minute_bucket,account_id,model_family,request_count,
                 input_token_count,updated_at) VALUES (?,?,?,?,?,?)
                ON CONFLICT(minute_bucket,account_id,model_family) DO UPDATE SET
-                 request_count=request_count+1,
+                 request_count=request_count+excluded.request_count,
                  input_token_count=input_token_count+excluded.input_token_count,
                  updated_at=excluded.updated_at""",
-            (minute, account_id, model_family, 1, estimated_tokens, timestamp),
+            (
+                minute, account_id, model_family, attempted_requests,
+                estimated_tokens, timestamp,
+            ),
         )
         connection.execute(
             """INSERT INTO news_ai_account_request_usage_v1
                VALUES (?,?,?,?,?,?)""",
             (
-                str(uuid.uuid4()), account_id, model_family, 1,
+                str(uuid.uuid4()), account_id, model_family, attempted_requests,
                 estimated_tokens, timestamp,
             ),
         )

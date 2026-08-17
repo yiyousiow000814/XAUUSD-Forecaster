@@ -14,6 +14,12 @@ Displayed totals aggregate usage across configured accounts, while admission
 control remains per account. Provider limits shown by AI Studio remain the
 authority; repository constants are conservative local safety limits.
 
+Gemini Embedding 2 is admitted independently at 100 RPM, 30,000 input TPM,
+and 1,000 RPD per configured independent account. Google counts each embedded
+content item in `batchEmbedContents` as one request; the scheduler therefore
+reserves the batch item count rather than the HTTP envelope count. Exhausted
+minute capacity defers work instead of sending an over-limit request.
+
 The runtime reloads this account registry for every scheduler batch and ranks
 independent accounts by current daily, RPM, and TPM headroom. On Windows it
 reads the current user-scoped environment registry directly, so adding or
@@ -23,6 +29,11 @@ existing account adds transport redundancy but does not increase that account's
 quota or the scheduler's automatic batch size.
 
 ## Assistant capacity policy
+
+Assistant generation is currently paused while a suitable API model is being
+selected. The provider-neutral chat, capacity, and conversation interfaces are
+retained, but the production write route rejects new turns before creating any
+conversation state. No Gemini or Gemma route is an implicit Assistant fallback.
 
 `ASSISTANT_CAPACITY_POLICIES` may declare exact or `*` pool templates for each
 enabled Assistant model. Each entry declares `credential_pool_id`, `provider`,

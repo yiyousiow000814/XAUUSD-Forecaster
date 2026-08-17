@@ -13,9 +13,9 @@ import {
 } from "../_lib/assistant-chat-client";
 import { ASSISTANT_PREVIEW_FIXTURE_LABEL } from "../_lib/assistant-preview-fixture";
 import {
-  ASSISTANT_CONTEXT_LIMIT_TOKENS,
   ASSISTANT_MAX_MESSAGE_BYTES,
 } from "../_lib/assistant-runtime-limits";
+import { ASSISTANT_UNAVAILABLE_MESSAGE } from "../_lib/assistant-availability";
 
 const timeLabel = (value: string) => new Intl.DateTimeFormat("zh-CN", {
   month: "short",
@@ -29,7 +29,7 @@ const byteLength = (value: string) => new TextEncoder().encode(value).length;
 
 const failureLabel = (code: string | null) => {
   const labels: Record<string, string> = {
-    NO_MODEL_CAPACITY: "本机模型正在处理其他问题，请稍后重试。",
+    NO_MODEL_CAPACITY: "当时没有可用模型容量，请稍后重试。",
     MODEL_OUTPUT_INVALID: "模型回答未通过证据与格式检查。",
     NO_COMPATIBLE_MODEL: "当前问题超过本机安全上下文。",
     USER_CANCELLED: "本轮已取消。",
@@ -91,6 +91,7 @@ export default function AssistantTranscript({
   events,
   draft,
   preview,
+  paused,
   accessLoginRequired,
   error,
   loading,
@@ -114,6 +115,7 @@ export default function AssistantTranscript({
   events: AssistantEventEnvelope[];
   draft: string;
   preview: boolean;
+  paused: boolean;
   accessLoginRequired: boolean;
   error: string | null;
   loading: boolean;
@@ -151,9 +153,6 @@ export default function AssistantTranscript({
   const draftBytes = byteLength(draft);
   const invalidDraft = draftBytes === 0 || draftBytes > ASSISTANT_MAX_MESSAGE_BYTES;
   const showDraftLimit = draftBytes >= ASSISTANT_MAX_MESSAGE_BYTES * 0.75;
-  const contextWindowLabel = `${Math.round(
-    ASSISTANT_CONTEXT_LIMIT_TOKENS / 1_024,
-  )}K 上下文`;
   const draftLimitLabel = `${(draftBytes / 1_000).toLocaleString("zh-CN", {
     maximumFractionDigits: 1,
   })} / ${ASSISTANT_MAX_MESSAGE_BYTES / 1_000} KB`;
@@ -180,7 +179,7 @@ export default function AssistantTranscript({
   const submitOnEnter = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
     event.preventDefault();
-    if (!invalidDraft && !sending && !activeTurn && !preview) onSend();
+    if (!invalidDraft && !sending && !activeTurn && !preview && !paused) onSend();
   };
 
   return <section className="assistant-transcript" aria-label="Assistant 对话">
@@ -248,6 +247,9 @@ export default function AssistantTranscript({
       {preview ? <div className="assistant-preview-notice" role="note">
         <b>PREVIEW FIXTURE</b><span>{ASSISTANT_PREVIEW_FIXTURE_LABEL}</span>
       </div> : null}
+      {!preview && paused ? <div className="assistant-paused-notice" role="status">
+        <b>ASSISTANT PAUSED</b><span>{ASSISTANT_UNAVAILABLE_MESSAGE}</span>
+      </div> : null}
       {error ? <div className="assistant-chat-error" role="alert">
         <span>{error}</span>{accessLoginRequired
           ? <a href="/assistant">完成 Access 登录</a>
@@ -304,28 +306,28 @@ export default function AssistantTranscript({
       </div> : null}
       {conversation?.status === "ARCHIVED" ? <p className="assistant-archived-note">此会话已归档；恢复后才能继续提问。</p> : <form onSubmit={event => {
         event.preventDefault();
-        if (!invalidDraft && !sending && !activeTurn && !preview) onSend();
+        if (!invalidDraft && !sending && !activeTurn && !preview && !paused) onSend();
       }}>
         <label htmlFor="assistant-message-input">给 Aurum Assistant 的问题</label>
         <textarea
           aria-describedby="assistant-composer-guidance"
-          disabled={Boolean(activeTurn) || preview}
+          disabled={Boolean(activeTurn) || preview || paused}
           id="assistant-message-input"
           onChange={event => onDraftChange(event.currentTarget.value)}
           onKeyDown={submitOnEnter}
-          placeholder={preview ? "Preview 只读" : "输入问题…"}
+          placeholder={preview ? "Preview 只读" : paused ? "等待新的 API 模型" : "输入问题…"}
           rows={3}
           value={draft}
         />
         <div className="assistant-composer-meta">
           <div className="assistant-composer-guidance" id="assistant-composer-guidance">
             <span>Enter 发送 · Shift + Enter 换行</span>
-            <strong>{contextWindowLabel} · 历史自动压缩</strong>
+            {!paused ? <strong>上下文由当前 API 模型决定</strong> : null}
             {showDraftLimit ? <b className={draftBytes > ASSISTANT_MAX_MESSAGE_BYTES
               ? "is-over" : ""}>本条 {draftLimitLabel}</b> : null}
           </div>
-          <button disabled={invalidDraft || sending || Boolean(activeTurn) || preview} type="submit">
-            <span>{sending ? "发送中" : preview ? "只读预览" : "发送问题"}</span>
+          <button disabled={invalidDraft || sending || Boolean(activeTurn) || preview || paused} type="submit">
+            <span>{sending ? "发送中" : preview ? "只读预览" : paused ? "暂不可用" : "发送问题"}</span>
             <svg aria-hidden="true" viewBox="0 0 24 24">
               <path d="M5 12h13M13 6l6 6-6 6" fill="none" stroke="currentColor" strokeLinecap="square" strokeWidth="2" />
             </svg>
