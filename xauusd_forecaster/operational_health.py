@@ -28,6 +28,8 @@ TASK_LABELS = {
     "TITLE_TRANSLATION": "中文标题展示",
 }
 SEVERITY_ORDER = {"ERROR": 0, "WARNING": 1, "INFO": 2}
+CAPACITY_FAILURE_CODES = frozenset({"MODEL_CAPACITY_DEFERRED"})
+MAINTENANCE_FAILURE_CODES = frozenset({"NEWS_EMBEDDING_BACKFILL_PENDING"})
 
 
 def _instant(value: object) -> datetime | None:
@@ -77,6 +79,8 @@ def scheduler_health_snapshot(
             "completed_15m": 0,
             "retired_15m": 0,
             "deferred_15m": 0,
+            "all_deferred_15m": 0,
+            "capacity_deferred_15m": 0,
             "errors_15m": 0,
             "failure_codes_15m": {},
             "claimable": 0,
@@ -173,8 +177,6 @@ def scheduler_health_snapshot(
     outcome_fields = {
         "OK": "completed_15m",
         "NOT_CURRENT": "retired_15m",
-        "DEFERRED": "deferred_15m",
-        "DISABLED": "deferred_15m",
         "ERROR": "errors_15m",
     }
     for row in outcome_rows:
@@ -183,6 +185,10 @@ def scheduler_health_snapshot(
         if field:
             summary[field] += int(row["total"])
         code = str(row["failure_code"] or "").strip()
+        if str(row["outcome"]) in {"DEFERRED", "DISABLED"}:
+            summary["all_deferred_15m"] += int(row["total"])
+            if code in CAPACITY_FAILURE_CODES:
+                summary["capacity_deferred_15m"] += int(row["total"])
         if code:
             codes = summary["failure_codes_15m"]
             codes[code] = int(codes.get(code, 0)) + int(row["total"])
@@ -207,13 +213,40 @@ def scheduler_health_snapshot(
         completed = int(summary["completed_15m"])
         retired = int(summary["retired_15m"])
         progressed = completed + retired
-        deferred = int(summary["deferred_15m"])
+        capacity_deferred = int(summary["capacity_deferred_15m"])
+        # Keep the established field as a compatibility alias with corrected
+        # capacity semantics; all deferrals remain separately observable.
+        summary["deferred_15m"] = capacity_deferred
         errors = int(summary["errors_15m"])
         max_claims = int(summary["max_claim_count"])
         max_claim_is_claimable = bool(summary["max_claim_is_claimable"])
         oldest_age = int(summary["oldest_age_seconds"] or 0)
 
-        if max_claims >= RETRY_LOOP_THRESHOLD:
+        retry_candidate = connection.execute(
+            """SELECT j.job_id,j.state,j.available_at,j.attempt_count,
+                      j.attempt_count - COALESCE(sum(
+                        CASE WHEN a.failure_code IN (?) THEN 1 ELSE 0 END
+                      ),0) AS retry_attempt_count
+               FROM news_ai_jobs_v1 j
+               LEFT JOIN news_ai_job_attempts_v1 a ON a.job_id=j.job_id
+               WHERE j.task_type=?
+                 AND j.state IN ('QUEUED','LEASED','BACKING_OFF')
+                 AND j.attempt_count>=?
+               GROUP BY j.job_id
+               HAVING retry_attempt_count>=?
+               ORDER BY retry_attempt_count DESC,j.created_at,j.job_id LIMIT 1""",
+            (
+                next(iter(MAINTENANCE_FAILURE_CODES)), task,
+                RETRY_LOOP_THRESHOLD, RETRY_LOOP_THRESHOLD,
+            ),
+        ).fetchone()
+        if retry_candidate is not None:
+            max_claims = int(retry_candidate["retry_attempt_count"])
+            retry_state = str(retry_candidate["state"])
+            retry_available_at = str(retry_candidate["available_at"])
+            max_claim_is_claimable = (
+                retry_state == "LEASED" or retry_available_at <= instant_iso
+            )
             scheduled = not max_claim_is_claimable
             alerts.append(_alert(
                 "OPS_AI_JOB_RETRY_LOOP",
@@ -228,22 +261,28 @@ def scheduler_health_snapshot(
                 blocking=not scheduled,
                 evidence={
                     "max_claim_count": max_claims,
-                    "job_ref": summary["max_claim_job_ref"],
-                    "state": summary["max_claim_state"],
+                    "job_ref": str(retry_candidate["job_id"])[:12],
+                    "state": retry_state,
                     "claimable": max_claim_is_claimable,
-                    "next_retry_at": summary["max_claim_next_retry_at"],
+                    "next_retry_at": (
+                        None if max_claim_is_claimable else retry_available_at
+                    ),
                 },
             ))
-        if deferred >= CAPACITY_DEFERRED_THRESHOLD and deferred > completed:
+        if (
+            capacity_deferred >= CAPACITY_DEFERRED_THRESHOLD
+            and capacity_deferred > completed
+        ):
             alerts.append(_alert(
                 "OPS_AI_ROUTE_CAPACITY_SATURATED",
                 severity="WARNING", scope=task,
                 message_zh=(
-                    f"{label} 最近15分钟容量延后 {deferred} 次，"
+                    f"{label} 最近15分钟容量延后 {capacity_deferred} 次，"
                     f"完成 {completed} 次。"
                 ),
                 evidence={
-                    "deferred_15m": deferred,
+                    "capacity_deferred_15m": capacity_deferred,
+                    "all_deferred_15m": summary["all_deferred_15m"],
                     "completed_15m": completed,
                 },
             ))

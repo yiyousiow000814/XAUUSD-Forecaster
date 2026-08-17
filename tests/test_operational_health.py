@@ -68,6 +68,8 @@ def test_scheduler_health_exposes_retry_capacity_stall_and_age_codes() -> None:
     assert impact["max_claim_count"] == 12
     assert impact["max_claim_is_claimable"] is True
     assert impact["deferred_15m"] == 11
+    assert impact["all_deferred_15m"] == 11
+    assert impact["capacity_deferred_15m"] == 11
     assert impact["oldest_age_seconds"] == 3600
     assert impact["failure_codes_15m"] == [
         {"code": "MODEL_CAPACITY_DEFERRED", "count": 11},
@@ -117,6 +119,51 @@ def test_scheduled_retry_loop_is_visible_without_claiming_current_impact() -> No
     }
     assert annotation["claimable"] == 0
     assert annotation["scheduled_retry"] == 1
+
+
+def test_embedding_maintenance_is_not_capacity_or_retry_failure() -> None:
+    connection = _connection()
+    job_id = enqueue_job(
+        connection,
+        task_type="ACTIVE_IMPACT",
+        source="source",
+        source_item_id="embedding-maintenance",
+        revision_number=1,
+        annotation_id="annotation",
+        prompt_version="prompt",
+        priority="FAST",
+        now=NOW - timedelta(minutes=5),
+    )
+    connection.execute(
+        "UPDATE news_ai_jobs_v1 SET attempt_count=14 WHERE job_id=?",
+        (job_id,),
+    )
+    for attempt in range(1, 15):
+        connection.execute(
+            """INSERT INTO news_ai_job_attempts_v1 VALUES
+               (?,?,?,?,?,'DEFERRED','NEWS_EMBEDDING_BACKFILL_PENDING',NULL,NULL,
+                'maintenance',?,NULL)""",
+            (
+                f"maintenance-{attempt}", job_id, attempt, "embedding-account",
+                "embedding-credential",
+                (NOW - timedelta(seconds=attempt)).isoformat(),
+            ),
+        )
+    connection.commit()
+
+    snapshot = scheduler_health_snapshot(connection, now=NOW)
+
+    codes = {alert["code"] for alert in snapshot["alerts"]}
+    assert "OPS_AI_ROUTE_CAPACITY_SATURATED" not in codes
+    assert "OPS_AI_JOB_RETRY_LOOP" not in codes
+    impact = next(
+        task for task in snapshot["scheduler"]["tasks"]
+        if task["task_type"] == "ACTIVE_IMPACT"
+    )
+    assert impact["max_claim_count"] == 14
+    assert impact["all_deferred_15m"] == 14
+    assert impact["capacity_deferred_15m"] == 0
+    assert impact["deferred_15m"] == 0
 
 
 def test_scheduler_retirement_is_progress_without_becoming_completion() -> None:
