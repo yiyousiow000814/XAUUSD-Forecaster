@@ -1773,7 +1773,10 @@ body:has(.assistant-main) > .assistant-main { width:100%; height:auto; min-heigh
 .assistant-composer-shell textarea:focus-visible { outline:4px solid var(--acid); outline-offset:-4px; }
 .assistant-composer-shell textarea:disabled { cursor:not-allowed; opacity:.6; }
 .assistant-composer-meta { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-top:7px; }
-.assistant-composer-meta>span { color:var(--muted); font-size:11px; }
+.assistant-composer-guidance { min-width:0; display:flex; align-items:center; flex-wrap:wrap; gap:4px 10px; color:var(--muted); font-size:12px; line-height:1.35; }
+.assistant-composer-guidance strong { color:var(--ink); font-size:11px; letter-spacing:.04em; }
+.assistant-composer-guidance b { padding:2px 5px; border:1px solid var(--ink); color:var(--ink); font-size:11px; }
+.assistant-composer-guidance b.is-over { border-color:var(--red); background:#e7b0a9; color:var(--red); }
 .assistant-composer-meta button { min-width:142px; min-height:46px; display:flex; align-items:center; justify-content:space-between; gap:18px; border:1px solid var(--ink); padding:8px 12px; background:var(--ink); color:var(--paper); font-size:12px; font-weight:900; cursor:pointer; }
 .assistant-composer-meta button svg { width:24px; height:24px; flex:0 0 auto; }
 .assistant-composer-meta button:hover:not(:disabled),.assistant-composer-meta button:focus-visible { background:var(--acid); color:var(--ink); outline:3px solid var(--ink); outline-offset:2px; }
@@ -1858,7 +1861,7 @@ body:has(.assistant-main) > .assistant-main { width:100%; height:auto; min-heigh
   .assistant-progress li { min-height:54px; }
   .assistant-composer-shell { min-height:69px; padding:8px; }
   .assistant-composer-shell form { grid-template-columns:minmax(0,1fr) 52px; gap:8px; }
-  .assistant-composer-shell label,.assistant-composer-meta>span,.assistant-composer-shell>small { display:none; }
+  .assistant-composer-shell label,.assistant-composer-guidance,.assistant-composer-shell>small { display:none; }
   .assistant-composer-shell textarea { grid-column:1; height:52px; min-height:52px; max-height:52px; padding:13px; resize:none; font-size:16px; }
   .assistant-composer-meta { display:contents; }
   .assistant-composer-meta button { grid-column:2; width:52px; min-width:52px; min-height:52px; padding:0; justify-content:center; }

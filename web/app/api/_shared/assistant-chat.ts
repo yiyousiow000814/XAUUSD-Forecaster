@@ -21,6 +21,7 @@ import {
   isAssistantModelIdentifier,
   parseAssistantRoutingProvenance,
 } from "./assistant-routing";
+import { ASSISTANT_MAX_MESSAGE_BYTES } from "../../_lib/assistant-runtime-limits";
 
 export const ASSISTANT_CHAT_LIMITS = {
   activePerOwner: 2,
@@ -31,7 +32,7 @@ export const ASSISTANT_CHAT_LIMITS = {
   maxAttempts: 3,
   turnTtlMs: 30 * 60 * 1_000,
   leaseMs: 5 * 60 * 1_000,
-  maxMessageBytes: 16_000,
+  maxMessageBytes: ASSISTANT_MAX_MESSAGE_BYTES,
   maxAnswerBytes: 32_000,
   maxProvenanceBytes: 256_000,
 } as const;

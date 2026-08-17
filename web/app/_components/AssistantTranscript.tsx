@@ -12,6 +12,10 @@ import {
   type AssistantMessageCursor,
 } from "../_lib/assistant-chat-client";
 import { ASSISTANT_PREVIEW_FIXTURE_LABEL } from "../_lib/assistant-preview-fixture";
+import {
+  ASSISTANT_CONTEXT_LIMIT_TOKENS,
+  ASSISTANT_MAX_MESSAGE_BYTES,
+} from "../_lib/assistant-runtime-limits";
 
 const timeLabel = (value: string) => new Intl.DateTimeFormat("zh-CN", {
   month: "short",
@@ -145,7 +149,14 @@ export default function AssistantTranscript({
     [activeTurn, events],
   );
   const draftBytes = byteLength(draft);
-  const invalidDraft = draftBytes === 0 || draftBytes > 16_000;
+  const invalidDraft = draftBytes === 0 || draftBytes > ASSISTANT_MAX_MESSAGE_BYTES;
+  const showDraftLimit = draftBytes >= ASSISTANT_MAX_MESSAGE_BYTES * 0.75;
+  const contextWindowLabel = `${Math.round(
+    ASSISTANT_CONTEXT_LIMIT_TOKENS / 1_024,
+  )}K 上下文`;
+  const draftLimitLabel = `${(draftBytes / 1_000).toLocaleString("zh-CN", {
+    maximumFractionDigits: 1,
+  })} / ${ASSISTANT_MAX_MESSAGE_BYTES / 1_000} KB`;
   const lastMessageId = messages.at(-1)?.id;
 
   useEffect(() => {
@@ -297,6 +308,7 @@ export default function AssistantTranscript({
       }}>
         <label htmlFor="assistant-message-input">给 Aurum Assistant 的问题</label>
         <textarea
+          aria-describedby="assistant-composer-guidance"
           disabled={Boolean(activeTurn) || preview}
           id="assistant-message-input"
           onChange={event => onDraftChange(event.currentTarget.value)}
@@ -306,7 +318,12 @@ export default function AssistantTranscript({
           value={draft}
         />
         <div className="assistant-composer-meta">
-          <span>Enter 发送 · Shift + Enter 换行 · {draftBytes.toLocaleString("zh-CN")}/16,000 bytes</span>
+          <div className="assistant-composer-guidance" id="assistant-composer-guidance">
+            <span>Enter 发送 · Shift + Enter 换行</span>
+            <strong>{contextWindowLabel} · 历史自动压缩</strong>
+            {showDraftLimit ? <b className={draftBytes > ASSISTANT_MAX_MESSAGE_BYTES
+              ? "is-over" : ""}>本条 {draftLimitLabel}</b> : null}
+          </div>
           <button disabled={invalidDraft || sending || Boolean(activeTurn) || preview} type="submit">
             <span>{sending ? "发送中" : preview ? "只读预览" : "发送问题"}</span>
             <svg aria-hidden="true" viewBox="0 0 24 24">

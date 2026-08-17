@@ -1,6 +1,7 @@
 import { AssistantConversationInputError } from "./assistant-conversations";
 import { retrieveAssistantHistoricalMemory } from "./assistant-memory-index";
 import { parseAssistantRoutingProvenance } from "./assistant-routing";
+import { ASSISTANT_CONTEXT_LIMIT_TOKENS } from "../../_lib/assistant-runtime-limits";
 
 export const ASSISTANT_COMPACTION_PROMPT_VERSION = "assistant-compaction-v1";
 
@@ -43,7 +44,7 @@ export type AssistantContextProfile = {
 // model router may select a different profile; conversation rows never do.
 export const DEFAULT_ASSISTANT_CONTEXT_PROFILE: AssistantContextProfile = {
   id: "assistant-context-256k-v2",
-  contextLimitTokens: 262_144,
+  contextLimitTokens: ASSISTANT_CONTEXT_LIMIT_TOKENS,
   greenThresholdRatio: 0.60,
   yellowThresholdRatio: 0.82,
   reservedSystemTokens: 2_048,
