@@ -59,9 +59,7 @@ that a visible line is continuous after cascade and responsive overrides.
 - The 24-open-hour view may show complete version badges. Denser 7-open-day,
   30-open-day, and full-history views use one event rail instead of stacking
   badge lanes above the chart.
-- Event-rail clustering is presentational only: every version event remains in
-  its cluster and the complete model detail is available by hover, keyboard,
-  or tap. Clusters must use non-overlapping 44-pixel interaction targets.
-- Dense event detail appears in a fixed-height evidence strip below the chart,
-  so hover and selection never move the plot. Each retained event exposes its
-  own timestamp, model identity, model version, and training-row count.
+- Event-rail clustering is presentational only: every version event remains
+  represented in the aggregate event count. Dense rails are intentionally
+  non-interactive and must not add hover tooltips or a separate detail strip
+  that obscures the chart or requires coordinated hovering and scrolling.
