@@ -148,6 +148,8 @@ class ModelOutputContractFailed(ValueError):
 def _model_failure_details(error: Exception) -> dict[str, object]:
     """Return stable failure semantics without exposing credentials or payloads."""
     provider_status = getattr(error, "code", None)
+    declared_failure_code = getattr(error, "failure_code", None)
+    declared_next_retry = getattr(error, "next_retry_at", None)
     if isinstance(error, ModelGatewayResponseInvalid):
         details = {
             "failure_code": "MODEL_OUTPUT_INVALID",
@@ -183,11 +185,30 @@ def _model_failure_details(error: Exception) -> dict[str, object]:
             "error": str(error)[:500],
             "provider_http_status": provider_status,
         }
+    if declared_failure_code:
+        return {
+            "failure_code": str(declared_failure_code),
+            "error_type": type(error).__name__,
+            "error": str(error)[:500],
+            "provider_http_status": None,
+            "next_retry_at": declared_next_retry,
+        }
     return {
         "failure_code": "MODEL_REQUEST_FAILED",
         "error_type": type(error).__name__,
         "error": str(error)[:500],
         "provider_http_status": None,
+    }
+
+
+def _capacity_deferred_status(
+    error: ModelGatewayCapacityExhausted,
+) -> dict[str, object]:
+    return {
+        "status": "DEFERRED",
+        "reason": str(error),
+        "failure_code": error.failure_code,
+        "next_retry_at": error.next_retry_at,
     }
 
 
@@ -571,10 +592,9 @@ def annotate_pending_news(
             }
         except GeminiBatchCapacityExhausted as error:
             return {
-                "status": "DEFERRED",
                 "row": row,
-                "reason": str(error),
                 "prompt_version": prompt_version,
+                **_capacity_deferred_status(error),
             }
         except Exception as error:
             failure_details = _model_failure_details(error)
@@ -879,10 +899,9 @@ def translate_pending_headlines(
         except GeminiBatchCapacityExhausted as error:
             statuses.append(
                 {
-                    "status": "DEFERRED",
                     "source": row["source"],
                     "source_item_id": row["source_item_id"],
-                    "reason": str(error),
+                    **_capacity_deferred_status(error),
                 }
             )
         except Exception as error:
@@ -996,8 +1015,9 @@ def assess_pending_news_impacts(
             })
         except GeminiBatchCapacityExhausted as error:
             statuses.append({
-                "status": "DEFERRED", "source": row["source"],
-                "source_item_id": row["source_item_id"], "reason": str(error),
+                "source": row["source"],
+                "source_item_id": row["source_item_id"],
+                **_capacity_deferred_status(error),
             })
         except Exception as error:
             failure_details = _model_failure_details(error)
@@ -1073,6 +1093,8 @@ class _GeminiRequestPool:
         *,
         conservative_tokens: int,
     ) -> int:
+        if not self.gateway.accountant.allow_provider_token_count:
+            return conservative_tokens
         try:
             return self.gateway.count_input_tokens(model, payload)
         except Exception:
@@ -2055,6 +2077,8 @@ def _fit_impact_context_to_tpm(
 def _count_impact_tokens(
     gateway: GeminiModelGateway, prompt: str,
 ) -> int | None:
+    if not gateway.accountant.allow_provider_token_count:
+        return len(prompt.encode("utf-8")) + 1024
     try:
         return gateway.count_input_tokens(IMPACT_MODEL, _impact_payload(prompt))
     except Exception:

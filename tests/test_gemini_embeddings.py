@@ -42,6 +42,11 @@ def test_embedding_batch_reserves_each_content_item_and_uses_asymmetric_tasks(
     profile = client.profile()
 
     client.embed(["document one", "document two"], profile)
+    ledger.connection.execute(
+        """UPDATE news_ai_provider_dispatch_state_v1
+           SET next_eligible_at='2000-01-01T00:00:00+00:00'"""
+    )
+    ledger.connection.commit()
     client.embed_queries(["query one"], profile)
 
     assert [task for _, task in calls] == [

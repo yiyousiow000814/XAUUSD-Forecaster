@@ -935,7 +935,7 @@ test("renders the Gemini quota status route", async () => {
   assert.match(html, /Gemma 4 31B/);
   assert.match(html, /reset-countdown/);
   assert.match(html, /逐 Key 配额/);
-  assert.match(source, /今日已发送 \/ 上限/);
+  assert.match(source, /本机已准入 \/ 上限/);
   assert.match(source, /className="quota-value"/);
   assert.match(source, /className="quota-overview" aria-labelledby="quota-overview-title"/);
   assert.match(source, /id="quota-capacity-title">账户与每日额度/);

@@ -112,6 +112,37 @@ CREATE TABLE IF NOT EXISTS news_ai_account_request_usage_v1 (
 CREATE INDEX IF NOT EXISTS news_ai_account_request_usage_window_v1
 ON news_ai_account_request_usage_v1(account_id,reserved_at,model_family);
 
+CREATE TABLE IF NOT EXISTS news_ai_provider_dispatch_state_v1 (
+    provider_scope TEXT PRIMARY KEY,
+    next_eligible_at TEXT NOT NULL,
+    interval_ms INTEGER NOT NULL CHECK(interval_ms BETWEEN 120 AND 5000),
+    success_streak INTEGER NOT NULL DEFAULT 0,
+    throttle_count INTEGER NOT NULL DEFAULT 0,
+    cooldown_until TEXT,
+    last_outcome TEXT,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS news_ai_provider_dispatch_task_state_v1 (
+    task_class TEXT PRIMARY KEY CHECK(task_class IN (
+        'ANNOTATION','IMPACT','TITLE_REPAIR','EMBEDDING')),
+    last_requested_at TEXT NOT NULL,
+    demand_until TEXT NOT NULL,
+    last_dispatched_at TEXT,
+    last_pressure_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS news_ai_retrieval_mode_state_v1 (
+    state_id TEXT PRIMARY KEY CHECK(state_id='NEWS_IDENTITY'),
+    mode TEXT NOT NULL CHECK(mode IN (
+        'WAIT_FOR_HYBRID','DETERMINISTIC_FALLBACK','HYBRID')),
+    reason TEXT NOT NULL,
+    mode_since TEXT NOT NULL,
+    recovery_observed_at TEXT,
+    pressure_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS news_ai_scheduler_migrations_v1 (
     migration_id TEXT PRIMARY KEY,
     applied_at TEXT NOT NULL
@@ -859,6 +890,7 @@ def reserve_account_request(
     urgent: bool = False,
     now: datetime | None = None,
     usage_id: str | None = None,
+    provider_task: str | None = None,
 ) -> bool:
     """Atomically count attempted provider requests against one account.
 
@@ -904,6 +936,15 @@ def reserve_account_request(
         ):
             connection.rollback()
             return False
+        if provider_task is not None:
+            dispatch = _reserve_provider_dispatch_locked(
+                connection, provider_task=provider_task, now=instant,
+            )
+            if not dispatch[0]:
+                # A denied slot must not reserve account quota, but the shared
+                # governor may have advanced a durable low-priority deferral.
+                connection.commit()
+                return False
         connection.execute(
             """INSERT INTO news_ai_account_daily_usage_v1 VALUES (?,?,?,?,?)
                ON CONFLICT(quota_day,account_id,model_family) DO UPDATE SET
@@ -942,6 +983,345 @@ def reserve_account_request(
         raise
 
 
+GOOGLE_PROVIDER_SCOPE = "GOOGLE_GENERATIVE_LANGUAGE"
+PROVIDER_DISPATCH_INITIAL_INTERVAL_MS = 250
+PROVIDER_DISPATCH_MIN_INTERVAL_MS = 120
+PROVIDER_DISPATCH_MAX_INTERVAL_MS = 5_000
+PROVIDER_DISPATCH_DEMAND_TTL = timedelta(seconds=2)
+
+
+def _provider_task_class(provider_task: str) -> str:
+    normalized = provider_task.strip().upper().replace("-", "_")
+    if "EMBEDDING" in normalized:
+        return "EMBEDDING"
+    if "IMPACT" in normalized:
+        return "IMPACT"
+    if "TITLE" in normalized or "TRANSLATION" in normalized:
+        return "TITLE_REPAIR"
+    return "ANNOTATION"
+
+
+def _provider_pressure(
+    connection: sqlite3.Connection,
+    *,
+    task_class: str,
+    now: datetime,
+) -> dict[str, int]:
+    task_types = {
+        "ANNOTATION": ("ACTIVE_ANNOTATION",),
+        "IMPACT": ("ACTIVE_IMPACT",),
+        "TITLE_REPAIR": ("TITLE_TRANSLATION",),
+    }
+    if task_class == "EMBEDDING":
+        row = connection.execute(
+            """SELECT count(*) AS backlog,min(created_at) AS oldest,
+                      min(available_at) AS earliest_retry
+               FROM news_ai_jobs_v1
+               WHERE task_type='ACTIVE_IMPACT'
+                 AND state IN ('QUEUED','LEASED','BACKING_OFF')
+                 AND (state='LEASED' OR available_at<=?)
+                 AND (last_error LIKE 'NEWS_EMBEDDING_%'
+                      OR last_error='PROVIDER_DISPATCH_DEFERRED')""",
+            (_iso(now),),
+        ).fetchone()
+        dependency_fanout = int(row["backlog"])
+        backlog = max(1, dependency_fanout)
+        completion_task = "ACTIVE_IMPACT"
+    else:
+        controlled = task_types[task_class]
+        placeholders = ",".join("?" for _ in controlled)
+        row = connection.execute(
+            f"""SELECT count(*) AS backlog,min(created_at) AS oldest,
+                       min(available_at) AS earliest_retry
+                FROM news_ai_jobs_v1
+                WHERE task_type IN ({placeholders})
+                  AND state IN ('QUEUED','LEASED','BACKING_OFF')
+                  AND (state='LEASED' OR available_at<=?)""",
+            (*controlled, _iso(now)),
+        ).fetchone()
+        dependency_fanout = 0
+        backlog = max(1, int(row["backlog"]))
+        completion_task = controlled[0]
+    completed = connection.execute(
+        """SELECT count(*) FROM news_ai_jobs_v1
+           WHERE task_type=? AND state='COMPLETED' AND completed_at>=?""",
+        (completion_task, _iso(now - timedelta(minutes=15))),
+    ).fetchone()[0]
+    oldest = datetime.fromisoformat(str(row["oldest"])) if row["oldest"] else now
+    earliest = (
+        datetime.fromisoformat(str(row["earliest_retry"]))
+        if row["earliest_retry"] else now
+    )
+    return {
+        "dependency_fanout": dependency_fanout,
+        "oldest_age_ms": max(0, int((now - oldest).total_seconds() * 1000)),
+        "retry_overdue_ms": max(0, int((now - earliest).total_seconds() * 1000)),
+        "backlog": backlog,
+        "drain_gap": max(0, backlog - int(completed)),
+    }
+
+
+def _register_provider_demand(
+    connection: sqlite3.Connection,
+    *,
+    task_class: str,
+    now: datetime,
+) -> dict[str, int]:
+    pressure = _provider_pressure(connection, task_class=task_class, now=now)
+    connection.execute(
+        """INSERT INTO news_ai_provider_dispatch_task_state_v1
+           (task_class,last_requested_at,demand_until,last_dispatched_at,
+            last_pressure_json) VALUES (?,?,?,NULL,?)
+           ON CONFLICT(task_class) DO UPDATE SET
+             last_requested_at=excluded.last_requested_at,
+             demand_until=excluded.demand_until,
+             last_pressure_json=excluded.last_pressure_json""",
+        (
+            task_class, _iso(now),
+            _iso(now + PROVIDER_DISPATCH_DEMAND_TTL),
+            json.dumps(pressure, sort_keys=True, separators=(",", ":")),
+        ),
+    )
+    return pressure
+
+
+def _selected_provider_task(
+    connection: sqlite3.Connection, *, now: datetime,
+) -> str:
+    rows = connection.execute(
+        """SELECT task_class,last_dispatched_at,last_pressure_json
+           FROM news_ai_provider_dispatch_task_state_v1
+           WHERE demand_until>=?""",
+        (_iso(now),),
+    ).fetchall()
+    candidates = []
+    for row in rows:
+        task_class = str(row["task_class"])
+        pressure = _provider_pressure(
+            connection, task_class=task_class, now=now,
+        )
+        connection.execute(
+            """UPDATE news_ai_provider_dispatch_task_state_v1
+               SET last_pressure_json=? WHERE task_class=?""",
+            (
+                json.dumps(pressure, sort_keys=True, separators=(",", ":")),
+                task_class,
+            ),
+        )
+        candidates.append({
+            "task_class": task_class,
+            "last_dispatched_at": row["last_dispatched_at"],
+            "pressure": pressure,
+        })
+
+    def dominates(left: dict[str, object], right: dict[str, object]) -> bool:
+        left_pressure = left["pressure"]
+        right_pressure = right["pressure"]
+        keys = tuple(left_pressure)
+        return all(
+            int(left_pressure[key]) >= int(right_pressure[key]) for key in keys
+        ) and any(
+            int(left_pressure[key]) > int(right_pressure[key]) for key in keys
+        )
+
+    frontier = [
+        candidate for candidate in candidates
+        if not any(
+            dominates(other, candidate)
+            for other in candidates if other is not candidate
+        )
+    ]
+    selected = min(
+        frontier,
+        key=lambda item: (
+            item["last_dispatched_at"] is not None,
+            str(item["last_dispatched_at"] or ""),
+            str(item["task_class"]),
+        ),
+    )
+    return str(selected["task_class"])
+
+
+def _provider_dispatch_row(
+    connection: sqlite3.Connection,
+) -> sqlite3.Row | None:
+    return connection.execute(
+        """SELECT * FROM news_ai_provider_dispatch_state_v1
+           WHERE provider_scope=?""",
+        (GOOGLE_PROVIDER_SCOPE,),
+    ).fetchone()
+
+
+def _reserve_provider_dispatch_locked(
+    connection: sqlite3.Connection,
+    *,
+    provider_task: str,
+    now: datetime,
+) -> tuple[bool, str]:
+    task_class = _provider_task_class(provider_task)
+    _register_provider_demand(
+        connection, task_class=task_class, now=now,
+    )
+    row = _provider_dispatch_row(connection)
+    interval_ms = (
+        int(row["interval_ms"])
+        if row is not None else PROVIDER_DISPATCH_INITIAL_INTERVAL_MS
+    )
+    next_eligible = (
+        datetime.fromisoformat(str(row["next_eligible_at"]))
+        if row is not None else now
+    )
+    cooldown = (
+        datetime.fromisoformat(str(row["cooldown_until"]))
+        if row is not None and row["cooldown_until"] else None
+    )
+    eligible_at = max(
+        next_eligible,
+        cooldown if cooldown is not None else now,
+    )
+    if eligible_at > now:
+        return False, _iso(eligible_at)
+    selected_task = _selected_provider_task(connection, now=now)
+    if selected_task != task_class:
+        return False, _iso(now + timedelta(milliseconds=interval_ms))
+    next_dispatch = now + timedelta(milliseconds=interval_ms)
+    timestamp = _iso(now)
+    connection.execute(
+        """INSERT INTO news_ai_provider_dispatch_state_v1
+           (provider_scope,next_eligible_at,interval_ms,success_streak,
+            throttle_count,cooldown_until,last_outcome,updated_at)
+           VALUES (?,?,?,0,0,NULL,'DISPATCHED',?)
+           ON CONFLICT(provider_scope) DO UPDATE SET
+             next_eligible_at=excluded.next_eligible_at,
+             last_outcome='DISPATCHED',updated_at=excluded.updated_at""",
+        (
+            GOOGLE_PROVIDER_SCOPE, _iso(next_dispatch), interval_ms,
+            timestamp,
+        ),
+    )
+    connection.execute(
+        """UPDATE news_ai_provider_dispatch_task_state_v1
+           SET last_dispatched_at=? WHERE task_class=?""",
+        (timestamp, task_class),
+    )
+    return True, _iso(next_dispatch)
+
+
+def reserve_provider_dispatch(
+    connection: sqlite3.Connection,
+    *,
+    provider_task: str,
+    now: datetime | None = None,
+) -> tuple[bool, str]:
+    instant = now or datetime.now(UTC)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        decision = _reserve_provider_dispatch_locked(
+            connection, provider_task=provider_task, now=instant,
+        )
+        connection.commit()
+        return decision
+    except Exception:
+        connection.rollback()
+        raise
+
+
+def register_provider_dispatch_demand(
+    connection: sqlite3.Connection,
+    *,
+    provider_task: str,
+    now: datetime | None = None,
+) -> None:
+    """Publish short-lived demand without consuming a provider slot."""
+    instant = now or datetime.now(UTC)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        _register_provider_demand(
+            connection,
+            task_class=_provider_task_class(provider_task),
+            now=instant,
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+
+
+def provider_dispatch_next_eligible(
+    connection: sqlite3.Connection,
+) -> str | None:
+    row = _provider_dispatch_row(connection)
+    return str(row["next_eligible_at"]) if row is not None else None
+
+
+def record_provider_dispatch_outcome(
+    connection: sqlite3.Connection,
+    *,
+    outcome: str,
+    retry_after_seconds: int | None = None,
+    now: datetime | None = None,
+) -> None:
+    if outcome not in {
+        "PROVIDER_SUCCEEDED", "PROVIDER_THROTTLED", "PROVIDER_FAILED",
+    }:
+        raise ValueError("provider dispatch outcome is not controlled")
+    instant = now or datetime.now(UTC)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = _provider_dispatch_row(connection)
+        if row is None:
+            connection.rollback()
+            return
+        interval_ms = int(row["interval_ms"])
+        success_streak = int(row["success_streak"])
+        throttle_count = int(row["throttle_count"])
+        cooldown = (
+            datetime.fromisoformat(str(row["cooldown_until"]))
+            if row["cooldown_until"] else None
+        )
+        next_eligible = datetime.fromisoformat(str(row["next_eligible_at"]))
+        if outcome == "PROVIDER_THROTTLED":
+            interval_ms = min(
+                PROVIDER_DISPATCH_MAX_INTERVAL_MS,
+                max(PROVIDER_DISPATCH_INITIAL_INTERVAL_MS, interval_ms * 2),
+            )
+            success_streak = 0
+            throttle_count += 1
+            wait_seconds = (
+                max(1, min(86_400, int(retry_after_seconds)))
+                if retry_after_seconds is not None
+                else interval_ms / 1000
+            )
+            cooldown = instant + timedelta(seconds=wait_seconds)
+            next_eligible = max(next_eligible, cooldown)
+        elif outcome == "PROVIDER_SUCCEEDED" and (
+            cooldown is None or cooldown <= instant
+        ):
+            success_streak += 1
+            interval_ms = max(
+                PROVIDER_DISPATCH_MIN_INTERVAL_MS,
+                round(interval_ms * 0.9),
+            )
+            cooldown = None
+        else:
+            success_streak = 0
+        connection.execute(
+            """UPDATE news_ai_provider_dispatch_state_v1
+               SET next_eligible_at=?,interval_ms=?,success_streak=?,
+                   throttle_count=?,cooldown_until=?,last_outcome=?,updated_at=?
+               WHERE provider_scope=?""",
+            (
+                _iso(next_eligible), interval_ms, success_streak,
+                throttle_count, _iso(cooldown) if cooldown else None,
+                outcome, _iso(instant), GOOGLE_PROVIDER_SCOPE,
+            ),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+
+
 def mark_account_request_attempted(
     connection: sqlite3.Connection,
     usage_id: str,
@@ -966,6 +1346,7 @@ def record_account_request_outcome(
     *,
     outcome: str,
     provider_http_status: int | None = None,
+    retry_after_seconds: int | None = None,
     now: datetime | None = None,
 ) -> None:
     if outcome not in {
@@ -984,6 +1365,12 @@ def record_account_request_outcome(
         )
         if updated.rowcount != 1:
             raise ValueError("model request outcome is not claimable")
+    record_provider_dispatch_outcome(
+        connection,
+        outcome=outcome,
+        retry_after_seconds=retry_after_seconds,
+        now=datetime.fromisoformat(timestamp),
+    )
 
 
 def record_account_vectors_committed(

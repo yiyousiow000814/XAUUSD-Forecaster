@@ -25,19 +25,27 @@ from .local_embeddings import EmbeddingProfile
 from .gemini_embeddings import (
     GEMINI_EMBEDDING_DIMENSIONS,
     GeminiEmbeddingClient,
+    GeminiEmbeddingDispatchDeferred,
     GeminiEmbeddingFailure,
+)
+from .news_scheduler import (
+    PROVIDER_DISPATCH_INITIAL_INTERVAL_MS,
+    register_provider_dispatch_demand,
 )
 
 
 NEWS_EMBEDDING_MODEL = "gemini-embedding-2"
 NEWS_EMBEDDING_TEXT_VERSION = "news-identity-embedding-v2-gemini2"
 NEWS_HYBRID_RETRIEVAL_VERSION = "news-hybrid-retrieval-v2"
+NEWS_DETERMINISTIC_FALLBACK_VERSION = "news-deterministic-fallback-v1"
 NEWS_EMBEDDING_DIMENSIONS = GEMINI_EMBEDDING_DIMENSIONS
 NEWS_ROUTE_LIMIT = 40
 NEWS_BACKFILL_BATCH = 50
 NEWS_BACKFILL_LEASE_SECONDS = 180
 NEWS_BACKFILL_COOLDOWN_BASE_SECONDS = 60
 NEWS_BACKFILL_COOLDOWN_MAX_SECONDS = 1800
+NEWS_RETRIEVAL_PRESSURE_WINDOW = timedelta(minutes=15)
+NEWS_RETRIEVAL_RECOVERY_STABILIZATION = timedelta(seconds=30)
 _LATIN_TOKEN = re.compile(r"[a-z0-9]+")
 _HAN_RUN = re.compile(r"[\u3400-\u9fff]+")
 _LEXICAL_STOPWORDS = frozenset({
@@ -371,6 +379,11 @@ def append_missing_embeddings(
             _clear_backfill_state(connection, generation_id, owner)
             return profile, 0
         texts = [identity_embedding_text(row) for row in selected]
+        dispatch_count = getattr(client, "document_dispatch_count", None)
+        if callable(dispatch_count):
+            count = dispatch_count(texts)
+            selected = selected[:count]
+            texts = texts[:count]
         vectors = client.embed(texts, profile)
         embedded_at = datetime.now(UTC).isoformat(timespec="microseconds")
         records = []
@@ -463,6 +476,249 @@ def latest_embedding_profile(
     return EmbeddingProfile(str(row[0]), str(row[1]), int(row[2]))
 
 
+def _write_retrieval_mode_state(
+    connection: sqlite3.Connection,
+    *,
+    mode: str,
+    reason: str,
+    pressure: dict[str, object],
+    now: datetime,
+    recovery_observed_at: str | None = None,
+) -> None:
+    prior = connection.execute(
+        """SELECT mode,mode_since FROM news_ai_retrieval_mode_state_v1
+           WHERE state_id='NEWS_IDENTITY'"""
+    ).fetchone()
+    mode_since = (
+        str(prior["mode_since"])
+        if prior is not None and str(prior["mode"]) == mode
+        else now.isoformat(timespec="microseconds")
+    )
+    with connection:
+        connection.execute(
+            """INSERT INTO news_ai_retrieval_mode_state_v1
+               (state_id,mode,reason,mode_since,recovery_observed_at,
+                pressure_json,updated_at)
+               VALUES ('NEWS_IDENTITY',?,?,?,?,?,?)
+               ON CONFLICT(state_id) DO UPDATE SET
+                 mode=excluded.mode,reason=excluded.reason,
+                 mode_since=excluded.mode_since,
+                 recovery_observed_at=excluded.recovery_observed_at,
+                 pressure_json=excluded.pressure_json,
+                 updated_at=excluded.updated_at""",
+            (
+                mode, reason, mode_since, recovery_observed_at,
+                json.dumps(pressure, sort_keys=True, separators=(",", ":")),
+                now.isoformat(timespec="microseconds"),
+            ),
+        )
+
+
+def _embedding_universe_progress(
+    connection: sqlite3.Connection,
+    universe: list[dict],
+    profile: EmbeddingProfile,
+    *,
+    since: datetime,
+) -> tuple[int, int, str | None]:
+    candidate_ids = [str(row["candidate_id"]) for row in universe]
+    stored = 0
+    recent = 0
+    latest: str | None = None
+    for start in range(0, len(candidate_ids), 800):
+        chunk = candidate_ids[start:start + 800]
+        placeholders = ",".join("?" for _ in chunk)
+        row = connection.execute(
+            f"""SELECT count(*) AS stored,
+                       sum(CASE WHEN embedded_at>=? THEN 1 ELSE 0 END) AS recent,
+                       max(embedded_at) AS latest
+                FROM news_identity_embeddings_v1
+                WHERE embedding_text_version=? AND model_name=?
+                  AND model_digest=?
+                  AND annotation_id IN ({placeholders})""",
+            (
+                since.isoformat(), NEWS_EMBEDDING_TEXT_VERSION,
+                profile.model_name, profile.model_digest, *chunk,
+            ),
+        ).fetchone()
+        stored += int(row["stored"])
+        recent += int(row["recent"] or 0)
+        if row["latest"] and (latest is None or str(row["latest"]) > latest):
+            latest = str(row["latest"])
+    return stored, recent, latest
+
+
+def _adaptive_retrieval_policy(
+    connection: sqlite3.Connection,
+    universe: list[dict],
+    profile: EmbeddingProfile,
+    *,
+    now: datetime | None = None,
+) -> tuple[str, str]:
+    """Choose wait/fallback/hybrid from live pressure with durable hysteresis."""
+    instant = now or datetime.now(UTC)
+    expected = len(universe)
+    stored, recent_progress, latest_progress_raw = _embedding_universe_progress(
+        connection, universe, profile,
+        since=instant - NEWS_RETRIEVAL_PRESSURE_WINDOW,
+    )
+    impact = connection.execute(
+        """SELECT count(*) AS backlog,min(created_at) AS oldest,
+                  sum(CASE WHEN last_error LIKE 'NEWS_EMBEDDING_%'
+                           THEN 1 ELSE 0 END) AS blocked
+           FROM news_ai_jobs_v1
+           WHERE task_type='ACTIVE_IMPACT'
+             AND state IN ('QUEUED','LEASED','BACKING_OFF')
+             AND (state='LEASED' OR available_at<=?)""",
+        (instant.isoformat(),),
+    ).fetchone()
+    recent_created = int(connection.execute(
+        """SELECT count(*) FROM news_ai_jobs_v1
+           WHERE task_type='ACTIVE_IMPACT' AND created_at>=?""",
+        ((instant - NEWS_RETRIEVAL_PRESSURE_WINDOW).isoformat(),),
+    ).fetchone()[0])
+    recent_completed = int(connection.execute(
+        """SELECT count(*) FROM news_ai_jobs_v1
+           WHERE task_type='ACTIVE_IMPACT' AND state='COMPLETED'
+             AND completed_at>=?""",
+        ((instant - NEWS_RETRIEVAL_PRESSURE_WINDOW).isoformat(),),
+    ).fetchone()[0])
+    provider = connection.execute(
+        """SELECT interval_ms,cooldown_until,next_eligible_at
+           FROM news_ai_provider_dispatch_state_v1
+           WHERE provider_scope='GOOGLE_GENERATIVE_LANGUAGE'"""
+    ).fetchone()
+    generation = connection.execute(
+        """SELECT cooldown_until,last_failure_code
+           FROM news_identity_embedding_backfill_leases_v1
+           WHERE generation_id=?""",
+        (_backfill_generation_id(profile),),
+    ).fetchone()
+    provider_cooldown = (
+        datetime.fromisoformat(str(provider["cooldown_until"]))
+        if provider is not None and provider["cooldown_until"] else None
+    )
+    generation_cooldown = (
+        datetime.fromisoformat(str(generation["cooldown_until"]))
+        if generation is not None and generation["cooldown_until"] else None
+    )
+    latest_progress = (
+        datetime.fromisoformat(str(latest_progress_raw))
+        if latest_progress_raw else None
+    )
+    missing = max(0, expected - stored)
+    backlog = int(impact["backlog"])
+    blocked = int(impact["blocked"] or 0)
+    oldest_age_seconds = (
+        max(0, int((instant - datetime.fromisoformat(
+            str(impact["oldest"]),
+        )).total_seconds()))
+        if impact["oldest"] else 0
+    )
+    pressure = {
+        "expected": expected,
+        "stored": stored,
+        "missing": missing,
+        "embedding_progress_15m": recent_progress,
+        "impact_backlog": backlog,
+        "impact_created_15m": recent_created,
+        "impact_completed_15m": recent_completed,
+        "impact_oldest_age_seconds": oldest_age_seconds,
+        "dependency_blocking_fanout": blocked,
+        "provider_interval_ms": (
+            int(provider["interval_ms"]) if provider is not None else None
+        ),
+    }
+    prior = connection.execute(
+        """SELECT * FROM news_ai_retrieval_mode_state_v1
+           WHERE state_id='NEWS_IDENTITY'"""
+    ).fetchone()
+    healthy_complete = (
+        missing == 0
+        and (provider_cooldown is None or provider_cooldown <= instant)
+        and (generation_cooldown is None or generation_cooldown <= instant)
+    )
+    if healthy_complete:
+        if prior is not None and str(prior["mode"]) == "DETERMINISTIC_FALLBACK":
+            observed = (
+                datetime.fromisoformat(str(prior["recovery_observed_at"]))
+                if prior["recovery_observed_at"] else None
+            )
+            if observed is None:
+                observed = instant
+            if instant - observed < NEWS_RETRIEVAL_RECOVERY_STABILIZATION:
+                _write_retrieval_mode_state(
+                    connection, mode="DETERMINISTIC_FALLBACK",
+                    reason="HYBRID_RECOVERY_STABILIZING", pressure=pressure,
+                    now=instant, recovery_observed_at=observed.isoformat(),
+                )
+                return "DETERMINISTIC_FALLBACK", "HYBRID_RECOVERY_STABILIZING"
+        _write_retrieval_mode_state(
+            connection, mode="HYBRID", reason="EMBEDDING_GENERATION_READY",
+            pressure=pressure, now=instant,
+        )
+        return "HYBRID", "EMBEDDING_GENERATION_READY"
+
+    cooldown_reason = None
+    if generation_cooldown is not None and generation_cooldown > instant:
+        cooldown_reason = str(
+            generation["last_failure_code"]
+            or "NEWS_EMBEDDING_PREREQUISITE_COOLDOWN"
+        )
+    elif provider_cooldown is not None and provider_cooldown > instant:
+        cooldown_reason = "GOOGLE_PROVIDER_SHARED_COOLDOWN"
+    provider_pressure = (
+        provider is not None
+        and int(provider["interval_ms"]) > PROVIDER_DISPATCH_INITIAL_INTERVAL_MS
+    )
+    stalled = (
+        latest_progress is None
+        or latest_progress < instant - NEWS_RETRIEVAL_PRESSURE_WINDOW
+    )
+    queue_not_draining = backlog > recent_completed
+    growth_pressure = recent_created > recent_completed
+    progress_insufficient = missing > recent_progress
+    adaptive_pressure = (
+        backlog > 0 and queue_not_draining and progress_insufficient
+        and (growth_pressure or stalled or provider_pressure or blocked > 0)
+    )
+    prior_fallback = (
+        prior is not None and str(prior["mode"]) == "DETERMINISTIC_FALLBACK"
+    )
+    if cooldown_reason or adaptive_pressure or prior_fallback:
+        reason = cooldown_reason or (
+            "ADAPTIVE_RETRIEVAL_PRESSURE"
+            if adaptive_pressure else "ADAPTIVE_FALLBACK_HYSTERESIS"
+        )
+        _write_retrieval_mode_state(
+            connection, mode="DETERMINISTIC_FALLBACK", reason=reason,
+            pressure=pressure, now=instant,
+        )
+        return "DETERMINISTIC_FALLBACK", reason
+    _write_retrieval_mode_state(
+        connection, mode="WAIT_FOR_HYBRID",
+        reason="EMBEDDING_CATCHUP_HEALTHY", pressure=pressure, now=instant,
+    )
+    return "WAIT_FOR_HYBRID", "EMBEDDING_CATCHUP_HEALTHY"
+
+
+def _force_retrieval_fallback(
+    connection: sqlite3.Connection, *, reason: str,
+) -> None:
+    row = connection.execute(
+        """SELECT pressure_json FROM news_ai_retrieval_mode_state_v1
+           WHERE state_id='NEWS_IDENTITY'"""
+    ).fetchone()
+    try:
+        pressure = json.loads(str(row[0])) if row is not None else {}
+    except json.JSONDecodeError:
+        pressure = {}
+    _write_retrieval_mode_state(
+        connection, mode="DETERMINISTIC_FALLBACK", reason=reason,
+        pressure=pressure, now=datetime.now(UTC),
+    )
+
+
 def attach_hybrid_prior_event_context(
     connection: sqlite3.Connection,
     records: list[dict],
@@ -487,12 +743,28 @@ def attach_hybrid_prior_event_context(
     ]
     if len(current_rows) != len(current_ids):
         raise ValueError("current news embedding source is outside the universe")
+    register_provider_dispatch_demand(
+        connection, provider_task="news-impact",
+    )
+    profile = embedding_client.profile()
+    initial_mode, initial_reason = _adaptive_retrieval_policy(
+        connection, universe, profile,
+    )
     # New annotations can become eligible between the deployment backfill and
     # the next impact cycle. Catch up the complete point-in-time universe, not
     # only the record currently holding the scheduler lease.
-    profile, _ = append_missing_embeddings(
-        connection, universe, embedding_client, limit=NEWS_BACKFILL_BATCH,
-    )
+    try:
+        profile, _ = append_missing_embeddings(
+            connection, universe, embedding_client, limit=NEWS_BACKFILL_BATCH,
+        )
+    except (GeminiEmbeddingFailure, GeminiEmbeddingDispatchDeferred,
+            NewsEmbeddingPrerequisiteCooldown) as error:
+        _force_retrieval_fallback(
+            connection, reason=error.failure_code,
+        )
+        return _attach_deterministic_fallback(
+            connection, records, universe, reason=error.failure_code,
+        )
     embeddings = load_embeddings(
         connection, profile, expected_rows=universe,
     )
@@ -500,6 +772,20 @@ def attach_hybrid_prior_event_context(
         str(row["candidate_id"]) for row in universe
         if str(row["candidate_id"]) not in embeddings
     ]
+    selected_mode, selected_reason = _adaptive_retrieval_policy(
+        connection, universe, profile,
+    )
+    if initial_mode == "DETERMINISTIC_FALLBACK" or (
+        selected_mode == "DETERMINISTIC_FALLBACK"
+    ):
+        return _attach_deterministic_fallback(
+            connection, records, universe,
+            reason=(
+                initial_reason
+                if initial_mode == "DETERMINISTIC_FALLBACK"
+                else selected_reason
+            ),
+        )
     if missing:
         raise NewsEmbeddingBackfillPending(
             f"news identity embedding backfill is incomplete: {len(missing)} missing"
@@ -511,6 +797,8 @@ def attach_hybrid_prior_event_context(
             candidates, route_rankings = frozen
             row["prior_event_context"] = candidates
             row["identity_retrieval_version"] = NEWS_HYBRID_RETRIEVAL_VERSION
+            row["identity_retrieval_mode"] = "HYBRID"
+            row["identity_retrieval_reason"] = "EMBEDDING_GENERATION_READY"
             row["identity_retrieval_routes"] = route_rankings
             continue
         pending_queries.append(row)
@@ -520,9 +808,15 @@ def attach_hybrid_prior_event_context(
         if str(row["candidate_id"]) in pending_ids
     ]
     embed_queries = getattr(embedding_client, "embed_queries", embedding_client.embed)
-    query_vectors = embed_queries(
-        [identity_embedding_text(row) for row in query_rows], profile,
-    )
+    try:
+        query_vectors = embed_queries(
+            [identity_embedding_text(row) for row in query_rows], profile,
+        )
+    except (GeminiEmbeddingFailure,
+            GeminiEmbeddingDispatchDeferred) as error:
+        return _attach_deterministic_fallback(
+            connection, records, universe, reason=error.failure_code,
+        )
     query_by_id = dict(zip(
         [str(row["candidate_id"]) for row in query_rows],
         query_vectors,
@@ -535,6 +829,8 @@ def attach_hybrid_prior_event_context(
         )
         row["prior_event_context"] = list(result.candidates)
         row["identity_retrieval_version"] = NEWS_HYBRID_RETRIEVAL_VERSION
+        row["identity_retrieval_mode"] = "HYBRID"
+        row["identity_retrieval_reason"] = "EMBEDDING_GENERATION_READY"
         row["identity_retrieval_routes"] = {
             route: list(candidate_ids)
             for route, candidate_ids in result.route_rankings.items()
@@ -542,6 +838,106 @@ def attach_hybrid_prior_event_context(
         _append_retrieval_receipt(
             connection, row, universe, profile, result,
         )
+    return records
+
+
+def _candidate_universe_hash(universe: list[dict]) -> str:
+    payload = [
+        (
+            str(row["candidate_id"]),
+            str(row["raw_content_hash"]),
+            str(row["collector_first_seen_time"]),
+        )
+        for row in sorted(universe, key=lambda item: str(item["candidate_id"]))
+    ]
+    return hashlib.sha256(json.dumps(
+        payload, separators=(",", ":"), ensure_ascii=False,
+    ).encode("utf-8")).hexdigest()
+
+
+def _load_deterministic_fallback_receipt(
+    connection: sqlite3.Connection, current: dict,
+) -> tuple[list[dict], str] | None:
+    row = connection.execute(
+        """SELECT selected_candidates_json,fallback_reason
+           FROM news_identity_deterministic_fallback_receipts_v1
+           WHERE annotation_id=? AND retrieval_version=?""",
+        (
+            str(current["annotation_id"]),
+            NEWS_DETERMINISTIC_FALLBACK_VERSION,
+        ),
+    ).fetchone()
+    if row is None:
+        return None
+    candidates = json.loads(row[0])
+    if not isinstance(candidates, list) or any(
+        not isinstance(candidate, dict) for candidate in candidates
+    ):
+        raise ValueError("stored deterministic fallback receipt is invalid")
+    return candidates, str(row[1])
+
+
+def _attach_deterministic_fallback(
+    connection: sqlite3.Connection,
+    records: list[dict],
+    universe: list[dict],
+    *,
+    reason: str,
+) -> list[dict]:
+    """Attach the frozen pre-embedding route during a durable provider wait."""
+    candidate_index = build_identity_candidate_index(universe)
+    universe_hash = _candidate_universe_hash(universe)
+    for row in records:
+        frozen = _load_deterministic_fallback_receipt(connection, row)
+        if frozen is None:
+            candidates = retrieve_prior_event_context(row, candidate_index)
+            frozen_reason = reason
+            candidate_ids = [
+                str(candidate["candidate_id"]) for candidate in candidates
+            ]
+            identity = "|".join((
+                str(row["annotation_id"]),
+                NEWS_DETERMINISTIC_FALLBACK_VERSION,
+            ))
+            with connection:
+                connection.execute(
+                    """INSERT OR IGNORE INTO
+                       news_identity_deterministic_fallback_receipts_v1
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (
+                        "news-retrieval-fallback-" + hashlib.sha256(
+                            identity.encode()
+                        ).hexdigest()[:32],
+                        str(row["annotation_id"]),
+                        NEWS_DETERMINISTIC_FALLBACK_VERSION,
+                        "DETERMINISTIC_FALLBACK",
+                        frozen_reason,
+                        universe_hash,
+                        json.dumps(
+                            candidate_ids, separators=(",", ":"),
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            candidates, separators=(",", ":"),
+                            ensure_ascii=False,
+                        ),
+                        datetime.now(UTC).isoformat(timespec="microseconds"),
+                    ),
+                )
+        else:
+            candidates, frozen_reason = frozen
+            candidate_ids = [
+                str(candidate["candidate_id"]) for candidate in candidates
+            ]
+        row["prior_event_context"] = list(candidates)
+        row["identity_retrieval_version"] = (
+            NEWS_DETERMINISTIC_FALLBACK_VERSION
+        )
+        row["identity_retrieval_mode"] = "DETERMINISTIC_FALLBACK"
+        row["identity_retrieval_reason"] = frozen_reason
+        row["identity_retrieval_routes"] = {
+            "deterministic": candidate_ids,
+        }
     return records
 
 
@@ -583,17 +979,7 @@ def _append_retrieval_receipt(
     result: HybridRetrievalResult,
 ) -> None:
     annotation_id = str(current["annotation_id"])
-    universe_payload = [
-        (
-            str(row["candidate_id"]),
-            str(row["raw_content_hash"]),
-            str(row["collector_first_seen_time"]),
-        )
-        for row in sorted(universe, key=lambda item: str(item["candidate_id"]))
-    ]
-    universe_hash = hashlib.sha256(json.dumps(
-        universe_payload, separators=(",", ":"), ensure_ascii=False,
-    ).encode("utf-8")).hexdigest()
+    universe_hash = _candidate_universe_hash(universe)
     identity = "|".join((
         annotation_id,
         NEWS_HYBRID_RETRIEVAL_VERSION,

@@ -102,13 +102,13 @@ function QuotaPanel({ title, eyebrow, quota, nowMs }: { title: string; eyebrow: 
       <div><p className="eyebrow">{eyebrow}</p><h2>{title}</h2></div>
       <div><b>Pacific 配额日 {quota?.quota_day_pacific ?? "—"}</b><span>下次自动重置：{resetAt}</span><strong className="reset-countdown">{formatCountdown(quota?.next_reset_at, nowMs)}</strong></div>
     </div>
-    <div className="quota-table-head"><span>匿名 Key</span><span>今日已发送</span><span>剩余</span><span>状态</span></div>
+    <div className="quota-table-head"><span>匿名 Key</span><span>今日本机已准入</span><span>剩余</span><span>状态</span></div>
     {(quota?.keys ?? []).map((key) => {
       const limit = quota?.daily_limit_per_key ?? 1;
       const used = Math.min(100, (key.sent / limit) * 100);
       return <article className="quota-row" key={key.fingerprint}>
         <div><b>KEY {key.slot}</b><small>…{key.fingerprint.slice(-6)}</small></div>
-        <div className="quota-value"><small>今日已发送 / 上限</small><strong><CountValue value={key.sent} format="exact" /> / <CountValue value={limit} format="exact" /></strong></div>
+        <div className="quota-value"><small>本机已准入 / 上限</small><strong><CountValue value={key.sent} format="exact" /> / <CountValue value={limit} format="exact" /></strong></div>
         <div className="quota-value"><small>剩余</small><strong><CountValue value={key.remaining} format="exact" /></strong></div>
         <span className={key.status === "AVAILABLE" ? "quota-ok" : "quota-stop"}>{key.status === "AVAILABLE" ? "可用" : "今日已停用"}</span>
         <div className="quota-progress"><i style={{ width: `${used}%` }} /></div>
@@ -207,10 +207,10 @@ export default function StatusView() {
             <header><span>01</span><div><h3 id="quota-capacity-title">账户与每日额度</h3><p>{payload?.llm_routing.action_bearing.model ?? "Gemini 3.5 Flash-Lite"} → {payload?.llm_routing.action_bearing.fallback_model ?? "Gemini 3.1 Flash-Lite"} · {payload?.llm_routing.action_bearing.role ?? "普通额度用尽后接管"}</p></div></header>
             <div className="quota-metric-grid quota-capacity-grid">
               <article><span>已配置 KEY</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.configured_key_count} /></MetricValue></strong><small>当前可用 <CountValue value={payload?.annotation_queue.available_key_count} format="exact" /> · 匿名编号</small></article>
-              <article><span>Flash 已发送</span><strong><MetricValue phase={currentPhase}><CountValue value={quota?.total_sent} /></MetricValue></strong><small>重要正文与训练特征</small></article>
+              <article><span>Flash 本机已准入</span><strong><MetricValue phase={currentPhase}><CountValue value={quota?.total_sent} /></MetricValue></strong><small>保守准入账本，不等同官方成功量</small></article>
               <article><span>Flash 剩余</span><strong className="good"><MetricValue phase={currentPhase}><CountValue value={quota?.total_remaining} /></MetricValue></strong><small>主模型本机账本</small></article>
               <article><span>3.1 剩余</span><strong className="good"><MetricValue phase={currentPhase}><CountValue value={fallbackQuota?.total_remaining} /></MetricValue></strong><small>Flash 普通额度用尽后接管</small></article>
-              <article><span>Embedding 剩余</span><strong className="good"><MetricValue phase={currentPhase}><CountValue value={embeddingQuota?.total_remaining} /></MetricValue></strong><small>语义召回 · 每账户 1K RPD</small></article>
+              <article><span>Embedding 剩余</span><strong className="good"><MetricValue phase={currentPhase}><CountValue value={embeddingQuota?.total_remaining} /></MetricValue></strong><small>本机准入账本 · 每账户 1K RPD</small></article>
             </div>
           </section>
 

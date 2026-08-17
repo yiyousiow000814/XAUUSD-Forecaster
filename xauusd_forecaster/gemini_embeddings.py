@@ -25,6 +25,7 @@ from .news_scheduler import (
     configured_api_credentials,
     credentials_for_background_task,
     mark_account_request_attempted,
+    provider_dispatch_next_eligible,
     record_account_request_outcome,
     record_account_vectors_committed,
     reserve_account_request,
@@ -61,6 +62,18 @@ class GeminiEmbeddingFailure(RuntimeError):
 
 class GeminiEmbeddingCapacityDeferred(GeminiEmbeddingFailure):
     """No independent account currently has safe embedding capacity."""
+
+
+class GeminiEmbeddingDispatchDeferred(RuntimeError):
+    """The shared Google dispatch governor has not reached its next slot."""
+
+    failure_code = "PROVIDER_DISPATCH_DEFERRED"
+    provider_http_status = None
+
+    def __init__(self, next_retry_at: str) -> None:
+        self.next_retry_at = next_retry_at
+        self.diagnostic = {"next_eligible_at": next_retry_at}
+        super().__init__(f"Google provider dispatch deferred until {next_retry_at}")
 
 
 def _bounded_text(value: object, limit: int = 120) -> str | None:
@@ -167,9 +180,16 @@ def _http_failure(
 class GeminiEmbeddingClient:
     """Use independent-account quota admission before every provider batch."""
 
-    def __init__(self, connection: sqlite3.Connection, *, timeout: float = 120.0) -> None:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        timeout: float = 120.0,
+        dispatch_task: str = "ACTIVE_IMPACT_RETRIEVAL",
+    ) -> None:
         self.connection = connection
         self.timeout = timeout
+        self.dispatch_task = dispatch_task
         self._last_successful_usage_ids: tuple[str, ...] = ()
 
     def profile(self) -> EmbeddingProfile:
@@ -211,6 +231,13 @@ class GeminiEmbeddingClient:
         if current:
             batches.append(current)
         return batches
+
+    def document_dispatch_count(self, texts: list[str]) -> int:
+        """Bound one catch-up turn to one paced provider envelope."""
+        if not texts:
+            return 0
+        formatted = [self._formatted(text, "RETRIEVAL_DOCUMENT") for text in texts]
+        return len(self._batches(formatted)[0])
 
     def _request(self, api_key: str, texts: list[str], task_type: str) -> np.ndarray:
         model_path = f"models/{GEMINI_EMBEDDING_MODEL}"
@@ -272,8 +299,16 @@ class GeminiEmbeddingClient:
                         GEMINI_EMBEDDING_INPUT_TOKENS_PER_MINUTE_PER_ACCOUNT
                     ),
                     usage_id=usage_id,
+                    provider_task=self.dispatch_task,
                 )
                 if not admitted:
+                    next_eligible_at = provider_dispatch_next_eligible(
+                        self.connection,
+                    )
+                    if next_eligible_at and datetime.fromisoformat(
+                        next_eligible_at
+                    ) > datetime.now(UTC):
+                        raise GeminiEmbeddingDispatchDeferred(next_eligible_at)
                     continue
                 requested_at = datetime.now(UTC)
                 mark_account_request_attempted(
@@ -291,6 +326,12 @@ class GeminiEmbeddingClient:
                     successful_usage_ids.append(usage_id)
                     break
                 except urllib.error.HTTPError as error:
+                    failure = _http_failure(
+                        error,
+                        requested_at=requested_at,
+                        batch_item_count=len(batch),
+                        estimated_input_tokens=estimated_input_tokens,
+                    )
                     record_account_request_outcome(
                         self.connection, usage_id,
                         outcome=(
@@ -298,17 +339,12 @@ class GeminiEmbeddingClient:
                             if int(error.code) == 429 else "PROVIDER_FAILED"
                         ),
                         provider_http_status=int(error.code),
+                        retry_after_seconds=failure.retry_after_seconds,
                     )
-                    last_error = _http_failure(
-                        error,
-                        requested_at=requested_at,
-                        batch_item_count=len(batch),
-                        estimated_input_tokens=estimated_input_tokens,
-                    )
-                    # Configured account labels do not prove distinct Google
-                    # quota domains. A 429 therefore cools the shared
-                    # generation instead of immediately sending the same burst
-                    # through every locally named account.
+                    last_error = failure
+                    # Account quotas are independent, but burst pressure is
+                    # smoothed at the shared Google transport boundary. Do not
+                    # release the same batch through another account instantly.
                     if int(error.code) == 429:
                         raise last_error
                 except urllib.error.URLError as error:

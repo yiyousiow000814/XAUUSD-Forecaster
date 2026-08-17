@@ -24,8 +24,10 @@ from xauusd_forecaster.news_scheduler import (
     enqueue_job,
     install_scheduler_schema,
     rank_accounts_for_models,
+    record_provider_dispatch_outcome,
     reconcile_completed_jobs,
     reserve_account_request,
+    reserve_provider_dispatch,
     scheduler_counts,
     sync_pending_jobs,
 )
@@ -69,6 +71,139 @@ def _enqueue(
         priority=priority,
         now=NOW,
     )
+
+
+def test_provider_dispatch_staggers_independent_accounts_without_quota_leak() -> None:
+    connection = _connection()
+
+    assert reserve_account_request(
+        connection, account_id="account-a", model_family="gemma-4",
+        daily_limit=1_000, requests_per_minute=100,
+        provider_task="ACTIVE_IMPACT", now=NOW,
+    )
+    assert not reserve_account_request(
+        connection, account_id="account-b", model_family="gemma-4",
+        daily_limit=1_000, requests_per_minute=100,
+        provider_task="ACTIVE_IMPACT", now=NOW,
+    )
+    rows = connection.execute(
+        """SELECT account_id,request_count
+           FROM news_ai_account_daily_usage_v1 ORDER BY account_id"""
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [("account-a", 1)]
+
+    assert reserve_account_request(
+        connection, account_id="account-b", model_family="gemma-4",
+        daily_limit=1_000, requests_per_minute=100,
+        provider_task="ACTIVE_IMPACT", now=NOW + timedelta(milliseconds=250),
+    )
+    rows = connection.execute(
+        """SELECT account_id,request_count
+           FROM news_ai_account_daily_usage_v1 ORDER BY account_id"""
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("account-a", 1), ("account-b", 1),
+    ]
+
+
+def test_provider_dispatch_adapts_to_success_and_retry_after() -> None:
+    connection = _connection()
+    granted, _ = reserve_provider_dispatch(
+        connection, provider_task="ACTIVE_IMPACT", now=NOW,
+    )
+    assert granted
+    record_provider_dispatch_outcome(
+        connection, outcome="PROVIDER_SUCCEEDED",
+        now=NOW + timedelta(milliseconds=10),
+    )
+    row = connection.execute(
+        "SELECT interval_ms FROM news_ai_provider_dispatch_state_v1"
+    ).fetchone()
+    assert row[0] == 225
+
+    record_provider_dispatch_outcome(
+        connection, outcome="PROVIDER_THROTTLED", retry_after_seconds=2,
+        now=NOW + timedelta(milliseconds=20),
+    )
+    row = connection.execute(
+        """SELECT interval_ms,cooldown_until
+           FROM news_ai_provider_dispatch_state_v1"""
+    ).fetchone()
+    assert row[0] == 450
+    assert datetime.fromisoformat(row[1]) == NOW + timedelta(milliseconds=20, seconds=2)
+    assert reserve_provider_dispatch(
+        connection, provider_task="ACTIVE_ANNOTATION",
+        now=NOW + timedelta(seconds=1),
+    )[0] is False
+    assert reserve_provider_dispatch(
+        connection, provider_task="ACTIVE_ANNOTATION",
+        now=NOW + timedelta(seconds=2, milliseconds=20),
+    )[0] is True
+    record_provider_dispatch_outcome(
+        connection, outcome="PROVIDER_SUCCEEDED",
+        now=NOW + timedelta(seconds=2, milliseconds=30),
+    )
+    assert connection.execute(
+        "SELECT interval_ms FROM news_ai_provider_dispatch_state_v1"
+    ).fetchone()[0] == 405
+
+
+def test_embedding_dispatch_rises_when_dependency_fanout_dominates() -> None:
+    connection = _connection()
+    _enqueue(connection, "live-annotation", task_type="ACTIVE_ANNOTATION")
+    for index in range(3):
+        job_id = _enqueue(
+            connection, f"blocked-impact-{index}", task_type="ACTIVE_IMPACT",
+        )
+        connection.execute(
+            """UPDATE news_ai_jobs_v1 SET last_error=? WHERE job_id=?""",
+            ("NEWS_EMBEDDING_BACKFILL_PENDING", job_id),
+        )
+    connection.commit()
+
+    assert reserve_provider_dispatch(
+        connection, provider_task="news-annotation", now=NOW,
+    )[0] is True
+    assert reserve_provider_dispatch(
+        connection, provider_task="NEWS_EMBEDDING_BACKFILL",
+        now=NOW + timedelta(milliseconds=100),
+    )[0] is False
+    assert reserve_provider_dispatch(
+        connection, provider_task="news-annotation",
+        now=NOW + timedelta(milliseconds=250),
+    )[0] is False
+    granted, _ = reserve_provider_dispatch(
+        connection, provider_task="NEWS_EMBEDDING_BACKFILL",
+        now=NOW + timedelta(milliseconds=250),
+    )
+    assert granted is True
+    row = connection.execute(
+        """SELECT last_pressure_json FROM news_ai_provider_dispatch_task_state_v1
+           WHERE task_class='EMBEDDING'"""
+    ).fetchone()
+    assert json.loads(row[0])["dependency_fanout"] == 3
+
+
+def test_annotation_surge_takes_priority_after_embedding_pressure_falls() -> None:
+    connection = _connection()
+    for index in range(5):
+        _enqueue(connection, f"fresh-annotation-{index}")
+
+    assert reserve_provider_dispatch(
+        connection, provider_task="NEWS_EMBEDDING_BACKFILL", now=NOW,
+    )[0] is True
+    assert reserve_provider_dispatch(
+        connection, provider_task="news-annotation",
+        now=NOW + timedelta(milliseconds=100),
+    )[0] is False
+    assert reserve_provider_dispatch(
+        connection, provider_task="NEWS_EMBEDDING_BACKFILL",
+        now=NOW + timedelta(milliseconds=250),
+    )[0] is False
+    assert reserve_provider_dispatch(
+        connection, provider_task="news-annotation",
+        now=NOW + timedelta(milliseconds=250),
+    )[0] is True
 
 
 def test_identity_contract_recovery_requeues_each_impact_only_once(tmp_path) -> None:
@@ -1100,6 +1235,51 @@ def test_embedding_provider_throttle_wait_does_not_consume_impact_attempt(
     assert row["attempt_count"] == 0
     assert row["last_error"] == "NEWS_EMBEDDING_PROVIDER_THROTTLED"
     assert datetime.fromisoformat(row["available_at"]) == retry_at
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_ai_job_attempts_v1 WHERE job_id=?", (job_id,),
+    ).fetchone()[0] == 0
+    ledger.close()
+
+
+def test_provider_dispatch_deferral_does_not_probe_accounts_or_consume_attempt(
+    tmp_path, monkeypatch,
+) -> None:
+    from scripts import run_news_annotator as runner
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    job_id = enqueue_job(
+        ledger.connection, task_type="ACTIVE_IMPACT", source="source",
+        source_item_id="paced", revision_number=1,
+        annotation_id="annotation", prompt_version="prompt", priority="FAST",
+        now=datetime.now(UTC) - timedelta(minutes=1),
+    )
+    credentials = tuple(
+        ApiCredential(f"account-{name}", ROUTINE_POOL, f"key-{name}", name)
+        for name in ("a", "b", "c")
+    )
+    retry_at = datetime.now(UTC) + timedelta(milliseconds=250)
+    calls = []
+    monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
+    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+
+    def deferred(_ledger, credential, _job, **_kwargs):
+        calls.append(credential.account_id)
+        return {
+            "status": "DEFERRED",
+            "failure_code": "PROVIDER_DISPATCH_DEFERRED",
+            "next_retry_at": retry_at.isoformat(),
+        }
+
+    monkeypatch.setattr(runner, "_execute_job", deferred)
+    statuses = runner.run_scheduled_batch(ledger, batch_size=3)
+
+    assert calls == ["account-a"]
+    assert statuses[0]["attempted_credentials"] == 0
+    row = ledger.connection.execute(
+        """SELECT state,attempt_count,available_at FROM news_ai_jobs_v1
+           WHERE job_id=?""", (job_id,),
+    ).fetchone()
+    assert tuple(row) == ("QUEUED", 0, retry_at.isoformat())
     assert ledger.connection.execute(
         "SELECT count(*) FROM news_ai_job_attempts_v1 WHERE job_id=?", (job_id,),
     ).fetchone()[0] == 0

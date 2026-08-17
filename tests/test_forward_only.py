@@ -31,6 +31,8 @@ from xauusd_forecaster.annotation import (
 )
 from xauusd_forecaster.factors import aggregate_news_features, factor_coverage
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
+from xauusd_forecaster.gemini_embeddings import GeminiEmbeddingFailure
+from xauusd_forecaster.local_embeddings import EmbeddingProfile
 from xauusd_forecaster.model_gateway import GeminiModelGateway
 from xauusd_forecaster.news_impact import pending_impact_records
 from xauusd_forecaster.maintenance import (
@@ -3399,10 +3401,32 @@ def test_gemma_impact_assessment_is_append_only_and_versioned(
         "parse_started_at": now + timedelta(hours=2, minutes=53),
         "parsed_at": now + timedelta(hours=2, minutes=54),
     })
+    captured_rows = []
+
+    class ThrottledEmbeddingClient:
+        def __init__(self, _connection) -> None:
+            pass
+
+        def profile(self) -> EmbeddingProfile:
+            return EmbeddingProfile("gemini-embedding-2", "e" * 64, 768)
+
+        def embed(self, _texts, _profile):
+            raise GeminiEmbeddingFailure(
+                "provider throttled",
+                failure_code="NEWS_EMBEDDING_PROVIDER_THROTTLED",
+                provider_http_status=429,
+                retry_after_seconds=30,
+                diagnostic={"batch_item_count": 1},
+            )
+
+    import xauusd_forecaster.news_retrieval as retrieval_module
     monkeypatch.setattr(
-        annotation_module._GeminiRequestPool,
-        "call_impact",
-        lambda *_args, **_kwargs: ({
+        retrieval_module, "GeminiEmbeddingClient", ThrottledEmbeddingClient,
+    )
+
+    def call_impact(_pool, _index, row, **_kwargs):
+        captured_rows.append(row)
+        return ({
             "impact_class": "POLICY_SHIFT", "event_state": "ACTIVE",
             "update_type": "NEW_EVENT", "identity_relation": "NEW_EPISODE",
             "matched_candidate_id": "",
@@ -3411,15 +3435,25 @@ def test_gemma_impact_assessment_is_append_only_and_versioned(
             "identity_differences_zh": ["当前政策决定属于新的发生批次。"],
             "context_differences_zh": [], "confidence": 0.9,
             "reason_zh": "政策决定可能持续影响利率预期。",
-        }, annotation_module.IMPACT_MODEL),
+        }, annotation_module.IMPACT_MODEL)
+
+    monkeypatch.setattr(
+        annotation_module._GeminiRequestPool,
+        "call_impact",
+        call_impact,
     )
 
     statuses = assess_pending_news_impacts(
         ledger, api_key="test-key", limit=1,
         request_accountant=ALLOW_MODEL_REQUEST,
+        use_hybrid_retrieval=True,
     )
 
     assert statuses[0]["status"] == "OK"
+    assert captured_rows[0]["identity_retrieval_mode"] == "DETERMINISTIC_FALLBACK"
+    assert captured_rows[0]["identity_retrieval_reason"] == (
+        "NEWS_EMBEDDING_PROVIDER_THROTTLED"
+    )
     row = ledger.connection.execute(
         "SELECT * FROM news_impact_assessments_v1"
     ).fetchone()
