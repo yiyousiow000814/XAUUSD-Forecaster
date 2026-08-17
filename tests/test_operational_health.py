@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
@@ -309,3 +310,32 @@ def test_future_backoff_is_scheduled_retry_not_overdue_backlog() -> None:
         }
         for alert in snapshot["alerts"]
     )
+
+
+def test_scheduler_health_detects_unrepaired_display_placeholder() -> None:
+    connection = _connection()
+    connection.execute(
+        """CREATE TABLE news_annotations (
+             source TEXT,source_item_id TEXT,revision_number INTEGER,
+             prompt_version TEXT,parsed_at TEXT,annotation_json TEXT)"""
+    )
+    connection.execute(
+        "INSERT INTO news_annotations VALUES (?,?,?,?,?,?)",
+        (
+            "source", "item", 1, "prompt", NOW.isoformat(),
+            json.dumps({
+                "semantic_reason_zh": (
+                    "语义已完成，但中文展示未通过校验；本记录仅供审计。"
+                ),
+            }, ensure_ascii=False),
+        ),
+    )
+
+    snapshot = scheduler_health_snapshot(connection, now=NOW)
+
+    alert = next(
+        item for item in snapshot["alerts"]
+        if item["code"] == "OPS_NEWS_ANNOTATION_CONTRACT_STATE_INVALID"
+    )
+    assert alert["blocking"] is True
+    assert alert["evidence"]["unrepaired_invalid_annotations"] == 1

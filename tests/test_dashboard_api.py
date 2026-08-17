@@ -1259,6 +1259,21 @@ def test_news_archive_does_not_mark_nonclaimable_news_as_waiting(tmp_path) -> No
     ledger.close()
 
 
+def test_duplicate_collection_copy_is_not_reported_as_queue_anomaly() -> None:
+    module = _dashboard_module()
+    now = datetime.now(UTC)
+    code, reason = module._not_required_reason({
+        "source": "google_news_gold_context",
+        "headline": "CPI report",
+        "source_published_time": now.isoformat(),
+        "collector_first_seen_time": now.isoformat(),
+        "has_canonical_content_peer": 1,
+    }, (now - timedelta(days=30)).isoformat())
+
+    assert code == "CANONICAL_COPY_HANDLES_ANNOTATION"
+    assert "不会重复消耗模型配额" in reason
+
+
 def test_news_archive_explains_terminal_model_contract_failure(tmp_path) -> None:
     module = _dashboard_module()
     now = datetime.now(UTC).replace(microsecond=0)

@@ -42,6 +42,7 @@ from .news_semantics import (
     CURRENT_NEWS_PROMPT_VERSION,
     GENERATED_NEWS_PROMPT_VERSIONS,
     LEGACY_INVALID_SEMANTIC_REASON_PREFIX,
+    DISPLAY_AUDIT_FALLBACK_REASON_PREFIX,
     news_annotation_schema,
     validated_annotation_predicate,
     validate_news_annotation,
@@ -67,7 +68,7 @@ GEMMA_EVIDENCE_WINDOWS_MAX_CHARS = 8_000
 GEMMA_TITLE_BATCH_LIMIT = 10
 GEMMA_IMPACT_BATCH_LIMIT = 10
 PROMPT_VERSION = CURRENT_NEWS_PROMPT_VERSION
-ANNOTATION_FAILURE_RECOVERY_VERSION = "annotation-repair-v1-source-grounded-display"
+ANNOTATION_FAILURE_RECOVERY_VERSION = "annotation-repair-v2-feedback-grounded-display"
 IMPACT_FAILURE_RECOVERY_VERSION = "impact-repair-v2-empty-candidate-new-episode"
 TITLE_PROMPT_VERSION = "headline-zh-v7-multilingual-month-preservation"
 INVALID_CHINESE_TITLE = "来源新闻（中文标题待校验）"
@@ -87,6 +88,7 @@ class ModelOutputContractFailed(ValueError):
     def __init__(
         self, error: Exception, result: dict, *, stage: str,
         initial_error: Exception | None = None,
+        invalid_fields: tuple[str, ...] = (),
         public_message: str | None = None,
     ) -> None:
         serialized = json.dumps(
@@ -128,6 +130,10 @@ class ModelOutputContractFailed(ValueError):
         if initial_error is not None:
             self.failure_evidence["selected_output"]["initial_error"] = (
                 f"{type(initial_error).__name__}: {str(initial_error)[:300]}"
+            )
+        if invalid_fields:
+            self.failure_evidence["selected_output"]["invalid_fields"] = list(
+                invalid_fields[:8]
             )
         super().__init__(public_message or str(error))
 
@@ -584,6 +590,20 @@ def _persist_parsed_annotation(
     ).fetchone()
     if legacy_invalid:
         identity.append("validated-recovery-v1")
+    display_fallback = ledger.connection.execute(
+        """SELECT 1 FROM news_annotations
+           WHERE source=? AND source_item_id=? AND revision_number=?
+             AND llm_model_version=? AND prompt_version=?
+             AND COALESCE(json_extract(annotation_json, '$.semantic_reason_zh'), '')
+                 LIKE ? LIMIT 1""",
+        (
+            row["source"], row["source_item_id"], row["revision_number"],
+            exact_model, prompt_version,
+            f"{DISPLAY_AUDIT_FALLBACK_REASON_PREFIX}%",
+        ),
+    ).fetchone()
+    if display_fallback:
+        identity.append("feedback-display-recovery-v2")
     annotation_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "|".join(identity)))
     common = {
         "source": row["source"], "source_item_id": row["source_item_id"],
@@ -1056,6 +1076,8 @@ class _GeminiRequestPool:
             try:
                 repaired = self._repair_chinese(
                     start_index + 1, model, result, headline, body,
+                    invalid_fields=invalid_display_fields,
+                    failure_reason=str(initial_display_error),
                 )
                 for field in invalid_display_fields:
                     result[field] = repaired[field]
@@ -1068,36 +1090,27 @@ class _GeminiRequestPool:
                     )
             except (ModelGatewayCapacityExhausted, urllib.error.HTTPError):
                 raise
-            except RuntimeError as error:
+            except Exception as error:
                 raise ModelOutputContractFailed(
                     error, result, stage="DISPLAY_REPAIR",
                     initial_error=initial_display_error,
+                    invalid_fields=invalid_display_fields,
                     public_message=(
                         "Gemini display repair failed; semantic annotation withheld"
                     ),
                 ) from error
-            except Exception as error:
-                if prompt_version not in GENERATED_NEWS_PROMPT_VERSIONS:
-                    raise ModelOutputContractFailed(
-                        error, result, stage="DISPLAY_REPAIR",
-                        initial_error=initial_display_error,
-                        public_message=(
-                            "Gemini display repair failed; semantic annotation withheld"
-                        ),
-                    ) from error
-                _apply_display_audit_fallback(result)
-                _validate_chinese_result(result)
-                _validate_current_result(
-                    result, headline=headline, body=body,
-                    prompt_version=prompt_version,
-                )
         return result, exact_model
 
     def _repair_chinese(
         self, start_index: int, model: str, result: dict,
         headline: str = "", body: str = "",
+        *, invalid_fields: tuple[str, ...], failure_reason: str,
     ) -> dict[str, object]:
-        payload = _chinese_repair_payload(result, headline, body)
+        payload = _chinese_repair_payload(
+            result, headline, body,
+            invalid_fields=invalid_fields,
+            failure_reason=failure_reason,
+        )
         serialized = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
         input_tokens = self._count_or_conservative(
             model,
@@ -1427,13 +1440,25 @@ def _source_number_lexemes(headline: str, body: str) -> list[str]:
 
 def _chinese_repair_payload(
     result: dict, headline: str = "", body: str = "",
+    *, invalid_fields: tuple[str, ...] | None = None,
+    failure_reason: str = "Chinese display validation failed",
 ) -> dict[str, object]:
-    repair_fields = ["headline_zh", "summary_zh", "primary_story_title_zh"]
+    available_fields = ["headline_zh", "summary_zh", "primary_story_title_zh"]
     if "semantic_reason_zh" in result:
-        repair_fields.append("semantic_reason_zh")
+        available_fields.append("semantic_reason_zh")
+    repair_fields = [
+        field for field in (invalid_fields or tuple(available_fields))
+        if field in available_fields
+    ]
+    if not repair_fields:
+        repair_fields = available_fields
     return {
         "contents": [{"parts": [{"text": (
-            "Rewrite the prose primarily in natural Simplified Chinese. Use common "
+            "Your previous display output was rejected by the validator. "
+            "REJECTION_REASON is the exact bounded failure reason. Correct only "
+            "REJECTED_FIELDS and return only those fields; all semantic fields and "
+            "all other display fields are frozen and must not be returned. "
+            "Rewrite the rejected prose primarily in natural Simplified Chinese. Use common "
             "Chinese expressions for financial concepts when they exist. Preserve "
             "personal and company names, tickers, widely used abbreviations, "
             "identifiers, and proper nouns in English when that is more natural or "
@@ -1444,7 +1469,11 @@ def _chinese_repair_payload(
             "SOURCE_NUMBER_LEXEMES. Never convert units or magnitudes. If a "
             "numeric claim cannot be expressed with an exact source lexeme, "
             "remove that whole claim and retain only supported nonnumeric facts. "
-            "Return JSON only.\nSOURCE_JSON\n"
+            "Return JSON only.\nREJECTION_REASON\n"
+            + failure_reason[:500]
+            + "\nREJECTED_FIELDS\n"
+            + json.dumps(repair_fields, ensure_ascii=False)
+            + "\nREJECTED_OUTPUT\n"
             + json.dumps(
                 {field: result.get(field) for field in repair_fields},
                 ensure_ascii=False,
@@ -2091,7 +2120,24 @@ def _restore_source_number_lexemes(
                 lexeme for lexeme in result_lexemes
                 if re.sub(r"\D", "", lexeme) == digits
             }
-            if matching_result and matching_result.isdisjoint(exact_lexemes):
+            currency_names = {
+                "$": "美元", "£": "英镑", "€": "欧元", "₹": "卢比",
+            }
+            has_equivalent_currency_spelling = any(
+                symbol in exact
+                and re.search(
+                    re.escape(re.sub(r"[$£€¥₹\s]", "", exact))
+                    + rf"\s*{currency_names[symbol]}",
+                    restored,
+                )
+                for exact in exact_lexemes
+                for symbol in currency_names
+            )
+            if (
+                matching_result
+                and matching_result.isdisjoint(exact_lexemes)
+                and not has_equivalent_currency_spelling
+            ):
                 raise ValueError(
                     f"SOURCE_NUMBER_MISMATCH: Gemini {field} changed source "
                     f"number magnitude or currency spelling"
@@ -2123,7 +2169,10 @@ def _recover_display_fields(result: dict, headline: str, body: str) -> None:
             candidates = by_digits.get(re.sub(r"\D", "", token), set())
             if len(candidates) == 1:
                 return next(iter(candidates))
-            return "相关数值"
+            raise ValueError(
+                f"SOURCE_NUMBER_AMBIGUOUS: Gemini {field} contains a number "
+                "that cannot be restored uniquely from source"
+            )
 
         result[field] = token_pattern.sub(recover, str(result.get(field) or ""))
     _restore_source_number_lexemes(result, headline, body)
@@ -2159,26 +2208,6 @@ def _validate_current_semantics(
         semantic_candidate, headline=headline, body=body,
         prompt_version=prompt_version,
     )
-
-
-def _apply_display_audit_fallback(result: dict) -> None:
-    """Retain valid semantics without granting a failed display measurement."""
-    result.update({
-        "headline_zh": "来源标题暂未生成可靠中文显示",
-        "summary_zh": (
-            "语义结构和来源证据已经通过校验，但中文展示字段未通过校验；"
-            "本记录仅供审计，方向测量已经归零。"
-        ),
-        "primary_story_title_zh": "",
-        "semantic_reason_zh": "语义已完成，但中文展示未通过校验；本记录仅供审计。",
-        "hawkishness": 0.0,
-        "inflation_impulse": 0.0,
-        "growth_impulse": 0.0,
-        "geopolitical_risk": 0.0,
-        "usd_impulse": 0.0,
-        "novelty": 0.0,
-        "confidence": 0.0,
-    })
 
 
 def _normalize_translated_named_months(result: dict, source: str) -> None:

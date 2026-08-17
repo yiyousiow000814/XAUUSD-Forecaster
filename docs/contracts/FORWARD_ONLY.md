@@ -136,12 +136,14 @@ publication is itself the event. Date-only, missing, future, and media-derived
 substitute clocks fail closed for training.
 
 Display-number formatting is repaired deterministically against source
-lexemes. The repair model receives a bounded list of exact source-number
-spellings and may copy those spellings or remove the unsupported numeric claim;
-it may never convert units or magnitudes. Unsupported numbers are replaced by a nonnumeric disclosure and lower
-display confidence instead of rejecting the structured receipt. If a Chinese
-repair cannot pass validation, the display text becomes an explicit audit notice and
-all directional impulses, novelty, and confidence become zero. Provider,
+lexemes. A rejected display response gets one bounded, feedback-guided repair:
+the repair request includes the prior rejection reason and rejected display
+fields, freezes semantic and already-valid display fields, and may return only
+the rejected fields. The repair model may copy exact source-number spellings or
+remove the unsupported numeric claim; it may never convert units or magnitudes.
+An ambiguous or unsupported number remains a validation failure and is never
+replaced by manufactured prose. If the repair cannot pass validation, no
+annotation is persisted and no model permission is granted. Provider,
 transport, malformed-JSON, and model-output contract failures append a
 `news_llm_failures` row before retry. A rejected structured response also
 appends bounded diagnostic evidence: its failure stage and code, response hash,
@@ -151,7 +153,9 @@ prefix and the complete response hash may replace selected fields. Full rejected
 responses, source bodies, prompts, and credentials MUST NOT be duplicated into
 the failure evidence table. Model-output contract
 failures retry once after five minutes and become terminal when the same failure
-repeats; waiting six hours would outlive the decision value of timely news.
+repeats; each retry preserves bounded failure evidence, and a later versioned
+recovery may authorize one new attempt after the repair mechanism changes.
+Waiting six hours would outlive the decision value of timely news.
 HTTP 429 and transient 5xx failures use bounded progressive backoff and become
 terminal after five attempts. Terminal rows remain auditable and are not
 automatically requeued. The primary Flash budget keeps 150 requests reserved

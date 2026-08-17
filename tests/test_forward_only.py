@@ -2314,8 +2314,25 @@ def test_chinese_repair_policy_preserves_natural_english_identifiers() -> None:
     })["generationConfig"]["responseSchema"]
     assert "semantic_reason_zh" not in legacy_schema["required"]
 
+    targeted = annotation_module._chinese_repair_payload(
+        {
+            "headline_zh": "Gold rose 9%", "summary_zh": "黄金上涨。",
+            "primary_story_title_zh": "",
+            "xauusd_relevance": "DIRECT",
+        },
+        "Gold rose 4.4%", "",
+        invalid_fields=("headline_zh",),
+        failure_reason="SOURCE_NUMBER_MISMATCH: changed source number",
+    )
+    targeted_instruction = targeted["contents"][0]["parts"][0]["text"]
+    targeted_schema = targeted["generationConfig"]["responseSchema"]
+    assert "previous display output was rejected" in targeted_instruction
+    assert "SOURCE_NUMBER_MISMATCH" in targeted_instruction
+    assert targeted_schema["required"] == ["headline_zh"]
+    assert "xauusd_relevance" not in targeted_schema["properties"]
 
-def test_failed_display_repair_keeps_auditable_semantics_without_impulse(
+
+def test_failed_display_repair_withholds_annotation_and_records_failure_fields(
     monkeypatch,
 ) -> None:
     evidence = "Source evidence confirms the reported event."
@@ -2339,19 +2356,17 @@ def test_failed_display_repair_keeps_auditable_semantics_without_impulse(
         request_accountant=ALLOW_MODEL_REQUEST,
     )
 
-    result, _ = pool.call(
-        0, annotation_module.DEFAULT_GEMINI_MODEL, "Source headline", evidence,
-        prompt_version=annotation_module.PROMPT_VERSION,
-    )
+    with pytest.raises(annotation_module.ModelOutputContractFailed) as failure:
+        pool.call(
+            0, annotation_module.DEFAULT_GEMINI_MODEL,
+            "Source headline", evidence,
+            prompt_version=annotation_module.PROMPT_VERSION,
+        )
 
-    assert result["headline_zh"] == "来源标题暂未生成可靠中文显示"
-    assert "仅供审计" in result["summary_zh"]
-    assert result["xauusd_relevance"] == vector["xauusd_relevance"]
-    for field in (
-        "hawkishness", "inflation_impulse", "growth_impulse",
-        "geopolitical_risk", "usd_impulse", "novelty", "confidence",
-    ):
-        assert result[field] == 0.0
+    assert failure.value.failure_evidence["failure_stage"] == "DISPLAY_REPAIR"
+    selected = failure.value.failure_evidence["selected_output"]
+    assert selected["invalid_fields"]
+    assert selected["initial_error"]
 
 
 def test_gemini_annotation_reserves_provider_counted_input_tokens(
@@ -2525,12 +2540,10 @@ def test_gemini_locally_recovers_unverifiable_display_numbers() -> None:
         "summary_zh": "来源称黄金上涨2.0%，但原文没有给出该数值。",
         "confidence": 0.9,
     }
-    annotation_module._recover_display_fields(
-        result, "Altın yüzde 1,3 arttı", "Fiyat hareketi devam etti."
-    )
-    assert "2.0" not in result["headline_zh"]
-    assert "相关数值" in result["headline_zh"]
-    assert "相关数值" in result["summary_zh"]
+    with pytest.raises(ValueError, match="SOURCE_NUMBER_AMBIGUOUS"):
+        annotation_module._recover_display_fields(
+            result, "Altın yüzde 1,3 arttı", "Fiyat hareketi devam etti."
+        )
     assert result["confidence"] == 0.9
 
 
@@ -2544,6 +2557,21 @@ def test_display_number_validation_rejects_unit_or_currency_conversion() -> None
         annotation_module._recover_display_fields(
             result, "Revenue reached $4.4B", "The company reported $4.4B.",
         )
+
+
+def test_display_number_validation_accepts_natural_chinese_currency_order() -> None:
+    result = {
+        "headline_zh": "黄金目标价为4,700美元",
+        "summary_zh": "报告认为黄金的公允价值可能达到4,700美元。",
+    }
+
+    annotation_module._recover_display_fields(
+        result,
+        "Gold fair value may reach $4,700",
+        "The report puts fair value at $4,700.",
+    )
+
+    assert "4,700美元" in result["headline_zh"]
 
 
 def test_display_failure_withholds_semantics_until_readable_output_exists(
@@ -2591,6 +2619,12 @@ def test_display_failure_withholds_semantics_until_readable_output_exists(
     assert "semantic annotation withheld" in statuses[0]["error"]
     assert ledger.count("news_annotations") == 0
     assert ledger.count("news_llm_failures") == 1
+    evidence = ledger.connection.execute(
+        "SELECT selected_output_json FROM news_llm_failure_evidence_v1"
+    ).fetchone()
+    selected = json.loads(evidence["selected_output_json"])
+    assert selected["invalid_fields"]
+    assert "initial_error" in selected
 
 
 def test_semantic_evidence_failure_uses_exact_source_pointer_repair(

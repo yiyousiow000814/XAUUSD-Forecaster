@@ -4,6 +4,14 @@ This design describes the account-aware scheduler used by the news AI chain.
 It allocates available provider capacity without changing which model owns a
 semantic decision.
 
+Model-output retries are corrective, not blind repetition. When an otherwise
+valid news annotation fails only display validation, the worker sends one
+bounded repair request containing the rejected fields and the exact prior
+validation reason. Semantic and already-valid display fields stay frozen. A
+second failure is persisted with a stable failure code and bounded rejected
+output evidence, then follows the scheduler's controlled backoff and terminal
+rules. A repair-version change may authorize one auditable recovery attempt.
+
 ## Goals
 
 - Discover configured accounts and keys again on every scheduler cycle.

@@ -24,6 +24,13 @@ produced, the annotation MUST be withheld from model permission and retried; it
 MUST NOT be persisted as irrelevant or admitted behind a placeholder. A
 semantic-schema or source-evidence failure MUST fail independently and MUST NOT
 be disguised as a translation failure.
+The bounded display repair request MUST identify the prior rejection reason and
+rejected fields, MUST include only the rejected display output, and MUST freeze
+semantic and already-valid display fields. A second validation failure appends
+bounded failure evidence and follows the controlled scheduler retry policy; it
+MUST NOT be persisted as a completed audit placeholder. Historical placeholders
+written by the superseded behavior are ineligible for model use and are
+automatically rediscovered for append-only recovery.
 Language validation MUST distinguish ordinary untranslated prose from natural
 English identifiers and names. A complete foreign-language clause or a script
 other than Chinese and Latin requires repair; punctuation, numbers, symbols,
