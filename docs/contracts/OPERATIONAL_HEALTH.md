@@ -109,6 +109,16 @@ resource failure retains its own upstream code under
 warning.
 
 Runtime rollout observation is also a state machine, not a binary HTTP probe.
+A candidate preflight validates generation completeness and every production
+contract that can be proven from the copied evidence database, but it does not
+require a post-generation live decision that the candidate has not yet had an
+opportunity to produce. After installation, the observation state remains the
+authority for that temporal proof: the candidate must produce two subsequent
+five-minute decision cycles before activation, and an eligible market closure
+pauses rather than waives that requirement. A code-only update therefore does
+not fail preflight merely because the market cannot currently create a new
+decision, while a model-generation handover still cannot become active without
+live evidence.
 A bounded stale snapshot remains suitable for production-shape validation while
 its single background refresh runs. When no bounded snapshot exists, the
 explicit `STATUS_SNAPSHOT_REFRESH_IN_PROGRESS` response is a bounded deferral
