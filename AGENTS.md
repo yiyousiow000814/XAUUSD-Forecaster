@@ -95,19 +95,24 @@
 
 ## Browser Automation Lifecycle
 
-- Treat every Playwright or browser-control session as a resource that must be
-  explicitly closed. Persistent browser sessions must never be left running
-  after inspection because they can keep polling deployed pages and consume
-  production request quotas.
-- Before browser automation, audit existing Playwright browser processes and
-  record the baseline. Reuse one named session for the complete verification
-  flow; do not open a new browser for each viewport, route, or assertion.
-- Close the named session on every completion path, including failed commands,
-  timeouts, interrupted checks, and task switches. A failed verification does
-  not waive cleanup.
-- After closing, audit Playwright browser processes again. Browser verification
-  is incomplete until no process created by the task remains. Report the final
-  process count in the pull request when Preview verification was performed.
+- Playwright is permitted for repository verification only when its launcher
+  and every child process are guaranteed not to open a visible Command Prompt,
+  PowerShell, or terminal window on the user's Windows desktop.
+- Prefer the in-app browser-control capability. When Playwright is required,
+  use a verified hidden or no-window launch path; never invoke `playwright-cli`,
+  `npx` Playwright packages, bundled wrappers, or scripts directly when that
+  invocation can create a visible console window.
+- Before launching browser automation, confirm that the selected launch method
+  suppresses visible terminal windows. If that cannot be guaranteed, use the
+  in-app browser or report browser verification as blocked instead of launching
+  it visibly.
+- Treat every permitted browser-control session as a resource that must be
+  explicitly closed. Reuse one session for the complete verification flow and
+  close it on every completion path, including failed commands, timeouts,
+  interrupted checks, and task switches.
+- After closing, confirm that no browser session created by the task remains.
+  Report the final session count in the pull request when Preview verification
+  was performed.
 - Prefer branch Previews with immutable code artifacts for UI checks. Do not
   leave a production page open in an automated browser, and never rely on
   background throttling to limit its requests.
