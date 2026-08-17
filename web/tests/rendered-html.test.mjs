@@ -21,12 +21,27 @@ const { publicImpactReason, publicNewsRecord } = await import("../app/_lib/publi
 const { sortNewsEvidenceByTime } = await import("../app/_lib/news-evidence-order.ts");
 const { summarizeAssistantQueue } = await import("../app/api/_shared/assistant-operational-health.ts");
 const { globalOperationalAlerts } = await import("../app/_lib/operational-health.ts");
+const { operationalEvidenceText } = await import("../app/_lib/operational-evidence.ts");
 
 test("reserves the global shell alert for blocking operational faults", () => {
   const warning = { code: "OPS_AI_BACKLOG_OVERDUE", severity: "WARNING", scope: "ACTIVE_IMPACT", message_zh: "积压", blocking: false, evidence: {} };
   const blocking = { code: "OPS_RUNTIME_UPDATE_FAILED", severity: "ERROR", scope: "DEPLOYMENT", message_zh: "更新失败", blocking: true, evidence: {} };
   assert.deepEqual(globalOperationalAlerts([warning]), []);
   assert.deepEqual(globalOperationalAlerts([warning, blocking]), [blocking]);
+});
+
+test("renders operational evidence timestamps for the UTC+8 operator surface", () => {
+  assert.equal(
+    operationalEvidenceText({
+      failed_at: "2026-08-16T19:33:00.7001669+00:00",
+      status: "ROLLED_BACK",
+    }),
+    "failed_at=2026-08-17 03:33:00 UTC+8 · status=ROLLED_BACK",
+  );
+  assert.equal(
+    operationalEvidenceText({ earliest_retry_at: null, active_jobs: 3 }),
+    "earliest_retry_at=— · active_jobs=3",
+  );
 });
 
 test("summarizes Assistant queue evidence without exposing job content", () => {
@@ -943,6 +958,13 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(css, /\.health-reveal-button \{ display:block;[^}]*min-height:48px/);
   assert.match(css, /\.component-status>header p \{ display:none; \}/);
   assert.match(css, /\.component-status>div \{ gap:13px; background:transparent; \}/);
+  assert.match(css, /\.component-status>div \{ display:grid; grid-template-columns:repeat\(6,1fr\); \}/);
+  assert.match(css, /\.component-status article:not\(:nth-child\(3n\)\) \{ border-right:1px solid var\(--ink\); \}/);
+  assert.match(css, /\.component-status article:nth-child\(n\+4\) \{ border-top:1px solid var\(--ink\); \}/);
+  assert.match(css, /\.component-status article:last-child:nth-child\(3n\+1\) \{ grid-column:span 6; \}/);
+  assert.match(css, /\.component-status article:nth-last-child\(2\):nth-child\(3n\+1\),[\s\S]*\.component-status article:last-child:nth-child\(3n\+2\) \{ grid-column:span 3; \}/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.component-status article:last-child:nth-child\(3n\+1\),[\s\S]*\.component-status article:last-child:nth-child\(3n\+2\) \{ grid-column:auto; \}/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.component-status article:last-child \{ border-right:1px solid rgba\(17,17,15,\.4\); \}/);
   assert.match(css, /\.source-health\.show-healthy article\.is-healthy \.news-source-details \{ display:none; \}/);
   assert.match(css, /\.source-health\.show-healthy article\.is-healthy\.is-detail-open \.news-source-details \{ display:contents; \}/);
   assert.match(css, /\.operational-alert-banner a \{[^}]*min-height: 44px/);
