@@ -44,6 +44,10 @@ class HybridRetrievalResult:
     route_rankings: dict[str, tuple[str, ...]]
 
 
+class NewsEmbeddingBackfillPending(RuntimeError):
+    """The local append-only embedding universe is still catching up."""
+
+
 def identity_embedding_text(row: dict) -> str:
     """Create the immutable multilingual text used for identity retrieval."""
     annotation = row.get("annotation")
@@ -244,8 +248,11 @@ def attach_hybrid_prior_event_context(
     ]
     if len(current_rows) != len(current_ids):
         raise ValueError("current news embedding source is outside the universe")
+    # New annotations can become eligible between the deployment backfill and
+    # the next impact cycle. Catch up the complete point-in-time universe, not
+    # only the record currently holding the scheduler lease.
     profile, _ = append_missing_embeddings(
-        connection, current_rows, embedding_client, limit=len(current_rows),
+        connection, universe, embedding_client, limit=NEWS_BACKFILL_BATCH,
     )
     embeddings = load_embeddings(
         connection, profile, expected_rows=universe,
@@ -255,7 +262,7 @@ def attach_hybrid_prior_event_context(
         if str(row["candidate_id"]) not in embeddings
     ]
     if missing:
-        raise ValueError(
+        raise NewsEmbeddingBackfillPending(
             f"news identity embedding backfill is incomplete: {len(missing)} missing"
         )
     for row in records:

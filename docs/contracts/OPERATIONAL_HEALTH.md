@@ -52,6 +52,7 @@ Task-level failure evidence uses these existing stable families:
 | --- | --- |
 | `MODEL_CAPACITY_DEFERRED` | Local quota admission rejected the request before transport. |
 | `MODEL_ROUTE_DISABLED` | No enabled model route was available for the task. |
+| `NEWS_EMBEDDING_BACKFILL_PENDING` | Local append-only identity embeddings are catching up; defer impact work without trying another provider account or counting a model failure. |
 | `MODEL_OUTPUT_CONTRACT_FAILED` | A response arrived but violated the semantic or evidence contract. |
 | `MODEL_OUTPUT_INVALID` | A response arrived but could not be decoded as the required schema. |
 | `PROVIDER_HTTP_ERROR` | The provider returned an HTTP failure. |

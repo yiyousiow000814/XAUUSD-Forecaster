@@ -45,10 +45,14 @@ python scripts/backfill_news_identity_embeddings.py `
   --database C:\path\to\forward-evidence.sqlite3
 ```
 
-The runtime embeds each newly annotated current record before retrieval. If the
-local model is absent, its digest changes without a backfill, or any historical
-vector is missing, identity assessment fails closed and returns to scheduler
-retry instead of silently claiming complete hybrid context.
+Before retrieval, the runtime appends a bounded catch-up batch across the whole
+point-in-time candidate universe, including annotations that became eligible
+between deployment backfill and the next impact cycle. If a larger migration is
+still incomplete, impact work is deferred with
+`NEWS_EMBEDDING_BACKFILL_PENDING`; this is maintenance progress, not a provider
+or model failure, and another credential MUST NOT be tried. If the local model
+is absent or its digest changes without a complete backfill, identity assessment
+still fails closed instead of silently claiming complete hybrid context.
 
 The dedicated embedding model is retrieval infrastructure. Qwen and Ministral
 chat profiles do not generate these vectors, and no Google quota is consumed.
