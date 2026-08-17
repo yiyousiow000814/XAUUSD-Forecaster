@@ -30,6 +30,13 @@ The first reasoning router SHOULD be deterministic and request-local. It MUST
 NOT spend another model request merely to ask how much reasoning to use. Initial
 classes MAY include `SIMPLE`, `ANALYTICAL`, and `TOOL_HEAVY`.
 
+High-confidence conversational turns such as greetings, capability questions,
+immediate conversation recall, and explanations of the Assistant's own prior
+behavior MUST run without an external tool surface. Other chat turns retain
+model-selected tool use inside the bounded loop. Tool availability is not a
+tool plan: reasoning policy and public progress MUST NOT treat the maximum
+authorized call budget as calls that the model has already chosen.
+
 One user turn fixes this task/effort policy before its first model request; a
 later final-only model call may disable tools but MUST NOT silently downgrade
 the effort policy while synthesizing results from the same native sequence.
@@ -218,6 +225,11 @@ When calls are independent, one model turn SHOULD plan them together and the
 backend SHOULD execute them in parallel within the configured limit. Tool
 results remain ordered deterministically in the context. A tool failure is a
 typed result; it MUST NOT be hidden as an empty success.
+
+Public tool progress MUST be emitted when each tool round actually settles. A
+completed turn MUST NOT reconstruct delayed tool activity and present it as if
+the operation were still live. Conversation-only turns MUST NOT report news
+retrieval or attach unrelated news evidence.
 
 The backend MUST reject an over-budget call plan before executing any subset.
 

@@ -209,8 +209,9 @@ admission. Compaction scheduling happens afterward and cannot invalidate that
 final.
 
 The Windows producer emits the deterministic public reasoning class before
-model work. After each successful native run it projects exact public tool
-receipts into closed start/finish batches before publishing the final; retry
+model work. As each tool round settles it projects exact public tool receipts
+into closed start/finish batches instead of delaying them until final synthesis;
+retry
 attempts use distinct bounded public call identities. Unknown rejected tools
 without an authoritative version remain in model provenance but do not receive
 a fabricated presentation event.
@@ -231,7 +232,9 @@ states such as:
 The system MUST NOT spend an extra model call merely to generate "thinking"
 copy. `reasoning.started` reports a phase and selected public policy metadata;
 it never exposes private chain-of-thought. A completed progress trace MAY be
-collapsed behind `查看分析过程`.
+collapsed behind `查看本轮处理记录`. `PENDING` means that an admitted turn is
+waiting for the local worker; the UI MUST NOT label every pending turn as
+model-capacity exhaustion.
 
 The responsive workbench exposes conversation selection, older-message paging,
 title controls, archive and restore, turn cancellation, and the finite progress

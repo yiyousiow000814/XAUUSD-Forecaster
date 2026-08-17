@@ -36,6 +36,11 @@ class ReasoningClass(StrEnum):
     TOOL_HEAVY = "TOOL_HEAVY"
 
 
+class AssistantToolPolicy(StrEnum):
+    DIRECT = "DIRECT"
+    AUTO = "AUTO"
+
+
 class ThinkingLevel(StrEnum):
     MINIMAL = "MINIMAL"
     HIGH = "HIGH"
@@ -109,8 +114,44 @@ _ANALYTICAL_MARKERS = (
 )
 _SIMPLE_MARKERS = (
     "多少", "几条", "列出", "有哪些", "最新", "何时", "什么时候",
+    "你是谁", "能做什么", "可以做什么", "上一句", "刚才说",
     "count", "list", "show", "latest", "when", "how many",
+    "who are you", "what can you do", "previous message", "repeat",
 )
+
+_DIRECT_CHAT_EXACT = frozenset({
+    "你好", "您好", "嗨", "谢谢", "多谢", "你是谁", "你能做什么",
+    "你可以做什么", "你会做什么", "介绍一下你自己", "hello", "hi",
+    "thanks", "thank you", "who are you", "what can you do",
+})
+_DIRECT_CHAT_MARKERS = (
+    "上一句", "上句话", "刚才说", "刚刚说", "刚才回答", "刚刚回答",
+    "重复你", "重说", "previous message", "previous answer", "repeat that",
+    "为什么你要做新闻检索", "为什么要做新闻检索", "为什么你要搜索",
+    "为什么要搜索", "你attach的", "你 attach 的", "你附加的", "你附上的",
+)
+
+
+def _compact_dialogue_text(value: str) -> str:
+    return "".join(
+        character for character in value
+        if not character.isspace()
+        and not unicodedata.category(character).startswith("P")
+    )
+
+
+def classify_assistant_tool_policy(user_text: str) -> AssistantToolPolicy:
+    """Disable external tools only for high-confidence conversational turns."""
+    normalized = unicodedata.normalize("NFKC", str(user_text)).casefold().strip()
+    compact = _compact_dialogue_text(normalized)
+    exact = {_compact_dialogue_text(item) for item in _DIRECT_CHAT_EXACT}
+    if compact in exact:
+        return AssistantToolPolicy.DIRECT
+    if len(normalized) <= 160 and any(
+        marker in normalized for marker in _DIRECT_CHAT_MARKERS
+    ):
+        return AssistantToolPolicy.DIRECT
+    return AssistantToolPolicy.AUTO
 
 
 def _strict_bool(value: object, field: str) -> bool:

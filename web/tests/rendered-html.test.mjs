@@ -2110,7 +2110,7 @@ test("renders a recoverable responsive Assistant workbench without unsafe HTML",
   assert.match(rail, /已归档/);
   assert.match(transcript, /加载更早消息/);
   assert.match(transcript, /取消本轮/);
-  assert.match(transcript, /查看本轮分析过程/);
+  assert.match(transcript, /查看本轮处理记录/);
   assert.match(transcript, /assistant-transcript-banners/);
   assert.match(transcript, /href="\/assistant">\u5b8c\u6210 Access \u767b\u5f55/);
   assert.match(transcript, /AURUM \/ PROVISIONAL/);

@@ -11,7 +11,7 @@ import urllib.error
 import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 from .assistant_agent import (
@@ -28,10 +28,12 @@ from .assistant_capacity import (
 )
 from .assistant_memory_index import build_assistant_query_embedding
 from .assistant_routing import (
+    AssistantToolPolicy,
     AssistantModelRoutingUnavailable,
     AssistantTaskType,
     ModelProfile,
     classify_assistant_reasoning,
+    classify_assistant_tool_policy,
 )
 from .assistant_tools import (
     AssistantToolActor,
@@ -64,6 +66,29 @@ _CONTEXT_LAYERS = (
 
 AssistantChatGetJson = Callable[[str, float], dict[str, object]]
 AssistantChatPostJson = Callable[[str, dict[str, object]], dict[str, object]]
+
+
+def assistant_relative_news_window(
+    user_text: str,
+    retrieval_cutoff: str,
+) -> tuple[str, str] | None:
+    """Return an exact Malaysia publisher day for explicit relative requests."""
+    normalized = str(user_text).casefold()
+    offset: int | None = None
+    if "昨天" in normalized or "yesterday" in normalized:
+        offset = -1
+    elif "今天" in normalized or "today" in normalized:
+        offset = 0
+    if offset is None:
+        return None
+    cutoff = datetime.fromisoformat(
+        str(retrieval_cutoff).strip().replace("Z", "+00:00")
+    )
+    if cutoff.tzinfo is None or cutoff.utcoffset() is None:
+        raise ValueError("Assistant relative news cutoff is invalid")
+    local_date = cutoff.astimezone(timezone(timedelta(hours=8))).date()
+    selected = (local_date + timedelta(days=offset)).isoformat()
+    return selected, selected
 
 
 class AssistantChatWorkerError(RuntimeError):
@@ -273,6 +298,7 @@ def assistant_tool_progress_batches(
     provenance: object,
     *,
     attempt_count: int,
+    round_offset: int = 0,
 ) -> tuple[tuple[dict[str, object], ...], ...]:
     """Project public tool receipts into closed, idempotent progress batches."""
     if not isinstance(provenance, dict):
@@ -285,7 +311,10 @@ def assistant_tool_progress_batches(
             "INVALID_AGENT_PROVENANCE", "Assistant tool provenance is invalid",
         )
     pairs: list[tuple[dict[str, object], dict[str, object]]] = []
-    for round_index, round_receipts in enumerate(execution):
+    if not isinstance(round_offset, int) or isinstance(round_offset, bool) or round_offset < 0:
+        raise ValueError("Assistant tool progress round offset is invalid")
+    for local_round_index, round_receipts in enumerate(execution):
+        round_index = round_offset + local_round_index
         if not isinstance(round_receipts, list):
             raise AssistantChatWorkerError(
                 "INVALID_AGENT_PROVENANCE", "Assistant tool round is invalid",
@@ -491,29 +520,39 @@ def run_assistant_chat_worker(
                     conversation_url,
                     context_request,
                 ), claim)
+                relative_news_window = assistant_relative_news_window(
+                    str(claim["user_text"]), str(claim["retrieval_cutoff"]),
+                )
 
                 def retrieve_news(
                     params: dict[str, object], timeout_seconds: float,
                 ) -> dict[str, object]:
                     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
                         raise TimeoutError("Assistant news retrieval deadline expired")
-                    url = news_url + "?" + urllib.parse.urlencode(params)
+                    bounded_params = dict(params)
+                    if relative_news_window is not None:
+                        bounded_params["published_from"] = relative_news_window[0]
+                        bounded_params["published_to"] = relative_news_window[1]
+                    url = news_url + "?" + urllib.parse.urlencode(bounded_params)
                     return transport.get_json(
                         url,
                         min(ASSISTANT_CHAT_REMOTE_TIMEOUT_SECONDS, timeout_seconds),
                     )
 
-                registry = AssistantToolRegistry((build_news_search_tool(
+                tool_policy = classify_assistant_tool_policy(str(claim["user_text"]))
+                definitions = (build_news_search_tool(
                     retrieve_news,
                     timeout_seconds=10.0,
                     max_result_tokens=selected_budgets.max_tool_result_tokens,
-                ),))
+                ),)
+                registry = AssistantToolRegistry(definitions)
                 actor = AssistantToolActor(
                     actor_id=str(claim["owner_id"]),
                     work_id=str(claim["id"]),
-                    allowed_capabilities=frozenset({
-                        AssistantToolCapability.NEWS_RETRIEVAL,
-                    }),
+                    allowed_capabilities=(
+                        frozenset({AssistantToolCapability.NEWS_RETRIEVAL})
+                        if tool_policy is AssistantToolPolicy.AUTO else frozenset()
+                    ),
                 )
                 request = AssistantAgentRequest(
                     conversation_id=str(claim["conversation_id"]),
@@ -556,7 +595,8 @@ def run_assistant_chat_worker(
                     planned_tool_calls = min(
                         selected_budgets.max_tool_calls_per_user_turn,
                         selected_budgets.max_parallel_tool_calls,
-                    ) if registry.authorized_definitions(actor) else 0
+                        len(registry.authorized_definitions(actor)),
+                    )
                     reasoning = classify_assistant_reasoning(
                         AssistantTaskType.ASSISTANT_CHAT,
                         user_text=request.user_text,
@@ -575,6 +615,22 @@ def run_assistant_chat_worker(
                         }],
                     })
 
+                def publish_tool_results(round_index, results) -> None:
+                    provenance = {
+                        "tool_execution": [[item.receipt() for item in results]],
+                    }
+                    for batch in assistant_tool_progress_batches(
+                        provenance,
+                        attempt_count=int(claim["attempt_count"]),
+                        round_offset=round_index,
+                    ):
+                        _machine_post(transport, machine_url, {
+                            "action": "EVENTS",
+                            "id": claim["id"],
+                            "lease_token": claim["lease_token"],
+                            "events": list(batch),
+                        })
+
                 result = run_capacity_routed_assistant_agent(
                     ledger.connection,
                     request,
@@ -584,21 +640,12 @@ def run_assistant_chat_worker(
                     profiles=profiles,
                     policies=policies,
                     before_model_attempt=renew_model_lease,
+                    on_tool_results=publish_tool_results,
                 )
                 if not isinstance(result, AssistantAgentResult):
                     raise AssistantChatWorkerError(
                         "INVALID_AGENT_RESULT", "Assistant agent returned no result",
                     )
-                for batch in assistant_tool_progress_batches(
-                    result.provenance,
-                    attempt_count=int(claim["attempt_count"]),
-                ):
-                    _machine_post(transport, machine_url, {
-                        "action": "EVENTS",
-                        "id": claim["id"],
-                        "lease_token": claim["lease_token"],
-                        "events": list(batch),
-                    })
                 _machine_post(transport, machine_url, {
                     "action": "COMPLETE",
                     "id": claim["id"],

@@ -10,6 +10,7 @@ from xauusd_forecaster.assistant_routing import (
     OLLAMA_LOCAL,
     AssistantModelRoutingUnavailable,
     AssistantTaskType,
+    AssistantToolPolicy,
     ModelCapacityClass,
     ModelProfile,
     ModelRequirement,
@@ -17,10 +18,29 @@ from xauusd_forecaster.assistant_routing import (
     ThinkingLevel,
     apply_provider_thinking_level,
     classify_assistant_reasoning,
+    classify_assistant_tool_policy,
     configured_assistant_model_profiles,
     plan_assistant_route,
     routing_provenance,
 )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    (
+        ("你是谁", AssistantToolPolicy.DIRECT),
+        ("你能做什么？", AssistantToolPolicy.DIRECT),
+        ("你上一句说什么", AssistantToolPolicy.DIRECT),
+        ("为什么你要做新闻检索？", AssistantToolPolicy.DIRECT),
+        ("昨天有什么影响黄金的新闻？", AssistantToolPolicy.AUTO),
+        ("为什么 CPI 后黄金反常上涨？", AssistantToolPolicy.AUTO),
+    ),
+)
+def test_tool_policy_separates_conversation_from_external_evidence(
+    text: str,
+    expected: AssistantToolPolicy,
+) -> None:
+    assert classify_assistant_tool_policy(text) is expected
 
 
 def _profile(

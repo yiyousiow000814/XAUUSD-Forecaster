@@ -273,7 +273,7 @@ def test_agent_may_answer_directly_without_executing_a_tool() -> None:
     ]
     assert result.provenance["model_turn_count"] == 1
     assert result.provenance["tool_call_count"] == 0
-    assert result.provenance["system_instruction_version"] == "assistant-system-v4"
+    assert result.provenance["system_instruction_version"] == "assistant-system-v5"
     assert result.provenance["policy_version"] == "assistant-agent-v2"
     assert result.provenance["evidence_validation"]["mode"] == (
         "NO_CITABLE_EVIDENCE"
@@ -294,6 +294,41 @@ def test_agent_may_answer_directly_without_executing_a_tool() -> None:
     assert len(result.provenance["active_context_sha256"]) == 64
     assert result.provenance["retrieval_cutoff"] == "2026-08-15T12:00:00.000Z"
     assert payloads[0]["toolConfig"]["functionCallingConfig"]["mode"] == "AUTO"
+
+
+def test_model_payload_exposes_the_immediate_conversation_tail_in_order() -> None:
+    captured: dict[str, object] = {}
+    context = {
+        "layers": [{
+            "type": "RECENT_VERBATIM_TURNS",
+            "items": [
+                {"role": "USER", "content": "你是谁"},
+                {"role": "ASSISTANT", "content": "我是 Aurum。"},
+                {"role": "USER", "content": "你能做什么"},
+                {"role": "ASSISTANT", "content": "我可以分析新闻证据。"},
+            ],
+        }],
+    }
+
+    def invoke(payload, **_kwargs):
+        captured.update(json.loads(payload["contents"][0]["parts"][0]["text"]))
+        return _routed(_model_content(text="你上一句是：我可以分析新闻证据。"), 1)
+
+    run_bounded_assistant_agent(
+        _request(active_context=context), _registry(), invoke,
+    )
+
+    assert captured["conversation_tail"] == [
+        {"role": "USER", "content": "你是谁"},
+        {"role": "ASSISTANT", "content": "我是 Aurum。"},
+        {"role": "USER", "content": "你能做什么"},
+        {"role": "ASSISTANT", "content": "我可以分析新闻证据。"},
+    ]
+    assert captured["relative_date_hints"] == {
+        "timezone": "Asia/Kuala_Lumpur",
+        "today": "2026-08-15",
+        "yesterday": "2026-08-14",
+    }
 
 
 def test_agent_rejects_nonfinite_context_before_model_transport() -> None:
@@ -339,6 +374,31 @@ def test_one_tool_round_preserves_model_content_and_exact_function_response_id()
     assert result.provenance["tool_round_count"] == 1
     assert result.provenance["tool_call_count"] == 1
     assert len(result.provenance["run_sha256"]) == 64
+
+
+def test_tool_observer_runs_when_the_round_settles_before_final_synthesis() -> None:
+    observed: list[tuple[int, str]] = []
+    turns = 0
+
+    def invoke(_payload, **_kwargs):
+        nonlocal turns
+        turns += 1
+        if turns == 1:
+            assert observed == []
+            return _routed(_model_content(call_id="call-live"), turns)
+        assert observed == [(0, "SUCCEEDED")]
+        return _routed(_model_content(text="工具结果已经返回。"), turns)
+
+    run_bounded_assistant_agent(
+        _request(),
+        _registry(),
+        invoke,
+        on_tool_results=lambda round_index, results: observed.append((
+            round_index, results[0].status.value,
+        )),
+    )
+
+    assert observed == [(0, "SUCCEEDED")]
 
 
 def test_agent_persists_claim_level_coverage_for_only_the_cited_subset() -> None:
@@ -534,6 +594,37 @@ def test_over_budget_tool_plan_executes_no_partial_calls() -> None:
     assert executed == []
 
 
+def test_tool_plan_cannot_exceed_the_advertised_authorized_tool_count() -> None:
+    executed: list[str] = []
+
+    def invoke(_payload, **_kwargs):
+        content = {
+            "role": "model",
+            "parts": [
+                {"functionCall": {
+                    "id": f"call-{index}",
+                    "name": "market_price_v1",
+                    "args": {"symbol": "XAUUSD"},
+                }}
+                for index in range(2)
+            ],
+        }
+        return _routed(content, 1)
+
+    budgets = replace(
+        DEFAULT_ASSISTANT_AGENT_BUDGETS,
+        max_model_turns_per_user_turn=2,
+        max_tool_calls_per_user_turn=2,
+        max_parallel_tool_calls=2,
+    )
+    with pytest.raises(AssistantAgentContractError) as captured:
+        run_bounded_assistant_agent(
+            _request(), _registry(executed), invoke, budgets=budgets,
+        )
+    assert captured.value.error_code == "TOOL_PLAN_BUDGET_EXCEEDED"
+    assert executed == []
+
+
 def test_active_context_budget_fails_before_model_transport() -> None:
     invoked = False
 
@@ -684,3 +775,4 @@ def test_ollama_payload_applies_the_selected_native_context_window() -> None:
     )
     assert payload["options"] == {"num_ctx": 262_144}
     assert payload["keep_alive"] == "5m"
+    assert payload["reasoning_effort"] == "none"

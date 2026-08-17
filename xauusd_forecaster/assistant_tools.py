@@ -795,9 +795,22 @@ NEWS_SEARCH_INPUT_SCHEMA: dict[str, object] = {
     "additionalProperties": False,
     "required": ["query"],
     "properties": {
-        "query": {"type": "string", "minLength": 1, "maxLength": 80},
-        "published_from": {"type": "string", "minLength": 10, "maxLength": 40},
-        "published_to": {"type": "string", "minLength": 10, "maxLength": 40},
+        "query": {
+            "type": "string", "minLength": 1, "maxLength": 80,
+            "description": (
+                "One focused subject term for broad daily requests, or at most six "
+                "terms for a specific event. Do not put dates in the query; use the "
+                "time boundary fields. Prefer 黄金, 美联储, CPI, 就业, 美元, or 地缘政治."
+            ),
+        },
+        "published_from": {
+            "type": "string", "minLength": 10, "maxLength": 40,
+            "description": "Inclusive publisher-time lower boundary in ISO 8601.",
+        },
+        "published_to": {
+            "type": "string", "minLength": 10, "maxLength": 40,
+            "description": "Inclusive publisher-time upper boundary in ISO 8601.",
+        },
         "received_from": {"type": "string", "minLength": 10, "maxLength": 40},
         "evidence_id": {
             "type": "string", "minLength": 1, "maxLength": 128,
@@ -955,7 +968,11 @@ def build_news_search_tool(
         version=NEWS_SEARCH_TOOL_VERSION,
         description=(
             "Search the authoritative point-in-time news archive. The server "
-            "fixes the received-time cutoff and returns compact evidence only."
+            "fixes the received-time cutoff and returns compact evidence only. "
+            "Use this only when the user needs external news facts, not for "
+            "conversation recall, greetings, identity, capabilities, or explaining "
+            "the Assistant's previous behavior. Resolve relative dates into the "
+            "published time fields and keep dates out of query terms."
         ),
         capability=AssistantToolCapability.NEWS_RETRIEVAL,
         input_schema=NEWS_SEARCH_INPUT_SCHEMA,
