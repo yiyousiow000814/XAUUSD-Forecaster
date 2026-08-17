@@ -81,6 +81,10 @@ def test_control_center_updates_only_the_isolated_main_runtime() -> None:
     assert "Get-VerifiedOriginMain" in control_center
     assert "Test-RevisionDescendsFrom" in control_center
     assert "Test-MainCandidate" in control_center
+    preflight = control_center.split(
+        "function Invoke-ProductionShapePreflight", 1,
+    )[1].split("function Get-DesiredMainRevision", 1)[0]
+    assert '"--allow-pending-generation-decision"' in preflight
     assert "accepted_main_revision" in control_center
     assert "Install-ProductionRuntime" in control_center
     assert 'RuntimeRoot must be separate from the development checkout' in control_center

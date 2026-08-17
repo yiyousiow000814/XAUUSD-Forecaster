@@ -470,7 +470,8 @@ function Invoke-ProductionShapePreflight {
         if (-not $ready) { throw "staged dashboard API did not become healthy" }
         $arguments = @(
             (Join-Path $stageRoot "scripts\check_production_shape.py"),
-            "--status-url", $statusUrl
+            "--status-url", $statusUrl,
+            "--allow-pending-generation-decision"
         )
         $result = & $python @arguments 2>&1
         if ($LASTEXITCODE -ne 0) { throw "production shape rejected: $result" }
