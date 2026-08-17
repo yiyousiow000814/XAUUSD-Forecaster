@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from sqlite3 import Connection
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
+
+if TYPE_CHECKING:
+    from sqlite3 import Connection
 
 MAX_ACTIONABLE_NEWS_AGE = timedelta(hours=72)
 MAX_ACTIONABLE_DISCOVERY_DELAY = timedelta(hours=1)
