@@ -870,6 +870,65 @@ def test_daily_brief_packet_keeps_strongest_evidence_within_tpm_budget(
     ledger.close()
 
 
+def test_daily_brief_packet_fits_the_calibrated_single_request_budget(
+    tmp_path, monkeypatch,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    for index in range(60):
+        _seed_news_item(
+            ledger, f"ordinary-{index:03d}", minute=index + 1,
+            summary="黄金市场背景与宏观变化" * 60,
+        )
+    _seed_news_item(
+        ledger, "priority-policy", minute=0, review_priority="IMMEDIATE",
+        summary="重要政策变化" * 80,
+    )
+    calls: list[dict] = []
+    monkeypatch.setattr(daily_brief, "generate_metered_json", _fake_generation(calls))
+
+    class CalibratedBudgetAccountant(CallbackModelAccountant):
+        def effective_base_input_token_budget(
+            self, _usage, *, input_tokens_per_minute: int,
+        ) -> int:
+            assert input_tokens_per_minute == 15_000
+            return 10_000
+
+    instant = datetime(2026, 8, 10, 3, tzinfo=UTC)
+    uncalibrated_rows = daily_brief._candidate_rows(daily_brief._reviewed_rows(
+        daily_brief._population_rows(ledger, "2026-08-10", cutoff=instant),
+    ))
+    uncalibrated_packet = daily_brief._budgeted_evidence_packet(
+        "2026-08-10", uncalibrated_rows,
+    )
+    uncalibrated_payload = json.dumps(
+        daily_brief._brief_payload("2026-08-10", uncalibrated_packet),
+        ensure_ascii=False, separators=(",", ":"),
+    )
+    uncalibrated_base = (
+        daily_brief.conservative_input_token_estimate(uncalibrated_payload) + 512
+    )
+    assert uncalibrated_base > 10_000
+    assert uncalibrated_base * 1.5 > 15_000
+
+    result = daily_brief.update_daily_brief(
+        ledger,
+        api_key="test",
+        request_accountant=CalibratedBudgetAccountant(lambda _: True),
+        now=instant,
+    )
+    serialized = json.dumps(
+        calls[0]["payload"], ensure_ascii=False, separators=(",", ":"),
+    )
+    base_tokens = daily_brief.conservative_input_token_estimate(serialized) + 512
+
+    assert result["candidate_items"] == daily_brief.BRIEF_EVIDENCE_LIMIT
+    assert len(calls[0]["evidence"]) < result["candidate_items"]
+    assert "Reuters:priority-policy:1" in calls[0]["evidence_ids"]
+    assert base_tokens <= 10_000
+    assert base_tokens * 1.5 <= 15_000
+    ledger.close()
+
+
 def test_structured_brief_output_budget_covers_multi_item_contract() -> None:
     payload = daily_brief._brief_payload("2026-08-16", [{
         "id": "source:item:1", "headline": "标题", "summary": "摘要",

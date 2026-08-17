@@ -3596,13 +3596,20 @@ def test_gemma_impact_repairs_one_identity_contract_failure_through_gateway(
     assert purposes == ["news-impact", "news-impact-contract-repair"]
 
 
-def test_gemma_impact_reduces_optional_candidates_to_fit_tpm(
+def test_gemma_impact_reduces_candidates_to_fit_calibrated_tpm(
     tmp_path, monkeypatch,
 ) -> None:
     reserved = []
+
+    class CalibratedBudgetAccountant(CallbackModelAccountant):
+        def effective_base_input_token_budget(
+            self, _usage, *, input_tokens_per_minute: int,
+        ) -> int:
+            return math.floor(input_tokens_per_minute / 1.2)
+
     pool = annotation_module._GeminiRequestPool(
         ("test-key",), requests_per_key=1, batch_limit=1,
-        request_accountant=CallbackModelAccountant(
+        request_accountant=CalibratedBudgetAccountant(
             lambda usage: reserved.append(usage.input_tokens) or True
         ),
     )
@@ -3620,20 +3627,28 @@ def test_gemma_impact_reduces_optional_candidates_to_fit_tpm(
         }
     monkeypatch.setattr(GeminiModelGateway, "_post_json", staticmethod(post_json))
 
-    result, _ = pool.call_impact(0, {
+    request = {
         "annotation": {},
         "prior_event_context": [
-            {"candidate_id": "nearest", "detail": "x" * 25_000},
-            {"candidate_id": "farther", "detail": "y" * 25_000},
+            {"candidate_id": "nearest", "detail": "x" * 14_000},
+            {"candidate_id": "farther", "detail": "y" * 14_000},
         ],
         "headline": "Headline", "body": "Complete body",
-    })
+    }
+    uncalibrated_base = annotation_module._count_impact_tokens(
+        annotation_module._impact_prompt(request),
+    )
+    assert 12_500 < uncalibrated_base <= 15_000
+
+    result, _ = pool.call_impact(0, request)
 
     assert result["impact_class"] == "BACKGROUND"
     sent_prompt = sent_payloads[0]["contents"][0]["parts"][0]["text"]
     assert reserved == [
         annotation_module.conservative_input_token_estimate(sent_prompt) + 1024
     ]
+    assert reserved[0] <= 12_500
+    assert math.ceil(reserved[0] * 1.2) <= 15_000
     assert '"candidate_id":"nearest"' in sent_prompt
     assert '"candidate_id":"farther"' not in sent_prompt
     assert "CANDIDATE_CONTEXT_TRUNCATED: true" in sent_prompt

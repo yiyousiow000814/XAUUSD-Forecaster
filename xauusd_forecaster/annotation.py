@@ -28,6 +28,7 @@ from .model_gateway import (
     ModelGatewayCapacityExhausted,
     ModelGatewayResponseInvalid,
     ModelRequestAccountant,
+    ModelRequestUsage,
 )
 from .news_identity import preferred_cluster_peer_predicate
 from .news_time import (
@@ -1384,9 +1385,19 @@ class _GeminiRequestPool:
         request_row = row
         prompt = _impact_prompt(request_row, prompt_version=prompt_version)
         counted_tokens = conservative_input_token_estimate(prompt) + 1024
+        base_budget = self.gateway.accountant.effective_base_input_token_budget(
+            ModelRequestUsage(
+                model=IMPACT_MODEL,
+                purpose="news-impact",
+                input_tokens=counted_tokens,
+                prompt_contract=prompt_version,
+            ),
+            input_tokens_per_minute=GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
+        )
         request_row, prompt, counted_tokens = _fit_impact_context_to_tpm(
             row,
             initial_tokens=counted_tokens,
+            max_input_tokens=base_budget,
             prompt_version=prompt_version,
         )
         raw_result, exact_model = self.gateway.generate(
@@ -2006,6 +2017,7 @@ def _fit_impact_context_to_tpm(
     row: dict,
     *,
     initial_tokens: int,
+    max_input_tokens: int = GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
     prompt_version: str,
 ) -> tuple[dict, str, int]:
     """Fit model context under TPM without mutating immutable full-text evidence."""
@@ -2017,7 +2029,7 @@ def _fit_impact_context_to_tpm(
     prompt = _impact_prompt(request_row, prompt_version=prompt_version)
     counted_tokens = initial_tokens
 
-    if counted_tokens > GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL:
+    if counted_tokens > max_input_tokens:
         evidence_row = _impact_evidence_window_row(request_row)
         if evidence_row is not None:
             evidence_prompt = _impact_prompt(
@@ -2029,7 +2041,7 @@ def _fit_impact_context_to_tpm(
             prompt = evidence_prompt
             counted_tokens = evidence_tokens
 
-    while counted_tokens > GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL and candidates:
+    while counted_tokens > max_input_tokens and candidates:
         candidates = candidates[:-1]
         request_row["prior_event_context"] = candidates
         request_row["identity_context_truncated"] = True

@@ -11,12 +11,13 @@ from zoneinfo import ZoneInfo
 
 from .annotation import (
     DEFAULT_GEMINI_MODEL, DEFAULT_GEMMA_MODEL, FALLBACK_GEMINI_MODEL,
-    PROMPT_VERSION, conservative_input_token_estimate, generate_metered_json,
+    GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL, PROMPT_VERSION,
+    conservative_input_token_estimate, generate_metered_json,
 )
 from .forward_ledger import ForwardLedger
 from .model_gateway import (
     ModelGatewayCapacityExhausted, ModelGatewayResponseInvalid,
-    ModelRequestAccountant,
+    ModelRequestAccountant, ModelRequestUsage,
 )
 from .news_semantics import model_usable_annotation_predicate
 from .news_identity import preferred_cluster_peer_predicate
@@ -493,7 +494,8 @@ def _evidence_packet(rows: list[dict]) -> list[dict[str, object]]:
 
 
 def _budgeted_evidence_packet(
-    day: str, rows: list[dict],
+    day: str, rows: list[dict], *,
+    input_token_budget: int = BRIEF_INPUT_TOKEN_BUDGET,
 ) -> list[dict[str, object]]:
     """Keep the strongest evidence that fits one Gemma TPM reservation."""
     selected = list(rows)
@@ -504,7 +506,7 @@ def _budgeted_evidence_packet(
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        if conservative_input_token_estimate(serialized) <= BRIEF_INPUT_TOKEN_BUDGET:
+        if conservative_input_token_estimate(serialized) <= input_token_budget:
             return packet
         selected.remove(min(selected, key=_importance))
     return []
@@ -974,7 +976,25 @@ def update_daily_brief(
     counts = _counts(rows)
     reviewed = _reviewed_rows(rows)
     candidates = _candidate_rows(reviewed)
-    packet = _budgeted_evidence_packet(day, candidates)
+    request_base_budget = GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL
+    if request_accountant is not None:
+        request_base_budget = request_accountant.effective_base_input_token_budget(
+            ModelRequestUsage(
+                model=DEFAULT_GEMMA_MODEL,
+                purpose="daily-news-brief",
+                input_tokens=0,
+                prompt_contract=BRIEF_PROMPT_VERSION,
+            ),
+            input_tokens_per_minute=GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
+        )
+    packet = _budgeted_evidence_packet(
+        day,
+        candidates,
+        input_token_budget=min(
+            BRIEF_INPUT_TOKEN_BUDGET,
+            max(0, request_base_budget - 512),
+        ),
+    )
     population_hash = _population_hash(rows)
     candidate_hash = _source_hash([
         {"prompt_version": BRIEF_PROMPT_VERSION},

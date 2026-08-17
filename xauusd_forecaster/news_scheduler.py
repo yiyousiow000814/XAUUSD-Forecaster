@@ -34,6 +34,7 @@ TOKEN_CALIBRATION_P99_MARGIN = 1.05
 TOKEN_CALIBRATION_MIN_RATIO = 0.50
 TOKEN_CALIBRATION_MAX_RATIO = 8.00
 TOKEN_CALIBRATION_MAX_DOWNWARD_STEP = 0.01
+SCHEDULER_DEFERRAL_RETENTION = timedelta(hours=24)
 EFFECTIVE_INPUT_TOKENS_SQL = """CASE
   WHEN provider_outcome='PROVIDER_SUCCEEDED'
    AND provider_prompt_token_count>0
@@ -102,6 +103,9 @@ CREATE TABLE IF NOT EXISTS news_ai_scheduler_deferrals_v1 (
 
 CREATE INDEX IF NOT EXISTS news_ai_scheduler_deferrals_lookup_v1
 ON news_ai_scheduler_deferrals_v1(task_type,deferred_at,failure_code);
+
+CREATE INDEX IF NOT EXISTS news_ai_scheduler_deferrals_retention_v1
+ON news_ai_scheduler_deferrals_v1(deferred_at);
 
 CREATE TABLE IF NOT EXISTS news_ai_account_daily_usage_v1 (
     quota_day TEXT NOT NULL,
@@ -386,6 +390,10 @@ def install_scheduler_schema(connection: sqlite3.Connection) -> None:
         "DELETE FROM news_ai_account_request_usage_v1 WHERE reserved_at<=?",
         (_iso(installed_at - timedelta(days=1)),),
     )
+    connection.execute(
+        "DELETE FROM news_ai_scheduler_deferrals_v1 WHERE deferred_at<=?",
+        (_iso(installed_at - SCHEDULER_DEFERRAL_RETENTION),),
+    )
     connection.commit()
 
 
@@ -582,6 +590,7 @@ def _record_token_calibration_sample_locked(
     recent = recent[-TOKEN_CALIBRATION_RECENT_LIMIT:]
     recent_p99 = _recent_p99(recent)
     measured_safe = max(
+        ratio * TOKEN_CALIBRATION_P99_MARGIN,
         recent_p99 * TOKEN_CALIBRATION_P99_MARGIN,
         ewma + 3 * ewma_error,
     )
@@ -918,6 +927,10 @@ def record_scheduler_deferral(
         _iso(deferred_at),
     ))
     with connection:
+        connection.execute(
+            "DELETE FROM news_ai_scheduler_deferrals_v1 WHERE deferred_at<=?",
+            (_iso(deferred_at - SCHEDULER_DEFERRAL_RETENTION),),
+        )
         connection.execute(
             """INSERT OR IGNORE INTO news_ai_scheduler_deferrals_v1
                VALUES (?,?,?,?,?,?,?,?)""",

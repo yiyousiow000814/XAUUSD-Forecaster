@@ -26,6 +26,7 @@ from xauusd_forecaster.news_scheduler import (
     mark_account_request_attempted,
     rank_accounts_for_models,
     record_account_request_outcome,
+    record_scheduler_deferral,
     record_provider_dispatch_outcome,
     reconcile_completed_jobs,
     reserve_account_request,
@@ -1473,6 +1474,54 @@ def test_provider_dispatch_deferral_does_not_probe_accounts_or_consume_attempt(
         "PROVIDER_DISPATCH_DEFERRED", retry_at.isoformat(),
     )
     ledger.close()
+
+
+def test_scheduler_deferral_retention_is_bounded_to_24_hours() -> None:
+    connection = _connection()
+    _enqueue(connection, "retention", task_type="ACTIVE_IMPACT")
+    job = claim_job(
+        connection, worker_id="retention-worker", pool=ROUTINE_POOL, now=NOW,
+    )
+    assert job is not None
+    credential = ApiCredential("account", ROUTINE_POOL, "key", "credential")
+    with connection:
+        connection.executemany(
+            """INSERT INTO news_ai_scheduler_deferrals_v1
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (
+                (
+                    "expired", job.job_id, job.task_type, credential.account_id,
+                    "PROVIDER_DISPATCH_DEFERRED", None,
+                    (NOW - timedelta(hours=24)).isoformat(), None,
+                ),
+                (
+                    "retained", job.job_id, job.task_type, credential.account_id,
+                    "PROVIDER_DISPATCH_DEFERRED", None,
+                    (NOW - timedelta(hours=24) + timedelta(microseconds=1)).isoformat(),
+                    None,
+                ),
+            ),
+        )
+
+    record_scheduler_deferral(
+        connection,
+        job=job,
+        credential=credential,
+        status={
+            "failure_code": "PROVIDER_DISPATCH_DEFERRED",
+            "next_retry_at": (NOW + timedelta(milliseconds=250)).isoformat(),
+        },
+        deferred_at=NOW,
+    )
+
+    rows = connection.execute(
+        """SELECT deferral_id,deferred_at
+           FROM news_ai_scheduler_deferrals_v1 ORDER BY deferred_at"""
+    ).fetchall()
+    identifiers = [str(row["deferral_id"]) for row in rows]
+    assert len(identifiers) == 2
+    assert identifiers[0] == "retained"
+    assert "expired" not in identifiers
 
 
 def test_scheduler_wakes_for_short_capacity_retry_without_busy_spin() -> None:

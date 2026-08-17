@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
 import uuid
 
@@ -94,6 +95,22 @@ class SchedulerModelAccountant(ModelRequestAccountant):
             if not reserved and self._failure_code else None
         )
         return reserved
+
+    def effective_base_input_token_budget(
+        self,
+        usage: ModelRequestUsage,
+        *,
+        input_tokens_per_minute: int,
+    ) -> int:
+        _, _, safe_ratio = calibrated_input_tokens(
+            self.connection,
+            requested_model=usage.model,
+            purpose=usage.purpose,
+            prompt_contract=usage.prompt_contract,
+            estimator_version=usage.estimator_version,
+            base_estimated_input_tokens=usage.input_tokens,
+        )
+        return max(0, math.floor(input_tokens_per_minute / safe_ratio))
 
     def record_provider_outcome(
         self, outcome: str, *, retry_after_seconds: int | None = None,

@@ -134,6 +134,16 @@ class ModelRequestAccountant(ABC):
     def reserve(self, usage: ModelRequestUsage) -> bool:
         """Persist one attempted request when quota is available."""
 
+    def effective_base_input_token_budget(
+        self,
+        usage: ModelRequestUsage,
+        *,
+        input_tokens_per_minute: int,
+    ) -> int:
+        """Return the largest base estimate that can fit one TPM admission."""
+        del usage
+        return max(0, int(input_tokens_per_minute))
+
     def mark_provider_attempted(self) -> None:
         """Mark the reserved request immediately before provider transport."""
 
@@ -218,30 +228,34 @@ class GeminiModelGateway:
             )
             if not self._reserve(api_key, usage):
                 continue
+            envelope: dict[str, object] | None = None
+            provider_attempted = False
             try:
                 self.accountant.mark_provider_attempted()
+                provider_attempted = True
                 envelope = self._post_json(
                     api_key, model, "generateContent", payload, timeout=120.0,
                 )
+                if not isinstance(envelope, dict):
+                    raise ValueError("provider response is not a JSON object")
                 provider_model_version = _sanitized_model_version(envelope)
-                self.accountant.record_provider_outcome(
-                    "PROVIDER_SUCCEEDED",
-                    usage_metadata=_sanitized_usage_metadata(envelope),
-                    provider_model_version=provider_model_version,
-                )
                 result = decode(envelope)
-                return result, provider_model_version or model
             except retryable_decode_errors as error:
+                if provider_attempted:
+                    self.accountant.record_provider_outcome("PROVIDER_FAILED")
                 if getattr(error, "failure_evidence", None) is None:
-                    try:
-                        raw_output = str(
-                            envelope["candidates"][0]["content"]["parts"][0]["text"]
-                        )
-                    except (KeyError, IndexError, TypeError):
-                        raw_output = json.dumps(
-                            envelope, ensure_ascii=False, sort_keys=True,
-                            separators=(",", ":"), default=str,
-                        )
+                    if envelope is None:
+                        raw_output = f"{type(error).__name__}: {error}"
+                    else:
+                        try:
+                            raw_output = str(
+                                envelope["candidates"][0]["content"]["parts"][0]["text"]
+                            )
+                        except (KeyError, IndexError, TypeError):
+                            raw_output = json.dumps(
+                                envelope, ensure_ascii=False, sort_keys=True,
+                                separators=(",", ":"), default=str,
+                            )
                     error.failure_evidence = {
                         "failure_code": "MODEL_OUTPUT_INVALID",
                         "failure_stage": "RESPONSE_DECODE",
@@ -256,19 +270,32 @@ class GeminiModelGateway:
                     }
                 last_error = error
             except urllib.error.HTTPError as error:
-                self.accountant.record_provider_outcome(
-                    (
-                        "PROVIDER_THROTTLED"
-                        if int(error.code) == 429 else "PROVIDER_FAILED"
-                    ),
-                    retry_after_seconds=_http_retry_after_seconds(error),
-                )
+                if provider_attempted:
+                    self.accountant.record_provider_outcome(
+                        (
+                            "PROVIDER_THROTTLED"
+                            if int(error.code) == 429 else "PROVIDER_FAILED"
+                        ),
+                        retry_after_seconds=_http_retry_after_seconds(error),
+                    )
                 last_error = error
                 if error.code not in retryable_http_codes:
                     raise
             except urllib.error.URLError as error:
-                self.accountant.record_provider_outcome("PROVIDER_FAILED")
+                if provider_attempted:
+                    self.accountant.record_provider_outcome("PROVIDER_FAILED")
                 last_error = error
+            except Exception:
+                if provider_attempted:
+                    self.accountant.record_provider_outcome("PROVIDER_FAILED")
+                raise
+            else:
+                self.accountant.record_provider_outcome(
+                    "PROVIDER_SUCCEEDED",
+                    usage_metadata=_sanitized_usage_metadata(envelope),
+                    provider_model_version=provider_model_version,
+                )
+                return result, provider_model_version or model
         if last_error is None:
             raise ModelGatewayCapacityExhausted(
                 "Model request slots used; retained for the next batch",
