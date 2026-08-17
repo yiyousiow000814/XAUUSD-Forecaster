@@ -125,7 +125,7 @@ CREATE TABLE IF NOT EXISTS news_ai_provider_dispatch_state_v1 (
 
 CREATE TABLE IF NOT EXISTS news_ai_provider_dispatch_task_state_v1 (
     task_class TEXT PRIMARY KEY CHECK(task_class IN (
-        'ANNOTATION','IMPACT','TITLE_REPAIR','EMBEDDING')),
+        'ANNOTATION','IMPACT','TITLE_REPAIR','EMBEDDING','DAILY_BRIEF')),
     last_requested_at TEXT NOT NULL,
     demand_until TEXT NOT NULL,
     last_dispatched_at TEXT,
@@ -207,6 +207,30 @@ class ScheduledJob:
 def install_scheduler_schema(connection: sqlite3.Connection) -> None:
     connection.executescript(SCHEDULER_SCHEMA)
     installed_at = datetime.now(UTC)
+    provider_task_sql = str(connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' "
+        "AND name='news_ai_provider_dispatch_task_state_v1'"
+    ).fetchone()[0])
+    if "DAILY_BRIEF" not in provider_task_sql:
+        # Provider task state is mutable scheduling evidence. Rebuild the old
+        # checked table in place so existing pressure/rotation history survives.
+        connection.executescript(
+            """BEGIN IMMEDIATE;
+               ALTER TABLE news_ai_provider_dispatch_task_state_v1
+                 RENAME TO news_ai_provider_dispatch_task_state_v1_legacy;
+               CREATE TABLE news_ai_provider_dispatch_task_state_v1 (
+                 task_class TEXT PRIMARY KEY CHECK(task_class IN (
+                   'ANNOTATION','IMPACT','TITLE_REPAIR','EMBEDDING','DAILY_BRIEF')),
+                 last_requested_at TEXT NOT NULL,
+                 demand_until TEXT NOT NULL,
+                 last_dispatched_at TEXT,
+                 last_pressure_json TEXT NOT NULL
+               );
+               INSERT INTO news_ai_provider_dispatch_task_state_v1
+                 SELECT * FROM news_ai_provider_dispatch_task_state_v1_legacy;
+               DROP TABLE news_ai_provider_dispatch_task_state_v1_legacy;
+               COMMIT;"""
+        )
     minute_columns = {
         str(row["name"])
         for row in connection.execute(
@@ -891,6 +915,7 @@ def reserve_account_request(
     now: datetime | None = None,
     usage_id: str | None = None,
     provider_task: str | None = None,
+    decision: dict[str, str | None] | None = None,
 ) -> bool:
     """Atomically count attempted provider requests against one account.
 
@@ -935,6 +960,10 @@ def reserve_account_request(
             or token_exhausted
         ):
             connection.rollback()
+            if decision is not None:
+                decision.update(
+                    failure_code="MODEL_CAPACITY_DEFERRED", next_retry_at=None,
+                )
             return False
         if provider_task is not None:
             dispatch = _reserve_provider_dispatch_locked(
@@ -944,6 +973,11 @@ def reserve_account_request(
                 # A denied slot must not reserve account quota, but the shared
                 # governor may have advanced a durable low-priority deferral.
                 connection.commit()
+                if decision is not None:
+                    decision.update(
+                        failure_code="PROVIDER_DISPATCH_DEFERRED",
+                        next_retry_at=dispatch[1],
+                    )
                 return False
         connection.execute(
             """INSERT INTO news_ai_account_daily_usage_v1 VALUES (?,?,?,?,?)
@@ -977,6 +1011,8 @@ def reserve_account_request(
             ),
         )
         connection.commit()
+        if decision is not None:
+            decision.update(failure_code=None, next_retry_at=None)
         return True
     except Exception:
         connection.rollback()
@@ -992,6 +1028,8 @@ PROVIDER_DISPATCH_DEMAND_TTL = timedelta(seconds=2)
 
 def _provider_task_class(provider_task: str) -> str:
     normalized = provider_task.strip().upper().replace("-", "_")
+    if "DAILY" in normalized and "BRIEF" in normalized:
+        return "DAILY_BRIEF"
     if "EMBEDDING" in normalized:
         return "EMBEDDING"
     if "IMPACT" in normalized:
@@ -1012,6 +1050,20 @@ def _provider_pressure(
         "IMPACT": ("ACTIVE_IMPACT",),
         "TITLE_REPAIR": ("TITLE_TRANSLATION",),
     }
+    if task_class == "DAILY_BRIEF":
+        row = connection.execute(
+            """SELECT last_pressure_json
+               FROM news_ai_provider_dispatch_task_state_v1
+               WHERE task_class='DAILY_BRIEF'"""
+        ).fetchone()
+        stored = json.loads(str(row[0])) if row and row[0] else {}
+        return {
+            "dependency_fanout": max(0, int(stored.get("dependency_fanout", 0))),
+            "oldest_age_ms": max(0, int(stored.get("oldest_age_ms", 0))),
+            "retry_overdue_ms": max(0, int(stored.get("retry_overdue_ms", 0))),
+            "backlog": max(1, int(stored.get("backlog", 0))),
+            "drain_gap": max(0, int(stored.get("drain_gap", 0))),
+        }
     if task_class == "EMBEDDING":
         row = connection.execute(
             """SELECT count(*) AS backlog,min(created_at) AS oldest,
@@ -1066,8 +1118,11 @@ def _register_provider_demand(
     *,
     task_class: str,
     now: datetime,
+    pressure: dict[str, int] | None = None,
 ) -> dict[str, int]:
-    pressure = _provider_pressure(connection, task_class=task_class, now=now)
+    pressure = pressure or _provider_pressure(
+        connection, task_class=task_class, now=now,
+    )
     connection.execute(
         """INSERT INTO news_ai_provider_dispatch_task_state_v1
            (task_class,last_requested_at,demand_until,last_dispatched_at,
@@ -1231,6 +1286,7 @@ def register_provider_dispatch_demand(
     *,
     provider_task: str,
     now: datetime | None = None,
+    pressure: dict[str, int] | None = None,
 ) -> None:
     """Publish short-lived demand without consuming a provider slot."""
     instant = now or datetime.now(UTC)
@@ -1240,6 +1296,7 @@ def register_provider_dispatch_demand(
             connection,
             task_class=_provider_task_class(provider_task),
             now=instant,
+            pressure=pressure,
         )
         connection.commit()
     except Exception:

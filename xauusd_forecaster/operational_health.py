@@ -473,11 +473,16 @@ def extend_with_component_alerts(
             if pending_since is not None else None
         )
         if phase == "DEFERRED" or failure_code:
+            deferred_message = (
+                "每日简报暂由自适应服务商调度器延后。"
+                if failure_code == "PROVIDER_DISPATCH_DEFERRED"
+                else "每日简报生成已延后。"
+            )
             alerts.append(_alert(
                 "OPS_DAILY_BRIEF_DEFERRED",
                 severity="WARNING", scope="daily_news_brief",
                 message_zh=(
-                    "每日简报生成已延后。"
+                    deferred_message
                     + (f"原因码：{failure_code}。" if failure_code else "")
                 ),
                 evidence={
@@ -492,7 +497,13 @@ def extend_with_component_alerts(
                     ),
                 },
             ))
-        if phase == "UPDATING" and pending_age is not None and pending_age >= 1800:
+        next_retry = _instant(daily_news_brief.get("next_retry_at"))
+        refresh_overdue = (
+            next_retry is None
+            or observed_at - next_retry >= timedelta(minutes=30)
+        )
+        if (phase == "UPDATING" and pending_age is not None
+                and pending_age >= 1800 and refresh_overdue):
             alerts.append(_alert(
                 "OPS_DAILY_BRIEF_STALLED",
                 severity="ERROR", scope="daily_news_brief",

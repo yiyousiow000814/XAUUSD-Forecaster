@@ -8,11 +8,15 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 
 from xauusd_forecaster import annotation, daily_brief
+from xauusd_forecaster.ai_provider_registry import quota_surface_for_model
 from xauusd_forecaster.forward_ledger import ForwardLedger
 from xauusd_forecaster.model_gateway import (
-    ModelGatewayCapacityExhausted, ModelGatewayResponseInvalid,
+    GeminiModelGateway, ModelGatewayCapacityExhausted, ModelGatewayResponseInvalid,
 )
-from xauusd_forecaster.news_scheduler import ApiCredential, ROUTINE_POOL, enqueue_job
+from xauusd_forecaster.news_scheduler import (
+    ApiCredential, ROUTINE_POOL, enqueue_job, quota_day,
+)
+from xauusd_forecaster.scheduler_model_gateway import SchedulerModelAccountant
 from tests.model_accounting_fakes import CallbackModelAccountant
 
 
@@ -26,6 +30,8 @@ def _seed_news_item(
     review_priority: str = "NORMAL",
     material_event_key: str | None = None,
     received_at: datetime | None = None,
+    category: str = "油价/能源",
+    materiality: float = 0.8,
 ) -> None:
     received = received_at or (
         datetime(2026, 8, 10, 1, tzinfo=UTC) + timedelta(minutes=minute)
@@ -83,9 +89,9 @@ def _seed_news_item(
                 json.dumps(
                     {
                         "summary_zh": summary or f"黄金价格出现新变化 {item_id}",
-                        "primary_category": "油价/能源",
+                        "primary_category": category,
                         "review_priority": review_priority,
-                        "materiality": 0.8,
+                        "materiality": materiality,
                         "material_event_key": material_event_key or f"event-{item_id}",
                     }
                 ),
@@ -210,17 +216,11 @@ def test_prompt_contract_change_regenerates_unchanged_candidates(
     monkeypatch.setattr(
         daily_brief, "BRIEF_PROMPT_VERSION", "daily-news-brief-v3-synthesis-overview",
     )
-    settling = daily_brief.update_daily_brief(
+    regenerated = daily_brief.update_daily_brief(
         ledger, api_key="test-key", request_accountant=accountant,
         now=now + timedelta(minutes=1),
     )
-    assert settling["reason"] == "SOURCE_SETTLING"
-    result = daily_brief.update_daily_brief(
-        ledger, api_key="test-key", request_accountant=accountant,
-        now=now + timedelta(minutes=12),
-    )
-
-    assert result["revision_number"] == 2
+    assert regenerated["revision_number"] == 2
     assert len(calls) == 2
     ledger.close()
 
@@ -305,12 +305,12 @@ def test_full_state_hash_and_candidates_cover_later_news_deterministically(
         api_key="test-key",
         request_accountant=accountant,
         now=now + timedelta(minutes=1),
-    )["reason"] == "SOURCE_SETTLING"
+    )["reason"] == "ADAPTIVE_REFRESH_WAIT"
     later_result = daily_brief.update_daily_brief(
         first,
         api_key="test-key",
         request_accountant=accountant,
-        now=now + timedelta(minutes=12),
+        now=now + timedelta(hours=2, minutes=1),
     )
     assert later_result["eligible_items"] == 66
     assert first_calls[-1]["evidence_ids"][-1] == "Reuters:bulk-065:1"
@@ -323,7 +323,7 @@ def test_full_state_hash_and_candidates_cover_later_news_deterministically(
     second.close()
 
 
-def test_regeneration_debounce_survives_restart(tmp_path, monkeypatch) -> None:
+def test_adaptive_refresh_state_survives_restart(tmp_path, monkeypatch) -> None:
     path = tmp_path / "forward.sqlite3"
     now = datetime(2026, 8, 10, 3, tzinfo=UTC)
     calls = []
@@ -345,7 +345,7 @@ def test_regeneration_debounce_survives_restart(tmp_path, monkeypatch) -> None:
         now=now + timedelta(minutes=1),
     )
     assert settling["status"] == "DEFERRED"
-    assert settling["reason"] == "SOURCE_SETTLING"
+    assert settling["reason"] == "ADAPTIVE_REFRESH_WAIT"
     ledger.close()
 
     restarted = ForwardLedger(path)
@@ -354,12 +354,12 @@ def test_regeneration_debounce_survives_restart(tmp_path, monkeypatch) -> None:
         api_key="test-key",
         request_accountant=accountant,
         now=now + timedelta(minutes=5),
-    )["reason"] == "SOURCE_SETTLING"
+    )["reason"] == "ADAPTIVE_REFRESH_WAIT"
     assert daily_brief.update_daily_brief(
         restarted,
         api_key="test-key",
         request_accountant=accountant,
-        now=now + timedelta(minutes=12),
+        now=now + timedelta(hours=2, minutes=1),
     )["status"] == "OK"
     assert len(calls) == 2
     restarted.close()
@@ -428,8 +428,212 @@ def test_daily_brief_defers_without_capacity(tmp_path, monkeypatch) -> None:
         now=datetime(2026, 8, 10, 3, tzinfo=UTC),
     )
     assert result["status"] == "DEFERRED"
-    assert result["reason"] == "NO_GEMMA_CAPACITY"
+    assert result["reason"] == "MODEL_CAPACITY_DEFERRED"
     assert not ledger.connection.execute("SELECT 1 FROM daily_news_briefs").fetchone()
+    ledger.close()
+
+
+def test_provider_pacing_deferral_keeps_typed_reason_and_sends_no_http(
+    tmp_path, monkeypatch,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    now = datetime(2026, 8, 10, 3, tzinfo=UTC)
+    _seed_news(ledger)
+    calls: list[dict] = []
+    monkeypatch.setattr(daily_brief, "generate_metered_json", _fake_generation(calls))
+    daily_brief.update_daily_brief(
+        ledger, api_key="test", request_accountant=CallbackModelAccountant(lambda _: True),
+        now=now,
+    )
+    _seed_news_item(ledger, "material-2", minute=40)
+    _seed_news_item(ledger, "material-3", minute=41)
+    blocked_until = datetime.now(UTC) + timedelta(hours=1)
+    with ledger.connection:
+        ledger.connection.execute(
+            """INSERT INTO news_ai_provider_dispatch_state_v1
+               (provider_scope,next_eligible_at,interval_ms,success_streak,
+                throttle_count,cooldown_until,last_outcome,updated_at)
+               VALUES ('GOOGLE_GENERATIVE_LANGUAGE',?,250,0,0,NULL,'DISPATCHED',?)""",
+            (blocked_until.isoformat(), datetime.now(UTC).isoformat()),
+        )
+    http_calls: list[object] = []
+    monkeypatch.setattr(
+        GeminiModelGateway, "_post_json",
+        lambda *_args, **_kwargs: http_calls.append(kwargs) or {},
+    )
+    monkeypatch.setattr(
+        daily_brief, "generate_metered_json", annotation.generate_metered_json,
+    )
+    accountant = SchedulerModelAccountant(
+        ledger.connection,
+        ApiCredential("routine", ROUTINE_POOL, "secret", "credential"),
+        urgent=False,
+    )
+
+    result = daily_brief.update_daily_brief(
+        ledger, api_key="secret", request_accountant=accountant,
+        now=now + timedelta(hours=1, minutes=1),
+    )
+
+    assert result["reason"] == "PROVIDER_DISPATCH_DEFERRED"
+    assert result["reason"] != "NO_GEMMA_CAPACITY"
+    assert http_calls == []
+    task = ledger.connection.execute(
+        """SELECT task_class,last_pressure_json
+           FROM news_ai_provider_dispatch_task_state_v1"""
+    ).fetchone()
+    assert task["task_class"] == "DAILY_BRIEF"
+    assert json.loads(task["last_pressure_json"])["backlog"] >= 2
+    assert not ledger.connection.execute(
+        "SELECT 1 FROM news_ai_account_request_usage_v1"
+    ).fetchone()
+    ledger.close()
+
+
+def test_real_account_capacity_keeps_model_capacity_reason(
+    tmp_path, monkeypatch,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    _seed_news(ledger)
+    policy = quota_surface_for_model(daily_brief.DEFAULT_GEMMA_MODEL)
+    with ledger.connection:
+        ledger.connection.execute(
+            """INSERT INTO news_ai_account_daily_usage_v1
+               (quota_day,account_id,model_family,request_count,updated_at)
+               VALUES (?,?,?,?,?)""",
+            (
+                quota_day(datetime.now(UTC)), "routine",
+                daily_brief.DEFAULT_GEMMA_MODEL, policy.daily_limit,
+                datetime.now(UTC).isoformat(),
+            ),
+        )
+    http_calls: list[object] = []
+    monkeypatch.setattr(
+        GeminiModelGateway, "_post_json",
+        lambda *_args, **_kwargs: http_calls.append(kwargs) or {},
+    )
+    accountant = SchedulerModelAccountant(
+        ledger.connection,
+        ApiCredential("routine", ROUTINE_POOL, "secret", "credential"),
+        urgent=False,
+    )
+
+    result = daily_brief.update_daily_brief(
+        ledger, api_key="secret", request_accountant=accountant,
+        now=datetime(2026, 8, 10, 3, tzinfo=UTC),
+    )
+
+    assert result["reason"] == "MODEL_CAPACITY_DEFERRED"
+    assert http_calls == []
+    ledger.close()
+
+
+def test_minor_same_event_churn_waits_without_generation(tmp_path, monkeypatch) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    now = datetime(2026, 8, 10, 3, tzinfo=UTC)
+    _seed_news_item(ledger, "original", minute=1, material_event_key="episode-1")
+    calls: list[dict] = []
+    monkeypatch.setattr(daily_brief, "generate_metered_json", _fake_generation(calls))
+    accountant = CallbackModelAccountant(lambda _: True)
+    daily_brief.update_daily_brief(
+        ledger, api_key="test", request_accountant=accountant, now=now,
+    )
+    _seed_news_item(
+        ledger, "syndicated-update", minute=30,
+        material_event_key="episode-1", materiality=0.2,
+    )
+
+    result = daily_brief.update_daily_brief(
+        ledger, api_key="test", request_accountant=accountant,
+        now=now + timedelta(hours=1),
+    )
+
+    assert result["reason"] == "CANDIDATES_UNCHANGED"
+    assert len(calls) == 1
+    ledger.close()
+
+
+def test_material_accumulation_and_major_event_refresh_early(
+    tmp_path, monkeypatch,
+) -> None:
+    accountant = CallbackModelAccountant(lambda _: True)
+    now = datetime(2026, 8, 10, 3, tzinfo=UTC)
+
+    accumulated = ForwardLedger(tmp_path / "accumulated.sqlite3")
+    _seed_news(accumulated)
+    accumulated_calls: list[dict] = []
+    monkeypatch.setattr(
+        daily_brief, "generate_metered_json", _fake_generation(accumulated_calls),
+    )
+    daily_brief.update_daily_brief(
+        accumulated, api_key="test", request_accountant=accountant, now=now,
+    )
+    _seed_news_item(accumulated, "event-2", minute=30)
+    _seed_news_item(accumulated, "event-3", minute=31)
+    accumulated_result = daily_brief.update_daily_brief(
+        accumulated, api_key="test", request_accountant=accountant,
+        now=now + timedelta(hours=1, minutes=1),
+    )
+    assert accumulated_result["status"] == "OK"
+    assert len(accumulated_calls) == 2
+    accumulated.close()
+
+    major = ForwardLedger(tmp_path / "major.sqlite3")
+    _seed_news(major)
+    major_calls: list[dict] = []
+    monkeypatch.setattr(
+        daily_brief, "generate_metered_json", _fake_generation(major_calls),
+    )
+    daily_brief.update_daily_brief(
+        major, api_key="test", request_accountant=accountant, now=now,
+    )
+    _seed_news_item(
+        major, "cpi", minute=20, category="inflation", materiality=0.95,
+    )
+    major_result = daily_brief.update_daily_brief(
+        major, api_key="test", request_accountant=accountant,
+        now=now + timedelta(minutes=31),
+    )
+    assert major_result["status"] == "OK"
+    assert len(major_calls) == 2
+    major.close()
+
+
+def test_pipeline_pressure_yields_then_aging_prevents_starvation(
+    tmp_path, monkeypatch,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    now = datetime(2026, 8, 10, 3, tzinfo=UTC)
+    _seed_news(ledger)
+    calls: list[dict] = []
+    monkeypatch.setattr(daily_brief, "generate_metered_json", _fake_generation(calls))
+    accountant = CallbackModelAccountant(lambda _: True)
+    daily_brief.update_daily_brief(
+        ledger, api_key="test", request_accountant=accountant, now=now,
+    )
+    _seed_news_item(ledger, "event-2", minute=30)
+    _seed_news_item(ledger, "event-3", minute=31)
+    for index in range(10):
+        enqueue_job(
+            ledger.connection, task_type="ACTIVE_IMPACT", source="pressure",
+            source_item_id=str(index), revision_number=1,
+            annotation_id=f"annotation-{index}", prompt_version="impact-test",
+            priority="NORMAL", now=now,
+        )
+
+    busy = daily_brief.update_daily_brief(
+        ledger, api_key="test", request_accountant=accountant,
+        now=now + timedelta(hours=2, minutes=1),
+    )
+    assert busy["reason"] == "ADAPTIVE_REFRESH_WAIT"
+    assert len(calls) == 1
+
+    aged = daily_brief.update_daily_brief(
+        ledger, api_key="test", request_accountant=accountant,
+        now=now + timedelta(hours=6, minutes=1),
+    )
+    assert aged["status"] == "OK"
+    assert len(calls) == 2
     ledger.close()
 
 
@@ -891,7 +1095,7 @@ def test_capacity_blocked_brief_leaves_gemma_window_for_retry(
     monkeypatch.setattr(
         runner, "run_daily_brief_batch",
         lambda ledger: [{
-            "status": "DEFERRED", "reason": "NO_GEMMA_CAPACITY",
+            "status": "DEFERRED", "reason": "MODEL_CAPACITY_DEFERRED",
             "account_id": "brief-account",
         }],
     )
@@ -1091,14 +1295,14 @@ def test_failed_regeneration_does_not_claim_candidate_was_generated(
     )
     failed = daily_brief.update_daily_brief(
         ledger, api_key="test", request_accountant=CallbackModelAccountant(lambda _: True),
-        now=now + timedelta(minutes=12),
+        now=now + timedelta(hours=2, minutes=1),
     )
     assert failed["status"] == "DEFERRED"
 
     monkeypatch.setattr(daily_brief, "generate_metered_json", _fake_generation(calls))
     recovered = daily_brief.update_daily_brief(
         ledger, api_key="test", request_accountant=CallbackModelAccountant(lambda _: True),
-        now=now + timedelta(minutes=14),
+        now=now + timedelta(hours=2, minutes=3),
     )
     assert recovered["status"] == "OK"
     assert recovered["revision_number"] == 2

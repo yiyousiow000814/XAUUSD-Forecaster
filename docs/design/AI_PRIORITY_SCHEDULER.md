@@ -83,6 +83,13 @@ above ordinary catch-up, while a fresh actionable annotation surge can take the
 next turns once that dependency pressure falls. The pressure snapshot and last
 dispatch time survive process restart.
 
+Daily Brief is its own provider task class. When synthesis is eligible it
+publishes changed distinct events as backlog, material-event count as dependency
+pressure, Brief staleness as oldest age, and repeated provider deferrals as the
+drain gap. It then uses the same atomic account admission and provider dispatch
+reservation as every other generation request. It has no independent timer,
+fixed weight, capacity share, or transport path.
+
 The ordinary unbounded annotator batch runs two synchronous provider lanes per
 independent account. This bounded fan-out hides provider latency while atomic
 account quota reservation remains authoritative for both RPM and TPM. Lanes
