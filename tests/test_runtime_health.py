@@ -47,18 +47,28 @@ def test_runtime_heartbeat_supports_overlapping_candidate_and_rollback_writers(
 def test_runtime_heartbeat_pulse_stays_fresh_during_blocking_work(tmp_path) -> None:
     path = tmp_path / "forward" / "annotator-status.json"
 
+    def read_last_success() -> str:
+        for attempt in range(50):
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))["last_success"]
+            except PermissionError:
+                if attempt == 49:
+                    raise
+                time.sleep(0.002)
+        raise AssertionError("heartbeat remained unreadable")
+
     with RuntimeHeartbeatPulse(
         path,
         service="annotator",
         work_items=2,
         interval_seconds=0.02,
     ) as pulse:
-        first = json.loads(path.read_text(encoding="utf-8"))["last_success"]
+        first = read_last_success()
         deadline = time.monotonic() + 1.0
         current = first
         while current == first and time.monotonic() < deadline:
             time.sleep(0.01)
-            current = json.loads(path.read_text(encoding="utf-8"))["last_success"]
+            current = read_last_success()
         pulse.update(work_items=3)
 
     payload = json.loads(path.read_text(encoding="utf-8"))
