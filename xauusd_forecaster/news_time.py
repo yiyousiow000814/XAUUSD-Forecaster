@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from sqlite3 import Connection
 from typing import Mapping
 
 MAX_ACTIONABLE_NEWS_AGE = timedelta(hours=72)
@@ -13,6 +14,7 @@ MAX_COARSE_PUBLICATION_CLOCK_SKEW = timedelta(minutes=5)
 SOURCE_REPORTED_TIME = "SOURCE_REPORTED"
 MIXED_PRECISE_OR_BATCH_PROXY_TIME = "MIXED_PRECISE_OR_BATCH_PROXY"
 _COARSE_PUBLICATION_TIME_SOURCES = frozenset({"gdelt_gold_geopolitics"})
+_SEMANTIC_ELIGIBILITY_SQL_FUNCTION = "news_semantic_is_eligible"
 
 _CATEGORY_TIME_RULES = {
     "inflation_employment": (timedelta(hours=24), 180.0),
@@ -179,4 +181,50 @@ def assess_news_semantic_eligibility(
         "SEMANTIC_ELIGIBLE",
         tuple(timing_reasons) or ("CURRENT_EVENT",),
         reliability,
+    )
+
+
+def register_news_semantic_eligibility_sql(connection: Connection) -> None:
+    """Expose the centralized semantic decision to canonical-owner queries."""
+
+    def is_eligible(
+        source: object,
+        source_published_time: object,
+        collector_first_seen_time: object,
+        forward_epoch: object,
+    ) -> int:
+        try:
+            assessment = assess_news_semantic_eligibility(
+                {
+                    "source": source,
+                    "source_published_time": source_published_time,
+                    "collector_first_seen_time": collector_first_seen_time,
+                },
+                forward_epoch=_time(forward_epoch),
+            )
+        except (TypeError, ValueError):
+            return 0
+        return int(assessment.eligible)
+
+    connection.create_function(
+        _SEMANTIC_ELIGIBILITY_SQL_FUNCTION,
+        4,
+        is_eligible,
+        deterministic=True,
+    )
+
+
+def semantic_eligibility_sql_predicate(alias: str) -> str:
+    """Limit canonical ownership to rows allowed by the semantic contract.
+
+    The existing representative ordering then chooses at most one owner from
+    current eligible peers; invalid timing evidence cannot shadow an eligible
+    member merely because its body is longer.
+    """
+    if not alias.isidentifier():
+        raise ValueError("invalid SQL alias")
+    return (
+        f"{_SEMANTIC_ELIGIBILITY_SQL_FUNCTION}("
+        f"{alias}.source,{alias}.source_published_time,"
+        f"{alias}.collector_first_seen_time,?)=1"
     )

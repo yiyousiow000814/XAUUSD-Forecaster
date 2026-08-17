@@ -18,7 +18,12 @@ from .news_impact import IMPACT_MODEL, IMPACT_PROMPT_VERSION
 from .news_relevance import google_news_item_is_relevant
 from .news_identity import preferred_cluster_peer_predicate
 from .news_scheduler import configured_api_credentials
-from .news_time import assess_news_semantic_eligibility, category_time_rule
+from .news_time import (
+    assess_news_semantic_eligibility,
+    category_time_rule,
+    register_news_semantic_eligibility_sql,
+    semantic_eligibility_sql_predicate,
+)
 from .news_semantics import model_usable_annotation_predicate
 
 
@@ -151,6 +156,7 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
     if epoch_row is None:
         raise ValueError("FORWARD_EPOCH is missing")
     forward_epoch = datetime.fromisoformat(str(epoch_row[0]))
+    register_news_semantic_eligibility_sql(ledger.connection)
     unresolved: dict[tuple[str, str, str, int, str], datetime] = {}
     actionable_failure_counts: dict[str, dict[str, int]] = {}
     annotation_pending = False
@@ -205,8 +211,12 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
                 WHERE peer_newer.source=peer.source
                   AND peer_newer.source_item_id=peer.source_item_id
                   AND peer_newer.revision_number>peer.revision_number)
+              AND {semantic_eligibility_sql_predicate('peer')}
               AND {preferred_cluster_peer_predicate('peer', 'n')})""",
-        (PROMPT_VERSION, intake_floor.isoformat(), observed_at.isoformat()),
+        (
+            PROMPT_VERSION, intake_floor.isoformat(), observed_at.isoformat(),
+            forward_epoch.isoformat(),
+        ),
     ).fetchall()
     for row in failed_jobs:
         received = _instant(row["collector_first_seen_time"])

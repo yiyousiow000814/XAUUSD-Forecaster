@@ -160,6 +160,54 @@ def test_preview_keeps_timing_anomalies_in_semantic_queue(
     assert "annotation_reason_code" not in row
 
 
+def test_preview_repairs_stale_queue_mismatch_for_late_discovery() -> None:
+    module = _preview_module()
+    news_index = {"items": [{
+        "annotation_status": "NOT_REQUIRED",
+        "annotation_reason_code": "QUEUE_INVARIANT_MISMATCH",
+        "annotation_reason": "正文符合条件但未进入语义队列，需要检查",
+        "impact_status": "NOT_REQUIRED",
+        "model_visibility": "MODEL_INELIGIBLE",
+        "source": "google_news_gold_context",
+        "source_published_time": "2026-08-08T20:40:28+00:00",
+        "collector_first_seen_time": "2026-08-08T23:34:06+00:00",
+    }]}
+
+    module._backfill_annotation_reasons(
+        news_index, {"forward_epoch": "2026-08-05T00:00:00+00:00"}
+    )
+
+    assert news_index["items"] == [{
+        "annotation_status": "QUEUED",
+        "impact_status": "PENDING_ANNOTATION",
+        "model_visibility": "NOT_YET_PARSED",
+        "source": "google_news_gold_context",
+        "source_published_time": "2026-08-08T20:40:28+00:00",
+        "collector_first_seen_time": "2026-08-08T23:34:06+00:00",
+    }]
+
+
+def test_preview_preserves_legitimate_not_required_reason() -> None:
+    module = _preview_module()
+    row = {
+        "annotation_status": "NOT_REQUIRED",
+        "annotation_reason_code": "CANONICAL_COPY_HANDLES_ANNOTATION",
+        "annotation_reason": "同一新闻已有 canonical 版本处理",
+        "impact_status": "NOT_REQUIRED",
+        "model_visibility": "MODEL_INELIGIBLE",
+        "source": "google_news_gold_context",
+        "source_published_time": "2026-08-08T20:40:28+00:00",
+        "collector_first_seen_time": "2026-08-08T23:34:06+00:00",
+    }
+    news_index = {"items": [dict(row)]}
+
+    module._backfill_annotation_reasons(
+        news_index, {"forward_epoch": "2026-08-05T00:00:00+00:00"}
+    )
+
+    assert news_index["items"] == [row]
+
+
 def test_preview_reads_completed_news_from_old_and_current_api_contracts(
     monkeypatch,
 ) -> None:

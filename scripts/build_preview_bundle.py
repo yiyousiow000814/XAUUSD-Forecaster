@@ -244,9 +244,13 @@ def _backfill_annotation_reasons(news_index: dict, status: dict) -> None:
         annotation_status = item.get("annotation_status")
         if annotation_status not in {"QUEUED", "NOT_REQUIRED"}:
             continue
-        if annotation_status == "NOT_REQUIRED" and (
-            item.get("annotation_reason_code")
-            and item.get("annotation_reason")
+        existing_reason_code = item.get("annotation_reason_code")
+        stale_queue_mismatch = (
+            annotation_status == "NOT_REQUIRED"
+            and existing_reason_code == "QUEUE_INVARIANT_MISMATCH"
+        )
+        if annotation_status == "NOT_REQUIRED" and not stale_queue_mismatch and (
+            existing_reason_code and item.get("annotation_reason")
         ):
             continue
         published_raw = item.get("source_published_time")
@@ -277,7 +281,14 @@ def _backfill_annotation_reasons(news_index: dict, status: dict) -> None:
                         "QUEUE_INVARIANT_MISMATCH",
                         "正文符合条件但未进入语义队列，需要检查",
                     )
-        if annotation_status == "QUEUED" and code == "QUEUE_INVARIANT_MISMATCH":
+        if code == "QUEUE_INVARIANT_MISMATCH":
+            if stale_queue_mismatch:
+                item["annotation_status"] = "QUEUED"
+                item["model_visibility"] = "NOT_YET_PARSED"
+                if not item.get("parsed_at"):
+                    item["impact_status"] = "PENDING_ANNOTATION"
+                item.pop("annotation_reason_code", None)
+                item.pop("annotation_reason", None)
             continue
         if code != "QUEUE_INVARIANT_MISMATCH":
             item["annotation_status"] = "NOT_REQUIRED"

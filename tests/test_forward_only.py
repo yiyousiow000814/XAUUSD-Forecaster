@@ -4035,6 +4035,65 @@ def test_duplicate_cluster_prefers_full_content_for_annotation(
     assert ledger.count("news_annotations") == 1
 
 
+def test_duplicate_cluster_selects_canonical_from_semantic_eligible_peers(
+    tmp_path,
+) -> None:
+    now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    rows = (
+        (
+            "preferred-but-invalid",
+            now + timedelta(minutes=10),
+            "Longer canonical-looking evidence with an invalid future timestamp. " * 12,
+        ),
+        (
+            "eligible-peer",
+            now,
+            "Shorter evidence with valid immutable receipt timing. " * 8,
+        ),
+    )
+    digests: dict[str, str] = {}
+    for item_id, published_at, body in rows:
+        digests[item_id] = hashlib.sha256(body.encode()).hexdigest()
+        ledger.append_news_revision({
+            "source": "duplicate-test", "source_item_id": item_id,
+            "source_published_time": published_at,
+            "collector_first_seen_time": now, "fetched_time": now,
+            "headline": "Same syndicated headline", "body": body,
+            "content_hash": digests[item_id], "cluster_id": "timing-cluster",
+        })
+
+    pending = annotation_module.pending_annotation_records(
+        ledger.connection, observed_at=now, limit=1,
+    )
+    titles = annotation_module.pending_title_translation_records(
+        ledger.connection, observed_at=now, limit=1,
+    )
+    assert [row["source_item_id"] for row in pending] == ["eligible-peer"]
+    assert [row["source_item_id"] for row in titles] == ["eligible-peer"]
+
+    ledger.append_annotation({
+        "annotation_id": "eligible-annotation", "source": "duplicate-test",
+        "source_item_id": "eligible-peer", "revision_number": 1,
+        "raw_content_hash": digests["eligible-peer"],
+        "annotation": _v15_annotation({
+            "headline_zh": "有效时间证据的语义版本",
+            "summary_zh": "系统只在时间证据合格的当前同簇记录中选择唯一语义代表。",
+            "event_type": "other", "entities": [], "hawkishness": 0.0,
+            "inflation_impulse": 0.0, "growth_impulse": 0.0,
+            "geopolitical_risk": 0.0, "usd_impulse": 0.0,
+            "novelty": 0.0, "confidence": 1.0,
+        }, "Shorter evidence with valid immutable receipt timing"),
+        "llm_model_version": annotation_module.DEFAULT_GEMINI_MODEL,
+        "prompt_version": annotation_module.PROMPT_VERSION,
+        "parse_started_at": now, "parsed_at": now + timedelta(seconds=1),
+    })
+    completed = annotation_module.completed_annotation_records(
+        ledger.connection, observed_at=now + timedelta(seconds=2), limit=10,
+    )
+    assert [row["source_item_id"] for row in completed] == ["eligible-peer"]
+
+
 def test_news_readers_share_cross_source_cluster_tie_break(tmp_path) -> None:
     now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)

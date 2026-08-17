@@ -30,7 +30,11 @@ from .model_gateway import (
     ModelRequestAccountant,
 )
 from .news_identity import preferred_cluster_peer_predicate
-from .news_time import assess_news_semantic_eligibility
+from .news_time import (
+    assess_news_semantic_eligibility,
+    register_news_semantic_eligibility_sql,
+    semantic_eligibility_sql_predicate,
+)
 from .news_impact import (
     IMPACT_MODEL,
     IMPACT_PROMPT_VERSION,
@@ -249,6 +253,7 @@ def pending_annotation_records(
     """
     now = observed_at or datetime.now(UTC)
     forward_epoch = _forward_epoch(connection)
+    register_news_semantic_eligibility_sql(connection)
     recovery_table_exists = connection.execute(
         """SELECT 1 FROM sqlite_master
            WHERE type='table' AND name='news_ai_failure_recoveries_v1'"""
@@ -299,6 +304,7 @@ def pending_annotation_records(
          AND a.llm_model_version IN (?, ?) AND a.prompt_version IN (?, ?)
          AND {model_usable_annotation_predicate('a')}
         WHERE a.annotation_id IS NULL
+          AND {semantic_eligibility_sql_predicate('n')}
           AND length(trim(COALESCE(n.body, ''))) >= 240
           AND NOT EXISTS (
             SELECT 1 FROM news_revisions newer
@@ -317,6 +323,7 @@ def pending_annotation_records(
                   AND peer_newer.source_item_id=peer.source_item_id
                   AND peer_newer.revision_number>peer.revision_number
                   {peer_revision_scope})
+              AND {semantic_eligibility_sql_predicate('peer')}
               AND {preferred_cluster_peer_predicate('peer', 'n')})
           AND NOT EXISTS (
             SELECT 1 FROM news_llm_failures f
@@ -348,7 +355,9 @@ def pending_annotation_records(
         LIMIT ?""",
         (
             *compatible_models, prompt_version, prompt_version,
+            forward_epoch.isoformat(),
             *(prioritized_days * 3),
+            forward_epoch.isoformat(),
             expected_model_identity, prompt_version,
             *(
                 (ANNOTATION_FAILURE_RECOVERY_VERSION,)
@@ -378,9 +387,11 @@ def completed_annotation_records(
     """Return current-policy rows already completed by the annotator."""
     now = observed_at or datetime.now(UTC)
     forward_epoch = _forward_epoch(connection)
+    register_news_semantic_eligibility_sql(connection)
     rows = connection.execute(
         f"""SELECT n.* FROM news_revisions n
         WHERE length(trim(COALESCE(n.body, ''))) >= 240
+          AND {semantic_eligibility_sql_predicate('n')}
           AND EXISTS (
             SELECT 1 FROM news_annotations a
             WHERE a.source=n.source AND a.source_item_id=n.source_item_id
@@ -401,13 +412,15 @@ def completed_annotation_records(
                 WHERE peer_newer.source=peer.source
                   AND peer_newer.source_item_id=peer.source_item_id
                   AND peer_newer.revision_number>peer.revision_number)
+              AND {semantic_eligibility_sql_predicate('peer')}
               AND {preferred_cluster_peer_predicate('peer', 'n')})
         ORDER BY COALESCE(n.source_published_time,
                           n.collector_first_seen_time) DESC,
                  n.collector_first_seen_time, n.source, n.source_item_id
         LIMIT ?""",
         (
-            *compatible_models, prompt_version,
+            forward_epoch.isoformat(), *compatible_models, prompt_version,
+            forward_epoch.isoformat(),
             max(1, limit),
         ),
     ).fetchall()
@@ -772,9 +785,11 @@ def pending_title_translation_records(
     """Return display-title work without performing an LLM request."""
     now = observed_at or datetime.now(UTC)
     forward_epoch = _forward_epoch(connection)
+    register_news_semantic_eligibility_sql(connection)
     pending = connection.execute(
         f"""SELECT n.* FROM news_revisions n
-        WHERE NOT EXISTS (
+        WHERE {semantic_eligibility_sql_predicate('n')}
+          AND NOT EXISTS (
             SELECT 1 FROM news_title_translations t
             WHERE t.source=n.source AND t.source_item_id=n.source_item_id
               AND t.revision_number=n.revision_number
@@ -794,6 +809,7 @@ def pending_title_translation_records(
                 WHERE peer_newer.source=peer.source
                   AND peer_newer.source_item_id=peer.source_item_id
                   AND peer_newer.revision_number>peer.revision_number)
+              AND {semantic_eligibility_sql_predicate('peer')}
               AND {preferred_cluster_peer_predicate('peer', 'n')})
           AND NOT EXISTS (
             SELECT 1 FROM news_llm_failures f
@@ -820,7 +836,9 @@ def pending_title_translation_records(
                           n.collector_first_seen_time) DESC
         LIMIT ?""",
         (
-            INVALID_CHINESE_TITLE, "%相关数值%", model, TITLE_PROMPT_VERSION,
+            forward_epoch.isoformat(), INVALID_CHINESE_TITLE, "%相关数值%",
+            forward_epoch.isoformat(),
+            model, TITLE_PROMPT_VERSION,
             now.isoformat(timespec="microseconds"),
             INVALID_CHINESE_TITLE, "%相关数值%", max(1, limit * 4),
         ),
