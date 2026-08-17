@@ -36,11 +36,16 @@ export const operationalCodeDefinitions = new Map(
 
 export function normalizeOperationalEvent(event: OperationalAlert): Required<OperationalAlert> {
   const definition = operationalCodeDefinitions.get(event.code);
+  const severityAllowed = definition?.kind !== "ALERT"
+    || definition.allowed_severities?.includes(event.severity);
   return {
     ...event,
-    evidence: definition ? event.evidence : {
+    evidence: !definition ? {
       ...event.evidence,
       taxonomy_error: `UNREGISTERED_OPERATIONAL_CODE:${event.code}`,
+    } : severityAllowed ? event.evidence : {
+      ...event.evidence,
+      taxonomy_error: `SEVERITY_NOT_ALLOWED:${event.code}:${event.severity}`,
     },
     category: event.category ?? definition?.category ?? "RUNTIME",
     root_cause_family: event.root_cause_family ?? definition?.root_cause_family ?? "UNREGISTERED_OPERATIONAL_CODE",

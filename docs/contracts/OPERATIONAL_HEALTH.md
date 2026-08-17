@@ -24,7 +24,18 @@ Every emitted event is normalized through the catalog and retains `code`,
 `severity`, `scope`, `blocking`, `message_zh`, and bounded `evidence`. It also
 publishes `category`, `root_cause_family`, `role`, and `recovery_policy`.
 Unknown runtime codes remain visible with an explicit taxonomy error. Contract
-tests fail when a published `OPS_*` code is absent from the catalog.
+tests fail when a published `OPS_*` code is absent from the catalog or when an
+emitter uses a severity outside that alert's `allowed_severities`. A runtime
+metadata mismatch remains a visible alert with an explicit taxonomy error; it
+must not be dropped or interpreted as healthy.
+
+Stable task/provider failure codes published through `failure_code`,
+`latest_failure_code`, `dominant_failure_code`, or actionable failure counts
+must also be cataloged. This includes the embedding capacity, throttle,
+transport, and response-validation family. `UNCLASSIFIED` is the sole bounded
+absence sentinel: it means no stable dominant failure family was available,
+is intentionally outside incident correlation, and must conservatively produce
+no reason-to-root match. Arbitrary exception text is never a failure code.
 
 Provider work rejected before transport preserves the admission layer that
 deferred it. Local account/model quota uses `MODEL_CAPACITY_DEFERRED`; adaptive
@@ -44,9 +55,13 @@ mutable incident database and cannot weaken scheduler or health decisions.
 Correlation uses controlled codes, scopes, root-cause families, and structured
 evidence. It never parses human-readable messages. Local capacity, provider
 pacing, and model-output failures remain separate families. Queue backlog,
-stall, Daily Brief deferral, and semantic-component pending state join a root
-incident only when coded evidence establishes the relationship. An unexplained
-component reason remains a standalone incident.
+stall, Daily Brief deferral, and each semantic-component pending reason join a
+root incident only when coded evidence establishes the relationship. When a
+stage has multiple candidate roots, actionable failure counts select a unique
+matching failure family; an absent or ambiguous match remains standalone. An
+unexplained component reason remains independently visible. The authoritative
+raw component event is retained exactly once in technical evidence; derived
+reason projections do not duplicate it or transfer unrelated blocking state.
 
 An incident retains a deterministic key, category, maximum child severity,
 conservative blocking flag, active/recovering state, action state, root event,
@@ -133,6 +148,8 @@ Health page leads with correlated incident cards and keeps raw codes, scopes,
 evidence, local scheduler progress, and Assistant D1 queue evidence in
 accessible technical disclosures. Banner counts use blocking/error incident
 count, not raw event count; a blocking child keeps its incident globally visible.
+The operator-facing header counts unique non-root affected scopes/components,
+not the number of same-scope symptoms, retries, or technical events.
 Preview snapshots must not present frozen operational alerts as current live
 state.
 

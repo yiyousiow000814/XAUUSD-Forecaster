@@ -25,7 +25,8 @@ const {
 } = await import("../app/_lib/news-review-state.ts");
 const { publicImpactReason, publicNewsRecord } = await import("../app/_lib/public-news-copy.ts");
 const { sortNewsEvidenceByTime } = await import("../app/_lib/news-evidence-order.ts");
-const { summarizeAssistantQueue } = await import("../app/api/_shared/assistant-operational-health.ts");
+const { assistantQueueOperationalAlerts, summarizeAssistantQueue } = await import("../app/api/_shared/assistant-operational-health.ts");
+const { normalizeOperationalEvent } = await import("../app/_lib/operational-health.ts");
 const { correlateOperationalEvents, globalOperationalIncidents } = await import("../app/_lib/operational-incidents.ts");
 const { operationalEvidenceText } = await import("../app/_lib/operational-evidence.ts");
 
@@ -36,6 +37,41 @@ test("reserves the global shell alert for blocking operational faults", () => {
   const incidents = globalOperationalIncidents(correlateOperationalEvents([warning, blocking]));
   assert.equal(incidents.length, 1);
   assert.equal(incidents[0].root_event.code, blocking.code);
+});
+
+test("current Web operational emitters use catalog-allowed severities", () => {
+  const definition = {
+    queue: "CHAT_TURN", label: "Assistant 对话", table: "unused",
+    createdColumn: "created_at", completedExpression: "completed_at",
+    successStatuses: ["ANSWERED"], failureStatuses: ["FAILED"], slaSeconds: 300,
+  };
+  const base = {
+    queue: "CHAT_TURN", label: "Assistant 对话", queued: 1, processing: 0,
+    claimable: 1, scheduled_retry: 0, oldest_active_at: "2026-08-18T00:00:00Z",
+    oldest_age_seconds: 600, max_attempt_count: 3, completed_15m: 0,
+    failed_15m: 1, capacity_deferred: 0, failure_codes: [{ code: "FAILED", count: 1 }],
+  };
+  const emitted = [
+    ...assistantQueueOperationalAlerts(base, definition),
+    ...assistantQueueOperationalAlerts({ ...base, max_attempt_count: 0, completed_15m: 1, failed_15m: 0 }, definition),
+  ];
+  assert.deepEqual(
+    new Set(emitted.map(item => item.code)),
+    new Set([
+      "OPS_ASSISTANT_JOB_RETRY_LOOP", "OPS_ASSISTANT_PIPELINE_STALLED",
+      "OPS_ASSISTANT_BACKLOG_OVERDUE", "OPS_ASSISTANT_NEW_TERMINAL_FAILURE",
+    ]),
+  );
+  assert.ok(emitted.every(item => !("taxonomy_error" in item.evidence)));
+
+  const mismatch = normalizeOperationalEvent({
+    code: "OPS_AI_ROUTE_CAPACITY_SATURATED", severity: "ERROR", scope: "ACTIVE_IMPACT",
+    message_zh: "容量异常", blocking: true, evidence: {},
+  });
+  assert.equal(
+    mismatch.evidence.taxonomy_error,
+    "SEVERITY_NOT_ALLOWED:OPS_AI_ROUTE_CAPACITY_SATURATED:ERROR",
+  );
 });
 
 test("renders operational evidence timestamps for the UTC+8 operator surface", () => {
@@ -979,6 +1015,9 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(banner, /aria-expanded=\{expanded\}/);
   assert.match(view, /OPERATIONAL INCIDENTS/);
   assert.match(view, /incident\.root_event/);
+  assert.match(view, /affectedOperationalScopeCount/);
+  assert.match(view, /个受影响组件/);
+  assert.doesNotMatch(view, /个下游影响|related_events\.length, 0/);
   assert.match(view, /查看技术详情/);
   assert.match(view, /aria-expanded=\{showTechnical\}/);
   assert.match(view, /hidden=\{!showTechnical\}/);

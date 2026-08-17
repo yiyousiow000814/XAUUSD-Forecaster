@@ -12,6 +12,7 @@ _VALID_KINDS = {"ALERT", "FAILURE_REASON", "HEALTH_REASON"}
 _VALID_ROLES = {"ROOT", "SYMPTOM", "STATE"}
 _VALID_RECOVERY_POLICIES = {"AUTO", "CONDITIONAL", "OPERATOR"}
 _VALID_SEVERITIES = {"ERROR", "WARNING", "INFO"}
+INTENTIONALLY_UNCORRELATED_FAILURE_CODES = frozenset({"UNCLASSIFIED"})
 
 
 @lru_cache(maxsize=1)
@@ -73,6 +74,13 @@ def normalize_operational_event(
             "default_role": "ROOT",
             "recovery_policy": "OPERATOR",
         }
+    elif (
+        metadata.get("kind") == "ALERT"
+        and severity not in set(metadata.get("allowed_severities") or [])
+    ):
+        bounded_evidence["taxonomy_error"] = (
+            f"SEVERITY_NOT_ALLOWED:{code}:{severity}"
+        )
     return {
         "code": code,
         "severity": severity,

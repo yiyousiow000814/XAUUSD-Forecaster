@@ -9,7 +9,7 @@ import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { operationalEvidenceText } from "../_lib/operational-evidence";
-import { correlateOperationalEvents, type OperationalIncident } from "../_lib/operational-incidents";
+import { affectedOperationalScopeCount, correlateOperationalEvents, type OperationalIncident } from "../_lib/operational-incidents";
 import { normalizeOperationalEvent, schedulerTaskLabel, type AssistantOperationalHealth, type OperationalAlert, type OperationalHealth } from "../_lib/operational-health";
 
 type StatusPayload = {
@@ -75,7 +75,9 @@ const actionLabels: Record<OperationalIncident["action_state"], string> = {
 };
 
 function IncidentCard({ incident }: { incident: OperationalIncident }) {
-  const events = [incident.root_event, ...incident.related_events];
+  const events = [
+    incident.root_event, ...incident.related_events, ...incident.technical_events,
+  ];
   const [showTechnical, setShowTechnical] = useState(false);
   const technicalId = useId();
   return <article className={`operational-incident-card is-${incident.severity.toLowerCase()}`}>
@@ -91,6 +93,10 @@ function IncidentCard({ incident }: { incident: OperationalIncident }) {
         <div><code>{event.code}</code><b>{event.scope}</b></div>
         <p>{event.message_zh}</p>
         <small>{operationalEvidenceText(event.evidence)}</small>
+      </section>)}
+      {incident.reason_projections.map(projection => <section className="incident-reason-projection" key={`${projection.source_scope}-${projection.reason_code}`}>
+        <div><code>{projection.reason_code}</code><b>{projection.source_scope}</b></div>
+        <p>由结构化组件原因关联；原始组件事件仅在一个技术证据位置保留。</p>
       </section>)}</div>
     </div>
   </article>;
@@ -180,7 +186,7 @@ export default function HealthView() {
     ...(assistantHealthError ? [assistantUnavailableEvent] : assistantHealth?.current ? assistantHealth.alerts : []),
   ];
   const incidents = correlateOperationalEvents(operationalEvents);
-  const downstreamImpactCount = incidents.reduce((total, incident) => total + incident.related_events.length, 0);
+  const affectedScopeCount = affectedOperationalScopeCount(incidents);
   const incidentStatus = incidents.some(incident => incident.severity === "ERROR")
     ? "error" : incidents.length ? "warning" : "healthy";
 
@@ -205,7 +211,7 @@ export default function HealthView() {
     {error ? <div className="error-banner">状态读取失败：{error}</div> : null}
     <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
     <section id="operational-alerts" className={`operational-health-panel incident-summary-panel is-${incidentStatus}`} aria-label="运行问题与关联证据">
-      <header><div><p className="eyebrow">OPERATIONAL INCIDENTS</p><h2>运行问题</h2></div><p>{incidents.length ? `${incidents.length} 个问题 · ${downstreamImpactCount} 个下游影响` : "当前没有达到告警阈值的运行问题。"}</p></header>
+      <header><div><p className="eyebrow">OPERATIONAL INCIDENTS</p><h2>运行问题</h2></div><p>{incidents.length ? `${incidents.length} 个问题 · ${affectedScopeCount} 个受影响组件` : "当前没有达到告警阈值的运行问题。"}</p></header>
       {incidents.length ? <div className="operational-incident-list">{incidents.map(incident => <IncidentCard incident={incident} key={incident.incident_key} />)}</div> : <p className="operational-all-clear">当前没有达到告警阈值的运行异常。</p>}
     </section>
     <section className="operational-health-panel technical-health-panel" aria-label="本机调度器技术状态">

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { correlateOperationalEvents, globalOperationalIncidents } from "../app/_lib/operational-incidents.ts";
+import { affectedOperationalScopeCount, correlateOperationalEvents, globalOperationalIncidents } from "../app/_lib/operational-incidents.ts";
 
 const event = (code, scope, evidence = {}, overrides = {}) => ({
   code, scope, evidence,
@@ -29,11 +29,16 @@ test("correlates the Gemma local-capacity chain without losing technical events"
   assert.equal(incidents[0].technical_event_count, 6);
   assert.equal(incidents[0].blocking, true);
   assert.deepEqual(
-    new Set([incidents[0].root_event, ...incidents[0].related_events].map(item => item.code)),
+    new Set([
+      incidents[0].root_event,
+      ...incidents[0].related_events,
+      ...incidents[0].technical_events,
+    ].map(item => item.code)),
     new Set(capacityChain().map(item => item.code)),
   );
   assert.ok(incidents[0].affected_scopes.includes("daily_news_brief"));
   assert.ok(incidents[0].affected_scopes.includes("news_semantic_pipeline"));
+  assert.equal(affectedOperationalScopeCount(incidents), 2);
   const fiveEvents = correlateOperationalEvents(capacityChain().slice(0, 5));
   assert.equal(fiveEvents.length, 1);
   assert.equal(fiveEvents[0].technical_event_count, 5);
@@ -57,17 +62,53 @@ test("keeps annotation output failure separate and links mixed semantic state to
   assert.ok(impact.affected_scopes.includes("news_semantic_pipeline"));
   assert.ok(annotation.affected_scopes.includes("news_semantic_pipeline"));
   assert.equal(annotation.category, "MODEL_OUTPUT");
+  const rawComponents = incidents.flatMap(item => [
+    item.root_event, ...item.related_events, ...item.technical_events,
+  ]).filter(item => item.code === "OPS_COMPONENT_UNHEALTHY");
+  assert.equal(rawComponents.length, 1);
 });
 
-test("keeps unexplained component health reasons independently visible", () => {
+test("correlates mixed component reasons without duplicating or escalating the raw event", () => {
+  const component = event("OPS_COMPONENT_UNHEALTHY", "news_semantic_pipeline", {
+    reason_codes: [
+      "ACTIONABLE_NEWS_SEMANTICS_PENDING",
+      "ANNOTATOR_HEARTBEAT_STALE",
+    ],
+    actionable_failure_counts: {
+      ACTIVE_ANNOTATION: {
+        MODEL_REQUEST_FAILED: 4,
+        MODEL_OUTPUT_CONTRACT_FAILED: 1,
+      },
+    },
+  }, { severity: "ERROR", blocking: true });
   const incidents = correlateOperationalEvents([
-    ...capacityChain(),
-    event("OPS_COMPONENT_UNHEALTHY", "news_semantic_pipeline", {
-      reason_codes: ["ANNOTATOR_HEARTBEAT_STALE"],
-    }, { severity: "ERROR", blocking: true }),
+    event("OPS_AI_JOB_RETRY_LOOP", "ACTIVE_ANNOTATION", {
+      latest_failure_code: "MODEL_REQUEST_FAILED", claimable: false,
+      next_retry_at: "2026-08-18T05:00:00Z",
+    }),
+    event("OPS_AI_JOB_RETRY_LOOP", "ACTIVE_ANNOTATION", {
+      latest_failure_code: "MODEL_OUTPUT_CONTRACT_FAILED", claimable: true,
+    }),
+    component,
   ]);
-  assert.equal(incidents.length, 2);
-  assert.ok(incidents.some(item => item.root_event.code === "OPS_COMPONENT_UNHEALTHY"));
+  assert.equal(incidents.length, 3);
+  const transport = incidents.find(item => item.category === "PROVIDER");
+  const output = incidents.find(item => item.category === "MODEL_OUTPUT");
+  const heartbeat = incidents.find(item => item.root_event.code === "OPS_COMPONENT_UNHEALTHY");
+  assert.equal(transport.action_state, "AUTO_RECOVERING");
+  assert.ok(transport.affected_scopes.includes("news_semantic_pipeline"));
+  assert.deepEqual(transport.reason_projections.map(item => item.reason_code), [
+    "ACTIONABLE_NEWS_SEMANTICS_PENDING",
+  ]);
+  assert.deepEqual(output.reason_projections, []);
+  assert.deepEqual(heartbeat.reason_projections.map(item => item.reason_code), [
+    "ANNOTATOR_HEARTBEAT_STALE",
+  ]);
+  const rawComponents = incidents.flatMap(item => [
+    item.root_event, ...item.related_events, ...item.technical_events,
+  ]).filter(item => item.code === "OPS_COMPONENT_UNHEALTHY");
+  assert.equal(rawComponents.length, 1);
+  assert.deepEqual(rawComponents[0].evidence, component.evidence);
 });
 
 test("does not collapse provider pacing into local capacity", () => {

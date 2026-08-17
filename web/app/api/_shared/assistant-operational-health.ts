@@ -81,6 +81,39 @@ export function summarizeAssistantQueue(
   };
 }
 
+export function assistantQueueOperationalAlerts(
+  queue: AssistantQueueHealth,
+  definition: AssistantQueueDefinition,
+): Array<Required<OperationalAlert>> {
+  const alerts: OperationalAlert[] = [];
+  const evidence = {
+    claimable: queue.claimable,
+    scheduled_retry: queue.scheduled_retry,
+    completed_15m: queue.completed_15m,
+    failed_15m: queue.failed_15m,
+    oldest_age_seconds: queue.oldest_age_seconds,
+  };
+  if (queue.max_attempt_count >= 3 && queue.claimable > 0) alerts.push({
+    code: "OPS_ASSISTANT_JOB_RETRY_LOOP", severity: "ERROR", scope: queue.queue,
+    message_zh: `${queue.label}有任务已尝试 ${queue.max_attempt_count} 次。`, blocking: true,
+    evidence: { ...evidence, max_attempt_count: queue.max_attempt_count },
+  });
+  if (queue.claimable > 0 && (queue.oldest_age_seconds ?? 0) >= definition.slaSeconds) alerts.push({
+    code: queue.completed_15m === 0 ? "OPS_ASSISTANT_PIPELINE_STALLED" : "OPS_ASSISTANT_BACKLOG_OVERDUE",
+    severity: queue.completed_15m === 0 ? "ERROR" : "WARNING", scope: queue.queue,
+    message_zh: queue.completed_15m === 0
+      ? `${queue.label}有 ${queue.claimable} 条可处理任务，但最近15分钟没有完成。`
+      : `${queue.label}最旧可处理任务已等待 ${Math.floor((queue.oldest_age_seconds ?? 0) / 60)} 分钟。`,
+    blocking: queue.completed_15m === 0, evidence,
+  });
+  if (queue.failed_15m > 0) alerts.push({
+    code: "OPS_ASSISTANT_NEW_TERMINAL_FAILURE", severity: "WARNING", scope: queue.queue,
+    message_zh: `${queue.label}最近15分钟新增 ${queue.failed_15m} 个终止失败。`, blocking: false,
+    evidence: { ...evidence, failure_codes: queue.failure_codes },
+  });
+  return alerts.map(normalizeOperationalEvent);
+}
+
 export async function assistantOperationalHealth(
   binding: D1Database,
   now = new Date(),
@@ -126,31 +159,7 @@ export async function assistantOperationalHealth(
   const alerts: OperationalAlert[] = [];
   for (const queue of queues) {
     const definition = definitions.find(item => item.queue === queue.queue)!;
-    const evidence = {
-      claimable: queue.claimable,
-      scheduled_retry: queue.scheduled_retry,
-      completed_15m: queue.completed_15m,
-      failed_15m: queue.failed_15m,
-      oldest_age_seconds: queue.oldest_age_seconds,
-    };
-    if (queue.max_attempt_count >= 3 && queue.claimable > 0) alerts.push({
-      code: "OPS_ASSISTANT_JOB_RETRY_LOOP", severity: "ERROR", scope: queue.queue,
-      message_zh: `${queue.label}有任务已尝试 ${queue.max_attempt_count} 次。`, blocking: true,
-      evidence: { ...evidence, max_attempt_count: queue.max_attempt_count },
-    });
-    if (queue.claimable > 0 && (queue.oldest_age_seconds ?? 0) >= definition.slaSeconds) alerts.push({
-      code: queue.completed_15m === 0 ? "OPS_ASSISTANT_PIPELINE_STALLED" : "OPS_ASSISTANT_BACKLOG_OVERDUE",
-      severity: queue.completed_15m === 0 ? "ERROR" : "WARNING", scope: queue.queue,
-      message_zh: queue.completed_15m === 0
-        ? `${queue.label}有 ${queue.claimable} 条可处理任务，但最近15分钟没有完成。`
-        : `${queue.label}最旧可处理任务已等待 ${Math.floor((queue.oldest_age_seconds ?? 0) / 60)} 分钟。`,
-      blocking: queue.completed_15m === 0, evidence,
-    });
-    if (queue.failed_15m > 0) alerts.push({
-      code: "OPS_ASSISTANT_NEW_TERMINAL_FAILURE", severity: "WARNING", scope: queue.queue,
-      message_zh: `${queue.label}最近15分钟新增 ${queue.failed_15m} 个终止失败。`, blocking: false,
-      evidence: { ...evidence, failure_codes: queue.failure_codes },
-    });
+    alerts.push(...assistantQueueOperationalAlerts(queue, definition));
   }
   const normalizedAlerts = alerts.map(normalizeOperationalEvent);
   normalizedAlerts.sort((left, right) => {

@@ -4,6 +4,7 @@ import {
   schedulerTaskLabel,
   type OperationalAlert,
   type OperationalCategory,
+  type OperationalCodeDefinition,
 } from "./operational-health";
 
 export type OperationalIncident = {
@@ -16,6 +17,12 @@ export type OperationalIncident = {
   summary_zh: string;
   root_event: Required<OperationalAlert>;
   related_events: Array<Required<OperationalAlert>>;
+  technical_events: Array<Required<OperationalAlert>>;
+  reason_projections: Array<{
+    source_event_code: string;
+    source_scope: string;
+    reason_code: string;
+  }>;
   affected_scopes: string[];
   summary_metrics: Array<{ label: string; value: string }>;
   blocking: boolean;
@@ -41,7 +48,22 @@ function stringEvidence(event: Required<OperationalAlert>, key: string): string 
 
 function reasonCodes(event: Required<OperationalAlert>): string[] {
   const value = event.evidence.reason_codes;
-  return Array.isArray(value) ? value.filter(item => typeof item === "string") : [];
+  return Array.isArray(value)
+    ? [...new Set(value.filter(item => typeof item === "string"))]
+    : [];
+}
+
+function actionableFailureCounts(
+  event: Required<OperationalAlert>, stage: string,
+): Array<{ code: string; count: number }> {
+  const allCounts = event.evidence.actionable_failure_counts;
+  if (!allCounts || typeof allCounts !== "object" || Array.isArray(allCounts)) return [];
+  const stageCounts = (allCounts as Record<string, unknown>)[stage];
+  if (!stageCounts || typeof stageCounts !== "object" || Array.isArray(stageCounts)) return [];
+  return Object.entries(stageCounts as Record<string, unknown>)
+    .map(([code, count]) => ({ code, count: Number(count) }))
+    .filter(item => Number.isFinite(item.count) && item.count > 0)
+    .sort((left, right) => right.count - left.count || left.code.localeCompare(right.code));
 }
 
 function causalDefinition(event: Required<OperationalAlert>) {
@@ -119,11 +141,58 @@ function buildIncident(root: Required<OperationalAlert>, related: Array<Required
     summary_zh: incidentSummary(root, family),
     root_event: root,
     related_events: related,
+    technical_events: [],
+    reason_projections: [],
     affected_scopes: [...new Set(related.map(event => event.scope).filter(scope => scope !== root.scope))].sort(),
     summary_metrics: metrics(events),
     blocking: events.some(event => event.blocking),
     technical_event_count: events.length,
   };
+}
+
+function stageForPendingReason(reason: string): string | null {
+  if (reason === "ACTIONABLE_NEWS_IMPACT_PENDING") return "ACTIVE_IMPACT";
+  if (reason === "ACTIONABLE_NEWS_SEMANTICS_PENDING") return "ACTIVE_ANNOTATION";
+  return null;
+}
+
+function selectPendingCause(
+  event: Required<OperationalAlert>, reason: string, incidents: OperationalIncident[],
+): OperationalIncident | null {
+  const stage = stageForPendingReason(reason);
+  if (!stage) return null;
+  const candidates = incidents.filter(incident => incident.root_event.scope === stage);
+  if (candidates.length === 0) return null;
+  const counts = actionableFailureCounts(event, stage);
+  if (counts.length) {
+    const highest = counts[0].count;
+    const matchingFamilies = new Set(
+      counts.filter(item => item.count === highest)
+        .map(item => operationalCodeDefinitions.get(item.code)?.root_cause_family)
+        .filter((family): family is string => Boolean(family)),
+    );
+    const matches = candidates.filter(
+      incident => matchingFamilies.has(eventFamily(incident.root_event)),
+    );
+    if (matches.length === 1) return matches[0];
+    return null;
+  }
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
+function addReasonProjection(
+  incident: OperationalIncident,
+  event: Required<OperationalAlert>,
+  reason: string,
+) {
+  incident.reason_projections.push({
+    source_event_code: event.code,
+    source_scope: event.scope,
+    reason_code: reason,
+  });
+  incident.affected_scopes = [
+    ...new Set([...incident.affected_scopes, event.scope]),
+  ].sort();
 }
 
 /** Deterministic, conservative presentation projection over authoritative events. */
@@ -171,31 +240,43 @@ export function correlateOperationalEvents(input: OperationalAlert[]): Operation
     incidents.push(buildIncident(event, related));
   });
 
-  const concreteByStage = (reason: string) => incidents.find(incident => (
-    reason === "ACTIONABLE_NEWS_IMPACT_PENDING"
-      ? incident.root_event.scope === "ACTIVE_IMPACT"
-      : incident.root_event.scope === "ACTIVE_ANNOTATION"
-  ));
   events.forEach((event, index) => {
     if (event.code !== "OPS_COMPONENT_UNHEALTHY" || event.scope !== "news_semantic_pipeline") return;
     const reasons = reasonCodes(event);
-    const explained = new Set<string>();
+    const explained = new Map<string, OperationalIncident>();
     for (const reason of reasons) {
-      if (!["ACTIONABLE_NEWS_IMPACT_PENDING", "ACTIONABLE_NEWS_SEMANTICS_PENDING"].includes(reason)) continue;
-      const incident = concreteByStage(reason);
+      const incident = selectPendingCause(event, reason, incidents);
       if (incident) {
-        incident.related_events.push(event);
-        incident.affected_scopes = [...new Set([...incident.affected_scopes, event.scope])].sort();
-        incident.technical_event_count = 1 + incident.related_events.length;
-        incident.blocking ||= event.blocking;
-        if (severityRank[event.severity] > severityRank[incident.severity]) incident.severity = event.severity;
-        const recovery = recoveryState([incident.root_event, ...incident.related_events]);
-        incident.state = recovery.state;
-        incident.action_state = recovery.action;
-        explained.add(reason);
+        addReasonProjection(incident, event, reason);
+        explained.set(reason, incident);
       }
     }
-    if (reasons.length > 0 && reasons.every(reason => explained.has(reason))) consumed.add(index);
+    if (explained.size === 0) return;
+    const unexplained = reasons.filter(reason => !explained.has(reason));
+    if (unexplained.length) {
+      const standalone = buildIncident(event, []);
+      standalone.reason_projections = unexplained.map(reason => ({
+        source_event_code: event.code,
+        source_scope: event.scope,
+        reason_code: reason,
+      }));
+      const definitions = unexplained
+        .map(reason => operationalCodeDefinitions.get(reason))
+        .filter((definition): definition is OperationalCodeDefinition => Boolean(definition));
+      if (definitions.length) {
+        standalone.category = definitions[0].category;
+        standalone.incident_key = `${definitions[0].root_cause_family}:${event.scope}:${unexplained.join("+")}`;
+        standalone.title_zh = definitions.map(item => item.title_zh).join("；");
+        standalone.summary_zh = event.message_zh;
+      }
+      incidents.push(standalone);
+    } else {
+      const owner = [...new Set(explained.values())]
+        .sort((left, right) => left.incident_key.localeCompare(right.incident_key))[0];
+      owner.technical_events.push(event);
+      owner.technical_event_count = 1 + owner.related_events.length + owner.technical_events.length;
+    }
+    consumed.add(index);
   });
 
   events.forEach((event, index) => {
@@ -224,3 +305,7 @@ export function correlateOperationalEvents(input: OperationalAlert[]): Operation
 export const globalOperationalIncidents = (incidents: OperationalIncident[]) => incidents.filter(
   incident => incident.blocking || incident.severity === "ERROR",
 );
+
+export const affectedOperationalScopeCount = (incidents: OperationalIncident[]) => new Set(
+  incidents.flatMap(incident => incident.affected_scopes),
+).size;
