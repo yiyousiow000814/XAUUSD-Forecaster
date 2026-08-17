@@ -147,6 +147,16 @@ Feature code MUST NOT call provider generation endpoints directly. Title,
 compaction, daily brief, Q&A, tool planning, and final-answer requests all use
 the same accounting boundary even when they have different priorities.
 
+Interactive `ASSISTANT_CHAT` runs on the loopback-only local provider boundary.
+Its declared primary is Qwen 3.5 9B and its declared transport fallback is
+Ministral 3 8B. Both share one GPU pool and therefore one in-flight admission
+slot. The local profiles are unavailable to news annotation, Daily Brief,
+title, compaction, and legacy Q&A work. Those workloads retain their separately
+configured provider routes. A local model's advertised 256K window does not
+authorize a 256K operational prompt: the Assistant keeps a 32K profile and the
+existing bounded context layers so GPU KV-cache growth cannot become implicit
+capacity.
+
 The existing news scheduler design is documented in
 [`AI_PRIORITY_SCHEDULER.md`](../design/AI_PRIORITY_SCHEDULER.md). Reusing it does
 not mean current news routes already implement the Assistant router.

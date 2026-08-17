@@ -111,6 +111,15 @@ const provisionalConversation = (
   status: "ACTIVE",
   title_job_status: null,
   active_turn: activeTurnFrom(turn),
+  latest_turn: {
+    id: turn.id,
+    user_message_id: turn.user_message_id,
+    status: turn.status,
+    failure_code: turn.failure_code,
+    event_sequence: turn.event_sequence,
+    created_at: turn.created_at,
+    completed_at: turn.completed_at,
+  },
 });
 
 export default function AssistantView() {
@@ -154,6 +163,21 @@ export default function AssistantView() {
   useEffect(() => {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
+
+  useEffect(() => {
+    const refreshVisibleState = () => {
+      if (document.visibilityState !== "visible") return;
+      setListRevision(value => value + 1);
+      setDetailRevision(value => value + 1);
+      setMonitorRevision(value => value + 1);
+    };
+    window.addEventListener("pageshow", refreshVisibleState);
+    document.addEventListener("visibilitychange", refreshVisibleState);
+    return () => {
+      window.removeEventListener("pageshow", refreshVisibleState);
+      document.removeEventListener("visibilitychange", refreshVisibleState);
+    };
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();

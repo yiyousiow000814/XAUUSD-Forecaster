@@ -940,7 +940,10 @@ test("renders component and news-source health on a separate route", async () =>
   const layout = readFileSync(new URL("../app/layout.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(layout, /<OperationalAlertBanner \/>/);
-  assert.match(readFileSync(new URL("../app/_components/OperationalAlertBanner.tsx", import.meta.url), "utf8"), /globalOperationalAlerts/);
+  const banner = readFileSync(new URL("../app/_components/OperationalAlertBanner.tsx", import.meta.url), "utf8");
+  assert.match(banner, /globalOperationalAlerts/);
+  assert.match(banner, /className="operational-alert-toggle"/);
+  assert.match(banner, /aria-expanded=\{expanded\}/);
   assert.match(view, /OPERATIONAL ERROR CODES/);
   assert.match(view, /alert\.code/);
   assert.match(view, /completed_15m/);
@@ -965,6 +968,8 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(css, /\.source-health\.show-healthy article\.is-healthy \.news-source-details \{ display:none; \}/);
   assert.match(css, /\.source-health\.show-healthy article\.is-healthy\.is-detail-open \.news-source-details \{ display:contents; \}/);
   assert.match(css, /\.operational-alert-banner a \{[^}]*min-height: 44px/);
+  assert.match(css, /\.operational-alert-toggle \{ display:none; cursor:pointer; \}/);
+  assert.match(css, /\.operational-alert-banner\.is-expanded \.operational-alert-detail \{ display:flex/);
   assert.match(css, /@media \(max-width: 640px\)[\s\S]*\.scheduler-health-grid \{ grid-template-columns: 1fr; \}/);
 });
 
@@ -2100,7 +2105,8 @@ test("renders a recoverable responsive Assistant workbench without unsafe HTML",
   assert.match(css, /\.assistant-workbench \{[^}]*grid-template-columns:300px minmax\(0,1fr\)/);
   assert.match(css, /\.assistant-workbench \{[^}]*gap:0/);
   assert.match(css, /\.assistant-transcript \{[^}]*border-left:1px solid var\(--ink\)/);
-  assert.match(css, /body:has\(> \.preview-banner\):has\(\.assistant-main\)[^{]*\{[^}]*grid-template-rows:auto minmax\(0,1fr\)/);
+  assert.match(css, /body:has\(\.assistant-main\) \{[^}]*display:flex; flex-direction:column; overflow:hidden/);
+  assert.match(css, /body:has\(\.assistant-main\) > \.assistant-main \{[^}]*height:auto; min-height:0; flex:1 1 auto/);
   assert.match(css, /\.assistant-conversation-rail\.is-open \{ transform:translateX\(0\); \}/);
   assert.match(css, /\.assistant-composer-meta button \{[^}]*min-height:46px/);
   assert.match(css, /\.assistant-chat-error button,\.assistant-chat-error a \{[^}]*min-height:44px/);

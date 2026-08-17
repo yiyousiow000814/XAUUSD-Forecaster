@@ -1,0 +1,76 @@
+"""Dedicated local model boundary for interactive Assistant chat only."""
+
+from __future__ import annotations
+
+import hashlib
+
+from .assistant_capacity import AssistantCapacityPolicy
+from .assistant_routing import ModelCapacityClass, ModelProfile, OLLAMA_LOCAL
+from .news_scheduler import PREEMPTIBLE_POOL, ApiCredential
+
+
+QWEN_ASSISTANT_MODEL = "qwen3.5:9b-q4_K_M"
+MINISTRAL_ASSISTANT_MODEL = "ministral-3:8b-instruct-2512-q4_K_M"
+LOCAL_ASSISTANT_POOL_ID = "local-assistant-gpu"
+LOCAL_ASSISTANT_CONTEXT_LIMIT = 32_768
+
+
+def local_assistant_profiles() -> tuple[ModelProfile, ...]:
+    """Return the ordered primary/fallback set; never used by other AI jobs."""
+    return (
+        ModelProfile(
+            profile_id="assistant-qwen35-9b-local-v1",
+            model_id=QWEN_ASSISTANT_MODEL,
+            provider=OLLAMA_LOCAL,
+            context_limit=LOCAL_ASSISTANT_CONTEXT_LIMIT,
+            supports_thinking=True,
+            supports_function_calling=True,
+            supports_streaming=False,
+            capacity_class=ModelCapacityClass.LARGE,
+        ),
+        ModelProfile(
+            profile_id="assistant-ministral3-8b-local-v1",
+            model_id=MINISTRAL_ASSISTANT_MODEL,
+            provider=OLLAMA_LOCAL,
+            context_limit=LOCAL_ASSISTANT_CONTEXT_LIMIT,
+            supports_thinking=True,
+            supports_function_calling=True,
+            supports_streaming=False,
+            capacity_class=ModelCapacityClass.LARGE,
+        ),
+    )
+
+
+def local_assistant_credentials() -> tuple[ApiCredential, ...]:
+    reference = "ollama-loopback"
+    return (ApiCredential(
+        account_id=LOCAL_ASSISTANT_POOL_ID,
+        pool=PREEMPTIBLE_POOL,
+        api_key=reference,
+        credential_id=hashlib.sha256(reference.encode("utf-8")).hexdigest()[:24],
+    ),)
+
+
+def local_assistant_capacity_policies() -> tuple[AssistantCapacityPolicy, ...]:
+    models = (QWEN_ASSISTANT_MODEL, MINISTRAL_ASSISTANT_MODEL)
+    return tuple(
+        AssistantCapacityPolicy(
+            credential_pool_id=LOCAL_ASSISTANT_POOL_ID,
+            provider=OLLAMA_LOCAL,
+            model_id=model,
+            shared_model_ids=models,
+            rpd_limit=100_000,
+            rpm_limit=120,
+            tpm_limit=100_000_000,
+            soft_cap_basis_points=9_500,
+            # Both routes share one GPU. Serial admission prevents avoidable
+            # VRAM pressure and lets the queue provide deterministic backpressure.
+            max_in_flight=1,
+            reservation_ttl_seconds=240,
+            cooldown_seconds=15,
+            failure_cooldown_threshold=1,
+            enabled=True,
+            source="CONFIGURED",
+        )
+        for model in models
+    )

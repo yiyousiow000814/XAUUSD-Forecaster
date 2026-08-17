@@ -3249,6 +3249,47 @@ def test_gemma_impact_reserves_provider_counted_input_tokens(
     assert reserved == [4_321]
 
 
+def test_gemma_impact_repairs_one_identity_contract_failure_through_gateway(
+    monkeypatch,
+) -> None:
+    purposes = []
+    pool = annotation_module._GeminiRequestPool(
+        ("test-key",), requests_per_key=2, batch_limit=2,
+        request_accountant=CallbackModelAccountant(
+            lambda usage: purposes.append(usage.purpose) or True
+        ),
+    )
+    invalid = {
+        **_impact_model_result(),
+        "update_type": "NEW_EVENT",
+        "identity_relation": "NEW_EPISODE",
+        "identity_anchor_zh": "美国就业数据公布。",
+        "identity_differences_zh": [],
+    }
+    responses = iter((invalid, _impact_model_result()))
+
+    def post_json(_key, model, method, _payload, *, timeout):
+        del timeout
+        if method == "countTokens":
+            return {"totalTokens": 1_000}
+        return {
+            "modelVersion": model,
+            "candidates": [{"content": {"parts": [{
+                "text": json.dumps(next(responses), ensure_ascii=False),
+            }]}}],
+        }
+
+    monkeypatch.setattr(GeminiModelGateway, "_post_json", staticmethod(post_json))
+
+    result, _ = pool.call_impact(0, {
+        "annotation": {}, "prior_event_context": [],
+        "headline": "Employment report", "body": "Complete source body",
+    })
+
+    assert result["identity_relation"] == "UNRESOLVED"
+    assert purposes == ["news-impact", "news-impact-contract-repair"]
+
+
 def test_gemma_impact_reduces_optional_candidates_to_fit_tpm(
     tmp_path, monkeypatch,
 ) -> None:

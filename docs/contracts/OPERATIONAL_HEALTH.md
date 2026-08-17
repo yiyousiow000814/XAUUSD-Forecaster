@@ -82,6 +82,10 @@ Counts from articles, event identities, prediction exposures, and training
 rows remain distinct. One must never substitute for another in health gates.
 
 The local status snapshot covers the forward-prediction and news data plane.
+After its fresh TTL, a still-bounded snapshot is returned immediately with a
+`stale` response marker while exactly one background refresh runs. A snapshot
+older than the declared maximum stale boundary remains unavailable; it is never
+presented as current or silently extended.
 The production health route separately reads aggregate Cloudflare D1 state for
 Assistant turns, news questions, titles, compaction, and memory indexing. These
 queues remain separate from local scheduler counters and expose their own
@@ -103,11 +107,13 @@ resource failure retains its own upstream code under
 warning.
 
 Runtime rollout observation is also a state machine, not a binary HTTP probe.
-The explicit `STATUS_SNAPSHOT_REFRESH_IN_PROGRESS` response is a bounded
-deferral while the status cache is rebuilding and must not consume the
-candidate rollback budget. Other HTTP, transport, schema, or production-shape
-failures remain failures. The update state records the deferral code and time,
-and clears them only after a complete production snapshot passes again.
+A bounded stale snapshot remains suitable for production-shape validation while
+its single background refresh runs. When no bounded snapshot exists, the
+explicit `STATUS_SNAPSHOT_REFRESH_IN_PROGRESS` response is a bounded deferral
+and must not consume the candidate rollback budget. Other HTTP, transport,
+schema, or production-shape failures remain failures. The update state records
+the deferral code and time, and clears them only after a complete production
+snapshot passes again.
 
 Preview never presents production D1 alerts as branch-current evidence. A
 separate scheduled GitHub Actions probe checks the public live, status, and
@@ -143,3 +149,8 @@ freshness alarms: quote, decision, and outcome components report
 records the payload generation time as its observation boundary. Missing broker
 evidence outside the weekly closure remains `DATA_UNAVAILABLE` and must not be
 normalized to healthy.
+
+The outcome settler runs inside the supervised collector loop. Its health uses
+that loop's successful heartbeat, not the timestamp of the most recently
+appended outcome. A quiet interval with no decision past its 30-minute horizon
+is valid idle work and must not become a stale-component alert.

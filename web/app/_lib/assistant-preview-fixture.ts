@@ -24,6 +24,27 @@ const modelProvenance = {
 
 export const assistantPreviewConversations: AssistantConversation[] = [
   {
+    id: "conversation-preview-recovery",
+    title: "页面返回后的失败恢复",
+    title_source: "USER",
+    created_at: "2026-08-15T11:00:00.000Z",
+    last_activity_at: "2026-08-15T11:01:00.000Z",
+    archived_at: null,
+    summary_version: 0,
+    status: "ACTIVE",
+    title_job_status: null,
+    active_turn: null,
+    latest_turn: {
+      id: "turn-preview-recovery",
+      user_message_id: "message-preview-user-recovery",
+      status: "FAILED",
+      failure_code: "NO_MODEL_CAPACITY",
+      event_sequence: 1,
+      created_at: "2026-08-15T11:00:00.000Z",
+      completed_at: "2026-08-15T11:01:00.000Z",
+    },
+  },
+  {
     id: "conversation-preview-rates",
     title: "美联储利率与黄金重定价",
     title_source: "AI",
@@ -34,6 +55,7 @@ export const assistantPreviewConversations: AssistantConversation[] = [
     status: "ACTIVE",
     title_job_status: null,
     active_turn: null,
+    latest_turn: null,
   },
   {
     id: "conversation-preview-opening",
@@ -46,6 +68,7 @@ export const assistantPreviewConversations: AssistantConversation[] = [
     status: "ACTIVE",
     title_job_status: null,
     active_turn: null,
+    latest_turn: null,
   },
   {
     id: "conversation-preview-inflation",
@@ -58,6 +81,7 @@ export const assistantPreviewConversations: AssistantConversation[] = [
     status: "ACTIVE",
     title_job_status: "PENDING",
     active_turn: null,
+    latest_turn: null,
   },
 ];
 
@@ -212,6 +236,17 @@ const previewMessages: Record<string, AssistantMessage[]> = {
       provenance: modelProvenance,
     },
   ],
+  "conversation-preview-recovery": [
+    {
+      id: "message-preview-user-recovery",
+      conversation_id: "conversation-preview-recovery",
+      role: "USER",
+      content: "请说明当前新闻对黄金方向的影响，并列出依据。",
+      content_document: null,
+      created_at: "2026-08-15T11:00:00.000Z",
+      provenance: { kind: "PREVIEW_FIXTURE" },
+    },
+  ],
 };
 
 export const assistantPreviewOlderMessages: Record<string, AssistantMessage[]> = {
@@ -244,6 +279,7 @@ export const assistantPreviewCursor: Record<string, AssistantMessageCursor | nul
   },
   "conversation-preview-opening": null,
   "conversation-preview-inflation": null,
+  "conversation-preview-recovery": null,
 };
 
 export function assistantPreviewMessages(conversationId: string) {

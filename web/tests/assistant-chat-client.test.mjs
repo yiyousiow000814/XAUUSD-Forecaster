@@ -143,7 +143,7 @@ test("Assistant SSE rejects transport identity drift and sequence gaps", () => {
   ]), null);
 });
 
-test("conversation transport preserves active-turn recovery and Preview labeling", async () => {
+test("conversation transport preserves active and terminal recovery with Preview labeling", async () => {
   const fixture = assistantPreviewConversations[0];
   const result = await fetchAssistantConversations(false, async () => new Response(
     JSON.stringify({ items: [{
@@ -153,6 +153,15 @@ test("conversation transport preserves active-turn recovery and Preview labeling
         status: "PROCESSING",
         event_sequence: 4,
         created_at: "2026-08-15T10:00:00.000Z",
+      },
+      latest_turn: {
+        id: "turn-recoverable",
+        user_message_id: "message-preview-user-1",
+        status: "PROCESSING",
+        failure_code: null,
+        event_sequence: 4,
+        created_at: "2026-08-15T10:00:00.000Z",
+        completed_at: null,
       },
     }], preview: true }),
     {
@@ -170,6 +179,27 @@ test("conversation transport preserves active-turn recovery and Preview labeling
     event_sequence: 4,
     created_at: "2026-08-15T10:00:00.000Z",
   });
+  assert.equal(result.items[0].latest_turn.user_message_id, "message-preview-user-1");
+
+  const failed = await fetchAssistantConversations(false, async () => new Response(
+    JSON.stringify({ items: [{
+      ...fixture,
+      active_turn: null,
+      latest_turn: {
+        id: "turn-failed",
+        user_message_id: "message-preview-user-1",
+        status: "FAILED",
+        failure_code: "MODEL_OUTPUT_INVALID",
+        event_sequence: 3,
+        created_at: "2026-08-15T10:00:00.000Z",
+        completed_at: "2026-08-15T10:00:10.000Z",
+      },
+    }], preview: false }),
+    { status: 200, headers: { "Content-Type": "application/json" } },
+  ));
+  assert.equal(failed.items[0].active_turn, null);
+  assert.equal(failed.items[0].latest_turn.status, "FAILED");
+  assert.equal(failed.items[0].latest_turn.failure_code, "MODEL_OUTPUT_INVALID");
 });
 
 test("Access login HTML is never accepted as an Assistant API response", async () => {

@@ -1496,6 +1496,7 @@ def test_assistant_chat_sync_wires_one_bounded_native_worker(
     from xauusd_forecaster import (
         assistant_capacity,
         assistant_chat_worker,
+        assistant_local_runtime,
         assistant_routing,
         news_scheduler,
     )
@@ -1517,6 +1518,15 @@ def test_assistant_chat_sync_wires_one_bounded_native_worker(
             if actual_credentials == credentials and actual_profiles == profiles
             else pytest.fail("capacity inputs changed")
         ),
+    )
+    monkeypatch.setattr(
+        assistant_local_runtime, "local_assistant_credentials", lambda: credentials,
+    )
+    monkeypatch.setattr(
+        assistant_local_runtime, "local_assistant_profiles", lambda: profiles,
+    )
+    monkeypatch.setattr(
+        assistant_local_runtime, "local_assistant_capacity_policies", lambda: policies,
     )
     monkeypatch.setenv("COMPUTERNAME", "Desk Top!")
     transport_calls: list[tuple] = []
