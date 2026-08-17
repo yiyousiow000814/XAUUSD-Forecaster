@@ -2394,10 +2394,10 @@ def test_failed_display_repair_withholds_annotation_and_records_failure_fields(
         "primary_story_title_zh": "Still English",
         "semantic_reason_zh": "Still English",
     }
-    responses = iter((vector, broken_repair))
+    responses = iter((vector, broken_repair, broken_repair, broken_repair))
     _mock_model_json(monkeypatch, lambda *_args: next(responses))
     pool = annotation_module._GeminiRequestPool(
-        ("test-key",), requests_per_key=2,
+        ("test-key",), requests_per_key=4,
         request_accountant=ALLOW_MODEL_REQUEST,
     )
 
@@ -2412,6 +2412,183 @@ def test_failed_display_repair_withholds_annotation_and_records_failure_fields(
     selected = failure.value.failure_evidence["selected_output"]
     assert selected["invalid_fields"]
     assert selected["initial_error"]
+
+
+@pytest.mark.parametrize(
+    "failure_factory",
+    (
+        pytest.param(
+            lambda: annotation_module.ModelGatewayCapacityExhausted(
+                "test capacity"
+            ),
+            id="local-capacity",
+        ),
+        pytest.param(
+            lambda: annotation_module.ModelGatewayCapacityExhausted(
+                "provider pacing", failure_code="PROVIDER_DISPATCH_DEFERRED",
+            ),
+            id="provider-pacing",
+        ),
+        pytest.param(
+            lambda: annotation_module.ModelGatewayRequestFailed(
+                urllib.error.URLError("connection refused")
+            ),
+            id="url-error",
+        ),
+        pytest.param(
+            lambda: annotation_module.ModelGatewayRequestFailed(
+                TimeoutError("provider timed out")
+            ),
+            id="timeout",
+        ),
+        pytest.param(
+            lambda: urllib.error.HTTPError(
+                "https://provider.invalid", 429, "rate limited", {}, None,
+            ),
+            id="http-429",
+        ),
+        pytest.param(
+            lambda: urllib.error.HTTPError(
+                "https://provider.invalid", 503, "unavailable", {}, None,
+            ),
+            id="http-503",
+        ),
+    ),
+)
+def test_display_repair_preserves_request_failure_classification(
+    monkeypatch, failure_factory,
+) -> None:
+    pool = object.__new__(annotation_module._GeminiRequestPool)
+    failure = failure_factory()
+
+    def request_failed(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(pool, "_repair_chinese", request_failed)
+
+    with pytest.raises(type(failure)) as raised:
+        pool._repair_display_until_valid(
+            0, (annotation_module.DEFAULT_GEMINI_MODEL,), {}, "headline", "body",
+            invalid_fields=("primary_story_title_zh",),
+            initial_error=ValueError("display rejected"),
+            prompt_version=annotation_module.PROMPT_VERSION,
+        )
+
+    assert raised.value is failure
+    assert annotation_module._model_failure_details(failure)[
+        "failure_code"
+    ] not in {"MODEL_OUTPUT_CONTRACT_FAILED", "MODEL_OUTPUT_INVALID"}
+
+
+def test_display_checkpoint_accepts_declared_latin_company_names_without_model_call(
+    monkeypatch,
+) -> None:
+    evidence = "Stripe will acquire OpenRouter in a reported transaction."
+    result = _v15_annotation({
+        "headline_zh": "企业并购消息",
+        "summary_zh": "报道显示这是一起企业并购事件，但与当前黄金宏观传导链无直接关联。",
+        "entities": ["Stripe", "OpenRouter"],
+        "event_type": "CORPORATE_ACQUISITION",
+        "hawkishness": 0.0, "inflation_impulse": 0.0,
+        "growth_impulse": 0.0, "geopolitical_risk": 0.0,
+        "usd_impulse": 0.0, "novelty": 0.8, "confidence": 0.7,
+    }, evidence, xauusd_relevance="IRRELEVANT",
+        primary_story_title_zh="Stripe 收购 OpenRouter",
+        actor="Stripe", object="OpenRouter")
+    checkpoint = {
+        "semantic_result": result,
+        "llm_model_version": annotation_module.DEFAULT_GEMINI_MODEL,
+        "invalid_fields": ["primary_story_title_zh"],
+        "rejection_reason": "ENGLISH_PROSE_DOMINANT",
+    }
+    monkeypatch.setattr(
+        annotation_module._GeminiRequestPool,
+        "_repair_display_until_valid",
+        lambda *_args, **_kwargs: pytest.fail("valid checkpoint must not call a model"),
+    )
+
+    repaired, _ = object.__new__(
+        annotation_module._GeminiRequestPool
+    ).repair_display_checkpoint(
+        0, annotation_module.DEFAULT_GEMINI_MODEL, checkpoint,
+        "Stripe to acquire OpenRouter", evidence,
+        prompt_version=annotation_module.PROMPT_VERSION,
+    )
+
+    assert repaired["primary_story_title_zh"] == "Stripe 收购 OpenRouter"
+
+
+def test_story_title_does_not_treat_undeclared_english_prose_as_an_identifier() -> None:
+    result = {
+        "headline_zh": "市场更新",
+        "summary_zh": "市场正在关注企业消息。",
+        "primary_story_title_zh": "市场 Market Update",
+        "actor": "Stripe", "object": "OpenRouter",
+        "entities": ["Stripe", "OpenRouter"],
+    }
+
+    with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
+        annotation_module._validate_chinese_result(result)
+
+
+@pytest.mark.parametrize(
+    ("title", "actor", "object_name", "entities"),
+    (
+        ("stripe 收购 OPENROUTER", "Stripe", "OpenRouter",
+         ["Stripe", "OpenRouter"]),
+        ("S&P 500 收购 Open-Router", "S&P 500", "Open-Router",
+         ["S&P 500", "Open-Router"]),
+        ("OpenRouter Inc. 收购 Stripe", "OpenRouter, Inc.", "Stripe",
+         ["OpenRouter, Inc.", "Stripe"]),
+    ),
+)
+def test_story_title_matches_declared_identities_across_safe_punctuation_and_case(
+    title, actor, object_name, entities,
+) -> None:
+    result = {
+        "headline_zh": "企业并购消息",
+        "summary_zh": "报道显示这是一起企业并购事件，相关身份已经由结构字段明确声明。",
+        "primary_story_title_zh": title,
+        "actor": actor,
+        "object": object_name,
+        "entities": entities,
+    }
+
+    annotation_module._validate_chinese_result(result)
+
+
+@pytest.mark.parametrize("transport", ("rss", "html"))
+def test_public_release_source_403_is_remote_rejection_not_credential_failure(
+    tmp_path, transport,
+) -> None:
+    fetched = datetime(2026, 8, 18, 3, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+
+    if transport == "rss":
+        def reject_rss(source):
+            raise urllib.error.HTTPError(
+                source.url, 403, "Forbidden", {}, None,
+            )
+
+        statuses = collect_direct_full_text_rss_news(
+            ledger, fetched, fetcher=reject_rss,
+        )
+    else:
+        def reject_html(url):
+            raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+
+        statuses = collect_direct_full_text_html_news(
+            ledger, fetched, fetcher=reject_html,
+        )
+
+    polls = ledger.connection.execute(
+        """SELECT error_type,provider_http_status FROM source_polls
+           ORDER BY source"""
+    ).fetchall()
+
+    assert statuses
+    assert {row["error_type"] for row in statuses} == {"RemoteAccessRejected"}
+    assert {tuple(row) for row in polls} == {("RemoteAccessRejected", 403)}
 
 
 def test_gemini_annotation_reserves_local_estimated_input_tokens(

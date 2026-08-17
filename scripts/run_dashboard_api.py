@@ -113,6 +113,7 @@ from xauusd_forecaster.news_identity import preferred_cluster_peer_predicate  # 
 from xauusd_forecaster.news_contracts import CURRENT_NEWS_CONTRACT  # noqa: E402
 from xauusd_forecaster.news_features_v2 import COLLECTION_SOURCES  # noqa: E402
 from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY  # noqa: E402
+from xauusd_forecaster.source_polling import source_poll_recovery_state  # noqa: E402
 from xauusd_forecaster.production_shape import production_contract_snapshot  # noqa: E402
 from xauusd_forecaster.market_session import expected_weekly_closure  # noqa: E402
 from xauusd_forecaster.operational_health import (  # noqa: E402
@@ -391,6 +392,12 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
                FROM source_polls WHERE source=?""",
             (source,),
         ).fetchone()
+        freshness_reference = connection.execute(
+            """SELECT fetched_time,status FROM source_polls
+               WHERE source=? AND status IN ('OK','PARTIAL')
+               ORDER BY fetched_time DESC,poll_id DESC LIMIT 1""",
+            (source,),
+        ).fetchone()
         latest = connection.execute(
             """SELECT fetched_time, status, error_type, error
                FROM source_polls WHERE source=?
@@ -398,7 +405,8 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
             (source,),
         ).fetchone()
         latest_error = connection.execute(
-            """SELECT fetched_time, error_type, error
+            """SELECT fetched_time,error_type,error,provider_http_status,
+                      retry_after_seconds
                FROM source_polls WHERE source=? AND status<>'OK'
                ORDER BY fetched_time DESC, poll_id DESC LIMIT 1""",
             (source,),
@@ -430,21 +438,44 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
             item_count = int(evidence["item_count"] or 0)
             revision_count = int(evidence["revision_count"] or 0)
             latest_item_time = evidence["latest_item_time"]
-        latest_time = _parse_utc(latest["fetched_time"] if latest else None)
-        age_seconds = max(0.0, (now - latest_time).total_seconds()) if latest_time else None
         latest_status = latest["status"] if latest else "NO_DATA"
-        if latest_status == "ERROR":
-            health = "DEGRADED" if role == "正文链路" else "ERROR"
-        elif latest_status == "PARTIAL":
-            health = "DEGRADED"
-        elif age_seconds is None or age_seconds > stale_minutes * 60:
+        freshness_reference_time = (
+            freshness_reference["fetched_time"] if freshness_reference else None
+        )
+        freshness_time = _parse_utc(freshness_reference_time)
+        age_seconds = (
+            max(0.0, (now - freshness_time).total_seconds())
+            if freshness_time else None
+        )
+        recovery = source_poll_recovery_state(
+            connection, source, observed_at=now,
+        )
+        freshness_is_fresh = (
+            age_seconds is not None and age_seconds <= stale_minutes * 60
+        )
+        recovery_mode = recovery["recovery_mode"] if recovery else None
+        if recovery_mode == "OPERATOR_ACTION_REQUIRED":
+            health = "ERROR"
+        elif latest_status in {"ERROR", "PARTIAL"}:
+            health = (
+                "DEGRADED" if freshness_is_fresh
+                else "STALE" if freshness_time is not None
+                else "ERROR"
+            )
+        elif age_seconds is None or not freshness_is_fresh:
             health = "STALE"
         elif revision_sources and item_count == 0:
             health = "WARMING_UP"
         else:
             health = "HEALTHY"
         recent_evidence = _has_recent_evidence(latest_item_time, now)
-        if health == "ERROR":
+        if recovery_mode == "OPERATOR_ACTION_REQUIRED":
+            semantic_status = "OPERATOR_ACTION_REQUIRED"
+            semantic_message = "来源鉴权或配置失败；需要操作员检查凭据与权限"
+        elif health == "DEGRADED" and recovery is not None:
+            semantic_status = "AUTO_RECOVERING"
+            semantic_message = "最新可用数据仍新鲜；传输失败正在按有界退避自动重试"
+        elif health in {"ERROR", "STALE"}:
             semantic_status = "SOURCE_ERROR"
             semantic_message = "来源当前轮询失败；请查看最近错误与后备链路状态"
         elif health == "WARMING_UP":
@@ -460,12 +491,21 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
             "source": source, "label": label, "role": role, "health": health,
             "latest_status": latest_status,
             "latest_poll_time": latest["fetched_time"] if latest else None,
-            "last_success": polls["last_success"] or (
-                latest["fetched_time"] if role == "正文链路" and latest_status == "PARTIAL" else None
-            ), "age_seconds": age_seconds,
+            "last_success": polls["last_success"],
+            "freshness_reference_time": freshness_reference_time,
+            "freshness_reference_status": (
+                freshness_reference["status"] if freshness_reference else None
+            ),
+            "age_seconds": age_seconds,
             "last_error_time": latest_error["fetched_time"] if latest_error else None,
             "last_error_type": latest_error["error_type"] if latest_error else None,
             "last_error": latest_error["error"] if latest_error else None,
+            "provider_http_status": (
+                latest_error["provider_http_status"] if latest_error else None
+            ),
+            "retry_after_seconds": (
+                latest_error["retry_after_seconds"] if latest_error else None
+            ),
             "poll_count": int(polls["total"] or 0),
             "ok_count": int(polls["ok_count"] or 0),
             "partial_count": int(polls["partial_count"] or 0),
@@ -473,8 +513,11 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
             "item_count": item_count, "revision_count": revision_count,
             "full_text_count": full_text_count, "latest_item_time": latest_item_time,
             "recent_evidence": recent_evidence,
-            "recovery_mode": None, "fallback_label": None,
-            "fallback_health": None, "next_retry_time": None,
+            "recovery_mode": recovery_mode, "fallback_label": None,
+            "fallback_health": None,
+            "next_retry_time": (
+                recovery["next_retry_at"].isoformat() if recovery else None
+            ),
             "semantic_status": semantic_status,
             "semantic_message": semantic_message,
         })
@@ -487,22 +530,8 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
     if (
         gdelt and fallback
         and gdelt.get("latest_status") == "ERROR"
-        and "429" in str(gdelt.get("last_error") or "")
+        and gdelt.get("recovery_mode") == "RATE_LIMITED"
     ):
-        recent = connection.execute(
-            """SELECT fetched_time,status,error FROM source_polls
-               WHERE source='gdelt_gold_geopolitics'
-               ORDER BY fetched_time DESC,poll_id DESC LIMIT 8"""
-        ).fetchall()
-        streak = 0
-        for poll in recent:
-            if poll["status"] == "ERROR" and "429" in str(poll["error"] or ""):
-                streak += 1
-            else:
-                break
-        latest_poll = _parse_utc(gdelt["latest_poll_time"])
-        cooldown = min(360, 60 * (2 ** min(streak, 3))) if streak else 60
-        gdelt["recovery_mode"] = "RATE_LIMIT_BACKOFF"
         gdelt["fallback_label"] = fallback["label"]
         fallback_ready = bool(
             fallback["health"] == "HEALTHY" and fallback.get("recent_evidence")
@@ -510,10 +539,6 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
         gdelt["fallback_health"] = (
             fallback["health"]
             if fallback.get("recent_evidence") else "NO_RECENT_EVIDENCE"
-        )
-        gdelt["next_retry_time"] = (
-            (latest_poll + timedelta(minutes=cooldown)).isoformat()
-            if latest_poll else None
         )
         if fallback_ready:
             gdelt["health"] = "FALLBACK_ACTIVE"

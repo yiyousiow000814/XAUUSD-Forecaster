@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+import urllib.error
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -120,3 +121,140 @@ def test_registered_macro_collector_errors_redact_credentials_as_one_family(
     assert result["status"] == "ERROR"
     assert api_key not in observable
     assert "[REDACTED]" in observable
+
+
+@pytest.mark.parametrize(
+    "environment_name,api_key,collector,payload_factory",
+    _registered_collector_cases(),
+)
+def test_registered_macro_collectors_retry_failures_before_normal_cadence(
+    tmp_path,
+    monkeypatch,
+    environment_name,
+    api_key,
+    collector,
+    payload_factory,
+) -> None:
+    """A failed poll must reach a valid result through bounded recovery."""
+    monkeypatch.setenv(environment_name, api_key)
+    failed_at = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=failed_at)
+
+    def timeout(_url: str) -> bytes:
+        raise TimeoutError("provider timed out")
+
+    failed = collector(ledger, failed_at, timeout)
+    waiting = collector(
+        ledger, failed_at + timedelta(minutes=4),
+        lambda _url: pytest.fail("backoff must not call the provider"),
+    )
+    recovered = collector(
+        ledger, failed_at + timedelta(minutes=5), payload_factory,
+    )
+
+    assert failed["status"] == "ERROR"
+    assert waiting["status"] == "SKIPPED_RETRY_BACKOFF"
+    assert waiting["next_retry_at"] == (
+        failed_at + timedelta(minutes=5)
+    ).isoformat()
+    assert recovered["status"] == "OK"
+    assert ledger.latest_successful_source_poll_time(
+        recovered["source"]
+    ) == failed_at + timedelta(minutes=5)
+
+
+@pytest.mark.parametrize(
+    "environment_name,api_key,collector,payload_factory",
+    _registered_collector_cases(),
+)
+def test_registered_macro_403_is_operator_actionable_as_one_family(
+    tmp_path, monkeypatch, environment_name, api_key, collector, payload_factory,
+) -> None:
+    del payload_factory
+    monkeypatch.setenv(environment_name, api_key)
+    fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+
+    def forbidden(url: str) -> bytes:
+        raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+
+    result = collector(ledger, fetched, forbidden)
+    poll = ledger.connection.execute(
+        """SELECT error_type,provider_http_status,retry_after_seconds
+           FROM source_polls WHERE source=?""",
+        (result["source"],),
+    ).fetchone()
+
+    assert result["status"] == "ERROR"
+    assert tuple(poll) == ("AuthConfigurationError", 403, None)
+    assert api_key not in "\n".join(ledger.connection.iterdump())
+
+
+def test_partial_fred_retries_the_failed_series_without_advancing_cadence(
+    tmp_path, monkeypatch,
+) -> None:
+    api_key = "a" * 32
+    monkeypatch.setenv("FRED_API_KEY", api_key)
+    failed_at = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=failed_at)
+    def payload_factory(_url: str) -> bytes:
+        return json.dumps({
+            "observations": [
+                {"date": "2026-08-04", "value": "11.0"},
+                {"date": "2026-08-03", "value": "10.0"},
+            ]
+        }).encode()
+    target = "series_id=DGS2"
+    target_calls = 0
+
+    def partial_then_success(url: str) -> bytes:
+        nonlocal target_calls
+        if target in url:
+            target_calls += 1
+            if target_calls == 1:
+                raise TimeoutError("target series timed out")
+        return payload_factory(url)
+
+    partial = collect_fred_macro(ledger, failed_at, partial_then_success)
+    waiting = collect_fred_macro(
+        ledger, failed_at + timedelta(minutes=4),
+        lambda _url: pytest.fail("partial recovery backoff must be honored"),
+    )
+    recovered = collect_fred_macro(
+        ledger, failed_at + timedelta(minutes=5), partial_then_success,
+    )
+
+    assert partial["status"] == "PARTIAL"
+    assert waiting["status"] == "SKIPPED_RETRY_BACKOFF"
+    assert recovered["status"] == "OK"
+    assert target_calls == 2
+
+
+def test_eia_persists_retry_after_without_persisting_credential(
+    tmp_path, monkeypatch,
+) -> None:
+    api_key = "b" * 40
+    monkeypatch.setenv("EIA_API_KEY", api_key)
+    fetched = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=fetched)
+
+    def rate_limited(url: str) -> bytes:
+        raise urllib.error.HTTPError(
+            url, 429, "Too Many Requests", {"Retry-After": "300"}, None,
+        )
+
+    result = collect_eia_macro(ledger, fetched, rate_limited)
+    poll = ledger.connection.execute(
+        """SELECT error_type,provider_http_status,retry_after_seconds
+           FROM source_polls WHERE source=?""",
+        (result["source"],),
+    ).fetchone()
+    waiting = collect_eia_macro(
+        ledger, fetched + timedelta(minutes=4),
+        lambda _url: pytest.fail("Retry-After must survive the collector call"),
+    )
+
+    assert result["status"] == "ERROR"
+    assert tuple(poll) == ("RateLimited", 429, 300)
+    assert waiting["next_retry_at"] == (fetched + timedelta(minutes=5)).isoformat()
+    assert api_key not in "\n".join(ledger.connection.iterdump())

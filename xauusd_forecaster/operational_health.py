@@ -29,7 +29,6 @@ TASK_LABELS = {
 }
 SEVERITY_ORDER = {"ERROR": 0, "WARNING": 1, "INFO": 2}
 CAPACITY_FAILURE_CODES = frozenset({"MODEL_CAPACITY_DEFERRED"})
-MAINTENANCE_FAILURE_CODES = frozenset({"NEWS_EMBEDDING_BACKFILL_PENDING"})
 
 
 def _instant(value: object) -> datetime | None:
@@ -95,6 +94,7 @@ def scheduler_health_snapshot(
             "max_claim_state": None,
             "max_claim_is_claimable": False,
             "max_claim_next_retry_at": None,
+            "max_effective_failure_streak": 0,
         }
         for task in TASKS
     }
@@ -258,36 +258,55 @@ def scheduler_health_snapshot(
         oldest_age = int(summary["oldest_age_seconds"] or 0)
 
         retry_candidate = connection.execute(
-            """SELECT j.job_id,j.state,j.available_at,j.attempt_count,
-                      j.attempt_count - COALESCE(sum(
-                        CASE WHEN a.failure_code IN (?) THEN 1 ELSE 0 END
-                      ),0) AS retry_attempt_count
+            """SELECT j.job_id,j.state,j.available_at,
+                      j.attempt_count AS lifetime_claim_count,
+                      COALESCE(sum(CASE
+                        WHEN a.outcome='ERROR'
+                         AND COALESCE(a.error_type,'')<>'ModelGatewayCapacityExhausted'
+                         AND COALESCE(a.failure_code,'') NOT IN (
+                           'MODEL_CAPACITY_DEFERRED','PROVIDER_DISPATCH_DEFERRED')
+                         AND COALESCE(a.failure_code,'') NOT LIKE 'NEWS_EMBEDDING_%'
+                         AND COALESCE(a.failure_code,'') NOT LIKE
+                             'SCHEDULER_MAINTENANCE_%'
+                         AND a.attempt_number>COALESCE((
+                           SELECT max(a2.attempt_number)
+                           FROM news_ai_job_attempts_v1 a2
+                           WHERE a2.job_id=j.job_id
+                             AND a2.outcome IN ('OK','NOT_CURRENT')
+                         ),0)
+                        THEN 1 ELSE 0 END),0) AS effective_failure_streak
                FROM news_ai_jobs_v1 j
                LEFT JOIN news_ai_job_attempts_v1 a ON a.job_id=j.job_id
                WHERE j.task_type=?
                  AND j.state IN ('QUEUED','LEASED','BACKING_OFF')
-                 AND j.attempt_count>=?
                GROUP BY j.job_id
-               HAVING retry_attempt_count>=?
-               ORDER BY retry_attempt_count DESC,j.created_at,j.job_id LIMIT 1""",
-            (
-                next(iter(MAINTENANCE_FAILURE_CODES)), task,
-                RETRY_LOOP_THRESHOLD, RETRY_LOOP_THRESHOLD,
-            ),
+               ORDER BY effective_failure_streak DESC,j.attempt_count DESC,
+                        j.created_at,j.job_id LIMIT 1""",
+            (task,),
         ).fetchone()
         if retry_candidate is not None:
-            max_claims = int(retry_candidate["retry_attempt_count"])
+            lifetime_claims = int(retry_candidate["lifetime_claim_count"])
+            failure_streak = int(retry_candidate["effective_failure_streak"])
+            summary["max_effective_failure_streak"] = failure_streak
             retry_state = str(retry_candidate["state"])
             retry_available_at = str(retry_candidate["available_at"])
             max_claim_is_claimable = (
                 retry_state == "LEASED" or retry_available_at <= instant_iso
             )
             scheduled = not max_claim_is_claimable
+        else:
+            lifetime_claims = 0
+            failure_streak = 0
+            retry_state = ""
+            retry_available_at = ""
+            scheduled = False
+        if failure_streak >= RETRY_LOOP_THRESHOLD:
             alerts.append(_alert(
                 "OPS_AI_JOB_RETRY_LOOP",
                 severity="WARNING" if scheduled else "ERROR", scope=task,
                 message_zh=(
-                    f"{label}（{task}）有任务已领取 {max_claims} 次，"
+                    f"{label}（{task}）有任务连续有效失败 {failure_streak} 次，"
+                    f"历史领取 {lifetime_claims} 次，"
                     + (
                         "目前按计划等待下次重试。"
                         if scheduled else "当前仍可处理，需要检查。"
@@ -295,7 +314,9 @@ def scheduler_health_snapshot(
                 ),
                 blocking=not scheduled,
                 evidence={
-                    "max_claim_count": max_claims,
+                    "max_claim_count": lifetime_claims,
+                    "lifetime_claim_count": lifetime_claims,
+                    "effective_failure_streak": failure_streak,
                     "job_ref": str(retry_candidate["job_id"])[:12],
                     "state": retry_state,
                     "claimable": max_claim_is_claimable,
@@ -492,6 +513,11 @@ def extend_with_component_alerts(
                 blocking=health in {"ERROR", "STALE"},
                 evidence={
                     "health": health,
+                    "recovery_mode": source.get("recovery_mode"),
+                    "last_success": source.get("last_success"),
+                    "next_retry_time": source.get("next_retry_time"),
+                    "provider_http_status": source.get("provider_http_status"),
+                    "retry_after_seconds": source.get("retry_after_seconds"),
                     "last_error_type": source.get("last_error_type"),
                     "last_error": source.get("last_error"),
                 },

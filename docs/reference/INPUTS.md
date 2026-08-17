@@ -52,6 +52,23 @@ are deliberately preserved separately; OOS learning decides their value.
 Changing this feature set requires a complete generation handover.
 Collection alone does not silently replace the active generation.
 
+Official and discovery source cadence is success-based. An `OK` poll starts the
+source's normal interval; `ERROR` and `PARTIAL` polls instead enter durable
+bounded recovery at 5, 15, and then 30 minutes. HTTP 429 uses a slower bounded
+rate-limit schedule unless a valid provider `Retry-After` supplies the bounded
+delay. The HTTP status and delay seconds are stored without URLs, bodies, or
+credentials so restart preserves the same retry. Only explicitly credentialed
+transports classify HTTP 401/403 as operator-actionable authentication failures;
+public endpoints classify them as remote access rejection and recover through
+freshness escalation. A `PARTIAL` poll never advances normal cadence, but its
+usable evidence may be the newest health-freshness reference while recovery of
+failed siblings remains active. Recovery reads only the four newest indexed poll
+receipts; lifetime history remains append-only audit evidence.
+Source-health payloads keep these clocks explicit: `last_success` is the latest
+complete `OK`, while `freshness_reference_time` and
+`freshness_reference_status` identify the newest usable `OK` or `PARTIAL`
+receipt used to calculate age and health freshness.
+
 ## 4. Optional synchronized symbols
 
 Confirmed: collect XAUUSD only. The market-provider and symbol-validation

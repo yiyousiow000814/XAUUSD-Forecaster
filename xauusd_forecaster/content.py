@@ -18,6 +18,7 @@ from pypdf import PdfReader
 
 from .forward_ledger import ForwardLedger
 from .news_relevance import google_news_item_is_relevant
+from .source_polling import source_poll_gate
 
 
 USER_AGENT = "XAUUSD-Forward-Evidence/0.1 (+local research collector)"
@@ -167,9 +168,12 @@ def hydrate_pending_non_fed_content(
     extractor: Callable[[str], tuple[str, str]] = extract_article_full_text,
 ) -> dict[str, object]:
     poll_source = "non_fed_full_text"
-    last_poll = ledger.latest_source_poll_time(poll_source)
-    if last_poll is not None and (fetched_at - last_poll).total_seconds() < 5 * 60:
-        return {"source": poll_source, "status": "SKIPPED_INTERVAL"}
+    gate = source_poll_gate(
+        ledger.connection, poll_source,
+        observed_at=fetched_at, success_interval=timedelta(minutes=5),
+    )
+    if gate is not None:
+        return gate
     placeholders = ",".join("?" for _ in NON_FED_FULL_TEXT_SOURCES)
     rows = ledger.connection.execute(
         f"""SELECT n.* FROM news_revisions n
