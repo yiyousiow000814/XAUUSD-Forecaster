@@ -1,6 +1,11 @@
 import { AssistantConversationInputError } from "./assistant-conversations";
 
-export const ASSISTANT_MEMORY_INDEX_VERSION = "assistant-memory-lexical-v1";
+export const ASSISTANT_MEMORY_INDEX_VERSION = "assistant-memory-hybrid-v2";
+export const ASSISTANT_MEMORY_EMBEDDING_TEXT_VERSION = "assistant-message-embedding-v1";
+export const ASSISTANT_MEMORY_EMBEDDING_MODEL = "qwen3-embedding:0.6b";
+export const ASSISTANT_MEMORY_EMBEDDING_MODEL_DIGEST =
+  "ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d";
+export const ASSISTANT_MEMORY_EMBEDDING_DIMENSIONS = 1024;
 
 export const ASSISTANT_MEMORY_INDEX_LIMITS = {
   leaseMs: 2 * 60 * 1_000,
@@ -35,6 +40,7 @@ type AssistantMemoryCandidateRow = Record<string, unknown> & {
   content: string;
   provenance_json: string;
   overlap_count: number;
+  semantic_score?: number;
 };
 
 type TokenEstimator = (value: unknown) => number;
@@ -103,6 +109,38 @@ const sha256Hex = async (value: string) => {
     .join("");
 };
 
+export const normalizeAssistantMemoryEmbedding = (input: Record<string, unknown>) => {
+  const embedding = input.embedding;
+  if (
+    input.embedding_text_version !== ASSISTANT_MEMORY_EMBEDDING_TEXT_VERSION
+    || input.embedding_model !== ASSISTANT_MEMORY_EMBEDDING_MODEL
+    || typeof input.embedding_model_digest !== "string"
+    || input.embedding_model_digest !== ASSISTANT_MEMORY_EMBEDDING_MODEL_DIGEST
+    || input.embedding_dimensions !== ASSISTANT_MEMORY_EMBEDDING_DIMENSIONS
+    || !Array.isArray(embedding)
+    || embedding.length !== ASSISTANT_MEMORY_EMBEDDING_DIMENSIONS
+    || embedding.some(value => typeof value !== "number" || !Number.isFinite(value))
+  ) throw new AssistantConversationInputError(
+    "INVALID_MEMORY_INDEX_RESULT", "历史记忆向量结果无效",
+  );
+  const norm = Math.sqrt(embedding.reduce((sum, value) => sum + value * value, 0));
+  if (Math.abs(norm - 1) > 0.001) throw new AssistantConversationInputError(
+    "INVALID_MEMORY_INDEX_RESULT", "历史记忆向量未规范化",
+  );
+  return {
+    embedding: embedding as number[],
+    embeddingTextVersion: String(input.embedding_text_version),
+    embeddingModel: String(input.embedding_model),
+    embeddingModelDigest: String(input.embedding_model_digest),
+    embeddingDimensions: Number(input.embedding_dimensions),
+  };
+};
+
+export const assistantMemoryVectorNamespace = async (ownerId: string) => sha256Hex(
+  `assistant-memory-owner-v1:${ownerId}`,
+);
+export const assistantMemoryContentSha256 = sha256Hex;
+
 const normalizedCompletion = async (
   input: Record<string, unknown>,
   content: string,
@@ -148,15 +186,17 @@ export async function claimAssistantMemoryIndexJob(
        completed_at=?,attempt_history_json=json_insert(attempt_history_json,'$[#]',
          json_object('event','LEASE_EXPIRED','occurred_at',?,'attempt',attempt_count,
            'terminal',1)),${leaseCleanup}
-       WHERE status='PROCESSING' AND lease_expires_at<=? AND attempt_count>=max_attempts`,
-    ).bind(timestamp, timestamp, timestamp),
+       WHERE status='PROCESSING' AND lease_expires_at<=? AND attempt_count>=max_attempts
+         AND index_version=?`,
+    ).bind(timestamp, timestamp, timestamp, ASSISTANT_MEMORY_INDEX_VERSION),
     binding.prepare(
       `UPDATE assistant_memory_index_jobs SET status='PENDING',failure_code='LEASE_EXPIRED',
        available_at=?,attempt_history_json=json_insert(attempt_history_json,'$[#]',
          json_object('event','LEASE_EXPIRED','occurred_at',?,'attempt',attempt_count,
            'terminal',0)),${leaseCleanup}
-       WHERE status='PROCESSING' AND lease_expires_at<=? AND attempt_count<max_attempts`,
-    ).bind(timestamp, timestamp, timestamp),
+       WHERE status='PROCESSING' AND lease_expires_at<=? AND attempt_count<max_attempts
+         AND index_version=?`,
+    ).bind(timestamp, timestamp, timestamp, ASSISTANT_MEMORY_INDEX_VERSION),
     binding.prepare(
       `UPDATE assistant_memory_index_jobs SET status='PROCESSING',lease_owner=?,lease_token=?,
        lease_expires_at=?,attempt_count=attempt_count+1,failure_code=NULL,
@@ -164,10 +204,13 @@ export async function claimAssistantMemoryIndexJob(
          json_object('event','CLAIMED','occurred_at',?,'attempt',attempt_count+1,
            'worker_id',?))
        WHERE id=(SELECT id FROM assistant_memory_index_jobs
-         WHERE status='PENDING' AND available_at<=?
+         WHERE status='PENDING' AND index_version=? AND available_at<=?
          ORDER BY created_at,id LIMIT 1)
        RETURNING *`,
-    ).bind(workerId, leaseToken, leaseExpiresAt, timestamp, workerId, timestamp),
+    ).bind(
+      workerId, leaseToken, leaseExpiresAt, timestamp, workerId,
+      ASSISTANT_MEMORY_INDEX_VERSION, timestamp,
+    ),
   ]);
   const job = results.at(-1)?.results?.[0];
   if (!job) return null;
@@ -205,6 +248,7 @@ export async function completeAssistantMemoryIndexJob(
   binding: D1Database,
   input: Record<string, unknown>,
   now = new Date(),
+  vectorIndex?: VectorizeIndex,
 ) {
   const id = String(input.id ?? "");
   const leaseToken = String(input.lease_token ?? "");
@@ -231,7 +275,22 @@ export async function completeAssistantMemoryIndexJob(
     "MEMORY_SOURCE_MISSING", "历史记忆规范消息不存在",
   );
   const normalized = await normalizedCompletion(input, message.content);
+  const embedded = normalizeAssistantMemoryEmbedding(input);
+  if (!vectorIndex) throw new Error("Assistant memory vector binding is unavailable");
   const entryId = `memory-entry:${job.index_version}:${job.source_message_id}`;
+  const vectorId = await sha256Hex(`assistant-memory-vector-v1:${entryId}`);
+  const namespace = await assistantMemoryVectorNamespace(job.owner_id);
+  const mutation = await vectorIndex.upsert([{
+    id: vectorId,
+    namespace,
+    values: embedded.embedding,
+    metadata: {
+      source_message_id: job.source_message_id,
+      source_created_at: job.source_created_at,
+    },
+  }]);
+  const mutationId = String(mutation.mutationId ?? "");
+  if (!mutationId) throw new Error("Vectorize did not return a mutation receipt");
   const entryStatement = binding.prepare(
     `INSERT INTO assistant_memory_entries (
        id,source_job_id,owner_id,conversation_id,source_message_id,source_role,
@@ -251,6 +310,16 @@ export async function completeAssistantMemoryIndexJob(
   const results = await binding.batch<Record<string, unknown>>([
     entryStatement,
     ...termStatements,
+    binding.prepare(
+      `INSERT INTO assistant_memory_vectors_v1 (
+         entry_id,owner_id,vector_id,embedding_text_version,embedding_model,
+         embedding_model_digest,embedding_dimensions,vector_mutation_id,indexed_at
+       ) VALUES (?,?,?,?,?,?,?,?,?)`,
+    ).bind(
+      entryId, job.owner_id, vectorId, embedded.embeddingTextVersion,
+      embedded.embeddingModel, embedded.embeddingModelDigest,
+      embedded.embeddingDimensions, mutationId, timestamp,
+    ),
     binding.prepare(
       `UPDATE assistant_memory_index_jobs SET status='COMPLETED',source_content_sha256=?,
        term_count=?,failure_code=NULL,completed_at=?,
@@ -274,6 +343,8 @@ export async function completeAssistantMemoryIndexJob(
     source_message_id: job.source_message_id,
     source_content_sha256: normalized.sourceContentSha256,
     term_count: normalized.terms.length,
+    vector_id: vectorId,
+    vector_mutation_id: mutationId,
     index_version: job.index_version,
   };
 }
@@ -323,6 +394,8 @@ export async function retrieveAssistantHistoricalMemory(
     currentUser: { id: string; content: string; created_at: string };
     tokenBudget: number;
     estimateTokens: TokenEstimator;
+    semanticMatches?: Array<{ id: string; score: number }>;
+    semanticAvailable?: boolean;
   },
 ) {
   // Cross-conversation UUIDs cannot prove ordering inside one millisecond.
@@ -333,6 +406,7 @@ export async function retrieveAssistantHistoricalMemory(
     `SELECT count(*) AS total_messages,
        COALESCE(sum(CASE WHEN status='COMPLETED' AND EXISTS (
          SELECT 1 FROM assistant_memory_entries entry
+         JOIN assistant_memory_vectors_v1 memory_vector ON memory_vector.entry_id=entry.id
          WHERE entry.source_job_id=job.id
        ) THEN 1 ELSE 0 END),0) AS indexed_messages,
        COALESCE(sum(CASE WHEN status='PENDING' THEN 1 ELSE 0 END),0) AS pending_messages,
@@ -346,7 +420,7 @@ export async function retrieveAssistantHistoricalMemory(
   const queryTerms = tokenizeAssistantMemory(
     input.currentUser.content, ASSISTANT_MEMORY_INDEX_LIMITS.maxQueryTerms,
   );
-  const candidates: AssistantMemoryCandidateRow[] = [];
+  const candidatesById = new Map<string, AssistantMemoryCandidateRow>();
   if (queryTerms.length) {
     const placeholders = queryTerms.map(() => "?").join(",");
     const rows = await binding.prepare(
@@ -368,8 +442,42 @@ export async function retrieveAssistantHistoricalMemory(
       input.conversationId, ...queryTerms, ...cutoffBindings,
       ASSISTANT_MEMORY_INDEX_LIMITS.maxCandidates,
     ).all<AssistantMemoryCandidateRow>();
-    candidates.push(...rows.results);
+    for (const candidate of rows.results) candidatesById.set(candidate.id, candidate);
   }
+  const semanticScores = new Map(
+    (input.semanticMatches ?? []).map(match => [match.id, match.score]),
+  );
+  if (semanticScores.size) {
+    const placeholders = [...semanticScores].map(() => "?").join(",");
+    const rows = await binding.prepare(
+      `SELECT entry.*,message.content,message.provenance_json,0 AS overlap_count,
+         memory_vector.vector_id
+       FROM assistant_memory_vectors_v1 memory_vector
+       JOIN assistant_memory_entries entry ON entry.id=memory_vector.entry_id
+       JOIN assistant_messages message ON message.id=entry.source_message_id
+       JOIN assistant_conversations conversation ON conversation.id=entry.conversation_id
+       WHERE memory_vector.owner_id=? AND entry.owner_id=? AND conversation.owner_id=?
+         AND entry.index_version=? AND entry.conversation_id!=?
+         AND entry.source_created_at<? AND memory_vector.vector_id IN (${placeholders})`,
+    ).bind(
+      input.ownerId, input.ownerId, input.ownerId, ASSISTANT_MEMORY_INDEX_VERSION,
+      input.conversationId, ...cutoffBindings, ...semanticScores.keys(),
+    ).all<AssistantMemoryCandidateRow & { vector_id: string }>();
+    for (const candidate of rows.results) {
+      const semanticScore = semanticScores.get(candidate.vector_id) ?? 0;
+      const existing = candidatesById.get(candidate.id);
+      candidatesById.set(candidate.id, {
+        ...(existing ?? candidate),
+        semantic_score: semanticScore,
+      });
+    }
+  }
+  const candidates = [...candidatesById.values()].sort((left, right) => (
+    (Number(right.overlap_count) + Number(right.semantic_score ?? 0) * 4)
+    - (Number(left.overlap_count) + Number(left.semantic_score ?? 0) * 4)
+    || right.source_created_at.localeCompare(left.source_created_at)
+    || right.source_message_id.localeCompare(left.source_message_id)
+  )).slice(0, ASSISTANT_MEMORY_INDEX_LIMITS.maxCandidates);
   const totalMessages = Number(counts?.total_messages ?? 0);
   const indexedMessages = Number(counts?.indexed_messages ?? 0);
   const retrieval = {
@@ -382,6 +490,13 @@ export async function retrieveAssistantHistoricalMemory(
     failed_messages: Number(counts?.failed_messages ?? 0),
     query_term_count: queryTerms.length,
     matched_entries: candidates.length,
+    lexical_matched_entries: [...candidatesById.values()].filter(
+      item => Number(item.overlap_count) > 0,
+    ).length,
+    semantic_matched_entries: [...candidatesById.values()].filter(
+      item => Number(item.semantic_score ?? 0) > 0,
+    ).length,
+    semantic_available: input.semanticAvailable ?? false,
     selected_entries: 0,
     current_conversation_excluded: true,
     trust: "UNVERIFIED_CONVERSATION_TEXT" as const,
@@ -406,6 +521,7 @@ export async function retrieveAssistantHistoricalMemory(
       created_at: candidate.source_created_at,
       match_terms: queryTerms.filter(term => indexedTerms.has(term)),
       overlap_count: Number(candidate.overlap_count),
+      semantic_score: Number(candidate.semantic_score ?? 0),
       trust: "UNVERIFIED_CONVERSATION_TEXT",
     };
     const nextRetrieval = { ...retrieval, selected_entries: items.length + 1 };

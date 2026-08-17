@@ -1815,11 +1815,26 @@ def test_news_question_sync_reports_capacity_failure_without_aborting_queue(
     }]
 
 
-def test_assistant_memory_index_sync_is_model_free_and_does_not_echo_content(
+def test_assistant_memory_index_sync_uses_local_embedding_and_does_not_echo_content(
     monkeypatch,
 ) -> None:
     module = _sync_module()
     from xauusd_forecaster import news_scheduler
+    from xauusd_forecaster import assistant_memory_index
+
+    class FakeEmbeddingClient:
+        def profile(self):
+            from xauusd_forecaster.local_embeddings import EmbeddingProfile
+            from xauusd_forecaster.local_embeddings import LOCAL_EMBEDDING_MODEL_DIGEST
+            return EmbeddingProfile("qwen3-embedding:0.6b", LOCAL_EMBEDDING_MODEL_DIGEST)
+
+        def embed(self, texts, profile):
+            import numpy as np
+            result = np.zeros((len(texts), profile.dimensions), dtype=np.float32)
+            result[:, 0] = 1.0
+            return result
+
+    monkeypatch.setattr(assistant_memory_index, "OllamaEmbeddingClient", FakeEmbeddingClient)
 
     monkeypatch.setattr(news_scheduler, "configured_api_credentials", lambda: ())
     memory_claims = 0
@@ -1836,7 +1851,7 @@ def test_assistant_memory_index_sync_is_model_free_and_does_not_echo_content(
                     "id": "memory-index:message-1",
                     "lease_token": "memory-lease-1",
                     "source_message_id": "message-1",
-                    "index_version": "assistant-memory-lexical-v1",
+                    "index_version": "assistant-memory-hybrid-v2",
                     "content": content,
                 }}
             return {"item": None}
@@ -1859,6 +1874,7 @@ def test_assistant_memory_index_sync_is_model_free_and_does_not_echo_content(
     assert posted[0]["source_message_id"] == "message-1"
     assert posted[0]["terms"][:4] == ["美联", "联储", "储利", "利率"]
     assert len(posted[0]["source_content_sha256"]) == 64
+    assert posted[0]["embedding_dimensions"] == 1024
     assert "content" not in posted[0]
 
 

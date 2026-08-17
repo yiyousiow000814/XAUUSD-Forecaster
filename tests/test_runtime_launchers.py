@@ -102,15 +102,16 @@ def test_control_center_updates_only_the_isolated_main_runtime() -> None:
     assert reported == expected
 
 
-def test_local_assistant_worker_keeps_only_the_primary_model_resident() -> None:
+def test_local_assistant_worker_uses_bounded_primary_residency_for_shared_gpu() -> None:
     worker = (ROOT / "scripts" / "run_assistant_worker.py").read_text(
         encoding="utf-8",
     )
 
-    assert '"keep_alive": -1' in worker
+    assert '"keep_alive": "5m"' in worker
+    assert '"keep_alive": -1' not in worker
     assert "QWEN_ASSISTANT_MODEL" in worker
     assert '"resident_primary": QWEN_ASSISTANT_MODEL' in worker
-    assert "MINISTRAL_ASSISTANT_MODEL" in worker
+    assert "MINISTRAL_ASSISTANT_MODEL" not in worker
     assert "configured_api_credentials" not in worker
 
 

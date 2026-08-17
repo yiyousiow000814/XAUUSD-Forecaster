@@ -203,11 +203,13 @@ second conversation store; selected text is read from the canonical message at
 Context Builder time and its content digest is checked against the derived
 entry.
 
-Indexing is deterministic, model-free background work with finite leases and
-attempts. Inserting a canonical message atomically schedules its index input.
-A completed entry records only source identity, version, digest, bounded terms,
-and indexing metadata. Failed or incomplete indexing leaves canonical history
-unchanged and MUST NOT advance conversation activity.
+Indexing is deterministic background work with finite leases and attempts.
+Inserting a canonical message atomically schedules its index input. The Windows
+worker derives bounded lexical terms and one normalized vector with the pinned
+local `qwen3-embedding:0.6b` digest. A completed entry records source identity,
+version, digest, bounded terms, and a Vectorize mutation receipt; message text
+remains only in the canonical store. Failed or incomplete indexing leaves
+canonical history unchanged and MUST NOT advance conversation activity.
 
 Retrieval uses the current user message as its query and MUST enforce all of
 these boundaries:
@@ -222,8 +224,12 @@ these boundaries:
   deterministic; and
 - selected text retains its canonical message ID and immutable provenance.
 
-The current lexical index is metadata retrieval, not semantic search. Context
-metadata MUST say when eligible jobs are pending, processing, failed, missing a
+Retrieval unions bounded lexical and owner-namespaced semantic candidates,
+reranks that union deterministically, and reads selected text from canonical
+D1 messages. Pinned State remains a separate higher-priority layer and never
+depends on retrieval. A Vectorize query outage degrades only the semantic route;
+lexical and pinned memory remain available. Context metadata MUST report route
+availability and when eligible jobs are pending, processing, failed, missing a
 derived entry, or fail an integrity check. An incomplete index MAY return the
 bounded valid matches it has, but neither the model nor UI may describe those
 matches as exhaustive recall.

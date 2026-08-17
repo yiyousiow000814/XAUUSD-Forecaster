@@ -42,24 +42,24 @@ export type AssistantContextProfile = {
 // Operational safety data for the current bounded memory worker. The later
 // model router may select a different profile; conversation rows never do.
 export const DEFAULT_ASSISTANT_CONTEXT_PROFILE: AssistantContextProfile = {
-  id: "assistant-context-default-v1",
-  contextLimitTokens: 32_768,
+  id: "assistant-context-256k-v2",
+  contextLimitTokens: 262_144,
   greenThresholdRatio: 0.60,
   yellowThresholdRatio: 0.82,
   reservedSystemTokens: 2_048,
   reservedToolDefinitionTokens: 2_048,
-  reservedReasoningTokens: 4_096,
-  reservedOutputTokens: 4_096,
-  pinnedTokenBudget: 4_096,
-  summaryTokenBudget: 4_096,
-  historicalMemoryTokenBudget: 2_048,
-  recentTurnsTokenBudget: 8_192,
-  currentUserTokenBudget: 4_096,
-  toolEvidenceTokenBudget: 4_096,
-  recentTurnLimit: 4,
-  recentMessageLimit: 16,
-  compactionMessageLimit: 12,
-  compactionSourceTokenBudget: 14_000,
+  reservedReasoningTokens: 16_384,
+  reservedOutputTokens: 8_192,
+  pinnedTokenBudget: 8_192,
+  summaryTokenBudget: 16_384,
+  historicalMemoryTokenBudget: 16_384,
+  recentTurnsTokenBudget: 98_304,
+  currentUserTokenBudget: 16_384,
+  toolEvidenceTokenBudget: 32_768,
+  recentTurnLimit: 24,
+  recentMessageLimit: 96,
+  compactionMessageLimit: 48,
+  compactionSourceTokenBudget: 98_304,
 };
 
 export const ASSISTANT_MEMORY_LIMITS = {
@@ -315,6 +315,8 @@ export async function buildAssistantContext(
     conversationId: string;
     currentUserMessageId: string;
     toolEvidence?: Array<{ evidence_id: string; content: unknown }>;
+    semanticMatches?: Array<{ id: string; score: number }>;
+    semanticAvailable?: boolean;
   },
   profile = DEFAULT_ASSISTANT_CONTEXT_PROFILE,
 ) {
@@ -370,6 +372,8 @@ export async function buildAssistantContext(
     },
     tokenBudget: profile.historicalMemoryTokenBudget,
     estimateTokens: conservativeAssistantTokenEstimate,
+    semanticMatches: input.semanticMatches,
+    semanticAvailable: input.semanticAvailable,
   });
   const normalizedEvidence = toolEvidence.map(item => ({
     evidence_id: orderedUniqueStrings([item.evidence_id], "evidence_id", 1)[0],

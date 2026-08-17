@@ -358,6 +358,7 @@ def decode_gemini_assistant_turn(envelope: dict[str, object]) -> AssistantModelT
 
 def _ollama_openai_payload(
     payload: dict[str, object], *, model: str, thinking_level: str | None,
+    context_limit: int,
 ) -> dict[str, object]:
     """Translate the canonical Assistant envelope without changing its state."""
     messages: list[dict[str, object]] = []
@@ -428,6 +429,8 @@ def _ollama_openai_payload(
         "temperature": generation.get("temperature", 0),
         "max_tokens": generation.get("maxOutputTokens", 2_048),
         "stream": False,
+        "keep_alive": "5m",
+        "options": {"num_ctx": context_limit},
     }
     raw_tools = payload.get("tools")
     if isinstance(raw_tools, list):
@@ -985,6 +988,7 @@ class CapacityRoutedAssistantModelInvoker:
                     payload=_ollama_openai_payload(
                         payload, model=profile.model_id,
                         thinking_level=thinking_level,
+                        context_limit=profile.context_limit,
                     ),
                     input_tokens=conservative_assistant_token_estimate(payload),
                     decode=decode_ollama_assistant_turn,

@@ -11,9 +11,24 @@ from xauusd_forecaster.assistant_memory_index import (
     build_assistant_memory_index_result,
     tokenize_assistant_memory,
 )
+from xauusd_forecaster.local_embeddings import (
+    LOCAL_EMBEDDING_MODEL_DIGEST,
+    EmbeddingProfile,
+)
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "assistant_memory_tokenizer.json"
+
+
+class FakeEmbeddingClient:
+    def profile(self) -> EmbeddingProfile:
+        return EmbeddingProfile("qwen3-embedding:0.6b", LOCAL_EMBEDDING_MODEL_DIGEST)
+
+    def embed(self, texts, profile):
+        import numpy as np
+        result = np.zeros((len(texts), profile.dimensions), dtype=np.float32)
+        result[:, 0] = 1.0
+        return result
 
 
 def test_memory_tokenizer_matches_shared_cross_runtime_fixture() -> None:
@@ -32,7 +47,7 @@ def test_memory_index_result_is_content_derived_and_bounded() -> None:
         "source_message_id": "message-1",
         "index_version": ASSISTANT_MEMORY_INDEX_VERSION,
         "content": content,
-    })
+    }, FakeEmbeddingClient())
 
     assert result == {
         "action": "COMPLETE_MEMORY_INDEX",
@@ -45,6 +60,11 @@ def test_memory_index_result_is_content_derived_and_bounded() -> None:
             "美联", "联储", "储利", "利率", "率影", "影响", "响黄", "黄金",
             "xauusd",
         ],
+        "embedding_text_version": "assistant-message-embedding-v1",
+        "embedding_model": "qwen3-embedding:0.6b",
+        "embedding_model_digest": LOCAL_EMBEDDING_MODEL_DIGEST,
+        "embedding_dimensions": 1024,
+        "embedding": [1.0, *([0.0] * 1023)],
     }
 
 
@@ -63,4 +83,4 @@ def test_memory_index_result_rejects_invalid_claims(field: str, value: object) -
     }
     claim[field] = value
     with pytest.raises(ValueError):
-        build_assistant_memory_index_result(claim)
+        build_assistant_memory_index_result(claim, FakeEmbeddingClient())

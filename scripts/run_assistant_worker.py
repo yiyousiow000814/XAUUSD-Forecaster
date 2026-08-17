@@ -21,7 +21,6 @@ from scripts.run_dashboard_sync import (  # noqa: E402
     configured_targets,
 )
 from xauusd_forecaster.assistant_local_runtime import (  # noqa: E402
-    MINISTRAL_ASSISTANT_MODEL,
     QWEN_ASSISTANT_MODEL,
 )
 
@@ -55,7 +54,7 @@ def require_local_models() -> list[str]:
         for item in payload.get("models", [])
         if isinstance(item, dict)
     }
-    required = [QWEN_ASSISTANT_MODEL, MINISTRAL_ASSISTANT_MODEL]
+    required = [QWEN_ASSISTANT_MODEL]
     missing = [model for model in required if model not in names]
     if missing:
         raise RuntimeError("Missing local Assistant models: " + ", ".join(missing))
@@ -67,7 +66,9 @@ def keep_primary_resident() -> None:
         OLLAMA_GENERATE_URL,
         data=json.dumps({
             "model": QWEN_ASSISTANT_MODEL,
-            "keep_alive": -1,
+            # A permanent resident 256K primary prevents the fallback and local
+            # embedding model from sharing one 24 GB GPU safely.
+            "keep_alive": "5m",
         }, separators=(",", ":")).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",

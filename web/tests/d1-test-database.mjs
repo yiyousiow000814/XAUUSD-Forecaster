@@ -44,6 +44,7 @@ export const ASSISTANT_TEST_MIGRATIONS = [
   "0014_assistant_structured_content.sql",
   "0015_assistant_historical_memory.sql",
   "0016_assistant_evidence_validation.sql",
+  "0018_assistant_hybrid_memory.sql",
 ];
 
 export class D1TestDatabase {
