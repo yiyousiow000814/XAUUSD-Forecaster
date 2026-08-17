@@ -28,6 +28,7 @@ const { sortNewsEvidenceByTime } = await import("../app/_lib/news-evidence-order
 const { summarizeAssistantQueue } = await import("../app/api/_shared/assistant-operational-health.ts");
 const { globalOperationalAlerts } = await import("../app/_lib/operational-health.ts");
 const { operationalEvidenceText } = await import("../app/_lib/operational-evidence.ts");
+const { sourceHealthErrorPresentation } = await import("../app/_lib/source-health-presentation.ts");
 
 test("reserves the global shell alert for blocking operational faults", () => {
   const warning = { code: "OPS_AI_BACKLOG_OVERDUE", severity: "WARNING", scope: "ACTIVE_IMPACT", message_zh: "积压", blocking: false, evidence: {} };
@@ -72,6 +73,27 @@ test("summarizes Assistant queue evidence without exposing job content", () => {
     { code: "WORKER_FAILURE", count: 1 },
   ]);
   assert.equal(JSON.stringify(summary).includes("job_id"), false);
+});
+
+test("renders canonical source rate-limit fallback and generic failures", () => {
+  assert.deepEqual(sourceHealthErrorPresentation({
+    recovery_mode: "RATE_LIMITED",
+    fallback_label: "Google News Context",
+    fallback_health: "HEALTHY",
+    last_error_type: "RateLimited",
+  }, false), {
+    heading: "GDELT 限流 · Google News Context 自动接管",
+    fallback: "后备链路：Google News Context · HEALTHY",
+  });
+  assert.deepEqual(sourceHealthErrorPresentation({
+    recovery_mode: "AUTO_RECOVERING",
+    fallback_label: null,
+    fallback_health: null,
+    last_error_type: "TimeoutError",
+  }, false), {
+    heading: "当前异常 · TimeoutError",
+    fallback: null,
+  });
 });
 
 test("keeps internal matched-news identifiers out of user-facing prose", () => {
