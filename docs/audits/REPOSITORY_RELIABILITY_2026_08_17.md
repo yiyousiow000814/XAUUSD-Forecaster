@@ -29,11 +29,12 @@ news semantics, model policy, historical evidence, or production data.
 | Quote bridge | live | timestamped XAUUSD Bid/Ask JSONL | cTrader read-only quotes | local append-only quote files; collector fails closed on stale/malformed quotes |
 | Forward Collector | 10 seconds; news poll 60 seconds | source polls, news revisions, decisions, outcomes, training/generation receipts, backups | quotes, official/news transports, matured evidence | local SQLite and quote archive; startup reconciliation and daily backup |
 | News Annotator | 60 seconds | annotation, impact, title, Daily Brief, scheduler attempt evidence | current revisions, model capacity ledgers | leased local scheduler with bounded retry, dead letter, recovery authorization, WAL contention retry |
+| News identity embedding | annotator/backfill cadence | versioned asymmetric document/query vectors for identity retrieval | eligible point-in-time news evidence, Gemini Embedding 2 | local append-only receipts and vectors; bounded Gemini account capacity; incomplete backfill defers impact work |
 | Dashboard API | request-driven with bounded snapshot cache | read-only status, archive pages, market/history pages | local SQLite, heartbeat/status files | no write authority; last good bounded snapshot may serve briefly while refresh runs |
 | Dashboard Mirrors | 30 seconds | heartbeat and bounded Cloudflare/Sites resource mirrors | Dashboard API, D1/Worker endpoints | independent target state files, bounded resource cursors, transport retry, D1 invariant verification |
-| Local Assistant worker | 1 second | Assistant turn events and validated completion | Cloudflare worker claims, local Ollama models | remote lease token plus bounded attempts; no provider session authority |
-| Cloudflare Worker and D1 | request-driven | public snapshots, Assistant/News-Q&A queues, immutable messages/events | authenticated human and machine requests | D1 is a replaceable read mirror for Forecaster evidence; Assistant state is owner-scoped D1 authority |
-| Vectorize | background indexing and query | versioned Assistant memory vectors | canonical D1 messages and index jobs | exact index-generation gate; failed generations remain auditable but inactive |
+| Assistant | `PAUSED` | no new chat, Q&A, title, indexing, or compaction work | retained owner-scoped D1 history and UI availability contract | local Assistant worker, Ollama installer, and local model were removed; paused routes fail closed before admission |
+| Cloudflare Worker and D1 | request-driven | public snapshots and retained immutable Assistant messages/events | authenticated human and machine requests | D1 is a replaceable read mirror for Forecaster evidence; retained Assistant state remains owner-scoped D1 authority |
+| Assistant indexing / compaction | `PAUSED` | no new summary or memory-index generation | retained canonical D1 messages, historical receipts, and provider-neutral Vectorize foundation | no worker claims jobs; a future API model must activate one complete verified generation |
 
 Critical dependency path:
 
@@ -41,10 +42,11 @@ Critical dependency path:
 cTrader / source transports
         -> Collector -> local append-only SQLite
                          |-> Annotator scheduler -> annotations / impacts / briefs
+                         |                  |-> Gemini Embedding 2 -> identity recall
                          |-> read-only Dashboard API
                                   -> Mirrors -> Worker/D1 -> public dashboard
-Cloudflare Assistant queues -> local Assistant worker -> validated D1 completion
-canonical D1 messages -> memory index jobs -> version-gated Vectorize entries
+Cloudflare Assistant/D1 retained history -> PAUSED (no local worker claims)
+Assistant indexing and compaction       -> PAUSED (no active generation)
 ```
 
 The quote/decision path does not depend on Cloudflare, Assistant, or LLM
@@ -60,11 +62,12 @@ one universal enum.
 | Local news scheduler | `QUEUED`, `LEASED`, `BACKING_OFF`, `COMPLETED`, `DEAD_LETTER` | Annotator; expired lease requeues, bounded failure reaches dead letter | account-aware Gemini/Gemma routing | only validated current evidence may complete model work; claimable stalls and new dead letters are operational alerts |
 | Public news review | `COMPLETED`, `PROCESSING`, `ISOLATED` derived from payload states | local producer owns transitions; D1 verifies tuples | none in Worker | `READY`/`NOT_REQUIRED` complete; display repair/backoff process; dead letter/content unavailable isolate |
 | Daily Brief | `WAITING`, `UPDATING`, `DEFERRED`, `FINAL`, `DEGRADED`, `EMPTY` | Annotator and finalization ledger | bounded Gemma route | only final/degraded revisions display as completed synthesis; stalled/deferred reasons remain explicit |
-| Assistant turns | `PENDING`, `PROCESSING`, `ANSWERED`, `FAILED`, `REJECTED`, `EXPIRED`, `CANCELLED` | Worker route and lease owner | policy-selected model/capacity pool | only validated `ANSWERED` content is usable; terminal failures are owner-visible and monitored |
-| News Q&A | `PENDING`, `PROCESSING`, `ANSWERED`, `FAILED`, `REJECTED`, `EXPIRED` | Worker route | bounded metered route | evidence receipt required for answer completion |
-| Title jobs | `PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`, `CANCELLED` | title worker | bounded route | display-only; cannot mutate user title or conversation activity incorrectly |
-| Compaction / memory-index jobs | `PENDING`, `PROCESSING`, `COMPLETED`, `FAILED` | background worker | bounded route / local embedding | old valid summary/index remains active; generation mismatch fails closed |
-| Assistant capacity | `IN_FLIGHT`, `SUCCEEDED`, `FAILED`, `THROTTLED`, `CAPACITY_REJECTED`, `ABANDONED` | capacity ledger | next healthy credential/model allowed by policy | provenance only; secrets never persist |
+| Assistant turns (`PAUSED`) | historical `PENDING`, `PROCESSING`, `ANSWERED`, `FAILED`, `REJECTED`, `EXPIRED`, `CANCELLED` receipts remain | no active worker; paused admission fails closed | none configured | no new model-usable answer can be produced while paused |
+| News Q&A (`PAUSED`) | historical `PENDING`, `PROCESSING`, `ANSWERED`, `FAILED`, `REJECTED`, `EXPIRED` receipts remain | no active worker claims | none configured | retained answers remain auditable; no new completion is admitted |
+| Assistant title jobs (`PAUSED`) | historical `PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`, `CANCELLED` receipts remain | no active title worker | none configured | no background title mutation while paused |
+| Assistant compaction / memory-index jobs (`PAUSED`) | historical `PENDING`, `PROCESSING`, `COMPLETED`, `FAILED` receipts remain | no active background worker | no embedding route configured | last valid historical summaries/receipts remain; no new generation activates |
+| News identity embedding | append-only embedding rows and bounded backfill admission | News Annotator/backfill scheduler | Gemini Embedding 2 with independent account capacity | complete current generation may feed identity recall; missing backfill defers rather than bypasses retrieval |
+| Assistant capacity (`PAUSED`) | historical `IN_FLIGHT`, `SUCCEEDED`, `FAILED`, `THROTTLED`, `CAPACITY_REJECTED`, `ABANDONED` receipts remain | capacity ledger retained for provenance | none configured | no new Assistant reservation is admitted |
 
 Allowed transition families are:
 
@@ -77,11 +80,12 @@ Allowed transition families are:
 - Daily Brief: `WAITING/DEFERRED -> UPDATING -> FINAL`, with bounded
   `DEGRADED` or `EMPTY` terminal display states and startup reconciliation of
   incomplete updates;
-- Assistant and News Q&A: `PENDING -> PROCESSING -> ANSWERED`, or an explicit
-  terminal `FAILED/REJECTED/EXPIRED/CANCELLED` state owned by the lease route;
-- title, compaction, and index jobs: `PENDING -> PROCESSING -> COMPLETED`, or
-  explicit `FAILED` (and title-only `CANCELLED`). A generation mismatch cannot
-  be retried by an incompatible worker;
+- Assistant, News Q&A, title, compaction, and Assistant memory indexing are
+  currently paused. Their historical transitions remain immutable, but no local
+  worker may claim or advance them until one complete API-model generation is
+  configured and verified;
+- news embedding admission uses Gemini Embedding 2 and completes only against
+  the current text/model contract. Incomplete catch-up defers impact work;
 - capacity attempts: one `IN_FLIGHT` reservation reaches exactly one outcome.
   A provider/account fallback creates another audited attempt, never a rewrite.
 
@@ -146,8 +150,8 @@ semantic re-analysis is performed.
 - model generation identity is a complete feature/eligibility/policy triple,
   not one global version string;
 - market, news, and learning cursors have different commit boundaries;
-- Assistant, Q&A, title, compaction, and memory jobs have different terminal
-  semantics;
+- paused Assistant, Q&A, title, compaction, and memory receipts retain their
+  distinct historical terminal semantics;
 - D1 mirrors local evidence but does not become local recovery authority.
 
 ### Residual risk
@@ -164,8 +168,8 @@ Recent incidents cluster into four sibling families:
    startup reconciliation ordering;
 2. news display-repair convergence, recovery authorization consumption, and
    mirror `REPAIRING_DISPLAY` alignment;
-3. Assistant memory generation gates, incomplete embedding catch-up, and
-   context/routing provenance;
+3. paused Assistant generation boundaries, Gemini Embedding 2 news catch-up,
+   and context/routing provenance;
 4. runtime rollout preflight, status refresh latency, and mirror replay health.
 
 The common failure pattern was a correct local transition that was not covered
@@ -178,10 +182,10 @@ case-specific status label.
 | Required scenario | Durable coverage |
 | --- | --- |
 | continuous annotation and index completeness | representative-family regression plus existing bounded archive repeated-cycle tests |
-| provider 429 / temporary unavailable | model capacity pool failover, scheduler retry, Daily Brief deferral, and News Q&A/Assistant capacity tests |
+| provider 429 / temporary unavailable | model capacity pool failover, scheduler retry, Daily Brief deferral, and Gemini Embedding 2 admission tests; Assistant routes are paused |
 | SQLite WAL contention | Annotator lock retry test preserves database errors and retries the writer cycle |
 | repeated processing cycles | existing three-cycle mirror test plus new scheduler restart lifecycle |
-| generation mismatch | active model generation, Assistant memory cutover, and old-worker claim gates |
+| generation mismatch | active forecast generation, paused Assistant admission, removed local worker launcher, and news embedding model/text contract gates |
 | migration / cutover | forward-only generation activation and D1 migration compatibility tests |
 | mirror cursor updates | independent per-target state, overlap cursor, materialization-contract reset, and repeated incremental page tests |
 | local -> API -> D1 repair state | `REPAIRING_DISPLAY` producer, mirror, D1 invariant, and public review-state tests |
@@ -250,7 +254,8 @@ Required order:
 This audit does not authorize a direct production database write or manual D1
 repair.
 
-Local verification of the final change set completed with 901 Python tests,
+Local verification of the final change set completed with 898 Python tests,
 168 Worker/web tests (164 passed and four expected Preview-only skips), ESLint,
 Cloudflare type generation verification, and the Cloudflare-only repository
-policy check. No paid-provider request or production-data write was used.
+policy check. The Windows runtime contract subset also completed with 84 tests.
+No paid-provider request or production-data write was used.
