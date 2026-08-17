@@ -1,3 +1,5 @@
+import { normalizeOperationalEvent, type OperationalAlert } from "../../_lib/operational-health";
+
 export type AssistantQueueDefinition = {
   queue: string;
   label: string;
@@ -121,7 +123,7 @@ export async function assistantOperationalHealth(
     ));
   }
 
-  const alerts: Array<Record<string, unknown>> = [];
+  const alerts: OperationalAlert[] = [];
   for (const queue of queues) {
     const definition = definitions.find(item => item.queue === queue.queue)!;
     const evidence = {
@@ -150,7 +152,8 @@ export async function assistantOperationalHealth(
       evidence: { ...evidence, failure_codes: queue.failure_codes },
     });
   }
-  alerts.sort((left, right) => {
+  const normalizedAlerts = alerts.map(normalizeOperationalEvent);
+  normalizedAlerts.sort((left, right) => {
     const order = { ERROR: 0, WARNING: 1, INFO: 2 } as Record<string, number>;
     return order[String(left.severity)] - order[String(right.severity)]
       || String(left.code).localeCompare(String(right.code));
@@ -158,9 +161,9 @@ export async function assistantOperationalHealth(
   return {
     schema_version: "assistant-operational-health.v1",
     observed_at: timestamp,
-    status: alerts.some(alert => alert.severity === "ERROR")
-      ? "ERROR" : alerts.length ? "WARNING" : "HEALTHY",
-    alerts,
+    status: normalizedAlerts.some(alert => alert.severity === "ERROR")
+      ? "ERROR" : normalizedAlerts.length ? "WARNING" : "HEALTHY",
+    alerts: normalizedAlerts,
     queues,
   };
 }

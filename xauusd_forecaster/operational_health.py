@@ -11,6 +11,7 @@ from .news_semantics import (
     display_repair_checkpoint_predicate,
     model_usable_annotation_predicate,
 )
+from .operational_taxonomy import normalize_operational_event
 
 
 MONITOR_WINDOW = timedelta(minutes=15)
@@ -51,14 +52,10 @@ def _alert(
     evidence: dict[str, object],
     blocking: bool = False,
 ) -> dict[str, object]:
-    return {
-        "code": code,
-        "severity": severity,
-        "scope": scope,
-        "message_zh": message_zh,
-        "blocking": blocking,
-        "evidence": evidence,
-    }
+    return normalize_operational_event(
+        code, severity=severity, scope=scope, message_zh=message_zh,
+        evidence=evidence, blocking=blocking,
+    )
 
 
 def scheduler_health_snapshot(
@@ -261,7 +258,15 @@ def scheduler_health_snapshot(
             """SELECT j.job_id,j.state,j.available_at,j.attempt_count,
                       j.attempt_count - COALESCE(sum(
                         CASE WHEN a.failure_code IN (?) THEN 1 ELSE 0 END
-                      ),0) AS retry_attempt_count
+                      ),0) AS retry_attempt_count,
+                      (SELECT latest.failure_code
+                         FROM news_ai_job_attempts_v1 latest
+                        WHERE latest.job_id=j.job_id
+                          AND latest.failure_code IS NOT NULL
+                          AND latest.failure_code NOT IN (?)
+                        ORDER BY latest.attempt_number DESC,
+                                 latest.attempted_at DESC LIMIT 1
+                      ) AS latest_failure_code
                FROM news_ai_jobs_v1 j
                LEFT JOIN news_ai_job_attempts_v1 a ON a.job_id=j.job_id
                WHERE j.task_type=?
@@ -271,6 +276,7 @@ def scheduler_health_snapshot(
                HAVING retry_attempt_count>=?
                ORDER BY retry_attempt_count DESC,j.created_at,j.job_id LIMIT 1""",
             (
+                next(iter(MAINTENANCE_FAILURE_CODES)),
                 next(iter(MAINTENANCE_FAILURE_CODES)), task,
                 RETRY_LOOP_THRESHOLD, RETRY_LOOP_THRESHOLD,
             ),
@@ -302,6 +308,9 @@ def scheduler_health_snapshot(
                     "next_retry_at": (
                         None if max_claim_is_claimable else retry_available_at
                     ),
+                    "latest_failure_code": retry_candidate[
+                        "latest_failure_code"
+                    ],
                 },
             ))
         if (
@@ -476,6 +485,10 @@ def extend_with_component_alerts(
                     "status": status,
                     "age_seconds": component.get("age_seconds"),
                     "last_error": component.get("last_error"),
+                    "reason_codes": list(component.get("reason_codes") or []),
+                    "actionable_failure_counts": component.get(
+                        "actionable_failure_counts"
+                    ) or {},
                 },
             ))
     for source in news_sources:

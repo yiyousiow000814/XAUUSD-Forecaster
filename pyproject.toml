@@ -21,7 +21,7 @@ dependencies = [
 testpaths = ["tests"]
 
 [tool.setuptools.package-data]
-xauusd_forecaster = ["*.schema.json"]
+xauusd_forecaster = ["*.schema.json", "operational_codes.json"]
 
 [tool.setuptools.packages.find]
 include = ["xauusd_forecaster*"]

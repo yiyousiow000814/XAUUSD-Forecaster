@@ -45,6 +45,8 @@ def _semantic_pipeline_component(latest, *, now: datetime) -> dict:
             "age_seconds": None,
             "status": "STALE",
             "last_error": "尚无决策时点的新闻语义健康记录",
+            "reason_codes": [],
+            "actionable_failure_counts": {},
         }
     observed_at = datetime.fromisoformat(str(latest["observed_at"]))
     age_seconds = max(0.0, (now - observed_at).total_seconds())
@@ -63,6 +65,10 @@ def _semantic_pipeline_component(latest, *, now: datetime) -> dict:
             "OK" if latest["status"] == "HEALTHY" else "ERROR"
         ),
         "last_error": None if not reason_codes else ", ".join(reason_codes),
+        "reason_codes": list(reason_codes),
+        "actionable_failure_counts": json.loads(
+            latest["actionable_failure_counts_json"] or "{}"
+        ) if "actionable_failure_counts_json" in latest.keys() else {},
     }
 
 from xauusd_forecaster.factors import factor_coverage  # noqa: E402

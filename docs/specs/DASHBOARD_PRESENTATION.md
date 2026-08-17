@@ -35,6 +35,21 @@ Automated coverage must protect the boundary ownership rule. Deployed Preview
 verification remains required because source-level CSS assertions do not prove
 that a visible line is continuous after cascade and responsive overrides.
 
+## Operational incident hierarchy
+
+- The Health page combines normalized local and current Assistant events into
+  one incident summary. Preview must not present production Assistant D1 events
+  as branch-current evidence.
+- Incident cards lead with a human title, action state, root-cause summary,
+  bounded metrics, and affected components. Raw codes and evidence remain
+  reachable through a `查看技术详情` disclosure instead of leading the layout.
+- Local scheduler and Assistant D1 queue grids remain separate technical
+  diagnostics below the incident summary. Unified presentation does not merge
+  their execution or storage planes.
+- Technical disclosure controls have a minimum 44 CSS-pixel target and expose
+  native keyboard and `aria-expanded` state. Cards and technical evidence must
+  not cause horizontal overflow at desktop, 390x844, or 360x800.
+
 ## Operator-facing time
 
 - Durable records and API payloads retain canonical timezone-aware timestamps.

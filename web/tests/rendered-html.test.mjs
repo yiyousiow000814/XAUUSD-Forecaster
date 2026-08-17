@@ -26,14 +26,16 @@ const {
 const { publicImpactReason, publicNewsRecord } = await import("../app/_lib/public-news-copy.ts");
 const { sortNewsEvidenceByTime } = await import("../app/_lib/news-evidence-order.ts");
 const { summarizeAssistantQueue } = await import("../app/api/_shared/assistant-operational-health.ts");
-const { globalOperationalAlerts } = await import("../app/_lib/operational-health.ts");
+const { correlateOperationalEvents, globalOperationalIncidents } = await import("../app/_lib/operational-incidents.ts");
 const { operationalEvidenceText } = await import("../app/_lib/operational-evidence.ts");
 
 test("reserves the global shell alert for blocking operational faults", () => {
   const warning = { code: "OPS_AI_BACKLOG_OVERDUE", severity: "WARNING", scope: "ACTIVE_IMPACT", message_zh: "积压", blocking: false, evidence: {} };
   const blocking = { code: "OPS_RUNTIME_UPDATE_FAILED", severity: "ERROR", scope: "DEPLOYMENT", message_zh: "更新失败", blocking: true, evidence: {} };
-  assert.deepEqual(globalOperationalAlerts([warning]), []);
-  assert.deepEqual(globalOperationalAlerts([warning, blocking]), [blocking]);
+  assert.deepEqual(globalOperationalIncidents(correlateOperationalEvents([warning])), []);
+  const incidents = globalOperationalIncidents(correlateOperationalEvents([warning, blocking]));
+  assert.equal(incidents.length, 1);
+  assert.equal(incidents[0].root_event.code, blocking.code);
 });
 
 test("renders operational evidence timestamps for the UTC+8 operator surface", () => {
@@ -972,11 +974,14 @@ test("renders component and news-source health on a separate route", async () =>
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(layout, /<OperationalAlertBanner \/>/);
   const banner = readFileSync(new URL("../app/_components/OperationalAlertBanner.tsx", import.meta.url), "utf8");
-  assert.match(banner, /globalOperationalAlerts/);
+  assert.match(banner, /globalOperationalIncidents/);
   assert.match(banner, /className="operational-alert-toggle"/);
   assert.match(banner, /aria-expanded=\{expanded\}/);
-  assert.match(view, /OPERATIONAL ERROR CODES/);
-  assert.match(view, /alert\.code/);
+  assert.match(view, /OPERATIONAL INCIDENTS/);
+  assert.match(view, /incident\.root_event/);
+  assert.match(view, /查看技术详情/);
+  assert.match(view, /aria-expanded=\{showTechnical\}/);
+  assert.match(view, /hidden=\{!showTechnical\}/);
   assert.match(view, /completed_15m/);
   assert.match(view, /deferred_15m/);
   assert.match(view, /provider_dispatch_deferred_15m/);
@@ -1001,6 +1006,8 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(css, /\.source-health\.show-healthy article\.is-healthy \.news-source-details \{ display:none; \}/);
   assert.match(css, /\.source-health\.show-healthy article\.is-healthy\.is-detail-open \.news-source-details \{ display:contents; \}/);
   assert.match(css, /\.operational-alert-banner a \{[^}]*min-height: 44px/);
+  assert.match(css, /\.incident-technical-details > button[^}]*min-height:44px/);
+  assert.match(css, /\.operational-incident-card \{[^}]*min-width:0/);
   assert.match(css, /\.operational-alert-toggle \{ display:none; cursor:pointer; \}/);
   assert.match(css, /\.operational-alert-banner\.is-expanded \.operational-alert-detail \{ display:flex/);
   assert.match(css, /@media \(max-width: 640px\)[\s\S]*\.scheduler-health-grid \{ grid-template-columns: 1fr; \}/);

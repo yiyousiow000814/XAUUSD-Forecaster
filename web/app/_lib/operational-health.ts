@@ -1,3 +1,21 @@
+import operationalCodeRegistry from "../../../xauusd_forecaster/operational_codes.json" with { type: "json" };
+
+export type OperationalCategory = "CAPACITY" | "PROVIDER" | "BACKLOG" | "RETRY" | "MODEL_OUTPUT" | "DATA" | "SEMANTIC" | "SYNC" | "RUNTIME" | "DEPLOYMENT" | "CONFIGURATION" | "DEPENDENCY" | "SECURITY";
+export type OperationalRole = "ROOT" | "SYMPTOM" | "STATE";
+export type RecoveryPolicy = "AUTO" | "CONDITIONAL" | "OPERATOR";
+
+export type OperationalCodeDefinition = {
+  code: string;
+  kind: "ALERT" | "FAILURE_REASON" | "HEALTH_REASON";
+  category: OperationalCategory;
+  root_cause_family: string;
+  default_role: OperationalRole;
+  recovery_policy: RecoveryPolicy;
+  title_zh: string;
+  description: string;
+  allowed_severities?: Array<OperationalAlert["severity"]>;
+};
+
 export type OperationalAlert = {
   code: string;
   severity: "ERROR" | "WARNING" | "INFO";
@@ -5,7 +23,31 @@ export type OperationalAlert = {
   message_zh: string;
   blocking: boolean;
   evidence: Record<string, unknown>;
+  category?: OperationalCategory;
+  root_cause_family?: string;
+  role?: OperationalRole;
+  recovery_policy?: RecoveryPolicy;
 };
+
+export const OPERATIONAL_CODE_REGISTRY_VERSION = operationalCodeRegistry.schema_version;
+export const operationalCodeDefinitions = new Map(
+  (operationalCodeRegistry.codes as OperationalCodeDefinition[]).map(item => [item.code, item]),
+);
+
+export function normalizeOperationalEvent(event: OperationalAlert): Required<OperationalAlert> {
+  const definition = operationalCodeDefinitions.get(event.code);
+  return {
+    ...event,
+    evidence: definition ? event.evidence : {
+      ...event.evidence,
+      taxonomy_error: `UNREGISTERED_OPERATIONAL_CODE:${event.code}`,
+    },
+    category: event.category ?? definition?.category ?? "RUNTIME",
+    root_cause_family: event.root_cause_family ?? definition?.root_cause_family ?? "UNREGISTERED_OPERATIONAL_CODE",
+    role: event.role ?? definition?.default_role ?? "ROOT",
+    recovery_policy: event.recovery_policy ?? definition?.recovery_policy ?? "OPERATOR",
+  };
+}
 
 export type SchedulerTaskHealth = {
   task_type: string;

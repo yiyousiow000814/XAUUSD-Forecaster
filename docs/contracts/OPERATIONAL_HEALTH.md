@@ -14,61 +14,46 @@ scope, concise user-facing explanation, and bounded evidence fields. Messages
 may improve without changing the code. A code changes only when the failure
 meaning or required operator response changes.
 
-The initial cross-component catalog is:
+`xauusd_forecaster/operational_codes.json` is the authoritative machine-readable
+catalog. It classifies alert, task-failure, and structured health-reason codes
+with a category, root-cause family, default root/symptom/state role, recovery
+policy, Chinese title, and bounded description. Python and TypeScript consume
+that same file; Markdown must not duplicate its complete mapping.
 
-| Code | Meaning |
-| --- | --- |
-| `OPS_AI_JOB_RETRY_LOOP` | One active AI job has been claimed unusually often. Claimable or leased work is blocking; a future scheduled retry remains a visible non-blocking warning with its next retry time. |
-| `OPS_AI_ROUTE_CAPACITY_SATURATED` | Capacity deferrals exceed useful completions for a model route. |
-| `OPS_AI_PIPELINE_STALLED` | Work exceeded its route-specific SLA and the route made no progress during the monitoring window. |
-| `OPS_AI_BACKLOG_OVERDUE` | The oldest currently claimable work exceeded its task-specific queue SLA. Future scheduled retries do not count as overdue backlog. |
-| `OPS_AI_FAILURE_RATE_HIGH` | Recent model, transport, or validation failures exceed the expected rate. |
-| `OPS_AI_NEW_DEAD_LETTER` | New terminally isolated work appeared during the monitoring window. |
-| `OPS_NEWS_ANNOTATION_CONTRACT_STATE_INVALID` | A superseded display-failure placeholder remains actionable on the latest canonical relevant revision and requires recovery before model use. Irrelevant evidence and noncanonical collection copies do not alert. |
-| `OPS_COMPONENT_UNHEALTHY` | A published runtime component is warning, stale, or in error. |
-| `OPS_NEWS_SOURCE_UNHEALTHY` | A monitored news source is degraded, stale, or failing. |
-| `OPS_RUNTIME_UPDATE_FAILED` | A runtime update failed and was retained or rolled back. |
-| `OPS_SYNC_RESOURCE_FAILED` | A named mirror resource failed while the target heartbeat remained available; evidence preserves its upstream error code. |
-| `OPS_NEWS_MIRROR_STATE_DIVERGED` | The public news mirror is reachable but violates its state, detail, derived-column, cluster, or completed-contract invariants. |
-| `OPS_DAILY_BRIEF_DEFERRED` | Daily Brief generation is waiting for a retry after a coded failure or capacity deferral. |
-| `OPS_DAILY_BRIEF_STALLED` | Daily Brief generation remained pending at least 30 minutes beyond its durable adaptive next-eligible time. |
-| `OPS_DAILY_BRIEF_DEGRADED` | Daily Brief finalized with terminally unreviewed inputs. |
-| `OPS_ASSISTANT_JOB_RETRY_LOOP` | One active Cloudflare Assistant job reached its bounded retry ceiling. |
-| `OPS_ASSISTANT_PIPELINE_STALLED` | A claimable Assistant queue exceeded its SLA without recent completion. |
-| `OPS_ASSISTANT_BACKLOG_OVERDUE` | The oldest claimable Assistant job exceeded its queue SLA while progress continued. |
-| `OPS_ASSISTANT_NEW_TERMINAL_FAILURE` | A Cloudflare Assistant queue recorded a new terminal failure. |
-| `OPS_ASSISTANT_HEALTH_UNAVAILABLE` | The production page could not read aggregate Assistant D1 health. |
-| `OPS_PUBLIC_ENDPOINT_UNAVAILABLE` | The external probe could not obtain a required public page or API. |
-| `OPS_PUBLIC_RENDER_CONTRACT_FAILED` | A public page responded but omitted its server-rendered identity marker. |
-| `OPS_PUBLIC_RESPONSE_INVALID` | A public operational API returned invalid JSON or the wrong schema. |
-| `OPS_PUBLIC_ASSISTANT_HEALTH_UNAVAILABLE` | The external probe could not obtain current Assistant health. |
+Every emitted event is normalized through the catalog and retains `code`,
+`severity`, `scope`, `blocking`, `message_zh`, and bounded `evidence`. It also
+publishes `category`, `root_cause_family`, `role`, and `recovery_policy`.
+Unknown runtime codes remain visible with an explicit taxonomy error. Contract
+tests fail when a published `OPS_*` code is absent from the catalog.
 
 Provider work rejected before transport preserves the admission layer that
 deferred it. Local account/model quota uses `MODEL_CAPACITY_DEFERRED`; adaptive
 provider pacing uses `PROVIDER_DISPATCH_DEFERRED`. Neither code proves an HTTP
 request was sent.
 
-Task-level failure evidence uses these existing stable families:
+New code paths must reuse a catalog meaning or update the canonical catalog.
+They must not persist a changing exception sentence as the only diagnostic key.
 
-| Code | Meaning |
-| --- | --- |
-| `MODEL_CAPACITY_DEFERRED` | Local quota admission rejected the request before transport. |
-| `PROVIDER_DISPATCH_DEFERRED` | The adaptive provider governor intentionally deferred this task before transport. |
-| `MODEL_ROUTE_DISABLED` | No enabled model route was available for the task. |
-| `NEWS_EMBEDDING_BACKFILL_PENDING` | The append-only identity embedding generation is catching up; defer impact work without counting this maintenance state as a model-output failure. Provider capacity admission remains authoritative for every catch-up batch. |
-| `MODEL_OUTPUT_CONTRACT_FAILED` | A response arrived but violated the semantic or evidence contract. |
-| `MODEL_OUTPUT_INVALID` | A response arrived but could not be decoded as the required schema. |
-| `PROVIDER_HTTP_ERROR` | The provider returned an HTTP failure. |
-| `MODEL_REQUEST_FAILED` | Transport or request execution failed without a more specific provider code. |
-| `SCHEDULER_EXECUTION_FAILED` | The scheduler caught an unexpected task execution exception. |
-| `STATUS_SNAPSHOT_REFRESH_IN_PROGRESS` | The local status API is rebuilding its bounded snapshot; runtime observation is deferred without consuming its rollback budget. |
-| `STATUS_ENDPOINT_HTTP_ERROR` | The local status API returned an HTTP failure other than the known refresh deferral. |
-| `STATUS_ENDPOINT_UNAVAILABLE` | Runtime observation could not reach the local status API. |
-| `STATUS_ENDPOINT_URL_INVALID` | A production-shape probe was pointed outside the permitted loopback status endpoint. |
-| `STATUS_RESPONSE_INVALID` | The local status API responded but did not return the required JSON object. |
+## Incident projection
 
-New code paths must reuse one of these meanings or add a documented code. They
-must not persist a changing exception sentence as the only diagnostic key.
+Detector execution remains in its authoritative domain. The backend event set
+remains authoritative for safety gates and blocking state. The Web incident
+correlator is a deterministic presentation projection only; it creates no
+mutable incident database and cannot weaken scheduler or health decisions.
+
+Correlation uses controlled codes, scopes, root-cause families, and structured
+evidence. It never parses human-readable messages. Local capacity, provider
+pacing, and model-output failures remain separate families. Queue backlog,
+stall, Daily Brief deferral, and semantic-component pending state join a root
+incident only when coded evidence establishes the relationship. An unexplained
+component reason remains a standalone incident.
+
+An incident retains a deterministic key, category, maximum child severity,
+conservative blocking flag, active/recovering state, action state, root event,
+related events, affected scopes, bounded metrics, and technical-event count.
+Scheduled future retry can be `AUTO_RECOVERING`; claimable work without progress
+or any blocking child remains `ACTION_REQUIRED`. All raw events and evidence
+remain available in technical details.
 
 ## Coverage
 
@@ -143,8 +128,11 @@ a claim that the client surface is healthy.
 ## Visibility
 
 Warnings and errors must be visible without expanding a diagnostic control.
-Production pages show a global alert banner linking to the health page. The
-health page shows the error code, scope, evidence, and per-route progress.
+Production pages show a global incident banner linking to the health page. The
+Health page leads with correlated incident cards and keeps raw codes, scopes,
+evidence, local scheduler progress, and Assistant D1 queue evidence in
+accessible technical disclosures. Banner counts use blocking/error incident
+count, not raw event count; a blocking child keeps its incident globally visible.
 Preview snapshots must not present frozen operational alerts as current live
 state.
 
