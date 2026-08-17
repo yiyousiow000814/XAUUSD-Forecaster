@@ -43,6 +43,43 @@ def _dashboard_module():
     return module
 
 
+def test_semantic_component_separates_freshness_from_readiness() -> None:
+    module = _dashboard_module()
+    now = datetime(2026, 8, 17, 6, 0, tzinfo=UTC)
+    fresh_pending = {
+        "observed_at": (now - timedelta(seconds=18)).isoformat(),
+        "heartbeat_at": (now - timedelta(seconds=10)).isoformat(),
+        "status": "UNHEALTHY",
+        "reason_codes_json": json.dumps(["ACTIONABLE_NEWS_SEMANTICS_PENDING"]),
+    }
+
+    component = module._semantic_pipeline_component(fresh_pending, now=now)
+
+    assert component["status"] == "ERROR"
+    assert component["age_seconds"] == 18
+    assert component["last_error"] == "ACTIONABLE_NEWS_SEMANTICS_PENDING"
+
+    stale_snapshot = {
+        **fresh_pending,
+        "observed_at": (
+            now - timedelta(seconds=module.SEMANTIC_SNAPSHOT_MAX_STALE_SECONDS + 1)
+        ).isoformat(),
+        "status": "HEALTHY",
+        "reason_codes_json": "[]",
+    }
+    assert module._semantic_pipeline_component(
+        stale_snapshot, now=now,
+    )["status"] == "STALE"
+
+    stale_heartbeat = {
+        **fresh_pending,
+        "reason_codes_json": json.dumps(["ANNOTATOR_HEARTBEAT_STALE"]),
+    }
+    assert module._semantic_pipeline_component(
+        stale_heartbeat, now=now,
+    )["status"] == "STALE"
+
+
 def test_deployment_status_does_not_mislabel_local_edits_as_remote_drift() -> None:
     module = _dashboard_module()
 
