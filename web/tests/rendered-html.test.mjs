@@ -2122,6 +2122,7 @@ test("renders a recoverable responsive Assistant workbench without unsafe HTML",
   assert.match(transcript, /AURUM \/ PROVISIONAL/);
   assert.match(transcript, /ASSISTANT PAUSED/);
   assert.match(transcript, /等待新的 API 模型/);
+  assert.doesNotMatch(transcript, /本机模型正在处理其他问题/);
   assert.match(transcript, /disabled=\{Boolean\(activeTurn\) \|\| preview \|\| paused\}/);
   assert.doesNotMatch(transcript, /ASSISTANT_CONTEXT_LIMIT_TOKENS/);
   assert.match(transcript, /ASSISTANT_MAX_MESSAGE_BYTES \* 0\.75/);

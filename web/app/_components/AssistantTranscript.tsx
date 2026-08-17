@@ -29,7 +29,7 @@ const byteLength = (value: string) => new TextEncoder().encode(value).length;
 
 const failureLabel = (code: string | null) => {
   const labels: Record<string, string> = {
-    NO_MODEL_CAPACITY: "本机模型正在处理其他问题，请稍后重试。",
+    NO_MODEL_CAPACITY: "当时没有可用模型容量，请稍后重试。",
     MODEL_OUTPUT_INVALID: "模型回答未通过证据与格式检查。",
     NO_COMPATIBLE_MODEL: "当前问题超过本机安全上下文。",
     USER_CANCELLED: "本轮已取消。",
