@@ -24,6 +24,7 @@ type StatusPayload = {
   news_source_health: Array<{
     source: string; label: string; role: string; health: "HEALTHY" | "DEGRADED" | "ERROR" | "STALE" | "FALLBACK_ACTIVE" | "WARMING_UP";
     latest_poll_time: string | null; last_success: string | null;
+    freshness_reference_time: string | null; freshness_reference_status: "OK" | "PARTIAL" | null;
     age_seconds: number | null; last_error_time: string | null; last_error_type: string | null; last_error: string | null;
     poll_count: number; ok_count: number; item_count: number; revision_count: number; full_text_count: number;
     recovery_mode: string | null; fallback_label: string | null; fallback_health: string | null; next_retry_time: string | null;
@@ -73,7 +74,7 @@ function SourceHealthCard({ item }: { item: NewsSourceHealth }) {
   const [showDetails, setShowDetails] = useState(false);
   return <article className={`${healthy ? "is-healthy" : "is-attention"} ${showDetails ? "is-detail-open" : ""}`}>
     <div><strong>{item.label}</strong><small>{item.role} · {item.source}</small></div>
-    <div><b className={`source-health-badge health-${item.health.toLowerCase()}`}>{item.health === "FALLBACK_ACTIVE" ? "后备源接管中" : item.health === "WARMING_UP" ? "等待首次正式发布" : item.health}</b><small>{localTime(item.latest_poll_time)}</small><small>最近成功 {localTime(item.last_success)}</small>{item.next_retry_time ? <small>自动重试 {localTime(item.next_retry_time)}</small> : null}{item.semantic_message ? <small>{item.semantic_message}</small> : null}</div>
+    <div><b className={`source-health-badge health-${item.health.toLowerCase()}`}>{item.health === "FALLBACK_ACTIVE" ? "后备源接管中" : item.health === "WARMING_UP" ? "等待首次正式发布" : item.health}</b><small>{localTime(item.latest_poll_time)}</small><small>最近成功 {localTime(item.last_success)}</small>{item.freshness_reference_status === "PARTIAL" ? <small>新鲜度参考 {localTime(item.freshness_reference_time)} · 部分成功</small> : null}{item.next_retry_time ? <small>自动重试 {localTime(item.next_retry_time)}</small> : null}{item.semantic_message ? <small>{item.semantic_message}</small> : null}</div>
     {healthy && <button className="source-detail-toggle" type="button" aria-expanded={showDetails} onClick={() => setShowDetails(value => !value)}>{showDetails ? "收起来源证据" : "查看来源证据"}</button>}
     <div className="news-source-details">
       <div><strong><CountValue value={item.item_count} suffix=" 篇" /></strong><small><CountValue value={item.revision_count} format="exact" suffix=" revisions" /> · 完整正文 <CountValue value={item.full_text_count} format="exact" /></small><small>轮询 <CountValue value={item.ok_count} format="exact" />/<CountValue value={item.poll_count} format="exact" /> 完成</small></div>

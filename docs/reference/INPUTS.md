@@ -64,6 +64,10 @@ freshness escalation. A `PARTIAL` poll never advances normal cadence, but its
 usable evidence may be the newest health-freshness reference while recovery of
 failed siblings remains active. Recovery reads only the four newest indexed poll
 receipts; lifetime history remains append-only audit evidence.
+Source-health payloads keep these clocks explicit: `last_success` is the latest
+complete `OK`, while `freshness_reference_time` and
+`freshness_reference_status` identify the newest usable `OK` or `PARTIAL`
+receipt used to calculate age and health freshness.
 
 ## 4. Optional synchronized symbols
 

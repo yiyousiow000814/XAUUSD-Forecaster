@@ -984,6 +984,9 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(view, /componentHasAttention/);
   assert.match(view, /sourceHasAttention/);
   assert.match(view, /function SourceHealthCard/);
+  assert.match(view, /最近成功 \{localTime\(item\.last_success\)\}/);
+  assert.match(view, /item\.freshness_reference_status === "PARTIAL"/);
+  assert.match(view, /新鲜度参考 \{localTime\(item\.freshness_reference_time\)\} · 部分成功/);
   assert.match(view, /className="source-detail-toggle"/);
   assert.match(view, /className="news-source-details"/);
   assert.match(view, /showDetails \? "收起来源证据" : "查看来源证据"/);

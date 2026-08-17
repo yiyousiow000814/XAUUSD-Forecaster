@@ -388,12 +388,14 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
                       sum(status='OK') ok_count,
                       sum(status='PARTIAL') partial_count,
                       sum(status='ERROR') error_count,
-                      max(CASE WHEN status='OK' THEN fetched_time END) last_success,
-                      max(CASE WHEN status='PARTIAL' THEN fetched_time END)
-                        last_partial_success,
-                      max(CASE WHEN status IN ('OK','PARTIAL')
-                               THEN fetched_time END) last_usable_success
+                      max(CASE WHEN status='OK' THEN fetched_time END) last_success
                FROM source_polls WHERE source=?""",
+            (source,),
+        ).fetchone()
+        freshness_reference = connection.execute(
+            """SELECT fetched_time,status FROM source_polls
+               WHERE source=? AND status IN ('OK','PARTIAL')
+               ORDER BY fetched_time DESC,poll_id DESC LIMIT 1""",
             (source,),
         ).fetchone()
         latest = connection.execute(
@@ -437,16 +439,18 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
             revision_count = int(evidence["revision_count"] or 0)
             latest_item_time = evidence["latest_item_time"]
         latest_status = latest["status"] if latest else "NO_DATA"
-        success_reference = polls["last_usable_success"]
-        success_time = _parse_utc(success_reference)
+        freshness_reference_time = (
+            freshness_reference["fetched_time"] if freshness_reference else None
+        )
+        freshness_time = _parse_utc(freshness_reference_time)
         age_seconds = (
-            max(0.0, (now - success_time).total_seconds())
-            if success_time else None
+            max(0.0, (now - freshness_time).total_seconds())
+            if freshness_time else None
         )
         recovery = source_poll_recovery_state(
             connection, source, observed_at=now,
         )
-        success_is_fresh = (
+        freshness_is_fresh = (
             age_seconds is not None and age_seconds <= stale_minutes * 60
         )
         recovery_mode = recovery["recovery_mode"] if recovery else None
@@ -454,11 +458,11 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
             health = "ERROR"
         elif latest_status in {"ERROR", "PARTIAL"}:
             health = (
-                "DEGRADED" if success_is_fresh
-                else "STALE" if success_time is not None
+                "DEGRADED" if freshness_is_fresh
+                else "STALE" if freshness_time is not None
                 else "ERROR"
             )
-        elif age_seconds is None or not success_is_fresh:
+        elif age_seconds is None or not freshness_is_fresh:
             health = "STALE"
         elif revision_sources and item_count == 0:
             health = "WARMING_UP"
@@ -470,7 +474,7 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
             semantic_message = "来源鉴权或配置失败；需要操作员检查凭据与权限"
         elif health == "DEGRADED" and recovery is not None:
             semantic_status = "AUTO_RECOVERING"
-            semantic_message = "最近成功数据仍新鲜；传输失败正在按有界退避自动重试"
+            semantic_message = "最新可用数据仍新鲜；传输失败正在按有界退避自动重试"
         elif health in {"ERROR", "STALE"}:
             semantic_status = "SOURCE_ERROR"
             semantic_message = "来源当前轮询失败；请查看最近错误与后备链路状态"
@@ -487,7 +491,12 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
             "source": source, "label": label, "role": role, "health": health,
             "latest_status": latest_status,
             "latest_poll_time": latest["fetched_time"] if latest else None,
-            "last_success": success_reference, "age_seconds": age_seconds,
+            "last_success": polls["last_success"],
+            "freshness_reference_time": freshness_reference_time,
+            "freshness_reference_status": (
+                freshness_reference["status"] if freshness_reference else None
+            ),
+            "age_seconds": age_seconds,
             "last_error_time": latest_error["fetched_time"] if latest_error else None,
             "last_error_type": latest_error["error_type"] if latest_error else None,
             "last_error": latest_error["error"] if latest_error else None,

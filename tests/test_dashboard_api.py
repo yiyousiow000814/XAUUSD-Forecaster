@@ -1039,12 +1039,13 @@ def test_transient_source_failure_escalates_when_last_success_is_stale(
 def test_newer_partial_is_the_freshness_reference_but_keeps_recovery_active(
     tmp_path,
 ) -> None:
-    now = datetime.now(UTC).replace(microsecond=0)
-    partial_at = now - timedelta(minutes=2)
+    now = datetime(2026, 8, 18, 4, 30, tzinfo=UTC)
+    ok_at = datetime(2026, 8, 18, 3, 0, tzinfo=UTC)
+    partial_at = datetime(2026, 8, 18, 4, 20, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
     ledger.append_source_poll({
         "poll_id": "eia-old-ok", "source": "eia_open_data_api",
-        "fetched_time": now - timedelta(hours=2), "status": "OK",
+        "fetched_time": ok_at, "status": "OK",
     })
     ledger.append_source_poll({
         "poll_id": "eia-new-partial", "source": "eia_open_data_api",
@@ -1055,8 +1056,10 @@ def test_newer_partial_is_the_freshness_reference_but_keeps_recovery_active(
     rows = _dashboard_module()._news_source_health(ledger.connection, now)
     eia = next(row for row in rows if row["source"] == "eia_open_data_api")
 
-    assert datetime.fromisoformat(eia["last_success"]) == partial_at
-    assert eia["age_seconds"] == 120
+    assert datetime.fromisoformat(eia["last_success"]) == ok_at
+    assert datetime.fromisoformat(eia["freshness_reference_time"]) == partial_at
+    assert eia["freshness_reference_status"] == "PARTIAL"
+    assert eia["age_seconds"] == 600
     assert eia["health"] == "DEGRADED"
     assert eia["recovery_mode"] == "PARTIAL_RECOVERY"
     assert eia["next_retry_time"] == (
@@ -1065,12 +1068,13 @@ def test_newer_partial_is_the_freshness_reference_but_keeps_recovery_active(
 
 
 def test_newer_complete_success_wins_over_older_partial(tmp_path) -> None:
-    now = datetime.now(UTC).replace(microsecond=0)
-    ok_at = now - timedelta(minutes=2)
+    now = datetime(2026, 8, 18, 4, 30, tzinfo=UTC)
+    partial_at = datetime(2026, 8, 18, 3, 0, tzinfo=UTC)
+    ok_at = datetime(2026, 8, 18, 4, 20, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
     ledger.append_source_poll({
         "poll_id": "eia-old-partial", "source": "eia_open_data_api",
-        "fetched_time": now - timedelta(minutes=10), "status": "PARTIAL",
+        "fetched_time": partial_at, "status": "PARTIAL",
         "error_type": "SeriesErrors", "error": "historical partial",
     })
     ledger.append_source_poll({
@@ -1082,6 +1086,9 @@ def test_newer_complete_success_wins_over_older_partial(tmp_path) -> None:
     eia = next(row for row in rows if row["source"] == "eia_open_data_api")
 
     assert datetime.fromisoformat(eia["last_success"]) == ok_at
+    assert datetime.fromisoformat(eia["freshness_reference_time"]) == ok_at
+    assert eia["freshness_reference_status"] == "OK"
+    assert eia["age_seconds"] == 600
     assert eia["health"] == "HEALTHY"
     assert eia["recovery_mode"] is None
 
@@ -1105,9 +1112,40 @@ def test_partial_without_historical_ok_has_factual_freshness(
     rows = _dashboard_module()._news_source_health(ledger.connection, now)
     eia = next(row for row in rows if row["source"] == "eia_open_data_api")
 
-    assert datetime.fromisoformat(eia["last_success"]) == partial_at
+    assert eia["last_success"] is None
+    assert datetime.fromisoformat(eia["freshness_reference_time"]) == partial_at
+    assert eia["freshness_reference_status"] == "PARTIAL"
     assert eia["health"] == expected_health
     assert eia["recovery_mode"] == "PARTIAL_RECOVERY"
+
+
+def test_transient_failure_after_fresh_partial_remains_auto_recovering(
+    tmp_path,
+) -> None:
+    now = datetime(2026, 8, 18, 4, 30, tzinfo=UTC)
+    partial_at = now - timedelta(minutes=2)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger.append_source_poll({
+        "poll_id": "eia-partial", "source": "eia_open_data_api",
+        "fetched_time": partial_at, "status": "PARTIAL",
+        "error_type": "SeriesErrors", "error": "one sibling failed",
+    })
+    ledger.append_source_poll({
+        "poll_id": "eia-timeout", "source": "eia_open_data_api",
+        "fetched_time": now, "status": "ERROR",
+        "error_type": "TimeoutError", "error": "transport timed out",
+    })
+
+    rows = _dashboard_module()._news_source_health(ledger.connection, now)
+    eia = next(row for row in rows if row["source"] == "eia_open_data_api")
+
+    assert eia["last_success"] is None
+    assert datetime.fromisoformat(eia["freshness_reference_time"]) == partial_at
+    assert eia["freshness_reference_status"] == "PARTIAL"
+    assert eia["age_seconds"] == 120
+    assert eia["health"] == "DEGRADED"
+    assert eia["semantic_status"] == "AUTO_RECOVERING"
+    assert eia["recovery_mode"] == "AUTO_RECOVERING"
 
 
 @pytest.mark.parametrize("source", [spec.source for spec in NEWS_SOURCE_REGISTRY])
