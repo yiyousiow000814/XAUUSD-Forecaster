@@ -916,7 +916,7 @@ def run_bounded_assistant_agent(
             )
         call_count = len(turn.tool_calls)
         if (
-            call_count > budgets.max_parallel_tool_calls
+            call_count > planned_tool_calls
             or tool_calls_used + call_count > budgets.max_tool_calls_per_user_turn
         ):
             # Reject the complete plan before executing any subset.
@@ -938,7 +938,7 @@ def run_bounded_assistant_agent(
                 turn.tool_calls,
                 actor=request.actor,
                 retrieval_cutoff=canonical_cutoff,
-                max_parallel_calls=budgets.max_parallel_tool_calls,
+                max_parallel_calls=planned_tool_calls,
                 max_total_result_tokens=remaining_result_tokens,
                 max_retrieved_evidence=max(0, remaining_evidence),
             )

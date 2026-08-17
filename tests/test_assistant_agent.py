@@ -594,6 +594,37 @@ def test_over_budget_tool_plan_executes_no_partial_calls() -> None:
     assert executed == []
 
 
+def test_tool_plan_cannot_exceed_the_advertised_authorized_tool_count() -> None:
+    executed: list[str] = []
+
+    def invoke(_payload, **_kwargs):
+        content = {
+            "role": "model",
+            "parts": [
+                {"functionCall": {
+                    "id": f"call-{index}",
+                    "name": "market_price_v1",
+                    "args": {"symbol": "XAUUSD"},
+                }}
+                for index in range(2)
+            ],
+        }
+        return _routed(content, 1)
+
+    budgets = replace(
+        DEFAULT_ASSISTANT_AGENT_BUDGETS,
+        max_model_turns_per_user_turn=2,
+        max_tool_calls_per_user_turn=2,
+        max_parallel_tool_calls=2,
+    )
+    with pytest.raises(AssistantAgentContractError) as captured:
+        run_bounded_assistant_agent(
+            _request(), _registry(executed), invoke, budgets=budgets,
+        )
+    assert captured.value.error_code == "TOOL_PLAN_BUDGET_EXCEEDED"
+    assert executed == []
+
+
 def test_active_context_budget_fails_before_model_transport() -> None:
     invoked = False
 
