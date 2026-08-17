@@ -11,6 +11,12 @@ npx wrangler d1 migrations apply aurum-signal-room --remote
 npx wrangler deploy
 ```
 
+When a migration schedules a new version of work for a Windows consumer, use a
+two-phase cutover. First deploy the claim-generation compatibility gate and
+verify the old worker receives no new-generation item. Then apply the scheduling
+migration and activate the matching runtime revision. A migration that exposes
+new-generation jobs to an unversioned old claimant must not be applied.
+
 Before enabling the private Assistant, configure one Cloudflare Access
 self-hosted application for these production paths only:
 

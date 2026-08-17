@@ -14,7 +14,7 @@ from .local_embeddings import (
 )
 
 
-ASSISTANT_MEMORY_INDEX_VERSION = "assistant-memory-hybrid-v2"
+ASSISTANT_MEMORY_INDEX_VERSION = "assistant-memory-hybrid-v3"
 ASSISTANT_MEMORY_EMBEDDING_TEXT_VERSION = "assistant-message-embedding-v1"
 ASSISTANT_MEMORY_MAX_INDEX_TERMS = 64
 ASSISTANT_MEMORY_MAX_QUERY_TERMS = 16

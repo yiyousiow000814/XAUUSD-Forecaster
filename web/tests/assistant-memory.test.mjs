@@ -554,7 +554,9 @@ test("historical memory tokenizer matches the shared Python fixture", () => {
 });
 
 test("historical memory migration backfills every existing canonical message", () => {
-  const database = new D1TestDatabase(ASSISTANT_TEST_MIGRATIONS.slice(0, -1));
+  const database = new D1TestDatabase(ASSISTANT_TEST_MIGRATIONS.slice(
+    0, ASSISTANT_TEST_MIGRATIONS.indexOf("0015_assistant_historical_memory.sql"),
+  ));
   const seeded = seedConversation(database, {
     id: "conversation-memory-backfill",
     messages: ["第一条旧消息。", "第二条旧回答。", "第三条旧消息。"],
@@ -837,4 +839,52 @@ test("memory index leases recover finitely and stale workers cannot publish", as
     database.database.prepare("SELECT count(*) AS count FROM assistant_memory_entries").get().count,
     0,
   );
+});
+
+test("generation cutover preserves failed v2 receipts and schedules distinct v3 work", () => {
+  const database = new D1TestDatabase(
+    ASSISTANT_TEST_MIGRATIONS.filter(
+      migration => migration !== "0019_assistant_memory_generation_cutover.sql",
+    ),
+  );
+  const seeded = seedConversation(database, {
+    id: "conversation-index-cutover",
+    messages: ["旧 worker 失败记录必须保留。", "尚未处理的旧版任务。"],
+  });
+  const failJob = database.database.prepare(
+    `UPDATE assistant_memory_index_jobs
+     SET status='FAILED',attempt_count=3,
+       failure_code='MEMORY_INDEX_INVALID',completed_at=?,available_at=?,
+       attempt_history_json=json_array(json_object(
+         'event','FAILED','occurred_at',?,'attempt',3,'terminal',1
+       ))
+     WHERE source_message_id=? AND index_version=?`,
+  );
+  failJob.run(
+    "2026-08-17T05:29:00.000Z", "2026-08-17T05:29:00.000Z",
+    "2026-08-17T05:29:00.000Z", seeded.messageIds[0],
+    "assistant-memory-hybrid-v2",
+  );
+  database.applyMigration("0019_assistant_memory_generation_cutover.sql");
+
+  const oldFailure = database.database.prepare(
+    "SELECT * FROM assistant_memory_index_jobs WHERE source_message_id=? AND index_version='assistant-memory-hybrid-v2'",
+  ).get(seeded.messageIds[0]);
+  assert.equal(oldFailure.status, "FAILED");
+  assert.equal(oldFailure.attempt_count, 3);
+  assert.equal(oldFailure.max_attempts, 3);
+  assert.equal(oldFailure.failure_code, "MEMORY_INDEX_INVALID");
+  assert.equal(JSON.parse(oldFailure.attempt_history_json).at(-1).event, "FAILED");
+
+  const replacements = database.database.prepare(
+    `SELECT source_message_id,status,attempt_count,index_version
+     FROM assistant_memory_index_jobs
+     WHERE conversation_id=? AND index_version=? ORDER BY source_message_id`,
+  ).all("conversation-index-cutover", ASSISTANT_MEMORY_INDEX_VERSION);
+  assert.equal(replacements.length, 2);
+  for (const replacement of replacements) {
+    assert.equal(replacement.status, "PENDING");
+    assert.equal(replacement.attempt_count, 0);
+    assert.equal(replacement.index_version, ASSISTANT_MEMORY_INDEX_VERSION);
+  }
 });
