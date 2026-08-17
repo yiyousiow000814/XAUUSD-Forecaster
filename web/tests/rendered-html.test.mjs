@@ -1481,6 +1481,10 @@ test("uses one modal timeline for model generations and market decisions", () =>
   assert.match(modal, /version-boundary-badge/);
   assert.match(modal, /const laneEnds: number\[\] = \[\]/);
   assert.match(modal, /boundaryLayouts/);
+  assert.match(modal, /const compactBoundaryRail = range !== "24h"/);
+  assert.match(modal, /clusterTimelineItems\(displayedBoundaries/);
+  assert.match(modal, /className="version-event-hit"[^>]*r="22"/);
+  assert.match(modal, /aria-pressed=\{selectedBoundary\?\.decision_time === boundary\.decision_time\}/);
   assert.match(modal, /version-boundary-leader/);
   assert.match(modal, /boundaryDividerY/);
   assert.doesNotMatch(modal, /标签分别显示方向池与新闻池/);

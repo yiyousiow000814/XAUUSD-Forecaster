@@ -8,6 +8,7 @@ import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-
 import { versionResultLabel, type VersionEvaluationStatus } from "../_lib/version-result-state";
 import { modelVersionMarkers } from "../_lib/model-version-markers";
 import { buildMarketOpenResultWindows } from "../_lib/market-open-window";
+import { clusterTimelineItems } from "../_lib/timeline-clusters";
 import { buildTrainingCutoffChart } from "../_lib/training-cutoff-chart";
 import { settleResponsiveScroll } from "../_lib/responsive-scroll";
 
@@ -397,6 +398,11 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
   const [cadence, setCadence] = useState<EvaluationCadence>("EVERY_5M");
   const [pageOffset, setPageOffset] = useState(0);
   const [hoveredBoundary, setHoveredBoundary] = useState<BoundaryReadout | null>(null);
+  const [selectedBoundary, setSelectedBoundary] = useState<BoundaryReadout | null>(null);
+  const clearBoundaryReadout = () => {
+    setHoveredBoundary(null);
+    setSelectedBoundary(null);
+  };
   const chartScrollRef = useRef<HTMLDivElement>(null);
   const initialHistoryUrl = historyResource
     ? `${historyResource}?resource=curve-overview&cadence=5m` : "";
@@ -442,8 +448,8 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
   if (!overviewPoints.length) return <div className="chart-block long-curve-block graph-state-shell">
     <div className="chart-caption"><div><b>历史＋实时成熟 OOS（只追加，不重写）</b><span>切换统计频率时，页面结构会保留。</span></div></div>
     <div className="curve-navigation" aria-label="长期 OOS 时间范围">
-      <label>统计频率<select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPageOffset(0); }}><option value="EVERY_5M">每5分钟（重叠）</option><option value="FIXED_30M">每30分钟（非重叠）</option></select></label>
-      <label>开市窗口<select value={range} onChange={event => { setRange(event.target.value as typeof range); setPageOffset(0); }}><option value="24h">24开市小时</option><option value="7d">7个开市日</option><option value="30d">30个开市日</option><option value="all">全部总览</option></select></label>
+      <label>统计频率<select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPageOffset(0); clearBoundaryReadout(); }}><option value="EVERY_5M">每5分钟（重叠）</option><option value="FIXED_30M">每30分钟（非重叠）</option></select></label>
+      <label>开市窗口<select value={range} onChange={event => { setRange(event.target.value as typeof range); setPageOffset(0); clearBoundaryReadout(); }}><option value="24h">24开市小时</option><option value="7d">7个开市日</option><option value="30d">30个开市日</option><option value="all">全部总览</option></select></label>
     </div>
     {historyLoading ? <GraphLoading label="正在读取长期曲线" compact /> : historyErrors[cadence] ? <GraphLoadError compact label="长期曲线读取失败" onRetry={() => {
       setHistoryErrors(previous => ({ ...previous, [cadence]: false }));
@@ -549,18 +555,18 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
     boundary.direction !== null ? `方向 ${boundary.direction}` : null,
     boundary.news !== null ? `新闻 ${boundary.news}` : null,
   ].filter(Boolean).join(" / ");
-  const compactBoundaryRail = range === "all";
-  const markerLimit = compactBoundaryRail ? 36 : 14;
-  const displayedBoundaries = groupedBoundaries.length <= markerLimit ? groupedBoundaries : Array.from(
-    new Set(Array.from({ length: markerLimit }, (_, index) => Math.round(index * (groupedBoundaries.length - 1) / (markerLimit - 1))))
-  ).map(index => groupedBoundaries[index]);
-  const boundaryGroups = compactBoundaryRail ? displayedBoundaries.reduce<typeof displayedBoundaries[]>((groups, boundary) => {
-    const previous = groups.at(-1);
-    const previousBoundary = previous?.at(-1);
-    if (previous && previousBoundary && Math.abs(x(boundary.decision_time) - x(previousBoundary.decision_time)) < 15) previous.push(boundary);
-    else groups.push([boundary]);
-    return groups;
-  }, []) : displayedBoundaries.map(boundary => [boundary]);
+  const compactBoundaryRail = range !== "24h";
+  const markerLimit = 14;
+  const displayedBoundaries = compactBoundaryRail || groupedBoundaries.length <= markerLimit
+    ? groupedBoundaries
+    : Array.from(
+      new Set(Array.from({ length: markerLimit }, (_, index) => Math.round(index * (groupedBoundaries.length - 1) / (markerLimit - 1))))
+    ).map(index => groupedBoundaries[index]);
+  // Dense windows retain every audit event, but combine events whose 44 px
+  // touch targets would collide. The readout exposes the complete group.
+  const boundaryGroups = compactBoundaryRail
+    ? clusterTimelineItems(displayedBoundaries, boundary => x(boundary.decision_time), 44)
+    : displayedBoundaries.map(boundary => [boundary]);
   const laneEnds: number[] = [];
   const boundaryLayouts = boundaryGroups.map(group => {
     const latest = group.at(-1)!;
@@ -584,8 +590,8 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
     return { boundary, markerX, label, labelWidth, labelX: idealLabelX, lane };
   });
   const boundaryLaneCount = compactBoundaryRail || !boundaryLayouts.length ? 0 : Math.max(...boundaryLayouts.map(layout => layout.lane)) + 1;
-  const boundaryDividerY = compactBoundaryRail ? 18 : boundaryLaneCount ? 16 + boundaryLaneCount * 29 : 56;
-  const plotTop = compactBoundaryRail ? 46 : boundaryLaneCount ? boundaryDividerY + 14 : 70;
+  const boundaryDividerY = compactBoundaryRail ? 24 : boundaryLaneCount ? 16 + boundaryLaneCount * 29 : 56;
+  const plotTop = compactBoundaryRail ? 56 : boundaryLaneCount ? boundaryDividerY + 14 : 70;
   const plotHeight = Math.max(118, 338 - plotTop);
   const y = (value: number) => plotTop + (high - value) / Math.max(.000001, high - low) * plotHeight;
   const sourcePointCount = usable.reduce((total, row) => total + (row.source_point_count ?? row.points.length), 0);
@@ -594,15 +600,16 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
   const canGoEarlier = range !== "all" && activePage < resultWindows.length - 1;
   const canGoLater = range !== "all" && activePage > 0;
   const windowLabel = `${axisLabel(new Date(start).toISOString())} — ${axisLabel(new Date(end).toISOString())}`;
+  const activeBoundary = hoveredBoundary ?? selectedBoundary;
   return <div className="chart-block long-curve-block">
     <div className="chart-caption"><div><b>历史＋实时成熟 OOS（只追加，不重写）</b><span>数据库永久保留每个成熟结果；图表固定宽度，按开市时间窗口查看，全部历史只画压缩轮廓。</span></div><strong>全历史 <CountValue value={sourceTimeCount} suffix=" 个时点" /><small> · <CountValue value={sourcePointCount} suffix=" 条模型评分" /></small></strong></div>
     <div className="curve-navigation" aria-label="长期 OOS 时间范围">
-      <label>统计频率<select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPageOffset(0); }}><option value="EVERY_5M">每5分钟（重叠）</option><option value="FIXED_30M">每30分钟（非重叠）</option></select></label>
-      <label>开市窗口<select value={range} onChange={event => { setRange(event.target.value as typeof range); setPageOffset(0); }}><option value="24h">24开市小时</option><option value="7d">7个开市日</option><option value="30d">30个开市日</option><option value="all">全部总览</option></select></label>
+      <label>统计频率<select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPageOffset(0); clearBoundaryReadout(); }}><option value="EVERY_5M">每5分钟（重叠）</option><option value="FIXED_30M">每30分钟（非重叠）</option></select></label>
+      <label>开市窗口<select value={range} onChange={event => { setRange(event.target.value as typeof range); setPageOffset(0); clearBoundaryReadout(); }}><option value="24h">24开市小时</option><option value="7d">7个开市日</option><option value="30d">30个开市日</option><option value="all">全部总览</option></select></label>
       <div className="curve-navigation-actions">
-        <button type="button" disabled={!canGoEarlier} onClick={() => setPageOffset(activePage + 1)}>← 较早一段</button>
-        <button type="button" disabled={!canGoLater} onClick={() => setPageOffset(Math.max(0, activePage - 1))}>较晚一段 →</button>
-        <button type="button" disabled={pageOffset === 0} onClick={() => setPageOffset(0)}>回到最新</button>
+        <button type="button" disabled={!canGoEarlier} onClick={() => { setPageOffset(activePage + 1); clearBoundaryReadout(); }}>← 较早一段</button>
+        <button type="button" disabled={!canGoLater} onClick={() => { setPageOffset(Math.max(0, activePage - 1)); clearBoundaryReadout(); }}>较晚一段 →</button>
+        <button type="button" disabled={pageOffset === 0} onClick={() => { setPageOffset(0); clearBoundaryReadout(); }}>回到最新</button>
       </div>
       <span>{windowLabel}{chartDownsampled ? ` · 全历史 ${formatExactCount(sourcePointCount)} 条已压缩为 ${formatExactCount(overviewPoints.length)} 个绘图点` : ` · 当前 ${formatExactCount(visiblePoints.length)} 个绘图点`}</span>
     </div>
@@ -612,7 +619,7 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
       setHistoryRetries(previous => ({ ...previous, [cadence]: (previous[cadence] ?? 0) + 1 }));
     }} />}
     {compactBoundaryRail && <div className="curve-event-readout" aria-live="polite">
-      {hoveredBoundary ? <><b>{hoveredBoundary.event_count && hoveredBoundary.event_count > 1 ? `${formatExactCount(hoveredBoundary.event_count)} 次相近换版 · ` : ""}{axisLabel(hoveredBoundary.decision_time)} · {boundaryLabel(hoveredBoundary)}</b><span>{hoveredBoundary.changes.map(change => `${LABELS[change.model_identity] ?? change.model_identity}（${formatExactCount(change.training_rows)} 条）`).join(" · ")}</span></> : <><b>模型换版本事件轨道</b><span>相近换版会合并为一个圆点；移到圆点查看准确时间、方向样本、新闻样本与模型明细。</span></>}
+      {activeBoundary ? <><b>{activeBoundary.event_count && activeBoundary.event_count > 1 ? `${formatExactCount(activeBoundary.event_count)} 次相近换版 · ` : ""}{axisLabel(activeBoundary.decision_time)} · {boundaryLabel(activeBoundary)}</b><span>{activeBoundary.changes.map(change => `${LABELS[change.model_identity] ?? change.model_identity}（${formatExactCount(change.training_rows)} 条）`).join(" · ")}</span></> : <><b>模型换版本事件轨道</b><span>7日、30日与全部总览会合并拥挤标签；移到或点击圆点查看准确时间、样本量与完整模型明细。</span></>}
     </div>}
     <span className="mobile-scroll-hint long-curve-interaction-hint" role="note">左右滑动浏览长期曲线 · 文字与时间轴保持可读大小</span>
     {/* Keyboard users need focus here so arrow keys can pan the wide chart. */}
@@ -627,7 +634,7 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
         return <g key={boundary.decision_time} className="version-boundary">
           <title>{boundary.event_count && boundary.event_count > 1 ? `${formatExactCount(boundary.event_count)} 次相近换版\n` : ""}{boundary.changes.map(change => `${LABELS[change.model_identity] ?? change.model_identity} · 训练 ${formatExactCount(change.training_rows)} 条 · ${change.model_version}`).join("\n")}</title>
           <line className="version-boundary-marker" x1={markerX} x2={markerX} y1={boundaryDividerY} y2="350" />
-          {compactBoundaryRail ? <circle className="version-event-dot" cx={markerX} cy={boundaryDividerY} r="5" tabIndex={0} onMouseEnter={() => setHoveredBoundary(boundary)} onMouseLeave={() => setHoveredBoundary(null)} onFocus={() => setHoveredBoundary(boundary)} onBlur={() => setHoveredBoundary(null)} /> : <>
+          {compactBoundaryRail ? <g className="version-event-control" role="button" tabIndex={0} aria-label={`${boundary.event_count && boundary.event_count > 1 ? `${formatExactCount(boundary.event_count)} 次相近换版，` : ""}${axisLabel(boundary.decision_time)}，${boundaryLabel(boundary)}`} aria-pressed={selectedBoundary?.decision_time === boundary.decision_time} onMouseEnter={() => setHoveredBoundary(boundary)} onMouseLeave={() => setHoveredBoundary(null)} onFocus={() => setHoveredBoundary(boundary)} onBlur={() => setHoveredBoundary(null)} onClick={() => setSelectedBoundary(current => current?.decision_time === boundary.decision_time ? null : boundary)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedBoundary(current => current?.decision_time === boundary.decision_time ? null : boundary); } }}><circle className="version-event-hit" cx={markerX} cy={boundaryDividerY} r="22" /><circle className="version-event-dot" cx={markerX} cy={boundaryDividerY} r="5" /></g> : <>
             <path className="version-boundary-leader" d={`M ${labelX} ${labelY + 24} L ${labelX} ${boundaryDividerY - 5} L ${markerX} ${boundaryDividerY}`} />
             <rect className="version-boundary-badge" x={labelX - labelWidth / 2} y={labelY} width={labelWidth} height="24" rx="3" />
             <text x={labelX} textAnchor="middle" y={labelY + 17}>{label}</text>
