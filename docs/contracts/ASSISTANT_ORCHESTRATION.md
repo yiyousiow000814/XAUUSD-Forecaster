@@ -153,9 +153,11 @@ an actual 262,144-token Ollama context. The 24 GB host does not advertise a
 second chat profile: hardware tests found that a 256K Ministral 8B cache spills
 to CPU, while retaining multiple resident chat weights reduces predictable
 headroom for the embedding service. The local pool therefore has one in-flight
-admission slot and finite model residency. This profile is unavailable to news
-annotation, Daily Brief, title, compaction, and legacy Q&A work. Those workloads
-retain their separately configured provider routes.
+admission slot and finite model residency. Interactive chat and incremental
+compaction share this profile; compaction is admitted only as background work
+and uses native schema-constrained, non-thinking output. The profile is
+unavailable to news annotation, Daily Brief, title, and legacy Q&A work. Those
+workloads retain their separately configured provider routes.
 
 The existing news scheduler design is documented in
 [`AI_PRIORITY_SCHEDULER.md`](../design/AI_PRIORITY_SCHEDULER.md). Reusing it does
@@ -176,6 +178,13 @@ inside the finite orchestration-attempt and task-expiry budgets.
 Admission MUST occur before queue creation or model transport where the relevant
 identity, payload, or capacity condition is already known. Retry and queue
 limits are enforced per actor and globally.
+
+Worker claims for a versioned derived-data queue MUST declare the exact
+generation they implement. The server returns no work when that generation is
+missing or differs; an older worker may never consume a newer migration's jobs.
+Failed cutover work is recovered by rolling to a new immutable generation. The
+failed generation and its attempt history remain unchanged; replacement jobs
+use distinct identities and only the matching worker generation may claim them.
 
 ## Bounded tool loop
 

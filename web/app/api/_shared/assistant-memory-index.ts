@@ -1,6 +1,6 @@
 import { AssistantConversationInputError } from "./assistant-conversations";
 
-export const ASSISTANT_MEMORY_INDEX_VERSION = "assistant-memory-hybrid-v2";
+export const ASSISTANT_MEMORY_INDEX_VERSION = "assistant-memory-hybrid-v3";
 export const ASSISTANT_MEMORY_EMBEDDING_TEXT_VERSION = "assistant-message-embedding-v1";
 export const ASSISTANT_MEMORY_EMBEDDING_MODEL = "qwen3-embedding:0.6b";
 export const ASSISTANT_MEMORY_EMBEDDING_MODEL_DIGEST =

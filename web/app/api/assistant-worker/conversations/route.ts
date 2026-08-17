@@ -21,6 +21,7 @@ import {
 } from "../../_shared/assistant-memory";
 import {
   claimAssistantMemoryIndexJob,
+  ASSISTANT_MEMORY_INDEX_VERSION,
   completeAssistantMemoryIndexJob,
   failAssistantMemoryIndexJob,
   normalizeAssistantMemoryEmbedding,
@@ -83,7 +84,9 @@ export async function GET(request: Request) {
       : queue === "compaction"
         ? await claimAssistantCompactionJob(binding, workerId)
         : queue === "memory-index"
-          ? await claimAssistantMemoryIndexJob(binding, workerId)
+          ? params.get("index_version") === ASSISTANT_MEMORY_INDEX_VERSION
+            ? await claimAssistantMemoryIndexJob(binding, workerId)
+            : null
           : null;
     if (queue !== "title" && queue !== "compaction" && queue !== "memory-index") {
       throw new AssistantConversationInputError("INVALID_QUEUE", "Assistant 机器队列无效");

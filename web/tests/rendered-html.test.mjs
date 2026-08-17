@@ -2061,6 +2061,11 @@ test("separates Access-owned human APIs from the ingest worker control plane", (
   assert.match(sync, /\/assistant-worker\/chat/);
   assert.match(sync, /\/assistant-worker\/news-questions/);
   assert.match(sync, /worker_root \+ "\/conversations"/);
+  assert.match(sync, /"index_version": ASSISTANT_MEMORY_INDEX_VERSION/);
+  assert.match(
+    workerRoutes[1],
+    /params\.get\("index_version"\).*ASSISTANT_MEMORY_INDEX_VERSION/s,
+  );
   assert.match(chatWorker, /\/assistant-worker\/chat/);
   assert.doesNotMatch(sync, /mode=machine|mode.*claim/);
   assert.match(security, /human boundary/);

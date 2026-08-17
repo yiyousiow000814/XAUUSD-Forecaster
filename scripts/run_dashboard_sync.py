@@ -1031,6 +1031,7 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
     )
     from xauusd_forecaster.assistant_memory_index import (
         ASSISTANT_MEMORY_MAX_CLAIMS_PER_SYNC,
+        ASSISTANT_MEMORY_INDEX_VERSION,
         build_assistant_memory_index_result,
     )
     from xauusd_forecaster.assistant_local_runtime import (
@@ -1226,6 +1227,7 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
         for _ in range(ASSISTANT_MEMORY_MAX_CLAIMS_PER_SYNC):
             claim_url = conversation_url + "?" + urllib.parse.urlencode({
                 "queue": "memory-index", "worker_id": worker_id,
+                "index_version": ASSISTANT_MEMORY_INDEX_VERSION,
             })
             item = _get_json(claim_url, config).get("item")
             if not isinstance(item, dict):

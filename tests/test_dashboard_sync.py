@@ -1628,7 +1628,11 @@ def test_news_question_sync_uses_shared_retrieval_and_skips_model_without_eviden
     )
 
     assert any("/news-search?" in url for url in requested_urls)
-    assert any("queue=memory-index" in url for url in requested_urls)
+    assert any(
+        "queue=memory-index" in url
+        and "index_version=assistant-memory-hybrid-v3" in url
+        for url in requested_urls
+    )
     assert not any("queue=title" in url for url in requested_urls)
     assert posted[0]["action"] == "COMPLETE"
     assert posted[0]["answer_status"] == "INSUFFICIENT_EVIDENCE"
@@ -1851,7 +1855,7 @@ def test_assistant_memory_index_sync_uses_local_embedding_and_does_not_echo_cont
                     "id": "memory-index:message-1",
                     "lease_token": "memory-lease-1",
                     "source_message_id": "message-1",
-                    "index_version": "assistant-memory-hybrid-v2",
+                    "index_version": "assistant-memory-hybrid-v3",
                     "content": content,
                 }}
             return {"item": None}
