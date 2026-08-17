@@ -31,8 +31,9 @@ NOT spend another model request merely to ask how much reasoning to use. Initial
 classes MAY include `SIMPLE`, `ANALYTICAL`, and `TOOL_HEAVY`.
 
 High-confidence conversational turns such as greetings, capability questions,
-immediate conversation recall, and explanations of the Assistant's own prior
-behavior MUST run without an external tool surface. Other chat turns retain
+immediate conversation recall, references to facts the user just asked the
+Assistant to remember, and explanations of the Assistant's own prior behavior
+MUST run without an external tool surface. Other chat turns retain
 model-selected tool use inside the bounded loop. Tool availability is not a
 tool plan: reasoning policy and public progress MUST NOT treat the maximum
 authorized call budget as calls that the model has already chosen.

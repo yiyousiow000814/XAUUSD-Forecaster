@@ -112,21 +112,27 @@ _ANALYTICAL_MARKERS = (
     "矛盾", "反常", "多个时期", "多期", "why", "cause", "causal",
     "compare", "versus", "conflict", "contradict",
 )
+_CONVERSATION_REFERENCE_MARKERS = (
+    "上一句", "上句话", "刚才说", "刚刚说", "刚才回答", "刚刚回答",
+    "刚才让你", "刚刚让你", "之前让你", "前面让你", "我刚才说的",
+    "我刚刚说的", "我之前说的", "我前面说的", "请记住", "让你记住的",
+    "你记住的", "你还记得", "重复你", "重说", "previous message",
+    "previous answer", "repeat that", "what did i just", "what did i ask",
+    "what did i tell", "do you remember", "remember what i",
+)
 _SIMPLE_MARKERS = (
     "多少", "几条", "列出", "有哪些", "最新", "何时", "什么时候",
-    "你是谁", "能做什么", "可以做什么", "上一句", "刚才说",
+    "你是谁", "能做什么", "可以做什么",
     "count", "list", "show", "latest", "when", "how many",
-    "who are you", "what can you do", "previous message", "repeat",
-)
+    "who are you", "what can you do", "repeat",
+) + _CONVERSATION_REFERENCE_MARKERS
 
 _DIRECT_CHAT_EXACT = frozenset({
     "你好", "您好", "嗨", "谢谢", "多谢", "你是谁", "你能做什么",
     "你可以做什么", "你会做什么", "介绍一下你自己", "hello", "hi",
     "thanks", "thank you", "who are you", "what can you do",
 })
-_DIRECT_CHAT_MARKERS = (
-    "上一句", "上句话", "刚才说", "刚刚说", "刚才回答", "刚刚回答",
-    "重复你", "重说", "previous message", "previous answer", "repeat that",
+_DIRECT_CHAT_MARKERS = _CONVERSATION_REFERENCE_MARKERS + (
     "为什么你要做新闻检索", "为什么要做新闻检索", "为什么你要搜索",
     "为什么要搜索", "你attach的", "你 attach 的", "你附加的", "你附上的",
 )
