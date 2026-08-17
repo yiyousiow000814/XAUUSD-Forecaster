@@ -866,6 +866,7 @@ def test_daily_brief_packet_keeps_strongest_evidence_within_tpm_budget(
         daily_brief.conservative_input_token_estimate(serialized)
         <= daily_brief.BRIEF_INPUT_TOKEN_BUDGET
     )
+    assert daily_brief.conservative_input_token_estimate(serialized) + 512 < 15_000
     ledger.close()
 
 

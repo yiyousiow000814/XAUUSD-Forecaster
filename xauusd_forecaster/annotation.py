@@ -208,12 +208,15 @@ def _model_failure_details(error: Exception) -> dict[str, object]:
 def _capacity_deferred_status(
     error: ModelGatewayCapacityExhausted,
 ) -> dict[str, object]:
-    return {
+    status = {
         "status": "DEFERRED",
         "reason": str(error),
         "failure_code": error.failure_code,
         "next_retry_at": error.next_retry_at,
     }
+    if error.failure_evidence:
+        status["failure_evidence"] = error.failure_evidence
+    return status
 
 
 def _eligible_at_intake(
@@ -1137,7 +1140,7 @@ class _GeminiRequestPool:
         input_tokens = self._count_or_conservative(
             model,
             payload,
-            conservative_tokens=max(512, len(serialized.encode("utf-8")) + 512),
+            conservative_tokens=conservative_input_token_estimate(serialized) + 512,
         )
         return self.gateway.generate(
             0,
@@ -1422,10 +1425,7 @@ class _GeminiRequestPool:
         counted_tokens = self._count_or_conservative(
             IMPACT_MODEL,
             payload,
-            conservative_tokens=max(
-                conservative_input_token_estimate(prompt) + 1024,
-                len(prompt.encode("utf-8")) + 1024,
-            ),
+            conservative_tokens=conservative_input_token_estimate(prompt) + 1024,
         )
         request_row, prompt, counted_tokens = _fit_impact_context_to_tpm(
             row,
@@ -1473,10 +1473,7 @@ class _GeminiRequestPool:
         input_tokens = self._count_or_conservative(
             IMPACT_MODEL,
             payload,
-            conservative_tokens=max(
-                conservative_input_token_estimate(serialized) + 512,
-                len(serialized.encode("utf-8")) + 512,
-            ),
+            conservative_tokens=conservative_input_token_estimate(serialized) + 512,
         )
         repaired, _ = self.gateway.generate(
             start_index,
@@ -2074,7 +2071,7 @@ def _fit_impact_context_to_tpm(
             if evidence_tokens is None:
                 return evidence_row, evidence_prompt, max(
                     counted_tokens,
-                    len(evidence_prompt.encode("utf-8")) + 1024,
+                    conservative_input_token_estimate(evidence_prompt) + 1024,
                 )
             request_row = evidence_row
             candidates = list(request_row.get("prior_event_context") or ())
@@ -2092,7 +2089,7 @@ def _fit_impact_context_to_tpm(
             # reservation will defer this item until exact preflight recovers.
             return request_row, prompt, max(
                 counted_tokens,
-                len(prompt.encode("utf-8")) + 1024,
+                conservative_input_token_estimate(prompt) + 1024,
             )
         counted_tokens = recounted
     return request_row, prompt, counted_tokens
@@ -2102,7 +2099,7 @@ def _count_impact_tokens(
     gateway: GeminiModelGateway, prompt: str,
 ) -> int | None:
     if not gateway.accountant.allow_provider_token_count:
-        return len(prompt.encode("utf-8")) + 1024
+        return conservative_input_token_estimate(prompt) + 1024
     try:
         return gateway.count_input_tokens(IMPACT_MODEL, _impact_payload(prompt))
     except Exception:

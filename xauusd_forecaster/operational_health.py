@@ -81,6 +81,8 @@ def scheduler_health_snapshot(
             "deferred_15m": 0,
             "all_deferred_15m": 0,
             "capacity_deferred_15m": 0,
+            "provider_dispatch_deferred_15m": 0,
+            "capacity_dimensions_15m": {},
             "errors_15m": 0,
             "failure_codes_15m": {},
             "claimable": 0,
@@ -192,6 +194,39 @@ def scheduler_health_snapshot(
         if code:
             codes = summary["failure_codes_15m"]
             codes[code] = int(codes.get(code, 0)) + int(row["total"])
+
+    dimension_rows = connection.execute(
+        """SELECT j.task_type,json_extract(a.error_detail,'$.dimension') AS dimension,
+                  count(*) AS total
+           FROM news_ai_job_attempts_v1 a
+           JOIN news_ai_jobs_v1 j ON j.job_id=a.job_id
+           WHERE a.attempted_at>=?
+             AND a.failure_code='MODEL_CAPACITY_DEFERRED'
+             AND json_valid(a.error_detail)
+           GROUP BY j.task_type,dimension""",
+        (cutoff,),
+    ).fetchall()
+    for row in dimension_rows:
+        dimension = str(row["dimension"] or "UNKNOWN")
+        dimensions = summaries[str(row["task_type"])]["capacity_dimensions_15m"]
+        dimensions[dimension] = int(dimensions.get(dimension, 0)) + int(row["total"])
+
+    provider_rows = connection.execute(
+        """SELECT task_type,count(*) AS total
+           FROM news_ai_scheduler_deferrals_v1
+           WHERE deferred_at>=? AND failure_code='PROVIDER_DISPATCH_DEFERRED'
+           GROUP BY task_type""",
+        (cutoff,),
+    ).fetchall()
+    for row in provider_rows:
+        summary = summaries[str(row["task_type"])]
+        total = int(row["total"])
+        summary["provider_dispatch_deferred_15m"] += total
+        summary["all_deferred_15m"] += total
+        codes = summary["failure_codes_15m"]
+        codes["PROVIDER_DISPATCH_DEFERRED"] = (
+            int(codes.get("PROVIDER_DISPATCH_DEFERRED", 0)) + total
+        )
 
     recent_dead_letters = {
         str(row["task_type"]): int(row["total"])
@@ -336,6 +371,13 @@ def scheduler_health_snapshot(
                 summary["failure_codes_15m"].items(),
                 key=lambda item: (-item[1], item[0]),
             )[:8]
+        ]
+        summary["capacity_dimensions_15m"] = [
+            {"dimension": dimension, "count": count}
+            for dimension, count in sorted(
+                summary["capacity_dimensions_15m"].items(),
+                key=lambda item: (-item[1], item[0]),
+            )
         ]
 
     has_annotations = connection.execute(

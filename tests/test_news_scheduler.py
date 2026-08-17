@@ -106,6 +106,43 @@ def test_provider_dispatch_staggers_independent_accounts_without_quota_leak() ->
     ]
 
 
+@pytest.mark.parametrize(
+    ("dimension", "first", "second"),
+    (
+        ("RPM", {"input_tokens": 1, "requests_per_minute": 1},
+         {"input_tokens": 1, "requests_per_minute": 1}),
+        ("TPM", {"input_tokens": 10_000, "requests_per_minute": 20},
+         {"input_tokens": 5_001, "requests_per_minute": 20}),
+        ("RPD", {"input_tokens": 1, "requests_per_minute": 20},
+         {"input_tokens": 1, "requests_per_minute": 20}),
+    ),
+)
+def test_capacity_rejection_reports_exact_dimension(
+    dimension: str, first: dict[str, int], second: dict[str, int],
+) -> None:
+    connection = _connection()
+    daily_limit = 1 if dimension == "RPD" else 100
+    common = {
+        "account_id": "account-a", "model_family": "gemma-4",
+        "daily_limit": daily_limit, "input_tokens_per_minute": 15_000,
+    }
+    assert reserve_account_request(connection, now=NOW, **common, **first)
+    decision: dict[str, object] = {}
+
+    assert not reserve_account_request(
+        connection, now=NOW + timedelta(seconds=1), decision=decision,
+        **common, **second,
+    )
+
+    assert decision["failure_code"] == "MODEL_CAPACITY_DEFERRED"
+    assert decision["dimension"] == dimension
+    assert decision["dimensions"] == [dimension]
+    assert decision["current"] >= 1
+    assert decision["requested"] >= 1
+    assert decision["limit"] >= 1
+    assert decision["next_retry_at"] is not None
+
+
 def test_provider_dispatch_adapts_to_success_and_retry_after() -> None:
     connection = _connection()
     granted, _ = reserve_provider_dispatch(
@@ -1311,7 +1348,27 @@ def test_provider_dispatch_deferral_does_not_probe_accounts_or_consume_attempt(
     assert ledger.connection.execute(
         "SELECT count(*) FROM news_ai_job_attempts_v1 WHERE job_id=?", (job_id,),
     ).fetchone()[0] == 0
+    deferral = ledger.connection.execute(
+        """SELECT failure_code,next_retry_at
+           FROM news_ai_scheduler_deferrals_v1 WHERE job_id=?""", (job_id,),
+    ).fetchone()
+    assert tuple(deferral) == (
+        "PROVIDER_DISPATCH_DEFERRED", retry_at.isoformat(),
+    )
     ledger.close()
+
+
+def test_scheduler_wakes_for_short_capacity_retry_without_busy_spin() -> None:
+    from scripts import run_news_annotator as runner
+
+    assert runner._scheduler_sleep_seconds(
+        [{"next_retry_at": (NOW + timedelta(seconds=8)).isoformat()}],
+        interval_seconds=60, now=NOW,
+    ) == 8
+    assert runner._scheduler_sleep_seconds(
+        [{"next_retry_at": (NOW + timedelta(milliseconds=120)).isoformat()}],
+        interval_seconds=60, now=NOW,
+    ) == 5
 
 
 def test_embedding_maintenance_does_not_consume_job_attempts_and_resumes(

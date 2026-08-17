@@ -979,6 +979,8 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(view, /alert\.code/);
   assert.match(view, /completed_15m/);
   assert.match(view, /deferred_15m/);
+  assert.match(view, /provider_dispatch_deferred_15m/);
+  assert.match(view, /LOCAL_\{item\.dimension\}_LIMIT/);
   assert.match(view, /componentHasAttention/);
   assert.match(view, /sourceHasAttention/);
   assert.match(view, /function SourceHealthCard/);

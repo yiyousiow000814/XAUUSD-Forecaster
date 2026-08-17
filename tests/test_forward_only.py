@@ -3530,6 +3530,50 @@ def test_gemma_impact_reserves_provider_counted_input_tokens(
     assert reserved == [4_321]
 
 
+def test_gemma_impact_local_preflight_does_not_treat_utf8_bytes_as_tokens(
+    monkeypatch,
+) -> None:
+    reserved = []
+
+    class LocalOnlyAccountant(CallbackModelAccountant):
+        @property
+        def allow_provider_token_count(self) -> bool:
+            return False
+
+    pool = annotation_module._GeminiRequestPool(
+        ("test-key",), requests_per_key=1, batch_limit=1,
+        request_accountant=LocalOnlyAccountant(
+            lambda usage: reserved.append(usage.input_tokens) or True,
+        ),
+    )
+    sent = {}
+
+    def post_json(_key, model, method, payload, *, timeout):
+        del timeout
+        assert method == "generateContent"
+        sent["prompt"] = payload["contents"][0]["parts"][0]["text"]
+        return {
+            "modelVersion": model,
+            "candidates": [{"content": {"parts": [{
+                "text": json.dumps(_impact_model_result(), ensure_ascii=False),
+            }]}}],
+        }
+
+    monkeypatch.setattr(GeminiModelGateway, "_post_json", staticmethod(post_json))
+    result, _ = pool.call_impact(0, {
+        "annotation": {}, "prior_event_context": [],
+        "headline": "黄金与美债收益率",
+        "body": "美国就业数据与通胀预期影响黄金市场。" * 100,
+    })
+
+    prompt = sent["prompt"]
+    assert result["impact_class"] == "BACKGROUND"
+    assert reserved == [
+        annotation_module.conservative_input_token_estimate(prompt) + 1024,
+    ]
+    assert reserved[0] < len(prompt.encode("utf-8")) + 1024
+
+
 def test_gemma_impact_repairs_one_identity_contract_failure_through_gateway(
     monkeypatch,
 ) -> None:

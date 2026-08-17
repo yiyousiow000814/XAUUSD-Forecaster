@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import uuid
 
 from .ai_provider_registry import quota_surface_for_model
 from .annotation import DEFAULT_GEMINI_MODEL, GEMINI_DAILY_PRIORITY_RESERVE
@@ -10,6 +11,8 @@ from .model_gateway import ModelRequestAccountant, ModelRequestUsage
 from .news_scheduler import (
     ApiCredential,
     provider_dispatch_next_eligible,
+    mark_account_request_attempted,
+    record_account_request_outcome,
     record_provider_dispatch_outcome,
     reserve_account_request,
     reserve_provider_dispatch,
@@ -30,6 +33,9 @@ class SchedulerModelAccountant(ModelRequestAccountant):
         self.credential = credential
         self.urgent = urgent
         self._next_retry_at: str | None = None
+        self._failure_code: str | None = None
+        self._failure_evidence: dict[str, object] | None = None
+        self._usage_id: str | None = None
 
     def reserve(self, usage: ModelRequestUsage) -> bool:
         policy = quota_surface_for_model(usage.model)
@@ -39,7 +45,8 @@ class SchedulerModelAccountant(ModelRequestAccountant):
             and usage.purpose == "news-annotation"
             else 0
         )
-        decision: dict[str, str | None] = {}
+        decision: dict[str, object] = {}
+        usage_id = str(uuid.uuid4())
         reserved = reserve_account_request(
             self.connection,
             account_id=self.credential.account_id,
@@ -53,9 +60,23 @@ class SchedulerModelAccountant(ModelRequestAccountant):
             reserve_total=reserve_total,
             urgent=self.urgent,
             provider_task=usage.purpose,
+            usage_id=usage_id,
             decision=decision,
         )
-        self._next_retry_at = decision.get("next_retry_at")
+        self._usage_id = usage_id if reserved else None
+        self._next_retry_at = (
+            str(decision["next_retry_at"])
+            if decision.get("next_retry_at") else None
+        )
+        self._failure_code = (
+            str(decision["failure_code"])
+            if decision.get("failure_code") else None
+        )
+        self._failure_evidence = (
+            {key: value for key, value in decision.items()
+             if key not in {"failure_code"}}
+            if not reserved and self._failure_code else None
+        )
         return reserved
 
     def reserve_dispatch(self, purpose: str) -> bool:
@@ -63,21 +84,51 @@ class SchedulerModelAccountant(ModelRequestAccountant):
             self.connection, provider_task=purpose,
         )
         self._next_retry_at = None if reserved else next_eligible_at
+        self._failure_code = None if reserved else "PROVIDER_DISPATCH_DEFERRED"
+        self._failure_evidence = (
+            None if reserved else {
+                "dimension": "PROVIDER_PACING",
+                "next_eligible_at": next_eligible_at,
+            }
+        )
         return reserved
 
     def record_provider_outcome(
         self, outcome: str, *, retry_after_seconds: int | None = None,
+        usage_metadata: dict[str, int] | None = None,
     ) -> None:
-        record_provider_dispatch_outcome(
-            self.connection,
-            outcome=outcome,
-            retry_after_seconds=retry_after_seconds,
-        )
+        if self._usage_id is not None:
+            record_account_request_outcome(
+                self.connection,
+                self._usage_id,
+                outcome=outcome,
+                retry_after_seconds=retry_after_seconds,
+                usage_metadata=usage_metadata,
+            )
+            self._usage_id = None
+        else:
+            record_provider_dispatch_outcome(
+                self.connection,
+                outcome=outcome,
+                retry_after_seconds=retry_after_seconds,
+            )
         self._next_retry_at = provider_dispatch_next_eligible(self.connection)
+
+    def mark_provider_attempted(self) -> None:
+        if self._usage_id is not None:
+            mark_account_request_attempted(self.connection, self._usage_id)
 
     @property
     def next_retry_at(self) -> str | None:
         return self._next_retry_at
+
+    @property
+    def failure_code(self) -> str | None:
+        return self._failure_code
+
+    @property
+    def failure_evidence(self) -> dict[str, object] | None:
+        return self._failure_evidence
 
     @property
     def allow_provider_token_count(self) -> bool:

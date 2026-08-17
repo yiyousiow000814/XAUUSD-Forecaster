@@ -75,6 +75,21 @@ CREATE TABLE IF NOT EXISTS news_ai_job_attempts_v1 (
 CREATE INDEX IF NOT EXISTS news_ai_job_attempts_lookup_v1
 ON news_ai_job_attempts_v1(job_id,attempt_number,attempted_at);
 
+CREATE TABLE IF NOT EXISTS news_ai_scheduler_deferrals_v1 (
+    deferral_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    task_type TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    failure_code TEXT NOT NULL,
+    evidence_json TEXT,
+    deferred_at TEXT NOT NULL,
+    next_retry_at TEXT,
+    FOREIGN KEY(job_id) REFERENCES news_ai_jobs_v1(job_id)
+);
+
+CREATE INDEX IF NOT EXISTS news_ai_scheduler_deferrals_lookup_v1
+ON news_ai_scheduler_deferrals_v1(task_type,deferred_at,failure_code);
+
 CREATE TABLE IF NOT EXISTS news_ai_account_daily_usage_v1 (
     quota_day TEXT NOT NULL,
     account_id TEXT NOT NULL,
@@ -106,7 +121,10 @@ CREATE TABLE IF NOT EXISTS news_ai_account_request_usage_v1 (
         'PROVIDER_SUCCEEDED','PROVIDER_THROTTLED','PROVIDER_FAILED')),
     provider_http_status INTEGER,
     provider_completed_at TEXT,
-    vectors_committed_at TEXT
+    vectors_committed_at TEXT,
+    provider_prompt_token_count INTEGER,
+    provider_candidates_token_count INTEGER,
+    provider_total_token_count INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS news_ai_account_request_usage_window_v1
@@ -254,6 +272,9 @@ def install_scheduler_schema(connection: sqlite3.Connection) -> None:
         "provider_http_status": "INTEGER",
         "provider_completed_at": "TEXT",
         "vectors_committed_at": "TEXT",
+        "provider_prompt_token_count": "INTEGER",
+        "provider_candidates_token_count": "INTEGER",
+        "provider_total_token_count": "INTEGER",
     }
     for name, declaration in request_usage_additions.items():
         if name not in request_usage_columns:
@@ -333,6 +354,57 @@ def rolling_account_usage(
         parameters,
     ).fetchone()
     return int(row["requests"]), int(row["tokens"])
+
+
+def _minute_capacity_next_eligible(
+    connection: sqlite3.Connection,
+    *,
+    account_id: str,
+    model_families: tuple[str, ...],
+    now: datetime,
+    share_across_accounts: bool,
+    requested_requests: int,
+    requested_tokens: int,
+    requests_per_minute: int,
+    input_tokens_per_minute: int | None,
+) -> str | None:
+    """Return the first exact rolling-window expiry that admits the request."""
+    placeholders = ",".join("?" for _ in model_families)
+    account_clause = "" if share_across_accounts else "AND account_id=?"
+    parameters: tuple[object, ...] = (
+        _iso(now - timedelta(seconds=60)),
+        *((account_id,) if not share_across_accounts else ()),
+        *model_families,
+    )
+    rows = connection.execute(
+        f"""SELECT request_count,input_token_count,reserved_at
+            FROM news_ai_account_request_usage_v1
+            WHERE reserved_at>? {account_clause}
+              AND model_family IN ({placeholders})
+            ORDER BY reserved_at""",
+        parameters,
+    ).fetchall()
+    for row in rows:
+        candidate = datetime.fromisoformat(str(row["reserved_at"])) + timedelta(
+            seconds=60,
+        )
+        remaining = [
+            item for item in rows
+            if datetime.fromisoformat(str(item["reserved_at"])) > candidate - timedelta(
+                seconds=60,
+            )
+        ]
+        requests = sum(int(item["request_count"]) for item in remaining)
+        tokens = sum(int(item["input_token_count"]) for item in remaining)
+        if requests + requested_requests > requests_per_minute:
+            continue
+        if (
+            input_tokens_per_minute is not None
+            and tokens + requested_tokens > input_tokens_per_minute
+        ):
+            continue
+        return _iso(candidate)
+    return None
 
 
 def _iso(value: datetime) -> str:
@@ -514,6 +586,15 @@ def record_job_attempt(
         credential.credential_id,
     ))
     provider_status = status.get("provider_http_status")
+    failure_evidence = status.get("failure_evidence")
+    error_detail = (
+        json.dumps(
+            failure_evidence, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"),
+        )
+        if isinstance(failure_evidence, dict)
+        else str(status.get("error") or status.get("reason") or "")
+    )
     with connection:
         connection.execute(
             """INSERT OR IGNORE INTO news_ai_job_attempts_v1 VALUES
@@ -525,8 +606,41 @@ def record_job_attempt(
                 str(status.get("failure_code") or "") or None,
                 str(status.get("error_type") or "") or None,
                 int(provider_status) if isinstance(provider_status, int) else None,
-                str(status.get("error") or status.get("reason") or "")[:500] or None,
+                error_detail[:500] or None,
                 _iso(attempted_at),
+                str(status.get("next_retry_at") or "") or None,
+            ),
+        )
+
+
+def record_scheduler_deferral(
+    connection: sqlite3.Connection,
+    *,
+    job: ScheduledJob,
+    credential: ApiCredential,
+    status: dict[str, object],
+    deferred_at: datetime,
+) -> None:
+    """Persist a non-attempt maintenance/pacing deferral for operations."""
+    failure_code = str(status.get("failure_code") or "")
+    evidence = status.get("failure_evidence")
+    serialized = (
+        json.dumps(evidence, ensure_ascii=False, sort_keys=True,
+                   separators=(",", ":"))[:500]
+        if isinstance(evidence, dict) else None
+    )
+    identity = "|".join((
+        job.job_id, credential.account_id, failure_code,
+        _iso(deferred_at),
+    ))
+    with connection:
+        connection.execute(
+            """INSERT OR IGNORE INTO news_ai_scheduler_deferrals_v1
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (
+                hashlib.sha256(identity.encode("utf-8")).hexdigest(),
+                job.job_id, job.task_type, credential.account_id,
+                failure_code, serialized, _iso(deferred_at),
                 str(status.get("next_retry_at") or "") or None,
             ),
         )
@@ -915,7 +1029,7 @@ def reserve_account_request(
     now: datetime | None = None,
     usage_id: str | None = None,
     provider_task: str | None = None,
-    decision: dict[str, str | None] | None = None,
+    decision: dict[str, object] | None = None,
 ) -> bool:
     """Atomically count attempted provider requests against one account.
 
@@ -950,19 +1064,71 @@ def reserve_account_request(
             now=instant,
             share_across_accounts=share_minute_across_accounts,
         )
+        daily_exhausted = daily_count + attempted_requests > usable_daily_limit
+        rpm_exhausted = minute_count + attempted_requests > requests_per_minute
         token_exhausted = (
             input_tokens_per_minute is not None
             and minute_tokens + estimated_tokens > input_tokens_per_minute
         )
-        if (
-            daily_count + attempted_requests > usable_daily_limit
-            or minute_count + attempted_requests > requests_per_minute
-            or token_exhausted
-        ):
+        if daily_exhausted or rpm_exhausted or token_exhausted:
             connection.rollback()
             if decision is not None:
+                dimensions = [
+                    name for name, exhausted in (
+                        ("RPD", daily_exhausted),
+                        ("RPM", rpm_exhausted),
+                        ("TPM", token_exhausted),
+                    )
+                    if exhausted
+                ]
+                next_retry_at = None
+                if daily_exhausted:
+                    next_retry_at = _iso(
+                        (instant.astimezone(PACIFIC) + timedelta(days=1)).replace(
+                            hour=0, minute=0, second=0, microsecond=0,
+                        )
+                    )
+                elif not (
+                    attempted_requests > requests_per_minute
+                    or (
+                        input_tokens_per_minute is not None
+                        and estimated_tokens > input_tokens_per_minute
+                    )
+                ):
+                    next_retry_at = _minute_capacity_next_eligible(
+                        connection,
+                        account_id=account_id,
+                        model_families=families,
+                        now=instant,
+                        share_across_accounts=share_minute_across_accounts,
+                        requested_requests=attempted_requests,
+                        requested_tokens=estimated_tokens,
+                        requests_per_minute=requests_per_minute,
+                        input_tokens_per_minute=input_tokens_per_minute,
+                    )
+                primary = dimensions[0]
                 decision.update(
-                    failure_code="MODEL_CAPACITY_DEFERRED", next_retry_at=None,
+                    failure_code="MODEL_CAPACITY_DEFERRED",
+                    dimension=primary,
+                    dimensions=dimensions,
+                    current=(
+                        daily_count if primary == "RPD"
+                        else minute_count if primary == "RPM"
+                        else minute_tokens
+                    ),
+                    requested=(
+                        attempted_requests if primary in {"RPD", "RPM"}
+                        else estimated_tokens
+                    ),
+                    limit=(
+                        usable_daily_limit if primary == "RPD"
+                        else requests_per_minute if primary == "RPM"
+                        else input_tokens_per_minute
+                    ),
+                    current_requests_60s=minute_count,
+                    current_tokens_60s=minute_tokens,
+                    current_requests_day=daily_count,
+                    next_retry_at=next_retry_at,
                 )
             return False
         if provider_task is not None:
@@ -1404,6 +1570,7 @@ def record_account_request_outcome(
     outcome: str,
     provider_http_status: int | None = None,
     retry_after_seconds: int | None = None,
+    usage_metadata: dict[str, int] | None = None,
     now: datetime | None = None,
 ) -> None:
     if outcome not in {
@@ -1415,10 +1582,17 @@ def record_account_request_outcome(
         updated = connection.execute(
             """UPDATE news_ai_account_request_usage_v1
                SET provider_outcome=?,provider_http_status=?,
-                   provider_completed_at=?
+                   provider_completed_at=?,provider_prompt_token_count=?,
+                   provider_candidates_token_count=?,provider_total_token_count=?
                WHERE usage_id=? AND attempted_at IS NOT NULL
                  AND provider_outcome IS NULL""",
-            (outcome, provider_http_status, timestamp, usage_id),
+            (
+                outcome, provider_http_status, timestamp,
+                (usage_metadata or {}).get("prompt_token_count"),
+                (usage_metadata or {}).get("candidates_token_count"),
+                (usage_metadata or {}).get("total_token_count"),
+                usage_id,
+            ),
         )
         if updated.rowcount != 1:
             raise ValueError("model request outcome is not claimable")

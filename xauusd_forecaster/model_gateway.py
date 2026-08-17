@@ -18,6 +18,24 @@ from typing import Callable, TypeVar
 T = TypeVar("T")
 
 
+def _sanitized_usage_metadata(envelope: dict[str, object]) -> dict[str, int] | None:
+    """Keep only bounded provider token counts, never request or response text."""
+    raw = envelope.get("usageMetadata")
+    if not isinstance(raw, dict):
+        return None
+    names = {
+        "prompt_token_count": "promptTokenCount",
+        "candidates_token_count": "candidatesTokenCount",
+        "total_token_count": "totalTokenCount",
+    }
+    result: dict[str, int] = {}
+    for target, source in names.items():
+        value = raw.get(source)
+        if isinstance(value, int) and 0 <= value <= 100_000_000:
+            result[target] = value
+    return result or None
+
+
 def _http_retry_after_seconds(error: Exception) -> int | None:
     """Parse a bounded Retry-After value without trusting provider input."""
     if not isinstance(error, urllib.error.HTTPError):
@@ -70,9 +88,11 @@ class ModelGatewayCapacityExhausted(RuntimeError):
         *,
         failure_code: str = "MODEL_CAPACITY_DEFERRED",
         next_retry_at: str | None = None,
+        failure_evidence: dict[str, object] | None = None,
     ) -> None:
         self.failure_code = failure_code
         self.next_retry_at = next_retry_at
+        self.failure_evidence = failure_evidence
         super().__init__(message)
 
 
@@ -108,14 +128,26 @@ class ModelRequestAccountant(ABC):
         del purpose
         return True
 
+    def mark_provider_attempted(self) -> None:
+        """Mark the reserved request immediately before provider transport."""
+
     def record_provider_outcome(
         self, outcome: str, *, retry_after_seconds: int | None = None,
+        usage_metadata: dict[str, int] | None = None,
     ) -> None:
         """Update optional adaptive provider pacing after transport."""
-        del outcome, retry_after_seconds
+        del outcome, retry_after_seconds, usage_metadata
 
     @property
     def next_retry_at(self) -> str | None:
+        return None
+
+    @property
+    def failure_code(self) -> str | None:
+        return None
+
+    @property
+    def failure_evidence(self) -> dict[str, object] | None:
         return None
 
     @property
@@ -199,6 +231,7 @@ class GeminiModelGateway:
                 "Google provider dispatch pacing deferred token counting",
                 failure_code="PROVIDER_DISPATCH_DEFERRED",
                 next_retry_at=self.accountant.next_retry_at,
+                failure_evidence=self.accountant.failure_evidence,
             )
         raise RuntimeError("All configured keys failed provider token counting") from last_error
 
@@ -228,10 +261,14 @@ class GeminiModelGateway:
             if not self._reserve(api_key, usage):
                 continue
             try:
+                self.accountant.mark_provider_attempted()
                 envelope = self._post_json(
                     api_key, model, "generateContent", payload, timeout=120.0,
                 )
-                self.accountant.record_provider_outcome("PROVIDER_SUCCEEDED")
+                self.accountant.record_provider_outcome(
+                    "PROVIDER_SUCCEEDED",
+                    usage_metadata=_sanitized_usage_metadata(envelope),
+                )
                 result = decode(envelope)
                 return result, str(envelope.get("modelVersion") or model)
             except retryable_decode_errors as error:
@@ -275,11 +312,10 @@ class GeminiModelGateway:
         if last_error is None:
             raise ModelGatewayCapacityExhausted(
                 "Model request slots used; retained for the next batch",
-                failure_code=(
-                    "PROVIDER_DISPATCH_DEFERRED"
-                    if self.accountant.next_retry_at else "MODEL_CAPACITY_DEFERRED"
-                ),
+                failure_code=(self.accountant.failure_code
+                              or "MODEL_CAPACITY_DEFERRED"),
                 next_retry_at=self.accountant.next_retry_at,
+                failure_evidence=self.accountant.failure_evidence,
             )
         if isinstance(last_error, urllib.error.HTTPError):
             raise last_error

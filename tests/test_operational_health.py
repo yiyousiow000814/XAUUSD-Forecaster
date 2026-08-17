@@ -70,9 +70,71 @@ def test_scheduler_health_exposes_retry_capacity_stall_and_age_codes() -> None:
     assert impact["deferred_15m"] == 11
     assert impact["all_deferred_15m"] == 11
     assert impact["capacity_deferred_15m"] == 11
+    assert impact["provider_dispatch_deferred_15m"] == 0
+    assert impact["capacity_dimensions_15m"] == []
     assert impact["oldest_age_seconds"] == 3600
     assert impact["failure_codes_15m"] == [
         {"code": "MODEL_CAPACITY_DEFERRED", "count": 11},
+    ]
+
+
+def test_scheduler_health_separates_local_limits_from_provider_pacing() -> None:
+    connection = _connection()
+    job_id = enqueue_job(
+        connection,
+        task_type="ACTIVE_IMPACT",
+        source="source",
+        source_item_id="capacity-evidence",
+        revision_number=1,
+        annotation_id="annotation",
+        prompt_version="prompt",
+        priority="FAST",
+        now=NOW - timedelta(minutes=5),
+    )
+    connection.execute(
+        """INSERT INTO news_ai_job_attempts_v1 VALUES
+           (?,?,?,?,?,'DEFERRED','MODEL_CAPACITY_DEFERRED',NULL,NULL,?,?,NULL)""",
+        (
+            "capacity-attempt", job_id, 1, "account", "credential",
+            json.dumps({
+                "dimension": "TPM",
+                "dimensions": ["TPM"],
+                "current": 12_000,
+                "requested": 6_000,
+                "limit": 15_000,
+            }),
+            (NOW - timedelta(minutes=1)).isoformat(),
+        ),
+    )
+    connection.execute(
+        """INSERT INTO news_ai_scheduler_deferrals_v1
+           (deferral_id,task_type,job_id,account_id,failure_code,
+            next_retry_at,deferred_at)
+           VALUES (?,?,?,?,?,?,?)""",
+        (
+            "pacing-deferral", "ACTIVE_IMPACT", job_id, "account",
+            "PROVIDER_DISPATCH_DEFERRED",
+            (NOW + timedelta(seconds=1)).isoformat(),
+            (NOW - timedelta(seconds=30)).isoformat(),
+        ),
+    )
+    connection.commit()
+
+    snapshot = scheduler_health_snapshot(connection, now=NOW)
+    impact = next(
+        task for task in snapshot["scheduler"]["tasks"]
+        if task["task_type"] == "ACTIVE_IMPACT"
+    )
+
+    assert impact["capacity_deferred_15m"] == 1
+    assert impact["provider_dispatch_deferred_15m"] == 1
+    assert impact["all_deferred_15m"] == 2
+    assert impact["capacity_dimensions_15m"] == [
+        {"dimension": "TPM", "count": 1},
+    ]
+    assert impact["failure_codes_15m"] == [
+        {"code": "MODEL_CAPACITY_DEFERRED", "count": 1},
+        {"code": "PROVIDER_DISPATCH_DEFERRED", "count": 1},
     ]
 
 

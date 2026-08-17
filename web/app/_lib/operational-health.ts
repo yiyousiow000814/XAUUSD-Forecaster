@@ -15,8 +15,10 @@ export type SchedulerTaskHealth = {
   dead_letter: number;
   completed_15m: number;
   deferred_15m: number;
+  provider_dispatch_deferred_15m?: number;
   errors_15m: number;
   failure_codes_15m: Array<{ code: string; count: number }>;
+  capacity_dimensions_15m?: Array<{ dimension: string; count: number }>;
   claimable: number;
   scheduled_retry: number;
   earliest_retry_at: string | null;
