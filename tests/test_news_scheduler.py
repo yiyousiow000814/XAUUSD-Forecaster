@@ -1541,3 +1541,67 @@ def test_annotator_retries_transient_writer_contention_without_exiting(
     assert len(calls) == 2
     assert sleeps == [5.0]
     ledger.close()
+
+
+def test_scheduler_lifecycle_survives_restart_without_duplicate_terminal_work(
+    tmp_path,
+) -> None:
+    database = tmp_path / "scheduler.sqlite3"
+
+    def open_connection() -> sqlite3.Connection:
+        connection = sqlite3.connect(database)
+        connection.row_factory = sqlite3.Row
+        install_scheduler_schema(connection)
+        return connection
+
+    first = open_connection()
+    job_id = enqueue_job(
+        first, task_type="ACTIVE_ANNOTATION", source="source",
+        source_item_id="restart-safe", revision_number=1,
+        prompt_version="prompt", priority="NORMAL", now=NOW,
+    )
+    lease = claim_job(
+        first, worker_id="worker-before-restart", pool=ROUTINE_POOL, now=NOW,
+    )
+    assert lease is not None and lease.attempt_count == 1
+    retry_at = NOW + timedelta(minutes=5)
+    backoff_job(
+        first, job_id, "worker-before-restart", available_at=retry_at,
+        error="PROVIDER_HTTP_429",
+    )
+    first.close()
+
+    restarted = open_connection()
+    assert claim_job(
+        restarted, worker_id="too-early", pool=ROUTINE_POOL,
+        now=retry_at - timedelta(seconds=1),
+    ) is None
+    retry_lease = claim_job(
+        restarted, worker_id="worker-after-restart", pool=ROUTINE_POOL,
+        now=retry_at,
+    )
+    assert retry_lease is not None
+    assert retry_lease.job_id == job_id
+    assert retry_lease.attempt_count == 2
+    complete_job(
+        restarted, job_id, "worker-after-restart",
+        now=retry_at + timedelta(seconds=1),
+    )
+    restarted.close()
+
+    verified = open_connection()
+    assert enqueue_job(
+        verified, task_type="ACTIVE_ANNOTATION", source="source",
+        source_item_id="restart-safe", revision_number=1,
+        prompt_version="prompt", priority="NORMAL",
+        now=retry_at + timedelta(minutes=1),
+    ) == job_id
+    assert claim_job(
+        verified, worker_id="must-not-requeue", pool=ROUTINE_POOL,
+        now=retry_at + timedelta(minutes=1),
+    ) is None
+    row = verified.execute(
+        "SELECT state,attempt_count,count(*) AS total FROM news_ai_jobs_v1",
+    ).fetchone()
+    assert dict(row) == {"state": "COMPLETED", "attempt_count": 2, "total": 1}
+    verified.close()

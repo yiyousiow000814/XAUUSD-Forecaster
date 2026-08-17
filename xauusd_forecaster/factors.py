@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from .news_semantics import V1_NEWS_PROMPT_VERSIONS
+from .news_identity import news_representative_key
 from .macro_release import MACRO_RELEASE_FEATURES
 
 if TYPE_CHECKING:
@@ -68,12 +69,8 @@ def aggregate_news_features(
     for row in ledger.visible_news(decision_time):
         cluster = str(row["cluster_id"])
         current = canonical_news.get(cluster)
-        score = (len(str(row["body"] or "")), str(row["source_item_id"]))
-        current_score = (
-            len(str(current["body"] or "")), str(current["source_item_id"])
-        ) if current is not None else None
-        if current_score is None or score[0] > current_score[0] or (
-            score[0] == current_score[0] and score[1] < current_score[1]
+        if current is None or news_representative_key(row) < news_representative_key(
+            current,
         ):
             canonical_news[cluster] = row
     latest_news = {

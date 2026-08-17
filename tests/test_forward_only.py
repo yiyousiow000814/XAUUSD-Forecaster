@@ -2072,6 +2072,7 @@ def test_gemini_rejects_non_chinese_translation_fields() -> None:
     "C++ 与 .NET 相关企业上涨，但这只是风险情绪的背景信息。",
     "Powell 表示通胀仍高 📈，XAUUSD 随后承压。",
     "S&P 500 与 U.S. 10Y Treasury 收益率上升，黄金因此承压。",
+    "Aya Gold & Silver (TSX: AYA; NASDAQ: AYA) 发布季度业绩，公司营运增长。",
     "貝萊德調整 GLD 持倉，市場仍關注實際利率。",
     "Beyonce\u0301 与 Societe\u0301 Generale 的名称含组合重音，正文仍为中文。",
 ])
@@ -2112,6 +2113,7 @@ def test_gemini_rejects_non_chinese_non_latin_scripts(foreign_text) -> None:
     "黄金市场受到实际收益率影响。Federal Reserve kept rates unchanged and markets reduced cut bets.",
     "摘要：Federal Reserve Bank of America BlackRock NVIDIA",
     "美国 CPI 高于预期，Gold ETF flows remained weak after the release.",
+    "摘要（括号未闭合；Federal Reserve kept rates unchanged and markets rallied.",
     "市场更新：Bu metin Türkçe olarak devam ediyor ve henüz çevrilmedi.",
 ])
 def test_gemini_rejects_english_or_latin_prose_dominating_chinese(
@@ -2982,6 +2984,89 @@ def test_checkpointed_display_failure_remains_repairable(tmp_path) -> None:
     assert {item["retry_state"] for item in outcomes} == {"BACKING_OFF"}
     assert all(item["is_terminal"] is False for item in outcomes)
     assert outcomes[-1]["next_retry_at"] is not None
+
+
+def test_display_checkpoint_revalidates_before_spending_another_model_call(
+    monkeypatch,
+) -> None:
+    body = (
+        "Aya Gold & Silver (TSX: AYA; NASDAQ: AYA) reported quarterly "
+        "performance and operating growth."
+    )
+    result = _v15_annotation({
+        "headline_zh": "矿业公司发布季度业绩",
+        "summary_zh": (
+            "Aya Gold & Silver (TSX: AYA; NASDAQ: AYA) 发布季度业绩，"
+            "报告显示公司营运增长。"
+        ),
+        "event_type": "other", "entities": ["Aya Gold & Silver"],
+        "hawkishness": 0.0, "inflation_impulse": 0.0,
+        "growth_impulse": 0.0, "geopolitical_risk": 0.0,
+        "usd_impulse": 0.0, "novelty": 0.0, "confidence": 1.0,
+    }, body)
+    checkpoint = {
+        "semantic_result": result,
+        "llm_model_version": annotation_module.DEFAULT_GEMINI_MODEL,
+        "invalid_fields": ["summary_zh"],
+        "rejection_reason": "stale validator rejected ticker punctuation",
+    }
+    monkeypatch.setattr(
+        annotation_module._GeminiRequestPool,
+        "_repair_display_until_valid",
+        lambda *_args, **_kwargs: pytest.fail("model repair must not run"),
+    )
+
+    repaired, semantic_model = object.__new__(
+        annotation_module._GeminiRequestPool
+    ).repair_display_checkpoint(
+        0, annotation_module.DEFAULT_GEMINI_MODEL, checkpoint,
+        "Quarterly performance", body,
+        prompt_version=annotation_module.PROMPT_VERSION,
+    )
+
+    assert repaired == result
+    assert semantic_model == annotation_module.DEFAULT_GEMINI_MODEL
+
+
+def test_display_checkpoint_recomputes_stale_invalid_field_list(monkeypatch) -> None:
+    body = "The company reported quarterly operating growth."
+    result = _v15_annotation({
+        "headline_zh": "矿业公司发布季度业绩",
+        "summary_zh": "公司公布999项新增数据，季度营运表现有所增长。",
+        "event_type": "other", "entities": [], "hawkishness": 0.0,
+        "inflation_impulse": 0.0, "growth_impulse": 0.0,
+        "geopolitical_risk": 0.0, "usd_impulse": 0.0,
+        "novelty": 0.0, "confidence": 1.0,
+    }, body)
+    checkpoint = {
+        "semantic_result": result,
+        "llm_model_version": annotation_module.DEFAULT_GEMINI_MODEL,
+        # A previous repair response can leave a narrower field list than the
+        # frozen checkpoint currently violates.
+        "invalid_fields": ["primary_story_title_zh"],
+        "rejection_reason": "stale field list",
+    }
+    captured: dict[str, tuple[str, ...]] = {}
+
+    def repair(_self, _index, _models, working, _headline, _body, **kwargs):
+        captured["invalid_fields"] = kwargs["invalid_fields"]
+        working["summary_zh"] = "公司公布季度业绩，营运表现有所增长。"
+
+    monkeypatch.setattr(
+        annotation_module._GeminiRequestPool,
+        "_repair_display_until_valid", repair,
+    )
+
+    repaired, _ = object.__new__(
+        annotation_module._GeminiRequestPool
+    ).repair_display_checkpoint(
+        0, annotation_module.DEFAULT_GEMINI_MODEL, checkpoint,
+        "Quarterly performance", body,
+        prompt_version=annotation_module.PROMPT_VERSION,
+    )
+
+    assert "summary_zh" in captured["invalid_fields"]
+    assert repaired["summary_zh"] == "公司公布季度业绩，营运表现有所增长。"
 
 
 def test_repeated_same_impact_validation_failure_gets_one_recovery_attempt(
@@ -3897,6 +3982,59 @@ def test_duplicate_cluster_prefers_full_content_for_annotation(
     )
     assert statuses[0]["source_item_id"] == "publisher-full"
     assert ledger.count("news_annotations") == 1
+
+
+def test_news_readers_share_cross_source_cluster_tie_break(tmp_path) -> None:
+    now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "Equal complete publisher evidence. " * 20
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    # source_item_id is deliberately ordered opposite to source. The item ID
+    # is source-local and therefore cannot decide a cross-source tie alone.
+    for source, item_id in (("z-source", "aaa"), ("a-source", "zzz")):
+        ledger.append_news_revision({
+            "source": source, "source_item_id": item_id,
+            "source_published_time": now,
+            "collector_first_seen_time": now, "fetched_time": now,
+            "headline": "Same syndicated headline", "body": body,
+            "content_hash": digest, "cluster_id": "shared-cluster",
+        })
+
+    pending = annotation_module.pending_annotation_records(
+        ledger.connection, observed_at=now, limit=10,
+    )
+    titles = annotation_module.pending_title_translation_records(
+        ledger.connection, observed_at=now, limit=10,
+    )
+    assert [(row["source"], row["source_item_id"]) for row in pending] == [
+        ("a-source", "zzz"),
+    ]
+    assert [(row["source"], row["source_item_id"]) for row in titles] == [
+        ("a-source", "zzz"),
+    ]
+
+    ledger.append_annotation({
+        "annotation_id": "annotation-a", "source": "a-source",
+        "source_item_id": "zzz", "revision_number": 1,
+        "raw_content_hash": digest,
+        "annotation": _v15_annotation({
+            "headline_zh": "同一篇联合发布新闻",
+            "summary_zh": "系统对跨来源的同一新闻簇选择唯一且稳定的代表记录。",
+            "event_type": "other", "entities": [], "hawkishness": 0.0,
+            "inflation_impulse": 0.0, "growth_impulse": 0.0,
+            "geopolitical_risk": 0.0, "usd_impulse": 0.0,
+            "novelty": 0.0, "confidence": 1.0,
+        }, "Equal complete publisher evidence"),
+        "llm_model_version": annotation_module.DEFAULT_GEMINI_MODEL,
+        "prompt_version": annotation_module.PROMPT_VERSION,
+        "parse_started_at": now, "parsed_at": now + timedelta(seconds=1),
+    })
+    completed = annotation_module.completed_annotation_records(
+        ledger.connection, observed_at=now + timedelta(seconds=2), limit=10,
+    )
+    assert [(row["source"], row["source_item_id"]) for row in completed] == [
+        ("a-source", "zzz"),
+    ]
 
 
 def test_gemini_annotation_does_not_treat_other_model_as_complete(

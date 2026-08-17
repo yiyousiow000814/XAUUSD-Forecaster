@@ -11,7 +11,7 @@ from .news_relevance import google_news_item_is_relevant
 from .news_semantics import (
     ACTIONABLE_RECORD_KINDS,
     CURRENT_NEWS_PROMPT_VERSION,
-    validated_annotation_predicate,
+    model_usable_annotation_predicate,
 )
 
 
@@ -415,7 +415,7 @@ def load_identity_candidate_universe(
             AND pa.source_item_id=p.source_item_id
             AND pa.revision_number=p.revision_number
             AND pa.raw_content_hash=p.content_hash
-            AND {validated_annotation_predicate('pa')}
+            AND {model_usable_annotation_predicate('pa')}
            LEFT JOIN news_impact_assessments_v1 pi
              ON pi.assessment_id=(
                SELECT selected_pi.assessment_id
@@ -480,7 +480,7 @@ def pending_impact_records(
          AND a.raw_content_hash=n.content_hash
         WHERE length(trim(COALESCE(n.body,'')))>=240
           AND a.prompt_version=?
-          AND {validated_annotation_predicate('a')}
+          AND {model_usable_annotation_predicate('a')}
           AND a.llm_model_version IN (
             'gemini-3.5-flash-lite','gemini-3.1-flash-lite')
           AND NOT EXISTS (

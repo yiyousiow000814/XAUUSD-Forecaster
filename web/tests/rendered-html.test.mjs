@@ -16,7 +16,13 @@ const { statusFieldPhase } = await import("../app/_lib/current-data-provenance.t
 const { shouldPollDashboardResource } = await import("../app/_lib/dashboard-refresh-policy.ts");
 const { quoteBridgePresentation } = await import("../app/_lib/quote-bridge-state.ts");
 const { withPreviewIdentity } = await import("../app/api/_shared/preview-status.ts");
-const { newsReviewStateInvariantHolds, newsReviewStateOf, parseNewsReviewState } = await import("../app/_lib/news-review-state.ts");
+const {
+  NEWS_REVIEW_STATE_CASE_SQL,
+  NEWS_REVIEW_STATE_SQL,
+  newsReviewStateInvariantHolds,
+  newsReviewStateOf,
+  parseNewsReviewState,
+} = await import("../app/_lib/news-review-state.ts");
 const { publicImpactReason, publicNewsRecord } = await import("../app/_lib/public-news-copy.ts");
 const { sortNewsEvidenceByTime } = await import("../app/_lib/news-evidence-order.ts");
 const { summarizeAssistantQueue } = await import("../app/api/_shared/assistant-operational-health.ts");
@@ -670,6 +676,16 @@ test("separates completed, processing, and isolated news by durable review state
   for (const status of ["DEAD_LETTER", "CONTENT_UNAVAILABLE"]) {
     assert.equal(newsReviewStateOf({ annotation_status: status }), "ISOLATED");
   }
+  for (const status of ["READY", "NOT_REQUIRED"]) {
+    assert.match(NEWS_REVIEW_STATE_SQL.COMPLETED, new RegExp(`'${status}'`));
+    assert.match(NEWS_REVIEW_STATE_SQL.PROCESSING, new RegExp(`'${status}'`));
+    assert.match(NEWS_REVIEW_STATE_CASE_SQL, new RegExp(`'${status}'`));
+  }
+  for (const status of ["DEAD_LETTER", "CONTENT_UNAVAILABLE"]) {
+    assert.match(NEWS_REVIEW_STATE_SQL.ISOLATED, new RegExp(`'${status}'`));
+    assert.match(NEWS_REVIEW_STATE_SQL.PROCESSING, new RegExp(`'${status}'`));
+    assert.match(NEWS_REVIEW_STATE_CASE_SQL, new RegExp(`'${status}'`));
+  }
   assert.equal(newsReviewStateInvariantHolds({
     annotation_status: "NOT_REQUIRED",
     model_visibility: "MODEL_INELIGIBLE",
@@ -704,7 +720,8 @@ test("separates completed, processing, and isolated news by durable review state
   assert.match(view, /setNewsCategory\("全部"\)/);
   assert.match(route, /invalid review state/);
   assert.match(route, /review_state_counts/);
-  assert.match(route, /json_extract\(payload, '\$\.annotation_status'\)/);
+  assert.match(route, /NEWS_REVIEW_STATE_CASE_SQL/);
+  assert.doesNotMatch(route, /annotation_status'\) IN/);
   assert.match(css, /\.news-review-zones button \{[^}]*min-height:104px/);
   assert.match(view, /className="news-category-picker"/);
   assert.match(css, /\.news-review-zones \{ grid-template-columns:repeat\(3,minmax\(0,1fr\)\);[^}]*overflow:visible/);
@@ -1083,7 +1100,7 @@ test("renders the news and decision audit route", async () => {
   assert.match(newsIndexRoute, /FROM news_index WHERE \$\{ACTIVE_NEWS_SQL\} GROUP BY review_state/);
   assert.match(newsIndexRoute, /neutralize_operational_state_for_contract/);
   assert.match(newsIndexRoute, /SET model_candidate=0 WHERE mirror_contract <> \?/);
-  assert.match(newsIndexRoute, /NOT IN \('READY','NOT_REQUIRED','DEAD_LETTER','CONTENT_UNAVAILABLE'\)/);
+  assert.match(newsIndexRoute, /NEWS_REVIEW_STATE_SQL\[reviewState\]/);
   assert.match(source, /evidenceMode === "eligible"/);
   assert.match(source, />当前可用 <b>/);
   assert.match(source, />历史上用过 <b>/);

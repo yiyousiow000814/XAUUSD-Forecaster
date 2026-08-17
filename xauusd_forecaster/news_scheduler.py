@@ -1168,7 +1168,7 @@ def reconcile_completed_jobs(
 ) -> int:
     """Close jobs already satisfied or superseded by immutable evidence."""
     from .annotation import INVALID_CHINESE_TITLE
-    from .news_semantics import validated_annotation_predicate
+    from .news_semantics import model_usable_annotation_predicate
 
     timestamp = _iso(now or datetime.now(UTC))
     with connection:
@@ -1182,7 +1182,7 @@ def reconcile_completed_jobs(
                     WHERE a.source=j.source AND a.source_item_id=j.source_item_id
                       AND a.revision_number=j.revision_number
                       AND a.prompt_version=j.prompt_version
-                      AND {validated_annotation_predicate('a')}))
+                      AND {model_usable_annotation_predicate('a')}))
                  OR (task_type='ACTIVE_IMPACT' AND EXISTS (
                    SELECT 1 FROM news_impact_assessments_v1 i
                    WHERE i.annotation_id=j.annotation_id

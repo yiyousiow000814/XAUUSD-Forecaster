@@ -91,6 +91,7 @@ current rules merely because they discovered one.
 - Audits: [test suite](audits/TEST_SUITE.md),
   [U5 authority](audits/U5_AUTHORITY.md),
   [documentation inventory](audits/DOCUMENTATION_INVENTORY.md),
+  [repository reliability 2026-08-17](audits/REPOSITORY_RELIABILITY_2026_08_17.md),
   [legacy news irrelevance recovery](audits/NEWS_IRRELEVANCE_RECOVERY_2026_08_16.md),
   and [news candidate retrieval baseline](audits/NEWS_CANDIDATE_RETRIEVAL_2026_08_17.md)
 - Reports: [Phase 2F repair](reports/PHASE2F_REPAIR.md),

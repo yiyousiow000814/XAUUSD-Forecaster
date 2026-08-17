@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
+from typing import Mapping
 
 
 SOURCE_ORGANIZATION_ALIASES = {
@@ -45,6 +46,42 @@ SOURCE_ORGANIZATION_ALIASES = {
 RESOLVED_IDENTITY_RELATIONS = frozenset({
     "NEW_EPISODE", "SAME_EPISODE", "SAME_EVENT",
 })
+
+
+def _sql_alias(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
+        raise ValueError("invalid SQL alias")
+    return value
+
+
+def preferred_cluster_peer_predicate(peer_alias: str, candidate_alias: str) -> str:
+    """Return the canonical current-revision ordering shared by news readers.
+
+    A cluster keeps the longest complete body. Equal-length bodies use the
+    stable ``(source, source_item_id)`` identity because ``source_item_id`` is
+    only unique inside one source. Callers may add their own time/revision
+    scope around this predicate, but may not invent another tie-break.
+    """
+    peer = _sql_alias(peer_alias)
+    candidate = _sql_alias(candidate_alias)
+    return (
+        f"(length(COALESCE({peer}.body,''))>"
+        f"length(COALESCE({candidate}.body,'')) OR "
+        f"(length(COALESCE({peer}.body,''))="
+        f"length(COALESCE({candidate}.body,'')) AND "
+        f"({peer}.source<{candidate}.source OR "
+        f"({peer}.source={candidate}.source AND "
+        f"{peer}.source_item_id<{candidate}.source_item_id))))"
+    )
+
+
+def news_representative_key(row: Mapping[str, object]) -> tuple[int, str, str]:
+    """Return the sortable key for the same representative contract in Python."""
+    return (
+        -len(str(row.get("body") or "")),
+        str(row.get("source") or ""),
+        str(row.get("source_item_id") or ""),
+    )
 
 
 def canonical_id(value: object) -> str:

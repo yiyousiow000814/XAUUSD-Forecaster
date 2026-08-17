@@ -16,9 +16,10 @@ from .news import NEWS_INTAKE_MAX_AGE
 from .news_evidence import annotation_is_actionable_candidate
 from .news_impact import IMPACT_MODEL, IMPACT_PROMPT_VERSION
 from .news_relevance import google_news_item_is_relevant
+from .news_identity import preferred_cluster_peer_predicate
 from .news_scheduler import configured_api_credentials
 from .news_time import category_time_rule
-from .news_semantics import validated_annotation_predicate
+from .news_semantics import model_usable_annotation_predicate
 
 
 ANNOTATOR_HEARTBEAT_MAX_AGE = timedelta(minutes=5)
@@ -59,7 +60,7 @@ def _current_actionable_impact_rows(
             AND j.annotation_id=a.annotation_id
             AND j.prompt_version=?
            WHERE a.prompt_version=?
-             AND {validated_annotation_predicate('a')}
+             AND {model_usable_annotation_predicate('a')}
              AND a.llm_model_version IN ({model_placeholders})
              AND length(trim(COALESCE(n.body,'')))>=240
              AND NOT EXISTS (
@@ -172,7 +173,7 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
             add_unresolved("ACTIVE_ANNOTATION", row, received)
 
     failed_jobs = ledger.connection.execute(
-        """SELECT j.created_at,n.source,n.source_item_id,n.revision_number,
+        f"""SELECT j.created_at,n.source,n.source_item_id,n.revision_number,
                   n.headline,n.source_published_time,n.collector_first_seen_time,
                   COALESCE((
                     SELECT a.failure_code FROM news_ai_job_attempts_v1 a
@@ -198,9 +199,7 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
                 WHERE peer_newer.source=peer.source
                   AND peer_newer.source_item_id=peer.source_item_id
                   AND peer_newer.revision_number>peer.revision_number)
-              AND (length(COALESCE(peer.body,''))>length(COALESCE(n.body,''))
-                OR (length(COALESCE(peer.body,''))=length(COALESCE(n.body,''))
-                  AND peer.source_item_id<n.source_item_id)))""",
+              AND {preferred_cluster_peer_predicate('peer', 'n')})""",
         (PROMPT_VERSION, intake_floor.isoformat(), observed_at.isoformat()),
     ).fetchall()
     for row in failed_jobs:

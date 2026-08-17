@@ -18,7 +18,7 @@ The initial cross-component catalog is:
 
 | Code | Meaning |
 | --- | --- |
-| `OPS_AI_JOB_RETRY_LOOP` | One active AI job has been claimed unusually often. |
+| `OPS_AI_JOB_RETRY_LOOP` | One active AI job has been claimed unusually often. Claimable or leased work is blocking; a future scheduled retry remains a visible non-blocking warning with its next retry time. |
 | `OPS_AI_ROUTE_CAPACITY_SATURATED` | Capacity deferrals exceed useful completions for a model route. |
 | `OPS_AI_PIPELINE_STALLED` | Work exceeded its route-specific SLA and the route made no progress during the monitoring window. |
 | `OPS_AI_BACKLOG_OVERDUE` | The oldest currently claimable work exceeded its task-specific queue SLA. Future scheduled retries do not count as overdue backlog. |

@@ -4,7 +4,9 @@ import { isIngestAuthorized } from "../_shared/ingest-auth";
 import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
 import {
   ACTIVE_NEWS_SQL,
+  NEWS_REVIEW_STATE_CASE_SQL,
   NEWS_REVIEW_STATE_INVARIANT_SQL,
+  NEWS_REVIEW_STATE_SQL,
   NEWS_REVIEW_STATES,
   newsReviewStateInvariantHolds,
   newsReviewStateOf,
@@ -40,11 +42,6 @@ const pageRequest = (request: Request) => {
   };
 };
 
-const REVIEW_STATE_SQL: Record<NewsReviewState, string> = {
-  COMPLETED: "json_extract(payload, '$.annotation_status') IN ('READY','NOT_REQUIRED')",
-  ISOLATED: "json_extract(payload, '$.annotation_status') IN ('DEAD_LETTER','CONTENT_UNAVAILABLE')",
-  PROCESSING: "COALESCE(json_extract(payload, '$.annotation_status'), '') NOT IN ('READY','NOT_REQUIRED','DEAD_LETTER','CONTENT_UNAVAILABLE')",
-};
 export async function GET(request: Request) {
   const query = new URL(request.url).searchParams;
   const healthCheck = query.get("health_check") === "1";
@@ -120,14 +117,14 @@ export async function GET(request: Request) {
           checks: failures.slice(0, 12),
         }, { headers: { "Cache-Control": "no-store, max-age=0" } });
       }
-      const conditions = [ACTIVE_NEWS_SQL, REVIEW_STATE_SQL[reviewState]];
+      const conditions = [ACTIVE_NEWS_SQL, NEWS_REVIEW_STATE_SQL[reviewState]];
       const bindValues: string[] = [];
       if (category) {
         conditions.push("category = ?");
         bindValues.push(category);
       }
       const where = `WHERE ${conditions.join(" AND ")}`;
-      const reviewWhere = `WHERE ${ACTIVE_NEWS_SQL} AND ${REVIEW_STATE_SQL[reviewState]}`;
+      const reviewWhere = `WHERE ${ACTIVE_NEWS_SQL} AND ${NEWS_REVIEW_STATE_SQL[reviewState]}`;
       const offset = (page - 1) * pageSize;
       const now = new Date().toISOString();
       const [rows, totalRow, totalsRow, categoryRows, reviewRows] = await Promise.all([
@@ -151,10 +148,7 @@ export async function GET(request: Request) {
            GROUP BY category`,
         ).all<{ category: string; count: number }>(),
         binding.prepare(
-          `SELECT CASE
-             WHEN json_extract(payload, '$.annotation_status') IN ('READY','NOT_REQUIRED') THEN 'COMPLETED'
-             WHEN json_extract(payload, '$.annotation_status') IN ('DEAD_LETTER','CONTENT_UNAVAILABLE') THEN 'ISOLATED'
-             ELSE 'PROCESSING' END AS review_state, count(*) AS count
+          `SELECT ${NEWS_REVIEW_STATE_CASE_SQL} AS review_state, count(*) AS count
            FROM news_index WHERE ${ACTIVE_NEWS_SQL} GROUP BY review_state`,
         ).all<{ review_state: NewsReviewState; count: number }>(),
       ]);

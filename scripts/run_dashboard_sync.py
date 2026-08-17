@@ -90,6 +90,16 @@ class AllTargetsRejected(RuntimeError):
         self.error_code = next(iter(codes)) if len(codes) == 1 else "ALL_TARGETS_REJECTED"
 
 
+class SyncResourceResults(list[dict]):
+    """Degraded resources plus bounded timing evidence for one sync cycle."""
+
+    def __init__(
+        self, degraded_resources: list[dict], resource_observations: list[dict],
+    ) -> None:
+        super().__init__(degraded_resources)
+        self.resource_observations = resource_observations
+
+
 class RemoteInvariantViolation(RuntimeError):
     """A remote resource answered but its persisted state is contradictory."""
 
@@ -804,6 +814,7 @@ def write_sync_status(
     attempts_used: int | None = None,
     error: Exception | None = None,
     degraded_resources: list[dict] | None = None,
+    resource_observations: list[dict] | None = None,
 ) -> None:
     """Atomically publish the synchronizer's actual operational heartbeat."""
     existing: dict = {}
@@ -825,11 +836,15 @@ def write_sync_status(
                 "attempts_used": attempts_used,
                 "status": "DEGRADED" if degraded_resources else "OK",
                 "degraded_resources": degraded_resources,
+                "resource_observations": resource_observations or [],
             }
         )
     else:
         current_degraded = list(
             getattr(error, "degraded_resources", None) or []
+        )
+        current_observations = list(
+            getattr(error, "resource_observations", None) or []
         )
         existing.update(
             {
@@ -839,6 +854,7 @@ def write_sync_status(
                 "last_error_code": sync_error_code(error),
                 "status": "ERROR",
                 "degraded_resources": current_degraded,
+                "resource_observations": current_observations,
             }
         )
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1882,29 +1898,47 @@ def _sync_news(_local_payload: dict, config: dict) -> None:
     _write_news_sync_state(state_path, state)
 
 
-def sync_once(config: dict) -> list[dict]:
+def sync_once(config: dict) -> SyncResourceResults:
     with urllib.request.urlopen(
         config["local_status_url"], timeout=LOCAL_STATUS_TIMEOUT_SECONDS
     ) as response:
         local_payload = json.loads(response.read())
 
     degraded = []
+    observations = []
     healthy_targets = 0
     live_payload = remote_snapshot(local_payload)
     for target in configured_targets(config):
         target_name = target["name"]
+        started = time.perf_counter()
         try:
             # The live heartbeat is the critical path. Optional, growing
             # resources must not make a healthy target appear offline.
             _post_json(target["remote_ingest_url"], live_payload, target)
             healthy_targets += 1
+            observations.append({
+                "target": target_name,
+                "resource": "heartbeat",
+                "status": "OK",
+                "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                "completed_at": datetime.now(UTC).isoformat(),
+            })
         except Exception as error:
+            duration_ms = round((time.perf_counter() - started) * 1000, 1)
             degraded.append({
                 "target": target_name,
                 "resource": "heartbeat",
                 "error_type": type(error).__name__,
                 "error_code": sync_error_code(error),
                 "error": str(error)[:500],
+                "duration_ms": duration_ms,
+            })
+            observations.append({
+                "target": target_name,
+                "resource": "heartbeat",
+                "status": "ERROR",
+                "duration_ms": duration_ms,
+                "completed_at": datetime.now(UTC).isoformat(),
             })
             continue
         for resource, operation in (
@@ -1914,30 +1948,53 @@ def sync_once(config: dict) -> list[dict]:
             ("news", _sync_news),
             ("news_questions", _sync_news_questions),
         ):
+            started = time.perf_counter()
             try:
                 operation(local_payload, target)
+                observations.append({
+                    "target": target_name,
+                    "resource": resource,
+                    "status": "OK",
+                    "duration_ms": round(
+                        (time.perf_counter() - started) * 1000, 1,
+                    ),
+                    "completed_at": datetime.now(UTC).isoformat(),
+                })
             except Exception as error:
+                duration_ms = round((time.perf_counter() - started) * 1000, 1)
                 failure = {
                     "target": target_name,
                     "resource": resource,
                     "error_type": type(error).__name__,
                     "error_code": sync_error_code(error),
                     "error": str(error)[:500],
+                    "duration_ms": duration_ms,
                 }
                 evidence = getattr(error, "evidence", None)
                 if isinstance(evidence, dict):
                     failure["evidence"] = evidence
                 degraded.append(failure)
+                observations.append({
+                    "target": target_name,
+                    "resource": resource,
+                    "status": "ERROR",
+                    "duration_ms": duration_ms,
+                    "completed_at": datetime.now(UTC).isoformat(),
+                })
     if healthy_targets == 0:
-        raise AllTargetsRejected(degraded)
-    return degraded
+        error = AllTargetsRejected(degraded)
+        error.resource_observations = observations
+        raise error
+    return SyncResourceResults(degraded, observations)
 
 
 def sync_with_retry(config: dict, *, attempts: int = 3) -> tuple[int, list[dict]]:
     """Retry transient transport failures without waiting for the next sync cycle."""
     for attempt in range(1, attempts + 1):
         try:
-            degraded = sync_once(config) or []
+            degraded = sync_once(config)
+            if degraded is None:
+                degraded = []
             return attempt, degraded
         except Exception as error:
             transient = isinstance(
@@ -1980,6 +2037,9 @@ def main() -> int:
                 success=True,
                 attempts_used=attempts_used,
                 degraded_resources=degraded_resources,
+                resource_observations=getattr(
+                    degraded_resources, "resource_observations", [],
+                ),
             )
             print(
                 json.dumps(

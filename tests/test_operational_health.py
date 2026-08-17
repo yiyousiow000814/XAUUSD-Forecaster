@@ -66,11 +66,57 @@ def test_scheduler_health_exposes_retry_capacity_stall_and_age_codes() -> None:
         if task["task_type"] == "ACTIVE_IMPACT"
     )
     assert impact["max_claim_count"] == 12
+    assert impact["max_claim_is_claimable"] is True
     assert impact["deferred_15m"] == 11
     assert impact["oldest_age_seconds"] == 3600
     assert impact["failure_codes_15m"] == [
         {"code": "MODEL_CAPACITY_DEFERRED", "count": 11},
     ]
+
+
+def test_scheduled_retry_loop_is_visible_without_claiming_current_impact() -> None:
+    connection = _connection()
+    job_id = enqueue_job(
+        connection,
+        task_type="ACTIVE_ANNOTATION",
+        source="source",
+        source_item_id="scheduled-repair",
+        revision_number=1,
+        prompt_version="prompt",
+        priority="NORMAL",
+        now=NOW - timedelta(hours=1),
+    )
+    next_retry = NOW + timedelta(minutes=5)
+    connection.execute(
+        """UPDATE news_ai_jobs_v1
+           SET state='BACKING_OFF',attempt_count=10,available_at=?
+           WHERE job_id=?""",
+        (next_retry.isoformat(), job_id),
+    )
+    connection.commit()
+
+    snapshot = scheduler_health_snapshot(connection, now=NOW)
+
+    alert = next(
+        item for item in snapshot["alerts"]
+        if item["code"] == "OPS_AI_JOB_RETRY_LOOP"
+    )
+    annotation = next(
+        task for task in snapshot["scheduler"]["tasks"]
+        if task["task_type"] == "ACTIVE_ANNOTATION"
+    )
+    assert snapshot["status"] == "WARNING"
+    assert alert["severity"] == "WARNING"
+    assert alert["blocking"] is False
+    assert alert["evidence"] == {
+        "max_claim_count": 10,
+        "job_ref": job_id[:12],
+        "state": "BACKING_OFF",
+        "claimable": False,
+        "next_retry_at": next_retry.isoformat(),
+    }
+    assert annotation["claimable"] == 0
+    assert annotation["scheduled_retry"] == 1
 
 
 def test_scheduler_retirement_is_progress_without_becoming_completion() -> None:
