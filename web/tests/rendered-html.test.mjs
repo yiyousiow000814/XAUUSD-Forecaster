@@ -686,6 +686,11 @@ test("separates completed, processing, and isolated news by durable review state
     parsed_at: null,
   }), true);
   assert.equal(newsReviewStateInvariantHolds({
+    annotation_status: "REPAIRING_DISPLAY",
+    model_visibility: "REPAIRING_DISPLAY",
+    parsed_at: null,
+  }), true);
+  assert.equal(newsReviewStateInvariantHolds({
     annotation_status: "BACKING_OFF",
     model_visibility: "MODEL_VISIBLE",
     parsed_at: "2026-08-17T00:00:00Z",

@@ -84,6 +84,9 @@ equivalent to `IRRELEVANT`. The public reader MUST default to completed review
 and present pending work and terminally isolated work in separate, explicitly
 labelled review zones. These records remain inspectable for diagnosis, but MUST
 NOT be mixed into the completed-news list.
+`REPAIRING_DISPLAY` is a processing state with no parsed annotation and an
+equally named model-visibility state. The local reader, mirror transport, D1
+invariant, and public review-zone classifier MUST accept that same tuple.
 
 During an annotation-contract handover, the public mirror MUST neutralize stale
 operational annotation states from older contracts before bounded
