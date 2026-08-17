@@ -29,6 +29,14 @@ const owner = "cloudflare-access:memory-owner";
 const otherOwner = "cloudflare-access:other-owner";
 const baseTime = Date.parse("2026-08-15T10:00:00.000Z");
 const instant = minutes => new Date(baseTime + minutes * 60_000);
+const testEmbedding = [1, ...Array(1023).fill(0)];
+const testVectorIndex = {
+  async upsert(vectors) {
+    assert.equal(vectors.length, 1);
+    assert.equal(vectors[0].values.length, 1024);
+    return { mutationId: "test-vector-mutation" };
+  },
+};
 
 const compactProfile = {
   ...DEFAULT_ASSISTANT_CONTEXT_PROFILE,
@@ -47,6 +55,7 @@ const compactProfile = {
   currentUserTokenBudget: 400,
   toolEvidenceTokenBudget: 400,
   recentTurnLimit: 2,
+  recentMessageLimit: 4,
   compactionMessageLimit: 2,
   compactionSourceTokenBudget: 800,
 };
@@ -112,6 +121,11 @@ const memoryCompletionPayload = claim => ({
   index_version: claim.index_version,
   source_content_sha256: createHash("sha256").update(claim.content).digest("hex"),
   terms: tokenizeAssistantMemory(claim.content),
+  embedding_text_version: "assistant-message-embedding-v1",
+  embedding_model: "qwen3-embedding:0.6b",
+  embedding_model_digest: "ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d",
+  embedding_dimensions: 1024,
+  embedding: testEmbedding,
 });
 
 async function drainMemoryIndex(database, now = instant(100)) {
@@ -120,7 +134,7 @@ async function drainMemoryIndex(database, now = instant(100)) {
     const claim = await claimAssistantMemoryIndexJob(database, "worker:memory-index", now);
     if (!claim) return completed;
     completed.push(await completeAssistantMemoryIndexJob(
-      database, memoryCompletionPayload(claim), now,
+      database, memoryCompletionPayload(claim), now, testVectorIndex,
     ));
   }
 }
@@ -391,7 +405,15 @@ test("turn-window overflow schedules compaction even while token capacity is GRE
   const seeded = seedConversation(database, {
     id: "conversation-green-turn-overflow", turns: 5, contentSize: 1,
   });
-  const scheduled = await scheduleAssistantCompaction(database, seeded.conversationId);
+  const greenTurnProfile = {
+    ...compactProfile,
+    id: "assistant-context-green-turn-overflow-v1",
+    greenThresholdRatio: 0.99,
+    yellowThresholdRatio: 0.995,
+  };
+  const scheduled = await scheduleAssistantCompaction(database, seeded.conversationId, {
+    profile: greenTurnProfile,
+  });
   assert.equal(scheduled.kind, "CREATED");
   assert.equal(scheduled.capacity_state, "GREEN");
 });
@@ -503,7 +525,7 @@ test("Context Builder preserves ordered layers and fails closed for owner or req
       ownerId: owner,
       conversationId: uncompacted.conversationId,
       currentUserMessageId: uncompacted.messageIds.at(-2),
-    }),
+    }, compactProfile),
     error => error.code === "COMPACTION_REQUIRED",
   );
   assert.throws(
@@ -693,6 +715,40 @@ test("historical context reports incomplete indexing without claiming false reca
   assert.doesNotMatch(JSON.stringify(history), /caller-supplied poison/);
 });
 
+test("historical memory unions semantic recall with lexical recall and preserves pinned priority", async () => {
+  const database = new D1TestDatabase();
+  const historical = seedConversation(database, {
+    id: "conversation-semantic-history",
+    startMinute: 0,
+    messages: ["Caracas shifted state bullion holdings overseas."],
+  });
+  const current = seedConversation(database, {
+    id: "conversation-semantic-current",
+    startMinute: 20,
+    messages: ["委内瑞拉转移主权黄金储备了吗？"],
+  });
+  await drainMemoryIndex(database);
+  const vector = database.database.prepare(
+    `SELECT memory_vector.vector_id FROM assistant_memory_vectors_v1 memory_vector
+     JOIN assistant_memory_entries entry ON entry.id=memory_vector.entry_id
+     WHERE entry.source_message_id=?`,
+  ).get(historical.messageIds[0]);
+  const context = await buildAssistantContext(database, {
+    ownerId: owner,
+    conversationId: current.conversationId,
+    currentUserMessageId: current.messageIds[0],
+    semanticMatches: [{ id: vector.vector_id, score: 0.91 }],
+    semanticAvailable: true,
+  });
+  const memory = context.layers.find(layer => layer.type === "HISTORICAL_MEMORY");
+  assert.equal(memory.retrieval.lexical_matched_entries, 0);
+  assert.equal(memory.retrieval.semantic_matched_entries, 1);
+  assert.equal(memory.retrieval.semantic_available, true);
+  assert.equal(memory.items[0].canonical_message_ids[0], historical.messageIds[0]);
+  assert.equal(memory.items[0].semantic_score, 0.91);
+  assert.equal(context.layers[0].type, "PINNED_STATE");
+});
+
 test("memory indexing rejects forged derivations and commits exact canonical terms atomically", async () => {
   const database = new D1TestDatabase();
   const seeded = seedConversation(database, {
@@ -705,7 +761,7 @@ test("memory indexing rejects forged derivations and commits exact canonical ter
     completeAssistantMemoryIndexJob(database, {
       ...memoryCompletionPayload(claim),
       terms: ["forged"],
-    }, instant(10)),
+    }, instant(10), testVectorIndex),
     error => error.code === "INVALID_MEMORY_INDEX_RESULT",
   );
   assert.equal(
@@ -716,14 +772,21 @@ test("memory indexing rejects forged derivations and commits exact canonical ter
     completeAssistantMemoryIndexJob(database, {
       ...memoryCompletionPayload(claim),
       source_content_sha256: "0".repeat(64),
-    }, instant(10)),
+    }, instant(10), testVectorIndex),
     error => error.code === "INVALID_MEMORY_INDEX_RESULT",
   );
   const completed = await completeAssistantMemoryIndexJob(
-    database, memoryCompletionPayload(claim), instant(10),
+    database, memoryCompletionPayload(claim), instant(10), testVectorIndex,
   );
   assert.equal(completed.status, "COMPLETED");
   assert.equal(completed.term_count, tokenizeAssistantMemory(claim.content).length);
+  assert.equal(completed.vector_mutation_id, "test-vector-mutation");
+  assert.equal(
+    database.database.prepare(
+      "SELECT count(*) AS count FROM assistant_memory_vectors_v1",
+    ).get().count,
+    1,
+  );
   assert.deepEqual(
     database.database.prepare(
       "SELECT term FROM assistant_memory_terms ORDER BY rowid",
@@ -736,6 +799,12 @@ test("memory indexing rejects forged derivations and commits exact canonical ter
     ).run(claim.id),
     /immutable|append-only/,
   );
+  assert.throws(
+    () => database.database.prepare(
+      "UPDATE assistant_memory_vectors_v1 SET vector_mutation_id='forged'",
+    ).run(),
+    /immutable/,
+  );
 });
 
 test("memory index leases recover finitely and stale workers cannot publish", async () => {
@@ -746,7 +815,7 @@ test("memory index leases recover finitely and stale workers cannot publish", as
   });
   const stale = await claimAssistantMemoryIndexJob(database, "worker:stale", instant(10));
   assert.equal(await completeAssistantMemoryIndexJob(
-    database, memoryCompletionPayload(stale), instant(13),
+    database, memoryCompletionPayload(stale), instant(13), testVectorIndex,
   ), null);
   const recovered = await claimAssistantMemoryIndexJob(database, "worker:recovered", instant(13));
   assert.equal(recovered.id, stale.id);

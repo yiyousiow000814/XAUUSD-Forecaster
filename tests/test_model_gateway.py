@@ -71,6 +71,52 @@ def test_local_gateway_reserves_before_loopback_transport(monkeypatch) -> None:
     ]
 
 
+def test_local_structured_gateway_uses_native_schema_endpoint_and_accounting(
+    monkeypatch,
+) -> None:
+    events: list[object] = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        @staticmethod
+        def read() -> bytes:
+            return b'{"model":"qwen-local","message":{"content":"{}"}}'
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda request, *, timeout: events.append((request.full_url, timeout))
+        or Response(),
+    )
+    gateway = OllamaAssistantGateway(
+        accountant=CallbackModelAccountant(
+            lambda usage: events.append(usage) or True,
+        ),
+    )
+    result, model = gateway.generate_structured(
+        model="qwen-local",
+        purpose="assistant-context-compaction",
+        payload={"format": {"type": "object"}},
+        input_tokens=321,
+        decode=lambda envelope: envelope["message"]["content"],
+    )
+
+    assert (result, model) == ("{}", "qwen-local")
+    assert events == [
+        ModelRequestUsage(
+            model="qwen-local",
+            purpose="assistant-context-compaction",
+            input_tokens=321,
+        ),
+        ("http://127.0.0.1:11434/api/chat", 180.0),
+    ]
+
+
 def test_provider_transport_keeps_the_host_fixed_and_encodes_the_model(monkeypatch) -> None:
     requested_urls: list[str] = []
 

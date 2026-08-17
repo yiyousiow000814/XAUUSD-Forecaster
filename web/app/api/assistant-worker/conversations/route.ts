@@ -23,6 +23,9 @@ import {
   claimAssistantMemoryIndexJob,
   completeAssistantMemoryIndexJob,
   failAssistantMemoryIndexJob,
+  normalizeAssistantMemoryEmbedding,
+  assistantMemoryVectorNamespace,
+  assistantMemoryContentSha256,
 } from "../../_shared/assistant-memory-index";
 import { rejectPreviewWrite } from "../../_shared/preview";
 
@@ -112,7 +115,10 @@ export async function POST(request: Request) {
     } else if (action === "DEFER_COMPACTION") {
       item = await deferAssistantCompactionJob(binding, body);
     } else if (action === "COMPLETE_MEMORY_INDEX") {
-      item = await completeAssistantMemoryIndexJob(binding, body);
+      if (!env.ASSISTANT_MEMORY_VECTOR) return unavailable();
+      item = await completeAssistantMemoryIndexJob(
+        binding, body, new Date(), env.ASSISTANT_MEMORY_VECTOR,
+      );
     } else if (action === "FAIL_MEMORY_INDEX") {
       item = await failAssistantMemoryIndexJob(binding, body);
     } else if (action === "SCHEDULE_COMPACTION") {
@@ -140,13 +146,54 @@ export async function POST(request: Request) {
           entry: body.entry,
         });
       } else {
+        const currentUserMessageId = String(body.current_user_message_id ?? "");
+        const currentUser = await binding.prepare(
+          `SELECT content FROM assistant_messages
+           WHERE id=? AND conversation_id=? AND role='USER'`,
+        ).bind(currentUserMessageId, conversationId).first<{ content: string }>();
+        if (!currentUser) return notFound();
+        let semanticMatches: Array<{ id: string; score: number }> = [];
+        let semanticAvailable = false;
+        const queryEmbedding = body.query_embedding;
+        if (queryEmbedding && typeof queryEmbedding === "object" && !Array.isArray(queryEmbedding)) {
+          const embedded = normalizeAssistantMemoryEmbedding(
+            queryEmbedding as Record<string, unknown>,
+          );
+          if (
+            String((queryEmbedding as Record<string, unknown>).query_content_sha256 ?? "")
+              !== await assistantMemoryContentSha256(currentUser.content)
+          ) throw new AssistantConversationInputError(
+            "INVALID_MEMORY_QUERY", "历史记忆查询与当前问题不一致",
+          );
+          if (env.ASSISTANT_MEMORY_VECTOR) {
+            try {
+              const vectorResult = await env.ASSISTANT_MEMORY_VECTOR.query(
+                embedded.embedding,
+                {
+                  topK: 24,
+                  namespace: await assistantMemoryVectorNamespace(conversation.owner_id),
+                  returnMetadata: "none",
+                },
+              );
+              semanticMatches = vectorResult.matches.map(match => ({
+                id: match.id,
+                score: Number(match.score),
+              }));
+              semanticAvailable = true;
+            } catch {
+              // Lexical and pinned memory remain available during a Vectorize outage.
+            }
+          }
+        }
         item = await buildAssistantContext(binding, {
           ownerId: conversation.owner_id,
           conversationId,
-          currentUserMessageId: String(body.current_user_message_id ?? ""),
+          currentUserMessageId,
           toolEvidence: Array.isArray(body.tool_evidence)
             ? body.tool_evidence as Array<{ evidence_id: string; content: unknown }>
             : [],
+          semanticMatches,
+          semanticAvailable,
         });
       }
     } else {

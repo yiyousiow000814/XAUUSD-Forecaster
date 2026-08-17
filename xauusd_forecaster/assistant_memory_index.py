@@ -1,4 +1,4 @@
-"""Deterministic, model-free indexing for canonical Assistant messages."""
+"""Deterministic lexical and local-vector indexing for Assistant messages."""
 
 from __future__ import annotations
 
@@ -7,8 +7,15 @@ import re
 import unicodedata
 from typing import Any
 
+from .local_embeddings import (
+    LOCAL_EMBEDDING_DIMENSIONS,
+    LOCAL_EMBEDDING_MODEL,
+    OllamaEmbeddingClient,
+)
 
-ASSISTANT_MEMORY_INDEX_VERSION = "assistant-memory-lexical-v1"
+
+ASSISTANT_MEMORY_INDEX_VERSION = "assistant-memory-hybrid-v2"
+ASSISTANT_MEMORY_EMBEDDING_TEXT_VERSION = "assistant-message-embedding-v1"
 ASSISTANT_MEMORY_MAX_INDEX_TERMS = 64
 ASSISTANT_MEMORY_MAX_QUERY_TERMS = 16
 ASSISTANT_MEMORY_MAX_CLAIMS_PER_SYNC = 20
@@ -81,7 +88,36 @@ def tokenize_assistant_memory(
     return tuple(terms)
 
 
-def build_assistant_memory_index_result(item: object) -> dict[str, Any]:
+def _embedding_payload(content: str, client: OllamaEmbeddingClient) -> dict[str, Any]:
+    profile = client.profile()
+    if profile.model_name != LOCAL_EMBEDDING_MODEL:
+        raise ValueError("Assistant memory embedding model is invalid")
+    vector = client.embed([content], profile)[0]
+    return {
+        "embedding_text_version": ASSISTANT_MEMORY_EMBEDDING_TEXT_VERSION,
+        "embedding_model": profile.model_name,
+        "embedding_model_digest": profile.model_digest,
+        "embedding_dimensions": profile.dimensions,
+        "embedding": [float(value) for value in vector],
+    }
+
+
+def build_assistant_query_embedding(
+    content: str,
+    embedding_client: OllamaEmbeddingClient | None = None,
+) -> dict[str, Any]:
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("Assistant memory query text is invalid")
+    return {
+        **_embedding_payload(content, embedding_client or OllamaEmbeddingClient()),
+        "query_content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+    }
+
+
+def build_assistant_memory_index_result(
+    item: object,
+    embedding_client: OllamaEmbeddingClient | None = None,
+) -> dict[str, Any]:
     if not isinstance(item, dict):
         raise ValueError("Assistant memory index claim is invalid")
     identifier = str(item.get("id") or "")
@@ -108,4 +144,5 @@ def build_assistant_memory_index_result(item: object) -> dict[str, Any]:
         "index_version": index_version,
         "source_content_sha256": digest,
         "terms": list(tokenize_assistant_memory(content)),
+        **_embedding_payload(content, embedding_client or OllamaEmbeddingClient()),
     }

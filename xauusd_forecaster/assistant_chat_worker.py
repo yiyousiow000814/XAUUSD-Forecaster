@@ -26,6 +26,7 @@ from .assistant_capacity import (
     AssistantCapacityPolicy,
     AssistantCapacityUnavailable,
 )
+from .assistant_memory_index import build_assistant_query_embedding
 from .assistant_routing import (
     AssistantModelRoutingUnavailable,
     AssistantTaskType,
@@ -472,14 +473,23 @@ def run_assistant_chat_worker(
             if ledger is None:
                 ledger = ForwardLedger(database)
             try:
+                context_request: dict[str, object] = {
+                    "action": "BUILD_CONTEXT",
+                    "conversation_id": claim["conversation_id"],
+                    "current_user_message_id": claim["user_message_id"],
+                    "tool_evidence": [],
+                }
+                try:
+                    context_request["query_embedding"] = build_assistant_query_embedding(
+                        str(claim["user_text"]),
+                    )
+                except Exception:
+                    # Lexical and pinned memory remain usable while local
+                    # semantic embedding is temporarily unavailable.
+                    pass
                 context = _validated_context(transport.post_json(
                     conversation_url,
-                    {
-                        "action": "BUILD_CONTEXT",
-                        "conversation_id": claim["conversation_id"],
-                        "current_user_message_id": claim["user_message_id"],
-                        "tool_evidence": [],
-                    },
+                    context_request,
                 ), claim)
 
                 def retrieve_news(

@@ -17,6 +17,7 @@ from xauusd_forecaster.assistant_agent import (
     configured_assistant_agent_budgets,
     decode_gemini_assistant_turn,
     decode_ollama_assistant_turn,
+    ollama_openai_payload,
     run_bounded_assistant_agent,
 )
 from xauusd_forecaster.assistant_capacity import AssistantCapacityPolicy
@@ -670,3 +671,16 @@ def test_every_native_model_turn_uses_capacity_and_locks_the_selected_model(
     assert lease_renewals == [2, 1]
     assert envelopes == []
     ledger.close()
+def test_ollama_payload_applies_the_selected_native_context_window() -> None:
+    payload = ollama_openai_payload(
+        {
+            "systemInstruction": {"parts": [{"text": "system"}]},
+            "contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+            "generationConfig": {"temperature": 0, "maxOutputTokens": 1024},
+        },
+        model="assistant-qwen35-4b-256k:latest",
+        thinking_level="minimal",
+        context_limit=262_144,
+    )
+    assert payload["options"] == {"num_ctx": 262_144}
+    assert payload["keep_alive"] == "5m"

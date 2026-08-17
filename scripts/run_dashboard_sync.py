@@ -1033,6 +1033,11 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
         ASSISTANT_MEMORY_MAX_CLAIMS_PER_SYNC,
         build_assistant_memory_index_result,
     )
+    from xauusd_forecaster.assistant_local_runtime import (
+        local_assistant_capacity_policies,
+        local_assistant_credentials,
+        local_assistant_profiles,
+    )
     from xauusd_forecaster.assistant_capacity import (
         AssistantCapacityUnavailable,
         AssistantServicePriority,
@@ -1087,6 +1092,9 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
     capacity_policies = configured_assistant_capacity_policies(
         credentials, model_profiles,
     )
+    local_compaction_credentials = local_assistant_credentials()
+    local_compaction_profiles = local_assistant_profiles()
+    local_compaction_policies = local_assistant_capacity_policies()
 
     def failure_code(error: Exception) -> str:
         if isinstance(error, AssistantCapacityUnavailable):
@@ -1241,18 +1249,17 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                     config,
                 )
 
-        # Background model work must not consume the pool reserved for interactive
-        # requests. Leave it unclaimed when no routine pool is configured.
+        # Cloud title work must not consume a preemptible pool. Local compaction
+        # has its own serial Assistant pool and remains available without Google.
         routine_pool_ids = {
             item.account_id for item in credentials if item.pool == ROUTINE_POOL
         }
-        if not routine_pool_ids or not any(
+        cloud_background_available = bool(routine_pool_ids) and any(
             policy.enabled and policy.credential_pool_id in routine_pool_ids
             for policy in capacity_policies
-        ):
-            return
+        )
         title_url = conversation_url
-        for _ in range(3):
+        for _ in range(3 if cloud_background_available else 0):
             claim_url = title_url + "?" + urllib.parse.urlencode({
                 "queue": "title", "worker_id": worker_id,
             })
@@ -1354,7 +1361,7 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                         "source_messages": source_messages,
                     }),
                     reserved_output_tokens=ASSISTANT_COMPACTION_MAX_OUTPUT_TOKENS,
-                    profiles=model_profiles,
+                    profiles=local_compaction_profiles,
                 )
 
                 def invoke_compaction(
@@ -1373,14 +1380,16 @@ def _sync_news_questions(local_payload: dict, config: dict) -> None:
                         request_accountant=request_accountant,
                         model=profile.model_id,
                         thinking_level=thinking_level,
+                        provider=profile.provider,
+                        context_limit=profile.context_limit,
                     )
 
                 routed = execute_assistant_capacity_route(
                     ledger.connection,
                     plan,
-                    credentials,
+                    local_compaction_credentials,
                     service_priority=AssistantServicePriority.BACKGROUND,
-                    policies=capacity_policies,
+                    policies=local_compaction_policies,
                     invoke=invoke_compaction,
                 )
                 result = {**routed.value, "routing": routed.routing}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import urllib.parse
 
 import pytest
@@ -390,3 +391,14 @@ def test_invalid_claim_identity_never_opens_the_local_ledger(
             max_claims=1,
         )
     assert opened is False
+
+@pytest.fixture(autouse=True)
+def _local_query_embedding(monkeypatch) -> None:
+    monkeypatch.setattr(worker, "build_assistant_query_embedding", lambda text: {
+        "embedding_text_version": "assistant-message-embedding-v1",
+        "embedding_model": "qwen3-embedding:0.6b",
+        "embedding_model_digest": "ac6da0dfba84a81fdbfbaf330198c33cd77c4cdfc53e8bc50eb581914a15621d",
+        "embedding_dimensions": 1024,
+        "embedding": [1.0, *([0.0] * 1023)],
+        "query_content_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    })
