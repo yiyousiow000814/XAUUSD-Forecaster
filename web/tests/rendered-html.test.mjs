@@ -2114,7 +2114,10 @@ test("renders a recoverable responsive Assistant workbench without unsafe HTML",
   assert.match(transcript, /assistant-transcript-banners/);
   assert.match(transcript, /href="\/assistant">\u5b8c\u6210 Access \u767b\u5f55/);
   assert.match(transcript, /AURUM \/ PROVISIONAL/);
-  assert.match(transcript, /16,000 bytes/);
+  assert.match(transcript, /历史自动压缩/);
+  assert.match(transcript, /ASSISTANT_CONTEXT_LIMIT_TOKENS/);
+  assert.match(transcript, /ASSISTANT_MAX_MESSAGE_BYTES \* 0\.75/);
+  assert.doesNotMatch(transcript, /16,000 bytes/);
   assert.doesNotMatch(transcript, /dangerouslySetInnerHTML/);
   assert.match(fixture, /管理与发送仅生产可用 · 不调用模型/);
   assert.match(css, /\.assistant-workbench \{[^}]*grid-template-columns:300px minmax\(0,1fr\)/);
