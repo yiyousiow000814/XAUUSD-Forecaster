@@ -24,7 +24,7 @@ The initial cross-component catalog is:
 | `OPS_AI_BACKLOG_OVERDUE` | The oldest currently claimable work exceeded its task-specific queue SLA. Future scheduled retries do not count as overdue backlog. |
 | `OPS_AI_FAILURE_RATE_HIGH` | Recent model, transport, or validation failures exceed the expected rate. |
 | `OPS_AI_NEW_DEAD_LETTER` | New terminally isolated work appeared during the monitoring window. |
-| `OPS_NEWS_ANNOTATION_CONTRACT_STATE_INVALID` | A superseded display-failure placeholder remains the latest annotation for a revision and requires recovery before model use. |
+| `OPS_NEWS_ANNOTATION_CONTRACT_STATE_INVALID` | A superseded display-failure placeholder remains actionable on the latest canonical relevant revision and requires recovery before model use. Irrelevant evidence and noncanonical collection copies do not alert. |
 | `OPS_COMPONENT_UNHEALTHY` | A published runtime component is warning, stale, or in error. |
 | `OPS_NEWS_SOURCE_UNHEALTHY` | A monitored news source is degraded, stale, or failing. |
 | `OPS_RUNTIME_UPDATE_FAILED` | A runtime update failed and was retained or rolled back. |
