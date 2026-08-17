@@ -154,6 +154,24 @@ def test_incomplete_candidate_context_cannot_claim_a_new_episode():
         )
 
 
+def test_first_event_needs_no_fabricated_candidate_difference():
+    result = assessment("NEW_EVENT", "NEW_EPISODE", "")
+    result["identity_differences_zh"] = []
+
+    validated = validate_impact_assessment(result, candidate_ids=set())
+
+    assert validated["identity_relation"] == "NEW_EPISODE"
+    assert validated["identity_differences_zh"] == []
+
+
+def test_new_episode_still_explains_difference_when_candidates_exist():
+    result = assessment("NEW_EVENT", "NEW_EPISODE", "")
+    result["identity_differences_zh"] = []
+
+    with pytest.raises(ValueError, match="anchor difference"):
+        validate_impact_assessment(result, candidate_ids={"prior"})
+
+
 def test_same_continuous_market_object_does_not_create_identity_similarity():
     current = {
         "material_event_key": "gold_pullback_aug_2026",

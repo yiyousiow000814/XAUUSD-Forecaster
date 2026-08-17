@@ -164,7 +164,11 @@ def validate_impact_assessment(
         raise ValueError("Same-event identity requires factual equivalence")
     if relation == "SAME_EPISODE" and (not core_changes or identity_differences):
         raise ValueError("Same-episode identity requires a core factual change")
-    if relation == "NEW_EPISODE" and not identity_differences:
+    if (
+        relation == "NEW_EPISODE"
+        and not identity_differences
+        and (candidate_ids is None or bool(candidate_ids))
+    ):
         raise ValueError("New-episode identity requires an anchor difference")
     confidence = float(result["confidence"])
     if not 0.0 <= confidence <= 1.0:

@@ -3282,7 +3282,10 @@ def test_gemma_impact_repairs_one_identity_contract_failure_through_gateway(
     monkeypatch.setattr(GeminiModelGateway, "_post_json", staticmethod(post_json))
 
     result, _ = pool.call_impact(0, {
-        "annotation": {}, "prior_event_context": [],
+        "annotation": {}, "prior_event_context": [{
+            "candidate_id": "prior-event",
+            "identity_anchor_eligible": True,
+        }],
         "headline": "Employment report", "body": "Complete source body",
     })
 
