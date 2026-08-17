@@ -92,6 +92,62 @@ def test_compaction_uses_only_prior_summary_and_next_chunk_through_metered_gatew
     assert "complete_history" not in inputs
 
 
+def test_compaction_uses_local_structured_gateway_without_google(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeOllamaGateway:
+        def __init__(self, *, accountant) -> None:
+            calls.append({"accountant": accountant})
+
+        def generate_structured(self, **kwargs):
+            calls.append(kwargs)
+            envelope = {
+                "message": {"content": json.dumps({
+                        "summary": "本地模型保留了用户约束和证据引用。",
+                        "covered_message_ids": ["message-1", "message-2"],
+                        "pinned_entries": [],
+                    }, ensure_ascii=False)},
+                "model": "assistant-qwen35-4b-256k:latest",
+            }
+            return kwargs["decode"](envelope), envelope["model"]
+
+    monkeypatch.setattr(
+        assistant_compaction, "OllamaAssistantGateway", FakeOllamaGateway,
+    )
+    monkeypatch.setattr(
+        assistant_compaction,
+        "generate_metered_json",
+        lambda *args, **kwargs: pytest.fail("local compaction must not call Google"),
+    )
+    result = assistant_compaction.compact_assistant_context(
+        None,
+        [],
+        source_messages(),
+        prompt_version=assistant_compaction.ASSISTANT_COMPACTION_PROMPT_VERSION,
+        context_profile_id="assistant-context-256k-v2",
+        api_key="ollama-loopback",
+        request_accountant=CallbackModelAccountant(lambda usage: True),
+        model="assistant-qwen35-4b-256k:latest",
+        thinking_level="minimal",
+        provider="OLLAMA_LOCAL",
+        context_limit=262_144,
+    )
+
+    assert result["model_version"] == "assistant-qwen35-4b-256k:latest"
+    payload = calls[1]["payload"]
+    assert payload["options"] == {
+        "temperature": 0,
+        "num_ctx": 262_144,
+        "num_predict": assistant_compaction.ASSISTANT_COMPACTION_MAX_OUTPUT_TOKENS,
+    }
+    assert payload["think"] is False
+    assert payload["format"]["additionalProperties"] is False
+    assert payload["format"]["required"] == [
+        "summary", "covered_message_ids", "pinned_entries",
+    ]
+    assert calls[1]["purpose"] == "assistant-context-compaction"
+
+
 @pytest.mark.parametrize(
     ("result", "match"),
     [

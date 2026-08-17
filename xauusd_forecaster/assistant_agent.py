@@ -356,7 +356,7 @@ def decode_gemini_assistant_turn(envelope: dict[str, object]) -> AssistantModelT
     )
 
 
-def _ollama_openai_payload(
+def ollama_openai_payload(
     payload: dict[str, object], *, model: str, thinking_level: str | None,
     context_limit: int,
 ) -> dict[str, object]:
@@ -456,7 +456,7 @@ def _ollama_openai_payload(
         if tools:
             translated["tools"] = tools
             translated["tool_choice"] = "auto"
-    schema = generation.get("responseJsonSchema")
+    schema = generation.get("responseJsonSchema", generation.get("responseSchema"))
     if isinstance(schema, dict):
         translated["response_format"] = {
             "type": "json_schema",
@@ -985,7 +985,7 @@ class CapacityRoutedAssistantModelInvoker:
                 return OllamaAssistantGateway(accountant=request_accountant).generate(
                     model=profile.model_id,
                     purpose=purpose,
-                    payload=_ollama_openai_payload(
+                    payload=ollama_openai_payload(
                         payload, model=profile.model_id,
                         thinking_level=thinking_level,
                         context_limit=profile.context_limit,

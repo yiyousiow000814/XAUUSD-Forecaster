@@ -1855,6 +1855,8 @@ def test_assistant_memory_index_sync_uses_local_embedding_and_does_not_echo_cont
                     "content": content,
                 }}
             return {"item": None}
+        if "queue=compaction" in url:
+            return {"item": None}
         raise AssertionError(f"unexpected URL: {url}")
 
     posted: list[dict] = []
@@ -2084,8 +2086,10 @@ def test_assistant_compaction_sync_uses_incremental_claim_and_low_priority_gatew
         "message-1", "message-2",
     ]
     assert compaction_calls[0]["request_accountant"] == "compaction-accountant"
-    assert compaction_calls[0]["model"] == "gemma-4-31b-it"
+    assert compaction_calls[0]["model"] == "assistant-qwen35-4b-256k:latest"
     assert compaction_calls[0]["thinking_level"] == "minimal"
+    assert compaction_calls[0]["provider"] == "OLLAMA_LOCAL"
+    assert compaction_calls[0]["context_limit"] == 262_144
     assert {key: value for key, value in posted[0].items() if key != "routing"} == {
         "action": "COMPLETE_COMPACTION",
         "id": "compaction-job-1",
@@ -2099,4 +2103,5 @@ def test_assistant_compaction_sync_uses_incremental_claim_and_low_priority_gatew
     }
     assert posted[0]["routing"]["task_type"] == "CONTEXT_COMPACTION"
     assert posted[0]["routing"]["model_requirement"] == "SMALL_PREFERRED"
+    assert posted[0]["routing"]["provider"] == "OLLAMA_LOCAL"
     assert closed["value"] is True

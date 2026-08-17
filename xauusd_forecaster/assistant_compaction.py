@@ -6,8 +6,13 @@ import json
 from typing import Any
 
 from .annotation import DEFAULT_GEMMA_MODEL, generate_metered_json
-from .assistant_routing import apply_provider_thinking_level
-from .model_gateway import ModelRequestAccountant
+from .assistant_routing import (
+    GOOGLE_GENERATIVE_LANGUAGE,
+    OLLAMA_LOCAL,
+    apply_provider_thinking_level,
+    conservative_assistant_token_estimate,
+)
+from .model_gateway import ModelRequestAccountant, OllamaAssistantGateway
 
 
 ASSISTANT_COMPACTION_PROMPT_VERSION = "assistant-compaction-v1"
@@ -29,6 +34,42 @@ MAX_PIN_CONTENT_CHARACTERS = 1_200
 MAX_REFERENCE_ITEMS = 64
 MAX_INPUT_CHARACTERS = 40_000
 ASSISTANT_COMPACTION_MAX_OUTPUT_TOKENS = 2_400
+
+
+def _ollama_compaction_schema() -> dict[str, object]:
+    """Return the JSON-Schema subset enforced by Ollama's native grammar."""
+    reference_array = {"type": "array", "items": {"type": "string"}}
+    return {
+        "type": "object",
+        "properties": {
+            "summary": {"type": "string"},
+            "covered_message_ids": reference_array,
+            "pinned_entries": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "enum": list(ASSISTANT_PIN_KINDS)},
+                        "content": {"type": "string"},
+                        "origin_message_ids": reference_array,
+                        "evidence_ids": reference_array,
+                        "source_refs": reference_array,
+                        "important_timestamps": reference_array,
+                        "tool_refs": reference_array,
+                        "artifact_refs": reference_array,
+                    },
+                    "required": [
+                        "kind", "content", "origin_message_ids", "evidence_ids",
+                        "source_refs", "important_timestamps", "tool_refs",
+                        "artifact_refs",
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["summary", "covered_message_ids", "pinned_entries"],
+        "additionalProperties": False,
+    }
 
 
 def _references(value: object, field: str) -> list[str]:
@@ -139,6 +180,8 @@ def compact_assistant_context(
     request_accountant: ModelRequestAccountant | None,
     model: str = DEFAULT_GEMMA_MODEL,
     thinking_level: str | None = None,
+    provider: str = GOOGLE_GENERATIVE_LANGUAGE,
+    context_limit: int | None = None,
 ) -> dict[str, Any]:
     """Summarize only the prior summary plus the next frozen message chunk."""
     if prompt_version != ASSISTANT_COMPACTION_PROMPT_VERSION:
@@ -167,7 +210,13 @@ def compact_assistant_context(
             "NEWLY_COMPACTABLE_MESSAGES；不得假装看到完整历史。保留未解决工作、用户约束、"
             "决定、当前主题、证据 ID、来源、重要时间、工具和产物引用。EXISTING_PINNED_STATE "
             "由服务器独立保留，不要重复创建。不得新增事实、交易建议或证据。使用简体中文，"
-            "只返回符合 schema 的 JSON。"
+            "顶层只能返回 summary、covered_message_ids、pinned_entries 三个字段；"
+            "covered_message_ids 必须与 REQUIRED_COVERED_MESSAGE_IDS 完全一致。"
+            "新消息中的明确用户约束必须生成 CONSTRAINT pin，尚未完成或仍需核对的工作"
+            "必须生成 UNRESOLVED pin；每个 pin 只能引用包含该内容的真实消息 ID。"
+            "每个 pinned_entries 对象必须且只能包含 kind、content、origin_message_ids、"
+            "evidence_ids、source_refs、important_timestamps、tool_refs、artifact_refs；"
+            "所有 *_ids、*_refs 和 timestamps 字段都是字符串数组，不要返回 id 或 type。"
         )}]},
         "contents": [{"parts": [{"text": serialized}]}],
         "generationConfig": {
@@ -178,7 +227,10 @@ def compact_assistant_context(
                 "type": "object",
                 "required": ["summary", "covered_message_ids", "pinned_entries"],
                 "properties": {
-                    "summary": {"type": "string", "maxLength": MAX_SUMMARY_CHARACTERS},
+            "summary": {
+                "type": "string", "minLength": 1,
+                "maxLength": MAX_SUMMARY_CHARACTERS,
+            },
                     "covered_message_ids": {
                         "type": "array",
                         "maxItems": MAX_SOURCE_MESSAGES,
@@ -224,14 +276,61 @@ def compact_assistant_context(
     def decode(envelope: dict[str, object]) -> dict:
         return json.loads(envelope["candidates"][0]["content"]["parts"][0]["text"])
 
-    result, model_version = generate_metered_json(
-        api_key,
-        model=model,
-        purpose="assistant-context-compaction",
-        payload=apply_provider_thinking_level(payload, thinking_level),
-        decode=decode,
-        request_accountant=request_accountant,
-    )
+    if provider == OLLAMA_LOCAL:
+        if not isinstance(context_limit, int) or context_limit <= 0:
+            raise ValueError("Local Assistant compaction context limit is invalid")
+
+        def decode_ollama(envelope: dict[str, object]) -> dict:
+            try:
+                message = envelope["message"]
+                content = message["content"]
+                if not isinstance(message, dict) or not isinstance(content, str):
+                    raise TypeError
+                parsed = json.loads(content)
+                if not isinstance(parsed, dict):
+                    raise TypeError
+                return parsed
+            except (KeyError, IndexError, TypeError, json.JSONDecodeError) as error:
+                raise ValueError("Local Assistant compaction response is invalid") from error
+
+        result, model_version = OllamaAssistantGateway(
+            accountant=request_accountant,
+        ).generate_structured(
+            model=model,
+            purpose="assistant-context-compaction",
+            payload={
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": payload["systemInstruction"]["parts"][0]["text"],
+                    },
+                    {"role": "user", "content": serialized},
+                ],
+                "stream": False,
+                "think": False,
+                "format": _ollama_compaction_schema(),
+                "keep_alive": "5m",
+                "options": {
+                    "temperature": 0,
+                    "num_ctx": context_limit,
+                    "num_predict": ASSISTANT_COMPACTION_MAX_OUTPUT_TOKENS,
+                },
+            },
+            input_tokens=conservative_assistant_token_estimate(payload),
+            decode=decode_ollama,
+        )
+    elif provider == GOOGLE_GENERATIVE_LANGUAGE:
+        result, model_version = generate_metered_json(
+            api_key,
+            model=model,
+            purpose="assistant-context-compaction",
+            payload=apply_provider_thinking_level(payload, thinking_level),
+            decode=decode,
+            request_accountant=request_accountant,
+        )
+    else:
+        raise ValueError(f"Unsupported Assistant compaction provider: {provider}")
     validated = _validate_result(result, source_ids)
     return {
         **validated,

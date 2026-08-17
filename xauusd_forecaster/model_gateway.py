@@ -266,3 +266,36 @@ class OllamaAssistantGateway:
         if not isinstance(envelope, dict):
             raise ValueError("Ollama response is not a JSON object")
         return decode(envelope), str(envelope.get("model") or model)
+
+    def generate_structured(
+        self,
+        *,
+        model: str,
+        purpose: str,
+        payload: dict[str, object],
+        input_tokens: int,
+        decode: Callable[[dict[str, object]], T],
+    ) -> tuple[T, str]:
+        """Use Ollama's native schema-constrained chat endpoint."""
+        usage = ModelRequestUsage(
+            model=model,
+            purpose=purpose,
+            input_tokens=max(1, int(input_tokens)),
+        )
+        if not self.accountant.reserve(usage):
+            raise ModelGatewayCapacityExhausted(
+                "Local Assistant request exceeded its reserved capacity"
+            )
+        request = urllib.request.Request(
+            "http://127.0.0.1:11434/api/chat",
+            data=json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8"
+            ),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=180.0) as response:
+            envelope = json.loads(response.read())
+        if not isinstance(envelope, dict):
+            raise ValueError("Ollama response is not a JSON object")
+        return decode(envelope), str(envelope.get("model") or model)
