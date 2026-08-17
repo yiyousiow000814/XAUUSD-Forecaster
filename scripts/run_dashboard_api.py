@@ -617,6 +617,11 @@ def _not_required_reason(item: dict, forward_epoch: str) -> tuple[str, str]:
         return "INVALID_PUBLISHED_TIME", "发布时间晚于收到时间，时间证据无效"
     if intake_reason == "MISSING_PUBLISHED_TIME":
         return "HISTORICAL_MATERIAL", "历史资料：缺少可靠发布时间"
+    if item.get("has_canonical_content_peer"):
+        return (
+            "CANONICAL_COPY_HANDLES_ANNOTATION",
+            "同一篇新闻已由另一采集入口的规范副本负责处理，不会重复消耗模型配额",
+        )
     if allowed:
         return "QUEUE_INVARIANT_MISMATCH", "正文符合条件但未进入语义队列，需要检查"
     return "INTAKE_REJECTED", "未通过客观采集条件，不进入语义处理"
@@ -733,6 +738,29 @@ def _news_reader_rows(
                         ELSE 'PENDING' END AS content_fetch_status,
                    cf.error_type AS content_error_type,
                    n.link, n.content_hash, n.body,
+                   EXISTS (
+                     SELECT 1 FROM news_annotation_display_checkpoints_v1 checkpoint
+                     WHERE checkpoint.source=n.source
+                       AND checkpoint.source_item_id=n.source_item_id
+                       AND checkpoint.revision_number=n.revision_number
+                       AND checkpoint.raw_content_hash=n.content_hash
+                       AND checkpoint.prompt_version=?
+                   ) AS has_display_checkpoint,
+                   EXISTS (
+                     SELECT 1 FROM news_revisions same_content
+                     WHERE (same_content.content_hash=n.content_hash
+                         OR (same_content.source<>n.source
+                           AND same_content.source_item_id=n.source_item_id))
+                       AND (same_content.source<>n.source
+                         OR same_content.source_item_id<>n.source_item_id)
+                       AND length(trim(COALESCE(same_content.body,'')))>=240
+                       AND NOT EXISTS (
+                         SELECT 1 FROM news_revisions same_content_newer
+                         WHERE same_content_newer.source=same_content.source
+                           AND same_content_newer.source_item_id=same_content.source_item_id
+                           AND same_content_newer.revision_number>
+                               same_content.revision_number)
+                   ) AS has_canonical_content_peer,
                    json_extract(a.annotation_json, '$.summary_zh') AS summary_zh,
                    json_extract(a.annotation_json, '$.primary_category') AS primary_category,
                    json_extract(a.annotation_json, '$.secondary_categories') AS secondary_categories_json,
@@ -861,8 +889,9 @@ def _news_reader_rows(
             LIMIT ?""",
         (
             *candidate_parameters,
-            now.isoformat(timespec="microseconds"), INVALID_CHINESE_TITLE,
-            PROMPT_VERSION, IMPACT_MODEL, IMPACT_PROMPT_VERSION,
+            PROMPT_VERSION, now.isoformat(timespec="microseconds"),
+            INVALID_CHINESE_TITLE, PROMPT_VERSION,
+            IMPACT_MODEL, IMPACT_PROMPT_VERSION,
             HANDOVER_IMPACT_PROMPT_VERSION, IMPACT_PROMPT_VERSION,
             PROMPT_VERSION, cutoff, limit,
         ),
@@ -979,13 +1008,29 @@ def _serialize_news_rows(
         )
         annotation_failure_code = item.pop("annotation_failure_code", None)
         annotation_failure = item.pop("annotation_failure", None)
+        has_display_checkpoint = bool(item.pop("has_display_checkpoint", False))
+        has_canonical_content_peer = bool(
+            item.pop("has_canonical_content_peer", False)
+        )
         if item.get("parsed_at"):
             item["annotation_status"] = "READY"
+        elif has_display_checkpoint:
+            item["annotation_status"] = "REPAIRING_DISPLAY"
+            item["annotation_reason_code"] = "DISPLAY_REPAIR_IN_PROGRESS"
+            item["annotation_reason"] = (
+                "语义复核已经完成，系统正在根据校验反馈修复中文显示"
+            )
         elif annotation_key in claimable_annotation_keys:
             item["annotation_status"] = "QUEUED"
         elif item.get("annotation_status") == "QUEUED":
             item["annotation_status"] = "NOT_REQUIRED"
-            reason_code, reason = _not_required_reason(item, epoch)
+            reason_code, reason = _not_required_reason(
+                {
+                    **item,
+                    "has_canonical_content_peer": has_canonical_content_peer,
+                },
+                epoch,
+            )
             item["annotation_reason_code"] = reason_code
             item["annotation_reason"] = reason
         elif item.get("annotation_status") in {"BACKING_OFF", "DEAD_LETTER"}:

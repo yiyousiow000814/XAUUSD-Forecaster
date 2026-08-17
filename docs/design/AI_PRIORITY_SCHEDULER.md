@@ -4,6 +4,18 @@ This design describes the account-aware scheduler used by the news AI chain.
 It allocates available provider capacity without changing which model owns a
 semantic decision.
 
+Model-output retries are corrective, not blind repetition. When an otherwise
+valid news annotation fails only display validation, the worker sends one
+bounded repair request containing the rejected fields and the exact prior
+validation reason. Semantic and already-valid display fields stay frozen in an
+immutable checkpoint. A second failure is persisted with a stable failure code
+and bounded rejected output evidence, then returns to a display-only retry with
+the latest reason. Display-only correction uses Gemma first, then escalates to
+the declared Gemini fallback routes if validation still fails. These jobs use bounded backoff
+but do not become terminal while the source and checkpoint remain current. A
+repair-version change may authorize one auditable recovery attempt for failures
+that predate checkpoints.
+
 ## Goals
 
 - Discover configured accounts and keys again on every scheduler cycle.

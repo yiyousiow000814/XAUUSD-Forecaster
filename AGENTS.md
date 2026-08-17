@@ -8,6 +8,22 @@
 4. Identify obsolete code.
 5. Add or update tests.
 
+## Problem Resolution Standard
+
+- Treat fail-closed behavior, error visibility, and audit evidence as safety
+  requirements, not as substitutes for fixing the failed workflow.
+- When the user asks to resolve a failure, completion requires a corrective path
+  that can produce the intended valid result and evidence that the path succeeds.
+  Do not redefine success as displaying, isolating, suppressing, or permanently
+  stopping at the failure state unless the underlying input is genuinely
+  impossible or the user explicitly requests that behavior.
+- A retry must use the prior rejection reason and preserve already-valid work.
+  Do not blindly repeat the same request or recompute an accepted stage when a
+  narrower failed stage can be repaired independently.
+- Verify recovery with a representative end-to-end fixture and, when safe and
+  available, one production-shaped or real-provider rehearsal. Report remaining
+  external availability limits separately from correctness.
+
 ## Testing Discipline
 
 - Tests must protect durable behavior, system contracts, and invariants. Do not add a test merely because code changed.

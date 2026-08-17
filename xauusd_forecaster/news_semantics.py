@@ -14,6 +14,7 @@ LEGACY_NEWS_PROMPT_VERSION = "news-json-v14-material-event-evidence"
 PREVIOUS_NEWS_PROMPT_VERSION = "news-json-v15-ai-semantic-review"
 CURRENT_NEWS_PROMPT_VERSION = "news-json-v16-xauusd-transmission-evidence"
 LEGACY_INVALID_SEMANTIC_REASON_PREFIX = "语言或结构一致性检查未通过"
+DISPLAY_AUDIT_FALLBACK_REASON_PREFIX = "语义已完成，但中文展示未通过校验"
 V1_NEWS_PROMPT_VERSIONS = (
     LEGACY_NEWS_PROMPT_VERSION,
     "news-json-v13-event-claims",
@@ -42,7 +43,10 @@ def validated_annotation_predicate(alias: str) -> str:
     return (
         f"COALESCE(json_extract({alias}.annotation_json, "
         "'$.semantic_reason_zh'), '') NOT LIKE "
-        f"'{LEGACY_INVALID_SEMANTIC_REASON_PREFIX}%'"
+        f"'{LEGACY_INVALID_SEMANTIC_REASON_PREFIX}%' AND "
+        f"COALESCE(json_extract({alias}.annotation_json, "
+        "'$.semantic_reason_zh'), '') NOT LIKE "
+        f"'{DISPLAY_AUDIT_FALLBACK_REASON_PREFIX}%'"
     )
 
 

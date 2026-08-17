@@ -250,6 +250,8 @@ def _credentials_for_job(
 def _may_try_another_credential(status: dict[str, object]) -> bool:
     if status.get("failure_code") == "NEWS_EMBEDDING_BACKFILL_PENDING":
         return False
+    if status.get("retry_with_another_account"):
+        return True
     if status.get("status") in {"DEFERRED", "DISABLED"}:
         return True
     return status.get("provider_http_status") in {
