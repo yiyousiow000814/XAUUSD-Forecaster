@@ -16,6 +16,33 @@ from typing import Callable, TypeVar
 
 
 T = TypeVar("T")
+LOCAL_TOKEN_ESTIMATOR_VERSION = "multilingual-conservative-v1"
+
+
+def _sanitized_usage_metadata(envelope: dict[str, object]) -> dict[str, int] | None:
+    """Keep only bounded provider token counts, never request or response text."""
+    raw = envelope.get("usageMetadata")
+    if not isinstance(raw, dict):
+        return None
+    names = {
+        "prompt_token_count": "promptTokenCount",
+        "candidates_token_count": "candidatesTokenCount",
+        "total_token_count": "totalTokenCount",
+    }
+    result: dict[str, int] = {}
+    for target, source in names.items():
+        value = raw.get(source)
+        if isinstance(value, int) and 0 <= value <= 100_000_000:
+            result[target] = value
+    return result or None
+
+
+def _sanitized_model_version(envelope: dict[str, object]) -> str | None:
+    value = envelope.get("modelVersion")
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized[:200] if normalized else None
 
 
 def _http_retry_after_seconds(error: Exception) -> int | None:
@@ -70,9 +97,11 @@ class ModelGatewayCapacityExhausted(RuntimeError):
         *,
         failure_code: str = "MODEL_CAPACITY_DEFERRED",
         next_retry_at: str | None = None,
+        failure_evidence: dict[str, object] | None = None,
     ) -> None:
         self.failure_code = failure_code
         self.next_retry_at = next_retry_at
+        self.failure_evidence = failure_evidence
         super().__init__(message)
 
 
@@ -94,6 +123,8 @@ class ModelRequestUsage:
     model: str
     purpose: str
     input_tokens: int
+    prompt_contract: str = "unspecified"
+    estimator_version: str = LOCAL_TOKEN_ESTIMATOR_VERSION
 
 
 class ModelRequestAccountant(ABC):
@@ -103,28 +134,41 @@ class ModelRequestAccountant(ABC):
     def reserve(self, usage: ModelRequestUsage) -> bool:
         """Persist one attempted request when quota is available."""
 
-    def reserve_dispatch(self, purpose: str) -> bool:
-        """Reserve one provider transport slot when pacing is applicable."""
-        del purpose
-        return True
+    def effective_base_input_token_budget(
+        self,
+        usage: ModelRequestUsage,
+        *,
+        input_tokens_per_minute: int,
+    ) -> int:
+        """Return the largest base estimate that can fit one TPM admission."""
+        del usage
+        return max(0, int(input_tokens_per_minute))
+
+    def mark_provider_attempted(self) -> None:
+        """Mark the reserved request immediately before provider transport."""
 
     def record_provider_outcome(
         self, outcome: str, *, retry_after_seconds: int | None = None,
+        usage_metadata: dict[str, int] | None = None,
+        provider_model_version: str | None = None,
     ) -> None:
         """Update optional adaptive provider pacing after transport."""
-        del outcome, retry_after_seconds
+        del outcome, retry_after_seconds, usage_metadata, provider_model_version
 
     @property
     def next_retry_at(self) -> str | None:
         return None
 
     @property
-    def allow_provider_token_count(self) -> bool:
-        return True
+    def failure_code(self) -> str | None:
+        return None
 
+    @property
+    def failure_evidence(self) -> dict[str, object] | None:
+        return None
 
 class GeminiModelGateway:
-    """Count, reserve, and send every Gemini or Gemma generation request."""
+    """Reserve and send every Gemini or Gemma generation request."""
 
     def __init__(
         self,
@@ -155,53 +199,6 @@ class GeminiModelGateway:
             capacity = min(capacity, max(0, self.batch_limit - self._batch_total))
         return capacity
 
-    def count_input_tokens(
-        self, model: str, generate_content_request: dict[str, object],
-    ) -> int:
-        """Use the provider tokenizer without consuming a generation slot."""
-        last_error: Exception | None = None
-        dispatch_attempted = False
-        for api_key in self.api_keys:
-            if not self.accountant.reserve_dispatch("provider-token-count"):
-                continue
-            dispatch_attempted = True
-            try:
-                envelope = self._post_json(
-                    api_key,
-                    model,
-                    "countTokens",
-                    {
-                        "generateContentRequest": {
-                            "model": f"models/{model}",
-                            **generate_content_request,
-                        },
-                    },
-                    timeout=30.0,
-                )
-                tokens = int(envelope["totalTokens"])
-                if tokens <= 0:
-                    raise ValueError("Gemini token count is not positive")
-                self.accountant.record_provider_outcome("PROVIDER_SUCCEEDED")
-                return tokens
-            except Exception as error:
-                last_error = error
-                self.accountant.record_provider_outcome(
-                    (
-                        "PROVIDER_THROTTLED"
-                        if isinstance(error, urllib.error.HTTPError)
-                        and int(error.code) == 429
-                        else "PROVIDER_FAILED"
-                    ),
-                    retry_after_seconds=_http_retry_after_seconds(error),
-                )
-        if not dispatch_attempted:
-            raise ModelGatewayCapacityExhausted(
-                "Google provider dispatch pacing deferred token counting",
-                failure_code="PROVIDER_DISPATCH_DEFERRED",
-                next_retry_at=self.accountant.next_retry_at,
-            )
-        raise RuntimeError("All configured keys failed provider token counting") from last_error
-
     def generate(
         self,
         start_index: int,
@@ -210,6 +207,8 @@ class GeminiModelGateway:
         purpose: str,
         payload: dict[str, object],
         input_tokens: int,
+        prompt_contract: str | None = None,
+        estimator_version: str = LOCAL_TOKEN_ESTIMATOR_VERSION,
         decode: Callable[[dict[str, object]], T],
         retryable_http_codes: frozenset[int],
         retryable_decode_errors: tuple[type[Exception], ...] = (),
@@ -224,27 +223,39 @@ class GeminiModelGateway:
                 model=model,
                 purpose=purpose,
                 input_tokens=max(0, int(input_tokens)),
+                prompt_contract=(prompt_contract or purpose).strip(),
+                estimator_version=estimator_version.strip(),
             )
             if not self._reserve(api_key, usage):
                 continue
+            envelope: dict[str, object] | None = None
+            provider_attempted = False
             try:
+                self.accountant.mark_provider_attempted()
+                provider_attempted = True
                 envelope = self._post_json(
                     api_key, model, "generateContent", payload, timeout=120.0,
                 )
-                self.accountant.record_provider_outcome("PROVIDER_SUCCEEDED")
+                if not isinstance(envelope, dict):
+                    raise ValueError("provider response is not a JSON object")
+                provider_model_version = _sanitized_model_version(envelope)
                 result = decode(envelope)
-                return result, str(envelope.get("modelVersion") or model)
             except retryable_decode_errors as error:
+                if provider_attempted:
+                    self.accountant.record_provider_outcome("PROVIDER_FAILED")
                 if getattr(error, "failure_evidence", None) is None:
-                    try:
-                        raw_output = str(
-                            envelope["candidates"][0]["content"]["parts"][0]["text"]
-                        )
-                    except (KeyError, IndexError, TypeError):
-                        raw_output = json.dumps(
-                            envelope, ensure_ascii=False, sort_keys=True,
-                            separators=(",", ":"), default=str,
-                        )
+                    if envelope is None:
+                        raw_output = f"{type(error).__name__}: {error}"
+                    else:
+                        try:
+                            raw_output = str(
+                                envelope["candidates"][0]["content"]["parts"][0]["text"]
+                            )
+                        except (KeyError, IndexError, TypeError):
+                            raw_output = json.dumps(
+                                envelope, ensure_ascii=False, sort_keys=True,
+                                separators=(",", ":"), default=str,
+                            )
                     error.failure_evidence = {
                         "failure_code": "MODEL_OUTPUT_INVALID",
                         "failure_stage": "RESPONSE_DECODE",
@@ -259,27 +270,39 @@ class GeminiModelGateway:
                     }
                 last_error = error
             except urllib.error.HTTPError as error:
-                self.accountant.record_provider_outcome(
-                    (
-                        "PROVIDER_THROTTLED"
-                        if int(error.code) == 429 else "PROVIDER_FAILED"
-                    ),
-                    retry_after_seconds=_http_retry_after_seconds(error),
-                )
+                if provider_attempted:
+                    self.accountant.record_provider_outcome(
+                        (
+                            "PROVIDER_THROTTLED"
+                            if int(error.code) == 429 else "PROVIDER_FAILED"
+                        ),
+                        retry_after_seconds=_http_retry_after_seconds(error),
+                    )
                 last_error = error
                 if error.code not in retryable_http_codes:
                     raise
             except urllib.error.URLError as error:
-                self.accountant.record_provider_outcome("PROVIDER_FAILED")
+                if provider_attempted:
+                    self.accountant.record_provider_outcome("PROVIDER_FAILED")
                 last_error = error
+            except Exception:
+                if provider_attempted:
+                    self.accountant.record_provider_outcome("PROVIDER_FAILED")
+                raise
+            else:
+                self.accountant.record_provider_outcome(
+                    "PROVIDER_SUCCEEDED",
+                    usage_metadata=_sanitized_usage_metadata(envelope),
+                    provider_model_version=provider_model_version,
+                )
+                return result, provider_model_version or model
         if last_error is None:
             raise ModelGatewayCapacityExhausted(
                 "Model request slots used; retained for the next batch",
-                failure_code=(
-                    "PROVIDER_DISPATCH_DEFERRED"
-                    if self.accountant.next_retry_at else "MODEL_CAPACITY_DEFERRED"
-                ),
+                failure_code=(self.accountant.failure_code
+                              or "MODEL_CAPACITY_DEFERRED"),
                 next_retry_at=self.accountant.next_retry_at,
+                failure_evidence=self.accountant.failure_evidence,
             )
         if isinstance(last_error, urllib.error.HTTPError):
             raise last_error
@@ -308,17 +331,12 @@ class GeminiModelGateway:
         *,
         timeout: float,
     ) -> dict[str, object]:
-        provider_methods = {
-            "countTokens": "countTokens",
-            "generateContent": "generateContent",
-        }
-        provider_method = provider_methods.get(method)
-        if provider_method is None:
+        if method != "generateContent":
             raise ValueError(f"unsupported model provider method: {method}")
         encoded_model = urllib.parse.quote(model, safe="")
         request = urllib.request.Request(
             "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{encoded_model}:{provider_method}",
+            f"{encoded_model}:generateContent",
             data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
             headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
             method="POST",

@@ -211,8 +211,6 @@ def test_target_backfill_cannot_bypass_scheduler_capacity_refusal(
     })
     def post_json(_key, _model, method, _payload, *, timeout):
         del timeout
-        if method == "countTokens":
-            return {"totalTokens": 1_000}
         pytest.fail("scheduler-refused generation reached the provider")
     monkeypatch.setattr(GeminiModelGateway, "_post_json", staticmethod(post_json))
 

@@ -180,12 +180,14 @@ export default function HealthView() {
             <div><dt>定时重试</dt><dd>{task.scheduled_retry}</dd></div>
             <div><dt>15分钟完成</dt><dd>{task.completed_15m}</dd></div>
             <div><dt>容量延后</dt><dd>{task.deferred_15m}</dd></div>
+            <div><dt>服务商调度等待</dt><dd>{task.provider_dispatch_deferred_15m ?? 0}</dd></div>
             <div><dt>失败</dt><dd>{task.errors_15m}</dd></div>
             <div><dt>最旧可处理</dt><dd>{compactElapsed(task.oldest_age_seconds)}</dd></div>
             <div><dt>下次重试</dt><dd>{task.earliest_retry_at ? localTime(task.earliest_retry_at) : "—"}</dd></div>
             <div><dt>最高领取</dt><dd>{task.max_claim_count}{task.max_claim_job_ref ? ` · ${task.max_claim_job_ref}` : ""}</dd></div>
           </dl>
           {task.failure_codes_15m.length ? <p className="scheduler-failure-codes">{task.failure_codes_15m.map(item => <code key={item.code}>{item.code} × {item.count}</code>)}</p> : null}
+          {(task.capacity_dimensions_15m ?? []).length ? <p className="scheduler-failure-codes">{task.capacity_dimensions_15m?.map(item => <code key={item.dimension}>LOCAL_{item.dimension}_LIMIT × {item.count}</code>)}</p> : null}
         </article>)}
       </div>
     </section>

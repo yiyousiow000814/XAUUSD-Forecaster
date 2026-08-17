@@ -23,11 +23,15 @@ from xauusd_forecaster.news_scheduler import (
     configured_api_credentials,
     enqueue_job,
     install_scheduler_schema,
+    mark_account_request_attempted,
     rank_accounts_for_models,
+    record_account_request_outcome,
+    record_scheduler_deferral,
     record_provider_dispatch_outcome,
     reconcile_completed_jobs,
     reserve_account_request,
     reserve_provider_dispatch,
+    rolling_account_usage,
     scheduler_counts,
     sync_pending_jobs,
 )
@@ -104,6 +108,157 @@ def test_provider_dispatch_staggers_independent_accounts_without_quota_leak() ->
     assert [tuple(row) for row in rows] == [
         ("account-a", 1), ("account-b", 1),
     ]
+
+
+@pytest.mark.parametrize(
+    ("dimension", "first", "second"),
+    (
+        ("RPM", {"input_tokens": 1, "requests_per_minute": 1},
+         {"input_tokens": 1, "requests_per_minute": 1}),
+        ("TPM", {"input_tokens": 10_000, "requests_per_minute": 20},
+         {"input_tokens": 5_001, "requests_per_minute": 20}),
+        ("RPD", {"input_tokens": 1, "requests_per_minute": 20},
+         {"input_tokens": 1, "requests_per_minute": 20}),
+    ),
+)
+def test_capacity_rejection_reports_exact_dimension(
+    dimension: str, first: dict[str, int], second: dict[str, int],
+) -> None:
+    connection = _connection()
+    daily_limit = 1 if dimension == "RPD" else 100
+    common = {
+        "account_id": "account-a", "model_family": "gemma-4",
+        "daily_limit": daily_limit, "input_tokens_per_minute": 15_000,
+    }
+    assert reserve_account_request(connection, now=NOW, **common, **first)
+    decision: dict[str, object] = {}
+
+    assert not reserve_account_request(
+        connection, now=NOW + timedelta(seconds=1), decision=decision,
+        **common, **second,
+    )
+
+    assert decision["failure_code"] == "MODEL_CAPACITY_DEFERRED"
+    assert decision["dimension"] == dimension
+    assert decision["dimensions"] == [dimension]
+    assert decision["current"] >= 1
+    assert decision["requested"] >= 1
+    assert decision["limit"] >= 1
+    assert decision["next_retry_at"] is not None
+
+
+@pytest.mark.parametrize(
+    ("outcome", "actual_tokens", "expected_tokens"),
+    (
+        ("PROVIDER_SUCCEEDED", 4_800, 4_800),
+        ("PROVIDER_SUCCEEDED", 6_200, 6_200),
+        ("PROVIDER_SUCCEEDED", None, 5_600),
+        ("PROVIDER_THROTTLED", None, 5_600),
+        ("PROVIDER_FAILED", None, 5_600),
+    ),
+)
+def test_rolling_tpm_uses_actual_only_for_trustworthy_success(
+    outcome: str, actual_tokens: int | None, expected_tokens: int,
+) -> None:
+    connection = _connection()
+    assert reserve_provider_dispatch(
+        connection, provider_task="ACTIVE_IMPACT",
+        now=NOW - timedelta(seconds=1),
+    )[0]
+    usage_id = f"usage-{outcome}-{actual_tokens}"
+    assert reserve_account_request(
+        connection,
+        account_id="account-a",
+        model_family="gemma-4",
+        daily_limit=1_000,
+        requests_per_minute=20,
+        input_tokens=5_600,
+        input_tokens_per_minute=15_000,
+        usage_id=usage_id,
+        requested_model="gemma-4",
+        purpose="news-impact",
+        prompt_contract="impact-v1",
+        estimator_version="estimator-v1",
+        base_estimated_input_tokens=5_600,
+        now=NOW,
+    )
+    mark_account_request_attempted(connection, usage_id, now=NOW)
+    record_account_request_outcome(
+        connection,
+        usage_id,
+        outcome=outcome,
+        usage_metadata=(
+            {"prompt_token_count": actual_tokens}
+            if actual_tokens is not None else None
+        ),
+        provider_model_version=("gemma-exact-v1" if actual_tokens else None),
+        now=NOW + timedelta(milliseconds=100),
+    )
+
+    assert rolling_account_usage(
+        connection,
+        account_id="account-a",
+        model_families=("gemma-4",),
+        now=NOW + timedelta(seconds=1),
+    ) == (1, expected_tokens)
+    row = connection.execute(
+        """SELECT input_token_count,base_estimated_input_tokens,
+                  admitted_input_tokens,provider_prompt_token_count
+           FROM news_ai_account_request_usage_v1 WHERE usage_id=?""",
+        (usage_id,),
+    ).fetchone()
+    assert tuple(row) == (5_600, 5_600, 5_600, actual_tokens)
+
+
+def test_actual_token_correction_changes_admission_and_exact_expiry() -> None:
+    def corrected_connection(actual_tokens: int) -> sqlite3.Connection:
+        connection = _connection()
+        assert reserve_provider_dispatch(
+            connection, provider_task="ACTIVE_IMPACT",
+            now=NOW - timedelta(seconds=1),
+        )[0]
+        assert reserve_account_request(
+            connection,
+            account_id="account-a", model_family="gemma-4",
+            daily_limit=1_000, requests_per_minute=20,
+            input_tokens=5_600, input_tokens_per_minute=15_000,
+            usage_id="first", requested_model="gemma-4",
+            purpose="news-impact", prompt_contract="impact-v1",
+            estimator_version="estimator-v1",
+            base_estimated_input_tokens=5_600, now=NOW,
+        )
+        mark_account_request_attempted(connection, "first", now=NOW)
+        record_account_request_outcome(
+            connection, "first", outcome="PROVIDER_SUCCEEDED",
+            usage_metadata={"prompt_token_count": actual_tokens},
+            provider_model_version="gemma-exact-v1",
+            now=NOW + timedelta(milliseconds=100),
+        )
+        return connection
+
+    refunded = corrected_connection(4_800)
+    assert reserve_account_request(
+        refunded,
+        account_id="account-a", model_family="gemma-4",
+        daily_limit=1_000, requests_per_minute=20,
+        input_tokens=10_200, input_tokens_per_minute=15_000,
+        now=NOW + timedelta(seconds=1),
+    )
+
+    charged = corrected_connection(6_200)
+    decision: dict[str, object] = {}
+    assert not reserve_account_request(
+        charged,
+        account_id="account-a", model_family="gemma-4",
+        daily_limit=1_000, requests_per_minute=20,
+        input_tokens=8_801, input_tokens_per_minute=15_000,
+        now=NOW + timedelta(seconds=1), decision=decision,
+    )
+    assert decision["dimension"] == "TPM"
+    assert decision["current"] == 6_200
+    assert decision["next_retry_at"] == (
+        NOW + timedelta(seconds=60)
+    ).isoformat(timespec="microseconds")
 
 
 def test_provider_dispatch_adapts_to_success_and_retry_after() -> None:
@@ -1311,7 +1466,82 @@ def test_provider_dispatch_deferral_does_not_probe_accounts_or_consume_attempt(
     assert ledger.connection.execute(
         "SELECT count(*) FROM news_ai_job_attempts_v1 WHERE job_id=?", (job_id,),
     ).fetchone()[0] == 0
+    deferral = ledger.connection.execute(
+        """SELECT failure_code,next_retry_at
+           FROM news_ai_scheduler_deferrals_v1 WHERE job_id=?""", (job_id,),
+    ).fetchone()
+    assert tuple(deferral) == (
+        "PROVIDER_DISPATCH_DEFERRED", retry_at.isoformat(),
+    )
     ledger.close()
+
+
+def test_scheduler_deferral_retention_is_bounded_to_24_hours() -> None:
+    connection = _connection()
+    _enqueue(connection, "retention", task_type="ACTIVE_IMPACT")
+    job = claim_job(
+        connection, worker_id="retention-worker", pool=ROUTINE_POOL, now=NOW,
+    )
+    assert job is not None
+    credential = ApiCredential("account", ROUTINE_POOL, "key", "credential")
+    with connection:
+        connection.executemany(
+            """INSERT INTO news_ai_scheduler_deferrals_v1
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (
+                (
+                    "expired", job.job_id, job.task_type, credential.account_id,
+                    "PROVIDER_DISPATCH_DEFERRED", None,
+                    (NOW - timedelta(hours=24)).isoformat(), None,
+                ),
+                (
+                    "retained", job.job_id, job.task_type, credential.account_id,
+                    "PROVIDER_DISPATCH_DEFERRED", None,
+                    (NOW - timedelta(hours=24) + timedelta(microseconds=1)).isoformat(),
+                    None,
+                ),
+            ),
+        )
+
+    record_scheduler_deferral(
+        connection,
+        job=job,
+        credential=credential,
+        status={
+            "failure_code": "PROVIDER_DISPATCH_DEFERRED",
+            "next_retry_at": (NOW + timedelta(milliseconds=250)).isoformat(),
+        },
+        deferred_at=NOW,
+    )
+
+    rows = connection.execute(
+        """SELECT deferral_id,deferred_at
+           FROM news_ai_scheduler_deferrals_v1 ORDER BY deferred_at"""
+    ).fetchall()
+    identifiers = [str(row["deferral_id"]) for row in rows]
+    assert len(identifiers) == 2
+    assert identifiers[0] == "retained"
+    assert "expired" not in identifiers
+
+
+def test_scheduler_wakes_for_short_capacity_retry_without_busy_spin() -> None:
+    from scripts import run_news_annotator as runner
+
+    assert runner._scheduler_sleep_seconds(
+        [{"next_retry_at": (NOW + timedelta(seconds=8)).isoformat()}],
+        interval_seconds=60, now=NOW,
+    ) == 8
+    assert runner._scheduler_sleep_seconds(
+        [{"next_retry_at": (NOW + timedelta(milliseconds=250)).isoformat()}],
+        interval_seconds=60, now=NOW,
+    ) == pytest.approx(0.25)
+    assert runner._scheduler_sleep_seconds(
+        [{"next_retry_at": (NOW - timedelta(seconds=2)).isoformat()}],
+        interval_seconds=60, now=NOW,
+    ) == pytest.approx(0.05)
+    assert runner._scheduler_sleep_seconds(
+        [], interval_seconds=60, now=NOW,
+    ) == 60
 
 
 def test_embedding_maintenance_does_not_consume_job_attempts_and_resumes(
@@ -1667,7 +1897,6 @@ def test_display_route_uses_declared_fallback_when_gemma_capacity_is_full(
     pool = annotation._GeminiRequestPool(
         ("offline-key",), request_accountant=Accountant(),
     )
-    monkeypatch.setattr(pool.gateway, "count_input_tokens", lambda *_args: 10)
     calls = []
 
     def generate(_index, *, model, **_kwargs):

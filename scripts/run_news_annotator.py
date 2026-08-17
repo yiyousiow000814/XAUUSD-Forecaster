@@ -52,6 +52,7 @@ from xauusd_forecaster.news_scheduler import (  # noqa: E402
     defer_job_for_maintenance,
     pending_record_for_job,
     record_job_attempt,
+    record_scheduler_deferral,
     rank_accounts_for_models,
     release_job,
     scheduler_counts,
@@ -128,6 +129,34 @@ def _next_retry(status: dict[str, object], now: datetime) -> datetime:
         except ValueError:
             pass
     return now + timedelta(minutes=1)
+
+
+def _scheduler_sleep_seconds(
+    statuses: list[dict[str, object]],
+    *,
+    interval_seconds: float,
+    now: datetime | None = None,
+) -> float:
+    """Wake for the earliest durable retry without busy-spinning."""
+    anti_spin_floor = 0.05
+    instant = now or datetime.now(UTC)
+    maximum = max(5.0, interval_seconds)
+    retry_times = []
+    for status in statuses:
+        raw = status.get("next_retry_at")
+        if not raw:
+            continue
+        try:
+            retry_times.append(datetime.fromisoformat(str(raw)))
+        except ValueError:
+            continue
+    if not retry_times:
+        return maximum
+    until_retry = min(
+        max(0.0, (retry_at - instant).total_seconds())
+        for retry_at in retry_times
+    )
+    return max(anti_spin_floor, min(maximum, until_retry))
 
 
 def _execute_job(
@@ -433,6 +462,13 @@ def _run_scheduled_lane(
             "PROVIDER_DISPATCH_DEFERRED",
         }:
             retry_at = _next_retry(status, outcome_at)
+            record_scheduler_deferral(
+                ledger.connection,
+                job=job,
+                credential=outcome_credential,
+                status=status,
+                deferred_at=outcome_at,
+            )
             defer_job_for_maintenance(
                 ledger.connection, job.job_id, worker_id,
                 available_at=retry_at,
@@ -440,9 +476,10 @@ def _run_scheduled_lane(
             )
             block_task_type(job.task_type)
         elif outcome in {"DEFERRED", "DISABLED"}:
+            retry_at = _next_retry(status, outcome_at)
             release_job(
                 ledger.connection, job.job_id, worker_id,
-                available_at=outcome_at + timedelta(minutes=1),
+                available_at=retry_at,
                 error=str(status.get("failure_code") or outcome),
             )
             if route_capacity_deferred:
@@ -693,7 +730,10 @@ def main() -> int:
             write_heartbeat(args.status_file, work_items=work_items)
             if args.once:
                 break
-            time.sleep(max(5.0, args.interval_seconds))
+            time.sleep(_scheduler_sleep_seconds(
+                [*brief_statuses, *statuses],
+                interval_seconds=args.interval_seconds,
+            ))
     finally:
         ledger.close()
     return 0
