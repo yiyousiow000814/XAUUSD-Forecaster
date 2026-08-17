@@ -68,7 +68,7 @@ GEMMA_TITLE_BATCH_LIMIT = 10
 GEMMA_IMPACT_BATCH_LIMIT = 10
 PROMPT_VERSION = CURRENT_NEWS_PROMPT_VERSION
 ANNOTATION_FAILURE_RECOVERY_VERSION = "annotation-repair-v1-source-grounded-display"
-IMPACT_FAILURE_RECOVERY_VERSION = "impact-repair-v1-identity-contract"
+IMPACT_FAILURE_RECOVERY_VERSION = "impact-repair-v2-empty-candidate-new-episode"
 TITLE_PROMPT_VERSION = "headline-zh-v7-multilingual-month-preservation"
 INVALID_CHINESE_TITLE = "来源新闻（中文标题待校验）"
 TITLE_TRANSLATION_MODELS = (
@@ -1733,7 +1733,8 @@ def _impact_contract_repair_payload(
         "DUPLICATE_REPORT必须对应SAME_EVENT；MATERIAL_UPDATE必须对应SAME_EPISODE；"
         "NEW_EVENT必须对应NEW_EPISODE。SAME_EVENT不得有核心事实变化或身份差异；"
         "SAME_EPISODE必须列出核心事实变化且不得列身份差异；"
-        "NEW_EPISODE必须列出具体身份差异。若现有证据不足以可靠修复，选择UNRESOLVED、"
+        "NEW_EPISODE在OFFERED_CANDIDATES非空时必须列出具体身份差异；候选为空且上下文完整时"
+        "不得虚构比较对象，identity_differences_zh可以为空。若现有证据不足以可靠修复，选择UNRESOLVED、"
         "清空matched_candidate_id，并使用与不确定性一致的非新增事件update_type。"
         "reason_zh必须是普通用户可读的简体中文。只返回完整JSON。\n"
         f"VALIDATION_ERROR: {str(validation_error)[:300]}\n"
@@ -1933,7 +1934,9 @@ def _impact_prompt(row: dict, *, prompt_version: str = IMPACT_PROMPT_VERSION) ->
         "核心事实变化；identity_differences_zh逐项列出不同现实过程的身份差异；"
         "context_differences_zh只列非核心差异。SAME_EVENT的前两项必须为空；"
         "SAME_EPISODE必须有core_fact_changes_zh且identity_differences_zh为空；"
-        "NEW_EPISODE必须有identity_differences_zh。reason_zh用一句简体中文说明正文依据。"
+        "NEW_EPISODE在存在候选时必须有identity_differences_zh；若候选列表为空且上下文完整，"
+        "identity_anchor_zh已足以建立首个事件，identity_differences_zh可以为空。"
+        "reason_zh用一句简体中文说明正文依据。"
         "reason_zh直接展示给普通用户：必须用白话说明为何属于重复报道、同一事件的新进展或"
         "不同事件，不得出现‘候选’、candidate_id、matched_candidate_id、annotation_id、UUID"
         "或任何内部标识；需要引用旧记录时写‘系统中已有的一篇报道’，并说明可理解的核心事实。"

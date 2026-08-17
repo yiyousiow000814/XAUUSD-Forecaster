@@ -110,6 +110,11 @@ new episode. Insufficient evidence remains unresolved. The stable anchor,
 factual changes, identity differences, and contextual differences are retained
 as immutable audit evidence with the resolution.
 
+When the complete offered candidate universe is empty, `NEW_EPISODE` establishes
+the first event from the current stable anchor and MUST NOT fabricate a pairwise
+identity difference. When one or more candidates are offered, `NEW_EPISODE`
+still requires an explicit identity difference from those prior records.
+
 The persisted identity resolution is the sole authority for every resolved
 current-contract event. Training, statistics, weighting, and storylines MUST
 use its canonical episode and event identifiers and MUST NOT derive a competing

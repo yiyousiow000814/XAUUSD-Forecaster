@@ -976,8 +976,6 @@ def authorize_repairable_impact_failures(
     """Grant one auditable retry to identity-contract failures now repairable."""
     timestamp = _iso(now or datetime.now(UTC))
     repairable_errors = (
-        "Gemma identity match is not an offered candidate",
-        "Gemma same-event match is not a core fact candidate",
         "New-episode identity requires an anchor difference",
     )
     placeholders = ",".join("?" for _ in repairable_errors)
