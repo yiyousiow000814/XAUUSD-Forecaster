@@ -22,7 +22,8 @@ export const NEWS_REVIEW_STATE_INVARIANT_SQL = `(
     AND json_extract(payload, '$.model_visibility')<>'NOT_YET_PARSED'
     AND json_extract(payload, '$.parsed_at') IS NOT NULL)
   OR (json_extract(payload, '$.annotation_status') IN (
-      'BACKING_OFF','DEAD_LETTER','WAITING_CONTENT','CONTENT_UNAVAILABLE'
+      'REPAIRING_DISPLAY','BACKING_OFF','DEAD_LETTER','WAITING_CONTENT',
+      'CONTENT_UNAVAILABLE'
     )
     AND json_extract(payload, '$.model_visibility') =
         json_extract(payload, '$.annotation_status')
@@ -43,10 +44,11 @@ export const newsReviewStateInvariantHolds = (
     return visibility === "NOT_YET_PARSED" && !parsed;
   }
   if (status === "READY") return visibility !== "NOT_YET_PARSED" && parsed;
-  const terminalOrWaiting = [
-    "BACKING_OFF", "DEAD_LETTER", "WAITING_CONTENT", "CONTENT_UNAVAILABLE",
+  const alignedUnparsedState = [
+    "REPAIRING_DISPLAY", "BACKING_OFF", "DEAD_LETTER",
+    "WAITING_CONTENT", "CONTENT_UNAVAILABLE",
   ].includes(status);
-  return terminalOrWaiting && visibility === status && !parsed;
+  return alignedUnparsedState && visibility === status && !parsed;
 };
 
 export const parseNewsReviewState = (value: string | null): NewsReviewState | null => {
