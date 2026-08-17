@@ -90,6 +90,10 @@ mirror clock. A changed state derivation that cannot advance existing record
 clocks MUST revise the mirror contract and replay the bounded archive. A sync
 MUST NOT report success while D1 retains an earlier review state for work that
 the current worker can claim.
+The local archive reader MUST discover a bounded set of changed revision keys
+before joining full bodies, annotations, failures, and impact evidence. Routine
+incremental synchronization MUST NOT rebuild or sort the complete 60-day detail
+view merely to discover that only a small page changed.
 
 ## Event construction
 
