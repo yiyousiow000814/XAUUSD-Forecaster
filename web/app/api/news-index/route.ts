@@ -375,10 +375,18 @@ export async function POST(request: Request) {
     if (!Array.isArray(body.items) || body.items.length > 20) {
       return NextResponse.json({ error: "invalid news index batch" }, { status: 400 });
     }
-    if (body.items.some(item => !newsReviewStateInvariantHolds(item))) {
+    const invalidReviewStateCount = body.items.filter(
+      item => !newsReviewStateInvariantHolds(item),
+    ).length;
+    if (invalidReviewStateCount > 0) {
       return NextResponse.json({
         error: "news review state invariant violation",
         error_code: "NEWS_MIRROR_STATE_INVARIANT_VIOLATION",
+        violation_count: invalidReviewStateCount,
+        checks: [{
+          code: "NEWS_REVIEW_STATE_INVALID",
+          count: invalidReviewStateCount,
+        }],
       }, { status: 409 });
     }
     const now = new Date().toISOString();
