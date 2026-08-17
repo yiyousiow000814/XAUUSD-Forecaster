@@ -10,10 +10,32 @@ import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Callable, TypeVar
 
 
 T = TypeVar("T")
+
+
+def _http_retry_after_seconds(error: Exception) -> int | None:
+    """Parse a bounded Retry-After value without trusting provider input."""
+    if not isinstance(error, urllib.error.HTTPError):
+        return None
+    value = error.headers.get("Retry-After") if error.headers else None
+    if not value:
+        return None
+    try:
+        return max(1, min(86_400, int(value)))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=UTC)
+            seconds = int((retry_at - datetime.now(UTC)).total_seconds())
+            return max(1, min(86_400, seconds))
+        except (TypeError, ValueError, OverflowError):
+            return None
 
 
 def post_gemini_batch_embeddings(
@@ -42,6 +64,17 @@ def post_gemini_batch_embeddings(
 class ModelGatewayCapacityExhausted(RuntimeError):
     """No metered request slot is available for this gateway batch."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_code: str = "MODEL_CAPACITY_DEFERRED",
+        next_retry_at: str | None = None,
+    ) -> None:
+        self.failure_code = failure_code
+        self.next_retry_at = next_retry_at
+        super().__init__(message)
+
 
 class ModelGatewayResponseInvalid(RuntimeError):
     """A metered provider response could not satisfy the requested contract."""
@@ -69,6 +102,25 @@ class ModelRequestAccountant(ABC):
     @abstractmethod
     def reserve(self, usage: ModelRequestUsage) -> bool:
         """Persist one attempted request when quota is available."""
+
+    def reserve_dispatch(self, purpose: str) -> bool:
+        """Reserve one provider transport slot when pacing is applicable."""
+        del purpose
+        return True
+
+    def record_provider_outcome(
+        self, outcome: str, *, retry_after_seconds: int | None = None,
+    ) -> None:
+        """Update optional adaptive provider pacing after transport."""
+        del outcome, retry_after_seconds
+
+    @property
+    def next_retry_at(self) -> str | None:
+        return None
+
+    @property
+    def allow_provider_token_count(self) -> bool:
+        return True
 
 
 class GeminiModelGateway:
@@ -108,7 +160,11 @@ class GeminiModelGateway:
     ) -> int:
         """Use the provider tokenizer without consuming a generation slot."""
         last_error: Exception | None = None
+        dispatch_attempted = False
         for api_key in self.api_keys:
+            if not self.accountant.reserve_dispatch("provider-token-count"):
+                continue
+            dispatch_attempted = True
             try:
                 envelope = self._post_json(
                     api_key,
@@ -125,9 +181,25 @@ class GeminiModelGateway:
                 tokens = int(envelope["totalTokens"])
                 if tokens <= 0:
                     raise ValueError("Gemini token count is not positive")
+                self.accountant.record_provider_outcome("PROVIDER_SUCCEEDED")
                 return tokens
             except Exception as error:
                 last_error = error
+                self.accountant.record_provider_outcome(
+                    (
+                        "PROVIDER_THROTTLED"
+                        if isinstance(error, urllib.error.HTTPError)
+                        and int(error.code) == 429
+                        else "PROVIDER_FAILED"
+                    ),
+                    retry_after_seconds=_http_retry_after_seconds(error),
+                )
+        if not dispatch_attempted:
+            raise ModelGatewayCapacityExhausted(
+                "Google provider dispatch pacing deferred token counting",
+                failure_code="PROVIDER_DISPATCH_DEFERRED",
+                next_retry_at=self.accountant.next_retry_at,
+            )
         raise RuntimeError("All configured keys failed provider token counting") from last_error
 
     def generate(
@@ -159,6 +231,7 @@ class GeminiModelGateway:
                 envelope = self._post_json(
                     api_key, model, "generateContent", payload, timeout=120.0,
                 )
+                self.accountant.record_provider_outcome("PROVIDER_SUCCEEDED")
                 result = decode(envelope)
                 return result, str(envelope.get("modelVersion") or model)
             except retryable_decode_errors as error:
@@ -186,12 +259,27 @@ class GeminiModelGateway:
                     }
                 last_error = error
             except urllib.error.HTTPError as error:
+                self.accountant.record_provider_outcome(
+                    (
+                        "PROVIDER_THROTTLED"
+                        if int(error.code) == 429 else "PROVIDER_FAILED"
+                    ),
+                    retry_after_seconds=_http_retry_after_seconds(error),
+                )
                 last_error = error
                 if error.code not in retryable_http_codes:
                     raise
+            except urllib.error.URLError as error:
+                self.accountant.record_provider_outcome("PROVIDER_FAILED")
+                last_error = error
         if last_error is None:
             raise ModelGatewayCapacityExhausted(
-                "Model request slots used; retained for the next batch"
+                "Model request slots used; retained for the next batch",
+                failure_code=(
+                    "PROVIDER_DISPATCH_DEFERRED"
+                    if self.accountant.next_retry_at else "MODEL_CAPACITY_DEFERRED"
+                ),
+                next_retry_at=self.accountant.next_retry_at,
             )
         if isinstance(last_error, urllib.error.HTTPError):
             raise last_error

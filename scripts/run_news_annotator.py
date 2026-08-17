@@ -274,7 +274,10 @@ def _credentials_for_job(
 
 
 def _may_try_another_credential(status: dict[str, object]) -> bool:
-    if status.get("failure_code") in EMBEDDING_PREREQUISITE_FAILURE_CODES:
+    if status.get("failure_code") in {
+        *EMBEDDING_PREREQUISITE_FAILURE_CODES,
+        "PROVIDER_DISPATCH_DEFERRED",
+    }:
         return False
     if status.get("retry_with_another_account"):
         return True
@@ -384,10 +387,10 @@ def _run_scheduled_lane(
             status = _with_scheduler_failure_code(_execute_job_safely(
                 ledger, credential, job, now=attempted_at,
             ))
-            maintenance_deferred = (
-                status.get("failure_code")
-                in EMBEDDING_PREREQUISITE_FAILURE_CODES
-            )
+            maintenance_deferred = status.get("failure_code") in {
+                *EMBEDDING_PREREQUISITE_FAILURE_CODES,
+                "PROVIDER_DISPATCH_DEFERRED",
+            }
             if not maintenance_deferred:
                 record_job_attempt(
                     ledger.connection,
@@ -425,7 +428,10 @@ def _run_scheduled_lane(
                     available_at=outcome_at + timedelta(minutes=1),
                     error="CURRENT_EVIDENCE_NOT_AVAILABLE",
                 )
-        elif status.get("failure_code") in EMBEDDING_PREREQUISITE_FAILURE_CODES:
+        elif status.get("failure_code") in {
+            *EMBEDDING_PREREQUISITE_FAILURE_CODES,
+            "PROVIDER_DISPATCH_DEFERRED",
+        }:
             retry_at = _next_retry(status, outcome_at)
             defer_job_for_maintenance(
                 ledger.connection, job.job_id, worker_id,

@@ -32,6 +32,10 @@ model still decides `SAME_EVENT`, `SAME_EPISODE`, `NEW_EPISODE`, or
 - Embedding text is versioned and bound to a stable provider/model/task profile.
 - Vectors and retrieval receipts are append-only. A receipt records every route
   ranking, the final selected IDs, and a digest of the candidate universe.
+- A deterministic fallback receipt is stored separately from hybrid-generation
+  receipts. It records only the deterministic route, the selected candidates,
+  and the durable embedding prerequisite reason; it never claims lexical or
+  semantic ranking.
 - Model-tag or text-contract changes create a new vector namespace; they do not
   reinterpret old vectors.
 
@@ -53,7 +57,23 @@ still incomplete, impact work is deferred with
 identity decision. Provider batches are admitted against each independent
 account's 100 RPM, 30K TPM, and 1K RPD limits. Each embedded content item counts
 as a request even when several items share one HTTP envelope. If capacity is
-temporarily unavailable, work is deferred instead of bypassing the scheduler.
+temporarily unavailable, the generation-level cooldown still controls catch-up
+and prevents repeated provider requests. During that durable cooldown, impact
+work uses the original deterministic retrieval route and records
+`DETERMINISTIC_FALLBACK` plus the prerequisite failure reason. Gemma may then
+process the bounded deterministic candidates without semantic claims. Ordinary
+incomplete-but-progressing catch-up remains deferred. Once the generation is
+complete, new work automatically returns to the hybrid generation.
+
+Runtime mode selection also observes live queue and provider pressure. Impact
+backlog, growth, oldest age, recent completions, embedding progress and missing
+count, dependency fan-out, provider pacing, and durable cooldown jointly decide
+whether waiting for catch-up still improves global freshness. Under pressure,
+the deterministic route keeps impact work moving while bounded embedding demand
+continues to compete fairly for dispatch slots. A fallback state remains stable
+until the generation is complete and healthy; a short durable recovery window
+then prevents rapid fallback/hybrid flapping before new work resumes hybrid
+retrieval.
 
 The dedicated embedding model is retrieval infrastructure, not an Assistant
 chat model. Historical Qwen vectors and receipts remain immutable audit

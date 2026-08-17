@@ -46,7 +46,9 @@ def main() -> int:
             max_first_seen=str(latest),
             limit=IDENTITY_CANDIDATE_UNIVERSE_LIMIT,
         )
-        client = GeminiEmbeddingClient(ledger.connection)
+        client = GeminiEmbeddingClient(
+            ledger.connection, dispatch_task="NEWS_EMBEDDING_BACKFILL",
+        )
         total = 0
         profile = client.profile()
         while True:

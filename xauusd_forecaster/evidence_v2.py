@@ -46,6 +46,7 @@ V2_IMMUTABLE_TABLES = (
     "news_event_identity_resolutions_v1",
     "news_identity_embeddings_v1",
     "news_identity_retrieval_receipts_v1",
+    "news_identity_deterministic_fallback_receipts_v1",
     "news_impact_failures_v1",
     "prediction_scores_v2",
     "calibration_snapshots_v2",
@@ -552,6 +553,25 @@ CREATE TABLE IF NOT EXISTS news_identity_retrieval_receipts_v1 (
 
 CREATE INDEX IF NOT EXISTS news_identity_retrieval_receipts_lookup_v1
 ON news_identity_retrieval_receipts_v1(annotation_id,retrieved_at);
+
+CREATE TABLE IF NOT EXISTS news_identity_deterministic_fallback_receipts_v1 (
+    receipt_id TEXT PRIMARY KEY,
+    annotation_id TEXT NOT NULL,
+    retrieval_version TEXT NOT NULL,
+    retrieval_mode TEXT NOT NULL CHECK(
+      retrieval_mode='DETERMINISTIC_FALLBACK'),
+    fallback_reason TEXT NOT NULL,
+    candidate_universe_hash TEXT NOT NULL,
+    deterministic_candidate_ids_json TEXT NOT NULL,
+    selected_candidates_json TEXT NOT NULL,
+    retrieved_at TEXT NOT NULL,
+    FOREIGN KEY(annotation_id) REFERENCES news_annotations(annotation_id),
+    UNIQUE(annotation_id,retrieval_version)
+);
+
+CREATE INDEX IF NOT EXISTS news_identity_deterministic_fallback_lookup_v1
+ON news_identity_deterministic_fallback_receipts_v1(
+  annotation_id,retrieved_at);
 
 CREATE TABLE IF NOT EXISTS news_impact_failures_v1 (
     failure_id TEXT PRIMARY KEY,

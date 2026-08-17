@@ -11,7 +11,11 @@ from xauusd_forecaster.gemini_embeddings import (
     GeminiEmbeddingClient,
     GeminiEmbeddingFailure,
 )
-from xauusd_forecaster.news_scheduler import ApiCredential, ROUTINE_POOL
+from xauusd_forecaster.news_scheduler import (
+    ApiCredential,
+    ROUTINE_POOL,
+    enqueue_job,
+)
 from xauusd_forecaster.news_retrieval import (
     EmbeddingProfile,
     append_missing_embeddings,
@@ -58,6 +62,32 @@ def _row(
             "supporting_evidence": [headline],
         },
     }
+
+
+def _insert_embedding_sources(ledger: ForwardLedger, *rows: dict) -> None:
+    for row in rows:
+        ledger.connection.execute(
+            """INSERT INTO news_revisions VALUES (
+               ?,?,1,NULL,?,?,?,?,'body',NULL,?,'cluster',NULL)""",
+            (
+                row["source"], row["source_item_id"],
+                row["collector_first_seen_time"],
+                row["collector_first_seen_time"],
+                row["collector_first_seen_time"], row["headline"],
+                row["raw_content_hash"],
+            ),
+        )
+        ledger.connection.execute(
+            """INSERT INTO news_annotations VALUES (
+               ?,?,?,1,?,'EVENT','[]',0,0,0,0,0,0,1,
+               'model','prompt',?,?,?)""",
+            (
+                row["annotation_id"], row["source"], row["source_item_id"],
+                row["raw_content_hash"], row["collector_first_seen_time"],
+                row["collector_first_seen_time"], "{}",
+            ),
+        )
+    ledger.connection.commit()
 
 
 class _FakeEmbeddingClient:
@@ -371,6 +401,175 @@ def test_embedding_throttle_cooldown_survives_restart_and_clears_on_progress(
         reopened.close()
 
 
+def test_throttled_generation_uses_frozen_deterministic_fallback(
+    tmp_path, monkeypatch,
+) -> None:
+    import xauusd_forecaster.news_retrieval as retrieval
+
+    ledger = ForwardLedger(tmp_path / "evidence.sqlite3")
+    prior = _row(
+        "prior", "Federal Reserve held rates steady",
+        first_seen="2026-08-16T10:00:00+00:00", cluster_id="fed-cycle",
+    )
+    current = _row(
+        "current", "Federal Reserve publishes its latest decision",
+        first_seen="2026-08-17T10:00:00+00:00", cluster_id="fed-cycle",
+    )
+    _insert_embedding_sources(ledger, prior, current)
+    monkeypatch.setattr(
+        retrieval, "load_identity_candidate_universe",
+        lambda *_args, **_kwargs: [prior, current],
+    )
+    provider_calls = 0
+
+    class _ThrottledClient(_FakeEmbeddingClient):
+        def embed(self, texts, profile):
+            nonlocal provider_calls
+            provider_calls += 1
+            raise GeminiEmbeddingFailure(
+                "provider throttled",
+                failure_code="NEWS_EMBEDDING_PROVIDER_THROTTLED",
+                provider_http_status=429,
+                retry_after_seconds=300,
+                diagnostic={"batch_item_count": len(texts)},
+            )
+
+    try:
+        attached = attach_hybrid_prior_event_context(
+            ledger.connection, [dict(current)], client=_ThrottledClient(),
+        )
+
+        assert provider_calls == 1
+        assert attached[0]["identity_retrieval_mode"] == (
+            "DETERMINISTIC_FALLBACK"
+        )
+        assert attached[0]["identity_retrieval_reason"] == (
+            "NEWS_EMBEDDING_PROVIDER_THROTTLED"
+        )
+        assert attached[0]["identity_retrieval_routes"] == {
+            "deterministic": ["prior"],
+        }
+        assert [
+            candidate["candidate_id"]
+            for candidate in attached[0]["prior_event_context"]
+        ] == ["prior"]
+        receipt = ledger.connection.execute(
+            "SELECT * FROM news_identity_deterministic_fallback_receipts_v1"
+        ).fetchone()
+        assert receipt["retrieval_mode"] == "DETERMINISTIC_FALLBACK"
+        assert receipt["fallback_reason"] == (
+            "NEWS_EMBEDDING_PROVIDER_THROTTLED"
+        )
+        assert json.loads(receipt["deterministic_candidate_ids_json"]) == [
+            "prior"
+        ]
+        assert ledger.connection.execute(
+            "SELECT count(*) FROM news_identity_retrieval_receipts_v1"
+        ).fetchone()[0] == 0
+
+        provider_calls = 0
+        during_cooldown = attach_hybrid_prior_event_context(
+            ledger.connection, [dict(current)], client=_ThrottledClient(),
+        )
+
+        assert provider_calls == 0
+        assert during_cooldown[0]["prior_event_context"] == (
+            attached[0]["prior_event_context"]
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            ledger.connection.execute(
+                "UPDATE news_identity_deterministic_fallback_receipts_v1 "
+                "SET fallback_reason='changed'"
+            )
+    finally:
+        ledger.close()
+
+
+def test_live_pressure_selects_fallback_then_stabilized_ready_returns_hybrid(
+    tmp_path, monkeypatch,
+) -> None:
+    import xauusd_forecaster.news_retrieval as retrieval
+
+    ledger = ForwardLedger(tmp_path / "evidence.sqlite3")
+    prior = _row(
+        "prior", "Federal Reserve held rates steady",
+        first_seen="2026-08-16T10:00:00+00:00", cluster_id="fed-cycle",
+    )
+    current = _row(
+        "current", "Federal Reserve publishes its latest decision",
+        first_seen="2026-08-17T10:00:00+00:00", cluster_id="fed-cycle",
+    )
+    _insert_embedding_sources(ledger, prior, current)
+    monkeypatch.setattr(
+        retrieval, "load_identity_candidate_universe",
+        lambda *_args, **_kwargs: [prior, current],
+    )
+    created = datetime.now(UTC) - timedelta(minutes=10)
+    for index in range(3):
+        enqueue_job(
+            ledger.connection, task_type="ACTIVE_IMPACT", source="pressure",
+            source_item_id=f"impact-{index}", revision_number=1,
+            annotation_id=f"impact-{index}", prompt_version="prompt",
+            priority="FAST", now=created,
+        )
+
+    class CountingEmbeddingClient(_FakeEmbeddingClient):
+        calls = 0
+
+        def embed(self, texts, profile):
+            self.calls += 1
+            return super().embed(texts, profile)
+
+    client = CountingEmbeddingClient()
+
+    try:
+        fallback = attach_hybrid_prior_event_context(
+            ledger.connection, [dict(current)], client=client,
+        )
+
+        assert client.calls == 0
+        assert fallback[0]["identity_retrieval_mode"] == "DETERMINISTIC_FALLBACK"
+        assert fallback[0]["identity_retrieval_reason"] == (
+            "ADAPTIVE_RETRIEVAL_PRESSURE"
+        )
+        state = ledger.connection.execute(
+            "SELECT * FROM news_ai_retrieval_mode_state_v1"
+        ).fetchone()
+        pressure = json.loads(state["pressure_json"])
+        assert pressure["impact_backlog"] == 3
+        assert pressure["impact_created_15m"] == 3
+        assert pressure["missing"] == 2
+        assert state["mode"] == "DETERMINISTIC_FALLBACK"
+        assert state["reason"] == "ADAPTIVE_RETRIEVAL_PRESSURE"
+
+        _, appended = append_missing_embeddings(
+            ledger.connection, [prior, current], client,
+        )
+        assert appended == 2
+        assert client.calls == 1
+        retrieval._adaptive_retrieval_policy(
+            ledger.connection, [prior, current], client.profile(),
+        )
+
+        ledger.connection.execute(
+            """UPDATE news_ai_retrieval_mode_state_v1
+               SET recovery_observed_at=?""",
+            ((datetime.now(UTC) - timedelta(seconds=31)).isoformat(),),
+        )
+        ledger.connection.commit()
+        hybrid = attach_hybrid_prior_event_context(
+            ledger.connection, [dict(current)], client=client,
+        )
+
+        assert hybrid[0]["identity_retrieval_mode"] == "HYBRID"
+        assert hybrid[0]["identity_retrieval_reason"] == (
+            "EMBEDDING_GENERATION_READY"
+        )
+        assert "semantic" in hybrid[0]["identity_retrieval_routes"]
+    finally:
+        ledger.close()
+
+
 def test_embedding_local_capacity_uses_bounded_exponential_generation_cooldown(
     tmp_path,
 ) -> None:
@@ -537,6 +736,11 @@ def test_runtime_catches_up_historical_embedding_gap_before_retrieval(
         assert attached[0]["identity_retrieval_version"] == (
             retrieval.NEWS_HYBRID_RETRIEVAL_VERSION
         )
+        assert attached[0]["identity_retrieval_mode"] == "HYBRID"
+        assert attached[0]["identity_retrieval_reason"] == (
+            "EMBEDDING_GENERATION_READY"
+        )
+        assert "semantic" in attached[0]["identity_retrieval_routes"]
         assert ledger.connection.execute(
             "SELECT count(*) FROM news_identity_embeddings_v1"
         ).fetchone()[0] == 2

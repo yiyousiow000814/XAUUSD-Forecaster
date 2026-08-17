@@ -64,6 +64,25 @@ accounts add real capacity automatically on the next cycle. Authentication
 failure may try another key in the same account; shared quota or provider
 pressure skips the remaining keys in that account.
 
+Independent account quotas do not authorize simultaneous provider bursts. One
+durable Google transport governor staggers outbound work across accounts and
+task types, initially at 250 ms and never at a fixed minute-scale cadence.
+Successful responses reduce the interval gradually toward 120 ms. HTTP 429
+doubles it up to five seconds, honors a longer bounded `Retry-After`, and then
+recovers through later successes. A pacing deferral reserves neither account
+quota nor a job attempt; its next eligible time is persisted instead of using a
+blocking sleep.
+
+Dispatch priority is pressure-driven rather than a permanent task weight or
+capacity percentage. Active task demand records backlog, oldest wait, overdue
+retry age, dependency fan-out, and the gap between backlog and recent
+completions. A task dominated on every current pressure signal yields its turn;
+non-dominated tasks rotate by least-recent dispatch so aging prevents
+starvation. Thus an embedding generation blocking many impact jobs can rise
+above ordinary catch-up, while a fresh actionable annotation surge can take the
+next turns once that dependency pressure falls. The pressure snapshot and last
+dispatch time survive process restart.
+
 The ordinary unbounded annotator batch runs two synchronous provider lanes per
 independent account. This bounded fan-out hides provider latency while atomic
 account quota reservation remains authoritative for both RPM and TPM. Lanes
@@ -103,7 +122,10 @@ attempts only by short SHA-256 fingerprints. Legacy `GEMINI_API_KEYS` and
 `GEMINI_API_KEY` remain routine-only compatibility inputs; each distinct legacy
 key is treated as an independent account because no account grouping exists.
 
-Every provider request reserves durable quota before transport. Daily counters
+Every provider request reserves durable quota before transport. These counters
+represent conservative local admission, not provider-confirmed success. The
+request lifecycle separately records provider transport, success, throttle or
+other failure, and committed embedding vectors. Daily counters
 use the provider's Pacific reset day. RPM and TPM admission use exact durable
 request timestamps over the trailing 60 seconds. The aggregate minute buckets
 remain a reporting ledger, but they are not an admission window because adding

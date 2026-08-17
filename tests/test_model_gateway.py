@@ -11,6 +11,7 @@ from xauusd_forecaster.model_gateway import (
     OllamaAssistantGateway,
     ModelGatewayCapacityExhausted,
     ModelGatewayResponseInvalid,
+    ModelRequestAccountant,
     ModelRequestUsage,
 )
 from tests.model_accounting_fakes import CallbackModelAccountant
@@ -263,6 +264,57 @@ def test_failed_provider_attempt_remains_typed_and_accounted(
 
     assert len(usages) == 1
     assert usages[0].input_tokens == 99
+
+
+def test_429_retry_after_stops_immediate_cross_account_dispatch(monkeypatch) -> None:
+    class AdaptiveAccountant(ModelRequestAccountant):
+        def __init__(self) -> None:
+            self.blocked = False
+            self.reserve_calls = 0
+            self.outcomes = []
+
+        def reserve(self, _usage: ModelRequestUsage) -> bool:
+            self.reserve_calls += 1
+            return not self.blocked
+
+        def record_provider_outcome(
+            self, outcome: str, *, retry_after_seconds: int | None = None,
+        ) -> None:
+            self.outcomes.append((outcome, retry_after_seconds))
+            if outcome == "PROVIDER_THROTTLED":
+                self.blocked = True
+
+        @property
+        def next_retry_at(self) -> str | None:
+            return "2026-08-17T12:00:07+00:00" if self.blocked else None
+
+    failure = urllib.error.HTTPError(
+        "https://example.invalid", 429, "quota", {"Retry-After": "7"}, None,
+    )
+    transports = 0
+
+    def fail(*_args, **_kwargs):
+        nonlocal transports
+        transports += 1
+        raise failure
+
+    monkeypatch.setattr(GeminiModelGateway, "_post_json", staticmethod(fail))
+    accountant = AdaptiveAccountant()
+    gateway = GeminiModelGateway(
+        ("account-a", "account-b"), requests_per_key=1,
+        accountant=accountant,
+    )
+
+    with pytest.raises(urllib.error.HTTPError):
+        gateway.generate(
+            0, model="model", purpose="news-impact", payload={},
+            input_tokens=99, decode=lambda envelope: envelope,
+            retryable_http_codes=frozenset({429}),
+        )
+
+    assert transports == 1
+    assert accountant.reserve_calls == 2
+    assert accountant.outcomes == [("PROVIDER_THROTTLED", 7)]
 
 
 def test_invalid_model_output_preserves_the_validator_failure(monkeypatch) -> None:
