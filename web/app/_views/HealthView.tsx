@@ -8,6 +8,7 @@ import MobileDashboardNav from "../_components/MobileDashboardNav";
 import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
+import { operationalEvidenceText } from "../_lib/operational-evidence";
 import { schedulerTaskLabel, type AssistantOperationalHealth, type OperationalHealth } from "../_lib/operational-health";
 
 type StatusPayload = {
@@ -167,7 +168,7 @@ export default function HealthView() {
         {payload?.operational_health?.alerts.map((alert, index) => <article key={`${alert.code}-${alert.scope}-${index}`} className={`is-${alert.severity.toLowerCase()}`}>
           <div><code>{alert.code}</code><b>{alert.scope}</b><span>{alert.severity === "ERROR" ? "需要处理" : "需要留意"}</span></div>
           <p>{alert.message_zh}</p>
-          <small>{Object.entries(alert.evidence).map(([key, value]) => `${key}=${value ?? "—"}`).join(" · ")}</small>
+          <small>{operationalEvidenceText(alert.evidence)}</small>
         </article>)}
       </div> : <p className="operational-all-clear">当前没有达到告警阈值的运行异常。</p>}
       <div className="scheduler-health-grid">
@@ -193,7 +194,7 @@ export default function HealthView() {
       {assistantHealthError ? <div className="operational-alert-list"><article className="is-error"><div><code>OPS_ASSISTANT_HEALTH_UNAVAILABLE</code><b>ASSISTANT_D1</b><span>需要处理</span></div><p>Assistant 云端运行状态无法读取。</p></article></div>
         : assistantHealth === null ? <p className="operational-all-clear">正在读取 Assistant 云端任务状态…</p>
           : assistantHealth.current === false ? <p className="operational-all-clear">PR Preview 不把生产 D1 告警伪装成分支实时状态；合并后由生产页面显示。</p>
-          : assistantHealth?.alerts.length ? <div className="operational-alert-list">{assistantHealth.alerts.map((alert, index) => <article key={`${alert.code}-${alert.scope}-${index}`} className={`is-${alert.severity.toLowerCase()}`}><div><code>{alert.code}</code><b>{alert.scope}</b><span>{alert.severity === "ERROR" ? "需要处理" : "需要留意"}</span></div><p>{alert.message_zh}</p><small>{Object.entries(alert.evidence).map(([key, value]) => `${key}=${typeof value === "object" ? JSON.stringify(value) : value ?? "—"}`).join(" · ")}</small></article>)}</div>
+          : assistantHealth?.alerts.length ? <div className="operational-alert-list">{assistantHealth.alerts.map((alert, index) => <article key={`${alert.code}-${alert.scope}-${index}`} className={`is-${alert.severity.toLowerCase()}`}><div><code>{alert.code}</code><b>{alert.scope}</b><span>{alert.severity === "ERROR" ? "需要处理" : "需要留意"}</span></div><p>{alert.message_zh}</p><small>{operationalEvidenceText(alert.evidence)}</small></article>)}</div>
             : <p className="operational-all-clear">当前没有达到告警阈值的 Assistant 云端任务异常。</p>}
       <div className="scheduler-health-grid">
         {(assistantHealth?.queues ?? []).map(queue => <article key={queue.queue}>

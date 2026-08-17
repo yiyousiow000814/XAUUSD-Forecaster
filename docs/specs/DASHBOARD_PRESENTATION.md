@@ -34,3 +34,12 @@ complete component rather than only the reported edge. The review includes:
 Automated coverage must protect the boundary ownership rule. Deployed Preview
 verification remains required because source-level CSS assertions do not prove
 that a visible line is continuous after cascade and responsive overrides.
+
+## Operator-facing time
+
+- Durable records and API payloads retain canonical timezone-aware timestamps.
+- Dashboard copy and diagnostic evidence render timestamps as readable local
+  date-times in the fixed `Asia/Kuala_Lumpur` (UTC+8) operator zone.
+- Raw ISO 8601 values are not a user-facing presentation. Automatic browser
+  timezone detection is intentionally avoided because server rendering and
+  hydration must produce the same value.

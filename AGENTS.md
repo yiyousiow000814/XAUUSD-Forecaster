@@ -70,6 +70,10 @@
   layouts, including spanning, incomplete, expanded, and collapsed rows. Follow
   `docs/specs/DASHBOARD_PRESENTATION.md`; do not validate only the edge named in
   the bug report.
+- Render operator-facing timestamps as readable local date-times using the
+  dashboard's fixed `Asia/Kuala_Lumpur` (UTC+8) zone. Do not expose raw ISO 8601
+  strings in UI copy or diagnostic evidence; retain canonical UTC in stored
+  records and APIs.
 - Add or update automated coverage, and record the Preview URL and responsive
   checks in the pull request before calling the change complete.
 
