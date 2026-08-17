@@ -261,7 +261,9 @@ def _event_budget_weights(
     for event_id, budget in event_budgets.items():
         source_unbounded[event_sources[event_id][1]] += budget
     source_scales = {
-        source_id: min(1.0, SOURCE_WEIGHT_BUDGET / total)
+        source_id: (
+            min(1.0, SOURCE_WEIGHT_BUDGET / total) if total > 0 else 0.0
+        )
         for source_id, total in source_unbounded.items()
     }
     bounded_event_budgets = {
@@ -279,7 +281,11 @@ def _event_budget_weights(
         for event in row.get(field, []):
             event_id = str(event["event_id"])
             raw = float(event["raw_weight"])
-            normalized = raw / totals[event_id] * bounded_event_budgets[event_id]
+            event_total = totals[event_id]
+            normalized = (
+                raw / event_total * bounded_event_budgets[event_id]
+                if event_total > 0 else 0.0
+            )
             budget += normalized
             receipts.append({
                 "source_decision_id": row["decision_id"],

@@ -2497,6 +2497,32 @@ def test_multiple_events_from_one_source_share_one_source_budget() -> None:
     assert summary["maximum_source_weight_share"] == pytest.approx(0.5)
 
 
+def test_zero_weight_events_do_not_break_a_mixed_source_budget() -> None:
+    rows = [
+        {"decision_id": "live", "broad_events": [{
+            "event_id": "live-event", "event_version_id": "live-v1",
+            "raw_weight": 0.8, "source_budget_id": "live-source",
+        }]},
+        {"decision_id": "expired", "broad_events": [{
+            "event_id": "expired-event", "event_version_id": "expired-v1",
+            "raw_weight": 0.0, "source_budget_id": "expired-source",
+        }]},
+    ]
+
+    weights, receipts, source_receipts, summary = training_v2._event_budget_weights(
+        rows, "broad_events",
+    )
+
+    assert weights[0] > 0
+    assert weights[1] == 0
+    assert receipts[1]["normalized_event_weight"] == 0
+    assert {
+        receipt["source_budget_id"]: receipt["bounded_weight"]
+        for receipt in source_receipts
+    } == {"expired-source": 0, "live-source": pytest.approx(0.8)}
+    assert summary["maximum_source_weight_share"] == pytest.approx(1.0)
+
+
 def test_commentary_and_low_materiality_are_not_training_evidence(tmp_path) -> None:
     epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
     decision = epoch + timedelta(minutes=10)
