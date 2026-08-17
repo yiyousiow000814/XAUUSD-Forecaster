@@ -37,7 +37,7 @@ type Decision = {
 };
 type BoundaryReadout = {
   decision_time: string; direction: number | null; news: number | null;
-  changes: Array<{ model_identity: string; model_version: string; training_rows?: number }>;
+  changes: Array<{ decision_time: string; model_identity: string; model_version: string; training_rows?: number }>;
   event_count?: number;
 };
 type VersionGroup = {
@@ -590,8 +590,8 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
     return { boundary, markerX, label, labelWidth, labelX: idealLabelX, lane };
   });
   const boundaryLaneCount = compactBoundaryRail || !boundaryLayouts.length ? 0 : Math.max(...boundaryLayouts.map(layout => layout.lane)) + 1;
-  const boundaryDividerY = compactBoundaryRail ? 24 : boundaryLaneCount ? 16 + boundaryLaneCount * 29 : 56;
-  const plotTop = compactBoundaryRail ? 56 : boundaryLaneCount ? boundaryDividerY + 14 : 70;
+  const boundaryDividerY = compactBoundaryRail ? 32 : boundaryLaneCount ? 16 + boundaryLaneCount * 29 : 56;
+  const plotTop = compactBoundaryRail ? 64 : boundaryLaneCount ? boundaryDividerY + 14 : 70;
   const plotHeight = Math.max(118, 338 - plotTop);
   const y = (value: number) => plotTop + (high - value) / Math.max(.000001, high - low) * plotHeight;
   const sourcePointCount = usable.reduce((total, row) => total + (row.source_point_count ?? row.points.length), 0);
@@ -607,9 +607,9 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
       <label>统计频率<select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPageOffset(0); clearBoundaryReadout(); }}><option value="EVERY_5M">每5分钟（重叠）</option><option value="FIXED_30M">每30分钟（非重叠）</option></select></label>
       <label>开市窗口<select value={range} onChange={event => { setRange(event.target.value as typeof range); setPageOffset(0); clearBoundaryReadout(); }}><option value="24h">24开市小时</option><option value="7d">7个开市日</option><option value="30d">30个开市日</option><option value="all">全部总览</option></select></label>
       <div className="curve-navigation-actions">
-        <button type="button" disabled={!canGoEarlier} onClick={() => { setPageOffset(activePage + 1); clearBoundaryReadout(); }}>← 较早一段</button>
-        <button type="button" disabled={!canGoLater} onClick={() => { setPageOffset(Math.max(0, activePage - 1)); clearBoundaryReadout(); }}>较晚一段 →</button>
-        <button type="button" disabled={pageOffset === 0} onClick={() => { setPageOffset(0); clearBoundaryReadout(); }}>回到最新</button>
+        <button type="button" aria-label="查看较早一段" disabled={!canGoEarlier} onClick={() => { setPageOffset(activePage + 1); clearBoundaryReadout(); }}><span aria-hidden="true">←</span><span className="curve-nav-text">较早一段</span></button>
+        <button type="button" aria-label="查看较晚一段" disabled={!canGoLater} onClick={() => { setPageOffset(Math.max(0, activePage - 1)); clearBoundaryReadout(); }}><span className="curve-nav-text">较晚一段</span><span aria-hidden="true">→</span></button>
+        <button type="button" aria-label="回到最新" disabled={pageOffset === 0} onClick={() => { setPageOffset(0); clearBoundaryReadout(); }}><span aria-hidden="true">↺</span><span className="curve-nav-text">回到最新</span></button>
       </div>
       <span>{windowLabel}{chartDownsampled ? ` · 全历史 ${formatExactCount(sourcePointCount)} 条已压缩为 ${formatExactCount(overviewPoints.length)} 个绘图点` : ` · 当前 ${formatExactCount(visiblePoints.length)} 个绘图点`}</span>
     </div>
@@ -618,9 +618,6 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
       setHistoryErrors(previous => ({ ...previous, [cadence]: false }));
       setHistoryRetries(previous => ({ ...previous, [cadence]: (previous[cadence] ?? 0) + 1 }));
     }} />}
-    {compactBoundaryRail && <div className="curve-event-readout" aria-live="polite">
-      {activeBoundary ? <><b>{activeBoundary.event_count && activeBoundary.event_count > 1 ? `${formatExactCount(activeBoundary.event_count)} 次相近换版 · ` : ""}{axisLabel(activeBoundary.decision_time)} · {boundaryLabel(activeBoundary)}</b><span>{activeBoundary.changes.map(change => `${LABELS[change.model_identity] ?? change.model_identity}（${formatExactCount(change.training_rows)} 条）`).join(" · ")}</span></> : <><b>模型换版本事件轨道</b><span>7日、30日与全部总览会合并拥挤标签；移到或点击圆点查看准确时间、样本量与完整模型明细。</span></>}
-    </div>}
     <span className="mobile-scroll-hint long-curve-interaction-hint" role="note">左右滑动浏览长期曲线 · 文字与时间轴保持可读大小</span>
     {/* Keyboard users need focus here so arrow keys can pan the wide chart. */}
     {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
@@ -664,6 +661,12 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
       {tickTimes.map(value => <g key={value} className="time-axis"><line x1={x(value)} x2={x(value)} y1="350" y2="356" /><text x={x(value)} y="374" textAnchor="middle">{axisLabel(value)}</text></g>)}
     </svg>
     </div>
+    {compactBoundaryRail && <section className="curve-event-readout" aria-live="polite">
+      <header><b>{activeBoundary ? `${activeBoundary.event_count && activeBoundary.event_count > 1 ? `${formatExactCount(activeBoundary.event_count)} 次相近换版 · ` : ""}${boundaryLabel(activeBoundary)}` : "模型换版本事件"}</b><span>{activeBoundary ? "完整换版证据" : "点选图表上方圆点查看"}</span></header>
+      <div className="curve-event-detail-list">
+        {activeBoundary ? activeBoundary.changes.map((change, index) => <article key={`${change.decision_time}-${change.model_identity}-${change.model_version}-${index}`}><time>{axisLabel(change.decision_time)}</time><b>{LABELS[change.model_identity] ?? change.model_identity}</b><code>{change.model_version}</code><span>训练 {formatExactCount(change.training_rows)} 条</span></article>) : <p>7日、30日与全部总览会把拥挤标签合并为事件点；图表本身保持固定位置。</p>}
+      </div>
+    </section>}
     <div className="chart-legend">{visibleCurves.map(row => <span key={row.model_identity}><i style={{ background: COLORS[row.model_identity] }} />{LABELS[row.model_identity]} <b>{pct(row.points.at(-1)?.cumulative_quote_return ?? 0)}</b></span>)}{groupedBoundaries.length > 0 && <span><i className="train-dot" />模型换版本{compactBoundaryRail ? `（${formatExactCount(boundaryLayouts.length)} 个事件点 / ${formatExactCount(groupedBoundaries.length)} 次）` : groupedBoundaries.length > displayedBoundaries.length ? `（显示 ${formatExactCount(displayedBoundaries.length)}/${formatExactCount(groupedBoundaries.length)}）` : ""}</span>}</div>
   </div>;
 }

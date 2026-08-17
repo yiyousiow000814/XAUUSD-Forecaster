@@ -62,3 +62,6 @@ that a visible line is continuous after cascade and responsive overrides.
 - Event-rail clustering is presentational only: every version event remains in
   its cluster and the complete model detail is available by hover, keyboard,
   or tap. Clusters must use non-overlapping 44-pixel interaction targets.
+- Dense event detail appears in a fixed-height evidence strip below the chart,
+  so hover and selection never move the plot. Each retained event exposes its
+  own timestamp, model identity, model version, and training-row count.
