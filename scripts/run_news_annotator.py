@@ -160,6 +160,7 @@ def _execute_job(
             impact_prompt_version=IMPACT_PROMPT_VERSION,
             records=[record],
             request_accountant=accountant,
+            use_hybrid_retrieval=True,
         )[0]
     return translate_pending_headlines(
         ledger,

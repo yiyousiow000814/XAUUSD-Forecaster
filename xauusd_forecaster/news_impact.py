@@ -289,6 +289,166 @@ def _claim_snapshot(annotation: dict) -> dict[str, object]:
     }
 
 
+def build_identity_candidate_index(
+    prior_rows: list[dict],
+) -> dict[tuple[str, str], tuple[dict, ...]]:
+    """Index one point-in-time prior universe by every recall-only key."""
+    mutable: dict[tuple[str, str], list[dict]] = {}
+    for prior in prior_rows:
+        annotation = prior.get("annotation")
+        if not isinstance(annotation, dict):
+            raise ValueError("identity candidate annotation is missing")
+        indexed = {**annotation, "cluster_id": prior.get("cluster_id")}
+        for key in _identity_lookup_keys(indexed):
+            mutable.setdefault(key, []).append(prior)
+    return {key: tuple(rows) for key, rows in mutable.items()}
+
+
+def retrieve_prior_event_context(
+    current: dict,
+    candidate_index: dict[tuple[str, str], tuple[dict, ...]],
+    *,
+    limit: int = 5,
+) -> list[dict]:
+    """Recall and rank prior candidates without invoking the final model."""
+    if not 1 <= limit <= 20:
+        raise ValueError("identity candidate result bound is invalid")
+    annotation = current.get("annotation")
+    if not isinstance(annotation, dict):
+        raise ValueError("current identity annotation is missing")
+    current_identity = {
+        **annotation, "cluster_id": current.get("cluster_id"),
+    }
+    recalled: dict[str, dict] = {}
+    for key in _identity_lookup_keys(current_identity):
+        for prior in candidate_index.get(key, ()):
+            recalled[str(prior["candidate_id"])] = prior
+
+    candidates = []
+    for prior in recalled.values():
+        prior_annotation = prior["annotation"]
+        similarity = prior_identity_similarity(
+            current_identity,
+            {**prior_annotation, "cluster_id": prior.get("cluster_id")},
+        )
+        if similarity <= 0.25:
+            continue
+        candidate = materialize_identity_candidate(current, prior, similarity)
+        if candidate is not None:
+            candidates.append(candidate)
+    return sorted(
+        candidates,
+        key=lambda candidate: (
+            bool(candidate["identity_anchor_eligible"]),
+            float(candidate["similarity"]),
+            str(candidate["collector_first_seen_time"]),
+        ),
+        reverse=True,
+    )[:limit]
+
+
+def materialize_identity_candidate(
+    current: dict, prior: dict, similarity: float,
+) -> dict | None:
+    """Apply the shared point-in-time and anchor admission contract."""
+    if str(prior["collector_first_seen_time"]) > str(
+        current["collector_first_seen_time"]
+    ):
+        return None
+    if (
+        prior["source"] == current["source"]
+        and prior["source_item_id"] == current["source_item_id"]
+        and prior["revision_number"] == current["revision_number"]
+    ):
+        return None
+    annotation = current.get("annotation")
+    prior_annotation = prior.get("annotation")
+    if not isinstance(annotation, dict) or not isinstance(prior_annotation, dict):
+        raise ValueError("identity candidate annotation is missing")
+    candidate = {
+        key: value for key, value in prior.items() if key != "annotation"
+    }
+    candidate["similarity"] = round(float(similarity), 3)
+    candidate["material_event_key"] = prior_annotation.get("material_event_key")
+    candidate["canonical_actor_id"] = prior_annotation.get("canonical_actor_id")
+    candidate["canonical_object_id"] = prior_annotation.get("canonical_object_id")
+    candidate["event_claim"] = _claim_snapshot(prior_annotation)
+    candidate["identity_anchor_eligible"] = bool(
+        str(prior_annotation.get("record_kind") or "")
+        in ACTIONABLE_RECORD_KINDS
+        and str(prior_annotation.get("evidence_role") or "")
+        in {"CORE_CLAIM", "EVIDENCE_DOCUMENT"}
+        and candidate.get("update_type")
+        not in {"COMMENTARY", "HISTORICAL_CONTEXT"}
+    )
+    current_is_core_fact = bool(
+        str(annotation.get("record_kind") or "") in ACTIONABLE_RECORD_KINDS
+        and str(annotation.get("evidence_role") or "")
+        in {"CORE_CLAIM", "EVIDENCE_DOCUMENT"}
+    )
+    if current_is_core_fact and not candidate["identity_anchor_eligible"]:
+        return None
+    return candidate
+
+
+def load_identity_candidate_universe(
+    connection,
+    *,
+    max_first_seen: str,
+    annotation_prompt_version: str = CURRENT_NEWS_PROMPT_VERSION,
+    impact_prompt_version: str = IMPACT_PROMPT_VERSION,
+    limit: int = IDENTITY_CANDIDATE_UNIVERSE_LIMIT,
+) -> list[dict]:
+    """Load the bounded historical universe used by production retrieval."""
+    if not 1 <= limit <= IDENTITY_CANDIDATE_UNIVERSE_LIMIT:
+        raise ValueError("identity candidate universe bound is invalid")
+    rows = connection.execute(
+        f"""SELECT p.source,p.source_item_id,p.revision_number,p.headline,
+                  p.collector_first_seen_time,p.cluster_id,
+                  pa.annotation_id AS candidate_id,pa.raw_content_hash,
+                  pa.annotation_json,
+                  json_extract(pa.annotation_json,'$.summary_zh') AS summary_zh,
+                  pi.impact_class,pi.update_type,
+                  er.canonical_episode_id,er.canonical_event_id
+           FROM news_revisions p JOIN news_annotations pa
+             ON pa.source=p.source
+            AND pa.source_item_id=p.source_item_id
+            AND pa.revision_number=p.revision_number
+            AND pa.raw_content_hash=p.content_hash
+            AND {validated_annotation_predicate('pa')}
+           LEFT JOIN news_impact_assessments_v1 pi
+             ON pi.assessment_id=(
+               SELECT selected_pi.assessment_id
+               FROM news_impact_assessments_v1 selected_pi
+               WHERE selected_pi.annotation_id=pa.annotation_id
+                 AND selected_pi.llm_model_version=?
+                 AND selected_pi.prompt_version IN (?,?)
+               ORDER BY CASE selected_pi.prompt_version
+                 WHEN ? THEN 0 ELSE 1 END,
+                 selected_pi.assessed_at DESC LIMIT 1)
+           LEFT JOIN news_event_identity_resolutions_v1 er
+             ON er.annotation_id=pa.annotation_id
+            AND er.llm_model_version=? AND er.prompt_version=?
+           WHERE pa.prompt_version=?
+             AND p.collector_first_seen_time<=?
+           ORDER BY p.collector_first_seen_time DESC LIMIT ?""",
+        (
+            IMPACT_MODEL, impact_prompt_version,
+            HANDOVER_IMPACT_PROMPT_VERSION, impact_prompt_version,
+            IMPACT_MODEL, impact_prompt_version,
+            annotation_prompt_version, max_first_seen, limit,
+        ),
+    ).fetchall()
+    candidates = []
+    for raw in rows:
+        candidate = dict(raw)
+        candidate["annotation"] = json.loads(
+            candidate.pop("annotation_json") or "{}"
+        )
+        candidates.append(candidate)
+    return candidates
+
+
 def pending_impact_records(
     connection,
     *,
@@ -382,125 +542,17 @@ def pending_impact_records(
     max_first_seen = max(
         str(row["collector_first_seen_time"]) for row in selected
     )
-    prior_rows = connection.execute(
-        f"""SELECT p.source,p.source_item_id,p.revision_number,p.headline,
-                  p.collector_first_seen_time,p.cluster_id,
-                  pa.annotation_id AS candidate_id,pa.annotation_json,
-                  json_extract(pa.annotation_json,'$.summary_zh') AS summary_zh,
-                  pi.impact_class,pi.update_type,
-                  er.canonical_episode_id,er.canonical_event_id
-           FROM news_revisions p JOIN news_annotations pa
-             ON pa.source=p.source
-            AND pa.source_item_id=p.source_item_id
-            AND pa.revision_number=p.revision_number
-            AND pa.raw_content_hash=p.content_hash
-            AND {validated_annotation_predicate('pa')}
-           LEFT JOIN news_impact_assessments_v1 pi
-             ON pi.assessment_id=(
-               SELECT selected_pi.assessment_id
-               FROM news_impact_assessments_v1 selected_pi
-               WHERE selected_pi.annotation_id=pa.annotation_id
-                 AND selected_pi.llm_model_version=?
-                 AND selected_pi.prompt_version IN (?,?)
-               ORDER BY CASE selected_pi.prompt_version
-                 WHEN ? THEN 0 ELSE 1 END,
-                 selected_pi.assessed_at DESC LIMIT 1)
-           LEFT JOIN news_event_identity_resolutions_v1 er
-             ON er.annotation_id=pa.annotation_id
-            AND er.llm_model_version=? AND er.prompt_version=?
-           WHERE pa.prompt_version=?
-             AND p.collector_first_seen_time<=?
-           ORDER BY p.collector_first_seen_time DESC LIMIT ?""",
-        (
-            IMPACT_MODEL, impact_prompt_version,
-            HANDOVER_IMPACT_PROMPT_VERSION, impact_prompt_version,
-            IMPACT_MODEL, impact_prompt_version,
-            annotation_prompt_version, max_first_seen, candidate_universe_limit,
-        ),
-    ).fetchall()
-    candidate_index: dict[tuple[str, str], list[dict]] = {}
-    for prior in prior_rows:
-        candidate = dict(prior)
-        candidate["annotation"] = json.loads(
-            candidate.pop("annotation_json") or "{}"
-        )
-        indexed = {
-            **candidate["annotation"],
-            "cluster_id": candidate.get("cluster_id"),
-        }
-        for key in _identity_lookup_keys(indexed):
-            candidate_index.setdefault(key, []).append(candidate)
+    candidate_rows = load_identity_candidate_universe(
+        connection,
+        max_first_seen=max_first_seen,
+        annotation_prompt_version=annotation_prompt_version,
+        impact_prompt_version=impact_prompt_version,
+        limit=candidate_universe_limit,
+    )
+    candidate_index = build_identity_candidate_index(candidate_rows)
 
     for row in selected:
-        candidates = []
-        current_identity = {
-            **row["annotation"], "cluster_id": row.get("cluster_id"),
-        }
-        recalled: dict[str, dict] = {}
-        for key in _identity_lookup_keys(current_identity):
-            for prior in candidate_index.get(key, ()):
-                recalled[str(prior["candidate_id"])] = prior
-        for prior in recalled.values():
-            if (
-                str(prior["collector_first_seen_time"])
-                > str(row["collector_first_seen_time"])
-            ):
-                continue
-            if (
-                prior["source"] == row["source"]
-                and prior["source_item_id"] == row["source_item_id"]
-                and prior["revision_number"] == row["revision_number"]
-            ):
-                continue
-            candidate = {
-                key: value for key, value in prior.items()
-                if key != "annotation"
-            }
-            prior_annotation = prior["annotation"]
-            similarity = prior_identity_similarity(
-                current_identity,
-                {**prior_annotation, "cluster_id": prior.get("cluster_id")},
-            )
-            if similarity <= 0.25:
-                continue
-            candidate["similarity"] = round(similarity, 3)
-            candidate["material_event_key"] = prior_annotation.get(
-                "material_event_key"
-            )
-            candidate["canonical_actor_id"] = prior_annotation.get(
-                "canonical_actor_id"
-            )
-            candidate["canonical_object_id"] = prior_annotation.get(
-                "canonical_object_id"
-            )
-            candidate["event_claim"] = _claim_snapshot(prior_annotation)
-            candidate["identity_anchor_eligible"] = bool(
-                str(prior_annotation.get("record_kind") or "")
-                in ACTIONABLE_RECORD_KINDS
-                and str(prior_annotation.get("evidence_role") or "")
-                in {"CORE_CLAIM", "EVIDENCE_DOCUMENT"}
-                and candidate.get("update_type")
-                not in {"COMMENTARY", "HISTORICAL_CONTEXT"}
-            )
-            candidates.append(candidate)
-        current_is_core_fact = bool(
-            str(row["annotation"].get("record_kind") or "")
-            in ACTIONABLE_RECORD_KINDS
-            and str(row["annotation"].get("evidence_role") or "")
-            in {"CORE_CLAIM", "EVIDENCE_DOCUMENT"}
+        row["prior_event_context"] = retrieve_prior_event_context(
+            row, candidate_index,
         )
-        eligible_candidates = (
-            [candidate for candidate in candidates
-             if candidate["identity_anchor_eligible"]]
-            if current_is_core_fact else candidates
-        )
-        row["prior_event_context"] = sorted(
-            eligible_candidates,
-            key=lambda candidate: (
-                bool(candidate["identity_anchor_eligible"]),
-                float(candidate["similarity"]),
-                str(candidate["collector_first_seen_time"]),
-            ),
-            reverse=True,
-        )[:5]
     return selected
