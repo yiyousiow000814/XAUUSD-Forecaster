@@ -282,8 +282,33 @@ def scheduler_health_snapshot(
     ).fetchone() is not None
     invalid_display_rows = int(connection.execute(
         f"""SELECT count(*) FROM news_annotations fallback
+            JOIN news_revisions current
+              ON current.source=fallback.source
+             AND current.source_item_id=fallback.source_item_id
+             AND current.revision_number=fallback.revision_number
             WHERE COALESCE(json_extract(
                     fallback.annotation_json,'$.semantic_reason_zh'),'') LIKE ?
+              AND COALESCE(json_extract(
+                    fallback.annotation_json,'$.xauusd_relevance'),'IRRELEVANT')
+                    <> 'IRRELEVANT'
+              AND NOT EXISTS (
+                SELECT 1 FROM news_revisions newer
+                WHERE newer.source=current.source
+                  AND newer.source_item_id=current.source_item_id
+                  AND newer.revision_number>current.revision_number)
+              AND NOT EXISTS (
+                SELECT 1 FROM news_revisions peer
+                WHERE peer.cluster_id=current.cluster_id
+                  AND NOT EXISTS (
+                    SELECT 1 FROM news_revisions peer_newer
+                    WHERE peer_newer.source=peer.source
+                      AND peer_newer.source_item_id=peer.source_item_id
+                      AND peer_newer.revision_number>peer.revision_number)
+                  AND (length(COALESCE(peer.body,''))>
+                       length(COALESCE(current.body,''))
+                    OR (length(COALESCE(peer.body,''))=
+                        length(COALESCE(current.body,''))
+                      AND peer.source_item_id<current.source_item_id)))
               AND NOT EXISTS (
                 SELECT 1 FROM news_annotations repaired
                 WHERE repaired.source=fallback.source

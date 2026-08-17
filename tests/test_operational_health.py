@@ -315,6 +315,11 @@ def test_future_backoff_is_scheduled_retry_not_overdue_backlog() -> None:
 def test_scheduler_health_detects_unrepaired_display_placeholder() -> None:
     connection = _connection()
     connection.execute(
+        """CREATE TABLE news_revisions (
+             source TEXT,source_item_id TEXT,revision_number INTEGER,
+             cluster_id TEXT,body TEXT)"""
+    )
+    connection.execute(
         """CREATE TABLE news_annotations (
              source TEXT,source_item_id TEXT,revision_number INTEGER,
              prompt_version TEXT,parsed_at TEXT,annotation_json TEXT)"""
@@ -327,8 +332,38 @@ def test_scheduler_health_detects_unrepaired_display_placeholder() -> None:
                 "semantic_reason_zh": (
                     "语义已完成，但中文展示未通过校验；本记录仅供审计。"
                 ),
+                "xauusd_relevance": "MACRO_DRIVER",
             }, ensure_ascii=False),
         ),
+    )
+    connection.executemany(
+        "INSERT INTO news_revisions VALUES (?,?,?,?,?)",
+        [
+            ("source", "item", 1, "actionable", "complete evidence"),
+            ("source", "duplicate-short", 1, "duplicate", "short"),
+            ("source", "duplicate-long", 1, "duplicate", "longer evidence"),
+            ("source", "irrelevant", 1, "irrelevant", "complete evidence"),
+        ],
+    )
+    placeholder = json.dumps({
+        "semantic_reason_zh": (
+            "语义已完成，但中文展示未通过校验；本记录仅供审计。"
+        ),
+        "xauusd_relevance": "MACRO_DRIVER",
+    }, ensure_ascii=False)
+    irrelevant = json.dumps({
+        "semantic_reason_zh": (
+            "语义已完成，但中文展示未通过校验；本记录仅供审计。"
+        ),
+        "xauusd_relevance": "IRRELEVANT",
+    }, ensure_ascii=False)
+    connection.executemany(
+        "INSERT INTO news_annotations VALUES (?,?,?,?,?,?)",
+        [
+            ("source", "duplicate-short", 1, "prompt", NOW.isoformat(),
+             placeholder),
+            ("source", "irrelevant", 1, "prompt", NOW.isoformat(), irrelevant),
+        ],
     )
 
     snapshot = scheduler_health_snapshot(connection, now=NOW)
