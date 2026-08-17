@@ -1,7 +1,7 @@
 param(
     [ValidateSet("Gui", "Status", "StatusJson", "CodeRevision", "Start", "Stop", "Restart", "ServiceStart", "ServiceStop", "Watchdog", "EnableAutoStart", "DisableAutoStart", "InstallShortcut", "InstallRuntime")]
     [string]$Action = "Gui",
-    [ValidateSet("", "quote", "collector", "annotator", "api", "sync", "assistant")]
+    [ValidateSet("", "quote", "collector", "annotator", "api", "sync")]
     [string]$ServiceKey = "",
     [string]$StatusPath = "",
     [string]$RuntimeRoot = "",
@@ -379,8 +379,7 @@ function Copy-CandidatePreflightState {
     $sourceRoot = Split-Path -Parent $SourceDatabase
     $targetRoot = Split-Path -Parent $TargetDatabase
     foreach ($name in @(
-        "dashboard-sync-status.json", "news-annotator-status.json",
-        "assistant-worker-status.json"
+        "dashboard-sync-status.json", "news-annotator-status.json"
     )) {
         $source = Join-Path $sourceRoot $name
         if (Test-Path -LiteralPath $source) {
@@ -638,8 +637,7 @@ function Test-CodeReloadHealth {
     }
     foreach ($heartbeatSpec in @(
         @("collector", "collector-status.json"),
-        @("annotator", "news-annotator-status.json"),
-        @("assistant", "assistant-worker-status.json")
+        @("annotator", "news-annotator-status.json")
     )) {
         # Collector reconciliation can temporarily keep the annotator waiting
         # on SQLite during a coordinated reload.  A fresh STARTING heartbeat
@@ -678,7 +676,7 @@ function Restart-CodeReloadableServices {
     $targets = @($services | Where-Object { $_.Key -in $reloadableServiceKeys })
     $reloadStarted = [DateTimeOffset]::UtcNow
     Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_STARTED" `
-        -Service "collector,annotator,api,sync,assistant" -State $Revision
+        -Service "collector,annotator,api,sync" -State $Revision
     foreach ($service in $targets) { Stop-ForecasterService $service }
     Start-Sleep -Milliseconds 800
     foreach ($service in $targets) {
@@ -692,7 +690,7 @@ function Restart-CodeReloadableServices {
     } while (-not $healthy -and [DateTimeOffset]::UtcNow -lt $deadline)
     if (-not $healthy) { throw "Code revision reload failed functional health checks." }
     Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_HEALTHY" `
-        -Service "collector,annotator,api,sync,assistant" -State $Revision
+        -Service "collector,annotator,api,sync" -State $Revision
     return $reloadStarted
 }
 
@@ -705,7 +703,7 @@ function Invoke-RuntimeCandidateActivation {
     # between repeats safe work instead of silently skipping validation.
     Write-RuntimeCodeState -Revision $Revision
     Write-WatchdogEvent -Event "CODE_REVISION_RELOAD_APPLIED" `
-        -Service "collector,annotator,api,sync,assistant" -State $Revision
+        -Service "collector,annotator,api,sync" -State $Revision
 }
 
 function Get-RuntimeDecisionTimes {
@@ -1014,12 +1012,10 @@ function Get-ServiceState {
     )
     if ($Processes.Count -eq 0) { return "STOPPED" }
 
-    if ($Service.Key -in @("collector", "annotator", "assistant")) {
+    if ($Service.Key -in @("collector", "annotator")) {
         $statusName = if ($Service.Key -eq "collector") {
             "collector-status.json"
-        } elseif ($Service.Key -eq "annotator") {
-            "news-annotator-status.json"
-        } else { "assistant-worker-status.json" }
+        } else { "news-annotator-status.json" }
         $heartbeat = Get-RuntimeHeartbeat `
             -Path (Join-Path $moduleRoot ".local\forward\$statusName") `
             -ServiceName $Service.Key `
@@ -1135,7 +1131,7 @@ function Start-ForecasterService {
         $env:FRED_API_KEY = Get-CollectorSecret -Name "FRED_API_KEY"
         $env:EIA_API_KEY = Get-CollectorSecret -Name "EIA_API_KEY"
     }
-    if ($Service.Key -in @("sync", "assistant")) {
+    if ($Service.Key -eq "sync") {
         $env:SITES_BYPASS_TOKEN = [Environment]::GetEnvironmentVariable(
             "SITES_BYPASS_TOKEN", "User"
         )
