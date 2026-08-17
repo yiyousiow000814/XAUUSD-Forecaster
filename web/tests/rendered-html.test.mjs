@@ -942,6 +942,11 @@ test("renders the Gemini quota status route", async () => {
   assert.match(source, /id="quota-allocation-title">新闻额度分配/);
   assert.match(source, /id="quota-queue-title">请求异常/);
   assert.match(source, /className="throughput-section" aria-labelledby="throughput-title"/);
+  assert.doesNotMatch(html, /class="routing-grid"/);
+  assert.match(html, /账户与每日额度[\s\S]*?Gemini 3\.5 Flash-Lite[\s\S]*?Gemini 3\.1 Flash-Lite/);
+  assert.match(html, /新闻额度分配[\s\S]*?Gemma 4 31B/);
+  assert.match(html, /Antigravity[\s\S]*?未启用/);
+  assert.doesNotMatch(css, /\.routing-grid/);
   assert.match(css, /\.quota-overview-layout \{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
   assert.match(css, /\.quota-capacity-grid \{[^}]*grid-template-columns:repeat\(5,minmax\(0,1fr\)\)/);
   assert.match(css, /\.throughput-summary \{[^}]*grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);

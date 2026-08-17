@@ -204,7 +204,7 @@ export default function StatusView() {
         </header>
         <div className="quota-overview-layout">
           <section className="quota-group quota-group-capacity" aria-labelledby="quota-capacity-title">
-            <header><span>01</span><div><h3 id="quota-capacity-title">账户与每日额度</h3><p>模型账户及 Pacific 配额日剩余容量</p></div></header>
+            <header><span>01</span><div><h3 id="quota-capacity-title">账户与每日额度</h3><p>{payload?.llm_routing.action_bearing.model ?? "Gemini 3.5 Flash-Lite"} → {payload?.llm_routing.action_bearing.fallback_model ?? "Gemini 3.1 Flash-Lite"} · {payload?.llm_routing.action_bearing.role ?? "普通额度用尽后接管"}</p></div></header>
             <div className="quota-metric-grid quota-capacity-grid">
               <article><span>已配置 KEY</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.configured_key_count} /></MetricValue></strong><small>当前可用 <CountValue value={payload?.annotation_queue.available_key_count} format="exact" /> · 匿名编号</small></article>
               <article><span>Flash 已发送</span><strong><MetricValue phase={currentPhase}><CountValue value={quota?.total_sent} /></MetricValue></strong><small>重要正文与训练特征</small></article>
@@ -215,7 +215,7 @@ export default function StatusView() {
           </section>
 
           <section className="quota-group" aria-labelledby="quota-allocation-title">
-            <header><span>02</span><div><h3 id="quota-allocation-title">新闻额度分配</h3><p>普通新闻与重要事件互不挤占</p></div></header>
+            <header><span>02</span><div><h3 id="quota-allocation-title">新闻额度分配</h3><p>{payload?.llm_routing.display_only.model ?? "Gemma 4 31B"} · {payload?.llm_routing.display_only.role ?? "事件整理与中文展示"}</p></div></header>
             <div className="quota-metric-grid">
               <article><span>普通新闻可用</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.routine_remaining} /></MetricValue></strong><small>不动用重要事件保留额</small></article>
               <article className="quota-metric-priority"><span>重要新闻保留</span><strong><MetricValue phase={currentPhase}><CountValue value={payload?.annotation_queue.priority_reserve} /></MetricValue></strong><small>FOMC · CPI · Payroll 专用</small></article>
@@ -241,12 +241,6 @@ export default function StatusView() {
         </div>
       </section>
 
-      <section className="routing-grid">
-        <article><span>重要 / 会进入训练</span><strong>{payload?.llm_routing.action_bearing.model ?? "Gemini 3.5 Flash-Lite"} → {payload?.llm_routing.action_bearing.fallback_model ?? "Gemini 3.1 Flash-Lite"}</strong><p>{payload?.llm_routing.action_bearing.role ?? "3.5 优先，普通额度用尽后由 3.1 接管"}</p></article>
-        <article><span>事件整理 / 展示</span><strong>{payload?.llm_routing.display_only.model ?? "Gemma 4 31B"}</strong><p>{payload?.llm_routing.display_only.role ?? "事件归并、影响说明与中文标题展示"}</p></article>
-        <article><span>暂不启用</span><strong>Antigravity</strong><p>{payload?.llm_routing.antigravity.reason ?? "每日额度不适合批量新闻"}</p></article>
-      </section>
-
       <QuotaPanel title="Gemini 3.5 Flash-Lite · 逐 Key 配额" eyebrow="ACTION-BEARING / FULL CONTENT" quota={quota} nowMs={nowMs} />
       <QuotaPanel title="Gemini 3.1 Flash-Lite · 逐 Key 配额" eyebrow="ACTION-BEARING FALLBACK / FULL CONTENT" quota={fallbackQuota} nowMs={nowMs} />
       <QuotaPanel title="Gemma 4 31B · 逐 Key 配额" eyebrow="DISPLAY-ONLY / TITLE TRANSLATION" quota={gemmaQuota} nowMs={nowMs} />
@@ -255,7 +249,7 @@ export default function StatusView() {
       <details className="quota-note">
         <summary><b>计数规则</b><span>查看账本与 Google 额度的区别</span></summary>
         <p>每次请求在发往模型前永久计入各自账本，包括被 Google 拒绝的请求。3.5 每 key 本机上限 500，并保留一部分给 FOMC、CPI 与 Payroll；普通额度用尽后才由 3.1 接管。数字格式和中文显示问题会在本地恢复，同一分钟的 RPM 槽位用完只会延后到下一批，不算失败。只有 Google 服务或响应故障才进入持久退避。Gemma 每 key 本机上限 15,000。Embedding 每个独立账户为 100 RPM、30K TPM、1K RPD，batch 内每条内容分别计一次请求。各账本都在 Pacific midnight 自动切换。</p>
-        <p>当前配置把每个账户视为独立额度域；Flash 与 Gemma 的总 RPM/TPM 都按独立账户数汇总。每次请求仍须先通过对应账户的 RPM 与 TPM 原子检查，因此增加并发不会绕过额度。</p>
+        <p>当前配置把每个账户视为独立额度域；Flash 与 Gemma 的总 RPM/TPM 都按独立账户数汇总。每次请求仍须先通过对应账户的 RPM 与 TPM 原子检查，因此增加并发不会绕过额度。Antigravity {payload?.llm_routing.antigravity.enabled ? "已启用" : "未启用"}：{payload?.llm_routing.antigravity.reason ?? "每日额度不适合批量新闻"}。</p>
       </details>
 
       <footer><span>每 {DASHBOARD_REFRESH_INTERVALS.status / 1000} 秒刷新 · SHADOW ONLY</span><span>最后状态：{payload?.generated_at ? new Date(payload.generated_at).toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Kuala_Lumpur" }) : "—"}</span></footer>

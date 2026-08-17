@@ -920,11 +920,6 @@ body.modal-open { overflow:hidden; }
 .throughput-summary article>span { color:var(--muted); font-size:12px; font-weight:800; letter-spacing:.04em; text-transform:uppercase; }
 .throughput-summary strong { grid-column:2; grid-row:1/3; font-family:var(--font-display); font-size:38px; line-height:1; }
 .throughput-summary small { min-width:0; color:var(--muted); font-size:11px; font-weight:700; line-height:1.45; overflow-wrap:anywhere; }
-.routing-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:1px; margin-top:24px; border:1px solid var(--ink); background:#aaa59a; }
-.routing-grid article { min-height:170px; padding:22px; background:var(--paper); }
-.routing-grid span { display:block; color:var(--muted); font-size:13px; font-weight:800; }
-.routing-grid strong { display:block; margin:14px 0 10px; font-family:var(--font-display); font-size:25px; overflow-wrap:anywhere; }
-.routing-grid p { margin:0; font-size:14px; font-weight:600; line-height:1.55; }
 .quota-panel { margin-top:24px; border:1px solid var(--ink); background:var(--paper); }
 .quota-panel-head { display:flex; justify-content:space-between; gap:24px; align-items:end; padding:24px; }
 .quota-panel-head h2 { margin:5px 0 0; font-family:var(--font-display); font-size:34px; }
@@ -1004,7 +999,6 @@ body.modal-open { overflow:hidden; }
   .throughput-summary { grid-template-columns:1fr 1fr; }
   .throughput-summary article+article { border-left:1px solid var(--ink); }
   .throughput-summary article:last-child:nth-child(odd) { grid-column:1/-1; border-top:1px solid var(--ink); border-left:0; }
-  .routing-grid { grid-template-columns:1fr; }
   .quota-panel-head { align-items:flex-start; flex-direction:column; }
   .quota-panel-head>div:last-child { text-align:left; }
   .quota-table-head { display:none; }
@@ -1077,9 +1071,6 @@ body.modal-open { overflow:hidden; }
   .throughput-summary article { gap:4px 12px; padding:14px; }
   .throughput-summary strong { font-size:30px; }
   .throughput-summary article>span,.throughput-summary small { font-size:10px; }
-  .routing-grid article { min-height:0; padding:16px; }
-  .routing-grid strong { margin:8px 0 6px; font-size:19px; }
-  .routing-grid p { font-size:12px; }
   .quota-panel-head { gap:10px; padding:16px; }
   .quota-panel-head h2 { font-size:24px; }
   .quota-row { min-height:0; padding:14px 14px 22px; }
