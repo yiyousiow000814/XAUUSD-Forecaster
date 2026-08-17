@@ -33,8 +33,37 @@ NEWS_ARCHIVE_PAGE_LIMIT = 20
 STATUS_SNAPSHOT_TTL_SECONDS = 15.0
 STATUS_SNAPSHOT_WAIT_SECONDS = 5.0
 STATUS_SNAPSHOT_MAX_STALE_SECONDS = 90.0
+SEMANTIC_SNAPSHOT_MAX_STALE_SECONDS = 420.0
 _QUOTE_CANDLE_CACHE_LOCK = threading.Lock()
 _QUOTE_CANDLE_CACHE: dict[str, dict] = {}
+
+
+def _semantic_pipeline_component(latest, *, now: datetime) -> dict:
+    if latest is None:
+        return {
+            "last_success": None,
+            "age_seconds": None,
+            "status": "STALE",
+            "last_error": "尚无决策时点的新闻语义健康记录",
+        }
+    observed_at = datetime.fromisoformat(str(latest["observed_at"]))
+    age_seconds = max(0.0, (now - observed_at).total_seconds())
+    reason_codes = tuple(json.loads(latest["reason_codes_json"]))
+    freshness_failure = any(
+        code.endswith("_STALE") or code.endswith("_MISSING")
+        for code in reason_codes
+        if code.startswith(("ANNOTATOR_HEARTBEAT_", "NEWS_COLLECTOR_POLL_"))
+    )
+    stale = age_seconds > SEMANTIC_SNAPSHOT_MAX_STALE_SECONDS or freshness_failure
+    return {
+        "last_success": latest["heartbeat_at"],
+        "age_seconds": age_seconds,
+        "status": (
+            "STALE" if stale else
+            "OK" if latest["status"] == "HEALTHY" else "ERROR"
+        ),
+        "last_error": None if not reason_codes else ", ".join(reason_codes),
+    }
 
 from xauusd_forecaster.factors import factor_coverage  # noqa: E402
 from xauusd_forecaster.dashboard_payloads import bounded_evidence_window  # noqa: E402
@@ -2245,29 +2274,9 @@ def _dashboard_payload(database: Path) -> dict:
     sites_sync_component = component(
         "sites_synchronizer", 120, sync_status.get("last_error")
     )
-    semantic_pipeline_component = {
-        "last_success": (
-            latest_semantic_health["heartbeat_at"]
-            if latest_semantic_health is not None else None
-        ),
-        "age_seconds": (
-            max(0.0, (
-                now - datetime.fromisoformat(latest_semantic_health["observed_at"])
-            ).total_seconds())
-            if latest_semantic_health is not None else None
-        ),
-        "status": (
-            "OK" if latest_semantic_health is not None
-            and latest_semantic_health["status"] == "HEALTHY" else "STALE"
-        ),
-        "last_error": (
-            None if latest_semantic_health is not None
-            and latest_semantic_health["status"] == "HEALTHY"
-            else ", ".join(json.loads(latest_semantic_health["reason_codes_json"]))
-            if latest_semantic_health is not None
-            else "尚无决策时点的新闻语义健康记录"
-        ),
-    }
+    semantic_pipeline_component = _semantic_pipeline_component(
+        latest_semantic_health, now=now,
+    )
     degraded_resources = sync_status.get("degraded_resources") or []
     if (
         sites_sync_component["status"] == "OK"

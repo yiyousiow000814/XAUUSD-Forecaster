@@ -609,6 +609,32 @@ def release_job(
     )
 
 
+def defer_job_for_maintenance(
+    connection: sqlite3.Connection,
+    job_id: str,
+    worker_id: str,
+    *,
+    available_at: datetime,
+    reason: str,
+) -> None:
+    """Release a shared-prerequisite wait without counting a model attempt."""
+    now = datetime.now(UTC)
+    with connection:
+        result = connection.execute(
+            """UPDATE news_ai_jobs_v1
+               SET state='QUEUED',available_at=?,lease_owner=NULL,
+                   lease_expires_at=NULL,last_error=?,updated_at=?,
+                   attempt_count=attempt_count-1
+               WHERE job_id=? AND state='LEASED' AND lease_owner=?
+                 AND attempt_count>0""",
+            (
+                _iso(available_at), reason, _iso(now), job_id, worker_id,
+            ),
+        )
+        if result.rowcount != 1:
+            raise ValueError("scheduler lease is not owned by this worker")
+
+
 def backoff_job(
     connection: sqlite3.Connection,
     job_id: str,

@@ -46,6 +46,7 @@ from xauusd_forecaster.news_scheduler import (  # noqa: E402
     complete_job,
     configured_api_credentials,
     credentials_for_background_task,
+    defer_job_for_maintenance,
     pending_record_for_job,
     record_job_attempt,
     rank_accounts_for_models,
@@ -358,15 +359,19 @@ def _run_scheduled_lane(
             status = _with_scheduler_failure_code(_execute_job_safely(
                 ledger, credential, job, now=attempted_at,
             ))
-            record_job_attempt(
-                ledger.connection,
-                job=job,
-                credential=credential,
-                status=status,
-                attempted_at=attempted_at,
+            maintenance_deferred = (
+                status.get("failure_code") == "NEWS_EMBEDDING_BACKFILL_PENDING"
             )
-            attempted_credentials += 1
-            attempted_accounts.add(credential.account_id)
+            if not maintenance_deferred:
+                record_job_attempt(
+                    ledger.connection,
+                    job=job,
+                    credential=credential,
+                    status=status,
+                    attempted_at=attempted_at,
+                )
+                attempted_credentials += 1
+                attempted_accounts.add(credential.account_id)
             outcome_credential = credential
             outcome_at = attempted_at
             if status.get("status") not in {"DEFERRED", "DISABLED"}:
@@ -394,6 +399,13 @@ def _run_scheduled_lane(
                     available_at=outcome_at + timedelta(minutes=1),
                     error="CURRENT_EVIDENCE_NOT_AVAILABLE",
                 )
+        elif status.get("failure_code") == "NEWS_EMBEDDING_BACKFILL_PENDING":
+            defer_job_for_maintenance(
+                ledger.connection, job.job_id, worker_id,
+                available_at=outcome_at + timedelta(minutes=1),
+                reason="NEWS_EMBEDDING_BACKFILL_PENDING",
+            )
+            block_task_type(job.task_type)
         elif outcome in {"DEFERRED", "DISABLED"}:
             release_job(
                 ledger.connection, job.job_id, worker_id,

@@ -1054,6 +1054,72 @@ def test_embedding_catchup_is_deferred_without_trying_another_account(
     assert runner._may_try_another_credential(status) is False
 
 
+def test_embedding_maintenance_does_not_consume_job_attempts_and_resumes(
+    tmp_path, monkeypatch,
+) -> None:
+    from scripts import run_news_annotator as runner
+    from xauusd_forecaster.news_retrieval import NewsEmbeddingBackfillPending
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    job_id = enqueue_job(
+        ledger.connection, task_type="ACTIVE_IMPACT", source="source",
+        source_item_id="maintenance", revision_number=1,
+        annotation_id="annotation", prompt_version="prompt", priority="FAST",
+        now=datetime.now(UTC) - timedelta(minutes=1),
+    )
+    credential = ApiCredential(
+        "account-a", ROUTINE_POOL, "not-a-real-key", "credential-a",
+    )
+    monkeypatch.setattr(runner, "configured_api_credentials", lambda: (credential,))
+    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    ready = False
+    gemma_requests = 0
+
+    def execute(*_args, **_kwargs):
+        nonlocal gemma_requests
+        if not ready:
+            raise NewsEmbeddingBackfillPending("embedding generation incomplete")
+        gemma_requests += 1
+        return {"status": "OK"}
+
+    monkeypatch.setattr(runner, "_execute_job", execute)
+
+    for _ in range(2):
+        statuses = runner.run_scheduled_batch(ledger, batch_size=3)
+        assert statuses[0]["failure_code"] == "NEWS_EMBEDDING_BACKFILL_PENDING"
+        row = ledger.connection.execute(
+            "SELECT state,attempt_count FROM news_ai_jobs_v1 WHERE job_id=?",
+            (job_id,),
+        ).fetchone()
+        assert dict(row) == {"state": "QUEUED", "attempt_count": 0}
+        assert ledger.connection.execute(
+            "SELECT count(*) FROM news_ai_job_attempts_v1 WHERE job_id=?",
+            (job_id,),
+        ).fetchone()[0] == 0
+        assert gemma_requests == 0
+        ledger.connection.execute(
+            "UPDATE news_ai_jobs_v1 SET available_at=? WHERE job_id=?",
+            ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(), job_id),
+        )
+        ledger.connection.commit()
+
+    ready = True
+    statuses = runner.run_scheduled_batch(ledger, batch_size=1)
+
+    assert statuses[0]["status"] == "OK"
+    assert gemma_requests == 1
+    row = ledger.connection.execute(
+        "SELECT state,attempt_count FROM news_ai_jobs_v1 WHERE job_id=?",
+        (job_id,),
+    ).fetchone()
+    assert dict(row) == {"state": "COMPLETED", "attempt_count": 1}
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_ai_job_attempts_v1 WHERE job_id=?",
+        (job_id,),
+    ).fetchone()[0] == 1
+    ledger.close()
+
+
 def test_display_repair_tries_another_independent_account_before_waiting(
     tmp_path, monkeypatch,
 ) -> None:
