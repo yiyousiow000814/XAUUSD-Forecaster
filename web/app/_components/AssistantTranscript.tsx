@@ -285,12 +285,12 @@ export default function AssistantTranscript({
       </article> : null}
 
       {progress.length > 0 ? <details className="assistant-progress" open={Boolean(activeTurn)}>
-        <summary>{activeTurn ? "本轮正在进行" : "查看本轮分析过程"}<span>{progress.length} 个公开阶段</span></summary>
+        <summary>{activeTurn ? "本轮正在处理" : "查看本轮处理记录"}<span>{progress.length} 项记录</span></summary>
         <ol>{progress.map(item => <li className={`is-${item.state.toLowerCase()}`} key={item.id}>
           <i aria-hidden="true" />
           <div><b>{item.label}</b>{item.detail ? <small>{item.detail}</small> : null}</div>
         </li>)}</ol>
-        <footer>这里只展示真实 backend/tool 事件，不包含私有 chain-of-thought。</footer>
+        <footer>这里只显示真实任务与工具状态，不展示模型内部思考。</footer>
       </details> : null}
       <div aria-live="polite" className="sr-only">
         {activeTurn ? "Assistant 正在处理当前问题" : ""}
@@ -299,7 +299,7 @@ export default function AssistantTranscript({
 
     <div className="assistant-composer-shell">
       {activeTurn ? <div className="assistant-active-turn">
-        <span><i aria-hidden="true" /> {activeTurn.status === "PENDING" ? "等待安全容量" : "正在生成回答"}</span>
+        <span><i aria-hidden="true" /> {activeTurn.status === "PENDING" ? "排队中" : "正在处理"}</span>
         <button disabled={cancelling || preview} onClick={onCancel} type="button">{cancelling ? "取消中…" : "取消本轮"}</button>
       </div> : null}
       {conversation?.status === "ARCHIVED" ? <p className="assistant-archived-note">此会话已归档；恢复后才能继续提问。</p> : <form onSubmit={event => {

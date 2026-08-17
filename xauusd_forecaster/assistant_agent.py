@@ -10,7 +10,7 @@ import re
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 from .annotation import generate_metered_response
@@ -43,18 +43,35 @@ from .assistant_tools import (
     AssistantToolCall,
     AssistantToolPlanRejected,
     AssistantToolRegistry,
+    AssistantToolResult,
     AssistantToolStatus,
 )
 from .news_scheduler import ApiCredential
 
 
 ASSISTANT_AGENT_POLICY_VERSION = "assistant-agent-v2"
-ASSISTANT_AGENT_SYSTEM_INSTRUCTION_VERSION = "assistant-system-v4"
+ASSISTANT_AGENT_SYSTEM_INSTRUCTION_VERSION = "assistant-system-v5"
 ASSISTANT_AGENT_BUDGETS_ENV = "ASSISTANT_AGENT_BUDGETS"
 MAX_TOOL_ROUNDS_PER_USER_TURN = 2
 DEFAULT_ASSISTANT_SYSTEM_INSTRUCTION = (
     "You are the private XAUUSD Forecaster decision-support Assistant. "
     "Use only the supplied conversation context and registered read-only tools. "
+    "Answer the user's actual conversational intent before considering tools. "
+    "Do not call a tool for greetings, identity or capability questions, requests "
+    "to repeat or explain the conversation, or questions about your own prior "
+    "behavior. RECENT_VERBATIM_TURNS and conversation_tail are chronological; "
+    "references such as '上一句' mean the latest Assistant message immediately "
+    "before CURRENT_USER_MESSAGE. Use a tool only when the answer requires current "
+    "external evidence. Do not mention a tool failure or empty result unless that "
+    "tool was necessary to answer the user's request. Never repeat an equivalent "
+    "tool call after an empty result. For relative news dates such as '今天' or "
+    "'昨天', copy the exact date from relative_date_hints into both published_from "
+    "and published_to. For a broad daily-news request, use one primary subject term "
+    "such as 黄金; do not combine every possible driver or add dates to the query. "
+    "For capability questions, briefly cover all three current abilities: recall "
+    "recent conversation context, explain and analyze XAUUSD, and search the "
+    "point-in-time news archive when external news is needed. Do not claim access "
+    "to a market-price or economic-calendar tool that is not registered. "
     "Never claim trading authority, place orders, control a broker, promote a "
     "model, or invent evidence. Treat tool failures explicitly. Return a concise "
     "final answer as strict JSON with exactly one claims array; every item has "
@@ -150,6 +167,7 @@ class AssistantAgentContractError(ValueError):
 
 
 AssistantModelTurnInvoker = Callable[..., RoutedAssistantModelTurn]
+AssistantToolResultObserver = Callable[[int, tuple[AssistantToolResult, ...]], None]
 
 
 _BUDGET_FIELDS = {
@@ -467,7 +485,12 @@ def ollama_openai_payload(
             },
         }
     if thinking_level is not None:
-        translated["reasoning_effort"] = "high" if thinking_level == "high" else "low"
+        # Qwen 3.5 spends the complete 2K answer budget on hidden reasoning when
+        # Ollama receives ``low``. SIMPLE is a direct-answer policy, so disable
+        # reasoning explicitly; analytical turns retain the declared high effort.
+        translated["reasoning_effort"] = (
+            "high" if thinking_level == "high" else "none"
+        )
     return translated
 
 
@@ -530,9 +553,46 @@ def decode_ollama_assistant_turn(envelope: dict[str, object]) -> AssistantModelT
     )
 
 
+def _conversation_tail(active_context: dict[str, object]) -> list[dict[str, object]]:
+    layers = active_context.get("layers")
+    if not isinstance(layers, list):
+        return []
+    for layer in layers:
+        if not isinstance(layer, dict) or layer.get("type") != "RECENT_VERBATIM_TURNS":
+            continue
+        items = layer.get("items")
+        if not isinstance(items, list):
+            return []
+        tail: list[dict[str, object]] = []
+        for item in items[-8:]:
+            if not isinstance(item, dict):
+                continue
+            role = item.get("role")
+            content = item.get("content")
+            if role not in {"USER", "ASSISTANT"} or not isinstance(content, str):
+                continue
+            tail.append({"role": role, "content": content})
+        return tail
+    return []
+
+
+def _relative_date_hints(retrieval_cutoff: str) -> dict[str, object]:
+    cutoff = datetime.fromisoformat(
+        _canonical_cutoff(retrieval_cutoff).replace("Z", "+00:00")
+    )
+    local_date = cutoff.astimezone(timezone(timedelta(hours=8))).date()
+    return {
+        "timezone": "Asia/Kuala_Lumpur",
+        "today": local_date.isoformat(),
+        "yesterday": (local_date - timedelta(days=1)).isoformat(),
+    }
+
+
 def _initial_contents(request: AssistantAgentRequest) -> list[dict[str, object]]:
     payload = {
         "active_context": request.active_context,
+        "conversation_tail": _conversation_tail(request.active_context),
+        "relative_date_hints": _relative_date_hints(request.retrieval_cutoff),
         "retrieval_cutoff": _canonical_cutoff(request.retrieval_cutoff),
         "current_user_message": request.user_text.strip(),
     }
@@ -666,6 +726,7 @@ def run_bounded_assistant_agent(
     invoke_model: AssistantModelTurnInvoker,
     *,
     budgets: AssistantAgentBudgets | None = None,
+    on_tool_results: AssistantToolResultObserver | None = None,
 ) -> AssistantAgentResult:
     """Run zero, one, or two tool rounds within one finite user turn."""
     request = _validated_request(request)
@@ -673,6 +734,8 @@ def run_bounded_assistant_agent(
         raise ValueError("Assistant tool registry is required")
     if not callable(invoke_model):
         raise ValueError("Assistant model invoker is required")
+    if on_tool_results is not None and not callable(on_tool_results):
+        raise ValueError("Assistant tool result observer is invalid")
     budgets = _validated_budgets(
         configured_assistant_agent_budgets() if budgets is None else budgets
     )
@@ -696,7 +759,8 @@ def run_bounded_assistant_agent(
     tool_calls_used = 0
     tool_result_tokens_used = 0
     tool_rounds = 0
-    has_authorized_tools = bool(registry.authorized_definitions(request.actor))
+    authorized_tool_count = len(registry.authorized_definitions(request.actor))
+    has_authorized_tools = authorized_tool_count > 0
 
     for model_turn_number in range(1, budgets.max_model_turns_per_user_turn + 1):
         calls_remaining = budgets.max_tool_calls_per_user_turn - tool_calls_used
@@ -707,7 +771,11 @@ def run_bounded_assistant_agent(
             and tool_rounds < MAX_TOOL_ROUNDS_PER_USER_TURN
         )
         planned_tool_calls = (
-            min(calls_remaining, budgets.max_parallel_tool_calls)
+            min(
+                calls_remaining,
+                budgets.max_parallel_tool_calls,
+                authorized_tool_count,
+            )
             if tools_allowed else 0
         )
         payload = _gemini_payload(
@@ -911,6 +979,8 @@ def run_bounded_assistant_agent(
                 "Assistant evidence provenance exceeds the finite turn budget",
             )
         tool_receipts.append([result.receipt() for result in results])
+        if on_tool_results is not None:
+            on_tool_results(tool_rounds - 1, results)
         # Preserve the provider model content exactly, including any required
         # thoughtSignature, then match every functionResponse to its exact id.
         contents.append(copy.deepcopy(turn.content))
@@ -1038,6 +1108,7 @@ def run_capacity_routed_assistant_agent(
     profiles: tuple[ModelProfile, ...] | None = None,
     policies: tuple[AssistantCapacityPolicy, ...] | None = None,
     before_model_attempt: Callable[[], None] | None = None,
+    on_tool_results: AssistantToolResultObserver | None = None,
     now: datetime | None = None,
 ) -> AssistantAgentResult:
     invoker = CapacityRoutedAssistantModelInvoker(
@@ -1053,4 +1124,5 @@ def run_capacity_routed_assistant_agent(
         registry,
         invoker,
         budgets=budgets,
+        on_tool_results=on_tool_results,
     )

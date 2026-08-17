@@ -22,6 +22,21 @@ CUTOFF = "2026-08-16T01:00:00.000Z"
 OWNER = "cloudflare-access:owner-1"
 
 
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    (
+        ("昨天有哪些新闻？", ("2026-08-15", "2026-08-15")),
+        ("今天有哪些新闻？", ("2026-08-16", "2026-08-16")),
+        ("What happened yesterday?", ("2026-08-15", "2026-08-15")),
+        ("列出最新新闻", None),
+    ),
+)
+def test_relative_news_dates_are_fixed_to_the_malaysia_calendar_day(
+    question, expected,
+) -> None:
+    assert worker.assistant_relative_news_window(question, CUTOFF) == expected
+
+
 def _claim(**overrides) -> dict[str, object]:
     value: dict[str, object] = {
         "id": "turn-1",
@@ -181,6 +196,7 @@ def test_worker_builds_owner_context_runs_native_news_tool_and_completes(
         )[0]
         assert result.status is AssistantToolStatus.SUCCEEDED
         assert "raw body" not in str(result.output)
+        kwargs["on_tool_results"](0, (result,))
         answer = "新闻证据显示利率预期仍是黄金的主要驱动。"
         return AssistantAgentResult(
             answer=answer,
@@ -226,7 +242,7 @@ def test_worker_builds_owner_context_runs_native_news_tool_and_completes(
     assert reasoning == [{
         "idempotency_key": "chat-reasoning-attempt-1",
         "type": "reasoning.started",
-        "payload": {"reasoning_class": "TOOL_HEAVY"},
+        "payload": {"reasoning_class": "SIMPLE"},
     }]
     assert transport.posts[2][1] == {
         "action": "RENEW",
@@ -259,6 +275,108 @@ def test_worker_builds_owner_context_runs_native_news_tool_and_completes(
     assert 0 < news_timeout <= 10
     assert news_query["received_to"] == [CUTOFF]
     assert news_query["limit"] == ["20"]
+
+
+def test_worker_enforces_relative_news_day_on_model_tool_arguments(
+    monkeypatch, tmp_path,
+) -> None:
+    claim = _claim(user_text="昨天有哪些影响黄金的新闻？")
+    transport = RecordingTransport(claim)
+
+    def run_agent(_connection, request, registry, _credentials, **kwargs):
+        result = registry.execute_batch(
+            (AssistantToolCall(
+                call_id="provider-relative-date",
+                name=NEWS_SEARCH_TOOL_NAME,
+                arguments={
+                    "query": "黄金",
+                    "published_from": "2026-08-01",
+                    "published_to": "2026-08-16",
+                },
+            ),),
+            actor=request.actor,
+            retrieval_cutoff=request.retrieval_cutoff,
+            max_parallel_calls=1,
+            max_total_result_tokens=8_192,
+            max_retrieved_evidence=20,
+        )[0]
+        kwargs["on_tool_results"](0, (result,))
+        answer = "昨天的黄金新闻已按本地日期检索。"
+        return AssistantAgentResult(
+            answer=answer,
+            model_version="assistant-qwen35-4b-256k:latest",
+            evidence_ids=result.evidence_ids,
+            content_document=build_assistant_content_document(
+                answer,
+                evidence_items=result.output["items"],
+                evidence_ids=result.evidence_ids,
+                retrieval_cutoff=request.retrieval_cutoff,
+            ),
+            provenance={
+                "policy_version": "assistant-agent-v2",
+                "tool_execution": [[result.receipt()]],
+            },
+        )
+
+    monkeypatch.setattr(worker, "run_capacity_routed_assistant_agent", run_agent)
+    outcome = worker.run_assistant_chat_worker(
+        chat_url="https://example.test/api/assistant-worker/chat",
+        worker_id="dashboard-sync:test",
+        database=tmp_path / "forward.sqlite3",
+        credentials=(),
+        transport=transport.value(),
+        max_claims=1,
+    )
+
+    assert outcome == worker.AssistantChatSyncResult(1, 1, 0, 0)
+    news_url = next(url for url, _timeout in transport.gets if "/news-search?" in url)
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(news_url).query)
+    assert query["published_from"] == ["2026-08-15"]
+    assert query["published_to"] == ["2026-08-15"]
+
+
+@pytest.mark.parametrize("question", ["你是谁", "你能做什么？", "你上一句说什么"])
+def test_conversation_only_turns_expose_no_news_tool(
+    monkeypatch, tmp_path, question,
+) -> None:
+    claim = _claim(user_text=question)
+    transport = RecordingTransport(claim)
+
+    def run_agent(_connection, request, registry, _credentials, **_kwargs):
+        assert registry.authorized_definitions(request.actor) == ()
+        assert request.actor.allowed_capabilities == frozenset()
+        answer = "这是直接对话回答。"
+        return AssistantAgentResult(
+            answer=answer,
+            model_version="assistant-qwen35-4b-256k:latest",
+            evidence_ids=(),
+            content_document=build_assistant_content_document(
+                answer,
+                evidence_items=[],
+                evidence_ids=(),
+                retrieval_cutoff=request.retrieval_cutoff,
+            ),
+            provenance={"policy_version": "assistant-agent-v2", "tool_execution": []},
+        )
+
+    monkeypatch.setattr(worker, "run_capacity_routed_assistant_agent", run_agent)
+    outcome = worker.run_assistant_chat_worker(
+        chat_url="https://example.test/api/assistant-worker/chat",
+        worker_id="dashboard-sync:test",
+        database=tmp_path / "forward.sqlite3",
+        credentials=(),
+        transport=transport.value(),
+        max_claims=1,
+    )
+
+    assert outcome == worker.AssistantChatSyncResult(1, 1, 0, 0)
+    assert [payload["action"] for _url, payload in transport.posts] == [
+        "BUILD_CONTEXT", "EVENTS", "COMPLETE",
+    ]
+    assert transport.posts[1][1]["events"][0]["payload"] == {
+        "reasoning_class": "SIMPLE",
+    }
+    assert not any("/news-search?" in url for url, _timeout in transport.gets)
 
 
 def test_capacity_failure_defers_under_the_same_turn_lease(

@@ -593,14 +593,14 @@ export function mergeAssistantMessages(
 }
 
 const reasoningLabel: Record<string, string> = {
-  SIMPLE: "正在整理直接回答",
-  ANALYTICAL: "正在核对上下文与证据",
-  TOOL_HEAVY: "正在规划证据检索",
+  SIMPLE: "正在理解问题",
+  ANALYTICAL: "正在分析问题",
+  TOOL_HEAVY: "正在规划多项资料检索",
 };
 const reasoningCompletedLabel: Record<string, string> = {
-  SIMPLE: "直接回答已整理",
-  ANALYTICAL: "上下文与证据已核对",
-  TOOL_HEAVY: "证据检索规划已完成",
+  SIMPLE: "问题已理解",
+  ANALYTICAL: "问题分析已完成",
+  TOOL_HEAVY: "多项资料检索规划已完成",
 };
 
 const toolLabel = (name: unknown) => (
@@ -661,8 +661,8 @@ export function assistantProgressItems(
     if (event.type === "conversation.started") {
       items.push({
         id: event.event_id,
-        label: "问题已进入安全队列",
-        detail: "等待 Windows Assistant worker",
+        label: "问题已收到",
+        detail: "等待本机 Assistant 开始处理",
         state: "QUEUED",
       });
     } else if (event.type === "reasoning.started") {
@@ -672,7 +672,7 @@ export function assistantProgressItems(
       items.push({
         id: event.event_id,
         label: reasoningLabel[reasoningClass] ?? "正在分析",
-        detail: "仅显示公开策略阶段，不展示私有思维过程",
+        detail: "这里记录处理状态；不是固定回答步骤",
         state: "ACTIVE",
       });
     } else if (event.type === "tool.started") {
