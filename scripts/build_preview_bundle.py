@@ -241,9 +241,14 @@ def _backfill_annotation_reasons(news_index: dict, status: dict) -> None:
         return
     epoch = datetime.fromisoformat(str(epoch_raw))
     for item in news_index.get("items", []):
-        if item.get("annotation_status") != "NOT_REQUIRED":
+        annotation_status = item.get("annotation_status")
+        if annotation_status not in {"QUEUED", "NOT_REQUIRED"}:
             continue
-        if item.get("annotation_reason_code") and item.get("annotation_reason"):
+        if (
+            annotation_status == "NOT_REQUIRED"
+            and item.get("annotation_reason_code")
+            and item.get("annotation_reason")
+        ):
             continue
         published_raw = item.get("source_published_time")
         if not published_raw:
@@ -276,6 +281,13 @@ def _backfill_annotation_reasons(news_index: dict, status: dict) -> None:
                         "QUEUE_INVARIANT_MISMATCH",
                         "正文符合条件但未进入语义队列，需要检查",
                     )
+        if annotation_status == "QUEUED" and code == "QUEUE_INVARIANT_MISMATCH":
+            continue
+        if annotation_status == "QUEUED":
+            item["annotation_status"] = "NOT_REQUIRED"
+            item["model_visibility"] = "MODEL_INELIGIBLE"
+            if not item.get("parsed_at"):
+                item["impact_status"] = "NOT_REQUIRED"
         item["annotation_reason_code"] = code
         item["annotation_reason"] = reason
 

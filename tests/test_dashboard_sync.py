@@ -124,7 +124,9 @@ def test_preview_reader_rejects_a_noncanonical_source() -> None:
 def test_preview_explains_late_discovery_as_model_ineligible() -> None:
     module = _preview_module()
     news_index = {"items": [{
-        "annotation_status": "NOT_REQUIRED",
+        "annotation_status": "QUEUED",
+        "impact_status": "PENDING_ANNOTATION",
+        "model_visibility": "NOT_YET_PARSED",
         "source": "google_news_gold_context",
         "source_published_time": "2026-08-08T20:40:28+00:00",
         "collector_first_seen_time": "2026-08-08T23:34:06+00:00",
@@ -135,6 +137,9 @@ def test_preview_explains_late_discovery_as_model_ineligible() -> None:
     )
 
     row = news_index["items"][0]
+    assert row["annotation_status"] == "NOT_REQUIRED"
+    assert row["impact_status"] == "NOT_REQUIRED"
+    assert row["model_visibility"] == "MODEL_INELIGIBLE"
     assert row["annotation_reason_code"] == "LATE_DISCOVERY"
     assert row["annotation_reason"] == (
         "采集时距发布时间已超过60分钟，不进入语义处理"
