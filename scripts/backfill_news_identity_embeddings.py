@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Backfill immutable local embeddings for the news identity universe."""
+"""Backfill immutable quota-accounted embeddings for news identity."""
 
 from __future__ import annotations
 
@@ -20,10 +20,10 @@ from xauusd_forecaster.news_impact import (  # noqa: E402
 )
 from xauusd_forecaster.news_retrieval import (  # noqa: E402
     NEWS_EMBEDDING_MODEL,
-    OllamaEmbeddingClient,
     append_missing_embeddings,
     load_embeddings,
 )
+from xauusd_forecaster.gemini_embeddings import GeminiEmbeddingClient  # noqa: E402
 
 
 def main() -> int:
@@ -46,7 +46,7 @@ def main() -> int:
             max_first_seen=str(latest),
             limit=IDENTITY_CANDIDATE_UNIVERSE_LIMIT,
         )
-        client = OllamaEmbeddingClient()
+        client = GeminiEmbeddingClient(ledger.connection)
         total = 0
         profile = client.profile()
         while True:

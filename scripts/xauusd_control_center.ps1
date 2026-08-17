@@ -36,7 +36,7 @@ $serviceStartupTimeout = [TimeSpan]::FromMinutes(15)
 $runtimeObservationCycles = 2
 $runtimeObservationTimeout = [TimeSpan]::FromMinutes(15)
 $runtimeDecisionHorizon = [TimeSpan]::FromMinutes(30)
-$reloadableServiceKeys = @("collector", "annotator", "api", "sync", "assistant")
+$reloadableServiceKeys = @("collector", "annotator", "api", "sync")
 $runtimeControlFileNames = @(
     "xauusd_control_center.ps1",
     "xauusd_watchdog_launcher.vbs",
@@ -106,14 +106,6 @@ $services = @(
         Kind = "Python"
         Script = "scripts\run_dashboard_sync.py"
         Arguments = @("--interval-seconds", "30")
-    },
-    [pscustomobject]@{
-        Key = "assistant"
-        Label = "Local Assistant"
-        Match = "run_assistant_worker.py"
-        Kind = "Python"
-        Script = "scripts\run_assistant_worker.py"
-        Arguments = @("--interval-seconds", "1")
     }
 )
 

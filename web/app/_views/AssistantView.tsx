@@ -31,6 +31,7 @@ import {
   assistantPreviewMessages,
   assistantPreviewOlderMessages,
 } from "../_lib/assistant-preview-fixture";
+import { ASSISTANT_ACCEPTING_TURNS } from "../_lib/assistant-availability";
 
 const replayDelay = (milliseconds: number, signal: AbortSignal) => new Promise<void>(
   (resolve, reject) => {
@@ -568,6 +569,7 @@ export default function AssistantView() {
         onRetry={retry}
         onSend={() => void send()}
         preview={preview}
+        paused={!ASSISTANT_ACCEPTING_TURNS}
         sending={sending}
       />
     </section>

@@ -155,17 +155,15 @@ Feature code MUST NOT call provider generation endpoints directly. Title,
 compaction, daily brief, Q&A, tool planning, and final-answer requests all use
 the same accounting boundary even when they have different priorities.
 
-Interactive `ASSISTANT_CHAT` runs on the loopback-only local provider boundary.
-Its only declared profile is the Assistant-only Qwen 3.5 4B Q4_K_M alias with
-an actual 262,144-token Ollama context. The 24 GB host does not advertise a
-second chat profile: hardware tests found that a 256K Ministral 8B cache spills
-to CPU, while retaining multiple resident chat weights reduces predictable
-headroom for the embedding service. The local pool therefore has one in-flight
-admission slot and finite model residency. Interactive chat and incremental
-compaction share this profile; compaction is admitted only as background work
-and uses native schema-constrained, non-thinking output. The profile is
-unavailable to news annotation, Daily Brief, title, and legacy Q&A work. Those
-workloads retain their separately configured provider routes.
+Interactive `ASSISTANT_CHAT` is currently paused. The local Qwen 3.5 4B runtime,
+installer, model artifact, and supervised worker were removed after sustained
+host-memory pressure proved that the local execution boundary was not viable.
+No Gemini or Gemma profile is an implicit fallback. The provider-neutral API,
+routing, capacity, storage, and UI contracts remain available for a later
+explicit API-model activation. While paused, write admission rejects a new turn
+before creating a conversation or message; worker, title, compaction, and
+memory queues are not claimed. News annotation, identity retrieval, Daily Brief,
+and impact processing remain separate workloads with their own routes.
 
 The existing news scheduler design is documented in
 [`AI_PRIORITY_SCHEDULER.md`](../design/AI_PRIORITY_SCHEDULER.md). Reusing it does

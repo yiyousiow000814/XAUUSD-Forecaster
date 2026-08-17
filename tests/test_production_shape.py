@@ -35,6 +35,9 @@ def _status() -> dict:
         "gemma_quota": {
             "accounting_source": "SCHEDULER_DB", "total_sent": 2,
         },
+        "gemini_embedding_quota": {
+            "accounting_source": "SCHEDULER_DB", "total_sent": 0,
+        },
         "news_source_health": [{
             "source": source, "health": "HEALTHY", "latest_status": "OK",
             "recovery_mode": None, "next_retry_time": None,

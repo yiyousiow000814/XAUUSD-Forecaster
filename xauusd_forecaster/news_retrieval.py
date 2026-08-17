@@ -20,16 +20,19 @@ from .news_impact import (
     prior_identity_similarity,
     retrieve_prior_event_context,
 )
-from .local_embeddings import EmbeddingProfile, OllamaEmbeddingClient
+from .local_embeddings import EmbeddingProfile
+from .gemini_embeddings import (
+    GEMINI_EMBEDDING_DIMENSIONS,
+    GeminiEmbeddingClient,
+)
 
 
-NEWS_EMBEDDING_MODEL = "qwen3-embedding:0.6b"
-NEWS_EMBEDDING_TEXT_VERSION = "news-identity-embedding-v1"
-NEWS_HYBRID_RETRIEVAL_VERSION = "news-hybrid-retrieval-v1"
-NEWS_EMBEDDING_DIMENSIONS = 1024
+NEWS_EMBEDDING_MODEL = "gemini-embedding-2"
+NEWS_EMBEDDING_TEXT_VERSION = "news-identity-embedding-v2-gemini2"
+NEWS_HYBRID_RETRIEVAL_VERSION = "news-hybrid-retrieval-v2"
+NEWS_EMBEDDING_DIMENSIONS = GEMINI_EMBEDDING_DIMENSIONS
 NEWS_ROUTE_LIMIT = 40
-NEWS_BACKFILL_BATCH = 256
-_OLLAMA_ENDPOINT = "http://127.0.0.1:11434"
+NEWS_BACKFILL_BATCH = 50
 _LATIN_TOKEN = re.compile(r"[a-z0-9]+")
 _HAN_RUN = re.compile(r"[\u3400-\u9fff]+")
 _LEXICAL_STOPWORDS = frozenset({
@@ -45,7 +48,7 @@ class HybridRetrievalResult:
 
 
 class NewsEmbeddingBackfillPending(RuntimeError):
-    """The local append-only embedding universe is still catching up."""
+    """The append-only embedding universe is still catching up."""
 
 
 def identity_embedding_text(row: dict) -> str:
@@ -117,7 +120,7 @@ def _embedding_id(annotation_id: str, profile: EmbeddingProfile) -> str:
 def append_missing_embeddings(
     connection: sqlite3.Connection,
     rows: list[dict],
-    client: OllamaEmbeddingClient,
+    client: GeminiEmbeddingClient,
     *,
     limit: int = NEWS_BACKFILL_BATCH,
 ) -> tuple[EmbeddingProfile, int]:
@@ -228,12 +231,12 @@ def attach_hybrid_prior_event_context(
     connection: sqlite3.Connection,
     records: list[dict],
     *,
-    client: OllamaEmbeddingClient | None = None,
+    client: GeminiEmbeddingClient | None = None,
 ) -> list[dict]:
     """Attach complete hybrid context before the final identity request."""
     if not records:
         return records
-    embedding_client = client or OllamaEmbeddingClient()
+    embedding_client = client or GeminiEmbeddingClient(connection)
     max_first_seen = max(
         str(row["collector_first_seen_time"]) for row in records
     )
@@ -265,6 +268,7 @@ def attach_hybrid_prior_event_context(
         raise NewsEmbeddingBackfillPending(
             f"news identity embedding backfill is incomplete: {len(missing)} missing"
         )
+    pending_queries: list[dict] = []
     for row in records:
         frozen = _load_retrieval_receipt(connection, row, profile)
         if frozen is not None:
@@ -273,8 +277,25 @@ def attach_hybrid_prior_event_context(
             row["identity_retrieval_version"] = NEWS_HYBRID_RETRIEVAL_VERSION
             row["identity_retrieval_routes"] = route_rankings
             continue
+        pending_queries.append(row)
+    pending_ids = {str(item["annotation_id"]) for item in pending_queries}
+    query_rows = [
+        row for row in current_rows
+        if str(row["candidate_id"]) in pending_ids
+    ]
+    embed_queries = getattr(embedding_client, "embed_queries", embedding_client.embed)
+    query_vectors = embed_queries(
+        [identity_embedding_text(row) for row in query_rows], profile,
+    )
+    query_by_id = dict(zip(
+        [str(row["candidate_id"]) for row in query_rows],
+        query_vectors,
+        strict=True,
+    ))
+    for row in pending_queries:
         result = retrieve_hybrid_prior_event_context(
             row, universe, embeddings,
+            query_vector=query_by_id[str(row["annotation_id"])],
         )
         row["prior_event_context"] = list(result.candidates)
         row["identity_retrieval_version"] = NEWS_HYBRID_RETRIEVAL_VERSION
@@ -396,6 +417,7 @@ def retrieve_hybrid_prior_event_context(
     universe: list[dict],
     embeddings: dict[str, np.ndarray],
     *,
+    query_vector: np.ndarray | None = None,
     limit: int = 5,
 ) -> HybridRetrievalResult:
     """Union deterministic, lexical, and semantic recall, then rerank."""
@@ -418,7 +440,7 @@ def retrieve_hybrid_prior_event_context(
     lexical_ids = _rank_scores(lexical_scores, NEWS_ROUTE_LIMIT)
 
     current_id = str(current.get("annotation_id") or current.get("candidate_id") or "")
-    current_vector = embeddings.get(current_id)
+    current_vector = query_vector if query_vector is not None else embeddings.get(current_id)
     semantic_scores = {}
     if current_vector is not None:
         semantic_scores = {
