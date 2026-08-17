@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -120,3 +120,43 @@ def test_registered_macro_collector_errors_redact_credentials_as_one_family(
     assert result["status"] == "ERROR"
     assert api_key not in observable
     assert "[REDACTED]" in observable
+
+
+@pytest.mark.parametrize(
+    "environment_name,api_key,collector,payload_factory",
+    _registered_collector_cases(),
+)
+def test_registered_macro_collectors_retry_failures_before_normal_cadence(
+    tmp_path,
+    monkeypatch,
+    environment_name,
+    api_key,
+    collector,
+    payload_factory,
+) -> None:
+    """A failed poll must reach a valid result through bounded recovery."""
+    monkeypatch.setenv(environment_name, api_key)
+    failed_at = datetime(2026, 8, 5, 10, 7, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=failed_at)
+
+    def timeout(_url: str) -> bytes:
+        raise TimeoutError("provider timed out")
+
+    failed = collector(ledger, failed_at, timeout)
+    waiting = collector(
+        ledger, failed_at + timedelta(minutes=4),
+        lambda _url: pytest.fail("backoff must not call the provider"),
+    )
+    recovered = collector(
+        ledger, failed_at + timedelta(minutes=5), payload_factory,
+    )
+
+    assert failed["status"] == "ERROR"
+    assert waiting["status"] == "SKIPPED_RETRY_BACKOFF"
+    assert waiting["next_retry_at"] == (
+        failed_at + timedelta(minutes=5)
+    ).isoformat()
+    assert recovered["status"] == "OK"
+    assert ledger.latest_source_poll_time(
+        recovered["source"]
+    ) == failed_at + timedelta(minutes=5)

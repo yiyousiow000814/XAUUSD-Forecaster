@@ -52,6 +52,14 @@ are deliberately preserved separately; OOS learning decides their value.
 Changing this feature set requires a complete generation handover.
 Collection alone does not silently replace the active generation.
 
+Official and discovery source cadence is success-based. An `OK` poll starts the
+source's normal interval; `ERROR` and `PARTIAL` polls instead enter durable
+bounded recovery at 5, 15, and then 30 minutes. HTTP 429 uses a slower bounded
+rate-limit schedule, while authentication or permission failures wait six hours
+and surface operator action instead of rapid retry. A fresh prior success plus a
+transient failure is degraded and auto-recovering; once that success exceeds the
+source freshness contract, health becomes stale or error.
+
 ## 4. Optional synchronized symbols
 
 Confirmed: collect XAUUSD only. The market-provider and symbol-validation

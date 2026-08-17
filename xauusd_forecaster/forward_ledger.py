@@ -756,8 +756,10 @@ class ForwardLedger:
             )
 
     def latest_source_poll_time(self, source: str) -> datetime | None:
+        """Return the last completed success, never a failed cadence attempt."""
         row = self.connection.execute(
-            "SELECT max(fetched_time) AS fetched FROM source_polls WHERE source=?",
+            """SELECT max(fetched_time) AS fetched FROM source_polls
+               WHERE source=? AND status='OK'""",
             (source,),
         ).fetchone()
         return datetime.fromisoformat(row["fetched"]) if row and row["fetched"] else None

@@ -108,6 +108,7 @@ class ModelOutputContractFailed(ValueError):
         limits = {
             "headline_zh": 300,
             "summary_zh": 800,
+            "primary_story_title_zh": 300,
             "semantic_reason_zh": 300,
             "xauusd_relevance": 40,
             "primary_category": 80,
@@ -1286,6 +1287,8 @@ class _GeminiRequestPool:
                 result.clear()
                 result.update(working)
                 return
+            except (ModelGatewayCapacityExhausted, urllib.error.HTTPError):
+                raise
             except Exception as error:
                 rejection = error
                 last_result = working
@@ -2214,15 +2217,38 @@ def _validate_chinese_result(result: dict) -> None:
         _validate_chinese_display_field(result.get(field), field)
     story_title = str(result.get("primary_story_title_zh") or "").strip()
     if story_title:
-        _validate_chinese_display_field(story_title, "primary_story_title_zh")
+        _validate_chinese_display_field(
+            story_title,
+            "primary_story_title_zh",
+            allowed_latin_identifiers=_declared_story_identifiers(result),
+        )
     if "semantic_reason_zh" in result:
         _validate_chinese_display_field(
             result.get("semantic_reason_zh"), "semantic_reason_zh"
         )
 
 
-def _validate_chinese_display_field(value: object, field: str) -> None:
-    _require_chinese_primary(value, field)
+def _declared_story_identifiers(result: dict) -> tuple[str, ...]:
+    """Return semantic identity text allowed to remain as natural Latin names."""
+    values = [
+        str(result.get("actor") or ""),
+        str(result.get("object") or ""),
+    ]
+    entities = result.get("entities")
+    if isinstance(entities, list):
+        values.extend(str(item) for item in entities)
+    return tuple(value for value in values if value.strip())
+
+
+def _validate_chinese_display_field(
+    value: object,
+    field: str,
+    *,
+    allowed_latin_identifiers: tuple[str, ...] = (),
+) -> None:
+    _require_chinese_primary(
+        value, field, allowed_latin_identifiers=allowed_latin_identifiers,
+    )
     text = str(value or "")
     if "相关数值" in text:
         raise ValueError(
@@ -2253,7 +2279,14 @@ def _invalid_chinese_display_fields(
         try:
             value = result.get(field)
             if minimum:
-                _validate_chinese_display_field(value, field)
+                _validate_chinese_display_field(
+                    value,
+                    field,
+                    allowed_latin_identifiers=(
+                        _declared_story_identifiers(result)
+                        if field == "primary_story_title_zh" else ()
+                    ),
+                )
             elif field not in result:
                 raise ValueError(f"Gemini {field} is missing")
             rule = schema_properties[field]
@@ -2702,7 +2735,28 @@ def _display_clauses(text: str) -> tuple[str, ...]:
     return tuple(clauses)
 
 
-def _require_chinese_primary(value: object, field: str) -> None:
+def _latin_tokens_are_declared(
+    text: str, allowed_latin_identifiers: tuple[str, ...],
+) -> bool:
+    observed = {
+        token.casefold() for token in _word_runs(text)
+        if any(_is_latin_letter(character) for character in token)
+    }
+    declared = {
+        token.casefold()
+        for value in allowed_latin_identifiers
+        for token in _word_runs(value)
+        if any(_is_latin_letter(character) for character in token)
+    }
+    return bool(observed) and observed.issubset(declared)
+
+
+def _require_chinese_primary(
+    value: object,
+    field: str,
+    *,
+    allowed_latin_identifiers: tuple[str, ...] = (),
+) -> None:
     """Reject obvious non-Chinese prose while allowing readable English names."""
     text = str(value or "").strip()
     han_letters = sum(_is_han(character) for character in text)
@@ -2733,6 +2787,10 @@ def _require_chinese_primary(value: object, field: str) -> None:
         if chinese_share < 0.50 and (
             prose_words >= 3 or identifiers > clause_han * 4
         ):
+            if not latin_prose and _latin_tokens_are_declared(
+                clause, allowed_latin_identifiers,
+            ):
+                continue
             raise ValueError(
                 f"ENGLISH_PROSE_DOMINANT: Gemini {field} is not Chinese-primary"
             )

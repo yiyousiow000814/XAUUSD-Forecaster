@@ -981,8 +981,56 @@ def test_source_error_does_not_claim_polling_is_normal(tmp_path) -> None:
     direct = next(row for row in rows if row["source"] == "eia_press_releases")
 
     assert direct["health"] == "ERROR"
-    assert direct["semantic_status"] == "SOURCE_ERROR"
-    assert direct["semantic_message"] == "来源当前轮询失败；请查看最近错误与后备链路状态"
+    assert direct["semantic_status"] == "OPERATOR_ACTION_REQUIRED"
+    assert direct["recovery_mode"] == "OPERATOR_ACTION_REQUIRED"
+    assert direct["next_retry_time"] == (now + timedelta(hours=6)).isoformat()
+
+
+def test_fresh_source_success_with_transient_failure_is_auto_recovering(
+    tmp_path,
+) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger.append_source_poll({
+        "poll_id": "eia-ok", "source": "eia_open_data_api",
+        "fetched_time": now - timedelta(minutes=10), "status": "OK",
+    })
+    ledger.append_source_poll({
+        "poll_id": "eia-timeout", "source": "eia_open_data_api",
+        "fetched_time": now, "status": "ERROR", "error_type": "TimeoutError",
+        "error": "The read operation timed out",
+    })
+
+    rows = _dashboard_module()._news_source_health(ledger.connection, now)
+    eia = next(row for row in rows if row["source"] == "eia_open_data_api")
+
+    assert eia["health"] == "DEGRADED"
+    assert eia["semantic_status"] == "AUTO_RECOVERING"
+    assert eia["recovery_mode"] == "AUTO_RECOVERING"
+    assert eia["age_seconds"] == 600
+    assert eia["next_retry_time"] == (now + timedelta(minutes=5)).isoformat()
+
+
+def test_transient_source_failure_escalates_when_last_success_is_stale(
+    tmp_path,
+) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger.append_source_poll({
+        "poll_id": "eia-old-ok", "source": "eia_open_data_api",
+        "fetched_time": now - timedelta(hours=2), "status": "OK",
+    })
+    ledger.append_source_poll({
+        "poll_id": "eia-timeout", "source": "eia_open_data_api",
+        "fetched_time": now, "status": "ERROR", "error_type": "TimeoutError",
+        "error": "The read operation timed out",
+    })
+
+    rows = _dashboard_module()._news_source_health(ledger.connection, now)
+    eia = next(row for row in rows if row["source"] == "eia_open_data_api")
+
+    assert eia["health"] == "STALE"
+    assert eia["semantic_status"] == "SOURCE_ERROR"
 
 
 @pytest.mark.parametrize("source", [spec.source for spec in NEWS_SOURCE_REGISTRY])
@@ -1697,7 +1745,8 @@ def test_dashboard_reports_gdelt_fallback_and_retry_time(tmp_path) -> None:
     assert gdelt["latest_status"] == "RATE_LIMITED"
     assert gdelt["fallback_label"] == "Google News Context"
     assert gdelt["fallback_health"] == "HEALTHY"
-    assert gdelt["next_retry_time"] == (now + timedelta(minutes=90)).isoformat()
+    assert gdelt["recovery_mode"] == "RATE_LIMITED"
+    assert gdelt["next_retry_time"] == (now + timedelta(minutes=30)).isoformat()
 
 
 def test_dashboard_does_not_activate_fallback_from_stale_historical_evidence(
