@@ -121,7 +121,7 @@ def test_preview_reader_rejects_a_noncanonical_source() -> None:
         module._read_json("http://127.0.0.1:8765", "/api/status")
 
 
-def test_preview_does_not_reject_fresh_aggregated_news_by_source() -> None:
+def test_preview_explains_late_discovery_as_model_ineligible() -> None:
     module = _preview_module()
     news_index = {"items": [{
         "annotation_status": "NOT_REQUIRED",
@@ -135,8 +135,10 @@ def test_preview_does_not_reject_fresh_aggregated_news_by_source() -> None:
     )
 
     row = news_index["items"][0]
-    assert row["annotation_reason_code"] == "QUEUE_INVARIANT_MISMATCH"
-    assert row["annotation_reason"] == "正文符合条件但未进入语义队列，需要检查"
+    assert row["annotation_reason_code"] == "LATE_DISCOVERY"
+    assert row["annotation_reason"] == (
+        "采集时距发布时间已超过60分钟，不进入语义处理"
+    )
 
 
 def test_preview_reads_completed_news_from_old_and_current_api_contracts(

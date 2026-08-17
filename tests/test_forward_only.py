@@ -2624,6 +2624,7 @@ def test_display_failure_withholds_semantics_until_readable_output_exists(
     ledger.append_news_revision(
         {
             "source": "language-test", "source_item_id": "one",
+            "source_published_time": now,
             "collector_first_seen_time": now, "fetched_time": now,
             "headline": "Gold market update", "body": body,
             "content_hash": hashlib.sha256(body.encode()).hexdigest(),
@@ -2832,6 +2833,7 @@ def test_semantic_contract_failure_keeps_bounded_diagnostic_evidence(
     body = "The source says gold demand was unchanged. " * 20
     ledger.append_news_revision({
         "source": "failure-test", "source_item_id": "bounded-evidence",
+        "source_published_time": now,
         "collector_first_seen_time": now, "fetched_time": now,
         "headline": "Gold demand update", "body": body,
         "content_hash": hashlib.sha256(body.encode()).hexdigest(),
@@ -2886,6 +2888,7 @@ def test_llm_failure_is_persisted_and_blocks_immediate_retry(
     ledger.append_news_revision(
         {
             "source": "failure-test", "source_item_id": "one",
+            "source_published_time": now,
             "collector_first_seen_time": now, "fetched_time": now,
             "headline": "Gold report", "body": body,
             "content_hash": hashlib.sha256(body.encode()).hexdigest(),
@@ -3115,6 +3118,7 @@ def test_batch_rpm_exhaustion_is_deferred_without_failure_row(
     ledger.append_news_revision(
         {
             "source": "capacity-test", "source_item_id": "one",
+            "source_published_time": now,
             "collector_first_seen_time": now, "fetched_time": now,
             "headline": "Gold report", "body": body,
             "content_hash": hashlib.sha256(body.encode()).hexdigest(),
@@ -3153,6 +3157,7 @@ def test_annotation_batch_uses_the_mandatory_accounting_boundary(
         ledger.append_news_revision(
             {
                 "source": source, "source_item_id": item,
+                "source_published_time": now,
                 "collector_first_seen_time": now, "fetched_time": now,
                 "headline": headline, "body": body,
                 "content_hash": hashlib.sha256(body.encode()).hexdigest(),
@@ -3192,6 +3197,7 @@ def test_headline_only_translation_is_display_only(tmp_path, monkeypatch) -> Non
     ledger.append_news_revision(
         {
             "source": "title-test", "source_item_id": "one",
+            "source_published_time": now,
             "collector_first_seen_time": now, "fetched_time": now,
             "headline": "Altın fiyatı yükseldi", "body": body,
             "content_hash": hashlib.sha256(body.encode()).hexdigest(),
@@ -3264,6 +3270,7 @@ def test_placeholder_title_is_retried_append_only(tmp_path, monkeypatch) -> None
     ledger.append_news_revision(
         {
             "source": "title-test", "source_item_id": "retry",
+            "source_published_time": now,
             "collector_first_seen_time": now, "fetched_time": now,
             "headline": "Federal Reserve requests comment", "body": body,
             "content_hash": content_hash, "cluster_id": "title-retry",
@@ -3303,6 +3310,7 @@ def test_suspect_numeric_recovery_title_is_retried_append_only(
     content_hash = hashlib.sha256(body.encode()).hexdigest()
     ledger.append_news_revision({
         "source": "title-test", "source_item_id": "month-retry",
+        "source_published_time": now,
         "collector_first_seen_time": now, "fetched_time": now,
         "headline": "Jobs report reviews July data", "body": body,
         "content_hash": content_hash, "cluster_id": "title-month-retry",
@@ -3994,6 +4002,7 @@ def test_duplicate_cluster_prefers_full_content_for_annotation(
         ledger.append_news_revision(
             {
                 "source": "duplicate-test", "source_item_id": item_id,
+                "source_published_time": now,
                 "collector_first_seen_time": now, "fetched_time": now,
                 "headline": "Same syndicated headline", "body": body,
                 "content_hash": hashlib.sha256(body.encode()).hexdigest(),
@@ -4084,6 +4093,7 @@ def test_gemini_annotation_does_not_treat_other_model_as_complete(
         {
             "source": "fed",
             "source_item_id": "one",
+            "source_published_time": now,
             "collector_first_seen_time": now,
             "fetched_time": now,
             "headline": "Policy update",
@@ -4140,6 +4150,7 @@ def test_v8_success_is_readable_but_receives_one_v10_category_backfill(tmp_path,
     ledger.append_news_revision(
         {
             "source": "compatible-test", "source_item_id": "one",
+            "source_published_time": now,
             "collector_first_seen_time": now, "fetched_time": now,
             "headline": "Policy update", "body": body,
             "content_hash": digest, "cluster_id": "compatible-cluster",
@@ -4194,6 +4205,7 @@ def test_gemini_batch_is_capped_below_provider_rpm_limit(tmp_path, monkeypatch) 
             {
                 "source": "quota-test",
                 "source_item_id": str(index),
+                "source_published_time": now,
                 "collector_first_seen_time": now,
                 "fetched_time": now,
                 "headline": f"News {index}",
@@ -4238,6 +4250,7 @@ def test_gemini_key_pool_distributes_safe_capacity(tmp_path, monkeypatch) -> Non
             {
                 "source": "pool-test",
                 "source_item_id": str(index),
+                "source_published_time": now,
                 "collector_first_seen_time": now,
                 "fetched_time": now,
                 "headline": f"Pooled news {index}",
@@ -4383,6 +4396,7 @@ def test_valid_annotation_is_not_reprocessed_but_legacy_neutralization_is(
     ledger.append_news_revision(
         {
             "source": "fallback-test", "source_item_id": "one",
+            "source_published_time": now,
             "collector_first_seen_time": now, "fetched_time": now,
             "headline": "Gold geopolitical update", "body": body,
             "content_hash": hashlib.sha256(body.encode()).hexdigest(),
@@ -4440,6 +4454,7 @@ def test_valid_annotation_is_not_reprocessed_but_legacy_neutralization_is(
     legacy_digest = hashlib.sha256(legacy_body.encode()).hexdigest()
     ledger.append_news_revision({
         "source": "fallback-test", "source_item_id": "legacy-invalid",
+        "source_published_time": now,
         "collector_first_seen_time": now, "fetched_time": now,
         "headline": "Gold semantic recovery", "body": legacy_body,
         "content_hash": legacy_digest, "cluster_id": "legacy-invalid-cluster",
@@ -4550,7 +4565,7 @@ def test_archive_is_rejected_but_late_seen_news_reaches_full_text_queue(tmp_path
     ledger.close()
 
 
-def test_archive_is_rejected_but_late_seen_news_reaches_annotation_queue(
+def test_archive_and_late_seen_news_stay_out_of_annotation_queue(
     tmp_path,
 ) -> None:
     epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
@@ -4576,5 +4591,5 @@ def test_archive_is_rejected_but_late_seen_news_reaches_annotation_queue(
         observed_at=epoch + timedelta(days=20),
         limit=10,
     )
-    assert [row["source_item_id"] for row in rows] == ["late"]
+    assert rows == []
     ledger.close()

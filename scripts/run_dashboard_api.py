@@ -107,6 +107,7 @@ from xauusd_forecaster.news_evidence import (  # noqa: E402
 from xauusd_forecaster.news_relevance import (  # noqa: E402
     GOOGLE_NEWS_MAX_AGE, google_news_item_is_relevant,
 )
+from xauusd_forecaster.news_time import assess_news_semantic_eligibility  # noqa: E402
 from xauusd_forecaster.news_semantics import model_usable_annotation_predicate  # noqa: E402
 from xauusd_forecaster.news_identity import preferred_cluster_peer_predicate  # noqa: E402
 from xauusd_forecaster.news_contracts import CURRENT_NEWS_CONTRACT  # noqa: E402
@@ -636,26 +637,23 @@ def _not_required_reason(item: dict, forward_epoch: str) -> tuple[str, str]:
     epoch = datetime.fromisoformat(forward_epoch)
     if published < epoch:
         return "HISTORICAL_MATERIAL", "历史资料：发布时间早于系统开始记录"
-    first_seen_raw = item.get("collector_first_seen_time")
-    first_seen = (
-        datetime.fromisoformat(str(first_seen_raw)) if first_seen_raw else epoch
+    assessment = assess_news_semantic_eligibility(
+        item, forward_epoch=epoch,
     )
-    allowed, intake_reason = google_news_item_is_relevant(
-        str(item.get("source") or ""), str(item.get("headline") or ""),
-        published, first_seen,
-    )
-    if intake_reason == "SEARCH_RESULT_TOO_OLD":
+    if assessment.reason_code == "STALE_EVENT":
         return "STALE_AT_INTAKE", "收到时已超过72小时，不进入语义处理"
-    if intake_reason == "FUTURE_PUBLISHED_TIME":
+    if assessment.reason_code == "LATE_DISCOVERY":
+        return "LATE_DISCOVERY", "采集时距发布时间已超过60分钟，不进入语义处理"
+    if assessment.reason_code == "PUBLISHED_AFTER_DECISION":
         return "INVALID_PUBLISHED_TIME", "发布时间晚于收到时间，时间证据无效"
-    if intake_reason == "MISSING_PUBLISHED_TIME":
+    if assessment.reason_code == "PUBLISHED_TIME_MISSING":
         return "HISTORICAL_MATERIAL", "历史资料：缺少可靠发布时间"
     if item.get("has_canonical_content_peer"):
         return (
             "CANONICAL_COPY_HANDLES_ANNOTATION",
             "同一篇新闻已由另一采集入口的规范副本负责处理，不会重复消耗模型配额",
         )
-    if allowed:
+    if assessment.eligible:
         return "QUEUE_INVARIANT_MISMATCH", "正文符合条件但未进入语义队列，需要检查"
     return "INTAKE_REJECTED", "未通过客观采集条件，不进入语义处理"
 
@@ -682,7 +680,11 @@ def _annotation_failure_reason(error: object, failure_code: object) -> str:
 def _apply_impact_status(item: dict, now: datetime) -> None:
     """Expose the current Gemma lifetime decision in plain, auditable states."""
     if not item.get("parsed_at"):
-        item["impact_status"] = "PENDING_ANNOTATION"
+        item["impact_status"] = (
+            "NOT_REQUIRED"
+            if item.get("annotation_status") == "NOT_REQUIRED"
+            else "PENDING_ANNOTATION"
+        )
         return
     if not item.get("impact_assessed_at"):
         item["impact_status"] = "PENDING_IMPACT"

@@ -29,8 +29,8 @@ from .model_gateway import (
     ModelGatewayResponseInvalid,
     ModelRequestAccountant,
 )
-from .news_relevance import google_news_item_is_relevant
 from .news_identity import preferred_cluster_peer_predicate
+from .news_time import assess_news_semantic_eligibility
 from .news_impact import (
     IMPACT_MODEL,
     IMPACT_PROMPT_VERSION,
@@ -213,19 +213,22 @@ def _capacity_deferred_status(
 
 
 def _eligible_at_intake(
-    row: dict[str, object], *, fallback: datetime,
+    row: dict[str, object], *, forward_epoch: datetime,
 ) -> tuple[bool, str]:
-    """Evaluate freshness at immutable receipt time, not replay time."""
-    first_seen = row.get("collector_first_seen_time") or fallback
-    if not isinstance(first_seen, datetime):
-        first_seen = datetime.fromisoformat(str(first_seen))
-    published_at = row.get("source_published_time")
-    if published_at is not None and not isinstance(published_at, datetime):
-        published_at = datetime.fromisoformat(str(published_at))
-    return google_news_item_is_relevant(
-        str(row.get("source") or ""), str(row.get("headline") or ""),
-        published_at, first_seen,
+    """Use the model's immutable receipt-time contract for semantic work."""
+    assessment = assess_news_semantic_eligibility(
+        row, forward_epoch=forward_epoch,
     )
+    return assessment.eligible, assessment.reason_code
+
+
+def _forward_epoch(connection: Connection) -> datetime:
+    row = connection.execute(
+        "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
+    ).fetchone()
+    if row is None:
+        raise ValueError("FORWARD_EPOCH is missing")
+    return datetime.fromisoformat(str(row[0]))
 
 
 def pending_annotation_records(
@@ -245,6 +248,7 @@ def pending_annotation_records(
     look permanently queued even though the worker could never select them.
     """
     now = observed_at or datetime.now(UTC)
+    forward_epoch = _forward_epoch(connection)
     recovery_table_exists = connection.execute(
         """SELECT 1 FROM sqlite_master
            WHERE type='table' AND name='news_ai_failure_recoveries_v1'"""
@@ -357,7 +361,7 @@ def pending_annotation_records(
     records: list[dict[str, object]] = []
     for raw_row in rows:
         row = dict(raw_row)
-        allowed, _ = _eligible_at_intake(row, fallback=now)
+        allowed, _ = _eligible_at_intake(row, forward_epoch=forward_epoch)
         if allowed:
             records.append(row)
     return records
@@ -373,6 +377,7 @@ def completed_annotation_records(
 ) -> list[dict[str, object]]:
     """Return current-policy rows already completed by the annotator."""
     now = observed_at or datetime.now(UTC)
+    forward_epoch = _forward_epoch(connection)
     rows = connection.execute(
         f"""SELECT n.* FROM news_revisions n
         WHERE length(trim(COALESCE(n.body, ''))) >= 240
@@ -409,7 +414,7 @@ def completed_annotation_records(
     records: list[dict[str, object]] = []
     for raw_row in rows:
         row = dict(raw_row)
-        allowed, _ = _eligible_at_intake(row, fallback=now)
+        allowed, _ = _eligible_at_intake(row, forward_epoch=forward_epoch)
         if allowed:
             records.append(row)
     return records
@@ -766,6 +771,7 @@ def pending_title_translation_records(
 ) -> list[dict[str, object]]:
     """Return display-title work without performing an LLM request."""
     now = observed_at or datetime.now(UTC)
+    forward_epoch = _forward_epoch(connection)
     pending = connection.execute(
         f"""SELECT n.* FROM news_revisions n
         WHERE NOT EXISTS (
@@ -822,7 +828,7 @@ def pending_title_translation_records(
     selected: list[dict[str, object]] = []
     for raw_row in pending:
         row = dict(raw_row)
-        allowed, _ = _eligible_at_intake(row, fallback=now)
+        allowed, _ = _eligible_at_intake(row, forward_epoch=forward_epoch)
         if allowed:
             selected.append(row)
         if len(selected) >= limit:

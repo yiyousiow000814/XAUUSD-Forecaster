@@ -1532,7 +1532,7 @@ def test_dashboard_shows_readable_unparsed_news_without_model_visibility(tmp_pat
     assert payload["counts"]["model_candidate_news_items"] == 0
 
 
-def test_dashboard_keeps_readable_late_news_for_semantic_impact_review(tmp_path) -> None:
+def test_dashboard_excludes_readable_late_news_from_semantic_queue(tmp_path) -> None:
     now = datetime(2026, 8, 8, 1, 0, tzinfo=UTC)
     database = tmp_path / "forward.sqlite3"
     ledger = ForwardLedger(database, now=now - timedelta(hours=3))
@@ -1556,10 +1556,15 @@ def test_dashboard_keeps_readable_late_news_for_semantic_impact_review(tmp_path)
 
     assert len(payload["recent_news"]) == 1
     row = payload["recent_news"][0]
-    assert row["annotation_status"] == "QUEUED"
-    assert row["impact_status"] == "PENDING_ANNOTATION"
-    assert "annotation_reason_code" not in row
-    assert payload["annotation_queue"]["queued"] == 1
+    assert row["annotation_status"] == "NOT_REQUIRED"
+    assert row["impact_status"] == "NOT_REQUIRED"
+    assert row["model_visibility"] == "MODEL_INELIGIBLE"
+    assert row["annotation_reason_code"] == "LATE_DISCOVERY"
+    assert row["annotation_reason"] == (
+        "采集时距发布时间已超过60分钟，不进入语义处理"
+    )
+    assert row["annotation_reason_code"] != "QUEUE_INVARIANT_MISMATCH"
+    assert payload["annotation_queue"]["queued"] == 0
 
 
 def test_dashboard_explains_active_and_expired_on_receipt_impacts(tmp_path) -> None:

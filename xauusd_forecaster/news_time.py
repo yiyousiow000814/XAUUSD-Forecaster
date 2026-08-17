@@ -6,9 +6,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Mapping
 
-from .market_session import market_open_elapsed
-
-
 MAX_ACTIONABLE_NEWS_AGE = timedelta(hours=72)
 MAX_ACTIONABLE_DISCOVERY_DELAY = timedelta(hours=1)
 
@@ -83,11 +80,11 @@ def assess_news_time(
     if published is None:
         return NewsTimeAssessment(False, None, None, None, "PUBLISHED_TIME_MISSING")
     delay = (first_seen - published).total_seconds()
-    elapsed = (
-        market_open_elapsed(published, decision)
-        if exclude_weekly_closure and published <= decision
-        else decision - published
-    )
+    if exclude_weekly_closure and published <= decision:
+        from .market_session import market_open_elapsed
+        elapsed = market_open_elapsed(published, decision)
+    else:
+        elapsed = decision - published
     age_minutes = elapsed.total_seconds() / 60.0
     if published < epoch and not allow_pre_forward_publication:
         return NewsTimeAssessment(
@@ -105,3 +102,19 @@ def assess_news_time(
     if elapsed > max_actionable_age:
         return NewsTimeAssessment(False, published, age_minutes, delay, "STALE_EVENT")
     return NewsTimeAssessment(True, published, max(0.0, age_minutes), delay, "CURRENT_EVENT")
+
+
+def assess_news_semantic_eligibility(
+    row: Mapping[str, object], *, forward_epoch: datetime,
+) -> NewsTimeAssessment:
+    """Evaluate immutable receipt-time eligibility for semantic model work."""
+    first_seen = _time(_value(row, "collector_first_seen_time"))
+    if first_seen is None:
+        raise ValueError("collector_first_seen_time requires a timestamp")
+    return assess_news_time(
+        row,
+        decision_time=first_seen,
+        forward_epoch=forward_epoch,
+        max_actionable_age=MAX_ACTIONABLE_NEWS_AGE,
+        max_discovery_delay=MAX_ACTIONABLE_DISCOVERY_DELAY,
+    )

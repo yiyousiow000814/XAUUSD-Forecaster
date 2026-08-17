@@ -747,6 +747,30 @@ def test_superseded_jobs_are_reconciled_without_another_model_attempt(tmp_path) 
     ledger.close()
 
 
+def test_late_discovery_is_not_admitted_to_annotation_scheduler(tmp_path) -> None:
+    ledger = ForwardLedger(
+        tmp_path / "forward.sqlite3", now=NOW - timedelta(hours=3),
+    )
+    body = "Complete but late economic report. " * 20
+    ledger.append_news_revision({
+        "source": "google_news_us_inflation", "source_item_id": "late",
+        "source_published_time": NOW - timedelta(hours=2),
+        "collector_first_seen_time": NOW, "fetched_time": NOW,
+        "headline": "Old CPI report collected recently", "body": body,
+        "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+        "cluster_id": "late-cluster",
+    })
+
+    discovered = sync_pending_jobs(ledger.connection, now=NOW)
+
+    assert discovered["ACTIVE_ANNOTATION"] == 0
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_ai_jobs_v1 "
+        "WHERE task_type='ACTIVE_ANNOTATION'"
+    ).fetchone()[0] == 0
+    ledger.close()
+
+
 def test_pending_contract_reopens_jobs_completed_by_invalid_legacy_annotations(
     tmp_path,
 ) -> None:
@@ -809,7 +833,9 @@ def test_pending_contract_reopens_jobs_completed_by_invalid_legacy_annotations(
 def test_protected_daily_brief_job_resolves_after_cross_date_dedup(
     tmp_path,
 ) -> None:
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    ledger = ForwardLedger(
+        tmp_path / "forward.sqlite3", now=NOW - timedelta(days=3),
+    )
     old_received = datetime(2026, 8, 10, 2, tzinfo=UTC)
     new_received = datetime(2026, 8, 11, 2, tzinfo=UTC)
     for item_id, received, body_length in (
@@ -980,7 +1006,9 @@ def test_impact_discovery_advances_old_backfill_and_new_arrivals(
 def test_annotation_discovery_reserves_capacity_for_unfinished_brief_dates(
     tmp_path,
 ) -> None:
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    ledger = ForwardLedger(
+        tmp_path / "forward.sqlite3", now=NOW - timedelta(days=3),
+    )
 
     def append(item: str, received_at: datetime) -> None:
         body = f"Complete macroeconomic evidence for {item}. " * 20

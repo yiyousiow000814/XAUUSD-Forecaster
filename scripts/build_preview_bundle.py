@@ -23,6 +23,9 @@ sys.modules["xauusd_forecaster"] = package
 factor_coverage = importlib.import_module("xauusd_forecaster.factors").factor_coverage
 model_limits = importlib.import_module("xauusd_forecaster.model_limits")
 dashboard_sync = importlib.import_module("scripts.run_dashboard_sync")
+assess_news_semantic_eligibility = importlib.import_module(
+    "xauusd_forecaster.news_time"
+).assess_news_semantic_eligibility
 
 
 DEFAULT_SOURCE = "https://aurum-signal-room.yiyousiow1234.workers.dev"
@@ -252,19 +255,19 @@ def _backfill_annotation_reasons(news_index: dict, status: dict) -> None:
                     "HISTORICAL_MATERIAL", "历史资料：发布时间早于系统开始记录",
                 )
             else:
-                source = str(item.get("source") or "")
-                first_seen = datetime.fromisoformat(
-                    str(item["collector_first_seen_time"])
+                assessment = assess_news_semantic_eligibility(
+                    item, forward_epoch=epoch,
                 )
-                if source.startswith(("google_news_", "gdelt_")) and (
-                    first_seen - published > timedelta(hours=72)
-                ):
+                if assessment.reason_code == "STALE_EVENT":
                     code, reason = (
                         "STALE_AT_INTAKE", "收到时已超过72小时，不进入语义处理",
                     )
-                elif source.startswith(("google_news_", "gdelt_")) and (
-                    published - first_seen > timedelta(minutes=10)
-                ):
+                elif assessment.reason_code == "LATE_DISCOVERY":
+                    code, reason = (
+                        "LATE_DISCOVERY",
+                        "采集时距发布时间已超过60分钟，不进入语义处理",
+                    )
+                elif assessment.reason_code == "PUBLISHED_AFTER_DECISION":
                     code, reason = (
                         "INVALID_PUBLISHED_TIME", "发布时间晚于收到时间，时间证据无效",
                     )

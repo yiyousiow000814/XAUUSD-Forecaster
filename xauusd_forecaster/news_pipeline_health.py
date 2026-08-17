@@ -18,7 +18,7 @@ from .news_impact import IMPACT_MODEL, IMPACT_PROMPT_VERSION
 from .news_relevance import google_news_item_is_relevant
 from .news_identity import preferred_cluster_peer_predicate
 from .news_scheduler import configured_api_credentials
-from .news_time import category_time_rule
+from .news_time import assess_news_semantic_eligibility, category_time_rule
 from .news_semantics import model_usable_annotation_predicate
 
 
@@ -145,6 +145,12 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
 
     cutoff = observed_at - ANNOTATION_DECISION_GRACE
     intake_floor = observed_at - NEWS_INTAKE_MAX_AGE
+    epoch_row = ledger.connection.execute(
+        "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
+    ).fetchone()
+    if epoch_row is None:
+        raise ValueError("FORWARD_EPOCH is missing")
+    forward_epoch = datetime.fromisoformat(str(epoch_row[0]))
     unresolved: dict[tuple[str, str, str, int, str], datetime] = {}
     actionable_failure_counts: dict[str, dict[str, int]] = {}
     annotation_pending = False
@@ -204,12 +210,12 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
     ).fetchall()
     for row in failed_jobs:
         received = _instant(row["collector_first_seen_time"])
-        published = _instant(row["source_published_time"])
-        allowed, _ = google_news_item_is_relevant(
-            str(row["source"]), str(row["headline"] or ""), published,
-            observed_at,
+        eligibility = assess_news_semantic_eligibility(
+            row, forward_epoch=forward_epoch,
         )
-        if allowed and (created := _instant(row["created_at"])) is not None:
+        if eligibility.eligible and (
+            created := _instant(row["created_at"])
+        ) is not None:
             annotation_pending = True
             add_unresolved(
                 "ACTIVE_ANNOTATION", dict(row), created,
