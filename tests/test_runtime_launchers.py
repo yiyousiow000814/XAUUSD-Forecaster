@@ -114,6 +114,7 @@ def test_local_assistant_worker_is_not_installed_or_supervised() -> None:
     assert not (ROOT / "scripts" / "run_assistant_worker.py").exists()
     assert not (ROOT / "xauusd_forecaster" / "assistant_local_runtime.py").exists()
     assert 'Key = "assistant"' not in control_center
+    assert "assistant" not in control_center.lower()
 
 
 def _run_control_center_contract(tmp_path, body: str) -> str:
@@ -898,7 +899,6 @@ def test_code_reload_health_requires_fresh_successful_sync(tmp_path) -> None:
     for name, service in (
         ("collector-status.json", "collector"),
         ("news-annotator-status.json", "annotator"),
-        ("assistant-worker-status.json", "assistant"),
     ):
         (status.parent / name).write_text(json.dumps({
             "service": service,
@@ -943,10 +943,6 @@ def test_code_reload_accepts_fresh_service_startup_but_rejects_failed_state(
     annotator = status.parent / "news-annotator-status.json"
     annotator.write_text(json.dumps({
         "service": "annotator", "state": "STARTING",
-        "last_success": "2026-08-12T08:00:01+00:00",
-    }), encoding="utf-8")
-    (status.parent / "assistant-worker-status.json").write_text(json.dumps({
-        "service": "assistant", "state": "STARTING",
         "last_success": "2026-08-12T08:00:01+00:00",
     }), encoding="utf-8")
     script = ROOT / "scripts" / "xauusd_control_center.ps1"
