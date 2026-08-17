@@ -1051,6 +1051,46 @@ def test_news_archive_is_60_day_bounded_and_cursor_safe(tmp_path) -> None:
     ) for row in rows}) == 3
 
 
+def test_news_archive_discovers_a_bounded_changed_key_page(tmp_path) -> None:
+    module = _dashboard_module()
+    now = datetime.now(UTC).replace(microsecond=0)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "complete bounded mirror evidence " * 20
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    ledger.connection.executemany(
+        """INSERT INTO news_revisions VALUES
+           (?,?,1,NULL,?,?,?,?,?,NULL,?,?,NULL)""",
+        [
+            (
+                "bea_economic_releases", f"item-{index:03d}",
+                now.isoformat(), now.isoformat(), now.isoformat(),
+                f"headline {index}", body, digest, f"cluster-{index}",
+            )
+            for index in range(250)
+        ],
+    )
+    ledger.connection.commit()
+    cursor = json.dumps([
+        now.isoformat(), "bea_economic_releases", "item-099", 1,
+    ])
+
+    keys = module._news_mirror_candidate_keys(
+        ledger.connection,
+        cutoff=(now - timedelta(days=60)).isoformat(),
+        after=cursor,
+        limit=20,
+    )
+
+    assert keys == [
+        (
+            "bea_economic_releases", f"item-{index:03d}", 1,
+            now.isoformat(),
+        )
+        for index in range(100, 120)
+    ]
+    ledger.close()
+
+
 def test_news_reader_materializations_exclude_semantically_irrelevant_articles(
     tmp_path,
 ) -> None:

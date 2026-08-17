@@ -704,51 +704,23 @@ def _news_reader_rows(
     cutoff = (now - timedelta(days=NEWS_READER_WINDOW_DAYS)).isoformat(
         timespec="microseconds"
     )
-    cursor_clause = ""
-    order_clause = """ORDER BY mirror_updated_at ASC,
-                                  n.source, n.source_item_id,
-                                  n.revision_number"""
-    cursor_parameters: tuple[object, ...] = ()
-    if after:
-        cursor = json.loads(after)
-        if not isinstance(cursor, list) or len(cursor) != 4:
-            raise ValueError("invalid news archive cursor")
-        cursor_clause = """AND (max(n.fetched_time,
-                    COALESCE(t.parsed_at, n.fetched_time),
-                    COALESCE(a.parsed_at, n.fetched_time),
-                    COALESCE((SELECT max(any_a.parsed_at)
-                      FROM news_annotations any_a
-                      WHERE any_a.source=n.source
-                        AND any_a.source_item_id=n.source_item_id
-                        AND any_a.revision_number=n.revision_number), n.fetched_time),
-                    COALESCE(i.assessed_at, n.fetched_time),
-                    COALESCE(f.failed_at, n.fetched_time),
-                    COALESCE(cf.failed_at, n.fetched_time),
-                    COALESCE((SELECT max(recovery.authorized_at)
-                      FROM news_ai_failure_recoveries_v1 recovery
-                      WHERE recovery.failure_id=f.failure_id),
-                      n.fetched_time)),
-                    n.source, n.source_item_id, n.revision_number) > (?, ?, ?, ?)"""
-        cursor_parameters = tuple(cursor)
+    candidate_keys = _news_mirror_candidate_keys(
+        connection, cutoff=cutoff, after=after, limit=max(limit * 8, 160),
+    )
+    if not candidate_keys:
+        return []
+    candidate_clause = ",".join("(?,?,?,?)" for _ in candidate_keys)
+    candidate_parameters = tuple(
+        value for key in candidate_keys for value in key
+    )
     return connection.execute(
-        f"""SELECT n.source, n.source_item_id, n.revision_number,
+        f"""WITH candidate_changes(
+              source,source_item_id,revision_number,mirror_updated_at
+            ) AS (VALUES {candidate_clause})
+            SELECT n.source, n.source_item_id, n.revision_number,
                    n.cluster_id, n.source_published_time,
                    n.collector_first_seen_time, n.fetched_time,
-                    max(n.fetched_time,
-                        COALESCE(t.parsed_at, n.fetched_time),
-                        COALESCE(a.parsed_at, n.fetched_time),
-                        COALESCE((SELECT max(any_a.parsed_at)
-                          FROM news_annotations any_a
-                          WHERE any_a.source=n.source
-                            AND any_a.source_item_id=n.source_item_id
-                            AND any_a.revision_number=n.revision_number), n.fetched_time),
-                        COALESCE(i.assessed_at, n.fetched_time),
-                       COALESCE(f.failed_at, n.fetched_time),
-                       COALESCE(cf.failed_at, n.fetched_time),
-                       COALESCE((SELECT max(recovery.authorized_at)
-                         FROM news_ai_failure_recoveries_v1 recovery
-                         WHERE recovery.failure_id=f.failure_id),
-                         n.fetched_time)) AS mirror_updated_at,
+                   candidate_changes.mirror_updated_at,
                    n.headline AS original_headline,
                    COALESCE(t.headline_zh, n.headline) AS headline,
                    length(COALESCE(n.body, '')) AS content_characters,
@@ -809,7 +781,11 @@ def _news_reader_rows(
                         WHEN f.next_retry_at > ? THEN 'BACKING_OFF'
                         WHEN length(trim(COALESCE(n.body, ''))) >= 240 THEN 'QUEUED'
                         ELSE 'WAITING_CONTENT' END AS annotation_status
-            FROM news_revisions n
+            FROM candidate_changes
+            JOIN news_revisions n
+              ON n.source=candidate_changes.source
+             AND n.source_item_id=candidate_changes.source_item_id
+             AND n.revision_number=candidate_changes.revision_number
             LEFT JOIN news_title_translations t ON t.translation_id=(
               SELECT latest_t.translation_id FROM news_title_translations latest_t
               WHERE latest_t.source=n.source
@@ -880,16 +856,108 @@ def _news_reader_rows(
               AND length(trim(COALESCE(n.body, ''))) >= 240
               AND COALESCE(n.source_published_time,
                            n.collector_first_seen_time) >= ?
-              {cursor_clause}
-            {order_clause}
+            ORDER BY candidate_changes.mirror_updated_at ASC,
+                     n.source,n.source_item_id,n.revision_number
             LIMIT ?""",
         (
+            *candidate_parameters,
             now.isoformat(timespec="microseconds"), INVALID_CHINESE_TITLE,
             PROMPT_VERSION, IMPACT_MODEL, IMPACT_PROMPT_VERSION,
             HANDOVER_IMPACT_PROMPT_VERSION, IMPACT_PROMPT_VERSION,
-            PROMPT_VERSION, cutoff, *cursor_parameters, limit,
+            PROMPT_VERSION, cutoff, limit,
         ),
     ).fetchall()
+
+
+def _news_mirror_candidate_keys(
+    connection: sqlite3.Connection,
+    *,
+    cutoff: str,
+    after: str | None,
+    limit: int,
+) -> list[tuple[str, str, int, str]]:
+    """Find changed reader keys before running the expensive detail joins."""
+    cursor_clause = ""
+    cursor_parameters: tuple[object, ...] = ()
+    if after:
+        cursor = json.loads(after)
+        if not isinstance(cursor, list) or len(cursor) != 4:
+            raise ValueError("invalid news archive cursor")
+        cursor_clause = (
+            "HAVING (max(changed_at),changes.source,changes.source_item_id,"
+            "changes.revision_number) "
+            "> (?,?,?,?)"
+        )
+        cursor_parameters = tuple(cursor)
+    rows = connection.execute(
+        f"""WITH changes AS (
+              SELECT source,source_item_id,revision_number,
+                     fetched_time AS changed_at
+              FROM news_revisions WHERE fetched_time>=?
+              UNION ALL
+              SELECT source,source_item_id,revision_number,parsed_at
+              FROM news_title_translations WHERE parsed_at>=?
+              UNION ALL
+              SELECT source,source_item_id,revision_number,parsed_at
+              FROM news_annotations WHERE parsed_at>=?
+              UNION ALL
+              SELECT source,source_item_id,revision_number,assessed_at
+              FROM news_impact_assessments_v1 WHERE assessed_at>=?
+              UNION ALL
+              SELECT source,source_item_id,revision_number,failed_at
+              FROM news_llm_failures WHERE failed_at>=?
+              UNION ALL
+              SELECT source,source_item_id,revision_number,failed_at
+              FROM news_content_failures WHERE failed_at>=?
+              UNION ALL
+              SELECT f.source,f.source_item_id,f.revision_number,r.authorized_at
+              FROM news_ai_failure_recoveries_v1 r
+              JOIN news_llm_failures f ON f.failure_id=r.failure_id
+              WHERE r.authorized_at>=?
+            )
+            SELECT changes.source,changes.source_item_id,
+                   changes.revision_number,max(changed_at)
+            FROM changes
+            JOIN news_revisions n
+              ON n.source=changes.source
+             AND n.source_item_id=changes.source_item_id
+             AND n.revision_number=changes.revision_number
+            WHERE NOT EXISTS (
+              SELECT 1 FROM news_revisions newer
+              WHERE newer.source=n.source
+                AND newer.source_item_id=n.source_item_id
+                AND newer.revision_number>n.revision_number)
+              AND NOT EXISTS (
+                SELECT 1 FROM news_revisions peer
+                WHERE peer.cluster_id=n.cluster_id
+                  AND NOT EXISTS (
+                    SELECT 1 FROM news_revisions peer_newer
+                    WHERE peer_newer.source=peer.source
+                      AND peer_newer.source_item_id=peer.source_item_id
+                      AND peer_newer.revision_number>peer.revision_number)
+                  AND (length(COALESCE(peer.body,''))>
+                       length(COALESCE(n.body,''))
+                    OR (length(COALESCE(peer.body,''))=
+                        length(COALESCE(n.body,''))
+                      AND peer.source_item_id<n.source_item_id)))
+              AND length(trim(COALESCE(n.body,'')))>=240
+              AND COALESCE(n.source_published_time,
+                           n.collector_first_seen_time)>=?
+            GROUP BY changes.source,changes.source_item_id,
+                     changes.revision_number
+            {cursor_clause}
+            ORDER BY max(changed_at),changes.source,
+                     changes.source_item_id,changes.revision_number
+            LIMIT ?""",
+        (
+            cutoff, cutoff, cutoff, cutoff, cutoff, cutoff, cutoff,
+            cutoff, *cursor_parameters, limit,
+        ),
+    ).fetchall()
+    return [
+        (str(row[0]), str(row[1]), int(row[2]), str(row[3]))
+        for row in rows
+    ]
 
 
 def _serialize_news_rows(
