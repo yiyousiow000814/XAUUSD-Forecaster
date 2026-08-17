@@ -33,11 +33,16 @@ def _heartbeat(ledger: ForwardLedger, at: datetime) -> None:
     })
 
 
-def _news(ledger: ForwardLedger, received_at: datetime) -> None:
+def _news(
+    ledger: ForwardLedger,
+    received_at: datetime,
+    *,
+    publication_delay: timedelta = timedelta(minutes=1),
+) -> None:
     body = "Material macroeconomic report. " * 20
     ledger.append_news_revision({
         "source": "test_semantic_source", "source_item_id": "item-1",
-        "source_published_time": received_at - timedelta(minutes=1),
+        "source_published_time": received_at - publication_delay,
         "collector_first_seen_time": received_at, "fetched_time": received_at,
         "headline": "Material macroeconomic report", "body": body,
         "link": "https://example.test/report",
@@ -142,7 +147,7 @@ def test_idle_pipeline_is_healthy_without_synthetic_provider_probe(
     tmp_path, credentials,
 ) -> None:
     now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now - timedelta(days=1))
     _heartbeat(ledger, now)
 
     health = news_pipeline_health.news_semantic_pipeline_health(
@@ -157,7 +162,7 @@ def test_recent_arrival_gets_one_decision_interval_before_fail_closed_gate(
     tmp_path, credentials,
 ) -> None:
     now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now - timedelta(days=1))
     _heartbeat(ledger, now)
     _news(ledger, now - timedelta(minutes=2))
 
@@ -168,13 +173,20 @@ def test_recent_arrival_gets_one_decision_interval_before_fail_closed_gate(
     assert health["status"] == "HEALTHY"
 
 
-def test_unresolved_actionable_news_after_one_interval_fails_closed(
-    tmp_path, credentials,
+@pytest.mark.parametrize(
+    "publication_delay", (timedelta(minutes=1), timedelta(hours=2)),
+)
+def test_unresolved_semantic_news_after_one_interval_fails_closed(
+    tmp_path, credentials, publication_delay: timedelta,
 ) -> None:
     now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now - timedelta(days=1))
     _heartbeat(ledger, now)
-    _news(ledger, now - timedelta(minutes=6))
+    _news(
+        ledger,
+        now - timedelta(minutes=6),
+        publication_delay=publication_delay,
+    )
 
     health = news_pipeline_health.news_semantic_pipeline_health(
         ledger, observed_at=now,
@@ -189,7 +201,7 @@ def test_expired_failed_candidate_does_not_hold_the_gate_closed(
     tmp_path, credentials,
 ) -> None:
     now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now - timedelta(days=1))
     _heartbeat(ledger, now)
     body = "Complete gold report. " * 20
     received = now - timedelta(minutes=6)
@@ -225,7 +237,7 @@ def test_known_current_model_failure_fails_closed_without_waiting_for_grace(
     tmp_path, credentials,
 ) -> None:
     now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now - timedelta(days=1))
     _heartbeat(ledger, now)
     received = now - timedelta(minutes=2)
     _news(ledger, received)
@@ -252,11 +264,94 @@ def test_known_current_model_failure_fails_closed_without_waiting_for_grace(
     }
 
 
+def test_late_discovery_model_failure_still_closes_semantic_gate(
+    tmp_path, credentials,
+) -> None:
+    now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
+    ledger = ForwardLedger(
+        tmp_path / "forward.sqlite3", now=now - timedelta(hours=3),
+    )
+    body = "Complete but late macroeconomic report. " * 20
+    received = now - timedelta(minutes=10)
+    ledger.append_news_revision({
+        "source": "google_news_us_inflation", "source_item_id": "late",
+        "source_published_time": received - timedelta(hours=2),
+        "collector_first_seen_time": received, "fetched_time": received,
+        "headline": "Old CPI report collected recently", "body": body,
+        "link": "https://example.test/late",
+        "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+        "cluster_id": "late-cluster",
+    })
+    job_id = enqueue_job(
+        ledger.connection, task_type="ACTIVE_ANNOTATION",
+        source="google_news_us_inflation", source_item_id="late",
+        revision_number=1, prompt_version=PROMPT_VERSION,
+        priority="NORMAL", now=received,
+    )
+    with ledger.connection:
+        ledger.connection.execute(
+            "UPDATE news_ai_jobs_v1 SET state='BACKING_OFF' WHERE job_id=?",
+            (job_id,),
+        )
+    _heartbeat(ledger, now)
+
+    health = news_pipeline_health.news_semantic_pipeline_health(
+        ledger, observed_at=now,
+    )
+
+    assert health["status"] == "UNHEALTHY"
+    assert health["reason_codes"] == ("ACTIONABLE_NEWS_SEMANTICS_PENDING",)
+    assert health["actionable_failure_counts"] == {
+        "ACTIVE_ANNOTATION": {"UNCLASSIFIED": 1},
+    }
+
+
+def test_superseded_annotation_failure_does_not_close_semantic_gate(
+    tmp_path, credentials,
+) -> None:
+    now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
+    ledger = ForwardLedger(
+        tmp_path / "forward.sqlite3", now=now - timedelta(days=1),
+    )
+    received = now - timedelta(minutes=10)
+    _news(ledger, received)
+    job_id = enqueue_job(
+        ledger.connection, task_type="ACTIVE_ANNOTATION",
+        source="test_semantic_source", source_item_id="item-1",
+        revision_number=1, prompt_version=PROMPT_VERSION,
+        priority="NORMAL", now=received,
+    )
+    with ledger.connection:
+        ledger.connection.execute(
+            "UPDATE news_ai_jobs_v1 SET state='BACKING_OFF' WHERE job_id=?",
+            (job_id,),
+        )
+    newer_body = "Corrected material macroeconomic report. " * 20
+    ledger.append_news_revision({
+        "source": "test_semantic_source", "source_item_id": "item-1",
+        "source_published_time": now - timedelta(minutes=3),
+        "collector_first_seen_time": now - timedelta(minutes=2),
+        "fetched_time": now - timedelta(minutes=2),
+        "headline": "Corrected macroeconomic report", "body": newer_body,
+        "link": "https://example.test/report",
+        "content_hash": hashlib.sha256(newer_body.encode()).hexdigest(),
+        "cluster_id": "cluster-1",
+    })
+    _heartbeat(ledger, now)
+
+    health = news_pipeline_health.news_semantic_pipeline_health(
+        ledger, observed_at=now,
+    )
+
+    assert health["status"] == "HEALTHY"
+    assert health["unresolved_items"] == 0
+
+
 def test_recent_actionable_impact_pending_past_grace_fails_closed(
     tmp_path, credentials,
 ) -> None:
     now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now - timedelta(days=1))
     _heartbeat(ledger, now)
     _impact_candidate(
         ledger, published_at=now - timedelta(minutes=7),
@@ -277,7 +372,7 @@ def test_impact_gate_derives_supported_models_from_registry(
     tmp_path, credentials, monkeypatch,
 ) -> None:
     now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now - timedelta(days=1))
     _heartbeat(ledger, now)
     future_model = "gemini-future-compatible"
     monkeypatch.setattr(
@@ -305,7 +400,7 @@ def test_recent_actionable_impact_within_grace_keeps_gate_healthy(
     tmp_path, credentials,
 ) -> None:
     now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now - timedelta(days=1))
     _heartbeat(ledger, now)
     _impact_candidate(
         ledger, published_at=now - timedelta(minutes=7),
@@ -324,7 +419,7 @@ def test_recent_non_actionable_impact_backlog_does_not_close_gate(
     tmp_path, credentials,
 ) -> None:
     now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now - timedelta(days=1))
     _heartbeat(ledger, now)
     _impact_candidate(
         ledger, published_at=now - timedelta(minutes=7),
@@ -349,7 +444,7 @@ def test_recent_actionable_impact_backoff_fails_closed_immediately(
     tmp_path, credentials,
 ) -> None:
     now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now - timedelta(days=1))
     _heartbeat(ledger, now)
     _impact_candidate(
         ledger, published_at=now - timedelta(minutes=2),
@@ -399,7 +494,7 @@ def test_historical_impact_backfill_does_not_close_current_gate(
     tmp_path, credentials,
 ) -> None:
     now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now - timedelta(days=1))
     _heartbeat(ledger, now)
     _impact_candidate(
         ledger, published_at=now - timedelta(days=4),
@@ -419,7 +514,7 @@ def test_completed_recent_impact_keeps_current_gate_healthy(
     tmp_path, credentials,
 ) -> None:
     now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now - timedelta(days=1))
     _heartbeat(ledger, now)
     _impact_candidate(
         ledger, published_at=now - timedelta(minutes=7),
@@ -439,7 +534,7 @@ def test_completed_recent_impact_keeps_current_gate_healthy(
 @pytest.mark.parametrize("failure", ["missing", "stale", "credentials"])
 def test_runtime_dependencies_fail_closed(tmp_path, monkeypatch, failure: str) -> None:
     now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now - timedelta(days=1))
     if failure != "missing":
         _heartbeat(
             ledger,

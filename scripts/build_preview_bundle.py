@@ -23,6 +23,9 @@ sys.modules["xauusd_forecaster"] = package
 factor_coverage = importlib.import_module("xauusd_forecaster.factors").factor_coverage
 model_limits = importlib.import_module("xauusd_forecaster.model_limits")
 dashboard_sync = importlib.import_module("scripts.run_dashboard_sync")
+assess_news_semantic_eligibility = importlib.import_module(
+    "xauusd_forecaster.news_time"
+).assess_news_semantic_eligibility
 
 
 DEFAULT_SOURCE = "https://aurum-signal-room.yiyousiow1234.workers.dev"
@@ -238,9 +241,17 @@ def _backfill_annotation_reasons(news_index: dict, status: dict) -> None:
         return
     epoch = datetime.fromisoformat(str(epoch_raw))
     for item in news_index.get("items", []):
-        if item.get("annotation_status") != "NOT_REQUIRED":
+        annotation_status = item.get("annotation_status")
+        if annotation_status not in {"QUEUED", "NOT_REQUIRED"}:
             continue
-        if item.get("annotation_reason_code") and item.get("annotation_reason"):
+        existing_reason_code = item.get("annotation_reason_code")
+        stale_queue_mismatch = (
+            annotation_status == "NOT_REQUIRED"
+            and existing_reason_code == "QUEUE_INVARIANT_MISMATCH"
+        )
+        if annotation_status == "NOT_REQUIRED" and not stale_queue_mismatch and (
+            existing_reason_code and item.get("annotation_reason")
+        ):
             continue
         published_raw = item.get("source_published_time")
         if not published_raw:
@@ -252,27 +263,38 @@ def _backfill_annotation_reasons(news_index: dict, status: dict) -> None:
                     "HISTORICAL_MATERIAL", "历史资料：发布时间早于系统开始记录",
                 )
             else:
-                source = str(item.get("source") or "")
-                first_seen = datetime.fromisoformat(
-                    str(item["collector_first_seen_time"])
+                assessment = assess_news_semantic_eligibility(
+                    item, forward_epoch=epoch,
                 )
-                if source.startswith(("google_news_", "gdelt_")) and (
-                    first_seen - published > timedelta(hours=72)
-                ):
-                    code, reason = (
-                        "STALE_AT_INTAKE", "收到时已超过72小时，不进入语义处理",
-                    )
-                elif source.startswith(("google_news_", "gdelt_")) and (
-                    published - first_seen > timedelta(minutes=10)
-                ):
+                if assessment.reason_code == "PUBLISHED_AFTER_DECISION":
                     code, reason = (
                         "INVALID_PUBLISHED_TIME", "发布时间晚于收到时间，时间证据无效",
+                    )
+                elif assessment.reason_code in {
+                    "PRE_FORWARD_PUBLICATION", "PRE_FORWARD_RECEIPT",
+                }:
+                    code, reason = (
+                        "HISTORICAL_MATERIAL", "历史资料：时间早于系统开始记录",
                     )
                 else:
                     code, reason = (
                         "QUEUE_INVARIANT_MISMATCH",
                         "正文符合条件但未进入语义队列，需要检查",
                     )
+        if code == "QUEUE_INVARIANT_MISMATCH":
+            if stale_queue_mismatch:
+                item["annotation_status"] = "QUEUED"
+                item["model_visibility"] = "NOT_YET_PARSED"
+                if not item.get("parsed_at"):
+                    item["impact_status"] = "PENDING_ANNOTATION"
+                item.pop("annotation_reason_code", None)
+                item.pop("annotation_reason", None)
+            continue
+        if code != "QUEUE_INVARIANT_MISMATCH":
+            item["annotation_status"] = "NOT_REQUIRED"
+            item["model_visibility"] = "MODEL_INELIGIBLE"
+            if not item.get("parsed_at"):
+                item["impact_status"] = "NOT_REQUIRED"
         item["annotation_reason_code"] = code
         item["annotation_reason"] = reason
 

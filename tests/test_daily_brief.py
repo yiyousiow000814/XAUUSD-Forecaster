@@ -1196,7 +1196,10 @@ def test_cross_date_superseding_evidence_does_not_settle_historical_items(tmp_pa
 def test_protected_brief_day_claims_its_representative_despite_cross_date_peer(
     tmp_path,
 ) -> None:
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    ledger = ForwardLedger(
+        tmp_path / "forward.sqlite3",
+        now=datetime(2026, 8, 10, 1, tzinfo=UTC),
+    )
     _seed_unannotated_revision(
         ledger, "day-one", received_at=datetime(2026, 8, 10, 2, tzinfo=UTC),
         cluster_id="shared-cluster", body_length=300,

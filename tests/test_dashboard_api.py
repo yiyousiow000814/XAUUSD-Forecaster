@@ -1532,7 +1532,7 @@ def test_dashboard_shows_readable_unparsed_news_without_model_visibility(tmp_pat
     assert payload["counts"]["model_candidate_news_items"] == 0
 
 
-def test_dashboard_keeps_readable_late_news_for_semantic_impact_review(tmp_path) -> None:
+def test_dashboard_keeps_readable_late_news_in_semantic_queue(tmp_path) -> None:
     now = datetime(2026, 8, 8, 1, 0, tzinfo=UTC)
     database = tmp_path / "forward.sqlite3"
     ledger = ForwardLedger(database, now=now - timedelta(hours=3))
@@ -1558,6 +1558,7 @@ def test_dashboard_keeps_readable_late_news_for_semantic_impact_review(tmp_path)
     row = payload["recent_news"][0]
     assert row["annotation_status"] == "QUEUED"
     assert row["impact_status"] == "PENDING_ANNOTATION"
+    assert row["model_visibility"] == "NOT_YET_PARSED"
     assert "annotation_reason_code" not in row
     assert payload["annotation_queue"]["queued"] == 1
 

@@ -121,10 +121,53 @@ def test_preview_reader_rejects_a_noncanonical_source() -> None:
         module._read_json("http://127.0.0.1:8765", "/api/status")
 
 
-def test_preview_does_not_reject_fresh_aggregated_news_by_source() -> None:
+@pytest.mark.parametrize(
+    ("source", "published_at", "first_seen_at"),
+    (
+        (
+            "google_news_gold_context",
+            "2026-08-08T20:40:28+00:00",
+            "2026-08-08T23:34:06+00:00",
+        ),
+        (
+            "gdelt_gold_geopolitics",
+            "2026-08-08T23:35:00+00:00",
+            "2026-08-08T23:30:07+00:00",
+        ),
+    ),
+)
+def test_preview_keeps_timing_anomalies_in_semantic_queue(
+    source: str, published_at: str, first_seen_at: str,
+) -> None:
+    module = _preview_module()
+    news_index = {"items": [{
+        "annotation_status": "QUEUED",
+        "impact_status": "PENDING_ANNOTATION",
+        "model_visibility": "NOT_YET_PARSED",
+        "source": source,
+        "source_published_time": published_at,
+        "collector_first_seen_time": first_seen_at,
+    }]}
+
+    module._backfill_annotation_reasons(
+        news_index, {"forward_epoch": "2026-08-05T00:00:00+00:00"}
+    )
+
+    row = news_index["items"][0]
+    assert row["annotation_status"] == "QUEUED"
+    assert row["impact_status"] == "PENDING_ANNOTATION"
+    assert row["model_visibility"] == "NOT_YET_PARSED"
+    assert "annotation_reason_code" not in row
+
+
+def test_preview_repairs_stale_queue_mismatch_for_late_discovery() -> None:
     module = _preview_module()
     news_index = {"items": [{
         "annotation_status": "NOT_REQUIRED",
+        "annotation_reason_code": "QUEUE_INVARIANT_MISMATCH",
+        "annotation_reason": "正文符合条件但未进入语义队列，需要检查",
+        "impact_status": "NOT_REQUIRED",
+        "model_visibility": "MODEL_INELIGIBLE",
         "source": "google_news_gold_context",
         "source_published_time": "2026-08-08T20:40:28+00:00",
         "collector_first_seen_time": "2026-08-08T23:34:06+00:00",
@@ -134,9 +177,35 @@ def test_preview_does_not_reject_fresh_aggregated_news_by_source() -> None:
         news_index, {"forward_epoch": "2026-08-05T00:00:00+00:00"}
     )
 
-    row = news_index["items"][0]
-    assert row["annotation_reason_code"] == "QUEUE_INVARIANT_MISMATCH"
-    assert row["annotation_reason"] == "正文符合条件但未进入语义队列，需要检查"
+    assert news_index["items"] == [{
+        "annotation_status": "QUEUED",
+        "impact_status": "PENDING_ANNOTATION",
+        "model_visibility": "NOT_YET_PARSED",
+        "source": "google_news_gold_context",
+        "source_published_time": "2026-08-08T20:40:28+00:00",
+        "collector_first_seen_time": "2026-08-08T23:34:06+00:00",
+    }]
+
+
+def test_preview_preserves_legitimate_not_required_reason() -> None:
+    module = _preview_module()
+    row = {
+        "annotation_status": "NOT_REQUIRED",
+        "annotation_reason_code": "CANONICAL_COPY_HANDLES_ANNOTATION",
+        "annotation_reason": "同一新闻已有 canonical 版本处理",
+        "impact_status": "NOT_REQUIRED",
+        "model_visibility": "MODEL_INELIGIBLE",
+        "source": "google_news_gold_context",
+        "source_published_time": "2026-08-08T20:40:28+00:00",
+        "collector_first_seen_time": "2026-08-08T23:34:06+00:00",
+    }
+    news_index = {"items": [dict(row)]}
+
+    module._backfill_annotation_reasons(
+        news_index, {"forward_epoch": "2026-08-05T00:00:00+00:00"}
+    )
+
+    assert news_index["items"] == [row]
 
 
 def test_preview_reads_completed_news_from_old_and_current_api_contracts(
