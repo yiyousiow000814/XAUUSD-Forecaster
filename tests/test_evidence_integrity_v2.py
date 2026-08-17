@@ -1422,6 +1422,30 @@ def test_generation_waits_for_news_evidence_without_partial_market_update(
     ledger.close()
 
 
+def test_generation_treats_fully_expired_news_as_insufficient(tmp_path, monkeypatch) -> None:
+    ledger = ForwardLedger(tmp_path / "forward-expired.sqlite3")
+    rows = _training_rows(200)
+    _attach_event_exposure(rows, event_days=3, event_count=10)
+    for row in rows:
+        for event in (*row["core_events"], *row["broad_events"]):
+            event["raw_weight"] = 0.0
+    monkeypatch.setattr(training_v2, "complete_training_rows", lambda *_: rows)
+
+    result = training_v2.train_due_v2(
+        ledger, datetime(2026, 8, 5, 12, tzinfo=UTC), tmp_path / "models"
+    )
+
+    assert result[0]["status"] == "NEWS_GENERATION_EVIDENCE_INSUFFICIENT"
+    assert result[0]["core_has_positive_weight"] is False
+    assert result[0]["broad_has_positive_weight"] is False
+    assert not (tmp_path / "models").exists()
+    update_count = ledger.connection.execute(
+        "SELECT count(*) FROM model_updates_v2"
+    ).fetchone()[0]
+    assert update_count == 0
+    ledger.close()
+
+
 def test_current_contract_generation_gate_fails_closed_without_complete_activation(
     tmp_path,
 ) -> None:

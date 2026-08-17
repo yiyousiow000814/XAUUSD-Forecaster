@@ -229,6 +229,13 @@ def _event_coverage(rows: list[dict], field: str) -> tuple[int, int]:
     return len(versions), len(days)
 
 
+def _has_positive_event_weight(rows: list[dict], field: str) -> bool:
+    return any(
+        max(0.0, float(event["raw_weight"])) > 0
+        for row in rows for event in row.get(field, [])
+    )
+
+
 def _event_budget_weights(
     rows: list[dict], field: str,
 ) -> tuple[np.ndarray, list[dict], list[dict], dict]:
@@ -430,6 +437,10 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
     broad_events, broad_days = _event_coverage(broad_rows, "broad_events")
     core_evidence_status = news_evidence_status(core_days, core_events)
     broad_evidence_status = news_evidence_status(broad_days, broad_events)
+    core_has_positive_weight = _has_positive_event_weight(core_rows, "core_events")
+    broad_has_positive_weight = _has_positive_event_weight(
+        broad_rows, "broad_events"
+    )
     latest = _latest_generation(ledger.connection, stage)
     latest_uses_current_contract = generation_matches_contract(
         latest, CURRENT_NEWS_CONTRACT,
@@ -443,9 +454,15 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
                  "generation_id": latest["generation_id"],
                  "next_threshold": int(latest["training_rows"]) + RETRAIN_INTERVAL}]
     core_cold_start = (
-        len(core_rows) < NEWS_MIN_EXPOSED_ROWS or not core_events
+        len(core_rows) < NEWS_MIN_EXPOSED_ROWS
+        or not core_events
+        or not core_has_positive_weight
     )
-    if len(broad_rows) < NEWS_MIN_EXPOSED_ROWS or not broad_events:
+    if (
+        len(broad_rows) < NEWS_MIN_EXPOSED_ROWS
+        or not broad_events
+        or not broad_has_positive_weight
+    ):
         return [{
             "status": "NEWS_GENERATION_EVIDENCE_INSUFFICIENT",
             "core_exposed_rows": len(core_rows),
@@ -454,6 +471,8 @@ def train_due_v2(ledger, cutoff: datetime, artifact_root: str | Path) -> list[di
             "broad_events": broad_events,
             "core_evidence_status": core_evidence_status,
             "broad_evidence_status": broad_evidence_status,
+            "core_has_positive_weight": core_has_positive_weight,
+            "broad_has_positive_weight": broad_has_positive_weight,
             "active_generation_id": latest["generation_id"] if latest else None,
             "active_contract_current": latest_uses_current_contract,
             "target_feature_version": NEWS_FEATURE_VERSION,
