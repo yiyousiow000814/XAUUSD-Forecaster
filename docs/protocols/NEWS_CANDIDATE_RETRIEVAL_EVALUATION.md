@@ -36,6 +36,10 @@ The evaluator MUST:
 5. make no provider or final-model request; and
 6. emit a digest of the exact point-in-time candidate universe.
 
+Semantic candidates MUST be scored from a complete stored vector namespace
+bound to the declared embedding-text version and exact model digest. Benchmark
+execution must not create missing embeddings or contact the embedding service.
+
 The benchmark reports Recall@1, Recall@5, MRR@5, positive empty-candidate rate,
 relation slices, and hard-negative exposure at five. Hard-negative exposure is
 candidate noise, not an end-to-end false-positive rate; the final identity
@@ -60,5 +64,6 @@ prompt improvement cannot satisfy a candidate-retrieval gate.
 python scripts/audit_news_candidate_retrieval.py `
   --database C:\path\to\forward-evidence.sqlite3 `
   --manifest tests/fixtures/news_candidate_retrieval_benchmark.json `
+  --mode hybrid `
   --output .local/news-candidate-retrieval-result.json
 ```

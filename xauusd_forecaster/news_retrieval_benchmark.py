@@ -13,6 +13,11 @@ from .news_impact import (
     load_identity_candidate_universe,
     retrieve_prior_event_context,
 )
+from .news_retrieval import (
+    EmbeddingProfile,
+    load_embeddings,
+    retrieve_hybrid_prior_event_context,
+)
 
 
 BENCHMARK_SCHEMA_VERSION = "news-candidate-retrieval-benchmark.v1"
@@ -161,6 +166,8 @@ def score_candidate_rankings(
 def evaluate_candidate_retrieval(
     connection,
     manifest: dict[str, Any],
+    *,
+    embedding_profile: EmbeddingProfile | None = None,
 ) -> dict[str, Any]:
     """Replay production retrieval over frozen, independently reviewed labels."""
     positives = manifest["positive_cases"]
@@ -183,13 +190,39 @@ def evaluate_candidate_retrieval(
         str(row["candidate_id"]): row for row in universe
     }
     index = build_identity_candidate_index(universe)
-    rankings = {
-        annotation_id: tuple(
-            str(candidate["candidate_id"])
-            for candidate in retrieve_prior_event_context(row, index, limit=20)
-        )
-        for annotation_id, row in current_rows.items()
+    route_rankings: dict[str, dict[str, tuple[str, ...]]] = {
+        "deterministic": {},
     }
+    if embedding_profile is None:
+        rankings = {
+            annotation_id: tuple(
+                str(candidate["candidate_id"])
+                for candidate in retrieve_prior_event_context(row, index, limit=20)
+            )
+            for annotation_id, row in current_rows.items()
+        }
+        route_rankings["deterministic"] = rankings
+        retrieval_version = "deterministic"
+    else:
+        embeddings = load_embeddings(
+            connection, embedding_profile, expected_rows=universe,
+        )
+        expected_ids = {str(row["candidate_id"]) for row in universe}
+        if not expected_ids <= set(embeddings):
+            raise ValueError("benchmark embedding universe is incomplete")
+        hybrid_results = {
+            annotation_id: retrieve_hybrid_prior_event_context(
+                row, universe, embeddings, limit=20,
+            )
+            for annotation_id, row in current_rows.items()
+        }
+        for route in ("deterministic", "lexical", "semantic", "combined"):
+            route_rankings[route] = {
+                annotation_id: result.route_rankings[route]
+                for annotation_id, result in hybrid_results.items()
+            }
+        rankings = route_rankings["combined"]
+        retrieval_version = "hybrid"
     for case in positives + negatives:
         current_id = str(case["current_annotation_id"])
         prior_id = str(
@@ -214,6 +247,10 @@ def evaluate_candidate_retrieval(
             raise ValueError("benchmark pair violates point-in-time ordering")
 
     metrics = score_candidate_rankings(positives, negatives, rankings)
+    ablations = {
+        route: score_candidate_rankings(positives, negatives, values)
+        for route, values in route_rankings.items()
+    }
     universe_digest = hashlib.sha256()
     for candidate in sorted(universe, key=lambda row: str(row["candidate_id"])):
         universe_digest.update(json.dumps(
@@ -234,5 +271,7 @@ def evaluate_candidate_retrieval(
         "candidate_universe_sha256": universe_digest.hexdigest(),
         "candidate_universe_rows": len(universe),
         "top_k": BENCHMARK_TOP_K,
+        "retrieval_version": retrieval_version,
+        "route_ablations": ablations,
         **metrics,
     }

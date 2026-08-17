@@ -44,6 +44,8 @@ V2_IMMUTABLE_TABLES = (
     "news_item_classifications_v1",
     "news_impact_assessments_v1",
     "news_event_identity_resolutions_v1",
+    "news_identity_embeddings_v1",
+    "news_identity_retrieval_receipts_v1",
     "news_impact_failures_v1",
     "prediction_scores_v2",
     "calibration_snapshots_v2",
@@ -499,6 +501,44 @@ CREATE INDEX IF NOT EXISTS news_event_identity_resolutions_lookup_v1
 ON news_event_identity_resolutions_v1(
     canonical_episode_id,canonical_event_id,resolved_at
 );
+
+CREATE TABLE IF NOT EXISTS news_identity_embeddings_v1 (
+    embedding_id TEXT PRIMARY KEY,
+    annotation_id TEXT NOT NULL,
+    raw_content_hash TEXT NOT NULL,
+    embedding_text_hash TEXT NOT NULL,
+    embedding_text_version TEXT NOT NULL,
+    model_name TEXT NOT NULL,
+    model_digest TEXT NOT NULL,
+    dimensions INTEGER NOT NULL CHECK(dimensions > 0),
+    vector_blob BLOB NOT NULL,
+    embedded_at TEXT NOT NULL,
+    FOREIGN KEY(annotation_id) REFERENCES news_annotations(annotation_id),
+    UNIQUE(annotation_id,embedding_text_version,model_name,model_digest)
+);
+
+CREATE INDEX IF NOT EXISTS news_identity_embeddings_lookup_v1
+ON news_identity_embeddings_v1(
+    embedding_text_version,model_name,model_digest,annotation_id
+);
+
+CREATE TABLE IF NOT EXISTS news_identity_retrieval_receipts_v1 (
+    receipt_id TEXT PRIMARY KEY,
+    annotation_id TEXT NOT NULL,
+    retrieval_version TEXT NOT NULL,
+    embedding_text_version TEXT NOT NULL,
+    model_name TEXT NOT NULL,
+    model_digest TEXT NOT NULL,
+    candidate_universe_hash TEXT NOT NULL,
+    route_rankings_json TEXT NOT NULL,
+    selected_candidates_json TEXT NOT NULL,
+    retrieved_at TEXT NOT NULL,
+    FOREIGN KEY(annotation_id) REFERENCES news_annotations(annotation_id),
+    UNIQUE(annotation_id,retrieval_version,model_digest)
+);
+
+CREATE INDEX IF NOT EXISTS news_identity_retrieval_receipts_lookup_v1
+ON news_identity_retrieval_receipts_v1(annotation_id,retrieved_at);
 
 CREATE TABLE IF NOT EXISTS news_impact_failures_v1 (
     failure_id TEXT PRIMARY KEY,

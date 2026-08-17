@@ -326,21 +326,6 @@ def retrieve_prior_event_context(
 
     candidates = []
     for prior in recalled.values():
-        if (
-            str(prior["collector_first_seen_time"])
-            > str(current["collector_first_seen_time"])
-        ):
-            continue
-        if (
-            prior["source"] == current["source"]
-            and prior["source_item_id"] == current["source_item_id"]
-            and prior["revision_number"] == current["revision_number"]
-        ):
-            continue
-        candidate = {
-            key: value for key, value in prior.items()
-            if key != "annotation"
-        }
         prior_annotation = prior["annotation"]
         similarity = prior_identity_similarity(
             current_identity,
@@ -348,39 +333,11 @@ def retrieve_prior_event_context(
         )
         if similarity <= 0.25:
             continue
-        candidate["similarity"] = round(similarity, 3)
-        candidate["material_event_key"] = prior_annotation.get(
-            "material_event_key"
-        )
-        candidate["canonical_actor_id"] = prior_annotation.get(
-            "canonical_actor_id"
-        )
-        candidate["canonical_object_id"] = prior_annotation.get(
-            "canonical_object_id"
-        )
-        candidate["event_claim"] = _claim_snapshot(prior_annotation)
-        candidate["identity_anchor_eligible"] = bool(
-            str(prior_annotation.get("record_kind") or "")
-            in ACTIONABLE_RECORD_KINDS
-            and str(prior_annotation.get("evidence_role") or "")
-            in {"CORE_CLAIM", "EVIDENCE_DOCUMENT"}
-            and candidate.get("update_type")
-            not in {"COMMENTARY", "HISTORICAL_CONTEXT"}
-        )
-        candidates.append(candidate)
-
-    current_is_core_fact = bool(
-        str(annotation.get("record_kind") or "") in ACTIONABLE_RECORD_KINDS
-        and str(annotation.get("evidence_role") or "")
-        in {"CORE_CLAIM", "EVIDENCE_DOCUMENT"}
-    )
-    eligible_candidates = (
-        [candidate for candidate in candidates
-         if candidate["identity_anchor_eligible"]]
-        if current_is_core_fact else candidates
-    )
+        candidate = materialize_identity_candidate(current, prior, similarity)
+        if candidate is not None:
+            candidates.append(candidate)
     return sorted(
-        eligible_candidates,
+        candidates,
         key=lambda candidate: (
             bool(candidate["identity_anchor_eligible"]),
             float(candidate["similarity"]),
@@ -388,6 +345,50 @@ def retrieve_prior_event_context(
         ),
         reverse=True,
     )[:limit]
+
+
+def materialize_identity_candidate(
+    current: dict, prior: dict, similarity: float,
+) -> dict | None:
+    """Apply the shared point-in-time and anchor admission contract."""
+    if str(prior["collector_first_seen_time"]) > str(
+        current["collector_first_seen_time"]
+    ):
+        return None
+    if (
+        prior["source"] == current["source"]
+        and prior["source_item_id"] == current["source_item_id"]
+        and prior["revision_number"] == current["revision_number"]
+    ):
+        return None
+    annotation = current.get("annotation")
+    prior_annotation = prior.get("annotation")
+    if not isinstance(annotation, dict) or not isinstance(prior_annotation, dict):
+        raise ValueError("identity candidate annotation is missing")
+    candidate = {
+        key: value for key, value in prior.items() if key != "annotation"
+    }
+    candidate["similarity"] = round(float(similarity), 3)
+    candidate["material_event_key"] = prior_annotation.get("material_event_key")
+    candidate["canonical_actor_id"] = prior_annotation.get("canonical_actor_id")
+    candidate["canonical_object_id"] = prior_annotation.get("canonical_object_id")
+    candidate["event_claim"] = _claim_snapshot(prior_annotation)
+    candidate["identity_anchor_eligible"] = bool(
+        str(prior_annotation.get("record_kind") or "")
+        in ACTIONABLE_RECORD_KINDS
+        and str(prior_annotation.get("evidence_role") or "")
+        in {"CORE_CLAIM", "EVIDENCE_DOCUMENT"}
+        and candidate.get("update_type")
+        not in {"COMMENTARY", "HISTORICAL_CONTEXT"}
+    )
+    current_is_core_fact = bool(
+        str(annotation.get("record_kind") or "") in ACTIONABLE_RECORD_KINDS
+        and str(annotation.get("evidence_role") or "")
+        in {"CORE_CLAIM", "EVIDENCE_DOCUMENT"}
+    )
+    if current_is_core_fact and not candidate["identity_anchor_eligible"]:
+        return None
+    return candidate
 
 
 def load_identity_candidate_universe(
