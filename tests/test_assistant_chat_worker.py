@@ -338,6 +338,7 @@ def test_worker_enforces_relative_news_day_on_model_tool_arguments(
 @pytest.mark.parametrize("question", [
     "你是谁",
     "你能做什么？",
+    "你能做什么？请分成三点，简洁说明。",
     "你上一句说什么",
     "我刚才让你记住的测试短语是什么？",
     "What did I just ask you to remember?",

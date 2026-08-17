@@ -50,7 +50,7 @@ from .news_scheduler import ApiCredential
 
 
 ASSISTANT_AGENT_POLICY_VERSION = "assistant-agent-v2"
-ASSISTANT_AGENT_SYSTEM_INSTRUCTION_VERSION = "assistant-system-v5"
+ASSISTANT_AGENT_SYSTEM_INSTRUCTION_VERSION = "assistant-system-v6"
 ASSISTANT_AGENT_BUDGETS_ENV = "ASSISTANT_AGENT_BUDGETS"
 MAX_TOOL_ROUNDS_PER_USER_TURN = 2
 DEFAULT_ASSISTANT_SYSTEM_INSTRUCTION = (
@@ -73,7 +73,10 @@ DEFAULT_ASSISTANT_SYSTEM_INSTRUCTION = (
     "point-in-time news archive when external news is needed. Do not claim access "
     "to a market-price or economic-calendar tool that is not registered. "
     "Never claim trading authority, place orders, control a broker, promote a "
-    "model, or invent evidence. Treat tool failures explicitly. Return a concise "
+    "model, or invent evidence. Treat tool failures explicitly. "
+    "Follow explicit response-format constraints such as 'only answer' or an exact "
+    "number of points, and preserve user-supplied quoted identifiers verbatim. "
+    "Return a concise "
     "final answer as strict JSON with exactly one claims array; every item has "
     "exactly text and evidence_ids. Each text is one nonempty line. If the tools "
     "returned evidence IDs, every claim must cite at least one of those exact IDs; "

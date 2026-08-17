@@ -133,6 +133,8 @@ _DIRECT_CHAT_EXACT = frozenset({
     "thanks", "thank you", "who are you", "what can you do",
 })
 _DIRECT_CHAT_MARKERS = _CONVERSATION_REFERENCE_MARKERS + (
+    "你是谁", "你能做什么", "你可以做什么", "你会做什么",
+    "介绍一下你自己", "who are you", "what can you do",
     "为什么你要做新闻检索", "为什么要做新闻检索", "为什么你要搜索",
     "为什么要搜索", "你attach的", "你 attach 的", "你附加的", "你附上的",
 )
