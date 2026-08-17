@@ -56,3 +56,10 @@ that a visible line is continuous after cascade and responsive overrides.
   closure or silently replace missing evidence with older points.
 - Counts above the chart describe the full retained history and must be labeled
   as full-history totals rather than current-window totals.
+- The 24-open-hour view may show complete version badges. Denser 7-open-day,
+  30-open-day, and full-history views use one event rail instead of stacking
+  badge lanes above the chart.
+- Event-rail clustering is presentational only: every version event remains
+  represented in the aggregate event count. Dense rails are intentionally
+  non-interactive and must not add hover tooltips or a separate detail strip
+  that obscures the chart or requires coordinated hovering and scrolling.

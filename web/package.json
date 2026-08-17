@@ -10,7 +10,7 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "npm run cf:types:check && npm run build && node --import ./tests/register-cloudflare-worker-loader.mjs --test tests/rendered-html.test.mjs tests/responsive-scroll.test.mjs tests/market-open-window.test.mjs tests/news-retrieval.test.mjs tests/assistant-auth.test.mjs tests/assistant-conversations.test.mjs tests/assistant-events.test.mjs tests/assistant-memory.test.mjs tests/assistant-routing.test.mjs tests/assistant-content.test.mjs tests/assistant-evidence.test.mjs tests/assistant-chat.test.mjs tests/assistant-chat-client.test.mjs tests/news-questions.test.mjs tests/news-questions-route.test.mjs",
+    "test": "npm run cf:types:check && npm run build && node --import ./tests/register-cloudflare-worker-loader.mjs --test tests/rendered-html.test.mjs tests/responsive-scroll.test.mjs tests/market-open-window.test.mjs tests/timeline-clusters.test.mjs tests/news-retrieval.test.mjs tests/assistant-auth.test.mjs tests/assistant-conversations.test.mjs tests/assistant-events.test.mjs tests/assistant-memory.test.mjs tests/assistant-routing.test.mjs tests/assistant-content.test.mjs tests/assistant-evidence.test.mjs tests/assistant-chat.test.mjs tests/assistant-chat-client.test.mjs tests/news-questions.test.mjs tests/news-questions-route.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
     "cf:types": "wrangler types worker-configuration.d.ts",
