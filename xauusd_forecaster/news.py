@@ -28,6 +28,11 @@ from .content import (
 )
 from .forward_ledger import ForwardLedger
 from .news_relevance import google_news_item_is_relevant
+from .source_polling import (
+    PollFailureClassification,
+    classified_poll_error,
+    source_poll_gate,
+)
 
 
 UTC = timezone.utc
@@ -40,6 +45,25 @@ GOOGLE_NEWS_ATTEMPT_MULTIPLIER = 2
 class RssSource:
     name: str
     url: str
+
+
+def _primary_poll_failure(
+    failures: list[PollFailureClassification],
+) -> PollFailureClassification | None:
+    """Choose the safest aggregate recovery fact for a multi-request poll."""
+    auth = next(
+        (item for item in failures
+         if item.error_type == "AuthConfigurationError"),
+        None,
+    )
+    if auth is not None:
+        return auth
+    rate_limits = [item for item in failures if item.error_type == "RateLimited"]
+    if rate_limits:
+        return max(
+            rate_limits, key=lambda item: item.retry_after_seconds or 0,
+        )
+    return failures[0] if failures else None
 
 
 def _current_forward_news(record: dict[str, object], ledger: ForwardLedger,
@@ -428,12 +452,16 @@ def collect_fred_macro(
     """Collect bounded official FRED snapshots with first-seen revisions."""
     interval = timedelta(minutes=60)
     poll_source = FRED_POLL_SOURCE
-    last_poll = ledger.latest_source_poll_time(poll_source)
-    if last_poll is not None and fetched_at - last_poll < interval:
-        return {"source": FRED_POLL_SOURCE, "status": "SKIPPED_INTERVAL"}
+    gate = source_poll_gate(
+        ledger.connection, poll_source,
+        observed_at=fetched_at, success_interval=interval,
+    )
+    if gate is not None:
+        return gate
     inserted = 0
     unchanged = 0
     errors: list[str] = []
+    failures = []
     hashes: list[str] = []
     start = (fetched_at - timedelta(days=45)).date().isoformat()
     api_key = os.environ.get("FRED_API_KEY", "").strip()
@@ -503,11 +531,24 @@ def collect_fred_macro(
                 inserted += int(created)
                 unchanged += int(not created)
         except Exception as error:
+            failure = classified_poll_error(
+                error, credentialed=bool(api_key), observed_at=fetched_at,
+            )
+            failures.append(failure)
             errors.append(
-                f"{series.series_id}:{type(error).__name__}:"
+                f"{series.series_id}:{failure.error_type}:"
                 f"{_redacted_error(error, api_key, limit=120)}"
             )
     status = "OK" if not errors else ("PARTIAL" if inserted or unchanged else "ERROR")
+    primary_failure = _primary_poll_failure(failures)
+    failure_fields = (
+        primary_failure.poll_fields(" | ".join(errors))
+        if primary_failure is not None else {}
+    )
+    if primary_failure is not None and primary_failure.error_type not in {
+        "AuthConfigurationError", "RateLimited",
+    }:
+        failure_fields["error_type"] = "SeriesErrors"
     ledger.append_source_poll(
         {
             "poll_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{poll_source}|{fetched_at.isoformat()}")),
@@ -515,8 +556,7 @@ def collect_fred_macro(
             "fetched_time": fetched_at,
             "status": status,
             "payload_hash": hashlib.sha256("".join(hashes).encode()).hexdigest() if hashes else None,
-            "error_type": "SeriesErrors" if errors else None,
-            "error": " | ".join(errors)[:500] if errors else None,
+            **failure_fields,
         }
     )
     return {
@@ -538,9 +578,13 @@ def collect_eia_macro(
     api_key = os.environ.get("EIA_API_KEY", "").strip()
     if not api_key:
         return {"source": EIA_API_SOURCE, "status": "DISABLED_KEY_MISSING"}
-    last_poll = ledger.latest_source_poll_time(EIA_API_SOURCE)
-    if last_poll is not None and fetched_at - last_poll < timedelta(hours=1):
-        return {"source": EIA_API_SOURCE, "status": "SKIPPED_INTERVAL"}
+    gate = source_poll_gate(
+        ledger.connection, EIA_API_SOURCE,
+        observed_at=fetched_at, success_interval=timedelta(hours=1),
+    )
+    if gate is not None:
+        gate["registered"] = True
+        return gate
     poll_id = str(uuid.uuid5(
         uuid.NAMESPACE_URL, f"{EIA_API_SOURCE}|{fetched_at.isoformat()}"
     ))
@@ -609,20 +653,21 @@ def collect_eia_macro(
             "registered": True,
         }
     except Exception as error:
-        rate_limited = getattr(error, "code", None) == 429
+        failure = classified_poll_error(
+            error, credentialed=True, observed_at=fetched_at,
+        )
         safe_error = _redacted_error(error, api_key)
         ledger.append_source_poll({
             "poll_id": poll_id,
             "source": EIA_API_SOURCE,
             "fetched_time": fetched_at,
             "status": "ERROR",
-            "error_type": "RateLimited" if rate_limited else type(error).__name__,
-            "error": safe_error,
+            **failure.poll_fields(safe_error),
         })
         return {
             "source": EIA_API_SOURCE,
             "status": "ERROR",
-            "error_type": "RateLimited" if rate_limited else type(error).__name__,
+            "error_type": failure.error_type,
             "error": safe_error,
             "registered": True,
         }
@@ -637,9 +682,13 @@ def collect_bea_macro(
     api_key = os.environ.get("BEA_API_KEY", "").strip()
     if not api_key:
         return {"source": BEA_API_SOURCE, "status": "DISABLED_KEY_MISSING"}
-    last_poll = ledger.latest_source_poll_time(BEA_API_SOURCE)
-    if last_poll is not None and fetched_at - last_poll < timedelta(hours=1):
-        return {"source": BEA_API_SOURCE, "status": "SKIPPED_INTERVAL"}
+    gate = source_poll_gate(
+        ledger.connection, BEA_API_SOURCE,
+        observed_at=fetched_at, success_interval=timedelta(hours=1),
+    )
+    if gate is not None:
+        gate["registered"] = True
+        return gate
     poll_id = str(uuid.uuid5(
         uuid.NAMESPACE_URL, f"{BEA_API_SOURCE}|{fetched_at.isoformat()}"
     ))
@@ -647,6 +696,7 @@ def collect_bea_macro(
     unchanged = 0
     hashes: list[str] = []
     errors: list[str] = []
+    failures = []
     years = f"{fetched_at.year - 1},{fetched_at.year}"
     by_table: dict[str, list[BeaSeries]] = {}
     for series in BEA_SERIES:
@@ -720,11 +770,24 @@ def collect_bea_macro(
                     inserted += int(created)
                     unchanged += int(not created)
         except Exception as error:
+            failure = classified_poll_error(
+                error, credentialed=True, observed_at=fetched_at,
+            )
+            failures.append(failure)
             errors.append(
-                f"{table_name}:{type(error).__name__}:"
+                f"{table_name}:{failure.error_type}:"
                 f"{_redacted_error(error, api_key, limit=180)}"
             )
     status = "OK" if not errors else ("PARTIAL" if inserted or unchanged else "ERROR")
+    primary_failure = _primary_poll_failure(failures)
+    failure_fields = (
+        primary_failure.poll_fields(" | ".join(errors))
+        if primary_failure is not None else {}
+    )
+    if primary_failure is not None and primary_failure.error_type not in {
+        "AuthConfigurationError", "RateLimited",
+    }:
+        failure_fields["error_type"] = "TableErrors"
     ledger.append_source_poll({
         "poll_id": poll_id,
         "source": BEA_API_SOURCE,
@@ -732,8 +795,7 @@ def collect_bea_macro(
         "status": status,
         "payload_hash": hashlib.sha256("".join(hashes).encode()).hexdigest()
         if hashes else None,
-        "error_type": "TableErrors" if errors else None,
-        "error": " | ".join(errors)[:500] if errors else None,
+        **failure_fields,
     })
     return {
         "source": BEA_API_SOURCE,
@@ -752,12 +814,12 @@ def collect_gdelt_news(
     content_extractor: Callable[[str], tuple[str, str]] = extract_article_full_text,
 ) -> dict[str, object]:
     """Collect bounded gold candidates from GDELT's official 15-minute GKG feed."""
-    last_poll = ledger.latest_source_poll_time(GDELT_SOURCE)
-    if last_poll is not None and fetched_at < last_poll + timedelta(hours=1):
-        return {
-            "source": GDELT_SOURCE,
-            "status": "SKIPPED_INTERVAL",
-        }
+    gate = source_poll_gate(
+        ledger.connection, GDELT_SOURCE,
+        observed_at=fetched_at, success_interval=timedelta(hours=1),
+    )
+    if gate is not None:
+        return gate
     poll_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{GDELT_SOURCE}|{fetched_at.isoformat()}"))
     try:
         manifest = fetcher(GDELT_LAST_UPDATE_URL).decode("ascii")
@@ -886,12 +948,19 @@ def collect_gdelt_news(
                 "archive": archive_name, "rejected_reasons": rejected,
                 "rejection_receipts": len(rejection_receipts)}
     except Exception as error:
+        failure = classified_poll_error(
+            error, credentialed=False, observed_at=fetched_at,
+        )
         message = str(error)[:500]
-        ledger.append_source_poll({"poll_id": poll_id, "source": GDELT_SOURCE, "fetched_time": fetched_at, "status": "ERROR", "error_type": type(error).__name__, "error": message})
+        ledger.append_source_poll({
+            "poll_id": poll_id, "source": GDELT_SOURCE,
+            "fetched_time": fetched_at, "status": "ERROR",
+            **failure.poll_fields(message),
+        })
         return {
             "source": GDELT_SOURCE,
             "status": "ERROR",
-            "error_type": type(error).__name__,
+            "error_type": failure.error_type,
             "error": message,
             "fallback_source": GOOGLE_GEO_SOURCE,
         }
@@ -906,10 +975,13 @@ def collect_direct_full_text_rss_news(
     """Collect bounded official feeds only after publisher text is available."""
     statuses: list[dict[str, object]] = []
     for source in DIRECT_FULL_TEXT_RSS_SOURCES:
-        last_poll = ledger.latest_source_poll_time(source.name)
         interval = timedelta(minutes=10)
-        if last_poll is not None and fetched_at - last_poll < interval:
-            statuses.append({"source": source.name, "status": "SKIPPED_INTERVAL"})
+        gate = source_poll_gate(
+            ledger.connection, source.name,
+            observed_at=fetched_at, success_interval=interval,
+        )
+        if gate is not None:
+            statuses.append(gate)
             continue
         poll_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source.name}|{fetched_at.isoformat()}"))
         try:
@@ -973,22 +1045,25 @@ def collect_direct_full_text_rss_news(
                 }
             )
         except Exception as error:
+            failure = classified_poll_error(
+                error, credentialed=False, observed_at=fetched_at,
+            )
+            message = str(error)
             ledger.append_source_poll(
                 {
                     "poll_id": poll_id,
                     "source": source.name,
                     "fetched_time": fetched_at,
                     "status": "ERROR",
-                    "error_type": type(error).__name__,
-                    "error": str(error)[:500],
+                    **failure.poll_fields(message),
                 }
             )
             statuses.append(
                 {
                     "source": source.name,
                     "status": "ERROR",
-                    "error_type": type(error).__name__,
-                    "error": str(error)[:500],
+                    "error_type": failure.error_type,
+                    "error": message[:500],
                 }
             )
     return statuses
@@ -1003,9 +1078,12 @@ def collect_direct_full_text_html_news(
     """Monitor bounded official listing pages with stable direct article links."""
     statuses: list[dict[str, object]] = []
     for source in DIRECT_FULL_TEXT_HTML_SOURCES:
-        last_poll = ledger.latest_source_poll_time(source.name)
-        if last_poll is not None and fetched_at - last_poll < timedelta(minutes=10):
-            statuses.append({"source": source.name, "status": "SKIPPED_INTERVAL"})
+        gate = source_poll_gate(
+            ledger.connection, source.name,
+            observed_at=fetched_at, success_interval=timedelta(minutes=10),
+        )
+        if gate is not None:
+            statuses.append(gate)
             continue
         poll_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source.name}|{fetched_at.isoformat()}"))
         try:
@@ -1106,22 +1184,25 @@ def collect_direct_full_text_html_news(
                 }
             )
         except Exception as error:
+            failure = classified_poll_error(
+                error, credentialed=False, observed_at=fetched_at,
+            )
+            message = str(error)
             ledger.append_source_poll(
                 {
                     "poll_id": poll_id,
                     "source": source.name,
                     "fetched_time": fetched_at,
                     "status": "ERROR",
-                    "error_type": type(error).__name__,
-                    "error": str(error)[:500],
+                    **failure.poll_fields(message),
                 }
             )
             statuses.append(
                 {
                     "source": source.name,
                     "status": "ERROR",
-                    "error_type": type(error).__name__,
-                    "error": str(error)[:500],
+                    "error_type": failure.error_type,
+                    "error": message[:500],
                 }
             )
     return statuses
@@ -1136,9 +1217,12 @@ def collect_world_gold_council_news(
     ] = extract_world_gold_council_article,
 ) -> dict[str, object]:
     """Collect World Gold Council central-bank research headlines."""
-    last_poll = ledger.latest_source_poll_time(WGC_SOURCE)
-    if last_poll is not None and fetched_at - last_poll < timedelta(hours=6):
-        return {"source": WGC_SOURCE, "status": "SKIPPED_INTERVAL"}
+    gate = source_poll_gate(
+        ledger.connection, WGC_SOURCE,
+        observed_at=fetched_at, success_interval=timedelta(hours=6),
+    )
+    if gate is not None:
+        return gate
     poll_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{WGC_SOURCE}|{fetched_at.isoformat()}"))
     try:
         raw = fetcher(WGC_URL)
@@ -1221,8 +1305,19 @@ def collect_world_gold_council_news(
         return {"source": WGC_SOURCE, "status": status, "inserted_revisions": inserted,
                 "unchanged_items": unchanged, "rejected_reasons": rejected}
     except Exception as error:
-        ledger.append_source_poll({"poll_id": poll_id, "source": WGC_SOURCE, "fetched_time": fetched_at, "status": "ERROR", "error_type": type(error).__name__, "error": str(error)[:500]})
-        return {"source": WGC_SOURCE, "status": "ERROR", "error_type": type(error).__name__, "error": str(error)[:500]}
+        failure = classified_poll_error(
+            error, credentialed=False, observed_at=fetched_at,
+        )
+        message = str(error)
+        ledger.append_source_poll({
+            "poll_id": poll_id, "source": WGC_SOURCE,
+            "fetched_time": fetched_at, "status": "ERROR",
+            **failure.poll_fields(message),
+        })
+        return {
+            "source": WGC_SOURCE, "status": "ERROR",
+            "error_type": failure.error_type, "error": message[:500],
+        }
 
 
 def collect_google_geopolitical_news(
@@ -1256,9 +1351,12 @@ def collect_google_news_lane(
     Headline-only search candidates are not durable evidence and are therefore
     never appended to the immutable news ledger.
     """
-    last_poll = ledger.latest_source_poll_time(lane.name)
-    if last_poll is not None and fetched_at - last_poll < timedelta(minutes=20):
-        return {"source": lane.name, "status": "SKIPPED_INTERVAL"}
+    gate = source_poll_gate(
+        ledger.connection, lane.name,
+        observed_at=fetched_at, success_interval=timedelta(minutes=20),
+    )
+    if gate is not None:
+        return gate
     source = RssSource(lane.name, lane.url)
     poll_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{lane.name}|{fetched_at.isoformat()}"))
     try:
@@ -1392,8 +1490,19 @@ def collect_google_news_lane(
             "unchanged_items": unchanged,
         }
     except Exception as error:
-        ledger.append_source_poll({"poll_id": poll_id, "source": lane.name, "fetched_time": fetched_at, "status": "ERROR", "error_type": type(error).__name__, "error": str(error)[:500]})
-        return {"source": lane.name, "status": "ERROR", "error_type": type(error).__name__, "error": str(error)[:500]}
+        failure = classified_poll_error(
+            error, credentialed=False, observed_at=fetched_at,
+        )
+        message = str(error)
+        ledger.append_source_poll({
+            "poll_id": poll_id, "source": lane.name,
+            "fetched_time": fetched_at, "status": "ERROR",
+            **failure.poll_fields(message),
+        })
+        return {
+            "source": lane.name, "status": "ERROR",
+            "error_type": failure.error_type, "error": message[:500],
+        }
 
 
 def _append_discovery_failure(
@@ -1443,16 +1552,16 @@ def collect_bls_macro(
     *,
     force: bool = False,
 ) -> dict[str, object]:
-    key_configured = bool(os.environ.get("BLS_API_KEY", "").strip())
+    api_key = os.environ.get("BLS_API_KEY", "").strip()
+    key_configured = bool(api_key)
     interval = timedelta(minutes=5 if key_configured else 65)
-    last_poll = ledger.latest_source_poll_time(BLS_SOURCE)
-    if not force and last_poll is not None and fetched_at - last_poll < interval:
-        return {
-            "source": BLS_SOURCE,
-            "status": "SKIPPED_INTERVAL",
-            "next_poll_after": (last_poll + interval).isoformat(),
-            "registered": key_configured,
-        }
+    gate = None if force else source_poll_gate(
+        ledger.connection, BLS_SOURCE,
+        observed_at=fetched_at, success_interval=interval,
+    )
+    if gate is not None:
+        gate["registered"] = key_configured
+        return gate
     poll_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{BLS_SOURCE}|{fetched_at.isoformat()}"))
     try:
         raw = fetcher(fetched_at)
@@ -1534,21 +1643,24 @@ def collect_bls_macro(
             "registered": key_configured,
         }
     except Exception as error:
+        failure = classified_poll_error(
+            error, credentialed=key_configured, observed_at=fetched_at,
+        )
+        message = _redacted_error(error, api_key)
         ledger.append_source_poll(
             {
                 "poll_id": poll_id,
                 "source": BLS_SOURCE,
                 "fetched_time": fetched_at,
                 "status": "ERROR",
-                "error_type": type(error).__name__,
-                "error": str(error)[:500],
+                **failure.poll_fields(message),
             }
         )
         return {
             "source": BLS_SOURCE,
             "status": "ERROR",
-            "error_type": type(error).__name__,
-            "error": str(error)[:500],
+            "error_type": failure.error_type,
+            "error": message[:500],
             "registered": key_configured,
         }
 

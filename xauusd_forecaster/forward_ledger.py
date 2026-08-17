@@ -368,7 +368,9 @@ CREATE TABLE IF NOT EXISTS source_polls (
     status TEXT NOT NULL,
     payload_hash TEXT,
     error_type TEXT,
-    error TEXT
+    error TEXT,
+    provider_http_status INTEGER,
+    retry_after_seconds INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_source_polls_source_time
 ON source_polls(source, fetched_time DESC);
@@ -550,6 +552,7 @@ class ForwardLedger:
         install_v2_schema(self.connection)
         install_scheduler_schema(self.connection)
         install_assistant_capacity_schema(self.connection)
+        self._install_source_poll_schema()
         self._install_daily_brief_lifecycle_schema()
         self._install_append_only_triggers()
         created = now or datetime.now(UTC)
@@ -628,6 +631,32 @@ class ForwardLedger:
                     "ALTER TABLE daily_news_brief_failures_v1 "
                     "ADD COLUMN failure_evidence_json TEXT"
                 )
+
+    def _install_source_poll_schema(self) -> None:
+        """Add safe transport metadata without rewriting poll evidence."""
+        existing = {
+            str(row["name"])
+            for row in self.connection.execute(
+                "PRAGMA table_info(source_polls)"
+            ).fetchall()
+        }
+        with self.connection:
+            if "provider_http_status" not in existing:
+                self.connection.execute(
+                    "ALTER TABLE source_polls ADD COLUMN provider_http_status INTEGER"
+                )
+            if "retry_after_seconds" not in existing:
+                self.connection.execute(
+                    "ALTER TABLE source_polls ADD COLUMN retry_after_seconds INTEGER"
+                )
+            self.connection.execute(
+                """CREATE INDEX IF NOT EXISTS idx_source_polls_source_status_time_id
+                   ON source_polls(source,status,fetched_time DESC,poll_id DESC)"""
+            )
+            self.connection.execute(
+                """CREATE INDEX IF NOT EXISTS idx_source_polls_source_time_id
+                   ON source_polls(source,fetched_time DESC,poll_id DESC)"""
+            )
 
     def append_snapshot(self, record: dict[str, Any]) -> None:
         decision_time = _iso(record["decision_time"])
@@ -746,21 +775,32 @@ class ForwardLedger:
     def append_source_poll(self, record: dict[str, Any]) -> None:
         with self.connection:
             self.connection.execute(
-                "INSERT INTO source_polls VALUES (?, ?, ?, ?, ?, ?, ?)",
+                """INSERT INTO source_polls
+                   (poll_id,source,fetched_time,status,payload_hash,error_type,error,
+                    provider_http_status,retry_after_seconds)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     record["poll_id"], record["source"],
                     _iso(record["fetched_time"]), record["status"],
                     record.get("payload_hash"), record.get("error_type"),
                     record.get("error"),
+                    record.get("provider_http_status"),
+                    record.get("retry_after_seconds"),
                 ),
             )
 
-    def latest_source_poll_time(self, source: str) -> datetime | None:
+    def latest_successful_source_poll_time(self, source: str) -> datetime | None:
+        """Return the latest complete OK used only for normal cadence."""
         row = self.connection.execute(
-            "SELECT max(fetched_time) AS fetched FROM source_polls WHERE source=?",
+            """SELECT fetched_time FROM source_polls
+               WHERE source=? AND status='OK'
+               ORDER BY fetched_time DESC,poll_id DESC LIMIT 1""",
             (source,),
         ).fetchone()
-        return datetime.fromisoformat(row["fetched"]) if row and row["fetched"] else None
+        return (
+            datetime.fromisoformat(row["fetched_time"])
+            if row and row["fetched_time"] else None
+        )
 
     def append_annotation(self, record: dict[str, Any]) -> None:
         source_key = (

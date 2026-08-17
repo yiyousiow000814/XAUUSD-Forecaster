@@ -73,6 +73,7 @@ type StatusPayload = {
   news_source_health: Array<{
     source: string; label: string; role: string; health: "HEALTHY" | "DEGRADED" | "ERROR" | "STALE";
     latest_status: string; latest_poll_time: string | null; last_success: string | null;
+    freshness_reference_time: string | null; freshness_reference_status: "OK" | "PARTIAL" | null;
     age_seconds: number | null; last_error_time: string | null; last_error_type: string | null; last_error: string | null;
     poll_count: number; ok_count: number; partial_count: number; error_count: number;
     item_count: number; revision_count: number; full_text_count: number; latest_item_time: string | null;

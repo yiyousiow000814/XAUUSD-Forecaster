@@ -164,6 +164,13 @@ repeats, except checkpointed display repair, which remains retryable because it
 cannot change semantic measurements or grant model permission. Each retry
 preserves bounded failure evidence, and a later versioned recovery may authorize
 one new attempt after another repair mechanism changes.
+
+The model gateway distinguishes a request that produced no trustworthy response
+from a response that failed decoding or validation. Capacity, provider pacing,
+HTTP, URL, connection, and timeout failures retain request/transport failure
+codes across display repair and MUST NOT become `MODEL_OUTPUT_CONTRACT_FAILED`.
+Only a returned response rejected by schema, semantic, or display validation may
+enter the model-output failure family.
 Waiting six hours would outlive the decision value of timely news.
 HTTP 429 and transient 5xx failures use bounded progressive backoff and become
 terminal after five attempts. Terminal rows remain auditable and are not

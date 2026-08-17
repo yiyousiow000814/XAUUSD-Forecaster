@@ -105,6 +105,19 @@ class ModelGatewayCapacityExhausted(RuntimeError):
         super().__init__(message)
 
 
+class ModelGatewayRequestFailed(RuntimeError):
+    """Provider transport ended without a trustworthy model response."""
+
+    failure_code = "MODEL_REQUEST_FAILED"
+
+    def __init__(self, error: Exception) -> None:
+        self.transport_error_type = type(error).__name__
+        self.provider_http_status = None
+        super().__init__(
+            f"Model provider request failed: {self.transport_error_type}"
+        )
+
+
 class ModelGatewayResponseInvalid(RuntimeError):
     """A metered provider response could not satisfy the requested contract."""
 
@@ -281,7 +294,9 @@ class GeminiModelGateway:
                 last_error = error
                 if error.code not in retryable_http_codes:
                     raise
-            except urllib.error.URLError as error:
+            except (
+                urllib.error.URLError, TimeoutError, ConnectionError,
+            ) as error:
                 if provider_attempted:
                     self.accountant.record_provider_outcome("PROVIDER_FAILED")
                 last_error = error
@@ -308,7 +323,7 @@ class GeminiModelGateway:
             raise last_error
         if isinstance(last_error, retryable_decode_errors):
             raise ModelGatewayResponseInvalid(last_error) from last_error
-        raise RuntimeError("Metered model request failed") from last_error
+        raise ModelGatewayRequestFailed(last_error) from last_error
 
     def _reserve(self, api_key: str, usage: ModelRequestUsage) -> bool:
         with self._lock:
