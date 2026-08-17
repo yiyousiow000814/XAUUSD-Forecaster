@@ -142,8 +142,12 @@ fields, freezes semantic and already-valid display fields, and may return only
 the rejected fields. The repair model may copy exact source-number spellings or
 remove the unsupported numeric claim; it may never convert units or magnitudes.
 An ambiguous or unsupported number remains a validation failure and is never
-replaced by manufactured prose. If the repair cannot pass validation, no
-annotation is persisted and no model permission is granted. Provider,
+replaced by manufactured prose. Validated semantics are checkpointed before a
+failed display attempt is released. Later attempts resume only the rejected
+display fields, carry the latest validation reason, and may use the declared
+fallback display route; they never repeat semantic analysis. Until the display
+passes, no annotation is persisted and no model permission is granted. Display
+repair remains nonterminal and uses bounded retry intervals. Provider,
 transport, malformed-JSON, and model-output contract failures append a
 `news_llm_failures` row before retry. A rejected structured response also
 appends bounded diagnostic evidence: its failure stage and code, response hash,
@@ -153,8 +157,10 @@ prefix and the complete response hash may replace selected fields. Full rejected
 responses, source bodies, prompts, and credentials MUST NOT be duplicated into
 the failure evidence table. Model-output contract
 failures retry once after five minutes and become terminal when the same failure
-repeats; each retry preserves bounded failure evidence, and a later versioned
-recovery may authorize one new attempt after the repair mechanism changes.
+repeats, except checkpointed display repair, which remains retryable because it
+cannot change semantic measurements or grant model permission. Each retry
+preserves bounded failure evidence, and a later versioned recovery may authorize
+one new attempt after another repair mechanism changes.
 Waiting six hours would outlive the decision value of timely news.
 HTTP 429 and transient 5xx failures use bounded progressive backoff and become
 terminal after five attempts. Terminal rows remain auditable and are not

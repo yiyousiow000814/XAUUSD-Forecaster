@@ -739,6 +739,14 @@ def _news_reader_rows(
                    cf.error_type AS content_error_type,
                    n.link, n.content_hash, n.body,
                    EXISTS (
+                     SELECT 1 FROM news_annotation_display_checkpoints_v1 checkpoint
+                     WHERE checkpoint.source=n.source
+                       AND checkpoint.source_item_id=n.source_item_id
+                       AND checkpoint.revision_number=n.revision_number
+                       AND checkpoint.raw_content_hash=n.content_hash
+                       AND checkpoint.prompt_version=?
+                   ) AS has_display_checkpoint,
+                   EXISTS (
                      SELECT 1 FROM news_revisions same_content
                      WHERE (same_content.content_hash=n.content_hash
                          OR (same_content.source<>n.source
@@ -881,8 +889,9 @@ def _news_reader_rows(
             LIMIT ?""",
         (
             *candidate_parameters,
-            now.isoformat(timespec="microseconds"), INVALID_CHINESE_TITLE,
-            PROMPT_VERSION, IMPACT_MODEL, IMPACT_PROMPT_VERSION,
+            PROMPT_VERSION, now.isoformat(timespec="microseconds"),
+            INVALID_CHINESE_TITLE, PROMPT_VERSION,
+            IMPACT_MODEL, IMPACT_PROMPT_VERSION,
             HANDOVER_IMPACT_PROMPT_VERSION, IMPACT_PROMPT_VERSION,
             PROMPT_VERSION, cutoff, limit,
         ),
@@ -999,11 +1008,18 @@ def _serialize_news_rows(
         )
         annotation_failure_code = item.pop("annotation_failure_code", None)
         annotation_failure = item.pop("annotation_failure", None)
+        has_display_checkpoint = bool(item.pop("has_display_checkpoint", False))
         has_canonical_content_peer = bool(
             item.pop("has_canonical_content_peer", False)
         )
         if item.get("parsed_at"):
             item["annotation_status"] = "READY"
+        elif has_display_checkpoint:
+            item["annotation_status"] = "REPAIRING_DISPLAY"
+            item["annotation_reason_code"] = "DISPLAY_REPAIR_IN_PROGRESS"
+            item["annotation_reason"] = (
+                "语义复核已经完成，系统正在根据校验反馈修复中文显示"
+            )
         elif annotation_key in claimable_annotation_keys:
             item["annotation_status"] = "QUEUED"
         elif item.get("annotation_status") == "QUEUED":

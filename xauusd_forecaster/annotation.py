@@ -75,6 +75,9 @@ INVALID_CHINESE_TITLE = "来源新闻（中文标题待校验）"
 TITLE_TRANSLATION_MODELS = (
     DEFAULT_GEMMA_MODEL, DEFAULT_GEMINI_MODEL, FALLBACK_GEMINI_MODEL,
 )
+DISPLAY_REPAIR_MODELS = (
+    DEFAULT_GEMMA_MODEL, DEFAULT_GEMINI_MODEL, FALLBACK_GEMINI_MODEL,
+)
 HIGH_PRIORITY_NEWS_SOURCES = frozenset({"federal_reserve_monetary"})
 
 
@@ -135,6 +138,9 @@ class ModelOutputContractFailed(ValueError):
             self.failure_evidence["selected_output"]["invalid_fields"] = list(
                 invalid_fields[:8]
             )
+        self.checkpoint_result = json.loads(serialized)
+        self.invalid_fields = invalid_fields
+        self.semantic_model: str | None = None
         super().__init__(public_message or str(error))
 
 
@@ -393,6 +399,58 @@ def completed_annotation_records(
     return records
 
 
+def _display_checkpoint_for_row(
+    connection: Connection, row: dict[str, object], *, prompt_version: str,
+) -> dict[str, object] | None:
+    checkpoint = connection.execute(
+        """SELECT * FROM news_annotation_display_checkpoints_v1
+           WHERE source=? AND source_item_id=? AND revision_number=?
+             AND raw_content_hash=? AND prompt_version=?
+           ORDER BY captured_at DESC LIMIT 1""",
+        (
+            row["source"], row["source_item_id"], row["revision_number"],
+            row["content_hash"], prompt_version,
+        ),
+    ).fetchone()
+    if checkpoint is None:
+        return None
+    semantic_result = json.loads(str(checkpoint["semantic_result_json"]))
+    invalid_fields = json.loads(str(checkpoint["invalid_fields_json"]))
+    rejection_reason = str(checkpoint["rejection_reason"])
+    latest = connection.execute(
+        """SELECT e.cause,e.selected_output_json
+           FROM news_llm_failures f
+           JOIN news_llm_failure_evidence_v1 e ON e.failure_id=f.failure_id
+           WHERE f.task_type='ANNOTATION' AND f.source=?
+             AND f.source_item_id=? AND f.revision_number=?
+             AND f.prompt_version=?
+             AND e.failure_stage='DISPLAY_REPAIR'
+           ORDER BY f.attempt_number DESC LIMIT 1""",
+        (
+            row["source"], row["source_item_id"], row["revision_number"],
+            prompt_version,
+        ),
+    ).fetchone()
+    if latest is not None:
+        rejection_reason = str(latest["cause"])
+        selected = json.loads(str(latest["selected_output_json"]))
+        latest_fields = selected.get("invalid_fields")
+        if isinstance(latest_fields, list) and latest_fields:
+            invalid_fields = latest_fields
+        for field in (
+            "headline_zh", "summary_zh", "primary_story_title_zh",
+            "semantic_reason_zh",
+        ):
+            if field in selected:
+                semantic_result[field] = selected[field]
+    return {
+        "semantic_result": semantic_result,
+        "invalid_fields": invalid_fields,
+        "rejection_reason": rejection_reason,
+        "llm_model_version": str(checkpoint["llm_model_version"]),
+    }
+
+
 def _schema(prompt_version: str = PROMPT_VERSION) -> dict:
     schema = json.loads(json.dumps(news_annotation_schema(prompt_version)))
     schema.pop("$schema", None)
@@ -489,7 +547,16 @@ def annotate_pending_news(
                     selected_model, row["headline"], row["body"] or ""
                 )
             else:
-                if prompt_version == PROMPT_VERSION:
+                checkpoint = _display_checkpoint_for_row(
+                    ledger.connection, row, prompt_version=prompt_version,
+                )
+                if checkpoint is not None:
+                    result, exact_model = request_pool.repair_display_checkpoint(
+                        index, selected_model, checkpoint,
+                        row["headline"], row["body"] or "",
+                        prompt_version=prompt_version,
+                    )
+                elif prompt_version == PROMPT_VERSION:
                     result, exact_model = request_pool.call(
                         index, selected_model, row["headline"], row["body"] or ""
                     )
@@ -516,6 +583,18 @@ def annotate_pending_news(
             }
         except Exception as error:
             failure_details = _model_failure_details(error)
+            display_checkpoint = None
+            if (
+                isinstance(error, ModelOutputContractFailed)
+                and error.failure_evidence.get("failure_stage") == "DISPLAY_REPAIR"
+                and error.semantic_model
+            ):
+                display_checkpoint = {
+                    "semantic_result": error.checkpoint_result,
+                    "invalid_fields": error.invalid_fields,
+                    "rejection_reason": error.failure_evidence["cause"],
+                    "llm_model_version": error.semantic_model,
+                }
             return {
                 "status": "ERROR",
                 "row": row,
@@ -523,6 +602,7 @@ def annotate_pending_news(
                 "error_code": failure_details["provider_http_status"],
                 "model_version": expected_model_identity,
                 "prompt_version": prompt_version,
+                "display_checkpoint": display_checkpoint,
             }
 
     pending_records = pending_records[:effective_limit]
@@ -557,8 +637,36 @@ def _persist_parsed_annotation(
             "reason": parsed_record["reason"],
         }
     if parsed_record["status"] != "PARSED":
+        checkpoint = parsed_record.get("display_checkpoint")
+        if isinstance(checkpoint, dict):
+            checkpoint_identity = "|".join((
+                str(row["source"]), str(row["source_item_id"]),
+                str(row["revision_number"]), str(row["content_hash"]),
+                str(checkpoint["llm_model_version"]), prompt_version,
+                "display-checkpoint-v1",
+            ))
+            ledger.append_annotation_display_checkpoint({
+                "checkpoint_id": str(uuid.uuid5(
+                    uuid.NAMESPACE_URL, checkpoint_identity,
+                )),
+                "source": row["source"],
+                "source_item_id": row["source_item_id"],
+                "revision_number": row["revision_number"],
+                "raw_content_hash": row["content_hash"],
+                "llm_model_version": checkpoint["llm_model_version"],
+                "prompt_version": prompt_version,
+                "semantic_result": checkpoint["semantic_result"],
+                "invalid_fields": checkpoint["invalid_fields"],
+                "rejection_reason": checkpoint["rejection_reason"],
+                "captured_at": parsed_record.get("started") or datetime.now(UTC),
+            })
         failure = _append_llm_failure(
             ledger, parsed_record, "ANNOTATION", prompt_version
+        )
+        failure_evidence = parsed_record.get("failure_evidence")
+        repair_is_pending = (
+            isinstance(failure_evidence, dict)
+            and failure_evidence.get("failure_stage") == "DISPLAY_REPAIR"
         )
         return {
             "status": "ERROR", "source": row["source"],
@@ -568,6 +676,7 @@ def _persist_parsed_annotation(
             "error": parsed_record["error"],
             "failure_code": parsed_record.get("failure_code"),
             "provider_http_status": parsed_record.get("provider_http_status"),
+            "retry_with_another_account": repair_is_pending,
             **failure,
         }
     result = parsed_record["result"]
@@ -1074,32 +1183,79 @@ class _GeminiRequestPool:
                 result, prompt_version=prompt_version,
             )
             try:
-                repaired = self._repair_chinese(
-                    start_index + 1, model, result, headline, body,
+                self._repair_display_until_valid(
+                    start_index + 1,
+                    DISPLAY_REPAIR_MODELS,
+                    result, headline, body,
                     invalid_fields=invalid_display_fields,
-                    failure_reason=str(initial_display_error),
+                    initial_error=initial_display_error,
+                    prompt_version=prompt_version,
                 )
-                for field in invalid_display_fields:
-                    result[field] = repaired[field]
-                _recover_display_fields(result, headline, body)
-                _validate_chinese_result(result)
+            except ModelOutputContractFailed as error:
+                error.semantic_model = exact_model
+                raise
+        return result, exact_model
+
+    def repair_display_checkpoint(
+        self, start_index: int, model: str, checkpoint: dict[str, object],
+        headline: str, body: str, *, prompt_version: str,
+    ) -> tuple[dict, str]:
+        """Resume display correction without asking for semantic analysis again."""
+        result = json.loads(json.dumps(checkpoint["semantic_result"]))
+        semantic_model = str(checkpoint["llm_model_version"])
+        invalid_fields = tuple(str(item) for item in checkpoint["invalid_fields"])
+        initial_error = ValueError(str(checkpoint["rejection_reason"]))
+        try:
+            self._repair_display_until_valid(
+                start_index, DISPLAY_REPAIR_MODELS,
+                result, headline, body,
+                invalid_fields=invalid_fields,
+                initial_error=initial_error,
+                prompt_version=prompt_version,
+            )
+        except ModelOutputContractFailed as error:
+            error.semantic_model = semantic_model
+            raise
+        return result, semantic_model
+
+    def _repair_display_until_valid(
+        self, start_index: int, models: tuple[str, ...], result: dict,
+        headline: str, body: str, *, invalid_fields: tuple[str, ...],
+        initial_error: Exception, prompt_version: str,
+    ) -> None:
+        """Correct rejected fields across declared routes while semantics stay frozen."""
+        rejection: Exception = initial_error
+        last_result = dict(result)
+        for offset, candidate_model in enumerate(dict.fromkeys(models)):
+            working = dict(last_result)
+            try:
+                repaired = self._repair_chinese(
+                    start_index + offset, candidate_model, working,
+                    headline, body, invalid_fields=invalid_fields,
+                    failure_reason=str(rejection),
+                )
+                for field in invalid_fields:
+                    working[field] = repaired[field]
+                _recover_display_fields(working, headline, body)
+                _validate_chinese_result(working)
                 if prompt_version in GENERATED_NEWS_PROMPT_VERSIONS:
                     _validate_current_result(
-                        result, headline=headline, body=body,
+                        working, headline=headline, body=body,
                         prompt_version=prompt_version,
                     )
-            except (ModelGatewayCapacityExhausted, urllib.error.HTTPError):
-                raise
+                result.clear()
+                result.update(working)
+                return
             except Exception as error:
-                raise ModelOutputContractFailed(
-                    error, result, stage="DISPLAY_REPAIR",
-                    initial_error=initial_display_error,
-                    invalid_fields=invalid_display_fields,
-                    public_message=(
-                        "Gemini display repair failed; semantic annotation withheld"
-                    ),
-                ) from error
-        return result, exact_model
+                rejection = error
+                last_result = working
+        raise ModelOutputContractFailed(
+            rejection, last_result, stage="DISPLAY_REPAIR",
+            initial_error=initial_error, invalid_fields=invalid_fields,
+            public_message=(
+                "Gemini display repair remains pending; validated semantics retained"
+            ),
+        ) from rejection
 
     def _repair_chinese(
         self, start_index: int, model: str, result: dict,
@@ -1128,7 +1284,7 @@ class _GeminiRequestPool:
             input_tokens=input_tokens,
             decode=_decode_model_json,
             retryable_http_codes=frozenset({401, 403, 429}),
-            retryable_decode_errors=(ValueError, KeyError, json.JSONDecodeError),
+            retryable_decode_errors=(),
         )
         return repaired
 
@@ -2203,6 +2359,7 @@ def _validate_current_semantics(
         "headline_zh": "来源新闻",
         "summary_zh": "完整来源正文已经保存，语义测量独立接受结构和证据校验。",
         "primary_story_title_zh": "",
+        "semantic_reason_zh": "来源证据已经通过结构与语义合同校验。",
     })
     _validate_current_result(
         semantic_candidate, headline=headline, body=body,
@@ -2291,11 +2448,19 @@ def _append_llm_failure(
     failure_code = str(
         parsed_record.get("failure_code") or "MODEL_REQUEST_FAILED"
     )
+    failure_evidence = parsed_record.get("failure_evidence")
+    failure_stage = (
+        str(failure_evidence.get("failure_stage") or "")
+        if isinstance(failure_evidence, dict) else ""
+    )
     transient = error_code in {429, 500, 502, 503, 504} or (
         error_type == "RuntimeError"
         and "unavailable" in normalized_error.casefold()
     )
-    if transient:
+    if failure_stage == "DISPLAY_REPAIR":
+        terminal = False
+        delay = timedelta(minutes=(1, 2, 5, 15, 30)[min(attempt - 1, 4)])
+    elif transient:
         terminal = attempt >= 5
         delay = timedelta(minutes=(15, 60, 360, 720)[min(attempt - 1, 3)])
     elif failure_code in {
@@ -2315,7 +2480,6 @@ def _append_llm_failure(
             str(attempt), signature,
         ]
     )
-    failure_evidence = parsed_record.get("failure_evidence")
     ledger.append_llm_failure(
         {
             "failure_id": str(uuid.uuid5(uuid.NAMESPACE_URL, identity)),

@@ -2604,27 +2604,64 @@ def test_display_failure_withholds_semantics_until_readable_output_exists(
         review_priority="IMMEDIATE",
         semantic_reason_zh="来源证据显示该事件可能影响黄金。",
     )
+    repaired_display = {
+        "headline_zh": "黄金市场更新",
+        "summary_zh": "完整来源正文已经保存，当前仅修复中文展示字段。",
+    }
     calls = []
-    def respond(_key, _model, _payload):
-        calls.append(1)
-        if len(calls) > 1:
+    def respond(_key, model, payload):
+        calls.append((model, payload))
+        if len(calls) == 1:
+            return vector
+        if len(calls) < 5:
             raise RuntimeError("repair unavailable")
-        return vector
+        return repaired_display
     _mock_model_json(monkeypatch, respond)
     statuses = annotate_pending_news(
         ledger, provider="gemini", api_key="test-key", limit=1,
         request_accountant=ALLOW_MODEL_REQUEST,
     )
     assert statuses[0]["status"] == "ERROR"
-    assert "semantic annotation withheld" in statuses[0]["error"]
+    assert "validated semantics retained" in statuses[0]["error"]
+    assert statuses[0]["is_terminal"] is False
     assert ledger.count("news_annotations") == 0
     assert ledger.count("news_llm_failures") == 1
+    assert ledger.count("news_annotation_display_checkpoints_v1") == 1
     evidence = ledger.connection.execute(
         "SELECT selected_output_json FROM news_llm_failure_evidence_v1"
     ).fetchone()
     selected = json.loads(evidence["selected_output_json"])
     assert selected["invalid_fields"]
     assert "initial_error" in selected
+
+    checkpoint = ledger.connection.execute(
+        "SELECT semantic_result_json FROM news_annotation_display_checkpoints_v1"
+    ).fetchone()
+    preserved = json.loads(checkpoint["semantic_result_json"])
+    assert preserved["xauusd_relevance"] == "MACRO_DRIVER"
+    assert preserved["hawkishness"] == 0.7
+    row = dict(ledger.connection.execute(
+        "SELECT * FROM news_revisions WHERE source_item_id='one'"
+    ).fetchone())
+
+    recovered = annotate_pending_news(
+        ledger, provider="gemini", api_key="test-key", limit=1,
+        records=[row], request_accountant=ALLOW_MODEL_REQUEST,
+    )
+
+    assert recovered[0]["status"] == "OK"
+    annotation = json.loads(ledger.connection.execute(
+        "SELECT annotation_json FROM news_annotations"
+    ).fetchone()[0])
+    assert annotation["headline_zh"] == "黄金市场更新"
+    assert annotation["hawkishness"] == 0.7
+    assert calls[1][0] == annotation_module.DEFAULT_GEMMA_MODEL
+    assert calls[2][0] == annotation_module.DEFAULT_GEMINI_MODEL
+    assert calls[3][0] == annotation_module.FALLBACK_GEMINI_MODEL
+    assert calls[4][0] == annotation_module.DEFAULT_GEMMA_MODEL
+    retry_instruction = calls[4][1]["contents"][0]["parts"][0]["text"]
+    assert "previous display output was rejected" in retry_instruction
+    assert "NEWS_START" not in retry_instruction
 
 
 def test_semantic_evidence_failure_uses_exact_source_pointer_repair(
@@ -2870,6 +2907,43 @@ def test_repeated_same_validation_failure_enters_dead_letter(tmp_path) -> None:
     ).fetchone()
     assert latest["is_terminal"] == 1
     assert latest["next_retry_at"] is None
+
+
+def test_checkpointed_display_failure_remains_repairable(tmp_path) -> None:
+    now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "Complete source text with enough content for annotation. " * 10
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    row = {
+        "source": "failure-test", "source_item_id": "display",
+        "collector_first_seen_time": now, "fetched_time": now,
+        "headline": "Gold report", "body": body,
+        "content_hash": digest, "cluster_id": "display-failure-cluster",
+    }
+    ledger.append_news_revision(row)
+    parsed = {
+        "row": {**row, "revision_number": 1},
+        "error_type": "ValueError", "error": "display still invalid",
+        "error_code": None, "failure_code": "MODEL_OUTPUT_CONTRACT_FAILED",
+        "model_version": annotation_module.DEFAULT_GEMINI_MODEL,
+        "failure_evidence": {
+            "failure_code": "MODEL_OUTPUT_CONTRACT_FAILED",
+            "failure_stage": "DISPLAY_REPAIR", "response_hash": "a" * 64,
+            "selected_output": {"invalid_fields": ["headline_zh"]},
+            "cause_type": "ValueError", "cause": "display still invalid",
+        },
+    }
+
+    outcomes = [
+        annotation_module._append_llm_failure(
+            ledger, parsed, "ANNOTATION", annotation_module.PROMPT_VERSION,
+        )
+        for _ in range(5)
+    ]
+
+    assert {item["retry_state"] for item in outcomes} == {"BACKING_OFF"}
+    assert all(item["is_terminal"] is False for item in outcomes)
+    assert outcomes[-1]["next_retry_at"] is not None
 
 
 def test_repeated_same_impact_validation_failure_gets_one_recovery_attempt(
