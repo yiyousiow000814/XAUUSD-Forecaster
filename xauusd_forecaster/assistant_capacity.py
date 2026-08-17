@@ -650,6 +650,8 @@ def _reserve_assistant_capacity(
         )
         connection.execute(
             """INSERT INTO news_ai_account_request_usage_v1
+               (usage_id,account_id,model_family,request_count,
+                input_token_count,reserved_at)
                VALUES (?,?,?,?,?,?)""",
             (
                 reservation_id, policy.credential_pool_id, profile.model_id,

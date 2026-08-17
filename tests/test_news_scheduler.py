@@ -1054,6 +1054,58 @@ def test_embedding_catchup_is_deferred_without_trying_another_account(
     assert runner._may_try_another_credential(status) is False
 
 
+def test_embedding_provider_throttle_wait_does_not_consume_impact_attempt(
+    tmp_path, monkeypatch,
+) -> None:
+    from scripts import run_news_annotator as runner
+    from xauusd_forecaster.gemini_embeddings import GeminiEmbeddingFailure
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    job_id = enqueue_job(
+        ledger.connection, task_type="ACTIVE_IMPACT", source="source",
+        source_item_id="throttled", revision_number=1,
+        annotation_id="annotation", prompt_version="prompt", priority="FAST",
+        now=datetime.now(UTC) - timedelta(minutes=1),
+    )
+    credential = ApiCredential(
+        "account-a", ROUTINE_POOL, "not-a-real-key", "credential-a",
+    )
+    monkeypatch.setattr(runner, "configured_api_credentials", lambda: (credential,))
+    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    retry_at = datetime.now(UTC) + timedelta(minutes=5)
+
+    def throttled(*_args, **_kwargs):
+        error = GeminiEmbeddingFailure(
+            "provider throttled",
+            failure_code="NEWS_EMBEDDING_PROVIDER_THROTTLED",
+            provider_http_status=429,
+            retry_after_seconds=300,
+            diagnostic={"batch_item_count": 20, "estimated_input_tokens": 25000},
+        )
+        error.next_retry_at = retry_at.isoformat()
+        raise error
+
+    monkeypatch.setattr(runner, "_execute_job", throttled)
+
+    statuses = runner.run_scheduled_batch(ledger, batch_size=3)
+
+    assert len(statuses) == 1
+    assert statuses[0]["failure_code"] == "NEWS_EMBEDDING_PROVIDER_THROTTLED"
+    assert statuses[0]["provider_http_status"] == 429
+    row = ledger.connection.execute(
+        "SELECT state,attempt_count,last_error,available_at "
+        "FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
+    ).fetchone()
+    assert row["state"] == "QUEUED"
+    assert row["attempt_count"] == 0
+    assert row["last_error"] == "NEWS_EMBEDDING_PROVIDER_THROTTLED"
+    assert datetime.fromisoformat(row["available_at"]) == retry_at
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_ai_job_attempts_v1 WHERE job_id=?", (job_id,),
+    ).fetchone()[0] == 0
+    ledger.close()
+
+
 def test_embedding_maintenance_does_not_consume_job_attempts_and_resumes(
     tmp_path, monkeypatch,
 ) -> None:

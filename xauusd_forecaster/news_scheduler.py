@@ -100,7 +100,13 @@ CREATE TABLE IF NOT EXISTS news_ai_account_request_usage_v1 (
     model_family TEXT NOT NULL,
     request_count INTEGER NOT NULL CHECK(request_count > 0),
     input_token_count INTEGER NOT NULL CHECK(input_token_count >= 0),
-    reserved_at TEXT NOT NULL
+    reserved_at TEXT NOT NULL,
+    attempted_at TEXT,
+    provider_outcome TEXT CHECK(provider_outcome IN (
+        'PROVIDER_SUCCEEDED','PROVIDER_THROTTLED','PROVIDER_FAILED')),
+    provider_http_status INTEGER,
+    provider_completed_at TEXT,
+    vectors_committed_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS news_ai_account_request_usage_window_v1
@@ -181,6 +187,25 @@ def install_scheduler_schema(connection: sqlite3.Connection) -> None:
             "ALTER TABLE news_ai_account_minute_usage_v1 "
             "ADD COLUMN input_token_count INTEGER NOT NULL DEFAULT 0"
         )
+    request_usage_columns = {
+        str(row["name"])
+        for row in connection.execute(
+            "PRAGMA table_info(news_ai_account_request_usage_v1)"
+        ).fetchall()
+    }
+    request_usage_additions = {
+        "attempted_at": "TEXT",
+        "provider_outcome": "TEXT",
+        "provider_http_status": "INTEGER",
+        "provider_completed_at": "TEXT",
+        "vectors_committed_at": "TEXT",
+    }
+    for name, declaration in request_usage_additions.items():
+        if name not in request_usage_columns:
+            connection.execute(
+                "ALTER TABLE news_ai_account_request_usage_v1 "
+                f"ADD COLUMN {name} {declaration}"
+            )
     migration_id = "exact-rolling-capacity-v1"
     migrated = connection.execute(
         "SELECT 1 FROM news_ai_scheduler_migrations_v1 WHERE migration_id=?",
@@ -208,6 +233,8 @@ def install_scheduler_schema(connection: sqlite3.Connection) -> None:
             ).hexdigest()[:24]
             connection.execute(
                 """INSERT OR IGNORE INTO news_ai_account_request_usage_v1
+                   (usage_id,account_id,model_family,request_count,
+                    input_token_count,reserved_at)
                    VALUES (?,?,?,?,?,?)""",
                 (
                     usage_id, legacy_account, legacy_model,
@@ -831,6 +858,7 @@ def reserve_account_request(
     reserve_total: int = 0,
     urgent: bool = False,
     now: datetime | None = None,
+    usage_id: str | None = None,
 ) -> bool:
     """Atomically count attempted provider requests against one account.
 
@@ -898,9 +926,12 @@ def reserve_account_request(
         )
         connection.execute(
             """INSERT INTO news_ai_account_request_usage_v1
+               (usage_id,account_id,model_family,request_count,
+                input_token_count,reserved_at)
                VALUES (?,?,?,?,?,?)""",
             (
-                str(uuid.uuid4()), account_id, model_family, attempted_requests,
+                usage_id or str(uuid.uuid4()), account_id, model_family,
+                attempted_requests,
                 estimated_tokens, timestamp,
             ),
         )
@@ -909,6 +940,73 @@ def reserve_account_request(
     except Exception:
         connection.rollback()
         raise
+
+
+def mark_account_request_attempted(
+    connection: sqlite3.Connection,
+    usage_id: str,
+    *,
+    now: datetime | None = None,
+) -> None:
+    timestamp = _iso(now or datetime.now(UTC))
+    with connection:
+        updated = connection.execute(
+            """UPDATE news_ai_account_request_usage_v1
+               SET attempted_at=COALESCE(attempted_at,?)
+               WHERE usage_id=?""",
+            (timestamp, usage_id),
+        )
+        if updated.rowcount != 1:
+            raise ValueError("model request admission is missing")
+
+
+def record_account_request_outcome(
+    connection: sqlite3.Connection,
+    usage_id: str,
+    *,
+    outcome: str,
+    provider_http_status: int | None = None,
+    now: datetime | None = None,
+) -> None:
+    if outcome not in {
+        "PROVIDER_SUCCEEDED", "PROVIDER_THROTTLED", "PROVIDER_FAILED",
+    }:
+        raise ValueError("provider request outcome is not controlled")
+    timestamp = _iso(now or datetime.now(UTC))
+    with connection:
+        updated = connection.execute(
+            """UPDATE news_ai_account_request_usage_v1
+               SET provider_outcome=?,provider_http_status=?,
+                   provider_completed_at=?
+               WHERE usage_id=? AND attempted_at IS NOT NULL
+                 AND provider_outcome IS NULL""",
+            (outcome, provider_http_status, timestamp, usage_id),
+        )
+        if updated.rowcount != 1:
+            raise ValueError("model request outcome is not claimable")
+
+
+def record_account_vectors_committed(
+    connection: sqlite3.Connection,
+    usage_ids: tuple[str, ...],
+    *,
+    now: datetime | None = None,
+) -> None:
+    if not usage_ids:
+        return
+    timestamp = _iso(now or datetime.now(UTC))
+    placeholders = ",".join("?" for _ in usage_ids)
+    with connection:
+        updated = connection.execute(
+            f"""UPDATE news_ai_account_request_usage_v1
+                SET vectors_committed_at=?
+                WHERE usage_id IN ({placeholders})
+                  AND provider_outcome='PROVIDER_SUCCEEDED'
+                  AND vectors_committed_at IS NULL""",
+            (timestamp, *usage_ids),
+        )
+        if updated.rowcount != len(usage_ids):
+            raise ValueError("successful embedding admissions are incomplete")
 
 
 def scheduler_counts(connection: sqlite3.Connection) -> dict[str, int]:

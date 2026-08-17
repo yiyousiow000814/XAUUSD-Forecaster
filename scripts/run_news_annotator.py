@@ -35,6 +35,9 @@ from xauusd_forecaster.daily_brief import (  # noqa: E402
     update_daily_brief,
 )
 from xauusd_forecaster.forward_ledger import ForwardLedger  # noqa: E402
+from xauusd_forecaster.gemini_embeddings import (  # noqa: E402
+    GeminiEmbeddingFailure,
+)
 from xauusd_forecaster.ai_task_registry import route_for_task  # noqa: E402
 from xauusd_forecaster.news_scheduler import (  # noqa: E402
     ApiCredential,
@@ -56,6 +59,7 @@ from xauusd_forecaster.news_scheduler import (  # noqa: E402
 )
 from xauusd_forecaster.news_retrieval import (  # noqa: E402
     NewsEmbeddingBackfillPending,
+    NewsEmbeddingPrerequisiteCooldown,
 )
 from xauusd_forecaster.runtime_health import (  # noqa: E402
     RuntimeHeartbeatPulse,
@@ -69,6 +73,13 @@ from xauusd_forecaster.scheduler_model_gateway import (  # noqa: E402
 from xauusd_forecaster.model_limits import GEMMA_PROVIDER_LANES_PER_ACCOUNT  # noqa: E402
 
 PRODUCTION_LANES_PER_ACCOUNT = GEMMA_PROVIDER_LANES_PER_ACCOUNT
+EMBEDDING_PREREQUISITE_FAILURE_CODES = frozenset({
+    "NEWS_EMBEDDING_BACKFILL_PENDING",
+    "NEWS_EMBEDDING_CAPACITY_DEFERRED",
+    "NEWS_EMBEDDING_PROVIDER_THROTTLED",
+    "NEWS_EMBEDDING_PROVIDER_TRANSPORT_FAILED",
+    "NEWS_EMBEDDING_PROVIDER_RESPONSE_INVALID",
+})
 
 
 def write_heartbeat(
@@ -193,6 +204,20 @@ def _execute_job_safely(
                 "error_type": type(error).__name__,
                 "error": str(error)[:500],
             }
+        if isinstance(error, (GeminiEmbeddingFailure,
+                              NewsEmbeddingPrerequisiteCooldown)):
+            diagnostic = json.dumps(
+                error.diagnostic, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
+            )[:500]
+            return {
+                "status": "DEFERRED",
+                "failure_code": error.failure_code,
+                "error_type": type(error).__name__,
+                "error": diagnostic,
+                "provider_http_status": error.provider_http_status,
+                "next_retry_at": getattr(error, "next_retry_at", None),
+            }
         return {
             "status": "ERROR",
             "failure_code": "SCHEDULER_EXECUTION_FAILED",
@@ -249,7 +274,7 @@ def _credentials_for_job(
 
 
 def _may_try_another_credential(status: dict[str, object]) -> bool:
-    if status.get("failure_code") == "NEWS_EMBEDDING_BACKFILL_PENDING":
+    if status.get("failure_code") in EMBEDDING_PREREQUISITE_FAILURE_CODES:
         return False
     if status.get("retry_with_another_account"):
         return True
@@ -360,7 +385,8 @@ def _run_scheduled_lane(
                 ledger, credential, job, now=attempted_at,
             ))
             maintenance_deferred = (
-                status.get("failure_code") == "NEWS_EMBEDDING_BACKFILL_PENDING"
+                status.get("failure_code")
+                in EMBEDDING_PREREQUISITE_FAILURE_CODES
             )
             if not maintenance_deferred:
                 record_job_attempt(
@@ -399,11 +425,12 @@ def _run_scheduled_lane(
                     available_at=outcome_at + timedelta(minutes=1),
                     error="CURRENT_EVIDENCE_NOT_AVAILABLE",
                 )
-        elif status.get("failure_code") == "NEWS_EMBEDDING_BACKFILL_PENDING":
+        elif status.get("failure_code") in EMBEDDING_PREREQUISITE_FAILURE_CODES:
+            retry_at = _next_retry(status, outcome_at)
             defer_job_for_maintenance(
                 ledger.connection, job.job_id, worker_id,
-                available_at=outcome_at + timedelta(minutes=1),
-                reason="NEWS_EMBEDDING_BACKFILL_PENDING",
+                available_at=retry_at,
+                reason=str(status.get("failure_code")),
             )
             block_task_type(job.task_type)
         elif outcome in {"DEFERRED", "DISABLED"}:

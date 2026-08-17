@@ -526,6 +526,12 @@ CREATE TABLE IF NOT EXISTS news_identity_embedding_backfill_leases_v1 (
     generation_id TEXT PRIMARY KEY,
     lease_owner TEXT NOT NULL,
     lease_expires_at TEXT NOT NULL,
+    cooldown_until TEXT,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    last_failure_code TEXT,
+    provider_http_status INTEGER,
+    diagnostic_json TEXT,
+    failed_at TEXT,
     updated_at TEXT NOT NULL
 );
 
@@ -817,6 +823,26 @@ def install_v2_schema(connection: sqlite3.Connection) -> None:
             "ALTER TABLE news_event_identity_resolutions_v1 ADD COLUMN "
             "identity_comparison_json TEXT NOT NULL DEFAULT '{}'"
         )
+    backfill_columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(news_identity_embedding_backfill_leases_v1)"
+        ).fetchall()
+    }
+    backfill_additions = {
+        "cooldown_until": "TEXT",
+        "failure_count": "INTEGER NOT NULL DEFAULT 0",
+        "last_failure_code": "TEXT",
+        "provider_http_status": "INTEGER",
+        "diagnostic_json": "TEXT",
+        "failed_at": "TEXT",
+    }
+    for name, declaration in backfill_additions.items():
+        if name not in backfill_columns:
+            connection.execute(
+                "ALTER TABLE news_identity_embedding_backfill_leases_v1 "
+                f"ADD COLUMN {name} {declaration}"
+            )
     _repair_execution_score_foreign_key(connection)
     for table in V2_IMMUTABLE_TABLES:
         for operation in ("UPDATE", "DELETE"):
