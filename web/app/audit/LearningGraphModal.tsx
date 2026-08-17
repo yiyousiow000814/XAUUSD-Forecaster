@@ -7,6 +7,7 @@ import { formatExactCount } from "../_lib/count-format";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { versionResultLabel, type VersionEvaluationStatus } from "../_lib/version-result-state";
 import { modelVersionMarkers } from "../_lib/model-version-markers";
+import { buildMarketOpenResultWindows } from "../_lib/market-open-window";
 import { buildTrainingCutoffChart } from "../_lib/training-cutoff-chart";
 import { settleResponsiveScroll } from "../_lib/responsive-scroll";
 
@@ -442,7 +443,7 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
     <div className="chart-caption"><div><b>历史＋实时成熟 OOS（只追加，不重写）</b><span>切换统计频率时，页面结构会保留。</span></div></div>
     <div className="curve-navigation" aria-label="长期 OOS 时间范围">
       <label>统计频率<select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPageOffset(0); }}><option value="EVERY_5M">每5分钟（重叠）</option><option value="FIXED_30M">每30分钟（非重叠）</option></select></label>
-      <label>时间窗口<select value={range} onChange={event => { setRange(event.target.value as typeof range); setPageOffset(0); }}><option value="24h">24小时</option><option value="7d">7天</option><option value="30d">30天</option><option value="all">全部总览</option></select></label>
+      <label>开市窗口<select value={range} onChange={event => { setRange(event.target.value as typeof range); setPageOffset(0); }}><option value="24h">24开市小时</option><option value="7d">7个开市日</option><option value="30d">30个开市日</option><option value="all">全部总览</option></select></label>
     </div>
     {historyLoading ? <GraphLoading label="正在读取长期曲线" compact /> : historyErrors[cadence] ? <GraphLoadError compact label="长期曲线读取失败" onRetry={() => {
       setHistoryErrors(previous => ({ ...previous, [cadence]: false }));
@@ -453,21 +454,11 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
   const fullStart = availableResultTimes[0];
   const fullEnd = availableResultTimes.at(-1)!;
   const rangeMs = range === "24h" ? 24 * 3_600_000 : range === "7d" ? 7 * 86_400_000 : range === "30d" ? 30 * 86_400_000 : Math.max(1, fullEnd-fullStart);
-  // Page through windows that contain real matured results. A market closure
-  // is not a page of flat scores, so jump directly to the previous result.
-  const resultWindows = range === "all" ? [{ start: fullStart, end: fullEnd }] : (() => {
-    const windows: Array<{ start: number; end: number }> = [];
-    let endIndex = availableResultTimes.length - 1;
-    while (endIndex >= 0) {
-      const windowEnd = availableResultTimes[endIndex];
-      const cutoff = windowEnd - rangeMs;
-      let startIndex = endIndex;
-      while (startIndex > 0 && availableResultTimes[startIndex - 1] >= cutoff) startIndex -= 1;
-      windows.push({ start: availableResultTimes[startIndex], end: windowEnd });
-      endIndex = startIndex - 1;
-    }
-    return windows;
-  })();
+  // Page by elapsed market-open time. Expected weekly closure never consumes
+  // the selected window, while an unexplained gap during open hours still does.
+  const resultWindows = range === "all"
+    ? [{ start: fullStart, end: fullEnd }]
+    : buildMarketOpenResultWindows(availableResultTimes, rangeMs);
   const activePage = Math.min(pageOffset, resultWindows.length - 1);
   const { start, end } = resultWindows[activePage];
   const visibleCurves = usable.map(row => {
@@ -604,10 +595,10 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
   const canGoLater = range !== "all" && activePage > 0;
   const windowLabel = `${axisLabel(new Date(start).toISOString())} — ${axisLabel(new Date(end).toISOString())}`;
   return <div className="chart-block long-curve-block">
-    <div className="chart-caption"><div><b>历史＋实时成熟 OOS（只追加，不重写）</b><span>数据库永久保留每个成熟结果；图表固定宽度，按时间窗口查看，全部历史只画压缩轮廓。</span></div><strong><CountValue value={sourceTimeCount} suffix=" 个时点" /><small> · <CountValue value={sourcePointCount} suffix=" 条模型评分" /></small></strong></div>
+    <div className="chart-caption"><div><b>历史＋实时成熟 OOS（只追加，不重写）</b><span>数据库永久保留每个成熟结果；图表固定宽度，按开市时间窗口查看，全部历史只画压缩轮廓。</span></div><strong>全历史 <CountValue value={sourceTimeCount} suffix=" 个时点" /><small> · <CountValue value={sourcePointCount} suffix=" 条模型评分" /></small></strong></div>
     <div className="curve-navigation" aria-label="长期 OOS 时间范围">
       <label>统计频率<select value={cadence} onChange={event => { setCadence(event.target.value as EvaluationCadence); setPageOffset(0); }}><option value="EVERY_5M">每5分钟（重叠）</option><option value="FIXED_30M">每30分钟（非重叠）</option></select></label>
-      <label>时间窗口<select value={range} onChange={event => { setRange(event.target.value as typeof range); setPageOffset(0); }}><option value="24h">24小时</option><option value="7d">7天</option><option value="30d">30天</option><option value="all">全部总览</option></select></label>
+      <label>开市窗口<select value={range} onChange={event => { setRange(event.target.value as typeof range); setPageOffset(0); }}><option value="24h">24开市小时</option><option value="7d">7个开市日</option><option value="30d">30个开市日</option><option value="all">全部总览</option></select></label>
       <div className="curve-navigation-actions">
         <button type="button" disabled={!canGoEarlier} onClick={() => setPageOffset(activePage + 1)}>← 较早一段</button>
         <button type="button" disabled={!canGoLater} onClick={() => setPageOffset(Math.max(0, activePage - 1))}>较晚一段 →</button>
