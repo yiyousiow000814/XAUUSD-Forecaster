@@ -138,6 +138,7 @@ def _scheduler_sleep_seconds(
     now: datetime | None = None,
 ) -> float:
     """Wake for the earliest durable retry without busy-spinning."""
+    anti_spin_floor = 0.05
     instant = now or datetime.now(UTC)
     maximum = max(5.0, interval_seconds)
     retry_times = []
@@ -155,7 +156,7 @@ def _scheduler_sleep_seconds(
         max(0.0, (retry_at - instant).total_seconds())
         for retry_at in retry_times
     )
-    return max(5.0, min(maximum, until_retry))
+    return max(anti_spin_floor, min(maximum, until_retry))
 
 
 def _execute_job(

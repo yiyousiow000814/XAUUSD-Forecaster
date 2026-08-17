@@ -111,12 +111,11 @@ def _v15_annotation(vector: dict, evidence: str, **overrides) -> dict:
 ALLOW_MODEL_REQUEST = CallbackModelAccountant(lambda _usage: True)
 
 
-def _mock_model_json(monkeypatch, responder, *, tokens: int = 1_000) -> None:
+def _mock_model_json(monkeypatch, responder) -> None:
     """Stub the single provider boundary while exercising real decoders."""
     def post_json(api_key, model, method, payload, *, timeout):
         del timeout
-        if method == "countTokens":
-            return {"totalTokens": tokens}
+        assert method == "generateContent"
         value = responder(api_key, model, payload)
         return {
             "modelVersion": model,
@@ -2415,7 +2414,7 @@ def test_failed_display_repair_withholds_annotation_and_records_failure_fields(
     assert selected["initial_error"]
 
 
-def test_gemini_annotation_reserves_provider_counted_input_tokens(
+def test_gemini_annotation_reserves_local_estimated_input_tokens(
     tmp_path, monkeypatch,
 ) -> None:
     evidence = "Complete body evidence"
@@ -2434,14 +2433,21 @@ def test_gemini_annotation_reserves_provider_counted_input_tokens(
             lambda usage: reserved.append(usage.input_tokens) or True
         ),
     )
-    _mock_model_json(monkeypatch, lambda *_args: dict(vector), tokens=12_345)
+    _mock_model_json(monkeypatch, lambda *_args: dict(vector))
 
     result, _ = pool.call(
         0, annotation_module.DEFAULT_GEMINI_MODEL, "Headline", evidence,
     )
 
     assert result["supporting_evidence"] == [evidence]
-    assert reserved == [12_345]
+    assert reserved == [
+        annotation_module.conservative_input_token_estimate(
+            annotation_module._annotation_prompt(
+                annotation_module.PROMPT_VERSION, "Headline", evidence,
+            )
+        )
+        + 512
+    ]
 
 
 def test_gemini_repairs_mixed_script_story_identity_with_counted_request(
@@ -2818,7 +2824,7 @@ def test_evidence_pointer_repair_preserves_capacity_backoff(
     )
     monkeypatch.setattr(
         pool, "_repair_evidence_anchors",
-        lambda *_args: (_ for _ in ()).throw(
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
             annotation_module.GeminiBatchCapacityExhausted("try later")
         ),
     )
@@ -3496,8 +3502,7 @@ def test_gemma_impact_preserves_transient_http_error(tmp_path, monkeypatch) -> N
     )
     def post_json(_key, _model, method, _payload, *, timeout):
         del timeout
-        if method == "countTokens":
-            return {"totalTokens": 100}
+        assert method == "generateContent"
         raise transient
     monkeypatch.setattr(
         GeminiModelGateway, "_post_json", staticmethod(post_json),
@@ -3509,40 +3514,14 @@ def test_gemma_impact_preserves_transient_http_error(tmp_path, monkeypatch) -> N
     assert caught.value.code == 429
 
 
-def test_gemma_impact_reserves_provider_counted_input_tokens(
-    tmp_path, monkeypatch,
-) -> None:
-    reserved = []
-    pool = annotation_module._GeminiRequestPool(
-        ("test-key",), requests_per_key=1, batch_limit=1,
-        request_accountant=CallbackModelAccountant(
-            lambda usage: reserved.append(usage.input_tokens) or True
-        ),
-    )
-    _mock_model_json(monkeypatch, lambda *_args: _impact_model_result(), tokens=4_321)
-
-    result, _ = pool.call_impact(0, {
-        "annotation": {}, "prior_event_context": [], "headline": "Headline",
-        "body": "Complete body",
-    })
-
-    assert result["impact_class"] == "BACKGROUND"
-    assert reserved == [4_321]
-
-
 def test_gemma_impact_local_preflight_does_not_treat_utf8_bytes_as_tokens(
     monkeypatch,
 ) -> None:
     reserved = []
 
-    class LocalOnlyAccountant(CallbackModelAccountant):
-        @property
-        def allow_provider_token_count(self) -> bool:
-            return False
-
     pool = annotation_module._GeminiRequestPool(
         ("test-key",), requests_per_key=1, batch_limit=1,
-        request_accountant=LocalOnlyAccountant(
+        request_accountant=CallbackModelAccountant(
             lambda usage: reserved.append(usage.input_tokens) or True,
         ),
     )
@@ -3595,8 +3574,7 @@ def test_gemma_impact_repairs_one_identity_contract_failure_through_gateway(
 
     def post_json(_key, model, method, _payload, *, timeout):
         del timeout
-        if method == "countTokens":
-            return {"totalTokens": 1_000}
+        assert method == "generateContent"
         return {
             "modelVersion": model,
             "candidates": [{"content": {"parts": [{
@@ -3629,15 +3607,10 @@ def test_gemma_impact_reduces_optional_candidates_to_fit_tpm(
         ),
     )
 
-    def count_tokens(_model, payload):
-        prompt = payload["contents"][0]["parts"][0]["text"]
-        return 15_500 if prompt.count('"candidate_id"') > 1 else 14_500
-
     sent_payloads = []
     def post_json(_key, model, method, payload, *, timeout):
         del timeout
-        if method == "countTokens":
-            return {"totalTokens": count_tokens(model, payload["generateContentRequest"])}
+        assert method == "generateContent"
         sent_payloads.append(payload)
         return {
             "modelVersion": model,
@@ -3650,14 +3623,17 @@ def test_gemma_impact_reduces_optional_candidates_to_fit_tpm(
     result, _ = pool.call_impact(0, {
         "annotation": {},
         "prior_event_context": [
-            {"candidate_id": "nearest"}, {"candidate_id": "farther"},
+            {"candidate_id": "nearest", "detail": "x" * 25_000},
+            {"candidate_id": "farther", "detail": "y" * 25_000},
         ],
         "headline": "Headline", "body": "Complete body",
     })
 
     assert result["impact_class"] == "BACKGROUND"
-    assert reserved == [14_500]
     sent_prompt = sent_payloads[0]["contents"][0]["parts"][0]["text"]
+    assert reserved == [
+        annotation_module.conservative_input_token_estimate(sent_prompt) + 1024
+    ]
     assert '"candidate_id":"nearest"' in sent_prompt
     assert '"candidate_id":"farther"' not in sent_prompt
     assert "CANDIDATE_CONTEXT_TRUNCATED: true" in sent_prompt
@@ -3683,15 +3659,10 @@ def test_gemma_impact_uses_all_evidence_windows_for_oversized_body(
         ),
     )
 
-    def count_tokens(_model, payload):
-        prompt = payload["contents"][0]["parts"][0]["text"]
-        return 39_000 if "SOURCE_CONTEXT_MODE: COMPLETE_BODY" in prompt else 5_200
-
     sent_payloads = []
     def post_json(_key, model, method, payload, *, timeout):
         del timeout
-        if method == "countTokens":
-            return {"totalTokens": count_tokens(model, payload["generateContentRequest"])}
+        assert method == "generateContent"
         sent_payloads.append(payload)
         return {
             "modelVersion": model,
@@ -3710,8 +3681,10 @@ def test_gemma_impact_uses_all_evidence_windows_for_oversized_body(
     })
 
     assert result["impact_class"] == "BACKGROUND"
-    assert reserved == [5_200]
     sent = sent_payloads[0]["contents"][0]["parts"][0]["text"]
+    assert reserved == [
+        annotation_module.conservative_input_token_estimate(sent) + 1024
+    ]
     assert "SOURCE_CONTEXT_MODE: EVIDENCE_WINDOWS" in sent
     assert f"SOURCE_BODY_CHARACTER_COUNT: {len(body)}" in sent
     assert evidence_one in sent
@@ -3736,12 +3709,7 @@ def test_gemma_impact_accepts_headline_evidence_for_oversized_body(
 
     def post_json(_key, model, method, payload, *, timeout):
         del timeout
-        if method == "countTokens":
-            prompt = payload["generateContentRequest"]["contents"][0]["parts"][0]["text"]
-            return {
-                "totalTokens": 39_000
-                if "SOURCE_CONTEXT_MODE: COMPLETE_BODY" in prompt else 900
-            }
+        assert method == "generateContent"
         return {
             "modelVersion": model,
             "candidates": [{"content": {"parts": [{
@@ -3756,7 +3724,7 @@ def test_gemma_impact_accepts_headline_evidence_for_oversized_body(
     })
 
     assert result["impact_class"] == "BACKGROUND"
-    assert reserved == [900]
+    assert reserved and reserved[0] < 15_000
 
 
 def test_oversized_body_without_verbatim_evidence_fails_closed(
@@ -3769,8 +3737,6 @@ def test_oversized_body_without_verbatim_evidence_fails_closed(
             lambda usage: reserved.append(usage.input_tokens) or False
         ),
     )
-    monkeypatch.setattr(pool.gateway, "count_input_tokens", lambda *_args: 39_000)
-
     with pytest.raises(annotation_module.GeminiBatchCapacityExhausted):
         pool.call_impact(0, {
             "annotation": {"supporting_evidence": ["absent exact evidence"]},
@@ -3778,7 +3744,8 @@ def test_oversized_body_without_verbatim_evidence_fails_closed(
             "body": "different immutable source text " * 5_000,
         })
 
-    assert reserved == [39_000]
+    assert len(reserved) == 1
+    assert reserved[0] > 15_000
 
 
 def test_impact_prompt_defines_factual_equivalence_without_domain_examples() -> None:

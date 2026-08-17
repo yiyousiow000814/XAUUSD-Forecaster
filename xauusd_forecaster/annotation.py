@@ -1113,39 +1113,23 @@ class _GeminiRequestPool:
         del reserve_total
         return self.gateway.available_batch_capacity()
 
-    def _count_or_conservative(
-        self,
-        model: str,
-        payload: dict[str, object],
-        *,
-        conservative_tokens: int,
-    ) -> int:
-        if not self.gateway.accountant.allow_provider_token_count:
-            return conservative_tokens
-        try:
-            return self.gateway.count_input_tokens(model, payload)
-        except Exception:
-            return conservative_tokens
-
     def call_json(
         self,
         model: str,
         *,
         purpose: str,
+        prompt_contract: str | None = None,
         payload: dict[str, object],
         decode: Callable[[dict[str, object]], object],
     ) -> tuple[object, str]:
         """Send one metered structured request through the shared transport."""
         serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        input_tokens = self._count_or_conservative(
-            model,
-            payload,
-            conservative_tokens=conservative_input_token_estimate(serialized) + 512,
-        )
+        input_tokens = conservative_input_token_estimate(serialized) + 512
         return self.gateway.generate(
             0,
             model=model,
             purpose=purpose,
+            prompt_contract=prompt_contract,
             payload=payload,
             input_tokens=input_tokens,
             decode=decode,
@@ -1159,18 +1143,12 @@ class _GeminiRequestPool:
     ) -> tuple[dict, str]:
         prompt = _annotation_prompt(prompt_version, headline, body)
         payload = _annotation_payload(prompt, prompt_version)
-        input_tokens = self._count_or_conservative(
-            model,
-            payload,
-            conservative_tokens=max(
-                conservative_input_token_estimate(prompt) + 512,
-                len(prompt.encode("utf-8")) + 512,
-            ),
-        )
+        input_tokens = conservative_input_token_estimate(prompt) + 512
         result, exact_model = self.gateway.generate(
             start_index,
             model=model,
             purpose="news-annotation",
+            prompt_contract=prompt_version,
             payload=payload,
             input_tokens=input_tokens,
             decode=_decode_model_json,
@@ -1195,6 +1173,7 @@ class _GeminiRequestPool:
                 try:
                     result["supporting_evidence"] = self._repair_evidence_anchors(
                         start_index + 1, model, result, headline, body,
+                        prompt_version=prompt_version,
                     )
                     _validate_current_semantics(
                         result, headline=headline, body=body,
@@ -1292,7 +1271,7 @@ class _GeminiRequestPool:
                 repaired = self._repair_chinese(
                     start_index + offset, candidate_model, working,
                     headline, body, invalid_fields=invalid_fields,
-                    failure_reason=str(rejection),
+                    failure_reason=str(rejection), prompt_version=prompt_version,
                 )
                 for field in invalid_fields:
                     working[field] = repaired[field]
@@ -1321,6 +1300,7 @@ class _GeminiRequestPool:
         self, start_index: int, model: str, result: dict,
         headline: str = "", body: str = "",
         *, invalid_fields: tuple[str, ...], failure_reason: str,
+        prompt_version: str,
     ) -> dict[str, object]:
         payload = _chinese_repair_payload(
             result, headline, body,
@@ -1328,18 +1308,12 @@ class _GeminiRequestPool:
             failure_reason=failure_reason,
         )
         serialized = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
-        input_tokens = self._count_or_conservative(
-            model,
-            payload,
-            conservative_tokens=max(
-                conservative_input_token_estimate(serialized) + 512,
-                len(serialized.encode("utf-8")) + 512,
-            ),
-        )
+        input_tokens = conservative_input_token_estimate(serialized) + 512
         repaired, _ = self.gateway.generate(
             start_index,
             model=model,
             purpose="chinese-repair",
+            prompt_contract=f"{prompt_version}:chinese-repair-v1",
             payload=payload,
             input_tokens=input_tokens,
             decode=_decode_model_json,
@@ -1350,23 +1324,17 @@ class _GeminiRequestPool:
 
     def _repair_evidence_anchors(
         self, start_index: int, model: str, result: dict,
-        headline: str, body: str,
+        headline: str, body: str, *, prompt_version: str,
     ) -> list[str]:
         candidates = _source_evidence_candidates(headline, body)
         payload = _evidence_anchor_repair_payload(result, candidates)
         serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        input_tokens = self._count_or_conservative(
-            model,
-            payload,
-            conservative_tokens=max(
-                conservative_input_token_estimate(serialized) + 256,
-                len(serialized.encode("utf-8")) + 256,
-            ),
-        )
+        input_tokens = conservative_input_token_estimate(serialized) + 256
         repaired, _ = self.gateway.generate(
             start_index,
             model=model,
             purpose="evidence-anchor-repair",
+            prompt_contract=f"{prompt_version}:evidence-anchor-repair-v1",
             payload=payload,
             input_tokens=input_tokens,
             decode=lambda envelope: _decode_evidence_anchor_selection(
@@ -1384,19 +1352,13 @@ class _GeminiRequestPool:
         last_error: Exception | None = None
         for candidate_model in models:
             payload = _title_payload(headline)
-            input_tokens = self._count_or_conservative(
-                candidate_model,
-                payload,
-                conservative_tokens=max(
-                    conservative_input_token_estimate(headline) + 512,
-                    len(headline.encode("utf-8")) + 512,
-                ),
-            )
+            input_tokens = conservative_input_token_estimate(headline) + 512
             try:
                 return self.gateway.generate(
                     start_index,
                     model=candidate_model,
                     purpose="headline-translation",
+                    prompt_contract=TITLE_PROMPT_VERSION,
                     payload=payload,
                     input_tokens=input_tokens,
                     decode=lambda envelope: _decode_title(envelope, headline),
@@ -1421,15 +1383,9 @@ class _GeminiRequestPool:
     ) -> tuple[dict, str]:
         request_row = row
         prompt = _impact_prompt(request_row, prompt_version=prompt_version)
-        payload = _impact_payload(prompt)
-        counted_tokens = self._count_or_conservative(
-            IMPACT_MODEL,
-            payload,
-            conservative_tokens=conservative_input_token_estimate(prompt) + 1024,
-        )
+        counted_tokens = conservative_input_token_estimate(prompt) + 1024
         request_row, prompt, counted_tokens = _fit_impact_context_to_tpm(
             row,
-            gateway=self.gateway,
             initial_tokens=counted_tokens,
             prompt_version=prompt_version,
         )
@@ -1437,6 +1393,7 @@ class _GeminiRequestPool:
             start_index,
             model=IMPACT_MODEL,
             purpose="news-impact",
+            prompt_contract=prompt_version,
             payload=_impact_payload(prompt),
             input_tokens=counted_tokens,
             decode=_decode_model_json,
@@ -1449,6 +1406,7 @@ class _GeminiRequestPool:
             try:
                 repaired = self._repair_impact_contract(
                     start_index + 1, request_row, raw_result, initial_error,
+                    prompt_version=prompt_version,
                 )
                 return _validate_impact_result(repaired, request_row), exact_model
             except (ModelGatewayCapacityExhausted, urllib.error.HTTPError):
@@ -1464,21 +1422,18 @@ class _GeminiRequestPool:
 
     def _repair_impact_contract(
         self, start_index: int, row: dict, result: dict,
-        validation_error: Exception,
+        validation_error: Exception, *, prompt_version: str,
     ) -> dict[str, object]:
         payload = _impact_contract_repair_payload(
             row, result, validation_error,
         )
         serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        input_tokens = self._count_or_conservative(
-            IMPACT_MODEL,
-            payload,
-            conservative_tokens=conservative_input_token_estimate(serialized) + 512,
-        )
+        input_tokens = conservative_input_token_estimate(serialized) + 512
         repaired, _ = self.gateway.generate(
             start_index,
             model=IMPACT_MODEL,
             purpose="news-impact-contract-repair",
+            prompt_contract=f"{prompt_version}:contract-repair-v1",
             payload=payload,
             input_tokens=input_tokens,
             decode=_decode_model_json,
@@ -1493,6 +1448,7 @@ def generate_metered_response(
     *,
     model: str,
     purpose: str,
+    prompt_contract: str | None = None,
     payload: dict[str, object],
     decode: Callable[[dict[str, object]], T],
     request_accountant: ModelRequestAccountant,
@@ -1503,7 +1459,8 @@ def generate_metered_response(
         request_accountant=request_accountant,
     )
     result, exact_model = pool.call_json(
-        model, purpose=purpose, payload=payload, decode=decode,
+        model, purpose=purpose, prompt_contract=prompt_contract,
+        payload=payload, decode=decode,
     )
     return result, exact_model
 
@@ -1513,6 +1470,7 @@ def generate_metered_json(
     *,
     model: str,
     purpose: str,
+    prompt_contract: str | None = None,
     payload: dict[str, object],
     decode: Callable[[dict[str, object]], dict],
     request_accountant: ModelRequestAccountant,
@@ -1522,6 +1480,7 @@ def generate_metered_json(
         api_key,
         model=model,
         purpose=purpose,
+        prompt_contract=prompt_contract,
         payload=payload,
         decode=decode,
         request_accountant=request_accountant,
@@ -2046,7 +2005,6 @@ def _impact_contract_repair_payload(
 def _fit_impact_context_to_tpm(
     row: dict,
     *,
-    gateway: GeminiModelGateway,
     initial_tokens: int,
     prompt_version: str,
 ) -> tuple[dict, str, int]:
@@ -2065,14 +2023,7 @@ def _fit_impact_context_to_tpm(
             evidence_prompt = _impact_prompt(
                 evidence_row, prompt_version=prompt_version,
             )
-            evidence_tokens = _count_impact_tokens(
-                gateway, evidence_prompt,
-            )
-            if evidence_tokens is None:
-                return evidence_row, evidence_prompt, max(
-                    counted_tokens,
-                    conservative_input_token_estimate(evidence_prompt) + 1024,
-                )
+            evidence_tokens = _count_impact_tokens(evidence_prompt)
             request_row = evidence_row
             candidates = list(request_row.get("prior_event_context") or ())
             prompt = evidence_prompt
@@ -2083,27 +2034,12 @@ def _fit_impact_context_to_tpm(
         request_row["prior_event_context"] = candidates
         request_row["identity_context_truncated"] = True
         prompt = _impact_prompt(request_row, prompt_version=prompt_version)
-        recounted = _count_impact_tokens(gateway, prompt)
-        if recounted is None:
-            # Never guess that a reduced request is safe. The caller's atomic
-            # reservation will defer this item until exact preflight recovers.
-            return request_row, prompt, max(
-                counted_tokens,
-                conservative_input_token_estimate(prompt) + 1024,
-            )
-        counted_tokens = recounted
+        counted_tokens = _count_impact_tokens(prompt)
     return request_row, prompt, counted_tokens
 
 
-def _count_impact_tokens(
-    gateway: GeminiModelGateway, prompt: str,
-) -> int | None:
-    if not gateway.accountant.allow_provider_token_count:
-        return conservative_input_token_estimate(prompt) + 1024
-    try:
-        return gateway.count_input_tokens(IMPACT_MODEL, _impact_payload(prompt))
-    except Exception:
-        return None
+def _count_impact_tokens(prompt: str) -> int:
+    return conservative_input_token_estimate(prompt) + 1024
 
 
 def _impact_evidence_window_row(row: dict) -> dict | None:

@@ -1176,6 +1176,7 @@ def update_daily_brief(
             decode=lambda envelope: _decode_brief(envelope, packet),
             request_accountant=request_accountant,
             purpose="daily-news-brief",
+            prompt_contract=BRIEF_PROMPT_VERSION,
         )
     except ModelGatewayCapacityExhausted as error:
         reason = str(error.failure_code or "MODEL_CAPACITY_DEFERRED")

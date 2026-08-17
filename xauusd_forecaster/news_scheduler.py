@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import sqlite3
 import uuid
@@ -27,6 +28,18 @@ TASKS = (
     "ACTIVE_IMPACT",
     "TITLE_TRANSLATION",
 )
+TOKEN_CALIBRATION_ALPHA = 0.05
+TOKEN_CALIBRATION_RECENT_LIMIT = 128
+TOKEN_CALIBRATION_P99_MARGIN = 1.05
+TOKEN_CALIBRATION_MIN_RATIO = 0.50
+TOKEN_CALIBRATION_MAX_RATIO = 8.00
+TOKEN_CALIBRATION_MAX_DOWNWARD_STEP = 0.01
+EFFECTIVE_INPUT_TOKENS_SQL = """CASE
+  WHEN provider_outcome='PROVIDER_SUCCEEDED'
+   AND provider_prompt_token_count>0
+    THEN provider_prompt_token_count
+  ELSE COALESCE(admitted_input_tokens,input_token_count)
+END"""
 SCHEDULER_SCHEMA = """
 CREATE TABLE IF NOT EXISTS news_ai_jobs_v1 (
     job_id TEXT PRIMARY KEY,
@@ -124,11 +137,50 @@ CREATE TABLE IF NOT EXISTS news_ai_account_request_usage_v1 (
     vectors_committed_at TEXT,
     provider_prompt_token_count INTEGER,
     provider_candidates_token_count INTEGER,
-    provider_total_token_count INTEGER
+    provider_total_token_count INTEGER,
+    requested_model TEXT,
+    purpose TEXT,
+    prompt_contract TEXT,
+    estimator_version TEXT,
+    base_estimated_input_tokens INTEGER,
+    admitted_input_tokens INTEGER,
+    calibration_provider_model_version TEXT,
+    calibration_safe_ratio REAL,
+    provider_model_version TEXT
 );
 
 CREATE INDEX IF NOT EXISTS news_ai_account_request_usage_window_v1
 ON news_ai_account_request_usage_v1(account_id,reserved_at,model_family);
+
+CREATE TABLE IF NOT EXISTS news_ai_token_calibration_v1 (
+    bucket_id TEXT PRIMARY KEY,
+    requested_model TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    prompt_contract TEXT NOT NULL,
+    estimator_version TEXT NOT NULL,
+    provider_model_version TEXT NOT NULL,
+    lifetime_sample_count INTEGER NOT NULL,
+    effective_sample_count INTEGER NOT NULL,
+    ewma_ratio REAL NOT NULL,
+    ewma_absolute_error REAL NOT NULL,
+    recent_ratio_window_json TEXT NOT NULL,
+    recent_p99_ratio REAL NOT NULL,
+    safe_ratio REAL NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(requested_model,purpose,prompt_contract,estimator_version,
+           provider_model_version)
+);
+
+CREATE TABLE IF NOT EXISTS news_ai_token_calibration_route_v1 (
+    requested_model TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    prompt_contract TEXT NOT NULL,
+    estimator_version TEXT NOT NULL,
+    last_provider_model_version TEXT NOT NULL,
+    last_request_reserved_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(requested_model,purpose,prompt_contract,estimator_version)
+);
 
 CREATE TABLE IF NOT EXISTS news_ai_provider_dispatch_state_v1 (
     provider_scope TEXT PRIMARY KEY,
@@ -275,6 +327,15 @@ def install_scheduler_schema(connection: sqlite3.Connection) -> None:
         "provider_prompt_token_count": "INTEGER",
         "provider_candidates_token_count": "INTEGER",
         "provider_total_token_count": "INTEGER",
+        "requested_model": "TEXT",
+        "purpose": "TEXT",
+        "prompt_contract": "TEXT",
+        "estimator_version": "TEXT",
+        "base_estimated_input_tokens": "INTEGER",
+        "admitted_input_tokens": "INTEGER",
+        "calibration_provider_model_version": "TEXT",
+        "calibration_safe_ratio": "REAL",
+        "provider_model_version": "TEXT",
     }
     for name, declaration in request_usage_additions.items():
         if name not in request_usage_columns:
@@ -347,13 +408,235 @@ def rolling_account_usage(
     )
     row = connection.execute(
         f"""SELECT COALESCE(sum(request_count),0) AS requests,
-                   COALESCE(sum(input_token_count),0) AS tokens
+                   COALESCE(sum({EFFECTIVE_INPUT_TOKENS_SQL}),0) AS tokens
             FROM news_ai_account_request_usage_v1
             WHERE reserved_at>? {account_clause}
               AND model_family IN ({placeholders})""",
         parameters,
     ).fetchone()
     return int(row["requests"]), int(row["tokens"])
+
+
+def _calibration_identity(
+    requested_model: str,
+    purpose: str,
+    prompt_contract: str,
+    estimator_version: str,
+    provider_model_version: str,
+) -> str:
+    payload = "\x1f".join((
+        requested_model, purpose, prompt_contract, estimator_version,
+        provider_model_version,
+    ))
+    return "token-calibration-" + hashlib.sha256(
+        payload.encode("utf-8"),
+    ).hexdigest()[:32]
+
+
+def _controlled_calibration_key(value: str, label: str) -> str:
+    normalized = value.strip()
+    if not normalized or len(normalized) > 200:
+        raise ValueError(f"{label} is not a bounded calibration key")
+    return normalized
+
+
+def calibrated_input_tokens(
+    connection: sqlite3.Connection,
+    *,
+    requested_model: str,
+    purpose: str,
+    prompt_contract: str,
+    estimator_version: str,
+    base_estimated_input_tokens: int,
+) -> tuple[int, str | None, float]:
+    """Resolve one bounded, durable calibration bucket for admission."""
+    base_tokens = max(0, int(base_estimated_input_tokens))
+    keys = tuple(_controlled_calibration_key(value, label) for value, label in (
+        (requested_model, "requested model"),
+        (purpose, "purpose"),
+        (prompt_contract, "prompt contract"),
+        (estimator_version, "estimator version"),
+    ))
+    row = connection.execute(
+        """SELECT r.last_provider_model_version,c.safe_ratio
+           FROM news_ai_token_calibration_route_v1 r
+           JOIN news_ai_token_calibration_v1 c
+             ON c.requested_model=r.requested_model
+            AND c.purpose=r.purpose
+            AND c.prompt_contract=r.prompt_contract
+            AND c.estimator_version=r.estimator_version
+            AND c.provider_model_version=r.last_provider_model_version
+           WHERE r.requested_model=? AND r.purpose=?
+             AND r.prompt_contract=? AND r.estimator_version=?""",
+        keys,
+    ).fetchone()
+    if row is None:
+        return base_tokens, None, 1.0
+    try:
+        safe_ratio = float(row["safe_ratio"])
+    except (TypeError, ValueError):
+        return base_tokens, None, 1.0
+    if not math.isfinite(safe_ratio) or not (
+        TOKEN_CALIBRATION_MIN_RATIO <= safe_ratio <= TOKEN_CALIBRATION_MAX_RATIO
+    ):
+        return base_tokens, None, 1.0
+    admitted = math.ceil(base_tokens * safe_ratio)
+    return admitted, str(row["last_provider_model_version"]), safe_ratio
+
+
+def _recent_p99(values: list[float]) -> float:
+    ordered = sorted(values)
+    index = max(0, math.ceil(0.99 * len(ordered)) - 1)
+    return ordered[index]
+
+
+def _calibration_floor(sample_count: int) -> float:
+    if sample_count < 5:
+        return 1.0
+    if sample_count < 20:
+        return 0.9
+    return TOKEN_CALIBRATION_MIN_RATIO
+
+
+def _record_token_calibration_sample_locked(
+    connection: sqlite3.Connection,
+    *,
+    usage_row: sqlite3.Row,
+    provider_prompt_token_count: int,
+    provider_model_version: str,
+    updated_at: str,
+) -> None:
+    base_tokens = int(usage_row["base_estimated_input_tokens"] or 0)
+    actual_tokens = int(provider_prompt_token_count)
+    if base_tokens <= 0 or actual_tokens <= 0:
+        return
+    ratio = actual_tokens / base_tokens
+    if not math.isfinite(ratio) or not (
+        TOKEN_CALIBRATION_MIN_RATIO / 2
+        <= ratio <= TOKEN_CALIBRATION_MAX_RATIO
+    ):
+        return
+    requested_model, purpose, prompt_contract, estimator_version = (
+        _controlled_calibration_key(str(usage_row[name] or ""), name)
+        for name in (
+            "requested_model", "purpose", "prompt_contract", "estimator_version",
+        )
+    )
+    exact_model = _controlled_calibration_key(
+        provider_model_version, "provider model version",
+    )
+    bucket_id = _calibration_identity(
+        requested_model, purpose, prompt_contract, estimator_version, exact_model,
+    )
+    existing = connection.execute(
+        "SELECT * FROM news_ai_token_calibration_v1 WHERE bucket_id=?",
+        (bucket_id,),
+    ).fetchone()
+    recent: list[float] = []
+    lifetime_count = 0
+    old_ewma = ratio
+    old_error = 0.0
+    old_safe: float | None = None
+    if existing is not None:
+        try:
+            loaded = json.loads(str(existing["recent_ratio_window_json"]))
+            if not isinstance(loaded, list):
+                raise ValueError("calibration window is not a list")
+            recent = [float(item) for item in loaded]
+            if any(
+                not math.isfinite(item)
+                or not (TOKEN_CALIBRATION_MIN_RATIO / 2
+                        <= item <= TOKEN_CALIBRATION_MAX_RATIO)
+                for item in recent
+            ):
+                raise ValueError("calibration window contains invalid ratios")
+            recent = recent[-TOKEN_CALIBRATION_RECENT_LIMIT:]
+            lifetime_count = max(0, int(existing["lifetime_sample_count"]))
+            old_ewma = float(existing["ewma_ratio"])
+            old_error = max(0.0, float(existing["ewma_absolute_error"]))
+            old_safe = float(existing["safe_ratio"])
+            if not all(math.isfinite(item) for item in (
+                old_ewma, old_error, old_safe,
+            )):
+                raise ValueError("calibration scalar is invalid")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            recent = []
+            lifetime_count = 0
+            old_ewma = ratio
+            old_error = 0.0
+            old_safe = None
+    new_count = lifetime_count + 1
+    if lifetime_count == 0:
+        ewma = ratio
+        ewma_error = 0.0
+    else:
+        ewma = (
+            TOKEN_CALIBRATION_ALPHA * ratio
+            + (1 - TOKEN_CALIBRATION_ALPHA) * old_ewma
+        )
+        ewma_error = (
+            TOKEN_CALIBRATION_ALPHA * abs(ratio - old_ewma)
+            + (1 - TOKEN_CALIBRATION_ALPHA) * old_error
+        )
+    recent.append(ratio)
+    recent = recent[-TOKEN_CALIBRATION_RECENT_LIMIT:]
+    recent_p99 = _recent_p99(recent)
+    measured_safe = max(
+        recent_p99 * TOKEN_CALIBRATION_P99_MARGIN,
+        ewma + 3 * ewma_error,
+    )
+    safe_ratio = max(_calibration_floor(new_count), measured_safe)
+    if old_safe is not None:
+        safe_ratio = max(
+            safe_ratio,
+            old_safe * (1 - TOKEN_CALIBRATION_MAX_DOWNWARD_STEP),
+        )
+    safe_ratio = min(TOKEN_CALIBRATION_MAX_RATIO, safe_ratio)
+    connection.execute(
+        """INSERT INTO news_ai_token_calibration_v1
+           (bucket_id,requested_model,purpose,prompt_contract,estimator_version,
+            provider_model_version,lifetime_sample_count,effective_sample_count,
+            ewma_ratio,ewma_absolute_error,recent_ratio_window_json,
+            recent_p99_ratio,safe_ratio,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(bucket_id) DO UPDATE SET
+             lifetime_sample_count=excluded.lifetime_sample_count,
+             effective_sample_count=excluded.effective_sample_count,
+             ewma_ratio=excluded.ewma_ratio,
+             ewma_absolute_error=excluded.ewma_absolute_error,
+             recent_ratio_window_json=excluded.recent_ratio_window_json,
+             recent_p99_ratio=excluded.recent_p99_ratio,
+             safe_ratio=excluded.safe_ratio,
+             updated_at=excluded.updated_at""",
+        (
+            bucket_id, requested_model, purpose, prompt_contract,
+            estimator_version, exact_model, new_count, len(recent), ewma,
+            ewma_error, json.dumps(recent, separators=(",", ":")),
+            recent_p99, safe_ratio, updated_at,
+        ),
+    )
+    reserved_at = str(usage_row["reserved_at"])
+    connection.execute(
+        """INSERT INTO news_ai_token_calibration_route_v1
+           (requested_model,purpose,prompt_contract,estimator_version,
+            last_provider_model_version,last_request_reserved_at,updated_at)
+           VALUES (?,?,?,?,?,?,?)
+           ON CONFLICT(requested_model,purpose,prompt_contract,estimator_version)
+           DO UPDATE SET
+             last_provider_model_version=CASE
+               WHEN excluded.last_request_reserved_at>=last_request_reserved_at
+                 THEN excluded.last_provider_model_version
+               ELSE last_provider_model_version END,
+             last_request_reserved_at=max(
+               last_request_reserved_at,excluded.last_request_reserved_at),
+             updated_at=CASE
+               WHEN excluded.last_request_reserved_at>=last_request_reserved_at
+                 THEN excluded.updated_at ELSE updated_at END""",
+        (
+            requested_model, purpose, prompt_contract, estimator_version,
+            exact_model, reserved_at, updated_at,
+        ),
+    )
 
 
 def _minute_capacity_next_eligible(
@@ -377,7 +660,8 @@ def _minute_capacity_next_eligible(
         *model_families,
     )
     rows = connection.execute(
-        f"""SELECT request_count,input_token_count,reserved_at
+        f"""SELECT request_count,reserved_at,
+                   {EFFECTIVE_INPUT_TOKENS_SQL} AS effective_input_tokens
             FROM news_ai_account_request_usage_v1
             WHERE reserved_at>? {account_clause}
               AND model_family IN ({placeholders})
@@ -395,7 +679,7 @@ def _minute_capacity_next_eligible(
             )
         ]
         requests = sum(int(item["request_count"]) for item in remaining)
-        tokens = sum(int(item["input_token_count"]) for item in remaining)
+        tokens = sum(int(item["effective_input_tokens"]) for item in remaining)
         if requests + requested_requests > requests_per_minute:
             continue
         if (
@@ -1029,6 +1313,13 @@ def reserve_account_request(
     now: datetime | None = None,
     usage_id: str | None = None,
     provider_task: str | None = None,
+    requested_model: str | None = None,
+    purpose: str | None = None,
+    prompt_contract: str | None = None,
+    estimator_version: str | None = None,
+    base_estimated_input_tokens: int | None = None,
+    calibration_provider_model_version: str | None = None,
+    calibration_safe_ratio: float | None = None,
     decision: dict[str, object] | None = None,
 ) -> bool:
     """Atomically count attempted provider requests against one account.
@@ -1041,6 +1332,11 @@ def reserve_account_request(
     minute = minute_bucket(instant)
     timestamp = _iso(instant)
     estimated_tokens = max(0, int(input_tokens))
+    base_tokens = max(0, int(
+        estimated_tokens
+        if base_estimated_input_tokens is None
+        else base_estimated_input_tokens
+    ))
     attempted_requests = int(request_count)
     if attempted_requests < 1:
         raise ValueError("request_count must be positive")
@@ -1128,6 +1424,8 @@ def reserve_account_request(
                     current_requests_60s=minute_count,
                     current_tokens_60s=minute_tokens,
                     current_requests_day=daily_count,
+                    base_estimated_input_tokens=base_tokens,
+                    admitted_input_tokens=estimated_tokens,
                     next_retry_at=next_retry_at,
                 )
             return False
@@ -1168,12 +1466,18 @@ def reserve_account_request(
         connection.execute(
             """INSERT INTO news_ai_account_request_usage_v1
                (usage_id,account_id,model_family,request_count,
-                input_token_count,reserved_at)
-               VALUES (?,?,?,?,?,?)""",
+                input_token_count,reserved_at,requested_model,purpose,
+                prompt_contract,estimator_version,base_estimated_input_tokens,
+                admitted_input_tokens,calibration_provider_model_version,
+                calibration_safe_ratio)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 usage_id or str(uuid.uuid4()), account_id, model_family,
                 attempted_requests,
-                estimated_tokens, timestamp,
+                estimated_tokens, timestamp, requested_model or model_family,
+                purpose, prompt_contract, estimator_version, base_tokens,
+                estimated_tokens, calibration_provider_model_version,
+                calibration_safe_ratio,
             ),
         )
         connection.commit()
@@ -1571,6 +1875,7 @@ def record_account_request_outcome(
     provider_http_status: int | None = None,
     retry_after_seconds: int | None = None,
     usage_metadata: dict[str, int] | None = None,
+    provider_model_version: str | None = None,
     now: datetime | None = None,
 ) -> None:
     if outcome not in {
@@ -1579,11 +1884,18 @@ def record_account_request_outcome(
         raise ValueError("provider request outcome is not controlled")
     timestamp = _iso(now or datetime.now(UTC))
     with connection:
+        usage_row = connection.execute(
+            "SELECT * FROM news_ai_account_request_usage_v1 WHERE usage_id=?",
+            (usage_id,),
+        ).fetchone()
+        if usage_row is None:
+            raise ValueError("model request admission is missing")
         updated = connection.execute(
             """UPDATE news_ai_account_request_usage_v1
                SET provider_outcome=?,provider_http_status=?,
                    provider_completed_at=?,provider_prompt_token_count=?,
-                   provider_candidates_token_count=?,provider_total_token_count=?
+                   provider_candidates_token_count=?,provider_total_token_count=?,
+                   provider_model_version=?
                WHERE usage_id=? AND attempted_at IS NOT NULL
                  AND provider_outcome IS NULL""",
             (
@@ -1591,11 +1903,26 @@ def record_account_request_outcome(
                 (usage_metadata or {}).get("prompt_token_count"),
                 (usage_metadata or {}).get("candidates_token_count"),
                 (usage_metadata or {}).get("total_token_count"),
+                provider_model_version,
                 usage_id,
             ),
         )
         if updated.rowcount != 1:
             raise ValueError("model request outcome is not claimable")
+        prompt_tokens = (usage_metadata or {}).get("prompt_token_count")
+        if (
+            outcome == "PROVIDER_SUCCEEDED"
+            and isinstance(prompt_tokens, int)
+            and prompt_tokens > 0
+            and provider_model_version
+        ):
+            _record_token_calibration_sample_locked(
+                connection,
+                usage_row=usage_row,
+                provider_prompt_token_count=prompt_tokens,
+                provider_model_version=provider_model_version,
+                updated_at=timestamp,
+            )
     record_provider_dispatch_outcome(
         connection,
         outcome=outcome,

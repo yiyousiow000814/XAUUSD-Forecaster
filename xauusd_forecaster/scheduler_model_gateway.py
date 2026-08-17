@@ -10,12 +10,11 @@ from .annotation import DEFAULT_GEMINI_MODEL, GEMINI_DAILY_PRIORITY_RESERVE
 from .model_gateway import ModelRequestAccountant, ModelRequestUsage
 from .news_scheduler import (
     ApiCredential,
+    calibrated_input_tokens,
     provider_dispatch_next_eligible,
     mark_account_request_attempted,
     record_account_request_outcome,
-    record_provider_dispatch_outcome,
     reserve_account_request,
-    reserve_provider_dispatch,
 )
 
 
@@ -39,6 +38,16 @@ class SchedulerModelAccountant(ModelRequestAccountant):
 
     def reserve(self, usage: ModelRequestUsage) -> bool:
         policy = quota_surface_for_model(usage.model)
+        admitted_tokens, calibration_model_version, safe_ratio = (
+            calibrated_input_tokens(
+                self.connection,
+                requested_model=usage.model,
+                purpose=usage.purpose,
+                prompt_contract=usage.prompt_contract,
+                estimator_version=usage.estimator_version,
+                base_estimated_input_tokens=usage.input_tokens,
+            )
+        )
         reserve_total = (
             GEMINI_DAILY_PRIORITY_RESERVE
             if usage.model == DEFAULT_GEMINI_MODEL
@@ -53,13 +62,20 @@ class SchedulerModelAccountant(ModelRequestAccountant):
             model_family=usage.model,
             daily_limit=policy.daily_limit,
             requests_per_minute=policy.requests_per_minute,
-            input_tokens=usage.input_tokens,
+            input_tokens=admitted_tokens,
             input_tokens_per_minute=policy.input_tokens_per_minute,
             shared_model_families=policy.model_families,
             share_minute_across_accounts=policy.share_minute_across_accounts,
             reserve_total=reserve_total,
             urgent=self.urgent,
             provider_task=usage.purpose,
+            requested_model=usage.model,
+            purpose=usage.purpose,
+            prompt_contract=usage.prompt_contract,
+            estimator_version=usage.estimator_version,
+            base_estimated_input_tokens=usage.input_tokens,
+            calibration_provider_model_version=calibration_model_version,
+            calibration_safe_ratio=safe_ratio,
             usage_id=usage_id,
             decision=decision,
         )
@@ -79,39 +95,22 @@ class SchedulerModelAccountant(ModelRequestAccountant):
         )
         return reserved
 
-    def reserve_dispatch(self, purpose: str) -> bool:
-        reserved, next_eligible_at = reserve_provider_dispatch(
-            self.connection, provider_task=purpose,
-        )
-        self._next_retry_at = None if reserved else next_eligible_at
-        self._failure_code = None if reserved else "PROVIDER_DISPATCH_DEFERRED"
-        self._failure_evidence = (
-            None if reserved else {
-                "dimension": "PROVIDER_PACING",
-                "next_eligible_at": next_eligible_at,
-            }
-        )
-        return reserved
-
     def record_provider_outcome(
         self, outcome: str, *, retry_after_seconds: int | None = None,
         usage_metadata: dict[str, int] | None = None,
+        provider_model_version: str | None = None,
     ) -> None:
-        if self._usage_id is not None:
-            record_account_request_outcome(
-                self.connection,
-                self._usage_id,
-                outcome=outcome,
-                retry_after_seconds=retry_after_seconds,
-                usage_metadata=usage_metadata,
-            )
-            self._usage_id = None
-        else:
-            record_provider_dispatch_outcome(
-                self.connection,
-                outcome=outcome,
-                retry_after_seconds=retry_after_seconds,
-            )
+        if self._usage_id is None:
+            raise ValueError("provider outcome has no reserved model request")
+        record_account_request_outcome(
+            self.connection,
+            self._usage_id,
+            outcome=outcome,
+            retry_after_seconds=retry_after_seconds,
+            usage_metadata=usage_metadata,
+            provider_model_version=provider_model_version,
+        )
+        self._usage_id = None
         self._next_retry_at = provider_dispatch_next_eligible(self.connection)
 
     def mark_provider_attempted(self) -> None:
@@ -129,10 +128,3 @@ class SchedulerModelAccountant(ModelRequestAccountant):
     @property
     def failure_evidence(self) -> dict[str, object] | None:
         return self._failure_evidence
-
-    @property
-    def allow_provider_token_count(self) -> bool:
-        # A synchronous countTokens call followed by generateContent would
-        # either violate pacing or perpetually defer the generation. The local
-        # UTF-8 estimate is deliberately conservative and needs no transport.
-        return False

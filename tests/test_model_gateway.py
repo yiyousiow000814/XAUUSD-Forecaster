@@ -177,6 +177,7 @@ def test_gateway_reserves_exact_usage_before_transport(monkeypatch) -> None:
         purpose="news-impact",
         payload={"contents": []},
         input_tokens=4_321,
+        prompt_contract="impact-v1",
         decode=lambda envelope: envelope["value"],
         retryable_http_codes=frozenset(),
     )
@@ -188,6 +189,7 @@ def test_gateway_reserves_exact_usage_before_transport(monkeypatch) -> None:
             model="requested-model",
             purpose="news-impact",
             input_tokens=4_321,
+            prompt_contract="impact-v1",
         ),
         "transport",
     ]
@@ -279,7 +281,10 @@ def test_429_retry_after_stops_immediate_cross_account_dispatch(monkeypatch) -> 
 
         def record_provider_outcome(
             self, outcome: str, *, retry_after_seconds: int | None = None,
+            usage_metadata: dict[str, int] | None = None,
+            provider_model_version: str | None = None,
         ) -> None:
+            del usage_metadata, provider_model_version
             self.outcomes.append((outcome, retry_after_seconds))
             if outcome == "PROVIDER_THROTTLED":
                 self.blocked = True
@@ -420,3 +425,7 @@ def test_google_model_transport_has_one_source_of_truth() -> None:
     assert constructors == ["xauusd_forecaster/annotation.py"]
     assert "def _call_gemini" not in annotation_source
     assert "x-goog-api-key" not in annotation_source
+    gateway_source = (package / "model_gateway.py").read_text(encoding="utf-8")
+    assert "countTokens" not in gateway_source
+    assert "count_input_tokens" not in gateway_source
+    assert "allow_provider_token_count" not in gateway_source
