@@ -30,6 +30,9 @@ from xauusd_forecaster.assistant_routing import (
     (
         ("你是谁", AssistantToolPolicy.DIRECT),
         ("你能做什么？", AssistantToolPolicy.DIRECT),
+        ("你能做什么？请分成三点，简洁说明。", AssistantToolPolicy.DIRECT),
+        ("介绍一下你自己，重点说明当前能力。", AssistantToolPolicy.DIRECT),
+        ("What can you do? Answer in three bullets.", AssistantToolPolicy.DIRECT),
         ("你上一句说什么", AssistantToolPolicy.DIRECT),
         ("我刚才让你记住的测试短语是什么？", AssistantToolPolicy.DIRECT),
         ("请记住测试短语蓝鲸-73", AssistantToolPolicy.DIRECT),
