@@ -24,6 +24,17 @@ produced, the annotation MUST be withheld from model permission and retried; it
 MUST NOT be persisted as irrelevant or admitted behind a placeholder. A
 semantic-schema or source-evidence failure MUST fail independently and MUST NOT
 be disguised as a translation failure.
+The bounded display repair request MUST identify the prior rejection reason and
+rejected fields, MUST include only the rejected display output, and MUST freeze
+semantic and already-valid display fields. Once semantic validation succeeds,
+an immutable bounded display checkpoint preserves that result. Every later
+attempt resumes from the checkpoint, corrects only rejected display fields,
+includes the latest rejection reason, and MAY escalate across declared display
+model routes; it MUST NOT analyze the article semantics again. Display repair
+remains retryable with bounded backoff until valid output exists. It never
+becomes a completed placeholder or terminal semantic rejection. Historical
+placeholders written by the superseded behavior are ineligible for model use
+and are automatically rediscovered for append-only recovery.
 Language validation MUST distinguish ordinary untranslated prose from natural
 English identifiers and names. A complete foreign-language clause or a script
 other than Chinese and Latin requires repair; punctuation, numbers, symbols,

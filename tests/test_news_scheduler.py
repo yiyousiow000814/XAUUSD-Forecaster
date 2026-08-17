@@ -1054,6 +1054,45 @@ def test_embedding_catchup_is_deferred_without_trying_another_account(
     assert runner._may_try_another_credential(status) is False
 
 
+def test_display_repair_tries_another_independent_account_before_waiting(
+    tmp_path, monkeypatch,
+) -> None:
+    from scripts import run_news_annotator as runner
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    enqueue_job(
+        ledger.connection, task_type="ACTIVE_ANNOTATION", source="source",
+        source_item_id="display-repair", revision_number=1,
+        prompt_version="prompt", priority="NORMAL",
+        now=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    credentials = (
+        ApiCredential("account-a", ROUTINE_POOL, "key-a", "a"),
+        ApiCredential("account-b", ROUTINE_POOL, "key-b", "b"),
+    )
+    monkeypatch.setattr(runner, "configured_api_credentials", lambda: credentials)
+    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    calls = []
+
+    def execute(_ledger, credential, _job, **_kwargs):
+        calls.append(credential.account_id)
+        if credential.account_id == "account-a":
+            return {
+                "status": "ERROR", "error": "display remains invalid",
+                "retry_with_another_account": True,
+            }
+        return {"status": "OK"}
+
+    monkeypatch.setattr(runner, "_execute_job", execute)
+
+    statuses = runner.run_scheduled_batch(ledger, batch_size=1)
+
+    assert calls == ["account-a", "account-b"]
+    assert statuses[0]["status"] == "OK"
+    assert statuses[0]["attempted_accounts"] == 2
+    ledger.close()
+
+
 def test_capacity_blocked_route_is_skipped_for_the_rest_of_the_lane(
     tmp_path, monkeypatch,
 ) -> None:

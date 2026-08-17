@@ -27,6 +27,7 @@ IMMUTABLE_TABLES = (
     "news_title_translations",
     "news_llm_failures",
     "news_llm_failure_evidence_v1",
+    "news_annotation_display_checkpoints_v1",
     "news_content_failures",
     "news_discovery_failures",
     "news_intake_rejections_v1",
@@ -271,6 +272,24 @@ CREATE TABLE IF NOT EXISTS news_llm_failure_evidence_v1 (
     cause_type TEXT NOT NULL,
     cause TEXT NOT NULL,
     captured_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS news_annotation_display_checkpoints_v1 (
+    checkpoint_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    source_item_id TEXT NOT NULL,
+    revision_number INTEGER NOT NULL,
+    raw_content_hash TEXT NOT NULL,
+    llm_model_version TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    semantic_result_json TEXT NOT NULL,
+    invalid_fields_json TEXT NOT NULL,
+    rejection_reason TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    FOREIGN KEY(source, source_item_id, revision_number)
+        REFERENCES news_revisions(source, source_item_id, revision_number),
+    UNIQUE(source, source_item_id, revision_number,
+           llm_model_version, prompt_version)
 );
 
 CREATE TABLE IF NOT EXISTS news_content_failures (
@@ -1069,6 +1088,68 @@ class ForwardLedger:
                         _iso(record["failed_at"]),
                     ),
                 )
+
+    def append_annotation_display_checkpoint(
+        self, record: dict[str, Any]
+    ) -> None:
+        """Preserve validated semantics while display prose remains repairable."""
+        source_key = (
+            record["source"], record["source_item_id"], record["revision_number"]
+        )
+        news = self.connection.execute(
+            """SELECT content_hash,headline,body FROM news_revisions
+               WHERE source=? AND source_item_id=? AND revision_number=?""",
+            source_key,
+        ).fetchone()
+        if news is None or news["content_hash"] != record["raw_content_hash"]:
+            raise ValueError(
+                "display checkpoint does not match an immutable news revision"
+            )
+        semantic_result = dict(record["semantic_result"])
+        allowed_fields = {
+            "headline_zh", "summary_zh", "primary_story_title_zh",
+            "semantic_reason_zh",
+        }
+        invalid_fields = tuple(str(item) for item in record["invalid_fields"])
+        if not invalid_fields or len(set(invalid_fields)) != len(invalid_fields):
+            raise ValueError("display checkpoint fields must be unique and nonempty")
+        if not set(invalid_fields).issubset(allowed_fields):
+            raise ValueError("display checkpoint may contain only display fields")
+        semantic_candidate = dict(semantic_result)
+        semantic_candidate.update({
+            "headline_zh": "来源新闻",
+            "summary_zh": "完整来源正文已经保存，语义测量已通过独立合同校验。",
+            "primary_story_title_zh": "",
+            "semantic_reason_zh": "来源证据已经通过结构与语义合同校验。",
+        })
+        validate_news_annotation(
+            semantic_candidate, prompt_version=record["prompt_version"],
+            source_text=f"{news['headline']}\n{news['body'] or ''}",
+        )
+        semantic_json = json.dumps(
+            semantic_result, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"),
+        )
+        invalid_fields_json = json.dumps(
+            list(invalid_fields), ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        if len(semantic_json.encode("utf-8")) > 16_384:
+            raise ValueError("display checkpoint exceeds bounded storage")
+        if len(invalid_fields_json.encode("utf-8")) > 512:
+            raise ValueError("display checkpoint fields exceed bounded storage")
+        with self.connection:
+            self.connection.execute(
+                """INSERT OR IGNORE INTO news_annotation_display_checkpoints_v1
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    record["checkpoint_id"], *source_key,
+                    record["raw_content_hash"], record["llm_model_version"],
+                    record["prompt_version"], semantic_json,
+                    invalid_fields_json, str(record["rejection_reason"])[:500],
+                    _iso(record["captured_at"]),
+                ),
+            )
 
     def append_content_failure(self, record: dict[str, Any]) -> None:
         source_key = (

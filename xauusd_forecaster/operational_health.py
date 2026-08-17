@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import UTC, datetime, timedelta
+
 from .news_scheduler import TASKS
+from .news_semantics import (
+    DISPLAY_AUDIT_FALLBACK_REASON_PREFIX,
+    validated_annotation_predicate,
+)
 
 
 MONITOR_WINDOW = timedelta(minutes=15)
@@ -271,6 +276,34 @@ def scheduler_health_snapshot(
                 key=lambda item: (-item[1], item[0]),
             )[:8]
         ]
+
+    has_annotations = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='news_annotations'"
+    ).fetchone() is not None
+    invalid_display_rows = int(connection.execute(
+        f"""SELECT count(*) FROM news_annotations fallback
+            WHERE COALESCE(json_extract(
+                    fallback.annotation_json,'$.semantic_reason_zh'),'') LIKE ?
+              AND NOT EXISTS (
+                SELECT 1 FROM news_annotations repaired
+                WHERE repaired.source=fallback.source
+                  AND repaired.source_item_id=fallback.source_item_id
+                  AND repaired.revision_number=fallback.revision_number
+                  AND repaired.prompt_version=fallback.prompt_version
+                  AND repaired.parsed_at>fallback.parsed_at
+                  AND {validated_annotation_predicate('repaired')})""",
+        (f"{DISPLAY_AUDIT_FALLBACK_REASON_PREFIX}%",),
+    ).fetchone()[0]) if has_annotations else 0
+    if invalid_display_rows:
+        alerts.append(_alert(
+            "OPS_NEWS_ANNOTATION_CONTRACT_STATE_INVALID",
+            severity="ERROR", scope="ACTIVE_ANNOTATION",
+            message_zh=(
+                f"有 {invalid_display_rows} 条中文展示校验失败记录被旧版本错误标记为完成。"
+            ),
+            blocking=True,
+            evidence={"unrepaired_invalid_annotations": invalid_display_rows},
+        ))
 
     alerts.sort(key=lambda item: (
         SEVERITY_ORDER[str(item["severity"])], str(item["code"]),

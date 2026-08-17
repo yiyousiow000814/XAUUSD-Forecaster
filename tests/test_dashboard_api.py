@@ -441,24 +441,22 @@ def test_detached_runtime_compares_against_origin_main(tmp_path, monkeypatch) ->
     assert provenance["status"] == "MATCHED"
 
 
-def _append_basic_annotation(
+def _basic_annotation_payload(
     ledger: ForwardLedger,
     *,
     source: str,
     item_id: str,
-    digest: str,
     parsed_at: datetime,
-    prompt_version: str = PROMPT_VERSION,
     event_time: datetime | None = None,
     xauusd_relevance: str = "MACRO_DRIVER",
-) -> None:
+) -> dict[str, object]:
     news = ledger.connection.execute(
         """SELECT headline,body,source_published_time FROM news_revisions
         WHERE source=? AND source_item_id=? AND revision_number=1""",
         (source, item_id),
     ).fetchone()
     evidence = " ".join(str(news["body"] or news["headline"]).split())[:120]
-    annotation = {
+    return {
         "event_type": "economic_release",
         "entities": [],
         "hawkishness": 0.0,
@@ -490,6 +488,27 @@ def _append_basic_annotation(
         "semantic_reason_zh": "完整正文显示这是可能影响黄金的宏观事件。",
         "supporting_evidence": [evidence],
     }
+
+
+def _append_basic_annotation(
+    ledger: ForwardLedger,
+    *,
+    source: str,
+    item_id: str,
+    digest: str,
+    parsed_at: datetime,
+    prompt_version: str = PROMPT_VERSION,
+    event_time: datetime | None = None,
+    xauusd_relevance: str = "MACRO_DRIVER",
+) -> None:
+    annotation = _basic_annotation_payload(
+        ledger,
+        source=source,
+        item_id=item_id,
+        parsed_at=parsed_at,
+        event_time=event_time,
+        xauusd_relevance=xauusd_relevance,
+    )
     ledger.append_annotation(
         {
             "annotation_id": f"annotation-{source}-{item_id}",
@@ -1257,6 +1276,61 @@ def test_news_archive_does_not_mark_nonclaimable_news_as_waiting(tmp_path) -> No
     assert item["annotation_status"] == "NOT_REQUIRED"
     assert item["model_visibility"] == "MODEL_INELIGIBLE"
     ledger.close()
+
+
+def test_news_archive_exposes_display_checkpoint_as_active_repair(tmp_path) -> None:
+    module = _dashboard_module()
+    now = datetime.now(UTC).replace(microsecond=0)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    body = "Complete source body with one exact evidence sentence. " * 20
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    source = "google_news_fed_rates"
+    item_id = "repair-display"
+    ledger.append_news_revision({
+        "source": source, "source_item_id": item_id,
+        "source_published_time": now, "collector_first_seen_time": now,
+        "fetched_time": now, "headline": "Fed policy report", "body": body,
+        "content_hash": digest, "cluster_id": item_id,
+    })
+    semantic_result = _basic_annotation_payload(
+        ledger, source=source, item_id=item_id, parsed_at=now,
+    )
+    semantic_result["headline_zh"] = "Untranslated headline"
+    semantic_result["semantic_reason_zh"] = "Untranslated semantic reason"
+    ledger.append_annotation_display_checkpoint({
+        "checkpoint_id": "display-checkpoint",
+        "source": source, "source_item_id": item_id, "revision_number": 1,
+        "raw_content_hash": digest,
+        "llm_model_version": "gemini-3.5-flash-lite",
+        "prompt_version": PROMPT_VERSION,
+        "semantic_result": semantic_result,
+        "invalid_fields": ["headline_zh", "semantic_reason_zh"],
+        "rejection_reason": "headline_zh must be Chinese-primary",
+        "captured_at": now,
+    })
+
+    item = module._news_archive_page(ledger.connection, None, 20)["items"][0]
+
+    assert item["annotation_status"] == "REPAIRING_DISPLAY"
+    assert item["annotation_reason_code"] == "DISPLAY_REPAIR_IN_PROGRESS"
+    assert item["model_visibility"] == "REPAIRING_DISPLAY"
+    assert "修复中文显示" in item["annotation_reason"]
+    ledger.close()
+
+
+def test_duplicate_collection_copy_is_not_reported_as_queue_anomaly() -> None:
+    module = _dashboard_module()
+    now = datetime.now(UTC)
+    code, reason = module._not_required_reason({
+        "source": "google_news_gold_context",
+        "headline": "CPI report",
+        "source_published_time": now.isoformat(),
+        "collector_first_seen_time": now.isoformat(),
+        "has_canonical_content_peer": 1,
+    }, (now - timedelta(days=30)).isoformat())
+
+    assert code == "CANONICAL_COPY_HANDLES_ANNOTATION"
+    assert "不会重复消耗模型配额" in reason
 
 
 def test_news_archive_explains_terminal_model_contract_failure(tmp_path) -> None:
