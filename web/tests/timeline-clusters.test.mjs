@@ -10,7 +10,7 @@ test("clusters colliding timeline targets without dropping audit events", () => 
     { id: "c", x: 55 },
     { id: "d", x: 110 },
   ];
-  const groups = clusterTimelineItems(events, event => event.x, 44);
+  const groups = clusterTimelineItems(events, event => event.x, 64);
 
   assert.deepEqual(groups.map(group => group.map(event => event.id)), [
     ["a", "b", "c"],
@@ -18,7 +18,7 @@ test("clusters colliding timeline targets without dropping audit events", () => 
   ]);
   assert.deepEqual(groups.flat(), events, "presentation clustering must preserve every event");
   const centers = groups.map(group => group.reduce((total, event) => total + event.x, 0) / group.length);
-  assert.ok(centers.every((center, index) => index === 0 || center - centers[index - 1] >= 44));
+  assert.ok(centers.every((center, index) => index === 0 || center - centers[index - 1] >= 64));
 });
 
 test("rejects an invalid interaction distance", () => {

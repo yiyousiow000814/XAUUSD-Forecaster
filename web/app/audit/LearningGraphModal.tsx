@@ -562,10 +562,10 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
     : Array.from(
       new Set(Array.from({ length: markerLimit }, (_, index) => Math.round(index * (groupedBoundaries.length - 1) / (markerLimit - 1))))
     ).map(index => groupedBoundaries[index]);
-  // Dense windows retain every audit event, but combine events whose 44 px
-  // touch targets would collide. The readout exposes the complete group.
+  // Dense windows retain every audit event. The 960-unit SVG shrinks to 680px
+  // on phones, so 64 viewBox units preserve a non-overlapping 44px target.
   const boundaryGroups = compactBoundaryRail
-    ? clusterTimelineItems(displayedBoundaries, boundary => x(boundary.decision_time), 44)
+    ? clusterTimelineItems(displayedBoundaries, boundary => x(boundary.decision_time), 64)
     : displayedBoundaries.map(boundary => [boundary]);
   const laneEnds: number[] = [];
   const boundaryLayouts = boundaryGroups.map(group => {
@@ -634,7 +634,7 @@ function LongCurve({ curves, historyResource }: { curves: Curve[]; historyResour
         return <g key={boundary.decision_time} className="version-boundary">
           <title>{boundary.event_count && boundary.event_count > 1 ? `${formatExactCount(boundary.event_count)} 次相近换版\n` : ""}{boundary.changes.map(change => `${LABELS[change.model_identity] ?? change.model_identity} · 训练 ${formatExactCount(change.training_rows)} 条 · ${change.model_version}`).join("\n")}</title>
           <line className="version-boundary-marker" x1={markerX} x2={markerX} y1={boundaryDividerY} y2="350" />
-          {compactBoundaryRail ? <g className="version-event-control" role="button" tabIndex={0} aria-label={`${boundary.event_count && boundary.event_count > 1 ? `${formatExactCount(boundary.event_count)} 次相近换版，` : ""}${axisLabel(boundary.decision_time)}，${boundaryLabel(boundary)}`} aria-pressed={selectedBoundary?.decision_time === boundary.decision_time} onMouseEnter={() => setHoveredBoundary(boundary)} onMouseLeave={() => setHoveredBoundary(null)} onFocus={() => setHoveredBoundary(boundary)} onBlur={() => setHoveredBoundary(null)} onClick={() => setSelectedBoundary(current => current?.decision_time === boundary.decision_time ? null : boundary)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedBoundary(current => current?.decision_time === boundary.decision_time ? null : boundary); } }}><circle className="version-event-hit" cx={markerX} cy={boundaryDividerY} r="22" /><circle className="version-event-dot" cx={markerX} cy={boundaryDividerY} r="5" /></g> : <>
+          {compactBoundaryRail ? <g className="version-event-control" role="button" tabIndex={0} aria-label={`${boundary.event_count && boundary.event_count > 1 ? `${formatExactCount(boundary.event_count)} 次相近换版，` : ""}${axisLabel(boundary.decision_time)}，${boundaryLabel(boundary)}`} aria-pressed={selectedBoundary?.decision_time === boundary.decision_time} onMouseEnter={() => setHoveredBoundary(boundary)} onMouseLeave={() => setHoveredBoundary(null)} onFocus={() => setHoveredBoundary(boundary)} onBlur={() => setHoveredBoundary(null)} onClick={() => setSelectedBoundary(current => current?.decision_time === boundary.decision_time ? null : boundary)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedBoundary(current => current?.decision_time === boundary.decision_time ? null : boundary); } }}><circle className="version-event-hit" cx={markerX} cy={boundaryDividerY} r="32" /><circle className="version-event-dot" cx={markerX} cy={boundaryDividerY} r="5" /></g> : <>
             <path className="version-boundary-leader" d={`M ${labelX} ${labelY + 24} L ${labelX} ${boundaryDividerY - 5} L ${markerX} ${boundaryDividerY}`} />
             <rect className="version-boundary-badge" x={labelX - labelWidth / 2} y={labelY} width={labelWidth} height="24" rx="3" />
             <text x={labelX} textAnchor="middle" y={labelY + 17}>{label}</text>
