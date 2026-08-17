@@ -8,6 +8,11 @@ from typing import Mapping
 
 MAX_ACTIONABLE_NEWS_AGE = timedelta(hours=72)
 MAX_ACTIONABLE_DISCOVERY_DELAY = timedelta(hours=1)
+MAX_COARSE_PUBLICATION_CLOCK_SKEW = timedelta(minutes=5)
+
+SOURCE_REPORTED_TIME = "SOURCE_REPORTED"
+MIXED_PRECISE_OR_BATCH_PROXY_TIME = "MIXED_PRECISE_OR_BATCH_PROXY"
+_COARSE_PUBLICATION_TIME_SOURCES = frozenset({"gdelt_gold_geopolitics"})
 
 _CATEGORY_TIME_RULES = {
     "inflation_employment": (timedelta(hours=24), 180.0),
@@ -33,6 +38,16 @@ class NewsTimeAssessment:
     age_minutes: float | None
     discovery_delay_seconds: float | None
     reason_code: str
+
+
+@dataclass(frozen=True)
+class NewsSemanticEligibility:
+    """Separate semantic permission from economic timing evidence."""
+
+    eligible: bool
+    reason_code: str
+    timing_reason_codes: tuple[str, ...]
+    publication_time_reliability: str
 
 
 def _value(row: Mapping[str, object], key: str) -> object:
@@ -106,15 +121,62 @@ def assess_news_time(
 
 def assess_news_semantic_eligibility(
     row: Mapping[str, object], *, forward_epoch: datetime,
-) -> NewsTimeAssessment:
-    """Evaluate immutable receipt-time eligibility for semantic model work."""
+) -> NewsSemanticEligibility:
+    """Decide whether received evidence may be understood by the semantic model.
+
+    Discovery delay and publication age remain auditable timing evidence. They
+    do not decide whether readable current evidence is worth classifying;
+    impact and trading contracts own economic freshness after classification.
+    """
     first_seen = _time(_value(row, "collector_first_seen_time"))
     if first_seen is None:
         raise ValueError("collector_first_seen_time requires a timestamp")
-    return assess_news_time(
-        row,
-        decision_time=first_seen,
-        forward_epoch=forward_epoch,
-        max_actionable_age=MAX_ACTIONABLE_NEWS_AGE,
-        max_discovery_delay=MAX_ACTIONABLE_DISCOVERY_DELAY,
+    epoch = _time(forward_epoch)
+    if epoch is None:
+        raise ValueError("forward_epoch requires a timestamp")
+    source = str(_value(row, "source") or "")
+    published = _time(_value(row, "source_published_time"))
+    reliability = (
+        MIXED_PRECISE_OR_BATCH_PROXY_TIME
+        if source in _COARSE_PUBLICATION_TIME_SOURCES
+        else SOURCE_REPORTED_TIME
+    )
+    if first_seen < epoch:
+        return NewsSemanticEligibility(
+            False, "PRE_FORWARD_RECEIPT", (), reliability,
+        )
+    if published is None:
+        return NewsSemanticEligibility(
+            False, "PUBLISHED_TIME_MISSING", (), reliability,
+        )
+    if published < epoch:
+        return NewsSemanticEligibility(
+            False, "PRE_FORWARD_PUBLICATION", (), reliability,
+        )
+
+    timing_reasons: list[str] = []
+    if published > first_seen:
+        timing_reasons.append("PUBLISHED_AFTER_DECISION")
+        if not (
+            reliability == MIXED_PRECISE_OR_BATCH_PROXY_TIME
+            and published - first_seen <= MAX_COARSE_PUBLICATION_CLOCK_SKEW
+        ):
+            return NewsSemanticEligibility(
+                False,
+                "PUBLISHED_AFTER_DECISION",
+                tuple(timing_reasons),
+                reliability,
+            )
+    else:
+        discovery_delay = first_seen - published
+        if discovery_delay > MAX_ACTIONABLE_DISCOVERY_DELAY:
+            timing_reasons.append("LATE_DISCOVERY")
+        if discovery_delay > MAX_ACTIONABLE_NEWS_AGE:
+            timing_reasons.append("STALE_EVENT")
+
+    return NewsSemanticEligibility(
+        True,
+        "SEMANTIC_ELIGIBLE",
+        tuple(timing_reasons) or ("CURRENT_EVENT",),
+        reliability,
     )

@@ -72,6 +72,12 @@ collector MUST NOT infer article meaning from title words or provider-specific
 theme combinations. A `PAGE_PRECISEPUBTIMESTAMP` is retained when available.
 Otherwise the GKG batch
 timestamp is a conservative visibility clock, not an inferred event time.
+Because that proxy can lead the local fetch clock by a few minutes at a batch
+boundary, the bounded skew is timing-quality evidence rather than a semantic
+exclusion. This does not make the proxy an economic event time; impact and
+trading continue to require their existing reliable event-time and visibility
+contracts. Persisting per-row timestamp provenance is deferred to a separate
+schema change.
 
 GKG field bounds apply to archive metadata, not publisher article length. A
 single oversized or malformed GKG row MUST be rejected independently and MUST

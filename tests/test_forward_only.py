@@ -68,6 +68,11 @@ from xauusd_forecaster.news import (
 )
 from xauusd_forecaster.news_features_v2 import aggregate_news_features_v2
 from xauusd_forecaster.news_relevance import google_news_item_is_relevant
+from xauusd_forecaster.news_time import (
+    MIXED_PRECISE_OR_BATCH_PROXY_TIME,
+    SOURCE_REPORTED_TIME,
+    assess_news_semantic_eligibility,
+)
 from xauusd_forecaster.ridge import RidgeArtifact, train_ridge
 from xauusd_forecaster.shadow_simulation import shadow_league
 from xauusd_forecaster.u5_state import U5State
@@ -4565,7 +4570,7 @@ def test_archive_is_rejected_but_late_seen_news_reaches_full_text_queue(tmp_path
     ledger.close()
 
 
-def test_archive_and_late_seen_news_stay_out_of_annotation_queue(
+def test_archive_stays_out_but_late_seen_news_enters_annotation_queue(
     tmp_path,
 ) -> None:
     epoch = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
@@ -4591,5 +4596,108 @@ def test_archive_and_late_seen_news_stay_out_of_annotation_queue(
         observed_at=epoch + timedelta(days=20),
         limit=10,
     )
-    assert rows == []
+    assert [row["source_item_id"] for row in rows] == ["late"]
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("source", "published_delta", "timing_reasons", "reliability"),
+    (
+        (
+            "google_news_gold_context", timedelta(hours=-2),
+            ("LATE_DISCOVERY",), SOURCE_REPORTED_TIME,
+        ),
+        (
+            "google_news_gold_context", timedelta(hours=-73),
+            ("LATE_DISCOVERY", "STALE_EVENT"), SOURCE_REPORTED_TIME,
+        ),
+        (
+            "gdelt_gold_geopolitics", timedelta(seconds=293),
+            ("PUBLISHED_AFTER_DECISION",), MIXED_PRECISE_OR_BATCH_PROXY_TIME,
+        ),
+    ),
+)
+def test_semantic_eligibility_preserves_timing_evidence_without_rejecting_it(
+    source: str,
+    published_delta: timedelta,
+    timing_reasons: tuple[str, ...],
+    reliability: str,
+) -> None:
+    received = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
+
+    assessment = assess_news_semantic_eligibility(
+        {
+            "source": source,
+            "source_published_time": received + published_delta,
+            "collector_first_seen_time": received,
+        },
+        forward_epoch=received - timedelta(days=10),
+    )
+
+    assert assessment.eligible is True
+    assert assessment.reason_code == "SEMANTIC_ELIGIBLE"
+    assert assessment.timing_reason_codes == timing_reasons
+    assert assessment.publication_time_reliability == reliability
+
+
+def test_untrusted_future_publication_time_remains_semantic_ineligible() -> None:
+    received = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
+
+    assessment = assess_news_semantic_eligibility(
+        {
+            "source": "google_news_gold_context",
+            "source_published_time": received + timedelta(minutes=11),
+            "collector_first_seen_time": received,
+        },
+        forward_epoch=received - timedelta(days=1),
+    )
+
+    assert assessment.eligible is False
+    assert assessment.reason_code == "PUBLISHED_AFTER_DECISION"
+
+
+def test_late_legacy_annotation_remains_completed_without_requeue(tmp_path) -> None:
+    received = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(
+        tmp_path / "forward.sqlite3", now=received - timedelta(days=3),
+    )
+    body = "Complete late source evidence for semantic classification. " * 20
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    ledger.append_news_revision({
+        "source": "google_news_gold_context", "source_item_id": "late-complete",
+        "source_published_time": received - timedelta(hours=2),
+        "collector_first_seen_time": received, "fetched_time": received,
+        "headline": "Late-discovered complete evidence", "body": body,
+        "link": "https://publisher.example/late-complete",
+        "content_hash": digest, "cluster_id": "late-complete",
+    })
+    ledger.append_annotation({
+        "annotation_id": "late-annotation",
+        "source": "google_news_gold_context", "source_item_id": "late-complete",
+        "revision_number": 1, "raw_content_hash": digest,
+        "annotation": _v15_annotation(
+            {
+                "headline_zh": "延迟发现的完整证据",
+                "summary_zh": "该新闻虽延迟发现，但完整正文仍已完成语义分类。",
+                "event_type": "other", "entities": [], "hawkishness": 0.0,
+                "inflation_impulse": 0.0, "growth_impulse": 0.0,
+                "geopolitical_risk": 0.0, "usd_impulse": 0.0,
+                "novelty": 0.2, "confidence": 0.9,
+            },
+            "Complete late source evidence for semantic classification",
+        ),
+        "llm_model_version": annotation_module.DEFAULT_GEMINI_MODEL,
+        "prompt_version": annotation_module.PROMPT_VERSION,
+        "parse_started_at": received, "parsed_at": received + timedelta(seconds=1),
+    })
+
+    completed = annotation_module.completed_annotation_records(
+        ledger.connection, observed_at=received + timedelta(minutes=1), limit=10,
+    )
+    pending = annotation_module.pending_annotation_records(
+        ledger.connection, observed_at=received + timedelta(minutes=1), limit=10,
+    )
+
+    assert [row["source_item_id"] for row in completed] == ["late-complete"]
+    assert pending == []
     ledger.close()

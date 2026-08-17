@@ -747,7 +747,7 @@ def test_superseded_jobs_are_reconciled_without_another_model_attempt(tmp_path) 
     ledger.close()
 
 
-def test_late_discovery_is_not_admitted_to_annotation_scheduler(tmp_path) -> None:
+def test_late_discovery_is_admitted_to_annotation_scheduler(tmp_path) -> None:
     ledger = ForwardLedger(
         tmp_path / "forward.sqlite3", now=NOW - timedelta(hours=3),
     )
@@ -763,11 +763,11 @@ def test_late_discovery_is_not_admitted_to_annotation_scheduler(tmp_path) -> Non
 
     discovered = sync_pending_jobs(ledger.connection, now=NOW)
 
-    assert discovered["ACTIVE_ANNOTATION"] == 0
+    assert discovered["ACTIVE_ANNOTATION"] == 1
     assert ledger.connection.execute(
         "SELECT count(*) FROM news_ai_jobs_v1 "
         "WHERE task_type='ACTIVE_ANNOTATION'"
-    ).fetchone()[0] == 0
+    ).fetchone()[0] == 1
     ledger.close()
 
 

@@ -68,12 +68,15 @@ controlled category: 24 hours for inflation/employment and risk sentiment,
 72 hours for rates/Fed, and seven days for central-bank gold. Missing publisher
 timestamps, pre-epoch archive items, discoveries delayed by more than 60
 minutes, and stale events remain visible for audit but cannot create a current
-model impulse. Known pre-epoch and late-discovery archive rows are not sent to
-the full-text or Gemini queues. A row with a missing publisher timestamp may be
-summarized for display, but it remains ineligible for training. Freshness decay
-is measured from publisher time, never from parser completion or collector
-startup. Controlled category `regulation_other` is display-only even when it
-comes from an official source.
+model impulse. Pre-epoch rows are not sent to semantic model queues. Discovery
+delay and publication age do not prevent a readable current revision from
+receiving semantic classification: the impact contract decides economic
+actionability and lifetime after classification, and the trading contract
+separately enforces decision-time visibility. A row with a missing publisher
+timestamp may be summarized for display, but it remains ineligible for
+training. Freshness decay is measured from publisher time, never from parser
+completion or collector startup. Controlled category `regulation_other` is
+display-only even when it comes from an official source.
 
 Revised news is a new row with a larger revision number and a new content
 hash. Existing revisions are never updated. An annotation is usable only when

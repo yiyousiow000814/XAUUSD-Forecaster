@@ -640,14 +640,14 @@ def _not_required_reason(item: dict, forward_epoch: str) -> tuple[str, str]:
     assessment = assess_news_semantic_eligibility(
         item, forward_epoch=epoch,
     )
-    if assessment.reason_code == "STALE_EVENT":
-        return "STALE_AT_INTAKE", "收到时已超过72小时，不进入语义处理"
-    if assessment.reason_code == "LATE_DISCOVERY":
-        return "LATE_DISCOVERY", "采集时距发布时间已超过60分钟，不进入语义处理"
     if assessment.reason_code == "PUBLISHED_AFTER_DECISION":
         return "INVALID_PUBLISHED_TIME", "发布时间晚于收到时间，时间证据无效"
     if assessment.reason_code == "PUBLISHED_TIME_MISSING":
         return "HISTORICAL_MATERIAL", "历史资料：缺少可靠发布时间"
+    if assessment.reason_code in {
+        "PRE_FORWARD_PUBLICATION", "PRE_FORWARD_RECEIPT",
+    }:
+        return "HISTORICAL_MATERIAL", "历史资料：时间早于系统开始记录"
     if item.get("has_canonical_content_peer"):
         return (
             "CANONICAL_COPY_HANDLES_ANNOTATION",

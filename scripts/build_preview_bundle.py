@@ -244,11 +244,9 @@ def _backfill_annotation_reasons(news_index: dict, status: dict) -> None:
         annotation_status = item.get("annotation_status")
         if annotation_status not in {"QUEUED", "NOT_REQUIRED"}:
             continue
-        if (
-            annotation_status == "NOT_REQUIRED"
-            and item.get("annotation_reason_code")
+        if annotation_status == "NOT_REQUIRED" and (
+            item.get("annotation_reason_code")
             and item.get("annotation_reason")
-            and item.get("annotation_reason_code") != "QUEUE_INVARIANT_MISMATCH"
         ):
             continue
         published_raw = item.get("source_published_time")
@@ -264,18 +262,15 @@ def _backfill_annotation_reasons(news_index: dict, status: dict) -> None:
                 assessment = assess_news_semantic_eligibility(
                     item, forward_epoch=epoch,
                 )
-                if assessment.reason_code == "STALE_EVENT":
-                    code, reason = (
-                        "STALE_AT_INTAKE", "收到时已超过72小时，不进入语义处理",
-                    )
-                elif assessment.reason_code == "LATE_DISCOVERY":
-                    code, reason = (
-                        "LATE_DISCOVERY",
-                        "采集时距发布时间已超过60分钟，不进入语义处理",
-                    )
-                elif assessment.reason_code == "PUBLISHED_AFTER_DECISION":
+                if assessment.reason_code == "PUBLISHED_AFTER_DECISION":
                     code, reason = (
                         "INVALID_PUBLISHED_TIME", "发布时间晚于收到时间，时间证据无效",
+                    )
+                elif assessment.reason_code in {
+                    "PRE_FORWARD_PUBLICATION", "PRE_FORWARD_RECEIPT",
+                }:
+                    code, reason = (
+                        "HISTORICAL_MATERIAL", "历史资料：时间早于系统开始记录",
                     )
                 else:
                     code, reason = (

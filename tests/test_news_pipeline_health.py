@@ -33,11 +33,16 @@ def _heartbeat(ledger: ForwardLedger, at: datetime) -> None:
     })
 
 
-def _news(ledger: ForwardLedger, received_at: datetime) -> None:
+def _news(
+    ledger: ForwardLedger,
+    received_at: datetime,
+    *,
+    publication_delay: timedelta = timedelta(minutes=1),
+) -> None:
     body = "Material macroeconomic report. " * 20
     ledger.append_news_revision({
         "source": "test_semantic_source", "source_item_id": "item-1",
-        "source_published_time": received_at - timedelta(minutes=1),
+        "source_published_time": received_at - publication_delay,
         "collector_first_seen_time": received_at, "fetched_time": received_at,
         "headline": "Material macroeconomic report", "body": body,
         "link": "https://example.test/report",
@@ -168,13 +173,20 @@ def test_recent_arrival_gets_one_decision_interval_before_fail_closed_gate(
     assert health["status"] == "HEALTHY"
 
 
-def test_unresolved_actionable_news_after_one_interval_fails_closed(
-    tmp_path, credentials,
+@pytest.mark.parametrize(
+    "publication_delay", (timedelta(minutes=1), timedelta(hours=2)),
+)
+def test_unresolved_semantic_news_after_one_interval_fails_closed(
+    tmp_path, credentials, publication_delay: timedelta,
 ) -> None:
     now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now - timedelta(days=1))
     _heartbeat(ledger, now)
-    _news(ledger, now - timedelta(minutes=6))
+    _news(
+        ledger,
+        now - timedelta(minutes=6),
+        publication_delay=publication_delay,
+    )
 
     health = news_pipeline_health.news_semantic_pipeline_health(
         ledger, observed_at=now,
@@ -252,7 +264,7 @@ def test_known_current_model_failure_fails_closed_without_waiting_for_grace(
     }
 
 
-def test_late_discovery_model_failure_does_not_close_semantic_gate(
+def test_late_discovery_model_failure_still_closes_semantic_gate(
     tmp_path, credentials,
 ) -> None:
     now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
@@ -287,8 +299,11 @@ def test_late_discovery_model_failure_does_not_close_semantic_gate(
         ledger, observed_at=now,
     )
 
-    assert health["status"] == "HEALTHY"
-    assert health["unresolved_items"] == 0
+    assert health["status"] == "UNHEALTHY"
+    assert health["reason_codes"] == ("ACTIONABLE_NEWS_SEMANTICS_PENDING",)
+    assert health["actionable_failure_counts"] == {
+        "ACTIVE_ANNOTATION": {"UNCLASSIFIED": 1},
+    }
 
 
 def test_superseded_annotation_failure_does_not_close_semantic_gate(
