@@ -8,6 +8,7 @@ from xauusd_forecaster.forward_ledger import ForwardLedger
 from xauusd_forecaster.news_retrieval import (
     EmbeddingProfile,
     append_missing_embeddings,
+    attach_hybrid_prior_event_context,
     lexical_identity_similarity,
     load_embeddings,
     retrieve_hybrid_prior_event_context,
@@ -178,5 +179,62 @@ def test_embedding_rows_are_versioned_by_exact_local_model_digest(tmp_path):
             ledger.connection.execute(
                 "UPDATE news_identity_embeddings_v1 SET dimensions=3"
             )
+    finally:
+        ledger.close()
+
+
+def test_runtime_catches_up_historical_embedding_gap_before_retrieval(
+    tmp_path, monkeypatch,
+):
+    import xauusd_forecaster.news_retrieval as retrieval
+
+    ledger = ForwardLedger(tmp_path / "evidence.sqlite3")
+    prior = _row(
+        "prior", "Federal Reserve held rates steady",
+        first_seen="2026-08-16T10:00:00+00:00",
+    )
+    current = _row(
+        "current", "Markets await the next Federal Reserve decision",
+        first_seen="2026-08-17T10:00:00+00:00",
+    )
+    try:
+        for row in (prior, current):
+            ledger.connection.execute(
+                """INSERT INTO news_revisions VALUES (
+                   ?,?,1,NULL,?,?,?,?,'body',NULL,?,'cluster',NULL)""",
+                (
+                    row["source"], row["source_item_id"],
+                    row["collector_first_seen_time"],
+                    row["collector_first_seen_time"],
+                    row["collector_first_seen_time"], row["headline"],
+                    row["raw_content_hash"],
+                ),
+            )
+            ledger.connection.execute(
+                """INSERT INTO news_annotations VALUES (
+                   ?,?,?,1,?,'EVENT','[]',0,0,0,0,0,0,1,
+                   'model','prompt',?,?,?)""",
+                (
+                    row["annotation_id"], row["source"], row["source_item_id"],
+                    row["raw_content_hash"], row["collector_first_seen_time"],
+                    row["collector_first_seen_time"], "{}",
+                ),
+            )
+        ledger.connection.commit()
+        monkeypatch.setattr(
+            retrieval, "load_identity_candidate_universe",
+            lambda *_args, **_kwargs: [prior, current],
+        )
+
+        attached = attach_hybrid_prior_event_context(
+            ledger.connection, [current], client=_FakeEmbeddingClient(),
+        )
+
+        assert attached[0]["identity_retrieval_version"] == (
+            retrieval.NEWS_HYBRID_RETRIEVAL_VERSION
+        )
+        assert ledger.connection.execute(
+            "SELECT count(*) FROM news_identity_embeddings_v1"
+        ).fetchone()[0] == 2
     finally:
         ledger.close()

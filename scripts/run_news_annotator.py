@@ -53,6 +53,9 @@ from xauusd_forecaster.news_scheduler import (  # noqa: E402
     scheduler_counts,
     sync_pending_jobs,
 )
+from xauusd_forecaster.news_retrieval import (  # noqa: E402
+    NewsEmbeddingBackfillPending,
+)
 from xauusd_forecaster.runtime_health import (  # noqa: E402
     RuntimeHeartbeatPulse,
     write_runtime_heartbeat,
@@ -182,6 +185,13 @@ def _execute_job_safely(
     except sqlite3.Error:
         raise
     except Exception as error:
+        if isinstance(error, NewsEmbeddingBackfillPending):
+            return {
+                "status": "DEFERRED",
+                "failure_code": "NEWS_EMBEDDING_BACKFILL_PENDING",
+                "error_type": type(error).__name__,
+                "error": str(error)[:500],
+            }
         return {
             "status": "ERROR",
             "failure_code": "SCHEDULER_EXECUTION_FAILED",
@@ -238,6 +248,8 @@ def _credentials_for_job(
 
 
 def _may_try_another_credential(status: dict[str, object]) -> bool:
+    if status.get("failure_code") == "NEWS_EMBEDDING_BACKFILL_PENDING":
+        return False
     if status.get("status") in {"DEFERRED", "DISABLED"}:
         return True
     return status.get("provider_http_status") in {

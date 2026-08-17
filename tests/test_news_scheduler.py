@@ -1032,6 +1032,28 @@ def test_scheduler_tries_every_independent_account_before_waiting(
     ledger.close()
 
 
+def test_embedding_catchup_is_deferred_without_trying_another_account(
+    monkeypatch,
+) -> None:
+    from scripts import run_news_annotator as runner
+    from xauusd_forecaster.news_retrieval import NewsEmbeddingBackfillPending
+
+    def pending(*_args, **_kwargs):
+        raise NewsEmbeddingBackfillPending(
+            "news identity embedding backfill is incomplete: 300 missing"
+        )
+
+    monkeypatch.setattr(runner, "_execute_job", pending)
+
+    status = runner._execute_job_safely(
+        object(), object(), object(), now=NOW,
+    )
+
+    assert status["status"] == "DEFERRED"
+    assert status["failure_code"] == "NEWS_EMBEDDING_BACKFILL_PENDING"
+    assert runner._may_try_another_credential(status) is False
+
+
 def test_capacity_blocked_route_is_skipped_for_the_rest_of_the_lane(
     tmp_path, monkeypatch,
 ) -> None:
