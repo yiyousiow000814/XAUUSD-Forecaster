@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import urllib.error
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pytest
@@ -14,7 +15,12 @@ from xauusd_forecaster.gemini_embeddings import (
     GeminiEmbeddingClient,
     GeminiEmbeddingFailure,
 )
-from xauusd_forecaster.news_scheduler import ApiCredential, ROUTINE_POOL
+from xauusd_forecaster.news_scheduler import (
+    ApiCredential,
+    ROUTINE_POOL,
+    quota_day,
+    reserve_account_request,
+)
 
 
 def test_embedding_batch_reserves_each_content_item_and_uses_asymmetric_tasks(
@@ -59,6 +65,10 @@ def test_embedding_batch_reserves_each_content_item_and_uses_asymmetric_tasks(
            WHERE model_family='gemini-embedding-2'"""
     ).fetchone()
     assert int(usage[0]) == 3
+    dispatch_classes = ledger.connection.execute(
+        "SELECT task_class FROM news_ai_provider_dispatch_task_state_v1"
+    ).fetchall()
+    assert {str(row[0]) for row in dispatch_classes} == {"EMBEDDING"}
     ledger.close()
 
 
@@ -192,6 +202,82 @@ def test_embedding_local_admission_has_distinct_failure_code(
     assert ledger.connection.execute(
         "SELECT count(*) FROM news_ai_account_request_usage_v1"
     ).fetchone()[0] == 1
+    ledger.close()
+
+
+def test_five_account_daily_cap_blocks_transport_and_next_day_resets(
+    tmp_path, monkeypatch,
+) -> None:
+    from xauusd_forecaster import gemini_embeddings
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    credentials = tuple(
+        ApiCredential(
+            f"account-{index}", ROUTINE_POOL, f"key-{index}", f"fp-{index}",
+        )
+        for index in range(5)
+    )
+    monkeypatch.setattr(
+        gemini_embeddings, "configured_api_credentials", lambda: credentials,
+    )
+    now = datetime.now(UTC)
+    day = quota_day(now)
+    for credential in credentials:
+        ledger.connection.execute(
+            """INSERT INTO news_ai_account_daily_usage_v1
+               (quota_day,account_id,model_family,request_count,updated_at)
+               VALUES (?,?,?,?,?)""",
+            (
+                day, credential.account_id, "gemini-embedding-2", 1_000,
+                now.isoformat(),
+            ),
+        )
+    ledger.connection.commit()
+    provider_calls = 0
+
+    def request(*_args, **_kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        pytest.fail("daily safety cap must prevent embedding transport")
+
+    client = GeminiEmbeddingClient(ledger.connection)
+    monkeypatch.setattr(client, "_request", request)
+    with pytest.raises(GeminiEmbeddingCapacityDeferred):
+        client.embed(["document"], client.profile())
+
+    assert provider_calls == 0
+    capped = ledger.connection.execute(
+        """SELECT account_id,request_count
+           FROM news_ai_account_daily_usage_v1
+           WHERE quota_day=? AND model_family='gemini-embedding-2'
+           ORDER BY account_id""",
+        (day,),
+    ).fetchall()
+    assert [tuple(row) for row in capped] == [
+        (f"account-{index}", 1_000) for index in range(5)
+    ]
+
+    next_day = now + timedelta(days=1)
+    assert reserve_account_request(
+        ledger.connection,
+        account_id="account-0",
+        model_family="gemini-embedding-2",
+        daily_limit=1_000,
+        requests_per_minute=100,
+        request_count=1,
+        now=next_day,
+    )
+    assert ledger.connection.execute(
+        """SELECT request_count FROM news_ai_account_daily_usage_v1
+           WHERE quota_day=? AND account_id='account-0'
+             AND model_family='gemini-embedding-2'""",
+        (quota_day(next_day),),
+    ).fetchone()[0] == 1
+    assert ledger.connection.execute(
+        """SELECT count(*) FROM news_ai_account_daily_usage_v1
+           WHERE quota_day=? AND model_family='gemini-embedding-2'""",
+        (day,),
+    ).fetchone()[0] == 5
     ledger.close()
 
 

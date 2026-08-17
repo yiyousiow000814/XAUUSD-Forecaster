@@ -750,6 +750,10 @@ def attach_hybrid_prior_event_context(
     initial_mode, initial_reason = _adaptive_retrieval_policy(
         connection, universe, profile,
     )
+    if initial_mode == "DETERMINISTIC_FALLBACK":
+        return _attach_deterministic_fallback(
+            connection, records, universe, reason=initial_reason,
+        )
     # New annotations can become eligible between the deployment backfill and
     # the next impact cycle. Catch up the complete point-in-time universe, not
     # only the record currently holding the scheduler lease.
@@ -775,16 +779,10 @@ def attach_hybrid_prior_event_context(
     selected_mode, selected_reason = _adaptive_retrieval_policy(
         connection, universe, profile,
     )
-    if initial_mode == "DETERMINISTIC_FALLBACK" or (
-        selected_mode == "DETERMINISTIC_FALLBACK"
-    ):
+    if selected_mode == "DETERMINISTIC_FALLBACK":
         return _attach_deterministic_fallback(
             connection, records, universe,
-            reason=(
-                initial_reason
-                if initial_mode == "DETERMINISTIC_FALLBACK"
-                else selected_reason
-            ),
+            reason=selected_reason,
         )
     if missing:
         raise NewsEmbeddingBackfillPending(

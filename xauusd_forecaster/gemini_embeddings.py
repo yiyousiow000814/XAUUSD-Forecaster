@@ -185,7 +185,7 @@ class GeminiEmbeddingClient:
         connection: sqlite3.Connection,
         *,
         timeout: float = 120.0,
-        dispatch_task: str = "ACTIVE_IMPACT_RETRIEVAL",
+        dispatch_task: str = "NEWS_EMBEDDING",
     ) -> None:
         self.connection = connection
         self.timeout = timeout

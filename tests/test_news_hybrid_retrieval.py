@@ -513,11 +513,21 @@ def test_live_pressure_selects_fallback_then_stabilized_ready_returns_hybrid(
             priority="FAST", now=created,
         )
 
+    class CountingEmbeddingClient(_FakeEmbeddingClient):
+        calls = 0
+
+        def embed(self, texts, profile):
+            self.calls += 1
+            return super().embed(texts, profile)
+
+    client = CountingEmbeddingClient()
+
     try:
         fallback = attach_hybrid_prior_event_context(
-            ledger.connection, [dict(current)], client=_FakeEmbeddingClient(),
+            ledger.connection, [dict(current)], client=client,
         )
 
+        assert client.calls == 0
         assert fallback[0]["identity_retrieval_mode"] == "DETERMINISTIC_FALLBACK"
         assert fallback[0]["identity_retrieval_reason"] == (
             "ADAPTIVE_RETRIEVAL_PRESSURE"
@@ -528,9 +538,18 @@ def test_live_pressure_selects_fallback_then_stabilized_ready_returns_hybrid(
         pressure = json.loads(state["pressure_json"])
         assert pressure["impact_backlog"] == 3
         assert pressure["impact_created_15m"] == 3
-        assert pressure["missing"] == 0
+        assert pressure["missing"] == 2
         assert state["mode"] == "DETERMINISTIC_FALLBACK"
-        assert state["reason"] == "HYBRID_RECOVERY_STABILIZING"
+        assert state["reason"] == "ADAPTIVE_RETRIEVAL_PRESSURE"
+
+        _, appended = append_missing_embeddings(
+            ledger.connection, [prior, current], client,
+        )
+        assert appended == 2
+        assert client.calls == 1
+        retrieval._adaptive_retrieval_policy(
+            ledger.connection, [prior, current], client.profile(),
+        )
 
         ledger.connection.execute(
             """UPDATE news_ai_retrieval_mode_state_v1
@@ -539,7 +558,7 @@ def test_live_pressure_selects_fallback_then_stabilized_ready_returns_hybrid(
         )
         ledger.connection.commit()
         hybrid = attach_hybrid_prior_event_context(
-            ledger.connection, [dict(current)], client=_FakeEmbeddingClient(),
+            ledger.connection, [dict(current)], client=client,
         )
 
         assert hybrid[0]["identity_retrieval_mode"] == "HYBRID"

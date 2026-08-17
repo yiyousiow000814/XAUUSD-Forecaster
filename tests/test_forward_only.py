@@ -31,7 +31,6 @@ from xauusd_forecaster.annotation import (
 )
 from xauusd_forecaster.factors import aggregate_news_features, factor_coverage
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
-from xauusd_forecaster.gemini_embeddings import GeminiEmbeddingFailure
 from xauusd_forecaster.local_embeddings import EmbeddingProfile
 from xauusd_forecaster.model_gateway import GeminiModelGateway
 from xauusd_forecaster.news_impact import pending_impact_records
@@ -3403,7 +3402,17 @@ def test_gemma_impact_assessment_is_append_only_and_versioned(
     })
     captured_rows = []
 
-    class ThrottledEmbeddingClient:
+    state_time = datetime.now(UTC).isoformat()
+    ledger.connection.execute(
+        """INSERT INTO news_ai_retrieval_mode_state_v1
+           (state_id,mode,reason,mode_since,recovery_observed_at,
+            pressure_json,updated_at)
+           VALUES ('NEWS_IDENTITY','DETERMINISTIC_FALLBACK',?,?,NULL,'{}',?)""",
+        ("OPERATOR_DAILY_QUOTA_CAP", state_time, state_time),
+    )
+    ledger.connection.commit()
+
+    class CappedEmbeddingClient:
         def __init__(self, _connection) -> None:
             pass
 
@@ -3411,17 +3420,11 @@ def test_gemma_impact_assessment_is_append_only_and_versioned(
             return EmbeddingProfile("gemini-embedding-2", "e" * 64, 768)
 
         def embed(self, _texts, _profile):
-            raise GeminiEmbeddingFailure(
-                "provider throttled",
-                failure_code="NEWS_EMBEDDING_PROVIDER_THROTTLED",
-                provider_http_status=429,
-                retry_after_seconds=30,
-                diagnostic={"batch_item_count": 1},
-            )
+            pytest.fail("preselected deterministic fallback called embedding")
 
     import xauusd_forecaster.news_retrieval as retrieval_module
     monkeypatch.setattr(
-        retrieval_module, "GeminiEmbeddingClient", ThrottledEmbeddingClient,
+        retrieval_module, "GeminiEmbeddingClient", CappedEmbeddingClient,
     )
 
     def call_impact(_pool, _index, row, **_kwargs):
@@ -3452,7 +3455,7 @@ def test_gemma_impact_assessment_is_append_only_and_versioned(
     assert statuses[0]["status"] == "OK"
     assert captured_rows[0]["identity_retrieval_mode"] == "DETERMINISTIC_FALLBACK"
     assert captured_rows[0]["identity_retrieval_reason"] == (
-        "NEWS_EMBEDDING_PROVIDER_THROTTLED"
+        "ADAPTIVE_FALLBACK_HYSTERESIS"
     )
     row = ledger.connection.execute(
         "SELECT * FROM news_impact_assessments_v1"
