@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -19,6 +20,7 @@ from .model_gateway import (
 )
 from .news_semantics import model_usable_annotation_predicate
 from .news_identity import preferred_cluster_peer_predicate
+from .news_scheduler import register_provider_dispatch_demand
 
 
 BRIEF_PROMPT_VERSION = "daily-news-brief-v5-scannable-synthesis"
@@ -27,7 +29,14 @@ BRIEF_EVIDENCE_LIMIT = 60
 BRIEF_INPUT_TOKEN_BUDGET = 12_000
 BRIEF_OUTPUT_TOKEN_BUDGET = 8_192
 BRIEF_BACKLOG_LIMIT = 14
-BRIEF_REGENERATION_DEBOUNCE = timedelta(minutes=10)
+# The existing 30-minute news/Brief progress boundary is the policy quantum.
+# Adaptive refresh uses several multiples of it rather than one debounce timer.
+BRIEF_PROGRESS_BOUNDARY = timedelta(minutes=30)
+BRIEF_MAJOR_EVENT_AGE = BRIEF_PROGRESS_BOUNDARY
+BRIEF_ACCUMULATION_AGE = 2 * BRIEF_PROGRESS_BOUNDARY
+BRIEF_NORMAL_STALENESS = 4 * BRIEF_PROGRESS_BOUNDARY
+BRIEF_QUIET_STALENESS = 8 * BRIEF_PROGRESS_BOUNDARY
+BRIEF_STARVATION_AGE = 12 * BRIEF_PROGRESS_BOUNDARY
 BRIEF_CAPACITY_RETRY = timedelta(minutes=1)
 BRIEF_FAILURE_RETRY_MAX = timedelta(hours=1)
 BRIEF_FAILURE_ATTEMPT_LIMIT = 5
@@ -266,6 +275,206 @@ def _candidate_rows(rows: list[dict]) -> list[dict]:
     ))
 
 
+def _major_event(row: dict) -> bool:
+    category = str(row.get("category") or "").casefold()
+    return (
+        str(row.get("impact_class") or "").upper()
+        in {"POLICY_SHIFT", "DATA_RELEASE", "IMMEDIATE"}
+        or any(token in category for token in (
+            "货币", "央行", "宏观", "经济数据", "通胀", "就业", "地缘", "政策",
+            "rates_fed", "inflation", "employment", "growth_economy",
+            "war_geopolitics",
+        ))
+    )
+
+
+def _material_event(row: dict) -> bool:
+    return (
+        float(row.get("materiality") or 0) >= 0.7
+        or str(row.get("review_priority") or "").upper() in {"IMMEDIATE", "FAST"}
+        or str(row.get("impact_update_type") or "").upper()
+        in {"NEW_EVENT", "MATERIAL_UPDATE"}
+        or str(row.get("impact_class") or "").upper()
+        in {"POLICY_SHIFT", "DATA_RELEASE", "IMMEDIATE", "SAME_DAY"}
+    )
+
+
+def _event_snapshot(rows: list[dict]) -> list[dict[str, object]]:
+    snapshot = []
+    for row in rows:
+        information = {
+            "headline": _bounded_text(row.get("headline_zh"), 300),
+            "summary": _bounded_text(row.get("summary"), 600),
+            "category": _bounded_text(row.get("category"), 80),
+            "impact_class": row.get("impact_class"),
+            "update_type": row.get("impact_update_type"),
+            "materiality": row.get("materiality"),
+        }
+        snapshot.append({
+            "identity": _event_identity(row),
+            "evidence_id": (
+                f"{row['source']}:{row['source_item_id']}:{row['revision_number']}"
+            ),
+            "information_hash": _source_hash([information]),
+            "material": _material_event(row),
+            "major": _major_event(row),
+        })
+    return snapshot
+
+
+def _json_snapshot(value: object) -> list[dict[str, object]]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return [dict(item) for item in parsed if isinstance(item, dict)] \
+        if isinstance(parsed, list) else []
+
+
+def _live_pipeline_pressure(
+    connection: sqlite3.Connection, *, instant: datetime,
+) -> dict[str, object]:
+    rows = connection.execute(
+        """SELECT task_type,count(*) AS backlog,min(created_at) AS oldest
+           FROM news_ai_jobs_v1
+           WHERE task_type IN ('ACTIVE_ANNOTATION','ACTIVE_IMPACT')
+             AND state IN ('QUEUED','LEASED','BACKING_OFF')
+           GROUP BY task_type"""
+    ).fetchall()
+    backlog = {str(row["task_type"]): int(row["backlog"]) for row in rows}
+    oldest_age = max((
+        max(0, (instant - datetime.fromisoformat(str(row["oldest"]))).total_seconds())
+        for row in rows if row["oldest"]
+    ), default=0.0)
+    provider = connection.execute(
+        """SELECT cooldown_until,last_outcome,updated_at
+           FROM news_ai_provider_dispatch_state_v1
+           WHERE provider_scope='GOOGLE_GENERATIVE_LANGUAGE'"""
+    ).fetchone()
+    cooldown_active = bool(
+        provider and provider["cooldown_until"]
+        and datetime.fromisoformat(str(provider["cooldown_until"])) > instant
+    )
+    recently_throttled = bool(
+        provider and str(provider["last_outcome"] or "") == "PROVIDER_THROTTLED"
+        and datetime.fromisoformat(str(provider["updated_at"]))
+        >= instant - BRIEF_PROGRESS_BOUNDARY
+    )
+    return {
+        "annotation_backlog": backlog.get("ACTIVE_ANNOTATION", 0),
+        "impact_backlog": backlog.get("ACTIVE_IMPACT", 0),
+        "oldest_age_seconds": int(oldest_age),
+        "provider_constrained": cooldown_active or recently_throttled,
+    }
+
+
+def _adaptive_refresh_decision(
+    ledger: ForwardLedger, *, instant: datetime, day: str, current_day: str,
+    latest, state, candidates: list[dict],
+    prompt_changed: bool, counts: dict[str, int],
+) -> dict[str, object]:
+    current = _event_snapshot(candidates)
+    previous = _json_snapshot(
+        state["last_generated_event_snapshot_json"] if state else None
+    )
+    previous_by_id = {str(item.get("identity")): item for item in previous}
+    current_by_id = {str(item.get("identity")): item for item in current}
+    new_ids = set(current_by_id) - set(previous_by_id)
+    changed_ids = {
+        identity for identity in set(current_by_id) & set(previous_by_id)
+        if current_by_id[identity].get("information_hash")
+        != previous_by_id[identity].get("information_hash")
+    }
+    changed = new_ids | changed_ids
+    material = {
+        identity for identity in changed
+        if bool(current_by_id[identity].get("material"))
+    }
+    major = {
+        identity for identity in changed
+        if bool(current_by_id[identity].get("major"))
+    }
+    removed = set(previous_by_id) - set(current_by_id)
+    denominator = max(1, len(previous_by_id), len(current_by_id))
+    change_ratio = (len(changed) + len(removed)) / denominator
+    generated_at = datetime.fromisoformat(str(latest["generated_at"]))
+    stale_age = max(timedelta(0), instant - generated_at)
+    pipeline = _live_pipeline_pressure(ledger.connection, instant=instant)
+    active_backlog = int(pipeline["annotation_backlog"]) + int(
+        pipeline["impact_backlog"]
+    )
+    heavy_pipeline = (
+        active_backlog > max(8, len(current_by_id))
+        or int(pipeline["oldest_age_seconds"])
+        >= int(BRIEF_PROGRESS_BOUNDARY.total_seconds())
+    )
+    provider_constrained = bool(pipeline["provider_constrained"])
+    constrained = heavy_pipeline or provider_constrained
+    accumulation_target = max(2, math.ceil(max(1, len(previous_by_id)) / 10))
+    scheduler_deferrals = int(state["scheduler_deferral_count"] or 0) if state else 0
+    pressure = {
+        "changed_events": len(changed),
+        "material_events": len(material | major),
+        "stale_age_ms": int(stale_age.total_seconds() * 1000),
+        "retry_overdue_ms": int(
+            max(0, scheduler_deferrals - 1)
+            * BRIEF_PROGRESS_BOUNDARY.total_seconds() * 1000
+        ),
+        "scheduler_deferrals": scheduler_deferrals,
+    }
+
+    reason = "ADAPTIVE_REFRESH_WAIT"
+    eligible = False
+    if day != current_day and counts["pending_items"] == 0:
+        eligible, reason = True, "END_OF_DAY_FINALIZATION"
+    elif prompt_changed:
+        eligible, reason = True, "SYNTHESIS_CONTRACT_CHANGED"
+    elif stale_age >= BRIEF_STARVATION_AGE:
+        eligible, reason = True, "BRIEF_STARVATION_AGED"
+    elif major and stale_age >= (
+        BRIEF_ACCUMULATION_AGE if constrained else BRIEF_MAJOR_EVENT_AGE
+    ):
+        eligible, reason = True, "MAJOR_EVENT_EARLY_REFRESH"
+    elif len(changed) >= accumulation_target and material and not constrained \
+            and stale_age >= BRIEF_ACCUMULATION_AGE:
+        eligible, reason = True, "MATERIAL_CHANGE_ACCUMULATED"
+    elif material and stale_age >= (
+        BRIEF_QUIET_STALENESS if constrained else BRIEF_NORMAL_STALENESS
+    ):
+        eligible, reason = True, "MATERIAL_CHANGE_STALE"
+    elif changed and change_ratio >= 0.25 \
+            and stale_age >= BRIEF_QUIET_STALENESS:
+        eligible, reason = True, "MEANINGFUL_PACKET_CHANGE"
+
+    if eligible:
+        next_eligible = instant
+    elif major:
+        next_eligible = generated_at + (
+            BRIEF_ACCUMULATION_AGE if constrained else BRIEF_MAJOR_EVENT_AGE
+        )
+    elif len(changed) >= accumulation_target and material:
+        next_eligible = generated_at + (
+            BRIEF_QUIET_STALENESS if constrained else BRIEF_ACCUMULATION_AGE
+        )
+    elif material:
+        next_eligible = generated_at + (
+            BRIEF_QUIET_STALENESS if constrained else BRIEF_NORMAL_STALENESS
+        )
+    else:
+        next_eligible = generated_at + BRIEF_STARVATION_AGE
+    return {
+        "eligible": eligible, "reason": reason,
+        "next_eligible_at": max(instant, next_eligible),
+        "event_snapshot": current, "pressure": pressure,
+        "new_distinct_events": len(new_ids),
+        "changed_events": len(changed), "material_events": len(material),
+        "major_events": len(major), "change_ratio": change_ratio,
+        **pipeline,
+    }
+
+
 def _bounded_text(value: object, limit: int) -> str:
     return " ".join(str(value or "").split())[:limit]
 
@@ -445,12 +654,25 @@ def _write_state(
     next_retry_at: str | None = None, finalized_at: str | None = None,
     failure_count: int = 0, failure_code: str | None = None,
     failure_at: str | None = None,
+    last_generated_event_snapshot: list[dict[str, object]] | None = None,
+    pending_event_snapshot: list[dict[str, object]] | None = None,
+    dispatch_pressure: dict[str, object] | None = None,
+    scheduler_deferral_count: int = 0,
 ) -> None:
     values = (day, candidate_hash, pending_source_hash, pending_candidate_hash,
               pending_since, _iso(instant), phase, counts["received_items"],
               counts["reviewed_items"], counts["pending_items"],
               counts["terminal_failure_items"], latest_revision, last_generated_at,
-              next_retry_at, finalized_at, failure_count, failure_code, failure_at)
+              next_retry_at, finalized_at, failure_count, failure_code, failure_at,
+              (json.dumps(last_generated_event_snapshot, sort_keys=True,
+                          separators=(",", ":"))
+               if last_generated_event_snapshot is not None else None),
+              (json.dumps(pending_event_snapshot, sort_keys=True,
+                          separators=(",", ":"))
+               if pending_event_snapshot is not None else None),
+              (json.dumps(dispatch_pressure, sort_keys=True, separators=(",", ":"))
+               if dispatch_pressure is not None else None),
+              scheduler_deferral_count)
     with ledger.connection:
         ledger.connection.execute(
             """INSERT INTO daily_news_brief_refresh_state
@@ -458,8 +680,10 @@ def _write_state(
                 pending_candidate_hash,pending_since,last_observed_at,phase,
                 received_items,reviewed_items,pending_items,terminal_failure_items,
                 latest_revision,last_generated_at,next_retry_at,finalized_at,
-                generation_failure_count,last_failure_code,last_failure_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                generation_failure_count,last_failure_code,last_failure_at,
+                last_generated_event_snapshot_json,pending_event_snapshot_json,
+                dispatch_pressure_json,scheduler_deferral_count)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(brief_date) DO UPDATE SET
                  last_generated_candidate_hash=excluded.last_generated_candidate_hash,
                  pending_source_hash=excluded.pending_source_hash,
@@ -471,7 +695,17 @@ def _write_state(
                  latest_revision=excluded.latest_revision,last_generated_at=excluded.last_generated_at,
                  next_retry_at=excluded.next_retry_at,finalized_at=excluded.finalized_at,
                  generation_failure_count=excluded.generation_failure_count,
-                 last_failure_code=excluded.last_failure_code,last_failure_at=excluded.last_failure_at""",
+                 last_failure_code=excluded.last_failure_code,last_failure_at=excluded.last_failure_at,
+                 last_generated_event_snapshot_json=COALESCE(
+                   excluded.last_generated_event_snapshot_json,
+                   daily_news_brief_refresh_state.last_generated_event_snapshot_json),
+                 pending_event_snapshot_json=COALESCE(
+                   excluded.pending_event_snapshot_json,
+                   daily_news_brief_refresh_state.pending_event_snapshot_json),
+                 dispatch_pressure_json=COALESCE(
+                   excluded.dispatch_pressure_json,
+                   daily_news_brief_refresh_state.dispatch_pressure_json),
+                 scheduler_deferral_count=excluded.scheduler_deferral_count""",
             values,
         )
 
@@ -479,7 +713,8 @@ def _write_state(
 def _finalize(ledger: ForwardLedger, day: str, *, instant: datetime,
               counts: dict[str, int], latest_revision: int,
               last_generated_at: str, candidate_hash: str,
-              force_degraded: bool = False) -> str:
+              force_degraded: bool = False,
+              event_snapshot: list[dict[str, object]] | None = None) -> str:
     phase = "DEGRADED" if counts["terminal_failure_items"] or force_degraded else "FINAL"
     with ledger.connection:
         original = ledger.connection.execute(
@@ -509,13 +744,19 @@ def _finalize(ledger: ForwardLedger, day: str, *, instant: datetime,
             )
     _write_state(ledger, day, instant=instant, phase=phase, counts=counts,
                  latest_revision=latest_revision, last_generated_at=last_generated_at,
-                 candidate_hash=candidate_hash, finalized_at=_iso(instant))
+                 candidate_hash=candidate_hash, finalized_at=_iso(instant),
+                 last_generated_event_snapshot=event_snapshot,
+                 pending_event_snapshot=event_snapshot,
+                 scheduler_deferral_count=0)
     return phase
 
 
 def _defer(ledger: ForwardLedger, day: str, *, instant: datetime,
            counts: dict[str, int], latest, candidate_hash: str | None,
-           reason: str, retry_at: datetime) -> dict[str, object]:
+           reason: str, retry_at: datetime,
+           event_snapshot: list[dict[str, object]] | None = None,
+           dispatch_pressure: dict[str, object] | None = None,
+           scheduler_deferral_count: int = 0) -> dict[str, object]:
     state = ledger.connection.execute(
         """SELECT pending_source_hash,pending_since
            FROM daily_news_brief_refresh_state WHERE brief_date=?""", (day,),
@@ -530,7 +771,9 @@ def _defer(ledger: ForwardLedger, day: str, *, instant: datetime,
                  pending_since=(str(state["pending_since"])
                                 if state and state["pending_since"] else None),
                  next_retry_at=_iso(retry_at),
-                 failure_code=reason)
+                 failure_code=reason, pending_event_snapshot=event_snapshot,
+                 dispatch_pressure=dispatch_pressure,
+                 scheduler_deferral_count=scheduler_deferral_count)
     return {"status": "DEFERRED", "phase": "DEFERRED", "brief_date": day,
             "reason": reason, "next_retry_at": _iso(retry_at), **counts}
 
@@ -655,7 +898,7 @@ def _finalize_generation_fallback(
     phase = _finalize(
         ledger, day, instant=instant, counts=counts, latest_revision=revision,
         last_generated_at=generated_at, candidate_hash=candidate_hash,
-        force_degraded=True,
+        force_degraded=True, event_snapshot=_event_snapshot(candidates),
     )
     return {"status": "OK", "phase": phase, "brief_date": day,
             "reason": "GENERATION_FAILURE_TERMINAL_FALLBACK",
@@ -840,24 +1083,9 @@ def update_daily_brief(
                 "reason": "CANDIDATES_UNCHANGED", "eligible_items": len(reviewed),
                 "candidate_items": len(candidates), **counts}
 
-    if latest and (day == current_day or counts["pending_items"] > 0):
-        pending_since = str(state["pending_since"]) if state and state["pending_since"] else _iso(instant)
-        ready_at = datetime.fromisoformat(pending_since) + BRIEF_REGENERATION_DEBOUNCE
-        if instant < ready_at:
-            _write_state(
-                ledger, day, instant=instant, phase="UPDATING", counts=counts,
-                latest_revision=int(latest["revision_number"]),
-                last_generated_at=str(latest["generated_at"]),
-                candidate_hash=str(state["last_generated_candidate_hash"] or "") if state else None,
-                pending_source_hash=population_hash, pending_candidate_hash=candidate_hash,
-                pending_since=pending_since, next_retry_at=_iso(ready_at),
-            )
-            return {"status": "DEFERRED", "phase": "UPDATING", "brief_date": day,
-                    "reason": "SOURCE_SETTLING", "next_retry_at": _iso(ready_at), **counts}
-
     if state and state["next_retry_at"]:
         retry_at = datetime.fromisoformat(str(state["next_retry_at"]))
-        if instant < retry_at and state["last_failure_code"] not in (None, "SOURCE_SETTLING"):
+        if instant < retry_at and state["last_failure_code"]:
             return {"status": "DEFERRED", "phase": "DEFERRED", "brief_date": day,
                     "reason": str(state["last_failure_code"]),
                     "next_retry_at": str(state["next_retry_at"]), **counts}
@@ -870,12 +1098,75 @@ def update_daily_brief(
             candidate_hash=str(candidate_hash), candidates=candidates,
         )
 
+    refresh = None
+    if latest:
+        refresh = _adaptive_refresh_decision(
+            ledger, instant=instant, day=day, current_day=current_day,
+            latest=latest, state=state, candidates=candidates,
+            prompt_changed=(
+                recovering
+                or str(latest["prompt_version"]) != BRIEF_PROMPT_VERSION
+            ),
+            counts=counts,
+        )
+        pending_since = (
+            str(state["pending_since"])
+            if state and state["pending_since"] else _iso(instant)
+        )
+        _write_state(
+            ledger, day, instant=instant,
+            phase="UPDATING",
+            counts=counts, latest_revision=int(latest["revision_number"]),
+            last_generated_at=str(latest["generated_at"]),
+            candidate_hash=(
+                str(state["last_generated_candidate_hash"] or latest["source_hash"])
+                if state else str(latest["source_hash"])
+            ),
+            pending_source_hash=population_hash,
+            pending_candidate_hash=candidate_hash, pending_since=pending_since,
+            next_retry_at=(
+                None if refresh["eligible"]
+                else _iso(refresh["next_eligible_at"])
+            ),
+            pending_event_snapshot=refresh["event_snapshot"],
+            dispatch_pressure=refresh["pressure"],
+            scheduler_deferral_count=int(refresh["pressure"]["scheduler_deferrals"]),
+        )
+        if not refresh["eligible"]:
+            return {
+                "status": "DEFERRED", "phase": "UPDATING", "brief_date": day,
+                "reason": str(refresh["reason"]),
+                "next_retry_at": _iso(refresh["next_eligible_at"]),
+                "new_distinct_events": refresh["new_distinct_events"],
+                "material_events": refresh["material_events"],
+                "major_events": refresh["major_events"], **counts,
+            }
+
     if not api_key or request_accountant is None:
         return _defer(
             ledger, day, instant=instant, counts=counts, latest=latest,
             candidate_hash=candidate_hash, reason="NO_COMPATIBLE_ROUTINE_ACCOUNT",
             retry_at=instant + BRIEF_CAPACITY_RETRY,
         )
+
+    dispatch = (
+        refresh["pressure"] if refresh else {
+            "changed_events": len(candidates),
+            "material_events": sum(_material_event(row) for row in candidates),
+            "stale_age_ms": 0, "retry_overdue_ms": 0,
+            "scheduler_deferrals": 0,
+        }
+    )
+    register_provider_dispatch_demand(
+        ledger.connection, provider_task="daily-news-brief", now=instant,
+        pressure={
+            "dependency_fanout": int(dispatch["material_events"]),
+            "oldest_age_ms": int(dispatch["stale_age_ms"]),
+            "retry_overdue_ms": int(dispatch["retry_overdue_ms"]),
+            "backlog": max(1, int(dispatch["changed_events"])),
+            "drain_gap": int(dispatch["scheduler_deferrals"]),
+        },
+    )
 
     try:
         brief, model = generate_metered_json(
@@ -886,11 +1177,28 @@ def update_daily_brief(
             request_accountant=request_accountant,
             purpose="daily-news-brief",
         )
-    except ModelGatewayCapacityExhausted:
+    except ModelGatewayCapacityExhausted as error:
+        reason = str(error.failure_code or "MODEL_CAPACITY_DEFERRED")
+        retry_at = instant + BRIEF_CAPACITY_RETRY
+        if error.next_retry_at:
+            try:
+                retry_at = max(
+                    instant + timedelta(microseconds=1),
+                    datetime.fromisoformat(str(error.next_retry_at)),
+                )
+            except ValueError:
+                pass
+        scheduler_deferrals = (
+            (int(state["scheduler_deferral_count"] or 0) if state else 0) + 1
+            if reason == "PROVIDER_DISPATCH_DEFERRED"
+            else int(state["scheduler_deferral_count"] or 0) if state else 0
+        )
         return _defer(
             ledger, day, instant=instant, counts=counts, latest=latest,
-            candidate_hash=candidate_hash, reason="NO_GEMMA_CAPACITY",
-            retry_at=instant + BRIEF_CAPACITY_RETRY,
+            candidate_hash=candidate_hash, reason=reason, retry_at=retry_at,
+            event_snapshot=(refresh["event_snapshot"] if refresh else _event_snapshot(candidates)),
+            dispatch_pressure=(refresh["pressure"] if refresh else None),
+            scheduler_deferral_count=scheduler_deferrals,
         )
     except sqlite3.Error:
         raise
@@ -922,6 +1230,7 @@ def update_daily_brief(
         phase = _finalize(
             ledger, day, instant=instant, counts=counts, latest_revision=revision,
             last_generated_at=generated_at, candidate_hash=str(candidate_hash),
+            event_snapshot=_event_snapshot(candidates),
         )
     else:
         phase = "UPDATING"
@@ -929,6 +1238,14 @@ def update_daily_brief(
             ledger, day, instant=instant, phase=phase, counts=counts,
             latest_revision=revision, last_generated_at=generated_at,
             candidate_hash=candidate_hash, pending_source_hash=population_hash,
+            last_generated_event_snapshot=_event_snapshot(candidates),
+            pending_event_snapshot=_event_snapshot(candidates),
+            dispatch_pressure={
+                "changed_events": 0, "material_events": 0,
+                "stale_age_ms": 0, "retry_overdue_ms": 0,
+                "scheduler_deferrals": 0,
+            },
+            scheduler_deferral_count=0,
         )
     return {"status": "OK", "phase": phase, "brief_date": day,
             "revision_number": revision, "eligible_items": len(reviewed),

@@ -290,7 +290,7 @@ def test_daily_brief_deferral_keeps_the_underlying_failure_code() -> None:
         runtime_update_failure=None,
         daily_news_brief={
             "phase": "DEFERRED",
-            "last_failure_code": "NO_GEMMA_CAPACITY",
+            "last_failure_code": "PROVIDER_DISPATCH_DEFERRED",
             "generation_failure_count": 4,
             "next_retry_at": (NOW + timedelta(minutes=1)).isoformat(),
             "last_failure_evidence": {
@@ -304,7 +304,8 @@ def test_daily_brief_deferral_keeps_the_underlying_failure_code() -> None:
         item for item in result["alerts"]
         if item["code"] == "OPS_DAILY_BRIEF_DEFERRED"
     )
-    assert alert["evidence"]["failure_code"] == "NO_GEMMA_CAPACITY"
+    assert alert["evidence"]["failure_code"] == "PROVIDER_DISPATCH_DEFERRED"
+    assert "自适应服务商调度器延后" in alert["message_zh"]
     assert alert["evidence"]["failure_count"] == 4
     assert alert["evidence"]["failure_evidence"]["selected_output"] == {
         "unknown_evidence_ids": ["invented:1"]
