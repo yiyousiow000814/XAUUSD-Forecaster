@@ -316,7 +316,7 @@ test("keeps nested compact counts in each dashboard headline hierarchy", () => {
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   for (const [selector, size] of [
     ["metric-grid strong", "44px"],
-    ["quota-summary strong", "46px"],
+    ["quota-metric-grid strong", "40px"],
     ["evidence-summary strong", "40px"],
     ["learning-summary-grid strong", "42px"],
     ["event-thread-summary b", "25px"],
@@ -330,7 +330,7 @@ test("keeps nested compact counts in each dashboard headline hierarchy", () => {
   assert.match(css, /\.metric-grid strong \.count-value \{[^}]*font-size:inherit/);
   for (const unsafeSelector of [
     /\.metric-grid span,\.metric-grid small/,
-    /\.quota-summary span,\.quota-summary small/,
+    /\.quota-metric-grid span,\.quota-metric-grid small/,
     /\.evidence-summary span/,
     /\.learning-summary-grid span,\.learning-summary-grid small/,
     /\.event-thread-summary span/,
@@ -937,11 +937,15 @@ test("renders the Gemini quota status route", async () => {
   assert.match(html, /逐 Key 配额/);
   assert.match(source, /今日已发送 \/ 上限/);
   assert.match(source, /className="quota-value"/);
-  assert.match(source, /className="quota-summary" aria-label="今日模型额度"/);
-  assert.match(source, /className="throughput-summary" aria-label="模型安全吞吐"/);
-  assert.match(css, /\.quota-summary \{[^}]*grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/);
-  assert.match(css, /\.throughput-summary \{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
-  assert.doesNotMatch(css, /\.quota-summary article:last-child:nth-child\(odd\)/);
+  assert.match(source, /className="quota-overview" aria-labelledby="quota-overview-title"/);
+  assert.match(source, /id="quota-capacity-title">账户与每日额度/);
+  assert.match(source, /id="quota-allocation-title">新闻额度分配/);
+  assert.match(source, /id="quota-queue-title">请求异常/);
+  assert.match(source, /className="throughput-section" aria-labelledby="throughput-title"/);
+  assert.match(css, /\.quota-overview-layout \{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(css, /\.quota-capacity-grid \{[^}]*grid-template-columns:repeat\(5,minmax\(0,1fr\)\)/);
+  assert.match(css, /\.throughput-summary \{[^}]*grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
+  assert.match(css, /\.quota-metric-grid article\+article \{[^}]*border-left:1px solid var\(--ink\)/);
   assert.match(source, /<details className="quota-note">/);
   assert.match(source, /查看账本与 Google 额度的区别/);
   assert.match(html, /分支配置/);
@@ -1604,7 +1608,7 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(css, /\.audit-main \.audit-intro>div:first-child \{ display:none; \}/);
   assert.match(css, /\.coverage-card \{ display:grid;[\s\S]*?min-height:0;/);
   assert.match(css, /\.evidence-summary \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); gap:8px/);
-  assert.match(css, /\.quota-summary \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); \}/);
+  assert.match(css, /\.quota-capacity-grid \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); \}/);
   assert.match(css, /@media \(max-width:430px\)\{[\s\S]*?\.throughput-summary \{ grid-template-columns:1fr; \}/);
   assert.match(css, /\.graph-modal>nav \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
   assert.match(css, /\.graph-modal,\.graph-modal\.graph-modal-curve,\.graph-modal\.graph-modal-versions \{ width:100vw; height:100dvh/);
