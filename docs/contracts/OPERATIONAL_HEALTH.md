@@ -169,6 +169,10 @@ counters supplement this pulse; they are not the only proof of liveness.
 The news collector pulses every 30 seconds. A pulse no older than 60 seconds is
 current; 60 to 300 seconds is a non-blocking late/grace state; and more than
 300 seconds is stale, matching the existing supervisor failure boundary.
+While its lifecycle is `STARTING`, a pulse within that 300-second heartbeat
+boundary is a non-blocking startup warning rather than readiness; an older
+pulse is stale. The supervisor's separate process-start timeout remains the
+authority for a startup that stays alive but never becomes ready.
 Source-poll completion timestamps never substitute for this process heartbeat.
 Each source retains its own registered cadence, bounded retry, and freshness
 contract.

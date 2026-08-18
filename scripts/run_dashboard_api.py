@@ -89,8 +89,18 @@ def _collector_component(
         max(0.0, (now - heartbeat_at).total_seconds())
         if heartbeat_at is not None else None
     )
-    running = heartbeat.get("state") == "RUNNING"
-    if not running or age_seconds is None:
+    lifecycle_state = str(heartbeat.get("state") or "")
+    running = lifecycle_state == "RUNNING"
+    starting = lifecycle_state == "STARTING"
+    if age_seconds is None:
+        status = "STALE"
+    elif starting:
+        status = (
+            "WARN"
+            if age_seconds <= COLLECTOR_HEARTBEAT_FAILURE_SECONDS
+            else "STALE"
+        )
+    elif not running:
         status = "STALE"
     elif age_seconds <= COLLECTOR_HEARTBEAT_EXPECTED_SECONDS:
         status = "OK"
@@ -98,6 +108,14 @@ def _collector_component(
         status = "WARN"
     else:
         status = "STALE"
+    if starting:
+        lifecycle_error = (
+            "采集器启动中" if status == "WARN" else "采集器启动心跳已过期"
+        )
+    elif running:
+        lifecycle_error = str(heartbeat.get("last_error") or "") or None
+    else:
+        lifecycle_error = "采集器运行心跳不可用"
     latest_poll_at = None
     try:
         latest_poll_at = datetime.fromisoformat(str(latest_poll))
@@ -107,10 +125,7 @@ def _collector_component(
         "last_success": heartbeat_at.isoformat() if heartbeat_at else None,
         "age_seconds": age_seconds,
         "status": status,
-        "last_error": (
-            str(heartbeat.get("last_error") or "") or None
-            if running else "采集器运行心跳不可用"
-        ),
+        "last_error": lifecycle_error,
         "latest_source_poll": latest_poll,
         "source_poll_age_seconds": (
             max(0.0, (now - latest_poll_at).total_seconds())

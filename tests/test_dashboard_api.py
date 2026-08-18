@@ -191,12 +191,47 @@ def test_news_collector_uses_process_heartbeat_with_bounded_grace() -> None:
             now=now,
         )
 
-    assert component(60)["status"] == "OK"
-    assert component(60.1)["status"] == "WARN"
+    assert component(10)["status"] == "OK"
+    assert component(61)["status"] == "WARN"
     assert component(300)["status"] == "WARN"
     assert component(300.1)["status"] == "STALE"
     assert component(10, state="ERROR")["status"] == "STALE"
-    assert component(10)["status"] == "OK"
+
+    starting = component(10, state="STARTING")
+    bounded_startup = component(299, state="STARTING")
+    later = now + timedelta(minutes=14)
+    refreshed_long_startup = module._collector_component(
+        {
+            "service": "collector",
+            "state": "STARTING",
+            "last_success": (later - timedelta(seconds=10)).isoformat(),
+            "last_error": None,
+        },
+        latest_poll=(now - timedelta(minutes=8)).isoformat(),
+        now=later,
+    )
+    stalled_startup = component(300.1, state="STARTING")
+    running = component(10)
+
+    assert starting["status"] == "WARN"
+    assert starting["last_error"] == "采集器启动中"
+    assert bounded_startup["status"] == "WARN"
+    assert refreshed_long_startup["status"] == "WARN"
+    assert refreshed_long_startup["last_error"] == "采集器启动中"
+    assert stalled_startup["status"] == "STALE"
+    assert stalled_startup["last_error"] == "采集器启动心跳已过期"
+    assert [starting["status"], running["status"]] == ["WARN", "OK"]
+
+    operational = module.extend_with_component_alerts(
+        {"alerts": []},
+        components={"news_collector": starting},
+        news_sources=[],
+        runtime_update_failure=None,
+    )
+    alert = operational["alerts"][0]
+    assert operational["status"] == "WARNING"
+    assert alert["severity"] == "WARNING"
+    assert alert["blocking"] is False
 
 
 def test_news_collector_recovery_depends_on_heartbeat_not_old_poll() -> None:
