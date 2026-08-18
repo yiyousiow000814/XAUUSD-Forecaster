@@ -1305,6 +1305,7 @@ def test_sync_repopulates_news_index_without_full_refresh_marker(
     "news-60-day-incremental-v3-semantic-categories",
     "news-60-day-incremental-v4-relevance-filter",
     "news-60-day-incremental-v7-semantic-handover",
+    "news-60-day-incremental-v8-recovery-state",
 ])
 def test_news_materialization_contract_upgrade_replays_and_reconciles_old_state(
     monkeypatch, tmp_path, previous_contract
@@ -1374,6 +1375,107 @@ def test_news_materialization_contract_upgrade_replays_and_reconciles_old_state(
     assert state["cursor"] != stale_cursor
     assert state["mirror_contract_version"] == module.NEWS_MIRROR_CONTRACT_VERSION
     assert state["reconciled_contract"] == module.NEWS_MIRROR_CONTRACT_VERSION
+
+
+def test_semantic_projection_upgrade_replays_late_discovery_once(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _sync_module()
+    monkeypatch.setattr(module, "_verify_news_mirror_state", lambda *_a, **_k: None)
+    state_file = tmp_path / "news-state.json"
+    state_file.write_text(json.dumps({
+        "mirror_contract_version": "news-60-day-incremental-v8-recovery-state",
+        "reconciled_contract": "news-60-day-incremental-v8-recovery-state",
+        "cursor": '["2026-08-17T04:09:01+00:00","google_news_gold_context","old",1]',
+    }), encoding="utf-8")
+    current_item = {
+        "source": "google_news_fed_rates",
+        "source_item_id": "late-discovery-cpi",
+        "revision_number": 1,
+        "cluster_id": "late-discovery-cpi-cluster",
+        "content_hash": "a" * 64,
+        "category": "通胀/就业",
+        "source_published_time": "2026-08-15T06:13:28+00:00",
+        "collector_first_seen_time": "2026-08-17T04:09:01+00:00",
+        "annotation_status": "READY",
+        "model_visibility": "IMPACT_PENDING",
+        "impact_status": "PENDING_IMPACT",
+        "eligibility_version": "news-source-eligibility-v14-resolved-identity",
+        "mirror_updated_at": "2026-08-17T04:09:02+00:00",
+        "headline": "CPI in Focus: Can the Dollar Turn Lower Again?",
+    }
+    requests: list[str] = []
+    posted: list[tuple[str, dict]] = []
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+    def urlopen(url, *_args, **_kwargs):
+        requests.append(str(url))
+        return Response({
+            "items": [] if "after=" in str(url) else [current_item],
+            "next_cursor": '["2026-08-17T04:09:02+00:00","google_news_fed_rates","late-discovery-cpi",1]',
+            "has_more": False,
+        })
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(
+        module, "_post_json",
+        lambda url, body, _config: posted.append((url, json.loads(body))),
+    )
+    config = {
+        "local_status_url": "http://local/status",
+        "remote_ingest_url": "https://remote/api/ingest",
+        "news_state_file": str(state_file),
+        "token": "test",
+    }
+
+    module._sync_news({}, config)
+
+    index_payloads = [
+        body for url, body in posted if url.endswith("/news-index")
+    ]
+    assert "after=" not in requests[0]
+    assert index_payloads[0] == {
+        "neutralize_operational_state_for_contract":
+            module.NEWS_MIRROR_CONTRACT_VERSION,
+    }
+    replay = next(payload for payload in index_payloads if "items" in payload)
+    assert replay["items"][0]["annotation_status"] == "READY"
+    assert replay["items"][0]["model_visibility"] == "IMPACT_PENDING"
+    assert replay["items"][0]["source_published_time"] == current_item[
+        "source_published_time"
+    ]
+    assert replay["items"][0]["collector_first_seen_time"] == current_item[
+        "collector_first_seen_time"
+    ]
+    assert index_payloads[-1]["reconcile_contract"] == (
+        module.NEWS_MIRROR_CONTRACT_VERSION
+    )
+    stable_state = json.loads(state_file.read_text(encoding="utf-8"))
+
+    posted.clear()
+    module._sync_news({}, config)
+
+    assert all(not url.endswith("/news-index") for url, _body in posted)
+    second_state = json.loads(state_file.read_text(encoding="utf-8"))
+    assert second_state["mirror_contract_version"] == stable_state[
+        "mirror_contract_version"
+    ]
+    assert second_state["reconciled_contract"] == stable_state[
+        "reconciled_contract"
+    ]
+    assert second_state["cursor"] == stable_state["cursor"]
 
 
 def test_news_sync_forwards_exact_semantic_withdrawals(monkeypatch, tmp_path) -> None:
