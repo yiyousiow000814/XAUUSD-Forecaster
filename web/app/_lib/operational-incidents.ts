@@ -53,6 +53,14 @@ function reasonCodes(event: Required<OperationalAlert>): string[] {
     : [];
 }
 
+function hasReasonSuffix(event: Required<OperationalAlert>, suffix: string): boolean {
+  return reasonCodes(event).some(reason => (
+    Boolean(stageForSemanticReason(reason))
+    && operationalCodeDefinitions.has(reason)
+    && reason.endsWith(`_${suffix}`)
+  ));
+}
+
 function actionableFailureCounts(
   event: Required<OperationalAlert>, stage: string,
 ): Array<{ code: string; count: number }> {
@@ -93,14 +101,15 @@ function incidentSummary(event: Required<OperationalAlert>, family: string): str
 
 function recoveryState(events: Array<Required<OperationalAlert>>) {
   const blocking = events.some(event => event.blocking);
-  if (blocking) return { state: "ACTIVE" as const, action: "ACTION_REQUIRED" as const };
+  const terminal = events.some(event => (
+    hasReasonSuffix(event, "TERMINAL") || hasReasonSuffix(event, "OVERDUE")
+  ));
+  if (blocking || terminal) return { state: "ACTIVE" as const, action: "ACTION_REQUIRED" as const };
   const scheduled = events.some(event => (
     event.evidence.claimable === false && Boolean(event.evidence.next_retry_at)
   ));
-  const progressing = events.some(event => (
-    Number(event.evidence.completed_15m ?? 0) > 0
-  ));
-  const automatic = scheduled || progressing || events.every(event => event.recovery_policy === "AUTO");
+  const recovering = events.some(event => hasReasonSuffix(event, "RECOVERING"));
+  const automatic = scheduled || recovering;
   if (automatic) return { state: "RECOVERING" as const, action: "AUTO_RECOVERING" as const };
   const operator = events.some(event => event.recovery_policy === "OPERATOR" && event.severity === "ERROR");
   return operator
@@ -131,9 +140,13 @@ function incidentEvents(incident: OperationalIncident): Array<Required<Operation
 function finalizeIncident(incident: OperationalIncident): OperationalIncident {
   const events = incidentEvents(incident);
   const recovery = recoveryState(events);
-  incident.severity = events.reduce((highest, event) => (
+  const rawSeverity = events.reduce((highest, event) => (
     severityRank[event.severity] > severityRank[highest] ? event.severity : highest
   ), "INFO" as OperationalAlert["severity"]);
+  const terminal = events.some(event => (
+    hasReasonSuffix(event, "TERMINAL") || hasReasonSuffix(event, "OVERDUE")
+  ));
+  incident.severity = terminal ? "ERROR" : rawSeverity;
   incident.blocking = events.some(event => event.blocking);
   incident.state = recovery.state;
   incident.action_state = recovery.action;
@@ -161,6 +174,37 @@ function buildIncident(root: Required<OperationalAlert>, related: Array<Required
     blocking: root.blocking,
     technical_event_count: 0,
   });
+}
+
+function applyStandaloneSemanticPresentation(
+  incident: OperationalIncident,
+  reasons: string[],
+): boolean {
+  const definitions = reasons
+    .map(reason => operationalCodeDefinitions.get(reason))
+    .filter((definition): definition is OperationalCodeDefinition => Boolean(definition));
+  if (definitions.length !== reasons.length) return false;
+  const families = new Set(definitions.map(definition => definition.root_cause_family));
+  if (families.size !== 1 || !reasons.every(reason => stageForSemanticReason(reason))) return false;
+
+  const pending = definitions.find(definition => definition.code.endsWith("_PENDING"));
+  const recovering = definitions.find(definition => definition.code.endsWith("_RECOVERING"));
+  const terminal = definitions.find(definition => definition.code.endsWith("_TERMINAL"));
+  const overdue = definitions.find(definition => definition.code.endsWith("_OVERDUE"));
+  const primary = overdue ?? terminal ?? pending ?? recovering ?? definitions[0];
+  const subject = primary.code.includes("_IMPACT_") ? "新闻影响复核" : "新闻语义复核";
+
+  incident.category = primary.category;
+  incident.incident_key = `${primary.root_cause_family}:${incident.root_event.scope}:${reasons.join("+")}`;
+  incident.title_zh = primary.title_zh;
+  if (recovering && !terminal && !overdue) {
+    incident.summary_zh = `有${subject}正在等待计划重试。系统会自动再次尝试处理，目前无需手动操作。`;
+  } else if (overdue) {
+    incident.summary_zh = `${subject}已超过任务时限，需要人工处理。`;
+  } else if (terminal) {
+    incident.summary_zh = `${subject}已终止失败，需要人工处理。`;
+  }
+  return true;
 }
 
 function stageForSemanticReason(reason: string): string | null {
@@ -268,7 +312,18 @@ export function correlateOperationalEvents(input: OperationalAlert[]): Operation
         explained.set(reason, incident);
       }
     }
-    if (explained.size === 0) return;
+    if (explained.size === 0) {
+      const standalone = buildIncident(event, []);
+      if (!applyStandaloneSemanticPresentation(standalone, reasons)) return;
+      standalone.reason_projections = reasons.map(reason => ({
+        source_event_code: event.code,
+        source_scope: event.scope,
+        reason_code: reason,
+      }));
+      incidents.push(standalone);
+      consumed.add(index);
+      return;
+    }
     const unexplained = reasons.filter(reason => !explained.has(reason));
     if (unexplained.length) {
       const standalone = buildIncident(event, []);
@@ -277,15 +332,7 @@ export function correlateOperationalEvents(input: OperationalAlert[]): Operation
         source_scope: event.scope,
         reason_code: reason,
       }));
-      const definitions = unexplained
-        .map(reason => operationalCodeDefinitions.get(reason))
-        .filter((definition): definition is OperationalCodeDefinition => Boolean(definition));
-      if (definitions.length) {
-        standalone.category = definitions[0].category;
-        standalone.incident_key = `${definitions[0].root_cause_family}:${event.scope}:${unexplained.join("+")}`;
-        standalone.title_zh = definitions.map(item => item.title_zh).join("；");
-        standalone.summary_zh = event.message_zh;
-      }
+      applyStandaloneSemanticPresentation(standalone, unexplained);
       incidents.push(standalone);
     } else {
       const owner = [...new Set(explained.values())]

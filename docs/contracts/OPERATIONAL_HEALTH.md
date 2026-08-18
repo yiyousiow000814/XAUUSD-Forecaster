@@ -76,9 +76,23 @@ reason projections do not duplicate it or transfer unrelated blocking state.
 An incident retains a deterministic key, category, maximum child severity,
 conservative blocking flag, active/recovering state, action state, root event,
 related events, affected scopes, bounded metrics, and technical-event count.
-Scheduled future retry can be `AUTO_RECOVERING`; claimable work without progress
-or any blocking child remains `ACTION_REQUIRED`. All raw events and evidence
-remain available in technical details.
+`AUTO_RECOVERING` is an internal presentation state for a bounded automatic
+retry/recovery attempt that is active; it does not mean recovery succeeded or
+is guaranteed. The operator surface calls this state "automatic retry". It may
+be shown only when current-instance structured evidence contains either a
+controlled `*_RECOVERING` reason whose backend contract guarantees a scheduled
+retry, or scheduler evidence with `claimable=false` and a non-null
+`next_retry_at`. A catalog `recovery_policy=AUTO`, historical progress, or
+human-readable error text alone is not current retry evidence.
+
+Blocking, `*_TERMINAL`, and `*_OVERDUE` evidence takes precedence over an
+automatic retry and requires attention. A successful completion or current OK
+state removes or resolves the active incident; an overdue retry becomes an
+error requiring attention; a terminal/dead-letter outcome becomes an error
+requiring attention. Claimable work without progress remains
+`ACTION_REQUIRED`. Technical details lead with translated structured state,
+component, reason, and human-formatted duration. Exact bounded raw codes and
+fields remain available in a second nested disclosure.
 
 ## Coverage
 
@@ -205,9 +219,10 @@ remain visible through their own component and scheduler detectors.
 
 Decision-time semantic readiness remains fail-closed whenever required current
 semantics or impact evidence is incomplete. Operator presentation classifies a
-future bounded retry as recovery and keeps the pending reason visible; it
-escalates terminal work or a retry overdue beyond the scheduler's task SLA to
-error. Local admission (`MODEL_CAPACITY_DEFERRED` and `LOCAL_TPM_LIMIT`),
+future bounded retry as automatic retry and keeps the pending reason visible;
+it never presents that retry as completed or guaranteed recovery. It escalates
+terminal work or a retry overdue beyond the scheduler's task SLA to error.
+Local admission (`MODEL_CAPACITY_DEFERRED` and `LOCAL_TPM_LIMIT`),
 provider pacing (`PROVIDER_DISPATCH_DEFERRED`), and provider transport
 (`PROVIDER_HTTP_ERROR`) remain distinct evidence. Presentation severity never
 changes, deletes, or retroactively enriches decision snapshots, prediction

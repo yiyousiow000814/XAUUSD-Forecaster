@@ -9,6 +9,7 @@ import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { operationalEvidenceText } from "../_lib/operational-evidence";
+import { operationalEventDiagnostic, operationalIncidentActionLabels, operationalScopeLabel } from "../_lib/operational-incident-presentation";
 import { affectedOperationalScopeCount, correlateOperationalEvents, type OperationalIncident } from "../_lib/operational-incidents";
 import { normalizeOperationalEvent, schedulerTaskLabel, type AssistantOperationalHealth, type OperationalAlert, type OperationalHealth } from "../_lib/operational-health";
 import { sourceHealthErrorPresentation } from "../_lib/source-health-presentation";
@@ -35,20 +36,6 @@ export type StatusPayload = {
   operational_health?: OperationalHealth;
 };
 
-const componentLabels: Record<string, string> = {
-  quote_bridge: "XAUUSD 报价桥",
-  system_clock: "cTrader 报价时间 / 本机接收时间",
-  decision_collector: "5 分钟决策收集器",
-  outcome_settler: "30 分钟结果结算器",
-  news_collector: "新闻收集器",
-  gemini_annotator: "Gemini 新闻分析器",
-  news_semantic_pipeline: "新闻语义决策门槛",
-  sites_synchronizer: "网页同步器",
-  sqlite_backup: "SQLite 备份",
-  integrity_check: "数据库完整性检查",
-  daily_news_brief: "Daily Brief",
-};
-
 function localTime(value: string | null): string {
   return value ? new Date(value).toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Kuala_Lumpur" }) : "—";
 }
@@ -70,36 +57,45 @@ function compactElapsed(seconds: number | null): string {
   return `${Math.floor(seconds / 3600)} 小时 ${Math.floor((seconds % 3600) / 60)} 分`;
 }
 
-const actionLabels: Record<OperationalIncident["action_state"], string> = {
-  ACTION_REQUIRED: "需要处理",
-  AUTO_RECOVERING: "自动恢复中",
-  MONITORING: "持续观察",
-};
-
-function IncidentCard({ incident }: { incident: OperationalIncident }) {
+export function IncidentCard({ incident }: { incident: OperationalIncident }) {
   const events = [
     incident.root_event, ...incident.related_events, ...incident.technical_events,
   ];
+  const affectedScopes = [...new Set([incident.root_event.scope, ...incident.affected_scopes])];
   const [showTechnical, setShowTechnical] = useState(false);
   const technicalId = useId();
   return <article className={`operational-incident-card is-${incident.severity.toLowerCase()}`}>
     <header>
       <div><h3>{incident.title_zh}</h3><p>{incident.summary_zh}</p></div>
-      <strong>{actionLabels[incident.action_state]}</strong>
+      <strong>{operationalIncidentActionLabels[incident.action_state]}</strong>
     </header>
     {incident.summary_metrics.length ? <dl>{incident.summary_metrics.map(metric => <div key={metric.label}><dt>{metric.label}</dt><dd>{metric.value}</dd></div>)}</dl> : null}
-    {incident.affected_scopes.length ? <p className="incident-affected"><b>影响：</b>{incident.affected_scopes.map(scope => componentLabels[scope] ?? schedulerTaskLabel[scope] ?? scope).join(" · ")}</p> : null}
+    <p className="incident-affected"><b>影响：</b>{affectedScopes.map(operationalScopeLabel).join(" · ")}</p>
     <div className={`incident-technical-details${showTechnical ? " is-expanded" : ""}`}>
       <button type="button" aria-expanded={showTechnical} aria-controls={technicalId} onClick={() => setShowTechnical(value => !value)}>查看技术详情 · {incident.technical_event_count} 个事件</button>
-      <div id={technicalId} hidden={!showTechnical}>{events.map((event, index) => <section key={`${event.code}-${event.scope}-${index}`}>
-        <div><code>{event.code}</code><b>{event.scope}</b></div>
-        <p>{event.message_zh}</p>
-        <small>{operationalEvidenceText(event.evidence)}</small>
-      </section>)}
-      {incident.reason_projections.map(projection => <section className="incident-reason-projection" key={`${projection.source_scope}-${projection.reason_code}`}>
-        <div><code>{projection.reason_code}</code><b>{projection.source_scope}</b></div>
-        <p>由结构化组件原因关联；原始组件事件仅在一个技术证据位置保留。</p>
-      </section>)}</div>
+      <div id={technicalId} hidden={!showTechnical}>
+        <div className="incident-human-diagnostics">{events.map((event, index) => {
+          const diagnostic = operationalEventDiagnostic(event);
+          return <section key={`${event.code}-${event.scope}-${index}`}>
+            <dl>
+              <div><dt>当前状态</dt><dd>{diagnostic.status}</dd></div>
+              <div><dt>组件</dt><dd>{diagnostic.component}</dd></div>
+              {diagnostic.reasons.length ? <div><dt>原因</dt><dd>{diagnostic.reasons.map(reason => <span key={reason}>{reason}</span>)}</dd></div> : null}
+            </dl>
+          </section>;
+        })}</div>
+        <details className="incident-raw-evidence">
+          <summary>查看原始字段</summary>
+          {events.map((event, index) => <section key={`${event.code}-${event.scope}-${index}`}>
+            <div><code>{event.code}</code><b>scope={event.scope}</b></div>
+            <small>severity={event.severity} · blocking={String(event.blocking)}{Object.keys(event.evidence).length ? ` · ${operationalEvidenceText(event.evidence)}` : ""}</small>
+          </section>)}
+          {incident.reason_projections.map(projection => <section className="incident-reason-projection" key={`${projection.source_scope}-${projection.reason_code}`}>
+            <div><code>{projection.reason_code}</code><b>scope={projection.source_scope}</b></div>
+            <small>由结构化组件原因关联；原始组件事件仅在一个技术证据位置保留。</small>
+          </section>)}
+        </details>
+      </div>
     </div>
   </article>;
 }
@@ -269,7 +265,7 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
       {componentHasAttention && healthyComponentCount > 0 && <button className="health-reveal-button" type="button" aria-expanded={showHealthyComponents} onClick={() => setShowHealthyComponents(value => !value)}>{showHealthyComponents ? "只看异常组件" : `另有 ${healthyComponentCount} 个正常组件`}</button>}
       <div>{components.map(({ name, item, healthy }) => <article className={healthy ? "is-healthy" : "is-attention"} key={name}>
         <span className={item.status === "OK" || item.status === "MARKET_CLOSED" ? "component-ok" : "component-stale"}>{item.status === "MARKET_CLOSED" ? "市场休市" : item.status}</span>
-        <strong>{componentLabels[name] ?? name.replaceAll("_", " ")}</strong>
+        <strong>{operationalScopeLabel(name)}</strong>
         <small>最后成功 {localTime(item.last_success)}</small><small>{elapsed(item.age_seconds)}</small>
         {item.last_error ? <em>{item.last_error}</em> : null}
       </article>)}</div>

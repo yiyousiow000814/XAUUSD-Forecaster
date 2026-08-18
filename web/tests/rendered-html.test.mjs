@@ -29,6 +29,7 @@ const { sortNewsEvidenceByTime } = await import("../app/_lib/news-evidence-order
 const { assistantQueueOperationalAlerts, summarizeAssistantQueue } = await import("../app/api/_shared/assistant-operational-health.ts");
 const { normalizeOperationalEvent } = await import("../app/_lib/operational-health.ts");
 const { correlateOperationalEvents, globalOperationalIncidents } = await import("../app/_lib/operational-incidents.ts");
+const { operationalEventDiagnostic, operationalIncidentActionLabels } = await import("../app/_lib/operational-incident-presentation.ts");
 const { operationalEvidenceText } = await import("../app/_lib/operational-evidence.ts");
 const { sourceHealthErrorPresentation } = await import("../app/_lib/source-health-presentation.ts");
 
@@ -88,6 +89,53 @@ test("renders operational evidence timestamps for the UTC+8 operator surface", (
     operationalEvidenceText({ earliest_retry_at: null, active_jobs: 3 }),
     "earliest_retry_at=— · active_jobs=3",
   );
+});
+
+test("renders human incident diagnostics before nested raw machine evidence", () => {
+  const [incident] = correlateOperationalEvents([{
+    code: "OPS_COMPONENT_UNHEALTHY",
+    severity: "WARNING",
+    scope: "news_semantic_pipeline",
+    message_zh: "组件 news_semantic_pipeline 当前状态为 WARN。",
+    blocking: false,
+    evidence: {
+      status: "WARN",
+      age_seconds: 213.730543,
+      last_error: "ACTIONABLE_NEWS_IMPACT_PENDING,ACTIONABLE_NEWS_IMPACT_RECOVERING",
+      reason_codes: [
+        "ACTIONABLE_NEWS_IMPACT_PENDING",
+        "ACTIONABLE_NEWS_IMPACT_RECOVERING",
+      ],
+    },
+  }]);
+  const diagnostic = operationalEventDiagnostic(incident.root_event);
+  assert.equal(incident.title_zh, "新闻影响复核等待中");
+  assert.equal(operationalIncidentActionLabels[incident.action_state], "自动重试中");
+  assert.equal(incident.summary_zh, "有新闻影响复核正在等待计划重试。系统会自动再次尝试处理，目前无需手动操作。");
+  assert.deepEqual(diagnostic, {
+    status: "WARN · 已持续 3 分 34 秒",
+    component: "新闻语义决策门槛",
+    reasons: ["新闻影响复核等待中", "新闻影响复核自动重试中"],
+  });
+  assert.equal(operationalEventDiagnostic({
+    ...incident.root_event, evidence: { age_seconds: 56 },
+  }).status, "WARNING · 已持续 56 秒");
+  assert.equal(operationalEventDiagnostic({
+    ...incident.root_event, evidence: { age_seconds: 4200 },
+  }).status, "WARNING · 已持续 1 小时 10 分");
+
+  const view = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
+  const humanLayer = view.indexOf("incident-human-diagnostics");
+  const rawLayer = view.indexOf("incident-raw-evidence");
+  assert.ok(humanLayer >= 0 && rawLayer > humanLayer);
+  assert.match(view, /<details className="incident-raw-evidence">/);
+  assert.match(view, /<summary>查看原始字段<\/summary>/);
+  assert.match(view, /<code>\{event\.code\}<\/code>/);
+  assert.match(view, /operationalEvidenceText\(event\.evidence\)/);
+  assert.doesNotMatch(view.slice(humanLayer, rawLayer), /event\.message_zh|<code>|operationalEvidenceText/);
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.incident-raw-evidence > summary \{[^}]*min-height:44px/);
+  assert.match(css, /\.incident-raw-evidence code,.incident-raw-evidence small \{[^}]*overflow-wrap:anywhere/);
 });
 
 test("summarizes Assistant queue evidence without exposing job content", () => {

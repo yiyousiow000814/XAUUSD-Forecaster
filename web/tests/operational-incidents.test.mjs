@@ -131,6 +131,81 @@ test("classifies future scheduled retry as auto-recovering", () => {
   assert.equal(incident.action_state, "AUTO_RECOVERING");
 });
 
+test("classifies standalone Impact and Annotation recovering components as automatic retry", () => {
+  for (const [family, expectedTitle, expectedSummary] of [
+    ["IMPACT", "新闻影响复核等待中", "有新闻影响复核正在等待计划重试。系统会自动再次尝试处理，目前无需手动操作。"],
+    ["SEMANTICS", "新闻语义复核等待中", "有新闻语义复核正在等待计划重试。系统会自动再次尝试处理，目前无需手动操作。"],
+  ]) {
+    const incidents = correlateOperationalEvents([
+      event("OPS_COMPONENT_UNHEALTHY", "news_semantic_pipeline", {
+        status: "WARN",
+        reason_codes: [
+          `ACTIONABLE_NEWS_${family}_PENDING`,
+          `ACTIONABLE_NEWS_${family}_RECOVERING`,
+        ],
+      }),
+    ]);
+    assert.equal(incidents.length, 1, family);
+    assert.equal(incidents[0].state, "RECOVERING", family);
+    assert.equal(incidents[0].action_state, "AUTO_RECOVERING", family);
+    assert.equal(incidents[0].title_zh, expectedTitle, family);
+    assert.equal(incidents[0].summary_zh, expectedSummary, family);
+    assert.equal(incidents[0].technical_event_count, 1, family);
+  }
+});
+
+test("terminal and overdue semantic reasons outrank recovering evidence", () => {
+  for (const suffix of ["TERMINAL", "OVERDUE"]) {
+    const [incident] = correlateOperationalEvents([
+      event("OPS_COMPONENT_UNHEALTHY", "news_semantic_pipeline", {
+        reason_codes: [
+          "ACTIONABLE_NEWS_IMPACT_RECOVERING",
+          `ACTIONABLE_NEWS_IMPACT_${suffix}`,
+        ],
+      }),
+    ]);
+    assert.equal(incident.severity, "ERROR", suffix);
+    assert.equal(incident.state, "ACTIVE", suffix);
+    assert.equal(incident.action_state, "ACTION_REQUIRED", suffix);
+  }
+});
+
+test("authoritative blocking error outranks recovering evidence", () => {
+  const [incident] = correlateOperationalEvents([
+    event("OPS_COMPONENT_UNHEALTHY", "news_semantic_pipeline", {
+      reason_codes: [
+        "ACTIONABLE_NEWS_IMPACT_PENDING",
+        "ACTIONABLE_NEWS_IMPACT_RECOVERING",
+      ],
+    }, { severity: "ERROR", blocking: true }),
+  ]);
+  assert.equal(incident.severity, "ERROR");
+  assert.equal(incident.blocking, true);
+  assert.equal(incident.action_state, "ACTION_REQUIRED");
+});
+
+test("keeps ordinary warnings without current retry evidence in monitoring", () => {
+  const [incident] = correlateOperationalEvents([
+    event("OPS_COMPONENT_UNHEALTHY", "news_semantic_pipeline", {
+      reason_codes: ["ANNOTATOR_HEARTBEAT_STALE"],
+    }),
+  ]);
+  assert.equal(incident.state, "ACTIVE");
+  assert.equal(incident.action_state, "MONITORING");
+
+  const [autoPolicyOnly] = correlateOperationalEvents([
+    event("OPS_DAILY_BRIEF_DEFERRED", "daily_news_brief"),
+  ]);
+  assert.equal(autoPolicyOnly.action_state, "MONITORING");
+
+  const [unregisteredSuffix] = correlateOperationalEvents([
+    event("OPS_COMPONENT_UNHEALTHY", "other_component", {
+      reason_codes: ["UNREGISTERED_RECOVERING"],
+    }),
+  ]);
+  assert.equal(unregisteredSuffix.action_state, "MONITORING");
+});
+
 test("finalizes a scheduled retry from terminal or overdue blocking component state", () => {
   for (const reason of [
     "ACTIONABLE_NEWS_SEMANTICS_TERMINAL",
