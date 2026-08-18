@@ -1,28 +1,20 @@
 "use client";
 
-import type { ReactNode } from "react";
+import {
+  DASHBOARD_GLOBAL_DESTINATIONS,
+  type DashboardGlobalDestinationId,
+} from "./DashboardNavigation";
 import { useDashboardNavigation } from "./DashboardNavigation";
 
-export type MobileDashboardSection = "live" | "assistant" | "audit" | "learning" | "status" | "health";
-
-const SECTIONS: Array<{ href: string; label: string; value: MobileDashboardSection }> = [
-  { href: "/", label: "实时室", value: "live" },
-  { href: "/assistant", label: "Assistant 私有分析", value: "assistant" },
-  { href: "/audit?view=news", label: "新闻与证据", value: "audit" },
-  { href: "/audit?view=league", label: "学习曲线", value: "learning" },
-  { href: "/status", label: "AI 模型用量", value: "status" },
-  { href: "/health", label: "系统健康", value: "health" },
-];
-
 export default function MobileDashboardNav({
-  current,
-  status,
+  activeDestination,
 }: {
-  current: MobileDashboardSection;
-  status?: ReactNode;
+  activeDestination: DashboardGlobalDestinationId;
 }) {
   const navigation = useDashboardNavigation();
-  const currentHref = SECTIONS.find(section => section.value === current)?.href ?? "/";
+  const currentHref = DASHBOARD_GLOBAL_DESTINATIONS.find(
+    destination => destination.id === activeDestination,
+  )?.href ?? "/";
 
   return <div className="mobile-dashboard-nav">
     <label>
@@ -36,9 +28,10 @@ export default function MobileDashboardNav({
           else window.location.assign(href);
         }}
       >
-        {SECTIONS.map(section => <option key={section.value} value={section.href}>{section.label}</option>)}
+        {DASHBOARD_GLOBAL_DESTINATIONS.map(destination => (
+          <option key={destination.id} value={destination.href}>{destination.label}</option>
+        ))}
       </select>
     </label>
-    {status && <div className="mobile-dashboard-status">{status}</div>}
   </div>;
 }

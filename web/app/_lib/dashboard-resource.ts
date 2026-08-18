@@ -5,6 +5,7 @@ type CacheEntry = {
 };
 
 const resources = new Map<string, CacheEntry>();
+const resourceListeners = new Map<string, Set<() => void>>();
 const DEFAULT_MAX_AGE_MS = 15_000;
 const DEFAULT_TIMEOUT_MS = 10_000;
 
@@ -17,6 +18,20 @@ export function primeDashboardResources(initial: Record<string, unknown>): void 
 
 export function readDashboardResource<T>(url: string): T | null {
   return (resources.get(url)?.data as T | undefined) ?? null;
+}
+
+export function subscribeDashboardResource(url: string, listener: () => void): () => void {
+  const listeners = resourceListeners.get(url) ?? new Set<() => void>();
+  listeners.add(listener);
+  resourceListeners.set(url, listeners);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0) resourceListeners.delete(url);
+  };
+}
+
+function notifyDashboardResource(url: string): void {
+  for (const listener of resourceListeners.get(url) ?? []) listener();
 }
 
 export async function loadDashboardResource<T>(
@@ -51,6 +66,7 @@ export async function loadDashboardResource<T>(
       throw new Error(message);
     }
     resources.set(url, { data: body, updatedAt: Date.now() });
+    notifyDashboardResource(url);
     return body as T;
   }).catch(reason => {
     resources.set(url, { ...entry, pending: undefined });

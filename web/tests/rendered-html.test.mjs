@@ -513,16 +513,92 @@ async function renderSettled(path, marker) {
   return { response, html };
 }
 
-test("renders the live room with an audit-page navigation button", async () => {
+test("renders the live room inside the canonical product shell", async () => {
   const response = await render("/");
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /Aurum Signal Room/);
-  assert.match(html, /新闻、决策与结果/);
-  assert.match(html, /新闻 \/ 结果/);
-  assert.match(html, /系统状态/);
+  assert.match(html, /XAUUSD · Forward-only intelligence/);
+  assert.match(html, /新闻与决策/);
+  assert.match(html, /<a[^>]*aria-current="page"[^>]*>实时室<\/a>/);
+  assert.doesNotMatch(html, /返回实时室|新闻 \/ 结果/);
   assert.doesNotMatch(html, /next\/link|rel="prefetch"/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
+});
+
+test("keeps global shell ownership centralized and prevents view-level design drift", () => {
+  const shell = readFileSync(new URL("../app/_components/DashboardShell.tsx", import.meta.url), "utf8");
+  const navigation = readFileSync(new URL("../app/_components/DashboardNavigation.tsx", import.meta.url), "utf8");
+  const mobile = readFileSync(new URL("../app/_components/MobileDashboardNav.tsx", import.meta.url), "utf8");
+  const app = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
+  const views = [
+    "../app/_views/LiveRoomView.tsx",
+    "../app/_views/AssistantView.tsx",
+    "../app/_views/AuditView.tsx",
+    "../app/_views/HealthView.tsx",
+    "../app/_views/StatusView.tsx",
+  ];
+
+  assert.match(app, /<DashboardShell location=\{location\}>/);
+  assert.match(shell, /<header className="dashboard-header topbar">/);
+  assert.match(shell, /Aurum Signal Room/);
+  assert.match(shell, /XAUUSD · Forward-only intelligence/);
+  assert.match(shell, /DASHBOARD_GLOBAL_DESTINATIONS\.map/);
+  assert.match(shell, /DASHBOARD_SYSTEM_DESTINATIONS\.map/);
+  assert.match(mobile, /DASHBOARD_GLOBAL_DESTINATIONS\.map/);
+  assert.doesNotMatch(mobile, /const SECTIONS|MobileDashboardSection/);
+  assert.equal(navigation.match(/label: "(?:实时室|Assistant|新闻与决策|系统)"/g)?.length, 4);
+  assert.match(navigation, /href: "\/audit\?view=news"/);
+  assert.match(navigation, /rooms: \["health", "status"\]/);
+
+  for (const path of views) {
+    const source = readFileSync(new URL(path, import.meta.url), "utf8");
+    assert.doesNotMatch(source, /<header className="topbar|MobileDashboardNav|SystemStatePill/);
+    assert.doesNotMatch(source, /Aurum Signal Room|XAUUSD · Forward-only intelligence/);
+    assert.doesNotMatch(source, /Aurum System Status|Aurum System Health|Aurum Evidence Desk|Aurum Assistant/);
+    assert.doesNotMatch(source, /返回实时室/);
+  }
+});
+
+test("renders one invariant global header and active section across every dashboard route", async () => {
+  const routes = [
+    ["/", "实时室"],
+    ["/?room=assistant", "Assistant"],
+    ["/?room=audit&view=news", "新闻与决策"],
+    ["/?room=audit&view=league", "新闻与决策"],
+    ["/?room=health", "系统"],
+    ["/?room=status", "系统"],
+  ];
+  const labels = ["实时室", "Assistant", "新闻与决策", "系统"];
+
+  for (const [path, activeLabel] of routes) {
+    const { response, html } = await renderSettled(path, /dashboard-header topbar/);
+    assert.equal(response.status, 200, path);
+    assert.equal(html.match(/class="dashboard-header topbar"/g)?.length, 1, path);
+    const header = html.match(/<header class="dashboard-header topbar">[\s\S]*?<\/header>/)?.[0];
+    assert.ok(header, path);
+    assert.match(header, /<span class="brand-mark">AU<\/span>/, path);
+    assert.match(header, /<strong>Aurum Signal Room<\/strong>/, path);
+    assert.match(header, /<small>XAUUSD · Forward-only intelligence<\/small>/, path);
+    assert.equal(header.match(/aria-current="page"/g)?.length, 1, path);
+    assert.match(header, new RegExp(`aria-current="page"[^>]*>${activeLabel}</a>`), path);
+    assert.equal(header.match(/class="dashboard-global-state"/g)?.length, 1, path);
+    assert.doesNotMatch(header, /返回实时室|学习曲线|AI 模型用量|系统健康/, path);
+
+    const globalNav = header.match(/<nav class="dashboard-global-nav"[\s\S]*?<\/nav>/)?.[0];
+    const mobileNav = header.match(/<select aria-label="切换主要区域"[\s\S]*?<\/select>/)?.[0];
+    assert.ok(globalNav && mobileNav, path);
+    let previousGlobal = -1;
+    let previousMobile = -1;
+    for (const label of labels) {
+      const globalIndex = globalNav.indexOf(`>${label}</a>`);
+      const mobileIndex = mobileNav.indexOf(`>${label}</option>`);
+      assert.ok(globalIndex > previousGlobal, `${path}: desktop ${label}`);
+      assert.ok(mobileIndex > previousMobile, `${path}: mobile ${label}`);
+      previousGlobal = globalIndex;
+      previousMobile = mobileIndex;
+    }
+  }
 });
 
 test("keeps branch Preview identity and blocks writes", async () => {
@@ -1087,7 +1163,8 @@ test("renders the Gemini quota status route", async () => {
   assert.match(source, /查看账本与 Google 额度的区别/);
   assert.match(html, /分支配置/);
   assert.match(html, /Pacific midnight/);
-  assert.match(html, /组件与新闻源/);
+  assert.match(html, /系统健康/);
+  assert.match(html, /AI 模型用量/);
   assert.match(html, /data-read-state="(?:CURRENT|REFRESHING)"/);
   assert.match(html, /data-live-market-state="MARKET_DATA_UNAVAILABLE"/);
   assert.match(html, /data-operational-state="(?:HEALTHY|WARNING|ERROR)"/);
@@ -1154,6 +1231,7 @@ test("renders component and news-source health on a separate route", async () =>
 
 test("uses one Chinese system-state presentation across every dashboard page", () => {
   const component = readFileSync(new URL("../app/_components/SystemStatePill.tsx", import.meta.url), "utf8");
+  const shell = readFileSync(new URL("../app/_components/DashboardShell.tsx", import.meta.url), "utf8");
   const contract = readFileSync(new URL("../app/_lib/system-state.ts", import.meta.url), "utf8");
   const freshness = readFileSync(new URL("../app/_components/CurrentDataState.tsx", import.meta.url), "utf8");
   assert.match(component, /systemStatePresentation/);
@@ -1165,11 +1243,14 @@ test("uses one Chinese system-state presentation across every dashboard page", (
   assert.doesNotMatch(contract, /状态离线|系统在线/);
   assert.match(freshness, /状态更新失败，正在重试/);
   assert.match(freshness, /最近状态/);
-  for (const path of ["../app/_views/LiveRoomView.tsx", "../app/_views/AuditView.tsx", "../app/_views/StatusView.tsx", "../app/_views/HealthView.tsx"]) {
+  assert.match(shell, /className="dashboard-global-state"/);
+  assert.match(shell, /<SystemStatePill/);
+  assert.match(shell, /subscribeDashboardResource\("\/api\/status"/);
+  assert.match(shell, /hasSnapshot=/);
+  assert.match(shell, /operationalStatus=/);
+  for (const path of ["../app/_views/LiveRoomView.tsx", "../app/_views/AuditView.tsx", "../app/_views/StatusView.tsx", "../app/_views/HealthView.tsx", "../app/_views/AssistantView.tsx"]) {
     const source = readFileSync(new URL(path, import.meta.url), "utf8");
-    assert.match(source, /SystemStatePill/);
-    assert.match(source, /hasSnapshot=/);
-    assert.match(source, /operationalStatus=/);
+    assert.doesNotMatch(source, /SystemStatePill/);
     assert.doesNotMatch(source, /MARKET CLOSED|CONNECTING|市场休市 · 新闻运行中/);
   }
 });
@@ -1239,7 +1320,8 @@ test("renders the news and decision audit route", async () => {
   const response = await render("/?room=audit&view=news");
   assert.equal(response.status, 200);
   const html = await response.text();
-  assert.match(html, /Aurum Evidence Desk/);
+  assert.match(html, /Aurum Signal Room/);
+  assert.match(html, /XAUUSD · Forward-only intelligence/);
   assert.match(html, />新闻 <b>/);
   assert.match(html, /当前可用新闻事件/);
   const source = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
@@ -1336,7 +1418,7 @@ test("switches dashboard rooms locally and reuses client data between views", ()
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   for (const path of ["../app/_views/LiveRoomView.tsx", "../app/_views/AuditView.tsx", "../app/_views/StatusView.tsx", "../app/_views/HealthView.tsx"]) {
     const source = readFileSync(new URL(path, import.meta.url), "utf8");
-    assert.match(source, /DashboardLink/);
+    assert.doesNotMatch(source, /DashboardLink/);
     assert.match(source, /readDashboardResource/);
     assert.match(source, /loadDashboardResource/);
     assert.doesNotMatch(source, /useRouter/);
@@ -1349,7 +1431,8 @@ test("switches dashboard rooms locally and reuses client data between views", ()
   assert.match(app, /window\.history\.replaceState/);
   assert.match(app, /window\.addEventListener\("popstate"/);
   assert.match(app, /lazy\(loadAuditView\)/);
-  assert.match(css, /\.audit-link\.is-navigating::after/);
+  assert.match(app, /<DashboardShell location=\{location\}>/);
+  assert.match(css, /\.dashboard-global-link\.is-navigating::after/);
   assert.match(css, /prefers-reduced-motion:reduce/);
   assert.match(cache, /const resources = new Map/);
   assert.match(cache, /if \(!options\.force && isFresh\)/);
@@ -1764,12 +1847,10 @@ test("keeps the learning page focused and folds secondary research below the sco
 
 test("keeps dashboard navigation and graph controls usable on phones", () => {
   const dashboard = readFileSync(new URL("../app/_components/DashboardApp.tsx", import.meta.url), "utf8");
+  const shell = readFileSync(new URL("../app/_components/DashboardShell.tsx", import.meta.url), "utf8");
+  const navigation = readFileSync(new URL("../app/_components/DashboardNavigation.tsx", import.meta.url), "utf8");
   const responsiveScroll = readFileSync(new URL("../app/_lib/responsive-scroll.ts", import.meta.url), "utf8");
   const page = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
-  const live = readFileSync(new URL("../app/_views/LiveRoomView.tsx", import.meta.url), "utf8");
-  const status = readFileSync(new URL("../app/_views/StatusView.tsx", import.meta.url), "utf8");
-  const health = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
-  const assistant = readFileSync(new URL("../app/_views/AssistantView.tsx", import.meta.url), "utf8");
   const mobileNav = readFileSync(new URL("../app/_components/MobileDashboardNav.tsx", import.meta.url), "utf8");
   const modal = readFileSync(new URL("../app/audit/LearningGraphModal.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
@@ -1785,16 +1866,16 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(responsiveScroll, /stableFrames < 6 && remainingFrames > 0/);
   assert.match(responsiveScroll, /cancelAnimationFrame\(frame\)/);
   assert.doesNotMatch(page, /scrollAuditTabs|auditTabsRef|向左查看更多审计视图|向右查看更多审计视图/);
-  for (const [source, current] of [[live, "live"], [page, "mobileDashboardSection"], [status, "status"], [health, "health"], [assistant, "assistant"]]) {
-    assert.match(source, new RegExp(`<MobileDashboardNav current=\\{?"?${current}`));
-  }
-  for (const label of ["实时室", "Assistant 私有分析", "新闻与证据", "学习曲线", "AI 模型用量", "系统健康"]) {
-    assert.match(mobileNav, new RegExp(label));
+  assert.match(shell, /<MobileDashboardNav activeDestination=\{activeDestination\}/);
+  assert.match(mobileNav, /DASHBOARD_GLOBAL_DESTINATIONS/);
+  assert.doesNotMatch(mobileNav, /const SECTIONS|学习曲线|AI 模型用量|系统健康/);
+  for (const label of ["实时室", "Assistant", "新闻与决策", "系统"]) {
+    assert.match(navigation, new RegExp(label));
   }
   assert.match(mobileNav, /aria-label="切换主要区域"/);
   assert.match(css, /\.topbar \{ align-items:stretch; flex-direction:column/);
-  assert.match(css, /\.top-actions \{ display:none; \}/);
-  assert.match(css, /\.mobile-dashboard-nav \{ display:grid;[\s\S]*?grid-template-columns:minmax\(0,1fr\) auto/);
+  assert.match(css, /\.dashboard-global-nav \{ display:none; \}/);
+  assert.match(css, /\.dashboard-header \.mobile-dashboard-nav \{ grid-column:1; display:grid; grid-template-columns:minmax\(0,1fr\)/);
   assert.match(css, /\.audit-tabs-shell \{ display:none; \}/);
   assert.match(css, /\.audit-view-picker \{ position:sticky; top:0;[\s\S]*?grid-template-columns:auto minmax\(0,1fr\)/);
   assert.match(css, /\.audit-main \.audit-intro>div:first-child \{ display:none; \}/);
@@ -2354,7 +2435,7 @@ test("renders a recoverable responsive Assistant workbench without unsafe HTML",
   assert.match(css, /\.assistant-workbench \{[^}]*gap:0/);
   assert.match(css, /\.assistant-transcript \{[^}]*border-left:1px solid var\(--ink\)/);
   assert.match(css, /body:has\(\.assistant-main\) \{[^}]*display:flex; flex-direction:column; overflow:hidden/);
-  assert.match(css, /body:has\(\.assistant-main\) > \.assistant-main \{[^}]*height:auto; min-height:0; flex:1 1 auto/);
+  assert.match(css, /body:has\(\.assistant-main\) > \.dashboard-shell \{[^}]*height:auto; min-height:0; flex:1 1 auto/);
   assert.match(css, /\.assistant-conversation-rail\.is-open \{ transform:translateX\(0\); \}/);
   assert.match(css, /\.assistant-composer-meta button \{[^}]*min-height:46px/);
   assert.match(css, /\.assistant-chat-error button,\.assistant-chat-error a \{[^}]*min-height:44px/);
@@ -2409,11 +2490,11 @@ test("renders only validated Assistant content blocks with phone-owned overflow"
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-rail-scrim \{[^}]*z-index:1010/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-news-dialog \{[^}]*inset:50% 12px auto; width:auto; max-width:none; height:auto; max-height:calc\(100dvh - 24px\); margin:0 auto;[^}]*transform:translateY\(-50%\)/);
   assert.match(css, /\.assistant-news-dialog \{[^}]*position:fixed; inset:0;[^}]*width:min\(720px,calc\(100vw - 48px\)\);[^}]*margin:auto/);
-  assert.match(css, /\.assistant-topbar \.mobile-dashboard-nav>label \{[^}]*grid-template-columns:minmax\(0,1fr\)/);
+  assert.match(css, /\.dashboard-header \.mobile-dashboard-nav>label \{ grid-template-columns:auto minmax\(0,1fr\)/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell form \{[^}]*grid-template-columns:minmax\(0,1fr\) 52px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell \{[^}]*min-height:69px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell textarea \{[^}]*height:52px;[^}]*max-height:52px/);
-  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-main \{[^}]*height:100dvh; min-height:0/);
+  assert.match(css, /\.dashboard-shell\.is-assistant>\.assistant-main \{[^}]*height:auto; min-height:0/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-thread-heading h1 \{[^}]*font-size:clamp\(18px,4\.8vw,20px\)/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-message\.is-user>p \{[^}]*font-size:15px; line-height:1\.68/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-news-card-trigger>strong \{[^}]*font-size:19px; line-height:1\.22/);
