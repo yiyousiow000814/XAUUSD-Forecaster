@@ -4,6 +4,7 @@ import { useCallback, useEffect, type MouseEvent, type ReactNode } from "react";
 import { useDashboardNavigation } from "./DashboardNavigation";
 
 type DashboardLinkProps = {
+  ariaCurrent?: "page";
   ariaLabel?: string;
   children: ReactNode;
   className?: string;
@@ -11,7 +12,7 @@ type DashboardLinkProps = {
   replace?: boolean;
 };
 
-export default function DashboardLink({ ariaLabel, children, className, href, replace = false }: DashboardLinkProps) {
+export default function DashboardLink({ ariaCurrent, ariaLabel, children, className, href, replace = false }: DashboardLinkProps) {
   const navigation = useDashboardNavigation();
   const prefetch = useCallback(() => navigation?.preload(href), [href, navigation]);
 
@@ -28,6 +29,7 @@ export default function DashboardLink({ ariaLabel, children, className, href, re
   };
 
   return <a
+    aria-current={ariaCurrent}
     aria-label={ariaLabel}
     className={className}
     href={href}

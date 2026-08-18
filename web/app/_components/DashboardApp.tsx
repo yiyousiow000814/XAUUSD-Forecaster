@@ -12,6 +12,7 @@ import {
   type DashboardLocation,
   type DashboardRoom,
 } from "./DashboardNavigation";
+import DashboardShell from "./DashboardShell";
 
 const loadStatusView = () => import("../_views/StatusView");
 const loadHealthView = () => import("../_views/HealthView");
@@ -132,12 +133,14 @@ export default function DashboardApp({
     (HealthStatusPayload & QuotaStatusPayload) | undefined;
 
   return <DashboardNavigationProvider value={navigation}>
-    <Suspense fallback={<main className="app-view-loading" aria-label="正在打开页面"><i /></main>}>
-      {location.room === "live" && <LiveRoomView />}
-      {location.room === "status" && <StatusView initialPayload={initialStatus} />}
-      {location.room === "health" && <HealthView initialPayload={initialStatus} />}
-      {location.room === "audit" && <AuditView key={location.auditView} />}
-      {location.room === "assistant" && <AssistantView />}
-    </Suspense>
+    <DashboardShell location={location}>
+      <Suspense fallback={<main className="app-view-loading" aria-label="正在打开页面"><i /></main>}>
+        {location.room === "live" && <LiveRoomView />}
+        {location.room === "status" && <StatusView initialPayload={initialStatus} />}
+        {location.room === "health" && <HealthView initialPayload={initialStatus} />}
+        {location.room === "audit" && <AuditView key={location.auditView} />}
+        {location.room === "assistant" && <AssistantView />}
+      </Suspense>
+    </DashboardShell>
   </DashboardNavigationProvider>;
 }

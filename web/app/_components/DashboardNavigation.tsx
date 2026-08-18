@@ -10,6 +10,31 @@ export type DashboardLocation = {
   auditView: AuditViewName;
 };
 
+export type DashboardGlobalDestinationId = "live" | "assistant" | "audit" | "system";
+
+export type DashboardGlobalDestination = {
+  id: DashboardGlobalDestinationId;
+  label: string;
+  href: string;
+  rooms: readonly DashboardRoom[];
+};
+
+export const DASHBOARD_GLOBAL_DESTINATIONS: readonly DashboardGlobalDestination[] = [
+  { id: "live", label: "实时室", href: "/", rooms: ["live"] },
+  { id: "assistant", label: "Assistant", href: "/assistant", rooms: ["assistant"] },
+  { id: "audit", label: "新闻与决策", href: "/audit?view=news", rooms: ["audit"] },
+  { id: "system", label: "系统", href: "/health", rooms: ["health", "status"] },
+];
+
+export const DASHBOARD_SYSTEM_DESTINATIONS = [
+  { id: "health", label: "系统健康", href: "/health", room: "health" },
+  { id: "status", label: "AI 模型用量", href: "/status", room: "status" },
+] as const;
+
+export function activeDashboardDestination(room: DashboardRoom): DashboardGlobalDestinationId {
+  return DASHBOARD_GLOBAL_DESTINATIONS.find(destination => destination.rooms.includes(room))?.id ?? "live";
+}
+
 type DashboardNavigationValue = {
   navigate: (href: string, replace?: boolean) => Promise<void>;
   preload: (href: string) => void;

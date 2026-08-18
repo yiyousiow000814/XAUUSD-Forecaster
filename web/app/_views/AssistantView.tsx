@@ -3,8 +3,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AssistantConversationRail from "../_components/AssistantConversationRail";
 import AssistantTranscript from "../_components/AssistantTranscript";
-import DashboardLink from "../_components/DashboardLink";
-import MobileDashboardNav from "../_components/MobileDashboardNav";
 import { AssistantEventSequence, type AssistantEventEnvelope } from
   "../api/_shared/assistant-events";
 import {
@@ -504,23 +502,11 @@ export default function AssistantView() {
   }, [selectedId]);
 
   return <main className="assistant-main">
-    <div className="grain" />
-    <header className="topbar assistant-topbar">
-      <DashboardLink className="brand audit-brand brand-button" href="/" replace>
-        <span className="brand-mark">AU</span>
-        <div><strong>Aurum Assistant</strong><small>可追溯分析 · 私有会话</small></div>
-      </DashboardLink>
-      <div className="top-actions">
-        <DashboardLink className="audit-link" href="/audit?view=news">新闻与证据</DashboardLink>
-        <DashboardLink className="audit-link" href="/status">系统状态</DashboardLink>
-        <DashboardLink className="audit-link" href="/" replace>← 返回实时室</DashboardLink>
-        <span className={`assistant-owner-pill${preview ? " is-preview" : ""}`}>
-          <i aria-hidden="true" /> {preview ? "PREVIEW" : "PRIVATE"}
-        </span>
-      </div>
-      <MobileDashboardNav current="assistant" />
-    </header>
-
+    <div className="assistant-scope-row">
+      <span className={`assistant-owner-pill${preview ? " is-preview" : ""}`}>
+        <i aria-hidden="true" /> {preview ? "PREVIEW" : "PRIVATE"}
+      </span>
+    </div>
     <section className="assistant-workbench">
       <AssistantConversationRail
         archived={archived}

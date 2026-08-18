@@ -3,10 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
 import CountValue from "../_components/CountValue";
-import DashboardLink from "../_components/DashboardLink";
-import MobileDashboardNav from "../_components/MobileDashboardNav";
 import RuntimeUpdateFailureBanner, { type RuntimeUpdateFailure } from "../_components/RuntimeUpdateFailureBanner";
-import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { statusFieldPhase } from "../_lib/current-data-provenance";
@@ -175,24 +172,8 @@ export default function StatusView({ initialPayload }: { initialPayload?: Status
   );
   return (
     <main className="status-main">
-      <div className="grain" />
-      <header className="topbar">
-        <DashboardLink className="brand audit-brand brand-button" href="/" replace>
-          <span className="brand-mark">AU</span>
-          <div><strong>Aurum System Status</strong><small>本机进程 · 多模型配额</small></div>
-        </DashboardLink>
-        <div className="top-actions">
-          <DashboardLink className="audit-link" href="/assistant">Assistant</DashboardLink>
-          <DashboardLink className="audit-link" href="/health">组件与新闻源</DashboardLink>
-          <DashboardLink className="audit-link" href="/audit?view=news">新闻与决策</DashboardLink>
-          <DashboardLink className="audit-link" href="/" replace>← 返回实时室</DashboardLink>
-        </div>
-        <MobileDashboardNav current="status" />
-      </header>
-
       <section className="status-hero">
         <div><p className="eyebrow">LOCAL QUOTA LEDGER / PACIFIC DAY</p><h1>AI 模型使用状态</h1></div>
-        <SystemStatePill loading={payload === null && !error} error={Boolean(error)} hasSnapshot={payload !== null} online={Boolean(payload?.system.online)} marketSession={payload?.system.market_session} operationalStatus={payload?.operational_health?.status} />
       </section>
 
       {error ? <div className="error-banner">状态读取失败：{error}</div> : null}
