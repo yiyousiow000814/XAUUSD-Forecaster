@@ -235,6 +235,7 @@ footer { position:relative; z-index:1; display:flex; justify-content:space-betwe
 .is-error .health-operator-now { color:var(--red); }
 .incident-summary-panel { margin-top:12px; }
 .incident-summary-panel>header { align-items:center; padding:10px 16px; }
+.status-main>.status-hero .eyebrow,.incident-summary-panel>header .eyebrow,.component-status>header .eyebrow,.source-health>header .eyebrow { display:none; }
 .incident-summary-panel>header h2 { font-size:30px; }
 .incident-summary-panel>header>p { color:var(--muted); font-size:12px; font-weight:800; }
 .operational-incident-list { display:grid; gap:10px; padding:10px; }
@@ -691,7 +692,7 @@ body.modal-open { overflow:hidden; }
 .status-hero h1 { margin:5px 0 0; font-family:var(--font-display); font-size:clamp(42px,5vw,58px); line-height:.95; }
 .component-status { margin-top:20px; }
 .component-status>header { display:flex; justify-content:space-between; gap:24px; align-items:end; padding:0 0 12px; border-bottom:1px solid var(--ink); }
-.component-status h2 { margin:3px 0 0; font-family:var(--font-display); font-size:clamp(28px,2.6vw,32px); }
+.component-status h2 { margin:0; font-family:var(--font-display); font-size:clamp(28px,2.6vw,32px); }
 .component-status>header>strong,.source-health>header>strong { padding-bottom:4px; font-size:14px; line-height:1.4; text-align:right; }
 .component-card-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; padding-top:10px; }
 .component-status article,.source-health article { min-width:0; border:1px solid rgba(17,17,15,.45); background:rgba(239,235,223,.72); }
@@ -706,7 +707,7 @@ body.modal-open { overflow:hidden; }
 .health-state-text { color:var(--green); font-size:11px; font-weight:900; }
 .state-warning .health-state-text { color:#765414; }.state-error .health-state-text { color:var(--red); }.state-neutral .health-state-text { color:#625f58; }
 .component-status article>header time,.source-health article>header time { color:var(--muted); font-size:12px; font-weight:750; white-space:nowrap; }
-.component-current-problem { display:grid; gap:6px; margin:0; border-top:1px solid rgba(17,17,15,.24); background:#eee8da; padding:15px 20px; }
+.component-current-problem { display:flex; min-height:46px; align-items:center; justify-content:space-between; gap:10px; margin:0; border-top:1px solid rgba(17,17,15,.24); background:#eee8da; padding:8px 16px; }
 .component-current-problem small { color:var(--muted); font-size:12px; font-weight:900; }
 .component-current-problem strong { font-size:14px; line-height:1.55; }
 .component-current-problem b { width:max-content; border-left:4px solid var(--gold); padding-left:8px; font-size:13px; }
@@ -969,7 +970,7 @@ body.modal-open { overflow:hidden; }
 .component-ok { background:var(--green); color:var(--paper); }.component-stale { background:#ecc2b8; color:var(--red); }
 .source-health { margin-top:26px; }
 .source-health>header { display:flex; justify-content:space-between; gap:24px; align-items:end; padding:0 0 12px; border-bottom:1px solid var(--ink); }
-.source-health h2 { margin:3px 0 0; font-family:var(--font-display); font-size:clamp(28px,2.6vw,32px); }
+.source-health h2 { margin:0; font-family:var(--font-display); font-size:clamp(28px,2.6vw,32px); }
 .source-health-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; padding-top:10px; }
 .source-health article>header div { min-width:0; }
 .source-health article strong,.source-health article small { display:block; }

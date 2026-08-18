@@ -1282,6 +1282,7 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(view, /state\.attention \? "技术详情" : "详情"/);
   assert.match(view, /item\.health === "WARMING_UP" && !item\.last_error/);
   assert.match(view, /item\.last_error \?\? "无已记录错误"/);
+  assert.match(view, /<dt>关联问题<\/dt><dd>\{incident\.summary_zh\}<\/dd>/);
   assert.match(view, /projection\.reason_code/);
   assert.match(view, /className="health-technical-section"/);
   assert.match(view, /调度器与技术状态/);
@@ -1290,13 +1291,13 @@ test("renders component and news-source health on a separate route", async () =>
   const sourceIndex = view.indexOf('<section className={`source-health');
   const technicalIndex = view.indexOf('<section className="health-technical-section"');
   assert.ok(incidentIndex < componentIndex && componentIndex < sourceIndex && sourceIndex < technicalIndex);
-  assert.ok(view.indexOf("当前问题", view.indexOf("function ComponentHealthCard")) < view.indexOf('className="component-technical-details"'));
   assert.match(view, /sortAttentionFirst\(Object\.entries/);
   assert.match(view, /sortAttentionFirst\(payload\?\.news_source_health/);
   assert.match(view, /className="health-state-mark" aria-label=\{state\.label\}>\{state\.symbol\}/);
   assert.match(view, /className="health-state-text">\{state\.label\}/);
   assert.match(css, /\.component-status article\.is-healthy,\.source-health article\.is-healthy \{[^}]*grid-template-columns:minmax\(0,1fr\) auto/);
   assert.match(css, /\.component-status article\.is-attention,\.source-health article\.is-attention \{[^}]*grid-column:1\/-1/);
+  assert.match(css, /\.component-current-problem \{[^}]*min-height:46px/);
   assert.match(css, /\.component-card-grid \{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
   assert.match(css, /\.source-health-grid \{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
   assert.doesNotMatch(css, /\.component-status>div \{[^}]*grid-template-columns:repeat\(6/);

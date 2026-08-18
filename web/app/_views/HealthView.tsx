@@ -193,8 +193,7 @@ function ComponentHealthCard({
       <time>{item.age_seconds === null ? "—" : `${compactElapsed(item.age_seconds)}前`}</time>
     </header>
     {state.attention ? <div className="component-current-problem">
-      <small>当前问题</small><strong>{incident?.summary_zh ?? componentProblem(item.status)}</strong>
-      {incident ? <b>{operationalIncidentActionLabels[incident.action_state]}</b> : null}
+      <strong>{incident ? operationalIncidentActionLabels[incident.action_state] : componentProblem(item.status)}</strong>
       {nextRetryAt ? <time>下次尝试 {localTime(nextRetryAt)}</time> : null}
     </div> : null}
     <details className="component-technical-details">
@@ -206,6 +205,7 @@ function ComponentHealthCard({
         <div><dt>组件标识</dt><dd><code>{name}</code></dd></div>
         <div><dt>原始状态</dt><dd><code>{item.status}</code></dd></div>
         <div><dt>最近错误</dt><dd><code>{item.last_error ?? "无已记录错误"}</code></dd></div>
+        {incident ? <div><dt>关联问题</dt><dd>{incident.summary_zh}</dd></div> : null}
       </dl>
     </details>
   </article>;
