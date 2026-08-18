@@ -2023,12 +2023,26 @@ def test_catch_up_decision_freezes_source_observability_at_decision_time(
         "reason_codes": [],
     }
 
+    with pytest.raises(
+        ValueError, match="semantic health uses evidence after decision time",
+    ):
+        append_live_decision_v2(
+            ledger, decision_id="catch-up", decision_time=decision,
+            created_at=created, snapshot=snapshot,
+            news_pipeline_health={
+                "observed_at": created.isoformat(), "status": "HEALTHY",
+                "reason_codes": (), "heartbeat_at": created.isoformat(),
+                "unresolved_items": 0, "oldest_unresolved_at": None,
+                "snapshot_hash": "future-health",
+            },
+        )
+
     append_live_decision_v2(
         ledger, decision_id="catch-up", decision_time=decision,
         created_at=created, snapshot=snapshot,
         news_pipeline_health={
-            "observed_at": created.isoformat(), "status": "HEALTHY",
-            "reason_codes": (), "heartbeat_at": created.isoformat(),
+            "observed_at": decision.isoformat(), "status": "HEALTHY",
+            "reason_codes": (), "heartbeat_at": None,
             "unresolved_items": 0, "oldest_unresolved_at": None,
             "snapshot_hash": "catch-up-health",
         },
@@ -2040,7 +2054,7 @@ def test_catch_up_decision_freezes_source_observability_at_decision_time(
            WHERE source_decision_id='catch-up'"""
     ).fetchone()
     source_observability = json.loads(coverage["source_observability_json"])
-    assert coverage["observed_at"] == created.isoformat()
+    assert coverage["observed_at"] == decision.isoformat()
     assert coverage["state"] == "UNAVAILABLE"
     assert source_observability["observable_source_count"] == 0
     assert source_observability["unavailable_source_count"] == len(

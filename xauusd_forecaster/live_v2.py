@@ -115,6 +115,11 @@ def append_live_decision_v2(
     epoch = evaluation_epoch(ledger.connection)
     if epoch is None or decision_time < epoch:
         return []
+    health_observed_at = datetime.fromisoformat(
+        str(news_pipeline_health["observed_at"]).replace("Z", "+00:00")
+    )
+    if health_observed_at > decision_time:
+        raise ValueError("news semantic health uses evidence after decision time")
     features = dict(snapshot["features"])
     features["decision_bid"] = snapshot["bid"]
     features["decision_ask"] = snapshot["ask"]
@@ -181,7 +186,8 @@ def append_live_decision_v2(
             """INSERT INTO news_input_coverage_snapshots_v1 VALUES
             (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                decision_id, decision_time.isoformat(), created_at.isoformat(),
+                decision_id, decision_time.isoformat(),
+                health_observed_at.isoformat(),
                 news_input_coverage["state"],
                 news_input_coverage["usable_core_event_count"],
                 news_input_coverage["usable_broad_event_count"],

@@ -311,6 +311,16 @@ excluded from news-specific fitting because their historical coverage cannot be
 reclassified without inventing evidence; their Market-only learning remains
 available.
 
+Every frozen coverage snapshot uses `decision_time` as both its source-poll and
+semantic-evidence cutoff. Catch-up rows reconstruct semantic readiness only from
+durable job creation, append-only attempts and deferrals, and immutable annotation
+or impact
+completion timestamps at or before that cutoff. Current heartbeat files,
+credential configuration, later retries, later terminal transitions, and later
+recoveries are excluded. The source-observability payload records its cutoff,
+and the coverage hash binds both the source evidence hash and the decision-time
+semantic snapshot hash.
+
 One complete generation contains Market-only, News residual, Full, Broad News
 residual, and Broad Full. All five share one cutoff, policy version, event
 snapshot hash, and generation identifier. Activation is a single append-only

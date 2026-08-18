@@ -239,6 +239,18 @@ provider pacing (`PROVIDER_DISPATCH_DEFERRED`), and provider transport
 changes, deletes, or retroactively enriches decision snapshots, prediction
 visibility, learning admission, training rows, or execution-learning evidence.
 
+Current operator health and historical decision coverage have separate clocks.
+The operator surface reads the mutable annotator heartbeat, current credentials,
+and latest scheduler state at the current observation time. A catch-up decision
+instead projects only durable job creation, append-only attempts and deferrals,
+immutable
+semantic completions, and source polls recorded no later than `decision_time`.
+The mutable heartbeat file and current credential configuration are never used
+as historical evidence. When no durable attempt or deferral exists, the bounded
+projection
+can establish only queued or overdue work; it does not invent a past credential,
+heartbeat, recovery, or terminal state from today's mutable state.
+
 The outcome settler runs inside the supervised collector loop. Its health uses
 that loop's successful heartbeat, not the timestamp of the most recently
 appended outcome. A quiet interval with no decision past its 30-minute horizon

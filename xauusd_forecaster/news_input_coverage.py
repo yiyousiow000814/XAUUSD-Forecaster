@@ -78,6 +78,7 @@ def news_source_observability_summary(
             usable_status,
         ))
     payload = {
+        "evidence_cutoff": observed_at.isoformat(),
         "registered_source_count": len(NEWS_SOURCE_REGISTRY),
         "observable_source_count": len(current),
         "degraded_source_count": len(degraded),
