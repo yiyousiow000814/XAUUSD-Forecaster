@@ -111,6 +111,10 @@ SOURCE_PERSON_IDENTITY_CUE_PATTERN = re.compile(
     r"starring)\b",
     re.IGNORECASE,
 )
+SOURCE_EPISODE_TITLE_CUE_PATTERN = re.compile(
+    r"\bSeason\s+\d+\s*,?\s*Episode\s+\d+\b",
+    re.IGNORECASE,
+)
 
 
 GeminiBatchCapacityExhausted = ModelGatewayCapacityExhausted
@@ -2388,11 +2392,22 @@ def _source_grounded_display_identifiers(
     source = f"{headline}\n{body}".strip()
     if not source:
         return ()
+    grounded = []
+    for match in re.finditer(r"《([^《》]{1,64})》", str(value or "")):
+        candidate = match.group(1).strip()
+        tokens = _normalized_identity_tokens(candidate)
+        if not tokens or len(tokens) > 8:
+            continue
+        source_match = _source_identity_match(source, candidate)
+        if (
+            source_match is not None
+            and SOURCE_EPISODE_TITLE_CUE_PATTERN.search(source_match[1])
+        ):
+            grounded.append(candidate)
     candidates = (
         match.group(0).strip()
         for match in SOURCE_IDENTITY_SPAN_PATTERN.finditer(str(value or ""))
     )
-    grounded = []
     for candidate in candidates:
         match = _source_identity_match(source, candidate)
         if match is None:
