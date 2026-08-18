@@ -1246,6 +1246,8 @@ test("uses one Chinese system-state presentation across every dashboard page", (
   assert.match(shell, /className="dashboard-global-state"/);
   assert.match(shell, /<SystemStatePill/);
   assert.match(shell, /subscribeDashboardResource\("\/api\/status"/);
+  assert.match(shell, /readDashboardResourceState<ShellStatusPayload>/);
+  assert.doesNotMatch(shell, /useState\(false\)/);
   assert.match(shell, /hasSnapshot=/);
   assert.match(shell, /operationalStatus=/);
   for (const path of ["../app/_views/LiveRoomView.tsx", "../app/_views/AuditView.tsx", "../app/_views/StatusView.tsx", "../app/_views/HealthView.tsx", "../app/_views/AssistantView.tsx"]) {
@@ -1261,7 +1263,7 @@ test("keeps read, live-market, and operational status axes independent", () => {
     marketSession: "OPEN", operationalStatus: "HEALTHY",
   });
   assert.equal(cachedRefreshFailure.readState, "STALE_SNAPSHOT");
-  assert.equal(cachedRefreshFailure.label, "实时链路正常");
+  assert.equal(cachedRefreshFailure.label, "状态更新失败");
 
   assert.equal(systemStatePresentation({
     loading: false, error: true, hasSnapshot: false, online: false,

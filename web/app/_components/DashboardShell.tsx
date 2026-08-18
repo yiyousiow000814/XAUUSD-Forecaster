@@ -1,7 +1,11 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
-import { loadDashboardResource, readDashboardResource, subscribeDashboardResource } from "../_lib/dashboard-resource";
+import {
+  loadDashboardResource,
+  readDashboardResourceState,
+  subscribeDashboardResource,
+} from "../_lib/dashboard-resource";
 import DashboardLink from "./DashboardLink";
 import {
   activeDashboardDestination,
@@ -48,32 +52,36 @@ function GlobalNavigation({ activeDestination }: { activeDestination: ReturnType
 }
 
 function GlobalSystemState() {
-  const [payload, setPayload] = useState<ShellStatusPayload | null>(
-    () => readDashboardResource<ShellStatusPayload>("/api/status"),
+  const [resource, setResource] = useState(
+    () => readDashboardResourceState<ShellStatusPayload>("/api/status"),
   );
-  const [error, setError] = useState(false);
-
-  useEffect(() => subscribeDashboardResource("/api/status", () => {
-    setPayload(readDashboardResource<ShellStatusPayload>("/api/status"));
-    setError(false);
-  }), []);
 
   useEffect(() => {
-    if (payload) return;
     let active = true;
-    void loadDashboardResource<ShellStatusPayload>("/api/status").then(next => {
-      if (active) setPayload(next);
-    }).catch(() => {
-      if (active) setError(true);
-    });
-    return () => { active = false; };
-  }, [payload]);
+    const update = () => {
+      if (active) {
+        setResource(readDashboardResourceState<ShellStatusPayload>("/api/status"));
+      }
+    };
+    const unsubscribe = subscribeDashboardResource("/api/status", update);
+    const current = readDashboardResourceState<ShellStatusPayload>("/api/status");
+    queueMicrotask(update);
+    if (!current.hasSnapshot && !current.loading) {
+      void loadDashboardResource<ShellStatusPayload>("/api/status").catch(() => undefined);
+    }
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
+
+  const payload = resource.data;
 
   return <div className="dashboard-global-state" aria-label="全局系统状态">
     <SystemStatePill
-      loading={payload === null && !error}
-      error={error}
-      hasSnapshot={payload !== null}
+      loading={resource.loading}
+      error={resource.error !== null}
+      hasSnapshot={resource.hasSnapshot}
       online={Boolean(payload?.system?.online)}
       marketSession={payload?.system?.market_session}
       operationalStatus={payload?.operational_health?.status}
