@@ -2,11 +2,8 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import DashboardLink from "../_components/DashboardLink";
-import MobileDashboardNav, { type MobileDashboardSection } from "../_components/MobileDashboardNav";
 import CountValue from "../_components/CountValue";
 import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
-import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { statusFieldPhase } from "../_lib/current-data-provenance";
@@ -1162,25 +1159,8 @@ export default function AuditView() {
   const continuedEventTotal = payload?.storyline_summary?.total ?? 0;
   const singleEventTotal = payload?.storyline_summary?.candidate_total ?? 0;
   const activeEventTotal = continuedEventTotal + singleEventTotal;
-  const mobileDashboardSection: MobileDashboardSection = view === "league" ? "learning" : "audit";
-
   return (
     <main className={`audit-main audit-view-${view}`}>
-      <div className="grain" />
-      <header className="topbar audit-topbar">
-        <DashboardLink className="brand audit-brand brand-button" href="/" replace>
-          <span className="brand-mark">AU</span>
-          <div><strong>Aurum Evidence Desk</strong><small>新闻 · 决策 · 因子覆盖</small></div>
-        </DashboardLink>
-        <div className="top-actions">
-          <DashboardLink className="audit-link" href="/assistant">Assistant</DashboardLink>
-          <DashboardLink className="audit-link" href="/status">系统状态</DashboardLink>
-          <DashboardLink className="audit-link" href="/" replace>← 返回实时室</DashboardLink>
-          <SystemStatePill loading={statusState === "loading"} error={statusState === "error"} hasSnapshot={payload !== null} online={Boolean(payload?.system?.online)} marketSession={payload?.system?.market_session} operationalStatus={payload?.operational_health?.status} />
-        </div>
-        <MobileDashboardNav current={mobileDashboardSection} status={<SystemStatePill loading={statusState === "loading"} error={statusState === "error"} hasSnapshot={payload !== null} online={Boolean(payload?.system?.online)} marketSession={payload?.system?.market_session} operationalStatus={payload?.operational_health?.status} />} />
-      </header>
-
       <section className="audit-intro">
         <div><p className="eyebrow">IMMUTABLE FORWARD EVIDENCE</p><h1>新闻先被看见，<br />决定随后产生。</h1></div>
         <div

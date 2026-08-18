@@ -34,6 +34,9 @@ export function systemStatePresentation(state: SystemStateInput) {
   if (axes.readState === "REFRESHING" && !state.hasSnapshot) {
     return { ...axes, label: "连接中", tone: "is-loading" };
   }
+  if (axes.readState === "STALE_SNAPSHOT") {
+    return { ...axes, label: "状态更新失败", tone: "is-loading" };
+  }
   if (axes.operationalState === "ERROR") {
     return { ...axes, label: "运行异常", tone: "is-down" };
   }

@@ -3,10 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
 import CountValue from "../_components/CountValue";
-import DashboardLink from "../_components/DashboardLink";
-import MobileDashboardNav from "../_components/MobileDashboardNav";
 import RuntimeUpdateFailureBanner, { type RuntimeUpdateFailure } from "../_components/RuntimeUpdateFailureBanner";
-import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { formatExactCount } from "../_lib/count-format";
@@ -244,24 +241,6 @@ export default function LiveRoomView() {
 
   return (
     <main>
-      <div className="grain" />
-      <header className="topbar">
-        <div className="brand">
-          <span className="brand-mark">AU</span>
-          <div>
-            <strong>Aurum Signal Room</strong>
-            <small>XAUUSD · Forward-only intelligence</small>
-          </div>
-        </div>
-        <div className="top-actions">
-          <DashboardLink className="audit-link" href="/assistant">Assistant</DashboardLink>
-          <DashboardLink className="audit-link" href="/status">系统状态</DashboardLink>
-          <DashboardLink ariaLabel="新闻、决策与结果" className="audit-link" href="/audit?view=decisions">新闻 / 结果 <span aria-hidden="true">→</span></DashboardLink>
-          <SystemStatePill loading={loading} error={Boolean(error)} hasSnapshot={payload !== null} online={Boolean(payload?.system.online)} marketSession={payload?.system.market_session} operationalStatus={payload?.operational_health?.status} />
-        </div>
-        <MobileDashboardNav current="live" status={<SystemStatePill loading={loading} error={Boolean(error)} hasSnapshot={payload !== null} online={Boolean(payload?.system.online)} marketSession={payload?.system.market_session} operationalStatus={payload?.operational_health?.status} />} />
-      </header>
-
       <section className="hero">
         <div className="hero-copy">
           <p className="eyebrow">CURRENT MARKET / CTRADER BID—ASK</p>

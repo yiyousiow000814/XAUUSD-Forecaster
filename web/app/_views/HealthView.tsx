@@ -3,9 +3,6 @@
 import { useCallback, useEffect, useId, useState } from "react";
 import { CurrentDataNotice, type CurrentDataPhase } from "../_components/CurrentDataState";
 import CountValue from "../_components/CountValue";
-import DashboardLink from "../_components/DashboardLink";
-import MobileDashboardNav from "../_components/MobileDashboardNav";
-import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { operationalEvidenceText } from "../_lib/operational-evidence";
@@ -196,22 +193,8 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
     ? "error" : incidents.length ? "warning" : "healthy";
 
   return <main className="status-main">
-    <div className="grain" />
-    <header className="topbar">
-      <DashboardLink className="brand audit-brand brand-button" href="/" replace>
-        <span className="brand-mark">AU</span><div><strong>Aurum System Health</strong><small>组件心跳 · 新闻来源</small></div>
-      </DashboardLink>
-      <div className="top-actions">
-        <DashboardLink className="audit-link" href="/assistant">Assistant</DashboardLink>
-        <DashboardLink className="audit-link" href="/status">AI 模型用量</DashboardLink>
-        <DashboardLink className="audit-link" href="/audit?view=news">新闻与决策</DashboardLink>
-        <DashboardLink className="audit-link" href="/" replace>← 返回实时室</DashboardLink>
-      </div>
-      <MobileDashboardNav current="health" />
-    </header>
     <section className="status-hero">
       <div><p className="eyebrow">OPERATIONAL HEARTBEATS / SOURCE HEALTH</p><h1>系统健康状态</h1></div>
-      <SystemStatePill loading={payload === null && !error} error={Boolean(error)} hasSnapshot={payload !== null} online={Boolean(payload?.system.online)} marketSession={payload?.system.market_session} operationalStatus={payload?.operational_health?.status} />
     </section>
     {error ? <div className="error-banner">状态读取失败：{error}</div> : null}
     <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
