@@ -10,6 +10,7 @@ import { operationalEventDiagnostic, operationalIncidentActionLabels, operationa
 import { affectedOperationalScopeCount, correlateOperationalEvents, type OperationalIncident } from "../_lib/operational-incidents";
 import { normalizeOperationalEvent, schedulerTaskLabel, type AssistantOperationalHealth, type OperationalAlert, type OperationalHealth } from "../_lib/operational-health";
 import { sourceHealthErrorPresentation } from "../_lib/source-health-presentation";
+import { componentAggregate, componentScanState, primaryOperatorAction, sortAttentionFirst, sourceAggregate, sourceScanState } from "../_lib/health-scan-presentation";
 
 export type StatusPayload = {
   preview_status_summary?: boolean;
@@ -44,6 +45,12 @@ function compactElapsed(seconds: number | null): string {
   return `${Math.floor(seconds / 3600)} 小时 ${Math.floor((seconds % 3600) / 60)} 分`;
 }
 
+function compactClock(value: string | null): string {
+  return value ? new Date(value).toLocaleTimeString("zh-CN", {
+    hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Kuala_Lumpur",
+  }) : "—";
+}
+
 const componentRoles: Record<string, string> = {
   quote_bridge: "持续接收 cTrader XAUUSD Bid / Ask 报价",
   system_clock: "校验报价时间与本机接收时间",
@@ -60,15 +67,6 @@ const componentRoles: Record<string, string> = {
 
 function componentRole(name: string): string {
   return componentRoles[name] ?? "运行与证据链路组件";
-}
-
-function componentStatusLabel(status: string): string {
-  if (status === "OK") return "正常";
-  if (status === "MARKET_CLOSED") return "市场休市";
-  if (status === "ERROR") return "错误";
-  if (status === "STALE") return "需要关注";
-  if (status === "UNAVAILABLE" || status === "UNKNOWN") return "状态不可用";
-  return status;
 }
 
 function componentProblem(status: string): string {
@@ -145,31 +143,31 @@ export function IncidentCard({ incident }: { incident: OperationalIncident }) {
 type NewsSourceHealth = StatusPayload["news_source_health"][number];
 
 function SourceHealthCard({ item }: { item: NewsSourceHealth }) {
-  const healthy = item.health === "HEALTHY";
-  const errorPresentation = sourceHealthErrorPresentation(item, healthy);
-  const statusLabel = item.health === "FALLBACK_ACTIVE"
-    ? "后备源接管中" : item.health === "WARMING_UP" ? "等待首次正式发布" : item.health;
-  return <article className={healthy ? "is-healthy" : "is-attention"}>
+  const state = sourceScanState(item.health);
+  const errorPresentation = sourceHealthErrorPresentation(item, !state.attention);
+  return <article className={`${state.attention ? "is-attention" : "is-healthy"} state-${state.tone}`}>
     <header>
-      <div><strong>{item.label}</strong><small>{item.role}</small></div>
-      <b className={`source-health-badge health-${item.health.toLowerCase()}`}>{statusLabel}</b>
+      <span className="health-state-mark" aria-label={state.label}>{state.symbol}</span>
+      <div><strong>{item.label}</strong></div>
+      <span className="health-state-text">{state.label}</span>
+      <time>{compactClock(item.last_success ?? item.latest_poll_time)}</time>
     </header>
-    <dl className="source-health-metadata">
-      <div><dt>最近轮询</dt><dd>{localTime(item.latest_poll_time)}</dd></div>
-      <div><dt>最近成功</dt><dd>{localTime(item.last_success)}</dd></div>
-    </dl>
-    {!healthy ? <div className="source-current-problem">
+    {state.attention ? <div className="source-current-problem">
       <small>当前问题</small><strong>{errorPresentation.heading}</strong>
       {errorPresentation.recovery ? <b>{errorPresentation.recovery}</b> : null}
       {item.next_retry_time ? <time>下次尝试 {localTime(item.next_retry_time)}</time> : null}
       {errorPresentation.fallback ? <span>{errorPresentation.fallback}</span> : null}
     </div> : null}
-    {item.semantic_message ? <p className="source-semantic-message">{item.semantic_message}</p> : null}
+    {state.attention && item.semantic_message ? <p className="source-semantic-message">{item.semantic_message}</p> : null}
     <details className="source-technical-details">
-      <summary>技术详情</summary>
+      <summary>{state.attention ? "技术详情" : "详情"}</summary>
       <div className="source-evidence-counts"><strong><CountValue value={item.item_count} suffix=" 篇" /></strong><small><CountValue value={item.revision_count} format="exact" suffix=" revisions" /> · 完整正文 <CountValue value={item.full_text_count} format="exact" /></small><small>轮询 <CountValue value={item.ok_count} format="exact" />/<CountValue value={item.poll_count} format="exact" /> 完成</small></div>
       <dl>
+        <div><dt>职责</dt><dd>{item.role}</dd></div>
+        <div><dt>最近轮询</dt><dd>{localTime(item.latest_poll_time)}</dd></div>
+        <div><dt>最近成功</dt><dd>{localTime(item.last_success)}</dd></div>
         <div><dt>来源标识</dt><dd><code>{item.source}</code></dd></div>
+        <div><dt>原始状态</dt><dd><code>{item.health}</code></dd></div>
         <div><dt>错误类型</dt><dd><code>{item.last_error_type ?? "NONE"}</code></dd></div>
         <div><dt>最近错误</dt><dd>{item.last_error_time ? localTime(item.last_error_time) : "—"} · <code>{item.last_error ?? "无已记录错误"}</code></dd></div>
         {item.freshness_reference_status === "PARTIAL" ? <div><dt>新鲜度参考</dt><dd>{localTime(item.freshness_reference_time)} · 部分成功</dd></div> : null}
@@ -181,27 +179,28 @@ function SourceHealthCard({ item }: { item: NewsSourceHealth }) {
 type ComponentHealth = StatusPayload["system"]["components"][string];
 
 function ComponentHealthCard({
-  name, item, healthy, incident,
-}: { name: string; item: ComponentHealth; healthy: boolean; incident: OperationalIncident | null }) {
+  name, item, incident,
+}: { name: string; item: ComponentHealth; incident: OperationalIncident | null }) {
+  const state = componentScanState(item.status);
   const nextRetryAt = incident ? operationalIncidentNextRetryAt(incident) : null;
-  return <article className={healthy ? "is-healthy" : "is-attention"}>
+  return <article className={`${state.attention ? "is-attention" : "is-healthy"} state-${state.tone}`}>
     <header>
-      <span className={`component-status-badge status-${item.status.toLowerCase()}`}>{componentStatusLabel(item.status)}</span>
+      <span className="health-state-mark" aria-label={state.label}>{state.symbol}</span>
       <h3>{operationalScopeLabel(name)}</h3>
+      <span className="health-state-text">{state.label}</span>
+      <time>{item.age_seconds === null ? "—" : `${compactElapsed(item.age_seconds)}前`}</time>
     </header>
-    <p className="component-role">{componentRole(name)}</p>
-    <dl className="component-primary-metadata">
-      <div><dt>最近成功</dt><dd>{localTime(item.last_success)}</dd></div>
-      <div><dt>距上次成功</dt><dd>{compactElapsed(item.age_seconds)}</dd></div>
-    </dl>
-    {!healthy ? <div className="component-current-problem">
+    {state.attention ? <div className="component-current-problem">
       <small>当前问题</small><strong>{incident?.summary_zh ?? componentProblem(item.status)}</strong>
       {incident ? <b>{operationalIncidentActionLabels[incident.action_state]}</b> : null}
       {nextRetryAt ? <time>下次尝试 {localTime(nextRetryAt)}</time> : null}
     </div> : null}
     <details className="component-technical-details">
-      <summary>技术详情</summary>
+      <summary>{state.attention ? "技术详情" : "详情"}</summary>
       <dl>
+        <div><dt>职责</dt><dd>{componentRole(name)}</dd></div>
+        <div><dt>最近成功</dt><dd>{localTime(item.last_success)}</dd></div>
+        <div><dt>距上次成功</dt><dd>{compactElapsed(item.age_seconds)}</dd></div>
         <div><dt>组件标识</dt><dd><code>{name}</code></dd></div>
         <div><dt>原始状态</dt><dd><code>{item.status}</code></dd></div>
         <div><dt>最近错误</dt><dd><code>{item.last_error ?? "无已记录错误"}</code></dd></div>
@@ -218,8 +217,6 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
   const [assistantHealthError, setAssistantHealthError] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [syncingCurrent, setSyncingCurrent] = useState(Boolean(cachedStatus?.preview_status_summary));
-  const [showHealthyComponents, setShowHealthyComponents] = useState(false);
-  const [showHealthySources, setShowHealthySources] = useState(false);
   const refresh = useCallback(async (force = false, showSyncState = false) => {
     if (showSyncState) setSyncingCurrent(true);
     try {
@@ -259,16 +256,13 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
 
   const currentPhase: CurrentDataPhase = error
     ? "error" : !payload || syncingCurrent ? "loading" : payload.preview_status_summary ? "snapshot" : "ready";
-  const components = Object.entries(payload?.system.components ?? {}).map(([name, item]) => ({
+  const components = sortAttentionFirst(Object.entries(payload?.system.components ?? {}).map(([name, item]) => ({
     name,
     item,
-    healthy: item.status === "OK" || item.status === "MARKET_CLOSED",
-  }));
-  const healthyComponentCount = components.filter(component => component.healthy).length;
-  const componentHasAttention = components.some(component => !component.healthy);
-  const sources = payload?.news_source_health ?? [];
-  const healthySourceCount = sources.filter(source => source.health === "HEALTHY").length;
-  const sourceHasAttention = sources.some(source => source.health !== "HEALTHY");
+  })), component => componentScanState(component.item.status));
+  const componentHasAttention = components.some(component => componentScanState(component.item.status).attention);
+  const sources = sortAttentionFirst(payload?.news_source_health ?? [], source => sourceScanState(source.health));
+  const sourceHasAttention = sources.some(source => sourceScanState(source.health).attention);
   const assistantUnavailableEvent: OperationalAlert = normalizeOperationalEvent({
     code: "OPS_ASSISTANT_HEALTH_UNAVAILABLE", severity: "ERROR", scope: "ASSISTANT_D1",
     message_zh: "Assistant 云端运行状态无法读取。", blocking: true, evidence: {},
@@ -281,8 +275,10 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
   const affectedScopeCount = affectedOperationalScopeCount(incidents);
   const incidentStatus = incidents.some(incident => incident.severity === "ERROR")
     ? "error" : incidents.length ? "warning" : "healthy";
-  const automaticRecoveryCount = incidents.filter(incident => incident.action_state === "AUTO_RECOVERING").length;
-  const manualActionCount = incidents.filter(incident => incident.action_state === "ACTION_REQUIRED").length;
+  const operatorAction = primaryOperatorAction(incidents);
+  const operatorActionIncident = operatorAction
+    ? incidents.find(incident => incident.action_state === operatorAction) ?? null : null;
+  const operatorRetryAt = operatorActionIncident ? operationalIncidentNextRetryAt(operatorActionIncident) : null;
 
   return <main className="status-main">
     <section className="status-hero">
@@ -291,23 +287,21 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
     {error ? <div className="error-banner">状态读取失败：{error}</div> : null}
     <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
     <section className={`health-at-a-glance is-${incidentStatus}`} aria-label="当前系统结论">
+      <span className="health-conclusion-mark" aria-hidden="true">{incidentStatus === "error" ? "✕" : incidentStatus === "warning" ? "⚠" : "✓"}</span>
       <div><small>当前结论</small><strong>{incidentStatus === "error" ? "运行异常" : incidentStatus === "warning" ? "运行警告" : "运行正常"}</strong></div>
-      <div><small>自动恢复</small><strong>{automaticRecoveryCount ? `${automaticRecoveryCount} 个处理中` : "无"}</strong></div>
-      <div><small>人工处理</small><strong>{manualActionCount ? `${manualActionCount} 个需要处理` : "当前不需要"}</strong></div>
-      <div><small>受影响子系统</small><strong>{affectedScopeCount ? `${affectedScopeCount} 个` : "无"}</strong></div>
+      <div className="health-current-action"><small>当前处置</small><strong>{operatorAction ? operationalIncidentActionLabels[operatorAction] : "当前没有需要处理的问题"}</strong><span>{operatorAction === "AUTO_RECOVERING" && operatorRetryAt ? `下次尝试 ${localTime(operatorRetryAt)}` : affectedScopeCount ? `${affectedScopeCount} 个子系统受影响` : "所有监测项处于预期状态"}</span></div>
+      <b className="health-operator-now">{operatorAction === "ACTION_REQUIRED" ? "现在需要人工处理" : "当前无需人工处理"}</b>
     </section>
     <section id="operational-alerts" className={`operational-health-panel incident-summary-panel is-${incidentStatus}`} aria-label="运行问题与关联证据">
       <header><div><p className="eyebrow">CURRENT PROBLEMS</p><h2>当前问题</h2></div><p>{incidents.length ? `${incidents.length} 个问题，先看影响与处置；原始代码保留在技术详情中。` : "当前没有达到告警阈值的运行问题。"}</p></header>
       {incidents.length ? <div className="operational-incident-list">{incidents.map(incident => <IncidentCard incident={incident} key={incident.incident_key} />)}</div> : <p className="operational-all-clear">当前没有达到告警阈值的运行异常。</p>}
     </section>
-    <section className={`component-status ${componentHasAttention ? "has-attention" : ""} ${showHealthyComponents ? "show-healthy" : ""}`} aria-label="数据链路组件状态">
-      <header><div><p className="eyebrow">SYSTEM COMPONENTS</p><h2>系统组件</h2></div><p>先看职责、最近成功和当前问题；组件标识、原始状态与错误文本保留在技术详情。</p></header>
-      {componentHasAttention && healthyComponentCount > 0 && <button className="health-reveal-button" type="button" aria-expanded={showHealthyComponents} onClick={() => setShowHealthyComponents(value => !value)}>{showHealthyComponents ? "只看异常组件" : `另有 ${healthyComponentCount} 个正常组件`}</button>}
-      <div className="component-card-grid">{components.map(({ name, item, healthy }) => <ComponentHealthCard name={name} item={item} healthy={healthy} incident={incidentForScope(incidents, name)} key={name} />)}</div>
+    <section className={`component-status ${componentHasAttention ? "has-attention" : ""}`} aria-label="数据链路组件状态">
+      <header><div><p className="eyebrow">SYSTEM COMPONENTS</p><h2>系统组件</h2></div><strong>{componentAggregate(components.map(component => component.item.status))}</strong></header>
+      <div className="component-card-grid">{components.map(({ name, item }) => <ComponentHealthCard name={name} item={item} incident={incidentForScope(incidents, name)} key={name} />)}</div>
     </section>
-    <section className={`source-health ${sourceHasAttention ? "has-attention" : ""} ${showHealthySources ? "show-healthy" : ""}`} aria-label="新闻来源状态">
-      <header><div><p className="eyebrow">NEWS SOURCES</p><h2>新闻来源</h2></div><p>来源新鲜度与进程心跳保持独立。单一来源暂时不可用，不会被表达为全系统故障。</p></header>
-      {sourceHasAttention && healthySourceCount > 0 && <button className="health-reveal-button" type="button" aria-expanded={showHealthySources} onClick={() => setShowHealthySources(value => !value)}>{showHealthySources ? "只看异常来源" : `另有 ${healthySourceCount} 个正常来源`}</button>}
+    <section className={`source-health ${sourceHasAttention ? "has-attention" : ""}`} aria-label="新闻来源状态">
+      <header><div><p className="eyebrow">NEWS SOURCES</p><h2>新闻来源</h2></div><strong>{sourceAggregate(sources.map(source => source.health))}</strong></header>
       <div className="source-health-grid">{sources.map((item) => <SourceHealthCard item={item} key={item.source} />)}</div>
     </section>
     <section className="health-technical-section" aria-label="调度器与技术状态">
