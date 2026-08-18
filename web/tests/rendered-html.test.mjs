@@ -32,6 +32,7 @@ const { correlateOperationalEvents, globalOperationalIncidents } = await import(
 const { operationalEventDiagnostic, operationalIncidentActionLabels } = await import("../app/_lib/operational-incident-presentation.ts");
 const { operationalEvidenceText } = await import("../app/_lib/operational-evidence.ts");
 const { sourceHealthErrorPresentation } = await import("../app/_lib/source-health-presentation.ts");
+const { compactPreviewStatus } = await import("../build/preview-learning.ts");
 
 test("reserves the global shell alert for blocking operational faults", () => {
   const warning = { code: "OPS_AI_BACKLOG_OVERDUE", severity: "WARNING", scope: "ACTIVE_IMPACT", message_zh: "积压", blocking: false, evidence: {} };
@@ -136,6 +137,18 @@ test("renders human incident diagnostics before nested raw machine evidence", ()
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(css, /\.incident-raw-evidence > summary \{[^}]*min-height:44px/);
   assert.match(css, /\.incident-raw-evidence code,.incident-raw-evidence small \{[^}]*overflow-wrap:anywhere/);
+});
+
+test("retains bounded operational incidents for deterministic Preview hydration", () => {
+  const operationalHealth = {
+    schema_version: "operational-health.v1",
+    status: "WARNING",
+    alerts: [{ code: "OPS_COMPONENT_UNHEALTHY", scope: "news_semantic_pipeline" }],
+  };
+  const compact = compactPreviewStatus({ operational_health: operationalHealth });
+  assert.deepEqual(compact.operational_health, operationalHealth);
+  const manifest = JSON.parse(readFileSync(new URL("../preview-manifest.json", import.meta.url), "utf8"));
+  assert.ok(manifest.statusInlineKeys.includes("operational_health"));
 });
 
 test("summarizes Assistant queue evidence without exposing job content", () => {

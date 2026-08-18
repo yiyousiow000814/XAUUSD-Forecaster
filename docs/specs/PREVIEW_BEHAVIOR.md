@@ -114,6 +114,9 @@ product requirement.
   to their immutable build snapshots. Machine-readable field provenance marks
   the status keys that remain branch build snapshots; factor coverage is the
   current branch-recomputed example.
+- The bounded operational-health event set is retained in the build snapshot so
+  server rendering and hydration use the same first-paint incident evidence
+  before the allowed current status refresh completes.
 - The news index reads the bounded current D1 archive. If that complete archive
   is unavailable, Preview reports it unavailable rather than substituting a
   partial relay window.
