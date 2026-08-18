@@ -82,9 +82,9 @@ part of it.
 1. The canonical product brand is `AU`, `AURUM SIGNAL ROOM`, and
    `XAUUSD · Forward-only intelligence`. It is identical on every top-level
    View and links to the realtime room.
-2. The canonical global destination order is `实时室`, `Assistant`,
-   `新闻与决策`, and `系统`. Their stable entry routes are `/`, `/assistant`,
-   `/audit?view=news`, and `/health` respectively.
+2. The canonical global destination order is `总览`, `新闻与决策`,
+   `Assistant`, and `系统`. Their stable entry routes are `/`,
+   `/audit?view=news`, `/assistant`, and `/health` respectively.
 3. Desktop and mobile navigation derive labels, order, routes, and active
    grouping from the same typed global destination definition. Mobile must not
    maintain a parallel product taxonomy.

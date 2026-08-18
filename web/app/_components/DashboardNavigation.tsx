@@ -20,9 +20,9 @@ export type DashboardGlobalDestination = {
 };
 
 export const DASHBOARD_GLOBAL_DESTINATIONS: readonly DashboardGlobalDestination[] = [
-  { id: "live", label: "实时室", href: "/", rooms: ["live"] },
-  { id: "assistant", label: "Assistant", href: "/assistant", rooms: ["assistant"] },
+  { id: "live", label: "总览", href: "/", rooms: ["live"] },
   { id: "audit", label: "新闻与决策", href: "/audit?view=news", rooms: ["audit"] },
+  { id: "assistant", label: "Assistant", href: "/assistant", rooms: ["assistant"] },
   { id: "system", label: "系统", href: "/health", rooms: ["health", "status"] },
 ];
 

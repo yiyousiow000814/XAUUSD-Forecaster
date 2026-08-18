@@ -25,7 +25,7 @@ type ShellStatusPayload = {
 };
 
 function DashboardBrand() {
-  return <DashboardLink ariaLabel="打开实时室" className="dashboard-brand brand brand-button" href="/" replace>
+  return <DashboardLink ariaLabel="打开总览" className="dashboard-brand brand brand-button" href="/" replace>
     <span className="brand-mark">AU</span>
     <span>
       <strong>Aurum Signal Room</strong>
