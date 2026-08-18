@@ -7,6 +7,15 @@ operator querying SQLite or reading process output. A live heartbeat proves
 only that a process is running. It does not prove that work is progressing,
 capacity is usable, or outputs remain within expected bounds.
 
+Operator presentation has three independent axes. API read state is
+`CURRENT`, `REFRESHING`, `STALE_SNAPSHOT`, or `UNAVAILABLE`; a failed refresh
+with a prior snapshot retains the last factual state and identifies the stale
+snapshot. Live-market state is `LIVE`, `MARKET_CLOSED`, or
+`MARKET_DATA_UNAVAILABLE`. Operational state is `HEALTHY`, `WARNING`, or
+`ERROR` and comes from authoritative component and scheduler detectors.
+`system.online` is only live quote/decision readiness and is never global
+operational health.
+
 ## Stable error codes
 
 Every published operational alert has a stable uppercase `code`, severity,
@@ -162,6 +171,16 @@ An absent or unreadable evidence source must never be interpreted as healthy.
 Supervised workers must refresh their runtime heartbeat independently of batch
 completion while a bounded provider or I/O operation is in progress. Progress
 counters supplement this pulse; they are not the only proof of liveness.
+The news collector pulses every 30 seconds. A pulse no older than 60 seconds is
+current; 60 to 300 seconds is a non-blocking late/grace state; and more than
+300 seconds is stale, matching the existing supervisor failure boundary.
+While its lifecycle is `STARTING`, a pulse within that 300-second heartbeat
+boundary is a non-blocking startup warning rather than readiness; an older
+pulse is stale. The supervisor's separate process-start timeout remains the
+authority for a startup that stays alive but never becomes ready.
+Source-poll completion timestamps never substitute for this process heartbeat.
+Each source retains its own registered cadence, bounded retry, and freshness
+contract.
 Broker-native cTrader `Symbol.MarketHours` is authoritative for daily market
 closure. Its `market-session.json` heartbeat is state telemetry and must remain
 fresh on the Algo timer independently of quote ticks. Python and dashboard code
@@ -181,6 +200,16 @@ independently while XAUUSD is closed. An old decision-time semantic snapshot or
 its old pending reason must not masquerade as a newly observed semantic failure
 when no market decision is expected; current independent news and AI failures
 remain visible through their own component and scheduler detectors.
+
+Decision-time semantic readiness remains fail-closed whenever required current
+semantics or impact evidence is incomplete. Operator presentation classifies a
+future bounded retry as recovery and keeps the pending reason visible; it
+escalates terminal work or a retry overdue beyond the scheduler's task SLA to
+error. Local admission (`MODEL_CAPACITY_DEFERRED` and `LOCAL_TPM_LIMIT`),
+provider pacing (`PROVIDER_DISPATCH_DEFERRED`), and provider transport
+(`PROVIDER_HTTP_ERROR`) remain distinct evidence. Presentation severity never
+changes, deletes, or retroactively enriches decision snapshots, prediction
+visibility, learning admission, training rows, or execution-learning evidence.
 
 The outcome settler runs inside the supervised collector loop. Its health uses
 that loop's successful heartbeat, not the timestamp of the most recently

@@ -34,6 +34,8 @@ STATUS_SNAPSHOT_TTL_SECONDS = 15.0
 STATUS_SNAPSHOT_WAIT_SECONDS = 5.0
 STATUS_SNAPSHOT_MAX_STALE_SECONDS = 90.0
 SEMANTIC_SNAPSHOT_MAX_STALE_SECONDS = 420.0
+COLLECTOR_HEARTBEAT_EXPECTED_SECONDS = 60.0
+COLLECTOR_HEARTBEAT_FAILURE_SECONDS = 300.0
 _QUOTE_CANDLE_CACHE_LOCK = threading.Lock()
 _QUOTE_CANDLE_CACHE: dict[str, dict] = {}
 
@@ -57,18 +59,84 @@ def _semantic_pipeline_component(latest, *, now: datetime) -> dict:
         if code.startswith(("ANNOTATOR_HEARTBEAT_", "NEWS_COLLECTOR_POLL_"))
     )
     stale = age_seconds > SEMANTIC_SNAPSHOT_MAX_STALE_SECONDS or freshness_failure
+    pending_only = bool(reason_codes) and all(
+        code.endswith(("_PENDING", "_RECOVERING"))
+        for code in reason_codes
+    )
     return {
         "last_success": latest["heartbeat_at"],
         "age_seconds": age_seconds,
         "status": (
             "STALE" if stale else
-            "OK" if latest["status"] == "HEALTHY" else "ERROR"
+            "OK" if latest["status"] == "HEALTHY" else
+            "WARN" if pending_only else "ERROR"
         ),
         "last_error": None if not reason_codes else ", ".join(reason_codes),
         "reason_codes": list(reason_codes),
         "actionable_failure_counts": json.loads(
             latest["actionable_failure_counts_json"] or "{}"
         ) if "actionable_failure_counts_json" in latest.keys() else {},
+    }
+
+
+def _collector_component(
+    heartbeat: dict[str, object],
+    *,
+    latest_poll: str | None,
+    now: datetime,
+) -> dict[str, object]:
+    """Use the supervised process pulse; source cadence has separate health."""
+    heartbeat_at = None
+    try:
+        heartbeat_at = datetime.fromisoformat(str(heartbeat["last_success"]))
+    except (KeyError, TypeError, ValueError):
+        pass
+    age_seconds = (
+        max(0.0, (now - heartbeat_at).total_seconds())
+        if heartbeat_at is not None else None
+    )
+    lifecycle_state = str(heartbeat.get("state") or "")
+    running = lifecycle_state == "RUNNING"
+    starting = lifecycle_state == "STARTING"
+    if age_seconds is None:
+        status = "STALE"
+    elif starting:
+        status = (
+            "WARN"
+            if age_seconds <= COLLECTOR_HEARTBEAT_FAILURE_SECONDS
+            else "STALE"
+        )
+    elif not running:
+        status = "STALE"
+    elif age_seconds <= COLLECTOR_HEARTBEAT_EXPECTED_SECONDS:
+        status = "OK"
+    elif age_seconds <= COLLECTOR_HEARTBEAT_FAILURE_SECONDS:
+        status = "WARN"
+    else:
+        status = "STALE"
+    if starting:
+        lifecycle_error = (
+            "采集器启动中" if status == "WARN" else "采集器启动心跳已过期"
+        )
+    elif running:
+        lifecycle_error = str(heartbeat.get("last_error") or "") or None
+    else:
+        lifecycle_error = "采集器运行心跳不可用"
+    latest_poll_at = None
+    try:
+        latest_poll_at = datetime.fromisoformat(str(latest_poll))
+    except (TypeError, ValueError):
+        pass
+    return {
+        "last_success": heartbeat_at.isoformat() if heartbeat_at else None,
+        "age_seconds": age_seconds,
+        "status": status,
+        "last_error": lifecycle_error,
+        "latest_source_poll": latest_poll,
+        "source_poll_age_seconds": (
+            max(0.0, (now - latest_poll_at).total_seconds())
+            if latest_poll_at is not None else None
+        ),
     }
 
 from xauusd_forecaster.factors import factor_coverage  # noqa: E402
@@ -2146,6 +2214,9 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
         collector_heartbeat = _runtime_heartbeat(
             database.parent / "collector-status.json", service="collector",
         )
+        latest_news_poll = connection.execute(
+            "SELECT max(fetched_time) FROM source_polls"
+        ).fetchone()[0]
         component_times = {
             "quote_bridge": _latest_quote_received(database),
             "decision_collector": connection.execute("SELECT max(created_at) FROM decision_events").fetchone()[0],
@@ -2154,7 +2225,7 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
             # 30-minute horizon, so output recency is not worker health.
             "outcome_settler": collector_heartbeat.get("last_success")
             or connection.execute("SELECT max(appended_at) FROM outcomes").fetchone()[0],
-            "news_collector": connection.execute("SELECT max(fetched_time) FROM source_polls").fetchone()[0],
+            "news_collector": collector_heartbeat.get("last_success"),
             "gemini_annotator": connection.execute("SELECT max(parsed_at) FROM news_annotations").fetchone()[0],
         }
         latest_semantic_health = connection.execute(
@@ -2444,7 +2515,9 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
         },
         "decision_collector": decision_component,
         "outcome_settler": outcome_component,
-        "news_collector": component("news_collector", 300),
+        "news_collector": _collector_component(
+            collector_heartbeat, latest_poll=latest_news_poll, now=now,
+        ),
         "gemini_annotator": component("gemini_annotator", 900),
         "news_semantic_pipeline": semantic_pipeline_component,
         "sites_synchronizer": sites_sync_component,

@@ -209,7 +209,7 @@ export default function HealthView() {
     </header>
     <section className="status-hero">
       <div><p className="eyebrow">OPERATIONAL HEARTBEATS / SOURCE HEALTH</p><h1>系统健康状态</h1></div>
-      <SystemStatePill loading={payload === null && !error} error={Boolean(error)} online={Boolean(payload?.system.online)} marketSession={payload?.system.market_session} />
+      <SystemStatePill loading={payload === null && !error} error={Boolean(error)} hasSnapshot={payload !== null} online={Boolean(payload?.system.online)} marketSession={payload?.system.market_session} operationalStatus={payload?.operational_health?.status} />
     </section>
     {error ? <div className="error-banner">状态读取失败：{error}</div> : null}
     <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />

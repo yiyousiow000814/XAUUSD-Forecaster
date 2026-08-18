@@ -1,25 +1,16 @@
-export type MarketSession = "OPEN" | "CLOSED" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE";
+import {
+  systemStatePresentation,
+  type SystemStateInput,
+} from "../_lib/system-state";
 
-type SystemState = {
-  loading: boolean;
-  error: boolean;
-  online: boolean;
-  marketSession?: MarketSession;
-};
-
-export function systemStatePresentation(state: SystemState) {
-  if (state.loading) return { label: "连接中", tone: "is-loading" };
-  if (state.error) return { label: "状态离线", tone: "is-down" };
-  if (state.marketSession === "CLOSED" || state.marketSession === "WEEKLY_CLOSED") {
-    return { label: "市场休市", tone: "is-live" };
-  }
-  if (state.online) return { label: "系统在线", tone: "is-live" };
-  return { label: "状态离线", tone: "is-down" };
-}
-
-export default function SystemStatePill(state: SystemState) {
+export default function SystemStatePill(state: SystemStateInput) {
   const presentation = systemStatePresentation(state);
-  return <div className={`live-pill ${presentation.tone}`}>
+  return <div
+    className={`live-pill ${presentation.tone}`}
+    data-read-state={presentation.readState}
+    data-live-market-state={presentation.liveMarketState}
+    data-operational-state={presentation.operationalState}
+  >
     <span />{presentation.label}
   </div>;
 }

@@ -77,3 +77,22 @@ def test_runtime_heartbeat_pulse_stays_fresh_during_blocking_work(tmp_path) -> N
     assert payload["state"] == "RUNNING"
     assert payload["work_items"] == 3
     assert not list(path.parent.glob(f".{path.name}.*.tmp"))
+
+
+def test_runtime_heartbeat_manual_lifecycle_supports_supervised_loops(
+    tmp_path,
+) -> None:
+    path = tmp_path / "forward" / "collector-status.json"
+    pulse = RuntimeHeartbeatPulse(
+        path, service="collector", interval_seconds=0.02,
+    )
+
+    pulse.start()
+    time.sleep(0.04)
+    pulse.update(work_items=4)
+    pulse.close()
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["service"] == "collector"
+    assert payload["state"] == "RUNNING"
+    assert payload["work_items"] == 4

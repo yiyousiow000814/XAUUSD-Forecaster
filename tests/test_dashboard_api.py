@@ -139,7 +139,7 @@ def test_semantic_component_separates_freshness_from_readiness() -> None:
 
     component = module._semantic_pipeline_component(fresh_pending, now=now)
 
-    assert component["status"] == "ERROR"
+    assert component["status"] == "WARN"
     assert component["age_seconds"] == 18
     assert component["last_error"] == "ACTIONABLE_NEWS_SEMANTICS_PENDING"
 
@@ -162,6 +162,95 @@ def test_semantic_component_separates_freshness_from_readiness() -> None:
     assert module._semantic_pipeline_component(
         stale_heartbeat, now=now,
     )["status"] == "STALE"
+
+    terminal = {
+        **fresh_pending,
+        "reason_codes_json": json.dumps([
+            "ACTIONABLE_NEWS_SEMANTICS_PENDING",
+            "ACTIONABLE_NEWS_SEMANTICS_TERMINAL",
+        ]),
+    }
+    assert module._semantic_pipeline_component(
+        terminal, now=now,
+    )["status"] == "ERROR"
+
+
+def test_news_collector_uses_process_heartbeat_with_bounded_grace() -> None:
+    module = _dashboard_module()
+    now = datetime(2026, 8, 18, 8, 40, tzinfo=UTC)
+
+    def component(age: float, *, state: str = "RUNNING") -> dict:
+        return module._collector_component(
+            {
+                "service": "collector",
+                "state": state,
+                "last_success": (now - timedelta(seconds=age)).isoformat(),
+                "last_error": None,
+            },
+            latest_poll=(now - timedelta(minutes=8)).isoformat(),
+            now=now,
+        )
+
+    assert component(10)["status"] == "OK"
+    assert component(61)["status"] == "WARN"
+    assert component(300)["status"] == "WARN"
+    assert component(300.1)["status"] == "STALE"
+    assert component(10, state="ERROR")["status"] == "STALE"
+
+    starting = component(10, state="STARTING")
+    bounded_startup = component(299, state="STARTING")
+    later = now + timedelta(minutes=14)
+    refreshed_long_startup = module._collector_component(
+        {
+            "service": "collector",
+            "state": "STARTING",
+            "last_success": (later - timedelta(seconds=10)).isoformat(),
+            "last_error": None,
+        },
+        latest_poll=(now - timedelta(minutes=8)).isoformat(),
+        now=later,
+    )
+    stalled_startup = component(300.1, state="STARTING")
+    running = component(10)
+
+    assert starting["status"] == "WARN"
+    assert starting["last_error"] == "采集器启动中"
+    assert bounded_startup["status"] == "WARN"
+    assert refreshed_long_startup["status"] == "WARN"
+    assert refreshed_long_startup["last_error"] == "采集器启动中"
+    assert stalled_startup["status"] == "STALE"
+    assert stalled_startup["last_error"] == "采集器启动心跳已过期"
+    assert [starting["status"], running["status"]] == ["WARN", "OK"]
+
+    operational = module.extend_with_component_alerts(
+        {"alerts": []},
+        components={"news_collector": starting},
+        news_sources=[],
+        runtime_update_failure=None,
+    )
+    alert = operational["alerts"][0]
+    assert operational["status"] == "WARNING"
+    assert alert["severity"] == "WARNING"
+    assert alert["blocking"] is False
+
+
+def test_news_collector_recovery_depends_on_heartbeat_not_old_poll() -> None:
+    module = _dashboard_module()
+    now = datetime(2026, 8, 18, 8, 40, tzinfo=UTC)
+    old_poll = (now - timedelta(hours=1)).isoformat()
+
+    stale = module._collector_component({
+        "service": "collector", "state": "RUNNING",
+        "last_success": (now - timedelta(seconds=301)).isoformat(),
+    }, latest_poll=old_poll, now=now)
+    recovered = module._collector_component({
+        "service": "collector", "state": "RUNNING",
+        "last_success": now.isoformat(),
+    }, latest_poll=old_poll, now=now)
+
+    assert stale["status"] == "STALE"
+    assert recovered["status"] == "OK"
+    assert recovered["source_poll_age_seconds"] == 3600
 
 
 def test_deployment_status_does_not_mislabel_local_edits_as_remote_drift() -> None:
@@ -1738,6 +1827,57 @@ def test_duplicate_collection_copy_is_not_reported_as_queue_anomaly() -> None:
 
     assert code == "CANONICAL_COPY_HANDLES_ANNOTATION"
     assert "不会重复消耗模型配额" in reason
+
+
+def test_news_archive_materializes_late_discovery_canonical_annotation(
+    tmp_path,
+) -> None:
+    module = _dashboard_module()
+    epoch = datetime(2026, 8, 5, tzinfo=UTC)
+    published_at = datetime(2026, 8, 15, 6, 13, 28, tzinfo=UTC)
+    first_seen = datetime(2026, 8, 17, 4, 9, 1, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
+    item_id = "late-discovery-cpi"
+    cluster_id = "late-discovery-cpi-cluster"
+    bodies = {
+        "google_news_fed_rates": "Complete CPI and US dollar analysis. " * 210,
+        "google_news_gold_context": "Complete CPI and US dollar analysis. " * 210,
+    }
+    for source, body in bodies.items():
+        ledger.append_news_revision({
+            "source": source, "source_item_id": item_id,
+            "source_published_time": published_at,
+            "collector_first_seen_time": first_seen, "fetched_time": first_seen,
+            "headline": "CPI in Focus: Can the Dollar Turn Lower Again?",
+            "body": body,
+            "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+            "cluster_id": cluster_id,
+        })
+    canonical_body = bodies["google_news_fed_rates"]
+    _append_basic_annotation(
+        ledger,
+        source="google_news_fed_rates",
+        item_id=item_id,
+        digest=hashlib.sha256(canonical_body.encode()).hexdigest(),
+        parsed_at=first_seen + timedelta(seconds=1),
+    )
+
+    archive = module._news_archive_page(ledger.connection, None, 20)
+
+    assert len(archive["items"]) == 1
+    item = archive["items"][0]
+    assert item["source"] == "google_news_fed_rates"
+    assert item["source_published_time"] == published_at.isoformat(
+        timespec="microseconds"
+    )
+    assert item["collector_first_seen_time"] == first_seen.isoformat(
+        timespec="microseconds"
+    )
+    assert item["annotation_status"] == "READY"
+    assert item["model_visibility"] == "IMPACT_PENDING"
+    assert item["impact_status"] == "PENDING_IMPACT"
+    assert item.get("annotation_reason_code") != "QUEUE_INVARIANT_MISMATCH"
+    ledger.close()
 
 
 def test_news_archive_explains_terminal_model_contract_failure(tmp_path) -> None:
