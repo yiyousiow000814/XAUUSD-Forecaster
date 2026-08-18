@@ -13,7 +13,7 @@ import { affectedOperationalScopeCount, correlateOperationalEvents, type Operati
 import { normalizeOperationalEvent, schedulerTaskLabel, type AssistantOperationalHealth, type OperationalAlert, type OperationalHealth } from "../_lib/operational-health";
 import { sourceHealthErrorPresentation } from "../_lib/source-health-presentation";
 
-type StatusPayload = {
+export type StatusPayload = {
   preview_status_summary?: boolean;
   generated_at: string;
   system: {
@@ -121,8 +121,8 @@ function SourceHealthCard({ item }: { item: NewsSourceHealth }) {
   </article>;
 }
 
-export default function HealthView() {
-  const cachedStatus = readDashboardResource<StatusPayload>("/api/status");
+export default function HealthView({ initialPayload }: { initialPayload?: StatusPayload }) {
+  const cachedStatus = initialPayload ?? readDashboardResource<StatusPayload>("/api/status");
   const cachedAssistantHealth = readDashboardResource<AssistantOperationalHealth>("/api/assistant-health");
   const [payload, setPayload] = useState<StatusPayload | null>(() => cachedStatus);
   const [assistantHealth, setAssistantHealth] = useState<AssistantOperationalHealth | null>(() => cachedAssistantHealth);

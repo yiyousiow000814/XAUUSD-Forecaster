@@ -510,6 +510,13 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   assert.match(page, /function previewResources/);
   assert.match(page, /review_state=COMPLETED/);
   assert.match(page, /previewBundle\.status/);
+  assert.match(app, /const initialStatus = initialResources\["\/api\/status"\]/);
+  assert.match(app, /<StatusView initialPayload=\{initialStatus\}/);
+  assert.match(app, /<HealthView initialPayload=\{initialStatus\}/);
+  for (const view of ["StatusView", "HealthView"]) {
+    const source = readFileSync(new URL(`../app/_views/${view}.tsx`, import.meta.url), "utf8");
+    assert.match(source, /initialPayload \?\? readDashboardResource<StatusPayload>/, view);
+  }
   assert.match(page, /previewBundle\.learning_summary/);
   const vite = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
   const learning = readFileSync(new URL("../build/preview-learning.ts", import.meta.url), "utf8");
