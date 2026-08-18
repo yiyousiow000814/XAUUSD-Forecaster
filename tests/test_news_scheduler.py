@@ -1097,6 +1097,7 @@ def test_sync_uses_v15_semantic_priority_not_headline_keywords(tmp_path) -> None
         "time_sensitivity": "SAME_DAY",
         "semantic_reason_zh": "完整正文显示行政更新已经生效。",
         "supporting_evidence": ["administrative update took effect"],
+        "named_references": [],
     }
     common = {
         "source": "semantic-scheduler-test",

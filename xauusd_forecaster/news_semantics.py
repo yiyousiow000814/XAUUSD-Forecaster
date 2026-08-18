@@ -5,14 +5,42 @@ from __future__ import annotations
 import json
 import math
 import re
+import unicodedata
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 
 LEGACY_NEWS_PROMPT_VERSION = "news-json-v14-material-event-evidence"
-PREVIOUS_NEWS_PROMPT_VERSION = "news-json-v15-ai-semantic-review"
-CURRENT_NEWS_PROMPT_VERSION = "news-json-v16-xauusd-transmission-evidence"
+LEGACY_SEMANTIC_NEWS_PROMPT_VERSION = "news-json-v15-ai-semantic-review"
+PREVIOUS_NEWS_PROMPT_VERSION = "news-json-v16-xauusd-transmission-evidence"
+CURRENT_NEWS_PROMPT_VERSION = "news-json-v17-structured-named-references"
+NAMED_REFERENCE_MAX_CHARACTERS = 512
+NAMED_REFERENCE_MAX_ITEMS = 24
+NAMED_REFERENCE_CONNECTORS = frozenset({
+    "a", "an", "and", "as", "at", "by", "for", "from", "in", "of",
+    "on", "or", "the", "to", "vs", "with",
+})
+NAMED_REFERENCE_CLAUSE_WORDS = frozenset({
+    "am", "are", "be", "been", "being", "can", "could", "did", "do",
+    "does", "expect", "expected", "expects", "fell", "had", "has", "have",
+    "increase", "increased", "increases", "is", "may", "might", "must",
+    "reported", "reports", "rise", "rises", "rose", "said", "says", "shall",
+    "should", "was", "were", "will", "worried", "would",
+})
+NAMED_REFERENCE_DELIMITERS = (
+    ("《", "》"), ("“", "”"), ("‘", "’"), ("「", "」"), ("『", "』"),
+    ('"', '"'),
+)
+_NAMED_REFERENCE_TOKEN_PATTERN = re.compile(
+    r"[A-Za-z0-9]+(?:[.'&+/-][A-Za-z0-9]+)*"
+)
+_NAMING_CONTEXT_PATTERN = re.compile(
+    r"\b(?:called|entitled|known\s+as|named|refers?\s+to|referred\s+to\s+as|"
+    r"titled)\b",
+    re.IGNORECASE,
+)
 LEGACY_INVALID_SEMANTIC_REASON_PREFIX = "语言或结构一致性检查未通过"
 DISPLAY_AUDIT_FALLBACK_REASON_PREFIX = "语义已完成，但中文展示未通过校验"
 V1_NEWS_PROMPT_VERSIONS = (
@@ -24,16 +52,26 @@ V1_NEWS_PROMPT_VERSIONS = (
 )
 GENERATED_NEWS_PROMPT_VERSIONS = frozenset({CURRENT_NEWS_PROMPT_VERSION})
 SEMANTIC_NEWS_PROMPT_VERSIONS = frozenset({
+    LEGACY_SEMANTIC_NEWS_PROMPT_VERSION,
     PREVIOUS_NEWS_PROMPT_VERSION,
     CURRENT_NEWS_PROMPT_VERSION,
 })
 SUPPORTED_NEWS_PROMPT_VERSIONS = frozenset({
     *V1_NEWS_PROMPT_VERSIONS,
+    LEGACY_SEMANTIC_NEWS_PROMPT_VERSION,
     PREVIOUS_NEWS_PROMPT_VERSION,
     CURRENT_NEWS_PROMPT_VERSION,
 })
 
 _SCHEMA_PATH = Path(__file__).with_name("news_annotation.schema.json")
+
+
+@dataclass(frozen=True)
+class StructuredNamedReferenceProof:
+    exact_text: str
+    source_start: int
+    source_end: int
+    evidence: tuple[str, ...]
 
 
 def model_usable_annotation_predicate(alias: str) -> str:
@@ -103,26 +141,58 @@ AI_SEMANTIC_FIELDS = {
 }
 
 
-@lru_cache(maxsize=3)
+@lru_cache(maxsize=4)
 def news_annotation_schema(
     prompt_version: str = CURRENT_NEWS_PROMPT_VERSION,
 ) -> dict:
     schema = json.loads(_SCHEMA_PATH.read_text(encoding="utf-8"))
     if prompt_version in SEMANTIC_NEWS_PROMPT_VERSIONS:
-        schema["$id"] = (
-            "xauusd.forward.news-annotation.v16"
-            if prompt_version == CURRENT_NEWS_PROMPT_VERSION
-            else "xauusd.forward.news-annotation.v15"
-        )
+        schema["$id"] = {
+            LEGACY_SEMANTIC_NEWS_PROMPT_VERSION:
+                "xauusd.forward.news-annotation.v15",
+            PREVIOUS_NEWS_PROMPT_VERSION:
+                "xauusd.forward.news-annotation.v16",
+            CURRENT_NEWS_PROMPT_VERSION:
+                "xauusd.forward.news-annotation.v17",
+        }[prompt_version]
         schema["required"].extend(AI_SEMANTIC_FIELDS)
         schema["properties"].update(json.loads(json.dumps(AI_SEMANTIC_FIELDS)))
-        if prompt_version == CURRENT_NEWS_PROMPT_VERSION:
+        if prompt_version in {
+            PREVIOUS_NEWS_PROMPT_VERSION, CURRENT_NEWS_PROMPT_VERSION,
+        }:
             evidence = schema["properties"]["supporting_evidence"]
             evidence["description"] = (
                 "One to three contiguous source-language substrings copied "
                 "verbatim from the supplied headline or full content; never "
                 "translate, paraphrase, join clauses, or add ellipses"
             )
+        if prompt_version == CURRENT_NEWS_PROMPT_VERSION:
+            schema["required"].append("named_references")
+            schema["properties"]["named_references"] = {
+                "type": "array",
+                "maxItems": NAMED_REFERENCE_MAX_ITEMS,
+                "uniqueItems": True,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["exact_text"],
+                    "properties": {
+                        "exact_text": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": NAMED_REFERENCE_MAX_CHARACTERS,
+                            "description": (
+                                "Exact contiguous named-reference text copied "
+                                "from the supplied immutable source"
+                            ),
+                        },
+                    },
+                },
+                "description": (
+                    "Category-neutral named references copied exactly from the "
+                    "source; local code derives and verifies all coordinates"
+                ),
+            }
     elif prompt_version not in V1_NEWS_PROMPT_VERSIONS:
         raise ValueError(f"unsupported news prompt version: {prompt_version}")
     return schema
@@ -173,6 +243,229 @@ def canonicalize_active_annotation(
         ]
         canonical.append(source_excerpt[:max_length])
     annotation["supporting_evidence"] = canonical
+
+
+def canonical_annotation_source_text(headline: str, body: str) -> str:
+    """Return the only coordinate space used for Annotation source spans."""
+    return f"{headline}\n{body}"
+
+
+def _is_han(character: str) -> bool:
+    codepoint = ord(character)
+    return (
+        0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0xF900 <= codepoint <= 0xFAFF
+        or 0x20000 <= codepoint <= 0x2FA1F
+    )
+
+
+def _is_latin_letter(character: str) -> bool:
+    return character.isalpha() and "LATIN" in unicodedata.name(character, "")
+
+
+def _normalized_reference_tokens(value: str) -> tuple[str, ...]:
+    return tuple(
+        normalized for match in re.finditer(
+            r"[A-Za-z0-9]+(?:[._'/-][A-Za-z0-9]+)*", value,
+        )
+        if (normalized := re.sub(
+            r"[^a-z0-9]", "", match.group(0).casefold(),
+        ))
+    )
+
+
+def _strong_identifier_shape(value: str) -> bool:
+    for token in _NAMED_REFERENCE_TOKEN_PATTERN.findall(value):
+        letters = "".join(
+            character for character in token if _is_latin_letter(character)
+        )
+        if (
+            any(character.isdigit() for character in token)
+            or any(character in ".&+/-" for character in token)
+            or (letters and letters.isupper())
+            or any(character.isupper() for character in letters[1:])
+        ):
+            return True
+    return False
+
+
+def _structured_name_shape(value: str) -> bool:
+    tokens = _NAMED_REFERENCE_TOKEN_PATTERN.findall(value)
+    latin_tokens = [
+        token for token in tokens
+        if any(_is_latin_letter(character) for character in token)
+    ]
+    if not latin_tokens:
+        return False
+    for token in latin_tokens:
+        word = re.sub(r"[^a-z]", "", token.casefold())
+        if word in NAMED_REFERENCE_CONNECTORS:
+            continue
+        letters = "".join(
+            character for character in token if _is_latin_letter(character)
+        )
+        if not letters or not (
+            letters[0].isupper() or _strong_identifier_shape(token)
+        ):
+            return False
+    return True
+
+
+def _reference_has_clause_syntax(value: str) -> bool:
+    if "\n" in value or "\r" in value or re.search(r"[;!?。！？]", value):
+        return True
+    if re.search(r"(?<![A-Z])\.\s+\S", value):
+        return True
+    words = [
+        re.sub(r"[^a-z]", "", token.casefold())
+        for token in _NAMED_REFERENCE_TOKEN_PATTERN.findall(value)
+    ]
+    return any(word in NAMED_REFERENCE_CLAUSE_WORDS for word in words)
+
+
+def source_span_within_reference_delimiters(
+    value: str, start: int, end: int, *,
+    max_span_characters: int = NAMED_REFERENCE_MAX_CHARACTERS,
+) -> bool:
+    for opening, closing in NAMED_REFERENCE_DELIMITERS:
+        if opening == closing:
+            if value[:start].count(opening) % 2 == 0:
+                continue
+            right = value.find(
+                closing, end, min(len(value), end + max_span_characters + 8),
+            )
+            if right >= 0:
+                return True
+            continue
+        left = value.rfind(opening, max(0, start - max_span_characters - 8), start)
+        prior_close = value.rfind(
+            closing, max(0, start - max_span_characters - 8), start,
+        )
+        if left < 0 or left < prior_close:
+            continue
+        search_end = min(len(value), end + max_span_characters + 8)
+        right = value.find(closing, end, search_end)
+        next_open = value.find(opening, end, search_end)
+        if (
+            right >= 0
+            and (next_open < 0 or right < next_open)
+            and right - left <= max_span_characters + 8
+        ):
+            return True
+    return False
+
+
+def _source_span_has_naming_context(source: str, start: int, end: int) -> bool:
+    prefix = source[max(0, start - 96):start]
+    for cue in _NAMING_CONTEXT_PATTERN.finditer(prefix):
+        if re.fullmatch(r"[\s:,-]*[\"“'‘]?", prefix[cue.end():]):
+            return True
+    suffix = source[end:min(len(source), end + 96)]
+    return bool(re.match(
+        r"^[\s\"”'’]*(?:is|was)?\s*(?:the\s+)?(?:name|title)\b",
+        suffix,
+        re.IGNORECASE,
+    ))
+
+
+def _exact_reference_matches(
+    source: str, exact_text: str,
+) -> tuple[tuple[int, int], ...]:
+    found = []
+    cursor = 0
+    while (start := source.find(exact_text, cursor)) >= 0:
+        end = start + len(exact_text)
+        left_ok = start == 0 or not (
+            source[start - 1].isdigit() or _is_latin_letter(source[start - 1])
+        )
+        right_ok = end == len(source) or not (
+            source[end].isdigit() or _is_latin_letter(source[end])
+        )
+        if left_ok and right_ok:
+            found.append((start, end))
+        cursor = start + max(1, len(exact_text))
+    return tuple(found)
+
+
+def resolve_structured_named_reference(
+    exact_text: str, source_text: str, declared_identities: tuple[str, ...],
+) -> StructuredNamedReferenceProof | None:
+    """Derive one auditable source span for a locally proven declaration."""
+    if (
+        exact_text != exact_text.strip()
+        or not exact_text
+        or len(exact_text) > NAMED_REFERENCE_MAX_CHARACTERS
+        or not any(_is_latin_letter(character) for character in exact_text)
+        or any(_is_han(character) for character in exact_text)
+        or any(
+            character.isalpha()
+            and not _is_han(character)
+            and not _is_latin_letter(character)
+            for character in exact_text
+        )
+    ):
+        return None
+    source_matches = _exact_reference_matches(source_text, exact_text)
+    if not source_matches:
+        return None
+    exact_tokens = _normalized_reference_tokens(exact_text)
+    declared_tokens = {
+        _normalized_reference_tokens(identity)
+        for identity in declared_identities
+        if identity.strip() and identity.strip().casefold() != "n/a"
+    }
+    evidence: list[str] = []
+    if exact_tokens and exact_tokens in declared_tokens:
+        evidence.append("DECLARED_SEMANTIC_IDENTITY")
+    name_shape = _structured_name_shape(exact_text)
+    reference_tokens = _NAMED_REFERENCE_TOKEN_PATTERN.findall(exact_text)
+    if _strong_identifier_shape(exact_text) and (
+        len(reference_tokens) == 1 or name_shape
+    ):
+        evidence.append("STRONG_IDENTIFIER")
+    if name_shape:
+        evidence.append("PROPER_NAME_SHAPE")
+    delimited_matches = tuple(
+        match for match in source_matches
+        if source_span_within_reference_delimiters(
+            source_text, match[0], match[1],
+        )
+    )
+    if delimited_matches:
+        evidence.append("SOURCE_DELIMITED_REFERENCE")
+    context_matches = tuple(
+        match for match in source_matches
+        if _source_span_has_naming_context(source_text, match[0], match[1])
+    )
+    if context_matches:
+        evidence.append("SOURCE_REFERENCE_CONTEXT")
+    if len(source_matches) > 1:
+        evidence.append("REPEATED_SOURCE_REFERENCE")
+
+    if _reference_has_clause_syntax(exact_text):
+        shared = [match for match in delimited_matches if match in context_matches]
+        if not shared:
+            return None
+        chosen = shared[0]
+    else:
+        locally_referential = {
+            "DECLARED_SEMANTIC_IDENTITY", "STRONG_IDENTIFIER",
+            "PROPER_NAME_SHAPE", "SOURCE_REFERENCE_CONTEXT",
+        }
+        if locally_referential.isdisjoint(evidence):
+            return None
+        chosen = (
+            context_matches[0] if context_matches
+            else delimited_matches[0] if delimited_matches
+            else source_matches[0]
+        )
+    return StructuredNamedReferenceProof(
+        exact_text=exact_text,
+        source_start=chosen[0],
+        source_end=chosen[1],
+        evidence=tuple(evidence),
+    )
 
 
 def _alphanumeric_fold(value: str) -> tuple[str, list[int]]:
@@ -277,14 +570,56 @@ def validate_news_annotation(
             for item in value:
                 if item_rule.get("type") == "string" and not isinstance(item, str):
                     raise ValueError(f"annotation {name} contains a non-string")
+                if item_rule.get("type") == "object":
+                    if not isinstance(item, dict):
+                        raise ValueError(f"annotation {name} contains a non-object")
+                    item_properties = item_rule.get("properties", {})
+                    item_required = set(item_rule.get("required", ()))
+                    missing_item = item_required - set(item)
+                    if missing_item:
+                        raise ValueError(
+                            f"annotation {name} item is missing fields: "
+                            + ", ".join(sorted(missing_item))
+                        )
+                    if item_rule.get("additionalProperties") is False:
+                        additional_item = set(item) - set(item_properties)
+                        if additional_item:
+                            raise ValueError(
+                                f"annotation {name} item has unknown fields: "
+                                + ", ".join(sorted(additional_item))
+                            )
+                    for item_name, item_value in item.items():
+                        child_rule = item_properties[item_name]
+                        if child_rule.get("type") == "string":
+                            if not isinstance(item_value, str):
+                                raise ValueError(
+                                    f"annotation {name}.{item_name} is not a string"
+                                )
+                            if len(item_value) < int(child_rule.get("minLength", 0)):
+                                raise ValueError(
+                                    f"annotation {name}.{item_name} is too short"
+                                )
+                            if len(item_value) > int(
+                                child_rule.get("maxLength", len(item_value))
+                            ):
+                                raise ValueError(
+                                    f"annotation {name}.{item_name} is too long"
+                                )
+                    continue
                 if len(str(item)) < int(item_rule.get("minLength", 0)):
                     raise ValueError(f"annotation {name} contains a short item")
                 if len(str(item)) > int(item_rule.get("maxLength", len(str(item)))):
                     raise ValueError(f"annotation {name} contains a long item")
                 if "enum" in item_rule and item not in item_rule["enum"]:
                     raise ValueError(f"annotation {name} contains an uncontrolled item")
-            if rule.get("uniqueItems") and len(value) != len(set(value)):
-                raise ValueError(f"annotation {name} contains duplicates")
+            if rule.get("uniqueItems"):
+                fingerprints = [
+                    json.dumps(item, ensure_ascii=False, sort_keys=True)
+                    if isinstance(item, (dict, list)) else repr(item)
+                    for item in value
+                ]
+                if len(fingerprints) != len(set(fingerprints)):
+                    raise ValueError(f"annotation {name} contains duplicates")
     secondary = annotation["secondary_categories"]
     if annotation["primary_category"] in secondary:
         raise ValueError("annotation category cannot be both primary and secondary")
@@ -295,6 +630,24 @@ def validate_news_annotation(
         for excerpt in annotation["supporting_evidence"]:
             if " ".join(excerpt.split()).casefold() not in normalized_source:
                 raise ValueError("annotation supporting evidence is absent from source")
+        if prompt_version == CURRENT_NEWS_PROMPT_VERSION:
+            declared_identities = (
+                str(annotation.get("actor") or ""),
+                str(annotation.get("object") or ""),
+                *tuple(str(item) for item in annotation.get("entities") or ()),
+            )
+            for reference in annotation["named_references"]:
+                if reference["exact_text"] not in source_text:
+                    raise ValueError(
+                        "annotation named reference is absent from source"
+                    )
+                if resolve_structured_named_reference(
+                    reference["exact_text"], source_text, declared_identities,
+                ) is None:
+                    raise ValueError(
+                        "UNPROVEN_NAMED_REFERENCE: annotation named reference "
+                        "lacks deterministic local proof"
+                    )
 
 
 def annotation_topics(annotation: dict) -> tuple[str, ...]:

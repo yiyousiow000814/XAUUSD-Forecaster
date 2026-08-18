@@ -46,6 +46,7 @@ from .news_impact import (
     validate_impact_assessment,
 )
 from .news_semantics import (
+    canonical_annotation_source_text,
     canonicalize_active_annotation,
     CURRENT_NEWS_PROMPT_VERSION,
     GENERATED_NEWS_PROMPT_VERSIONS,
@@ -53,6 +54,7 @@ from .news_semantics import (
     DISPLAY_AUDIT_FALLBACK_REASON_PREFIX,
     news_annotation_schema,
     model_usable_annotation_predicate,
+    resolve_structured_named_reference,
     validate_news_annotation,
 )
 
@@ -120,6 +122,9 @@ class _AllowedLatinSpan:
     end: int
     text: str
     proof: str
+    source_start: int
+    source_end: int
+    supporting_proofs: tuple[str, ...] = ()
 
 
 GeminiBatchCapacityExhausted = ModelGatewayCapacityExhausted
@@ -1204,7 +1209,8 @@ class _GeminiRequestPool:
             # Never spend a translation retry on a schema/evidence failure.
             try:
                 canonicalize_active_annotation(
-                    result, source_text=f"{headline}\n{body}",
+                    result,
+                    source_text=canonical_annotation_source_text(headline, body),
                 )
                 _validate_current_semantics(
                     result, headline=headline, body=body,
@@ -1558,7 +1564,7 @@ def _source_evidence_candidates(
     headline: str, body: str, *, max_chars: int = 220,
 ) -> list[tuple[str, str]]:
     """Build exact, bounded source spans that a repair request can only select."""
-    source = f"{headline}\n{body}"
+    source = canonical_annotation_source_text(headline, body)
     candidates: list[tuple[str, str]] = []
     cursor = 0
     while cursor < len(source) and len(candidates) < 384:
@@ -1656,7 +1662,7 @@ def _source_number_lexemes(headline: str, body: str) -> list[str]:
     )
     result: list[str] = []
     seen: set[str] = set()
-    for match in pattern.finditer(f"{headline}\n{body}"):
+    for match in pattern.finditer(canonical_annotation_source_text(headline, body)):
         value = match.group(0).strip()
         if value and value not in seen:
             seen.add(value)
@@ -1928,6 +1934,14 @@ def _annotation_prompt(prompt_version: str, headline: str, body: str) -> str:
         "tickers, widely used abbreviations, identifiers and proper nouns in "
         "English when that is more natural or accurate. Do not leave whole "
         "explanatory sentences unnecessarily in another language. "
+        "Return named_references as category-neutral named-reference declarations. "
+        "For each genuine person, organization, product, work, event, meeting, "
+        "case, paper or other proper reference that remains in Latin text in a "
+        "Chinese display field, copy only its exact contiguous source spelling "
+        "into exact_text. Do not provide offsets; local code derives them from "
+        "the immutable source. Never declare an explanatory sentence, ordinary "
+        "clause, paragraph, or extra words around a name as a named reference. "
+        "Use an empty array when no such reference is needed. "
         "For summary_zh: "
         "summarize the actual event, the decisive facts and numbers, and why "
         "it may or may not matter to XAUUSD in 3-6 concise sentences. "
@@ -2376,13 +2390,16 @@ def _identity_has_strong_identifier_shape(value: str) -> bool:
 
 
 def _span_within_reference_delimiters(
-    value: str, start: int, end: int,
+    value: str, start: int, end: int, *,
+    max_span_characters: int = SOURCE_IDENTITY_MAX_CHARACTERS,
 ) -> bool:
     for opening, closing in SOURCE_REFERENCE_DELIMITERS:
         if opening == closing:
             if value[:start].count(opening) % 2 == 0:
                 continue
-            right = value.find(closing, end, min(len(value), end + 80))
+            right = value.find(
+                closing, end, min(len(value), end + max_span_characters + 8),
+            )
             if right >= 0:
                 return True
             continue
@@ -2390,12 +2407,13 @@ def _span_within_reference_delimiters(
         prior_close = value.rfind(closing, max(0, start - 80), start)
         if left < 0 or left < prior_close:
             continue
-        right = value.find(closing, end, min(len(value), end + 80))
-        next_open = value.find(opening, end, min(len(value), end + 80))
+        search_end = min(len(value), end + max_span_characters + 8)
+        right = value.find(closing, end, search_end)
+        next_open = value.find(opening, end, search_end)
         if (
             right >= 0
             and (next_open < 0 or right < next_open)
-            and right - left <= SOURCE_IDENTITY_MAX_CHARACTERS + 8
+            and right - left <= max_span_characters + 8
         ):
             return True
     return False
@@ -2421,6 +2439,84 @@ def _source_context_has_declared_identity(
     return False
 
 
+def _structured_named_reference_texts(result: dict) -> tuple[str, ...]:
+    references = result.get("named_references")
+    if not isinstance(references, list):
+        return ()
+    return tuple(
+        str(item["exact_text"])
+        for item in references
+        if isinstance(item, dict) and isinstance(item.get("exact_text"), str)
+    )
+
+
+def _structured_reference_source_proof(
+    exact_text: str, source: str, declared_identities: tuple[str, ...],
+) -> tuple[tuple[str, int, int, str], tuple[str, ...]] | None:
+    """Prove a category-neutral declaration without trusting model offsets."""
+    proof = resolve_structured_named_reference(
+        exact_text, source, declared_identities,
+    )
+    if proof is None:
+        return None
+    source_match = (
+        exact_text, proof.source_start, proof.source_end,
+        source[
+            max(0, proof.source_start - 120):
+            min(len(source), proof.source_end + 120)
+        ],
+    )
+    return source_match, proof.evidence
+
+
+def _validate_structured_named_references(
+    result: dict, headline: str, body: str,
+) -> None:
+    references = _structured_named_reference_texts(result)
+    if not references:
+        return
+    source = canonical_annotation_source_text(headline, body)
+    declared = _declared_display_identifiers(result)
+    for exact_text in references:
+        if _structured_reference_source_proof(exact_text, source, declared) is None:
+            raise ValueError(
+                "UNPROVEN_NAMED_REFERENCE: annotation named reference lacks "
+                "deterministic local proof"
+            )
+
+
+def _structured_display_latin_spans(
+    result: dict, display: str, headline: str, body: str,
+) -> tuple[_AllowedLatinSpan, ...]:
+    source = canonical_annotation_source_text(headline, body)
+    declared = _declared_display_identifiers(result)
+    allowed: list[_AllowedLatinSpan] = []
+    for exact_text in _structured_named_reference_texts(result):
+        proven = _structured_reference_source_proof(exact_text, source, declared)
+        if proven is None:
+            continue
+        source_match, supporting_proofs = proven
+        cursor = 0
+        while (start := display.find(exact_text, cursor)) >= 0:
+            end = start + len(exact_text)
+            left_ok = start == 0 or not (
+                display[start - 1].isdigit()
+                or _is_latin_letter(display[start - 1])
+            )
+            right_ok = end == len(display) or not (
+                display[end].isdigit() or _is_latin_letter(display[end])
+            )
+            if left_ok and right_ok:
+                allowed.append(_AllowedLatinSpan(
+                    start=start, end=end, text=exact_text,
+                    proof="STRUCTURED_NAMED_REFERENCE",
+                    source_start=source_match[1], source_end=source_match[2],
+                    supporting_proofs=supporting_proofs,
+                ))
+            cursor = start + max(1, len(exact_text))
+    return tuple(allowed)
+
+
 def _classify_source_grounded_latin_span(
     display: str, start: int, end: int, headline: str, body: str,
     declared_identities: tuple[str, ...],
@@ -2433,8 +2529,8 @@ def _classify_source_grounded_latin_span(
         or len(candidate_tokens) > SOURCE_IDENTITY_MAX_TOKENS
     ):
         return None
-    source = f"{headline}\n{body}".strip()
-    if not source:
+    source = canonical_annotation_source_text(headline, body)
+    if not source.strip():
         return None
     source_matches = _source_identity_matches(source, candidate)
     if not source_matches:
@@ -2445,13 +2541,21 @@ def _classify_source_grounded_latin_span(
         if identity.strip() and identity.strip().casefold() != "n/a"
     }
     if candidate_tokens in declared_tokens:
-        return _AllowedLatinSpan(start, end, candidate, "DECLARED_IDENTITY")
+        source_match = source_matches[0]
+        return _AllowedLatinSpan(
+            start, end, candidate, "DECLARED_IDENTITY",
+            source_match[1], source_match[2],
+        )
     if any(
         _bounded_reference_shape(value)
         and _identity_has_strong_identifier_shape(value)
         for value in (candidate, *(match[0] for match in source_matches))
     ):
-        return _AllowedLatinSpan(start, end, candidate, "STRONG_IDENTIFIER")
+        source_match = source_matches[0]
+        return _AllowedLatinSpan(
+            start, end, candidate, "STRONG_IDENTIFIER",
+            source_match[1], source_match[2],
+        )
     source_reference_shaped = any(
         _bounded_reference_shape(match[0]) for match in source_matches
     )
@@ -2462,20 +2566,29 @@ def _classify_source_grounded_latin_span(
         return None
     if source_reference_shaped and _span_within_reference_delimiters(
         display, start, end,
-    ) and any(
-        _span_within_reference_delimiters(source, match[1], match[2])
-        or _normalized_identity_tokens(headline) == candidate_tokens
-        for match in source_matches
     ):
-        return _AllowedLatinSpan(start, end, candidate, "DELIMITED_REFERENCE")
-    if any(
-        SOURCE_PERSON_IDENTITY_CUE_PATTERN.search(match[3])
-        or _source_context_has_declared_identity(
-            source, match[3], match[0], declared_identities,
-        )
-        for match in source_matches
-    ):
-        return _AllowedLatinSpan(start, end, candidate, "SOURCE_REFERENCE_CONTEXT")
+        for source_match in source_matches:
+            if (
+                _span_within_reference_delimiters(
+                    source, source_match[1], source_match[2],
+                )
+                or _normalized_identity_tokens(headline) == candidate_tokens
+            ):
+                return _AllowedLatinSpan(
+                    start, end, candidate, "DELIMITED_REFERENCE",
+                    source_match[1], source_match[2],
+                )
+    for source_match in source_matches:
+        if (
+            SOURCE_PERSON_IDENTITY_CUE_PATTERN.search(source_match[3])
+            or _source_context_has_declared_identity(
+                source, source_match[3], source_match[0], declared_identities,
+            )
+        ):
+            return _AllowedLatinSpan(
+                start, end, candidate, "SOURCE_REFERENCE_CONTEXT",
+                source_match[1], source_match[2],
+            )
     return None
 
 
@@ -2485,14 +2598,64 @@ def _allowed_display_latin_spans(
     """Prove bounded display spans; source occurrence alone is insufficient."""
     display = str(value or "")
     declared = _declared_display_identifiers(result)
-    allowed = []
+    allowed = list(_structured_display_latin_spans(
+        result, display, headline, body,
+    ))
     for match in SOURCE_IDENTITY_SPAN_PATTERN.finditer(display):
         proof = _classify_source_grounded_latin_span(
             display, match.start(), match.end(), headline, body, declared,
         )
         if proof is not None:
             allowed.append(proof)
-    return tuple(allowed)
+    return _normalize_allowed_latin_spans(tuple(allowed))
+
+
+def _normalize_allowed_latin_spans(
+    spans: tuple[_AllowedLatinSpan, ...],
+) -> tuple[_AllowedLatinSpan, ...]:
+    """Dedupe exact ranges and prevent overlap from widening masked text."""
+    by_range: dict[tuple[int, int], _AllowedLatinSpan] = {}
+    for span in spans:
+        key = (span.start, span.end)
+        current = by_range.get(key)
+        if current is None or (
+            span.proof == "STRUCTURED_NAMED_REFERENCE"
+            and current.proof != "STRUCTURED_NAMED_REFERENCE"
+        ):
+            by_range[key] = span
+    ordered = sorted(by_range.values(), key=lambda item: (item.start, item.end))
+    groups: list[list[_AllowedLatinSpan]] = []
+    for span in ordered:
+        if not groups or span.start >= max(item.end for item in groups[-1]):
+            groups.append([span])
+        else:
+            groups[-1].append(span)
+    normalized: list[_AllowedLatinSpan] = []
+    for group in groups:
+        if len(group) == 1:
+            normalized.append(group[0])
+            continue
+        structured = [
+            span for span in group
+            if span.proof == "STRUCTURED_NAMED_REFERENCE"
+        ]
+        if len(structured) == 1:
+            normalized.append(structured[0])
+            continue
+        if structured:
+            widest = max(
+                structured,
+                key=lambda item: (item.end - item.start, -item.start),
+            )
+            if all(
+                widest.start <= item.start and item.end <= widest.end
+                for item in structured
+            ):
+                normalized.append(widest)
+            continue
+        # Legacy fallback matches are never unioned. Leaving an ambiguous
+        # overlap unmasked preserves fail-closed Chinese-primary validation.
+    return tuple(normalized)
 
 
 def _reject_unproven_delimited_latin_spans(
@@ -2587,7 +2750,9 @@ def _restore_source_number_lexemes(
     )
     source_tokens = {
         re.sub(r"\s+", "", token)
-        for token in token_pattern.findall(f"{headline}\n{body}")
+        for token in token_pattern.findall(
+            canonical_annotation_source_text(headline, body)
+        )
     }
     by_digits: dict[tuple[str, int], list[str]] = {}
     for token in source_tokens:
@@ -2654,7 +2819,7 @@ def _restore_source_number_lexemes(
 
 def _recover_display_fields(result: dict, headline: str, body: str) -> None:
     """Make display text auditable without rejecting structured measurements."""
-    source = f"{headline}\n{body}"
+    source = canonical_annotation_source_text(headline, body)
     _normalize_translated_named_months(result, source)
     token_pattern = re.compile(
         r"\d+(?:(?:\s*[./-]\s*\d+)|(?:\s*,\s*\d{1,3}(?!\d)))*"
@@ -2694,7 +2859,7 @@ def _validate_current_result(
         return
     validate_news_annotation(
         result, prompt_version=prompt_version,
-        source_text=f"{headline}\n{body}",
+        source_text=canonical_annotation_source_text(headline, body),
     )
 
 
@@ -2945,6 +3110,15 @@ def _is_latin_letter(character: str) -> bool:
     return character.isalpha() and "LATIN" in unicodedata.name(character, "")
 
 
+def _contains_third_script(value: str) -> bool:
+    return any(
+        character.isalpha()
+        and not _is_han(character)
+        and not _is_latin_letter(character)
+        for character in value
+    )
+
+
 def _word_runs(text: str) -> tuple[str, ...]:
     runs: list[str] = []
     current: list[str] = []
@@ -3040,13 +3214,7 @@ def _require_chinese_primary(
     han_letters = sum(_is_han(character) for character in text)
     if not han_letters:
         raise ValueError(f"NO_CHINESE_PROSE: Gemini {field} has no Chinese prose")
-    other_script_letters = sum(
-        character.isalpha()
-        and not _is_han(character)
-        and not _is_latin_letter(character)
-        for character in text
-    )
-    if other_script_letters:
+    if _contains_third_script(text):
         raise ValueError(
             f"THIRD_SCRIPT_PRESENT: Gemini {field} contains non-Chinese/Latin text"
         )

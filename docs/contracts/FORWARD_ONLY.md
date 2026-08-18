@@ -104,18 +104,18 @@ summary together with the structured impulse fields. A new prompt version is a
 new immutable annotation; it never rewrites an earlier interpretation.
 
 The active annotation contract is
-`news-json-v16-xauusd-transmission-evidence`. V16 retains the explicit
+`news-json-v17-structured-named-references`. V17 retains the explicit
 semantic relevance, review priority, material-change, time-sensitivity,
-reason, and source-evidence fields introduced by V15, while requiring a narrow
-XAUUSD transmission test. Company, product, local, and non-US macro stories do
+reason, source-evidence, and narrow XAUUSD transmission rules from V16. Company,
+product, local, and non-US macro stories do
 not qualify without an explicit current bullion, USD, US Treasury-yield, US
 monetary-policy, or major geopolitical transmission. CONTEXT_ONLY is not a
 fallback for otherwise irrelevant content. Evidence must resolve to a unique
 contiguous excerpt in the stored headline or body; punctuation-only model drift
 may be restored deterministically to the original source characters, while
 changed words, numbers, ordering, or joined clauses fail closed. Casing,
-spelling, one keyword, or publisher identity cannot determine meaning. V15
-annotations remain immutable historical evidence but cannot be generated or
+spelling, one keyword, or publisher identity cannot determine meaning. V15 and
+V16 annotations remain immutable historical evidence but cannot be generated or
 used by the active feature, storyline, training, or inference paths.
 
 Gemini 3.5 Flash-Lite is the primary annotator. Its last 150 daily local
@@ -165,17 +165,29 @@ cannot change semantic measurements or grant model permission. Each retry
 preserves bounded failure evidence, and a later versioned recovery may authorize
 one new attempt after another repair mechanism changes.
 
-Chinese-facing annotation fields share one source-grounded allowed-Latin-span
-contract. The validator MAY exclude only a bounded span that occurs in the
-immutable source headline/body and has deterministic referential proof: an
-exact declared identity, strong identifier shape, a bounded reference delimited
-in both display and source, or a conservative established source-reference
-context. It MUST mask only the proven span before applying the unchanged
-Chinese-primary ratio to the remaining text. Source occurrence, casing, or
-display punctuation alone is not permission: copied English prose, long clauses,
-invented references, and bracket-wrapped sentences remain invalid. Existing
-display checkpoints MUST be revalidated locally against the current
-deterministic rules before another provider request is attempted.
+Chinese-facing annotation fields share one layered source-grounded
+allowed-Latin-span contract. V17 adds category-neutral `named_references`; each
+item contains only `exact_text` copied from the immutable source. Provider
+offsets are forbidden. Local code resolves every occurrence in the sole source
+coordinate space `headline + "\n" + body`, derives source offsets, and requires
+independent local referential proof before the declaration may affect display
+validation. The 512-character and 24-item limits are broad payload-safety bounds,
+not claims about the normal semantic length of a name. They replace the legacy
+64-character/eight-token title heuristic for structured references.
+
+The validator MUST reject declarations that capture ordinary clause syntax,
+multiple sentences, paragraphs, invented text, or unrelated words around an
+identifier. A clause-like title requires both source delimitation and explicit
+naming/reference context; quoting prose alone grants no permission. Duplicate
+ranges are collapsed, a proven enclosing structured range may replace its
+proven nested ranges, and partially overlapping declarations are never unioned.
+Only normalized non-overlapping display spans are masked before the unchanged
+Chinese-primary ratio is applied. V16 and older rows without
+`named_references` continue through the conservative declared-identity,
+identifier-shape, delimiter, and source-context fallback; historical semantic
+objects are never rewritten merely to add the field. Existing display
+checkpoints MUST be revalidated locally against the current deterministic rules
+before another provider request is attempted.
 
 The model gateway distinguishes a request that produced no trustworthy response
 from a response that failed decoding or validation. Capacity, provider pacing,

@@ -434,6 +434,7 @@ def _append_news(ledger: ForwardLedger, *, source: str, item: str,
         "time_sensitivity": "SAME_DAY",
         "semantic_reason_zh": "完整正文显示这是可能影响黄金的宏观事件。",
         "supporting_evidence": ["publisher full body"],
+        "named_references": [],
     }
     annotation.update(annotation_overrides or {})
     ledger.append_annotation({

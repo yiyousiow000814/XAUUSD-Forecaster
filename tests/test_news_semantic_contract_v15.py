@@ -16,6 +16,7 @@ from xauusd_forecaster.model_gateway import GeminiModelGateway
 from xauusd_forecaster.news_semantics import (
     CURRENT_NEWS_PROMPT_VERSION,
     LEGACY_NEWS_PROMPT_VERSION,
+    LEGACY_SEMANTIC_NEWS_PROMPT_VERSION,
     PREVIOUS_NEWS_PROMPT_VERSION,
     canonicalize_active_annotation,
     news_annotation_schema,
@@ -71,22 +72,29 @@ def _target_annotation(evidence: str) -> dict:
         "time_sensitivity": "SAME_DAY",
         "semantic_reason_zh": "官方就业数据可能改变利率预期。",
         "supporting_evidence": [evidence],
+        "named_references": [],
     }
 
 
-def test_v16_schema_is_versioned_without_mutating_history() -> None:
+def test_v17_schema_is_versioned_without_mutating_history() -> None:
     news_annotation_schema.cache_clear()
     legacy = news_annotation_schema(LEGACY_NEWS_PROMPT_VERSION)
+    legacy_semantic = news_annotation_schema(LEGACY_SEMANTIC_NEWS_PROMPT_VERSION)
     previous = news_annotation_schema(PREVIOUS_NEWS_PROMPT_VERSION)
     active = news_annotation_schema(CURRENT_NEWS_PROMPT_VERSION)
 
     assert "review_priority" not in legacy["properties"]
     assert "review_priority" in active["required"]
     assert legacy["$id"] == "xauusd.forward.news-annotation.v1"
-    assert previous["$id"] == "xauusd.forward.news-annotation.v15"
-    assert active["$id"] == "xauusd.forward.news-annotation.v16"
-    assert previous["required"] == active["required"]
+    assert legacy_semantic["$id"] == "xauusd.forward.news-annotation.v15"
+    assert previous["$id"] == "xauusd.forward.news-annotation.v16"
+    assert active["$id"] == "xauusd.forward.news-annotation.v17"
+    assert "named_references" not in previous["required"]
+    assert "named_references" in active["required"]
     assert active["properties"]["supporting_evidence"]["items"]["maxLength"] == 240
+    assert active["properties"]["named_references"]["items"]["required"] == [
+        "exact_text"
+    ]
 
 
 def test_semantic_generations_require_evidence_copied_from_the_source() -> None:
@@ -107,7 +115,108 @@ def test_semantic_generations_require_evidence_copied_from_the_source() -> None:
         )
 
 
-def test_v16_only_applies_lossless_active_cleanup() -> None:
+def test_v17_named_references_copy_text_but_never_accept_model_offsets() -> None:
+    source = "The Bureau of Labor Statistics reported job openings fell in June."
+    annotation = _target_annotation("job openings fell in June")
+    annotation["named_references"] = [
+        {"exact_text": "Bureau of Labor Statistics"}
+    ]
+
+    annotation_module._validate_current_result(
+        annotation, headline="Jobs report", body=source,
+        prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+    )
+
+    annotation["named_references"] = [{
+        "exact_text": "Bureau of Labor Statistics",
+        "source_start": 4,
+        "source_end": 30,
+    }]
+    with pytest.raises(ValueError, match="unknown fields"):
+        validate_news_annotation(
+            annotation,
+            prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+            source_text=f"Jobs report\n{source}",
+        )
+
+
+def test_v17_named_reference_declaration_cannot_whitelist_exact_source_prose() -> None:
+    prose = "Market expects growth to be strong"
+    source = f"{prose} after the policy update."
+    annotation = _target_annotation(prose)
+    annotation["supporting_evidence"] = [prose]
+    annotation["named_references"] = [{"exact_text": prose}]
+
+    with pytest.raises(ValueError, match="UNPROVEN_NAMED_REFERENCE"):
+        annotation_module._validate_current_result(
+            annotation, headline="Market commentary", body=source,
+            prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+        )
+
+
+def test_v17_ledger_cannot_persist_a_locally_unproven_named_reference(
+    tmp_path,
+) -> None:
+    now = datetime(2026, 8, 19, 2, 0, tzinfo=UTC)
+    prose = "Market expects growth to be strong"
+    body = f"{prose} after the policy update. " * 12
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger.append_news_revision({
+        "source": "named-reference-contract",
+        "source_item_id": "prose-abuse",
+        "source_published_time": now,
+        "collector_first_seen_time": now,
+        "fetched_time": now,
+        "headline": "Market commentary",
+        "body": body,
+        "content_hash": digest,
+        "cluster_id": "prose-abuse",
+    })
+    annotation = _target_annotation(prose)
+    annotation["supporting_evidence"] = [prose]
+    annotation["named_references"] = [{"exact_text": prose}]
+
+    with pytest.raises(ValueError, match="UNPROVEN_NAMED_REFERENCE"):
+        ledger.append_annotation({
+            "annotation_id": "prose-abuse",
+            "source": "named-reference-contract",
+            "source_item_id": "prose-abuse",
+            "revision_number": 1,
+            "raw_content_hash": digest,
+            "llm_model_version": annotation_module.DEFAULT_GEMINI_MODEL,
+            "prompt_version": CURRENT_NEWS_PROMPT_VERSION,
+            "parse_started_at": now,
+            "parsed_at": now,
+            "annotation": annotation,
+        })
+    assert ledger.count("news_annotations") == 0
+    ledger.close()
+
+
+def test_v17_named_reference_schema_rejects_duplicates_and_pathological_size() -> None:
+    source = "OpenAI released an update."
+    annotation = _target_annotation("OpenAI released an update")
+    annotation["named_references"] = [
+        {"exact_text": "OpenAI"}, {"exact_text": "OpenAI"},
+    ]
+    with pytest.raises(ValueError, match="contains duplicates"):
+        validate_news_annotation(
+            annotation,
+            prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+            source_text=source,
+        )
+
+    annotation["named_references"] = [{"exact_text": "A" * 513}]
+    with pytest.raises(ValueError, match="named_references.exact_text is too long"):
+        validate_news_annotation(
+            annotation,
+            prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+            source_text=source,
+        )
+
+
+def test_v17_only_applies_lossless_active_cleanup() -> None:
     source = (
         "FinCEN announced: it will delete previously reported information. "
         "The same evidence appears twice. The same evidence appears twice."
@@ -171,7 +280,7 @@ def test_v15_prompt_uses_context_not_keyword_or_casing() -> None:
     assert "investment guide remains commentary" in prompt
 
 
-def test_v16_requires_current_event_and_transmission_evidence() -> None:
+def test_v17_retains_v16_current_event_and_transmission_evidence() -> None:
     prompt = annotation_module._annotation_prompt(
         CURRENT_NEWS_PROMPT_VERSION,
         "Miner reports quarterly earnings",
@@ -190,6 +299,8 @@ def test_v16_requires_current_event_and_transmission_evidence() -> None:
     assert "genre does not erase quoted current market facts" in prompt
     assert "supporting_evidence is a copy field" in prompt
     assert "Never translate, paraphrase" in prompt
+    assert "Return named_references as category-neutral" in prompt
+    assert "Do not provide offsets" in prompt
 
 
 def test_target_backfill_cannot_bypass_scheduler_capacity_refusal(
@@ -244,7 +355,7 @@ def test_current_contract_fails_closed_for_non_gemini_provider(tmp_path) -> None
     ledger.close()
 
 
-def test_previous_generation_cannot_execute_after_v16_handover(tmp_path) -> None:
+def test_previous_generation_cannot_execute_after_v17_handover(tmp_path) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3")
 
     with pytest.raises(ValueError, match="unsupported news prompt version"):
@@ -312,7 +423,7 @@ def test_current_annotation_pipeline_persists_versioned_receipt(
     ledger.close()
 
 
-def test_previous_v15_and_active_v16_annotations_coexist(tmp_path) -> None:
+def test_previous_v16_and_active_v17_annotations_coexist(tmp_path) -> None:
     now = datetime(2026, 8, 11, 10, 0, tzinfo=UTC)
     body = (
         "The Bureau of Labor Statistics reported job openings fell in June. "
@@ -332,6 +443,8 @@ def test_previous_v15_and_active_v16_annotations_coexist(tmp_path) -> None:
         "cluster_id": "jobs",
     })
     target = _target_annotation("job openings fell in June")
+    previous_target = dict(target)
+    previous_target.pop("named_references")
     common = {
         "source": "semantic-contract-test",
         "source_item_id": "jobs",
@@ -345,7 +458,7 @@ def test_previous_v15_and_active_v16_annotations_coexist(tmp_path) -> None:
         **common,
         "annotation_id": "previous",
         "prompt_version": PREVIOUS_NEWS_PROMPT_VERSION,
-        "annotation": target,
+        "annotation": previous_target,
     })
 
     assert pending_annotation_records(
