@@ -86,6 +86,31 @@ DISPLAY_REPAIR_MODELS = (
     DEFAULT_GEMMA_MODEL, DEFAULT_GEMINI_MODEL, FALLBACK_GEMINI_MODEL,
 )
 HIGH_PRIORITY_NEWS_SOURCES = frozenset({"federal_reserve_monetary"})
+SOURCE_IDENTITY_MAX_TOKENS = 4
+SOURCE_IDENTITY_MAX_CHARACTERS = 64
+SOURCE_IDENTITY_PROSE_WORDS = frozenset({
+    "a", "an", "and", "appeared", "appears", "are", "as", "at", "be",
+    "been", "being", "but", "company", "development", "episode", "every",
+    "expects", "expected", "for", "from", "growth", "important", "in",
+    "is", "it", "market", "of", "on", "or", "outlook", "said", "says",
+    "strong", "that", "the", "this", "to", "update", "was", "were",
+    "who", "with",
+})
+SOURCE_IDENTITY_SPAN_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])"
+    r"[A-Za-z0-9][A-Za-z0-9.'&+/-]*"
+    rf"(?:[ \t]+[A-Za-z0-9][A-Za-z0-9.'&+/-]*)"
+    rf"{{0,{SOURCE_IDENTITY_MAX_TOKENS - 1}}}"
+    r"(?![A-Za-z0-9])"
+)
+SOURCE_IDENTITY_TOKEN_PATTERN = re.compile(
+    r"[A-Za-z0-9]+(?:[._'/-][A-Za-z0-9]+)*"
+)
+SOURCE_PERSON_IDENTITY_CUE_PATTERN = re.compile(
+    r"\b(?:actor|actress|cast|character|played|plays|portrayed|role|starred|"
+    r"starring)\b",
+    re.IGNORECASE,
+)
 
 
 GeminiBatchCapacityExhausted = ModelGatewayCapacityExhausted
@@ -1203,7 +1228,7 @@ class _GeminiRequestPool:
         invalid_display_fields: tuple[str, ...]
         try:
             _recover_display_fields(result, headline, body)
-            _validate_chinese_result(result)
+            _validate_chinese_result(result, headline=headline, body=body)
             if prompt_version in GENERATED_NEWS_PROMPT_VERSIONS:
                 _validate_current_result(
                     result, headline=headline, body=body,
@@ -1241,7 +1266,7 @@ class _GeminiRequestPool:
         # or semantic re-analysis.
         try:
             _recover_display_fields(result, headline, body)
-            _validate_chinese_result(result)
+            _validate_chinese_result(result, headline=headline, body=body)
             if prompt_version in GENERATED_NEWS_PROMPT_VERSIONS:
                 _validate_current_result(
                     result, headline=headline, body=body,
@@ -1286,7 +1311,9 @@ class _GeminiRequestPool:
                 for field in invalid_fields:
                     working[field] = repaired[field]
                 _recover_display_fields(working, headline, body)
-                _validate_chinese_result(working)
+                _validate_chinese_result(
+                    working, headline=headline, body=body,
+                )
                 if prompt_version in GENERATED_NEWS_PROMPT_VERSIONS:
                     _validate_current_result(
                         working, headline=headline, body=body,
@@ -2220,23 +2247,37 @@ def _require_title_numbers_preserved(translated: str, source: str) -> None:
         )
 
 
-def _validate_chinese_result(result: dict) -> None:
+def _validate_chinese_result(
+    result: dict, *, headline: str = "", body: str = "",
+) -> None:
     for field in ("headline_zh", "summary_zh"):
-        _validate_chinese_display_field(result.get(field), field)
+        value = result.get(field)
+        _validate_chinese_display_field(
+            value, field,
+            allowed_latin_identifiers=_display_identity_context(
+                result, value, headline, body,
+            ),
+        )
     story_title = str(result.get("primary_story_title_zh") or "").strip()
     if story_title:
         _validate_chinese_display_field(
             story_title,
             "primary_story_title_zh",
-            allowed_latin_identifiers=_declared_story_identifiers(result),
+            allowed_latin_identifiers=_display_identity_context(
+                result, story_title, headline, body,
+            ),
         )
     if "semantic_reason_zh" in result:
+        value = result.get("semantic_reason_zh")
         _validate_chinese_display_field(
-            result.get("semantic_reason_zh"), "semantic_reason_zh"
+            value, "semantic_reason_zh",
+            allowed_latin_identifiers=_display_identity_context(
+                result, value, headline, body,
+            ),
         )
 
 
-def _declared_story_identifiers(result: dict) -> tuple[str, ...]:
+def _declared_display_identifiers(result: dict) -> tuple[str, ...]:
     """Return semantic identity text allowed to remain as natural Latin names."""
     values = [
         str(result.get("actor") or ""),
@@ -2246,6 +2287,144 @@ def _declared_story_identifiers(result: dict) -> tuple[str, ...]:
     if isinstance(entities, list):
         values.extend(str(item) for item in entities)
     return tuple(value for value in values if value.strip())
+
+
+def _normalized_identity_tokens(value: str) -> tuple[str, ...]:
+    return tuple(
+        normalized for match in re.finditer(
+            r"[A-Za-z0-9]+(?:[._'/-][A-Za-z0-9]+)*", value,
+        )
+        if (normalized := re.sub(
+            r"[^a-z0-9]", "", match.group(0).casefold(),
+        ))
+    )
+
+
+def _source_identity_match(source: str, identity: str) -> tuple[str, str] | None:
+    candidate = _normalized_identity_tokens(identity)
+    if not candidate:
+        return None
+    matches = tuple(SOURCE_IDENTITY_TOKEN_PATTERN.finditer(source))
+    source_tokens = tuple(
+        re.sub(r"[^a-z0-9]", "", match.group(0).casefold())
+        for match in matches
+    )
+    width = len(candidate)
+    for index in range(len(source_tokens) - width + 1):
+        if source_tokens[index:index + width] != candidate:
+            continue
+        selected = matches[index:index + width]
+        separators = (
+            source[left.end():right.start()]
+            for left, right in zip(selected, selected[1:])
+        )
+        if all(re.fullmatch(r"[\s.,&'()+/-]*", gap) for gap in separators):
+            start = selected[0].start()
+            end = selected[-1].end()
+            return (
+                source[start:end],
+                source[max(0, start - 80):min(len(source), end + 80)],
+            )
+    return None
+
+
+def _source_identity_is_bounded_proper_name(value: str) -> bool:
+    if len(value) > SOURCE_IDENTITY_MAX_CHARACTERS:
+        return False
+    tokens = _word_runs(value)
+    latin_tokens = [
+        token for token in tokens
+        if any(_is_latin_letter(character) for character in token)
+    ]
+    if not latin_tokens or len(tokens) > SOURCE_IDENTITY_MAX_TOKENS:
+        return False
+    if any(
+        re.sub(r"[^a-z]", "", token.casefold()) in SOURCE_IDENTITY_PROSE_WORDS
+        for token in latin_tokens
+    ):
+        return False
+    return all(_latin_identifier_like(token) for token in latin_tokens)
+
+
+def _identity_has_strong_identifier_shape(value: str) -> bool:
+    for token in SOURCE_IDENTITY_TOKEN_PATTERN.findall(value):
+        letters = "".join(
+            character for character in token if _is_latin_letter(character)
+        )
+        if (
+            any(character.isdigit() for character in token)
+            or any(character in ".&+/-" for character in token)
+            or (letters and letters.isupper())
+            or any(character.isupper() for character in letters[1:])
+        ):
+            return True
+    return False
+
+
+def _source_context_links_declared_identity(
+    source_context: str, source_identity: str,
+    declared_identities: tuple[str, ...],
+) -> bool:
+    candidate = re.escape(source_identity).replace(r"\ ", r"\s+")
+    for declared in declared_identities:
+        if not declared.strip() or declared.strip().casefold() == "n/a":
+            continue
+        owner = re.escape(declared).replace(r"\ ", r"\s+")
+        relationships = (
+            rf"{owner}(?:'s|’s)\s+{candidate}",
+            rf"{owner}.{{0,60}}\b(?:as|played|playing|portrayed)\s+{candidate}",
+            rf"{candidate}.{{0,60}}\b(?:played|portrayed)\s+by\s+{owner}",
+        )
+        if any(re.search(pattern, source_context, re.IGNORECASE) for pattern in relationships):
+            return True
+    return False
+
+
+def _source_grounded_display_identifiers(
+    value: object, headline: str, body: str,
+    declared_identities: tuple[str, ...],
+) -> tuple[str, ...]:
+    source = f"{headline}\n{body}".strip()
+    if not source:
+        return ()
+    candidates = (
+        match.group(0).strip()
+        for match in SOURCE_IDENTITY_SPAN_PATTERN.finditer(str(value or ""))
+    )
+    grounded = []
+    for candidate in candidates:
+        match = _source_identity_match(source, candidate)
+        if match is None:
+            continue
+        source_match, source_context = match
+        proper_name_like = (
+            _source_identity_is_bounded_proper_name(candidate)
+            or _source_identity_is_bounded_proper_name(source_match)
+        )
+        supported_identity_shape = (
+            _identity_has_strong_identifier_shape(candidate)
+            or _identity_has_strong_identifier_shape(source_match)
+            or SOURCE_PERSON_IDENTITY_CUE_PATTERN.search(source_context)
+            or _source_context_links_declared_identity(
+                source_context, source_match, declared_identities,
+            )
+        )
+        if proper_name_like and supported_identity_shape:
+            grounded.append(candidate)
+    return tuple(dict.fromkeys(grounded))
+
+
+def _display_identity_context(
+    result: dict, value: object, headline: str, body: str,
+) -> tuple[str, ...]:
+    """Return declared or bounded source-grounded names, never source prose."""
+    declared = _declared_display_identifiers(result)
+    return tuple(dict.fromkeys((
+        *declared,
+        *_source_grounded_display_identifiers(
+            value, headline, body, declared,
+        ),
+    )))
 
 
 def _validate_chinese_display_field(
@@ -2290,9 +2469,8 @@ def _invalid_chinese_display_fields(
                 _validate_chinese_display_field(
                     value,
                     field,
-                    allowed_latin_identifiers=(
-                        _declared_story_identifiers(result)
-                        if field == "primary_story_title_zh" else ()
+                    allowed_latin_identifiers=_display_identity_context(
+                        result, value, headline, body,
                     ),
                 )
             elif field not in result:
@@ -2747,14 +2925,14 @@ def _latin_tokens_are_declared(
     text: str, allowed_latin_identifiers: tuple[str, ...],
 ) -> bool:
     observed = {
-        token.casefold() for token in _word_runs(text)
-        if any(_is_latin_letter(character) for character in token)
+        token for token in _normalized_identity_tokens(text)
+        if any(character.isalpha() for character in token)
     }
     declared = {
-        token.casefold()
+        token
         for value in allowed_latin_identifiers
-        for token in _word_runs(value)
-        if any(_is_latin_letter(character) for character in token)
+        for token in _normalized_identity_tokens(value)
+        if any(character.isalpha() for character in token)
     }
     return bool(observed) and observed.issubset(declared)
 
