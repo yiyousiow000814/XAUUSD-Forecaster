@@ -1807,6 +1807,12 @@ test("explains U5 as a risk scale rather than a probability", () => {
   assert.match(source, /research_forecast/);
   assert.match(source, /30分钟预测/);
   assert.match(source, /forecast-state/);
+  assert.match(source, /新闻覆盖：降级/);
+  assert.match(source, /当前预测仅使用决策时已完成的新闻证据/);
+  assert.match(source, /当前无符合条件的新闻/);
+  assert.match(source, /新闻系统运行正常/);
+  assert.match(source, /新闻输入不可用/);
+  assert.match(source, /Market-only 仍独立评估/);
   assert.doesNotMatch(source, /成本后 EV 较高方向/);
   assert.doesNotMatch(source, /固定观察30分钟 · 不下单/);
   assert.doesNotMatch(source, /30分钟结果窗口已完成/);

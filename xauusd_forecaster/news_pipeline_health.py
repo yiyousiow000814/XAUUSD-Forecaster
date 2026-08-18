@@ -194,6 +194,7 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
     unresolved: dict[tuple[str, str, str, int, str], datetime] = {}
     actionable_failure_counts: dict[str, dict[str, int]] = {}
     operational_reasons: list[str] = []
+    operational_reason_counts: dict[str, int] = {}
     annotation_pending = False
 
     def add_unresolved(
@@ -271,6 +272,9 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
                 "ACTIVE_ANNOTATION", item, observed_at=observed_at,
             ):
                 operational_reasons.append(operational_reason)
+                operational_reason_counts[operational_reason] = (
+                    operational_reason_counts.get(operational_reason, 0) + 1
+                )
 
     impact_pending = False
     for row in _current_actionable_impact_rows(ledger, observed_at=observed_at):
@@ -287,6 +291,9 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
                 "ACTIVE_IMPACT", row, observed_at=observed_at,
             ):
                 operational_reasons.append(operational_reason)
+                operational_reason_counts[operational_reason] = (
+                    operational_reason_counts.get(operational_reason, 0) + 1
+                )
     if annotation_pending:
         reasons.append("ACTIONABLE_NEWS_SEMANTICS_PENDING")
     if impact_pending:
@@ -300,6 +307,20 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
         "reason_codes": reason_codes,
         "heartbeat_at": heartbeat_at.isoformat() if heartbeat_at else None,
         "unresolved_items": len(unresolved),
+        "unresolved_annotation_count": sum(
+            task_type == "ACTIVE_ANNOTATION" for task_type, *_ in unresolved
+        ),
+        "unresolved_impact_count": sum(
+            task_type == "ACTIVE_IMPACT" for task_type, *_ in unresolved
+        ),
+        "recovering_count": sum(
+            count for code, count in operational_reason_counts.items()
+            if code.endswith("_RECOVERING")
+        ),
+        "terminal_or_overdue_count": sum(
+            count for code, count in operational_reason_counts.items()
+            if code.endswith(("_TERMINAL", "_OVERDUE"))
+        ),
         "oldest_unresolved_at": (
             min(unresolved.values()).isoformat() if unresolved else None
         ),

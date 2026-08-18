@@ -47,6 +47,15 @@ type Payload = {
     };
   };
   operational_health?: { status: "HEALTHY" | "WARNING" | "ERROR" };
+  news_input_coverage?: {
+    state: "AVAILABLE" | "DEGRADED" | "QUIET" | "UNAVAILABLE";
+    usable_core_event_count: number;
+    usable_broad_event_count: number;
+    unresolved_annotation_count: number;
+    unresolved_impact_count: number;
+    recovering_count: number;
+    terminal_or_overdue_count: number;
+  } | null;
   latest: Decision & {
     source_event_time: string;
     source_received_time: string;
@@ -212,6 +221,26 @@ export default function LiveRoomView() {
     payload?.system.components?.quote_bridge?.status,
     payload?.system.market_session,
   );
+  const newsCoverage = payload?.news_input_coverage;
+  const newsCoverageCopy = !newsCoverage
+    ? {
+        label: "新闻覆盖：等待新版本决策快照",
+        detail: payload?.preview_status_summary
+          ? "Preview 保留合并前的生产快照，不推测历史输入状态"
+          : "等待下一轮决策生成覆盖快照",
+      }
+    : newsCoverage.state === "AVAILABLE"
+      ? { label: "新闻覆盖：可用", detail: `本轮使用 ${formatExactCount(newsCoverage.usable_broad_event_count)} 个决策时可见事件` }
+      : newsCoverage.state === "DEGRADED"
+        ? {
+            label: "新闻覆盖：降级",
+            detail: newsCoverage.recovering_count > 0
+              ? `${formatExactCount(newsCoverage.recovering_count)} 条复核正在自动恢复；当前预测仅使用决策时已完成的新闻证据`
+              : "部分新闻链路不完整；当前预测仅使用决策时已完成的新闻证据",
+          }
+        : newsCoverage.state === "QUIET"
+          ? { label: "当前无符合条件的新闻", detail: "新闻系统运行正常" }
+          : { label: "新闻输入不可用", detail: "综合新闻模型暂不出方向；Market-only 仍独立评估" };
 
   return (
     <main>
@@ -255,6 +284,10 @@ export default function LiveRoomView() {
             {dialAction}
           </div>
           {forecastStatus && (marketClosed || marketUnavailable || (signalRemaining > 0 && online)) && <strong className="forecast-state is-current">{forecastStatus}</strong>}
+          <div className={`news-coverage-state is-${newsCoverage?.state.toLowerCase() ?? "pending"}`}>
+            <strong>{newsCoverageCopy.label}</strong>
+            <small>{newsCoverageCopy.detail}</small>
+          </div>
         </div>
       </section>
 

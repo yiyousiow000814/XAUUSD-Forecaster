@@ -24,6 +24,7 @@ V2_IMMUTABLE_TABLES = (
     "derived_market_snapshots",
     "derived_news_feature_snapshots",
     "news_semantic_health_snapshots_v1",
+    "news_input_coverage_snapshots_v1",
     "derived_outcomes",
     "training_eligibility_v2",
     "market_crossfit_predictions",
@@ -444,6 +445,25 @@ CREATE TABLE IF NOT EXISTS news_semantic_health_snapshots_v1 (
     heartbeat_at TEXT,
     unresolved_items INTEGER NOT NULL,
     oldest_unresolved_at TEXT,
+    snapshot_hash TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS news_input_coverage_snapshots_v1 (
+    source_decision_id TEXT PRIMARY KEY,
+    decision_time TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN (
+        'AVAILABLE','DEGRADED','QUIET','UNAVAILABLE')),
+    usable_core_event_count INTEGER NOT NULL,
+    usable_broad_event_count INTEGER NOT NULL,
+    unresolved_annotation_count INTEGER NOT NULL,
+    unresolved_impact_count INTEGER NOT NULL,
+    recovering_count INTEGER NOT NULL,
+    terminal_or_overdue_count INTEGER NOT NULL,
+    operational_reason_codes_json TEXT NOT NULL,
+    coverage_reason_codes_json TEXT NOT NULL,
+    source_observability_json TEXT NOT NULL,
+    source_evidence_hash TEXT NOT NULL,
     snapshot_hash TEXT NOT NULL
 );
 

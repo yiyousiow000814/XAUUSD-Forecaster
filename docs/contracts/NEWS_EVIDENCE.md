@@ -231,20 +231,31 @@ in an existing report and describe those facts; the immutable matched ID stays
 in the audit record rather than in display prose. Legacy display prose is
 normalized at the presentation boundary without mutating its stored evidence.
 
-Every live decision records semantic-pipeline health. A newly received
-candidate gets one five-minute decision interval to finish its current-contract
-annotation. An annotation that satisfies the current model-admission semantics
-gets one interval from annotation completion to finish its current impact and
-identity review. A current job in backoff or dead letter closes the applicable
-gate immediately. Otherwise unresolved work closes it after that interval.
-Only recent evidence still inside its configured actionable lifetime can close
-the decision gate; historical archive and recovery backfill remain observable
-without pausing current inference. A stale/missing annotator heartbeat or no
-usable model credential also makes the pipeline unhealthy. Every news-dependent
-model must then append `WAIT` with `NEWS_PIPELINE_UNHEALTHY`; `MARKET_ONLY`
-remains observable as the control. Recovery requires the actual current-contract
-backlog and runtime dependency failures to clear. A provider status page or
-synthetic probe alone cannot reopen the gate.
+Every live decision records two separate frozen facts. Operator health retains
+current backlog, retry, terminal-work, heartbeat, credential, and source
+failures. News-input coverage records whether the exact evidence
+visible to that decision was trustworthy enough for model use. Operational
+`WARNING` or `ERROR` never implies by itself that news input was unavailable.
+
+News-input coverage has four states. `AVAILABLE` means normal observation with
+usable point-in-time evidence. `DEGRADED` means usable evidence or observable
+collection remains available while some current work or sources are incomplete.
+`QUIET` means zero eligible events while collection, registered source polling,
+and semantic processing remain observable. `UNAVAILABLE` means zero trustworthy
+current evidence while the observation path is materially unobservable or
+current actionable work prevents zero from being interpreted as a real quiet
+environment. Only `UNAVAILABLE` forces news-dependent identities to append
+`WAIT` with `NEWS_INPUT_UNAVAILABLE`; `MARKET_ONLY` remains independent.
+
+Pending, recovering, overdue, or terminal annotation and impact items remain
+operational evidence. With other usable decision-time evidence they make
+coverage `DEGRADED`, not unavailable. A partial source failure is treated the
+same way while other registered sources remain observable. No pending-count or
+pending-ratio threshold is an input-availability rule. Coverage stores the
+usable Core and Broad event counts, stage-specific unresolved counts, recovery
+and terminal/overdue counts, operational reason codes, registered-source
+observability summary, and hashes of both the visible evidence and coverage
+snapshot. The record is append-only and is never recomputed after the decision.
 
 Archive semantic recovery consumes the same metered scheduler and never
 backdates model visibility, training eligibility, decisions, or predictions.
@@ -284,6 +295,18 @@ residual Ridge consumes these values as `sample_weight`; repeated visibility
 does not create additional event votes. Canonical reporting organizations also
 receive one bounded source budget, so several events from one publisher cannot
 dominate several independent sources merely through volume.
+
+Rows frozen as `AVAILABLE`, `DEGRADED`, or `QUIET` remain eligible for news
+learning when the market and label contracts pass. Observable zero-news rows
+share one bounded event-equivalent environment budget per generation, so the
+model can learn a real quiet input without high-frequency quiet decisions
+overwhelming independent events. `UNAVAILABLE` rows remain eligible for the
+Market-only fit but are excluded from news residual and News-only fits; an
+infrastructure outage is never taught as economically zero news.
+Pre-coverage live rows whose frozen semantic snapshot was unhealthy are also
+excluded from news-specific fitting because their historical coverage cannot be
+reclassified without inventing evidence; their Market-only learning remains
+available.
 
 One complete generation contains Market-only, News residual, Full, Broad News
 residual, and Broad Full. All five share one cutoff, policy version, event

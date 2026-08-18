@@ -492,6 +492,10 @@ def test_recent_actionable_impact_backoff_fails_closed_immediately(
     assert health["actionable_failure_counts"] == {
         "ACTIVE_IMPACT": {"PROVIDER_UNAVAILABLE": 1},
     }
+    assert health["unresolved_annotation_count"] == 0
+    assert health["unresolved_impact_count"] == 1
+    assert health["recovering_count"] == 1
+    assert health["terminal_or_overdue_count"] == 0
 
 
 def test_terminal_actionable_impact_remains_operator_error(
@@ -526,6 +530,8 @@ def test_terminal_actionable_impact_remains_operator_error(
         "ACTIONABLE_NEWS_IMPACT_PENDING",
         "ACTIONABLE_NEWS_IMPACT_TERMINAL",
     )
+    assert health["recovering_count"] == 0
+    assert health["terminal_or_overdue_count"] == 1
 
 
 def test_historical_impact_backfill_does_not_close_current_gate(

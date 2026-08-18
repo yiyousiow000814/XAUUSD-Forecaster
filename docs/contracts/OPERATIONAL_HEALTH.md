@@ -196,11 +196,13 @@ its old pending reason must not masquerade as a newly observed semantic failure
 when no market decision is expected; current independent news and AI failures
 remain visible through their own component and scheduler detectors.
 
-Decision-time semantic readiness remains fail-closed whenever required current
-semantics or impact evidence is incomplete. Operator presentation classifies a
-future bounded retry as recovery and keeps the pending reason visible; it
-escalates terminal work or a retry overdue beyond the scheduler's task SLA to
-error. Local admission (`MODEL_CAPACITY_DEFERRED` and `LOCAL_TPM_LIMIT`),
+Decision-time semantic health keeps incomplete current semantics and impact
+evidence visible without acting as the model-input gate. The separate frozen
+news-input coverage contract in `NEWS_EVIDENCE.md` decides whether a news-aware
+identity can run. Operator presentation classifies a future bounded retry as
+recovery and keeps the pending reason visible; it escalates terminal work or a
+retry overdue beyond the scheduler's task SLA to error. Local admission
+(`MODEL_CAPACITY_DEFERRED` and `LOCAL_TPM_LIMIT`),
 provider pacing (`PROVIDER_DISPATCH_DEFERRED`), and provider transport
 (`PROVIDER_HTTP_ERROR`) remain distinct evidence. Presentation severity never
 changes, deletes, or retroactively enriches decision snapshots, prediction
