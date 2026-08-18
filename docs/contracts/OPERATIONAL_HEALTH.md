@@ -157,12 +157,25 @@ An absent or unreadable evidence source must never be interpreted as healthy.
 Supervised workers must refresh their runtime heartbeat independently of batch
 completion while a bounded provider or I/O operation is in progress. Progress
 counters supplement this pulse; they are not the only proof of liveness.
-Expected weekly market closure is the only exception to market-component
-freshness alarms: quote, decision, and outcome components report
-`MARKET_CLOSED` during that clock window. A clock-classified weekly closure
-records the payload generation time as its observation boundary. Missing broker
-evidence outside the weekly closure remains `DATA_UNAVAILABLE` and must not be
-normalized to healthy.
+Broker-native cTrader `Symbol.MarketHours` is authoritative for daily market
+closure. Its `market-session.json` heartbeat is state telemetry and must remain
+fresh on the Algo timer independently of quote ticks. Python and dashboard code
+must not hard-code or infer a daily maintenance window. Missing or stale broker
+evidence outside the bounded weekend fallback remains `DATA_UNAVAILABLE`; quote
+or decision silence alone must never be normalized to closure.
+
+Authoritative `CLOSED` and bounded weekend-fallback `WEEKLY_CLOSED` suspend only
+freshness clocks whose outputs are not expected during closure. Quote, decision,
+outcome, and decision-time semantic-snapshot components report `MARKET_CLOSED`
+instead of aging into component faults. A clock-classified weekly closure records
+the payload generation time as its observation boundary. Fresh broker `OPEN`
+evidence immediately restores normal quote and decision freshness enforcement.
+
+News collection, annotation, impact processing, sources, and scheduling continue
+independently while XAUUSD is closed. An old decision-time semantic snapshot or
+its old pending reason must not masquerade as a newly observed semantic failure
+when no market decision is expected; current independent news and AI failures
+remain visible through their own component and scheduler detectors.
 
 The outcome settler runs inside the supervised collector loop. Its health uses
 that loop's successful heartbeat, not the timestamp of the most recently
