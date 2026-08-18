@@ -1708,8 +1708,9 @@ def _news_metrics(
     }
 
 
-def _dashboard_payload(database: Path) -> dict:
-    now = datetime.now(UTC)
+def _dashboard_payload(database: Path, *, clock=None) -> dict:
+    clock = clock or (lambda: datetime.now(UTC))
+    now = clock()
     credentials = configured_api_credentials()
     gemini_keys = tuple(credential.api_key for credential in credentials)
     gemini_account_count = len({
@@ -2246,6 +2247,11 @@ def _dashboard_payload(database: Path) -> dict:
             "低波动" if u5_percentile is not None else "等待样本"
         ),
     }
+    # Snapshot construction performs bounded but potentially blocking SQLite
+    # and evidence work. Refresh the wall clock before validating continuously
+    # published runtime heartbeats so a current broker receipt cannot appear to
+    # come from the future relative to the snapshot's initial query boundary.
+    now = clock()
     age_seconds = None
     if component_times["quote_bridge"]:
         age_seconds = max(
@@ -2400,13 +2406,6 @@ def _dashboard_payload(database: Path) -> dict:
         "outcome_settler", 420,
         str(collector_heartbeat.get("last_error") or "") or None,
     )
-    if market_session in {"CLOSED", "WEEKLY_CLOSED"}:
-        for market_component in (
-            quote_component, decision_component, outcome_component,
-        ):
-            market_component["status"] = "MARKET_CLOSED"
-            market_component["last_error"] = None
-
     runtime_update_failure = None
     runtime_update_path = database.parent / "runtime-update-state.json"
     if runtime_update_path.exists():
@@ -2454,6 +2453,15 @@ def _dashboard_payload(database: Path) -> dict:
         # integrity check succeeds. Reuse that durable proof.
         "integrity_check": backup_integrity_component,
     }
+    if market_session in {"CLOSED", "WEEKLY_CLOSED"}:
+        for component_name in (
+            "quote_bridge",
+            "decision_collector",
+            "outcome_settler",
+            "news_semantic_pipeline",
+        ):
+            system_components[component_name]["status"] = "MARKET_CLOSED"
+            system_components[component_name]["last_error"] = None
     operational_health = extend_with_component_alerts(
         operational_health,
         components=system_components,

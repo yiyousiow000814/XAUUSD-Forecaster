@@ -2096,6 +2096,130 @@ def test_gemini_accepts_chinese_primary_prose_with_natural_english_names(
     annotation_module._validate_chinese_result(vector)
 
 
+def _production_shaped_identity_annotation() -> tuple[dict, str]:
+    evidence = "Corbin Bernsen's Arnie Becker was a mainstay on L.A. Law."
+    source = (
+        f"{evidence} The character remained central from beginning "
+        "to end and remained central across the full run of the legal drama. "
+        "Jill Eikenberry spent eight years playing Ann Kelsey. "
+        "Richard Dysart played Leland McKenzie from the pilot to the finale. "
+        "The series aired on NBC as L.A. Law."
+    )
+    summary = (
+        "这些演员包括饰演Arnie Becker的Corbin Bernsen、"
+        "饰演Ann Kelsey的Jill Eikenberry，以及饰演Leland McKenzie"
+        "的Richard Dysart。"
+    )
+    result = _v15_annotation({
+        "headline_zh": "《洛杉矶法律》演员回顾",
+        "summary_zh": summary,
+        "event_type": "entertainment_news",
+        "entities": [
+            "L.A. Law", "NBC", "Corbin Bernsen", "Jill Eikenberry",
+            "Richard Dysart",
+        ],
+        "hawkishness": 0.0, "inflation_impulse": 0.0,
+        "growth_impulse": 0.0, "geopolitical_risk": 0.0,
+        "usd_impulse": 0.0, "novelty": 0.0, "confidence": 1.0,
+    }, evidence, primary_story_title_zh="《洛杉矶法律》演员回顾")
+    return result, source
+
+
+def test_chinese_display_accepts_source_grounded_actor_and_character_names() -> None:
+    result, source = _production_shaped_identity_annotation()
+
+    annotation_module._validate_chinese_result(
+        result, headline="L.A. Law cast", body=source,
+    )
+
+
+@pytest.mark.parametrize(
+    "field", (
+        "headline_zh", "summary_zh", "primary_story_title_zh",
+        "semantic_reason_zh",
+    ),
+)
+def test_chinese_display_fields_share_declared_identity_context(field) -> None:
+    identities = [
+        "Arnie Becker", "Corbin Bernsen", "Ann Kelsey", "Jill Eikenberry",
+        "Leland McKenzie", "Richard Dysart",
+    ]
+    value = "相关角色包括 " + "、".join(identities) + "。"
+    result = {
+        "headline_zh": "演员消息",
+        "summary_zh": "报道使用中文说明演员身份。",
+        "primary_story_title_zh": "演员身份回顾",
+        "actor": "", "object": "", "entities": identities,
+    }
+    result[field] = value
+
+    annotation_module._validate_chinese_result(result)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "相关身份包括 l.a. law、NBC、OPEN-ROUTER 与 S&P 500。",
+        "相关演员包括 arnie becker、corbin bernsen、ann kelsey、"
+        "jill eikenberry、leland mckenzie 与 richard dysart。",
+    ),
+)
+def test_chinese_display_accepts_bounded_grounded_identity_variants(value) -> None:
+    source = (
+        "L.A. Law aired on NBC. OpenRouter and Open-Router are product names. "
+        "The S&P 500 was mentioned. Character Arnie Becker was played by actor "
+        "Corbin Bernsen. Character Ann Kelsey was played by actor Jill Eikenberry. "
+        "Character Leland McKenzie was played by actor Richard Dysart."
+    )
+    result = {
+        "headline_zh": "身份说明",
+        "summary_zh": value,
+        "primary_story_title_zh": "身份回顾",
+        "actor": "", "object": "", "entities": [],
+    }
+
+    annotation_module._validate_chinese_result(
+        result, headline="L.A. Law", body=source,
+    )
+
+
+@pytest.mark.parametrize(
+    "value,source",
+    (
+        (
+            "摘要：The company said it expects growth。",
+            "The company said it expects growth in the source article.",
+        ),
+        ("市场 Market Update", "The source section is titled Market Update."),
+        (
+            "摘要：This is an important development。",
+            "This is an important development according to the article.",
+        ),
+        (
+            "这些演员包括 The actor appeared in every episode。",
+            "The actor appeared in every episode of the series.",
+        ),
+        (
+            "摘要：Economic Recovery Forecast。",
+            "The report heading is Economic Recovery Forecast.",
+        ),
+    ),
+)
+def test_source_words_cannot_bypass_chinese_primary_validation(
+    value, source,
+) -> None:
+    result = {
+        "headline_zh": "中文标题", "summary_zh": value,
+        "primary_story_title_zh": "中文主题",
+        "actor": "", "object": "", "entities": [],
+    }
+
+    with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
+        annotation_module._validate_chinese_result(
+            result, headline="Source article", body=source,
+        )
+
+
 @pytest.mark.parametrize("foreign_text", [
     "市场更新：Федеральная резервная система сохранила ставку。",
     "市场更新：الذهب ارتفع بعد قرار البنك المركزي。",
@@ -2516,6 +2640,38 @@ def test_display_checkpoint_accepts_declared_latin_company_names_without_model_c
     )
 
     assert repaired["primary_story_title_zh"] == "Stripe 收购 OpenRouter"
+
+
+def test_display_checkpoint_accepts_grounded_names_without_model_call(
+    monkeypatch,
+) -> None:
+    result, source = _production_shaped_identity_annotation()
+    checkpoint = {
+        "semantic_result": result,
+        "llm_model_version": annotation_module.FALLBACK_GEMINI_MODEL,
+        "invalid_fields": ["summary_zh"],
+        "rejection_reason": (
+            "ENGLISH_PROSE_DOMINANT: Gemini summary_zh is not Chinese-primary"
+        ),
+    }
+    monkeypatch.setattr(
+        annotation_module._GeminiRequestPool,
+        "_repair_display_until_valid",
+        lambda *_args, **_kwargs: pytest.fail(
+            "valid checkpoint must not call a provider"
+        ),
+    )
+
+    repaired, model = object.__new__(
+        annotation_module._GeminiRequestPool
+    ).repair_display_checkpoint(
+        0, annotation_module.DEFAULT_GEMINI_MODEL, checkpoint,
+        "L.A. Law cast", source,
+        prompt_version=annotation_module.PROMPT_VERSION,
+    )
+
+    assert repaired["summary_zh"] == result["summary_zh"]
+    assert model == annotation_module.FALLBACK_GEMINI_MODEL
 
 
 def test_story_title_does_not_treat_undeclared_english_prose_as_an_identifier() -> None:
