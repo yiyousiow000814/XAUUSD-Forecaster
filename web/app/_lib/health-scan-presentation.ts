@@ -1,4 +1,5 @@
 import type { OperationalIncident } from "./operational-incidents";
+import { operationalIncidentActionLabels } from "./operational-incident-presentation";
 
 export type HealthTone = "healthy" | "warning" | "error" | "neutral";
 
@@ -37,6 +38,21 @@ export function componentScanState(status: string): ScanState {
   return componentStates[status] ?? unknownState;
 }
 
+export function operatorComponentScanState(
+  status: string,
+  incident: OperationalIncident | null,
+): ScanState {
+  if (!incident) return componentScanState(status);
+  const tone: HealthTone = incident.severity === "ERROR" || incident.action_state === "ACTION_REQUIRED"
+    ? "error" : "warning";
+  return {
+    tone,
+    symbol: tone === "error" ? "✕" : "⚠",
+    label: operationalIncidentActionLabels[incident.action_state],
+    attention: true,
+  };
+}
+
 export function sourceScanState(health: string): ScanState {
   return sourceStates[health] ?? unknownState;
 }
@@ -45,8 +61,7 @@ export function sortAttentionFirst<T>(items: T[], state: (item: T) => ScanState)
   return [...items].sort((left, right) => Number(state(right).attention) - Number(state(left).attention));
 }
 
-export function componentAggregate(statuses: string[]): string {
-  const states = statuses.map(componentScanState);
+export function componentAggregate(states: ScanState[]): string {
   const healthy = states.filter(state => state.tone === "healthy").length;
   const warning = states.filter(state => state.tone === "warning").length;
   const error = states.filter(state => state.tone === "error").length;

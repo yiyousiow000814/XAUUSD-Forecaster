@@ -10,7 +10,7 @@ import { operationalEventDiagnostic, operationalIncidentActionLabels, operationa
 import { affectedOperationalScopeCount, correlateOperationalEvents, type OperationalIncident } from "../_lib/operational-incidents";
 import { normalizeOperationalEvent, schedulerTaskLabel, type AssistantOperationalHealth, type OperationalAlert, type OperationalHealth } from "../_lib/operational-health";
 import { sourceHealthErrorPresentation } from "../_lib/source-health-presentation";
-import { componentAggregate, componentScanState, primaryOperatorAction, sortAttentionFirst, sourceAggregate, sourceScanState } from "../_lib/health-scan-presentation";
+import { componentAggregate, operatorComponentScanState, primaryOperatorAction, sortAttentionFirst, sourceAggregate, sourceScanState, type ScanState } from "../_lib/health-scan-presentation";
 
 export type StatusPayload = {
   preview_status_summary?: boolean;
@@ -93,7 +93,7 @@ export function IncidentCard({ incident }: { incident: OperationalIncident }) {
   return <article className={`operational-incident-card is-${incident.severity.toLowerCase()}`}>
     <header>
       <div className="incident-primary">
-        <div className="incident-kicker"><span>{incident.severity}</span><b>{operationalScopeLabel(incident.root_event.scope)}</b></div>
+        <div className="incident-kicker"><span>{incident.severity === "ERROR" ? "错误" : incident.severity === "WARNING" ? "警告" : "信息"}</span><b>{operationalScopeLabel(incident.root_event.scope)}</b></div>
         <h3>{incident.title_zh}</h3>
         <p>{incident.summary_zh}</p>
       </div>
@@ -162,7 +162,7 @@ function SourceHealthCard({ item }: { item: NewsSourceHealth }) {
     </div> : null}
     {state.attention && item.semantic_message ? <p className="source-semantic-message">{item.semantic_message}</p> : null}
     <details className="source-technical-details">
-      <summary>{state.attention ? "技术详情" : "详情"}</summary>
+      <summary>{state.attention ? "技术详情" : "详情 ›"}</summary>
       <div className="source-evidence-counts"><strong><CountValue value={item.item_count} suffix=" 篇" /></strong><small><CountValue value={item.revision_count} format="exact" suffix=" revisions" /> · 完整正文 <CountValue value={item.full_text_count} format="exact" /></small><small>轮询 <CountValue value={item.ok_count} format="exact" />/<CountValue value={item.poll_count} format="exact" /> 完成</small></div>
       <dl>
         <div><dt>职责</dt><dd>{item.role}</dd></div>
@@ -181,9 +181,8 @@ function SourceHealthCard({ item }: { item: NewsSourceHealth }) {
 type ComponentHealth = StatusPayload["system"]["components"][string];
 
 function ComponentHealthCard({
-  name, item, incident,
-}: { name: string; item: ComponentHealth; incident: OperationalIncident | null }) {
-  const state = componentScanState(item.status);
+  name, item, incident, state,
+}: { name: string; item: ComponentHealth; incident: OperationalIncident | null; state: ScanState }) {
   const nextRetryAt = incident ? operationalIncidentNextRetryAt(incident) : null;
   return <article className={`${state.attention ? "is-attention" : "is-healthy"} state-${state.tone}`}>
     <header>
@@ -197,7 +196,7 @@ function ComponentHealthCard({
       {nextRetryAt ? <time>下次尝试 {localTime(nextRetryAt)}</time> : null}
     </div> : null}
     <details className="component-technical-details">
-      <summary>{state.attention ? "技术详情" : "详情"}</summary>
+      <summary>{state.attention ? "技术详情" : "详情 ›"}</summary>
       <dl>
         <div><dt>职责</dt><dd>{componentRole(name)}</dd></div>
         <div><dt>最近成功</dt><dd>{localTime(item.last_success)}</dd></div>
@@ -258,13 +257,6 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
 
   const currentPhase: CurrentDataPhase = error
     ? "error" : !payload || syncingCurrent ? "loading" : payload.preview_status_summary ? "snapshot" : "ready";
-  const components = sortAttentionFirst(Object.entries(payload?.system.components ?? {}).map(([name, item]) => ({
-    name,
-    item,
-  })), component => componentScanState(component.item.status));
-  const componentHasAttention = components.some(component => componentScanState(component.item.status).attention);
-  const sources = sortAttentionFirst(payload?.news_source_health ?? [], source => sourceScanState(source.health));
-  const sourceHasAttention = sources.some(source => sourceScanState(source.health).attention);
   const assistantUnavailableEvent: OperationalAlert = normalizeOperationalEvent({
     code: "OPS_ASSISTANT_HEALTH_UNAVAILABLE", severity: "ERROR", scope: "ASSISTANT_D1",
     message_zh: "Assistant 云端运行状态无法读取。", blocking: true, evidence: {},
@@ -274,6 +266,13 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
     ...(assistantHealthError ? [assistantUnavailableEvent] : assistantHealth?.current ? assistantHealth.alerts : []),
   ];
   const incidents = correlateOperationalEvents(operationalEvents);
+  const components = sortAttentionFirst(Object.entries(payload?.system.components ?? {}).map(([name, item]) => {
+    const incident = incidentForScope(incidents, name);
+    return { name, item, incident, state: operatorComponentScanState(item.status, incident) };
+  }), component => component.state);
+  const componentHasAttention = components.some(component => component.state.attention);
+  const sources = sortAttentionFirst(payload?.news_source_health ?? [], source => sourceScanState(source.health));
+  const sourceHasAttention = sources.some(source => sourceScanState(source.health).attention);
   const affectedScopeCount = affectedOperationalScopeCount(incidents);
   const incidentStatus = incidents.some(incident => incident.severity === "ERROR")
     ? "error" : incidents.length ? "warning" : "healthy";
@@ -290,17 +289,19 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
     <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
     <section className={`health-at-a-glance is-${incidentStatus}`} aria-label="当前系统结论">
       <span className="health-conclusion-mark" aria-hidden="true">{incidentStatus === "error" ? "✕" : incidentStatus === "warning" ? "⚠" : "✓"}</span>
-      <div><small>当前结论</small><strong>{incidentStatus === "error" ? "运行异常" : incidentStatus === "warning" ? "运行警告" : "运行正常"}</strong></div>
-      <div className="health-current-action"><small>当前处置</small><strong>{operatorAction ? operationalIncidentActionLabels[operatorAction] : "当前没有需要处理的问题"}</strong><span>{operatorAction === "AUTO_RECOVERING" && operatorRetryAt ? `下次尝试 ${localTime(operatorRetryAt)}` : affectedScopeCount ? `${affectedScopeCount} 个子系统受影响` : "所有监测项处于预期状态"}</span></div>
-      <b className="health-operator-now">{operatorAction === "ACTION_REQUIRED" ? "现在需要人工处理" : "当前无需人工处理"}</b>
+      <div className="health-current-conclusion">
+        <small>当前结论</small>
+        <strong>{incidentStatus === "error" ? "运行异常" : incidentStatus === "warning" ? "运行警告" : "运行正常"}</strong>
+        <span>{operatorAction ? operationalIncidentActionLabels[operatorAction] : "无需处理"} · {operatorAction === "AUTO_RECOVERING" && operatorRetryAt ? `下次尝试 ${localTime(operatorRetryAt)}` : affectedScopeCount ? `${affectedScopeCount} 个子系统受影响` : "所有监测项处于预期状态"}</span>
+      </div>
     </section>
     <section id="operational-alerts" className={`operational-health-panel incident-summary-panel is-${incidentStatus}`} aria-label="运行问题与关联证据">
       <header><div><p className="eyebrow">CURRENT PROBLEMS</p><h2>当前问题</h2></div><p>{incidents.length ? `${incidents.length} 个问题 · 异常优先` : "当前没有运行问题"}</p></header>
       {incidents.length ? <div className="operational-incident-list">{incidents.map(incident => <IncidentCard incident={incident} key={incident.incident_key} />)}</div> : <p className="operational-all-clear">当前没有达到告警阈值的运行异常。</p>}
     </section>
     <section className={`component-status ${componentHasAttention ? "has-attention" : ""}`} aria-label="数据链路组件状态">
-      <header><div><p className="eyebrow">SYSTEM COMPONENTS</p><h2>系统组件</h2></div><strong>{componentAggregate(components.map(component => component.item.status))}</strong></header>
-      <div className="component-card-grid">{components.map(({ name, item }) => <ComponentHealthCard name={name} item={item} incident={incidentForScope(incidents, name)} key={name} />)}</div>
+      <header><div><p className="eyebrow">SYSTEM COMPONENTS</p><h2>系统组件</h2></div><strong>{componentAggregate(components.map(component => component.state))}</strong></header>
+      <div className="component-card-grid">{components.map(({ name, item, incident, state }) => <ComponentHealthCard name={name} item={item} incident={incident} state={state} key={name} />)}</div>
     </section>
     <section className={`source-health ${sourceHasAttention ? "has-attention" : ""}`} aria-label="新闻来源状态">
       <header><div><p className="eyebrow">NEWS SOURCES</p><h2>新闻来源</h2></div><strong>{sourceAggregate(sources.map(source => source.health))}</strong></header>

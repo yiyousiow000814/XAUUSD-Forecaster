@@ -35,6 +35,7 @@ const { sourceHealthErrorPresentation } = await import("../app/_lib/source-healt
 const {
   componentAggregate,
   componentScanState,
+  operatorComponentScanState,
   primaryOperatorAction,
   sortAttentionFirst,
   sourceAggregate,
@@ -228,6 +229,13 @@ test("presents health as an action-first scanning contract", () => {
   assert.deepEqual(componentScanState("WARN"), {
     tone: "warning", symbol: "⚠", label: "警告", attention: true,
   });
+  const staleWithActionRequiredIncident = operatorComponentScanState("STALE", {
+    severity: "ERROR", action_state: "ACTION_REQUIRED",
+  });
+  assert.deepEqual(staleWithActionRequiredIncident, {
+    tone: "error", symbol: "✕", label: "需要人工处理", attention: true,
+  });
+  assert.equal(componentScanState("STALE").tone, "warning");
   assert.deepEqual(sourceScanState("ERROR"), {
     tone: "error", symbol: "✕", label: "错误", attention: true,
   });
@@ -239,7 +247,10 @@ test("presents health as an action-first scanning contract", () => {
     sortAttentionFirst(["HEALTHY", "WARMING_UP"], sourceScanState),
     ["WARMING_UP", "HEALTHY"],
   );
-  assert.equal(componentAggregate(["OK", "OK", "WARN", "ERROR"]), "2 正常 · 1 警告 · 1 错误");
+  assert.equal(componentAggregate([
+    componentScanState("OK"), componentScanState("OK"),
+    componentScanState("WARN"), staleWithActionRequiredIncident,
+  ]), "2 正常 · 1 警告 · 1 错误");
   assert.equal(sourceAggregate(["HEALTHY", "HEALTHY", "WARMING_UP"]), "2 正常 · 1 等待发布");
 });
 
@@ -1252,9 +1263,10 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(view, /CURRENT PROBLEMS/);
   assert.match(view, /className=\{`health-at-a-glance is-\$\{incidentStatus\}`\}/);
   assert.match(view, /primaryOperatorAction\(incidents\)/);
+  assert.match(view, /operatorComponentScanState\(item\.status, incident\)/);
   assert.match(view, /operationalIncidentActionLabels\[operatorAction\]/);
-  assert.match(view, /当前处置/);
-  assert.match(view, /当前无需人工处理/);
+  assert.match(view, /无需处理/);
+  assert.doesNotMatch(view, /现在需要人工处理|当前无需人工处理/);
   assert.doesNotMatch(view, /<small>自动恢复<\/small>|<small>人工处理<\/small>/);
   assert.match(view, /incident\.root_event/);
   assert.match(view, /affectedOperationalScopeCount/);
@@ -1279,9 +1291,13 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(view, /item\.freshness_reference_status === "PARTIAL"/);
   assert.match(view, /className="component-technical-details"/);
   assert.match(view, /className="source-technical-details"/);
-  assert.match(view, /state\.attention \? "技术详情" : "详情"/);
+  assert.match(view, /state\.attention \? "技术详情" : "详情 ›"/);
   assert.match(view, /item\.health === "WARMING_UP" && !item\.last_error/);
   assert.match(view, /item\.last_error \?\? "无已记录错误"/);
+  assert.match(view, /<dt>原始状态<\/dt><dd><code>\{item\.status\}<\/code><\/dd>/);
+  assert.match(view, /incident\.severity === "ERROR" \? "错误"/);
+  assert.match(view, /severity=\{event\.severity\}/);
+  assert.match(readFileSync(new URL("../app/_lib/operational-incident-presentation.ts", import.meta.url), "utf8"), /daily_news_brief: "每日新闻简报"/);
   assert.match(view, /<dt>关联问题<\/dt><dd>\{incident\.summary_zh\}<\/dd>/);
   assert.match(view, /projection\.reason_code/);
   assert.match(view, /className="health-technical-section"/);
@@ -1296,10 +1312,13 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(view, /className="health-state-mark" aria-label=\{state\.label\}>\{state\.symbol\}/);
   assert.match(view, /className="health-state-text">\{state\.label\}/);
   assert.match(css, /\.component-status article\.is-healthy,\.source-health article\.is-healthy \{[^}]*grid-template-columns:minmax\(0,1fr\) auto/);
+  assert.match(css, /\.component-card-grid>article\.is-healthy:has\(>details\[open\]\),\.source-health-grid>article\.is-healthy:has\(>details\[open\]\) \{[^}]*grid-column:1\/-1/);
   assert.match(css, /\.component-status article\.is-attention,\.source-health article\.is-attention \{[^}]*grid-column:1\/-1/);
   assert.match(css, /\.component-current-problem \{[^}]*min-height:46px/);
   assert.match(css, /\.component-card-grid \{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
   assert.match(css, /\.source-health-grid \{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(css, /\.component-card-grid \{[^}]*align-items:start/);
+  assert.match(css, /\.source-health-grid \{[^}]*align-items:start/);
   assert.doesNotMatch(css, /\.component-status>div \{[^}]*grid-template-columns:repeat\(6/);
   assert.doesNotMatch(css, /\.component-status article:not\(:nth-child\(3n\)\)/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.component-card-grid,\.source-health-grid \{ grid-template-columns:1fr; \}/);
@@ -1307,6 +1326,10 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(css, /\.incident-technical-details > button[^}]*min-height:44px/);
   assert.match(css, /\.component-technical-details>summary,\.source-technical-details>summary \{[^}]*min-height:44px/);
   assert.match(css, /article\.is-healthy summary,\.source-health article\.is-healthy summary \{[^}]*min-height:48px/);
+  assert.match(css, /article\.is-healthy,\.source-health article\.is-healthy \{[^}]*border-bottom:1px solid rgba\(17,17,15,\.16\)/);
+  assert.match(css, /\.component-status article h3,\.source-health article>header strong \{[^}]*font-family:var\(--font-sans\)/);
+  assert.match(css, /\.health-at-a-glance,\.incident-summary-panel,\.component-status,\.source-health \{[^}]*font-family:var\(--font-sans\)/);
+  assert.match(css, /\.incident-summary-panel time,\.component-status time,\.source-health time,\.incident-raw-evidence \{[^}]*font-family:var\(--font-mono\)/);
   assert.match(css, /\.operational-incident-card \{[^}]*min-width:0/);
   assert.match(css, /\.operational-alert-toggle \{ display:none; cursor:pointer; \}/);
   assert.match(css, /\.operational-alert-banner\.is-expanded \.operational-alert-detail \{ display:flex/);

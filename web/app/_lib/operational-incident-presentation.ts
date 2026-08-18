@@ -18,7 +18,7 @@ const componentLabels: Record<string, string> = {
   sites_synchronizer: "网页同步器",
   sqlite_backup: "SQLite 备份",
   integrity_check: "数据库完整性检查",
-  daily_news_brief: "Daily Brief",
+  daily_news_brief: "每日新闻简报",
 };
 
 export function operationalScopeLabel(scope: string): string {
