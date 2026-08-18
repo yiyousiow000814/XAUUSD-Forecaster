@@ -40,6 +40,7 @@ type StatusPayload = {
     runtime_update_failure?: RuntimeUpdateFailure | null;
     components: Record<string, { last_success: string | null; age_seconds: number | null; status: string; last_error: string | null }>;
   };
+  operational_health?: { status: "HEALTHY" | "WARNING" | "ERROR" };
   annotation_queue: {
     configured_key_count: number;
     configured_account_count?: number;
@@ -191,7 +192,7 @@ export default function StatusView() {
 
       <section className="status-hero">
         <div><p className="eyebrow">LOCAL QUOTA LEDGER / PACIFIC DAY</p><h1>AI 模型使用状态</h1></div>
-        <SystemStatePill loading={payload === null && !error} error={Boolean(error)} online={Boolean(payload?.system.online)} marketSession={payload?.system.market_session} />
+        <SystemStatePill loading={payload === null && !error} error={Boolean(error)} hasSnapshot={payload !== null} online={Boolean(payload?.system.online)} marketSession={payload?.system.market_session} operationalStatus={payload?.operational_health?.status} />
       </section>
 
       {error ? <div className="error-banner">状态读取失败：{error}</div> : null}

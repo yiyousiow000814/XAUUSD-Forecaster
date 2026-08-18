@@ -46,6 +46,7 @@ type Payload = {
       quote_bridge?: { status?: string | null };
     };
   };
+  operational_health?: { status: "HEALTHY" | "WARNING" | "ERROR" };
   latest: Decision & {
     source_event_time: string;
     source_received_time: string;
@@ -227,9 +228,9 @@ export default function LiveRoomView() {
           <DashboardLink className="audit-link" href="/assistant">Assistant</DashboardLink>
           <DashboardLink className="audit-link" href="/status">系统状态</DashboardLink>
           <DashboardLink ariaLabel="新闻、决策与结果" className="audit-link" href="/audit?view=decisions">新闻 / 结果 <span aria-hidden="true">→</span></DashboardLink>
-          <SystemStatePill loading={loading} error={Boolean(error)} online={Boolean(payload?.system.online)} marketSession={payload?.system.market_session} />
+          <SystemStatePill loading={loading} error={Boolean(error)} hasSnapshot={payload !== null} online={Boolean(payload?.system.online)} marketSession={payload?.system.market_session} operationalStatus={payload?.operational_health?.status} />
         </div>
-        <MobileDashboardNav current="live" status={<SystemStatePill loading={loading} error={Boolean(error)} online={Boolean(payload?.system.online)} marketSession={payload?.system.market_session} />} />
+        <MobileDashboardNav current="live" status={<SystemStatePill loading={loading} error={Boolean(error)} hasSnapshot={payload !== null} online={Boolean(payload?.system.online)} marketSession={payload?.system.market_session} operationalStatus={payload?.operational_health?.status} />} />
       </header>
 
       <section className="hero">

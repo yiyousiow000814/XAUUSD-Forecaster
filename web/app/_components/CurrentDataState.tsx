@@ -41,5 +41,11 @@ export function CurrentDataNotice({ phase, snapshotTime, snapshotKind = "fallbac
     }
     return <div className="current-data-notice is-snapshot"><b>实时同步暂不可用</b><span>当前明确显示构建快照{snapshotTime ? ` · ${snapshotTime}` : ""}，不会冒充实时数字。</span></div>;
   }
+  if (phase === "error") {
+    return <div className="current-data-notice is-error">
+      <b>{snapshotTime ? "状态更新失败，正在重试" : "状态不可用"}</b>
+      <span>{snapshotTime ? `最近状态 ${snapshotTime}` : "页面会自动重试。"}</span>
+    </div>;
+  }
   return null;
 }

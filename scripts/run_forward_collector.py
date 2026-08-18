@@ -34,7 +34,10 @@ from xauusd_forecaster.execution_learning import (  # noqa: E402
     append_due_exit_predictions,
     train_due_execution,
 )
-from xauusd_forecaster.runtime_health import write_runtime_heartbeat  # noqa: E402
+from xauusd_forecaster.runtime_health import (  # noqa: E402
+    RuntimeHeartbeatPulse,
+    write_runtime_heartbeat,
+)
 
 
 UTC = timezone.utc
@@ -165,15 +168,26 @@ def main() -> int:
     u5_path = local_root / "u5-state.json"
     u5_state = U5State.load(u5_path) if u5_path.exists() else U5State()
     engine = ForwardEngine(ledger, provider, u5_state)
-    news_status = engine.collect_news(datetime.now(UTC))
-    annotation_status = [{"status": "SEPARATE_PROCESS"}]
-    quote_root = args.market_jsonl if args.market_jsonl and args.market_jsonl.is_dir() else None
-    archived_quotes = (
-        archive_completed_quote_days(quote_root, initialized_at) if quote_root else []
+    write_runtime_heartbeat(
+        status_file, service="collector", state="STARTING",
     )
-    backup_path = backup_forward_ledger(
-        ledger, local_root / "backups", initialized_at
-    )
+    with RuntimeHeartbeatPulse(
+        status_file, service="collector", state="STARTING",
+    ):
+        news_status = engine.collect_news(datetime.now(UTC))
+        annotation_status = [{"status": "SEPARATE_PROCESS"}]
+        quote_root = (
+            args.market_jsonl
+            if args.market_jsonl and args.market_jsonl.is_dir()
+            else None
+        )
+        archived_quotes = (
+            archive_completed_quote_days(quote_root, initialized_at)
+            if quote_root else []
+        )
+        backup_path = backup_forward_ledger(
+            ledger, local_root / "backups", initialized_at
+        )
     print(
         json.dumps(
             {
@@ -190,15 +204,15 @@ def main() -> int:
         ),
         flush=True,
     )
-    write_runtime_heartbeat(
-        status_file, service="collector", state="STARTING",
-    )
     # Reconcile at startup even in --once mode.  A rule release must build its
     # compatible news generation from already matured point-in-time evidence;
     # it must not wait for 96 brand-new direction rows.
-    startup_reconciliation = reconcile_news_contract(
-        ledger, datetime.now(UTC), local_root / "models-v2"
-    )
+    with RuntimeHeartbeatPulse(
+        status_file, service="collector", state="STARTING",
+    ):
+        startup_reconciliation = reconcile_news_contract(
+            ledger, datetime.now(UTC), local_root / "models-v2"
+        )
     print(
         json.dumps(
             {"event": "NEWS_CONTRACT_RECONCILIATION", **startup_reconciliation},
@@ -222,6 +236,8 @@ def main() -> int:
         if row["latest"]
         else floor_five_minutes(ledger.forward_epoch)
     )
+    heartbeat = RuntimeHeartbeatPulse(status_file, service="collector")
+    heartbeat.start()
     try:
         while True:
             now = datetime.now(UTC)
@@ -312,13 +328,12 @@ def main() -> int:
                     ),
                     flush=True,
                 )
-            write_runtime_heartbeat(
-                status_file,
-                service="collector",
+            heartbeat.update(
                 work_items=len(appended_decisions) + len(completed_outcomes),
             )
             time.sleep(max(1.0, args.poll_seconds))
     finally:
+        heartbeat.close()
         ledger.close()
 
 

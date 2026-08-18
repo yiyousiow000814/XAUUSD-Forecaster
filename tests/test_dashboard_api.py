@@ -139,7 +139,7 @@ def test_semantic_component_separates_freshness_from_readiness() -> None:
 
     component = module._semantic_pipeline_component(fresh_pending, now=now)
 
-    assert component["status"] == "ERROR"
+    assert component["status"] == "WARN"
     assert component["age_seconds"] == 18
     assert component["last_error"] == "ACTIONABLE_NEWS_SEMANTICS_PENDING"
 
@@ -162,6 +162,60 @@ def test_semantic_component_separates_freshness_from_readiness() -> None:
     assert module._semantic_pipeline_component(
         stale_heartbeat, now=now,
     )["status"] == "STALE"
+
+    terminal = {
+        **fresh_pending,
+        "reason_codes_json": json.dumps([
+            "ACTIONABLE_NEWS_SEMANTICS_PENDING",
+            "ACTIONABLE_NEWS_SEMANTICS_TERMINAL",
+        ]),
+    }
+    assert module._semantic_pipeline_component(
+        terminal, now=now,
+    )["status"] == "ERROR"
+
+
+def test_news_collector_uses_process_heartbeat_with_bounded_grace() -> None:
+    module = _dashboard_module()
+    now = datetime(2026, 8, 18, 8, 40, tzinfo=UTC)
+
+    def component(age: float, *, state: str = "RUNNING") -> dict:
+        return module._collector_component(
+            {
+                "service": "collector",
+                "state": state,
+                "last_success": (now - timedelta(seconds=age)).isoformat(),
+                "last_error": None,
+            },
+            latest_poll=(now - timedelta(minutes=8)).isoformat(),
+            now=now,
+        )
+
+    assert component(60)["status"] == "OK"
+    assert component(60.1)["status"] == "WARN"
+    assert component(300)["status"] == "WARN"
+    assert component(300.1)["status"] == "STALE"
+    assert component(10, state="ERROR")["status"] == "STALE"
+    assert component(10)["status"] == "OK"
+
+
+def test_news_collector_recovery_depends_on_heartbeat_not_old_poll() -> None:
+    module = _dashboard_module()
+    now = datetime(2026, 8, 18, 8, 40, tzinfo=UTC)
+    old_poll = (now - timedelta(hours=1)).isoformat()
+
+    stale = module._collector_component({
+        "service": "collector", "state": "RUNNING",
+        "last_success": (now - timedelta(seconds=301)).isoformat(),
+    }, latest_poll=old_poll, now=now)
+    recovered = module._collector_component({
+        "service": "collector", "state": "RUNNING",
+        "last_success": now.isoformat(),
+    }, latest_poll=old_poll, now=now)
+
+    assert stale["status"] == "STALE"
+    assert recovered["status"] == "OK"
+    assert recovered["source_poll_age_seconds"] == 3600
 
 
 def test_deployment_status_does_not_mislabel_local_edits_as_remote_drift() -> None:

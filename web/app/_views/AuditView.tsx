@@ -264,6 +264,7 @@ type Payload = {
   };
   generated_at: string;
   system: { online: boolean; market_session?: "OPEN" | "CLOSED" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE"; source_of_truth: string; sites_mirror: string; deployment?: { runtime_git_sha: string | null; expected_git_sha: string | null; runtime_dirty: boolean; status: string; storyline_policy_version: string; payload_schema_version: string; payload_generated_at: string; source_database_epoch: string | null } };
+  operational_health?: { status: "HEALTHY" | "WARNING" | "ERROR" };
   counts: Record<string, number>;
   news_metrics?: NewsMetrics;
   annotation_queue: {
@@ -1175,9 +1176,9 @@ export default function AuditView() {
           <DashboardLink className="audit-link" href="/assistant">Assistant</DashboardLink>
           <DashboardLink className="audit-link" href="/status">系统状态</DashboardLink>
           <DashboardLink className="audit-link" href="/" replace>← 返回实时室</DashboardLink>
-          <SystemStatePill loading={statusState === "loading"} error={statusState === "error"} online={Boolean(payload?.system?.online)} marketSession={payload?.system?.market_session} />
+          <SystemStatePill loading={statusState === "loading"} error={statusState === "error"} hasSnapshot={payload !== null} online={Boolean(payload?.system?.online)} marketSession={payload?.system?.market_session} operationalStatus={payload?.operational_health?.status} />
         </div>
-        <MobileDashboardNav current={mobileDashboardSection} status={<SystemStatePill loading={statusState === "loading"} error={statusState === "error"} online={Boolean(payload?.system?.online)} marketSession={payload?.system?.market_session} />} />
+        <MobileDashboardNav current={mobileDashboardSection} status={<SystemStatePill loading={statusState === "loading"} error={statusState === "error"} hasSnapshot={payload !== null} online={Boolean(payload?.system?.online)} marketSession={payload?.system?.market_session} operationalStatus={payload?.operational_health?.status} />} />
       </header>
 
       <section className="audit-intro">
