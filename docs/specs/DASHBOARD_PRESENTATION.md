@@ -106,6 +106,15 @@ part of it.
    shell-level structure instead of extending its owner is design drift.
 10. Deterministic source and rendered-route contracts must prevent design
     drift; human review and memory are not sufficient enforcement.
+11. System Health contains a subordinate `重试任务` operator area below the
+    incident summary. It shows human-readable task context, state, failure,
+    attempt count, current UTC+8 schedule, and automatic-versus-operator
+    provenance. Technical job IDs remain visually secondary. Desktop, 390x844,
+    and 360x800 layouts keep every control reachable without horizontal
+    overflow, and every scheduling control has a minimum 44 CSS-pixel target.
+12. Advancing work uses a lightweight confirmation that states the selected
+    count and says the work becomes scheduler-claimable, not immediately
+    executed. Custom datetime input is explicitly UTC+8.
 
 ## OOS chart windows
 

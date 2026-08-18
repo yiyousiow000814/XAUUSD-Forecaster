@@ -103,6 +103,20 @@ requiring attention. Claimable work without progress remains
 component, reason, and human-formatted duration. Exact bounded raw codes and
 fields remain available in a second nested disclosure.
 
+An operator retry override changes only the mutable scheduler `available_at`
+value. It does not resolve an incident, erase a pending, recovering, overdue,
+or terminal reason, or make a component healthy. An immediate override may be
+presented as manually advanced and waiting for the next claim; it is not an
+execution or recovery success. The immutable failure row and its automatic
+`next_retry_at` remain the explanation of the original wait.
+
+`IDLE_CAPACITY` is an ordering mode, not a business priority. While its active
+override is younger than 30 minutes, every otherwise claimable non-idle job in
+the same scheduler pool is ordered first. After 30 minutes it enters the normal
+age and priority order so sustained traffic cannot starve it. Claim, quota,
+governor, provider pacing, account selection, and concurrency rules are
+unchanged.
+
 ## Coverage
 
 The status payload must cover every published runtime component and news

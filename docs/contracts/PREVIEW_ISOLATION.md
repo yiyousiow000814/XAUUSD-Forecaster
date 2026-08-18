@@ -23,6 +23,7 @@ A Preview must never mutate production-owned state, including:
 - trading or order state;
 - model activation or promotion state;
 - scheduler state;
+- operator retry commands, mirrors, and retry-override audit state;
 - Assistant conversations, messages, memory, or queue state;
 - production configuration; or
 - any other authoritative production-owned state.
@@ -105,3 +106,11 @@ Every `/api/assistant-worker/*` GET or POST follows the early write rejection,
 including chat, News Q&A, title, compaction, and historical-memory indexing.
 Preview never authenticates a machine, claims work, or reads canonical
 production messages to build or test private memory.
+
+`/api/operator-retry` returns a labeled synthetic empty queue in Preview and
+rejects every POST before operator authentication, body parsing, or D1 access.
+`/api/operator-retry-worker` rejects both machine claims and updates at the same
+early boundary. Only after the human API returns its labeled synthetic-empty
+state may the client install an explicitly labeled, branch-owned retry fixture
+for selection, confirmation, custom-time, and responsive review. Its submit
+control remains disabled and it never contacts the Windows scheduler bridge.

@@ -24,10 +24,12 @@ self-hosted application for these production paths only:
 - `/api/assistant-chat`
 - `/api/assistant-conversations`
 - `/api/news-questions`
+- `/api/operator-retry`
 
 Allow only the configured owner identity and set `CF_ACCESS_TEAM_DOMAIN`,
 `CF_ACCESS_AUD`, and at least one owner allowlist secret to match that
 application. Do not add `/api/assistant-worker/*` to the Access application.
+Do not add `/api/operator-retry-worker` either.
 The Windows synchronizer reaches that separate control plane with
 `INGEST_TOKEN`; unauthenticated requests to it must receive `401` from the
 Worker.

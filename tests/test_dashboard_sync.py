@@ -1205,8 +1205,8 @@ def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> 
     first_cycle = module.sync_once(config)
     assert first_cycle == []
     assert {row["resource"] for row in first_cycle.resource_observations} == {
-        "heartbeat", "learning", "market_chart", "market_history", "news",
-        "news_questions",
+            "heartbeat", "learning", "market_chart", "market_history", "news",
+            "news_questions", "operator_retries",
     }
     assert all(row["status"] == "OK" for row in first_cycle.resource_observations)
     assert all(row["duration_ms"] >= 0 for row in first_cycle.resource_observations)
@@ -1702,3 +1702,63 @@ def test_assistant_sync_surfaces_are_paused_without_network_or_model_calls(
         "status": "PAUSED_NO_MODEL",
     }
     assert module._sync_news_questions({}, {}) is None
+
+
+def test_operator_retry_sync_mirrors_claims_applies_and_finishes(monkeypatch) -> None:
+    module = _sync_module()
+    job = {
+        "job_id": "a" * 64, "task_type": "ACTIVE_IMPACT", "title": "Gold",
+        "state": "BACKING_OFF", "priority": "NORMAL",
+        "available_at": "2026-08-19T06:00:00+00:00", "attempt_count": 3,
+        "last_error": "ConnectionResetError",
+        "original_available_at": "2026-08-19T06:00:00+00:00",
+    }
+    claim = {
+        "request_id": "request-1", "job_id": job["job_id"],
+        "operator_id": "cloudflare-access:owner", "mode": "IMMEDIATE",
+        "reason": "fix deployed", "expected_state": "BACKING_OFF",
+        "expected_available_at": job["available_at"],
+        "requested_available_at": None, "lease_token": "lease-1",
+    }
+    monkeypatch.setattr(module, "_get_local_json", lambda _url: {"items": [job]})
+    local_posts = []
+    monkeypatch.setattr(
+        module, "_post_local_json",
+        lambda url, payload: local_posts.append((url, payload)) or {
+            "results": [{"request_id": "request-1", "job_id": job["job_id"],
+                         "status": "APPLIED", "current": {"state": "BACKING_OFF"}}],
+        },
+    )
+    claims = iter(({"item": claim}, {"item": None}))
+    monkeypatch.setattr(module, "_get_json", lambda *_args, **_kwargs: next(claims))
+    remote_posts = []
+    monkeypatch.setattr(
+        module, "_post_json",
+        lambda url, body, _config: remote_posts.append((url, json.loads(body))) or {},
+    )
+
+    module._sync_operator_retries({}, {
+        "local_status_url": "http://127.0.0.1:8765/api/status",
+        "remote_ingest_url": "https://example.workers.dev/api/ingest",
+        "token": "test",
+    })
+
+    assert remote_posts[0][1] == {"action": "SYNC_JOBS", "items": [job]}
+    assert local_posts[0][0].endswith("/api/retry-overrides")
+    assert local_posts[0][1]["operator_id"] == "cloudflare-access:owner"
+    assert remote_posts[1][1]["action"] == "FINISH"
+    assert remote_posts[1][1]["status"] == "APPLIED"
+
+
+def test_operator_retry_worker_urls_keep_human_and_machine_planes_separate() -> None:
+    module = _sync_module()
+    config = {
+        "local_status_url": "http://127.0.0.1:8765/api/status",
+        "remote_ingest_url": "https://example.workers.dev/api/ingest",
+    }
+    assert module._operator_retry_worker_url(config) == (
+        "https://example.workers.dev/api/operator-retry-worker"
+    )
+    assert module._local_retry_url(config, "/api/retry-jobs") == (
+        "http://127.0.0.1:8765/api/retry-jobs"
+    )

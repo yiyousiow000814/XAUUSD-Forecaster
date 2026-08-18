@@ -1186,6 +1186,91 @@ def test_health_endpoint_requires_recent_dashboard_snapshot(monkeypatch, tmp_pat
         thread.join(timeout=2)
 
 
+def test_retry_operator_bridge_lists_and_atomically_applies_idempotent_override(
+    tmp_path,
+) -> None:
+    from xauusd_forecaster.news_scheduler import (
+        ROUTINE_POOL, backoff_job, claim_job, enqueue_job,
+    )
+
+    module = _dashboard_module()
+    now = datetime.now(UTC).replace(microsecond=0)
+    database = tmp_path / "forward.sqlite3"
+    ForwardLedger(database, now=now).close()
+    connection = sqlite3.connect(database)
+    connection.row_factory = sqlite3.Row
+    try:
+        job_id = enqueue_job(
+            connection, task_type="ACTIVE_IMPACT", source="source",
+            source_item_id="operator-job", revision_number=1,
+            annotation_id="annotation", prompt_version="prompt",
+            priority="NORMAL", now=now,
+        )
+        claimed = claim_job(
+            connection, worker_id="worker", pool=ROUTINE_POOL, now=now,
+        )
+        assert claimed and claimed.job_id == job_id
+        backoff_job(
+            connection, job_id, "worker", available_at=now + timedelta(hours=4),
+            error="ConnectionResetError",
+        )
+        observed = connection.execute(
+            "SELECT state,available_at,attempt_count FROM news_ai_jobs_v1 WHERE job_id=?",
+            (job_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    module.Handler.database = database
+    module.Handler.status_cache = module.StatusSnapshotCache()
+    server = module.ThreadingHTTPServer(("127.0.0.1", 0), module.Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        with urllib.request.urlopen(f"{base}/api/retry-jobs", timeout=2) as response:
+            item = json.loads(response.read())["items"][0]
+        assert item["job_id"] == job_id
+        assert item["last_error"] == "ConnectionResetError"
+        payload = {
+            "operator_id": "cloudflare-access:owner",
+            "items": [{
+                "request_id": "request-idempotent", "job_id": job_id,
+                "mode": "IMMEDIATE", "reason": "repair deployed",
+                "expected_state": observed["state"],
+                "expected_available_at": observed["available_at"],
+            }],
+        }
+        request = lambda: urllib.request.Request(
+            f"{base}/api/retry-overrides", method="POST",
+            headers={"Content-Type": "application/json"},
+            data=json.dumps(payload).encode(),
+        )
+        with urllib.request.urlopen(request(), timeout=2) as response:
+            first = json.loads(response.read())["results"][0]
+        with urllib.request.urlopen(request(), timeout=2) as response:
+            duplicate = json.loads(response.read())["results"][0]
+        assert first["status"] == duplicate["status"] == "APPLIED"
+
+        connection = sqlite3.connect(database)
+        connection.row_factory = sqlite3.Row
+        try:
+            current = connection.execute(
+                "SELECT state,attempt_count,last_error FROM news_ai_jobs_v1 WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+            audits = connection.execute(
+                "SELECT count(*) FROM news_ai_retry_schedule_overrides_v1 WHERE job_id=?",
+                (job_id,),
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        assert tuple(current) == ("BACKING_OFF", observed["attempt_count"], "ConnectionResetError")
+        assert audits == 1
+    finally:
+        server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+
 def test_dashboard_status_does_not_scan_live_database_integrity(
     monkeypatch, tmp_path,
 ) -> None:

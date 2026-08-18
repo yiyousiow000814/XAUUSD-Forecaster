@@ -97,6 +97,49 @@ footer { position:relative; z-index:1; display:flex; justify-content:space-betwe
   .news-meta { display:grid; grid-template-columns:1fr auto; }
 }
 
+.retry-queue { border:1px solid var(--ink); background:var(--paper); }
+.retry-queue > header { display:flex; justify-content:space-between; gap:24px; padding:22px; border-bottom:1px solid var(--ink); }
+.retry-queue > header h2 { margin:5px 0 0; font-size:clamp(25px,3vw,38px); }
+.retry-queue > header > p { max-width:480px; margin:0; font-size:13px; }
+.retry-queue-notice,.retry-queue-empty { margin:0; padding:14px 18px; border-bottom:1px solid rgba(17,17,15,.28); }
+.retry-bulk-bar { display:flex; align-items:center; flex-wrap:wrap; gap:10px 16px; padding:12px 18px; border-bottom:1px solid var(--ink); }
+.retry-bulk-bar label { display:flex; align-items:center; min-height:44px; gap:10px; font-weight:800; }
+.retry-bulk-bar > div { display:flex; flex-wrap:wrap; gap:6px; margin-left:auto; }
+.retry-bulk-bar button,.retry-job-actions button,.retry-confirmation button { min-height:44px; padding:8px 12px; border:1px solid var(--ink); background:transparent; font:inherit; font-weight:800; cursor:pointer; }
+.retry-bulk-bar button:disabled,.retry-job-actions button:disabled,.retry-confirmation button:disabled { cursor:not-allowed; opacity:.42; }
+.retry-job-list { display:grid; }
+.retry-job-card { display:grid; grid-template-columns:44px minmax(0,1fr) minmax(180px,260px); gap:12px; padding:18px; border-bottom:1px solid var(--ink); }
+.retry-job-card:last-child { border-bottom:0; }
+.retry-job-select { display:flex; align-items:flex-start; justify-content:center; min-height:44px; padding-top:5px; }
+.retry-job-select input,.retry-bulk-bar input { width:20px; height:20px; }
+.retry-job-main { min-width:0; }
+.retry-job-main > p { display:flex; flex-wrap:wrap; gap:8px 16px; margin:0; }
+.retry-job-main > p span { color:var(--muted); }
+.retry-job-main h3 { margin:8px 0 14px; overflow-wrap:anywhere; font-size:18px; }
+.retry-job-main dl { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px 16px; margin:0; }
+.retry-job-main dl > div { min-width:0; }
+.retry-job-main dt { color:var(--muted); font-size:11px; }
+.retry-job-main dd { margin:3px 0 0; overflow-wrap:anywhere; font-weight:750; }
+.retry-job-main > code { display:block; max-width:160px; margin-top:14px; overflow:hidden; color:var(--muted); font-size:10px; }
+.retry-job-actions { display:grid; grid-template-columns:1fr 1fr; align-content:start; gap:6px; }
+.retry-confirmation { position:sticky; z-index:6; bottom:12px; display:grid; grid-template-columns:minmax(220px,1fr) minmax(180px,260px) auto; align-items:end; gap:12px; margin:12px; padding:16px; border:2px solid var(--ink); background:var(--paper); box-shadow:5px 5px 0 var(--ink); }
+.retry-confirmation p { margin:5px 0 0; }
+.retry-confirmation label { display:grid; gap:5px; font-size:12px; font-weight:800; }
+.retry-confirmation input { box-sizing:border-box; width:100%; min-height:44px; padding:8px; border:1px solid var(--ink); background:white; font:inherit; }
+.retry-confirmation > div:last-child { display:flex; gap:6px; }
+
+@media (max-width: 720px) {
+  .retry-queue > header { display:grid; padding:18px 14px; }
+  .retry-bulk-bar { align-items:flex-start; padding:10px 14px; }
+  .retry-bulk-bar > div { width:100%; margin-left:0; }
+  .retry-bulk-bar button { flex:1 1 calc(50% - 6px); }
+  .retry-job-card { grid-template-columns:32px minmax(0,1fr); padding:14px; }
+  .retry-job-main dl { grid-template-columns:1fr 1fr; }
+  .retry-job-actions { grid-column:1 / -1; grid-template-columns:1fr 1fr; }
+  .retry-confirmation { position:relative; bottom:auto; grid-template-columns:1fr; margin:10px; }
+  .retry-confirmation > div:last-child { display:grid; grid-template-columns:1fr 1fr; }
+}
+
 .operational-alert-banner {
   position: relative;
   z-index: 90;
