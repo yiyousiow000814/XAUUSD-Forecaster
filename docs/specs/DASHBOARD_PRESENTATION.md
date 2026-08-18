@@ -73,6 +73,40 @@ that a visible line is continuous after cascade and responsive overrides.
   unavailability is labeled as a live-path condition, not as global system
   health.
 
+## Dashboard shell and global navigation contract
+
+The dashboard has one product shell. `DashboardApp` supplies the current
+location and page content to that shell; individual Views do not recreate any
+part of it.
+
+1. The canonical product brand is `AU`, `AURUM SIGNAL ROOM`, and
+   `XAUUSD · Forward-only intelligence`. It is identical on every top-level
+   View and links to the realtime room.
+2. The canonical global destination order is `实时室`, `Assistant`,
+   `新闻与决策`, and `系统`. Their stable entry routes are `/`, `/assistant`,
+   `/audit?view=news`, and `/health` respectively.
+3. Desktop and mobile navigation derive labels, order, routes, and active
+   grouping from the same typed global destination definition. Mobile must not
+   maintain a parallel product taxonomy.
+4. Individual Views MUST NOT define the global product header, product brand,
+   global destination ordering, global system-state placement, or top-level
+   shell spacing and borders.
+5. Page identity belongs inside page content. A System or Audit page heading
+   must not replace the product identity in the global header.
+6. Section navigation is subordinate to global navigation. Audit tabs remain
+   inside Audit. System exposes `系统健康` (`/health`) and `AI 模型用量`
+   (`/status`) through one shared secondary navigation while both routes keep
+   the top-level `系统` destination active.
+7. Global destination labels and order are product contracts. A back-style
+   action such as `返回实时室` is not a global destination.
+8. The global system-state indicator has one shell-owned location and consumes
+   the shared `/api/status` dashboard resource. It must not create a competing
+   polling or interpretation path.
+9. New top-level Views plug into the canonical shell. Copying an existing
+   shell-level structure instead of extending its owner is design drift.
+10. Deterministic source and rendered-route contracts must prevent design
+    drift; human review and memory are not sufficient enforcement.
+
 ## OOS chart windows
 
 - The long OOS chart's 24-hour, 7-day, and 30-day ranges are elapsed XAUUSD
