@@ -241,21 +241,24 @@ News-input coverage has four states. `AVAILABLE` means normal observation with
 usable point-in-time evidence. `DEGRADED` means usable evidence or observable
 collection remains available while some current work or sources are incomplete.
 `QUIET` means zero eligible events while collection, registered source polling,
-and semantic processing remain observable. `UNAVAILABLE` means zero trustworthy
-current evidence while the observation path is materially unobservable or
-current actionable work prevents zero from being interpreted as a real quiet
-environment. Only `UNAVAILABLE` forces news-dependent identities to append
-`WAIT` with `NEWS_INPUT_UNAVAILABLE`; `MARKET_ONLY` remains independent.
+and semantic processing remain observable. `UNAVAILABLE` means the current
+observation path is materially unobservable, even when an older still-active
+event remains in the frozen input. Small incomplete or retrying work does not
+by itself prove an outage. Only `UNAVAILABLE` forces news-dependent identities
+to append `WAIT` with `NEWS_INPUT_UNAVAILABLE`; `MARKET_ONLY` remains
+independent.
 
 Pending, recovering, overdue, or terminal annotation and impact items remain
-operational evidence. With other usable decision-time evidence they make
-coverage `DEGRADED`, not unavailable. A partial source failure is treated the
-same way while other registered sources remain observable. No pending-count or
-pending-ratio threshold is an input-availability rule. Coverage stores the
-usable Core and Broad event counts, stage-specific unresolved counts, recovery
-and terminal/overdue counts, operational reason codes, registered-source
-observability summary, and hashes of both the visible evidence and coverage
-snapshot. The record is append-only and is never recomputed after the decision.
+operational evidence. While the observation path remains available they make
+coverage `DEGRADED`, including when the frozen input contains zero eligible
+events. A partial source failure is treated the same way while other registered
+sources remain observable. No pending-count or pending-ratio threshold is an
+input-availability rule. Source observability is frozen at decision time, not a
+later catch-up append time. Coverage stores the usable Core and Broad event
+counts, stage-specific unresolved counts, recovery and terminal/overdue counts,
+operational reason codes, registered-source observability summary, and hashes
+of both the visible evidence and coverage snapshot. The record is append-only
+and is never recomputed after the decision.
 
 Archive semantic recovery consumes the same metered scheduler and never
 backdates model visibility, training eligibility, decisions, or predictions.

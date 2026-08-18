@@ -235,7 +235,7 @@ export default function LiveRoomView() {
         ? {
             label: "新闻覆盖：降级",
             detail: newsCoverage.recovering_count > 0
-              ? `${formatExactCount(newsCoverage.recovering_count)} 条复核正在自动恢复；当前预测仅使用决策时已完成的新闻证据`
+              ? `${formatExactCount(newsCoverage.recovering_count)} 条复核正在自动重试；当前预测仅使用决策时已完成的新闻证据`
               : "部分新闻链路不完整；当前预测仅使用决策时已完成的新闻证据",
           }
         : newsCoverage.state === "QUIET"

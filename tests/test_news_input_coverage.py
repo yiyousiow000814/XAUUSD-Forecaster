@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from xauusd_forecaster import inference_v2
+from xauusd_forecaster import inference_v2, training_v2
 from xauusd_forecaster.news_input_coverage import classify_news_input_coverage
 from xauusd_forecaster.news_input_coverage import news_source_observability_summary
 from xauusd_forecaster.forward_ledger import ForwardLedger
@@ -104,6 +104,30 @@ def test_current_two_impact_recovering_shape_keeps_inference_open() -> None:
     ) is None
 
 
+def test_zero_news_with_two_recovering_items_remains_degraded_and_learnable() -> None:
+    coverage = classify_news_input_coverage(
+        news_snapshot=_news(),
+        operational_health=_health(
+            "ACTIONABLE_NEWS_IMPACT_PENDING",
+            "ACTIONABLE_NEWS_IMPACT_RECOVERING",
+            impacts=2,
+            recovering=2,
+        ),
+        source_observability=_sources(),
+    )
+
+    assert coverage["state"] == "DEGRADED"
+    assert coverage["usable_broad_event_count"] == 0
+    assert training_v2.news_input_state_is_training_eligible(
+        coverage["state"]
+    ) is True
+    for identity in inference_v2.NEWS_MODEL_IDENTITIES:
+        assert inference_v2._runtime_gate_status(
+            identity, market_healthy=True,
+            news_input_state=coverage["state"],
+        ) is None
+
+
 def test_partial_source_failure_with_usable_news_is_degraded() -> None:
     coverage = classify_news_input_coverage(
         news_snapshot=_news(core=5, broad=8),
@@ -134,6 +158,29 @@ def test_zero_news_during_observation_outage_is_unavailable() -> None:
     )
 
     assert coverage["state"] == "UNAVAILABLE"
+
+
+def test_old_usable_event_during_total_source_outage_is_unavailable() -> None:
+    coverage = classify_news_input_coverage(
+        news_snapshot=_news(broad=1),
+        operational_health=_health(),
+        source_observability=_sources(current=0, unavailable=12),
+    )
+
+    assert coverage["state"] == "UNAVAILABLE"
+    assert coverage["usable_broad_event_count"] == 1
+    assert training_v2.news_input_state_is_training_eligible(
+        coverage["state"]
+    ) is False
+    for identity in inference_v2.NEWS_MODEL_IDENTITIES:
+        assert inference_v2._runtime_gate_status(
+            identity, market_healthy=True,
+            news_input_state=coverage["state"],
+        ) == "NEWS_INPUT_UNAVAILABLE"
+    assert inference_v2._runtime_gate_status(
+        "MARKET_ONLY", market_healthy=True,
+        news_input_state=coverage["state"],
+    ) is None
 
 
 def test_terminal_item_does_not_hide_other_usable_evidence() -> None:
@@ -179,3 +226,37 @@ def test_later_source_poll_never_changes_older_observability(tmp_path) -> None:
     assert source in before["unavailable_sources"]
     assert source not in before["observable_sources"]
     assert source in after["observable_sources"]
+
+
+def test_source_evidence_hash_binds_latest_usable_poll(tmp_path) -> None:
+    ledgers = [
+        ForwardLedger(
+            tmp_path / f"forward-{index}.sqlite3",
+            now=NOW - timedelta(days=1),
+        )
+        for index in range(2)
+    ]
+    source = NEWS_SOURCE_REGISTRY[0].source
+    for index, ledger in enumerate(ledgers):
+        ledger.append_source_poll({
+            "poll_id": f"usable-{index}", "source": source,
+            "fetched_time": NOW - timedelta(minutes=5 - index), "status": "OK",
+        })
+        ledger.append_source_poll({
+            "poll_id": f"latest-{index}", "source": source,
+            "fetched_time": NOW - timedelta(minutes=1), "status": "ERROR",
+        })
+
+    summaries = [
+        news_source_observability_summary(
+            ledger.connection, observed_at=NOW,
+        )
+        for ledger in ledgers
+    ]
+
+    assert summaries[0]["observable_sources"] == summaries[1]["observable_sources"]
+    assert summaries[0]["degraded_sources"] == summaries[1]["degraded_sources"]
+    assert (
+        summaries[0]["source_poll_evidence_hash"]
+        != summaries[1]["source_poll_evidence_hash"]
+    )

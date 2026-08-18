@@ -142,7 +142,7 @@ def append_live_decision_v2(
     news_hash = canonical_hash(news_payload)
     news_id = _uuid("derived-news", f"{decision_id}:{NEWS_FEATURE_VERSION}:{ELIGIBILITY_VERSION}")
     news_input_coverage = news_input_coverage_at(
-        ledger, observed_at=created_at, news_snapshot=news,
+        ledger, decision_time=decision_time, news_snapshot=news,
         operational_health=news_pipeline_health,
     )
     with ledger.connection:

@@ -45,6 +45,14 @@ REQUIRED_GENERATION_IDENTITIES = frozenset({
     "MARKET_ONLY", "NEWS_RESIDUAL", "FULL",
     "BROAD_NEWS_RESIDUAL", "BROAD_FULL",
 })
+NEWS_TRAINING_ELIGIBLE_STATES = frozenset({
+    "AVAILABLE", "DEGRADED", "QUIET",
+})
+
+
+def news_input_state_is_training_eligible(state: object) -> bool:
+    """Admit only frozen states that represent observable news input."""
+    return str(state) in NEWS_TRAINING_ELIGIBLE_STATES
 
 
 def news_evidence_status(event_days: int, clusters: int = NEWS_MIN_CLUSTERS) -> str:
@@ -138,7 +146,9 @@ def complete_training_rows(ledger, cutoff: datetime) -> list[dict]:
             ),
             "distinct_news_clusters": int(row["distinct_news_clusters"]),
             "news_input_state": str(row["news_input_state"]),
-            "news_training_eligible": row["news_input_state"] != "UNAVAILABLE",
+            "news_training_eligible": news_input_state_is_training_eligible(
+                row["news_input_state"]
+            ),
             "core_events": [
                 event for event in event_snapshots
                 if event["model_permission"] == CORE_MODEL_STORAGE_PERMISSION

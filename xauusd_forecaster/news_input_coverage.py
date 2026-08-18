@@ -11,6 +11,15 @@ from .news_source_registry import NEWS_SOURCE_REGISTRY
 NEWS_INPUT_STATES = frozenset({
     "AVAILABLE", "DEGRADED", "QUIET", "UNAVAILABLE",
 })
+NEWS_OBSERVATION_OUTAGE_REASONS = frozenset({
+    "ANNOTATOR_HEARTBEAT_MISSING",
+    "ANNOTATOR_HEARTBEAT_STALE",
+    "ANNOTATOR_NOT_RUNNING",
+    "MODEL_CREDENTIALS_INVALID",
+    "MODEL_CREDENTIALS_UNAVAILABLE",
+    "NEWS_COLLECTOR_POLL_MISSING",
+    "NEWS_COLLECTOR_POLL_STALE",
+})
 
 
 def _instant(value: object) -> datetime | None:
@@ -30,7 +39,9 @@ def news_source_observability_summary(
     current: list[str] = []
     degraded: list[str] = []
     unavailable: list[str] = []
-    evidence: list[tuple[str, str | None, str | None]] = []
+    evidence: list[
+        tuple[str, str | None, str | None, str | None, str | None]
+    ] = []
     cutoff = observed_at.isoformat(timespec="microseconds")
     for spec in NEWS_SOURCE_REGISTRY:
         latest = connection.execute(
@@ -63,6 +74,8 @@ def news_source_observability_summary(
             spec.source,
             latest["fetched_time"] if latest is not None else None,
             latest_status,
+            usable["fetched_time"] if usable is not None else None,
+            usable_status,
         ))
     payload = {
         "registered_source_count": len(NEWS_SOURCE_REGISTRY),
@@ -94,7 +107,6 @@ def classify_news_input_coverage(
     unresolved_impact = int(
         operational_health.get("unresolved_impact_count") or 0
     )
-    unresolved_total = unresolved_annotation + unresolved_impact
     recovering_count = int(operational_health.get("recovering_count") or 0)
     terminal_or_overdue_count = int(
         operational_health.get("terminal_or_overdue_count") or 0
@@ -114,15 +126,19 @@ def classify_news_input_coverage(
     elif degraded_sources or unavailable_sources:
         source_reasons.append("NEWS_SOURCES_PARTIALLY_OBSERVABLE")
 
-    if usable_count:
+    observation_outage = (
+        observable_sources == 0
+        or any(code in NEWS_OBSERVATION_OUTAGE_REASONS for code in operational_reasons)
+    )
+    if observation_outage:
+        state = "UNAVAILABLE"
+    elif usable_count:
         state = (
             "DEGRADED"
             if operational_reasons or source_reasons
             else "AVAILABLE"
         )
-    elif observable_sources == 0 or operational_reasons or unresolved_total:
-        state = "UNAVAILABLE"
-    elif source_reasons:
+    elif operational_reasons or source_reasons:
         state = "DEGRADED"
     else:
         state = "QUIET"
@@ -148,13 +164,13 @@ def classify_news_input_coverage(
 
 
 def news_input_coverage_at(
-    ledger, *, observed_at: datetime, news_snapshot: dict,
+    ledger, *, decision_time: datetime, news_snapshot: dict,
     operational_health: dict,
 ) -> dict[str, object]:
     return classify_news_input_coverage(
         news_snapshot=news_snapshot,
         operational_health=operational_health,
         source_observability=news_source_observability_summary(
-            ledger.connection, observed_at=observed_at,
+            ledger.connection, observed_at=decision_time,
         ),
     )

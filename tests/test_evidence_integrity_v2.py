@@ -39,6 +39,7 @@ from xauusd_forecaster.news_features_v2 import (
     event_raw_weight,
 )
 from xauusd_forecaster.news_impact import impact_time_rule, pending_impact_records
+from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY
 from xauusd_forecaster.news_semantics import (
     CURRENT_NEWS_PROMPT_VERSION,
     annotation_topics,
@@ -1989,6 +1990,62 @@ def test_live_decision_writes_only_current_news_contract(tmp_path) -> None:
     assert coverage["usable_broad_event_count"] == 0
     assert coverage["source_evidence_hash"]
     assert coverage["snapshot_hash"]
+    ledger.close()
+
+
+def test_catch_up_decision_freezes_source_observability_at_decision_time(
+    tmp_path,
+) -> None:
+    decision = datetime(2026, 8, 10, 20, 5, tzinfo=UTC)
+    created = decision + timedelta(minutes=25)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=decision)
+    ledger.connection.execute(
+        "INSERT INTO evaluation_epochs VALUES (?,?,?,?,?,?,?)",
+        (
+            "epoch", decision.isoformat(), decision.isoformat(),
+            decision.isoformat(), decision.isoformat(), "commit", "contract",
+        ),
+    )
+    for index, spec in enumerate(NEWS_SOURCE_REGISTRY):
+        ledger.append_source_poll({
+            "poll_id": f"later-poll-{index}", "source": spec.source,
+            "fetched_time": decision + timedelta(minutes=10), "status": "OK",
+        })
+    snapshot = {
+        "features": {name: 0.0 for name in MARKET_FEATURES},
+        "bid": 2400.0,
+        "ask": 2400.1,
+        "snapshot_hash": "catch-up-market-snapshot",
+        "source_event_time": decision,
+        "source_received_time": decision,
+        "u5": 0.0,
+        "data_health": "OK",
+        "reason_codes": [],
+    }
+
+    append_live_decision_v2(
+        ledger, decision_id="catch-up", decision_time=decision,
+        created_at=created, snapshot=snapshot,
+        news_pipeline_health={
+            "observed_at": created.isoformat(), "status": "HEALTHY",
+            "reason_codes": (), "heartbeat_at": created.isoformat(),
+            "unresolved_items": 0, "oldest_unresolved_at": None,
+            "snapshot_hash": "catch-up-health",
+        },
+    )
+
+    coverage = ledger.connection.execute(
+        """SELECT observed_at,state,source_observability_json
+           FROM news_input_coverage_snapshots_v1
+           WHERE source_decision_id='catch-up'"""
+    ).fetchone()
+    source_observability = json.loads(coverage["source_observability_json"])
+    assert coverage["observed_at"] == created.isoformat()
+    assert coverage["state"] == "UNAVAILABLE"
+    assert source_observability["observable_source_count"] == 0
+    assert source_observability["unavailable_source_count"] == len(
+        NEWS_SOURCE_REGISTRY
+    )
     ledger.close()
 
 
