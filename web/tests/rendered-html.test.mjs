@@ -15,6 +15,7 @@ const { buildTrainingCutoffChart } = await import("../app/_lib/training-cutoff-c
 const { statusFieldPhase } = await import("../app/_lib/current-data-provenance.ts");
 const { shouldPollDashboardResource } = await import("../app/_lib/dashboard-refresh-policy.ts");
 const { quoteBridgePresentation } = await import("../app/_lib/quote-bridge-state.ts");
+const { systemStateAxes, systemStatePresentation } = await import("../app/_lib/system-state.ts");
 const { withPreviewIdentity } = await import("../app/api/_shared/preview-status.ts");
 const {
   NEWS_REVIEW_STATE_CASE_SQL,
@@ -978,7 +979,10 @@ test("renders the Gemini quota status route", async () => {
   assert.match(html, /分支配置/);
   assert.match(html, /Pacific midnight/);
   assert.match(html, /组件与新闻源/);
-  assert.match(html, /连接中|状态离线/);
+  assert.match(html, /data-read-state="(?:CURRENT|REFRESHING)"/);
+  assert.match(html, /data-live-market-state="MARKET_DATA_UNAVAILABLE"/);
+  assert.match(html, /data-operational-state="HEALTHY"/);
+  assert.match(html, /连接中|实时链路不可用/);
 });
 
 test("renders component and news-source health on a separate route", async () => {
@@ -1033,15 +1037,54 @@ test("renders component and news-source health on a separate route", async () =>
 
 test("uses one Chinese system-state presentation across every dashboard page", () => {
   const component = readFileSync(new URL("../app/_components/SystemStatePill.tsx", import.meta.url), "utf8");
-  assert.match(component, /连接中/);
-  assert.match(component, /系统在线/);
-  assert.match(component, /市场休市/);
-  assert.match(component, /状态离线/);
+  const contract = readFileSync(new URL("../app/_lib/system-state.ts", import.meta.url), "utf8");
+  const freshness = readFileSync(new URL("../app/_components/CurrentDataState.tsx", import.meta.url), "utf8");
+  assert.match(component, /systemStatePresentation/);
+  assert.match(component, /data-read-state/);
+  assert.match(contract, /实时链路正常/);
+  assert.match(contract, /实时链路不可用/);
+  assert.match(contract, /市场休市/);
+  assert.match(contract, /状态不可用/);
+  assert.doesNotMatch(contract, /状态离线|系统在线/);
+  assert.match(freshness, /状态更新失败，正在重试/);
+  assert.match(freshness, /最近状态/);
   for (const path of ["../app/_views/LiveRoomView.tsx", "../app/_views/AuditView.tsx", "../app/_views/StatusView.tsx", "../app/_views/HealthView.tsx"]) {
     const source = readFileSync(new URL(path, import.meta.url), "utf8");
     assert.match(source, /SystemStatePill/);
+    assert.match(source, /hasSnapshot=/);
+    assert.match(source, /operationalStatus=/);
     assert.doesNotMatch(source, /MARKET CLOSED|CONNECTING|市场休市 · 新闻运行中/);
   }
+});
+
+test("keeps read, live-market, and operational status axes independent", () => {
+  const cachedRefreshFailure = systemStatePresentation({
+    loading: false, error: true, hasSnapshot: true, online: true,
+    marketSession: "OPEN", operationalStatus: "HEALTHY",
+  });
+  assert.equal(cachedRefreshFailure.readState, "STALE_SNAPSHOT");
+  assert.equal(cachedRefreshFailure.label, "实时链路正常");
+
+  assert.equal(systemStatePresentation({
+    loading: false, error: true, hasSnapshot: false, online: false,
+  }).label, "状态不可用");
+
+  const closed = systemStateAxes({
+    loading: false, error: false, hasSnapshot: true, online: false,
+    marketSession: "CLOSED", operationalStatus: "HEALTHY",
+  });
+  assert.equal(closed.liveMarketState, "MARKET_CLOSED");
+  assert.equal(closed.operationalState, "HEALTHY");
+
+  assert.equal(systemStatePresentation({
+    loading: false, error: false, hasSnapshot: true, online: false,
+    marketSession: "DATA_UNAVAILABLE", operationalStatus: "HEALTHY",
+  }).label, "实时链路不可用");
+
+  assert.equal(systemStatePresentation({
+    loading: false, error: false, hasSnapshot: true, online: true,
+    marketSession: "OPEN", operationalStatus: "ERROR",
+  }).label, "运行异常");
 });
 
 test("reports cTrader health independently from downstream decision lag", () => {

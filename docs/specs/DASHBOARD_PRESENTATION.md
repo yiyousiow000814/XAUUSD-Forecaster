@@ -44,6 +44,20 @@ that a visible line is continuous after cascade and responsive overrides.
   timezone detection is intentionally avoided because server rendering and
   hydration must produce the same value.
 
+## Canonical system state
+
+- Status copy has one presentation owner shared by Live Room, Audit, Status,
+  and Health.
+- API read freshness, live-market readiness, and operational health are
+  separate axes. A refresh failure must not relabel cached operational or
+  market evidence as system offline.
+- A failed refresh with a prior snapshot says that the update failed and shows
+  the last status time. With no successful snapshot, the factual label is
+  status unavailable.
+- Market closure is not an operational error. Live quote/decision
+  unavailability is labeled as a live-path condition, not as global system
+  health.
+
 ## OOS chart windows
 
 - The long OOS chart's 24-hour, 7-day, and 30-day ranges are elapsed XAUUSD

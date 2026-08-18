@@ -51,6 +51,7 @@ def _current_actionable_impact_rows(
                   n.source_published_time,n.collector_first_seen_time,
                   a.annotation_id,a.annotation_json,a.llm_model_version,a.parsed_at,
                   j.job_id,j.state AS job_state,j.created_at AS job_created_at,
+                  j.available_at AS job_available_at,
                   COALESCE((
                     SELECT ja.failure_code FROM news_ai_job_attempts_v1 ja
                     WHERE ja.job_id=j.job_id AND ja.outcome='ERROR'
@@ -112,6 +113,39 @@ def _current_actionable_impact_rows(
     return current
 
 
+def _pending_operational_reason(
+    task_type: str,
+    row: dict[str, object],
+    *,
+    observed_at: datetime,
+) -> str | None:
+    """Classify operator action without weakening decision-time readiness."""
+    from .operational_health import TASK_QUEUE_SLA
+
+    state = str(row.get("job_state") or "")
+    prefix = (
+        "ACTIONABLE_NEWS_SEMANTICS"
+        if task_type == "ACTIVE_ANNOTATION"
+        else "ACTIONABLE_NEWS_IMPACT"
+    )
+    if state == "DEAD_LETTER":
+        return f"{prefix}_TERMINAL"
+    available_at = _instant(row.get("job_available_at"))
+    if state == "BACKING_OFF" and available_at is not None:
+        if available_at > observed_at:
+            return f"{prefix}_RECOVERING"
+        if observed_at - available_at > TASK_QUEUE_SLA[task_type]:
+            return f"{prefix}_OVERDUE"
+    created_at = _instant(row.get("job_created_at"))
+    if (
+        state in {"QUEUED", "LEASED", "BACKING_OFF"}
+        and created_at is not None
+        and observed_at - created_at > TASK_QUEUE_SLA[task_type]
+    ):
+        return f"{prefix}_OVERDUE"
+    return None
+
+
 def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str, object]:
     """Inspect our real semantic pipeline; external provider status is advisory only."""
     reasons: list[str] = []
@@ -159,6 +193,7 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
     register_news_semantic_eligibility_sql(ledger.connection)
     unresolved: dict[tuple[str, str, str, int, str], datetime] = {}
     actionable_failure_counts: dict[str, dict[str, int]] = {}
+    operational_reasons: list[str] = []
     annotation_pending = False
 
     def add_unresolved(
@@ -185,7 +220,9 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
             add_unresolved("ACTIVE_ANNOTATION", row, received)
 
     failed_jobs = ledger.connection.execute(
-        f"""SELECT j.created_at,n.source,n.source_item_id,n.revision_number,
+        f"""SELECT j.created_at AS job_created_at,j.state AS job_state,
+                  j.available_at AS job_available_at,
+                  n.source,n.source_item_id,n.revision_number,
                   n.headline,n.source_published_time,n.collector_first_seen_time,
                   COALESCE((
                     SELECT a.failure_code FROM news_ai_job_attempts_v1 a
@@ -224,13 +261,16 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
             row, forward_epoch=forward_epoch,
         )
         if eligibility.eligible and (
-            created := _instant(row["created_at"])
+            created := _instant(row["job_created_at"])
         ) is not None:
             annotation_pending = True
-            add_unresolved(
-                "ACTIVE_ANNOTATION", dict(row), created,
-                str(row["failure_code"]),
-            )
+            item = dict(row)
+            add_unresolved("ACTIVE_ANNOTATION", item, created,
+                           str(row["failure_code"]))
+            if operational_reason := _pending_operational_reason(
+                "ACTIVE_ANNOTATION", item, observed_at=observed_at,
+            ):
+                operational_reasons.append(operational_reason)
 
     impact_pending = False
     for row in _current_actionable_impact_rows(ledger, observed_at=observed_at):
@@ -243,10 +283,15 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
                 "ACTIVE_IMPACT", row, ready_at,
                 str(row["failure_code"]) if failed else None,
             )
+            if operational_reason := _pending_operational_reason(
+                "ACTIVE_IMPACT", row, observed_at=observed_at,
+            ):
+                operational_reasons.append(operational_reason)
     if annotation_pending:
         reasons.append("ACTIONABLE_NEWS_SEMANTICS_PENDING")
     if impact_pending:
         reasons.append("ACTIONABLE_NEWS_IMPACT_PENDING")
+    reasons.extend(operational_reasons)
 
     reason_codes = tuple(dict.fromkeys(reasons))
     payload = {

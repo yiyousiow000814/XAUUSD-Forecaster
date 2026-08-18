@@ -62,6 +62,11 @@ class RuntimeHeartbeatPulse:
         self._write()
 
     def __enter__(self) -> RuntimeHeartbeatPulse:
+        self.start()
+        return self
+
+    def start(self) -> None:
+        """Start pulsing for a caller with an existing cleanup boundary."""
         if self._thread is not None:
             raise RuntimeError("heartbeat pulse is already running")
         self._write()
@@ -71,12 +76,16 @@ class RuntimeHeartbeatPulse:
             daemon=True,
         )
         self._thread.start()
-        return self
 
-    def __exit__(self, *_exc: object) -> None:
+    def close(self) -> None:
+        """Stop the pulse and join its bounded background thread."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=self.interval_seconds + 1.0)
+            self._thread = None
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
 
 
 def write_runtime_heartbeat(

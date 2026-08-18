@@ -474,8 +474,46 @@ def test_recent_actionable_impact_backoff_fails_closed_immediately(
     with ledger.connection:
         ledger.connection.execute(
             """UPDATE news_ai_jobs_v1
-               SET state='BACKING_OFF',lease_owner=NULL,lease_expires_at=NULL
+               SET state='BACKING_OFF',available_at=?,
+                   lease_owner=NULL,lease_expires_at=NULL
                WHERE job_id=?""",
+            ((now + timedelta(minutes=1)).isoformat(), job_id),
+        )
+
+    health = news_pipeline_health.news_semantic_pipeline_health(
+        ledger, observed_at=now,
+    )
+
+    assert health["status"] == "UNHEALTHY"
+    assert health["reason_codes"] == (
+        "ACTIONABLE_NEWS_IMPACT_PENDING",
+        "ACTIONABLE_NEWS_IMPACT_RECOVERING",
+    )
+    assert health["actionable_failure_counts"] == {
+        "ACTIVE_IMPACT": {"PROVIDER_UNAVAILABLE": 1},
+    }
+
+
+def test_terminal_actionable_impact_remains_operator_error(
+    tmp_path, credentials,
+) -> None:
+    now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now - timedelta(days=1))
+    _heartbeat(ledger, now)
+    _impact_candidate(
+        ledger, published_at=now - timedelta(minutes=7),
+        received_at=now - timedelta(minutes=7),
+        parsed_at=now - timedelta(minutes=6),
+    )
+    job_id = enqueue_job(
+        ledger.connection, task_type="ACTIVE_IMPACT",
+        source="impact-health-source", source_item_id="impact-item",
+        revision_number=1, annotation_id="impact-annotation",
+        prompt_version=IMPACT_PROMPT_VERSION, priority="FAST", now=now,
+    )
+    with ledger.connection:
+        ledger.connection.execute(
+            "UPDATE news_ai_jobs_v1 SET state='DEAD_LETTER' WHERE job_id=?",
             (job_id,),
         )
 
@@ -484,10 +522,10 @@ def test_recent_actionable_impact_backoff_fails_closed_immediately(
     )
 
     assert health["status"] == "UNHEALTHY"
-    assert health["reason_codes"] == ("ACTIONABLE_NEWS_IMPACT_PENDING",)
-    assert health["actionable_failure_counts"] == {
-        "ACTIVE_IMPACT": {"PROVIDER_UNAVAILABLE": 1},
-    }
+    assert health["reason_codes"] == (
+        "ACTIONABLE_NEWS_IMPACT_PENDING",
+        "ACTIONABLE_NEWS_IMPACT_TERMINAL",
+    )
 
 
 def test_historical_impact_backfill_does_not_close_current_gate(

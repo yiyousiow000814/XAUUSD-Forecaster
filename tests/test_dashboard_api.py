@@ -139,7 +139,7 @@ def test_semantic_component_separates_freshness_from_readiness() -> None:
 
     component = module._semantic_pipeline_component(fresh_pending, now=now)
 
-    assert component["status"] == "ERROR"
+    assert component["status"] == "WARN"
     assert component["age_seconds"] == 18
     assert component["last_error"] == "ACTIONABLE_NEWS_SEMANTICS_PENDING"
 
@@ -162,6 +162,95 @@ def test_semantic_component_separates_freshness_from_readiness() -> None:
     assert module._semantic_pipeline_component(
         stale_heartbeat, now=now,
     )["status"] == "STALE"
+
+    terminal = {
+        **fresh_pending,
+        "reason_codes_json": json.dumps([
+            "ACTIONABLE_NEWS_SEMANTICS_PENDING",
+            "ACTIONABLE_NEWS_SEMANTICS_TERMINAL",
+        ]),
+    }
+    assert module._semantic_pipeline_component(
+        terminal, now=now,
+    )["status"] == "ERROR"
+
+
+def test_news_collector_uses_process_heartbeat_with_bounded_grace() -> None:
+    module = _dashboard_module()
+    now = datetime(2026, 8, 18, 8, 40, tzinfo=UTC)
+
+    def component(age: float, *, state: str = "RUNNING") -> dict:
+        return module._collector_component(
+            {
+                "service": "collector",
+                "state": state,
+                "last_success": (now - timedelta(seconds=age)).isoformat(),
+                "last_error": None,
+            },
+            latest_poll=(now - timedelta(minutes=8)).isoformat(),
+            now=now,
+        )
+
+    assert component(10)["status"] == "OK"
+    assert component(61)["status"] == "WARN"
+    assert component(300)["status"] == "WARN"
+    assert component(300.1)["status"] == "STALE"
+    assert component(10, state="ERROR")["status"] == "STALE"
+
+    starting = component(10, state="STARTING")
+    bounded_startup = component(299, state="STARTING")
+    later = now + timedelta(minutes=14)
+    refreshed_long_startup = module._collector_component(
+        {
+            "service": "collector",
+            "state": "STARTING",
+            "last_success": (later - timedelta(seconds=10)).isoformat(),
+            "last_error": None,
+        },
+        latest_poll=(now - timedelta(minutes=8)).isoformat(),
+        now=later,
+    )
+    stalled_startup = component(300.1, state="STARTING")
+    running = component(10)
+
+    assert starting["status"] == "WARN"
+    assert starting["last_error"] == "采集器启动中"
+    assert bounded_startup["status"] == "WARN"
+    assert refreshed_long_startup["status"] == "WARN"
+    assert refreshed_long_startup["last_error"] == "采集器启动中"
+    assert stalled_startup["status"] == "STALE"
+    assert stalled_startup["last_error"] == "采集器启动心跳已过期"
+    assert [starting["status"], running["status"]] == ["WARN", "OK"]
+
+    operational = module.extend_with_component_alerts(
+        {"alerts": []},
+        components={"news_collector": starting},
+        news_sources=[],
+        runtime_update_failure=None,
+    )
+    alert = operational["alerts"][0]
+    assert operational["status"] == "WARNING"
+    assert alert["severity"] == "WARNING"
+    assert alert["blocking"] is False
+
+
+def test_news_collector_recovery_depends_on_heartbeat_not_old_poll() -> None:
+    module = _dashboard_module()
+    now = datetime(2026, 8, 18, 8, 40, tzinfo=UTC)
+    old_poll = (now - timedelta(hours=1)).isoformat()
+
+    stale = module._collector_component({
+        "service": "collector", "state": "RUNNING",
+        "last_success": (now - timedelta(seconds=301)).isoformat(),
+    }, latest_poll=old_poll, now=now)
+    recovered = module._collector_component({
+        "service": "collector", "state": "RUNNING",
+        "last_success": now.isoformat(),
+    }, latest_poll=old_poll, now=now)
+
+    assert stale["status"] == "STALE"
+    assert recovered["status"] == "OK"
+    assert recovered["source_poll_age_seconds"] == 3600
 
 
 def test_deployment_status_does_not_mislabel_local_edits_as_remote_drift() -> None:
