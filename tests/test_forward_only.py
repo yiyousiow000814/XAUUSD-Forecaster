@@ -2674,6 +2674,78 @@ def test_display_checkpoint_accepts_grounded_names_without_model_call(
     assert model == annotation_module.FALLBACK_GEMINI_MODEL
 
 
+def test_display_checkpoint_accepts_source_grounded_episode_titles_without_model_call(
+    monkeypatch,
+) -> None:
+    titles = (
+        "Bugs", "Route 666", "Man's Best Friend with Benefits",
+        "All Dogs Go To Heaven", "The One You've Been Waiting For",
+        "Time for a Wedding", "Dark Dynasty", "Swap Meat",
+    )
+    source = " ".join(
+        f"{rank} {title} Season {rank}, Episode {rank} (2005)"
+        for rank, title in zip(range(8, 0, -1), titles)
+    )
+    summary = (
+        "这些剧集包括"
+        + "、".join(f"《{title}》" for title in titles[:-1])
+        + f"和《{titles[-1]}》。"
+    )
+    evidence = "8 Bugs Season 8, Episode 8 (2005)"
+    result = _v15_annotation({
+        "headline_zh": "8集《邪恶力量》剧集在今天看来已不再合时宜",
+        "summary_zh": summary,
+        "event_type": "entertainment_news",
+        "entities": ["Supernatural", "ScreenRant"],
+        "hawkishness": 0.0, "inflation_impulse": 0.0,
+        "growth_impulse": 0.0, "geopolitical_risk": 0.0,
+        "usd_impulse": 0.0, "novelty": 0.0, "confidence": 1.0,
+    }, evidence, xauusd_relevance="IRRELEVANT",
+        primary_story_title_zh="8集《邪恶力量》剧集回顾")
+    checkpoint = {
+        "semantic_result": result,
+        "llm_model_version": annotation_module.FALLBACK_GEMINI_MODEL,
+        "invalid_fields": ["summary_zh"],
+        "rejection_reason": (
+            "ENGLISH_PROSE_DOMINANT: Gemini summary_zh is not Chinese-primary"
+        ),
+    }
+    monkeypatch.setattr(
+        annotation_module._GeminiRequestPool,
+        "_repair_display_until_valid",
+        lambda *_args, **_kwargs: pytest.fail(
+            "valid checkpoint must not call a provider"
+        ),
+    )
+
+    repaired, model = object.__new__(
+        annotation_module._GeminiRequestPool
+    ).repair_display_checkpoint(
+        0, annotation_module.DEFAULT_GEMINI_MODEL, checkpoint,
+        "8 Supernatural Episodes That Do Not Hold Up Today", source,
+        prompt_version=annotation_module.PROMPT_VERSION,
+    )
+
+    assert repaired == result
+    assert model == annotation_module.FALLBACK_GEMINI_MODEL
+
+
+def test_source_grounding_does_not_allow_bracketed_english_prose() -> None:
+    result = {
+        "headline_zh": "市场评论",
+        "summary_zh": "报道声称《Market expects growth to be strong》。",
+        "primary_story_title_zh": "市场评论",
+        "actor": "", "object": "", "entities": [],
+    }
+
+    with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
+        annotation_module._validate_chinese_result(
+            result,
+            headline="Market commentary",
+            body="Market expects growth to be strong after the policy update.",
+        )
+
+
 def test_story_title_does_not_treat_undeclared_english_prose_as_an_identifier() -> None:
     result = {
         "headline_zh": "市场更新",
