@@ -52,7 +52,12 @@ def _semantic_pipeline_component(latest, *, now: datetime) -> dict:
         }
     observed_at = datetime.fromisoformat(str(latest["observed_at"]))
     age_seconds = max(0.0, (now - observed_at).total_seconds())
-    reason_codes = tuple(json.loads(latest["reason_codes_json"]))
+    latest_keys = latest.keys()
+    reason_codes = tuple(
+        latest["reason_codes"]
+        if "reason_codes" in latest_keys
+        else json.loads(latest["reason_codes_json"])
+    )
     freshness_failure = any(
         code.endswith("_STALE") or code.endswith("_MISSING")
         for code in reason_codes
@@ -73,9 +78,12 @@ def _semantic_pipeline_component(latest, *, now: datetime) -> dict:
         ),
         "last_error": None if not reason_codes else ", ".join(reason_codes),
         "reason_codes": list(reason_codes),
-        "actionable_failure_counts": json.loads(
-            latest["actionable_failure_counts_json"] or "{}"
-        ) if "actionable_failure_counts_json" in latest.keys() else {},
+        "actionable_failure_counts": (
+            latest["actionable_failure_counts"]
+            if "actionable_failure_counts" in latest_keys
+            else json.loads(latest["actionable_failure_counts_json"] or "{}")
+            if "actionable_failure_counts_json" in latest_keys else {}
+        ),
     }
 
 
@@ -187,6 +195,9 @@ from xauusd_forecaster.news_identity import preferred_cluster_peer_predicate  # 
 from xauusd_forecaster.news_contracts import CURRENT_NEWS_CONTRACT  # noqa: E402
 from xauusd_forecaster.news_features_v2 import COLLECTION_SOURCES  # noqa: E402
 from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY  # noqa: E402
+from xauusd_forecaster.news_pipeline_health import (  # noqa: E402
+    news_semantic_pipeline_health,
+)
 from xauusd_forecaster.source_polling import source_poll_recovery_state  # noqa: E402
 from xauusd_forecaster.production_shape import production_contract_snapshot  # noqa: E402
 from xauusd_forecaster.market_session import expected_weekly_closure  # noqa: E402
@@ -2248,10 +2259,6 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
             "news_collector": collector_heartbeat.get("last_success"),
             "gemini_annotator": connection.execute("SELECT max(parsed_at) FROM news_annotations").fetchone()[0],
         }
-        latest_semantic_health = connection.execute(
-            """SELECT * FROM news_semantic_health_snapshots_v1
-            ORDER BY observed_at DESC LIMIT 1"""
-        ).fetchone()
         news_source_health = _news_source_health(connection, now)
         monitored_news_sources = {
             row["source"] for row in news_source_health if row["health"] == "HEALTHY"
@@ -2302,6 +2309,10 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
             ),
         )
         operational_health = scheduler_health_snapshot(connection, now=now)
+        current_semantic_health = news_semantic_pipeline_health(
+            SimpleNamespace(connection=connection, path=database),
+            observed_at=now,
+        )
     finally:
         connection.rollback()
         connection.close()
@@ -2416,7 +2427,7 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
         "sites_synchronizer", 120, sync_status.get("last_error")
     )
     semantic_pipeline_component = _semantic_pipeline_component(
-        latest_semantic_health, now=now,
+        current_semantic_health, now=now,
     )
     degraded_resources = sync_status.get("degraded_resources") or []
     if (

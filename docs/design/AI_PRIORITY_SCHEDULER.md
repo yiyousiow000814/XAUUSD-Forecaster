@@ -159,8 +159,8 @@ usage during the first rolling window so a deployment cannot create a burst.
 `BACKING_OFF` applies to the AI task, not publisher-content retrieval. A local
 model-output contract failure becomes available again after five minutes and
 gets one recovery attempt; the same repeated failure moves to `DEAD_LETTER`.
-Provider rate limits and transient server failures keep their separate bounded
-progressive schedule.
+Provider rate limits, transient server failures, and typed transport
+interruptions keep their separate bounded progressive schedule.
 
 A recovery version can authorize one additional attempt for the exact bounded
 failure family it fixes. The authorization is persisted by failure ID. It does

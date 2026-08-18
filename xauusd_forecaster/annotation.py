@@ -231,6 +231,7 @@ def _model_failure_details(error: Exception) -> dict[str, object]:
             "error": str(error)[:500],
             "provider_http_status": None,
             "next_retry_at": declared_next_retry,
+            "retryable_transport": isinstance(error, ModelGatewayRequestFailed),
         }
     return {
         "failure_code": "MODEL_REQUEST_FAILED",
@@ -2716,9 +2717,13 @@ def _append_llm_failure(
         str(failure_evidence.get("failure_stage") or "")
         if isinstance(failure_evidence, dict) else ""
     )
-    transient = error_code in {429, 500, 502, 503, 504} or (
-        error_type == "RuntimeError"
-        and "unavailable" in normalized_error.casefold()
+    transient = (
+        error_code in {429, 500, 502, 503, 504}
+        or parsed_record.get("retryable_transport") is True
+        or (
+            error_type == "RuntimeError"
+            and "unavailable" in normalized_error.casefold()
+        )
     )
     if failure_stage == "DISPLAY_REPAIR":
         terminal = False
@@ -2798,7 +2803,10 @@ def _append_impact_failure(
     ).fetchone()
     attempt = 1 if prior is None else int(prior["attempt_number"]) + 1
     same_error = prior is not None and prior["error_signature"] == signature
-    transient = details["provider_http_status"] in {429, 500, 502, 503, 504}
+    transient = (
+        details["provider_http_status"] in {429, 500, 502, 503, 504}
+        or details.get("retryable_transport") is True
+    )
     terminal = attempt >= 5 if transient else (same_error and attempt >= 2)
     failed_at = datetime.now(UTC)
     if terminal:

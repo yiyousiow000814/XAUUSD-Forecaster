@@ -3453,6 +3453,68 @@ def test_repeated_same_impact_validation_failure_gets_one_recovery_attempt(
     ledger.close()
 
 
+def test_typed_transport_failures_use_bounded_transient_policy_for_both_tasks(
+    tmp_path,
+) -> None:
+    now = datetime(2026, 8, 5, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    ledger.connection.execute("PRAGMA foreign_keys=OFF")
+    body = "Complete source text for transport retry evidence. " * 10
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    ledger.append_news_revision({
+        "source": "transport-test", "source_item_id": "one",
+        "collector_first_seen_time": now, "fetched_time": now,
+        "headline": "Gold report", "body": body,
+        "content_hash": digest, "cluster_id": "transport-test-one",
+    })
+    row = {
+        "source": "transport-test", "source_item_id": "one",
+        "revision_number": 1, "content_hash": digest,
+        "annotation_id": "transport-annotation",
+    }
+    error = annotation_module.ModelGatewayRequestFailed(
+        ConnectionResetError("connection reset")
+    )
+    details = annotation_module._model_failure_details(error)
+
+    annotation_outcomes = [
+        annotation_module._append_llm_failure(
+            ledger,
+            {
+                "row": row, **details, "error_code": None,
+                "model_version": annotation_module.DEFAULT_GEMINI_MODEL,
+            },
+            "ANNOTATION", annotation_module.PROMPT_VERSION,
+        )
+        for _ in range(5)
+    ]
+    impact_outcomes = [
+        annotation_module._append_impact_failure(
+            ledger, row, error, model_version=annotation_module.IMPACT_MODEL,
+        )
+        for _ in range(5)
+    ]
+
+    for outcomes in (annotation_outcomes, impact_outcomes):
+        assert [item["retry_state"] for item in outcomes] == [
+            "BACKING_OFF", "BACKING_OFF", "BACKING_OFF", "BACKING_OFF",
+            "DEAD_LETTER",
+        ]
+        assert outcomes[-1]["next_retry_at"] is None
+    for table in ("news_llm_failures", "news_impact_failures_v1"):
+        rows = ledger.connection.execute(
+            f"""SELECT failed_at,next_retry_at FROM {table}
+                ORDER BY attempt_number"""
+        ).fetchall()
+        assert [
+            int((datetime.fromisoformat(row["next_retry_at"])
+                 - datetime.fromisoformat(row["failed_at"])).total_seconds() / 60)
+            for row in rows[:-1]
+        ] == [15, 60, 360, 720]
+        assert rows[-1]["next_retry_at"] is None
+    ledger.close()
+
+
 def test_batch_rpm_exhaustion_is_deferred_without_failure_row(
     tmp_path, monkeypatch
 ) -> None:
