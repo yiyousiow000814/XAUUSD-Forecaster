@@ -175,17 +175,31 @@ validation. The 512-character and 24-item limits are broad payload-safety bounds
 not claims about the normal semantic length of a name. They replace the legacy
 64-character/eight-token title heuristic for structured references.
 
+The Annotation prompt/schema version, passed explicitly through initial output,
+invalid-field detection, display repair, and checkpoint revalidation, selects
+the display contract. V17 uses only locally proven structured
+`named_references`; it MUST NOT run the V16 source-grounded fallback after or
+instead of structured resolution. V16 and older records retain that fallback
+unchanged for frozen compatibility and are never inferred from the presence or
+absence of `named_references`.
+
 The validator MUST reject declarations that capture ordinary clause syntax,
 multiple sentences, paragraphs, invented text, or unrelated words around an
-identifier. A clause-like title requires both source delimitation and explicit
-naming/reference context; quoting prose alone grants no permission. Duplicate
+identifier. Exact source occurrence, model declaration, and Title Case are not
+sufficient together. `PROPER_NAME_SHAPE` is supporting audit evidence only;
+authorization requires an independently strong signal such as an exact semantic
+identity, strong identifier shape, explicit naming/reference context, or a
+deterministic complete-subject reference role. The latter is category-neutral:
+for example, `The Dark Knight was released in 2008.` proves the named span by
+its source role, not by a movie-specific rule. An unrelated declared identity
+near a candidate never supplies V17 proof. A clause-like title requires both
+source delimitation and explicit naming/reference context; quoting prose alone
+grants no permission. Duplicate
 ranges are collapsed, a proven enclosing structured range may replace its
 proven nested ranges, and partially overlapping declarations are never unioned.
 Only normalized non-overlapping display spans are masked before the unchanged
-Chinese-primary ratio is applied. V16 and older rows without
-`named_references` continue through the conservative declared-identity,
-identifier-shape, delimiter, and source-context fallback; historical semantic
-objects are never rewritten merely to add the field. Existing display
+Chinese-primary ratio is applied. Historical semantic objects are never
+rewritten merely to add the field. Existing display
 checkpoints MUST be revalidated locally against the current deterministic rules
 before another provider request is attempted.
 

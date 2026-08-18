@@ -55,6 +55,7 @@ from .news_semantics import (
     news_annotation_schema,
     model_usable_annotation_predicate,
     resolve_structured_named_reference,
+    SUPPORTED_NEWS_PROMPT_VERSIONS,
     validate_news_annotation,
 )
 
@@ -1244,7 +1245,10 @@ class _GeminiRequestPool:
         invalid_display_fields: tuple[str, ...]
         try:
             _recover_display_fields(result, headline, body)
-            _validate_chinese_result(result, headline=headline, body=body)
+            _validate_chinese_result(
+                result, prompt_version=prompt_version,
+                headline=headline, body=body,
+            )
             if prompt_version in GENERATED_NEWS_PROMPT_VERSIONS:
                 _validate_current_result(
                     result, headline=headline, body=body,
@@ -1282,7 +1286,10 @@ class _GeminiRequestPool:
         # or semantic re-analysis.
         try:
             _recover_display_fields(result, headline, body)
-            _validate_chinese_result(result, headline=headline, body=body)
+            _validate_chinese_result(
+                result, prompt_version=prompt_version,
+                headline=headline, body=body,
+            )
             if prompt_version in GENERATED_NEWS_PROMPT_VERSIONS:
                 _validate_current_result(
                     result, headline=headline, body=body,
@@ -1328,7 +1335,8 @@ class _GeminiRequestPool:
                     working[field] = repaired[field]
                 _recover_display_fields(working, headline, body)
                 _validate_chinese_result(
-                    working, headline=headline, body=body,
+                    working, prompt_version=prompt_version,
+                    headline=headline, body=body,
                 )
                 if prompt_version in GENERATED_NEWS_PROMPT_VERSIONS:
                     _validate_current_result(
@@ -2272,7 +2280,8 @@ def _require_title_numbers_preserved(translated: str, source: str) -> None:
 
 
 def _validate_chinese_result(
-    result: dict, *, headline: str = "", body: str = "",
+    result: dict, *, prompt_version: str = PROMPT_VERSION,
+    headline: str = "", body: str = "",
 ) -> None:
     for field in ("headline_zh", "summary_zh"):
         value = result.get(field)
@@ -2280,6 +2289,7 @@ def _validate_chinese_result(
             value, field,
             allowed_latin_spans=_allowed_display_latin_spans(
                 result, value, headline, body,
+                prompt_version=prompt_version,
             ),
         )
     story_title = str(result.get("primary_story_title_zh") or "").strip()
@@ -2289,6 +2299,7 @@ def _validate_chinese_result(
             "primary_story_title_zh",
             allowed_latin_spans=_allowed_display_latin_spans(
                 result, story_title, headline, body,
+                prompt_version=prompt_version,
             ),
         )
     if "semantic_reason_zh" in result:
@@ -2297,6 +2308,7 @@ def _validate_chinese_result(
             value, "semantic_reason_zh",
             allowed_latin_spans=_allowed_display_latin_spans(
                 result, value, headline, body,
+                prompt_version=prompt_version,
             ),
         )
 
@@ -2593,14 +2605,21 @@ def _classify_source_grounded_latin_span(
 
 
 def _allowed_display_latin_spans(
-    result: dict, value: object, headline: str, body: str,
+    result: dict, value: object, headline: str, body: str, *,
+    prompt_version: str = PROMPT_VERSION,
 ) -> tuple[_AllowedLatinSpan, ...]:
-    """Prove bounded display spans; source occurrence alone is insufficient."""
+    """Apply the explicit display-reference contract for one schema version."""
     display = str(value or "")
+    if prompt_version == CURRENT_NEWS_PROMPT_VERSION:
+        return _normalize_allowed_latin_spans(
+            _structured_display_latin_spans(
+                result, display, headline, body,
+            )
+        )
+    if prompt_version not in SUPPORTED_NEWS_PROMPT_VERSIONS:
+        raise ValueError(f"unsupported annotation prompt version: {prompt_version}")
     declared = _declared_display_identifiers(result)
-    allowed = list(_structured_display_latin_spans(
-        result, display, headline, body,
-    ))
+    allowed: list[_AllowedLatinSpan] = []
     for match in SOURCE_IDENTITY_SPAN_PATTERN.finditer(display):
         proof = _classify_source_grounded_latin_span(
             display, match.start(), match.end(), headline, body, declared,
@@ -2722,6 +2741,7 @@ def _invalid_chinese_display_fields(
                     field,
                     allowed_latin_spans=_allowed_display_latin_spans(
                         result, value, headline, body,
+                        prompt_version=prompt_version,
                     ),
                 )
             elif field not in result:

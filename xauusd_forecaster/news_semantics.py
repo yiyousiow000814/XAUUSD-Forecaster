@@ -41,6 +41,11 @@ _NAMING_CONTEXT_PATTERN = re.compile(
     r"titled)\b",
     re.IGNORECASE,
 )
+_SOURCE_SUBJECT_REFERENCE_PREDICATE = re.compile(
+    r"^\s+(?:(?:is|was|were)(?:\s+being)?|(?:has|had)\s+been)\s+"
+    r"[a-z]+(?:ed|en)\b",
+    re.IGNORECASE,
+)
 LEGACY_INVALID_SEMANTIC_REASON_PREFIX = "语言或结构一致性检查未通过"
 DISPLAY_AUDIT_FALLBACK_REASON_PREFIX = "语义已完成，但中文展示未通过校验"
 V1_NEWS_PROMPT_VERSIONS = (
@@ -369,6 +374,18 @@ def _source_span_has_naming_context(source: str, start: int, end: int) -> bool:
     ))
 
 
+def _source_span_is_named_subject(source: str, start: int, end: int) -> bool:
+    """Recognize an unquoted complete subject, not Title Case by itself."""
+    if source_span_within_reference_delimiters(source, start, end):
+        return False
+    prefix = source[:start]
+    if not re.search(
+        r"(?:^|[.!?]\s+|\n\s*)(?:the\s+)?$", prefix, re.IGNORECASE,
+    ):
+        return False
+    return bool(_SOURCE_SUBJECT_REFERENCE_PREDICATE.match(source[end:]))
+
+
 def _exact_reference_matches(
     source: str, exact_text: str,
 ) -> tuple[tuple[int, int], ...]:
@@ -440,6 +457,14 @@ def resolve_structured_named_reference(
     )
     if context_matches:
         evidence.append("SOURCE_REFERENCE_CONTEXT")
+    subject_matches = tuple(
+        match for match in source_matches
+        if name_shape and _source_span_is_named_subject(
+            source_text, match[0], match[1],
+        )
+    )
+    if subject_matches:
+        evidence.append("SOURCE_SUBJECT_REFERENCE")
     if len(source_matches) > 1:
         evidence.append("REPEATED_SOURCE_REFERENCE")
 
@@ -449,14 +474,15 @@ def resolve_structured_named_reference(
             return None
         chosen = shared[0]
     else:
-        locally_referential = {
+        strong_referential = {
             "DECLARED_SEMANTIC_IDENTITY", "STRONG_IDENTIFIER",
-            "PROPER_NAME_SHAPE", "SOURCE_REFERENCE_CONTEXT",
+            "SOURCE_REFERENCE_CONTEXT", "SOURCE_SUBJECT_REFERENCE",
         }
-        if locally_referential.isdisjoint(evidence):
+        if strong_referential.isdisjoint(evidence):
             return None
         chosen = (
             context_matches[0] if context_matches
+            else subject_matches[0] if subject_matches
             else delimited_matches[0] if delimited_matches
             else source_matches[0]
         )

@@ -2131,7 +2131,8 @@ def test_chinese_display_accepts_source_grounded_actor_and_character_names() -> 
     result, source = _production_shaped_identity_annotation()
 
     annotation_module._validate_chinese_result(
-        result, headline="L.A. Law cast", body=source,
+        result, prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
+        headline="L.A. Law cast", body=source,
     )
 
 
@@ -2156,7 +2157,8 @@ def test_chinese_display_fields_share_declared_identity_context(field) -> None:
     result[field] = value
 
     annotation_module._validate_chinese_result(
-        result, body=" ".join(identities),
+        result, prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
+        body=" ".join(identities),
     )
 
 
@@ -2183,7 +2185,8 @@ def test_chinese_display_accepts_bounded_grounded_identity_variants(value) -> No
     }
 
     annotation_module._validate_chinese_result(
-        result, headline="L.A. Law", body=source,
+        result, prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
+        headline="L.A. Law", body=source,
     )
 
 
@@ -2254,11 +2257,13 @@ def test_source_grounded_latin_span_family_accepts_references(
 
     allowed = annotation_module._allowed_display_latin_spans(
         result, value, "Source headline", source,
+        prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
     )
 
     assert [(item.text, item.proof) for item in allowed] == [(span, proof)]
     annotation_module._validate_chinese_result(
-        result, headline="Source headline", body=source,
+        result, prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
+        headline="Source headline", body=source,
     )
 
 
@@ -2323,7 +2328,7 @@ def test_structured_named_reference_accepts_unseen_categories_and_long_names(
     result = {
         "headline_zh": "名称说明", "summary_zh": value,
         "primary_story_title_zh": "名称说明",
-        "actor": "", "object": "", "entities": [],
+        "actor": "", "object": "", "entities": [reference],
         "named_references": [{"exact_text": reference}],
     }
 
@@ -2334,10 +2339,133 @@ def test_structured_named_reference_accepts_unseen_categories_and_long_names(
     assert len(allowed) == 1
     assert allowed[0].text == reference
     assert allowed[0].proof == "STRUCTURED_NAMED_REFERENCE"
+    assert {
+        "DECLARED_SEMANTIC_IDENTITY", "STRONG_IDENTIFIER",
+        "SOURCE_REFERENCE_CONTEXT", "SOURCE_SUBJECT_REFERENCE",
+    }.intersection(allowed[0].supporting_proofs)
     canonical_source = f"Source headline\n{source}"
     assert canonical_source[allowed[0].source_start:allowed[0].source_end] == reference
     annotation_module._validate_chinese_result(
         result, headline="Source headline", body=source,
+    )
+
+
+def test_annotation_prompt_version_selects_v17_or_legacy_display_contract() -> None:
+    source = "OpenAI released a research update."
+    value = "相关机构为《OpenAI》。"
+    historical = {
+        "headline_zh": value, "summary_zh": "报道确认相关机构为《OpenAI》。",
+        "primary_story_title_zh": "机构消息", "actor": "", "object": "",
+        "entities": [],
+    }
+
+    annotation_module._validate_chinese_result(
+        historical, prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
+        headline="Source headline", body=source,
+    )
+    assert annotation_module._allowed_display_latin_spans(
+        historical, value, "Source headline", source,
+        prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
+    )[0].proof == "STRONG_IDENTIFIER"
+
+    assert annotation_module._allowed_display_latin_spans(
+        historical, value, "Source headline", source,
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+    ) == ()
+    with pytest.raises(ValueError, match="UNGROUNDED_LATIN_REFERENCE"):
+        annotation_module._validate_chinese_result(
+            historical,
+            prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+            headline="Source headline", body=source,
+        )
+
+
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "Global Markets Under Pressure",
+        "Investors Await Federal Reserve Decision",
+        "Markets Brace For Higher Rates",
+        "Strong Growth Across Major Economies",
+        "Gold Prices Rise As Dollar Falls",
+    ),
+)
+@pytest.mark.parametrize("quoted_source", (False, True))
+def test_v17_title_case_prose_is_not_a_named_reference(
+    reference, quoted_source,
+) -> None:
+    source = f'"{reference}"' if quoted_source else reference
+    result = {
+        "headline_zh": "市场评论", "summary_zh": f"报道讨论《{reference}》。",
+        "primary_story_title_zh": "市场评论", "actor": "", "object": "",
+        "entities": [], "named_references": [{"exact_text": reference}],
+    }
+
+    with pytest.raises(ValueError, match="UNPROVEN_NAMED_REFERENCE"):
+        annotation_module._validate_structured_named_references(
+            result, "Source headline", source,
+        )
+    with pytest.raises(ValueError, match="UNGROUNDED_LATIN_REFERENCE"):
+        annotation_module._validate_chinese_result(
+            result,
+            prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+            headline="Source headline", body=source,
+        )
+
+
+def test_v17_unrelated_nearby_identity_cannot_authorize_title_case_prose() -> None:
+    reference = "Global Markets Under Pressure"
+    source = f"OpenAI issued a bulletin. {reference}"
+    result = {
+        "actor": "OpenAI", "object": "", "entities": ["OpenAI"],
+        "named_references": [{"exact_text": reference}],
+    }
+
+    with pytest.raises(ValueError, match="UNPROVEN_NAMED_REFERENCE"):
+        annotation_module._validate_structured_named_references(
+            result, "Source headline", source,
+        )
+
+
+@pytest.mark.parametrize(
+    "source,required_proof",
+    (
+        (
+            "The Dark Knight was released in 2008.",
+            "SOURCE_SUBJECT_REFERENCE",
+        ),
+        (
+            '"The Dark Knight" is the title discussed in the article.',
+            "SOURCE_REFERENCE_CONTEXT",
+        ),
+        (
+            'The article refers to "The Dark Knight" as its title.',
+            "SOURCE_REFERENCE_CONTEXT",
+        ),
+    ),
+)
+def test_v17_dark_knight_requires_category_neutral_source_role(
+    source, required_proof,
+) -> None:
+    reference = "The Dark Knight"
+    value = f"影片《{reference}》于报道中被讨论。"
+    result = {
+        "headline_zh": "影片消息", "summary_zh": value,
+        "primary_story_title_zh": "影片消息", "actor": "", "object": "",
+        "entities": [], "named_references": [{"exact_text": reference}],
+    }
+
+    allowed = annotation_module._allowed_display_latin_spans(
+        result, value, "Source headline", source,
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+    )
+
+    assert len(allowed) == 1
+    assert required_proof in allowed[0].supporting_proofs
+    assert "PROPER_NAME_SHAPE" in allowed[0].supporting_proofs
+    annotation_module._validate_chinese_result(
+        result, prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+        headline="Source headline", body=source,
     )
 
 
@@ -2423,7 +2551,7 @@ def test_allowed_span_normalization_handles_duplicates_nested_and_repeated_names
     result = {
         "headline_zh": "机构说明", "summary_zh": value,
         "primary_story_title_zh": "机构说明", "actor": "", "object": "",
-        "entities": [],
+        "entities": ["Bank of America", "America"],
         "named_references": [
             {"exact_text": "Bank of America"},
             {"exact_text": "America"},
@@ -2989,6 +3117,7 @@ def test_display_checkpoint_accepts_declared_latin_company_names_without_model_c
     }, evidence, xauusd_relevance="IRRELEVANT",
         primary_story_title_zh="Stripe 收购 OpenRouter",
         actor="Stripe", object="OpenRouter")
+    result.pop("named_references")
     checkpoint = {
         "semantic_result": result,
         "llm_model_version": annotation_module.DEFAULT_GEMINI_MODEL,
@@ -3006,7 +3135,7 @@ def test_display_checkpoint_accepts_declared_latin_company_names_without_model_c
     ).repair_display_checkpoint(
         0, annotation_module.DEFAULT_GEMINI_MODEL, checkpoint,
         "Stripe to acquire OpenRouter", evidence,
-        prompt_version=annotation_module.PROMPT_VERSION,
+        prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
     )
 
     assert repaired["primary_story_title_zh"] == "Stripe 收购 OpenRouter"
@@ -3158,7 +3287,8 @@ def test_story_title_matches_declared_identities_across_safe_punctuation_and_cas
     }
 
     annotation_module._validate_chinese_result(
-        result, body=f"{actor} {object_name}",
+        result, prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
+        body=f"{actor} {object_name}",
     )
 
 
