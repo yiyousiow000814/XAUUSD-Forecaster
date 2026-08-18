@@ -115,7 +115,7 @@ footer { position:relative; z-index:1; display:flex; justify-content:space-betwe
 .retry-job-list { display:grid; }
 .retry-job-card { display:grid; grid-template-columns:44px minmax(0,1fr) minmax(180px,260px); gap:12px; padding:18px; border-bottom:1px solid var(--ink); }
 .retry-job-card:last-child { border-bottom:0; }
-.retry-job-select { align-items:flex-start; justify-content:center; padding-top:5px; }
+.retry-job-select { align-self:start; align-items:flex-start; justify-content:center; height:44px; padding-top:5px; }
 .retry-job-main { min-width:0; }
 .retry-job-main > p { display:flex; flex-wrap:wrap; gap:6px 14px; margin:0; }
 .retry-job-main > p span { color:var(--muted); }
