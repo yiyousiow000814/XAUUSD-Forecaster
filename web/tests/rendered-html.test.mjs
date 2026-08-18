@@ -26,16 +26,56 @@ const {
 } = await import("../app/_lib/news-review-state.ts");
 const { publicImpactReason, publicNewsRecord } = await import("../app/_lib/public-news-copy.ts");
 const { sortNewsEvidenceByTime } = await import("../app/_lib/news-evidence-order.ts");
-const { summarizeAssistantQueue } = await import("../app/api/_shared/assistant-operational-health.ts");
-const { globalOperationalAlerts } = await import("../app/_lib/operational-health.ts");
+const { assistantQueueOperationalAlerts, summarizeAssistantQueue } = await import("../app/api/_shared/assistant-operational-health.ts");
+const { normalizeOperationalEvent } = await import("../app/_lib/operational-health.ts");
+const { correlateOperationalEvents, globalOperationalIncidents } = await import("../app/_lib/operational-incidents.ts");
+const { operationalEventDiagnostic, operationalIncidentActionLabels } = await import("../app/_lib/operational-incident-presentation.ts");
 const { operationalEvidenceText } = await import("../app/_lib/operational-evidence.ts");
 const { sourceHealthErrorPresentation } = await import("../app/_lib/source-health-presentation.ts");
+const { compactPreviewStatus } = await import("../build/preview-learning.ts");
 
 test("reserves the global shell alert for blocking operational faults", () => {
   const warning = { code: "OPS_AI_BACKLOG_OVERDUE", severity: "WARNING", scope: "ACTIVE_IMPACT", message_zh: "积压", blocking: false, evidence: {} };
   const blocking = { code: "OPS_RUNTIME_UPDATE_FAILED", severity: "ERROR", scope: "DEPLOYMENT", message_zh: "更新失败", blocking: true, evidence: {} };
-  assert.deepEqual(globalOperationalAlerts([warning]), []);
-  assert.deepEqual(globalOperationalAlerts([warning, blocking]), [blocking]);
+  assert.deepEqual(globalOperationalIncidents(correlateOperationalEvents([warning])), []);
+  const incidents = globalOperationalIncidents(correlateOperationalEvents([warning, blocking]));
+  assert.equal(incidents.length, 1);
+  assert.equal(incidents[0].root_event.code, blocking.code);
+});
+
+test("current Web operational emitters use catalog-allowed severities", () => {
+  const definition = {
+    queue: "CHAT_TURN", label: "Assistant 对话", table: "unused",
+    createdColumn: "created_at", completedExpression: "completed_at",
+    successStatuses: ["ANSWERED"], failureStatuses: ["FAILED"], slaSeconds: 300,
+  };
+  const base = {
+    queue: "CHAT_TURN", label: "Assistant 对话", queued: 1, processing: 0,
+    claimable: 1, scheduled_retry: 0, oldest_active_at: "2026-08-18T00:00:00Z",
+    oldest_age_seconds: 600, max_attempt_count: 3, completed_15m: 0,
+    failed_15m: 1, capacity_deferred: 0, failure_codes: [{ code: "FAILED", count: 1 }],
+  };
+  const emitted = [
+    ...assistantQueueOperationalAlerts(base, definition),
+    ...assistantQueueOperationalAlerts({ ...base, max_attempt_count: 0, completed_15m: 1, failed_15m: 0 }, definition),
+  ];
+  assert.deepEqual(
+    new Set(emitted.map(item => item.code)),
+    new Set([
+      "OPS_ASSISTANT_JOB_RETRY_LOOP", "OPS_ASSISTANT_PIPELINE_STALLED",
+      "OPS_ASSISTANT_BACKLOG_OVERDUE", "OPS_ASSISTANT_NEW_TERMINAL_FAILURE",
+    ]),
+  );
+  assert.ok(emitted.every(item => !("taxonomy_error" in item.evidence)));
+
+  const mismatch = normalizeOperationalEvent({
+    code: "OPS_AI_ROUTE_CAPACITY_SATURATED", severity: "ERROR", scope: "ACTIVE_IMPACT",
+    message_zh: "容量异常", blocking: true, evidence: {},
+  });
+  assert.equal(
+    mismatch.evidence.taxonomy_error,
+    "SEVERITY_NOT_ALLOWED:OPS_AI_ROUTE_CAPACITY_SATURATED:ERROR",
+  );
 });
 
 test("renders operational evidence timestamps for the UTC+8 operator surface", () => {
@@ -50,6 +90,68 @@ test("renders operational evidence timestamps for the UTC+8 operator surface", (
     operationalEvidenceText({ earliest_retry_at: null, active_jobs: 3 }),
     "earliest_retry_at=— · active_jobs=3",
   );
+});
+
+test("renders human incident diagnostics before nested raw machine evidence", () => {
+  const [incident] = correlateOperationalEvents([{
+    code: "OPS_COMPONENT_UNHEALTHY",
+    severity: "WARNING",
+    scope: "news_semantic_pipeline",
+    message_zh: "组件 news_semantic_pipeline 当前状态为 WARN。",
+    blocking: false,
+    evidence: {
+      status: "WARN",
+      age_seconds: 213.730543,
+      last_error: "ACTIONABLE_NEWS_IMPACT_PENDING,ACTIONABLE_NEWS_IMPACT_RECOVERING",
+      reason_codes: [
+        "ACTIONABLE_NEWS_IMPACT_PENDING",
+        "ACTIONABLE_NEWS_IMPACT_RECOVERING",
+      ],
+    },
+  }]);
+  const diagnostic = operationalEventDiagnostic(incident.root_event);
+  assert.equal(incident.title_zh, "新闻影响复核等待中");
+  assert.equal(operationalIncidentActionLabels[incident.action_state], "自动重试中");
+  assert.equal(incident.summary_zh, "有新闻影响复核正在等待计划重试。系统会自动再次尝试处理，目前无需手动操作。");
+  assert.deepEqual(diagnostic, {
+    status: "WARN · 已持续 3 分 34 秒",
+    component: "新闻语义决策门槛",
+    reasons: ["新闻影响复核等待中", "新闻影响复核自动重试中"],
+  });
+  assert.deepEqual(operationalEventDiagnostic(incident.root_event, [
+    "ACTIONABLE_NEWS_IMPACT_RECOVERING",
+  ]).reasons, ["新闻影响复核自动重试中"]);
+  assert.equal(operationalEventDiagnostic({
+    ...incident.root_event, evidence: { age_seconds: 56 },
+  }).status, "WARNING · 已持续 56 秒");
+  assert.equal(operationalEventDiagnostic({
+    ...incident.root_event, evidence: { age_seconds: 4200 },
+  }).status, "WARNING · 已持续 1 小时 10 分");
+
+  const view = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
+  const humanLayer = view.indexOf("incident-human-diagnostics");
+  const rawLayer = view.indexOf("incident-raw-evidence");
+  assert.ok(humanLayer >= 0 && rawLayer > humanLayer);
+  assert.match(view, /<details className="incident-raw-evidence">/);
+  assert.match(view, /<summary>查看原始字段<\/summary>/);
+  assert.match(view, /<code>\{event\.code\}<\/code>/);
+  assert.match(view, /operationalEvidenceText\(event\.evidence\)/);
+  assert.doesNotMatch(view.slice(humanLayer, rawLayer), /event\.message_zh|<code>|operationalEvidenceText/);
+  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.incident-raw-evidence > summary \{[^}]*min-height:44px/);
+  assert.match(css, /\.incident-raw-evidence code,.incident-raw-evidence small \{[^}]*overflow-wrap:anywhere/);
+});
+
+test("retains bounded operational incidents for deterministic Preview hydration", () => {
+  const operationalHealth = {
+    schema_version: "operational-health.v1",
+    status: "WARNING",
+    alerts: [{ code: "OPS_COMPONENT_UNHEALTHY", scope: "news_semantic_pipeline" }],
+  };
+  const compact = compactPreviewStatus({ operational_health: operationalHealth });
+  assert.deepEqual(compact.operational_health, operationalHealth);
+  const manifest = JSON.parse(readFileSync(new URL("../preview-manifest.json", import.meta.url), "utf8"));
+  assert.ok(manifest.statusInlineKeys.includes("operational_health"));
 });
 
 test("summarizes Assistant queue evidence without exposing job content", () => {
@@ -472,6 +574,13 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   assert.match(page, /function previewResources/);
   assert.match(page, /review_state=COMPLETED/);
   assert.match(page, /previewBundle\.status/);
+  assert.match(app, /const initialStatus = initialResources\["\/api\/status"\]/);
+  assert.match(app, /<StatusView initialPayload=\{initialStatus\}/);
+  assert.match(app, /<HealthView initialPayload=\{initialStatus\}/);
+  for (const view of ["StatusView", "HealthView"]) {
+    const source = readFileSync(new URL(`../app/_views/${view}.tsx`, import.meta.url), "utf8");
+    assert.match(source, /initialPayload \?\? readDashboardResource<StatusPayload>/, view);
+  }
   assert.match(page, /previewBundle\.learning_summary/);
   const vite = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
   const learning = readFileSync(new URL("../build/preview-learning.ts", import.meta.url), "utf8");
@@ -981,8 +1090,8 @@ test("renders the Gemini quota status route", async () => {
   assert.match(html, /组件与新闻源/);
   assert.match(html, /data-read-state="(?:CURRENT|REFRESHING)"/);
   assert.match(html, /data-live-market-state="MARKET_DATA_UNAVAILABLE"/);
-  assert.match(html, /data-operational-state="HEALTHY"/);
-  assert.match(html, /连接中|实时链路不可用/);
+  assert.match(html, /data-operational-state="(?:HEALTHY|WARNING|ERROR)"/);
+  assert.match(html, /连接中|运行警告|实时链路不可用/);
 });
 
 test("renders component and news-source health on a separate route", async () => {
@@ -998,11 +1107,17 @@ test("renders component and news-source health on a separate route", async () =>
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(layout, /<OperationalAlertBanner \/>/);
   const banner = readFileSync(new URL("../app/_components/OperationalAlertBanner.tsx", import.meta.url), "utf8");
-  assert.match(banner, /globalOperationalAlerts/);
+  assert.match(banner, /globalOperationalIncidents/);
   assert.match(banner, /className="operational-alert-toggle"/);
   assert.match(banner, /aria-expanded=\{expanded\}/);
-  assert.match(view, /OPERATIONAL ERROR CODES/);
-  assert.match(view, /alert\.code/);
+  assert.match(view, /OPERATIONAL INCIDENTS/);
+  assert.match(view, /incident\.root_event/);
+  assert.match(view, /affectedOperationalScopeCount/);
+  assert.match(view, /个受影响组件/);
+  assert.doesNotMatch(view, /个下游影响|related_events\.length, 0/);
+  assert.match(view, /查看技术详情/);
+  assert.match(view, /aria-expanded=\{showTechnical\}/);
+  assert.match(view, /hidden=\{!showTechnical\}/);
   assert.match(view, /completed_15m/);
   assert.match(view, /deferred_15m/);
   assert.match(view, /provider_dispatch_deferred_15m/);
@@ -1030,6 +1145,8 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(css, /\.source-health\.show-healthy article\.is-healthy \.news-source-details \{ display:none; \}/);
   assert.match(css, /\.source-health\.show-healthy article\.is-healthy\.is-detail-open \.news-source-details \{ display:contents; \}/);
   assert.match(css, /\.operational-alert-banner a \{[^}]*min-height: 44px/);
+  assert.match(css, /\.incident-technical-details > button[^}]*min-height:44px/);
+  assert.match(css, /\.operational-incident-card \{[^}]*min-width:0/);
   assert.match(css, /\.operational-alert-toggle \{ display:none; cursor:pointer; \}/);
   assert.match(css, /\.operational-alert-banner\.is-expanded \.operational-alert-detail \{ display:flex/);
   assert.match(css, /@media \(max-width: 640px\)[\s\S]*\.scheduler-health-grid \{ grid-template-columns: 1fr; \}/);
