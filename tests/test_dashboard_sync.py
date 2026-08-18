@@ -1143,6 +1143,7 @@ def test_news_detail_failure_never_publishes_dangling_index(monkeypatch, tmp_pat
 
 def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> None:
     module = _sync_module()
+    monkeypatch.setenv("DASHBOARD_OPERATOR_BRIDGE_TOKEN", "test-bridge-" + "x" * 32)
     monkeypatch.setattr(module, "_verify_news_mirror_state", lambda *_a, **_k: None)
     payload = {
         "generated_at": "2026-08-07T00:00:00+00:00",
@@ -1242,6 +1243,7 @@ def test_sync_repopulates_news_index_without_full_refresh_marker(
     monkeypatch, tmp_path
 ) -> None:
     module = _sync_module()
+    monkeypatch.setenv("DASHBOARD_OPERATOR_BRIDGE_TOKEN", "test-bridge-" + "y" * 32)
     monkeypatch.setattr(module, "_verify_news_mirror_state", lambda *_a, **_k: None)
     payload = {
         "generated_at": "2026-08-07T00:00:00+00:00",
@@ -1720,7 +1722,9 @@ def test_operator_retry_sync_mirrors_claims_applies_and_finishes(monkeypatch) ->
         "expected_available_at": job["available_at"],
         "requested_available_at": None, "lease_token": "lease-1",
     }
-    monkeypatch.setattr(module, "_get_local_json", lambda _url: {"items": [job]})
+    applied_job = {**job, "available_at": "2026-08-19T03:02:00+00:00"}
+    local_reads = iter(({"items": [job]}, {"items": [applied_job]}))
+    monkeypatch.setattr(module, "_get_local_json", lambda _url: next(local_reads))
     local_posts = []
     monkeypatch.setattr(
         module, "_post_local_json",
@@ -1748,6 +1752,98 @@ def test_operator_retry_sync_mirrors_claims_applies_and_finishes(monkeypatch) ->
     assert local_posts[0][1]["operator_id"] == "cloudflare-access:owner"
     assert remote_posts[1][1]["action"] == "FINISH"
     assert remote_posts[1][1]["status"] == "APPLIED"
+    assert remote_posts[2][1] == {"action": "SYNC_JOBS", "items": [applied_job]}
+
+
+def test_local_operator_bridge_transport_requires_dedicated_secret(monkeypatch) -> None:
+    module = _sync_module()
+    monkeypatch.delenv("DASHBOARD_OPERATOR_BRIDGE_TOKEN", raising=False)
+    with pytest.raises(RuntimeError, match="credential is not configured"):
+        module._get_local_json("http://127.0.0.1:8765/api/retry-jobs")
+    with pytest.raises(RuntimeError, match="credential is not configured"):
+        module._post_local_json("http://127.0.0.1:8765/api/retry-overrides", {})
+
+
+def test_operator_retry_bridge_auth_failure_leaves_cloud_lease_reclaimable(monkeypatch) -> None:
+    module = _sync_module()
+    job = {
+        "job_id": "e" * 64, "task_type": "ACTIVE_IMPACT", "title": "Gold",
+        "state": "BACKING_OFF", "priority": "NORMAL",
+        "available_at": "2026-08-19T06:00:00+00:00", "attempt_count": 3,
+        "original_available_at": "2026-08-19T06:00:00+00:00",
+    }
+    command = {
+        "request_id": "request-auth-failure", "job_id": job["job_id"],
+        "operator_id": "cloudflare-access:owner", "mode": "IMMEDIATE",
+        "reason": "fix deployed", "expected_state": "BACKING_OFF",
+        "expected_available_at": job["available_at"], "lease_token": "lease-auth-failure",
+    }
+    monkeypatch.setattr(module, "_get_local_json", lambda _url: {"items": [job]})
+    monkeypatch.setattr(
+        module, "_post_local_json",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("operator bridge authorization failed")),
+    )
+    monkeypatch.setattr(module, "_get_json", lambda *_args, **_kwargs: {"item": command})
+    remote_posts = []
+    monkeypatch.setattr(
+        module, "_post_json",
+        lambda url, body, _config: remote_posts.append((url, json.loads(body))) or {},
+    )
+
+    with pytest.raises(RuntimeError, match="authorization failed"):
+        module._sync_operator_retries({}, {
+            "local_status_url": "http://127.0.0.1:8765/api/status",
+            "remote_ingest_url": "https://example.workers.dev/api/ingest",
+            "token": "test",
+        })
+
+    assert len(remote_posts) == 1
+    assert remote_posts[0][1] == {"action": "SYNC_JOBS", "items": [job]}
+
+
+@pytest.mark.parametrize("status,code", [
+    ("CONFLICT", "JOB_STATE_CHANGED"),
+    ("CONFLICT", "JOB_NOT_MUTABLE"),
+])
+def test_operator_retry_state_races_finish_with_explicit_terminal_result(
+    monkeypatch, status, code,
+) -> None:
+    module = _sync_module()
+    job = {
+        "job_id": "f" * 64, "task_type": "ACTIVE_IMPACT", "title": "Gold",
+        "state": "BACKING_OFF", "priority": "NORMAL",
+        "available_at": "2026-08-19T06:00:00+00:00", "attempt_count": 3,
+        "original_available_at": "2026-08-19T06:00:00+00:00",
+    }
+    command = {
+        "request_id": f"request-{code}", "job_id": job["job_id"],
+        "operator_id": "cloudflare-access:owner", "mode": "IMMEDIATE",
+        "reason": "fix deployed", "expected_state": "BACKING_OFF",
+        "expected_available_at": job["available_at"], "lease_token": f"lease-{code}",
+    }
+    local_reads = iter(({"items": [job]}, {"items": [job]}))
+    monkeypatch.setattr(module, "_get_local_json", lambda _url: next(local_reads))
+    monkeypatch.setattr(module, "_post_local_json", lambda *_args: {
+        "results": [{"request_id": command["request_id"], "job_id": job["job_id"],
+                     "status": status, "code": code, "current": {"state": "LEASED"}}],
+    })
+    claims = iter(({"item": command}, {"item": None}))
+    monkeypatch.setattr(module, "_get_json", lambda *_args, **_kwargs: next(claims))
+    remote_posts = []
+    monkeypatch.setattr(
+        module, "_post_json",
+        lambda url, body, _config: remote_posts.append((url, json.loads(body))) or {},
+    )
+
+    module._sync_operator_retries({}, {
+        "local_status_url": "http://127.0.0.1:8765/api/status",
+        "remote_ingest_url": "https://example.workers.dev/api/ingest",
+        "token": "test",
+    })
+
+    finish = next(body for _url, body in remote_posts if body.get("action") == "FINISH")
+    assert finish["status"] == status
+    assert finish["result"]["code"] == code
 
 
 def test_operator_retry_worker_urls_keep_human_and_machine_planes_separate() -> None:

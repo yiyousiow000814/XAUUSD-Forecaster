@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import { authenticateAssistantRequest } from "../app/api/_shared/assistant-auth.ts";
+import { authenticateDashboardOperatorRequest } from "../app/api/_shared/dashboard-operator-auth.ts";
 
 const runtimeEnv = {
   CF_ACCESS_TEAM_DOMAIN: "aurum.cloudflareaccess.com",
   CF_ACCESS_AUD: "assistant-audience",
-  ASSISTANT_OWNER_SUBJECTS: "owner-subject",
+  DASHBOARD_OPERATOR_OWNER_SUBJECTS: "owner-subject",
 };
 
 const request = token => new Request("https://example.test/api/news-questions", {
@@ -42,7 +42,7 @@ test("verifies the Access signature, issuer, audience, user type, and owner memb
   };
   try {
     assert.deepEqual(
-      await authenticateAssistantRequest(request(signed.token), runtimeEnv),
+      await authenticateDashboardOperatorRequest(request(signed.token), runtimeEnv),
       { actor_id: "cloudflare-access:owner-subject", role: "OWNER" },
     );
   } finally {
@@ -52,7 +52,7 @@ test("verifies the Access signature, issuer, audience, user type, and owner memb
 
 test("does not trust a header without a valid signed token", async () => {
   let verifierCalls = 0;
-  assert.equal(await authenticateAssistantRequest(
+  assert.equal(await authenticateDashboardOperatorRequest(
     request("not-a-jwt"),
     runtimeEnv,
     async () => {
@@ -61,7 +61,7 @@ test("does not trust a header without a valid signed token", async () => {
     },
   ), null);
   assert.equal(verifierCalls, 1);
-  assert.equal(await authenticateAssistantRequest(request(null), runtimeEnv), null);
+  assert.equal(await authenticateDashboardOperatorRequest(request(null), runtimeEnv), null);
 });
 
 test("fails closed for service identities, strangers, and missing owner configuration", async () => {
@@ -70,26 +70,26 @@ test("fails closed for service identities, strangers, and missing owner configur
     email: "stranger@example.com",
     type: "app",
   });
-  assert.equal(await authenticateAssistantRequest(request("token"), runtimeEnv, verify), null);
-  assert.equal(await authenticateAssistantRequest(
+  assert.equal(await authenticateDashboardOperatorRequest(request("token"), runtimeEnv, verify), null);
+  assert.equal(await authenticateDashboardOperatorRequest(
     request("token"),
     runtimeEnv,
     async () => ({ sub: "", email: "owner@example.com", type: "app" }),
   ), null);
-  assert.equal(await authenticateAssistantRequest(
+  assert.equal(await authenticateDashboardOperatorRequest(
     request("token"),
-    { ...runtimeEnv, ASSISTANT_OWNER_SUBJECTS: "" },
+    { ...runtimeEnv, DASHBOARD_OPERATOR_OWNER_SUBJECTS: "" },
     async () => ({ sub: "owner-subject", email: "owner@example.com", type: "app" }),
   ), null);
 });
 
 test("email may authorize membership but never becomes actor identity", async () => {
-  const actor = await authenticateAssistantRequest(
+  const actor = await authenticateDashboardOperatorRequest(
     request("token"),
     {
       ...runtimeEnv,
-      ASSISTANT_OWNER_SUBJECTS: "",
-      ASSISTANT_OWNER_EMAILS: "OWNER@EXAMPLE.COM",
+      DASHBOARD_OPERATOR_OWNER_SUBJECTS: "",
+      DASHBOARD_OPERATOR_OWNER_EMAILS: "OWNER@EXAMPLE.COM",
     },
     async () => ({ sub: "stable-subject", email: "owner@example.com", type: "app" }),
   );
@@ -97,4 +97,21 @@ test("email may authorize membership but never becomes actor identity", async ()
     actor_id: "cloudflare-access:stable-subject",
     role: "OWNER",
   });
+});
+
+test("shared operator allowlist takes precedence over legacy Assistant cutover values", async () => {
+  const verify = async () => ({
+    sub: "legacy-owner", email: "legacy@example.com", type: "app",
+  });
+  assert.equal(await authenticateDashboardOperatorRequest(request("token"), {
+    ...runtimeEnv,
+    DASHBOARD_OPERATOR_OWNER_SUBJECTS: "current-owner",
+    ASSISTANT_OWNER_SUBJECTS: "legacy-owner",
+  }, verify), null);
+
+  assert.deepEqual(await authenticateDashboardOperatorRequest(request("token"), {
+    ...runtimeEnv,
+    DASHBOARD_OPERATOR_OWNER_SUBJECTS: undefined,
+    ASSISTANT_OWNER_SUBJECTS: "legacy-owner",
+  }, verify), { actor_id: "cloudflare-access:legacy-owner", role: "OWNER" });
 });

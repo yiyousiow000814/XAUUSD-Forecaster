@@ -103,25 +103,42 @@ footer { position:relative; z-index:1; display:flex; justify-content:space-betwe
 .retry-queue > header > p { max-width:480px; margin:0; font-size:13px; }
 .retry-queue-notice,.retry-queue-empty { margin:0; padding:14px 18px; border-bottom:1px solid rgba(17,17,15,.28); }
 .retry-bulk-bar { display:flex; align-items:center; flex-wrap:wrap; gap:10px 16px; padding:12px 18px; border-bottom:1px solid var(--ink); }
-.retry-bulk-bar label { display:flex; align-items:center; min-height:44px; gap:10px; font-weight:800; }
-.retry-bulk-bar > div { display:flex; flex-wrap:wrap; gap:6px; margin-left:auto; }
-.retry-bulk-bar button,.retry-job-actions button,.retry-confirmation button { min-height:44px; padding:8px 12px; border:1px solid var(--ink); background:transparent; font:inherit; font-weight:800; cursor:pointer; }
-.retry-bulk-bar button:disabled,.retry-job-actions button:disabled,.retry-confirmation button:disabled { cursor:not-allowed; opacity:.42; }
+.retry-checkbox-target { box-sizing:border-box; display:flex; align-items:center; min-width:44px; min-height:44px; gap:10px; cursor:pointer; }
+.retry-checkbox-target input { width:20px; height:20px; margin:0; accent-color:var(--ink); }
+.retry-checkbox-target:has(input:disabled) { cursor:not-allowed; opacity:.48; }
+.retry-bulk-bar > strong { font-size:12px; }
+.retry-bulk-action { display:flex; align-items:end; flex-wrap:wrap; gap:6px; margin-left:auto; }
+.retry-bulk-action label { display:grid; gap:3px; color:var(--muted); font-size:10px; font-weight:800; }
+.retry-bulk-action select { min-width:180px; min-height:44px; padding:8px 30px 8px 10px; border:1px solid var(--ink); background:var(--paper); color:var(--ink); font:700 12px var(--font-mono); }
+.retry-bulk-bar button,.retry-job-control > button,.retry-job-plan button,.retry-confirmation button { min-height:44px; padding:8px 12px; border:1px solid var(--ink); background:transparent; color:var(--ink); font:inherit; font-weight:800; cursor:pointer; }
+.retry-bulk-bar button:disabled,.retry-job-control button:disabled,.retry-confirmation button:disabled { cursor:not-allowed; opacity:.42; }
 .retry-job-list { display:grid; }
 .retry-job-card { display:grid; grid-template-columns:44px minmax(0,1fr) minmax(180px,260px); gap:12px; padding:18px; border-bottom:1px solid var(--ink); }
 .retry-job-card:last-child { border-bottom:0; }
-.retry-job-select { display:flex; align-items:flex-start; justify-content:center; min-height:44px; padding-top:5px; }
-.retry-job-select input,.retry-bulk-bar input { width:20px; height:20px; }
+.retry-job-select { align-items:flex-start; justify-content:center; padding-top:5px; }
 .retry-job-main { min-width:0; }
-.retry-job-main > p { display:flex; flex-wrap:wrap; gap:8px 16px; margin:0; }
+.retry-job-main > p { display:flex; flex-wrap:wrap; gap:6px 14px; margin:0; }
 .retry-job-main > p span { color:var(--muted); }
-.retry-job-main h3 { margin:8px 0 14px; overflow-wrap:anywhere; font-size:18px; }
+.retry-job-kicker { align-items:center; font-size:12px; }
+.retry-job-kicker span,.retry-job-kicker em { padding:2px 6px; border:1px solid rgba(17,17,15,.34); font-style:normal; }
+.retry-job-kicker em { background:var(--ink); color:var(--paper); }
+.retry-job-main h3 { margin:9px 0 8px; overflow-wrap:anywhere; font-size:18px; }
+.retry-failure-summary { padding-bottom:12px; border-bottom:1px dotted rgba(17,17,15,.35); font-size:12px; }
+.retry-failure-summary b { overflow-wrap:anywhere; color:var(--red); }
 .retry-job-main dl { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px 16px; margin:0; }
 .retry-job-main dl > div { min-width:0; }
 .retry-job-main dt { color:var(--muted); font-size:11px; }
 .retry-job-main dd { margin:3px 0 0; overflow-wrap:anywhere; font-weight:750; }
+.retry-command-state { align-items:center; margin-top:12px!important; padding:8px 10px; border-left:3px solid var(--muted); background:rgba(17,17,15,.045); font-size:11px; }
+.retry-command-state > span { text-transform:uppercase; letter-spacing:.08em; }
+.retry-command-state.is-applied { border-left-color:var(--green); }
+.retry-command-state.is-conflict,.retry-command-state.is-rejected { border-left-color:var(--red); }
 .retry-job-main > code { display:block; max-width:160px; margin-top:14px; overflow:hidden; color:var(--muted); font-size:10px; }
-.retry-job-actions { display:grid; grid-template-columns:1fr 1fr; align-content:start; gap:6px; }
+.retry-job-control { display:grid; align-content:start; gap:6px; }
+.retry-job-control > button { width:100%; background:var(--ink); color:var(--paper); }
+.retry-job-plan { display:grid; gap:5px; padding-top:6px; border-top:1px solid var(--ink); }
+.retry-job-plan button { display:grid; gap:2px; width:100%; text-align:left; }
+.retry-job-plan button span { color:var(--muted); font-size:10px; font-weight:500; line-height:1.3; }
 .retry-confirmation { position:sticky; z-index:6; bottom:12px; display:grid; grid-template-columns:minmax(220px,1fr) minmax(180px,260px) auto; align-items:end; gap:12px; margin:12px; padding:16px; border:2px solid var(--ink); background:var(--paper); box-shadow:5px 5px 0 var(--ink); }
 .retry-confirmation p { margin:5px 0 0; }
 .retry-confirmation label { display:grid; gap:5px; font-size:12px; font-weight:800; }
@@ -131,11 +148,12 @@ footer { position:relative; z-index:1; display:flex; justify-content:space-betwe
 @media (max-width: 720px) {
   .retry-queue > header { display:grid; padding:18px 14px; }
   .retry-bulk-bar { align-items:flex-start; padding:10px 14px; }
-  .retry-bulk-bar > div { width:100%; margin-left:0; }
-  .retry-bulk-bar button { flex:1 1 calc(50% - 6px); }
-  .retry-job-card { grid-template-columns:32px minmax(0,1fr); padding:14px; }
+  .retry-bulk-action { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); width:100%; margin-left:0; }
+  .retry-bulk-action select,.retry-bulk-action button { width:100%; min-width:0; }
+  .retry-job-card { grid-template-columns:44px minmax(0,1fr); padding:14px; }
   .retry-job-main dl { grid-template-columns:1fr 1fr; }
-  .retry-job-actions { grid-column:1 / -1; grid-template-columns:1fr 1fr; }
+  .retry-job-control { grid-column:1 / -1; }
+  .retry-job-plan { grid-template-columns:1fr 1fr; }
   .retry-confirmation { position:relative; bottom:auto; grid-template-columns:1fr; margin:10px; }
   .retry-confirmation > div:last-child { display:grid; grid-template-columns:1fr 1fr; }
 }

@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
-import { authenticateAssistantRequest } from "../_shared/assistant-auth";
+import { authenticateDashboardOperatorRequest } from "../_shared/dashboard-operator-auth";
 import { readBoundedBody } from "../_shared/dashboard-snapshot";
 import {
   createOperatorRetryRequests,
@@ -34,7 +34,7 @@ export async function GET(request: Request) {
   if (isPreviewDeployment) {
     return previewJson({ items: [], requests: [], preview: true }, 200, "synthetic-empty-operator-retry");
   }
-  const actor = await authenticateAssistantRequest(request, env);
+  const actor = await authenticateDashboardOperatorRequest(request, env);
   if (!actor) return json({ error: "操作员身份验证失败" }, 401);
   if (!env.DB) return json({ error: "重试控制暂不可用" }, 503);
   const requested = Number(new URL(request.url).searchParams.get("limit") ?? 200);
@@ -48,7 +48,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const preview = rejectPreviewWrite();
   if (preview) return preview;
-  const actor = await authenticateAssistantRequest(request, env);
+  const actor = await authenticateDashboardOperatorRequest(request, env);
   if (!actor) return json({ error: "操作员身份验证失败" }, 401);
   if (!env.DB) return json({ error: "重试控制暂不可用" }, 503);
   try {

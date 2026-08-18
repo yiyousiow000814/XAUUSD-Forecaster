@@ -13,6 +13,11 @@ import {
   syncOperatorRetryJobs,
 } from "../app/api/_shared/operator-retry.ts";
 import { D1TestDatabase } from "./d1-test-database.mjs";
+import {
+  latestOperatorRetryRequests,
+  operatorRetryCommandPresentation,
+  shouldPollOperatorRetry,
+} from "../app/_lib/operator-retry-client.ts";
 
 test("operator retry inputs use explicit durable modes and bounded identity", () => {
   for (const mode of [
@@ -66,8 +71,9 @@ test("bulk admission is per-job, owner-audited, and browser replay is idempotent
   assert.equal(first[1].code, "JOB_NOT_MUTABLE");
   const replay = await createOperatorRetryRequests(database, input);
   assert.equal(replay[0].duplicate, true);
-  assert.equal(database.database.prepare("SELECT count(*) AS n FROM operator_retry_requests").get().n, 1);
-  assert.equal(database.database.prepare("SELECT count(*) AS n FROM operator_retry_request_events").get().n, 1);
+  assert.equal(replay[1].duplicate, true);
+  assert.equal(database.database.prepare("SELECT count(*) AS n FROM operator_retry_requests").get().n, 2);
+  assert.equal(database.database.prepare("SELECT count(*) AS n FROM operator_retry_request_events").get().n, 3);
 
   const conflict = await createOperatorRetryRequests(database, { ...input, mode: "DELAY_1_HOUR" });
   assert.equal(conflict[0].code, "IDEMPOTENCY_CONFLICT");
@@ -95,4 +101,58 @@ test("machine lease completion is bounded and public reads contain no secrets", 
   const listed = await listOperatorRetryJobs(database);
   assert.equal(listed.items[0].title, "Job c");
   assert.doesNotMatch(JSON.stringify(listed), /credential|api[_-]?key/i);
+});
+
+test("expired machine leases are reclaimed without duplicating the durable command", async () => {
+  const database = new D1TestDatabase(["0020_operator_retry_scheduling.sql"]);
+  await syncOperatorRetryJobs(database, [job("d")], new Date("2026-08-19T03:00:00Z"));
+  await createOperatorRetryRequests(database, {
+    operatorId: "cloudflare-access:owner", idempotencyKey: "00000000-0000-4000-8000-000000000003",
+    jobIds: ["d".repeat(64)], mode: "CUSTOM_TIME", reason: "bounded custom retry",
+    requestedAvailableAt: "2026-08-19T04:30:00.000Z", now: new Date("2026-08-19T03:01:00Z"),
+  });
+  const first = await claimOperatorRetryRequest(database, "windows:one", new Date("2026-08-19T03:02:00Z"));
+  assert.equal(first.status, "APPLYING");
+  assert.equal(await claimOperatorRetryRequest(
+    database, "windows:two", new Date("2026-08-19T03:03:59Z"),
+  ), null);
+  const reclaimed = await claimOperatorRetryRequest(
+    database, "windows:two", new Date("2026-08-19T03:04:01Z"),
+  );
+  assert.equal(reclaimed.request_id, first.request_id);
+  assert.notEqual(reclaimed.lease_token, first.lease_token);
+  assert.equal(await finishOperatorRetryRequest(database, {
+    request_id: first.request_id, lease_token: first.lease_token,
+    status: "APPLIED", result: {},
+  }), null);
+});
+
+test("operator command presentation separates cloud acceptance, scheduler application, and conflict", () => {
+  const base = {
+    request_id: "request", job_id: "a".repeat(64), mode: "IMMEDIATE",
+    requested_at: "2026-08-19T03:00:00.000Z", completed_at: null, result_json: null,
+  };
+  assert.match(operatorRetryCommandPresentation({ ...base, status: "PENDING" }).label, /等待 Windows/);
+  assert.match(operatorRetryCommandPresentation({ ...base, status: "APPLYING" }).label, /正在由 Windows/);
+  assert.match(operatorRetryCommandPresentation({
+    ...base, status: "APPLIED", completed_at: "2026-08-19T03:00:02.000Z",
+  }).label, /已应用到 Windows/);
+  assert.match(operatorRetryCommandPresentation({
+    ...base, status: "CONFLICT", completed_at: "2026-08-19T03:00:02.000Z",
+    result_json: JSON.stringify({ code: "JOB_STATE_CHANGED" }),
+  }).label, /状态或计划已变化/);
+  assert.match(operatorRetryCommandPresentation({
+    ...base, status: "REJECTED", completed_at: "2026-08-19T03:00:02.000Z",
+    result_json: JSON.stringify({ code: "JOB_NOT_MUTABLE" }),
+  }).label, /已不可调整/);
+  assert.equal(shouldPollOperatorRetry(
+    { ...base, status: "PENDING" }, Date.parse("2026-08-19T03:02:59.000Z"),
+  ), true);
+  assert.equal(shouldPollOperatorRetry(
+    { ...base, status: "PENDING" }, Date.parse("2026-08-19T03:03:01.000Z"),
+  ), false);
+  assert.equal(latestOperatorRetryRequests([
+    { ...base, request_id: "new", status: "APPLIED" },
+    { ...base, request_id: "old", status: "PENDING" },
+  ]).get(base.job_id).request_id, "new");
 });

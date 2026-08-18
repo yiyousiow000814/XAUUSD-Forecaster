@@ -1187,13 +1187,15 @@ def test_health_endpoint_requires_recent_dashboard_snapshot(monkeypatch, tmp_pat
 
 
 def test_retry_operator_bridge_lists_and_atomically_applies_idempotent_override(
-    tmp_path,
+    monkeypatch, tmp_path,
 ) -> None:
     from xauusd_forecaster.news_scheduler import (
         ROUTINE_POOL, backoff_job, claim_job, enqueue_job,
     )
 
     module = _dashboard_module()
+    bridge_token = "test-operator-bridge-token-" + "x" * 32
+    monkeypatch.setenv("DASHBOARD_OPERATOR_BRIDGE_TOKEN", bridge_token)
     now = datetime.now(UTC).replace(microsecond=0)
     database = tmp_path / "forward.sqlite3"
     ForwardLedger(database, now=now).close()
@@ -1228,7 +1230,11 @@ def test_retry_operator_bridge_lists_and_atomically_applies_idempotent_override(
     thread.start()
     try:
         base = f"http://127.0.0.1:{server.server_port}"
-        with urllib.request.urlopen(f"{base}/api/retry-jobs", timeout=2) as response:
+        read_request = urllib.request.Request(
+            f"{base}/api/retry-jobs",
+            headers={"X-Aurum-Operator-Bridge-Token": bridge_token},
+        )
+        with urllib.request.urlopen(read_request, timeout=2) as response:
             item = json.loads(response.read())["items"][0]
         assert item["job_id"] == job_id
         assert item["last_error"] == "ConnectionResetError"
@@ -1243,7 +1249,10 @@ def test_retry_operator_bridge_lists_and_atomically_applies_idempotent_override(
         }
         request = lambda: urllib.request.Request(
             f"{base}/api/retry-overrides", method="POST",
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "X-Aurum-Operator-Bridge-Token": bridge_token,
+            },
             data=json.dumps(payload).encode(),
         )
         with urllib.request.urlopen(request(), timeout=2) as response:
@@ -1267,6 +1276,70 @@ def test_retry_operator_bridge_lists_and_atomically_applies_idempotent_override(
             connection.close()
         assert tuple(current) == ("BACKING_OFF", observed["attempt_count"], "ConnectionResetError")
         assert audits == 1
+    finally:
+        server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+
+def test_retry_operator_bridge_requires_both_loopback_and_dedicated_credential(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _dashboard_module()
+    bridge_token = "test-operator-bridge-token-" + "y" * 32
+    monkeypatch.setenv("DASHBOARD_OPERATOR_BRIDGE_TOKEN", bridge_token)
+    database = tmp_path / "forward.sqlite3"
+    ForwardLedger(database, now=datetime.now(UTC)).close()
+    module.Handler.database = database
+    server = module.ThreadingHTTPServer(("127.0.0.1", 0), module.Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+
+    def status(request: urllib.request.Request) -> int:
+        try:
+            urllib.request.urlopen(request, timeout=2)
+        except urllib.error.HTTPError as error:
+            return error.code
+        raise AssertionError("bridge request should have failed")
+
+    try:
+        assert status(urllib.request.Request(f"{base}/api/retry-jobs")) == 401
+        assert status(urllib.request.Request(
+            f"{base}/api/retry-jobs",
+            headers={"X-Aurum-Operator-Bridge-Token": "wrong" * 10},
+        )) == 401
+        payload = b'{"items":[]}'
+        assert status(urllib.request.Request(
+            f"{base}/api/retry-overrides", method="POST", data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "X-Aurum-Operator-Bridge-Token": bridge_token,
+                "Origin": "https://attacker.example",
+            },
+        )) == 403
+        assert status(urllib.request.Request(
+            f"{base}/api/retry-overrides", method="POST", data=payload,
+            headers={"X-Aurum-Operator-Bridge-Token": bridge_token},
+        )) == 415
+        assert status(urllib.request.Request(
+            f"{base}/api/retry-overrides", method="POST", data=b"{" + b"x" * 100_001,
+            headers={
+                "Content-Type": "application/json",
+                "X-Aurum-Operator-Bridge-Token": bridge_token,
+            },
+        )) == 400
+
+        direct = type("DirectRequest", (), {
+            "client_address": ("192.0.2.8", 1234),
+            "headers": {"X-Aurum-Operator-Bridge-Token": bridge_token},
+        })()
+        assert module.Handler._operator_bridge_auth_error(direct)[0] == 403
+        connection = sqlite3.connect(database)
+        try:
+            assert connection.execute(
+                "SELECT count(*) FROM news_ai_retry_schedule_overrides_v1"
+            ).fetchone()[0] == 0
+        finally:
+            connection.close()
     finally:
         server.shutdown(); server.server_close(); thread.join(timeout=2)
 

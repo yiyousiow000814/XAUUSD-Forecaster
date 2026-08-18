@@ -112,9 +112,17 @@ part of it.
     provenance. Technical job IDs remain visually secondary. Desktop, 390x844,
     and 360x800 layouts keep every control reachable without horizontal
     overflow, and every scheduling control has a minimum 44 CSS-pixel target.
+    Checkbox labels must make the complete 44x44 area interactive; a 20px input
+    centered inside a non-interactive layout box does not satisfy this rule.
 12. Advancing work uses a lightweight confirmation that states the selected
     count and says the work becomes scheduler-claimable, not immediately
     executed. Custom datetime input is explicitly UTC+8.
+13. A retry card leads with task, failure, failure time, schedule provenance,
+    and the latest operator command state. It exposes one compact adjustment
+    entry point instead of six persistent action buttons. Restore-original is
+    offered only when an active override exists. `IDLE_CAPACITY` copy describes
+    yielding within the scheduler pool for 30 minutes; it never claims to sense
+    machine, CPU, or provider idleness.
 
 ## OOS chart windows
 

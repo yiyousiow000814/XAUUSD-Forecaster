@@ -107,10 +107,10 @@ including chat, News Q&A, title, compaction, and historical-memory indexing.
 Preview never authenticates a machine, claims work, or reads canonical
 production messages to build or test private memory.
 
-`/api/operator-retry` returns a labeled synthetic empty queue in Preview and
+`/api/operator-retry` returns a labeled synthetic-empty API state in Preview and
 rejects every POST before operator authentication, body parsing, or D1 access.
 `/api/operator-retry-worker` rejects both machine claims and updates at the same
 early boundary. Only after the human API returns its labeled synthetic-empty
-state may the client install an explicitly labeled, branch-owned retry fixture
+state may the client install explicitly labeled, synthetic branch-owned retry tasks
 for selection, confirmation, custom-time, and responsive review. Its submit
 control remains disabled and it never contacts the Windows scheduler bridge.

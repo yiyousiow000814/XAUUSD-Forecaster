@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hmac
 import json
 import math
+import os
 import sqlite3
 import subprocess
 import sys
@@ -2803,6 +2805,20 @@ class Handler(BaseHTTPRequestHandler):
     database: Path
     status_cache = StatusSnapshotCache()
 
+    def _operator_bridge_auth_error(self) -> tuple[int, bytes] | None:
+        if self.client_address[0] not in {"127.0.0.1", "::1"}:
+            return 403, b'{"error":"localhost operator bridge only"}'
+        # Browser-origin requests have no reason to reach this machine bridge.
+        if self.headers.get("Origin") or self.headers.get("Sec-Fetch-Mode"):
+            return 403, b'{"error":"browser origin is not permitted"}'
+        expected = os.environ.get("DASHBOARD_OPERATOR_BRIDGE_TOKEN", "").strip()
+        supplied = self.headers.get("X-Aurum-Operator-Bridge-Token", "").strip()
+        if not 32 <= len(expected) <= 512:
+            return 503, b'{"error":"operator bridge credential is not configured"}'
+        if not supplied or not hmac.compare_digest(supplied, expected):
+            return 401, b'{"error":"operator bridge authorization failed"}'
+        return None
+
     def _write_json(self, status: int, body: bytes, **headers: str) -> None:
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -2873,6 +2889,10 @@ class Handler(BaseHTTPRequestHandler):
             self._write_json(status, body)
             return
         if path == "/api/retry-jobs":
+            auth_error = self._operator_bridge_auth_error()
+            if auth_error:
+                self._write_json(*auth_error)
+                return
             try:
                 connection = sqlite3.connect(
                     f"file:{self.database}?mode=ro", uri=True, timeout=5,
@@ -2916,8 +2936,13 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.rstrip("/") != "/api/retry-overrides":
             self.send_error(404)
             return
-        if self.client_address[0] not in {"127.0.0.1", "::1"}:
-            self._write_json(403, b'{"error":"localhost operator bridge only"}')
+        auth_error = self._operator_bridge_auth_error()
+        if auth_error:
+            self._write_json(*auth_error)
+            return
+        content_type = self.headers.get("Content-Type", "").partition(";")[0].strip().lower()
+        if content_type != "application/json":
+            self._write_json(415, b'{"error":"application/json content type required"}')
             return
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
@@ -2930,6 +2955,8 @@ class Handler(BaseHTTPRequestHandler):
             if not 1 <= len(items) <= 100:
                 raise ValueError("retry override batch size is invalid")
             operator_id = str(payload.get("operator_id") or "").strip()
+            if not operator_id.startswith("cloudflare-access:") or len(operator_id) > 500:
+                raise ValueError("retry override operator identity is invalid")
             connection = sqlite3.connect(self.database, timeout=10)
             connection.row_factory = sqlite3.Row
             try:

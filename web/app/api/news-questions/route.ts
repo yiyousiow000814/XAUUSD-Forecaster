@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
-import { authenticateAssistantRequest } from "../_shared/assistant-auth";
+import { authenticateDashboardOperatorRequest } from "../_shared/dashboard-operator-auth";
 import { readBoundedBody } from "../_shared/dashboard-snapshot";
 import {
   createNewsQuestion,
@@ -50,7 +50,7 @@ export async function GET(request: Request) {
     return previewJson({ items: [], preview: true }, 200, "synthetic-empty-assistant");
   }
 
-  const actor = await authenticateAssistantRequest(request, env);
+  const actor = await authenticateDashboardOperatorRequest(request, env);
   if (!actor) return unauthorized();
   if (params.has("mode")) {
     return inputError(new NewsQuestionInputError("INVALID_MODE", "新闻问答查询模式无效"));
@@ -81,7 +81,7 @@ export async function POST(request: Request) {
   const previewRejection = rejectPreviewWrite();
   if (previewRejection) return previewRejection;
   const mode = new URL(request.url).searchParams.get("mode");
-  const actor = await authenticateAssistantRequest(request, env);
+  const actor = await authenticateDashboardOperatorRequest(request, env);
   if (!actor) return unauthorized();
   if (mode !== null) {
     return inputError(new NewsQuestionInputError("INVALID_MODE", "新闻问答写入模式无效"));

@@ -121,6 +121,7 @@ export async function createOperatorRetryRequests(
   const requestedAt = (input.now ?? new Date()).toISOString();
   const results: Array<Record<string, unknown>> = [];
   for (const jobId of jobIds) {
+    const requestId = await digest(`${input.operatorId}\n${input.idempotencyKey}\n${jobId}`);
     const job = await binding.prepare(
       "SELECT * FROM operator_retry_jobs WHERE job_id=?",
     ).bind(jobId).first<RetryJobRow>();
@@ -129,10 +130,54 @@ export async function createOperatorRetryRequests(
       continue;
     }
     if (!new Set(["QUEUED", "BACKING_OFF"]).has(job.state)) {
-      results.push({ job_id: jobId, status: "REJECTED", code: "JOB_NOT_MUTABLE", current: job });
+      const resultJson = JSON.stringify({ code: "JOB_NOT_MUTABLE", current: job });
+      const inserted = await binding.prepare(
+        `INSERT INTO operator_retry_requests (
+         request_id,idempotency_key,job_id,task_type,operator_id,mode,reason,
+         requested_at,requested_available_at,expected_state,expected_available_at,
+         status,completed_at,result_json)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,'REJECTED',?,?)
+         ON CONFLICT(operator_id,idempotency_key,job_id) DO NOTHING RETURNING *`,
+      ).bind(
+        requestId, input.idempotencyKey, jobId, job.task_type, input.operatorId,
+        input.mode, input.reason, requestedAt, input.requestedAvailableAt,
+        job.state, job.available_at, requestedAt, resultJson,
+      ).first<Record<string, unknown>>();
+      const row = inserted ?? await binding.prepare(
+        `SELECT * FROM operator_retry_requests
+         WHERE operator_id=? AND idempotency_key=? AND job_id=?`,
+      ).bind(input.operatorId, input.idempotencyKey, jobId).first<Record<string, unknown>>();
+      if (
+        !inserted && row
+        && (
+          row.mode !== input.mode
+          || row.reason !== input.reason
+          || (row.requested_available_at ?? null) !== input.requestedAvailableAt
+        )
+      ) {
+        results.push({ job_id: jobId, status: "CONFLICT", code: "IDEMPOTENCY_CONFLICT" });
+        continue;
+      }
+      if (inserted) {
+        await binding.batch([
+          binding.prepare(
+            `INSERT INTO operator_retry_request_events
+             (event_id,request_id,event_type,recorded_at,payload_json)
+             VALUES (?,?, 'REQUESTED',?,?)`,
+          ).bind(
+            crypto.randomUUID(), requestId, requestedAt,
+            JSON.stringify({ mode: input.mode, expected_state: job.state, expected_available_at: job.available_at }),
+          ),
+          binding.prepare(
+            `INSERT INTO operator_retry_request_events
+             (event_id,request_id,event_type,recorded_at,payload_json)
+             VALUES (?,?, 'REJECTED',?,?)`,
+          ).bind(crypto.randomUUID(), requestId, requestedAt, resultJson),
+        ]);
+      }
+      results.push({ ...row, code: "JOB_NOT_MUTABLE", current: job, duplicate: !inserted });
       continue;
     }
-    const requestId = await digest(`${input.operatorId}\n${input.idempotencyKey}\n${jobId}`);
     const inserted = await binding.prepare(
       `INSERT INTO operator_retry_requests (
        request_id,idempotency_key,job_id,task_type,operator_id,mode,reason,

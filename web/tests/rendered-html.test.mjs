@@ -1192,14 +1192,22 @@ test("renders component and news-source health on a separate route", async () =>
   const layout = readFileSync(new URL("../app/layout.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   const retryQueue = readFileSync(new URL("../app/_components/RetryQueue.tsx", import.meta.url), "utf8");
-  assert.match(retryQueue, /立即重试/);
-  assert.match(retryQueue, /任务会变成可领取状态/);
+  assert.match(retryQueue, /立即可领取/);
+  assert.match(retryQueue, /云端已接受/);
+  assert.match(retryQueue, /尚不代表 Windows scheduler 已应用/);
+  assert.match(retryQueue, /PR Preview 使用合成演示任务/);
+  assert.match(retryQueue, /调整计划/);
+  assert.match(retryQueue, /恢复自动计划/);
+  assert.match(retryQueue, /action.mode !== "KEEP_ORIGINAL" \|\| overridden/);
+  assert.doesNotMatch(retryQueue, /自动重试中|系统空闲时|空的演示队列/);
   assert.match(retryQueue, /timeZone: "Asia\/Kuala_Lumpur"/);
   assert.match(retryQueue, /type="datetime-local"/);
   assert.match(retryQueue, /已选 \{selected\.size\} 个/);
-  assert.match(retryQueue, /原计划/);
-  assert.match(css, /\.retry-job-actions button[^}]*min-height:44px/);
-  assert.match(css, /@media \(max-width: 720px\)[\s\S]*\.retry-job-card \{ grid-template-columns:32px minmax\(0,1fr\)/);
+  assert.match(retryQueue, /原自动计划/);
+  assert.match(retryQueue, /retry-checkbox-target/);
+  assert.match(css, /\.retry-checkbox-target \{[^}]*min-width:44px;[^}]*min-height:44px/);
+  assert.match(css, /\.retry-job-control > button[^}]*width:100%/);
+  assert.match(css, /@media \(max-width: 720px\)[\s\S]*\.retry-job-card \{ grid-template-columns:44px minmax\(0,1fr\)/);
   assert.match(layout, /<OperationalAlertBanner \/>/);
   const banner = readFileSync(new URL("../app/_components/OperationalAlertBanner.tsx", import.meta.url), "utf8");
   assert.match(banner, /globalOperationalIncidents/);
@@ -2281,7 +2289,7 @@ test("keeps the legacy news Q&A queue protected and paused without a duplicate s
     new URL("../app/api/assistant-worker/news-questions/route.ts", import.meta.url), "utf8",
   );
   const queue = readFileSync(new URL("../app/api/_shared/news-questions.ts", import.meta.url), "utf8");
-  const auth = readFileSync(new URL("../app/api/_shared/assistant-auth.ts", import.meta.url), "utf8");
+  const auth = readFileSync(new URL("../app/api/_shared/dashboard-operator-auth.ts", import.meta.url), "utf8");
   const sync = readFileSync(new URL("../../scripts/run_dashboard_sync.py", import.meta.url), "utf8");
 
   assert.doesNotMatch(view, /view === "qa"/);
@@ -2291,10 +2299,10 @@ test("keeps the legacy news Q&A queue protected and paused without a duplicate s
   assert.match(route, /rejectPreviewWrite\(\)/);
   const postRoute = route.slice(route.indexOf("export async function POST"));
   assert.ok(
-    postRoute.indexOf("rejectPreviewWrite()") < postRoute.indexOf("authenticateAssistantRequest(request, env)"),
+    postRoute.indexOf("rejectPreviewWrite()") < postRoute.indexOf("authenticateDashboardOperatorRequest(request, env)"),
     "Preview writes must reject before human authentication",
   );
-  assert.match(route, /authenticateAssistantRequest\(request, env\)/);
+  assert.match(route, /authenticateDashboardOperatorRequest\(request, env\)/);
   assert.doesNotMatch(route, /isIngestAuthorized|claimNewsQuestion|completeNewsQuestion/);
   assert.match(workerRoute, /isIngestAuthorized\(request\)/);
   assert.match(workerRoute, /claimNewsQuestion/);
@@ -2331,10 +2339,10 @@ test("keeps chat admission owner-authenticated and event replay finite", () => {
   const postRoute = route.slice(route.indexOf("export async function POST"));
   assert.ok(
     postRoute.indexOf("rejectPreviewWrite()")
-      < postRoute.indexOf("authenticateAssistantRequest(request, env)"),
+      < postRoute.indexOf("authenticateDashboardOperatorRequest(request, env)"),
     "Preview chat writes must reject before human authentication",
   );
-  assert.match(route, /authenticateAssistantRequest\(request, env\)/);
+  assert.match(route, /authenticateDashboardOperatorRequest\(request, env\)/);
   assert.doesNotMatch(route, /isIngestAuthorized|claimAssistantChatTurn|completeAssistantChatTurn/);
   assert.match(workerRoute, /isIngestAuthorized\(request\)/);
   assert.match(route, /last-event-id/);
@@ -2359,6 +2367,7 @@ test("separates Access-owned human APIs from the ingest worker control plane", (
     "../app/api/assistant-chat/route.ts",
     "../app/api/assistant-conversations/route.ts",
     "../app/api/news-questions/route.ts",
+    "../app/api/operator-retry/route.ts",
   ].map(path => readFileSync(new URL(path, import.meta.url), "utf8"));
   const workerRoutes = [
     "../app/api/assistant-worker/chat/route.ts",
@@ -2374,12 +2383,12 @@ test("separates Access-owned human APIs from the ingest worker control plane", (
   );
 
   for (const route of humanRoutes) {
-    assert.match(route, /authenticateAssistantRequest\(request, env\)/);
+    assert.match(route, /authenticateDashboardOperatorRequest\(request, env\)/);
     assert.doesNotMatch(route, /isIngestAuthorized|mode === "machine"/);
   }
   for (const route of workerRoutes) {
     assert.match(route, /isIngestAuthorized\(request\)/);
-    assert.doesNotMatch(route, /authenticateAssistantRequest/);
+    assert.doesNotMatch(route, /authenticateDashboardOperatorRequest/);
     const getRoute = route.slice(route.indexOf("export async function GET"));
     assert.ok(
       getRoute.indexOf("rejectPreviewWrite()")

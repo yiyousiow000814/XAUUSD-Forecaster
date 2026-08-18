@@ -1003,10 +1003,17 @@ def _local_retry_url(config: dict, path: str) -> str:
 
 
 def _post_local_json(url: str, payload: dict) -> dict:
+    token = os.environ.get("DASHBOARD_OPERATOR_BRIDGE_TOKEN", "").strip()
+    if not 32 <= len(token) <= 512:
+        raise RuntimeError("dashboard operator bridge credential is not configured")
     request = urllib.request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json", "User-Agent": "AurumOperatorBridge/1.0"},
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "AurumOperatorBridge/1.0",
+            "X-Aurum-Operator-Bridge-Token": token,
+        },
         method="POST",
     )
     try:
@@ -1019,8 +1026,15 @@ def _post_local_json(url: str, payload: dict) -> dict:
 
 
 def _get_local_json(url: str) -> dict:
+    token = os.environ.get("DASHBOARD_OPERATOR_BRIDGE_TOKEN", "").strip()
+    if not 32 <= len(token) <= 512:
+        raise RuntimeError("dashboard operator bridge credential is not configured")
     request = urllib.request.Request(
-        url, headers={"Accept": "application/json", "User-Agent": "AurumOperatorBridge/1.0"},
+        url, headers={
+            "Accept": "application/json",
+            "User-Agent": "AurumOperatorBridge/1.0",
+            "X-Aurum-Operator-Bridge-Token": token,
+        },
     )
     with urllib.request.urlopen(request, timeout=LOCAL_STATUS_TIMEOUT_SECONDS) as response:
         return json.loads(response.read())
@@ -1035,6 +1049,7 @@ def _sync_operator_retries(_local_payload: dict, config: dict) -> None:
         config,
     )
     worker_id = _assistant_worker_id()
+    processed = False
     for _ in range(100):
         command = _get_json(
             f"{worker_url}?{urllib.parse.urlencode({'worker_id': worker_id})}", config,
@@ -1066,6 +1081,18 @@ def _sync_operator_retries(_local_payload: dict, config: dict) -> None:
                 "lease_token": command.get("lease_token"),
                 "status": status,
                 "result": result,
+            }).encode(),
+            config,
+        )
+        processed = True
+    if processed:
+        # A command result and the scheduler mirror advance in the same bounded
+        # sync pass; the browser need not wait for an unrelated later cycle.
+        refreshed_jobs = _get_local_json(_local_retry_url(config, "/api/retry-jobs"))
+        _post_json(
+            worker_url,
+            json.dumps({
+                "action": "SYNC_JOBS", "items": refreshed_jobs.get("items", []),
             }).encode(),
             config,
         )
