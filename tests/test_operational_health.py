@@ -191,6 +191,7 @@ def test_scheduled_retry_loop_is_visible_without_claiming_current_impact() -> No
         "state": "BACKING_OFF",
         "claimable": False,
         "next_retry_at": next_retry.isoformat(),
+        "latest_failure_code": "MODEL_OUTPUT_CONTRACT_FAILED",
     }
     assert annotation["claimable"] == 0
     assert annotation["scheduled_retry"] == 1
@@ -484,6 +485,37 @@ def test_daily_brief_deferral_keeps_the_underlying_failure_code() -> None:
     assert alert["evidence"]["failure_count"] == 4
     assert alert["evidence"]["failure_evidence"]["selected_output"] == {
         "unknown_evidence_ids": ["invented:1"]
+    }
+
+
+def test_component_alert_preserves_structured_semantic_reason_codes() -> None:
+    result = extend_with_component_alerts(
+        scheduler_health_snapshot(_connection(), now=NOW),
+        components={
+            "news_semantic_pipeline": {
+                "status": "ERROR", "age_seconds": 30, "last_error": "opaque",
+                "reason_codes": [
+                    "ACTIONABLE_NEWS_SEMANTICS_PENDING",
+                    "ACTIONABLE_NEWS_IMPACT_PENDING",
+                ],
+                "actionable_failure_counts": {
+                    "ACTIVE_ANNOTATION": {"MODEL_OUTPUT_CONTRACT_FAILED": 2},
+                },
+            },
+        },
+        news_sources=[], runtime_update_failure=None,
+    )
+
+    alert = next(
+        item for item in result["alerts"]
+        if item["code"] == "OPS_COMPONENT_UNHEALTHY"
+    )
+    assert alert["evidence"]["reason_codes"] == [
+        "ACTIONABLE_NEWS_SEMANTICS_PENDING",
+        "ACTIONABLE_NEWS_IMPACT_PENDING",
+    ]
+    assert alert["evidence"]["actionable_failure_counts"] == {
+        "ACTIVE_ANNOTATION": {"MODEL_OUTPUT_CONTRACT_FAILED": 2},
     }
 
 

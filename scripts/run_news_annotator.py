@@ -36,6 +36,7 @@ from xauusd_forecaster.daily_brief import (  # noqa: E402
 )
 from xauusd_forecaster.forward_ledger import ForwardLedger  # noqa: E402
 from xauusd_forecaster.gemini_embeddings import (  # noqa: E402
+    GEMINI_EMBEDDING_FAILURE_CODES,
     GeminiEmbeddingFailure,
 )
 from xauusd_forecaster.ai_task_registry import route_for_task  # noqa: E402
@@ -76,10 +77,7 @@ from xauusd_forecaster.model_limits import GEMMA_PROVIDER_LANES_PER_ACCOUNT  # n
 PRODUCTION_LANES_PER_ACCOUNT = GEMMA_PROVIDER_LANES_PER_ACCOUNT
 EMBEDDING_PREREQUISITE_FAILURE_CODES = frozenset({
     "NEWS_EMBEDDING_BACKFILL_PENDING",
-    "NEWS_EMBEDDING_CAPACITY_DEFERRED",
-    "NEWS_EMBEDDING_PROVIDER_THROTTLED",
-    "NEWS_EMBEDDING_PROVIDER_TRANSPORT_FAILED",
-    "NEWS_EMBEDDING_PROVIDER_RESPONSE_INVALID",
+    *GEMINI_EMBEDDING_FAILURE_CODES,
 })
 
 

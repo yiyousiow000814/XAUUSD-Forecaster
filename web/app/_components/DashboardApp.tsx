@@ -4,6 +4,8 @@ import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import LiveRoomView from "../_views/LiveRoomView";
 import { primeDashboardResources } from "../_lib/dashboard-resource";
 import { settleResponsiveScroll } from "../_lib/responsive-scroll";
+import type { StatusPayload as HealthStatusPayload } from "../_views/HealthView";
+import type { StatusPayload as QuotaStatusPayload } from "../_views/StatusView";
 import {
   DashboardNavigationProvider,
   type AuditViewName,
@@ -126,12 +128,14 @@ export default function DashboardApp({
   }, []);
 
   const navigation = useMemo(() => ({ navigate, preload }), [navigate, preload]);
+  const initialStatus = initialResources["/api/status"] as
+    (HealthStatusPayload & QuotaStatusPayload) | undefined;
 
   return <DashboardNavigationProvider value={navigation}>
     <Suspense fallback={<main className="app-view-loading" aria-label="正在打开页面"><i /></main>}>
       {location.room === "live" && <LiveRoomView />}
-      {location.room === "status" && <StatusView />}
-      {location.room === "health" && <HealthView />}
+      {location.room === "status" && <StatusView initialPayload={initialStatus} />}
+      {location.room === "health" && <HealthView initialPayload={initialStatus} />}
       {location.room === "audit" && <AuditView key={location.auditView} />}
       {location.room === "assistant" && <AssistantView />}
     </Suspense>

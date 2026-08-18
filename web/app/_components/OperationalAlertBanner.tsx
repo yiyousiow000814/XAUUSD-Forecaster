@@ -4,7 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import DashboardLink from "./DashboardLink";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
-import { globalOperationalAlerts, type AssistantOperationalHealth, type OperationalAlert, type OperationalHealth } from "../_lib/operational-health";
+import { correlateOperationalEvents, globalOperationalIncidents } from "../_lib/operational-incidents";
+import { normalizeOperationalEvent, type AssistantOperationalHealth, type OperationalAlert, type OperationalHealth } from "../_lib/operational-health";
 
 type AlertPayload = {
   preview_status_summary?: boolean;
@@ -51,30 +52,28 @@ export default function OperationalAlertBanner() {
   ), [refreshAssistant]);
 
   const health = payload?.operational_health;
-  const unavailableAlert: OperationalAlert = {
+  const unavailableAlert: OperationalAlert = normalizeOperationalEvent({
     code: "OPS_ASSISTANT_HEALTH_UNAVAILABLE",
     severity: "ERROR",
     scope: "ASSISTANT_D1",
     message_zh: "Assistant 云端运行状态无法读取。",
     blocking: true,
     evidence: {},
-  };
-  const alerts = globalOperationalAlerts([
+  });
+  const incidents = globalOperationalIncidents(correlateOperationalEvents([
     ...(health?.alerts ?? []),
     ...(assistantUnavailable ? [unavailableAlert] : assistant?.current ? assistant.alerts : []),
-  ]).sort((left, right) => (
-    (left.severity === "ERROR" ? 0 : 1) - (right.severity === "ERROR" ? 0 : 1)
-  ));
-  if (payload?.preview_status_summary || alerts.length === 0) {
+  ]));
+  if (payload?.preview_status_summary || incidents.length === 0) {
     return null;
   }
-  const status = alerts.some(alert => alert.severity === "ERROR") ? "error" : "warning";
-  const first = alerts[0];
+  const status = incidents.some(incident => incident.severity === "ERROR") ? "error" : "warning";
+  const first = incidents[0];
   const title = status === "error" ? "后台运行异常" : "后台运行提醒";
   return <aside className={`operational-alert-banner is-${status}${expanded ? " is-expanded" : ""}`} role="alert">
     <div className="operational-alert-heading">
       <b>{title}</b>
-      <span>{alerts.length} 项</span>
+      <span>{incidents.length} 个问题</span>
     </div>
     <button
       type="button"
@@ -84,12 +83,12 @@ export default function OperationalAlertBanner() {
       onClick={() => setExpanded(value => !value)}
     >
       <b>{title}</b>
-      <span>{alerts.length} 项</span>
+      <span>{incidents.length} 个问题</span>
       <i aria-hidden="true">{expanded ? "−" : "+"}</i>
     </button>
     <div className="operational-alert-detail" id="operational-alert-details">
-      <code>{first.code}</code>
-      <span>{first.message_zh}{alerts.length > 1 ? ` · 另有 ${alerts.length - 1} 项` : ""}</span>
+      <span>{first.title_zh}</span>
+      <span>{first.summary_zh}{incidents.length > 1 ? ` · 另有 ${incidents.length - 1} 个问题` : ""}</span>
     </div>
     <DashboardLink href="/health#operational-alerts">查看证据与处理进度 →</DashboardLink>
   </aside>;

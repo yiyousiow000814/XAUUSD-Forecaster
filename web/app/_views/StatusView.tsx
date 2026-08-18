@@ -28,7 +28,7 @@ type QuotaState = {
   total_remaining: number;
 };
 
-type StatusPayload = {
+export type StatusPayload = {
   preview_status_summary?: boolean;
   preview?: {
     branch_snapshot?: { generated_at: string | null; status_paths: string[] };
@@ -119,8 +119,8 @@ function QuotaPanel({ title, eyebrow, quota, nowMs }: { title: string; eyebrow: 
   </section>;
 }
 
-export default function StatusView() {
-  const cachedStatus = readDashboardResource<StatusPayload>("/api/status");
+export default function StatusView({ initialPayload }: { initialPayload?: StatusPayload }) {
+  const cachedStatus = initialPayload ?? readDashboardResource<StatusPayload>("/api/status");
   const [payload, setPayload] = useState<StatusPayload | null>(() => cachedStatus);
   const [error, setError] = useState<string | null>(null);
   const [syncingCurrent, setSyncingCurrent] = useState(Boolean(cachedStatus?.preview_status_summary));

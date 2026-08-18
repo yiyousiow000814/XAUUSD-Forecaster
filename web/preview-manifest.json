@@ -25,7 +25,7 @@
     "marketHistory": "/api/market-history"
   },
   "statusInlineKeys": [
-    "preview", "generated_at", "system", "training", "counts",
+    "preview", "generated_at", "system", "operational_health", "training", "counts",
     "news_evidence_summary", "daily_news_briefs", "daily_news_brief_summary",
     "storyline_summary", "factor_coverage",
     "annotation_queue", "news_source_health", "llm_routing", "gemini_quota",

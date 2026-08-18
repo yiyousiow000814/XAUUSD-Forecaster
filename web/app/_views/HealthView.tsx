@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 import { CurrentDataNotice, type CurrentDataPhase } from "../_components/CurrentDataState";
 import CountValue from "../_components/CountValue";
 import DashboardLink from "../_components/DashboardLink";
@@ -9,10 +9,12 @@ import SystemStatePill from "../_components/SystemStatePill";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { operationalEvidenceText } from "../_lib/operational-evidence";
-import { schedulerTaskLabel, type AssistantOperationalHealth, type OperationalHealth } from "../_lib/operational-health";
+import { operationalEventDiagnostic, operationalIncidentActionLabels, operationalScopeLabel } from "../_lib/operational-incident-presentation";
+import { affectedOperationalScopeCount, correlateOperationalEvents, type OperationalIncident } from "../_lib/operational-incidents";
+import { normalizeOperationalEvent, schedulerTaskLabel, type AssistantOperationalHealth, type OperationalAlert, type OperationalHealth } from "../_lib/operational-health";
 import { sourceHealthErrorPresentation } from "../_lib/source-health-presentation";
 
-type StatusPayload = {
+export type StatusPayload = {
   preview_status_summary?: boolean;
   generated_at: string;
   system: {
@@ -32,19 +34,6 @@ type StatusPayload = {
     semantic_status: string; semantic_message: string | null;
   }>;
   operational_health?: OperationalHealth;
-};
-
-const componentLabels: Record<string, string> = {
-  quote_bridge: "XAUUSD 报价桥",
-  system_clock: "cTrader 报价时间 / 本机接收时间",
-  decision_collector: "5 分钟决策收集器",
-  outcome_settler: "30 分钟结果结算器",
-  news_collector: "新闻收集器",
-  gemini_annotator: "Gemini 新闻分析器",
-  news_semantic_pipeline: "新闻语义决策门槛",
-  sites_synchronizer: "网页同步器",
-  sqlite_backup: "SQLite 备份",
-  integrity_check: "数据库完整性检查",
 };
 
 function localTime(value: string | null): string {
@@ -68,6 +57,55 @@ function compactElapsed(seconds: number | null): string {
   return `${Math.floor(seconds / 3600)} 小时 ${Math.floor((seconds % 3600) / 60)} 分`;
 }
 
+export function IncidentCard({ incident }: { incident: OperationalIncident }) {
+  const events = [
+    incident.root_event, ...incident.related_events, ...incident.technical_events,
+  ];
+  const affectedScopes = [...new Set([incident.root_event.scope, ...incident.affected_scopes])];
+  const [showTechnical, setShowTechnical] = useState(false);
+  const technicalId = useId();
+  return <article className={`operational-incident-card is-${incident.severity.toLowerCase()}`}>
+    <header>
+      <div><h3>{incident.title_zh}</h3><p>{incident.summary_zh}</p></div>
+      <strong>{operationalIncidentActionLabels[incident.action_state]}</strong>
+    </header>
+    {incident.summary_metrics.length ? <dl>{incident.summary_metrics.map(metric => <div key={metric.label}><dt>{metric.label}</dt><dd>{metric.value}</dd></div>)}</dl> : null}
+    <p className="incident-affected"><b>影响：</b>{affectedScopes.map(operationalScopeLabel).join(" · ")}</p>
+    <div className={`incident-technical-details${showTechnical ? " is-expanded" : ""}`}>
+      <button type="button" aria-expanded={showTechnical} aria-controls={technicalId} onClick={() => setShowTechnical(value => !value)}>查看技术详情 · {incident.technical_event_count} 个事件</button>
+      <div id={technicalId} hidden={!showTechnical}>
+        <div className="incident-human-diagnostics">{events.map((event, index) => {
+          const incidentReasons = event.code === "OPS_COMPONENT_UNHEALTHY"
+            ? incident.reason_projections
+              .filter(projection => projection.source_event_code === event.code
+                && projection.source_scope === event.scope)
+              .map(projection => projection.reason_code)
+            : undefined;
+          const diagnostic = operationalEventDiagnostic(event, incidentReasons);
+          return <section key={`${event.code}-${event.scope}-${index}`}>
+            <dl>
+              <div><dt>当前状态</dt><dd>{diagnostic.status}</dd></div>
+              <div><dt>组件</dt><dd>{diagnostic.component}</dd></div>
+              {diagnostic.reasons.length ? <div><dt>原因</dt><dd>{diagnostic.reasons.map(reason => <span key={reason}>{reason}</span>)}</dd></div> : null}
+            </dl>
+          </section>;
+        })}</div>
+        <details className="incident-raw-evidence">
+          <summary>查看原始字段</summary>
+          {events.map((event, index) => <section key={`${event.code}-${event.scope}-${index}`}>
+            <div><code>{event.code}</code><b>scope={event.scope}</b></div>
+            <small>severity={event.severity} · blocking={String(event.blocking)}{Object.keys(event.evidence).length ? ` · ${operationalEvidenceText(event.evidence)}` : ""}</small>
+          </section>)}
+          {incident.reason_projections.map(projection => <section className="incident-reason-projection" key={`${projection.source_scope}-${projection.reason_code}`}>
+            <div><code>{projection.reason_code}</code><b>scope={projection.source_scope}</b></div>
+            <small>由结构化组件原因关联；原始组件事件仅在一个技术证据位置保留。</small>
+          </section>)}
+        </details>
+      </div>
+    </div>
+  </article>;
+}
+
 type NewsSourceHealth = StatusPayload["news_source_health"][number];
 
 function SourceHealthCard({ item }: { item: NewsSourceHealth }) {
@@ -85,8 +123,8 @@ function SourceHealthCard({ item }: { item: NewsSourceHealth }) {
   </article>;
 }
 
-export default function HealthView() {
-  const cachedStatus = readDashboardResource<StatusPayload>("/api/status");
+export default function HealthView({ initialPayload }: { initialPayload?: StatusPayload }) {
+  const cachedStatus = initialPayload ?? readDashboardResource<StatusPayload>("/api/status");
   const cachedAssistantHealth = readDashboardResource<AssistantOperationalHealth>("/api/assistant-health");
   const [payload, setPayload] = useState<StatusPayload | null>(() => cachedStatus);
   const [assistantHealth, setAssistantHealth] = useState<AssistantOperationalHealth | null>(() => cachedAssistantHealth);
@@ -144,6 +182,18 @@ export default function HealthView() {
   const sources = payload?.news_source_health ?? [];
   const healthySourceCount = sources.filter(source => source.health === "HEALTHY").length;
   const sourceHasAttention = sources.some(source => source.health !== "HEALTHY");
+  const assistantUnavailableEvent: OperationalAlert = normalizeOperationalEvent({
+    code: "OPS_ASSISTANT_HEALTH_UNAVAILABLE", severity: "ERROR", scope: "ASSISTANT_D1",
+    message_zh: "Assistant 云端运行状态无法读取。", blocking: true, evidence: {},
+  });
+  const operationalEvents = [
+    ...(payload?.operational_health?.alerts ?? []),
+    ...(assistantHealthError ? [assistantUnavailableEvent] : assistantHealth?.current ? assistantHealth.alerts : []),
+  ];
+  const incidents = correlateOperationalEvents(operationalEvents);
+  const affectedScopeCount = affectedOperationalScopeCount(incidents);
+  const incidentStatus = incidents.some(incident => incident.severity === "ERROR")
+    ? "error" : incidents.length ? "warning" : "healthy";
 
   return <main className="status-main">
     <div className="grain" />
@@ -165,16 +215,14 @@ export default function HealthView() {
     </section>
     {error ? <div className="error-banner">状态读取失败：{error}</div> : null}
     <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
-    <section id="operational-alerts" className={`operational-health-panel is-${(payload?.operational_health?.status ?? "HEALTHY").toLowerCase()}`} aria-label="运行异常与错误码">
-      <header><div><p className="eyebrow">OPERATIONAL ERROR CODES</p><h2>运行异常与定位证据</h2></div><p>覆盖本机预测与新闻数据链路、新闻 AI 队列、来源、同步和 Daily Brief；Assistant 云端任务另有独立运行面。正常运行不等于正在产生进展。</p></header>
-      {(payload?.operational_health?.alerts ?? []).length ? <div className="operational-alert-list">
-        {payload?.operational_health?.alerts.map((alert, index) => <article key={`${alert.code}-${alert.scope}-${index}`} className={`is-${alert.severity.toLowerCase()}`}>
-          <div><code>{alert.code}</code><b>{alert.scope}</b><span>{alert.severity === "ERROR" ? "需要处理" : "需要留意"}</span></div>
-          <p>{alert.message_zh}</p>
-          <small>{operationalEvidenceText(alert.evidence)}</small>
-        </article>)}
-      </div> : <p className="operational-all-clear">当前没有达到告警阈值的运行异常。</p>}
-      <div className="scheduler-health-grid">
+    <section id="operational-alerts" className={`operational-health-panel incident-summary-panel is-${incidentStatus}`} aria-label="运行问题与关联证据">
+      <header><div><p className="eyebrow">OPERATIONAL INCIDENTS</p><h2>运行问题</h2></div><p>{incidents.length ? `${incidents.length} 个问题 · ${affectedScopeCount} 个受影响组件` : "当前没有达到告警阈值的运行问题。"}</p></header>
+      {incidents.length ? <div className="operational-incident-list">{incidents.map(incident => <IncidentCard incident={incident} key={incident.incident_key} />)}</div> : <p className="operational-all-clear">当前没有达到告警阈值的运行异常。</p>}
+    </section>
+    <section className="operational-health-panel technical-health-panel" aria-label="本机调度器技术状态">
+      <details>
+        <summary>查看调度器技术状态</summary>
+        <div className="scheduler-health-grid">
         {(payload?.operational_health?.scheduler.tasks ?? []).map(task => <article key={task.task_type}>
           <header><strong>{schedulerTaskLabel[task.task_type] ?? task.task_type}</strong><code>{task.task_type}</code></header>
           <dl>
@@ -192,16 +240,14 @@ export default function HealthView() {
           {task.failure_codes_15m.length ? <p className="scheduler-failure-codes">{task.failure_codes_15m.map(item => <code key={item.code}>{item.code} × {item.count}</code>)}</p> : null}
           {(task.capacity_dimensions_15m ?? []).length ? <p className="scheduler-failure-codes">{task.capacity_dimensions_15m?.map(item => <code key={item.dimension}>LOCAL_{item.dimension}_LIMIT × {item.count}</code>)}</p> : null}
         </article>)}
-      </div>
+        </div>
+      </details>
     </section>
-    <section id="assistant-operational-alerts" className={`operational-health-panel is-${assistantHealthError ? "error" : (assistantHealth?.status ?? "healthy").toLowerCase()}`} aria-label="Assistant 云端运行异常与错误码">
-      <header><div><p className="eyebrow">ASSISTANT D1 ERROR CODES</p><h2>Assistant 云端任务</h2></div><p>覆盖对话、新闻问答、标题、上下文压缩与历史记忆索引。这里直接读取 Cloudflare D1 队列，不拿本机新闻队列代替。</p></header>
-      {assistantHealthError ? <div className="operational-alert-list"><article className="is-error"><div><code>OPS_ASSISTANT_HEALTH_UNAVAILABLE</code><b>ASSISTANT_D1</b><span>需要处理</span></div><p>Assistant 云端运行状态无法读取。</p></article></div>
-        : assistantHealth === null ? <p className="operational-all-clear">正在读取 Assistant 云端任务状态…</p>
-          : assistantHealth.current === false ? <p className="operational-all-clear">PR Preview 不把生产 D1 告警伪装成分支实时状态；合并后由生产页面显示。</p>
-          : assistantHealth?.alerts.length ? <div className="operational-alert-list">{assistantHealth.alerts.map((alert, index) => <article key={`${alert.code}-${alert.scope}-${index}`} className={`is-${alert.severity.toLowerCase()}`}><div><code>{alert.code}</code><b>{alert.scope}</b><span>{alert.severity === "ERROR" ? "需要处理" : "需要留意"}</span></div><p>{alert.message_zh}</p><small>{operationalEvidenceText(alert.evidence)}</small></article>)}</div>
-            : <p className="operational-all-clear">当前没有达到告警阈值的 Assistant 云端任务异常。</p>}
-      <div className="scheduler-health-grid">
+    <section id="assistant-operational-alerts" className="operational-health-panel technical-health-panel" aria-label="Assistant 云端队列技术状态">
+      <details>
+        <summary>查看 Assistant 云端队列技术状态</summary>
+        <p className="technical-boundary-note">本机 SQLite 与 Assistant D1 保持独立执行面；这里只统一分类和展示。{assistantHealth?.current === false ? " PR Preview 不把生产 D1 告警伪装成分支实时状态。" : ""}</p>
+        <div className="scheduler-health-grid">
         {(assistantHealth?.queues ?? []).map(queue => <article key={queue.queue}>
           <header><strong>{queue.label}</strong><code>{queue.queue}</code></header>
           <dl>
@@ -217,14 +263,15 @@ export default function HealthView() {
           </dl>
           {queue.failure_codes.length ? <p className="scheduler-failure-codes">{queue.failure_codes.map(item => <code key={item.code}>{item.code} × {item.count}</code>)}</p> : null}
         </article>)}
-      </div>
+        </div>
+      </details>
     </section>
     <section className={`component-status ${componentHasAttention ? "has-attention" : ""} ${showHealthyComponents ? "show-healthy" : ""}`} aria-label="数据链路组件状态">
       <header><div><p className="eyebrow">EVIDENCE PIPELINE</p><h2>系统组件状态</h2></div><p><b>{payload?.system.source_of_truth ?? "Local append-only SQLite"}</b> 是不可修改的证据源；{payload?.system.sites_mirror ?? "Sites D1 read-only materialized display mirror"} 只是展示镜像。</p></header>
       {componentHasAttention && healthyComponentCount > 0 && <button className="health-reveal-button" type="button" aria-expanded={showHealthyComponents} onClick={() => setShowHealthyComponents(value => !value)}>{showHealthyComponents ? "只看异常组件" : `另有 ${healthyComponentCount} 个正常组件`}</button>}
       <div>{components.map(({ name, item, healthy }) => <article className={healthy ? "is-healthy" : "is-attention"} key={name}>
         <span className={item.status === "OK" || item.status === "MARKET_CLOSED" ? "component-ok" : "component-stale"}>{item.status === "MARKET_CLOSED" ? "市场休市" : item.status}</span>
-        <strong>{componentLabels[name] ?? name.replaceAll("_", " ")}</strong>
+        <strong>{operationalScopeLabel(name)}</strong>
         <small>最后成功 {localTime(item.last_success)}</small><small>{elapsed(item.age_seconds)}</small>
         {item.last_error ? <em>{item.last_error}</em> : null}
       </article>)}</div>
