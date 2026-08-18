@@ -88,14 +88,16 @@ class ForwardEngine:
             }
         )
         from .live_v2 import append_live_decision_v2
-        from .news_pipeline_health import news_semantic_pipeline_health
+        from .news_pipeline_health import news_semantic_pipeline_health_at
+
+        coverage_health = news_semantic_pipeline_health_at(
+            self.ledger, observed_at=decision_time,
+        )
 
         append_live_decision_v2(
             self.ledger, decision_id=decision_id, decision_time=decision_time,
             created_at=collected_at, snapshot=snapshot,
-            news_pipeline_health=news_semantic_pipeline_health(
-                self.ledger, observed_at=collected_at,
-            ),
+            news_pipeline_health=coverage_health,
         )
         run_id = str(uuid.uuid4())
         with self.ledger.connection:

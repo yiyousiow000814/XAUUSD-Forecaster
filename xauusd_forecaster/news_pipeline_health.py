@@ -194,6 +194,7 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
     unresolved: dict[tuple[str, str, str, int, str], datetime] = {}
     actionable_failure_counts: dict[str, dict[str, int]] = {}
     operational_reasons: list[str] = []
+    operational_reason_counts: dict[str, int] = {}
     annotation_pending = False
 
     def add_unresolved(
@@ -271,6 +272,9 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
                 "ACTIVE_ANNOTATION", item, observed_at=observed_at,
             ):
                 operational_reasons.append(operational_reason)
+                operational_reason_counts[operational_reason] = (
+                    operational_reason_counts.get(operational_reason, 0) + 1
+                )
 
     impact_pending = False
     for row in _current_actionable_impact_rows(ledger, observed_at=observed_at):
@@ -287,6 +291,9 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
                 "ACTIVE_IMPACT", row, observed_at=observed_at,
             ):
                 operational_reasons.append(operational_reason)
+                operational_reason_counts[operational_reason] = (
+                    operational_reason_counts.get(operational_reason, 0) + 1
+                )
     if annotation_pending:
         reasons.append("ACTIONABLE_NEWS_SEMANTICS_PENDING")
     if impact_pending:
@@ -300,9 +307,218 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
         "reason_codes": reason_codes,
         "heartbeat_at": heartbeat_at.isoformat() if heartbeat_at else None,
         "unresolved_items": len(unresolved),
+        "unresolved_annotation_count": sum(
+            task_type == "ACTIVE_ANNOTATION" for task_type, *_ in unresolved
+        ),
+        "unresolved_impact_count": sum(
+            task_type == "ACTIVE_IMPACT" for task_type, *_ in unresolved
+        ),
+        "recovering_count": sum(
+            count for code, count in operational_reason_counts.items()
+            if code.endswith("_RECOVERING")
+        ),
+        "terminal_or_overdue_count": sum(
+            count for code, count in operational_reason_counts.items()
+            if code.endswith(("_TERMINAL", "_OVERDUE"))
+        ),
         "oldest_unresolved_at": (
             min(unresolved.values()).isoformat() if unresolved else None
         ),
         "actionable_failure_counts": actionable_failure_counts,
+    }
+    return {**payload, "snapshot_hash": canonical_hash(payload)}
+
+
+def news_semantic_pipeline_health_at(
+    ledger, *, observed_at: datetime,
+) -> dict[str, object]:
+    """Project semantic readiness from durable evidence known by one instant.
+
+    This historical path deliberately excludes the mutable annotator heartbeat,
+    current credentials, and the job table's latest state.  Job creation,
+    append-only attempts, and immutable semantic outputs are the only scheduler
+    evidence that can be replayed without applying later state backwards.
+    """
+    from .operational_health import TASK_QUEUE_SLA
+
+    cutoff = observed_at.isoformat()
+    query_cutoff = observed_at.isoformat(timespec="microseconds")
+    intake_floor = (observed_at - NEWS_INTAKE_MAX_AGE).isoformat(
+        timespec="microseconds"
+    )
+    latest_poll = ledger.connection.execute(
+        "SELECT max(fetched_time) FROM source_polls WHERE fetched_time<=?",
+        (query_cutoff,),
+    ).fetchone()[0]
+    latest_poll_at = _instant(latest_poll)
+    reasons: list[str] = []
+    if latest_poll_at is None:
+        reasons.append("NEWS_COLLECTOR_POLL_MISSING")
+    elif observed_at - latest_poll_at > ANNOTATOR_HEARTBEAT_MAX_AGE:
+        reasons.append("NEWS_COLLECTOR_POLL_STALE")
+
+    jobs = ledger.connection.execute(
+        """SELECT job_id,task_type,source,source_item_id,revision_number,
+                  annotation_id,prompt_version,created_at
+           FROM news_ai_jobs_v1
+           WHERE task_type IN ('ACTIVE_ANNOTATION','ACTIVE_IMPACT')
+             AND created_at>=? AND created_at<=?
+           ORDER BY created_at,job_id""",
+        (intake_floor, query_cutoff),
+    ).fetchall()
+    unresolved: list[tuple[str, datetime]] = []
+    operational_reason_counts: dict[str, int] = {}
+    actionable_failure_counts: dict[str, dict[str, int]] = {}
+    evidence: list[tuple[object, ...]] = []
+
+    for raw in jobs:
+        row = dict(raw)
+        task_type = str(row["task_type"])
+        if task_type == "ACTIVE_ANNOTATION":
+            completed = ledger.connection.execute(
+                """SELECT min(parsed_at) FROM news_annotations
+                   WHERE source=? AND source_item_id=? AND revision_number=?
+                     AND prompt_version=? AND parsed_at<=?""",
+                (
+                    row["source"], row["source_item_id"], row["revision_number"],
+                    row["prompt_version"], query_cutoff,
+                ),
+            ).fetchone()[0]
+        else:
+            completed = ledger.connection.execute(
+                """SELECT min(assessed_at) FROM news_impact_assessments_v1
+                   WHERE annotation_id=? AND prompt_version=? AND assessed_at<=?""",
+                (row["annotation_id"], row["prompt_version"], query_cutoff),
+            ).fetchone()[0]
+        attempt = ledger.connection.execute(
+            """SELECT attempt_number,outcome,failure_code,provider_http_status,
+                      attempted_at,next_retry_at
+               FROM news_ai_job_attempts_v1
+               WHERE job_id=? AND attempted_at<=?
+               ORDER BY attempted_at DESC,attempt_number DESC,attempt_id DESC
+               LIMIT 1""",
+            (row["job_id"], query_cutoff),
+        ).fetchone()
+        attempt_values = dict(attempt) if attempt is not None else None
+        deferral = ledger.connection.execute(
+            """SELECT failure_code,deferred_at,next_retry_at
+               FROM news_ai_scheduler_deferrals_v1
+               WHERE job_id=? AND deferred_at<=?
+               ORDER BY deferred_at DESC,deferral_id DESC LIMIT 1""",
+            (row["job_id"], query_cutoff),
+        ).fetchone()
+        deferral_values = dict(deferral) if deferral is not None else None
+        evidence.append((
+            row["job_id"], task_type, row["created_at"], completed,
+            *(
+                (
+                    attempt_values["attempt_number"], attempt_values["outcome"],
+                    attempt_values["failure_code"],
+                    attempt_values["provider_http_status"],
+                    attempt_values["attempted_at"], attempt_values["next_retry_at"],
+                )
+                if attempt_values is not None else (None,) * 6
+            ),
+            *(
+                (
+                    deferral_values["failure_code"],
+                    deferral_values["deferred_at"],
+                    deferral_values["next_retry_at"],
+                )
+                if deferral_values is not None else (None,) * 3
+            ),
+        ))
+        if completed is not None:
+            continue
+
+        created_at = _instant(row["created_at"])
+        if created_at is None:
+            continue
+        unresolved.append((task_type, created_at))
+        prefix = (
+            "ACTIONABLE_NEWS_SEMANTICS"
+            if task_type == "ACTIVE_ANNOTATION"
+            else "ACTIONABLE_NEWS_IMPACT"
+        )
+        reason = None
+        failure_code = ""
+        transition = attempt_values
+        if deferral_values is not None and (
+            transition is None
+            or str(deferral_values["deferred_at"]) > str(transition["attempted_at"])
+        ):
+            transition = {
+                "outcome": "DEFERRED",
+                "failure_code": deferral_values["failure_code"],
+                "attempted_at": deferral_values["deferred_at"],
+                "next_retry_at": deferral_values["next_retry_at"],
+            }
+        if transition is not None:
+            failure_code = str(transition.get("failure_code") or "")
+            if failure_code:
+                counts = actionable_failure_counts.setdefault(task_type, {})
+                counts[failure_code] = counts.get(failure_code, 0) + 1
+            retry_at = _instant(transition.get("next_retry_at"))
+            if retry_at is not None and retry_at > observed_at:
+                reason = f"{prefix}_RECOVERING"
+            elif retry_at is not None and observed_at - retry_at > TASK_QUEUE_SLA[task_type]:
+                reason = f"{prefix}_OVERDUE"
+            elif str(transition.get("outcome") or "") in {
+                "ERROR", "DISABLED", "NOT_CURRENT",
+            } and retry_at is None:
+                reason = f"{prefix}_TERMINAL"
+        elif observed_at - created_at > TASK_QUEUE_SLA[task_type]:
+            reason = f"{prefix}_OVERDUE"
+        if failure_code in {
+            "GEMINI_API_KEY_MISSING", "MODEL_CREDENTIALS_INVALID",
+            "MODEL_CREDENTIALS_UNAVAILABLE", "MODEL_ACCOUNTING_REQUIRED",
+            "UNKNOWN_LLM_PROVIDER",
+        }:
+            reasons.append("MODEL_CREDENTIALS_UNAVAILABLE")
+        if reason is not None:
+            reasons.append(reason)
+            operational_reason_counts[reason] = (
+                operational_reason_counts.get(reason, 0) + 1
+            )
+
+    task_types = {task_type for task_type, _ in unresolved}
+    if "ACTIVE_ANNOTATION" in task_types:
+        reasons.append("ACTIONABLE_NEWS_SEMANTICS_PENDING")
+    if "ACTIVE_IMPACT" in task_types:
+        reasons.append("ACTIONABLE_NEWS_IMPACT_PENDING")
+    reason_codes = tuple(dict.fromkeys(reasons))
+    semantic_evidence_hash = canonical_hash({
+        "evidence_cutoff": cutoff,
+        "latest_source_poll_at": latest_poll,
+        "jobs_and_attempts": evidence,
+        "mutable_heartbeat_included": False,
+        "current_credentials_included": False,
+    })
+    payload = {
+        "observed_at": cutoff,
+        "evidence_mode": "DURABLE_POINT_IN_TIME",
+        "status": "UNHEALTHY" if reason_codes else "HEALTHY",
+        "reason_codes": reason_codes,
+        "heartbeat_at": None,
+        "unresolved_items": len(unresolved),
+        "unresolved_annotation_count": sum(
+            task_type == "ACTIVE_ANNOTATION" for task_type, _ in unresolved
+        ),
+        "unresolved_impact_count": sum(
+            task_type == "ACTIVE_IMPACT" for task_type, _ in unresolved
+        ),
+        "recovering_count": sum(
+            count for code, count in operational_reason_counts.items()
+            if code.endswith("_RECOVERING")
+        ),
+        "terminal_or_overdue_count": sum(
+            count for code, count in operational_reason_counts.items()
+            if code.endswith(("_TERMINAL", "_OVERDUE"))
+        ),
+        "oldest_unresolved_at": (
+            min(at for _, at in unresolved).isoformat() if unresolved else None
+        ),
+        "actionable_failure_counts": actionable_failure_counts,
+        "semantic_evidence_hash": semantic_evidence_hash,
     }
     return {**payload, "snapshot_hash": canonical_hash(payload)}

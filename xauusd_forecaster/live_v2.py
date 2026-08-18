@@ -17,6 +17,7 @@ from .news_contracts import (
     NEWS_CONTRACT_BY_ELIGIBILITY,
 )
 from .news_features_v2 import aggregate_news_features_v2
+from .news_input_coverage import news_input_coverage_at
 from .news_evidence import EVIDENCE_POLICY_VERSION
 from .repair_v2 import LANE_RULE_VERSION, TRAINING_ELIGIBILITY_VERSION
 from .training import MARKET_FEATURES
@@ -114,6 +115,11 @@ def append_live_decision_v2(
     epoch = evaluation_epoch(ledger.connection)
     if epoch is None or decision_time < epoch:
         return []
+    health_observed_at = datetime.fromisoformat(
+        str(news_pipeline_health["observed_at"]).replace("Z", "+00:00")
+    )
+    if health_observed_at > decision_time:
+        raise ValueError("news semantic health uses evidence after decision time")
     features = dict(snapshot["features"])
     features["decision_bid"] = snapshot["bid"]
     features["decision_ask"] = snapshot["ask"]
@@ -140,6 +146,10 @@ def append_live_decision_v2(
                     "eligibility_version": ELIGIBILITY_VERSION, **news_snapshot_values}
     news_hash = canonical_hash(news_payload)
     news_id = _uuid("derived-news", f"{decision_id}:{NEWS_FEATURE_VERSION}:{ELIGIBILITY_VERSION}")
+    news_input_coverage = news_input_coverage_at(
+        ledger, decision_time=decision_time, news_snapshot=news,
+        operational_health=news_pipeline_health,
+    )
     with ledger.connection:
         ledger.connection.execute(
             """INSERT INTO derived_market_snapshots VALUES
@@ -170,6 +180,35 @@ def append_live_decision_v2(
                 int(news_pipeline_health.get("unresolved_items") or 0),
                 news_pipeline_health.get("oldest_unresolved_at"),
                 str(news_pipeline_health["snapshot_hash"]),
+            ),
+        )
+        ledger.connection.execute(
+            """INSERT INTO news_input_coverage_snapshots_v1 VALUES
+            (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                decision_id, decision_time.isoformat(),
+                health_observed_at.isoformat(),
+                news_input_coverage["state"],
+                news_input_coverage["usable_core_event_count"],
+                news_input_coverage["usable_broad_event_count"],
+                news_input_coverage["unresolved_annotation_count"],
+                news_input_coverage["unresolved_impact_count"],
+                news_input_coverage["recovering_count"],
+                news_input_coverage["terminal_or_overdue_count"],
+                json.dumps(
+                    news_input_coverage["operational_reason_codes"],
+                    separators=(",", ":"),
+                ),
+                json.dumps(
+                    news_input_coverage["coverage_reason_codes"],
+                    separators=(",", ":"),
+                ),
+                json.dumps(
+                    news_input_coverage["source_observability"],
+                    sort_keys=True, separators=(",", ":"),
+                ),
+                news_input_coverage["source_evidence_hash"],
+                news_input_coverage["snapshot_hash"],
             ),
         )
         for event in news["event_snapshots"]:
@@ -230,7 +269,7 @@ def append_live_decision_v2(
                 "news_exposed": news["news_exposed"],
                 "broad_news_exposed": news.get("broad_news_exposed", 0),
             },
-            news_pipeline_health=news_pipeline_health,
+            news_input_coverage=news_input_coverage,
         )
         _append_news_visibility_receipts(
             ledger.connection, decision_id=decision_id, decision_time=decision_time,

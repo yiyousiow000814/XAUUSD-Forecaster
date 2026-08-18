@@ -119,6 +119,35 @@ def _append_semantic_snapshot(
         connection.close()
 
 
+def _append_news_input_coverage(database: Path, observed_at: datetime) -> None:
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            """INSERT INTO news_input_coverage_snapshots_v1 VALUES
+               (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "decision", observed_at.isoformat(), observed_at.isoformat(),
+                "DEGRADED", 25, 30, 0, 2, 2, 0,
+                json.dumps([
+                    "ACTIONABLE_NEWS_IMPACT_PENDING",
+                    "ACTIONABLE_NEWS_IMPACT_RECOVERING",
+                ]),
+                json.dumps([
+                    "ACTIONABLE_NEWS_IMPACT_PENDING",
+                    "ACTIONABLE_NEWS_IMPACT_RECOVERING",
+                ]),
+                json.dumps({
+                    "observable_source_count": 12,
+                    "unavailable_source_count": 0,
+                }),
+                "visible-news-hash", "coverage-hash",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def _component_alert_scopes(payload: dict) -> set[str]:
     return {
         str(alert["scope"])
@@ -348,6 +377,29 @@ def test_dashboard_reports_broker_close_and_reopen_time(tmp_path) -> None:
         assert payload["system"]["components"][component]["status"] == "MARKET_CLOSED"
         assert payload["system"]["components"][component]["last_error"] is None
     assert _component_alert_scopes(payload).isdisjoint(expected_silence)
+
+
+def test_dashboard_exposes_frozen_news_coverage_separately_from_health(
+    tmp_path,
+) -> None:
+    now = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=now).close()
+    _append_decision_at(database, now)
+    _append_semantic_snapshot(
+        database, observed_at=now,
+        reason_code="ACTIONABLE_NEWS_IMPACT_PENDING",
+    )
+    _append_news_input_coverage(database, now)
+
+    payload = _dashboard_module()._dashboard_payload(database, clock=lambda: now)
+
+    assert payload["news_input_coverage"]["state"] == "DEGRADED"
+    assert payload["news_input_coverage"]["usable_broad_event_count"] == 30
+    assert payload["news_input_coverage"]["recovering_count"] == 2
+    assert payload["system"]["components"]["news_semantic_pipeline"][
+        "status"
+    ] == "WARN"
 
 
 def test_dashboard_refreshes_clock_before_reading_live_broker_heartbeat(

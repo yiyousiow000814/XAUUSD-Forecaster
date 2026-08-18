@@ -39,6 +39,7 @@ from xauusd_forecaster.news_features_v2 import (
     event_raw_weight,
 )
 from xauusd_forecaster.news_impact import impact_time_rule, pending_impact_records
+from xauusd_forecaster.news_source_registry import NEWS_SOURCE_REGISTRY
 from xauusd_forecaster.news_semantics import (
     CURRENT_NEWS_PROMPT_VERSION,
     annotation_topics,
@@ -1977,6 +1978,88 @@ def test_live_decision_writes_only_current_news_contract(tmp_path) -> None:
     assert [(row["feature_version"], row["eligibility_version"]) for row in versions] == [
         (CURRENT_NEWS_CONTRACT.feature_version, CURRENT_NEWS_CONTRACT.eligibility_version)
     ]
+    coverage = ledger.connection.execute(
+        """SELECT state,usable_core_event_count,usable_broad_event_count,
+                  source_evidence_hash,snapshot_hash
+           FROM news_input_coverage_snapshots_v1
+           WHERE source_decision_id=?""",
+        ("current-only",),
+    ).fetchone()
+    assert coverage["state"] == "UNAVAILABLE"
+    assert coverage["usable_core_event_count"] == 0
+    assert coverage["usable_broad_event_count"] == 0
+    assert coverage["source_evidence_hash"]
+    assert coverage["snapshot_hash"]
+    ledger.close()
+
+
+def test_catch_up_decision_freezes_source_observability_at_decision_time(
+    tmp_path,
+) -> None:
+    decision = datetime(2026, 8, 10, 20, 5, tzinfo=UTC)
+    created = decision + timedelta(minutes=25)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=decision)
+    ledger.connection.execute(
+        "INSERT INTO evaluation_epochs VALUES (?,?,?,?,?,?,?)",
+        (
+            "epoch", decision.isoformat(), decision.isoformat(),
+            decision.isoformat(), decision.isoformat(), "commit", "contract",
+        ),
+    )
+    for index, spec in enumerate(NEWS_SOURCE_REGISTRY):
+        ledger.append_source_poll({
+            "poll_id": f"later-poll-{index}", "source": spec.source,
+            "fetched_time": decision + timedelta(minutes=10), "status": "OK",
+        })
+    snapshot = {
+        "features": {name: 0.0 for name in MARKET_FEATURES},
+        "bid": 2400.0,
+        "ask": 2400.1,
+        "snapshot_hash": "catch-up-market-snapshot",
+        "source_event_time": decision,
+        "source_received_time": decision,
+        "u5": 0.0,
+        "data_health": "OK",
+        "reason_codes": [],
+    }
+
+    with pytest.raises(
+        ValueError, match="semantic health uses evidence after decision time",
+    ):
+        append_live_decision_v2(
+            ledger, decision_id="catch-up", decision_time=decision,
+            created_at=created, snapshot=snapshot,
+            news_pipeline_health={
+                "observed_at": created.isoformat(), "status": "HEALTHY",
+                "reason_codes": (), "heartbeat_at": created.isoformat(),
+                "unresolved_items": 0, "oldest_unresolved_at": None,
+                "snapshot_hash": "future-health",
+            },
+        )
+
+    append_live_decision_v2(
+        ledger, decision_id="catch-up", decision_time=decision,
+        created_at=created, snapshot=snapshot,
+        news_pipeline_health={
+            "observed_at": decision.isoformat(), "status": "HEALTHY",
+            "reason_codes": (), "heartbeat_at": None,
+            "unresolved_items": 0, "oldest_unresolved_at": None,
+            "snapshot_hash": "catch-up-health",
+        },
+    )
+
+    coverage = ledger.connection.execute(
+        """SELECT observed_at,state,source_observability_json
+           FROM news_input_coverage_snapshots_v1
+           WHERE source_decision_id='catch-up'"""
+    ).fetchone()
+    source_observability = json.loads(coverage["source_observability_json"])
+    assert coverage["observed_at"] == decision.isoformat()
+    assert coverage["state"] == "UNAVAILABLE"
+    assert source_observability["observable_source_count"] == 0
+    assert source_observability["unavailable_source_count"] == len(
+        NEWS_SOURCE_REGISTRY
+    )
     ledger.close()
 
 
@@ -2178,29 +2261,58 @@ def test_news_exposure_flag_prevents_residual_without_visible_event() -> None:
 
 
 @pytest.mark.parametrize("identity", sorted(inference_v2.NEWS_MODEL_IDENTITIES))
-def test_every_news_model_fails_closed_when_semantic_pipeline_is_unhealthy(
+def test_every_news_model_fails_closed_when_news_input_is_unavailable(
     identity: str,
 ) -> None:
     assert inference_v2._runtime_gate_status(
-        identity, market_healthy=True, news_pipeline_status="UNHEALTHY",
-    ) == "NEWS_PIPELINE_UNHEALTHY"
+        identity, market_healthy=True, news_input_state="UNAVAILABLE",
+    ) == "NEWS_INPUT_UNAVAILABLE"
 
 
-def test_market_only_remains_observable_during_news_pipeline_failure() -> None:
+def test_market_only_remains_observable_when_news_input_is_unavailable() -> None:
     assert inference_v2._runtime_gate_status(
-        "MARKET_ONLY", market_healthy=True, news_pipeline_status="UNHEALTHY",
+        "MARKET_ONLY", market_healthy=True, news_input_state="UNAVAILABLE",
+    ) is None
+
+
+def test_unknown_news_input_state_fails_closed() -> None:
+    assert inference_v2._runtime_gate_status(
+        "BROAD_FULL", market_healthy=True, news_input_state="UNKNOWN",
+    ) == "NEWS_INPUT_UNAVAILABLE"
+
+
+def test_news_learning_keeps_degraded_and_quiet_but_excludes_unavailable() -> None:
+    rows = [
+        {"decision_id": "available", "news_training_eligible": True},
+        {"decision_id": "degraded", "news_training_eligible": True},
+        {"decision_id": "quiet", "news_training_eligible": True},
+        {"decision_id": "unavailable", "news_training_eligible": False},
+    ]
+
+    assert [
+        row["decision_id"] for row in training_v2._news_learning_rows(rows)
+    ] == ["available", "degraded", "quiet"]
+
+
+@pytest.mark.parametrize("state", ["AVAILABLE", "DEGRADED", "QUIET"])
+@pytest.mark.parametrize("identity", sorted(inference_v2.NEWS_MODEL_IDENTITIES))
+def test_observable_news_input_states_do_not_force_wait(
+    identity: str, state: str,
+) -> None:
+    assert inference_v2._runtime_gate_status(
+        identity, market_healthy=True, news_input_state=state,
     ) is None
 
 
 @pytest.mark.parametrize(
-    ("market_health", "news_health", "expected_status"),
+    ("market_health", "news_input_state", "expected_status"),
     [
-        ("STALE", "HEALTHY", "DATA_UNHEALTHY"),
-        ("OK", "UNHEALTHY", "NEWS_PIPELINE_UNHEALTHY"),
+        ("STALE", "AVAILABLE", "DATA_UNHEALTHY"),
+        ("OK", "UNAVAILABLE", "NEWS_INPUT_UNAVAILABLE"),
     ],
 )
 def test_generation_receipts_remain_complete_when_runtime_gates_force_wait(
-    monkeypatch, market_health: str, news_health: str, expected_status: str,
+    monkeypatch, market_health: str, news_input_state: str, expected_status: str,
 ) -> None:
     updates = [
         {
@@ -2251,14 +2363,16 @@ def test_generation_receipts_remain_complete_when_runtime_gates_force_wait(
         object(), decision_id="decision", decision_time=datetime.now(UTC),
         created_at=datetime.now(UTC), market_snapshot=market_snapshot,
         news_snapshot=news_snapshot,
-        news_pipeline_health={"status": news_health, "snapshot_hash": "health"},
+        news_input_coverage={
+            "state": news_input_state, "snapshot_hash": "coverage",
+        },
     )
 
     assert {row["model_identity"] for row in created} == {
         "CHAMPION_0", *inference_v2.MODEL_IDENTITIES,
     }
     gated = [row for row in inserted if row["model_identity"] != "CHAMPION_0"]
-    if expected_status == "NEWS_PIPELINE_UNHEALTHY":
+    if expected_status == "NEWS_INPUT_UNAVAILABLE":
         gated = [
             row for row in gated
             if row["model_identity"] in inference_v2.NEWS_MODEL_IDENTITIES
@@ -2545,6 +2659,32 @@ def test_zero_weight_events_do_not_break_a_mixed_source_budget() -> None:
         for receipt in source_receipts
     } == {"expired-source": 0, "live-source": pytest.approx(0.8)}
     assert summary["maximum_source_weight_share"] == pytest.approx(1.0)
+
+
+def test_observable_zero_news_rows_receive_one_bounded_environment_budget() -> None:
+    rows = [
+        {
+            "decision_id": "event-row",
+            "broad_events": [{
+                "event_id": "event-a", "event_version_id": "event-a-v1",
+                "raw_weight": 0.8, "evidence_grade": "PRIMARY",
+                "source_budget_id": "source-a",
+            }],
+        },
+        {"decision_id": "quiet-a", "broad_events": []},
+        {"decision_id": "quiet-b", "broad_events": []},
+    ]
+
+    weights, receipts, _, summary = training_v2._event_budget_weights(
+        rows, "broad_events",
+    )
+
+    assert weights[0] > 0
+    assert weights[1] == pytest.approx(weights[2])
+    assert weights[1] > 0
+    assert len(receipts) == 1
+    assert summary["observable_zero_news_rows"] == 2
+    assert summary["observable_zero_news_budget"] == pytest.approx(0.8)
 
 
 def test_commentary_and_low_materiality_are_not_training_evidence(tmp_path) -> None:

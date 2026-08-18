@@ -1799,6 +1799,7 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
                ORDER BY d.decision_time DESC LIMIT 1"""
         ).fetchone()
         latest_prediction = None
+        latest_news_input_coverage = None
         if latest:
             latest_prediction = connection.execute(
                 """SELECT p.model_identity,p.model_version,p.recommended_action,
@@ -1814,6 +1815,25 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
                    LIMIT 1""",
                 (latest["decision_id"],),
             ).fetchone()
+            coverage_table = connection.execute(
+                """SELECT 1 FROM sqlite_master
+                   WHERE type='table' AND name='news_input_coverage_snapshots_v1'"""
+            ).fetchone()
+            if coverage_table is not None:
+                latest_news_input_coverage = connection.execute(
+                    """SELECT state,usable_core_event_count,
+                              usable_broad_event_count,
+                              unresolved_annotation_count,
+                              unresolved_impact_count,recovering_count,
+                              terminal_or_overdue_count,
+                              operational_reason_codes_json,
+                              coverage_reason_codes_json,
+                              source_observability_json,source_evidence_hash,
+                              snapshot_hash,observed_at
+                       FROM news_input_coverage_snapshots_v1
+                       WHERE source_decision_id=?""",
+                    (latest["decision_id"],),
+                ).fetchone()
         u5_rows = connection.execute(
             """SELECT u5 FROM market_snapshots
                WHERE u5_status='READY' AND u5 IS NOT NULL
@@ -2301,6 +2321,17 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
             else "NEUTRAL"
         )
         research_forecast["frozen_record"] = True
+    news_input_coverage = (
+        dict(latest_news_input_coverage)
+        if latest_news_input_coverage is not None else None
+    )
+    if news_input_coverage is not None:
+        for field in (
+            "operational_reason_codes_json", "coverage_reason_codes_json",
+            "source_observability_json",
+        ):
+            value = news_input_coverage.pop(field)
+            news_input_coverage[field.removesuffix("_json")] = json.loads(value)
     u5_values = sorted(float(row["u5"]) for row in u5_rows)
     current_u5 = float(latest["u5"]) if latest and latest["u5"] is not None else None
     u5_percentile = None
@@ -2661,6 +2692,7 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
             "point_in_time_cutoff": True,
         },
         "news_source_health": news_source_health,
+        "news_input_coverage": news_input_coverage,
         "annotation_queue": {
             "ready": completed_annotation_count,
             "queued": claimable_annotation_count,

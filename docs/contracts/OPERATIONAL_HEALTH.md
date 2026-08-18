@@ -226,9 +226,11 @@ its old pending reason must not masquerade as a newly observed semantic failure
 when no market decision is expected; current independent news and AI failures
 remain visible through their own component and scheduler detectors.
 
-Decision-time semantic readiness remains fail-closed whenever required current
-semantics or impact evidence is incomplete. Operator presentation classifies a
-future bounded retry as automatic retry and keeps the pending reason visible;
+Decision-time semantic health keeps incomplete current semantics and impact
+evidence visible without acting as the model-input gate. The separate frozen
+news-input coverage contract in `NEWS_EVIDENCE.md` decides whether a news-aware
+identity can run. Operator presentation classifies a future bounded retry as
+automatic retry and keeps the pending reason visible;
 it never presents that retry as completed or guaranteed recovery. It escalates
 terminal work or a retry overdue beyond the scheduler's task SLA to error.
 Local admission (`MODEL_CAPACITY_DEFERRED` and `LOCAL_TPM_LIMIT`),
@@ -236,6 +238,18 @@ provider pacing (`PROVIDER_DISPATCH_DEFERRED`), and provider transport
 (`PROVIDER_HTTP_ERROR`) remain distinct evidence. Presentation severity never
 changes, deletes, or retroactively enriches decision snapshots, prediction
 visibility, learning admission, training rows, or execution-learning evidence.
+
+Current operator health and historical decision coverage have separate clocks.
+The operator surface reads the mutable annotator heartbeat, current credentials,
+and latest scheduler state at the current observation time. Every model decision,
+including one appended in its current five-minute slot, instead projects only
+durable job creation, append-only attempts and deferrals, immutable
+semantic completions, and source polls recorded no later than `decision_time`.
+The mutable heartbeat file and current credential configuration are never used
+as historical evidence. When no durable attempt or deferral exists, the bounded
+projection
+can establish only queued or overdue work; it does not invent a past credential,
+heartbeat, recovery, or terminal state from today's mutable state.
 
 The outcome settler runs inside the supervised collector loop. Its health uses
 that loop's successful heartbeat, not the timestamp of the most recently

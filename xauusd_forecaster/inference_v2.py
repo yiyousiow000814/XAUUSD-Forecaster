@@ -19,6 +19,7 @@ from .news_contracts import (
     NewsContract,
 )
 from .news_evidence import EVIDENCE_POLICY_VERSION
+from .news_input_coverage import NEWS_INPUT_STATES
 from .ridge import RidgeArtifact
 from .training import MARKET_FEATURES
 
@@ -35,13 +36,19 @@ NEWS_MODEL_IDENTITIES = frozenset({
 
 
 def _runtime_gate_status(
-    identity: str, *, market_healthy: bool, news_pipeline_status: str,
+    identity: str, *, market_healthy: bool, news_input_state: str,
 ) -> str | None:
-    """Apply one fail-closed gate to the whole news-model family."""
+    """Block news identities only when decision-time input is unavailable."""
     if not market_healthy:
         return "DATA_UNHEALTHY"
-    if identity in NEWS_MODEL_IDENTITIES and news_pipeline_status != "HEALTHY":
-        return "NEWS_PIPELINE_UNHEALTHY"
+    if (
+        identity in NEWS_MODEL_IDENTITIES
+        and (
+            news_input_state not in NEWS_INPUT_STATES
+            or news_input_state == "UNAVAILABLE"
+        )
+    ):
+        return "NEWS_INPUT_UNAVAILABLE"
     return None
 
 
@@ -363,7 +370,7 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
                                created_at: datetime, market_snapshot: dict,
                                news_snapshot: dict,
                                news_snapshots: dict[str, dict] | None = None,
-                               news_pipeline_health: dict) -> list[dict]:
+                               news_input_coverage: dict) -> list[dict]:
     """Append only models that existed before this decision; never backfill."""
     created = []
     empty_cal = {"version": "always-wait-no-calibration", "rows": 0, "blocks": 0,
@@ -398,7 +405,9 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
                 and market_snapshot["u5"] is not None
                 and not any(value is None for value in values)
             ),
-            news_pipeline_status=str(news_pipeline_health.get("status") or "UNHEALTHY"),
+            news_input_state=str(
+                news_input_coverage.get("state") or "UNAVAILABLE"
+            ),
         )
         if gate_status == "DATA_UNHEALTHY":
             _insert_prediction(
@@ -413,18 +422,18 @@ def append_live_predictions_v2(ledger, *, decision_id: str, decision_time: datet
                 calibration=calibration,
             ))
             continue
-        if gate_status == "NEWS_PIPELINE_UNHEALTHY":
+        if gate_status == "NEWS_INPUT_UNAVAILABLE":
             _insert_prediction(
                 ledger, decision_id=decision_id, decision_time=decision_time,
                 created_at=created_at, model_version=update["model_version"],
                 model_identity=identity,
                 feature_hash=canonical_hash((
                     market_snapshot["output_hash"], selected_news_snapshot["output_hash"],
-                    update_eligibility, news_pipeline_health.get("snapshot_hash"),
+                    update_eligibility, news_input_coverage.get("snapshot_hash"),
                 )),
                 predicted=None, news_residual=None, ev_long=None, ev_short=None,
                 calibration=calibration, recommended="WAIT",
-                status="NEWS_PIPELINE_UNHEALTHY",
+                status="NEWS_INPUT_UNAVAILABLE",
             )
             created.append(_prediction_receipt(
                 update, recommended="WAIT", raw_recommended="WAIT",
