@@ -35,10 +35,14 @@ function diagnosticDuration(value: unknown): string | null {
   return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
 }
 
-export function operationalEventDiagnostic(event: Required<OperationalAlert>) {
-  const reasonCodes = Array.isArray(event.evidence.reason_codes)
-    ? [...new Set(event.evidence.reason_codes.filter(reason => typeof reason === "string"))]
-    : [];
+export function operationalEventDiagnostic(
+  event: Required<OperationalAlert>, incidentReasonCodes?: string[],
+) {
+  const reasonCodes = incidentReasonCodes === undefined
+    ? Array.isArray(event.evidence.reason_codes)
+      ? [...new Set(event.evidence.reason_codes.filter(reason => typeof reason === "string"))]
+      : []
+    : [...new Set(incidentReasonCodes)];
   const duration = diagnosticDuration(event.evidence.age_seconds);
   const status = typeof event.evidence.status === "string" ? event.evidence.status : event.severity;
   return {

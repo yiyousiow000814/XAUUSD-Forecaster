@@ -118,6 +118,9 @@ test("renders human incident diagnostics before nested raw machine evidence", ()
     component: "新闻语义决策门槛",
     reasons: ["新闻影响复核等待中", "新闻影响复核自动重试中"],
   });
+  assert.deepEqual(operationalEventDiagnostic(incident.root_event, [
+    "ACTIONABLE_NEWS_IMPACT_RECOVERING",
+  ]).reasons, ["新闻影响复核自动重试中"]);
   assert.equal(operationalEventDiagnostic({
     ...incident.root_event, evidence: { age_seconds: 56 },
   }).status, "WARNING · 已持续 56 秒");

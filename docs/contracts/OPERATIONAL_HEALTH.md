@@ -73,6 +73,15 @@ unexplained component reason remains independently visible. The authoritative
 raw component event is retained exactly once in technical evidence; derived
 reason projections do not duplicate it or transfer unrelated blocking state.
 
+Semantic lifecycle is incident-scoped. One component event may contain reasons
+for multiple semantic stages, but each projected incident evaluates only its
+own pending, recovering, overdue, or terminal projections. The incident that
+retains a shared nonblocking raw event for audit does not inherit another
+stage's lifecycle, severity, or blocking state. If a shared aggregate component
+event is itself `ERROR` or blocking and cannot be attributed to one projected
+incident, it remains visible as a separate component-level fault. In every
+case, the authoritative raw component event is retained exactly once.
+
 An incident retains a deterministic key, category, maximum child severity,
 conservative blocking flag, active/recovering state, action state, root event,
 related events, affected scopes, bounded metrics, and technical-event count.

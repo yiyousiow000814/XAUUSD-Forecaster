@@ -53,14 +53,6 @@ function reasonCodes(event: Required<OperationalAlert>): string[] {
     : [];
 }
 
-function hasReasonSuffix(event: Required<OperationalAlert>, suffix: string): boolean {
-  return reasonCodes(event).some(reason => (
-    Boolean(stageForSemanticReason(reason))
-    && operationalCodeDefinitions.has(reason)
-    && reason.endsWith(`_${suffix}`)
-  ));
-}
-
 function actionableFailureCounts(
   event: Required<OperationalAlert>, stage: string,
 ): Array<{ code: string; count: number }> {
@@ -99,19 +91,52 @@ function incidentSummary(event: Required<OperationalAlert>, family: string): str
   return event.message_zh;
 }
 
-function recoveryState(events: Array<Required<OperationalAlert>>) {
-  const blocking = events.some(event => event.blocking);
-  const terminal = events.some(event => (
-    hasReasonSuffix(event, "TERMINAL") || hasReasonSuffix(event, "OVERDUE")
+function incidentSemanticReasons(incident: OperationalIncident): string[] {
+  return [...new Set(incident.reason_projections.map(projection => projection.reason_code))]
+    .filter(reason => Boolean(stageForSemanticReason(reason)) && operationalCodeDefinitions.has(reason));
+}
+
+function incidentHasAuthoritativeFault(incident: OperationalIncident): boolean {
+  return incident.blocking || incident.severity === "ERROR"
+    || incidentSemanticReasons(incident).some(reason => (
+      reason.endsWith("_TERMINAL") || reason.endsWith("_OVERDUE")
+    ));
+}
+
+function isSplitSemanticComponentEvent(event: Required<OperationalAlert>): boolean {
+  if (event.code !== "OPS_COMPONENT_UNHEALTHY") return false;
+  const stages = new Set(reasonCodes(event).map(stageForSemanticReason).filter(Boolean));
+  return stages.size > 1;
+}
+
+function incidentLifecycleEvents(
+  incident: OperationalIncident, events: Array<Required<OperationalAlert>>,
+): Array<Required<OperationalAlert>> {
+  const sharedTechnicalEvents = new Set(
+    incident.technical_events.filter(isSplitSemanticComponentEvent),
+  );
+  return events.filter(event => !sharedTechnicalEvents.has(event));
+}
+
+function recoveryState(
+  incident: OperationalIncident, events: Array<Required<OperationalAlert>>,
+) {
+  const lifecycleEvents = incidentLifecycleEvents(incident, events);
+  const semanticReasons = incidentSemanticReasons(incident);
+  const blocking = lifecycleEvents.some(event => event.blocking);
+  const terminal = semanticReasons.some(reason => (
+    reason.endsWith("_TERMINAL") || reason.endsWith("_OVERDUE")
   ));
   if (blocking || terminal) return { state: "ACTIVE" as const, action: "ACTION_REQUIRED" as const };
-  const scheduled = events.some(event => (
+  const scheduled = lifecycleEvents.some(event => (
     event.evidence.claimable === false && Boolean(event.evidence.next_retry_at)
   ));
-  const recovering = events.some(event => hasReasonSuffix(event, "RECOVERING"));
+  const recovering = semanticReasons.some(reason => reason.endsWith("_RECOVERING"));
   const automatic = scheduled || recovering;
   if (automatic) return { state: "RECOVERING" as const, action: "AUTO_RECOVERING" as const };
-  const operator = events.some(event => event.recovery_policy === "OPERATOR" && event.severity === "ERROR");
+  const operator = lifecycleEvents.some(
+    event => event.recovery_policy === "OPERATOR" && event.severity === "ERROR",
+  );
   return operator
     ? { state: "ACTIVE" as const, action: "ACTION_REQUIRED" as const }
     : { state: "ACTIVE" as const, action: "MONITORING" as const };
@@ -139,15 +164,17 @@ function incidentEvents(incident: OperationalIncident): Array<Required<Operation
 
 function finalizeIncident(incident: OperationalIncident): OperationalIncident {
   const events = incidentEvents(incident);
-  const recovery = recoveryState(events);
-  const rawSeverity = events.reduce((highest, event) => (
+  const lifecycleEvents = incidentLifecycleEvents(incident, events);
+  const semanticReasons = incidentSemanticReasons(incident);
+  const recovery = recoveryState(incident, events);
+  const rawSeverity = lifecycleEvents.reduce((highest, event) => (
     severityRank[event.severity] > severityRank[highest] ? event.severity : highest
   ), "INFO" as OperationalAlert["severity"]);
-  const terminal = events.some(event => (
-    hasReasonSuffix(event, "TERMINAL") || hasReasonSuffix(event, "OVERDUE")
+  const terminal = semanticReasons.some(reason => (
+    reason.endsWith("_TERMINAL") || reason.endsWith("_OVERDUE")
   ));
   incident.severity = terminal ? "ERROR" : rawSeverity;
-  incident.blocking = events.some(event => event.blocking);
+  incident.blocking = lifecycleEvents.some(event => event.blocking);
   incident.state = recovery.state;
   incident.action_state = recovery.action;
   incident.summary_metrics = metrics(events);
@@ -335,9 +362,16 @@ export function correlateOperationalEvents(input: OperationalAlert[]): Operation
       applyStandaloneSemanticPresentation(standalone, unexplained);
       incidents.push(standalone);
     } else {
-      const owner = [...new Set(explained.values())]
-        .sort((left, right) => left.incident_key.localeCompare(right.incident_key))[0];
-      owner.technical_events.push(event);
+      const owners = [...new Set(explained.values())]
+        .sort((left, right) => left.incident_key.localeCompare(right.incident_key));
+      const aggregateFaultNeedsOwner = owners.length > 1
+        && (event.blocking || event.severity === "ERROR")
+        && !owners.some(incidentHasAuthoritativeFault);
+      if (aggregateFaultNeedsOwner) {
+        incidents.push(buildIncident(event, []));
+      } else {
+        owners[0].technical_events.push(event);
+      }
     }
     consumed.add(index);
   });

@@ -111,6 +111,121 @@ test("correlates mixed component reasons without duplicating or escalating the r
   assert.deepEqual(rawComponents[0].evidence, component.evidence);
 });
 
+function mixedSemanticEvents(reasonCodes, componentOverrides = {}) {
+  return [
+    event("OPS_AI_JOB_RETRY_LOOP", "ACTIVE_IMPACT", {
+      latest_failure_code: "MODEL_REQUEST_FAILED", claimable: true,
+    }),
+    event("OPS_AI_JOB_RETRY_LOOP", "ACTIVE_ANNOTATION", {
+      latest_failure_code: "MODEL_REQUEST_FAILED", claimable: true,
+    }),
+    event("OPS_COMPONENT_UNHEALTHY", "news_semantic_pipeline", { reason_codes: reasonCodes }, componentOverrides),
+  ];
+}
+
+function semanticLifecycleSignature(incidents) {
+  return incidents.map(incident => ({
+    scope: incident.root_event.scope,
+    severity: incident.severity,
+    blocking: incident.blocking,
+    state: incident.state,
+    action_state: incident.action_state,
+    reasons: incident.reason_projections.map(item => item.reason_code).sort(),
+    raw_component_count: [
+      incident.root_event, ...incident.related_events, ...incident.technical_events,
+    ].filter(item => item.code === "OPS_COMPONENT_UNHEALTHY").length,
+  })).sort((left, right) => left.scope.localeCompare(right.scope));
+}
+
+test("scopes mixed semantic lifecycle projections to their own incidents in every event order", () => {
+  const cases = [
+    {
+      name: "Impact recovering and Annotation pending",
+      reasons: ["ACTIONABLE_NEWS_IMPACT_RECOVERING", "ACTIONABLE_NEWS_SEMANTICS_PENDING"],
+      impact: ["WARNING", false, "RECOVERING", "AUTO_RECOVERING"],
+      annotation: ["WARNING", false, "ACTIVE", "MONITORING"],
+    },
+    {
+      name: "Impact recovering and Annotation overdue",
+      reasons: ["ACTIONABLE_NEWS_IMPACT_RECOVERING", "ACTIONABLE_NEWS_SEMANTICS_OVERDUE"],
+      impact: ["WARNING", false, "RECOVERING", "AUTO_RECOVERING"],
+      annotation: ["ERROR", false, "ACTIVE", "ACTION_REQUIRED"],
+    },
+    {
+      name: "Impact overdue and Annotation recovering",
+      reasons: ["ACTIONABLE_NEWS_IMPACT_OVERDUE", "ACTIONABLE_NEWS_SEMANTICS_RECOVERING"],
+      impact: ["ERROR", false, "ACTIVE", "ACTION_REQUIRED"],
+      annotation: ["WARNING", false, "RECOVERING", "AUTO_RECOVERING"],
+    },
+    {
+      name: "Impact terminal and Annotation recovering",
+      reasons: ["ACTIONABLE_NEWS_IMPACT_TERMINAL", "ACTIONABLE_NEWS_SEMANTICS_RECOVERING"],
+      impact: ["ERROR", false, "ACTIVE", "ACTION_REQUIRED"],
+      annotation: ["WARNING", false, "RECOVERING", "AUTO_RECOVERING"],
+    },
+  ];
+
+  for (const fixture of cases) {
+    const input = mixedSemanticEvents(fixture.reasons);
+    const orders = [input, input.toReversed(), [input[2], input[0], input[1]]];
+    const signatures = orders.map(order => semanticLifecycleSignature(correlateOperationalEvents(order)));
+    assert.deepEqual(signatures[1], signatures[0], fixture.name);
+    assert.deepEqual(signatures[2], signatures[0], fixture.name);
+    assert.equal(signatures[0].length, 2, fixture.name);
+    const impact = signatures[0].find(item => item.scope === "ACTIVE_IMPACT");
+    const annotation = signatures[0].find(item => item.scope === "ACTIVE_ANNOTATION");
+    assert.deepEqual(
+      [impact.severity, impact.blocking, impact.state, impact.action_state], fixture.impact, fixture.name,
+    );
+    assert.deepEqual(
+      [annotation.severity, annotation.blocking, annotation.state, annotation.action_state], fixture.annotation, fixture.name,
+    );
+    assert.deepEqual(impact.reasons, fixture.reasons.filter(reason => reason.includes("_IMPACT_")), fixture.name);
+    assert.deepEqual(annotation.reasons, fixture.reasons.filter(reason => reason.includes("_SEMANTICS_")), fixture.name);
+    assert.equal(signatures[0].reduce((total, item) => total + item.raw_component_count, 0), 1, fixture.name);
+  }
+});
+
+test("keeps an unattributable aggregate component error visible without blocking projected retry", () => {
+  const incidents = correlateOperationalEvents(mixedSemanticEvents([
+    "ACTIONABLE_NEWS_IMPACT_RECOVERING",
+    "ACTIONABLE_NEWS_SEMANTICS_PENDING",
+  ], { severity: "ERROR", blocking: true }));
+  assert.equal(incidents.length, 3);
+  const impact = incidents.find(item => item.root_event.scope === "ACTIVE_IMPACT");
+  const annotation = incidents.find(item => item.root_event.scope === "ACTIVE_ANNOTATION");
+  const component = incidents.find(item => item.root_event.code === "OPS_COMPONENT_UNHEALTHY");
+  assert.deepEqual([impact.severity, impact.blocking, impact.action_state], ["WARNING", false, "AUTO_RECOVERING"]);
+  assert.deepEqual([annotation.severity, annotation.blocking, annotation.action_state], ["WARNING", false, "MONITORING"]);
+  assert.deepEqual([component.severity, component.blocking, component.action_state], ["ERROR", true, "ACTION_REQUIRED"]);
+  assert.deepEqual(globalOperationalIncidents(incidents), [component]);
+  const rawComponents = incidents.flatMap(item => [
+    item.root_event, ...item.related_events, ...item.technical_events,
+  ]).filter(item => item.code === "OPS_COMPONENT_UNHEALTHY");
+  assert.equal(rawComponents.length, 1);
+});
+
+test("keeps an unrelated component fault separate from an Impact retry projection", () => {
+  const component = event("OPS_COMPONENT_UNHEALTHY", "news_semantic_pipeline", {
+    reason_codes: ["ACTIONABLE_NEWS_IMPACT_RECOVERING", "ANNOTATOR_HEARTBEAT_STALE"],
+  }, { severity: "ERROR", blocking: true });
+  const incidents = correlateOperationalEvents([
+    event("OPS_AI_JOB_RETRY_LOOP", "ACTIVE_IMPACT", {
+      latest_failure_code: "MODEL_REQUEST_FAILED", claimable: true,
+    }),
+    component,
+  ]);
+  assert.equal(incidents.length, 2);
+  const impact = incidents.find(item => item.root_event.scope === "ACTIVE_IMPACT");
+  const heartbeat = incidents.find(item => item.root_event.code === "OPS_COMPONENT_UNHEALTHY");
+  assert.deepEqual([impact.severity, impact.blocking, impact.action_state], ["WARNING", false, "AUTO_RECOVERING"]);
+  assert.deepEqual([heartbeat.severity, heartbeat.blocking, heartbeat.action_state], ["ERROR", true, "ACTION_REQUIRED"]);
+  assert.deepEqual(globalOperationalIncidents(incidents), [heartbeat]);
+  assert.equal(incidents.flatMap(item => [
+    item.root_event, ...item.related_events, ...item.technical_events,
+  ]).filter(item => item.code === "OPS_COMPONENT_UNHEALTHY").length, 1);
+});
+
 test("does not collapse provider pacing into local capacity", () => {
   const incidents = correlateOperationalEvents([
     event("OPS_AI_ROUTE_CAPACITY_SATURATED", "ACTIVE_IMPACT"),

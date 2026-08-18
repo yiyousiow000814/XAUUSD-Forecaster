@@ -75,7 +75,13 @@ export function IncidentCard({ incident }: { incident: OperationalIncident }) {
       <button type="button" aria-expanded={showTechnical} aria-controls={technicalId} onClick={() => setShowTechnical(value => !value)}>查看技术详情 · {incident.technical_event_count} 个事件</button>
       <div id={technicalId} hidden={!showTechnical}>
         <div className="incident-human-diagnostics">{events.map((event, index) => {
-          const diagnostic = operationalEventDiagnostic(event);
+          const incidentReasons = event.code === "OPS_COMPONENT_UNHEALTHY"
+            ? incident.reason_projections
+              .filter(projection => projection.source_event_code === event.code
+                && projection.source_scope === event.scope)
+              .map(projection => projection.reason_code)
+            : undefined;
+          const diagnostic = operationalEventDiagnostic(event, incidentReasons);
           return <section key={`${event.code}-${event.scope}-${index}`}>
             <dl>
               <div><dt>当前状态</dt><dd>{diagnostic.status}</dd></div>
