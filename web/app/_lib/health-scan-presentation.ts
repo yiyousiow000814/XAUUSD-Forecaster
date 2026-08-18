@@ -12,6 +12,7 @@ export type ScanState = {
 const componentStates: Record<string, ScanState> = {
   OK: { tone: "healthy", symbol: "✓", label: "正常", attention: false },
   MARKET_CLOSED: { tone: "neutral", symbol: "—", label: "市场休市", attention: false },
+  WARN: { tone: "warning", symbol: "⚠", label: "警告", attention: true },
   WARNING: { tone: "warning", symbol: "⚠", label: "警告", attention: true },
   STALE: { tone: "warning", symbol: "⚠", label: "需要关注", attention: true },
   ERROR: { tone: "error", symbol: "✕", label: "错误", attention: true },

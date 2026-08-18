@@ -225,6 +225,9 @@ test("presents health as an action-first scanning contract", () => {
   assert.deepEqual(componentScanState("UNKNOWN"), {
     tone: "neutral", symbol: "—", label: "状态未知", attention: true,
   });
+  assert.deepEqual(componentScanState("WARN"), {
+    tone: "warning", symbol: "⚠", label: "警告", attention: true,
+  });
   assert.deepEqual(sourceScanState("ERROR"), {
     tone: "error", symbol: "✕", label: "错误", attention: true,
   });
@@ -236,7 +239,7 @@ test("presents health as an action-first scanning contract", () => {
     sortAttentionFirst(["HEALTHY", "WARMING_UP"], sourceScanState),
     ["WARMING_UP", "HEALTHY"],
   );
-  assert.equal(componentAggregate(["OK", "OK", "STALE", "ERROR"]), "2 正常 · 1 警告 · 1 错误");
+  assert.equal(componentAggregate(["OK", "OK", "WARN", "ERROR"]), "2 正常 · 1 警告 · 1 错误");
   assert.equal(sourceAggregate(["HEALTHY", "HEALTHY", "WARMING_UP"]), "2 正常 · 1 等待发布");
 });
 
@@ -1277,6 +1280,7 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(view, /className="component-technical-details"/);
   assert.match(view, /className="source-technical-details"/);
   assert.match(view, /state\.attention \? "技术详情" : "详情"/);
+  assert.match(view, /item\.health === "WARMING_UP" && !item\.last_error/);
   assert.match(view, /item\.last_error \?\? "无已记录错误"/);
   assert.match(view, /projection\.reason_code/);
   assert.match(view, /className="health-technical-section"/);
