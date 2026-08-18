@@ -124,19 +124,32 @@ function metrics(events: Array<Required<OperationalAlert>>) {
   return result.slice(0, 4);
 }
 
-function buildIncident(root: Required<OperationalAlert>, related: Array<Required<OperationalAlert>>): OperationalIncident {
-  const events = [root, ...related];
-  const family = eventFamily(root);
+function incidentEvents(incident: OperationalIncident): Array<Required<OperationalAlert>> {
+  return [incident.root_event, ...incident.related_events, ...incident.technical_events];
+}
+
+function finalizeIncident(incident: OperationalIncident): OperationalIncident {
+  const events = incidentEvents(incident);
   const recovery = recoveryState(events);
-  const severity = events.reduce((highest, event) => (
+  incident.severity = events.reduce((highest, event) => (
     severityRank[event.severity] > severityRank[highest] ? event.severity : highest
   ), "INFO" as OperationalAlert["severity"]);
-  return {
+  incident.blocking = events.some(event => event.blocking);
+  incident.state = recovery.state;
+  incident.action_state = recovery.action;
+  incident.summary_metrics = metrics(events);
+  incident.technical_event_count = events.length;
+  return incident;
+}
+
+function buildIncident(root: Required<OperationalAlert>, related: Array<Required<OperationalAlert>>): OperationalIncident {
+  const family = eventFamily(root);
+  return finalizeIncident({
     incident_key: `${family}:${root.scope}:${root.code}`,
     category: causalDefinition(root)?.category ?? root.category,
-    severity,
-    state: recovery.state,
-    action_state: recovery.action,
+    severity: root.severity,
+    state: "ACTIVE",
+    action_state: "MONITORING",
     title_zh: incidentTitle(root, family),
     summary_zh: incidentSummary(root, family),
     root_event: root,
@@ -144,22 +157,26 @@ function buildIncident(root: Required<OperationalAlert>, related: Array<Required
     technical_events: [],
     reason_projections: [],
     affected_scopes: [...new Set(related.map(event => event.scope).filter(scope => scope !== root.scope))].sort(),
-    summary_metrics: metrics(events),
-    blocking: events.some(event => event.blocking),
-    technical_event_count: events.length,
-  };
+    summary_metrics: [],
+    blocking: root.blocking,
+    technical_event_count: 0,
+  });
 }
 
-function stageForPendingReason(reason: string): string | null {
-  if (reason === "ACTIONABLE_NEWS_IMPACT_PENDING") return "ACTIVE_IMPACT";
-  if (reason === "ACTIONABLE_NEWS_SEMANTICS_PENDING") return "ACTIVE_ANNOTATION";
+function stageForSemanticReason(reason: string): string | null {
+  if (/^ACTIONABLE_NEWS_IMPACT_(?:PENDING|RECOVERING|TERMINAL|OVERDUE)$/.test(reason)) {
+    return "ACTIVE_IMPACT";
+  }
+  if (/^ACTIONABLE_NEWS_SEMANTICS_(?:PENDING|RECOVERING|TERMINAL|OVERDUE)$/.test(reason)) {
+    return "ACTIVE_ANNOTATION";
+  }
   return null;
 }
 
-function selectPendingCause(
+function selectSemanticCause(
   event: Required<OperationalAlert>, reason: string, incidents: OperationalIncident[],
 ): OperationalIncident | null {
-  const stage = stageForPendingReason(reason);
+  const stage = stageForSemanticReason(reason);
   if (!stage) return null;
   const candidates = incidents.filter(incident => incident.root_event.scope === stage);
   if (candidates.length === 0) return null;
@@ -245,7 +262,7 @@ export function correlateOperationalEvents(input: OperationalAlert[]): Operation
     const reasons = reasonCodes(event);
     const explained = new Map<string, OperationalIncident>();
     for (const reason of reasons) {
-      const incident = selectPendingCause(event, reason, incidents);
+      const incident = selectSemanticCause(event, reason, incidents);
       if (incident) {
         addReasonProjection(incident, event, reason);
         explained.set(reason, incident);
@@ -274,7 +291,6 @@ export function correlateOperationalEvents(input: OperationalAlert[]): Operation
       const owner = [...new Set(explained.values())]
         .sort((left, right) => left.incident_key.localeCompare(right.incident_key))[0];
       owner.technical_events.push(event);
-      owner.technical_event_count = 1 + owner.related_events.length + owner.technical_events.length;
     }
     consumed.add(index);
   });
@@ -295,7 +311,7 @@ export function correlateOperationalEvents(input: OperationalAlert[]): Operation
     incidents.push(buildIncident(event, related));
   });
 
-  return incidents.sort((left, right) => (
+  return incidents.map(finalizeIncident).sort((left, right) => (
     Number(right.blocking) - Number(left.blocking)
     || severityRank[right.severity] - severityRank[left.severity]
     || left.incident_key.localeCompare(right.incident_key)
@@ -307,5 +323,5 @@ export const globalOperationalIncidents = (incidents: OperationalIncident[]) => 
 );
 
 export const affectedOperationalScopeCount = (incidents: OperationalIncident[]) => new Set(
-  incidents.flatMap(incident => incident.affected_scopes),
+  incidents.flatMap(incident => [incident.root_event.scope, ...incident.affected_scopes]),
 ).size;

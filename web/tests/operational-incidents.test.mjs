@@ -38,7 +38,7 @@ test("correlates the Gemma local-capacity chain without losing technical events"
   );
   assert.ok(incidents[0].affected_scopes.includes("daily_news_brief"));
   assert.ok(incidents[0].affected_scopes.includes("news_semantic_pipeline"));
-  assert.equal(affectedOperationalScopeCount(incidents), 2);
+  assert.equal(affectedOperationalScopeCount(incidents), 3);
   const fiveEvents = correlateOperationalEvents(capacityChain().slice(0, 5));
   assert.equal(fiveEvents.length, 1);
   assert.equal(fiveEvents[0].technical_event_count, 5);
@@ -129,6 +129,63 @@ test("classifies future scheduled retry as auto-recovering", () => {
   ]);
   assert.equal(incident.state, "RECOVERING");
   assert.equal(incident.action_state, "AUTO_RECOVERING");
+});
+
+test("finalizes a scheduled retry from terminal or overdue blocking component state", () => {
+  for (const reason of [
+    "ACTIONABLE_NEWS_SEMANTICS_TERMINAL",
+    "ACTIONABLE_NEWS_SEMANTICS_OVERDUE",
+  ]) {
+    const incidents = correlateOperationalEvents([
+      event("OPS_AI_JOB_RETRY_LOOP", "ACTIVE_ANNOTATION", {
+        claimable: false, next_retry_at: "2026-08-18T05:00:00Z",
+        latest_failure_code: "MODEL_REQUEST_FAILED", active_jobs: 1,
+      }),
+      event("OPS_COMPONENT_UNHEALTHY", "news_semantic_pipeline", {
+        reason_codes: [reason], active_jobs: 4, failed_15m: 2,
+      }, { severity: "ERROR", blocking: true }),
+    ]);
+    assert.equal(incidents.length, 1, reason);
+    assert.equal(incidents[0].severity, "ERROR", reason);
+    assert.equal(incidents[0].blocking, true, reason);
+    assert.equal(incidents[0].state, "ACTIVE", reason);
+    assert.equal(incidents[0].action_state, "ACTION_REQUIRED", reason);
+    assert.equal(incidents[0].technical_event_count, 2, reason);
+    assert.deepEqual(incidents[0].summary_metrics, [
+      { label: "待处理", value: "4" },
+      { label: "15 分钟失败", value: "2" },
+    ], reason);
+    assert.deepEqual(globalOperationalIncidents(incidents), incidents, reason);
+  }
+});
+
+test("correlates pending and recovering projections into one incident", () => {
+  const incidents = correlateOperationalEvents([
+    event("OPS_AI_JOB_RETRY_LOOP", "ACTIVE_IMPACT", {
+      claimable: false, next_retry_at: "2026-08-18T05:00:00Z",
+      latest_failure_code: "MODEL_REQUEST_FAILED",
+    }),
+    event("OPS_COMPONENT_UNHEALTHY", "news_semantic_pipeline", {
+      reason_codes: [
+        "ACTIONABLE_NEWS_IMPACT_PENDING",
+        "ACTIONABLE_NEWS_IMPACT_RECOVERING",
+      ],
+    }),
+  ]);
+  assert.equal(incidents.length, 1);
+  assert.deepEqual(incidents[0].reason_projections.map(item => item.reason_code), [
+    "ACTIONABLE_NEWS_IMPACT_PENDING",
+    "ACTIONABLE_NEWS_IMPACT_RECOVERING",
+  ]);
+  assert.equal(incidents[0].technical_events.length, 1);
+  assert.equal(incidents[0].technical_event_count, 2);
+});
+
+test("counts a standalone incident root as an affected component", () => {
+  const incidents = correlateOperationalEvents([
+    event("OPS_RUNTIME_UPDATE_FAILED", "runtime_updater", {}, { severity: "ERROR", blocking: true }),
+  ]);
+  assert.equal(affectedOperationalScopeCount(incidents), 1);
 });
 
 test("classifies a claimable blocking retry as action required", () => {

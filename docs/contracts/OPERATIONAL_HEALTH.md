@@ -64,7 +64,8 @@ mutable incident database and cannot weaken scheduler or health decisions.
 Correlation uses controlled codes, scopes, root-cause families, and structured
 evidence. It never parses human-readable messages. Local capacity, provider
 pacing, and model-output failures remain separate families. Queue backlog,
-stall, Daily Brief deferral, and each semantic-component pending reason join a
+stall, Daily Brief deferral, and each semantic-component pending, recovering,
+terminal, or overdue reason join a
 root incident only when coded evidence establishes the relationship. When a
 stage has multiple candidate roots, actionable failure counts select a unique
 matching failure family; an absent or ambiguous match remains standalone. An
@@ -157,8 +158,9 @@ Health page leads with correlated incident cards and keeps raw codes, scopes,
 evidence, local scheduler progress, and Assistant D1 queue evidence in
 accessible technical disclosures. Banner counts use blocking/error incident
 count, not raw event count; a blocking child keeps its incident globally visible.
-The operator-facing header counts unique non-root affected scopes/components,
-not the number of same-scope symptoms, retries, or technical events.
+The operator-facing header counts every unique affected scope/component,
+including each incident root, but not same-scope symptoms, retries, or technical
+events more than once.
 Preview snapshots must not present frozen operational alerts as current live
 state.
 
