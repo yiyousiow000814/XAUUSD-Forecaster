@@ -312,9 +312,9 @@ reclassified without inventing evidence; their Market-only learning remains
 available.
 
 Every frozen coverage snapshot uses `decision_time` as both its source-poll and
-semantic-evidence cutoff. Catch-up rows reconstruct semantic readiness only from
-durable job creation, append-only attempts and deferrals, and immutable annotation
-or impact
+semantic-evidence cutoff, regardless of whether collection occurs in the same
+five-minute slot. All rows reconstruct semantic readiness only from durable job
+creation, append-only attempts and deferrals, and immutable annotation or impact
 completion timestamps at or before that cutoff. Current heartbeat files,
 credential configuration, later retries, later terminal transitions, and later
 recoveries are excluded. The source-observability payload records its cutoff,

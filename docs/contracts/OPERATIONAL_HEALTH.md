@@ -241,9 +241,9 @@ visibility, learning admission, training rows, or execution-learning evidence.
 
 Current operator health and historical decision coverage have separate clocks.
 The operator surface reads the mutable annotator heartbeat, current credentials,
-and latest scheduler state at the current observation time. A catch-up decision
-instead projects only durable job creation, append-only attempts and deferrals,
-immutable
+and latest scheduler state at the current observation time. Every model decision,
+including one appended in its current five-minute slot, instead projects only
+durable job creation, append-only attempts and deferrals, immutable
 semantic completions, and source polls recorded no later than `decision_time`.
 The mutable heartbeat file and current credential configuration are never used
 as historical evidence. When no durable attempt or deferral exists, the bounded

@@ -35,11 +35,11 @@ def _prepare_news_coverage_decision(
         })
 
 
-def test_catch_up_live_decision_ignores_later_mutable_semantic_failure(
-    tmp_path,
+def test_current_grid_live_decision_ignores_later_operational_evidence(
+    tmp_path, monkeypatch,
 ) -> None:
     decision = datetime(2026, 8, 10, 20, 5, tzinfo=UTC)
-    collected = decision + timedelta(minutes=25)
+    collected = decision + timedelta(minutes=4)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=decision - timedelta(hours=1))
     _prepare_news_coverage_decision(ledger, decision)
     pending_job_id = enqueue_job(
@@ -49,6 +49,7 @@ def test_catch_up_live_decision_ignores_later_mutable_semantic_failure(
         now=decision - timedelta(minutes=2),
     )
     before = news_semantic_pipeline_health_at(ledger, observed_at=decision)
+    assert before["evidence_mode"] == "DURABLE_POINT_IN_TIME"
 
     (ledger.path.parent / "news-annotator-status.json").write_text(
         json.dumps({
@@ -61,12 +62,12 @@ def test_catch_up_live_decision_ignores_later_mutable_semantic_failure(
         ledger.connection, task_type="ACTIVE_ANNOTATION", source="later-source",
         source_item_id="later-item", revision_number=1,
         prompt_version="later-prompt", priority="NORMAL",
-        now=decision + timedelta(minutes=15),
+        now=decision + timedelta(minutes=2),
     )
     ledger.append_source_poll({
         "poll_id": "later-source-failure",
         "source": NEWS_SOURCE_REGISTRY[0].source,
-        "fetched_time": decision + timedelta(minutes=20), "status": "ERROR",
+        "fetched_time": decision + timedelta(minutes=2), "status": "ERROR",
     })
     ledger.connection.execute(
         """INSERT INTO news_ai_scheduler_deferrals_v1 VALUES
@@ -74,12 +75,21 @@ def test_catch_up_live_decision_ignores_later_mutable_semantic_failure(
         (
             "later-deferral", pending_job_id, "ACTIVE_ANNOTATION", "account",
             "MODEL_CAPACITY_DEFERRED", None,
-            (decision + timedelta(minutes=15)).isoformat(),
-            (decision + timedelta(minutes=20)).isoformat(),
+            (decision + timedelta(minutes=3)).isoformat(),
+            (decision + timedelta(minutes=4)).isoformat(),
         ),
+    )
+    monkeypatch.setattr(
+        news_pipeline_health_module, "configured_api_credentials", lambda: (),
     )
     after = news_semantic_pipeline_health_at(ledger, observed_at=decision)
     assert after["snapshot_hash"] == before["snapshot_hash"]
+    operator_health = news_pipeline_health_module.news_semantic_pipeline_health(
+        ledger, observed_at=collected,
+    )
+    assert "ANNOTATOR_NOT_RUNNING" in operator_health["reason_codes"]
+    assert "ANNOTATOR_HEARTBEAT_STALE" in operator_health["reason_codes"]
+    assert "MODEL_CREDENTIALS_UNAVAILABLE" in operator_health["reason_codes"]
 
     _, decision_id = ForwardEngine(ledger, _EmptyProvider()).append_clock_event(
         decision, collected,
@@ -110,11 +120,11 @@ def test_catch_up_live_decision_ignores_later_mutable_semantic_failure(
     assert source_evidence["evidence_cutoff"] == decision.isoformat()
 
 
-def test_catch_up_live_decision_keeps_prior_unavailable_after_later_recovery(
+def test_current_grid_live_decision_keeps_prior_unavailable_after_later_recovery(
     tmp_path,
 ) -> None:
     decision = datetime(2026, 8, 10, 20, 5, tzinfo=UTC)
-    collected = decision + timedelta(minutes=25)
+    collected = decision + timedelta(minutes=4)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=decision - timedelta(hours=1))
     _prepare_news_coverage_decision(ledger, decision)
     job_id = enqueue_job(
@@ -139,15 +149,15 @@ def test_catch_up_live_decision_keeps_prior_unavailable_after_later_recovery(
            (?,?,?,?,?,'OK',NULL,NULL,NULL,NULL,?,NULL)""",
         (
             "attempt-after", job_id, 2, "account", "credential-2",
-            (decision + timedelta(minutes=15)).isoformat(),
+            (decision + timedelta(minutes=3)).isoformat(),
         ),
     )
     ledger.connection.execute(
         """UPDATE news_ai_jobs_v1 SET state='COMPLETED',updated_at=?,completed_at=?
            WHERE job_id=?""",
         (
-            (decision + timedelta(minutes=15)).isoformat(),
-            (decision + timedelta(minutes=15)).isoformat(), job_id,
+            (decision + timedelta(minutes=3)).isoformat(),
+            (decision + timedelta(minutes=3)).isoformat(), job_id,
         ),
     )
     after = news_semantic_pipeline_health_at(ledger, observed_at=decision)
@@ -165,38 +175,3 @@ def test_catch_up_live_decision_keeps_prior_unavailable_after_later_recovery(
     assert "MODEL_CREDENTIALS_UNAVAILABLE" in json.loads(
         coverage["coverage_reason_codes_json"]
     )
-
-
-def test_current_live_decision_keeps_current_operational_evidence(
-    tmp_path, monkeypatch,
-) -> None:
-    decision = datetime(2026, 8, 10, 20, 5, tzinfo=UTC)
-    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=decision - timedelta(hours=1))
-    _prepare_news_coverage_decision(ledger, decision)
-    (ledger.path.parent / "news-annotator-status.json").write_text(
-        json.dumps({
-            "service": "annotator", "state": "RUNNING",
-            "last_success": (decision - timedelta(minutes=10)).isoformat(),
-        }),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        news_pipeline_health_module, "configured_api_credentials", lambda: (object(),),
-    )
-
-    _, decision_id = ForwardEngine(ledger, _EmptyProvider()).append_clock_event(
-        decision, decision,
-    )
-    semantic = ledger.connection.execute(
-        """SELECT observed_at,reason_codes_json
-           FROM news_semantic_health_snapshots_v1 WHERE source_decision_id=?""",
-        (decision_id,),
-    ).fetchone()
-    coverage = ledger.connection.execute(
-        """SELECT state FROM news_input_coverage_snapshots_v1
-           WHERE source_decision_id=?""",
-        (decision_id,),
-    ).fetchone()
-    assert semantic["observed_at"] == decision.isoformat()
-    assert "ANNOTATOR_HEARTBEAT_STALE" in json.loads(semantic["reason_codes_json"])
-    assert coverage["state"] == "UNAVAILABLE"
