@@ -2153,7 +2153,9 @@ def test_chinese_display_fields_share_declared_identity_context(field) -> None:
     }
     result[field] = value
 
-    annotation_module._validate_chinese_result(result)
+    annotation_module._validate_chinese_result(
+        result, body=" ".join(identities),
+    )
 
 
 @pytest.mark.parametrize(
@@ -2181,6 +2183,151 @@ def test_chinese_display_accepts_bounded_grounded_identity_variants(value) -> No
     annotation_module._validate_chinese_result(
         result, headline="L.A. Law", body=source,
     )
+
+
+@pytest.mark.parametrize(
+    "span,rendered,source,declared,proof",
+    (
+        (
+            "Jerome Powell", "Jerome Powell",
+            "Jerome Powell addressed the policy outlook.",
+            ["Jerome Powell"], "DECLARED_IDENTITY",
+        ),
+        (
+            "OpenAI", "OpenAI", "OpenAI released a research update.",
+            [], "STRONG_IDENTIFIER",
+        ),
+        (
+            "OpenRouter", "OpenRouter", "OpenRouter released an update.",
+            [], "STRONG_IDENTIFIER",
+        ),
+        (
+            "Berkshire Hathaway", "Berkshire Hathaway",
+            "Berkshire Hathaway published its report.",
+            ["Berkshire Hathaway"], "DECLARED_IDENTITY",
+        ),
+        (
+            "FOMC", "FOMC", "The FOMC published its minutes.",
+            [], "STRONG_IDENTIFIER",
+        ),
+        (
+            "GPT-5", "GPT-5", "The product is named GPT-5.",
+            [], "STRONG_IDENTIFIER",
+        ),
+        (
+            "iPhone 17 Pro", "iPhone 17 Pro",
+            "Apple introduced iPhone 17 Pro.",
+            [], "STRONG_IDENTIFIER",
+        ),
+        (
+            "Berkshire Hathaway Annual Meeting",
+            "Berkshire Hathaway Annual Meeting",
+            "The Berkshire Hathaway Annual Meeting begins today.",
+            ["Berkshire Hathaway Annual Meeting"], "DECLARED_IDENTITY",
+        ),
+        *(
+            (
+                title, f"《{title}》",
+                f'The source refers to "{title}" as a named work.',
+                [], "DELIMITED_REFERENCE",
+            )
+            for title in (
+                "The Dark Knight", "The Intelligent Investor",
+                "Bohemian Rhapsody", "Grand Theft Auto",
+                "The One You've Been Waiting For",
+            )
+        ),
+    ),
+)
+def test_source_grounded_latin_span_family_accepts_references(
+    span, rendered, source, declared, proof,
+) -> None:
+    value = f"相关名称为{rendered}。"
+    result = {
+        "headline_zh": "名称说明",
+        "summary_zh": value,
+        "primary_story_title_zh": "名称说明",
+        "actor": "", "object": "", "entities": declared,
+    }
+
+    allowed = annotation_module._allowed_display_latin_spans(
+        result, value, "Source headline", source,
+    )
+
+    assert [(item.text, item.proof) for item in allowed] == [(span, proof)]
+    annotation_module._validate_chinese_result(
+        result, headline="Source headline", body=source,
+    )
+
+
+@pytest.mark.parametrize(
+    "value,source,declared",
+    (
+        (
+            "报道称Market expects growth to be strong。",
+            "Market expects growth to be strong after the policy update.", [],
+        ),
+        (
+            "报道称《Market expects growth to be strong》。",
+            "Market expects growth to be strong after the policy update.", [],
+        ),
+        (
+            "报道称《Market Expects Growth To Be Strong》。",
+            'The source quotes "Market expects growth to be strong."', [],
+        ),
+        (
+            "报道称《Market Update》。",
+            'The source says "Alpha" Market Update "Omega".', [],
+        ),
+        (
+            "报道称“Market expects growth to be strong after policy changes”。",
+            'The source quotes "Market expects growth to be strong after policy changes."',
+            [],
+        ),
+        (
+            "报道讨论《The Dark Knight》。",
+            "The source discusses an unrelated work.", [],
+        ),
+        (
+            "报道讨论《This Is An Excessively Long Source Grounded Phrase That "
+            "Cannot Be A Bounded Display Identifier》。",
+            'The source quotes "This Is An Excessively Long Source Grounded Phrase '
+            'That Cannot Be A Bounded Display Identifier."', [],
+        ),
+        (
+            "报道称OpenAI said markets expect growth to be strong。",
+            "OpenAI said markets expect growth to be strong.", ["OpenAI"],
+        ),
+        (
+            "报道称open market update。",
+            "The article contains the phrase open market update.", [],
+        ),
+        (
+            "报道称《Market》expects growth to be strong。",
+            "Market expects growth to be strong.", [],
+        ),
+        (
+            "Market expects growth to be strong after the policy update.",
+            "Market expects growth to be strong after the policy update.", [],
+        ),
+    ),
+)
+def test_source_grounded_latin_span_family_rejects_prose_and_spoofs(
+    value, source, declared,
+) -> None:
+    result = {
+        "headline_zh": "市场评论", "summary_zh": value,
+        "primary_story_title_zh": "市场评论",
+        "actor": "", "object": "", "entities": declared,
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="NO_CHINESE_PROSE|ENGLISH_PROSE_DOMINANT|UNGROUNDED_LATIN_REFERENCE",
+    ):
+        annotation_module._validate_chinese_result(
+            result, headline="Market commentary", body=source,
+        )
 
 
 @pytest.mark.parametrize(
@@ -2686,6 +2833,10 @@ def test_display_checkpoint_accepts_source_grounded_episode_titles_without_model
         f"{rank} {title} Season {rank}, Episode {rank} (2005)"
         for rank, title in zip(range(8, 0, -1), titles)
     )
+    source += " " + " ".join(
+        f'The article later refers to "{title}."'
+        for title in titles
+    )
     summary = (
         "这些剧集包括"
         + "、".join(f"《{title}》" for title in titles[:-1])
@@ -2738,7 +2889,7 @@ def test_source_grounding_does_not_allow_bracketed_english_prose() -> None:
         "actor": "", "object": "", "entities": [],
     }
 
-    with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
+    with pytest.raises(ValueError, match="UNGROUNDED_LATIN_REFERENCE"):
         annotation_module._validate_chinese_result(
             result,
             headline="Market commentary",
@@ -2782,7 +2933,9 @@ def test_story_title_matches_declared_identities_across_safe_punctuation_and_cas
         "entities": entities,
     }
 
-    annotation_module._validate_chinese_result(result)
+    annotation_module._validate_chinese_result(
+        result, body=f"{actor} {object_name}",
+    )
 
 
 @pytest.mark.parametrize("transport", ("rss", "html"))

@@ -165,14 +165,17 @@ cannot change semantic measurements or grant model permission. Each retry
 preserves bounded failure evidence, and a later versioned recovery may authorize
 one new attempt after another repair mechanism changes.
 
-Chinese-facing annotation fields share one controlled identity context. Latin
-identities may remain natural when declared by `actor`, `object`, or `entities`,
-or when the exact short proper-name-like span is grounded in the immutable source
-headline/body. Source occurrence alone is not permission: arbitrary English
-words, generic title phrases, and English clauses remain invalid even when their
-individual words appear in an English article. Existing display checkpoints MUST
-be revalidated locally against the current deterministic rules before another
-provider request is attempted.
+Chinese-facing annotation fields share one source-grounded allowed-Latin-span
+contract. The validator MAY exclude only a bounded span that occurs in the
+immutable source headline/body and has deterministic referential proof: an
+exact declared identity, strong identifier shape, a bounded reference delimited
+in both display and source, or a conservative established source-reference
+context. It MUST mask only the proven span before applying the unchanged
+Chinese-primary ratio to the remaining text. Source occurrence, casing, or
+display punctuation alone is not permission: copied English prose, long clauses,
+invented references, and bracket-wrapped sentences remain invalid. Existing
+display checkpoints MUST be revalidated locally against the current
+deterministic rules before another provider request is attempted.
 
 The model gateway distinguishes a request that produced no trustworthy response
 from a response that failed decoding or validation. Capacity, provider pacing,
