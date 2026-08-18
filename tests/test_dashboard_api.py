@@ -43,6 +43,90 @@ def _dashboard_module():
     return module
 
 
+def _write_market_session(
+    root: Path, *, observed_at: datetime, is_open: bool,
+) -> None:
+    quotes = root / "quotes"
+    quotes.mkdir(exist_ok=True)
+    (quotes / "market-session.json").write_text(json.dumps({
+        "schema": "xauusd.forward.market-session.v1",
+        "symbol": "XAUUSD",
+        "observed_at": observed_at.isoformat(),
+        "is_open": is_open,
+        "next_open_time": (
+            (observed_at + timedelta(hours=1)).isoformat()
+            if not is_open else None
+        ),
+        "next_close_time": (
+            (observed_at + timedelta(hours=23)).isoformat()
+            if is_open else None
+        ),
+    }), encoding="utf-8")
+
+
+def _write_quote(root: Path, *, received_at: datetime) -> None:
+    quotes = root / "quotes"
+    quotes.mkdir(exist_ok=True)
+    (quotes / "xauusd-quotes-test.jsonl").write_text(json.dumps({
+        "schema": "xauusd.forward.quote.v1",
+        "symbol": "XAUUSD",
+        "event_time": received_at.isoformat(),
+        "received_time": received_at.isoformat(),
+        "bid": 2400.0,
+        "ask": 2400.2,
+    }) + "\n", encoding="utf-8")
+
+
+def _append_decision_at(database: Path, created_at: datetime) -> None:
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "INSERT INTO market_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "snapshot", created_at.isoformat(), created_at.isoformat(),
+                "FORWARD", "fixture", created_at.isoformat(),
+                created_at.isoformat(), 2400.0, 2400.2, 0.2, "{}", "fixture",
+                None, "WARMUP", "OK", 0, "[]", "snapshot-hash",
+            ),
+        )
+        connection.execute(
+            "INSERT INTO decision_events VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "decision", created_at.isoformat(), "snapshot",
+                created_at.isoformat(), "visible-news-hash", "OK", "WAIT", "[]",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _append_semantic_snapshot(
+    database: Path, *, observed_at: datetime, reason_code: str,
+) -> None:
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "INSERT INTO news_semantic_health_snapshots_v1 VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                "decision", observed_at.isoformat(), observed_at.isoformat(),
+                "UNHEALTHY", json.dumps([reason_code]), observed_at.isoformat(),
+                1, observed_at.isoformat(), "semantic-hash",
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _component_alert_scopes(payload: dict) -> set[str]:
+    return {
+        str(alert["scope"])
+        for alert in payload["operational_health"]["alerts"]
+        if alert["code"] == "OPS_COMPONENT_UNHEALTHY"
+    }
+
+
 def test_semantic_component_separates_freshness_from_readiness() -> None:
     module = _dashboard_module()
     now = datetime(2026, 8, 17, 6, 0, tzinfo=UTC)
@@ -150,27 +234,150 @@ def test_dashboard_distinguishes_weekly_close_from_missing_open_market_data() ->
 
 
 def test_dashboard_reports_broker_close_and_reopen_time(tmp_path) -> None:
-    now = datetime.now(UTC).replace(microsecond=0)
+    now = datetime(2026, 8, 18, 21, 15, tzinfo=UTC)
     database = tmp_path / "forward-evidence.sqlite3"
     ForwardLedger(database, now=now).close()
-    quotes = tmp_path / "quotes"
-    quotes.mkdir()
+    _write_quote(tmp_path, received_at=now - timedelta(minutes=58))
+    _append_decision_at(database, now - timedelta(minutes=90))
+    _append_semantic_snapshot(
+        database,
+        observed_at=now - timedelta(minutes=90),
+        reason_code="ACTIONABLE_NEWS_SEMANTICS_PENDING",
+    )
     reopens_at = now + timedelta(hours=1)
-    (quotes / "market-session.json").write_text(json.dumps({
-        "schema": "xauusd.forward.market-session.v1",
-        "symbol": "XAUUSD",
-        "observed_at": now.isoformat(),
-        "is_open": False,
-        "next_open_time": reopens_at.isoformat(),
-        "next_close_time": None,
-    }), encoding="utf-8")
+    _write_market_session(tmp_path, observed_at=now, is_open=False)
 
-    payload = _dashboard_module()._dashboard_payload(database)
+    payload = _dashboard_module()._dashboard_payload(database, clock=lambda: now)
 
     assert payload["system"]["market_session"] == "CLOSED"
     assert payload["system"]["market_reopens_at"] == reopens_at.isoformat()
-    for component in ("quote_bridge", "decision_collector", "outcome_settler"):
+    expected_silence = {
+        "quote_bridge", "decision_collector", "outcome_settler",
+        "news_semantic_pipeline",
+    }
+    for component in expected_silence:
         assert payload["system"]["components"][component]["status"] == "MARKET_CLOSED"
+        assert payload["system"]["components"][component]["last_error"] is None
+    assert _component_alert_scopes(payload).isdisjoint(expected_silence)
+
+
+def test_dashboard_refreshes_clock_before_reading_live_broker_heartbeat(
+    tmp_path,
+) -> None:
+    query_started = datetime(2026, 8, 18, 21, 14, 45, tzinfo=UTC)
+    runtime_observed = query_started + timedelta(seconds=14)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=query_started).close()
+    _write_market_session(tmp_path, observed_at=runtime_observed, is_open=False)
+    clock_values = iter((query_started, runtime_observed))
+
+    payload = _dashboard_module()._dashboard_payload(
+        database, clock=lambda: next(clock_values),
+    )
+
+    assert payload["generated_at"] == runtime_observed.isoformat()
+    assert payload["system"]["market_session"] == "CLOSED"
+    assert payload["system"]["market_session_observed_at"] == runtime_observed.isoformat()
+
+
+def test_open_market_stale_quote_and_decision_remain_unhealthy(tmp_path) -> None:
+    now = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=now).close()
+    _write_market_session(tmp_path, observed_at=now, is_open=True)
+    _write_quote(tmp_path, received_at=now - timedelta(minutes=58))
+    _append_decision_at(database, now - timedelta(minutes=90))
+
+    payload = _dashboard_module()._dashboard_payload(database, clock=lambda: now)
+
+    assert payload["system"]["market_session"] == "DATA_UNAVAILABLE"
+    assert payload["system"]["components"]["quote_bridge"]["status"] == "STALE"
+    assert payload["system"]["components"]["decision_collector"]["status"] == "STALE"
+    assert {"quote_bridge", "decision_collector"}.issubset(
+        _component_alert_scopes(payload)
+    )
+
+
+def test_weekend_fallback_suspends_only_expected_silence(tmp_path) -> None:
+    saturday = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=saturday).close()
+
+    payload = _dashboard_module()._dashboard_payload(
+        database, clock=lambda: saturday,
+    )
+
+    assert payload["system"]["market_session"] == "WEEKLY_CLOSED"
+    expected_silence = {
+        "quote_bridge", "decision_collector", "outcome_settler",
+        "news_semantic_pipeline",
+    }
+    assert _component_alert_scopes(payload).isdisjoint(expected_silence)
+    for component in expected_silence:
+        assert payload["system"]["components"][component]["status"] == "MARKET_CLOSED"
+
+
+def test_stale_weekday_broker_heartbeat_does_not_infer_closure(tmp_path) -> None:
+    now = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=now).close()
+    _write_market_session(
+        tmp_path, observed_at=now - timedelta(seconds=21), is_open=False,
+    )
+
+    payload = _dashboard_module()._dashboard_payload(database, clock=lambda: now)
+
+    assert payload["system"]["market_session"] == "DATA_UNAVAILABLE"
+    assert payload["system"]["market_session_observed_at"] is None
+    assert payload["system"]["components"]["quote_bridge"]["status"] == "STALE"
+    assert "quote_bridge" in _component_alert_scopes(payload)
+
+
+def test_closed_market_keeps_current_annotation_failure_visible(tmp_path) -> None:
+    now = datetime(2026, 8, 18, 21, 15, tzinfo=UTC)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=now).close()
+    _write_market_session(tmp_path, observed_at=now, is_open=False)
+    (tmp_path / "news-annotator-status.json").write_text(json.dumps({
+        "service": "annotator",
+        "state": "RUNNING",
+        "last_success": (now - timedelta(minutes=20)).isoformat(),
+        "last_error": "MODEL_OUTPUT_CONTRACT_FAILED",
+    }), encoding="utf-8")
+
+    payload = _dashboard_module()._dashboard_payload(database, clock=lambda: now)
+
+    assert payload["system"]["components"]["news_semantic_pipeline"]["status"] == "MARKET_CLOSED"
+    assert payload["system"]["components"]["gemini_annotator"]["status"] == "STALE"
+    assert "gemini_annotator" in _component_alert_scopes(payload)
+
+
+def test_broker_reopen_immediately_restores_freshness_enforcement(tmp_path) -> None:
+    closed_at = datetime(2026, 8, 18, 21, 15, tzinfo=UTC)
+    reopened_at = closed_at + timedelta(hours=1)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=closed_at).close()
+    _write_market_session(tmp_path, observed_at=closed_at, is_open=False)
+    module = _dashboard_module()
+
+    closed = module._dashboard_payload(database, clock=lambda: closed_at)
+    _write_market_session(tmp_path, observed_at=reopened_at, is_open=True)
+    reopened = module._dashboard_payload(database, clock=lambda: reopened_at)
+
+    assert closed["system"]["components"]["quote_bridge"]["status"] == "MARKET_CLOSED"
+    assert reopened["system"]["market_session"] == "DATA_UNAVAILABLE"
+    assert reopened["system"]["components"]["quote_bridge"]["status"] == "STALE"
+    assert reopened["system"]["components"]["decision_collector"]["status"] == "STALE"
+    assert {"quote_bridge", "decision_collector"}.issubset(
+        _component_alert_scopes(reopened)
+    )
+
+    _write_quote(tmp_path, received_at=reopened_at)
+    _append_decision_at(database, reopened_at)
+    live = module._dashboard_payload(database, clock=lambda: reopened_at)
+    assert live["system"]["market_session"] == "OPEN"
+    assert live["system"]["components"]["quote_bridge"]["status"] == "OK"
+    assert live["system"]["components"]["decision_collector"]["status"] == "OK"
 
 
 def test_outcome_settler_health_uses_successful_loop_heartbeat_not_output_age(
