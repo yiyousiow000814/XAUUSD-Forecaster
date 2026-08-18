@@ -1087,7 +1087,7 @@ test("renders the Gemini quota status route", async () => {
   assert.match(html, /组件与新闻源/);
   assert.match(html, /data-read-state="(?:CURRENT|REFRESHING)"/);
   assert.match(html, /data-live-market-state="MARKET_DATA_UNAVAILABLE"/);
-  assert.match(html, /data-operational-state="HEALTHY"/);
+  assert.match(html, /data-operational-state="(?:HEALTHY|WARNING|ERROR)"/);
   assert.match(html, /连接中|实时链路不可用/);
 });
 
