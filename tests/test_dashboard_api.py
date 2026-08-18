@@ -379,7 +379,7 @@ def test_dashboard_reports_broker_close_and_reopen_time(tmp_path) -> None:
     assert _component_alert_scopes(payload).isdisjoint(expected_silence)
 
 
-def test_dashboard_exposes_frozen_news_coverage_separately_from_health(
+def test_dashboard_exposes_frozen_news_coverage_separately_from_current_health(
     tmp_path,
 ) -> None:
     now = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
@@ -388,18 +388,26 @@ def test_dashboard_exposes_frozen_news_coverage_separately_from_health(
     _append_decision_at(database, now)
     _append_semantic_snapshot(
         database, observed_at=now,
-        reason_code="ACTIONABLE_NEWS_IMPACT_PENDING",
+        reason_code="ACTIONABLE_NEWS_IMPACT_TERMINAL",
     )
     _append_news_input_coverage(database, now)
+    module = _dashboard_module()
+    module.news_semantic_pipeline_health = lambda *_args, **_kwargs: {
+        "observed_at": now.isoformat(),
+        "status": "HEALTHY",
+        "reason_codes": (),
+        "heartbeat_at": now.isoformat(),
+        "actionable_failure_counts": {},
+    }
 
-    payload = _dashboard_module()._dashboard_payload(database, clock=lambda: now)
+    payload = module._dashboard_payload(database, clock=lambda: now)
 
     assert payload["news_input_coverage"]["state"] == "DEGRADED"
     assert payload["news_input_coverage"]["usable_broad_event_count"] == 30
     assert payload["news_input_coverage"]["recovering_count"] == 2
     assert payload["system"]["components"]["news_semantic_pipeline"][
         "status"
-    ] == "WARN"
+    ] == "OK"
 
 
 def test_dashboard_refreshes_clock_before_reading_live_broker_heartbeat(
