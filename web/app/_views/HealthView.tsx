@@ -6,7 +6,7 @@ import CountValue from "../_components/CountValue";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { operationalEvidenceText } from "../_lib/operational-evidence";
-import { operationalEventDiagnostic, operationalIncidentActionLabels, operationalScopeLabel } from "../_lib/operational-incident-presentation";
+import { operationalEventDiagnostic, operationalIncidentActionLabels, operationalIncidentNextRetryAt, operationalScopeLabel } from "../_lib/operational-incident-presentation";
 import { affectedOperationalScopeCount, correlateOperationalEvents, type OperationalIncident } from "../_lib/operational-incidents";
 import { normalizeOperationalEvent, schedulerTaskLabel, type AssistantOperationalHealth, type OperationalAlert, type OperationalHealth } from "../_lib/operational-health";
 import { sourceHealthErrorPresentation } from "../_lib/source-health-presentation";
@@ -37,16 +37,6 @@ function localTime(value: string | null): string {
   return value ? new Date(value).toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Kuala_Lumpur" }) : "—";
 }
 
-function elapsed(seconds: number | null): string {
-  if (seconds === null) return "尚无记录";
-  const whole = Math.max(0, Math.round(seconds));
-  if (whole < 60) return `距上次成功 ${whole} 秒`;
-  const minutes = Math.floor(whole / 60);
-  if (minutes < 60) return `距上次成功 ${minutes} 分 ${whole % 60} 秒`;
-  const hours = Math.floor(minutes / 60);
-  return `距上次成功 ${hours} 小时 ${minutes % 60} 分`;
-}
-
 function compactElapsed(seconds: number | null): string {
   if (seconds === null) return "无等待";
   if (seconds < 60) return `${Math.round(seconds)} 秒`;
@@ -54,20 +44,69 @@ function compactElapsed(seconds: number | null): string {
   return `${Math.floor(seconds / 3600)} 小时 ${Math.floor((seconds % 3600) / 60)} 分`;
 }
 
+const componentRoles: Record<string, string> = {
+  quote_bridge: "持续接收 cTrader XAUUSD Bid / Ask 报价",
+  system_clock: "校验报价时间与本机接收时间",
+  decision_collector: "每五分钟保存一次前向决策",
+  outcome_settler: "结算决策后的 30 分钟结果",
+  news_collector: "轮询并保存新闻来源证据",
+  gemini_annotator: "生成新闻语义与影响标注",
+  news_semantic_pipeline: "汇总当前新闻语义处理状态",
+  sites_synchronizer: "同步只读网页展示镜像",
+  sqlite_backup: "保留 append-only 证据备份",
+  integrity_check: "检查本地证据数据库完整性",
+  daily_news_brief: "生成每日新闻简报",
+};
+
+function componentRole(name: string): string {
+  return componentRoles[name] ?? "运行与证据链路组件";
+}
+
+function componentStatusLabel(status: string): string {
+  if (status === "OK") return "正常";
+  if (status === "MARKET_CLOSED") return "市场休市";
+  if (status === "ERROR") return "错误";
+  if (status === "STALE") return "需要关注";
+  if (status === "UNAVAILABLE" || status === "UNKNOWN") return "状态不可用";
+  return status;
+}
+
+function componentProblem(status: string): string {
+  if (status === "STALE") return "最近一次成功已超过组件的健康时限。";
+  if (status === "ERROR") return "组件当前未能完成预期工作。";
+  if (status === "UNAVAILABLE" || status === "UNKNOWN") return "当前无法取得可信的组件状态。";
+  return "组件报告了需要关注的当前状态。";
+}
+
+function incidentForScope(incidents: OperationalIncident[], scope: string): OperationalIncident | null {
+  return incidents.find(incident => (
+    incident.root_event.scope === scope || incident.affected_scopes.includes(scope)
+  )) ?? null;
+}
+
 export function IncidentCard({ incident }: { incident: OperationalIncident }) {
   const events = [
     incident.root_event, ...incident.related_events, ...incident.technical_events,
   ];
   const affectedScopes = [...new Set([incident.root_event.scope, ...incident.affected_scopes])];
+  const nextRetryAt = operationalIncidentNextRetryAt(incident);
   const [showTechnical, setShowTechnical] = useState(false);
   const technicalId = useId();
   return <article className={`operational-incident-card is-${incident.severity.toLowerCase()}`}>
     <header>
-      <div><h3>{incident.title_zh}</h3><p>{incident.summary_zh}</p></div>
-      <strong>{operationalIncidentActionLabels[incident.action_state]}</strong>
+      <div className="incident-primary">
+        <div className="incident-kicker"><span>{incident.severity}</span><b>{operationalScopeLabel(incident.root_event.scope)}</b></div>
+        <h3>{incident.title_zh}</h3>
+        <p>{incident.summary_zh}</p>
+      </div>
+      <div className={`incident-action is-${incident.action_state.toLowerCase()}`}>
+        <small>当前处置</small>
+        <strong>{operationalIncidentActionLabels[incident.action_state]}</strong>
+        {nextRetryAt ? <time>下次尝试 {localTime(nextRetryAt)}</time> : null}
+      </div>
     </header>
     {incident.summary_metrics.length ? <dl>{incident.summary_metrics.map(metric => <div key={metric.label}><dt>{metric.label}</dt><dd>{metric.value}</dd></div>)}</dl> : null}
-    <p className="incident-affected"><b>影响：</b>{affectedScopes.map(operationalScopeLabel).join(" · ")}</p>
+    <p className="incident-affected"><b>受影响子系统</b><span>{affectedScopes.map(operationalScopeLabel).join(" · ")}</span><small>{affectedScopes.length} 个组件</small></p>
     <div className={`incident-technical-details${showTechnical ? " is-expanded" : ""}`}>
       <button type="button" aria-expanded={showTechnical} aria-controls={technicalId} onClick={() => setShowTechnical(value => !value)}>查看技术详情 · {incident.technical_event_count} 个事件</button>
       <div id={technicalId} hidden={!showTechnical}>
@@ -107,16 +146,67 @@ type NewsSourceHealth = StatusPayload["news_source_health"][number];
 
 function SourceHealthCard({ item }: { item: NewsSourceHealth }) {
   const healthy = item.health === "HEALTHY";
-  const [showDetails, setShowDetails] = useState(false);
   const errorPresentation = sourceHealthErrorPresentation(item, healthy);
-  return <article className={`${healthy ? "is-healthy" : "is-attention"} ${showDetails ? "is-detail-open" : ""}`}>
-    <div><strong>{item.label}</strong><small>{item.role} · {item.source}</small></div>
-    <div><b className={`source-health-badge health-${item.health.toLowerCase()}`}>{item.health === "FALLBACK_ACTIVE" ? "后备源接管中" : item.health === "WARMING_UP" ? "等待首次正式发布" : item.health}</b><small>{localTime(item.latest_poll_time)}</small><small>最近成功 {localTime(item.last_success)}</small>{item.freshness_reference_status === "PARTIAL" ? <small>新鲜度参考 {localTime(item.freshness_reference_time)} · 部分成功</small> : null}{item.next_retry_time ? <small>自动重试 {localTime(item.next_retry_time)}</small> : null}{item.semantic_message ? <small>{item.semantic_message}</small> : null}</div>
-    {healthy && <button className="source-detail-toggle" type="button" aria-expanded={showDetails} onClick={() => setShowDetails(value => !value)}>{showDetails ? "收起来源证据" : "查看来源证据"}</button>}
-    <div className="news-source-details">
-      <div><strong><CountValue value={item.item_count} suffix=" 篇" /></strong><small><CountValue value={item.revision_count} format="exact" suffix=" revisions" /> · 完整正文 <CountValue value={item.full_text_count} format="exact" /></small><small>轮询 <CountValue value={item.ok_count} format="exact" />/<CountValue value={item.poll_count} format="exact" /> 完成</small></div>
-      <div className="source-health-error"><strong>{errorPresentation.heading}</strong><small>{item.last_error_time ? localTime(item.last_error_time) : ""} {item.last_error ?? "链路轮询正常"}</small>{errorPresentation.fallback ? <small>{errorPresentation.fallback}</small> : null}</div>
-    </div>
+  const statusLabel = item.health === "FALLBACK_ACTIVE"
+    ? "后备源接管中" : item.health === "WARMING_UP" ? "等待首次正式发布" : item.health;
+  return <article className={healthy ? "is-healthy" : "is-attention"}>
+    <header>
+      <div><strong>{item.label}</strong><small>{item.role}</small></div>
+      <b className={`source-health-badge health-${item.health.toLowerCase()}`}>{statusLabel}</b>
+    </header>
+    <dl className="source-health-metadata">
+      <div><dt>最近轮询</dt><dd>{localTime(item.latest_poll_time)}</dd></div>
+      <div><dt>最近成功</dt><dd>{localTime(item.last_success)}</dd></div>
+    </dl>
+    {!healthy ? <div className="source-current-problem">
+      <small>当前问题</small><strong>{errorPresentation.heading}</strong>
+      {errorPresentation.recovery ? <b>{errorPresentation.recovery}</b> : null}
+      {item.next_retry_time ? <time>下次尝试 {localTime(item.next_retry_time)}</time> : null}
+      {errorPresentation.fallback ? <span>{errorPresentation.fallback}</span> : null}
+    </div> : null}
+    {item.semantic_message ? <p className="source-semantic-message">{item.semantic_message}</p> : null}
+    <details className="source-technical-details">
+      <summary>技术详情</summary>
+      <div className="source-evidence-counts"><strong><CountValue value={item.item_count} suffix=" 篇" /></strong><small><CountValue value={item.revision_count} format="exact" suffix=" revisions" /> · 完整正文 <CountValue value={item.full_text_count} format="exact" /></small><small>轮询 <CountValue value={item.ok_count} format="exact" />/<CountValue value={item.poll_count} format="exact" /> 完成</small></div>
+      <dl>
+        <div><dt>来源标识</dt><dd><code>{item.source}</code></dd></div>
+        <div><dt>错误类型</dt><dd><code>{item.last_error_type ?? "NONE"}</code></dd></div>
+        <div><dt>最近错误</dt><dd>{item.last_error_time ? localTime(item.last_error_time) : "—"} · <code>{item.last_error ?? "无已记录错误"}</code></dd></div>
+        {item.freshness_reference_status === "PARTIAL" ? <div><dt>新鲜度参考</dt><dd>{localTime(item.freshness_reference_time)} · 部分成功</dd></div> : null}
+      </dl>
+    </details>
+  </article>;
+}
+
+type ComponentHealth = StatusPayload["system"]["components"][string];
+
+function ComponentHealthCard({
+  name, item, healthy, incident,
+}: { name: string; item: ComponentHealth; healthy: boolean; incident: OperationalIncident | null }) {
+  const nextRetryAt = incident ? operationalIncidentNextRetryAt(incident) : null;
+  return <article className={healthy ? "is-healthy" : "is-attention"}>
+    <header>
+      <span className={`component-status-badge status-${item.status.toLowerCase()}`}>{componentStatusLabel(item.status)}</span>
+      <h3>{operationalScopeLabel(name)}</h3>
+    </header>
+    <p className="component-role">{componentRole(name)}</p>
+    <dl className="component-primary-metadata">
+      <div><dt>最近成功</dt><dd>{localTime(item.last_success)}</dd></div>
+      <div><dt>距上次成功</dt><dd>{compactElapsed(item.age_seconds)}</dd></div>
+    </dl>
+    {!healthy ? <div className="component-current-problem">
+      <small>当前问题</small><strong>{incident?.summary_zh ?? componentProblem(item.status)}</strong>
+      {incident ? <b>{operationalIncidentActionLabels[incident.action_state]}</b> : null}
+      {nextRetryAt ? <time>下次尝试 {localTime(nextRetryAt)}</time> : null}
+    </div> : null}
+    <details className="component-technical-details">
+      <summary>技术详情</summary>
+      <dl>
+        <div><dt>组件标识</dt><dd><code>{name}</code></dd></div>
+        <div><dt>原始状态</dt><dd><code>{item.status}</code></dd></div>
+        <div><dt>最近错误</dt><dd><code>{item.last_error ?? "无已记录错误"}</code></dd></div>
+      </dl>
+    </details>
   </article>;
 }
 
@@ -191,6 +281,8 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
   const affectedScopeCount = affectedOperationalScopeCount(incidents);
   const incidentStatus = incidents.some(incident => incident.severity === "ERROR")
     ? "error" : incidents.length ? "warning" : "healthy";
+  const automaticRecoveryCount = incidents.filter(incident => incident.action_state === "AUTO_RECOVERING").length;
+  const manualActionCount = incidents.filter(incident => incident.action_state === "ACTION_REQUIRED").length;
 
   return <main className="status-main">
     <section className="status-hero">
@@ -198,72 +290,75 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
     </section>
     {error ? <div className="error-banner">状态读取失败：{error}</div> : null}
     <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
+    <section className={`health-at-a-glance is-${incidentStatus}`} aria-label="当前系统结论">
+      <div><small>当前结论</small><strong>{incidentStatus === "error" ? "运行异常" : incidentStatus === "warning" ? "运行警告" : "运行正常"}</strong></div>
+      <div><small>自动恢复</small><strong>{automaticRecoveryCount ? `${automaticRecoveryCount} 个处理中` : "无"}</strong></div>
+      <div><small>人工处理</small><strong>{manualActionCount ? `${manualActionCount} 个需要处理` : "当前不需要"}</strong></div>
+      <div><small>受影响子系统</small><strong>{affectedScopeCount ? `${affectedScopeCount} 个` : "无"}</strong></div>
+    </section>
     <section id="operational-alerts" className={`operational-health-panel incident-summary-panel is-${incidentStatus}`} aria-label="运行问题与关联证据">
-      <header><div><p className="eyebrow">OPERATIONAL INCIDENTS</p><h2>运行问题</h2></div><p>{incidents.length ? `${incidents.length} 个问题 · ${affectedScopeCount} 个受影响组件` : "当前没有达到告警阈值的运行问题。"}</p></header>
+      <header><div><p className="eyebrow">CURRENT PROBLEMS</p><h2>当前问题</h2></div><p>{incidents.length ? `${incidents.length} 个问题，先看影响与处置；原始代码保留在技术详情中。` : "当前没有达到告警阈值的运行问题。"}</p></header>
       {incidents.length ? <div className="operational-incident-list">{incidents.map(incident => <IncidentCard incident={incident} key={incident.incident_key} />)}</div> : <p className="operational-all-clear">当前没有达到告警阈值的运行异常。</p>}
     </section>
-    <section className="operational-health-panel technical-health-panel" aria-label="本机调度器技术状态">
-      <details>
-        <summary>查看调度器技术状态</summary>
-        <div className="scheduler-health-grid">
-        {(payload?.operational_health?.scheduler.tasks ?? []).map(task => <article key={task.task_type}>
-          <header><strong>{schedulerTaskLabel[task.task_type] ?? task.task_type}</strong><code>{task.task_type}</code></header>
-          <dl>
-            <div><dt>当前工作</dt><dd>{task.queued + task.leased + task.backing_off}</dd></div>
-            <div><dt>可立即处理</dt><dd>{task.claimable}</dd></div>
-            <div><dt>定时重试</dt><dd>{task.scheduled_retry}</dd></div>
-            <div><dt>15分钟完成</dt><dd>{task.completed_15m}</dd></div>
-            <div><dt>容量延后</dt><dd>{task.deferred_15m}</dd></div>
-            <div><dt>服务商调度等待</dt><dd>{task.provider_dispatch_deferred_15m ?? 0}</dd></div>
-            <div><dt>失败</dt><dd>{task.errors_15m}</dd></div>
-            <div><dt>最旧可处理</dt><dd>{compactElapsed(task.oldest_age_seconds)}</dd></div>
-            <div><dt>下次重试</dt><dd>{task.earliest_retry_at ? localTime(task.earliest_retry_at) : "—"}</dd></div>
-            <div><dt>最高领取</dt><dd>{task.max_claim_count}{task.max_claim_job_ref ? ` · ${task.max_claim_job_ref}` : ""}</dd></div>
-          </dl>
-          {task.failure_codes_15m.length ? <p className="scheduler-failure-codes">{task.failure_codes_15m.map(item => <code key={item.code}>{item.code} × {item.count}</code>)}</p> : null}
-          {(task.capacity_dimensions_15m ?? []).length ? <p className="scheduler-failure-codes">{task.capacity_dimensions_15m?.map(item => <code key={item.dimension}>LOCAL_{item.dimension}_LIMIT × {item.count}</code>)}</p> : null}
-        </article>)}
-        </div>
-      </details>
-    </section>
-    <section id="assistant-operational-alerts" className="operational-health-panel technical-health-panel" aria-label="Assistant 云端队列技术状态">
-      <details>
-        <summary>查看 Assistant 云端队列技术状态</summary>
-        <p className="technical-boundary-note">本机 SQLite 与 Assistant D1 保持独立执行面；这里只统一分类和展示。{assistantHealth?.current === false ? " PR Preview 不把生产 D1 告警伪装成分支实时状态。" : ""}</p>
-        <div className="scheduler-health-grid">
-        {(assistantHealth?.queues ?? []).map(queue => <article key={queue.queue}>
-          <header><strong>{queue.label}</strong><code>{queue.queue}</code></header>
-          <dl>
-            <div><dt>排队</dt><dd>{queue.queued}</dd></div>
-            <div><dt>处理中</dt><dd>{queue.processing}</dd></div>
-            <div><dt>可立即处理</dt><dd>{queue.claimable}</dd></div>
-            <div><dt>定时重试</dt><dd>{queue.scheduled_retry}</dd></div>
-            <div><dt>15分钟完成</dt><dd>{queue.completed_15m}</dd></div>
-            <div><dt>终止失败</dt><dd>{queue.failed_15m}</dd></div>
-            <div><dt>容量等待</dt><dd>{queue.capacity_deferred}</dd></div>
-            <div><dt>最旧可处理</dt><dd>{compactElapsed(queue.oldest_age_seconds)}</dd></div>
-            <div><dt>最高尝试</dt><dd>{queue.max_attempt_count}</dd></div>
-          </dl>
-          {queue.failure_codes.length ? <p className="scheduler-failure-codes">{queue.failure_codes.map(item => <code key={item.code}>{item.code} × {item.count}</code>)}</p> : null}
-        </article>)}
-        </div>
-      </details>
-    </section>
     <section className={`component-status ${componentHasAttention ? "has-attention" : ""} ${showHealthyComponents ? "show-healthy" : ""}`} aria-label="数据链路组件状态">
-      <header><div><p className="eyebrow">EVIDENCE PIPELINE</p><h2>系统组件状态</h2></div><p><b>{payload?.system.source_of_truth ?? "Local append-only SQLite"}</b> 是不可修改的证据源；{payload?.system.sites_mirror ?? "Sites D1 read-only materialized display mirror"} 只是展示镜像。</p></header>
+      <header><div><p className="eyebrow">SYSTEM COMPONENTS</p><h2>系统组件</h2></div><p>先看职责、最近成功和当前问题；组件标识、原始状态与错误文本保留在技术详情。</p></header>
       {componentHasAttention && healthyComponentCount > 0 && <button className="health-reveal-button" type="button" aria-expanded={showHealthyComponents} onClick={() => setShowHealthyComponents(value => !value)}>{showHealthyComponents ? "只看异常组件" : `另有 ${healthyComponentCount} 个正常组件`}</button>}
-      <div>{components.map(({ name, item, healthy }) => <article className={healthy ? "is-healthy" : "is-attention"} key={name}>
-        <span className={item.status === "OK" || item.status === "MARKET_CLOSED" ? "component-ok" : "component-stale"}>{item.status === "MARKET_CLOSED" ? "市场休市" : item.status}</span>
-        <strong>{operationalScopeLabel(name)}</strong>
-        <small>最后成功 {localTime(item.last_success)}</small><small>{elapsed(item.age_seconds)}</small>
-        {item.last_error ? <em>{item.last_error}</em> : null}
-      </article>)}</div>
+      <div className="component-card-grid">{components.map(({ name, item, healthy }) => <ComponentHealthCard name={name} item={item} healthy={healthy} incident={incidentForScope(incidents, name)} key={name} />)}</div>
     </section>
     <section className={`source-health ${sourceHasAttention ? "has-attention" : ""} ${showHealthySources ? "show-healthy" : ""}`} aria-label="新闻来源状态">
-      <header><div><p className="eyebrow">NEWS INGEST / SOURCE-BY-SOURCE</p><h2>新闻来源状态</h2></div><p>发布源和正文解析器分别判断。<b>正文链路降级不会伪装成全部新闻中断</b>；错误会保留最近一次成功时间和具体原因。</p></header>
+      <header><div><p className="eyebrow">NEWS SOURCES</p><h2>新闻来源</h2></div><p>来源新鲜度与进程心跳保持独立。单一来源暂时不可用，不会被表达为全系统故障。</p></header>
       {sourceHasAttention && healthySourceCount > 0 && <button className="health-reveal-button" type="button" aria-expanded={showHealthySources} onClick={() => setShowHealthySources(value => !value)}>{showHealthySources ? "只看异常来源" : `另有 ${healthySourceCount} 个正常来源`}</button>}
-      <div className="source-health-head"><span>来源 / 角色</span><span>状态 / 最近轮询</span><span>证据</span><span>最近错误</span></div>
-      {sources.map((item) => <SourceHealthCard item={item} key={item.source} />)}
+      <div className="source-health-grid">{sources.map((item) => <SourceHealthCard item={item} key={item.source} />)}</div>
+    </section>
+    <section className="health-technical-section" aria-label="调度器与技术状态">
+      <details>
+        <summary><span><small>SCHEDULER / TECHNICAL EVIDENCE</small><strong>调度器与技术状态</strong></span><b>展开技术证据</b></summary>
+        <div className="technical-health-group">
+          <section aria-labelledby="local-scheduler-title">
+            <header><div><p className="eyebrow">LOCAL SCHEDULER</p><h3 id="local-scheduler-title">本机调度器</h3></div><p>任务数量、领取、退避、失败代码和下一次重试。</p></header>
+            <div className="scheduler-health-grid">
+            {(payload?.operational_health?.scheduler.tasks ?? []).map(task => <article key={task.task_type}>
+              <header><strong>{schedulerTaskLabel[task.task_type] ?? task.task_type}</strong><code>{task.task_type}</code></header>
+              <dl>
+                <div><dt>当前工作</dt><dd>{task.queued + task.leased + task.backing_off}</dd></div>
+                <div><dt>可立即处理</dt><dd>{task.claimable}</dd></div>
+                <div><dt>定时重试</dt><dd>{task.scheduled_retry}</dd></div>
+                <div><dt>15分钟完成</dt><dd>{task.completed_15m}</dd></div>
+                <div><dt>容量延后</dt><dd>{task.deferred_15m}</dd></div>
+                <div><dt>服务商调度等待</dt><dd>{task.provider_dispatch_deferred_15m ?? 0}</dd></div>
+                <div><dt>失败</dt><dd>{task.errors_15m}</dd></div>
+                <div><dt>最旧可处理</dt><dd>{compactElapsed(task.oldest_age_seconds)}</dd></div>
+                <div><dt>下次重试</dt><dd>{task.earliest_retry_at ? localTime(task.earliest_retry_at) : "—"}</dd></div>
+                <div><dt>最高领取</dt><dd>{task.max_claim_count}{task.max_claim_job_ref ? ` · ${task.max_claim_job_ref}` : ""}</dd></div>
+              </dl>
+              {task.failure_codes_15m.length ? <p className="scheduler-failure-codes">{task.failure_codes_15m.map(item => <code key={item.code}>{item.code} × {item.count}</code>)}</p> : null}
+              {(task.capacity_dimensions_15m ?? []).length ? <p className="scheduler-failure-codes">{task.capacity_dimensions_15m?.map(item => <code key={item.dimension}>LOCAL_{item.dimension}_LIMIT × {item.count}</code>)}</p> : null}
+            </article>)}
+            </div>
+          </section>
+          <section id="assistant-operational-alerts" aria-labelledby="assistant-queue-title">
+            <header><div><p className="eyebrow">ASSISTANT D1</p><h3 id="assistant-queue-title">Assistant 云端队列</h3></div><p>与本机 SQLite 分离的队列证据。</p></header>
+            <p className="technical-boundary-note">本机 SQLite 与 Assistant D1 保持独立执行面；这里只统一分类和展示。{assistantHealth?.current === false ? " PR Preview 不把生产 D1 告警伪装成分支实时状态。" : ""}</p>
+            <div className="scheduler-health-grid">
+            {(assistantHealth?.queues ?? []).map(queue => <article key={queue.queue}>
+              <header><strong>{queue.label}</strong><code>{queue.queue}</code></header>
+              <dl>
+                <div><dt>排队</dt><dd>{queue.queued}</dd></div>
+                <div><dt>处理中</dt><dd>{queue.processing}</dd></div>
+                <div><dt>可立即处理</dt><dd>{queue.claimable}</dd></div>
+                <div><dt>定时重试</dt><dd>{queue.scheduled_retry}</dd></div>
+                <div><dt>15分钟完成</dt><dd>{queue.completed_15m}</dd></div>
+                <div><dt>终止失败</dt><dd>{queue.failed_15m}</dd></div>
+                <div><dt>容量等待</dt><dd>{queue.capacity_deferred}</dd></div>
+                <div><dt>最旧可处理</dt><dd>{compactElapsed(queue.oldest_age_seconds)}</dd></div>
+                <div><dt>最高尝试</dt><dd>{queue.max_attempt_count}</dd></div>
+              </dl>
+              {queue.failure_codes.length ? <p className="scheduler-failure-codes">{queue.failure_codes.map(item => <code key={item.code}>{item.code} × {item.count}</code>)}</p> : null}
+            </article>)}
+            </div>
+          </section>
+        </div>
+      </details>
     </section>
     <footer><span>每 {DASHBOARD_REFRESH_INTERVALS.status / 1000} 秒刷新 · SHADOW ONLY</span><span>最后状态：{payload?.generated_at ? localTime(payload.generated_at) : "—"}</span></footer>
   </main>;

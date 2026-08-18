@@ -2,7 +2,7 @@ import { operationalCodeDefinitions, schedulerTaskLabel, type OperationalAlert }
 import type { OperationalIncident } from "./operational-incidents";
 
 export const operationalIncidentActionLabels: Record<OperationalIncident["action_state"], string> = {
-  ACTION_REQUIRED: "需要处理",
+  ACTION_REQUIRED: "需要人工处理",
   AUTO_RECOVERING: "自动重试中",
   MONITORING: "持续观察",
 };
@@ -52,4 +52,12 @@ export function operationalEventDiagnostic(
       .map(reason => operationalCodeDefinitions.get(reason)?.title_zh)
       .filter((title): title is string => Boolean(title)),
   };
+}
+
+export function operationalIncidentNextRetryAt(incident: OperationalIncident): string | null {
+  const retryTimes = [incident.root_event, ...incident.related_events, ...incident.technical_events]
+    .map(event => event.evidence.next_retry_at)
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .sort();
+  return retryTimes[0] ?? null;
 }
