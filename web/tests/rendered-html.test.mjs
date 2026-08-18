@@ -520,7 +520,7 @@ test("renders the live room inside the canonical product shell", async () => {
   assert.match(html, /Aurum Signal Room/);
   assert.match(html, /XAUUSD · Forward-only intelligence/);
   assert.match(html, /新闻与决策/);
-  assert.match(html, /<a[^>]*aria-current="page"[^>]*>实时室<\/a>/);
+  assert.match(html, /<a[^>]*aria-current="page"[^>]*>总览<\/a>/);
   assert.doesNotMatch(html, /返回实时室|新闻 \/ 结果/);
   assert.doesNotMatch(html, /next\/link|rel="prefetch"/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/);
@@ -547,7 +547,7 @@ test("keeps global shell ownership centralized and prevents view-level design dr
   assert.match(shell, /DASHBOARD_SYSTEM_DESTINATIONS\.map/);
   assert.match(mobile, /DASHBOARD_GLOBAL_DESTINATIONS\.map/);
   assert.doesNotMatch(mobile, /const SECTIONS|MobileDashboardSection/);
-  assert.equal(navigation.match(/label: "(?:实时室|Assistant|新闻与决策|系统)"/g)?.length, 4);
+  assert.equal(navigation.match(/label: "(?:总览|新闻与决策|Assistant|系统)"/g)?.length, 4);
   assert.match(navigation, /href: "\/audit\?view=news"/);
   assert.match(navigation, /rooms: \["health", "status"\]/);
 
@@ -562,14 +562,14 @@ test("keeps global shell ownership centralized and prevents view-level design dr
 
 test("renders one invariant global header and active section across every dashboard route", async () => {
   const routes = [
-    ["/", "实时室"],
+    ["/", "总览"],
     ["/?room=assistant", "Assistant"],
     ["/?room=audit&view=news", "新闻与决策"],
     ["/?room=audit&view=league", "新闻与决策"],
     ["/?room=health", "系统"],
     ["/?room=status", "系统"],
   ];
-  const labels = ["实时室", "Assistant", "新闻与决策", "系统"];
+  const labels = ["总览", "新闻与决策", "Assistant", "系统"];
 
   for (const [path, activeLabel] of routes) {
     const { response, html } = await renderSettled(path, /dashboard-header topbar/);
@@ -1879,7 +1879,7 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(shell, /<MobileDashboardNav activeDestination=\{activeDestination\}/);
   assert.match(mobileNav, /DASHBOARD_GLOBAL_DESTINATIONS/);
   assert.doesNotMatch(mobileNav, /const SECTIONS|学习曲线|AI 模型用量|系统健康/);
-  for (const label of ["实时室", "Assistant", "新闻与决策", "系统"]) {
+  for (const label of ["总览", "新闻与决策", "Assistant", "系统"]) {
     assert.match(navigation, new RegExp(label));
   }
   assert.match(mobileNav, /aria-label="切换主要区域"/);
