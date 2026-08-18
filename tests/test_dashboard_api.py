@@ -1740,6 +1740,57 @@ def test_duplicate_collection_copy_is_not_reported_as_queue_anomaly() -> None:
     assert "不会重复消耗模型配额" in reason
 
 
+def test_news_archive_materializes_late_discovery_canonical_annotation(
+    tmp_path,
+) -> None:
+    module = _dashboard_module()
+    epoch = datetime(2026, 8, 5, tzinfo=UTC)
+    published_at = datetime(2026, 8, 15, 6, 13, 28, tzinfo=UTC)
+    first_seen = datetime(2026, 8, 17, 4, 9, 1, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=epoch)
+    item_id = "late-discovery-cpi"
+    cluster_id = "late-discovery-cpi-cluster"
+    bodies = {
+        "google_news_fed_rates": "Complete CPI and US dollar analysis. " * 210,
+        "google_news_gold_context": "Complete CPI and US dollar analysis. " * 210,
+    }
+    for source, body in bodies.items():
+        ledger.append_news_revision({
+            "source": source, "source_item_id": item_id,
+            "source_published_time": published_at,
+            "collector_first_seen_time": first_seen, "fetched_time": first_seen,
+            "headline": "CPI in Focus: Can the Dollar Turn Lower Again?",
+            "body": body,
+            "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+            "cluster_id": cluster_id,
+        })
+    canonical_body = bodies["google_news_fed_rates"]
+    _append_basic_annotation(
+        ledger,
+        source="google_news_fed_rates",
+        item_id=item_id,
+        digest=hashlib.sha256(canonical_body.encode()).hexdigest(),
+        parsed_at=first_seen + timedelta(seconds=1),
+    )
+
+    archive = module._news_archive_page(ledger.connection, None, 20)
+
+    assert len(archive["items"]) == 1
+    item = archive["items"][0]
+    assert item["source"] == "google_news_fed_rates"
+    assert item["source_published_time"] == published_at.isoformat(
+        timespec="microseconds"
+    )
+    assert item["collector_first_seen_time"] == first_seen.isoformat(
+        timespec="microseconds"
+    )
+    assert item["annotation_status"] == "READY"
+    assert item["model_visibility"] == "IMPACT_PENDING"
+    assert item["impact_status"] == "PENDING_IMPACT"
+    assert item.get("annotation_reason_code") != "QUEUE_INVARIANT_MISMATCH"
+    ledger.close()
+
+
 def test_news_archive_explains_terminal_model_contract_failure(tmp_path) -> None:
     module = _dashboard_module()
     now = datetime.now(UTC).replace(microsecond=0)
