@@ -1726,6 +1726,28 @@ def test_late_discovery_is_admitted_to_annotation_scheduler(tmp_path) -> None:
     ledger.close()
 
 
+def test_small_positive_publication_skew_enters_annotation_scheduler(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW - timedelta(days=1))
+    body = "Complete production-shaped Federal Reserve report. " * 20
+    ledger.append_news_revision({
+        "source": "google_news_fed_rates", "source_item_id": "skew-2.3s",
+        "source_published_time": NOW + timedelta(seconds=2.3),
+        "collector_first_seen_time": NOW, "fetched_time": NOW,
+        "headline": "Federal Reserve report", "body": body,
+        "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+        "cluster_id": "skew-2.3s-cluster",
+    })
+
+    discovered = sync_pending_jobs(ledger.connection, now=NOW)
+
+    assert discovered["ACTIVE_ANNOTATION"] == 1
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_ai_jobs_v1 "
+        "WHERE task_type='ACTIVE_ANNOTATION'"
+    ).fetchone()[0] == 1
+    ledger.close()
+
+
 def test_pending_contract_reopens_jobs_completed_by_invalid_legacy_annotations(
     tmp_path,
 ) -> None:

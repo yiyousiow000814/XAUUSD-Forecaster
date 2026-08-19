@@ -10,9 +10,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+from . import news_time
+
 
 GOOGLE_NEWS_MAX_AGE = timedelta(hours=72)
-GOOGLE_NEWS_FUTURE_TOLERANCE = timedelta(minutes=10)
 
 _GOOGLE_NEWS_SOURCES = frozenset({
     "google_news_gold_context",
@@ -46,7 +47,9 @@ def google_news_item_is_relevant(
         return False, "MISSING_PUBLISHED_TIME"
     published = published_at.replace(tzinfo=published_at.tzinfo or UTC).astimezone(UTC)
     observed = observed_at.replace(tzinfo=observed_at.tzinfo or UTC).astimezone(UTC)
-    if published > observed + GOOGLE_NEWS_FUTURE_TOLERANCE:
+    if not news_time.assess_publication_receipt_clock(
+        published, observed,
+    ).eligible:
         return False, "FUTURE_PUBLISHED_TIME"
     if observed - published > GOOGLE_NEWS_MAX_AGE:
         return False, "SEARCH_RESULT_TOO_OLD"

@@ -589,6 +589,23 @@ def test_late_received_news_can_be_used_only_after_receipt_when_still_active() -
     assert after_receipt.age_minutes == pytest.approx(174.0)
 
 
+def test_bounded_publication_skew_never_advances_visibility_before_receipt() -> None:
+    first_seen = datetime(2026, 8, 19, 15, 51, 15, 685775, tzinfo=UTC)
+    published = first_seen + timedelta(seconds=2.314225)
+
+    timing = assess_news_time(
+        {
+            "source_published_time": published,
+            "collector_first_seen_time": first_seen,
+        },
+        decision_time=first_seen - timedelta(microseconds=1),
+        forward_epoch=first_seen - timedelta(days=1),
+    )
+
+    assert timing.eligible is False
+    assert timing.reason_code == "NOT_YET_VISIBLE"
+
+
 def test_news_received_after_impact_window_is_expired_on_arrival() -> None:
     published = datetime(2026, 8, 8, 20, 40, tzinfo=UTC)
     first_seen = published + timedelta(hours=2, minutes=53)

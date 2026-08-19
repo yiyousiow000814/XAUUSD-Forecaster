@@ -78,6 +78,13 @@ training. Freshness decay is measured from publisher time, never from parser
 completion or collector startup. Controlled category `regulation_other` is
 display-only even when it comes from an official source.
 
+Publication metadata may lead the local receipt clock by up to and including
+10 minutes because webpage, provider, CDN, and server clocks are not perfectly
+synchronized. That bounded positive skew does not block semantic processing,
+but it remains audit timing evidence. It never advances visibility: a news
+revision is unavailable to inference, snapshots, and training until its
+immutable `collector_first_seen_time`, regardless of publisher time.
+
 Revised news is a new row with a larger revision number and a new content
 hash. Existing revisions are never updated. An annotation is usable only when
 all of the following hold:

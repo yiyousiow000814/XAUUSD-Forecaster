@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 import xauusd_forecaster.annotation as annotation_module
+import xauusd_forecaster.news_relevance as news_relevance_module
+import xauusd_forecaster.news_time as news_time_module
 
 from xauusd_forecaster.forward_engine import ForwardEngine
 from xauusd_forecaster.forward_ledger import ForwardLedger
@@ -53,6 +55,7 @@ from xauusd_forecaster.news import (
     GOOGLE_NEWS_LANES,
     GoogleNewsLane,
     RssSource,
+    _current_forward_news,
     collect_bea_macro,
     collect_bls_macro,
     collect_direct_full_text_rss_news,
@@ -71,6 +74,7 @@ from xauusd_forecaster.news_features_v2 import aggregate_news_features_v2
 from xauusd_forecaster.news_relevance import google_news_item_is_relevant
 from xauusd_forecaster.news_time import (
     MIXED_PRECISE_OR_BATCH_PROXY_TIME,
+    PublicationReceiptClockAssessment,
     SOURCE_REPORTED_TIME,
     assess_news_semantic_eligibility,
 )
@@ -484,6 +488,47 @@ def test_official_rss_parser_stamps_real_fetch_time() -> None:
     row = parse_rss(xml, RssSource("official", "https://example.test"), fetched)[0]
     assert row["collector_first_seen_time"] == fetched
     assert row["source_published_time"] < row["collector_first_seen_time"]
+
+
+@pytest.mark.parametrize(
+    ("published_delta", "expected_allowed"),
+    (
+        (timedelta(seconds=2.3), True),
+        (timedelta(minutes=5, seconds=1), True),
+        (timedelta(minutes=9, seconds=59), True),
+        (timedelta(minutes=10), True),
+        (timedelta(minutes=10, seconds=1), False),
+    ),
+)
+def test_official_news_intake_uses_global_publication_clock_boundary(
+    tmp_path, published_delta: timedelta, expected_allowed: bool,
+) -> None:
+    fetched = datetime(2026, 8, 20, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(
+        tmp_path / "forward.sqlite3", now=fetched - timedelta(days=1),
+    )
+    record = {
+        "source": "federal_reserve_press_all",
+        "source_item_id": f"future-{published_delta.total_seconds()}",
+        "source_published_time": fetched + published_delta,
+        "collector_first_seen_time": fetched,
+        "fetched_time": fetched,
+        "headline": "Federal Reserve official release",
+        "body": "Official publication body",
+        "link": "https://www.federalreserve.gov/newsevents/pressreleases/test.htm",
+        "content_hash": hashlib.sha256(str(published_delta).encode()).hexdigest(),
+        "cluster_id": f"official-{published_delta.total_seconds()}",
+    }
+
+    allowed, reason = _current_forward_news(record, ledger, fetched)
+
+    assert allowed is expected_allowed
+    assert reason == ("ELIGIBLE" if expected_allowed else "FUTURE_PUBLICATION_TIME")
+    if expected_allowed:
+        ledger.append_news_revision(record)
+        assert ledger.visible_news(fetched - timedelta(microseconds=1)) == []
+        assert len(ledger.visible_news(fetched)) == 1
+    ledger.close()
 
 
 def test_federal_reserve_intake_requires_current_full_text(tmp_path) -> None:
@@ -5002,7 +5047,7 @@ def test_duplicate_cluster_selects_canonical_from_semantic_eligible_peers(
     rows = (
         (
             "preferred-but-invalid",
-            now + timedelta(minutes=10),
+            now + timedelta(minutes=10, seconds=1),
             "Longer canonical-looking evidence with an invalid future timestamp. " * 12,
         ),
         (
@@ -5051,6 +5096,35 @@ def test_duplicate_cluster_selects_canonical_from_semantic_eligible_peers(
         ledger.connection, observed_at=now + timedelta(seconds=2), limit=10,
     )
     assert [row["source_item_id"] for row in completed] == ["eligible-peer"]
+
+
+def test_small_positive_skew_can_own_canonical_annotation_work(tmp_path) -> None:
+    now = datetime(2026, 8, 19, 15, 51, 15, 685775, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    for item_id, published_at, body in (
+        (
+            "production-shaped-skew", now + timedelta(seconds=2.314225),
+            "Longer production-shaped evidence with bounded clock skew. " * 12,
+        ),
+        ("same-clock-peer", now, "Shorter same-clock evidence. " * 12),
+    ):
+        ledger.append_news_revision({
+            "source": "direct-test-source", "source_item_id": item_id,
+            "source_published_time": published_at,
+            "collector_first_seen_time": now, "fetched_time": now,
+            "headline": "Same publication", "body": body,
+            "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+            "cluster_id": "bounded-skew-cluster",
+        })
+
+    pending = annotation_module.pending_annotation_records(
+        ledger.connection, observed_at=now, limit=1,
+    )
+
+    assert [row["source_item_id"] for row in pending] == [
+        "production-shaped-skew",
+    ]
+    ledger.close()
 
 
 def test_news_readers_share_cross_source_cluster_tie_break(tmp_path) -> None:
@@ -5631,7 +5705,15 @@ def test_archive_stays_out_but_late_seen_news_enters_annotation_queue(
         ),
         (
             "gdelt_gold_geopolitics", timedelta(seconds=293),
-            ("PUBLISHED_AFTER_DECISION",), MIXED_PRECISE_OR_BATCH_PROXY_TIME,
+            ("PUBLISHED_AFTER_RECEIPT",), MIXED_PRECISE_OR_BATCH_PROXY_TIME,
+        ),
+        (
+            "google_news_fed_rates", timedelta(seconds=2.3),
+            ("PUBLISHED_AFTER_RECEIPT",), SOURCE_REPORTED_TIME,
+        ),
+        (
+            "us_treasury_press_releases", timedelta(minutes=10),
+            ("PUBLISHED_AFTER_RECEIPT",), SOURCE_REPORTED_TIME,
         ),
     ),
 )
@@ -5658,20 +5740,93 @@ def test_semantic_eligibility_preserves_timing_evidence_without_rejecting_it(
     assert assessment.publication_time_reliability == reliability
 
 
-def test_untrusted_future_publication_time_remains_semantic_ineligible() -> None:
+@pytest.mark.parametrize(
+    ("source", "published_delta", "expected_eligible"),
+    (
+        ("generic-test-source", timedelta(seconds=-1), True),
+        ("generic-test-source", timedelta(0), True),
+        ("google_news_fed_rates", timedelta(seconds=2.3), True),
+        ("gdelt_gold_geopolitics", timedelta(seconds=30), True),
+        ("us_treasury_press_releases", timedelta(minutes=5), True),
+        ("generic-test-source", timedelta(minutes=9, seconds=59), True),
+        ("generic-test-source", timedelta(minutes=10), True),
+        ("generic-test-source", timedelta(minutes=10, seconds=1), False),
+    ),
+)
+def test_publication_clock_skew_boundary_is_global(
+    source: str, published_delta: timedelta, expected_eligible: bool,
+) -> None:
     received = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
 
     assessment = assess_news_semantic_eligibility(
         {
-            "source": "google_news_gold_context",
-            "source_published_time": received + timedelta(minutes=11),
+            "source": source,
+            "source_published_time": received + published_delta,
             "collector_first_seen_time": received,
         },
         forward_epoch=received - timedelta(days=1),
     )
 
-    assert assessment.eligible is False
-    assert assessment.reason_code == "PUBLISHED_AFTER_DECISION"
+    assert assessment.eligible is expected_eligible
+    assert assessment.reason_code == (
+        "SEMANTIC_ELIGIBLE" if expected_eligible else "PUBLISHED_AFTER_DECISION"
+    )
+
+
+@pytest.mark.parametrize(
+    ("published_delta", "expected_allowed", "expected_reason"),
+    (
+        (timedelta(seconds=2.3), True, "AI_SEMANTIC_REVIEW_REQUIRED"),
+        (timedelta(minutes=10), True, "AI_SEMANTIC_REVIEW_REQUIRED"),
+        (timedelta(minutes=10, seconds=1), False, "FUTURE_PUBLISHED_TIME"),
+    ),
+)
+def test_google_news_intake_uses_global_publication_clock_boundary(
+    published_delta: timedelta, expected_allowed: bool, expected_reason: str,
+) -> None:
+    received = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
+
+    allowed, reason = google_news_item_is_relevant(
+        "google_news_fed_rates", "Federal Reserve update",
+        received + published_delta, received,
+    )
+
+    assert allowed is expected_allowed
+    assert reason == expected_reason
+
+
+def test_semantic_and_google_intake_delegate_publication_clock_policy(
+    monkeypatch,
+) -> None:
+    received = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
+    calls: list[tuple[object, object]] = []
+
+    def reject_clock_skew(published_at, received_at):
+        calls.append((published_at, received_at))
+        return PublicationReceiptClockAssessment(
+            eligible=False, published_after_receipt=True,
+        )
+
+    monkeypatch.setattr(
+        news_time_module, "assess_publication_receipt_clock", reject_clock_skew,
+    )
+
+    intake_allowed, intake_reason = news_relevance_module.google_news_item_is_relevant(
+        "google_news_fed_rates", "Federal Reserve update", received, received,
+    )
+    semantic = news_time_module.assess_news_semantic_eligibility(
+        {
+            "source": "generic-test-source",
+            "source_published_time": received,
+            "collector_first_seen_time": received,
+        },
+        forward_epoch=received - timedelta(days=1),
+    )
+
+    assert (intake_allowed, intake_reason) == (False, "FUTURE_PUBLISHED_TIME")
+    assert semantic.eligible is False
+    assert semantic.reason_code == "PUBLISHED_AFTER_DECISION"
+    assert calls == [(received, received), (received, received)]
 
 
 def test_late_legacy_annotation_remains_completed_without_requeue(tmp_path) -> None:
