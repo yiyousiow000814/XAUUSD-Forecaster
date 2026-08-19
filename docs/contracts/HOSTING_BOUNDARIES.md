@@ -42,6 +42,18 @@
 - Optional growing resources, such as news details, must not mark an otherwise
   current live heartbeat offline.
 
+## D1 capability readiness
+
+- Deployed code declares named D1 capabilities as bounded sets of required
+  schema objects. Runtime and deployment-readiness probes must fail with an
+  explicit `D1_SCHEMA_CAPABILITY_MISSING` error and the missing capability and
+  table names when production D1 does not satisfy that declaration.
+- Capability checks do not execute migrations. Migration files and the
+  reviewed Wrangler migration command remain the controlled schema authority.
+- Capability names describe product behavior rather than a permanent migration
+  number, so later additive migrations can extend or supersede the required
+  object set without embedding one incident's filenames in runtime logic.
+
 ## Cross-boundary growth and critical paths
 
 - Before data crosses a process, service, hosting, storage, synchronization, or

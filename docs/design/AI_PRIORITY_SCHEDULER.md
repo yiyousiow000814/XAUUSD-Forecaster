@@ -111,11 +111,26 @@ project-shared minute budget.
 
 ## Fair queueing
 
-Fresh work receives at most a one-minute semantic-priority head start. After a
-job has waited one scheduler cycle, all ready jobs are claimed in original FIFO
-order. This keeps immediate market-relevant work responsive while guaranteeing
-that annotation, impact, and display stages cannot be starved by a continuous
-stream of newer urgent work.
+Current-contract annotation work has two operational ownership lanes. `LIVE`
+contains eligible evidence first received after the contract activation point;
+`CONTRACT_BACKFILL` contains earlier evidence that still needs the same current
+semantic contract. This distinction changes scheduling only and never creates
+a second semantic authority.
+
+LIVE annotation is `FAST`, is always claimed before contract backfill, and may
+use the existing preemptible account and priority quota reserve. Contract
+backfill is `BACKGROUND` and routine-only. A contract handover persists its
+activation point and descending receipt cursor, scans at most 50 historical
+rows per scheduler cycle, and resumes from that cursor after restart. Backfill
+is enqueued only when frozen relevance and category freshness rules show that
+the record can still affect current operational behavior; immutable older
+evidence remains stored without entering the live queue. Unfinished Daily Brief
+dates remain a bounded operational exception and use the background lane.
+
+Within one ownership lane, fresh work receives at most a one-minute
+semantic-priority head start. After that interval, ready jobs follow original
+FIFO order. Continuous historical migration therefore cannot consume the
+capacity reserved for newly arriving live evidence.
 
 Preemptible accounts remain restricted to `IMMEDIATE` and `FAST` jobs. Routine
 accounts may serve every priority and provide overflow capacity for urgent

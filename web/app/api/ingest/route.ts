@@ -3,6 +3,11 @@ import { NextResponse } from "next/server";
 import { isIngestAuthorized } from "../_shared/ingest-auth";
 import { rejectPreviewWrite } from "../_shared/preview";
 import { writeDashboardSnapshot } from "../_shared/dashboard-snapshot";
+import {
+  d1CapabilityFailure,
+  D1CapabilityError,
+  requireD1Capabilities,
+} from "../_shared/d1-capabilities";
 
 declare const __AURUM_DEPLOYMENT__: {
   branch: string;
@@ -21,9 +26,27 @@ function deploymentStatus() {
 }
 
 export async function GET() {
-  return NextResponse.json(deploymentStatus(), {
-    headers: { "Cache-Control": "no-store" },
-  });
+  const binding = env.DB as D1Database | undefined;
+  if (!binding) {
+    return NextResponse.json({
+      status: "ERROR", error: "database unavailable", error_code: "D1_BINDING_MISSING",
+    }, { status: 503, headers: { "Cache-Control": "no-store" } });
+  }
+  try {
+    await requireD1Capabilities(binding, [
+      "operator_retry_scheduling", "paged_news_evidence",
+    ]);
+    return NextResponse.json(deploymentStatus(), {
+      headers: { "Cache-Control": "no-store" },
+    });
+  } catch (error) {
+    if (error instanceof D1CapabilityError) {
+      return NextResponse.json(d1CapabilityFailure(error), {
+        status: 503, headers: { "Cache-Control": "no-store" },
+      });
+    }
+    throw error;
+  }
 }
 
 export async function POST(request: Request) {

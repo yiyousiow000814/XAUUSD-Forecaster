@@ -99,6 +99,109 @@ def _backing_off_job(
     return job_id
 
 
+def test_live_annotation_claim_preempts_aged_contract_backfill() -> None:
+    connection = _connection()
+    backfill = enqueue_job(
+        connection, task_type="ACTIVE_ANNOTATION", source="source",
+        source_item_id="backfill", revision_number=1, prompt_version="prompt",
+        priority="BACKGROUND",
+        work_lane=news_scheduler_module.CONTRACT_BACKFILL_LANE,
+        now=NOW - timedelta(hours=2),
+    )
+    live = enqueue_job(
+        connection, task_type="ACTIVE_ANNOTATION", source="source",
+        source_item_id="live", revision_number=1, prompt_version="prompt",
+        priority="FAST", work_lane=news_scheduler_module.LIVE_LANE, now=NOW,
+    )
+
+    claimed = claim_job(
+        connection, worker_id="worker", pool=ROUTINE_POOL, now=NOW,
+    )
+
+    assert claimed and claimed.job_id == live
+    assert claimed.work_lane == news_scheduler_module.LIVE_LANE
+    assert connection.execute(
+        "SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (backfill,),
+    ).fetchone()[0] == "QUEUED"
+    connection.close()
+
+
+def test_fast_live_annotation_uses_reserved_order_before_aged_impact() -> None:
+    connection = _connection()
+    impact = enqueue_job(
+        connection, task_type="ACTIVE_IMPACT", source="source",
+        source_item_id="impact", revision_number=1, annotation_id="impact-id",
+        prompt_version="impact-prompt", priority="IMMEDIATE",
+        now=NOW - timedelta(hours=2),
+    )
+    live = enqueue_job(
+        connection, task_type="ACTIVE_ANNOTATION", source="source",
+        source_item_id="live", revision_number=1, prompt_version="prompt",
+        priority="FAST", work_lane=news_scheduler_module.LIVE_LANE, now=NOW,
+    )
+
+    claimed = claim_job(
+        connection, worker_id="worker", pool=ROUTINE_POOL, now=NOW,
+    )
+
+    assert claimed and claimed.job_id == live
+    assert connection.execute(
+        "SELECT state FROM news_ai_jobs_v1 WHERE job_id=?", (impact,),
+    ).fetchone()[0] == "QUEUED"
+    connection.close()
+
+
+def test_contract_backfill_discovery_is_bounded_resumable_and_separate(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW - timedelta(days=2))
+
+    def append(item: str, received: datetime) -> None:
+        body = f"Complete XAUUSD macro evidence {item}. " * 20
+        ledger.append_news_revision({
+            "source": "fixture", "source_item_id": item,
+            "source_published_time": received,
+            "collector_first_seen_time": received, "fetched_time": received,
+            "headline": f"Report {item}", "body": body,
+            "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+            "cluster_id": item,
+        })
+
+    for index in range(5):
+        append(f"historical-{index}", NOW - timedelta(minutes=index + 1))
+    append("live", NOW)
+
+    first = sync_pending_jobs(ledger.connection, now=NOW, limit=4)
+    first_rows = ledger.connection.execute(
+        """SELECT source_item_id,work_lane,priority FROM news_ai_jobs_v1
+           WHERE task_type='ACTIVE_ANNOTATION' ORDER BY source_item_id"""
+    ).fetchall()
+    first_cursor = ledger.connection.execute(
+        """SELECT cursor_first_seen FROM news_annotation_contract_backfill_v1
+           WHERE prompt_version=?""", (CURRENT_NEWS_PROMPT_VERSION,),
+    ).fetchone()[0]
+
+    second = sync_pending_jobs(
+        ledger.connection, now=NOW + timedelta(minutes=1), limit=4,
+    )
+    second_cursor = ledger.connection.execute(
+        """SELECT cursor_first_seen FROM news_annotation_contract_backfill_v1
+           WHERE prompt_version=?""", (CURRENT_NEWS_PROMPT_VERSION,),
+    ).fetchone()[0]
+    third = sync_pending_jobs(
+        ledger.connection, now=NOW + timedelta(minutes=2), limit=4,
+    )
+
+    assert first["ACTIVE_ANNOTATION"] <= 4
+    assert second["ACTIVE_ANNOTATION"] <= 4
+    assert third["ACTIVE_ANNOTATION"] <= 4
+    assert any(row[0] == "live" and row[1:] == ("LIVE", "FAST") for row in first_rows)
+    assert sum(row[1] == "CONTRACT_BACKFILL" for row in first_rows) <= 2
+    assert second_cursor < first_cursor
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_ai_jobs_v1 WHERE task_type='ACTIVE_ANNOTATION'"
+    ).fetchone()[0] == 6
+    ledger.close()
+
+
 @pytest.mark.parametrize(
     ("mode", "custom", "expected"),
     (

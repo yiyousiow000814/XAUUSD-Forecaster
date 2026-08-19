@@ -15,6 +15,11 @@ import {
   parseOperatorRetryReason,
 } from "../_shared/operator-retry";
 import { isPreviewDeployment, previewJson, rejectPreviewWrite } from "../_shared/preview";
+import {
+  d1CapabilityFailure,
+  D1CapabilityError,
+  requireD1Capabilities,
+} from "../_shared/d1-capabilities";
 
 export const dynamic = "force-dynamic";
 
@@ -42,8 +47,10 @@ export async function GET(request: Request) {
   if (!env.DB) return json({ error: "重试控制暂不可用" }, 503);
   const requested = Number(new URL(request.url).searchParams.get("limit") ?? 200);
   try {
+    await requireD1Capabilities(env.DB, ["operator_retry_scheduling"]);
     return json(await listOperatorRetryJobs(env.DB, Number.isSafeInteger(requested) ? requested : 200));
-  } catch {
+  } catch (error) {
+    if (error instanceof D1CapabilityError) return json(d1CapabilityFailure(error), 503);
     return json({ error: "重试任务读取失败" }, 503);
   }
 }
@@ -56,6 +63,7 @@ export async function POST(request: Request) {
   const actor = authorization.actor;
   if (!env.DB) return json({ error: "重试控制暂不可用" }, 503);
   try {
+    await requireD1Capabilities(env.DB, ["operator_retry_scheduling"]);
     const input = await body(request);
     const mode = parseOperatorRetryMode(input.mode);
     const reason = parseOperatorRetryReason(input.reason);
@@ -69,6 +77,7 @@ export async function POST(request: Request) {
     const accepted = items.filter(item => !["REJECTED", "CONFLICT"].includes(String(item.status))).length;
     return json({ items, accepted }, accepted === items.length ? 202 : 207);
   } catch (error) {
+    if (error instanceof D1CapabilityError) return json(d1CapabilityFailure(error), 503);
     if (error instanceof OperatorRetryInputError) {
       return json({ error: error.message, code: error.code }, error.code === "PAYLOAD_TOO_LARGE" ? 413 : 400);
     }

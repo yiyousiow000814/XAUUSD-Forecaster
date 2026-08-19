@@ -23,6 +23,10 @@ ROUTINE_POOL = "ROUTINE"
 PREEMPTIBLE_POOL = "PREEMPTIBLE"
 URGENT_PRIORITIES = frozenset({"IMMEDIATE", "FAST"})
 PRIORITIES = ("IMMEDIATE", "FAST", "NORMAL", "BACKGROUND")
+LIVE_LANE = "LIVE"
+CONTRACT_BACKFILL_LANE = "CONTRACT_BACKFILL"
+WORK_LANES = (LIVE_LANE, CONTRACT_BACKFILL_LANE)
+CONTRACT_BACKFILL_PAGE_SIZE = 50
 PRIORITY_HEAD_START = timedelta(minutes=1)
 IDLE_CAPACITY_MAX_WAIT = timedelta(minutes=30)
 RETRY_OVERRIDE_MODES = (
@@ -305,6 +309,7 @@ class ScheduledJob:
     annotation_id: str
     prompt_version: str
     priority: str
+    work_lane: str
     state: str
     available_at: datetime
     lease_owner: str | None
@@ -324,6 +329,31 @@ class RetryScheduleConflict(ValueError):
 def install_scheduler_schema(connection: sqlite3.Connection) -> None:
     connection.executescript(SCHEDULER_SCHEMA)
     installed_at = datetime.now(UTC)
+    job_columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(news_ai_jobs_v1)").fetchall()
+    }
+    if "work_lane" not in job_columns:
+        connection.execute(
+            "ALTER TABLE news_ai_jobs_v1 ADD COLUMN work_lane TEXT NOT NULL "
+            "DEFAULT 'LIVE' CHECK(work_lane IN ('LIVE','CONTRACT_BACKFILL'))"
+        )
+    connection.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS news_ai_jobs_lane_claim_v1
+        ON news_ai_jobs_v1(state,available_at,work_lane,priority,task_type,created_at);
+        CREATE TABLE IF NOT EXISTS news_annotation_contract_backfill_v1 (
+          prompt_version TEXT PRIMARY KEY,
+          activated_at TEXT NOT NULL,
+          cursor_first_seen TEXT,
+          cursor_source TEXT,
+          cursor_source_item_id TEXT,
+          cursor_revision_number INTEGER,
+          state TEXT NOT NULL CHECK(state IN ('ACTIVE','COMPLETE')),
+          updated_at TEXT NOT NULL
+        );
+        """
+    )
     provider_task_sql = str(connection.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' "
         "AND name='news_ai_provider_dispatch_task_state_v1'"
@@ -913,6 +943,7 @@ def enqueue_job(
     revision_number: int,
     prompt_version: str,
     priority: str,
+    work_lane: str = LIVE_LANE,
     annotation_id: str = "",
     reopen_completed: bool = False,
     now: datetime | None = None,
@@ -921,6 +952,8 @@ def enqueue_job(
         raise ValueError("scheduler task type is not controlled")
     if priority not in PRIORITIES:
         raise ValueError("scheduler priority is not controlled")
+    if work_lane not in WORK_LANES:
+        raise ValueError("scheduler work lane is not controlled")
     created = now or datetime.now(UTC)
     job_id = _job_id(
         task_type, source, source_item_id, revision_number,
@@ -929,13 +962,21 @@ def enqueue_job(
     timestamp = _iso(created)
     with connection:
         connection.execute(
-            """INSERT OR IGNORE INTO news_ai_jobs_v1 VALUES
-            (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            """INSERT OR IGNORE INTO news_ai_jobs_v1
+            (job_id,task_type,source,source_item_id,revision_number,annotation_id,
+             prompt_version,priority,state,available_at,lease_owner,
+             lease_expires_at,attempt_count,last_error,created_at,updated_at,
+             completed_at,work_lane) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 job_id, task_type, source, source_item_id, revision_number,
                 annotation_id, prompt_version, priority, "QUEUED", timestamp,
-                None, None, 0, None, timestamp, timestamp, None,
+                None, None, 0, None, timestamp, timestamp, None, work_lane,
             ),
+        )
+        connection.execute(
+            """UPDATE news_ai_jobs_v1 SET work_lane=?,priority=?
+               WHERE job_id=? AND state IN ('QUEUED','BACKING_OFF')""",
+            (work_lane, priority, job_id),
         )
         if reopen_completed:
             connection.execute(
@@ -1037,6 +1078,7 @@ def _job_from_row(row: sqlite3.Row) -> ScheduledJob:
         annotation_id=str(row["annotation_id"]),
         prompt_version=str(row["prompt_version"]),
         priority=str(row["priority"]),
+        work_lane=str(row["work_lane"]),
         state=str(row["state"]),
         available_at=datetime.fromisoformat(str(row["available_at"])),
         lease_owner=str(row["lease_owner"]) if row["lease_owner"] else None,
@@ -1295,6 +1337,7 @@ def claim_job(
     pool: str,
     task_types: tuple[str, ...] | None = None,
     excluded_task_types: frozenset[str] = frozenset(),
+    work_lanes: tuple[str, ...] = WORK_LANES,
     now: datetime | None = None,
     lease_seconds: int = 180,
 ) -> ScheduledJob | None:
@@ -1307,6 +1350,9 @@ def claim_job(
         raise ValueError("scheduler task type is not controlled")
     if not excluded_task_types.issubset(TASKS):
         raise ValueError("scheduler task exclusion is not controlled")
+    claimable_lanes = tuple(dict.fromkeys(work_lanes))
+    if not claimable_lanes or any(lane not in WORK_LANES for lane in claimable_lanes):
+        raise ValueError("scheduler work lane is not controlled")
     claimable_tasks = tuple(
         task_type for task_type in claimable_tasks
         if task_type not in excluded_task_types
@@ -1322,6 +1368,7 @@ def claim_job(
         if pool == PREEMPTIBLE_POOL else ""
     )
     task_placeholders = ",".join("?" for _ in claimable_tasks)
+    lane_placeholders = ",".join("?" for _ in claimable_lanes)
     connection.execute("BEGIN IMMEDIATE")
     try:
         connection.execute(
@@ -1335,10 +1382,18 @@ def claim_job(
             f"""SELECT j.* FROM news_ai_jobs_v1 j
                 LEFT JOIN news_ai_retry_schedule_overrides_v1 retry_override
                   ON retry_override.job_id=j.job_id AND retry_override.active=1
-                WHERE j.state IN ('QUEUED','BACKING_OFF')
-                  AND j.task_type IN ({task_placeholders})
-                  AND j.available_at<=? {priority_filter}
-                ORDER BY
+                 WHERE j.state IN ('QUEUED','BACKING_OFF')
+                   AND j.task_type IN ({task_placeholders})
+                   AND j.work_lane IN ({lane_placeholders})
+                   AND j.available_at<=? {priority_filter}
+                 ORDER BY
+                   CASE WHEN retry_override.mode='IDLE_CAPACITY'
+                              AND retry_override.requested_at<=? THEN 0 ELSE 1 END,
+                   CASE j.work_lane WHEN 'LIVE' THEN 0 ELSE 1 END,
+                   CASE WHEN j.task_type='ACTIVE_ANNOTATION'
+                              AND j.work_lane='LIVE'
+                              AND j.priority IN ('IMMEDIATE','FAST')
+                        THEN 0 ELSE 1 END,
                   CASE WHEN retry_override.mode='IDLE_CAPACITY'
                              AND retry_override.requested_at>? THEN 1 ELSE 0 END,
                   CASE WHEN j.created_at<=? THEN 0 ELSE 1 END,
@@ -1350,7 +1405,8 @@ def claim_job(
                   j.created_at,j.job_id
                 LIMIT 1""",
             (
-                *claimable_tasks, timestamp,
+                *claimable_tasks, *claimable_lanes, timestamp,
+                _iso(instant - IDLE_CAPACITY_MAX_WAIT),
                 _iso(instant - IDLE_CAPACITY_MAX_WAIT),
                 aged_before, aged_before,
             ),
@@ -2321,6 +2377,18 @@ def scheduler_counts(connection: sqlite3.Connection) -> dict[str, int]:
     ).fetchone()[0])
     result["obsolete"] = obsolete
     result["dead_letter"] = max(0, result["dead_letter"] - obsolete)
+    lane_rows = connection.execute(
+        """SELECT work_lane,state,count(*) AS total FROM news_ai_jobs_v1
+           WHERE task_type='ACTIVE_ANNOTATION'
+           GROUP BY work_lane,state"""
+    ).fetchall()
+    for lane in WORK_LANES:
+        prefix = "live" if lane == LIVE_LANE else "backfill"
+        for state in ("QUEUED", "LEASED", "BACKING_OFF", "COMPLETED", "DEAD_LETTER"):
+            result[f"active_annotation_{prefix}_{state.lower()}"] = sum(
+                int(row["total"]) for row in lane_rows
+                if str(row["work_lane"]) == lane and str(row["state"]) == state
+            )
     return result
 
 
@@ -2453,6 +2521,200 @@ def authorize_repairable_impact_failures(
     return max(0, inserted)
 
 
+def _contract_backfill_has_current_value(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row | dict[str, object],
+    *,
+    activated_at: datetime,
+    prompt_version: str,
+) -> bool:
+    """Keep migration work only while it can affect current decision behavior."""
+    from .news_time import assess_news_time, category_time_rule
+
+    prior = connection.execute(
+        """SELECT annotation_json FROM news_annotations
+           WHERE source=? AND source_item_id=? AND revision_number=?
+             AND prompt_version<>?
+           ORDER BY parsed_at DESC LIMIT 1""",
+        (
+            row["source"], row["source_item_id"], row["revision_number"],
+            prompt_version,
+        ),
+    ).fetchone()
+    category: str | None = None
+    if prior is not None:
+        try:
+            annotation = json.loads(str(prior[0]))
+        except (TypeError, ValueError):
+            return False
+        if str(annotation.get("xauusd_relevance") or "") == "IRRELEVANT":
+            return False
+        category = str(annotation.get("primary_category") or "") or None
+    forward_epoch = datetime.fromisoformat(str(connection.execute(
+        "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
+    ).fetchone()[0]))
+    actionable_age, _ = category_time_rule(category)
+    try:
+        return assess_news_time(
+            row,
+            decision_time=activated_at,
+            forward_epoch=forward_epoch,
+            max_actionable_age=actionable_age,
+            max_discovery_delay=None,
+        ).eligible
+    except (TypeError, ValueError):
+        return False
+
+
+def _install_annotation_contract_lanes(
+    connection: sqlite3.Connection,
+    *,
+    prompt_version: str,
+    now: datetime,
+) -> datetime:
+    marker = f"annotation-work-lanes:{prompt_version}"
+    state = connection.execute(
+        "SELECT activated_at FROM news_annotation_contract_backfill_v1 "
+        "WHERE prompt_version=?",
+        (prompt_version,),
+    ).fetchone()
+    if state is None:
+        first_job = connection.execute(
+            """SELECT min(created_at) FROM news_ai_jobs_v1
+               WHERE task_type='ACTIVE_ANNOTATION' AND prompt_version=?""",
+            (prompt_version,),
+        ).fetchone()[0]
+        activated_at = datetime.fromisoformat(str(first_job)) if first_job else now
+        timestamp = _iso(now)
+        with connection:
+            connection.execute(
+                """INSERT INTO news_annotation_contract_backfill_v1
+                   (prompt_version,activated_at,state,updated_at)
+                   VALUES (?,?,'ACTIVE',?)""",
+                (prompt_version, _iso(activated_at), timestamp),
+            )
+    else:
+        activated_at = datetime.fromisoformat(str(state[0]))
+
+    migrated = connection.execute(
+        "SELECT 1 FROM news_ai_scheduler_migrations_v1 WHERE migration_id=?",
+        (marker,),
+    ).fetchone()
+    if migrated is not None:
+        return activated_at
+
+    timestamp = _iso(now)
+    with connection:
+        connection.execute(
+            """UPDATE news_ai_jobs_v1 AS j
+               SET work_lane=CASE WHEN EXISTS (
+                     SELECT 1 FROM news_revisions n
+                     WHERE n.source=j.source AND n.source_item_id=j.source_item_id
+                       AND n.revision_number=j.revision_number
+                       AND n.collector_first_seen_time<?)
+                   THEN 'CONTRACT_BACKFILL' ELSE 'LIVE' END,
+                   priority=CASE WHEN EXISTS (
+                     SELECT 1 FROM news_revisions n
+                     WHERE n.source=j.source AND n.source_item_id=j.source_item_id
+                       AND n.revision_number=j.revision_number
+                       AND n.collector_first_seen_time<?)
+                   THEN 'BACKGROUND' ELSE 'FAST' END
+               WHERE j.task_type='ACTIVE_ANNOTATION' AND j.prompt_version=?""",
+            (_iso(activated_at), _iso(activated_at), prompt_version),
+        )
+        candidates = connection.execute(
+            """SELECT j.*,n.source_published_time,n.collector_first_seen_time
+               FROM news_ai_jobs_v1 j JOIN news_revisions n
+                 ON n.source=j.source AND n.source_item_id=j.source_item_id
+                AND n.revision_number=j.revision_number
+               WHERE j.task_type='ACTIVE_ANNOTATION' AND j.prompt_version=?
+                 AND j.work_lane='CONTRACT_BACKFILL'
+                 AND j.state IN ('QUEUED','BACKING_OFF')""",
+            (prompt_version,),
+        ).fetchall()
+        retire = [
+            str(row["job_id"]) for row in candidates
+            if not _contract_backfill_has_current_value(
+                connection, row, activated_at=activated_at,
+                prompt_version=prompt_version,
+            )
+        ]
+        for job_id in retire:
+            connection.execute(
+                """UPDATE news_ai_jobs_v1
+                   SET state='DEAD_LETTER',last_error='CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE',
+                       lease_owner=NULL,lease_expires_at=NULL,updated_at=?,completed_at=?
+                   WHERE job_id=? AND state IN ('QUEUED','BACKING_OFF')""",
+                (timestamp, timestamp, job_id),
+            )
+        connection.execute(
+            "INSERT INTO news_ai_scheduler_migrations_v1 VALUES (?,?)",
+            (marker, timestamp),
+        )
+    return activated_at
+
+
+def _contract_backfill_page(
+    connection: sqlite3.Connection,
+    *,
+    prompt_version: str,
+    activated_at: datetime,
+    now: datetime,
+    pending_annotation_records,
+    page_size: int,
+) -> list[dict[str, object]]:
+    state = connection.execute(
+        "SELECT * FROM news_annotation_contract_backfill_v1 WHERE prompt_version=?",
+        (prompt_version,),
+    ).fetchone()
+    if state is None or str(state["state"]) == "COMPLETE":
+        return []
+    cursor = None
+    if state["cursor_first_seen"]:
+        cursor = (
+            str(state["cursor_first_seen"]), str(state["cursor_source"]),
+            str(state["cursor_source_item_id"]), int(state["cursor_revision_number"]),
+        )
+    if page_size <= 0:
+        return []
+    scanned = pending_annotation_records(
+        connection,
+        observed_at=now,
+        limit=min(CONTRACT_BACKFILL_PAGE_SIZE, page_size),
+        prompt_version=prompt_version,
+        received_before=activated_at,
+        before_cursor=cursor,
+        selection_order="receipt_desc",
+    )
+    selected = [
+        row for row in scanned
+        if _contract_backfill_has_current_value(
+            connection, row, activated_at=activated_at,
+            prompt_version=prompt_version,
+        )
+    ]
+    with connection:
+        if scanned:
+            last = scanned[-1]
+            connection.execute(
+                """UPDATE news_annotation_contract_backfill_v1
+                   SET cursor_first_seen=?,cursor_source=?,cursor_source_item_id=?,
+                       cursor_revision_number=?,updated_at=? WHERE prompt_version=?""",
+                (
+                    last["collector_first_seen_time"], last["source"],
+                    last["source_item_id"], last["revision_number"],
+                    _iso(now), prompt_version,
+                ),
+            )
+        if len(scanned) < min(CONTRACT_BACKFILL_PAGE_SIZE, page_size):
+            connection.execute(
+                """UPDATE news_annotation_contract_backfill_v1
+                   SET state='COMPLETE',updated_at=? WHERE prompt_version=?""",
+                (_iso(now), prompt_version),
+            )
+    return selected
+
+
 def sync_pending_jobs(
     connection: sqlite3.Connection,
     *,
@@ -2485,21 +2747,76 @@ def sync_pending_jobs(
         recovery_version=IMPACT_FAILURE_RECOVERY_VERSION,
         now=instant,
     )
+    activated_at = _install_annotation_contract_lanes(
+        connection, prompt_version=PROMPT_VERSION, now=instant,
+    )
     brief_backlog = brief_dates_to_process(connection, now=instant)[1:]
-    protected_limit = (limit + 1) // 2 if brief_backlog else 0
-    protected_annotations = pending_annotation_records(
-        connection, observed_at=instant, limit=max(1, protected_limit),
+    backfill_capacity = (
+        min(CONTRACT_BACKFILL_PAGE_SIZE, max(1, limit // 2))
+        if limit > 1 else 0
+    )
+    live_capacity = max(1, limit - backfill_capacity)
+    live_annotations = pending_annotation_records(
+        connection,
+        observed_at=instant,
+        limit=live_capacity,
         prompt_version=PROMPT_VERSION,
         priority_receipt_days=tuple(brief_backlog),
-    ) if protected_limit else []
-    general_annotations = pending_annotation_records(
-        connection, observed_at=instant, limit=limit, prompt_version=PROMPT_VERSION,
+        received_from=activated_at,
     )
-    active_annotations_by_revision = {
+    protected_capacity = backfill_capacity if brief_backlog else 0
+    protected_annotations = pending_annotation_records(
+        connection,
+        observed_at=instant,
+        limit=protected_capacity,
+        prompt_version=PROMPT_VERSION,
+        priority_receipt_days=tuple(brief_backlog),
+        received_before=activated_at,
+    ) if protected_capacity else []
+    backfill_annotations = _contract_backfill_page(
+        connection,
+        prompt_version=PROMPT_VERSION,
+        activated_at=activated_at,
+        now=instant,
+        pending_annotation_records=pending_annotation_records,
+        page_size=max(0, backfill_capacity - len(protected_annotations)),
+    )
+    live_by_revision = {
         (str(row["source"]), str(row["source_item_id"]), int(row["revision_number"])): row
-        for row in (*protected_annotations, *general_annotations)
+        for row in live_annotations
     }
-    active_annotations = list(active_annotations_by_revision.values())[:limit]
+    backfill_by_revision = {
+        (str(row["source"]), str(row["source_item_id"]), int(row["revision_number"])): row
+        for row in (*protected_annotations, *backfill_annotations)
+        if (str(row["source"]), str(row["source_item_id"]), int(row["revision_number"]))
+        not in live_by_revision
+    }
+    for row in live_by_revision.values():
+        enqueue_job(
+            connection,
+            task_type="ACTIVE_ANNOTATION",
+            source=str(row["source"]),
+            source_item_id=str(row["source_item_id"]),
+            revision_number=int(row["revision_number"]),
+            prompt_version=PROMPT_VERSION,
+            priority="FAST",
+            work_lane=LIVE_LANE,
+            reopen_completed=True,
+            now=instant,
+        )
+    for row in backfill_by_revision.values():
+        enqueue_job(
+            connection,
+            task_type="ACTIVE_ANNOTATION",
+            source=str(row["source"]),
+            source_item_id=str(row["source_item_id"]),
+            revision_number=int(row["revision_number"]),
+            prompt_version=PROMPT_VERSION,
+            priority="BACKGROUND",
+            work_lane=CONTRACT_BACKFILL_LANE,
+            reopen_completed=True,
+            now=instant,
+        )
     oldest_impact_limit = (limit + 1) // 2
     newest_impact_limit = limit // 2
     oldest_impacts = pending_impact_records(
@@ -2523,11 +2840,12 @@ def sync_pending_jobs(
         connection, observed_at=instant, limit=limit,
     )
     batches = (
-        ("ACTIVE_ANNOTATION", PROMPT_VERSION, active_annotations),
         ("ACTIVE_IMPACT", IMPACT_PROMPT_VERSION, active_impacts),
         ("TITLE_TRANSLATION", TITLE_PROMPT_VERSION, titles),
     )
-    discovered: dict[str, int] = {}
+    discovered: dict[str, int] = {
+        "ACTIVE_ANNOTATION": len(live_by_revision) + len(backfill_by_revision),
+    }
     for task_type, prompt_version, rows in batches:
         discovered[task_type] = len(rows)
         for row in rows:
@@ -2545,7 +2863,6 @@ def sync_pending_jobs(
                     else "BACKGROUND" if task_type == "TITLE_TRANSLATION"
                     else "NORMAL"
                 ),
-                reopen_completed=task_type == "ACTIVE_ANNOTATION",
                 now=instant,
             )
     reconcile_completed_jobs(connection, now=instant)

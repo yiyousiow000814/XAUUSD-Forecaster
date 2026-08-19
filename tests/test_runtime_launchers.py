@@ -1219,3 +1219,32 @@ def test_worker_family_keeps_current_startup_alive_but_bounds_stalled_startup(
         "STARTING,COLLECTOR STALE",
         "STARTING,ANNOTATOR STALE",
     ]
+
+
+def test_api_and_sync_load_operator_bridge_from_user_environment(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    (repo / ".local" / "forward" / "logs").mkdir(parents=True)
+    script = ROOT / "scripts" / "xauusd_control_center.ps1"
+    command = (
+        f"$null = . '{script}' -Action CodeRevision -RuntimeRoot '{repo}' "
+        f"-RepositoryRoot '{repo}'; "
+        "function Get-UserEnvironmentValue { param($Name) return 'bridge-secret-from-user-environment-123456' }; "
+        "$script:captured = @(); "
+        "function Start-Process { param($FilePath,$ArgumentList,$WorkingDirectory,$WindowStyle,"
+        "$RedirectStandardOutput,$RedirectStandardError); "
+        "$script:captured += $env:DASHBOARD_OPERATOR_BRIDGE_TOKEN }; "
+        "$api = [pscustomobject]@{ Key='api'; Kind='Python'; Script='api.py'; Arguments=@() }; "
+        "$sync = [pscustomobject]@{ Key='sync'; Kind='Python'; Script='sync.py'; Arguments=@() }; "
+        "Start-ForecasterService -Service $api -SkipExistingCheck; "
+        "Start-ForecasterService -Service $sync -SkipExistingCheck; "
+        "Write-Output ($script:captured -join ',')"
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    assert result == (
+        "bridge-secret-from-user-environment-123456,"
+        "bridge-secret-from-user-environment-123456"
+    )

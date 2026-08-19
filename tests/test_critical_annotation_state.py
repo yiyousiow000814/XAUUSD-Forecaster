@@ -278,7 +278,11 @@ def test_job_summary_install_is_idempotent_and_never_rebackfills_history(tmp_pat
     ) for index in range(4_000)]
     with connection:
         connection.executemany(
-            "INSERT INTO news_ai_jobs_v1 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            """INSERT INTO news_ai_jobs_v1
+               (job_id,task_type,source,source_item_id,revision_number,annotation_id,
+                prompt_version,priority,state,available_at,lease_owner,
+                lease_expires_at,attempt_count,last_error,created_at,updated_at,
+                completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             rows,
         )
     statements: list[str] = []

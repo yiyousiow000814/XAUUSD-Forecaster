@@ -178,7 +178,7 @@ def _execute_job(
             "api_key": credential.api_key,
             "limit": 1,
             "prompt_version": PROMPT_VERSION,
-            "allow_priority_reserve": False,
+            "allow_priority_reserve": urgent,
             "records": [record],
         }
         status = annotate_pending_news(
