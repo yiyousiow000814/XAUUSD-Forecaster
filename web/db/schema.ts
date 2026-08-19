@@ -38,6 +38,45 @@ export const newsIndex = sqliteTable(
   ],
 );
 
+export const newsEvidenceRecords = sqliteTable(
+  "news_evidence_records",
+  {
+    snapshotId: text("snapshot_id").notNull(),
+    eventKey: text("event_key").notNull(),
+    sortTime: text("sort_time").notNull(),
+    broadModelEligible: integer("broad_model_eligible").notNull(),
+    modelSeen: integer("model_seen").notNull(),
+    payload: text("payload").notNull(),
+    receivedAt: text("received_at").notNull(),
+  },
+  table => [
+    primaryKey({ columns: [table.snapshotId, table.eventKey] }),
+    index("news_evidence_snapshot_time_idx").on(
+      table.snapshotId, table.sortTime, table.eventKey,
+    ),
+    index("news_evidence_snapshot_eligible_idx").on(
+      table.snapshotId, table.broadModelEligible, table.sortTime, table.eventKey,
+    ),
+    index("news_evidence_snapshot_seen_idx").on(
+      table.snapshotId, table.modelSeen, table.sortTime, table.eventKey,
+    ),
+  ],
+);
+
+export const newsEvidenceState = sqliteTable("news_evidence_state", {
+  id: integer("id").primaryKey(),
+  activeSnapshotId: text("active_snapshot_id").notNull(),
+  contractVersion: text("contract_version").notNull(),
+  recordCount: integer("record_count").notNull(),
+  activatedAt: text("activated_at").notNull(),
+});
+
+export const newsEvidenceStaging = sqliteTable("news_evidence_staging", {
+  snapshotId: text("snapshot_id").primaryKey().notNull(),
+  nextOffset: integer("next_offset").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
 export const marketCandles = sqliteTable("market_candles", {
   timeEpoch: integer("time_epoch").primaryKey(),
   time: text("time").notNull(),

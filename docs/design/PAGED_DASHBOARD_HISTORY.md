@@ -58,8 +58,21 @@ The Worker 800 KB check must remain an emergency guard, not the storage model.
    gap from the wider spacing between compressed points.
 10. Graph history uses the shared browser resource cache. Reopening a graph
     shows its last successful result immediately; live data refreshes in the
-   background after 60 seconds, while immutable build-snapshot data is reused
-   for the page lifetime.
+    background after 60 seconds, while immutable build-snapshot data is reused
+    for the page lifetime.
+11. The live heartbeat is an allowlisted critical-state projection. Audit first
+    pages use a separate bounded snapshot, so a new top-level collection cannot
+    enter or enlarge the heartbeat by default. The local API caches that
+    projection beside the full snapshot and exposes it separately; the sync
+    worker does not need to read or parse growing optional state before posting
+    the heartbeat.
+12. Event-level news evidence uses independently staged D1 rows. Local reads and
+    remote writes have row and byte bounds, each sync cycle advances a fixed
+    number of pages, and the remote reader uses a bounded `(sort_time,event_key)`
+    cursor rather than history-sized offsets or count scans. A new snapshot
+    becomes active only after its contiguous staged offset reaches the declared
+    row count, so an interrupted backfill leaves the previous complete snapshot
+    readable. Superseded materializations are reclaimed in fixed-size batches.
 
 ## Measured Current Data
 
@@ -85,6 +98,8 @@ duplicates.
 - All historical learning groups and market decisions remain reachable.
 - Repeating a sync is idempotent and does not duplicate rows.
 - Invalid or partial pages never replace previously verified history.
+- Failure of a history or audit resource does not prevent the current critical
+  heartbeat from advancing, and the failure remains visible under that resource.
 - Desktop, 390x844, and 360x800 Preview flows can open, paginate, return, and
   close without clipped or unreachable controls.
 - Tests prove the new paged generation is active and no obsolete runtime blob

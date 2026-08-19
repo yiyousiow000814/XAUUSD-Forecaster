@@ -1529,6 +1529,44 @@ def test_status_snapshot_cache_singleflights_concurrent_builds(tmp_path) -> None
     assert {state for _body, state, _age in results} == {"fresh"}
 
 
+def test_critical_status_route_uses_the_independent_bounded_builder(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _dashboard_module()
+    module.Handler.database = tmp_path / "unused.sqlite3"
+    module.Handler.status_cache = module.StatusSnapshotCache()
+    module.Handler.critical_status_cache = module.StatusSnapshotCache()
+    calls = []
+
+    def builder(_database, *, include_optional=True):
+        calls.append(include_optional)
+        if include_optional:
+            raise AssertionError("critical status must not build optional history")
+        return {
+            "generated_at": "2026-08-19T00:00:00+00:00",
+            "system": {"online": True},
+            "future_accumulated_records": [{"body": "x" * 20_000}],
+        }
+
+    monkeypatch.setattr(module, "_dashboard_payload", builder)
+    server = module.ThreadingHTTPServer(("127.0.0.1", 0), module.Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{server.server_port}/api/critical-status",
+            timeout=2,
+        ) as response:
+            payload = json.loads(response.read())
+        assert calls == [False]
+        assert payload["system"] == {"online": True}
+        assert "future_accumulated_records" not in payload
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_status_snapshot_cache_serves_bounded_stale_during_slow_refresh(
     tmp_path,
 ) -> None:
@@ -2906,3 +2944,39 @@ def test_learning_surfaces_rebuild_only_when_source_counts_change(monkeypatch) -
     assert third != second
     assert calls == {"learning": 2, "execution": 2}
     connection.close()
+
+
+def test_news_evidence_pages_are_byte_bounded_and_complete_at_large_scale() -> None:
+    module = _dashboard_module()
+    rows = [{
+        "event_key": f"{index:064x}",
+        "collector_first_seen_time": f"2026-08-{(index % 28) + 1:02d}T00:00:00+00:00",
+        "source_published_time": None,
+        "broad_model_eligible": index % 2 == 0,
+        "model_seen": index % 3 == 0,
+        "canonical_headline": f"event {index}",
+        "reason_codes": ["TEST_EVIDENCE"],
+        "detail": "x" * 3_000,
+    } for index in range(1_000)]
+    module._publish_news_evidence_snapshot(rows)
+
+    cursor = None
+    received = []
+    snapshot_id = None
+    while True:
+        page = module._news_evidence_page(cursor, 50)
+        snapshot_id = snapshot_id or page["snapshot_id"]
+        assert page["snapshot_id"] == snapshot_id
+        encoded = json.dumps(
+            page, ensure_ascii=False, separators=(",", ":"),
+        ).encode("utf-8")
+        assert len(encoded) <= module.NEWS_EVIDENCE_PAGE_LIMIT_BYTES
+        received.extend(page["items"])
+        if not page["has_more"]:
+            break
+        assert page["next_cursor"] != cursor
+        cursor = page["next_cursor"]
+
+    assert received == rows
+    assert len(received) == 1_000
+    assert len({row["event_key"] for row in received}) == len(rows)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import math
 import sqlite3
@@ -22,6 +23,8 @@ from pathlib import Path
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODULE_ROOT))
+from xauusd_forecaster.dashboard_payloads import critical_status_payload
+
 DEFAULT_DATABASE = MODULE_ROOT / ".local" / "forward" / "forward-evidence.sqlite3"
 UTC = timezone.utc
 PAYLOAD_SCHEMA_VERSION = "xauusd-dashboard-v4-event-episode"
@@ -30,6 +33,8 @@ MARKET_OVERVIEW_CANDLE_LIMIT = 480
 MARKET_HISTORY_PAGE_LIMIT = 500
 NEWS_READER_WINDOW_DAYS = 60
 NEWS_ARCHIVE_PAGE_LIMIT = 20
+NEWS_EVIDENCE_PAGE_LIMIT = 50
+NEWS_EVIDENCE_PAGE_LIMIT_BYTES = 350_000
 STATUS_SNAPSHOT_TTL_SECONDS = 15.0
 STATUS_SNAPSHOT_WAIT_SECONDS = 5.0
 STATUS_SNAPSHOT_MAX_STALE_SECONDS = 90.0
@@ -44,6 +49,8 @@ DECISION_OUTPUT_GRACE_SECONDS = (
 DECISION_HORIZON = timedelta(minutes=30)
 _QUOTE_CANDLE_CACHE_LOCK = threading.Lock()
 _QUOTE_CANDLE_CACHE: dict[str, dict] = {}
+_NEWS_EVIDENCE_CACHE_LOCK = threading.Lock()
+_NEWS_EVIDENCE_CACHE: dict[str, object] = {}
 
 
 def _semantic_pipeline_component(latest, *, now: datetime) -> dict:
@@ -313,7 +320,6 @@ from xauusd_forecaster.ai_provider_registry import (  # noqa: E402
     GEMINI_EMBEDDING_REQUESTS_PER_DAY_PER_ACCOUNT,
 )
 from xauusd_forecaster.model_limits import GEMMA_PROVIDER_LANES_PER_ACCOUNT  # noqa: E402
-from xauusd_forecaster.training import MARKET_FEATURES  # noqa: E402
 from xauusd_forecaster.learning_curves import learning_curve_payload  # noqa: E402
 from xauusd_forecaster.execution_costs import net_shadow_log_return  # noqa: E402
 from xauusd_forecaster.news_evidence import (  # noqa: E402
@@ -470,8 +476,9 @@ class StatusSnapshotCache:
 
     def _refresh(self, database: Path, builder) -> tuple[bytes, str, float]:
         try:
+            payload = builder(database)
             body = json.dumps(
-                builder(database), allow_nan=False, separators=(",", ":"),
+                payload, allow_nan=False, separators=(",", ":"),
             ).encode()
         except Exception as error:
             with self._condition:
@@ -552,7 +559,6 @@ class StatusSnapshotCache:
             raise StatusSnapshotUnavailable(
                 "dashboard snapshot refresh completed without a result"
             )
-
 
 def _learning_revision(connection: sqlite3.Connection) -> tuple[object, ...]:
     database_row = connection.execute("PRAGMA database_list").fetchone()
@@ -1885,6 +1891,62 @@ def _news_evidence_display_rows(
     return rows
 
 
+def _publish_news_evidence_snapshot(rows: list[dict]) -> None:
+    encoded = json.dumps(
+        rows, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    snapshot_id = hashlib.sha256(encoded).hexdigest()
+    with _NEWS_EVIDENCE_CACHE_LOCK:
+        _NEWS_EVIDENCE_CACHE.clear()
+        _NEWS_EVIDENCE_CACHE.update({
+            "snapshot_id": snapshot_id,
+            "items": tuple(rows),
+        })
+
+
+def _news_evidence_page(cursor: str | None, limit: int) -> dict:
+    with _NEWS_EVIDENCE_CACHE_LOCK:
+        snapshot_id = str(_NEWS_EVIDENCE_CACHE.get("snapshot_id") or "")
+        items = tuple(_NEWS_EVIDENCE_CACHE.get("items") or ())
+    if not snapshot_id:
+        raise StatusSnapshotUnavailable("news evidence snapshot is not ready")
+    offset = 0
+    if cursor:
+        cursor_snapshot, separator, raw_offset = cursor.partition(":")
+        if separator != ":" or cursor_snapshot != snapshot_id:
+            raise ValueError("news evidence cursor is stale")
+        offset = int(raw_offset)
+        if offset < 0 or offset > len(items):
+            raise ValueError("news evidence cursor offset is invalid")
+    page_items: list[dict] = []
+    for row in items[offset:offset + limit]:
+        candidate = [*page_items, row]
+        candidate_payload = {
+            "snapshot_id": snapshot_id,
+            "items": candidate,
+            "total": len(items),
+        }
+        encoded = json.dumps(
+            candidate_payload, ensure_ascii=False, allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if page_items and len(encoded) > NEWS_EVIDENCE_PAGE_LIMIT_BYTES:
+            break
+        if len(encoded) > NEWS_EVIDENCE_PAGE_LIMIT_BYTES:
+            raise ValueError("one news evidence row exceeds the page byte limit")
+        page_items = candidate
+    next_offset = offset + len(page_items)
+    has_more = next_offset < len(items)
+    return {
+        "snapshot_id": snapshot_id,
+        "items": page_items,
+        "total": len(items),
+        "has_more": has_more,
+        "next_cursor": f"{snapshot_id}:{next_offset}" if has_more else None,
+    }
+
+
 def _news_metrics(
     *,
     counts: dict[str, int],
@@ -1938,7 +2000,9 @@ def _news_metrics(
     }
 
 
-def _dashboard_payload(database: Path, *, clock=None) -> dict:
+def _dashboard_payload(
+    database: Path, *, clock=None, include_optional: bool = True,
+) -> dict:
     clock = clock or (lambda: datetime.now(UTC))
     now = clock()
     credentials = configured_api_credentials()
@@ -2023,7 +2087,7 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
                JOIN market_snapshots s USING(snapshot_id)
                LEFT JOIN outcomes o USING(decision_id)
                ORDER BY d.decision_time DESC LIMIT 30"""
-        ).fetchall()
+        ).fetchall() if include_optional else []
         counts = {
             name: connection.execute(f"SELECT count(*) FROM {name}").fetchone()[0]
             for name in (
@@ -2241,7 +2305,7 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
                 HANDOVER_IMPACT_PROMPT_VERSION, IMPACT_PROMPT_VERSION,
                 PROMPT_VERSION,
             ),
-        ).fetchall()
+        ).fetchall() if include_optional else []
         annotation_queue = connection.execute(
             f"""SELECT
                  sum(CASE WHEN length(trim(COALESCE(n.body, ''))) >= 240
@@ -2367,32 +2431,28 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
         collected_news_sources = {
             row[0] for row in connection.execute("SELECT DISTINCT source FROM news_revisions")
         }
-        complete_candidates = connection.execute(
-            """SELECT s.features_json, s.u5
-               FROM training_eligibility e
-               JOIN decision_events d USING(decision_id)
-               JOIN market_snapshots s USING(snapshot_id)
-               WHERE e.eligible_at <= ? AND d.decision_time >= ?""",
-            (now.isoformat(), epoch),
-        ).fetchall()
-        complete_rows = 0
-        for candidate in complete_candidates:
-            features = json.loads(candidate["features_json"])
-            values = [features.get(name) for name in MARKET_FEATURES]
-            if candidate["u5"] is None or any(value is None for value in values):
-                continue
-            numeric = [float(value) for value in values]
-            if all(math.isfinite(value) for value in numeric) and math.isfinite(
-                float(candidate["u5"])
-            ):
-                complete_rows += 1
-        learning, execution_learning = _learning_surfaces(connection)
-        counts["live_oos_model_groups"] = len({
-            str(row.get("model_identity") or "")
-            for row in learning.get("models", [])
-            if row.get("active_rank") is not None and row.get("model_identity")
-        })
-        market_chart = _recent_market_chart(database, connection, now)
+        if include_optional:
+            learning, execution_learning = _learning_surfaces(connection)
+            counts["live_oos_model_groups"] = len({
+                str(row.get("model_identity") or "")
+                for row in learning.get("models", [])
+                if row.get("active_rank") is not None and row.get("model_identity")
+            })
+        else:
+            complete = int(counts["training_eligibility_v2"])
+            learning = {
+                "models": [],
+                "next_training_threshold": (
+                    96 if complete < 96 else 200 if complete < 200
+                    else ((complete // 50) + 1) * 50
+                ),
+                "news_contract_transition": {},
+            }
+            execution_learning = {}
+        market_chart = (
+            _recent_market_chart(database, connection, now)
+            if include_optional else {}
+        )
         latest_news_poll = connection.execute(
             "SELECT max(fetched_time) FROM source_polls"
         ).fetchone()[0]
@@ -2414,18 +2474,33 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
         monitored_news_sources = {
             row["source"] for row in news_source_health if row["health"] == "HEALTHY"
         }
-        all_news_evidence = event_evidence_rows_from_connection(connection, now)
-        event_graph = temporal_event_graph(all_news_evidence)
-        storylines = event_graph["stories"]
-        evidence_grades = Counter(
-            row["evidence_grade"] for row in all_news_evidence
-        )
-        evidence_topics = Counter(
-            topic for row in all_news_evidence for topic in row["topics"]
-        )
-        auditable_news_events = _news_evidence_display_rows(
-            connection, all_news_evidence
-        )
+        if include_optional:
+            all_news_evidence = event_evidence_rows_from_connection(connection, now)
+            event_graph = temporal_event_graph(all_news_evidence)
+            storylines = event_graph["stories"]
+            evidence_grades = Counter(
+                row["evidence_grade"] for row in all_news_evidence
+            )
+            evidence_topics = Counter(
+                topic for row in all_news_evidence for topic in row["topics"]
+            )
+            auditable_news_events = _news_evidence_display_rows(
+                connection, all_news_evidence
+            )
+            _publish_news_evidence_snapshot(auditable_news_events)
+        else:
+            all_news_evidence = []
+            event_graph = {
+                "stories": [], "market_narrative_candidates": [],
+                "archived_storylines": [], "archived_event_candidates": [],
+                "event_candidates": [], "market_reaction_streams": [],
+                "theme_streams": [], "unassigned_events": [],
+                "legacy_policy_status": "OPTIONAL_RESOURCE",
+            }
+            storylines = []
+            evidence_grades = Counter()
+            evidence_topics = Counter()
+            auditable_news_events = []
         news_evidence = bounded_evidence_window(auditable_news_events, 60)
         raw_article_revisions = connection.execute(
             "SELECT count(*) FROM news_revisions"
@@ -2436,7 +2511,9 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
         decision_event_exposures = connection.execute(
             "SELECT count(*) FROM news_decision_event_snapshots_v1"
         ).fetchone()[0]
-        daily_news_briefs = recent_daily_briefs(connection)
+        daily_news_briefs = (
+            recent_daily_briefs(connection) if include_optional else []
+        )
         daily_news_brief_summary = daily_brief_summary(connection, now=now)
         scheduler_ledger_available = connection.execute(
             """SELECT 1 FROM sqlite_master
@@ -2634,29 +2711,20 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
     news = _serialize_news_rows(
         news_rows[:200], now, epoch, claimable_annotation_keys,
     )
-    counts["latest_news_items"] = len(news)
-    counts["readable_news_items"] = len(news)
-    counts["parsed_news_items"] = sum(
-        1 for item in news if item.get("parsed_at")
-    )
-    counts["model_candidate_news_items"] = sum(
-        1 for item in news if item.get("model_visibility") == "MODEL_VISIBLE"
-    )
+    if include_optional:
+        counts["latest_news_items"] = len(news)
+        counts["readable_news_items"] = len(news)
+        counts["parsed_news_items"] = sum(
+            1 for item in news if item.get("parsed_at")
+        )
+        counts["model_candidate_news_items"] = sum(
+            1 for item in news if item.get("model_visibility") == "MODEL_VISIBLE"
+        )
     models = []
     for row in model_rows:
         item = dict(row)
         item["hyperparameters"] = json.loads(item.pop("hyperparameters_json"))
         models.append(item)
-    latest_market = next(
-        (item for item in models if item["model_identity"] == "CHALLENGER_A"),
-        None,
-    )
-    trained_rows = (
-        int(latest_market["hyperparameters"].get("complete_rows", 0))
-        if latest_market else 0
-    )
-    next_training_at = 200 if trained_rows == 0 else trained_rows + 50
-
     if latest_data:
         latest_data["features"] = json.loads(latest_data.pop("features_json"))
         latest_data["reason_codes"] = json.loads(latest_data.pop("reason_codes_json"))
@@ -2806,18 +2874,32 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
         "counts": counts,
         "outcome_summary": dict(valid),
         "recent_decisions": [serialize_row(row) for row in recent],
-        "recent_news": news,
+        "recent_news": news if include_optional else [],
         "daily_news_briefs": daily_news_briefs,
         "daily_news_brief_summary": daily_news_brief_summary,
-        "news_evidence": news_evidence,
-        "storylines": storylines[:20],
-        "market_narrative_candidates": event_graph["market_narrative_candidates"][:20],
-        "archived_storylines": event_graph["archived_storylines"][:20],
-        "archived_story_event_candidates": event_graph["archived_event_candidates"][:50],
-        "story_event_candidates": event_graph["event_candidates"][:50],
-        "market_reaction_streams": event_graph["market_reaction_streams"],
-        "theme_streams": event_graph["theme_streams"],
-        "unassigned_story_events": event_graph["unassigned_events"][:50],
+        "news_evidence": news_evidence if include_optional else [],
+        "storylines": storylines[:20] if include_optional else [],
+        "market_narrative_candidates": (
+            event_graph["market_narrative_candidates"][:20]
+            if include_optional else []
+        ),
+        "archived_storylines": (
+            event_graph["archived_storylines"][:20] if include_optional else []
+        ),
+        "archived_story_event_candidates": (
+            event_graph["archived_event_candidates"][:50]
+            if include_optional else []
+        ),
+        "story_event_candidates": (
+            event_graph["event_candidates"][:50] if include_optional else []
+        ),
+        "market_reaction_streams": (
+            event_graph["market_reaction_streams"] if include_optional else []
+        ),
+        "theme_streams": event_graph["theme_streams"] if include_optional else [],
+        "unassigned_story_events": (
+            event_graph["unassigned_events"][:50] if include_optional else []
+        ),
         "storyline_summary": {
             "policy_version": STORYLINE_POLICY_VERSION,
             "legacy_policy_status": event_graph["legacy_policy_status"],
@@ -2975,6 +3057,7 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
 class Handler(BaseHTTPRequestHandler):
     database: Path
     status_cache = StatusSnapshotCache()
+    critical_status_cache = StatusSnapshotCache()
 
     def _write_json(self, status: int, body: bytes, **headers: str) -> None:
         self.send_response(status)
@@ -3045,13 +3128,43 @@ class Handler(BaseHTTPRequestHandler):
                 status = 400
             self._write_json(status, body)
             return
-        if path != "/api/status":
+        if path == "/api/news-evidence":
+            query = urllib.parse.parse_qs(parsed.query)
+            cursor = (query.get("cursor") or [None])[0]
+            try:
+                limit = min(
+                    NEWS_EVIDENCE_PAGE_LIMIT,
+                    max(1, int((query.get("limit") or [NEWS_EVIDENCE_PAGE_LIMIT])[0])),
+                )
+                payload = _news_evidence_page(cursor, limit)
+                body = json.dumps(
+                    payload, ensure_ascii=False, allow_nan=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                status = 200
+            except StatusSnapshotUnavailable as error:
+                body = json.dumps({"error": str(error)[:500]}).encode()
+                status = 503
+            except (TypeError, ValueError) as error:
+                body = json.dumps({"error": str(error)[:500]}).encode()
+                status = 409
+            self._write_json(status, body)
+            return
+        if path not in {"/api/status", "/api/critical-status"}:
             self.send_error(404)
             return
         try:
-            body, snapshot_state, snapshot_age = self.status_cache.get(
-                self.database, _dashboard_payload,
-            )
+            if path == "/api/critical-status":
+                body, snapshot_state, snapshot_age = self.critical_status_cache.get(
+                    self.database,
+                    lambda database: critical_status_payload(
+                        _dashboard_payload(database, include_optional=False)
+                    ),
+                )
+            else:
+                body, snapshot_state, snapshot_age = self.status_cache.get(
+                    self.database, _dashboard_payload,
+                )
             status = 200
         except StatusSnapshotUnavailable as error:
             body = json.dumps({"error": str(error)[:500]}).encode()

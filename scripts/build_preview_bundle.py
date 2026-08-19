@@ -349,6 +349,8 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
 
     status["factor_coverage"] = _rebuild_factor_coverage(status)
     _backfill_annotation_reasons(news_index, status)
+    audit = json.loads(dashboard_sync.audit_snapshot(status))
+    status = json.loads(dashboard_sync.remote_snapshot(status))
     status["preview"] = {
         "is_preview": True,
         "branch": branch,
@@ -414,6 +416,7 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
 
     return {
         "status": status,
+        "audit": audit,
         "learning": learning,
         # Production's public learning payload is already compressed. Wider
         # spacing there is not proof of a source-data gap, so Preview must not

@@ -734,7 +734,7 @@ def test_ingest_response_records_valid_main_revision(tmp_path, monkeypatch) -> N
     assert json.loads(signal.read_text(encoding="utf-8"))["main_revision"] == revision
 
 
-def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
+def test_critical_status_excludes_growing_resources_and_keeps_references() -> None:
     module = _sync_module()
     body = "完整正文" * 2_000
     payload = {
@@ -780,12 +780,14 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
 
     encoded = module.remote_snapshot(payload)
     mirrored = json.loads(encoded)
+    audit = json.loads(module.audit_snapshot(payload))
     index_rows, detail_rows = module.news_mirror_parts(payload)
     learning = json.loads(module.learning_snapshot(payload))
 
     assert len(encoded) <= module.REMOTE_PAYLOAD_LIMIT_BYTES
-    assert mirrored["recent_news"] == []
     assert mirrored["news_index_resource"] == "/api/news-index"
+    assert mirrored["news_evidence_resource"] == "/api/news-evidence"
+    assert mirrored["audit_resource"] == "/api/audit"
     assert mirrored["learning_resource"] == "/api/learning"
     assert detail_rows[0]["payload"]["summary_zh"] == body
     assert index_rows[0]["content_fetch_status"] == "UNAVAILABLE"
@@ -796,18 +798,14 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
     assert "annotation_reason" not in detail_rows[0]["payload"]
     assert len(detail_rows[0]["detail_key"]) == 64
     assert mirrored["market_chart"]["decisions"] == []
-    assert mirrored["market_chart"]["candles"] == []
-    assert mirrored["market_chart"]["overview_candles"] == []
-    assert mirrored["market_chart"]["training_markers"] == []
+    assert "news_evidence" not in mirrored
+    assert "recent_news" not in mirrored
+    assert "recent_decisions" not in mirrored
     market_decision = json.loads(module.market_chart_snapshot(payload))["decisions"][0]
     assert market_decision["source_decision_id"] == "d1"
     assert market_decision["model_version"] == "unused-field"
-    assert len(mirrored["recent_decisions"]) == module.REMOTE_DECISION_LIMIT
-    assert len(mirrored["news_evidence"]) == 2 * module.REMOTE_EVIDENCE_LIMIT_PER_STATE
-    assert sum(row["model_seen"] for row in mirrored["news_evidence"]) == 60
-    assert sum(not row["model_seen"] for row in mirrored["news_evidence"]) == 60
-    assert mirrored["mirror_window"]["news_evidence_seen"] == 60
-    assert mirrored["mirror_window"]["news_evidence_unseen"] == 60
+    assert len(audit["recent_decisions"]) == module.REMOTE_DECISION_LIMIT
+    assert audit["news_evidence_resource"] == "/api/news-evidence"
     assert learning["learning_curves"]["models"] == [
         {"lifecycle_status": "LATEST", "model_version": "latest"},
     ]
@@ -819,6 +817,32 @@ def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
     assert "learning_curves" not in mirrored
     assert "models" not in mirrored["training"]
     assert len(index_rows) == 100
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "news_evidence", "daily_news_briefs", "storylines",
+        "future_accumulated_records", "future_user_history",
+    ),
+)
+def test_critical_status_size_is_independent_of_unknown_growing_state(field) -> None:
+    module = _sync_module()
+    base = {
+        "generated_at": "2026-08-19T10:00:00+00:00",
+        "system": {"online": True, "components": {}},
+        "counts": {"decision_events": 10},
+    }
+    baseline = module.remote_snapshot(base)
+    grown = {
+        **base,
+        field: [{"id": index, "body": "x" * 2_000} for index in range(10_000)],
+    }
+
+    encoded = module.remote_snapshot(grown)
+
+    assert encoded == baseline
+    assert len(encoded) < module.REMOTE_PAYLOAD_LIMIT_BYTES // 4
 
 
 def test_news_detail_batches_stay_bounded() -> None:
@@ -1141,9 +1165,215 @@ def test_news_detail_failure_never_publishes_dangling_index(monkeypatch, tmp_pat
     assert posted == ["https://remote/api/news-content"]
 
 
+def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _sync_module()
+    snapshot_id = "a" * 64
+    rows = [{
+        "event_key": f"{index:064x}",
+        "collector_first_seen_time": f"2026-08-19T10:{index % 60:02d}:00+00:00",
+        "source_published_time": None,
+        "broad_model_eligible": index % 2 == 0,
+        "model_seen": index % 3 == 0,
+        "body": "evidence" * 200,
+    } for index in range(105)]
+
+    class Response:
+        status = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload, ensure_ascii=False).encode("utf-8")
+
+    def urlopen(url, *_args, **_kwargs):
+        query = __import__("urllib.parse").parse.urlsplit(str(url)).query
+        values = __import__("urllib.parse").parse.parse_qs(query)
+        cursor = (values.get("cursor") or [None])[0]
+        offset = int(cursor.split(":", 1)[1]) if cursor else 0
+        page = rows[offset:offset + module.NEWS_EVIDENCE_WRITE_BATCH_ITEMS]
+        next_offset = offset + len(page)
+        return Response({
+            "snapshot_id": snapshot_id,
+            "items": page,
+            "total": len(rows),
+            "has_more": next_offset < len(rows),
+            "next_cursor": (
+                f"{snapshot_id}:{next_offset}" if next_offset < len(rows) else None
+            ),
+        })
+
+    posted = []
+    monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(
+        module, "_post_json",
+        lambda url, body, _config: posted.append((url, json.loads(body))),
+    )
+    config = {
+        "local_status_url": "http://local/api/status",
+        "remote_ingest_url": "https://remote/api/ingest",
+        "token": "test",
+        "news_evidence_state_file": str(tmp_path / "evidence-state.json"),
+    }
+
+    module._sync_news_evidence({}, config)
+    first_cycle_posts = len(posted)
+    assert not any("activate_snapshot" in body for _url, body in posted)
+    assert first_cycle_posts == module.NEWS_EVIDENCE_PAGES_PER_CYCLE
+    module._sync_news_evidence({}, config)
+
+    batches = [body for _url, body in posted if "items" in body]
+    activation = next(body for _url, body in posted if "activate_snapshot" in body)
+    assert sum(len(body["items"]) for body in batches) == len(rows)
+    assert [item["event_key"] for body in batches for item in body["items"]] == [
+        row["event_key"] for row in rows
+    ]
+    assert [body["offset"] for body in batches] == list(
+        range(0, len(rows), module.NEWS_EVIDENCE_WRITE_BATCH_ITEMS)
+    )
+    assert all(
+        len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode())
+        <= module.NEWS_INDEX_BATCH_LIMIT_BYTES
+        for body in batches
+    )
+    assert activation == {
+        "contract_version": module.NEWS_EVIDENCE_CONTRACT_VERSION,
+        "activate_snapshot": snapshot_id,
+        "expected_count": len(rows),
+    }
+    state = json.loads((tmp_path / "evidence-state.json").read_text(encoding="utf-8"))
+    assert state["active_snapshot_id"] == snapshot_id
+    assert posted[-1][1]["cleanup_active_snapshot"] == snapshot_id
+
+    posted.clear()
+    module._sync_news_evidence({}, config)
+    assert posted == [(
+        "https://remote/api/news-evidence",
+        {
+            "contract_version": module.NEWS_EVIDENCE_CONTRACT_VERSION,
+            "cleanup_active_snapshot": snapshot_id,
+        },
+    )]
+
+
+def test_optional_growing_resource_failure_does_not_block_heartbeat(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _sync_module()
+    local_payload = {
+        "generated_at": "2026-08-19T10:00:00+00:00",
+        "system": {"online": True, "components": {}},
+        "future_history": [{"body": "x" * 20_000} for _ in range(100)],
+    }
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(local_payload).encode("utf-8")
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k: Response())
+    target = {
+        "name": "cloudflare", "remote_ingest_url": "https://remote/api/ingest",
+        "token": "test", "legacy": False,
+    }
+    monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
+    posted = []
+    monkeypatch.setattr(
+        module, "_post_json", lambda url, body, _config: posted.append((url, body)),
+    )
+    for name in (
+        "_sync_audit", "_sync_learning", "_sync_market", "_sync_market_history",
+        "_sync_news", "_sync_news_questions",
+    ):
+        monkeypatch.setattr(module, name, lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        module, "_sync_news_evidence",
+        lambda *_a, **_k: (_ for _ in ()).throw(TimeoutError("evidence unavailable")),
+    )
+
+    result = module.sync_once({"local_status_url": "http://local/api/status"})
+
+    assert posted[0][0] == "https://remote/api/ingest"
+    assert json.loads(posted[0][1])["generated_at"] == local_payload["generated_at"]
+    assert len(result) == 1
+    assert result[0]["resource"] == "news_evidence"
+    assert result[0]["error_type"] == "TimeoutError"
+    heartbeat = next(
+        row for row in result.resource_observations if row["resource"] == "heartbeat"
+    )
+    evidence = next(
+        row for row in result.resource_observations if row["resource"] == "news_evidence"
+    )
+    assert heartbeat["status"] == "OK"
+    assert evidence["status"] == "ERROR"
+
+
+def test_growing_local_snapshot_failure_cannot_block_critical_heartbeat(
+    monkeypatch,
+) -> None:
+    module = _sync_module()
+    critical = {
+        "generated_at": "2026-08-19T10:00:00+00:00",
+        "system": {"online": True},
+    }
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(critical).encode("utf-8")
+
+    def urlopen(url, *_args, **_kwargs):
+        if str(url).endswith("/api/critical-status"):
+            return Response()
+        raise TimeoutError("full optional snapshot timed out")
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
+    target = {
+        "name": "cloudflare", "remote_ingest_url": "https://remote/api/ingest",
+        "token": "test", "legacy": False,
+    }
+    monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
+    posted = []
+    monkeypatch.setattr(
+        module, "_post_json", lambda url, body, _config: posted.append((url, body)),
+    )
+
+    result = module.sync_once({"local_status_url": "http://local/api/status"})
+
+    assert len(posted) == 1
+    assert posted[0][0] == "https://remote/api/ingest"
+    assert json.loads(posted[0][1])["system"]["online"] is True
+    assert len(result) == 1
+    assert result[0]["resource"] == "optional_snapshot"
+    assert next(
+        row for row in result.resource_observations if row["resource"] == "heartbeat"
+    )["status"] == "OK"
+
+
 def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> None:
     module = _sync_module()
     monkeypatch.setattr(module, "_verify_news_mirror_state", lambda *_a, **_k: None)
+    monkeypatch.setattr(module, "_sync_news_evidence", lambda *_a, **_k: None)
     payload = {
         "generated_at": "2026-08-07T00:00:00+00:00",
         "learning_curves": {"learning_stage": "EARLY"},
@@ -1205,8 +1435,8 @@ def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> 
     first_cycle = module.sync_once(config)
     assert first_cycle == []
     assert {row["resource"] for row in first_cycle.resource_observations} == {
-        "heartbeat", "learning", "market_chart", "market_history", "news",
-        "news_questions",
+        "heartbeat", "audit", "learning", "market_chart", "market_history", "news",
+        "news_evidence", "news_questions",
     }
     assert all(row["status"] == "OK" for row in first_cycle.resource_observations)
     assert all(row["duration_ms"] >= 0 for row in first_cycle.resource_observations)
@@ -1541,7 +1771,7 @@ def test_remote_market_chart_is_split_from_status_and_keeps_recent_window() -> N
     }
     mirrored = json.loads(module.remote_snapshot(payload))
     assert mirrored["market_chart"]["decisions"] == []
-    assert mirrored["market_chart"]["decision_resource"] == "/api/market-chart"
+    assert mirrored["market_chart_resource"] == "/api/market-chart"
 
     market = json.loads(module.market_chart_snapshot(payload))
     retained = market["decisions"]

@@ -152,6 +152,11 @@ promoted to `OPS_NEWS_MIRROR_STATE_DIVERGED`. Every other optional mirror
 resource failure retains its own upstream code under
 `OPS_SYNC_RESOURCE_FAILED`; it must not collapse into an uncoded component
 warning.
+The critical heartbeat is published before independently synchronized optional
+resources. A failed optional resource degrades that named resource and is
+reported on the next bounded heartbeat; it does not freeze the heartbeat,
+deployment provenance, or unrelated component health. A partially written
+paged generation cannot replace the last complete active generation.
 
 Runtime rollout observation is also a state machine, not a binary HTTP probe.
 A candidate preflight validates generation completeness and every production

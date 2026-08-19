@@ -8,6 +8,14 @@
 4. Identify obsolete code.
 5. Add or update tests.
 
+Before changing a cross-boundary data flow, follow
+`docs/contracts/HOSTING_BOUNDARIES.md`: identify the authoritative owner,
+classify the path as critical or optional, classify accumulated growth, keep
+critical work and transport bounded independently, and isolate optional failure
+domains. Distinguish display limits from serialized transport bounds. Prefer
+repairing ownership or transport architecture over raising limits or deleting
+authoritative data.
+
 ## Problem Resolution Standard
 
 - Treat fail-closed behavior, error visibility, and audit evidence as safety

@@ -130,6 +130,16 @@ type NewsEvidence = {
   model_versions: string[];
   model_unseen_reason_codes?: string[] | null;
 };
+type NewsEvidenceResponse = {
+  items: NewsEvidence[];
+  page: number;
+  page_size: number;
+  mode: "all" | "eligible" | "seen" | "unseen";
+  has_more?: boolean;
+  next_cursor?: string | null;
+  snapshot_id?: string;
+  source_mode?: string;
+};
 type StoryEvent = { event_key: string; first_seen: string; headline: string;
   event_time: string; actor: string; action: string; object: string; location: string;
   claim_status: string; materiality: number; evidence_grade: string;
@@ -278,7 +288,9 @@ type Payload = {
   recent_news?: News[];
   daily_news_briefs?: DailyNewsBrief[];
   daily_news_brief_summary?: DailyNewsBriefSummary;
-  news_evidence: NewsEvidence[];
+  news_evidence?: NewsEvidence[];
+  audit_resource?: string;
+  news_evidence_resource?: string;
   news_evidence_summary: {
     policy_version: string;
     raw_article_revisions: number;
@@ -481,6 +493,7 @@ const outcomeReason = (codes: string[]) => codes.some(code => code.includes("CLO
       : "报价证据不完整，样本已隔离且不进入训练";
 const impulse = (value?: number | null) => value === null || value === undefined ? "—" : `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
 const NEWS_PER_PAGE = PREVIEW_NEWS_PAGE_SIZE;
+const EVIDENCE_PER_PAGE = 20;
 const NEWS_REVIEW_PRESENTATION: Record<NewsReviewState, {
   label: string; description: string;
 }> = {
@@ -817,10 +830,11 @@ export default function AuditView() {
     ? requestedView
     : "news";
   const cachedStatus = readDashboardResource<Payload>("/api/status");
+  const cachedAudit = readDashboardResource<Partial<Payload>>("/api/audit");
   const cachedLearning = readDashboardResource<Partial<Payload>>("/api/learning");
   const cachedNewsIndex = readDashboardResource<NewsIndexResponse>(`/api/news-index?page=1&limit=${NEWS_PER_PAGE}&review_state=COMPLETED`);
   const [payload, setPayload] = useState<Payload | null>(() => cachedStatus
-    ? ({ ...cachedStatus, ...cachedLearning } as Payload)
+    ? ({ ...cachedStatus, ...cachedAudit, ...cachedLearning } as Payload)
     : null);
   const [newsIndex, setNewsIndex] = useState<NewsIndexResponse>(() => (
     cachedNewsIndex ?? {
@@ -836,8 +850,13 @@ export default function AuditView() {
   const [learningState, setLearningState] = useState<CurrentDataPhase | "idle">(
     cachedLearning?.learning_preview_summary ? "loading" : cachedLearning ? "ready" : "idle",
   );
+  const [auditState, setAuditState] = useState<CurrentDataPhase | "idle">(
+    cachedAudit ? "ready" : "idle",
+  );
   const [statusError, setStatusError] = useState<string | null>(null);
   const [learningError, setLearningError] = useState<string | null>(null);
+  const [auditError, setAuditError] = useState<string | null>(null);
+  const [evidenceError, setEvidenceError] = useState<string | null>(null);
   const [newsError, setNewsError] = useState<string | null>(null);
   const [newsDetails, setNewsDetails] = useState<Record<string, Partial<News>>>({});
   const [view, setView] = useState<AuditDeskView>(initialView);
@@ -889,6 +908,15 @@ export default function AuditView() {
   const learningFailureCountRef = useRef(0);
   const [summaryCadence, setSummaryCadence] = useState<EvaluationCadence>("EVERY_5M");
   const [evidenceMode, setEvidenceMode] = useState<"eligible" | "seen" | "unseen">("eligible");
+  const [evidencePage, setEvidencePage] = useState(1);
+  const [evidencePageCursors, setEvidencePageCursors] = useState<Record<number, string | null>>({ 1: null });
+  const evidenceCursor = evidencePageCursors[evidencePage] ?? null;
+  const evidenceUrl = `/api/news-evidence?mode=${evidenceMode}&page=${evidencePage}&limit=${EVIDENCE_PER_PAGE}${evidenceCursor ? `&cursor=${encodeURIComponent(evidenceCursor)}` : ""}`;
+  const [evidenceArchive, setEvidenceArchive] = useState<NewsEvidenceResponse>(() => (
+    readDashboardResource<NewsEvidenceResponse>(evidenceUrl) ?? {
+      items: [], page: 1, page_size: EVIDENCE_PER_PAGE, mode: "eligible",
+    }
+  ));
 
   const refreshStatus = useCallback(async (force = false) => {
     try {
@@ -923,6 +951,34 @@ export default function AuditView() {
       );
     }
   }, []);
+
+  const refreshAudit = useCallback(async (force = false) => {
+    setAuditState(previous => previous === "ready" ? previous : "loading");
+    try {
+      const body = await loadDashboardResource<Partial<Payload>>("/api/audit", { force });
+      setPayload(previous => ({ ...previous, ...body }) as Payload);
+      setAuditState("ready");
+      setAuditError(null);
+    } catch (reason) {
+      setAuditState("error");
+      setAuditError(reason instanceof Error ? reason.message : "无法读取审计首屏");
+    }
+  }, []);
+
+  const refreshEvidence = useCallback(async (force = false) => {
+    try {
+      const body = await loadDashboardResource<NewsEvidenceResponse>(evidenceUrl, { force });
+      setEvidenceArchive(body);
+      if (body.next_cursor) {
+        setEvidencePageCursors(previous => ({
+          ...previous, [body.page + 1]: body.next_cursor,
+        }));
+      }
+      setEvidenceError(null);
+    } catch (reason) {
+      setEvidenceError(reason instanceof Error ? reason.message : "无法读取新闻证据档案");
+    }
+  }, [evidenceUrl]);
 
   const refreshNews = useCallback(async (force = false) => {
     const query = new URLSearchParams({
@@ -985,6 +1041,28 @@ export default function AuditView() {
       "learning",
     );
   }, [refreshLearning, view]);
+
+  useEffect(() => {
+    if (!new Set(["briefs", "stories", "decisions"]).has(view)) return;
+    return scheduleDashboardRefresh(
+      () => void refreshAudit(auditState !== "ready"),
+      () => void refreshAudit(true),
+      DASHBOARD_REFRESH_INTERVALS.status,
+      "current",
+      "audit",
+    );
+  }, [auditState, refreshAudit, view]);
+
+  useEffect(() => {
+    if (view !== "evidence") return;
+    return scheduleDashboardRefresh(
+      () => void refreshEvidence(false),
+      () => void refreshEvidence(true),
+      DASHBOARD_REFRESH_INTERVALS.news,
+      "current",
+      `news-evidence:${evidenceMode}:${evidencePage}`,
+    );
+  }, [evidenceMode, evidencePage, refreshEvidence, view]);
 
   const openLearningGraph = (tab: "curve" | "execution") => {
     setGraphStartTab(tab);
@@ -1123,14 +1201,29 @@ export default function AuditView() {
   );
   const combinedErrors = [
     statusError && `系统状态：${statusError}`,
+    auditError && `审计首屏：${auditError}`,
+    view === "evidence" && evidenceError && `新闻证据：${evidenceError}`,
     view === "league" && learningError && `学习进度：${learningError}`,
     view === "news" && newsError && `新闻索引：${newsError}`,
   ].filter(Boolean).join(" · ");
-  const canonicalEvidence = useMemo(
+  const legacyEvidence = useMemo(
     () => mergeNewsEvidenceByEvent(payload?.news_evidence ?? []),
     [payload?.news_evidence],
   );
-  const evidencePayloadHasDuplicates = canonicalEvidence.length !== (payload?.news_evidence ?? []).length;
+  const evidenceArchiveReady = Boolean(
+    evidenceArchive.snapshot_id && evidenceArchive.mode === evidenceMode,
+  );
+  const canonicalEvidence = useMemo(
+    () => evidenceArchiveReady
+      ? mergeNewsEvidenceByEvent(evidenceArchive.items) : legacyEvidence,
+    [evidenceArchive.items, evidenceArchiveReady, legacyEvidence],
+  );
+  const evidencePayloadHasDuplicates = (
+    legacyEvidence.length !== (payload?.news_evidence ?? []).length
+  );
+  const repairLegacyDuplicateSummary = (
+    !evidenceArchiveReady && evidencePayloadHasDuplicates
+  );
   const seenEvidenceCount = canonicalEvidence.filter(row => row.model_seen).length;
   const unseenEvidenceCount = canonicalEvidence.length - seenEvidenceCount;
   const eligibleEvidenceCount = canonicalEvidence.filter(row => row.broad_model_eligible).length;
@@ -1140,19 +1233,24 @@ export default function AuditView() {
   const evidenceModelUses = canonicalEvidence.reduce(
     (total, row) => total + row.frozen_model_uses, 0,
   );
-  const evidenceSummarySeenCount = evidencePayloadHasDuplicates ? seenEvidenceCount : newsMetrics.events.used_in_predictions;
-  const evidenceSummaryUnseenCount = evidencePayloadHasDuplicates ? unseenEvidenceCount : newsMetrics.events.never_used;
-  const evidenceSummaryEligibleCount = evidencePayloadHasDuplicates ? eligibleEvidenceCount : newsMetrics.events.currently_model_eligible;
-  const evidenceSummaryDecisionExposures = evidencePayloadHasDuplicates ? evidenceDecisionExposures : newsMetrics.prediction_usage.decision_event_exposures;
-  const evidenceSummaryModelUses = evidencePayloadHasDuplicates ? evidenceModelUses : newsMetrics.prediction_usage.frozen_model_uses;
+  const evidenceSummarySeenCount = repairLegacyDuplicateSummary ? seenEvidenceCount : newsMetrics.events.used_in_predictions;
+  const evidenceSummaryUnseenCount = repairLegacyDuplicateSummary ? unseenEvidenceCount : newsMetrics.events.never_used;
+  const evidenceSummaryEligibleCount = repairLegacyDuplicateSummary ? eligibleEvidenceCount : newsMetrics.events.currently_model_eligible;
+  const evidenceSummaryDecisionExposures = repairLegacyDuplicateSummary ? evidenceDecisionExposures : newsMetrics.prediction_usage.decision_event_exposures;
+  const evidenceSummaryModelUses = repairLegacyDuplicateSummary ? evidenceModelUses : newsMetrics.prediction_usage.frozen_model_uses;
   const visibleEvidence = canonicalEvidence.filter(row => (
     evidenceMode === "eligible" ? row.broad_model_eligible
       : evidenceMode === "seen" ? row.model_seen : !row.model_seen
   ));
-  const evidenceModeTotal = evidenceMode === "eligible"
-    ? evidenceSummaryEligibleCount
+  const evidenceModeTotal = evidenceMode === "eligible" ? evidenceSummaryEligibleCount
     : evidenceMode === "seen" ? evidenceSummarySeenCount : evidenceSummaryUnseenCount;
   const evidenceWindowPartial = visibleEvidence.length < evidenceModeTotal;
+  const selectEvidenceMode = (mode: "eligible" | "seen" | "unseen") => {
+    setEvidenceMode(mode);
+    setEvidencePage(1);
+    setEvidencePageCursors({ 1: null });
+    setShowAllEvidence(false);
+  };
   const deploymentPresentation = DEPLOYMENT_PRESENTATION[
     payload?.system?.deployment?.status ?? "PROVENANCE_UNKNOWN"
   ] ?? DEPLOYMENT_PRESENTATION.PROVENANCE_UNKNOWN;
@@ -1409,9 +1507,9 @@ export default function AuditView() {
           <p className="evidence-count-note"><b>{formatExactCount(newsMetrics.training.current_contract_rows)} 条训练记录</b> 来自 <b>{formatExactCount(newsMetrics.training.distinct_events)} 个当前契约事件</b>；文章、独立事件、预测读取和训练记录是四种不同口径。</p>
         </div>
         <nav className="evidence-filters" aria-label="模型新闻可见性筛选">
-          <button type="button" className={evidenceMode === "eligible" ? "active" : ""} onClick={() => { setEvidenceMode("eligible"); setShowAllEvidence(false); }}>当前可用 <b><CountValue value={evidenceSummaryEligibleCount} /></b></button>
-          <button type="button" className={evidenceMode === "seen" ? "active" : ""} onClick={() => { setEvidenceMode("seen"); setShowAllEvidence(false); }}>历史上用过 <b><CountValue value={evidenceSummarySeenCount} /></b></button>
-          <button type="button" className={evidenceMode === "unseen" ? "active" : ""} onClick={() => { setEvidenceMode("unseen"); setShowAllEvidence(false); }}>从未用过 <b><CountValue value={evidenceSummaryUnseenCount} /></b></button>
+          <button type="button" className={evidenceMode === "eligible" ? "active" : ""} onClick={() => selectEvidenceMode("eligible")}>当前可用 <b><CountValue value={evidenceSummaryEligibleCount} /></b></button>
+          <button type="button" className={evidenceMode === "seen" ? "active" : ""} onClick={() => selectEvidenceMode("seen")}>历史上用过 <b><CountValue value={evidenceSummarySeenCount} /></b></button>
+          <button type="button" className={evidenceMode === "unseen" ? "active" : ""} onClick={() => selectEvidenceMode("unseen")}>从未用过 <b><CountValue value={evidenceSummaryUnseenCount} /></b></button>
         </nav>
         <p className="evidence-window-note">
           {evidenceWindowPartial
@@ -1428,6 +1526,11 @@ export default function AuditView() {
             <td className="evidence-time-cell"><time><span>发布</span>{row.source_published_time ? time(row.source_published_time) : "时间未知"}</time><small><span>收到 {time(row.collector_first_seen_time)}</span><span>{formatExactCount(row.independent_publishers)} 个独立来源 · {formatExactCount(row.member_count)} 篇新闻</span></small></td>
           </tr>)}</tbody>
         </table></div>
+        <nav className="market-history-nav" aria-label="新闻证据翻页">
+          <button type="button" disabled={evidencePage <= 1} onClick={() => setEvidencePage(page => Math.max(1, page - 1))}>上一页</button>
+          <span>第 {formatExactCount(evidencePage)} 页</span>
+          <button type="button" disabled={!evidenceArchiveReady || !evidenceArchive.has_more || !evidenceArchive.next_cursor} onClick={() => setEvidencePage(page => page + 1)}>下一页</button>
+        </nav>
         {visibleEvidence.length > 8 && <button className="mobile-reveal-button" type="button" aria-expanded={showAllEvidence} onClick={() => setShowAllEvidence(value => !value)}>{showAllEvidence ? "收起证据" : `显示本页其余 ${formatExactCount(visibleEvidence.length - 8)} 个事件`}</button>}
       </section>}
 
