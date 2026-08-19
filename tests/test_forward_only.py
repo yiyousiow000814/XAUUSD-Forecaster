@@ -104,7 +104,6 @@ def _v15_annotation(vector: dict, evidence: str, **overrides) -> dict:
         "time_sensitivity": "BACKGROUND",
         "semantic_reason_zh": "完整正文显示该条目不进入当前模型。",
         "supporting_evidence": [evidence],
-        "named_references": [],
     }
     current.update(overrides)
     return current
@@ -2051,11 +2050,17 @@ def test_gemini_rejects_non_chinese_translation_fields() -> None:
     }
 
     with pytest.raises(ValueError, match="NO_CHINESE_PROSE"):
-        annotation_module._validate_chinese_result(vector)
+        annotation_module._validate_chinese_result(
+            vector, headline=vector["headline_zh"], body=vector["summary_zh"],
+        )
 
     vector["headline_zh"] = "黄金市场更新"
     with pytest.raises(ValueError, match="NO_CHINESE_PROSE"):
-        annotation_module._validate_chinese_result(vector)
+        annotation_module._validate_chinese_result(
+            vector,
+            headline=vector["headline_zh"],
+            body=vector["summary_zh"],
+        )
 
     vector["summary_zh"] = (
         "这是一段中文开头用于掩饰后续内容：Federal Reserve kept rates unchanged "
@@ -2063,7 +2068,11 @@ def test_gemini_rejects_non_chinese_translation_fields() -> None:
         "watch incoming economic data before considering any future policy change"
     )
     with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
-        annotation_module._validate_chinese_result(vector)
+        annotation_module._validate_chinese_result(
+            vector,
+            headline=vector["headline_zh"],
+            body=vector["summary_zh"],
+        )
 
 
 @pytest.mark.parametrize("display_text", [
@@ -2095,7 +2104,9 @@ def test_gemini_accepts_chinese_primary_prose_with_natural_english_names(
         "usd_impulse": 0.0, "novelty": 0.0, "confidence": 0.5,
     }
 
-    annotation_module._validate_chinese_result(vector)
+    annotation_module._validate_chinese_result(
+        vector, headline=display_text, body=display_text,
+    )
 
 
 def _production_shaped_identity_annotation() -> tuple[dict, str]:
@@ -2108,9 +2119,9 @@ def _production_shaped_identity_annotation() -> tuple[dict, str]:
         "The series aired on NBC as L.A. Law."
     )
     summary = (
-        "这些演员包括饰演Arnie Becker的Corbin Bernsen、"
-        "饰演Ann Kelsey的Jill Eikenberry，以及饰演Leland McKenzie"
-        "的Richard Dysart。"
+        "这篇回顾介绍了贯穿整部法律剧的主要演员和角色，其中包括"
+        "饰演Arnie Becker的Corbin Bernsen、饰演Ann Kelsey的"
+        "Jill Eikenberry，以及饰演Leland McKenzie的Richard Dysart。"
     )
     result = _v15_annotation({
         "headline_zh": "《洛杉矶法律》演员回顾",
@@ -2268,284 +2279,43 @@ def test_source_grounded_latin_span_family_accepts_references(
 
 
 @pytest.mark.parametrize(
-    "reference,source,authorizing_proof",
+    "span,source",
     (
+        ("Jerome Powell", "Jerome Powell addressed reporters."),
+        ("OpenAI", "OpenAI released a research update."),
+        ("FOMC", "The FOMC published its minutes."),
+        ("GPT-5", "The product label is GPT-5."),
+        ("iPhone 17 Pro", "Apple introduced iPhone 17 Pro."),
+        ("The Dark Knight", "The Dark Knight was released in 2008."),
+        ("OpenAI Launches New Model", "OpenAI Launches New Model"),
         (
-            "Jerome Powell", "The speaker is named Jerome Powell.",
-            "SOURCE_REFERENCE_CONTEXT",
-        ),
-        ("OpenAI", "OpenAI released a research update.", "STRONG_IDENTIFIER"),
-        ("OpenRouter", "OpenRouter released an update.", "STRONG_IDENTIFIER"),
-        ("FOMC", "The FOMC published its minutes.", "STRONG_IDENTIFIER"),
-        ("GPT-5", "The product is named GPT-5.", "STRONG_IDENTIFIER"),
-        (
-            "iPhone 17 Pro", "Apple introduced iPhone 17 Pro.",
-            "STRONG_IDENTIFIER",
-        ),
-        (
-            "Berkshire Hathaway", "The company is named Berkshire Hathaway.",
-            "SOURCE_REFERENCE_CONTEXT",
-        ),
-        (
-            "Berkshire Hathaway Annual Meeting",
-            "The event is titled Berkshire Hathaway Annual Meeting.",
-            "SOURCE_REFERENCE_CONTEXT",
-        ),
-        (
-            "The Dark Knight",
-            'The article refers to "The Dark Knight" as its title.',
-            "SOURCE_REFERENCE_CONTEXT",
-        ),
-        *(
-            (
-                title, f'The article refers to "{title}" as its title.',
-                "SOURCE_REFERENCE_CONTEXT",
-            )
-            for title in (
-                "The Intelligent Investor", "Bohemian Rhapsody",
-                "Grand Theft Auto", "The One You've Been Waiting For",
-            )
-        ),
-        *(
-            (
-                reference, f'The source refers to "{reference}" as its full name.',
-                "SOURCE_REFERENCE_CONTEXT",
-            )
-            for reference in (
-                "The International Symposium on Extremely Long Autonomous Agent "
-                "Systems and Multi-Modal Financial Decision Infrastructure",
-                "Proceedings of the International Workshop on Trustworthy Autonomous "
-                "Financial Agents and Cross-Market Decision Infrastructure",
-                "Association for the Advancement of Transparent Multi-Modal Economic "
-                "Forecasting and Long-Horizon Risk Communication",
-            )
-        ),
-    ),
-)
-def test_structured_named_reference_accepts_unseen_categories_and_long_names(
-    reference, source, authorizing_proof,
-) -> None:
-    assert len(reference) > 64 or len(reference.split()) > 8 or reference in {
-        "Jerome Powell", "OpenAI", "OpenRouter", "FOMC", "GPT-5",
-        "iPhone 17 Pro", "Berkshire Hathaway",
-        "Berkshire Hathaway Annual Meeting", "The Dark Knight",
-        "The Intelligent Investor", "Bohemian Rhapsody", "Grand Theft Auto",
-        "The One You've Been Waiting For",
-    }
-    value = f"报道确认相关名称为《{reference}》。"
-    result = {
-        "headline_zh": "名称说明", "summary_zh": value,
-        "primary_story_title_zh": "名称说明",
-        "actor": "", "object": "", "entities": [],
-        "named_references": [{"exact_text": reference}],
-    }
-
-    allowed = annotation_module._allowed_display_latin_spans(
-        result, value, "Source headline", source,
-    )
-
-    assert len(allowed) == 1
-    assert allowed[0].text == reference
-    assert allowed[0].proof == "STRUCTURED_NAMED_REFERENCE"
-    assert authorizing_proof in allowed[0].supporting_proofs
-    canonical_source = f"Source headline\n{source}"
-    assert canonical_source[allowed[0].source_start:allowed[0].source_end] == reference
-    annotation_module._validate_chinese_result(
-        result, headline="Source headline", body=source,
-    )
-
-
-def test_annotation_prompt_version_selects_v17_or_legacy_display_contract() -> None:
-    source = "OpenAI released a research update."
-    value = "相关机构为《OpenAI》。"
-    historical = {
-        "headline_zh": value, "summary_zh": "报道确认相关机构为《OpenAI》。",
-        "primary_story_title_zh": "机构消息", "actor": "", "object": "",
-        "entities": [],
-    }
-
-    annotation_module._validate_chinese_result(
-        historical, prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
-        headline="Source headline", body=source,
-    )
-    assert annotation_module._allowed_display_latin_spans(
-        historical, value, "Source headline", source,
-        prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
-    )[0].proof == "STRONG_IDENTIFIER"
-
-    assert annotation_module._allowed_display_latin_spans(
-        historical, value, "Source headline", source,
-        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
-    ) == ()
-    with pytest.raises(ValueError, match="UNGROUNDED_LATIN_REFERENCE"):
-        annotation_module._validate_chinese_result(
-            historical,
-            prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
-            headline="Source headline", body=source,
-        )
-
-
-@pytest.mark.parametrize(
-    "reference",
-    (
-        "Global Markets Under Pressure",
-        "Investors Await Federal Reserve Decision",
-        "Markets Brace For Higher Rates",
-        "Strong Growth Across Major Economies",
-        "Gold Prices Rise As Dollar Falls",
-    ),
-)
-@pytest.mark.parametrize("quoted_source", (False, True))
-def test_v17_title_case_prose_is_not_a_named_reference(
-    reference, quoted_source,
-) -> None:
-    source = f'"{reference}"' if quoted_source else reference
-    result = {
-        "headline_zh": "市场评论", "summary_zh": f"报道讨论《{reference}》。",
-        "primary_story_title_zh": "市场评论", "actor": "", "object": "",
-        "entities": [], "named_references": [{"exact_text": reference}],
-    }
-
-    with pytest.raises(ValueError, match="UNPROVEN_NAMED_REFERENCE"):
-        annotation_module._validate_structured_named_references(
-            result, "Source headline", source,
-        )
-    with pytest.raises(ValueError, match="UNGROUNDED_LATIN_REFERENCE"):
-        annotation_module._validate_chinese_result(
-            result,
-            prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
-            headline="Source headline", body=source,
-        )
-
-
-def test_v17_unrelated_nearby_identity_cannot_authorize_title_case_prose() -> None:
-    reference = "Global Markets Under Pressure"
-    source = f"OpenAI issued a bulletin. {reference}"
-    result = {
-        "actor": "OpenAI", "object": "", "entities": ["OpenAI"],
-        "named_references": [{"exact_text": reference}],
-    }
-
-    with pytest.raises(ValueError, match="UNPROVEN_NAMED_REFERENCE"):
-        annotation_module._validate_structured_named_references(
-            result, "Source headline", source,
-        )
-
-
-@pytest.mark.parametrize(
-    "reference,source",
-    (
-        (
-            "Strong Growth Across Major Economies",
-            "Strong Growth Across Major Economies was reported yesterday.",
-        ),
-        (
-            "Global Markets Under Pressure",
-            "Global Markets Under Pressure was reported overnight.",
-        ),
-        (
-            "Higher Rates Across Major Economies",
-            "Higher Rates Across Major Economies were expected this year.",
-        ),
-        (
-            "Gold Prices Across Global Markets",
-            "Gold Prices Across Global Markets were reported higher.",
+            "Market expects growth to be strong",
+            "Market expects growth to be strong after the policy update.",
         ),
         (
             "Investors Await Federal Reserve Decision",
-            "Investors Await Federal Reserve Decision was published this morning.",
+            "Investors Await Federal Reserve Decision",
         ),
+        ("Gold Prices Rise As Dollar Falls", "Gold Prices Rise As Dollar Falls"),
+        (
+            "International Conference on Trustworthy Autonomous Financial "
+            "Agents and Cross-Market Decision Infrastructure",
+            "International Conference on Trustworthy Autonomous Financial "
+            "Agents and Cross-Market Decision Infrastructure opens today.",
+        ),
+        ("FutureCategory ZX-41", "FutureCategory ZX-41 appeared in the source."),
     ),
 )
-def test_v17_passive_title_case_subject_is_not_referential(reference, source) -> None:
-    value = f"报道讨论《{reference}》。"
-    result = {
-        "headline_zh": "市场评论", "summary_zh": value,
-        "primary_story_title_zh": "市场评论", "actor": "", "object": "",
-        "entities": [reference],
-        "named_references": [{"exact_text": reference}],
-    }
-
-    assert annotation_module.resolve_structured_named_reference(
-        reference, source, (reference,),
-    ) is None
-    with pytest.raises(ValueError, match="UNGROUNDED_LATIN_REFERENCE"):
-        annotation_module._validate_chinese_result(
-            result, prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
-            headline="Source headline", body=source,
-        )
-
-
-@pytest.mark.parametrize(
-    "identity_field,reference",
-    (
-        ("entities", "Global Markets Under Pressure"),
-        ("actor", "Strong Growth Across Major Economies"),
-        ("object", "Markets Brace For Higher Rates"),
-    ),
-)
-def test_v17_same_model_identity_declaration_is_supporting_only(
-    identity_field, reference,
+def test_v17_accepts_exact_source_grounded_latin_without_semantic_classification(
+    span, source,
 ) -> None:
-    result = {
-        "headline_zh": "市场评论", "summary_zh": f"报道讨论《{reference}》。",
-        "primary_story_title_zh": "市场评论", "actor": "", "object": "",
-        "entities": [], "named_references": [{"exact_text": reference}],
-    }
-    if identity_field == "entities":
-        result[identity_field] = [reference]
-    else:
-        result[identity_field] = reference
-    declared = (
-        str(result["actor"]), str(result["object"]),
-        *tuple(str(item) for item in result["entities"]),
+    value = (
+        f"完整报道引用了《{span}》，并继续解释相关背景、来源依据、"
+        "事件过程与可能造成的市场影响。"
     )
-
-    assert annotation_module.resolve_structured_named_reference(
-        reference, reference, declared,
-    ) is None
-    with pytest.raises(ValueError, match="UNGROUNDED_LATIN_REFERENCE"):
-        annotation_module._validate_chinese_result(
-            result, prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
-            headline="Source headline", body=reference,
-        )
-
-
-def test_v17_unquoted_dark_knight_subject_fails_closed() -> None:
-    reference = "The Dark Knight"
-    source = "The Dark Knight was released in 2008."
-    value = f"影片《{reference}》于报道中被讨论。"
     result = {
-        "headline_zh": "影片消息", "summary_zh": value,
-        "primary_story_title_zh": "影片消息", "actor": "", "object": "",
-        "entities": [reference],
-        "named_references": [{"exact_text": reference}],
-    }
-
-    assert annotation_module.resolve_structured_named_reference(
-        reference, source, (reference,),
-    ) is None
-    with pytest.raises(ValueError, match="UNGROUNDED_LATIN_REFERENCE"):
-        annotation_module._validate_chinese_result(
-            result, prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
-            headline="Source headline", body=source,
-        )
-
-
-@pytest.mark.parametrize(
-    "source",
-    (
-        '"The Dark Knight" is the title discussed in the article.',
-        'The article refers to "The Dark Knight" as its title.',
-    ),
-)
-def test_v17_dark_knight_explicit_reference_context_passes(source) -> None:
-    reference = "The Dark Knight"
-    value = f"影片《{reference}》于报道中被讨论。"
-    result = {
-        "headline_zh": "影片消息", "summary_zh": value,
-        "primary_story_title_zh": "影片消息", "actor": "", "object": "",
-        "entities": [], "named_references": [{"exact_text": reference}],
+        "headline_zh": "来源内容说明", "summary_zh": value,
+        "primary_story_title_zh": "来源内容说明",
     }
 
     allowed = annotation_module._allowed_display_latin_spans(
@@ -2553,164 +2323,145 @@ def test_v17_dark_knight_explicit_reference_context_passes(source) -> None:
         prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
     )
 
-    assert len(allowed) == 1
-    assert "SOURCE_REFERENCE_CONTEXT" in allowed[0].supporting_proofs
-    assert "PROPER_NAME_SHAPE" in allowed[0].supporting_proofs
+    assert [item.text for item in allowed] == [span]
+    assert allowed[0].proof == "EXACT_SOURCE"
+    canonical_source = f"Source headline\n{source}"
+    assert canonical_source[allowed[0].source_start:allowed[0].source_end] == span
     annotation_module._validate_chinese_result(
         result, prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
         headline="Source headline", body=source,
     )
 
 
-@pytest.mark.parametrize(
-    "reference",
-    (
-        "Market expects growth to be strong",
-        "Investors are worried about inflation",
-        "The company expects revenue to increase next year",
-        "Market Expects Growth To Be Strong",
-        "OpenAI said markets expect growth to be strong",
-        "iPhone 17 Pro will increase revenue next year",
-    ),
-)
-def test_structured_named_reference_cannot_whitelist_source_prose(reference) -> None:
-    source = f"{reference} after the policy update."
-    value = f"报道声称《{reference}》。"
-    result = {
-        "headline_zh": "市场评论", "summary_zh": value,
-        "primary_story_title_zh": "市场评论",
-        "actor": "OpenAI", "object": "", "entities": ["OpenAI"],
-        "named_references": [{"exact_text": reference}],
-    }
+def test_v17_derives_multiple_disjoint_visible_latin_runs() -> None:
+    value = "完整报道比较了 OpenAI 与 FOMC，并解释双方信息对市场的影响。"
+    source = "OpenAI issued an update. The FOMC published its minutes."
 
-    with pytest.raises(ValueError, match="UNPROVEN_NAMED_REFERENCE"):
-        annotation_module._validate_structured_named_references(
-            result, "Market commentary", source,
-        )
-    with pytest.raises(
-        ValueError, match="UNGROUNDED_LATIN_REFERENCE|ENGLISH_PROSE_DOMINANT",
-    ):
-        annotation_module._validate_chinese_result(
-            result, headline="Market commentary", body=source,
-        )
-
-
-@pytest.mark.parametrize(
-    "reference,source",
-    (
-        ("Invented Conference Name", "The source contains no such conference."),
-        (
-            "OpenAI and unrelated ordinary words around it",
-            "OpenAI and unrelated ordinary words around it appear in the source.",
-        ),
-        (
-            "OpenAI released an update. Markets expect growth",
-            "OpenAI released an update. Markets expect growth this year.",
-        ),
-        (
-            "OpenAI released an update\nMarkets expect growth this year",
-            "OpenAI released an update\nMarkets expect growth this year.",
-        ),
-        (
-            "Market expects growth to be strong",
-            'The article named OpenAI. "Market expects growth to be strong" '
-            "appears later as ordinary prose.",
-        ),
-        (
-            "The company expects revenue to increase next year and investors "
-            "are worried about inflation while markets await another update",
-            "The company expects revenue to increase next year and investors "
-            "are worried about inflation while markets await another update.",
-        ),
-    ),
-)
-def test_structured_named_reference_rejects_absent_sentence_and_paragraph_capture(
-    reference, source,
-) -> None:
-    result = {
-        "actor": "OpenAI", "object": "", "entities": ["OpenAI"],
-        "named_references": [{"exact_text": reference}],
-    }
-
-    with pytest.raises(ValueError, match="UNPROVEN_NAMED_REFERENCE"):
-        annotation_module._validate_structured_named_references(
-            result, "Source headline", source,
-        )
-
-
-def test_allowed_span_normalization_handles_duplicates_nested_and_repeated_names() -> None:
-    source = (
-        'The source refers to "Bank of America" and later refers to "America". '
-        "OpenAI published the update. OpenAI confirmed it."
-    )
-    value = "相关机构包括Bank of America与OpenAI，OpenAI随后回应。"
-    result = {
-        "headline_zh": "机构说明", "summary_zh": value,
-        "primary_story_title_zh": "机构说明", "actor": "", "object": "",
-        "entities": [],
-        "named_references": [
-            {"exact_text": "Bank of America"},
-            {"exact_text": "America"},
-            {"exact_text": "OpenAI"},
-        ],
-    }
-
-    allowed = annotation_module._allowed_display_latin_spans(
-        result, value, "Source headline", source,
+    spans = annotation_module._allowed_display_latin_spans(
+        {}, value, "Source headline", source,
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
     )
 
-    assert [item.text for item in allowed] == [
-        "Bank of America", "OpenAI", "OpenAI",
+    assert [(span.text, span.proof) for span in spans] == [
+        ("OpenAI", "EXACT_SOURCE"), ("FOMC", "EXACT_SOURCE"),
     ]
-    assert all(item.proof == "STRUCTURED_NAMED_REFERENCE" for item in allowed)
-    assert "SOURCE_REFERENCE_CONTEXT" in allowed[0].supporting_proofs
-    assert all(
-        "STRONG_IDENTIFIER" in item.supporting_proofs
-        for item in allowed[1:]
+
+
+def test_v17_repeated_source_occurrences_use_first_exact_coordinates() -> None:
+    value = "完整报道讨论了 OpenAI，并解释相关影响。"
+    source = "OpenAI issued an update. OpenAI later added details."
+
+    spans = annotation_module._allowed_display_latin_spans(
+        {}, value, "Source headline", source,
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
     )
+
+    canonical_source = f"Source headline\n{source}"
+    assert len(spans) == 1
+    assert spans[0].source_start == canonical_source.index("OpenAI")
+    assert canonical_source[spans[0].source_start:spans[0].source_end] == "OpenAI"
+
+
+def test_v17_does_not_semantically_reject_grounded_lowercase_latin() -> None:
+    result = {
+        "headline_zh": "来源说明",
+        "summary_zh": "完整报道讨论 open 这一原文内容及其相关影响。",
+        "primary_story_title_zh": "市场open消息",
+    }
+
     annotation_module._validate_chinese_result(
-        result, headline="Source headline", body=source,
+        result,
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+        headline="Source headline",
+        body="The source contains open as written.",
     )
 
 
-def test_partially_overlapping_named_references_cannot_union_mask_extra_text() -> None:
-    source = "Alpha Beta Gamma appears in the source."
-    value = "相关名称为《Alpha Beta Gamma》。"
-    result = {
-        "headline_zh": "名称说明", "summary_zh": value,
-        "primary_story_title_zh": "名称说明", "actor": "", "object": "",
-        "entities": [],
-        "named_references": [
-            {"exact_text": "Alpha Beta"},
-            {"exact_text": "Beta Gamma"},
-        ],
-    }
-
-    assert annotation_module._allowed_display_latin_spans(
-        result, value, "Source headline", source,
-    ) == ()
-    with pytest.raises(ValueError, match="UNGROUNDED_LATIN_REFERENCE"):
+@pytest.mark.parametrize(
+    "value,source",
+    (
+        (
+            "报道称 OpenAI Launches New Model，并讨论市场反应。",
+            "OpenAI released a model.",
+        ),
+        ("报道称 New OpenAI，并讨论市场反应。", "OpenAI discussed the update."),
+        ("报道称 OpenAI Labs，并讨论市场反应。", "OpenAI discussed the update."),
+        (
+            "报道称 OpenAI Changed Middle Words，并讨论市场反应。",
+            "OpenAI Changed Other Words.",
+        ),
+        ("报道称 Openai，并讨论市场反应。", "OpenAI released a model."),
+        (
+            "报道称 OpenAI Markets rally，并讨论市场反应。",
+            "OpenAI released an update. Markets rally afterward.",
+        ),
+        ("报道称 OpenAI，并讨论市场反应。", "SuperOpenAICompany responded."),
+    ),
+)
+def test_v17_rejects_ungrounded_or_partial_token_latin(value, source) -> None:
+    with pytest.raises(ValueError, match="UNGROUNDED_LATIN_DISPLAY"):
         annotation_module._validate_chinese_result(
-            result, headline="Source headline", body=source,
+            {"headline_zh": "来源说明", "summary_zh": value},
+            prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+            headline="Source headline", body=source,
         )
 
 
-def test_unicode_lookalike_named_reference_cannot_bypass_script_validation() -> None:
+def test_v17_source_grounding_does_not_bypass_field_language_balance() -> None:
+    english = (
+        "OpenAI Launches New Model and Investors Await Federal Reserve Decision"
+    )
+    value = f"{english}，市场关注。"
+
+    with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
+        annotation_module._validate_chinese_result(
+            {"headline_zh": "来源说明", "summary_zh": value},
+            prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+            headline=english, body="",
+        )
+
+
+def test_v17_controlled_xauusd_exemption_is_closed() -> None:
+    value = "完整报道说明相关信息可能继续影响 XAUUSD 的市场表现。"
+    spans = annotation_module._allowed_display_latin_spans(
+        {}, value, "中文来源标题", "中文来源正文",
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+    )
+    assert [(span.text, span.proof) for span in spans] == [
+        ("XAUUSD", "SYSTEM_CONTROLLED"),
+    ]
+    annotation_module._validate_chinese_result(
+        {"headline_zh": "来源说明", "summary_zh": value},
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+        headline="中文来源标题", body="中文来源正文",
+    )
+
+    with pytest.raises(ValueError, match="UNGROUNDED_LATIN_DISPLAY"):
+        annotation_module._validate_chinese_result(
+            {"headline_zh": "来源说明", "summary_zh": "完整报道讨论 ArbitraryToken 的影响。"},
+            prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+            headline="中文来源标题", body="中文来源正文",
+        )
+
+
+def test_v17_unicode_lookalike_fails_even_when_present_in_source() -> None:
     lookalike = "\u039fpenAI"  # Greek omicron, not Latin O.
-    source = f"{lookalike} appears in the immutable source."
-    result = {
-        "headline_zh": "名称说明", "summary_zh": f"相关名称为《{lookalike}》。",
-        "primary_story_title_zh": "名称说明", "actor": "", "object": "",
-        "entities": [], "named_references": [{"exact_text": lookalike}],
-    }
-
-    with pytest.raises(
-        ValueError, match="THIRD_SCRIPT_PRESENT|UNGROUNDED_LATIN_REFERENCE",
-    ):
+    with pytest.raises(ValueError, match="THIRD_SCRIPT_PRESENT"):
         annotation_module._validate_chinese_result(
-            result, headline="Source headline", body=source,
+            {"headline_zh": "来源说明", "summary_zh": f"完整报道讨论《{lookalike}》及其影响。"},
+            prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+            headline="Source headline", body=f"{lookalike} appears in the source.",
         )
 
+
+def test_v17_rejects_invisible_format_control_inside_latin_run() -> None:
+    spoof = "Open\u200bAI"
+    with pytest.raises(ValueError, match="MALFORMED_DISPLAY_CONTROL"):
+        annotation_module._validate_chinese_result(
+            {"headline_zh": "来源说明", "summary_zh": f"完整报道讨论 {spoof} 的影响。"},
+            prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+            headline="Source headline", body=f"{spoof} appears in the source.",
+        )
 
 @pytest.mark.parametrize(
     "value,source,declared",
@@ -2764,7 +2515,7 @@ def test_unicode_lookalike_named_reference_cannot_bypass_script_validation() -> 
         ),
     ),
 )
-def test_source_grounded_latin_span_family_rejects_prose_and_spoofs(
+def test_v16_source_grounded_latin_span_family_rejects_prose_and_spoofs(
     value, source, declared,
 ) -> None:
     result = {
@@ -2778,7 +2529,8 @@ def test_source_grounded_latin_span_family_rejects_prose_and_spoofs(
         match="NO_CHINESE_PROSE|ENGLISH_PROSE_DOMINANT|UNGROUNDED_LATIN_REFERENCE",
     ):
         annotation_module._validate_chinese_result(
-            result, headline="Market commentary", body=source,
+            result, prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
+            headline="Market commentary", body=source,
         )
 
 
@@ -2853,10 +2605,12 @@ def test_gemini_rejects_english_or_latin_prose_dominating_chinese(
     }
 
     with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
-        annotation_module._validate_chinese_result(vector)
+        annotation_module._validate_chinese_result(
+            vector, headline=english_dominant, body=english_dominant,
+        )
 
 
-def test_gemini_distinguishes_translated_prose_from_english_identifiers() -> None:
+def test_v16_distinguishes_translated_prose_from_english_identifiers() -> None:
     valid = {
         "headline_zh": "美国 CPI 高于预期",
         "summary_zh": "美国 CPI 高于预期，Gold ETF 资金流仍然疲弱。",
@@ -2866,9 +2620,13 @@ def test_gemini_distinguishes_translated_prose_from_english_identifiers() -> Non
         "summary_zh": "美国 CPI 高于预期，Gold ETF flows remained weak after the release.",
     }
 
-    annotation_module._validate_chinese_result(valid)
+    annotation_module._validate_chinese_result(
+        valid, prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
+    )
     with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
-        annotation_module._validate_chinese_result(invalid)
+        annotation_module._validate_chinese_result(
+            invalid, prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
+        )
 
 
 def test_gemini_validates_semantic_reason_as_chinese_primary_display() -> None:
@@ -2885,9 +2643,15 @@ def test_gemini_validates_semantic_reason_as_chinese_primary_display() -> None:
         ),
     }
 
-    annotation_module._validate_chinese_result(valid)
+    annotation_module._validate_chinese_result(
+        valid, headline="CPI release", body="",
+    )
     with pytest.raises(ValueError, match="NO_CHINESE_PROSE"):
-        annotation_module._validate_chinese_result(invalid)
+        annotation_module._validate_chinese_result(
+            invalid,
+            headline="CPI release",
+            body=invalid["semantic_reason_zh"],
+        )
 
 
 def test_gemini_repairs_only_invalid_semantic_reason(monkeypatch) -> None:
@@ -3011,7 +2775,9 @@ def test_gemini_repairs_mixed_language_summary_with_counted_request(
             lambda usage: usages.append(usage) or True
         ),
     )
-    result, _ = pool.call(0, "model", "headline", "body")
+    result, _ = pool.call(
+        0, "model", "headline", "Powell discussed inflation in the source.",
+    )
     assert result["summary_zh"] == repaired["summary_zh"]
     assert "Powell" in result["summary_zh"]
     assert "XAUUSD" in result["summary_zh"]
@@ -3218,7 +2984,6 @@ def test_display_checkpoint_accepts_declared_latin_company_names_without_model_c
     }, evidence, xauusd_relevance="IRRELEVANT",
         primary_story_title_zh="Stripe 收购 OpenRouter",
         actor="Stripe", object="OpenRouter")
-    result.pop("named_references")
     checkpoint = {
         "semantic_result": result,
         "llm_model_version": annotation_module.DEFAULT_GEMINI_MODEL,
@@ -3306,7 +3071,6 @@ def test_display_checkpoint_accepts_source_grounded_episode_titles_without_model
         "usd_impulse": 0.0, "novelty": 0.0, "confidence": 1.0,
     }, evidence, xauusd_relevance="IRRELEVANT",
         primary_story_title_zh="8集《邪恶力量》剧集回顾")
-    result.pop("named_references")
     checkpoint = {
         "semantic_result": result,
         "llm_model_version": annotation_module.FALLBACK_GEMINI_MODEL,
@@ -3335,7 +3099,7 @@ def test_display_checkpoint_accepts_source_grounded_episode_titles_without_model
     assert model == annotation_module.FALLBACK_GEMINI_MODEL
 
 
-def test_source_grounding_does_not_allow_bracketed_english_prose() -> None:
+def test_v17_rejects_bracketed_source_grounded_english_dominant_field() -> None:
     result = {
         "headline_zh": "市场评论",
         "summary_zh": "报道声称《Market expects growth to be strong》。",
@@ -3343,7 +3107,7 @@ def test_source_grounding_does_not_allow_bracketed_english_prose() -> None:
         "actor": "", "object": "", "entities": [],
     }
 
-    with pytest.raises(ValueError, match="UNGROUNDED_LATIN_REFERENCE"):
+    with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
         annotation_module._validate_chinese_result(
             result,
             headline="Market commentary",
@@ -3351,7 +3115,7 @@ def test_source_grounding_does_not_allow_bracketed_english_prose() -> None:
         )
 
 
-def test_story_title_does_not_treat_undeclared_english_prose_as_an_identifier() -> None:
+def test_v17_story_title_rejects_ungrounded_latin() -> None:
     result = {
         "headline_zh": "市场更新",
         "summary_zh": "市场正在关注企业消息。",
@@ -3360,7 +3124,7 @@ def test_story_title_does_not_treat_undeclared_english_prose_as_an_identifier() 
         "entities": ["Stripe", "OpenRouter"],
     }
 
-    with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
+    with pytest.raises(ValueError, match="UNGROUNDED_LATIN_DISPLAY"):
         annotation_module._validate_chinese_result(result)
 
 
@@ -4895,7 +4659,6 @@ def test_current_cross_publisher_event_survives_recent_noise(tmp_path) -> None:
         "material_change": "NEW_EVENT", "time_sensitivity": "ONGOING",
             "semantic_reason_zh": "完整正文显示这是同一次美国7月就业数据发布。",
             "supporting_evidence": ["the economy lost 23,000 nonfarm payroll positions"],
-            "named_references": [],
         }
     for index, material_key in enumerate((
         "us_july_2026_jobs_report_release",

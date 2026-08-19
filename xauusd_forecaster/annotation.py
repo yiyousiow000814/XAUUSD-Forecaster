@@ -52,9 +52,10 @@ from .news_semantics import (
     GENERATED_NEWS_PROMPT_VERSIONS,
     LEGACY_INVALID_SEMANTIC_REASON_PREFIX,
     DISPLAY_AUDIT_FALLBACK_REASON_PREFIX,
+    grounded_display_latin_spans,
     news_annotation_schema,
     model_usable_annotation_predicate,
-    resolve_structured_named_reference,
+    require_chinese_primary_display,
     SUPPORTED_NEWS_PROMPT_VERSIONS,
     validate_news_annotation,
 )
@@ -1942,14 +1943,10 @@ def _annotation_prompt(prompt_version: str, headline: str, body: str) -> str:
         "tickers, widely used abbreviations, identifiers and proper nouns in "
         "English when that is more natural or accurate. Do not leave whole "
         "explanatory sentences unnecessarily in another language. "
-        "Return named_references as category-neutral named-reference declarations. "
-        "For each genuine person, organization, product, work, event, meeting, "
-        "case, paper or other proper reference that remains in Latin text in a "
-        "Chinese display field, copy only its exact contiguous source spelling "
-        "into exact_text. Do not provide offsets; local code derives them from "
-        "the immutable source. Never declare an explanatory sentence, ordinary "
-        "clause, paragraph, or extra words around a name as a named reference. "
-        "Use an empty array when no such reference is needed. "
+        "Any Latin text retained in a Chinese display field must copy one exact "
+        "contiguous spelling from NEWS. Do not translate part of an English span, "
+        "join distant words, or invent a prefix, suffix, or middle word. The final "
+        "visible field must remain Chinese-primary overall. "
         "For summary_zh: "
         "summarize the actual event, the decisive facts and numbers, and why "
         "it may or may not matter to XAUUSD in 3-6 concise sentences. "
@@ -2291,6 +2288,9 @@ def _validate_chinese_result(
                 result, value, headline, body,
                 prompt_version=prompt_version,
             ),
+            source_grounded_contract=(
+                prompt_version == CURRENT_NEWS_PROMPT_VERSION
+            ),
         )
     story_title = str(result.get("primary_story_title_zh") or "").strip()
     if story_title:
@@ -2301,6 +2301,9 @@ def _validate_chinese_result(
                 result, story_title, headline, body,
                 prompt_version=prompt_version,
             ),
+            source_grounded_contract=(
+                prompt_version == CURRENT_NEWS_PROMPT_VERSION
+            ),
         )
     if "semantic_reason_zh" in result:
         value = result.get("semantic_reason_zh")
@@ -2309,6 +2312,9 @@ def _validate_chinese_result(
             allowed_latin_spans=_allowed_display_latin_spans(
                 result, value, headline, body,
                 prompt_version=prompt_version,
+            ),
+            source_grounded_contract=(
+                prompt_version == CURRENT_NEWS_PROMPT_VERSION
             ),
         )
 
@@ -2451,84 +2457,6 @@ def _source_context_has_declared_identity(
     return False
 
 
-def _structured_named_reference_texts(result: dict) -> tuple[str, ...]:
-    references = result.get("named_references")
-    if not isinstance(references, list):
-        return ()
-    return tuple(
-        str(item["exact_text"])
-        for item in references
-        if isinstance(item, dict) and isinstance(item.get("exact_text"), str)
-    )
-
-
-def _structured_reference_source_proof(
-    exact_text: str, source: str, declared_identities: tuple[str, ...],
-) -> tuple[tuple[str, int, int, str], tuple[str, ...]] | None:
-    """Prove a category-neutral declaration without trusting model offsets."""
-    proof = resolve_structured_named_reference(
-        exact_text, source, declared_identities,
-    )
-    if proof is None:
-        return None
-    source_match = (
-        exact_text, proof.source_start, proof.source_end,
-        source[
-            max(0, proof.source_start - 120):
-            min(len(source), proof.source_end + 120)
-        ],
-    )
-    return source_match, proof.evidence
-
-
-def _validate_structured_named_references(
-    result: dict, headline: str, body: str,
-) -> None:
-    references = _structured_named_reference_texts(result)
-    if not references:
-        return
-    source = canonical_annotation_source_text(headline, body)
-    declared = _declared_display_identifiers(result)
-    for exact_text in references:
-        if _structured_reference_source_proof(exact_text, source, declared) is None:
-            raise ValueError(
-                "UNPROVEN_NAMED_REFERENCE: annotation named reference lacks "
-                "deterministic local proof"
-            )
-
-
-def _structured_display_latin_spans(
-    result: dict, display: str, headline: str, body: str,
-) -> tuple[_AllowedLatinSpan, ...]:
-    source = canonical_annotation_source_text(headline, body)
-    declared = _declared_display_identifiers(result)
-    allowed: list[_AllowedLatinSpan] = []
-    for exact_text in _structured_named_reference_texts(result):
-        proven = _structured_reference_source_proof(exact_text, source, declared)
-        if proven is None:
-            continue
-        source_match, supporting_proofs = proven
-        cursor = 0
-        while (start := display.find(exact_text, cursor)) >= 0:
-            end = start + len(exact_text)
-            left_ok = start == 0 or not (
-                display[start - 1].isdigit()
-                or _is_latin_letter(display[start - 1])
-            )
-            right_ok = end == len(display) or not (
-                display[end].isdigit() or _is_latin_letter(display[end])
-            )
-            if left_ok and right_ok:
-                allowed.append(_AllowedLatinSpan(
-                    start=start, end=end, text=exact_text,
-                    proof="STRUCTURED_NAMED_REFERENCE",
-                    source_start=source_match[1], source_end=source_match[2],
-                    supporting_proofs=supporting_proofs,
-                ))
-            cursor = start + max(1, len(exact_text))
-    return tuple(allowed)
-
-
 def _classify_source_grounded_latin_span(
     display: str, start: int, end: int, headline: str, body: str,
     declared_identities: tuple[str, ...],
@@ -2611,9 +2539,18 @@ def _allowed_display_latin_spans(
     """Apply the explicit display-reference contract for one schema version."""
     display = str(value or "")
     if prompt_version == CURRENT_NEWS_PROMPT_VERSION:
-        return _normalize_allowed_latin_spans(
-            _structured_display_latin_spans(
-                result, display, headline, body,
+        del result
+        return tuple(
+            _AllowedLatinSpan(
+                start=span.display_start,
+                end=span.display_end,
+                text=span.text,
+                proof=span.proof,
+                source_start=span.source_start,
+                source_end=span.source_end,
+            )
+            for span in grounded_display_latin_spans(
+                display, canonical_annotation_source_text(headline, body),
             )
         )
     if prompt_version not in SUPPORTED_NEWS_PROMPT_VERSIONS:
@@ -2632,16 +2569,8 @@ def _allowed_display_latin_spans(
 def _normalize_allowed_latin_spans(
     spans: tuple[_AllowedLatinSpan, ...],
 ) -> tuple[_AllowedLatinSpan, ...]:
-    """Dedupe exact ranges and prevent overlap from widening masked text."""
-    by_range: dict[tuple[int, int], _AllowedLatinSpan] = {}
-    for span in spans:
-        key = (span.start, span.end)
-        current = by_range.get(key)
-        if current is None or (
-            span.proof == "STRUCTURED_NAMED_REFERENCE"
-            and current.proof != "STRUCTURED_NAMED_REFERENCE"
-        ):
-            by_range[key] = span
+    """Dedupe legacy V16 ranges without widening overlapping matches."""
+    by_range = {(span.start, span.end): span for span in spans}
     ordered = sorted(by_range.values(), key=lambda item: (item.start, item.end))
     groups: list[list[_AllowedLatinSpan]] = []
     for span in ordered:
@@ -2649,32 +2578,9 @@ def _normalize_allowed_latin_spans(
             groups.append([span])
         else:
             groups[-1].append(span)
-    normalized: list[_AllowedLatinSpan] = []
-    for group in groups:
-        if len(group) == 1:
-            normalized.append(group[0])
-            continue
-        structured = [
-            span for span in group
-            if span.proof == "STRUCTURED_NAMED_REFERENCE"
-        ]
-        if len(structured) == 1:
-            normalized.append(structured[0])
-            continue
-        if structured:
-            widest = max(
-                structured,
-                key=lambda item: (item.end - item.start, -item.start),
-            )
-            if all(
-                widest.start <= item.start and item.end <= widest.end
-                for item in structured
-            ):
-                normalized.append(widest)
-            continue
-        # Legacy fallback matches are never unioned. Leaving an ambiguous
-        # overlap unmasked preserves fail-closed Chinese-primary validation.
-    return tuple(normalized)
+    # Legacy fallback matches are never unioned. Leaving ambiguous overlaps
+    # unmasked preserves fail-closed Chinese-primary validation.
+    return tuple(group[0] for group in groups if len(group) == 1)
 
 
 def _reject_unproven_delimited_latin_spans(
@@ -2699,20 +2605,28 @@ def _validate_chinese_display_field(
     field: str,
     *,
     allowed_latin_spans: tuple[_AllowedLatinSpan, ...] = (),
+    source_grounded_contract: bool = False,
 ) -> None:
-    _reject_unproven_delimited_latin_spans(
-        str(value or ""), allowed_latin_spans, field,
-    )
-    _require_chinese_primary(
-        value, field, allowed_latin_spans=allowed_latin_spans,
-    )
+    if source_grounded_contract:
+        require_chinese_primary_display(value, field)
+    else:
+        _reject_unproven_delimited_latin_spans(
+            str(value or ""), allowed_latin_spans, field,
+        )
+        _require_chinese_primary(
+            value, field, allowed_latin_spans=allowed_latin_spans,
+        )
     text = str(value or "")
     if "相关数值" in text:
         raise ValueError(
             f"SOURCE_NUMBER_MISMATCH: Gemini {field} contains an unresolved number"
         )
-    if field == "primary_story_title_zh" and re.search(
-        r"(?<=[\u3400-\u9fff])[a-z]{3,}(?=[\u3400-\u9fff])", text,
+    if (
+        not source_grounded_contract
+        and field == "primary_story_title_zh"
+        and re.search(
+            r"(?<=[\u3400-\u9fff])[a-z]{3,}(?=[\u3400-\u9fff])", text,
+        )
     ):
         raise ValueError(
             "Gemini primary_story_title_zh contains an untranslated word fragment"
@@ -2742,6 +2656,9 @@ def _invalid_chinese_display_fields(
                     allowed_latin_spans=_allowed_display_latin_spans(
                         result, value, headline, body,
                         prompt_version=prompt_version,
+                    ),
+                    source_grounded_contract=(
+                        prompt_version == CURRENT_NEWS_PROMPT_VERSION
                     ),
                 )
             elif field not in result:

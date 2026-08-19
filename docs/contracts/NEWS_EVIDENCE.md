@@ -17,7 +17,12 @@ background without granting model authority.
 
 Chinese display text is Chinese-primary rather than Chinese-only. Natural
 names, company names, tickers, identifiers, and common abbreviations MAY remain
-in English when English improves readability. Display-language repair MUST NOT
+in English when English improves readability. Under V17, every maximal visible
+Latin-and-digit run MUST exactly match the immutable
+`headline + "\n" + body` source with safe Latin/digit boundaries, except for
+the controlled system token `XAUUSD`. Grounded Latin remains visible when the
+field-level Chinese-primary balance is measured; source grounding never exempts
+English prose from that check. Display-language repair MUST NOT
 rewrite an otherwise valid semantic category, direction, impact, evidence, or
 confidence measurement. If readable Chinese-primary display text cannot be
 produced, the annotation MUST be withheld from model permission and retried; it

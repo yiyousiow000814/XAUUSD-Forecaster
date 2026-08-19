@@ -15,32 +15,11 @@ from typing import Any
 LEGACY_NEWS_PROMPT_VERSION = "news-json-v14-material-event-evidence"
 LEGACY_SEMANTIC_NEWS_PROMPT_VERSION = "news-json-v15-ai-semantic-review"
 PREVIOUS_NEWS_PROMPT_VERSION = "news-json-v16-xauusd-transmission-evidence"
-CURRENT_NEWS_PROMPT_VERSION = "news-json-v17-structured-named-references"
-NAMED_REFERENCE_MAX_CHARACTERS = 512
-NAMED_REFERENCE_MAX_ITEMS = 24
-NAMED_REFERENCE_CONNECTORS = frozenset({
-    "a", "an", "and", "as", "at", "by", "for", "from", "in", "of",
-    "on", "or", "the", "to", "vs", "with",
-})
-NAMED_REFERENCE_CLAUSE_WORDS = frozenset({
-    "am", "are", "be", "been", "being", "can", "could", "did", "do",
-    "does", "expect", "expected", "expects", "fell", "had", "has", "have",
-    "increase", "increased", "increases", "is", "may", "might", "must",
-    "reported", "reports", "rise", "rises", "rose", "said", "says", "shall",
-    "should", "was", "were", "will", "worried", "would",
-})
-NAMED_REFERENCE_DELIMITERS = (
-    ("《", "》"), ("“", "”"), ("‘", "’"), ("「", "」"), ("『", "』"),
-    ('"', '"'),
-)
-_NAMED_REFERENCE_TOKEN_PATTERN = re.compile(
-    r"[A-Za-z0-9]+(?:[.'&+/-][A-Za-z0-9]+)*"
-)
-_NAMING_CONTEXT_PATTERN = re.compile(
-    r"\b(?:called|entitled|known\s+as|named|refers?\s+to|referred\s+to\s+as|"
-    r"titled)\b",
-    re.IGNORECASE,
-)
+CURRENT_NEWS_PROMPT_VERSION = "news-json-v17-source-grounded-latin-display"
+DISPLAY_LATIN_SPAN_MAX_CHARACTERS = 512
+CONTROLLED_DISPLAY_LATIN = frozenset({"XAUUSD"})
+_VISIBLE_LATIN_INTERNAL_PUNCTUATION = frozenset(".'&+/:_%#-’")
+_VISIBLE_LATIN_TRAILING_TRIM = frozenset(" .'&/:_%-’")
 LEGACY_INVALID_SEMANTIC_REASON_PREFIX = "语言或结构一致性检查未通过"
 DISPLAY_AUDIT_FALLBACK_REASON_PREFIX = "语义已完成，但中文展示未通过校验"
 V1_NEWS_PROMPT_VERSIONS = (
@@ -67,11 +46,13 @@ _SCHEMA_PATH = Path(__file__).with_name("news_annotation.schema.json")
 
 
 @dataclass(frozen=True)
-class StructuredNamedReferenceProof:
-    exact_text: str
+class GroundedDisplayLatinSpan:
+    display_start: int
+    display_end: int
+    text: str
     source_start: int
     source_end: int
-    evidence: tuple[str, ...]
+    proof: str
 
 
 def model_usable_annotation_predicate(alias: str) -> str:
@@ -166,33 +147,6 @@ def news_annotation_schema(
                 "verbatim from the supplied headline or full content; never "
                 "translate, paraphrase, join clauses, or add ellipses"
             )
-        if prompt_version == CURRENT_NEWS_PROMPT_VERSION:
-            schema["required"].append("named_references")
-            schema["properties"]["named_references"] = {
-                "type": "array",
-                "maxItems": NAMED_REFERENCE_MAX_ITEMS,
-                "uniqueItems": True,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["exact_text"],
-                    "properties": {
-                        "exact_text": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": NAMED_REFERENCE_MAX_CHARACTERS,
-                            "description": (
-                                "Exact contiguous named-reference text copied "
-                                "from the supplied immutable source"
-                            ),
-                        },
-                    },
-                },
-                "description": (
-                    "Category-neutral named references copied exactly from the "
-                    "source; local code derives and verifies all coordinates"
-                ),
-            }
     elif prompt_version not in V1_NEWS_PROMPT_VERSIONS:
         raise ValueError(f"unsupported news prompt version: {prompt_version}")
     return schema
@@ -264,112 +218,7 @@ def _is_latin_letter(character: str) -> bool:
     return character.isalpha() and "LATIN" in unicodedata.name(character, "")
 
 
-def _normalized_reference_tokens(value: str) -> tuple[str, ...]:
-    return tuple(
-        normalized for match in re.finditer(
-            r"[A-Za-z0-9]+(?:[._'/-][A-Za-z0-9]+)*", value,
-        )
-        if (normalized := re.sub(
-            r"[^a-z0-9]", "", match.group(0).casefold(),
-        ))
-    )
-
-
-def _strong_identifier_shape(value: str) -> bool:
-    for token in _NAMED_REFERENCE_TOKEN_PATTERN.findall(value):
-        letters = "".join(
-            character for character in token if _is_latin_letter(character)
-        )
-        if (
-            any(character.isdigit() for character in token)
-            or any(character in ".&+/-" for character in token)
-            or (letters and letters.isupper())
-            or any(character.isupper() for character in letters[1:])
-        ):
-            return True
-    return False
-
-
-def _structured_name_shape(value: str) -> bool:
-    tokens = _NAMED_REFERENCE_TOKEN_PATTERN.findall(value)
-    latin_tokens = [
-        token for token in tokens
-        if any(_is_latin_letter(character) for character in token)
-    ]
-    if not latin_tokens:
-        return False
-    for token in latin_tokens:
-        word = re.sub(r"[^a-z]", "", token.casefold())
-        if word in NAMED_REFERENCE_CONNECTORS:
-            continue
-        letters = "".join(
-            character for character in token if _is_latin_letter(character)
-        )
-        if not letters or not (
-            letters[0].isupper() or _strong_identifier_shape(token)
-        ):
-            return False
-    return True
-
-
-def _reference_has_clause_syntax(value: str) -> bool:
-    if "\n" in value or "\r" in value or re.search(r"[;!?。！？]", value):
-        return True
-    if re.search(r"(?<![A-Z])\.\s+\S", value):
-        return True
-    words = [
-        re.sub(r"[^a-z]", "", token.casefold())
-        for token in _NAMED_REFERENCE_TOKEN_PATTERN.findall(value)
-    ]
-    return any(word in NAMED_REFERENCE_CLAUSE_WORDS for word in words)
-
-
-def source_span_within_reference_delimiters(
-    value: str, start: int, end: int, *,
-    max_span_characters: int = NAMED_REFERENCE_MAX_CHARACTERS,
-) -> bool:
-    for opening, closing in NAMED_REFERENCE_DELIMITERS:
-        if opening == closing:
-            if value[:start].count(opening) % 2 == 0:
-                continue
-            right = value.find(
-                closing, end, min(len(value), end + max_span_characters + 8),
-            )
-            if right >= 0:
-                return True
-            continue
-        left = value.rfind(opening, max(0, start - max_span_characters - 8), start)
-        prior_close = value.rfind(
-            closing, max(0, start - max_span_characters - 8), start,
-        )
-        if left < 0 or left < prior_close:
-            continue
-        search_end = min(len(value), end + max_span_characters + 8)
-        right = value.find(closing, end, search_end)
-        next_open = value.find(opening, end, search_end)
-        if (
-            right >= 0
-            and (next_open < 0 or right < next_open)
-            and right - left <= max_span_characters + 8
-        ):
-            return True
-    return False
-
-
-def _source_span_has_naming_context(source: str, start: int, end: int) -> bool:
-    prefix = source[max(0, start - 96):start]
-    for cue in _NAMING_CONTEXT_PATTERN.finditer(prefix):
-        if re.fullmatch(r"[\s:,-]*[\"“'‘]?", prefix[cue.end():]):
-            return True
-    suffix = source[end:min(len(source), end + 96)]
-    return bool(re.match(
-        r"^[\s\"”'’]*(?:is|was)?\s*(?:the\s+)?(?:name|title)\b",
-        suffix,
-        re.IGNORECASE,
-    ))
-
-
-def _exact_reference_matches(
+def _exact_source_matches(
     source: str, exact_text: str,
 ) -> tuple[tuple[int, int], ...]:
     found = []
@@ -388,83 +237,101 @@ def _exact_reference_matches(
     return tuple(found)
 
 
-def resolve_structured_named_reference(
-    exact_text: str, source_text: str, declared_identities: tuple[str, ...],
-) -> StructuredNamedReferenceProof | None:
-    """Derive one auditable source span for a locally proven declaration."""
-    if (
-        exact_text != exact_text.strip()
-        or not exact_text
-        or len(exact_text) > NAMED_REFERENCE_MAX_CHARACTERS
-        or not any(_is_latin_letter(character) for character in exact_text)
-        or any(_is_han(character) for character in exact_text)
-        or any(
-            character.isalpha()
-            and not _is_han(character)
-            and not _is_latin_letter(character)
-            for character in exact_text
-        )
-    ):
-        return None
-    source_matches = _exact_reference_matches(source_text, exact_text)
-    if not source_matches:
-        return None
-    exact_tokens = _normalized_reference_tokens(exact_text)
-    declared_tokens = {
-        _normalized_reference_tokens(identity)
-        for identity in declared_identities
-        if identity.strip() and identity.strip().casefold() != "n/a"
-    }
-    evidence: list[str] = []
-    if exact_tokens and exact_tokens in declared_tokens:
-        evidence.append("DECLARED_SEMANTIC_IDENTITY")
-    name_shape = _structured_name_shape(exact_text)
-    reference_tokens = _NAMED_REFERENCE_TOKEN_PATTERN.findall(exact_text)
-    if _strong_identifier_shape(exact_text) and (
-        len(reference_tokens) == 1 or name_shape
-    ):
-        evidence.append("STRONG_IDENTIFIER")
-    if name_shape:
-        evidence.append("PROPER_NAME_SHAPE")
-    delimited_matches = tuple(
-        match for match in source_matches
-        if source_span_within_reference_delimiters(
-            source_text, match[0], match[1],
-        )
-    )
-    if delimited_matches:
-        evidence.append("SOURCE_DELIMITED_REFERENCE")
-    context_matches = tuple(
-        match for match in source_matches
-        if _source_span_has_naming_context(source_text, match[0], match[1])
-    )
-    if context_matches:
-        evidence.append("SOURCE_REFERENCE_CONTEXT")
-    if len(source_matches) > 1:
-        evidence.append("REPEATED_SOURCE_REFERENCE")
+def visible_latin_runs(value: object) -> tuple[tuple[int, int, str], ...]:
+    """Derive maximal Latin/digit display runs without English semantics."""
+    text = str(value or "")
+    runs = []
+    cursor = 0
+    while cursor < len(text):
+        if not (_is_latin_letter(text[cursor]) or text[cursor].isdigit()):
+            cursor += 1
+            continue
+        start = cursor
+        cursor += 1
+        while cursor < len(text):
+            character = text[cursor]
+            if (
+                _is_latin_letter(character)
+                or character.isdigit()
+                or unicodedata.category(character) == "Mn"
+                or character in _VISIBLE_LATIN_INTERNAL_PUNCTUATION
+                or character in " \t"
+            ):
+                cursor += 1
+                continue
+            break
+        end = cursor
+        while end > start and (
+            text[end - 1].isspace()
+            or text[end - 1] in _VISIBLE_LATIN_TRAILING_TRIM
+        ):
+            end -= 1
+        exact_text = text[start:end]
+        if exact_text and any(_is_latin_letter(character) for character in exact_text):
+            runs.append((start, end, exact_text))
+    return tuple(runs)
 
-    if _reference_has_clause_syntax(exact_text):
-        shared = [match for match in delimited_matches if match in context_matches]
-        if not shared:
-            return None
-        chosen = shared[0]
-    else:
-        authorizing_evidence = {
-            "STRONG_IDENTIFIER", "SOURCE_REFERENCE_CONTEXT",
-        }
-        if authorizing_evidence.isdisjoint(evidence):
-            return None
-        chosen = (
-            context_matches[0] if context_matches
-            else delimited_matches[0] if delimited_matches
-            else source_matches[0]
-        )
-    return StructuredNamedReferenceProof(
-        exact_text=exact_text,
-        source_start=chosen[0],
-        source_end=chosen[1],
-        evidence=tuple(evidence),
+
+def grounded_display_latin_spans(
+    value: object, source_text: str,
+) -> tuple[GroundedDisplayLatinSpan, ...]:
+    """Require every visible Latin run to be source-grounded or controlled."""
+    text = str(value or "")
+    if any(
+        unicodedata.category(character) in {"Cc", "Cf", "Cs"}
+        for character in text
+    ):
+        raise ValueError("MALFORMED_DISPLAY_CONTROL: display contains control text")
+    if any(
+        character.isalpha()
+        and not _is_han(character)
+        and not _is_latin_letter(character)
+        for character in text
+    ):
+        raise ValueError("THIRD_SCRIPT_PRESENT: display contains unsupported script")
+    grounded = []
+    for start, end, exact_text in visible_latin_runs(text):
+        if len(exact_text) > DISPLAY_LATIN_SPAN_MAX_CHARACTERS:
+            raise ValueError("DISPLAY_LATIN_SPAN_TOO_LARGE: display span is too long")
+        matches = _exact_source_matches(source_text, exact_text)
+        if matches:
+            source_start, source_end = matches[0]
+            proof = "EXACT_SOURCE"
+        elif exact_text in CONTROLLED_DISPLAY_LATIN:
+            source_start = source_end = -1
+            proof = "SYSTEM_CONTROLLED"
+        else:
+            raise ValueError(
+                "UNGROUNDED_LATIN_DISPLAY: display contains Latin text absent "
+                "from the immutable source"
+            )
+        grounded.append(GroundedDisplayLatinSpan(
+            display_start=start,
+            display_end=end,
+            text=exact_text,
+            source_start=source_start,
+            source_end=source_end,
+            proof=proof,
+        ))
+    return tuple(grounded)
+
+
+def require_chinese_primary_display(value: object, field: str) -> None:
+    """Apply one field-level script-balance rule to the final visible text."""
+    text = str(value or "").strip()
+    han_characters = sum(_is_han(character) for character in text)
+    if not han_characters:
+        raise ValueError(f"NO_CHINESE_PROSE: Gemini {field} has no Chinese prose")
+    latin_characters = sum(
+        _is_latin_letter(character) or character.isdigit()
+        for character in text
     )
+    latin_tokens = len(re.findall(r"[A-Za-z0-9]+", text))
+    latin_units = max(latin_tokens, math.ceil(latin_characters / 4))
+    if han_characters / (han_characters + latin_units) < 0.50:
+        raise ValueError(
+            f"ENGLISH_PROSE_DOMINANT: Gemini {field} is not Chinese-primary"
+        )
 
 
 def _alphanumeric_fold(value: str) -> tuple[str, list[int]]:
@@ -630,23 +497,15 @@ def validate_news_annotation(
             if " ".join(excerpt.split()).casefold() not in normalized_source:
                 raise ValueError("annotation supporting evidence is absent from source")
         if prompt_version == CURRENT_NEWS_PROMPT_VERSION:
-            declared_identities = (
-                str(annotation.get("actor") or ""),
-                str(annotation.get("object") or ""),
-                *tuple(str(item) for item in annotation.get("entities") or ()),
-            )
-            for reference in annotation["named_references"]:
-                if reference["exact_text"] not in source_text:
-                    raise ValueError(
-                        "annotation named reference is absent from source"
-                    )
-                if resolve_structured_named_reference(
-                    reference["exact_text"], source_text, declared_identities,
-                ) is None:
-                    raise ValueError(
-                        "UNPROVEN_NAMED_REFERENCE: annotation named reference "
-                        "lacks deterministic local proof"
-                    )
+            for field in (
+                "headline_zh", "summary_zh", "primary_story_title_zh",
+                "semantic_reason_zh",
+            ):
+                value = annotation.get(field)
+                if field == "primary_story_title_zh" and not str(value or "").strip():
+                    continue
+                grounded_display_latin_spans(value, source_text)
+                require_chinese_primary_display(value, field)
 
 
 def annotation_topics(annotation: dict) -> tuple[str, ...]:

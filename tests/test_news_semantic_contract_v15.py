@@ -72,7 +72,6 @@ def _target_annotation(evidence: str) -> dict:
         "time_sensitivity": "SAME_DAY",
         "semantic_reason_zh": "官方就业数据可能改变利率预期。",
         "supporting_evidence": [evidence],
-        "named_references": [],
     }
 
 
@@ -90,11 +89,9 @@ def test_v17_schema_is_versioned_without_mutating_history() -> None:
     assert previous["$id"] == "xauusd.forward.news-annotation.v16"
     assert active["$id"] == "xauusd.forward.news-annotation.v17"
     assert "named_references" not in previous["required"]
-    assert "named_references" in active["required"]
+    assert "named_references" not in active["required"]
+    assert "named_references" not in active["properties"]
     assert active["properties"]["supporting_evidence"]["items"]["maxLength"] == 240
-    assert active["properties"]["named_references"]["items"]["required"] == [
-        "exact_text"
-    ]
 
 
 def test_semantic_generations_require_evidence_copied_from_the_source() -> None:
@@ -115,57 +112,20 @@ def test_semantic_generations_require_evidence_copied_from_the_source() -> None:
         )
 
 
-def test_v17_named_references_copy_text_but_never_accept_model_offsets() -> None:
-    source = (
-        "The agency is named Bureau of Labor Statistics and reported job "
-        "openings fell in June."
-    )
-    annotation = _target_annotation("job openings fell in June")
-    annotation["named_references"] = [
-        {"exact_text": "Bureau of Labor Statistics"}
-    ]
-
-    annotation_module._validate_current_result(
-        annotation, headline="Jobs report", body=source,
-        prompt_version=CURRENT_NEWS_PROMPT_VERSION,
-    )
-    proof = annotation_module.resolve_structured_named_reference(
-        "Bureau of Labor Statistics",
-        f"Jobs report\n{source}",
-        (annotation["actor"], annotation["object"], *annotation["entities"]),
-    )
-    assert proof is not None
-    assert "DECLARED_SEMANTIC_IDENTITY" in proof.evidence
-    assert "SOURCE_REFERENCE_CONTEXT" in proof.evidence
-
-    annotation["named_references"] = [{
-        "exact_text": "Bureau of Labor Statistics",
-        "source_start": 4,
-        "source_end": 30,
-    }]
-    with pytest.raises(ValueError, match="unknown fields"):
-        validate_news_annotation(
-            annotation,
-            prompt_version=CURRENT_NEWS_PROMPT_VERSION,
-            source_text=f"Jobs report\n{source}",
-        )
-
-
-def test_v17_named_reference_declaration_cannot_whitelist_exact_source_prose() -> None:
+def test_v17_accepts_source_grounded_latin_without_provider_declaration() -> None:
     prose = "Market expects growth to be strong"
     source = f"{prose} after the policy update."
     annotation = _target_annotation(prose)
     annotation["supporting_evidence"] = [prose]
-    annotation["named_references"] = [{"exact_text": prose}]
+    annotation["summary_zh"] = f"报道引用了 {prose} 这一原文表述，并继续解释事件影响。"
 
-    with pytest.raises(ValueError, match="UNPROVEN_NAMED_REFERENCE"):
-        annotation_module._validate_current_result(
-            annotation, headline="Market commentary", body=source,
-            prompt_version=CURRENT_NEWS_PROMPT_VERSION,
-        )
+    annotation_module._validate_current_result(
+        annotation, headline="Market commentary", body=source,
+        prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+    )
 
 
-def test_v17_ledger_cannot_persist_a_locally_unproven_named_reference(
+def test_v17_ledger_cannot_persist_ungrounded_visible_latin(
     tmp_path,
 ) -> None:
     now = datetime(2026, 8, 19, 2, 0, tzinfo=UTC)
@@ -186,9 +146,11 @@ def test_v17_ledger_cannot_persist_a_locally_unproven_named_reference(
     })
     annotation = _target_annotation(prose)
     annotation["supporting_evidence"] = [prose]
-    annotation["named_references"] = [{"exact_text": prose}]
+    annotation["summary_zh"] = (
+        "报道称 OpenAI Launches New Model，并继续讨论市场反应与政策影响。"
+    )
 
-    with pytest.raises(ValueError, match="UNPROVEN_NAMED_REFERENCE"):
+    with pytest.raises(ValueError, match="UNGROUNDED_LATIN_DISPLAY"):
         ledger.append_annotation({
             "annotation_id": "prose-abuse",
             "source": "named-reference-contract",
@@ -205,21 +167,11 @@ def test_v17_ledger_cannot_persist_a_locally_unproven_named_reference(
     ledger.close()
 
 
-def test_v17_named_reference_schema_rejects_duplicates_and_pathological_size() -> None:
+def test_v17_schema_rejects_obsolete_named_reference_declarations() -> None:
     source = "OpenAI released an update."
     annotation = _target_annotation("OpenAI released an update")
-    annotation["named_references"] = [
-        {"exact_text": "OpenAI"}, {"exact_text": "OpenAI"},
-    ]
-    with pytest.raises(ValueError, match="contains duplicates"):
-        validate_news_annotation(
-            annotation,
-            prompt_version=CURRENT_NEWS_PROMPT_VERSION,
-            source_text=source,
-        )
-
-    annotation["named_references"] = [{"exact_text": "A" * 513}]
-    with pytest.raises(ValueError, match="named_references.exact_text is too long"):
+    annotation["named_references"] = [{"exact_text": "OpenAI"}]
+    with pytest.raises(ValueError, match="unknown schema fields: named_references"):
         validate_news_annotation(
             annotation,
             prompt_version=CURRENT_NEWS_PROMPT_VERSION,
@@ -310,8 +262,9 @@ def test_v17_retains_v16_current_event_and_transmission_evidence() -> None:
     assert "genre does not erase quoted current market facts" in prompt
     assert "supporting_evidence is a copy field" in prompt
     assert "Never translate, paraphrase" in prompt
-    assert "Return named_references as category-neutral" in prompt
-    assert "Do not provide offsets" in prompt
+    assert "Any Latin text retained in a Chinese display field" in prompt
+    assert "final visible field must remain Chinese-primary overall" in prompt
+    assert "named_references" not in prompt
 
 
 def test_target_backfill_cannot_bypass_scheduler_capacity_refusal(
@@ -455,7 +408,6 @@ def test_previous_v16_and_active_v17_annotations_coexist(tmp_path) -> None:
     })
     target = _target_annotation("job openings fell in June")
     previous_target = dict(target)
-    previous_target.pop("named_references")
     common = {
         "source": "semantic-contract-test",
         "source_item_id": "jobs",

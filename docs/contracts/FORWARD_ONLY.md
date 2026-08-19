@@ -104,7 +104,7 @@ summary together with the structured impulse fields. A new prompt version is a
 new immutable annotation; it never rewrites an earlier interpretation.
 
 The active annotation contract is
-`news-json-v17-structured-named-references`. V17 retains the explicit
+`news-json-v17-source-grounded-latin-display`. V17 retains the explicit
 semantic relevance, review priority, material-change, time-sensitivity,
 reason, source-evidence, and narrow XAUUSD transmission rules from V16. Company,
 product, local, and non-US macro stories do
@@ -165,48 +165,26 @@ cannot change semantic measurements or grant model permission. Each retry
 preserves bounded failure evidence, and a later versioned recovery may authorize
 one new attempt after another repair mechanism changes.
 
-Chinese-facing annotation fields share one layered source-grounded
-allowed-Latin-span contract. V17 adds category-neutral `named_references`; each
-item contains only `exact_text` copied from the immutable source. Provider
-offsets are forbidden. Local code resolves every occurrence in the sole source
-coordinate space `headline + "\n" + body`, derives source offsets, and requires
-independent local referential proof before the declaration may affect display
-validation. The 512-character and 24-item limits are broad payload-safety bounds,
-not claims about the normal semantic length of a name. They replace the legacy
-64-character/eight-token title heuristic for structured references.
+Chinese-facing annotation fields use two deterministic V17 display questions.
+First, local code derives every maximal visible Latin-and-digit run directly
+from the final field. Each run MUST be an exact, case-sensitive, boundary-safe
+substring of the sole immutable source coordinate space
+`headline + "\n" + body`, or the exact controlled system token `XAUUSD`.
+Repeated source occurrences are valid; no provider declaration or semantic
+classification is consulted. Invented prefixes, suffixes, middle text, joined
+source regions, unsupported scripts, and ungrounded runs fail closed.
 
-The Annotation prompt/schema version, passed explicitly through initial output,
-invalid-field detection, display repair, and checkpoint revalidation, selects
-the display contract. V17 uses only locally proven structured
-`named_references`; it MUST NOT run the V16 source-grounded fallback after or
-instead of structured resolution. V16 and older records retain that fallback
-unchanged for frozen compatibility and are never inferred from the presence or
-absence of `named_references`.
-
-The validator MUST reject declarations that capture ordinary clause syntax,
-multiple sentences, paragraphs, invented text, or unrelated words around an
-identifier. Exact source occurrence, model declaration, and Title Case are not
-sufficient together. `PROPER_NAME_SHAPE` is supporting audit evidence only;
-`DECLARED_SEMANTIC_IDENTITY` is also supporting only because `actor`, `object`,
-`entities`, and `named_references` come from the same provider result. Repeating
-one model assertion in two fields is not independent proof. Authorization
-requires deterministic source evidence: strong identifier shape or explicit
-naming/reference context. Source-subject position, including a Title Case span
-followed by a passive predicate, never authorizes V17 because the same structure
-can describe an ordinary headline or proposition. Consequently,
-`The Dark Knight was released in 2008.` fails closed without another local cue;
-`"The Dark Knight" is the title ...` and `refers to "The Dark Knight" ...`
-remain valid category-neutral reference contexts. An unrelated declared identity
-near a candidate never supplies V17 proof. A clause-like title requires both
-source delimitation and explicit naming/reference context; quoting prose alone
-grants no permission. Duplicate
-ranges are collapsed, a proven enclosing structured range may replace its
-proven nested ranges, and partially overlapping declarations are never unioned.
-Only normalized non-overlapping display spans are masked before the unchanged
-Chinese-primary ratio is applied. Historical semantic objects are never
-rewritten merely to add the field. Existing display
-checkpoints MUST be revalidated locally against the current deterministic rules
-before another provider request is attempted.
+Second, the validator evaluates the complete final visible field, without
+masking grounded Latin text, and requires the field to remain Chinese-primary.
+Quotation marks, brackets, title casing, source identity, and model-declared
+roles never exempt English prose from that field-level balance. This rule is
+applied consistently during initial validation, invalid-field detection,
+display repair, and checkpoint revalidation. V16 and older records retain their
+frozen legacy display behavior. No V17 row existed in production when the
+obsolete structured declaration schema was removed, so no historical semantic
+object needs a compatibility field or rewrite. Existing display checkpoints
+MUST be revalidated locally against the current deterministic rules before
+another provider request is attempted.
 
 The model gateway distinguishes a request that produced no trustworthy response
 from a response that failed decoding or validation. Capacity, provider pacing,

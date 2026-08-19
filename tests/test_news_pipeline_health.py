@@ -96,7 +96,6 @@ def _impact_candidate(
         "supporting_evidence": [
             "Federal Reserve announced a material policy decision"
         ],
-        "named_references": [],
     }
     annotation.update(annotation_overrides or {})
     ledger.append_annotation({

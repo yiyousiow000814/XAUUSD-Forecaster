@@ -1,4 +1,4 @@
-"""Run the frozen named-reference benchmark through the metered Gemma gateway."""
+"""Offline evaluation only: run the frozen benchmark through Gemma manually."""
 
 from __future__ import annotations
 

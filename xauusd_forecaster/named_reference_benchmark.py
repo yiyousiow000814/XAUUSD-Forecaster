@@ -1,4 +1,7 @@
-"""Frozen evaluation contract for the narrow named-reference reviewer."""
+"""Offline-only frozen evaluation for the rejected named-reference reviewer.
+
+This module has no production annotation, scheduler, retry, or provider role.
+"""
 
 from __future__ import annotations
 
