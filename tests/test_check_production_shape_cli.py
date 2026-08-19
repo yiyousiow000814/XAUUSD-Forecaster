@@ -81,3 +81,43 @@ def test_status_probe_rejects_non_loopback_url_before_transport() -> None:
 
     assert result.returncode == 2
     assert json.loads(result.stdout)["error_code"] == "STATUS_ENDPOINT_URL_INVALID"
+
+
+def test_legacy_loopback_status_url_is_validated_through_critical_endpoint() -> None:
+    paths = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            paths.append(self.path)
+            body = json.dumps({"error": "database unavailable"}).encode()
+            self.send_response(503)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--status-url",
+                f"http://127.0.0.1:{server.server_port}/api/status",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert result.returncode == 2
+    assert json.loads(result.stdout)["error_code"] == "STATUS_ENDPOINT_HTTP_ERROR"
+    assert paths == ["/api/critical-status"]
