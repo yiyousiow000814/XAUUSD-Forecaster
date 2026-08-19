@@ -1488,15 +1488,33 @@ def test_dashboard_quota_keeps_pre_scheduler_file_compatibility(
     ledger.close()
     monkeypatch.setenv("GEMINI_API_KEYS", "legacy-key")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    GeminiQuotaLedger(tmp_path / "gemini-quota.json").seed(
-        "legacy-key", 7, now=now,
-    )
+    quota_day = GeminiQuotaLedger.quota_day(now)
+    quota_paths = {
+        "gemini_quota": tmp_path / "gemini-quota.json",
+        "gemini_31_quota": tmp_path / "gemini-3.1-flash-lite-quota.json",
+        "gemma_quota": tmp_path / "gemma-quota.json",
+        "gemini_embedding_quota": tmp_path / "gemini-embedding-2-quota.json",
+    }
+    expected_counts = {
+        "gemini_quota": 7,
+        "gemini_31_quota": 8,
+        "gemma_quota": 9,
+        "gemini_embedding_quota": 10,
+    }
+    for payload_key, path in quota_paths.items():
+        path.write_text(json.dumps({
+            "quota_day": quota_day,
+            "counts": {"94eeb7bbe979": expected_counts[payload_key]},
+        }), encoding="utf-8")
+    original_bytes = {path: path.read_bytes() for path in quota_paths.values()}
 
-    payload = _dashboard_module()._dashboard_payload(database)
+    payload = _dashboard_module()._dashboard_payload(database, clock=lambda: now)
 
-    assert payload["gemini_quota"]["total_sent"] == 7
-    assert payload["gemini_quota"]["keys"][0]["sent"] == 7
-    assert "accounting_source" not in payload["gemini_quota"]
+    for payload_key, path in quota_paths.items():
+        assert payload[payload_key]["total_sent"] == expected_counts[payload_key]
+        assert payload[payload_key]["keys"][0]["sent"] == expected_counts[payload_key]
+        assert "accounting_source" not in payload[payload_key]
+        assert path.read_bytes() == original_bytes[path]
 
 
 def test_status_snapshot_cache_singleflights_concurrent_builds(tmp_path) -> None:

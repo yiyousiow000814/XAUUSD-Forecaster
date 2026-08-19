@@ -6,7 +6,6 @@ import hashlib
 import json
 import threading
 import urllib.error
-import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -14,6 +13,10 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Callable, TypeVar
 
+from .ai_provider_registry import (
+    google_embedding_endpoint_for_model,
+    google_generation_endpoint_for_model,
+)
 
 T = TypeVar("T")
 LOCAL_TOKEN_ESTIMATOR_VERSION = "multilingual-conservative-v1"
@@ -73,10 +76,8 @@ def post_gemini_batch_embeddings(
     timeout: float,
 ) -> dict[str, object]:
     """Send an already-accounted embedding batch through the Google boundary."""
-    encoded_model = urllib.parse.quote(model, safe="")
     request = urllib.request.Request(
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{encoded_model}:batchEmbedContents",
+        google_embedding_endpoint_for_model(model),
         data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
         headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
         method="POST",
@@ -348,10 +349,8 @@ class GeminiModelGateway:
     ) -> dict[str, object]:
         if method != "generateContent":
             raise ValueError(f"unsupported model provider method: {method}")
-        encoded_model = urllib.parse.quote(model, safe="")
         request = urllib.request.Request(
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{encoded_model}:generateContent",
+            google_generation_endpoint_for_model(model),
             data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
             headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
             method="POST",
