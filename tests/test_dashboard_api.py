@@ -1591,6 +1591,46 @@ def test_critical_status_route_uses_the_independent_bounded_builder(
         thread.join(timeout=2)
 
 
+@pytest.mark.parametrize(
+    ("database", "expected_optional"),
+    [
+        (Path(".local/preflight/forward.sqlite3"), False),
+        (Path(".local/forward/forward.sqlite3"), True),
+    ],
+)
+def test_legacy_status_alias_is_bounded_only_for_isolated_preflight(
+    monkeypatch, tmp_path, database, expected_optional,
+) -> None:
+    module = _dashboard_module()
+    module.Handler.database = tmp_path / database
+    module.Handler.status_cache = module.StatusSnapshotCache()
+    module.Handler.critical_status_cache = module.StatusSnapshotCache()
+    calls = []
+
+    def builder(_database, *, include_optional=True):
+        calls.append(include_optional)
+        return {
+            "generated_at": "2026-08-20T00:00:00+00:00",
+            "system": {"online": True},
+        }
+
+    monkeypatch.setattr(module, "_dashboard_payload", builder)
+    server = module.ThreadingHTTPServer(("127.0.0.1", 0), module.Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{server.server_port}/api/status", timeout=2,
+        ) as response:
+            assert response.status == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert calls == [expected_optional]
+
+
 def test_status_snapshot_cache_serves_bounded_stale_during_slow_refresh(
     tmp_path,
 ) -> None:

@@ -1,11 +1,16 @@
 from pathlib import Path
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import socket
 import sqlite3
 import subprocess
 import sys
 import textwrap
+import threading
+import time
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -90,6 +95,8 @@ def test_control_center_updates_only_the_isolated_main_runtime() -> None:
     assert 'RuntimeRoot must be separate from the development checkout' in control_center
     assert 'worktree add --detach --quiet' in control_center
     assert '-WindowStyle Hidden -PassThru' in control_center
+    assert 'isolated-critical-status-diagnostics-v4' in control_center
+    assert '$statusUrl = "http://127.0.0.1:$preflightPort/api/critical-status"' in preflight
     assert '"quote"' not in control_center.split("$reloadableServiceKeys =", 1)[1].splitlines()[0]
 
     reported = subprocess.run(
@@ -261,21 +268,191 @@ def test_preflight_failure_always_stops_the_staged_api_process(tmp_path) -> None
     database = tmp_path / "runtime" / ".local" / "forward" / "forward-evidence.sqlite3"
     database.parent.mkdir(parents=True)
     database.write_bytes(b"")
-    result = _run_control_center_contract(
+    result = json.loads(_run_control_center_contract(
         tmp_path,
         "$script:stops = 0; function git { $global:LASTEXITCODE = 0 }; "
         "function Get-Command { return [pscustomobject]@{ Source = 'missing-python.exe' } }; "
-        "function New-CandidatePreflightDatabase {}; "
+        "function Copy-CandidatePreflightDatabase {}; "
+        "function Migrate-CandidatePreflightDatabase {}; "
+        "function Copy-CandidatePreflightState {}; "
         "function Start-Process { $process = [pscustomobject]@{ HasExited = $false; Id = 424242 }; "
-        "$process | Add-Member ScriptMethod WaitForExit { param($milliseconds) return $true }; "
-        "return $process }; function Invoke-WebRequest { return [pscustomobject]@{ StatusCode = 200 } }; "
+        "$process | Add-Member ScriptMethod Refresh { return $null }; "
+        "$process | Add-Member ScriptMethod WaitForExit { param($milliseconds) "
+        "$this.HasExited = $true; return $true }; "
+        "return $process }; function Wait-CandidateCriticalStatus { return [pscustomobject]@{ "
+        "ready = $false; error_code = 'CRITICAL_STATUS_HTTP_ERROR'; last_probe = "
+        "[pscustomobject]@{ http_status = 500; response_body = 'failed'; "
+        "transport_error = $null; elapsed_ms = 2 } } }; "
         "function Stop-Process { $script:stops += 1 }; "
         "$accepted = Invoke-ProductionShapePreflight -Revision ('b' * 40); "
         "$state = Get-RuntimeUpdateState; "
-        'Write-Output "$accepted,$script:stops,$($state.update_status)"',
+        "[pscustomobject]@{ accepted = $accepted; stops = $script:stops; "
+        "status = $state.update_status; code = $state.failure_code; "
+        "phase = $state.failure_phase; diagnostics = $state.preflight_diagnostics } "
+        "| ConvertTo-Json -Compress -Depth 8",
+    ))
+
+    assert result["accepted"] is False
+    assert result["stops"] == 1
+    assert result["status"] == "PREFLIGHT_FAILED"
+    assert result["code"] == "CRITICAL_STATUS_HTTP_ERROR"
+    assert result["phase"] == "WAIT_CRITICAL_STATUS"
+    assert result["diagnostics"]["last_http_status"] == 500
+    assert result["diagnostics"]["last_http_body"] == "failed"
+
+
+@pytest.mark.parametrize(
+    ("copy_body", "migration_body", "expected_phase", "expected_code", "detail"),
+    [
+        ("throw 'copy exploded'", "", "COPY_DATABASE", "COPY_DATABASE_FAILED", "copy exploded"),
+        ("", "throw 'migration exploded'", "MIGRATE_DATABASE", "MIGRATE_DATABASE_FAILED", "migration exploded"),
+    ],
+)
+def test_preflight_failure_identifies_database_phase(
+    tmp_path, copy_body, migration_body, expected_phase, expected_code, detail
+) -> None:
+    database = tmp_path / "runtime" / ".local" / "forward" / "forward-evidence.sqlite3"
+    database.parent.mkdir(parents=True)
+    database.write_bytes(b"")
+    result = json.loads(_run_control_center_contract(
+        tmp_path,
+        "function git { $global:LASTEXITCODE = 0 }; "
+        "function Get-Command { return [pscustomobject]@{ Source = 'missing-python.exe' } }; "
+        f"function Copy-CandidatePreflightDatabase {{ {copy_body} }}; "
+        f"function Migrate-CandidatePreflightDatabase {{ {migration_body} }}; "
+        "function Copy-CandidatePreflightState {}; "
+        "$accepted = Invoke-ProductionShapePreflight -Revision ('b' * 40); "
+        "$state = Get-RuntimeUpdateState; "
+        "[pscustomobject]@{ accepted = $accepted; phase = $state.failure_phase; "
+        "code = $state.failure_code; detail = $state.preflight_diagnostics.failure_detail } "
+        "| ConvertTo-Json -Compress -Depth 8",
+    ))
+
+    assert result["accepted"] is False
+    assert result["phase"] == expected_phase
+    assert result["code"] == expected_code
+    assert detail in result["detail"]
+
+
+def test_candidate_api_exit_persists_bounded_secret_safe_diagnostics(tmp_path) -> None:
+    database = tmp_path / "runtime" / ".local" / "forward" / "forward-evidence.sqlite3"
+    database.parent.mkdir(parents=True)
+    database.write_bytes(b"")
+    result = json.loads(_run_control_center_contract(
+        tmp_path,
+        "function git { $global:LASTEXITCODE = 0 }; "
+        "function Get-Command { return [pscustomobject]@{ Source = 'missing-python.exe' } }; "
+        "function Copy-CandidatePreflightDatabase {}; "
+        "function Migrate-CandidatePreflightDatabase {}; "
+        "function Copy-CandidatePreflightState {}; "
+        "function Start-Process { param($FilePath,$ArgumentList,$WorkingDirectory,"
+        "$WindowStyle,[switch]$PassThru,$RedirectStandardOutput,$RedirectStandardError); "
+        "Set-Content -LiteralPath $RedirectStandardOutput -Value ('x' * 5000); "
+        "Set-Content -LiteralPath $RedirectStandardError "
+        "-Value 'api_key=super-secret Bearer abc.def.ghi'; "
+        "$process = [pscustomobject]@{ HasExited = $true; ExitCode = 23; Id = 42 }; "
+        "$process | Add-Member ScriptMethod Refresh { return $null }; "
+        "$process | Add-Member ScriptMethod WaitForExit { param($milliseconds) return $true }; "
+        "return $process }; "
+        "$accepted = Invoke-ProductionShapePreflight -Revision ('b' * 40); "
+        "$state = Get-RuntimeUpdateState; "
+        "[pscustomobject]@{ accepted = $accepted; code = $state.failure_code; "
+        "phase = $state.failure_phase; exited = "
+        "$state.preflight_diagnostics.candidate_process_exited; exit_code = "
+        "$state.preflight_diagnostics.candidate_exit_code; stdout = "
+        "$state.preflight_diagnostics.stdout_tail; stderr = "
+        "$state.preflight_diagnostics.stderr_tail } | ConvertTo-Json -Compress",
+    ))
+
+    assert result["accepted"] is False
+    assert result["code"] == "CANDIDATE_API_EXITED"
+    assert result["phase"] == "WAIT_CRITICAL_STATUS"
+    assert result["exited"] is True
+    assert result["exit_code"] == 23
+    assert len(result["stdout"]) <= 2060
+    assert "super-secret" not in result["stderr"]
+    assert "abc.def.ghi" not in result["stderr"]
+    assert "[REDACTED]" in result["stderr"]
+
+
+class _CandidateProbeHandler(BaseHTTPRequestHandler):
+    mode = "success"
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.mode == "timeout":
+            time.sleep(2)
+        status = 500 if self.mode == "error" else 200
+        body = (
+            b'{"error":"api_key=super-secret"}'
+            if self.mode == "error" else b'{"status":"OK"}'
+        )
+        try:
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def log_message(self, *_args) -> None:
+        pass
+
+
+def _run_candidate_probe(tmp_path, mode: str) -> dict:
+    tmp_path.mkdir()
+    handler = type("CandidateProbeHandler", (_CandidateProbeHandler,), {"mode": mode})
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result = _run_control_center_contract(
+            tmp_path,
+            f"Invoke-CandidateStatusProbe -Url "
+            f"'http://127.0.0.1:{server.server_port}/api/critical-status' "
+            "-TimeoutSeconds 1 | ConvertTo-Json -Compress",
+        )
+        return json.loads(result)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+
+def test_candidate_critical_status_probe_distinguishes_success_http_and_timeout(
+    tmp_path,
+) -> None:
+    success = _run_candidate_probe(tmp_path / "success", "success")
+    error = _run_candidate_probe(tmp_path / "error", "error")
+    timeout = _run_candidate_probe(tmp_path / "timeout", "timeout")
+
+    assert success["ready"] is True
+    assert success["http_status"] == 200
+    assert success["error_code"] is None
+    assert error["ready"] is False
+    assert error["http_status"] == 500
+    assert error["error_code"] == "CRITICAL_STATUS_HTTP_ERROR"
+    assert "super-secret" not in json.dumps(error)
+    assert "[REDACTED]" in json.dumps(error)
+    assert timeout["ready"] is False
+    assert timeout["http_status"] is None
+    assert timeout["error_code"] == "CRITICAL_STATUS_TIMEOUT"
+
+
+def test_candidate_readiness_accepts_a_successful_critical_probe(tmp_path) -> None:
+    result = _run_control_center_contract(
+        tmp_path,
+        "$process = [pscustomobject]@{ HasExited = $false }; "
+        "$process | Add-Member ScriptMethod Refresh { return $null }; "
+        "function Start-Sleep {}; function Invoke-CandidateStatusProbe { "
+        "return [pscustomobject]@{ ready = $true; error_code = $null; "
+        "http_status = 200; response_body = $null; transport_error = $null; "
+        "elapsed_ms = 1 } }; $result = Wait-CandidateCriticalStatus "
+        "-Process $process -Url 'http://127.0.0.1:1/api/critical-status' "
+        "-Deadline ([DateTimeOffset]::UtcNow.AddSeconds(1)); "
+        'Write-Output "$($result.ready),$($result.last_probe.http_status)"',
     )
 
-    assert result == "False,1,PREFLIGHT_FAILED"
+    assert result == "True,200"
 
 
 def test_switch_preparation_reports_when_previous_bundle_cannot_be_restored(
@@ -856,7 +1033,7 @@ def test_failed_candidate_is_only_blocked_by_the_same_preflight_contract(
         "function Test-RevisionDescendsFrom { return $true }; "
         f"Write-RuntimeUpdateState @{{ accepted_main_revision = '{current}'; "
         f"failed_revision = '{candidate}'; failed_preflight_contract = "
-        "'legacy-direct-database-v1' }; "
+        "'isolated-migrated-runtime-state-v3' }; "
         f"Write-Output (Test-MainCandidate '{current}' '{candidate}')",
     )
 
