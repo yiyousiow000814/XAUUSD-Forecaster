@@ -17,7 +17,11 @@ from .news_evidence import annotation_is_actionable_candidate
 from .news_impact import IMPACT_MODEL, IMPACT_PROMPT_VERSION
 from .news_relevance import google_news_item_is_relevant
 from .news_identity import preferred_cluster_peer_predicate
-from .news_scheduler import configured_api_credentials
+from .news_scheduler import (
+    LIVE_LANE,
+    configured_api_credentials,
+    resolve_work_provenance,
+)
 from .news_time import (
     assess_news_semantic_eligibility,
     category_time_rule,
@@ -86,6 +90,16 @@ def _current_actionable_impact_rows(
     current: list[dict[str, object]] = []
     for raw in rows:
         row = dict(raw)
+        provenance = resolve_work_provenance(
+            ledger.connection,
+            source=str(row["source"]),
+            source_item_id=str(row["source_item_id"]),
+            revision_number=int(row["revision_number"]),
+            annotation_id=str(row["annotation_id"]),
+            current_prompt_version=PROMPT_VERSION,
+        )
+        if provenance is None or provenance.work_lane != LIVE_LANE:
+            continue
         annotation = json.loads(str(row.get("annotation_json") or "{}"))
         if not annotation_is_actionable_candidate(
             annotation, str(row.get("headline") or ""),
@@ -196,6 +210,16 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
     operational_reasons: list[str] = []
     operational_reason_counts: dict[str, int] = {}
     annotation_pending = False
+    live_annotation_origins = {
+        (str(row[0]), str(row[1]), int(row[2]))
+        for row in ledger.connection.execute(
+            """SELECT source,source_item_id,revision_number
+               FROM news_ai_jobs_v1
+               WHERE task_type='ACTIVE_ANNOTATION' AND prompt_version=?
+                 AND work_lane=? AND lane_classified=1""",
+            (PROMPT_VERSION, LIVE_LANE),
+        )
+    }
 
     def add_unresolved(
         task_type: str, row: dict[str, object], at: datetime,
@@ -215,6 +239,13 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
         ledger.connection, observed_at=observed_at, limit=100_000,
         prompt_version=PROMPT_VERSION,
     ):
+        origin = (
+            str(row.get("source") or ""),
+            str(row.get("source_item_id") or ""),
+            int(row.get("revision_number") or 0),
+        )
+        if origin not in live_annotation_origins:
+            continue
         received = _instant(row.get("collector_first_seen_time"))
         if received is not None and intake_floor <= received <= cutoff:
             annotation_pending = True
@@ -235,6 +266,7 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
           ON n.source=j.source AND n.source_item_id=j.source_item_id
          AND n.revision_number=j.revision_number
         WHERE j.task_type='ACTIVE_ANNOTATION' AND j.prompt_version=?
+          AND j.work_lane=? AND j.lane_classified=1
           AND j.state IN ('BACKING_OFF','DEAD_LETTER')
           AND j.created_at>=? AND j.created_at<=?
           AND NOT EXISTS (
@@ -252,7 +284,8 @@ def news_semantic_pipeline_health(ledger, *, observed_at: datetime) -> dict[str,
               AND {semantic_eligibility_sql_predicate('peer')}
               AND {preferred_cluster_peer_predicate('peer', 'n')})""",
         (
-            PROMPT_VERSION, intake_floor.isoformat(), observed_at.isoformat(),
+            PROMPT_VERSION, LIVE_LANE,
+            intake_floor.isoformat(), observed_at.isoformat(),
             forward_epoch.isoformat(),
         ),
     ).fetchall()
