@@ -64,10 +64,10 @@ class GeminiQuotaLedger:
         temporary.replace(self.path)
 
     @staticmethod
-    def _migrate_credential_count(
+    def _credential_count(
         state: dict, api_key: str,
-    ) -> tuple[str, int, bool]:
-        """Move a legacy count to its canonical HMAC identity conservatively."""
+    ) -> tuple[str, str, int]:
+        """Read the conservative count without changing ledger state."""
         counts = state["counts"]
         fingerprint = key_fingerprint(api_key)
         legacy_fingerprint = legacy_credential_id_for_migration(
@@ -75,7 +75,17 @@ class GeminiQuotaLedger:
         )
         canonical_count = int(counts.get(fingerprint, 0))
         legacy_count = int(counts.get(legacy_fingerprint, 0))
-        effective_count = max(canonical_count, legacy_count)
+        return fingerprint, legacy_fingerprint, max(canonical_count, legacy_count)
+
+    @classmethod
+    def _migrate_credential_count(
+        cls, state: dict, api_key: str,
+    ) -> tuple[str, int, bool]:
+        """Move a legacy count to its canonical HMAC identity conservatively."""
+        counts = state["counts"]
+        fingerprint, legacy_fingerprint, effective_count = cls._credential_count(
+            state, api_key,
+        )
         changed = (
             legacy_fingerprint in counts
             or (
@@ -120,12 +130,10 @@ class GeminiQuotaLedger:
         with self._lock:
             state = self._load(now)
             keys = []
-            migrated = False
             for slot, api_key in enumerate(api_keys, 1):
-                fingerprint, sent, changed = self._migrate_credential_count(
+                fingerprint, _, sent = self._credential_count(
                     state, api_key,
                 )
-                migrated = migrated or changed
                 keys.append(
                     {
                         "slot": slot,
@@ -137,8 +145,6 @@ class GeminiQuotaLedger:
                         ),
                     }
                 )
-            if migrated:
-                self._save(state)
         return {
             "quota_day_pacific": state["quota_day"],
             "daily_limit_per_key": self.daily_limit,

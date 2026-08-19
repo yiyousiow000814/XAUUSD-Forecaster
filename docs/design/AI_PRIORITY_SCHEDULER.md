@@ -150,10 +150,15 @@ that bounded migration, legacy inputs deliberately cut over to visibly
 versioned `legacy-hmac-v1-*` accounts instead of silently claiming old identity.
 
 Pre-scheduler JSON quota ledgers recognize the retired SHA-256 identifier only
-as a bounded migration lookup. On the first `reserve`, `seed`, or `snapshot`,
-the ledger takes the maximum of the legacy and canonical counts, removes the
-legacy key, and atomically replaces the file with the canonical HMAC identity.
-Counts are never added, so migration cannot reset or double-count daily usage.
+as a bounded migration lookup. `snapshot` computes the maximum of the legacy
+and canonical counts in memory and never changes the file. On the first
+`reserve` or `seed`, the ledger writes that maximum under the canonical HMAC
+identity, removes the legacy key, and atomically replaces the file. Counts are
+never added, so migration cannot reset or double-count daily usage. Current
+production request accounting writes the scheduler database; production status
+and compatibility JSON reads do not write these files. The compatibility JSON
+writer lock is process-local, so any caller that uses `reserve` or `seed` must
+enforce a single-writer process for a given path.
 
 Every provider request reserves durable quota before transport. These counters
 represent conservative local admission, not provider-confirmed success. The

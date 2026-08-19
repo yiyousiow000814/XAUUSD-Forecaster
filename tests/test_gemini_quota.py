@@ -30,15 +30,15 @@ def _saved_counts(path) -> dict[str, int]:
     return json.loads(path.read_text(encoding="utf-8"))["counts"]
 
 
-def test_snapshot_migrates_old_only_count_without_resetting_quota(tmp_path) -> None:
+def test_snapshot_reads_old_only_count_without_modifying_file(tmp_path) -> None:
     path = tmp_path / "gemini-quota.json"
     _write_state(path, legacy=420, canonical=None)
+    original = path.read_bytes()
 
     snapshot = GeminiQuotaLedger(path).snapshot((KEY,), DAY)
 
     assert snapshot["keys"][0]["sent"] == 420
-    assert _saved_counts(path) == {key_fingerprint(KEY): 420}
-    assert KEY not in path.read_text(encoding="utf-8")
+    assert path.read_bytes() == original
 
 
 def test_reserve_continues_from_legacy_count(tmp_path) -> None:
@@ -48,6 +48,7 @@ def test_reserve_continues_from_legacy_count(tmp_path) -> None:
     assert GeminiQuotaLedger(path).reserve(KEY, DAY)
 
     assert _saved_counts(path) == {key_fingerprint(KEY): 421}
+    assert KEY not in path.read_text(encoding="utf-8")
 
 
 def test_seed_never_lowers_migrated_legacy_count(tmp_path) -> None:
@@ -57,29 +58,39 @@ def test_seed_never_lowers_migrated_legacy_count(tmp_path) -> None:
     GeminiQuotaLedger(path).seed(KEY, 300, DAY)
 
     assert _saved_counts(path) == {key_fingerprint(KEY): 420}
+    assert KEY not in path.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(("legacy", "canonical"), ((420, 400), (300, 420)))
-def test_migration_uses_maximum_without_double_counting(
+def test_snapshot_uses_maximum_without_modifying_file(
     tmp_path, legacy: int, canonical: int,
 ) -> None:
     path = tmp_path / "gemini-quota.json"
     _write_state(path, legacy=legacy, canonical=canonical)
+    original = path.read_bytes()
 
     snapshot = GeminiQuotaLedger(path).snapshot((KEY,), DAY)
 
     assert snapshot["keys"][0]["sent"] == max(legacy, canonical)
-    assert _saved_counts(path) == {key_fingerprint(KEY): max(legacy, canonical)}
+    assert path.read_bytes() == original
 
 
-def test_migration_is_restart_safe_and_quota_day_reset_is_unchanged(tmp_path) -> None:
+def test_repeated_snapshot_and_restart_are_read_only(tmp_path) -> None:
     path = tmp_path / "gemini-quota.json"
     _write_state(path, legacy=420, canonical=400)
+    original = path.read_bytes()
 
     first = GeminiQuotaLedger(path).snapshot((KEY,), DAY)
-    first_saved = path.read_text(encoding="utf-8")
     restarted = GeminiQuotaLedger(path).snapshot((KEY,), DAY)
 
     assert first == restarted
-    assert path.read_text(encoding="utf-8") == first_saved
+    assert path.read_bytes() == original
+
+
+def test_snapshot_quota_day_reset_is_read_only(tmp_path) -> None:
+    path = tmp_path / "gemini-quota.json"
+    _write_state(path, legacy=420, canonical=400)
+    original = path.read_bytes()
+
     assert GeminiQuotaLedger(path).snapshot((KEY,), NEXT_DAY)["keys"][0]["sent"] == 0
+    assert path.read_bytes() == original
