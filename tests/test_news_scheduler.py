@@ -776,11 +776,120 @@ def test_account_configuration_groups_keys_without_exposing_secrets() -> None:
     assert all("key-" not in item.credential_id for item in credentials)
 
 
+def test_credential_identity_is_stable_unique_and_secret_safe() -> None:
+    first = configured_api_credentials(legacy_keys=("secret-a", "secret-b"))
+    restarted = configured_api_credentials(legacy_keys=("secret-a", "secret-b"))
+
+    assert first == restarted
+    assert len({item.credential_id for item in first}) == 2
+    assert all(item.credential_id.startswith("hmac-v1-") for item in first)
+    assert all(len(item.credential_id) == 40 for item in first)
+    assert all(item.api_key not in item.credential_id for item in first)
+    assert all(item.api_key not in repr(item) for item in first)
+
+
+def test_explicit_credential_ids_preserve_historical_identity() -> None:
+    raw_accounts = json.dumps([{
+        "account_id": "legacy-existing-id",
+        "pool": "routine",
+        "api_keys": ["secret-a", "secret-b"],
+        "credential_ids": ["existing-id-a", "existing-id-b"],
+    }])
+
+    credentials = configured_api_credentials(raw_accounts=raw_accounts)
+
+    assert [(item.account_id, item.credential_id) for item in credentials] == [
+        ("legacy-existing-id", "existing-id-a"),
+        ("legacy-existing-id", "existing-id-b"),
+    ]
+    assert "secret-a" not in repr(credentials)
+    assert "secret-b" not in repr(credentials)
+
+
+@pytest.mark.parametrize(
+    "credential_ids",
+    [
+        [], ["only-one"], ["", "second"],
+        ["secret-a", "second"], ["same", "same"],
+    ],
+)
+def test_explicit_credential_ids_fail_closed_on_invalid_migration(
+    credential_ids: list[str],
+) -> None:
+    raw_accounts = json.dumps([{
+        "account_id": "account",
+        "pool": "routine",
+        "api_keys": ["secret-a", "secret-b"],
+        "credential_ids": credential_ids,
+    }])
+
+    with pytest.raises(ValueError, match="credential_id") as error:
+        configured_api_credentials(raw_accounts=raw_accounts)
+
+    assert "secret-a" not in str(error.value)
+    assert "secret-b" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "raw_accounts",
+    [
+        [{
+            "account_id": "account",
+            "pool": "routine",
+            "api_keys": ["secret-a", "secret-b"],
+            "credential_ids": ["secret-b", "safe-id"],
+        }],
+        [
+            {
+                "account_id": "account-a",
+                "pool": "routine",
+                "api_keys": ["secret-a"],
+                "credential_ids": ["safe-a"],
+            },
+            {
+                "account_id": "account-b",
+                "pool": "routine",
+                "api_keys": ["secret-b"],
+                "credential_ids": ["contains-secret-a"],
+            },
+        ],
+        [
+            {
+                "account_id": "account-secret-b",
+                "pool": "routine",
+                "api_keys": ["secret-a"],
+                "credential_ids": ["safe-a"],
+            },
+            {
+                "account_id": "account-b",
+                "pool": "routine",
+                "api_keys": ["secret-b"],
+                "credential_ids": ["safe-b"],
+            },
+        ],
+    ],
+)
+def test_operational_ids_reject_any_configured_api_key_without_exposure(
+    raw_accounts: list[dict[str, object]],
+) -> None:
+    with pytest.raises(ValueError) as error:
+        configured_api_credentials(raw_accounts=json.dumps(raw_accounts))
+
+    assert "secret-a" not in str(error.value)
+    assert "secret-b" not in str(error.value)
+
+
 def test_account_quota_snapshot_uses_scheduler_usage_without_double_counting() -> None:
     connection = _connection()
     credentials = configured_api_credentials(raw_accounts=json.dumps([
-        {"account_id": "shared", "pool": "routine", "api_keys": ["a", "b"]},
-        {"account_id": "single", "pool": "routine", "api_keys": ["c"]},
+        {
+            "account_id": "shared", "pool": "routine",
+            "api_keys": ["secret-key-one", "secret-key-two"],
+        },
+        {
+            "account_id": "single", "pool": "routine",
+            "api_keys": ["secret-key-three"],
+        },
     ]))
     for family in ("gemma-impact", "gemma-title"):
         assert reserve_account_request(
@@ -902,13 +1011,21 @@ def test_gemini_model_tpm_is_shared_across_keys_in_one_project() -> None:
 def test_account_configuration_rejects_one_key_in_two_accounts() -> None:
     with pytest.raises(ValueError, match="two accounts"):
         configured_api_credentials(raw_accounts=json.dumps([
-            {"account_id": "a", "pool": "routine", "api_keys": ["same"]},
-            {"account_id": "b", "pool": "routine", "api_keys": ["same"]},
+            {
+                "account_id": "a", "pool": "routine",
+                "api_keys": ["same-secret-key"],
+            },
+            {
+                "account_id": "b", "pool": "routine",
+                "api_keys": ["same-secret-key"],
+            },
         ]))
 
 
 def test_legacy_keys_are_independent_routine_accounts() -> None:
-    credentials = configured_api_credentials(legacy_keys=("a", "b", "a"))
+    credentials = configured_api_credentials(legacy_keys=(
+        "legacy-secret-a", "legacy-secret-b", "legacy-secret-a",
+    ))
 
     assert len(credentials) == 2
     assert len({item.account_id for item in credentials}) == 2

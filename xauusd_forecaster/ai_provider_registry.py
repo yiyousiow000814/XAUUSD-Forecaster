@@ -1,27 +1,52 @@
-"""Canonical runtime registry for AI quota surfaces."""
+"""Canonical runtime registry for authorized AI provider surfaces."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .annotation import (
-    DEFAULT_GEMINI_MODEL,
-    DEFAULT_GEMMA_MODEL,
-    FALLBACK_GEMINI_MODEL,
-    GEMMA_REQUESTS_PER_DAY_PER_KEY,
-    GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
-    GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL,
-)
 from .gemini_quota import GEMINI_REQUESTS_PER_DAY_PER_KEY
 from .model_limits import (
+    GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_PER_ACCOUNT,
+    GEMMA_SAFE_REQUESTS_PER_MINUTE_PER_ACCOUNT,
     GEMINI_REQUESTS_PER_MINUTE_PER_KEY,
     GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
 )
 
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
+FALLBACK_GEMINI_MODEL = "gemini-3.1-flash-lite"
+DEFAULT_GEMMA_MODEL = "gemma-4-31b-it"
 GEMINI_EMBEDDING_MODEL = "gemini-embedding-2"
+GEMMA_REQUESTS_PER_DAY_PER_KEY = 15_000
+GEMMA_SAFE_REQUESTS_PER_MINUTE_TOTAL = (
+    GEMMA_SAFE_REQUESTS_PER_MINUTE_PER_ACCOUNT
+)
+GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL = (
+    GEMMA_SAFE_INPUT_TOKENS_PER_MINUTE_PER_ACCOUNT
+)
 GEMINI_EMBEDDING_REQUESTS_PER_DAY_PER_ACCOUNT = 1_000
 GEMINI_EMBEDDING_REQUESTS_PER_MINUTE_PER_ACCOUNT = 100
 GEMINI_EMBEDDING_INPUT_TOKENS_PER_MINUTE_PER_ACCOUNT = 30_000
+
+_GOOGLE_GENERATION_ENDPOINTS = {
+    DEFAULT_GEMINI_MODEL: (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "gemini-3.5-flash-lite:generateContent"
+    ),
+    FALLBACK_GEMINI_MODEL: (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "gemini-3.1-flash-lite:generateContent"
+    ),
+    DEFAULT_GEMMA_MODEL: (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "gemma-4-31b-it:generateContent"
+    ),
+}
+_GOOGLE_EMBEDDING_ENDPOINTS = {
+    GEMINI_EMBEDDING_MODEL: (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "gemini-embedding-2:batchEmbedContents"
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -72,3 +97,19 @@ def quota_surface_for_model(model: str) -> AiQuotaSurface:
     if len(matches) != 1:
         raise ValueError(f"model has no unique quota policy: {model}")
     return matches[0]
+
+
+def google_generation_endpoint_for_model(model: str) -> str:
+    """Return a fixed authorized Google generation endpoint or fail closed."""
+    try:
+        return _GOOGLE_GENERATION_ENDPOINTS[model]
+    except KeyError:
+        raise ValueError("model is not authorized for Google generation") from None
+
+
+def google_embedding_endpoint_for_model(model: str) -> str:
+    """Return a fixed authorized Google embedding endpoint or fail closed."""
+    try:
+        return _GOOGLE_EMBEDDING_ENDPOINTS[model]
+    except KeyError:
+        raise ValueError("model is not authorized for Google embedding") from None
