@@ -43,9 +43,21 @@ that a visible line is continuous after cascade and responsive overrides.
 - Incident cards lead with a human title, action state, root-cause summary,
   bounded metrics, and affected components. Raw codes and evidence remain
   reachable through a `查看技术详情` disclosure instead of leading the layout.
-- Local scheduler and Assistant D1 queue grids remain separate technical
-  diagnostics below the incident summary. Unified presentation does not merge
-  their execution or storage planes.
+- The Health page order is current problems, system components, news sources,
+  then scheduler and technical evidence. Its top summary exposes one dominant
+  operator action (`ACTION_REQUIRED`, `AUTO_RECOVERING`, or `MONITORING`) rather
+  than presenting mutually exclusive actions as independent counters.
+- Abnormal component and source records sort first and remain prominent. Healthy
+  records use compact scan rows with redundant symbol, restrained color, and
+  text status encoding. Unknown or unavailable states remain neutral and must
+  not look healthy.
+- Component and source inventories use two compact columns at normal desktop
+  widths and one column on phones. Human roles, exact local timestamps, raw
+  identifiers/status, errors, transport copy, and evidence counts remain
+  reachable through per-record details instead of expanding every healthy row.
+- Local scheduler and Assistant D1 queue grids remain separate subsections in
+  one secondary `调度器与技术状态` disclosure. Unified presentation does not
+  merge their execution or storage planes.
 - Technical disclosure controls have a minimum 44 CSS-pixel target and expose
   native keyboard and `aria-expanded` state. Cards and technical evidence must
   not cause horizontal overflow at desktop, 390x844, or 360x800.
