@@ -800,6 +800,14 @@ def test_scheduler_health_detects_unrepaired_display_placeholder() -> None:
             ("source", "irrelevant", 1, "prompt", NOW.isoformat(), irrelevant),
         ],
     )
+    connection.execute(
+        """CREATE TABLE dashboard_news_current_counts_v1 (
+             id INTEGER PRIMARY KEY,waiting_content INTEGER,
+             unavailable_content INTEGER,invalid_display INTEGER)"""
+    )
+    connection.execute(
+        "INSERT INTO dashboard_news_current_counts_v1 VALUES (1,0,0,1)"
+    )
 
     snapshot = scheduler_health_snapshot(connection, now=NOW)
 

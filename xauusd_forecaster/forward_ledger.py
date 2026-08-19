@@ -548,7 +548,13 @@ class ForwardLedger:
         self.connection.execute("PRAGMA busy_timeout=60000")
         self.connection.executescript(SCHEMA)
         from .assistant_capacity import install_assistant_capacity_schema
-        from .dashboard_summaries import install_dashboard_summary_schema
+        from .critical_annotation_state import (
+            install_critical_annotation_state_schema,
+        )
+        from .dashboard_summaries import (
+            install_dashboard_critical_activity_schema,
+            install_dashboard_summary_schema,
+        )
         from .evidence_v2 import install_v2_schema
         from .news_scheduler import install_scheduler_schema
 
@@ -556,6 +562,7 @@ class ForwardLedger:
         install_scheduler_schema(self.connection)
         install_assistant_capacity_schema(self.connection)
         install_dashboard_summary_schema(self.connection)
+        install_dashboard_critical_activity_schema(self.connection)
         self._install_source_poll_schema()
         self._install_daily_brief_lifecycle_schema()
         self._install_append_only_triggers()
@@ -565,6 +572,7 @@ class ForwardLedger:
                 "INSERT OR IGNORE INTO runtime_metadata VALUES (?, ?, ?)",
                 ("FORWARD_EPOCH", _iso(created), _iso(created)),
             )
+        install_critical_annotation_state_schema(self.connection)
 
     def close(self) -> None:
         self.connection.close()
@@ -722,6 +730,7 @@ class ForwardLedger:
             ORDER BY revision_number DESC LIMIT 1""",
             (record["source"], record["source_item_id"]),
         ).fetchone()
+        previous_cluster_id = str(latest["cluster_id"]) if latest else None
         content_hash = record["content_hash"]
         revision = 1 if latest is None else int(latest["revision_number"]) + 1
         first_seen = record["collector_first_seen_time"]
@@ -744,6 +753,9 @@ class ForwardLedger:
                     content_hash, record["cluster_id"], latency,
                 ),
             )
+            from .critical_annotation_state import refresh_news_cluster_state
+            refresh_news_cluster_state(self.connection, previous_cluster_id)
+            refresh_news_cluster_state(self.connection, str(record["cluster_id"]))
         return revision, True
 
     def append_macro_observation(self, record: dict[str, Any]) -> tuple[int, bool]:
@@ -931,6 +943,19 @@ class ForwardLedger:
                     json.dumps(vector, sort_keys=True, separators=(",", ":")),
                 ),
             )
+            from .critical_annotation_state import (
+                record_annotation_completion,
+                refresh_news_revision_state,
+            )
+            record_annotation_completion(
+                self.connection,
+                source=str(record["source"]),
+                source_item_id=str(record["source_item_id"]),
+                revision_number=int(record["revision_number"]),
+                prompt_version=str(record["prompt_version"]),
+                completed_at=_iso(record["parsed_at"]),
+            )
+            refresh_news_revision_state(self.connection, *source_key)
 
     def append_news_impact_assessment(self, record: dict[str, Any]) -> None:
         from .news_impact import (
@@ -1240,6 +1265,8 @@ class ForwardLedger:
                     int(bool(record.get("is_terminal"))),
                 ),
             )
+            from .critical_annotation_state import refresh_news_revision_state
+            refresh_news_revision_state(self.connection, *source_key)
 
     def append_discovery_failure(self, record: dict[str, Any]) -> None:
         next_retry = record["next_retry_at"]

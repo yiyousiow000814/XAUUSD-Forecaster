@@ -438,6 +438,8 @@ def install_scheduler_schema(connection: sqlite3.Connection) -> None:
         (_iso(installed_at - SCHEDULER_DEFERRAL_RETENTION),),
     )
     connection.commit()
+    from .critical_annotation_state import install_annotation_job_count_schema
+    install_annotation_job_count_schema(connection)
 
 
 def rolling_account_usage(
@@ -2597,9 +2599,18 @@ def reconcile_completed_jobs(
 ) -> int:
     """Close jobs already satisfied or superseded by immutable evidence."""
     from .annotation import INVALID_CHINESE_TITLE
+    from .news_identity import preferred_cluster_peer_predicate
     from .news_semantics import model_usable_annotation_predicate
+    from .news_time import (
+        register_news_semantic_eligibility_sql,
+        semantic_eligibility_sql_predicate,
+    )
 
     timestamp = _iso(now or datetime.now(UTC))
+    register_news_semantic_eligibility_sql(connection)
+    forward_epoch = str(connection.execute(
+        "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
+    ).fetchone()[0])
     with connection:
         completed = connection.execute(
             f"""UPDATE news_ai_jobs_v1 AS j
@@ -2627,17 +2638,48 @@ def reconcile_completed_jobs(
             (timestamp, timestamp, INVALID_CHINESE_TITLE, "%相关数值%"),
         )
         obsolete = connection.execute(
-            """UPDATE news_ai_jobs_v1 AS j
+            f"""UPDATE news_ai_jobs_v1 AS j
                SET state='DEAD_LETTER',lease_owner=NULL,lease_expires_at=NULL,
                    last_error='CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE',
                    updated_at=?,completed_at=?
-               WHERE state IN ('QUEUED','BACKING_OFF')
-                 AND EXISTS (
-                   SELECT 1 FROM news_revisions newer
-                   WHERE newer.source=j.source
-                     AND newer.source_item_id=j.source_item_id
-                     AND newer.revision_number>j.revision_number)""",
-            (timestamp, timestamp),
+               WHERE state IN ('QUEUED','BACKING_OFF','COMPLETED')
+                 AND (
+                   EXISTS (
+                     SELECT 1 FROM news_revisions newer
+                     WHERE newer.source=j.source
+                       AND newer.source_item_id=j.source_item_id
+                       AND newer.revision_number>j.revision_number)
+                   OR (j.task_type='ACTIVE_ANNOTATION' AND EXISTS (
+                     SELECT 1 FROM news_revisions current
+                     WHERE current.source=j.source
+                       AND current.source_item_id=j.source_item_id
+                       AND current.revision_number=j.revision_number
+                       AND (
+                         length(trim(COALESCE(current.body,'')))<240
+                         OR NOT ({semantic_eligibility_sql_predicate('current')})
+                         OR (j.state='COMPLETED' AND NOT EXISTS (
+                           SELECT 1 FROM news_annotations current_annotation
+                           WHERE current_annotation.source=j.source
+                             AND current_annotation.source_item_id=j.source_item_id
+                             AND current_annotation.revision_number=j.revision_number
+                             AND current_annotation.prompt_version=j.prompt_version
+                             AND {model_usable_annotation_predicate('current_annotation')}
+                         ))
+                         OR EXISTS (
+                         SELECT 1 FROM news_revisions peer
+                         WHERE peer.cluster_id=current.cluster_id
+                           AND {semantic_eligibility_sql_predicate('peer')}
+                           AND NOT EXISTS (
+                             SELECT 1 FROM news_revisions peer_newer
+                             WHERE peer_newer.source=peer.source
+                               AND peer_newer.source_item_id=peer.source_item_id
+                               AND peer_newer.revision_number>peer.revision_number)
+                           AND {preferred_cluster_peer_predicate('peer', 'current')}
+                         )
+                       )
+                   ))
+                 )""",
+            (timestamp, timestamp, forward_epoch, forward_epoch),
         )
     return completed.rowcount + obsolete.rowcount
 

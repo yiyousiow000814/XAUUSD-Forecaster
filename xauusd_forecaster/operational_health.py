@@ -5,12 +5,8 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
+from .critical_annotation_state import news_current_counts, scheduler_state_counts
 from .news_scheduler import TASKS
-from .news_identity import preferred_cluster_peer_predicate
-from .news_semantics import (
-    display_repair_checkpoint_predicate,
-    model_usable_annotation_predicate,
-)
 from .operational_taxonomy import normalize_operational_event
 
 
@@ -95,13 +91,7 @@ def scheduler_health_snapshot(
         }
         for task in TASKS
     }
-    state_rows = connection.execute(
-        """SELECT task_type,state,count(*) AS total
-           FROM news_ai_jobs_v1
-           WHERE task_type IN ('ACTIVE_ANNOTATION','ACTIVE_IMPACT',
-                               'TITLE_TRANSLATION')
-           GROUP BY task_type,state"""
-    ).fetchall()
+    state_rows = scheduler_state_counts(connection)
     for row in state_rows:
         task = str(row["task_type"])
         state = str(row["state"]).lower()
@@ -421,42 +411,7 @@ def scheduler_health_snapshot(
             )
         ]
 
-    has_annotations = connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='news_annotations'"
-    ).fetchone() is not None
-    invalid_display_rows = int(connection.execute(
-        f"""SELECT count(*) FROM news_annotations fallback
-            JOIN news_revisions current
-              ON current.source=fallback.source
-             AND current.source_item_id=fallback.source_item_id
-             AND current.revision_number=fallback.revision_number
-            WHERE {display_repair_checkpoint_predicate('fallback')}
-              AND COALESCE(json_extract(
-                    fallback.annotation_json,'$.xauusd_relevance'),'IRRELEVANT')
-                    <> 'IRRELEVANT'
-              AND NOT EXISTS (
-                SELECT 1 FROM news_revisions newer
-                WHERE newer.source=current.source
-                  AND newer.source_item_id=current.source_item_id
-                  AND newer.revision_number>current.revision_number)
-              AND NOT EXISTS (
-                SELECT 1 FROM news_revisions peer
-                WHERE peer.cluster_id=current.cluster_id
-                  AND NOT EXISTS (
-                    SELECT 1 FROM news_revisions peer_newer
-                    WHERE peer_newer.source=peer.source
-                      AND peer_newer.source_item_id=peer.source_item_id
-                      AND peer_newer.revision_number>peer.revision_number)
-                  AND {preferred_cluster_peer_predicate('peer', 'current')})
-              AND NOT EXISTS (
-                SELECT 1 FROM news_annotations repaired
-                WHERE repaired.source=fallback.source
-                  AND repaired.source_item_id=fallback.source_item_id
-                  AND repaired.revision_number=fallback.revision_number
-                  AND repaired.prompt_version=fallback.prompt_version
-                  AND repaired.parsed_at>fallback.parsed_at
-                  AND {model_usable_annotation_predicate('repaired')})""",
-    ).fetchone()[0]) if has_annotations else 0
+    invalid_display_rows = news_current_counts(connection)["invalid_display"]
     if invalid_display_rows:
         alerts.append(_alert(
             "OPS_NEWS_ANNOTATION_CONTRACT_STATE_INVALID",
