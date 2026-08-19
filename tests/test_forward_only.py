@@ -55,6 +55,7 @@ from xauusd_forecaster.news import (
     GOOGLE_NEWS_LANES,
     GoogleNewsLane,
     RssSource,
+    _current_forward_news,
     collect_bea_macro,
     collect_bls_macro,
     collect_direct_full_text_rss_news,
@@ -487,6 +488,47 @@ def test_official_rss_parser_stamps_real_fetch_time() -> None:
     row = parse_rss(xml, RssSource("official", "https://example.test"), fetched)[0]
     assert row["collector_first_seen_time"] == fetched
     assert row["source_published_time"] < row["collector_first_seen_time"]
+
+
+@pytest.mark.parametrize(
+    ("published_delta", "expected_allowed"),
+    (
+        (timedelta(seconds=2.3), True),
+        (timedelta(minutes=5, seconds=1), True),
+        (timedelta(minutes=9, seconds=59), True),
+        (timedelta(minutes=10), True),
+        (timedelta(minutes=10, seconds=1), False),
+    ),
+)
+def test_official_news_intake_uses_global_publication_clock_boundary(
+    tmp_path, published_delta: timedelta, expected_allowed: bool,
+) -> None:
+    fetched = datetime(2026, 8, 20, 10, 0, tzinfo=UTC)
+    ledger = ForwardLedger(
+        tmp_path / "forward.sqlite3", now=fetched - timedelta(days=1),
+    )
+    record = {
+        "source": "federal_reserve_press_all",
+        "source_item_id": f"future-{published_delta.total_seconds()}",
+        "source_published_time": fetched + published_delta,
+        "collector_first_seen_time": fetched,
+        "fetched_time": fetched,
+        "headline": "Federal Reserve official release",
+        "body": "Official publication body",
+        "link": "https://www.federalreserve.gov/newsevents/pressreleases/test.htm",
+        "content_hash": hashlib.sha256(str(published_delta).encode()).hexdigest(),
+        "cluster_id": f"official-{published_delta.total_seconds()}",
+    }
+
+    allowed, reason = _current_forward_news(record, ledger, fetched)
+
+    assert allowed is expected_allowed
+    assert reason == ("ELIGIBLE" if expected_allowed else "FUTURE_PUBLICATION_TIME")
+    if expected_allowed:
+        ledger.append_news_revision(record)
+        assert ledger.visible_news(fetched - timedelta(microseconds=1)) == []
+        assert len(ledger.visible_news(fetched)) == 1
+    ledger.close()
 
 
 def test_federal_reserve_intake_requires_current_full_text(tmp_path) -> None:

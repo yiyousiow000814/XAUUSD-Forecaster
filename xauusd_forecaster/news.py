@@ -28,6 +28,7 @@ from .content import (
 )
 from .forward_ledger import ForwardLedger
 from .news_relevance import google_news_item_is_relevant
+from .news_time import assess_publication_receipt_clock
 from .source_polling import (
     PollFailureClassification,
     classified_poll_error,
@@ -74,7 +75,7 @@ def _current_forward_news(record: dict[str, object], ledger: ForwardLedger,
         return False, "PUBLISHED_TIME_MISSING"
     if published < ledger.forward_epoch:
         return False, "PRE_FORWARD_PUBLICATION"
-    if published > fetched_at + timedelta(minutes=5):
+    if not assess_publication_receipt_clock(published, fetched_at).eligible:
         return False, "FUTURE_PUBLICATION_TIME"
     if fetched_at - published > NEWS_INTAKE_MAX_AGE:
         return False, "STALE_PUBLICATION"

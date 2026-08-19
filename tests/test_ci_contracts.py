@@ -32,6 +32,9 @@ _RECEIPT_CLOCK_NAMES = frozenset({
     "received", "received_at", "first_seen", "first_seen_time",
     "collector_first_seen_time",
 })
+_OBSERVATION_CLOCK_NAMES = frozenset({
+    "fetched", "fetched_at", "observed", "observed_at",
+})
 
 
 def _name_clock_origins(name: str) -> set[str]:
@@ -39,6 +42,8 @@ def _name_clock_origins(name: str) -> set[str]:
         return {"publication"}
     if name in _RECEIPT_CLOCK_NAMES:
         return {"receipt"}
+    if name in _OBSERVATION_CLOCK_NAMES:
+        return {"observation"}
     return set()
 
 
@@ -91,6 +96,25 @@ def _assigned_names(target: ast.AST) -> set[str]:
     return set()
 
 
+def _has_explicit_skew_threshold(node: ast.AST) -> bool:
+    for child in ast.walk(node):
+        if isinstance(child, ast.Call) and isinstance(
+            child.func, (ast.Name, ast.Attribute),
+        ):
+            name = (
+                child.func.id if isinstance(child.func, ast.Name)
+                else child.func.attr
+            )
+            if name == "timedelta":
+                return True
+        if isinstance(child, ast.Name) and any(
+            marker in child.id.lower()
+            for marker in ("clock_skew", "future_tolerance")
+        ):
+            return True
+    return False
+
+
 def _publication_receipt_comparisons(tree: ast.AST) -> list[int]:
     offenders: list[int] = []
     scopes = [tree, *(
@@ -122,7 +146,13 @@ def _publication_receipt_comparisons(tree: ast.AST) -> list[int]:
             if not isinstance(node, ast.Compare):
                 continue
             origins = _clock_origins(node, aliases)
-            if origins == {"publication", "receipt"}:
+            if (
+                {"publication", "receipt"}.issubset(origins)
+                or (
+                    {"publication", "observation"}.issubset(origins)
+                    and _has_explicit_skew_threshold(node)
+                )
+            ):
                 offenders.append(node.lineno)
     return sorted(set(offenders))
 
@@ -159,3 +189,17 @@ def bypass(row):
     )
 
     assert _publication_receipt_comparisons(tree) == [5]
+
+
+def test_publication_receipt_guard_catches_fetched_at_tolerance() -> None:
+    tree = ast.parse(
+        """
+def bypass(record, fetched_at):
+    published = record["source_published_time"]
+    if published > fetched_at + timedelta(minutes=5):
+        return False
+    return True
+"""
+    )
+
+    assert _publication_receipt_comparisons(tree) == [4]
