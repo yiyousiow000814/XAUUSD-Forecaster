@@ -385,6 +385,11 @@ def install_scheduler_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS news_ai_jobs_lane_migration_v1
         ON news_ai_jobs_v1(prompt_version,task_type,lane_classified,
                            created_at,job_id);
+        CREATE INDEX IF NOT EXISTS news_ai_jobs_lane_health_v1
+        ON news_ai_jobs_v1(task_type,lane_classified,work_lane,state,
+                           available_at,created_at);
+        CREATE INDEX IF NOT EXISTS news_ai_jobs_lane_oldest_v1
+        ON news_ai_jobs_v1(task_type,lane_classified,work_lane,state,created_at);
         CREATE TABLE IF NOT EXISTS news_annotation_contract_backfill_v1 (
           prompt_version TEXT PRIMARY KEY,
           activated_at TEXT NOT NULL,
@@ -409,6 +414,8 @@ def install_scheduler_schema(connection: sqlite3.Connection) -> None:
           to_prompt_version TEXT NOT NULL,
           transition_kind TEXT NOT NULL CHECK(transition_kind IN (
             'REUSE_COMPATIBLE','DETERMINISTIC_MIGRATION','MODEL_REVIEW_REQUIRED')),
+          transition_fingerprint TEXT NOT NULL,
+          transition_contract_json TEXT NOT NULL,
           cursor_parsed_at TEXT,
           cursor_annotation_id TEXT,
           processed_count INTEGER NOT NULL DEFAULT 0,
@@ -423,6 +430,7 @@ def install_scheduler_schema(connection: sqlite3.Connection) -> None:
           to_prompt_version TEXT NOT NULL,
           transition_kind TEXT NOT NULL,
           migrator_version TEXT,
+          transition_fingerprint TEXT NOT NULL,
           source_annotation_hash TEXT NOT NULL,
           projected_annotation_hash TEXT NOT NULL,
           applied_at TEXT NOT NULL,
@@ -439,8 +447,46 @@ def install_scheduler_schema(connection: sqlite3.Connection) -> None:
           failed_at TEXT NOT NULL,
           PRIMARY KEY(source_annotation_id,to_prompt_version)
         );
+        CREATE TABLE IF NOT EXISTS
+          news_annotation_transition_contract_failures_v1 (
+            from_prompt_version TEXT NOT NULL,
+            to_prompt_version TEXT NOT NULL,
+            persisted_fingerprint TEXT,
+            current_fingerprint TEXT NOT NULL,
+            failure_code TEXT NOT NULL,
+            failure_detail TEXT NOT NULL,
+            failed_at TEXT NOT NULL,
+            PRIMARY KEY(from_prompt_version,to_prompt_version)
+        );
         """
     )
+    transition_state_columns = {
+        str(row["name"])
+        for row in connection.execute(
+            "PRAGMA table_info(news_annotation_transition_state_v1)"
+        ).fetchall()
+    }
+    if "transition_fingerprint" not in transition_state_columns:
+        connection.execute(
+            "ALTER TABLE news_annotation_transition_state_v1 "
+            "ADD COLUMN transition_fingerprint TEXT"
+        )
+    if "transition_contract_json" not in transition_state_columns:
+        connection.execute(
+            "ALTER TABLE news_annotation_transition_state_v1 "
+            "ADD COLUMN transition_contract_json TEXT"
+        )
+    projection_columns = {
+        str(row["name"])
+        for row in connection.execute(
+            "PRAGMA table_info(news_annotation_transition_projections_v1)"
+        ).fetchall()
+    }
+    if "transition_fingerprint" not in projection_columns:
+        connection.execute(
+            "ALTER TABLE news_annotation_transition_projections_v1 "
+            "ADD COLUMN transition_fingerprint TEXT"
+        )
     provider_task_sql = str(connection.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' "
         "AND name='news_ai_provider_dispatch_task_state_v1'"
@@ -1942,7 +1988,8 @@ def _backfill_admission_locked(
              sum(CASE WHEN created_at>=? THEN 1 ELSE 0 END) arrivals,
              sum(CASE WHEN completed_at>=? THEN 1 ELSE 0 END) completions
            FROM news_ai_jobs_v1
-           WHERE task_type='ACTIVE_ANNOTATION' AND work_lane='LIVE'
+           WHERE task_type='ACTIVE_ANNOTATION' AND lane_classified=1
+             AND work_lane='LIVE'
              AND state IN ('QUEUED','LEASED','BACKING_OFF','COMPLETED')""",
         (
             now.isoformat(timespec="microseconds"),
@@ -1965,7 +2012,8 @@ def _backfill_admission_locked(
     capacity_deferred = int(connection.execute(
         """SELECT count(*) FROM news_ai_scheduler_deferrals_v1 d
            JOIN news_ai_jobs_v1 j ON j.job_id=d.job_id
-           WHERE d.deferred_at>=? AND j.work_lane='LIVE'
+           WHERE d.deferred_at>=? AND j.lane_classified=1
+             AND j.work_lane='LIVE'
              AND d.failure_code IN ('MODEL_CAPACITY_DEFERRED',
                                     'PROVIDER_DISPATCH_DEFERRED')""",
         (pressure_cutoff,),
@@ -2719,6 +2767,7 @@ def scheduler_counts(connection: sqlite3.Connection) -> dict[str, int]:
     rows = connection.execute(
         """SELECT state,count(*) AS total FROM news_ai_jobs_v1
         WHERE task_type IN ('ACTIVE_ANNOTATION','ACTIVE_IMPACT','TITLE_TRANSLATION')
+          AND (task_type<>'ACTIVE_ANNOTATION' OR lane_classified=1)
         GROUP BY state"""
     ).fetchall()
     counts = {str(row["state"]): int(row["total"]) for row in rows}
@@ -2728,13 +2777,14 @@ def scheduler_counts(connection: sqlite3.Connection) -> dict[str, int]:
     obsolete = int(connection.execute(
         """SELECT count(*) FROM news_ai_jobs_v1
         WHERE state='DEAD_LETTER'
+          AND (task_type<>'ACTIVE_ANNOTATION' OR lane_classified=1)
           AND last_error='CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'"""
     ).fetchone()[0])
     result["obsolete"] = obsolete
     result["dead_letter"] = max(0, result["dead_letter"] - obsolete)
     lane_rows = connection.execute(
         """SELECT work_lane,state,count(*) AS total FROM news_ai_jobs_v1
-           WHERE task_type='ACTIVE_ANNOTATION'
+           WHERE task_type='ACTIVE_ANNOTATION' AND lane_classified=1
            GROUP BY work_lane,state"""
     ).fetchall()
     for lane in WORK_LANES:
@@ -2744,6 +2794,10 @@ def scheduler_counts(connection: sqlite3.Connection) -> dict[str, int]:
                 int(row["total"]) for row in lane_rows
                 if str(row["work_lane"]) == lane and str(row["state"]) == state
             )
+    result["active_annotation_unclassified"] = int(connection.execute(
+        """SELECT count(*) FROM news_ai_jobs_v1
+           WHERE task_type='ACTIVE_ANNOTATION' AND lane_classified=0"""
+    ).fetchone()[0])
     return result
 
 

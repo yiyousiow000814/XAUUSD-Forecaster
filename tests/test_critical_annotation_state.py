@@ -8,6 +8,7 @@ import pytest
 
 import xauusd_forecaster.annotation as annotation_contract
 import xauusd_forecaster.critical_annotation_state as critical_state
+import xauusd_forecaster.news_scheduler as scheduler
 from xauusd_forecaster.annotation import PROMPT_VERSION
 from xauusd_forecaster.critical_annotation_state import (
     INSTALL_VERSION,
@@ -18,6 +19,7 @@ from xauusd_forecaster.critical_annotation_state import (
     refresh_news_revision_state,
 )
 from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.operational_health import scheduler_health_snapshot
 from xauusd_forecaster.news_scheduler import (
     ROUTINE_POOL,
     backoff_job,
@@ -51,6 +53,67 @@ def _append_revision(
     })
 
 
+def _insert_lane_fixture_jobs(
+    connection: sqlite3.Connection,
+    *,
+    live: int,
+    backfill: int,
+    unclassified: int,
+) -> None:
+    timestamp = NOW.isoformat(timespec="microseconds")
+    jobs: list[tuple[object, ...]] = []
+    for lane, classified, count in (
+        (scheduler.LIVE_LANE, 1, live),
+        (scheduler.CONTRACT_BACKFILL_LANE, 1, backfill),
+        (scheduler.LIVE_LANE, 0, unclassified),
+    ):
+        prefix = "unclassified" if not classified else lane.lower()
+        for index in range(count):
+            item = f"{prefix}-{index:05d}"
+            jobs.append((
+                f"job-{item}", "ACTIVE_ANNOTATION", "fixture", item, 1,
+                "", PROMPT_VERSION, "NORMAL", "QUEUED", timestamp,
+                timestamp, timestamp, lane, classified,
+            ))
+    with connection:
+        connection.executemany(
+            """INSERT INTO news_ai_jobs_v1
+               (job_id,task_type,source,source_item_id,revision_number,
+                annotation_id,prompt_version,priority,state,available_at,
+                created_at,updated_at,work_lane,lane_classified)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            jobs,
+        )
+
+
+def _insert_unclassified_revisions(
+    connection: sqlite3.Connection, *, historical: int, live: int,
+) -> None:
+    rows = []
+    for index in range(historical + live):
+        item = f"unclassified-{index:05d}"
+        first_seen = NOW + timedelta(
+            days=-1 if index < historical else 1,
+            microseconds=index,
+        )
+        timestamp = first_seen.isoformat(timespec="microseconds")
+        rows.append((
+            "fixture", item, 1, timestamp, timestamp, timestamp, timestamp,
+            item, "complete evidence body", None, f"hash-{index}", item, 0.0,
+        ))
+    with connection:
+        connection.executemany(
+            "INSERT INTO news_revisions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        connection.execute(
+            """INSERT INTO news_annotation_contract_backfill_v1
+               (prompt_version,activated_at,state,updated_at)
+               VALUES (?,?,'ACTIVE',?)""",
+            (PROMPT_VERSION, NOW.isoformat(), NOW.isoformat()),
+        )
+
+
 def test_annotation_queue_summary_tracks_scheduler_transitions_exactly(tmp_path) -> None:
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
     connection = ledger.connection
@@ -70,7 +133,8 @@ def test_annotation_queue_summary_tracks_scheduler_transitions_exactly(tmp_path)
         error="retryable",
     )
     assert _snapshot(connection)["backing_off"] == 1
-    assert _snapshot(connection, NOW + timedelta(hours=2))["queued"] == 1
+    assert _snapshot(connection, NOW + timedelta(hours=2))["queued"] == 0
+    assert _snapshot(connection, NOW + timedelta(hours=2))["backing_off"] == 1
 
     lease = claim_job(
         connection, worker_id="worker", pool=ROUTINE_POOL,
@@ -107,6 +171,127 @@ def test_annotation_queue_summary_tracks_scheduler_transitions_exactly(tmp_path)
         error="terminal", terminal=True,
     )
     assert _snapshot(connection, NOW + timedelta(hours=3))["dead_letter"] == 1
+    ledger.close()
+
+
+def test_annotation_queue_separates_live_backfill_and_unclassified_migration(
+    tmp_path, monkeypatch,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    connection = ledger.connection
+    _insert_lane_fixture_jobs(
+        connection, live=11, backfill=1_988, unclassified=100,
+    )
+    _insert_unclassified_revisions(connection, historical=50, live=50)
+
+    traced: list[str] = []
+    connection.set_trace_callback(traced.append)
+    snapshot = _snapshot(connection)
+    connection.set_trace_callback(None)
+    assert snapshot["queued"] == 11
+    assert snapshot["contract_backfill_queued"] == 1_988
+    assert snapshot["unclassified_annotation_jobs"] == 100
+    assert not any("FROM news_ai_jobs_v1" in sql for sql in traced)
+
+    health = scheduler_health_snapshot(connection, now=NOW)
+    annotation = next(
+        task for task in health["scheduler"]["tasks"]
+        if task["task_type"] == "ACTIVE_ANNOTATION"
+    )
+    assert health["status"] == "HEALTHY"
+    assert annotation["queued"] == 11
+    assert annotation["claimable"] == 11
+    assert health["scheduler"]["contract_backfill"]["states"]["queued"] == 1_988
+    assert health["scheduler"]["unclassified_annotation_jobs"] == 100
+    assert not any(
+        alert["scope"] == "ACTIVE_ANNOTATION" for alert in health["alerts"]
+    )
+
+    monkeypatch.setattr(
+        scheduler, "_contract_backfill_has_current_value",
+        lambda *_args, **_kwargs: True,
+    )
+    scheduler._install_annotation_contract_lanes(
+        connection, prompt_version=PROMPT_VERSION, now=NOW,
+    )
+    classified = _snapshot(connection)
+    assert classified["queued"] == 61
+    assert classified["contract_backfill_queued"] == 2_038
+    assert classified["unclassified_annotation_jobs"] == 0
+    assert classified["queued"] + classified["contract_backfill_queued"] == 2_099
+    assert connection.execute(
+        "SELECT count(*) FROM news_ai_jobs_v1"
+    ).fetchone()[0] == 2_099
+    ledger.close()
+
+
+def test_only_backfill_and_unclassified_pressure_keeps_live_health_healthy(
+    tmp_path,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    _insert_lane_fixture_jobs(
+        ledger.connection, live=0, backfill=2_000, unclassified=500,
+    )
+
+    snapshot = _snapshot(ledger.connection)
+    health = scheduler_health_snapshot(ledger.connection, now=NOW)
+    annotation = next(
+        task for task in health["scheduler"]["tasks"]
+        if task["task_type"] == "ACTIVE_ANNOTATION"
+    )
+    assert snapshot["queued"] == 0
+    assert snapshot["contract_backfill_queued"] == 2_000
+    assert snapshot["unclassified_annotation_jobs"] == 500
+    assert health["status"] == "HEALTHY"
+    assert health["alerts"] == []
+    assert annotation["claimable"] == 0
+    assert annotation["queued"] == 0
+    assert health["scheduler"]["contract_backfill"]["states"]["queued"] == 2_000
+    assert health["scheduler"]["unclassified_annotation_jobs"] == 500
+    ledger.close()
+
+
+def test_critical_and_health_reads_avoid_full_job_scan_with_ten_thousand_mixed_jobs(
+    tmp_path,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    _insert_lane_fixture_jobs(
+        ledger.connection, live=11, backfill=4_989, unclassified=5_000,
+    )
+    statements: list[str] = []
+    ledger.connection.set_trace_callback(statements.append)
+    snapshot = _snapshot(ledger.connection)
+    health = scheduler_health_snapshot(ledger.connection, now=NOW)
+    ledger.connection.set_trace_callback(None)
+
+    assert snapshot["queued"] == 11
+    assert snapshot["contract_backfill_queued"] == 4_989
+    assert snapshot["unclassified_annotation_jobs"] == 5_000
+    assert health["status"] == "HEALTHY"
+    critical_reads = [
+        sql for sql in statements
+        if "dashboard_annotation_job_counts_v1" in sql
+    ]
+    assert critical_reads
+    assert not any("news_ai_jobs_v1" in sql for sql in critical_reads)
+
+    job_queries = [
+        sql for sql in statements
+        if sql.lstrip().upper().startswith(("SELECT", "WITH"))
+        and "news_ai_jobs_v1" in sql
+    ]
+    assert job_queries
+    job_plan_details: list[str] = []
+    for sql in job_queries:
+        job_plan_details.extend(
+            str(row[3]) for row in ledger.connection.execute(
+                f"EXPLAIN QUERY PLAN {sql}"
+            ).fetchall()
+            if "news_ai_jobs_v1" in str(row[3]) or " j " in f" {row[3]} "
+        )
+    assert job_plan_details
+    assert all("SEARCH" in detail for detail in job_plan_details)
+    assert any("news_ai_jobs_lane_" in detail for detail in job_plan_details)
     ledger.close()
 
 
@@ -389,9 +574,11 @@ def test_materialization_contract_handover_rebuilds_once_and_is_atomic(
         "select distinct cluster_id from news_revisions" in statement.lower()
         for statement in handover_statements
     ) == 1
-    assert annotation_queue_snapshot(
+    handover_queue = annotation_queue_snapshot(
         connection, prompt_version=prompt_b, observed_at=NOW.isoformat(),
-    )["queued"] == 1
+    )
+    assert handover_queue["queued"] == 0
+    assert handover_queue["semantic_pending"] == 1
     assert connection.execute(
         "SELECT last_error FROM news_ai_jobs_v1 WHERE job_id=?", (old_job,),
     ).fetchone()[0] == "CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE"

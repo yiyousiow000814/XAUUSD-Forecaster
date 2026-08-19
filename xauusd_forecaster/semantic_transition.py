@@ -30,6 +30,7 @@ CURRENT_OPERATIONAL = "CURRENT_OPERATIONAL"
 TRAINING_REQUIRED = "TRAINING_REQUIRED"
 ARCHIVAL_ONLY = "ARCHIVAL_ONLY"
 DEMAND_CLASSES = frozenset({CURRENT_OPERATIONAL, TRAINING_REQUIRED, ARCHIVAL_ONLY})
+TRANSITION_CONTRACT_VERSION = "semantic-transition-v1"
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,45 @@ class SemanticTransition:
     kind: str
     rationale: str
     migrator_version: str | None = None
+
+
+@dataclass(frozen=True)
+class SemanticTransitionContract:
+    fingerprint: str
+    contract_json: str
+
+
+class SemanticTransitionContractChanged(RuntimeError):
+    """Persisted progress belongs to a different transition implementation."""
+
+    code = "SEMANTIC_TRANSITION_CONTRACT_CHANGED"
+
+
+def semantic_transition_contract(
+    transition: SemanticTransition,
+) -> SemanticTransitionContract:
+    """Return the stable declared identity that may resume one cursor."""
+    if transition.kind not in TRANSITION_KINDS:
+        raise ValueError("semantic transition kind is not controlled")
+    if transition.kind == DETERMINISTIC_MIGRATION:
+        if not transition.migrator_version:
+            raise ValueError("deterministic transition has no migrator version")
+    elif transition.migrator_version is not None:
+        raise ValueError("non-deterministic transition cannot declare a migrator")
+    components = {
+        "contract_version": TRANSITION_CONTRACT_VERSION,
+        "from_prompt_version": transition.from_version,
+        "kind": transition.kind,
+        "migrator_version": transition.migrator_version,
+        "to_prompt_version": transition.to_version,
+    }
+    contract_json = json.dumps(
+        components, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+    )
+    return SemanticTransitionContract(
+        hashlib.sha256(contract_json.encode("utf-8")).hexdigest(),
+        contract_json,
+    )
 
 
 DECLARED_TRANSITIONS = {
@@ -97,15 +137,11 @@ def execute_transition_page(
     page_size: int = 50,
 ) -> dict[str, object]:
     """Apply one replay-safe, zero-provider historical transition page."""
-    if transition.kind == MODEL_REVIEW_REQUIRED:
-        return {"kind": transition.kind, "processed": 0, "complete": False}
-    if transition.kind not in {REUSE_COMPATIBLE, DETERMINISTIC_MIGRATION}:
-        raise ValueError("semantic transition kind is not controlled")
+    contract = semantic_transition_contract(transition)
     migrator = None
     if transition.kind == DETERMINISTIC_MIGRATION:
-        if not transition.migrator_version:
-            raise ValueError("deterministic transition has no migrator version")
         try:
+            assert transition.migrator_version is not None
             migrator = DETERMINISTIC_MIGRATORS[transition.migrator_version]
         except KeyError:
             raise ValueError("deterministic transition migrator is not declared") from None
@@ -137,10 +173,12 @@ def execute_transition_page(
             connection.execute(
                 """INSERT INTO news_annotation_transition_state_v1
                    (from_prompt_version,to_prompt_version,transition_kind,
-                    state,updated_at) VALUES (?,?,?,'ACTIVE',?)""",
+                    transition_fingerprint,transition_contract_json,
+                    state,updated_at) VALUES (?,?,?,?,?,'ACTIVE',?)""",
                 (
                     transition.from_version, transition.to_version,
-                    transition.kind, timestamp,
+                    transition.kind, contract.fingerprint,
+                    contract.contract_json, timestamp,
                 ),
             )
         state = connection.execute(
@@ -148,10 +186,82 @@ def execute_transition_page(
                WHERE from_prompt_version=? AND to_prompt_version=?""",
             (transition.from_version, transition.to_version),
         ).fetchone()
-    if str(state["transition_kind"]) != transition.kind:
-        raise ValueError("persisted semantic transition kind changed")
+    persisted_fingerprint = str(state["transition_fingerprint"] or "")
+    persisted_contract_json = str(state["transition_contract_json"] or "")
+    if not persisted_fingerprint or not persisted_contract_json:
+        projection_count = int(connection.execute(
+            """SELECT count(*)
+               FROM news_annotation_transition_projections_v1
+               WHERE from_prompt_version=? AND to_prompt_version=?""",
+            (transition.from_version, transition.to_version),
+        ).fetchone()[0])
+        safe_to_initialize = (
+            str(state["transition_kind"]) == transition.kind
+            and int(state["processed_count"]) == 0
+            and state["cursor_parsed_at"] is None
+            and state["cursor_annotation_id"] is None
+            and projection_count == 0
+        )
+        if safe_to_initialize:
+            with connection:
+                connection.execute(
+                    """UPDATE news_annotation_transition_state_v1
+                       SET transition_fingerprint=?,transition_contract_json=?,
+                           updated_at=?
+                       WHERE from_prompt_version=? AND to_prompt_version=?""",
+                    (
+                        contract.fingerprint, contract.contract_json, timestamp,
+                        transition.from_version, transition.to_version,
+                    ),
+                )
+            state = connection.execute(
+                """SELECT * FROM news_annotation_transition_state_v1
+                   WHERE from_prompt_version=? AND to_prompt_version=?""",
+                (transition.from_version, transition.to_version),
+            ).fetchone()
+            persisted_fingerprint = contract.fingerprint
+            persisted_contract_json = contract.contract_json
+    contract_changed = (
+        str(state["transition_kind"]) != transition.kind
+        or persisted_fingerprint != contract.fingerprint
+        or persisted_contract_json != contract.contract_json
+    )
+    if contract_changed:
+        detail = (
+            "persisted semantic transition progress belongs to a different "
+            "declared contract"
+        )
+        with connection:
+            connection.execute(
+                """INSERT INTO news_annotation_transition_contract_failures_v1
+                   (from_prompt_version,to_prompt_version,persisted_fingerprint,
+                    current_fingerprint,failure_code,failure_detail,failed_at)
+                   VALUES (?,?,?,?,?,?,?)
+                   ON CONFLICT(from_prompt_version,to_prompt_version) DO UPDATE SET
+                     persisted_fingerprint=excluded.persisted_fingerprint,
+                     current_fingerprint=excluded.current_fingerprint,
+                     failure_code=excluded.failure_code,
+                     failure_detail=excluded.failure_detail,
+                     failed_at=excluded.failed_at""",
+                (
+                    transition.from_version, transition.to_version,
+                    persisted_fingerprint or None, contract.fingerprint,
+                    SemanticTransitionContractChanged.code, detail, timestamp,
+                ),
+            )
+        raise SemanticTransitionContractChanged(
+            f"{SemanticTransitionContractChanged.code}: {detail}"
+        )
     if str(state["state"]) == "COMPLETE":
-        return {"kind": transition.kind, "processed": 0, "complete": True}
+        return {
+            "kind": transition.kind, "processed": 0, "complete": True,
+            "transition_fingerprint": contract.fingerprint,
+        }
+    if transition.kind == MODEL_REVIEW_REQUIRED:
+        return {
+            "kind": transition.kind, "processed": 0, "complete": False,
+            "transition_fingerprint": contract.fingerprint,
+        }
     cursor_clause = ""
     if state["cursor_parsed_at"] is not None:
         cursor_clause = "AND (a.parsed_at,a.annotation_id)>(?,?)"
@@ -279,12 +389,18 @@ def execute_transition_page(
                     ),
                 )
                 connection.execute(
-                    """INSERT OR IGNORE INTO news_annotation_transition_projections_v1
-                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                    """INSERT OR IGNORE INTO
+                       news_annotation_transition_projections_v1
+                       (target_annotation_id,source_annotation_id,
+                        from_prompt_version,to_prompt_version,transition_kind,
+                        migrator_version,transition_fingerprint,
+                        source_annotation_hash,projected_annotation_hash,applied_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
                     (
                         target_id, row["annotation_id"], transition.from_version,
                         transition.to_version, transition.kind,
                         transition.migrator_version,
+                        contract.fingerprint,
                         hashlib.sha256(source_json.encode("utf-8")).hexdigest(),
                         hashlib.sha256(projected_json.encode("utf-8")).hexdigest(),
                         timestamp,
@@ -336,6 +452,7 @@ def execute_transition_page(
     return {
         "kind": transition.kind, "processed": len(rows), "applied": applied,
         "failed": failed, "complete": complete,
+        "transition_fingerprint": contract.fingerprint,
     }
 
 

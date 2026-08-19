@@ -25,29 +25,31 @@ TRANSITION_KEY = (
 )
 
 
-def _historical_annotation(ledger: ForwardLedger) -> dict[str, object]:
+def _historical_annotation(
+    ledger: ForwardLedger, *, item: str = "historical", offset: int = 0,
+) -> dict[str, object]:
     body = (
         "The Bureau of Labor Statistics reported job openings fell in June. "
         + "The official report contains complete macroeconomic evidence. " * 12
     )
     digest = hashlib.sha256(body.encode()).hexdigest()
-    received = NOW - timedelta(hours=1)
+    received = NOW - timedelta(hours=1) + timedelta(seconds=offset)
     ledger.append_news_revision({
         "source": "transition-fixture",
-        "source_item_id": "historical",
+        "source_item_id": item,
         "source_published_time": received,
         "collector_first_seen_time": received,
         "fetched_time": received,
         "headline": "Job openings report",
         "body": body,
         "content_hash": digest,
-        "cluster_id": "historical",
+        "cluster_id": item,
     })
     annotation = _target_annotation("job openings fell in June")
     ledger.append_annotation({
-        "annotation_id": "source-v16",
+        "annotation_id": f"source-v16-{item}" if item != "historical" else "source-v16",
         "source": "transition-fixture",
-        "source_item_id": "historical",
+        "source_item_id": item,
         "revision_number": 1,
         "raw_content_hash": digest,
         "llm_model_version": "gemini-3.5-flash-lite",
@@ -58,7 +60,8 @@ def _historical_annotation(ledger: ForwardLedger) -> dict[str, object]:
     })
     ledger.connection.execute(
         """INSERT INTO news_annotation_contract_backfill_v1
-           VALUES (?,?,NULL,NULL,NULL,NULL,'ACTIVE',?)""",
+           VALUES (?,?,NULL,NULL,NULL,NULL,'ACTIVE',?)
+           ON CONFLICT(prompt_version) DO NOTHING""",
         (CURRENT_NEWS_PROMPT_VERSION, NOW.isoformat(), NOW.isoformat()),
     )
     ledger.connection.commit()
@@ -103,6 +106,9 @@ def test_zero_provider_transitions_execute_in_sync_and_replay_safely(
             migrator_version=migrator_version,
         ),
     )
+    declared_contract = transition_policy.semantic_transition_contract(
+        transition_policy.DECLARED_TRANSITIONS[TRANSITION_KEY]
+    )
 
     database = ledger.path
     first = scheduler.sync_pending_jobs(ledger.connection, now=NOW, limit=10)
@@ -140,6 +146,7 @@ def test_zero_provider_transitions_execute_in_sync_and_replay_safely(
     assert projection["source_annotation_id"] == "source-v16"
     assert projection["transition_kind"] == kind
     assert projection["migrator_version"] == migrator_version
+    assert projection["transition_fingerprint"] == declared_contract.fingerprint
     assert projection["source_annotation_hash"]
     assert projection["projected_annotation_hash"]
     assert ledger.connection.execute(
@@ -161,10 +168,14 @@ def test_zero_provider_transitions_execute_in_sync_and_replay_safely(
         (CURRENT_NEWS_PROMPT_VERSION,),
     ).fetchone()[0] == 0
     state = ledger.connection.execute(
-        """SELECT state,processed_count
+        """SELECT state,processed_count,transition_fingerprint,
+                  transition_contract_json
            FROM news_annotation_transition_state_v1"""
     ).fetchone()
-    assert tuple(state) == ("COMPLETE", 1)
+    assert tuple(state) == (
+        "COMPLETE", 1, declared_contract.fingerprint,
+        declared_contract.contract_json,
+    )
     ledger.close()
 
 
@@ -227,6 +238,194 @@ def test_deterministic_transition_failure_is_bounded_without_model_fallback(
         alert["code"] == "OPS_AI_BACKFILL_MIGRATION_FAILED"
         for alert in health["alerts"]
     )
+    ledger.close()
+
+
+def test_deterministic_transition_resumes_only_with_same_fingerprint(
+    tmp_path, monkeypatch,
+) -> None:
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=NOW - timedelta(hours=2))
+    for index in range(3):
+        _historical_annotation(
+            ledger, item=f"resume-{index}", offset=index,
+        )
+
+    def migrate(annotation: dict[str, object], _source_text: str) -> None:
+        annotation["review_priority"] = "BACKGROUND"
+
+    monkeypatch.setitem(
+        transition_policy.DETERMINISTIC_MIGRATORS, "resume-v1", migrate,
+    )
+    transition = transition_policy.SemanticTransition(
+        *TRANSITION_KEY,
+        transition_policy.DETERMINISTIC_MIGRATION,
+        "restart fingerprint fixture",
+        migrator_version="resume-v1",
+    )
+    contract = transition_policy.semantic_transition_contract(transition)
+
+    first = transition_policy.execute_transition_page(
+        ledger.connection, transition, activated_at=NOW, now=NOW, page_size=1,
+    )
+    first_cursor = ledger.connection.execute(
+        """SELECT cursor_annotation_id
+           FROM news_annotation_transition_state_v1"""
+    ).fetchone()[0]
+    assert first["processed"] == 1
+    assert first["transition_fingerprint"] == contract.fingerprint
+    ledger.close()
+
+    ledger = ForwardLedger(database, now=NOW + timedelta(minutes=1))
+    second = transition_policy.execute_transition_page(
+        ledger.connection, transition, activated_at=NOW,
+        now=NOW + timedelta(minutes=1), page_size=1,
+    )
+    state = ledger.connection.execute(
+        """SELECT cursor_annotation_id,processed_count,transition_fingerprint
+           FROM news_annotation_transition_state_v1"""
+    ).fetchone()
+    assert second["processed"] == 1
+    assert state["cursor_annotation_id"] != first_cursor
+    assert tuple(state)[1:] == (2, contract.fingerprint)
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_annotation_transition_projections_v1"
+    ).fetchone()[0] == 2
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_ai_job_attempts_v1"
+    ).fetchone()[0] == 0
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_ai_account_request_usage_v1"
+    ).fetchone()[0] == 0
+    ledger.close()
+
+
+def test_changed_migrator_fails_closed_before_resuming_cursor(
+    tmp_path, monkeypatch,
+) -> None:
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=NOW - timedelta(hours=2))
+    for index in range(3):
+        _historical_annotation(
+            ledger, item=f"changed-{index}", offset=index,
+        )
+
+    def migrate_v1(annotation: dict[str, object], _source_text: str) -> None:
+        annotation["review_priority"] = "BACKGROUND"
+
+    monkeypatch.setitem(
+        transition_policy.DETERMINISTIC_MIGRATORS, "migrator-v1", migrate_v1,
+    )
+    transition_v1 = transition_policy.SemanticTransition(
+        *TRANSITION_KEY,
+        transition_policy.DETERMINISTIC_MIGRATION,
+        "first declared migration",
+        migrator_version="migrator-v1",
+    )
+    transition_policy.execute_transition_page(
+        ledger.connection, transition_v1,
+        activated_at=NOW, now=NOW, page_size=1,
+    )
+    before = ledger.connection.execute(
+        """SELECT cursor_annotation_id,processed_count,transition_fingerprint
+           FROM news_annotation_transition_state_v1"""
+    ).fetchone()
+    projections_before = ledger.connection.execute(
+        "SELECT count(*) FROM news_annotation_transition_projections_v1"
+    ).fetchone()[0]
+    ledger.close()
+
+    ledger = ForwardLedger(database, now=NOW + timedelta(minutes=1))
+
+    def migrate_v2(annotation: dict[str, object], _source_text: str) -> None:
+        annotation["review_priority"] = "NORMAL"
+
+    monkeypatch.setitem(
+        transition_policy.DETERMINISTIC_MIGRATORS, "migrator-v2", migrate_v2,
+    )
+    transition_v2 = transition_policy.SemanticTransition(
+        *TRANSITION_KEY,
+        transition_policy.DETERMINISTIC_MIGRATION,
+        "changed declared migration",
+        migrator_version="migrator-v2",
+    )
+    with pytest.raises(
+        transition_policy.SemanticTransitionContractChanged,
+        match="SEMANTIC_TRANSITION_CONTRACT_CHANGED",
+    ):
+        transition_policy.execute_transition_page(
+            ledger.connection, transition_v2, activated_at=NOW,
+            now=NOW + timedelta(minutes=1), page_size=1,
+        )
+
+    after = ledger.connection.execute(
+        """SELECT cursor_annotation_id,processed_count,transition_fingerprint
+           FROM news_annotation_transition_state_v1"""
+    ).fetchone()
+    assert tuple(after) == tuple(before)
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_annotation_transition_projections_v1"
+    ).fetchone()[0] == projections_before == 1
+    failure = ledger.connection.execute(
+        "SELECT * FROM news_annotation_transition_contract_failures_v1"
+    ).fetchone()
+    assert failure["failure_code"] == "SEMANTIC_TRANSITION_CONTRACT_CHANGED"
+    assert failure["persisted_fingerprint"] == before["transition_fingerprint"]
+    assert failure["current_fingerprint"] == (
+        transition_policy.semantic_transition_contract(transition_v2).fingerprint
+    )
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_ai_job_attempts_v1"
+    ).fetchone()[0] == 0
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_ai_account_request_usage_v1"
+    ).fetchone()[0] == 0
+    ledger.close()
+
+
+def test_transition_kind_change_fails_closed_instead_of_model_fallback(
+    tmp_path,
+) -> None:
+    ledger = ForwardLedger(
+        tmp_path / "forward.sqlite3", now=NOW - timedelta(hours=2),
+    )
+    for index in range(2):
+        _historical_annotation(ledger, item=f"kind-{index}", offset=index)
+    reuse = transition_policy.SemanticTransition(
+        *TRANSITION_KEY, transition_policy.REUSE_COMPATIBLE,
+        "compatible fixture",
+    )
+    transition_policy.execute_transition_page(
+        ledger.connection, reuse, activated_at=NOW, now=NOW, page_size=1,
+    )
+    before = tuple(ledger.connection.execute(
+        """SELECT cursor_annotation_id,processed_count,transition_fingerprint
+           FROM news_annotation_transition_state_v1"""
+    ).fetchone())
+    review = transition_policy.SemanticTransition(
+        *TRANSITION_KEY, transition_policy.MODEL_REVIEW_REQUIRED,
+        "changed to model review",
+    )
+
+    with pytest.raises(transition_policy.SemanticTransitionContractChanged):
+        transition_policy.execute_transition_page(
+            ledger.connection, review, activated_at=NOW,
+            now=NOW + timedelta(minutes=1), page_size=1,
+        )
+
+    assert tuple(ledger.connection.execute(
+        """SELECT cursor_annotation_id,processed_count,transition_fingerprint
+           FROM news_annotation_transition_state_v1"""
+    ).fetchone()) == before
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_annotation_transition_projections_v1"
+    ).fetchone()[0] == 1
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_ai_job_attempts_v1"
+    ).fetchone()[0] == 0
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_ai_account_request_usage_v1"
+    ).fetchone()[0] == 0
     ledger.close()
 
 

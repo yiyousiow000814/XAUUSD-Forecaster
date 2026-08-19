@@ -2981,9 +2981,16 @@ def _dashboard_payload(
         "news_input_coverage": news_input_coverage,
         "annotation_queue": {
             "ready": int(annotation_queue["ready"]),
+            "semantic_pending": int(annotation_queue["semantic_pending"]),
             "queued": int(annotation_queue["queued"]),
             "backing_off": int(annotation_queue["backing_off"] or 0),
             "dead_letter": int(annotation_queue["dead_letter"] or 0),
+            "contract_backfill_queued": int(
+                annotation_queue["contract_backfill_queued"] or 0
+            ),
+            "unclassified_annotation_jobs": int(
+                annotation_queue["unclassified_annotation_jobs"] or 0
+            ),
             "waiting_content": int(annotation_queue["waiting_content"] or 0),
             "unavailable_content": int(annotation_queue["unavailable_content"] or 0),
             "configured_key_count": len(gemini_keys),

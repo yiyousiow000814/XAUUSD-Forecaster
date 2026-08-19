@@ -151,7 +151,12 @@ job/account/reason and refresh at most once per five minutes, so scheduler ticks
 do not create an unbounded evidence stream. LIVE scheduler health excludes
 migration queue age and pacing; a
 separate non-blocking `contract_backfill` summary exposes its states, oldest
-age, and recent budget deferrals.
+age, and recent budget deferrals. A not-yet-classified job is owned by the
+bounded lane migration and is reported only as `UNCLASSIFIED_MIGRATION`; its
+stored lane default is not operational authority. The materialized dashboard
+read model therefore keys counts by `lane_classified` as well as lane and state.
+Legacy annotation queue fields read classified LIVE work only, while semantic
+pending, contract-backfill, and unclassified-migration totals remain separate.
 
 Every annotation contract transition is declared as `REUSE_COMPATIBLE`,
 `DETERMINISTIC_MIGRATION`, or `MODEL_REVIEW_REQUIRED`. Only the last class may
@@ -160,8 +165,14 @@ current-contract projection while retaining the source annotation and original
 model provenance. Deterministic migration applies a declared, versioned local
 transform and records source and projected hashes. Both paths are cursor-bounded,
 replay-safe, and consume no provider dispatch, account quota, job attempt, retry,
-or model-backed backfill. A contract failure is retained under
-`SEMANTIC_TRANSITION_CONTRACT_FAILED` and never falls through to model review.
+or model-backed backfill. The transition state and every zero-call projection
+persist the same stable fingerprint over the contract version, source and target
+prompt versions, transition kind, and deterministic migrator version. A restart
+may resume only when that fingerprint matches. A projection failure is retained
+under `SEMANTIC_TRANSITION_CONTRACT_FAILED`; a changed in-flight contract is
+retained under `SEMANTIC_TRANSITION_CONTRACT_CHANGED`. Either failure is
+fail-closed: the cursor and existing projections remain unchanged and execution
+never falls through to model review.
 Historical demand is independently
 classified as `CURRENT_OPERATIONAL`, `TRAINING_REQUIRED`, or `ARCHIVAL_ONLY`;
 training work is schedulable only after an explicit generation demand, while
