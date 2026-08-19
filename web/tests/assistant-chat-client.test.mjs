@@ -81,7 +81,7 @@ test("finite Assistant SSE replay validates ids, cursors, and public progress", 
       });
     },
   );
-  assert.equal(request.input, "/api/assistant-chat?mode=events&id=turn-preview-rates&after=0&limit=100");
+  assert.equal(request.input, "/admin/api/assistant-chat?mode=events&id=turn-preview-rates&after=0&limit=100");
   assert.equal(new Headers(request.init.headers).get("last-event-id"), "0");
   assert.equal(request.init.credentials, "same-origin");
   assert.equal(replay.turn_status, "ANSWERED");

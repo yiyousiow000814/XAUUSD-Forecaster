@@ -1,7 +1,17 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
+  adminAuthStateAfterProbe,
+  isTrustedAdminAuthMessage,
+  openAdminAuthPopup,
+  probeAdminSession,
+  subscribeAdminAuthOutcomes,
+  type AdminAuthProbeOutcome,
+  type AdminAuthState,
+} from "../_lib/admin-auth-session";
+import {
+  clearPrivateDashboardResources,
   loadDashboardResource,
   readDashboardResourceState,
   subscribeDashboardResource,
@@ -12,6 +22,7 @@ import {
   DASHBOARD_ADMIN_DESTINATIONS,
   DASHBOARD_GLOBAL_DESTINATIONS,
   type DashboardLocation,
+  useDashboardNavigation,
 } from "./DashboardNavigation";
 import MobileDashboardNav from "./MobileDashboardNav";
 import SystemStatePill from "./SystemStatePill";
@@ -35,18 +46,20 @@ function DashboardBrand() {
 }
 
 function GlobalNavigation({
-  activeDestination, openAdminLogin,
+  activeDestination, adminAuthenticated, openAdminLogin,
 }: {
   activeDestination: ReturnType<typeof activeDashboardDestination>;
+  adminAuthenticated: boolean;
   openAdminLogin: () => void;
 }) {
   return <nav className="dashboard-global-nav" aria-label="产品区域">
     {DASHBOARD_GLOBAL_DESTINATIONS.map(destination => {
       const active = destination.id === activeDestination;
-      const label = active && destination.authenticatedLabel
+      const label = adminAuthenticated && destination.authenticatedLabel
         ? destination.authenticatedLabel : destination.label;
-      if (destination.private && !active) {
+      if (destination.private && !adminAuthenticated) {
         return <button
+          aria-current={active ? "page" : undefined}
           className="dashboard-global-link dashboard-admin-login-trigger"
           key={destination.id}
           onClick={openAdminLogin}
@@ -105,13 +118,21 @@ function GlobalSystemState() {
 }
 
 function DashboardHeader({
-  location, openAdminLogin,
-}: { location: DashboardLocation; openAdminLogin: () => void }) {
+  location, adminAuthenticated, openAdminLogin,
+}: { location: DashboardLocation; adminAuthenticated: boolean; openAdminLogin: () => void }) {
   const activeDestination = activeDashboardDestination(location.room);
   return <header className="dashboard-header topbar">
     <DashboardBrand />
-    <GlobalNavigation activeDestination={activeDestination} openAdminLogin={openAdminLogin} />
-    <MobileDashboardNav activeDestination={activeDestination} openAdminLogin={openAdminLogin} />
+    <GlobalNavigation
+      activeDestination={activeDestination}
+      adminAuthenticated={adminAuthenticated}
+      openAdminLogin={openAdminLogin}
+    />
+    <MobileDashboardNav
+      activeDestination={activeDestination}
+      adminAuthenticated={adminAuthenticated}
+      openAdminLogin={openAdminLogin}
+    />
     <GlobalSystemState />
   </header>;
 }
@@ -135,8 +156,79 @@ function AdminSectionNavigation({ location }: { location: DashboardLocation }) {
 
 export default function DashboardShell({ children, location }: { children: ReactNode; location: DashboardLocation }) {
   const activeDestination = activeDashboardDestination(location.room);
+  const navigation = useDashboardNavigation();
+  const [adminAuthState, setAdminAuthState] = useState<AdminAuthState>("CHECKING");
   const [adminLoginOpen, setAdminLoginOpen] = useState(false);
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const popupRef = useRef<Window | null>(null);
+  const popupCloseTimerRef = useRef<number | null>(null);
+  const authCompletionInFlightRef = useRef(false);
+  const applyAuthOutcome = useCallback((outcome: AdminAuthProbeOutcome) => {
+    if (outcome === "ANONYMOUS" || outcome === "FORBIDDEN") {
+      clearPrivateDashboardResources();
+    }
+    setAdminAuthState(current => adminAuthStateAfterProbe(current, outcome));
+  }, []);
+  const revalidateAdminSession = useCallback(async () => {
+    const outcome = await probeAdminSession();
+    applyAuthOutcome(outcome);
+    return outcome;
+  }, [applyAuthOutcome]);
+
+  useEffect(() => {
+    queueMicrotask(() => void revalidateAdminSession());
+    const unsubscribe = subscribeAdminAuthOutcomes(applyAuthOutcome);
+    const revalidateOnReturn = () => {
+      if (document.visibilityState === "visible") void revalidateAdminSession();
+    };
+    window.addEventListener("pageshow", revalidateOnReturn);
+    document.addEventListener("visibilitychange", revalidateOnReturn);
+    return () => {
+      unsubscribe();
+      window.removeEventListener("pageshow", revalidateOnReturn);
+      document.removeEventListener("visibilitychange", revalidateOnReturn);
+    };
+  }, [applyAuthOutcome, revalidateAdminSession]);
+
+  const clearPopupCloseTimer = useCallback(() => {
+    if (popupCloseTimerRef.current !== null) {
+      window.clearInterval(popupCloseTimerRef.current);
+      popupCloseTimerRef.current = null;
+    }
+  }, []);
+
+  const completeAdminLogin = useCallback(async () => {
+    if (authCompletionInFlightRef.current) return;
+    authCompletionInFlightRef.current = true;
+    try {
+      const outcome = await revalidateAdminSession();
+      if (outcome !== "AUTHENTICATED") return;
+      clearPopupCloseTimer();
+      popupRef.current?.close();
+      popupRef.current = null;
+      dialogRef.current?.close();
+      setAdminLoginOpen(false);
+      if (navigation) void navigation.navigate("/admin");
+      else window.location.assign("/admin");
+    } finally {
+      authCompletionInFlightRef.current = false;
+    }
+  }, [clearPopupCloseTimer, navigation, revalidateAdminSession]);
+
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      if (!isTrustedAdminAuthMessage(
+        event, window.location.origin, popupRef.current,
+      )) return;
+      void completeAdminLogin();
+    };
+    window.addEventListener("message", handleMessage);
+    return () => {
+      window.removeEventListener("message", handleMessage);
+      clearPopupCloseTimer();
+    };
+  }, [clearPopupCloseTimer, completeAdminLogin]);
+
   const openAdminLogin = () => {
     setAdminLoginOpen(true);
     queueMicrotask(() => dialogRef.current?.showModal());
@@ -145,10 +237,29 @@ export default function DashboardShell({ children, location }: { children: React
     dialogRef.current?.close();
     setAdminLoginOpen(false);
   };
+  const beginAdminLogin = () => {
+    clearPopupCloseTimer();
+    popupRef.current = openAdminAuthPopup(
+      (url, target, features) => window.open(url, target, features),
+      () => window.location.assign("/admin"),
+    );
+    if (!popupRef.current) return;
+    popupRef.current.focus();
+    popupCloseTimerRef.current = window.setInterval(() => {
+      if (!popupRef.current?.closed) return;
+      clearPopupCloseTimer();
+      popupRef.current = null;
+      void completeAdminLogin();
+    }, 500);
+  };
   return <div className={`dashboard-shell is-${activeDestination}`}>
     <div className="grain" />
     <div className="dashboard-shell-header">
-      <DashboardHeader location={location} openAdminLogin={openAdminLogin} />
+      <DashboardHeader
+        location={location}
+        adminAuthenticated={adminAuthState === "AUTHENTICATED"}
+        openAdminLogin={openAdminLogin}
+      />
       <AdminSectionNavigation location={location} />
     </div>
     {children}
@@ -161,11 +272,15 @@ export default function DashboardShell({ children, location }: { children: React
         <header><h2>管理员登录</h2></header>
         <div>
           <p>仅系统管理员可访问 Assistant、重试任务和 AI 模型用量。</p>
-          <span>登录后进入私有管理后台。</span>
+          <span>{adminAuthState === "FORBIDDEN"
+            ? "当前 Google 账号不在管理员允许名单中。"
+            : "登录后进入私有管理后台。"}</span>
         </div>
         <footer>
           <button type="button" onClick={closeAdminLogin}>取消</button>
-          <a href="/admin">使用 Google 登录</a>
+          <button className="admin-login-primary" type="button" onClick={beginAdminLogin}>
+            使用 Google 登录
+          </button>
         </footer>
       </article> : null}
     </dialog>

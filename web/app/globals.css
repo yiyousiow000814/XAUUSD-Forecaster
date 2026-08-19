@@ -2085,7 +2085,10 @@ body:has(.assistant-main) > .dashboard-shell { width:100%; height:auto; min-heig
 .admin-login-dialog footer button { min-width:82px; }
 .admin-login-dialog footer a { min-width:148px; }
 .admin-login-dialog footer a { background:var(--ink); color:var(--paper); }
+.admin-login-dialog footer .admin-login-primary { min-width:148px; background:var(--ink); color:var(--paper); }
 .admin-login-dialog footer button:hover,.admin-login-dialog footer button:focus-visible,.admin-login-dialog footer a:hover,.admin-login-dialog footer a:focus-visible { outline:3px solid var(--acid); outline-offset:2px; }
+.admin-auth-complete { min-height:100vh; display:grid; place-content:center; gap:10px; padding:24px; background:var(--paper); color:var(--ink); text-align:center; }
+.admin-auth-complete h1,.admin-auth-complete p { margin:0; }
 
 .admin-overview-main { width:min(1180px,100%); margin:0 auto; padding:24px 2vw 36px; }
 .admin-overview-hero { display:grid; grid-template-columns:minmax(0,1fr) minmax(260px,.55fr); align-items:end; gap:24px; border-bottom:1px solid var(--ink); padding:5px 0 15px; }

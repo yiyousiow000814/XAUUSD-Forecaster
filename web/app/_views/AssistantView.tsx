@@ -30,6 +30,10 @@ import {
   assistantPreviewOlderMessages,
 } from "../_lib/assistant-preview-fixture";
 import { ASSISTANT_ACCEPTING_TURNS } from "../_lib/assistant-availability";
+import {
+  ADMIN_AUTH_REQUIRED_MESSAGE,
+  ADMIN_FORBIDDEN_MESSAGE,
+} from "../_lib/admin-client";
 
 const replayDelay = (milliseconds: number, signal: AbortSignal) => new Promise<void>(
   (resolve, reject) => {
@@ -75,7 +79,8 @@ type AssistantViewError = {
 const assistantViewError = (reason: unknown, prefix = ""): AssistantViewError => {
   let message: string;
   if (reason instanceof AssistantClientError) {
-    if (reason.status === 401) message = "管理员会话已过期，请重新登录。";
+    if (reason.status === 401) message = ADMIN_AUTH_REQUIRED_MESSAGE;
+    else if (reason.status === 403) message = ADMIN_FORBIDDEN_MESSAGE;
     else if (reason.status === 429) message = "Assistant 当前繁忙，请稍后再试。";
     else message = reason.message;
   } else {

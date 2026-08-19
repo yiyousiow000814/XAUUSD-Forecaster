@@ -7,9 +7,10 @@ import {
 import { useDashboardNavigation } from "./DashboardNavigation";
 
 export default function MobileDashboardNav({
-  activeDestination, openAdminLogin,
+  activeDestination, adminAuthenticated, openAdminLogin,
 }: {
   activeDestination: DashboardGlobalDestinationId;
+  adminAuthenticated: boolean;
   openAdminLogin: () => void;
 }) {
   const navigation = useDashboardNavigation();
@@ -26,7 +27,7 @@ export default function MobileDashboardNav({
         onChange={event => {
           const href = event.currentTarget.value;
           const destination = DASHBOARD_GLOBAL_DESTINATIONS.find(item => item.href === href);
-          if (destination?.private && activeDestination !== "admin") {
+          if (destination?.private && !adminAuthenticated) {
             openAdminLogin();
             event.currentTarget.value = currentHref;
             return;
@@ -37,7 +38,7 @@ export default function MobileDashboardNav({
       >
         {DASHBOARD_GLOBAL_DESTINATIONS.map(destination => (
           <option key={destination.id} value={destination.href}>
-            {destination.id === activeDestination && destination.authenticatedLabel
+            {adminAuthenticated && destination.authenticatedLabel
               ? destination.authenticatedLabel : destination.label}
           </option>
         ))}

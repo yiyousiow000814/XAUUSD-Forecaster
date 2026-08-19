@@ -1,3 +1,5 @@
+import { reportAdminAuthOutcome } from "./admin-auth-session";
+
 type CacheEntry = {
   data?: unknown;
   updatedAt: number;
@@ -56,6 +58,12 @@ export function clearDashboardResource(url: string): void {
   notifyDashboardResource(url);
 }
 
+export function clearPrivateDashboardResources(): void {
+  for (const url of resources.keys()) {
+    if (url.startsWith("/admin/api/")) clearDashboardResource(url);
+  }
+}
+
 export function readDashboardResourceState<T>(url: string): DashboardResourceState<T> {
   const entry = resources.get(url);
   const hasSnapshot = entry?.data !== undefined;
@@ -102,6 +110,7 @@ export async function loadDashboardResource<T>(
       const response = await fetch(url, { cache: "no-store", signal: controller.signal });
       const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
       if (response.redirected || (response.ok && contentType.includes("text/html"))) {
+        if (url.startsWith("/admin/api/")) reportAdminAuthOutcome("ANONYMOUS");
         const error = new Error("Authentication required") as Error & { status?: number };
         error.status = 401;
         throw error;
@@ -116,6 +125,10 @@ export async function loadDashboardResource<T>(
           : `数据服务暂时不可用（HTTP ${response.status}），页面会自动重试`);
       }
       if (!response.ok) {
+        if (url.startsWith("/admin/api/")) {
+          if (response.status === 401) reportAdminAuthOutcome("ANONYMOUS");
+          else if (response.status === 403) reportAdminAuthOutcome("FORBIDDEN");
+        }
         const details = body && typeof body === "object"
           ? body as Record<string, unknown> : {};
         const message = "error" in details

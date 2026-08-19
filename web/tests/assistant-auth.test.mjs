@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import { authenticateDashboardOperatorRequest } from "../app/api/_shared/dashboard-operator-auth.ts";
+import {
+  authenticateDashboardOperatorRequest,
+  dashboardOperatorAuthFailure,
+  dashboardOperatorSessionResponse,
+} from "../app/api/_shared/dashboard-operator-auth.ts";
 
 const runtimeEnv = {
   CF_ACCESS_TEAM_DOMAIN: "aurum.cloudflareaccess.com",
@@ -43,7 +47,10 @@ test("verifies the Access signature, issuer, audience, user type, and owner memb
   try {
     assert.deepEqual(
       await authenticateDashboardOperatorRequest(request(signed.token), runtimeEnv),
-      { actor_id: "cloudflare-access:owner-subject", role: "OWNER" },
+      {
+        state: "AUTHORIZED",
+        actor: { actor_id: "cloudflare-access:owner-subject", role: "OWNER" },
+      },
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -52,16 +59,19 @@ test("verifies the Access signature, issuer, audience, user type, and owner memb
 
 test("does not trust a header without a valid signed token", async () => {
   let verifierCalls = 0;
-  assert.equal(await authenticateDashboardOperatorRequest(
+  assert.deepEqual(await authenticateDashboardOperatorRequest(
     request("not-a-jwt"),
     runtimeEnv,
     async () => {
       verifierCalls += 1;
       throw new Error("invalid signature");
     },
-  ), null);
+  ), { state: "AUTH_REQUIRED" });
   assert.equal(verifierCalls, 1);
-  assert.equal(await authenticateDashboardOperatorRequest(request(null), runtimeEnv), null);
+  assert.deepEqual(
+    await authenticateDashboardOperatorRequest(request(null), runtimeEnv),
+    { state: "AUTH_REQUIRED" },
+  );
 });
 
 test("fails closed for service identities, strangers, and missing owner configuration", async () => {
@@ -70,17 +80,20 @@ test("fails closed for service identities, strangers, and missing owner configur
     email: "stranger@example.com",
     type: "app",
   });
-  assert.equal(await authenticateDashboardOperatorRequest(request("token"), runtimeEnv, verify), null);
-  assert.equal(await authenticateDashboardOperatorRequest(
+  assert.deepEqual(
+    await authenticateDashboardOperatorRequest(request("token"), runtimeEnv, verify),
+    { state: "FORBIDDEN" },
+  );
+  assert.deepEqual(await authenticateDashboardOperatorRequest(
     request("token"),
     runtimeEnv,
     async () => ({ sub: "", email: "owner@example.com", type: "app" }),
-  ), null);
-  assert.equal(await authenticateDashboardOperatorRequest(
+  ), { state: "AUTH_REQUIRED" });
+  assert.deepEqual(await authenticateDashboardOperatorRequest(
     request("token"),
     { ...runtimeEnv, DASHBOARD_OPERATOR_OWNER_SUBJECTS: "" },
     async () => ({ sub: "owner-subject", email: "owner@example.com", type: "app" }),
-  ), null);
+  ), { state: "UNAVAILABLE" });
 });
 
 test("email may authorize membership but never becomes actor identity", async () => {
@@ -94,8 +107,8 @@ test("email may authorize membership but never becomes actor identity", async ()
     async () => ({ sub: "stable-subject", email: "owner@example.com", type: "app" }),
   );
   assert.deepEqual(actor, {
-    actor_id: "cloudflare-access:stable-subject",
-    role: "OWNER",
+    state: "AUTHORIZED",
+    actor: { actor_id: "cloudflare-access:stable-subject", role: "OWNER" },
   });
 });
 
@@ -103,15 +116,41 @@ test("shared operator allowlist takes precedence over legacy Assistant cutover v
   const verify = async () => ({
     sub: "legacy-owner", email: "legacy@example.com", type: "app",
   });
-  assert.equal(await authenticateDashboardOperatorRequest(request("token"), {
+  assert.deepEqual(await authenticateDashboardOperatorRequest(request("token"), {
     ...runtimeEnv,
     DASHBOARD_OPERATOR_OWNER_SUBJECTS: "current-owner",
     ASSISTANT_OWNER_SUBJECTS: "legacy-owner",
-  }, verify), null);
+  }, verify), { state: "FORBIDDEN" });
 
   assert.deepEqual(await authenticateDashboardOperatorRequest(request("token"), {
     ...runtimeEnv,
     DASHBOARD_OPERATOR_OWNER_SUBJECTS: undefined,
     ASSISTANT_OWNER_SUBJECTS: "legacy-owner",
-  }, verify), { actor_id: "cloudflare-access:legacy-owner", role: "OWNER" });
+  }, verify), {
+    state: "AUTHORIZED",
+    actor: { actor_id: "cloudflare-access:legacy-owner", role: "OWNER" },
+  });
+});
+
+test("maps shared authentication states to fail-closed HTTP contracts", async () => {
+  const required = dashboardOperatorAuthFailure({ state: "AUTH_REQUIRED" });
+  assert.equal(required.status, 401);
+  assert.equal((await required.json()).code, "DASHBOARD_OPERATOR_AUTH_REQUIRED");
+
+  const forbidden = dashboardOperatorAuthFailure({ state: "FORBIDDEN" });
+  assert.equal(forbidden.status, 403);
+  assert.equal((await forbidden.json()).code, "DASHBOARD_OPERATOR_FORBIDDEN");
+
+  const unavailable = dashboardOperatorAuthFailure({ state: "UNAVAILABLE" });
+  assert.equal(unavailable.status, 503);
+  assert.equal((await unavailable.json()).code, "DASHBOARD_OPERATOR_AUTH_UNAVAILABLE");
+
+  const session = dashboardOperatorSessionResponse({
+    state: "AUTHORIZED",
+    actor: { actor_id: "cloudflare-access:owner-subject", role: "OWNER" },
+  });
+  assert.equal(session.status, 200);
+  assert.deepEqual(await session.json(), { authenticated: true });
+  assert.match(session.headers.get("cache-control"), /no-store/);
+  assert.equal(dashboardOperatorSessionResponse({ state: "AUTH_REQUIRED" }).status, 401);
 });

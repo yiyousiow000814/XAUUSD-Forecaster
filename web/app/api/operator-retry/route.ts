@@ -1,6 +1,9 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
-import { authenticateDashboardOperatorRequest } from "../_shared/dashboard-operator-auth";
+import {
+  authenticateDashboardOperatorRequest,
+  dashboardOperatorAuthFailure,
+} from "../_shared/dashboard-operator-auth";
 import { readBoundedBody } from "../_shared/dashboard-snapshot";
 import {
   createOperatorRetryRequests,
@@ -34,8 +37,8 @@ export async function GET(request: Request) {
   if (isPreviewDeployment) {
     return previewJson({ items: [], requests: [], preview: true }, 200, "synthetic-empty-operator-retry");
   }
-  const actor = await authenticateDashboardOperatorRequest(request, env);
-  if (!actor) return json({ error: "操作员身份验证失败" }, 401);
+  const authorization = await authenticateDashboardOperatorRequest(request, env);
+  if (authorization.state !== "AUTHORIZED") return dashboardOperatorAuthFailure(authorization);
   if (!env.DB) return json({ error: "重试控制暂不可用" }, 503);
   const requested = Number(new URL(request.url).searchParams.get("limit") ?? 200);
   try {
@@ -48,8 +51,9 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const preview = rejectPreviewWrite();
   if (preview) return preview;
-  const actor = await authenticateDashboardOperatorRequest(request, env);
-  if (!actor) return json({ error: "操作员身份验证失败" }, 401);
+  const authorization = await authenticateDashboardOperatorRequest(request, env);
+  if (authorization.state !== "AUTHORIZED") return dashboardOperatorAuthFailure(authorization);
+  const actor = authorization.actor;
   if (!env.DB) return json({ error: "重试控制暂不可用" }, 503);
   try {
     const input = await body(request);

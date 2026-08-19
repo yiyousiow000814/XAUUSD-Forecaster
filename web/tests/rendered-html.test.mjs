@@ -677,10 +677,10 @@ test("renders one invariant global header and active section across every dashbo
     ["/?room=audit&view=news", "新闻与决策"],
     ["/?room=audit&view=league", "新闻与决策"],
     ["/?room=health", "系统"],
-    ["/admin", "管理后台"],
-    ["/admin/assistant", "管理后台"],
-    ["/admin/retry-jobs", "管理后台"],
-    ["/admin/ai-usage", "管理后台"],
+    ["/admin", "管理员登录"],
+    ["/admin/assistant", "管理员登录"],
+    ["/admin/retry-jobs", "管理员登录"],
+    ["/admin/ai-usage", "管理员登录"],
   ];
   const publicLabels = ["总览", "新闻与决策", "系统"];
 
@@ -694,7 +694,7 @@ test("renders one invariant global header and active section across every dashbo
     assert.match(header, /<strong>Aurum Signal Room<\/strong>/, path);
     assert.match(header, /<small>XAUUSD · Forward-only intelligence<\/small>/, path);
     assert.equal(header.match(/aria-current="page"/g)?.length, 1, path);
-    assert.match(header, new RegExp(`aria-current="page"[^>]*>${activeLabel}</a>`), path);
+    assert.match(header, new RegExp(`aria-current="page"[^>]*>(?:<span[^>]*></span>)?${activeLabel}</(?:a|button)>`), path);
     assert.equal(header.match(/class="dashboard-global-state"/g)?.length, 1, path);
     assert.doesNotMatch(header, /返回实时室|学习曲线|AI 模型用量|系统健康|重试任务/, path);
 
@@ -711,8 +711,8 @@ test("renders one invariant global header and active section across every dashbo
       previousGlobal = globalIndex;
       previousMobile = mobileIndex;
     }
-    assert.match(globalNav, activeLabel === "管理后台" ? />管理后台<\/a>/ : />管理员登录<\/button>/);
-    assert.match(mobileNav, activeLabel === "管理后台" ? />管理后台<\/option>/ : />管理员登录<\/option>/);
+    assert.match(globalNav, />管理员登录<\/button>/);
+    assert.match(mobileNav, />管理员登录<\/option>/);
   }
 });
 
@@ -726,7 +726,10 @@ test("keeps Admin login intent local until the explicit Access handoff", () => {
   assert.match(shell, /<h2>管理员登录<\/h2>/);
   assert.match(shell, /仅系统管理员可访问 Assistant、重试任务和 AI 模型用量。/);
   assert.match(shell, /登录后进入私有管理后台。/);
-  assert.match(shell, /<a href="\/admin">使用 Google 登录<\/a>/);
+  assert.match(shell, /className="admin-login-primary"[\s\S]*onClick=\{beginAdminLogin\}/);
+  assert.match(shell, /openAdminAuthPopup[\s\S]*window\.location\.assign\("\/admin"\)/);
+  assert.match(shell, /isTrustedAdminAuthMessage[\s\S]*revalidateAdminSession/);
+  assert.match(shell, /adminAuthState === "AUTHENTICATED"/);
   assert.match(shell, /<button type="button" onClick=\{closeAdminLogin\}>取消<\/button>/);
   assert.doesNotMatch(shell, /<ul>|其他私有运维工具|登录后可以访问|PRIVATE ADMIN WORKSPACE/);
   assert.doesNotMatch(shell, /DashboardLink[^\n]*使用 Google 登录/);
@@ -807,7 +810,8 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   const health = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
   const status = readFileSync(new URL("../app/_views/StatusView.tsx", import.meta.url), "utf8");
   assert.match(health, /initialPayload \?\? readDashboardResource<StatusPayload>\("\/api\/status"\)/);
-  assert.match(status, /readDashboardResource<StatusPayload>\("\/api\/admin-status"\)/);
+  assert.match(status, /const statusUrl = `\$\{ADMIN_API_PREFIX\}\/admin-status`/);
+  assert.match(status, /readDashboardResource<StatusPayload>\(statusUrl\)/);
   assert.match(page, /previewBundle\.learning_summary/);
   const vite = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
   const learning = readFileSync(new URL("../build/preview-learning.ts", import.meta.url), "utf8");
@@ -1358,7 +1362,7 @@ test("keeps System Health separate from the dedicated retry workspace", async ()
   assert.equal(retryPage.response.status, 200);
   assert.match(retryPage.html, /PRIVATE OPERATOR QUEUE/);
   assert.match(retryPage.html, /<h1>重试任务<\/h1>/);
-  assert.match(retryPage.html, /aria-current="page"[^>]*>管理后台<\/a>/);
+  assert.match(retryPage.html, /aria-current="page"[^>]*>[\s\S]*?管理员登录<\/button>/);
   assert.match(retryPage.html, /aria-current="page"[^>]*>重试任务<\/a>/);
   const retryNavigation = retryPage.html.match(/<nav class="dashboard-section-nav admin-section-nav"[\s\S]*?<\/nav>/)?.[0] ?? "";
   assert.match(retryNavigation, /概览[\s\S]*Assistant[\s\S]*重试任务[\s\S]*AI 模型用量/);
@@ -1368,7 +1372,7 @@ test("keeps System Health separate from the dedicated retry workspace", async ()
   const retryRoute = readFileSync(new URL("../app/api/operator-retry/route.ts", import.meta.url), "utf8");
   const retryGet = retryRoute.match(/export async function GET[\s\S]*?\n\}/)?.[0] ?? "";
   assert.match(retryGet, /authenticateDashboardOperatorRequest\(request, env\)/);
-  assert.match(retryGet, /if \(!actor\) return json\(\{ error: "操作员身份验证失败" \}, 401\)/);
+  assert.match(retryGet, /authorization\.state !== "AUTHORIZED"[\s\S]*dashboardOperatorAuthFailure\(authorization\)/);
   assert.ok(retryGet.indexOf("authenticateDashboardOperatorRequest") < retryGet.indexOf("env.DB"));
   assert.ok(retryGet.indexOf("env.DB") < retryGet.indexOf("listOperatorRetryJobs"));
   assert.match(retryQueue, /立即可领取/);
@@ -1523,20 +1527,22 @@ test("separates anonymous health data from owner-only Admin evidence", async () 
   ]) assert.match(statusProjection, new RegExp(`"${field}"`));
   assert.doesNotMatch(healthView, /operator-retry|assistant-health|AdminOverview/);
   assert.doesNotMatch(alertBanner, /assistant-health|AssistantOperationalHealth/);
-  assert.match(adminOverview, /fetch\("\/api\/operator-retry"/);
-  assert.match(adminOverview, /fetch\("\/api\/assistant-health"/);
+  assert.match(adminOverview, /fetch\(`\$\{ADMIN_API_PREFIX\}\/operator-retry`/);
+  assert.match(adminOverview, /fetch\(`\$\{ADMIN_API_PREFIX\}\/assistant-health`/);
   assert.match(adminOverview, /assistantHealthPresentation\(assistantHealth\)/);
-  assert.match(adminOverview, /管理员会话已过期，请重新登录/);
-  assert.match(adminOverview, /href="\/admin">重新登录/);
-  assert.match(adminClient, /ADMIN_RELOGIN_MESSAGE = "管理员会话已过期，请重新登录。"/);
-  assert.match(statusView, /adminErrorPresentation[\s\S]*href="\/admin">重新登录/);
-  assert.match(statusView, /presentation\.kind === "AUTH_REQUIRED"[\s\S]*clearDashboardResource\("\/api\/admin-status"\)[\s\S]*setPayload\(null\)/);
+  assert.match(adminOverview, /需要管理员登录/);
+  assert.match(adminOverview, /href="\/admin">管理员登录/);
+  assert.match(adminClient, /ADMIN_AUTH_REQUIRED_MESSAGE = "需要管理员登录。"/);
+  assert.doesNotMatch(adminClient, /会话已过期/);
+  assert.match(statusView, /adminErrorPresentation[\s\S]*href="\/admin">管理员登录/);
+  assert.match(statusView, /presentation\.kind === "AUTH_REQUIRED"[\s\S]*clearDashboardResource\(statusUrl\)[\s\S]*setPayload\(null\)/);
   const dashboardResource = readFileSync(new URL("../app/_lib/dashboard-resource.ts", import.meta.url), "utf8");
   assert.match(dashboardResource, /export function clearDashboardResource\(url: string\)/);
   assert.doesNotMatch(dashboardResource, /resources\.clear\(\)/);
-  assert.match(retryQueue, /adminErrorPresentation[\s\S]*href="\/admin">重新登录/);
-  assert.match(assistantView, /管理员会话已过期，请重新登录。/);
-  assert.match(assistantTranscript, /href="\/admin">重新登录/);
+  assert.match(retryQueue, /adminErrorPresentation[\s\S]*href="\/admin">管理员登录/);
+  assert.match(assistantView, /ADMIN_AUTH_REQUIRED_MESSAGE/);
+  assert.doesNotMatch(assistantView, /会话已过期/);
+  assert.match(assistantTranscript, /href="\/admin">管理员登录/);
   assert.doesNotMatch(statusProjection, /fetch\(|STATUS_RELAY_URL/);
   assert.doesNotMatch(adminStatus, /STATUS_RELAY_URL/);
 
@@ -2244,7 +2250,7 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(responsiveScroll, /stableFrames < 6 && remainingFrames > 0/);
   assert.match(responsiveScroll, /cancelAnimationFrame\(frame\)/);
   assert.doesNotMatch(page, /scrollAuditTabs|auditTabsRef|向左查看更多审计视图|向右查看更多审计视图/);
-  assert.match(shell, /<MobileDashboardNav activeDestination=\{activeDestination\}/);
+  assert.match(shell, /<MobileDashboardNav[\s\S]*activeDestination=\{activeDestination\}/);
   assert.match(mobileNav, /DASHBOARD_GLOBAL_DESTINATIONS/);
   assert.doesNotMatch(mobileNav, /const SECTIONS|学习曲线|AI 模型用量|系统健康/);
   for (const label of ["总览", "新闻与决策", "系统", "管理员登录"]) {
@@ -2736,6 +2742,12 @@ test("separates Access-owned human APIs from the ingest worker control plane", (
     "../app/api/assistant-worker/conversations/route.ts",
     "../app/api/assistant-worker/news-questions/route.ts",
   ].map(path => readFileSync(new URL(path, import.meta.url), "utf8"));
+  const protectedAliases = [
+    "admin-status", "assistant-health", "assistant-chat",
+    "assistant-conversations", "news-questions", "operator-retry",
+  ].map(name => readFileSync(
+    new URL(`../app/admin/api/${name}/route.ts`, import.meta.url), "utf8",
+  ));
   const sync = readFileSync(new URL("../../scripts/run_dashboard_sync.py", import.meta.url), "utf8");
   const chatWorker = readFileSync(
     new URL("../../xauusd_forecaster/assistant_chat_worker.py", import.meta.url), "utf8",
@@ -2747,6 +2759,9 @@ test("separates Access-owned human APIs from the ingest worker control plane", (
   for (const route of humanRoutes) {
     assert.match(route, /authenticateDashboardOperatorRequest\(request, env\)/);
     assert.doesNotMatch(route, /isIngestAuthorized|mode === "machine"/);
+  }
+  for (const route of protectedAliases) {
+    assert.match(route, /export \{ (?:GET|GET, POST) \} from "\.\.\/\.\.\/\.\.\/api\//);
   }
   for (const route of workerRoutes) {
     assert.match(route, /isIngestAuthorized\(request\)/);
@@ -2767,7 +2782,7 @@ test("separates Access-owned human APIs from the ingest worker control plane", (
   );
   assert.match(chatWorker, /\/assistant-worker\/chat/);
   assert.doesNotMatch(sync, /mode=machine|mode.*claim/);
-  assert.match(security, /human boundary/);
+  assert.match(security, /canonical browser API aliases/);
   assert.match(security, /\/api\/assistant-worker\/\*/);
 });
 
@@ -2811,7 +2826,7 @@ test("renders a recoverable responsive Assistant workbench without unsafe HTML",
   assert.match(transcript, /取消本轮/);
   assert.match(transcript, /查看本轮处理记录/);
   assert.match(transcript, /assistant-transcript-banners/);
-  assert.match(transcript, /href="\/admin">重新登录/);
+  assert.match(transcript, /href="\/admin">管理员登录/);
   assert.match(transcript, /AURUM \/ PROVISIONAL/);
   assert.match(transcript, /ASSISTANT PAUSED/);
   assert.match(transcript, /等待新的 API 模型/);
