@@ -2040,6 +2040,12 @@ test("keeps live quotes online between five-minute decisions", async () => {
   assert.equal(payload.system.quote_age_seconds, 7);
 });
 
+test("shows a broker-close decision pause without presenting a component fault", () => {
+  const source = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
+  assert.match(source, /decision_output_message/);
+  assert.match(source, /最新决策/);
+});
+
 test("marks the mirror offline when the quote heartbeat stops arriving", () => {
   const now = Date.now();
   const payload = applyFreshness({

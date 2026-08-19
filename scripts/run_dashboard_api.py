@@ -36,6 +36,8 @@ STATUS_SNAPSHOT_MAX_STALE_SECONDS = 90.0
 SEMANTIC_SNAPSHOT_MAX_STALE_SECONDS = 420.0
 COLLECTOR_HEARTBEAT_EXPECTED_SECONDS = 60.0
 COLLECTOR_HEARTBEAT_FAILURE_SECONDS = 300.0
+DECISION_OUTPUT_EXPECTED_SECONDS = 420.0
+DECISION_HORIZON = timedelta(minutes=30)
 _QUOTE_CANDLE_CACHE_LOCK = threading.Lock()
 _QUOTE_CANDLE_CACHE: dict[str, dict] = {}
 
@@ -146,6 +148,59 @@ def _collector_component(
             if latest_poll_at is not None else None
         ),
     }
+
+
+def _decision_collector_component(
+    heartbeat: dict[str, object],
+    *,
+    latest_decision: str | None,
+    broker_session: dict | None,
+    now: datetime,
+) -> dict[str, object]:
+    """Separate supervised collector liveness from decision output cadence."""
+    component = _collector_component(
+        heartbeat, latest_poll=None, now=now,
+    )
+    component.pop("latest_source_poll", None)
+    component.pop("source_poll_age_seconds", None)
+    decision_at = None
+    try:
+        decision_at = datetime.fromisoformat(str(latest_decision))
+    except (TypeError, ValueError):
+        pass
+    decision_age = (
+        max(0.0, (now - decision_at).total_seconds())
+        if decision_at is not None else None
+    )
+    output_status = (
+        "CURRENT"
+        if decision_age is not None
+        and decision_age <= DECISION_OUTPUT_EXPECTED_SECONDS
+        else "NO_RECENT_DECISION"
+    )
+    output_reason = None
+    output_message = None
+    if broker_session is not None and not broker_session["is_open"]:
+        output_status = "MARKET_CLOSED"
+    elif broker_session is not None:
+        try:
+            closes_at = datetime.fromisoformat(
+                str(broker_session["next_close_time"]).replace("Z", "+00:00")
+            )
+        except (KeyError, TypeError, ValueError):
+            closes_at = None
+        if closes_at is not None and closes_at <= now + DECISION_HORIZON:
+            output_status = "EXPECTED_PAUSE"
+            output_reason = "FIXED_HORIZON_CROSSES_BROKER_CLOSE"
+            output_message = "等待下一个完整 30 分钟决策窗口"
+    component.update({
+        "latest_decision": decision_at.isoformat() if decision_at else None,
+        "decision_age_seconds": decision_age,
+        "decision_output_status": output_status,
+        "decision_output_reason": output_reason,
+        "decision_output_message": output_message,
+    })
+    return component
 
 from xauusd_forecaster.factors import factor_coverage  # noqa: E402
 from xauusd_forecaster.dashboard_payloads import bounded_evidence_window  # noqa: E402
@@ -2242,21 +2297,21 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
             if row.get("active_rank") is not None and row.get("model_identity")
         })
         market_chart = _recent_market_chart(database, connection, now)
-        collector_heartbeat = _runtime_heartbeat(
-            database.parent / "collector-status.json", service="collector",
-        )
         latest_news_poll = connection.execute(
             "SELECT max(fetched_time) FROM source_polls"
         ).fetchone()[0]
+        latest_decision_time = connection.execute(
+            "SELECT max(created_at) FROM decision_events"
+        ).fetchone()[0]
         component_times = {
             "quote_bridge": _latest_quote_received(database),
-            "decision_collector": connection.execute("SELECT max(created_at) FROM decision_events").fetchone()[0],
             # The collector invokes the settler on every successful loop. No
             # newly appended outcome is expected until a decision reaches its
             # 30-minute horizon, so output recency is not worker health.
-            "outcome_settler": collector_heartbeat.get("last_success")
-            or connection.execute("SELECT max(appended_at) FROM outcomes").fetchone()[0],
-            "news_collector": collector_heartbeat.get("last_success"),
+            "outcome_settler": connection.execute(
+                "SELECT max(appended_at) FROM outcomes"
+            ).fetchone()[0],
+            "news_collector": None,
             "gemini_annotator": connection.execute("SELECT max(parsed_at) FROM news_annotations").fetchone()[0],
         }
         news_source_health = _news_source_health(connection, now)
@@ -2365,18 +2420,42 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
     # published runtime heartbeats so a current broker receipt cannot appear to
     # come from the future relative to the snapshot's initial query boundary.
     now = clock()
+    # Runtime files are outside the SQLite snapshot. Read them at the current
+    # classification boundary so a long status build or hot reload cannot
+    # turn an old decision snapshot into a false process-liveness failure.
+    collector_heartbeat = _runtime_heartbeat(
+        database.parent / "collector-status.json", service="collector",
+    )
+    component_times["quote_bridge"] = _latest_quote_received(database)
+    component_times["news_collector"] = collector_heartbeat.get("last_success")
+    component_times["outcome_settler"] = (
+        collector_heartbeat.get("last_success")
+        or component_times["outcome_settler"]
+    )
     age_seconds = None
     if component_times["quote_bridge"]:
         age_seconds = max(
             0.0,
             (now - datetime.fromisoformat(component_times["quote_bridge"])).total_seconds(),
         )
-    decision_success = component_times.get("decision_collector")
-    decision_age = ((now - datetime.fromisoformat(decision_success)).total_seconds()
-                    if decision_success else None)
-    online = bool(age_seconds is not None and age_seconds <= 30
-                  and decision_age is not None and decision_age <= 420)
     broker_session = _broker_market_session(database, now)
+    decision_component = _decision_collector_component(
+        collector_heartbeat,
+        latest_decision=latest_decision_time,
+        broker_session=broker_session,
+        now=now,
+    )
+    collector_available = (
+        collector_heartbeat.get("state") == "RUNNING"
+        and decision_component["status"] in {"OK", "WARN"}
+    )
+    online = bool(
+        age_seconds is not None
+        and age_seconds <= 30
+        and collector_available
+        and broker_session is not None
+        and broker_session["is_open"]
+    )
     market_session = _market_session_status(
         broker_session,
         online=online,
@@ -2514,7 +2593,6 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
         GEMINI_DAILY_PRIORITY_RESERVE, int(gemini_quota["total_remaining"])
     )
     quote_component = component("quote_bridge", 30)
-    decision_component = component("decision_collector", 420)
     outcome_component = component(
         "outcome_settler", 420,
         str(collector_heartbeat.get("last_error") or "") or None,

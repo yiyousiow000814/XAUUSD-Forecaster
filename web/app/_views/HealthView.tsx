@@ -19,7 +19,12 @@ export type StatusPayload = {
     market_session?: "OPEN" | "CLOSED" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE";
     source_of_truth: string;
     sites_mirror: string;
-    components: Record<string, { last_success: string | null; age_seconds: number | null; status: string; last_error: string | null }>;
+    components: Record<string, {
+      last_success: string | null; age_seconds: number | null; status: string; last_error: string | null;
+      latest_decision?: string | null; decision_age_seconds?: number | null;
+      decision_output_status?: string; decision_output_reason?: string | null;
+      decision_output_message?: string | null;
+    }>;
   };
   news_source_health: Array<{
     source: string; label: string; role: string; health: "HEALTHY" | "DEGRADED" | "ERROR" | "STALE" | "FALLBACK_ACTIVE" | "WARMING_UP";
@@ -256,6 +261,8 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
         <span className={item.status === "OK" || item.status === "MARKET_CLOSED" ? "component-ok" : "component-stale"}>{item.status === "MARKET_CLOSED" ? "市场休市" : item.status}</span>
         <strong>{operationalScopeLabel(name)}</strong>
         <small>最后成功 {localTime(item.last_success)}</small><small>{elapsed(item.age_seconds)}</small>
+        {item.latest_decision ? <small>最新决策 {localTime(item.latest_decision)} · {elapsed(item.decision_age_seconds ?? null)}</small> : null}
+        {item.decision_output_message ? <small>{item.decision_output_message}</small> : null}
         {item.last_error ? <em>{item.last_error}</em> : null}
       </article>)}</div>
     </section>

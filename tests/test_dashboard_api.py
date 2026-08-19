@@ -45,6 +45,7 @@ def _dashboard_module():
 
 def _write_market_session(
     root: Path, *, observed_at: datetime, is_open: bool,
+    next_close_time: datetime | None = None,
 ) -> None:
     quotes = root / "quotes"
     quotes.mkdir(exist_ok=True)
@@ -58,7 +59,7 @@ def _write_market_session(
             if not is_open else None
         ),
         "next_close_time": (
-            (observed_at + timedelta(hours=23)).isoformat()
+            (next_close_time or observed_at + timedelta(hours=23)).isoformat()
             if is_open else None
         ),
     }), encoding="utf-8")
@@ -75,6 +76,18 @@ def _write_quote(root: Path, *, received_at: datetime) -> None:
         "bid": 2400.0,
         "ask": 2400.2,
     }) + "\n", encoding="utf-8")
+
+
+def _write_collector_heartbeat(
+    root: Path, *, last_success: datetime, state: str = "RUNNING",
+) -> None:
+    (root / "collector-status.json").write_text(json.dumps({
+        "service": "collector",
+        "state": state,
+        "last_success": last_success.isoformat(),
+        "last_error": None,
+        "work_items": 0,
+    }), encoding="utf-8")
 
 
 def _append_decision_at(database: Path, created_at: datetime) -> None:
@@ -282,6 +295,60 @@ def test_news_collector_recovery_depends_on_heartbeat_not_old_poll() -> None:
     assert recovered["source_poll_age_seconds"] == 3600
 
 
+def test_decision_collector_liveness_is_independent_of_old_output() -> None:
+    module = _dashboard_module()
+    now = datetime(2026, 8, 18, 8, 40, tzinfo=UTC)
+    old_decision = (now - timedelta(minutes=20)).isoformat()
+    session = {
+        "is_open": True,
+        "next_close_time": (now + timedelta(hours=1)).isoformat(),
+    }
+
+    component = module._decision_collector_component(
+        {
+            "service": "collector", "state": "RUNNING",
+            "last_success": now.isoformat(), "last_error": None,
+        },
+        latest_decision=old_decision,
+        broker_session=session,
+        now=now,
+    )
+
+    assert component["status"] == "OK"
+    assert component["last_success"] == now.isoformat()
+    assert component["latest_decision"] == old_decision
+    assert component["decision_age_seconds"] == 1200
+    assert component["decision_output_status"] == "NO_RECENT_DECISION"
+
+
+@pytest.mark.parametrize("state,age", [
+    ("RUNNING", 301),
+    ("STOPPED", 1),
+    ("ERROR", 1),
+])
+def test_decision_collector_still_fails_for_invalid_heartbeat(
+    state: str, age: float,
+) -> None:
+    module = _dashboard_module()
+    now = datetime(2026, 8, 18, 8, 40, tzinfo=UTC)
+
+    component = module._decision_collector_component(
+        {
+            "service": "collector", "state": state,
+            "last_success": (now - timedelta(seconds=age)).isoformat(),
+            "last_error": None,
+        },
+        latest_decision=now.isoformat(),
+        broker_session={
+            "is_open": True,
+            "next_close_time": (now + timedelta(hours=1)).isoformat(),
+        },
+        now=now,
+    )
+
+    assert component["status"] == "STALE"
+
+
 def test_deployment_status_does_not_mislabel_local_edits_as_remote_drift() -> None:
     module = _dashboard_module()
 
@@ -447,6 +514,123 @@ def test_open_market_stale_quote_and_decision_remain_unhealthy(tmp_path) -> None
     )
 
 
+def test_healthy_collector_old_decision_stays_online_without_incident(
+    tmp_path,
+) -> None:
+    now = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=now).close()
+    _write_market_session(tmp_path, observed_at=now, is_open=True)
+    _write_quote(tmp_path, received_at=now)
+    _write_collector_heartbeat(tmp_path, last_success=now)
+    _append_decision_at(database, now - timedelta(minutes=20))
+
+    payload = _dashboard_module()._dashboard_payload(
+        database, clock=lambda: now,
+    )
+
+    decision = payload["system"]["components"]["decision_collector"]
+    assert payload["system"]["online"] is True
+    assert payload["system"]["market_session"] == "OPEN"
+    assert decision["status"] == "OK"
+    assert decision["decision_output_status"] == "NO_RECENT_DECISION"
+    assert "decision_collector" not in _component_alert_scopes(payload)
+
+
+def test_healthy_collector_recent_decision_remains_current(tmp_path) -> None:
+    now = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=now).close()
+    _write_market_session(tmp_path, observed_at=now, is_open=True)
+    _write_quote(tmp_path, received_at=now)
+    _write_collector_heartbeat(tmp_path, last_success=now)
+    _append_decision_at(database, now - timedelta(minutes=5))
+
+    payload = _dashboard_module()._dashboard_payload(
+        database, clock=lambda: now,
+    )
+
+    decision = payload["system"]["components"]["decision_collector"]
+    assert payload["system"]["online"] is True
+    assert decision["status"] == "OK"
+    assert decision["decision_output_status"] == "CURRENT"
+    assert "decision_collector" not in _component_alert_scopes(payload)
+
+
+def test_online_still_fails_closed_without_broker_session(tmp_path) -> None:
+    now = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=now).close()
+    _write_quote(tmp_path, received_at=now)
+    _write_collector_heartbeat(tmp_path, last_success=now)
+    _append_decision_at(database, now)
+
+    payload = _dashboard_module()._dashboard_payload(
+        database, clock=lambda: now,
+    )
+
+    assert payload["system"]["online"] is False
+    assert payload["system"]["market_session"] == "DATA_UNAVAILABLE"
+
+
+def test_starting_collector_does_not_claim_system_online(tmp_path) -> None:
+    now = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=now).close()
+    _write_market_session(tmp_path, observed_at=now, is_open=True)
+    _write_quote(tmp_path, received_at=now)
+    _write_collector_heartbeat(
+        tmp_path, last_success=now, state="STARTING",
+    )
+    _append_decision_at(database, now)
+
+    payload = _dashboard_module()._dashboard_payload(
+        database, clock=lambda: now,
+    )
+
+    decision = payload["system"]["components"]["decision_collector"]
+    assert payload["system"]["online"] is False
+    assert decision["status"] == "WARN"
+    alert = next(
+        item for item in payload["operational_health"]["alerts"]
+        if item["scope"] == "decision_collector"
+    )
+    assert alert["severity"] == "WARNING"
+    assert alert["blocking"] is False
+
+
+def test_pre_close_horizon_is_expected_pause_not_incident(tmp_path) -> None:
+    now = datetime(2026, 8, 18, 20, 35, tzinfo=UTC)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=now).close()
+    _write_market_session(
+        tmp_path,
+        observed_at=now,
+        is_open=True,
+        next_close_time=now + timedelta(minutes=25),
+    )
+    _write_quote(tmp_path, received_at=now)
+    _write_collector_heartbeat(tmp_path, last_success=now)
+    _append_decision_at(database, now - timedelta(minutes=10))
+
+    payload = _dashboard_module()._dashboard_payload(
+        database, clock=lambda: now,
+    )
+
+    decision = payload["system"]["components"]["decision_collector"]
+    assert payload["system"]["online"] is True
+    assert payload["system"]["market_session"] == "OPEN"
+    assert decision["status"] == "OK"
+    assert decision["decision_output_status"] == "EXPECTED_PAUSE"
+    assert decision["decision_output_reason"] == (
+        "FIXED_HORIZON_CROSSES_BROKER_CLOSE"
+    )
+    assert decision["decision_output_message"] == (
+        "等待下一个完整 30 分钟决策窗口"
+    )
+    assert "decision_collector" not in _component_alert_scopes(payload)
+
+
 def test_weekend_fallback_suspends_only_expected_silence(tmp_path) -> None:
     saturday = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
     database = tmp_path / "forward-evidence.sqlite3"
@@ -522,6 +706,7 @@ def test_broker_reopen_immediately_restores_freshness_enforcement(tmp_path) -> N
     )
 
     _write_quote(tmp_path, received_at=reopened_at)
+    _write_collector_heartbeat(tmp_path, last_success=reopened_at)
     _append_decision_at(database, reopened_at)
     live = module._dashboard_payload(database, clock=lambda: reopened_at)
     assert live["system"]["market_session"] == "OPEN"

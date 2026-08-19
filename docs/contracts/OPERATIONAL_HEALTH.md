@@ -13,8 +13,15 @@ with a prior snapshot retains the last factual state and identifies the stale
 snapshot. Live-market state is `LIVE`, `MARKET_CLOSED`, or
 `MARKET_DATA_UNAVAILABLE`. Operational state is `HEALTHY`, `WARNING`, or
 `ERROR` and comes from authoritative component and scheduler detectors.
-`system.online` is only live quote/decision readiness and is never global
-operational health.
+`system.online` means the broker session is current and open, the live quote
+feed is current, and the supervised decision collector has an available
+`RUNNING` heartbeat. It is never global operational health. Decision-row
+recency is a separate output-cadence observation and
+must not substitute for process liveness. A fresh `RUNNING` collector remains
+healthy when no row is emitted; near a broker close, a fixed horizon that
+would cross the close is published as an expected pause rather than an
+operational incident. Missing, expired, or non-running collector heartbeats
+and unavailable open-market quotes remain fail-closed failures.
 
 ## Stable error codes
 
