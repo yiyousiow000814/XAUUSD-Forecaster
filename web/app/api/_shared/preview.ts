@@ -13,6 +13,12 @@ export type PreviewBundle = {
     items?: Array<Record<string, unknown>>;
     [key: string]: unknown;
   };
+  news_evidence?: {
+    snapshot_id: string;
+    contract_version: string;
+    activated_at?: string | null;
+    items: Array<Record<string, unknown>>;
+  };
   news_details: Record<string, Record<string, unknown>>;
 };
 

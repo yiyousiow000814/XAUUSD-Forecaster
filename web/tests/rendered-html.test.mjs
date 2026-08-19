@@ -801,6 +801,7 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   assert.match(previewBuilder, /for cadence in \("5m", "30m"\)/);
   assert.match(previewBuilder, /resource=version-overview/);
   assert.match(previewBuilder, /\*version_history/);
+  assert.match(previewBuilder, /"news_evidence": news_evidence/);
   assert.doesNotMatch(page, /auditView === "league"/);
   assert.match(page, /\[PREVIEW_RESOURCES\.status\]: previewBundle\.status/);
   assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);

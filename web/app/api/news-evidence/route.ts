@@ -12,6 +12,7 @@ import {
   NewsEvidenceProtocolError,
   prepareNewsEvidenceSnapshot,
   readNewsEvidencePage,
+  readPreviewNewsEvidencePage,
   stageNewsEvidenceBatch,
 } from "../_shared/news-evidence-store";
 import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
@@ -39,12 +40,6 @@ function protocolFailure(reason: unknown) {
 }
 
 export async function GET(request: Request) {
-  const binding = env.DB as D1Database | undefined;
-  if (!binding) {
-    const body = { error: "新闻证据档案暂时不可用" };
-    return previewBundle ? previewJson(body, 503, "current-read-unavailable")
-      : NextResponse.json(body, { status: 503 });
-  }
   const query = new URL(request.url).searchParams;
   const mode = evidenceMode(query.get("mode"));
   if (mode === null) {
@@ -55,6 +50,20 @@ export async function GET(request: Request) {
     MAX_PAGE_ITEMS,
     Math.max(1, Number.parseInt(query.get("limit") ?? "20", 10) || 20),
   );
+  if (previewBundle?.news_evidence) {
+    try {
+      return previewJson(readPreviewNewsEvidencePage(
+        previewBundle.news_evidence,
+        { mode, rawCursor: query.get("cursor"), page, pageSize },
+      ), 200, "immutable-build-snapshot-evidence");
+    } catch (reason) {
+      return protocolFailure(reason);
+    }
+  }
+  const binding = env.DB as D1Database | undefined;
+  if (!binding) {
+    return NextResponse.json({ error: "新闻证据档案暂时不可用" }, { status: 503 });
+  }
   try {
     const payload = await readNewsEvidencePage(binding, {
       mode, rawCursor: query.get("cursor"), page, pageSize,

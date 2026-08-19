@@ -88,7 +88,17 @@ def _preview_module():
     spec = importlib.util.spec_from_file_location("build_preview_bundle_test", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    package_modules = {
+        name: loaded for name, loaded in sys.modules.items()
+        if name == "xauusd_forecaster" or name.startswith("xauusd_forecaster.")
+    }
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        for name in tuple(sys.modules):
+            if name == "xauusd_forecaster" or name.startswith("xauusd_forecaster."):
+                sys.modules.pop(name, None)
+        sys.modules.update(package_modules)
     return module
 
 
@@ -121,6 +131,38 @@ spec.loader.exec_module(module)
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_preview_evidence_fixture_is_stable_and_omits_display_age() -> None:
+    module = _preview_module()
+    status = {
+        "generated_at": "2026-08-19T10:00:00+00:00",
+        "news_evidence": [{
+            "event_key": "a" * 64,
+            "source_hash": "b" * 64,
+            "economic_age_minutes": 42.5,
+            "broad_model_eligible": True,
+            "model_seen": False,
+        }],
+    }
+
+    first = module._preview_news_evidence(status)
+    later = module._preview_news_evidence({
+        **status,
+        "news_evidence": [{
+            **status["news_evidence"][0], "economic_age_minutes": 99.0,
+        }],
+    })
+
+    assert later == first
+    assert "economic_age_minutes" not in first["items"][0]
+    changed = module._preview_news_evidence({
+        **status,
+        "news_evidence": [{
+            **status["news_evidence"][0], "source_hash": "c" * 64,
+        }],
+    })
+    assert changed["snapshot_id"] != first["snapshot_id"]
 
 
 def test_preview_reader_rejects_a_noncanonical_source() -> None:

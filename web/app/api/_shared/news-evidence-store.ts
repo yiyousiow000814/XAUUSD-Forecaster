@@ -134,6 +134,80 @@ export async function readNewsEvidencePage(
   };
 }
 
+export function readPreviewNewsEvidencePage(
+  snapshot: {
+    snapshot_id: string;
+    contract_version: string;
+    activated_at?: string | null;
+    items: Array<Record<string, unknown>>;
+  },
+  options: {
+    mode: EvidenceMode;
+    rawCursor: string | null;
+    page: number;
+    pageSize: number;
+  },
+) {
+  if (!NEWS_EVIDENCE_SNAPSHOT_ID.test(snapshot.snapshot_id)) {
+    throw new NewsEvidenceProtocolError(
+      "invalid Preview evidence generation", 503,
+      "NEWS_EVIDENCE_PREVIEW_INVALID",
+    );
+  }
+  let cursor: [string, string, string] | null = null;
+  if (options.rawCursor) {
+    cursor = decodeEvidenceCursor(options.rawCursor);
+    if (cursor[0] !== snapshot.snapshot_id) {
+      throw new NewsEvidenceProtocolError(
+        "evidence generation changed", 409, NEWS_EVIDENCE_CURSOR_STALE,
+        { active_snapshot_id: snapshot.snapshot_id },
+      );
+    }
+  }
+  const rows = snapshot.items
+    .filter(item => (
+      options.mode === "eligible" ? item.broad_model_eligible === true
+        : options.mode === "seen" ? item.model_seen === true
+          : options.mode === "unseen" ? item.model_seen === false : true
+    ))
+    .map(item => ({
+      item,
+      sortTime: typeof item.source_published_time === "string"
+        ? item.source_published_time
+        : String(item.collector_first_seen_time ?? ""),
+      eventKey: String(item.event_key ?? ""),
+    }))
+    .filter(row => row.sortTime && NEWS_EVIDENCE_SNAPSHOT_ID.test(row.eventKey))
+    .sort((left, right) => (
+      right.sortTime.localeCompare(left.sortTime)
+      || right.eventKey.localeCompare(left.eventKey)
+    ));
+  const afterCursor = cursor
+    ? rows.filter(row => (
+      row.sortTime < cursor[1]
+      || (row.sortTime === cursor[1] && row.eventKey < cursor[2])
+    ))
+    : rows;
+  const pageRows = afterCursor.slice(0, options.pageSize + 1);
+  const hasMore = pageRows.length > options.pageSize;
+  const visible = pageRows.slice(0, options.pageSize);
+  const last = visible.at(-1);
+  return {
+    items: visible.map(row => row.item),
+    page: options.page,
+    page_size: options.pageSize,
+    mode: options.mode,
+    has_more: hasMore,
+    next_cursor: hasMore && last
+      ? encodeEvidenceCursor(snapshot.snapshot_id, last.sortTime, last.eventKey)
+      : null,
+    snapshot_id: snapshot.snapshot_id,
+    contract_version: snapshot.contract_version,
+    activated_at: snapshot.activated_at ?? null,
+    source_mode: "IMMUTABLE_BUILD_SNAPSHOT",
+  };
+}
+
 export async function prepareNewsEvidenceSnapshot(
   binding: D1Database, snapshotId: string, expectedCount: number,
 ) {

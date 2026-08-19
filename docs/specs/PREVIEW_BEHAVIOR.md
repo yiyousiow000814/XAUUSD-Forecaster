@@ -120,6 +120,12 @@ product requirement.
 - The news index reads the bounded current D1 archive. If that complete archive
   is unavailable, Preview reports it unavailable rather than substituting a
   partial relay window.
+- The news-evidence archive uses a bounded production-derived window frozen into
+  the build artifact. The branch serves cursor-bound pages from that immutable
+  fixture so filtering, paging, refresh, and stale-generation behavior can be
+  reviewed without applying an unmerged D1 migration or mutating production.
+  Responses remain labeled as immutable build-snapshot evidence and do not
+  represent current production authority.
 - A news detail embedded in the build snapshot is used first; other requested
   details may be read from D1.
 - Market chart and paged market or learning history currently use bounded data

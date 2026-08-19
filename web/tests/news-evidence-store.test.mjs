@@ -7,6 +7,7 @@ import {
   NEWS_EVIDENCE_CURSOR_STALE,
   prepareNewsEvidenceSnapshot,
   readNewsEvidencePage,
+  readPreviewNewsEvidencePage,
   stageNewsEvidenceBatch,
 } from "../app/api/_shared/news-evidence-store.ts";
 import { D1TestDatabase } from "./d1-test-database.mjs";
@@ -22,6 +23,37 @@ const item = (digit, minute = 0) => ({
 });
 
 const database = () => new D1TestDatabase(["0020_paged_news_evidence.sql"]);
+
+test("pages immutable Preview evidence with generation-bound cursors", () => {
+  const generationA = id("a");
+  const rows = Array.from({ length: 25 }, (_, index) => ({
+    ...item(((index % 9) + 1).toString(), index),
+    event_key: index.toString(16).padStart(64, "0"),
+  }));
+  const snapshot = {
+    snapshot_id: generationA,
+    contract_version: "news-evidence-preview-v1",
+    activated_at: "2026-08-19T10:00:00+00:00",
+    items: rows,
+  };
+  const first = readPreviewNewsEvidencePage(snapshot, {
+    mode: "all", rawCursor: null, page: 1, pageSize: 20,
+  });
+  assert.equal(first.items.length, 20);
+  assert.equal(first.has_more, true);
+  const second = readPreviewNewsEvidencePage(snapshot, {
+    mode: "all", rawCursor: first.next_cursor, page: 2, pageSize: 20,
+  });
+  assert.equal(second.items.length, 5);
+  assert.equal(second.has_more, false);
+  assert.equal(new Set([...first.items, ...second.items].map(row => row.event_key)).size, 25);
+  assert.throws(
+    () => readPreviewNewsEvidencePage({ ...snapshot, snapshot_id: id("b") }, {
+      mode: "all", rawCursor: first.next_cursor, page: 2, pageSize: 20,
+    }),
+    error => error.code === NEWS_EVIDENCE_CURSOR_STALE,
+  );
+});
 
 test("stages replay-safe batches and binds every read cursor to one generation", async () => {
   const db = database();
