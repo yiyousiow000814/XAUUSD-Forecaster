@@ -22,7 +22,10 @@ from xauusd_forecaster.annotation import (
 )
 from xauusd_forecaster.ai_provider_registry import AI_QUOTA_SURFACES
 from xauusd_forecaster.forward_ledger import ForwardLedger
-from xauusd_forecaster.dashboard_summaries import DASHBOARD_COUNT_TABLES
+from xauusd_forecaster.dashboard_summaries import (
+    DASHBOARD_COUNT_TABLES,
+    install_dashboard_summary_schema,
+)
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
 from xauusd_forecaster.news_scheduler import (
     authorize_repairable_annotation_failures,
@@ -1967,6 +1970,12 @@ def test_critical_summary_reads_stay_fixed_as_append_only_history_grows(
     assert "from dashboard_news_article_summary_v1" in reads[1]
     assert "from dashboard_news_source_summary_v1" in reads[2]
     assert all("count(" not in statement for statement in reads)
+    statements.clear()
+    install_dashboard_summary_schema(ledger.connection)
+    assert not any(
+        "count(" in statement.lower() or "sum(" in statement.lower()
+        for statement in statements
+    )
     ledger.close()
 
 

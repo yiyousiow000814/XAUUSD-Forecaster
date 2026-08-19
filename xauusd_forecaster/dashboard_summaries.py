@@ -30,8 +30,22 @@ DASHBOARD_COUNT_TABLES = (
 
 def install_dashboard_summary_schema(connection: sqlite3.Connection) -> None:
     """Backfill once, then increment exact append-only dashboard summaries."""
+    metadata_exists = connection.execute(
+        """SELECT 1 FROM sqlite_master
+           WHERE type='table' AND name='dashboard_summary_metadata_v1'"""
+    ).fetchone()
+    if metadata_exists and connection.execute(
+        """SELECT 1 FROM dashboard_summary_metadata_v1
+           WHERE key='append_only_backfill_v1'"""
+    ).fetchone():
+        return
+
     connection.executescript(
         """
+        CREATE TABLE IF NOT EXISTS dashboard_summary_metadata_v1 (
+            key TEXT PRIMARY KEY,
+            installed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE TABLE IF NOT EXISTS dashboard_table_counts_v1 (
             table_name TEXT PRIMARY KEY,
             row_count INTEGER NOT NULL CHECK(row_count >= 0)
@@ -211,6 +225,10 @@ def install_dashboard_summary_schema(connection: sqlite3.Connection) -> None:
                        OR excluded.latest_item_time>latest_item_time
                      THEN excluded.latest_item_time ELSE latest_item_time END;
                END"""
+        )
+        connection.execute(
+            """INSERT OR REPLACE INTO dashboard_summary_metadata_v1(key)
+               VALUES ('append_only_backfill_v1')"""
         )
 
 
