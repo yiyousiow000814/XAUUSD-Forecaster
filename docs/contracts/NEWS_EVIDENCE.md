@@ -15,6 +15,16 @@ headline or body keywords to decide XAUUSD meaning. Complete bounded documents
 proceed to semantic review, which may classify them as irrelevant or
 background without granting model authority.
 
+Publication timestamps may differ slightly from the local receipt clock. A
+bounded positive publication clock skew of up to and including 10 minutes does
+not by itself invalidate semantic processing for any source. Larger positive
+skew remains an invalid publication-time signal. The semantic-admission owner
+is `xauusd_forecaster/news_time.py`; timestamp provenance and positive skew
+remain audit metadata, while impact lifetime is owned by the news-impact
+contract and trading/training visibility is owned by the forward-only contract.
+`collector_first_seen_time` remains the authoritative earliest visibility and
+no-lookahead boundary in every case.
+
 Chinese display text is Chinese-primary rather than Chinese-only. Natural
 names, company names, tickers, identifiers, and common abbreviations MAY remain
 in English when English improves readability. Under V17, every maximal visible
@@ -81,8 +91,9 @@ theme combinations. A `PAGE_PRECISEPUBTIMESTAMP` is retained when available.
 Otherwise the GKG batch
 timestamp is a conservative visibility clock, not an inferred event time.
 Because that proxy can lead the local fetch clock by a few minutes at a batch
-boundary, the bounded skew is timing-quality evidence rather than a semantic
-exclusion. This does not make the proxy an economic event time; impact and
+boundary, its provenance classification is retained as timing-quality evidence
+under the same global publication-skew contract rather than a separate semantic
+admission rule. This does not make the proxy an economic event time; impact and
 trading continue to require their existing reliable event-time and visibility
 contracts. Persisting per-row timestamp provenance is deferred to a separate
 schema change.

@@ -11,13 +11,13 @@ if TYPE_CHECKING:
 
 MAX_ACTIONABLE_NEWS_AGE = timedelta(hours=72)
 MAX_ACTIONABLE_DISCOVERY_DELAY = timedelta(hours=1)
-MAX_COARSE_PUBLICATION_CLOCK_SKEW = timedelta(minutes=5)
+MAX_PUBLICATION_CLOCK_SKEW = timedelta(minutes=10)
 
 SOURCE_REPORTED_TIME = "SOURCE_REPORTED"
 MIXED_PRECISE_OR_BATCH_PROXY_TIME = "MIXED_PRECISE_OR_BATCH_PROXY"
 _COARSE_PUBLICATION_TIME_SOURCES = frozenset({"gdelt_gold_geopolitics"})
 _SEMANTIC_ELIGIBILITY_SQL_FUNCTION = "news_semantic_is_eligible"
-NEWS_SEMANTIC_ELIGIBILITY_CONTRACT_VERSION = "news-semantic-eligibility-v1"
+NEWS_SEMANTIC_ELIGIBILITY_CONTRACT_VERSION = "news-semantic-eligibility-v2"
 
 _CATEGORY_TIME_RULES = {
     "inflation_employment": (timedelta(hours=24), 180.0),
@@ -161,11 +161,8 @@ def assess_news_semantic_eligibility(
 
     timing_reasons: list[str] = []
     if published > first_seen:
-        timing_reasons.append("PUBLISHED_AFTER_DECISION")
-        if not (
-            reliability == MIXED_PRECISE_OR_BATCH_PROXY_TIME
-            and published - first_seen <= MAX_COARSE_PUBLICATION_CLOCK_SKEW
-        ):
+        timing_reasons.append("PUBLISHED_AFTER_RECEIPT")
+        if published - first_seen > MAX_PUBLICATION_CLOCK_SKEW:
             return NewsSemanticEligibility(
                 False,
                 "PUBLISHED_AFTER_DECISION",

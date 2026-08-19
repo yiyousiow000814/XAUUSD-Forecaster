@@ -5002,7 +5002,7 @@ def test_duplicate_cluster_selects_canonical_from_semantic_eligible_peers(
     rows = (
         (
             "preferred-but-invalid",
-            now + timedelta(minutes=10),
+            now + timedelta(minutes=10, seconds=1),
             "Longer canonical-looking evidence with an invalid future timestamp. " * 12,
         ),
         (
@@ -5051,6 +5051,35 @@ def test_duplicate_cluster_selects_canonical_from_semantic_eligible_peers(
         ledger.connection, observed_at=now + timedelta(seconds=2), limit=10,
     )
     assert [row["source_item_id"] for row in completed] == ["eligible-peer"]
+
+
+def test_small_positive_skew_can_own_canonical_annotation_work(tmp_path) -> None:
+    now = datetime(2026, 8, 19, 15, 51, 15, 685775, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now)
+    for item_id, published_at, body in (
+        (
+            "production-shaped-skew", now + timedelta(seconds=2.314225),
+            "Longer production-shaped evidence with bounded clock skew. " * 12,
+        ),
+        ("same-clock-peer", now, "Shorter same-clock evidence. " * 12),
+    ):
+        ledger.append_news_revision({
+            "source": "direct-test-source", "source_item_id": item_id,
+            "source_published_time": published_at,
+            "collector_first_seen_time": now, "fetched_time": now,
+            "headline": "Same publication", "body": body,
+            "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+            "cluster_id": "bounded-skew-cluster",
+        })
+
+    pending = annotation_module.pending_annotation_records(
+        ledger.connection, observed_at=now, limit=1,
+    )
+
+    assert [row["source_item_id"] for row in pending] == [
+        "production-shaped-skew",
+    ]
+    ledger.close()
 
 
 def test_news_readers_share_cross_source_cluster_tie_break(tmp_path) -> None:
@@ -5631,7 +5660,15 @@ def test_archive_stays_out_but_late_seen_news_enters_annotation_queue(
         ),
         (
             "gdelt_gold_geopolitics", timedelta(seconds=293),
-            ("PUBLISHED_AFTER_DECISION",), MIXED_PRECISE_OR_BATCH_PROXY_TIME,
+            ("PUBLISHED_AFTER_RECEIPT",), MIXED_PRECISE_OR_BATCH_PROXY_TIME,
+        ),
+        (
+            "google_news_fed_rates", timedelta(seconds=2.3),
+            ("PUBLISHED_AFTER_RECEIPT",), SOURCE_REPORTED_TIME,
+        ),
+        (
+            "us_treasury_press_releases", timedelta(minutes=10),
+            ("PUBLISHED_AFTER_RECEIPT",), SOURCE_REPORTED_TIME,
         ),
     ),
 )
@@ -5658,20 +5695,37 @@ def test_semantic_eligibility_preserves_timing_evidence_without_rejecting_it(
     assert assessment.publication_time_reliability == reliability
 
 
-def test_untrusted_future_publication_time_remains_semantic_ineligible() -> None:
+@pytest.mark.parametrize(
+    ("source", "published_delta", "expected_eligible"),
+    (
+        ("generic-test-source", timedelta(seconds=-1), True),
+        ("generic-test-source", timedelta(0), True),
+        ("google_news_fed_rates", timedelta(seconds=2.3), True),
+        ("gdelt_gold_geopolitics", timedelta(seconds=30), True),
+        ("us_treasury_press_releases", timedelta(minutes=5), True),
+        ("generic-test-source", timedelta(minutes=9, seconds=59), True),
+        ("generic-test-source", timedelta(minutes=10), True),
+        ("generic-test-source", timedelta(minutes=10, seconds=1), False),
+    ),
+)
+def test_publication_clock_skew_boundary_is_global(
+    source: str, published_delta: timedelta, expected_eligible: bool,
+) -> None:
     received = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
 
     assessment = assess_news_semantic_eligibility(
         {
-            "source": "google_news_gold_context",
-            "source_published_time": received + timedelta(minutes=11),
+            "source": source,
+            "source_published_time": received + published_delta,
             "collector_first_seen_time": received,
         },
         forward_epoch=received - timedelta(days=1),
     )
 
-    assert assessment.eligible is False
-    assert assessment.reason_code == "PUBLISHED_AFTER_DECISION"
+    assert assessment.eligible is expected_eligible
+    assert assessment.reason_code == (
+        "SEMANTIC_ELIGIBLE" if expected_eligible else "PUBLISHED_AFTER_DECISION"
+    )
 
 
 def test_late_legacy_annotation_remains_completed_without_requeue(tmp_path) -> None:

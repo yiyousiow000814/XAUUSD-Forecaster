@@ -174,7 +174,9 @@ def test_recent_arrival_gets_one_decision_interval_before_fail_closed_gate(
 
 
 @pytest.mark.parametrize(
-    "publication_delay", (timedelta(minutes=1), timedelta(hours=2)),
+    "publication_delay", (
+        timedelta(seconds=-2.3), timedelta(minutes=1), timedelta(hours=2),
+    ),
 )
 def test_unresolved_semantic_news_after_one_interval_fails_closed(
     tmp_path, credentials, publication_delay: timedelta,

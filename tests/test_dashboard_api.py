@@ -3026,6 +3026,29 @@ def test_dashboard_keeps_readable_late_news_in_semantic_queue(tmp_path) -> None:
     assert payload["annotation_queue"]["queued"] == 1
 
 
+def test_dashboard_keeps_small_positive_skew_in_semantic_queue(tmp_path) -> None:
+    received = datetime(2026, 8, 19, 15, 51, 15, 685775, tzinfo=UTC)
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=received - timedelta(days=1))
+    body = "production-shaped Federal Reserve evidence body " * 20
+    ledger.append_news_revision({
+        "source": "google_news_fed_rates", "source_item_id": "skew-2.3s",
+        "source_published_time": received + timedelta(seconds=2.314225),
+        "collector_first_seen_time": received, "fetched_time": received,
+        "headline": "Federal Reserve report", "body": body,
+        "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+        "cluster_id": "skew-2.3s",
+    })
+    ledger.connection.close()
+
+    row = _dashboard_module()._dashboard_payload(database)["recent_news"][0]
+
+    assert row["annotation_status"] == "QUEUED"
+    assert row["impact_status"] == "PENDING_ANNOTATION"
+    assert row["model_visibility"] == "NOT_YET_PARSED"
+    assert "annotation_reason_code" not in row
+
+
 def test_dashboard_explains_active_and_expired_on_receipt_impacts(tmp_path) -> None:
     now = datetime.now(UTC)
     database = tmp_path / "forward.sqlite3"

@@ -238,6 +238,50 @@ def test_preview_repairs_stale_queue_mismatch_for_late_discovery() -> None:
     }]
 
 
+def test_preview_repairs_stale_invalid_label_for_small_positive_skew() -> None:
+    module = _preview_module()
+    news_index = {"items": [{
+        "annotation_status": "NOT_REQUIRED",
+        "annotation_reason_code": "INVALID_PUBLISHED_TIME",
+        "annotation_reason": "发布时间晚于收到时间，时间证据无效",
+        "impact_status": "NOT_REQUIRED",
+        "model_visibility": "MODEL_INELIGIBLE",
+        "source": "google_news_fed_rates",
+        "source_published_time": "2026-08-19T15:51:18+00:00",
+        "collector_first_seen_time": "2026-08-19T15:51:15.685775+00:00",
+    }]}
+
+    module._backfill_annotation_reasons(
+        news_index, {"forward_epoch": "2026-08-05T00:00:00+00:00"}
+    )
+
+    assert news_index["items"][0]["annotation_status"] == "QUEUED"
+    assert news_index["items"][0]["impact_status"] == "PENDING_ANNOTATION"
+    assert news_index["items"][0]["model_visibility"] == "NOT_YET_PARSED"
+    assert "annotation_reason_code" not in news_index["items"][0]
+
+
+def test_preview_preserves_invalid_label_beyond_clock_skew_tolerance() -> None:
+    module = _preview_module()
+    row = {
+        "annotation_status": "NOT_REQUIRED",
+        "annotation_reason_code": "INVALID_PUBLISHED_TIME",
+        "annotation_reason": "发布时间晚于收到时间，时间证据无效",
+        "impact_status": "NOT_REQUIRED",
+        "model_visibility": "MODEL_INELIGIBLE",
+        "source": "direct-test-source",
+        "source_published_time": "2026-08-19T16:01:16+00:00",
+        "collector_first_seen_time": "2026-08-19T15:51:15+00:00",
+    }
+    news_index = {"items": [dict(row)]}
+
+    module._backfill_annotation_reasons(
+        news_index, {"forward_epoch": "2026-08-05T00:00:00+00:00"}
+    )
+
+    assert news_index["items"] == [row]
+
+
 def test_preview_preserves_legitimate_not_required_reason() -> None:
     module = _preview_module()
     row = {
@@ -1895,6 +1939,7 @@ def test_sync_repopulates_news_index_without_full_refresh_marker(
     "news-60-day-incremental-v4-relevance-filter",
     "news-60-day-incremental-v7-semantic-handover",
     "news-60-day-incremental-v8-recovery-state",
+    "news-60-day-incremental-v9-semantic-projection",
 ])
 def test_news_materialization_contract_upgrade_replays_and_reconciles_old_state(
     monkeypatch, tmp_path, previous_contract
@@ -1973,8 +2018,8 @@ def test_semantic_projection_upgrade_replays_late_discovery_once(
     monkeypatch.setattr(module, "_verify_news_mirror_state", lambda *_a, **_k: None)
     state_file = tmp_path / "news-state.json"
     state_file.write_text(json.dumps({
-        "mirror_contract_version": "news-60-day-incremental-v8-recovery-state",
-        "reconciled_contract": "news-60-day-incremental-v8-recovery-state",
+        "mirror_contract_version": "news-60-day-incremental-v9-semantic-projection",
+        "reconciled_contract": "news-60-day-incremental-v9-semantic-projection",
         "cursor": '["2026-08-17T04:09:01+00:00","google_news_gold_context","old",1]',
     }), encoding="utf-8")
     current_item = {
