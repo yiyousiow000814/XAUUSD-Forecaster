@@ -35,7 +35,12 @@ export type StatusPayload = {
     online: boolean; mode: string; trading_enabled: boolean; market_session?: "OPEN" | "CLOSED" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE";
     source_of_truth: string; sites_mirror: string;
     runtime_update_failure?: RuntimeUpdateFailure | null;
-    components: Record<string, { last_success: string | null; age_seconds: number | null; status: string; last_error: string | null }>;
+    components: Record<string, {
+      last_success: string | null; age_seconds: number | null; status: string; last_error: string | null;
+      latest_decision?: string | null; decision_age_seconds?: number | null;
+      decision_output_status?: string; decision_output_reason?: string | null;
+      decision_output_message?: string | null;
+    }>;
   };
   operational_health?: { status: "HEALTHY" | "WARNING" | "ERROR" };
   annotation_queue: {
