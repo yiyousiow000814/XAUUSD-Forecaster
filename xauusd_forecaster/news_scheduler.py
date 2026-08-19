@@ -28,6 +28,8 @@ CONTRACT_BACKFILL_LANE = "CONTRACT_BACKFILL"
 WORK_LANES = (LIVE_LANE, CONTRACT_BACKFILL_LANE)
 CONTRACT_BACKFILL_PAGE_SIZE = 50
 EXISTING_JOB_LANE_PAGE_SIZE = 100
+DOWNSTREAM_PROVENANCE_PAGE_SIZE = 100
+WORK_PROVENANCE_VERSION = "ai-work-provenance-v1"
 LIVE_OPERATIONAL_WORKLOAD = "LIVE_OPERATIONAL"
 CONTRACT_BACKFILL_WORKLOAD = "CONTRACT_BACKFILL"
 REQUEST_WORKLOADS = (LIVE_OPERATIONAL_WORKLOAD, CONTRACT_BACKFILL_WORKLOAD)
@@ -87,6 +89,14 @@ CREATE TABLE IF NOT EXISTS news_ai_jobs_v1 (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     completed_at TEXT,
+    work_lane TEXT NOT NULL DEFAULT 'LIVE' CHECK(work_lane IN (
+        'LIVE','CONTRACT_BACKFILL')),
+    lane_classified INTEGER NOT NULL DEFAULT 0 CHECK(lane_classified IN (0,1)),
+    provenance_resolved INTEGER NOT NULL DEFAULT 0 CHECK(
+        provenance_resolved IN (0,1)),
+    provenance_version TEXT,
+    provenance_origin_task TEXT,
+    provenance_origin_ref TEXT,
     UNIQUE(task_type,source,source_item_id,revision_number,annotation_id,prompt_version)
 );
 
@@ -328,6 +338,29 @@ class ApiCredential:
 
 
 @dataclass(frozen=True)
+class WorkProvenance:
+    """Authoritative operational ownership inherited by derived AI work."""
+
+    work_lane: str
+    origin_task: str
+    origin_ref: str
+
+    def __post_init__(self) -> None:
+        if self.work_lane not in WORK_LANES:
+            raise ValueError("work provenance lane is not controlled")
+        if not self.origin_task.strip() or not self.origin_ref.strip():
+            raise ValueError("work provenance origin is required")
+
+    @property
+    def workload_class(self) -> str:
+        return (
+            CONTRACT_BACKFILL_WORKLOAD
+            if self.work_lane == CONTRACT_BACKFILL_LANE
+            else LIVE_OPERATIONAL_WORKLOAD
+        )
+
+
+@dataclass(frozen=True)
 class ScheduledJob:
     job_id: str
     task_type: str
@@ -338,6 +371,10 @@ class ScheduledJob:
     prompt_version: str
     priority: str
     work_lane: str
+    provenance_resolved: bool
+    provenance_version: str | None
+    provenance_origin_task: str | None
+    provenance_origin_ref: str | None
     state: str
     available_at: datetime
     lease_owner: str | None
@@ -371,6 +408,23 @@ def install_scheduler_schema(connection: sqlite3.Connection) -> None:
             "ALTER TABLE news_ai_jobs_v1 ADD COLUMN lane_classified INTEGER "
             "NOT NULL DEFAULT 0 CHECK(lane_classified IN (0,1))"
         )
+    if "provenance_resolved" not in job_columns:
+        connection.execute(
+            "ALTER TABLE news_ai_jobs_v1 ADD COLUMN provenance_resolved INTEGER "
+            "NOT NULL DEFAULT 0 CHECK(provenance_resolved IN (0,1))"
+        )
+    if "provenance_version" not in job_columns:
+        connection.execute(
+            "ALTER TABLE news_ai_jobs_v1 ADD COLUMN provenance_version TEXT"
+        )
+    if "provenance_origin_task" not in job_columns:
+        connection.execute(
+            "ALTER TABLE news_ai_jobs_v1 ADD COLUMN provenance_origin_task TEXT"
+        )
+    if "provenance_origin_ref" not in job_columns:
+        connection.execute(
+            "ALTER TABLE news_ai_jobs_v1 ADD COLUMN provenance_origin_ref TEXT"
+        )
     lane_index = connection.execute(
         "SELECT sql FROM sqlite_master WHERE type='index' "
         "AND name='news_ai_jobs_lane_claim_v1'"
@@ -390,6 +444,8 @@ def install_scheduler_schema(connection: sqlite3.Connection) -> None:
                            available_at,created_at);
         CREATE INDEX IF NOT EXISTS news_ai_jobs_lane_oldest_v1
         ON news_ai_jobs_v1(task_type,lane_classified,work_lane,state,created_at);
+        CREATE INDEX IF NOT EXISTS news_ai_jobs_provenance_migration_v1
+        ON news_ai_jobs_v1(task_type,provenance_resolved,created_at,job_id);
         CREATE TABLE IF NOT EXISTS news_annotation_contract_backfill_v1 (
           prompt_version TEXT PRIMARY KEY,
           activated_at TEXT NOT NULL,
@@ -407,6 +463,18 @@ def install_scheduler_schema(connection: sqlite3.Connection) -> None:
           cursor_job_id TEXT,
           processed_count INTEGER NOT NULL DEFAULT 0,
           state TEXT NOT NULL CHECK(state IN ('ACTIVE','COMPLETE')),
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS news_downstream_provenance_migrations_v1 (
+          provenance_version TEXT PRIMARY KEY,
+          cursor_created_at TEXT,
+          cursor_job_id TEXT,
+          processed_count INTEGER NOT NULL DEFAULT 0,
+          resolved_count INTEGER NOT NULL DEFAULT 0,
+          unresolved_count INTEGER NOT NULL DEFAULT 0,
+          leased_skipped_count INTEGER NOT NULL DEFAULT 0,
+          pass_count INTEGER NOT NULL DEFAULT 0,
+          state TEXT NOT NULL CHECK(state IN ('ACTIVE','WAITING_INPUT','COMPLETE')),
           updated_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS news_annotation_transition_state_v1 (
@@ -1073,6 +1141,70 @@ def _job_id(
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
+def resolve_work_provenance(
+    connection: sqlite3.Connection,
+    *,
+    source: str,
+    source_item_id: str,
+    revision_number: int,
+    annotation_id: str = "",
+    current_prompt_version: str,
+) -> WorkProvenance | None:
+    """Resolve derived ownership from the classified current annotation job."""
+    projection_filter = ""
+    projection_parameters: list[object] = [
+        source, source_item_id, revision_number, current_prompt_version,
+    ]
+    if annotation_id:
+        projection_filter = "AND a.annotation_id=?"
+        projection_parameters.append(annotation_id)
+    projection = connection.execute(
+        f"""SELECT p.transition_fingerprint,p.source_annotation_id
+            FROM news_annotation_transition_projections_v1 p
+            JOIN news_annotations a ON a.annotation_id=p.target_annotation_id
+            WHERE a.source=? AND a.source_item_id=? AND a.revision_number=?
+              AND a.prompt_version=? {projection_filter}
+            ORDER BY a.parsed_at DESC,a.annotation_id DESC LIMIT 2""",
+        tuple(projection_parameters),
+    ).fetchall()
+    annotation_filter = ""
+    parameters: list[object] = [
+        source, source_item_id, revision_number, current_prompt_version,
+    ]
+    if annotation_id:
+        annotation_filter = "AND a.annotation_id=?"
+        parameters.append(annotation_id)
+    row = connection.execute(
+        f"""SELECT j.job_id,j.work_lane
+            FROM news_ai_jobs_v1 j
+            WHERE j.task_type='ACTIVE_ANNOTATION'
+              AND j.source=? AND j.source_item_id=? AND j.revision_number=?
+              AND j.prompt_version=? AND j.lane_classified=1
+              AND EXISTS (
+                SELECT 1 FROM news_annotations a
+                WHERE a.source=j.source AND a.source_item_id=j.source_item_id
+                  AND a.revision_number=j.revision_number
+                  AND a.prompt_version=j.prompt_version {annotation_filter})
+            LIMIT 2""",
+        tuple(parameters),
+    ).fetchall()
+    if len(row) != 1:
+        return None
+    if len(projection) > 1:
+        return None
+    if projection:
+        return WorkProvenance(
+            CONTRACT_BACKFILL_LANE,
+            "SEMANTIC_TRANSITION",
+            f"{projection[0]['transition_fingerprint']}:"
+            f"{projection[0]['source_annotation_id']}",
+        )
+    lane = str(row[0]["work_lane"])
+    if lane not in WORK_LANES:
+        return None
+    return WorkProvenance(lane, "ACTIVE_ANNOTATION", str(row[0]["job_id"]))
+
+
 def enqueue_job(
     connection: sqlite3.Connection,
     *,
@@ -1083,6 +1215,7 @@ def enqueue_job(
     prompt_version: str,
     priority: str,
     work_lane: str = LIVE_LANE,
+    provenance: WorkProvenance | None = None,
     annotation_id: str = "",
     reopen_completed: bool = False,
     now: datetime | None = None,
@@ -1098,6 +1231,13 @@ def enqueue_job(
         task_type, source, source_item_id, revision_number,
         annotation_id, prompt_version,
     )
+    resolved_provenance = provenance or WorkProvenance(
+        work_lane, task_type, job_id,
+    )
+    if resolved_provenance.work_lane != work_lane:
+        raise ValueError("scheduler job lane disagrees with workload provenance")
+    if resolved_provenance.work_lane not in WORK_LANES:
+        raise ValueError("scheduler provenance lane is not controlled")
     timestamp = _iso(created)
     with connection:
         connection.execute(
@@ -1105,19 +1245,29 @@ def enqueue_job(
             (job_id,task_type,source,source_item_id,revision_number,annotation_id,
              prompt_version,priority,state,available_at,lease_owner,
              lease_expires_at,attempt_count,last_error,created_at,updated_at,
-             completed_at,work_lane,lane_classified)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             completed_at,work_lane,lane_classified,provenance_resolved,
+             provenance_version,provenance_origin_task,provenance_origin_ref)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 job_id, task_type, source, source_item_id, revision_number,
                 annotation_id, prompt_version, priority, "QUEUED", timestamp,
                 None, None, 0, None, timestamp, timestamp, None, work_lane, 1,
+                1, WORK_PROVENANCE_VERSION,
+                resolved_provenance.origin_task,
+                resolved_provenance.origin_ref,
             ),
         )
         connection.execute(
             """UPDATE news_ai_jobs_v1
-               SET work_lane=?,priority=?,lane_classified=1
+               SET work_lane=?,priority=?,lane_classified=1,
+                   provenance_resolved=1,provenance_version=?,
+                   provenance_origin_task=?,provenance_origin_ref=?
                WHERE job_id=? AND state IN ('QUEUED','BACKING_OFF')""",
-            (work_lane, priority, job_id),
+            (
+                work_lane, priority, WORK_PROVENANCE_VERSION,
+                resolved_provenance.origin_task,
+                resolved_provenance.origin_ref, job_id,
+            ),
         )
         if reopen_completed:
             connection.execute(
@@ -1129,6 +1279,40 @@ def enqueue_job(
                 (timestamp, timestamp, job_id),
             )
     return job_id
+
+
+def enqueue_derived_ai_job(
+    connection: sqlite3.Connection,
+    *,
+    provenance: WorkProvenance,
+    task_type: str,
+    source: str,
+    source_item_id: str,
+    revision_number: int,
+    prompt_version: str,
+    priority: str,
+    annotation_id: str = "",
+    now: datetime | None = None,
+) -> str:
+    """Enqueue history-sensitive work without an implicit LIVE fallback."""
+    effective_priority = (
+        "BACKGROUND"
+        if provenance.work_lane == CONTRACT_BACKFILL_LANE
+        else priority
+    )
+    return enqueue_job(
+        connection,
+        task_type=task_type,
+        source=source,
+        source_item_id=source_item_id,
+        revision_number=revision_number,
+        annotation_id=annotation_id,
+        prompt_version=prompt_version,
+        priority=effective_priority,
+        work_lane=provenance.work_lane,
+        provenance=provenance,
+        now=now,
+    )
 
 
 def record_job_attempt(
@@ -1235,6 +1419,19 @@ def _job_from_row(row: sqlite3.Row) -> ScheduledJob:
         prompt_version=str(row["prompt_version"]),
         priority=str(row["priority"]),
         work_lane=str(row["work_lane"]),
+        provenance_resolved=bool(row["provenance_resolved"]),
+        provenance_version=(
+            str(row["provenance_version"])
+            if row["provenance_version"] else None
+        ),
+        provenance_origin_task=(
+            str(row["provenance_origin_task"])
+            if row["provenance_origin_task"] else None
+        ),
+        provenance_origin_ref=(
+            str(row["provenance_origin_ref"])
+            if row["provenance_origin_ref"] else None
+        ),
         state=str(row["state"]),
         available_at=datetime.fromisoformat(str(row["available_at"])),
         lease_owner=str(row["lease_owner"]) if row["lease_owner"] else None,
@@ -1540,7 +1737,9 @@ def claim_job(
                   ON retry_override.job_id=j.job_id AND retry_override.active=1
                  WHERE j.state IN ('QUEUED','BACKING_OFF')
                    AND j.task_type IN ({task_placeholders})
-                   AND (j.task_type<>'ACTIVE_ANNOTATION' OR j.lane_classified=1)
+                   AND j.lane_classified=1
+                   AND (j.task_type='ACTIVE_ANNOTATION' OR
+                        (j.provenance_resolved=1 AND j.provenance_version=?))
                    AND j.work_lane IN ({lane_placeholders})
                    AND j.available_at<=? {priority_filter}
                  ORDER BY
@@ -1562,7 +1761,8 @@ def claim_job(
                   j.created_at,j.job_id
                 LIMIT 1""",
             (
-                *claimable_tasks, *claimable_lanes, timestamp,
+                *claimable_tasks, WORK_PROVENANCE_VERSION,
+                *claimable_lanes, timestamp,
                 _iso(instant - IDLE_CAPACITY_MAX_WAIT),
                 _iso(instant - IDLE_CAPACITY_MAX_WAIT),
                 aged_before, aged_before,
@@ -1909,6 +2109,21 @@ def forecast_safe_backfill_budget(
     )
 
 
+def _live_pressure_tasks_for_quota(quota_authority: str) -> tuple[str, ...]:
+    """Resolve persisted LIVE demand independently from the requested model."""
+    from .ai_provider_registry import quota_surface_for_model
+    from .ai_task_registry import AI_TASK_ROUTES
+
+    tasks: list[str] = []
+    for route in AI_TASK_ROUTES:
+        if any(
+            quota_surface_for_model(model).payload_key == quota_authority
+            for model in route.models
+        ):
+            tasks.extend(route.quota_pressure_tasks)
+    return tuple(dict.fromkeys(tasks))
+
+
 def _backfill_admission_locked(
     connection: sqlite3.Connection,
     *,
@@ -1980,20 +2195,30 @@ def _backfill_admission_locked(
         return {**evidence, "admitted": False, "reason": "COLD_START_HISTORY"}
 
     placeholders = ",".join("?" for _ in model_families)
+    pressure_tasks = _live_pressure_tasks_for_quota(quota_authority)
+    if not pressure_tasks:
+        return {
+            **evidence, "admitted": False,
+            "reason": "UNCLASSIFIED_LIVE_PRESSURE_ROUTE",
+        }
+    task_placeholders = ",".join("?" for _ in pressure_tasks)
     pressure_cutoff = (now - timedelta(minutes=15)).isoformat(timespec="microseconds")
     live = connection.execute(
-        """SELECT
+        f"""SELECT
              sum(CASE WHEN state='LEASED' OR available_at<=? THEN 1 ELSE 0 END) claimable,
              min(CASE WHEN state='LEASED' OR available_at<=? THEN created_at END) oldest,
              sum(CASE WHEN created_at>=? THEN 1 ELSE 0 END) arrivals,
              sum(CASE WHEN completed_at>=? THEN 1 ELSE 0 END) completions
            FROM news_ai_jobs_v1
-           WHERE task_type='ACTIVE_ANNOTATION' AND lane_classified=1
+           WHERE task_type IN ({task_placeholders}) AND lane_classified=1
              AND work_lane='LIVE'
+             AND (task_type='ACTIVE_ANNOTATION' OR
+                  (provenance_resolved=1 AND provenance_version=?))
              AND state IN ('QUEUED','LEASED','BACKING_OFF','COMPLETED')""",
         (
             now.isoformat(timespec="microseconds"),
             now.isoformat(timespec="microseconds"), pressure_cutoff, pressure_cutoff,
+            *pressure_tasks, WORK_PROVENANCE_VERSION,
         ),
     ).fetchone()
     claimable = int(live["claimable"] or 0)
@@ -2010,13 +2235,16 @@ def _backfill_admission_locked(
         (account_id, pressure_cutoff, *model_families),
     ).fetchone()[0])
     capacity_deferred = int(connection.execute(
-        """SELECT count(*) FROM news_ai_scheduler_deferrals_v1 d
+        f"""SELECT count(*) FROM news_ai_scheduler_deferrals_v1 d
            JOIN news_ai_jobs_v1 j ON j.job_id=d.job_id
            WHERE d.deferred_at>=? AND j.lane_classified=1
              AND j.work_lane='LIVE'
+             AND j.task_type IN ({task_placeholders})
+             AND (j.task_type='ACTIVE_ANNOTATION' OR
+                  (j.provenance_resolved=1 AND j.provenance_version=?))
              AND d.failure_code IN ('MODEL_CAPACITY_DEFERRED',
                                     'PROVIDER_DISPATCH_DEFERRED')""",
-        (pressure_cutoff,),
+        (pressure_cutoff, *pressure_tasks, WORK_PROVENANCE_VERSION),
     ).fetchone()[0])
     recent = connection.execute(
         f"""SELECT COALESCE(sum(request_count),0) AS total,
@@ -2767,8 +2995,11 @@ def scheduler_counts(connection: sqlite3.Connection) -> dict[str, int]:
     rows = connection.execute(
         """SELECT state,count(*) AS total FROM news_ai_jobs_v1
         WHERE task_type IN ('ACTIVE_ANNOTATION','ACTIVE_IMPACT','TITLE_TRANSLATION')
-          AND (task_type<>'ACTIVE_ANNOTATION' OR lane_classified=1)
-        GROUP BY state"""
+          AND lane_classified=1
+          AND (task_type='ACTIVE_ANNOTATION' OR
+               (provenance_resolved=1 AND provenance_version=?))
+        GROUP BY state""",
+        (WORK_PROVENANCE_VERSION,),
     ).fetchall()
     counts = {str(row["state"]): int(row["total"]) for row in rows}
     result = {state.lower(): counts.get(state, 0) for state in (
@@ -2777,26 +3008,48 @@ def scheduler_counts(connection: sqlite3.Connection) -> dict[str, int]:
     obsolete = int(connection.execute(
         """SELECT count(*) FROM news_ai_jobs_v1
         WHERE state='DEAD_LETTER'
-          AND (task_type<>'ACTIVE_ANNOTATION' OR lane_classified=1)
-          AND last_error='CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'"""
+          AND lane_classified=1
+          AND (task_type='ACTIVE_ANNOTATION' OR
+               (provenance_resolved=1 AND provenance_version=?))
+          AND last_error='CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'""",
+        (WORK_PROVENANCE_VERSION,),
     ).fetchone()[0])
     result["obsolete"] = obsolete
     result["dead_letter"] = max(0, result["dead_letter"] - obsolete)
     lane_rows = connection.execute(
-        """SELECT work_lane,state,count(*) AS total FROM news_ai_jobs_v1
-           WHERE task_type='ACTIVE_ANNOTATION' AND lane_classified=1
-           GROUP BY work_lane,state"""
+        """SELECT task_type,work_lane,state,count(*) AS total
+           FROM news_ai_jobs_v1
+           WHERE task_type IN ('ACTIVE_ANNOTATION','ACTIVE_IMPACT',
+                               'TITLE_TRANSLATION')
+             AND lane_classified=1
+             AND (task_type='ACTIVE_ANNOTATION' OR
+                  (provenance_resolved=1 AND provenance_version=?))
+           GROUP BY task_type,work_lane,state""",
+        (WORK_PROVENANCE_VERSION,),
     ).fetchall()
-    for lane in WORK_LANES:
-        prefix = "live" if lane == LIVE_LANE else "backfill"
-        for state in ("QUEUED", "LEASED", "BACKING_OFF", "COMPLETED", "DEAD_LETTER"):
-            result[f"active_annotation_{prefix}_{state.lower()}"] = sum(
-                int(row["total"]) for row in lane_rows
-                if str(row["work_lane"]) == lane and str(row["state"]) == state
-            )
+    for task_type in TASKS:
+        task_prefix = task_type.lower()
+        for lane in WORK_LANES:
+            lane_prefix = "live" if lane == LIVE_LANE else "backfill"
+            for state in (
+                "QUEUED", "LEASED", "BACKING_OFF", "COMPLETED", "DEAD_LETTER",
+            ):
+                result[f"{task_prefix}_{lane_prefix}_{state.lower()}"] = sum(
+                    int(row["total"]) for row in lane_rows
+                    if str(row["task_type"]) == task_type
+                    and str(row["work_lane"]) == lane
+                    and str(row["state"]) == state
+                )
     result["active_annotation_unclassified"] = int(connection.execute(
         """SELECT count(*) FROM news_ai_jobs_v1
            WHERE task_type='ACTIVE_ANNOTATION' AND lane_classified=0"""
+    ).fetchone()[0])
+    result["downstream_provenance_unresolved"] = int(connection.execute(
+        """SELECT count(*) FROM news_ai_jobs_v1
+           WHERE task_type IN ('ACTIVE_IMPACT','TITLE_TRANSLATION')
+             AND (lane_classified=0 OR provenance_resolved=0
+                  OR COALESCE(provenance_version,'')<>?)""",
+        (WORK_PROVENANCE_VERSION,),
     ).fetchone()[0])
     return result
 
@@ -3172,6 +3425,158 @@ def _contract_backfill_page(
     return selected
 
 
+def _install_downstream_work_provenance(
+    connection: sqlite3.Connection,
+    *,
+    current_prompt_version: str,
+    now: datetime,
+) -> dict[str, int | str]:
+    """Repair one bounded page without disturbing active leases or evidence."""
+    timestamp = _iso(now)
+    state = connection.execute(
+        """SELECT * FROM news_downstream_provenance_migrations_v1
+           WHERE provenance_version=?""",
+        (WORK_PROVENANCE_VERSION,),
+    ).fetchone()
+    if state is None:
+        with connection:
+            connection.execute(
+                """INSERT INTO news_downstream_provenance_migrations_v1
+                   (provenance_version,state,updated_at)
+                   VALUES (?,'ACTIVE',?)""",
+                (WORK_PROVENANCE_VERSION, timestamp),
+            )
+        state = connection.execute(
+            """SELECT * FROM news_downstream_provenance_migrations_v1
+               WHERE provenance_version=?""",
+            (WORK_PROVENANCE_VERSION,),
+        ).fetchone()
+    if str(state["state"]) == "COMPLETE":
+        return {
+            "state": "COMPLETE", "processed": 0, "resolved": 0,
+            "unresolved": 0, "leased_skipped": 0,
+        }
+    cursor_clause = ""
+    parameters: list[object] = [WORK_PROVENANCE_VERSION]
+    if state["cursor_created_at"] is not None:
+        cursor_clause = "AND (created_at,job_id)>(?,?)"
+        parameters.extend((state["cursor_created_at"], state["cursor_job_id"]))
+    rows = connection.execute(
+        f"""SELECT * FROM news_ai_jobs_v1
+            WHERE task_type IN ('ACTIVE_IMPACT','TITLE_TRANSLATION')
+              AND COALESCE(provenance_version,'')<>? {cursor_clause}
+            ORDER BY created_at,job_id LIMIT ?""",
+        (*parameters, DOWNSTREAM_PROVENANCE_PAGE_SIZE),
+    ).fetchall()
+    annotation_migration = connection.execute(
+        """SELECT state FROM news_annotation_work_lane_migrations_v1
+           WHERE prompt_version=?""",
+        (current_prompt_version,),
+    ).fetchone()
+    parents_complete = bool(
+        annotation_migration and str(annotation_migration["state"]) == "COMPLETE"
+    )
+    resolved = 0
+    unresolved = 0
+    leased_skipped = 0
+    finalized = 0
+    with connection:
+        for row in rows:
+            if str(row["state"]) == "LEASED":
+                leased_skipped += 1
+                continue
+            provenance = resolve_work_provenance(
+                connection,
+                source=str(row["source"]),
+                source_item_id=str(row["source_item_id"]),
+                revision_number=int(row["revision_number"]),
+                annotation_id=str(row["annotation_id"] or ""),
+                current_prompt_version=current_prompt_version,
+            )
+            if provenance is None:
+                if not parents_complete:
+                    continue
+                connection.execute(
+                    """UPDATE news_ai_jobs_v1
+                       SET lane_classified=0,provenance_resolved=0,
+                           provenance_version=?,
+                           provenance_origin_task='UNRESOLVED',
+                           provenance_origin_ref=?,updated_at=?
+                       WHERE job_id=? AND state<>'LEASED'""",
+                    (
+                        WORK_PROVENANCE_VERSION,
+                        f"unresolved:{row['job_id']}", timestamp, row["job_id"],
+                    ),
+                )
+                unresolved += 1
+                finalized += 1
+                continue
+            priority = (
+                "BACKGROUND"
+                if provenance.work_lane == CONTRACT_BACKFILL_LANE
+                else str(row["priority"])
+            )
+            connection.execute(
+                """UPDATE news_ai_jobs_v1
+                   SET work_lane=?,priority=?,lane_classified=1,
+                       provenance_resolved=1,provenance_version=?,
+                       provenance_origin_task=?,provenance_origin_ref=?,
+                       updated_at=?
+                   WHERE job_id=? AND state<>'LEASED'""",
+                (
+                    provenance.work_lane, priority, WORK_PROVENANCE_VERSION,
+                    provenance.origin_task, provenance.origin_ref,
+                    timestamp, row["job_id"],
+                ),
+            )
+            resolved += 1
+            finalized += 1
+        if rows:
+            last = rows[-1]
+            connection.execute(
+                """UPDATE news_downstream_provenance_migrations_v1
+                   SET cursor_created_at=?,cursor_job_id=?,
+                       processed_count=processed_count+?,
+                       resolved_count=resolved_count+?,
+                       unresolved_count=unresolved_count+?,
+                       leased_skipped_count=leased_skipped_count+?,
+                       state='ACTIVE',updated_at=?
+                   WHERE provenance_version=?""",
+                (
+                    last["created_at"], last["job_id"], finalized, resolved,
+                    unresolved, leased_skipped, timestamp,
+                    WORK_PROVENANCE_VERSION,
+                ),
+            )
+        if len(rows) < DOWNSTREAM_PROVENANCE_PAGE_SIZE:
+            remaining = int(connection.execute(
+                """SELECT count(*) FROM news_ai_jobs_v1
+                   WHERE task_type IN ('ACTIVE_IMPACT','TITLE_TRANSLATION')
+                     AND COALESCE(provenance_version,'')<>?""",
+                (WORK_PROVENANCE_VERSION,),
+            ).fetchone()[0])
+            next_state = "COMPLETE" if remaining == 0 else "WAITING_INPUT"
+            connection.execute(
+                """UPDATE news_downstream_provenance_migrations_v1
+                   SET cursor_created_at=NULL,cursor_job_id=NULL,
+                       pass_count=pass_count+1,state=?,updated_at=?
+                   WHERE provenance_version=?""",
+                (next_state, timestamp, WORK_PROVENANCE_VERSION),
+            )
+    current_state = str(connection.execute(
+        """SELECT state FROM news_downstream_provenance_migrations_v1
+           WHERE provenance_version=?""",
+        (WORK_PROVENANCE_VERSION,),
+    ).fetchone()[0])
+    return {
+        "state": current_state,
+        "processed": finalized,
+        "resolved": resolved,
+        "unresolved": unresolved,
+        "leased_skipped": leased_skipped,
+    }
+
+
 def sync_pending_jobs(
     connection: sqlite3.Connection,
     *,
@@ -3218,6 +3623,9 @@ def sync_pending_jobs(
     execute_transition_page(
         connection, transition, activated_at=activated_at, now=instant,
         page_size=CONTRACT_BACKFILL_PAGE_SIZE,
+    )
+    _install_downstream_work_provenance(
+        connection, current_prompt_version=PROMPT_VERSION, now=instant,
     )
     brief_backlog = brief_dates_to_process(connection, now=instant)[1:]
     backfill_capacity = (
@@ -3322,10 +3730,21 @@ def sync_pending_jobs(
         "ACTIVE_ANNOTATION": len(live_by_revision) + len(backfill_by_revision),
     }
     for task_type, prompt_version, rows in batches:
-        discovered[task_type] = len(rows)
+        enqueued = 0
         for row in rows:
-            enqueue_job(
+            provenance = resolve_work_provenance(
                 connection,
+                source=str(row["source"]),
+                source_item_id=str(row["source_item_id"]),
+                revision_number=int(row["revision_number"]),
+                annotation_id=str(row.get("annotation_id") or ""),
+                current_prompt_version=PROMPT_VERSION,
+            )
+            if provenance is None:
+                continue
+            enqueue_derived_ai_job(
+                connection,
+                provenance=provenance,
                 task_type=task_type,
                 source=str(row["source"]),
                 source_item_id=str(row["source_item_id"]),
@@ -3340,6 +3759,8 @@ def sync_pending_jobs(
                 ),
                 now=instant,
             )
+            enqueued += 1
+        discovered[task_type] = enqueued
     reconcile_completed_jobs(connection, now=instant)
     _reopen_protected_annotation_jobs(
         connection, protected_annotations, prompt_version=PROMPT_VERSION,

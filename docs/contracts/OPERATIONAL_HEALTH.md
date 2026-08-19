@@ -61,7 +61,14 @@ deferred it. Local account/model quota uses `MODEL_CAPACITY_DEFERRED`; adaptive
 provider pacing uses `PROVIDER_DISPATCH_DEFERRED`. Neither code proves an HTTP
 request was sent.
 
-Contract migration has a separate non-blocking health domain from LIVE work.
+Workload provenance survives task and model boundaries. Derived AI work
+inherits the authoritative operational class of its parent evidence unless an
+explicit demand transition promotes it. Model quota authority and workload
+class are independent: the actual model selects the quota surface, while
+provenance selects LIVE or contract-backfill admission and health semantics.
+
+Contract migration has a separate non-blocking health domain from LIVE work at
+every history-capable AI stage.
 `BACKFILL_BUDGET_DEFERRED` means forecast-safe quota isolation deliberately
 withheld a historical model dispatch before transport. It reserves no quota and
 increments neither attempt nor retry count. Contract-backfill queue size, age,
@@ -70,12 +77,15 @@ degrade LIVE annotation task health, create a LIVE stall alert, or change the
 top-level operational status. Genuine provider, storage, or scheduler failures
 retain their existing failure semantics and are not relabeled as healthy pacing.
 
-Only annotation jobs with `lane_classified=1` and `work_lane=LIVE` contribute to
-LIVE queue counts, claimable work, retry pressure, failure windows, or stall
-alerts. `lane_classified=0` is a bounded `UNCLASSIFIED_MIGRATION` state, not an
-implicit LIVE lane; its count is visible separately and is non-blocking while
-the keyset migration advances. Contract-backfill and unclassified totals must
-never be inferred from semantic-pending content counts.
+Only provenance-resolved jobs with `lane_classified=1` and `work_lane=LIVE`
+contribute to LIVE queue counts, claimable work, retry pressure, failure
+windows, or stall alerts. This applies to annotation, impact, and title/display
+routes. `lane_classified=0` or unresolved downstream provenance is a bounded
+`UNCLASSIFIED_MIGRATION` state, not an implicit LIVE lane; its count is visible
+separately and is non-blocking while the keyset migration advances.
+Contract-backfill and unresolved totals must never be inferred from
+semantic-pending content counts. Historical migration age alone is never a
+LIVE pipeline failure at any AI stage.
 
 `SEMANTIC_TRANSITION_CONTRACT_FAILED` is a bounded local projection failure.
 It proves neither provider transport nor quota consumption and must not be
@@ -167,10 +177,11 @@ Brief state machine. Scheduler evidence includes:
 - oldest claimable work age and the earliest future retry time;
 - highest active claim count and a bounded non-secret job reference.
 
-Annotation evidence additionally separates classified LIVE, contract-backfill,
-and unclassified-migration counts. The legacy annotation queue counters describe
-classified LIVE work only; semantic pending is a distinct content-contract
-measure.
+Scheduler evidence additionally separates classified LIVE,
+contract-backfill, and unresolved-provenance counts by task. The legacy
+annotation queue counters describe classified LIVE annotation work only;
+semantic pending is a distinct content-contract measure. These bounded counts
+never include job arrays.
 
 Counts from articles, event identities, prediction exposures, and training
 rows remain distinct. One must never substitute for another in health gates.

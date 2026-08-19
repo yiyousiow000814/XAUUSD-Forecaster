@@ -20,21 +20,40 @@ class AiTaskRoute:
     models: tuple[str, ...]
     semantic_owner: str
     priority_reserve_models: tuple[str, ...] = ()
+    provenance_source: str = "INHERENT_LIVE"
+    quota_pressure_tasks: tuple[str, ...] = ()
 
 
 AI_TASK_ROUTES = (
     AiTaskRoute(
-        "ACTIVE_ANNOTATION",
-        (DEFAULT_GEMINI_MODEL, FALLBACK_GEMINI_MODEL),
-        "NEWS_SEMANTICS",
-        (DEFAULT_GEMINI_MODEL,),
+        task_type="ACTIVE_ANNOTATION",
+        models=(DEFAULT_GEMINI_MODEL, FALLBACK_GEMINI_MODEL),
+        semantic_owner="NEWS_SEMANTICS",
+        priority_reserve_models=(DEFAULT_GEMINI_MODEL,),
+        provenance_source="SOURCE_RECEIPT_TIME",
+        quota_pressure_tasks=("ACTIVE_ANNOTATION",),
     ),
-    AiTaskRoute("ACTIVE_IMPACT", (IMPACT_MODEL,), "NEWS_EVENT_IDENTITY"),
-    AiTaskRoute("TITLE_TRANSLATION", TITLE_TRANSLATION_MODELS, "DISPLAY_ONLY"),
-    AiTaskRoute("DAILY_BRIEF", (DEFAULT_GEMMA_MODEL,), "DISPLAY_ONLY"),
     AiTaskRoute(
-        "NEWS_EMBEDDING", (GEMINI_EMBEDDING_MODEL,),
-        "NEWS_IDENTITY_RETRIEVAL",
+        task_type="ACTIVE_IMPACT", models=(IMPACT_MODEL,),
+        semantic_owner="NEWS_EVENT_IDENTITY",
+        provenance_source="ACTIVE_ANNOTATION",
+        quota_pressure_tasks=("ACTIVE_IMPACT",),
+    ),
+    AiTaskRoute(
+        task_type="TITLE_TRANSLATION", models=TITLE_TRANSLATION_MODELS,
+        semantic_owner="DISPLAY_ONLY",
+        provenance_source="ACTIVE_ANNOTATION",
+        quota_pressure_tasks=("TITLE_TRANSLATION",),
+    ),
+    AiTaskRoute(
+        task_type="DAILY_BRIEF", models=(DEFAULT_GEMMA_MODEL,),
+        semantic_owner="DISPLAY_ONLY", provenance_source="INHERENT_LIVE",
+    ),
+    AiTaskRoute(
+        task_type="NEWS_EMBEDDING", models=(GEMINI_EMBEDDING_MODEL,),
+        semantic_owner="NEWS_IDENTITY_RETRIEVAL",
+        provenance_source="CALLER_OPERATION",
+        quota_pressure_tasks=("ACTIVE_IMPACT",),
     ),
 )
 

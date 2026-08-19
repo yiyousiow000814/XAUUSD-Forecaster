@@ -167,6 +167,24 @@ def test_zero_provider_transitions_execute_in_sync_and_replay_safely(
              AND state IN ('QUEUED','LEASED','BACKING_OFF')""",
         (CURRENT_NEWS_PROMPT_VERSION,),
     ).fetchone()[0] == 0
+    projected_job = ledger.connection.execute(
+        """SELECT work_lane,lane_classified,provenance_resolved,
+                  provenance_origin_task,provenance_origin_ref
+           FROM news_ai_jobs_v1
+           WHERE task_type='ACTIVE_ANNOTATION' AND prompt_version=?""",
+        (CURRENT_NEWS_PROMPT_VERSION,),
+    ).fetchone()
+    assert tuple(projected_job) == (
+        "CONTRACT_BACKFILL", 1, 1, "SEMANTIC_TRANSITION",
+        f"{declared_contract.fingerprint}:source-v16",
+    )
+    assert ledger.connection.execute(
+        """SELECT count(*) FROM news_ai_jobs_v1
+           WHERE task_type IN ('ACTIVE_IMPACT','TITLE_TRANSLATION')
+             AND (work_lane<>'CONTRACT_BACKFILL' OR priority<>'BACKGROUND'
+                  OR provenance_origin_task NOT IN (
+                    'ACTIVE_ANNOTATION','SEMANTIC_TRANSITION'))"""
+    ).fetchone()[0] == 0
     state = ledger.connection.execute(
         """SELECT state,processed_count,transition_fingerprint,
                   transition_contract_json

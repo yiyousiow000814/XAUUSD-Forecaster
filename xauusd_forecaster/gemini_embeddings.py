@@ -18,10 +18,12 @@ from .ai_provider_registry import (
     GEMINI_EMBEDDING_MODEL,
     GEMINI_EMBEDDING_REQUESTS_PER_DAY_PER_ACCOUNT,
     GEMINI_EMBEDDING_REQUESTS_PER_MINUTE_PER_ACCOUNT,
+    quota_surface_for_model,
 )
 from .local_embeddings import EmbeddingProfile
 from .model_gateway import post_gemini_batch_embeddings
 from .news_scheduler import (
+    REQUEST_WORKLOADS,
     configured_api_credentials,
     credentials_for_background_task,
     mark_account_request_attempted,
@@ -192,10 +194,14 @@ class GeminiEmbeddingClient:
         *,
         timeout: float = 120.0,
         dispatch_task: str = "NEWS_EMBEDDING",
+        workload_class: str,
     ) -> None:
+        if workload_class not in REQUEST_WORKLOADS:
+            raise ValueError("embedding workload class is not controlled")
         self.connection = connection
         self.timeout = timeout
         self.dispatch_task = dispatch_task
+        self.workload_class = workload_class
         self._last_successful_usage_ids: tuple[str, ...] = ()
 
     def profile(self) -> EmbeddingProfile:
@@ -291,8 +297,11 @@ class GeminiEmbeddingClient:
                     independent.append(credential)
                     seen_accounts.add(credential.account_id)
             last_error: Exception | None = None
+            last_admission_decision: dict[str, object] = {}
             for credential in independent:
                 usage_id = str(uuid.uuid4())
+                policy = quota_surface_for_model(GEMINI_EMBEDDING_MODEL)
+                decision: dict[str, object] = {}
                 admitted = reserve_account_request(
                     self.connection,
                     account_id=credential.account_id,
@@ -306,8 +315,14 @@ class GeminiEmbeddingClient:
                     ),
                     usage_id=usage_id,
                     provider_task=self.dispatch_task,
+                    requested_model=GEMINI_EMBEDDING_MODEL,
+                    purpose=self.dispatch_task,
+                    workload_class=self.workload_class,
+                    quota_authority=policy.payload_key,
+                    decision=decision,
                 )
                 if not admitted:
+                    last_admission_decision = decision
                     next_eligible_at = provider_dispatch_next_eligible(
                         self.connection,
                     )
@@ -388,17 +403,30 @@ class GeminiEmbeddingClient:
             else:
                 if last_error is not None:
                     raise last_error
-                raise GeminiEmbeddingCapacityDeferred(
+                deferred = GeminiEmbeddingCapacityDeferred(
                     "Gemini Embedding 2 capacity is temporarily unavailable",
-                    failure_code="NEWS_EMBEDDING_CAPACITY_DEFERRED",
+                    failure_code=(
+                        "BACKFILL_BUDGET_DEFERRED"
+                        if last_admission_decision.get("failure_code")
+                        == "BACKFILL_BUDGET_DEFERRED"
+                        else "NEWS_EMBEDDING_CAPACITY_DEFERRED"
+                    ),
                     diagnostic={
                         "request_timestamp": datetime.now(UTC).isoformat(
                             timespec="microseconds"
                         ),
                         "batch_item_count": len(batch),
                         "estimated_input_tokens": estimated_input_tokens,
+                        "quota_authority": "gemini_embedding_quota",
+                        "workload_class": self.workload_class,
+                        "admission_reason": last_admission_decision.get("reason"),
                     },
                 )
+                if last_admission_decision.get("next_retry_at"):
+                    deferred.next_retry_at = str(
+                        last_admission_decision["next_retry_at"]
+                    )
+                raise deferred
         self._last_successful_usage_ids = tuple(successful_usage_ids)
         return np.concatenate(results, axis=0)
 

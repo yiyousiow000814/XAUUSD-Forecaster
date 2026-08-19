@@ -336,6 +336,7 @@ def execute_transition_page(
     from .critical_annotation_state import (
         record_annotation_completion, refresh_news_revision_state,
     )
+    from .news_scheduler import CONTRACT_BACKFILL_LANE, WorkProvenance
     from .news_semantics import (
         canonical_annotation_source_text, validate_news_annotation,
     )
@@ -412,6 +413,11 @@ def execute_transition_page(
                     revision_number=int(row["revision_number"]),
                     prompt_version=transition.to_version,
                     completed_at=timestamp,
+                    provenance=WorkProvenance(
+                        CONTRACT_BACKFILL_LANE,
+                        "SEMANTIC_TRANSITION",
+                        f"{contract.fingerprint}:{row['annotation_id']}",
+                    ),
                 )
                 refresh_news_revision_state(
                     connection, str(row["source"]), str(row["source_item_id"]),

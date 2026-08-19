@@ -36,6 +36,7 @@ from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
 from xauusd_forecaster.local_embeddings import EmbeddingProfile
 from xauusd_forecaster.model_gateway import GeminiModelGateway
 from xauusd_forecaster.news_impact import pending_impact_records
+from xauusd_forecaster.news_scheduler import LIVE_OPERATIONAL_WORKLOAD
 from xauusd_forecaster.news_semantics import PREVIOUS_NEWS_PROMPT_VERSION
 from xauusd_forecaster.maintenance import (
     archive_completed_quote_days,
@@ -4410,8 +4411,8 @@ def test_gemma_impact_assessment_is_append_only_and_versioned(
     ledger.connection.commit()
 
     class CappedEmbeddingClient:
-        def __init__(self, _connection) -> None:
-            pass
+        def __init__(self, _connection, *, workload_class) -> None:
+            self.workload_class = workload_class
 
         def profile(self) -> EmbeddingProfile:
             return EmbeddingProfile("gemini-embedding-2", "e" * 64, 768)
@@ -4447,6 +4448,7 @@ def test_gemma_impact_assessment_is_append_only_and_versioned(
         ledger, api_key="test-key", limit=1,
         request_accountant=ALLOW_MODEL_REQUEST,
         use_hybrid_retrieval=True,
+        workload_class=LIVE_OPERATIONAL_WORKLOAD,
     )
 
     assert statuses[0]["status"] == "OK"

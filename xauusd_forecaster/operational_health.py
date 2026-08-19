@@ -6,7 +6,7 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 
 from .critical_annotation_state import news_current_counts, scheduler_state_counts
-from .news_scheduler import TASKS
+from .news_scheduler import TASKS, WORK_PROVENANCE_VERSION
 from .operational_taxonomy import normalize_operational_event
 
 
@@ -118,32 +118,14 @@ def scheduler_health_snapshot(
                     AS oldest_active_at,
                   max(attempt_count) AS max_claim_count
            FROM news_ai_jobs_v1
-           WHERE task_type='ACTIVE_ANNOTATION'
+           WHERE task_type IN ('ACTIVE_ANNOTATION','ACTIVE_IMPACT',
+                               'TITLE_TRANSLATION')
              AND lane_classified=1 AND work_lane='LIVE'
+             AND (task_type='ACTIVE_ANNOTATION' OR
+                  (provenance_resolved=1 AND provenance_version=?))
              AND state IN ('QUEUED','LEASED','BACKING_OFF')
            GROUP BY task_type""",
-        active_row_parameters,
-    ).fetchall())
-    active_rows.extend(connection.execute(
-        """SELECT task_type,
-                  sum(CASE WHEN state='LEASED' OR available_at<=? THEN 1 ELSE 0 END)
-                    AS claimable,
-                  sum(CASE WHEN state IN ('QUEUED','BACKING_OFF')
-                                AND available_at>? THEN 1 ELSE 0 END)
-                    AS scheduled_retry,
-                  min(CASE WHEN state IN ('QUEUED','BACKING_OFF')
-                                AND available_at>? THEN available_at END)
-                    AS earliest_retry_at,
-                  min(CASE WHEN state='LEASED' OR available_at<=?
-                           THEN CASE WHEN available_at>created_at
-                                     THEN available_at ELSE created_at END END)
-                    AS oldest_active_at,
-                  max(attempt_count) AS max_claim_count
-           FROM news_ai_jobs_v1
-           WHERE task_type IN ('ACTIVE_IMPACT','TITLE_TRANSLATION')
-             AND state IN ('QUEUED','LEASED','BACKING_OFF')
-           GROUP BY task_type""",
-        active_row_parameters,
+        (*active_row_parameters, WORK_PROVENANCE_VERSION),
     ).fetchall())
     for row in active_rows:
         task = str(row["task_type"])
@@ -160,16 +142,14 @@ def scheduler_health_snapshot(
             if oldest is not None else None
         )
         summary["max_claim_count"] = int(row["max_claim_count"] or 0)
-        lane_filter = (
-            "AND lane_classified=1 AND work_lane='LIVE'"
-            if task == "ACTIVE_ANNOTATION" else ""
-        )
         top = connection.execute(
-            f"""SELECT job_id,state,available_at FROM news_ai_jobs_v1
+            """SELECT job_id,state,available_at FROM news_ai_jobs_v1
                WHERE task_type=? AND state IN ('QUEUED','LEASED','BACKING_OFF')
-                 {lane_filter}
+                 AND lane_classified=1 AND work_lane='LIVE'
+                 AND (task_type='ACTIVE_ANNOTATION' OR
+                      (provenance_resolved=1 AND provenance_version=?))
                ORDER BY attempt_count DESC,created_at,job_id LIMIT 1""",
-            (task,),
+            (task, WORK_PROVENANCE_VERSION),
         ).fetchone()
         summary["max_claim_job_ref"] = str(top["job_id"])[:12] if top else None
         if top:
@@ -189,10 +169,11 @@ def scheduler_health_snapshot(
            WHERE a.attempted_at>=?
              AND j.task_type IN ('ACTIVE_ANNOTATION','ACTIVE_IMPACT',
                                  'TITLE_TRANSLATION')
-             AND (j.task_type<>'ACTIVE_ANNOTATION' OR
-                  (j.lane_classified=1 AND j.work_lane='LIVE'))
+             AND j.lane_classified=1 AND j.work_lane='LIVE'
+             AND (j.task_type='ACTIVE_ANNOTATION' OR
+                  (j.provenance_resolved=1 AND j.provenance_version=?))
            GROUP BY j.task_type,a.outcome,a.failure_code""",
-        (cutoff,),
+        (cutoff, WORK_PROVENANCE_VERSION),
     ).fetchall()
     outcome_fields = {
         "OK": "completed_15m",
@@ -220,11 +201,14 @@ def scheduler_health_snapshot(
            JOIN news_ai_jobs_v1 j ON j.job_id=a.job_id
            WHERE a.attempted_at>=?
              AND a.failure_code='MODEL_CAPACITY_DEFERRED'
-             AND (j.task_type<>'ACTIVE_ANNOTATION' OR
-                  (j.lane_classified=1 AND j.work_lane='LIVE'))
+             AND j.task_type IN ('ACTIVE_ANNOTATION','ACTIVE_IMPACT',
+                                 'TITLE_TRANSLATION')
+             AND j.lane_classified=1 AND j.work_lane='LIVE'
+             AND (j.task_type='ACTIVE_ANNOTATION' OR
+                  (j.provenance_resolved=1 AND j.provenance_version=?))
              AND json_valid(a.error_detail)
            GROUP BY j.task_type,dimension""",
-        (cutoff,),
+        (cutoff, WORK_PROVENANCE_VERSION),
     ).fetchall()
     for row in dimension_rows:
         dimension = str(row["dimension"] or "UNKNOWN")
@@ -236,10 +220,11 @@ def scheduler_health_snapshot(
            FROM news_ai_scheduler_deferrals_v1 d
            JOIN news_ai_jobs_v1 j ON j.job_id=d.job_id
            WHERE d.deferred_at>=? AND d.failure_code='PROVIDER_DISPATCH_DEFERRED'
-             AND (j.task_type<>'ACTIVE_ANNOTATION' OR
-                  (j.lane_classified=1 AND j.work_lane='LIVE'))
+             AND j.lane_classified=1 AND j.work_lane='LIVE'
+             AND (j.task_type='ACTIVE_ANNOTATION' OR
+                  (j.provenance_resolved=1 AND j.provenance_version=?))
            GROUP BY d.task_type""",
-        (cutoff,),
+        (cutoff, WORK_PROVENANCE_VERSION),
     ).fetchall()
     for row in provider_rows:
         summary = summaries[str(row["task_type"])]
@@ -254,21 +239,17 @@ def scheduler_health_snapshot(
     recent_dead_letters = {
         str(row["task_type"]): int(row["total"])
         for row in connection.execute(
-            """SELECT task_type,count(*) AS total FROM (
-                 SELECT task_type FROM news_ai_jobs_v1
-                  WHERE task_type='ACTIVE_ANNOTATION'
-                    AND lane_classified=1 AND work_lane='LIVE'
-                    AND state='DEAD_LETTER' AND updated_at>=?
-                    AND COALESCE(last_error,'')<>
-                        'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'
-                 UNION ALL
-                 SELECT task_type FROM news_ai_jobs_v1
-                  WHERE task_type IN ('ACTIVE_IMPACT','TITLE_TRANSLATION')
-                    AND state='DEAD_LETTER' AND updated_at>=?
-                    AND COALESCE(last_error,'')<>
-                        'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'
-               ) GROUP BY task_type""",
-            (cutoff, cutoff),
+            """SELECT task_type,count(*) AS total FROM news_ai_jobs_v1
+               WHERE task_type IN ('ACTIVE_ANNOTATION','ACTIVE_IMPACT',
+                                   'TITLE_TRANSLATION')
+                 AND lane_classified=1 AND work_lane='LIVE'
+                 AND (task_type='ACTIVE_ANNOTATION' OR
+                      (provenance_resolved=1 AND provenance_version=?))
+                 AND state='DEAD_LETTER' AND updated_at>=?
+                 AND COALESCE(last_error,'')<>
+                     'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'
+               GROUP BY task_type""",
+            (WORK_PROVENANCE_VERSION, cutoff),
         ).fetchall()
     }
 
@@ -287,13 +268,8 @@ def scheduler_health_snapshot(
         max_claims = int(summary["max_claim_count"])
         max_claim_is_claimable = bool(summary["max_claim_is_claimable"])
         oldest_age = int(summary["oldest_age_seconds"] or 0)
-        lane_filter = (
-            "AND j.lane_classified=1 AND j.work_lane='LIVE'"
-            if task == "ACTIVE_ANNOTATION" else ""
-        )
-
         retry_candidate = connection.execute(
-            f"""SELECT j.job_id,j.state,j.available_at,
+            """SELECT j.job_id,j.state,j.available_at,
                       j.attempt_count AS lifetime_claim_count,
                       COALESCE(sum(CASE
                         WHEN a.outcome='ERROR'
@@ -336,11 +312,13 @@ def scheduler_health_snapshot(
                LEFT JOIN news_ai_job_attempts_v1 a ON a.job_id=j.job_id
                WHERE j.task_type=?
                  AND j.state IN ('QUEUED','LEASED','BACKING_OFF')
-                 {lane_filter}
+                 AND j.lane_classified=1 AND j.work_lane='LIVE'
+                 AND (j.task_type='ACTIVE_ANNOTATION' OR
+                      (j.provenance_resolved=1 AND j.provenance_version=?))
                GROUP BY j.job_id
                ORDER BY effective_failure_streak DESC,j.attempt_count DESC,
                         j.created_at,j.job_id LIMIT 1""",
-            (task,),
+            (task, WORK_PROVENANCE_VERSION),
         ).fetchone()
         if retry_candidate is not None:
             lifetime_claims = int(retry_candidate["lifetime_claim_count"])
@@ -481,27 +459,55 @@ def scheduler_health_snapshot(
         else "WARNING" if alerts else "HEALTHY"
     )
     backfill_rows = connection.execute(
-        """SELECT state,sum(job_count) AS total
+        """SELECT task_type,state,sum(job_count) AS total
            FROM dashboard_annotation_job_counts_v1
-           WHERE task_type='ACTIVE_ANNOTATION' AND retired=0
+           WHERE task_type IN ('ACTIVE_ANNOTATION','ACTIVE_IMPACT',
+                               'TITLE_TRANSLATION')
+             AND retired=0
              AND lane_classified=1 AND work_lane='CONTRACT_BACKFILL'
-           GROUP BY state"""
+             AND (task_type='ACTIVE_ANNOTATION' OR
+                  (provenance_resolved=1 AND provenance_version=?))
+           GROUP BY task_type,state""",
+        (WORK_PROVENANCE_VERSION,),
     ).fetchall()
     backfill_states = {
-        str(row["state"]).lower(): int(row["total"]) for row in backfill_rows
+        state.lower(): sum(
+            int(row["total"]) for row in backfill_rows
+            if str(row["state"]) == state
+        )
+        for state in ("QUEUED", "LEASED", "BACKING_OFF", "COMPLETED", "DEAD_LETTER")
     }
-    unclassified_annotation_jobs = int(connection.execute(
-        """SELECT COALESCE(sum(job_count),0)
+    unresolved_rows = connection.execute(
+        """SELECT task_type,COALESCE(sum(job_count),0) AS total
            FROM dashboard_annotation_job_counts_v1
-           WHERE task_type='ACTIVE_ANNOTATION' AND lane_classified=0"""
-    ).fetchone()[0])
-    oldest_row = connection.execute(
-        """SELECT min(created_at) FROM news_ai_jobs_v1
-           WHERE task_type='ACTIVE_ANNOTATION'
+           WHERE task_type IN ('ACTIVE_ANNOTATION','ACTIVE_IMPACT',
+                               'TITLE_TRANSLATION')
+             AND (lane_classified=0 OR
+                  (task_type<>'ACTIVE_ANNOTATION' AND
+                   (provenance_resolved=0 OR provenance_version<>?)))
+           GROUP BY task_type""",
+        (WORK_PROVENANCE_VERSION,),
+    ).fetchall()
+    unresolved_by_task = {task: 0 for task in TASKS}
+    unresolved_by_task.update({
+        str(row["task_type"]): int(row["total"]) for row in unresolved_rows
+    })
+    unclassified_annotation_jobs = unresolved_by_task["ACTIVE_ANNOTATION"]
+    oldest_rows = connection.execute(
+        """SELECT task_type,min(created_at) AS oldest
+           FROM news_ai_jobs_v1
+           WHERE task_type IN ('ACTIVE_ANNOTATION','ACTIVE_IMPACT',
+                               'TITLE_TRANSLATION')
              AND lane_classified=1 AND work_lane='CONTRACT_BACKFILL'
-             AND state IN ('QUEUED','LEASED','BACKING_OFF')"""
-    ).fetchone()
-    oldest_backfill = _instant(oldest_row[0]) if oldest_row and oldest_row[0] else None
+             AND (task_type='ACTIVE_ANNOTATION' OR
+                  (provenance_resolved=1 AND provenance_version=?))
+             AND state IN ('QUEUED','LEASED','BACKING_OFF')
+           GROUP BY task_type""",
+        (WORK_PROVENANCE_VERSION,),
+    ).fetchall()
+    oldest_by_task = {
+        str(row["task_type"]): _instant(row["oldest"]) for row in oldest_rows
+    }
     budget_deferrals = int(connection.execute(
         """SELECT count(*) FROM news_ai_scheduler_deferrals_v1 d
            JOIN news_ai_jobs_v1 j ON j.job_id=d.job_id
@@ -519,9 +525,13 @@ def scheduler_health_snapshot(
              COALESCE(sum(CASE WHEN a.outcome='OK' THEN 1 ELSE 0 END),0) completed
            FROM news_ai_job_attempts_v1 a
            JOIN news_ai_jobs_v1 j ON j.job_id=a.job_id
-           WHERE a.attempted_at>=? AND j.task_type='ACTIVE_ANNOTATION'
-             AND j.lane_classified=1 AND j.work_lane='CONTRACT_BACKFILL'""",
-        (cutoff,),
+           WHERE a.attempted_at>=?
+             AND j.task_type IN ('ACTIVE_ANNOTATION','ACTIVE_IMPACT',
+                                 'TITLE_TRANSLATION')
+             AND j.lane_classified=1 AND j.work_lane='CONTRACT_BACKFILL'
+             AND (j.task_type='ACTIVE_ANNOTATION' OR
+                  (j.provenance_resolved=1 AND j.provenance_version=?))""",
+        (cutoff, WORK_PROVENANCE_VERSION),
     ).fetchone()
     projection_failures = int(connection.execute(
         """SELECT count(*) FROM news_annotation_transition_failures_v1
@@ -537,6 +547,29 @@ def scheduler_health_snapshot(
     transition_failures = projection_failures + contract_change_failures
     backfill_failures = int(backfill_progress["failures"]) + transition_failures
     backfill_completed = int(backfill_progress["completed"])
+    backfill_tasks = []
+    for task in TASKS:
+        task_states = {
+            state.lower(): sum(
+                int(row["total"]) for row in backfill_rows
+                if str(row["task_type"]) == task and str(row["state"]) == state
+            )
+            for state in (
+                "QUEUED", "LEASED", "BACKING_OFF", "COMPLETED", "DEAD_LETTER",
+            )
+        }
+        oldest = oldest_by_task.get(task)
+        backfill_tasks.append({
+            "task_type": task,
+            "states": task_states,
+            "active": sum(task_states[state] for state in (
+                "queued", "leased", "backing_off",
+            )),
+            "oldest_age_seconds": (
+                max(0, int((instant - oldest).total_seconds()))
+                if oldest is not None else None
+            ),
+        })
     if transition_failures or (
         backfill_failures >= 3 and backfill_failures > backfill_completed
     ):
@@ -572,18 +605,30 @@ def scheduler_health_snapshot(
         "scheduler": {
             "status": status,
             "unclassified_annotation_jobs": unclassified_annotation_jobs,
+            "unresolved_provenance": {
+                "total": sum(unresolved_by_task.values()),
+                "by_task": [
+                    {"task_type": task, "count": unresolved_by_task[task]}
+                    for task in TASKS
+                ],
+            },
             "tasks": list(summaries.values()),
             "contract_backfill": {
                 "health_semantics": "NON_BLOCKING_MIGRATION",
                 "states": backfill_states,
+                "tasks": backfill_tasks,
                 "budget_deferred_15m": budget_deferrals,
                 "completed_15m": backfill_completed,
                 "real_failures_15m": backfill_failures,
                 "semantic_transition_contract_failures_15m": transition_failures,
                 "semantic_transition_contract_changes_15m": contract_change_failures,
-                "oldest_age_seconds": (
-                    max(0, int((instant - oldest_backfill).total_seconds()))
-                    if oldest_backfill is not None else None
+                "oldest_age_seconds": max(
+                    (
+                        int(item["oldest_age_seconds"])
+                        for item in backfill_tasks
+                        if item["oldest_age_seconds"] is not None
+                    ),
+                    default=None,
                 ),
             },
         },

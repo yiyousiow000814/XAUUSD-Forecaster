@@ -42,6 +42,7 @@ from xauusd_forecaster.gemini_embeddings import (  # noqa: E402
 from xauusd_forecaster.ai_task_registry import route_for_task  # noqa: E402
 from xauusd_forecaster.news_scheduler import (  # noqa: E402
     ApiCredential,
+    LIVE_LANE,
     PREEMPTIBLE_POOL,
     ROUTINE_POOL,
     URGENT_PRIORITIES,
@@ -206,6 +207,7 @@ def _execute_job(
             records=[record],
             request_accountant=accountant,
             use_hybrid_retrieval=True,
+            workload_class=accountant.workload_class,
         )[0]
     return translate_pending_headlines(
         ledger,
@@ -651,6 +653,7 @@ def run_daily_brief_batch(
             api_key=credential.api_key if credential else None,
             request_accountant=(SchedulerModelAccountant(
                 ledger.connection, credential, urgent=False,
+                work_lane=LIVE_LANE,
             ) if credential else None),
         )
         results.append({
