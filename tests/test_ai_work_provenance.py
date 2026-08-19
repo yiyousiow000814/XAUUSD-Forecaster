@@ -286,9 +286,15 @@ def test_downstream_provenance_migration_is_bounded_resumable_and_lease_safe(
         (WORK_PROVENANCE_VERSION,),
     ).fetchone()[0]
 
-    assert first_page["processed"] == 99
-    assert first_page["leased_skipped"] == 1
-    assert migrated_after_page == 99
+    assert first_page["processed"] == 100
+    assert first_page["leased_skipped"] == 0
+    assert migrated_after_page == 100
+    assert ledger.connection.execute(
+        """SELECT count(*) FROM news_ai_jobs_v1
+           WHERE task_type='ACTIVE_IMPACT' AND state='COMPLETED'
+             AND provenance_version=?""",
+        (WORK_PROVENANCE_VERSION,),
+    ).fetchone()[0] == 0
     assert ledger.connection.execute(
         "SELECT work_lane FROM news_ai_jobs_v1 WHERE job_id=?", (first,),
     ).fetchone()[0] == LIVE_LANE

@@ -3456,18 +3456,6 @@ def _install_downstream_work_provenance(
             "state": "COMPLETE", "processed": 0, "resolved": 0,
             "unresolved": 0, "leased_skipped": 0,
         }
-    cursor_clause = ""
-    parameters: list[object] = [WORK_PROVENANCE_VERSION]
-    if state["cursor_created_at"] is not None:
-        cursor_clause = "AND (created_at,job_id)>(?,?)"
-        parameters.extend((state["cursor_created_at"], state["cursor_job_id"]))
-    rows = connection.execute(
-        f"""SELECT * FROM news_ai_jobs_v1
-            WHERE task_type IN ('ACTIVE_IMPACT','TITLE_TRANSLATION')
-              AND COALESCE(provenance_version,'')<>? {cursor_clause}
-            ORDER BY created_at,job_id LIMIT ?""",
-        (*parameters, DOWNSTREAM_PROVENANCE_PAGE_SIZE),
-    ).fetchall()
     annotation_migration = connection.execute(
         """SELECT state FROM news_annotation_work_lane_migrations_v1
            WHERE prompt_version=?""",
@@ -3476,6 +3464,31 @@ def _install_downstream_work_provenance(
     parents_complete = bool(
         annotation_migration and str(annotation_migration["state"]) == "COMPLETE"
     )
+    priority_page = False
+    rows: list[sqlite3.Row] = []
+    if parents_complete:
+        rows = connection.execute(
+            """SELECT * FROM news_ai_jobs_v1
+               WHERE task_type IN ('ACTIVE_IMPACT','TITLE_TRANSLATION')
+                 AND state IN ('QUEUED','BACKING_OFF')
+                 AND COALESCE(provenance_version,'')<>?
+               ORDER BY created_at,job_id LIMIT ?""",
+            (WORK_PROVENANCE_VERSION, DOWNSTREAM_PROVENANCE_PAGE_SIZE),
+        ).fetchall()
+        priority_page = bool(rows)
+    cursor_clause = ""
+    parameters: list[object] = [WORK_PROVENANCE_VERSION]
+    if state["cursor_created_at"] is not None:
+        cursor_clause = "AND (created_at,job_id)>(?,?)"
+        parameters.extend((state["cursor_created_at"], state["cursor_job_id"]))
+    if not priority_page:
+        rows = connection.execute(
+            f"""SELECT * FROM news_ai_jobs_v1
+                WHERE task_type IN ('ACTIVE_IMPACT','TITLE_TRANSLATION')
+                  AND COALESCE(provenance_version,'')<>? {cursor_clause}
+                ORDER BY created_at,job_id LIMIT ?""",
+            (*parameters, DOWNSTREAM_PROVENANCE_PAGE_SIZE),
+        ).fetchall()
     resolved = 0
     unresolved = 0
     leased_skipped = 0
@@ -3532,23 +3545,38 @@ def _install_downstream_work_provenance(
             resolved += 1
             finalized += 1
         if rows:
-            last = rows[-1]
-            connection.execute(
-                """UPDATE news_downstream_provenance_migrations_v1
-                   SET cursor_created_at=?,cursor_job_id=?,
-                       processed_count=processed_count+?,
-                       resolved_count=resolved_count+?,
-                       unresolved_count=unresolved_count+?,
-                       leased_skipped_count=leased_skipped_count+?,
-                       state='ACTIVE',updated_at=?
-                   WHERE provenance_version=?""",
-                (
-                    last["created_at"], last["job_id"], finalized, resolved,
-                    unresolved, leased_skipped, timestamp,
-                    WORK_PROVENANCE_VERSION,
-                ),
-            )
-        if len(rows) < DOWNSTREAM_PROVENANCE_PAGE_SIZE:
+            if priority_page:
+                connection.execute(
+                    """UPDATE news_downstream_provenance_migrations_v1
+                       SET processed_count=processed_count+?,
+                           resolved_count=resolved_count+?,
+                           unresolved_count=unresolved_count+?,
+                           leased_skipped_count=leased_skipped_count+?,
+                           state='ACTIVE',updated_at=?
+                       WHERE provenance_version=?""",
+                    (
+                        finalized, resolved, unresolved, leased_skipped,
+                        timestamp, WORK_PROVENANCE_VERSION,
+                    ),
+                )
+            else:
+                last = rows[-1]
+                connection.execute(
+                    """UPDATE news_downstream_provenance_migrations_v1
+                       SET cursor_created_at=?,cursor_job_id=?,
+                           processed_count=processed_count+?,
+                           resolved_count=resolved_count+?,
+                           unresolved_count=unresolved_count+?,
+                           leased_skipped_count=leased_skipped_count+?,
+                           state='ACTIVE',updated_at=?
+                       WHERE provenance_version=?""",
+                    (
+                        last["created_at"], last["job_id"], finalized, resolved,
+                        unresolved, leased_skipped, timestamp,
+                        WORK_PROVENANCE_VERSION,
+                    ),
+                )
+        if not priority_page and len(rows) < DOWNSTREAM_PROVENANCE_PAGE_SIZE:
             remaining = int(connection.execute(
                 """SELECT count(*) FROM news_ai_jobs_v1
                    WHERE task_type IN ('ACTIVE_IMPACT','TITLE_TRANSLATION')
