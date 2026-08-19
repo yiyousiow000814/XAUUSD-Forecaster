@@ -46,6 +46,8 @@ def _dashboard_module():
 def _write_market_session(
     root: Path, *, observed_at: datetime, is_open: bool,
     next_close_time: datetime | None = None,
+    opened_at: datetime | None = None,
+    first_quote_after_open_at: datetime | None = None,
 ) -> None:
     quotes = root / "quotes"
     quotes.mkdir(exist_ok=True)
@@ -61,6 +63,11 @@ def _write_market_session(
         "next_close_time": (
             (next_close_time or observed_at + timedelta(hours=23)).isoformat()
             if is_open else None
+        ),
+        "opened_at": opened_at.isoformat() if opened_at else None,
+        "first_quote_after_open_at": (
+            first_quote_after_open_at.isoformat()
+            if first_quote_after_open_at else None
         ),
     }), encoding="utf-8")
 
@@ -681,6 +688,59 @@ def test_healthy_collector_old_decision_reports_output_stall_not_collector_stale
     assert stalled["scope"] == "decision_output"
     assert stalled["blocking"] is True
     assert stalled["evidence"]["age_seconds"] == 1200
+
+
+def test_broker_reopen_waits_for_first_quote_eligible_grid_before_stall(
+    tmp_path,
+) -> None:
+    reopened_at = datetime(2026, 8, 18, 10, 0, tzinfo=UTC)
+    first_quote = reopened_at + timedelta(seconds=1)
+    immediate = reopened_at + timedelta(seconds=10)
+    eligible_grid = reopened_at + timedelta(minutes=5)
+    stall_after = eligible_grid + timedelta(seconds=120)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=reopened_at - timedelta(hours=1)).close()
+    _append_decision_at(database, reopened_at - timedelta(minutes=20))
+
+    def payload_at(now: datetime) -> dict:
+        _write_market_session(
+            tmp_path,
+            observed_at=now,
+            is_open=True,
+            next_close_time=now + timedelta(hours=1),
+            opened_at=reopened_at,
+            first_quote_after_open_at=first_quote,
+        )
+        _write_quote(tmp_path, received_at=now)
+        _write_collector_heartbeat(tmp_path, last_success=now)
+        return _dashboard_module()._dashboard_payload(
+            database, clock=lambda: now,
+        )
+
+    waiting = payload_at(immediate)
+    waiting_decision = waiting["system"]["components"]["decision_collector"]
+    assert waiting_decision["decision_output_status"] == "NO_RECENT_DECISION"
+    assert waiting_decision["decision_output_eligible_grid"] == (
+        eligible_grid.isoformat()
+    )
+    assert waiting_decision["decision_output_stall_after"] == stall_after.isoformat()
+    assert not any(
+        alert["code"] == "OPS_DECISION_OUTPUT_STALLED"
+        for alert in waiting["operational_health"]["alerts"]
+    )
+
+    grace_boundary = payload_at(stall_after)
+    assert grace_boundary["system"]["components"]["decision_collector"][
+        "decision_output_status"
+    ] == "NO_RECENT_DECISION"
+
+    overdue = payload_at(stall_after + timedelta(seconds=1))
+    overdue_decision = overdue["system"]["components"]["decision_collector"]
+    assert overdue_decision["decision_output_status"] == "STALLED"
+    assert any(
+        alert["code"] == "OPS_DECISION_OUTPUT_STALLED"
+        for alert in overdue["operational_health"]["alerts"]
+    )
 
 
 def test_no_first_decision_stalls_after_forward_epoch_grace(tmp_path) -> None:

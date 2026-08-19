@@ -230,7 +230,11 @@ than 30 minutes away, and the quote is current. Missing or stale market/quote
 evidence cannot establish this incident. Before the first decision, elapsed
 output time starts at the immutable `FORWARD_EPOCH`. A stale or non-running
 collector remains the single incident root and suppresses the derivative
-`OPS_DECISION_OUTPUT_STALLED` alert. At final classification, the dashboard
+`OPS_DECISION_OUTPUT_STALLED` alert. After a broker reopen, the first quote may
+arrive just after the current five-minute boundary. The broker session heartbeat
+therefore records the open epoch and its first received quote; output stall
+timing resumes only at the first causally eligible five-minute grid plus the
+same bounded two-minute scheduling grace. At final classification, the dashboard
 must reopen a current read-only SQLite snapshot for the latest decision time,
 alongside rereading runtime heartbeat, quote, and broker-session evidence, so a
 long build or hot reload cannot report an output stall from an old snapshot.

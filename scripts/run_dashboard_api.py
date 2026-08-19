@@ -38,6 +38,9 @@ COLLECTOR_HEARTBEAT_EXPECTED_SECONDS = 60.0
 COLLECTOR_HEARTBEAT_FAILURE_SECONDS = 300.0
 DECISION_OUTPUT_CADENCE_SECONDS = 300.0
 DECISION_OUTPUT_STALLED_SECONDS = 420.0
+DECISION_OUTPUT_GRACE_SECONDS = (
+    DECISION_OUTPUT_STALLED_SECONDS - DECISION_OUTPUT_CADENCE_SECONDS
+)
 DECISION_HORIZON = timedelta(minutes=30)
 _QUOTE_CANDLE_CACHE_LOCK = threading.Lock()
 _QUOTE_CANDLE_CACHE: dict[str, dict] = {}
@@ -185,6 +188,34 @@ def _decision_collector_component(
     output_age = decision_age
     if output_age is None and observation_started_at is not None:
         output_age = max(0.0, (now - observation_started_at).total_seconds())
+    output_reference = decision_at or observation_started_at
+    eligible_grid = None
+    post_reopen_stall_after = None
+    try:
+        opened_at = datetime.fromisoformat(
+            str(broker_session["opened_at"]).replace("Z", "+00:00")
+        )
+        first_quote_after_open = datetime.fromisoformat(
+            str(broker_session["first_quote_after_open_at"]).replace(
+                "Z", "+00:00"
+            )
+        )
+    except (KeyError, TypeError, ValueError):
+        opened_at = None
+        first_quote_after_open = None
+    if (
+        output_reference is not None
+        and opened_at is not None
+        and first_quote_after_open is not None
+        and output_reference <= opened_at <= first_quote_after_open <= now
+    ):
+        eligible_grid = first_quote_after_open.replace(second=0, microsecond=0)
+        minute_remainder = eligible_grid.minute % 5
+        if minute_remainder or eligible_grid < first_quote_after_open:
+            eligible_grid += timedelta(minutes=5 - minute_remainder)
+        post_reopen_stall_after = eligible_grid + timedelta(
+            seconds=DECISION_OUTPUT_GRACE_SECONDS
+        )
     output_status = (
         "CURRENT"
         if decision_age is not None
@@ -210,7 +241,11 @@ def _decision_collector_component(
             closes_at is not None
             and quote_current
             and output_age is not None
-            and output_age > DECISION_OUTPUT_STALLED_SECONDS
+            and (
+                now > post_reopen_stall_after
+                if post_reopen_stall_after is not None
+                else output_age > DECISION_OUTPUT_STALLED_SECONDS
+            )
             and output_status == "NO_RECENT_DECISION"
         ):
             output_status = "STALLED"
@@ -223,6 +258,13 @@ def _decision_collector_component(
             observation_started_at.isoformat() if observation_started_at else None
         ),
         "decision_output_age_seconds": output_age,
+        "decision_output_eligible_grid": (
+            eligible_grid.isoformat() if eligible_grid else None
+        ),
+        "decision_output_stall_after": (
+            post_reopen_stall_after.isoformat()
+            if post_reopen_stall_after else None
+        ),
         "collector_state": str(heartbeat.get("state") or ""),
         "decision_output_status": output_status,
         "decision_output_reason": output_reason,
@@ -784,12 +826,16 @@ def _broker_market_session(database: Path, now: datetime) -> dict | None:
         age = (now - observed_at).total_seconds()
         if age < -5 or age > 20:
             return None
-        return {
+        session = {
             "is_open": bool(item["is_open"]),
             "observed_at": observed_at.isoformat(),
             "next_open_time": item.get("next_open_time"),
             "next_close_time": item.get("next_close_time"),
         }
+        for field in ("opened_at", "first_quote_after_open_at"):
+            if item.get(field) is not None:
+                session[field] = item[field]
+        return session
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
         return None
 
