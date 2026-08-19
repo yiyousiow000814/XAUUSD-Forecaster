@@ -118,7 +118,7 @@ footer { position:relative; z-index:1; display:flex; justify-content:space-betwe
 .retry-bulk-bar button,.retry-job-control > button,.retry-job-plan button,.retry-confirmation button { min-height:44px; padding:8px 12px; border:1px solid var(--ink); background:transparent; color:var(--ink); font:inherit; font-weight:800; cursor:pointer; }
 .retry-bulk-bar button:disabled,.retry-job-control button:disabled,.retry-confirmation button:disabled { cursor:not-allowed; opacity:.42; }
 .retry-job-list { display:grid; }
-.retry-job-row { display:grid; grid-template-columns:44px minmax(220px,1fr) minmax(160px,200px) minmax(110px,145px) 108px; align-items:center; gap:8px 12px; padding:8px 12px; border-bottom:1px solid rgba(17,17,15,.34); }
+.retry-job-row { position:relative; display:grid; grid-template-columns:44px minmax(220px,1fr) minmax(160px,200px) minmax(110px,145px) 108px; align-items:center; gap:8px 12px; padding:8px 12px; border-bottom:1px solid rgba(17,17,15,.34); }
 .retry-job-row:last-child { border-bottom:0; }
 .retry-job-row.is-expanded { background:rgba(17,17,15,.025); }
 .retry-job-select { align-self:start; align-items:flex-start; justify-content:center; height:44px; padding-top:4px; }
@@ -166,12 +166,12 @@ footer { position:relative; z-index:1; display:flex; justify-content:space-betwe
   .retry-bulk-bar { align-items:center; padding:4px 10px; }
   .retry-bulk-action { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); width:100%; margin-left:0; }
   .retry-bulk-action select,.retry-bulk-action button { width:100%; min-width:0; }
-  .retry-job-row { grid-template-columns:44px minmax(0,1fr) 96px; gap:5px 8px; padding:8px 10px; }
-  .retry-job-identity { grid-column:2 / 4; }
+  .retry-job-row { grid-template-columns:44px minmax(0,1fr); gap:5px 8px; padding:8px 10px; }
+  .retry-job-identity { grid-column:2; padding-right:104px; }
   .retry-job-schedule { grid-column:2; }
   .retry-command-state { grid-column:2; }
-  .retry-job-control { grid-column:3; grid-row:2 / 4; align-self:stretch; }
-  .retry-job-control > button { height:100%; }
+  .retry-job-control { position:absolute; top:8px; right:10px; width:96px; }
+  .retry-job-control > button { height:44px; }
   .retry-job-plan { grid-column:1 / -1; }
   .retry-job-plan > div { grid-template-columns:1fr 1fr; }
   .retry-confirmation { position:relative; bottom:auto; grid-template-columns:1fr; margin:10px; }

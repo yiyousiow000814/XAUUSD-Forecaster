@@ -1219,7 +1219,8 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(css, /\.retry-job-row \{[^}]*grid-template-columns:44px minmax\(220px,1fr\)[^}]*padding:8px 12px/);
   assert.match(css, /\.retry-job-plan \{[^}]*grid-column:2 \/ -1/);
   assert.match(css, /\.retry-job-plan > div \{[^}]*grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
-  assert.match(css, /@media \(max-width: 720px\)[\s\S]*\.retry-job-row \{ grid-template-columns:44px minmax\(0,1fr\) 96px/);
+  assert.match(css, /@media \(max-width: 720px\)[\s\S]*\.retry-job-row \{ grid-template-columns:44px minmax\(0,1fr\)/);
+  assert.match(css, /@media \(max-width: 720px\)[\s\S]*\.retry-job-control \{ position:absolute; top:8px; right:10px; width:96px/);
   assert.match(css, /@media \(max-width: 720px\)[\s\S]*\.retry-job-plan > div \{ grid-template-columns:1fr 1fr/);
   assert.match(layout, /<OperationalAlertBanner \/>/);
   const banner = readFileSync(new URL("../app/_components/OperationalAlertBanner.tsx", import.meta.url), "utf8");
