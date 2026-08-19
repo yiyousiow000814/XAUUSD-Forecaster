@@ -18,6 +18,7 @@ import {
   operatorRetryCommandPresentation,
   shouldPollOperatorRetry,
   shouldPollOperatorRetryRequests,
+  summarizeOperatorRetryQueue,
 } from "../app/_lib/operator-retry-client.ts";
 
 test("operator retry inputs use explicit durable modes and bounded identity", () => {
@@ -212,4 +213,20 @@ test("mixed jobs retain their own latest command presentation", () => {
   assert.match(operatorRetryCommandPresentation(latest.get(jobA)).label, /等待 Windows/);
   assert.equal(latest.get(jobB).request_id, "b-new");
   assert.match(operatorRetryCommandPresentation(latest.get(jobB)).label, /已应用到 Windows/);
+});
+
+test("Admin overview and Retry queue share one authoritative summary contract", () => {
+  const jobs = [job("a"), { ...job("b"), override_mode: "DELAY_1_HOUR" }];
+  const requests = [{
+    request_id: "pending", job_id: jobs[0].job_id, mode: "IMMEDIATE",
+    requested_at: "2026-08-19T03:00:00.000Z", completed_at: null,
+    status: "PENDING", result_json: null,
+  }, {
+    request_id: "conflict", job_id: jobs[1].job_id, mode: "CUSTOM_TIME",
+    requested_at: "2026-08-19T02:59:00.000Z", completed_at: "2026-08-19T03:00:00.000Z",
+    status: "CONFLICT", result_json: null,
+  }];
+  assert.deepEqual(summarizeOperatorRetryQueue(jobs, requests), {
+    total: 2, waiting: 2, overridden: 1, applying: 1, conflict: 1,
+  });
 });

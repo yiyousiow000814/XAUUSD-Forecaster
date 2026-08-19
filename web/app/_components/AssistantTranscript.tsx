@@ -252,7 +252,7 @@ export default function AssistantTranscript({
       </div> : null}
       {error ? <div className="assistant-chat-error" role="alert">
         <span>{error}</span>{accessLoginRequired
-          ? <a href="/assistant">完成 Access 登录</a>
+          ? <a href="/admin">返回管理员登录</a>
           : <button onClick={onRetry} type="button">重新连接</button>}
       </div> : null}
     </div>

@@ -117,7 +117,7 @@ function QuotaPanel({ title, eyebrow, quota, nowMs }: { title: string; eyebrow: 
 }
 
 export default function StatusView({ initialPayload }: { initialPayload?: StatusPayload }) {
-  const cachedStatus = initialPayload ?? readDashboardResource<StatusPayload>("/api/status");
+  const cachedStatus = initialPayload ?? readDashboardResource<StatusPayload>("/api/admin-status");
   const [payload, setPayload] = useState<StatusPayload | null>(() => cachedStatus);
   const [error, setError] = useState<string | null>(null);
   const [syncingCurrent, setSyncingCurrent] = useState(Boolean(cachedStatus?.preview_status_summary));
@@ -126,7 +126,7 @@ export default function StatusView({ initialPayload }: { initialPayload?: Status
   const refresh = useCallback(async (force = false, showSyncState = false) => {
     if (showSyncState) setSyncingCurrent(true);
     try {
-      setPayload(await loadDashboardResource<StatusPayload>("/api/status", { force }));
+      setPayload(await loadDashboardResource<StatusPayload>("/api/admin-status", { force }));
       setError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "状态读取失败");
@@ -141,7 +141,7 @@ export default function StatusView({ initialPayload }: { initialPayload?: Status
       () => void refresh(true, Boolean(payload?.preview_status_summary)),
       DASHBOARD_REFRESH_INTERVALS.status,
       "current",
-      "status",
+      "admin-status",
     );
   }, [refresh, payload?.preview_status_summary]);
 

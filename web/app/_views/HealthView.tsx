@@ -8,7 +8,7 @@ import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/d
 import { operationalEvidenceText } from "../_lib/operational-evidence";
 import { operationalEventDiagnostic, operationalIncidentActionLabels, operationalIncidentNextRetryAt, operationalIncidentsNextRetryAt, operationalScopeLabel, operationalSummaryDetails } from "../_lib/operational-incident-presentation";
 import { affectedOperationalScopeCount, correlateOperationalEvents, type OperationalIncident } from "../_lib/operational-incidents";
-import { normalizeOperationalEvent, schedulerTaskLabel, type AssistantOperationalHealth, type OperationalAlert, type OperationalHealth } from "../_lib/operational-health";
+import { schedulerTaskLabel, type OperationalHealth } from "../_lib/operational-health";
 import { sourceHealthErrorPresentation } from "../_lib/source-health-presentation";
 import { componentAggregate, operatorComponentScanState, primaryOperatorAction, sortAttentionFirst, sourceAggregate, sourceScanState, type ScanState } from "../_lib/health-scan-presentation";
 
@@ -210,10 +210,7 @@ function ComponentHealthCard({
 
 export default function HealthView({ initialPayload }: { initialPayload?: StatusPayload }) {
   const cachedStatus = initialPayload ?? readDashboardResource<StatusPayload>("/api/status");
-  const cachedAssistantHealth = readDashboardResource<AssistantOperationalHealth>("/api/assistant-health");
   const [payload, setPayload] = useState<StatusPayload | null>(() => cachedStatus);
-  const [assistantHealth, setAssistantHealth] = useState<AssistantOperationalHealth | null>(() => cachedAssistantHealth);
-  const [assistantHealthError, setAssistantHealthError] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [syncingCurrent, setSyncingCurrent] = useState(Boolean(cachedStatus?.preview_status_summary));
   const refresh = useCallback(async (force = false, showSyncState = false) => {
@@ -227,15 +224,6 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
       if (showSyncState) setSyncingCurrent(false);
     }
   }, []);
-  const refreshAssistantHealth = useCallback(async (force = false) => {
-    try {
-      setAssistantHealth(await loadDashboardResource<AssistantOperationalHealth>("/api/assistant-health", { force }));
-      setAssistantHealthError(false);
-    } catch {
-      setAssistantHealthError(true);
-    }
-  }, []);
-
   useEffect(() => {
     return scheduleDashboardRefresh(
       () => void refresh(Boolean(payload?.preview_status_summary), Boolean(payload?.preview_status_summary)),
@@ -245,24 +233,9 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
       "status",
     );
   }, [refresh, payload?.preview_status_summary]);
-  useEffect(() => scheduleDashboardRefresh(
-    () => void refreshAssistantHealth(false),
-    () => void refreshAssistantHealth(true),
-    DASHBOARD_REFRESH_INTERVALS.status,
-    "current",
-    "assistant-health",
-  ), [refreshAssistantHealth]);
-
   const currentPhase: CurrentDataPhase = error
     ? "error" : !payload || syncingCurrent ? "loading" : payload.preview_status_summary ? "snapshot" : "ready";
-  const assistantUnavailableEvent: OperationalAlert = normalizeOperationalEvent({
-    code: "OPS_ASSISTANT_HEALTH_UNAVAILABLE", severity: "ERROR", scope: "ASSISTANT_D1",
-    message_zh: "Assistant 云端运行状态无法读取。", blocking: true, evidence: {},
-  });
-  const operationalEvents = [
-    ...(payload?.operational_health?.alerts ?? []),
-    ...(assistantHealthError ? [assistantUnavailableEvent] : assistantHealth?.current ? assistantHealth.alerts : []),
-  ];
+  const operationalEvents = payload?.operational_health?.alerts ?? [];
   const incidents = correlateOperationalEvents(operationalEvents);
   const components = sortAttentionFirst(Object.entries(payload?.system.components ?? {}).map(([name, item]) => {
     const incident = incidentForScope(incidents, name);
@@ -323,27 +296,6 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
               </dl>
               {task.failure_codes_15m.length ? <p className="scheduler-failure-codes">{task.failure_codes_15m.map(item => <code key={item.code}>{item.code} × {item.count}</code>)}</p> : null}
               {(task.capacity_dimensions_15m ?? []).length ? <p className="scheduler-failure-codes">{task.capacity_dimensions_15m?.map(item => <code key={item.dimension}>LOCAL_{item.dimension}_LIMIT × {item.count}</code>)}</p> : null}
-            </article>)}
-            </div>
-          </section>
-          <section id="assistant-operational-alerts" aria-labelledby="assistant-queue-title">
-            <header><div><p className="eyebrow">ASSISTANT D1</p><h3 id="assistant-queue-title">Assistant 云端队列</h3></div><p>与本机 SQLite 分离的队列证据。</p></header>
-            <p className="technical-boundary-note">本机 SQLite 与 Assistant D1 保持独立执行面；这里只统一分类和展示。{assistantHealth?.current === false ? " PR Preview 不把生产 D1 告警伪装成分支实时状态。" : ""}</p>
-            <div className="scheduler-health-grid">
-            {(assistantHealth?.queues ?? []).map(queue => <article key={queue.queue}>
-              <header><strong>{queue.label}</strong><code>{queue.queue}</code></header>
-              <dl>
-                <div><dt>排队</dt><dd>{queue.queued}</dd></div>
-                <div><dt>处理中</dt><dd>{queue.processing}</dd></div>
-                <div><dt>可立即处理</dt><dd>{queue.claimable}</dd></div>
-                <div><dt>定时重试</dt><dd>{queue.scheduled_retry}</dd></div>
-                <div><dt>15分钟完成</dt><dd>{queue.completed_15m}</dd></div>
-                <div><dt>终止失败</dt><dd>{queue.failed_15m}</dd></div>
-                <div><dt>容量等待</dt><dd>{queue.capacity_deferred}</dd></div>
-                <div><dt>最旧可处理</dt><dd>{compactElapsed(queue.oldest_age_seconds)}</dd></div>
-                <div><dt>最高尝试</dt><dd>{queue.max_attempt_count}</dd></div>
-              </dl>
-              {queue.failure_codes.length ? <p className="scheduler-failure-codes">{queue.failure_codes.map(item => <code key={item.code}>{item.code} × {item.count}</code>)}</p> : null}
             </article>)}
             </div>
           </section>

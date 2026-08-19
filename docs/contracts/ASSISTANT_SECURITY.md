@@ -3,8 +3,9 @@
 ## Purpose
 
 This contract defines one reusable human Dashboard Operator boundary and
-separates it from public research reads and machine synchronization. Assistant
-and System mutations do not own separate login systems. It supplements
+separates it from public research reads and machine synchronization. Assistant,
+Retry Jobs, AI Model Usage, and future Admin tools do not own separate login
+systems. It supplements
 [`HOSTING_BOUNDARIES.md`](HOSTING_BOUNDARIES.md) and
 [`PREVIEW_ISOLATION.md`](PREVIEW_ISOLATION.md).
 
@@ -24,12 +25,13 @@ include credentials, lease tokens, provider requests, or operator audit rows.
 
 ### Private Dashboard Operator
 
-Cloudflare Access establishes one browser session for every privileged human
-Dashboard surface. Assistant conversation routes, News Q&A, and System retry
+Cloudflare Access establishes one browser session for the complete Admin
+Console. Assistant conversation routes, News Q&A, Admin status, Assistant
+health, and retry
 reads or mutations all call the same server-side verifier and produce the same
-stable `cloudflare-access:<subject>` actor. A login initiated from either
-Assistant or System therefore authorizes the other section without another
-application login. Future privileged human tools must reuse this boundary.
+stable `cloudflare-access:<subject>` actor. One explicit login at `/admin`
+therefore authorizes every Admin destination without another application
+login. Future privileged human tools must reuse this boundary.
 
 Identity is not permission by itself. Every request validates the Access
 application JWT and then applies the configured owner allowlist. Only `OWNER`
@@ -85,12 +87,20 @@ owner allowlist. Missing or malformed configuration fails closed;
 it does not fall back to an anonymous queue, a browser credential, or the
 machine ingest token.
 
-The shared Access application protects `/assistant`, `/retry-jobs`,
+The shared Access application protects `/admin`, `/admin/*`,
+the compatibility entries `/assistant`, `/retry-jobs`, and `/status`,
+`/api/admin-status`, `/api/assistant-health`,
 `/api/assistant-chat`, `/api/assistant-conversations`, and
 `/api/news-questions`. Those application paths, plus `/api/operator-retry`, are
 the human boundary. `/api/assistant-worker/*` is deliberately outside
 the Access application because it has no browser identity and is authorized by
 the independent machine policy below.
+
+The public login trigger is only an intent and explanation layer. It cannot
+establish identity or authorization. Its explicit login action performs a
+normal navigation to `/admin` so Cloudflare Access owns the authentication
+handoff. Client state, hidden navigation, and route selection never bypass the
+server-side verifier.
 
 ### Local operator bridge
 

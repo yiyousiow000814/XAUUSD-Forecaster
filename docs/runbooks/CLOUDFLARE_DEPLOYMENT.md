@@ -22,8 +22,13 @@ new-generation jobs to an unversioned old claimant must not be applied.
 Configure one Cloudflare Access self-hosted application for these production
 human paths only:
 
-- `/assistant`
-- `/retry-jobs`
+- `/admin`
+- `/admin/*`
+- `/assistant` (compatibility redirect)
+- `/retry-jobs` (compatibility redirect)
+- `/status` (compatibility redirect)
+- `/api/admin-status`
+- `/api/assistant-health`
 - `/api/assistant-chat`
 - `/api/assistant-conversations`
 - `/api/news-questions`
@@ -33,10 +38,11 @@ Allow only the configured owner identity and set `CF_ACCESS_TEAM_DOMAIN`,
 `CF_ACCESS_AUD`, and at least one of
 `DASHBOARD_OPERATOR_OWNER_SUBJECTS` or `DASHBOARD_OPERATOR_OWNER_EMAILS` to
 match that application. Keep the Access cookie path restriction disabled so
-Assistant and System API paths share one application session. If Google is the
+all Admin pages and human API paths share one application session. If Google is the
 chosen identity provider, enable it on this same application and optionally use
 instant authentication; the owner allowlist remains mandatory authorization.
-Do not create a retry-specific Access application or login state.
+Do not create Assistant-, retry-, or usage-specific Access applications or
+login state.
 
 Do not add `/api/assistant-worker/*` or `/api/operator-retry-worker` to the
 Access application. The Windows synchronizer reaches those separate machine
@@ -60,7 +66,7 @@ receive the current user-level environment.
 ## Operator retry production cutover
 
 1. Verify the shared Access application paths, IdP, audience, and owner-only
-   allowlist without removing the existing Assistant path.
+   allowlist without removing the Admin and compatibility paths.
 2. Set the new `DASHBOARD_OPERATOR_OWNER_*` secret(s). Legacy
    `ASSISTANT_OWNER_*` values may remain during one cutover but do not broaden a
    configured shared allowlist.
@@ -70,7 +76,7 @@ receive the current user-level environment.
 5. Configure `DASHBOARD_OPERATOR_BRIDGE_TOKEN`, then restart both the local
    Dashboard API and `Dashboard Mirrors`.
 6. Verify anonymous Dashboard reads still work, anonymous privileged reads and
-   writes fail, one Access login works across Assistant and System, the machine
+   writes fail, one Access login works across every Admin destination, the machine
    route rejects human credentials, and the localhost bridge rejects missing or
    wrong credentials.
 7. Submit one bounded safe retry command and observe `PENDING` -> `APPLYING` ->

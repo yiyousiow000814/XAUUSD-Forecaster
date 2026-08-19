@@ -37,9 +37,9 @@ that a visible line is continuous after cascade and responsive overrides.
 
 ## Operational incident hierarchy
 
-- The Health page combines normalized local and current Assistant events into
-  one incident summary. Preview must not present production Assistant D1 events
-  as branch-current evidence.
+- The public Health page summarizes the bounded public operational event set.
+  It does not fetch private Assistant D1 health or Admin evidence. Preview must
+  not present production Assistant D1 events as branch-current evidence.
 - Incident cards lead with a human title, action state, root-cause summary,
   bounded metrics, and affected components. Raw codes and evidence remain
   reachable through a `查看技术详情` disclosure instead of leading the layout.
@@ -55,9 +55,9 @@ that a visible line is continuous after cascade and responsive overrides.
   widths and one column on phones. Human roles, exact local timestamps, raw
   identifiers/status, errors, transport copy, and evidence counts remain
   reachable through per-record details instead of expanding every healthy row.
-- Local scheduler and Assistant D1 queue grids remain separate subsections in
-  one secondary `调度器与技术状态` disclosure. Unified presentation does not
-  merge their execution or storage planes.
+- Public local scheduler evidence remains in the secondary
+  `调度器与技术状态` disclosure. Private Assistant D1 queue evidence belongs
+  in Admin and is never fetched to render public Health.
 - Technical disclosure controls have a minimum 44 CSS-pixel target and expose
   native keyboard and `aria-expanded` state. Cards and technical evidence must
   not cause horizontal overflow at desktop, 390x844, or 360x800.
@@ -94,9 +94,11 @@ part of it.
 1. The canonical product brand is `AU`, `AURUM SIGNAL ROOM`, and
    `XAUUSD · Forward-only intelligence`. It is identical on every top-level
    View and links to the realtime room.
-2. The canonical global destination order is `总览`, `新闻与决策`,
-   `Assistant`, and `系统`. Their stable entry routes are `/`,
-   `/audit?view=news`, `/assistant`, and `/health` respectively.
+2. The public global destination order is `总览`, `新闻与决策`, `系统`, and
+   `管理员登录`. The first three stable entry routes are `/`,
+   `/audit?view=news`, and `/health`. `管理员登录` first opens a local
+   explanation dialog; only its explicit Google login action performs a normal
+   browser navigation to the Access-protected `/admin` route.
 3. Desktop and mobile navigation derive labels, order, routes, and active
    grouping from the same typed global destination definition. Mobile must not
    maintain a parallel product taxonomy.
@@ -106,10 +108,11 @@ part of it.
 5. Page identity belongs inside page content. A System or Audit page heading
    must not replace the product identity in the global header.
 6. Section navigation is subordinate to global navigation. Audit tabs remain
-   inside Audit. System exposes `系统健康` (`/health`), `重试任务`
-   (`/retry-jobs`), and `AI 模型用量` (`/status`) through one shared secondary
-   navigation while all three routes keep the top-level `系统` destination
-   active.
+   inside Audit. Public System contains only System Health and therefore has no
+   redundant one-item secondary navigation. Admin owns one shared secondary
+   destination model: overview (`/admin`), Assistant (`/admin/assistant`),
+   Retry Jobs (`/admin/retry-jobs`), and AI Model Usage
+   (`/admin/ai-usage`).
 7. Global destination labels and order are product contracts. A back-style
    action such as `返回实时室` is not a global destination.
 8. The global system-state indicator has one shell-owned location and consumes
@@ -119,8 +122,9 @@ part of it.
    shell-level structure instead of extending its owner is design drift.
 10. Deterministic source and rendered-route contracts must prevent design
     drift; human review and memory are not sufficient enforcement.
-11. `重试任务` is a dedicated privileged System workspace. System Health does
-    not render or anonymously fetch the retry queue. The retry workspace shows
+11. `重试任务` is a dedicated privileged Admin workspace. System Health does
+    not render or anonymously fetch the retry queue or Assistant health state.
+    The retry workspace shows
     human-readable task context, state, failure, attempt count, current UTC+8
     schedule, and automatic-versus-operator provenance. Technical job IDs
     remain visually secondary. Desktop, 390x844, and 360x800 layouts keep every
@@ -139,6 +143,9 @@ part of it.
     original is offered only when an active override exists. `IDLE_CAPACITY`
     copy describes yielding within the scheduler pool for 30 minutes; it never
     claims to sense machine, CPU, or provider idleness.
+14. Public status responses exclude provider quota ledgers and routing fields.
+    The full AI-usage payload is read only from the owner-authenticated Admin
+    endpoint. Hiding Admin navigation is presentation, never authorization.
 
 ## OOS chart windows
 

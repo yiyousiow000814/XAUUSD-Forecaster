@@ -87,6 +87,12 @@ A Preview may render explicitly labeled synthetic Assistant fixtures or an
 immutable build snapshot for presentation review. Such output is not a live
 conversation and does not verify the model, retrieval, or persistence path.
 
+The Admin Console may render as an explicitly labeled synthetic, read-only
+Preview workspace without claiming that Cloudflare Access authentication
+succeeded. `/api/admin-status` uses only the branch-owned fixture in Preview;
+it does not read production D1 quota evidence. Public `/api/status` omits the
+private provider quota and routing fields in every deployment mode.
+
 The responsive Assistant workbench may install its branch-owned fixture only
 after the Preview API returns the labeled synthetic-empty Assistant state. The
 fixture remains visibly labeled, never enters an API request, and may be used

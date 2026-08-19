@@ -1,11 +1,12 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
 import { assistantOperationalHealth } from "../_shared/assistant-operational-health";
+import { authenticateDashboardOperatorRequest } from "../_shared/dashboard-operator-auth";
 import { isPreviewDeployment, previewJson } from "../_shared/preview";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(request: Request) {
   if (isPreviewDeployment) {
     return previewJson({
       schema_version: "assistant-operational-health.v1",
@@ -16,6 +17,10 @@ export async function GET() {
       current: false,
     });
   }
+  const actor = await authenticateDashboardOperatorRequest(request, env);
+  if (!actor) return NextResponse.json({ error: "操作员身份验证失败" }, {
+    status: 401, headers: { "Cache-Control": "private, no-store, max-age=0" },
+  });
   const binding = env.DB as D1Database | undefined;
   if (!binding) {
     return NextResponse.json({

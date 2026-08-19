@@ -7,9 +7,10 @@ import {
 import { useDashboardNavigation } from "./DashboardNavigation";
 
 export default function MobileDashboardNav({
-  activeDestination,
+  activeDestination, openAdminLogin,
 }: {
   activeDestination: DashboardGlobalDestinationId;
+  openAdminLogin: () => void;
 }) {
   const navigation = useDashboardNavigation();
   const currentHref = DASHBOARD_GLOBAL_DESTINATIONS.find(
@@ -24,12 +25,21 @@ export default function MobileDashboardNav({
         value={currentHref}
         onChange={event => {
           const href = event.currentTarget.value;
+          const destination = DASHBOARD_GLOBAL_DESTINATIONS.find(item => item.href === href);
+          if (destination?.private && activeDestination !== "admin") {
+            openAdminLogin();
+            event.currentTarget.value = currentHref;
+            return;
+          }
           if (navigation) void navigation.navigate(href);
           else window.location.assign(href);
         }}
       >
         {DASHBOARD_GLOBAL_DESTINATIONS.map(destination => (
-          <option key={destination.id} value={destination.href}>{destination.label}</option>
+          <option key={destination.id} value={destination.href}>
+            {destination.id === activeDestination && destination.authenticatedLabel
+              ? destination.authenticatedLabel : destination.label}
+          </option>
         ))}
       </select>
     </label>

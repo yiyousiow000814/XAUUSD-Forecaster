@@ -3,18 +3,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   latestOperatorRetryRequests,
+  operatorRetryPreviewJobs,
+  operatorRetryPreviewRequests,
   operatorRetryCommandPresentation,
   shouldPollOperatorRetryRequests,
+  summarizeOperatorRetryQueue,
+  type OperatorRetryJob,
   type OperatorRetryRequest,
 } from "../_lib/operator-retry-client";
 
 type RetryMode = "KEEP_ORIGINAL" | "IMMEDIATE" | "DELAY_15_MIN" | "DELAY_1_HOUR" | "IDLE_CAPACITY" | "CUSTOM_TIME";
-type RetryJob = {
-  job_id: string; task_type: string; title: string; state: string; priority: string;
-  available_at: string; attempt_count: number; last_error: string | null;
-  last_failure_at: string | null; lease_expires_at: string | null;
-  override_mode: RetryMode | null; original_available_at: string;
-};
+type RetryJob = OperatorRetryJob & { override_mode: RetryMode | null };
 
 const actions: Array<{ mode: RetryMode; label: string; help: string }> = [
   { mode: "IMMEDIATE", label: "立即可领取", help: "立即进入可领取状态，仍受配额与 scheduler 控制。" },
@@ -29,35 +28,6 @@ const taskLabels: Record<string, string> = {
   ACTIVE_IMPACT: "影响评估",
   TITLE_TRANSLATION: "标题翻译",
 };
-const previewJobs: RetryJob[] = [{
-  job_id: "a".repeat(64), task_type: "ACTIVE_IMPACT", title: "黄金重新成为货币抵押品的市场讨论",
-  state: "BACKING_OFF", priority: "NORMAL", available_at: "2026-08-19T06:47:00.000Z",
-  attempt_count: 3, last_error: "ConnectionResetError", last_failure_at: "2026-08-19T00:46:00.000Z",
-  lease_expires_at: null, override_mode: null, original_available_at: "2026-08-19T06:47:00.000Z",
-}, {
-  job_id: "b".repeat(64), task_type: "ACTIVE_ANNOTATION", title: "美联储官员就通胀路径发表最新讲话",
-  state: "BACKING_OFF", priority: "FAST", available_at: "2026-08-19T04:05:00.000Z",
-  attempt_count: 2, last_error: "MODEL_OUTPUT_CONTRACT_FAILED", last_failure_at: "2026-08-19T00:51:00.000Z",
-  lease_expires_at: null, override_mode: "DELAY_1_HOUR", original_available_at: "2026-08-19T06:58:00.000Z",
-}, {
-  job_id: "c".repeat(64), task_type: "TITLE_TRANSLATION", title: "央行储备资产配置讨论",
-  state: "QUEUED", priority: "NORMAL", available_at: "2026-08-19T05:15:00.000Z",
-  attempt_count: 1, last_error: "UPSTREAM_TEMPORARILY_UNAVAILABLE", last_failure_at: "2026-08-19T01:02:00.000Z",
-  lease_expires_at: null, override_mode: null, original_available_at: "2026-08-19T05:15:00.000Z",
-}];
-const previewRequests: OperatorRetryRequest[] = [{
-  request_id: "preview-pending", job_id: "a".repeat(64), mode: "IMMEDIATE",
-  requested_at: "2026-08-19T03:05:00.000Z", completed_at: null,
-  status: "PENDING", result_json: null,
-}, {
-  request_id: "preview-applied", job_id: "b".repeat(64), mode: "DELAY_1_HOUR",
-  requested_at: "2026-08-19T03:04:00.000Z", completed_at: "2026-08-19T03:04:03.000Z",
-  status: "APPLIED", result_json: JSON.stringify({ current: { state: "BACKING_OFF" } }),
-}, {
-  request_id: "preview-conflict", job_id: "c".repeat(64), mode: "CUSTOM_TIME",
-  requested_at: "2026-08-19T03:03:00.000Z", completed_at: "2026-08-19T03:03:02.000Z",
-  status: "CONFLICT", result_json: JSON.stringify({ code: "JOB_STATE_CHANGED" }),
-}];
 
 const localTime = (value: string | null) => value
   ? new Date(value).toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Kuala_Lumpur" })
@@ -104,8 +74,8 @@ export default function RetryQueue() {
       const payload = await response.json() as {
         items?: RetryJob[]; requests?: OperatorRetryRequest[]; preview?: boolean;
       };
-      setJobs(payload.preview ? previewJobs : payload.items ?? []);
-      setRequests(payload.preview ? previewRequests : payload.requests ?? []);
+      setJobs(payload.preview ? operatorRetryPreviewJobs as RetryJob[] : payload.items ?? []);
+      setRequests(payload.preview ? operatorRetryPreviewRequests : payload.requests ?? []);
       setPreview(Boolean(payload.preview));
       setAuthRequired(false);
       if (clearMessage) setMessage(null);
@@ -119,16 +89,7 @@ export default function RetryQueue() {
   }, [load]);
 
   const latestRequests = useMemo(() => latestOperatorRetryRequests(requests), [requests]);
-  const summary = useMemo(() => {
-    const commands = [...latestRequests.values()];
-    return {
-      total: jobs.length,
-      waiting: jobs.filter(job => job.state === "BACKING_OFF").length,
-      overridden: jobs.filter(job => Boolean(job.override_mode)).length,
-      applying: commands.filter(request => request.status === "PENDING" || request.status === "APPLYING").length,
-      conflict: commands.filter(request => request.status === "CONFLICT").length,
-    };
-  }, [jobs, latestRequests]);
+  const summary = useMemo(() => summarizeOperatorRetryQueue(jobs, requests), [jobs, requests]);
   useEffect(() => {
     if (preview || !shouldPollOperatorRetryRequests(requests)) return;
     const timer = window.setTimeout(() => void load(false), 1_500);
@@ -184,7 +145,7 @@ export default function RetryQueue() {
     </header>
     {preview ? <p className="retry-queue-notice">PR Preview 使用合成演示任务，仅用于检查界面与交互，不连接或修改生产调度器。</p> : null}
     {message ? <p className="retry-queue-notice" role="status">{message}</p> : null}
-    {authRequired ? <p className="retry-queue-notice"><a href="/retry-jobs">使用共享 Dashboard Operator 登录</a>。登录一次后，Assistant 与重试任务共用同一 Access 会话。</p> : null}
+    {authRequired ? <p className="retry-queue-notice"><a href="/admin">返回管理员登录</a>。登录一次后，全部 Admin 工具共用同一 Access 会话。</p> : null}
     <div className={`retry-bulk-bar ${selected.size ? "is-active" : ""}`}>
       <label className="retry-checkbox-target"><input type="checkbox" aria-label="选择全部可调整任务" checked={eligible.length > 0 && selected.size === eligible.length} onChange={event => setSelected(event.target.checked ? new Set(eligible.map(job => job.job_id)) : new Set())} /><span>选择全部可调整任务</span></label>
       <strong>{selected.size ? `已选 ${selected.size} 个` : "选择任务后可批量调整"}</strong>

@@ -114,14 +114,16 @@ npm run cf:deploy
 ```
 
 One Cloudflare Access application and at least one matching Dashboard Operator
-owner subject or email must be configured before Assistant or System mutation
-routes are enabled. Both owner allowlist names remain explicit runtime
+owner subject or email must be configured before the Admin Console or its human
+APIs are enabled. Both owner allowlist names remain explicit runtime
 contracts; set an unused allowlist to a
 non-matching sentinel value rather than placing owner identity in source. These
 production-only values are intentionally not `secrets.required`: branch Preview
 versions have no model authority and must remain deployable without them.
 
-Protect `/assistant`, `/retry-jobs`, `/api/assistant-chat`,
+Protect `/admin`, `/admin/*`, the compatibility routes `/assistant`,
+`/retry-jobs`, and `/status`, plus `/api/admin-status`,
+`/api/assistant-health`, `/api/assistant-chat`,
 `/api/assistant-conversations`, `/api/news-questions`, and
 `/api/operator-retry` with one Access application.
 Keep `/api/assistant-worker/*` and `/api/operator-retry-worker` outside that

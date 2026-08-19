@@ -14,10 +14,12 @@ also needs credentials that must not become human session authority.
 ## Decision
 
 Require one verified Dashboard Operator identity and owner authorization on
-every privileged human endpoint. Assistant and System retry controls reuse the
-same Cloudflare Access application session, JWT verifier, stable actor identity,
+every privileged human endpoint. The Admin Console, Assistant, Retry Jobs, and
+AI Model Usage reuse the same Cloudflare Access application session, JWT verifier, stable actor identity,
 and owner allowlist. Prefer hosting-provided edge identity over a custom
-password or section-specific session system.
+password or tool-specific session system. Public navigation opens a local
+explanation before an explicit normal navigation to the Access-protected Admin
+entry; that presentation step never grants authority.
 
 Use a separate machine/service identity for synchronization. Persist a stable
 Forecaster `actor_id`; email is an attribute, not ownership. The initial role
