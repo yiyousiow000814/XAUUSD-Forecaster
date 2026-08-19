@@ -149,6 +149,12 @@ ignored, so the configuration can be staged before the new runtime. Without
 that bounded migration, legacy inputs deliberately cut over to visibly
 versioned `legacy-hmac-v1-*` accounts instead of silently claiming old identity.
 
+Pre-scheduler JSON quota ledgers recognize the retired SHA-256 identifier only
+as a bounded migration lookup. On the first `reserve`, `seed`, or `snapshot`,
+the ledger takes the maximum of the legacy and canonical counts, removes the
+legacy key, and atomically replaces the file with the canonical HMAC identity.
+Counts are never added, so migration cannot reset or double-count daily usage.
+
 Every provider request reserves durable quota before transport. These counters
 represent conservative local admission, not provider-confirmed success. The
 request lifecycle separately records provider transport, success, throttle or

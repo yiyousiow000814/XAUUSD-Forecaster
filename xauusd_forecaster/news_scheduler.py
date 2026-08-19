@@ -712,7 +712,7 @@ def _credential_id(api_key: str) -> str:
 
 
 def _contains_raw_key(identifier: str, api_key: str) -> bool:
-    return identifier == api_key or (len(api_key) >= 8 and api_key in identifier)
+    return api_key in identifier
 
 
 def _runtime_environment_value(name: str) -> str:
@@ -775,23 +775,36 @@ def configured_api_credentials(
             for key in keys if key.strip()
         ]
 
+    normalized_entries: list[tuple[dict[str, object], tuple[str, ...]]] = []
+    configured_keys: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("each Gemini account must be an object")
+        raw_keys = entry.get("api_keys")
+        if not isinstance(raw_keys, list) or not raw_keys:
+            raise ValueError("Gemini account api_keys must be a non-empty list")
+        normalized_keys = tuple(str(raw_key or "").strip() for raw_key in raw_keys)
+        if any(not key for key in normalized_keys):
+            raise ValueError("Gemini account contains an empty API key")
+        normalized_entries.append((entry, normalized_keys))
+        configured_keys.extend(
+            key for key in normalized_keys if key not in configured_keys
+        )
+
     credentials: list[ApiCredential] = []
     account_pools: dict[str, str] = {}
     key_accounts: dict[str, str] = {}
     credential_id_keys: dict[str, str] = {}
-    for entry in entries:
-        if not isinstance(entry, dict):
-            raise ValueError("each Gemini account must be an object")
+    for entry, api_keys in normalized_entries:
         account_id = str(entry.get("account_id") or "").strip()
         pool = str(entry.get("pool") or "").strip().upper()
-        api_keys = entry.get("api_keys")
         credential_ids = entry.get("credential_ids")
         if not account_id:
             raise ValueError("Gemini account_id is required")
+        if any(_contains_raw_key(account_id, key) for key in configured_keys):
+            raise ValueError("Gemini account_id must not contain an API key")
         if pool not in {ROUTINE_POOL, PREEMPTIBLE_POOL}:
             raise ValueError("Gemini account pool is not controlled")
-        if not isinstance(api_keys, list) or not api_keys:
-            raise ValueError("Gemini account api_keys must be a non-empty list")
         if credential_ids is not None and (
             not isinstance(credential_ids, list)
             or len(credential_ids) != len(api_keys)
@@ -802,12 +815,7 @@ def configured_api_credentials(
         prior_pool = account_pools.setdefault(account_id, pool)
         if prior_pool != pool:
             raise ValueError("one Gemini account cannot belong to two pools")
-        for key_index, raw_key in enumerate(api_keys):
-            api_key = str(raw_key or "").strip()
-            if not api_key:
-                raise ValueError("Gemini account contains an empty API key")
-            if _contains_raw_key(account_id, api_key):
-                raise ValueError("Gemini account_id must not contain an API key")
+        for key_index, api_key in enumerate(api_keys):
             prior_account = key_accounts.setdefault(api_key, account_id)
             if prior_account != account_id:
                 raise ValueError("one Gemini API key cannot belong to two accounts")
@@ -816,7 +824,10 @@ def configured_api_credentials(
                 credential_id = str(credential_ids[key_index] or "").strip()
                 if not credential_id:
                     raise ValueError("Gemini credential_id is required")
-                if _contains_raw_key(credential_id, api_key):
+                if any(
+                    _contains_raw_key(credential_id, key)
+                    for key in configured_keys
+                ):
                     raise ValueError(
                         "Gemini credential_id must not contain an API key"
                     )
