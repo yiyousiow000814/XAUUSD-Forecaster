@@ -104,18 +104,18 @@ summary together with the structured impulse fields. A new prompt version is a
 new immutable annotation; it never rewrites an earlier interpretation.
 
 The active annotation contract is
-`news-json-v16-xauusd-transmission-evidence`. V16 retains the explicit
+`news-json-v17-source-grounded-latin-display`. V17 retains the explicit
 semantic relevance, review priority, material-change, time-sensitivity,
-reason, and source-evidence fields introduced by V15, while requiring a narrow
-XAUUSD transmission test. Company, product, local, and non-US macro stories do
+reason, source-evidence, and narrow XAUUSD transmission rules from V16. Company,
+product, local, and non-US macro stories do
 not qualify without an explicit current bullion, USD, US Treasury-yield, US
 monetary-policy, or major geopolitical transmission. CONTEXT_ONLY is not a
 fallback for otherwise irrelevant content. Evidence must resolve to a unique
 contiguous excerpt in the stored headline or body; punctuation-only model drift
 may be restored deterministically to the original source characters, while
 changed words, numbers, ordering, or joined clauses fail closed. Casing,
-spelling, one keyword, or publisher identity cannot determine meaning. V15
-annotations remain immutable historical evidence but cannot be generated or
+spelling, one keyword, or publisher identity cannot determine meaning. V15 and
+V16 annotations remain immutable historical evidence but cannot be generated or
 used by the active feature, storyline, training, or inference paths.
 
 Gemini 3.5 Flash-Lite is the primary annotator. Its last 150 daily local
@@ -165,14 +165,31 @@ cannot change semantic measurements or grant model permission. Each retry
 preserves bounded failure evidence, and a later versioned recovery may authorize
 one new attempt after another repair mechanism changes.
 
-Chinese-facing annotation fields share one controlled identity context. Latin
-identities may remain natural when declared by `actor`, `object`, or `entities`,
-or when the exact short proper-name-like span is grounded in the immutable source
-headline/body. Source occurrence alone is not permission: arbitrary English
-words, generic title phrases, and English clauses remain invalid even when their
-individual words appear in an English article. Existing display checkpoints MUST
-be revalidated locally against the current deterministic rules before another
-provider request is attempted.
+Chinese-facing annotation fields use two deterministic V17 display questions.
+First, local code derives every maximal visible Latin-and-digit run directly
+from the final field. Each run MUST be an exact, case-sensitive, boundary-safe
+substring of the sole immutable source coordinate space
+`headline + "\n" + body`, or the exact controlled system token `XAUUSD`.
+Repeated source occurrences are valid; no provider declaration or semantic
+classification is consulted. Invented prefixes, suffixes, middle text, joined
+source regions, unsupported scripts, and ungrounded runs fail closed.
+
+Second, the validator evaluates the complete final visible field, without
+masking grounded Latin text, and requires the field to remain Chinese-primary.
+Language balance compares Han content with Latin-letter content only; digits
+have zero English-language weight and remain governed by the independent
+source-number integrity contract. Ordinary line breaks and tabs are layout
+boundaries, while invisible formatting, bidirectional, and surrogate controls
+fail closed.
+Quotation marks, brackets, title casing, source identity, and model-declared
+roles never exempt English prose from that field-level balance. This rule is
+applied consistently during initial validation, invalid-field detection,
+display repair, and checkpoint revalidation. V16 and older records retain their
+frozen legacy display behavior. No V17 row existed in production when the
+obsolete structured declaration schema was removed, so no historical semantic
+object needs a compatibility field or rewrite. Existing display checkpoints
+MUST be revalidated locally against the current deterministic rules before
+another provider request is attempted.
 
 The model gateway distinguishes a request that produced no trustworthy response
 from a response that failed decoding or validation. Capacity, provider pacing,

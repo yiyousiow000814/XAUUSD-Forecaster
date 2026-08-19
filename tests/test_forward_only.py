@@ -34,6 +34,7 @@ from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
 from xauusd_forecaster.local_embeddings import EmbeddingProfile
 from xauusd_forecaster.model_gateway import GeminiModelGateway
 from xauusd_forecaster.news_impact import pending_impact_records
+from xauusd_forecaster.news_semantics import PREVIOUS_NEWS_PROMPT_VERSION
 from xauusd_forecaster.maintenance import (
     archive_completed_quote_days,
     backup_forward_ledger,
@@ -2049,11 +2050,17 @@ def test_gemini_rejects_non_chinese_translation_fields() -> None:
     }
 
     with pytest.raises(ValueError, match="NO_CHINESE_PROSE"):
-        annotation_module._validate_chinese_result(vector)
+        annotation_module._validate_chinese_result(
+            vector, headline=vector["headline_zh"], body=vector["summary_zh"],
+        )
 
     vector["headline_zh"] = "黄金市场更新"
     with pytest.raises(ValueError, match="NO_CHINESE_PROSE"):
-        annotation_module._validate_chinese_result(vector)
+        annotation_module._validate_chinese_result(
+            vector,
+            headline=vector["headline_zh"],
+            body=vector["summary_zh"],
+        )
 
     vector["summary_zh"] = (
         "这是一段中文开头用于掩饰后续内容：Federal Reserve kept rates unchanged "
@@ -2061,7 +2068,11 @@ def test_gemini_rejects_non_chinese_translation_fields() -> None:
         "watch incoming economic data before considering any future policy change"
     )
     with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
-        annotation_module._validate_chinese_result(vector)
+        annotation_module._validate_chinese_result(
+            vector,
+            headline=vector["headline_zh"],
+            body=vector["summary_zh"],
+        )
 
 
 @pytest.mark.parametrize("display_text", [
@@ -2093,7 +2104,9 @@ def test_gemini_accepts_chinese_primary_prose_with_natural_english_names(
         "usd_impulse": 0.0, "novelty": 0.0, "confidence": 0.5,
     }
 
-    annotation_module._validate_chinese_result(vector)
+    annotation_module._validate_chinese_result(
+        vector, headline=display_text, body=display_text,
+    )
 
 
 def _production_shaped_identity_annotation() -> tuple[dict, str]:
@@ -2106,9 +2119,9 @@ def _production_shaped_identity_annotation() -> tuple[dict, str]:
         "The series aired on NBC as L.A. Law."
     )
     summary = (
-        "这些演员包括饰演Arnie Becker的Corbin Bernsen、"
-        "饰演Ann Kelsey的Jill Eikenberry，以及饰演Leland McKenzie"
-        "的Richard Dysart。"
+        "这篇回顾介绍了贯穿整部法律剧的主要演员和角色，其中包括"
+        "饰演Arnie Becker的Corbin Bernsen、饰演Ann Kelsey的"
+        "Jill Eikenberry，以及饰演Leland McKenzie的Richard Dysart。"
     )
     result = _v15_annotation({
         "headline_zh": "《洛杉矶法律》演员回顾",
@@ -2129,7 +2142,8 @@ def test_chinese_display_accepts_source_grounded_actor_and_character_names() -> 
     result, source = _production_shaped_identity_annotation()
 
     annotation_module._validate_chinese_result(
-        result, headline="L.A. Law cast", body=source,
+        result, prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
+        headline="L.A. Law cast", body=source,
     )
 
 
@@ -2153,7 +2167,10 @@ def test_chinese_display_fields_share_declared_identity_context(field) -> None:
     }
     result[field] = value
 
-    annotation_module._validate_chinese_result(result)
+    annotation_module._validate_chinese_result(
+        result, prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
+        body=" ".join(identities),
+    )
 
 
 @pytest.mark.parametrize(
@@ -2179,8 +2196,436 @@ def test_chinese_display_accepts_bounded_grounded_identity_variants(value) -> No
     }
 
     annotation_module._validate_chinese_result(
-        result, headline="L.A. Law", body=source,
+        result, prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
+        headline="L.A. Law", body=source,
     )
+
+
+@pytest.mark.parametrize(
+    "span,rendered,source,declared,proof",
+    (
+        (
+            "Jerome Powell", "Jerome Powell",
+            "Jerome Powell addressed the policy outlook.",
+            ["Jerome Powell"], "DECLARED_IDENTITY",
+        ),
+        (
+            "OpenAI", "OpenAI", "OpenAI released a research update.",
+            [], "STRONG_IDENTIFIER",
+        ),
+        (
+            "OpenRouter", "OpenRouter", "OpenRouter released an update.",
+            [], "STRONG_IDENTIFIER",
+        ),
+        (
+            "Berkshire Hathaway", "Berkshire Hathaway",
+            "Berkshire Hathaway published its report.",
+            ["Berkshire Hathaway"], "DECLARED_IDENTITY",
+        ),
+        (
+            "FOMC", "FOMC", "The FOMC published its minutes.",
+            [], "STRONG_IDENTIFIER",
+        ),
+        (
+            "GPT-5", "GPT-5", "The product is named GPT-5.",
+            [], "STRONG_IDENTIFIER",
+        ),
+        (
+            "iPhone 17 Pro", "iPhone 17 Pro",
+            "Apple introduced iPhone 17 Pro.",
+            [], "STRONG_IDENTIFIER",
+        ),
+        (
+            "Berkshire Hathaway Annual Meeting",
+            "Berkshire Hathaway Annual Meeting",
+            "The Berkshire Hathaway Annual Meeting begins today.",
+            ["Berkshire Hathaway Annual Meeting"], "DECLARED_IDENTITY",
+        ),
+        *(
+            (
+                title, f"《{title}》",
+                f'The source refers to "{title}" as a named work.',
+                [], "DELIMITED_REFERENCE",
+            )
+            for title in (
+                "The Dark Knight", "The Intelligent Investor",
+                "Bohemian Rhapsody", "Grand Theft Auto",
+                "The One You've Been Waiting For",
+            )
+        ),
+    ),
+)
+def test_source_grounded_latin_span_family_accepts_references(
+    span, rendered, source, declared, proof,
+) -> None:
+    value = f"相关名称为{rendered}。"
+    result = {
+        "headline_zh": "名称说明",
+        "summary_zh": value,
+        "primary_story_title_zh": "名称说明",
+        "actor": "", "object": "", "entities": declared,
+    }
+
+    allowed = annotation_module._allowed_display_latin_spans(
+        result, value, "Source headline", source,
+        prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
+    )
+
+    assert [(item.text, item.proof) for item in allowed] == [(span, proof)]
+    annotation_module._validate_chinese_result(
+        result, prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
+        headline="Source headline", body=source,
+    )
+
+
+@pytest.mark.parametrize(
+    "span,source",
+    (
+        ("Jerome Powell", "Jerome Powell addressed reporters."),
+        ("OpenAI", "OpenAI released a research update."),
+        ("FOMC", "The FOMC published its minutes."),
+        ("GPT-5", "The product label is GPT-5."),
+        ("iPhone 17 Pro", "Apple introduced iPhone 17 Pro."),
+        ("The Dark Knight", "The Dark Knight was released in 2008."),
+        ("OpenAI Launches New Model", "OpenAI Launches New Model"),
+        (
+            "Market expects growth to be strong",
+            "Market expects growth to be strong after the policy update.",
+        ),
+        (
+            "Investors Await Federal Reserve Decision",
+            "Investors Await Federal Reserve Decision",
+        ),
+        ("Gold Prices Rise As Dollar Falls", "Gold Prices Rise As Dollar Falls"),
+        (
+            "International Conference on Trustworthy Autonomous Financial "
+            "Agents and Cross-Market Decision Infrastructure",
+            "International Conference on Trustworthy Autonomous Financial "
+            "Agents and Cross-Market Decision Infrastructure opens today.",
+        ),
+        ("FutureCategory ZX-41", "FutureCategory ZX-41 appeared in the source."),
+    ),
+)
+def test_v17_accepts_exact_source_grounded_latin_without_semantic_classification(
+    span, source,
+) -> None:
+    value = (
+        f"完整报道引用了《{span}》，并继续解释相关背景、来源依据、"
+        "事件过程与可能造成的市场影响。"
+    )
+    result = {
+        "headline_zh": "来源内容说明", "summary_zh": value,
+        "primary_story_title_zh": "来源内容说明",
+    }
+
+    allowed = annotation_module._allowed_display_latin_spans(
+        result, value, "Source headline", source,
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+    )
+
+    assert [item.text for item in allowed] == [span]
+    assert allowed[0].proof == "EXACT_SOURCE"
+    canonical_source = f"Source headline\n{source}"
+    assert canonical_source[allowed[0].source_start:allowed[0].source_end] == span
+    annotation_module._validate_chinese_result(
+        result, prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+        headline="Source headline", body=source,
+    )
+
+
+def test_v17_derives_multiple_disjoint_visible_latin_runs() -> None:
+    value = "完整报道比较了 OpenAI 与 FOMC，并解释双方信息对市场的影响。"
+    source = "OpenAI issued an update. The FOMC published its minutes."
+
+    spans = annotation_module._allowed_display_latin_spans(
+        {}, value, "Source headline", source,
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+    )
+
+    assert [(span.text, span.proof) for span in spans] == [
+        ("OpenAI", "EXACT_SOURCE"), ("FOMC", "EXACT_SOURCE"),
+    ]
+
+
+def test_v17_repeated_source_occurrences_use_first_exact_coordinates() -> None:
+    value = "完整报道讨论了 OpenAI，并解释相关影响。"
+    source = "OpenAI issued an update. OpenAI later added details."
+
+    spans = annotation_module._allowed_display_latin_spans(
+        {}, value, "Source headline", source,
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+    )
+
+    canonical_source = f"Source headline\n{source}"
+    assert len(spans) == 1
+    assert spans[0].source_start == canonical_source.index("OpenAI")
+    assert canonical_source[spans[0].source_start:spans[0].source_end] == "OpenAI"
+
+
+def test_v17_does_not_semantically_reject_grounded_lowercase_latin() -> None:
+    result = {
+        "headline_zh": "来源说明",
+        "summary_zh": "完整报道讨论 open 这一原文内容及其相关影响。",
+        "primary_story_title_zh": "市场open消息",
+    }
+
+    annotation_module._validate_chinese_result(
+        result,
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+        headline="Source headline",
+        body="The source contains open as written.",
+    )
+
+
+@pytest.mark.parametrize(
+    "value,source",
+    (
+        (
+            "报道称 OpenAI Launches New Model，并讨论市场反应。",
+            "OpenAI released a model.",
+        ),
+        ("报道称 New OpenAI，并讨论市场反应。", "OpenAI discussed the update."),
+        ("报道称 OpenAI Labs，并讨论市场反应。", "OpenAI discussed the update."),
+        (
+            "报道称 OpenAI Changed Middle Words，并讨论市场反应。",
+            "OpenAI Changed Other Words.",
+        ),
+        ("报道称 Openai，并讨论市场反应。", "OpenAI released a model."),
+        (
+            "报道称 OpenAI Markets rally，并讨论市场反应。",
+            "OpenAI released an update. Markets rally afterward.",
+        ),
+        ("报道称 OpenAI，并讨论市场反应。", "SuperOpenAICompany responded."),
+    ),
+)
+def test_v17_rejects_ungrounded_or_partial_token_latin(value, source) -> None:
+    with pytest.raises(ValueError, match="UNGROUNDED_LATIN_DISPLAY"):
+        annotation_module._validate_chinese_result(
+            {"headline_zh": "来源说明", "summary_zh": value},
+            prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+            headline="Source headline", body=source,
+        )
+
+
+def test_v17_source_grounding_does_not_bypass_field_language_balance() -> None:
+    english = (
+        "OpenAI Launches New Model and Investors Await Federal Reserve Decision"
+    )
+    value = f"{english}，市场关注。"
+
+    with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
+        annotation_module._validate_chinese_result(
+            {"headline_zh": "来源说明", "summary_zh": value},
+            prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+            headline=english, body="",
+        )
+
+
+def test_v17_latin_identifier_list_can_still_be_english_dominant() -> None:
+    english = "CPI PPI FOMC OpenAI GPT-5 Market Outlook"
+    with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
+        annotation_module._validate_chinese_result(
+            {"headline_zh": "来源说明", "summary_zh": f"{english}，市场关注。"},
+            prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+            headline=english, body="",
+        )
+
+
+@pytest.mark.parametrize(
+    "value,source",
+    (
+        (
+            "美国 CPI 3.2%，PPI 2.1%，失业率 4.3%，数据整体高于市场预期。",
+            "CPI 3.2% and PPI 2.1% were reported with unemployment at 4.3%.",
+        ),
+        (
+            "美国新增 175,000 个就业岗位，失业率升至 4.1%，工资同比增长 3.9%。",
+            "Payrolls rose by 175,000, unemployment reached 4.1%, and wages grew 3.9%.",
+        ),
+        (
+            "美联储将利率维持在 5.25%-5.50%，市场随后重新评估降息预期。",
+            "The target range remained 5.25%-5.50% after the decision.",
+        ),
+        (
+            "黄金升至 2,450 美元，较前一交易日上涨 1.8%，市场继续关注美元走势。",
+            "Gold reached 2,450 dollars after rising 1.8%.",
+        ),
+    ),
+)
+def test_v17_number_dense_chinese_has_zero_digit_language_weight(
+    value, source,
+) -> None:
+    result = {"headline_zh": "来源说明", "summary_zh": value}
+    annotation_module._recover_display_fields(result, "Source headline", source)
+    annotation_module._validate_chinese_result(
+        result,
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+        headline="Source headline", body=source,
+    )
+
+
+def test_v17_pure_digits_contribute_zero_english_language_weight() -> None:
+    annotation_module.require_chinese_primary_display(
+        "数据：1 2 3 4 5 6 7 8 9 10 2026 175,000 5.25%-5.50%",
+        "summary_zh",
+    )
+
+
+def test_v17_mixed_identifiers_count_only_latin_letters() -> None:
+    value = "报道讨论 GPT-5、iPhone 17 与 S&P 500，并解释相关市场影响。"
+    source = "GPT-5, iPhone 17, and S&P 500 were discussed in the report."
+
+    annotation_module._validate_chinese_result(
+        {"headline_zh": "来源说明", "summary_zh": value},
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+        headline="Source headline", body=source,
+    )
+
+
+def test_v17_controlled_xauusd_exemption_is_closed() -> None:
+    value = "完整报道说明相关信息可能继续影响 XAUUSD 的市场表现。"
+    spans = annotation_module._allowed_display_latin_spans(
+        {}, value, "中文来源标题", "中文来源正文",
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+    )
+    assert [(span.text, span.proof) for span in spans] == [
+        ("XAUUSD", "SYSTEM_CONTROLLED"),
+    ]
+    annotation_module._validate_chinese_result(
+        {"headline_zh": "来源说明", "summary_zh": value},
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+        headline="中文来源标题", body="中文来源正文",
+    )
+
+    with pytest.raises(ValueError, match="UNGROUNDED_LATIN_DISPLAY"):
+        annotation_module._validate_chinese_result(
+            {"headline_zh": "来源说明", "summary_zh": "完整报道讨论 ArbitraryToken 的影响。"},
+            prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+            headline="中文来源标题", body="中文来源正文",
+        )
+
+
+def test_v17_unicode_lookalike_fails_even_when_present_in_source() -> None:
+    lookalike = "\u039fpenAI"  # Greek omicron, not Latin O.
+    with pytest.raises(ValueError, match="THIRD_SCRIPT_PRESENT"):
+        annotation_module._validate_chinese_result(
+            {"headline_zh": "来源说明", "summary_zh": f"完整报道讨论《{lookalike}》及其影响。"},
+            prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+            headline="Source headline", body=f"{lookalike} appears in the source.",
+        )
+
+
+@pytest.mark.parametrize("spoof", ("Open\u200bAI", "Open\u202eAI", "Open\x07AI"))
+def test_v17_rejects_invisible_or_bidi_control_inside_latin_run(spoof) -> None:
+    with pytest.raises(ValueError, match="MALFORMED_DISPLAY_CONTROL"):
+        annotation_module._validate_chinese_result(
+            {"headline_zh": "来源说明", "summary_zh": f"完整报道讨论 {spoof} 的影响。"},
+            prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+            headline="Source headline", body=f"{spoof} appears in the source.",
+        )
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "报道提到 OpenAI。\n市场继续关注后续发展。",
+        "报道提到 OpenAI。\r\n市场继续关注后续发展。",
+        "报道提到\tOpenAI，并解释相关影响。",
+    ),
+)
+def test_v17_allows_ordinary_layout_whitespace(value) -> None:
+    result = {"headline_zh": "来源说明", "summary_zh": value}
+    spans = annotation_module._allowed_display_latin_spans(
+        result, value, "Source headline", "OpenAI issued an update.",
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+    )
+
+    assert [span.text for span in spans] == ["OpenAI"]
+    annotation_module._validate_chinese_result(
+        result,
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+        headline="Source headline", body="OpenAI issued an update.",
+    )
+
+
+def test_v17_newline_terminates_independent_latin_runs() -> None:
+    value = "报道提到 OpenAI\nFOMC，并解释相关影响。"
+    spans = annotation_module._allowed_display_latin_spans(
+        {}, value, "Source headline", "OpenAI and FOMC issued updates.",
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+    )
+
+    assert [span.text for span in spans] == ["OpenAI", "FOMC"]
+
+@pytest.mark.parametrize(
+    "value,source,declared",
+    (
+        (
+            "报道称Market expects growth to be strong。",
+            "Market expects growth to be strong after the policy update.", [],
+        ),
+        (
+            "报道称《Market expects growth to be strong》。",
+            "Market expects growth to be strong after the policy update.", [],
+        ),
+        (
+            "报道称《Market Expects Growth To Be Strong》。",
+            'The source quotes "Market expects growth to be strong."', [],
+        ),
+        (
+            "报道称《Market Update》。",
+            'The source says "Alpha" Market Update "Omega".', [],
+        ),
+        (
+            "报道称“Market expects growth to be strong after policy changes”。",
+            'The source quotes "Market expects growth to be strong after policy changes."',
+            [],
+        ),
+        (
+            "报道讨论《The Dark Knight》。",
+            "The source discusses an unrelated work.", [],
+        ),
+        (
+            "报道讨论《This Is An Excessively Long Source Grounded Phrase That "
+            "Cannot Be A Bounded Display Identifier》。",
+            'The source quotes "This Is An Excessively Long Source Grounded Phrase '
+            'That Cannot Be A Bounded Display Identifier."', [],
+        ),
+        (
+            "报道称OpenAI said markets expect growth to be strong。",
+            "OpenAI said markets expect growth to be strong.", ["OpenAI"],
+        ),
+        (
+            "报道称open market update。",
+            "The article contains the phrase open market update.", [],
+        ),
+        (
+            "报道称《Market》expects growth to be strong。",
+            "Market expects growth to be strong.", [],
+        ),
+        (
+            "Market expects growth to be strong after the policy update.",
+            "Market expects growth to be strong after the policy update.", [],
+        ),
+    ),
+)
+def test_v16_source_grounded_latin_span_family_rejects_prose_and_spoofs(
+    value, source, declared,
+) -> None:
+    result = {
+        "headline_zh": "市场评论", "summary_zh": value,
+        "primary_story_title_zh": "市场评论",
+        "actor": "", "object": "", "entities": declared,
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="NO_CHINESE_PROSE|ENGLISH_PROSE_DOMINANT|UNGROUNDED_LATIN_REFERENCE",
+    ):
+        annotation_module._validate_chinese_result(
+            result, prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
+            headline="Market commentary", body=source,
+        )
 
 
 @pytest.mark.parametrize(
@@ -2254,10 +2699,12 @@ def test_gemini_rejects_english_or_latin_prose_dominating_chinese(
     }
 
     with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
-        annotation_module._validate_chinese_result(vector)
+        annotation_module._validate_chinese_result(
+            vector, headline=english_dominant, body=english_dominant,
+        )
 
 
-def test_gemini_distinguishes_translated_prose_from_english_identifiers() -> None:
+def test_v16_distinguishes_translated_prose_from_english_identifiers() -> None:
     valid = {
         "headline_zh": "美国 CPI 高于预期",
         "summary_zh": "美国 CPI 高于预期，Gold ETF 资金流仍然疲弱。",
@@ -2267,9 +2714,13 @@ def test_gemini_distinguishes_translated_prose_from_english_identifiers() -> Non
         "summary_zh": "美国 CPI 高于预期，Gold ETF flows remained weak after the release.",
     }
 
-    annotation_module._validate_chinese_result(valid)
+    annotation_module._validate_chinese_result(
+        valid, prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
+    )
     with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
-        annotation_module._validate_chinese_result(invalid)
+        annotation_module._validate_chinese_result(
+            invalid, prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
+        )
 
 
 def test_gemini_validates_semantic_reason_as_chinese_primary_display() -> None:
@@ -2286,9 +2737,15 @@ def test_gemini_validates_semantic_reason_as_chinese_primary_display() -> None:
         ),
     }
 
-    annotation_module._validate_chinese_result(valid)
+    annotation_module._validate_chinese_result(
+        valid, headline="CPI release", body="",
+    )
     with pytest.raises(ValueError, match="NO_CHINESE_PROSE"):
-        annotation_module._validate_chinese_result(invalid)
+        annotation_module._validate_chinese_result(
+            invalid,
+            headline="CPI release",
+            body=invalid["semantic_reason_zh"],
+        )
 
 
 def test_gemini_repairs_only_invalid_semantic_reason(monkeypatch) -> None:
@@ -2412,7 +2869,9 @@ def test_gemini_repairs_mixed_language_summary_with_counted_request(
             lambda usage: usages.append(usage) or True
         ),
     )
-    result, _ = pool.call(0, "model", "headline", "body")
+    result, _ = pool.call(
+        0, "model", "headline", "Powell discussed inflation in the source.",
+    )
     assert result["summary_zh"] == repaired["summary_zh"]
     assert "Powell" in result["summary_zh"]
     assert "XAUUSD" in result["summary_zh"]
@@ -2636,7 +3095,7 @@ def test_display_checkpoint_accepts_declared_latin_company_names_without_model_c
     ).repair_display_checkpoint(
         0, annotation_module.DEFAULT_GEMINI_MODEL, checkpoint,
         "Stripe to acquire OpenRouter", evidence,
-        prompt_version=annotation_module.PROMPT_VERSION,
+        prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
     )
 
     assert repaired["primary_story_title_zh"] == "Stripe 收购 OpenRouter"
@@ -2686,6 +3145,10 @@ def test_display_checkpoint_accepts_source_grounded_episode_titles_without_model
         f"{rank} {title} Season {rank}, Episode {rank} (2005)"
         for rank, title in zip(range(8, 0, -1), titles)
     )
+    source += " " + " ".join(
+        f'The article later refers to "{title}."'
+        for title in titles
+    )
     summary = (
         "这些剧集包括"
         + "、".join(f"《{title}》" for title in titles[:-1])
@@ -2723,14 +3186,14 @@ def test_display_checkpoint_accepts_source_grounded_episode_titles_without_model
     ).repair_display_checkpoint(
         0, annotation_module.DEFAULT_GEMINI_MODEL, checkpoint,
         "8 Supernatural Episodes That Do Not Hold Up Today", source,
-        prompt_version=annotation_module.PROMPT_VERSION,
+        prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
     )
 
     assert repaired == result
     assert model == annotation_module.FALLBACK_GEMINI_MODEL
 
 
-def test_source_grounding_does_not_allow_bracketed_english_prose() -> None:
+def test_v17_rejects_bracketed_source_grounded_english_dominant_field() -> None:
     result = {
         "headline_zh": "市场评论",
         "summary_zh": "报道声称《Market expects growth to be strong》。",
@@ -2746,7 +3209,7 @@ def test_source_grounding_does_not_allow_bracketed_english_prose() -> None:
         )
 
 
-def test_story_title_does_not_treat_undeclared_english_prose_as_an_identifier() -> None:
+def test_v17_story_title_rejects_ungrounded_latin() -> None:
     result = {
         "headline_zh": "市场更新",
         "summary_zh": "市场正在关注企业消息。",
@@ -2755,7 +3218,7 @@ def test_story_title_does_not_treat_undeclared_english_prose_as_an_identifier() 
         "entities": ["Stripe", "OpenRouter"],
     }
 
-    with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
+    with pytest.raises(ValueError, match="UNGROUNDED_LATIN_DISPLAY"):
         annotation_module._validate_chinese_result(result)
 
 
@@ -2782,7 +3245,10 @@ def test_story_title_matches_declared_identities_across_safe_punctuation_and_cas
         "entities": entities,
     }
 
-    annotation_module._validate_chinese_result(result)
+    annotation_module._validate_chinese_result(
+        result, prompt_version=PREVIOUS_NEWS_PROMPT_VERSION,
+        body=f"{actor} {object_name}",
+    )
 
 
 @pytest.mark.parametrize("transport", ("rss", "html"))
@@ -4285,9 +4751,9 @@ def test_current_cross_publisher_event_survives_recent_noise(tmp_path) -> None:
         "document_kind": "NEWS_REPORT", "source_organization_id": "test-source",
         "xauusd_relevance": "MACRO_DRIVER", "review_priority": "FAST",
         "material_change": "NEW_EVENT", "time_sensitivity": "ONGOING",
-        "semantic_reason_zh": "完整正文显示这是同一次美国7月就业数据发布。",
-        "supporting_evidence": ["the economy lost 23,000 nonfarm payroll positions"],
-    }
+            "semantic_reason_zh": "完整正文显示这是同一次美国7月就业数据发布。",
+            "supporting_evidence": ["the economy lost 23,000 nonfarm payroll positions"],
+        }
     for index, material_key in enumerate((
         "us_july_2026_jobs_report_release",
         "july_2026_us_jobs_report_release",
