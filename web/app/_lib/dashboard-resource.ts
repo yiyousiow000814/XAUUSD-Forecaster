@@ -73,6 +73,12 @@ export async function loadDashboardResource<T>(
   const pending = (async () => {
     try {
       const response = await fetch(url, { cache: "no-store", signal: controller.signal });
+      const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+      if (response.redirected || (response.ok && contentType.includes("text/html"))) {
+        const error = new Error("Authentication required") as Error & { status?: number };
+        error.status = 401;
+        throw error;
+      }
       const serialized = await response.text();
       let body: unknown;
       try {
@@ -86,7 +92,9 @@ export async function loadDashboardResource<T>(
         const message = body && typeof body === "object" && "error" in body
           ? String(body.error)
           : `HTTP ${response.status}`;
-        throw new Error(message);
+        const error = new Error(message) as Error & { status?: number };
+        error.status = response.status;
+        throw error;
       }
       resources.set(url, { data: body, updatedAt: Date.now() });
       notifyDashboardResource(url);

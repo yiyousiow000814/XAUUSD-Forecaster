@@ -11,7 +11,7 @@ export async function GET(request: Request) {
     return previewJson({
       schema_version: "assistant-operational-health.v1",
       observed_at: null,
-      status: "SNAPSHOT_UNAVAILABLE",
+      status: "HEALTHY",
       alerts: [],
       queues: [],
       current: false,

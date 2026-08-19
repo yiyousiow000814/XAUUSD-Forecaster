@@ -1503,6 +1503,11 @@ test("separates anonymous health data from owner-only Admin evidence", async () 
   const healthView = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
   const alertBanner = readFileSync(new URL("../app/_components/OperationalAlertBanner.tsx", import.meta.url), "utf8");
   const adminOverview = readFileSync(new URL("../app/_views/AdminOverviewView.tsx", import.meta.url), "utf8");
+  const adminClient = readFileSync(new URL("../app/_lib/admin-client.ts", import.meta.url), "utf8");
+  const statusView = readFileSync(new URL("../app/_views/StatusView.tsx", import.meta.url), "utf8");
+  const retryQueue = readFileSync(new URL("../app/_components/RetryQueue.tsx", import.meta.url), "utf8");
+  const assistantView = readFileSync(new URL("../app/_views/AssistantView.tsx", import.meta.url), "utf8");
+  const assistantTranscript = readFileSync(new URL("../app/_components/AssistantTranscript.tsx", import.meta.url), "utf8");
 
   assert.match(publicStatus, /publicDashboardStatus\(payload\)/);
   for (const field of [
@@ -1512,6 +1517,15 @@ test("separates anonymous health data from owner-only Admin evidence", async () 
   assert.doesNotMatch(healthView, /operator-retry|assistant-health|AdminOverview/);
   assert.doesNotMatch(alertBanner, /assistant-health|AssistantOperationalHealth/);
   assert.match(adminOverview, /fetch\("\/api\/operator-retry"/);
+  assert.match(adminOverview, /fetch\("\/api\/assistant-health"/);
+  assert.match(adminOverview, /assistantHealthPresentation\(assistantHealth\)/);
+  assert.match(adminOverview, /管理员会话已过期，请重新登录/);
+  assert.match(adminOverview, /href="\/admin">重新登录/);
+  assert.match(adminClient, /ADMIN_RELOGIN_MESSAGE = "管理员会话已过期，请重新登录。"/);
+  assert.match(statusView, /adminErrorPresentation[\s\S]*href="\/admin">重新登录/);
+  assert.match(retryQueue, /adminErrorPresentation[\s\S]*href="\/admin">重新登录/);
+  assert.match(assistantView, /管理员会话已过期，请重新登录。/);
+  assert.match(assistantTranscript, /href="\/admin">重新登录/);
   assert.doesNotMatch(statusProjection, /fetch\(|STATUS_RELAY_URL/);
   assert.doesNotMatch(adminStatus, /STATUS_RELAY_URL/);
 
@@ -1521,12 +1535,16 @@ test("separates anonymous health data from owner-only Admin evidence", async () 
     assert.ok(get.indexOf("authenticateDashboardOperatorRequest") < get.indexOf("env.DB"));
   }
   assert.match(adminStatus, /previewBundle[\s\S]*synthetic-admin-status/);
+  assert.match(assistantHealth, /status: "HEALTHY"[\s\S]*current: false/);
 
   const overview = await renderSettled("/admin", /OWNER OPERATIONS/);
   assert.equal(overview.response.status, 200);
   assert.match(overview.html, /概览[\s\S]*Assistant[\s\S]*重试任务[\s\S]*AI 模型用量/);
   assert.match(overview.html, /总任务[\s\S]*等待应用[\s\S]*冲突/);
   assert.doesNotMatch(adminOverview, /进入私有对话|查看 Windows 应用进度|查看模型额度/);
+  assert.match(adminOverview, /className="admin-overview-health"/);
+  const adminCss = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(adminCss, /\.admin-overview-card \{[^}]*min-height:198px/);
   assert.match(overview.html, /aria-current="page"[^>]*>概览<\/a>/);
 });
 
@@ -2740,7 +2758,7 @@ test("renders a recoverable responsive Assistant workbench without unsafe HTML",
   assert.match(transcript, /取消本轮/);
   assert.match(transcript, /查看本轮处理记录/);
   assert.match(transcript, /assistant-transcript-banners/);
-  assert.match(transcript, /href="\/admin">返回管理员登录/);
+  assert.match(transcript, /href="\/admin">重新登录/);
   assert.match(transcript, /AURUM \/ PROVISIONAL/);
   assert.match(transcript, /ASSISTANT PAUSED/);
   assert.match(transcript, /等待新的 API 模型/);

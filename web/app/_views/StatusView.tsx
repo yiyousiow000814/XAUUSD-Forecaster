@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
 import CountValue from "../_components/CountValue";
 import RuntimeUpdateFailureBanner, { type RuntimeUpdateFailure } from "../_components/RuntimeUpdateFailureBanner";
+import { adminErrorPresentation, type AdminErrorPresentation } from "../_lib/admin-client";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { statusFieldPhase } from "../_lib/current-data-provenance";
@@ -124,7 +125,7 @@ function QuotaPanel({ title, eyebrow, quota, nowMs }: { title: string; eyebrow: 
 export default function StatusView({ initialPayload }: { initialPayload?: StatusPayload }) {
   const cachedStatus = initialPayload ?? readDashboardResource<StatusPayload>("/api/admin-status");
   const [payload, setPayload] = useState<StatusPayload | null>(() => cachedStatus);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<AdminErrorPresentation | null>(null);
   const [syncingCurrent, setSyncingCurrent] = useState(Boolean(cachedStatus?.preview_status_summary));
   const [nowMs, setNowMs] = useState(0);
 
@@ -134,7 +135,9 @@ export default function StatusView({ initialPayload }: { initialPayload?: Status
       setPayload(await loadDashboardResource<StatusPayload>("/api/admin-status", { force }));
       setError(null);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "状态读取失败");
+      const presentation = adminErrorPresentation(reason, "AI 模型用量状态暂不可用");
+      if (presentation.kind === "AUTH_REQUIRED") setPayload(null);
+      setError(presentation);
     } finally {
       if (showSyncState) setSyncingCurrent(false);
     }
@@ -181,7 +184,7 @@ export default function StatusView({ initialPayload }: { initialPayload?: Status
         <div><p className="eyebrow">LOCAL QUOTA LEDGER / PACIFIC DAY</p><h1>AI 模型使用状态</h1></div>
       </section>
 
-      {error ? <div className="error-banner">状态读取失败：{error}</div> : null}
+      {error ? <div className="error-banner">{error.message}{error.kind === "AUTH_REQUIRED" ? <> <a href="/admin">重新登录</a></> : null}</div> : null}
       <RuntimeUpdateFailureBanner failure={payload?.system.runtime_update_failure} />
       <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
 

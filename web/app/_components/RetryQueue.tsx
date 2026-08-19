@@ -11,6 +11,7 @@ import {
   type OperatorRetryJob,
   type OperatorRetryRequest,
 } from "../_lib/operator-retry-client";
+import { adminErrorPresentation, adminResponseError } from "../_lib/admin-client";
 
 type RetryMode = "KEEP_ORIGINAL" | "IMMEDIATE" | "DELAY_15_MIN" | "DELAY_1_HOUR" | "IDLE_CAPACITY" | "CUSTOM_TIME";
 type RetryJob = OperatorRetryJob & { override_mode: RetryMode | null };
@@ -66,11 +67,11 @@ export default function RetryQueue() {
   const load = useCallback(async (clearMessage = true) => {
     try {
       const response = await fetch("/api/operator-retry", { cache: "no-store" });
-      if (response.status === 401 || !response.headers.get("content-type")?.includes("application/json")) {
-        setAuthRequired(true);
-        throw new Error("需要完成 Dashboard Operator 身份验证后才能查看运维证据和调整计划。");
+      const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+      if (response.status === 401 || response.redirected || (response.ok && contentType.includes("text/html"))) {
+        throw adminResponseError(response, "重试任务暂时无法读取。");
       }
-      if (!response.ok) throw new Error("重试任务暂时无法读取。");
+      if (!response.ok) throw adminResponseError(response, "重试任务暂时无法读取。");
       const payload = await response.json() as {
         items?: RetryJob[]; requests?: OperatorRetryRequest[]; preview?: boolean;
       };
@@ -80,7 +81,10 @@ export default function RetryQueue() {
       setAuthRequired(false);
       if (clearMessage) setMessage(null);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "重试任务暂时无法读取。");
+      const presentation = adminErrorPresentation(error, "重试任务暂时无法读取。");
+      setAuthRequired(presentation.kind === "AUTH_REQUIRED");
+      if (presentation.kind === "AUTH_REQUIRED") { setJobs([]); setRequests([]); }
+      setMessage(presentation.message);
     } finally { setLoading(false); }
   }, []);
   useEffect(() => {
@@ -121,14 +125,20 @@ export default function RetryQueue() {
           requested_available_at: requested,
         }),
       });
+      const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+      if (response.status === 401 || response.redirected || (response.ok && contentType.includes("text/html"))) {
+        throw adminResponseError(response, "提交失败");
+      }
       const payload = await response.json() as { accepted?: number; error?: string; items?: Array<{ status: string }> };
-      if (!response.ok && response.status !== 207) throw new Error(payload.error ?? "提交失败");
+      if (!response.ok && response.status !== 207) throw adminResponseError(response, payload.error ?? "提交失败");
       const rejected = (payload.items ?? []).filter(item => item.status === "REJECTED" || item.status === "CONFLICT").length;
       setMessage(`云端已接受 ${payload.accepted ?? 0} 个命令，尚不代表 Windows scheduler 已应用${rejected ? `；另有 ${rejected} 个未被接受` : ""}。`);
       setPending(null); setReason(""); setSelected(new Set()); setExpandedJobId(null);
       await load(false);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "提交失败");
+      const presentation = adminErrorPresentation(error, "提交失败");
+      setAuthRequired(presentation.kind === "AUTH_REQUIRED");
+      setMessage(presentation.message);
     } finally { setLoading(false); }
   };
 
@@ -145,7 +155,7 @@ export default function RetryQueue() {
     </header>
     {preview ? <p className="retry-queue-notice">PR Preview 使用合成演示任务，仅用于检查界面与交互，不连接或修改生产调度器。</p> : null}
     {message ? <p className="retry-queue-notice" role="status">{message}</p> : null}
-    {authRequired ? <p className="retry-queue-notice"><a href="/admin">返回管理员登录</a>。登录一次后，全部 Admin 工具共用同一 Access 会话。</p> : null}
+    {authRequired ? <p className="retry-queue-notice"><a href="/admin">重新登录</a></p> : null}
     <div className={`retry-bulk-bar ${selected.size ? "is-active" : ""}`}>
       <label className="retry-checkbox-target"><input type="checkbox" aria-label="选择全部可调整任务" checked={eligible.length > 0 && selected.size === eligible.length} onChange={event => setSelected(event.target.checked ? new Set(eligible.map(job => job.job_id)) : new Set())} /><span>选择全部可调整任务</span></label>
       <strong>{selected.size ? `已选 ${selected.size} 个` : "选择任务后可批量调整"}</strong>

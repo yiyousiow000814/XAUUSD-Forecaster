@@ -2093,6 +2093,8 @@ body:has(.assistant-main) > .dashboard-shell { width:100%; height:auto; min-heig
 .admin-overview-hero h1 { margin:0; font:600 clamp(36px,5vw,58px)/.92 var(--font-display); }
 .admin-overview-hero>p { margin:0; color:var(--muted); font-size:12px; line-height:1.5; }
 .admin-preview-notice { margin:12px 0 0; border:1px solid var(--ink); padding:9px 12px; background:#f5d9a9; font-size:11px; font-weight:800; }
+.admin-preview-notice.is-auth { background:var(--red); }
+.admin-preview-notice a,.error-banner a { color:inherit; font-weight:900; }
 .admin-overview-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:0; margin-top:16px; border:1px solid var(--ink); }
 .admin-overview-card { min-width:0; min-height:198px; display:flex; flex-direction:column; border-right:1px solid var(--ink); padding:17px 18px; color:var(--ink); text-decoration:none; }
 .admin-overview-card:last-child { border-right:0; }
@@ -2100,6 +2102,7 @@ body:has(.assistant-main) > .dashboard-shell { width:100%; height:auto; min-heig
 .admin-overview-card>span { color:var(--green); font-size:10px; font-weight:900; letter-spacing:.13em; }
 .admin-overview-card h2 { margin:8px 0 16px; font:600 clamp(24px,2.5vw,32px)/1 var(--font-display); }
 .admin-overview-card>strong { font-size:16px; }
+.admin-overview-health { display:block; margin-top:6px; color:var(--muted); font-size:11px; line-height:1.35; }
 .admin-overview-card>b { margin-top:auto; font-size:12px; }
 .admin-overview-card dl { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); margin:0; }
 .admin-overview-card dl div { border-right:1px solid var(--ink); padding-right:10px; }
