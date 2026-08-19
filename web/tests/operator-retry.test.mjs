@@ -133,15 +133,22 @@ test("operator command presentation separates cloud acceptance, scheduler applic
     request_id: "request", job_id: "a".repeat(64), mode: "IMMEDIATE",
     requested_at: "2026-08-19T03:00:00.000Z", completed_at: null, result_json: null,
   };
-  assert.match(operatorRetryCommandPresentation({ ...base, status: "PENDING" }).label, /等待 Windows/);
-  assert.match(operatorRetryCommandPresentation({ ...base, status: "APPLYING" }).label, /正在由 Windows/);
+  assert.equal(operatorRetryCommandPresentation({ ...base, status: "PENDING" }).shortLabel, "等待应用");
+  assert.equal(operatorRetryCommandPresentation({ ...base, status: "APPLYING" }).shortLabel, "应用中");
   assert.match(operatorRetryCommandPresentation({
     ...base, status: "APPLIED", completed_at: "2026-08-19T03:00:02.000Z",
   }).label, /已应用到 Windows/);
+  assert.equal(operatorRetryCommandPresentation({
+    ...base, status: "APPLIED", completed_at: "2026-08-19T03:00:02.000Z",
+  }).shortLabel, "已应用");
   assert.match(operatorRetryCommandPresentation({
     ...base, status: "CONFLICT", completed_at: "2026-08-19T03:00:02.000Z",
     result_json: JSON.stringify({ code: "JOB_STATE_CHANGED" }),
   }).label, /状态或计划已变化/);
+  assert.equal(operatorRetryCommandPresentation({
+    ...base, status: "CONFLICT", completed_at: "2026-08-19T03:00:02.000Z",
+    result_json: JSON.stringify({ code: "JOB_STATE_CHANGED" }),
+  }).shortLabel, "冲突");
   assert.match(operatorRetryCommandPresentation({
     ...base, status: "REJECTED", completed_at: "2026-08-19T03:00:02.000Z",
     result_json: JSON.stringify({ code: "JOB_NOT_MUTABLE" }),

@@ -117,12 +117,14 @@ part of it.
 12. Advancing work uses a lightweight confirmation that states the selected
     count and says the work becomes scheduler-claimable, not immediately
     executed. Custom datetime input is explicitly UTC+8.
-13. A retry card leads with task, failure, failure time, schedule provenance,
-    and the latest operator command state. It exposes one compact adjustment
-    entry point instead of six persistent action buttons. Restore-original is
-    offered only when an active override exists. `IDLE_CAPACITY` copy describes
-    yielding within the scheduler pool for 30 minutes; it never claims to sense
-    machine, CPU, or provider idleness.
+13. Retry work is a dense operator queue, not a stack of presentation cards.
+    Every collapsed row leads with task, failure, failure time, schedule and
+    provenance, latest operator command state, and one compact adjustment entry
+    point. Long scheduling descriptions and technical job IDs stay inside the
+    single expanded row. The bulk bar remains quiet until selection. Restore-
+    original is offered only when an active override exists. `IDLE_CAPACITY`
+    copy describes yielding within the scheduler pool for 30 minutes; it never
+    claims to sense machine, CPU, or provider idleness.
 
 ## OOS chart windows
 

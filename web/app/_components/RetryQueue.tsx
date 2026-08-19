@@ -62,6 +62,12 @@ const previewRequests: OperatorRetryRequest[] = [{
 const localTime = (value: string | null) => value
   ? new Date(value).toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Kuala_Lumpur" })
   : "—";
+const compactTime = (value: string | null) => value
+  ? new Date(value).toLocaleString("zh-CN", {
+      hour12: false, timeZone: "Asia/Kuala_Lumpur",
+      month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+    })
+  : "—";
 const localInput = () => {
   const local = new Date(Date.now() + 8 * 60 * 60_000 + 15 * 60_000);
   return local.toISOString().slice(0, 16);
@@ -113,6 +119,16 @@ export default function RetryQueue() {
   }, [load]);
 
   const latestRequests = useMemo(() => latestOperatorRetryRequests(requests), [requests]);
+  const summary = useMemo(() => {
+    const commands = [...latestRequests.values()];
+    return {
+      total: jobs.length,
+      waiting: jobs.filter(job => job.state === "BACKING_OFF").length,
+      overridden: jobs.filter(job => Boolean(job.override_mode)).length,
+      applying: commands.filter(request => request.status === "PENDING" || request.status === "APPLYING").length,
+      conflict: commands.filter(request => request.status === "CONFLICT").length,
+    };
+  }, [jobs, latestRequests]);
   useEffect(() => {
     if (preview || !shouldPollOperatorRetryRequests(requests)) return;
     const timer = window.setTimeout(() => void load(false), 1_500);
@@ -156,20 +172,26 @@ export default function RetryQueue() {
   };
 
   return <section className="retry-queue" id="retry-jobs" aria-label="重试任务">
-    <header>
-      <div><p className="eyebrow">OPERATOR RETRY SCHEDULING</p><h2>重试任务</h2></div>
-      <p>私有运维证据。云端接受、Windows 应用和任务实际执行是三个独立阶段；自动退避与历史失败证据保持不变。</p>
+    <header className="retry-queue-header">
+      <div><p className="eyebrow">PRIVATE OPERATOR QUEUE</p><h2>重试任务</h2><p>云端接受、Windows 应用与实际执行分阶段记录。</p></div>
+      <dl className="retry-queue-summary" aria-label="重试队列摘要">
+        <div><dt>总任务</dt><dd>{summary.total}</dd></div>
+        <div><dt>等待重试</dt><dd>{summary.waiting}</dd></div>
+        <div><dt>人工调整</dt><dd>{summary.overridden}</dd></div>
+        <div><dt>等待应用</dt><dd>{summary.applying}</dd></div>
+        <div><dt>冲突</dt><dd>{summary.conflict}</dd></div>
+      </dl>
     </header>
     {preview ? <p className="retry-queue-notice">PR Preview 使用合成演示任务，仅用于检查界面与交互，不连接或修改生产调度器。</p> : null}
     {message ? <p className="retry-queue-notice" role="status">{message}</p> : null}
     {authRequired ? <p className="retry-queue-notice"><a href="/assistant?returnTo=%2F%3Froom%3Dhealth%23retry-jobs">使用共享 Dashboard Operator 登录</a>。登录一次后，Assistant 与系统操作共用同一 Access 会话。</p> : null}
-    <div className="retry-bulk-bar">
+    <div className={`retry-bulk-bar ${selected.size ? "is-active" : ""}`}>
       <label className="retry-checkbox-target"><input type="checkbox" aria-label="选择全部可调整任务" checked={eligible.length > 0 && selected.size === eligible.length} onChange={event => setSelected(event.target.checked ? new Set(eligible.map(job => job.job_id)) : new Set())} /><span>选择全部可调整任务</span></label>
-      <strong>已选 {selected.size} 个</strong>
-      <div className="retry-bulk-action">
+      <strong>{selected.size ? `已选 ${selected.size} 个` : "选择任务后可批量调整"}</strong>
+      {selected.size ? <div className="retry-bulk-action">
         <label>批量计划<select value={bulkMode} onChange={event => setBulkMode(event.target.value as RetryMode)}>{actions.filter(action => action.mode !== "KEEP_ORIGINAL").map(action => <option key={action.mode} value={action.mode}>{action.label}</option>)}</select></label>
         <button type="button" disabled={!selected.size || loading} onClick={() => choose(bulkMode, [...selected])}>调整选中任务</button>
-      </div>
+      </div> : null}
     </div>
     {loading && !jobs.length ? <p className="retry-queue-empty">正在读取权威调度状态…</p> : null}
     {!loading && !jobs.length ? <p className="retry-queue-empty">当前没有排队、退避或正在执行的重试任务。</p> : null}
@@ -179,24 +201,19 @@ export default function RetryQueue() {
       const latest = latestRequests.get(job.job_id);
       const command = latest ? operatorRetryCommandPresentation(latest) : null;
       const expanded = expandedJobId === job.job_id;
-      return <article className="retry-job-card" key={job.job_id}>
+      return <article className={`retry-job-row ${expanded ? "is-expanded" : ""}`} key={job.job_id}>
         <label className="retry-checkbox-target retry-job-select"><input aria-label={`选择 ${job.title}`} type="checkbox" disabled={!mutable} checked={selected.has(job.job_id)} onChange={event => setSelected(current => { const next = new Set(current); if (event.target.checked) next.add(job.job_id); else next.delete(job.job_id); return next; })} /><span className="sr-only">选择 {job.title}</span></label>
-        <div className="retry-job-main">
-          <p className="retry-job-kicker"><b>{taskLabels[job.task_type] ?? job.task_type}</b><span>{stateLabel(job.state)}</span><em>{overridden ? "人工调整" : "自动计划"}</em></p>
+        <div className="retry-job-identity">
+          <p className="retry-job-kicker"><b>{taskLabels[job.task_type] ?? job.task_type}</b><span>{stateLabel(job.state)}</span></p>
           <h3>{job.title}</h3>
-          <p className="retry-failure-summary"><b>{job.last_error ?? "暂无失败代码"}</b><span>失败 {localTime(job.last_failure_at)}</span><span>第 {job.attempt_count} 次</span></p>
-          <dl>
-            <div><dt>当前计划</dt><dd>{localTime(job.available_at)}</dd></div>
-            <div><dt>计划来源</dt><dd>{overridden ? "人工调整" : "自动计划"}</dd></div>
-            {overridden ? <div><dt>原自动计划</dt><dd>{localTime(job.original_available_at)}</dd></div> : null}
-          </dl>
-          {latest && command ? <p className={`retry-command-state is-${command.tone}`}><span>最近操作</span><b>{command.label}</b><time>{localTime(latest.completed_at ?? latest.requested_at)}</time></p> : null}
-          <code title={job.job_id}>任务 {job.job_id.slice(0, 12)}…</code>
+          <p className="retry-failure-summary"><b>{job.last_error ?? "暂无失败代码"}</b><span>失败 {compactTime(job.last_failure_at)}</span><span>第 {job.attempt_count} 次</span></p>
         </div>
+        <p className="retry-job-schedule"><span>当前计划</span><b>{compactTime(job.available_at)}</b><em>{overridden ? "人工调整" : "自动计划"}</em>{overridden ? <small>原自动计划 {compactTime(job.original_available_at)}</small> : null}</p>
+        {latest && command ? <p className={`retry-command-state is-${command.tone}`} title={command.label}><span>最近操作</span><b>{command.shortLabel}</b><time>{compactTime(latest.completed_at ?? latest.requested_at)}</time></p> : <p className="retry-command-state is-empty"><span>最近操作</span><b>暂无命令</b></p>}
         <div className="retry-job-control">
           <button type="button" aria-expanded={expanded} aria-controls={`retry-plan-${job.job_id}`} disabled={!mutable || loading} onClick={() => setExpandedJobId(expanded ? null : job.job_id)}>{expanded ? "收起计划" : "调整计划"}</button>
-          {expanded ? <div className="retry-job-plan" id={`retry-plan-${job.job_id}`}>{actions.filter(action => action.mode !== "KEEP_ORIGINAL" || overridden).map(action => <button key={action.mode} type="button" disabled={!mutable || loading} onClick={() => choose(action.mode, [job.job_id])}><b>{action.label}</b><span>{action.help}</span></button>)}</div> : null}
         </div>
+        {expanded ? <div className="retry-job-plan" id={`retry-plan-${job.job_id}`}><header><div><b>选择新的领取时间</b><span>只改变可领取时间，不直接调用 provider。</span></div><code title={job.job_id}>任务 {job.job_id.slice(0, 12)}…</code></header><div>{actions.filter(action => action.mode !== "KEEP_ORIGINAL" || overridden).map(action => <button key={action.mode} type="button" disabled={!mutable || loading} onClick={() => choose(action.mode, [job.job_id])}><b>{action.label}</b><span>{action.help}</span></button>)}</div>{latest && command ? <p>最近命令：<b>{command.label}</b> · {localTime(latest.completed_at ?? latest.requested_at)}</p> : null}</div> : null}
       </article>;
     })}</div>
     {pending ? <div className="retry-confirmation" role="dialog" aria-modal="false" aria-label="确认重试调度调整">

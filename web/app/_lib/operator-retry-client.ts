@@ -19,23 +19,24 @@ const resultCode = (request: OperatorRetryRequest) => {
 
 export const operatorRetryCommandPresentation = (request: OperatorRetryRequest) => {
   if (request.status === "PENDING") return {
-    label: "等待 Windows 调度器应用", tone: "pending", terminal: false,
+    label: "等待 Windows 调度器应用", shortLabel: "等待应用", tone: "pending", terminal: false,
   } as const;
   if (request.status === "APPLYING") return {
-    label: "正在由 Windows 调度器应用", tone: "applying", terminal: false,
+    label: "正在由 Windows 调度器应用", shortLabel: "应用中", tone: "applying", terminal: false,
   } as const;
   if (request.status === "APPLIED") return {
-    label: "已应用到 Windows 调度器", tone: "applied", terminal: true,
+    label: "已应用到 Windows 调度器", shortLabel: "已应用", tone: "applied", terminal: true,
   } as const;
   const code = resultCode(request);
   if (code === "JOB_NOT_MUTABLE") return {
-    label: "未应用：任务已不可调整", tone: "rejected", terminal: true,
+    label: "未应用：任务已不可调整", shortLabel: "未应用", tone: "rejected", terminal: true,
   } as const;
   if (code === "JOB_STATE_CHANGED") return {
-    label: "未应用：任务状态或计划已变化", tone: "conflict", terminal: true,
+    label: "未应用：任务状态或计划已变化", shortLabel: "冲突", tone: "conflict", terminal: true,
   } as const;
   return {
     label: request.status === "CONFLICT" ? "未应用：调度状态冲突" : "未应用：命令被拒绝",
+    shortLabel: request.status === "CONFLICT" ? "冲突" : "未应用",
     tone: request.status === "CONFLICT" ? "conflict" : "rejected",
     terminal: true,
   } as const;
