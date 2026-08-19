@@ -42,33 +42,5 @@
 - Optional growing resources, such as news details, must not mark an otherwise
   current live heartbeat offline.
 
-## Cross-boundary growth and critical paths
-
-- Before data crosses a process, service, hosting, storage, synchronization, or
-  API boundary, its owner and source of truth must be identified, the path must
-  be classified as critical or optional, and its work and transport growth must
-  be classified against accumulated state.
-- A path that communicates liveness, readiness, current authority, deployment,
-  or control state must have bounded work and bounded transport independently
-  of history, record, user, retry, or generation growth. Its representation is
-  an explicit projection of current state and bounded summaries; newly added
-  data does not enter that path merely because it appears in a shared source
-  object.
-- Growing state crosses the boundary through an independently bounded resource,
-  such as a cursor page, byte-bounded batch, indexed D1 ledger, or lazy read.
-  One operation must remain bounded as total authoritative state grows, and a
-  complete source of truth must remain reachable without creating another
-  full-history blob.
-- A display limit or business selection window is not a transport guarantee.
-  Transport bounds are enforced on serialized bytes at the transport boundary,
-  with enough normal headroom that the emergency host limit remains a final
-  guard rather than the storage model.
-- Failure belongs to the resource whose write or read failed. Optional or
-  growing-resource failure remains visible as that resource's degraded state,
-  but shared plumbing must still publish unrelated healthy critical state.
-- When a bound is exceeded, repair ownership, projection, pagination, batching,
-  or failure isolation first. Do not default to raising the host limit or
-  deleting authoritative evidence.
-
 Preview-specific write isolation and provenance guarantees are defined in
 [`PREVIEW_ISOLATION.md`](PREVIEW_ISOLATION.md).

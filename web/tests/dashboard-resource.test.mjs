@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  DashboardResourceError,
   clearDashboardResource,
   loadDashboardResource,
   primeDashboardResources,
@@ -62,23 +61,6 @@ test("exposes initial loading and unavailable read state without a snapshot", as
   assert.match(failed.error.message, /offline/);
   assert.equal(presentationOf(failed).readState, "UNAVAILABLE");
   assert.equal(presentationOf(failed).label, "状态不可用");
-});
-
-test("preserves machine-readable resource failure codes for generation recovery", async () => {
-  const url = "/api/news-evidence?resource-test=stale-generation";
-  globalThis.fetch = async () => jsonResponse({
-    error: "evidence generation changed",
-    error_code: "NEWS_EVIDENCE_CURSOR_STALE",
-    active_snapshot_id: "b".repeat(64),
-  }, 409);
-
-  await assert.rejects(
-    loadDashboardResource(url, { force: true }),
-    error => error instanceof DashboardResourceError
-      && error.status === 409
-      && error.code === "NEWS_EVIDENCE_CURSOR_STALE"
-      && error.details.active_snapshot_id === "b".repeat(64),
-  );
 });
 
 test("shares stale status with the shell subscriber and clears it after recovery", async () => {

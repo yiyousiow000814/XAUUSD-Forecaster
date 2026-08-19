@@ -444,15 +444,16 @@ function Invoke-ProductionShapePreflight {
             "--port", [string]$preflightPort
         ) -WorkingDirectory $stageRoot -WindowStyle Hidden -PassThru `
             -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-        $statusUrl = "http://127.0.0.1:$preflightPort/api/critical-status"
+        $statusUrl = "http://127.0.0.1:$preflightPort/api/status"
         $deadline = [DateTimeOffset]::UtcNow.AddSeconds(60)
         $ready = $false
         do {
             Start-Sleep -Milliseconds 500
             if ($process.HasExited) { break }
             try {
-                # Candidate readiness depends on one complete critical status
-                # snapshot. Optional dashboard resources degrade independently.
+                # Readiness is the ability to build one complete status
+                # snapshot. /api/health describes live market availability and
+                # may correctly be non-200 while the candidate is sound.
                 $ready = (Invoke-WebRequest -UseBasicParsing -Uri $statusUrl `
                     -TimeoutSec 20).StatusCode -eq 200
             } catch { $ready = $false }
@@ -729,7 +730,7 @@ function Test-CurrentProductionShape {
         $python = (Get-Command python.exe -ErrorAction Stop).Source
         $arguments = @(
             (Join-Path $moduleRoot "scripts\check_production_shape.py"),
-            "--status-url", "http://127.0.0.1:8765/api/critical-status",
+            "--status-url", "http://127.0.0.1:8765/api/status",
             "--allow-pending-generation-decision"
         )
         $result = @(& $python @arguments 2>&1)

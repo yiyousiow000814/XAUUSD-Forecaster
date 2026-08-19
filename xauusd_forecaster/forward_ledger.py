@@ -548,14 +548,12 @@ class ForwardLedger:
         self.connection.execute("PRAGMA busy_timeout=60000")
         self.connection.executescript(SCHEMA)
         from .assistant_capacity import install_assistant_capacity_schema
-        from .dashboard_summaries import install_dashboard_summary_schema
         from .evidence_v2 import install_v2_schema
         from .news_scheduler import install_scheduler_schema
 
         install_v2_schema(self.connection)
         install_scheduler_schema(self.connection)
         install_assistant_capacity_schema(self.connection)
-        install_dashboard_summary_schema(self.connection)
         self._install_source_poll_schema()
         self._install_daily_brief_lifecycle_schema()
         self._install_append_only_triggers()

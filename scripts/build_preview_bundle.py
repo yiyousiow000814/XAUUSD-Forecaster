@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import importlib
 import json
 import sys
@@ -38,28 +37,6 @@ SERIES_BY_DOMAIN = {
     "流动性": "WALCL",
     "风险偏好": "VIXCLS",
 }
-
-
-def _preview_news_evidence(status: dict) -> dict:
-    """Freeze the bounded production-derived evidence window for Preview QA."""
-    rows = [
-        {
-            key: value for key, value in row.items()
-            if key != "economic_age_minutes"
-        }
-        for row in status.get("news_evidence", [])
-        if isinstance(row, dict)
-    ]
-    encoded = json.dumps(
-        rows, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    return {
-        "snapshot_id": hashlib.sha256(encoded).hexdigest(),
-        "contract_version": "news-evidence-preview-v1",
-        "activated_at": status.get("generated_at"),
-        "items": rows,
-    }
 PREVIEW_MANIFEST = json.loads(
     (MODULE_ROOT / "web" / "preview-manifest.json").read_text(encoding="utf-8")
 )
@@ -364,7 +341,6 @@ def _read_completed_news_index(base_url: str) -> dict:
 
 def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
     status = _read_json(base_url, "/api/status")
-    news_evidence = _preview_news_evidence(status)
     _apply_branch_runtime_contract(status)
     learning = _read_json(base_url, "/api/learning")
     market_chart = _read_json(base_url, "/api/market-chart")
@@ -373,8 +349,6 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
 
     status["factor_coverage"] = _rebuild_factor_coverage(status)
     _backfill_annotation_reasons(news_index, status)
-    audit = json.loads(dashboard_sync.audit_snapshot(status))
-    status = json.loads(dashboard_sync.remote_snapshot(status))
     status["preview"] = {
         "is_preview": True,
         "branch": branch,
@@ -440,7 +414,6 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
 
     return {
         "status": status,
-        "audit": audit,
         "learning": learning,
         # Production's public learning payload is already compressed. Wider
         # spacing there is not proof of a source-data gap, so Preview must not
@@ -448,7 +421,6 @@ def build_bundle(base_url: str, branch: str, commit_sha: str) -> dict:
         "learning_history": list(indexed_history.values()),
         "market_chart": market_chart,
         "news_index": news_index,
-        "news_evidence": news_evidence,
         "news_details": details,
     }
 

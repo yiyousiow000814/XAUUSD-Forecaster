@@ -142,16 +142,11 @@ Brief state machine. Scheduler evidence includes:
 Counts from articles, event identities, prediction exposures, and training
 rows remain distinct. One must never substitute for another in health gates.
 
-The local API exposes process/API readiness, critical-status readiness, and
-optional-resource degradation as separate states. Critical status covers the
-bounded forward-prediction and news control plane; audit, learning, market, and
-event-level evidence are independently built optional resources. After a
-resource's fresh TTL, a still-bounded snapshot is returned immediately with a
+The local status snapshot covers the forward-prediction and news data plane.
+After its fresh TTL, a still-bounded snapshot is returned immediately with a
 `stale` response marker while exactly one background refresh runs. A snapshot
 older than the declared maximum stale boundary remains unavailable; it is never
-presented as current or silently extended. `/api/health` depends on process and
-critical-status readiness, not successful construction of every optional
-resource.
+presented as current or silently extended.
 The production health route separately reads aggregate Cloudflare D1 state for
 Assistant turns, news questions, titles, compaction, and memory indexing. These
 queues remain separate from local scheduler counters and expose their own
@@ -171,16 +166,10 @@ promoted to `OPS_NEWS_MIRROR_STATE_DIVERGED`. Every other optional mirror
 resource failure retains its own upstream code under
 `OPS_SYNC_RESOURCE_FAILED`; it must not collapse into an uncoded component
 warning.
-The critical heartbeat is published before independently synchronized optional
-resources. A failed optional resource degrades that named resource and is
-reported on the next bounded heartbeat; it does not freeze the heartbeat,
-deployment provenance, or unrelated component health. A partially written
-paged generation cannot replace the last complete active generation.
 
 Runtime rollout observation is also a state machine, not a binary HTTP probe.
-A candidate preflight reads the bounded critical-status projection and validates
-generation completeness plus every production contract that can be proven from
-the copied evidence database, but it does not
+A candidate preflight validates generation completeness and every production
+contract that can be proven from the copied evidence database, but it does not
 require a post-generation live decision that the candidate has not yet had an
 opportunity to produce. After installation, the observation state remains the
 authority for that temporal proof: the candidate must produce two subsequent

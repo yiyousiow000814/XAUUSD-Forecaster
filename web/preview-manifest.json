@@ -18,30 +18,23 @@
   ],
   "resources": {
     "status": "/api/status",
-    "audit": "/api/audit",
     "learning": "/api/learning",
     "learningHistory": "/api/learning-history",
     "newsIndex": "/api/news-index",
     "newsContent": "/api/news-content",
-    "newsEvidence": "/api/news-evidence",
     "marketHistory": "/api/market-history"
   },
   "statusInlineKeys": [
     "preview", "generated_at", "system", "operational_health", "training", "counts",
-    "factor_coverage",
+    "news_evidence_summary", "daily_news_briefs", "daily_news_brief_summary",
+    "storyline_summary", "factor_coverage",
     "annotation_queue", "news_source_health", "llm_routing", "gemini_quota",
     "gemini_31_quota", "gemma_quota", "gemini_embedding_quota", "latest", "research_forecast",
     "u5_context", "outcome_summary", "sources", "forward_epoch",
-    "learning_resource", "news_index_resource",
-    "audit_resource", "news_evidence_resource", "market_chart_resource",
-    "market_history_resource"
-  ],
-  "auditInlineKeys": [
-    "generated_at", "daily_news_briefs", "daily_news_brief_summary",
-    "storylines", "market_narrative_candidates", "archived_storylines",
+    "news_feature_policy", "news_evidence", "storylines",
+    "market_narrative_candidates", "archived_storylines",
     "archived_story_event_candidates", "story_event_candidates",
     "market_reaction_streams", "theme_streams", "unassigned_story_events",
-    "recent_decisions", "news_metrics", "news_evidence_summary",
-    "storyline_summary", "news_feature_policy", "news_evidence_resource"
+    "recent_decisions", "learning_resource", "news_index_resource"
   ]
 }

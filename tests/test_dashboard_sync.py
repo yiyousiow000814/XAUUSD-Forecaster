@@ -22,15 +22,6 @@ def _sync_module():
     return module
 
 
-def _dashboard_module():
-    path = Path(__file__).resolve().parents[1] / "scripts" / "run_dashboard_api.py"
-    spec = importlib.util.spec_from_file_location("run_dashboard_api_sync_test", path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def _stub_assistant_capacity_route(monkeypatch, accountant_value: str) -> list[dict]:
     from xauusd_forecaster import assistant_capacity, assistant_routing
 
@@ -88,17 +79,7 @@ def _preview_module():
     spec = importlib.util.spec_from_file_location("build_preview_bundle_test", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
-    package_modules = {
-        name: loaded for name, loaded in sys.modules.items()
-        if name == "xauusd_forecaster" or name.startswith("xauusd_forecaster.")
-    }
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        for name in tuple(sys.modules):
-            if name == "xauusd_forecaster" or name.startswith("xauusd_forecaster."):
-                sys.modules.pop(name, None)
-        sys.modules.update(package_modules)
+    spec.loader.exec_module(module)
     return module
 
 
@@ -131,38 +112,6 @@ spec.loader.exec_module(module)
         check=False,
     )
     assert result.returncode == 0, result.stderr
-
-
-def test_preview_evidence_fixture_is_stable_and_omits_display_age() -> None:
-    module = _preview_module()
-    status = {
-        "generated_at": "2026-08-19T10:00:00+00:00",
-        "news_evidence": [{
-            "event_key": "a" * 64,
-            "source_hash": "b" * 64,
-            "economic_age_minutes": 42.5,
-            "broad_model_eligible": True,
-            "model_seen": False,
-        }],
-    }
-
-    first = module._preview_news_evidence(status)
-    later = module._preview_news_evidence({
-        **status,
-        "news_evidence": [{
-            **status["news_evidence"][0], "economic_age_minutes": 99.0,
-        }],
-    })
-
-    assert later == first
-    assert "economic_age_minutes" not in first["items"][0]
-    changed = module._preview_news_evidence({
-        **status,
-        "news_evidence": [{
-            **status["news_evidence"][0], "source_hash": "c" * 64,
-        }],
-    })
-    assert changed["snapshot_id"] != first["snapshot_id"]
 
 
 def test_preview_reader_rejects_a_noncanonical_source() -> None:
@@ -785,7 +734,7 @@ def test_ingest_response_records_valid_main_revision(tmp_path, monkeypatch) -> N
     assert json.loads(signal.read_text(encoding="utf-8"))["main_revision"] == revision
 
 
-def test_critical_status_excludes_growing_resources_and_keeps_references() -> None:
+def test_remote_snapshot_keeps_full_news_index_and_splits_details() -> None:
     module = _sync_module()
     body = "完整正文" * 2_000
     payload = {
@@ -831,14 +780,12 @@ def test_critical_status_excludes_growing_resources_and_keeps_references() -> No
 
     encoded = module.remote_snapshot(payload)
     mirrored = json.loads(encoded)
-    audit = json.loads(module.audit_snapshot(payload))
     index_rows, detail_rows = module.news_mirror_parts(payload)
     learning = json.loads(module.learning_snapshot(payload))
 
     assert len(encoded) <= module.REMOTE_PAYLOAD_LIMIT_BYTES
+    assert mirrored["recent_news"] == []
     assert mirrored["news_index_resource"] == "/api/news-index"
-    assert mirrored["news_evidence_resource"] == "/api/news-evidence"
-    assert mirrored["audit_resource"] == "/api/audit"
     assert mirrored["learning_resource"] == "/api/learning"
     assert detail_rows[0]["payload"]["summary_zh"] == body
     assert index_rows[0]["content_fetch_status"] == "UNAVAILABLE"
@@ -849,14 +796,18 @@ def test_critical_status_excludes_growing_resources_and_keeps_references() -> No
     assert "annotation_reason" not in detail_rows[0]["payload"]
     assert len(detail_rows[0]["detail_key"]) == 64
     assert mirrored["market_chart"]["decisions"] == []
-    assert "news_evidence" not in mirrored
-    assert "recent_news" not in mirrored
-    assert "recent_decisions" not in mirrored
+    assert mirrored["market_chart"]["candles"] == []
+    assert mirrored["market_chart"]["overview_candles"] == []
+    assert mirrored["market_chart"]["training_markers"] == []
     market_decision = json.loads(module.market_chart_snapshot(payload))["decisions"][0]
     assert market_decision["source_decision_id"] == "d1"
     assert market_decision["model_version"] == "unused-field"
-    assert len(audit["recent_decisions"]) == module.REMOTE_DECISION_LIMIT
-    assert audit["news_evidence_resource"] == "/api/news-evidence"
+    assert len(mirrored["recent_decisions"]) == module.REMOTE_DECISION_LIMIT
+    assert len(mirrored["news_evidence"]) == 2 * module.REMOTE_EVIDENCE_LIMIT_PER_STATE
+    assert sum(row["model_seen"] for row in mirrored["news_evidence"]) == 60
+    assert sum(not row["model_seen"] for row in mirrored["news_evidence"]) == 60
+    assert mirrored["mirror_window"]["news_evidence_seen"] == 60
+    assert mirrored["mirror_window"]["news_evidence_unseen"] == 60
     assert learning["learning_curves"]["models"] == [
         {"lifecycle_status": "LATEST", "model_version": "latest"},
     ]
@@ -868,32 +819,6 @@ def test_critical_status_excludes_growing_resources_and_keeps_references() -> No
     assert "learning_curves" not in mirrored
     assert "models" not in mirrored["training"]
     assert len(index_rows) == 100
-
-
-@pytest.mark.parametrize(
-    "field",
-    (
-        "news_evidence", "daily_news_briefs", "storylines",
-        "future_accumulated_records", "future_user_history",
-    ),
-)
-def test_critical_status_size_is_independent_of_unknown_growing_state(field) -> None:
-    module = _sync_module()
-    base = {
-        "generated_at": "2026-08-19T10:00:00+00:00",
-        "system": {"online": True, "components": {}},
-        "counts": {"decision_events": 10},
-    }
-    baseline = module.remote_snapshot(base)
-    grown = {
-        **base,
-        field: [{"id": index, "body": "x" * 2_000} for index in range(10_000)],
-    }
-
-    encoded = module.remote_snapshot(grown)
-
-    assert encoded == baseline
-    assert len(encoded) < module.REMOTE_PAYLOAD_LIMIT_BYTES // 4
 
 
 def test_news_detail_batches_stay_bounded() -> None:
@@ -1216,522 +1141,10 @@ def test_news_detail_failure_never_publishes_dangling_index(monkeypatch, tmp_pat
     assert posted == ["https://remote/api/news-content"]
 
 
-def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
-    monkeypatch, tmp_path,
-) -> None:
-    module = _sync_module()
-    snapshot_id = "a" * 64
-    rows = [{
-        "event_key": f"{index:064x}",
-        "collector_first_seen_time": f"2026-08-19T10:{index % 60:02d}:00+00:00",
-        "source_published_time": None,
-        "broad_model_eligible": index % 2 == 0,
-        "model_seen": index % 3 == 0,
-        "body": "evidence" * 200,
-    } for index in range(105)]
-
-    class Response:
-        status = 200
-
-        def __init__(self, payload):
-            self.payload = payload
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def read(self):
-            return json.dumps(self.payload, ensure_ascii=False).encode("utf-8")
-
-    def urlopen(url, *_args, **_kwargs):
-        query = __import__("urllib.parse").parse.urlsplit(str(url)).query
-        values = __import__("urllib.parse").parse.parse_qs(query)
-        cursor = (values.get("cursor") or [None])[0]
-        offset = int(cursor.split(":", 1)[1]) if cursor else 0
-        page = rows[offset:offset + module.NEWS_EVIDENCE_WRITE_BATCH_ITEMS]
-        next_offset = offset + len(page)
-        return Response({
-            "snapshot_id": snapshot_id,
-            "items": page,
-            "total": len(rows),
-            "has_more": next_offset < len(rows),
-            "next_cursor": (
-                f"{snapshot_id}:{next_offset}" if next_offset < len(rows) else None
-            ),
-        })
-
-    posted = []
-    remote_next_offset = 0
-    remote_active = False
-
-    def post(url, body, _config):
-        nonlocal remote_next_offset, remote_active
-        payload = json.loads(body)
-        posted.append((url, payload))
-        if "prepare_snapshot" in payload:
-            return {
-                "status": "OK", "active": remote_active,
-                "next_offset": len(rows) if remote_active else remote_next_offset,
-            }
-        if "items" in payload:
-            assert payload["offset"] == remote_next_offset
-            remote_next_offset += len(payload["items"])
-            return {"status": "OK", "received": len(payload["items"])}
-        if "activate_snapshot" in payload:
-            assert remote_next_offset == len(rows)
-            remote_active = True
-            return {"status": "OK", "activated": snapshot_id, "count": len(rows)}
-        return {"status": "OK"}
-
-    monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
-    monkeypatch.setattr(module, "_post_json", post)
-    config = {
-        "local_status_url": "http://local/api/status",
-        "remote_ingest_url": "https://remote/api/ingest",
-        "token": "test",
-        "news_evidence_state_file": str(tmp_path / "evidence-state.json"),
-    }
-
-    module._sync_news_evidence({}, config)
-    first_cycle_batches = [body for _url, body in posted if "items" in body]
-    assert not any("activate_snapshot" in body for _url, body in posted)
-    assert len(first_cycle_batches) == module.NEWS_EVIDENCE_PAGES_PER_CYCLE
-    assert posted[0][1] == {
-        "contract_version": module.NEWS_EVIDENCE_CONTRACT_VERSION,
-        "prepare_snapshot": snapshot_id,
-        "expected_count": len(rows),
-    }
-    module._sync_news_evidence({}, config)
-
-    batches = [body for _url, body in posted if "items" in body]
-    activation = next(body for _url, body in posted if "activate_snapshot" in body)
-    assert sum(len(body["items"]) for body in batches) == len(rows)
-    assert [item["event_key"] for body in batches for item in body["items"]] == [
-        row["event_key"] for row in rows
-    ]
-    assert [body["offset"] for body in batches] == list(
-        range(0, len(rows), module.NEWS_EVIDENCE_WRITE_BATCH_ITEMS)
-    )
-    assert all(
-        len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode())
-        <= module.NEWS_INDEX_BATCH_LIMIT_BYTES
-        for body in batches
-    )
-    assert activation == {
-        "contract_version": module.NEWS_EVIDENCE_CONTRACT_VERSION,
-        "activate_snapshot": snapshot_id,
-        "expected_count": len(rows),
-    }
-    state = json.loads((tmp_path / "evidence-state.json").read_text(encoding="utf-8"))
-    assert state["active_snapshot_id"] == snapshot_id
-    assert posted[-1][1]["cleanup_active_snapshot"] == snapshot_id
-
-    posted.clear()
-    module._sync_news_evidence({}, config)
-    assert posted == [(
-        "https://remote/api/news-evidence",
-        {
-            "contract_version": module.NEWS_EVIDENCE_CONTRACT_VERSION,
-            "cleanup_active_snapshot": snapshot_id,
-        },
-    )]
-
-
-def test_news_evidence_sync_resumes_stable_generation_across_volatile_time_fields(
-    monkeypatch, tmp_path,
-) -> None:
-    sync = _sync_module()
-    api = _dashboard_module()
-    rows = [{
-        "event_key": f"{index:064x}",
-        "collector_first_seen_time": f"2026-08-19T10:{index:02d}:00+00:00",
-        "source_published_time": None,
-        "broad_model_eligible": True,
-        "model_seen": index % 2 == 0,
-        "source_hash": f"{index + 100:064x}",
-        "economic_age_minutes": float(index),
-        "freshness_status": "FRESH",
-        "model_permission": "BROAD_MODEL",
-        "reason_codes": ["EVIDENCE_PRIMARY"],
-    } for index in range(45)]
-    manifest = tmp_path / "news-evidence-generation.json"
-    stable_snapshot, frozen_rows = api._materialize_news_evidence_generation(
-        rows, manifest,
-    )
-    assert api._publish_news_evidence_snapshot(frozen_rows) == stable_snapshot
-    monkeypatch.setattr(sync, "NEWS_EVIDENCE_PAGES_PER_CYCLE", 2)
-
-    class Response:
-        status = 200
-
-        def __init__(self, payload):
-            self.payload = payload
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def read(self):
-            return json.dumps(self.payload).encode("utf-8")
-
-    def urlopen(url, *_args, **_kwargs):
-        query = __import__("urllib.parse").parse.urlsplit(str(url)).query
-        cursor = (__import__("urllib.parse").parse.parse_qs(query).get("cursor") or [None])[0]
-        return Response(api._news_evidence_page(cursor, sync.NEWS_EVIDENCE_WRITE_BATCH_ITEMS))
-
-    offsets: dict[str, int] = {}
-    received_keys: dict[str, list[str]] = {}
-    active = [None]
-    activations = []
-
-    def post(_url, body, _config):
-        payload = json.loads(body)
-        snapshot = payload.get("prepare_snapshot") or payload.get("snapshot_id") \
-            or payload.get("activate_snapshot") or payload.get("cleanup_active_snapshot")
-        if "prepare_snapshot" in payload:
-            return {
-                "status": "OK", "active": active[0] == snapshot,
-                "next_offset": offsets.get(snapshot, 0),
-            }
-        if "items" in payload:
-            assert payload["offset"] == offsets.get(snapshot, 0)
-            received_keys.setdefault(snapshot, []).extend(
-                item["event_key"] for item in payload["items"]
-            )
-            offsets[snapshot] = payload["offset"] + len(payload["items"])
-        if "activate_snapshot" in payload:
-            assert offsets.get(snapshot, 0) == payload["expected_count"]
-            active[0] = snapshot
-            activations.append(snapshot)
-        return {"status": "OK"}
-
-    monkeypatch.setattr(sync.urllib.request, "urlopen", urlopen)
-    monkeypatch.setattr(sync, "_post_json", post)
-    config = {
-        "local_status_url": "http://local/api/status",
-        "remote_ingest_url": "https://remote/api/ingest",
-        "token": "test",
-        "news_evidence_state_file": str(tmp_path / "evidence-state.json"),
-    }
-
-    sync._sync_news_evidence({}, config)
-    assert offsets[stable_snapshot] == 40
-    assert activations == []
-
-    age_drift_snapshot, restarted_rows = api._materialize_news_evidence_generation([
-        {
-            **row,
-            "economic_age_minutes": row["economic_age_minutes"] + 180,
-        }
-        for row in rows
-    ], manifest)
-    assert age_drift_snapshot == stable_snapshot
-    assert api._publish_news_evidence_snapshot(restarted_rows) == stable_snapshot
-    sync = _sync_module()
-    monkeypatch.setattr(sync, "NEWS_EVIDENCE_PAGES_PER_CYCLE", 2)
-    monkeypatch.setattr(sync.urllib.request, "urlopen", urlopen)
-    monkeypatch.setattr(sync, "_post_json", post)
-    sync._sync_news_evidence({}, config)
-    assert activations == [stable_snapshot]
-    assert received_keys[stable_snapshot] == [row["event_key"] for row in rows]
-    assert len(set(received_keys[stable_snapshot])) == len(rows)
-
-    expired_rows = [{
-        **row,
-        "economic_age_minutes": row["economic_age_minutes"] + 240,
-        "freshness_status": "EVENT_LIFETIME_EXPIRED",
-        "broad_model_eligible": False,
-        "model_permission": "DISPLAY_ONLY",
-        "reason_codes": ["EVIDENCE_PRIMARY", "EVENT_LIFETIME_EXPIRED"],
-    } for row in rows]
-    changed_snapshot, changed_rows = api._materialize_news_evidence_generation(
-        expired_rows,
-        manifest,
-        activated_snapshot_id=stable_snapshot,
-    )
-    assert api._publish_news_evidence_snapshot(changed_rows) == changed_snapshot
-    assert changed_snapshot != stable_snapshot
-    sync._sync_news_evidence({}, config)
-    assert changed_snapshot in offsets
-    assert active[0] == stable_snapshot
-    sync._sync_news_evidence({}, config)
-    assert active[0] == changed_snapshot
-    assert activations == [stable_snapshot, changed_snapshot]
-    assert all(
-        item["broad_model_eligible"] is False
-        for item in api._news_evidence_page(None, 50)["items"]
-    )
-
-    age_only_snapshot, age_only_rows = api._materialize_news_evidence_generation(
-        [
-            {**row, "economic_age_minutes": row["economic_age_minutes"] + 60}
-            for row in expired_rows
-        ],
-        manifest,
-        activated_snapshot_id=changed_snapshot,
-    )
-    assert age_only_snapshot == changed_snapshot
-    assert age_only_rows == changed_rows
-
-
-def test_news_evidence_activation_acknowledgement_replays_idempotently(
-    monkeypatch, tmp_path,
-) -> None:
-    module = _sync_module()
-    snapshot_id = "a" * 64
-    row = {
-        "event_key": "b" * 64,
-        "collector_first_seen_time": "2026-08-19T10:00:00+00:00",
-        "source_published_time": None,
-        "broad_model_eligible": True,
-        "model_seen": False,
-    }
-
-    class Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def read(self):
-            return json.dumps({
-                "snapshot_id": snapshot_id,
-                "items": [row],
-                "total": 1,
-                "has_more": False,
-                "next_cursor": None,
-            }).encode("utf-8")
-
-    remote = {"next_offset": 0, "active": False, "lose_ack": True}
-
-    def post(_url, body, _config):
-        payload = json.loads(body)
-        if "prepare_snapshot" in payload:
-            return {
-                "status": "OK", "active": remote["active"],
-                "next_offset": remote["next_offset"],
-            }
-        if "items" in payload:
-            remote["next_offset"] = 1
-            return {"status": "OK"}
-        if "activate_snapshot" in payload:
-            remote["active"] = True
-            if remote["lose_ack"]:
-                remote["lose_ack"] = False
-                raise TimeoutError("activation response was lost")
-        return {"status": "OK"}
-
-    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k: Response())
-    monkeypatch.setattr(module, "_post_json", post)
-    state_path = tmp_path / "evidence-state.json"
-    config = {
-        "local_status_url": "http://local/api/status",
-        "remote_ingest_url": "https://remote/api/ingest",
-        "token": "test",
-        "news_evidence_state_file": str(state_path),
-    }
-
-    with pytest.raises(TimeoutError, match="response was lost"):
-        module._sync_news_evidence({}, config)
-    assert not state_path.exists() or "active_snapshot_id" not in json.loads(
-        state_path.read_text(encoding="utf-8")
-    )
-
-    restarted = _sync_module()
-    monkeypatch.setattr(restarted.urllib.request, "urlopen", lambda *_a, **_k: Response())
-    monkeypatch.setattr(restarted, "_post_json", post)
-    restarted._sync_news_evidence({}, config)
-    local = json.loads(state_path.read_text(encoding="utf-8"))
-    assert local["active_snapshot_id"] == snapshot_id
-    assert local["record_count"] == 1
-
-
-def test_optional_growing_resource_failure_does_not_block_heartbeat(
-    monkeypatch, tmp_path,
-) -> None:
-    module = _sync_module()
-    local_payload = {
-        "generated_at": "2026-08-19T10:00:00+00:00",
-        "system": {"online": True, "components": {}},
-        "future_history": [{"body": "x" * 20_000} for _ in range(100)],
-    }
-
-    class Response:
-        status = 200
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def read(self):
-            return json.dumps(local_payload).encode("utf-8")
-
-    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k: Response())
-    target = {
-        "name": "cloudflare", "remote_ingest_url": "https://remote/api/ingest",
-        "token": "test", "legacy": False,
-        "local_status_url": "http://local/api/status",
-    }
-    monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
-    posted = []
-    monkeypatch.setattr(
-        module, "_post_json", lambda url, body, _config: posted.append((url, body)),
-    )
-    for name in (
-        "_sync_audit", "_sync_learning", "_sync_market", "_sync_market_history",
-        "_sync_news", "_sync_news_questions", "_sync_operator_retries",
-    ):
-        monkeypatch.setattr(module, name, lambda *_a, **_k: None)
-    monkeypatch.setattr(
-        module, "_sync_news_evidence",
-        lambda *_a, **_k: (_ for _ in ()).throw(TimeoutError("evidence unavailable")),
-    )
-
-    result = module.sync_once({"local_status_url": "http://local/api/status"})
-
-    assert posted[0][0] == "https://remote/api/ingest"
-    assert json.loads(posted[0][1])["generated_at"] == local_payload["generated_at"]
-    assert len(result) == 1
-    assert result[0]["resource"] == "news_evidence"
-    assert result[0]["error_type"] == "TimeoutError"
-    heartbeat = next(
-        row for row in result.resource_observations if row["resource"] == "heartbeat"
-    )
-    evidence = next(
-        row for row in result.resource_observations if row["resource"] == "news_evidence"
-    )
-    assert heartbeat["status"] == "OK"
-    assert evidence["status"] == "ERROR"
-
-
-def test_growing_local_snapshot_failure_cannot_block_critical_heartbeat(
-    monkeypatch,
-) -> None:
-    module = _sync_module()
-    critical = {
-        "generated_at": "2026-08-19T10:00:00+00:00",
-        "system": {"online": True},
-    }
-
-    class Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def read(self):
-            return json.dumps(critical).encode("utf-8")
-
-    def urlopen(url, *_args, **_kwargs):
-        if str(url).endswith("/api/critical-status"):
-            return Response()
-        raise TimeoutError("full optional snapshot timed out")
-
-    monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
-    target = {
-        "name": "cloudflare", "remote_ingest_url": "https://remote/api/ingest",
-        "token": "test", "legacy": False,
-        "local_status_url": "http://local/api/status",
-    }
-    monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
-    posted = []
-    monkeypatch.setattr(
-        module, "_post_json", lambda url, body, _config: posted.append((url, body)),
-    )
-    monkeypatch.setattr(module, "_sync_operator_retries", lambda *_a, **_k: None)
-
-    result = module.sync_once({"local_status_url": "http://local/api/status"})
-
-    assert len(posted) == 1
-    assert posted[0][0] == "https://remote/api/ingest"
-    assert json.loads(posted[0][1])["system"]["online"] is True
-    assert {row["resource"] for row in result} == {
-        "audit", "learning", "market_chart", "market_history", "news",
-        "news_evidence",
-    }
-    assert all(row["resource"] != "optional_snapshot" for row in result)
-    assert next(
-        row for row in result.resource_observations if row["resource"] == "heartbeat"
-    )["status"] == "OK"
-
-
-@pytest.mark.parametrize("failed_resource", ["audit", "learning", "market_chart"])
-def test_optional_resource_families_degrade_only_their_owner(
-    monkeypatch, failed_resource,
-) -> None:
-    module = _sync_module()
-    critical = {
-        "generated_at": "2026-08-19T10:00:00+00:00",
-        "system": {"online": True},
-    }
-
-    class Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def read(self):
-            return json.dumps(critical).encode("utf-8")
-
-    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k: Response())
-    target = {
-        "name": "cloudflare", "remote_ingest_url": "https://remote/api/ingest",
-        "token": "test", "legacy": False,
-        "local_status_url": "http://local/api/status",
-    }
-    monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
-    posted = []
-    monkeypatch.setattr(
-        module, "_post_json",
-        lambda url, body, _config: posted.append((url, json.loads(body))) or {},
-    )
-    operations = {
-        "audit": "_sync_audit",
-        "learning": "_sync_learning",
-        "market_chart": "_sync_market",
-        "market_history": "_sync_market_history",
-        "news": "_sync_news",
-        "news_evidence": "_sync_news_evidence",
-        "news_questions": "_sync_news_questions",
-        "operator_retries": "_sync_operator_retries",
-    }
-    called = []
-    for resource, name in operations.items():
-        def operation(*_args, resource=resource, **_kwargs):
-            called.append(resource)
-            if resource == failed_resource:
-                raise TimeoutError(f"{resource} failed")
-        monkeypatch.setattr(module, name, operation)
-
-    result = module.sync_once({"local_status_url": "http://local/api/status"})
-
-    assert posted[0][0] == "https://remote/api/ingest"
-    assert called == list(operations)
-    assert [row["resource"] for row in result] == [failed_resource]
-    by_resource = {row["resource"]: row for row in result.resource_observations}
-    assert by_resource["heartbeat"]["status"] == "OK"
-    assert by_resource[failed_resource]["status"] == "ERROR"
-    assert all(
-        row["status"] == "OK" for name, row in by_resource.items()
-        if name not in {failed_resource}
-    )
-
-
 def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> None:
     module = _sync_module()
     monkeypatch.setenv("DASHBOARD_OPERATOR_BRIDGE_TOKEN", "test-bridge-" + "x" * 32)
     monkeypatch.setattr(module, "_verify_news_mirror_state", lambda *_a, **_k: None)
-    monkeypatch.setattr(module, "_sync_news_evidence", lambda *_a, **_k: None)
     payload = {
         "generated_at": "2026-08-07T00:00:00+00:00",
         "learning_curves": {"learning_stage": "EARLY"},
@@ -1793,8 +1206,8 @@ def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> 
     first_cycle = module.sync_once(config)
     assert first_cycle == []
     assert {row["resource"] for row in first_cycle.resource_observations} == {
-        "heartbeat", "audit", "learning", "market_chart", "market_history", "news",
-        "news_evidence", "news_questions", "operator_retries",
+            "heartbeat", "learning", "market_chart", "market_history", "news",
+            "news_questions", "operator_retries",
     }
     assert all(row["status"] == "OK" for row in first_cycle.resource_observations)
     assert all(row["duration_ms"] >= 0 for row in first_cycle.resource_observations)
@@ -2130,7 +1543,7 @@ def test_remote_market_chart_is_split_from_status_and_keeps_recent_window() -> N
     }
     mirrored = json.loads(module.remote_snapshot(payload))
     assert mirrored["market_chart"]["decisions"] == []
-    assert mirrored["market_chart_resource"] == "/api/market-chart"
+    assert mirrored["market_chart"]["decision_resource"] == "/api/market-chart"
 
     market = json.loads(module.market_chart_snapshot(payload))
     retained = market["decisions"]

@@ -352,7 +352,7 @@ test("renders Daily Brief from authoritative date lifecycle state", () => {
   assert.match(source, /ASIA\/KUALA_LUMPUR/);
   assert.doesNotMatch(source, /payload\?\.daily_news_briefs\?\.length/);
   assert.doesNotMatch(source, /今日还没有简报/);
-  assert.ok(manifest.auditInlineKeys.includes("daily_news_brief_summary"));
+  assert.ok(manifest.statusInlineKeys.includes("daily_news_brief_summary"));
   assert.ok(
     css.indexOf(".brief-progress { grid-template-columns:1fr") >
       css.indexOf(".brief-progress { display:grid; grid-template-columns:minmax"),
@@ -770,8 +770,8 @@ test("keeps branch Preview identity and blocks writes", async () => {
   assert.match(builtPreview, new RegExp(escapedBranch));
 
   for (const path of [
-    "/api/ingest", "/api/audit", "/api/learning", "/api/learning-history",
-    "/api/news-index", "/api/news-content", "/api/news-evidence", "/api/market-chart",
+    "/api/ingest", "/api/learning", "/api/learning-history",
+    "/api/news-index", "/api/news-content", "/api/market-chart",
     "/api/market-history", "/api/news-questions", "/api/assistant-chat",
     "/api/assistant-worker/chat", "/api/assistant-worker/conversations",
     "/api/assistant-worker/news-questions",
@@ -800,7 +800,6 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   assert.match(page, /function previewResources/);
   assert.match(page, /review_state=COMPLETED/);
   assert.match(page, /previewBundle\.status/);
-  assert.match(page, /previewBundle\.audit/);
   assert.match(app, /const initialStatus = initialResources\["\/api\/status"\]/);
   assert.match(app, /<StatusView \/>/);
   assert.match(app, /<HealthView initialPayload=\{initialStatus\}/);
@@ -815,21 +814,19 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   const previewBuilder = readFileSync(new URL("../../scripts/build_preview_bundle.py", import.meta.url), "utf8");
   assert.match(vite, /compactPreviewLearning/);
   assert.match(vite, /compactPreviewStatus/);
-  assert.match(vite, /compactPreviewAudit/);
   assert.match(vite, /compactPreviewNewsIndex/);
   assert.match(vite, /delete bundle\.learning/);
   assert.match(learning, /daily_news_briefs: 2/);
+  assert.match(learning, /news_evidence: 12/);
   assert.match(learning, /recent_decisions: 12/);
   assert.match(learning, /value\.slice\(0, limit\)/);
   assert.match(learning, /items\.slice\(0, PREVIEW_NEWS_PAGE_SIZE\)/);
   assert.match(learning, /totals_scope: "BUILD_SNAPSHOT"/);
   assert.match(learning, /history_resource: market\.history_resource \?\? PREVIEW_RESOURCES\.marketHistory/);
   assert.match(learning, /training_markers: market\.training_markers \?\? \[\]/);
-  for (const key of ["story_event_candidates", "recent_decisions"]) {
-    assert.ok(manifest.auditInlineKeys.includes(key), key);
+  for (const key of ["news_evidence", "story_event_candidates", "recent_decisions"]) {
+    assert.ok(manifest.statusInlineKeys.includes(key), key);
   }
-  assert.ok(!manifest.statusInlineKeys.includes("news_evidence"));
-  assert.equal(manifest.resources.newsEvidence, "/api/news-evidence");
   assert.equal(manifest.resources.marketHistory, "/api/market-history");
   assert.doesNotMatch(page, /function previewRoomResources/);
   assert.match(learning, /models\.filter/);
@@ -844,7 +841,6 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   assert.match(previewBuilder, /for cadence in \("5m", "30m"\)/);
   assert.match(previewBuilder, /resource=version-overview/);
   assert.match(previewBuilder, /\*version_history/);
-  assert.match(previewBuilder, /"news_evidence": news_evidence/);
   assert.doesNotMatch(page, /auditView === "league"/);
   assert.match(page, /\[PREVIEW_RESOURCES\.status\]: publicDashboardStatus\(previewBundle\.status\)/);
   assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);
@@ -986,15 +982,12 @@ test("only a current D1 archive may publish the 60-day news total", async () => 
 test("keeps every audit collection in the compact Preview manifest", () => {
   const manifest = JSON.parse(readFileSync(new URL("../preview-manifest.json", import.meta.url), "utf8"));
   for (const key of [
-    "storylines", "story_event_candidates", "theme_streams",
+    "news_evidence", "storylines", "story_event_candidates", "theme_streams",
     "market_reaction_streams", "recent_decisions",
   ]) {
-    assert.ok(manifest.auditInlineKeys.includes(key), key);
+    assert.ok(manifest.statusInlineKeys.includes(key), key);
   }
   assert.ok(manifest.statusInlineKeys.includes("preview"));
-  assert.ok(!manifest.statusInlineKeys.includes("news_evidence"));
-  assert.equal(manifest.resources.audit, "/api/audit");
-  assert.equal(manifest.resources.newsEvidence, "/api/news-evidence");
   assert.deepEqual(manifest.branchSnapshotStatusPaths, [
     "factor_coverage",
     "annotation_queue.requests_per_minute_per_key",
@@ -1852,49 +1845,11 @@ test("uses one D1-validated writer for every large dashboard snapshot", () => {
     ["../app/api/ingest/route.ts", 1],
     ["../app/api/market-chart/route.ts", 2],
     ["../app/api/learning/route.ts", 3],
-    ["../app/api/audit/route.ts", 4],
   ]) {
     const source = readFileSync(new URL(path, import.meta.url), "utf8");
     assert.match(source, new RegExp(`writeDashboardSnapshot\\(request, binding, ${id}\\)`), path);
     assert.doesNotMatch(source, /INSERT INTO dashboard_snapshots/, path);
   }
-});
-
-test("activates only complete paged news-evidence generations outside status", () => {
-  const route = readFileSync(new URL("../app/api/news-evidence/route.ts", import.meta.url), "utf8");
-  const migration = readFileSync(
-    new URL("../drizzle/0021_paged_news_evidence.sql", import.meta.url), "utf8",
-  );
-  const store = readFileSync(
-    new URL("../app/api/_shared/news-evidence-store.ts", import.meta.url), "utf8",
-  );
-  const sync = readFileSync(new URL("../../scripts/run_dashboard_sync.py", import.meta.url), "utf8");
-  const manifest = JSON.parse(readFileSync(new URL("../preview-manifest.json", import.meta.url), "utf8"));
-  assert.match(migration, /PRIMARY KEY\(`snapshot_id`, `event_key`\)/);
-  assert.match(migration, /news_evidence_snapshot_eligible_idx/);
-  assert.match(migration, /news_evidence_batches/);
-  assert.match(migration, /expected_count/);
-  assert.match(route, /MAX_WRITE_BYTES = 400_000/);
-  assert.match(route, /MAX_PAGE_ITEMS = 50/);
-  assert.match(store, /NEWS_EVIDENCE_CURSOR_STALE/);
-  assert.match(store, /sort_time<\? OR \(sort_time=\? AND event_key<\?\)/);
-  assert.match(store, /pageSize \+ 1/);
-  assert.match(store, /next_cursor/);
-  assert.doesNotMatch(store, / OFFSET \?/);
-  assert.match(store, /SELECT count\(\*\) AS count FROM news_evidence_records/);
-  assert.match(store, /news_evidence_staging/);
-  assert.match(store, /news_evidence_batches/);
-  assert.match(store, /next_offset/);
-  assert.match(route, /cleanup_active_snapshot/);
-  assert.match(store, /LIMIT 200/);
-  assert.match(store, /INSERT INTO news_evidence_state/);
-  assert.match(store, /WHERE snapshot_id<>\?/);
-  assert.ok(route.indexOf("rejectPreviewWrite()") < route.indexOf("isIngestAuthorized(request)"));
-  assert.ok(route.indexOf("rejectPreviewWrite()") < route.indexOf("readBoundedBody(request"));
-  assert.match(sync, /news evidence snapshot expected \{total\} rows but staged \{received\}/);
-  assert.match(sync, /"activate_snapshot": snapshot_id/);
-  assert.equal(manifest.resources.newsEvidence, "/api/news-evidence");
-  assert.ok(!manifest.statusInlineKeys.includes("news_evidence"));
 });
 
 test("rejects oversized snapshots before preparing a D1 statement", async () => {
@@ -2575,10 +2530,6 @@ test("reflows news evidence into readable mobile cards", () => {
   assert.match(view, /showEvidenceMetrics/);
   assert.match(view, /className="evidence-metrics-toggle"/);
   assert.match(view, /mergeNewsEvidenceByEvent/);
-  assert.match(view, /const evidenceArchiveReady = Boolean\([\s\S]*evidenceArchive\.snapshot_id && evidenceArchive\.mode === evidenceMode/);
-  assert.match(view, /evidenceArchiveReady[\s\S]*mergeNewsEvidenceByEvent\(evidenceArchive\.items\)/);
-  assert.doesNotMatch(view, /evidenceArchive\.items\.length > 0/);
-  assert.match(view, /!evidenceArchiveReady && evidencePayloadHasDuplicates/);
   assert.match(view, /sortNewsEvidenceByTime\(merged\.values\(\)\)/);
   assert.match(view, /new Map<string, NewsEvidence>/);
   assert.match(view, /evidenceMode}:\$\{row\.event_key}/);
