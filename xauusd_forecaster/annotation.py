@@ -296,6 +296,10 @@ def pending_annotation_records(
     limit: int = 500,
     prompt_version: str = PROMPT_VERSION,
     priority_receipt_days: tuple[str, ...] = (),
+    received_from: datetime | None = None,
+    received_before: datetime | None = None,
+    before_cursor: tuple[str, str, str, int] | None = None,
+    selection_order: str = "default",
 ) -> list[dict[str, object]]:
     """Return exactly the rows that the current annotator may claim.
 
@@ -317,6 +321,23 @@ def pending_annotation_records(
         if recovery_table_exists else ""
     )
     prioritized_days = tuple(dict.fromkeys(priority_receipt_days))
+    if selection_order not in {"default", "receipt_desc"}:
+        raise ValueError("annotation selection order is not controlled")
+    scope_clauses: list[str] = []
+    scope_parameters: list[object] = []
+    if received_from is not None:
+        scope_clauses.append("n.collector_first_seen_time>=?")
+        scope_parameters.append(received_from.isoformat(timespec="microseconds"))
+    if received_before is not None:
+        scope_clauses.append("n.collector_first_seen_time<?")
+        scope_parameters.append(received_before.isoformat(timespec="microseconds"))
+    if before_cursor is not None:
+        scope_clauses.append(
+            "(n.collector_first_seen_time,n.source,n.source_item_id,n.revision_number)"
+            " < (?,?,?,?)"
+        )
+        scope_parameters.extend(before_cursor)
+    scope_clause = "".join(f" AND {clause}" for clause in scope_clauses)
     protected_day_membership = (
         "substr(datetime(n.collector_first_seen_time,'+8 hours'),1,10) IN ("
         + ",".join("?" for _ in prioritized_days) + ")"
@@ -348,6 +369,18 @@ def pending_annotation_records(
         + f" ELSE {len(prioritized_days)} END,"
         if prioritized_days else ""
     )
+    ordering = (
+        "n.collector_first_seen_time DESC,n.source DESC,"
+        "n.source_item_id DESC,n.revision_number DESC"
+        if selection_order == "receipt_desc" else
+        f"{day_order} CASE WHEN n.source='federal_reserve_monetary' "
+        "OR lower(n.headline) LIKE '%fomc%' "
+        "OR lower(n.headline) LIKE '%consumer price%' "
+        "OR lower(n.headline) LIKE '%payroll%' THEN 0 ELSE 1 END, "
+        "CASE WHEN n.body LIKE '[FULL_TEXT%' THEN 0 ELSE 1 END, "
+        "COALESCE(n.source_published_time,n.collector_first_seen_time) DESC, "
+        "n.collector_first_seen_time,n.source,n.source_item_id"
+    )
     rows = connection.execute(
         f"""SELECT n.* FROM news_revisions n
         LEFT JOIN news_annotations a
@@ -358,6 +391,7 @@ def pending_annotation_records(
         WHERE a.annotation_id IS NULL
           AND {semantic_eligibility_sql_predicate('n')}
           AND length(trim(COALESCE(n.body, ''))) >= {ANNOTATION_BODY_MIN_CHARACTERS}
+          {scope_clause}
           AND NOT EXISTS (
             SELECT 1 FROM news_revisions newer
             WHERE newer.source=n.source
@@ -394,20 +428,12 @@ def pending_annotation_records(
                   AND f2.prompt_version=f.prompt_version)
               {recovery_clause}
               AND (f.is_terminal=1 OR f.next_retry_at > ?))
-        ORDER BY {day_order}
-                 CASE WHEN n.source='federal_reserve_monetary'
-                           OR lower(n.headline) LIKE '%fomc%'
-                           OR lower(n.headline) LIKE '%consumer price%'
-                           OR lower(n.headline) LIKE '%payroll%'
-                      THEN 0 ELSE 1 END,
-                 CASE WHEN n.body LIKE '[FULL_TEXT%' THEN 0 ELSE 1 END,
-                 COALESCE(n.source_published_time,
-                          n.collector_first_seen_time) DESC,
-                 n.collector_first_seen_time, n.source, n.source_item_id
+        ORDER BY {ordering}
         LIMIT ?""",
         (
             *compatible_models, prompt_version, prompt_version,
             forward_epoch.isoformat(),
+            *scope_parameters,
             *(prioritized_days * 3),
             forward_epoch.isoformat(),
             expected_model_identity, prompt_version,
@@ -415,7 +441,8 @@ def pending_annotation_records(
                 (ANNOTATION_FAILURE_RECOVERY_VERSION,)
                 if recovery_table_exists else ()
             ),
-            now.isoformat(timespec="microseconds"), *prioritized_days,
+            now.isoformat(timespec="microseconds"),
+            *(prioritized_days if selection_order == "default" else ()),
             max(1, limit),
         ),
     ).fetchall()

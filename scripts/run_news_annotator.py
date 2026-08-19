@@ -169,7 +169,7 @@ def _execute_job(
         return {"status": "NOT_CURRENT"}
     urgent = job.priority in URGENT_PRIORITIES
     accountant = SchedulerModelAccountant(
-        ledger.connection, credential, urgent=urgent,
+        ledger.connection, credential, urgent=urgent, work_lane=job.work_lane,
     )
 
     if job.task_type == "ACTIVE_ANNOTATION":
@@ -178,7 +178,7 @@ def _execute_job(
             "api_key": credential.api_key,
             "limit": 1,
             "prompt_version": PROMPT_VERSION,
-            "allow_priority_reserve": False,
+            "allow_priority_reserve": urgent,
             "records": [record],
         }
         status = annotate_pending_news(
@@ -186,7 +186,10 @@ def _execute_job(
             model=DEFAULT_GEMINI_MODEL,
             request_accountant=accountant,
         )[0]
-        if status.get("status") == "DEFERRED":
+        if (
+            status.get("status") == "DEFERRED"
+            and status.get("failure_code") != "BACKFILL_BUDGET_DEFERRED"
+        ):
             status = annotate_pending_news(
                 **common,
                 model=FALLBACK_GEMINI_MODEL,
@@ -304,6 +307,7 @@ def _may_try_another_credential(status: dict[str, object]) -> bool:
     if status.get("failure_code") in {
         *EMBEDDING_PREREQUISITE_FAILURE_CODES,
         "PROVIDER_DISPATCH_DEFERRED",
+        "BACKFILL_BUDGET_DEFERRED",
     }:
         return False
     if status.get("retry_with_another_account"):
@@ -417,6 +421,7 @@ def _run_scheduled_lane(
             maintenance_deferred = status.get("failure_code") in {
                 *EMBEDDING_PREREQUISITE_FAILURE_CODES,
                 "PROVIDER_DISPATCH_DEFERRED",
+                "BACKFILL_BUDGET_DEFERRED",
             }
             if not maintenance_deferred:
                 record_job_attempt(
@@ -458,6 +463,7 @@ def _run_scheduled_lane(
         elif status.get("failure_code") in {
             *EMBEDDING_PREREQUISITE_FAILURE_CODES,
             "PROVIDER_DISPATCH_DEFERRED",
+            "BACKFILL_BUDGET_DEFERRED",
         }:
             retry_at = _next_retry(status, outcome_at)
             record_scheduler_deferral(

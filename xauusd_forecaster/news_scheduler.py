@@ -23,6 +23,20 @@ ROUTINE_POOL = "ROUTINE"
 PREEMPTIBLE_POOL = "PREEMPTIBLE"
 URGENT_PRIORITIES = frozenset({"IMMEDIATE", "FAST"})
 PRIORITIES = ("IMMEDIATE", "FAST", "NORMAL", "BACKGROUND")
+LIVE_LANE = "LIVE"
+CONTRACT_BACKFILL_LANE = "CONTRACT_BACKFILL"
+WORK_LANES = (LIVE_LANE, CONTRACT_BACKFILL_LANE)
+CONTRACT_BACKFILL_PAGE_SIZE = 50
+EXISTING_JOB_LANE_PAGE_SIZE = 100
+LIVE_OPERATIONAL_WORKLOAD = "LIVE_OPERATIONAL"
+CONTRACT_BACKFILL_WORKLOAD = "CONTRACT_BACKFILL"
+REQUEST_WORKLOADS = (LIVE_OPERATIONAL_WORKLOAD, CONTRACT_BACKFILL_WORKLOAD)
+BACKFILL_FORECAST_DAYS = 14
+BACKFILL_MIN_COMPLETE_DAYS = 7
+BACKFILL_RESERVE_RATIO = 0.08
+BACKFILL_SAFETY_RATIO = 0.08
+BACKFILL_MAX_SHARE_DENOMINATOR = 10
+BACKFILL_LIVE_SLA = timedelta(minutes=15)
 PRIORITY_HEAD_START = timedelta(minutes=1)
 IDLE_CAPACITY_MAX_WAIT = timedelta(minutes=30)
 RETRY_OVERRIDE_MODES = (
@@ -98,6 +112,9 @@ CREATE TABLE IF NOT EXISTS news_ai_job_attempts_v1 (
 
 CREATE INDEX IF NOT EXISTS news_ai_job_attempts_lookup_v1
 ON news_ai_job_attempts_v1(job_id,attempt_number,attempted_at);
+
+CREATE INDEX IF NOT EXISTS news_ai_job_attempts_recent_v1
+ON news_ai_job_attempts_v1(attempted_at,job_id,outcome,failure_code);
 
 CREATE TABLE IF NOT EXISTS news_ai_retry_schedule_overrides_v1 (
     override_id TEXT PRIMARY KEY,
@@ -189,6 +206,21 @@ CREATE TABLE IF NOT EXISTS news_ai_account_request_usage_v1 (
 
 CREATE INDEX IF NOT EXISTS news_ai_account_request_usage_window_v1
 ON news_ai_account_request_usage_v1(account_id,reserved_at,model_family);
+
+CREATE TABLE IF NOT EXISTS news_ai_quota_day_workload_v1 (
+    quota_day TEXT NOT NULL,
+    hour_bucket INTEGER NOT NULL CHECK(hour_bucket BETWEEN 0 AND 23),
+    account_id TEXT NOT NULL,
+    quota_authority TEXT NOT NULL,
+    workload_class TEXT NOT NULL CHECK(workload_class IN (
+        'LIVE_OPERATIONAL','CONTRACT_BACKFILL')),
+    request_count INTEGER NOT NULL CHECK(request_count >= 0),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(quota_day,hour_bucket,account_id,quota_authority,workload_class)
+);
+
+CREATE INDEX IF NOT EXISTS news_ai_quota_day_workload_retention_v1
+ON news_ai_quota_day_workload_v1(quota_day);
 
 CREATE TABLE IF NOT EXISTS news_ai_token_calibration_v1 (
     bucket_id TEXT PRIMARY KEY,
@@ -305,6 +337,7 @@ class ScheduledJob:
     annotation_id: str
     prompt_version: str
     priority: str
+    work_lane: str
     state: str
     available_at: datetime
     lease_owner: str | None
@@ -324,6 +357,136 @@ class RetryScheduleConflict(ValueError):
 def install_scheduler_schema(connection: sqlite3.Connection) -> None:
     connection.executescript(SCHEDULER_SCHEMA)
     installed_at = datetime.now(UTC)
+    job_columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(news_ai_jobs_v1)").fetchall()
+    }
+    if "work_lane" not in job_columns:
+        connection.execute(
+            "ALTER TABLE news_ai_jobs_v1 ADD COLUMN work_lane TEXT NOT NULL "
+            "DEFAULT 'LIVE' CHECK(work_lane IN ('LIVE','CONTRACT_BACKFILL'))"
+        )
+    if "lane_classified" not in job_columns:
+        connection.execute(
+            "ALTER TABLE news_ai_jobs_v1 ADD COLUMN lane_classified INTEGER "
+            "NOT NULL DEFAULT 0 CHECK(lane_classified IN (0,1))"
+        )
+    lane_index = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' "
+        "AND name='news_ai_jobs_lane_claim_v1'"
+    ).fetchone()
+    if lane_index is not None and "lane_classified" not in str(lane_index[0]):
+        connection.execute("DROP INDEX news_ai_jobs_lane_claim_v1")
+    connection.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS news_ai_jobs_lane_claim_v1
+        ON news_ai_jobs_v1(state,available_at,lane_classified,work_lane,
+                           priority,task_type,created_at);
+        CREATE INDEX IF NOT EXISTS news_ai_jobs_lane_migration_v1
+        ON news_ai_jobs_v1(prompt_version,task_type,lane_classified,
+                           created_at,job_id);
+        CREATE INDEX IF NOT EXISTS news_ai_jobs_lane_health_v1
+        ON news_ai_jobs_v1(task_type,lane_classified,work_lane,state,
+                           available_at,created_at);
+        CREATE INDEX IF NOT EXISTS news_ai_jobs_lane_oldest_v1
+        ON news_ai_jobs_v1(task_type,lane_classified,work_lane,state,created_at);
+        CREATE TABLE IF NOT EXISTS news_annotation_contract_backfill_v1 (
+          prompt_version TEXT PRIMARY KEY,
+          activated_at TEXT NOT NULL,
+          cursor_first_seen TEXT,
+          cursor_source TEXT,
+          cursor_source_item_id TEXT,
+          cursor_revision_number INTEGER,
+          state TEXT NOT NULL CHECK(state IN ('ACTIVE','COMPLETE')),
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS news_annotation_work_lane_migrations_v1 (
+          prompt_version TEXT PRIMARY KEY,
+          activated_at TEXT NOT NULL,
+          cursor_created_at TEXT,
+          cursor_job_id TEXT,
+          processed_count INTEGER NOT NULL DEFAULT 0,
+          state TEXT NOT NULL CHECK(state IN ('ACTIVE','COMPLETE')),
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS news_annotation_transition_state_v1 (
+          from_prompt_version TEXT NOT NULL,
+          to_prompt_version TEXT NOT NULL,
+          transition_kind TEXT NOT NULL CHECK(transition_kind IN (
+            'REUSE_COMPATIBLE','DETERMINISTIC_MIGRATION','MODEL_REVIEW_REQUIRED')),
+          transition_fingerprint TEXT NOT NULL,
+          transition_contract_json TEXT NOT NULL,
+          cursor_parsed_at TEXT,
+          cursor_annotation_id TEXT,
+          processed_count INTEGER NOT NULL DEFAULT 0,
+          state TEXT NOT NULL CHECK(state IN ('ACTIVE','COMPLETE')),
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(from_prompt_version,to_prompt_version)
+        );
+        CREATE TABLE IF NOT EXISTS news_annotation_transition_projections_v1 (
+          target_annotation_id TEXT PRIMARY KEY,
+          source_annotation_id TEXT NOT NULL,
+          from_prompt_version TEXT NOT NULL,
+          to_prompt_version TEXT NOT NULL,
+          transition_kind TEXT NOT NULL,
+          migrator_version TEXT,
+          transition_fingerprint TEXT NOT NULL,
+          source_annotation_hash TEXT NOT NULL,
+          projected_annotation_hash TEXT NOT NULL,
+          applied_at TEXT NOT NULL,
+          UNIQUE(source_annotation_id,to_prompt_version),
+          FOREIGN KEY(target_annotation_id) REFERENCES news_annotations(annotation_id),
+          FOREIGN KEY(source_annotation_id) REFERENCES news_annotations(annotation_id)
+        );
+        CREATE TABLE IF NOT EXISTS news_annotation_transition_failures_v1 (
+          source_annotation_id TEXT NOT NULL,
+          to_prompt_version TEXT NOT NULL,
+          transition_kind TEXT NOT NULL,
+          failure_code TEXT NOT NULL,
+          failure_detail TEXT NOT NULL,
+          failed_at TEXT NOT NULL,
+          PRIMARY KEY(source_annotation_id,to_prompt_version)
+        );
+        CREATE TABLE IF NOT EXISTS
+          news_annotation_transition_contract_failures_v1 (
+            from_prompt_version TEXT NOT NULL,
+            to_prompt_version TEXT NOT NULL,
+            persisted_fingerprint TEXT,
+            current_fingerprint TEXT NOT NULL,
+            failure_code TEXT NOT NULL,
+            failure_detail TEXT NOT NULL,
+            failed_at TEXT NOT NULL,
+            PRIMARY KEY(from_prompt_version,to_prompt_version)
+        );
+        """
+    )
+    transition_state_columns = {
+        str(row["name"])
+        for row in connection.execute(
+            "PRAGMA table_info(news_annotation_transition_state_v1)"
+        ).fetchall()
+    }
+    if "transition_fingerprint" not in transition_state_columns:
+        connection.execute(
+            "ALTER TABLE news_annotation_transition_state_v1 "
+            "ADD COLUMN transition_fingerprint TEXT"
+        )
+    if "transition_contract_json" not in transition_state_columns:
+        connection.execute(
+            "ALTER TABLE news_annotation_transition_state_v1 "
+            "ADD COLUMN transition_contract_json TEXT"
+        )
+    projection_columns = {
+        str(row["name"])
+        for row in connection.execute(
+            "PRAGMA table_info(news_annotation_transition_projections_v1)"
+        ).fetchall()
+    }
+    if "transition_fingerprint" not in projection_columns:
+        connection.execute(
+            "ALTER TABLE news_annotation_transition_projections_v1 "
+            "ADD COLUMN transition_fingerprint TEXT"
+        )
     provider_task_sql = str(connection.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' "
         "AND name='news_ai_provider_dispatch_task_state_v1'"
@@ -383,6 +546,7 @@ def install_scheduler_schema(connection: sqlite3.Connection) -> None:
         "calibration_provider_model_version": "TEXT",
         "calibration_safe_ratio": "REAL",
         "provider_model_version": "TEXT",
+        "workload_class": "TEXT NOT NULL DEFAULT 'LIVE_OPERATIONAL'",
     }
     for name, declaration in request_usage_additions.items():
         if name not in request_usage_columns:
@@ -436,6 +600,11 @@ def install_scheduler_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         "DELETE FROM news_ai_scheduler_deferrals_v1 WHERE deferred_at<=?",
         (_iso(installed_at - SCHEDULER_DEFERRAL_RETENTION),),
+    )
+    oldest_quota_day = quota_day(installed_at - timedelta(days=BACKFILL_FORECAST_DAYS))
+    connection.execute(
+        "DELETE FROM news_ai_quota_day_workload_v1 WHERE quota_day<?",
+        (oldest_quota_day,),
     )
     connection.commit()
     from .critical_annotation_state import install_annotation_job_count_schema
@@ -913,6 +1082,7 @@ def enqueue_job(
     revision_number: int,
     prompt_version: str,
     priority: str,
+    work_lane: str = LIVE_LANE,
     annotation_id: str = "",
     reopen_completed: bool = False,
     now: datetime | None = None,
@@ -921,6 +1091,8 @@ def enqueue_job(
         raise ValueError("scheduler task type is not controlled")
     if priority not in PRIORITIES:
         raise ValueError("scheduler priority is not controlled")
+    if work_lane not in WORK_LANES:
+        raise ValueError("scheduler work lane is not controlled")
     created = now or datetime.now(UTC)
     job_id = _job_id(
         task_type, source, source_item_id, revision_number,
@@ -929,13 +1101,23 @@ def enqueue_job(
     timestamp = _iso(created)
     with connection:
         connection.execute(
-            """INSERT OR IGNORE INTO news_ai_jobs_v1 VALUES
-            (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            """INSERT OR IGNORE INTO news_ai_jobs_v1
+            (job_id,task_type,source,source_item_id,revision_number,annotation_id,
+             prompt_version,priority,state,available_at,lease_owner,
+             lease_expires_at,attempt_count,last_error,created_at,updated_at,
+             completed_at,work_lane,lane_classified)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 job_id, task_type, source, source_item_id, revision_number,
                 annotation_id, prompt_version, priority, "QUEUED", timestamp,
-                None, None, 0, None, timestamp, timestamp, None,
+                None, None, 0, None, timestamp, timestamp, None, work_lane, 1,
             ),
+        )
+        connection.execute(
+            """UPDATE news_ai_jobs_v1
+               SET work_lane=?,priority=?,lane_classified=1
+               WHERE job_id=? AND state IN ('QUEUED','BACKING_OFF')""",
+            (work_lane, priority, job_id),
         )
         if reopen_completed:
             connection.execute(
@@ -1006,21 +1188,36 @@ def record_scheduler_deferral(
                    separators=(",", ":"))[:500]
         if isinstance(evidence, dict) else None
     )
+    coalesced = failure_code == "BACKFILL_BUDGET_DEFERRED"
     identity = "|".join((
         job.job_id, credential.account_id, failure_code,
-        _iso(deferred_at),
+        "coalesced" if coalesced else _iso(deferred_at),
     ))
+    deferral_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     with connection:
         connection.execute(
             "DELETE FROM news_ai_scheduler_deferrals_v1 WHERE deferred_at<=?",
             (_iso(deferred_at - SCHEDULER_DEFERRAL_RETENTION),),
         )
+        if coalesced:
+            existing = connection.execute(
+                "SELECT deferred_at FROM news_ai_scheduler_deferrals_v1 "
+                "WHERE deferral_id=?",
+                (deferral_id,),
+            ).fetchone()
+            if existing is not None and datetime.fromisoformat(
+                str(existing["deferred_at"])
+            ) > deferred_at - timedelta(minutes=5):
+                return
         connection.execute(
-            """INSERT OR IGNORE INTO news_ai_scheduler_deferrals_v1
-               VALUES (?,?,?,?,?,?,?,?)""",
+            """INSERT INTO news_ai_scheduler_deferrals_v1
+               VALUES (?,?,?,?,?,?,?,?)
+               ON CONFLICT(deferral_id) DO UPDATE SET
+                 evidence_json=excluded.evidence_json,
+                 deferred_at=excluded.deferred_at,
+                 next_retry_at=excluded.next_retry_at""",
             (
-                hashlib.sha256(identity.encode("utf-8")).hexdigest(),
-                job.job_id, job.task_type, credential.account_id,
+                deferral_id, job.job_id, job.task_type, credential.account_id,
                 failure_code, serialized, _iso(deferred_at),
                 str(status.get("next_retry_at") or "") or None,
             ),
@@ -1037,6 +1234,7 @@ def _job_from_row(row: sqlite3.Row) -> ScheduledJob:
         annotation_id=str(row["annotation_id"]),
         prompt_version=str(row["prompt_version"]),
         priority=str(row["priority"]),
+        work_lane=str(row["work_lane"]),
         state=str(row["state"]),
         available_at=datetime.fromisoformat(str(row["available_at"])),
         lease_owner=str(row["lease_owner"]) if row["lease_owner"] else None,
@@ -1295,6 +1493,7 @@ def claim_job(
     pool: str,
     task_types: tuple[str, ...] | None = None,
     excluded_task_types: frozenset[str] = frozenset(),
+    work_lanes: tuple[str, ...] = WORK_LANES,
     now: datetime | None = None,
     lease_seconds: int = 180,
 ) -> ScheduledJob | None:
@@ -1307,6 +1506,9 @@ def claim_job(
         raise ValueError("scheduler task type is not controlled")
     if not excluded_task_types.issubset(TASKS):
         raise ValueError("scheduler task exclusion is not controlled")
+    claimable_lanes = tuple(dict.fromkeys(work_lanes))
+    if not claimable_lanes or any(lane not in WORK_LANES for lane in claimable_lanes):
+        raise ValueError("scheduler work lane is not controlled")
     claimable_tasks = tuple(
         task_type for task_type in claimable_tasks
         if task_type not in excluded_task_types
@@ -1322,6 +1524,7 @@ def claim_job(
         if pool == PREEMPTIBLE_POOL else ""
     )
     task_placeholders = ",".join("?" for _ in claimable_tasks)
+    lane_placeholders = ",".join("?" for _ in claimable_lanes)
     connection.execute("BEGIN IMMEDIATE")
     try:
         connection.execute(
@@ -1335,10 +1538,19 @@ def claim_job(
             f"""SELECT j.* FROM news_ai_jobs_v1 j
                 LEFT JOIN news_ai_retry_schedule_overrides_v1 retry_override
                   ON retry_override.job_id=j.job_id AND retry_override.active=1
-                WHERE j.state IN ('QUEUED','BACKING_OFF')
-                  AND j.task_type IN ({task_placeholders})
-                  AND j.available_at<=? {priority_filter}
-                ORDER BY
+                 WHERE j.state IN ('QUEUED','BACKING_OFF')
+                   AND j.task_type IN ({task_placeholders})
+                   AND (j.task_type<>'ACTIVE_ANNOTATION' OR j.lane_classified=1)
+                   AND j.work_lane IN ({lane_placeholders})
+                   AND j.available_at<=? {priority_filter}
+                 ORDER BY
+                   CASE WHEN retry_override.mode='IDLE_CAPACITY'
+                              AND retry_override.requested_at<=? THEN 0 ELSE 1 END,
+                   CASE j.work_lane WHEN 'LIVE' THEN 0 ELSE 1 END,
+                   CASE WHEN j.task_type='ACTIVE_ANNOTATION'
+                              AND j.work_lane='LIVE'
+                              AND j.priority IN ('IMMEDIATE','FAST')
+                        THEN 0 ELSE 1 END,
                   CASE WHEN retry_override.mode='IDLE_CAPACITY'
                              AND retry_override.requested_at>? THEN 1 ELSE 0 END,
                   CASE WHEN j.created_at<=? THEN 0 ELSE 1 END,
@@ -1350,7 +1562,8 @@ def claim_job(
                   j.created_at,j.job_id
                 LIMIT 1""",
             (
-                *claimable_tasks, timestamp,
+                *claimable_tasks, *claimable_lanes, timestamp,
+                _iso(instant - IDLE_CAPACITY_MAX_WAIT),
                 _iso(instant - IDLE_CAPACITY_MAX_WAIT),
                 aged_before, aged_before,
             ),
@@ -1496,6 +1709,7 @@ def account_quota_snapshot(
     *,
     model_families: tuple[str, ...],
     daily_limit: int,
+    quota_authority: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, object]:
     """Read the scheduler's account ledger without exposing credentials."""
@@ -1528,13 +1742,44 @@ def account_quota_snapshot(
             if len(account_credentials) == 1
             else hashlib.sha256(account_id.encode("utf-8")).hexdigest()[:12]
         )
-        keys.append({
+        key_snapshot: dict[str, object] = {
             "slot": slot,
             "fingerprint": fingerprint,
             "sent": sent,
             "remaining": max(0, daily_limit - sent),
             "status": "AVAILABLE" if sent < daily_limit else "DAILY_LIMIT",
-        })
+        }
+        if quota_authority in {"gemini_quota", "gemini_31_quota"}:
+            forecast = _backfill_admission_locked(
+                connection,
+                account_id=account_id,
+                quota_authority=quota_authority,
+                model_families=families,
+                daily_limit=daily_limit,
+                current_daily_count=sent,
+                requested_requests=1,
+                now=instant,
+            )
+            backfill_today = int(connection.execute(
+                """SELECT COALESCE(sum(request_count),0)
+                   FROM news_ai_quota_day_workload_v1
+                   WHERE quota_day=? AND account_id=? AND quota_authority=?
+                     AND workload_class='CONTRACT_BACKFILL'""",
+                (day, account_id, quota_authority),
+            ).fetchone()[0])
+            key_snapshot["contract_backfill"] = {
+                "predicted_remaining_live_demand": forecast["predicted_live_requests"],
+                "operational_retry_reserve": forecast["operational_retry_reserve"],
+                "safety_buffer": forecast["safety_buffer"],
+                "spendable_remaining": forecast["safe_backfill_budget"],
+                "requests_today": backfill_today,
+                "dispatch_allowed": bool(forecast["admitted"]),
+                "deferred_reason": (
+                    None if forecast["admitted"] else forecast["reason"]
+                ),
+                "forecast_window_days": BACKFILL_FORECAST_DAYS,
+            }
+        keys.append(key_snapshot)
     next_midnight = (instant.astimezone(PACIFIC) + timedelta(days=1)).replace(
         hour=0, minute=0, second=0, microsecond=0,
     ).astimezone(UTC)
@@ -1646,6 +1891,178 @@ def credentials_for_background_task(
     )
 
 
+def _nearest_rank_p95(values: list[int]) -> int:
+    if not values:
+        return 0
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(0.95 * len(ordered)) - 1)]
+
+
+def forecast_safe_backfill_budget(
+    *, remaining_capacity: int, predicted_live: int,
+    operational_retry_reserve: int, safety_buffer: int,
+) -> int:
+    return max(
+        0,
+        int(remaining_capacity) - int(predicted_live)
+        - int(operational_retry_reserve) - int(safety_buffer),
+    )
+
+
+def _backfill_admission_locked(
+    connection: sqlite3.Connection,
+    *,
+    account_id: str,
+    quota_authority: str,
+    model_families: tuple[str, ...],
+    daily_limit: int,
+    current_daily_count: int,
+    requested_requests: int,
+    now: datetime,
+) -> dict[str, object]:
+    """Return one atomic, forecast-safe grant for contract backfill.
+
+    The caller owns ``BEGIN IMMEDIATE``. History contains only admitted requests
+    and is aggregated by quota day/hour, so retention and forecasting stay O(1)
+    with respect to news history size.
+    """
+    pacific = now.astimezone(PACIFIC)
+    current_day = pacific.date().isoformat()
+    complete_start = (pacific.date() - timedelta(days=BACKFILL_FORECAST_DAYS)).isoformat()
+    history = connection.execute(
+        """WITH complete_days AS (
+             SELECT DISTINCT quota_day FROM news_ai_quota_day_workload_v1
+             WHERE account_id=? AND quota_authority=?
+               AND quota_day>=? AND quota_day<?
+           )
+           SELECT d.quota_day,COALESCE(sum(CASE
+                    WHEN w.workload_class='LIVE_OPERATIONAL'
+                     AND w.hour_bucket>=? THEN w.request_count ELSE 0 END),0)
+                  AS remaining_live
+           FROM complete_days d
+           LEFT JOIN news_ai_quota_day_workload_v1 w
+             ON w.quota_day=d.quota_day AND w.account_id=?
+            AND w.quota_authority=?
+           GROUP BY d.quota_day""",
+        (
+            account_id, quota_authority, complete_start, current_day,
+            pacific.hour, account_id, quota_authority,
+        ),
+    ).fetchall()
+    values = [int(row["remaining_live"]) for row in history]
+    history_days = len(values)
+    predicted_live = _nearest_rank_p95(values)
+    operational_reserve = math.ceil(daily_limit * BACKFILL_RESERVE_RATIO)
+    safety = math.ceil(daily_limit * BACKFILL_SAFETY_RATIO)
+    remaining_capacity = max(0, daily_limit - current_daily_count)
+    safe_budget = forecast_safe_backfill_budget(
+        remaining_capacity=remaining_capacity,
+        predicted_live=predicted_live,
+        operational_retry_reserve=operational_reserve,
+        safety_buffer=safety,
+    )
+    next_reset = (pacific + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    ).isoformat(timespec="microseconds")
+    evidence: dict[str, object] = {
+        "reason": "SAFE_BUDGET_AVAILABLE",
+        "quota_authority": quota_authority,
+        "history_days": history_days,
+        "forecast_method": "P95_REMAINING_QUOTA_DAY_HOURLY",
+        "predicted_live_requests": predicted_live,
+        "operational_retry_reserve": operational_reserve,
+        "safety_buffer": safety,
+        "remaining_daily_capacity": remaining_capacity,
+        "safe_backfill_budget": safe_budget,
+        "next_retry_at": (now + timedelta(minutes=1)).isoformat(timespec="microseconds"),
+    }
+    if history_days < BACKFILL_MIN_COMPLETE_DAYS:
+        return {**evidence, "admitted": False, "reason": "COLD_START_HISTORY"}
+
+    placeholders = ",".join("?" for _ in model_families)
+    pressure_cutoff = (now - timedelta(minutes=15)).isoformat(timespec="microseconds")
+    live = connection.execute(
+        """SELECT
+             sum(CASE WHEN state='LEASED' OR available_at<=? THEN 1 ELSE 0 END) claimable,
+             min(CASE WHEN state='LEASED' OR available_at<=? THEN created_at END) oldest,
+             sum(CASE WHEN created_at>=? THEN 1 ELSE 0 END) arrivals,
+             sum(CASE WHEN completed_at>=? THEN 1 ELSE 0 END) completions
+           FROM news_ai_jobs_v1
+           WHERE task_type='ACTIVE_ANNOTATION' AND lane_classified=1
+             AND work_lane='LIVE'
+             AND state IN ('QUEUED','LEASED','BACKING_OFF','COMPLETED')""",
+        (
+            now.isoformat(timespec="microseconds"),
+            now.isoformat(timespec="microseconds"), pressure_cutoff, pressure_cutoff,
+        ),
+    ).fetchone()
+    claimable = int(live["claimable"] or 0)
+    oldest = datetime.fromisoformat(str(live["oldest"])) if live["oldest"] else None
+    if oldest is not None and oldest.tzinfo is None:
+        oldest = oldest.replace(tzinfo=UTC)
+    live_overdue = bool(oldest and now - oldest >= BACKFILL_LIVE_SLA)
+    backlog_increasing = int(live["arrivals"] or 0) > int(live["completions"] or 0)
+    throttled = int(connection.execute(
+        f"""SELECT count(*) FROM news_ai_account_request_usage_v1
+            WHERE account_id=? AND reserved_at>=?
+              AND model_family IN ({placeholders})
+              AND provider_outcome='PROVIDER_THROTTLED'""",
+        (account_id, pressure_cutoff, *model_families),
+    ).fetchone()[0])
+    capacity_deferred = int(connection.execute(
+        """SELECT count(*) FROM news_ai_scheduler_deferrals_v1 d
+           JOIN news_ai_jobs_v1 j ON j.job_id=d.job_id
+           WHERE d.deferred_at>=? AND j.lane_classified=1
+             AND j.work_lane='LIVE'
+             AND d.failure_code IN ('MODEL_CAPACITY_DEFERRED',
+                                    'PROVIDER_DISPATCH_DEFERRED')""",
+        (pressure_cutoff,),
+    ).fetchone()[0])
+    recent = connection.execute(
+        f"""SELECT COALESCE(sum(request_count),0) AS total,
+                   COALESCE(sum(CASE WHEN workload_class='CONTRACT_BACKFILL'
+                                     THEN request_count ELSE 0 END),0) AS backfill
+            FROM news_ai_account_request_usage_v1
+            WHERE account_id=? AND reserved_at>?
+              AND model_family IN ({placeholders})""",
+        (
+            account_id, (now - timedelta(seconds=60)).isoformat(timespec="microseconds"),
+            *model_families,
+        ),
+    ).fetchone()
+    total_60s = int(recent["total"])
+    backfill_60s = int(recent["backfill"])
+    share_blocked = backfill_60s >= max(
+        1, (total_60s + 1) // BACKFILL_MAX_SHARE_DENOMINATOR,
+    )
+    evidence.update({
+        "live_claimable": claimable,
+        "live_sla_overdue": live_overdue,
+        "live_backlog_increasing": backlog_increasing,
+        "provider_throttles_15m": throttled,
+        "live_capacity_deferrals_15m": capacity_deferred,
+        "backfill_requests_60s": backfill_60s,
+        "total_requests_60s": total_60s,
+    })
+    blockers = (
+        (claimable > 0, "LIVE_CLAIMABLE"),
+        (live_overdue, "LIVE_SLA_PRESSURE"),
+        (backlog_increasing, "LIVE_BACKLOG_INCREASING"),
+        (throttled > 0, "PROVIDER_THROTTLED"),
+        (capacity_deferred > 0, "LIVE_CAPACITY_DEFERRED"),
+        (share_blocked, "INSTANTANEOUS_SHARE"),
+        (safe_budget < requested_requests, "NO_SAFE_DAILY_BUDGET"),
+    )
+    reason = next((name for blocked, name in blockers if blocked), None)
+    if reason is not None:
+        return {
+            **evidence, "admitted": False, "reason": reason,
+            "next_retry_at": next_reset if reason == "NO_SAFE_DAILY_BUDGET"
+            else evidence["next_retry_at"],
+        }
+    return {**evidence, "admitted": True}
+
+
 def reserve_account_request(
     connection: sqlite3.Connection,
     *,
@@ -1670,6 +2087,8 @@ def reserve_account_request(
     base_estimated_input_tokens: int | None = None,
     calibration_provider_model_version: str | None = None,
     calibration_safe_ratio: float | None = None,
+    workload_class: str = LIVE_OPERATIONAL_WORKLOAD,
+    quota_authority: str | None = None,
     decision: dict[str, object] | None = None,
 ) -> bool:
     """Atomically count attempted provider requests against one account.
@@ -1691,6 +2110,9 @@ def reserve_account_request(
     if attempted_requests < 1:
         raise ValueError("request_count must be positive")
     families = tuple(dict.fromkeys(shared_model_families or (model_family,)))
+    if workload_class not in REQUEST_WORKLOADS:
+        raise ValueError("unknown request workload class")
+    authority = str(quota_authority or model_family)
     placeholders = ",".join("?" for _ in families)
     usable_daily_limit = daily_limit if urgent else max(0, daily_limit - reserve_total)
     connection.execute("BEGIN IMMEDIATE")
@@ -1703,6 +2125,27 @@ def reserve_account_request(
             (day, account_id, *families),
         ).fetchone()
         daily_count = int(daily["request_count"])
+        if workload_class == CONTRACT_BACKFILL_WORKLOAD:
+            backfill = _backfill_admission_locked(
+                connection,
+                account_id=account_id,
+                quota_authority=authority,
+                model_families=families,
+                daily_limit=daily_limit,
+                current_daily_count=daily_count,
+                requested_requests=attempted_requests,
+                now=instant,
+            )
+            if not bool(backfill["admitted"]):
+                connection.rollback()
+                if decision is not None:
+                    decision.update(
+                        failure_code="BACKFILL_BUDGET_DEFERRED",
+                        next_retry_at=backfill["next_retry_at"],
+                        **{key: value for key, value in backfill.items()
+                           if key not in {"admitted", "next_retry_at"}},
+                    )
+                return False
         minute_count, minute_tokens = rolling_account_usage(
             connection,
             account_id=account_id,
@@ -1819,8 +2262,8 @@ def reserve_account_request(
                 input_token_count,reserved_at,requested_model,purpose,
                 prompt_contract,estimator_version,base_estimated_input_tokens,
                 admitted_input_tokens,calibration_provider_model_version,
-                calibration_safe_ratio)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                calibration_safe_ratio,workload_class)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 usage_id or str(uuid.uuid4()), account_id, model_family,
                 attempted_requests,
@@ -1828,6 +2271,22 @@ def reserve_account_request(
                 purpose, prompt_contract, estimator_version, base_tokens,
                 estimated_tokens, calibration_provider_model_version,
                 calibration_safe_ratio,
+                workload_class,
+            ),
+        )
+        pacific = instant.astimezone(PACIFIC)
+        connection.execute(
+            """INSERT INTO news_ai_quota_day_workload_v1
+               (quota_day,hour_bucket,account_id,quota_authority,
+                workload_class,request_count,updated_at)
+               VALUES (?,?,?,?,?,?,?)
+               ON CONFLICT(quota_day,hour_bucket,account_id,quota_authority,
+                           workload_class) DO UPDATE SET
+                 request_count=request_count+excluded.request_count,
+                 updated_at=excluded.updated_at""",
+            (
+                day, pacific.hour, account_id, authority, workload_class,
+                attempted_requests, timestamp,
             ),
         )
         connection.commit()
@@ -2308,6 +2767,7 @@ def scheduler_counts(connection: sqlite3.Connection) -> dict[str, int]:
     rows = connection.execute(
         """SELECT state,count(*) AS total FROM news_ai_jobs_v1
         WHERE task_type IN ('ACTIVE_ANNOTATION','ACTIVE_IMPACT','TITLE_TRANSLATION')
+          AND (task_type<>'ACTIVE_ANNOTATION' OR lane_classified=1)
         GROUP BY state"""
     ).fetchall()
     counts = {str(row["state"]): int(row["total"]) for row in rows}
@@ -2317,10 +2777,27 @@ def scheduler_counts(connection: sqlite3.Connection) -> dict[str, int]:
     obsolete = int(connection.execute(
         """SELECT count(*) FROM news_ai_jobs_v1
         WHERE state='DEAD_LETTER'
+          AND (task_type<>'ACTIVE_ANNOTATION' OR lane_classified=1)
           AND last_error='CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE'"""
     ).fetchone()[0])
     result["obsolete"] = obsolete
     result["dead_letter"] = max(0, result["dead_letter"] - obsolete)
+    lane_rows = connection.execute(
+        """SELECT work_lane,state,count(*) AS total FROM news_ai_jobs_v1
+           WHERE task_type='ACTIVE_ANNOTATION' AND lane_classified=1
+           GROUP BY work_lane,state"""
+    ).fetchall()
+    for lane in WORK_LANES:
+        prefix = "live" if lane == LIVE_LANE else "backfill"
+        for state in ("QUEUED", "LEASED", "BACKING_OFF", "COMPLETED", "DEAD_LETTER"):
+            result[f"active_annotation_{prefix}_{state.lower()}"] = sum(
+                int(row["total"]) for row in lane_rows
+                if str(row["work_lane"]) == lane and str(row["state"]) == state
+            )
+    result["active_annotation_unclassified"] = int(connection.execute(
+        """SELECT count(*) FROM news_ai_jobs_v1
+           WHERE task_type='ACTIVE_ANNOTATION' AND lane_classified=0"""
+    ).fetchone()[0])
     return result
 
 
@@ -2453,6 +2930,248 @@ def authorize_repairable_impact_failures(
     return max(0, inserted)
 
 
+def _contract_backfill_has_current_value(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row | dict[str, object],
+    *,
+    activated_at: datetime,
+    prompt_version: str,
+) -> bool:
+    """Keep migration work only while it can affect current decision behavior."""
+    from .news_time import assess_news_time, category_time_rule
+
+    prior = connection.execute(
+        """SELECT annotation_json FROM news_annotations
+           WHERE source=? AND source_item_id=? AND revision_number=?
+             AND prompt_version<>?
+           ORDER BY parsed_at DESC LIMIT 1""",
+        (
+            row["source"], row["source_item_id"], row["revision_number"],
+            prompt_version,
+        ),
+    ).fetchone()
+    category: str | None = None
+    if prior is not None:
+        try:
+            annotation = json.loads(str(prior[0]))
+        except (TypeError, ValueError):
+            return False
+        if str(annotation.get("xauusd_relevance") or "") == "IRRELEVANT":
+            return False
+        category = str(annotation.get("primary_category") or "") or None
+    forward_epoch = datetime.fromisoformat(str(connection.execute(
+        "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
+    ).fetchone()[0]))
+    actionable_age, _ = category_time_rule(category)
+    try:
+        return assess_news_time(
+            row,
+            decision_time=activated_at,
+            forward_epoch=forward_epoch,
+            max_actionable_age=actionable_age,
+            max_discovery_delay=None,
+        ).eligible
+    except (TypeError, ValueError):
+        return False
+
+
+def _install_annotation_contract_lanes(
+    connection: sqlite3.Connection,
+    *,
+    prompt_version: str,
+    now: datetime,
+) -> datetime:
+    marker = f"annotation-work-lanes:{prompt_version}"
+    backfill_state = connection.execute(
+        "SELECT activated_at FROM news_annotation_contract_backfill_v1 "
+        "WHERE prompt_version=?",
+        (prompt_version,),
+    ).fetchone()
+    lane_state = connection.execute(
+        "SELECT * FROM news_annotation_work_lane_migrations_v1 "
+        "WHERE prompt_version=?",
+        (prompt_version,),
+    ).fetchone()
+    if lane_state is not None:
+        activated_at = datetime.fromisoformat(str(lane_state["activated_at"]))
+    elif backfill_state is not None:
+        activated_at = datetime.fromisoformat(str(backfill_state[0]))
+    else:
+        first_job = connection.execute(
+            """SELECT min(created_at) FROM news_ai_jobs_v1
+               WHERE task_type='ACTIVE_ANNOTATION' AND prompt_version=?""",
+            (prompt_version,),
+        ).fetchone()[0]
+        activated_at = datetime.fromisoformat(str(first_job)) if first_job else now
+    timestamp = _iso(now)
+    with connection:
+        if backfill_state is None:
+            connection.execute(
+                """INSERT INTO news_annotation_contract_backfill_v1
+                   (prompt_version,activated_at,state,updated_at)
+                   VALUES (?,?,'ACTIVE',?)""",
+                (prompt_version, _iso(activated_at), timestamp),
+            )
+        if lane_state is None:
+            connection.execute(
+                """INSERT INTO news_annotation_work_lane_migrations_v1
+                   (prompt_version,activated_at,state,updated_at)
+                   VALUES (?,?,'ACTIVE',?)""",
+                (prompt_version, _iso(activated_at), timestamp),
+            )
+    lane_state = connection.execute(
+        "SELECT * FROM news_annotation_work_lane_migrations_v1 "
+        "WHERE prompt_version=?",
+        (prompt_version,),
+    ).fetchone()
+    if str(lane_state["state"]) == "COMPLETE":
+        return activated_at
+    cursor = None
+    if lane_state["cursor_created_at"] is not None:
+        cursor = (
+            str(lane_state["cursor_created_at"]),
+            str(lane_state["cursor_job_id"]),
+        )
+    cursor_clause = ""
+    parameters: list[object] = [prompt_version]
+    if cursor is not None:
+        cursor_clause = "AND (j.created_at,j.job_id)>(?,?)"
+        parameters.extend(cursor)
+    rows = connection.execute(
+        f"""SELECT j.*,n.source_published_time,n.collector_first_seen_time,
+                   n.source AS revision_source
+            FROM news_ai_jobs_v1 j
+            LEFT JOIN news_revisions n ON n.source=j.source
+             AND n.source_item_id=j.source_item_id
+             AND n.revision_number=j.revision_number
+            WHERE j.task_type='ACTIVE_ANNOTATION' AND j.prompt_version=?
+              AND j.lane_classified=0 {cursor_clause}
+            ORDER BY j.created_at,j.job_id LIMIT ?""",
+        (*parameters, EXISTING_JOB_LANE_PAGE_SIZE),
+    ).fetchall()
+    with connection:
+        for row in rows:
+            missing_revision = row["revision_source"] is None
+            historical = (
+                missing_revision
+                or datetime.fromisoformat(str(row["collector_first_seen_time"]))
+                   < activated_at
+            )
+            lane = CONTRACT_BACKFILL_LANE if historical else LIVE_LANE
+            priority = "BACKGROUND" if historical else "FAST"
+            retired = (
+                historical
+                and str(row["state"]) in {"QUEUED", "BACKING_OFF"}
+                and (
+                    missing_revision
+                    or not _contract_backfill_has_current_value(
+                        connection, row, activated_at=activated_at,
+                        prompt_version=prompt_version,
+                    )
+                )
+            )
+            connection.execute(
+                """UPDATE news_ai_jobs_v1
+                   SET work_lane=?,priority=?,lane_classified=1,
+                       state=CASE WHEN ? THEN 'DEAD_LETTER' ELSE state END,
+                       last_error=CASE WHEN ? THEN
+                         'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE' ELSE last_error END,
+                       lease_owner=CASE WHEN ? THEN NULL ELSE lease_owner END,
+                       lease_expires_at=CASE WHEN ? THEN NULL ELSE lease_expires_at END,
+                       updated_at=CASE WHEN ? THEN ? ELSE updated_at END,
+                       completed_at=CASE WHEN ? THEN ? ELSE completed_at END
+                   WHERE job_id=? AND lane_classified=0""",
+                (
+                    lane, priority, retired, retired, retired, retired,
+                    retired, timestamp, retired, timestamp, row["job_id"],
+                ),
+            )
+        if rows:
+            last = rows[-1]
+            connection.execute(
+                """UPDATE news_annotation_work_lane_migrations_v1
+                   SET cursor_created_at=?,cursor_job_id=?,
+                       processed_count=processed_count+?,updated_at=?
+                   WHERE prompt_version=?""",
+                (
+                    last["created_at"], last["job_id"], len(rows), timestamp,
+                    prompt_version,
+                ),
+            )
+        if len(rows) < EXISTING_JOB_LANE_PAGE_SIZE:
+            connection.execute(
+                """UPDATE news_annotation_work_lane_migrations_v1
+                   SET state='COMPLETE',updated_at=? WHERE prompt_version=?""",
+                (timestamp, prompt_version),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO news_ai_scheduler_migrations_v1 VALUES (?,?)",
+                (marker, timestamp),
+            )
+    return activated_at
+
+
+def _contract_backfill_page(
+    connection: sqlite3.Connection,
+    *,
+    prompt_version: str,
+    activated_at: datetime,
+    now: datetime,
+    pending_annotation_records,
+    page_size: int,
+) -> list[dict[str, object]]:
+    state = connection.execute(
+        "SELECT * FROM news_annotation_contract_backfill_v1 WHERE prompt_version=?",
+        (prompt_version,),
+    ).fetchone()
+    if state is None or str(state["state"]) == "COMPLETE":
+        return []
+    cursor = None
+    if state["cursor_first_seen"]:
+        cursor = (
+            str(state["cursor_first_seen"]), str(state["cursor_source"]),
+            str(state["cursor_source_item_id"]), int(state["cursor_revision_number"]),
+        )
+    if page_size <= 0:
+        return []
+    scanned = pending_annotation_records(
+        connection,
+        observed_at=now,
+        limit=min(CONTRACT_BACKFILL_PAGE_SIZE, page_size),
+        prompt_version=prompt_version,
+        received_before=activated_at,
+        before_cursor=cursor,
+        selection_order="receipt_desc",
+    )
+    selected = [
+        row for row in scanned
+        if _contract_backfill_has_current_value(
+            connection, row, activated_at=activated_at,
+            prompt_version=prompt_version,
+        )
+    ]
+    with connection:
+        if scanned:
+            last = scanned[-1]
+            connection.execute(
+                """UPDATE news_annotation_contract_backfill_v1
+                   SET cursor_first_seen=?,cursor_source=?,cursor_source_item_id=?,
+                       cursor_revision_number=?,updated_at=? WHERE prompt_version=?""",
+                (
+                    last["collector_first_seen_time"], last["source"],
+                    last["source_item_id"], last["revision_number"],
+                    _iso(now), prompt_version,
+                ),
+            )
+        if len(scanned) < min(CONTRACT_BACKFILL_PAGE_SIZE, page_size):
+            connection.execute(
+                """UPDATE news_annotation_contract_backfill_v1
+                   SET state='COMPLETE',updated_at=? WHERE prompt_version=?""",
+                (_iso(now), prompt_version),
+            )
+    return selected
+
+
 def sync_pending_jobs(
     connection: sqlite3.Connection,
     *,
@@ -2470,6 +3189,14 @@ def sync_pending_jobs(
         pending_impact_records,
         pending_title_translation_records,
     )
+    from .news_semantics import PREVIOUS_NEWS_PROMPT_VERSION
+    from .semantic_transition import (
+        MODEL_REVIEW_REQUIRED,
+        execute_transition_page,
+        transition_for,
+    )
+
+    transition = transition_for(PREVIOUS_NEWS_PROMPT_VERSION, PROMPT_VERSION)
     from .daily_brief import brief_dates_to_process
 
     instant = now or datetime.now(UTC)
@@ -2485,21 +3212,86 @@ def sync_pending_jobs(
         recovery_version=IMPACT_FAILURE_RECOVERY_VERSION,
         now=instant,
     )
+    activated_at = _install_annotation_contract_lanes(
+        connection, prompt_version=PROMPT_VERSION, now=instant,
+    )
+    execute_transition_page(
+        connection, transition, activated_at=activated_at, now=instant,
+        page_size=CONTRACT_BACKFILL_PAGE_SIZE,
+    )
     brief_backlog = brief_dates_to_process(connection, now=instant)[1:]
-    protected_limit = (limit + 1) // 2 if brief_backlog else 0
-    protected_annotations = pending_annotation_records(
-        connection, observed_at=instant, limit=max(1, protected_limit),
+    backfill_capacity = (
+        min(CONTRACT_BACKFILL_PAGE_SIZE, max(1, limit // 2))
+        if limit > 1 else 0
+    )
+    live_capacity = max(1, limit - backfill_capacity)
+    live_annotations = pending_annotation_records(
+        connection,
+        observed_at=instant,
+        limit=live_capacity,
         prompt_version=PROMPT_VERSION,
         priority_receipt_days=tuple(brief_backlog),
-    ) if protected_limit else []
-    general_annotations = pending_annotation_records(
-        connection, observed_at=instant, limit=limit, prompt_version=PROMPT_VERSION,
+        received_from=activated_at,
     )
-    active_annotations_by_revision = {
+    model_review_backfill = transition.kind == MODEL_REVIEW_REQUIRED
+    protected_capacity = (
+        backfill_capacity if brief_backlog and model_review_backfill else 0
+    )
+    protected_annotations = pending_annotation_records(
+        connection,
+        observed_at=instant,
+        limit=protected_capacity,
+        prompt_version=PROMPT_VERSION,
+        priority_receipt_days=tuple(brief_backlog),
+        received_before=activated_at,
+    ) if protected_capacity else []
+    backfill_annotations = (
+        _contract_backfill_page(
+            connection,
+            prompt_version=PROMPT_VERSION,
+            activated_at=activated_at,
+            now=instant,
+            pending_annotation_records=pending_annotation_records,
+            page_size=max(0, backfill_capacity - len(protected_annotations)),
+        )
+        if model_review_backfill else []
+    )
+    live_by_revision = {
         (str(row["source"]), str(row["source_item_id"]), int(row["revision_number"])): row
-        for row in (*protected_annotations, *general_annotations)
+        for row in live_annotations
     }
-    active_annotations = list(active_annotations_by_revision.values())[:limit]
+    backfill_by_revision = {
+        (str(row["source"]), str(row["source_item_id"]), int(row["revision_number"])): row
+        for row in (*protected_annotations, *backfill_annotations)
+        if (str(row["source"]), str(row["source_item_id"]), int(row["revision_number"]))
+        not in live_by_revision
+    }
+    for row in live_by_revision.values():
+        enqueue_job(
+            connection,
+            task_type="ACTIVE_ANNOTATION",
+            source=str(row["source"]),
+            source_item_id=str(row["source_item_id"]),
+            revision_number=int(row["revision_number"]),
+            prompt_version=PROMPT_VERSION,
+            priority="FAST",
+            work_lane=LIVE_LANE,
+            reopen_completed=True,
+            now=instant,
+        )
+    for row in backfill_by_revision.values():
+        enqueue_job(
+            connection,
+            task_type="ACTIVE_ANNOTATION",
+            source=str(row["source"]),
+            source_item_id=str(row["source_item_id"]),
+            revision_number=int(row["revision_number"]),
+            prompt_version=PROMPT_VERSION,
+            priority="BACKGROUND",
+            work_lane=CONTRACT_BACKFILL_LANE,
+            reopen_completed=True,
+            now=instant,
+        )
     oldest_impact_limit = (limit + 1) // 2
     newest_impact_limit = limit // 2
     oldest_impacts = pending_impact_records(
@@ -2523,11 +3315,12 @@ def sync_pending_jobs(
         connection, observed_at=instant, limit=limit,
     )
     batches = (
-        ("ACTIVE_ANNOTATION", PROMPT_VERSION, active_annotations),
         ("ACTIVE_IMPACT", IMPACT_PROMPT_VERSION, active_impacts),
         ("TITLE_TRANSLATION", TITLE_PROMPT_VERSION, titles),
     )
-    discovered: dict[str, int] = {}
+    discovered: dict[str, int] = {
+        "ACTIVE_ANNOTATION": len(live_by_revision) + len(backfill_by_revision),
+    }
     for task_type, prompt_version, rows in batches:
         discovered[task_type] = len(rows)
         for row in rows:
@@ -2545,7 +3338,6 @@ def sync_pending_jobs(
                     else "BACKGROUND" if task_type == "TITLE_TRANSLATION"
                     else "NORMAL"
                 ),
-                reopen_completed=task_type == "ACTIVE_ANNOTATION",
                 now=instant,
             )
     reconcile_completed_jobs(connection, now=instant)

@@ -1412,7 +1412,10 @@ def test_dashboard_annotation_counts_match_current_worker_policy(tmp_path) -> No
     payload = _dashboard_module()._dashboard_payload(database)
 
     assert payload["annotation_queue"]["ready"] == 1
-    assert payload["annotation_queue"]["queued"] == 1
+    assert payload["annotation_queue"]["semantic_pending"] == 1
+    assert payload["annotation_queue"]["queued"] == 0
+    assert payload["annotation_queue"]["contract_backfill_queued"] == 1
+    assert payload["annotation_queue"]["unclassified_annotation_jobs"] == 0
     active_identities = {
         row["model_identity"]
         for row in payload["learning_curves"]["models"]
@@ -2036,7 +2039,11 @@ def test_critical_builder_uses_bounded_u5_window_and_materialized_counts(
     ) for index in range(4_000)]
     with ledger.connection:
         ledger.connection.executemany(
-            "INSERT INTO news_ai_jobs_v1 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            """INSERT INTO news_ai_jobs_v1
+               (job_id,task_type,source,source_item_id,revision_number,annotation_id,
+                prompt_version,priority,state,available_at,lease_owner,
+                lease_expires_at,attempt_count,last_error,created_at,updated_at,
+                completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             historical_jobs,
         )
     ledger.close()
