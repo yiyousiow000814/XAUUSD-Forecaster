@@ -5,7 +5,7 @@ import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_compo
 import CountValue from "../_components/CountValue";
 import RuntimeUpdateFailureBanner, { type RuntimeUpdateFailure } from "../_components/RuntimeUpdateFailureBanner";
 import { adminErrorPresentation, type AdminErrorPresentation } from "../_lib/admin-client";
-import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
+import { clearDashboardResource, loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { statusFieldPhase } from "../_lib/current-data-provenance";
 
@@ -136,7 +136,10 @@ export default function StatusView({ initialPayload }: { initialPayload?: Status
       setError(null);
     } catch (reason) {
       const presentation = adminErrorPresentation(reason, "AI 模型用量状态暂不可用");
-      if (presentation.kind === "AUTH_REQUIRED") setPayload(null);
+      if (presentation.kind === "AUTH_REQUIRED") {
+        clearDashboardResource("/api/admin-status");
+        setPayload(null);
+      }
       setError(presentation);
     } finally {
       if (showSyncState) setSyncingCurrent(false);

@@ -1523,6 +1523,10 @@ test("separates anonymous health data from owner-only Admin evidence", async () 
   assert.match(adminOverview, /href="\/admin">重新登录/);
   assert.match(adminClient, /ADMIN_RELOGIN_MESSAGE = "管理员会话已过期，请重新登录。"/);
   assert.match(statusView, /adminErrorPresentation[\s\S]*href="\/admin">重新登录/);
+  assert.match(statusView, /presentation\.kind === "AUTH_REQUIRED"[\s\S]*clearDashboardResource\("\/api\/admin-status"\)[\s\S]*setPayload\(null\)/);
+  const dashboardResource = readFileSync(new URL("../app/_lib/dashboard-resource.ts", import.meta.url), "utf8");
+  assert.match(dashboardResource, /export function clearDashboardResource\(url: string\)/);
+  assert.doesNotMatch(dashboardResource, /resources\.clear\(\)/);
   assert.match(retryQueue, /adminErrorPresentation[\s\S]*href="\/admin">重新登录/);
   assert.match(assistantView, /管理员会话已过期，请重新登录。/);
   assert.match(assistantTranscript, /href="\/admin">重新登录/);

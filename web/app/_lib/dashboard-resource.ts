@@ -29,6 +29,15 @@ export function readDashboardResource<T>(url: string): T | null {
   return (resources.get(url)?.data as T | undefined) ?? null;
 }
 
+export function clearDashboardResource(url: string): void {
+  const entry = resources.get(url);
+  if (!entry || entry.data === undefined) return;
+  const withoutData = { ...entry };
+  delete withoutData.data;
+  resources.set(url, withoutData);
+  notifyDashboardResource(url);
+}
+
 export function readDashboardResourceState<T>(url: string): DashboardResourceState<T> {
   const entry = resources.get(url);
   const hasSnapshot = entry?.data !== undefined;
