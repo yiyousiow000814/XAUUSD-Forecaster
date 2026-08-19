@@ -46,6 +46,7 @@ SOURCE_ORGANIZATION_ALIASES = {
 RESOLVED_IDENTITY_RELATIONS = frozenset({
     "NEW_EPISODE", "SAME_EPISODE", "SAME_EVENT",
 })
+NEWS_CURRENT_REPRESENTATIVE_CONTRACT_VERSION = "news-current-representative-v1"
 
 
 def _sql_alias(value: str) -> str:

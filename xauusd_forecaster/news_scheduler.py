@@ -2596,9 +2596,16 @@ def reconcile_completed_jobs(
     connection: sqlite3.Connection,
     *,
     now: datetime | None = None,
+    manage_transaction: bool = True,
 ) -> int:
     """Close jobs already satisfied or superseded by immutable evidence."""
-    from .annotation import INVALID_CHINESE_TITLE
+    from contextlib import nullcontext
+
+    from .annotation import (
+        ANNOTATION_BODY_MIN_CHARACTERS,
+        INVALID_CHINESE_TITLE,
+        PROMPT_VERSION,
+    )
     from .news_identity import preferred_cluster_peer_predicate
     from .news_semantics import model_usable_annotation_predicate
     from .news_time import (
@@ -2611,7 +2618,8 @@ def reconcile_completed_jobs(
     forward_epoch = str(connection.execute(
         "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
     ).fetchone()[0])
-    with connection:
+    transaction = connection if manage_transaction else nullcontext()
+    with transaction:
         completed = connection.execute(
             f"""UPDATE news_ai_jobs_v1 AS j
                SET state='COMPLETED',lease_owner=NULL,lease_expires_at=NULL,
@@ -2642,8 +2650,11 @@ def reconcile_completed_jobs(
                SET state='DEAD_LETTER',lease_owner=NULL,lease_expires_at=NULL,
                    last_error='CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE',
                    updated_at=?,completed_at=?
-               WHERE state IN ('QUEUED','BACKING_OFF','COMPLETED')
+               WHERE state IN ('QUEUED','BACKING_OFF','COMPLETED','DEAD_LETTER')
                  AND (
+                   (j.task_type='ACTIVE_ANNOTATION'
+                    AND j.prompt_version<>?)
+                   OR
                    EXISTS (
                      SELECT 1 FROM news_revisions newer
                      WHERE newer.source=j.source
@@ -2655,7 +2666,8 @@ def reconcile_completed_jobs(
                        AND current.source_item_id=j.source_item_id
                        AND current.revision_number=j.revision_number
                        AND (
-                         length(trim(COALESCE(current.body,'')))<240
+                         length(trim(COALESCE(current.body,'')))<
+                           {ANNOTATION_BODY_MIN_CHARACTERS}
                          OR NOT ({semantic_eligibility_sql_predicate('current')})
                          OR (j.state='COMPLETED' AND NOT EXISTS (
                            SELECT 1 FROM news_annotations current_annotation
@@ -2679,7 +2691,10 @@ def reconcile_completed_jobs(
                        )
                    ))
                  )""",
-            (timestamp, timestamp, forward_epoch, forward_epoch),
+            (
+                timestamp, timestamp, PROMPT_VERSION,
+                forward_epoch, forward_epoch,
+            ),
         )
     return completed.rowcount + obsolete.rowcount
 

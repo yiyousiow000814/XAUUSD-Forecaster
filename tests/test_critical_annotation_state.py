@@ -4,9 +4,14 @@ import hashlib
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
+import xauusd_forecaster.annotation as annotation_contract
+import xauusd_forecaster.critical_annotation_state as critical_state
 from xauusd_forecaster.annotation import PROMPT_VERSION
 from xauusd_forecaster.critical_annotation_state import (
     INSTALL_VERSION,
+    annotation_materialization_contract,
     annotation_queue_snapshot,
     install_critical_annotation_state_schema,
     news_current_counts,
@@ -102,6 +107,98 @@ def test_annotation_queue_summary_tracks_scheduler_transitions_exactly(tmp_path)
         error="terminal", terminal=True,
     )
     assert _snapshot(connection, NOW + timedelta(hours=3))["dead_letter"] == 1
+    ledger.close()
+
+
+def test_current_terminal_failures_retire_when_evidence_is_superseded(
+    tmp_path,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    connection = ledger.connection
+    _append_revision(ledger, "superseded-dead", "first evidence body " * 25)
+    old_job = enqueue_job(
+        connection, task_type="ACTIVE_ANNOTATION", source="fixture",
+        source_item_id="superseded-dead", revision_number=1, annotation_id="",
+        prompt_version=PROMPT_VERSION, priority="NORMAL", now=NOW,
+    )
+    lease = claim_job(connection, worker_id="worker", pool=ROUTINE_POOL, now=NOW)
+    assert lease and lease.job_id == old_job
+    backoff_job(
+        connection, old_job, "worker", available_at=NOW, error="provider failure",
+        terminal=True,
+    )
+    with connection:
+        connection.execute(
+            """INSERT INTO news_ai_job_attempts_v1 VALUES
+               (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "attempt-old", old_job, 1, "account", "credential",
+                "FAILED", "PROVIDER_FAILURE", "RuntimeError", 503,
+                "historical provider failure", NOW.isoformat(), None,
+            ),
+        )
+    assert _snapshot(connection)["dead_letter"] == 1
+
+    _append_revision(ledger, "superseded-dead", "replacement evidence body " * 25)
+    enqueue_job(
+        connection, task_type="ACTIVE_ANNOTATION", source="fixture",
+        source_item_id="superseded-dead", revision_number=2, annotation_id="",
+        prompt_version=PROMPT_VERSION, priority="NORMAL", now=NOW,
+    )
+    reconcile_completed_jobs(connection, now=NOW)
+
+    snapshot = _snapshot(connection)
+    assert snapshot["dead_letter"] == 0
+    assert snapshot["queued"] == 1
+    assert tuple(connection.execute(
+        "SELECT state,last_error FROM news_ai_jobs_v1 WHERE job_id=?", (old_job,),
+    ).fetchone()) == ("DEAD_LETTER", "CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE")
+    assert tuple(connection.execute(
+        """SELECT outcome,failure_code,error_detail
+           FROM news_ai_job_attempts_v1 WHERE attempt_id='attempt-old'"""
+    ).fetchone()) == (
+        "FAILED", "PROVIDER_FAILURE", "historical provider failure",
+    )
+    ledger.close()
+
+
+def test_duplicate_terminal_failure_retires_for_preferred_cluster_peer(
+    tmp_path,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    connection = ledger.connection
+    _append_revision(
+        ledger, "duplicate-dead", "short duplicate body " * 20,
+        cluster="terminal-duplicate",
+    )
+    old_job = enqueue_job(
+        connection, task_type="ACTIVE_ANNOTATION", source="fixture",
+        source_item_id="duplicate-dead", revision_number=1, annotation_id="",
+        prompt_version=PROMPT_VERSION, priority="NORMAL", now=NOW,
+    )
+    lease = claim_job(connection, worker_id="worker", pool=ROUTINE_POOL, now=NOW)
+    assert lease and lease.job_id == old_job
+    backoff_job(
+        connection, old_job, "worker", available_at=NOW, error="terminal",
+        terminal=True,
+    )
+    _append_revision(
+        ledger, "duplicate-preferred", "long preferred duplicate body " * 30,
+        cluster="terminal-duplicate",
+    )
+    enqueue_job(
+        connection, task_type="ACTIVE_ANNOTATION", source="fixture",
+        source_item_id="duplicate-preferred", revision_number=1, annotation_id="",
+        prompt_version=PROMPT_VERSION, priority="NORMAL", now=NOW,
+    )
+
+    reconcile_completed_jobs(connection, now=NOW)
+
+    assert _snapshot(connection)["dead_letter"] == 0
+    assert _snapshot(connection)["queued"] == 1
+    assert connection.execute(
+        "SELECT last_error FROM news_ai_jobs_v1 WHERE job_id=?", (old_job,),
+    ).fetchone()[0] == "CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE"
     ledger.close()
 
 
@@ -234,4 +331,99 @@ def test_one_time_install_backfills_pre_scheduler_current_completion(tmp_path) -
         for statement in statements
         if statement.lstrip().upper().startswith("SELECT")
     )
+    ledger.close()
+
+
+def test_materialization_contract_handover_rebuilds_once_and_is_atomic(
+    tmp_path, monkeypatch,
+) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    connection = ledger.connection
+    body = "contract-bound current annotation evidence " * 20
+    _append_revision(ledger, "contract", body)
+    with connection:
+        connection.execute(
+            "INSERT INTO news_annotations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "annotation-contract", "fixture", "contract", 1,
+                hashlib.sha256(body.encode()).hexdigest(), "MACRO", "[]",
+                0, 0, 0, 0, 0, 0.5, 0.8, "gemini-3.5-flash-lite",
+                PROMPT_VERSION, NOW.isoformat(), NOW.isoformat(), "{}",
+            ),
+        )
+        refresh_news_revision_state(connection, "fixture", "contract", 1)
+    old_job = enqueue_job(
+        connection, task_type="ACTIVE_ANNOTATION", source="fixture",
+        source_item_id="contract", revision_number=1, annotation_id="",
+        prompt_version=PROMPT_VERSION, priority="NORMAL", now=NOW,
+    )
+    with connection:
+        connection.execute(
+            "UPDATE news_ai_jobs_v1 SET state='COMPLETED' WHERE job_id=?",
+            (old_job,),
+        )
+    contract_a = annotation_materialization_contract()
+
+    same_contract_statements: list[str] = []
+    connection.set_trace_callback(same_contract_statements.append)
+    install_critical_annotation_state_schema(connection)
+    connection.set_trace_callback(None)
+    assert not any(
+        "select distinct cluster_id from news_revisions" in statement.lower()
+        for statement in same_contract_statements
+    )
+
+    prompt_b = f"{PROMPT_VERSION}-contract-b"
+    monkeypatch.setattr(annotation_contract, "PROMPT_VERSION", prompt_b)
+    contract_b = annotation_materialization_contract()
+    assert contract_b.fingerprint != contract_a.fingerprint
+    handover_statements: list[str] = []
+    connection.set_trace_callback(handover_statements.append)
+    install_critical_annotation_state_schema(connection)
+    connection.set_trace_callback(None)
+    assert sum(
+        "select distinct cluster_id from news_revisions" in statement.lower()
+        for statement in handover_statements
+    ) == 1
+    assert annotation_queue_snapshot(
+        connection, prompt_version=prompt_b, observed_at=NOW.isoformat(),
+    )["queued"] == 1
+    assert connection.execute(
+        "SELECT last_error FROM news_ai_jobs_v1 WHERE job_id=?", (old_job,),
+    ).fetchone()[0] == "CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE"
+    marker = connection.execute(
+        """SELECT contract_fingerprint,contract_json
+           FROM dashboard_critical_state_metadata_v1 WHERE version=?""",
+        (INSTALL_VERSION,),
+    ).fetchone()
+    assert tuple(marker) == (contract_b.fingerprint, contract_b.components_json)
+
+    second_b_statements: list[str] = []
+    connection.set_trace_callback(second_b_statements.append)
+    install_critical_annotation_state_schema(connection)
+    connection.set_trace_callback(None)
+    assert not any(
+        "from news_revisions" in statement.lower()
+        or "from news_annotations" in statement.lower()
+        or "from news_ai_jobs_v1" in statement.lower()
+        for statement in second_b_statements
+        if statement.lstrip().upper().startswith("SELECT")
+    )
+
+    monkeypatch.setattr(annotation_contract, "PROMPT_VERSION", f"{prompt_b}-failed")
+    failed_contract = annotation_materialization_contract()
+
+    def fail_refresh(*_args, **_kwargs) -> None:
+        raise RuntimeError("rebuild failed")
+
+    monkeypatch.setattr(critical_state, "refresh_news_cluster_state", fail_refresh)
+    with pytest.raises(RuntimeError, match="rebuild failed"):
+        install_critical_annotation_state_schema(connection)
+    persisted = connection.execute(
+        """SELECT contract_fingerprint FROM dashboard_critical_state_metadata_v1
+           WHERE version=?""",
+        (INSTALL_VERSION,),
+    ).fetchone()[0]
+    assert persisted == contract_b.fingerprint
+    assert persisted != failed_contract.fingerprint
     ledger.close()

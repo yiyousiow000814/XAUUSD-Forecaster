@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime
 
-from .news_identity import preferred_cluster_peer_predicate
+from .news_identity import (
+    NEWS_CURRENT_REPRESENTATIVE_CONTRACT_VERSION,
+    preferred_cluster_peer_predicate,
+)
 from .news_semantics import (
+    NEWS_ANNOTATION_USABILITY_CONTRACT_VERSION,
     display_repair_checkpoint_predicate,
     model_usable_annotation_predicate,
 )
@@ -15,6 +21,39 @@ from .news_semantics import (
 
 INSTALL_VERSION = "critical-annotation-state-v1"
 RETIRED_ERROR = "CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE"
+
+
+@dataclass(frozen=True)
+class AnnotationMaterializationContract:
+    fingerprint: str
+    components_json: str
+
+
+def annotation_materialization_contract() -> AnnotationMaterializationContract:
+    """Fingerprint every authority that can change current annotation state."""
+    from .annotation import (
+        ANNOTATION_BODY_MIN_CHARACTERS,
+        PROMPT_VERSION,
+        SUPPORTED_GEMINI_MODELS,
+    )
+    from .news_time import NEWS_SEMANTIC_ELIGIBILITY_CONTRACT_VERSION
+
+    components = {
+        "annotation_body_min_characters": ANNOTATION_BODY_MIN_CHARACTERS,
+        "annotation_usability": NEWS_ANNOTATION_USABILITY_CONTRACT_VERSION,
+        "current_prompt": PROMPT_VERSION,
+        "materialization_schema": INSTALL_VERSION,
+        "representative_policy": NEWS_CURRENT_REPRESENTATIVE_CONTRACT_VERSION,
+        "semantic_eligibility": NEWS_SEMANTIC_ELIGIBILITY_CONTRACT_VERSION,
+        "supported_models": sorted(SUPPORTED_GEMINI_MODELS),
+    }
+    encoded = json.dumps(
+        components, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+    )
+    return AnnotationMaterializationContract(
+        fingerprint=hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+        components_json=encoded,
+    )
 
 
 def install_annotation_job_count_schema(connection: sqlite3.Connection) -> None:
@@ -157,7 +196,9 @@ def _preferred_cluster_row(
 
 
 def _content_state(connection: sqlite3.Connection, row: sqlite3.Row) -> str:
-    if len(str(row["body"] or "").strip()) >= 240:
+    from .annotation import ANNOTATION_BODY_MIN_CHARACTERS
+
+    if len(str(row["body"] or "").strip()) >= ANNOTATION_BODY_MIN_CHARACTERS:
         return "AVAILABLE"
     failure = connection.execute(
         """SELECT is_terminal FROM news_content_failures
@@ -169,9 +210,13 @@ def _content_state(connection: sqlite3.Connection, row: sqlite3.Row) -> str:
 
 
 def _annotation_state(connection: sqlite3.Connection, row: sqlite3.Row) -> str:
-    if len(str(row["body"] or "").strip()) < 240:
+    from .annotation import (
+        ANNOTATION_BODY_MIN_CHARACTERS,
+        PROMPT_VERSION,
+        SUPPORTED_GEMINI_MODELS,
+    )
+    if len(str(row["body"] or "").strip()) < ANNOTATION_BODY_MIN_CHARACTERS:
         return "NONE"
-    from .annotation import PROMPT_VERSION, SUPPORTED_GEMINI_MODELS
     from .news_time import assess_news_semantic_eligibility
 
     epoch = connection.execute(
@@ -271,7 +316,11 @@ def _backfill_current_annotation_completions(
     connection: sqlite3.Connection,
 ) -> None:
     """Bridge pre-scheduler evidence into the current scheduler contract once."""
-    from .annotation import PROMPT_VERSION, SUPPORTED_GEMINI_MODELS
+    from .annotation import (
+        ANNOTATION_BODY_MIN_CHARACTERS,
+        PROMPT_VERSION,
+        SUPPORTED_GEMINI_MODELS,
+    )
     from .news_time import (
         register_news_semantic_eligibility_sql,
         semantic_eligibility_sql_predicate,
@@ -290,7 +339,8 @@ def _backfill_current_annotation_completions(
              AND a.revision_number=n.revision_number
              AND a.llm_model_version IN (?,?) AND a.prompt_version=?
              AND {model_usable_annotation_predicate('a')}
-            WHERE length(trim(COALESCE(n.body,'')))>=240
+            WHERE length(trim(COALESCE(n.body,'')))>=
+              {ANNOTATION_BODY_MIN_CHARACTERS}
               AND {semantic_eligibility_sql_predicate('n')}
               AND NOT EXISTS (
                 SELECT 1 FROM news_revisions newer
@@ -327,6 +377,8 @@ def install_critical_annotation_state_schema(
         f"""
         CREATE TABLE IF NOT EXISTS dashboard_critical_state_metadata_v1 (
             version TEXT PRIMARY KEY,
+            contract_fingerprint TEXT,
+            contract_json TEXT,
             installed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS dashboard_news_current_state_v1 (
@@ -393,10 +445,26 @@ def install_critical_annotation_state_schema(
         END;
         """
     )
+    metadata_columns = {
+        str(row[1]) for row in connection.execute(
+            "PRAGMA table_info(dashboard_critical_state_metadata_v1)"
+        ).fetchall()
+    }
+    if "contract_fingerprint" not in metadata_columns:
+        connection.execute(
+            "ALTER TABLE dashboard_critical_state_metadata_v1 "
+            "ADD COLUMN contract_fingerprint TEXT"
+        )
+    if "contract_json" not in metadata_columns:
+        connection.execute(
+            "ALTER TABLE dashboard_critical_state_metadata_v1 "
+            "ADD COLUMN contract_json TEXT"
+        )
+    contract = annotation_materialization_contract()
     installed = connection.execute(
         """SELECT 1 FROM dashboard_critical_state_metadata_v1
-           WHERE version=?""",
-        (INSTALL_VERSION,),
+           WHERE version=? AND contract_fingerprint=?""",
+        (INSTALL_VERSION, contract.fingerprint),
     ).fetchone()
     if installed:
         return
@@ -408,10 +476,16 @@ def install_critical_annotation_state_schema(
             refresh_news_cluster_state(connection, str(row[0]))
         _backfill_current_annotation_completions(connection)
         from .news_scheduler import reconcile_completed_jobs
-        reconcile_completed_jobs(connection)
+        reconcile_completed_jobs(connection, manage_transaction=False)
         connection.execute(
-            "INSERT INTO dashboard_critical_state_metadata_v1(version) VALUES (?)",
-            (INSTALL_VERSION,),
+            """INSERT INTO dashboard_critical_state_metadata_v1
+                 (version,contract_fingerprint,contract_json)
+               VALUES (?,?,?)
+               ON CONFLICT(version) DO UPDATE SET
+                 contract_fingerprint=excluded.contract_fingerprint,
+                 contract_json=excluded.contract_json,
+                 installed_at=CURRENT_TIMESTAMP""",
+            (INSTALL_VERSION, contract.fingerprint, contract.components_json),
         )
 
 

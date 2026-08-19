@@ -70,6 +70,7 @@ from .news_semantics import (
 UTC = timezone.utc
 DEFAULT_OLLAMA_MODEL = "qwen3.5:9b"
 SUPPORTED_GEMINI_MODELS = (DEFAULT_GEMINI_MODEL, FALLBACK_GEMINI_MODEL)
+ANNOTATION_BODY_MIN_CHARACTERS = 240
 GEMINI_DAILY_PRIORITY_RESERVE = 150
 GEMMA_EVIDENCE_WINDOW_RADIUS_CHARS = 900
 GEMMA_EVIDENCE_WINDOWS_MAX_CHARS = 8_000
@@ -356,7 +357,7 @@ def pending_annotation_records(
          AND {model_usable_annotation_predicate('a')}
         WHERE a.annotation_id IS NULL
           AND {semantic_eligibility_sql_predicate('n')}
-          AND length(trim(COALESCE(n.body, ''))) >= 240
+          AND length(trim(COALESCE(n.body, ''))) >= {ANNOTATION_BODY_MIN_CHARACTERS}
           AND NOT EXISTS (
             SELECT 1 FROM news_revisions newer
             WHERE newer.source=n.source
@@ -366,7 +367,7 @@ def pending_annotation_records(
           AND NOT EXISTS (
             SELECT 1 FROM news_revisions peer
             WHERE peer.cluster_id=n.cluster_id
-              AND length(trim(COALESCE(peer.body, ''))) >= 240
+              AND length(trim(COALESCE(peer.body, ''))) >= {ANNOTATION_BODY_MIN_CHARACTERS}
               {peer_scope}
               AND NOT EXISTS (
                 SELECT 1 FROM news_revisions peer_newer
@@ -441,7 +442,7 @@ def completed_annotation_records(
     register_news_semantic_eligibility_sql(connection)
     rows = connection.execute(
         f"""SELECT n.* FROM news_revisions n
-        WHERE length(trim(COALESCE(n.body, ''))) >= 240
+        WHERE length(trim(COALESCE(n.body, ''))) >= {ANNOTATION_BODY_MIN_CHARACTERS}
           AND {semantic_eligibility_sql_predicate('n')}
           AND EXISTS (
             SELECT 1 FROM news_annotations a
