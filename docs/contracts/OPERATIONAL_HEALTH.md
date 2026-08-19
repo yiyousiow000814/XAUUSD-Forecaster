@@ -189,6 +189,12 @@ pauses rather than waives that requirement. A code-only update therefore does
 not fail preflight merely because the market cannot currently create a new
 decision, while a model-generation handover still cannot become active without
 live evidence.
+The preflight contract versions its executable readiness behavior, not only its
+database-copy shape. A failed revision is suppressed under the same contract to
+prevent retry storms, but one controlled retry is permitted after a newer
+contract changes that behavior. Every failed phase records a bounded,
+secret-redacted diagnostic containing process exit state, the last HTTP result,
+and candidate log tails. The prior runtime remains active throughout failure.
 A bounded stale snapshot remains suitable for production-shape validation while
 its single background refresh runs. When no bounded snapshot exists, the
 explicit `STATUS_SNAPSHOT_REFRESH_IN_PROGRESS` response is a bounded deferral

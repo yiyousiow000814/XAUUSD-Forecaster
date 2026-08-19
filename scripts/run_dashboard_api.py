@@ -3292,7 +3292,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         try:
-            if path == "/api/critical-status":
+            # Older stable supervisors request /api/status while handing over
+            # to a newer control bundle. Only isolated candidate databases use
+            # the bounded critical snapshot for that bootstrap request.
+            isolated_preflight_alias = (
+                path == "/api/status"
+                and self.database.parent.name == "preflight"
+                and self.database.parent.parent.name == ".local"
+            )
+            if path == "/api/critical-status" or isolated_preflight_alias:
                 body, snapshot_state, snapshot_age = self.critical_status_cache.get(
                     self.database,
                     lambda database: critical_status_payload(

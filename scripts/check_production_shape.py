@@ -22,7 +22,7 @@ STATUS_REFRESH_IN_PROGRESS = "dashboard snapshot refresh is still running"
 
 
 def _loopback_status_port(value: str) -> int | None:
-    """Reduce the CLI value to the one permitted local status endpoint."""
+    """Reduce a permitted local status URL to its loopback port."""
     try:
         parsed = urllib.parse.urlsplit(value)
         port = parsed.port
@@ -31,7 +31,7 @@ def _loopback_status_port(value: str) -> int | None:
     if (
         parsed.scheme != "http"
         or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
-        or parsed.path != "/api/critical-status"
+        or parsed.path not in {"/api/critical-status", "/api/status"}
         or parsed.query
         or parsed.fragment
         or port is None
@@ -110,7 +110,7 @@ def main() -> int:
         print(json.dumps({
             "status": "ERROR",
             "error_code": "STATUS_ENDPOINT_URL_INVALID",
-            "error": "status URL must be the loopback /api/critical-status endpoint",
+            "error": "status URL must be a permitted loopback status endpoint",
         }, ensure_ascii=False, sort_keys=True))
         return 2
     status, transport_failure = _read_status(status_port)

@@ -30,7 +30,8 @@ $runtimeCodeStatePath = Join-Path $moduleRoot ".local\forward\runtime-code-state
 $runtimeUpdateStatePath = Join-Path $moduleRoot ".local\forward\runtime-update-state.json"
 $dashboardSyncConfigPath = Join-Path $moduleRoot ".local\forward\dashboard-sync.json"
 $runtimeUpdateCheckInterval = [TimeSpan]::FromMinutes(5)
-$runtimePreflightContractVersion = "isolated-migrated-runtime-state-v3"
+$runtimePreflightContractVersion = "isolated-critical-status-diagnostics-v4"
+$preflightDiagnosticMaxCharacters = 2048
 $codeReloadTimeout = [TimeSpan]::FromMinutes(5)
 $serviceStartupTimeout = [TimeSpan]::FromMinutes(15)
 $runtimeObservationCycles = 2
@@ -259,7 +260,14 @@ function Test-MainCandidate {
 }
 
 function Write-RuntimeUpdateFailure {
-    param([string]$Revision, [string]$Status, [string]$Message)
+    param(
+        [string]$Revision,
+        [string]$Status,
+        [string]$Message,
+        [string]$ErrorCode = "RUNTIME_UPDATE_FAILED",
+        [string]$Phase = "UNKNOWN",
+        [hashtable]$Diagnostics = @{}
+    )
     Write-RuntimeUpdateState @{
         update_status = $Status
         failed_revision = $Revision
@@ -267,6 +275,9 @@ function Write-RuntimeUpdateFailure {
         failed_at = [DateTimeOffset]::UtcNow.ToString("o")
         user_visible_failure = $true
         failure_message = $Message
+        failure_code = $ErrorCode
+        failure_phase = $Phase
+        preflight_diagnostics = $Diagnostics
     }
     Write-WatchdogEvent -Event "RUNTIME_UPDATE_FAILED" -Service "all" -State $Message
 }
@@ -335,21 +346,19 @@ function Get-AvailableLoopbackPort {
     }
 }
 
-function New-CandidatePreflightDatabase {
+function Copy-CandidatePreflightDatabase {
     param(
         [string]$Python,
-        [string]$StageRoot,
         [string]$SourceDatabase,
         [string]$TargetDatabase
     )
-    $migration = @'
+    $copy = @'
 import sqlite3
 import sys
 from pathlib import Path
 
-stage_root = Path(sys.argv[1]).resolve()
-source_path = Path(sys.argv[2]).resolve()
-target_path = Path(sys.argv[3]).resolve()
+source_path = Path(sys.argv[1]).resolve()
+target_path = Path(sys.argv[2]).resolve()
 target_path.parent.mkdir(parents=True, exist_ok=True)
 if target_path.exists():
     target_path.unlink()
@@ -360,15 +369,47 @@ try:
 finally:
     destination.close()
     source.close()
+'@
+    $result = & $Python -c $copy $SourceDatabase $TargetDatabase 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "candidate evidence copy failed: $result"
+    }
+}
+
+function Migrate-CandidatePreflightDatabase {
+    param(
+        [string]$Python,
+        [string]$StageRoot,
+        [string]$TargetDatabase
+    )
+    $migration = @'
+import sys
+from pathlib import Path
+
+stage_root = Path(sys.argv[1]).resolve()
+target_path = Path(sys.argv[2]).resolve()
 sys.path.insert(0, str(stage_root))
 from xauusd_forecaster.forward_ledger import ForwardLedger
 ledger = ForwardLedger(target_path)
 ledger.close()
 '@
-    $result = & $Python -c $migration $StageRoot $SourceDatabase $TargetDatabase 2>&1
+    $result = & $Python -c $migration $StageRoot $TargetDatabase 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "candidate evidence migration failed: $result"
     }
+}
+
+function New-CandidatePreflightDatabase {
+    param(
+        [string]$Python,
+        [string]$StageRoot,
+        [string]$SourceDatabase,
+        [string]$TargetDatabase
+    )
+    Copy-CandidatePreflightDatabase -Python $Python `
+        -SourceDatabase $SourceDatabase -TargetDatabase $TargetDatabase
+    Migrate-CandidatePreflightDatabase -Python $Python -StageRoot $StageRoot `
+        -TargetDatabase $TargetDatabase
 }
 
 function Copy-CandidatePreflightState {
@@ -407,6 +448,129 @@ function Copy-CandidatePreflightState {
     }
 }
 
+function Protect-PreflightDiagnosticText {
+    param([object]$Value, [int]$Limit = $preflightDiagnosticMaxCharacters)
+    $text = [string]$Value
+    if (-not $text) { return $null }
+    $text = [regex]::Replace(
+        $text, '(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+', 'Bearer [REDACTED]'
+    )
+    $text = [regex]::Replace(
+        $text,
+        '(?i)(["'']?\b(?:api[_-]?key|token|secret|password|authorization)\b["'']?\s*[:=]\s*)["'']?[^\s,;"'']+',
+        '$1[REDACTED]'
+    )
+    if ($text.Length -gt $Limit) {
+        return "[TRUNCATED]" + $text.Substring($text.Length - $Limit)
+    }
+    return $text
+}
+
+function Get-PreflightLogTail {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $null }
+    try {
+        $tail = (Get-Content -LiteralPath $Path -Tail 40 -ErrorAction Stop) -join "`n"
+        return Protect-PreflightDiagnosticText $tail
+    } catch { return $null }
+}
+
+function Invoke-CandidateStatusProbe {
+    param([string]$Url, [int]$TimeoutSeconds = 20)
+    $started = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing -Uri $Url `
+            -TimeoutSec $TimeoutSeconds
+        $started.Stop()
+        return [pscustomobject]@{
+            ready = [int]$response.StatusCode -eq 200
+            error_code = if ([int]$response.StatusCode -eq 200) {
+                $null
+            } else { "CRITICAL_STATUS_HTTP_ERROR" }
+            http_status = [int]$response.StatusCode
+            response_body = if ([int]$response.StatusCode -eq 200) {
+                $null
+            } else { Protect-PreflightDiagnosticText $response.Content }
+            transport_error = $null
+            elapsed_ms = [math]::Round($started.Elapsed.TotalMilliseconds, 1)
+        }
+    } catch {
+        $started.Stop()
+        $statusCode = $null
+        try {
+            if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+                $statusCode = [int]$_.Exception.Response.StatusCode
+            }
+        } catch {}
+        $message = Protect-PreflightDiagnosticText $_.Exception.Message
+        $body = Protect-PreflightDiagnosticText $_.ErrorDetails.Message
+        $timedOut = (
+            [string]$_.Exception.Status -eq "Timeout" -or
+            [string]$_.Exception.Message -match '(?i)timed?\s*out|timeout'
+        )
+        return [pscustomobject]@{
+            ready = $false
+            error_code = if ($null -ne $statusCode) {
+                "CRITICAL_STATUS_HTTP_ERROR"
+            } elseif ($timedOut) {
+                "CRITICAL_STATUS_TIMEOUT"
+            } else { "CRITICAL_STATUS_TRANSPORT_ERROR" }
+            http_status = $statusCode
+            response_body = $body
+            transport_error = $message
+            elapsed_ms = [math]::Round($started.Elapsed.TotalMilliseconds, 1)
+        }
+    }
+}
+
+function Wait-CandidateCriticalStatus {
+    param(
+        [object]$Process,
+        [string]$Url,
+        [DateTimeOffset]$Deadline
+    )
+    $started = [Diagnostics.Stopwatch]::StartNew()
+    $lastProbe = $null
+    do {
+        Start-Sleep -Milliseconds 500
+        try { $null = $Process.Refresh() } catch {}
+        if ($Process.HasExited) {
+            $started.Stop()
+            return [pscustomobject]@{
+                ready = $false
+                error_code = "CANDIDATE_API_EXITED"
+                process_exited = $true
+                exit_code = $Process.ExitCode
+                last_probe = $lastProbe
+                elapsed_seconds = [math]::Round($started.Elapsed.TotalSeconds, 3)
+            }
+        }
+        $lastProbe = Invoke-CandidateStatusProbe -Url $Url
+        if ($lastProbe.ready) {
+            $started.Stop()
+            return [pscustomobject]@{
+                ready = $true
+                error_code = $null
+                process_exited = $false
+                exit_code = $null
+                last_probe = $lastProbe
+                elapsed_seconds = [math]::Round($started.Elapsed.TotalSeconds, 3)
+            }
+        }
+    } while ([DateTimeOffset]::UtcNow -lt $Deadline)
+    $started.Stop()
+    return [pscustomobject]@{
+        ready = $false
+        error_code = if ($lastProbe -and $lastProbe.error_code) {
+            [string]$lastProbe.error_code
+        } else { "CRITICAL_STATUS_NOT_READY" }
+        process_exited = $false
+        exit_code = $null
+        last_probe = $lastProbe
+        elapsed_seconds = [math]::Round($started.Elapsed.TotalSeconds, 3)
+    }
+}
+
 function Invoke-ProductionShapePreflight {
     param([string]$Revision)
     $preflightRoot = Join-Path $repositoryRoot ".local\runtime-preflight"
@@ -414,9 +578,18 @@ function Invoke-ProductionShapePreflight {
     $database = Join-Path $moduleRoot ".local\forward\forward-evidence.sqlite3"
     $preflightPort = Get-AvailableLoopbackPort
     $process = $null
+    $phase = "STAGE_WORKTREE"
+    $failureCode = $null
+    $readiness = $null
+    $productionShapeOutput = $null
+    $stdout = $null
+    $stderr = $null
+    $preflightStarted = [Diagnostics.Stopwatch]::StartNew()
     if (-not (Test-Path -LiteralPath $database)) {
         Write-RuntimeUpdateFailure -Revision $Revision -Status "PREFLIGHT_FAILED" `
-            -Message "Candidate preflight failed; the current version is still running: production evidence database is missing."
+            -Message "Candidate preflight failed in COPY_DATABASE (EVIDENCE_DATABASE_MISSING); current runtime retained." `
+            -ErrorCode "EVIDENCE_DATABASE_MISSING" -Phase "COPY_DATABASE" `
+            -Diagnostics @{ elapsed_seconds = 0; source_database_exists = $false }
         return $false
     }
     New-Item -ItemType Directory -Path $preflightRoot -Force | Out-Null
@@ -431,13 +604,21 @@ function Invoke-ProductionShapePreflight {
         if ($LASTEXITCODE -ne 0) { throw "cannot stage candidate worktree" }
         $python = (Get-Command python.exe -ErrorAction Stop).Source
         $candidateDatabase = Join-Path $stageRoot ".local\preflight\forward-evidence.sqlite3"
-        New-CandidatePreflightDatabase -Python $python -StageRoot $stageRoot `
+        $phase = "COPY_DATABASE"
+        Copy-CandidatePreflightDatabase -Python $python `
             -SourceDatabase $database -TargetDatabase $candidateDatabase
+        $phase = "MIGRATE_DATABASE"
+        Migrate-CandidatePreflightDatabase -Python $python -StageRoot $stageRoot `
+            -TargetDatabase $candidateDatabase
+        $phase = "COPY_STATE"
         Copy-CandidatePreflightState -SourceDatabase $database `
             -TargetDatabase $candidateDatabase
         $stdout = Join-Path $logRoot "runtime-preflight.stdout.log"
         $stderr = Join-Path $logRoot "runtime-preflight.stderr.log"
         New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
+        Set-Content -LiteralPath $stdout -Value "" -Encoding UTF8
+        Set-Content -LiteralPath $stderr -Value "" -Encoding UTF8
+        $phase = "START_API"
         $process = Start-Process -FilePath $python -ArgumentList @(
             (Join-Path $stageRoot "scripts\run_dashboard_api.py"),
             "--database", $candidateDatabase, "--host", "127.0.0.1",
@@ -445,26 +626,26 @@ function Invoke-ProductionShapePreflight {
         ) -WorkingDirectory $stageRoot -WindowStyle Hidden -PassThru `
             -RedirectStandardOutput $stdout -RedirectStandardError $stderr
         $statusUrl = "http://127.0.0.1:$preflightPort/api/critical-status"
-        $deadline = [DateTimeOffset]::UtcNow.AddSeconds(60)
-        $ready = $false
-        do {
-            Start-Sleep -Milliseconds 500
-            if ($process.HasExited) { break }
-            try {
-                # Candidate readiness depends on one complete critical status
-                # snapshot. Optional dashboard resources degrade independently.
-                $ready = (Invoke-WebRequest -UseBasicParsing -Uri $statusUrl `
-                    -TimeoutSec 20).StatusCode -eq 200
-            } catch { $ready = $false }
-        } while (-not $ready -and [DateTimeOffset]::UtcNow -lt $deadline)
-        if (-not $ready) { throw "staged dashboard API did not become healthy" }
+        $phase = "WAIT_CRITICAL_STATUS"
+        $readiness = Wait-CandidateCriticalStatus -Process $process `
+            -Url $statusUrl -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(60))
+        if (-not $readiness.ready) {
+            $failureCode = [string]$readiness.error_code
+            throw "candidate critical status did not become ready"
+        }
+        $phase = "PRODUCTION_SHAPE"
         $arguments = @(
             (Join-Path $stageRoot "scripts\check_production_shape.py"),
             "--status-url", $statusUrl,
             "--allow-pending-generation-decision"
         )
         $result = & $python @arguments 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "production shape rejected: $result" }
+        if ($LASTEXITCODE -ne 0) {
+            $failureCode = "PRODUCTION_SHAPE_REJECTED"
+            $productionShapeOutput = Protect-PreflightDiagnosticText ($result -join "`n")
+            throw "candidate production shape rejected"
+        }
+        $preflightStarted.Stop()
         Write-RuntimeUpdateState @{
             update_status = "PREFLIGHT_PASSED"
             preflight_revision = $Revision
@@ -474,13 +655,46 @@ function Invoke-ProductionShapePreflight {
             failed_revision = $null
             failed_at = $null
             failed_preflight_contract = $null
+            failure_code = $null
+            failure_phase = $null
+            preflight_diagnostics = $null
         }
         Write-WatchdogEvent -Event "RUNTIME_PREFLIGHT_PASSED" `
             -Service "all" -State $Revision
         return $true
     } catch {
+        $preflightStarted.Stop()
+        $failureDetail = Protect-PreflightDiagnosticText $_.Exception.Message
+        $processExited = $false
+        $exitCode = $null
+        if ($process) {
+            try { $null = $process.Refresh() } catch {}
+            $processExited = [bool]$process.HasExited
+            if ($processExited) {
+                try { $exitCode = [int]$process.ExitCode } catch {}
+            } else {
+                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                try { $process.WaitForExit(5000) | Out-Null } catch {}
+            }
+        }
+        if (-not $failureCode) { $failureCode = "${phase}_FAILED" }
+        $lastProbe = if ($readiness) { $readiness.last_probe } else { $null }
+        $diagnostics = @{
+            elapsed_seconds = [math]::Round($preflightStarted.Elapsed.TotalSeconds, 3)
+            candidate_process_exited = $processExited
+            candidate_exit_code = $exitCode
+            last_http_status = if ($lastProbe) { $lastProbe.http_status } else { $null }
+            last_http_body = if ($lastProbe) { $lastProbe.response_body } else { $null }
+            last_transport_error = if ($lastProbe) { $lastProbe.transport_error } else { $null }
+            last_probe_elapsed_ms = if ($lastProbe) { $lastProbe.elapsed_ms } else { $null }
+            stdout_tail = Get-PreflightLogTail $stdout
+            stderr_tail = Get-PreflightLogTail $stderr
+            production_shape_output = $productionShapeOutput
+            failure_detail = $failureDetail
+        }
         Write-RuntimeUpdateFailure -Revision $Revision -Status "PREFLIGHT_FAILED" `
-            -Message "Candidate preflight failed; the current version is still running: $($_.Exception.Message)"
+            -Message "Candidate preflight failed in $phase ($failureCode); current runtime retained." `
+            -ErrorCode $failureCode -Phase $phase -Diagnostics $diagnostics
         return $false
     } finally {
         if ($process -and -not $process.HasExited) {
