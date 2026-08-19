@@ -23,6 +23,7 @@ Configure one Cloudflare Access self-hosted application for these production
 human paths only:
 
 - `/assistant`
+- `/retry-jobs`
 - `/api/assistant-chat`
 - `/api/assistant-conversations`
 - `/api/news-questions`

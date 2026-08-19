@@ -173,7 +173,7 @@ export default function RetryQueue() {
 
   return <section className="retry-queue" id="retry-jobs" aria-label="重试任务">
     <header className="retry-queue-header">
-      <div><p className="eyebrow">PRIVATE OPERATOR QUEUE</p><h2>重试任务</h2><p>云端接受、Windows 应用与实际执行分阶段记录。</p></div>
+      <div><p className="eyebrow">PRIVATE OPERATOR QUEUE</p><h1>重试任务</h1><p>云端接受、Windows 应用与实际执行分阶段记录。</p></div>
       <dl className="retry-queue-summary" aria-label="重试队列摘要">
         <div><dt>总任务</dt><dd>{summary.total}</dd></div>
         <div><dt>等待重试</dt><dd>{summary.waiting}</dd></div>
@@ -184,7 +184,7 @@ export default function RetryQueue() {
     </header>
     {preview ? <p className="retry-queue-notice">PR Preview 使用合成演示任务，仅用于检查界面与交互，不连接或修改生产调度器。</p> : null}
     {message ? <p className="retry-queue-notice" role="status">{message}</p> : null}
-    {authRequired ? <p className="retry-queue-notice"><a href="/assistant?returnTo=%2F%3Froom%3Dhealth%23retry-jobs">使用共享 Dashboard Operator 登录</a>。登录一次后，Assistant 与系统操作共用同一 Access 会话。</p> : null}
+    {authRequired ? <p className="retry-queue-notice"><a href="/retry-jobs">使用共享 Dashboard Operator 登录</a>。登录一次后，Assistant 与重试任务共用同一 Access 会话。</p> : null}
     <div className={`retry-bulk-bar ${selected.size ? "is-active" : ""}`}>
       <label className="retry-checkbox-target"><input type="checkbox" aria-label="选择全部可调整任务" checked={eligible.length > 0 && selected.size === eligible.length} onChange={event => setSelected(event.target.checked ? new Set(eligible.map(job => job.job_id)) : new Set())} /><span>选择全部可调整任务</span></label>
       <strong>{selected.size ? `已选 ${selected.size} 个` : "选择任务后可批量调整"}</strong>

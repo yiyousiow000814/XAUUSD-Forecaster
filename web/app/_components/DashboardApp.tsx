@@ -16,11 +16,13 @@ import DashboardShell from "./DashboardShell";
 
 const loadStatusView = () => import("../_views/StatusView");
 const loadHealthView = () => import("../_views/HealthView");
+const loadRetryView = () => import("../_views/RetryView");
 const loadAuditView = () => import("../_views/AuditView");
 const loadAssistantView = () => import("../_views/AssistantView");
 
 const StatusView = lazy(loadStatusView);
 const HealthView = lazy(loadHealthView);
+const RetryView = lazy(loadRetryView);
 const AuditView = lazy(loadAuditView);
 const AssistantView = lazy(loadAssistantView);
 
@@ -33,11 +35,12 @@ function validAuditView(value: string | null | undefined): AuditViewName {
 function parseDashboardUrl(url: URL): DashboardLocation | null {
   if (url.pathname === "/status") return { room: "status", auditView: "news" };
   if (url.pathname === "/health") return { room: "health", auditView: "news" };
+  if (url.pathname === "/retry-jobs") return { room: "retry", auditView: "news" };
   if (url.pathname === "/assistant") return { room: "assistant", auditView: "news" };
   if (url.pathname === "/audit") return { room: "audit", auditView: validAuditView(url.searchParams.get("view")) };
   if (url.pathname !== "/") return null;
   const room = url.searchParams.get("room");
-  if (room === "assistant" || room === "status" || room === "health") return { room, auditView: "news" };
+  if (room === "assistant" || room === "status" || room === "health" || room === "retry") return { room, auditView: "news" };
   if (room === "audit") return { room, auditView: validAuditView(url.searchParams.get("view")) };
   return { room: "live", auditView: "news" };
 }
@@ -51,6 +54,7 @@ function canonicalHref(location: DashboardLocation): string {
 function preloadRoom(room: DashboardRoom): Promise<unknown> {
   if (room === "status") return loadStatusView();
   if (room === "health") return loadHealthView();
+  if (room === "retry") return loadRetryView();
   if (room === "audit") return loadAuditView();
   if (room === "assistant") return loadAssistantView();
   return Promise.resolve();
@@ -106,6 +110,7 @@ export default function DashboardApp({
   useEffect(() => {
     void loadStatusView();
     void loadHealthView();
+    void loadRetryView();
     const prepareAudit = () => void loadAuditView();
     if ("requestIdleCallback" in window) {
       const idleId = window.requestIdleCallback(prepareAudit, { timeout: 2_000 });
@@ -138,6 +143,7 @@ export default function DashboardApp({
         {location.room === "live" && <LiveRoomView />}
         {location.room === "status" && <StatusView initialPayload={initialStatus} />}
         {location.room === "health" && <HealthView initialPayload={initialStatus} />}
+        {location.room === "retry" && <RetryView />}
         {location.room === "audit" && <AuditView key={location.auditView} />}
         {location.room === "assistant" && <AssistantView />}
       </Suspense>

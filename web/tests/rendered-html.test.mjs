@@ -536,6 +536,7 @@ test("keeps global shell ownership centralized and prevents view-level design dr
     "../app/_views/AssistantView.tsx",
     "../app/_views/AuditView.tsx",
     "../app/_views/HealthView.tsx",
+    "../app/_views/RetryView.tsx",
     "../app/_views/StatusView.tsx",
   ];
 
@@ -549,7 +550,7 @@ test("keeps global shell ownership centralized and prevents view-level design dr
   assert.doesNotMatch(mobile, /const SECTIONS|MobileDashboardSection/);
   assert.equal(navigation.match(/label: "(?:总览|新闻与决策|Assistant|系统)"/g)?.length, 4);
   assert.match(navigation, /href: "\/audit\?view=news"/);
-  assert.match(navigation, /rooms: \["health", "status"\]/);
+  assert.match(navigation, /rooms: \["health", "retry", "status"\]/);
 
   for (const path of views) {
     const source = readFileSync(new URL(path, import.meta.url), "utf8");
@@ -567,6 +568,7 @@ test("renders one invariant global header and active section across every dashbo
     ["/?room=audit&view=news", "新闻与决策"],
     ["/?room=audit&view=league", "新闻与决策"],
     ["/?room=health", "系统"],
+    ["/?room=retry", "系统"],
     ["/?room=status", "系统"],
   ];
   const labels = ["总览", "新闻与决策", "Assistant", "系统"];
@@ -583,7 +585,7 @@ test("renders one invariant global header and active section across every dashbo
     assert.equal(header.match(/aria-current="page"/g)?.length, 1, path);
     assert.match(header, new RegExp(`aria-current="page"[^>]*>${activeLabel}</a>`), path);
     assert.equal(header.match(/class="dashboard-global-state"/g)?.length, 1, path);
-    assert.doesNotMatch(header, /返回实时室|学习曲线|AI 模型用量|系统健康/, path);
+    assert.doesNotMatch(header, /返回实时室|学习曲线|AI 模型用量|系统健康|重试任务/, path);
 
     const globalNav = header.match(/<nav class="dashboard-global-nav"[\s\S]*?<\/nav>/)?.[0];
     const mobileNav = header.match(/<select aria-label="切换主要区域"[\s\S]*?<\/select>/)?.[0];
@@ -1084,6 +1086,7 @@ test("renders every Preview room from the embedded build snapshot", async () => 
     ["/", /Aurum Signal Room/],
     ["/?room=status", /AI 模型使用状态/],
     ["/?room=health", /系统健康状态/],
+    ["/?room=retry", /PRIVATE OPERATOR QUEUE/],
   ]) {
     const { response, html } = await renderSettled(path, marker);
     assert.equal(response.status, 200, path);
@@ -1179,7 +1182,7 @@ test("renders the Gemini quota status route", async () => {
   assert.match(html, /连接中|运行警告|运行异常|实时链路不可用/);
 });
 
-test("renders component and news-source health on a separate route", async () => {
+test("keeps System Health separate from the dedicated retry workspace", async () => {
   const response = await render("/?room=health");
   assert.equal(response.status, 200);
   const html = await response.text();
@@ -1188,10 +1191,28 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(html, /新闻来源状态/);
   assert.match(html, /AI 模型用量/);
   assert.match(html, /重试任务/);
+  assert.doesNotMatch(html, /PRIVATE OPERATOR QUEUE|class="retry-queue"/);
   const view = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(view, /RetryQueue|operator-retry/);
+  const retryView = readFileSync(new URL("../app/_views/RetryView.tsx", import.meta.url), "utf8");
+  assert.match(retryView, /<RetryQueue \/>/);
+  const retryPage = await renderSettled("/?room=retry", /PRIVATE OPERATOR QUEUE/);
+  assert.equal(retryPage.response.status, 200);
+  assert.match(retryPage.html, /PRIVATE OPERATOR QUEUE/);
+  assert.match(retryPage.html, /<h1>重试任务<\/h1>/);
+  assert.match(retryPage.html, /aria-current="page"[^>]*>系统<\/a>/);
+  assert.match(retryPage.html, /aria-current="page"[^>]*>重试任务<\/a>/);
+  const retryNavigation = retryPage.html.match(/<nav class="dashboard-section-nav"[\s\S]*?<\/nav>/)?.[0] ?? "";
+  assert.match(retryNavigation, /系统健康[\s\S]*重试任务[\s\S]*AI 模型用量/);
   const layout = readFileSync(new URL("../app/layout.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   const retryQueue = readFileSync(new URL("../app/_components/RetryQueue.tsx", import.meta.url), "utf8");
+  const retryRoute = readFileSync(new URL("../app/api/operator-retry/route.ts", import.meta.url), "utf8");
+  const retryGet = retryRoute.match(/export async function GET[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(retryGet, /authenticateDashboardOperatorRequest\(request, env\)/);
+  assert.match(retryGet, /if \(!actor\) return json\(\{ error: "操作员身份验证失败" \}, 401\)/);
+  assert.ok(retryGet.indexOf("authenticateDashboardOperatorRequest") < retryGet.indexOf("env.DB"));
+  assert.ok(retryGet.indexOf("env.DB") < retryGet.indexOf("listOperatorRetryJobs"));
   assert.match(retryQueue, /立即可领取/);
   assert.match(retryQueue, /云端已接受/);
   assert.match(retryQueue, /尚不代表 Windows scheduler 已应用/);
@@ -1473,6 +1494,10 @@ test("switches dashboard rooms locally and reuses client data between views", ()
   assert.match(app, /window\.history\.replaceState/);
   assert.match(app, /window\.addEventListener\("popstate"/);
   assert.match(app, /lazy\(loadAuditView\)/);
+  assert.match(app, /url\.pathname === "\/retry-jobs"/);
+  assert.match(app, /room === "retry"/);
+  assert.match(app, /lazy\(loadRetryView\)/);
+  assert.match(app, /<RetryView \/>/);
   assert.match(app, /<DashboardShell location=\{location\}>/);
   assert.match(css, /\.dashboard-global-link\.is-navigating::after/);
   assert.match(css, /prefers-reduced-motion:reduce/);
@@ -1486,6 +1511,7 @@ test("redirects legacy dashboard URLs to the single app shell", async () => {
   for (const [path, location] of [
     ["/status", "/?room=status"],
     ["/health", "/?room=health"],
+    ["/retry-jobs", "/?room=retry"],
     ["/audit?view=league", "/?room=audit&view=league"],
   ]) {
     const response = await render(path);
@@ -1915,6 +1941,8 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
     assert.match(navigation, new RegExp(label));
   }
   assert.match(mobileNav, /aria-label="切换主要区域"/);
+  assert.match(shell, /DASHBOARD_SYSTEM_DESTINATIONS\.map/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.dashboard-section-nav a \{ min-width:0; flex:1 1 0; \}/);
   assert.match(css, /\.topbar \{ align-items:stretch; flex-direction:column/);
   assert.match(css, /\.dashboard-global-nav \{ display:none; \}/);
   assert.match(css, /\.dashboard-header \.mobile-dashboard-nav \{ grid-column:1; display:grid; grid-template-columns:minmax\(0,1fr\)/);

@@ -94,9 +94,10 @@ part of it.
 5. Page identity belongs inside page content. A System or Audit page heading
    must not replace the product identity in the global header.
 6. Section navigation is subordinate to global navigation. Audit tabs remain
-   inside Audit. System exposes `系统健康` (`/health`) and `AI 模型用量`
-   (`/status`) through one shared secondary navigation while both routes keep
-   the top-level `系统` destination active.
+   inside Audit. System exposes `系统健康` (`/health`), `重试任务`
+   (`/retry-jobs`), and `AI 模型用量` (`/status`) through one shared secondary
+   navigation while all three routes keep the top-level `系统` destination
+   active.
 7. Global destination labels and order are product contracts. A back-style
    action such as `返回实时室` is not a global destination.
 8. The global system-state indicator has one shell-owned location and consumes
@@ -106,14 +107,15 @@ part of it.
    shell-level structure instead of extending its owner is design drift.
 10. Deterministic source and rendered-route contracts must prevent design
     drift; human review and memory are not sufficient enforcement.
-11. System Health contains a subordinate `重试任务` operator area below the
-    incident summary. It shows human-readable task context, state, failure,
-    attempt count, current UTC+8 schedule, and automatic-versus-operator
-    provenance. Technical job IDs remain visually secondary. Desktop, 390x844,
-    and 360x800 layouts keep every control reachable without horizontal
-    overflow, and every scheduling control has a minimum 44 CSS-pixel target.
-    Checkbox labels must make the complete 44x44 area interactive; a 20px input
-    centered inside a non-interactive layout box does not satisfy this rule.
+11. `重试任务` is a dedicated privileged System workspace. System Health does
+    not render or anonymously fetch the retry queue. The retry workspace shows
+    human-readable task context, state, failure, attempt count, current UTC+8
+    schedule, and automatic-versus-operator provenance. Technical job IDs
+    remain visually secondary. Desktop, 390x844, and 360x800 layouts keep every
+    control reachable without horizontal overflow, and every scheduling control
+    has a minimum 44 CSS-pixel target. Checkbox labels must make the complete
+    44x44 area interactive; a 20px input centered inside a non-interactive
+    layout box does not satisfy this rule.
 12. Advancing work uses a lightweight confirmation that states the selected
     count and says the work becomes scheduler-claimable, not immediately
     executed. Custom datetime input is explicitly UTC+8.

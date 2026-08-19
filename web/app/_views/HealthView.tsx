@@ -10,7 +10,6 @@ import { operationalEventDiagnostic, operationalIncidentActionLabels, operationa
 import { affectedOperationalScopeCount, correlateOperationalEvents, type OperationalIncident } from "../_lib/operational-incidents";
 import { normalizeOperationalEvent, schedulerTaskLabel, type AssistantOperationalHealth, type OperationalAlert, type OperationalHealth } from "../_lib/operational-health";
 import { sourceHealthErrorPresentation } from "../_lib/source-health-presentation";
-import RetryQueue from "../_components/RetryQueue";
 
 export type StatusPayload = {
   preview_status_summary?: boolean;
@@ -227,7 +226,6 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
         </div>
       </details>
     </section>
-    <RetryQueue />
     <section id="assistant-operational-alerts" className="operational-health-panel technical-health-panel" aria-label="Assistant 云端队列技术状态">
       <details>
         <summary>查看 Assistant 云端队列技术状态</summary>

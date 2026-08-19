@@ -85,9 +85,10 @@ owner allowlist. Missing or malformed configuration fails closed;
 it does not fall back to an anonymous queue, a browser credential, or the
 machine ingest token.
 
-The shared Access application protects `/assistant`, `/api/assistant-chat`,
-`/api/assistant-conversations`, and `/api/news-questions`. Those application
-paths, plus `/api/operator-retry`, are the human boundary. `/api/assistant-worker/*` is deliberately outside
+The shared Access application protects `/assistant`, `/retry-jobs`,
+`/api/assistant-chat`, `/api/assistant-conversations`, and
+`/api/news-questions`. Those application paths, plus `/api/operator-retry`, are
+the human boundary. `/api/assistant-worker/*` is deliberately outside
 the Access application because it has no browser identity and is authorized by
 the independent machine policy below.
 

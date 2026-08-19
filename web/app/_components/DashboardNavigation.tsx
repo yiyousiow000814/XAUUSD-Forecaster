@@ -2,7 +2,7 @@
 
 import { createContext, useContext, type ReactNode } from "react";
 
-export type DashboardRoom = "live" | "assistant" | "status" | "health" | "audit";
+export type DashboardRoom = "live" | "assistant" | "status" | "health" | "retry" | "audit";
 export type AuditViewName = "news" | "evidence" | "stories" | "decisions" | "league" | "coverage";
 
 export type DashboardLocation = {
@@ -23,11 +23,12 @@ export const DASHBOARD_GLOBAL_DESTINATIONS: readonly DashboardGlobalDestination[
   { id: "live", label: "总览", href: "/", rooms: ["live"] },
   { id: "audit", label: "新闻与决策", href: "/audit?view=news", rooms: ["audit"] },
   { id: "assistant", label: "Assistant", href: "/assistant", rooms: ["assistant"] },
-  { id: "system", label: "系统", href: "/health", rooms: ["health", "status"] },
+  { id: "system", label: "系统", href: "/health", rooms: ["health", "retry", "status"] },
 ];
 
 export const DASHBOARD_SYSTEM_DESTINATIONS = [
   { id: "health", label: "系统健康", href: "/health", room: "health" },
+  { id: "retry", label: "重试任务", href: "/retry-jobs", room: "retry" },
   { id: "status", label: "AI 模型用量", href: "/status", room: "status" },
 ] as const;
 
