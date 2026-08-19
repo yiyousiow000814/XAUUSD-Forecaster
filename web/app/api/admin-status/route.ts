@@ -16,10 +16,7 @@ export async function GET(request: Request) {
   }
   const actor = await authenticateDashboardOperatorRequest(request, env);
   if (!actor) return json({ error: "操作员身份验证失败" }, 401);
-  const current = await readDashboardStatus(
-    env.DB as D1Database | undefined,
-    process.env.STATUS_RELAY_URL,
-  );
+  const current = await readDashboardStatus(env.DB as D1Database | undefined);
   if (!current) return json({ error: "AI 模型用量暂不可用" }, 503);
   return json({ ...current.payload, observation_scope: current.scope }, current.status);
 }

@@ -1505,6 +1505,8 @@ test("separates anonymous health data from owner-only Admin evidence", async () 
   assert.doesNotMatch(healthView, /operator-retry|assistant-health|AdminOverview/);
   assert.doesNotMatch(alertBanner, /assistant-health|AssistantOperationalHealth/);
   assert.match(adminOverview, /fetch\("\/api\/operator-retry"/);
+  assert.doesNotMatch(statusProjection, /fetch\(|STATUS_RELAY_URL/);
+  assert.doesNotMatch(adminStatus, /STATUS_RELAY_URL/);
 
   for (const source of [adminStatus, assistantHealth]) {
     const get = source.match(/export async function GET[\s\S]*?\n\}/)?.[0] ?? "";

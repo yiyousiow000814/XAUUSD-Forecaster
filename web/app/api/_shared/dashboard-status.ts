@@ -3,12 +3,11 @@ import { applyFreshness } from "../status/freshness.js";
 export type DashboardStatusRead = {
   payload: Record<string, unknown>;
   status: number;
-  scope: "D1_SNAPSHOT" | "RELAY";
+  scope: "D1_SNAPSHOT";
 };
 
 export async function readDashboardStatus(
   binding: D1Database | undefined,
-  relayUrl: string | undefined,
 ): Promise<DashboardStatusRead | null> {
   try {
     if (binding) {
@@ -22,21 +21,10 @@ export async function readDashboardStatus(
       };
     }
   } catch {
-    // A temporary D1 read problem may still use the configured relay.
+    // Callers decide whether their public surface may use a relay fallback.
   }
 
-  if (!relayUrl) return null;
-  try {
-    const response = await fetch(relayUrl, {
-      cache: "no-store",
-      headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(4_000),
-    });
-    const payload = await response.json() as Record<string, unknown>;
-    return { payload: applyFreshness(payload), status: response.status, scope: "RELAY" };
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 export function publicDashboardStatus(payload: Record<string, unknown>) {
