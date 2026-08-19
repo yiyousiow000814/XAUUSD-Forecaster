@@ -17,29 +17,82 @@ verify the old worker receives no new-generation item. Then apply the scheduling
 migration and activate the matching runtime revision. A migration that exposes
 new-generation jobs to an unversioned old claimant must not be applied.
 
-Before enabling the private Assistant, configure one Cloudflare Access
-self-hosted application for these production paths only:
+## Shared Dashboard Operator authentication
 
-- `/assistant`
+Configure one Cloudflare Access self-hosted application for these production
+human paths only:
+
+- `/admin`
+- `/admin/*`
+- `/assistant` (compatibility redirect)
+- `/retry-jobs` (compatibility redirect)
+- `/status` (compatibility redirect)
+- `/api/admin-status`
+- `/api/assistant-health`
 - `/api/assistant-chat`
 - `/api/assistant-conversations`
 - `/api/news-questions`
+- `/api/operator-retry`
 
 Allow only the configured owner identity and set `CF_ACCESS_TEAM_DOMAIN`,
-`CF_ACCESS_AUD`, and at least one owner allowlist secret to match that
-application. Do not add `/api/assistant-worker/*` to the Access application.
-The Windows synchronizer reaches that separate control plane with
-`INGEST_TOKEN`; unauthenticated requests to it must receive `401` from the
+`CF_ACCESS_AUD`, and at least one of
+`DASHBOARD_OPERATOR_OWNER_SUBJECTS` or `DASHBOARD_OPERATOR_OWNER_EMAILS` to
+match that application. Keep the Access cookie path restriction disabled so
+all Admin pages and human API paths share one application session. If Google is the
+chosen identity provider, enable it on this same application and optionally use
+instant authentication; the owner allowlist remains mandatory authorization.
+Do not create Assistant-, retry-, or usage-specific Access applications or
+login state.
+
+Do not add `/api/assistant-worker/*` or `/api/operator-retry-worker` to the
+Access application. The Windows synchronizer reaches those separate machine
+planes with `INGEST_TOKEN`; unauthenticated requests must receive `401` from the
 Worker.
 
-After changing a Worker secret, restart `Dashboard Mirrors` in the Control
-Center so the child process receives the current user-level environment.
+## Local operator bridge credential
+
+Create a separate credential with at least 32 characters; 48 cryptographically
+random bytes encoded as base64 is recommended. Store the same value in the
+Windows user environment as `DASHBOARD_OPERATOR_BRIDGE_TOKEN` for both the
+Dashboard API and Dashboard Mirrors processes. Never place it in
+`dashboard-sync.json`, a URL, command-line argument, log, D1, SQLite evidence,
+or source control. This token is independent from `INGEST_TOKEN` and Cloudflare
+Access credentials.
+
+After changing a Worker or bridge secret, restart the affected local Dashboard
+API and `Dashboard Mirrors` processes in the Control Center so child processes
+receive the current user-level environment.
+
+## Operator retry production cutover
+
+1. Verify the shared Access application paths, IdP, audience, and owner-only
+   allowlist without removing the Admin and compatibility paths.
+2. Set the new `DASHBOARD_OPERATOR_OWNER_*` secret(s). Legacy
+   `ASSISTANT_OWNER_*` values may remain during one cutover but do not broaden a
+   configured shared allowlist.
+3. Apply D1 migration `0020_operator_retry_scheduling.sql`.
+4. Deploy one Worker revision containing both `/api/operator-retry` and
+   `/api/operator-retry-worker`.
+5. Configure `DASHBOARD_OPERATOR_BRIDGE_TOKEN`, then restart both the local
+   Dashboard API and `Dashboard Mirrors`.
+6. Verify anonymous Dashboard reads still work, anonymous privileged reads and
+   writes fail, one Access login works across every Admin destination, the machine
+   route rejects human credentials, and the localhost bridge rejects missing or
+   wrong credentials.
+7. Submit one bounded safe retry command and observe `PENDING` -> `APPLYING` ->
+   a terminal result, followed by the updated retry-job mirror and `SYNC OK` at
+   the exact deployed main revision.
 
 Verify the deployed Worker, required API routes, and dashboard synchronization
-before describing the deployment as recovered. Verification includes an Access
-login through `/assistant`, an authenticated human API request, an
-unauthenticated machine-route rejection, a successful Windows claim cycle, and
-`SYNC OK` at the exact deployed main revision.
+before describing the deployment as recovered. A running process or accepted
+cloud command is not sufficient; the final scheduler mirror must reflect the
+applied result.
+
+Rollback disables retry mutation without rewriting evidence: disable its UI,
+stop `Dashboard Mirrors` command consumption, and redeploy the prior Worker.
+Do not delete D1 request/event rows or local append-only override evidence. The
+local bridge remains fail-closed if its credential is removed. Migration 0020
+tables may be retained because they are isolated control-plane evidence.
 
 GitHub checks validate the branch; they do not deploy it. Do not add a workflow
 `environment:` key or call GitHub's Deployments API. When inspecting GitHub API

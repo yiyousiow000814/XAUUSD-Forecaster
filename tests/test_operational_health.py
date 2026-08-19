@@ -6,7 +6,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from xauusd_forecaster.news_scheduler import enqueue_job, install_scheduler_schema
+from xauusd_forecaster.news_scheduler import (
+    apply_retry_schedule_override,
+    enqueue_job,
+    install_scheduler_schema,
+)
 from xauusd_forecaster.operational_health import (
     extend_with_component_alerts,
     scheduler_health_snapshot,
@@ -197,6 +201,53 @@ def test_scheduled_retry_loop_is_visible_without_claiming_current_impact() -> No
     }
     assert annotation["claimable"] == 0
     assert annotation["scheduled_retry"] == 1
+
+
+def test_operator_advance_changes_claimability_without_claiming_health_success() -> None:
+    connection = _connection()
+    job_id = enqueue_job(
+        connection, task_type="ACTIVE_ANNOTATION", source="source",
+        source_item_id="operator-health", revision_number=1,
+        prompt_version="prompt", priority="NORMAL", now=NOW - timedelta(hours=1),
+    )
+    automatic = (NOW + timedelta(hours=5)).isoformat()
+    connection.execute(
+        """UPDATE news_ai_jobs_v1 SET state='BACKING_OFF',attempt_count=10,
+           available_at=?,last_error='MODEL_OUTPUT_CONTRACT_FAILED' WHERE job_id=?""",
+        (automatic, job_id),
+    )
+    for attempt in range(1, 11):
+        connection.execute(
+            """INSERT INTO news_ai_job_attempts_v1 VALUES
+               (?,?,?,?,?,'ERROR','MODEL_OUTPUT_CONTRACT_FAILED','ValueError',NULL,
+                'display invalid',?,?)""",
+            (
+                f"operator-health-{attempt}", job_id, attempt, "account", "credential",
+                (NOW - timedelta(minutes=attempt)).isoformat(), automatic,
+            ),
+        )
+    connection.commit()
+    before = scheduler_health_snapshot(connection, now=NOW)
+    assert before["status"] == "WARNING"
+
+    apply_retry_schedule_override(
+        connection, request_id="operator-health", job_id=job_id,
+        operator_id="cloudflare-access:owner", mode="IMMEDIATE",
+        reason="repair deployed", expected_state="BACKING_OFF",
+        expected_available_at=automatic, now=NOW,
+    )
+    after = scheduler_health_snapshot(connection, now=NOW)
+    annotation = next(
+        task for task in after["scheduler"]["tasks"]
+        if task["task_type"] == "ACTIVE_ANNOTATION"
+    )
+    assert after["status"] != "HEALTHY"
+    assert annotation["claimable"] == 1
+    assert annotation["scheduled_retry"] == 0
+    assert connection.execute(
+        "SELECT next_retry_at FROM news_ai_job_attempts_v1 WHERE job_id=? LIMIT 1",
+        (job_id,),
+    ).fetchone()[0] == automatic
 
 
 def test_historical_capacity_debt_does_not_become_a_retry_loop() -> None:

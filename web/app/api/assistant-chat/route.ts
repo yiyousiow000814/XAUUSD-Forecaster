@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
-import { authenticateAssistantRequest } from "../_shared/assistant-auth";
+import { authenticateDashboardOperatorRequest } from "../_shared/dashboard-operator-auth";
 import {
   AssistantChatInputError,
   cancelOwnerAssistantChatTurn,
@@ -87,7 +87,7 @@ export async function GET(request: Request) {
       : previewJson({ item: null, preview: true }, 200, "synthetic-empty-assistant");
   }
 
-  const actor = await authenticateAssistantRequest(request, env);
+  const actor = await authenticateDashboardOperatorRequest(request, env);
   if (!actor) return unauthorized();
   if (mode !== null && mode !== "events") {
     return inputError(new AssistantChatInputError("INVALID_MODE", "Assistant 查询模式无效"));
@@ -131,7 +131,7 @@ export async function POST(request: Request) {
   const previewRejection = rejectPreviewWrite();
   if (previewRejection) return previewRejection;
   const mode = new URL(request.url).searchParams.get("mode");
-  const actor = await authenticateAssistantRequest(request, env);
+  const actor = await authenticateDashboardOperatorRequest(request, env);
   if (!actor) return unauthorized();
   if (mode !== null) {
     return inputError(new AssistantChatInputError("INVALID_MODE", "Assistant 写入模式无效"));

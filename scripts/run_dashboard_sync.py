@@ -990,6 +990,114 @@ def _assistant_worker_id() -> str:
     return f"dashboard-sync:{worker_suffix}"
 
 
+def _operator_retry_worker_url(config: dict) -> str:
+    remote = urllib.parse.urlsplit(str(config["remote_ingest_url"]))
+    return urllib.parse.urlunsplit((
+        remote.scheme, remote.netloc, "/api/operator-retry-worker", "", "",
+    ))
+
+
+def _local_retry_url(config: dict, path: str) -> str:
+    local = urllib.parse.urlsplit(str(config["local_status_url"]))
+    return urllib.parse.urlunsplit((local.scheme, local.netloc, path, "", ""))
+
+
+def _post_local_json(url: str, payload: dict) -> dict:
+    token = os.environ.get("DASHBOARD_OPERATOR_BRIDGE_TOKEN", "").strip()
+    if not 32 <= len(token) <= 512:
+        raise RuntimeError("dashboard operator bridge credential is not configured")
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "AurumOperatorBridge/1.0",
+            "X-Aurum-Operator-Bridge-Token": token,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=LOCAL_STATUS_TIMEOUT_SECONDS) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        if error.code != 207:
+            raise
+        return json.loads(error.read())
+
+
+def _get_local_json(url: str) -> dict:
+    token = os.environ.get("DASHBOARD_OPERATOR_BRIDGE_TOKEN", "").strip()
+    if not 32 <= len(token) <= 512:
+        raise RuntimeError("dashboard operator bridge credential is not configured")
+    request = urllib.request.Request(
+        url, headers={
+            "Accept": "application/json",
+            "User-Agent": "AurumOperatorBridge/1.0",
+            "X-Aurum-Operator-Bridge-Token": token,
+        },
+    )
+    with urllib.request.urlopen(request, timeout=LOCAL_STATUS_TIMEOUT_SECONDS) as response:
+        return json.loads(response.read())
+
+
+def _sync_operator_retries(_local_payload: dict, config: dict) -> None:
+    local_jobs = _get_local_json(_local_retry_url(config, "/api/retry-jobs"))
+    worker_url = _operator_retry_worker_url(config)
+    _post_json(
+        worker_url,
+        json.dumps({"action": "SYNC_JOBS", "items": local_jobs.get("items", [])}).encode(),
+        config,
+    )
+    worker_id = _assistant_worker_id()
+    processed = False
+    for _ in range(100):
+        command = _get_json(
+            f"{worker_url}?{urllib.parse.urlencode({'worker_id': worker_id})}", config,
+        ).get("item")
+        if not isinstance(command, dict):
+            break
+        local_result = _post_local_json(
+            _local_retry_url(config, "/api/retry-overrides"),
+            {
+                "operator_id": command.get("operator_id"),
+                "items": [{
+                    "request_id": command.get("request_id"),
+                    "job_id": command.get("job_id"),
+                    "mode": command.get("mode"),
+                    "reason": command.get("reason"),
+                    "expected_state": command.get("expected_state"),
+                    "expected_available_at": command.get("expected_available_at"),
+                    "requested_available_at": command.get("requested_available_at"),
+                }],
+            },
+        )
+        result = (local_result.get("results") or [{}])[0]
+        status = str(result.get("status") or "REJECTED")
+        _post_json(
+            worker_url,
+            json.dumps({
+                "action": "FINISH",
+                "request_id": command.get("request_id"),
+                "lease_token": command.get("lease_token"),
+                "status": status,
+                "result": result,
+            }).encode(),
+            config,
+        )
+        processed = True
+    if processed:
+        # A command result and the scheduler mirror advance in the same bounded
+        # sync pass; the browser need not wait for an unrelated later cycle.
+        refreshed_jobs = _get_local_json(_local_retry_url(config, "/api/retry-jobs"))
+        _post_json(
+            worker_url,
+            json.dumps({
+                "action": "SYNC_JOBS", "items": refreshed_jobs.get("items", []),
+            }).encode(),
+            config,
+        )
+
+
 def _sync_assistant_chat(_local_payload: dict, _config: dict):
     """Assistant is intentionally paused until an API model is configured."""
     return {"status": "PAUSED_NO_MODEL"}
@@ -1506,6 +1614,7 @@ def sync_once(config: dict) -> SyncResourceResults:
             ("market_history", lambda _payload, scoped: _sync_market_history(scoped)),
             ("news", _sync_news),
             ("news_questions", _sync_news_questions),
+            ("operator_retries", _sync_operator_retries),
         ):
             started = time.perf_counter()
             try:

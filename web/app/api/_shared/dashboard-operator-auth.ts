@@ -1,8 +1,8 @@
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 
-// Human Assistant authorization is independent from machine ingest authorization.
+// Human Dashboard Operator authorization is independent from machine ingest.
 
-export type AssistantActor = {
+export type DashboardOperatorActor = {
   actor_id: string;
   role: "OWNER";
 };
@@ -38,6 +38,21 @@ const accessConfig = (runtimeEnv: Cloudflare.Env) => {
   return { issuer: `https://${domain}`, audience };
 };
 
+const ownerAllowlist = (runtimeEnv: Cloudflare.Env) => {
+  const configuredSubjects = csv(runtimeEnv.DASHBOARD_OPERATOR_OWNER_SUBJECTS);
+  const configuredEmails = csv(runtimeEnv.DASHBOARD_OPERATOR_OWNER_EMAILS);
+  // Preserve a safe cutover path for existing deployments. Once either shared
+  // allowlist is configured, legacy Assistant values cannot broaden it.
+  const subjects = configuredSubjects.length || configuredEmails.length
+    ? configuredSubjects : csv(runtimeEnv.ASSISTANT_OWNER_SUBJECTS);
+  const emails = configuredSubjects.length || configuredEmails.length
+    ? configuredEmails : csv(runtimeEnv.ASSISTANT_OWNER_EMAILS);
+  return {
+    subjects: new Set(subjects),
+    emails: new Set(emails.map(value => value.toLocaleLowerCase("en-US"))),
+  };
+};
+
 const defaultVerifier: AccessVerifier = async (token, config) => {
   let jwks = jwksByIssuer.get(config.issuer);
   if (!jwks) {
@@ -53,11 +68,11 @@ const defaultVerifier: AccessVerifier = async (token, config) => {
   return verified.payload as AccessClaims;
 };
 
-export async function authenticateAssistantRequest(
+export async function authenticateDashboardOperatorRequest(
   request: Request,
   runtimeEnv: Cloudflare.Env,
   verify: AccessVerifier = defaultVerifier,
-): Promise<AssistantActor | null> {
+): Promise<DashboardOperatorActor | null> {
   const config = accessConfig(runtimeEnv);
   const token = request.headers.get("cf-access-jwt-assertion")?.trim();
   if (!config || !token || token.length > 8_192) return null;
@@ -70,13 +85,9 @@ export async function authenticateAssistantRequest(
       : "";
     if (claims.type !== "app" || !subject || !email) return null;
 
-    const allowedSubjects = new Set(csv(runtimeEnv.ASSISTANT_OWNER_SUBJECTS));
-    const allowedEmails = new Set(
-      csv(runtimeEnv.ASSISTANT_OWNER_EMAILS)
-        .map(value => value.toLocaleLowerCase("en-US")),
-    );
-    if (allowedSubjects.size === 0 && allowedEmails.size === 0) return null;
-    if (!allowedSubjects.has(subject) && !allowedEmails.has(email)) return null;
+    const allowlist = ownerAllowlist(runtimeEnv);
+    if (allowlist.subjects.size === 0 && allowlist.emails.size === 0) return null;
+    if (!allowlist.subjects.has(subject) && !allowlist.emails.has(email)) return null;
 
     return { actor_id: `cloudflare-access:${subject}`, role: "OWNER" };
   } catch {

@@ -347,3 +347,75 @@ export const learningRecords = sqliteTable(
     ),
   ],
 );
+
+export const operatorRetryJobs = sqliteTable(
+  "operator_retry_jobs",
+  {
+    jobId: text("job_id").primaryKey(),
+    taskType: text("task_type").notNull(),
+    title: text("title").notNull(),
+    state: text("state").notNull(),
+    priority: text("priority").notNull(),
+    availableAt: text("available_at").notNull(),
+    attemptCount: integer("attempt_count").notNull(),
+    lastError: text("last_error"),
+    lastFailureAt: text("last_failure_at"),
+    leaseExpiresAt: text("lease_expires_at"),
+    overrideMode: text("override_mode"),
+    overrideRequestedAt: text("override_requested_at"),
+    originalAvailableAt: text("original_available_at").notNull(),
+    syncedAt: text("synced_at").notNull(),
+    syncGeneration: text("sync_generation").notNull(),
+  },
+  table => [
+    index("operator_retry_jobs_schedule_idx")
+      .on(table.state, table.availableAt, table.syncedAt),
+  ],
+);
+
+export const operatorRetryRequests = sqliteTable(
+  "operator_retry_requests",
+  {
+    requestId: text("request_id").primaryKey(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    jobId: text("job_id").notNull(),
+    taskType: text("task_type").notNull(),
+    operatorId: text("operator_id").notNull(),
+    mode: text("mode").notNull(),
+    reason: text("reason").notNull(),
+    requestedAt: text("requested_at").notNull(),
+    requestedAvailableAt: text("requested_available_at"),
+    expectedState: text("expected_state").notNull(),
+    expectedAvailableAt: text("expected_available_at").notNull(),
+    status: text("status").notNull(),
+    leaseOwner: text("lease_owner"),
+    leaseToken: text("lease_token"),
+    leaseExpiresAt: text("lease_expires_at"),
+    completedAt: text("completed_at"),
+    resultJson: text("result_json"),
+  },
+  table => [
+    uniqueIndex("operator_retry_requests_idempotency_idx")
+      .on(table.operatorId, table.idempotencyKey, table.jobId),
+    index("operator_retry_requests_claim_idx")
+      .on(table.status, table.requestedAt),
+  ],
+);
+
+export const operatorRetryRequestEvents = sqliteTable(
+  "operator_retry_request_events",
+  {
+    eventId: text("event_id").primaryKey(),
+    requestId: text("request_id").notNull()
+      .references(() => operatorRetryRequests.requestId),
+    eventType: text("event_type").notNull(),
+    recordedAt: text("recorded_at").notNull(),
+    payloadJson: text("payload_json").notNull(),
+  },
+  table => [
+    index("operator_retry_request_events_lookup_idx")
+      .on(table.requestId, table.recordedAt),
+    uniqueIndex("operator_retry_request_events_type_idx")
+      .on(table.requestId, table.eventType),
+  ],
+);

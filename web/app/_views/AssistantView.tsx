@@ -75,7 +75,7 @@ type AssistantViewError = {
 const assistantViewError = (reason: unknown, prefix = ""): AssistantViewError => {
   let message: string;
   if (reason instanceof AssistantClientError) {
-    if (reason.status === 401) message = "Assistant 身份尚未通过 Cloudflare Access 验证。";
+    if (reason.status === 401) message = "管理员会话已过期，请重新登录。";
     else if (reason.status === 429) message = "Assistant 当前繁忙，请稍后再试。";
     else message = reason.message;
   } else {

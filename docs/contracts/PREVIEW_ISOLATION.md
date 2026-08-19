@@ -23,6 +23,7 @@ A Preview must never mutate production-owned state, including:
 - trading or order state;
 - model activation or promotion state;
 - scheduler state;
+- operator retry commands, mirrors, and retry-override audit state;
 - Assistant conversations, messages, memory, or queue state;
 - production configuration; or
 - any other authoritative production-owned state.
@@ -86,6 +87,12 @@ A Preview may render explicitly labeled synthetic Assistant fixtures or an
 immutable build snapshot for presentation review. Such output is not a live
 conversation and does not verify the model, retrieval, or persistence path.
 
+The Admin Console may render as an explicitly labeled synthetic, read-only
+Preview workspace without claiming that Cloudflare Access authentication
+succeeded. `/api/admin-status` uses only the branch-owned fixture in Preview;
+it does not read production D1 quota evidence. Public `/api/status` omits the
+private provider quota and routing fields in every deployment mode.
+
 The responsive Assistant workbench may install its branch-owned fixture only
 after the Preview API returns the labeled synthetic-empty Assistant state. The
 fixture remains visibly labeled, never enters an API request, and may be used
@@ -105,3 +112,11 @@ Every `/api/assistant-worker/*` GET or POST follows the early write rejection,
 including chat, News Q&A, title, compaction, and historical-memory indexing.
 Preview never authenticates a machine, claims work, or reads canonical
 production messages to build or test private memory.
+
+`/api/operator-retry` returns a labeled synthetic-empty API state in Preview and
+rejects every POST before operator authentication, body parsing, or D1 access.
+`/api/operator-retry-worker` rejects both machine claims and updates at the same
+early boundary. Only after the human API returns its labeled synthetic-empty
+state may the client install explicitly labeled, synthetic branch-owned retry tasks
+for selection, confirmation, custom-time, and responsive review. Its submit
+control remains disabled and it never contacts the Windows scheduler bridge.

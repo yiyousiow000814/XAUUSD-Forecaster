@@ -24,6 +24,15 @@ PREEMPTIBLE_POOL = "PREEMPTIBLE"
 URGENT_PRIORITIES = frozenset({"IMMEDIATE", "FAST"})
 PRIORITIES = ("IMMEDIATE", "FAST", "NORMAL", "BACKGROUND")
 PRIORITY_HEAD_START = timedelta(minutes=1)
+IDLE_CAPACITY_MAX_WAIT = timedelta(minutes=30)
+RETRY_OVERRIDE_MODES = (
+    "KEEP_ORIGINAL",
+    "IMMEDIATE",
+    "DELAY_15_MIN",
+    "DELAY_1_HOUR",
+    "IDLE_CAPACITY",
+    "CUSTOM_TIME",
+)
 TASKS = (
     "ACTIVE_ANNOTATION",
     "ACTIVE_IMPACT",
@@ -89,6 +98,30 @@ CREATE TABLE IF NOT EXISTS news_ai_job_attempts_v1 (
 
 CREATE INDEX IF NOT EXISTS news_ai_job_attempts_lookup_v1
 ON news_ai_job_attempts_v1(job_id,attempt_number,attempted_at);
+
+CREATE TABLE IF NOT EXISTS news_ai_retry_schedule_overrides_v1 (
+    override_id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL UNIQUE,
+    job_id TEXT NOT NULL,
+    task_type TEXT NOT NULL,
+    operator_id TEXT NOT NULL,
+    mode TEXT NOT NULL CHECK(mode IN (
+        'KEEP_ORIGINAL','IMMEDIATE','DELAY_15_MIN','DELAY_1_HOUR',
+        'IDLE_CAPACITY','CUSTOM_TIME')),
+    requested_at TEXT NOT NULL,
+    original_available_at TEXT NOT NULL,
+    previous_available_at TEXT NOT NULL,
+    requested_available_at TEXT,
+    effective_available_at TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    observed_state TEXT NOT NULL,
+    resulting_state TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+    FOREIGN KEY(job_id) REFERENCES news_ai_jobs_v1(job_id)
+);
+
+CREATE INDEX IF NOT EXISTS news_ai_retry_schedule_overrides_active_v1
+ON news_ai_retry_schedule_overrides_v1(job_id,active,requested_at);
 
 CREATE TABLE IF NOT EXISTS news_ai_scheduler_deferrals_v1 (
     deferral_id TEXT PRIMARY KEY,
@@ -277,6 +310,15 @@ class ScheduledJob:
     lease_owner: str | None
     lease_expires_at: datetime | None
     attempt_count: int
+
+
+class RetryScheduleConflict(ValueError):
+    """The requested override no longer matches mutable scheduler state."""
+
+    def __init__(self, code: str, current: dict[str, object] | None = None) -> None:
+        super().__init__(code)
+        self.code = code
+        self.current = current
 
 
 def install_scheduler_schema(connection: sqlite3.Connection) -> None:
@@ -1004,6 +1046,246 @@ def _job_from_row(row: sqlite3.Row) -> ScheduledJob:
     )
 
 
+def _retry_job_snapshot(row: sqlite3.Row) -> dict[str, object]:
+    keys = set(row.keys())
+    return {
+        "job_id": str(row["job_id"]),
+        "task_type": str(row["task_type"]),
+        "source": str(row["source"]),
+        "source_item_id": str(row["source_item_id"]),
+        "state": str(row["state"]),
+        "priority": str(row["priority"]),
+        "available_at": str(row["available_at"]),
+        "attempt_count": int(row["attempt_count"]),
+        "last_error": str(row["last_error"]) if row["last_error"] else None,
+        "last_failure_at": (
+            str(row["last_failure_at"])
+            if "last_failure_at" in keys and row["last_failure_at"] else None
+        ),
+        "title": (
+            str(row["title"])
+            if "title" in keys and row["title"] else str(row["source_item_id"])
+        ),
+        "lease_owner": str(row["lease_owner"]) if row["lease_owner"] else None,
+        "lease_expires_at": (
+            str(row["lease_expires_at"]) if row["lease_expires_at"] else None
+        ),
+        "override_mode": (
+            str(row["override_mode"])
+            if "override_mode" in keys and row["override_mode"] else None
+        ),
+        "override_requested_at": (
+            str(row["override_requested_at"])
+            if "override_requested_at" in keys and row["override_requested_at"]
+            else None
+        ),
+        "original_available_at": (
+            str(row["original_available_at"])
+            if "original_available_at" in keys and row["original_available_at"]
+            else str(row["available_at"])
+        ),
+    }
+
+
+def list_retry_schedule_jobs(
+    connection: sqlite3.Connection,
+    *,
+    limit: int = 200,
+) -> list[dict[str, object]]:
+    """Return bounded scheduler state without provider or credential material."""
+    bounded = max(1, min(500, int(limit)))
+    has_revisions = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='news_revisions'",
+    ).fetchone() is not None
+    has_translations = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='news_title_translations'",
+    ).fetchone() is not None
+    title_sql = (
+        f"""COALESCE({
+          "(SELECT t.headline_zh FROM news_title_translations t "
+          "WHERE t.source=j.source AND t.source_item_id=j.source_item_id "
+          "AND t.revision_number=j.revision_number ORDER BY t.parsed_at DESC LIMIT 1),"
+          if has_translations else ""
+        }(SELECT n.headline FROM news_revisions n
+                       WHERE n.source=j.source AND n.source_item_id=j.source_item_id
+                         AND n.revision_number=j.revision_number LIMIT 1),
+                    j.source_item_id)"""
+        if has_revisions else "j.source_item_id"
+    )
+    rows = connection.execute(
+        f"""SELECT j.*,
+                  {title_sql} AS title,
+                  (SELECT max(a.attempted_at) FROM news_ai_job_attempts_v1 a
+                   WHERE a.job_id=j.job_id) AS last_failure_at,
+                  active.mode AS override_mode,
+                  active.requested_at AS override_requested_at,
+                  active.original_available_at AS original_available_at
+           FROM news_ai_jobs_v1 j
+           LEFT JOIN news_ai_retry_schedule_overrides_v1 active
+             ON active.job_id=j.job_id AND active.active=1
+           WHERE j.state IN ('QUEUED','BACKING_OFF','LEASED')
+           ORDER BY CASE j.state WHEN 'BACKING_OFF' THEN 0 WHEN 'QUEUED' THEN 1 ELSE 2 END,
+                    j.available_at,j.created_at,j.job_id
+           LIMIT ?""",
+        (bounded,),
+    ).fetchall()
+    return [_retry_job_snapshot(row) for row in rows]
+
+
+def apply_retry_schedule_override(
+    connection: sqlite3.Connection,
+    *,
+    request_id: str,
+    job_id: str,
+    operator_id: str,
+    mode: str,
+    reason: str,
+    expected_state: str,
+    expected_available_at: str,
+    requested_available_at: datetime | None = None,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Append an audited override and conditionally change current availability."""
+    request_id = request_id.strip()
+    operator_id = operator_id.strip()
+    normalized_mode = mode.strip().upper()
+    normalized_reason = " ".join(reason.split())
+    if not request_id or len(request_id) > 128:
+        raise ValueError("retry override request_id is invalid")
+    if not operator_id or len(operator_id) > 256:
+        raise ValueError("retry override operator is invalid")
+    if normalized_mode not in RETRY_OVERRIDE_MODES:
+        raise ValueError("retry override mode is invalid")
+    if not normalized_reason or len(normalized_reason) > 500:
+        raise ValueError("retry override reason is invalid")
+    instant = now or datetime.now(UTC)
+    timestamp = _iso(instant)
+    custom = _iso(requested_available_at) if requested_available_at else None
+    if normalized_mode == "CUSTOM_TIME" and custom is None:
+        raise ValueError("custom retry time is required")
+    if normalized_mode != "CUSTOM_TIME" and custom is not None:
+        raise ValueError("requested retry time is only valid for custom mode")
+    if custom and datetime.fromisoformat(custom) < instant - timedelta(minutes=5):
+        raise ValueError("custom retry time is too far in the past")
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        existing = connection.execute(
+            """SELECT j.*,
+                      CASE WHEN o.active=1 THEN o.mode END AS override_mode,
+                      CASE WHEN o.active=1 THEN o.requested_at END AS override_requested_at,
+                      CASE WHEN o.active=1 THEN o.original_available_at
+                           ELSE j.available_at END AS original_available_at
+               FROM news_ai_retry_schedule_overrides_v1 o
+               JOIN news_ai_jobs_v1 j ON j.job_id=o.job_id
+               WHERE o.request_id=?""",
+            (request_id,),
+        ).fetchone()
+        if existing is not None:
+            if str(existing["job_id"]) != job_id:
+                raise RetryScheduleConflict("IDEMPOTENCY_CONFLICT")
+            connection.commit()
+            return _retry_job_snapshot(existing)
+
+        row = connection.execute(
+            "SELECT * FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
+        ).fetchone()
+        if row is None:
+            raise RetryScheduleConflict("JOB_NOT_FOUND")
+        current = _retry_job_snapshot(row)
+        if str(row["state"]) not in {"QUEUED", "BACKING_OFF"}:
+            raise RetryScheduleConflict("JOB_NOT_MUTABLE", current)
+        if (
+            str(row["state"]) != expected_state
+            or str(row["available_at"]) != expected_available_at
+        ):
+            raise RetryScheduleConflict("JOB_STATE_CHANGED", current)
+
+        first = connection.execute(
+            """SELECT original_available_at
+               FROM news_ai_retry_schedule_overrides_v1
+               WHERE job_id=? AND active=1 LIMIT 1""",
+            (job_id,),
+        ).fetchone()
+        original = str(first[0]) if first else str(row["available_at"])
+        effective = {
+            "KEEP_ORIGINAL": original,
+            "IMMEDIATE": timestamp,
+            "DELAY_15_MIN": _iso(instant + timedelta(minutes=15)),
+            "DELAY_1_HOUR": _iso(instant + timedelta(hours=1)),
+            "IDLE_CAPACITY": timestamp,
+            "CUSTOM_TIME": custom,
+        }[normalized_mode]
+        assert effective is not None
+
+        if normalized_mode == "KEEP_ORIGINAL" and first is None:
+            connection.execute(
+                """INSERT INTO news_ai_retry_schedule_overrides_v1 (
+                   override_id,request_id,job_id,task_type,operator_id,mode,
+                   requested_at,original_available_at,previous_available_at,
+                   requested_available_at,effective_available_at,reason,
+                   observed_state,resulting_state,active)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)""",
+                (
+                    str(uuid.uuid4()), request_id, job_id, str(row["task_type"]),
+                    operator_id, normalized_mode, timestamp, original,
+                    str(row["available_at"]), custom, effective, normalized_reason,
+                    str(row["state"]), str(row["state"]),
+                ),
+            )
+            connection.commit()
+            return current
+
+        connection.execute(
+            "UPDATE news_ai_retry_schedule_overrides_v1 SET active=0 WHERE job_id=? AND active=1",
+            (job_id,),
+        )
+        updated = connection.execute(
+            """UPDATE news_ai_jobs_v1
+               SET available_at=?,updated_at=?
+               WHERE job_id=? AND state=? AND available_at=?
+                 AND state IN ('QUEUED','BACKING_OFF')""",
+            (effective, timestamp, job_id, expected_state, expected_available_at),
+        )
+        if updated.rowcount != 1:
+            current_row = connection.execute(
+                "SELECT * FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
+            ).fetchone()
+            raise RetryScheduleConflict(
+                "JOB_STATE_CHANGED",
+                _retry_job_snapshot(current_row) if current_row else None,
+            )
+        connection.execute(
+            """INSERT INTO news_ai_retry_schedule_overrides_v1 (
+               override_id,request_id,job_id,task_type,operator_id,mode,
+               requested_at,original_available_at,previous_available_at,
+               requested_available_at,effective_available_at,reason,
+               observed_state,resulting_state,active)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)""",
+            (
+                str(uuid.uuid4()), request_id, job_id, str(row["task_type"]),
+                operator_id, normalized_mode, timestamp, original,
+                str(row["available_at"]), custom, effective, normalized_reason,
+                str(row["state"]), str(row["state"]),
+            ),
+        )
+        result = connection.execute(
+            """SELECT j.*,o.mode AS override_mode,
+                      o.requested_at AS override_requested_at,
+                      o.original_available_at AS original_available_at
+               FROM news_ai_jobs_v1 j
+               JOIN news_ai_retry_schedule_overrides_v1 o
+                 ON o.job_id=j.job_id AND o.active=1
+               WHERE j.job_id=?""",
+            (job_id,),
+        ).fetchone()
+        connection.commit()
+        return _retry_job_snapshot(result)
+    except Exception:
+        connection.rollback()
+        raise
+
+
 def claim_job(
     connection: sqlite3.Connection,
     *,
@@ -1034,7 +1316,7 @@ def claim_job(
     aged_before = _iso(instant - PRIORITY_HEAD_START)
     lease_expires = _iso(instant + timedelta(seconds=max(30, lease_seconds)))
     priority_filter = (
-        "AND priority IN ('IMMEDIATE','FAST')"
+        "AND j.priority IN ('IMMEDIATE','FAST')"
         if pool == PREEMPTIBLE_POOL else ""
     )
     task_placeholders = ",".join("?" for _ in claimable_tasks)
@@ -1048,20 +1330,28 @@ def claim_job(
             (timestamp, timestamp),
         )
         row = connection.execute(
-            f"""SELECT * FROM news_ai_jobs_v1
-                WHERE state IN ('QUEUED','BACKING_OFF')
-                  AND task_type IN ({task_placeholders})
-                  AND available_at<=? {priority_filter}
+            f"""SELECT j.* FROM news_ai_jobs_v1 j
+                LEFT JOIN news_ai_retry_schedule_overrides_v1 retry_override
+                  ON retry_override.job_id=j.job_id AND retry_override.active=1
+                WHERE j.state IN ('QUEUED','BACKING_OFF')
+                  AND j.task_type IN ({task_placeholders})
+                  AND j.available_at<=? {priority_filter}
                 ORDER BY
-                  CASE WHEN created_at<=? THEN 0 ELSE 1 END,
-                  CASE WHEN created_at<=? THEN created_at ELSE NULL END,
-                  CASE priority WHEN 'IMMEDIATE' THEN 0 WHEN 'FAST' THEN 1
+                  CASE WHEN retry_override.mode='IDLE_CAPACITY'
+                             AND retry_override.requested_at>? THEN 1 ELSE 0 END,
+                  CASE WHEN j.created_at<=? THEN 0 ELSE 1 END,
+                  CASE WHEN j.created_at<=? THEN j.created_at ELSE NULL END,
+                  CASE j.priority WHEN 'IMMEDIATE' THEN 0 WHEN 'FAST' THEN 1
                                 WHEN 'NORMAL' THEN 2 ELSE 3 END,
-                  CASE task_type WHEN 'ACTIVE_IMPACT' THEN 0
+                  CASE j.task_type WHEN 'ACTIVE_IMPACT' THEN 0
                                  WHEN 'ACTIVE_ANNOTATION' THEN 1 ELSE 2 END,
-                  created_at,job_id
+                  j.created_at,j.job_id
                 LIMIT 1""",
-            (*claimable_tasks, timestamp, aged_before, aged_before),
+            (
+                *claimable_tasks, timestamp,
+                _iso(instant - IDLE_CAPACITY_MAX_WAIT),
+                aged_before, aged_before,
+            ),
         ).fetchone()
         if row is None:
             connection.commit()
@@ -1076,6 +1366,11 @@ def claim_job(
         if updated.rowcount != 1:
             connection.rollback()
             return None
+        connection.execute(
+            """UPDATE news_ai_retry_schedule_overrides_v1
+               SET active=0 WHERE job_id=? AND active=1""",
+            (row["job_id"],),
+        )
         claimed = connection.execute(
             "SELECT * FROM news_ai_jobs_v1 WHERE job_id=?",
             (row["job_id"],),

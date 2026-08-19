@@ -1,4 +1,4 @@
-# ADR-004: Authenticate Private Assistant Use at the Server Edge
+# ADR-004: Authenticate Private Dashboard Operator Use at the Server Edge
 
 - Status: Accepted
 - Date: 2026-08-15
@@ -6,16 +6,20 @@
 ## Context
 
 The research dashboard may remain public, but Assistant requests spend model
-quota and create owner-specific state. UI hiding, CAPTCHA, IP throttling, or a
+quota and retry controls mutate scheduler state. Both expose owner-specific or
+operational evidence. UI hiding, CAPTCHA, IP throttling, or a
 global queue cap cannot establish who is authorized. Machine synchronization
 also needs credentials that must not become human session authority.
 
 ## Decision
 
-Require verified human identity and owner authorization on every
-model-consuming or conversation-mutating Assistant endpoint before parsing,
-queueing, storage access, or model admission. Prefer hosting-provided edge
-identity over a custom password system.
+Require one verified Dashboard Operator identity and owner authorization on
+every privileged human endpoint. The Admin Console, Assistant, Retry Jobs, and
+AI Model Usage reuse the same Cloudflare Access application session, JWT verifier, stable actor identity,
+and owner allowlist. Prefer hosting-provided edge identity over a custom
+password or tool-specific session system. Public navigation opens a local
+explanation before an explicit normal navigation to the Access-protected Admin
+entry; that presentation step never grants authority.
 
 Use a separate machine/service identity for synchronization. Persist a stable
 Forecaster `actor_id`; email is an attribute, not ownership. The initial role
@@ -24,6 +28,9 @@ model may contain only `OWNER`.
 ## Consequences
 
 - Anonymous visitors cannot consume Assistant quota or occupy its queue.
+- Anonymous visitors cannot read retry failure/audit evidence or mutate the
+  Windows scheduler.
+- Logging in through one privileged Dashboard section covers the others.
 - Human and machine credentials cannot substitute for each other.
 - Every object lookup requires owner scope, not only an unguessable ID.
 - Hosting identity still needs an explicit owner/membership policy.

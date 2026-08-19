@@ -5,7 +5,7 @@ import DashboardLink from "./DashboardLink";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { correlateOperationalEvents, globalOperationalIncidents } from "../_lib/operational-incidents";
-import { normalizeOperationalEvent, type AssistantOperationalHealth, type OperationalAlert, type OperationalHealth } from "../_lib/operational-health";
+import { type OperationalHealth } from "../_lib/operational-health";
 
 type AlertPayload = {
   preview_status_summary?: boolean;
@@ -14,10 +14,7 @@ type AlertPayload = {
 
 export default function OperationalAlertBanner() {
   const cached = readDashboardResource<AlertPayload>("/api/status");
-  const cachedAssistant = readDashboardResource<AssistantOperationalHealth>("/api/assistant-health");
   const [payload, setPayload] = useState<AlertPayload | null>(() => cached);
-  const [assistant, setAssistant] = useState<AssistantOperationalHealth | null>(() => cachedAssistant);
-  const [assistantUnavailable, setAssistantUnavailable] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const refresh = useCallback(async (force = false) => {
     try {
@@ -25,14 +22,6 @@ export default function OperationalAlertBanner() {
     } catch {
       // The page-level current-data state remains the authority for transport
       // errors. Never replace it with an alert inferred from missing data.
-    }
-  }, []);
-  const refreshAssistant = useCallback(async (force = false) => {
-    try {
-      setAssistant(await loadDashboardResource<AssistantOperationalHealth>("/api/assistant-health", { force }));
-      setAssistantUnavailable(false);
-    } catch {
-      setAssistantUnavailable(true);
     }
   }, []);
 
@@ -43,27 +32,8 @@ export default function OperationalAlertBanner() {
     "current",
     "status",
   ), [payload?.preview_status_summary, refresh]);
-  useEffect(() => scheduleDashboardRefresh(
-    () => void refreshAssistant(false),
-    () => void refreshAssistant(true),
-    DASHBOARD_REFRESH_INTERVALS.status,
-    "current",
-    "assistant-health",
-  ), [refreshAssistant]);
-
   const health = payload?.operational_health;
-  const unavailableAlert: OperationalAlert = normalizeOperationalEvent({
-    code: "OPS_ASSISTANT_HEALTH_UNAVAILABLE",
-    severity: "ERROR",
-    scope: "ASSISTANT_D1",
-    message_zh: "Assistant 云端运行状态无法读取。",
-    blocking: true,
-    evidence: {},
-  });
-  const incidents = globalOperationalIncidents(correlateOperationalEvents([
-    ...(health?.alerts ?? []),
-    ...(assistantUnavailable ? [unavailableAlert] : assistant?.current ? assistant.alerts : []),
-  ]));
+  const incidents = globalOperationalIncidents(correlateOperationalEvents(health?.alerts ?? []));
   if (payload?.preview_status_summary || incidents.length === 0) {
     return null;
   }

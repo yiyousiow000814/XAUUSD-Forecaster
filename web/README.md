@@ -108,29 +108,39 @@ npx wrangler secret put INGEST_TOKEN
 npx wrangler secret put STATUS_RELAY_URL
 npx wrangler secret put CF_ACCESS_TEAM_DOMAIN
 npx wrangler secret put CF_ACCESS_AUD
-npx wrangler secret put ASSISTANT_OWNER_SUBJECTS
-npx wrangler secret put ASSISTANT_OWNER_EMAILS
+npx wrangler secret put DASHBOARD_OPERATOR_OWNER_SUBJECTS
+npx wrangler secret put DASHBOARD_OPERATOR_OWNER_EMAILS
 npm run cf:deploy
 ```
 
-Cloudflare Access and at least one matching owner subject or email must be
-configured before private Assistant routes are enabled. Both owner allowlist
-names remain explicit runtime contracts; set an unused allowlist to a
+One Cloudflare Access application and at least one matching Dashboard Operator
+owner subject or email must be configured before the Admin Console or its human
+APIs are enabled. Both owner allowlist names remain explicit runtime
+contracts; set an unused allowlist to a
 non-matching sentinel value rather than placing owner identity in source. These
 production-only values are intentionally not `secrets.required`: branch Preview
 versions have no model authority and must remain deployable without them.
 
-Protect `/assistant`, `/api/assistant-chat`,
-`/api/assistant-conversations`, and `/api/news-questions` with the Access
-application. Keep `/api/assistant-worker/*` outside that application; it is the
-non-browser control plane and accepts only `INGEST_TOKEN` plus the applicable
-job lease.
+Protect `/admin`, `/admin/*`, the compatibility routes `/assistant`,
+`/retry-jobs`, and `/status`, plus `/api/admin-status`,
+`/api/assistant-health`, `/api/assistant-chat`,
+`/api/assistant-conversations`, `/api/news-questions`, and
+`/api/operator-retry` with one Access application.
+Keep `/api/assistant-worker/*` and `/api/operator-retry-worker` outside that
+application; they are non-browser control planes and accept only `INGEST_TOKEN`
+plus the applicable job lease.
+
+The local Dashboard API and Dashboard Mirrors processes also require the same
+user-level `DASHBOARD_OPERATOR_BRIDGE_TOKEN` with at least 32 characters. It is
+a dedicated localhost machine credential, not a Wrangler secret, Access token,
+or replacement for `INGEST_TOKEN`; see the Cloudflare deployment runbook.
 
 The local Control Center reads these user-level environment variables when it
 starts `Dashboard Mirrors`:
 
 - `CLOUDFLARE_INGEST_URL`
 - `CLOUDFLARE_INGEST_TOKEN`
+- `DASHBOARD_OPERATOR_BRIDGE_TOKEN`
 - `XAUUSD_DASHBOARD_URL`
 
 For automatic deployment after a GitHub push, connect the GitHub repository in

@@ -6,6 +6,8 @@ declare global {
       STATUS_RELAY_URL?: string;
       CF_ACCESS_TEAM_DOMAIN?: string;
       CF_ACCESS_AUD?: string;
+      DASHBOARD_OPERATOR_OWNER_SUBJECTS?: string;
+      DASHBOARD_OPERATOR_OWNER_EMAILS?: string;
       ASSISTANT_OWNER_SUBJECTS?: string;
       ASSISTANT_OWNER_EMAILS?: string;
     }
@@ -15,6 +17,8 @@ declare global {
     STATUS_RELAY_URL?: string;
     CF_ACCESS_TEAM_DOMAIN?: string;
     CF_ACCESS_AUD?: string;
+    DASHBOARD_OPERATOR_OWNER_SUBJECTS?: string;
+    DASHBOARD_OPERATOR_OWNER_EMAILS?: string;
     ASSISTANT_OWNER_SUBJECTS?: string;
     ASSISTANT_OWNER_EMAILS?: string;
   }

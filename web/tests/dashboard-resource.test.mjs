@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  clearDashboardResource,
   loadDashboardResource,
   primeDashboardResources,
   readDashboardResource,
@@ -164,4 +165,54 @@ test("serves a fresh cached snapshot without changing its read state", async () 
     updatedAt: readDashboardResourceState(url).updatedAt,
   });
   unsubscribe();
+});
+
+test("purges one private Admin snapshot after confirmed authentication expiry", async () => {
+  const privateUrl = "/api/admin-status";
+  const publicUrl = "/api/status?resource-test=private-purge-boundary";
+  clearDashboardResource(privateUrl);
+  primeDashboardResources({
+    [privateUrl]: { gemini_quota: { total_remaining: 7 } },
+    [publicUrl]: { system: { online: true }, version: 1 },
+  });
+  const observed = [];
+  const unsubscribe = subscribeDashboardResource(privateUrl, () => {
+    observed.push(readDashboardResourceState(privateUrl));
+  });
+
+  globalThis.fetch = async () => jsonResponse({ error: "操作员身份验证失败" }, 401);
+  let authError;
+  try {
+    await loadDashboardResource(privateUrl, { force: true });
+  } catch (reason) {
+    authError = reason;
+  }
+  assert.equal(authError.status, 401);
+  clearDashboardResource(privateUrl);
+
+  assert.equal(readDashboardResource(privateUrl), null);
+  assert.equal(readDashboardResourceState(privateUrl).hasSnapshot, false);
+  assert.equal(readDashboardResourceState(privateUrl).error.status, 401);
+  assert.equal(observed.at(-1).hasSnapshot, false);
+  assert.deepEqual(readDashboardResource(publicUrl), { system: { online: true }, version: 1 });
+
+  globalThis.fetch = async () => jsonResponse({ gemini_quota: { total_remaining: 9 } });
+  await loadDashboardResource(privateUrl, { force: true });
+  assert.deepEqual(readDashboardResource(privateUrl), { gemini_quota: { total_remaining: 9 } });
+  unsubscribe();
+});
+
+test("retains last-good private and public snapshots after service failures", async () => {
+  const privateUrl = "/api/admin-status?resource-test=503-last-good";
+  const publicUrl = "/api/status?resource-test=503-last-good";
+  primeDashboardResources({
+    [privateUrl]: { private: "last-good" },
+    [publicUrl]: { public: "last-good" },
+  });
+  globalThis.fetch = async () => jsonResponse({ error: "unavailable" }, 503);
+
+  await assert.rejects(loadDashboardResource(privateUrl, { force: true }), /unavailable/);
+  await assert.rejects(loadDashboardResource(publicUrl, { force: true }), /unavailable/);
+  assert.deepEqual(readDashboardResource(privateUrl), { private: "last-good" });
+  assert.deepEqual(readDashboardResource(publicUrl), { public: "last-good" });
 });
