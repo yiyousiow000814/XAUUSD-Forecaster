@@ -280,6 +280,11 @@ authority for a startup that stays alive but never becomes ready.
 Source-poll completion timestamps never substitute for this process heartbeat.
 Each source retains its own registered cadence, bounded retry, and freshness
 contract.
+Network news polling has one bounded background owner and a SQLite connection
+owned only by that background thread. The five-minute market/decision lane
+reads the latest committed news evidence and never waits for a source poll.
+An unfinished or stale poll degrades news freshness while decision-time
+semantic-health snapshots continue advancing on every eligible market grid.
 Broker-native cTrader `Symbol.MarketHours` is authoritative for daily market
 closure. Its `market-session.json` heartbeat is state telemetry and must remain
 fresh on the Algo timer independently of quote ticks. Python and dashboard code
