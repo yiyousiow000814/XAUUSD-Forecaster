@@ -29,6 +29,14 @@ from xauusd_forecaster.dashboard_payloads import (
     audit_status_payload,
     critical_status_payload,
 )
+from xauusd_forecaster.dashboard_summaries import (
+    dashboard_distinct_article_count,
+    dashboard_macro_source_summary,
+    dashboard_news_source_summary,
+    dashboard_source_poll_summary,
+    dashboard_table_counts,
+    dashboard_valid_outcome_summary,
+)
 from xauusd_forecaster.news_scheduler import (  # noqa: E402
     RetryScheduleConflict,
     apply_retry_schedule_override,
@@ -45,6 +53,7 @@ NEWS_READER_WINDOW_DAYS = 60
 NEWS_ARCHIVE_PAGE_LIMIT = 20
 NEWS_EVIDENCE_PAGE_LIMIT = 50
 NEWS_EVIDENCE_PAGE_LIMIT_BYTES = 350_000
+U5_CONTEXT_SAMPLE_LIMIT = 2_016
 STATUS_SNAPSHOT_TTL_SECONDS = 15.0
 STATUS_SNAPSHOT_WAIT_SECONDS = 5.0
 STATUS_SNAPSHOT_MAX_STALE_SECONDS = 90.0
@@ -62,11 +71,7 @@ _QUOTE_CANDLE_CACHE: dict[str, dict] = {}
 _NEWS_EVIDENCE_CACHE_LOCK = threading.Lock()
 _NEWS_EVIDENCE_CACHE: dict[str, object] = {}
 _NEWS_EVIDENCE_VOLATILE_FIELDS = frozenset({"economic_age_minutes"})
-_NEWS_EVIDENCE_AUTHORITY_EXCLUDED_FIELDS = frozenset({
-    "economic_age_minutes", "freshness_status", "broad_model_eligible",
-    "model_permission", "reason_codes",
-})
-_NEWS_EVIDENCE_MANIFEST_VERSION = "local-news-evidence-generation-v1"
+_NEWS_EVIDENCE_MANIFEST_VERSION = "local-news-evidence-generation-v2"
 
 
 def _semantic_pipeline_component(latest, *, now: datetime) -> dict:
@@ -622,15 +627,7 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
         role = spec.role
         stale_minutes = spec.stale_minutes
         revision_sources = spec.revision_sources
-        polls = connection.execute(
-            """SELECT count(*) total,
-                      sum(status='OK') ok_count,
-                      sum(status='PARTIAL') partial_count,
-                      sum(status='ERROR') error_count,
-                      max(CASE WHEN status='OK' THEN fetched_time END) last_success
-               FROM source_polls WHERE source=?""",
-            (source,),
-        ).fetchone()
+        polls = dashboard_source_poll_summary(connection, source)
         freshness_reference = connection.execute(
             """SELECT fetched_time,status FROM source_polls
                WHERE source=? AND status IN ('OK','PARTIAL')
@@ -653,27 +650,13 @@ def _news_source_health(connection: sqlite3.Connection, now: datetime) -> list[d
         item_count = revision_count = full_text_count = 0
         latest_item_time = None
         if revision_sources:
-            placeholders = ",".join("?" for _ in revision_sources)
-            evidence = connection.execute(
-                f"""SELECT count(DISTINCT source || ':' || source_item_id) item_count,
-                            count(*) revision_count,
-                            count(DISTINCT CASE WHEN body LIKE '[FULL_TEXT%'
-                              THEN source || ':' || source_item_id END) full_text_count,
-                            max(collector_first_seen_time) latest_item_time
-                     FROM news_revisions WHERE source IN ({placeholders})""",
-                revision_sources,
-            ).fetchone()
+            evidence = dashboard_news_source_summary(connection, revision_sources)
             item_count = int(evidence["item_count"] or 0)
             revision_count = int(evidence["revision_count"] or 0)
             full_text_count = int(evidence["full_text_count"] or 0)
             latest_item_time = evidence["latest_item_time"]
         elif source == "bls_public_api":
-            evidence = connection.execute(
-                """SELECT count(*) revision_count,
-                          count(DISTINCT series_id || ':' || observation_period) item_count,
-                          max(collector_first_seen_time) latest_item_time
-                   FROM macro_observations WHERE source='bls_public_api'"""
-            ).fetchone()
+            evidence = dashboard_macro_source_summary(connection, source)
             item_count = int(evidence["item_count"] or 0)
             revision_count = int(evidence["revision_count"] or 0)
             latest_item_time = evidence["latest_item_time"]
@@ -1932,28 +1915,11 @@ def _publish_news_evidence_snapshot(rows: list[dict]) -> str:
     return snapshot_id
 
 
-def _news_evidence_authority_fingerprint(rows: list[dict]) -> str:
-    """Identify source/audit changes without wall-clock presentation drift."""
-    authority = [
-        {
-            key: value for key, value in row.items()
-            if key not in _NEWS_EVIDENCE_AUTHORITY_EXCLUDED_FIELDS
-        }
-        for row in rows
-    ]
-    encoded = json.dumps(
-        authority, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
 def _materialize_news_evidence_generation(
-    rows: list[dict], manifest_path: Path,
+    rows: list[dict], manifest_path: Path, *, activated_snapshot_id: str | None = None,
 ) -> tuple[str, list[dict]]:
-    """Freeze one ordered generation durably across refreshes and restarts."""
+    """Freeze a generation until its remote activation is acknowledged."""
     rows = _durable_news_evidence_rows(rows)
-    authority_fingerprint = _news_evidence_authority_fingerprint(rows)
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, json.JSONDecodeError):
@@ -1963,7 +1929,6 @@ def _materialize_news_evidence_generation(
         frozen_snapshot = str(manifest.get("snapshot_id") or "")
         if (
             manifest.get("manifest_version") == _NEWS_EVIDENCE_MANIFEST_VERSION
-            and manifest.get("authority_fingerprint") == authority_fingerprint
             and re.fullmatch(r"[a-f0-9]{64}", frozen_snapshot)
             and isinstance(frozen_rows, list)
         ):
@@ -1971,7 +1936,10 @@ def _materialize_news_evidence_generation(
                 frozen_rows, ensure_ascii=False, allow_nan=False,
                 separators=(",", ":"), sort_keys=True,
             ).encode("utf-8")
-            if hashlib.sha256(encoded).hexdigest() == frozen_snapshot:
+            if (
+                hashlib.sha256(encoded).hexdigest() == frozen_snapshot
+                and frozen_snapshot != activated_snapshot_id
+            ):
                 return frozen_snapshot, frozen_rows
 
     encoded = json.dumps(
@@ -1981,7 +1949,6 @@ def _materialize_news_evidence_generation(
     snapshot_id = hashlib.sha256(encoded).hexdigest()
     manifest = {
         "manifest_version": _NEWS_EVIDENCE_MANIFEST_VERSION,
-        "authority_fingerprint": authority_fingerprint,
         "snapshot_id": snapshot_id,
         "items": rows,
     }
@@ -1997,6 +1964,7 @@ def _materialize_news_evidence_generation(
 
 def _build_news_evidence_resource(
     database: Path, *, clock=None, manifest_path: Path | None = None,
+    activated_snapshot_id: str | None = None,
 ) -> dict:
     """Materialize the independently owned durable evidence generation."""
     now = (clock or (lambda: datetime.now(UTC)))()
@@ -2012,6 +1980,7 @@ def _build_news_evidence_resource(
     snapshot_id, frozen_rows = _materialize_news_evidence_generation(
         rows,
         manifest_path or database.parent / "dashboard-news-evidence-generation-v2.json",
+        activated_snapshot_id=activated_snapshot_id,
     )
     published_snapshot = _publish_news_evidence_snapshot(frozen_rows)
     if published_snapshot != snapshot_id:
@@ -2187,7 +2156,8 @@ def _dashboard_payload(
         u5_rows = connection.execute(
             """SELECT u5 FROM market_snapshots
                WHERE u5_status='READY' AND u5 IS NOT NULL
-               ORDER BY decision_time"""
+               ORDER BY decision_time DESC LIMIT ?""",
+            (U5_CONTEXT_SAMPLE_LIMIT,),
         ).fetchall()
         recent = connection.execute(
             """SELECT d.decision_id, d.decision_time, d.effective_action, d.data_health,
@@ -2212,29 +2182,7 @@ def _dashboard_payload(
                LEFT JOIN outcomes o USING(decision_id)
                ORDER BY d.decision_time DESC LIMIT 30"""
         ).fetchall() if include_audit else []
-        counts = {
-            name: connection.execute(f"SELECT count(*) FROM {name}").fetchone()[0]
-            for name in (
-                "decision_events",
-                "outcomes",
-                "news_revisions",
-                "news_annotations",
-                "news_title_translations",
-                "macro_observations",
-                "training_eligibility",
-                "model_updates",
-                "shadow_trade_intents",
-                "shadow_trade_results",
-                "repair_batches",
-                "derived_market_snapshots",
-                "derived_news_feature_snapshots",
-                "derived_outcomes",
-                "training_eligibility_v2",
-                "model_updates_v2",
-                "predictions_v2",
-                "prediction_scores_v2",
-            )
-        }
+        counts = dashboard_table_counts(connection)
         decision_ids = [row["decision_id"] for row in recent]
         predictions_by_decision: dict[str, list[dict]] = {key: [] for key in decision_ids}
         if decision_ids:
@@ -2528,14 +2476,8 @@ def _dashboard_payload(
                       training_cutoff, hyperparameters_json, artifact_hash
                FROM model_updates ORDER BY training_cutoff DESC,
                                            model_identity"""
-        ).fetchall()
-        valid = connection.execute(
-            """SELECT count(*) AS samples,
-                      avg(long_return) AS avg_long,
-                      avg(short_return) AS avg_short,
-                      avg(quote_coverage) AS avg_coverage
-               FROM outcomes WHERE outcome_status='VALID'"""
-        ).fetchone()
+        ).fetchall() if include_learning else []
+        valid = dashboard_valid_outcome_summary(connection)
         epoch = connection.execute(
             "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
         ).fetchone()[0]
@@ -2625,15 +2567,9 @@ def _dashboard_payload(
             evidence_topics = Counter()
             auditable_news_events = []
         news_evidence = bounded_evidence_window(auditable_news_events, 60)
-        raw_article_revisions = connection.execute(
-            "SELECT count(*) FROM news_revisions"
-        ).fetchone()[0]
-        distinct_articles = connection.execute(
-            "SELECT count(*) FROM (SELECT DISTINCT source,source_item_id FROM news_revisions)"
-        ).fetchone()[0]
-        decision_event_exposures = connection.execute(
-            "SELECT count(*) FROM news_decision_event_snapshots_v1"
-        ).fetchone()[0]
+        raw_article_revisions = counts["news_revisions"]
+        distinct_articles = dashboard_distinct_article_count(connection)
+        decision_event_exposures = counts["news_decision_event_snapshots_v1"]
         daily_news_briefs = (
             recent_daily_briefs(connection) if include_audit else []
         )
@@ -2704,6 +2640,8 @@ def _dashboard_payload(
     u5_context = {
         "percentile": u5_percentile,
         "samples": len(u5_values),
+        "sample_limit": U5_CONTEXT_SAMPLE_LIMIT,
+        "scope": "RECENT_READY_WINDOW",
         "label": (
             "高波动" if u5_percentile is not None and u5_percentile >= 85 else
             "偏高" if u5_percentile is not None and u5_percentile >= 60 else
@@ -3308,9 +3246,20 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/news-evidence":
             query = urllib.parse.parse_qs(parsed.query)
             cursor = (query.get("cursor") or [None])[0]
+            activated_snapshot_id = (
+                query.get("activated_snapshot_id") or [None]
+            )[0]
+            if activated_snapshot_id and not re.fullmatch(
+                r"[a-f0-9]{64}", activated_snapshot_id,
+            ):
+                self._write_json(400, b'{"error":"invalid activated snapshot id"}')
+                return
             try:
                 self.news_evidence_cache.get(
-                    self.database, _build_news_evidence_resource,
+                    self.database,
+                    lambda database: _build_news_evidence_resource(
+                        database, activated_snapshot_id=activated_snapshot_id,
+                    ),
                 )
                 limit = min(
                     NEWS_EVIDENCE_PAGE_LIMIT,

@@ -22,6 +22,7 @@ from xauusd_forecaster.annotation import (
 )
 from xauusd_forecaster.ai_provider_registry import AI_QUOTA_SURFACES
 from xauusd_forecaster.forward_ledger import ForwardLedger
+from xauusd_forecaster.dashboard_summaries import DASHBOARD_COUNT_TABLES
 from xauusd_forecaster.gemini_quota import GeminiQuotaLedger
 from xauusd_forecaster.news_scheduler import (
     authorize_repairable_annotation_failures,
@@ -1924,6 +1925,104 @@ def test_dashboard_status_does_not_scan_live_database_integrity(
     assert not any("integrity_check" in statement.lower() for statement in statements)
 
 
+def test_critical_summary_reads_stay_fixed_as_append_only_history_grows(
+    tmp_path,
+) -> None:
+    module = _dashboard_module()
+    database = tmp_path / "forward.sqlite3"
+    ledger = ForwardLedger(database, now=datetime(2026, 8, 19, tzinfo=UTC))
+    rows = [(
+        "fixture", f"item-{index}", 1, None,
+        f"2026-08-19T10:{index % 60:02d}:00+00:00",
+        f"2026-08-19T10:{index % 60:02d}:00+00:00",
+        f"2026-08-19T10:{index % 60:02d}:00+00:00",
+        f"headline {index}", "body" * 80, f"https://example.test/{index}",
+        f"{index:064x}", f"cluster-{index}", None,
+    ) for index in range(2_500)]
+    with ledger.connection:
+        ledger.connection.executemany(
+            "INSERT INTO news_revisions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows,
+        )
+    statements: list[str] = []
+    ledger.connection.set_trace_callback(statements.append)
+
+    counts = module.dashboard_table_counts(ledger.connection)
+    articles = module.dashboard_distinct_article_count(ledger.connection)
+    source = module.dashboard_news_source_summary(ledger.connection, ("fixture",))
+
+    assert counts["news_revisions"] == len(rows)
+    assert articles == len(rows)
+    assert source == {
+        "item_count": len(rows),
+        "revision_count": len(rows),
+        "full_text_count": 0,
+        "latest_item_time": "2026-08-19T10:59:00+00:00",
+    }
+    reads = [
+        " ".join(statement.lower().split()) for statement in statements
+        if statement.lstrip().upper().startswith("SELECT")
+    ]
+    assert len(reads) == 3
+    assert "from dashboard_table_counts_v1" in reads[0]
+    assert "from dashboard_news_article_summary_v1" in reads[1]
+    assert "from dashboard_news_source_summary_v1" in reads[2]
+    assert all("count(" not in statement for statement in reads)
+    ledger.close()
+
+
+def test_critical_builder_uses_bounded_u5_window_and_materialized_counts(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _dashboard_module()
+    now = datetime(2026, 8, 19, 10, 0, tzinfo=UTC)
+    database = tmp_path / "forward.sqlite3"
+    ForwardLedger(database, now=now).close()
+    real_connect = module.sqlite3.connect
+    statements: list[str] = []
+
+    def tracked_connect(target, *args, **kwargs):
+        connection = real_connect(target, *args, **kwargs)
+        if str(database) in str(target):
+            connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(module.sqlite3, "connect", tracked_connect)
+    payload = module._dashboard_payload(database, clock=lambda: now, include_optional=False)
+
+    u5_query = next(
+        statement for statement in statements
+        if "select u5 from market_snapshots" in statement.lower()
+    )
+    assert f"LIMIT {module.U5_CONTEXT_SAMPLE_LIMIT}" in u5_query
+    assert payload["u5_context"]["sample_limit"] == module.U5_CONTEXT_SAMPLE_LIMIT
+    assert payload["u5_context"]["scope"] == "RECENT_READY_WINDOW"
+    assert any(
+        "from dashboard_table_counts_v1" in statement.lower()
+        for statement in statements
+    )
+    assert any(
+        "from dashboard_news_source_summary_v1" in statement.lower()
+        for statement in statements
+    )
+    unbounded_counts = [
+        " ".join(statement.lower().split()) for table in DASHBOARD_COUNT_TABLES
+        for statement in statements
+        if " ".join(statement.lower().split()) == f"select count(*) from {table}"
+    ]
+    assert not unbounded_counts, unbounded_counts
+    normalized = [" ".join(statement.lower().split()) for statement in statements]
+    assert not any(
+        statement.startswith("select model_identity, model_version, created_at,")
+        and "from model_updates order by" in statement
+        for statement in normalized
+    )
+    assert not any(
+        "from news_revisions where source in" in statement
+        and ("count(" in statement or "max(" in statement)
+        for statement in normalized
+    )
+
+
 def test_live_quote_candle_cache_reads_only_appended_bytes(tmp_path) -> None:
     module = _dashboard_module()
     quote_file = tmp_path / "xauusd-quotes-20260812.jsonl"
@@ -3206,7 +3305,7 @@ def test_news_evidence_pages_are_byte_bounded_and_complete_at_large_scale() -> N
     assert len({row["event_key"] for row in received}) == len(rows)
 
 
-def test_news_evidence_generation_freezes_volatile_state_across_restart(
+def test_news_evidence_generation_freezes_until_activation_then_tracks_current_state(
     tmp_path,
 ) -> None:
     module = _dashboard_module()
@@ -3239,8 +3338,26 @@ def test_news_evidence_generation_freezes_volatile_state_across_restart(
     assert later_rows == first_rows
     assert "economic_age_minutes" not in later_rows[0]
 
-    changed_id, changed_rows = module._materialize_news_evidence_generation([
-        {**base, "source_hash": "c" * 64, "economic_age_minutes": 62.0},
-    ], manifest)
-    assert changed_id != first_id
-    assert changed_rows[0]["source_hash"] == "c" * 64
+    age_only_id, age_only_rows = module._materialize_news_evidence_generation(
+        [{**base, "economic_age_minutes": 240.0}],
+        manifest,
+        activated_snapshot_id=first_id,
+    )
+    assert age_only_id == first_id
+    assert age_only_rows == first_rows
+
+    expired_id, expired_rows = module._materialize_news_evidence_generation(
+        [{
+            **base,
+            "economic_age_minutes": 241.0,
+            "freshness_status": "EVENT_LIFETIME_EXPIRED",
+            "broad_model_eligible": False,
+            "model_permission": "DISPLAY_ONLY",
+            "reason_codes": ["EVIDENCE_PRIMARY", "EVENT_LIFETIME_EXPIRED"],
+        }],
+        manifest,
+        activated_snapshot_id=first_id,
+    )
+    assert expired_id != first_id
+    assert expired_rows[0]["broad_model_eligible"] is False
+    assert expired_rows[0]["freshness_status"] == "EVENT_LIFETIME_EXPIRED"

@@ -1422,18 +1422,14 @@ def test_news_evidence_sync_resumes_stable_generation_across_volatile_time_field
     assert offsets[stable_snapshot] == 40
     assert activations == []
 
-    volatile_snapshot, restarted_rows = api._materialize_news_evidence_generation([
+    age_drift_snapshot, restarted_rows = api._materialize_news_evidence_generation([
         {
             **row,
             "economic_age_minutes": row["economic_age_minutes"] + 180,
-            "freshness_status": "EVENT_LIFETIME_EXPIRED",
-            "broad_model_eligible": False,
-            "model_permission": "DISPLAY_ONLY",
-            "reason_codes": ["EVIDENCE_PRIMARY", "EVENT_LIFETIME_EXPIRED"],
         }
         for row in rows
     ], manifest)
-    assert volatile_snapshot == stable_snapshot
+    assert age_drift_snapshot == stable_snapshot
     assert api._publish_news_evidence_snapshot(restarted_rows) == stable_snapshot
     sync = _sync_module()
     monkeypatch.setattr(sync, "NEWS_EVIDENCE_PAGES_PER_CYCLE", 2)
@@ -1444,15 +1440,42 @@ def test_news_evidence_sync_resumes_stable_generation_across_volatile_time_field
     assert received_keys[stable_snapshot] == [row["event_key"] for row in rows]
     assert len(set(received_keys[stable_snapshot])) == len(rows)
 
-    changed_rows = [{**rows[0], "source_hash": "f" * 64}, *rows[1:]]
+    expired_rows = [{
+        **row,
+        "economic_age_minutes": row["economic_age_minutes"] + 240,
+        "freshness_status": "EVENT_LIFETIME_EXPIRED",
+        "broad_model_eligible": False,
+        "model_permission": "DISPLAY_ONLY",
+        "reason_codes": ["EVIDENCE_PRIMARY", "EVENT_LIFETIME_EXPIRED"],
+    } for row in rows]
     changed_snapshot, changed_rows = api._materialize_news_evidence_generation(
-        changed_rows, manifest,
+        expired_rows,
+        manifest,
+        activated_snapshot_id=stable_snapshot,
     )
     assert api._publish_news_evidence_snapshot(changed_rows) == changed_snapshot
     assert changed_snapshot != stable_snapshot
     sync._sync_news_evidence({}, config)
     assert changed_snapshot in offsets
     assert active[0] == stable_snapshot
+    sync._sync_news_evidence({}, config)
+    assert active[0] == changed_snapshot
+    assert activations == [stable_snapshot, changed_snapshot]
+    assert all(
+        item["broad_model_eligible"] is False
+        for item in api._news_evidence_page(None, 50)["items"]
+    )
+
+    age_only_snapshot, age_only_rows = api._materialize_news_evidence_generation(
+        [
+            {**row, "economic_age_minutes": row["economic_age_minutes"] + 60}
+            for row in expired_rows
+        ],
+        manifest,
+        activated_snapshot_id=changed_snapshot,
+    )
+    assert age_only_snapshot == changed_snapshot
+    assert age_only_rows == changed_rows
 
 
 def test_news_evidence_activation_acknowledgement_replays_idempotently(

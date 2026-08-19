@@ -1556,11 +1556,15 @@ def _sync_audit(local_payload: dict, config: dict) -> None:
     _post_json(audit_url, audit_snapshot(local_payload), config)
 
 
-def _local_news_evidence_url(config: dict, cursor: str | None) -> str:
+def _local_news_evidence_url(
+    config: dict, cursor: str | None, *, activated_snapshot_id: str | None = None,
+) -> str:
     status_url = urllib.parse.urlsplit(config["local_status_url"])
     query = {"limit": str(NEWS_EVIDENCE_WRITE_BATCH_ITEMS)}
     if cursor:
         query["cursor"] = cursor
+    if activated_snapshot_id:
+        query["activated_snapshot_id"] = activated_snapshot_id
     return urllib.parse.urlunsplit((
         status_url.scheme, status_url.netloc, "/api/news-evidence",
         urllib.parse.urlencode(query), "",
@@ -1606,7 +1610,15 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
     received = 0
     first_page = None
     with urllib.request.urlopen(
-        _local_news_evidence_url(config, None),
+        _local_news_evidence_url(
+            config,
+            None,
+            activated_snapshot_id=(
+                str(state.get("active_snapshot_id"))
+                if state.get("contract_version") == NEWS_EVIDENCE_CONTRACT_VERSION
+                and state.get("active_snapshot_id") else None
+            ),
+        ),
         timeout=LOCAL_STATUS_TIMEOUT_SECONDS,
     ) as response:
         first_page = json.loads(response.read())
