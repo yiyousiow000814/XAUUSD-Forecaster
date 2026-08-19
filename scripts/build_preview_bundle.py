@@ -268,12 +268,17 @@ def _backfill_annotation_reasons(news_index: dict, status: dict) -> None:
         if annotation_status not in {"QUEUED", "NOT_REQUIRED"}:
             continue
         existing_reason_code = item.get("annotation_reason_code")
-        stale_queue_mismatch = (
+        stale_semantic_projection = (
             annotation_status == "NOT_REQUIRED"
-            and existing_reason_code == "QUEUE_INVARIANT_MISMATCH"
+            and existing_reason_code in {
+                "QUEUE_INVARIANT_MISMATCH", "INVALID_PUBLISHED_TIME",
+            }
         )
-        if annotation_status == "NOT_REQUIRED" and not stale_queue_mismatch and (
-            existing_reason_code and item.get("annotation_reason")
+        if (
+            annotation_status == "NOT_REQUIRED"
+            and not stale_semantic_projection
+            and existing_reason_code
+            and item.get("annotation_reason")
         ):
             continue
         published_raw = item.get("source_published_time")
@@ -305,7 +310,7 @@ def _backfill_annotation_reasons(news_index: dict, status: dict) -> None:
                         "正文符合条件但未进入语义队列，需要检查",
                     )
         if code == "QUEUE_INVARIANT_MISMATCH":
-            if stale_queue_mismatch:
+            if stale_semantic_projection:
                 item["annotation_status"] = "QUEUED"
                 item["model_visibility"] = "NOT_YET_PARSED"
                 if not item.get("parsed_at"):
