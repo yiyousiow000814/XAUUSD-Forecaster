@@ -55,6 +55,14 @@ class NewsSemanticEligibility:
     publication_time_reliability: str
 
 
+@dataclass(frozen=True)
+class PublicationReceiptClockAssessment:
+    """Authoritative publication-vs-receipt clock-skew decision."""
+
+    eligible: bool
+    published_after_receipt: bool
+
+
 def _value(row: Mapping[str, object], key: str) -> object:
     try:
         return row[key]
@@ -69,6 +77,29 @@ def _time(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def assess_publication_receipt_clock(
+    published_at: object, received_at: object,
+) -> PublicationReceiptClockAssessment:
+    """Apply the global positive publication-skew policy.
+
+    Consumers retain ownership of missing-time handling, freshness, and
+    visibility.  This function alone decides whether a publisher timestamp
+    that follows receipt is within the accepted clock-skew boundary.
+    """
+    published = _time(published_at)
+    received = _time(received_at)
+    if published is None or received is None:
+        raise ValueError("published_at and received_at require timestamps")
+    follows_receipt = published > received
+    return PublicationReceiptClockAssessment(
+        eligible=(
+            not follows_receipt
+            or published - received <= MAX_PUBLICATION_CLOCK_SKEW
+        ),
+        published_after_receipt=follows_receipt,
+    )
 
 
 def assess_news_time(
@@ -159,10 +190,11 @@ def assess_news_semantic_eligibility(
             False, "PRE_FORWARD_PUBLICATION", (), reliability,
         )
 
+    publication_clock = assess_publication_receipt_clock(published, first_seen)
     timing_reasons: list[str] = []
-    if published > first_seen:
+    if publication_clock.published_after_receipt:
         timing_reasons.append("PUBLISHED_AFTER_RECEIPT")
-        if published - first_seen > MAX_PUBLICATION_CLOCK_SKEW:
+        if not publication_clock.eligible:
             return NewsSemanticEligibility(
                 False,
                 "PUBLISHED_AFTER_DECISION",

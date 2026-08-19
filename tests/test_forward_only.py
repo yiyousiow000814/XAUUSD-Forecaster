@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 import xauusd_forecaster.annotation as annotation_module
+import xauusd_forecaster.news_relevance as news_relevance_module
+import xauusd_forecaster.news_time as news_time_module
 
 from xauusd_forecaster.forward_engine import ForwardEngine
 from xauusd_forecaster.forward_ledger import ForwardLedger
@@ -71,6 +73,7 @@ from xauusd_forecaster.news_features_v2 import aggregate_news_features_v2
 from xauusd_forecaster.news_relevance import google_news_item_is_relevant
 from xauusd_forecaster.news_time import (
     MIXED_PRECISE_OR_BATCH_PROXY_TIME,
+    PublicationReceiptClockAssessment,
     SOURCE_REPORTED_TIME,
     assess_news_semantic_eligibility,
 )
@@ -5726,6 +5729,62 @@ def test_publication_clock_skew_boundary_is_global(
     assert assessment.reason_code == (
         "SEMANTIC_ELIGIBLE" if expected_eligible else "PUBLISHED_AFTER_DECISION"
     )
+
+
+@pytest.mark.parametrize(
+    ("published_delta", "expected_allowed", "expected_reason"),
+    (
+        (timedelta(seconds=2.3), True, "AI_SEMANTIC_REVIEW_REQUIRED"),
+        (timedelta(minutes=10), True, "AI_SEMANTIC_REVIEW_REQUIRED"),
+        (timedelta(minutes=10, seconds=1), False, "FUTURE_PUBLISHED_TIME"),
+    ),
+)
+def test_google_news_intake_uses_global_publication_clock_boundary(
+    published_delta: timedelta, expected_allowed: bool, expected_reason: str,
+) -> None:
+    received = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
+
+    allowed, reason = google_news_item_is_relevant(
+        "google_news_fed_rates", "Federal Reserve update",
+        received + published_delta, received,
+    )
+
+    assert allowed is expected_allowed
+    assert reason == expected_reason
+
+
+def test_semantic_and_google_intake_delegate_publication_clock_policy(
+    monkeypatch,
+) -> None:
+    received = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
+    calls: list[tuple[object, object]] = []
+
+    def reject_clock_skew(published_at, received_at):
+        calls.append((published_at, received_at))
+        return PublicationReceiptClockAssessment(
+            eligible=False, published_after_receipt=True,
+        )
+
+    monkeypatch.setattr(
+        news_time_module, "assess_publication_receipt_clock", reject_clock_skew,
+    )
+
+    intake_allowed, intake_reason = news_relevance_module.google_news_item_is_relevant(
+        "google_news_fed_rates", "Federal Reserve update", received, received,
+    )
+    semantic = news_time_module.assess_news_semantic_eligibility(
+        {
+            "source": "generic-test-source",
+            "source_published_time": received,
+            "collector_first_seen_time": received,
+        },
+        forward_epoch=received - timedelta(days=1),
+    )
+
+    assert (intake_allowed, intake_reason) == (False, "FUTURE_PUBLISHED_TIME")
+    assert semantic.eligible is False
+    assert semantic.reason_code == "PUBLISHED_AFTER_DECISION"
+    assert calls == [(received, received), (received, received)]
 
 
 def test_late_legacy_annotation_remains_completed_without_requeue(tmp_path) -> None:
