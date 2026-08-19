@@ -56,7 +56,7 @@ export default function AdminOverviewView() {
       <DashboardLink className="admin-overview-card" href="/admin/assistant">
         <span>ASSISTANT</span><h2>Assistant</h2>
         <strong>{ASSISTANT_ACCEPTING_TURNS ? "可接受新对话" : "已暂停"}</strong>
-        <p>进入私有对话、News Q&A 与历史会话。</p><b>打开 Assistant →</b>
+        <b>打开 Assistant →</b>
       </DashboardLink>
       <DashboardLink className="admin-overview-card is-retry" href="/admin/retry-jobs">
         <span>SCHEDULER</span><h2>重试任务</h2>
@@ -65,12 +65,12 @@ export default function AdminOverviewView() {
           <div><dt>等待应用</dt><dd>{retrySummary.applying}</dd></div>
           <div><dt>冲突</dt><dd>{retrySummary.conflict}</dd></div>
         </dl>}
-        <p>查看 Windows 应用进度与人工计划覆盖。</p><b>打开重试队列 →</b>
+        <b>打开重试队列 →</b>
       </DashboardLink>
       <DashboardLink className="admin-overview-card" href="/admin/ai-usage">
         <span>PROVIDER CAPACITY</span><h2>AI 模型用量</h2>
         <strong>权威配额账本</strong>
-        <p>查看模型额度、请求退避与安全吞吐上限。</p><b>打开用量状态 →</b>
+        <b>打开用量状态 →</b>
       </DashboardLink>
     </section>
   </main>;

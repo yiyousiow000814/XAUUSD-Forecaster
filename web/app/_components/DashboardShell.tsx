@@ -51,7 +51,7 @@ function GlobalNavigation({
           key={destination.id}
           onClick={openAdminLogin}
           type="button"
-        >{label}</button>;
+        ><span aria-hidden="true" className="dashboard-admin-lock" />{label}</button>;
       }
       return <DashboardLink
         ariaCurrent={active ? "page" : undefined}
@@ -158,11 +158,10 @@ export default function DashboardShell({ children, location }: { children: React
       ref={dialogRef}
     >
       {adminLoginOpen ? <article>
-        <header><p>PRIVATE ADMIN WORKSPACE</p><h2>管理员登录</h2></header>
+        <header><h2>管理员登录</h2></header>
         <div>
-          <p>此区域仅供系统管理员使用。</p>
-          <span>登录后可以访问</span>
-          <ul><li>Assistant</li><li>重试任务</li><li>AI 模型用量</li><li>其他私有运维工具</li></ul>
+          <p>仅系统管理员可访问 Assistant、重试任务和 AI 模型用量。</p>
+          <span>登录后进入私有管理后台。</span>
         </div>
         <footer>
           <button type="button" onClick={closeAdminLogin}>取消</button>

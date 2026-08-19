@@ -719,13 +719,19 @@ test("renders one invariant global header and active section across every dashbo
 test("keeps Admin login intent local until the explicit Access handoff", () => {
   const shell = readFileSync(new URL("../app/_components/DashboardShell.tsx", import.meta.url), "utf8");
   const mobile = readFileSync(new URL("../app/_components/MobileDashboardNav.tsx", import.meta.url), "utf8");
+  const shellCss = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(shell, /dashboard-admin-login-trigger/);
   assert.match(shell, /onClick=\{openAdminLogin\}/);
   assert.match(shell, /dialogRef\.current\?\.showModal\(\)/);
   assert.match(shell, /<h2>管理员登录<\/h2>/);
+  assert.match(shell, /仅系统管理员可访问 Assistant、重试任务和 AI 模型用量。/);
+  assert.match(shell, /登录后进入私有管理后台。/);
   assert.match(shell, /<a href="\/admin">使用 Google 登录<\/a>/);
   assert.match(shell, /<button type="button" onClick=\{closeAdminLogin\}>取消<\/button>/);
+  assert.doesNotMatch(shell, /<ul>|其他私有运维工具|登录后可以访问|PRIVATE ADMIN WORKSPACE/);
   assert.doesNotMatch(shell, /DashboardLink[^\n]*使用 Google 登录/);
+  assert.match(shellCss, /\.dashboard-admin-login-trigger \{[^}]*border-style:dashed/);
+  assert.match(shellCss, /\.admin-login-dialog \{ width:min\(420px/);
   assert.match(mobile, /destination\?\.private[\s\S]*openAdminLogin\(\)/);
 });
 
@@ -1518,6 +1524,8 @@ test("separates anonymous health data from owner-only Admin evidence", async () 
   const overview = await renderSettled("/admin", /OWNER OPERATIONS/);
   assert.equal(overview.response.status, 200);
   assert.match(overview.html, /概览[\s\S]*Assistant[\s\S]*重试任务[\s\S]*AI 模型用量/);
+  assert.match(overview.html, /总任务[\s\S]*等待应用[\s\S]*冲突/);
+  assert.doesNotMatch(adminOverview, /进入私有对话|查看 Windows 应用进度|查看模型额度/);
   assert.match(overview.html, /aria-current="page"[^>]*>概览<\/a>/);
 });
 
