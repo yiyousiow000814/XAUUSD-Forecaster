@@ -27,6 +27,15 @@ LIVE_LANE = "LIVE"
 CONTRACT_BACKFILL_LANE = "CONTRACT_BACKFILL"
 WORK_LANES = (LIVE_LANE, CONTRACT_BACKFILL_LANE)
 CONTRACT_BACKFILL_PAGE_SIZE = 50
+LIVE_OPERATIONAL_WORKLOAD = "LIVE_OPERATIONAL"
+CONTRACT_BACKFILL_WORKLOAD = "CONTRACT_BACKFILL"
+REQUEST_WORKLOADS = (LIVE_OPERATIONAL_WORKLOAD, CONTRACT_BACKFILL_WORKLOAD)
+BACKFILL_FORECAST_DAYS = 14
+BACKFILL_MIN_COMPLETE_DAYS = 7
+BACKFILL_RESERVE_RATIO = 0.08
+BACKFILL_SAFETY_RATIO = 0.08
+BACKFILL_MAX_SHARE_DENOMINATOR = 10
+BACKFILL_LIVE_SLA = timedelta(minutes=15)
 PRIORITY_HEAD_START = timedelta(minutes=1)
 IDLE_CAPACITY_MAX_WAIT = timedelta(minutes=30)
 RETRY_OVERRIDE_MODES = (
@@ -102,6 +111,9 @@ CREATE TABLE IF NOT EXISTS news_ai_job_attempts_v1 (
 
 CREATE INDEX IF NOT EXISTS news_ai_job_attempts_lookup_v1
 ON news_ai_job_attempts_v1(job_id,attempt_number,attempted_at);
+
+CREATE INDEX IF NOT EXISTS news_ai_job_attempts_recent_v1
+ON news_ai_job_attempts_v1(attempted_at,job_id,outcome,failure_code);
 
 CREATE TABLE IF NOT EXISTS news_ai_retry_schedule_overrides_v1 (
     override_id TEXT PRIMARY KEY,
@@ -193,6 +205,21 @@ CREATE TABLE IF NOT EXISTS news_ai_account_request_usage_v1 (
 
 CREATE INDEX IF NOT EXISTS news_ai_account_request_usage_window_v1
 ON news_ai_account_request_usage_v1(account_id,reserved_at,model_family);
+
+CREATE TABLE IF NOT EXISTS news_ai_quota_day_workload_v1 (
+    quota_day TEXT NOT NULL,
+    hour_bucket INTEGER NOT NULL CHECK(hour_bucket BETWEEN 0 AND 23),
+    account_id TEXT NOT NULL,
+    quota_authority TEXT NOT NULL,
+    workload_class TEXT NOT NULL CHECK(workload_class IN (
+        'LIVE_OPERATIONAL','CONTRACT_BACKFILL')),
+    request_count INTEGER NOT NULL CHECK(request_count >= 0),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(quota_day,hour_bucket,account_id,quota_authority,workload_class)
+);
+
+CREATE INDEX IF NOT EXISTS news_ai_quota_day_workload_retention_v1
+ON news_ai_quota_day_workload_v1(quota_day);
 
 CREATE TABLE IF NOT EXISTS news_ai_token_calibration_v1 (
     bucket_id TEXT PRIMARY KEY,
@@ -413,6 +440,7 @@ def install_scheduler_schema(connection: sqlite3.Connection) -> None:
         "calibration_provider_model_version": "TEXT",
         "calibration_safe_ratio": "REAL",
         "provider_model_version": "TEXT",
+        "workload_class": "TEXT NOT NULL DEFAULT 'LIVE_OPERATIONAL'",
     }
     for name, declaration in request_usage_additions.items():
         if name not in request_usage_columns:
@@ -466,6 +494,11 @@ def install_scheduler_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         "DELETE FROM news_ai_scheduler_deferrals_v1 WHERE deferred_at<=?",
         (_iso(installed_at - SCHEDULER_DEFERRAL_RETENTION),),
+    )
+    oldest_quota_day = quota_day(installed_at - timedelta(days=BACKFILL_FORECAST_DAYS))
+    connection.execute(
+        "DELETE FROM news_ai_quota_day_workload_v1 WHERE quota_day<?",
+        (oldest_quota_day,),
     )
     connection.commit()
     from .critical_annotation_state import install_annotation_job_count_schema
@@ -1552,6 +1585,7 @@ def account_quota_snapshot(
     *,
     model_families: tuple[str, ...],
     daily_limit: int,
+    quota_authority: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, object]:
     """Read the scheduler's account ledger without exposing credentials."""
@@ -1584,13 +1618,44 @@ def account_quota_snapshot(
             if len(account_credentials) == 1
             else hashlib.sha256(account_id.encode("utf-8")).hexdigest()[:12]
         )
-        keys.append({
+        key_snapshot: dict[str, object] = {
             "slot": slot,
             "fingerprint": fingerprint,
             "sent": sent,
             "remaining": max(0, daily_limit - sent),
             "status": "AVAILABLE" if sent < daily_limit else "DAILY_LIMIT",
-        })
+        }
+        if quota_authority in {"gemini_quota", "gemini_31_quota"}:
+            forecast = _backfill_admission_locked(
+                connection,
+                account_id=account_id,
+                quota_authority=quota_authority,
+                model_families=families,
+                daily_limit=daily_limit,
+                current_daily_count=sent,
+                requested_requests=1,
+                now=instant,
+            )
+            backfill_today = int(connection.execute(
+                """SELECT COALESCE(sum(request_count),0)
+                   FROM news_ai_quota_day_workload_v1
+                   WHERE quota_day=? AND account_id=? AND quota_authority=?
+                     AND workload_class='CONTRACT_BACKFILL'""",
+                (day, account_id, quota_authority),
+            ).fetchone()[0])
+            key_snapshot["contract_backfill"] = {
+                "predicted_remaining_live_demand": forecast["predicted_live_requests"],
+                "operational_retry_reserve": forecast["operational_retry_reserve"],
+                "safety_buffer": forecast["safety_buffer"],
+                "spendable_remaining": forecast["safe_backfill_budget"],
+                "requests_today": backfill_today,
+                "dispatch_allowed": bool(forecast["admitted"]),
+                "deferred_reason": (
+                    None if forecast["admitted"] else forecast["reason"]
+                ),
+                "forecast_window_days": BACKFILL_FORECAST_DAYS,
+            }
+        keys.append(key_snapshot)
     next_midnight = (instant.astimezone(PACIFIC) + timedelta(days=1)).replace(
         hour=0, minute=0, second=0, microsecond=0,
     ).astimezone(UTC)
@@ -1702,6 +1767,176 @@ def credentials_for_background_task(
     )
 
 
+def _nearest_rank_p95(values: list[int]) -> int:
+    if not values:
+        return 0
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(0.95 * len(ordered)) - 1)]
+
+
+def forecast_safe_backfill_budget(
+    *, remaining_capacity: int, predicted_live: int,
+    operational_retry_reserve: int, safety_buffer: int,
+) -> int:
+    return max(
+        0,
+        int(remaining_capacity) - int(predicted_live)
+        - int(operational_retry_reserve) - int(safety_buffer),
+    )
+
+
+def _backfill_admission_locked(
+    connection: sqlite3.Connection,
+    *,
+    account_id: str,
+    quota_authority: str,
+    model_families: tuple[str, ...],
+    daily_limit: int,
+    current_daily_count: int,
+    requested_requests: int,
+    now: datetime,
+) -> dict[str, object]:
+    """Return one atomic, forecast-safe grant for contract backfill.
+
+    The caller owns ``BEGIN IMMEDIATE``. History contains only admitted requests
+    and is aggregated by quota day/hour, so retention and forecasting stay O(1)
+    with respect to news history size.
+    """
+    pacific = now.astimezone(PACIFIC)
+    current_day = pacific.date().isoformat()
+    complete_start = (pacific.date() - timedelta(days=BACKFILL_FORECAST_DAYS)).isoformat()
+    history = connection.execute(
+        """WITH complete_days AS (
+             SELECT DISTINCT quota_day FROM news_ai_quota_day_workload_v1
+             WHERE account_id=? AND quota_authority=?
+               AND quota_day>=? AND quota_day<?
+           )
+           SELECT d.quota_day,COALESCE(sum(CASE
+                    WHEN w.workload_class='LIVE_OPERATIONAL'
+                     AND w.hour_bucket>=? THEN w.request_count ELSE 0 END),0)
+                  AS remaining_live
+           FROM complete_days d
+           LEFT JOIN news_ai_quota_day_workload_v1 w
+             ON w.quota_day=d.quota_day AND w.account_id=?
+            AND w.quota_authority=?
+           GROUP BY d.quota_day""",
+        (
+            account_id, quota_authority, complete_start, current_day,
+            pacific.hour, account_id, quota_authority,
+        ),
+    ).fetchall()
+    values = [int(row["remaining_live"]) for row in history]
+    history_days = len(values)
+    predicted_live = _nearest_rank_p95(values)
+    operational_reserve = math.ceil(daily_limit * BACKFILL_RESERVE_RATIO)
+    safety = math.ceil(daily_limit * BACKFILL_SAFETY_RATIO)
+    remaining_capacity = max(0, daily_limit - current_daily_count)
+    safe_budget = forecast_safe_backfill_budget(
+        remaining_capacity=remaining_capacity,
+        predicted_live=predicted_live,
+        operational_retry_reserve=operational_reserve,
+        safety_buffer=safety,
+    )
+    next_reset = (pacific + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    ).isoformat(timespec="microseconds")
+    evidence: dict[str, object] = {
+        "reason": "SAFE_BUDGET_AVAILABLE",
+        "quota_authority": quota_authority,
+        "history_days": history_days,
+        "forecast_method": "P95_REMAINING_QUOTA_DAY_HOURLY",
+        "predicted_live_requests": predicted_live,
+        "operational_retry_reserve": operational_reserve,
+        "safety_buffer": safety,
+        "remaining_daily_capacity": remaining_capacity,
+        "safe_backfill_budget": safe_budget,
+        "next_retry_at": (now + timedelta(minutes=1)).isoformat(timespec="microseconds"),
+    }
+    if history_days < BACKFILL_MIN_COMPLETE_DAYS:
+        return {**evidence, "admitted": False, "reason": "COLD_START_HISTORY"}
+
+    placeholders = ",".join("?" for _ in model_families)
+    pressure_cutoff = (now - timedelta(minutes=15)).isoformat(timespec="microseconds")
+    live = connection.execute(
+        """SELECT
+             sum(CASE WHEN state='LEASED' OR available_at<=? THEN 1 ELSE 0 END) claimable,
+             min(CASE WHEN state='LEASED' OR available_at<=? THEN created_at END) oldest,
+             sum(CASE WHEN created_at>=? THEN 1 ELSE 0 END) arrivals,
+             sum(CASE WHEN completed_at>=? THEN 1 ELSE 0 END) completions
+           FROM news_ai_jobs_v1
+           WHERE task_type='ACTIVE_ANNOTATION' AND work_lane='LIVE'
+             AND state IN ('QUEUED','LEASED','BACKING_OFF','COMPLETED')""",
+        (
+            now.isoformat(timespec="microseconds"),
+            now.isoformat(timespec="microseconds"), pressure_cutoff, pressure_cutoff,
+        ),
+    ).fetchone()
+    claimable = int(live["claimable"] or 0)
+    oldest = datetime.fromisoformat(str(live["oldest"])) if live["oldest"] else None
+    if oldest is not None and oldest.tzinfo is None:
+        oldest = oldest.replace(tzinfo=UTC)
+    live_overdue = bool(oldest and now - oldest >= BACKFILL_LIVE_SLA)
+    backlog_increasing = int(live["arrivals"] or 0) > int(live["completions"] or 0)
+    throttled = int(connection.execute(
+        f"""SELECT count(*) FROM news_ai_account_request_usage_v1
+            WHERE account_id=? AND reserved_at>=?
+              AND model_family IN ({placeholders})
+              AND provider_outcome='PROVIDER_THROTTLED'""",
+        (account_id, pressure_cutoff, *model_families),
+    ).fetchone()[0])
+    capacity_deferred = int(connection.execute(
+        """SELECT count(*) FROM news_ai_scheduler_deferrals_v1 d
+           JOIN news_ai_jobs_v1 j ON j.job_id=d.job_id
+           WHERE d.deferred_at>=? AND j.work_lane='LIVE'
+             AND d.failure_code IN ('MODEL_CAPACITY_DEFERRED',
+                                    'PROVIDER_DISPATCH_DEFERRED')""",
+        (pressure_cutoff,),
+    ).fetchone()[0])
+    recent = connection.execute(
+        f"""SELECT COALESCE(sum(request_count),0) AS total,
+                   COALESCE(sum(CASE WHEN workload_class='CONTRACT_BACKFILL'
+                                     THEN request_count ELSE 0 END),0) AS backfill
+            FROM news_ai_account_request_usage_v1
+            WHERE account_id=? AND reserved_at>?
+              AND model_family IN ({placeholders})""",
+        (
+            account_id, (now - timedelta(seconds=60)).isoformat(timespec="microseconds"),
+            *model_families,
+        ),
+    ).fetchone()
+    total_60s = int(recent["total"])
+    backfill_60s = int(recent["backfill"])
+    share_blocked = backfill_60s >= max(
+        1, (total_60s + 1) // BACKFILL_MAX_SHARE_DENOMINATOR,
+    )
+    evidence.update({
+        "live_claimable": claimable,
+        "live_sla_overdue": live_overdue,
+        "live_backlog_increasing": backlog_increasing,
+        "provider_throttles_15m": throttled,
+        "live_capacity_deferrals_15m": capacity_deferred,
+        "backfill_requests_60s": backfill_60s,
+        "total_requests_60s": total_60s,
+    })
+    blockers = (
+        (claimable > 0, "LIVE_CLAIMABLE"),
+        (live_overdue, "LIVE_SLA_PRESSURE"),
+        (backlog_increasing, "LIVE_BACKLOG_INCREASING"),
+        (throttled > 0, "PROVIDER_THROTTLED"),
+        (capacity_deferred > 0, "LIVE_CAPACITY_DEFERRED"),
+        (share_blocked, "INSTANTANEOUS_SHARE"),
+        (safe_budget < requested_requests, "NO_SAFE_DAILY_BUDGET"),
+    )
+    reason = next((name for blocked, name in blockers if blocked), None)
+    if reason is not None:
+        return {
+            **evidence, "admitted": False, "reason": reason,
+            "next_retry_at": next_reset if reason == "NO_SAFE_DAILY_BUDGET"
+            else evidence["next_retry_at"],
+        }
+    return {**evidence, "admitted": True}
+
+
 def reserve_account_request(
     connection: sqlite3.Connection,
     *,
@@ -1726,6 +1961,8 @@ def reserve_account_request(
     base_estimated_input_tokens: int | None = None,
     calibration_provider_model_version: str | None = None,
     calibration_safe_ratio: float | None = None,
+    workload_class: str = LIVE_OPERATIONAL_WORKLOAD,
+    quota_authority: str | None = None,
     decision: dict[str, object] | None = None,
 ) -> bool:
     """Atomically count attempted provider requests against one account.
@@ -1747,6 +1984,9 @@ def reserve_account_request(
     if attempted_requests < 1:
         raise ValueError("request_count must be positive")
     families = tuple(dict.fromkeys(shared_model_families or (model_family,)))
+    if workload_class not in REQUEST_WORKLOADS:
+        raise ValueError("unknown request workload class")
+    authority = str(quota_authority or model_family)
     placeholders = ",".join("?" for _ in families)
     usable_daily_limit = daily_limit if urgent else max(0, daily_limit - reserve_total)
     connection.execute("BEGIN IMMEDIATE")
@@ -1759,6 +1999,27 @@ def reserve_account_request(
             (day, account_id, *families),
         ).fetchone()
         daily_count = int(daily["request_count"])
+        if workload_class == CONTRACT_BACKFILL_WORKLOAD:
+            backfill = _backfill_admission_locked(
+                connection,
+                account_id=account_id,
+                quota_authority=authority,
+                model_families=families,
+                daily_limit=daily_limit,
+                current_daily_count=daily_count,
+                requested_requests=attempted_requests,
+                now=instant,
+            )
+            if not bool(backfill["admitted"]):
+                connection.rollback()
+                if decision is not None:
+                    decision.update(
+                        failure_code="BACKFILL_BUDGET_DEFERRED",
+                        next_retry_at=backfill["next_retry_at"],
+                        **{key: value for key, value in backfill.items()
+                           if key not in {"admitted", "next_retry_at"}},
+                    )
+                return False
         minute_count, minute_tokens = rolling_account_usage(
             connection,
             account_id=account_id,
@@ -1875,8 +2136,8 @@ def reserve_account_request(
                 input_token_count,reserved_at,requested_model,purpose,
                 prompt_contract,estimator_version,base_estimated_input_tokens,
                 admitted_input_tokens,calibration_provider_model_version,
-                calibration_safe_ratio)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                calibration_safe_ratio,workload_class)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 usage_id or str(uuid.uuid4()), account_id, model_family,
                 attempted_requests,
@@ -1884,6 +2145,22 @@ def reserve_account_request(
                 purpose, prompt_contract, estimator_version, base_tokens,
                 estimated_tokens, calibration_provider_model_version,
                 calibration_safe_ratio,
+                workload_class,
+            ),
+        )
+        pacific = instant.astimezone(PACIFIC)
+        connection.execute(
+            """INSERT INTO news_ai_quota_day_workload_v1
+               (quota_day,hour_bucket,account_id,quota_authority,
+                workload_class,request_count,updated_at)
+               VALUES (?,?,?,?,?,?,?)
+               ON CONFLICT(quota_day,hour_bucket,account_id,quota_authority,
+                           workload_class) DO UPDATE SET
+                 request_count=request_count+excluded.request_count,
+                 updated_at=excluded.updated_at""",
+            (
+                day, pacific.hour, account_id, authority, workload_class,
+                attempted_requests, timestamp,
             ),
         )
         connection.commit()
@@ -2732,6 +3009,12 @@ def sync_pending_jobs(
         pending_impact_records,
         pending_title_translation_records,
     )
+    from .news_semantics import PREVIOUS_NEWS_PROMPT_VERSION
+    from .semantic_transition import MODEL_REVIEW_REQUIRED, transition_for
+
+    transition = transition_for(PREVIOUS_NEWS_PROMPT_VERSION, PROMPT_VERSION)
+    if transition.kind != MODEL_REVIEW_REQUIRED:
+        raise RuntimeError("active annotation backfill must follow transition policy")
     from .daily_brief import brief_dates_to_process
 
     instant = now or datetime.now(UTC)

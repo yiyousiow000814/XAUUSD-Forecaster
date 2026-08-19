@@ -473,6 +473,79 @@ def test_background_route_stalls_only_after_its_own_sla() -> None:
     assert stalled["evidence"]["stall_sla_seconds"] == 2 * 60 * 60
 
 
+def test_contract_backfill_pressure_is_observable_but_never_degrades_live_health() -> None:
+    connection = _connection()
+    job_id = enqueue_job(
+        connection,
+        task_type="ACTIVE_ANNOTATION",
+        source="source",
+        source_item_id="historical",
+        revision_number=1,
+        prompt_version="prompt",
+        priority="BACKGROUND",
+        work_lane="CONTRACT_BACKFILL",
+        now=NOW - timedelta(days=2),
+    )
+    connection.execute(
+        """INSERT INTO news_ai_scheduler_deferrals_v1 VALUES
+           (?,?,?,?,?,?,?,?)""",
+        (
+            "deferral", job_id, "ACTIVE_ANNOTATION", "account-a",
+            "BACKFILL_BUDGET_DEFERRED", '{"reason":"COLD_START_HISTORY"}',
+            NOW.isoformat(timespec="microseconds"),
+            (NOW + timedelta(minutes=1)).isoformat(timespec="microseconds"),
+        ),
+    )
+    connection.commit()
+
+    snapshot = scheduler_health_snapshot(connection, now=NOW)
+
+    assert snapshot["status"] == "HEALTHY"
+    assert snapshot["alerts"] == []
+    annotation = next(
+        task for task in snapshot["scheduler"]["tasks"]
+        if task["task_type"] == "ACTIVE_ANNOTATION"
+    )
+    assert annotation["claimable"] == 0
+    backfill = snapshot["scheduler"]["contract_backfill"]
+    assert backfill["health_semantics"] == "NON_BLOCKING_MIGRATION"
+    assert backfill["states"]["queued"] == 1
+    assert backfill["budget_deferred_15m"] == 1
+    assert backfill["oldest_age_seconds"] == 2 * 24 * 60 * 60
+
+
+def test_real_backfill_failures_emit_only_the_migration_diagnostic() -> None:
+    connection = _connection()
+    job_id = enqueue_job(
+        connection,
+        task_type="ACTIVE_ANNOTATION", source="source",
+        source_item_id="broken-history", revision_number=1,
+        prompt_version="prompt", priority="BACKGROUND",
+        work_lane="CONTRACT_BACKFILL", now=NOW - timedelta(hours=1),
+    )
+    for attempt in range(1, 4):
+        connection.execute(
+            """INSERT INTO news_ai_job_attempts_v1 VALUES
+               (?,?,?,?,?,'ERROR','MODEL_OUTPUT_CONTRACT_FAILED','ValueError',
+                NULL,'bounded contract failure',?,NULL)""",
+            (
+                f"attempt-{attempt}", job_id, attempt, "account-a",
+                f"credential-{attempt}",
+                (NOW - timedelta(minutes=attempt)).isoformat(),
+            ),
+        )
+    connection.commit()
+
+    snapshot = scheduler_health_snapshot(connection, now=NOW)
+
+    assert snapshot["status"] == "WARNING"
+    assert [alert["code"] for alert in snapshot["alerts"]] == [
+        "OPS_AI_BACKFILL_MIGRATION_FAILED",
+    ]
+    assert snapshot["alerts"][0]["scope"] == "CONTRACT_BACKFILL"
+    assert snapshot["scheduler"]["contract_backfill"]["real_failures_15m"] == 3
+
+
 def test_component_and_source_failures_use_the_same_alert_contract() -> None:
     connection = _connection()
     snapshot = scheduler_health_snapshot(connection, now=NOW)

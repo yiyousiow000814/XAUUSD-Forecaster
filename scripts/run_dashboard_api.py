@@ -2530,6 +2530,7 @@ def _dashboard_payload(
                     connection, credentials,
                     model_families=surface.model_families,
                     daily_limit=surface.daily_limit,
+                    quota_authority=surface.payload_key,
                     now=now,
                 )
                 for surface in AI_QUOTA_SURFACES

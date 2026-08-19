@@ -11,6 +11,9 @@ from .annotation import DEFAULT_GEMINI_MODEL, GEMINI_DAILY_PRIORITY_RESERVE
 from .model_gateway import ModelRequestAccountant, ModelRequestUsage
 from .news_scheduler import (
     ApiCredential,
+    CONTRACT_BACKFILL_LANE,
+    CONTRACT_BACKFILL_WORKLOAD,
+    LIVE_OPERATIONAL_WORKLOAD,
     calibrated_input_tokens,
     provider_dispatch_next_eligible,
     mark_account_request_attempted,
@@ -28,10 +31,16 @@ class SchedulerModelAccountant(ModelRequestAccountant):
         credential: ApiCredential,
         *,
         urgent: bool,
+        work_lane: str = "LIVE",
     ) -> None:
         self.connection = connection
         self.credential = credential
         self.urgent = urgent
+        self.workload_class = (
+            CONTRACT_BACKFILL_WORKLOAD
+            if work_lane == CONTRACT_BACKFILL_LANE
+            else LIVE_OPERATIONAL_WORKLOAD
+        )
         self._next_retry_at: str | None = None
         self._failure_code: str | None = None
         self._failure_evidence: dict[str, object] | None = None
@@ -77,6 +86,8 @@ class SchedulerModelAccountant(ModelRequestAccountant):
             base_estimated_input_tokens=usage.input_tokens,
             calibration_provider_model_version=calibration_model_version,
             calibration_safe_ratio=safe_ratio,
+            workload_class=self.workload_class,
+            quota_authority=policy.payload_key,
             usage_id=usage_id,
             decision=decision,
         )

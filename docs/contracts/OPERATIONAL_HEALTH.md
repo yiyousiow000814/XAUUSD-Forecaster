@@ -61,6 +61,15 @@ deferred it. Local account/model quota uses `MODEL_CAPACITY_DEFERRED`; adaptive
 provider pacing uses `PROVIDER_DISPATCH_DEFERRED`. Neither code proves an HTTP
 request was sent.
 
+Contract migration has a separate non-blocking health domain from LIVE work.
+`BACKFILL_BUDGET_DEFERRED` means forecast-safe quota isolation deliberately
+withheld a historical model dispatch before transport. It reserves no quota and
+increments neither attempt nor retry count. Contract-backfill queue size, age,
+and pacing must remain visible in the bounded migration summary but must not
+degrade LIVE annotation task health, create a LIVE stall alert, or change the
+top-level operational status. Genuine provider, storage, or scheduler failures
+retain their existing failure semantics and are not relabeled as healthy pacing.
+
 New code paths must reuse a catalog meaning or update the canonical catalog.
 They must not persist a changing exception sentence as the only diagnostic key.
 

@@ -132,6 +132,33 @@ semantic-priority head start. After that interval, ready jobs follow original
 FIFO order. Continuous historical migration therefore cannot consume the
 capacity reserved for newly arriving live evidence.
 
+Queue ordering is not quota isolation. Before every contract-backfill provider
+dispatch, the same atomic account admission transaction computes a one-request
+grant from the authoritative provider/model/account quota surface. Spendable
+capacity is the current quota-day remainder minus the conservative P95 of
+remaining LIVE demand from 7–14 complete Pacific quota days, an operational
+reserve, a retry/critical reserve, and a safety buffer. Cold start fails closed.
+The grant is recomputed after every admitted request; it stops immediately for
+claimable or overdue LIVE work, increasing LIVE backlog, recent provider
+throttling, LIVE capacity deferral, or the bounded instantaneous backfill share.
+
+Hourly per-quota-day workload summaries retain only the latest 14 complete
+days, independent of news-history size. Fine-grained request evidence remains
+bounded separately. `BACKFILL_BUDGET_DEFERRED` is healthy pacing: it performs no
+provider call, reserves no quota, and increments neither job attempt nor retry
+count. LIVE scheduler health excludes migration queue age and pacing; a
+separate non-blocking `contract_backfill` summary exposes its states, oldest
+age, and recent budget deferrals.
+
+Every annotation contract transition is declared as `REUSE_COMPATIBLE`,
+`DETERMINISTIC_MIGRATION`, or `MODEL_REVIEW_REQUIRED`. Only the last class may
+create model-backed migration jobs. Historical demand is independently
+classified as `CURRENT_OPERATIONAL`, `TRAINING_REQUIRED`, or `ARCHIVAL_ONLY`;
+training work is schedulable only after an explicit generation demand, while
+archival evidence is never scheduled. The V16-to-V17 transition is explicitly
+model-review-required, remains cursor-bounded to 50 records per discovery page,
+and still passes through the same LIVE-reserving quota gate.
+
 Preemptible accounts remain restricted to `IMMEDIATE` and `FAST` jobs. Routine
 accounts may serve every priority and provide overflow capacity for urgent
 jobs. If no routine account exists, routine work remains queued rather than

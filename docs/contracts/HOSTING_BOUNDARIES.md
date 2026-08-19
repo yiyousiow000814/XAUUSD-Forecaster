@@ -71,6 +71,12 @@
   One operation must remain bounded as total authoritative state grows, and a
   complete source of truth must remain reachable without creating another
   full-history blob.
+- Provider-capacity status crosses the dashboard boundary only as bounded,
+  secret-safe per-authority/account projections. Forecasting may use a retained
+  quota-day summary, but critical status must never scan accumulated provider
+  requests or model attempts. Historical contract migration is preemptible and
+  may consume only forecast-safe surplus provider capacity; its latency remains
+  separate from LIVE pipeline health.
 - A display limit or business selection window is not a transport guarantee.
   Transport bounds are enforced on serialized bytes at the transport boundary,
   with enough normal headroom that the emergency host limit remains a final

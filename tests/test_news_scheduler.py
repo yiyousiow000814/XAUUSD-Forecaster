@@ -23,6 +23,7 @@ from xauusd_forecaster.news_scheduler import (
     complete_job,
     configured_api_credentials,
     enqueue_job,
+    forecast_safe_backfill_budget,
     install_scheduler_schema,
     list_retry_schedule_jobs,
     mark_account_request_attempted,
@@ -48,6 +49,19 @@ from xauusd_forecaster.annotation import (
 from xauusd_forecaster.forward_ledger import ForwardLedger
 from xauusd_forecaster.news_semantics import (
     CURRENT_NEWS_PROMPT_VERSION,
+    PREVIOUS_NEWS_PROMPT_VERSION,
+)
+from xauusd_forecaster.semantic_transition import (
+    ARCHIVAL_ONLY,
+    DETERMINISTIC_MIGRATION,
+    MODEL_REVIEW_REQUIRED,
+    REUSE_COMPATIBLE,
+    TRAINING_REQUIRED,
+    SemanticTransition,
+    demand_allows_scheduling,
+    requires_model_review,
+    provider_dispatches_for_transition,
+    transition_for,
 )
 
 
@@ -59,6 +73,23 @@ def _connection() -> sqlite3.Connection:
     connection.row_factory = sqlite3.Row
     install_scheduler_schema(connection)
     return connection
+
+
+def _seed_complete_live_quota_days(
+    connection: sqlite3.Connection, *, remaining_live: int = 1_000,
+) -> None:
+    pacific_day = datetime(2026, 8, 11, 19)
+    for offset in range(1, 8):
+        day = (pacific_day.date() - timedelta(days=offset)).isoformat()
+        connection.execute(
+            """INSERT INTO news_ai_quota_day_workload_v1
+               VALUES (?,?,?,?,?,?,?)""",
+            (
+                day, 19, "account-a", "gemini_quota", "LIVE_OPERATIONAL",
+                remaining_live, NOW.isoformat(timespec="microseconds"),
+            ),
+        )
+    connection.commit()
 
 
 def _enqueue(
@@ -200,6 +231,55 @@ def test_contract_backfill_discovery_is_bounded_resumable_and_separate(tmp_path)
         "SELECT count(*) FROM news_ai_jobs_v1 WHERE task_type='ACTIVE_ANNOTATION'"
     ).fetchone()[0] == 6
     ledger.close()
+
+
+def test_ten_thousand_record_backfill_cursor_is_bounded_and_exact(monkeypatch) -> None:
+    connection = _connection()
+    connection.execute(
+        """INSERT INTO news_annotation_contract_backfill_v1
+           VALUES (?,?,NULL,NULL,NULL,NULL,'ACTIVE',?)""",
+        ("prompt", NOW.isoformat(), NOW.isoformat()),
+    )
+    rows = [
+        {
+            "collector_first_seen_time": (
+                NOW - timedelta(seconds=index)
+            ).isoformat(timespec="microseconds"),
+            "source": "fixture",
+            "source_item_id": f"item-{index:05d}",
+            "revision_number": 1,
+        }
+        for index in range(10_000)
+    ]
+    monkeypatch.setattr(
+        news_scheduler_module, "_contract_backfill_has_current_value",
+        lambda *_args, **_kwargs: True,
+    )
+
+    def pending(_connection, *, before_cursor=None, limit, **_kwargs):
+        start = 0
+        if before_cursor is not None:
+            previous_id = before_cursor[2]
+            start = int(previous_id.rsplit("-", 1)[1]) + 1
+        return rows[start:start + limit]
+
+    seen: list[str] = []
+    for offset in range(201):
+        page = news_scheduler_module._contract_backfill_page(
+            connection, prompt_version="prompt", activated_at=NOW,
+            now=NOW + timedelta(seconds=offset),
+            pending_annotation_records=pending, page_size=2_000,
+        )
+        assert len(page) <= news_scheduler_module.CONTRACT_BACKFILL_PAGE_SIZE
+        seen.extend(str(row["source_item_id"]) for row in page)
+
+    assert len(seen) == 10_000
+    assert len(set(seen)) == 10_000
+    state = connection.execute(
+        """SELECT state,cursor_source_item_id
+           FROM news_annotation_contract_backfill_v1 WHERE prompt_version='prompt'"""
+    ).fetchone()
+    assert tuple(state) == ("COMPLETE", "item-09999")
 
 
 @pytest.mark.parametrize(
@@ -685,6 +765,200 @@ def test_provider_dispatch_adapts_to_success_and_retry_after() -> None:
     ).fetchone()[0] == 405
 
 
+def test_live_admission_is_not_reduced_by_backfill_reserves() -> None:
+    connection = _connection()
+    _seed_complete_live_quota_days(connection)
+    assert reserve_account_request(
+        connection, account_id="account-a", model_family="gemini-model",
+        daily_limit=2_500, requests_per_minute=10, now=NOW,
+        quota_authority="gemini_quota",
+    )
+
+
+def test_backfill_gets_only_forecast_safe_remaining_daily_budget() -> None:
+    connection = _connection()
+    _seed_complete_live_quota_days(connection)
+    assert reserve_account_request(
+        connection, account_id="account-a", model_family="gemini-model",
+        daily_limit=2_500, requests_per_minute=1_000, request_count=800,
+        now=NOW - timedelta(seconds=122), quota_authority="gemini_quota",
+    )
+    decision: dict[str, object] = {}
+    assert reserve_account_request(
+        connection, account_id="account-a", model_family="gemini-model",
+        daily_limit=2_500, requests_per_minute=1_000, request_count=300,
+        now=NOW, workload_class="CONTRACT_BACKFILL",
+        quota_authority="gemini_quota", decision=decision,
+    )
+    denied: dict[str, object] = {}
+    assert not reserve_account_request(
+        connection, account_id="account-a", model_family="gemini-model",
+        daily_limit=2_500, requests_per_minute=1_000, request_count=1,
+        now=NOW + timedelta(seconds=61), workload_class="CONTRACT_BACKFILL",
+        quota_authority="gemini_quota", decision=denied,
+    )
+    assert denied["failure_code"] == "BACKFILL_BUDGET_DEFERRED"
+    assert denied["reason"] == "NO_SAFE_DAILY_BUDGET"
+    assert denied["safe_backfill_budget"] == 0
+    assert reserve_account_request(
+        connection, account_id="account-a", model_family="gemini-model",
+        daily_limit=2_500, requests_per_minute=2_000, request_count=1_000,
+        now=NOW + timedelta(seconds=122), quota_authority="gemini_quota",
+    )
+
+
+def test_backfill_budget_examples_clamp_at_forecast_safe_surplus() -> None:
+    assert forecast_safe_backfill_budget(
+        remaining_capacity=1_700, predicted_live=1_000,
+        operational_retry_reserve=200, safety_buffer=200,
+    ) == 300
+    assert forecast_safe_backfill_budget(
+        remaining_capacity=800, predicted_live=700,
+        operational_retry_reserve=100, safety_buffer=100,
+    ) == 0
+
+
+def test_live_claimable_work_preempts_backfill_before_quota_is_reserved() -> None:
+    connection = _connection()
+    _seed_complete_live_quota_days(connection, remaining_live=0)
+    _enqueue(connection, "new-live")
+    decision: dict[str, object] = {}
+    assert not reserve_account_request(
+        connection, account_id="account-a", model_family="gemini-model",
+        daily_limit=2_500, requests_per_minute=10, now=NOW,
+        workload_class="CONTRACT_BACKFILL", quota_authority="gemini_quota",
+        decision=decision,
+    )
+    assert decision["reason"] == "LIVE_CLAIMABLE"
+    assert connection.execute(
+        "SELECT count(*) FROM news_ai_account_request_usage_v1"
+    ).fetchone()[0] == 0
+
+
+def test_provider_throttle_halts_backfill_but_not_live_admission() -> None:
+    connection = _connection()
+    _seed_complete_live_quota_days(connection, remaining_live=0)
+    assert reserve_account_request(
+        connection, account_id="account-a", model_family="gemini-model",
+        daily_limit=2_500, requests_per_minute=10, now=NOW - timedelta(minutes=1),
+        usage_id="throttled", quota_authority="gemini_quota",
+    )
+    mark_account_request_attempted(connection, "throttled", now=NOW)
+    record_account_request_outcome(
+        connection, "throttled", outcome="PROVIDER_THROTTLED", now=NOW,
+    )
+    decision: dict[str, object] = {}
+    assert not reserve_account_request(
+        connection, account_id="account-a", model_family="gemini-model",
+        daily_limit=2_500, requests_per_minute=10, now=NOW,
+        workload_class="CONTRACT_BACKFILL", quota_authority="gemini_quota",
+        decision=decision,
+    )
+    assert decision["reason"] == "PROVIDER_THROTTLED"
+    assert reserve_account_request(
+        connection, account_id="account-a", model_family="gemini-model",
+        daily_limit=2_500, requests_per_minute=10, now=NOW,
+        quota_authority="gemini_quota",
+    )
+
+
+def test_backfill_cold_start_fails_closed_without_consuming_quota() -> None:
+    connection = _connection()
+    decision: dict[str, object] = {}
+    assert not reserve_account_request(
+        connection, account_id="account-a", model_family="gemini-model",
+        daily_limit=2_500, requests_per_minute=10, now=NOW,
+        workload_class="CONTRACT_BACKFILL", quota_authority="gemini_quota",
+        decision=decision,
+    )
+    assert decision["reason"] == "COLD_START_HISTORY"
+    assert decision["history_days"] == 0
+    assert connection.execute(
+        "SELECT count(*) FROM news_ai_account_request_usage_v1"
+    ).fetchone()[0] == 0
+
+
+def test_backfill_budget_recomputes_at_pacific_quota_reset() -> None:
+    connection = _connection()
+    _seed_complete_live_quota_days(connection, remaining_live=0)
+    current_day = news_scheduler_module.quota_day(NOW)
+    connection.execute(
+        "INSERT INTO news_ai_account_daily_usage_v1 VALUES (?,?,?,?,?)",
+        (current_day, "account-a", "gemini-model", 2_500, NOW.isoformat()),
+    )
+    connection.execute(
+        """INSERT INTO news_ai_quota_day_workload_v1 VALUES
+           (?,?,?,?,?,?,?)""",
+        (
+            current_day, 19, "account-a", "gemini_quota",
+            "CONTRACT_BACKFILL", 2_500, NOW.isoformat(),
+        ),
+    )
+    connection.commit()
+    denied: dict[str, object] = {}
+    assert not reserve_account_request(
+        connection, account_id="account-a", model_family="gemini-model",
+        daily_limit=2_500, requests_per_minute=10, now=NOW,
+        workload_class="CONTRACT_BACKFILL", quota_authority="gemini_quota",
+        decision=denied,
+    )
+    assert denied["reason"] == "NO_SAFE_DAILY_BUDGET"
+
+    assert reserve_account_request(
+        connection, account_id="account-a", model_family="gemini-model",
+        daily_limit=2_500, requests_per_minute=10,
+        now=NOW + timedelta(days=1), workload_class="CONTRACT_BACKFILL",
+        quota_authority="gemini_quota",
+    )
+
+
+def test_semantic_transition_taxonomy_requires_review_only_when_declared() -> None:
+    assert transition_for("same", "same").kind == REUSE_COMPATIBLE
+    assert provider_dispatches_for_transition(
+        transition_for("same", "same"),
+    ) == 0
+    assert requires_model_review(
+        PREVIOUS_NEWS_PROMPT_VERSION, CURRENT_NEWS_PROMPT_VERSION,
+    )
+    assert transition_for(
+        PREVIOUS_NEWS_PROMPT_VERSION, CURRENT_NEWS_PROMPT_VERSION,
+    ).kind == MODEL_REVIEW_REQUIRED
+    deterministic = SemanticTransition("a", "b", DETERMINISTIC_MIGRATION, "fixture")
+    assert provider_dispatches_for_transition(deterministic) == 0
+    assert provider_dispatches_for_transition(transition_for(
+        PREVIOUS_NEWS_PROMPT_VERSION, CURRENT_NEWS_PROMPT_VERSION,
+    )) == 1
+    with pytest.raises(ValueError, match="not declared"):
+        transition_for("unknown-v1", "unknown-v2")
+
+
+def test_training_and_archival_history_are_demand_driven() -> None:
+    assert not demand_allows_scheduling(TRAINING_REQUIRED)
+    assert demand_allows_scheduling(
+        TRAINING_REQUIRED, training_generation_requested=True,
+    )
+    assert not demand_allows_scheduling(
+        ARCHIVAL_ONLY, training_generation_requested=True,
+    )
+
+
+def test_training_promotion_still_cannot_consume_live_reserve() -> None:
+    connection = _connection()
+    _seed_complete_live_quota_days(connection, remaining_live=0)
+    _enqueue(connection, "current-live")
+    assert demand_allows_scheduling(
+        TRAINING_REQUIRED, training_generation_requested=True,
+    )
+    decision: dict[str, object] = {}
+    assert not reserve_account_request(
+        connection, account_id="account-a", model_family="gemini-model",
+        daily_limit=2_500, requests_per_minute=10, now=NOW,
+        workload_class="CONTRACT_BACKFILL", quota_authority="gemini_quota",
+        decision=decision,
+    )
+    assert decision["reason"] == "LIVE_CLAIMABLE"
+
+
 def test_embedding_dispatch_rises_when_dependency_fanout_dominates() -> None:
     connection = _connection()
     _enqueue(connection, "live-annotation", task_type="ACTIVE_ANNOTATION")
@@ -1016,6 +1290,33 @@ def test_account_quota_snapshot_uses_scheduler_usage_without_double_counting() -
     assert [row["sent"] for row in snapshot["keys"]] == [2, 1]
     assert len(snapshot["keys"]) == 2
     assert all("account_id" not in row for row in snapshot["keys"])
+
+
+def test_gemini_quota_snapshot_exposes_bounded_secret_safe_backfill_evidence() -> None:
+    connection = _connection()
+    credentials = (
+        ApiCredential("private-account", ROUTINE_POOL, "secret-key", "safe-ref"),
+    )
+    snapshot = account_quota_snapshot(
+        connection, credentials,
+        model_families=("gemini-model",), daily_limit=2_500,
+        quota_authority="gemini_quota", now=NOW,
+    )
+
+    account = snapshot["keys"][0]
+    assert account["fingerprint"] == "safe-ref"
+    assert "private-account" not in json.dumps(snapshot)
+    assert "secret-key" not in json.dumps(snapshot)
+    assert account["contract_backfill"] == {
+        "predicted_remaining_live_demand": 0,
+        "operational_retry_reserve": 200,
+        "safety_buffer": 200,
+        "spendable_remaining": 2_100,
+        "requests_today": 0,
+        "dispatch_allowed": False,
+        "deferred_reason": "COLD_START_HISTORY",
+        "forecast_window_days": 14,
+    }
 
 
 def test_gemma_minute_budget_is_shared_across_tasks_and_keys() -> None:
@@ -1972,6 +2273,49 @@ def test_provider_dispatch_deferral_does_not_probe_accounts_or_consume_attempt(
     assert tuple(deferral) == (
         "PROVIDER_DISPATCH_DEFERRED", retry_at.isoformat(),
     )
+    ledger.close()
+
+
+def test_backfill_budget_deferral_is_non_attempt_healthy_pacing(
+    tmp_path, monkeypatch,
+) -> None:
+    from scripts import run_news_annotator as runner
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=NOW)
+    job_id = enqueue_job(
+        ledger.connection, task_type="ACTIVE_ANNOTATION", source="source",
+        source_item_id="historical", revision_number=1,
+        prompt_version="prompt", priority="BACKGROUND",
+        work_lane="CONTRACT_BACKFILL",
+        now=datetime.now(UTC) - timedelta(days=1),
+    )
+    credential = ApiCredential("account-a", ROUTINE_POOL, "key-a", "credential-a")
+    retry_at = datetime.now(UTC) + timedelta(minutes=1)
+    monkeypatch.setattr(runner, "configured_api_credentials", lambda: (credential,))
+    monkeypatch.setattr(runner, "sync_pending_jobs", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        runner, "_execute_job",
+        lambda *_args, **_kwargs: {
+            "status": "DEFERRED",
+            "failure_code": "BACKFILL_BUDGET_DEFERRED",
+            "reason": "COLD_START_HISTORY",
+            "next_retry_at": retry_at.isoformat(),
+        },
+    )
+
+    statuses = runner.run_scheduled_batch(ledger, batch_size=1)
+
+    assert statuses[0]["attempted_credentials"] == 0
+    row = ledger.connection.execute(
+        """SELECT state,attempt_count,available_at,last_error
+           FROM news_ai_jobs_v1 WHERE job_id=?""", (job_id,),
+    ).fetchone()
+    assert tuple(row) == (
+        "QUEUED", 0, retry_at.isoformat(), "BACKFILL_BUDGET_DEFERRED",
+    )
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_ai_job_attempts_v1 WHERE job_id=?", (job_id,),
+    ).fetchone()[0] == 0
     ledger.close()
 
 
