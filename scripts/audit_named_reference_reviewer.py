@@ -44,17 +44,15 @@ def _batches(values: tuple, size: int) -> tuple[tuple, ...]:
 
 
 def run_benchmark(
-    fixture: Path,
     *,
     runs: int,
     batch_size: int,
-    model: str,
 ) -> dict[str, object]:
     if runs not in {2, 3}:
         raise ValueError("benchmark runs must be 2 or 3")
     if not 1 <= batch_size <= 60:
         raise ValueError("benchmark batch size must be between 1 and 60")
-    manifest = load_named_reference_benchmark(fixture)
+    manifest = load_named_reference_benchmark(DEFAULT_FIXTURE)
     cases = manifest["review_cases"]
     credentials = configured_api_credentials()
     if not credentials:
@@ -84,7 +82,7 @@ def run_benchmark(
                     try:
                         result, exact_model = generate_metered_response(
                             credential.api_key,
-                            model=model,
+                            model=DEFAULT_GEMMA_MODEL,
                             purpose="named-reference-benchmark",
                             prompt_contract=REVIEW_CONTRACT_VERSION,
                             payload=payload,
@@ -120,7 +118,7 @@ def run_benchmark(
         "benchmark_schema_version": manifest["schema_version"],
         "benchmark_manifest_sha256": benchmark_manifest_sha256(manifest),
         "review_contract_version": REVIEW_CONTRACT_VERSION,
-        "requested_model": model,
+        "requested_model": DEFAULT_GEMMA_MODEL,
         "provider_model_versions": sorted(exact_models),
         "runs": runs,
         "batch_size": batch_size,
@@ -134,18 +132,13 @@ def run_benchmark(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=60)
-    parser.add_argument("--model", default=DEFAULT_GEMMA_MODEL)
-    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     report = run_benchmark(
-        args.fixture, runs=args.runs, batch_size=args.batch_size, model=args.model,
+        runs=args.runs, batch_size=args.batch_size,
     )
     serialized = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True)
-    if args.output is not None:
-        args.output.write_text(serialized + "\n", encoding="utf-8")
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     print(serialized)
