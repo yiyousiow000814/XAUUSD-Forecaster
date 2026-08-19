@@ -310,6 +310,7 @@ def test_decision_collector_stays_live_when_decision_output_stalls() -> None:
             "last_success": now.isoformat(), "last_error": None,
         },
         latest_decision=old_decision,
+        decision_observation_start=now.isoformat(),
         broker_session=session,
         quote_current=True,
         now=now,
@@ -351,6 +352,7 @@ def test_decision_output_stall_requires_current_quote_and_full_horizon(
             "last_success": now.isoformat(), "last_error": None,
         },
         latest_decision=(now - timedelta(minutes=20)).isoformat(),
+        decision_observation_start=now.isoformat(),
         broker_session=broker_session,
         quote_current=quote_current,
         now=now,
@@ -376,6 +378,7 @@ def test_decision_output_stall_honors_bounded_five_minute_cadence(
             "last_success": now.isoformat(), "last_error": None,
         },
         latest_decision=(now - timedelta(seconds=age_seconds)).isoformat(),
+        decision_observation_start=now.isoformat(),
         broker_session={
             "is_open": True,
             "next_close_time": (now + timedelta(hours=1)).isoformat(),
@@ -387,7 +390,13 @@ def test_decision_output_stall_honors_bounded_five_minute_cadence(
     assert component["decision_output_status"] == expected
 
 
-def test_decision_output_without_a_prior_row_does_not_invent_elapsed_stall() -> None:
+@pytest.mark.parametrize("observation_age_seconds,expected", [
+    (420, "NO_RECENT_DECISION"),
+    (421, "STALLED"),
+])
+def test_decision_output_without_a_prior_row_uses_observation_start(
+    observation_age_seconds: float, expected: str,
+) -> None:
     module = _dashboard_module()
     now = datetime(2026, 8, 18, 8, 40, tzinfo=UTC)
 
@@ -397,6 +406,9 @@ def test_decision_output_without_a_prior_row_does_not_invent_elapsed_stall() -> 
             "last_success": now.isoformat(), "last_error": None,
         },
         latest_decision=None,
+        decision_observation_start=(
+            now - timedelta(seconds=observation_age_seconds)
+        ).isoformat(),
         broker_session={
             "is_open": True,
             "next_close_time": (now + timedelta(hours=1)).isoformat(),
@@ -406,7 +418,10 @@ def test_decision_output_without_a_prior_row_does_not_invent_elapsed_stall() -> 
     )
 
     assert component["status"] == "OK"
-    assert component["decision_output_status"] == "NO_RECENT_DECISION"
+    assert component["latest_decision"] is None
+    assert component["decision_age_seconds"] is None
+    assert component["decision_output_age_seconds"] == observation_age_seconds
+    assert component["decision_output_status"] == expected
 
 
 @pytest.mark.parametrize("state,age", [
@@ -427,6 +442,7 @@ def test_decision_collector_still_fails_for_invalid_heartbeat(
             "last_error": None,
         },
         latest_decision=now.isoformat(),
+        decision_observation_start=now.isoformat(),
         broker_session={
             "is_open": True,
             "next_close_time": (now + timedelta(hours=1)).isoformat(),
@@ -665,6 +681,65 @@ def test_healthy_collector_old_decision_reports_output_stall_not_collector_stale
     assert stalled["scope"] == "decision_output"
     assert stalled["blocking"] is True
     assert stalled["evidence"]["age_seconds"] == 1200
+
+
+def test_no_first_decision_stalls_after_forward_epoch_grace(tmp_path) -> None:
+    now = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
+    epoch = now - timedelta(seconds=421)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=epoch).close()
+    _write_market_session(tmp_path, observed_at=now, is_open=True)
+    _write_quote(tmp_path, received_at=now)
+    _write_collector_heartbeat(tmp_path, last_success=now)
+
+    payload = _dashboard_module()._dashboard_payload(
+        database, clock=lambda: now,
+    )
+
+    decision = payload["system"]["components"]["decision_collector"]
+    assert decision["status"] == "OK"
+    assert decision["latest_decision"] is None
+    assert decision["decision_age_seconds"] is None
+    assert decision["decision_observation_started_at"] == epoch.isoformat()
+    assert decision["decision_output_age_seconds"] == 421
+    assert decision["decision_output_status"] == "STALLED"
+    assert any(
+        alert["code"] == "OPS_DECISION_OUTPUT_STALLED"
+        for alert in payload["operational_health"]["alerts"]
+    )
+
+
+@pytest.mark.parametrize("state,heartbeat_age,expected_status", [
+    ("RUNNING", 301, "STALE"),
+    ("STOPPED", 1, "STALE"),
+])
+def test_collector_fault_suppresses_duplicate_decision_output_incident(
+    tmp_path, state: str, heartbeat_age: float, expected_status: str,
+) -> None:
+    now = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=now - timedelta(hours=1)).close()
+    _write_market_session(tmp_path, observed_at=now, is_open=True)
+    _write_quote(tmp_path, received_at=now)
+    _write_collector_heartbeat(
+        tmp_path,
+        last_success=now - timedelta(seconds=heartbeat_age),
+        state=state,
+    )
+    _append_decision_at(database, now - timedelta(minutes=20))
+
+    payload = _dashboard_module()._dashboard_payload(
+        database, clock=lambda: now,
+    )
+
+    decision = payload["system"]["components"]["decision_collector"]
+    assert decision["status"] == expected_status
+    assert decision["decision_output_status"] == "STALLED"
+    assert "decision_collector" in _component_alert_scopes(payload)
+    assert not any(
+        alert["code"] == "OPS_DECISION_OUTPUT_STALLED"
+        for alert in payload["operational_health"]["alerts"]
+    )
 
 
 def test_healthy_collector_recent_decision_remains_current(tmp_path) -> None:

@@ -155,6 +155,7 @@ def _decision_collector_component(
     heartbeat: dict[str, object],
     *,
     latest_decision: str | None,
+    decision_observation_start: str,
     broker_session: dict | None,
     quote_current: bool,
     now: datetime,
@@ -174,6 +175,16 @@ def _decision_collector_component(
         max(0.0, (now - decision_at).total_seconds())
         if decision_at is not None else None
     )
+    observation_started_at = None
+    try:
+        observation_started_at = datetime.fromisoformat(
+            str(decision_observation_start).replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        pass
+    output_age = decision_age
+    if output_age is None and observation_started_at is not None:
+        output_age = max(0.0, (now - observation_started_at).total_seconds())
     output_status = (
         "CURRENT"
         if decision_age is not None
@@ -198,7 +209,8 @@ def _decision_collector_component(
         elif (
             closes_at is not None
             and quote_current
-            and decision_age is not None
+            and output_age is not None
+            and output_age > DECISION_OUTPUT_STALLED_SECONDS
             and output_status == "NO_RECENT_DECISION"
         ):
             output_status = "STALLED"
@@ -207,6 +219,11 @@ def _decision_collector_component(
     component.update({
         "latest_decision": decision_at.isoformat() if decision_at else None,
         "decision_age_seconds": decision_age,
+        "decision_observation_started_at": (
+            observation_started_at.isoformat() if observation_started_at else None
+        ),
+        "decision_output_age_seconds": output_age,
+        "collector_state": str(heartbeat.get("state") or ""),
         "decision_output_status": output_status,
         "decision_output_reason": output_reason,
         "decision_output_message": output_message,
@@ -2477,6 +2494,7 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
     decision_component = _decision_collector_component(
         collector_heartbeat,
         latest_decision=latest_decision_time,
+        decision_observation_start=epoch,
         broker_session=broker_session,
         quote_current=age_seconds is not None and age_seconds <= 30,
         now=now,

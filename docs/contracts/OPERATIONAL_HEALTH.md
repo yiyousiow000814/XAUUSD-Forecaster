@@ -227,7 +227,10 @@ Decision output has a five-minute expected cadence with a bounded two-minute
 scheduling grace. More than 420 seconds without a new decision is `STALLED`
 only when fresh broker evidence says the market is open, the next close is more
 than 30 minutes away, and the quote is current. Missing or stale market/quote
-evidence cannot establish this incident. At final classification, the dashboard
+evidence cannot establish this incident. Before the first decision, elapsed
+output time starts at the immutable `FORWARD_EPOCH`. A stale or non-running
+collector remains the single incident root and suppresses the derivative
+`OPS_DECISION_OUTPUT_STALLED` alert. At final classification, the dashboard
 must reopen a current read-only SQLite snapshot for the latest decision time,
 alongside rereading runtime heartbeat, quote, and broker-session evidence, so a
 long build or hot reload cannot report an output stall from an old snapshot.

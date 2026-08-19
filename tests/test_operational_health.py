@@ -4,6 +4,8 @@ import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from xauusd_forecaster.news_scheduler import enqueue_job, install_scheduler_schema
 from xauusd_forecaster.operational_health import (
     extend_with_component_alerts,
@@ -461,10 +463,13 @@ def test_decision_output_stall_is_separate_from_collector_liveness() -> None:
         components={
             "decision_collector": {
                 "status": "OK",
+                "collector_state": "RUNNING",
                 "age_seconds": 12,
                 "last_error": None,
                 "latest_decision": (NOW - timedelta(minutes=20)).isoformat(),
                 "decision_age_seconds": 1200,
+                "decision_output_age_seconds": 1200,
+                "decision_observation_started_at": NOW.isoformat(),
                 "decision_output_status": "STALLED",
                 "decision_output_expected_cadence_seconds": 300,
                 "decision_output_stalled_after_seconds": 420,
@@ -490,10 +495,47 @@ def test_decision_output_stall_is_separate_from_collector_liveness() -> None:
         "status": "STALLED",
         "age_seconds": 1200,
         "latest_decision": (NOW - timedelta(minutes=20)).isoformat(),
+        "observation_started_at": NOW.isoformat(),
         "expected_cadence_seconds": 300,
         "stalled_after_seconds": 420,
         "market_closes_at": (NOW + timedelta(hours=1)).isoformat(),
     }
+
+
+@pytest.mark.parametrize("status,collector_state", [
+    ("STALE", "RUNNING"),
+    ("STALE", "STOPPED"),
+    ("WARN", "STARTING"),
+])
+def test_collector_fault_suppresses_duplicate_output_stall_alert(
+    status: str, collector_state: str,
+) -> None:
+    result = extend_with_component_alerts(
+        scheduler_health_snapshot(_connection(), now=NOW),
+        components={
+            "decision_collector": {
+                "status": status,
+                "collector_state": collector_state,
+                "age_seconds": 600,
+                "last_error": "collector heartbeat unavailable",
+                "latest_decision": (NOW - timedelta(minutes=20)).isoformat(),
+                "decision_age_seconds": 1200,
+                "decision_output_age_seconds": 1200,
+                "decision_output_status": "STALLED",
+            },
+        },
+        news_sources=[],
+        runtime_update_failure=None,
+    )
+
+    assert any(
+        alert["code"] == "OPS_COMPONENT_UNHEALTHY"
+        for alert in result["alerts"]
+    )
+    assert not any(
+        alert["code"] == "OPS_DECISION_OUTPUT_STALLED"
+        for alert in result["alerts"]
+    )
 
 
 def test_daily_brief_deferral_keeps_the_underlying_failure_code() -> None:
