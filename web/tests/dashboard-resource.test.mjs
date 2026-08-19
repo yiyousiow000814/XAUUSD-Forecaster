@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   DashboardResourceError,
   clearDashboardResource,
+  clearPrivateDashboardResources,
   loadDashboardResource,
   primeDashboardResources,
   readDashboardResource,
@@ -185,12 +186,14 @@ test("serves a fresh cached snapshot without changing its read state", async () 
   unsubscribe();
 });
 
-test("purges one private Admin snapshot after confirmed authentication expiry", async () => {
-  const privateUrl = "/api/admin-status";
+test("purges private Admin snapshots after confirmed authentication expiry", async () => {
+  const privateUrl = "/admin/api/admin-status";
+  const siblingPrivateUrl = "/admin/api/assistant-health?resource-test=private-purge-boundary";
   const publicUrl = "/api/status?resource-test=private-purge-boundary";
   clearDashboardResource(privateUrl);
   primeDashboardResources({
     [privateUrl]: { gemini_quota: { total_remaining: 7 } },
+    [siblingPrivateUrl]: { status: "HEALTHY" },
     [publicUrl]: { system: { online: true }, version: 1 },
   });
   const observed = [];
@@ -206,9 +209,10 @@ test("purges one private Admin snapshot after confirmed authentication expiry", 
     authError = reason;
   }
   assert.equal(authError.status, 401);
-  clearDashboardResource(privateUrl);
+  clearPrivateDashboardResources();
 
   assert.equal(readDashboardResource(privateUrl), null);
+  assert.equal(readDashboardResource(siblingPrivateUrl), null);
   assert.equal(readDashboardResourceState(privateUrl).hasSnapshot, false);
   assert.equal(readDashboardResourceState(privateUrl).error.status, 401);
   assert.equal(observed.at(-1).hasSnapshot, false);
@@ -221,7 +225,7 @@ test("purges one private Admin snapshot after confirmed authentication expiry", 
 });
 
 test("retains last-good private and public snapshots after service failures", async () => {
-  const privateUrl = "/api/admin-status?resource-test=503-last-good";
+  const privateUrl = "/admin/api/admin-status?resource-test=503-last-good";
   const publicUrl = "/api/status?resource-test=503-last-good";
   primeDashboardResources({
     [privateUrl]: { private: "last-good" },

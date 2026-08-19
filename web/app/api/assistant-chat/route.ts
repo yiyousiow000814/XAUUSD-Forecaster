@@ -1,6 +1,9 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
-import { authenticateDashboardOperatorRequest } from "../_shared/dashboard-operator-auth";
+import {
+  authenticateDashboardOperatorRequest,
+  dashboardOperatorAuthFailure,
+} from "../_shared/dashboard-operator-auth";
 import {
   AssistantChatInputError,
   cancelOwnerAssistantChatTurn,
@@ -27,7 +30,6 @@ const noStoreJson = (payload: unknown, status = 200) => NextResponse.json(payloa
   headers: { "Cache-Control": "private, no-store, max-age=0" },
 });
 
-const unauthorized = () => noStoreJson({ error: "Assistant 身份验证失败" }, 401);
 const unavailable = () => noStoreJson({ error: "Assistant 对话暂不可用" }, 503);
 const notFound = () => noStoreJson({ error: "找不到这个 Assistant turn" }, 404);
 const conflict = () => noStoreJson({ error: "Assistant turn 状态已改变" }, 409);
@@ -87,8 +89,9 @@ export async function GET(request: Request) {
       : previewJson({ item: null, preview: true }, 200, "synthetic-empty-assistant");
   }
 
-  const actor = await authenticateDashboardOperatorRequest(request, env);
-  if (!actor) return unauthorized();
+  const authorization = await authenticateDashboardOperatorRequest(request, env);
+  if (authorization.state !== "AUTHORIZED") return dashboardOperatorAuthFailure(authorization);
+  const actor = authorization.actor;
   if (mode !== null && mode !== "events") {
     return inputError(new AssistantChatInputError("INVALID_MODE", "Assistant 查询模式无效"));
   }
@@ -131,8 +134,9 @@ export async function POST(request: Request) {
   const previewRejection = rejectPreviewWrite();
   if (previewRejection) return previewRejection;
   const mode = new URL(request.url).searchParams.get("mode");
-  const actor = await authenticateDashboardOperatorRequest(request, env);
-  if (!actor) return unauthorized();
+  const authorization = await authenticateDashboardOperatorRequest(request, env);
+  if (authorization.state !== "AUTHORIZED") return dashboardOperatorAuthFailure(authorization);
+  const actor = authorization.actor;
   if (mode !== null) {
     return inputError(new AssistantChatInputError("INVALID_MODE", "Assistant 写入模式无效"));
   }

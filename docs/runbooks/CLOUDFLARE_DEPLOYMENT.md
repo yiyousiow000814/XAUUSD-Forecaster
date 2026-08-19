@@ -19,20 +19,33 @@ new-generation jobs to an unversioned old claimant must not be applied.
 
 ## Shared Dashboard Operator authentication
 
-Configure one Cloudflare Access self-hosted application for these production
-human paths only:
+Cloudflare Zero Trust must be activated before this boundary can be created.
+Select the Zero Trust Free plan if it is appropriate for the account; Cloudflare
+still requires the account owner to complete the plan and payment-details step.
+This account subscription action is separate from a Worker deployment.
 
-- `/admin`
-- `/admin/*`
+Configure Google under **Zero Trust -> Integrations -> Identity providers**.
+The Google OAuth client uses
+`https://<team-name>.cloudflareaccess.com` as its authorized JavaScript origin
+and `https://<team-name>.cloudflareaccess.com/cdn-cgi/access/callback` as its
+authorized redirect URI. Test the IdP connection before attaching it to the
+application.
+
+Configure one Cloudflare Access self-hosted application with these four
+production destinations:
+
+- `/admin*` (Admin pages and the canonical `/admin/api/*` browser APIs)
 - `/assistant` (compatibility redirect)
 - `/retry-jobs` (compatibility redirect)
 - `/status` (compatibility redirect)
-- `/api/admin-status`
-- `/api/assistant-health`
-- `/api/assistant-chat`
-- `/api/assistant-conversations`
-- `/api/news-questions`
-- `/api/operator-retry`
+
+The canonical browser API aliases under `/admin/api/*` re-export the existing
+fail-closed handlers. Do not use a broad `/api/*` Access destination: it would
+capture anonymous research reads and the machine control plane. The legacy
+`/api/admin-status`, `/api/assistant-health`, `/api/assistant-chat`,
+`/api/assistant-conversations`, `/api/news-questions`, and
+`/api/operator-retry` URLs remain server-authorized compatibility handlers,
+but the Admin browser must use the protected aliases.
 
 Allow only the configured owner identity and set `CF_ACCESS_TEAM_DOMAIN`,
 `CF_ACCESS_AUD`, and at least one of
@@ -43,6 +56,12 @@ chosen identity provider, enable it on this same application and optionally use
 instant authentication; the owner allowlist remains mandatory authorization.
 Do not create Assistant-, retry-, or usage-specific Access applications or
 login state.
+
+After saving the application, copy its exact audience tag to `CF_ACCESS_AUD`;
+do not reuse an audience from an older or deleted application. List applications
+and policies with the Cloudflare API before and after the change, and verify
+that all protected entries belong to this one application and owner-only Allow
+policy.
 
 Do not add `/api/assistant-worker/*` or `/api/operator-retry-worker` to the
 Access application. The Windows synchronizer reaches those separate machine
@@ -87,6 +106,29 @@ Verify the deployed Worker, required API routes, and dashboard synchronization
 before describing the deployment as recovered. A running process or accepted
 cloud command is not sufficient; the final scheduler mirror must reflect the
 applied result.
+
+Run the anonymous probes from the repository root:
+
+```powershell
+python scripts/check_public_health.py
+python scripts/check_admin_access_boundary.py
+```
+
+The first command covers only genuinely public surfaces. The second requires
+every human Admin path, including `/admin/auth-complete` and
+`/admin/api/session`, to redirect to Cloudflare Access while public surfaces
+remain anonymously reachable and machine-only endpoints continue to return the Worker's own
+`401`, not an Access login redirect. Then complete one browser login at
+`/admin`, verify `/admin/api/assistant-health` returns its current private schema, and
+navigate through Assistant, Retry Jobs, and AI Model Usage without another
+login. On a public page, confirm that the login action opens a popup, returns
+to the original tab, changes the shared desktop and phone navigation to
+`管理后台`, and enters `/admin`. Also verify popup blocking falls back to a full
+page `/admin` handoff. Test a non-owner Google identity for denial, then visit both the
+team-domain and application-domain `/cdn-cgi/access/logout` endpoints before
+confirming that the next `/admin` navigation requires authentication again.
+The team-domain endpoint clears the global Access session; the application-
+domain endpoint clears the application cookie immediately.
 
 Rollback disables retry mutation without rewriting evidence: disable its UI,
 stop `Dashboard Mirrors` command consumption, and redeploy the prior Worker.

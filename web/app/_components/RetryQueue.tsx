@@ -11,7 +11,7 @@ import {
   type OperatorRetryJob,
   type OperatorRetryRequest,
 } from "../_lib/operator-retry-client";
-import { adminErrorPresentation, adminResponseError } from "../_lib/admin-client";
+import { ADMIN_API_PREFIX, adminErrorPresentation, adminResponseError } from "../_lib/admin-client";
 
 type RetryMode = "KEEP_ORIGINAL" | "IMMEDIATE" | "DELAY_15_MIN" | "DELAY_1_HOUR" | "IDLE_CAPACITY" | "CUSTOM_TIME";
 type RetryJob = OperatorRetryJob & { override_mode: RetryMode | null };
@@ -66,7 +66,7 @@ export default function RetryQueue() {
 
   const load = useCallback(async (clearMessage = true) => {
     try {
-      const response = await fetch("/api/operator-retry", { cache: "no-store" });
+      const response = await fetch(`${ADMIN_API_PREFIX}/operator-retry`, { cache: "no-store" });
       const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
       if (response.status === 401 || response.redirected || (response.ok && contentType.includes("text/html"))) {
         throw adminResponseError(response, "重试任务暂时无法读取。");
@@ -117,7 +117,7 @@ export default function RetryQueue() {
     if (pending.mode === "CUSTOM_TIME" && !requested) { setMessage("指定日期时间无效。"); return; }
     setLoading(true);
     try {
-      const response = await fetch("/api/operator-retry", {
+      const response = await fetch(`${ADMIN_API_PREFIX}/operator-retry`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
         body: JSON.stringify({
@@ -155,7 +155,7 @@ export default function RetryQueue() {
     </header>
     {preview ? <p className="retry-queue-notice">PR Preview 使用合成演示任务，仅用于检查界面与交互，不连接或修改生产调度器。</p> : null}
     {message ? <p className="retry-queue-notice" role="status">{message}</p> : null}
-    {authRequired ? <p className="retry-queue-notice"><a href="/admin">重新登录</a></p> : null}
+    {authRequired ? <p className="retry-queue-notice"><a href="/admin">管理员登录</a></p> : null}
     <div className={`retry-bulk-bar ${selected.size ? "is-active" : ""}`}>
       <label className="retry-checkbox-target"><input type="checkbox" aria-label="选择全部可调整任务" checked={eligible.length > 0 && selected.size === eligible.length} onChange={event => setSelected(event.target.checked ? new Set(eligible.map(job => job.job_id)) : new Set())} /><span>选择全部可调整任务</span></label>
       <strong>{selected.size ? `已选 ${selected.size} 个` : "选择任务后可批量调整"}</strong>

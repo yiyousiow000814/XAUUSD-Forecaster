@@ -120,15 +120,23 @@ contracts; set an unused allowlist to a
 non-matching sentinel value rather than placing owner identity in source. These
 production-only values are intentionally not `secrets.required`: branch Preview
 versions have no model authority and must remain deployable without them.
+Activating a Cloudflare Zero Trust plan and configuring the Google IdP are
+account-level prerequisites; deploying the Worker and setting secrets do not
+create the outer Access boundary.
 
-Protect `/admin`, `/admin/*`, the compatibility routes `/assistant`,
-`/retry-jobs`, and `/status`, plus `/api/admin-status`,
-`/api/assistant-health`, `/api/assistant-chat`,
-`/api/assistant-conversations`, `/api/news-questions`, and
-`/api/operator-retry` with one Access application.
+Protect `/admin*` (including the canonical `/admin/api/*` browser APIs) and the
+compatibility routes `/assistant`, `/retry-jobs`, and `/status` with one Access
+application. The root `/api/*` handler URLs remain fail-closed compatibility
+surfaces; the Admin browser uses only `/admin/api/*` so public research APIs and
+machine endpoints stay outside Access.
 Keep `/api/assistant-worker/*` and `/api/operator-retry-worker` outside that
 application; they are non-browser control planes and accept only `INGEST_TOKEN`
 plus the applicable job lease.
+
+`scripts/check_public_health.py` intentionally checks only anonymous public
+surfaces. Use `scripts/check_admin_access_boundary.py` for the anonymous Access
+redirect and machine-route boundary, then verify private Assistant health in an
+authenticated Admin browser session.
 
 The local Dashboard API and Dashboard Mirrors processes also require the same
 user-level `DASHBOARD_OPERATOR_BRIDGE_TOKEN` with at least 32 characters. It is

@@ -7,6 +7,12 @@ export type DashboardOperatorActor = {
   role: "OWNER";
 };
 
+export type DashboardOperatorAuthResult =
+  | { state: "AUTHORIZED"; actor: DashboardOperatorActor }
+  | { state: "AUTH_REQUIRED" }
+  | { state: "FORBIDDEN" }
+  | { state: "UNAVAILABLE" };
+
 type AccessClaims = JWTPayload & {
   email?: unknown;
   type?: unknown;
@@ -72,10 +78,11 @@ export async function authenticateDashboardOperatorRequest(
   request: Request,
   runtimeEnv: Cloudflare.Env,
   verify: AccessVerifier = defaultVerifier,
-): Promise<DashboardOperatorActor | null> {
-  const config = accessConfig(runtimeEnv);
+): Promise<DashboardOperatorAuthResult> {
   const token = request.headers.get("cf-access-jwt-assertion")?.trim();
-  if (!config || !token || token.length > 8_192) return null;
+  if (!token || token.length > 8_192) return { state: "AUTH_REQUIRED" };
+  const config = accessConfig(runtimeEnv);
+  if (!config) return { state: "UNAVAILABLE" };
 
   try {
     const claims = await verify(token, config);
@@ -83,14 +90,44 @@ export async function authenticateDashboardOperatorRequest(
     const email = typeof claims.email === "string"
       ? claims.email.trim().toLocaleLowerCase("en-US")
       : "";
-    if (claims.type !== "app" || !subject || !email) return null;
+    if (claims.type !== "app" || !subject || !email) return { state: "AUTH_REQUIRED" };
 
     const allowlist = ownerAllowlist(runtimeEnv);
-    if (allowlist.subjects.size === 0 && allowlist.emails.size === 0) return null;
-    if (!allowlist.subjects.has(subject) && !allowlist.emails.has(email)) return null;
+    if (allowlist.subjects.size === 0 && allowlist.emails.size === 0) {
+      return { state: "UNAVAILABLE" };
+    }
+    if (!allowlist.subjects.has(subject) && !allowlist.emails.has(email)) {
+      return { state: "FORBIDDEN" };
+    }
 
-    return { actor_id: `cloudflare-access:${subject}`, role: "OWNER" };
+    return {
+      state: "AUTHORIZED",
+      actor: { actor_id: `cloudflare-access:${subject}`, role: "OWNER" },
+    };
   } catch {
-    return null;
+    return { state: "AUTH_REQUIRED" };
   }
+}
+
+export function dashboardOperatorAuthFailure(
+  result: Exclude<DashboardOperatorAuthResult, { state: "AUTHORIZED" }>,
+) {
+  const status = result.state === "AUTH_REQUIRED" ? 401
+    : result.state === "FORBIDDEN" ? 403 : 503;
+  const payload = result.state === "AUTH_REQUIRED"
+    ? { code: "DASHBOARD_OPERATOR_AUTH_REQUIRED", error: "需要管理员登录。" }
+    : result.state === "FORBIDDEN"
+      ? { code: "DASHBOARD_OPERATOR_FORBIDDEN", error: "当前账号不在管理员允许名单中。" }
+      : { code: "DASHBOARD_OPERATOR_AUTH_UNAVAILABLE", error: "管理员身份验证服务暂不可用。" };
+  return Response.json(payload, {
+    status,
+    headers: { "Cache-Control": "private, no-store, max-age=0" },
+  });
+}
+
+export function dashboardOperatorSessionResponse(result: DashboardOperatorAuthResult) {
+  if (result.state !== "AUTHORIZED") return dashboardOperatorAuthFailure(result);
+  return Response.json({ authenticated: true }, {
+    headers: { "Cache-Control": "private, no-store, max-age=0" },
+  });
 }

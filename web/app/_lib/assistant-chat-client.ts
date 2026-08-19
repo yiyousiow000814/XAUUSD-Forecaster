@@ -9,6 +9,8 @@ import {
   type AssistantContentDocument,
 } from "../api/_shared/assistant-content";
 import { isAssistantModelIdentifier } from "../api/_shared/assistant-routing";
+import { ADMIN_API_PREFIX } from "./admin-client";
+import { reportAdminAuthenticationRequired } from "./admin-auth-session";
 
 export const ASSISTANT_ACTIVE_STATUSES = ["PENDING", "PROCESSING"] as const;
 export const ASSISTANT_TERMINAL_STATUSES = [
@@ -335,6 +337,7 @@ const previewResponse = (response: Response) => (
 const rejectAccessLoginResponse = (response: Response) => {
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
   if (response.redirected || contentType.includes("text/html")) {
+    reportAdminAuthenticationRequired();
     throw new AssistantClientError(
       "ACCESS_LOGIN_REQUIRED", "需要完成 Cloudflare Access 登录", 401,
     );
@@ -353,6 +356,7 @@ async function jsonResponse(response: Response) {
     );
   }
   if (!response.ok) {
+    if (response.status === 401) reportAdminAuthenticationRequired();
     const body = parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? parsed as Record<string, unknown> : {};
     throw new AssistantClientError(
@@ -379,7 +383,7 @@ export async function fetchAssistantConversations(
   fetcher: AssistantFetcher = fetch,
 ) {
   const response = await fetcher(
-    `/api/assistant-conversations?limit=50&archived=${archived}`,
+    `${ADMIN_API_PREFIX}/assistant-conversations?limit=50&archived=${archived}`,
     requestInit(),
   );
   const body = objectValue(await jsonResponse(response), "conversation list");
@@ -401,7 +405,7 @@ export async function fetchAssistantConversation(
     params.set("before_id", cursor.before_id);
   }
   const response = await fetcher(
-    `/api/assistant-conversations?${params.toString()}`,
+    `${ADMIN_API_PREFIX}/assistant-conversations?${params.toString()}`,
     requestInit(),
   );
   const body = objectValue(await jsonResponse(response), "conversation detail");
@@ -426,7 +430,7 @@ export async function submitAssistantTurn(
   input: { message: string; conversation_id: string | null; idempotency_key: string },
   fetcher: AssistantFetcher = fetch,
 ) {
-  const response = await fetcher("/api/assistant-chat", requestInit({
+  const response = await fetcher(`${ADMIN_API_PREFIX}/assistant-chat`, requestInit({
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -444,7 +448,7 @@ export async function cancelAssistantTurn(
   turnId: string,
   fetcher: AssistantFetcher = fetch,
 ) {
-  const response = await fetcher("/api/assistant-chat", requestInit({
+  const response = await fetcher(`${ADMIN_API_PREFIX}/assistant-chat`, requestInit({
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action: "CANCEL", turn_id: turnId }),
@@ -461,7 +465,7 @@ export async function updateAssistantConversation(
   },
   fetcher: AssistantFetcher = fetch,
 ) {
-  const response = await fetcher("/api/assistant-conversations", requestInit({
+  const response = await fetcher(`${ADMIN_API_PREFIX}/assistant-conversations`, requestInit({
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -530,7 +534,7 @@ export async function replayAssistantEvents(
     after: String(after),
     limit: "100",
   });
-  const response = await fetcher(`/api/assistant-chat?${params.toString()}`, {
+  const response = await fetcher(`${ADMIN_API_PREFIX}/assistant-chat?${params.toString()}`, {
     ...requestInit({
       headers: {
         Accept: "text/event-stream",

@@ -12,8 +12,7 @@ DEFAULT_BASE_URL = "https://aurum-signal-room.yiyousiow1234.workers.dev"
 TIMEOUT_SECONDS = 20
 PAGE_MARKERS = {
     "/": "Aurum Signal Room",
-    "/status": "Aurum System Status",
-    "/health": "Aurum System Health",
+    "/health": "系统健康状态",
 }
 
 
@@ -57,32 +56,19 @@ def check_public_surface(base_url: str) -> list[str]:
             )
         evidence.append(f"{path}=200:{len(body)}B")
 
-    for path, schema in (
-        ("/api/status", None),
-        ("/api/assistant-health", "assistant-operational-health.v1"),
-    ):
+    for path in ("/api/status",):
         status, body, _ = read(base + path)
         if status != 200:
-            code = (
-                "OPS_PUBLIC_ASSISTANT_HEALTH_UNAVAILABLE"
-                if path.endswith("assistant-health")
-                else "OPS_PUBLIC_ENDPOINT_UNAVAILABLE"
-            )
-            raise ProbeFailure(code, f"{path}: HTTP {status}")
+            raise ProbeFailure("OPS_PUBLIC_ENDPOINT_UNAVAILABLE", f"{path}: HTTP {status}")
         try:
             payload = json.loads(body)
         except (TypeError, ValueError) as error:
             raise ProbeFailure(
                 "OPS_PUBLIC_RESPONSE_INVALID", f"{path}: invalid JSON",
             ) from error
-        if not isinstance(payload, dict) or (schema and payload.get("schema_version") != schema):
+        if not isinstance(payload, dict):
             raise ProbeFailure(
                 "OPS_PUBLIC_RESPONSE_INVALID", f"{path}: response contract mismatch",
-            )
-        if path.endswith("assistant-health") and payload.get("current") is not True:
-            raise ProbeFailure(
-                "OPS_PUBLIC_ASSISTANT_HEALTH_UNAVAILABLE",
-                f"{path}: production health is not current",
             )
         evidence.append(f"{path}=200:{len(body)}B")
     return evidence

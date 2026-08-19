@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import DashboardLink from "../_components/DashboardLink";
-import { adminErrorPresentation, adminResponseError, type AdminErrorPresentation } from "../_lib/admin-client";
+import { ADMIN_API_PREFIX, adminErrorPresentation, adminResponseError, type AdminErrorPresentation } from "../_lib/admin-client";
 import { ASSISTANT_ACCEPTING_TURNS } from "../_lib/assistant-availability";
 import { assistantHealthPresentation, type AssistantHealthPayload } from "../_lib/assistant-health-presentation";
 import {
@@ -28,7 +28,7 @@ export default function AdminOverviewView() {
 
   const loadRetrySummary = useCallback(async () => {
     try {
-      const response = await fetch("/api/operator-retry", { cache: "no-store" });
+      const response = await fetch(`${ADMIN_API_PREFIX}/operator-retry`, { cache: "no-store" });
       const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
       if (!response.ok || response.redirected || contentType.includes("text/html")) {
         throw adminResponseError(response, "重试任务状态暂不可用");
@@ -51,7 +51,7 @@ export default function AdminOverviewView() {
 
   const loadAssistantHealth = useCallback(async () => {
     try {
-      const response = await fetch("/api/assistant-health", { cache: "no-store" });
+      const response = await fetch(`${ADMIN_API_PREFIX}/assistant-health`, { cache: "no-store" });
       const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
       if (!response.ok || response.redirected || contentType.includes("text/html")) {
         throw adminResponseError(response, "Assistant 运行状态暂不可用");
@@ -82,7 +82,7 @@ export default function AdminOverviewView() {
       <p>一个登录会话内查看私有工具与需要处理的运维状态。</p>
     </header>
     {preview ? <p className="admin-preview-notice">PR Preview 使用合成只读 Admin 数据，不代表 Cloudflare Access 已完成登录，也不具有生产操作权限。</p> : null}
-    {authRequired ? <p className="admin-preview-notice is-auth">管理员会话已过期，请重新登录。 <a href="/admin">重新登录</a></p> : null}
+    {authRequired ? <p className="admin-preview-notice is-auth">需要管理员登录。 <a href="/admin">管理员登录</a></p> : null}
     <section className="admin-overview-grid" aria-label="管理概览">
       <DashboardLink className="admin-overview-card" href="/admin/assistant">
         <span>ASSISTANT</span><h2>Assistant</h2>

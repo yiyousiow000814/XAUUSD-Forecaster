@@ -89,7 +89,8 @@ conversation and does not verify the model, retrieval, or persistence path.
 
 The Admin Console may render as an explicitly labeled synthetic, read-only
 Preview workspace without claiming that Cloudflare Access authentication
-succeeded. `/api/admin-status` uses only the branch-owned fixture in Preview;
+succeeded. The `/admin/api/*` aliases re-export the same Preview-safe handlers
+and do not create a second data path. `/api/admin-status` uses only the branch-owned fixture in Preview;
 it does not read production D1 quota evidence. Public `/api/status` omits the
 private provider quota and routing fields in every deployment mode.
 

@@ -38,6 +38,13 @@ application JWT and then applies the configured owner allowlist. Only `OWNER`
 may mutate scheduler state. Browser state, visible controls, and an email header
 are never authorization.
 
+An absent or unverifiable Access identity returns `401`. A verified human
+identity outside the owner allowlist returns `403`. Missing server-side Access
+or owner configuration returns `503`; clients must not describe that service
+failure as an authentication failure. Because the application has no
+authoritative evidence that a `401` represents an expired prior session, its
+neutral presentation is “administrator login required,” not “session expired.”
+
 ### Private Assistant
 
 Every endpoint that can create an Assistant message, enqueue Assistant work,
@@ -87,20 +94,46 @@ owner allowlist. Missing or malformed configuration fails closed;
 it does not fall back to an anonymous queue, a browser credential, or the
 machine ingest token.
 
-The shared Access application protects `/admin`, `/admin/*`,
-the compatibility entries `/assistant`, `/retry-jobs`, and `/status`,
-`/api/admin-status`, `/api/assistant-health`,
-`/api/assistant-chat`, `/api/assistant-conversations`, and
-`/api/news-questions`. Those application paths, plus `/api/operator-retry`, are
-the human boundary. `/api/assistant-worker/*` is deliberately outside
+The shared Access application protects the wildcard `/admin*`, which includes
+the Admin pages and canonical browser API aliases under `/admin/api/*`, plus
+the compatibility entries `/assistant`, `/retry-jobs`, and `/status`. The
+canonical aliases re-export the same handlers as `/api/admin-status`,
+`/api/assistant-health`, `/api/assistant-chat`,
+`/api/assistant-conversations`, `/api/news-questions`, and
+`/api/operator-retry`; those legacy handler URLs remain fail-closed but are not
+browser entrypoints. This common Admin prefix keeps public `/api/*` reads and
+machine routes outside the Access application while staying within the
+platform's five-destination application limit. `/api/assistant-worker/*` is deliberately outside
 the Access application because it has no browser identity and is authorized by
 the independent machine policy below.
 
 The public login trigger is only an intent and explanation layer. It cannot
-establish identity or authorization. Its explicit login action performs a
-normal navigation to `/admin` so Cloudflare Access owns the authentication
-handoff. Client state, hidden navigation, and route selection never bypass the
-server-side verifier.
+establish identity or authorization. The shell probes `/admin/api/session`,
+which reuses the Dashboard Operator verifier and returns only
+`{ "authenticated": true }` after authorization. A `401` or Access login HTML
+means anonymous, `403` means forbidden, and a transient `5xx` or network
+failure does not erase a previously verified session state.
+
+The explicit login action opens the Access-protected
+`/admin/auth-complete` page in a popup. Its same-origin `postMessage` is only a
+signal to repeat the authoritative session probe; it never carries identity,
+credentials, or authorization. The popup is also matched by window identity.
+Only a successful probe closes the dialog, changes navigation to
+`管理后台`, and enters `/admin`. The shell also repeats the bounded probe when
+the page returns from a hidden or back-forward-cached state; it does not poll
+continuously. Popup blocking falls back to a normal `/admin`
+navigation. Closing or spoofing the popup cannot create an authenticated
+state. The `/admin*` wildcard already protects both new paths, so this flow
+does not add another Access application or destination.
+
+Confirmed session expiry clears private Admin client snapshots and returns the
+navigation to its anonymous state. Client state, messages, hidden navigation,
+and route selection never bypass the server-side verifier.
+
+Public health checks cover only anonymous public pages and `/api/status`.
+Private Admin health is verified after Access login through
+`/admin/api/assistant-health`; it is never weakened or anonymously probed to satisfy
+a public smoke check.
 
 ### Local operator bridge
 

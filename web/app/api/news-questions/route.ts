@@ -1,6 +1,9 @@
 import { env } from "cloudflare:workers";
 import { NextResponse } from "next/server";
-import { authenticateDashboardOperatorRequest } from "../_shared/dashboard-operator-auth";
+import {
+  authenticateDashboardOperatorRequest,
+  dashboardOperatorAuthFailure,
+} from "../_shared/dashboard-operator-auth";
 import { readBoundedBody } from "../_shared/dashboard-snapshot";
 import {
   createNewsQuestion,
@@ -19,7 +22,6 @@ const noStoreJson = (payload: unknown, status = 200) => NextResponse.json(payloa
   headers: { "Cache-Control": "private, no-store, max-age=0" },
 });
 
-const unauthorized = () => noStoreJson({ error: "Assistant 身份验证失败" }, 401);
 const unavailable = () => noStoreJson({ error: "新闻问答暂不可用" }, 503);
 
 const boundedBody = async (request: Request) => {
@@ -50,8 +52,9 @@ export async function GET(request: Request) {
     return previewJson({ items: [], preview: true }, 200, "synthetic-empty-assistant");
   }
 
-  const actor = await authenticateDashboardOperatorRequest(request, env);
-  if (!actor) return unauthorized();
+  const authorization = await authenticateDashboardOperatorRequest(request, env);
+  if (authorization.state !== "AUTHORIZED") return dashboardOperatorAuthFailure(authorization);
+  const actor = authorization.actor;
   if (params.has("mode")) {
     return inputError(new NewsQuestionInputError("INVALID_MODE", "新闻问答查询模式无效"));
   }
@@ -81,8 +84,9 @@ export async function POST(request: Request) {
   const previewRejection = rejectPreviewWrite();
   if (previewRejection) return previewRejection;
   const mode = new URL(request.url).searchParams.get("mode");
-  const actor = await authenticateDashboardOperatorRequest(request, env);
-  if (!actor) return unauthorized();
+  const authorization = await authenticateDashboardOperatorRequest(request, env);
+  if (authorization.state !== "AUTHORIZED") return dashboardOperatorAuthFailure(authorization);
+  const actor = authorization.actor;
   if (mode !== null) {
     return inputError(new NewsQuestionInputError("INVALID_MODE", "新闻问答写入模式无效"));
   }

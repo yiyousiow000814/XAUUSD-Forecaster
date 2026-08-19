@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
 import CountValue from "../_components/CountValue";
 import RuntimeUpdateFailureBanner, { type RuntimeUpdateFailure } from "../_components/RuntimeUpdateFailureBanner";
-import { adminErrorPresentation, type AdminErrorPresentation } from "../_lib/admin-client";
+import { ADMIN_API_PREFIX, adminErrorPresentation, type AdminErrorPresentation } from "../_lib/admin-client";
 import { clearDashboardResource, loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { statusFieldPhase } from "../_lib/current-data-provenance";
@@ -122,8 +122,10 @@ function QuotaPanel({ title, eyebrow, quota, nowMs }: { title: string; eyebrow: 
   </section>;
 }
 
+const statusUrl = `${ADMIN_API_PREFIX}/admin-status`;
+
 export default function StatusView({ initialPayload }: { initialPayload?: StatusPayload }) {
-  const cachedStatus = initialPayload ?? readDashboardResource<StatusPayload>("/api/admin-status");
+  const cachedStatus = initialPayload ?? readDashboardResource<StatusPayload>(statusUrl);
   const [payload, setPayload] = useState<StatusPayload | null>(() => cachedStatus);
   const [error, setError] = useState<AdminErrorPresentation | null>(null);
   const [syncingCurrent, setSyncingCurrent] = useState(Boolean(cachedStatus?.preview_status_summary));
@@ -132,12 +134,12 @@ export default function StatusView({ initialPayload }: { initialPayload?: Status
   const refresh = useCallback(async (force = false, showSyncState = false) => {
     if (showSyncState) setSyncingCurrent(true);
     try {
-      setPayload(await loadDashboardResource<StatusPayload>("/api/admin-status", { force }));
+      setPayload(await loadDashboardResource<StatusPayload>(statusUrl, { force }));
       setError(null);
     } catch (reason) {
       const presentation = adminErrorPresentation(reason, "AI 模型用量状态暂不可用");
       if (presentation.kind === "AUTH_REQUIRED") {
-        clearDashboardResource("/api/admin-status");
+        clearDashboardResource(statusUrl);
         setPayload(null);
       }
       setError(presentation);
@@ -187,7 +189,7 @@ export default function StatusView({ initialPayload }: { initialPayload?: Status
         <div><p className="eyebrow">LOCAL QUOTA LEDGER / PACIFIC DAY</p><h1>AI 模型使用状态</h1></div>
       </section>
 
-      {error ? <div className="error-banner">{error.message}{error.kind === "AUTH_REQUIRED" ? <> <a href="/admin">重新登录</a></> : null}</div> : null}
+      {error ? <div className="error-banner">{error.message}{error.kind === "AUTH_REQUIRED" ? <> <a href="/admin">管理员登录</a></> : null}</div> : null}
       <RuntimeUpdateFailureBanner failure={payload?.system.runtime_update_failure} />
       <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
 
