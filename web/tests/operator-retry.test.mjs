@@ -17,6 +17,7 @@ import {
   latestOperatorRetryRequests,
   operatorRetryCommandPresentation,
   shouldPollOperatorRetry,
+  shouldPollOperatorRetryRequests,
 } from "../app/_lib/operator-retry-client.ts";
 
 test("operator retry inputs use explicit durable modes and bounded identity", () => {
@@ -155,4 +156,53 @@ test("operator command presentation separates cloud acceptance, scheduler applic
     { ...base, request_id: "new", status: "APPLIED" },
     { ...base, request_id: "old", status: "PENDING" },
   ]).get(base.job_id).request_id, "new");
+});
+
+test("operator retry polling considers every recent request and remains bounded", () => {
+  const now = Date.parse("2026-08-19T03:03:00.000Z");
+  const request = (request_id, job_id, status, requested_at, completed_at = null) => ({
+    request_id, job_id, status, requested_at, completed_at,
+    mode: "IMMEDIATE", result_json: null,
+  });
+  const newestApplied = request(
+    "new-applied", "b".repeat(64), "APPLIED",
+    "2026-08-19T03:02:30.000Z", "2026-08-19T03:02:30.000Z",
+  );
+
+  assert.equal(shouldPollOperatorRetryRequests([
+    newestApplied,
+    request("older-pending", "a".repeat(64), "PENDING", "2026-08-19T03:01:00.000Z"),
+  ], now), true, "an older recent PENDING command still needs Windows application");
+  assert.equal(shouldPollOperatorRetryRequests([
+    newestApplied,
+    request("older-applying", "a".repeat(64), "APPLYING", "2026-08-19T03:01:00.000Z"),
+  ], now), true, "an older recent APPLYING command still needs Windows application");
+  assert.equal(shouldPollOperatorRetryRequests([
+    request("applied", "a".repeat(64), "APPLIED", "2026-08-19T03:00:00.000Z", "2026-08-19T03:00:01.000Z"),
+    request("conflict", "b".repeat(64), "CONFLICT", "2026-08-19T03:00:00.000Z", "2026-08-19T03:00:02.000Z"),
+    request("rejected", "c".repeat(64), "REJECTED", "2026-08-19T03:00:00.000Z", "2026-08-19T03:00:03.000Z"),
+  ], now), false, "terminal commands stop after the short final-refresh window");
+  assert.equal(shouldPollOperatorRetryRequests([
+    request("stale-pending", "a".repeat(64), "PENDING", "2026-08-19T02:59:59.000Z"),
+  ], now), false, "stale non-terminal evidence cannot create permanent polling");
+});
+
+test("mixed jobs retain their own latest command presentation", () => {
+  const request = (request_id, job_id, status, requested_at) => ({
+    request_id, job_id, status, requested_at, completed_at: null,
+    mode: "IMMEDIATE", result_json: null,
+  });
+  const jobA = "a".repeat(64);
+  const jobB = "b".repeat(64);
+  const latest = latestOperatorRetryRequests([
+    request("b-new", jobB, "APPLIED", "2026-08-19T03:03:00.000Z"),
+    request("a-new", jobA, "PENDING", "2026-08-19T03:02:00.000Z"),
+    request("b-old", jobB, "APPLYING", "2026-08-19T03:01:00.000Z"),
+    request("a-old", jobA, "REJECTED", "2026-08-19T03:00:00.000Z"),
+  ]);
+
+  assert.equal(latest.get(jobA).request_id, "a-new");
+  assert.match(operatorRetryCommandPresentation(latest.get(jobA)).label, /等待 Windows/);
+  assert.equal(latest.get(jobB).request_id, "b-new");
+  assert.match(operatorRetryCommandPresentation(latest.get(jobB)).label, /已应用到 Windows/);
 });

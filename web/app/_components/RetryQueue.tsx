@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   latestOperatorRetryRequests,
   operatorRetryCommandPresentation,
-  shouldPollOperatorRetry,
+  shouldPollOperatorRetryRequests,
   type OperatorRetryRequest,
 } from "../_lib/operator-retry-client";
 
@@ -113,12 +113,11 @@ export default function RetryQueue() {
   }, [load]);
 
   const latestRequests = useMemo(() => latestOperatorRetryRequests(requests), [requests]);
-  const newestRequest = requests[0];
   useEffect(() => {
-    if (preview || !shouldPollOperatorRetry(newestRequest)) return;
+    if (preview || !shouldPollOperatorRetryRequests(requests)) return;
     const timer = window.setTimeout(() => void load(false), 1_500);
     return () => window.clearTimeout(timer);
-  }, [load, newestRequest, preview]);
+  }, [load, preview, requests]);
 
   const eligible = useMemo(
     () => jobs.filter(job => job.state === "QUEUED" || job.state === "BACKING_OFF"),

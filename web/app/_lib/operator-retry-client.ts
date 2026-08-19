@@ -62,3 +62,8 @@ export const shouldPollOperatorRetry = (
     && now - Date.parse(request.completed_at) <= 5_000,
   );
 };
+
+export const shouldPollOperatorRetryRequests = (
+  requests: OperatorRetryRequest[],
+  now = Date.now(),
+) => requests.some(request => shouldPollOperatorRetry(request, now));
