@@ -255,7 +255,7 @@ def visible_latin_runs(value: object) -> tuple[tuple[int, int, str], ...]:
                 or character.isdigit()
                 or unicodedata.category(character) == "Mn"
                 or character in _VISIBLE_LATIN_INTERNAL_PUNCTUATION
-                or character in " \t"
+                or character == " "
             ):
                 cursor += 1
                 continue
@@ -278,7 +278,11 @@ def grounded_display_latin_spans(
     """Require every visible Latin run to be source-grounded or controlled."""
     text = str(value or "")
     if any(
-        unicodedata.category(character) in {"Cc", "Cf", "Cs"}
+        (
+            unicodedata.category(character) == "Cc"
+            and character not in "\n\r\t"
+        )
+        or unicodedata.category(character) in {"Cf", "Cs"}
         for character in text
     ):
         raise ValueError("MALFORMED_DISPLAY_CONTROL: display contains control text")
@@ -322,12 +326,17 @@ def require_chinese_primary_display(value: object, field: str) -> None:
     han_characters = sum(_is_han(character) for character in text)
     if not han_characters:
         raise ValueError(f"NO_CHINESE_PROSE: Gemini {field} has no Chinese prose")
-    latin_characters = sum(
-        _is_latin_letter(character) or character.isdigit()
-        for character in text
-    )
-    latin_tokens = len(re.findall(r"[A-Za-z0-9]+", text))
-    latin_units = max(latin_tokens, math.ceil(latin_characters / 4))
+    latin_characters = sum(_is_latin_letter(character) for character in text)
+    latin_words = 0
+    inside_latin_word = False
+    for character in text:
+        if _is_latin_letter(character):
+            if not inside_latin_word:
+                latin_words += 1
+            inside_latin_word = True
+        elif unicodedata.category(character) != "Mn":
+            inside_latin_word = False
+    latin_units = max(latin_words, math.ceil(latin_characters / 4))
     if han_characters / (han_characters + latin_units) < 0.50:
         raise ValueError(
             f"ENGLISH_PROSE_DOMINANT: Gemini {field} is not Chinese-primary"

@@ -176,6 +176,11 @@ source regions, unsupported scripts, and ungrounded runs fail closed.
 
 Second, the validator evaluates the complete final visible field, without
 masking grounded Latin text, and requires the field to remain Chinese-primary.
+Language balance compares Han content with Latin-letter content only; digits
+have zero English-language weight and remain governed by the independent
+source-number integrity contract. Ordinary line breaks and tabs are layout
+boundaries, while invisible formatting, bidirectional, and surrogate controls
+fail closed.
 Quotation marks, brackets, title casing, source identity, and model-declared
 roles never exempt English prose from that field-level balance. This rule is
 applied consistently during initial validation, invalid-field detection,

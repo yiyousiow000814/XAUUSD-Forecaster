@@ -2421,6 +2421,67 @@ def test_v17_source_grounding_does_not_bypass_field_language_balance() -> None:
         )
 
 
+def test_v17_latin_identifier_list_can_still_be_english_dominant() -> None:
+    english = "CPI PPI FOMC OpenAI GPT-5 Market Outlook"
+    with pytest.raises(ValueError, match="ENGLISH_PROSE_DOMINANT"):
+        annotation_module._validate_chinese_result(
+            {"headline_zh": "来源说明", "summary_zh": f"{english}，市场关注。"},
+            prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+            headline=english, body="",
+        )
+
+
+@pytest.mark.parametrize(
+    "value,source",
+    (
+        (
+            "美国 CPI 3.2%，PPI 2.1%，失业率 4.3%，数据整体高于市场预期。",
+            "CPI 3.2% and PPI 2.1% were reported with unemployment at 4.3%.",
+        ),
+        (
+            "美国新增 175,000 个就业岗位，失业率升至 4.1%，工资同比增长 3.9%。",
+            "Payrolls rose by 175,000, unemployment reached 4.1%, and wages grew 3.9%.",
+        ),
+        (
+            "美联储将利率维持在 5.25%-5.50%，市场随后重新评估降息预期。",
+            "The target range remained 5.25%-5.50% after the decision.",
+        ),
+        (
+            "黄金升至 2,450 美元，较前一交易日上涨 1.8%，市场继续关注美元走势。",
+            "Gold reached 2,450 dollars after rising 1.8%.",
+        ),
+    ),
+)
+def test_v17_number_dense_chinese_has_zero_digit_language_weight(
+    value, source,
+) -> None:
+    result = {"headline_zh": "来源说明", "summary_zh": value}
+    annotation_module._recover_display_fields(result, "Source headline", source)
+    annotation_module._validate_chinese_result(
+        result,
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+        headline="Source headline", body=source,
+    )
+
+
+def test_v17_pure_digits_contribute_zero_english_language_weight() -> None:
+    annotation_module.require_chinese_primary_display(
+        "数据：1 2 3 4 5 6 7 8 9 10 2026 175,000 5.25%-5.50%",
+        "summary_zh",
+    )
+
+
+def test_v17_mixed_identifiers_count_only_latin_letters() -> None:
+    value = "报道讨论 GPT-5、iPhone 17 与 S&P 500，并解释相关市场影响。"
+    source = "GPT-5, iPhone 17, and S&P 500 were discussed in the report."
+
+    annotation_module._validate_chinese_result(
+        {"headline_zh": "来源说明", "summary_zh": value},
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+        headline="Source headline", body=source,
+    )
+
+
 def test_v17_controlled_xauusd_exemption_is_closed() -> None:
     value = "完整报道说明相关信息可能继续影响 XAUUSD 的市场表现。"
     spans = annotation_module._allowed_display_latin_spans(
@@ -2454,14 +2515,47 @@ def test_v17_unicode_lookalike_fails_even_when_present_in_source() -> None:
         )
 
 
-def test_v17_rejects_invisible_format_control_inside_latin_run() -> None:
-    spoof = "Open\u200bAI"
+@pytest.mark.parametrize("spoof", ("Open\u200bAI", "Open\u202eAI", "Open\x07AI"))
+def test_v17_rejects_invisible_or_bidi_control_inside_latin_run(spoof) -> None:
     with pytest.raises(ValueError, match="MALFORMED_DISPLAY_CONTROL"):
         annotation_module._validate_chinese_result(
             {"headline_zh": "来源说明", "summary_zh": f"完整报道讨论 {spoof} 的影响。"},
             prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
             headline="Source headline", body=f"{spoof} appears in the source.",
         )
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "报道提到 OpenAI。\n市场继续关注后续发展。",
+        "报道提到 OpenAI。\r\n市场继续关注后续发展。",
+        "报道提到\tOpenAI，并解释相关影响。",
+    ),
+)
+def test_v17_allows_ordinary_layout_whitespace(value) -> None:
+    result = {"headline_zh": "来源说明", "summary_zh": value}
+    spans = annotation_module._allowed_display_latin_spans(
+        result, value, "Source headline", "OpenAI issued an update.",
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+    )
+
+    assert [span.text for span in spans] == ["OpenAI"]
+    annotation_module._validate_chinese_result(
+        result,
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+        headline="Source headline", body="OpenAI issued an update.",
+    )
+
+
+def test_v17_newline_terminates_independent_latin_runs() -> None:
+    value = "报道提到 OpenAI\nFOMC，并解释相关影响。"
+    spans = annotation_module._allowed_display_latin_spans(
+        {}, value, "Source headline", "OpenAI and FOMC issued updates.",
+        prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+    )
+
+    assert [span.text for span in spans] == ["OpenAI", "FOMC"]
 
 @pytest.mark.parametrize(
     "value,source,declared",

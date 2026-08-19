@@ -22,7 +22,10 @@ Latin-and-digit run MUST exactly match the immutable
 `headline + "\n" + body` source with safe Latin/digit boundaries, except for
 the controlled system token `XAUUSD`. Grounded Latin remains visible when the
 field-level Chinese-primary balance is measured; source grounding never exempts
-English prose from that check. Display-language repair MUST NOT
+English prose from that check. Digits carry no English-language weight because
+source-number integrity validates them independently. Newlines, carriage
+returns, and tabs are layout boundaries; other control or formatting characters
+fail closed. Display-language repair MUST NOT
 rewrite an otherwise valid semantic category, direction, impact, evidence, or
 confidence measurement. If readable Chinese-primary display text cannot be
 produced, the annotation MUST be withheld from model permission and retried; it
