@@ -715,8 +715,9 @@ body.modal-open { overflow:hidden; }
 .component-current-problem b { width:max-content; border-left:4px solid var(--gold); padding-left:8px; font-size:13px; }
 .component-current-problem time { font-size:13px; font-weight:750; }
 .component-technical-details { margin-top:auto; border-top:1px solid rgba(17,17,15,.24); }
-.component-status article.is-healthy>.component-technical-details,.source-health article.is-healthy>.source-technical-details { margin:0; border:0; }
-.component-status article.is-healthy>.component-technical-details[open],.source-health article.is-healthy>.source-technical-details[open] { grid-column:1/-1; border-top:1px solid rgba(17,17,15,.2); border-left:0; }
+.component-status article.is-healthy>.component-technical-details,.source-health article.is-healthy>.source-technical-details { display:contents; margin:0; border:0; }
+.component-status article.is-healthy>.component-technical-details>summary,.source-health article.is-healthy>.source-technical-details>summary { grid-column:2; grid-row:1; justify-content:flex-end; }
+.component-status article.is-healthy>.component-technical-details>:not(summary),.source-health article.is-healthy>.source-technical-details>:not(summary) { grid-column:1/-1; }
 .component-technical-details>summary,.source-technical-details>summary { display:flex; min-height:44px; align-items:center; padding:0 20px; cursor:pointer; font-size:12px; font-weight:900; }
 .component-status article.is-healthy summary,.source-health article.is-healthy summary { min-height:48px; padding:0 12px; color:var(--muted); font-family:var(--font-sans); font-weight:650; }
 .component-technical-details>dl { display:grid; gap:10px; margin:0; border-top:1px solid rgba(17,17,15,.2); padding:14px 20px 18px; }
