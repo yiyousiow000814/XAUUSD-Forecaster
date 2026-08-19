@@ -111,6 +111,22 @@ project-shared minute budget.
 
 ## Fair queueing
 
+Workload ownership is end-to-end provenance. Derived AI work inherits the
+authoritative operational class of the parent annotation even when the task or
+model changes. `ACTIVE_IMPACT` and `TITLE_TRANSLATION` resolve their parent from
+the classified current `ACTIVE_ANNOTATION` job; an unresolved parent cannot be
+enqueued or claimed as LIVE. Gemini Embedding receives the explicit workload
+class of the impact operation that required retrieval. Only a declared demand
+transition may promote historical work to operational work. Prompt currency,
+semantic importance, queue age, task changes, and model changes never promote
+workload ownership.
+
+Quota authority and workload ownership are independent. The model actually
+sent selects `gemini_quota`, `gemini_31_quota`, `gemma_quota`, or
+`gemini_embedding_quota`; inherited provenance selects LIVE or forecast-safe
+contract-backfill admission on that surface. Backfill semantic importance does
+not grant LIVE priority or reserve access.
+
 Current-contract annotation work has two operational ownership lanes. `LIVE`
 contains eligible evidence first received after the contract activation point;
 `CONTRACT_BACKFILL` contains earlier evidence that still needs the same current
@@ -186,6 +202,15 @@ cycle. Its cursor and page updates commit together. Unclassified annotation jobs
 cannot be claimed, while newly created jobs are classified at insertion. A
 restart resumes after the last committed cursor without changing attempts or
 replaying provider work; completion is durable and prevents later full scans.
+
+Existing history-sensitive downstream jobs use a separate durable
+`(created_at, job_id)` keyset migration of at most 100 rows per scheduler cycle.
+It changes only lane, derived priority, and provenance metadata. Job identity,
+attempts, availability, retry state, failure evidence, and completed outputs
+remain unchanged, and migration never invokes a provider. A leased row is left
+untouched, remains unresolved for claiming and health, and is revisited after
+the lease finishes or expires. This prevents duplicate work without corrupting
+an active lease.
 
 Preemptible accounts remain restricted to `IMMEDIATE` and `FAST` jobs. Routine
 accounts may serve every priority and provide overflow capacity for urgent

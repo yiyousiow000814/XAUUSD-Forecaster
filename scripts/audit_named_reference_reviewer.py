@@ -76,6 +76,7 @@ def run_benchmark(
                     ]
                     accountant = SchedulerModelAccountant(
                         connection, credential, urgent=False,
+                        work_lane="LIVE",
                     )
                     expected_ids = tuple(case.case_id for case in batch)
                     payload = named_reference_review_payload(batch)

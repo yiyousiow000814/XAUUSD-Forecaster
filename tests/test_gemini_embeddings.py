@@ -4,6 +4,7 @@ import io
 import json
 import urllib.error
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pytest
@@ -17,10 +18,89 @@ from xauusd_forecaster.gemini_embeddings import (
 )
 from xauusd_forecaster.news_scheduler import (
     ApiCredential,
+    CONTRACT_BACKFILL_WORKLOAD,
+    LIVE_OPERATIONAL_WORKLOAD,
     ROUTINE_POOL,
     quota_day,
     reserve_account_request,
 )
+
+
+def _client(connection) -> GeminiEmbeddingClient:
+    return GeminiEmbeddingClient(
+        connection, workload_class=LIVE_OPERATIONAL_WORKLOAD,
+    )
+
+
+def _seed_embedding_backfill_forecast(connection) -> None:
+    now = datetime.now(UTC)
+    pacific_now = now.astimezone(ZoneInfo("America/Los_Angeles"))
+    pacific_day = pacific_now.date()
+    for offset in range(1, 8):
+        connection.execute(
+            """INSERT INTO news_ai_quota_day_workload_v1
+               VALUES (?,?,?,?,?,?,?)""",
+            (
+                (pacific_day - timedelta(days=offset)).isoformat(),
+                pacific_now.hour,
+                "account", "gemini_embedding_quota", "LIVE_OPERATIONAL",
+                900, now.isoformat(),
+            ),
+        )
+    connection.commit()
+
+
+def test_embedding_inherits_backfill_admission_without_reserving_or_calling(
+    tmp_path, monkeypatch,
+) -> None:
+    from xauusd_forecaster import gemini_embeddings
+
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    credential = ApiCredential("account", ROUTINE_POOL, "key", "fingerprint")
+    monkeypatch.setattr(
+        gemini_embeddings, "configured_api_credentials", lambda: (credential,),
+    )
+    _seed_embedding_backfill_forecast(ledger.connection)
+    provider_calls = 0
+    client = GeminiEmbeddingClient(
+        ledger.connection, workload_class=CONTRACT_BACKFILL_WORKLOAD,
+    )
+
+    def request(*_args, **_kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        pytest.fail("backfill without forecast-safe surplus must not call provider")
+
+    monkeypatch.setattr(client, "_request", request)
+    with pytest.raises(GeminiEmbeddingCapacityDeferred) as caught:
+        client.embed(["historical event"], client.profile())
+
+    assert caught.value.failure_code == "BACKFILL_BUDGET_DEFERRED"
+    assert provider_calls == 0
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_ai_account_request_usage_v1"
+    ).fetchone()[0] == 0
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_ai_account_daily_usage_v1"
+    ).fetchone()[0] == 0
+
+    live = _client(ledger.connection)
+    monkeypatch.setattr(
+        live, "_request",
+        lambda _key, texts, _task: np.tile(
+            np.eye(1, GEMINI_EMBEDDING_DIMENSIONS, dtype=np.float32),
+            (len(texts), 1),
+        ),
+    )
+    live.embed(["current event"], live.profile())
+    usage = ledger.connection.execute(
+        """SELECT quota_authority,workload_class,request_count
+           FROM news_ai_quota_day_workload_v1
+           WHERE quota_day=?""",
+        (quota_day(datetime.now(UTC)),),
+    ).fetchone()
+    assert tuple(usage) == ("gemini_embedding_quota", "LIVE_OPERATIONAL", 1)
+    ledger.close()
 
 
 def test_embedding_batch_reserves_each_content_item_and_uses_asymmetric_tasks(
@@ -43,7 +123,7 @@ def test_embedding_batch_reserves_each_content_item_and_uses_asymmetric_tasks(
         result[:, 0] = 1.0
         return result
 
-    client = GeminiEmbeddingClient(ledger.connection)
+    client = _client(ledger.connection)
     monkeypatch.setattr(client, "_request", request)
     profile = client.profile()
 
@@ -95,7 +175,7 @@ def test_embedding_batch_moves_to_an_independent_account_when_rpm_is_full(
         request_count=99,
     )
     used_keys: list[str] = []
-    client = GeminiEmbeddingClient(ledger.connection)
+    client = _client(ledger.connection)
 
     def request(key: str, texts: list[str], _task: str) -> np.ndarray:
         used_keys.append(key)
@@ -138,7 +218,7 @@ def test_embedding_http_429_keeps_bounded_safe_quota_provenance(
         "https://provider.invalid", 429, "Too Many Requests",
         {"Retry-After": "300"}, io.BytesIO(body),
     )
-    client = GeminiEmbeddingClient(ledger.connection)
+    client = _client(ledger.connection)
     monkeypatch.setattr(
         client, "_request",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
@@ -193,8 +273,8 @@ def test_embedding_local_admission_has_distinct_failure_code(
     )
 
     with pytest.raises(GeminiEmbeddingCapacityDeferred) as caught:
-        GeminiEmbeddingClient(ledger.connection).embed(
-            ["document"], GeminiEmbeddingClient(ledger.connection).profile(),
+        _client(ledger.connection).embed(
+            ["document"], _client(ledger.connection).profile(),
         )
 
     assert caught.value.failure_code == "NEWS_EMBEDDING_CAPACITY_DEFERRED"
@@ -240,7 +320,7 @@ def test_five_account_daily_cap_blocks_transport_and_next_day_resets(
         provider_calls += 1
         pytest.fail("daily safety cap must prevent embedding transport")
 
-    client = GeminiEmbeddingClient(ledger.connection)
+    client = _client(ledger.connection)
     monkeypatch.setattr(client, "_request", request)
     with pytest.raises(GeminiEmbeddingCapacityDeferred):
         client.embed(["document"], client.profile())
@@ -294,7 +374,7 @@ def test_first_provider_429_stops_unproven_account_failover(
     monkeypatch.setattr(
         gemini_embeddings, "configured_api_credentials", lambda: credentials,
     )
-    client = GeminiEmbeddingClient(ledger.connection)
+    client = _client(ledger.connection)
 
     def throttled(*_args, **_kwargs):
         raise urllib.error.HTTPError(
@@ -341,7 +421,7 @@ def test_embedding_provider_failure_family_keeps_distinct_provenance(
     monkeypatch.setattr(
         gemini_embeddings, "configured_api_credentials", lambda: (credential,),
     )
-    client = GeminiEmbeddingClient(ledger.connection)
+    client = _client(ledger.connection)
     monkeypatch.setattr(
         client, "_request",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(provider_error),

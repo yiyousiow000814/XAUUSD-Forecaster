@@ -24,6 +24,9 @@ from xauusd_forecaster.news_retrieval import (  # noqa: E402
     load_embeddings,
 )
 from xauusd_forecaster.gemini_embeddings import GeminiEmbeddingClient  # noqa: E402
+from xauusd_forecaster.news_scheduler import (  # noqa: E402
+    CONTRACT_BACKFILL_WORKLOAD,
+)
 
 
 def main() -> int:
@@ -48,6 +51,7 @@ def main() -> int:
         )
         client = GeminiEmbeddingClient(
             ledger.connection, dispatch_task="NEWS_EMBEDDING_BACKFILL",
+            workload_class=CONTRACT_BACKFILL_WORKLOAD,
         )
         total = 0
         profile = client.profile()

@@ -4,6 +4,7 @@ import json
 import math
 import urllib.request
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -15,6 +16,7 @@ from xauusd_forecaster.model_gateway import (
 )
 from xauusd_forecaster.news_scheduler import (
     ApiCredential,
+    CONTRACT_BACKFILL_LANE,
     calibrated_input_tokens,
     mark_account_request_attempted,
     record_account_request_outcome,
@@ -26,6 +28,55 @@ from xauusd_forecaster.scheduler_model_gateway import SchedulerModelAccountant
 
 
 NOW = datetime(2026, 8, 18, 1, 0, tzinfo=UTC)
+
+
+def test_gemma_backfill_is_surplus_gated_while_live_capacity_remains(tmp_path) -> None:
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3")
+    now = datetime.now(UTC)
+    pacific = now.astimezone(ZoneInfo("America/Los_Angeles"))
+    for offset in range(1, 8):
+        ledger.connection.execute(
+            """INSERT INTO news_ai_quota_day_workload_v1
+               VALUES (?,?,?,?,?,?,?)""",
+            (
+                (pacific.date() - timedelta(days=offset)).isoformat(),
+                pacific.hour, "account", "gemma_quota", "LIVE_OPERATIONAL",
+                14_000, now.isoformat(),
+            ),
+        )
+    ledger.connection.commit()
+    usage = ModelRequestUsage(
+        model=DEFAULT_GEMMA_MODEL, purpose="news-impact", input_tokens=100,
+    )
+    backfill = SchedulerModelAccountant(
+        ledger.connection,
+        ApiCredential("account", "ROUTINE", "secret", "credential"),
+        urgent=False, work_lane=CONTRACT_BACKFILL_LANE,
+    )
+
+    assert not backfill.reserve(usage)
+    assert backfill.failure_code == "BACKFILL_BUDGET_DEFERRED"
+    assert ledger.connection.execute(
+        "SELECT count(*) FROM news_ai_account_request_usage_v1"
+    ).fetchone()[0] == 0
+
+    live = SchedulerModelAccountant(
+        ledger.connection,
+        ApiCredential("account", "ROUTINE", "secret", "credential"),
+        urgent=False,
+    )
+    assert live.reserve(usage)
+    assert ledger.connection.execute(
+        "SELECT requested_model FROM news_ai_account_request_usage_v1"
+    ).fetchone()[0] == DEFAULT_GEMMA_MODEL
+    reserved = ledger.connection.execute(
+        """SELECT workload_class,quota_authority,request_count
+           FROM news_ai_quota_day_workload_v1
+           WHERE quota_day=? AND account_id='account'""",
+        (pacific.date().isoformat(),),
+    ).fetchone()
+    assert tuple(reserved) == ("LIVE_OPERATIONAL", "gemma_quota", 1)
+    ledger.close()
 
 
 def _initialize_provider_state(connection) -> None:

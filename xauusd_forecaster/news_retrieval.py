@@ -723,12 +723,17 @@ def attach_hybrid_prior_event_context(
     connection: sqlite3.Connection,
     records: list[dict],
     *,
+    workload_class: str,
     client: GeminiEmbeddingClient | None = None,
 ) -> list[dict]:
     """Attach complete hybrid context before the final identity request."""
     if not records:
         return records
-    embedding_client = client or GeminiEmbeddingClient(connection)
+    embedding_client = client or GeminiEmbeddingClient(
+        connection, workload_class=workload_class,
+    )
+    if embedding_client.workload_class != workload_class:
+        raise ValueError("embedding client workload provenance changed")
     max_first_seen = max(
         str(row["collector_first_seen_time"]) for row in records
     )

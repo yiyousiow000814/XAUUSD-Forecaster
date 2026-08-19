@@ -1042,6 +1042,7 @@ def assess_pending_news_impacts(
     records: list[dict[str, object]] | None = None,
     request_accountant: ModelRequestAccountant | None = None,
     use_hybrid_retrieval: bool = False,
+    workload_class: str | None = None,
 ) -> list[dict[str, object]]:
     """Classify semantic impact lifetime with frozen Gemma 4 buckets."""
     keys = configured_gemini_api_keys(api_key)
@@ -1065,9 +1066,11 @@ def assess_pending_news_impacts(
         impact_prompt_version=impact_prompt_version,
     )[:effective_limit]
     if use_hybrid_retrieval:
+        if workload_class is None:
+            raise ValueError("hybrid retrieval workload provenance is required")
         from .news_retrieval import attach_hybrid_prior_event_context
         pending = attach_hybrid_prior_event_context(
-            ledger.connection, list(pending),
+            ledger.connection, list(pending), workload_class=workload_class,
         )
     statuses = []
     for index, row in enumerate(pending):

@@ -1967,6 +1967,36 @@ def test_impact_discovery_advances_old_backfill_and_new_arrivals(
     monkeypatch.setattr(annotation, "pending_annotation_records", lambda *_a, **_k: [])
     monkeypatch.setattr(annotation, "pending_title_translation_records", lambda *_a, **_k: [])
     monkeypatch.setattr(annotation, "pending_impact_records", impact_rows)
+    for item in ("oldest", "newest"):
+        digest = hashlib.sha256(item.encode()).hexdigest()
+        ledger.append_news_revision({
+            "source": "scheduler-fairness", "source_item_id": item,
+            "source_published_time": NOW, "collector_first_seen_time": NOW,
+            "fetched_time": NOW, "headline": item, "body": "body",
+            "content_hash": digest, "cluster_id": item,
+        })
+        ledger.connection.execute(
+            """INSERT INTO news_annotations VALUES (
+               ?,?, ?,1,?,'EVENT','[]',0,0,0,0,0,0,1,
+               'gemini-3.5-flash-lite',?,?,?,?)""",
+            (
+                f"annotation-{item}", "scheduler-fairness", item,
+                digest, CURRENT_NEWS_PROMPT_VERSION,
+                NOW.isoformat(), NOW.isoformat(), "{}",
+            ),
+        )
+        parent = enqueue_job(
+            ledger.connection, task_type="ACTIVE_ANNOTATION",
+            source="scheduler-fairness", source_item_id=item,
+            revision_number=1, prompt_version=CURRENT_NEWS_PROMPT_VERSION,
+            priority="FAST", now=NOW,
+        )
+        ledger.connection.execute(
+            """UPDATE news_ai_jobs_v1 SET state='COMPLETED',completed_at=?
+               WHERE job_id=?""",
+            (NOW.isoformat(), parent),
+        )
+    ledger.connection.commit()
 
     discovered = sync_pending_jobs(ledger.connection, now=NOW, limit=4)
     queued = {

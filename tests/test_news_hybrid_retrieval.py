@@ -13,6 +13,7 @@ from xauusd_forecaster.gemini_embeddings import (
 )
 from xauusd_forecaster.news_scheduler import (
     ApiCredential,
+    LIVE_OPERATIONAL_WORKLOAD,
     ROUTINE_POOL,
     enqueue_job,
 )
@@ -93,6 +94,7 @@ def _insert_embedding_sources(ledger: ForwardLedger, *rows: dict) -> None:
 class _FakeEmbeddingClient:
     def __init__(self, digest: str = "d" * 64) -> None:
         self._profile = EmbeddingProfile("fake-embedding", digest, 4)
+        self.workload_class = LIVE_OPERATIONAL_WORKLOAD
 
     def profile(self) -> EmbeddingProfile:
         return self._profile
@@ -437,6 +439,7 @@ def test_throttled_generation_uses_frozen_deterministic_fallback(
     try:
         attached = attach_hybrid_prior_event_context(
             ledger.connection, [dict(current)], client=_ThrottledClient(),
+            workload_class=LIVE_OPERATIONAL_WORKLOAD,
         )
 
         assert provider_calls == 1
@@ -470,6 +473,7 @@ def test_throttled_generation_uses_frozen_deterministic_fallback(
         provider_calls = 0
         during_cooldown = attach_hybrid_prior_event_context(
             ledger.connection, [dict(current)], client=_ThrottledClient(),
+            workload_class=LIVE_OPERATIONAL_WORKLOAD,
         )
 
         assert provider_calls == 0
@@ -525,6 +529,7 @@ def test_live_pressure_selects_fallback_then_stabilized_ready_returns_hybrid(
     try:
         fallback = attach_hybrid_prior_event_context(
             ledger.connection, [dict(current)], client=client,
+            workload_class=LIVE_OPERATIONAL_WORKLOAD,
         )
 
         assert client.calls == 0
@@ -559,6 +564,7 @@ def test_live_pressure_selects_fallback_then_stabilized_ready_returns_hybrid(
         ledger.connection.commit()
         hybrid = attach_hybrid_prior_event_context(
             ledger.connection, [dict(current)], client=client,
+            workload_class=LIVE_OPERATIONAL_WORKLOAD,
         )
 
         assert hybrid[0]["identity_retrieval_mode"] == "HYBRID"
@@ -633,7 +639,9 @@ def test_successful_embedding_admission_records_vector_commit(
     monkeypatch.setattr(
         gemini_embeddings, "configured_api_credentials", lambda: (credential,),
     )
-    client = GeminiEmbeddingClient(ledger.connection)
+    client = GeminiEmbeddingClient(
+        ledger.connection, workload_class=LIVE_OPERATIONAL_WORKLOAD,
+    )
     ledger.connection.execute(
         """INSERT INTO news_revisions VALUES (
            'source','annotation-1',1,NULL,?,?,?,'Federal Reserve decision',
@@ -731,6 +739,7 @@ def test_runtime_catches_up_historical_embedding_gap_before_retrieval(
 
         attached = attach_hybrid_prior_event_context(
             ledger.connection, [current], client=_FakeEmbeddingClient(),
+            workload_class=LIVE_OPERATIONAL_WORKLOAD,
         )
 
         assert attached[0]["identity_retrieval_version"] == (
