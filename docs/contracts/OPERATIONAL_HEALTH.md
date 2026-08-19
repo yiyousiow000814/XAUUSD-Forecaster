@@ -18,10 +18,13 @@ feed is current, and the supervised decision collector has an available
 `RUNNING` heartbeat. It is never global operational health. Decision-row
 recency is a separate output-cadence observation and
 must not substitute for process liveness. A fresh `RUNNING` collector remains
-healthy when no row is emitted; near a broker close, a fixed horizon that
-would cross the close is published as an expected pause rather than an
-operational incident. Missing, expired, or non-running collector heartbeats
-and unavailable open-market quotes remain fail-closed failures.
+healthy when no row is emitted. When the broker is explicitly open, the quote
+is current, and the next close is more than one fixed 30-minute horizon away,
+decision output older than the bounded five-minute cadence publishes
+`OPS_DECISION_OUTPUT_STALLED` without relabeling the collector `STALE`. Only a
+fixed horizon that would cross the next broker close is `EXPECTED_PAUSE`.
+Missing, expired, or non-running collector heartbeats and unavailable
+open-market quotes remain fail-closed failures.
 
 ## Stable error codes
 
@@ -219,6 +222,15 @@ fresh on the Algo timer independently of quote ticks. Python and dashboard code
 must not hard-code or infer a daily maintenance window. Missing or stale broker
 evidence outside the bounded weekend fallback remains `DATA_UNAVAILABLE`; quote
 or decision silence alone must never be normalized to closure.
+
+Decision output has a five-minute expected cadence with a bounded two-minute
+scheduling grace. More than 420 seconds without a new decision is `STALLED`
+only when fresh broker evidence says the market is open, the next close is more
+than 30 minutes away, and the quote is current. Missing or stale market/quote
+evidence cannot establish this incident. At final classification, the dashboard
+must reopen a current read-only SQLite snapshot for the latest decision time,
+alongside rereading runtime heartbeat, quote, and broker-session evidence, so a
+long build or hot reload cannot report an output stall from an old snapshot.
 
 Authoritative `CLOSED` and bounded weekend-fallback `WEEKLY_CLOSED` suspend only
 freshness clocks whose outputs are not expected during closure. Quote, decision,

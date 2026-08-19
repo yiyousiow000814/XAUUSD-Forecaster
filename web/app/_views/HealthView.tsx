@@ -177,7 +177,8 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
   const components = Object.entries(payload?.system.components ?? {}).map(([name, item]) => ({
     name,
     item,
-    healthy: item.status === "OK" || item.status === "MARKET_CLOSED",
+    healthy: (item.status === "OK" || item.status === "MARKET_CLOSED")
+      && item.decision_output_status !== "STALLED",
   }));
   const healthyComponentCount = components.filter(component => component.healthy).length;
   const componentHasAttention = components.some(component => !component.healthy);

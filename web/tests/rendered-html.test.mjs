@@ -142,6 +142,27 @@ test("renders human incident diagnostics before nested raw machine evidence", ()
   assert.match(css, /\.incident-raw-evidence code,.incident-raw-evidence small \{[^}]*overflow-wrap:anywhere/);
 });
 
+test("presents decision output stalls separately from collector liveness", () => {
+  const [incident] = correlateOperationalEvents([{
+    code: "OPS_DECISION_OUTPUT_STALLED",
+    severity: "ERROR",
+    scope: "decision_output",
+    message_zh: "市场与报价正常，但 5 分钟决策输出已超过容许节奏。",
+    blocking: true,
+    evidence: { status: "STALLED", age_seconds: 1200 },
+  }]);
+
+  assert.equal(incident.title_zh, "决策输出停滞");
+  assert.equal(incident.root_event.scope, "decision_output");
+  assert.equal(incident.action_state, "ACTION_REQUIRED");
+  assert.equal(operationalIncidentActionLabels[incident.action_state], "需要处理");
+  assert.deepEqual(operationalEventDiagnostic(incident.root_event), {
+    status: "STALLED · 已持续 20 分 0 秒",
+    component: "5 分钟决策输出",
+    reasons: [],
+  });
+});
+
 test("retains bounded operational incidents for deterministic Preview hydration", () => {
   const operationalHealth = {
     schema_version: "operational-health.v1",

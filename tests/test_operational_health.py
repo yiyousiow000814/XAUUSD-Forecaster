@@ -455,6 +455,47 @@ def test_component_and_source_failures_use_the_same_alert_contract() -> None:
     }
 
 
+def test_decision_output_stall_is_separate_from_collector_liveness() -> None:
+    result = extend_with_component_alerts(
+        scheduler_health_snapshot(_connection(), now=NOW),
+        components={
+            "decision_collector": {
+                "status": "OK",
+                "age_seconds": 12,
+                "last_error": None,
+                "latest_decision": (NOW - timedelta(minutes=20)).isoformat(),
+                "decision_age_seconds": 1200,
+                "decision_output_status": "STALLED",
+                "decision_output_expected_cadence_seconds": 300,
+                "decision_output_stalled_after_seconds": 420,
+                "market_closes_at": (NOW + timedelta(hours=1)).isoformat(),
+            },
+        },
+        news_sources=[],
+        runtime_update_failure=None,
+    )
+
+    assert not any(
+        alert["code"] == "OPS_COMPONENT_UNHEALTHY"
+        for alert in result["alerts"]
+    )
+    stalled = next(
+        alert for alert in result["alerts"]
+        if alert["code"] == "OPS_DECISION_OUTPUT_STALLED"
+    )
+    assert stalled["scope"] == "decision_output"
+    assert stalled["severity"] == "ERROR"
+    assert stalled["blocking"] is True
+    assert stalled["evidence"] == {
+        "status": "STALLED",
+        "age_seconds": 1200,
+        "latest_decision": (NOW - timedelta(minutes=20)).isoformat(),
+        "expected_cadence_seconds": 300,
+        "stalled_after_seconds": 420,
+        "market_closes_at": (NOW + timedelta(hours=1)).isoformat(),
+    }
+
+
 def test_daily_brief_deferral_keeps_the_underlying_failure_code() -> None:
     connection = _connection()
     snapshot = scheduler_health_snapshot(connection, now=NOW)

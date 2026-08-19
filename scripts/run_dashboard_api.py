@@ -36,7 +36,8 @@ STATUS_SNAPSHOT_MAX_STALE_SECONDS = 90.0
 SEMANTIC_SNAPSHOT_MAX_STALE_SECONDS = 420.0
 COLLECTOR_HEARTBEAT_EXPECTED_SECONDS = 60.0
 COLLECTOR_HEARTBEAT_FAILURE_SECONDS = 300.0
-DECISION_OUTPUT_EXPECTED_SECONDS = 420.0
+DECISION_OUTPUT_CADENCE_SECONDS = 300.0
+DECISION_OUTPUT_STALLED_SECONDS = 420.0
 DECISION_HORIZON = timedelta(minutes=30)
 _QUOTE_CANDLE_CACHE_LOCK = threading.Lock()
 _QUOTE_CANDLE_CACHE: dict[str, dict] = {}
@@ -155,6 +156,7 @@ def _decision_collector_component(
     *,
     latest_decision: str | None,
     broker_session: dict | None,
+    quote_current: bool,
     now: datetime,
 ) -> dict[str, object]:
     """Separate supervised collector liveness from decision output cadence."""
@@ -175,7 +177,7 @@ def _decision_collector_component(
     output_status = (
         "CURRENT"
         if decision_age is not None
-        and decision_age <= DECISION_OUTPUT_EXPECTED_SECONDS
+        and decision_age <= DECISION_OUTPUT_STALLED_SECONDS
         else "NO_RECENT_DECISION"
     )
     output_reason = None
@@ -193,12 +195,30 @@ def _decision_collector_component(
             output_status = "EXPECTED_PAUSE"
             output_reason = "FIXED_HORIZON_CROSSES_BROKER_CLOSE"
             output_message = "等待下一个完整 30 分钟决策窗口"
+        elif (
+            closes_at is not None
+            and quote_current
+            and decision_age is not None
+            and output_status == "NO_RECENT_DECISION"
+        ):
+            output_status = "STALLED"
+            output_reason = "DECISION_OUTPUT_CADENCE_EXCEEDED"
+            output_message = "决策输出已超过正常 5 分钟节奏"
     component.update({
         "latest_decision": decision_at.isoformat() if decision_at else None,
         "decision_age_seconds": decision_age,
         "decision_output_status": output_status,
         "decision_output_reason": output_reason,
         "decision_output_message": output_message,
+        "decision_output_expected_cadence_seconds": (
+            DECISION_OUTPUT_CADENCE_SECONDS
+        ),
+        "decision_output_stalled_after_seconds": (
+            DECISION_OUTPUT_STALLED_SECONDS
+        ),
+        "market_closes_at": (
+            broker_session.get("next_close_time") if broker_session else None
+        ),
     })
     return component
 
@@ -701,6 +721,19 @@ def _latest_quote_received(database: Path) -> str | None:
         except (KeyError, ValueError, json.JSONDecodeError):
             continue
     return None
+
+
+def _latest_decision_created_at(database: Path) -> str | None:
+    """Read decision cadence from a new SQLite snapshot at classification time."""
+    connection = sqlite3.connect(
+        f"file:{database}?mode=ro", uri=True, timeout=5,
+    )
+    try:
+        return connection.execute(
+            "SELECT max(created_at) FROM decision_events"
+        ).fetchone()[0]
+    finally:
+        connection.close()
 
 
 def _runtime_heartbeat(path: Path, *, service: str) -> dict[str, object]:
@@ -2421,12 +2454,14 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
     # come from the future relative to the snapshot's initial query boundary.
     now = clock()
     # Runtime files are outside the SQLite snapshot. Read them at the current
-    # classification boundary so a long status build or hot reload cannot
-    # turn an old decision snapshot into a false process-liveness failure.
+    # classification boundary, and open a fresh SQLite snapshot for output
+    # cadence, so a long status build or hot reload cannot publish false
+    # liveness or decision-output incidents.
     collector_heartbeat = _runtime_heartbeat(
         database.parent / "collector-status.json", service="collector",
     )
     component_times["quote_bridge"] = _latest_quote_received(database)
+    latest_decision_time = _latest_decision_created_at(database)
     component_times["news_collector"] = collector_heartbeat.get("last_success")
     component_times["outcome_settler"] = (
         collector_heartbeat.get("last_success")
@@ -2443,6 +2478,7 @@ def _dashboard_payload(database: Path, *, clock=None) -> dict:
         collector_heartbeat,
         latest_decision=latest_decision_time,
         broker_session=broker_session,
+        quote_current=age_seconds is not None and age_seconds <= 30,
         now=now,
     )
     collector_available = (
