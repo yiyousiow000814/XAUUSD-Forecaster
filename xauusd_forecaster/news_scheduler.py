@@ -27,6 +27,7 @@ LIVE_LANE = "LIVE"
 CONTRACT_BACKFILL_LANE = "CONTRACT_BACKFILL"
 WORK_LANES = (LIVE_LANE, CONTRACT_BACKFILL_LANE)
 CONTRACT_BACKFILL_PAGE_SIZE = 50
+EXISTING_JOB_LANE_PAGE_SIZE = 100
 LIVE_OPERATIONAL_WORKLOAD = "LIVE_OPERATIONAL"
 CONTRACT_BACKFILL_WORKLOAD = "CONTRACT_BACKFILL"
 REQUEST_WORKLOADS = (LIVE_OPERATIONAL_WORKLOAD, CONTRACT_BACKFILL_WORKLOAD)
@@ -365,10 +366,25 @@ def install_scheduler_schema(connection: sqlite3.Connection) -> None:
             "ALTER TABLE news_ai_jobs_v1 ADD COLUMN work_lane TEXT NOT NULL "
             "DEFAULT 'LIVE' CHECK(work_lane IN ('LIVE','CONTRACT_BACKFILL'))"
         )
+    if "lane_classified" not in job_columns:
+        connection.execute(
+            "ALTER TABLE news_ai_jobs_v1 ADD COLUMN lane_classified INTEGER "
+            "NOT NULL DEFAULT 0 CHECK(lane_classified IN (0,1))"
+        )
+    lane_index = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' "
+        "AND name='news_ai_jobs_lane_claim_v1'"
+    ).fetchone()
+    if lane_index is not None and "lane_classified" not in str(lane_index[0]):
+        connection.execute("DROP INDEX news_ai_jobs_lane_claim_v1")
     connection.executescript(
         """
         CREATE INDEX IF NOT EXISTS news_ai_jobs_lane_claim_v1
-        ON news_ai_jobs_v1(state,available_at,work_lane,priority,task_type,created_at);
+        ON news_ai_jobs_v1(state,available_at,lane_classified,work_lane,
+                           priority,task_type,created_at);
+        CREATE INDEX IF NOT EXISTS news_ai_jobs_lane_migration_v1
+        ON news_ai_jobs_v1(prompt_version,task_type,lane_classified,
+                           created_at,job_id);
         CREATE TABLE IF NOT EXISTS news_annotation_contract_backfill_v1 (
           prompt_version TEXT PRIMARY KEY,
           activated_at TEXT NOT NULL,
@@ -378,6 +394,50 @@ def install_scheduler_schema(connection: sqlite3.Connection) -> None:
           cursor_revision_number INTEGER,
           state TEXT NOT NULL CHECK(state IN ('ACTIVE','COMPLETE')),
           updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS news_annotation_work_lane_migrations_v1 (
+          prompt_version TEXT PRIMARY KEY,
+          activated_at TEXT NOT NULL,
+          cursor_created_at TEXT,
+          cursor_job_id TEXT,
+          processed_count INTEGER NOT NULL DEFAULT 0,
+          state TEXT NOT NULL CHECK(state IN ('ACTIVE','COMPLETE')),
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS news_annotation_transition_state_v1 (
+          from_prompt_version TEXT NOT NULL,
+          to_prompt_version TEXT NOT NULL,
+          transition_kind TEXT NOT NULL CHECK(transition_kind IN (
+            'REUSE_COMPATIBLE','DETERMINISTIC_MIGRATION','MODEL_REVIEW_REQUIRED')),
+          cursor_parsed_at TEXT,
+          cursor_annotation_id TEXT,
+          processed_count INTEGER NOT NULL DEFAULT 0,
+          state TEXT NOT NULL CHECK(state IN ('ACTIVE','COMPLETE')),
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(from_prompt_version,to_prompt_version)
+        );
+        CREATE TABLE IF NOT EXISTS news_annotation_transition_projections_v1 (
+          target_annotation_id TEXT PRIMARY KEY,
+          source_annotation_id TEXT NOT NULL,
+          from_prompt_version TEXT NOT NULL,
+          to_prompt_version TEXT NOT NULL,
+          transition_kind TEXT NOT NULL,
+          migrator_version TEXT,
+          source_annotation_hash TEXT NOT NULL,
+          projected_annotation_hash TEXT NOT NULL,
+          applied_at TEXT NOT NULL,
+          UNIQUE(source_annotation_id,to_prompt_version),
+          FOREIGN KEY(target_annotation_id) REFERENCES news_annotations(annotation_id),
+          FOREIGN KEY(source_annotation_id) REFERENCES news_annotations(annotation_id)
+        );
+        CREATE TABLE IF NOT EXISTS news_annotation_transition_failures_v1 (
+          source_annotation_id TEXT NOT NULL,
+          to_prompt_version TEXT NOT NULL,
+          transition_kind TEXT NOT NULL,
+          failure_code TEXT NOT NULL,
+          failure_detail TEXT NOT NULL,
+          failed_at TEXT NOT NULL,
+          PRIMARY KEY(source_annotation_id,to_prompt_version)
         );
         """
     )
@@ -999,15 +1059,17 @@ def enqueue_job(
             (job_id,task_type,source,source_item_id,revision_number,annotation_id,
              prompt_version,priority,state,available_at,lease_owner,
              lease_expires_at,attempt_count,last_error,created_at,updated_at,
-             completed_at,work_lane) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             completed_at,work_lane,lane_classified)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 job_id, task_type, source, source_item_id, revision_number,
                 annotation_id, prompt_version, priority, "QUEUED", timestamp,
-                None, None, 0, None, timestamp, timestamp, None, work_lane,
+                None, None, 0, None, timestamp, timestamp, None, work_lane, 1,
             ),
         )
         connection.execute(
-            """UPDATE news_ai_jobs_v1 SET work_lane=?,priority=?
+            """UPDATE news_ai_jobs_v1
+               SET work_lane=?,priority=?,lane_classified=1
                WHERE job_id=? AND state IN ('QUEUED','BACKING_OFF')""",
             (work_lane, priority, job_id),
         )
@@ -1080,21 +1142,36 @@ def record_scheduler_deferral(
                    separators=(",", ":"))[:500]
         if isinstance(evidence, dict) else None
     )
+    coalesced = failure_code == "BACKFILL_BUDGET_DEFERRED"
     identity = "|".join((
         job.job_id, credential.account_id, failure_code,
-        _iso(deferred_at),
+        "coalesced" if coalesced else _iso(deferred_at),
     ))
+    deferral_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     with connection:
         connection.execute(
             "DELETE FROM news_ai_scheduler_deferrals_v1 WHERE deferred_at<=?",
             (_iso(deferred_at - SCHEDULER_DEFERRAL_RETENTION),),
         )
+        if coalesced:
+            existing = connection.execute(
+                "SELECT deferred_at FROM news_ai_scheduler_deferrals_v1 "
+                "WHERE deferral_id=?",
+                (deferral_id,),
+            ).fetchone()
+            if existing is not None and datetime.fromisoformat(
+                str(existing["deferred_at"])
+            ) > deferred_at - timedelta(minutes=5):
+                return
         connection.execute(
-            """INSERT OR IGNORE INTO news_ai_scheduler_deferrals_v1
-               VALUES (?,?,?,?,?,?,?,?)""",
+            """INSERT INTO news_ai_scheduler_deferrals_v1
+               VALUES (?,?,?,?,?,?,?,?)
+               ON CONFLICT(deferral_id) DO UPDATE SET
+                 evidence_json=excluded.evidence_json,
+                 deferred_at=excluded.deferred_at,
+                 next_retry_at=excluded.next_retry_at""",
             (
-                hashlib.sha256(identity.encode("utf-8")).hexdigest(),
-                job.job_id, job.task_type, credential.account_id,
+                deferral_id, job.job_id, job.task_type, credential.account_id,
                 failure_code, serialized, _iso(deferred_at),
                 str(status.get("next_retry_at") or "") or None,
             ),
@@ -1417,6 +1494,7 @@ def claim_job(
                   ON retry_override.job_id=j.job_id AND retry_override.active=1
                  WHERE j.state IN ('QUEUED','BACKING_OFF')
                    AND j.task_type IN ({task_placeholders})
+                   AND (j.task_type<>'ACTIVE_ANNOTATION' OR j.lane_classified=1)
                    AND j.work_lane IN ({lane_placeholders})
                    AND j.available_at<=? {priority_filter}
                  ORDER BY
@@ -2850,84 +2928,132 @@ def _install_annotation_contract_lanes(
     now: datetime,
 ) -> datetime:
     marker = f"annotation-work-lanes:{prompt_version}"
-    state = connection.execute(
+    backfill_state = connection.execute(
         "SELECT activated_at FROM news_annotation_contract_backfill_v1 "
         "WHERE prompt_version=?",
         (prompt_version,),
     ).fetchone()
-    if state is None:
+    lane_state = connection.execute(
+        "SELECT * FROM news_annotation_work_lane_migrations_v1 "
+        "WHERE prompt_version=?",
+        (prompt_version,),
+    ).fetchone()
+    if lane_state is not None:
+        activated_at = datetime.fromisoformat(str(lane_state["activated_at"]))
+    elif backfill_state is not None:
+        activated_at = datetime.fromisoformat(str(backfill_state[0]))
+    else:
         first_job = connection.execute(
             """SELECT min(created_at) FROM news_ai_jobs_v1
                WHERE task_type='ACTIVE_ANNOTATION' AND prompt_version=?""",
             (prompt_version,),
         ).fetchone()[0]
         activated_at = datetime.fromisoformat(str(first_job)) if first_job else now
-        timestamp = _iso(now)
-        with connection:
+    timestamp = _iso(now)
+    with connection:
+        if backfill_state is None:
             connection.execute(
                 """INSERT INTO news_annotation_contract_backfill_v1
                    (prompt_version,activated_at,state,updated_at)
                    VALUES (?,?,'ACTIVE',?)""",
                 (prompt_version, _iso(activated_at), timestamp),
             )
-    else:
-        activated_at = datetime.fromisoformat(str(state[0]))
-
-    migrated = connection.execute(
-        "SELECT 1 FROM news_ai_scheduler_migrations_v1 WHERE migration_id=?",
-        (marker,),
-    ).fetchone()
-    if migrated is not None:
-        return activated_at
-
-    timestamp = _iso(now)
-    with connection:
-        connection.execute(
-            """UPDATE news_ai_jobs_v1 AS j
-               SET work_lane=CASE WHEN EXISTS (
-                     SELECT 1 FROM news_revisions n
-                     WHERE n.source=j.source AND n.source_item_id=j.source_item_id
-                       AND n.revision_number=j.revision_number
-                       AND n.collector_first_seen_time<?)
-                   THEN 'CONTRACT_BACKFILL' ELSE 'LIVE' END,
-                   priority=CASE WHEN EXISTS (
-                     SELECT 1 FROM news_revisions n
-                     WHERE n.source=j.source AND n.source_item_id=j.source_item_id
-                       AND n.revision_number=j.revision_number
-                       AND n.collector_first_seen_time<?)
-                   THEN 'BACKGROUND' ELSE 'FAST' END
-               WHERE j.task_type='ACTIVE_ANNOTATION' AND j.prompt_version=?""",
-            (_iso(activated_at), _iso(activated_at), prompt_version),
-        )
-        candidates = connection.execute(
-            """SELECT j.*,n.source_published_time,n.collector_first_seen_time
-               FROM news_ai_jobs_v1 j JOIN news_revisions n
-                 ON n.source=j.source AND n.source_item_id=j.source_item_id
-                AND n.revision_number=j.revision_number
-               WHERE j.task_type='ACTIVE_ANNOTATION' AND j.prompt_version=?
-                 AND j.work_lane='CONTRACT_BACKFILL'
-                 AND j.state IN ('QUEUED','BACKING_OFF')""",
-            (prompt_version,),
-        ).fetchall()
-        retire = [
-            str(row["job_id"]) for row in candidates
-            if not _contract_backfill_has_current_value(
-                connection, row, activated_at=activated_at,
-                prompt_version=prompt_version,
+        if lane_state is None:
+            connection.execute(
+                """INSERT INTO news_annotation_work_lane_migrations_v1
+                   (prompt_version,activated_at,state,updated_at)
+                   VALUES (?,?,'ACTIVE',?)""",
+                (prompt_version, _iso(activated_at), timestamp),
             )
-        ]
-        for job_id in retire:
+    lane_state = connection.execute(
+        "SELECT * FROM news_annotation_work_lane_migrations_v1 "
+        "WHERE prompt_version=?",
+        (prompt_version,),
+    ).fetchone()
+    if str(lane_state["state"]) == "COMPLETE":
+        return activated_at
+    cursor = None
+    if lane_state["cursor_created_at"] is not None:
+        cursor = (
+            str(lane_state["cursor_created_at"]),
+            str(lane_state["cursor_job_id"]),
+        )
+    cursor_clause = ""
+    parameters: list[object] = [prompt_version]
+    if cursor is not None:
+        cursor_clause = "AND (j.created_at,j.job_id)>(?,?)"
+        parameters.extend(cursor)
+    rows = connection.execute(
+        f"""SELECT j.*,n.source_published_time,n.collector_first_seen_time,
+                   n.source AS revision_source
+            FROM news_ai_jobs_v1 j
+            LEFT JOIN news_revisions n ON n.source=j.source
+             AND n.source_item_id=j.source_item_id
+             AND n.revision_number=j.revision_number
+            WHERE j.task_type='ACTIVE_ANNOTATION' AND j.prompt_version=?
+              AND j.lane_classified=0 {cursor_clause}
+            ORDER BY j.created_at,j.job_id LIMIT ?""",
+        (*parameters, EXISTING_JOB_LANE_PAGE_SIZE),
+    ).fetchall()
+    with connection:
+        for row in rows:
+            missing_revision = row["revision_source"] is None
+            historical = (
+                missing_revision
+                or datetime.fromisoformat(str(row["collector_first_seen_time"]))
+                   < activated_at
+            )
+            lane = CONTRACT_BACKFILL_LANE if historical else LIVE_LANE
+            priority = "BACKGROUND" if historical else "FAST"
+            retired = (
+                historical
+                and str(row["state"]) in {"QUEUED", "BACKING_OFF"}
+                and (
+                    missing_revision
+                    or not _contract_backfill_has_current_value(
+                        connection, row, activated_at=activated_at,
+                        prompt_version=prompt_version,
+                    )
+                )
+            )
             connection.execute(
                 """UPDATE news_ai_jobs_v1
-                   SET state='DEAD_LETTER',last_error='CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE',
-                       lease_owner=NULL,lease_expires_at=NULL,updated_at=?,completed_at=?
-                   WHERE job_id=? AND state IN ('QUEUED','BACKING_OFF')""",
-                (timestamp, timestamp, job_id),
+                   SET work_lane=?,priority=?,lane_classified=1,
+                       state=CASE WHEN ? THEN 'DEAD_LETTER' ELSE state END,
+                       last_error=CASE WHEN ? THEN
+                         'CURRENT_EVIDENCE_NO_LONGER_ELIGIBLE' ELSE last_error END,
+                       lease_owner=CASE WHEN ? THEN NULL ELSE lease_owner END,
+                       lease_expires_at=CASE WHEN ? THEN NULL ELSE lease_expires_at END,
+                       updated_at=CASE WHEN ? THEN ? ELSE updated_at END,
+                       completed_at=CASE WHEN ? THEN ? ELSE completed_at END
+                   WHERE job_id=? AND lane_classified=0""",
+                (
+                    lane, priority, retired, retired, retired, retired,
+                    retired, timestamp, retired, timestamp, row["job_id"],
+                ),
             )
-        connection.execute(
-            "INSERT INTO news_ai_scheduler_migrations_v1 VALUES (?,?)",
-            (marker, timestamp),
-        )
+        if rows:
+            last = rows[-1]
+            connection.execute(
+                """UPDATE news_annotation_work_lane_migrations_v1
+                   SET cursor_created_at=?,cursor_job_id=?,
+                       processed_count=processed_count+?,updated_at=?
+                   WHERE prompt_version=?""",
+                (
+                    last["created_at"], last["job_id"], len(rows), timestamp,
+                    prompt_version,
+                ),
+            )
+        if len(rows) < EXISTING_JOB_LANE_PAGE_SIZE:
+            connection.execute(
+                """UPDATE news_annotation_work_lane_migrations_v1
+                   SET state='COMPLETE',updated_at=? WHERE prompt_version=?""",
+                (timestamp, prompt_version),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO news_ai_scheduler_migrations_v1 VALUES (?,?)",
+                (marker, timestamp),
+            )
     return activated_at
 
 
@@ -3010,11 +3136,13 @@ def sync_pending_jobs(
         pending_title_translation_records,
     )
     from .news_semantics import PREVIOUS_NEWS_PROMPT_VERSION
-    from .semantic_transition import MODEL_REVIEW_REQUIRED, transition_for
+    from .semantic_transition import (
+        MODEL_REVIEW_REQUIRED,
+        execute_transition_page,
+        transition_for,
+    )
 
     transition = transition_for(PREVIOUS_NEWS_PROMPT_VERSION, PROMPT_VERSION)
-    if transition.kind != MODEL_REVIEW_REQUIRED:
-        raise RuntimeError("active annotation backfill must follow transition policy")
     from .daily_brief import brief_dates_to_process
 
     instant = now or datetime.now(UTC)
@@ -3033,6 +3161,10 @@ def sync_pending_jobs(
     activated_at = _install_annotation_contract_lanes(
         connection, prompt_version=PROMPT_VERSION, now=instant,
     )
+    execute_transition_page(
+        connection, transition, activated_at=activated_at, now=instant,
+        page_size=CONTRACT_BACKFILL_PAGE_SIZE,
+    )
     brief_backlog = brief_dates_to_process(connection, now=instant)[1:]
     backfill_capacity = (
         min(CONTRACT_BACKFILL_PAGE_SIZE, max(1, limit // 2))
@@ -3047,7 +3179,10 @@ def sync_pending_jobs(
         priority_receipt_days=tuple(brief_backlog),
         received_from=activated_at,
     )
-    protected_capacity = backfill_capacity if brief_backlog else 0
+    model_review_backfill = transition.kind == MODEL_REVIEW_REQUIRED
+    protected_capacity = (
+        backfill_capacity if brief_backlog and model_review_backfill else 0
+    )
     protected_annotations = pending_annotation_records(
         connection,
         observed_at=instant,
@@ -3056,13 +3191,16 @@ def sync_pending_jobs(
         priority_receipt_days=tuple(brief_backlog),
         received_before=activated_at,
     ) if protected_capacity else []
-    backfill_annotations = _contract_backfill_page(
-        connection,
-        prompt_version=PROMPT_VERSION,
-        activated_at=activated_at,
-        now=instant,
-        pending_annotation_records=pending_annotation_records,
-        page_size=max(0, backfill_capacity - len(protected_annotations)),
+    backfill_annotations = (
+        _contract_backfill_page(
+            connection,
+            prompt_version=PROMPT_VERSION,
+            activated_at=activated_at,
+            now=instant,
+            pending_annotation_records=pending_annotation_records,
+            page_size=max(0, backfill_capacity - len(protected_annotations)),
+        )
+        if model_review_backfill else []
     )
     live_by_revision = {
         (str(row["source"]), str(row["source_item_id"]), int(row["revision_number"])): row

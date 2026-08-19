@@ -173,8 +173,8 @@ def record_annotation_completion(
            (job_id,task_type,source,source_item_id,revision_number,annotation_id,
             prompt_version,priority,state,available_at,lease_owner,
             lease_expires_at,attempt_count,last_error,created_at,updated_at,
-            completed_at,work_lane) VALUES
-           (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            completed_at,work_lane,lane_classified) VALUES
+           (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(job_id) DO UPDATE SET
              state='COMPLETED',available_at=excluded.available_at,
              lease_owner=NULL,lease_expires_at=NULL,last_error=NULL,
@@ -184,7 +184,7 @@ def record_annotation_completion(
             job_id, "ACTIVE_ANNOTATION", source, source_item_id,
             revision_number, "", prompt_version, "NORMAL", "COMPLETED",
             completed_at, None, None, 0, None, completed_at, completed_at,
-            completed_at, "LIVE",
+            completed_at, "LIVE", 1,
         ),
     )
 

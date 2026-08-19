@@ -146,18 +146,35 @@ Hourly per-quota-day workload summaries retain only the latest 14 complete
 days, independent of news-history size. Fine-grained request evidence remains
 bounded separately. `BACKFILL_BUDGET_DEFERRED` is healthy pacing: it performs no
 provider call, reserves no quota, and increments neither job attempt nor retry
-count. LIVE scheduler health excludes migration queue age and pacing; a
+count. Repeated identical budget deferrals use one durable record per
+job/account/reason and refresh at most once per five minutes, so scheduler ticks
+do not create an unbounded evidence stream. LIVE scheduler health excludes
+migration queue age and pacing; a
 separate non-blocking `contract_backfill` summary exposes its states, oldest
 age, and recent budget deferrals.
 
 Every annotation contract transition is declared as `REUSE_COMPATIBLE`,
 `DETERMINISTIC_MIGRATION`, or `MODEL_REVIEW_REQUIRED`. Only the last class may
-create model-backed migration jobs. Historical demand is independently
+create model-backed migration jobs. Compatible reuse creates a validated
+current-contract projection while retaining the source annotation and original
+model provenance. Deterministic migration applies a declared, versioned local
+transform and records source and projected hashes. Both paths are cursor-bounded,
+replay-safe, and consume no provider dispatch, account quota, job attempt, retry,
+or model-backed backfill. A contract failure is retained under
+`SEMANTIC_TRANSITION_CONTRACT_FAILED` and never falls through to model review.
+Historical demand is independently
 classified as `CURRENT_OPERATIONAL`, `TRAINING_REQUIRED`, or `ARCHIVAL_ONLY`;
 training work is schedulable only after an explicit generation demand, while
 archival evidence is never scheduled. The V16-to-V17 transition is explicitly
 model-review-required, remains cursor-bounded to 50 records per discovery page,
 and still passes through the same LIVE-reserving quota gate.
+
+Existing annotation jobs are assigned to LIVE or contract-backfill lanes by a
+durable `(created_at, job_id)` keyset migration of at most 100 jobs per scheduler
+cycle. Its cursor and page updates commit together. Unclassified annotation jobs
+cannot be claimed, while newly created jobs are classified at insertion. A
+restart resumes after the last committed cursor without changing attempts or
+replaying provider work; completion is durable and prevents later full scans.
 
 Preemptible accounts remain restricted to `IMMEDIATE` and `FAST` jobs. Routine
 accounts may serve every priority and provide overflow capacity for urgent

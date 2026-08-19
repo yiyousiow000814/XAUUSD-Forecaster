@@ -70,6 +70,12 @@ degrade LIVE annotation task health, create a LIVE stall alert, or change the
 top-level operational status. Genuine provider, storage, or scheduler failures
 retain their existing failure semantics and are not relabeled as healthy pacing.
 
+`SEMANTIC_TRANSITION_CONTRACT_FAILED` is a bounded local projection failure.
+It proves neither provider transport nor quota consumption and must not be
+retried through an undeclared model fallback. The source annotation remains
+immutable and the failure retains the declared transition kind and bounded
+validation detail for operator review.
+
 New code paths must reuse a catalog meaning or update the canonical catalog.
 They must not persist a changing exception sentence as the only diagnostic key.
 

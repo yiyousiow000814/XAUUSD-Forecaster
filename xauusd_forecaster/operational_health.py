@@ -476,9 +476,16 @@ def scheduler_health_snapshot(
              AND j.work_lane='CONTRACT_BACKFILL'""",
         (cutoff,),
     ).fetchone()
-    backfill_failures = int(backfill_progress["failures"])
+    transition_failures = int(connection.execute(
+        """SELECT count(*) FROM news_annotation_transition_failures_v1
+           WHERE failed_at>=?""",
+        (cutoff,),
+    ).fetchone()[0])
+    backfill_failures = int(backfill_progress["failures"]) + transition_failures
     backfill_completed = int(backfill_progress["completed"])
-    if backfill_failures >= 3 and backfill_failures > backfill_completed:
+    if transition_failures or (
+        backfill_failures >= 3 and backfill_failures > backfill_completed
+    ):
         alerts.append(_alert(
             "OPS_AI_BACKFILL_MIGRATION_FAILED",
             severity="WARNING", scope="CONTRACT_BACKFILL",
@@ -488,6 +495,7 @@ def scheduler_health_snapshot(
             ),
             evidence={
                 "real_failures_15m": backfill_failures,
+                "semantic_transition_contract_failures_15m": transition_failures,
                 "completed_15m": backfill_completed,
                 "budget_deferred_15m": budget_deferrals,
             },
@@ -515,6 +523,7 @@ def scheduler_health_snapshot(
                 "budget_deferred_15m": budget_deferrals,
                 "completed_15m": backfill_completed,
                 "real_failures_15m": backfill_failures,
+                "semantic_transition_contract_failures_15m": transition_failures,
                 "oldest_age_seconds": (
                     max(0, int((instant - oldest_backfill).total_seconds()))
                     if oldest_backfill is not None else None
