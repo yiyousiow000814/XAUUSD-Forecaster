@@ -13,8 +13,18 @@ with a prior snapshot retains the last factual state and identifies the stale
 snapshot. Live-market state is `LIVE`, `MARKET_CLOSED`, or
 `MARKET_DATA_UNAVAILABLE`. Operational state is `HEALTHY`, `WARNING`, or
 `ERROR` and comes from authoritative component and scheduler detectors.
-`system.online` is only live quote/decision readiness and is never global
-operational health.
+`system.online` means the broker session is current and open, the live quote
+feed is current, and the supervised decision collector has an available
+`RUNNING` heartbeat. It is never global operational health. Decision-row
+recency is a separate output-cadence observation and
+must not substitute for process liveness. A fresh `RUNNING` collector remains
+healthy when no row is emitted. When the broker is explicitly open, the quote
+is current, and the next close is more than one fixed 30-minute horizon away,
+decision output older than the bounded five-minute cadence publishes
+`OPS_DECISION_OUTPUT_STALLED` without relabeling the collector `STALE`. Only a
+fixed horizon that would cross the next broker close is `EXPECTED_PAUSE`.
+Missing, expired, or non-running collector heartbeats and unavailable
+open-market quotes remain fail-closed failures.
 
 ## Stable error codes
 
@@ -212,6 +222,22 @@ fresh on the Algo timer independently of quote ticks. Python and dashboard code
 must not hard-code or infer a daily maintenance window. Missing or stale broker
 evidence outside the bounded weekend fallback remains `DATA_UNAVAILABLE`; quote
 or decision silence alone must never be normalized to closure.
+
+Decision output has a five-minute expected cadence with a bounded two-minute
+scheduling grace. More than 420 seconds without a new decision is `STALLED`
+only when fresh broker evidence says the market is open, the next close is more
+than 30 minutes away, and the quote is current. Missing or stale market/quote
+evidence cannot establish this incident. Before the first decision, elapsed
+output time starts at the immutable `FORWARD_EPOCH`. A stale or non-running
+collector remains the single incident root and suppresses the derivative
+`OPS_DECISION_OUTPUT_STALLED` alert. After a broker reopen, the first quote may
+arrive just after the current five-minute boundary. The broker session heartbeat
+therefore records the open epoch and its first received quote; output stall
+timing resumes only at the first causally eligible five-minute grid plus the
+same bounded two-minute scheduling grace. At final classification, the dashboard
+must reopen a current read-only SQLite snapshot for the latest decision time,
+alongside rereading runtime heartbeat, quote, and broker-session evidence, so a
+long build or hot reload cannot report an output stall from an old snapshot.
 
 Authoritative `CLOSED` and bounded weekend-fallback `WEEKLY_CLOSED` suspend only
 freshness clocks whose outputs are not expected during closure. Quote, decision,

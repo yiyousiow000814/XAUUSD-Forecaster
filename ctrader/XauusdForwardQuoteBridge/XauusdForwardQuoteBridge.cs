@@ -17,6 +17,9 @@ namespace CAlgo.Robots
         private long sequence;
         private long invalidQuotes;
         private long marketSessionWrites;
+        private bool? marketWasOpen;
+        private DateTime? openedAt;
+        private DateTime? firstQuoteAfterOpenAt;
 
         [Parameter("Output Directory", DefaultValue = "")]
         public string OutputDirectory
@@ -70,6 +73,7 @@ namespace CAlgo.Robots
         {
             DateTime eventTime = DateTime.SpecifyKind(this.Server.Time, DateTimeKind.Utc);
             DateTime receivedTime = this.UtcNow();
+            this.ObserveMarketState(receivedTime, this.Symbol.MarketHours.IsOpened());
             if (eventTime.Date != this.activeDateUtc)
             {
                 this.RotateDailyFile(eventTime);
@@ -81,6 +85,11 @@ namespace CAlgo.Robots
             {
                 this.invalidQuotes += 1;
                 return;
+            }
+
+            if (!this.firstQuoteAfterOpenAt.HasValue && this.openedAt.HasValue)
+            {
+                this.firstQuoteAfterOpenAt = receivedTime;
             }
 
             this.sequence += 1;
@@ -141,6 +150,7 @@ namespace CAlgo.Robots
             DateTime observedAt = this.UtcNow();
             DateTime serverTime = DateTime.SpecifyKind(this.Server.Time, DateTimeKind.Utc);
             bool isOpen = this.Symbol.MarketHours.IsOpened();
+            this.ObserveMarketState(observedAt, isOpen);
             TimeSpan timeTillOpen = this.Symbol.MarketHours.TimeTillOpen();
             TimeSpan timeTillClose = this.Symbol.MarketHours.TimeTillClose();
             DateTime? nextOpenTime = isOpen ? null : serverTime.Add(timeTillOpen);
@@ -156,7 +166,9 @@ namespace CAlgo.Robots
             payload.Append("\"time_till_open_seconds\":").Append(Math.Max(0.0d, timeTillOpen.TotalSeconds).ToString("R", CultureInfo.InvariantCulture)).Append(',');
             payload.Append("\"time_till_close_seconds\":").Append(Math.Max(0.0d, timeTillClose.TotalSeconds).ToString("R", CultureInfo.InvariantCulture)).Append(',');
             payload.Append("\"next_open_time\":").Append(this.JsonTimestamp(nextOpenTime)).Append(',');
-            payload.Append("\"next_close_time\":").Append(this.JsonTimestamp(nextCloseTime));
+            payload.Append("\"next_close_time\":").Append(this.JsonTimestamp(nextCloseTime)).Append(',');
+            payload.Append("\"opened_at\":").Append(this.JsonTimestamp(this.openedAt)).Append(',');
+            payload.Append("\"first_quote_after_open_at\":").Append(this.JsonTimestamp(this.firstQuoteAfterOpenAt));
             payload.Append('}');
 
             string temporaryPath = this.marketSessionPath + ".tmp";
@@ -173,6 +185,17 @@ namespace CAlgo.Robots
                     System.IO.File.Delete(temporaryPath);
                 }
             }
+        }
+
+        private void ObserveMarketState(DateTime observedAt, bool isOpen)
+        {
+            if (!this.marketWasOpen.HasValue || this.marketWasOpen.Value != isOpen)
+            {
+                this.openedAt = isOpen ? observedAt : (DateTime?)null;
+                this.firstQuoteAfterOpenAt = null;
+            }
+
+            this.marketWasOpen = isOpen;
         }
 
         private string JsonTimestamp(DateTime? value)

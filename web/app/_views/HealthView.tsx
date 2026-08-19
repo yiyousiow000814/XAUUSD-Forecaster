@@ -20,7 +20,12 @@ export type StatusPayload = {
     market_session?: "OPEN" | "CLOSED" | "WEEKLY_CLOSED" | "DATA_UNAVAILABLE";
     source_of_truth: string;
     sites_mirror: string;
-    components: Record<string, { last_success: string | null; age_seconds: number | null; status: string; last_error: string | null }>;
+    components: Record<string, {
+      last_success: string | null; age_seconds: number | null; status: string; last_error: string | null;
+      latest_decision?: string | null; decision_age_seconds?: number | null;
+      decision_output_status?: string; decision_output_reason?: string | null;
+      decision_output_message?: string | null;
+    }>;
   };
   news_source_health: Array<{
     source: string; label: string; role: string; health: "HEALTHY" | "DEGRADED" | "ERROR" | "STALE" | "FALLBACK_ACTIVE" | "WARMING_UP";
@@ -199,6 +204,8 @@ function ComponentHealthCard({
         <div><dt>职责</dt><dd>{componentRole(name)}</dd></div>
         <div><dt>最近成功</dt><dd>{localTime(item.last_success)}</dd></div>
         <div><dt>距上次成功</dt><dd>{compactElapsed(item.age_seconds)}</dd></div>
+        {item.latest_decision ? <div><dt>最新决策</dt><dd>{localTime(item.latest_decision)}</dd></div> : null}
+        {item.decision_output_message ? <div><dt>决策输出</dt><dd>{item.decision_output_message}</dd></div> : null}
         <div><dt>组件标识</dt><dd><code>{name}</code></dd></div>
         <div><dt>原始状态</dt><dd><code>{item.status}</code></dd></div>
         <div><dt>最近错误</dt><dd><code>{item.last_error ?? "无已记录错误"}</code></dd></div>

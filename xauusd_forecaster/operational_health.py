@@ -523,6 +523,36 @@ def extend_with_component_alerts(
                     ) or {},
                 },
             ))
+        if (
+            name == "decision_collector"
+            and component.get("decision_output_status") == "STALLED"
+            and component.get("collector_state") == "RUNNING"
+            and status in {"OK", "WARN"}
+        ):
+            alerts.append(_alert(
+                "OPS_DECISION_OUTPUT_STALLED",
+                severity="ERROR",
+                scope="decision_output",
+                message_zh=(
+                    "市场与报价正常，但 5 分钟决策输出已超过容许节奏。"
+                ),
+                blocking=True,
+                evidence={
+                    "status": "STALLED",
+                    "age_seconds": component.get("decision_output_age_seconds"),
+                    "latest_decision": component.get("latest_decision"),
+                    "observation_started_at": component.get(
+                        "decision_observation_started_at"
+                    ),
+                    "expected_cadence_seconds": component.get(
+                        "decision_output_expected_cadence_seconds"
+                    ),
+                    "stalled_after_seconds": component.get(
+                        "decision_output_stalled_after_seconds"
+                    ),
+                    "market_closes_at": component.get("market_closes_at"),
+                },
+            ))
     for source in news_sources:
         health = str(source.get("health") or "UNKNOWN")
         if health not in {"HEALTHY", "WARMING_UP"}:
