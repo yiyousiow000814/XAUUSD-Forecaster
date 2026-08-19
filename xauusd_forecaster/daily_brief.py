@@ -1300,15 +1300,19 @@ def recent_daily_briefs(connection: sqlite3.Connection, *, limit: int = 14) -> l
 
 def daily_brief_summary(
     connection: sqlite3.Connection, *, now: datetime | None = None,
+    total_brief_days: int | None = None,
 ) -> dict[str, object]:
     instant = now or datetime.now(UTC)
     day = instant.astimezone(KUALA_LUMPUR).date().isoformat()
     row = connection.execute(
         "SELECT * FROM daily_news_brief_refresh_state WHERE brief_date=?", (day,),
     ).fetchone()
-    total = int(connection.execute(
-        "SELECT COUNT(DISTINCT brief_date) FROM daily_news_briefs"
-    ).fetchone()[0])
+    total = (
+        int(total_brief_days) if total_brief_days is not None
+        else int(connection.execute(
+            "SELECT COUNT(DISTINCT brief_date) FROM daily_news_briefs"
+        ).fetchone()[0])
+    )
     if not row:
         latest = _latest_brief(connection, day)
         return {"brief_date": day, "phase": "UPDATING" if latest else "WAITING",

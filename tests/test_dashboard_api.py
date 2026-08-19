@@ -1405,6 +1405,8 @@ def test_dashboard_annotation_counts_match_current_worker_policy(tmp_path) -> No
                 parsed_at=now + timedelta(seconds=1),
                 prompt_version=PROMPT_VERSION,
             )
+    from xauusd_forecaster.news_scheduler import sync_pending_jobs
+    sync_pending_jobs(ledger.connection, now=now + timedelta(seconds=2))
     ledger.connection.close()
 
     payload = _dashboard_module()._dashboard_payload(database)
@@ -1985,7 +1987,19 @@ def test_critical_builder_uses_bounded_u5_window_and_materialized_counts(
     module = _dashboard_module()
     now = datetime(2026, 8, 19, 10, 0, tzinfo=UTC)
     database = tmp_path / "forward.sqlite3"
-    ForwardLedger(database, now=now).close()
+    ledger = ForwardLedger(database, now=now)
+    historical_jobs = [(
+        f"historical-{index}", "ACTIVE_ANNOTATION", "fixture",
+        f"item-{index}", 1, "", "historical-prompt", "NORMAL", "COMPLETED",
+        now.isoformat(), None, None, 1, None, now.isoformat(), now.isoformat(),
+        now.isoformat(),
+    ) for index in range(4_000)]
+    with ledger.connection:
+        ledger.connection.executemany(
+            "INSERT INTO news_ai_jobs_v1 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            historical_jobs,
+        )
+    ledger.close()
     real_connect = module.sqlite3.connect
     statements: list[str] = []
 
@@ -2030,6 +2044,19 @@ def test_critical_builder_uses_bounded_u5_window_and_materialized_counts(
         and ("count(" in statement or "max(" in statement)
         for statement in normalized
     )
+    assert "select max(created_at) from decision_events" not in normalized
+    job_reads = [
+        statement for statement in normalized
+        if "from news_ai_jobs_v1" in statement
+    ]
+    assert job_reads
+    assert all(
+        " state in (" in statement
+        or " state='" in statement
+        or " j.state in (" in statement
+        or " j.state='" in statement
+        for statement in job_reads
+    ), job_reads
 
 
 def test_live_quote_candle_cache_reads_only_appended_bytes(tmp_path) -> None:
@@ -2944,6 +2971,8 @@ def test_dashboard_keeps_readable_late_news_in_semantic_queue(tmp_path) -> None:
             "cluster_id": "late-readable",
         }
     )
+    from xauusd_forecaster.news_scheduler import sync_pending_jobs
+    sync_pending_jobs(ledger.connection, now=now)
     ledger.connection.close()
 
     payload = _dashboard_module()._dashboard_payload(database)

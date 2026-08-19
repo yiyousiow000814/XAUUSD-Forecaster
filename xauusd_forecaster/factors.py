@@ -150,6 +150,18 @@ def aggregate_news_features(
     return totals
 
 
+FACTOR_COVERAGE_NEWS_SOURCES = frozenset({
+    "gdelt_gold_geopolitics",
+    "google_news_gold_geopolitics",
+    "google_news_gold_context",
+    "us_treasury_press_releases",
+    "world_gold_council_central_banks",
+})
+FACTOR_COVERAGE_MACRO_SERIES = frozenset({
+    "DGS2", "DFII10", "DTWEXBGS", "DCOILWTICO", "WALCL", "VIXCLS",
+})
+
+
 def factor_coverage(
     latest_macro: dict[str, dict[str, object]] | None = None,
     news_sources: set[str] | None = None,

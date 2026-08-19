@@ -328,3 +328,197 @@ def dashboard_macro_source_summary(
         "item_count": int(row[0]), "revision_count": int(row[1]),
         "latest_item_time": row[2],
     }
+
+
+def install_dashboard_critical_activity_schema(
+    connection: sqlite3.Connection,
+) -> None:
+    """Materialize the remaining fixed-cardinality critical activity state."""
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS dashboard_latest_activity_v1 (
+            activity_name TEXT PRIMARY KEY,
+            activity_time TEXT
+        );
+        CREATE TABLE IF NOT EXISTS dashboard_macro_latest_v1 (
+            series_id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            observation_period TEXT NOT NULL,
+            revision_number INTEGER NOT NULL,
+            value REAL NOT NULL,
+            unit TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS dashboard_daily_brief_summary_v1 (
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            total_brief_days INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS dashboard_daily_brief_days_v1 (
+            brief_date TEXT PRIMARY KEY
+        );
+        CREATE TRIGGER IF NOT EXISTS dashboard_latest_poll_insert_v1
+        AFTER INSERT ON source_polls BEGIN
+          INSERT INTO dashboard_latest_activity_v1 VALUES
+            ('source_polls',NEW.fetched_time)
+          ON CONFLICT(activity_name) DO UPDATE SET
+            activity_time=CASE
+              WHEN activity_time IS NULL OR excluded.activity_time>activity_time
+              THEN excluded.activity_time ELSE activity_time END;
+        END;
+        CREATE TRIGGER IF NOT EXISTS dashboard_latest_decision_insert_v1
+        AFTER INSERT ON decision_events BEGIN
+          INSERT INTO dashboard_latest_activity_v1 VALUES
+            ('decision_events',NEW.created_at)
+          ON CONFLICT(activity_name) DO UPDATE SET
+            activity_time=CASE
+              WHEN activity_time IS NULL OR excluded.activity_time>activity_time
+              THEN excluded.activity_time ELSE activity_time END;
+          INSERT INTO dashboard_latest_activity_v1 VALUES
+            ('decision_time',NEW.decision_time)
+          ON CONFLICT(activity_name) DO UPDATE SET
+            activity_time=CASE
+              WHEN activity_time IS NULL OR excluded.activity_time>activity_time
+              THEN excluded.activity_time ELSE activity_time END;
+        END;
+        CREATE TRIGGER IF NOT EXISTS dashboard_latest_outcome_insert_v1
+        AFTER INSERT ON outcomes BEGIN
+          INSERT INTO dashboard_latest_activity_v1 VALUES
+            ('outcomes',NEW.appended_at)
+          ON CONFLICT(activity_name) DO UPDATE SET
+            activity_time=CASE
+              WHEN activity_time IS NULL OR excluded.activity_time>activity_time
+              THEN excluded.activity_time ELSE activity_time END;
+        END;
+        CREATE TRIGGER IF NOT EXISTS dashboard_latest_annotation_insert_v1
+        AFTER INSERT ON news_annotations BEGIN
+          INSERT INTO dashboard_latest_activity_v1 VALUES
+            ('news_annotations',NEW.parsed_at)
+          ON CONFLICT(activity_name) DO UPDATE SET
+            activity_time=CASE
+              WHEN activity_time IS NULL OR excluded.activity_time>activity_time
+              THEN excluded.activity_time ELSE activity_time END;
+        END;
+        CREATE TRIGGER IF NOT EXISTS dashboard_macro_latest_insert_v1
+        AFTER INSERT ON macro_observations BEGIN
+          INSERT INTO dashboard_macro_latest_v1
+            (series_id,source,observation_period,revision_number,value,unit)
+          VALUES (NEW.series_id,NEW.source,NEW.observation_period,
+                  NEW.revision_number,NEW.value,NEW.unit)
+          ON CONFLICT(series_id) DO UPDATE SET
+            source=excluded.source,
+            observation_period=excluded.observation_period,
+            revision_number=excluded.revision_number,
+            value=excluded.value,
+            unit=excluded.unit
+          WHERE excluded.observation_period>observation_period
+             OR (excluded.observation_period=observation_period
+                 AND excluded.revision_number>revision_number);
+        END;
+        CREATE TRIGGER IF NOT EXISTS dashboard_daily_brief_insert_v1
+        AFTER INSERT ON daily_news_briefs BEGIN
+          INSERT OR IGNORE INTO dashboard_daily_brief_days_v1
+            VALUES (NEW.brief_date);
+          UPDATE dashboard_daily_brief_summary_v1
+             SET total_brief_days=total_brief_days+changes() WHERE id=1;
+        END;
+        """
+    )
+    installed = connection.execute(
+        """SELECT 1 FROM dashboard_summary_metadata_v1
+           WHERE key='critical_activity_backfill_v1'"""
+    ).fetchone()
+    if installed:
+        return
+    with connection:
+        activities = (
+            ("source_polls", "SELECT max(fetched_time) FROM source_polls"),
+            ("decision_events", "SELECT max(created_at) FROM decision_events"),
+            ("decision_time", "SELECT max(decision_time) FROM decision_events"),
+            ("outcomes", "SELECT max(appended_at) FROM outcomes"),
+            ("news_annotations", "SELECT max(parsed_at) FROM news_annotations"),
+        )
+        for name, query in activities:
+            connection.execute(
+                "INSERT OR REPLACE INTO dashboard_latest_activity_v1 VALUES (?,?)",
+                (name, connection.execute(query).fetchone()[0]),
+            )
+        connection.execute("DELETE FROM dashboard_macro_latest_v1")
+        connection.execute(
+            """INSERT INTO dashboard_macro_latest_v1
+                 (series_id,source,observation_period,revision_number,value,unit)
+               SELECT series_id,source,observation_period,revision_number,value,unit
+               FROM (
+                 SELECT *,row_number() OVER (
+                   PARTITION BY series_id
+                   ORDER BY observation_period DESC,revision_number DESC
+                 ) AS current_rank
+                 FROM macro_observations
+               ) WHERE current_rank=1"""
+        )
+        connection.execute(
+            """INSERT OR IGNORE INTO dashboard_daily_brief_days_v1
+                 SELECT DISTINCT brief_date FROM daily_news_briefs"""
+        )
+        connection.execute(
+            """INSERT OR REPLACE INTO dashboard_daily_brief_summary_v1
+                 (id,total_brief_days)
+               SELECT 1,count(*) FROM dashboard_daily_brief_days_v1"""
+        )
+        connection.execute(
+            """INSERT INTO dashboard_summary_metadata_v1(key)
+               VALUES ('critical_activity_backfill_v1')"""
+        )
+
+
+def dashboard_latest_activity(connection: sqlite3.Connection) -> dict[str, str | None]:
+    activity_names = (
+        "source_polls", "decision_events", "decision_time", "outcomes",
+        "news_annotations",
+    )
+    return {
+        str(row[0]): (str(row[1]) if row[1] else None)
+        for row in connection.execute(
+            """SELECT activity_name,activity_time
+               FROM dashboard_latest_activity_v1
+               WHERE activity_name IN (?,?,?,?,?)""",
+            activity_names,
+        ).fetchall()
+    }
+
+
+def dashboard_latest_macro(
+    connection: sqlite3.Connection, series_ids: tuple[str, ...],
+) -> dict[str, dict]:
+    if not series_ids:
+        return {}
+    placeholders = ",".join("?" for _ in series_ids)
+    return {
+        str(row["series_id"]): dict(row)
+        for row in connection.execute(
+            f"""SELECT series_id,observation_period,value,unit
+                FROM dashboard_macro_latest_v1
+                WHERE series_id IN ({placeholders}) ORDER BY series_id""",
+            series_ids,
+        ).fetchall()
+    }
+
+
+def dashboard_collected_news_sources(
+    connection: sqlite3.Connection, sources: tuple[str, ...],
+) -> set[str]:
+    if not sources:
+        return set()
+    placeholders = ",".join("?" for _ in sources)
+    return {
+        str(row[0]) for row in connection.execute(
+            f"""SELECT source FROM dashboard_news_source_summary_v1
+                WHERE source IN ({placeholders})""",
+            sources,
+        ).fetchall()
+    }
+
+
+def dashboard_total_brief_days(connection: sqlite3.Connection) -> int:
+    row = connection.execute(
+        "SELECT total_brief_days FROM dashboard_daily_brief_summary_v1 WHERE id=1"
+    ).fetchone()
+    return int(row[0])

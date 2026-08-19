@@ -16,6 +16,7 @@ LEGACY_NEWS_PROMPT_VERSION = "news-json-v14-material-event-evidence"
 LEGACY_SEMANTIC_NEWS_PROMPT_VERSION = "news-json-v15-ai-semantic-review"
 PREVIOUS_NEWS_PROMPT_VERSION = "news-json-v16-xauusd-transmission-evidence"
 CURRENT_NEWS_PROMPT_VERSION = "news-json-v17-source-grounded-latin-display"
+NEWS_ANNOTATION_USABILITY_CONTRACT_VERSION = "news-annotation-usability-v1"
 DISPLAY_LATIN_SPAN_MAX_CHARACTERS = 512
 CONTROLLED_DISPLAY_LATIN = frozenset({"XAUUSD"})
 _VISIBLE_LATIN_INTERNAL_PUNCTUATION = frozenset(".'&+/:_%#-’")

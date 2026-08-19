@@ -17,6 +17,7 @@ SOURCE_REPORTED_TIME = "SOURCE_REPORTED"
 MIXED_PRECISE_OR_BATCH_PROXY_TIME = "MIXED_PRECISE_OR_BATCH_PROXY"
 _COARSE_PUBLICATION_TIME_SOURCES = frozenset({"gdelt_gold_geopolitics"})
 _SEMANTIC_ELIGIBILITY_SQL_FUNCTION = "news_semantic_is_eligible"
+NEWS_SEMANTIC_ELIGIBILITY_CONTRACT_VERSION = "news-semantic-eligibility-v1"
 
 _CATEGORY_TIME_RULES = {
     "inflation_employment": (timedelta(hours=24), 180.0),

@@ -29,12 +29,17 @@ from xauusd_forecaster.dashboard_payloads import (
     audit_status_payload,
     critical_status_payload,
 )
+from xauusd_forecaster.critical_annotation_state import annotation_queue_snapshot
 from xauusd_forecaster.dashboard_summaries import (
+    dashboard_collected_news_sources,
     dashboard_distinct_article_count,
+    dashboard_latest_activity,
+    dashboard_latest_macro,
     dashboard_macro_source_summary,
     dashboard_news_source_summary,
     dashboard_source_poll_summary,
     dashboard_table_counts,
+    dashboard_total_brief_days,
     dashboard_valid_outcome_summary,
 )
 from xauusd_forecaster.news_scheduler import (  # noqa: E402
@@ -119,6 +124,26 @@ def _semantic_pipeline_component(latest, *, now: datetime) -> dict:
             if "actionable_failure_counts_json" in latest_keys else {}
         ),
     }
+
+
+def _materialized_semantic_health(
+    connection: sqlite3.Connection, decision_id: str | None,
+) -> dict | None:
+    if not decision_id:
+        return None
+    row = connection.execute(
+        """SELECT observed_at,status,reason_codes_json,heartbeat_at,
+                  unresolved_items,oldest_unresolved_at,snapshot_hash
+           FROM news_semantic_health_snapshots_v1
+           WHERE source_decision_id=?""",
+        (decision_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    result = dict(row)
+    result["reason_codes"] = json.loads(result.pop("reason_codes_json"))
+    result["actionable_failure_counts"] = {}
+    return result
 
 
 def _collector_component(
@@ -309,7 +334,11 @@ def _decision_collector_component(
     })
     return component
 
-from xauusd_forecaster.factors import factor_coverage  # noqa: E402
+from xauusd_forecaster.factors import (  # noqa: E402
+    FACTOR_COVERAGE_MACRO_SERIES,
+    FACTOR_COVERAGE_NEWS_SOURCES,
+    factor_coverage,
+)
 from xauusd_forecaster.dashboard_payloads import bounded_evidence_window  # noqa: E402
 from xauusd_forecaster.daily_brief import (  # noqa: E402
     daily_brief_summary,
@@ -327,7 +356,6 @@ from xauusd_forecaster.annotation import (  # noqa: E402
     GEMINI_SAFE_INPUT_TOKENS_PER_MINUTE_TOTAL,
     INVALID_CHINESE_TITLE,
     PROMPT_VERSION,
-    completed_annotation_records,
     pending_annotation_records,
 )
 from xauusd_forecaster.gemini_quota import (  # noqa: E402
@@ -792,7 +820,8 @@ def _latest_decision_created_at(database: Path) -> str | None:
     )
     try:
         return connection.execute(
-            "SELECT max(created_at) FROM decision_events"
+            """SELECT activity_time FROM dashboard_latest_activity_v1
+               WHERE activity_name='decision_events'"""
         ).fetchone()[0]
     finally:
         connection.close()
@@ -2378,99 +2407,25 @@ def _dashboard_payload(
                 PROMPT_VERSION,
             ),
         ).fetchall() if include_audit else []
-        annotation_queue = connection.execute(
-            f"""SELECT
-                 sum(CASE WHEN length(trim(COALESCE(n.body, ''))) >= 240
-                           AND a.annotation_id IS NOT NULL THEN 1 ELSE 0 END) AS ready,
-                 sum(CASE WHEN length(trim(COALESCE(n.body, ''))) >= 240
-                           AND a.annotation_id IS NULL
-                           AND (f.failure_id IS NULL OR
-                                (f.is_terminal=0 AND f.next_retry_at <= ?))
-                          THEN 1 ELSE 0 END) AS queued,
-                 sum(CASE WHEN a.annotation_id IS NULL
-                           AND f.is_terminal=0 AND f.next_retry_at > ?
-                          THEN 1 ELSE 0 END) AS backing_off,
-                 sum(CASE WHEN a.annotation_id IS NULL
-                           AND f.is_terminal=1 THEN 1 ELSE 0 END) AS dead_letter,
-                 sum(CASE WHEN length(trim(COALESCE(n.body, ''))) < 240
-                           AND (cf.failure_id IS NULL OR cf.is_terminal=0)
-                          THEN 1 ELSE 0 END) AS waiting_content,
-                 sum(CASE WHEN length(trim(COALESCE(n.body, ''))) < 240
-                           AND cf.is_terminal=1
-                          THEN 1 ELSE 0 END) AS unavailable_content
-               FROM news_revisions n
-               LEFT JOIN news_annotations a
-                 ON a.annotation_id=(
-                   SELECT preferred_a.annotation_id
-                   FROM news_annotations preferred_a
-                   WHERE preferred_a.source=n.source
-                     AND preferred_a.source_item_id=n.source_item_id
-                     AND preferred_a.revision_number=n.revision_number
-                     AND preferred_a.llm_model_version IN (
-                       'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
-                     AND preferred_a.prompt_version=?
-                     AND {model_usable_annotation_predicate('preferred_a')}
-                   ORDER BY CASE preferred_a.llm_model_version
-                       WHEN 'gemini-3.5-flash-lite' THEN 0 ELSE 1 END,
-                     preferred_a.parsed_at DESC LIMIT 1)
-               LEFT JOIN news_llm_failures f
-                 ON f.failure_id=(
-                   SELECT latest_f.failure_id
-                   FROM news_llm_failures latest_f
-                   WHERE latest_f.task_type='ANNOTATION'
-                     AND latest_f.source=n.source
-                     AND latest_f.source_item_id=n.source_item_id
-                     AND latest_f.revision_number=n.revision_number
-                     AND latest_f.llm_model_version IN (
-                       'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite')
-                     AND latest_f.prompt_version=?
-                     AND NOT (latest_f.error_type='RuntimeError'
-                              AND latest_f.error='All configured Gemini keys unavailable for this batch')
-                   ORDER BY latest_f.failed_at DESC LIMIT 1)
-               LEFT JOIN news_content_failures cf
-                 ON cf.failure_id=(
-                   SELECT latest_cf.failure_id
-                   FROM news_content_failures latest_cf
-                   WHERE latest_cf.source=n.source
-                     AND latest_cf.source_item_id=n.source_item_id
-                     AND latest_cf.revision_number=n.revision_number
-                   ORDER BY latest_cf.attempt_number DESC LIMIT 1)
-               WHERE NOT EXISTS (
-                 SELECT 1 FROM news_revisions newer
-                 WHERE newer.source=n.source
-                   AND newer.source_item_id=n.source_item_id
-                   AND newer.revision_number>n.revision_number)
-                 AND NOT EXISTS (
-                   SELECT 1 FROM news_revisions peer
-                   WHERE peer.cluster_id=n.cluster_id
-                     AND NOT EXISTS (
-                       SELECT 1 FROM news_revisions peer_newer
-                       WHERE peer_newer.source=peer.source
-                         AND peer_newer.source_item_id=peer.source_item_id
-                         AND peer_newer.revision_number>peer.revision_number)
-                     AND {preferred_cluster_peer_predicate('peer', 'n')})""",
-            (
-                now.isoformat(timespec="microseconds"),
-                now.isoformat(timespec="microseconds"),
-                PROMPT_VERSION,
-                PROMPT_VERSION,
-            ),
-        ).fetchone()
-        # The displayed queue is the worker's real claimable queue, not a
-        # second approximation tied to an older prompt version.
-        claimable_annotations = pending_annotation_records(connection, limit=100_000)
-        claimable_annotation_count = len(claimable_annotations)
-        claimable_annotation_keys = {
-            (
-                str(row["source"]),
-                str(row["source_item_id"]),
-                int(row["revision_number"]),
-            )
-            for row in claimable_annotations
-        }
-        completed_annotation_count = len(
-            completed_annotation_records(connection, limit=100_000)
+        annotation_queue = annotation_queue_snapshot(
+            connection,
+            prompt_version=PROMPT_VERSION,
+            observed_at=now.isoformat(timespec="microseconds"),
         )
+        if include_audit:
+            claimable_annotations = pending_annotation_records(
+                connection, limit=100_000,
+            )
+            claimable_annotation_keys = {
+                (
+                    str(row["source"]),
+                    str(row["source_item_id"]),
+                    int(row["revision_number"]),
+                )
+                for row in claimable_annotations
+            }
+        else:
+            claimable_annotation_keys = set()
         model_rows = connection.execute(
             """SELECT model_identity, model_version, created_at,
                       training_cutoff, hyperparameters_json, artifact_hash
@@ -2481,22 +2436,12 @@ def _dashboard_payload(
         epoch = connection.execute(
             "SELECT value FROM runtime_metadata WHERE key='FORWARD_EPOCH'"
         ).fetchone()[0]
-        macro_rows = connection.execute(
-            """SELECT m.series_id, m.observation_period, m.value, m.unit
-               FROM macro_observations m
-               WHERE m.revision_number=(
-                 SELECT max(r.revision_number) FROM macro_observations r
-                 WHERE r.source=m.source AND r.series_id=m.series_id
-                   AND r.observation_period=m.observation_period)
-                 AND m.observation_period=(
-                   SELECT max(p.observation_period) FROM macro_observations p
-                   WHERE p.series_id=m.series_id)
-               ORDER BY m.series_id"""
-        ).fetchall()
-        latest_macro = {row["series_id"]: dict(row) for row in macro_rows}
-        collected_news_sources = {
-            row[0] for row in connection.execute("SELECT DISTINCT source FROM news_revisions")
-        }
+        latest_macro = dashboard_latest_macro(
+            connection, tuple(sorted(FACTOR_COVERAGE_MACRO_SERIES)),
+        )
+        collected_news_sources = dashboard_collected_news_sources(
+            connection, tuple(sorted(FACTOR_COVERAGE_NEWS_SOURCES)),
+        )
         if include_learning:
             learning, execution_learning = _learning_surfaces(connection)
             counts["live_oos_model_groups"] = len({
@@ -2519,22 +2464,17 @@ def _dashboard_payload(
             _recent_market_chart(database, connection, now)
             if include_market_chart else {}
         )
-        latest_news_poll = connection.execute(
-            "SELECT max(fetched_time) FROM source_polls"
-        ).fetchone()[0]
-        latest_decision_time = connection.execute(
-            "SELECT max(created_at) FROM decision_events"
-        ).fetchone()[0]
+        latest_activity = dashboard_latest_activity(connection)
+        latest_news_poll = latest_activity.get("source_polls")
+        latest_decision_time = latest_activity.get("decision_events")
         component_times = {
             "quote_bridge": _latest_quote_received(database),
             # The collector invokes the settler on every successful loop. No
             # newly appended outcome is expected until a decision reaches its
             # 30-minute horizon, so output recency is not worker health.
-            "outcome_settler": connection.execute(
-                "SELECT max(appended_at) FROM outcomes"
-            ).fetchone()[0],
+            "outcome_settler": latest_activity.get("outcomes"),
             "news_collector": None,
-            "gemini_annotator": connection.execute("SELECT max(parsed_at) FROM news_annotations").fetchone()[0],
+            "gemini_annotator": latest_activity.get("news_annotations"),
         }
         news_source_health = _news_source_health(connection, now)
         monitored_news_sources = {
@@ -2573,7 +2513,13 @@ def _dashboard_payload(
         daily_news_briefs = (
             recent_daily_briefs(connection) if include_audit else []
         )
-        daily_news_brief_summary = daily_brief_summary(connection, now=now)
+        daily_news_brief_summary = daily_brief_summary(
+            connection,
+            now=now,
+            total_brief_days=(
+                None if include_audit else dashboard_total_brief_days(connection)
+            ),
+        )
         scheduler_ledger_available = connection.execute(
             """SELECT 1 FROM sqlite_master
                WHERE type='table' AND name='news_ai_account_daily_usage_v1'"""
@@ -2594,11 +2540,18 @@ def _dashboard_payload(
             account_ids=frozenset(
                 credential.account_id for credential in credentials
             ),
+            materialized_latest_decision_time=latest_activity.get("decision_time"),
+            use_materialized_latest_decision=True,
         )
         operational_health = scheduler_health_snapshot(connection, now=now)
-        current_semantic_health = news_semantic_pipeline_health(
-            SimpleNamespace(connection=connection, path=database),
-            observed_at=now,
+        current_semantic_health = (
+            news_semantic_pipeline_health(
+                SimpleNamespace(connection=connection, path=database),
+                observed_at=now,
+            )
+            if include_optional else _materialized_semantic_health(
+                connection, str(latest["decision_id"]) if latest else None,
+            )
         )
     finally:
         connection.rollback()
@@ -3026,8 +2979,8 @@ def _dashboard_payload(
         "news_source_health": news_source_health,
         "news_input_coverage": news_input_coverage,
         "annotation_queue": {
-            "ready": completed_annotation_count,
-            "queued": claimable_annotation_count,
+            "ready": int(annotation_queue["ready"]),
+            "queued": int(annotation_queue["queued"]),
             "backing_off": int(annotation_queue["backing_off"] or 0),
             "dead_letter": int(annotation_queue["dead_letter"] or 0),
             "waiting_content": int(annotation_queue["waiting_content"] or 0),

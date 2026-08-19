@@ -49,6 +49,8 @@ def production_contract_snapshot(
     *,
     now: datetime | None = None,
     account_ids: frozenset[str] | None = None,
+    materialized_latest_decision_time: str | None = None,
+    use_materialized_latest_decision: bool = False,
 ) -> dict:
     """Capture all database facts at one SQLite read boundary."""
     instant = now or datetime.now(UTC)
@@ -143,9 +145,12 @@ def production_contract_snapshot(
             snapshot["latest_source_status"][spec.source] = (
                 str(row[0]) if row is not None else None
             )
-        snapshot["latest_decision_time"] = connection.execute(
-            "SELECT max(decision_time) FROM decision_events"
-        ).fetchone()[0]
+        snapshot["latest_decision_time"] = (
+            materialized_latest_decision_time
+            if use_materialized_latest_decision else connection.execute(
+                "SELECT max(decision_time) FROM decision_events"
+            ).fetchone()[0]
+        )
     finally:
         if owns_transaction:
             connection.rollback()
