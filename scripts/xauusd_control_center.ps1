@@ -46,6 +46,11 @@ $runtimeControlFileNames = @(
 )
 $collectorSecretsPath = Join-Path $repositoryRoot ".local\secrets\collector-keys.json"
 
+function Get-UserEnvironmentValue {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    [Environment]::GetEnvironmentVariable($Name, "User")
+}
+
 function Get-CollectorSecret {
     param([Parameter(Mandatory = $true)][string]$Name)
     $userValue = [Environment]::GetEnvironmentVariable($Name, "User")
@@ -1337,6 +1342,10 @@ function Start-ForecasterService {
     if ($Service.Key -in @("annotator", "api")) {
         $env:GEMINI_API_KEY = [Environment]::GetEnvironmentVariable("GEMINI_API_KEY", "User")
         $env:GEMINI_API_KEYS = [Environment]::GetEnvironmentVariable("GEMINI_API_KEYS", "User")
+    }
+    if ($Service.Key -in @("api", "sync")) {
+        $env:DASHBOARD_OPERATOR_BRIDGE_TOKEN = Get-UserEnvironmentValue `
+            -Name "DASHBOARD_OPERATOR_BRIDGE_TOKEN"
     }
     if ($Service.Key -eq "collector") {
         $env:BLS_API_KEY = Get-CollectorSecret -Name "BLS_API_KEY"

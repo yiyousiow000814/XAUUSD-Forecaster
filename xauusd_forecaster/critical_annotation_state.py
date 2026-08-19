@@ -63,10 +63,13 @@ def install_annotation_job_count_schema(connection: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS dashboard_annotation_job_counts_v1 (
             task_type TEXT NOT NULL,
             prompt_version TEXT NOT NULL,
+            lane_classified INTEGER NOT NULL CHECK(lane_classified IN (0,1)),
+            work_lane TEXT NOT NULL,
             state TEXT NOT NULL,
             retired INTEGER NOT NULL CHECK(retired IN (0,1)),
             job_count INTEGER NOT NULL CHECK(job_count >= 0),
-            PRIMARY KEY(task_type,prompt_version,state,retired)
+            PRIMARY KEY(task_type,prompt_version,lane_classified,
+                        work_lane,state,retired)
         );
         CREATE TABLE IF NOT EXISTS dashboard_job_count_metadata_v1 (
             version TEXT PRIMARY KEY
@@ -74,36 +77,61 @@ def install_annotation_job_count_schema(connection: sqlite3.Connection) -> None:
         CREATE TRIGGER IF NOT EXISTS dashboard_job_count_insert_v1
         AFTER INSERT ON news_ai_jobs_v1 BEGIN
           INSERT INTO dashboard_annotation_job_counts_v1
-            (task_type,prompt_version,state,retired,job_count)
-          VALUES (NEW.task_type,NEW.prompt_version,NEW.state,
+            (task_type,prompt_version,lane_classified,work_lane,state,retired,
+             job_count)
+          VALUES (NEW.task_type,NEW.prompt_version,NEW.lane_classified,
+            NEW.work_lane,NEW.state,
             CASE WHEN NEW.last_error='{RETIRED_ERROR}' THEN 1 ELSE 0 END,1)
-          ON CONFLICT(task_type,prompt_version,state,retired)
+          ON CONFLICT(task_type,prompt_version,lane_classified,work_lane,state,
+                      retired)
           DO UPDATE SET job_count=job_count+1;
         END;
         CREATE TRIGGER IF NOT EXISTS dashboard_job_count_update_v1
-        AFTER UPDATE OF task_type,prompt_version,state,last_error
+        AFTER UPDATE OF task_type,prompt_version,lane_classified,work_lane,state,
+                        last_error
         ON news_ai_jobs_v1 BEGIN
           UPDATE dashboard_annotation_job_counts_v1 SET job_count=job_count-1
            WHERE task_type=OLD.task_type AND prompt_version=OLD.prompt_version
+             AND lane_classified=OLD.lane_classified
+             AND work_lane=OLD.work_lane
              AND state=OLD.state AND retired=CASE
                WHEN OLD.last_error='{RETIRED_ERROR}' THEN 1 ELSE 0 END;
           INSERT INTO dashboard_annotation_job_counts_v1
-            (task_type,prompt_version,state,retired,job_count)
-          VALUES (NEW.task_type,NEW.prompt_version,NEW.state,
+            (task_type,prompt_version,lane_classified,work_lane,state,retired,
+             job_count)
+          VALUES (NEW.task_type,NEW.prompt_version,NEW.lane_classified,
+            NEW.work_lane,NEW.state,
             CASE WHEN NEW.last_error='{RETIRED_ERROR}' THEN 1 ELSE 0 END,1)
-          ON CONFLICT(task_type,prompt_version,state,retired)
+          ON CONFLICT(task_type,prompt_version,lane_classified,work_lane,state,
+                      retired)
           DO UPDATE SET job_count=job_count+1;
         END;
         CREATE TRIGGER IF NOT EXISTS dashboard_job_count_delete_v1
         AFTER DELETE ON news_ai_jobs_v1 BEGIN
           UPDATE dashboard_annotation_job_counts_v1 SET job_count=job_count-1
            WHERE task_type=OLD.task_type AND prompt_version=OLD.prompt_version
+             AND lane_classified=OLD.lane_classified
+             AND work_lane=OLD.work_lane
              AND state=OLD.state AND retired=CASE
                WHEN OLD.last_error='{RETIRED_ERROR}' THEN 1 ELSE 0 END;
         END;
         """
     )
-    marker = "annotation-job-counts-v1"
+    count_columns = {
+        str(row[1]) for row in connection.execute(
+            "PRAGMA table_info(dashboard_annotation_job_counts_v1)"
+        ).fetchall()
+    }
+    if "lane_classified" not in count_columns:
+        with connection:
+            connection.executescript(
+                """DROP TRIGGER IF EXISTS dashboard_job_count_insert_v1;
+                   DROP TRIGGER IF EXISTS dashboard_job_count_update_v1;
+                   DROP TRIGGER IF EXISTS dashboard_job_count_delete_v1;
+                   DROP TABLE dashboard_annotation_job_counts_v1;"""
+            )
+        return install_annotation_job_count_schema(connection)
+    marker = "annotation-job-counts-v3-classified-lanes"
     if connection.execute(
         "SELECT 1 FROM dashboard_job_count_metadata_v1 WHERE version=?",
         (marker,),
@@ -113,12 +141,13 @@ def install_annotation_job_count_schema(connection: sqlite3.Connection) -> None:
         connection.execute("DELETE FROM dashboard_annotation_job_counts_v1")
         connection.execute(
             f"""INSERT INTO dashboard_annotation_job_counts_v1
-                  (task_type,prompt_version,state,retired,job_count)
-                SELECT task_type,prompt_version,state,
+                  (task_type,prompt_version,lane_classified,work_lane,state,
+                   retired,job_count)
+                SELECT task_type,prompt_version,lane_classified,work_lane,state,
                   CASE WHEN last_error='{RETIRED_ERROR}' THEN 1 ELSE 0 END,
                   count(*)
                 FROM news_ai_jobs_v1
-                GROUP BY task_type,prompt_version,state,
+                GROUP BY task_type,prompt_version,lane_classified,work_lane,state,
                   CASE WHEN last_error='{RETIRED_ERROR}' THEN 1 ELSE 0 END"""
         )
         connection.execute(
@@ -152,8 +181,12 @@ def record_annotation_completion(
     ))
     job_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     connection.execute(
-        """INSERT INTO news_ai_jobs_v1 VALUES
-           (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """INSERT INTO news_ai_jobs_v1
+           (job_id,task_type,source,source_item_id,revision_number,annotation_id,
+            prompt_version,priority,state,available_at,lease_owner,
+            lease_expires_at,attempt_count,last_error,created_at,updated_at,
+            completed_at,work_lane,lane_classified) VALUES
+           (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(job_id) DO UPDATE SET
              state='COMPLETED',available_at=excluded.available_at,
              lease_owner=NULL,lease_expires_at=NULL,last_error=NULL,
@@ -163,7 +196,7 @@ def record_annotation_completion(
             job_id, "ACTIVE_ANNOTATION", source, source_item_id,
             revision_number, "", prompt_version, "NORMAL", "COMPLETED",
             completed_at, None, None, 0, None, completed_at, completed_at,
-            completed_at,
+            completed_at, "LIVE", 1,
         ),
     )
 
@@ -497,35 +530,35 @@ def annotation_queue_snapshot(
 ) -> dict[str, int]:
     """Read exact annotation state without touching accumulated news history."""
     fixed = {
-        (str(row[0]), int(row[1])): int(row[2])
+        (int(row[0]), str(row[1]), str(row[2]), int(row[3])): int(row[4])
         for row in connection.execute(
-            """SELECT state,retired,job_count
+            """SELECT lane_classified,work_lane,state,retired,job_count
                FROM dashboard_annotation_job_counts_v1
                WHERE task_type='ACTIVE_ANNOTATION' AND prompt_version=?""",
             (prompt_version,),
         ).fetchall()
     }
-    active = connection.execute(
-        f"""SELECT count(*)
-            FROM news_ai_jobs_v1
-            WHERE task_type='ACTIVE_ANNOTATION' AND prompt_version=?
-              AND state='BACKING_OFF' AND available_at>?
-              AND COALESCE(last_error,'')<>'{RETIRED_ERROR}'""",
-        (prompt_version, observed_at),
-    ).fetchone()
+    _ = observed_at  # Retained for the stable public call signature.
     current = connection.execute(
         """SELECT waiting_content,unavailable_content,invalid_display,
                   ready_annotations,pending_annotations
            FROM dashboard_news_current_counts_v1 WHERE id=1"""
     ).fetchone()
-    backing_off = int(active[0] or 0)
-    dead_letter = fixed.get(("DEAD_LETTER", 0), 0)
-    pending = int(current[4])
+    def live(state: str) -> int:
+        return fixed.get((1, "LIVE", state, 0), 0)
+    backfill_queued = fixed.get((1, "CONTRACT_BACKFILL", "QUEUED", 0), 0)
+    unclassified = sum(
+        count for (classified, _lane, _state, _retired), count in fixed.items()
+        if classified == 0
+    )
     return {
         "ready": int(current[3]),
-        "queued": max(0, pending - backing_off - dead_letter),
-        "backing_off": backing_off,
-        "dead_letter": dead_letter,
+        "semantic_pending": int(current[4]),
+        "queued": live("QUEUED"),
+        "backing_off": live("BACKING_OFF"),
+        "dead_letter": live("DEAD_LETTER"),
+        "contract_backfill_queued": backfill_queued,
+        "unclassified_annotation_jobs": unclassified,
         "waiting_content": int(current[0]),
         "unavailable_content": int(current[1]),
         "invalid_display": int(current[2]),
@@ -537,6 +570,8 @@ def scheduler_state_counts(connection: sqlite3.Connection) -> list[sqlite3.Row]:
         """SELECT task_type,state,sum(job_count) AS total
            FROM dashboard_annotation_job_counts_v1
            WHERE retired=0
+             AND (task_type<>'ACTIVE_ANNOTATION' OR
+                  (lane_classified=1 AND work_lane='LIVE'))
            GROUP BY task_type,state"""
     ).fetchall()
 

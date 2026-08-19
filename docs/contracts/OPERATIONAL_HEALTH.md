@@ -61,6 +61,34 @@ deferred it. Local account/model quota uses `MODEL_CAPACITY_DEFERRED`; adaptive
 provider pacing uses `PROVIDER_DISPATCH_DEFERRED`. Neither code proves an HTTP
 request was sent.
 
+Contract migration has a separate non-blocking health domain from LIVE work.
+`BACKFILL_BUDGET_DEFERRED` means forecast-safe quota isolation deliberately
+withheld a historical model dispatch before transport. It reserves no quota and
+increments neither attempt nor retry count. Contract-backfill queue size, age,
+and pacing must remain visible in the bounded migration summary but must not
+degrade LIVE annotation task health, create a LIVE stall alert, or change the
+top-level operational status. Genuine provider, storage, or scheduler failures
+retain their existing failure semantics and are not relabeled as healthy pacing.
+
+Only annotation jobs with `lane_classified=1` and `work_lane=LIVE` contribute to
+LIVE queue counts, claimable work, retry pressure, failure windows, or stall
+alerts. `lane_classified=0` is a bounded `UNCLASSIFIED_MIGRATION` state, not an
+implicit LIVE lane; its count is visible separately and is non-blocking while
+the keyset migration advances. Contract-backfill and unclassified totals must
+never be inferred from semantic-pending content counts.
+
+`SEMANTIC_TRANSITION_CONTRACT_FAILED` is a bounded local projection failure.
+It proves neither provider transport nor quota consumption and must not be
+retried through an undeclared model fallback. The source annotation remains
+immutable and the failure retains the declared transition kind and bounded
+validation detail for operator review.
+
+`SEMANTIC_TRANSITION_CONTRACT_CHANGED` means persisted transition state no
+longer matches the stable declared fingerprint for its source version, target
+version, kind, and migrator version. It is a bounded non-provider diagnostic.
+The detector must preserve the existing cursor and projections, perform no
+provider or quota action, and must not substitute a model-backed transition.
+
 New code paths must reuse a catalog meaning or update the canonical catalog.
 They must not persist a changing exception sentence as the only diagnostic key.
 
@@ -138,6 +166,11 @@ Brief state machine. Scheduler evidence includes:
   current 15-minute window;
 - oldest claimable work age and the earliest future retry time;
 - highest active claim count and a bounded non-secret job reference.
+
+Annotation evidence additionally separates classified LIVE, contract-backfill,
+and unclassified-migration counts. The legacy annotation queue counters describe
+classified LIVE work only; semantic pending is a distinct content-contract
+measure.
 
 Counts from articles, event identities, prediction exposures, and training
 rows remain distinct. One must never substitute for another in health gates.

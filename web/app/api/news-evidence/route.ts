@@ -16,6 +16,11 @@ import {
   stageNewsEvidenceBatch,
 } from "../_shared/news-evidence-store";
 import { previewBundle, previewJson, rejectPreviewWrite } from "../_shared/preview";
+import {
+  d1CapabilityFailure,
+  D1CapabilityError,
+  requireD1Capabilities,
+} from "../_shared/d1-capabilities";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +29,9 @@ const MAX_WRITE_ITEMS = 20;
 const MAX_PAGE_ITEMS = 50;
 
 function protocolFailure(reason: unknown) {
+  if (reason instanceof D1CapabilityError) {
+    return NextResponse.json(d1CapabilityFailure(reason), { status: 503 });
+  }
   if (reason instanceof NewsEvidenceProtocolError) {
     return NextResponse.json({
       error: reason.message,
@@ -65,6 +73,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "新闻证据档案暂时不可用" }, { status: 503 });
   }
   try {
+    await requireD1Capabilities(binding, ["paged_news_evidence"]);
     const payload = await readNewsEvidencePage(binding, {
       mode, rawCursor: query.get("cursor"), page, pageSize,
     });
@@ -92,6 +101,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "payload too large" }, { status: 413 });
   }
   try {
+    await requireD1Capabilities(binding, ["paged_news_evidence"]);
     const body = JSON.parse(bounded.serialized) as {
       contract_version?: unknown;
       prepare_snapshot?: unknown;
