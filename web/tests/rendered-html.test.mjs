@@ -643,6 +643,8 @@ test("keeps global shell ownership centralized and prevents view-level design dr
     "../app/_views/AssistantView.tsx",
     "../app/_views/AuditView.tsx",
     "../app/_views/HealthView.tsx",
+    "../app/_views/AdminOverviewView.tsx",
+    "../app/_views/RetryView.tsx",
     "../app/_views/StatusView.tsx",
   ];
 
@@ -651,12 +653,14 @@ test("keeps global shell ownership centralized and prevents view-level design dr
   assert.match(shell, /Aurum Signal Room/);
   assert.match(shell, /XAUUSD · Forward-only intelligence/);
   assert.match(shell, /DASHBOARD_GLOBAL_DESTINATIONS\.map/);
-  assert.match(shell, /DASHBOARD_SYSTEM_DESTINATIONS\.map/);
+  assert.match(shell, /DASHBOARD_ADMIN_DESTINATIONS\.map/);
   assert.match(mobile, /DASHBOARD_GLOBAL_DESTINATIONS\.map/);
   assert.doesNotMatch(mobile, /const SECTIONS|MobileDashboardSection/);
-  assert.equal(navigation.match(/label: "(?:总览|新闻与决策|Assistant|系统)"/g)?.length, 4);
+  assert.equal(navigation.match(/label: "(?:总览|新闻与决策|系统|管理员登录)"/g)?.length, 4);
   assert.match(navigation, /href: "\/audit\?view=news"/);
-  assert.match(navigation, /rooms: \["health", "status"\]/);
+  assert.match(navigation, /rooms: \["health"\]/);
+  assert.match(navigation, /DASHBOARD_ADMIN_DESTINATIONS/);
+  assert.match(navigation, /概览[\s\S]*Assistant[\s\S]*重试任务[\s\S]*AI 模型用量/);
 
   for (const path of views) {
     const source = readFileSync(new URL(path, import.meta.url), "utf8");
@@ -670,13 +674,15 @@ test("keeps global shell ownership centralized and prevents view-level design dr
 test("renders one invariant global header and active section across every dashboard route", async () => {
   const routes = [
     ["/", "总览"],
-    ["/?room=assistant", "Assistant"],
     ["/?room=audit&view=news", "新闻与决策"],
     ["/?room=audit&view=league", "新闻与决策"],
     ["/?room=health", "系统"],
-    ["/?room=status", "系统"],
+    ["/admin", "管理后台"],
+    ["/admin/assistant", "管理后台"],
+    ["/admin/retry-jobs", "管理后台"],
+    ["/admin/ai-usage", "管理后台"],
   ];
-  const labels = ["总览", "新闻与决策", "Assistant", "系统"];
+  const publicLabels = ["总览", "新闻与决策", "系统"];
 
   for (const [path, activeLabel] of routes) {
     const { response, html } = await renderSettled(path, /dashboard-header topbar/);
@@ -690,14 +696,14 @@ test("renders one invariant global header and active section across every dashbo
     assert.equal(header.match(/aria-current="page"/g)?.length, 1, path);
     assert.match(header, new RegExp(`aria-current="page"[^>]*>${activeLabel}</a>`), path);
     assert.equal(header.match(/class="dashboard-global-state"/g)?.length, 1, path);
-    assert.doesNotMatch(header, /返回实时室|学习曲线|AI 模型用量|系统健康/, path);
+    assert.doesNotMatch(header, /返回实时室|学习曲线|AI 模型用量|系统健康|重试任务/, path);
 
     const globalNav = header.match(/<nav class="dashboard-global-nav"[\s\S]*?<\/nav>/)?.[0];
     const mobileNav = header.match(/<select aria-label="切换主要区域"[\s\S]*?<\/select>/)?.[0];
     assert.ok(globalNav && mobileNav, path);
     let previousGlobal = -1;
     let previousMobile = -1;
-    for (const label of labels) {
+    for (const label of publicLabels) {
       const globalIndex = globalNav.indexOf(`>${label}</a>`);
       const mobileIndex = mobileNav.indexOf(`>${label}</option>`);
       assert.ok(globalIndex > previousGlobal, `${path}: desktop ${label}`);
@@ -705,6 +711,43 @@ test("renders one invariant global header and active section across every dashbo
       previousGlobal = globalIndex;
       previousMobile = mobileIndex;
     }
+    assert.match(globalNav, activeLabel === "管理后台" ? />管理后台<\/a>/ : />管理员登录<\/button>/);
+    assert.match(mobileNav, activeLabel === "管理后台" ? />管理后台<\/option>/ : />管理员登录<\/option>/);
+  }
+});
+
+test("keeps Admin login intent local until the explicit Access handoff", () => {
+  const shell = readFileSync(new URL("../app/_components/DashboardShell.tsx", import.meta.url), "utf8");
+  const mobile = readFileSync(new URL("../app/_components/MobileDashboardNav.tsx", import.meta.url), "utf8");
+  const shellCss = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(shell, /dashboard-admin-login-trigger/);
+  assert.match(shell, /onClick=\{openAdminLogin\}/);
+  assert.match(shell, /dialogRef\.current\?\.showModal\(\)/);
+  assert.match(shell, /<h2>管理员登录<\/h2>/);
+  assert.match(shell, /仅系统管理员可访问 Assistant、重试任务和 AI 模型用量。/);
+  assert.match(shell, /登录后进入私有管理后台。/);
+  assert.match(shell, /<a href="\/admin">使用 Google 登录<\/a>/);
+  assert.match(shell, /<button type="button" onClick=\{closeAdminLogin\}>取消<\/button>/);
+  assert.doesNotMatch(shell, /<ul>|其他私有运维工具|登录后可以访问|PRIVATE ADMIN WORKSPACE/);
+  assert.doesNotMatch(shell, /DashboardLink[^\n]*使用 Google 登录/);
+  assert.match(shellCss, /\.dashboard-admin-login-trigger \{[^}]*border-style:dashed/);
+  assert.match(shellCss, /\.admin-login-dialog \{ width:min\(420px/);
+  assert.match(shellCss, /\.admin-login-dialog footer \{[^}]*flex-direction:row/);
+  assert.match(mobile, /destination\?\.private[\s\S]*openAdminLogin\(\)/);
+});
+
+test("renders one canonical Admin navigation with direct child active state", async () => {
+  for (const [path, label, marker] of [
+    ["/admin", "概览", /OWNER OPERATIONS/],
+    ["/admin/assistant", "Assistant", /ASSISTANT/],
+    ["/admin/retry-jobs", "重试任务", /PRIVATE OPERATOR QUEUE/],
+    ["/admin/ai-usage", "AI 模型用量", /AI 模型使用状态/],
+  ]) {
+    const page = await renderSettled(path, marker);
+    assert.equal(page.response.status, 200, path);
+    const navigation = page.html.match(/<nav class="dashboard-section-nav admin-section-nav"[\s\S]*?<\/nav>/)?.[0] ?? "";
+    assert.match(navigation, /概览[\s\S]*Assistant[\s\S]*重试任务[\s\S]*AI 模型用量/, path);
+    assert.match(navigation, new RegExp(`aria-current="page"[^>]*>${label}</a>`), path);
   }
 });
 
@@ -759,12 +802,12 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   assert.match(page, /previewBundle\.status/);
   assert.match(page, /previewBundle\.audit/);
   assert.match(app, /const initialStatus = initialResources\["\/api\/status"\]/);
-  assert.match(app, /<StatusView initialPayload=\{initialStatus\}/);
+  assert.match(app, /<StatusView \/>/);
   assert.match(app, /<HealthView initialPayload=\{initialStatus\}/);
-  for (const view of ["StatusView", "HealthView"]) {
-    const source = readFileSync(new URL(`../app/_views/${view}.tsx`, import.meta.url), "utf8");
-    assert.match(source, /initialPayload \?\? readDashboardResource<StatusPayload>/, view);
-  }
+  const health = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
+  const status = readFileSync(new URL("../app/_views/StatusView.tsx", import.meta.url), "utf8");
+  assert.match(health, /initialPayload \?\? readDashboardResource<StatusPayload>\("\/api\/status"\)/);
+  assert.match(status, /readDashboardResource<StatusPayload>\("\/api\/admin-status"\)/);
   assert.match(page, /previewBundle\.learning_summary/);
   const vite = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
   const learning = readFileSync(new URL("../build/preview-learning.ts", import.meta.url), "utf8");
@@ -803,7 +846,7 @@ test("hydrates Preview first paint from its immutable build snapshot", () => {
   assert.match(previewBuilder, /\*version_history/);
   assert.match(previewBuilder, /"news_evidence": news_evidence/);
   assert.doesNotMatch(page, /auditView === "league"/);
-  assert.match(page, /\[PREVIEW_RESOURCES\.status\]: previewBundle\.status/);
+  assert.match(page, /\[PREVIEW_RESOURCES\.status\]: publicDashboardStatus\(previewBundle\.status\)/);
   assert.match(app, /primeDashboardResources\(initialResources\);\s*const \[location/);
   assert.match(resources, /DEFAULT_TIMEOUT_MS = 10_000/);
   assert.match(resources, /数据读取超时，页面会自动重试/);
@@ -813,6 +856,7 @@ test("uses one current-data contract across every dashboard surface", () => {
   const component = readFileSync(new URL("../app/_components/CurrentDataState.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
   const statusRoute = readFileSync(new URL("../app/api/status/route.ts", import.meta.url), "utf8");
+  const statusReader = readFileSync(new URL("../app/api/_shared/dashboard-status.ts", import.meta.url), "utf8");
   const learningRoute = readFileSync(new URL("../app/api/learning/route.ts", import.meta.url), "utf8");
 
   assert.doesNotMatch(component, /正在同步页面当前指标/);
@@ -830,13 +874,15 @@ test("uses one current-data contract across every dashboard surface", () => {
   const audit = readFileSync(new URL("../app/_views/AuditView.tsx", import.meta.url), "utf8");
   assert.match(audit, /live_oos_model_groups !== undefined\s*\? statusState/);
 
-  const statusD1 = statusRoute.indexOf("dashboard_snapshots WHERE id = ?");
-  const statusPreviewFallback = statusRoute.indexOf("if (previewBundle) return previewJson(previewBundle.status)");
+  const statusD1 = statusReader.indexOf("dashboard_snapshots WHERE id = ?");
+  const statusPreviewFallback = statusRoute.indexOf("if (previewBundle) return previewJson(publicDashboardStatus(previewBundle.status))");
   const learningD1 = learningRoute.indexOf("dashboard_snapshots WHERE id = ?");
   const learningPreviewFallback = learningRoute.indexOf("if (previewBundle?.learning_summary)");
   assert.ok(statusD1 >= 0 && statusPreviewFallback > statusD1, "Preview status must prefer current D1 data");
   assert.ok(learningD1 >= 0 && learningPreviewFallback > learningD1, "Preview learning must prefer current D1 data");
-  assert.match(statusRoute, /withPreviewIdentity\(current, previewBundle\.status\)/);
+  assert.match(statusRoute, /withPreviewIdentity\(current\.payload, previewBundle\.status\)/);
+  assert.match(statusRoute, /publicDashboardStatus\(payload\)/);
+  assert.match(statusReader, /"annotation_queue"[\s\S]*"llm_routing"/);
   assert.match(learningRoute, /"X-Aurum-Preview": "read-only-d1-snapshot"/);
 });
 
@@ -1196,8 +1242,10 @@ test("renders every Preview room from the embedded build snapshot", async () => 
   if (!process.env.WORKERS_CI_BRANCH || process.env.WORKERS_CI_BRANCH === "main") return;
   for (const [path, marker] of [
     ["/", /Aurum Signal Room/],
-    ["/?room=status", /AI 模型使用状态/],
     ["/?room=health", /系统健康状态/],
+    ["/admin", /管理后台/],
+    ["/admin/ai-usage", /AI 模型使用状态/],
+    ["/admin/retry-jobs", /PRIVATE OPERATOR QUEUE/],
   ]) {
     const { response, html } = await renderSettled(path, marker);
     assert.equal(response.status, 200, path);
@@ -1249,7 +1297,7 @@ test("replaces the forecast state with the broker reopening countdown", () => {
 test("renders the Gemini quota status route", async () => {
   const source = readFileSync(new URL("../app/_views/StatusView.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-  const { response, html } = await renderSettled("/?room=status", /AI 模型使用状态/);
+  const { response, html } = await renderSettled("/admin/ai-usage", /AI 模型使用状态/);
   assert.equal(response.status, 200);
   assert.match(html, /AI 模型使用状态/);
   assert.match(html, /Gemini 3.5 Flash-Lite/);
@@ -1285,25 +1333,74 @@ test("renders the Gemini quota status route", async () => {
   assert.match(source, /查看账本与 Google 额度的区别/);
   assert.match(html, /分支配置/);
   assert.match(html, /Pacific midnight/);
-  assert.match(html, /系统健康/);
   assert.match(html, /AI 模型用量/);
+  assert.match(html, /aria-current="page"[^>]*>AI 模型用量<\/a>/);
   assert.match(html, /data-read-state="(?:CURRENT|REFRESHING)"/);
   assert.match(html, /data-live-market-state="MARKET_DATA_UNAVAILABLE"/);
   assert.match(html, /data-operational-state="(?:HEALTHY|WARNING|ERROR)"/);
   assert.match(html, /连接中|运行警告|运行异常|实时链路不可用/);
 });
 
-test("renders component and news-source health on a separate route", async () => {
-  const response = await render("/?room=health");
-  assert.equal(response.status, 200);
-  const html = await response.text();
+test("keeps System Health separate from the dedicated retry workspace", async () => {
+  const healthPage = await renderSettled("/?room=health", /系统健康状态/);
+  assert.equal(healthPage.response.status, 200);
+  const html = healthPage.html;
   assert.match(html, /系统健康状态/);
   assert.match(html, /系统组件/);
   assert.match(html, /新闻来源/);
-  assert.match(html, /AI 模型用量/);
+  assert.doesNotMatch(html, /AI 模型用量|重试任务|管理后台区域/);
+  assert.doesNotMatch(html, /PRIVATE OPERATOR QUEUE|class="retry-queue"/);
   const view = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(view, /RetryQueue|operator-retry|assistant-health/);
+  const retryView = readFileSync(new URL("../app/_views/RetryView.tsx", import.meta.url), "utf8");
+  assert.match(retryView, /<RetryQueue \/>/);
+  const retryPage = await renderSettled("/admin/retry-jobs", /PRIVATE OPERATOR QUEUE/);
+  assert.equal(retryPage.response.status, 200);
+  assert.match(retryPage.html, /PRIVATE OPERATOR QUEUE/);
+  assert.match(retryPage.html, /<h1>重试任务<\/h1>/);
+  assert.match(retryPage.html, /aria-current="page"[^>]*>管理后台<\/a>/);
+  assert.match(retryPage.html, /aria-current="page"[^>]*>重试任务<\/a>/);
+  const retryNavigation = retryPage.html.match(/<nav class="dashboard-section-nav admin-section-nav"[\s\S]*?<\/nav>/)?.[0] ?? "";
+  assert.match(retryNavigation, /概览[\s\S]*Assistant[\s\S]*重试任务[\s\S]*AI 模型用量/);
   const layout = readFileSync(new URL("../app/layout.tsx", import.meta.url), "utf8");
   const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  const retryQueue = readFileSync(new URL("../app/_components/RetryQueue.tsx", import.meta.url), "utf8");
+  const retryRoute = readFileSync(new URL("../app/api/operator-retry/route.ts", import.meta.url), "utf8");
+  const retryGet = retryRoute.match(/export async function GET[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(retryGet, /authenticateDashboardOperatorRequest\(request, env\)/);
+  assert.match(retryGet, /if \(!actor\) return json\(\{ error: "操作员身份验证失败" \}, 401\)/);
+  assert.ok(retryGet.indexOf("authenticateDashboardOperatorRequest") < retryGet.indexOf("env.DB"));
+  assert.ok(retryGet.indexOf("env.DB") < retryGet.indexOf("listOperatorRetryJobs"));
+  assert.match(retryQueue, /立即可领取/);
+  assert.match(retryQueue, /云端已接受/);
+  assert.match(retryQueue, /尚不代表 Windows scheduler 已应用/);
+  assert.match(retryQueue, /PR Preview 使用合成演示任务/);
+  assert.match(retryQueue, /调整计划/);
+  assert.match(retryQueue, /恢复自动计划/);
+  assert.match(retryQueue, /action.mode !== "KEEP_ORIGINAL" \|\| overridden/);
+  assert.doesNotMatch(retryQueue, /自动重试中|系统空闲时|空的演示队列/);
+  assert.match(retryQueue, /timeZone: "Asia\/Kuala_Lumpur"/);
+  assert.match(retryQueue, /type="datetime-local"/);
+  assert.match(retryQueue, /PRIVATE OPERATOR QUEUE/);
+  assert.match(retryQueue, /className="retry-queue-summary"/);
+  assert.match(retryQueue, /summary\.total/);
+  assert.match(retryQueue, /selected\.size \? `已选 \$\{selected\.size\} 个` : "选择任务后可批量调整"/);
+  assert.match(retryQueue, /selected\.size \? <div className="retry-bulk-action">/);
+  assert.match(retryQueue, /原自动计划/);
+  assert.match(retryQueue, /retry-checkbox-target/);
+  assert.match(retryQueue, /className=\{`retry-job-row \$\{expanded \? "is-expanded" : ""\}`\}/);
+  assert.match(retryQueue, /expandedJobId === job\.job_id/);
+  assert.match(retryQueue, /setExpandedJobId\(expanded \? null : job\.job_id\)/);
+  assert.match(retryQueue, /expanded \? <div className="retry-job-plan"/);
+  assert.match(retryQueue, /command\.shortLabel/);
+  assert.doesNotMatch(retryQueue, /retry-job-card|retry-job-main/);
+  assert.match(css, /\.retry-checkbox-target \{[^}]*min-width:44px;[^}]*min-height:44px/);
+  assert.match(css, /\.retry-job-row \{[^}]*grid-template-columns:44px minmax\(220px,1fr\)[^}]*padding:8px 12px/);
+  assert.match(css, /\.retry-job-plan \{[^}]*grid-column:2 \/ -1/);
+  assert.match(css, /\.retry-job-plan > div \{[^}]*grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/);
+  assert.match(css, /@media \(max-width: 720px\)[\s\S]*\.retry-job-row \{ grid-template-columns:44px minmax\(0,1fr\)/);
+  assert.match(css, /@media \(max-width: 720px\)[\s\S]*\.retry-job-control \{ position:absolute; top:8px; right:10px; width:96px/);
+  assert.match(css, /@media \(max-width: 720px\)[\s\S]*\.retry-job-plan > div \{ grid-template-columns:1fr 1fr/);
   assert.match(layout, /<OperationalAlertBanner \/>/);
   const banner = readFileSync(new URL("../app/_components/OperationalAlertBanner.tsx", import.meta.url), "utf8");
   assert.match(banner, /globalOperationalIncidents/);
@@ -1405,6 +1502,63 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(css, /@media \(max-width: 640px\)[\s\S]*\.scheduler-health-grid \{ grid-template-columns: 1fr; \}/);
 });
 
+test("separates anonymous health data from owner-only Admin evidence", async () => {
+  const publicStatus = readFileSync(new URL("../app/api/status/route.ts", import.meta.url), "utf8");
+  const statusProjection = readFileSync(new URL("../app/api/_shared/dashboard-status.ts", import.meta.url), "utf8");
+  const adminStatus = readFileSync(new URL("../app/api/admin-status/route.ts", import.meta.url), "utf8");
+  const assistantHealth = readFileSync(new URL("../app/api/assistant-health/route.ts", import.meta.url), "utf8");
+  const healthView = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
+  const alertBanner = readFileSync(new URL("../app/_components/OperationalAlertBanner.tsx", import.meta.url), "utf8");
+  const adminOverview = readFileSync(new URL("../app/_views/AdminOverviewView.tsx", import.meta.url), "utf8");
+  const adminClient = readFileSync(new URL("../app/_lib/admin-client.ts", import.meta.url), "utf8");
+  const statusView = readFileSync(new URL("../app/_views/StatusView.tsx", import.meta.url), "utf8");
+  const retryQueue = readFileSync(new URL("../app/_components/RetryQueue.tsx", import.meta.url), "utf8");
+  const assistantView = readFileSync(new URL("../app/_views/AssistantView.tsx", import.meta.url), "utf8");
+  const assistantTranscript = readFileSync(new URL("../app/_components/AssistantTranscript.tsx", import.meta.url), "utf8");
+
+  assert.match(publicStatus, /publicDashboardStatus\(payload\)/);
+  for (const field of [
+    "annotation_queue", "gemini_quota", "gemini_31_quota", "gemma_quota",
+    "gemini_embedding_quota", "llm_routing",
+  ]) assert.match(statusProjection, new RegExp(`"${field}"`));
+  assert.doesNotMatch(healthView, /operator-retry|assistant-health|AdminOverview/);
+  assert.doesNotMatch(alertBanner, /assistant-health|AssistantOperationalHealth/);
+  assert.match(adminOverview, /fetch\("\/api\/operator-retry"/);
+  assert.match(adminOverview, /fetch\("\/api\/assistant-health"/);
+  assert.match(adminOverview, /assistantHealthPresentation\(assistantHealth\)/);
+  assert.match(adminOverview, /管理员会话已过期，请重新登录/);
+  assert.match(adminOverview, /href="\/admin">重新登录/);
+  assert.match(adminClient, /ADMIN_RELOGIN_MESSAGE = "管理员会话已过期，请重新登录。"/);
+  assert.match(statusView, /adminErrorPresentation[\s\S]*href="\/admin">重新登录/);
+  assert.match(statusView, /presentation\.kind === "AUTH_REQUIRED"[\s\S]*clearDashboardResource\("\/api\/admin-status"\)[\s\S]*setPayload\(null\)/);
+  const dashboardResource = readFileSync(new URL("../app/_lib/dashboard-resource.ts", import.meta.url), "utf8");
+  assert.match(dashboardResource, /export function clearDashboardResource\(url: string\)/);
+  assert.doesNotMatch(dashboardResource, /resources\.clear\(\)/);
+  assert.match(retryQueue, /adminErrorPresentation[\s\S]*href="\/admin">重新登录/);
+  assert.match(assistantView, /管理员会话已过期，请重新登录。/);
+  assert.match(assistantTranscript, /href="\/admin">重新登录/);
+  assert.doesNotMatch(statusProjection, /fetch\(|STATUS_RELAY_URL/);
+  assert.doesNotMatch(adminStatus, /STATUS_RELAY_URL/);
+
+  for (const source of [adminStatus, assistantHealth]) {
+    const get = source.match(/export async function GET[\s\S]*?\n\}/)?.[0] ?? "";
+    assert.match(get, /authenticateDashboardOperatorRequest\(request, env\)/);
+    assert.ok(get.indexOf("authenticateDashboardOperatorRequest") < get.indexOf("env.DB"));
+  }
+  assert.match(adminStatus, /previewBundle[\s\S]*synthetic-admin-status/);
+  assert.match(assistantHealth, /status: "HEALTHY"[\s\S]*current: false/);
+
+  const overview = await renderSettled("/admin", /OWNER OPERATIONS/);
+  assert.equal(overview.response.status, 200);
+  assert.match(overview.html, /概览[\s\S]*Assistant[\s\S]*重试任务[\s\S]*AI 模型用量/);
+  assert.match(overview.html, /总任务[\s\S]*等待应用[\s\S]*冲突/);
+  assert.doesNotMatch(adminOverview, /进入私有对话|查看 Windows 应用进度|查看模型额度/);
+  assert.match(adminOverview, /className="admin-overview-health"/);
+  const adminCss = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(adminCss, /\.admin-overview-card \{[^}]*min-height:198px/);
+  assert.match(overview.html, /aria-current="page"[^>]*>概览<\/a>/);
+});
+
 test("uses one Chinese system-state presentation across every dashboard page", () => {
   const component = readFileSync(new URL("../app/_components/SystemStatePill.tsx", import.meta.url), "utf8");
   const shell = readFileSync(new URL("../app/_components/DashboardShell.tsx", import.meta.url), "utf8");
@@ -1423,7 +1577,6 @@ test("uses one Chinese system-state presentation across every dashboard page", (
   assert.match(shell, /<SystemStatePill/);
   assert.match(shell, /subscribeDashboardResource\("\/api\/status"/);
   assert.match(shell, /readDashboardResourceState<ShellStatusPayload>/);
-  assert.doesNotMatch(shell, /useState\(false\)/);
   assert.match(shell, /hasSnapshot=/);
   assert.match(shell, /operationalStatus=/);
   for (const path of ["../app/_views/LiveRoomView.tsx", "../app/_views/AuditView.tsx", "../app/_views/StatusView.tsx", "../app/_views/HealthView.tsx", "../app/_views/AssistantView.tsx"]) {
@@ -1609,6 +1762,10 @@ test("switches dashboard rooms locally and reuses client data between views", ()
   assert.match(app, /window\.history\.replaceState/);
   assert.match(app, /window\.addEventListener\("popstate"/);
   assert.match(app, /lazy\(loadAuditView\)/);
+  assert.match(app, /url\.pathname === "\/admin\/retry-jobs"/);
+  assert.match(app, /room === "retry"/);
+  assert.match(app, /lazy\(loadRetryView\)/);
+  assert.match(app, /<RetryView \/>/);
   assert.match(app, /<DashboardShell location=\{location\}>/);
   assert.match(css, /\.dashboard-global-link\.is-navigating::after/);
   assert.match(css, /prefers-reduced-motion:reduce/);
@@ -1620,8 +1777,13 @@ test("switches dashboard rooms locally and reuses client data between views", ()
 
 test("redirects legacy dashboard URLs to the single app shell", async () => {
   for (const [path, location] of [
-    ["/status", "/?room=status"],
+    ["/status", "/admin/ai-usage"],
     ["/health", "/?room=health"],
+    ["/assistant", "/admin/assistant"],
+    ["/retry-jobs", "/admin/retry-jobs"],
+    ["/?room=assistant", "/admin/assistant"],
+    ["/?room=retry", "/admin/retry-jobs"],
+    ["/?room=status", "/admin/ai-usage"],
     ["/audit?view=league", "/?room=audit&view=league"],
   ]) {
     const response = await render(path);
@@ -1701,7 +1863,7 @@ test("uses one D1-validated writer for every large dashboard snapshot", () => {
 test("activates only complete paged news-evidence generations outside status", () => {
   const route = readFileSync(new URL("../app/api/news-evidence/route.ts", import.meta.url), "utf8");
   const migration = readFileSync(
-    new URL("../drizzle/0020_paged_news_evidence.sql", import.meta.url), "utf8",
+    new URL("../drizzle/0021_paged_news_evidence.sql", import.meta.url), "utf8",
   );
   const store = readFileSync(
     new URL("../app/api/_shared/news-evidence-store.ts", import.meta.url), "utf8",
@@ -2085,10 +2247,12 @@ test("keeps dashboard navigation and graph controls usable on phones", () => {
   assert.match(shell, /<MobileDashboardNav activeDestination=\{activeDestination\}/);
   assert.match(mobileNav, /DASHBOARD_GLOBAL_DESTINATIONS/);
   assert.doesNotMatch(mobileNav, /const SECTIONS|学习曲线|AI 模型用量|系统健康/);
-  for (const label of ["总览", "新闻与决策", "Assistant", "系统"]) {
+  for (const label of ["总览", "新闻与决策", "系统", "管理员登录"]) {
     assert.match(navigation, new RegExp(label));
   }
   assert.match(mobileNav, /aria-label="切换主要区域"/);
+  assert.match(shell, /DASHBOARD_ADMIN_DESTINATIONS\.map/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.dashboard-section-nav a \{ min-width:0; flex:1 1 0; \}/);
   assert.match(css, /\.topbar \{ align-items:stretch; flex-direction:column/);
   assert.match(css, /\.dashboard-global-nav \{ display:none; \}/);
   assert.match(css, /\.dashboard-header \.mobile-dashboard-nav \{ grid-column:1; display:grid; grid-template-columns:minmax\(0,1fr\)/);
@@ -2487,7 +2651,7 @@ test("keeps the legacy news Q&A queue protected and paused without a duplicate s
     new URL("../app/api/assistant-worker/news-questions/route.ts", import.meta.url), "utf8",
   );
   const queue = readFileSync(new URL("../app/api/_shared/news-questions.ts", import.meta.url), "utf8");
-  const auth = readFileSync(new URL("../app/api/_shared/assistant-auth.ts", import.meta.url), "utf8");
+  const auth = readFileSync(new URL("../app/api/_shared/dashboard-operator-auth.ts", import.meta.url), "utf8");
   const sync = readFileSync(new URL("../../scripts/run_dashboard_sync.py", import.meta.url), "utf8");
 
   assert.doesNotMatch(view, /view === "qa"/);
@@ -2497,10 +2661,10 @@ test("keeps the legacy news Q&A queue protected and paused without a duplicate s
   assert.match(route, /rejectPreviewWrite\(\)/);
   const postRoute = route.slice(route.indexOf("export async function POST"));
   assert.ok(
-    postRoute.indexOf("rejectPreviewWrite()") < postRoute.indexOf("authenticateAssistantRequest(request, env)"),
+    postRoute.indexOf("rejectPreviewWrite()") < postRoute.indexOf("authenticateDashboardOperatorRequest(request, env)"),
     "Preview writes must reject before human authentication",
   );
-  assert.match(route, /authenticateAssistantRequest\(request, env\)/);
+  assert.match(route, /authenticateDashboardOperatorRequest\(request, env\)/);
   assert.doesNotMatch(route, /isIngestAuthorized|claimNewsQuestion|completeNewsQuestion/);
   assert.match(workerRoute, /isIngestAuthorized\(request\)/);
   assert.match(workerRoute, /claimNewsQuestion/);
@@ -2537,10 +2701,10 @@ test("keeps chat admission owner-authenticated and event replay finite", () => {
   const postRoute = route.slice(route.indexOf("export async function POST"));
   assert.ok(
     postRoute.indexOf("rejectPreviewWrite()")
-      < postRoute.indexOf("authenticateAssistantRequest(request, env)"),
+      < postRoute.indexOf("authenticateDashboardOperatorRequest(request, env)"),
     "Preview chat writes must reject before human authentication",
   );
-  assert.match(route, /authenticateAssistantRequest\(request, env\)/);
+  assert.match(route, /authenticateDashboardOperatorRequest\(request, env\)/);
   assert.doesNotMatch(route, /isIngestAuthorized|claimAssistantChatTurn|completeAssistantChatTurn/);
   assert.match(workerRoute, /isIngestAuthorized\(request\)/);
   assert.match(route, /last-event-id/);
@@ -2565,6 +2729,7 @@ test("separates Access-owned human APIs from the ingest worker control plane", (
     "../app/api/assistant-chat/route.ts",
     "../app/api/assistant-conversations/route.ts",
     "../app/api/news-questions/route.ts",
+    "../app/api/operator-retry/route.ts",
   ].map(path => readFileSync(new URL(path, import.meta.url), "utf8"));
   const workerRoutes = [
     "../app/api/assistant-worker/chat/route.ts",
@@ -2580,12 +2745,12 @@ test("separates Access-owned human APIs from the ingest worker control plane", (
   );
 
   for (const route of humanRoutes) {
-    assert.match(route, /authenticateAssistantRequest\(request, env\)/);
+    assert.match(route, /authenticateDashboardOperatorRequest\(request, env\)/);
     assert.doesNotMatch(route, /isIngestAuthorized|mode === "machine"/);
   }
   for (const route of workerRoutes) {
     assert.match(route, /isIngestAuthorized\(request\)/);
-    assert.doesNotMatch(route, /authenticateAssistantRequest/);
+    assert.doesNotMatch(route, /authenticateDashboardOperatorRequest/);
     const getRoute = route.slice(route.indexOf("export async function GET"));
     assert.ok(
       getRoute.indexOf("rejectPreviewWrite()")
@@ -2628,8 +2793,8 @@ test("renders a recoverable responsive Assistant workbench without unsafe HTML",
 
   assert.match(app, /room === "assistant"/);
   assert.match(app, /<AssistantView \/>/);
-  assert.match(app, /destinationUrl\.pathname === "\/assistant"/);
-  assert.match(app, /window\.location\.assign\(destinationUrl\.href\)/);
+  assert.match(app, /url\.pathname === "\/admin\/assistant"/);
+  assert.match(app, /return "\/admin\/assistant"/);
   assert.match(view, /fetchAssistantConversations/);
   assert.match(view, /replayAssistantEvents/);
   assert.match(view, /document\.visibilityState === "hidden"/);
@@ -2646,7 +2811,7 @@ test("renders a recoverable responsive Assistant workbench without unsafe HTML",
   assert.match(transcript, /取消本轮/);
   assert.match(transcript, /查看本轮处理记录/);
   assert.match(transcript, /assistant-transcript-banners/);
-  assert.match(transcript, /href="\/assistant">\u5b8c\u6210 Access \u767b\u5f55/);
+  assert.match(transcript, /href="\/admin">重新登录/);
   assert.match(transcript, /AURUM \/ PROVISIONAL/);
   assert.match(transcript, /ASSISTANT PAUSED/);
   assert.match(transcript, /等待新的 API 模型/);
@@ -2720,7 +2885,7 @@ test("renders only validated Assistant content blocks with phone-owned overflow"
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell form \{[^}]*grid-template-columns:minmax\(0,1fr\) 52px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell \{[^}]*min-height:69px/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-composer-shell textarea \{[^}]*height:52px;[^}]*max-height:52px/);
-  assert.match(css, /\.dashboard-shell\.is-assistant>\.assistant-main \{[^}]*height:auto; min-height:0/);
+  assert.match(css, /\.dashboard-shell\.is-admin>\.assistant-main \{[^}]*height:auto; min-height:0/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-thread-heading h1 \{[^}]*font-size:clamp\(18px,4\.8vw,20px\)/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-message\.is-user>p \{[^}]*font-size:15px; line-height:1\.68/);
   assert.match(css, /@media \(max-width:850px\)[\s\S]*\.assistant-news-card-trigger>strong \{[^}]*font-size:19px; line-height:1\.22/);

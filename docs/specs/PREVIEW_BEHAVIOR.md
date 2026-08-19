@@ -77,6 +77,15 @@ older-message reveal, collapsed progress-trace review, and all five validated
 fixture links are explicitly synthetic public HTTPS examples, and fixture data
 is never submitted to an API.
 
+### Admin Console presentation
+
+A branch Preview may expose the Admin shell for layout review without asserting
+an authenticated owner session. The overview, Assistant, Retry Jobs, and AI
+Model Usage destinations are clearly marked as synthetic/read-only. Admin
+status uses the branch fixture, retry tasks are installed only after the
+synthetic-empty API response, and every model-consuming or scheduler mutation
+remains unavailable.
+
 ## Semantic display states
 
 - **Loading**: the current authority has not resolved yet.

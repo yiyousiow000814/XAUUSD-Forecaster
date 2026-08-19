@@ -1,9 +1,11 @@
-# Assistant Security Boundary Contract
+# Dashboard Operator and Assistant Security Boundary Contract
 
 ## Purpose
 
-This contract separates public research reads, private human Assistant use, and
-machine synchronization. It supplements
+This contract defines one reusable human Dashboard Operator boundary and
+separates it from public research reads and machine synchronization. Assistant,
+Retry Jobs, AI Model Usage, and future Admin tools do not own separate login
+systems. It supplements
 [`HOSTING_BOUNDARIES.md`](HOSTING_BOUNDARIES.md) and
 [`PREVIEW_ISOLATION.md`](PREVIEW_ISOLATION.md).
 
@@ -14,6 +16,27 @@ machine synchronization. It supplements
 The dashboard, news reader, Daily Brief display, and public evidence MAY remain
 anonymous read-only surfaces. Public access never implies permission to submit
 model-consuming work.
+
+Retry job failure text, scheduler metadata, and operator command history are
+private operational evidence. `/api/operator-retry` GET and POST both require
+the shared owner-authenticated Dashboard Operator identity even though the
+System Health page itself remains publicly readable. Public payloads never
+include credentials, lease tokens, provider requests, or operator audit rows.
+
+### Private Dashboard Operator
+
+Cloudflare Access establishes one browser session for the complete Admin
+Console. Assistant conversation routes, News Q&A, Admin status, Assistant
+health, and retry
+reads or mutations all call the same server-side verifier and produce the same
+stable `cloudflare-access:<subject>` actor. One explicit login at `/admin`
+therefore authorizes every Admin destination without another application
+login. Future privileged human tools must reuse this boundary.
+
+Identity is not permission by itself. Every request validates the Access
+application JWT and then applies the configured owner allowlist. Only `OWNER`
+may mutate scheduler state. Browser state, visible controls, and an email header
+are never authorization.
 
 ### Private Assistant
 
@@ -38,7 +61,7 @@ display name are attributes, not authorization keys or schema ownership.
 
 ### Current Cloudflare Access profile
 
-The bounded News Q&A MVP verifies `Cf-Access-Jwt-Assertion` on the server. It
+The Dashboard Operator verifier checks `Cf-Access-Jwt-Assertion` on the server. It
 MUST validate the RS256 signature against the configured team JWKS, issuer,
 audience, expiry, application-token type, non-empty subject, and configured
 owner membership. Merely receiving an identity-looking header is never
@@ -50,20 +73,45 @@ Production activation requires runtime configuration outside source control:
 
 - `CF_ACCESS_TEAM_DOMAIN` identifies the Access team issuer and JWKS endpoint;
 - `CF_ACCESS_AUD` declares one or more accepted Access application audiences;
-- `ASSISTANT_OWNER_SUBJECTS` and/or `ASSISTANT_OWNER_EMAILS` declares the
-  current `OWNER` membership; and
+- `DASHBOARD_OPERATOR_OWNER_SUBJECTS` and/or
+  `DASHBOARD_OPERATOR_OWNER_EMAILS` declares the current `OWNER` membership;
+  legacy `ASSISTANT_OWNER_*` values are a bounded cutover fallback only when
+  neither shared allowlist is configured; and
 - `INGEST_TOKEN` remains the independent machine identity.
 
-The Cloudflare Access application and policy MUST be provisioned before the
-private UI is enabled for use. Missing or malformed configuration fails closed;
+One Cloudflare Access application and owner-only policy MUST cover every human
+privileged path. Its cookie path restriction remains disabled so its protected
+paths share one application session. Google or another configured Access IdP
+may provide the login experience; application authorization still uses the
+owner allowlist. Missing or malformed configuration fails closed;
 it does not fall back to an anonymous queue, a browser credential, or the
 machine ingest token.
 
-The Access application protects `/assistant`, `/api/assistant-chat`,
-`/api/assistant-conversations`, and `/api/news-questions`. Those application
-paths are the human boundary. `/api/assistant-worker/*` is deliberately outside
+The shared Access application protects `/admin`, `/admin/*`,
+the compatibility entries `/assistant`, `/retry-jobs`, and `/status`,
+`/api/admin-status`, `/api/assistant-health`,
+`/api/assistant-chat`, `/api/assistant-conversations`, and
+`/api/news-questions`. Those application paths, plus `/api/operator-retry`, are
+the human boundary. `/api/assistant-worker/*` is deliberately outside
 the Access application because it has no browser identity and is authorized by
 the independent machine policy below.
+
+The public login trigger is only an intent and explanation layer. It cannot
+establish identity or authorization. Its explicit login action performs a
+normal navigation to `/admin` so Cloudflare Access owns the authentication
+handoff. Client state, hidden navigation, and route selection never bypass the
+server-side verifier.
+
+### Local operator bridge
+
+The Windows sync process is the only client of the local retry scheduler bridge.
+Both `/api/retry-jobs` and `/api/retry-overrides` require loopback origin plus a
+dedicated high-entropy `DASHBOARD_OPERATOR_BRIDGE_TOKEN` carried in the
+`X-Aurum-Operator-Bridge-Token` header. The mutation route additionally rejects
+browser-origin requests, non-JSON content, and unbounded bodies before opening
+a writable scheduler connection. The token is never accepted in a URL, logged,
+returned to the browser, reused as `INGEST_TOKEN`, or persisted in evidence.
+Missing or invalid configuration fails closed.
 
 ### Machine synchronization
 

@@ -22,7 +22,7 @@ const item = (digit, minute = 0) => ({
   canonical_headline: `evidence ${digit}`,
 });
 
-const database = () => new D1TestDatabase(["0020_paged_news_evidence.sql"]);
+const database = () => new D1TestDatabase(["0021_paged_news_evidence.sql"]);
 
 test("pages immutable Preview evidence with generation-bound cursors", () => {
   const generationA = id("a");

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   loadDashboardResource,
   readDashboardResourceState,
@@ -9,8 +9,8 @@ import {
 import DashboardLink from "./DashboardLink";
 import {
   activeDashboardDestination,
+  DASHBOARD_ADMIN_DESTINATIONS,
   DASHBOARD_GLOBAL_DESTINATIONS,
-  DASHBOARD_SYSTEM_DESTINATIONS,
   type DashboardLocation,
 } from "./DashboardNavigation";
 import MobileDashboardNav from "./MobileDashboardNav";
@@ -34,10 +34,25 @@ function DashboardBrand() {
   </DashboardLink>;
 }
 
-function GlobalNavigation({ activeDestination }: { activeDestination: ReturnType<typeof activeDashboardDestination> }) {
+function GlobalNavigation({
+  activeDestination, openAdminLogin,
+}: {
+  activeDestination: ReturnType<typeof activeDashboardDestination>;
+  openAdminLogin: () => void;
+}) {
   return <nav className="dashboard-global-nav" aria-label="产品区域">
     {DASHBOARD_GLOBAL_DESTINATIONS.map(destination => {
       const active = destination.id === activeDestination;
+      const label = active && destination.authenticatedLabel
+        ? destination.authenticatedLabel : destination.label;
+      if (destination.private && !active) {
+        return <button
+          className="dashboard-global-link dashboard-admin-login-trigger"
+          key={destination.id}
+          onClick={openAdminLogin}
+          type="button"
+        ><span aria-hidden="true" className="dashboard-admin-lock" />{label}</button>;
+      }
       return <DashboardLink
         ariaCurrent={active ? "page" : undefined}
         className={`dashboard-global-link${active ? " is-active" : ""}`}
@@ -45,7 +60,7 @@ function GlobalNavigation({ activeDestination }: { activeDestination: ReturnType
         key={destination.id}
         replace={destination.id === "live"}
       >
-        {destination.label}
+        {label}
       </DashboardLink>;
     })}
   </nav>;
@@ -89,20 +104,22 @@ function GlobalSystemState() {
   </div>;
 }
 
-function DashboardHeader({ location }: { location: DashboardLocation }) {
+function DashboardHeader({
+  location, openAdminLogin,
+}: { location: DashboardLocation; openAdminLogin: () => void }) {
   const activeDestination = activeDashboardDestination(location.room);
   return <header className="dashboard-header topbar">
     <DashboardBrand />
-    <GlobalNavigation activeDestination={activeDestination} />
-    <MobileDashboardNav activeDestination={activeDestination} />
+    <GlobalNavigation activeDestination={activeDestination} openAdminLogin={openAdminLogin} />
+    <MobileDashboardNav activeDestination={activeDestination} openAdminLogin={openAdminLogin} />
     <GlobalSystemState />
   </header>;
 }
 
-function SystemSectionNavigation({ location }: { location: DashboardLocation }) {
-  if (activeDashboardDestination(location.room) !== "system") return null;
-  return <nav className="dashboard-section-nav" aria-label="系统区域">
-    {DASHBOARD_SYSTEM_DESTINATIONS.map(destination => {
+function AdminSectionNavigation({ location }: { location: DashboardLocation }) {
+  if (activeDashboardDestination(location.room) !== "admin") return null;
+  return <nav className="dashboard-section-nav admin-section-nav" aria-label="管理后台区域">
+    {DASHBOARD_ADMIN_DESTINATIONS.map(destination => {
       const active = destination.room === location.room;
       return <DashboardLink
         ariaCurrent={active ? "page" : undefined}
@@ -118,12 +135,39 @@ function SystemSectionNavigation({ location }: { location: DashboardLocation }) 
 
 export default function DashboardShell({ children, location }: { children: ReactNode; location: DashboardLocation }) {
   const activeDestination = activeDashboardDestination(location.room);
+  const [adminLoginOpen, setAdminLoginOpen] = useState(false);
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const openAdminLogin = () => {
+    setAdminLoginOpen(true);
+    queueMicrotask(() => dialogRef.current?.showModal());
+  };
+  const closeAdminLogin = () => {
+    dialogRef.current?.close();
+    setAdminLoginOpen(false);
+  };
   return <div className={`dashboard-shell is-${activeDestination}`}>
     <div className="grain" />
     <div className="dashboard-shell-header">
-      <DashboardHeader location={location} />
-      <SystemSectionNavigation location={location} />
+      <DashboardHeader location={location} openAdminLogin={openAdminLogin} />
+      <AdminSectionNavigation location={location} />
     </div>
     {children}
+    <dialog
+      className="admin-login-dialog"
+      onClose={() => setAdminLoginOpen(false)}
+      ref={dialogRef}
+    >
+      {adminLoginOpen ? <article>
+        <header><h2>管理员登录</h2></header>
+        <div>
+          <p>仅系统管理员可访问 Assistant、重试任务和 AI 模型用量。</p>
+          <span>登录后进入私有管理后台。</span>
+        </div>
+        <footer>
+          <button type="button" onClick={closeAdminLogin}>取消</button>
+          <a href="/admin">使用 Google 登录</a>
+        </footer>
+      </article> : null}
+    </dialog>
   </div>;
 }

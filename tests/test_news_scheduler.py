@@ -15,6 +15,7 @@ from xauusd_forecaster.news_scheduler import (
     PREEMPTIBLE_POOL,
     ROUTINE_POOL,
     account_quota_snapshot,
+    apply_retry_schedule_override,
     authorize_repairable_annotation_failures,
     authorize_repairable_impact_failures,
     backoff_job,
@@ -23,6 +24,7 @@ from xauusd_forecaster.news_scheduler import (
     configured_api_credentials,
     enqueue_job,
     install_scheduler_schema,
+    list_retry_schedule_jobs,
     mark_account_request_attempted,
     rank_accounts_for_models,
     record_account_request_outcome,
@@ -32,6 +34,7 @@ from xauusd_forecaster.news_scheduler import (
     reserve_account_request,
     reserve_provider_dispatch,
     rolling_account_usage,
+    RetryScheduleConflict,
     scheduler_counts,
     sync_pending_jobs,
 )
@@ -75,6 +78,282 @@ def _enqueue(
         priority=priority,
         now=NOW,
     )
+
+
+def _backing_off_job(
+    connection: sqlite3.Connection,
+    item: str,
+    *,
+    retry_at: datetime,
+    priority: str = "NORMAL",
+) -> str:
+    job_id = _enqueue(connection, item, priority=priority)
+    claimed = claim_job(
+        connection, worker_id=f"worker-{item}", pool=ROUTINE_POOL, now=NOW,
+    )
+    assert claimed and claimed.job_id == job_id
+    backoff_job(
+        connection, job_id, f"worker-{item}",
+        available_at=retry_at, error="ConnectionResetError",
+    )
+    return job_id
+
+
+@pytest.mark.parametrize(
+    ("mode", "custom", "expected"),
+    (
+        ("IMMEDIATE", None, NOW + timedelta(minutes=2)),
+        ("DELAY_15_MIN", None, NOW + timedelta(minutes=17)),
+        ("DELAY_1_HOUR", None, NOW + timedelta(hours=1, minutes=2)),
+        ("CUSTOM_TIME", NOW + timedelta(hours=3), NOW + timedelta(hours=3)),
+        ("IDLE_CAPACITY", None, NOW + timedelta(minutes=2)),
+    ),
+)
+def test_retry_schedule_override_modes_preserve_attempt_and_failure_evidence(
+    mode: str, custom: datetime | None, expected: datetime,
+) -> None:
+    connection = _connection()
+    automatic = NOW + timedelta(hours=6)
+    job_id = _backing_off_job(connection, mode.lower(), retry_at=automatic)
+    before = connection.execute(
+        "SELECT state,available_at,attempt_count,last_error FROM news_ai_jobs_v1 WHERE job_id=?",
+        (job_id,),
+    ).fetchone()
+
+    result = apply_retry_schedule_override(
+        connection,
+        request_id=f"request-{mode}", job_id=job_id, operator_id="owner-1",
+        mode=mode, reason="Bug fix deployed", expected_state="BACKING_OFF",
+        expected_available_at=str(before["available_at"]),
+        requested_available_at=custom, now=NOW + timedelta(minutes=2),
+    )
+
+    assert datetime.fromisoformat(str(result["available_at"])) == expected
+    after = connection.execute(
+        "SELECT attempt_count,last_error FROM news_ai_jobs_v1 WHERE job_id=?",
+        (job_id,),
+    ).fetchone()
+    assert tuple(after) == (before["attempt_count"], "ConnectionResetError")
+    audit = connection.execute(
+        "SELECT * FROM news_ai_retry_schedule_overrides_v1 WHERE job_id=?",
+        (job_id,),
+    ).fetchone()
+    assert audit["original_available_at"] == automatic.isoformat(timespec="microseconds")
+    assert audit["previous_available_at"] == automatic.isoformat(timespec="microseconds")
+    assert audit["operator_id"] == "owner-1"
+    assert audit["mode"] == mode
+
+
+def test_keep_original_restores_first_automatic_schedule_and_appends_audit() -> None:
+    connection = _connection()
+    automatic = NOW + timedelta(hours=6)
+    job_id = _backing_off_job(connection, "restore", retry_at=automatic)
+    expected = automatic.isoformat(timespec="microseconds")
+    first = apply_retry_schedule_override(
+        connection, request_id="early", job_id=job_id, operator_id="owner-1",
+        mode="IMMEDIATE", reason="try repaired path", expected_state="BACKING_OFF",
+        expected_available_at=expected, now=NOW + timedelta(minutes=1),
+    )
+    restored = apply_retry_schedule_override(
+        connection, request_id="restore", job_id=job_id, operator_id="owner-1",
+        mode="KEEP_ORIGINAL", reason="retain automatic plan",
+        expected_state="BACKING_OFF",
+        expected_available_at=str(first["available_at"]),
+        now=NOW + timedelta(minutes=2),
+    )
+
+    assert restored["available_at"] == expected
+    audits = connection.execute(
+        """SELECT mode,original_available_at,previous_available_at
+           FROM news_ai_retry_schedule_overrides_v1
+           WHERE job_id=? ORDER BY requested_at""",
+        (job_id,),
+    ).fetchall()
+    assert [row["mode"] for row in audits] == ["IMMEDIATE", "KEEP_ORIGINAL"]
+    assert {row["original_available_at"] for row in audits} == {expected}
+    assert audits[1]["previous_available_at"] == first["available_at"]
+
+
+def test_keep_original_without_prior_override_is_an_audited_no_op() -> None:
+    connection = _connection()
+    automatic = NOW + timedelta(hours=6)
+    job_id = _backing_off_job(connection, "keep", retry_at=automatic)
+    expected = automatic.isoformat(timespec="microseconds")
+    updated_at = connection.execute(
+        "SELECT updated_at FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
+    ).fetchone()[0]
+
+    result = apply_retry_schedule_override(
+        connection, request_id="keep", job_id=job_id, operator_id="owner-1",
+        mode="KEEP_ORIGINAL", reason="no change", expected_state="BACKING_OFF",
+        expected_available_at=expected, now=NOW + timedelta(minutes=1),
+    )
+
+    assert result["available_at"] == expected
+    assert connection.execute(
+        "SELECT updated_at FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
+    ).fetchone()[0] == updated_at
+    assert connection.execute(
+        "SELECT count(*) FROM news_ai_retry_schedule_overrides_v1 WHERE job_id=?",
+        (job_id,),
+    ).fetchone()[0] == 1
+    assert list_retry_schedule_jobs(connection)[0]["override_mode"] is None
+
+
+@pytest.mark.parametrize("terminal_state", ("LEASED", "COMPLETED", "DEAD_LETTER"))
+def test_retry_schedule_override_rejects_non_mutable_states(terminal_state: str) -> None:
+    connection = _connection()
+    job_id = _enqueue(connection, terminal_state.lower())
+    if terminal_state == "LEASED":
+        claim_job(connection, worker_id="worker", pool=ROUTINE_POOL, now=NOW)
+    else:
+        connection.execute(
+            "UPDATE news_ai_jobs_v1 SET state=? WHERE job_id=?",
+            (terminal_state, job_id),
+        )
+        connection.commit()
+    row = connection.execute(
+        "SELECT state,available_at FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
+    ).fetchone()
+
+    with pytest.raises(RetryScheduleConflict, match="JOB_NOT_MUTABLE"):
+        apply_retry_schedule_override(
+            connection, request_id=f"reject-{terminal_state}", job_id=job_id,
+            operator_id="owner-1", mode="IMMEDIATE", reason="not allowed",
+            expected_state=str(row["state"]),
+            expected_available_at=str(row["available_at"]), now=NOW,
+        )
+    assert connection.execute(
+        "SELECT count(*) FROM news_ai_retry_schedule_overrides_v1",
+    ).fetchone()[0] == 0
+
+
+def test_retry_schedule_override_detects_claim_race_and_is_idempotent() -> None:
+    connection = _connection()
+    job_id = _backing_off_job(connection, "race", retry_at=NOW + timedelta(hours=2))
+    observed = connection.execute(
+        "SELECT state,available_at FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
+    ).fetchone()
+    connection.execute(
+        "UPDATE news_ai_jobs_v1 SET available_at=? WHERE job_id=?",
+        (NOW.isoformat(timespec="microseconds"), job_id),
+    )
+    connection.commit()
+    claimed = claim_job(connection, worker_id="racer", pool=ROUTINE_POOL, now=NOW)
+    assert claimed and claimed.job_id == job_id
+
+    with pytest.raises(RetryScheduleConflict, match="JOB_NOT_MUTABLE"):
+        apply_retry_schedule_override(
+            connection, request_id="lost-race", job_id=job_id,
+            operator_id="owner-1", mode="IMMEDIATE", reason="race",
+            expected_state=str(observed["state"]),
+            expected_available_at=str(observed["available_at"]), now=NOW,
+        )
+
+    connection = _connection()
+    job_id = _backing_off_job(connection, "idempotent", retry_at=NOW + timedelta(hours=2))
+    observed = connection.execute(
+        "SELECT state,available_at FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
+    ).fetchone()
+    inputs = dict(
+        request_id="same-request", job_id=job_id, operator_id="owner-1",
+        mode="IMMEDIATE", reason="retry once", expected_state=str(observed["state"]),
+        expected_available_at=str(observed["available_at"]), now=NOW,
+    )
+    first = apply_retry_schedule_override(connection, **inputs)
+    second = apply_retry_schedule_override(connection, **inputs)
+    assert second["available_at"] == first["available_at"]
+    assert connection.execute(
+        "SELECT count(*) FROM news_ai_retry_schedule_overrides_v1",
+    ).fetchone()[0] == 1
+
+
+def test_immediate_override_only_becomes_claimable_and_claim_increments_attempt() -> None:
+    connection = _connection()
+    job_id = _backing_off_job(connection, "claimable", retry_at=NOW + timedelta(hours=2))
+    row = connection.execute(
+        "SELECT state,available_at,attempt_count FROM news_ai_jobs_v1 WHERE job_id=?",
+        (job_id,),
+    ).fetchone()
+    result = apply_retry_schedule_override(
+        connection, request_id="claimable", job_id=job_id,
+        operator_id="owner-1", mode="IMMEDIATE", reason="fixed",
+        expected_state=str(row["state"]), expected_available_at=str(row["available_at"]),
+        now=NOW + timedelta(minutes=1),
+    )
+    assert result["attempt_count"] == row["attempt_count"]
+    claimed = claim_job(
+        connection, worker_id="worker-next", pool=ROUTINE_POOL,
+        now=NOW + timedelta(minutes=1),
+    )
+    assert claimed and claimed.job_id == job_id
+    assert claimed.attempt_count == row["attempt_count"] + 1
+
+
+def test_future_override_is_not_claimable_before_effective_time() -> None:
+    connection = _connection()
+    job_id = _backing_off_job(connection, "future", retry_at=NOW + timedelta(hours=2))
+    row = connection.execute(
+        "SELECT state,available_at FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
+    ).fetchone()
+    apply_retry_schedule_override(
+        connection, request_id="future", job_id=job_id, operator_id="owner-1",
+        mode="DELAY_15_MIN", reason="wait", expected_state=str(row["state"]),
+        expected_available_at=str(row["available_at"]), now=NOW,
+    )
+    assert claim_job(
+        connection, worker_id="early", pool=ROUTINE_POOL,
+        now=NOW + timedelta(minutes=14, seconds=59),
+    ) is None
+
+
+def test_idle_capacity_yields_to_normal_work_but_ages_out() -> None:
+    connection = _connection()
+    idle_id = _backing_off_job(connection, "idle", retry_at=NOW + timedelta(hours=2))
+    idle = connection.execute(
+        "SELECT state,available_at FROM news_ai_jobs_v1 WHERE job_id=?", (idle_id,),
+    ).fetchone()
+    apply_retry_schedule_override(
+        connection, request_id="idle", job_id=idle_id, operator_id="owner-1",
+        mode="IDLE_CAPACITY", reason="spare capacity", expected_state=str(idle["state"]),
+        expected_available_at=str(idle["available_at"]), now=NOW,
+    )
+    normal_id = _enqueue(connection, "normal", priority="BACKGROUND")
+    claimed = claim_job(
+        connection, worker_id="normal-first", pool=ROUTINE_POOL, now=NOW,
+    )
+    assert claimed and claimed.job_id == normal_id
+    complete_job(connection, normal_id, "normal-first", now=NOW)
+
+    # Even sustained newer work cannot starve an idle override past 30 minutes.
+    newer_id = enqueue_job(
+        connection, task_type="ACTIVE_ANNOTATION", source="source",
+        source_item_id="newer", revision_number=1, prompt_version="prompt",
+        priority="IMMEDIATE", now=NOW + timedelta(minutes=31),
+    )
+    claimed = claim_job(
+        connection, worker_id="aged-idle", pool=ROUTINE_POOL,
+        now=NOW + timedelta(minutes=31),
+    )
+    assert claimed and claimed.job_id == idle_id
+    assert newer_id != idle_id
+
+
+def test_retry_job_listing_exposes_schedule_provenance_without_credentials() -> None:
+    connection = _connection()
+    job_id = _backing_off_job(connection, "listed", retry_at=NOW + timedelta(hours=2))
+    row = connection.execute(
+        "SELECT state,available_at FROM news_ai_jobs_v1 WHERE job_id=?", (job_id,),
+    ).fetchone()
+    apply_retry_schedule_override(
+        connection, request_id="listed", job_id=job_id, operator_id="owner-1",
+        mode="DELAY_1_HOUR", reason="operator plan", expected_state=str(row["state"]),
+        expected_available_at=str(row["available_at"]), now=NOW,
+    )
+    item = next(item for item in list_retry_schedule_jobs(connection) if item["job_id"] == job_id)
+    assert item["override_mode"] == "DELAY_1_HOUR"
+    assert item["original_available_at"] == row["available_at"]
+    assert "credential_id" not in item
 
 
 def test_provider_dispatch_staggers_independent_accounts_without_quota_leak() -> None:
