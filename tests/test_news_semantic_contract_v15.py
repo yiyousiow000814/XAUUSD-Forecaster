@@ -116,7 +116,10 @@ def test_semantic_generations_require_evidence_copied_from_the_source() -> None:
 
 
 def test_v17_named_references_copy_text_but_never_accept_model_offsets() -> None:
-    source = "The Bureau of Labor Statistics reported job openings fell in June."
+    source = (
+        "The agency is named Bureau of Labor Statistics and reported job "
+        "openings fell in June."
+    )
     annotation = _target_annotation("job openings fell in June")
     annotation["named_references"] = [
         {"exact_text": "Bureau of Labor Statistics"}
@@ -126,6 +129,14 @@ def test_v17_named_references_copy_text_but_never_accept_model_offsets() -> None
         annotation, headline="Jobs report", body=source,
         prompt_version=CURRENT_NEWS_PROMPT_VERSION,
     )
+    proof = annotation_module.resolve_structured_named_reference(
+        "Bureau of Labor Statistics",
+        f"Jobs report\n{source}",
+        (annotation["actor"], annotation["object"], *annotation["entities"]),
+    )
+    assert proof is not None
+    assert "DECLARED_SEMANTIC_IDENTITY" in proof.evidence
+    assert "SOURCE_REFERENCE_CONTEXT" in proof.evidence
 
     annotation["named_references"] = [{
         "exact_text": "Bureau of Labor Statistics",

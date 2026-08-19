@@ -2268,54 +2268,62 @@ def test_source_grounded_latin_span_family_accepts_references(
 
 
 @pytest.mark.parametrize(
-    "reference,source",
+    "reference,source,authorizing_proof",
     (
-        ("Jerome Powell", "Jerome Powell addressed the policy outlook."),
-        ("OpenAI", "OpenAI released a research update."),
-        ("OpenRouter", "OpenRouter released an update."),
-        ("FOMC", "The FOMC published its minutes."),
-        ("GPT-5", "The product is named GPT-5."),
-        ("iPhone 17 Pro", "Apple introduced iPhone 17 Pro."),
-        ("Berkshire Hathaway", "Berkshire Hathaway published its report."),
+        (
+            "Jerome Powell", "The speaker is named Jerome Powell.",
+            "SOURCE_REFERENCE_CONTEXT",
+        ),
+        ("OpenAI", "OpenAI released a research update.", "STRONG_IDENTIFIER"),
+        ("OpenRouter", "OpenRouter released an update.", "STRONG_IDENTIFIER"),
+        ("FOMC", "The FOMC published its minutes.", "STRONG_IDENTIFIER"),
+        ("GPT-5", "The product is named GPT-5.", "STRONG_IDENTIFIER"),
+        (
+            "iPhone 17 Pro", "Apple introduced iPhone 17 Pro.",
+            "STRONG_IDENTIFIER",
+        ),
+        (
+            "Berkshire Hathaway", "The company is named Berkshire Hathaway.",
+            "SOURCE_REFERENCE_CONTEXT",
+        ),
         (
             "Berkshire Hathaway Annual Meeting",
-            "The Berkshire Hathaway Annual Meeting begins today.",
-        ),
-        ("The Dark Knight", "The Dark Knight was released in 2008."),
-        (
-            "The Intelligent Investor",
-            "The Intelligent Investor remains in the source bibliography.",
-        ),
-        ("Bohemian Rhapsody", "Bohemian Rhapsody appears in the source."),
-        ("Grand Theft Auto", "Grand Theft Auto appears in the source."),
-        (
-            "The One You've Been Waiting For",
-            'The article refers to "The One You\'ve Been Waiting For" as its title.',
+            "The event is titled Berkshire Hathaway Annual Meeting.",
+            "SOURCE_REFERENCE_CONTEXT",
         ),
         (
-            "The International Symposium on Extremely Long Autonomous Agent "
-            "Systems and Multi-Modal Financial Decision Infrastructure",
-            "The International Symposium on Extremely Long Autonomous Agent "
-            "Systems and Multi-Modal Financial Decision Infrastructure opens "
-            "next month.",
+            "The Dark Knight",
+            'The article refers to "The Dark Knight" as its title.',
+            "SOURCE_REFERENCE_CONTEXT",
         ),
-        (
-            "Proceedings of the International Workshop on Trustworthy Autonomous "
-            "Financial Agents and Cross-Market Decision Infrastructure",
-            "Proceedings of the International Workshop on Trustworthy Autonomous "
-            "Financial Agents and Cross-Market Decision Infrastructure appears "
-            "in the archive.",
+        *(
+            (
+                title, f'The article refers to "{title}" as its title.',
+                "SOURCE_REFERENCE_CONTEXT",
+            )
+            for title in (
+                "The Intelligent Investor", "Bohemian Rhapsody",
+                "Grand Theft Auto", "The One You've Been Waiting For",
+            )
         ),
-        (
-            "Association for the Advancement of Transparent Multi-Modal Economic "
-            "Forecasting and Long-Horizon Risk Communication",
-            "Association for the Advancement of Transparent Multi-Modal Economic "
-            "Forecasting and Long-Horizon Risk Communication published a notice.",
+        *(
+            (
+                reference, f'The source refers to "{reference}" as its full name.',
+                "SOURCE_REFERENCE_CONTEXT",
+            )
+            for reference in (
+                "The International Symposium on Extremely Long Autonomous Agent "
+                "Systems and Multi-Modal Financial Decision Infrastructure",
+                "Proceedings of the International Workshop on Trustworthy Autonomous "
+                "Financial Agents and Cross-Market Decision Infrastructure",
+                "Association for the Advancement of Transparent Multi-Modal Economic "
+                "Forecasting and Long-Horizon Risk Communication",
+            )
         ),
     ),
 )
 def test_structured_named_reference_accepts_unseen_categories_and_long_names(
-    reference, source,
+    reference, source, authorizing_proof,
 ) -> None:
     assert len(reference) > 64 or len(reference.split()) > 8 or reference in {
         "Jerome Powell", "OpenAI", "OpenRouter", "FOMC", "GPT-5",
@@ -2328,7 +2336,7 @@ def test_structured_named_reference_accepts_unseen_categories_and_long_names(
     result = {
         "headline_zh": "名称说明", "summary_zh": value,
         "primary_story_title_zh": "名称说明",
-        "actor": "", "object": "", "entities": [reference],
+        "actor": "", "object": "", "entities": [],
         "named_references": [{"exact_text": reference}],
     }
 
@@ -2339,10 +2347,7 @@ def test_structured_named_reference_accepts_unseen_categories_and_long_names(
     assert len(allowed) == 1
     assert allowed[0].text == reference
     assert allowed[0].proof == "STRUCTURED_NAMED_REFERENCE"
-    assert {
-        "DECLARED_SEMANTIC_IDENTITY", "STRONG_IDENTIFIER",
-        "SOURCE_REFERENCE_CONTEXT", "SOURCE_SUBJECT_REFERENCE",
-    }.intersection(allowed[0].supporting_proofs)
+    assert authorizing_proof in allowed[0].supporting_proofs
     canonical_source = f"Source headline\n{source}"
     assert canonical_source[allowed[0].source_start:allowed[0].source_end] == reference
     annotation_module._validate_chinese_result(
@@ -2428,25 +2433,113 @@ def test_v17_unrelated_nearby_identity_cannot_authorize_title_case_prose() -> No
 
 
 @pytest.mark.parametrize(
-    "source,required_proof",
+    "reference,source",
     (
         (
-            "The Dark Knight was released in 2008.",
-            "SOURCE_SUBJECT_REFERENCE",
+            "Strong Growth Across Major Economies",
+            "Strong Growth Across Major Economies was reported yesterday.",
         ),
         (
-            '"The Dark Knight" is the title discussed in the article.',
-            "SOURCE_REFERENCE_CONTEXT",
+            "Global Markets Under Pressure",
+            "Global Markets Under Pressure was reported overnight.",
         ),
         (
-            'The article refers to "The Dark Knight" as its title.',
-            "SOURCE_REFERENCE_CONTEXT",
+            "Higher Rates Across Major Economies",
+            "Higher Rates Across Major Economies were expected this year.",
+        ),
+        (
+            "Gold Prices Across Global Markets",
+            "Gold Prices Across Global Markets were reported higher.",
+        ),
+        (
+            "Investors Await Federal Reserve Decision",
+            "Investors Await Federal Reserve Decision was published this morning.",
         ),
     ),
 )
-def test_v17_dark_knight_requires_category_neutral_source_role(
-    source, required_proof,
+def test_v17_passive_title_case_subject_is_not_referential(reference, source) -> None:
+    value = f"报道讨论《{reference}》。"
+    result = {
+        "headline_zh": "市场评论", "summary_zh": value,
+        "primary_story_title_zh": "市场评论", "actor": "", "object": "",
+        "entities": [reference],
+        "named_references": [{"exact_text": reference}],
+    }
+
+    assert annotation_module.resolve_structured_named_reference(
+        reference, source, (reference,),
+    ) is None
+    with pytest.raises(ValueError, match="UNGROUNDED_LATIN_REFERENCE"):
+        annotation_module._validate_chinese_result(
+            result, prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+            headline="Source headline", body=source,
+        )
+
+
+@pytest.mark.parametrize(
+    "identity_field,reference",
+    (
+        ("entities", "Global Markets Under Pressure"),
+        ("actor", "Strong Growth Across Major Economies"),
+        ("object", "Markets Brace For Higher Rates"),
+    ),
+)
+def test_v17_same_model_identity_declaration_is_supporting_only(
+    identity_field, reference,
 ) -> None:
+    result = {
+        "headline_zh": "市场评论", "summary_zh": f"报道讨论《{reference}》。",
+        "primary_story_title_zh": "市场评论", "actor": "", "object": "",
+        "entities": [], "named_references": [{"exact_text": reference}],
+    }
+    if identity_field == "entities":
+        result[identity_field] = [reference]
+    else:
+        result[identity_field] = reference
+    declared = (
+        str(result["actor"]), str(result["object"]),
+        *tuple(str(item) for item in result["entities"]),
+    )
+
+    assert annotation_module.resolve_structured_named_reference(
+        reference, reference, declared,
+    ) is None
+    with pytest.raises(ValueError, match="UNGROUNDED_LATIN_REFERENCE"):
+        annotation_module._validate_chinese_result(
+            result, prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+            headline="Source headline", body=reference,
+        )
+
+
+def test_v17_unquoted_dark_knight_subject_fails_closed() -> None:
+    reference = "The Dark Knight"
+    source = "The Dark Knight was released in 2008."
+    value = f"影片《{reference}》于报道中被讨论。"
+    result = {
+        "headline_zh": "影片消息", "summary_zh": value,
+        "primary_story_title_zh": "影片消息", "actor": "", "object": "",
+        "entities": [reference],
+        "named_references": [{"exact_text": reference}],
+    }
+
+    assert annotation_module.resolve_structured_named_reference(
+        reference, source, (reference,),
+    ) is None
+    with pytest.raises(ValueError, match="UNGROUNDED_LATIN_REFERENCE"):
+        annotation_module._validate_chinese_result(
+            result, prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
+            headline="Source headline", body=source,
+        )
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        '"The Dark Knight" is the title discussed in the article.',
+        'The article refers to "The Dark Knight" as its title.',
+    ),
+)
+def test_v17_dark_knight_explicit_reference_context_passes(source) -> None:
     reference = "The Dark Knight"
     value = f"影片《{reference}》于报道中被讨论。"
     result = {
@@ -2461,7 +2554,7 @@ def test_v17_dark_knight_requires_category_neutral_source_role(
     )
 
     assert len(allowed) == 1
-    assert required_proof in allowed[0].supporting_proofs
+    assert "SOURCE_REFERENCE_CONTEXT" in allowed[0].supporting_proofs
     assert "PROPER_NAME_SHAPE" in allowed[0].supporting_proofs
     annotation_module._validate_chinese_result(
         result, prompt_version=annotation_module.CURRENT_NEWS_PROMPT_VERSION,
@@ -2546,12 +2639,15 @@ def test_structured_named_reference_rejects_absent_sentence_and_paragraph_captur
 
 
 def test_allowed_span_normalization_handles_duplicates_nested_and_repeated_names() -> None:
-    source = "Bank of America cited OpenAI. OpenAI published the update."
+    source = (
+        'The source refers to "Bank of America" and later refers to "America". '
+        "OpenAI published the update. OpenAI confirmed it."
+    )
     value = "相关机构包括Bank of America与OpenAI，OpenAI随后回应。"
     result = {
         "headline_zh": "机构说明", "summary_zh": value,
         "primary_story_title_zh": "机构说明", "actor": "", "object": "",
-        "entities": ["Bank of America", "America"],
+        "entities": [],
         "named_references": [
             {"exact_text": "Bank of America"},
             {"exact_text": "America"},
@@ -2567,6 +2663,11 @@ def test_allowed_span_normalization_handles_duplicates_nested_and_repeated_names
         "Bank of America", "OpenAI", "OpenAI",
     ]
     assert all(item.proof == "STRUCTURED_NAMED_REFERENCE" for item in allowed)
+    assert "SOURCE_REFERENCE_CONTEXT" in allowed[0].supporting_proofs
+    assert all(
+        "STRONG_IDENTIFIER" in item.supporting_proofs
+        for item in allowed[1:]
+    )
     annotation_module._validate_chinese_result(
         result, headline="Source headline", body=source,
     )

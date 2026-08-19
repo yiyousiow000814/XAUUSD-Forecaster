@@ -187,11 +187,16 @@ The validator MUST reject declarations that capture ordinary clause syntax,
 multiple sentences, paragraphs, invented text, or unrelated words around an
 identifier. Exact source occurrence, model declaration, and Title Case are not
 sufficient together. `PROPER_NAME_SHAPE` is supporting audit evidence only;
-authorization requires an independently strong signal such as an exact semantic
-identity, strong identifier shape, explicit naming/reference context, or a
-deterministic complete-subject reference role. The latter is category-neutral:
-for example, `The Dark Knight was released in 2008.` proves the named span by
-its source role, not by a movie-specific rule. An unrelated declared identity
+`DECLARED_SEMANTIC_IDENTITY` is also supporting only because `actor`, `object`,
+`entities`, and `named_references` come from the same provider result. Repeating
+one model assertion in two fields is not independent proof. Authorization
+requires deterministic source evidence: strong identifier shape or explicit
+naming/reference context. Source-subject position, including a Title Case span
+followed by a passive predicate, never authorizes V17 because the same structure
+can describe an ordinary headline or proposition. Consequently,
+`The Dark Knight was released in 2008.` fails closed without another local cue;
+`"The Dark Knight" is the title ...` and `refers to "The Dark Knight" ...`
+remain valid category-neutral reference contexts. An unrelated declared identity
 near a candidate never supplies V17 proof. A clause-like title requires both
 source delimitation and explicit naming/reference context; quoting prose alone
 grants no permission. Duplicate
