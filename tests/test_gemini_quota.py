@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from datetime import UTC, datetime
 
@@ -10,18 +9,15 @@ from xauusd_forecaster.gemini_quota import GeminiQuotaLedger, key_fingerprint
 
 
 KEY = "secret-api-key-for-migration"
+LEGACY_FINGERPRINT = "2ede7a1eaf23"
 DAY = datetime(2026, 8, 19, 6, 0, tzinfo=UTC)
 NEXT_DAY = datetime(2026, 8, 20, 7, 0, tzinfo=UTC)
-
-
-def _legacy_fingerprint(api_key: str = KEY) -> str:
-    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
 
 
 def _write_state(path, *, legacy: int | None, canonical: int | None) -> None:
     counts = {}
     if legacy is not None:
-        counts[_legacy_fingerprint()] = legacy
+        counts[LEGACY_FINGERPRINT] = legacy
     if canonical is not None:
         counts[key_fingerprint(KEY)] = canonical
     path.write_text(

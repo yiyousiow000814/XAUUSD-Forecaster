@@ -70,7 +70,9 @@ class GeminiQuotaLedger:
         """Move a legacy count to its canonical HMAC identity conservatively."""
         counts = state["counts"]
         fingerprint = key_fingerprint(api_key)
-        legacy_fingerprint = legacy_credential_id_for_migration(api_key)
+        legacy_fingerprint = legacy_credential_id_for_migration(
+            api_key.encode("utf-8")
+        )
         canonical_count = int(counts.get(fingerprint, 0))
         legacy_count = int(counts.get(legacy_fingerprint, 0))
         effective_count = max(canonical_count, legacy_count)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import io
 
 
 def derived_credential_id(api_key: str) -> str:
@@ -16,6 +17,7 @@ def derived_credential_id(api_key: str) -> str:
     return f"hmac-v1-{digest.hex()[:32]}"
 
 
-def legacy_credential_id_for_migration(api_key: str) -> str:
+def legacy_credential_id_for_migration(material: bytes) -> str:
     """Resolve the retired SHA-256 ID only to migrate existing state."""
-    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.file_digest(io.BytesIO(material), "sha256")
+    return digest.hexdigest()[:12]
