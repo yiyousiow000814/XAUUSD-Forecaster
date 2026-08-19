@@ -126,15 +126,28 @@ consuming the preemptible reserve.
 
 ```json
 [
-  {"account_id":"routine-a","pool":"ROUTINE","api_keys":["key-1","key-2"]},
+  {"account_id":"routine-a","pool":"ROUTINE","api_keys":["key-1","key-2"],"credential_ids":["credential-a","credential-b"]},
   {"account_id":"urgent-a","pool":"PREEMPTIBLE","api_keys":["key-3"]}
 ]
 ```
 
-Account IDs are operational metadata. API keys are represented in persisted
-attempts only by short SHA-256 fingerprints. Legacy `GEMINI_API_KEYS` and
-`GEMINI_API_KEY` remain routine-only compatibility inputs; each distinct legacy
-key is treated as an independent account because no account grouping exists.
+Account and credential IDs are non-secret operational metadata. Explicit
+`credential_ids` are preferred and must align one-for-one with `api_keys`.
+They preserve historical attempt identity without deriving it from key material.
+When omitted, a versioned 128-bit HMAC identity is derived with the high-entropy
+API key as the HMAC key and a fixed application-domain message; raw keys are
+never persisted or included in credential representations. Legacy
+`GEMINI_API_KEYS` and `GEMINI_API_KEY` remain routine-only compatibility inputs;
+each distinct legacy key is treated as an independent account because no
+account grouping exists.
+
+Before upgrading a legacy deployment that must retain existing scheduler and
+quota identity, convert it to `GEMINI_API_ACCOUNTS` and pin each existing
+non-secret account and credential ID in `account_id` and `credential_ids`.
+The format is accepted by the previous runtime because unknown fields are
+ignored, so the configuration can be staged before the new runtime. Without
+that bounded migration, legacy inputs deliberately cut over to visibly
+versioned `legacy-hmac-v1-*` accounts instead of silently claiming old identity.
 
 Every provider request reserves durable quota before transport. These counters
 represent conservative local admission, not provider-confirmed success. The

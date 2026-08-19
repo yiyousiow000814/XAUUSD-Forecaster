@@ -12,10 +12,11 @@ import math
 import os
 import sqlite3
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from .credential_identity import derived_credential_id
 
 PACIFIC = ZoneInfo("America/Los_Angeles")
 ROUTINE_POOL = "ROUTINE"
@@ -257,7 +258,7 @@ CREATE TABLE IF NOT EXISTS news_ai_impact_failure_recoveries_v1 (
 class ApiCredential:
     account_id: str
     pool: str
-    api_key: str
+    api_key: str = field(repr=False)
     credential_id: str
 
 
@@ -707,7 +708,11 @@ def _iso(value: datetime) -> str:
 
 
 def _credential_id(api_key: str) -> str:
-    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
+    return derived_credential_id(api_key)
+
+
+def _contains_raw_key(identifier: str, api_key: str) -> bool:
+    return identifier == api_key or (len(api_key) >= 8 and api_key in identifier)
 
 
 def _runtime_environment_value(name: str) -> str:
@@ -738,8 +743,9 @@ def configured_api_credentials(
     """Load account-aware pools without exposing secret key material.
 
     ``GEMINI_API_ACCOUNTS`` is a JSON list of objects with ``account_id``,
-    ``pool``, and ``api_keys``.  Legacy key variables remain routine-only and
-    preserve the previous one-key/one-account behavior.
+    ``pool``, and ``api_keys``. An optional parallel ``credential_ids`` list
+    pins stable non-secret identifiers across identity-scheme migrations.
+    Legacy key variables remain routine-only compatibility inputs.
     """
     raw = (
         raw_accounts
@@ -772,33 +778,56 @@ def configured_api_credentials(
     credentials: list[ApiCredential] = []
     account_pools: dict[str, str] = {}
     key_accounts: dict[str, str] = {}
+    credential_id_keys: dict[str, str] = {}
     for entry in entries:
         if not isinstance(entry, dict):
             raise ValueError("each Gemini account must be an object")
         account_id = str(entry.get("account_id") or "").strip()
         pool = str(entry.get("pool") or "").strip().upper()
         api_keys = entry.get("api_keys")
+        credential_ids = entry.get("credential_ids")
         if not account_id:
             raise ValueError("Gemini account_id is required")
         if pool not in {ROUTINE_POOL, PREEMPTIBLE_POOL}:
             raise ValueError("Gemini account pool is not controlled")
         if not isinstance(api_keys, list) or not api_keys:
             raise ValueError("Gemini account api_keys must be a non-empty list")
+        if credential_ids is not None and (
+            not isinstance(credential_ids, list)
+            or len(credential_ids) != len(api_keys)
+        ):
+            raise ValueError(
+                "Gemini account credential_ids must match api_keys"
+            )
         prior_pool = account_pools.setdefault(account_id, pool)
         if prior_pool != pool:
             raise ValueError("one Gemini account cannot belong to two pools")
-        for raw_key in api_keys:
+        for key_index, raw_key in enumerate(api_keys):
             api_key = str(raw_key or "").strip()
             if not api_key:
                 raise ValueError("Gemini account contains an empty API key")
+            if _contains_raw_key(account_id, api_key):
+                raise ValueError("Gemini account_id must not contain an API key")
             prior_account = key_accounts.setdefault(api_key, account_id)
             if prior_account != account_id:
                 raise ValueError("one Gemini API key cannot belong to two accounts")
+            credential_id = _credential_id(api_key)
+            if credential_ids is not None:
+                credential_id = str(credential_ids[key_index] or "").strip()
+                if not credential_id:
+                    raise ValueError("Gemini credential_id is required")
+                if _contains_raw_key(credential_id, api_key):
+                    raise ValueError(
+                        "Gemini credential_id must not contain an API key"
+                    )
+            prior_key = credential_id_keys.setdefault(credential_id, api_key)
+            if prior_key != api_key:
+                raise ValueError("Gemini credential_id must be unique")
             credential = ApiCredential(
                 account_id=account_id,
                 pool=pool,
                 api_key=api_key,
-                credential_id=_credential_id(api_key),
+                credential_id=credential_id,
             )
             if credential not in credentials:
                 credentials.append(credential)

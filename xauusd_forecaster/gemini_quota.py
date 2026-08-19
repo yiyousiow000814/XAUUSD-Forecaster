@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .credential_identity import derived_credential_id
 
 UTC = timezone.utc
 PACIFIC = ZoneInfo("America/Los_Angeles")
@@ -16,7 +16,7 @@ GEMINI_REQUESTS_PER_DAY_PER_KEY = 500
 
 
 def key_fingerprint(api_key: str) -> str:
-    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
+    return derived_credential_id(api_key)
 
 
 class GeminiQuotaLedger:

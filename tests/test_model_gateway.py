@@ -6,6 +6,12 @@ from pathlib import Path
 
 import pytest
 
+from xauusd_forecaster.ai_provider_registry import (
+    DEFAULT_GEMINI_MODEL,
+    DEFAULT_GEMMA_MODEL,
+    FALLBACK_GEMINI_MODEL,
+    GEMINI_EMBEDDING_MODEL,
+)
 from xauusd_forecaster.model_gateway import (
     GeminiModelGateway,
     OllamaAssistantGateway,
@@ -14,6 +20,7 @@ from xauusd_forecaster.model_gateway import (
     ModelGatewayResponseInvalid,
     ModelRequestAccountant,
     ModelRequestUsage,
+    post_gemini_batch_embeddings,
 )
 from tests.model_accounting_fakes import CallbackModelAccountant
 
@@ -119,7 +126,17 @@ def test_local_structured_gateway_uses_native_schema_endpoint_and_accounting(
     ]
 
 
-def test_provider_transport_keeps_the_host_fixed_and_encodes_the_model(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("model", "endpoint_model"),
+    [
+        (DEFAULT_GEMINI_MODEL, DEFAULT_GEMINI_MODEL),
+        (FALLBACK_GEMINI_MODEL, FALLBACK_GEMINI_MODEL),
+        (DEFAULT_GEMMA_MODEL, DEFAULT_GEMMA_MODEL),
+    ],
+)
+def test_provider_transport_uses_authorized_fixed_generation_endpoint(
+    monkeypatch, model: str, endpoint_model: str,
+) -> None:
     requested_urls: list[str] = []
 
     class Response:
@@ -141,17 +158,85 @@ def test_provider_transport_keeps_the_host_fixed_and_encodes_the_model(monkeypat
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
 
     GeminiModelGateway._post_json(
-        "key", "../../other-model", "generateContent", {}, timeout=1.0,
+        "key", model, "generateContent", {}, timeout=1.0,
     )
 
     assert requested_urls == [
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        "..%2F..%2Fother-model:generateContent"
+        f"{endpoint_model}:generateContent"
     ]
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "unknown-model", "/", "..", "%2f", "?", "#", ":", "@",
+        "https://example.com/model", "..%252fother", "%252e%252e%252fother",
+        f"{DEFAULT_GEMINI_MODEL}?key=value",
+        f"{DEFAULT_GEMINI_MODEL}#fragment",
+    ],
+)
+def test_provider_transport_rejects_unauthorized_models_before_network(
+    monkeypatch, model: str,
+) -> None:
+    calls: list[object] = []
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(ValueError, match="not authorized"):
+        GeminiModelGateway._post_json(
+            "key", model, "generateContent", {}, timeout=1.0,
+        )
+
+    assert calls == []
+
+
+def test_embedding_transport_uses_only_the_registered_embedding_endpoint(
+    monkeypatch,
+) -> None:
+    requested_urls: list[str] = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        @staticmethod
+        def read() -> bytes:
+            return b"{}"
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda request, *, timeout: requested_urls.append(request.full_url) or Response(),
+    )
+
+    post_gemini_batch_embeddings(
+        "key", GEMINI_EMBEDDING_MODEL, {}, timeout=1.0,
+    )
+    with pytest.raises(ValueError, match="not authorized"):
+        post_gemini_batch_embeddings("key", "../model", {}, timeout=1.0)
+
+    assert requested_urls == [
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "gemini-embedding-2:batchEmbedContents"
+    ]
+
+
+def test_provider_transport_rejects_unknown_method_before_network(monkeypatch) -> None:
+    calls: list[object] = []
+    monkeypatch.setattr(
+        urllib.request, "urlopen", lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
     with pytest.raises(ValueError, match="unsupported model provider method"):
         GeminiModelGateway._post_json(
-            "key", "model", "../other-method", {}, timeout=1.0,
+            "key", DEFAULT_GEMINI_MODEL, "../other-method", {}, timeout=1.0,
         )
+    assert calls == []
 
 
 def test_gateway_reserves_exact_usage_before_transport(monkeypatch) -> None:
@@ -456,11 +541,14 @@ def test_google_model_transport_has_one_source_of_truth() -> None:
                 constructors.append(path.relative_to(root).as_posix())
     annotation_source = (package / "annotation.py").read_text(encoding="utf-8")
 
-    assert owners == ["xauusd_forecaster/model_gateway.py"]
+    assert owners == ["xauusd_forecaster/ai_provider_registry.py"]
     assert constructors == ["xauusd_forecaster/annotation.py"]
     assert "def _call_gemini" not in annotation_source
     assert "x-goog-api-key" not in annotation_source
     gateway_source = (package / "model_gateway.py").read_text(encoding="utf-8")
+    assert "google_generation_endpoint_for_model(model)" in gateway_source
+    assert "google_embedding_endpoint_for_model(model)" in gateway_source
+    assert "urllib.parse" not in gateway_source
     assert "countTokens" not in gateway_source
     assert "count_input_tokens" not in gateway_source
     assert "allow_provider_token_count" not in gateway_source
