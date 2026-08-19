@@ -732,6 +732,7 @@ test("keeps Admin login intent local until the explicit Access handoff", () => {
   assert.doesNotMatch(shell, /DashboardLink[^\n]*使用 Google 登录/);
   assert.match(shellCss, /\.dashboard-admin-login-trigger \{[^}]*border-style:dashed/);
   assert.match(shellCss, /\.admin-login-dialog \{ width:min\(420px/);
+  assert.match(shellCss, /\.admin-login-dialog footer \{[^}]*flex-direction:row/);
   assert.match(mobile, /destination\?\.private[\s\S]*openAdminLogin\(\)/);
 });
 
