@@ -1702,25 +1702,32 @@ test("activates only complete paged news-evidence generations outside status", (
   const migration = readFileSync(
     new URL("../drizzle/0020_paged_news_evidence.sql", import.meta.url), "utf8",
   );
+  const store = readFileSync(
+    new URL("../app/api/_shared/news-evidence-store.ts", import.meta.url), "utf8",
+  );
   const sync = readFileSync(new URL("../../scripts/run_dashboard_sync.py", import.meta.url), "utf8");
   const manifest = JSON.parse(readFileSync(new URL("../preview-manifest.json", import.meta.url), "utf8"));
-  const reader = route.split("export async function POST")[0];
   assert.match(migration, /PRIMARY KEY\(`snapshot_id`, `event_key`\)/);
   assert.match(migration, /news_evidence_snapshot_eligible_idx/);
+  assert.match(migration, /news_evidence_batches/);
+  assert.match(migration, /expected_count/);
   assert.match(route, /MAX_WRITE_BYTES = 400_000/);
   assert.match(route, /MAX_PAGE_ITEMS = 50/);
-  assert.match(route, /sort_time<\? OR \(sort_time=\? AND event_key<\?\)/);
-  assert.match(route, /pageSize \+ 1/);
-  assert.match(route, /next_cursor/);
-  assert.doesNotMatch(reader, / OFFSET \?/);
-  assert.doesNotMatch(reader, /SELECT count\(\*\).*news_evidence_records/s);
-  assert.match(route, /count !== Number\(body\.expected_count\)/);
-  assert.match(route, /news_evidence_staging/);
-  assert.match(route, /next_offset/);
+  assert.match(store, /NEWS_EVIDENCE_CURSOR_STALE/);
+  assert.match(store, /sort_time<\? OR \(sort_time=\? AND event_key<\?\)/);
+  assert.match(store, /pageSize \+ 1/);
+  assert.match(store, /next_cursor/);
+  assert.doesNotMatch(store, / OFFSET \?/);
+  assert.match(store, /SELECT count\(\*\) AS count FROM news_evidence_records/);
+  assert.match(store, /news_evidence_staging/);
+  assert.match(store, /news_evidence_batches/);
+  assert.match(store, /next_offset/);
   assert.match(route, /cleanup_active_snapshot/);
-  assert.match(route, /LIMIT 200/);
-  assert.match(route, /INSERT INTO news_evidence_state/);
-  assert.match(route, /WHERE snapshot_id<>\?/);
+  assert.match(store, /LIMIT 200/);
+  assert.match(store, /INSERT INTO news_evidence_state/);
+  assert.match(store, /WHERE snapshot_id<>\?/);
+  assert.ok(route.indexOf("rejectPreviewWrite()") < route.indexOf("isIngestAuthorized(request)"));
+  assert.ok(route.indexOf("rejectPreviewWrite()") < route.indexOf("readBoundedBody(request"));
   assert.match(sync, /news evidence snapshot expected \{total\} rows but staged \{received\}/);
   assert.match(sync, /"activate_snapshot": snapshot_id/);
   assert.equal(manifest.resources.newsEvidence, "/api/news-evidence");

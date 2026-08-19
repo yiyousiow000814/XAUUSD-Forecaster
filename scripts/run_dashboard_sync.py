@@ -50,7 +50,7 @@ NEWS_EVIDENCE_WRITE_BATCH_ITEMS = 20
 NEWS_EVIDENCE_PAGES_PER_CYCLE = 4
 NEWS_READER_WINDOW_DAYS = 60
 NEWS_MIRROR_CONTRACT_VERSION = "news-60-day-incremental-v9-semantic-projection"
-NEWS_EVIDENCE_CONTRACT_VERSION = "news-evidence-paged-v1"
+NEWS_EVIDENCE_CONTRACT_VERSION = "news-evidence-paged-v2"
 MARKET_HISTORY_CONTRACT_VERSION = "market-history-d1-v2"
 MARKET_HISTORY_BATCH_LIMIT_BYTES = 350_000
 MARKET_HISTORY_OVERLAP_SECONDS = 2 * 3_600
@@ -1079,6 +1079,8 @@ def _write_news_sync_state(path: Path, state: dict) -> None:
 
 
 def _sync_learning(local_payload: dict, config: dict) -> None:
+    if not local_payload and config.get("local_status_url"):
+        local_payload = _read_local_resource(config, "/api/learning")
     learning_url = config.get("remote_learning_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/learning"
     )
@@ -1147,6 +1149,8 @@ def _sync_learning(local_payload: dict, config: dict) -> None:
 
 
 def _sync_market(local_payload: dict, config: dict) -> None:
+    if not local_payload and config.get("local_status_url"):
+        local_payload = _read_local_resource(config, "/api/market-chart")
     market_url = config.get("remote_market_chart_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/market-chart"
     )
@@ -1436,6 +1440,8 @@ def _sync_news(_local_payload: dict, config: dict) -> None:
 
 
 def _sync_audit(local_payload: dict, config: dict) -> None:
+    if not local_payload and config.get("local_status_url"):
+        local_payload = _read_local_resource(config, "/api/audit")
     audit_url = config.get("remote_audit_url") or (
         config["remote_ingest_url"].rsplit("/", 1)[0] + "/audit"
     )
@@ -1453,11 +1459,26 @@ def _local_news_evidence_url(config: dict, cursor: str | None) -> str:
     ))
 
 
-def _local_critical_status_url(config: dict) -> str:
+def _local_resource_url(config: dict, path: str) -> str:
     status_url = urllib.parse.urlsplit(config["local_status_url"])
     return urllib.parse.urlunsplit((
-        status_url.scheme, status_url.netloc, "/api/critical-status", "", "",
+        status_url.scheme, status_url.netloc, path, "", "",
     ))
+
+
+def _read_local_resource(config: dict, path: str) -> dict:
+    with urllib.request.urlopen(
+        _local_resource_url(config, path),
+        timeout=LOCAL_STATUS_TIMEOUT_SECONDS,
+    ) as response:
+        payload = json.loads(response.read())
+    if not isinstance(payload, dict):
+        raise PayloadContractError(f"local resource {path} is not an object")
+    return payload
+
+
+def _local_critical_status_url(config: dict) -> str:
+    return _local_resource_url(config, "/api/critical-status")
 
 
 def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
@@ -1493,19 +1514,25 @@ def _sync_news_evidence(_local_payload: dict, config: dict) -> None:
             "cleanup_active_snapshot": first_snapshot,
         }, separators=(",", ":")).encode("utf-8"), config)
         return
-    if (
-        state.get("contract_version") == NEWS_EVIDENCE_CONTRACT_VERSION
-        and state.get("staging_snapshot_id") == first_snapshot
-    ):
-        snapshot_id = first_snapshot
-        total = int(state.get("record_count") or 0)
-        received = int(state.get("staged_count") or 0)
-        cursor = state.get("next_cursor")
-        if not isinstance(cursor, str) or not cursor:
-            cursor = None
-    else:
-        snapshot_id = first_snapshot
-        total = int(first_page.get("total") or 0)
+    snapshot_id = first_snapshot
+    total = int(first_page.get("total") or 0)
+    prepared = _post_json(remote_url, json.dumps({
+        "contract_version": NEWS_EVIDENCE_CONTRACT_VERSION,
+        "prepare_snapshot": snapshot_id,
+        "expected_count": total,
+    }, separators=(",", ":")).encode("utf-8"), config) or {}
+    if prepared.get("active") is True:
+        _write_news_sync_state(state_path, {
+            "contract_version": NEWS_EVIDENCE_CONTRACT_VERSION,
+            "active_snapshot_id": snapshot_id,
+            "record_count": total,
+            "last_success": datetime.now(UTC).isoformat(),
+        })
+        return
+    received = int(prepared.get("next_offset") or 0)
+    if received < 0 or received > total:
+        raise PayloadContractError("remote news evidence staging offset is invalid")
+    cursor = f"{snapshot_id}:{received}" if received else None
 
     for page_number in range(NEWS_EVIDENCE_PAGES_PER_CYCLE):
         if page_number == 0 and cursor is None:
@@ -1623,31 +1650,6 @@ def sync_once(config: dict) -> SyncResourceResults:
         error.resource_observations = observations
         raise error
 
-    try:
-        with urllib.request.urlopen(
-            config["local_status_url"], timeout=LOCAL_STATUS_TIMEOUT_SECONDS
-        ) as response:
-            local_payload = json.loads(response.read())
-    except Exception as error:
-        for target in healthy:
-            failure = {
-                "target": target["name"],
-                "resource": "optional_snapshot",
-                "error_type": type(error).__name__,
-                "error_code": sync_error_code(error),
-                "error": str(error)[:500],
-                "duration_ms": 0.0,
-            }
-            degraded.append(failure)
-            observations.append({
-                "target": target["name"],
-                "resource": "optional_snapshot",
-                "status": "ERROR",
-                "duration_ms": 0.0,
-                "completed_at": datetime.now(UTC).isoformat(),
-            })
-        return SyncResourceResults(degraded, observations)
-
     for target in healthy:
         target_name = target["name"]
         for resource, operation in (
@@ -1661,7 +1663,7 @@ def sync_once(config: dict) -> SyncResourceResults:
         ):
             started = time.perf_counter()
             try:
-                operation(local_payload, target)
+                operation({}, target)
                 observations.append({
                     "target": target_name,
                     "resource": resource,

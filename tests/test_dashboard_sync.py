@@ -22,6 +22,15 @@ def _sync_module():
     return module
 
 
+def _dashboard_module():
+    path = Path(__file__).resolve().parents[1] / "scripts" / "run_dashboard_api.py"
+    spec = importlib.util.spec_from_file_location("run_dashboard_api_sync_test", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _stub_assistant_capacity_route(monkeypatch, accountant_value: str) -> list[dict]:
     from xauusd_forecaster import assistant_capacity, assistant_routing
 
@@ -1212,11 +1221,30 @@ def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
         })
 
     posted = []
+    remote_next_offset = 0
+    remote_active = False
+
+    def post(url, body, _config):
+        nonlocal remote_next_offset, remote_active
+        payload = json.loads(body)
+        posted.append((url, payload))
+        if "prepare_snapshot" in payload:
+            return {
+                "status": "OK", "active": remote_active,
+                "next_offset": len(rows) if remote_active else remote_next_offset,
+            }
+        if "items" in payload:
+            assert payload["offset"] == remote_next_offset
+            remote_next_offset += len(payload["items"])
+            return {"status": "OK", "received": len(payload["items"])}
+        if "activate_snapshot" in payload:
+            assert remote_next_offset == len(rows)
+            remote_active = True
+            return {"status": "OK", "activated": snapshot_id, "count": len(rows)}
+        return {"status": "OK"}
+
     monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
-    monkeypatch.setattr(
-        module, "_post_json",
-        lambda url, body, _config: posted.append((url, json.loads(body))),
-    )
+    monkeypatch.setattr(module, "_post_json", post)
     config = {
         "local_status_url": "http://local/api/status",
         "remote_ingest_url": "https://remote/api/ingest",
@@ -1225,9 +1253,14 @@ def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
     }
 
     module._sync_news_evidence({}, config)
-    first_cycle_posts = len(posted)
+    first_cycle_batches = [body for _url, body in posted if "items" in body]
     assert not any("activate_snapshot" in body for _url, body in posted)
-    assert first_cycle_posts == module.NEWS_EVIDENCE_PAGES_PER_CYCLE
+    assert len(first_cycle_batches) == module.NEWS_EVIDENCE_PAGES_PER_CYCLE
+    assert posted[0][1] == {
+        "contract_version": module.NEWS_EVIDENCE_CONTRACT_VERSION,
+        "prepare_snapshot": snapshot_id,
+        "expected_count": len(rows),
+    }
     module._sync_news_evidence({}, config)
 
     batches = [body for _url, body in posted if "items" in body]
@@ -1264,6 +1297,195 @@ def test_news_evidence_sync_stages_complete_bounded_pages_before_activation(
     )]
 
 
+def test_news_evidence_sync_resumes_stable_generation_across_volatile_time_fields(
+    monkeypatch, tmp_path,
+) -> None:
+    sync = _sync_module()
+    api = _dashboard_module()
+    rows = [{
+        "event_key": f"{index:064x}",
+        "collector_first_seen_time": f"2026-08-19T10:{index:02d}:00+00:00",
+        "source_published_time": None,
+        "broad_model_eligible": True,
+        "model_seen": index % 2 == 0,
+        "source_hash": f"{index + 100:064x}",
+        "economic_age_minutes": float(index),
+        "freshness_status": "FRESH",
+        "model_permission": "BROAD_MODEL",
+        "reason_codes": ["EVIDENCE_PRIMARY"],
+    } for index in range(45)]
+    manifest = tmp_path / "news-evidence-generation.json"
+    stable_snapshot, frozen_rows = api._materialize_news_evidence_generation(
+        rows, manifest,
+    )
+    assert api._publish_news_evidence_snapshot(frozen_rows) == stable_snapshot
+    monkeypatch.setattr(sync, "NEWS_EVIDENCE_PAGES_PER_CYCLE", 2)
+
+    class Response:
+        status = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    def urlopen(url, *_args, **_kwargs):
+        query = __import__("urllib.parse").parse.urlsplit(str(url)).query
+        cursor = (__import__("urllib.parse").parse.parse_qs(query).get("cursor") or [None])[0]
+        return Response(api._news_evidence_page(cursor, sync.NEWS_EVIDENCE_WRITE_BATCH_ITEMS))
+
+    offsets: dict[str, int] = {}
+    received_keys: dict[str, list[str]] = {}
+    active = [None]
+    activations = []
+
+    def post(_url, body, _config):
+        payload = json.loads(body)
+        snapshot = payload.get("prepare_snapshot") or payload.get("snapshot_id") \
+            or payload.get("activate_snapshot") or payload.get("cleanup_active_snapshot")
+        if "prepare_snapshot" in payload:
+            return {
+                "status": "OK", "active": active[0] == snapshot,
+                "next_offset": offsets.get(snapshot, 0),
+            }
+        if "items" in payload:
+            assert payload["offset"] == offsets.get(snapshot, 0)
+            received_keys.setdefault(snapshot, []).extend(
+                item["event_key"] for item in payload["items"]
+            )
+            offsets[snapshot] = payload["offset"] + len(payload["items"])
+        if "activate_snapshot" in payload:
+            assert offsets.get(snapshot, 0) == payload["expected_count"]
+            active[0] = snapshot
+            activations.append(snapshot)
+        return {"status": "OK"}
+
+    monkeypatch.setattr(sync.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(sync, "_post_json", post)
+    config = {
+        "local_status_url": "http://local/api/status",
+        "remote_ingest_url": "https://remote/api/ingest",
+        "token": "test",
+        "news_evidence_state_file": str(tmp_path / "evidence-state.json"),
+    }
+
+    sync._sync_news_evidence({}, config)
+    assert offsets[stable_snapshot] == 40
+    assert activations == []
+
+    volatile_snapshot, restarted_rows = api._materialize_news_evidence_generation([
+        {
+            **row,
+            "economic_age_minutes": row["economic_age_minutes"] + 180,
+            "freshness_status": "EVENT_LIFETIME_EXPIRED",
+            "broad_model_eligible": False,
+            "model_permission": "DISPLAY_ONLY",
+            "reason_codes": ["EVIDENCE_PRIMARY", "EVENT_LIFETIME_EXPIRED"],
+        }
+        for row in rows
+    ], manifest)
+    assert volatile_snapshot == stable_snapshot
+    assert api._publish_news_evidence_snapshot(restarted_rows) == stable_snapshot
+    sync = _sync_module()
+    monkeypatch.setattr(sync, "NEWS_EVIDENCE_PAGES_PER_CYCLE", 2)
+    monkeypatch.setattr(sync.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(sync, "_post_json", post)
+    sync._sync_news_evidence({}, config)
+    assert activations == [stable_snapshot]
+    assert received_keys[stable_snapshot] == [row["event_key"] for row in rows]
+    assert len(set(received_keys[stable_snapshot])) == len(rows)
+
+    changed_rows = [{**rows[0], "source_hash": "f" * 64}, *rows[1:]]
+    changed_snapshot, changed_rows = api._materialize_news_evidence_generation(
+        changed_rows, manifest,
+    )
+    assert api._publish_news_evidence_snapshot(changed_rows) == changed_snapshot
+    assert changed_snapshot != stable_snapshot
+    sync._sync_news_evidence({}, config)
+    assert changed_snapshot in offsets
+    assert active[0] == stable_snapshot
+
+
+def test_news_evidence_activation_acknowledgement_replays_idempotently(
+    monkeypatch, tmp_path,
+) -> None:
+    module = _sync_module()
+    snapshot_id = "a" * 64
+    row = {
+        "event_key": "b" * 64,
+        "collector_first_seen_time": "2026-08-19T10:00:00+00:00",
+        "source_published_time": None,
+        "broad_model_eligible": True,
+        "model_seen": False,
+    }
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({
+                "snapshot_id": snapshot_id,
+                "items": [row],
+                "total": 1,
+                "has_more": False,
+                "next_cursor": None,
+            }).encode("utf-8")
+
+    remote = {"next_offset": 0, "active": False, "lose_ack": True}
+
+    def post(_url, body, _config):
+        payload = json.loads(body)
+        if "prepare_snapshot" in payload:
+            return {
+                "status": "OK", "active": remote["active"],
+                "next_offset": remote["next_offset"],
+            }
+        if "items" in payload:
+            remote["next_offset"] = 1
+            return {"status": "OK"}
+        if "activate_snapshot" in payload:
+            remote["active"] = True
+            if remote["lose_ack"]:
+                remote["lose_ack"] = False
+                raise TimeoutError("activation response was lost")
+        return {"status": "OK"}
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k: Response())
+    monkeypatch.setattr(module, "_post_json", post)
+    state_path = tmp_path / "evidence-state.json"
+    config = {
+        "local_status_url": "http://local/api/status",
+        "remote_ingest_url": "https://remote/api/ingest",
+        "token": "test",
+        "news_evidence_state_file": str(state_path),
+    }
+
+    with pytest.raises(TimeoutError, match="response was lost"):
+        module._sync_news_evidence({}, config)
+    assert not state_path.exists() or "active_snapshot_id" not in json.loads(
+        state_path.read_text(encoding="utf-8")
+    )
+
+    restarted = _sync_module()
+    monkeypatch.setattr(restarted.urllib.request, "urlopen", lambda *_a, **_k: Response())
+    monkeypatch.setattr(restarted, "_post_json", post)
+    restarted._sync_news_evidence({}, config)
+    local = json.loads(state_path.read_text(encoding="utf-8"))
+    assert local["active_snapshot_id"] == snapshot_id
+    assert local["record_count"] == 1
+
+
 def test_optional_growing_resource_failure_does_not_block_heartbeat(
     monkeypatch, tmp_path,
 ) -> None:
@@ -1290,6 +1512,7 @@ def test_optional_growing_resource_failure_does_not_block_heartbeat(
     target = {
         "name": "cloudflare", "remote_ingest_url": "https://remote/api/ingest",
         "token": "test", "legacy": False,
+        "local_status_url": "http://local/api/status",
     }
     monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
     posted = []
@@ -1351,6 +1574,7 @@ def test_growing_local_snapshot_failure_cannot_block_critical_heartbeat(
     target = {
         "name": "cloudflare", "remote_ingest_url": "https://remote/api/ingest",
         "token": "test", "legacy": False,
+        "local_status_url": "http://local/api/status",
     }
     monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
     posted = []
@@ -1363,11 +1587,77 @@ def test_growing_local_snapshot_failure_cannot_block_critical_heartbeat(
     assert len(posted) == 1
     assert posted[0][0] == "https://remote/api/ingest"
     assert json.loads(posted[0][1])["system"]["online"] is True
-    assert len(result) == 1
-    assert result[0]["resource"] == "optional_snapshot"
+    assert {row["resource"] for row in result} == {
+        "audit", "learning", "market_chart", "market_history", "news",
+        "news_evidence",
+    }
+    assert all(row["resource"] != "optional_snapshot" for row in result)
     assert next(
         row for row in result.resource_observations if row["resource"] == "heartbeat"
     )["status"] == "OK"
+
+
+@pytest.mark.parametrize("failed_resource", ["audit", "learning", "market_chart"])
+def test_optional_resource_families_degrade_only_their_owner(
+    monkeypatch, failed_resource,
+) -> None:
+    module = _sync_module()
+    critical = {
+        "generated_at": "2026-08-19T10:00:00+00:00",
+        "system": {"online": True},
+    }
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(critical).encode("utf-8")
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *_a, **_k: Response())
+    target = {
+        "name": "cloudflare", "remote_ingest_url": "https://remote/api/ingest",
+        "token": "test", "legacy": False,
+        "local_status_url": "http://local/api/status",
+    }
+    monkeypatch.setattr(module, "configured_targets", lambda _config: [target])
+    posted = []
+    monkeypatch.setattr(
+        module, "_post_json",
+        lambda url, body, _config: posted.append((url, json.loads(body))) or {},
+    )
+    operations = {
+        "audit": "_sync_audit",
+        "learning": "_sync_learning",
+        "market_chart": "_sync_market",
+        "market_history": "_sync_market_history",
+        "news": "_sync_news",
+        "news_evidence": "_sync_news_evidence",
+        "news_questions": "_sync_news_questions",
+    }
+    called = []
+    for resource, name in operations.items():
+        def operation(*_args, resource=resource, **_kwargs):
+            called.append(resource)
+            if resource == failed_resource:
+                raise TimeoutError(f"{resource} failed")
+        monkeypatch.setattr(module, name, operation)
+
+    result = module.sync_once({"local_status_url": "http://local/api/status"})
+
+    assert posted[0][0] == "https://remote/api/ingest"
+    assert called == list(operations)
+    assert [row["resource"] for row in result] == [failed_resource]
+    by_resource = {row["resource"]: row for row in result.resource_observations}
+    assert by_resource["heartbeat"]["status"] == "OK"
+    assert by_resource[failed_resource]["status"] == "ERROR"
+    assert all(
+        row["status"] == "OK" for name, row in by_resource.items()
+        if name not in {failed_resource}
+    )
 
 
 def test_sync_skips_unchanged_news_index_and_learning(monkeypatch, tmp_path) -> None:

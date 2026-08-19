@@ -66,13 +66,21 @@ The Worker 800 KB check must remain an emergency guard, not the storage model.
     projection beside the full snapshot and exposes it separately; the sync
     worker does not need to read or parse growing optional state before posting
     the heartbeat.
-12. Event-level news evidence uses independently staged D1 rows. Local reads and
-    remote writes have row and byte bounds, each sync cycle advances a fixed
-    number of pages, and the remote reader uses a bounded `(sort_time,event_key)`
-    cursor rather than history-sized offsets or count scans. A new snapshot
-    becomes active only after its contiguous staged offset reaches the declared
-    row count, so an interrupted backfill leaves the previous complete snapshot
-    readable. Superseded materializations are reclaimed in fixed-size batches.
+12. Event-level news evidence uses independently staged D1 rows. A snapshot ID
+    is backed by a persisted local manifest keyed by authoritative event/audit
+    identity; display-only age and freshness changes reuse its frozen ordered
+    contents across cache refreshes and process restarts. Local reads and remote
+    writes have row and byte bounds,
+    each sync cycle advances a fixed number of pages, and the remote reader uses
+    a generation-bound `(snapshot_id,sort_time,event_key)` cursor rather than
+    history-sized offsets or count scans. The server records an explicit staging
+    manifest, including a valid zero-row generation, and replay-safe batch
+    receipts. A new snapshot becomes active atomically only after its contiguous
+    staged offset and stored row count reach the manifest count. Interrupted or
+    ambiguously acknowledged writes resume from remote state, while the previous
+    complete snapshot remains readable. Readers reject a cursor from another
+    generation so the client can restart at page one. Superseded materializations
+    are reclaimed in fixed-size batches after a reader grace period.
 
 ## Measured Current Data
 

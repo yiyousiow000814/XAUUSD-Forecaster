@@ -43,6 +43,7 @@ export const newsEvidenceRecords = sqliteTable(
   {
     snapshotId: text("snapshot_id").notNull(),
     eventKey: text("event_key").notNull(),
+    ordinal: integer("ordinal").notNull(),
     sortTime: text("sort_time").notNull(),
     broadModelEligible: integer("broad_model_eligible").notNull(),
     modelSeen: integer("model_seen").notNull(),
@@ -60,6 +61,9 @@ export const newsEvidenceRecords = sqliteTable(
     index("news_evidence_snapshot_seen_idx").on(
       table.snapshotId, table.modelSeen, table.sortTime, table.eventKey,
     ),
+    uniqueIndex("news_evidence_snapshot_ordinal_idx").on(
+      table.snapshotId, table.ordinal,
+    ),
   ],
 );
 
@@ -74,8 +78,21 @@ export const newsEvidenceState = sqliteTable("news_evidence_state", {
 export const newsEvidenceStaging = sqliteTable("news_evidence_staging", {
   snapshotId: text("snapshot_id").primaryKey().notNull(),
   nextOffset: integer("next_offset").notNull(),
+  expectedCount: integer("expected_count").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
+
+export const newsEvidenceBatches = sqliteTable(
+  "news_evidence_batches",
+  {
+    snapshotId: text("snapshot_id").notNull(),
+    batchOffset: integer("batch_offset").notNull(),
+    itemCount: integer("item_count").notNull(),
+    payloadHash: text("payload_hash").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  table => [primaryKey({ columns: [table.snapshotId, table.batchOffset] })],
+);
 
 export const marketCandles = sqliteTable("market_candles", {
   timeEpoch: integer("time_epoch").primaryKey(),

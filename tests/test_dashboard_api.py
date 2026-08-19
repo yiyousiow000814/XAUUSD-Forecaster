@@ -1659,14 +1659,24 @@ def test_status_snapshot_cache_serves_bounded_stale_during_slow_refresh(
         raise AssertionError("expired dashboard snapshot must fail closed")
 
 
-def test_health_endpoint_requires_recent_dashboard_snapshot(monkeypatch, tmp_path) -> None:
+def test_health_endpoint_tracks_critical_readiness_not_optional_status(
+    monkeypatch, tmp_path,
+) -> None:
     module = _dashboard_module()
     module.Handler.database = tmp_path / "unused.sqlite3"
     module.Handler.status_cache = module.StatusSnapshotCache()
+    module.Handler.critical_status_cache = module.StatusSnapshotCache()
+    critical_fails = [True]
+
+    def builder(_database, *, include_optional=True, **_kwargs):
+        if include_optional:
+            raise RuntimeError("optional status failed")
+        if critical_fails[0]:
+            raise RuntimeError("critical status failed")
+        return {"generated_at": "2026-08-19T00:00:00+00:00"}
+
     monkeypatch.setattr(
-        module,
-        "_dashboard_payload",
-        lambda _database: (_ for _ in ()).throw(AssertionError("must not build")),
+        module, "_dashboard_payload", builder,
     )
     server = module.ThreadingHTTPServer(("127.0.0.1", 0), module.Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -1678,18 +1688,56 @@ def test_health_endpoint_requires_recent_dashboard_snapshot(monkeypatch, tmp_pat
             )
         except urllib.error.HTTPError as error:
             assert error.code == 503
-            assert json.loads(error.read())["status"] == "UNAVAILABLE"
+            failed = json.loads(error.read())
+            assert failed["status"] == "UNAVAILABLE"
+            assert failed["readiness_scope"] == "PROCESS_AND_CRITICAL_STATUS"
         else:
-            raise AssertionError("health must fail before a status snapshot exists")
+            raise AssertionError("health must fail when critical status cannot build")
 
-        module.Handler.status_cache.get(
-            module.Handler.database, lambda _database: {"status": "ready"},
-        )
+        critical_fails[0] = False
         with urllib.request.urlopen(
             f"http://127.0.0.1:{server.server_port}/api/health", timeout=2
         ) as response:
             assert response.status == 200
-            assert json.loads(response.read())["status"] == "OK"
+            healthy = json.loads(response.read())
+            assert healthy["status"] == "OK"
+            assert healthy["optional_resources"] == "SEPARATE_DEGRADATION"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_optional_api_producers_fail_independently(monkeypatch, tmp_path) -> None:
+    module = _dashboard_module()
+    module.Handler.database = tmp_path / "unused.sqlite3"
+    module.Handler.audit_cache = module.StatusSnapshotCache()
+    module.Handler.learning_cache = module.StatusSnapshotCache()
+    module.Handler.market_chart_cache = module.StatusSnapshotCache()
+
+    def resource(_database, name):
+        if name == "audit":
+            raise RuntimeError("audit source failed")
+        return {"generated_at": "2026-08-19T00:00:00+00:00", "resource": name}
+
+    monkeypatch.setattr(module, "_optional_resource_payload", resource)
+    server = module.ThreadingHTTPServer(("127.0.0.1", 0), module.Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(urllib.error.HTTPError) as failed:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/api/audit", timeout=2,
+            )
+        assert failed.value.code == 500
+        for path, expected in (
+            ("/api/learning", "learning"),
+            ("/api/market-chart", "market_chart"),
+        ):
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}{path}", timeout=2,
+            ) as response:
+                assert json.loads(response.read())["resource"] == expected
     finally:
         server.shutdown()
         server.server_close()
@@ -2998,3 +3046,43 @@ def test_news_evidence_pages_are_byte_bounded_and_complete_at_large_scale() -> N
     assert received == rows
     assert len(received) == 1_000
     assert len({row["event_key"] for row in received}) == len(rows)
+
+
+def test_news_evidence_generation_freezes_volatile_state_across_restart(
+    tmp_path,
+) -> None:
+    module = _dashboard_module()
+    manifest = tmp_path / "news-evidence-generation.json"
+    base = {
+        "event_key": "a" * 64,
+        "collector_first_seen_time": "2026-08-19T10:00:00+00:00",
+        "source_published_time": "2026-08-19T09:00:00+00:00",
+        "broad_model_eligible": True,
+        "model_seen": False,
+        "source_hash": "b" * 64,
+        "economic_age_minutes": 60.0,
+        "freshness_status": "FRESH",
+        "model_permission": "BROAD_MODEL",
+        "reason_codes": ["EVIDENCE_PRIMARY"],
+    }
+    first_id, first_rows = module._materialize_news_evidence_generation(
+        [base], manifest,
+    )
+    later_id, later_rows = module._materialize_news_evidence_generation([{
+        **base,
+        "economic_age_minutes": 181.5,
+        "freshness_status": "EVENT_LIFETIME_EXPIRED",
+        "broad_model_eligible": False,
+        "model_permission": "DISPLAY_ONLY",
+        "reason_codes": ["EVIDENCE_PRIMARY", "EVENT_LIFETIME_EXPIRED"],
+    }], manifest)
+
+    assert later_id == first_id
+    assert later_rows == first_rows
+    assert "economic_age_minutes" not in later_rows[0]
+
+    changed_id, changed_rows = module._materialize_news_evidence_generation([
+        {**base, "source_hash": "c" * 64, "economic_age_minutes": 62.0},
+    ], manifest)
+    assert changed_id != first_id
+    assert changed_rows[0]["source_hash"] == "c" * 64

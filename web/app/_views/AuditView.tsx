@@ -4,7 +4,9 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { useSearchParams } from "next/navigation";
 import CountValue from "../_components/CountValue";
 import { CurrentDataNotice, MetricValue, type CurrentDataPhase } from "../_components/CurrentDataState";
-import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
+import {
+  DashboardResourceError, loadDashboardResource, readDashboardResource,
+} from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { statusFieldPhase } from "../_lib/current-data-provenance";
 import { PREVIEW_NEWS_PAGE_SIZE } from "../_lib/preview-manifest";
@@ -969,6 +971,11 @@ export default function AuditView() {
     try {
       const body = await loadDashboardResource<NewsEvidenceResponse>(evidenceUrl, { force });
       setEvidenceArchive(body);
+      if (body.page === 1) {
+        setEvidencePageCursors({
+          1: null, ...(body.next_cursor ? { 2: body.next_cursor } : {}),
+        });
+      }
       if (body.next_cursor) {
         setEvidencePageCursors(previous => ({
           ...previous, [body.page + 1]: body.next_cursor,
@@ -976,9 +983,37 @@ export default function AuditView() {
       }
       setEvidenceError(null);
     } catch (reason) {
+      if (
+        reason instanceof DashboardResourceError
+        && reason.code === "NEWS_EVIDENCE_CURSOR_STALE"
+      ) {
+        const firstUrl = `/api/news-evidence?mode=${evidenceMode}&page=1&limit=${EVIDENCE_PER_PAGE}`;
+        setEvidencePage(1);
+        setEvidencePageCursors({ 1: null });
+        setEvidenceArchive({
+          items: [], page: 1, page_size: EVIDENCE_PER_PAGE, mode: evidenceMode,
+        });
+        try {
+          const first = await loadDashboardResource<NewsEvidenceResponse>(
+            firstUrl, { force: true },
+          );
+          setEvidenceArchive(first);
+          setEvidencePageCursors({
+            1: null, ...(first.next_cursor ? { 2: first.next_cursor } : {}),
+          });
+          setEvidenceError(null);
+          return;
+        } catch (reloadReason) {
+          setEvidenceError(
+            reloadReason instanceof Error
+              ? reloadReason.message : "新闻证据代次变化后重新读取失败",
+          );
+          return;
+        }
+      }
       setEvidenceError(reason instanceof Error ? reason.message : "无法读取新闻证据档案");
     }
-  }, [evidenceUrl]);
+  }, [evidenceMode, evidenceUrl]);
 
   const refreshNews = useCallback(async (force = false) => {
     const query = new URLSearchParams({

@@ -31,7 +31,7 @@ def _loopback_status_port(value: str) -> int | None:
     if (
         parsed.scheme != "http"
         or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
-        or parsed.path != "/api/status"
+        or parsed.path != "/api/critical-status"
         or parsed.query
         or parsed.fragment
         or port is None
@@ -44,7 +44,9 @@ def _read_status(status_port: int) -> tuple[dict | None, dict | None]:
     """Return a status snapshot or one structured transport failure."""
     connection = http.client.HTTPConnection("127.0.0.1", status_port, timeout=20)
     try:
-        connection.request("GET", "/api/status", headers={"Accept": "application/json"})
+        connection.request(
+            "GET", "/api/critical-status", headers={"Accept": "application/json"},
+        )
         response = connection.getresponse()
         serialized = response.read()
         if response.status >= 400:
@@ -94,7 +96,9 @@ def _read_status(status_port: int) -> tuple[dict | None, dict | None]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--status-url", default="http://127.0.0.1:8765/api/status")
+    parser.add_argument(
+        "--status-url", default="http://127.0.0.1:8765/api/critical-status",
+    )
     parser.add_argument(
         "--allow-pending-generation-decision", action="store_true",
         help="During post-reload observation, wait for the next live boundary.",
@@ -106,7 +110,7 @@ def main() -> int:
         print(json.dumps({
             "status": "ERROR",
             "error_code": "STATUS_ENDPOINT_URL_INVALID",
-            "error": "status URL must be the loopback /api/status endpoint",
+            "error": "status URL must be the loopback /api/critical-status endpoint",
         }, ensure_ascii=False, sort_keys=True))
         return 2
     status, transport_failure = _read_status(status_port)
