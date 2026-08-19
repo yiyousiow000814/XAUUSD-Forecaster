@@ -111,11 +111,81 @@ project-shared minute budget.
 
 ## Fair queueing
 
-Fresh work receives at most a one-minute semantic-priority head start. After a
-job has waited one scheduler cycle, all ready jobs are claimed in original FIFO
-order. This keeps immediate market-relevant work responsive while guaranteeing
-that annotation, impact, and display stages cannot be starved by a continuous
-stream of newer urgent work.
+Current-contract annotation work has two operational ownership lanes. `LIVE`
+contains eligible evidence first received after the contract activation point;
+`CONTRACT_BACKFILL` contains earlier evidence that still needs the same current
+semantic contract. This distinction changes scheduling only and never creates
+a second semantic authority.
+
+LIVE annotation is `FAST`, is always claimed before contract backfill, and may
+use the existing preemptible account and priority quota reserve. Contract
+backfill is `BACKGROUND` and routine-only. A contract handover persists its
+activation point and descending receipt cursor, scans at most 50 historical
+rows per scheduler cycle, and resumes from that cursor after restart. Backfill
+is enqueued only when frozen relevance and category freshness rules show that
+the record can still affect current operational behavior; immutable older
+evidence remains stored without entering the live queue. Unfinished Daily Brief
+dates remain a bounded operational exception and use the background lane.
+
+Within one ownership lane, fresh work receives at most a one-minute
+semantic-priority head start. After that interval, ready jobs follow original
+FIFO order. Continuous historical migration therefore cannot consume the
+capacity reserved for newly arriving live evidence.
+
+Queue ordering is not quota isolation. Before every contract-backfill provider
+dispatch, the same atomic account admission transaction computes a one-request
+grant from the authoritative provider/model/account quota surface. Spendable
+capacity is the current quota-day remainder minus the conservative P95 of
+remaining LIVE demand from 7–14 complete Pacific quota days, an operational
+reserve, a retry/critical reserve, and a safety buffer. Cold start fails closed.
+The grant is recomputed after every admitted request; it stops immediately for
+claimable or overdue LIVE work, increasing LIVE backlog, recent provider
+throttling, LIVE capacity deferral, or the bounded instantaneous backfill share.
+
+Hourly per-quota-day workload summaries retain only the latest 14 complete
+days, independent of news-history size. Fine-grained request evidence remains
+bounded separately. `BACKFILL_BUDGET_DEFERRED` is healthy pacing: it performs no
+provider call, reserves no quota, and increments neither job attempt nor retry
+count. Repeated identical budget deferrals use one durable record per
+job/account/reason and refresh at most once per five minutes, so scheduler ticks
+do not create an unbounded evidence stream. LIVE scheduler health excludes
+migration queue age and pacing; a
+separate non-blocking `contract_backfill` summary exposes its states, oldest
+age, and recent budget deferrals. A not-yet-classified job is owned by the
+bounded lane migration and is reported only as `UNCLASSIFIED_MIGRATION`; its
+stored lane default is not operational authority. The materialized dashboard
+read model therefore keys counts by `lane_classified` as well as lane and state.
+Legacy annotation queue fields read classified LIVE work only, while semantic
+pending, contract-backfill, and unclassified-migration totals remain separate.
+
+Every annotation contract transition is declared as `REUSE_COMPATIBLE`,
+`DETERMINISTIC_MIGRATION`, or `MODEL_REVIEW_REQUIRED`. Only the last class may
+create model-backed migration jobs. Compatible reuse creates a validated
+current-contract projection while retaining the source annotation and original
+model provenance. Deterministic migration applies a declared, versioned local
+transform and records source and projected hashes. Both paths are cursor-bounded,
+replay-safe, and consume no provider dispatch, account quota, job attempt, retry,
+or model-backed backfill. The transition state and every zero-call projection
+persist the same stable fingerprint over the contract version, source and target
+prompt versions, transition kind, and deterministic migrator version. A restart
+may resume only when that fingerprint matches. A projection failure is retained
+under `SEMANTIC_TRANSITION_CONTRACT_FAILED`; a changed in-flight contract is
+retained under `SEMANTIC_TRANSITION_CONTRACT_CHANGED`. Either failure is
+fail-closed: the cursor and existing projections remain unchanged and execution
+never falls through to model review.
+Historical demand is independently
+classified as `CURRENT_OPERATIONAL`, `TRAINING_REQUIRED`, or `ARCHIVAL_ONLY`;
+training work is schedulable only after an explicit generation demand, while
+archival evidence is never scheduled. The V16-to-V17 transition is explicitly
+model-review-required, remains cursor-bounded to 50 records per discovery page,
+and still passes through the same LIVE-reserving quota gate.
+
+Existing annotation jobs are assigned to LIVE or contract-backfill lanes by a
+durable `(created_at, job_id)` keyset migration of at most 100 jobs per scheduler
+cycle. Its cursor and page updates commit together. Unclassified annotation jobs
+cannot be claimed, while newly created jobs are classified at insertion. A
+restart resumes after the last committed cursor without changing attempts or
+replaying provider work; completion is durable and prevents later full scans.
 
 Preemptible accounts remain restricted to `IMMEDIATE` and `FAST` jobs. Routine
 accounts may serve every priority and provide overflow capacity for urgent
