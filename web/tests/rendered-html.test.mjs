@@ -1311,11 +1311,13 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(view, /sortAttentionFirst\(payload\?\.news_source_health/);
   assert.match(view, /className="health-state-mark" aria-label=\{state\.label\}>\{state\.symbol\}/);
   assert.match(view, /className="health-state-text">\{state\.label\}/);
-  assert.match(css, /\.component-status article\.is-healthy,\.source-health article\.is-healthy \{[^}]*grid-template-columns:minmax\(0,1fr\) auto/);
+  assert.match(css, /\.component-status article\.is-healthy,\.source-health article\.is-healthy \{[^}]*position:relative; display:block/);
   assert.match(css, /\.component-card-grid>article\.is-healthy:has\(>details\[open\]\),\.source-health-grid>article\.is-healthy:has\(>details\[open\]\) \{[^}]*grid-column:1\/-1/);
-  assert.match(css, /article\.is-healthy>\.component-technical-details,\.source-health article\.is-healthy>\.source-technical-details \{[^}]*display:contents/);
-  assert.match(css, /article\.is-healthy>\.component-technical-details>summary,\.source-health article\.is-healthy>\.source-technical-details>summary \{[^}]*grid-column:2; grid-row:1; justify-content:flex-end/);
-  assert.match(css, /article\.is-healthy>\.component-technical-details>:not\(summary\),\.source-health article\.is-healthy>\.source-technical-details>:not\(summary\) \{[^}]*grid-column:1\/-1/);
+  assert.match(css, /article\.is-healthy>header,\.source-health article\.is-healthy>header \{[^}]*padding-right:72px/);
+  assert.match(css, /article\.is-healthy>\.component-technical-details,\.source-health article\.is-healthy>\.source-technical-details \{[^}]*display:block; height:0/);
+  assert.match(css, /article\.is-healthy>\.component-technical-details\[open\],\.source-health article\.is-healthy>\.source-technical-details\[open\] \{[^}]*height:auto/);
+  assert.match(css, /article\.is-healthy>\.component-technical-details>summary,\.source-health article\.is-healthy>\.source-technical-details>summary \{[^}]*position:absolute; top:0; right:0; width:60px; justify-content:flex-end/);
+  assert.match(css, /article\.is-healthy>\.component-technical-details>:not\(summary\),\.source-health article\.is-healthy>\.source-technical-details>:not\(summary\) \{[^}]*width:100%/);
   assert.match(css, /\.component-status article\.is-attention,\.source-health article\.is-attention \{[^}]*grid-column:1\/-1/);
   assert.match(css, /\.component-current-problem \{[^}]*min-height:46px/);
   assert.match(css, /\.component-card-grid \{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);

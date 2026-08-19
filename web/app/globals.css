@@ -695,7 +695,7 @@ body.modal-open { overflow:hidden; }
 .component-status>header>strong,.source-health>header>strong { padding-bottom:4px; font-size:14px; line-height:1.4; text-align:right; }
 .component-card-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); align-items:start; gap:8px 18px; padding-top:10px; }
 .component-status article,.source-health article { min-width:0; border:1px solid rgba(17,17,15,.45); background:rgba(239,235,223,.72); }
-.component-status article.is-healthy,.source-health article.is-healthy { display:grid; grid-template-columns:minmax(0,1fr) auto; border:0; border-bottom:1px solid rgba(17,17,15,.16); background:transparent; }
+.component-status article.is-healthy,.source-health article.is-healthy { position:relative; display:block; border:0; border-bottom:1px solid rgba(17,17,15,.16); background:transparent; }
 .component-card-grid>article.is-healthy:has(>details[open]),.source-health-grid>article.is-healthy:has(>details[open]) { grid-column:1/-1; }
 .component-status article.is-attention,.source-health article.is-attention { grid-column:1/-1; display:flex; flex-direction:column; border-left:6px solid #b57b00; background:#eee8da; }
 .component-status article.state-error,.source-health article.state-error { border-left-color:#bd3028; }
@@ -715,9 +715,11 @@ body.modal-open { overflow:hidden; }
 .component-current-problem b { width:max-content; border-left:4px solid var(--gold); padding-left:8px; font-size:13px; }
 .component-current-problem time { font-size:13px; font-weight:750; }
 .component-technical-details { margin-top:auto; border-top:1px solid rgba(17,17,15,.24); }
-.component-status article.is-healthy>.component-technical-details,.source-health article.is-healthy>.source-technical-details { display:contents; margin:0; border:0; }
-.component-status article.is-healthy>.component-technical-details>summary,.source-health article.is-healthy>.source-technical-details>summary { grid-column:2; grid-row:1; justify-content:flex-end; }
-.component-status article.is-healthy>.component-technical-details>:not(summary),.source-health article.is-healthy>.source-technical-details>:not(summary) { grid-column:1/-1; }
+.component-status article.is-healthy>header,.source-health article.is-healthy>header { padding-right:72px; }
+.component-status article.is-healthy>.component-technical-details,.source-health article.is-healthy>.source-technical-details { display:block; height:0; margin:0; border:0; }
+.component-status article.is-healthy>.component-technical-details[open],.source-health article.is-healthy>.source-technical-details[open] { height:auto; border-top:1px solid rgba(17,17,15,.2); }
+.component-status article.is-healthy>.component-technical-details>summary,.source-health article.is-healthy>.source-technical-details>summary { position:absolute; top:0; right:0; width:60px; justify-content:flex-end; }
+.component-status article.is-healthy>.component-technical-details>:not(summary),.source-health article.is-healthy>.source-technical-details>:not(summary) { width:100%; }
 .component-technical-details>summary,.source-technical-details>summary { display:flex; min-height:44px; align-items:center; padding:0 20px; cursor:pointer; font-size:12px; font-weight:900; }
 .component-status article.is-healthy summary,.source-health article.is-healthy summary { min-height:48px; padding:0 12px; color:var(--muted); font-family:var(--font-sans); font-weight:650; }
 .component-technical-details>dl { display:grid; gap:10px; margin:0; border-top:1px solid rgba(17,17,15,.2); padding:14px 20px 18px; }
@@ -1520,7 +1522,6 @@ body.modal-open { overflow:hidden; }
   .component-status article>header,.source-health article>header { grid-template-columns:26px minmax(0,1fr) auto; }
   .component-status article>header time,.source-health article>header time { grid-column:2; }
   .component-status article>header .health-state-text,.source-health article>header .health-state-text { grid-column:3; grid-row:1; }
-  .component-status article.is-healthy,.source-health article.is-healthy { grid-template-columns:minmax(0,1fr) 60px; }
   .health-technical-section>details>summary { min-height:72px; }
   .technical-health-group>section>header { align-items:flex-start; flex-direction:column; }
 
