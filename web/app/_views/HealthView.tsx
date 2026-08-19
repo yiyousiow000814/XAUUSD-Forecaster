@@ -151,8 +151,7 @@ function SourceHealthCard({ item }: { item: NewsSourceHealth }) {
     <header>
       <span className="health-state-mark" aria-label={state.label}>{state.symbol}</span>
       <div><strong>{item.label}</strong></div>
-      <span className="health-state-text">{state.label}</span>
-      <time>{compactClock(item.last_success ?? item.latest_poll_time)}</time>
+      <span className="health-row-meta"><span className="health-state-text">{state.label}</span><time>{compactClock(item.last_success ?? item.latest_poll_time)}</time></span>
     </header>
     {state.attention ? <div className="source-current-problem">
       <small>当前问题</small><strong>{problemHeading}</strong>
@@ -188,8 +187,7 @@ function ComponentHealthCard({
     <header>
       <span className="health-state-mark" aria-label={state.label}>{state.symbol}</span>
       <h3>{operationalScopeLabel(name)}</h3>
-      <span className="health-state-text">{state.label}</span>
-      <time>{item.age_seconds === null ? "—" : `${compactElapsed(item.age_seconds)}前`}</time>
+      <span className="health-row-meta"><span className="health-state-text">{state.label}</span><time>{item.age_seconds === null ? "—" : `${compactElapsed(item.age_seconds)}前`}</time></span>
     </header>
     {state.attention ? <div className="component-current-problem">
       <strong>{incident ? operationalIncidentActionLabels[incident.action_state] : componentProblem(item.status)}</strong>
@@ -280,6 +278,10 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
   const operatorActionIncident = operatorAction
     ? incidents.find(incident => incident.action_state === operatorAction) ?? null : null;
   const operatorRetryAt = operatorActionIncident ? operationalIncidentNextRetryAt(operatorActionIncident) : null;
+  const incidentStatusLabel = incidentStatus === "error" ? "运行异常" : incidentStatus === "warning" ? "运行警告" : "运行正常";
+  const incidentStatusMark = incidentStatus === "error" ? "✕" : incidentStatus === "warning" ? "⚠" : "✓";
+  const operatorSummaryTail = operatorAction === "AUTO_RECOVERING" && operatorRetryAt
+    ? `下次尝试 ${localTime(operatorRetryAt)}` : affectedScopeCount ? `${affectedScopeCount} 个子系统受影响` : null;
 
   return <main className="status-main">
     <section className="status-hero">
@@ -287,16 +289,8 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
     </section>
     {error ? <div className="error-banner">状态读取失败：{error}</div> : null}
     <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
-    <section className={`health-at-a-glance is-${incidentStatus}`} aria-label="当前系统结论">
-      <span className="health-conclusion-mark" aria-hidden="true">{incidentStatus === "error" ? "✕" : incidentStatus === "warning" ? "⚠" : "✓"}</span>
-      <div className="health-current-conclusion">
-        <small>当前结论</small>
-        <strong>{incidentStatus === "error" ? "运行异常" : incidentStatus === "warning" ? "运行警告" : "运行正常"}</strong>
-        <span>{operatorAction ? operationalIncidentActionLabels[operatorAction] : "无需处理"} · {operatorAction === "AUTO_RECOVERING" && operatorRetryAt ? `下次尝试 ${localTime(operatorRetryAt)}` : affectedScopeCount ? `${affectedScopeCount} 个子系统受影响` : "所有监测项处于预期状态"}</span>
-      </div>
-    </section>
     <section id="operational-alerts" className={`operational-health-panel incident-summary-panel is-${incidentStatus}`} aria-label="运行问题与关联证据">
-      <header><div><p className="eyebrow">CURRENT PROBLEMS</p><h2>当前问题</h2></div><p>{incidents.length ? `${incidents.length} 个问题 · 异常优先` : "当前没有运行问题"}</p></header>
+      <header><div><p className="eyebrow">CURRENT PROBLEMS</p><h2>当前问题</h2><p className="incident-operator-summary"><span aria-hidden="true">{incidentStatusMark}</span> {incidentStatusLabel} · {operatorAction ? operationalIncidentActionLabels[operatorAction] : "无需处理"}{operatorSummaryTail ? ` · ${operatorSummaryTail}` : ""}</p></div><p>{incidents.length ? `${incidents.length} 个问题 · 异常优先` : "当前没有运行问题"}</p></header>
       {incidents.length ? <div className="operational-incident-list">{incidents.map(incident => <IncidentCard incident={incident} key={incident.incident_key} />)}</div> : <p className="operational-all-clear">当前没有达到告警阈值的运行异常。</p>}
     </section>
     <section className={`component-status ${componentHasAttention ? "has-attention" : ""}`} aria-label="数据链路组件状态">

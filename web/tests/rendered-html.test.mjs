@@ -1261,7 +1261,11 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(banner, /className="operational-alert-toggle"/);
   assert.match(banner, /aria-expanded=\{expanded\}/);
   assert.match(view, /CURRENT PROBLEMS/);
-  assert.match(view, /className=\{`health-at-a-glance is-\$\{incidentStatus\}`\}/);
+  assert.doesNotMatch(view, /health-at-a-glance|当前结论/);
+  assert.match(view, /className="incident-operator-summary"/);
+  assert.match(view, /incidentStatusLabel/);
+  assert.match(view, /incidentStatusMark/);
+  assert.match(view, /operatorSummaryTail/);
   assert.match(view, /primaryOperatorAction\(incidents\)/);
   assert.match(view, /operatorComponentScanState\(item\.status, incident\)/);
   assert.match(view, /operationalIncidentActionLabels\[operatorAction\]/);
@@ -1311,6 +1315,7 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(view, /sortAttentionFirst\(payload\?\.news_source_health/);
   assert.match(view, /className="health-state-mark" aria-label=\{state\.label\}>\{state\.symbol\}/);
   assert.match(view, /className="health-state-text">\{state\.label\}/);
+  assert.match(view, /className="health-row-meta"/);
   assert.match(css, /\.component-status article\.is-healthy,\.source-health article\.is-healthy \{[^}]*position:relative; display:block/);
   assert.match(css, /\.component-card-grid>article\.is-healthy:has\(>details\[open\]\),\.source-health-grid>article\.is-healthy:has\(>details\[open\]\) \{[^}]*grid-column:1\/-1/);
   assert.match(css, /article\.is-healthy>header,\.source-health article\.is-healthy>header \{[^}]*padding-right:72px/);
@@ -1333,7 +1338,12 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(css, /article\.is-healthy summary,\.source-health article\.is-healthy summary \{[^}]*min-height:48px/);
   assert.match(css, /article\.is-healthy,\.source-health article\.is-healthy \{[^}]*border-bottom:1px solid rgba\(17,17,15,\.16\)/);
   assert.match(css, /\.component-status article h3,\.source-health article>header strong \{[^}]*font-family:var\(--font-sans\)/);
-  assert.match(css, /\.health-at-a-glance,\.incident-summary-panel,\.component-status,\.source-health \{[^}]*font-family:var\(--font-sans\)/);
+  assert.match(css, /\.incident-summary-panel,\.component-status,\.source-health \{[^}]*font-family:var\(--font-sans\)/);
+  assert.match(css, /\.health-row-meta \{[^}]*display:flex[^}]*white-space:nowrap/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*article\.is-healthy>header[^}]*grid-template-columns:26px minmax\(0,1fr\)[^}]*min-height:64px/);
+  assert.match(css, /article\.is-healthy>header \.health-row-meta[^}]*grid-column:2[^}]*grid-row:2/);
+  assert.match(css, /article\.is-healthy summary,\.source-health article\.is-healthy summary \{[^}]*min-height:64px/);
+  assert.doesNotMatch(css, /\.health-at-a-glance|\.health-conclusion-mark|\.health-current-conclusion/);
   assert.match(css, /\.incident-summary-panel time,\.component-status time,\.source-health time,\.incident-raw-evidence \{[^}]*font-family:var\(--font-mono\)/);
   assert.match(css, /\.operational-incident-card \{[^}]*min-width:0/);
   assert.match(css, /\.operational-alert-toggle \{ display:none; cursor:pointer; \}/);
