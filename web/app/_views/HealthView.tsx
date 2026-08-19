@@ -6,7 +6,7 @@ import CountValue from "../_components/CountValue";
 import { loadDashboardResource, readDashboardResource } from "../_lib/dashboard-resource";
 import { DASHBOARD_REFRESH_INTERVALS, scheduleDashboardRefresh } from "../_lib/dashboard-refresh";
 import { operationalEvidenceText } from "../_lib/operational-evidence";
-import { operationalEventDiagnostic, operationalIncidentActionLabels, operationalIncidentNextRetryAt, operationalScopeLabel } from "../_lib/operational-incident-presentation";
+import { operationalEventDiagnostic, operationalIncidentActionLabels, operationalIncidentNextRetryAt, operationalIncidentsNextRetryAt, operationalScopeLabel, operationalSummaryDetails } from "../_lib/operational-incident-presentation";
 import { affectedOperationalScopeCount, correlateOperationalEvents, type OperationalIncident } from "../_lib/operational-incidents";
 import { normalizeOperationalEvent, schedulerTaskLabel, type AssistantOperationalHealth, type OperationalAlert, type OperationalHealth } from "../_lib/operational-health";
 import { sourceHealthErrorPresentation } from "../_lib/source-health-presentation";
@@ -275,13 +275,12 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
   const incidentStatus = incidents.some(incident => incident.severity === "ERROR")
     ? "error" : incidents.length ? "warning" : "healthy";
   const operatorAction = primaryOperatorAction(incidents);
-  const operatorActionIncident = operatorAction
-    ? incidents.find(incident => incident.action_state === operatorAction) ?? null : null;
-  const operatorRetryAt = operatorActionIncident ? operationalIncidentNextRetryAt(operatorActionIncident) : null;
+  const operatorRetryAt = operationalIncidentsNextRetryAt(incidents, operatorAction);
   const incidentStatusLabel = incidentStatus === "error" ? "运行异常" : incidentStatus === "warning" ? "运行警告" : "运行正常";
   const incidentStatusMark = incidentStatus === "error" ? "✕" : incidentStatus === "warning" ? "⚠" : "✓";
-  const operatorSummaryTail = operatorAction === "AUTO_RECOVERING" && operatorRetryAt
-    ? `下次尝试 ${localTime(operatorRetryAt)}` : affectedScopeCount ? `${affectedScopeCount} 个子系统受影响` : null;
+  const operatorSummaryDetails = operationalSummaryDetails(
+    affectedScopeCount, operatorAction, operatorRetryAt ? localTime(operatorRetryAt) : null,
+  );
 
   return <main className="status-main">
     <section className="status-hero">
@@ -290,8 +289,8 @@ export default function HealthView({ initialPayload }: { initialPayload?: Status
     {error ? <div className="error-banner">状态读取失败：{error}</div> : null}
     <CurrentDataNotice phase={currentPhase} snapshotTime={payload?.generated_at ? localTime(payload.generated_at) : null} />
     <section id="operational-alerts" className={`operational-health-panel incident-summary-panel is-${incidentStatus}`} aria-label="运行问题与关联证据">
-      <header><div><p className="eyebrow">CURRENT PROBLEMS</p><h2>当前问题</h2><p className="incident-operator-summary"><span aria-hidden="true">{incidentStatusMark}</span> {incidentStatusLabel} · {operatorAction ? operationalIncidentActionLabels[operatorAction] : "无需处理"}{operatorSummaryTail ? ` · ${operatorSummaryTail}` : ""}</p></div><p>{incidents.length ? `${incidents.length} 个问题 · 异常优先` : "当前没有运行问题"}</p></header>
-      {incidents.length ? <div className="operational-incident-list">{incidents.map(incident => <IncidentCard incident={incident} key={incident.incident_key} />)}</div> : <p className="operational-all-clear">当前没有达到告警阈值的运行异常。</p>}
+      <header><div><p className="eyebrow">CURRENT PROBLEMS</p><h2>当前问题</h2><p className="incident-operator-summary"><span aria-hidden="true">{incidentStatusMark}</span> {incidentStatusLabel} · {operatorAction ? operationalIncidentActionLabels[operatorAction] : "无需处理"}{operatorSummaryDetails.map(detail => ` · ${detail}`).join("")}</p></div></header>
+      {incidents.length ? <div className="operational-incident-list">{incidents.map(incident => <IncidentCard incident={incident} key={incident.incident_key} />)}</div> : <p className="operational-all-clear">当前没有运行异常。</p>}
     </section>
     <section className={`component-status ${componentHasAttention ? "has-attention" : ""}`} aria-label="数据链路组件状态">
       <header><div><p className="eyebrow">SYSTEM COMPONENTS</p><h2>系统组件</h2></div><strong>{componentAggregate(components.map(component => component.state))}</strong></header>

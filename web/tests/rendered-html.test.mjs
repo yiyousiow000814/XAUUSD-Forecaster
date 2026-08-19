@@ -29,7 +29,7 @@ const { sortNewsEvidenceByTime } = await import("../app/_lib/news-evidence-order
 const { assistantQueueOperationalAlerts, summarizeAssistantQueue } = await import("../app/api/_shared/assistant-operational-health.ts");
 const { normalizeOperationalEvent } = await import("../app/_lib/operational-health.ts");
 const { correlateOperationalEvents, globalOperationalIncidents } = await import("../app/_lib/operational-incidents.ts");
-const { operationalEventDiagnostic, operationalIncidentActionLabels, operationalIncidentNextRetryAt } = await import("../app/_lib/operational-incident-presentation.ts");
+const { operationalEventDiagnostic, operationalIncidentActionLabels, operationalIncidentNextRetryAt, operationalIncidentsNextRetryAt, operationalSummaryDetails } = await import("../app/_lib/operational-incident-presentation.ts");
 const { operationalEvidenceText } = await import("../app/_lib/operational-evidence.ts");
 const { sourceHealthErrorPresentation } = await import("../app/_lib/source-health-presentation.ts");
 const {
@@ -262,6 +262,27 @@ test("presents structured retry timing without parsing human error copy", () => 
   }]);
   assert.equal(operationalIncidentActionLabels[incident.action_state], "自动重试中");
   assert.equal(operationalIncidentNextRetryAt(incident), "2026-08-19T04:00:00Z");
+});
+
+test("uses the earliest structured retry across every incident with the primary action", () => {
+  const incident = (action_state, retryTimes) => ({
+    action_state,
+    root_event: { evidence: { next_retry_at: retryTimes[0] } },
+    related_events: retryTimes.slice(1).map(next_retry_at => ({ evidence: { next_retry_at } })),
+    technical_events: [],
+  });
+  const incidents = [
+    incident("AUTO_RECOVERING", ["not-a-time", "2026-08-19T08:55:00Z"]),
+    incident("MONITORING", ["2026-08-19T08:00:00Z"]),
+    incident("AUTO_RECOVERING", ["2026-08-19T09:00:00Z"]),
+  ];
+  assert.equal(operationalIncidentsNextRetryAt(incidents, "AUTO_RECOVERING"), "2026-08-19T08:55:00Z");
+  assert.equal(operationalIncidentsNextRetryAt(incidents, null), null);
+  assert.deepEqual(operationalSummaryDetails(3, "AUTO_RECOVERING", "16:55"), [
+    "3 个子系统受影响", "下次尝试 16:55",
+  ]);
+  assert.deepEqual(operationalSummaryDetails(1, "ACTION_REQUIRED", null), ["1 个子系统受影响"]);
+  assert.deepEqual(operationalSummaryDetails(0, null, null), []);
 });
 
 test("keeps internal matched-news identifiers out of user-facing prose", () => {
@@ -1265,8 +1286,11 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(view, /className="incident-operator-summary"/);
   assert.match(view, /incidentStatusLabel/);
   assert.match(view, /incidentStatusMark/);
-  assert.match(view, /operatorSummaryTail/);
+  assert.match(view, /operatorSummaryDetails/);
+  assert.match(view, /operationalSummaryDetails\(/);
+  assert.match(view, /operatorSummaryDetails\.map\(detail => ` · \$\{detail\}`\)\.join\(""\)/);
   assert.match(view, /primaryOperatorAction\(incidents\)/);
+  assert.match(view, /operationalIncidentsNextRetryAt\(incidents, operatorAction\)/);
   assert.match(view, /operatorComponentScanState\(item\.status, incident\)/);
   assert.match(view, /operationalIncidentActionLabels\[operatorAction\]/);
   assert.match(view, /无需处理/);
@@ -1275,6 +1299,8 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(view, /incident\.root_event/);
   assert.match(view, /affectedOperationalScopeCount/);
   assert.match(view, /受影响子系统/);
+  assert.doesNotMatch(view, /个问题 · 异常优先|当前没有运行问题/);
+  assert.match(view, /当前没有运行异常。/);
   assert.doesNotMatch(view, /个下游影响|related_events\.length, 0/);
   assert.match(view, /查看技术详情/);
   assert.match(view, /aria-expanded=\{showTechnical\}/);

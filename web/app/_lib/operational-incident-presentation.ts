@@ -58,6 +58,32 @@ export function operationalIncidentNextRetryAt(incident: OperationalIncident): s
   const retryTimes = [incident.root_event, ...incident.related_events, ...incident.technical_events]
     .map(event => event.evidence.next_retry_at)
     .filter((value): value is string => typeof value === "string" && value.length > 0)
-    .sort();
-  return retryTimes[0] ?? null;
+    .map(value => ({ value, timestamp: Date.parse(value) }))
+    .filter(item => Number.isFinite(item.timestamp))
+    .sort((left, right) => left.timestamp - right.timestamp);
+  return retryTimes[0]?.value ?? null;
+}
+
+export function operationalIncidentsNextRetryAt(
+  incidents: OperationalIncident[], action: OperationalIncident["action_state"] | null,
+): string | null {
+  if (!action) return null;
+  const retryTimes = incidents
+    .filter(incident => incident.action_state === action)
+    .map(operationalIncidentNextRetryAt)
+    .filter((value): value is string => value !== null)
+    .map(value => ({ value, timestamp: Date.parse(value) }))
+    .sort((left, right) => left.timestamp - right.timestamp);
+  return retryTimes[0]?.value ?? null;
+}
+
+export function operationalSummaryDetails(
+  affectedScopeCount: number,
+  action: OperationalIncident["action_state"] | null,
+  retryAt: string | null,
+): string[] {
+  return [
+    affectedScopeCount ? `${affectedScopeCount} 个子系统受影响` : null,
+    action === "AUTO_RECOVERING" && retryAt ? `下次尝试 ${retryAt}` : null,
+  ].filter((detail): detail is string => detail !== null);
 }
