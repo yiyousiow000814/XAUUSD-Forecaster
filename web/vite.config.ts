@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import {
   compactPreviewLearning,
   compactPreviewNewsIndex,
+  compactPreviewAudit,
   compactPreviewStatus,
 } from "./build/preview-learning";
 
@@ -41,6 +42,9 @@ export default defineConfig(async () => {
       }
       if (bundle.status && typeof bundle.status === "object") {
         bundle.status = compactPreviewStatus(bundle.status as Record<string, unknown>);
+      }
+      if (bundle.audit && typeof bundle.audit === "object") {
+        bundle.audit = compactPreviewAudit(bundle.audit as Record<string, unknown>);
       }
       if (bundle.news_index && typeof bundle.news_index === "object") {
         bundle.news_index = compactPreviewNewsIndex(bundle.news_index as Record<string, unknown>);

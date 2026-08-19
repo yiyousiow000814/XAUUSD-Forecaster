@@ -1,14 +1,14 @@
 import {
   PREVIEW_NEWS_PAGE_SIZE,
   PREVIEW_RESOURCES,
+  PREVIEW_AUDIT_INLINE_KEYS,
   PREVIEW_STATUS_INLINE_KEYS,
 } from "../app/_lib/preview-manifest";
 
 type JsonObject = Record<string, unknown>;
 
-const PREVIEW_STATUS_ARRAY_LIMITS: Record<string, number> = {
+const PREVIEW_AUDIT_ARRAY_LIMITS: Record<string, number> = {
   daily_news_briefs: 2,
-  news_evidence: 12,
   storylines: 5,
   market_narrative_candidates: 5,
   archived_storylines: 5,
@@ -28,8 +28,7 @@ export function compactPreviewStatus(status: JsonObject): JsonObject {
   };
   for (const key of PREVIEW_STATUS_INLINE_KEYS) {
     const value = status[key];
-    const limit = PREVIEW_STATUS_ARRAY_LIMITS[key];
-    result[key] = Array.isArray(value) && limit ? value.slice(0, limit) : value;
+    result[key] = value;
   }
   const market = status.market_chart && typeof status.market_chart === "object"
     ? status.market_chart as JsonObject
@@ -44,6 +43,17 @@ export function compactPreviewStatus(status: JsonObject): JsonObject {
     training_markers: market.training_markers ?? [],
     prediction_history_start: market.prediction_history_start ?? {},
   };
+  return result;
+}
+
+/** Keep the optional audit first page bounded independently of live status. */
+export function compactPreviewAudit(audit: JsonObject): JsonObject {
+  const result: JsonObject = {};
+  for (const key of PREVIEW_AUDIT_INLINE_KEYS) {
+    const value = audit[key];
+    const limit = PREVIEW_AUDIT_ARRAY_LIMITS[key];
+    result[key] = Array.isArray(value) && limit ? value.slice(0, limit) : value;
+  }
   return result;
 }
 
