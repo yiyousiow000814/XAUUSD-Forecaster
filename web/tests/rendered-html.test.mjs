@@ -29,9 +29,18 @@ const { sortNewsEvidenceByTime } = await import("../app/_lib/news-evidence-order
 const { assistantQueueOperationalAlerts, summarizeAssistantQueue } = await import("../app/api/_shared/assistant-operational-health.ts");
 const { normalizeOperationalEvent } = await import("../app/_lib/operational-health.ts");
 const { correlateOperationalEvents, globalOperationalIncidents } = await import("../app/_lib/operational-incidents.ts");
-const { operationalEventDiagnostic, operationalIncidentActionLabels } = await import("../app/_lib/operational-incident-presentation.ts");
+const { operationalEventDiagnostic, operationalIncidentActionLabels, operationalIncidentNextRetryAt, operationalIncidentsNextRetryAt, operationalSummaryDetails } = await import("../app/_lib/operational-incident-presentation.ts");
 const { operationalEvidenceText } = await import("../app/_lib/operational-evidence.ts");
 const { sourceHealthErrorPresentation } = await import("../app/_lib/source-health-presentation.ts");
+const {
+  componentAggregate,
+  componentScanState,
+  operatorComponentScanState,
+  primaryOperatorAction,
+  sortAttentionFirst,
+  sourceAggregate,
+  sourceScanState,
+} = await import("../app/_lib/health-scan-presentation.ts");
 const { compactPreviewStatus } = await import("../build/preview-learning.ts");
 
 test("reserves the global shell alert for blocking operational faults", () => {
@@ -155,7 +164,7 @@ test("presents decision output stalls separately from collector liveness", () =>
   assert.equal(incident.title_zh, "决策输出停滞");
   assert.equal(incident.root_event.scope, "decision_output");
   assert.equal(incident.action_state, "ACTION_REQUIRED");
-  assert.equal(operationalIncidentActionLabels[incident.action_state], "需要处理");
+  assert.equal(operationalIncidentActionLabels[incident.action_state], "需要人工处理");
   assert.deepEqual(operationalEventDiagnostic(incident.root_event), {
     status: "STALLED · 已持续 20 分 0 秒",
     component: "5 分钟决策输出",
@@ -207,6 +216,7 @@ test("renders canonical source rate-limit fallback and generic failures", () => 
     last_error_type: "RateLimited",
   }, false), {
     heading: "GDELT 限流 · Google News Context 自动接管",
+    recovery: "后备来源正在接管",
     fallback: "后备链路：Google News Context · HEALTHY",
   });
   assert.deepEqual(sourceHealthErrorPresentation({
@@ -215,9 +225,85 @@ test("renders canonical source rate-limit fallback and generic failures", () => 
     fallback_health: null,
     last_error_type: "TimeoutError",
   }, false), {
-    heading: "当前异常 · TimeoutError",
+    heading: "Provider 响应超时",
+    recovery: "正在自动重试",
     fallback: null,
   });
+});
+
+test("presents health as an action-first scanning contract", () => {
+  assert.equal(primaryOperatorAction([]), null);
+  assert.equal(primaryOperatorAction([{ action_state: "MONITORING" }]), "MONITORING");
+  assert.equal(primaryOperatorAction([
+    { action_state: "MONITORING" }, { action_state: "AUTO_RECOVERING" },
+  ]), "AUTO_RECOVERING");
+  assert.equal(primaryOperatorAction([
+    { action_state: "AUTO_RECOVERING" }, { action_state: "ACTION_REQUIRED" },
+  ]), "ACTION_REQUIRED");
+
+  assert.deepEqual(componentScanState("OK"), {
+    tone: "healthy", symbol: "✓", label: "正常", attention: false,
+  });
+  assert.deepEqual(componentScanState("UNKNOWN"), {
+    tone: "neutral", symbol: "—", label: "状态未知", attention: true,
+  });
+  assert.deepEqual(componentScanState("WARN"), {
+    tone: "warning", symbol: "⚠", label: "警告", attention: true,
+  });
+  const staleWithActionRequiredIncident = operatorComponentScanState("STALE", {
+    severity: "ERROR", action_state: "ACTION_REQUIRED",
+  });
+  assert.deepEqual(staleWithActionRequiredIncident, {
+    tone: "error", symbol: "✕", label: "需要人工处理", attention: true,
+  });
+  assert.equal(componentScanState("STALE").tone, "warning");
+  assert.deepEqual(sourceScanState("ERROR"), {
+    tone: "error", symbol: "✕", label: "错误", attention: true,
+  });
+  assert.deepEqual(
+    sortAttentionFirst(["OK", "ERROR", "STALE"], componentScanState),
+    ["ERROR", "STALE", "OK"],
+  );
+  assert.deepEqual(
+    sortAttentionFirst(["HEALTHY", "WARMING_UP"], sourceScanState),
+    ["WARMING_UP", "HEALTHY"],
+  );
+  assert.equal(componentAggregate([
+    componentScanState("OK"), componentScanState("OK"),
+    componentScanState("WARN"), staleWithActionRequiredIncident,
+  ]), "2 正常 · 1 警告 · 1 错误");
+  assert.equal(sourceAggregate(["HEALTHY", "HEALTHY", "WARMING_UP"]), "2 正常 · 1 等待发布");
+});
+
+test("presents structured retry timing without parsing human error copy", () => {
+  const [incident] = correlateOperationalEvents([{
+    code: "OPS_AI_JOB_RETRY_LOOP", severity: "WARNING", scope: "ACTIVE_IMPACT",
+    message_zh: "任意人类说明", blocking: false,
+    evidence: { latest_failure_code: "PROVIDER_HTTP_ERROR", claimable: false, next_retry_at: "2026-08-19T04:00:00Z" },
+  }]);
+  assert.equal(operationalIncidentActionLabels[incident.action_state], "自动重试中");
+  assert.equal(operationalIncidentNextRetryAt(incident), "2026-08-19T04:00:00Z");
+});
+
+test("uses the earliest structured retry across every incident with the primary action", () => {
+  const incident = (action_state, retryTimes) => ({
+    action_state,
+    root_event: { evidence: { next_retry_at: retryTimes[0] } },
+    related_events: retryTimes.slice(1).map(next_retry_at => ({ evidence: { next_retry_at } })),
+    technical_events: [],
+  });
+  const incidents = [
+    incident("AUTO_RECOVERING", ["not-a-time", "2026-08-19T08:55:00Z"]),
+    incident("MONITORING", ["2026-08-19T08:00:00Z"]),
+    incident("AUTO_RECOVERING", ["2026-08-19T09:00:00Z"]),
+  ];
+  assert.equal(operationalIncidentsNextRetryAt(incidents, "AUTO_RECOVERING"), "2026-08-19T08:55:00Z");
+  assert.equal(operationalIncidentsNextRetryAt(incidents, null), null);
+  assert.deepEqual(operationalSummaryDetails(3, "AUTO_RECOVERING", "16:55"), [
+    "3 个子系统受影响", "下次尝试 16:55",
+  ]);
+  assert.deepEqual(operationalSummaryDetails(1, "ACTION_REQUIRED", null), ["1 个子系统受影响"]);
+  assert.deepEqual(operationalSummaryDetails(0, null, null), []);
 });
 
 test("keeps internal matched-news identifiers out of user-facing prose", () => {
@@ -1205,8 +1291,8 @@ test("renders component and news-source health on a separate route", async () =>
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /系统健康状态/);
-  assert.match(html, /系统组件状态/);
-  assert.match(html, /新闻来源状态/);
+  assert.match(html, /系统组件/);
+  assert.match(html, /新闻来源/);
   assert.match(html, /AI 模型用量/);
   const view = readFileSync(new URL("../app/_views/HealthView.tsx", import.meta.url), "utf8");
   const layout = readFileSync(new URL("../app/layout.tsx", import.meta.url), "utf8");
@@ -1216,42 +1302,96 @@ test("renders component and news-source health on a separate route", async () =>
   assert.match(banner, /globalOperationalIncidents/);
   assert.match(banner, /className="operational-alert-toggle"/);
   assert.match(banner, /aria-expanded=\{expanded\}/);
-  assert.match(view, /OPERATIONAL INCIDENTS/);
+  assert.match(view, /CURRENT PROBLEMS/);
+  assert.doesNotMatch(view, /health-at-a-glance|当前结论/);
+  assert.match(view, /className="incident-operator-summary"/);
+  assert.match(view, /incidentStatusLabel/);
+  assert.match(view, /incidentStatusMark/);
+  assert.match(view, /operatorSummaryDetails/);
+  assert.match(view, /operationalSummaryDetails\(/);
+  assert.match(view, /operatorSummaryDetails\.map\(detail => ` · \$\{detail\}`\)\.join\(""\)/);
+  assert.match(view, /primaryOperatorAction\(incidents\)/);
+  assert.match(view, /operationalIncidentsNextRetryAt\(incidents, operatorAction\)/);
+  assert.match(view, /operatorComponentScanState\(item\.status, incident\)/);
+  assert.match(view, /operationalIncidentActionLabels\[operatorAction\]/);
+  assert.match(view, /无需处理/);
+  assert.doesNotMatch(view, /现在需要人工处理|当前无需人工处理/);
+  assert.doesNotMatch(view, /<small>自动恢复<\/small>|<small>人工处理<\/small>/);
   assert.match(view, /incident\.root_event/);
   assert.match(view, /affectedOperationalScopeCount/);
-  assert.match(view, /个受影响组件/);
+  assert.match(view, /受影响子系统/);
+  assert.doesNotMatch(view, /个问题 · 异常优先|当前没有运行问题/);
+  assert.match(view, /当前没有运行异常。/);
   assert.doesNotMatch(view, /个下游影响|related_events\.length, 0/);
   assert.match(view, /查看技术详情/);
   assert.match(view, /aria-expanded=\{showTechnical\}/);
   assert.match(view, /hidden=\{!showTechnical\}/);
+  assert.match(view, /operationalIncidentNextRetryAt/);
+  assert.match(view, /下次尝试 \{localTime\(nextRetryAt\)\}/);
   assert.match(view, /completed_15m/);
   assert.match(view, /deferred_15m/);
   assert.match(view, /provider_dispatch_deferred_15m/);
   assert.match(view, /LOCAL_\{item\.dimension\}_LIMIT/);
   assert.match(view, /componentHasAttention/);
   assert.match(view, /sourceHasAttention/);
+  assert.match(view, /function ComponentHealthCard/);
   assert.match(view, /function SourceHealthCard/);
-  assert.match(view, /最近成功 \{localTime\(item\.last_success\)\}/);
+  assert.match(view, /className="component-card-grid"/);
+  assert.match(view, /className="source-health-grid"/);
+  assert.match(view, /<dt>最近成功<\/dt><dd>\{localTime\(item\.last_success\)\}<\/dd>/);
   assert.match(view, /item\.freshness_reference_status === "PARTIAL"/);
-  assert.match(view, /新鲜度参考 \{localTime\(item\.freshness_reference_time\)\} · 部分成功/);
-  assert.match(view, /className="source-detail-toggle"/);
-  assert.match(view, /className="news-source-details"/);
-  assert.match(view, /showDetails \? "收起来源证据" : "查看来源证据"/);
-  assert.match(css, /\.component-status\.has-attention:not\(\.show-healthy\) article\.is-healthy/);
-  assert.match(css, /\.health-reveal-button \{ display:block;[^}]*min-height:48px/);
-  assert.match(css, /\.component-status>header p \{ display:none; \}/);
-  assert.match(css, /\.component-status>div \{ gap:13px; background:transparent; \}/);
-  assert.match(css, /\.component-status>div \{ display:grid; grid-template-columns:repeat\(6,1fr\); \}/);
-  assert.match(css, /\.component-status article:not\(:nth-child\(3n\)\) \{ border-right:1px solid var\(--ink\); \}/);
-  assert.match(css, /\.component-status article:nth-child\(n\+4\) \{ border-top:1px solid var\(--ink\); \}/);
-  assert.match(css, /\.component-status article:last-child:nth-child\(3n\+1\) \{ grid-column:span 6; \}/);
-  assert.match(css, /\.component-status article:nth-last-child\(2\):nth-child\(3n\+1\),[\s\S]*\.component-status article:last-child:nth-child\(3n\+2\) \{ grid-column:span 3; \}/);
-  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.component-status article:last-child:nth-child\(3n\+1\),[\s\S]*\.component-status article:last-child:nth-child\(3n\+2\) \{ grid-column:auto; \}/);
-  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.component-status article:last-child \{ border-right:1px solid rgba\(17,17,15,\.4\); \}/);
-  assert.match(css, /\.source-health\.show-healthy article\.is-healthy \.news-source-details \{ display:none; \}/);
-  assert.match(css, /\.source-health\.show-healthy article\.is-healthy\.is-detail-open \.news-source-details \{ display:contents; \}/);
+  assert.match(view, /className="component-technical-details"/);
+  assert.match(view, /className="source-technical-details"/);
+  assert.match(view, /state\.attention \? "技术详情" : "详情 ›"/);
+  assert.match(view, /item\.health === "WARMING_UP" && !item\.last_error/);
+  assert.match(view, /item\.last_error \?\? "无已记录错误"/);
+  assert.match(view, /<dt>原始状态<\/dt><dd><code>\{item\.status\}<\/code><\/dd>/);
+  assert.match(view, /incident\.severity === "ERROR" \? "错误"/);
+  assert.match(view, /severity=\{event\.severity\}/);
+  assert.match(readFileSync(new URL("../app/_lib/operational-incident-presentation.ts", import.meta.url), "utf8"), /daily_news_brief: "每日新闻简报"/);
+  assert.match(view, /<dt>关联问题<\/dt><dd>\{incident\.summary_zh\}<\/dd>/);
+  assert.match(view, /projection\.reason_code/);
+  assert.match(view, /className="health-technical-section"/);
+  assert.match(view, /调度器与技术状态/);
+  const incidentIndex = view.indexOf('<section id="operational-alerts"');
+  const componentIndex = view.indexOf('<section className={`component-status');
+  const sourceIndex = view.indexOf('<section className={`source-health');
+  const technicalIndex = view.indexOf('<section className="health-technical-section"');
+  assert.ok(incidentIndex < componentIndex && componentIndex < sourceIndex && sourceIndex < technicalIndex);
+  assert.match(view, /sortAttentionFirst\(Object\.entries/);
+  assert.match(view, /sortAttentionFirst\(payload\?\.news_source_health/);
+  assert.match(view, /className="health-state-mark" aria-label=\{state\.label\}>\{state\.symbol\}/);
+  assert.match(view, /className="health-state-text">\{state\.label\}/);
+  assert.match(view, /className="health-row-meta"/);
+  assert.match(css, /\.component-status article\.is-healthy,\.source-health article\.is-healthy \{[^}]*position:relative; display:block/);
+  assert.match(css, /\.component-card-grid>article\.is-healthy:has\(>details\[open\]\),\.source-health-grid>article\.is-healthy:has\(>details\[open\]\) \{[^}]*grid-column:1\/-1/);
+  assert.match(css, /article\.is-healthy>header,\.source-health article\.is-healthy>header \{[^}]*padding-right:72px/);
+  assert.match(css, /article\.is-healthy>\.component-technical-details,\.source-health article\.is-healthy>\.source-technical-details \{[^}]*display:block; height:0/);
+  assert.match(css, /article\.is-healthy>\.component-technical-details\[open\],\.source-health article\.is-healthy>\.source-technical-details\[open\] \{[^}]*height:auto/);
+  assert.match(css, /article\.is-healthy>\.component-technical-details>summary,\.source-health article\.is-healthy>\.source-technical-details>summary \{[^}]*position:absolute; top:0; right:0; width:60px; justify-content:flex-end/);
+  assert.match(css, /article\.is-healthy>\.component-technical-details>:not\(summary\),\.source-health article\.is-healthy>\.source-technical-details>:not\(summary\) \{[^}]*width:100%/);
+  assert.match(css, /\.component-status article\.is-attention,\.source-health article\.is-attention \{[^}]*grid-column:1\/-1/);
+  assert.match(css, /\.component-current-problem \{[^}]*min-height:46px/);
+  assert.match(css, /\.component-card-grid \{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(css, /\.source-health-grid \{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(css, /\.component-card-grid \{[^}]*align-items:start/);
+  assert.match(css, /\.source-health-grid \{[^}]*align-items:start/);
+  assert.doesNotMatch(css, /\.component-status>div \{[^}]*grid-template-columns:repeat\(6/);
+  assert.doesNotMatch(css, /\.component-status article:not\(:nth-child\(3n\)\)/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*\.component-card-grid,\.source-health-grid \{ grid-template-columns:1fr; \}/);
   assert.match(css, /\.operational-alert-banner a \{[^}]*min-height: 44px/);
   assert.match(css, /\.incident-technical-details > button[^}]*min-height:44px/);
+  assert.match(css, /\.component-technical-details>summary,\.source-technical-details>summary \{[^}]*min-height:44px/);
+  assert.match(css, /article\.is-healthy summary,\.source-health article\.is-healthy summary \{[^}]*min-height:48px/);
+  assert.match(css, /article\.is-healthy,\.source-health article\.is-healthy \{[^}]*border-bottom:1px solid rgba\(17,17,15,\.16\)/);
+  assert.match(css, /\.component-status article h3,\.source-health article>header strong \{[^}]*font-family:var\(--font-sans\)/);
+  assert.match(css, /\.incident-summary-panel,\.component-status,\.source-health \{[^}]*font-family:var\(--font-sans\)/);
+  assert.match(css, /\.health-row-meta \{[^}]*display:flex[^}]*white-space:nowrap/);
+  assert.match(css, /@media \(max-width:850px\)[\s\S]*article\.is-healthy>header[^}]*grid-template-columns:26px minmax\(0,1fr\)[^}]*min-height:64px/);
+  assert.match(css, /article\.is-healthy>header \.health-row-meta[^}]*grid-column:2[^}]*grid-row:2/);
+  assert.match(css, /article\.is-healthy summary,\.source-health article\.is-healthy summary \{[^}]*min-height:64px/);
+  assert.doesNotMatch(css, /\.health-at-a-glance|\.health-conclusion-mark|\.health-current-conclusion/);
+  assert.match(css, /\.incident-summary-panel time,\.component-status time,\.source-health time,\.incident-raw-evidence \{[^}]*font-family:var\(--font-mono\)/);
   assert.match(css, /\.operational-incident-card \{[^}]*min-width:0/);
   assert.match(css, /\.operational-alert-toggle \{ display:none; cursor:pointer; \}/);
   assert.match(css, /\.operational-alert-banner\.is-expanded \.operational-alert-detail \{ display:flex/);
