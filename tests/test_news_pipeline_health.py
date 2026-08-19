@@ -9,10 +9,14 @@ import pytest
 from xauusd_forecaster.forward_ledger import ForwardLedger
 from xauusd_forecaster import news_pipeline_health
 from xauusd_forecaster.annotation import DEFAULT_GEMINI_MODEL, PROMPT_VERSION
+from xauusd_forecaster.critical_annotation_state import record_annotation_completion
 from xauusd_forecaster.news_impact import IMPACT_MODEL, IMPACT_PROMPT_VERSION
 from xauusd_forecaster.news_scheduler import (
     ApiCredential,
+    CONTRACT_BACKFILL_LANE,
+    LIVE_LANE,
     ROUTINE_POOL,
+    WorkProvenance,
     claim_job,
     enqueue_job,
     record_job_attempt,
@@ -38,6 +42,7 @@ def _news(
     received_at: datetime,
     *,
     publication_delay: timedelta = timedelta(minutes=1),
+    work_lane: str = LIVE_LANE,
 ) -> None:
     body = "Material macroeconomic report. " * 20
     ledger.append_news_revision({
@@ -49,6 +54,17 @@ def _news(
         "content_hash": hashlib.sha256(body.encode()).hexdigest(),
         "cluster_id": "cluster-1",
     })
+    enqueue_job(
+        ledger.connection,
+        task_type="ACTIVE_ANNOTATION",
+        source="test_semantic_source",
+        source_item_id="item-1",
+        revision_number=1,
+        prompt_version=PROMPT_VERSION,
+        priority="FAST" if work_lane == LIVE_LANE else "BACKGROUND",
+        work_lane=work_lane,
+        now=received_at,
+    )
 
 
 def _impact_candidate(
@@ -56,6 +72,7 @@ def _impact_candidate(
     parsed_at: datetime | None = None,
     annotation_overrides: dict[str, object] | None = None,
     model_version: str = DEFAULT_GEMINI_MODEL,
+    work_lane: str = LIVE_LANE,
 ) -> None:
     body = "The Federal Reserve announced a material policy decision. " * 12
     digest = hashlib.sha256(body.encode()).hexdigest()
@@ -107,6 +124,17 @@ def _impact_candidate(
         "parse_started_at": parsed, "parsed_at": parsed,
         "annotation": annotation,
     })
+    record_annotation_completion(
+        ledger.connection,
+        source="impact-health-source",
+        source_item_id="impact-item",
+        revision_number=1,
+        prompt_version=PROMPT_VERSION,
+        completed_at=parsed.isoformat(),
+        provenance=WorkProvenance(
+            work_lane, "ACTIVE_ANNOTATION", "test-annotation-origin",
+        ),
+    )
 
 
 def _complete_impact(ledger: ForwardLedger, at: datetime) -> None:
@@ -197,6 +225,35 @@ def test_unresolved_semantic_news_after_one_interval_fails_closed(
     assert health["status"] == "UNHEALTHY"
     assert health["reason_codes"] == ("ACTIONABLE_NEWS_SEMANTICS_PENDING",)
     assert health["actionable_failure_counts"] == {}
+
+
+@pytest.mark.parametrize(
+    ("work_lane", "lane_classified"),
+    ((CONTRACT_BACKFILL_LANE, 1), (LIVE_LANE, 0)),
+)
+def test_non_live_annotation_origin_does_not_close_current_gate(
+    tmp_path, credentials, work_lane: str, lane_classified: int,
+) -> None:
+    now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
+    ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now - timedelta(days=1))
+    _heartbeat(ledger, now)
+    _news(
+        ledger, now - timedelta(minutes=6), work_lane=work_lane,
+    )
+    if not lane_classified:
+        with ledger.connection:
+            ledger.connection.execute(
+                """UPDATE news_ai_jobs_v1 SET lane_classified=0
+                   WHERE task_type='ACTIVE_ANNOTATION'"""
+            )
+
+    health = news_pipeline_health.news_semantic_pipeline_health(
+        ledger, observed_at=now,
+    )
+
+    assert health["status"] == "HEALTHY"
+    assert health["reason_codes"] == ()
+    assert health["unresolved_items"] == 0
 
 
 def test_expired_failed_candidate_does_not_hold_the_gate_closed(
@@ -536,16 +593,32 @@ def test_terminal_actionable_impact_remains_operator_error(
     assert health["terminal_or_overdue_count"] == 1
 
 
-def test_historical_impact_backfill_does_not_close_current_gate(
+def test_current_actionable_impact_backfill_does_not_close_current_gate(
     tmp_path, credentials,
 ) -> None:
     now = datetime(2026, 8, 14, 7, 0, tzinfo=UTC)
     ledger = ForwardLedger(tmp_path / "forward.sqlite3", now=now - timedelta(days=1))
     _heartbeat(ledger, now)
     _impact_candidate(
-        ledger, published_at=now - timedelta(days=4),
-        received_at=now - timedelta(minutes=10),
-        parsed_at=now - timedelta(minutes=9),
+        ledger, published_at=now - timedelta(minutes=7),
+        received_at=now - timedelta(minutes=7),
+        parsed_at=now - timedelta(minutes=6),
+        work_lane=CONTRACT_BACKFILL_LANE,
+    )
+    enqueue_job(
+        ledger.connection,
+        task_type="ACTIVE_IMPACT",
+        source="impact-health-source",
+        source_item_id="impact-item",
+        revision_number=1,
+        annotation_id="impact-annotation",
+        prompt_version=IMPACT_PROMPT_VERSION,
+        priority="BACKGROUND",
+        work_lane=CONTRACT_BACKFILL_LANE,
+        provenance=WorkProvenance(
+            CONTRACT_BACKFILL_LANE, "ACTIVE_ANNOTATION", "backfill-parent",
+        ),
+        now=now - timedelta(minutes=6),
     )
 
     health = news_pipeline_health.news_semantic_pipeline_health(
