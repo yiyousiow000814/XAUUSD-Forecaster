@@ -38,6 +38,7 @@ from xauusd_forecaster.runtime_health import (  # noqa: E402
     RuntimeHeartbeatPulse,
     write_runtime_heartbeat,
 )
+from xauusd_forecaster.news_collection_owner import NewsCollectionOwner  # noqa: E402
 
 
 UTC = timezone.utc
@@ -174,7 +175,15 @@ def main() -> int:
     with RuntimeHeartbeatPulse(
         status_file, service="collector", state="STARTING",
     ):
-        news_status = engine.collect_news(datetime.now(UTC))
+        news_status = (
+            engine.collect_news(datetime.now(UTC))
+            if args.once
+            else [{
+                "source": "NEWS_COLLECTION_OWNER",
+                "status": "DEGRADED",
+                "reason_code": "NEWS_COLLECTION_PENDING",
+            }]
+        )
         annotation_status = [{"status": "SEPARATE_PROCESS"}]
         quote_root = (
             args.market_jsonl
@@ -225,8 +234,7 @@ def main() -> int:
         ledger.close()
         return 0
 
-    last_news_poll = datetime.now(UTC)
-    last_news_reconciliation = last_news_poll
+    last_news_reconciliation = datetime.now(UTC)
     last_maintenance_day = initialized_at.date()
     row = ledger.connection.execute(
         "SELECT max(decision_time) AS latest FROM decision_events"
@@ -237,6 +245,10 @@ def main() -> int:
         else floor_five_minutes(ledger.forward_epoch)
     )
     heartbeat = RuntimeHeartbeatPulse(status_file, service="collector")
+    news_owner = NewsCollectionOwner(
+        ledger.path, poll_seconds=args.news_poll_seconds,
+    )
+    news_owner.start()
     heartbeat.start()
     try:
         while True:
@@ -246,9 +258,7 @@ def main() -> int:
                     archive_completed_quote_days(quote_root, now)
                 backup_forward_ledger(ledger, local_root / "backups", now)
                 last_maintenance_day = now.date()
-            if (now - last_news_poll).total_seconds() >= args.news_poll_seconds:
-                news_status = engine.collect_news(now)
-                last_news_poll = now
+            news_status = news_owner.snapshot(now)
             if ((now - last_news_reconciliation).total_seconds()
                     >= NEWS_CONTRACT_RECONCILE_SECONDS):
                 reconciliation = reconcile_news_contract(
@@ -333,6 +343,7 @@ def main() -> int:
             )
             time.sleep(max(1.0, args.poll_seconds))
     finally:
+        news_owner.close()
         heartbeat.close()
         ledger.close()
 
