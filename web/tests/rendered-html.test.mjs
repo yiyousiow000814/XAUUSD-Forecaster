@@ -1750,7 +1750,7 @@ test("renders the news and decision audit route", async () => {
   assert.match(source, /无效样本/);
   assert.match(source, /activeLearningIdentities/);
   assert.match(source, /counts\?\.live_oos_model_groups/);
-  assert.match(html, /news-row-placeholder/);
+  assert.match(html, /class="news-table"/);
 });
 
 test("switches dashboard rooms locally and reuses client data between views", () => {
