@@ -2146,6 +2146,19 @@ def _dashboard_payload(
                JOIN market_snapshots s USING(snapshot_id)
                ORDER BY d.decision_time DESC LIMIT 1"""
         ).fetchone()
+        # The annotator heartbeat is a mutable runtime file outside this
+        # SQLite snapshot. Sample semantic health at the same boundary as the
+        # fixed observation clock, before optional evidence aggregation can
+        # make a later heartbeat look like future-dated evidence.
+        current_semantic_health = (
+            news_semantic_pipeline_health(
+                SimpleNamespace(connection=connection, path=database),
+                observed_at=now,
+            )
+            if include_optional else _materialized_semantic_health(
+                connection, str(latest["decision_id"]) if latest else None,
+            )
+        )
         latest_prediction = None
         latest_news_input_coverage = None
         if latest:
@@ -2545,15 +2558,6 @@ def _dashboard_payload(
             use_materialized_latest_decision=True,
         )
         operational_health = scheduler_health_snapshot(connection, now=now)
-        current_semantic_health = (
-            news_semantic_pipeline_health(
-                SimpleNamespace(connection=connection, path=database),
-                observed_at=now,
-            )
-            if include_optional else _materialized_semantic_health(
-                connection, str(latest["decision_id"]) if latest else None,
-            )
-        )
     finally:
         connection.rollback()
         connection.close()

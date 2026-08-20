@@ -101,6 +101,18 @@ def _write_collector_heartbeat(
     }), encoding="utf-8")
 
 
+def _write_annotator_heartbeat(
+    root: Path, *, last_success: datetime, state: str = "RUNNING",
+) -> None:
+    (root / "news-annotator-status.json").write_text(json.dumps({
+        "service": "annotator",
+        "state": state,
+        "last_success": last_success.isoformat(),
+        "last_error": None,
+        "work_items": 0,
+    }), encoding="utf-8")
+
+
 def _append_decision_at(database: Path, created_at: datetime) -> None:
     connection = sqlite3.connect(database)
     try:
@@ -591,6 +603,33 @@ def test_dashboard_exposes_frozen_news_coverage_separately_from_current_health(
     assert payload["system"]["components"]["news_semantic_pipeline"][
         "status"
     ] == "OK"
+
+
+def test_dashboard_samples_mutable_semantic_heartbeat_at_snapshot_boundary(
+    tmp_path,
+) -> None:
+    query_started = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
+    database = tmp_path / "forward-evidence.sqlite3"
+    ForwardLedger(database, now=query_started).close()
+    _write_annotator_heartbeat(tmp_path, last_success=query_started)
+    module = _dashboard_module()
+    original_evidence_reader = module.event_evidence_rows_from_connection
+
+    def evidence_reader(connection, decision_time):
+        _write_annotator_heartbeat(
+            tmp_path, last_success=query_started + timedelta(minutes=2),
+        )
+        return original_evidence_reader(connection, decision_time)
+
+    module.event_evidence_rows_from_connection = evidence_reader
+
+    payload = module._dashboard_payload(
+        database, clock=lambda: query_started,
+    )
+
+    semantic = payload["system"]["components"]["news_semantic_pipeline"]
+    assert "ANNOTATOR_HEARTBEAT_STALE" not in semantic["reason_codes"]
+    assert semantic["last_success"] == query_started.isoformat()
 
 
 def test_dashboard_refreshes_clock_before_reading_live_broker_heartbeat(
