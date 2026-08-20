@@ -144,6 +144,49 @@ def test_scheduler_health_separates_local_limits_from_provider_pacing() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "task_type",
+    ("ACTIVE_ANNOTATION", "ACTIVE_IMPACT", "TITLE_TRANSLATION"),
+)
+def test_provenance_migration_touch_is_not_a_new_dead_letter(
+    task_type: str,
+) -> None:
+    connection = _connection()
+    terminal_times = (
+        NOW - timedelta(days=1),
+        NOW - timedelta(minutes=1),
+    )
+    for index, terminal_at in enumerate(terminal_times):
+        job_id = enqueue_job(
+            connection,
+            task_type=task_type,
+            source="source",
+            source_item_id=f"dead-letter-{index}",
+            revision_number=1,
+            annotation_id=("annotation" if task_type == "ACTIVE_IMPACT" else ""),
+            prompt_version="prompt",
+            priority="FAST",
+            now=terminal_at - timedelta(minutes=1),
+        )
+        connection.execute(
+            """UPDATE news_ai_jobs_v1
+               SET state='DEAD_LETTER',last_error='MODEL_OUTPUT_INVALID',
+                   completed_at=?,updated_at=? WHERE job_id=?""",
+            (terminal_at.isoformat(), NOW.isoformat(), job_id),
+        )
+    connection.commit()
+
+    snapshot = scheduler_health_snapshot(connection, now=NOW)
+
+    alerts = [
+        alert for alert in snapshot["alerts"]
+        if alert["code"] == "OPS_AI_NEW_DEAD_LETTER"
+        and alert["scope"] == task_type
+    ]
+    assert len(alerts) == 1
+    assert alerts[0]["evidence"] == {"new_dead_letters_15m": 1}
+
+
 def test_scheduled_retry_loop_is_visible_without_claiming_current_impact() -> None:
     connection = _connection()
     job_id = enqueue_job(
